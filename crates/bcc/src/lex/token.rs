@@ -13,6 +13,8 @@ pub enum TokenKind {
     KwInt,
     KwVoid,
     KwReturn,
+    KwIf,
+    KwElse,
     // Atoms
     Ident(String),
     IntLit(u32),
@@ -33,6 +35,12 @@ pub enum TokenKind {
     Caret,
     ShiftLeft,
     ShiftRight,
+    EqEq,
+    BangEq,
+    Lt,
+    Le,
+    Gt,
+    Ge,
     // End-of-input sentinel
     Eof,
 }
@@ -46,6 +54,8 @@ impl TokenKind {
             Self::KwInt => "`int`",
             Self::KwVoid => "`void`",
             Self::KwReturn => "`return`",
+            Self::KwIf => "`if`",
+            Self::KwElse => "`else`",
             Self::Ident(_) => "identifier",
             Self::IntLit(_) => "integer literal",
             Self::LParen => "`(`",
@@ -64,6 +74,12 @@ impl TokenKind {
             Self::Caret => "`^`",
             Self::ShiftLeft => "`<<`",
             Self::ShiftRight => "`>>`",
+            Self::EqEq => "`==`",
+            Self::BangEq => "`!=`",
+            Self::Lt => "`<`",
+            Self::Le => "`<=`",
+            Self::Gt => "`>`",
+            Self::Ge => "`>=`",
             Self::Eof => "end of input",
         }
     }

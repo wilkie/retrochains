@@ -54,7 +54,8 @@ impl<'a> Lexer<'a> {
                 b'{' => { self.pos += 1; TokenKind::LBrace }
                 b'}' => { self.pos += 1; TokenKind::RBrace }
                 b';' => { self.pos += 1; TokenKind::Semicolon }
-                b'=' => { self.pos += 1; TokenKind::Equals }
+                b'=' => self.lex_after_eq(),
+                b'!' => self.lex_after_bang()?,
                 b'+' => { self.pos += 1; TokenKind::Plus }
                 b'-' => { self.pos += 1; TokenKind::Minus }
                 b'*' => { self.pos += 1; TokenKind::Star }
@@ -63,8 +64,8 @@ impl<'a> Lexer<'a> {
                 b'&' => { self.pos += 1; TokenKind::Ampersand }
                 b'|' => { self.pos += 1; TokenKind::Pipe }
                 b'^' => { self.pos += 1; TokenKind::Caret }
-                b'<' => self.lex_after_lt()?,
-                b'>' => self.lex_after_gt()?,
+                b'<' => self.lex_after_lt(),
+                b'>' => self.lex_after_gt(),
                 b if is_ident_start(b) => self.lex_ident_or_keyword(),
                 b if b.is_ascii_digit() => self.lex_int_literal()?,
                 other => {
@@ -106,32 +107,55 @@ impl<'a> Lexer<'a> {
             b"int" => TokenKind::KwInt,
             b"void" => TokenKind::KwVoid,
             b"return" => TokenKind::KwReturn,
+            b"if" => TokenKind::KwIf,
+            b"else" => TokenKind::KwElse,
             other => TokenKind::Ident(String::from_utf8_lossy(other).into_owned()),
         }
     }
 
-    /// Disambiguate `<` — only `<<` is recognized so far. The comparison
-    /// operators (`<`, `<=`) land in the next slice.
-    fn lex_after_lt(&mut self) -> Result<TokenKind, LexError> {
-        let lt_pos = self.pos;
+    /// Disambiguate `=`: `==` is equality, bare `=` is assignment.
+    fn lex_after_eq(&mut self) -> TokenKind {
         self.pos += 1;
-        if matches!(self.src.get(self.pos), Some(&b'<')) {
+        if matches!(self.src.get(self.pos), Some(&b'=')) {
             self.pos += 1;
-            Ok(TokenKind::ShiftLeft)
+            TokenKind::EqEq
         } else {
-            Err(LexError::UnexpectedChar { ch: '<', offset: off(lt_pos) })
+            TokenKind::Equals
         }
     }
 
-    /// Disambiguate `>` — only `>>` is recognized so far.
-    fn lex_after_gt(&mut self) -> Result<TokenKind, LexError> {
-        let gt_pos = self.pos;
+    /// Disambiguate `!`: only `!=` is recognized so far. Logical `!`
+    /// lands when a fixture needs it.
+    fn lex_after_bang(&mut self) -> Result<TokenKind, LexError> {
+        let bang_pos = self.pos;
         self.pos += 1;
-        if matches!(self.src.get(self.pos), Some(&b'>')) {
+        if matches!(self.src.get(self.pos), Some(&b'=')) {
             self.pos += 1;
-            Ok(TokenKind::ShiftRight)
+            Ok(TokenKind::BangEq)
         } else {
-            Err(LexError::UnexpectedChar { ch: '>', offset: off(gt_pos) })
+            Err(LexError::UnexpectedChar { ch: '!', offset: off(bang_pos) })
+        }
+    }
+
+    /// Disambiguate `<`: `<<` is shift, `<=` is less-or-equal, bare `<`
+    /// is strict less-than.
+    fn lex_after_lt(&mut self) -> TokenKind {
+        self.pos += 1;
+        match self.src.get(self.pos) {
+            Some(&b'<') => { self.pos += 1; TokenKind::ShiftLeft }
+            Some(&b'=') => { self.pos += 1; TokenKind::Le }
+            _ => TokenKind::Lt,
+        }
+    }
+
+    /// Disambiguate `>`: `>>` is shift, `>=` is greater-or-equal, bare
+    /// `>` is strict greater-than.
+    fn lex_after_gt(&mut self) -> TokenKind {
+        self.pos += 1;
+        match self.src.get(self.pos) {
+            Some(&b'>') => { self.pos += 1; TokenKind::ShiftRight }
+            Some(&b'=') => { self.pos += 1; TokenKind::Ge }
+            _ => TokenKind::Gt,
         }
     }
 

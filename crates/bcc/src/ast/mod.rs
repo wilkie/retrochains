@@ -34,6 +34,8 @@ pub enum StmtKind {
     /// `<type> <name> [= <init>];`. For now only `int` and a single
     /// declarator with an optional initializer.
     Declare { ty: Type, name: String, init: Option<Expr> },
+    /// `if (cond) then-body [else else-body]`.
+    If { cond: Expr, then_branch: Vec<Stmt>, else_branch: Option<Vec<Stmt>> },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,4 +84,41 @@ pub enum BinOp {
     /// C `>>`. For signed `int` we emit `sar`; for unsigned types
     /// (when we add them) we'll emit `shr`.
     Shr,
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+}
+
+impl BinOp {
+    /// True for the six comparison operators (`==`, `!=`, `<`, `<=`,
+    /// `>`, `>=`). They are produced as a 0/1 value when used in an
+    /// expression context, and as a conditional jump when used as a
+    /// condition.
+    #[must_use]
+    pub fn is_comparison(self) -> bool {
+        matches!(
+            self,
+            Self::Eq | Self::Ne | Self::Lt | Self::Le | Self::Gt | Self::Ge
+        )
+    }
+
+    /// The conditional-jump mnemonic to use when this comparison
+    /// operator's result is **false**. For example, `<` is "less-than"
+    /// — its inverse-on-false is "jump if not less", `jge`.
+    /// Returns `None` for non-comparison operators.
+    #[must_use]
+    pub fn jump_if_false(self) -> Option<&'static str> {
+        Some(match self {
+            Self::Eq => "jne",
+            Self::Ne => "je",
+            Self::Lt => "jge",
+            Self::Le => "jg",
+            Self::Gt => "jle",
+            Self::Ge => "jl",
+            _ => return None,
+        })
+    }
 }

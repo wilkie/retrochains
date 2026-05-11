@@ -1,0 +1,4 @@
+description = "Simple `if` with a single-statement then-branch and an unconditional return after. Discover how BCC numbers labels beyond @n@50, and the conditional-jump shape it picks for the condition's negation."
+tool = "bcc"
+args = ["-S", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

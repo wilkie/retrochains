@@ -100,7 +100,47 @@ impl Parser {
                     span: Span::new(start, semi.span.end),
                 })
             }
+            TokenKind::KwIf => self.parse_if(),
             _ => Err(ParseError::Unsupported { offset: start }),
+        }
+    }
+
+    /// `if ( <expr> ) <branch> [else <branch>]`. A branch is either
+    /// a single statement or a brace-delimited block.
+    fn parse_if(&mut self) -> Result<Stmt, ParseError> {
+        let if_tok = self.expect(&TokenKind::KwIf)?;
+        self.expect(&TokenKind::LParen)?;
+        let cond = self.parse_expr()?;
+        self.expect(&TokenKind::RParen)?;
+        let then_branch = self.parse_branch()?;
+        let else_branch = if matches!(self.peek().kind, TokenKind::KwElse) {
+            self.bump();
+            Some(self.parse_branch()?)
+        } else {
+            None
+        };
+        let end = else_branch
+            .as_ref()
+            .and_then(|b| b.last())
+            .or_else(|| then_branch.last())
+            .map_or(if_tok.span.end, |s| s.span.end);
+        Ok(Stmt {
+            kind: StmtKind::If { cond, then_branch, else_branch },
+            span: Span::new(if_tok.span.start, end),
+        })
+    }
+
+    fn parse_branch(&mut self) -> Result<Vec<Stmt>, ParseError> {
+        if matches!(self.peek().kind, TokenKind::LBrace) {
+            self.bump();
+            let mut body = Vec::new();
+            while !matches!(self.peek().kind, TokenKind::RBrace | TokenKind::Eof) {
+                body.push(self.parse_stmt()?);
+            }
+            self.expect(&TokenKind::RBrace)?;
+            Ok(body)
+        } else {
+            Ok(vec![self.parse_stmt()?])
         }
     }
 
@@ -125,8 +165,26 @@ impl Parser {
     }
 
     fn parse_bitand(&mut self) -> Result<Expr, ParseError> {
-        self.left_assoc(Self::parse_shift, |t| {
+        self.left_assoc(Self::parse_equality, |t| {
             matches!(t, TokenKind::Ampersand).then_some(BinOp::BitAnd)
+        })
+    }
+
+    fn parse_equality(&mut self) -> Result<Expr, ParseError> {
+        self.left_assoc(Self::parse_relational, |t| match t {
+            TokenKind::EqEq => Some(BinOp::Eq),
+            TokenKind::BangEq => Some(BinOp::Ne),
+            _ => None,
+        })
+    }
+
+    fn parse_relational(&mut self) -> Result<Expr, ParseError> {
+        self.left_assoc(Self::parse_shift, |t| match t {
+            TokenKind::Lt => Some(BinOp::Lt),
+            TokenKind::Le => Some(BinOp::Le),
+            TokenKind::Gt => Some(BinOp::Gt),
+            TokenKind::Ge => Some(BinOp::Ge),
+            _ => None,
         })
     }
 

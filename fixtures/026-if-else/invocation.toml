@@ -1,0 +1,4 @@
+description = "`if/else` with both branches returning. Discover BCC's three-label pattern (then, else, end) and how jumps from the then-branch skip the else-branch."
+tool = "bcc"
+args = ["-S", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

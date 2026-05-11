@@ -45,6 +45,14 @@ pub fn try_const_eval(e: &Expr) -> Option<u32> {
                 BinOp::Shl => l.wrapping_shl(r & 0x1F),
                 // Signed (arithmetic) shift-right, matching BCC's `sar`.
                 BinOp::Shr => l.cast_signed().wrapping_shr(r & 0x1F).cast_unsigned(),
+                // Comparisons fold to 0/1 (C bool-result). Signed compare
+                // to match BCC's signed-int semantics.
+                BinOp::Eq => u32::from(l == r),
+                BinOp::Ne => u32::from(l != r),
+                BinOp::Lt => u32::from(l.cast_signed() < r.cast_signed()),
+                BinOp::Le => u32::from(l.cast_signed() <= r.cast_signed()),
+                BinOp::Gt => u32::from(l.cast_signed() > r.cast_signed()),
+                BinOp::Ge => u32::from(l.cast_signed() >= r.cast_signed()),
             })
         }
     }

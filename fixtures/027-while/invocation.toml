@@ -1,0 +1,4 @@
+description = "Basic `while` loop counting up to a constant. Discover BCC's loop layout (header check vs bottom check), label numbering, and how an assignment statement compiles."
+tool = "bcc"
+args = ["-S", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

@@ -295,6 +295,159 @@ pattern is just this same instruction encoding hit on a special case.)
   encoding even when the right operand is a compile-time constant —
   we'll need a constant-rhs shift fixture to confirm this.
 
+### Comparison-as-value (`019`–`024`)
+
+`return x < y;` produces this six-instruction pattern, with the
+specific conditional-jump mnemonic varying per operator:
+
+```
+	mov	ax,word ptr [bp-2]
+	cmp	ax,word ptr [bp-4]
+	j<inv>	short @<F>        ; jump if comparison is FALSE
+	mov	ax,1              ; true: AX = 1
+	jmp	short @<E>        ; skip the false case
+@<F>:                             ; false-branch
+	xor	ax,ax             ; AX = 0
+@<E>:                             ; end
+```
+
+The `j<inv>` is the *inverse* of the source operator:
+
+| C operator | jump-if-false |
+| ---------- | -------------- |
+| `==`       | `jne`          |
+| `!=`       | `je`           |
+| `<`        | `jge`          |
+| `>`        | `jle`          |
+| `<=`       | `jg`           |
+| `>=`       | `jl`           |
+
+All are signed-comparison mnemonics (`jl/jg/jle/jge`), not the unsigned
+variants (`jb/ja/jbe/jae`), because BCC treats `int` as signed.
+
+### Comparison in a condition with an immediate RHS (`025`)
+
+When the condition is `<var> == <immediate>`, BCC skips the load-to-AX
+and emits a memory-immediate compare directly:
+
+```
+	cmp	word ptr [bp-2],0
+	jne	short @<skip>
+```
+
+vs. the local-local form which still goes through AX:
+
+```
+	mov	ax,word ptr [bp-2]
+	cmp	ax,word ptr [bp-4]
+	jge	short @<else>
+```
+
+The local-local form for an if-condition uses the *same inverse-jump
+table* as comparison-as-value above; the difference is only that no 0/1
+materialization is needed when the result feeds a conditional jump.
+
+### `if` without `else` (`025`)
+
+```
+	<cond>
+	j<inv> short @<skip>
+	<then-stmts>
+@<skip>:
+	<following-stmts>
+```
+
+The `<skip>` label is the fall-through point; any code after the `if`
+runs there.
+
+### `if`/`else` (`026`)
+
+```
+	<cond>
+	j<inv> short @<else>
+	<then-stmts>
+	jmp short @<end>          ; <— always emitted, even when unreachable
+@<else>:
+	<else-stmts>
+@<end>:
+	<following-stmts>
+```
+
+BCC emits the unconditional `jmp short @<end>` between the then-branch
+and the `<else>:` label **even when the then-branch ends with a
+return** (making it unreachable). For byte-exact output we have to emit
+it too — no dead-code elimination in this path.
+
+When the if-else has nothing following it (as in fixture 026, where
+both branches return), the `<end>` label coincides with the function
+exit.
+
+## Label numbering
+
+Every label takes the form `@<func-idx>@<N>` where N is computed as:
+
+```
+N = 50 + 24 * slot
+```
+
+`slot` is an index that increments per "label slot" reserved by the
+function. Each control construct reserves a fixed number of slots; the
+function exit gets the next slot after the whole body has been planned.
+
+Per-construct reservations and which slots actually emit a label:
+
+| Construct                      | Slots | Emits at offset(s)   | Notes                                          |
+| ------------------------------ | :---: | -------------------- | ---------------------------------------------- |
+| Comparison-as-value            | 3     | +1 (false), +2 (end) | offset +0 unused                              |
+| `if` (no else)                 | 2     | +1 (skip)            | +0 unused                                      |
+| `if`/`else`                    | 3     | +2 (else)            | +0 and +1 unused; `end` re-uses the exit slot  |
+| `while`                        | 3     | +0 (body), +1 (check) | +2 unused                                    |
+| (function exit, always last)   | 1     | the single slot      | every function has this                       |
+
+Verified against fixtures:
+
+- `001`: 1 slot → exit at slot 0 → `@1@50`. ✓
+- `019`: cmp-as-value 3 + exit 1 = 4 → exit at slot 3 → `@1@122`. ✓
+- `025`: if-no-else 2 + exit 1 = 3 → exit at slot 2 → `@1@98`. ✓
+- `026`: if-else 3 + exit 1 = 4 → exit at slot 3 → `@1@122`. ✓
+- `027`: while 3 + exit 1 = 4 → exit at slot 3 → `@1@122`. ✓
+
+The "unused" slots are presumably reservations BCC makes before
+knowing which branches will actually need a target.
+
+## Register-promoted locals in `while` (`027`) — deferred
+
+The captured `027-while` shows BCC doing register allocation:
+
+```
+	push	bp
+	mov	bp,sp
+	push	si                   ; save callee-saved SI
+	xor	si,si                ; i = 0  — `i` is in SI, not on the stack
+	jmp	short @1@74
+@1@50:
+	mov	ax,si
+	inc	ax
+	mov	si,ax                ; i = i + 1 — still in SI
+@1@74:
+	cmp	si,10
+	jl	short @1@50
+	mov	ax,si
+	jmp	short @1@122
+@1@122:
+	pop	si                   ; restore SI
+	pop	bp
+	ret	
+```
+
+Even at default `-S -ms` (no `-O`), BCC promotes the loop's induction
+variable into `SI`. No `sub sp,N` — nothing about `i` lives on the
+stack. This is a real optimization (selection of locals to enregister)
+that we're going to need for any loop-using fixture.
+
+**Slice deferred:** `027-while` stays as a known failing fixture; we'll
+tackle register allocation as its own thing.
+
 ## Local variable alignment
 
 Fixture 011 captures `char c; int i;` — total 3 bytes of values, but

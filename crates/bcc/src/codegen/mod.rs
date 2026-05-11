@@ -15,10 +15,11 @@ use crate::ast::{BinOp, Expr, ExprKind, Function, Stmt, StmtKind, Type};
 
 mod fold;
 mod line_map;
+mod plan;
 
 use fold::try_const_eval;
-
 use line_map::LineMap;
+use plan::LabelPlan;
 
 /// Emit the per-function chunk of an `-S` file for one function.
 ///
@@ -75,6 +76,9 @@ struct FunctionEmitter<'a> {
     /// haven't emitted any comment yet for this function.
     current_line: u32,
     locals: Locals,
+    /// Label assignments computed before emission. Tells us where the
+    /// function exit lives and what slot each control construct owns.
+    label_plan: LabelPlan,
 }
 
 impl<'a> FunctionEmitter<'a> {
@@ -92,7 +96,21 @@ impl<'a> FunctionEmitter<'a> {
             lines: LineMap::new(source),
             current_line: 0,
             locals: Locals::new(),
+            label_plan: LabelPlan::build(function),
         }
+    }
+
+    fn exit_label_num(&self) -> u32 {
+        LabelPlan::label_number(self.label_plan.exit_slot())
+    }
+
+    fn emit_label(&mut self, slot: u32) {
+        let n = LabelPlan::label_number(slot);
+        let _ = write!(self.out, "@{}@{n}:\r\n", self.func_idx);
+    }
+
+    fn label_ref(&self, slot: u32) -> String {
+        format!("@{}@{}", self.func_idx, LabelPlan::label_number(slot))
     }
 
     fn run(&mut self) {
@@ -140,8 +158,8 @@ impl<'a> FunctionEmitter<'a> {
             self.emit_stmt(stmt);
         }
 
-        // Single exit label, `@<func_idx>@50`.
-        let _ = write!(self.out, "@{}@50:\r\n", self.func_idx);
+        // Single exit label.
+        self.emit_label(self.label_plan.exit_slot());
 
         // Closing-brace line gets its own comment block. Span end is the
         // byte just past `}`, so back up by one to get the brace itself.
@@ -167,7 +185,8 @@ impl<'a> FunctionEmitter<'a> {
         match &stmt.kind {
             StmtKind::Return(value) => {
                 self.emit_return_value_load(value.as_ref());
-                let _ = write!(self.out, "\tjmp\tshort @{}@50\r\n", self.func_idx);
+                let exit = self.exit_label_num();
+                let _ = write!(self.out, "\tjmp\tshort @{}@{exit}\r\n", self.func_idx);
             }
             StmtKind::Declare { name, init, .. } => {
                 let offset = self
@@ -178,7 +197,73 @@ impl<'a> FunctionEmitter<'a> {
                     self.emit_store_local(offset, init);
                 }
             }
+            StmtKind::If { cond, then_branch, else_branch } => {
+                self.emit_if(stmt.span.start, cond, then_branch, else_branch.as_deref());
+            }
         }
+    }
+
+    fn emit_if(
+        &mut self,
+        if_span_start: u32,
+        cond: &Expr,
+        then_branch: &[Stmt],
+        else_branch: Option<&[Stmt]>,
+    ) {
+        let base = self.label_plan.base(if_span_start);
+        if let Some(else_stmts) = else_branch {
+            // if/else reserves 3 slots; the else label lives at +2. The
+            // "skip-else" jmp from the then-branch targets the function
+            // exit — that matches fixture 026, where end-of-if-else IS
+            // the exit. (When a fixture has code after if-else we'll
+            // discover whether BCC uses a separate end label.)
+            let else_slot = base + 2;
+            self.emit_cond_jump_if_false(cond, else_slot);
+            for s in then_branch {
+                self.emit_stmt(s);
+            }
+            let exit_n = self.exit_label_num();
+            let _ = write!(self.out, "\tjmp\tshort @{}@{exit_n}\r\n", self.func_idx);
+            self.emit_label(else_slot);
+            for s in else_stmts {
+                self.emit_stmt(s);
+            }
+        } else {
+            // if (no else) reserves 2 slots; skip label at +1.
+            let skip_slot = base + 1;
+            self.emit_cond_jump_if_false(cond, skip_slot);
+            for s in then_branch {
+                self.emit_stmt(s);
+            }
+            self.emit_label(skip_slot);
+        }
+    }
+
+    /// Emit a conditional jump that jumps to `target_slot` when `cond`
+    /// is FALSE. Handles the two patterns BCC uses:
+    ///
+    /// - `<ident> <cmp> <constant-expr>`: direct memory-immediate
+    ///   `cmp word ptr [bp-N], K` + inverse-op jump (fixture 025).
+    /// - everything else: load LHS into AX, then `cmp ax, <rhs>` +
+    ///   inverse-op jump (fixture 026).
+    fn emit_cond_jump_if_false(&mut self, cond: &Expr, target_slot: u32) {
+        let ExprKind::BinOp { op, left, right } = &cond.kind else {
+            panic!("non-comparison if-conditions not yet supported");
+        };
+        let Some(inv) = op.jump_if_false() else {
+            panic!("non-comparison binop in if-condition not yet supported");
+        };
+        let target = self.label_ref(target_slot);
+        if let (ExprKind::Ident(name), Some(rhs)) = (&left.kind, try_const_eval(right)) {
+            let off = self.local_offset(name);
+            let _ = write!(self.out, "\tcmp\tword ptr [bp-{off}],{rhs}\r\n");
+            let _ = write!(self.out, "\t{inv}\tshort {target}\r\n");
+            return;
+        }
+        self.emit_expr_to_ax(left);
+        let src = self.resolve_operand_source(right);
+        let _ = write!(self.out, "\tcmp\tax,{}\r\n", src.word());
+        let _ = write!(self.out, "\t{inv}\tshort {target}\r\n");
     }
 
     fn emit_return_value_load(&mut self, value: Option<&Expr>) {
@@ -217,11 +302,17 @@ impl<'a> FunctionEmitter<'a> {
                 let _ = write!(self.out, "\tmov\tax,word ptr [bp-{offset}]\r\n");
             }
             ExprKind::BinOp { op, left, right } => {
-                // Load left operand into AX, then apply the right side
-                // via the operator-specific pattern (memory-direct or
-                // immediate add/sub; single-operand imul).
-                self.emit_expr_to_ax(left);
-                self.emit_binary_right(*op, right);
+                if op.is_comparison() {
+                    // Comparison-as-value: materialize a 0/1 result via
+                    // the cmp / j-inv / mov-1 / xor-0 pattern from
+                    // specs/bcc/ASM_OUTPUT.md (fixture 019).
+                    self.emit_comparison_as_value(e.span.start, *op, left, right);
+                } else {
+                    // Arithmetic / bitwise / shift: load LHS into AX,
+                    // apply RHS via the operator-specific shape.
+                    self.emit_expr_to_ax(left);
+                    self.emit_binary_right(*op, right);
+                }
             }
             ExprKind::Call { name } => {
                 // No-arg call. Result lands in AX; that's exactly where
@@ -229,6 +320,32 @@ impl<'a> FunctionEmitter<'a> {
                 let _ = write!(self.out, "\tcall\tnear ptr _{name}\r\n");
             }
         }
+    }
+
+    /// Emit a 0/1-producing materialization of `<left> <op> <right>` in
+    /// AX. Three labels per comparison-as-value; their base slot is in
+    /// the label plan.
+    fn emit_comparison_as_value(
+        &mut self,
+        cmp_span_start: u32,
+        op: BinOp,
+        left: &Expr,
+        right: &Expr,
+    ) {
+        let base = self.label_plan.base(cmp_span_start);
+        let false_slot = base + 1;
+        let end_slot = base + 2;
+        let inv = op.jump_if_false().expect("comparison op has inverse jump");
+
+        self.emit_expr_to_ax(left);
+        let src = self.resolve_operand_source(right);
+        let _ = write!(self.out, "\tcmp\tax,{}\r\n", src.word());
+        let _ = write!(self.out, "\t{inv}\tshort {}\r\n", self.label_ref(false_slot));
+        self.out.extend_from_slice(b"\tmov\tax,1\r\n");
+        let _ = write!(self.out, "\tjmp\tshort {}\r\n", self.label_ref(end_slot));
+        self.emit_label(false_slot);
+        self.out.extend_from_slice(b"\txor\tax,ax\r\n");
+        self.emit_label(end_slot);
     }
 
     /// Emit the right-hand side of a binary op, applying it to AX.
@@ -355,6 +472,13 @@ fn emit_op_with_source(out: &mut Vec<u8>, op: BinOp, src: &OperandSource) {
                 _ => unreachable!(),
             };
             let _ = write!(out, "\t{mnemonic}\tax,cl\r\n");
+        }
+        BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
+            // Comparison BinOps in expression position are emitted via
+            // `emit_comparison_as_value`, not through `emit_binary_right`.
+            // Reaching here means a comparison slipped through the
+            // dispatcher.
+            unreachable!("comparison op should take the cmp-as-value path");
         }
     }
 }
