@@ -4,7 +4,7 @@
 //! once" case (which is all the early fixtures need; nothing in
 //! single-pass forbids building a one-function-at-a-time variant later).
 
-use crate::ast::{BinOp, Expr, ExprKind, Function, Stmt, StmtKind, Type, Unit};
+use crate::ast::{BinOp, Expr, ExprKind, Function, Param, Stmt, StmtKind, Type, Unit};
 use crate::lex::{Span, Token, TokenKind};
 
 #[derive(Debug, thiserror::Error)]
@@ -43,7 +43,8 @@ impl Parser {
 
     fn parse_function(&mut self) -> Result<Function, ParseError> {
         let start = self.peek().span.start;
-        // Accept only `int <ident>(void) { … }` for now.
+        // Return type is always `int` today; we'll learn about non-int
+        // return types from a fixture.
         self.expect(&TokenKind::KwInt)?;
         let name_tok = self.bump();
         let TokenKind::Ident(name) = &name_tok.kind else {
@@ -51,7 +52,7 @@ impl Parser {
         };
         let name = name.clone();
         self.expect(&TokenKind::LParen)?;
-        self.expect(&TokenKind::KwVoid)?;
+        let params = self.parse_param_list()?;
         self.expect(&TokenKind::RParen)?;
         self.expect(&TokenKind::LBrace)?;
 
@@ -61,7 +62,45 @@ impl Parser {
         }
         let close = self.expect(&TokenKind::RBrace)?;
         let span = Span::new(start, close.span.end);
-        Ok(Function { name, span, body })
+        Ok(Function { name, params, span, body })
+    }
+
+    /// Parameter list inside the `(...)` of a function definition.
+    /// Two shapes are recognized:
+    ///
+    /// - `void` — the C spelling for "no parameters". Returns empty.
+    /// - `<type> <name> (, <type> <name>)*` — one or more typed params.
+    ///
+    /// The caller is responsible for the surrounding parens.
+    fn parse_param_list(&mut self) -> Result<Vec<Param>, ParseError> {
+        if matches!(self.peek().kind, TokenKind::KwVoid) {
+            self.bump();
+            return Ok(Vec::new());
+        }
+        let mut params = Vec::new();
+        loop {
+            let ty_tok = self.bump();
+            let ty = match ty_tok.kind {
+                TokenKind::KwInt => Type::Int,
+                TokenKind::KwChar => Type::Char,
+                _ => return Err(ParseError::Unexpected {
+                    expected: "parameter type".to_owned(),
+                    found: ty_tok.kind.describe().to_owned(),
+                    offset: ty_tok.span.start,
+                }),
+            };
+            let name_tok = self.bump();
+            let TokenKind::Ident(name) = name_tok.kind else {
+                return Err(ParseError::NotAnIdent { offset: name_tok.span.start });
+            };
+            params.push(Param { name, ty });
+            if matches!(self.peek().kind, TokenKind::Comma) {
+                self.bump();
+            } else {
+                break;
+            }
+        }
+        Ok(params)
     }
 
     fn parse_stmt(&mut self) -> Result<Stmt, ParseError> {
@@ -278,12 +317,23 @@ impl Parser {
         match tok.kind {
             TokenKind::IntLit(v) => Ok(Expr { kind: ExprKind::IntLit(v), span: tok.span }),
             TokenKind::Ident(ref name) => {
-                // Postfix `()` makes it a function call. Args land later.
+                // Postfix `()` makes it a function call.
                 if matches!(self.peek().kind, TokenKind::LParen) {
                     self.bump();
+                    let mut args = Vec::new();
+                    if !matches!(self.peek().kind, TokenKind::RParen) {
+                        loop {
+                            args.push(self.parse_expr()?);
+                            if matches!(self.peek().kind, TokenKind::Comma) {
+                                self.bump();
+                            } else {
+                                break;
+                            }
+                        }
+                    }
                     let close = self.expect(&TokenKind::RParen)?;
                     Ok(Expr {
-                        kind: ExprKind::Call { name: name.clone() },
+                        kind: ExprKind::Call { name: name.clone(), args },
                         span: Span::new(tok.span.start, close.span.end),
                     })
                 } else {
@@ -390,8 +440,28 @@ mod tests {
     fn call_parses() {
         let unit = parse("int main(void) { return f(); }\n").unwrap();
         let StmtKind::Return(Some(ref e)) = unit.functions[0].body[0].kind else { panic!() };
-        let ExprKind::Call { ref name } = e.kind else { panic!() };
+        let ExprKind::Call { ref name, ref args } = e.kind else { panic!() };
         assert_eq!(name, "f");
+        assert!(args.is_empty());
+    }
+
+    #[test]
+    fn call_with_args_parses() {
+        let unit = parse("int main(void) { return f(1, 2 + 3); }\n").unwrap();
+        let StmtKind::Return(Some(ref e)) = unit.functions[0].body[0].kind else { panic!() };
+        let ExprKind::Call { ref args, .. } = e.kind else { panic!() };
+        assert_eq!(args.len(), 2);
+        assert!(matches!(args[0].kind, ExprKind::IntLit(1)));
+        assert!(matches!(args[1].kind, ExprKind::BinOp { op: BinOp::Add, .. }));
+    }
+
+    #[test]
+    fn function_with_params_parses() {
+        let unit = parse("int f(int x, int y) { return x; }\n").unwrap();
+        let f = &unit.functions[0];
+        assert_eq!(f.params.len(), 2);
+        assert_eq!(f.params[0].name, "x");
+        assert_eq!(f.params[1].name, "y");
     }
 
     #[test]

@@ -14,12 +14,21 @@ pub struct Unit {
 #[derive(Debug)]
 pub struct Function {
     pub name: String,
+    /// Parameters in source order. The empty list represents `(void)`
+    /// — C's "no parameters" spelling — not a variadic prototype.
+    pub params: Vec<Param>,
     /// The full byte range of the function definition, from the
     /// `int main…` opening through the closing `}`. Used to compute
     /// which source lines this function spans, which in turn drives the
     /// `;` source-comment emission in the asm.
     pub span: Span,
     pub body: Vec<Stmt>,
+}
+
+#[derive(Debug)]
+pub struct Param {
+    pub name: String,
+    pub ty: Type,
 }
 
 #[derive(Debug)]
@@ -86,8 +95,8 @@ pub enum ExprKind {
     IntLit(u32),
     Ident(String),
     BinOp { op: BinOp, left: Box<Expr>, right: Box<Expr> },
-    /// Direct function call by name. Arguments not yet supported.
-    Call { name: String },
+    /// Direct function call by name.
+    Call { name: String, args: Vec<Expr> },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -21,7 +21,18 @@ mod plan;
 
 use fold::try_const_eval;
 use line_map::LineMap;
-use locals::{LocalLocation, Locals, Reg};
+use locals::{LocalLocation, Locals, ParamLoad, Reg};
+
+/// Format a bp-relative address: negative offsets are written
+/// `[bp-N]`, positives `[bp+N]`. Used by every `word ptr` / `byte ptr`
+/// memory operand a local/param produces.
+fn bp_addr(off: i16) -> String {
+    if off < 0 {
+        format!("[bp-{}]", -i32::from(off))
+    } else {
+        format!("[bp+{off}]")
+    }
+}
 use plan::LabelPlan;
 
 /// Emit the per-function chunk of an `-S` file for one function.
@@ -109,6 +120,17 @@ impl<'a> FunctionEmitter<'a> {
         }
         for reg in self.locals.saved_regs() {
             let _ = write!(self.out, "\tpush\t{}\r\n", reg.name());
+        }
+        // Register-promoted incoming parameters: copy each from its
+        // caller-built stack slot into its assigned register.
+        let param_loads: Vec<ParamLoad> = self.locals.param_loads().to_vec();
+        for pl in &param_loads {
+            let _ = write!(
+                self.out,
+                "\tmov\t{},word ptr [bp+{}]\r\n",
+                pl.reg.name(),
+                pl.incoming_offset
+            );
         }
 
         // Body.
@@ -248,14 +270,23 @@ impl<'a> FunctionEmitter<'a> {
         let _ = write!(self.out, "\t{mnemonic}\tshort {target}\r\n");
     }
 
-    /// Emit just the `cmp` instruction (no jump). Three shapes,
+    /// Emit just the `cmp` instruction (no jump). Four shapes,
     /// matching what BCC produces:
     ///
-    /// 1. LHS in a register: `cmp <reg>, <rhs>`
-    /// 2. LHS is a stack local and RHS is a constant: `cmp word ptr [bp-N], K`
-    /// 3. Otherwise: `mov ax, <lhs>` then `cmp ax, <rhs>`
+    /// 1. LHS in a register AND RHS is constant 0: `or <reg>, <reg>` —
+    ///    a one-byte-shorter alias for `cmp <reg>, 0` (fixture 035).
+    ///    Sets ZF/SF/PF the same way and clears OF/CF, which matches
+    ///    what a `cmp` against zero produces, so the same signed
+    ///    conditional-jump mnemonics work.
+    /// 2. LHS in a register: `cmp <reg>, <rhs>`
+    /// 3. LHS is a stack local and RHS is a constant: `cmp word ptr [bp-N], K`
+    /// 4. Otherwise: `mov ax, <lhs>` then `cmp ax, <rhs>`
     fn emit_compare(&mut self, left: &Expr, right: &Expr) {
         if let Some(reg) = self.ident_in_register(left) {
+            if let Some(0) = try_const_eval(right) {
+                let _ = write!(self.out, "\tor\t{0},{0}\r\n", reg.name());
+                return;
+            }
             let src = self.resolve_operand_source(right);
             let _ = write!(self.out, "\tcmp\t{},{}\r\n", reg.name(), src.word());
             return;
@@ -263,12 +294,26 @@ impl<'a> FunctionEmitter<'a> {
         if let (ExprKind::Ident(name), Some(rhs)) = (&left.kind, try_const_eval(right))
             && let LocalLocation::Stack(off) = self.locals.location_of(name)
         {
-            let _ = write!(self.out, "\tcmp\tword ptr [bp-{off}],{rhs}\r\n");
+            let _ = write!(self.out, "\tcmp\tword ptr {},{rhs}\r\n", bp_addr(off));
             return;
         }
         self.emit_expr_to_ax(left);
         let src = self.resolve_operand_source(right);
         let _ = write!(self.out, "\tcmp\tax,{}\r\n", src.word());
+    }
+
+    /// Emit a function call: push args right-to-left (each materialized
+    /// into AX first), `call near ptr _name`, then `pop cx` per arg to
+    /// clean up the cdecl-style caller-cleanup. Result lands in AX.
+    fn emit_call(&mut self, name: &str, args: &[Expr]) {
+        for arg in args.iter().rev() {
+            self.emit_expr_to_ax(arg);
+            self.out.extend_from_slice(b"\tpush\tax\r\n");
+        }
+        let _ = write!(self.out, "\tcall\tnear ptr _{name}\r\n");
+        for _ in args {
+            self.out.extend_from_slice(b"\tpop\tcx\r\n");
+        }
     }
 
     /// If `e` is an identifier that refers to a register-resident
@@ -295,7 +340,7 @@ impl<'a> FunctionEmitter<'a> {
                 // `byte ptr` (fixture 011); for `int`, `word ptr`.
                 if let Some(v) = try_const_eval(init) {
                     let width = ptr_width(ty);
-                    let _ = write!(self.out, "\tmov\t{width} ptr [bp-{off}],{v}\r\n");
+                    let _ = write!(self.out, "\tmov\t{width} ptr {},{v}\r\n", bp_addr(off));
                     return;
                 }
                 // Non-constant init for a char would need a different
@@ -305,7 +350,7 @@ impl<'a> FunctionEmitter<'a> {
                     "non-constant init for `char` not yet supported (no fixture)"
                 );
                 self.emit_expr_to_ax(init);
-                let _ = write!(self.out, "\tmov\tword ptr [bp-{off}],ax\r\n");
+                let _ = write!(self.out, "\tmov\tword ptr {},ax\r\n", bp_addr(off));
             }
             LocalLocation::Reg(reg) => self.emit_store_reg(reg, init),
         }
@@ -317,11 +362,11 @@ impl<'a> FunctionEmitter<'a> {
                 // No fixture yet for "assign constant to stack local" —
                 // mirror the init form (immediate-store) when possible.
                 if let Some(v) = try_const_eval(value) {
-                    let _ = write!(self.out, "\tmov\tword ptr [bp-{off}],{v}\r\n");
+                    let _ = write!(self.out, "\tmov\tword ptr {},{v}\r\n", bp_addr(off));
                     return;
                 }
                 self.emit_expr_to_ax(value);
-                let _ = write!(self.out, "\tmov\tword ptr [bp-{off}],ax\r\n");
+                let _ = write!(self.out, "\tmov\tword ptr {},ax\r\n", bp_addr(off));
             }
             LocalLocation::Reg(reg) => self.emit_store_reg(reg, value),
         }
@@ -364,7 +409,7 @@ impl<'a> FunctionEmitter<'a> {
                         matches!(self.locals.type_of(name), Type::Int),
                         "reading a `char` local in expression position not yet supported (no fixture)"
                     );
-                    let _ = write!(self.out, "\tmov\tax,word ptr [bp-{off}]\r\n");
+                    let _ = write!(self.out, "\tmov\tax,word ptr {}\r\n", bp_addr(off));
                 }
                 LocalLocation::Reg(reg) => {
                     let _ = write!(self.out, "\tmov\tax,{}\r\n", reg.name());
@@ -378,9 +423,7 @@ impl<'a> FunctionEmitter<'a> {
                     self.emit_binary_right(*op, right);
                 }
             }
-            ExprKind::Call { name } => {
-                let _ = write!(self.out, "\tcall\tnear ptr _{name}\r\n");
-            }
+            ExprKind::Call { name, args } => self.emit_call(name, args),
         }
     }
 
@@ -498,7 +541,8 @@ fn expect_comparison(e: &Expr) -> (BinOp, &Expr, &Expr) {
 /// A resolved right-hand operand.
 enum OperandSource {
     Immediate(u32),
-    Local(u16),
+    /// Stack-resident local or param at a (signed) bp offset.
+    Local(i16),
     Reg(Reg),
 }
 
@@ -507,7 +551,7 @@ impl OperandSource {
     fn word(&self) -> String {
         match self {
             Self::Immediate(v) => v.to_string(),
-            Self::Local(off) => format!("word ptr [bp-{off}]"),
+            Self::Local(off) => format!("word ptr {}", bp_addr(*off)),
             Self::Reg(r) => r.name().to_owned(),
         }
     }
@@ -516,7 +560,7 @@ impl OperandSource {
     fn byte(&self) -> String {
         match self {
             Self::Immediate(v) => v.to_string(),
-            Self::Local(off) => format!("byte ptr [bp-{off}]"),
+            Self::Local(off) => format!("byte ptr {}", bp_addr(*off)),
             // A register holding an int provides the low byte via
             // its `*L` half; we'd need a separate fixture to confirm
             // BCC's exact shape. Panic until we see one.

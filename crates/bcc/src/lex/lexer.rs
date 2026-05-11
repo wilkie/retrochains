@@ -54,6 +54,7 @@ impl<'a> Lexer<'a> {
                 b'{' => { self.pos += 1; TokenKind::LBrace }
                 b'}' => { self.pos += 1; TokenKind::RBrace }
                 b';' => { self.pos += 1; TokenKind::Semicolon }
+                b',' => { self.pos += 1; TokenKind::Comma }
                 b'=' => self.lex_after_eq(),
                 b'!' => self.lex_after_bang()?,
                 b'+' => { self.pos += 1; TokenKind::Plus }

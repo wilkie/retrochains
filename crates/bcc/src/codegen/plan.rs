@@ -107,16 +107,23 @@ fn plan_stmt(stmt: &Stmt, counter: &mut u32, bases: &mut HashMap<u32, u32>) {
 /// Walk an expression in value position. Each comparison reserves 3 slots
 /// (its base goes into the map keyed by `expr.span.start`).
 fn plan_expr_value(e: &Expr, counter: &mut u32, bases: &mut HashMap<u32, u32>) {
-    if let ExprKind::BinOp { op, left, right } = &e.kind {
-        plan_expr_value(left, counter, bases);
-        plan_expr_value(right, counter, bases);
-        if op.is_comparison() {
-            let base = *counter;
-            bases.insert(e.span.start, base);
-            *counter += 3;
+    match &e.kind {
+        ExprKind::BinOp { op, left, right } => {
+            plan_expr_value(left, counter, bases);
+            plan_expr_value(right, counter, bases);
+            if op.is_comparison() {
+                let base = *counter;
+                bases.insert(e.span.start, base);
+                *counter += 3;
+            }
         }
+        ExprKind::Call { args, .. } => {
+            for a in args {
+                plan_expr_value(a, counter, bases);
+            }
+        }
+        ExprKind::IntLit(_) | ExprKind::Ident(_) => {}
     }
-    // IntLit / Ident / Call: nothing to reserve.
 }
 
 /// Walk an expression in condition position. The top-level comparison (if

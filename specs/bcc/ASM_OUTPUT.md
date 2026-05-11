@@ -600,7 +600,7 @@ Open: a `char`-only frame (e.g. `char c;` alone) — does BCC emit
 expressions, and char enregistration are all unexercised — needs
 fixtures before we can pin the codegen.
 
-### Calling a function (`010`)
+### Calling a function (`010`, `033`–`035`)
 
 ```
 	call	near ptr _f
@@ -609,11 +609,91 @@ fixtures before we can pin the codegen.
 - Small-memory-model: all calls are **near**, but BCC writes
   `near ptr` explicitly (TASM accepts both with and without; the explicit
   form is the bytes BCC produces).
-- Calling convention is cdecl-like: caller pushes args right-to-left
-  (we haven't seen args yet — fixture 010 is no-arg). Return value lives
-  in AX.
-- For `return f();`, no setup is needed: the result is already in AX
-  after the `call`, then the standard `jmp short @<f>@50` to the exit.
+- Calling convention is cdecl: caller pushes args **right-to-left**,
+  result lives in AX, caller cleans the stack.
+- Arguments are always materialized into AX first, then pushed:
+  `mov ax, K / push ax`. BCC does *not* use 80186+ `push K`.
+- Cleanup after the call is one `pop cx` **per argument** (the value
+  is discarded). Fixture 034 shows two `pop cx`s after a 2-arg call —
+  not `add sp, 4`. Whether BCC switches to `add sp, N*2` for larger
+  arg counts is open — needs a fixture.
+
+```
+	mov	ax,5            ; rightmost arg first
+	push	ax
+	mov	ax,3            ; then the next
+	push	ax
+	call	near ptr _f
+	pop	cx              ; one per arg
+	pop	cx
+```
+
+For `return f(args);`, the result is in AX after the call, then the
+standard `jmp short @<f>@50` to the exit. No move needed.
+
+### Parameter access in the callee (`033`–`035`)
+
+After the standard small-model prologue (`push bp / mov bp,sp`), the
+stack layout *above* `bp` is:
+
+| Offset    | Contents                                    |
+| --------- | ------------------------------------------- |
+| `[bp+0]`  | saved `bp`                                  |
+| `[bp+2]`  | near-call return address (2 bytes)          |
+| `[bp+4]`  | first argument (pushed last by caller)      |
+| `[bp+6]`  | second argument                             |
+| `[bp+N]`  | further arguments at +2 each                |
+
+So the **leftmost** parameter sits closest to `bp`. Every `int` arg
+takes a 2-byte slot regardless of declared type — `char` arguments
+would presumably be promoted at the caller's push site to a 2-byte
+push (we don't have a fixture confirming this).
+
+In a medium or large memory model the return address grows to 4 bytes,
+shifting the first arg to `[bp+6]`. We currently only handle `-ms`.
+
+#### Register-promoted parameters (`035`)
+
+Parameters participate in the same register-allocation heuristic as
+locals: an `int` param with ≥ 3 textual occurrences (counting the
+"implicit init" of the param entering the function) gets a register
+from the `[SI, DI, DX, BX]` pool, in **source order, params before
+locals**.
+
+The prologue gains a per-promoted-param load **after** the callee-save
+pushes:
+
+```
+	push	bp
+	mov	bp,sp
+	push	si           ; callee-save (because we'll clobber it)
+	push	di           ; callee-save
+	mov	si,word ptr [bp+4]   ; load incoming arg `x` into SI
+	; ... local inits begin here ...
+```
+
+Stack-resident params stay at their incoming `[bp+N]` slot — no
+spill/copy is performed.
+
+### `cmp <reg>, 0` peephole: `or <reg>, <reg>` (`035`)
+
+When the LHS of a comparison-with-zero is a register, BCC substitutes
+the smaller `or <reg>, <reg>`:
+
+```
+	or	si,si             ; instead of `cmp si,0`
+	jg	short @1@50
+```
+
+The `or` sets ZF/SF/PF identically to `cmp <reg>, 0` (it computes
+`reg | reg == reg`, sets flags based on the result) and clears OF/CF
+— matching what `cmp` against an immediate would produce, so the
+signed conditional jumps (`jg/jl/jge/jle/je/jne`) all give the right
+answer. The encoding is 2 bytes vs `cmp <reg>, 0` at 3+ bytes.
+
+We don't yet have a fixture for `cmp <stack>, 0` — that path may
+still use the memory-immediate form, since `or` would write back to
+memory.
 
 ### Constant folding (`005`)
 

@@ -1,20 +1,27 @@
-//! Local-variable layout for one function.
+//! Local-variable + parameter layout for one function.
 //!
-//! BCC enregisters some locals into a small fixed pool of registers
-//! (SI, DI, DX, BX in that order) before falling back to stack slots.
-//! The decision is driven by a use-count heuristic captured in the
-//! investigation fixtures `028`–`032` and documented in
-//! `specs/bcc/ASM_OUTPUT.md`. Briefly:
+//! BCC enregisters some locals and parameters into a small fixed pool
+//! of registers (SI, DI, DX, BX in that order) before falling back to
+//! stack slots. The decision is driven by a use-count heuristic
+//! captured in the investigation fixtures `028`–`032` (locals) and
+//! `035` (params), and documented in `specs/bcc/ASM_OUTPUT.md`.
 //!
-//! - Count every textual occurrence of each local, including the
-//!   initializer of its declaration and the LHS of any assignment.
-//! - Locals with ≥ 3 occurrences are eligible for a register.
-//! - Eligible locals receive registers in declaration order from the
-//!   pool `[SI, DI, DX, BX]`; the rest land on the stack.
+//! - Count every textual occurrence of each declarable name (param or
+//!   local), plus one implicit "init use" for the declaration itself.
+//! - Names with ≥ 3 occurrences are eligible for a register.
+//! - Eligible names receive registers in **source order** (params
+//!   first, in their declaration order; then locals, also in
+//!   declaration order) from the pool `[SI, DI, DX, BX]`; the rest
+//!   stay at their stack slot.
 //!
-//! Once we layout the function, codegen can ask `location_of(name)`
-//! for any local and emit either a register operand or a `word ptr
-//! [bp-N]` memory operand accordingly.
+//! Stack-resident locals live at negative bp offsets (below `bp`);
+//! stack-resident params live at the positive bp offsets the caller
+//! pushed them to (`[bp+4]`, `[bp+6]`, … for the small memory model,
+//! whose 2-byte near-call return address sits at `[bp+2]`).
+//!
+//! Only `int` locals/params are eligible for register allocation; we
+//! haven't observed BCC enregistering a `char` and don't have a fixture
+//! to pin its shape.
 
 use std::collections::HashMap;
 
@@ -26,16 +33,18 @@ fn align_up(n: u16, alignment: u16) -> u16 {
     (n + mask) & !mask
 }
 
-/// Where one local variable lives for the duration of the function.
+/// Where one local or parameter lives for the duration of the function.
 #[derive(Debug, Clone, Copy)]
 pub enum LocalLocation {
-    /// Memory at `[bp - offset]`. The offset is the magnitude (positive).
-    Stack(u16),
+    /// bp-relative stack slot. Negative ⇒ below `bp` (a local).
+    /// Positive ⇒ above `bp` (an incoming parameter the caller left
+    /// on the stack).
+    Stack(i16),
     /// Register-resident.
     Reg(Reg),
 }
 
-/// The four registers BCC draws from for enregistered locals.
+/// The four registers BCC draws from for enregistered locals/params.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Reg {
     Si,
@@ -67,23 +76,37 @@ impl Reg {
     pub const POOL: [Self; 4] = [Self::Si, Self::Di, Self::Dx, Self::Bx];
 }
 
-/// Use count threshold for enregistering. A local with `>= THRESHOLD`
+/// One register-promoted parameter that needs an `mov <reg>, word ptr
+/// [bp+N]` in the prologue to copy its incoming value out of the
+/// caller-built stack slot.
+#[derive(Debug, Clone, Copy)]
+pub struct ParamLoad {
+    pub reg: Reg,
+    /// Positive bp offset of the incoming param slot.
+    pub incoming_offset: u16,
+}
+
+/// Use count threshold for enregistering. A name with `>= THRESHOLD`
 /// textual occurrences (init + reads + writes) gets a register if one
-/// is still available. Determined empirically from fixture `030`
-/// (`limit` with 2 uses stays on the stack) and fixture `032` (`i`
-/// with 3 uses goes into SI).
+/// is still available.
 const ENREGISTER_THRESHOLD: u32 = 3;
+
+/// Offset of the **first** incoming argument relative to `bp` after
+/// the standard small-model prologue (`push bp` then `mov bp,sp`):
+/// `[bp+0]` saved bp, `[bp+2]` near-call return address, `[bp+4]`
+/// first arg.
+const FIRST_PARAM_BP_OFFSET: u16 = 4;
 
 #[derive(Debug)]
 pub struct Locals {
-    /// Total bytes claimed for stack-resident locals only.
+    /// Total bytes claimed for stack-resident *locals* only. Stack
+    /// params don't contribute (they're caller-allocated above `bp`).
     stack_bytes: u16,
-    /// Per-local placement + type. Type is kept so codegen can pick the
-    /// right asm operand width (`byte ptr` vs `word ptr`).
     by_name: HashMap<String, LocalEntry>,
-    /// Which callee-saved registers we actually used (in order, for
-    /// emitting matching push/pop sequences).
+    /// Callee-saved registers used by the function, in push order.
     saved_regs: Vec<Reg>,
+    /// Register-promoted params; the prologue emits a `mov` per entry.
+    param_loads: Vec<ParamLoad>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -93,37 +116,44 @@ struct LocalEntry {
 }
 
 impl Locals {
-    /// Compute the layout from the function body. Walks all statements
-    /// once to count uses, then assigns locations in declaration order.
     #[must_use]
     pub fn analyze(function: &Function) -> Self {
-        // Pass 1: collect declarations in source order and count uses.
-        let mut declared: Vec<(String, Type)> = Vec::new();
+        // Pass 1: collect all "declarable" names (params first, then
+        // locals in source order). Each gets an `init`-style use plus
+        // a textual count.
+        let mut declared: Vec<DeclItem> = Vec::new();
         let mut counts: HashMap<String, u32> = HashMap::new();
+
+        // Params: assign each its incoming bp+N slot.
+        let mut param_offset = FIRST_PARAM_BP_OFFSET;
+        for param in &function.params {
+            declared.push(DeclItem {
+                name: param.name.clone(),
+                ty: param.ty,
+                kind: DeclKind::Param { incoming_offset: param_offset },
+            });
+            // Every param takes a 2-byte slot on the stack regardless
+            // of declared type — `char` gets promoted at the push site
+            // by the caller. (We haven't pinned this with a `char`-
+            // param fixture; revisit when we have one.)
+            param_offset += 2;
+            *counts.entry(param.name.clone()).or_insert(0) += 1;
+        }
+
         for stmt in &function.body {
             collect_decls(stmt, &mut declared);
             count_uses_stmt(stmt, &mut counts);
         }
 
         // Pass 2: assign locations.
-        //
-        // Stack offsets grow downward from `bp`; we track the cumulative
-        // distance below `bp` in `stack_bytes`. Each `int` slot must
-        // sit on an even bp-offset (BCC pads with a byte when the
-        // cursor is on an odd offset, as in fixture 011: `char c`
-        // takes [bp-1], then `int i` lands at [bp-4] with [bp-2]
-        // padding).
-        //
-        // Only `int` locals are eligible for register allocation; we
-        // haven't observed BCC enregistering a `char` and don't have a
-        // fixture to pin its shape.
         let mut by_name = HashMap::new();
         let mut stack_bytes = 0u16;
         let mut saved_regs = Vec::new();
+        let mut param_loads = Vec::new();
         let mut next_reg = 0usize;
-        for (name, ty) in &declared {
-            let uses = counts.get(name).copied().unwrap_or(0);
-            let eligible_for_reg = *ty == Type::Int;
+        for item in &declared {
+            let uses = counts.get(&item.name).copied().unwrap_or(0);
+            let eligible_for_reg = item.ty == Type::Int;
             let location = if eligible_for_reg
                 && uses >= ENREGISTER_THRESHOLD
                 && next_reg < Reg::POOL.len()
@@ -133,15 +163,27 @@ impl Locals {
                 if reg.is_callee_saved() {
                     saved_regs.push(reg);
                 }
+                // For params, record the prologue load.
+                if let DeclKind::Param { incoming_offset } = item.kind {
+                    param_loads.push(ParamLoad { reg, incoming_offset });
+                }
                 LocalLocation::Reg(reg)
             } else {
-                stack_bytes = align_up(stack_bytes, ty.alignment()) + ty.size_bytes();
-                LocalLocation::Stack(stack_bytes)
+                match item.kind {
+                    DeclKind::Local => {
+                        stack_bytes = align_up(stack_bytes, item.ty.alignment())
+                            + item.ty.size_bytes();
+                        LocalLocation::Stack(-i16::try_from(stack_bytes).expect("stack frame fits in i16"))
+                    }
+                    DeclKind::Param { incoming_offset } => {
+                        LocalLocation::Stack(i16::try_from(incoming_offset).expect("param offset fits in i16"))
+                    }
+                }
             };
-            by_name.insert(name.clone(), LocalEntry { location, ty: *ty });
+            by_name.insert(item.name.clone(), LocalEntry { location, ty: item.ty });
         }
 
-        Self { stack_bytes, by_name, saved_regs }
+        Self { stack_bytes, by_name, saved_regs, param_loads }
     }
 
     #[must_use]
@@ -149,21 +191,21 @@ impl Locals {
         self.stack_bytes
     }
 
-    /// Callee-saved registers we used, in the order we pushed them.
-    /// The epilogue should pop them in reverse.
     #[must_use]
     pub fn saved_regs(&self) -> &[Reg] {
         &self.saved_regs
     }
 
-    /// Where does `name` live? Panics on an unknown name (codegen bug).
+    #[must_use]
+    pub fn param_loads(&self) -> &[ParamLoad] {
+        &self.param_loads
+    }
+
     #[must_use]
     pub fn location_of(&self, name: &str) -> LocalLocation {
         self.entry(name).location
     }
 
-    /// Declared type of `name`. Used to pick `byte`-vs-`word` operand
-    /// widths in codegen.
     #[must_use]
     pub fn type_of(&self, name: &str) -> Type {
         self.entry(name).ty
@@ -176,10 +218,22 @@ impl Locals {
     }
 }
 
-fn collect_decls(stmt: &Stmt, out: &mut Vec<(String, Type)>) {
+struct DeclItem {
+    name: String,
+    ty: Type,
+    kind: DeclKind,
+}
+
+#[derive(Clone, Copy)]
+enum DeclKind {
+    Local,
+    Param { incoming_offset: u16 },
+}
+
+fn collect_decls(stmt: &Stmt, out: &mut Vec<DeclItem>) {
     match &stmt.kind {
         StmtKind::Declare { ty, name, .. } => {
-            out.push((name.clone(), *ty));
+            out.push(DeclItem { name: name.clone(), ty: *ty, kind: DeclKind::Local });
         }
         StmtKind::If { then_branch, else_branch, .. } => {
             for s in then_branch {
@@ -208,17 +262,12 @@ fn count_uses_stmt(stmt: &Stmt, counts: &mut HashMap<String, u32>) {
             }
         }
         StmtKind::Declare { name, init, .. } => {
-            // The declaration line is itself a use of the name (the
-            // initializer write). This matches BCC's heuristic — a
-            // declared-but-otherwise-unread local with only an init
-            // still counts as having one use, not zero.
             *counts.entry(name.clone()).or_insert(0) += 1;
             if let Some(e) = init {
                 count_uses_expr(e, counts);
             }
         }
         StmtKind::Assign { name, value } => {
-            // Both the LHS and any names in the RHS count.
             *counts.entry(name.clone()).or_insert(0) += 1;
             count_uses_expr(value, counts);
         }
@@ -251,7 +300,12 @@ fn count_uses_expr(e: &Expr, counts: &mut HashMap<String, u32>) {
             count_uses_expr(left, counts);
             count_uses_expr(right, counts);
         }
-        // No-arg calls and literals don't reference any names.
-        ExprKind::IntLit(_) | ExprKind::Call { .. } => {}
+        ExprKind::Call { args, .. } => {
+            for a in args {
+                count_uses_expr(a, counts);
+            }
+        }
+        ExprKind::IntLit(_) => {}
     }
 }
+

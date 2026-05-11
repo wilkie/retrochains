@@ -1,0 +1,4 @@
+description = "Simplest case: function with one `int` param read once and returned. Pins how the param is addressed (`[bp+N]` offset) and how the caller pushes a single int argument."
+tool = "bcc"
+args = ["-S", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

@@ -1,0 +1,4 @@
+description = "Two-int-param function. Pins the offsets for the second and beyond — confirms cdecl right-to-left push (so first param ends up closer to bp than the second) and shows the caller-cleanup pattern after the call."
+tool = "bcc"
+args = ["-S", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]
