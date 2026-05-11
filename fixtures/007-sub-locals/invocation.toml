@@ -1,0 +1,4 @@
+description = "Subtraction of two local ints. Symmetric to 006; observe whether BCC uses the same load-then-op-from-memory pattern with `sub` instead of `add`."
+tool = "bcc"
+args = ["-S", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

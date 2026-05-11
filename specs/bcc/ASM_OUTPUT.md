@@ -89,23 +89,30 @@ markers BCC uses internally.
 
 ### Function emission
 
+`_TEXT segment byte public 'CODE'` is opened **once per translation
+unit**, not per function. All functions in a translation unit live
+inside one `_TEXT` segment. After the last function, a single
+`?debug C E9` record marks end-of-translation-unit-code, and then
+`_TEXT ends` closes the segment.
+
 ```
-_TEXT	segment byte public 'CODE'
+_TEXT	segment byte public 'CODE'           ;  opens once
+   ;	
+   ;	int f(void) { return 1; }
+   ;	
+	assume	cs:_TEXT
+_f	proc	near
+	... body, single exit label @1@50 ...
+_f	endp
    ;	
    ;	int main(void) { return 0; }
    ;	
 	assume	cs:_TEXT
 _main	proc	near
-	push	bp
-	mov	bp,sp
-	... body ...
-	jmp	short @1@50
-@1@50:
-	... epilogue ...
-	ret	
+	... body, single exit label @2@50 ...
 _main	endp
-	?debug	C E9
-_TEXT	ends
+	?debug	C E9                              ; once, at the end
+_TEXT	ends                                  ; closes once
 ```
 
 - Source-line comments are emitted as `   ;\t<source-text>\r\n`, with each
@@ -113,14 +120,18 @@ _TEXT	ends
   comment block.
 - C function name `main` becomes ASM symbol `_main` (leading underscore is
   the standard Borland small-model convention).
-- Every function has a **single exit label**: `@1@50` in fixture 001.
-  Even an unconditional return goes via `jmp short @1@50` to that label,
-  which holds the epilogue. The `1` is presumably the function index and
-  `50` is its exit-label number; we've only seen function 1 so far.
-- The function ends with `?debug C E9` — a debug-comment record with just
-  the type byte and no payload, presumably marking end-of-function.
+- Every function has a **single exit label** `@<func-idx>@<label-idx>`.
+  `func-idx` increments per function definition in source order (1, 2,
+  3, ...). `label-idx` is `50` for the exit label (consistent across
+  fixtures 001, 003, 004, 005, 006, 009, 010). Even an unconditional
+  return goes via `jmp short @<f>@50` to that label, which holds the
+  epilogue.
+- A re-issued `\tassume\tcs:_TEXT\r\n` precedes every `proc near` —
+  even for the *second* function in a TU, despite the `assume` from the
+  segment scaffold above still being in scope. (Belt-and-suspenders for
+  the linker / debugger.)
 
-### Tail (constant across the three `-S` fixtures we've captured)
+### Tail
 
 ```
 _DATA	segment word public 'DATA'
@@ -128,14 +139,22 @@ s@	label	byte
 _DATA	ends
 _TEXT	segment byte public 'CODE'
 _TEXT	ends
-	public	_main
+	public	_<sym>            ; one line per defined function
+	...
 	end
 ```
 
 `s@` is another section-base label, this time for strings/static data
-(unused by these fixtures). The `_TEXT` is re-opened and re-closed in case
-later sections need it. `public _main` exports the function, and `end`
-closes the assembly file.
+(unused by our `-S`-only fixtures so far). The `_TEXT` is re-opened and
+re-closed in case later sections need it.
+
+The `public _<sym>` lines appear **in reverse definition order**.
+Fixtures 009 and 010 both define `f` first and `main` second, but emit
+`public _main` before `public _f`. Probably an artifact of how BCC walks
+its internal symbol table (LIFO insertion); for byte-exactness we need to
+match it.
+
+`end` closes the assembly file (TASM's end-of-source directive).
 
 ## Codegen patterns observed
 
@@ -196,6 +215,43 @@ The left operand is loaded into AX; the right operand is added in a
 single memory-to-register `add`. No third register is involved for this
 pattern.
 
+### Binary `-` (`007`)
+
+Symmetric to `+`, with `sub`:
+
+```
+	mov	ax,word ptr [bp-2]
+	sub	ax,word ptr [bp-4]
+```
+
+### Binary `*` (`008`)
+
+```
+	mov	ax,word ptr [bp-2]
+	imul	word ptr [bp-4]
+```
+
+This is the **single-operand IMUL** form: `imul src` ≡ `DX:AX ← AX *
+src`. For 16-bit `int` we only need AX (DX is discarded). BCC picks this
+over the 80186+ two-operand `imul reg, src` form even when targeting
+small-model 16-bit code — presumably because that's the most-compatible
+encoding (8086 supports it).
+
+### Calling a function (`010`)
+
+```
+	call	near ptr _f
+```
+
+- Small-memory-model: all calls are **near**, but BCC writes
+  `near ptr` explicitly (TASM accepts both with and without; the explicit
+  form is the bytes BCC produces).
+- Calling convention is cdecl-like: caller pushes args right-to-left
+  (we haven't seen args yet — fixture 010 is no-arg). Return value lives
+  in AX.
+- For `return f();`, no setup is needed: the result is already in AX
+  after the `call`, then the standard `jmp short @<f>@50` to the exit.
+
 ### Constant folding (`005`)
 
 BCC folds simple arithmetic on integer literals at compile time. Source
@@ -250,11 +306,19 @@ Three observations:
 
 ## Open questions (track for future fixtures)
 
-- What's the `@<n>@<m>` label scheme? `@1@50` is constant across our
-  three fixtures. Does `@1` step to `@2` for a second function?
-  Does `@50` step for additional labels (else-branches, loops)?
+- `@<n>@<m>` label scheme: `@n` steps per function (confirmed). `@50`
+  is the exit label number — does it step for additional labels
+  (else-branches, loops, gotos)? Probably 50 is just "the exit
+  label slot" and other labels get @51, @52, …
+- Why does `public` ordering appear to be LIFO over the symbol table?
+  When we add globals and externs, find out where they slot in.
 - Does the `s@` label ever become non-empty? Probably for string literals.
 - Are `d@`/`d@w` and `b@`/`b@w` ever positioned mid-segment, or always
   at the segment head?
+- 3-byte stack frame: 3× `dec sp` or `sub sp,3`? (Pin down the
+  `dec`→`sub` crossover.)
+- Two-operand `imul` (80186/286): does any `-mc`/`-ml` model or higher
+  target switch BCC to it?
+- Call with arguments: cdecl push-and-pop pattern.
 - What does `-O`/`-G`/`-r`/`-Z` actually change in the output? We've
   only run with `-ms`.
