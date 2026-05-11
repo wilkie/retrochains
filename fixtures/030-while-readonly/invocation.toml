@@ -1,0 +1,4 @@
+description = "While loop with a read-only-in-loop local (`limit`) alongside a modified one (`i`). Tells us whether read-only loop usage also triggers enregistering."
+tool = "bcc"
+args = ["-S", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

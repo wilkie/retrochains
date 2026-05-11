@@ -415,38 +415,157 @@ Verified against fixtures:
 The "unused" slots are presumably reservations BCC makes before
 knowing which branches will actually need a target.
 
-## Register-promoted locals in `while` (`027`) — deferred
+## Register allocation for locals
 
-The captured `027-while` shows BCC doing register allocation:
+Even at default `-S -ms` (no `-O`), BCC enregisters some local `int`
+variables into `SI`, `DI`, `DX`, and `BX` in that order. Investigation
+fixtures `028`–`032` pin the heuristic and the emission shape.
+
+### When does a local get a register?
+
+| Fixture | Local  | Uses (incl. init) | Lives in |
+| ------- | ------ | :---------------: | -------- |
+| `027`   | `i`    | 4                 | SI       |
+| `028`   | `i`    | 4                 | SI       |
+| `029`   | `i`    | 4                 | SI       |
+| `029`   | `sum`  | 4                 | DI       |
+| `030`   | `limit`| **2**             | **stack** (`[bp-2]`) |
+| `030`   | `i`    | 5                 | SI       |
+| `031`   | `a`    | 5                 | SI       |
+| `031`   | `b`    | 4                 | DI       |
+| `031`   | `c`    | 4                 | DX       |
+| `031`   | `d`    | 4                 | BX       |
+| `032`   | `i`    | 3                 | SI       |
+
+The heuristic is: **a local with ≥ 3 textual occurrences (counting the
+initializer) is enregistered, in declaration order, drawing from the
+fixed pool `[SI, DI, DX, BX]`.** Locals with fewer uses, and any locals
+left over after the pool is exhausted, stay on the stack.
+
+(We don't yet know what happens with a 5th-eligible local, or with a
+function that calls another function in its loop body — DX/BX are
+caller-saved across cdecl calls. Future fixtures will pin those down.)
+
+### Prologue and epilogue shape
+
+Stack space is allocated **before** the callee-saved pushes. Only SI
+and DI are saved/restored (DX and BX are used without saving, fine as
+long as nothing the function calls clobbers them):
 
 ```
 	push	bp
 	mov	bp,sp
-	push	si                   ; save callee-saved SI
-	xor	si,si                ; i = 0  — `i` is in SI, not on the stack
-	jmp	short @1@74
-@1@50:
-	mov	ax,si
-	inc	ax
-	mov	si,ax                ; i = i + 1 — still in SI
-@1@74:
-	cmp	si,10
-	jl	short @1@50
-	mov	ax,si
-	jmp	short @1@122
-@1@122:
-	pop	si                   ; restore SI
+	dec	sp / sub sp,N        ; only if there are stack-resident locals
+	push	si                   ; only if SI is used
+	push	di                   ; only if DI is used
+	...body...
+	pop	di                   ; reverse of the pushes
+	pop	si
+	mov	sp,bp                ; only if there were stack-resident locals
 	pop	bp
-	ret	
+	ret
 ```
 
-Even at default `-S -ms` (no `-O`), BCC promotes the loop's induction
-variable into `SI`. No `sub sp,N` — nothing about `i` lives on the
-stack. This is a real optimization (selection of locals to enregister)
-that we're going to need for any loop-using fixture.
+In fixture `030` with `limit` on the stack and `i` in SI, the prologue
+is `push bp / mov bp,sp / dec sp / dec sp / push si`, and the epilogue
+is `pop si / mov sp,bp / pop bp / ret`. With *only* register locals
+(028, 029, 031, 032), there is no `dec sp` / `sub sp,N` and no
+`mov sp,bp` in the epilogue.
 
-**Slice deferred:** `027-while` stays as a known failing fixture; we'll
-tackle register allocation as its own thing.
+### Initializing a register local
+
+Same constant-folding rules as for AX:
+
+- `int i = 0;` → `xor si,si` (and same for any register: `xor di,di`,
+  `xor dx,dx`, `xor bx,bx`).
+- `int i = K;` (K ≠ 0) → `mov <reg>,K`.
+- Non-constant initializer (not yet observed): presumably load to AX
+  via the usual path, then `mov <reg>,ax`.
+
+### Assignment to a register local
+
+```
+	i = i + 1;
+```
+
+emits (when `i` is in SI):
+
+```
+	mov	ax,si
+	inc	ax
+	mov	si,ax
+```
+
+Two things to note:
+
+1. **`x + 1` on a value already in AX becomes `inc ax`**, not
+   `add ax,1`. This is a constant-rhs peephole we haven't seen before.
+   (Probably symmetric `dec ax` for `x - 1`; needs a fixture.)
+2. The store back is via AX even though the rhs is computed in AX —
+   BCC doesn't fuse the operation into the destination register. The
+   shape is always `mov ax,<reg>` / `<op>` / `mov <reg>,ax`.
+
+### Reading a register local in an expression
+
+The plain load `mov ax, word ptr [bp-N]` becomes `mov ax, <reg>`:
+
+```
+	return a + b + c + d;       ; all four in SI/DI/DX/BX
+```
+
+```
+	mov	ax,si       ; a
+	add	ax,di       ; b
+	add	ax,dx       ; c
+	add	ax,bx       ; d
+```
+
+So `add ax, <reg>` is used directly instead of `add ax, word ptr [bp-N]`.
+
+### Comparison with a register operand
+
+When the LHS of a comparison-in-condition is a register local, BCC
+skips the load-to-AX and compares directly:
+
+```
+	cmp	si,10                ; cmp <reg>, K (fixture 027/032)
+	cmp	si,word ptr [bp-2]   ; cmp <reg>, [stack-local]  (fixture 030)
+	cmp	si,di                ; cmp <reg>, <reg>          (hypothetical;
+	                             ; not yet captured)
+```
+
+The conditional-jump mnemonic obeys the same true/inverse selection as
+the load-via-AX form.
+
+### `while` loop codegen
+
+```c
+while (<cond>) { <body> }
+```
+
+becomes (with slot base reserved by the planner):
+
+```
+	jmp	short @<check>          ; jump to the condition first
+@<body>:                                ; slot +0
+	<body-stmts>
+@<check>:                               ; slot +1
+	<cond>
+	j<true>	short @<body>          ; true-mnemonic, NOT inverse
+```
+
+Two contrasts with the if/if-else pattern:
+
+- **Trampoline `jmp` to the check before the body.** The condition is
+  evaluated at the bottom of the loop.
+- **The conditional jump uses the *true*-mnemonic** (`jl` for `<`,
+  `je` for `==`, …), because we jump *back to the body when the
+  condition holds*. (Inverse-mnemonic jumps fall through into the
+  successor for `if`.)
+
+Slot layout: while reserves 3 slots: `+0 body`, `+1 check`, `+2 unused`.
+(The `+2` is presumably the reservation for a future `break` / `continue`
+target; BCC seems to over-reserve consistently.)
 
 ## Local variable alignment
 

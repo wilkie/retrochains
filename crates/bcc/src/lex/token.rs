@@ -15,6 +15,7 @@ pub enum TokenKind {
     KwReturn,
     KwIf,
     KwElse,
+    KwWhile,
     // Atoms
     Ident(String),
     IntLit(u32),
@@ -56,6 +57,7 @@ impl TokenKind {
             Self::KwReturn => "`return`",
             Self::KwIf => "`if`",
             Self::KwElse => "`else`",
+            Self::KwWhile => "`while`",
             Self::Ident(_) => "identifier",
             Self::IntLit(_) => "integer literal",
             Self::LParen => "`(`",

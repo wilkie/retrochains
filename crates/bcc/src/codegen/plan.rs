@@ -87,6 +87,20 @@ fn plan_stmt(stmt: &Stmt, counter: &mut u32, bases: &mut HashMap<u32, u32>) {
                 plan_stmts(else_branch, counter, bases);
             }
         }
+        StmtKind::Assign { value, .. } => {
+            plan_expr_value(value, counter, bases);
+        }
+        StmtKind::While { cond, body } => {
+            // While reserves its slots up-front (3: body, check, unused)
+            // before walking either condition or body, so the construct's
+            // own labels come first. The condition itself is in jump
+            // position; sub-expressions revert to value position.
+            let base = *counter;
+            bases.insert(stmt.span.start, base);
+            *counter += 3;
+            plan_expr_condition(cond, counter, bases);
+            plan_stmts(body, counter, bases);
+        }
     }
 }
 

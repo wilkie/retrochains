@@ -109,6 +109,7 @@ impl<'a> Lexer<'a> {
             b"return" => TokenKind::KwReturn,
             b"if" => TokenKind::KwIf,
             b"else" => TokenKind::KwElse,
+            b"while" => TokenKind::KwWhile,
             other => TokenKind::Ident(String::from_utf8_lossy(other).into_owned()),
         }
     }

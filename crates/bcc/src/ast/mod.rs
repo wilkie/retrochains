@@ -36,6 +36,12 @@ pub enum StmtKind {
     Declare { ty: Type, name: String, init: Option<Expr> },
     /// `if (cond) then-body [else else-body]`.
     If { cond: Expr, then_branch: Vec<Stmt>, else_branch: Option<Vec<Stmt>> },
+    /// `<name> = <value>;`. Currently only assignment to an existing
+    /// local (no compound assignment, no dereference); the parser
+    /// validates the LHS is a bare identifier.
+    Assign { name: String, value: Expr },
+    /// `while (cond) body`.
+    While { cond: Expr, body: Vec<Stmt> },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -118,6 +124,23 @@ impl BinOp {
             Self::Le => "jg",
             Self::Gt => "jle",
             Self::Ge => "jl",
+            _ => return None,
+        })
+    }
+
+    /// The conditional-jump mnemonic to use when this comparison
+    /// operator's result is **true**. Used by `while` (the bottom-of-loop
+    /// jump goes back to the body when the condition holds).
+    /// Returns `None` for non-comparison operators.
+    #[must_use]
+    pub fn jump_if_true(self) -> Option<&'static str> {
+        Some(match self {
+            Self::Eq => "je",
+            Self::Ne => "jne",
+            Self::Lt => "jl",
+            Self::Le => "jle",
+            Self::Gt => "jg",
+            Self::Ge => "jge",
             _ => return None,
         })
     }

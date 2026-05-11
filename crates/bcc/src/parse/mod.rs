@@ -101,8 +101,39 @@ impl Parser {
                 })
             }
             TokenKind::KwIf => self.parse_if(),
+            TokenKind::KwWhile => self.parse_while(),
+            TokenKind::Ident(_) => {
+                // `<ident> = <expr> ;` is the only statement that
+                // starts with an identifier today. We don't yet support
+                // bare expression-statements (function-call statements
+                // without a return) — those will arrive when a fixture
+                // needs them.
+                let ident_tok = self.bump();
+                let TokenKind::Ident(name) = ident_tok.kind else { unreachable!() };
+                self.expect(&TokenKind::Equals)?;
+                let value = self.parse_expr()?;
+                let semi = self.expect(&TokenKind::Semicolon)?;
+                Ok(Stmt {
+                    kind: StmtKind::Assign { name, value },
+                    span: Span::new(start, semi.span.end),
+                })
+            }
             _ => Err(ParseError::Unsupported { offset: start }),
         }
+    }
+
+    /// `while ( <cond> ) <branch>`. Same branch shape as `if`.
+    fn parse_while(&mut self) -> Result<Stmt, ParseError> {
+        let while_tok = self.expect(&TokenKind::KwWhile)?;
+        self.expect(&TokenKind::LParen)?;
+        let cond = self.parse_expr()?;
+        self.expect(&TokenKind::RParen)?;
+        let body = self.parse_branch()?;
+        let end = body.last().map_or(while_tok.span.end, |s| s.span.end);
+        Ok(Stmt {
+            kind: StmtKind::While { cond, body },
+            span: Span::new(while_tok.span.start, end),
+        })
     }
 
     /// `if ( <expr> ) <branch> [else <branch>]`. A branch is either

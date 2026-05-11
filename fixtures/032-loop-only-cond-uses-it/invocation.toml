@@ -1,0 +1,4 @@
+description = "While loop where the loop variable is read in the condition but NEVER modified (infinite loop in principle, but the inner `return` makes it exit on first iteration). Tests whether enregistering depends on modification or just usage."
+tool = "bcc"
+args = ["-S", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]
