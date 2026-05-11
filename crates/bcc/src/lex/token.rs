@@ -23,6 +23,7 @@ pub enum TokenKind {
     RBrace,
     Semicolon,
     Equals,
+    Plus,
     // End-of-input sentinel
     Eof,
 }
@@ -44,6 +45,7 @@ impl TokenKind {
             Self::RBrace => "`}`",
             Self::Semicolon => "`;`",
             Self::Equals => "`=`",
+            Self::Plus => "`+`",
             Self::Eof => "end of input",
         }
     }

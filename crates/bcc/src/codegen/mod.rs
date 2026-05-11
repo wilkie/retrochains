@@ -11,9 +11,12 @@
 use std::collections::HashMap;
 use std::io::Write as _;
 
-use crate::ast::{Expr, ExprKind, Function, Stmt, StmtKind, Type};
+use crate::ast::{BinOp, Expr, ExprKind, Function, Stmt, StmtKind, Type};
 
+mod fold;
 mod line_map;
+
+use fold::try_const_eval;
 
 use line_map::LineMap;
 
@@ -108,14 +111,21 @@ impl<'a> FunctionEmitter<'a> {
         // Prologue.
         self.out.extend_from_slice(b"\tpush\tbp\r\n");
         self.out.extend_from_slice(b"\tmov\tbp,sp\r\n");
-        // Locals allocation: BCC emits one `dec sp` per *byte* of frame
-        // (the instruction decrements SP by 1) for small frames, rather
-        // than `sub sp,N`. So for a single `int` local (2 bytes), we
-        // emit two `dec sp`. There's presumably a threshold beyond which
-        // `sub sp,N` wins on code size — we'll learn it when a fixture
-        // demands it.
-        for _ in 0..self.locals.used {
-            self.out.extend_from_slice(b"\tdec\tsp\r\n");
+        // Locals allocation. Up to 2 bytes BCC emits per-byte `dec sp`
+        // (2 single-byte instructions); above that it switches to
+        // `sub sp,N` (3-byte instruction, immediately cheaper than
+        // 3+ `dec sp`s). The exact crossover (between 2 and 4 in our
+        // fixtures) is documented in specs/bcc/ASM_OUTPUT.md.
+        match self.locals.used {
+            0 => {}
+            n @ 1..=2 => {
+                for _ in 0..n {
+                    self.out.extend_from_slice(b"\tdec\tsp\r\n");
+                }
+            }
+            n => {
+                let _ = write!(self.out, "\tsub\tsp,{n}\r\n");
+            }
         }
 
         // Body.
@@ -168,43 +178,76 @@ impl<'a> FunctionEmitter<'a> {
 
     fn emit_return_value_load(&mut self, value: Option<&Expr>) {
         let Some(e) = value else { return };
-        match &e.kind {
-            ExprKind::IntLit(0) => {
+        self.emit_expr_to_ax(e);
+    }
+
+    fn emit_store_local(&mut self, offset: u16, init: &Expr) {
+        // If the initializer folds to a constant, store it directly with a
+        // single `mov word ptr [bp-N],K`. Otherwise compute the RHS into
+        // AX and store from AX.
+        if let Some(v) = try_const_eval(init) {
+            let _ = write!(self.out, "\tmov\tword ptr [bp-{offset}],{v}\r\n");
+            return;
+        }
+        self.emit_expr_to_ax(init);
+        let _ = write!(self.out, "\tmov\tword ptr [bp-{offset}],ax\r\n");
+    }
+
+    /// Emit code that leaves the value of `e` in AX. If `e` folds to a
+    /// constant we take the constant path (`xor ax,ax` for zero,
+    /// otherwise `mov ax,K`). Otherwise we emit the runtime pattern.
+    fn emit_expr_to_ax(&mut self, e: &Expr) {
+        if let Some(v) = try_const_eval(e) {
+            if v == 0 {
                 self.out.extend_from_slice(b"\txor\tax,ax\r\n");
+            } else {
+                let _ = write!(self.out, "\tmov\tax,{v}\r\n");
             }
-            ExprKind::IntLit(n) => {
-                let _ = write!(self.out, "\tmov\tax,{n}\r\n");
-            }
+            return;
+        }
+        match &e.kind {
+            ExprKind::IntLit(_) => unreachable!("literals fold via try_const_eval"),
             ExprKind::Ident(name) => {
-                let offset = self
-                    .locals
-                    .offset_of(name)
-                    .unwrap_or_else(|| panic!("unknown local in codegen: {name}"));
+                let offset = self.local_offset(name);
                 let _ = write!(self.out, "\tmov\tax,word ptr [bp-{offset}]\r\n");
+            }
+            ExprKind::BinOp { op: BinOp::Add, left, right } => {
+                // Load left operand into AX, then add right with a
+                // memory-direct (or immediate) `add`. This matches the
+                // pattern observed in fixture 006.
+                self.emit_expr_to_ax(left);
+                self.emit_add_right(right);
             }
         }
     }
 
-    fn emit_store_local(&mut self, offset: u16, init: &Expr) {
-        match &init.kind {
-            ExprKind::IntLit(n) => {
-                let _ = write!(
-                    self.out,
-                    "\tmov\tword ptr [bp-{offset}],{n}\r\n"
-                );
-            }
+    /// Emit the right-hand side of a `+` as an `add ax, <operand>`.
+    /// Sub-expressions on the right side aren't yet supported because no
+    /// fixture exercises them; we'll grow this when one does.
+    fn emit_add_right(&mut self, e: &Expr) {
+        if let Some(v) = try_const_eval(e) {
+            let _ = write!(self.out, "\tadd\tax,{v}\r\n");
+            return;
+        }
+        match &e.kind {
             ExprKind::Ident(name) => {
-                // a = b; — first load to AX, then store. Not in any fixture
-                // yet; included for completeness so 004's grammar doesn't
-                // dead-end if extended.
-                let src = self
-                    .locals
-                    .offset_of(name)
-                    .unwrap_or_else(|| panic!("unknown local in codegen: {name}"));
-                let _ = write!(self.out, "\tmov\tax,word ptr [bp-{src}]\r\n");
-                let _ = write!(self.out, "\tmov\tword ptr [bp-{offset}],ax\r\n");
+                let offset = self.local_offset(name);
+                let _ = write!(self.out, "\tadd\tax,word ptr [bp-{offset}]\r\n");
+            }
+            ExprKind::IntLit(_) => unreachable!("literals fold via try_const_eval"),
+            ExprKind::BinOp { .. } => {
+                // A nested non-constant right-hand binary operand would
+                // need register save/restore; no fixture forces this
+                // yet. Fail loudly so we notice the shape when it lands.
+                panic!("nested non-constant right operand not yet supported");
             }
         }
+    }
+
+    fn local_offset(&self, name: &str) -> u16 {
+        self.locals
+            .offset_of(name)
+            .unwrap_or_else(|| panic!("unknown local in codegen: {name}"))
     }
 
     /// Emit `;` source-comment block(s) for any source line(s) up to and

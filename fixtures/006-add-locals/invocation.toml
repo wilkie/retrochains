@@ -1,0 +1,4 @@
+description = "Addition over two local ints, returned. Forces runtime arithmetic (no constant folding) so we see the operator's actual codegen pattern."
+tool = "bcc"
+args = ["-S", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

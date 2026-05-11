@@ -55,6 +55,7 @@ impl<'a> Lexer<'a> {
                 b'}' => { self.pos += 1; TokenKind::RBrace }
                 b';' => { self.pos += 1; TokenKind::Semicolon }
                 b'=' => { self.pos += 1; TokenKind::Equals }
+                b'+' => { self.pos += 1; TokenKind::Plus }
                 b if is_ident_start(b) => self.lex_ident_or_keyword(),
                 b if b.is_ascii_digit() => self.lex_int_literal()?,
                 other => {

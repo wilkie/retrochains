@@ -4,7 +4,7 @@
 //! once" case (which is all the early fixtures need; nothing in
 //! single-pass forbids building a one-function-at-a-time variant later).
 
-use crate::ast::{Expr, ExprKind, Function, Stmt, StmtKind, Type, Unit};
+use crate::ast::{BinOp, Expr, ExprKind, Function, Stmt, StmtKind, Type, Unit};
 use crate::lex::{Span, Token, TokenKind};
 
 #[derive(Debug, thiserror::Error)]
@@ -105,6 +105,32 @@ impl Parser {
     }
 
     fn parse_expr(&mut self) -> Result<Expr, ParseError> {
+        // The whole expression grammar is one level (additive) for now.
+        // As we add operators with other precedences we'll grow this into
+        // a real precedence-climbing chain.
+        self.parse_additive()
+    }
+
+    /// Left-associative chain of `<atom> (+ <atom>)*`.
+    fn parse_additive(&mut self) -> Result<Expr, ParseError> {
+        let mut left = self.parse_atom()?;
+        while matches!(self.peek().kind, TokenKind::Plus) {
+            self.bump();
+            let right = self.parse_atom()?;
+            let span = Span::new(left.span.start, right.span.end);
+            left = Expr {
+                kind: ExprKind::BinOp {
+                    op: BinOp::Add,
+                    left: Box::new(left),
+                    right: Box::new(right),
+                },
+                span,
+            };
+        }
+        Ok(left)
+    }
+
+    fn parse_atom(&mut self) -> Result<Expr, ParseError> {
         let tok = self.bump();
         match tok.kind {
             TokenKind::IntLit(v) => Ok(Expr { kind: ExprKind::IntLit(v), span: tok.span }),
@@ -177,5 +203,26 @@ mod tests {
         let unit = parse("int main(void) { return 42; }\n").unwrap();
         let StmtKind::Return(Some(ref e)) = unit.functions[0].body[0].kind else { panic!() };
         assert!(matches!(e.kind, ExprKind::IntLit(42)));
+    }
+
+    #[test]
+    fn fixture_005_binary_plus() {
+        let unit = parse("int main(void) { return 1 + 2; }\n").unwrap();
+        let StmtKind::Return(Some(ref e)) = unit.functions[0].body[0].kind else { panic!() };
+        let ExprKind::BinOp { op: BinOp::Add, ref left, ref right } = e.kind else { panic!() };
+        assert!(matches!(left.kind, ExprKind::IntLit(1)));
+        assert!(matches!(right.kind, ExprKind::IntLit(2)));
+    }
+
+    #[test]
+    fn additive_is_left_associative() {
+        // `1 + 2 + 3` → ((1 + 2) + 3)
+        let unit = parse("int main(void) { return 1 + 2 + 3; }\n").unwrap();
+        let StmtKind::Return(Some(ref e)) = unit.functions[0].body[0].kind else { panic!() };
+        let ExprKind::BinOp { ref left, ref right, .. } = e.kind else { panic!() };
+        assert!(matches!(right.kind, ExprKind::IntLit(3)));
+        let ExprKind::BinOp { left: ref ll, right: ref lr, .. } = left.kind else { panic!() };
+        assert!(matches!(ll.kind, ExprKind::IntLit(1)));
+        assert!(matches!(lr.kind, ExprKind::IntLit(2)));
     }
 }

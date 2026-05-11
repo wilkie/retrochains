@@ -151,16 +151,21 @@ inline `ret`.
 
 ### Stack frame
 
-- **No locals (`001`, `003`)**: `push bp` / `mov bp,sp` ... `pop bp` /
-  `ret`.
-- **One `int` local (`004`)**: `push bp` / `mov bp,sp` / **`dec sp` /
-  `dec sp`** ... `mov sp,bp` / `pop bp` / `ret`. The local is at `[bp-2]`.
+- **No locals (`001`, `003`, `005`)**: `push bp` / `mov bp,sp` ...
+  `pop bp` / `ret`.
+- **One `int` local — 2 bytes (`004`)**: `push bp` / `mov bp,sp` /
+  **`dec sp` / `dec sp`** ... `mov sp,bp` / `pop bp` / `ret`. The local
+  is at `[bp-2]`.
+- **Two `int` locals — 4 bytes (`006`)**: `push bp` / `mov bp,sp` /
+  **`sub sp,4`** ... `mov sp,bp` / `pop bp` / `ret`. The locals are at
+  `[bp-2]` and `[bp-4]`.
 
 `dec sp` decrements SP by **one byte** (it's the single-byte register
-DEC encoding). So 2 bytes of locals = **2** `dec sp`s, not one. That's
-what threw the codegen on the first cut. There's presumably a frame-size
-threshold beyond which `sub sp,N` wins on code size — we'll learn it
-when a fixture exercises it.
+DEC encoding). For 2 bytes of locals BCC emits two `dec sp` (2-byte
+total prologue extension); for 4 bytes it switches to `sub sp,4` (3- or
+4-byte instruction). The threshold sits between 2 and 4 bytes. The
+exact crossover and any larger-frame patterns will be pinned down by
+future fixtures.
 
 ### Local-variable access
 
@@ -171,6 +176,39 @@ when a fixture exercises it.
 
 `word ptr` is always written explicitly even when the destination is a
 16-bit register that would otherwise disambiguate the size.
+
+Multiple `int` locals are laid out in declaration order with 2-byte
+offsets growing toward more-negative offsets from `bp`:
+
+```
+	mov	word ptr [bp-2],5         ; int x = 5;
+	mov	word ptr [bp-4],7         ; int y = 7;
+```
+
+### Binary `+` (`006`)
+
+```
+	mov	ax,word ptr [bp-2]        ; load left operand into AX
+	add	ax,word ptr [bp-4]        ; add right operand straight from memory
+```
+
+The left operand is loaded into AX; the right operand is added in a
+single memory-to-register `add`. No third register is involved for this
+pattern.
+
+### Constant folding (`005`)
+
+BCC folds simple arithmetic on integer literals at compile time. Source
+`return 1 + 2;` emits exactly:
+
+```
+	mov	ax,3
+	jmp	short @1@50
+```
+
+No `add` is generated. This means our front-end has to actually
+recognize `1 + 2` as a binary expression (we can't skip parsing it),
+then a fold pass replaces it with the constant `3` before codegen.
 
 ## Source-line comments
 

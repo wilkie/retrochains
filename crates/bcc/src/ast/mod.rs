@@ -63,4 +63,10 @@ pub struct Expr {
 pub enum ExprKind {
     IntLit(u32),
     Ident(String),
+    BinOp { op: BinOp, left: Box<Expr>, right: Box<Expr> },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BinOp {
+    Add,
 }
