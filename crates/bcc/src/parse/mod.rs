@@ -105,46 +105,71 @@ impl Parser {
     }
 
     fn parse_expr(&mut self) -> Result<Expr, ParseError> {
-        // The whole expression grammar is one level (additive) for now.
-        // As we add operators with other precedences we'll grow this into
-        // a real precedence-climbing chain.
-        self.parse_additive()
+        // Precedence ladder, lowest precedence at the top. We cover what
+        // fixtures up through 018 demand: bitwise OR < XOR < AND < shift
+        // < additive < multiplicative < atom. Comparison and logical
+        // operators (and unary) get inserted as fixtures introduce them.
+        self.parse_bitor()
     }
 
-    /// Left-associative chain of `<multiplicative> ((+|-) <multiplicative>)*`.
+    fn parse_bitor(&mut self) -> Result<Expr, ParseError> {
+        self.left_assoc(Self::parse_bitxor, |t| {
+            matches!(t, TokenKind::Pipe).then_some(BinOp::BitOr)
+        })
+    }
+
+    fn parse_bitxor(&mut self) -> Result<Expr, ParseError> {
+        self.left_assoc(Self::parse_bitand, |t| {
+            matches!(t, TokenKind::Caret).then_some(BinOp::BitXor)
+        })
+    }
+
+    fn parse_bitand(&mut self) -> Result<Expr, ParseError> {
+        self.left_assoc(Self::parse_shift, |t| {
+            matches!(t, TokenKind::Ampersand).then_some(BinOp::BitAnd)
+        })
+    }
+
+    fn parse_shift(&mut self) -> Result<Expr, ParseError> {
+        self.left_assoc(Self::parse_additive, |t| match t {
+            TokenKind::ShiftLeft => Some(BinOp::Shl),
+            TokenKind::ShiftRight => Some(BinOp::Shr),
+            _ => None,
+        })
+    }
+
     fn parse_additive(&mut self) -> Result<Expr, ParseError> {
-        let mut left = self.parse_multiplicative()?;
-        loop {
-            let op = match self.peek().kind {
-                TokenKind::Plus => BinOp::Add,
-                TokenKind::Minus => BinOp::Sub,
-                _ => break,
-            };
+        self.left_assoc(Self::parse_multiplicative, |t| match t {
+            TokenKind::Plus => Some(BinOp::Add),
+            TokenKind::Minus => Some(BinOp::Sub),
+            _ => None,
+        })
+    }
+
+    fn parse_multiplicative(&mut self) -> Result<Expr, ParseError> {
+        self.left_assoc(Self::parse_atom, |t| match t {
+            TokenKind::Star => Some(BinOp::Mul),
+            TokenKind::Slash => Some(BinOp::Div),
+            TokenKind::Percent => Some(BinOp::Mod),
+            _ => None,
+        })
+    }
+
+    /// One left-associative precedence level: parses `<sub> (<op> <sub>)*`
+    /// where `match_op` decides which token kinds at this level
+    /// qualify as an operator (and which `BinOp` they map to).
+    fn left_assoc<F, M>(&mut self, sub: F, mut match_op: M) -> Result<Expr, ParseError>
+    where
+        F: Fn(&mut Self) -> Result<Expr, ParseError>,
+        M: FnMut(&TokenKind) -> Option<BinOp>,
+    {
+        let mut left = sub(self)?;
+        while let Some(op) = match_op(&self.peek().kind) {
             self.bump();
-            let right = self.parse_multiplicative()?;
+            let right = sub(self)?;
             let span = Span::new(left.span.start, right.span.end);
             left = Expr {
                 kind: ExprKind::BinOp { op, left: Box::new(left), right: Box::new(right) },
-                span,
-            };
-        }
-        Ok(left)
-    }
-
-    /// Left-associative chain of `<atom> (* <atom>)*`. Multiplicative
-    /// binds tighter than additive, so `1 + 2 * 3` ≡ `1 + (2 * 3)`.
-    fn parse_multiplicative(&mut self) -> Result<Expr, ParseError> {
-        let mut left = self.parse_atom()?;
-        while matches!(self.peek().kind, TokenKind::Star) {
-            self.bump();
-            let right = self.parse_atom()?;
-            let span = Span::new(left.span.start, right.span.end);
-            left = Expr {
-                kind: ExprKind::BinOp {
-                    op: BinOp::Mul,
-                    left: Box::new(left),
-                    right: Box::new(right),
-                },
                 span,
             };
         }
@@ -270,6 +295,24 @@ mod tests {
         let StmtKind::Return(Some(ref e)) = unit.functions[0].body[0].kind else { panic!() };
         let ExprKind::Call { ref name } = e.kind else { panic!() };
         assert_eq!(name, "f");
+    }
+
+    #[test]
+    fn full_precedence_ladder() {
+        // `1 | 2 ^ 3 & 4 << 5 + 6 * 7` should parse with `*` tightest
+        // and `|` loosest, so the root is BinOp::BitOr.
+        let unit = parse("int main(void) { return 1 | 2 ^ 3 & 4 << 5 + 6 * 7; }\n").unwrap();
+        let StmtKind::Return(Some(ref e)) = unit.functions[0].body[0].kind else { panic!() };
+        assert!(matches!(e.kind, ExprKind::BinOp { op: BinOp::BitOr, .. }));
+    }
+
+    #[test]
+    fn shift_binds_below_additive() {
+        // `1 + 2 << 3` ≡ `(1 + 2) << 3` — additive is tighter than shift.
+        let unit = parse("int main(void) { return 1 + 2 << 3; }\n").unwrap();
+        let StmtKind::Return(Some(ref e)) = unit.functions[0].body[0].kind else { panic!() };
+        let ExprKind::BinOp { op: BinOp::Shl, ref left, .. } = e.kind else { panic!() };
+        assert!(matches!(left.kind, ExprKind::BinOp { op: BinOp::Add, .. }));
     }
 
     #[test]

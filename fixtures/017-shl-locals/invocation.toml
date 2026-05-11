@@ -1,0 +1,4 @@
+description = "Left shift by a runtime amount. 8086 shifts by CL (count register); discover how BCC loads the right operand into CL before SHL."
+tool = "bcc"
+args = ["-S", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

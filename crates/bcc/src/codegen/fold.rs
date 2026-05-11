@@ -23,6 +23,28 @@ pub fn try_const_eval(e: &Expr) -> Option<u32> {
                 BinOp::Add => l.wrapping_add(r),
                 BinOp::Sub => l.wrapping_sub(r),
                 BinOp::Mul => l.wrapping_mul(r),
+                BinOp::Div => {
+                    if r == 0 {
+                        return None;
+                    }
+                    // Signed division to match BCC's `idiv`. Our values
+                    // are small u32 today; the i32 round-trip preserves
+                    // them and gives signed semantics for the eventual
+                    // negative-literal case.
+                    l.cast_signed().wrapping_div(r.cast_signed()).cast_unsigned()
+                }
+                BinOp::Mod => {
+                    if r == 0 {
+                        return None;
+                    }
+                    l.cast_signed().wrapping_rem(r.cast_signed()).cast_unsigned()
+                }
+                BinOp::BitAnd => l & r,
+                BinOp::BitOr => l | r,
+                BinOp::BitXor => l ^ r,
+                BinOp::Shl => l.wrapping_shl(r & 0x1F),
+                // Signed (arithmetic) shift-right, matching BCC's `sar`.
+                BinOp::Shr => l.cast_signed().wrapping_shr(r & 0x1F).cast_unsigned(),
             })
         }
     }

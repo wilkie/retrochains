@@ -237,6 +237,88 @@ over the 80186+ two-operand `imul reg, src` form even when targeting
 small-model 16-bit code — presumably because that's the most-compatible
 encoding (8086 supports it).
 
+### Binary `/` (`012`)
+
+```
+	mov	ax,word ptr [bp-2]
+	cwd	
+	idiv	word ptr [bp-4]
+```
+
+`cwd` (no operands) sign-extends AX into DX:AX before the signed
+divide. After `idiv` the quotient is in AX and the remainder is in DX.
+For `/` we use AX as-is.
+
+`cwd` has a trailing TAB followed by CRLF (`\tcwd\t\r\n`) — same shape
+as `ret\t\r\n`: every operand-less mnemonic gets the empty-operand TAB.
+
+### Binary `%` (`013`)
+
+```
+	mov	ax,word ptr [bp-2]
+	cwd	
+	idiv	word ptr [bp-4]
+	mov	ax,dx
+```
+
+Same machinery as `/`, with `mov ax,dx` afterwards to surface the
+remainder.
+
+### Binary `&` / `|` / `^` (`014`/`015`/`016`)
+
+Two-operand, same shape as `+`/`-`:
+
+```
+	mov	ax,word ptr [bp-2]
+	and	ax,word ptr [bp-4]
+```
+
+`or` and `xor` use the same pattern. (BCC's `xor ax,ax` "set zero"
+pattern is just this same instruction encoding hit on a special case.)
+
+### Shifts `<<` / `>>` (`017`/`018`)
+
+```
+	mov	ax,word ptr [bp-2]
+	mov	cl,byte ptr [bp-4]
+	shl	ax,cl
+```
+
+- Shift count goes through `CL` (only the low 8 bits of the right
+  operand are used).
+- The right operand is loaded as `byte ptr [bp-N]` even when the
+  source variable is an `int` — BCC reads only its low byte.
+- For `<<` BCC emits `shl ax,cl`; for `>>` on a signed `int` it emits
+  **`sar ax,cl`** (signed arithmetic right shift, preserving sign bit).
+- 8086 has no `shl reg,imm` (added in 80186) so this is the only
+  encoding available pre-80186. BCC stays on the 8086-compatible
+  encoding even when the right operand is a compile-time constant —
+  we'll need a constant-rhs shift fixture to confirm this.
+
+## Local variable alignment
+
+Fixture 011 captures `char c; int i;` — total 3 bytes of values, but
+BCC allocates **4 bytes**:
+
+```
+	sub	sp,4
+	mov	byte ptr [bp-1],1     ; char c at [bp-1]
+	mov	word ptr [bp-4],2     ; int  i at [bp-4]
+```
+
+The byte at `[bp-2]` is padding so the `int` lands on an even-offset
+slot. So:
+
+- `char` occupies 1 byte (`byte ptr [bp-N]`).
+- `int` is aligned to a 2-byte boundary; gaps are padded.
+- Total frame appears to be rounded so the cumulative allocation lands
+  on even bytes. (A bare single `char` may still consume 1 byte — needs
+  a confirming fixture.)
+
+This sidesteps the "is a 3-byte frame possible?" question: in normal
+C source it isn't, given BCC's alignment policy. The `dec sp` ↔
+`sub sp,N` threshold (≤2 → `dec sp`, >2 → `sub sp,N`) appears safe.
+
 ### Calling a function (`010`)
 
 ```

@@ -232,56 +232,134 @@ impl<'a> FunctionEmitter<'a> {
     }
 
     /// Emit the right-hand side of a binary op, applying it to AX.
-    /// `add`/`sub` use the two-operand `add ax, <src>` / `sub ax, <src>`
-    /// form. `imul` uses the single-operand `imul <src>` form (DX:AX
-    /// receives the product; we use only AX for 16-bit `int`).
+    /// Different operators have different shapes:
+    ///
+    /// - `add`/`sub`/`and`/`or`/`xor`: two-operand `<mnemonic> ax, <src>`.
+    /// - `imul`: single-operand `imul <src>` (DX:AX ← AX * src; DX
+    ///   discarded for 16-bit int).
+    /// - `idiv`: needs `cwd` first (sign-extend AX → DX:AX), then
+    ///   single-operand `idiv <src>`. Quotient in AX, remainder in DX.
+    /// - `mod`: same as `idiv` plus `mov ax,dx` to surface the remainder.
+    /// - shifts: load the right operand's low byte into CL, then
+    ///   `shl ax,cl` or `sar ax,cl` (signed `>>` is `sar`, not `shr`).
     fn emit_binary_right(&mut self, op: BinOp, e: &Expr) {
-        // Constant operand: same shape for add/sub via immediate
-        // (`add ax,K` / `sub ax,K`). `imul ax, imm` only exists on
-        // 80186+ — no fixture forces this yet.
+        // Memory operand source. We only need a single string — the bp
+        // offset of the local — that the various op-specific paths reuse.
+        let src = self.resolve_operand_source(e);
+        emit_op_with_source(self.out, op, &src);
+    }
+
+    /// Resolve the right operand to a textual asm source operand and
+    /// return it. Today either an immediate (constant-foldable) or
+    /// `word ptr [bp-N]` for a local. Other shapes (call, nested
+    /// non-constant binop) panic — future fixtures will tell us what BCC
+    /// does with them.
+    fn resolve_operand_source(&self, e: &Expr) -> OperandSource {
         if let Some(v) = try_const_eval(e) {
-            match op {
-                BinOp::Add => {
-                    let _ = write!(self.out, "\tadd\tax,{v}\r\n");
-                }
-                BinOp::Sub => {
-                    let _ = write!(self.out, "\tsub\tax,{v}\r\n");
-                }
-                BinOp::Mul => panic!("imul with immediate not yet supported"),
-            }
-            return;
+            return OperandSource::Immediate(v);
         }
         match &e.kind {
-            ExprKind::Ident(name) => {
-                let offset = self.local_offset(name);
-                match op {
-                    BinOp::Add => {
-                        let _ = write!(self.out, "\tadd\tax,word ptr [bp-{offset}]\r\n");
-                    }
-                    BinOp::Sub => {
-                        let _ = write!(self.out, "\tsub\tax,word ptr [bp-{offset}]\r\n");
-                    }
-                    BinOp::Mul => {
-                        // Single-operand IMUL: AX <- AX * src, high word
-                        // in DX (discarded for 16-bit int).
-                        let _ = write!(self.out, "\timul\tword ptr [bp-{offset}]\r\n");
-                    }
-                }
-            }
+            ExprKind::Ident(name) => OperandSource::Local(self.local_offset(name)),
             ExprKind::IntLit(_) => unreachable!("literals fold via try_const_eval"),
-            ExprKind::Call { name } => {
-                // A non-constant call as right operand needs the left's
-                // value preserved across the call; no fixture forces
-                // this yet. Fail loudly so we notice when it shows up.
-                let _ = name;
-                panic!("call as right operand not yet supported (need to preserve AX)");
+            ExprKind::Call { .. } => {
+                panic!("call as right operand not yet supported (need to preserve AX)")
             }
             ExprKind::BinOp { .. } => {
-                panic!("nested non-constant right operand not yet supported");
+                panic!("nested non-constant right operand not yet supported")
             }
         }
     }
 
+}
+
+/// A resolved right-hand operand: either an integer immediate or a local
+/// at `[bp-N]`.
+enum OperandSource {
+    Immediate(u32),
+    Local(u16),
+}
+
+impl OperandSource {
+    /// Format as a `word ptr ...` / immediate that fits into a two-operand
+    /// `<mnemonic> ax, <src>` instruction.
+    fn word(&self) -> String {
+        match self {
+            Self::Immediate(v) => v.to_string(),
+            Self::Local(off) => format!("word ptr [bp-{off}]"),
+        }
+    }
+
+    /// Format the *byte* form, used for shift counts (`mov cl, byte ptr ...`).
+    /// Immediates use their raw value.
+    fn byte(&self) -> String {
+        match self {
+            Self::Immediate(v) => v.to_string(),
+            Self::Local(off) => format!("byte ptr [bp-{off}]"),
+        }
+    }
+}
+
+/// Emit the operator-specific instruction(s) given an already-loaded AX
+/// (left operand) and a source string for the right operand. Free
+/// function so it doesn't borrow `&mut self`.
+fn emit_op_with_source(out: &mut Vec<u8>, op: BinOp, src: &OperandSource) {
+    use std::io::Write as _;
+    match op {
+        BinOp::Add => {
+            let _ = write!(out, "\tadd\tax,{}\r\n", src.word());
+        }
+        BinOp::Sub => {
+            let _ = write!(out, "\tsub\tax,{}\r\n", src.word());
+        }
+        BinOp::BitAnd => {
+            let _ = write!(out, "\tand\tax,{}\r\n", src.word());
+        }
+        BinOp::BitOr => {
+            let _ = write!(out, "\tor\tax,{}\r\n", src.word());
+        }
+        BinOp::BitXor => {
+            let _ = write!(out, "\txor\tax,{}\r\n", src.word());
+        }
+        BinOp::Mul => {
+            if matches!(src, OperandSource::Immediate(_)) {
+                panic!("imul with immediate not yet supported (80186+ only)");
+            }
+            let _ = write!(out, "\timul\t{}\r\n", src.word());
+        }
+        BinOp::Div => {
+            if matches!(src, OperandSource::Immediate(_)) {
+                panic!("idiv with immediate not supported (no such encoding)");
+            }
+            // cwd has no operands but still gets the operand-separator
+            // tab + empty operand, matching BCC.
+            out.extend_from_slice(b"\tcwd\t\r\n");
+            let _ = write!(out, "\tidiv\t{}\r\n", src.word());
+        }
+        BinOp::Mod => {
+            if matches!(src, OperandSource::Immediate(_)) {
+                panic!("idiv with immediate not supported (no such encoding)");
+            }
+            out.extend_from_slice(b"\tcwd\t\r\n");
+            let _ = write!(out, "\tidiv\t{}\r\n", src.word());
+            out.extend_from_slice(b"\tmov\tax,dx\r\n");
+        }
+        BinOp::Shl | BinOp::Shr => {
+            // Load only the low byte of the right operand into CL (BCC
+            // reads `byte ptr [bp-N]` even when the local is wider).
+            let _ = write!(out, "\tmov\tcl,{}\r\n", src.byte());
+            let mnemonic = match op {
+                BinOp::Shl => "shl",
+                // Signed right shift uses SAR. Unsigned types (when we
+                // get them) will need a separate Shr variant.
+                BinOp::Shr => "sar",
+                _ => unreachable!(),
+            };
+            let _ = write!(out, "\t{mnemonic}\tax,cl\r\n");
+        }
+    }
+}
+
+impl FunctionEmitter<'_> {
     fn local_offset(&self, name: &str) -> u16 {
         self.locals
             .offset_of(name)

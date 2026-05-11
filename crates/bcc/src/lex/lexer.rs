@@ -58,6 +58,13 @@ impl<'a> Lexer<'a> {
                 b'+' => { self.pos += 1; TokenKind::Plus }
                 b'-' => { self.pos += 1; TokenKind::Minus }
                 b'*' => { self.pos += 1; TokenKind::Star }
+                b'/' => { self.pos += 1; TokenKind::Slash }
+                b'%' => { self.pos += 1; TokenKind::Percent }
+                b'&' => { self.pos += 1; TokenKind::Ampersand }
+                b'|' => { self.pos += 1; TokenKind::Pipe }
+                b'^' => { self.pos += 1; TokenKind::Caret }
+                b'<' => self.lex_after_lt()?,
+                b'>' => self.lex_after_gt()?,
                 b if is_ident_start(b) => self.lex_ident_or_keyword(),
                 b if b.is_ascii_digit() => self.lex_int_literal()?,
                 other => {
@@ -100,6 +107,31 @@ impl<'a> Lexer<'a> {
             b"void" => TokenKind::KwVoid,
             b"return" => TokenKind::KwReturn,
             other => TokenKind::Ident(String::from_utf8_lossy(other).into_owned()),
+        }
+    }
+
+    /// Disambiguate `<` — only `<<` is recognized so far. The comparison
+    /// operators (`<`, `<=`) land in the next slice.
+    fn lex_after_lt(&mut self) -> Result<TokenKind, LexError> {
+        let lt_pos = self.pos;
+        self.pos += 1;
+        if matches!(self.src.get(self.pos), Some(&b'<')) {
+            self.pos += 1;
+            Ok(TokenKind::ShiftLeft)
+        } else {
+            Err(LexError::UnexpectedChar { ch: '<', offset: off(lt_pos) })
+        }
+    }
+
+    /// Disambiguate `>` — only `>>` is recognized so far.
+    fn lex_after_gt(&mut self) -> Result<TokenKind, LexError> {
+        let gt_pos = self.pos;
+        self.pos += 1;
+        if matches!(self.src.get(self.pos), Some(&b'>')) {
+            self.pos += 1;
+            Ok(TokenKind::ShiftRight)
+        } else {
+            Err(LexError::UnexpectedChar { ch: '>', offset: off(gt_pos) })
         }
     }
 

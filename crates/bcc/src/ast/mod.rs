@@ -73,4 +73,13 @@ pub enum BinOp {
     Add,
     Sub,
     Mul,
+    Div,
+    Mod,
+    BitAnd,
+    BitOr,
+    BitXor,
+    Shl,
+    /// C `>>`. For signed `int` we emit `sar`; for unsigned types
+    /// (when we add them) we'll emit `shr`.
+    Shr,
 }

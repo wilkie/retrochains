@@ -26,6 +26,13 @@ pub enum TokenKind {
     Plus,
     Minus,
     Star,
+    Slash,
+    Percent,
+    Ampersand,
+    Pipe,
+    Caret,
+    ShiftLeft,
+    ShiftRight,
     // End-of-input sentinel
     Eof,
 }
@@ -50,6 +57,13 @@ impl TokenKind {
             Self::Plus => "`+`",
             Self::Minus => "`-`",
             Self::Star => "`*`",
+            Self::Slash => "`/`",
+            Self::Percent => "`%`",
+            Self::Ampersand => "`&`",
+            Self::Pipe => "`|`",
+            Self::Caret => "`^`",
+            Self::ShiftLeft => "`<<`",
+            Self::ShiftRight => "`>>`",
             Self::Eof => "end of input",
         }
     }
