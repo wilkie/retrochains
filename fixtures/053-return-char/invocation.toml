@@ -1,0 +1,4 @@
+description = "Return a char from an int-returning function. Pins how BCC widens char → int — almost certainly `mov al, <char-reg> / cbw` for sign-extension, since `char` is signed in BCC."
+tool = "bcc"
+args = ["-S", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

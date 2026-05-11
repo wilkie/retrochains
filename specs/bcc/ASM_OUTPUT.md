@@ -581,6 +581,100 @@ Slot layout: while reserves 3 slots: `+0 body`, `+1 check`, `+2 unused`.
 (The `+2` is presumably the reservation for a future `break` / `continue`
 target; BCC seems to over-reserve consistently.)
 
+## Char register allocation (`047`, `050`–`055`)
+
+`char` locals and parameters participate in their own register pool,
+separate from the int pool but with allocation rules that interact
+with the function's call shape.
+
+### Char register pool: `[DL, BL, CL]`
+
+Chars draw from `{DL, BL, CL}` in **source order**. Fixture 050
+(`char a, b, c`, all enregistered) lays them down in exactly that
+sequence. AL is the working byte (used for arithmetic and the
+load/cbw round-trip); AH/BH/CH/DH are unused by BCC for variables.
+
+### Char enregistration is suppressed when the function makes a call
+
+Fixture 055 (`int main(void) { char c = 5; ++c; return f(c); }`) shows
+`c` on the stack at `[bp-1]` even though it has 4 textual uses. The
+reason: DL/BL/CL all alias with the *caller-clobbered* halves of
+DX/BX/CX, and BCC's call protocol does not save them. A char that
+must survive a call has to live on the stack.
+
+Today we suppress char enregistration for the whole function whenever
+its body contains *any* `Call` expression. (Ints aren't similarly
+restricted — none of our fixtures exercise an int that lives across a
+call, so we leave that path alone until a fixture forces a choice.)
+
+### Char codegen in a register
+
+| Form              | Asm (target in DL)                                |
+| ----------------- | ------------------------------------------------- |
+| `char c = K;`     | `mov dl,K`                                        |
+| `++c;` / `--c;`   | `mov al,dl` / `inc al` (or `dec`) / `mov dl,al`   |
+| `return c;`       | `mov al,dl` / `cbw` (sign-extend AL into AX)      |
+| `c < K` (cond)    | `cmp dl,K`                                        |
+
+Notable: BCC does **not** emit `inc dl` directly — even though `INC r8`
+is a valid 8086 instruction, BCC always routes through AL. And the
+zero-init special case (`xor r,r` for 16-bit) doesn't apply to byte
+registers; `char c = 0;` is `mov dl,0`, not `xor dl,dl`.
+
+### Char on the stack
+
+When a char isn't enregistered (or never qualified), it sits at a
+`byte ptr [bp-N]` slot with the standard alignment rules. `++` /
+`--` and reads use the same AL round-trip as the register form:
+
+```
+	mov	al,byte ptr [bp-1]
+	inc	al
+	mov	byte ptr [bp-1],al
+```
+
+### Char parameters
+
+Char params live in 2-byte slots on the stack (the caller pushes a
+full word; only the low byte is meaningful). The callee reads them
+as `byte ptr [bp+N]`:
+
+```
+_f	proc	near
+	push	bp
+	mov	bp,sp
+	mov	dl,byte ptr [bp+4]     ; char c register-promoted
+```
+
+If a char param isn't enregistered, no copy happens — reads go
+directly to `[bp+N]`.
+
+### Char arguments at the call site
+
+Caller-side, char args are loaded into AL (8-bit) before the
+standard `push ax`:
+
+```
+	mov	al,1                   ; constant char arg
+	push	ax
+	; or:
+	mov	al,byte ptr [bp-1]     ; char-on-stack arg
+	push	ax
+```
+
+BCC consults the callee's declared parameter types to pick the byte
+form, so our codegen needs a translation-unit-wide signature table
+(see `codegen::Signatures`). Calls to functions with no in-TU
+definition fall back to the int form — no fixture pins extern char
+arguments yet.
+
+### Frame alignment with chars
+
+Fixture 055 forces a single-char stack frame: `dec sp` only once
+would leave SP at an odd offset. BCC instead emits **two** `dec sp`s
+— the frame is rounded up to an even byte count. We pad the local
+allocation to a 2-byte boundary at the end of layout.
+
 ## Local variable alignment
 
 Fixture 011 captures `char c; int i;` — total 3 bytes of values, but

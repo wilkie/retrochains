@@ -44,23 +44,36 @@ pub enum LocalLocation {
     Reg(Reg),
 }
 
-/// The five registers BCC draws from for enregistered locals/params.
+/// Registers BCC uses for enregistered variables.
 ///
-/// The 8086 has six 16-bit general-purpose registers (AX, BX, CX, DX,
-/// SI, DI). AX is BCC's working/return register, so it's unusable for
-/// long-lived variables. That leaves five — which is the empirical
-/// maximum, confirmed by fixture 048 (six eligibles → one spills).
+/// 16-bit `int` locals/params draw from `{Si, Di, Dx, Bx, Cx}` (AX is
+/// BCC's working/return register, SP/BP are dedicated to the frame).
+/// 8-bit `char` locals/params draw from `{Dl, Bl, Cl}` — the 8086's
+/// only addressable byte registers besides AL/AH (AL is the working
+/// half; AH/BH/CH/DH are unused by BCC for variables).
+///
+/// The byte registers alias with the low halves of `Dx`/`Bx`/`Cx`,
+/// which means BCC's allocator must coordinate when a function has
+/// both ints and chars. We haven't yet captured a fixture that puts
+/// pressure on the aliased pool; today the two pools are allocated
+/// independently and char enregistration is suppressed when the
+/// function makes a call (fixture 055).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Reg {
+    // 16-bit, for ints.
     Si,
     Di,
     Dx,
     Bx,
     Cx,
+    // 8-bit, for chars.
+    Dl,
+    Bl,
+    Cl,
 }
 
 impl Reg {
-    /// The two-letter asm name (`si`/`di`/`dx`/`bx`/`cx`).
+    /// The asm name (`si`/`di`/`dx`/`bx`/`cx`/`dl`/`bl`/`cl`).
     #[must_use]
     pub fn name(self) -> &'static str {
         match self {
@@ -69,17 +82,33 @@ impl Reg {
             Self::Dx => "dx",
             Self::Bx => "bx",
             Self::Cx => "cx",
+            Self::Dl => "dl",
+            Self::Bl => "bl",
+            Self::Cl => "cl",
         }
     }
 
-    /// Pool used for the *non-SI* eligibles, in assignment order.
+    /// True when this register is one of the 8-bit byte registers
+    /// (DL/BL/CL). Used by codegen to pick between word and byte
+    /// instruction forms.
+    #[must_use]
+    pub fn is_byte(self) -> bool {
+        matches!(self, Self::Dl | Self::Bl | Self::Cl)
+    }
+
+    /// Pool used for the *non-SI* int eligibles, in assignment order.
     /// SI is handed out separately to the most-used eligible (see
     /// `Locals::analyze`).
     const NON_SI_POOL: [Self; 4] = [Self::Di, Self::Dx, Self::Bx, Self::Cx];
 
+    /// Pool used for char eligibles, in source-order assignment.
+    /// Fixtures 047/050: a char declared first lands in DL, the next
+    /// in BL, the third in CL.
+    const CHAR_POOL: [Self; 3] = [Self::Dl, Self::Bl, Self::Cl];
+
     /// Registers BCC treats as callee-saved, in canonical push order.
-    /// DX, BX, and CX are used by BCC without push/pop at the function
-    /// boundary.
+    /// Everything else (DX, BX, CX, DL, BL, CL) is used by BCC without
+    /// push/pop at the function boundary.
     const CALLEE_SAVED: [Self; 2] = [Self::Si, Self::Di];
 }
 
@@ -154,34 +183,61 @@ impl Locals {
 
         // Pass 2: figure out the register assignment.
         //
-        // Empirically (fixtures 028–048), BCC's rule is:
+        // Int rule (fixtures 028–048):
         //   1. SI goes to the *most-used* eligible Int variable.
         //      Ties broken by source order — earliest wins.
         //   2. The remaining eligibles (in source order) fill the
         //      `[DI, DX, BX, CX]` pool.
         //   3. Beyond 5 eligibles, the rest spill to the stack.
         //
-        // We pre-compute the register map here, then walk `declared`
-        // a final time below to assign LocalLocation/ParamLoad entries.
-        let eligible: Vec<usize> = (0..declared.len())
+        // Char rule (fixtures 047, 050, 051):
+        //   1. Chars draw from `[DL, BL, CL]` in source order.
+        //   2. *But* char enregistration is suppressed entirely if
+        //      the function makes a call (fixture 055): DL/BL/CL all
+        //      alias with caller-clobbered DX/BX/CX, so a char in
+        //      one of them would be lost across the call. Ints are
+        //      not similarly restricted today — none of our fixtures
+        //      exercise an int enregistered across a call, so we
+        //      leave that path alone until a fixture forces a choice.
+        let function_makes_call = body_has_call(&function.body);
+
+        // Int eligibles.
+        let eligible_int: Vec<usize> = (0..declared.len())
             .filter(|&i| {
                 declared[i].ty == Type::Int
                     && counts.get(&declared[i].name).copied().unwrap_or(0)
                         >= ENREGISTER_THRESHOLD
             })
             .collect();
-        let si_pick = pick_si(&eligible, &declared, &counts);
+        let si_pick = pick_si(&eligible_int, &declared, &counts);
+
         let mut reg_of: HashMap<usize, Reg> = HashMap::new();
         if let Some(idx) = si_pick {
             reg_of.insert(idx, Reg::Si);
         }
         let mut non_si_iter = Reg::NON_SI_POOL.iter().copied();
-        for &i in &eligible {
+        for &i in &eligible_int {
             if Some(i) == si_pick {
                 continue;
             }
             let Some(reg) = non_si_iter.next() else { break };
             reg_of.insert(i, reg);
+        }
+
+        // Char eligibles — only when the function makes no call.
+        if !function_makes_call {
+            let mut char_pool = Reg::CHAR_POOL.iter().copied();
+            for (i, item) in declared.iter().enumerate() {
+                if item.ty != Type::Char {
+                    continue;
+                }
+                let uses = counts.get(&item.name).copied().unwrap_or(0);
+                if uses < ENREGISTER_THRESHOLD {
+                    continue;
+                }
+                let Some(reg) = char_pool.next() else { break };
+                reg_of.insert(i, reg);
+            }
         }
 
         // Pass 3: fill in LocalEntry, saved_regs, param_loads. The
@@ -227,6 +283,12 @@ impl Locals {
             by_name.insert(item.name.clone(), LocalEntry { location, ty: item.ty });
         }
 
+        // Round the local frame up to an even byte count. BCC's stack
+        // is word-aligned for everything that comes after the locals
+        // (saved registers, callee state) — a single-char frame
+        // emits two `dec sp`s, not one (fixture 055).
+        stack_bytes = align_up(stack_bytes, 2);
+
         Self { stack_bytes, by_name, saved_regs, param_loads }
     }
 
@@ -259,6 +321,38 @@ impl Locals {
         self.by_name
             .get(name)
             .unwrap_or_else(|| panic!("unknown local in codegen: {name}"))
+    }
+}
+
+/// True when any statement in `body` contains a function-call
+/// expression. Used to gate char enregistration — chars live in
+/// caller-clobbered registers (DL/BL/CL), so a char that needs to
+/// survive a call must stay on the stack (fixture 055).
+fn body_has_call(body: &[Stmt]) -> bool {
+    body.iter().any(stmt_has_call)
+}
+
+fn stmt_has_call(stmt: &Stmt) -> bool {
+    match &stmt.kind {
+        StmtKind::Return(value) => value.as_ref().is_some_and(expr_has_call),
+        StmtKind::Declare { init, .. } => init.as_ref().is_some_and(expr_has_call),
+        StmtKind::Assign { value, .. } => expr_has_call(value),
+        StmtKind::If { cond, then_branch, else_branch } => {
+            expr_has_call(cond)
+                || body_has_call(then_branch)
+                || else_branch.as_ref().is_some_and(|b| body_has_call(b))
+        }
+        StmtKind::While { cond, body } => expr_has_call(cond) || body_has_call(body),
+        StmtKind::ExprStmt(e) => expr_has_call(e),
+    }
+}
+
+fn expr_has_call(e: &Expr) -> bool {
+    match &e.kind {
+        ExprKind::Call { .. } => true,
+        ExprKind::BinOp { left, right, .. } => expr_has_call(left) || expr_has_call(right),
+        ExprKind::Unary { operand, .. } => expr_has_call(operand),
+        ExprKind::Update { .. } | ExprKind::Ident(_) | ExprKind::IntLit(_) => false,
     }
 }
 

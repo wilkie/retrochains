@@ -73,9 +73,10 @@ pub fn build_asm(
     // _TEXT opens once for the whole translation unit; every function
     // lives inside, ending with one `?debug C E9` and one `_TEXT ends`.
     out.extend_from_slice(b"_TEXT\tsegment byte public 'CODE'\r\n");
+    let signatures = codegen::Signatures::from_unit(&unit);
     for (idx, function) in unit.functions.iter().enumerate() {
         let func_idx = u32::try_from(idx + 1).unwrap_or(u32::MAX);
-        codegen::emit_function(&mut out, source, function, func_idx);
+        codegen::emit_function(&mut out, source, function, func_idx, &signatures);
     }
     out.extend_from_slice(b"\t?debug\tC E9\r\n");
     out.extend_from_slice(b"_TEXT\tends\r\n");

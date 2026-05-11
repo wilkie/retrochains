@@ -1,0 +1,4 @@
+description = "Char in a comparison condition. Pins whether BCC uses an 8-bit `cmp <char-reg>, K` or widens via `mov al / cbw / cmp ax, K` first."
+tool = "bcc"
+args = ["-S", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

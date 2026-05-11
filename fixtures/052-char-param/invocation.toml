@@ -1,0 +1,4 @@
+description = "Char parameter, heavily used. Pins the param-passing convention for chars: is the caller pushing a full 2-byte word with the char in the low byte? Where is the char read from in the callee — `[bp+4]` (byte) or some other offset?"
+tool = "bcc"
+args = ["-S", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

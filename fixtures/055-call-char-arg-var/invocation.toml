@@ -1,0 +1,4 @@
+description = "Calling a char-arg function with a char variable. Pins how BCC packages a char from a register/stack location into the pushed arg slot."
+tool = "bcc"
+args = ["-S", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

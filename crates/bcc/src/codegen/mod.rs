@@ -10,11 +10,44 @@
 //! There are two preparatory passes per function: a local-layout
 //! analyzer (`locals.rs`) and a label planner (`plan.rs`).
 
+use std::collections::HashMap;
 use std::io::Write as _;
 
 use crate::ast::{
-    BinOp, Expr, ExprKind, Function, Stmt, StmtKind, Type, UnaryOp, UpdateOp, UpdatePosition,
+    BinOp, Expr, ExprKind, Function, Stmt, StmtKind, Type, UnaryOp, Unit, UpdateOp,
+    UpdatePosition,
 };
+
+/// Maps each function's name to the declared types of its parameters,
+/// in source order. Built once per translation unit and consulted at
+/// call sites so we know whether to push each argument as a byte or
+/// a word (fixture 052: `f(1)` where `f` takes `char` becomes
+/// `mov al,1 / push ax`, not `mov ax,1 / push ax`).
+#[derive(Debug, Default)]
+pub struct Signatures {
+    map: HashMap<String, Vec<Type>>,
+}
+
+impl Signatures {
+    #[must_use]
+    pub fn from_unit(unit: &Unit) -> Self {
+        let map = unit
+            .functions
+            .iter()
+            .map(|f| (f.name.clone(), f.params.iter().map(|p| p.ty).collect()))
+            .collect();
+        Self { map }
+    }
+
+    /// Look up the declared parameter types of a function. Returns
+    /// `None` if the name isn't defined in this TU (extern function).
+    /// Callers should default to `int` widths for missing signatures —
+    /// we have no fixture for extern char-arg calls yet.
+    #[must_use]
+    pub fn params_of(&self, name: &str) -> Option<&[Type]> {
+        self.map.get(name).map(Vec::as_slice)
+    }
+}
 
 mod fold;
 mod line_map;
@@ -38,8 +71,14 @@ fn bp_addr(off: i16) -> String {
 use plan::LabelPlan;
 
 /// Emit the per-function chunk of an `-S` file for one function.
-pub fn emit_function(out: &mut Vec<u8>, source: &str, function: &Function, func_idx: u32) {
-    let mut emitter = FunctionEmitter::new(out, source, function, func_idx);
+pub fn emit_function(
+    out: &mut Vec<u8>,
+    source: &str,
+    function: &Function,
+    func_idx: u32,
+    signatures: &Signatures,
+) {
+    let mut emitter = FunctionEmitter::new(out, source, function, func_idx, signatures);
     emitter.run();
 }
 
@@ -60,6 +99,7 @@ struct FunctionEmitter<'a> {
     current_line: u32,
     locals: Locals,
     label_plan: LabelPlan,
+    signatures: &'a Signatures,
 }
 
 impl<'a> FunctionEmitter<'a> {
@@ -68,6 +108,7 @@ impl<'a> FunctionEmitter<'a> {
         source: &'a str,
         function: &'a Function,
         func_idx: u32,
+        signatures: &'a Signatures,
     ) -> Self {
         Self {
             out,
@@ -78,6 +119,7 @@ impl<'a> FunctionEmitter<'a> {
             current_line: 0,
             locals: Locals::analyze(function),
             label_plan: LabelPlan::build(function),
+            signatures,
         }
     }
 
@@ -124,14 +166,18 @@ impl<'a> FunctionEmitter<'a> {
             let _ = write!(self.out, "\tpush\t{}\r\n", reg.name());
         }
         // Register-promoted incoming parameters: copy each from its
-        // caller-built stack slot into its assigned register.
+        // caller-built stack slot into its assigned register. Byte
+        // registers (char params) load from `byte ptr` — the caller
+        // pushes a full word but only the low byte is meaningful for
+        // a char arg (fixture 052).
         let param_loads: Vec<ParamLoad> = self.locals.param_loads().to_vec();
         for pl in &param_loads {
+            let width = if pl.reg.is_byte() { "byte" } else { "word" };
             let _ = write!(
                 self.out,
-                "\tmov\t{},word ptr [bp+{}]\r\n",
+                "\tmov\t{},{width} ptr [bp+{}]\r\n",
                 pl.reg.name(),
-                pl.incoming_offset
+                pl.incoming_offset,
             );
         }
 
@@ -215,21 +261,37 @@ impl<'a> FunctionEmitter<'a> {
     /// Emit just the increment/decrement on the named local — no
     /// load-to-AX. Used by `ExprStmt` and by the "first half" of
     /// pre-form Update in expression position.
+    ///
+    /// Int register: direct `inc/dec <reg>` (fixture 040).
+    /// Char register: round-trip through AL — `mov al, <reg> /
+    /// inc/dec al / mov <reg>, al` (fixture 047). BCC does not use
+    /// `inc/dec <byte-reg>` directly.
     fn emit_update_in_place(&mut self, name: &str, op: UpdateOp) {
         let mnemonic = match op {
             UpdateOp::Inc => "inc",
             UpdateOp::Dec => "dec",
         };
         match self.locals.location_of(name) {
+            LocalLocation::Reg(reg) if reg.is_byte() => {
+                let _ = write!(self.out, "\tmov\tal,{}\r\n", reg.name());
+                let _ = write!(self.out, "\t{mnemonic}\tal\r\n");
+                let _ = write!(self.out, "\tmov\t{},al\r\n", reg.name());
+            }
             LocalLocation::Reg(reg) => {
                 let _ = write!(self.out, "\t{mnemonic}\t{}\r\n", reg.name());
             }
-            LocalLocation::Stack(_) => {
-                // Stack-resident ++/-- is unobserved (every fixture
-                // 040–045 puts the target in a register). The natural
-                // extension is `inc word ptr [bp-N]` / `dec word ptr
-                // [bp-N]`, but until a fixture pins it we bail.
-                panic!("++/-- on a stack-resident local not yet supported (no fixture)");
+            LocalLocation::Stack(off) => {
+                // Stack-resident ++/-- on a char uses the AL round-trip
+                // (fixture 055). Stack ints are still unobserved — keep
+                // the panic until a fixture forces us there.
+                let ty = self.locals.type_of(name);
+                assert!(
+                    matches!(ty, Type::Char),
+                    "++/-- on a stack-resident int not yet supported (no fixture)"
+                );
+                let _ = write!(self.out, "\tmov\tal,byte ptr {}\r\n", bp_addr(off));
+                let _ = write!(self.out, "\t{mnemonic}\tal\r\n");
+                let _ = write!(self.out, "\tmov\tbyte ptr {},al\r\n", bp_addr(off));
             }
         }
     }
@@ -323,6 +385,16 @@ impl<'a> FunctionEmitter<'a> {
     /// 4. Otherwise: `mov ax, <lhs>` then `cmp ax, <rhs>`
     fn emit_compare(&mut self, left: &Expr, right: &Expr) {
         if let Some(reg) = self.ident_in_register(left) {
+            // Char in a byte register: 8-bit cmp with byte-truncated
+            // immediate (fixture 054). Non-constant RHS is unobserved.
+            if reg.is_byte() {
+                if let Some(v) = try_const_eval(right) {
+                    let v8 = v & 0xFF;
+                    let _ = write!(self.out, "\tcmp\t{},{v8}\r\n", reg.name());
+                    return;
+                }
+                panic!("char-register comparison with non-constant rhs not yet supported");
+            }
             if let Some(0) = try_const_eval(right) {
                 let _ = write!(self.out, "\tor\t{0},{0}\r\n", reg.name());
                 return;
@@ -395,18 +467,25 @@ impl<'a> FunctionEmitter<'a> {
         }
     }
 
-    /// Emit a function call: push args right-to-left (each materialized
-    /// into AX first), `call near ptr _name`, then clean up the
-    /// pushed args per the cdecl convention. Result lands in AX.
+    /// Emit a function call: push args right-to-left, `call near ptr
+    /// _name`, then clean up the pushed args. Each arg is pushed as a
+    /// 16-bit word, but **char** parameters use the byte form for the
+    /// value-loading instruction (`mov al, K` or `mov al, <src>`)
+    /// before the `push ax` — the high byte of the pushed word is
+    /// undefined since the callee only reads the low byte (fixture
+    /// 052 and 055).
     ///
-    /// Cleanup uses `pop cx` per arg when there are ≤ 2 args (1-2
-    /// pops is no bigger than `add sp, N`, and a single `pop` is
-    /// smaller). For ≥ 3 args BCC switches to `add sp, N*2` (one
-    /// 3-byte instruction beats three or more `pop cx`s).
-    /// Fixtures 010 (0), 033 (1), 034 (2), 049 (3), 046/048 (4).
+    /// Cleanup: `pop cx` per arg when there are ≤ 2 args; for ≥ 3
+    /// args BCC switches to `add sp, N*2` (one 3-byte instruction
+    /// beats three or more `pop cx`s). Fixtures 010 (0), 033 (1),
+    /// 034 (2), 049 (3), 046/048 (4).
     fn emit_call(&mut self, name: &str, args: &[Expr]) {
-        for arg in args.iter().rev() {
-            self.emit_expr_to_ax(arg);
+        let param_tys = self.signatures.params_of(name);
+        for (i, arg) in args.iter().enumerate().rev() {
+            // Param type for the i-th arg, defaulting to int when the
+            // signature isn't known (extern function — no fixture yet).
+            let arg_ty = param_tys.and_then(|tys| tys.get(i)).copied().unwrap_or(Type::Int);
+            self.emit_arg_into_ax(arg, arg_ty);
             self.out.extend_from_slice(b"\tpush\tax\r\n");
         }
         let _ = write!(self.out, "\tcall\tnear ptr _{name}\r\n");
@@ -421,6 +500,41 @@ impl<'a> FunctionEmitter<'a> {
                 let _ = write!(self.out, "\tadd\tsp,{}\r\n", n * 2);
             }
         }
+    }
+
+    /// Place an argument into AX (the low byte of which is `al`) for
+    /// the subsequent `push ax`. For a `char` param the load uses the
+    /// 8-bit form so only AL is touched; AH is whatever happened to
+    /// be there. For `int`, the standard 16-bit load.
+    fn emit_arg_into_ax(&mut self, arg: &Expr, param_ty: Type) {
+        if !matches!(param_ty, Type::Char) {
+            self.emit_expr_to_ax(arg);
+            return;
+        }
+        // Char arg path.
+        if let Some(v) = try_const_eval(arg) {
+            // 8-bit immediate.
+            let v8 = v & 0xFF;
+            let _ = write!(self.out, "\tmov\tal,{v8}\r\n");
+            return;
+        }
+        if let ExprKind::Ident(name) = &arg.kind {
+            let ty = self.locals.type_of(name);
+            assert!(
+                matches!(ty, Type::Char),
+                "passing non-char `{name}` to a char parameter not yet supported (no fixture)"
+            );
+            match self.locals.location_of(name) {
+                LocalLocation::Stack(off) => {
+                    let _ = write!(self.out, "\tmov\tal,byte ptr {}\r\n", bp_addr(off));
+                }
+                LocalLocation::Reg(reg) => {
+                    let _ = write!(self.out, "\tmov\tal,{}\r\n", reg.name());
+                }
+            }
+            return;
+        }
+        panic!("complex char-typed arg expression not yet supported (no fixture)");
     }
 
     /// If `e` is an identifier that refers to a register-resident
@@ -479,18 +593,30 @@ impl<'a> FunctionEmitter<'a> {
         }
     }
 
-    /// Store `expr`'s value into register `reg`. For constants we use
-    /// the same special cases as AX (`xor reg,reg` for zero, otherwise
-    /// `mov reg,K`). For everything else we compute into AX and copy.
+    /// Store `expr`'s value into register `reg`. For 16-bit registers
+    /// BCC special-cases the zero-init via `xor reg,reg` (one byte
+    /// shorter); 8-bit registers use plain `mov reg,0` even for zero
+    /// (fixture 050/051).
     fn emit_store_reg(&mut self, reg: Reg, expr: &Expr) {
         if let Some(v) = try_const_eval(expr) {
-            if v == 0 {
+            if reg.is_byte() {
+                let v8 = v & 0xFF;
+                let _ = write!(self.out, "\tmov\t{},{v8}\r\n", reg.name());
+            } else if v.trailing_zeros() >= 16 {
                 let _ = write!(self.out, "\txor\t{0},{0}\r\n", reg.name());
             } else {
-                let _ = write!(self.out, "\tmov\t{},{v}\r\n", reg.name());
+                let v16 = v & 0xFFFF;
+                let _ = write!(self.out, "\tmov\t{},{v16}\r\n", reg.name());
             }
             return;
         }
+        // Non-constant char init: untested. Best guess would be
+        // `<compute to AL> / mov <reg>, al`, but until a fixture pins
+        // the load-to-AL path, bail.
+        assert!(
+            !reg.is_byte(),
+            "non-constant char init/assign not yet supported (no fixture)"
+        );
         self.emit_expr_to_ax(expr);
         let _ = write!(self.out, "\tmov\t{},ax\r\n", reg.name());
     }
@@ -511,21 +637,28 @@ impl<'a> FunctionEmitter<'a> {
         }
         match &e.kind {
             ExprKind::IntLit(_) => unreachable!("literals fold via try_const_eval"),
-            ExprKind::Ident(name) => match self.locals.location_of(name) {
-                LocalLocation::Stack(off) => {
-                    // A `char` read into AX would need sign-extension
-                    // (cbw or mov al/cbw), which we haven't observed in
-                    // a fixture — bail loudly until one shows up.
-                    assert!(
-                        matches!(self.locals.type_of(name), Type::Int),
-                        "reading a `char` local in expression position not yet supported (no fixture)"
-                    );
-                    let _ = write!(self.out, "\tmov\tax,word ptr {}\r\n", bp_addr(off));
+            ExprKind::Ident(name) => {
+                let ty = self.locals.type_of(name);
+                match self.locals.location_of(name) {
+                    LocalLocation::Stack(off) if matches!(ty, Type::Char) => {
+                        // Char on stack into AX: load AL then sign-extend.
+                        let _ = write!(self.out, "\tmov\tal,byte ptr {}\r\n", bp_addr(off));
+                        self.out.extend_from_slice(b"\tcbw\t\r\n");
+                    }
+                    LocalLocation::Stack(off) => {
+                        let _ = write!(self.out, "\tmov\tax,word ptr {}\r\n", bp_addr(off));
+                    }
+                    LocalLocation::Reg(reg) if reg.is_byte() => {
+                        // Char in a byte register into AX: copy AL then
+                        // sign-extend (fixture 053).
+                        let _ = write!(self.out, "\tmov\tal,{}\r\n", reg.name());
+                        self.out.extend_from_slice(b"\tcbw\t\r\n");
+                    }
+                    LocalLocation::Reg(reg) => {
+                        let _ = write!(self.out, "\tmov\tax,{}\r\n", reg.name());
+                    }
                 }
-                LocalLocation::Reg(reg) => {
-                    let _ = write!(self.out, "\tmov\tax,{}\r\n", reg.name());
-                }
-            },
+            }
             ExprKind::BinOp { op, left, right } => {
                 if op.is_comparison() {
                     self.emit_comparison_as_value(e.span.start, *op, left, right);

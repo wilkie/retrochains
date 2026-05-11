@@ -1,0 +1,4 @@
+description = "An int and a char, both register-eligible. Pins whether they go to disjoint registers (int → SI, char → DL?) or whether BCC's allocator unifies them with aliasing constraints (int in DX would conflict with char in DL or DH)."
+tool = "bcc"
+args = ["-S", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

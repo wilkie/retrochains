@@ -1,0 +1,4 @@
+description = "Three char locals, all heavily used (3 uses each). Pins the char register pool: which 8-bit registers BCC uses and in what order. The 8086 has AL/AH/BL/BH/CL/CH/DL/DH; AL is the working register half, so chars must come from {BL, BH, CL, CH, DL, DH}."
+tool = "bcc"
+args = ["-S", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]
