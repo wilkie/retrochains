@@ -8,6 +8,7 @@ members = [
     "crates/x86",
     "crates/bcc-wasm",
     "crates/oracle",
+    "crates/fixtures",
 ]
 
 [workspace.package]

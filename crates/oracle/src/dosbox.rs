@@ -18,11 +18,12 @@ use std::process::Command;
 use std::time::SystemTime;
 
 use crate::bc2::Bc2Layout;
-use crate::{FakeTime, OracleRun, Tool};
+use crate::{FakeTime, OracleOutput, OracleRun, Tool};
 
 /// Files written by our batch wrapper (not by the tool itself). They are
 /// filtered out of the returned `outputs` map.
 const STDOUT_FILE: &str = "_OUT.TXT";
+const STDERR_FILE: &str = "_ERR.TXT";
 const EXITCODE_FILE: &str = "_RC.TXT";
 const RUN_BAT: &str = "_RUN.BAT";
 
@@ -78,9 +79,23 @@ pub(crate) fn run(
 
     let exit_code = read_exit_code(work.path())?;
     let stdout = fs::read(work.path().join(STDOUT_FILE)).unwrap_or_default();
+    let stderr = fs::read(work.path().join(STDERR_FILE)).unwrap_or_default();
+
+    // The host kernel stamps every file the tool wrote with the host's
+    // real-time clock — that path bypasses faketime entirely. Normalize the
+    // mtimes to the pin instant before reading them so captured goldens are
+    // reproducible. The byte contents are unaffected (only the inode's
+    // mtime changes); when we later need to test that a DOS tool
+    // deliberately stamped an mtime (e.g. BCC copying the source's mtime
+    // onto its OBJ output), a format-aware diff can pull the timestamp out
+    // of the file's own bytes.
+    if let Some(ft) = fake_time {
+        normalize_output_mtimes(work.path(), inputs, ft.instant)?;
+    }
+
     let outputs = collect_outputs(work.path(), inputs)?;
 
-    Ok(OracleRun { exit_code, stdout, stderr: Vec::new(), outputs })
+    Ok(OracleRun { exit_code, stdout, stderr, outputs })
 }
 
 /// Build the base `Command` — either `dosbox` directly, or
@@ -122,6 +137,11 @@ fn write_run_bat(work: &Path, tool: Tool, args: &[String]) -> io::Result<()> {
     }
     bat.push_str(" > ");
     bat.push_str(STDOUT_FILE);
+    // No `2>` here. DOSBox 0.74's shell honors the redirect but ALSO leaves
+    // the leading `2` in the command's args (BCC then tries to compile a
+    // phantom "2.CPP"), so we capture stdout-and-stderr-combined into
+    // `_OUT.TXT` and accept that `_ERR.TXT` stays empty. Borland tools
+    // write almost everything to stdout anyway.
     bat.push_str("\r\n");
     bat.push_str("IF ERRORLEVEL 1 GOTO FAIL\r\n");
     bat.push_str("ECHO 0 > ");
@@ -171,10 +191,34 @@ fn read_exit_code(work: &Path) -> Result<i32, DosboxError> {
     text.parse().map_err(|_| DosboxError::BadExitCode(raw))
 }
 
+fn normalize_output_mtimes(
+    work: &Path,
+    inputs: &BTreeMap<String, &[u8]>,
+    pin: SystemTime,
+) -> io::Result<()> {
+    for entry in fs::read_dir(work)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_uppercase();
+        let is_orchestration = name == STDOUT_FILE
+            || name == STDERR_FILE
+            || name == EXITCODE_FILE
+            || name == RUN_BAT;
+        if is_orchestration || inputs.contains_key(&name) {
+            continue;
+        }
+        let f = fs::File::options().write(true).open(entry.path())?;
+        f.set_modified(pin)?;
+    }
+    Ok(())
+}
+
 fn collect_outputs(
     work: &Path,
     inputs: &BTreeMap<String, &[u8]>,
-) -> io::Result<BTreeMap<String, Vec<u8>>> {
+) -> io::Result<BTreeMap<String, OracleOutput>> {
     let mut outputs = BTreeMap::new();
     for entry in fs::read_dir(work)? {
         let entry = entry?;
@@ -182,10 +226,15 @@ fn collect_outputs(
             continue;
         }
         let name = entry.file_name().to_string_lossy().to_uppercase();
-        let is_orchestration =
-            name == STDOUT_FILE || name == EXITCODE_FILE || name == RUN_BAT;
+        let is_orchestration = name == STDOUT_FILE
+            || name == STDERR_FILE
+            || name == EXITCODE_FILE
+            || name == RUN_BAT;
         if !is_orchestration && !inputs.contains_key(&name) {
-            outputs.insert(name, fs::read(entry.path())?);
+            let metadata = entry.metadata()?;
+            let bytes = fs::read(entry.path())?;
+            let mtime = metadata.modified().ok();
+            outputs.insert(name, OracleOutput { bytes, mtime });
         }
     }
     Ok(outputs)

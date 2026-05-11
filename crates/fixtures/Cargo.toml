@@ -1,0 +1,28 @@
+[package]
+name = "fixtures"
+description = "Loads fixture corpus entries and drives the capture/verify harness that compares our toolchain to the Borland C++ 2.0 oracle"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lib]
+name = "fixtures"
+path = "src/lib.rs"
+
+[[bin]]
+name = "xfix"
+path = "src/main.rs"
+
+[dependencies]
+oracle = { path = "../oracle" }
+serde = { version = "1", features = ["derive"] }
+sha2 = "0.10"
+thiserror = "2"
+time = { version = "0.3", default-features = false, features = ["formatting", "parsing", "macros"] }
+toml = { version = "0.9", default-features = false, features = ["parse", "display", "serde"] }
+
+[lints]
+workspace = true

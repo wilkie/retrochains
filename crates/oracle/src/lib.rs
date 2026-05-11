@@ -76,20 +76,33 @@ impl<'a> OracleInvocation<'a> {
     }
 }
 
+/// A single file produced by an oracle run.
+#[derive(Debug, Clone)]
+pub struct OracleOutput {
+    /// Raw bytes of the file as the DOS tool wrote it.
+    pub bytes: Vec<u8>,
+    /// Modification time of the file at the moment the tool exited, as
+    /// reported by the host filesystem. DOS tools propagate / set mtimes
+    /// (e.g. BCC stamps its output OBJ with the source's mtime), so this
+    /// is part of the byte-exact contract.
+    pub mtime: Option<SystemTime>,
+}
+
 /// What a single oracle run produced.
 #[derive(Debug)]
 pub struct OracleRun {
     /// Exit code reported by the DOS tool (captured via `errorlevel`).
     pub exit_code: i32,
-    /// Captured stdout from the tool. May be empty for tools that write
-    /// directly to the screen rather than a stream.
+    /// Captured stdout from the tool.
     pub stdout: Vec<u8>,
-    /// Captured stderr.
+    /// Captured stderr. May be empty if DOSBox 0.74's shell didn't honor
+    /// the `2>` redirect for this invocation — Borland tools also tend to
+    /// write diagnostics to stdout anyway.
     pub stderr: Vec<u8>,
-    /// Every file in the working directory at exit time, keyed by DOS filename
-    /// (uppercase). Inputs are filtered out so only generated/modified files
-    /// appear here.
-    pub outputs: BTreeMap<String, Vec<u8>>,
+    /// Every file the tool produced or modified in the working directory at
+    /// exit time, keyed by DOS filename (uppercase). Caller-provided input
+    /// files are filtered out.
+    pub outputs: BTreeMap<String, OracleOutput>,
 }
 
 #[derive(Debug, thiserror::Error)]

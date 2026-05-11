@@ -108,6 +108,13 @@ elegance:
 - **`EXIT` belongs inside the batch**, not as a trailing `-c "exit"` on the
   DOSBox command line: subsequent `-c` commands after a `-c <batch>` are
   silently dropped, so DOSBox would hang at the DOS prompt waiting for input.
+- **No `2>` for stderr.** DOSBox 0.74's shell honors `cmd … 2>FILE` as a
+  redirect *but also leaves the leading `2` in the command's argv*, so BCC
+  ends up trying to compile a phantom "2.CPP" alongside the real input. We
+  use a single `>` (which captures stdout) and leave stderr unsplit —
+  Borland tools write essentially everything to stdout anyway. The
+  oracle's `OracleRun::stderr` field exists for forward-compatibility but
+  is always empty under DOSBox 0.74.
 - **`ORACLE_KEEP_WORKDIR=1`** in the environment leaves the temp dir on disk
   after the run, with its `_RUN.BAT`, `_OUT.TXT`, `_RC.TXT`, and any tool
   outputs visible. Useful when diagnosing what DOSBox actually did.

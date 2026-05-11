@@ -77,10 +77,10 @@ fn try_main() -> Result<i32, Box<dyn std::error::Error>> {
     // a `oracle bcc ... -- foo.c` run leaves FOO.OBJ on disk like the real tool
     // would. The CLI is intentionally simple — callers that want richer control
     // should use the library API directly.
-    for (name, bytes) in &run.outputs {
-        std::fs::write(name, bytes)
+    for (name, out) in &run.outputs {
+        std::fs::write(name, &out.bytes)
             .map_err(|e| format!("writing output {name}: {e}"))?;
-        eprintln!("[oracle] wrote {name} ({} bytes)", bytes.len());
+        eprintln!("[oracle] wrote {name} ({} bytes)", out.bytes.len());
     }
     Ok(run.exit_code)
 }
