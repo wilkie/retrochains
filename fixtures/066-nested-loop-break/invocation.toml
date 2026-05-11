@@ -1,0 +1,4 @@
+description = "`break` in the inner of two nested `while` loops. Confirms break targets only the innermost loop's end — the outer loop continues."
+tool = "bcc"
+args = ["-S", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

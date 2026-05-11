@@ -4,9 +4,13 @@
 //! `specs/bcc/ASM_OUTPUT.md`), and the function exit gets the next slot
 //! after all body reservations.
 //!
-//! By doing this before codegen we can emit the function exit label with
-//! its correct number even though it's referenced from `jmp short
-//! <exit>` calls that appear earlier in the output.
+//! Loop constructs (while/do-while/for) maintain enough state to let
+//! codegen know:
+//! - where the body label is (where the loop iterates back to)
+//! - where the check label is (where the cond is tested)
+//! - where the break-target is (where `break;` jumps)
+//! - where `continue;` lands (for while/do-while it's the check label;
+//!   for `for` it's a separate "continue-target" slot when reserved)
 
 use std::collections::HashMap;
 
@@ -15,11 +19,24 @@ use crate::ast::{Expr, ExprKind, Function, Stmt, StmtKind};
 /// Compiled label assignments for one function.
 #[derive(Debug)]
 pub struct LabelPlan {
-    /// `span.start` of a control construct → its base slot. Each construct
-    /// reserves a contiguous run of slots starting from this number.
+    /// `span.start` of a non-loop control construct → its base slot.
+    /// Used by `if`, `comparison-as-value`, and `&&`/`||`.
     bases: HashMap<u32, u32>,
-    /// Slot for the function exit label. Numerically: `50 + 24 * exit_slot`.
+    /// `span.start` of a loop construct → its named slot assignments.
+    loops: HashMap<u32, LoopPlan>,
+    /// Slot for the function exit label.
     exit_slot: u32,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct LoopPlan {
+    pub body_slot: u32,
+    pub check_slot: u32,
+    pub break_target_slot: u32,
+    /// Where `continue;` should jump. For while/do-while this equals
+    /// `check_slot`; for `for` it's the continue-target slot that
+    /// sits between the body and the step.
+    pub continue_target_slot: u32,
 }
 
 impl LabelPlan {
@@ -27,8 +44,9 @@ impl LabelPlan {
     pub fn build(function: &Function) -> Self {
         let mut counter = 0u32;
         let mut bases = HashMap::new();
-        plan_stmts(&function.body, &mut counter, &mut bases);
-        Self { bases, exit_slot: counter }
+        let mut loops = HashMap::new();
+        plan_stmts(&function.body, &mut counter, &mut bases, &mut loops);
+        Self { bases, loops, exit_slot: counter }
     }
 
     /// Numeric label corresponding to a slot index.
@@ -43,23 +61,41 @@ impl LabelPlan {
         self.exit_slot
     }
 
-    /// Base slot reserved for the construct whose span starts at `start`.
-    /// Panics if the planner didn't reserve one — that's a bug.
+    /// Base slot reserved for a non-loop control construct.
+    /// Panics if the planner didn't reserve one.
     #[must_use]
     pub fn base(&self, span_start: u32) -> u32 {
         *self.bases.get(&span_start).unwrap_or_else(|| {
             panic!("no label plan entry for span starting at byte {span_start}")
         })
     }
-}
 
-fn plan_stmts(stmts: &[Stmt], counter: &mut u32, bases: &mut HashMap<u32, u32>) {
-    for stmt in stmts {
-        plan_stmt(stmt, counter, bases);
+    /// Slot assignments for a loop construct.
+    #[must_use]
+    pub fn loop_plan(&self, span_start: u32) -> LoopPlan {
+        *self.loops.get(&span_start).unwrap_or_else(|| {
+            panic!("no loop plan entry for span starting at byte {span_start}")
+        })
     }
 }
 
-fn plan_stmt(stmt: &Stmt, counter: &mut u32, bases: &mut HashMap<u32, u32>) {
+fn plan_stmts(
+    stmts: &[Stmt],
+    counter: &mut u32,
+    bases: &mut HashMap<u32, u32>,
+    loops: &mut HashMap<u32, LoopPlan>,
+) {
+    for stmt in stmts {
+        plan_stmt(stmt, counter, bases, loops);
+    }
+}
+
+fn plan_stmt(
+    stmt: &Stmt,
+    counter: &mut u32,
+    bases: &mut HashMap<u32, u32>,
+    loops: &mut HashMap<u32, LoopPlan>,
+) {
     match &stmt.kind {
         StmtKind::Return(value) => {
             if let Some(e) = value {
@@ -72,36 +108,116 @@ fn plan_stmt(stmt: &Stmt, counter: &mut u32, bases: &mut HashMap<u32, u32>) {
             }
         }
         StmtKind::If { cond, then_branch, else_branch } => {
-            // The condition is in jump position — its top-level comparison
-            // is consumed by a conditional jump, not as a 0/1 value. Sub-
-            // expressions of the condition are still in value position.
             plan_expr_condition(cond, counter, bases);
-            // Reserve slots for the `if` construct itself before walking
-            // its branches: that way the inner content's labels (e.g. a
-            // cmp-as-value in a branch's `return`) get later numbers.
             let base = *counter;
             bases.insert(stmt.span.start, base);
             *counter += if else_branch.is_some() { 3 } else { 2 };
-            plan_stmts(then_branch, counter, bases);
+            plan_stmts(then_branch, counter, bases, loops);
             if let Some(else_branch) = else_branch {
-                plan_stmts(else_branch, counter, bases);
+                plan_stmts(else_branch, counter, bases, loops);
             }
         }
         StmtKind::Assign { value, .. } => {
             plan_expr_value(value, counter, bases);
         }
-        StmtKind::ExprStmt(e) => plan_expr_value(e, counter, bases),
         StmtKind::While { cond, body } => {
-            // While reserves its slots up-front (3: body, check, unused)
-            // before walking either condition or body, so the construct's
-            // own labels come first. The condition itself is in jump
-            // position; sub-expressions revert to value position.
-            let base = *counter;
-            bases.insert(stmt.span.start, base);
-            *counter += 3;
+            // While layout: body slot, then body planning, then check
+            // and break-target. Matches fixtures 027, 063, 066. The
+            // earlier "reserve 3 contiguous slots up-front" model is
+            // wrong when the body has nested labels (063: if-skip
+            // lands inside what would have been while's "+2 unused"
+            // slot, requiring while's check/break-target to come
+            // *after* the body's reservations).
+            let body_slot = *counter;
+            *counter += 1;
             plan_expr_condition(cond, counter, bases);
-            plan_stmts(body, counter, bases);
+            plan_stmts(body, counter, bases, loops);
+            let check_slot = *counter;
+            *counter += 1;
+            let break_target_slot = *counter;
+            *counter += 1;
+            loops.insert(
+                stmt.span.start,
+                LoopPlan {
+                    body_slot,
+                    check_slot,
+                    break_target_slot,
+                    continue_target_slot: check_slot,
+                },
+            );
         }
+        StmtKind::DoWhile { body, cond } => {
+            // Do-while: same shape as while, just no trampoline jmp at
+            // the top. Same slot reservation.
+            let body_slot = *counter;
+            *counter += 1;
+            plan_stmts(body, counter, bases, loops);
+            plan_expr_condition(cond, counter, bases);
+            let check_slot = *counter;
+            *counter += 1;
+            let break_target_slot = *counter;
+            *counter += 1;
+            loops.insert(
+                stmt.span.start,
+                LoopPlan {
+                    body_slot,
+                    check_slot,
+                    break_target_slot,
+                    continue_target_slot: check_slot,
+                },
+            );
+        }
+        StmtKind::For { init, cond, step, body } => {
+            // For: body slot, plan init/cond/step (typically 0 slots),
+            // plan body, then if body planning reserved nothing emit
+            // an extra "continue-target / step" slot before check +
+            // break-target. Fixture 061 reserves 4 slots for a body
+            // with 0 nested labels; 065 reserves 5 (3 + 2 nested).
+            let body_slot = *counter;
+            *counter += 1;
+            if let Some(e) = init {
+                plan_expr_value(e, counter, bases);
+            }
+            if let Some(e) = cond {
+                plan_expr_condition(e, counter, bases);
+            }
+            if let Some(e) = step {
+                plan_expr_value(e, counter, bases);
+            }
+            let before_body = *counter;
+            plan_stmts(body, counter, bases, loops);
+            let continue_target_slot;
+            if *counter == before_body {
+                // No nested labels in body — reserve a filler slot
+                // that doubles as the `continue;` landing if any.
+                continue_target_slot = *counter;
+                *counter += 1;
+            } else {
+                // Body's reservations consumed the slot that would
+                // have been the continue-target. We don't yet have
+                // a fixture for `continue` in a `for` with nested
+                // body labels; defaulting to check_slot is safe-ish
+                // but codegen will panic if it actually fires.
+                continue_target_slot = *counter;
+            }
+            let check_slot = *counter;
+            *counter += 1;
+            let break_target_slot = *counter;
+            *counter += 1;
+            loops.insert(
+                stmt.span.start,
+                LoopPlan {
+                    body_slot,
+                    check_slot,
+                    break_target_slot,
+                    continue_target_slot,
+                },
+            );
+        }
+        StmtKind::Break | StmtKind::Continue => {
+            // No slot reservations.
+        }
+        StmtKind::ExprStmt(e) => plan_expr_value(e, counter, bases),
     }
 }
 
@@ -122,19 +238,14 @@ fn plan_expr_value(e: &Expr, counter: &mut u32, bases: &mut HashMap<u32, u32>) {
             plan_expr_value(operand, counter, bases);
         }
         ExprKind::Logical { left, right, .. } => {
-            // && or || in expression position reserves 4 slots:
-            //   +0: unused
-            //   +1: unused (for &&) or true-mat (for ||)
-            //   +2: false-mat
-            //   +3: end
-            // The operands are evaluated in CONDITION position (their
-            // values feed into the conditional jumps inside the
-            // logical, not as 0/1 materialized values).
             let base = *counter;
             bases.insert(e.span.start, base);
             *counter += 4;
             plan_expr_condition(left, counter, bases);
             plan_expr_condition(right, counter, bases);
+        }
+        ExprKind::AssignExpr { value, .. } => {
+            plan_expr_value(value, counter, bases);
         }
         ExprKind::Call { args, .. } => {
             for a in args {
@@ -145,9 +256,7 @@ fn plan_expr_value(e: &Expr, counter: &mut u32, bases: &mut HashMap<u32, u32>) {
     }
 }
 
-/// Walk an expression in condition position. Comparisons and Logicals
-/// at the top level don't materialize a 0/1 value; they emit jumps.
-/// Other sub-expressions go back to value position.
+/// Walk an expression in condition position.
 fn plan_expr_condition(e: &Expr, counter: &mut u32, bases: &mut HashMap<u32, u32>) {
     match &e.kind {
         ExprKind::BinOp { op, left, right } if op.is_comparison() => {
@@ -155,10 +264,6 @@ fn plan_expr_condition(e: &Expr, counter: &mut u32, bases: &mut HashMap<u32, u32
             plan_expr_value(right, counter, bases);
         }
         ExprKind::Logical { left, right, .. } => {
-            // Each && or || in condition position reserves 1 "buffer"
-            // slot (unused as a label in our simple cases — possibly
-            // for chained operators' intermediate landings). The
-            // operands stay in condition position.
             let base = *counter;
             bases.insert(e.span.start, base);
             *counter += 1;

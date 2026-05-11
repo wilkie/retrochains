@@ -343,6 +343,14 @@ fn stmt_has_call(stmt: &Stmt) -> bool {
                 || else_branch.as_ref().is_some_and(|b| body_has_call(b))
         }
         StmtKind::While { cond, body } => expr_has_call(cond) || body_has_call(body),
+        StmtKind::DoWhile { body, cond } => body_has_call(body) || expr_has_call(cond),
+        StmtKind::For { init, cond, step, body } => {
+            init.as_ref().is_some_and(expr_has_call)
+                || cond.as_ref().is_some_and(expr_has_call)
+                || step.as_ref().is_some_and(expr_has_call)
+                || body_has_call(body)
+        }
+        StmtKind::Break | StmtKind::Continue => false,
         StmtKind::ExprStmt(e) => expr_has_call(e),
     }
 }
@@ -354,6 +362,7 @@ fn expr_has_call(e: &Expr) -> bool {
             expr_has_call(left) || expr_has_call(right)
         }
         ExprKind::Unary { operand, .. } => expr_has_call(operand),
+        ExprKind::AssignExpr { value, .. } => expr_has_call(value),
         ExprKind::Update { .. } | ExprKind::Ident(_) | ExprKind::IntLit(_) => false,
     }
 }
@@ -403,12 +412,16 @@ fn collect_decls(stmt: &Stmt, out: &mut Vec<DeclItem>) {
                 }
             }
         }
-        StmtKind::While { body, .. } => {
+        StmtKind::While { body, .. } | StmtKind::DoWhile { body, .. } | StmtKind::For { body, .. } => {
             for s in body {
                 collect_decls(s, out);
             }
         }
-        StmtKind::Return(_) | StmtKind::Assign { .. } | StmtKind::ExprStmt(_) => {}
+        StmtKind::Return(_)
+        | StmtKind::Assign { .. }
+        | StmtKind::ExprStmt(_)
+        | StmtKind::Break
+        | StmtKind::Continue => {}
     }
 }
 
@@ -420,8 +433,14 @@ fn count_uses_stmt(stmt: &Stmt, counts: &mut HashMap<String, u32>) {
             }
         }
         StmtKind::Declare { name, init, .. } => {
-            *counts.entry(name.clone()).or_insert(0) += 1;
+            // A declaration counts as a use of the name only when it
+            // initializes (since the init is a write). Uninitialized
+            // `int x;` produces no asm and shouldn't compete with
+            // initialized locals for the SI slot (fixture 066:
+            // `int i = 0; int j;` ⇒ i → SI even though j has more
+            // textual uses overall).
             if let Some(e) = init {
+                *counts.entry(name.clone()).or_insert(0) += 1;
                 count_uses_expr(e, counts);
             }
         }
@@ -446,6 +465,27 @@ fn count_uses_stmt(stmt: &Stmt, counts: &mut HashMap<String, u32>) {
                 count_uses_stmt(s, counts);
             }
         }
+        StmtKind::DoWhile { body, cond } => {
+            for s in body {
+                count_uses_stmt(s, counts);
+            }
+            count_uses_expr(cond, counts);
+        }
+        StmtKind::For { init, cond, step, body } => {
+            if let Some(e) = init {
+                count_uses_expr(e, counts);
+            }
+            if let Some(e) = cond {
+                count_uses_expr(e, counts);
+            }
+            if let Some(e) = step {
+                count_uses_expr(e, counts);
+            }
+            for s in body {
+                count_uses_stmt(s, counts);
+            }
+        }
+        StmtKind::Break | StmtKind::Continue => {}
         StmtKind::ExprStmt(e) => count_uses_expr(e, counts),
     }
 }
@@ -468,6 +508,11 @@ fn count_uses_expr(e: &Expr, counts: &mut HashMap<String, u32>) {
             // contributes 2 to the use-count, just like `x = x + 1`
             // would.
             *counts.entry(target.clone()).or_insert(0) += 2;
+        }
+        ExprKind::AssignExpr { target, value } => {
+            // Like a statement-level Assign: LHS + RHS uses.
+            *counts.entry(target.clone()).or_insert(0) += 1;
+            count_uses_expr(value, counts);
         }
         ExprKind::Call { args, .. } => {
             for a in args {

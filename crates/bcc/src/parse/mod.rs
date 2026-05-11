@@ -125,6 +125,24 @@ impl Parser {
             TokenKind::KwInt | TokenKind::KwChar => self.parse_declare(start),
             TokenKind::KwIf => self.parse_if(),
             TokenKind::KwWhile => self.parse_while(),
+            TokenKind::KwDo => self.parse_do_while(),
+            TokenKind::KwFor => self.parse_for(),
+            TokenKind::KwBreak => {
+                let tok = self.bump();
+                let semi = self.expect(&TokenKind::Semicolon)?;
+                Ok(Stmt {
+                    kind: StmtKind::Break,
+                    span: Span::new(tok.span.start, semi.span.end),
+                })
+            }
+            TokenKind::KwContinue => {
+                let tok = self.bump();
+                let semi = self.expect(&TokenKind::Semicolon)?;
+                Ok(Stmt {
+                    kind: StmtKind::Continue,
+                    span: Span::new(tok.span.start, semi.span.end),
+                })
+            }
             // `<ident> = …` is an assignment; otherwise the line is an
             // expression statement (`f();`, `++x;`, etc.).
             TokenKind::Ident(_) if matches!(self.peek_n(1).kind, TokenKind::Equals) => {
@@ -189,6 +207,76 @@ impl Parser {
             kind: StmtKind::While { cond, body },
             span: Span::new(while_tok.span.start, end),
         })
+    }
+
+    /// `do <branch> while ( <cond> ) ;`.
+    fn parse_do_while(&mut self) -> Result<Stmt, ParseError> {
+        let do_tok = self.expect(&TokenKind::KwDo)?;
+        let body = self.parse_branch()?;
+        self.expect(&TokenKind::KwWhile)?;
+        self.expect(&TokenKind::LParen)?;
+        let cond = self.parse_expr()?;
+        self.expect(&TokenKind::RParen)?;
+        let semi = self.expect(&TokenKind::Semicolon)?;
+        Ok(Stmt {
+            kind: StmtKind::DoWhile { body, cond },
+            span: Span::new(do_tok.span.start, semi.span.end),
+        })
+    }
+
+    /// `for ( <init>? ; <cond>? ; <step>? ) <branch>`. Each of
+    /// init/cond/step is an optional expression. (C99 declarations
+    /// in init are not yet supported — fixture 061 declares its
+    /// loop variable outside the `for`.)
+    fn parse_for(&mut self) -> Result<Stmt, ParseError> {
+        let for_tok = self.expect(&TokenKind::KwFor)?;
+        self.expect(&TokenKind::LParen)?;
+        let init = if matches!(self.peek().kind, TokenKind::Semicolon) {
+            None
+        } else {
+            Some(self.parse_for_clause_expr()?)
+        };
+        self.expect(&TokenKind::Semicolon)?;
+        let cond = if matches!(self.peek().kind, TokenKind::Semicolon) {
+            None
+        } else {
+            Some(self.parse_expr()?)
+        };
+        self.expect(&TokenKind::Semicolon)?;
+        let step = if matches!(self.peek().kind, TokenKind::RParen) {
+            None
+        } else {
+            Some(self.parse_for_clause_expr()?)
+        };
+        self.expect(&TokenKind::RParen)?;
+        let body = self.parse_branch()?;
+        let end = body.last().map_or(for_tok.span.end, |s| s.span.end);
+        Ok(Stmt {
+            kind: StmtKind::For { init, cond, step, body },
+            span: Span::new(for_tok.span.start, end),
+        })
+    }
+
+    /// Parse a for-loop init/step clause. We accept `<ident> = <rhs>`
+    /// (the common form) as an assignment expression; otherwise the
+    /// clause is any normal expression (`++i`, function call, …).
+    /// Pure C also allows the init clause to be a declaration, but
+    /// that's a separate slice.
+    fn parse_for_clause_expr(&mut self) -> Result<Expr, ParseError> {
+        if matches!(self.peek().kind, TokenKind::Ident(_))
+            && matches!(self.peek_n(1).kind, TokenKind::Equals)
+        {
+            let ident_tok = self.bump();
+            let TokenKind::Ident(name) = ident_tok.kind else { unreachable!() };
+            self.expect(&TokenKind::Equals)?;
+            let rhs = self.parse_expr()?;
+            let span = Span::new(ident_tok.span.start, rhs.span.end);
+            return Ok(Expr {
+                kind: ExprKind::AssignExpr { target: name, value: Box::new(rhs) },
+                span,
+            });
+        }
+        self.parse_expr()
     }
 
     /// `if ( <expr> ) <branch> [else <branch>]`. A branch is either

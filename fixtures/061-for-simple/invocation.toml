@@ -1,0 +1,4 @@
+description = "Basic `for` loop: init/cond/step. Pins how BCC orders the init/check/step/body labels and which label `continue` would target. The classic accumulator pattern."
+tool = "bcc"
+args = ["-S", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

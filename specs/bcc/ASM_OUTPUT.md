@@ -551,6 +551,68 @@ skips the load-to-AX and compares directly:
 The conditional-jump mnemonic obeys the same true/inverse selection as
 the load-via-AX form.
 
+### `for` and `do-while` (`061`, `062`, `065`)
+
+`for (init; cond; step) body` follows the while pattern but with a
+per-iteration step inlined between the body and the check:
+
+```text
+   <init>
+   jmp short @check
+@body:
+   <body>
+   <step>
+@check:
+   <cond evaluation, j-true @body>
+@break-target:                       ; emitted only if `break;` in body
+```
+
+The init runs once before the loop. The step is *inlined at the end
+of the body* — no separate label unless `continue;` appears.
+
+`do body while (cond);` is simpler — no trampoline jmp:
+
+```text
+@body:
+   <body>
+   <cond evaluation, j-true @body>
+```
+
+#### Slot reservation for `for`
+
+`for` reserves the body slot first, then walks the body, then reserves
+a continue-target slot **only when the body itself reserved no slots**,
+then check + break-target. Fixture 061 (body = a plain assignment, 0
+nested labels) reserves 4 slots total; fixture 065 (body = if-no-else,
+2 nested labels) reserves 5. The "filler" slot in the body-empty case
+is the would-be continue-target — unused as a label when `continue;`
+isn't present.
+
+### `break` and `continue` (`063`, `064`, `065`, `066`)
+
+`break;` emits a `jmp short` to the loop's `@break-target` label.
+`continue;` emits a `jmp short` to the loop's continue-target — which
+for `while` / `do-while` is the same as the `@check` label.
+
+The `@break-target` label is **only emitted when the loop body
+actually contains a `break;`** (fixture 063 emits it; 027 does not,
+even though the slot is reserved).
+
+Nested loops: `break;` / `continue;` target the **innermost**
+enclosing loop. Fixture 066 (two nested `while`s, `break;` in the
+inner) shows the inner loop's `@break-target` reached only by the
+inner break — the outer loop continues iterating.
+
+### Use-count rule refinement: uninitialized declarations
+
+`int x;` (declaration without initializer) does **not** contribute
+to `x`'s use count for the SI-priority tie-break. Only initializing
+declarations count as a use. Fixture 066: `int i = 0; int j;`
+declares both, but BCC places `i` (initialized + 4 textual uses = 5)
+in SI rather than `j` (uninitialized + 5 textual uses = 5) — the tie
+is broken in `i`'s favor because the `int j;` declaration doesn't add
+to `j`'s count.
+
 ### `while` loop codegen
 
 ```c

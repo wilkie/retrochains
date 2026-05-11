@@ -51,6 +51,24 @@ pub enum StmtKind {
     Assign { name: String, value: Expr },
     /// `while (cond) body`.
     While { cond: Expr, body: Vec<Stmt> },
+    /// `do body while (cond);` — bottom-checking loop, body runs at
+    /// least once.
+    DoWhile { body: Vec<Stmt>, cond: Expr },
+    /// `for (init; cond; step) body`. Any of init/cond/step may be
+    /// absent (C lets you omit each clause); we'll model that as
+    /// `Option<Expr>` (init/step as expressions only — we don't yet
+    /// support C99-style declarations in the init clause).
+    For {
+        init: Option<Expr>,
+        cond: Option<Expr>,
+        step: Option<Expr>,
+        body: Vec<Stmt>,
+    },
+    /// `break;` — exit the innermost enclosing loop.
+    Break,
+    /// `continue;` — jump to the next iteration of the innermost
+    /// enclosing loop (i.e., to its check / step label).
+    Continue,
     /// Expression evaluated for its side effects, value discarded.
     /// Examples: `++x;`, `f();`. Plain expressions without side
     /// effects (`5;`) are syntactically valid but semantically a no-op
@@ -111,6 +129,12 @@ pub enum ExprKind {
     /// `++name` / `--name` / `name++` / `name--`. Today the target
     /// must be a bare identifier referring to a local or parameter.
     Update { target: String, op: UpdateOp, position: UpdatePosition },
+    /// `name = value` as an expression. In C, assignment is an
+    /// expression that yields the assigned value; we have it as a
+    /// statement (`StmtKind::Assign`) for the common case, and this
+    /// expression form covers `for (i = 0; ...; ...)` init/step
+    /// clauses where the assignment appears in expression position.
+    AssignExpr { target: String, value: Box<Expr> },
     /// Direct function call by name.
     Call { name: String, args: Vec<Expr> },
 }

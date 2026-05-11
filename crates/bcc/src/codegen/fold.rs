@@ -22,7 +22,8 @@ pub fn try_const_eval(e: &Expr) -> Option<u32> {
         ExprKind::Ident(_)
         | ExprKind::Call { .. }
         | ExprKind::Update { .. }
-        | ExprKind::Logical { .. } => None,
+        | ExprKind::Logical { .. }
+        | ExprKind::AssignExpr { .. } => None,
         ExprKind::Unary { op, operand } => {
             let v = try_const_eval(operand)?;
             Some(match op {

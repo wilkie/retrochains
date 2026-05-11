@@ -100,6 +100,16 @@ struct FunctionEmitter<'a> {
     locals: Locals,
     label_plan: LabelPlan,
     signatures: &'a Signatures,
+    /// Stack of enclosing loop targets so `break;` / `continue;`
+    /// statements can look up their jump destination. The innermost
+    /// loop sits at the top (index `len()-1`).
+    loop_stack: Vec<LoopTargets>,
+}
+
+#[derive(Clone, Copy)]
+struct LoopTargets {
+    break_target_slot: u32,
+    continue_target_slot: u32,
 }
 
 impl<'a> FunctionEmitter<'a> {
@@ -120,6 +130,7 @@ impl<'a> FunctionEmitter<'a> {
             locals: Locals::analyze(function),
             label_plan: LabelPlan::build(function),
             signatures,
+            loop_stack: Vec::new(),
         }
     }
 
@@ -218,8 +229,14 @@ impl<'a> FunctionEmitter<'a> {
                 let _ = write!(self.out, "\tjmp\tshort @{}@{exit}\r\n", self.func_idx);
             }
             StmtKind::Declare { name, init, ty } => {
-                self.advance_to_stmt_line(stmt);
+                // Only emit the source-comment block when there's
+                // actually some asm to label. A declaration with no
+                // initializer produces no code, and BCC folds its
+                // source line into the next comment block (fixture
+                // 061: `int i; int sum = 0;` emits both lines in
+                // one block before `xor di,di`).
                 if let Some(init) = init {
+                    self.advance_to_stmt_line(stmt);
                     let loc = self.locals.location_of(name);
                     self.emit_init_local(loc, *ty, init);
                 }
@@ -239,6 +256,32 @@ impl<'a> FunctionEmitter<'a> {
                 // line via the body label.
                 self.emit_while(stmt.span.start, cond, body);
             }
+            StmtKind::DoWhile { body, cond } => {
+                self.emit_do_while(stmt.span.start, body, cond);
+            }
+            StmtKind::For { init, cond, step, body } => {
+                self.emit_for(
+                    stmt.span.start,
+                    init.as_ref(),
+                    cond.as_ref(),
+                    step.as_ref(),
+                    body,
+                );
+            }
+            StmtKind::Break => {
+                self.advance_to_stmt_line(stmt);
+                let target = self.loop_stack.last().expect(
+                    "`break;` outside any enclosing loop — parser should reject this",
+                ).break_target_slot;
+                let _ = write!(self.out, "\tjmp\tshort {}\r\n", self.label_ref(target));
+            }
+            StmtKind::Continue => {
+                self.advance_to_stmt_line(stmt);
+                let target = self.loop_stack.last().expect(
+                    "`continue;` outside any enclosing loop — parser should reject this",
+                ).continue_target_slot;
+                let _ = write!(self.out, "\tjmp\tshort {}\r\n", self.label_ref(target));
+            }
             StmtKind::ExprStmt(expr) => {
                 self.advance_to_stmt_line(stmt);
                 self.emit_expr_discard(expr);
@@ -248,14 +291,22 @@ impl<'a> FunctionEmitter<'a> {
 
     /// Emit `expr` for its side effects, discarding the value. The
     /// special case is `Update` (`++x;` / `x++;`): BCC emits just the
-    /// increment, no `mov ax, ...` afterward (fixture 040).
+    /// increment, no `mov ax, ...` afterward (fixture 040). Likewise
+    /// for an assignment expression in a `for`-clause: emit the
+    /// side-effect store, no value-load afterward.
     fn emit_expr_discard(&mut self, expr: &Expr) {
-        if let ExprKind::Update { target, op, .. } = &expr.kind {
-            self.emit_update_in_place(target, *op);
-            return;
+        match &expr.kind {
+            ExprKind::Update { target, op, .. } => {
+                self.emit_update_in_place(target, *op);
+            }
+            ExprKind::AssignExpr { target, value } => {
+                let loc = self.locals.location_of(target);
+                self.emit_assign_local(loc, value);
+            }
+            _ => {
+                self.emit_expr_to_ax(expr);
+            }
         }
-        // Other expressions: compute into AX, drop the result.
-        self.emit_expr_to_ax(expr);
     }
 
     /// Emit just the increment/decrement on the named local — no
@@ -350,27 +401,114 @@ impl<'a> FunctionEmitter<'a> {
     }
 
     fn emit_while(&mut self, while_span_start: u32, cond: &Expr, body: &[Stmt]) {
-        // While reserves 3 slots: +0 body, +1 check, +2 unused.
-        // Logical conditions (`&& / ||`) in a while are unobserved —
-        // they'd need an explicit "past-loop" label since the
-        // standard `cond / j-true body / fall-through` shape only
-        // has *one* labeled target. Bail until a fixture appears.
         assert!(
             !matches!(cond.kind, ExprKind::Logical { .. }),
             "logical condition (`&&`/`||`) in a `while` not yet supported (no fixture)"
         );
-        let base = self.label_plan.base(while_span_start);
-        let body_slot = base;
-        let check_slot = base + 1;
+        let plan = self.label_plan.loop_plan(while_span_start);
         // Trampoline jump to the check, then body label.
-        let _ = write!(self.out, "\tjmp\tshort {}\r\n", self.label_ref(check_slot));
-        self.emit_label(body_slot);
+        let _ = write!(self.out, "\tjmp\tshort {}\r\n", self.label_ref(plan.check_slot));
+        self.emit_label(plan.body_slot);
+        self.loop_stack.push(LoopTargets {
+            break_target_slot: plan.break_target_slot,
+            continue_target_slot: plan.continue_target_slot,
+        });
         for s in body {
             self.emit_stmt(s);
         }
-        self.emit_label(check_slot);
-        // Condition: jump back to body if true; fall through if false.
-        self.emit_cond_branch(cond, Some(body_slot), None);
+        self.loop_stack.pop();
+        self.emit_label(plan.check_slot);
+        self.emit_cond_branch(cond, Some(plan.body_slot), None);
+        // Break-target label: emitted only if the body actually
+        // contained `break;` (BCC suppresses the label otherwise —
+        // fixtures 027 vs 063).
+        if body_has_break(body) {
+            self.emit_label(plan.break_target_slot);
+        }
+    }
+
+    fn emit_do_while(&mut self, do_span_start: u32, body: &[Stmt], cond: &Expr) {
+        assert!(
+            !matches!(cond.kind, ExprKind::Logical { .. }),
+            "logical condition (`&&`/`||`) in a `do-while` not yet supported (no fixture)"
+        );
+        let plan = self.label_plan.loop_plan(do_span_start);
+        self.emit_label(plan.body_slot);
+        self.loop_stack.push(LoopTargets {
+            break_target_slot: plan.break_target_slot,
+            continue_target_slot: plan.continue_target_slot,
+        });
+        for s in body {
+            self.emit_stmt(s);
+        }
+        self.loop_stack.pop();
+        // Advance to the `while (cond);` line — it should appear as a
+        // comment block before the cmp/jump (fixture 062).
+        let cond_line = self.lines.line_of(cond.span.start);
+        self.advance_to_line(cond_line);
+        // Do-while: no separate check label emitted in our captured
+        // fixture — the cmp/j-true sits right after the body. Continue,
+        // if used, would need a label; BCC's reservation suggests the
+        // check slot is the continue target, but a fixture is needed.
+        self.emit_cond_branch(cond, Some(plan.body_slot), None);
+        if body_has_break(body) {
+            self.emit_label(plan.break_target_slot);
+        }
+    }
+
+    fn emit_for(
+        &mut self,
+        for_span_start: u32,
+        init: Option<&Expr>,
+        cond: Option<&Expr>,
+        step: Option<&Expr>,
+        body: &[Stmt],
+    ) {
+        let plan = self.label_plan.loop_plan(for_span_start);
+        // Init runs once, before the loop.
+        if let Some(e) = init {
+            self.advance_to_for_header_line(for_span_start);
+            self.emit_expr_discard(e);
+        }
+        // Trampoline jump to the check.
+        let _ = write!(self.out, "\tjmp\tshort {}\r\n", self.label_ref(plan.check_slot));
+        self.emit_label(plan.body_slot);
+        self.loop_stack.push(LoopTargets {
+            break_target_slot: plan.break_target_slot,
+            continue_target_slot: plan.continue_target_slot,
+        });
+        for s in body {
+            self.emit_stmt(s);
+        }
+        self.loop_stack.pop();
+        // Step runs after each iteration of the body. Inlined here —
+        // no separate label (continue uses the continue_target_slot
+        // which sits before any step code; only emitted if continue
+        // is present).
+        if body_has_continue(body) {
+            self.emit_label(plan.continue_target_slot);
+        }
+        if let Some(e) = step {
+            self.emit_expr_discard(e);
+        }
+        self.emit_label(plan.check_slot);
+        if let Some(c) = cond {
+            self.emit_cond_branch(c, Some(plan.body_slot), None);
+        } else {
+            // Missing cond means infinite loop — unconditional back-jump.
+            let _ = write!(self.out, "\tjmp\tshort {}\r\n", self.label_ref(plan.body_slot));
+        }
+        if body_has_break(body) {
+            self.emit_label(plan.break_target_slot);
+        }
+    }
+
+    /// `for`'s header source-line is the `for` keyword's line. The
+    /// init expression doesn't have its own statement span, so we
+    /// advance the comment cursor manually using the for's span.
+    fn advance_to_for_header_line(&mut self, for_span_start: u32) {
+        let line = self.lines.line_of(for_span_start);
+        self.advance_to_line(line);
     }
 
     /// Emit a conditional branch: control flows to `true_slot` when
@@ -844,6 +982,12 @@ impl<'a> FunctionEmitter<'a> {
             ExprKind::Update { target, op, position } => {
                 self.emit_update_to_ax(target, *op, *position);
             }
+            ExprKind::AssignExpr { .. } => {
+                // No fixture yet exercises an assignment-expression
+                // in value position (we don't materialize its value).
+                // `for`-init/step go through `emit_expr_discard`.
+                panic!("AssignExpr in value position not yet supported (no fixture)");
+            }
             ExprKind::Call { name, args } => self.emit_call(name, args),
         }
     }
@@ -914,6 +1058,9 @@ impl<'a> FunctionEmitter<'a> {
             ExprKind::Logical { .. } => {
                 panic!("`&&`/`||` as right operand of a binary op not yet supported (no fixture)")
             }
+            ExprKind::AssignExpr { .. } => {
+                panic!("assignment expression as right operand not yet supported (no fixture)")
+            }
         }
     }
 
@@ -942,6 +1089,41 @@ impl<'a> FunctionEmitter<'a> {
         }
         self.out.extend_from_slice(b"   ;\t\r\n");
         self.current_line = line;
+    }
+}
+
+/// Does `body` contain a `break;` that targets the enclosing loop?
+/// Stops at nested loops — a `break;` inside an inner `while`/`for`
+/// targets the inner loop, not the outer one.
+fn body_has_break(body: &[Stmt]) -> bool {
+    body.iter().any(stmt_has_break)
+}
+
+fn stmt_has_break(stmt: &Stmt) -> bool {
+    match &stmt.kind {
+        StmtKind::Break => true,
+        StmtKind::If { then_branch, else_branch, .. } => {
+            body_has_break(then_branch)
+                || else_branch.as_ref().is_some_and(|b| body_has_break(b))
+        }
+        // Nested loops shadow break/continue — handled by the
+        // wildcard. Return/Declare/Assign/ExprStmt etc.: never break.
+        _ => false,
+    }
+}
+
+fn body_has_continue(body: &[Stmt]) -> bool {
+    body.iter().any(stmt_has_continue)
+}
+
+fn stmt_has_continue(stmt: &Stmt) -> bool {
+    match &stmt.kind {
+        StmtKind::Continue => true,
+        StmtKind::If { then_branch, else_branch, .. } => {
+            body_has_continue(then_branch)
+                || else_branch.as_ref().is_some_and(|b| body_has_continue(b))
+        }
+        _ => false,
     }
 }
 
