@@ -1,5 +1,27 @@
-fn main() {
-    // The CLI surface must match BCC.EXE exactly; see specs/RUNNING_BCC.md.
-    eprintln!("bcc: not yet implemented");
-    std::process::exit(1);
+use std::process::ExitCode;
+
+use bcc::{CompileMode, emit_dash_s, parse_args};
+
+fn main() -> ExitCode {
+    match try_main() {
+        Ok(()) => ExitCode::from(0),
+        Err(e) => {
+            eprintln!("bcc: {e}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn try_main() -> Result<(), Box<dyn std::error::Error>> {
+    let raw: Vec<String> = std::env::args().skip(1).collect();
+    let parsed = parse_args(&raw)?;
+    match parsed.mode {
+        CompileMode::Assembly => {
+            for src in &parsed.sources {
+                emit_dash_s(src)?;
+            }
+            Ok(())
+        }
+        CompileMode::Object => Err("bcc -c: not yet implemented".into()),
+    }
 }

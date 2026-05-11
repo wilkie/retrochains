@@ -65,19 +65,39 @@ result into `expected/`. Used when:
 Running `capture` overwrites `expected/` for that fixture. Review the diff
 before committing.
 
-### `xfix verify <fixture>`
+### `xfix verify --toolchain T <fixture>`
 
-Runs **our toolchain** against the fixture and diffs the result against
-`expected/`. Reports any difference. Used by:
+Runs a toolchain against the fixture and diffs the result against
+`expected/`. Used by `cargo test`, CI, and local development.
 
-- `cargo test` integration tests in each crate.
-- CI, as a regression gate.
-- Local development, to confirm a change hasn't broken anything.
+`T` is one of:
 
-The toolchain under test is selected by `--toolchain ours|oracle`. Default
-is `ours`. Pointing `verify` at `oracle` is also useful: it must be a
-no-op (re-running the oracle reproduces the goldens exactly) and is a good
-sanity check that the harness itself is deterministic.
+- **`oracle`** (default): re-runs the oracle. This must be a no-op — the
+  oracle is deterministic by construction, so the diff must be empty. Use
+  it as a self-check on the harness and the goldens themselves.
+- **`ours`**: runs the corresponding host binary from `target/debug/`
+  (currently `bcc`; later `tasm`, `tlink`). This is the path our
+  reimplementation tests run against.
+
+### Gating vs. advisory differences
+
+`verify` reports two tiers of difference:
+
+- **Gating**: the exit code, the list of output files, their sizes,
+  sha256s, mtimes, and byte contents. A gating mismatch fails verify and
+  exits non-zero.
+- **Advisory**: stdout and stderr bytes (and their sha256s in the
+  manifest). Reported but not fail-on-mismatch under `--toolchain ours`.
+
+The reason: BCC's stdout includes lines like
+`\tAvailable memory 426624\r\r\n` — the host DOS RAM count reported by
+the BC2 tool, observed under DOSBox. A native Rust reimplementation runs
+outside DOS and can't reproduce this number. Treating streams as advisory
+means our compiler can be byte-exact in what *matters* (the compilation
+product) without us having to mimic DOS-emulator-specific banners.
+
+Under `--toolchain oracle` everything is gating — there's no excuse for
+the oracle to drift from itself.
 
 ## Diff reporting
 

@@ -9,5 +9,5 @@ mod timefmt;
 
 pub use diff::{Diff, FileDiff, FileDiffKind, ManifestDiff};
 pub use fixture::{Fixture, Invocation, LoadError, ToolName};
-pub use harness::{HarnessError, capture, verify_oracle};
+pub use harness::{HarnessError, ToolPaths, capture, verify_oracle, verify_ours};
 pub use manifest::{Manifest, OracleSummary, OutputEntry, RunSummary};

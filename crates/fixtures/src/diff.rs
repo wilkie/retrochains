@@ -6,16 +6,27 @@ use crate::manifest::Manifest;
 /// One fixture's verification report.
 #[derive(Debug, Default)]
 pub struct Diff {
-    /// Manifest-level mismatches (fast scan).
+    /// Manifest-level mismatches (fast scan). Gating.
     pub manifest: Vec<ManifestDiff>,
-    /// Per-file mismatches.
+    /// Per-file content mismatches. Gating.
     pub files: Vec<FileDiff>,
+    /// Mismatches that are reported but don't fail the run. Currently
+    /// stdout/stderr under `verify_ours`, where a native Rust impl can't
+    /// reproduce BCC's "Available memory N" banner.
+    pub advisory: Vec<FileDiff>,
 }
 
 impl Diff {
+    /// Whether the *gating* portion of the diff is empty.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.manifest.is_empty() && self.files.is_empty()
+    }
+
+    /// Whether anything at all (gating or advisory) was reported.
+    #[must_use]
+    pub fn has_any(&self) -> bool {
+        !self.manifest.is_empty() || !self.files.is_empty() || !self.advisory.is_empty()
     }
 }
 

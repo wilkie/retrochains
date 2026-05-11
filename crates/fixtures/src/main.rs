@@ -1,13 +1,17 @@
 //! `xfix` — drive the fixture corpus from the shell. Two subcommands:
 //!
-//!     xfix capture <fixture>     # run the oracle, write expected/
-//!     xfix verify <fixture>      # re-run the oracle, diff against expected/
+//!     xfix capture <fixture>                  # run the oracle, write expected/
+//!     xfix verify [--toolchain T] <fixture>   # diff a fresh run against expected/
+//!
+//! `--toolchain oracle` (default) re-runs the oracle (a determinism check
+//! on the capture itself). `--toolchain ours` runs our host-side
+//! reimplementation (e.g. `target/debug/bcc`) and is the path tests use.
 
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use fixtures::{Diff, FileDiffKind, Fixture, ManifestDiff, capture, verify_oracle};
+use fixtures::{Diff, FileDiffKind, Fixture, ManifestDiff, ToolPaths, capture, verify_oracle, verify_ours};
 
 fn main() -> ExitCode {
     match try_main() {
@@ -19,13 +23,38 @@ fn main() -> ExitCode {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+enum Toolchain {
+    Oracle,
+    Ours,
+}
+
 fn try_main() -> Result<ExitCode, Box<dyn std::error::Error>> {
-    let mut argv = std::env::args().skip(1);
-    let sub = argv.next().ok_or("usage: xfix <capture|verify> <fixture>")?;
-    let fixture_path: PathBuf = argv
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    let mut it = argv.iter();
+    let sub = it
         .next()
-        .ok_or("missing <fixture> path")?
-        .into();
+        .ok_or("usage: xfix <capture|verify> [--toolchain T] <fixture>")?;
+
+    let mut toolchain = Toolchain::Oracle;
+    let mut fixture_path: Option<PathBuf> = None;
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--toolchain" => {
+                let v = it.next().ok_or("--toolchain needs a value (oracle|ours)")?;
+                toolchain = match v.as_str() {
+                    "oracle" => Toolchain::Oracle,
+                    "ours" => Toolchain::Ours,
+                    other => return Err(format!("unknown toolchain: {other}").into()),
+                };
+            }
+            path if !path.starts_with("--") => {
+                fixture_path = Some(PathBuf::from(path));
+            }
+            other => return Err(format!("unknown flag: {other}").into()),
+        }
+    }
+    let fixture_path = fixture_path.ok_or("missing <fixture> path")?;
 
     let workspace_root = find_workspace_root()?;
     let fixture = Fixture::load(&fixture_path)?;
@@ -37,7 +66,13 @@ fn try_main() -> Result<ExitCode, Box<dyn std::error::Error>> {
             Ok(ExitCode::from(0))
         }
         "verify" => {
-            let diff = verify_oracle(&workspace_root, &fixture)?;
+            let diff = match toolchain {
+                Toolchain::Oracle => verify_oracle(&workspace_root, &fixture)?,
+                Toolchain::Ours => {
+                    let tool_paths = ToolPaths::from_workspace_debug(&workspace_root);
+                    verify_ours(&fixture, &tool_paths)?
+                }
+            };
             print_diff(&fixture.name, &diff);
             if diff.is_empty() {
                 Ok(ExitCode::from(0))
@@ -50,11 +85,15 @@ fn try_main() -> Result<ExitCode, Box<dyn std::error::Error>> {
 }
 
 fn print_diff(fixture_name: &str, diff: &Diff) {
-    if diff.is_empty() {
+    if !diff.has_any() {
         eprintln!("[xfix] {fixture_name}: match");
         return;
     }
-    eprintln!("[xfix] {fixture_name}: MISMATCH");
+    if diff.is_empty() {
+        eprintln!("[xfix] {fixture_name}: match (advisory differences below)");
+    } else {
+        eprintln!("[xfix] {fixture_name}: MISMATCH");
+    }
     for m in &diff.manifest {
         match m {
             ManifestDiff::ExitCode { expected, actual } => {
@@ -78,21 +117,32 @@ fn print_diff(fixture_name: &str, diff: &Diff) {
         }
     }
     for f in &diff.files {
-        match &f.kind {
-            FileDiffKind::Length { expected, actual } => {
-                eprintln!("  {}: length {} -> {}", f.name, expected, actual);
-            }
-            FileDiffKind::Bytes { first_diff_offset, expected_window, actual_window } => {
-                eprintln!(
-                    "  {}: first byte differs at offset {first_diff_offset}",
-                    f.name
-                );
-                eprintln!("    expected: {}", hex_window(expected_window));
-                eprintln!("    actual:   {}", hex_window(actual_window));
-            }
+        print_file_diff("", f);
+    }
+    for f in &diff.advisory {
+        print_file_diff("[advisory] ", f);
+    }
+}
+
+fn print_file_diff(prefix: &str, f: &FileDiffKindCarrier) {
+    match &f.kind {
+        FileDiffKind::Length { expected, actual } => {
+            eprintln!("  {prefix}{}: length {} -> {}", f.name, expected, actual);
+        }
+        FileDiffKind::Bytes { first_diff_offset, expected_window, actual_window } => {
+            eprintln!(
+                "  {prefix}{}: first byte differs at offset {first_diff_offset}",
+                f.name
+            );
+            eprintln!("    expected: {}", hex_window(expected_window));
+            eprintln!("    actual:   {}", hex_window(actual_window));
         }
     }
 }
+
+// Type alias so the helper above stays decoupled from the exact name we
+// happened to pick in `diff.rs`.
+type FileDiffKindCarrier = fixtures::FileDiff;
 
 fn hex_window(bytes: &[u8]) -> String {
     let mut s = String::with_capacity(bytes.len() * 3);

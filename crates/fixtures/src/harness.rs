@@ -3,17 +3,25 @@
 //! (a deterministic-by-construction sanity check that also proves the
 //! capture is reproducible).
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::time::{Duration, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
 
-use oracle::{Oracle, OracleConfig, OracleInvocation, OracleRun};
+use oracle::{Oracle, OracleConfig, OracleInvocation, OracleOutput, OracleRun};
 
-use crate::diff::{Diff, diff_bytes, diff_manifests};
-use crate::fixture::Fixture;
+use crate::diff::{Diff, ManifestDiff, diff_bytes, diff_manifests};
+use crate::fixture::{Fixture, ToolName};
 use crate::manifest::{Manifest, OracleSummary, OutputEntry, RunSummary};
 use crate::timefmt;
+
+/// The pinned instant. Must match `oracle::FakeTime::default().instant` so
+/// inputs materialized for our toolchain see the same mtime as the oracle
+/// pinned them to. 672_408_000 == 1991-04-23 12:00:00 UTC.
+const PIN_EPOCH_SECS: u64 = 672_408_000;
 
 /// Capture a fixture: run the oracle and write a fresh `expected/`.
 ///
@@ -39,6 +47,59 @@ pub fn capture(workspace_root: &Path, fixture: &Fixture) -> Result<(), HarnessEr
         .map_err(|e| HarnessError::ManifestSerialize(e.to_string()))?;
     fs::write(expected.join("manifest.toml"), manifest_text)?;
     Ok(())
+}
+
+/// Verify by running **our toolchain** against the fixture and diffing
+/// against the captured goldens. `tool_paths` resolves which host binary
+/// implements each oracle tool.
+///
+/// `stdout`/`stderr` differences are reported but **not gating**: a stream
+/// mismatch alone doesn't make `is_empty()` return false. The byte-exact
+/// contract is about output files and exit codes; BCC's stdout banner
+/// contains "Available memory NNNNNN" reporting DOSBox-emulated DOS RAM,
+/// which a native Rust binary can't reproduce. (Use [`verify_oracle`] —
+/// which is strict — to check the goldens themselves haven't drifted.)
+///
+/// # Errors
+/// Returns [`HarnessError`] if our toolchain fails to spawn or the
+/// fixture has no `expected/` to compare against.
+pub fn verify_ours(
+    fixture: &Fixture,
+    tool_paths: &ToolPaths,
+) -> Result<Diff, HarnessError> {
+    let expected_manifest = load_expected_manifest(fixture)?;
+    let run = run_ours(fixture, tool_paths)?;
+    let actual_manifest = build_manifest(fixture, &run, our_summary(fixture));
+
+    let manifest_diffs: Vec<_> = diff_manifests(&expected_manifest, &actual_manifest)
+        .into_iter()
+        .filter(|d| {
+            // Stream-related sha diffs are informational under
+            // verify_ours; everything else stays gating.
+            !matches!(d, ManifestDiff::StdoutSha { .. } | ManifestDiff::StderrSha { .. })
+        })
+        .collect();
+    let mut diff = Diff { manifest: manifest_diffs, ..Diff::default() };
+
+    let expected_dir = fixture.expected_dir();
+    // Streams are noted as advisory in the report but don't gate.
+    for (name, expected, actual) in [
+        ("stdout", read_file(&expected_dir, "stdout")?, run.stdout.clone()),
+        ("stderr", read_file(&expected_dir, "stderr")?, run.stderr.clone()),
+    ] {
+        if let Some(d) = diff_bytes(name, &expected, &actual) {
+            diff.advisory.push(d);
+        }
+    }
+    for (name, output) in &run.outputs {
+        let expected = read_file_opt(&expected_dir, name)?;
+        if let Some(expected) = expected
+            && let Some(file_diff) = diff_bytes(name, &expected, &output.bytes)
+        {
+            diff.files.push(file_diff);
+        }
+    }
+    Ok(diff)
 }
 
 /// Verify by re-running the **oracle** against the fixture. Useful as a
@@ -76,6 +137,117 @@ pub fn verify_oracle(workspace_root: &Path, fixture: &Fixture) -> Result<Diff, H
         }
     }
     Ok(diff)
+}
+
+/// Which host binaries implement each oracle tool. `None` means "not yet
+/// implemented", and using a fixture that demands it will fail with
+/// [`HarnessError::ToolNotImplemented`].
+#[derive(Debug, Clone, Default)]
+pub struct ToolPaths {
+    pub bcc: Option<PathBuf>,
+    pub tasm: Option<PathBuf>,
+    pub tlink: Option<PathBuf>,
+}
+
+impl ToolPaths {
+    /// Look for `target/debug/{bcc,tasm,tlink}` under the workspace root.
+    /// Whichever binaries exist are bound; the rest stay `None`.
+    #[must_use]
+    pub fn from_workspace_debug(workspace_root: &Path) -> Self {
+        let pick = |name: &str| {
+            let candidate = workspace_root.join("target").join("debug").join(name);
+            candidate.is_file().then_some(candidate)
+        };
+        Self { bcc: pick("bcc"), tasm: pick("tasm"), tlink: pick("tlink") }
+    }
+
+    fn resolve(&self, tool: ToolName) -> Result<&Path, HarnessError> {
+        let opt = match tool {
+            ToolName::Bcc => &self.bcc,
+            ToolName::Tasm => &self.tasm,
+            ToolName::Tlink => &self.tlink,
+        };
+        opt.as_deref().ok_or(HarnessError::ToolNotImplemented(tool.as_str().to_owned()))
+    }
+}
+
+fn run_ours(fixture: &Fixture, tool_paths: &ToolPaths) -> Result<OracleRun, HarnessError> {
+    let tool = fixture.invocation.tool;
+    let bin = tool_paths.resolve(tool)?;
+    let inputs = fixture.load_inputs()?;
+    let work = make_workdir()?;
+
+    // Materialize inputs with the pinned mtime — mirrors what
+    // `oracle::dosbox::materialize_inputs` does so our compiler sees the
+    // same source mtime as the oracle's BCC.
+    let pin = UNIX_EPOCH + Duration::from_secs(PIN_EPOCH_SECS);
+    let mut input_names: BTreeSet<String> = BTreeSet::new();
+    for (name, bytes) in &inputs {
+        let path = work.join(name);
+        fs::write(&path, bytes)?;
+        let f = fs::File::options().write(true).open(&path)?;
+        f.set_modified(pin)?;
+        input_names.insert(name.clone());
+    }
+
+    let output = Command::new(bin)
+        .args(&fixture.invocation.args)
+        .current_dir(&work)
+        .output()
+        .map_err(|e| HarnessError::ToolSpawn(bin.to_owned(), e.to_string()))?;
+
+    let stdout = output.stdout;
+    let stderr = output.stderr;
+    let exit_code = output.status.code().unwrap_or(-1);
+
+    // Collect outputs the same way the oracle does: every file in the work
+    // dir that wasn't an input, with its mtime normalized to the pin so the
+    // manifest stays deterministic.
+    let mut outputs = BTreeMap::new();
+    for entry in fs::read_dir(&work)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_uppercase();
+        if input_names.contains(&name) {
+            continue;
+        }
+        let path = entry.path();
+        let bytes = fs::read(&path)?;
+        let f = fs::File::options().write(true).open(&path)?;
+        f.set_modified(pin)?;
+        let mtime = Some(pin);
+        outputs.insert(name, OracleOutput { bytes, mtime });
+    }
+
+    let _ = fs::remove_dir_all(&work);
+    Ok(OracleRun { exit_code, stdout, stderr, outputs })
+}
+
+fn make_workdir() -> Result<PathBuf, HarnessError> {
+    let base = std::env::temp_dir();
+    let pid = std::process::id();
+    for n in 0u32..1024 {
+        let candidate = base.join(format!("borland-c20-fixtures-{pid}-{n}"));
+        match fs::create_dir(&candidate) {
+            Ok(()) => return Ok(candidate),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(HarnessError::Io(e)),
+        }
+    }
+    Err(HarnessError::Io(std::io::Error::other(
+        "could not allocate workdir",
+    )))
+}
+
+fn our_summary(fixture: &Fixture) -> OracleSummary {
+    OracleSummary {
+        tool: fixture.invocation.tool.as_str().to_owned(),
+        args: fixture.invocation.args.clone(),
+        dosbox_version: None,
+        fake_time: Some("1991-04-23T12:00:00Z".to_owned()),
+    }
 }
 
 fn run_oracle(workspace_root: &Path, fixture: &Fixture) -> Result<OracleRun, HarnessError> {
@@ -168,5 +340,9 @@ pub enum HarnessError {
     ManifestParse(PathBuf, String),
     #[error("no captured expected/ at {0}: {1}")]
     MissingExpected(PathBuf, String),
+    #[error("tool not yet implemented in our toolchain: {0}")]
+    ToolNotImplemented(String),
+    #[error("could not run tool {0}: {1}")]
+    ToolSpawn(PathBuf, String),
 }
 
