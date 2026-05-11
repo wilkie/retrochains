@@ -1,0 +1,24 @@
+[package]
+name = "oracle"
+description = "Runs the original Borland C++ 2.0 binaries (BCC/TASM/TLINK) under DOSBox so tests can diff our output byte-for-byte against the oracle"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lib]
+name = "oracle"
+path = "src/lib.rs"
+
+[[bin]]
+name = "oracle"
+path = "src/main.rs"
+
+[dependencies]
+thiserror = "2"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+[lints]
+workspace = true

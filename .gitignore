@@ -14,6 +14,10 @@ dist/
 build/
 pkg/
 
+# Extracted Borland C++ 2.0 install tree (extracted lazily from BC2.zip by the
+# oracle crate; BC2.zip itself is tracked, the unpacked contents are not).
+.bc2/
+
 # Stray Borland-built artifacts at the repo root (fixture outputs belong under
 # fixtures/ and ARE tracked, so we don't blanket-ignore these extensions).
 /*.OBJ

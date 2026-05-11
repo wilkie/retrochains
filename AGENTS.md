@@ -28,26 +28,33 @@ tools byte for byte** for the same input and flags. This is the only success
 criterion that matters; performance, ergonomics, and code clarity are
 secondary.
 
-The original `bcc`, `tlink`, and `tasm` are available locally via the
-`@rawrs/borland-c-2` npm package (already a dependency). Always diff against
-them. Common oracle invocations:
+The original binaries (`BCC.EXE`, `TASM.EXE`, `TLINK.EXE`) plus headers and
+runtime libraries are shipped in `BC2.zip` at the repo root. The
+`crates/oracle/` crate unpacks it lazily into `.bc2/` (gitignored) and runs
+the tools under DOSBox. Use it; don't shell out to DOSBox directly. Full
+details and a known-issues list are in
+[`specs/RUNNING_BCC.md`](specs/RUNNING_BCC.md).
 
 ```bash
-# Compile (default flags as discovered in specs/RUNNING_BCC.md):
-npm exec -p @rawrs/borland-c-2 bcc -ms -p- -k -V -Z -O -r -G FOO.CPP
-
-# Assemble only:
-npm exec -p @rawrs/borland-c-2 bcc -ms -p- -k -V -Z -O -r -G -S MAIN.CPP
-
-# Object only:
-npm exec -p @rawrs/borland-c-2 bcc -ms -p- -k -V -Z -O -r -G -c MAIN.CPP
-
-# Link:
-npm exec -p @rawrs/borland-c-2 tlink C0S MAIN.OBJ,MAIN.EXE,,CS
-
-# Assemble:
-npm exec -p @rawrs/borland-c-2 tasm
+# Ad-hoc oracle from the shell — compile-only, small memory model:
+cargo run -q -p oracle -- bcc -ms -c -- hello.c
 ```
+
+```rust
+// From a Rust test:
+let oracle = Oracle::open(OracleConfig::for_workspace(workspace_root))?;
+let run = oracle.run(
+    &OracleInvocation::new(Tool::Bcc)
+        .args(["-ms", "-c", "HELLO.C"])
+        .input("HELLO.C", source_bytes),
+)?;
+assert_eq!(run.exit_code, 0);
+```
+
+DOSBox and faketime must be installed on the host
+(`sudo apt install dosbox faketime`). The wrapper runs DOSBox headlessly via
+`SDL_VIDEODRIVER=dummy` and wraps the spawn in `faketime` to pin the
+emulated DOS clock so BCC's embedded timestamps stay reproducible.
 
 ## Toolchains
 
@@ -80,10 +87,13 @@ pnpm format:check
 ## Repository layout (short form)
 
 ```
+BC2.zip               original Borland C++ 2.0 install (tracked; the oracle source)
+.bc2/                 lazily unpacked from BC2.zip (gitignored)
 crates/               cargo workspace
   bcc/   tlink/  tasm/        — the three tool reimplementations (lib + bin)
   obj/   x86/                 — shared support libraries
   bcc-wasm/                   — cdylib that exposes the tools to TS over WASM
+  oracle/                     — runs the BC2 binaries under DOSBox
 packages/             pnpm workspace
   bcc/                        — @borland-c20/bcc, the TS wrapper
 specs/                Specs and design notes (start here)

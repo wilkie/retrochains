@@ -16,11 +16,13 @@ compiler and its peculiarity.
 
 ```
 borland-c20/
+├── BC2.zip                 # Original Borland C++ 2.0 install tree (the oracle source)
+├── .bc2/                   # Gitignored. Lazily unpacked from BC2.zip on first oracle use.
 ├── Cargo.toml              # Rust workspace manifest
 ├── rust-toolchain.toml     # Pinned rustup channel + components
 ├── rustfmt.toml
 ├── pnpm-workspace.yaml     # pnpm workspace definition
-├── package.json            # Workspace root: shared devDeps, oracle dep
+├── package.json            # Workspace root: shared devDeps
 ├── tsconfig.base.json      # Shared TS compiler options
 ├── eslint.config.js        # Flat ESLint config (typescript-eslint)
 ├── .prettierrc.json
@@ -30,7 +32,8 @@ borland-c20/
 │   ├── tasm/
 │   ├── obj/
 │   ├── x86/
-│   └── bcc-wasm/
+│   ├── bcc-wasm/
+│   └── oracle/             # Runs the original BC2 binaries under DOSBox
 ├── packages/               # TypeScript packages (pnpm workspace members)
 │   └── bcc/                # @borland-c20/bcc — WASM wrapper
 └── specs/                  # Specs and design notes (this directory)
@@ -65,6 +68,11 @@ driven independently from the CLI or composed together via the WASM facade.
   single WASM module. Its job is to expose a stable C-ABI surface that
   `@borland-c20/bcc` (the TS package) can call so the entire compile / assemble
   / link pipeline runs in-browser or in Node without shelling out.
+- **`oracle`** — Runs the original Borland binaries from `BC2.zip` under
+  DOSBox so the rest of the workspace can diff its output byte-for-byte
+  against the reference. Lazily unpacks `BC2.zip` to `.bc2/` on first use.
+  See [`specs/RUNNING_BCC.md`](RUNNING_BCC.md) for the wrapper's design and
+  current quirks.
 
 The Rust build will use a cargo workspace, rustup to manage the versions, and any
 standard linting, testing, and layout best practice.
@@ -79,14 +87,16 @@ standard linting, testing, and layout best practice.
 The TypeScript and JavaScript ecosystem will consist of pnpm, eslint, prettier,
 and use any best practice to structure its build system and testing practices.
 
-## Running Borland C++ 2.0
+## The oracle
 
-The original Borland C++ 2.0 binaries are accessible via the `@rawrs/borland-c-2`
-package. One can run the `bcc`, `tlink`, and `tasm` binaries via `npm exec` from
-those packages. For more information, read `RUNNING_BCC.md` which has details and
-an end-to-end example of using `BCC.EXE`, `TLINK.EXE`, and `TASM.EXE`. Other
-options will be discovered and outlined here or in other specs as needed.
+The original Borland C++ 2.0 binaries (`BCC.EXE`, `TASM.EXE`, `TLINK.EXE`)
+along with their headers and runtime libraries are committed to the repo as
+`BC2.zip` — it's the only file we get from the original distribution that
+lives in version control. On first use, `crates/oracle/` unpacks the archive
+into a gitignored `.bc2/` directory and from then on drives those binaries
+under DOSBox to produce reference outputs.
 
-This package is the **oracle** for correctness: every output produced by our
-Rust reimplementation must match what `@rawrs/borland-c-2` produces, byte for
-byte, for the same input.
+That reference is the **oracle**: every byte our Rust reimplementation
+produces must match the byte the oracle produces for the same input. See
+[`RUNNING_BCC.md`](RUNNING_BCC.md) for how to invoke it, the design of the
+DOSBox wrapper, and the open issues (notably timestamp determinism).

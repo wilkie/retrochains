@@ -7,6 +7,7 @@ members = [
     "crates/obj",
     "crates/x86",
     "crates/bcc-wasm",
+    "crates/oracle",
 ]
 
 [workspace.package]
@@ -27,6 +28,9 @@ pedantic = { level = "warn", priority = -1 }
 # Style lints that are noisy without adding value for this codebase.
 module_name_repetitions = "allow"
 must_use_candidate = "allow"
+# Triggers constantly on real-world product names (Borland, DOSBox, BCC, BC2,
+# TASM, TLINK). They aren't code items, so backticks just clutter the prose.
+doc_markdown = "allow"
 
 [profile.release]
 lto = "thin"
