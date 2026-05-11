@@ -1,17 +1,17 @@
 //! Emit the `.ASM` text that `BCC -S` produces. See
-//! `specs/bcc/ASM_OUTPUT.md` for the format, with byte-level callouts.
-//!
-//! This first cut covers only `int main(void) { return 0; }` — fixture
-//! `001-empty-main`. Function body emission is a small `match` on a
-//! hand-recognized source shape today; that match will be replaced by a
-//! real parser as fixtures grow.
+//! `specs/bcc/ASM_OUTPUT.md` for the format. The bytes in this file are
+//! the file-level scaffolding (macro preamble, segment scaffold, tail);
+//! everything that varies per-function is driven by [`crate::codegen`].
 
 use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+use crate::codegen;
 use crate::dos_time;
+use crate::lex::Lexer;
+use crate::parse::Parser;
 
 #[derive(Debug, thiserror::Error)]
 pub enum EmitError {
@@ -19,15 +19,16 @@ pub enum EmitError {
     Io(#[from] std::io::Error),
     #[error("source {0}: {1}")]
     SourceRead(PathBuf, std::io::Error),
-    #[error("unsupported source — not yet a fixture-001-shaped program")]
-    Unsupported,
+    #[error("lex: {0}")]
+    Lex(#[from] crate::lex::LexError),
+    #[error("parse: {0}")]
+    Parse(#[from] crate::parse::ParseError),
 }
 
 /// Compile one `.C` source to `.ASM` next to it in the current directory.
 ///
 /// # Errors
-/// Returns [`EmitError`] on I/O failures or when the source isn't yet a
-/// shape our emitter recognizes.
+/// Returns [`EmitError`] on I/O failures, lex errors, or parse errors.
 pub fn emit_dash_s(source_path: &Path) -> Result<PathBuf, EmitError> {
     let source = fs::read_to_string(source_path)
         .map_err(|e| EmitError::SourceRead(source_path.to_owned(), e))?;
@@ -51,51 +52,31 @@ pub fn emit_dash_s(source_path: &Path) -> Result<PathBuf, EmitError> {
     Ok(output_path)
 }
 
-/// Produce the ASM file bytes. Pure for testability.
+/// Produce the ASM file bytes from a source string and the associated
+/// metadata. Pure for testability.
 ///
 /// # Errors
-/// Returns [`EmitError::Unsupported`] for sources our emitter doesn't yet
-/// know how to handle.
+/// Returns [`EmitError`] on lex or parse failures.
 pub fn build_asm(
     source: &str,
     source_filename_lower: &str,
     mtime: SystemTime,
 ) -> Result<Vec<u8>, EmitError> {
-    let function = recognize(source).ok_or(EmitError::Unsupported)?;
+    let tokens = Lexer::new(source).tokenize()?;
+    let unit = Parser::new(tokens).parse_unit()?;
 
     let mut out = Vec::with_capacity(1024);
     write_macro_preamble(&mut out);
     write_debug_header(&mut out, source_filename_lower, mtime);
     write_segment_scaffold(&mut out);
-    write_function(&mut out, &function);
-    write_tail(&mut out, &function);
+
+    for function in &unit.functions {
+        codegen::emit_function(&mut out, source, function);
+    }
+
+    write_tail(&mut out, &unit);
     out.push(0x1A); // DOS EOF marker
     Ok(out)
-}
-
-/// What the rest of the emitter needs to know about one function. For
-/// fixture 001 this is just the function name and the source line(s).
-#[derive(Debug)]
-struct Function<'a> {
-    /// BCC-style symbol, e.g. `_main` for C `main`.
-    sym: String,
-    /// The original source line(s) that defined this function, used for
-    /// the interleaved `;` comments. For now: a single line covering
-    /// the whole function.
-    source_line: &'a str,
-}
-
-/// Hand-recognize "is this the empty-main shape?" Returns `Some` for
-/// sources that match; `None` otherwise. Will be replaced by a real lex
-/// + parse as fixtures demand more.
-fn recognize(source: &str) -> Option<Function<'_>> {
-    // Strip trailing newline (the source file ends with `\n` but BCC
-    // inlines the comment text without it).
-    let line = source.strip_suffix('\n').unwrap_or(source);
-    if line == "int main(void) { return 0; }" {
-        return Some(Function { sym: "_main".to_owned(), source_line: line });
-    }
-    None
 }
 
 fn write_macro_preamble(out: &mut Vec<u8>) {
@@ -155,41 +136,14 @@ _BSS\tends\r\n";
     out.extend_from_slice(SCAFFOLD);
 }
 
-fn write_function(out: &mut Vec<u8>, f: &Function<'_>) {
-    out.extend_from_slice(b"_TEXT\tsegment byte public 'CODE'\r\n");
-
-    // Source-line comment block: empty, source, empty (all leading
-    // "   ;\t").
-    out.extend_from_slice(b"   ;\t\r\n");
-    let _ = write!(out, "   ;\t{}\r\n", f.source_line);
-    out.extend_from_slice(b"   ;\t\r\n");
-
-    out.extend_from_slice(b"\tassume\tcs:_TEXT\r\n");
-    let _ = write!(out, "{}\tproc\tnear\r\n", f.sym);
-
-    // Empty-main body. xor ax,ax for the return 0; jmp to single exit.
-    out.extend_from_slice(b"\tpush\tbp\r\n");
-    out.extend_from_slice(b"\tmov\tbp,sp\r\n");
-    out.extend_from_slice(b"\txor\tax,ax\r\n");
-    out.extend_from_slice(b"\tjmp\tshort @1@50\r\n");
-    out.extend_from_slice(b"@1@50:\r\n");
-    out.extend_from_slice(b"\tpop\tbp\r\n");
-    // The trailing \t after `ret` is part of BCC's output — even
-    // operand-less mnemonics get the operand-separator tab + empty
-    // operand.
-    out.extend_from_slice(b"\tret\t\r\n");
-
-    let _ = write!(out, "{}\tendp\r\n", f.sym);
-    out.extend_from_slice(b"\t?debug\tC E9\r\n");
-    out.extend_from_slice(b"_TEXT\tends\r\n");
-}
-
-fn write_tail(out: &mut Vec<u8>, f: &Function<'_>) {
+fn write_tail(out: &mut Vec<u8>, unit: &crate::ast::Unit) {
     out.extend_from_slice(b"_DATA\tsegment word public 'DATA'\r\n");
     out.extend_from_slice(b"s@\tlabel\tbyte\r\n");
     out.extend_from_slice(b"_DATA\tends\r\n");
     out.extend_from_slice(b"_TEXT\tsegment byte public 'CODE'\r\n");
     out.extend_from_slice(b"_TEXT\tends\r\n");
-    let _ = write!(out, "\tpublic\t{}\r\n", f.sym);
+    for f in &unit.functions {
+        let _ = write!(out, "\tpublic\t{}\r\n", codegen::function_symbol(&f.name));
+    }
     out.extend_from_slice(b"\tend\r\n");
 }

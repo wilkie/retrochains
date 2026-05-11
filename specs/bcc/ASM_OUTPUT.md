@@ -154,8 +154,13 @@ inline `ret`.
 - **No locals (`001`, `003`)**: `push bp` / `mov bp,sp` ... `pop bp` /
   `ret`.
 - **One `int` local (`004`)**: `push bp` / `mov bp,sp` / **`dec sp` /
-  `dec sp`** (two single-byte decrements rather than `sub sp,2` — saves a
-  byte) ... `mov sp,bp` / `pop bp` / `ret`. The local is at `[bp-2]`.
+  `dec sp`** ... `mov sp,bp` / `pop bp` / `ret`. The local is at `[bp-2]`.
+
+`dec sp` decrements SP by **one byte** (it's the single-byte register
+DEC encoding). So 2 bytes of locals = **2** `dec sp`s, not one. That's
+what threw the codegen on the first cut. There's presumably a frame-size
+threshold beyond which `sub sp,N` wins on code size — we'll learn it
+when a fixture exercises it.
 
 ### Local-variable access
 

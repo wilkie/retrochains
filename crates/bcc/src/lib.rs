@@ -4,9 +4,13 @@
 //! emitted must match `BCC.EXE` exactly; see `specs/RUNNING_BCC.md` and
 //! `specs/bcc/ASM_OUTPUT.md`.
 
+pub mod ast;
 mod cli;
+mod codegen;
 mod dos_time;
 mod emit_s;
+pub mod lex;
+pub mod parse;
 
 pub use cli::{CliError, CompileMode, MemoryModel, ParsedArgs, parse_args};
 pub use emit_s::{EmitError, build_asm, emit_dash_s};
