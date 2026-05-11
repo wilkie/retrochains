@@ -12,7 +12,7 @@
 
 use std::io::Write as _;
 
-use crate::ast::{BinOp, Expr, ExprKind, Function, Stmt, StmtKind, Type};
+use crate::ast::{BinOp, Expr, ExprKind, Function, Stmt, StmtKind, Type, UnaryOp};
 
 mod fold;
 mod line_map;
@@ -302,6 +302,27 @@ impl<'a> FunctionEmitter<'a> {
         let _ = write!(self.out, "\tcmp\tax,{}\r\n", src.word());
     }
 
+    /// Emit a prefix unary operator. The operand always lands in AX
+    /// first, then the per-op tail runs:
+    ///
+    /// - `-e` → `neg ax`.
+    /// - `~e` → `not ax`.
+    /// - `!e` → `neg ax / sbb ax,ax / inc ax`. Classic zero-test:
+    ///   after `neg`, CF == (operand != 0); `sbb ax,ax` materializes
+    ///   `-CF` (0 or 0xFFFF); `inc ax` shifts to 1 or 0. Fixture 038.
+    fn emit_unary(&mut self, op: UnaryOp, operand: &Expr) {
+        self.emit_expr_to_ax(operand);
+        match op {
+            UnaryOp::Neg => self.out.extend_from_slice(b"\tneg\tax\r\n"),
+            UnaryOp::BitNot => self.out.extend_from_slice(b"\tnot\tax\r\n"),
+            UnaryOp::Not => {
+                self.out.extend_from_slice(b"\tneg\tax\r\n");
+                self.out.extend_from_slice(b"\tsbb\tax,ax\r\n");
+                self.out.extend_from_slice(b"\tinc\tax\r\n");
+            }
+        }
+    }
+
     /// Emit a function call: push args right-to-left (each materialized
     /// into AX first), `call near ptr _name`, then `pop cx` per arg to
     /// clean up the cdecl-style caller-cleanup. Result lands in AX.
@@ -391,10 +412,14 @@ impl<'a> FunctionEmitter<'a> {
     /// Emit code that leaves the value of `e` in AX.
     fn emit_expr_to_ax(&mut self, e: &Expr) {
         if let Some(v) = try_const_eval(e) {
-            if v == 0 {
+            // Narrow to 16 bits — BCC writes signed-negative constants
+            // as their unsigned-wrapped form (fixture 036: `-5` →
+            // `mov ax,65531`).
+            let v16 = v & 0xFFFF;
+            if v16 == 0 {
                 self.out.extend_from_slice(b"\txor\tax,ax\r\n");
             } else {
-                let _ = write!(self.out, "\tmov\tax,{v}\r\n");
+                let _ = write!(self.out, "\tmov\tax,{v16}\r\n");
             }
             return;
         }
@@ -423,6 +448,7 @@ impl<'a> FunctionEmitter<'a> {
                     self.emit_binary_right(*op, right);
                 }
             }
+            ExprKind::Unary { op, operand } => self.emit_unary(*op, operand),
             ExprKind::Call { name, args } => self.emit_call(name, args),
         }
     }
@@ -483,6 +509,9 @@ impl<'a> FunctionEmitter<'a> {
             }
             ExprKind::BinOp { .. } => {
                 panic!("nested non-constant right operand not yet supported")
+            }
+            ExprKind::Unary { .. } => {
+                panic!("non-constant unary expression as right operand not yet supported")
             }
         }
     }

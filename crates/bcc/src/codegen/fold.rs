@@ -4,7 +4,7 @@
 //! attempting a recursive constant-evaluation on every expression before
 //! emitting it.
 
-use crate::ast::{BinOp, Expr, ExprKind};
+use crate::ast::{BinOp, Expr, ExprKind, UnaryOp};
 
 /// If `e` is a constant expression under our current set of operators
 /// and atom forms, return its `u32` value. Otherwise return `None`.
@@ -16,6 +16,17 @@ pub fn try_const_eval(e: &Expr) -> Option<u32> {
     match &e.kind {
         ExprKind::IntLit(n) => Some(*n),
         ExprKind::Ident(_) | ExprKind::Call { .. } => None,
+        ExprKind::Unary { op, operand } => {
+            let v = try_const_eval(operand)?;
+            Some(match op {
+                // Two's-complement negation; emit-time truncation to
+                // u16 makes `-5` land as `65531` (fixture 036).
+                UnaryOp::Neg => 0u32.wrapping_sub(v),
+                UnaryOp::BitNot => !v,
+                // `!0` → 1; anything-non-zero → 0.
+                UnaryOp::Not => u32::from(v == 0),
+            })
+        }
         ExprKind::BinOp { op, left, right } => {
             let l = try_const_eval(left)?;
             let r = try_const_eval(right)?;

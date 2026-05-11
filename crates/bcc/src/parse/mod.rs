@@ -4,7 +4,7 @@
 //! once" case (which is all the early fixtures need; nothing in
 //! single-pass forbids building a one-function-at-a-time variant later).
 
-use crate::ast::{BinOp, Expr, ExprKind, Function, Param, Stmt, StmtKind, Type, Unit};
+use crate::ast::{BinOp, Expr, ExprKind, Function, Param, Stmt, StmtKind, Type, UnaryOp, Unit};
 use crate::lex::{Span, Token, TokenKind};
 
 #[derive(Debug, thiserror::Error)]
@@ -283,11 +283,29 @@ impl Parser {
     }
 
     fn parse_multiplicative(&mut self) -> Result<Expr, ParseError> {
-        self.left_assoc(Self::parse_atom, |t| match t {
+        self.left_assoc(Self::parse_unary, |t| match t {
             TokenKind::Star => Some(BinOp::Mul),
             TokenKind::Slash => Some(BinOp::Div),
             TokenKind::Percent => Some(BinOp::Mod),
             _ => None,
+        })
+    }
+
+    /// Prefix unary operators. Higher precedence than multiplicative;
+    /// right-associative (parses `--x` as `-(-x)` and so on).
+    fn parse_unary(&mut self) -> Result<Expr, ParseError> {
+        let op = match self.peek().kind {
+            TokenKind::Minus => UnaryOp::Neg,
+            TokenKind::Bang => UnaryOp::Not,
+            TokenKind::Tilde => UnaryOp::BitNot,
+            _ => return self.parse_atom(),
+        };
+        let op_tok = self.bump();
+        let operand = self.parse_unary()?;
+        let span = Span::new(op_tok.span.start, operand.span.end);
+        Ok(Expr {
+            kind: ExprKind::Unary { op, operand: Box::new(operand) },
+            span,
         })
     }
 

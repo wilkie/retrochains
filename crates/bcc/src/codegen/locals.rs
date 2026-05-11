@@ -300,6 +300,9 @@ fn count_uses_expr(e: &Expr, counts: &mut HashMap<String, u32>) {
             count_uses_expr(left, counts);
             count_uses_expr(right, counts);
         }
+        ExprKind::Unary { operand, .. } => {
+            count_uses_expr(operand, counts);
+        }
         ExprKind::Call { args, .. } => {
             for a in args {
                 count_uses_expr(a, counts);

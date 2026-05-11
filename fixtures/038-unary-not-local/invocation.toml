@@ -1,0 +1,4 @@
+description = "Logical not on a local. Pins how BCC materializes the 0/1 result (likely a comparison-as-value-style pattern or a clever `neg + sbb` trick)."
+tool = "bcc"
+args = ["-S", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

@@ -56,7 +56,7 @@ impl<'a> Lexer<'a> {
                 b';' => { self.pos += 1; TokenKind::Semicolon }
                 b',' => { self.pos += 1; TokenKind::Comma }
                 b'=' => self.lex_after_eq(),
-                b'!' => self.lex_after_bang()?,
+                b'!' => self.lex_after_bang(),
                 b'+' => { self.pos += 1; TokenKind::Plus }
                 b'-' => { self.pos += 1; TokenKind::Minus }
                 b'*' => { self.pos += 1; TokenKind::Star }
@@ -65,6 +65,7 @@ impl<'a> Lexer<'a> {
                 b'&' => { self.pos += 1; TokenKind::Ampersand }
                 b'|' => { self.pos += 1; TokenKind::Pipe }
                 b'^' => { self.pos += 1; TokenKind::Caret }
+                b'~' => { self.pos += 1; TokenKind::Tilde }
                 b'<' => self.lex_after_lt(),
                 b'>' => self.lex_after_gt(),
                 b if is_ident_start(b) => self.lex_ident_or_keyword(),
@@ -127,16 +128,14 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    /// Disambiguate `!`: only `!=` is recognized so far. Logical `!`
-    /// lands when a fixture needs it.
-    fn lex_after_bang(&mut self) -> Result<TokenKind, LexError> {
-        let bang_pos = self.pos;
+    /// Disambiguate `!`: `!=` is inequality, bare `!` is logical not.
+    fn lex_after_bang(&mut self) -> TokenKind {
         self.pos += 1;
         if matches!(self.src.get(self.pos), Some(&b'=')) {
             self.pos += 1;
-            Ok(TokenKind::BangEq)
+            TokenKind::BangEq
         } else {
-            Err(LexError::UnexpectedChar { ch: '!', offset: off(bang_pos) })
+            TokenKind::Bang
         }
     }
 

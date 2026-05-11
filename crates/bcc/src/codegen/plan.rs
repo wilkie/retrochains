@@ -117,6 +117,9 @@ fn plan_expr_value(e: &Expr, counter: &mut u32, bases: &mut HashMap<u32, u32>) {
                 *counter += 3;
             }
         }
+        ExprKind::Unary { operand, .. } => {
+            plan_expr_value(operand, counter, bases);
+        }
         ExprKind::Call { args, .. } => {
             for a in args {
                 plan_expr_value(a, counter, bases);

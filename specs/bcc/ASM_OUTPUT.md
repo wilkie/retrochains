@@ -695,6 +695,31 @@ We don't yet have a fixture for `cmp <stack>, 0` — that path may
 still use the memory-immediate form, since `or` would write back to
 memory.
 
+### Unary operators (`036`–`039`)
+
+| C source            | Asm                                              |
+| ------------------- | ------------------------------------------------ |
+| `return -5;`        | `mov ax,65531` (constant-folded, u16-wrapped)    |
+| `return -x;`        | `mov ax,[bp-N]` / `neg ax`                       |
+| `return ~x;`        | `mov ax,[bp-N]` / `not ax`                       |
+| `return !x;`        | `mov ax,[bp-N]` / `neg ax` / `sbb ax,ax` / `inc ax` |
+
+Negative integer constants are emitted as their **unsigned-wrapped
+16-bit** decimal representation: `-5` → `mov ax,65531`. So immediate
+emission narrows the (internally 32-bit) folded value to 16 bits
+before formatting.
+
+The `!x` shape is the classic 8086 zero-test idiom:
+
+- `neg ax` — sets CF = (ax != 0); ax becomes `-x`.
+- `sbb ax,ax` — `ax := ax - ax - CF = -CF`, so ax is `0` if x was 0,
+  `0xFFFF` otherwise.
+- `inc ax` — `0 → 1`, `0xFFFF → 0`.
+
+No conditional jumps, no labels — four straight-line instructions.
+This makes `!x` significantly smaller than a comparison-as-value
+expansion of `x == 0`.
+
 ### Constant folding (`005`)
 
 BCC folds simple arithmetic on integer literals at compile time. Source

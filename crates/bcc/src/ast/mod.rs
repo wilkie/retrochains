@@ -95,8 +95,23 @@ pub enum ExprKind {
     IntLit(u32),
     Ident(String),
     BinOp { op: BinOp, left: Box<Expr>, right: Box<Expr> },
+    /// Prefix unary operator: `-e`, `!e`, `~e`.
+    Unary { op: UnaryOp, operand: Box<Expr> },
     /// Direct function call by name.
     Call { name: String, args: Vec<Expr> },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnaryOp {
+    /// Arithmetic negation. Emits `neg ax` at runtime; folds to the
+    /// two's-complement of the operand (truncated to 16 bits) for
+    /// constants.
+    Neg,
+    /// Logical not. Emits the 4-instruction `neg / sbb / inc` idiom at
+    /// runtime; folds `0` → `1`, anything else → `0`.
+    Not,
+    /// Bitwise complement. Emits `not ax`; folds to `~x` (truncated).
+    BitNot,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
