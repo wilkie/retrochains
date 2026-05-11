@@ -44,17 +44,23 @@ pub enum LocalLocation {
     Reg(Reg),
 }
 
-/// The four registers BCC draws from for enregistered locals/params.
+/// The five registers BCC draws from for enregistered locals/params.
+///
+/// The 8086 has six 16-bit general-purpose registers (AX, BX, CX, DX,
+/// SI, DI). AX is BCC's working/return register, so it's unusable for
+/// long-lived variables. That leaves five — which is the empirical
+/// maximum, confirmed by fixture 048 (six eligibles → one spills).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Reg {
     Si,
     Di,
     Dx,
     Bx,
+    Cx,
 }
 
 impl Reg {
-    /// The two-letter asm name (`si`/`di`/`dx`/`bx`).
+    /// The two-letter asm name (`si`/`di`/`dx`/`bx`/`cx`).
     #[must_use]
     pub fn name(self) -> &'static str {
         match self {
@@ -62,18 +68,19 @@ impl Reg {
             Self::Di => "di",
             Self::Dx => "dx",
             Self::Bx => "bx",
+            Self::Cx => "cx",
         }
     }
 
-    /// True for callee-saved registers (SI, DI). DX and BX are used by
-    /// BCC without save/restore at the function boundary.
-    #[must_use]
-    pub fn is_callee_saved(self) -> bool {
-        matches!(self, Self::Si | Self::Di)
-    }
+    /// Pool used for the *non-SI* eligibles, in assignment order.
+    /// SI is handed out separately to the most-used eligible (see
+    /// `Locals::analyze`).
+    const NON_SI_POOL: [Self; 4] = [Self::Di, Self::Dx, Self::Bx, Self::Cx];
 
-    /// The fixed allocation order BCC uses.
-    pub const POOL: [Self; 4] = [Self::Si, Self::Di, Self::Dx, Self::Bx];
+    /// Registers BCC treats as callee-saved, in canonical push order.
+    /// DX, BX, and CX are used by BCC without push/pop at the function
+    /// boundary.
+    const CALLEE_SAVED: [Self; 2] = [Self::Si, Self::Di];
 }
 
 /// One register-promoted parameter that needs an `mov <reg>, word ptr
@@ -145,25 +152,60 @@ impl Locals {
             count_uses_stmt(stmt, &mut counts);
         }
 
-        // Pass 2: assign locations.
+        // Pass 2: figure out the register assignment.
+        //
+        // Empirically (fixtures 028–048), BCC's rule is:
+        //   1. SI goes to the *most-used* eligible Int variable.
+        //      Ties broken by source order — earliest wins.
+        //   2. The remaining eligibles (in source order) fill the
+        //      `[DI, DX, BX, CX]` pool.
+        //   3. Beyond 5 eligibles, the rest spill to the stack.
+        //
+        // We pre-compute the register map here, then walk `declared`
+        // a final time below to assign LocalLocation/ParamLoad entries.
+        let eligible: Vec<usize> = (0..declared.len())
+            .filter(|&i| {
+                declared[i].ty == Type::Int
+                    && counts.get(&declared[i].name).copied().unwrap_or(0)
+                        >= ENREGISTER_THRESHOLD
+            })
+            .collect();
+        let si_pick = pick_si(&eligible, &declared, &counts);
+        let mut reg_of: HashMap<usize, Reg> = HashMap::new();
+        if let Some(idx) = si_pick {
+            reg_of.insert(idx, Reg::Si);
+        }
+        let mut non_si_iter = Reg::NON_SI_POOL.iter().copied();
+        for &i in &eligible {
+            if Some(i) == si_pick {
+                continue;
+            }
+            let Some(reg) = non_si_iter.next() else { break };
+            reg_of.insert(i, reg);
+        }
+
+        // Pass 3: fill in LocalEntry, saved_regs, param_loads. The
+        // order of saved_regs/param_loads is the function's natural
+        // emission order:
+        //
+        // - saved_regs: SI first (if used), then DI (if used).
+        //   Maintained by iterating in `declared` order and adding any
+        //   newly-seen callee-saved register.
+        // - param_loads: source order of the *params*.
         let mut by_name = HashMap::new();
         let mut stack_bytes = 0u16;
         let mut saved_regs = Vec::new();
         let mut param_loads = Vec::new();
-        let mut next_reg = 0usize;
-        for item in &declared {
-            let uses = counts.get(&item.name).copied().unwrap_or(0);
-            let eligible_for_reg = item.ty == Type::Int;
-            let location = if eligible_for_reg
-                && uses >= ENREGISTER_THRESHOLD
-                && next_reg < Reg::POOL.len()
-            {
-                let reg = Reg::POOL[next_reg];
-                next_reg += 1;
-                if reg.is_callee_saved() {
-                    saved_regs.push(reg);
-                }
-                // For params, record the prologue load.
+        // Push callee-saved registers in canonical order (SI, then DI).
+        // Both fixtures 046 and 048 emit `push si / push di` even when
+        // DI is the first to be assigned in source order.
+        for reg in Reg::CALLEE_SAVED {
+            if reg_of.values().any(|&r| r == reg) {
+                saved_regs.push(reg);
+            }
+        }
+        for (i, item) in declared.iter().enumerate() {
+            let location = if let Some(&reg) = reg_of.get(&i) {
                 if let DeclKind::Param { incoming_offset } = item.kind {
                     param_loads.push(ParamLoad { reg, incoming_offset });
                 }
@@ -173,11 +215,13 @@ impl Locals {
                     DeclKind::Local => {
                         stack_bytes = align_up(stack_bytes, item.ty.alignment())
                             + item.ty.size_bytes();
-                        LocalLocation::Stack(-i16::try_from(stack_bytes).expect("stack frame fits in i16"))
+                        LocalLocation::Stack(
+                            -i16::try_from(stack_bytes).expect("stack frame fits in i16"),
+                        )
                     }
-                    DeclKind::Param { incoming_offset } => {
-                        LocalLocation::Stack(i16::try_from(incoming_offset).expect("param offset fits in i16"))
-                    }
+                    DeclKind::Param { incoming_offset } => LocalLocation::Stack(
+                        i16::try_from(incoming_offset).expect("param offset fits in i16"),
+                    ),
                 }
             };
             by_name.insert(item.name.clone(), LocalEntry { location, ty: item.ty });
@@ -216,6 +260,24 @@ impl Locals {
             .get(name)
             .unwrap_or_else(|| panic!("unknown local in codegen: {name}"))
     }
+}
+
+/// Choose which eligible name gets SI: the one with the highest use
+/// count, ties broken by earliest source order. Returns the index into
+/// `declared` (not `eligible`).
+fn pick_si(
+    eligible: &[usize],
+    declared: &[DeclItem],
+    counts: &HashMap<String, u32>,
+) -> Option<usize> {
+    let mut best: Option<(usize, u32)> = None;
+    for &i in eligible {
+        let uses = counts.get(&declared[i].name).copied().unwrap_or(0);
+        if best.is_none_or(|(_, b)| uses > b) {
+            best = Some((i, uses));
+        }
+    }
+    best.map(|(i, _)| i)
 }
 
 struct DeclItem {

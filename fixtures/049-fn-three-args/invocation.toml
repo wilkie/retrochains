@@ -1,0 +1,4 @@
+description = "3-arg call. Pins the threshold between `pop cx` per arg (used at 1-2 args, fixture 034) and `add sp, N*2` (used at 4 args, fixture 046)."
+tool = "bcc"
+args = ["-S", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

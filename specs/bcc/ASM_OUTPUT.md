@@ -436,15 +436,29 @@ fixtures `028`–`032` pin the heuristic and the emission shape.
 | `031`   | `c`    | 4                 | DX       |
 | `031`   | `d`    | 4                 | BX       |
 | `032`   | `i`    | 3                 | SI       |
+| `046`   | `a`–`d`| 3 each            | DI/DX/BX/CX (source order) |
+| `046`   | `x`    | 4 (most-used)     | SI       |
+| `048`   | `a`    | 5 (most-used)     | SI       |
+| `048`   | `b`–`x`| 4 each            | DI/DX/BX/CX (source order) |
+| `048`   | `y`    | 4                 | stack (`[bp-2]`, 6th eligible) |
 
-The heuristic is: **a local with ≥ 3 textual occurrences (counting the
-initializer) is enregistered, in declaration order, drawing from the
-fixed pool `[SI, DI, DX, BX]`.** Locals with fewer uses, and any locals
-left over after the pool is exhausted, stay on the stack.
+The heuristic, refined across fixtures 028–048:
 
-(We don't yet know what happens with a 5th-eligible local, or with a
-function that calls another function in its loop body — DX/BX are
-caller-saved across cdecl calls. Future fixtures will pin those down.)
+1. A local or parameter with ≥ 3 textual occurrences (counting the
+   "implicit init" of a declaration or a param entering the function)
+   is eligible for a register.
+2. The eligible **most-used** name gets `SI`. Ties are broken by
+   source order — earliest wins.
+3. The remaining eligibles fill `[DI, DX, BX, CX]` in source order.
+4. Beyond five eligibles, the rest spill to the stack (fixture 048
+   confirms the pool size: AX is BCC's working register, SP/BP belong
+   to the frame, so the maximum is `{SI, DI, DX, BX, CX}` = 5).
+
+Only `SI` and `DI` are pushed/popped as callee-saved. `DX`, `BX`, and
+`CX` are used without save/restore — fine for leaf functions, and
+inherited as-is for non-leaf functions today (no fixture pins the
+behavior when a register-promoted variable's lifetime overlaps a call
+that clobbers DX/BX/CX).
 
 ### Prologue and epilogue shape
 
@@ -613,10 +627,11 @@ fixtures before we can pin the codegen.
   result lives in AX, caller cleans the stack.
 - Arguments are always materialized into AX first, then pushed:
   `mov ax, K / push ax`. BCC does *not* use 80186+ `push K`.
-- Cleanup after the call is one `pop cx` **per argument** (the value
-  is discarded). Fixture 034 shows two `pop cx`s after a 2-arg call —
-  not `add sp, 4`. Whether BCC switches to `add sp, N*2` for larger
-  arg counts is open — needs a fixture.
+- Cleanup after the call: BCC uses `pop cx` per arg when there are
+  ≤ 2 args (small/byte-counted encoding), and switches to
+  `add sp, N*2` at ≥ 3 args (one 3-byte instruction is smaller than
+  3+ `pop cx`s). Confirmed by 010 (0 args, nothing), 033 (1), 034 (2),
+  049 (3 → `add sp,6`), 046/048 (4 → `add sp,8`).
 
 ```
 	mov	ax,5            ; rightmost arg first

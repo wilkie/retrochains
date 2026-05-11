@@ -396,16 +396,30 @@ impl<'a> FunctionEmitter<'a> {
     }
 
     /// Emit a function call: push args right-to-left (each materialized
-    /// into AX first), `call near ptr _name`, then `pop cx` per arg to
-    /// clean up the cdecl-style caller-cleanup. Result lands in AX.
+    /// into AX first), `call near ptr _name`, then clean up the
+    /// pushed args per the cdecl convention. Result lands in AX.
+    ///
+    /// Cleanup uses `pop cx` per arg when there are ≤ 2 args (1-2
+    /// pops is no bigger than `add sp, N`, and a single `pop` is
+    /// smaller). For ≥ 3 args BCC switches to `add sp, N*2` (one
+    /// 3-byte instruction beats three or more `pop cx`s).
+    /// Fixtures 010 (0), 033 (1), 034 (2), 049 (3), 046/048 (4).
     fn emit_call(&mut self, name: &str, args: &[Expr]) {
         for arg in args.iter().rev() {
             self.emit_expr_to_ax(arg);
             self.out.extend_from_slice(b"\tpush\tax\r\n");
         }
         let _ = write!(self.out, "\tcall\tnear ptr _{name}\r\n");
-        for _ in args {
-            self.out.extend_from_slice(b"\tpop\tcx\r\n");
+        match args.len() {
+            0 => {}
+            1 | 2 => {
+                for _ in args {
+                    self.out.extend_from_slice(b"\tpop\tcx\r\n");
+                }
+            }
+            n => {
+                let _ = write!(self.out, "\tadd\tsp,{}\r\n", n * 2);
+            }
         }
     }
 
