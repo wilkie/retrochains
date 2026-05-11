@@ -15,11 +15,15 @@ use crate::ast::{BinOp, Expr, ExprKind};
 pub fn try_const_eval(e: &Expr) -> Option<u32> {
     match &e.kind {
         ExprKind::IntLit(n) => Some(*n),
-        ExprKind::Ident(_) => None,
-        ExprKind::BinOp { op: BinOp::Add, left, right } => {
+        ExprKind::Ident(_) | ExprKind::Call { .. } => None,
+        ExprKind::BinOp { op, left, right } => {
             let l = try_const_eval(left)?;
             let r = try_const_eval(right)?;
-            Some(l.wrapping_add(r))
+            Some(match op {
+                BinOp::Add => l.wrapping_add(r),
+                BinOp::Sub => l.wrapping_sub(r),
+                BinOp::Mul => l.wrapping_mul(r),
+            })
         }
     }
 }

@@ -23,9 +23,11 @@ use line_map::LineMap;
 /// Emit the per-function chunk of an `-S` file for one function.
 ///
 /// `source` is the full original source text; we slice it to emit
-/// source-line comments.
-pub fn emit_function(out: &mut Vec<u8>, source: &str, function: &Function) {
-    let mut emitter = FunctionEmitter::new(out, source, function);
+/// source-line comments. `func_idx` is the 1-based index of this
+/// function within its translation unit — it ends up in the
+/// `@<func_idx>@50` exit label.
+pub fn emit_function(out: &mut Vec<u8>, source: &str, function: &Function, func_idx: u32) {
+    let mut emitter = FunctionEmitter::new(out, source, function, func_idx);
     emitter.run();
 }
 
@@ -67,6 +69,7 @@ struct FunctionEmitter<'a> {
     out: &'a mut Vec<u8>,
     source: &'a str,
     function: &'a Function,
+    func_idx: u32,
     lines: LineMap,
     /// 1-based source line of the last comment we emitted, or 0 if we
     /// haven't emitted any comment yet for this function.
@@ -75,11 +78,17 @@ struct FunctionEmitter<'a> {
 }
 
 impl<'a> FunctionEmitter<'a> {
-    fn new(out: &'a mut Vec<u8>, source: &'a str, function: &'a Function) -> Self {
+    fn new(
+        out: &'a mut Vec<u8>,
+        source: &'a str,
+        function: &'a Function,
+        func_idx: u32,
+    ) -> Self {
         Self {
             out,
             source,
             function,
+            func_idx,
             lines: LineMap::new(source),
             current_line: 0,
             locals: Locals::new(),
@@ -96,8 +105,6 @@ impl<'a> FunctionEmitter<'a> {
                 self.locals.allocate(name, *ty);
             }
         }
-
-        self.out.extend_from_slice(b"_TEXT\tsegment byte public 'CODE'\r\n");
 
         // Header line: emit `;` comment block for the line where the
         // function definition starts, before the prologue.
@@ -133,8 +140,8 @@ impl<'a> FunctionEmitter<'a> {
             self.emit_stmt(stmt);
         }
 
-        // Single exit label.
-        self.out.extend_from_slice(b"@1@50:\r\n");
+        // Single exit label, `@<func_idx>@50`.
+        let _ = write!(self.out, "@{}@50:\r\n", self.func_idx);
 
         // Closing-brace line gets its own comment block. Span end is the
         // byte just past `}`, so back up by one to get the brace itself.
@@ -151,8 +158,6 @@ impl<'a> FunctionEmitter<'a> {
         self.out.extend_from_slice(b"\tret\t\r\n");
 
         let _ = write!(self.out, "{sym}\tendp\r\n");
-        self.out.extend_from_slice(b"\t?debug\tC E9\r\n");
-        self.out.extend_from_slice(b"_TEXT\tends\r\n");
     }
 
     fn emit_stmt(&mut self, stmt: &Stmt) {
@@ -162,7 +167,7 @@ impl<'a> FunctionEmitter<'a> {
         match &stmt.kind {
             StmtKind::Return(value) => {
                 self.emit_return_value_load(value.as_ref());
-                self.out.extend_from_slice(b"\tjmp\tshort @1@50\r\n");
+                let _ = write!(self.out, "\tjmp\tshort @{}@50\r\n", self.func_idx);
             }
             StmtKind::Declare { name, init, .. } => {
                 let offset = self
@@ -211,34 +216,67 @@ impl<'a> FunctionEmitter<'a> {
                 let offset = self.local_offset(name);
                 let _ = write!(self.out, "\tmov\tax,word ptr [bp-{offset}]\r\n");
             }
-            ExprKind::BinOp { op: BinOp::Add, left, right } => {
-                // Load left operand into AX, then add right with a
-                // memory-direct (or immediate) `add`. This matches the
-                // pattern observed in fixture 006.
+            ExprKind::BinOp { op, left, right } => {
+                // Load left operand into AX, then apply the right side
+                // via the operator-specific pattern (memory-direct or
+                // immediate add/sub; single-operand imul).
                 self.emit_expr_to_ax(left);
-                self.emit_add_right(right);
+                self.emit_binary_right(*op, right);
+            }
+            ExprKind::Call { name } => {
+                // No-arg call. Result lands in AX; that's exactly where
+                // `emit_expr_to_ax` is supposed to leave its result.
+                let _ = write!(self.out, "\tcall\tnear ptr _{name}\r\n");
             }
         }
     }
 
-    /// Emit the right-hand side of a `+` as an `add ax, <operand>`.
-    /// Sub-expressions on the right side aren't yet supported because no
-    /// fixture exercises them; we'll grow this when one does.
-    fn emit_add_right(&mut self, e: &Expr) {
+    /// Emit the right-hand side of a binary op, applying it to AX.
+    /// `add`/`sub` use the two-operand `add ax, <src>` / `sub ax, <src>`
+    /// form. `imul` uses the single-operand `imul <src>` form (DX:AX
+    /// receives the product; we use only AX for 16-bit `int`).
+    fn emit_binary_right(&mut self, op: BinOp, e: &Expr) {
+        // Constant operand: same shape for add/sub via immediate
+        // (`add ax,K` / `sub ax,K`). `imul ax, imm` only exists on
+        // 80186+ — no fixture forces this yet.
         if let Some(v) = try_const_eval(e) {
-            let _ = write!(self.out, "\tadd\tax,{v}\r\n");
+            match op {
+                BinOp::Add => {
+                    let _ = write!(self.out, "\tadd\tax,{v}\r\n");
+                }
+                BinOp::Sub => {
+                    let _ = write!(self.out, "\tsub\tax,{v}\r\n");
+                }
+                BinOp::Mul => panic!("imul with immediate not yet supported"),
+            }
             return;
         }
         match &e.kind {
             ExprKind::Ident(name) => {
                 let offset = self.local_offset(name);
-                let _ = write!(self.out, "\tadd\tax,word ptr [bp-{offset}]\r\n");
+                match op {
+                    BinOp::Add => {
+                        let _ = write!(self.out, "\tadd\tax,word ptr [bp-{offset}]\r\n");
+                    }
+                    BinOp::Sub => {
+                        let _ = write!(self.out, "\tsub\tax,word ptr [bp-{offset}]\r\n");
+                    }
+                    BinOp::Mul => {
+                        // Single-operand IMUL: AX <- AX * src, high word
+                        // in DX (discarded for 16-bit int).
+                        let _ = write!(self.out, "\timul\tword ptr [bp-{offset}]\r\n");
+                    }
+                }
             }
             ExprKind::IntLit(_) => unreachable!("literals fold via try_const_eval"),
+            ExprKind::Call { name } => {
+                // A non-constant call as right operand needs the left's
+                // value preserved across the call; no fixture forces
+                // this yet. Fail loudly so we notice when it shows up.
+                let _ = name;
+                panic!("call as right operand not yet supported (need to preserve AX)");
+            }
             ExprKind::BinOp { .. } => {
-                // A nested non-constant right-hand binary operand would
-                // need register save/restore; no fixture forces this
-                // yet. Fail loudly so we notice the shape when it lands.
                 panic!("nested non-constant right operand not yet supported");
             }
         }

@@ -64,9 +64,13 @@ pub enum ExprKind {
     IntLit(u32),
     Ident(String),
     BinOp { op: BinOp, left: Box<Expr>, right: Box<Expr> },
+    /// Direct function call by name. Arguments not yet supported.
+    Call { name: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinOp {
     Add,
+    Sub,
+    Mul,
 }

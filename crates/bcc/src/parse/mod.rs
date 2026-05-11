@@ -111,16 +111,37 @@ impl Parser {
         self.parse_additive()
     }
 
-    /// Left-associative chain of `<atom> (+ <atom>)*`.
+    /// Left-associative chain of `<multiplicative> ((+|-) <multiplicative>)*`.
     fn parse_additive(&mut self) -> Result<Expr, ParseError> {
+        let mut left = self.parse_multiplicative()?;
+        loop {
+            let op = match self.peek().kind {
+                TokenKind::Plus => BinOp::Add,
+                TokenKind::Minus => BinOp::Sub,
+                _ => break,
+            };
+            self.bump();
+            let right = self.parse_multiplicative()?;
+            let span = Span::new(left.span.start, right.span.end);
+            left = Expr {
+                kind: ExprKind::BinOp { op, left: Box::new(left), right: Box::new(right) },
+                span,
+            };
+        }
+        Ok(left)
+    }
+
+    /// Left-associative chain of `<atom> (* <atom>)*`. Multiplicative
+    /// binds tighter than additive, so `1 + 2 * 3` ≡ `1 + (2 * 3)`.
+    fn parse_multiplicative(&mut self) -> Result<Expr, ParseError> {
         let mut left = self.parse_atom()?;
-        while matches!(self.peek().kind, TokenKind::Plus) {
+        while matches!(self.peek().kind, TokenKind::Star) {
             self.bump();
             let right = self.parse_atom()?;
             let span = Span::new(left.span.start, right.span.end);
             left = Expr {
                 kind: ExprKind::BinOp {
-                    op: BinOp::Add,
+                    op: BinOp::Mul,
                     left: Box::new(left),
                     right: Box::new(right),
                 },
@@ -135,7 +156,17 @@ impl Parser {
         match tok.kind {
             TokenKind::IntLit(v) => Ok(Expr { kind: ExprKind::IntLit(v), span: tok.span }),
             TokenKind::Ident(ref name) => {
-                Ok(Expr { kind: ExprKind::Ident(name.clone()), span: tok.span })
+                // Postfix `()` makes it a function call. Args land later.
+                if matches!(self.peek().kind, TokenKind::LParen) {
+                    self.bump();
+                    let close = self.expect(&TokenKind::RParen)?;
+                    Ok(Expr {
+                        kind: ExprKind::Call { name: name.clone() },
+                        span: Span::new(tok.span.start, close.span.end),
+                    })
+                } else {
+                    Ok(Expr { kind: ExprKind::Ident(name.clone()), span: tok.span })
+                }
             }
             _ => Err(ParseError::Unsupported { offset: tok.span.start }),
         }
@@ -212,6 +243,33 @@ mod tests {
         let ExprKind::BinOp { op: BinOp::Add, ref left, ref right } = e.kind else { panic!() };
         assert!(matches!(left.kind, ExprKind::IntLit(1)));
         assert!(matches!(right.kind, ExprKind::IntLit(2)));
+    }
+
+    #[test]
+    fn multiplicative_binds_tighter_than_additive() {
+        // `1 + 2 * 3` ≡ `1 + (2 * 3)`.
+        let unit = parse("int main(void) { return 1 + 2 * 3; }\n").unwrap();
+        let StmtKind::Return(Some(ref e)) = unit.functions[0].body[0].kind else { panic!() };
+        let ExprKind::BinOp { op: BinOp::Add, ref left, ref right } = e.kind else { panic!() };
+        assert!(matches!(left.kind, ExprKind::IntLit(1)));
+        let ExprKind::BinOp { op: BinOp::Mul, .. } = right.kind else {
+            panic!("expected right side to be Mul");
+        };
+    }
+
+    #[test]
+    fn subtraction_parses() {
+        let unit = parse("int main(void) { return 9 - 4; }\n").unwrap();
+        let StmtKind::Return(Some(ref e)) = unit.functions[0].body[0].kind else { panic!() };
+        assert!(matches!(e.kind, ExprKind::BinOp { op: BinOp::Sub, .. }));
+    }
+
+    #[test]
+    fn call_parses() {
+        let unit = parse("int main(void) { return f(); }\n").unwrap();
+        let StmtKind::Return(Some(ref e)) = unit.functions[0].body[0].kind else { panic!() };
+        let ExprKind::Call { ref name } = e.kind else { panic!() };
+        assert_eq!(name, "f");
     }
 
     #[test]

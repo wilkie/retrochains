@@ -70,9 +70,15 @@ pub fn build_asm(
     write_debug_header(&mut out, source_filename_lower, mtime);
     write_segment_scaffold(&mut out);
 
-    for function in &unit.functions {
-        codegen::emit_function(&mut out, source, function);
+    // _TEXT opens once for the whole translation unit; every function
+    // lives inside, ending with one `?debug C E9` and one `_TEXT ends`.
+    out.extend_from_slice(b"_TEXT\tsegment byte public 'CODE'\r\n");
+    for (idx, function) in unit.functions.iter().enumerate() {
+        let func_idx = u32::try_from(idx + 1).unwrap_or(u32::MAX);
+        codegen::emit_function(&mut out, source, function, func_idx);
     }
+    out.extend_from_slice(b"\t?debug\tC E9\r\n");
+    out.extend_from_slice(b"_TEXT\tends\r\n");
 
     write_tail(&mut out, &unit);
     out.push(0x1A); // DOS EOF marker
@@ -142,7 +148,10 @@ fn write_tail(out: &mut Vec<u8>, unit: &crate::ast::Unit) {
     out.extend_from_slice(b"_DATA\tends\r\n");
     out.extend_from_slice(b"_TEXT\tsegment byte public 'CODE'\r\n");
     out.extend_from_slice(b"_TEXT\tends\r\n");
-    for f in &unit.functions {
+    // Public symbols are emitted in *reverse* definition order — BCC
+    // walks its symbol table LIFO and we have to match that for
+    // byte-exactness. See specs/bcc/ASM_OUTPUT.md.
+    for f in unit.functions.iter().rev() {
         let _ = write!(out, "\tpublic\t{}\r\n", codegen::function_symbol(&f.name));
     }
     out.extend_from_slice(b"\tend\r\n");

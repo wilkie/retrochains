@@ -24,6 +24,8 @@ pub enum TokenKind {
     Semicolon,
     Equals,
     Plus,
+    Minus,
+    Star,
     // End-of-input sentinel
     Eof,
 }
@@ -46,6 +48,8 @@ impl TokenKind {
             Self::Semicolon => "`;`",
             Self::Equals => "`=`",
             Self::Plus => "`+`",
+            Self::Minus => "`-`",
+            Self::Star => "`*`",
             Self::Eof => "end of input",
         }
     }
