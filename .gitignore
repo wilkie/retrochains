@@ -1,0 +1,39 @@
+# Rust
+target/
+**/*.rs.bk
+
+# Node / pnpm
+node_modules/
+.pnpm-store/
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# Build artifacts
+dist/
+build/
+pkg/
+
+# Stray Borland-built artifacts at the repo root (fixture outputs belong under
+# fixtures/ and ARE tracked, so we don't blanket-ignore these extensions).
+/*.OBJ
+/*.obj
+/*.EXE
+/*.exe
+/*.MAP
+/*.map
+/*.ASM
+/*.asm
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.idea/
+.vscode/
+*~
+
+# Env
+.env
+.env.local

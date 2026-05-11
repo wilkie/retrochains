@@ -1,0 +1,24 @@
+[package]
+name = "tasm"
+description = "Reimplementation of Turbo Assembler, the Borland C++ 2.0 assembler (TASM.EXE)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lib]
+name = "tasm"
+path = "src/lib.rs"
+
+[[bin]]
+name = "tasm"
+path = "src/main.rs"
+
+[dependencies]
+obj = { path = "../obj" }
+x86 = { path = "../x86" }
+
+[lints]
+workspace = true

@@ -1,0 +1,22 @@
+[package]
+name = "bcc-wasm"
+description = "WASM entry points wrapping the bcc/tlink/tasm crates for the @borland-c20/bcc TypeScript package"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lib]
+name = "bcc_wasm"
+path = "src/lib.rs"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+bcc = { path = "../bcc" }
+tlink = { path = "../tlink" }
+tasm = { path = "../tasm" }
+
+[lints]
+workspace = true

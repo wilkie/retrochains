@@ -1,0 +1,12 @@
+[package]
+name = "obj"
+description = "Borland/Intel OMF object-file format used by Borland C++ 2.0 toolchain"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,23 @@
+[package]
+name = "tlink"
+description = "Reimplementation of Turbo Link 4.0, the Borland C++ 2.0 linker (TLINK.EXE)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lib]
+name = "tlink"
+path = "src/lib.rs"
+
+[[bin]]
+name = "tlink"
+path = "src/main.rs"
+
+[dependencies]
+obj = { path = "../obj" }
+
+[lints]
+workspace = true

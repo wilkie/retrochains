@@ -1,0 +1,24 @@
+[package]
+name = "bcc"
+description = "Reimplementation of the Borland C++ 2.0 C/C++ compiler driver and front-end (BCC.EXE)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lib]
+name = "bcc"
+path = "src/lib.rs"
+
+[[bin]]
+name = "bcc"
+path = "src/main.rs"
+
+[dependencies]
+obj = { path = "../obj" }
+x86 = { path = "../x86" }
+
+[lints]
+workspace = true

@@ -1,0 +1,12 @@
+[package]
+name = "x86"
+description = "x86 (8086/80286) instruction encoding and real-mode addressing used by the Borland C++ 2.0 toolchain"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true

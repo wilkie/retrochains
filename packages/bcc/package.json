@@ -1,0 +1,24 @@
+{
+  "name": "@borland-c20/bcc",
+  "version": "0.0.0",
+  "private": true,
+  "description": "TypeScript wrapper around the WASM build of the Rust Borland C++ 2.0 toolchain reimplementation",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": ["dist", "wasm"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "node --test",
+    "lint": "eslint src"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0"
+  }
+}

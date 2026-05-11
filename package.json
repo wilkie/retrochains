@@ -1,0 +1,26 @@
+{
+  "name": "borland-c20",
+  "private": true,
+  "description": "Reverse-engineered Borland C++ 2.0 toolchain (Rust + WASM, TypeScript wrapper)",
+  "packageManager": "pnpm@10.31.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "pnpm -r run build",
+    "test": "pnpm -r run test",
+    "lint": "pnpm -r run lint",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.18.0",
+    "@rawrs/borland-c-2": "^1.0.7",
+    "@types/node": "^22.10.0",
+    "canvas": "^3.2.3",
+    "eslint": "^9.18.0",
+    "prettier": "^3.4.0",
+    "typescript": "^5.7.0",
+    "typescript-eslint": "^8.20.0"
+  }
+}
