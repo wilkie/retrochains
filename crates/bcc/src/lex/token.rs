@@ -11,6 +11,7 @@ pub struct Token {
 pub enum TokenKind {
     // Keywords (extend as fixtures demand)
     KwInt,
+    KwChar,
     KwVoid,
     KwReturn,
     KwIf,
@@ -53,6 +54,7 @@ impl TokenKind {
     pub fn describe(&self) -> &'static str {
         match self {
             Self::KwInt => "`int`",
+            Self::KwChar => "`char`",
             Self::KwVoid => "`void`",
             Self::KwReturn => "`return`",
             Self::KwIf => "`if`",

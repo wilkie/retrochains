@@ -105,6 +105,7 @@ impl<'a> Lexer<'a> {
         let text = &self.src[start..self.pos];
         match text {
             b"int" => TokenKind::KwInt,
+            b"char" => TokenKind::KwChar,
             b"void" => TokenKind::KwVoid,
             b"return" => TokenKind::KwReturn,
             b"if" => TokenKind::KwIf,

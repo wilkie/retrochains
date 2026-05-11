@@ -80,26 +80,7 @@ impl Parser {
                     span: Span::new(start, semi.span.end),
                 })
             }
-            TokenKind::KwInt => {
-                // `int <name> [= <init>];`
-                self.bump();
-                let name_tok = self.bump();
-                let TokenKind::Ident(name) = &name_tok.kind else {
-                    return Err(ParseError::NotAnIdent { offset: name_tok.span.start });
-                };
-                let name = name.clone();
-                let init = if matches!(self.peek().kind, TokenKind::Equals) {
-                    self.bump();
-                    Some(self.parse_expr()?)
-                } else {
-                    None
-                };
-                let semi = self.expect(&TokenKind::Semicolon)?;
-                Ok(Stmt {
-                    kind: StmtKind::Declare { ty: Type::Int, name, init },
-                    span: Span::new(start, semi.span.end),
-                })
-            }
+            TokenKind::KwInt | TokenKind::KwChar => self.parse_declare(start),
             TokenKind::KwIf => self.parse_if(),
             TokenKind::KwWhile => self.parse_while(),
             TokenKind::Ident(_) => {
@@ -120,6 +101,33 @@ impl Parser {
             }
             _ => Err(ParseError::Unsupported { offset: start }),
         }
+    }
+
+    /// `<type> <name> [= <init>] ;`. Caller has already peeked the
+    /// type keyword (int or char).
+    fn parse_declare(&mut self, start: u32) -> Result<Stmt, ParseError> {
+        let ty_tok = self.bump();
+        let ty = match ty_tok.kind {
+            TokenKind::KwInt => Type::Int,
+            TokenKind::KwChar => Type::Char,
+            _ => unreachable!("caller peeked an int/char keyword"),
+        };
+        let name_tok = self.bump();
+        let TokenKind::Ident(name) = &name_tok.kind else {
+            return Err(ParseError::NotAnIdent { offset: name_tok.span.start });
+        };
+        let name = name.clone();
+        let init = if matches!(self.peek().kind, TokenKind::Equals) {
+            self.bump();
+            Some(self.parse_expr()?)
+        } else {
+            None
+        };
+        let semi = self.expect(&TokenKind::Semicolon)?;
+        Ok(Stmt {
+            kind: StmtKind::Declare { ty, name, init },
+            span: Span::new(start, semi.span.end),
+        })
     }
 
     /// `while ( <cond> ) <branch>`. Same branch shape as `if`.

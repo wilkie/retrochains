@@ -20,6 +20,12 @@ use std::collections::HashMap;
 
 use crate::ast::{Expr, ExprKind, Function, Stmt, StmtKind, Type};
 
+/// Round `n` up to the next multiple of `alignment` (a small power of 2).
+fn align_up(n: u16, alignment: u16) -> u16 {
+    let mask = alignment - 1;
+    (n + mask) & !mask
+}
+
 /// Where one local variable lives for the duration of the function.
 #[derive(Debug, Clone, Copy)]
 pub enum LocalLocation {
@@ -72,11 +78,18 @@ const ENREGISTER_THRESHOLD: u32 = 3;
 pub struct Locals {
     /// Total bytes claimed for stack-resident locals only.
     stack_bytes: u16,
-    /// Per-local placement.
-    by_name: HashMap<String, LocalLocation>,
+    /// Per-local placement + type. Type is kept so codegen can pick the
+    /// right asm operand width (`byte ptr` vs `word ptr`).
+    by_name: HashMap<String, LocalEntry>,
     /// Which callee-saved registers we actually used (in order, for
     /// emitting matching push/pop sequences).
     saved_regs: Vec<Reg>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct LocalEntry {
+    location: LocalLocation,
+    ty: Type,
 }
 
 impl Locals {
@@ -93,13 +106,28 @@ impl Locals {
         }
 
         // Pass 2: assign locations.
+        //
+        // Stack offsets grow downward from `bp`; we track the cumulative
+        // distance below `bp` in `stack_bytes`. Each `int` slot must
+        // sit on an even bp-offset (BCC pads with a byte when the
+        // cursor is on an odd offset, as in fixture 011: `char c`
+        // takes [bp-1], then `int i` lands at [bp-4] with [bp-2]
+        // padding).
+        //
+        // Only `int` locals are eligible for register allocation; we
+        // haven't observed BCC enregistering a `char` and don't have a
+        // fixture to pin its shape.
         let mut by_name = HashMap::new();
         let mut stack_bytes = 0u16;
         let mut saved_regs = Vec::new();
         let mut next_reg = 0usize;
         for (name, ty) in &declared {
             let uses = counts.get(name).copied().unwrap_or(0);
-            let location = if uses >= ENREGISTER_THRESHOLD && next_reg < Reg::POOL.len() {
+            let eligible_for_reg = *ty == Type::Int;
+            let location = if eligible_for_reg
+                && uses >= ENREGISTER_THRESHOLD
+                && next_reg < Reg::POOL.len()
+            {
                 let reg = Reg::POOL[next_reg];
                 next_reg += 1;
                 if reg.is_callee_saved() {
@@ -107,10 +135,10 @@ impl Locals {
                 }
                 LocalLocation::Reg(reg)
             } else {
-                stack_bytes += ty.size_bytes();
+                stack_bytes = align_up(stack_bytes, ty.alignment()) + ty.size_bytes();
                 LocalLocation::Stack(stack_bytes)
             };
-            by_name.insert(name.clone(), location);
+            by_name.insert(name.clone(), LocalEntry { location, ty: *ty });
         }
 
         Self { stack_bytes, by_name, saved_regs }
@@ -131,8 +159,18 @@ impl Locals {
     /// Where does `name` live? Panics on an unknown name (codegen bug).
     #[must_use]
     pub fn location_of(&self, name: &str) -> LocalLocation {
-        *self
-            .by_name
+        self.entry(name).location
+    }
+
+    /// Declared type of `name`. Used to pick `byte`-vs-`word` operand
+    /// widths in codegen.
+    #[must_use]
+    pub fn type_of(&self, name: &str) -> Type {
+        self.entry(name).ty
+    }
+
+    fn entry(&self, name: &str) -> &LocalEntry {
+        self.by_name
             .get(name)
             .unwrap_or_else(|| panic!("unknown local in codegen: {name}"))
     }

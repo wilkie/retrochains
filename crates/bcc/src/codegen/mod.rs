@@ -12,7 +12,7 @@
 
 use std::io::Write as _;
 
-use crate::ast::{BinOp, Expr, ExprKind, Function, Stmt, StmtKind};
+use crate::ast::{BinOp, Expr, ExprKind, Function, Stmt, StmtKind, Type};
 
 mod fold;
 mod line_map;
@@ -147,11 +147,11 @@ impl<'a> FunctionEmitter<'a> {
                 let exit = self.exit_label_num();
                 let _ = write!(self.out, "\tjmp\tshort @{}@{exit}\r\n", self.func_idx);
             }
-            StmtKind::Declare { name, init, .. } => {
+            StmtKind::Declare { name, init, ty } => {
                 self.advance_to_stmt_line(stmt);
                 if let Some(init) = init {
                     let loc = self.locals.location_of(name);
-                    self.emit_init_local(loc, init);
+                    self.emit_init_local(loc, *ty, init);
                 }
             }
             StmtKind::Assign { name, value } => {
@@ -287,15 +287,23 @@ impl<'a> FunctionEmitter<'a> {
     }
 
     /// Initialize a freshly-declared local with `init`.
-    fn emit_init_local(&mut self, loc: LocalLocation, init: &Expr) {
+    fn emit_init_local(&mut self, loc: LocalLocation, ty: Type, init: &Expr) {
         match loc {
             LocalLocation::Stack(off) => {
                 // Stack init: prefer the immediate-store form when the
-                // initializer folds to a constant.
+                // initializer folds to a constant. For `char` we emit
+                // `byte ptr` (fixture 011); for `int`, `word ptr`.
                 if let Some(v) = try_const_eval(init) {
-                    let _ = write!(self.out, "\tmov\tword ptr [bp-{off}],{v}\r\n");
+                    let width = ptr_width(ty);
+                    let _ = write!(self.out, "\tmov\t{width} ptr [bp-{off}],{v}\r\n");
                     return;
                 }
+                // Non-constant init for a char would need a different
+                // shape (load to AL, store AL); no fixture yet.
+                assert!(
+                    matches!(ty, Type::Int),
+                    "non-constant init for `char` not yet supported (no fixture)"
+                );
                 self.emit_expr_to_ax(init);
                 let _ = write!(self.out, "\tmov\tword ptr [bp-{off}],ax\r\n");
             }
@@ -349,6 +357,13 @@ impl<'a> FunctionEmitter<'a> {
             ExprKind::IntLit(_) => unreachable!("literals fold via try_const_eval"),
             ExprKind::Ident(name) => match self.locals.location_of(name) {
                 LocalLocation::Stack(off) => {
+                    // A `char` read into AX would need sign-extension
+                    // (cbw or mov al/cbw), which we haven't observed in
+                    // a fixture — bail loudly until one shows up.
+                    assert!(
+                        matches!(self.locals.type_of(name), Type::Int),
+                        "reading a `char` local in expression position not yet supported (no fixture)"
+                    );
                     let _ = write!(self.out, "\tmov\tax,word ptr [bp-{off}]\r\n");
                 }
                 LocalLocation::Reg(reg) => {
@@ -454,6 +469,16 @@ impl<'a> FunctionEmitter<'a> {
         }
         self.out.extend_from_slice(b"   ;\t\r\n");
         self.current_line = line;
+    }
+}
+
+/// Width keyword for a `mov ptr [bp-N], K` store of the given type:
+/// `"byte"` for `char`, `"word"` for `int`. Currently used only by
+/// initialization of stack-resident locals.
+fn ptr_width(ty: Type) -> &'static str {
+    match ty {
+        Type::Int => "word",
+        Type::Char => "byte",
     }
 }
 

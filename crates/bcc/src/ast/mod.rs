@@ -48,6 +48,8 @@ pub enum StmtKind {
 pub enum Type {
     /// `int` — 16-bit signed under the small memory model.
     Int,
+    /// `char` — 1-byte signed (BCC's default for plain `char`).
+    Char,
 }
 
 impl Type {
@@ -57,6 +59,18 @@ impl Type {
     pub fn size_bytes(self) -> u16 {
         match self {
             Self::Int => 2,
+            Self::Char => 1,
+        }
+    }
+
+    /// Alignment (in bytes) required for this type's stack slot. `int`
+    /// must land on an even bp-offset (so BCC pads when a preceding
+    /// `char` left the cursor at an odd offset — see fixture 011).
+    #[must_use]
+    pub fn alignment(self) -> u16 {
+        match self {
+            Self::Int => 2,
+            Self::Char => 1,
         }
     }
 }

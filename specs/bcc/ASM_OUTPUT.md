@@ -581,15 +581,24 @@ BCC allocates **4 bytes**:
 The byte at `[bp-2]` is padding so the `int` lands on an even-offset
 slot. So:
 
-- `char` occupies 1 byte (`byte ptr [bp-N]`).
-- `int` is aligned to a 2-byte boundary; gaps are padded.
-- Total frame appears to be rounded so the cumulative allocation lands
-  on even bytes. (A bare single `char` may still consume 1 byte — needs
-  a confirming fixture.)
+- `char` occupies 1 byte at `[bp-N]`, no padding *before* it.
+- `int` requires a 2-byte-aligned bp-offset; when the cursor sits on
+  an odd offset (because a `char` preceded it), BCC inserts a 1-byte
+  pad and the int lands at the next even offset.
+- The frame size is exactly the cumulative used offset; no extra tail
+  padding has been observed.
 
 This sidesteps the "is a 3-byte frame possible?" question: in normal
 C source it isn't, given BCC's alignment policy. The `dec sp` ↔
 `sub sp,N` threshold (≤2 → `dec sp`, >2 → `sub sp,N`) appears safe.
+
+Open: a `char`-only frame (e.g. `char c;` alone) — does BCC emit
+`dec sp` (1-byte frame) or round up to 2? Needs a fixture.
+
+`char` initialization with a constant uses `mov byte ptr [bp-N], K`
+(byte-immediate). Non-constant char initialization, char reads in
+expressions, and char enregistration are all unexercised — needs
+fixtures before we can pin the codegen.
 
 ### Calling a function (`010`)
 
