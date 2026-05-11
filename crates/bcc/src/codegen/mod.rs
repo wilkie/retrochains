@@ -12,7 +12,9 @@
 
 use std::io::Write as _;
 
-use crate::ast::{BinOp, Expr, ExprKind, Function, Stmt, StmtKind, Type, UnaryOp};
+use crate::ast::{
+    BinOp, Expr, ExprKind, Function, Stmt, StmtKind, Type, UnaryOp, UpdateOp, UpdatePosition,
+};
 
 mod fold;
 mod line_map;
@@ -191,6 +193,44 @@ impl<'a> FunctionEmitter<'a> {
                 // line via the body label.
                 self.emit_while(stmt.span.start, cond, body);
             }
+            StmtKind::ExprStmt(expr) => {
+                self.advance_to_stmt_line(stmt);
+                self.emit_expr_discard(expr);
+            }
+        }
+    }
+
+    /// Emit `expr` for its side effects, discarding the value. The
+    /// special case is `Update` (`++x;` / `x++;`): BCC emits just the
+    /// increment, no `mov ax, ...` afterward (fixture 040).
+    fn emit_expr_discard(&mut self, expr: &Expr) {
+        if let ExprKind::Update { target, op, .. } = &expr.kind {
+            self.emit_update_in_place(target, *op);
+            return;
+        }
+        // Other expressions: compute into AX, drop the result.
+        self.emit_expr_to_ax(expr);
+    }
+
+    /// Emit just the increment/decrement on the named local — no
+    /// load-to-AX. Used by `ExprStmt` and by the "first half" of
+    /// pre-form Update in expression position.
+    fn emit_update_in_place(&mut self, name: &str, op: UpdateOp) {
+        let mnemonic = match op {
+            UpdateOp::Inc => "inc",
+            UpdateOp::Dec => "dec",
+        };
+        match self.locals.location_of(name) {
+            LocalLocation::Reg(reg) => {
+                let _ = write!(self.out, "\t{mnemonic}\t{}\r\n", reg.name());
+            }
+            LocalLocation::Stack(_) => {
+                // Stack-resident ++/-- is unobserved (every fixture
+                // 040–045 puts the target in a register). The natural
+                // extension is `inc word ptr [bp-N]` / `dec word ptr
+                // [bp-N]`, but until a fixture pins it we bail.
+                panic!("++/-- on a stack-resident local not yet supported (no fixture)");
+            }
         }
     }
 
@@ -323,6 +363,38 @@ impl<'a> FunctionEmitter<'a> {
         }
     }
 
+    /// Emit `++x` / `--x` / `x++` / `x--` *as an expression* — the
+    /// result must land in AX. Shapes (target in a register, fixtures
+    /// 043 and 044):
+    ///
+    /// - Pre  (`++x`): `inc <reg>` / `mov ax, <reg>`
+    /// - Post (`x++`): `mov ax, <reg>` / `inc <reg>`
+    ///
+    /// Equivalents with `dec` for `--`. Stack-resident targets panic
+    /// (no fixture yet).
+    fn emit_update_to_ax(&mut self, target: &str, op: UpdateOp, position: UpdatePosition) {
+        let reg = match self.locals.location_of(target) {
+            LocalLocation::Reg(r) => r,
+            LocalLocation::Stack(_) => {
+                panic!("++/-- in expression on a stack-resident local not yet supported (no fixture)");
+            }
+        };
+        let mnemonic = match op {
+            UpdateOp::Inc => "inc",
+            UpdateOp::Dec => "dec",
+        };
+        match position {
+            UpdatePosition::Pre => {
+                let _ = write!(self.out, "\t{mnemonic}\t{}\r\n", reg.name());
+                let _ = write!(self.out, "\tmov\tax,{}\r\n", reg.name());
+            }
+            UpdatePosition::Post => {
+                let _ = write!(self.out, "\tmov\tax,{}\r\n", reg.name());
+                let _ = write!(self.out, "\t{mnemonic}\t{}\r\n", reg.name());
+            }
+        }
+    }
+
     /// Emit a function call: push args right-to-left (each materialized
     /// into AX first), `call near ptr _name`, then `pop cx` per arg to
     /// clean up the cdecl-style caller-cleanup. Result lands in AX.
@@ -449,6 +521,9 @@ impl<'a> FunctionEmitter<'a> {
                 }
             }
             ExprKind::Unary { op, operand } => self.emit_unary(*op, operand),
+            ExprKind::Update { target, op, position } => {
+                self.emit_update_to_ax(target, *op, *position);
+            }
             ExprKind::Call { name, args } => self.emit_call(name, args),
         }
     }
@@ -512,6 +587,9 @@ impl<'a> FunctionEmitter<'a> {
             }
             ExprKind::Unary { .. } => {
                 panic!("non-constant unary expression as right operand not yet supported")
+            }
+            ExprKind::Update { .. } => {
+                panic!("++/-- as right operand of a binary op not yet supported (no fixture)")
             }
         }
     }

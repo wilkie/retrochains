@@ -1,0 +1,4 @@
+description = "Pre-decrement statement on stack local. Confirms ++/-- are symmetric (probably `dec` vs `inc`)."
+tool = "bcc"
+args = ["-S", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

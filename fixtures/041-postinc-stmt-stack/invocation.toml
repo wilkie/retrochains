@@ -1,0 +1,4 @@
+description = "Post-increment as a statement on a stack-resident local. Compared with 040 to confirm pre/post are identical when the value is discarded."
+tool = "bcc"
+args = ["-S", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

@@ -1,0 +1,4 @@
+description = "Pre-increment in a loop where the loop variable ends up in a register. Compares to 027-while's `x = x + 1` form — does BCC fold both to the same asm, or does `++x` emit a tighter `inc <reg>`?"
+tool = "bcc"
+args = ["-S", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

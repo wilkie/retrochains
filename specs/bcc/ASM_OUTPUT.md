@@ -695,6 +695,36 @@ We don't yet have a fixture for `cmp <stack>, 0` — that path may
 still use the memory-immediate form, since `or` would write back to
 memory.
 
+### `++` / `--` (`040`–`045`)
+
+`++x` and `--x` count as **two textual uses** of `x` in the
+register-allocation heuristic (read + write), matching what
+`x = x + 1` would contribute.
+
+When the target is a register-resident local/param, BCC emits a single
+instruction — the `mov ax / inc ax / mov` round-trip used for
+`x = x + 1` is bypassed:
+
+| Form         | Asm (target in a register)                |
+| ------------ | ----------------------------------------- |
+| `++x;`       | `inc <reg>`                               |
+| `--x;`       | `dec <reg>`                               |
+| `x++;`       | `inc <reg>` (value discarded — same as pre) |
+| `x--;`       | `dec <reg>`                               |
+| `return ++x;` | `inc <reg>` / `mov ax, <reg>`           |
+| `return x++;` | `mov ax, <reg>` / `inc <reg>`           |
+
+Statement and expression forms differ only when the value is *used*:
+the expression form must materialize the new value (pre) or the old
+value (post) in AX. The statement form omits the `mov ax, <reg>`.
+
+Open: `++/--` on a stack-resident target. The natural extension is
+`inc word ptr [bp-N]` (the 8086 supports memory-operand INC/DEC), but
+in every fixture so far BCC has chosen to enregister the target — we
+can't yet confirm that without forcing a stack-allocated target,
+which depends on the deferred 5-register-pool / char-register-allocation
+work (fixtures 046, 047).
+
 ### Unary operators (`036`–`039`)
 
 | C source            | Asm                                              |

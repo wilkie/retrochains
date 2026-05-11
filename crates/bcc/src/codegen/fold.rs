@@ -15,7 +15,9 @@ use crate::ast::{BinOp, Expr, ExprKind, UnaryOp};
 pub fn try_const_eval(e: &Expr) -> Option<u32> {
     match &e.kind {
         ExprKind::IntLit(n) => Some(*n),
-        ExprKind::Ident(_) | ExprKind::Call { .. } => None,
+        // Identifiers, calls, and ++/-- have side effects or unknown
+        // runtime values and never fold.
+        ExprKind::Ident(_) | ExprKind::Call { .. } | ExprKind::Update { .. } => None,
         ExprKind::Unary { op, operand } => {
             let v = try_const_eval(operand)?;
             Some(match op {

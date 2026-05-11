@@ -57,8 +57,8 @@ impl<'a> Lexer<'a> {
                 b',' => { self.pos += 1; TokenKind::Comma }
                 b'=' => self.lex_after_eq(),
                 b'!' => self.lex_after_bang(),
-                b'+' => { self.pos += 1; TokenKind::Plus }
-                b'-' => { self.pos += 1; TokenKind::Minus }
+                b'+' => self.lex_after_plus(),
+                b'-' => self.lex_after_minus(),
                 b'*' => { self.pos += 1; TokenKind::Star }
                 b'/' => { self.pos += 1; TokenKind::Slash }
                 b'%' => { self.pos += 1; TokenKind::Percent }
@@ -125,6 +125,28 @@ impl<'a> Lexer<'a> {
             TokenKind::EqEq
         } else {
             TokenKind::Equals
+        }
+    }
+
+    /// Disambiguate `+`: `++` is increment, bare `+` is addition.
+    fn lex_after_plus(&mut self) -> TokenKind {
+        self.pos += 1;
+        if matches!(self.src.get(self.pos), Some(&b'+')) {
+            self.pos += 1;
+            TokenKind::PlusPlus
+        } else {
+            TokenKind::Plus
+        }
+    }
+
+    /// Disambiguate `-`: `--` is decrement, bare `-` is subtraction.
+    fn lex_after_minus(&mut self) -> TokenKind {
+        self.pos += 1;
+        if matches!(self.src.get(self.pos), Some(&b'-')) {
+            self.pos += 1;
+            TokenKind::MinusMinus
+        } else {
+            TokenKind::Minus
         }
     }
 

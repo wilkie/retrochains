@@ -4,7 +4,10 @@
 //! once" case (which is all the early fixtures need; nothing in
 //! single-pass forbids building a one-function-at-a-time variant later).
 
-use crate::ast::{BinOp, Expr, ExprKind, Function, Param, Stmt, StmtKind, Type, UnaryOp, Unit};
+use crate::ast::{
+    BinOp, Expr, ExprKind, Function, Param, Stmt, StmtKind, Type, UnaryOp, Unit, UpdateOp,
+    UpdatePosition,
+};
 use crate::lex::{Span, Token, TokenKind};
 
 #[derive(Debug, thiserror::Error)]
@@ -122,12 +125,9 @@ impl Parser {
             TokenKind::KwInt | TokenKind::KwChar => self.parse_declare(start),
             TokenKind::KwIf => self.parse_if(),
             TokenKind::KwWhile => self.parse_while(),
-            TokenKind::Ident(_) => {
-                // `<ident> = <expr> ;` is the only statement that
-                // starts with an identifier today. We don't yet support
-                // bare expression-statements (function-call statements
-                // without a return) — those will arrive when a fixture
-                // needs them.
+            // `<ident> = …` is an assignment; otherwise the line is an
+            // expression statement (`f();`, `++x;`, etc.).
+            TokenKind::Ident(_) if matches!(self.peek_n(1).kind, TokenKind::Equals) => {
                 let ident_tok = self.bump();
                 let TokenKind::Ident(name) = ident_tok.kind else { unreachable!() };
                 self.expect(&TokenKind::Equals)?;
@@ -138,7 +138,15 @@ impl Parser {
                     span: Span::new(start, semi.span.end),
                 })
             }
-            _ => Err(ParseError::Unsupported { offset: start }),
+            _ => {
+                // Expression statement.
+                let expr = self.parse_expr()?;
+                let semi = self.expect(&TokenKind::Semicolon)?;
+                Ok(Stmt {
+                    kind: StmtKind::ExprStmt(expr),
+                    span: Span::new(start, semi.span.end),
+                })
+            }
         }
     }
 
@@ -292,8 +300,29 @@ impl Parser {
     }
 
     /// Prefix unary operators. Higher precedence than multiplicative;
-    /// right-associative (parses `--x` as `-(-x)` and so on).
+    /// right-associative.
+    ///
+    /// Handles `-e`/`!e`/`~e` (arithmetic, logical, bitwise) plus
+    /// `++name`/`--name` (pre-increment / pre-decrement). The latter
+    /// require the operand to be a plain identifier today — no compound
+    /// LHS like `*p++`.
     fn parse_unary(&mut self) -> Result<Expr, ParseError> {
+        if let Some(update_op) = match_update_op(&self.peek().kind) {
+            let op_tok = self.bump();
+            let name_tok = self.bump();
+            let TokenKind::Ident(name) = name_tok.kind else {
+                return Err(ParseError::NotAnIdent { offset: name_tok.span.start });
+            };
+            let span = Span::new(op_tok.span.start, name_tok.span.end);
+            return Ok(Expr {
+                kind: ExprKind::Update {
+                    target: name,
+                    op: update_op,
+                    position: UpdatePosition::Pre,
+                },
+                span,
+            });
+        }
         let op = match self.peek().kind {
             TokenKind::Minus => UnaryOp::Neg,
             TokenKind::Bang => UnaryOp::Not,
@@ -354,6 +383,18 @@ impl Parser {
                         kind: ExprKind::Call { name: name.clone(), args },
                         span: Span::new(tok.span.start, close.span.end),
                     })
+                } else if let Some(update_op) = match_update_op(&self.peek().kind) {
+                    // Postfix `name++` or `name--`.
+                    let op_tok = self.bump();
+                    let span = Span::new(tok.span.start, op_tok.span.end);
+                    Ok(Expr {
+                        kind: ExprKind::Update {
+                            target: name.clone(),
+                            op: update_op,
+                            position: UpdatePosition::Post,
+                        },
+                        span,
+                    })
                 } else {
                     Ok(Expr { kind: ExprKind::Ident(name.clone()), span: tok.span })
                 }
@@ -365,9 +406,16 @@ impl Parser {
     // ----- tiny utilities -----------------------------------------------
 
     fn peek(&self) -> &Token {
+        self.peek_n(0)
+    }
+
+    /// Look `n` tokens ahead. Used for the 2-token lookahead in
+    /// `parse_stmt` to disambiguate `<ident> =` (assignment) from
+    /// `<ident> ++` (expression statement).
+    fn peek_n(&self, n: usize) -> &Token {
         // `parse_unit` exits before EOF; once we run off the end, return
         // the last token (always `Eof` after `Lexer::tokenize`).
-        self.tokens.get(self.pos).unwrap_or_else(|| {
+        self.tokens.get(self.pos + n).unwrap_or_else(|| {
             self.tokens.last().expect("lexer always emits at least an EOF token")
         })
     }
@@ -395,6 +443,14 @@ impl Parser {
                 offset: cur.span.start,
             })
         }
+    }
+}
+
+fn match_update_op(t: &TokenKind) -> Option<UpdateOp> {
+    match t {
+        TokenKind::PlusPlus => Some(UpdateOp::Inc),
+        TokenKind::MinusMinus => Some(UpdateOp::Dec),
+        _ => None,
     }
 }
 

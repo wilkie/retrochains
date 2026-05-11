@@ -51,6 +51,12 @@ pub enum StmtKind {
     Assign { name: String, value: Expr },
     /// `while (cond) body`.
     While { cond: Expr, body: Vec<Stmt> },
+    /// Expression evaluated for its side effects, value discarded.
+    /// Examples: `++x;`, `f();`. Plain expressions without side
+    /// effects (`5;`) are syntactically valid but semantically a no-op
+    /// — codegen still emits a (no-op) load to match BCC if a fixture
+    /// ever pins it.
+    ExprStmt(Expr),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -97,8 +103,25 @@ pub enum ExprKind {
     BinOp { op: BinOp, left: Box<Expr>, right: Box<Expr> },
     /// Prefix unary operator: `-e`, `!e`, `~e`.
     Unary { op: UnaryOp, operand: Box<Expr> },
+    /// `++name` / `--name` / `name++` / `name--`. Today the target
+    /// must be a bare identifier referring to a local or parameter.
+    Update { target: String, op: UpdateOp, position: UpdatePosition },
     /// Direct function call by name.
     Call { name: String, args: Vec<Expr> },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpdateOp {
+    Inc,
+    Dec,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpdatePosition {
+    /// `++x` / `--x` — the *new* value is the expression's value.
+    Pre,
+    /// `x++` / `x--` — the *old* value is the expression's value.
+    Post,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

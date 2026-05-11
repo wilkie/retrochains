@@ -250,7 +250,7 @@ fn collect_decls(stmt: &Stmt, out: &mut Vec<DeclItem>) {
                 collect_decls(s, out);
             }
         }
-        StmtKind::Return(_) | StmtKind::Assign { .. } => {}
+        StmtKind::Return(_) | StmtKind::Assign { .. } | StmtKind::ExprStmt(_) => {}
     }
 }
 
@@ -288,6 +288,7 @@ fn count_uses_stmt(stmt: &Stmt, counts: &mut HashMap<String, u32>) {
                 count_uses_stmt(s, counts);
             }
         }
+        StmtKind::ExprStmt(e) => count_uses_expr(e, counts),
     }
 }
 
@@ -302,6 +303,13 @@ fn count_uses_expr(e: &Expr, counts: &mut HashMap<String, u32>) {
         }
         ExprKind::Unary { operand, .. } => {
             count_uses_expr(operand, counts);
+        }
+        ExprKind::Update { target, .. } => {
+            // `++x` is a read + a write of x. Empirically (fixture
+            // 040: `int x = 5; ++x; return 0;` puts x in SI) it
+            // contributes 2 to the use-count, just like `x = x + 1`
+            // would.
+            *counts.entry(target.clone()).or_insert(0) += 2;
         }
         ExprKind::Call { args, .. } => {
             for a in args {

@@ -90,6 +90,7 @@ fn plan_stmt(stmt: &Stmt, counter: &mut u32, bases: &mut HashMap<u32, u32>) {
         StmtKind::Assign { value, .. } => {
             plan_expr_value(value, counter, bases);
         }
+        StmtKind::ExprStmt(e) => plan_expr_value(e, counter, bases),
         StmtKind::While { cond, body } => {
             // While reserves its slots up-front (3: body, check, unused)
             // before walking either condition or body, so the construct's
@@ -125,7 +126,7 @@ fn plan_expr_value(e: &Expr, counter: &mut u32, bases: &mut HashMap<u32, u32>) {
                 plan_expr_value(a, counter, bases);
             }
         }
-        ExprKind::IntLit(_) | ExprKind::Ident(_) => {}
+        ExprKind::IntLit(_) | ExprKind::Ident(_) | ExprKind::Update { .. } => {}
     }
 }
 

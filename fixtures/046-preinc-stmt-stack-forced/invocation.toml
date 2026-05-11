@@ -1,0 +1,4 @@
+description = "Forces ++x to operate on a stack-resident local by exhausting the register pool with four heavily-used params. Pins the memory-operand asm for ++ on a stack local."
+tool = "bcc"
+args = ["-S", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

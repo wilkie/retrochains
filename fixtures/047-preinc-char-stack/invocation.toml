@@ -1,0 +1,4 @@
+description = "Pre-increment a `char` local. Chars don't participate in register allocation (per our observations to date), so this guaranteed-stack case pins the memory-form asm for `++`."
+tool = "bcc"
+args = ["-S", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]
