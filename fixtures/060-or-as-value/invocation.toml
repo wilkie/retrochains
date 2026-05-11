@@ -1,0 +1,4 @@
+description = "`return x || y` — || in expression position. Pins the 0/1 result shape for OR."
+tool = "bcc"
+args = ["-S", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

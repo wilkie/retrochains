@@ -62,8 +62,8 @@ impl<'a> Lexer<'a> {
                 b'*' => { self.pos += 1; TokenKind::Star }
                 b'/' => { self.pos += 1; TokenKind::Slash }
                 b'%' => { self.pos += 1; TokenKind::Percent }
-                b'&' => { self.pos += 1; TokenKind::Ampersand }
-                b'|' => { self.pos += 1; TokenKind::Pipe }
+                b'&' => self.lex_after_amp(),
+                b'|' => self.lex_after_pipe(),
                 b'^' => { self.pos += 1; TokenKind::Caret }
                 b'~' => { self.pos += 1; TokenKind::Tilde }
                 b'<' => self.lex_after_lt(),
@@ -147,6 +147,28 @@ impl<'a> Lexer<'a> {
             TokenKind::MinusMinus
         } else {
             TokenKind::Minus
+        }
+    }
+
+    /// Disambiguate `&`: `&&` is logical-and, bare `&` is bitwise-and.
+    fn lex_after_amp(&mut self) -> TokenKind {
+        self.pos += 1;
+        if matches!(self.src.get(self.pos), Some(&b'&')) {
+            self.pos += 1;
+            TokenKind::AmpAmp
+        } else {
+            TokenKind::Ampersand
+        }
+    }
+
+    /// Disambiguate `|`: `||` is logical-or, bare `|` is bitwise-or.
+    fn lex_after_pipe(&mut self) -> TokenKind {
+        self.pos += 1;
+        if matches!(self.src.get(self.pos), Some(&b'|')) {
+            self.pos += 1;
+            TokenKind::PipePipe
+        } else {
+            TokenKind::Pipe
         }
     }
 

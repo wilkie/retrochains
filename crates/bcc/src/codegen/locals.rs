@@ -350,7 +350,9 @@ fn stmt_has_call(stmt: &Stmt) -> bool {
 fn expr_has_call(e: &Expr) -> bool {
     match &e.kind {
         ExprKind::Call { .. } => true,
-        ExprKind::BinOp { left, right, .. } => expr_has_call(left) || expr_has_call(right),
+        ExprKind::BinOp { left, right, .. } | ExprKind::Logical { left, right, .. } => {
+            expr_has_call(left) || expr_has_call(right)
+        }
         ExprKind::Unary { operand, .. } => expr_has_call(operand),
         ExprKind::Update { .. } | ExprKind::Ident(_) | ExprKind::IntLit(_) => false,
     }
@@ -453,7 +455,7 @@ fn count_uses_expr(e: &Expr, counts: &mut HashMap<String, u32>) {
         ExprKind::Ident(name) => {
             *counts.entry(name.clone()).or_insert(0) += 1;
         }
-        ExprKind::BinOp { left, right, .. } => {
+        ExprKind::BinOp { left, right, .. } | ExprKind::Logical { left, right, .. } => {
             count_uses_expr(left, counts);
             count_uses_expr(right, counts);
         }

@@ -1,0 +1,4 @@
+description = "`if (x < 10 && y > 0)` — &&'s operands are comparisons. Pins how BCC chains the two cmp/jump sequences; the operands are already in jump position so no 0/1 materialization happens."
+tool = "bcc"
+args = ["-S", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::io::Write as _;
 
 use crate::ast::{
-    BinOp, Expr, ExprKind, Function, Stmt, StmtKind, Type, UnaryOp, Unit, UpdateOp,
+    BinOp, Expr, ExprKind, Function, LogicalOp, Stmt, StmtKind, Type, UnaryOp, Unit, UpdateOp,
     UpdatePosition,
 };
 
@@ -309,10 +309,23 @@ impl<'a> FunctionEmitter<'a> {
         else_branch: Option<&[Stmt]>,
     ) {
         let base = self.label_plan.base(if_span_start);
+        // When the cond's outermost operator is `||`, the operands may
+        // short-circuit-to-true; we need a label at the start of the
+        // then-branch for them to land at. The if's base+0 slot —
+        // unused for plain conds — serves as that "then-entry".
+        let cond_has_top_or = matches!(
+            cond.kind,
+            ExprKind::Logical { op: LogicalOp::Or, .. }
+        );
+        let then_entry_slot = if cond_has_top_or { Some(base) } else { None };
+
         if let Some(else_stmts) = else_branch {
             // if/else reserves 3 slots; the else label lives at +2.
             let else_slot = base + 2;
-            self.emit_cond_jump_if_false(cond, else_slot);
+            self.emit_cond_branch(cond, then_entry_slot, Some(else_slot));
+            if let Some(slot) = then_entry_slot {
+                self.emit_label(slot);
+            }
             for s in then_branch {
                 self.emit_stmt(s);
             }
@@ -325,7 +338,10 @@ impl<'a> FunctionEmitter<'a> {
         } else {
             // if (no else) reserves 2 slots; skip label at +1.
             let skip_slot = base + 1;
-            self.emit_cond_jump_if_false(cond, skip_slot);
+            self.emit_cond_branch(cond, then_entry_slot, Some(skip_slot));
+            if let Some(slot) = then_entry_slot {
+                self.emit_label(slot);
+            }
             for s in then_branch {
                 self.emit_stmt(s);
             }
@@ -335,6 +351,14 @@ impl<'a> FunctionEmitter<'a> {
 
     fn emit_while(&mut self, while_span_start: u32, cond: &Expr, body: &[Stmt]) {
         // While reserves 3 slots: +0 body, +1 check, +2 unused.
+        // Logical conditions (`&& / ||`) in a while are unobserved —
+        // they'd need an explicit "past-loop" label since the
+        // standard `cond / j-true body / fall-through` shape only
+        // has *one* labeled target. Bail until a fixture appears.
+        assert!(
+            !matches!(cond.kind, ExprKind::Logical { .. }),
+            "logical condition (`&&`/`||`) in a `while` not yet supported (no fixture)"
+        );
         let base = self.label_plan.base(while_span_start);
         let body_slot = base;
         let check_slot = base + 1;
@@ -345,31 +369,123 @@ impl<'a> FunctionEmitter<'a> {
             self.emit_stmt(s);
         }
         self.emit_label(check_slot);
-        // Condition emits a true-mnemonic jump back to the body.
-        self.emit_cond_jump_if_true(cond, body_slot);
+        // Condition: jump back to body if true; fall through if false.
+        self.emit_cond_branch(cond, Some(body_slot), None);
     }
 
-    /// Emit a conditional jump that jumps to `target_slot` when `cond`
-    /// is FALSE. Used by `if`. Picks the best emission shape based on
-    /// where the LHS lives and whether the RHS folds to a constant; see
-    /// `specs/bcc/ASM_OUTPUT.md` for the priority order.
-    fn emit_cond_jump_if_false(&mut self, cond: &Expr, target_slot: u32) {
-        let (op, left, right) = expect_comparison(cond);
-        let inv = op.jump_if_false().expect("comparison op has inverse jump");
-        self.emit_compare(left, right);
-        let target = self.label_ref(target_slot);
-        let _ = write!(self.out, "\t{inv}\tshort {target}\r\n");
+    /// Emit a conditional branch: control flows to `true_slot` when
+    /// `cond` is true, to `false_slot` when false. Exactly one of the
+    /// two should be `None` — that direction falls through to the
+    /// next instruction emitted.
+    ///
+    /// `Logical` operators (`&&`, `||`) recurse into this function on
+    /// both operands, short-circuiting via fall-through:
+    /// - `a && b`: a's false → false_slot; a's true → fall through to
+    ///   b's test (a's true target becomes `None`). Then b carries
+    ///   the original true/false targets.
+    /// - `a || b`: a's true → true_slot; a's false → fall through to
+    ///   b's test (a's false target becomes `None`). Then b same.
+    fn emit_cond_branch(
+        &mut self,
+        cond: &Expr,
+        true_slot: Option<u32>,
+        false_slot: Option<u32>,
+    ) {
+        if let ExprKind::Logical { op, left, right } = &cond.kind {
+            // Restricted to top-level binary `&&` / `||`. Chained or
+            // nested logical operators need a more careful target
+            // tracking (each non-final operand's short-circuit must
+            // still jump rather than fall through); we'll lift this
+            // when a fixture forces a choice.
+            assert!(
+                !matches!(left.kind, ExprKind::Logical { .. })
+                    && !matches!(right.kind, ExprKind::Logical { .. }),
+                "nested `&&`/`||` operators not yet supported (no fixture)"
+            );
+            match op {
+                LogicalOp::And => {
+                    // a false → false_slot; a true → fall through to b.
+                    // b carries the outer true/false targets.
+                    self.emit_cond_branch(left, None, false_slot);
+                    self.emit_cond_branch(right, true_slot, false_slot);
+                }
+                LogicalOp::Or => {
+                    // a true → true_slot (jump); a false → fall through to b.
+                    // b: true → fall through (caller emits true_slot label
+                    // right after this call); false → false_slot.
+                    self.emit_cond_branch(left, true_slot, None);
+                    self.emit_cond_branch(right, None, false_slot);
+                }
+            }
+            return;
+        }
+        // Base case: single test (comparison or treat-as-bool).
+        let (true_mnem, false_mnem) = self.emit_cond_test(cond);
+        match (true_slot, false_slot) {
+            (Some(slot), None) => {
+                let _ = write!(
+                    self.out,
+                    "\t{true_mnem}\tshort {}\r\n",
+                    self.label_ref(slot),
+                );
+            }
+            (None, Some(slot)) => {
+                let _ = write!(
+                    self.out,
+                    "\t{false_mnem}\tshort {}\r\n",
+                    self.label_ref(slot),
+                );
+            }
+            (Some(_), Some(_)) => panic!(
+                "emit_cond_branch with both true and false targets not yet supported \
+                 (nested mixed && / || requires this case)"
+            ),
+            (None, None) => panic!(
+                "emit_cond_branch with both targets fall-through: no jump would be emitted"
+            ),
+        }
     }
 
-    /// Same as `emit_cond_jump_if_false` but uses the *true* mnemonic
-    /// — for `while`, where the loop-back jump fires when the
-    /// condition holds.
-    fn emit_cond_jump_if_true(&mut self, cond: &Expr, target_slot: u32) {
-        let (op, left, right) = expect_comparison(cond);
-        let mnemonic = op.jump_if_true().expect("comparison op has true jump");
-        self.emit_compare(left, right);
-        let target = self.label_ref(target_slot);
-        let _ = write!(self.out, "\t{mnemonic}\tshort {target}\r\n");
+    /// Emit the actual test instruction for a simple (non-Logical)
+    /// condition and return the (jump-if-true, jump-if-false)
+    /// mnemonic pair the caller should use.
+    ///
+    /// - Comparison `a <op> b`: emit `emit_compare`, return the op's
+    ///   `(jump_if_true, jump_if_false)` mnemonics.
+    /// - Anything else: treat as boolean. Emit `cmp <expr>, 0` (or
+    ///   `or <reg>, <reg>` peephole for register locals); the cond is
+    ///   non-zero ⇔ true, so the mnemonic pair is `("jne", "je")`.
+    fn emit_cond_test(&mut self, cond: &Expr) -> (&'static str, &'static str) {
+        if let ExprKind::BinOp { op, left, right } = &cond.kind
+            && op.is_comparison()
+        {
+            self.emit_compare(left, right);
+            return (
+                op.jump_if_true().expect("comparison op has true mnemonic"),
+                op.jump_if_false().expect("comparison op has false mnemonic"),
+            );
+        }
+        self.emit_zero_test(cond);
+        ("jne", "je")
+    }
+
+    /// Emit a "test against zero" instruction for a non-comparison
+    /// expression — used in boolean contexts (`if (x)`, `x && y`).
+    /// Today only `Ident`s are supported; other expressions panic.
+    fn emit_zero_test(&mut self, cond: &Expr) {
+        let ExprKind::Ident(name) = &cond.kind else {
+            panic!("non-ident boolean condition not yet supported (no fixture)");
+        };
+        match self.locals.location_of(name) {
+            LocalLocation::Stack(off) => {
+                let ty = self.locals.type_of(name);
+                let width = if matches!(ty, Type::Char) { "byte" } else { "word" };
+                let _ = write!(self.out, "\tcmp\t{width} ptr {},0\r\n", bp_addr(off));
+            }
+            LocalLocation::Reg(reg) => {
+                let _ = write!(self.out, "\tor\t{0},{0}\r\n", reg.name());
+            }
+        }
     }
 
     /// Emit just the `cmp` instruction (no jump). Four shapes,
@@ -412,6 +528,60 @@ impl<'a> FunctionEmitter<'a> {
         self.emit_expr_to_ax(left);
         let src = self.resolve_operand_source(right);
         let _ = write!(self.out, "\tcmp\tax,{}\r\n", src.word());
+    }
+
+    /// Emit `a && b` / `a || b` in expression position — the value
+    /// (0 or 1) must land in AX. Layout (fixtures 059, 060):
+    ///
+    /// && (slots: +0 unused, +1 unused, +2 false-mat, +3 end):
+    /// ```text
+    ///   <cond-branch(a, true=None, false=false-mat)>
+    ///   <cond-branch(b, true=None, false=false-mat)>
+    ///   mov ax, 1
+    ///   jmp short end
+    /// false-mat:
+    ///   xor ax, ax
+    /// end:
+    /// ```
+    ///
+    /// || (slots: +0 unused, +1 true-mat, +2 false-mat, +3 end):
+    /// ```text
+    ///   <cond-branch(a, true=true-mat, false=None)>
+    ///   <cond-branch(b, true=None,     false=false-mat)>
+    /// true-mat:
+    ///   mov ax, 1
+    ///   jmp short end
+    /// false-mat:
+    ///   xor ax, ax
+    /// end:
+    /// ```
+    fn emit_logical_to_ax(
+        &mut self,
+        logical_span_start: u32,
+        op: LogicalOp,
+        left: &Expr,
+        right: &Expr,
+    ) {
+        let base = self.label_plan.base(logical_span_start);
+        let true_mat_slot = base + 1;
+        let false_mat_slot = base + 2;
+        let end_slot = base + 3;
+        match op {
+            LogicalOp::And => {
+                self.emit_cond_branch(left, None, Some(false_mat_slot));
+                self.emit_cond_branch(right, None, Some(false_mat_slot));
+            }
+            LogicalOp::Or => {
+                self.emit_cond_branch(left, Some(true_mat_slot), None);
+                self.emit_cond_branch(right, None, Some(false_mat_slot));
+                self.emit_label(true_mat_slot);
+            }
+        }
+        self.out.extend_from_slice(b"\tmov\tax,1\r\n");
+        let _ = write!(self.out, "\tjmp\tshort {}\r\n", self.label_ref(end_slot));
+        self.emit_label(false_mat_slot);
+        self.out.extend_from_slice(b"\txor\tax,ax\r\n");
+        self.emit_label(end_slot);
     }
 
     /// Emit a prefix unary operator. The operand always lands in AX
@@ -668,6 +838,9 @@ impl<'a> FunctionEmitter<'a> {
                 }
             }
             ExprKind::Unary { op, operand } => self.emit_unary(*op, operand),
+            ExprKind::Logical { op, left, right } => {
+                self.emit_logical_to_ax(e.span.start, *op, left, right);
+            }
             ExprKind::Update { target, op, position } => {
                 self.emit_update_to_ax(target, *op, *position);
             }
@@ -738,6 +911,9 @@ impl<'a> FunctionEmitter<'a> {
             ExprKind::Update { .. } => {
                 panic!("++/-- as right operand of a binary op not yet supported (no fixture)")
             }
+            ExprKind::Logical { .. } => {
+                panic!("`&&`/`||` as right operand of a binary op not yet supported (no fixture)")
+            }
         }
     }
 
@@ -777,19 +953,6 @@ fn ptr_width(ty: Type) -> &'static str {
         Type::Int => "word",
         Type::Char => "byte",
     }
-}
-
-/// Destructure an expression that should be a comparison BinOp, or
-/// panic. Used at the entry to `emit_cond_jump_*` and friends.
-fn expect_comparison(e: &Expr) -> (BinOp, &Expr, &Expr) {
-    let ExprKind::BinOp { op, left, right } = &e.kind else {
-        panic!("non-comparison if/while condition not yet supported");
-    };
-    assert!(
-        op.is_comparison(),
-        "non-comparison binop in if/while condition not yet supported"
-    );
-    (*op, left, right)
 }
 
 /// A resolved right-hand operand.

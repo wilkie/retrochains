@@ -834,6 +834,91 @@ can't yet confirm that without forcing a stack-allocated target,
 which depends on the deferred 5-register-pool / char-register-allocation
 work (fixtures 046, 047).
 
+### Logical `&&` and `||` (`056`–`060`)
+
+Short-circuit evaluation. Each operand is tested with the standard
+"test-and-jump" shape, except neither operand materializes a 0/1
+value — they branch directly. Comparison operands use their natural
+inverse/true-mnemonic jump; non-comparison operands are tested
+against zero (`cmp <stack>, 0` or `or <reg>, <reg>` for register
+operands; both set ZF the same way).
+
+#### `&&` and `||` in condition position (056, 057, 058)
+
+The if's skip label serves as the "false target" for both operators.
+`||` additionally needs a "then-entry" label so an early-true operand
+has somewhere to land — the if's `base+0` slot (otherwise unused for
+a plain cond) is repurposed for this.
+
+`if (x && y) <then>`:
+```text
+   cmp word ptr [bp-2], 0
+   je  short @skip
+   cmp word ptr [bp-4], 0
+   je  short @skip
+   <then>
+@skip:
+```
+
+`if (x || y) <then>`:
+```text
+   cmp word ptr [bp-2], 0
+   jne short @then-entry
+   cmp word ptr [bp-4], 0
+   je  short @skip
+@then-entry:
+   <then>
+@skip:
+```
+
+When operands are themselves comparisons (058), each emits its
+natural cmp + inverse jump targeting the skip (for `&&`) or the
+then-entry / skip pair (for `||`).
+
+#### `&&` and `||` in expression position (059, 060)
+
+When the result is consumed as a value (e.g., `return a && b;`),
+BCC materializes a 0 or 1 in AX after the short-circuit evaluation.
+Both operators reserve **4 slots**: +0 unused, +1 unused (`&&`) or
+true-mat (`||`), +2 false-mat, +3 end.
+
+`return x && y`:
+```text
+   cmp word ptr [bp-2], 0
+   je  short @false-mat
+   cmp word ptr [bp-4], 0
+   je  short @false-mat
+   mov ax, 1
+   jmp short @end
+@false-mat:
+   xor ax, ax
+@end:
+```
+
+`return x || y`:
+```text
+   cmp word ptr [bp-2], 0
+   jne short @true-mat
+   cmp word ptr [bp-4], 0
+   je  short @false-mat
+@true-mat:
+   mov ax, 1
+   jmp short @end
+@false-mat:
+   xor ax, ax
+@end:
+```
+
+The `||` form's true-mat label consolidates two paths: short-circuit
+from an early-true operand, and fall-through when the last operand
+was true (i.e., the `je @false-mat` didn't fire).
+
+Open: chained or nested `&&`/`||` (e.g., `a && b && c`, `(a || b) && c`)
+— each non-final operand's short-circuit-to-true still needs a jump,
+not fall-through, so the simple binary recursion we use today doesn't
+generalize without an extra "is-final-leaf" hint. Logical operators
+in `while` conditions are also unobserved.
+
 ### Unary operators (`036`–`039`)
 
 | C source            | Asm                                              |

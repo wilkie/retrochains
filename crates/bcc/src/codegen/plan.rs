@@ -121,6 +121,21 @@ fn plan_expr_value(e: &Expr, counter: &mut u32, bases: &mut HashMap<u32, u32>) {
         ExprKind::Unary { operand, .. } => {
             plan_expr_value(operand, counter, bases);
         }
+        ExprKind::Logical { left, right, .. } => {
+            // && or || in expression position reserves 4 slots:
+            //   +0: unused
+            //   +1: unused (for &&) or true-mat (for ||)
+            //   +2: false-mat
+            //   +3: end
+            // The operands are evaluated in CONDITION position (their
+            // values feed into the conditional jumps inside the
+            // logical, not as 0/1 materialized values).
+            let base = *counter;
+            bases.insert(e.span.start, base);
+            *counter += 4;
+            plan_expr_condition(left, counter, bases);
+            plan_expr_condition(right, counter, bases);
+        }
         ExprKind::Call { args, .. } => {
             for a in args {
                 plan_expr_value(a, counter, bases);
@@ -130,14 +145,25 @@ fn plan_expr_value(e: &Expr, counter: &mut u32, bases: &mut HashMap<u32, u32>) {
     }
 }
 
-/// Walk an expression in condition position. The top-level comparison (if
-/// any) doesn't reserve cmp-as-value slots — it becomes a conditional
-/// jump. Sub-expressions revert to value position.
+/// Walk an expression in condition position. Comparisons and Logicals
+/// at the top level don't materialize a 0/1 value; they emit jumps.
+/// Other sub-expressions go back to value position.
 fn plan_expr_condition(e: &Expr, counter: &mut u32, bases: &mut HashMap<u32, u32>) {
     match &e.kind {
         ExprKind::BinOp { op, left, right } if op.is_comparison() => {
             plan_expr_value(left, counter, bases);
             plan_expr_value(right, counter, bases);
+        }
+        ExprKind::Logical { left, right, .. } => {
+            // Each && or || in condition position reserves 1 "buffer"
+            // slot (unused as a label in our simple cases — possibly
+            // for chained operators' intermediate landings). The
+            // operands stay in condition position.
+            let base = *counter;
+            bases.insert(e.span.start, base);
+            *counter += 1;
+            plan_expr_condition(left, counter, bases);
+            plan_expr_condition(right, counter, bases);
         }
         _ => plan_expr_value(e, counter, bases),
     }

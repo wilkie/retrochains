@@ -5,8 +5,8 @@
 //! single-pass forbids building a one-function-at-a-time variant later).
 
 use crate::ast::{
-    BinOp, Expr, ExprKind, Function, Param, Stmt, StmtKind, Type, UnaryOp, Unit, UpdateOp,
-    UpdatePosition,
+    BinOp, Expr, ExprKind, Function, LogicalOp, Param, Stmt, StmtKind, Type, UnaryOp, Unit,
+    UpdateOp, UpdatePosition,
 };
 use crate::lex::{Span, Token, TokenKind};
 
@@ -231,11 +231,46 @@ impl Parser {
     }
 
     fn parse_expr(&mut self) -> Result<Expr, ParseError> {
-        // Precedence ladder, lowest precedence at the top. We cover what
-        // fixtures up through 018 demand: bitwise OR < XOR < AND < shift
-        // < additive < multiplicative < atom. Comparison and logical
-        // operators (and unary) get inserted as fixtures introduce them.
-        self.parse_bitor()
+        // Precedence ladder, lowest at the top: || < && < | < ^ < & <
+        // == != < relational < shift < additive < multiplicative <
+        // unary < atom.
+        self.parse_logor()
+    }
+
+    fn parse_logor(&mut self) -> Result<Expr, ParseError> {
+        let mut left = self.parse_logand()?;
+        while matches!(self.peek().kind, TokenKind::PipePipe) {
+            self.bump();
+            let right = self.parse_logand()?;
+            let span = Span::new(left.span.start, right.span.end);
+            left = Expr {
+                kind: ExprKind::Logical {
+                    op: LogicalOp::Or,
+                    left: Box::new(left),
+                    right: Box::new(right),
+                },
+                span,
+            };
+        }
+        Ok(left)
+    }
+
+    fn parse_logand(&mut self) -> Result<Expr, ParseError> {
+        let mut left = self.parse_bitor()?;
+        while matches!(self.peek().kind, TokenKind::AmpAmp) {
+            self.bump();
+            let right = self.parse_bitor()?;
+            let span = Span::new(left.span.start, right.span.end);
+            left = Expr {
+                kind: ExprKind::Logical {
+                    op: LogicalOp::And,
+                    left: Box::new(left),
+                    right: Box::new(right),
+                },
+                span,
+            };
+        }
+        Ok(left)
     }
 
     fn parse_bitor(&mut self) -> Result<Expr, ParseError> {

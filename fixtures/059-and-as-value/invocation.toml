@@ -1,0 +1,4 @@
+description = "`return x && y` — && in expression position, must materialize 0 or 1 in AX. Pins the 0/1 result shape and the label/jump structure."
+tool = "bcc"
+args = ["-S", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

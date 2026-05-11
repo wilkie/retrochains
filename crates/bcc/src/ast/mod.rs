@@ -103,11 +103,26 @@ pub enum ExprKind {
     BinOp { op: BinOp, left: Box<Expr>, right: Box<Expr> },
     /// Prefix unary operator: `-e`, `!e`, `~e`.
     Unary { op: UnaryOp, operand: Box<Expr> },
+    /// Short-circuiting logical operator: `a && b`, `a || b`. Held
+    /// separately from `BinOp` because the right operand may not be
+    /// evaluated, and the codegen patterns are completely different
+    /// from the regular binary ops.
+    Logical { op: LogicalOp, left: Box<Expr>, right: Box<Expr> },
     /// `++name` / `--name` / `name++` / `name--`. Today the target
     /// must be a bare identifier referring to a local or parameter.
     Update { target: String, op: UpdateOp, position: UpdatePosition },
     /// Direct function call by name.
     Call { name: String, args: Vec<Expr> },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogicalOp {
+    /// `&&`. Short-circuit: false on left → result is 0, right not
+    /// evaluated.
+    And,
+    /// `||`. Short-circuit: true on left → result is 1, right not
+    /// evaluated.
+    Or,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

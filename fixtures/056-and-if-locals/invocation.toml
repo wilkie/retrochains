@@ -1,0 +1,4 @@
+description = "`if (x && y)` with int locals. Pins the short-circuit code shape: how BCC evaluates x, tests it, jumps over the right operand on false, then evaluates y, then enters the then-branch."
+tool = "bcc"
+args = ["-S", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]
