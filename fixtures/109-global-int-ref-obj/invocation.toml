@@ -1,0 +1,4 @@
+description = "Read an uninitialized global int and return it. Probes the FIXUPP for a global symbol resident in _BSS, accessed via DGROUP (segment-relative offset into the merged data group)."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

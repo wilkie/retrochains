@@ -1,0 +1,4 @@
+description = "Store a function's address into a function-pointer local, then call through it. Probes the FIXUPP that BCC emits for a code-symbol immediate inside an instruction in _TEXT (small-model function pointer = 16-bit offset)."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

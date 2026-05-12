@@ -1,0 +1,4 @@
+description = "Call a sibling function in the same TU, compiled to OBJ. Same source as 010-function-call, but -c. Probes the FIXUPP record TLINK uses for an intra-TU near-call (target is _f, frame is _TEXT)."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]
