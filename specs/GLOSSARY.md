@@ -168,6 +168,30 @@ two senses:
    slot to free the register for another use. BCC's linear-search
    switch uses this for the scrutinee (`[bp-4]` in fixture 074).
 
+### Address-taken
+A variable that appears as the target of `&x` somewhere in the
+function. Address-taken variables must be **stack-resident** — a
+register has no address to give. BCC's locals analyzer excludes
+them from the register pool regardless of use count. _Fixture_: 080.
+
+### Decay
+In C, an array name used in most expression contexts implicitly
+becomes a pointer to its first element. `f(a)` where `a` is an
+array is equivalent to `f(&a[0])`. We haven't pinned BCC's
+specific lowering of decay yet — our current fixtures use array
+indexing (`a[i]`) directly, not bare-array contexts.
+
+### Lvalue / Rvalue
+- **Lvalue** ("locator-value"): something that has an address —
+  a variable, an array element, a pointer dereference. Can appear
+  on the left side of `=`.
+- **Rvalue**: a value with no permanent storage — a literal, the
+  result of an expression. Cannot appear on the left of `=`.
+
+The same syntax can be lvalue or rvalue depending on context:
+`*p` on the right of `=` reads through the pointer, on the left
+writes through it.
+
 ### Working register
 The register a compiler treats as the default scratch / temporary.
 For BCC, **AX** — values are computed into AX, then moved

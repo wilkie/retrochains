@@ -19,11 +19,16 @@ pub fn try_const_eval(e: &Expr) -> Option<u32> {
         // have side effects or unknown runtime values — never fold.
         // (`&& / ||` *could* fold if both operands are constants, but
         // BCC doesn't emit a fixture where that matters; defer.)
+        // `&x`, `*p`, and `a[i]` all evaluate at runtime — addresses
+        // and memory loads aren't compile-time constants in our model.
         ExprKind::Ident(_)
         | ExprKind::Call { .. }
         | ExprKind::Update { .. }
         | ExprKind::Logical { .. }
-        | ExprKind::AssignExpr { .. } => None,
+        | ExprKind::AssignExpr { .. }
+        | ExprKind::AddressOf(_)
+        | ExprKind::Deref(_)
+        | ExprKind::ArrayIndex { .. } => None,
         ExprKind::Unary { op, operand } => {
             let v = try_const_eval(operand)?;
             Some(match op {

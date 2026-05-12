@@ -546,6 +546,44 @@ fixtures 073 (jump-table n=8, `C1244`) and 076 (jump-table n=4,
 (function position, TU contents, surrounding constants) is an
 open question — see specs/bcc/ASM_OUTPUT.md.
 
+### Variable array indexing: 5-instruction effective-address (STRONG)
+
+For `a[i]` with non-constant `i`, BCC always emits this exact
+sequence — both for reads and writes:
+
+```
+mov bx, <i>
+shl bx, 1                ; only for int arrays (stride 2)
+lea ax, word ptr [bp-N]  ; note the `word ptr` on lea
+add bx, ax
+mov <width> ptr [bx], <rhs>   ; or mov ax, <width> ptr [bx]
+```
+
+Distinctive features:
+- `lea ax, word ptr [bp-N]` with the redundant `word ptr` annotation
+- Address goes through AX rather than `lea bx, ...` directly
+- The `add bx, ax` over `lea bx, [bx+ax]` (which exists)
+
+Other era compilers compute via `lea bx, [bp+si-N]` (one
+instruction) or fold via SI. BCC's 4-instruction address compute is
+characteristic. _Fixture_: 079.
+
+### `&x` via `lea ax / mov <dst>, ax` (STRONG)
+
+Even when the destination is a register, address-of materializes
+into AX first and then `mov`s to the destination — never `lea
+<dst>, [bp-N]` directly. Consistent with BCC's "AX is the
+working register" pattern. _Fixtures_: 080, 081.
+
+### Pointer enregistration at ≥ 2 uses (STRONG)
+
+Plain `int` locals need ≥ 3 textual uses to land in a register,
+but pointers enregister at ≥ 2 uses. The likely reason is that
+pointer use almost always implies indirect addressing (`mov ax,
+[reg]`), and keeping a pointer on the stack costs an extra load
+per access — BCC drops the threshold to preempt that overhead.
+_Fixtures_: 080, 081.
+
 ### `switch` slot-reservation fingerprint (STRONG)
 
 The slot counter advances past unused "ghost" slots before the

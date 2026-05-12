@@ -34,7 +34,7 @@ impl Signatures {
         let map = unit
             .functions
             .iter()
-            .map(|f| (f.name.clone(), f.params.iter().map(|p| p.ty).collect()))
+            .map(|f| (f.name.clone(), f.params.iter().map(|p| p.ty.clone()).collect()))
             .collect();
         Self { map }
     }
@@ -254,7 +254,7 @@ impl<'a> FunctionEmitter<'a> {
                 if let Some(init) = init {
                     self.advance_to_stmt_line(stmt);
                     let loc = self.locals.location_of(name);
-                    self.emit_init_local(loc, *ty, init);
+                    self.emit_init_local(loc, ty, init);
                 }
             }
             StmtKind::Assign { name, value } => {
@@ -265,6 +265,14 @@ impl<'a> FunctionEmitter<'a> {
             StmtKind::CompoundAssign { name, op, value } => {
                 self.advance_to_stmt_line(stmt);
                 self.emit_compound_assign(name, *op, value);
+            }
+            StmtKind::ArrayAssign { array, index, value } => {
+                self.advance_to_stmt_line(stmt);
+                self.emit_array_assign(array, index, value);
+            }
+            StmtKind::DerefAssign { target, value } => {
+                self.advance_to_stmt_line(stmt);
+                self.emit_deref_assign(target, value);
             }
             StmtKind::If { cond, then_branch, else_branch } => {
                 self.advance_to_stmt_line(stmt);
@@ -1208,7 +1216,10 @@ impl<'a> FunctionEmitter<'a> {
         for (i, arg) in args.iter().enumerate().rev() {
             // Param type for the i-th arg, defaulting to int when the
             // signature isn't known (extern function — no fixture yet).
-            let arg_ty = param_tys.and_then(|tys| tys.get(i)).copied().unwrap_or(Type::Int);
+            let arg_ty = param_tys
+                .and_then(|tys| tys.get(i))
+                .cloned()
+                .unwrap_or(Type::Int);
             self.emit_arg_into_ax(arg, arg_ty);
             self.out.extend_from_slice(b"\tpush\tax\r\n");
         }
@@ -1277,7 +1288,7 @@ impl<'a> FunctionEmitter<'a> {
     }
 
     /// Initialize a freshly-declared local with `init`.
-    fn emit_init_local(&mut self, loc: LocalLocation, ty: Type, init: &Expr) {
+    fn emit_init_local(&mut self, loc: LocalLocation, ty: &Type, init: &Expr) {
         match loc {
             LocalLocation::Stack(off) => {
                 // Stack init: prefer the immediate-store form when the
@@ -1379,6 +1390,192 @@ impl<'a> FunctionEmitter<'a> {
                 unreachable!("comparison ops are not compound-assignable in C")
             }
         }
+    }
+
+    /// `&<name>` — load the effective address of `name`'s stack slot
+    /// into AX. Pattern (fixture 080):
+    /// ```text
+    ///   lea ax, word ptr [bp-N]
+    /// ```
+    /// `name` must be stack-resident — its address was taken at parse
+    /// time, which the locals analyzer uses to force it off the
+    /// register pool.
+    fn emit_address_of(&mut self, name: &str) {
+        let LocalLocation::Stack(off) = self.locals.location_of(name) else {
+            panic!(
+                "`&{name}`: register-resident local cannot have its address taken \
+                 (locals analyzer should have forced it to the stack)"
+            );
+        };
+        let _ = write!(self.out, "\tlea\tax,word ptr {}\r\n", bp_addr(off));
+    }
+
+    /// `*<ptr>` in rvalue position — load through a pointer. Pattern
+    /// (fixture 080, p in SI):
+    /// ```text
+    ///   mov ax, word ptr [si]
+    /// ```
+    /// Today `ptr` must be an `Ident` referring to a pointer local; a
+    /// general pointer expression (e.g. `*(p + 1)`) would need a
+    /// compute-into-BX step before the load.
+    fn emit_deref_to_ax(&mut self, ptr: &Expr) {
+        let ExprKind::Ident(name) = &ptr.kind else {
+            panic!("non-ident pointer in `*p` not yet supported (no fixture)");
+        };
+        let ty = self.locals.type_of(name).clone();
+        let Some(pointee) = ty.pointee() else {
+            panic!("`*{name}`: not a pointer type");
+        };
+        let width = ptr_width(pointee);
+        let addr_reg = match self.locals.location_of(name) {
+            LocalLocation::Reg(reg) => reg.name(),
+            LocalLocation::Stack(_) => {
+                panic!("stack-resident pointer dereference not yet supported (no fixture)");
+            }
+        };
+        let _ = write!(self.out, "\tmov\tax,{width} ptr [{addr_reg}]\r\n");
+    }
+
+    /// `a[<index>]` in rvalue position. Two shapes:
+    /// - **Constant index**: `mov ax, word ptr [bp-(base+K*stride)]`
+    ///   — same as a plain stack-local access (fixture 077, 078, 082).
+    /// - **Variable index**: the 5-instruction effective-address
+    ///   sequence (fixture 079):
+    ///   ```text
+    ///     mov bx, <index>
+    ///     shl bx, 1                    ; for stride 2; omitted for chars
+    ///     lea ax, word ptr [bp-base]
+    ///     add bx, ax
+    ///     mov ax, <width> ptr [bx]
+    ///   ```
+    /// where `base` is the bp-offset of `a[0]`.
+    fn emit_array_index_to_ax(&mut self, array: &str, index: &Expr) {
+        let ty = self.locals.type_of(array).clone();
+        let elem = ty
+            .array_elem()
+            .unwrap_or_else(|| panic!("`{array}[i]`: not an array type"));
+        let elem_size = elem.size_bytes();
+        let width = ptr_width(elem);
+        let LocalLocation::Stack(base_off) = self.locals.location_of(array) else {
+            panic!("array `{array}` should be stack-resident");
+        };
+        if let Some(k) = try_const_eval(index) {
+            let off = base_off + i16::try_from(k * u32::from(elem_size)).unwrap_or(i16::MAX);
+            if matches!(*elem, Type::Char) {
+                let _ = write!(self.out, "\tmov\tal,byte ptr {}\r\n", bp_addr(off));
+                self.out.extend_from_slice(b"\tcbw\t\r\n");
+            } else {
+                let _ = write!(self.out, "\tmov\tax,{width} ptr {}\r\n", bp_addr(off));
+            }
+            return;
+        }
+        self.emit_array_addr_to_bx(array, index, base_off, elem_size);
+        if matches!(*elem, Type::Char) {
+            self.out.extend_from_slice(b"\tmov\tal,byte ptr [bx]\r\n");
+            self.out.extend_from_slice(b"\tcbw\t\r\n");
+        } else {
+            let _ = write!(self.out, "\tmov\tax,{width} ptr [bx]\r\n");
+        }
+    }
+
+    /// Emit the 4-instruction sequence that lands `&a[index]` in BX
+    /// (used as a shared head by `emit_array_index_to_ax` and
+    /// `emit_array_assign` for the variable-index case):
+    /// ```text
+    ///   mov bx, <index>
+    ///   shl bx, 1               ; only when elem stride is 2
+    ///   lea ax, word ptr [bp-<base>]
+    ///   add bx, ax
+    /// ```
+    fn emit_array_addr_to_bx(
+        &mut self,
+        _array: &str,
+        index: &Expr,
+        base_off: i16,
+        elem_size: u16,
+    ) {
+        // Load index into BX. If it's a register-local, that's a
+        // direct `mov bx, <reg>`; otherwise we'd need a stack load —
+        // no fixture for that yet.
+        let ExprKind::Ident(idx_name) = &index.kind else {
+            panic!("non-ident array index not yet supported (no fixture)");
+        };
+        match self.locals.location_of(idx_name) {
+            LocalLocation::Reg(reg) => {
+                let _ = write!(self.out, "\tmov\tbx,{}\r\n", reg.name());
+            }
+            LocalLocation::Stack(off) => {
+                let _ = write!(self.out, "\tmov\tbx,word ptr {}\r\n", bp_addr(off));
+            }
+        }
+        if elem_size == 2 {
+            self.out.extend_from_slice(b"\tshl\tbx,1\r\n");
+        }
+        let _ = write!(self.out, "\tlea\tax,word ptr {}\r\n", bp_addr(base_off));
+        self.out.extend_from_slice(b"\tadd\tbx,ax\r\n");
+    }
+
+    /// `a[<index>] = <value>;` — write into an array slot. Same
+    /// constant/variable split as the read path.
+    fn emit_array_assign(&mut self, array: &str, index: &Expr, value: &Expr) {
+        let ty = self.locals.type_of(array).clone();
+        let elem = ty
+            .array_elem()
+            .unwrap_or_else(|| panic!("`{array}[i] = v`: not an array type"));
+        let elem_size = elem.size_bytes();
+        let width = ptr_width(elem);
+        let LocalLocation::Stack(base_off) = self.locals.location_of(array) else {
+            panic!("array `{array}` should be stack-resident");
+        };
+        if let Some(k) = try_const_eval(index) {
+            let off = base_off + i16::try_from(k * u32::from(elem_size)).unwrap_or(i16::MAX);
+            // Constant-index assign: same shape as `mov word ptr [bp-N], K`.
+            if let Some(v) = try_const_eval(value) {
+                let v_masked = if matches!(*elem, Type::Char) { v & 0xFF } else { v & 0xFFFF };
+                let _ = write!(
+                    self.out,
+                    "\tmov\t{width} ptr {},{v_masked}\r\n",
+                    bp_addr(off),
+                );
+                return;
+            }
+            panic!("non-constant rhs in constant-indexed array assign not yet supported (no fixture)");
+        }
+        self.emit_array_addr_to_bx(array, index, base_off, elem_size);
+        if let Some(v) = try_const_eval(value) {
+            let v_masked = if matches!(*elem, Type::Char) { v & 0xFF } else { v & 0xFFFF };
+            let _ = write!(self.out, "\tmov\t{width} ptr [bx],{v_masked}\r\n");
+            return;
+        }
+        panic!("non-constant rhs in variable-indexed array assign not yet supported (no fixture)");
+    }
+
+    /// `*<target> = <value>;` — indirect store. Pattern (fixture 081):
+    /// ```text
+    ///   mov word ptr [si], <value>
+    /// ```
+    /// where SI holds the pointer.
+    fn emit_deref_assign(&mut self, target: &Expr, value: &Expr) {
+        let ExprKind::Ident(name) = &target.kind else {
+            panic!("non-ident pointer in `*p = v` not yet supported (no fixture)");
+        };
+        let ty = self.locals.type_of(name).clone();
+        let Some(pointee) = ty.pointee() else {
+            panic!("`*{name} = v`: not a pointer type");
+        };
+        let width = ptr_width(pointee);
+        let addr_reg = match self.locals.location_of(name) {
+            LocalLocation::Reg(reg) => reg.name(),
+            LocalLocation::Stack(_) => {
+                panic!("stack-resident pointer in `*p = v` not yet supported (no fixture)");
+            }
+        };
+        if let Some(v) = try_const_eval(value) {
+            let v_masked = if matches!(*pointee, Type::Char) { v & 0xFF } else { v & 0xFFFF };
+            let _ = write!(self.out, "\tmov\t{width} ptr [{addr_reg}],{v_masked}\r\n");
+            return;
+        }
+        panic!("non-constant rhs in `*p = v` not yet supported (no fixture)");
     }
 
     fn emit_assign_local(&mut self, loc: LocalLocation, value: &Expr) {
@@ -1485,6 +1682,11 @@ impl<'a> FunctionEmitter<'a> {
                 panic!("AssignExpr in value position not yet supported (no fixture)");
             }
             ExprKind::Call { name, args } => self.emit_call(name, args),
+            ExprKind::AddressOf(name) => self.emit_address_of(name),
+            ExprKind::Deref(operand) => self.emit_deref_to_ax(operand),
+            ExprKind::ArrayIndex { array, index } => {
+                self.emit_array_index_to_ax(array, index);
+            }
         }
     }
 
@@ -1561,6 +1763,15 @@ impl<'a> FunctionEmitter<'a> {
             }
             ExprKind::AssignExpr { .. } => {
                 panic!("assignment expression as right operand not yet supported (no fixture)")
+            }
+            ExprKind::AddressOf(_) => {
+                panic!("`&x` as right operand of a binary op not yet supported (no fixture)")
+            }
+            ExprKind::Deref(_) => {
+                panic!("`*p` as right operand of a binary op not yet supported (no fixture)")
+            }
+            ExprKind::ArrayIndex { .. } => {
+                panic!("`a[i]` as right operand of a binary op not yet supported (no fixture)")
             }
         }
     }
@@ -1655,13 +1866,11 @@ fn switch_c_num(strategy: SwitchStrategy, case_count: u32) -> u32 {
 }
 
 /// Width keyword for a `mov ptr [bp-N], K` store of the given type:
-/// `"byte"` for `char`, `"word"` for `int`. Currently used only by
-/// initialization of stack-resident locals.
-fn ptr_width(ty: Type) -> &'static str {
-    match ty {
-        Type::Int => "word",
-        Type::Char => "byte",
-    }
+/// `"byte"` for `char` (and char arrays), `"word"` for `int`,
+/// pointers, and int arrays. Currently used only by initialization
+/// of stack-resident locals.
+fn ptr_width(ty: &Type) -> &'static str {
+    if ty.size_bytes() == 1 { "byte" } else { "word" }
 }
 
 /// A resolved right-hand operand.

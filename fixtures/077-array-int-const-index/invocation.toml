@@ -1,0 +1,4 @@
+description = "Local int array, read element by constant index. Smallest fixture that exercises array stack-frame allocation and a constant-indexed `[bp-N]` load."
+tool = "bcc"
+args = ["-S", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

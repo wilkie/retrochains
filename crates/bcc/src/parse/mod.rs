@@ -146,7 +146,9 @@ impl Parser {
             }
             // `<ident> = …` is an assignment; `<ident> +=` (and the
             // other compound-assignment ops) becomes CompoundAssign.
-            // Otherwise the line is an expression statement.
+            // Otherwise the line is an expression statement, or — for
+            // lvalues other than a bare ident — an assignment to that
+            // lvalue.
             TokenKind::Ident(_)
                 if matches!(self.peek_n(1).kind, TokenKind::Equals)
                     || match_compound_op(&self.peek_n(1).kind).is_some() =>
@@ -171,32 +173,94 @@ impl Parser {
                     })
                 }
             }
-            _ => {
-                // Expression statement.
-                let expr = self.parse_expr()?;
-                let semi = self.expect(&TokenKind::Semicolon)?;
-                Ok(Stmt {
-                    kind: StmtKind::ExprStmt(expr),
-                    span: Span::new(start, semi.span.end),
-                })
-            }
+            _ => self.parse_expr_or_lvalue_assign(start),
         }
     }
 
-    /// `<type> <name> [= <init>] ;`. Caller has already peeked the
-    /// type keyword (int or char).
+    /// Either a plain expression statement or an assignment whose
+    /// LHS is a non-ident lvalue (`*p = v;`, `a[i] = v;`).
+    ///
+    /// We get here when `parse_stmt`'s prefix dispatch fell through —
+    /// the next tokens don't start a `Return` / `Declare` / `If` /
+    /// loop / `Break` / `Continue` / `Switch`, and they aren't a bare
+    /// `<ident> =` either. Bare-ident assignment got its own path
+    /// because it predates the lvalue notion and lots of code still
+    /// builds `StmtKind::Assign { name, value }` directly; we route
+    /// only the new lvalue shapes through here.
+    fn parse_expr_or_lvalue_assign(&mut self, start: u32) -> Result<Stmt, ParseError> {
+        let expr = self.parse_expr()?;
+        if !matches!(self.peek().kind, TokenKind::Equals) {
+            // Plain expression statement.
+            let semi = self.expect(&TokenKind::Semicolon)?;
+            return Ok(Stmt {
+                kind: StmtKind::ExprStmt(expr),
+                span: Span::new(start, semi.span.end),
+            });
+        }
+        // Assignment. Validate the parsed expression is a kind we
+        // know how to assign to.
+        self.bump(); // `=`
+        let value = self.parse_expr()?;
+        let semi = self.expect(&TokenKind::Semicolon)?;
+        let span = Span::new(start, semi.span.end);
+        let kind = match expr.kind {
+            ExprKind::Deref(ptr) => StmtKind::DerefAssign { target: *ptr, value },
+            ExprKind::ArrayIndex { array, index } => StmtKind::ArrayAssign {
+                array,
+                index: *index,
+                value,
+            },
+            ExprKind::Ident(name) => StmtKind::Assign { name, value },
+            _ => {
+                return Err(ParseError::Unsupported { offset: expr.span.start });
+            }
+        };
+        Ok(Stmt { kind, span })
+    }
+
+    /// `<type-base> <pointer-stars>* <name> ('[' <int> ']')? [= <init>] ;`.
+    /// Caller has already peeked the type keyword (int or char).
+    ///
+    /// Shapes accepted today:
+    /// - `int x;` — plain int local
+    /// - `int *p;` — pointer-to-int (zero or more `*`s wrap the type)
+    /// - `int a[3];` — array; size must be a non-zero int literal
+    /// - `char *s = ...;` / `int a[3] = ...;` — initializer not yet
+    ///   widely supported in codegen; we'll parse and let the next
+    ///   layer reject.
     fn parse_declare(&mut self, start: u32) -> Result<Stmt, ParseError> {
         let ty_tok = self.bump();
-        let ty = match ty_tok.kind {
+        let mut ty = match ty_tok.kind {
             TokenKind::KwInt => Type::Int,
             TokenKind::KwChar => Type::Char,
             _ => unreachable!("caller peeked an int/char keyword"),
         };
+        // Pointer stars wrap the base type: `int **pp` is `Pointer(Pointer(Int))`.
+        while matches!(self.peek().kind, TokenKind::Star) {
+            self.bump();
+            ty = Type::Pointer(Box::new(ty));
+        }
         let name_tok = self.bump();
         let TokenKind::Ident(name) = &name_tok.kind else {
             return Err(ParseError::NotAnIdent { offset: name_tok.span.start });
         };
         let name = name.clone();
+        // Array suffix: `[<int-literal>]`. C also allows `[]` for
+        // function parameters (decays to pointer) — we don't have
+        // a fixture for that yet.
+        if matches!(self.peek().kind, TokenKind::LBracket) {
+            self.bump();
+            let size_tok = self.bump();
+            let TokenKind::IntLit(len) = size_tok.kind else {
+                return Err(ParseError::Unexpected {
+                    expected: "array size (integer literal)".to_owned(),
+                    found: size_tok.kind.describe().to_owned(),
+                    offset: size_tok.span.start,
+                });
+            };
+            self.expect(&TokenKind::RBracket)?;
+            ty = Type::Array { elem: Box::new(ty), len };
+        }
         let init = if matches!(self.peek().kind, TokenKind::Equals) {
             self.bump();
             Some(self.parse_expr()?)
@@ -522,6 +586,32 @@ impl Parser {
                 span,
             });
         }
+        // Address-of: only `&<ident>` is supported today. The more
+        // general `&<lvalue>` doesn't appear in fixtures.
+        if matches!(self.peek().kind, TokenKind::Ampersand) {
+            let amp = self.bump();
+            let name_tok = self.bump();
+            let TokenKind::Ident(name) = name_tok.kind else {
+                return Err(ParseError::NotAnIdent { offset: name_tok.span.start });
+            };
+            let span = Span::new(amp.span.start, name_tok.span.end);
+            return Ok(Expr {
+                kind: ExprKind::AddressOf(name),
+                span,
+            });
+        }
+        // Pointer dereference: `*<unary>`. Lexically `*` is also the
+        // multiplication operator; the precedence layering puts unary
+        // tighter than multiplicative, so prefix `*` is unambiguous.
+        if matches!(self.peek().kind, TokenKind::Star) {
+            let star = self.bump();
+            let operand = self.parse_unary()?;
+            let span = Span::new(star.span.start, operand.span.end);
+            return Ok(Expr {
+                kind: ExprKind::Deref(Box::new(operand)),
+                span,
+            });
+        }
         let op = match self.peek().kind {
             TokenKind::Minus => UnaryOp::Neg,
             TokenKind::Bang => UnaryOp::Not,
@@ -593,6 +683,21 @@ impl Parser {
                             position: UpdatePosition::Post,
                         },
                         span,
+                    })
+                } else if matches!(self.peek().kind, TokenKind::LBracket) {
+                    // Array index `name[<expr>]`. Only one level today
+                    // — chained `a[i][j]` would need the indexed value
+                    // to itself be an array/pointer, which our type
+                    // system doesn't fully model.
+                    self.bump();
+                    let index = self.parse_expr()?;
+                    let close = self.expect(&TokenKind::RBracket)?;
+                    Ok(Expr {
+                        kind: ExprKind::ArrayIndex {
+                            array: name.clone(),
+                            index: Box::new(index),
+                        },
+                        span: Span::new(tok.span.start, close.span.end),
                     })
                 } else {
                     Ok(Expr { kind: ExprKind::Ident(name.clone()), span: tok.span })

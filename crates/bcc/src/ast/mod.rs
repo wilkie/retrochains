@@ -56,10 +56,21 @@ pub enum StmtKind {
     Declare { ty: Type, name: String, init: Option<Expr> },
     /// `if (cond) then-body [else else-body]`.
     If { cond: Expr, then_branch: Vec<Stmt>, else_branch: Option<Vec<Stmt>> },
-    /// `<name> = <value>;`. Currently only assignment to an existing
-    /// local (no dereference); the parser validates the LHS is a bare
-    /// identifier.
+    /// `<name> = <value>;`. The bare-ident assignment form. Pointer-
+    /// indirect (`*p = v;`) and array-index (`a[i] = v;`) targets get
+    /// their own statement kinds because the asm shape is distinct
+    /// enough that lumping them into one node would just split into a
+    /// match at codegen anyway.
     Assign { name: String, value: Expr },
+    /// `a[<index>] = <value>;`. `array` is the base name of a local
+    /// of array type (no pointer arithmetic yet — that would lower to
+    /// `DerefAssign` of a computed pointer). Index can be any int
+    /// expression; codegen specializes the constant-index case.
+    ArrayAssign { array: String, index: Expr, value: Expr },
+    /// `*<target> = <value>;`. `target` is the pointer expression
+    /// — usually an `Ident` for a pointer local, but in principle
+    /// anything that evaluates to a pointer.
+    DerefAssign { target: Expr, value: Expr },
     /// `<name> <op>= <value>;` (compound assignment). The codegen
     /// is distinct from `Assign { name, value: name <op> value }` —
     /// BCC emits a tighter form using `<op> <dst>, <src>` directly
@@ -104,33 +115,83 @@ pub enum StmtKind {
     ExprStmt(Expr),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Type {
     /// `int` — 16-bit signed under the small memory model.
     Int,
     /// `char` — 1-byte signed (BCC's default for plain `char`).
     Char,
+    /// `T a[N]` — contiguous run of `N` `T`-typed elements on the stack.
+    /// Arrays never enregister; the name in expression contexts refers
+    /// to a stack address. Today only constant `N` is supported (we
+    /// store the count as a `u32` matching `IntLit`'s width); the
+    /// element type is itself a `Type` so multi-dimensional arrays
+    /// fall out naturally when a fixture demands them.
+    Array { elem: Box<Type>, len: u32 },
+    /// `T *p` — a 16-bit near pointer to a `T`. Under the small memory
+    /// model all pointers are 2 bytes (intra-segment). Pointer locals
+    /// are eligible for the int register pool (SI/DI/DX/BX/CX) and
+    /// enregister at a *lower* use threshold than ints (≥ 2 vs. ≥ 3),
+    /// pinned by fixtures 080 and 081.
+    Pointer(Box<Type>),
 }
 
 impl Type {
     /// Size in bytes for stack-frame allocation. Memory-model-specific
     /// details (far pointers, etc.) will come later.
     #[must_use]
-    pub fn size_bytes(self) -> u16 {
+    pub fn size_bytes(&self) -> u16 {
         match self {
             Self::Int => 2,
             Self::Char => 1,
+            Self::Array { elem, len } => {
+                let elem = elem.size_bytes();
+                elem * u16::try_from(*len).expect("array byte size fits in u16")
+            }
+            Self::Pointer(_) => 2,
         }
     }
 
     /// Alignment (in bytes) required for this type's stack slot. `int`
     /// must land on an even bp-offset (so BCC pads when a preceding
     /// `char` left the cursor at an odd offset — see fixture 011).
+    /// Arrays align like their element type; pointers like ints.
     #[must_use]
-    pub fn alignment(self) -> u16 {
+    pub fn alignment(&self) -> u16 {
         match self {
             Self::Int => 2,
             Self::Char => 1,
+            Self::Array { elem, .. } => elem.alignment(),
+            Self::Pointer(_) => 2,
+        }
+    }
+
+    /// Whether this type can sit in an int-pool register (SI/DI/DX/BX/CX).
+    /// True for `int` and any pointer. Arrays never enregister.
+    #[must_use]
+    pub fn is_int_like(&self) -> bool {
+        matches!(self, Self::Int | Self::Pointer(_))
+    }
+
+    /// The element type of an array, or `None` if not an array. Used
+    /// by codegen to pick the right stride / width when indexing.
+    #[must_use]
+    pub fn array_elem(&self) -> Option<&Type> {
+        if let Self::Array { elem, .. } = self {
+            Some(elem)
+        } else {
+            None
+        }
+    }
+
+    /// The pointee type of a pointer, or `None` if not a pointer.
+    /// Used by codegen to pick the deref width.
+    #[must_use]
+    pub fn pointee(&self) -> Option<&Type> {
+        if let Self::Pointer(inner) = self {
+            Some(inner)
+        } else {
+            None
         }
     }
 }
@@ -164,6 +225,18 @@ pub enum ExprKind {
     AssignExpr { target: String, value: Box<Expr> },
     /// Direct function call by name.
     Call { name: String, args: Vec<Expr> },
+    /// `&<name>` — address-of a named local or parameter. Restricted
+    /// to a bare ident today; the more general `&<lvalue>` (e.g.
+    /// `&a[i]`) doesn't appear in fixtures yet.
+    AddressOf(String),
+    /// `*<ptr>` — pointer dereference in an rvalue context. The
+    /// pointee width comes from the static type of `ptr`.
+    Deref(Box<Expr>),
+    /// `<array>[<index>]` in an rvalue context. `array` is the name
+    /// of a local of array type; codegen specializes constant indices
+    /// to a plain `[bp-N]` load and falls back to the 5-instruction
+    /// effective-address sequence for variable indices.
+    ArrayIndex { array: String, index: Box<Expr> },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

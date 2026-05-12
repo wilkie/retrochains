@@ -53,6 +53,8 @@ impl<'a> Lexer<'a> {
                 b')' => { self.pos += 1; TokenKind::RParen }
                 b'{' => { self.pos += 1; TokenKind::LBrace }
                 b'}' => { self.pos += 1; TokenKind::RBrace }
+                b'[' => { self.pos += 1; TokenKind::LBracket }
+                b']' => { self.pos += 1; TokenKind::RBracket }
                 b';' => { self.pos += 1; TokenKind::Semicolon }
                 b':' => { self.pos += 1; TokenKind::Colon }
                 b',' => { self.pos += 1; TokenKind::Comma }

@@ -23,7 +23,7 @@
 //! haven't observed BCC enregistering a `char` and don't have a fixture
 //! to pin its shape.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::ast::{Expr, ExprKind, Function, Stmt, StmtKind, Type};
 use crate::codegen::plan::{pick_switch_strategy, SwitchStrategy};
@@ -123,10 +123,18 @@ pub struct ParamLoad {
     pub incoming_offset: u16,
 }
 
-/// Use count threshold for enregistering. A name with `>= THRESHOLD`
-/// textual occurrences (init + reads + writes) gets a register if one
-/// is still available.
-const ENREGISTER_THRESHOLD: u32 = 3;
+/// Use count threshold for enregistering ints. A name with
+/// `>= INT_ENREGISTER_THRESHOLD` textual occurrences (init + reads +
+/// writes) gets a register if one is still available.
+const INT_ENREGISTER_THRESHOLD: u32 = 3;
+
+/// Threshold for enregistering pointers. Lower than the int threshold
+/// because pointer use almost always involves indirect addressing
+/// (`mov ax, [reg]`), which has no equivalent stack-source form —
+/// staying on the stack would cost an extra load per access. Fixtures
+/// 080 and 081 have pointers with exactly 2 uses (init + one deref),
+/// both of which enregister.
+const PTR_ENREGISTER_THRESHOLD: u32 = 2;
 
 /// Offset of the **first** incoming argument relative to `bp` after
 /// the standard small-model prologue (`push bp` then `mov bp,sp`):
@@ -151,7 +159,7 @@ pub struct Locals {
     switch_spill_offsets: HashMap<u32, i16>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct LocalEntry {
     location: LocalLocation,
     ty: Type,
@@ -171,7 +179,7 @@ impl Locals {
         for param in &function.params {
             declared.push(DeclItem {
                 name: param.name.clone(),
-                ty: param.ty,
+                ty: param.ty.clone(),
                 kind: DeclKind::Param { incoming_offset: param_offset },
             });
             // Every param takes a 2-byte slot on the stack regardless
@@ -207,12 +215,29 @@ impl Locals {
         //      leave that path alone until a fixture forces a choice.
         let function_makes_call = body_has_call(&function.body);
 
-        // Int eligibles.
+        // Variables whose address is taken with `&x` anywhere in the
+        // function must live on the stack — a register has no address
+        // to give. Fixture 080 demonstrates: `int x = 5; int *p = &x;
+        // return *p;` puts x at [bp-2] even though it would otherwise
+        // be a candidate.
+        let mut address_taken: HashSet<String> = HashSet::new();
+        for stmt in &function.body {
+            collect_address_taken(stmt, &mut address_taken);
+        }
+
+        // Int-pool eligibles: ints with ≥ 3 uses, pointers with ≥ 2,
+        // and never anything whose address was taken.
         let eligible_int: Vec<usize> = (0..declared.len())
             .filter(|&i| {
-                declared[i].ty == Type::Int
-                    && counts.get(&declared[i].name).copied().unwrap_or(0)
-                        >= ENREGISTER_THRESHOLD
+                if address_taken.contains(&declared[i].name) {
+                    return false;
+                }
+                let uses = counts.get(&declared[i].name).copied().unwrap_or(0);
+                match &declared[i].ty {
+                    Type::Int => uses >= INT_ENREGISTER_THRESHOLD,
+                    Type::Pointer(_) => uses >= PTR_ENREGISTER_THRESHOLD,
+                    _ => false,
+                }
             })
             .collect();
         let si_pick = pick_si(&eligible_int, &declared, &counts);
@@ -230,15 +255,19 @@ impl Locals {
             reg_of.insert(i, reg);
         }
 
-        // Char eligibles — only when the function makes no call.
+        // Char eligibles — only when the function makes no call, and
+        // never for chars whose address was taken.
         if !function_makes_call {
             let mut char_pool = Reg::CHAR_POOL.iter().copied();
             for (i, item) in declared.iter().enumerate() {
-                if item.ty != Type::Char {
+                if !matches!(item.ty, Type::Char) {
+                    continue;
+                }
+                if address_taken.contains(&item.name) {
                     continue;
                 }
                 let uses = counts.get(&item.name).copied().unwrap_or(0);
-                if uses < ENREGISTER_THRESHOLD {
+                if uses < INT_ENREGISTER_THRESHOLD {
                     continue;
                 }
                 let Some(reg) = char_pool.next() else { break };
@@ -286,7 +315,7 @@ impl Locals {
                     ),
                 }
             };
-            by_name.insert(item.name.clone(), LocalEntry { location, ty: item.ty });
+            by_name.insert(item.name.clone(), LocalEntry { location, ty: item.ty.clone() });
         }
 
         // Round the local frame up to an even byte count. BCC's stack
@@ -339,8 +368,8 @@ impl Locals {
     }
 
     #[must_use]
-    pub fn type_of(&self, name: &str) -> Type {
-        self.entry(name).ty
+    pub fn type_of(&self, name: &str) -> &Type {
+        &self.entry(name).ty
     }
 
     /// Signed bp-offset of the scrutinee-spill stack slot for a
@@ -370,6 +399,106 @@ impl Locals {
 /// survive a call must stay on the stack (fixture 055).
 fn body_has_call(body: &[Stmt]) -> bool {
     body.iter().any(stmt_has_call)
+}
+
+/// Collect every name that appears as the target of an `&x`
+/// (address-of) anywhere in `stmt`. The resulting set is used to
+/// force those variables to stack-resident — register-resident
+/// locals have no address to take.
+fn collect_address_taken(stmt: &Stmt, out: &mut HashSet<String>) {
+    match &stmt.kind {
+        StmtKind::Return(value) => {
+            if let Some(e) = value {
+                expr_address_taken(e, out);
+            }
+        }
+        StmtKind::Declare { init, .. } => {
+            if let Some(e) = init {
+                expr_address_taken(e, out);
+            }
+        }
+        StmtKind::Assign { value, .. } | StmtKind::CompoundAssign { value, .. } => {
+            expr_address_taken(value, out);
+        }
+        StmtKind::ArrayAssign { index, value, .. } => {
+            expr_address_taken(index, out);
+            expr_address_taken(value, out);
+        }
+        StmtKind::DerefAssign { target, value } => {
+            expr_address_taken(target, out);
+            expr_address_taken(value, out);
+        }
+        StmtKind::If { cond, then_branch, else_branch } => {
+            expr_address_taken(cond, out);
+            for s in then_branch {
+                collect_address_taken(s, out);
+            }
+            if let Some(b) = else_branch {
+                for s in b {
+                    collect_address_taken(s, out);
+                }
+            }
+        }
+        StmtKind::While { cond, body } => {
+            expr_address_taken(cond, out);
+            for s in body {
+                collect_address_taken(s, out);
+            }
+        }
+        StmtKind::DoWhile { body, cond } => {
+            for s in body {
+                collect_address_taken(s, out);
+            }
+            expr_address_taken(cond, out);
+        }
+        StmtKind::For { init, cond, step, body } => {
+            if let Some(e) = init {
+                expr_address_taken(e, out);
+            }
+            if let Some(e) = cond {
+                expr_address_taken(e, out);
+            }
+            if let Some(e) = step {
+                expr_address_taken(e, out);
+            }
+            for s in body {
+                collect_address_taken(s, out);
+            }
+        }
+        StmtKind::Switch { scrutinee, cases } => {
+            expr_address_taken(scrutinee, out);
+            for c in cases {
+                for s in &c.body {
+                    collect_address_taken(s, out);
+                }
+            }
+        }
+        StmtKind::Break | StmtKind::Continue => {}
+        StmtKind::ExprStmt(e) => expr_address_taken(e, out),
+    }
+}
+
+fn expr_address_taken(e: &Expr, out: &mut HashSet<String>) {
+    match &e.kind {
+        ExprKind::AddressOf(name) => {
+            out.insert(name.clone());
+        }
+        ExprKind::BinOp { left, right, .. } | ExprKind::Logical { left, right, .. } => {
+            expr_address_taken(left, out);
+            expr_address_taken(right, out);
+        }
+        ExprKind::Unary { operand, .. } | ExprKind::Deref(operand) => {
+            expr_address_taken(operand, out);
+        }
+        ExprKind::AssignExpr { value, .. } => expr_address_taken(value, out),
+        ExprKind::ArrayIndex { index, .. } => expr_address_taken(index, out),
+        ExprKind::Call { args, .. } => {
+            for a in args {
+                expr_address_taken(a, out);
+            }
+        }
+        ExprKind::IntLit(_) | ExprKind::Ident(_) | ExprKind::Update { .. } => {}
+    }
 }
 
 /// Walk `stmts` and call `f(stmt.span.start)` for each `switch`
@@ -429,6 +558,12 @@ fn stmt_has_call(stmt: &Stmt) -> bool {
         StmtKind::Switch { scrutinee, cases } => {
             expr_has_call(scrutinee) || cases.iter().any(|c| body_has_call(&c.body))
         }
+        StmtKind::ArrayAssign { index, value, .. } => {
+            expr_has_call(index) || expr_has_call(value)
+        }
+        StmtKind::DerefAssign { target, value } => {
+            expr_has_call(target) || expr_has_call(value)
+        }
         StmtKind::ExprStmt(e) => expr_has_call(e),
     }
 }
@@ -441,7 +576,12 @@ fn expr_has_call(e: &Expr) -> bool {
         }
         ExprKind::Unary { operand, .. } => expr_has_call(operand),
         ExprKind::AssignExpr { value, .. } => expr_has_call(value),
-        ExprKind::Update { .. } | ExprKind::Ident(_) | ExprKind::IntLit(_) => false,
+        ExprKind::Deref(operand) => expr_has_call(operand),
+        ExprKind::ArrayIndex { index, .. } => expr_has_call(index),
+        ExprKind::Update { .. }
+        | ExprKind::Ident(_)
+        | ExprKind::IntLit(_)
+        | ExprKind::AddressOf(_) => false,
     }
 }
 
@@ -478,7 +618,7 @@ enum DeclKind {
 fn collect_decls(stmt: &Stmt, out: &mut Vec<DeclItem>) {
     match &stmt.kind {
         StmtKind::Declare { ty, name, .. } => {
-            out.push(DeclItem { name: name.clone(), ty: *ty, kind: DeclKind::Local });
+            out.push(DeclItem { name: name.clone(), ty: ty.clone(), kind: DeclKind::Local });
         }
         StmtKind::If { then_branch, else_branch, .. } => {
             for s in then_branch {
@@ -505,6 +645,8 @@ fn collect_decls(stmt: &Stmt, out: &mut Vec<DeclItem>) {
         StmtKind::Return(_)
         | StmtKind::Assign { .. }
         | StmtKind::CompoundAssign { .. }
+        | StmtKind::ArrayAssign { .. }
+        | StmtKind::DerefAssign { .. }
         | StmtKind::ExprStmt(_)
         | StmtKind::Break
         | StmtKind::Continue => {}
@@ -585,6 +727,18 @@ fn count_uses_stmt(stmt: &Stmt, counts: &mut HashMap<String, u32>) {
                 }
             }
         }
+        StmtKind::ArrayAssign { array, index, value } => {
+            // Each `a[i] = v;` is a write to a slot of `a`, so counts
+            // as one use of the array's name plus the uses inside the
+            // index and the value.
+            *counts.entry(array.clone()).or_insert(0) += 1;
+            count_uses_expr(index, counts);
+            count_uses_expr(value, counts);
+        }
+        StmtKind::DerefAssign { target, value } => {
+            count_uses_expr(target, counts);
+            count_uses_expr(value, counts);
+        }
         StmtKind::ExprStmt(e) => count_uses_expr(e, counts),
     }
 }
@@ -617,6 +771,20 @@ fn count_uses_expr(e: &Expr, counts: &mut HashMap<String, u32>) {
             for a in args {
                 count_uses_expr(a, counts);
             }
+        }
+        ExprKind::AddressOf(name) => {
+            // `&x` is itself a use, *and* it forces x to the stack
+            // (its address must be a real memory address). The
+            // "force to stack" half is handled separately when we
+            // decide eligibility below; the count contribution here
+            // is the use itself.
+            *counts.entry(name.clone()).or_insert(0) += 1;
+        }
+        ExprKind::Deref(operand) => count_uses_expr(operand, counts),
+        ExprKind::ArrayIndex { array, index } => {
+            // `a[i]` is a read of `a` plus a read of `i`.
+            *counts.entry(array.clone()).or_insert(0) += 1;
+            count_uses_expr(index, counts);
         }
         ExprKind::IntLit(_) => {}
     }

@@ -1212,6 +1212,101 @@ No `add` is generated. This means our front-end has to actually
 recognize `1 + 2` as a binary expression (we can't skip parsing it),
 then a fold pass replaces it with the constant `3` before codegen.
 
+## Arrays and pointers (`077`–`082`)
+
+### Array layout on the stack
+
+`<elem-type> a[N]` allocates `N * sizeof(<elem-type>)` bytes on the
+stack and places element 0 at the **most negative** bp-offset (the
+"bottom" of the array's stack chunk). Later indices step toward `bp`.
+For `int a[3]` (fixture 077), `a[0]` is at `[bp-6]`, `a[1]` at
+`[bp-4]`, `a[2]` at `[bp-2]`. For `char a[4]` (fixture 082),
+`a[0]` is at `[bp-4]`, `a[1]` at `[bp-3]`, etc.
+
+Arrays never enregister — their name is implicitly an address, and
+register-resident locals have no address. The locals analyzer skips
+them when handing out registers.
+
+### Constant-indexed array access (`077`, `078`, `082`)
+
+When the index folds to a constant, the access lowers to a plain
+stack reference with no address computation:
+
+```
+mov ax, word ptr [bp-6]      ; int a[0]
+mov word ptr [bp-6], 5       ; int a[0] = 5
+mov al, byte ptr [bp-4]      ; char a[0] (then `cbw` to widen to int)
+mov byte ptr [bp-4], 88      ; char a[0] = 88
+```
+
+Identical shape to a non-array local at the same offset, but reading
+the asm doesn't betray the difference — the C-level distinction is
+lost at the asm level.
+
+### Variable-indexed array access (`079`)
+
+When the index is a variable, BCC uses the same 5-instruction
+effective-address sequence for both reads and writes:
+
+```
+mov  bx, <index>             ; copy index to bx
+shl  bx, 1                    ; stride 2 for int (omitted for char, stride 1)
+lea  ax, word ptr [bp-N]      ; ax = &a[0]
+add  bx, ax                   ; bx = &a[i]
+mov  word ptr [bx], <rhs>     ; or mov ax, word ptr [bx] for a read
+```
+
+Note BCC writes `lea ax, word ptr [bp-N]` with the `word ptr`
+annotation preserved — `lea` doesn't actually load memory, so the
+prefix is meaningless to the CPU but BCC emits it consistently.
+The address goes via AX (`lea ax / add bx, ax`) rather than `lea
+bx, ...` directly — same AX-as-working-register pattern that
+shows up for `&x`.
+
+For char arrays (stride 1), the `shl bx, 1` is omitted. No fixture
+yet pins this — derived from the structure.
+
+### Address-of (`080`)
+
+`&<name>` lowers to:
+
+```
+lea  ax, word ptr [bp-N]
+mov  <dst>, ax
+```
+
+The address always materializes in AX first, then transfers to
+the destination — BCC doesn't use `lea <dst>, ...` directly even
+when it could. Consistent with the "AX is the working register"
+pattern (e.g. compound-assignment-via-AX for `*= K`).
+
+Taking the address of `x` forces `x` to be stack-resident, even
+if its use count would otherwise qualify it for a register.
+
+### Pointer storage and enregistration
+
+Pointers occupy 2 bytes (16-bit near pointers under the small
+memory model). They share the int register pool (`SI, DI, DX, BX,
+CX`) but enregister at a **lower use threshold** — `≥ 2` instead of
+`≥ 3` for ints. Both fixtures 080 and 081 have pointers with
+exactly 2 uses (init + one deref) and both put the pointer in SI.
+
+The likely reason: pointer use almost always involves indirect
+addressing (`mov ax, [reg]`), which has no equivalent stack-source
+form, so keeping a pointer on the stack costs an extra load per
+access. The threshold drop preempts that overhead.
+
+### Pointer dereference (`080`, `081`)
+
+`*<ptr>` in rvalue position: `mov ax, word ptr [<reg>]` where
+`<reg>` holds the pointer (SI in our fixtures).
+
+`*<ptr> = <value>;` (lvalue position, constant rhs): `mov word ptr
+[<reg>], <value>` — a direct indirect store of the immediate.
+
+The deref width is `word ptr` for `int *`, `byte ptr` for `char *`
+(no fixture for the latter yet — inferred from the symmetry).
+
 ## Source-line comments
 
 BCC interleaves the source as comments. Observed layout for `004`:
