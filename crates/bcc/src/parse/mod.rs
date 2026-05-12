@@ -152,15 +152,27 @@ impl Parser {
         self.expect(&TokenKind::LParen)?;
         let params = self.parse_param_list()?;
         self.expect(&TokenKind::RParen)?;
-        self.expect(&TokenKind::LBrace)?;
 
+        // Prototype (just `;` after the param list) vs definition
+        // (a `{ ... }` body). Fixture 097 has the prototype form.
+        if matches!(self.peek().kind, TokenKind::Semicolon) {
+            let semi = self.bump();
+            return Ok(Function {
+                name,
+                params,
+                span: Span::new(start, semi.span.end),
+                body: None,
+            });
+        }
+
+        self.expect(&TokenKind::LBrace)?;
         let mut body = Vec::new();
         while !matches!(self.peek().kind, TokenKind::RBrace | TokenKind::Eof) {
             body.push(self.parse_stmt()?);
         }
         let close = self.expect(&TokenKind::RBrace)?;
         let span = Span::new(start, close.span.end);
-        Ok(Function { name, params, span, body })
+        Ok(Function { name, params, span, body: Some(body) })
     }
 
     /// Parameter list inside the `(...)` of a function definition.
@@ -931,22 +943,22 @@ mod tests {
         assert_eq!(unit.functions.len(), 1);
         let f = &unit.functions[0];
         assert_eq!(f.name, "main");
-        assert_eq!(f.body.len(), 1);
-        let StmtKind::Return(Some(ref e)) = f.body[0].kind else { panic!() };
+        assert_eq!(f.body.as_ref().unwrap().len(), 1);
+        let StmtKind::Return(Some(ref e)) = f.body.as_ref().unwrap()[0].kind else { panic!() };
         assert!(matches!(e.kind, ExprKind::IntLit(0)));
     }
 
     #[test]
     fn fixture_003() {
         let unit = parse("int main(void) { return 42; }\n").unwrap();
-        let StmtKind::Return(Some(ref e)) = unit.functions[0].body[0].kind else { panic!() };
+        let StmtKind::Return(Some(ref e)) = unit.functions[0].body.as_ref().unwrap()[0].kind else { panic!() };
         assert!(matches!(e.kind, ExprKind::IntLit(42)));
     }
 
     #[test]
     fn fixture_005_binary_plus() {
         let unit = parse("int main(void) { return 1 + 2; }\n").unwrap();
-        let StmtKind::Return(Some(ref e)) = unit.functions[0].body[0].kind else { panic!() };
+        let StmtKind::Return(Some(ref e)) = unit.functions[0].body.as_ref().unwrap()[0].kind else { panic!() };
         let ExprKind::BinOp { op: BinOp::Add, ref left, ref right } = e.kind else { panic!() };
         assert!(matches!(left.kind, ExprKind::IntLit(1)));
         assert!(matches!(right.kind, ExprKind::IntLit(2)));
@@ -956,7 +968,7 @@ mod tests {
     fn multiplicative_binds_tighter_than_additive() {
         // `1 + 2 * 3` ≡ `1 + (2 * 3)`.
         let unit = parse("int main(void) { return 1 + 2 * 3; }\n").unwrap();
-        let StmtKind::Return(Some(ref e)) = unit.functions[0].body[0].kind else { panic!() };
+        let StmtKind::Return(Some(ref e)) = unit.functions[0].body.as_ref().unwrap()[0].kind else { panic!() };
         let ExprKind::BinOp { op: BinOp::Add, ref left, ref right } = e.kind else { panic!() };
         assert!(matches!(left.kind, ExprKind::IntLit(1)));
         let ExprKind::BinOp { op: BinOp::Mul, .. } = right.kind else {
@@ -967,14 +979,14 @@ mod tests {
     #[test]
     fn subtraction_parses() {
         let unit = parse("int main(void) { return 9 - 4; }\n").unwrap();
-        let StmtKind::Return(Some(ref e)) = unit.functions[0].body[0].kind else { panic!() };
+        let StmtKind::Return(Some(ref e)) = unit.functions[0].body.as_ref().unwrap()[0].kind else { panic!() };
         assert!(matches!(e.kind, ExprKind::BinOp { op: BinOp::Sub, .. }));
     }
 
     #[test]
     fn call_parses() {
         let unit = parse("int main(void) { return f(); }\n").unwrap();
-        let StmtKind::Return(Some(ref e)) = unit.functions[0].body[0].kind else { panic!() };
+        let StmtKind::Return(Some(ref e)) = unit.functions[0].body.as_ref().unwrap()[0].kind else { panic!() };
         let ExprKind::Call { ref name, ref args } = e.kind else { panic!() };
         assert_eq!(name, "f");
         assert!(args.is_empty());
@@ -983,7 +995,7 @@ mod tests {
     #[test]
     fn call_with_args_parses() {
         let unit = parse("int main(void) { return f(1, 2 + 3); }\n").unwrap();
-        let StmtKind::Return(Some(ref e)) = unit.functions[0].body[0].kind else { panic!() };
+        let StmtKind::Return(Some(ref e)) = unit.functions[0].body.as_ref().unwrap()[0].kind else { panic!() };
         let ExprKind::Call { ref args, .. } = e.kind else { panic!() };
         assert_eq!(args.len(), 2);
         assert!(matches!(args[0].kind, ExprKind::IntLit(1)));
@@ -1004,7 +1016,7 @@ mod tests {
         // `1 | 2 ^ 3 & 4 << 5 + 6 * 7` should parse with `*` tightest
         // and `|` loosest, so the root is BinOp::BitOr.
         let unit = parse("int main(void) { return 1 | 2 ^ 3 & 4 << 5 + 6 * 7; }\n").unwrap();
-        let StmtKind::Return(Some(ref e)) = unit.functions[0].body[0].kind else { panic!() };
+        let StmtKind::Return(Some(ref e)) = unit.functions[0].body.as_ref().unwrap()[0].kind else { panic!() };
         assert!(matches!(e.kind, ExprKind::BinOp { op: BinOp::BitOr, .. }));
     }
 
@@ -1012,7 +1024,7 @@ mod tests {
     fn shift_binds_below_additive() {
         // `1 + 2 << 3` ≡ `(1 + 2) << 3` — additive is tighter than shift.
         let unit = parse("int main(void) { return 1 + 2 << 3; }\n").unwrap();
-        let StmtKind::Return(Some(ref e)) = unit.functions[0].body[0].kind else { panic!() };
+        let StmtKind::Return(Some(ref e)) = unit.functions[0].body.as_ref().unwrap()[0].kind else { panic!() };
         let ExprKind::BinOp { op: BinOp::Shl, ref left, .. } = e.kind else { panic!() };
         assert!(matches!(left.kind, ExprKind::BinOp { op: BinOp::Add, .. }));
     }
@@ -1021,7 +1033,7 @@ mod tests {
     fn additive_is_left_associative() {
         // `1 + 2 + 3` → ((1 + 2) + 3)
         let unit = parse("int main(void) { return 1 + 2 + 3; }\n").unwrap();
-        let StmtKind::Return(Some(ref e)) = unit.functions[0].body[0].kind else { panic!() };
+        let StmtKind::Return(Some(ref e)) = unit.functions[0].body.as_ref().unwrap()[0].kind else { panic!() };
         let ExprKind::BinOp { ref left, ref right, .. } = e.kind else { panic!() };
         assert!(matches!(right.kind, ExprKind::IntLit(3)));
         let ExprKind::BinOp { left: ref ll, right: ref lr, .. } = left.kind else { panic!() };

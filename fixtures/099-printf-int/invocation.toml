@@ -1,0 +1,4 @@
+description = "Call a multi-arg external function (printf) with mixed string + int arguments. Pins multi-arg push order with a string literal as arg 0 and an int literal as arg 1."
+tool = "bcc"
+args = ["-S", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

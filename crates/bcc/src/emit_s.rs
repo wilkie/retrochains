@@ -79,13 +79,19 @@ pub fn build_asm(
     }
 
     // _TEXT opens once for the whole translation unit; every function
-    // lives inside.
+    // *definition* lives inside (prototypes don't produce any asm).
     out.extend_from_slice(b"_TEXT\tsegment byte public 'CODE'\r\n");
     let signatures = codegen::Signatures::from_unit(&unit);
     let globals = codegen::GlobalTable::from_unit(&unit);
     let mut strings = codegen::StringPool::default();
-    for (idx, function) in unit.functions.iter().enumerate() {
-        let func_idx = u32::try_from(idx + 1).unwrap_or(u32::MAX);
+    // Function-index assignment skips prototypes — they don't get a
+    // `@N@…` label scope of their own.
+    let mut func_idx = 0u32;
+    for function in &unit.functions {
+        if function.body.is_none() {
+            continue;
+        }
+        func_idx += 1;
         codegen::emit_function(
             &mut out,
             source,
@@ -230,6 +236,13 @@ _BSS\tends\r\n";
 }
 
 fn write_tail(out: &mut Vec<u8>, unit: &crate::ast::Unit, strings: &codegen::StringPool) {
+    // Collect external function references: any name called from
+    // somewhere in the TU that isn't defined here. Each becomes an
+    // `extrn _<name>:near` directive in the tail, between the
+    // empty `_TEXT segment / _TEXT ends` and the `public` list.
+    // Fixtures 096–100.
+    let externs = collect_extern_calls(unit);
+
     out.extend_from_slice(b"_DATA\tsegment word public 'DATA'\r\n");
     out.extend_from_slice(b"s@\tlabel\tbyte\r\n");
     // String literals materialize here. Each entry becomes a
@@ -243,6 +256,11 @@ fn write_tail(out: &mut Vec<u8>, unit: &crate::ast::Unit, strings: &codegen::Str
     out.extend_from_slice(b"_DATA\tends\r\n");
     out.extend_from_slice(b"_TEXT\tsegment byte public 'CODE'\r\n");
     out.extend_from_slice(b"_TEXT\tends\r\n");
+    // Extern declarations come between the final `_TEXT ends` and
+    // the `public` list. Source order, one per called external.
+    for name in &externs {
+        let _ = write!(out, "\textrn\t_{name}:near\r\n");
+    }
     // Public symbols are emitted in **reverse alphabetical** order.
     // Earlier fixtures (009, 010, 087) happened to land in alpha
     // order in source too, which led us to assume "reverse source
@@ -254,7 +272,11 @@ fn write_tail(out: &mut Vec<u8>, unit: &crate::ast::Unit, strings: &codegen::Str
     // walks it in reverse at TU end.
     let mut names: Vec<String> = Vec::new();
     for f in &unit.functions {
-        names.push(codegen::function_symbol(&f.name));
+        // Prototypes (body: None) don't get a `public` line — they
+        // didn't define a symbol in this TU.
+        if f.body.is_some() {
+            names.push(codegen::function_symbol(&f.name));
+        }
     }
     for g in &unit.globals {
         names.push(format!("_{}", g.name));
@@ -266,21 +288,173 @@ fn write_tail(out: &mut Vec<u8>, unit: &crate::ast::Unit, strings: &codegen::Str
     out.extend_from_slice(b"\tend\r\n");
 }
 
-/// Render a string literal's bytes as a single `db '...'` line,
-/// matching the way TASM accepts string literals. Quote handling
-/// (`'` inside the string) and non-printables would need attention
-/// for fancier fixtures; today our captures only have plain ASCII.
-fn emit_string_literal_db(out: &mut Vec<u8>, bytes: &[u8]) {
-    out.extend_from_slice(b"\tdb\t'");
-    for &b in bytes {
-        // Escape embedded `'` by closing the string, emitting a
-        // separate byte, and reopening. This is one of TASM's
-        // accepted forms; revisit when a fixture has an embedded quote.
-        if b == b'\'' {
-            out.extend_from_slice(b"',39,'");
-        } else {
-            out.push(b);
+/// Walk the AST and collect every function name that's *called* but
+/// not *defined* in this TU. The result is the set of external
+/// symbols we need to declare via `extrn _<name>:near`. Order is
+/// source-order of first appearance (matching what BCC emits — we
+/// haven't pinned the rule with multi-extern fixtures yet, but
+/// source-order is the natural default).
+fn collect_extern_calls(unit: &crate::ast::Unit) -> Vec<String> {
+    use std::collections::HashSet;
+    let defined: HashSet<&str> = unit
+        .functions
+        .iter()
+        .filter(|f| f.body.is_some())
+        .map(|f| f.name.as_str())
+        .collect();
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut ordered: Vec<String> = Vec::new();
+    for f in &unit.functions {
+        let Some(body) = &f.body else { continue };
+        for stmt in body {
+            walk_calls(stmt, &defined, &mut seen, &mut ordered);
         }
     }
-    out.extend_from_slice(b"'\r\n");
+    ordered
+}
+
+fn walk_calls(
+    stmt: &crate::ast::Stmt,
+    defined: &std::collections::HashSet<&str>,
+    seen: &mut std::collections::HashSet<String>,
+    ordered: &mut Vec<String>,
+) {
+    use crate::ast::StmtKind;
+    match &stmt.kind {
+        StmtKind::Return(e) => {
+            if let Some(e) = e {
+                walk_calls_expr(e, defined, seen, ordered);
+            }
+        }
+        StmtKind::Declare { init, .. } => {
+            if let Some(e) = init {
+                walk_calls_expr(e, defined, seen, ordered);
+            }
+        }
+        StmtKind::Assign { value, .. } | StmtKind::CompoundAssign { value, .. } => {
+            walk_calls_expr(value, defined, seen, ordered);
+        }
+        StmtKind::ArrayAssign { index, value, .. } => {
+            walk_calls_expr(index, defined, seen, ordered);
+            walk_calls_expr(value, defined, seen, ordered);
+        }
+        StmtKind::DerefAssign { target, value } => {
+            walk_calls_expr(target, defined, seen, ordered);
+            walk_calls_expr(value, defined, seen, ordered);
+        }
+        StmtKind::If { cond, then_branch, else_branch } => {
+            walk_calls_expr(cond, defined, seen, ordered);
+            for s in then_branch {
+                walk_calls(s, defined, seen, ordered);
+            }
+            if let Some(b) = else_branch {
+                for s in b {
+                    walk_calls(s, defined, seen, ordered);
+                }
+            }
+        }
+        StmtKind::While { cond, body } => {
+            walk_calls_expr(cond, defined, seen, ordered);
+            for s in body {
+                walk_calls(s, defined, seen, ordered);
+            }
+        }
+        StmtKind::DoWhile { body, cond } => {
+            for s in body {
+                walk_calls(s, defined, seen, ordered);
+            }
+            walk_calls_expr(cond, defined, seen, ordered);
+        }
+        StmtKind::For { init, cond, step, body } => {
+            if let Some(e) = init {
+                walk_calls_expr(e, defined, seen, ordered);
+            }
+            if let Some(e) = cond {
+                walk_calls_expr(e, defined, seen, ordered);
+            }
+            if let Some(e) = step {
+                walk_calls_expr(e, defined, seen, ordered);
+            }
+            for s in body {
+                walk_calls(s, defined, seen, ordered);
+            }
+        }
+        StmtKind::Switch { scrutinee, cases } => {
+            walk_calls_expr(scrutinee, defined, seen, ordered);
+            for c in cases {
+                for s in &c.body {
+                    walk_calls(s, defined, seen, ordered);
+                }
+            }
+        }
+        StmtKind::Break | StmtKind::Continue => {}
+        StmtKind::ExprStmt(e) => walk_calls_expr(e, defined, seen, ordered),
+    }
+}
+
+fn walk_calls_expr(
+    e: &crate::ast::Expr,
+    defined: &std::collections::HashSet<&str>,
+    seen: &mut std::collections::HashSet<String>,
+    ordered: &mut Vec<String>,
+) {
+    use crate::ast::ExprKind;
+    match &e.kind {
+        ExprKind::Call { name, args } => {
+            if !defined.contains(name.as_str()) && seen.insert(name.clone()) {
+                ordered.push(name.clone());
+            }
+            for a in args {
+                walk_calls_expr(a, defined, seen, ordered);
+            }
+        }
+        ExprKind::BinOp { left, right, .. } | ExprKind::Logical { left, right, .. } => {
+            walk_calls_expr(left, defined, seen, ordered);
+            walk_calls_expr(right, defined, seen, ordered);
+        }
+        ExprKind::Unary { operand, .. } | ExprKind::Deref(operand) => {
+            walk_calls_expr(operand, defined, seen, ordered);
+        }
+        ExprKind::AssignExpr { value, .. } => walk_calls_expr(value, defined, seen, ordered),
+        ExprKind::ArrayIndex { array, index } => {
+            walk_calls_expr(array, defined, seen, ordered);
+            walk_calls_expr(index, defined, seen, ordered);
+        }
+        ExprKind::Ident(_)
+        | ExprKind::IntLit(_)
+        | ExprKind::StringLit(_)
+        | ExprKind::Update { .. }
+        | ExprKind::AddressOf(_) => {}
+    }
+}
+
+/// Render a string literal's bytes as one or more `db` lines.
+/// Runs of printable ASCII go into a single quoted `db '...'`; each
+/// non-printable byte (like `\n` = 10) becomes its own `db <decimal>`
+/// line. Fixture 098 shows `"hi\n"` as `db 'hi' / db 10`.
+///
+/// We define "printable" as the ASCII printable range, excluding
+/// the single quote (which would close the run). A real BCC may
+/// have additional break conditions (e.g. tab), but our fixtures
+/// only exercise newline.
+fn emit_string_literal_db(out: &mut Vec<u8>, bytes: &[u8]) {
+    let mut quoted_run: Vec<u8> = Vec::new();
+    let flush = |out: &mut Vec<u8>, run: &mut Vec<u8>| {
+        if run.is_empty() {
+            return;
+        }
+        out.extend_from_slice(b"\tdb\t'");
+        out.extend_from_slice(run);
+        out.extend_from_slice(b"'\r\n");
+        run.clear();
+    };
+    for &b in bytes {
+        if (0x20..0x7F).contains(&b) && b != b'\'' {
+            quoted_run.push(b);
+        } else {
+            flush(out, &mut quoted_run);
+            let _ = write!(out, "\tdb\t{b}\r\n");
+        }
+    }
+    flush(out, &mut quoted_run);
 }

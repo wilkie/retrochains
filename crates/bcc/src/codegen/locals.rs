@@ -190,7 +190,7 @@ impl Locals {
             *counts.entry(param.name.clone()).or_insert(0) += 1;
         }
 
-        for stmt in &function.body {
+        for stmt in function.body.as_deref().unwrap_or(&[]) {
             collect_decls(stmt, &mut declared);
             count_uses_stmt(stmt, &mut counts);
         }
@@ -213,7 +213,7 @@ impl Locals {
         //      not similarly restricted today — none of our fixtures
         //      exercise an int enregistered across a call, so we
         //      leave that path alone until a fixture forces a choice.
-        let function_makes_call = body_has_call(&function.body);
+        let function_makes_call = body_has_call(function.body.as_deref().unwrap_or(&[]));
 
         // Variables whose address is taken with `&x` anywhere in the
         // function must live on the stack — a register has no address
@@ -221,7 +221,7 @@ impl Locals {
         // return *p;` puts x at [bp-2] even though it would otherwise
         // be a candidate.
         let mut address_taken: HashSet<String> = HashSet::new();
-        for stmt in &function.body {
+        for stmt in function.body.as_deref().unwrap_or(&[]) {
             collect_address_taken(stmt, &mut address_taken);
         }
 
@@ -331,7 +331,7 @@ impl Locals {
         // matches what fixture 074 demonstrates (only the one switch,
         // exactly one extra slot).
         let mut switch_spill_offsets = HashMap::new();
-        collect_linear_search_switches(&function.body, |span_start| {
+        collect_linear_search_switches(function.body.as_deref().unwrap_or(&[]), |span_start| {
             stack_bytes += 2;
             let off = -i16::try_from(stack_bytes).expect("stack frame fits in i16");
             switch_spill_offsets.insert(span_start, off);

@@ -1,0 +1,4 @@
+description = "String literal containing a `\\n` escape. Pins how BCC encodes embedded non-printable bytes in the `db 'string'` directive (single quoted with newline as control? `db 'hi',10,0`? other?)."
+tool = "bcc"
+args = ["-S", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

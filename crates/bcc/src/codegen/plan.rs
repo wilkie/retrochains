@@ -87,7 +87,7 @@ impl LabelPlan {
             loops: HashMap::new(),
             switches: HashMap::new(),
         };
-        plan_stmts(&function.body, &mut ctx);
+        plan_stmts(function.body.as_deref().unwrap_or(&[]), &mut ctx);
         Self {
             bases: ctx.bases,
             loops: ctx.loops,

@@ -47,11 +47,16 @@ pub struct Function {
     /// — C's "no parameters" spelling — not a variadic prototype.
     pub params: Vec<Param>,
     /// The full byte range of the function definition, from the
-    /// `int main…` opening through the closing `}`. Used to compute
-    /// which source lines this function spans, which in turn drives the
-    /// `;` source-comment emission in the asm.
+    /// `int main…` opening through the closing `}` (or `;` for a
+    /// prototype). Used to compute which source lines this function
+    /// spans, which in turn drives the `;` source-comment emission
+    /// in the asm.
     pub span: Span,
-    pub body: Vec<Stmt>,
+    /// `Some(body)` for a definition; `None` for a prototype-only
+    /// declaration (`int puts(char *s);` — fixture 097). Prototypes
+    /// don't produce asm output of their own, but they do feed the
+    /// signature table so call sites know each parameter's type.
+    pub body: Option<Vec<Stmt>>,
 }
 
 #[derive(Debug)]

@@ -182,6 +182,22 @@ array is equivalent to `f(&a[0])`; `int *p = a;` is equivalent to
 [bp-N]` that `&a[0]` would produce. Fixtures 090 (`int *p = a;`)
 and 095 (`sum(a)`) pin this.
 
+### Extern / `EXTRN`
+A function or variable referenced by this translation unit but
+defined elsewhere (in another TU, a library, or a hand-written
+`.ASM`). BCC emits one `extrn _<name>:near` directive per such
+function call, in the file tail between `_TEXT ends` and the
+`public` list. The linker resolves the references when combining
+this `.OBJ` with others.
+
+### Prototype
+A function declaration without a body — `int puts(char *s);`.
+Tells the compiler the parameter and return types so it can
+type-check calls, but produces no asm output of its own. Common
+in C headers (`stdio.h`, etc.). Fixture 097 confirms BCC ignores
+the prototype for codegen — the asm matches the implicit-extern
+case (fixture 096) byte-exactly.
+
 ### Direct deref
 A pointer dereference in a syntactic form BCC recognizes as a
 single addressed-load idiom — `*p`, `p[i]`, or `*(p + <constant>)`.

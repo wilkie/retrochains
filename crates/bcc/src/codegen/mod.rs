@@ -296,7 +296,7 @@ impl<'a> FunctionEmitter<'a> {
         }
 
         // Body.
-        for stmt in &self.function.body {
+        for stmt in self.function.body.as_deref().unwrap_or(&[]) {
             self.emit_stmt(stmt);
         }
 

@@ -521,6 +521,36 @@ BCC uses `jl/jg/jle/jge` not the unsigned variants `jb/ja/jbe/jae`,
 even when both operands are non-negative. Reflects the signed default
 for C `int`. _Fixtures_: 019–024.
 
+### `extrn _<name>:near` between `_TEXT ends` and publics (STRONG)
+
+Calls to functions not defined in this TU produce one
+`extrn _<name>:near` directive each, emitted in the file tail
+*before* the `public` list. The `:near` suffix is BCC-specific
+(MASM prefers `extern <name>:PROC`). _Fixtures_: 096–100.
+
+### Non-printable bytes break `db` quote runs (STRONG)
+
+A string literal containing `\n` (byte 10) splits into:
+```
+db	'hi'
+db	10
+db	0
+```
+The quoted form only holds printable ASCII; control bytes get
+their own decimal `db <N>` lines. Most era compilers either
+escape (`\n` in a quoted string) or emit one big `dw`/`db` list.
+_Fixture_: 098.
+
+### Each string literal explicitly NUL-terminated (STRONG)
+
+Every literal in `s@` ends with an explicit `db 0` — the NUL isn't
+embedded inside the quoted form. Multiple literals stack with
+their NULs visible:
+```
+db	'a' / db 0 / db 'b' / db 0
+```
+_Fixtures_: 088, 098, 100.
+
 ### `switch` strategy fingerprint: three observable forms (DEFINITIVE)
 
 BCC picks one of exactly three dispatch shapes — the choice is a

@@ -1,0 +1,4 @@
+description = "Same call site as 096, but with an explicit prototype for `puts`. Pins whether the prototype changes the emission (it shouldn't for a simple int-returning fn, but the comparison is worth having)."
+tool = "bcc"
+args = ["-S", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

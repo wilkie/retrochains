@@ -1307,6 +1307,106 @@ access. The threshold drop preempts that overhead.
 The deref width is `word ptr` for `int *`, `byte ptr` for `char *`
 (no fixture for the latter yet — inferred from the symmetry).
 
+## External function calls and hello-world (`096`–`100`)
+
+### Implicit and explicit extern functions
+
+A function called from this TU but not defined here becomes an
+external symbol. BCC emits an `extrn _<name>:near` directive in the
+**tail of the file**, between the final empty `_TEXT segment /
+_TEXT ends` and the `public` list:
+
+```
+_TEXT	segment byte public 'CODE'
+_TEXT	ends
+	extrn	_puts:near        ← external reference
+	public	_main
+	end
+```
+
+Two source forms produce *identical* asm (fixtures 096 vs. 097):
+- **Implicit declaration** (K&R-style): just `puts("hi");` with no
+  prior declaration. BCC assumes `extern int puts(...)`.
+- **Explicit prototype**: `int puts(char *s);` declared before
+  `main`. The prototype produces no asm of its own — its only
+  effect is to inform the type checker (which doesn't affect
+  codegen for these simple cases).
+
+The prototype gets parsed but doesn't enter the function-index
+counter (`@N@…` labels) or the `public` list.
+
+### String argument at a call site
+
+When a string literal is passed as a function argument, the address
+loads through AX (not the direct `mov reg, offset` used for pointer
+init):
+
+```
+mov	ax,offset DGROUP:s@
+push	ax
+call	near ptr _puts
+pop	cx
+```
+
+This is the same path used by every non-constant arg (`emit_arg_into_ax`
+→ `emit_expr_to_ax`). The contrast with `char *s = "hi"` (which uses
+`mov si, offset DGROUP:s@` directly) is because of *destination*: a
+register-local store has a direct form, but `push ax` requires the
+value in AX first.
+
+### Multiple string literals
+
+Each unique string literal occupies a contiguous run in `s@`:
+
+```
+_DATA	segment word public 'DATA'
+s@	label	byte
+	db	'a'
+	db	0
+	db	'b'
+	db	0
+_DATA	ends
+```
+
+The second literal's address is `offset DGROUP:s@+2` — the byte
+position of `'b'` after the first literal's contents + NUL. Each
+literal gets its own explicit `db 0` terminator (no quoted-form
+NUL embedding). Identical literals deduplicate to the same offset
+(no fixture pins this yet, but the natural implementation).
+
+### Non-printable bytes in string literals
+
+Bytes outside the ASCII printable range break out of the quoted
+`db '...'` form into their own decimal `db <N>` lines. Fixture 098
+(`"hi\n"`):
+
+```
+db	'hi'
+db	10
+db	0
+```
+
+The quoted run ends at the first non-printable, that byte gets its
+own line, and a new quoted run starts after (if there's more
+printable content). The closing `db 0` is the NUL terminator.
+
+### Right-to-left arg push, with `pop cx` cleanup
+
+Standard cdecl. For `printf("%d", 42)` (fixture 099):
+
+```
+mov	ax,42
+push	ax              ; rightmost arg first
+mov	ax,offset DGROUP:s@
+push	ax              ; leftmost arg last
+call	near ptr _printf
+pop	cx              ; clean up two args
+pop	cx
+```
+
+Same `pop cx` × N rule (for N ≤ 2) we've already pinned with
+intra-TU calls (fixture 010).
+
 ## Pointer arithmetic and array decay (`090`–`095`)
 
 ### Array name as a value (array decay)
