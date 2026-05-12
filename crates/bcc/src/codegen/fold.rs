@@ -19,8 +19,11 @@ pub fn try_const_eval(e: &Expr) -> Option<u32> {
         // have side effects or unknown runtime values — never fold.
         // (`&& / ||` *could* fold if both operands are constants, but
         // BCC doesn't emit a fixture where that matters; defer.)
-        // `&x`, `*p`, and `a[i]` all evaluate at runtime — addresses
-        // and memory loads aren't compile-time constants in our model.
+        // `&x`, `*p`, `a[i]`, and string literals all evaluate at
+        // runtime — addresses and memory loads aren't compile-time
+        // constants in our model. (String literals decay to their
+        // address, which a future codegen pass could fold to an
+        // immediate, but there's no fixture for it yet.)
         ExprKind::Ident(_)
         | ExprKind::Call { .. }
         | ExprKind::Update { .. }
@@ -28,7 +31,8 @@ pub fn try_const_eval(e: &Expr) -> Option<u32> {
         | ExprKind::AssignExpr { .. }
         | ExprKind::AddressOf(_)
         | ExprKind::Deref(_)
-        | ExprKind::ArrayIndex { .. } => None,
+        | ExprKind::ArrayIndex { .. }
+        | ExprKind::StringLit(_) => None,
         ExprKind::Unary { op, operand } => {
             let v = try_const_eval(operand)?;
             Some(match op {

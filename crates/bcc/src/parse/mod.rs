@@ -5,8 +5,8 @@
 //! single-pass forbids building a one-function-at-a-time variant later).
 
 use crate::ast::{
-    BinOp, Expr, ExprKind, Function, LogicalOp, Param, Stmt, StmtKind, SwitchCase, Type, UnaryOp,
-    Unit, UpdateOp, UpdatePosition,
+    BinOp, Expr, ExprKind, Function, Global, LogicalOp, Param, Stmt, StmtKind, SwitchCase,
+    TopLevelRef, Type, UnaryOp, Unit, UpdateOp, UpdatePosition,
 };
 use crate::lex::{Span, Token, TokenKind};
 
@@ -32,16 +32,111 @@ impl Parser {
         Self { tokens, pos: 0 }
     }
 
-    /// Parse a whole translation unit.
+    /// Parse a whole translation unit. Top-level items can be either
+    /// function definitions or global-variable declarations, in any
+    /// order. The distinction is decided by 2-token lookahead: after
+    /// the type and the name, an `(` means it's a function, anything
+    /// else (`;`, `=`, `[`) means it's a global.
     ///
     /// # Errors
     /// Returns [`ParseError`] on the first unrecognized construct.
     pub fn parse_unit(&mut self) -> Result<Unit, ParseError> {
         let mut functions = Vec::new();
+        let mut globals = Vec::new();
+        let mut decl_order = Vec::new();
         while !self.at_eof() {
-            functions.push(self.parse_function()?);
+            // Look past type-keyword + optional `*`s to find the
+            // declarator name, then peek the token after it to decide
+            // between function and global. Limited lookahead — enough
+            // for what we support today.
+            let mut probe = 0usize;
+            // Type keyword.
+            if !matches!(self.peek_n(probe).kind, TokenKind::KwInt | TokenKind::KwChar) {
+                let t = self.peek_n(probe);
+                return Err(ParseError::Unexpected {
+                    expected: "type keyword (`int` or `char`) at top level".to_owned(),
+                    found: t.kind.describe().to_owned(),
+                    offset: t.span.start,
+                });
+            }
+            probe += 1;
+            // Pointer stars (zero or more).
+            while matches!(self.peek_n(probe).kind, TokenKind::Star) {
+                probe += 1;
+            }
+            // Name.
+            if !matches!(self.peek_n(probe).kind, TokenKind::Ident(_)) {
+                let t = self.peek_n(probe);
+                return Err(ParseError::Unexpected {
+                    expected: "declarator name".to_owned(),
+                    found: t.kind.describe().to_owned(),
+                    offset: t.span.start,
+                });
+            }
+            probe += 1;
+            // The token after the name disambiguates: `(` means
+            // function, anything else means global decl.
+            if matches!(self.peek_n(probe).kind, TokenKind::LParen) {
+                let idx = functions.len();
+                functions.push(self.parse_function()?);
+                decl_order.push(TopLevelRef::Function(idx));
+            } else {
+                let idx = globals.len();
+                globals.push(self.parse_global()?);
+                decl_order.push(TopLevelRef::Global(idx));
+            }
         }
-        Ok(Unit { functions })
+        Ok(Unit { functions, globals, decl_order })
+    }
+
+    /// `<type-base> <pointer-stars>* <name> ('[' <int> ']')? [= <expr>] ;`
+    /// at the top level. Same declarator shape as a local declaration
+    /// (`parse_declare`); the difference is the resulting AST node
+    /// (`Global` vs. `StmtKind::Declare`) and the absence of an
+    /// enclosing function context.
+    fn parse_global(&mut self) -> Result<Global, ParseError> {
+        let start = self.peek().span.start;
+        let ty_tok = self.bump();
+        let mut ty = match ty_tok.kind {
+            TokenKind::KwInt => Type::Int,
+            TokenKind::KwChar => Type::Char,
+            _ => unreachable!("caller verified int/char at top of probe"),
+        };
+        while matches!(self.peek().kind, TokenKind::Star) {
+            self.bump();
+            ty = Type::Pointer(Box::new(ty));
+        }
+        let name_tok = self.bump();
+        let TokenKind::Ident(name) = &name_tok.kind else {
+            return Err(ParseError::NotAnIdent { offset: name_tok.span.start });
+        };
+        let name = name.clone();
+        if matches!(self.peek().kind, TokenKind::LBracket) {
+            self.bump();
+            let size_tok = self.bump();
+            let TokenKind::IntLit(len) = size_tok.kind else {
+                return Err(ParseError::Unexpected {
+                    expected: "array size (integer literal)".to_owned(),
+                    found: size_tok.kind.describe().to_owned(),
+                    offset: size_tok.span.start,
+                });
+            };
+            self.expect(&TokenKind::RBracket)?;
+            ty = Type::Array { elem: Box::new(ty), len };
+        }
+        let init = if matches!(self.peek().kind, TokenKind::Equals) {
+            self.bump();
+            Some(self.parse_expr()?)
+        } else {
+            None
+        };
+        let semi = self.expect(&TokenKind::Semicolon)?;
+        Ok(Global {
+            name,
+            ty,
+            init,
+            span: Span::new(start, semi.span.end),
+        })
     }
 
     fn parse_function(&mut self) -> Result<Function, ParseError> {
@@ -205,11 +300,19 @@ impl Parser {
         let span = Span::new(start, semi.span.end);
         let kind = match expr.kind {
             ExprKind::Deref(ptr) => StmtKind::DerefAssign { target: *ptr, value },
-            ExprKind::ArrayIndex { array, index } => StmtKind::ArrayAssign {
-                array,
-                index: *index,
-                value,
-            },
+            ExprKind::ArrayIndex { array, index } => {
+                // The array side of an assign must be a named array
+                // local (or future global) — string literals are not
+                // assignable. Extract the ident name.
+                let ExprKind::Ident(name) = array.kind else {
+                    return Err(ParseError::Unsupported { offset: array.span.start });
+                };
+                StmtKind::ArrayAssign {
+                    array: name,
+                    index: *index,
+                    value,
+                }
+            }
             ExprKind::Ident(name) => StmtKind::Assign { name, value },
             _ => {
                 return Err(ParseError::Unsupported { offset: expr.span.start });
@@ -652,6 +755,26 @@ impl Parser {
         let tok = self.bump();
         match tok.kind {
             TokenKind::IntLit(v) => Ok(Expr { kind: ExprKind::IntLit(v), span: tok.span }),
+            TokenKind::StringLit(bytes) => {
+                let lit = Expr {
+                    kind: ExprKind::StringLit(bytes),
+                    span: tok.span,
+                };
+                // String literals can be indexed in place: `"hi"[0]`.
+                if matches!(self.peek().kind, TokenKind::LBracket) {
+                    self.bump();
+                    let index = self.parse_expr()?;
+                    let close = self.expect(&TokenKind::RBracket)?;
+                    return Ok(Expr {
+                        kind: ExprKind::ArrayIndex {
+                            array: Box::new(lit),
+                            index: Box::new(index),
+                        },
+                        span: Span::new(tok.span.start, close.span.end),
+                    });
+                }
+                Ok(lit)
+            }
             TokenKind::Ident(ref name) => {
                 // Postfix `()` makes it a function call.
                 if matches!(self.peek().kind, TokenKind::LParen) {
@@ -692,9 +815,13 @@ impl Parser {
                     self.bump();
                     let index = self.parse_expr()?;
                     let close = self.expect(&TokenKind::RBracket)?;
+                    let array = Expr {
+                        kind: ExprKind::Ident(name.clone()),
+                        span: tok.span,
+                    };
                     Ok(Expr {
                         kind: ExprKind::ArrayIndex {
-                            array: name.clone(),
+                            array: Box::new(array),
                             index: Box::new(index),
                         },
                         span: Span::new(tok.span.start, close.span.end),

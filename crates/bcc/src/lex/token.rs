@@ -27,6 +27,11 @@ pub enum TokenKind {
     // Atoms
     Ident(String),
     IntLit(u32),
+    /// `"...."` — string literal. Decoded byte contents, escapes
+    /// resolved at lex time. The trailing NUL is implicit (added by
+    /// codegen when materializing the literal); the lexer doesn't
+    /// include it in the value.
+    StringLit(Vec<u8>),
     // Punctuation
     LParen,
     RParen,
@@ -94,6 +99,7 @@ impl TokenKind {
             Self::KwDefault => "`default`",
             Self::Ident(_) => "identifier",
             Self::IntLit(_) => "integer literal",
+            Self::StringLit(_) => "string literal",
             Self::LParen => "`(`",
             Self::RParen => "`)`",
             Self::LBrace => "`{`",

@@ -491,13 +491,19 @@ fn expr_address_taken(e: &Expr, out: &mut HashSet<String>) {
             expr_address_taken(operand, out);
         }
         ExprKind::AssignExpr { value, .. } => expr_address_taken(value, out),
-        ExprKind::ArrayIndex { index, .. } => expr_address_taken(index, out),
+        ExprKind::ArrayIndex { array, index } => {
+            expr_address_taken(array, out);
+            expr_address_taken(index, out);
+        }
         ExprKind::Call { args, .. } => {
             for a in args {
                 expr_address_taken(a, out);
             }
         }
-        ExprKind::IntLit(_) | ExprKind::Ident(_) | ExprKind::Update { .. } => {}
+        ExprKind::IntLit(_)
+        | ExprKind::Ident(_)
+        | ExprKind::Update { .. }
+        | ExprKind::StringLit(_) => {}
     }
 }
 
@@ -577,11 +583,14 @@ fn expr_has_call(e: &Expr) -> bool {
         ExprKind::Unary { operand, .. } => expr_has_call(operand),
         ExprKind::AssignExpr { value, .. } => expr_has_call(value),
         ExprKind::Deref(operand) => expr_has_call(operand),
-        ExprKind::ArrayIndex { index, .. } => expr_has_call(index),
+        ExprKind::ArrayIndex { array, index } => {
+            expr_has_call(array) || expr_has_call(index)
+        }
         ExprKind::Update { .. }
         | ExprKind::Ident(_)
         | ExprKind::IntLit(_)
-        | ExprKind::AddressOf(_) => false,
+        | ExprKind::AddressOf(_)
+        | ExprKind::StringLit(_) => false,
     }
 }
 
@@ -782,10 +791,14 @@ fn count_uses_expr(e: &Expr, counts: &mut HashMap<String, u32>) {
         }
         ExprKind::Deref(operand) => count_uses_expr(operand, counts),
         ExprKind::ArrayIndex { array, index } => {
-            // `a[i]` is a read of `a` plus a read of `i`.
-            *counts.entry(array.clone()).or_insert(0) += 1;
+            // `a[i]` is a read of `a` plus a read of `i`. When the
+            // array base is an ident, count one use of that name.
+            // String-literal bases don't contribute use counts —
+            // they aren't variables.
+            count_uses_expr(array, counts);
             count_uses_expr(index, counts);
         }
+        ExprKind::StringLit(_) => {}
         ExprKind::IntLit(_) => {}
     }
 }

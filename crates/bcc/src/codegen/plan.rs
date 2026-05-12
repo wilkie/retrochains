@@ -386,11 +386,15 @@ fn plan_expr_value(e: &Expr, ctx: &mut PlanCtx) {
             }
         }
         ExprKind::Deref(operand) => plan_expr_value(operand, ctx),
-        ExprKind::ArrayIndex { index, .. } => plan_expr_value(index, ctx),
+        ExprKind::ArrayIndex { array, index } => {
+            plan_expr_value(array, ctx);
+            plan_expr_value(index, ctx);
+        }
         ExprKind::IntLit(_)
         | ExprKind::Ident(_)
         | ExprKind::Update { .. }
-        | ExprKind::AddressOf(_) => {}
+        | ExprKind::AddressOf(_)
+        | ExprKind::StringLit(_) => {}
     }
 }
 

@@ -1,0 +1,4 @@
+description = "Write to a global from a function. Pins how BCC addresses a global (likely `word ptr _g` or `word ptr [_g]`) as both an lvalue and an rvalue."
+tool = "bcc"
+args = ["-S", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

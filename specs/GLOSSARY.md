@@ -181,6 +181,46 @@ array is equivalent to `f(&a[0])`. We haven't pinned BCC's
 specific lowering of decay yet — our current fixtures use array
 indexing (`a[i]`) directly, not bare-array contexts.
 
+### Global / file-scope variable
+A variable declared outside any function. Persists for the
+program's whole lifetime. BCC routes globals through `DGROUP:_<name>`
+references and partitions them between `_DATA` (initialized) and
+`_BSS` (uninitialized). Fixtures 083–087.
+
+### `s@` block
+The label at the start of the trailing `_DATA` block that anchors
+**string literals**. We'd been emitting `s@ label byte / _DATA ends`
+as an empty marker in every prior fixture; with literals, the block
+fills with `db '<chars>' / db 0` runs, one per unique literal.
+The label itself is part of the BCC fingerprint — most compilers
+use `LC0` / `$SG0` / etc.
+
+### String pool
+The data structure in our codegen (`StringPool` in `codegen/mod.rs`)
+that accumulates string literals during emission, assigns each a
+byte offset within the eventual `s@` block, and dedupes
+identical literals. Filled per translation unit and drained when
+the file tail is written.
+
+### `_DATA` / `_BSS` / `_TEXT`
+The three segments BCC partitions program content into under the
+small memory model:
+- **`_TEXT`**: code. Functions live here.
+- **`_DATA`**: initialized data — globals with `= K` initializers,
+  string literals, jump tables.
+- **`_BSS`**: uninitialized data — globals with no initializer,
+  declared by reservation (`db N dup (?)`).
+The trailing `_TEXT segment ... _TEXT ends` after the data tail is
+an empty re-open that BCC always emits, presumably as a "this
+file's `_TEXT` is closed" marker for the linker.
+
+### `DGROUP`
+A linker-level grouping of related data segments. BCC groups
+`_DATA` and `_BSS` into `DGROUP`. Every global access carries an
+explicit `DGROUP:` segment override (`word ptr DGROUP:_g`), even
+though `DS:` would normally resolve to the same thing — the
+explicit override is a strong fingerprint of BCC.
+
 ### Lvalue / Rvalue
 - **Lvalue** ("locator-value"): something that has an address —
   a variable, an array element, a pointer dereference. Can appear

@@ -5,10 +5,39 @@
 
 use crate::lex::Span;
 
-/// A whole translation unit (one `.C` file).
+/// A whole translation unit (one `.C` file). Holds the top-level
+/// declarations in source order so codegen can preserve that order
+/// when emitting public symbols and segment data.
 #[derive(Debug)]
 pub struct Unit {
     pub functions: Vec<Function>,
+    /// File-scope variable declarations. Source order preserved;
+    /// codegen partitions them into `_DATA` (initialized) and `_BSS`
+    /// (uninitialized) at emit time.
+    pub globals: Vec<Global>,
+    /// Source order of top-level decls, so the LIFO `public` list at
+    /// the end of the file can be reconstructed (LIFO of declaration
+    /// order). Each entry references either a function or a global by
+    /// index into the corresponding vec.
+    pub decl_order: Vec<TopLevelRef>,
+}
+
+/// One file-scope variable. `init = None` means the global lives in
+/// `_BSS`; `Some(...)` means `_DATA`.
+#[derive(Debug)]
+pub struct Global {
+    pub name: String,
+    pub ty: Type,
+    pub init: Option<Expr>,
+    pub span: Span,
+}
+
+/// Source-order pointer back into a `Unit`'s `functions` or `globals`
+/// vector. Used to walk top-level items in declaration order.
+#[derive(Debug, Clone, Copy)]
+pub enum TopLevelRef {
+    Function(usize),
+    Global(usize),
 }
 
 #[derive(Debug)]
@@ -232,11 +261,16 @@ pub enum ExprKind {
     /// `*<ptr>` — pointer dereference in an rvalue context. The
     /// pointee width comes from the static type of `ptr`.
     Deref(Box<Expr>),
-    /// `<array>[<index>]` in an rvalue context. `array` is the name
-    /// of a local of array type; codegen specializes constant indices
-    /// to a plain `[bp-N]` load and falls back to the 5-instruction
-    /// effective-address sequence for variable indices.
-    ArrayIndex { array: String, index: Box<Expr> },
+    /// `<array>[<index>]` in an rvalue context. `array` can be an
+    /// `Ident` (a local of array type) or a `StringLit` (a string
+    /// literal indexed in place, e.g. `"hi"[0]`). Codegen specializes
+    /// constant indices and folds `StringLit`-base accesses to a
+    /// direct `DGROUP:s@<offset>` memory reference.
+    ArrayIndex { array: Box<Expr>, index: Box<Expr> },
+    /// `"...."` — a string literal. The bytes are the decoded
+    /// contents (escapes resolved); codegen appends a trailing NUL
+    /// when materializing the literal into the `s@` block.
+    StringLit(Vec<u8>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

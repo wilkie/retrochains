@@ -575,6 +575,56 @@ into AX first and then `mov`s to the destination — never `lea
 <dst>, [bp-N]` directly. Consistent with BCC's "AX is the
 working register" pattern. _Fixtures_: 080, 081.
 
+### `DGROUP:` segment override on every global access (STRONG)
+
+Every read or write of a file-scope variable carries the explicit
+`DGROUP:` prefix: `mov ax, word ptr DGROUP:_g`. Many era compilers
+omitted the override and relied on the default `DS:`; BCC's
+verbose form is distinctive. _Fixtures_: 083–087.
+
+### Initialized data emits as `db` byte pairs (STRONG)
+
+An `int g = 42` global emits `db 42 / db 0` rather than `dw 42`.
+Same byte-pair shape as the linear-search switch value table — a
+consistent BCC idiom for emitting 16-bit values into data
+segments. _Fixtures_: 084, 086, 087.
+
+### `?debug C E9` moves when BSS is non-empty (DEFINITIVE)
+
+The end-of-function debug record `?debug C E9` normally sits
+inside `_TEXT` between `_main endp` and `_TEXT ends`. **When the
+program has any uninitialized globals, the record moves to inside
+the trailing `_BSS` block**, right before `_BSS ends`. The shift
+is structural and reliable. _Fixtures_: 083, 085, 087.
+
+### Char-on-right widening dance (STRONG)
+
+When a char operand appears as the right side of arithmetic with
+an int LHS, BCC emits the six-instruction sequence
+`push ax / mov al, ... / cbw / mov dx, ax / pop ax / add ax, dx`
+to preserve the running int sum through the char load.  Most
+era compilers either widen the char eagerly before the int load,
+or use a different temp register without the push/pop. _Fixture_:
+087.
+
+### String literals materialize after `s@` (DEFINITIVE)
+
+The `s@ label byte` marker in the trailing `_DATA` block is the
+anchor for string literals. Each literal becomes `db '<chars>'`
+followed by an explicit `db 0` NUL terminator. References to the
+first literal use `offset DGROUP:s@`; subsequent literals would
+use `s@+<offset>`. The presence of `s@` in any BCC-emitted `.ASM`
+is essentially conclusive. _Fixtures_: 088, 089.
+
+### Direct `mov reg, offset DGROUP:s@` for string-literal addresses (STRONG)
+
+Unlike `&x` (which always routes through AX), assigning a string
+literal address to a register uses a direct `mov` with an
+`offset` immediate: `mov si, offset DGROUP:s@`. The distinction
+is mechanical (literals are linker-resolved constants vs. `&x`
+which is a runtime `lea`), but few compilers special-case it as
+visibly. _Fixture_: 088.
+
 ### Pointer enregistration at ≥ 2 uses (STRONG)
 
 Plain `int` locals need ≥ 3 textual uses to land in a register,

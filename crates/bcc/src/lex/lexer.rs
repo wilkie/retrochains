@@ -13,6 +13,10 @@ pub enum LexError {
     UnexpectedChar { ch: char, offset: u32 },
     #[error("integer literal at offset {offset} overflows 32 bits")]
     IntOverflow { offset: u32 },
+    #[error("unterminated string literal starting at offset {offset}")]
+    UnterminatedString { offset: u32 },
+    #[error("unknown escape `\\{ch}` in string literal at offset {offset}")]
+    UnknownEscape { ch: char, offset: u32 },
 }
 
 #[derive(Debug)]
@@ -71,6 +75,7 @@ impl<'a> Lexer<'a> {
                 b'~' => { self.pos += 1; TokenKind::Tilde }
                 b'<' => self.lex_after_lt(),
                 b'>' => self.lex_after_gt(),
+                b'"' => self.lex_string_literal()?,
                 b if is_ident_start(b) => self.lex_ident_or_keyword(),
                 b if b.is_ascii_digit() => self.lex_int_literal()?,
                 other => {
@@ -224,6 +229,54 @@ impl<'a> Lexer<'a> {
             Some(&b'>') => { self.pos += 1; TokenKind::ShiftRight }
             Some(&b'=') => { self.pos += 1; TokenKind::Ge }
             _ => TokenKind::Gt,
+        }
+    }
+
+    /// `"<chars>"` with simple C-style escape sequences. We handle
+    /// the escapes BCC's stdio formats most commonly want — newline,
+    /// tab, the two quote forms, backslash, and null. Fancier ones
+    /// (`\x`, `\<octal>`, `\a`, `\v`) wait for a fixture.
+    fn lex_string_literal(&mut self) -> Result<TokenKind, LexError> {
+        let start = self.pos;
+        self.pos += 1; // opening `"`
+        let mut bytes = Vec::new();
+        loop {
+            let Some(&b) = self.src.get(self.pos) else {
+                return Err(LexError::UnterminatedString { offset: off(start) });
+            };
+            match b {
+                b'"' => {
+                    self.pos += 1;
+                    return Ok(TokenKind::StringLit(bytes));
+                }
+                b'\\' => {
+                    self.pos += 1;
+                    let Some(&esc) = self.src.get(self.pos) else {
+                        return Err(LexError::UnterminatedString { offset: off(start) });
+                    };
+                    self.pos += 1;
+                    let decoded = match esc {
+                        b'n' => b'\n',
+                        b't' => b'\t',
+                        b'r' => b'\r',
+                        b'0' => 0u8,
+                        b'\\' => b'\\',
+                        b'\'' => b'\'',
+                        b'"' => b'"',
+                        other => {
+                            return Err(LexError::UnknownEscape {
+                                ch: other as char,
+                                offset: off(self.pos - 1),
+                            });
+                        }
+                    };
+                    bytes.push(decoded);
+                }
+                _ => {
+                    bytes.push(b);
+                    self.pos += 1;
+                }
+            }
         }
     }
 

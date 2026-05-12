@@ -55,8 +55,90 @@ mod locals;
 mod plan;
 
 use fold::try_const_eval;
+
+/// Public re-export so the file-emitter can fold a global-variable
+/// initializer down to its constant byte value.
+#[must_use]
+pub fn fold_const_global(expr: &crate::ast::Expr) -> Option<u32> {
+    try_const_eval(expr)
+}
 use line_map::LineMap;
 use locals::{LocalLocation, Locals, ParamLoad, Reg};
+
+/// File-scope variable lookup. Built once per translation unit from
+/// `Unit::globals` and consulted by codegen whenever an `Ident`
+/// reference doesn't match a local — at which point the reference
+/// lowers to `<width> ptr DGROUP:_<name>` instead of `[bp-N]`.
+#[derive(Debug, Default)]
+pub struct GlobalTable {
+    map: HashMap<String, crate::ast::Type>,
+}
+
+impl GlobalTable {
+    #[must_use]
+    pub fn from_unit(unit: &Unit) -> Self {
+        let map = unit
+            .globals
+            .iter()
+            .map(|g| (g.name.clone(), g.ty.clone()))
+            .collect();
+        Self { map }
+    }
+
+    #[must_use]
+    pub fn type_of(&self, name: &str) -> Option<&crate::ast::Type> {
+        self.map.get(name)
+    }
+
+    #[must_use]
+    pub fn contains(&self, name: &str) -> bool {
+        self.map.contains_key(name)
+    }
+}
+
+/// Accumulator for string literals encountered during codegen of a
+/// translation unit. Each unique literal gets a stable byte offset
+/// within the `s@` block; identical literals deduplicate. Emission
+/// of the actual `db 'string' / db 0` block happens in the tail of
+/// the file (`emit_s.rs::write_tail`).
+#[derive(Debug, Default)]
+pub struct StringPool {
+    /// Source bytes of each unique literal, in insertion order. The
+    /// running total of `bytes.len() + 1` (NUL terminator) is the
+    /// next available offset.
+    entries: Vec<Vec<u8>>,
+}
+
+impl StringPool {
+    /// Intern a literal and return its byte offset within `s@`.
+    /// Identical literals return the same offset.
+    pub fn intern(&mut self, bytes: &[u8]) -> u32 {
+        let mut offset: u32 = 0;
+        for existing in &self.entries {
+            if existing.as_slice() == bytes {
+                return offset;
+            }
+            offset += u32::try_from(existing.len() + 1).expect("string offset fits in u32");
+        }
+        self.entries.push(bytes.to_vec());
+        offset
+    }
+
+    /// True when no literals have been interned. Tail emission can
+    /// skip the `db` lines entirely in that case (matching the
+    /// "empty s@ block" we used to always emit).
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// The interned literals in insertion order. Tail emission writes
+    /// each as `db '<contents>'` (and an explicit terminating `db 0`).
+    #[must_use]
+    pub fn entries(&self) -> &[Vec<u8>] {
+        &self.entries
+    }
+}
 
 /// Format a bp-relative address: negative offsets are written
 /// `[bp-N]`, positives `[bp+N]`. Used by every `word ptr` / `byte ptr`
@@ -77,8 +159,12 @@ pub fn emit_function(
     function: &Function,
     func_idx: u32,
     signatures: &Signatures,
+    globals: &GlobalTable,
+    strings: &mut StringPool,
 ) {
-    let mut emitter = FunctionEmitter::new(out, source, function, func_idx, signatures);
+    let mut emitter = FunctionEmitter::new(
+        out, source, function, func_idx, signatures, globals, strings,
+    );
     emitter.run();
 }
 
@@ -100,6 +186,8 @@ struct FunctionEmitter<'a> {
     locals: Locals,
     label_plan: LabelPlan,
     signatures: &'a Signatures,
+    globals: &'a GlobalTable,
+    strings: &'a mut StringPool,
     /// Stack of enclosing loop targets so `break;` / `continue;`
     /// statements can look up their jump destination. The innermost
     /// loop sits at the top (index `len()-1`).
@@ -129,6 +217,8 @@ impl<'a> FunctionEmitter<'a> {
         function: &'a Function,
         func_idx: u32,
         signatures: &'a Signatures,
+        globals: &'a GlobalTable,
+        strings: &'a mut StringPool,
     ) -> Self {
         Self {
             out,
@@ -140,6 +230,8 @@ impl<'a> FunctionEmitter<'a> {
             locals: Locals::analyze(function),
             label_plan: LabelPlan::build(function),
             signatures,
+            globals,
+            strings,
             loop_stack: Vec::new(),
             post_function_data: Vec::new(),
         }
@@ -259,8 +351,12 @@ impl<'a> FunctionEmitter<'a> {
             }
             StmtKind::Assign { name, value } => {
                 self.advance_to_stmt_line(stmt);
-                let loc = self.locals.location_of(name);
-                self.emit_assign_local(loc, value);
+                if self.globals.contains(name) {
+                    self.emit_assign_global(name, value);
+                } else {
+                    let loc = self.locals.location_of(name);
+                    self.emit_assign_local(loc, value);
+                }
             }
             StmtKind::CompoundAssign { name, op, value } => {
                 self.advance_to_stmt_line(stmt);
@@ -1436,21 +1532,29 @@ impl<'a> FunctionEmitter<'a> {
         let _ = write!(self.out, "\tmov\tax,{width} ptr [{addr_reg}]\r\n");
     }
 
-    /// `a[<index>]` in rvalue position. Two shapes:
-    /// - **Constant index**: `mov ax, word ptr [bp-(base+K*stride)]`
-    ///   — same as a plain stack-local access (fixture 077, 078, 082).
-    /// - **Variable index**: the 5-instruction effective-address
-    ///   sequence (fixture 079):
-    ///   ```text
-    ///     mov bx, <index>
-    ///     shl bx, 1                    ; for stride 2; omitted for chars
-    ///     lea ax, word ptr [bp-base]
-    ///     add bx, ax
-    ///     mov ax, <width> ptr [bx]
-    ///   ```
-    /// where `base` is the bp-offset of `a[0]`.
-    fn emit_array_index_to_ax(&mut self, array: &str, index: &Expr) {
+    /// `a[<index>]` in rvalue position. The `array` side can be:
+    /// - An ident referencing a local array (077, 078, 082, 079).
+    ///   Constant index → direct `[bp-K]` load; variable index → the
+    ///   5-instruction effective-address sequence.
+    /// - A string literal (089: `"hi"[0]`). The literal is registered
+    ///   in the string pool and the access folds to a direct
+    ///   `DGROUP:s@<offset>` reference for constant indices. Variable
+    ///   indexing of a string literal isn't observed yet.
+    fn emit_array_index_to_ax(&mut self, array: &Expr, index: &Expr) {
+        if let ExprKind::StringLit(bytes) = &array.kind {
+            return self.emit_string_lit_index_to_ax(bytes, index);
+        }
+        let ExprKind::Ident(array_name) = &array.kind else {
+            panic!("array base in `a[i]` must be an ident or string literal (no fixture for {:?})", array.kind);
+        };
+        let array = array_name.as_str();
         let ty = self.locals.type_of(array).clone();
+        // `p[i]` where `p` is a pointer (not an array). Equivalent
+        // to `*(p + i)`. Fixture 088: `s[0]` with `s: char *` in SI
+        // → `mov al, byte ptr [si] / cbw`.
+        if let Some(pointee) = ty.pointee() {
+            return self.emit_pointer_index_to_ax(array, pointee.clone(), index);
+        }
         let elem = ty
             .array_elem()
             .unwrap_or_else(|| panic!("`{array}[i]`: not an array type"));
@@ -1476,6 +1580,57 @@ impl<'a> FunctionEmitter<'a> {
         } else {
             let _ = write!(self.out, "\tmov\tax,{width} ptr [bx]\r\n");
         }
+    }
+
+    /// `p[<index>]` where `p` is a pointer (not an array). Equivalent
+    /// to `*(p + index)`. Fixture 088: `s[0]` with `s: char *` in SI
+    /// emits `mov al, byte ptr [si] / cbw`. Variable-indexed pointer
+    /// access isn't observed yet — would need an add-into-bx step.
+    fn emit_pointer_index_to_ax(&mut self, ptr_name: &str, pointee: Type, index: &Expr) {
+        let Some(k) = try_const_eval(index) else {
+            panic!("variable-indexed pointer access not yet supported (no fixture)");
+        };
+        let addr_reg = match self.locals.location_of(ptr_name) {
+            LocalLocation::Reg(reg) => reg.name(),
+            LocalLocation::Stack(_) => {
+                panic!("stack-resident pointer in `p[K]` not yet supported (no fixture)");
+            }
+        };
+        // The address operand: `[reg]` for k=0, else `[reg+K*stride]`.
+        let stride = u32::from(pointee.size_bytes());
+        let byte_off = k * stride;
+        let addr = if byte_off == 0 {
+            format!("[{addr_reg}]")
+        } else {
+            format!("[{addr_reg}+{byte_off}]")
+        };
+        if matches!(pointee, Type::Char) {
+            let _ = write!(self.out, "\tmov\tal,byte ptr {addr}\r\n");
+            self.out.extend_from_slice(b"\tcbw\t\r\n");
+        } else {
+            let _ = write!(self.out, "\tmov\tax,word ptr {addr}\r\n");
+        }
+    }
+
+    /// `"<string>"[<index>]` — string literal indexed in place. For
+    /// a constant index, BCC folds the access to a direct memory
+    /// reference (fixture 089: `"hi"[0]` → `mov al, byte ptr DGROUP:s@`).
+    /// Variable indexing of a string literal isn't observed yet.
+    fn emit_string_lit_index_to_ax(&mut self, bytes: &[u8], index: &Expr) {
+        let pool_offset = self.strings.intern(bytes);
+        let Some(k) = try_const_eval(index) else {
+            panic!("variable-indexed string literal not yet supported (no fixture)");
+        };
+        let total_offset = pool_offset + k;
+        let label = if total_offset == 0 {
+            "DGROUP:s@".to_owned()
+        } else {
+            format!("DGROUP:s@+{total_offset}")
+        };
+        // Strings are bytes; load AL then sign-extend, matching the
+        // char-array constant-index path.
+        let _ = write!(self.out, "\tmov\tal,byte ptr {label}\r\n");
+        self.out.extend_from_slice(b"\tcbw\t\r\n");
     }
 
     /// Emit the 4-instruction sequence that lands `&a[index]` in BX
@@ -1578,6 +1733,33 @@ impl<'a> FunctionEmitter<'a> {
         panic!("non-constant rhs in `*p = v` not yet supported (no fixture)");
     }
 
+    /// Assign to a file-scope variable: `<width> ptr DGROUP:_<name>`
+    /// is both the lvalue and the rvalue address. Fixture 085:
+    /// `g = 7;` → `mov word ptr DGROUP:_g, 7`.
+    fn emit_assign_global(&mut self, name: &str, value: &Expr) {
+        let ty = self
+            .globals
+            .type_of(name)
+            .cloned()
+            .expect("caller already checked");
+        let width = if matches!(ty, Type::Char) { "byte" } else { "word" };
+        if let Some(v) = try_const_eval(value) {
+            let v_masked = if matches!(ty, Type::Char) { v & 0xFF } else { v & 0xFFFF };
+            let _ = write!(
+                self.out,
+                "\tmov\t{width} ptr DGROUP:_{name},{v_masked}\r\n",
+            );
+            return;
+        }
+        // Non-constant: compute into AX, then store.
+        self.emit_expr_to_ax(value);
+        if matches!(ty, Type::Char) {
+            let _ = write!(self.out, "\tmov\tbyte ptr DGROUP:_{name},al\r\n");
+        } else {
+            let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name},ax\r\n");
+        }
+    }
+
     fn emit_assign_local(&mut self, loc: LocalLocation, value: &Expr) {
         match loc {
             LocalLocation::Stack(off) => {
@@ -1611,6 +1793,27 @@ impl<'a> FunctionEmitter<'a> {
             }
             return;
         }
+        // String-literal init: BCC emits the address as a direct
+        // immediate, skipping the AX round-trip used for `&x` (which
+        // is a runtime address). Fixture 088: `char *s = "hi";` →
+        // `mov si, offset DGROUP:s@`.
+        if let ExprKind::StringLit(bytes) = &expr.kind {
+            assert!(
+                !reg.is_byte(),
+                "string-literal address into a byte register is impossible (pointer is 2 bytes)"
+            );
+            let offset = self.strings.intern(bytes);
+            if offset == 0 {
+                let _ = write!(self.out, "\tmov\t{},offset DGROUP:s@\r\n", reg.name());
+            } else {
+                let _ = write!(
+                    self.out,
+                    "\tmov\t{},offset DGROUP:s@+{offset}\r\n",
+                    reg.name(),
+                );
+            }
+            return;
+        }
         // Non-constant char init: untested. Best guess would be
         // `<compute to AL> / mov <reg>, al`, but until a fixture pins
         // the load-to-AL path, bail.
@@ -1639,7 +1842,25 @@ impl<'a> FunctionEmitter<'a> {
         match &e.kind {
             ExprKind::IntLit(_) => unreachable!("literals fold via try_const_eval"),
             ExprKind::Ident(name) => {
-                let ty = self.locals.type_of(name);
+                // Globals first: if this name is file-scope, lower
+                // to a `<width> ptr DGROUP:_<name>` reference rather
+                // than a stack/register access (fixtures 083–087).
+                if let Some(gty) = self.globals.type_of(name) {
+                    if matches!(gty, Type::Char) {
+                        let _ = write!(
+                            self.out,
+                            "\tmov\tal,byte ptr DGROUP:_{name}\r\n",
+                        );
+                        self.out.extend_from_slice(b"\tcbw\t\r\n");
+                    } else {
+                        let _ = write!(
+                            self.out,
+                            "\tmov\tax,word ptr DGROUP:_{name}\r\n",
+                        );
+                    }
+                    return;
+                }
+                let ty = self.locals.type_of(name).clone();
                 match self.locals.location_of(name) {
                     LocalLocation::Stack(off) if matches!(ty, Type::Char) => {
                         // Char on stack into AX: load AL then sign-extend.
@@ -1687,6 +1908,18 @@ impl<'a> FunctionEmitter<'a> {
             ExprKind::ArrayIndex { array, index } => {
                 self.emit_array_index_to_ax(array, index);
             }
+            ExprKind::StringLit(bytes) => {
+                // A bare string literal in value position is its
+                // address (the C decay rule). We don't have a
+                // fixture, but `mov ax, offset DGROUP:s@<offset>`
+                // is the expected shape.
+                let offset = self.strings.intern(bytes);
+                if offset == 0 {
+                    let _ = write!(self.out, "\tmov\tax,offset DGROUP:s@\r\n");
+                } else {
+                    let _ = write!(self.out, "\tmov\tax,offset DGROUP:s@+{offset}\r\n");
+                }
+            }
         }
     }
 
@@ -1729,8 +1962,36 @@ impl<'a> FunctionEmitter<'a> {
             }
             return;
         }
+        // Char-on-right widening dance (fixture 087: `a + b + c` with
+        // `c` a char global). Loading a char clobbers AX, so the
+        // running sum gets pushed, the char loaded + widened to AX,
+        // saved to DX, the sum restored, then combined. The same
+        // pattern would apply to a char *stack* local but we have no
+        // fixture pinning it yet.
+        if let ExprKind::Ident(name) = &e.kind
+            && self.ident_is_char(name)
+        {
+            self.out.extend_from_slice(b"\tpush\tax\r\n");
+            self.emit_expr_to_ax(e);
+            self.out.extend_from_slice(b"\tmov\tdx,ax\r\n");
+            self.out.extend_from_slice(b"\tpop\tax\r\n");
+            emit_op_with_source(self.out, op, &OperandSource::Reg(Reg::Dx));
+            return;
+        }
         let src = self.resolve_operand_source(e);
         emit_op_with_source(self.out, op, &src);
+    }
+
+    /// True iff `name` refers to an identifier (global or local)
+    /// whose static type is `char`. Used by `emit_binary_right` to
+    /// detect when the right operand needs the widening dance.
+    fn ident_is_char(&self, name: &str) -> bool {
+        if let Some(ty) = self.globals.type_of(name) {
+            return matches!(ty, Type::Char);
+        }
+        // The locals analyzer panics on unknown names, so only ask
+        // if there's no global match.
+        matches!(self.locals.type_of(name), Type::Char)
     }
 
     /// Resolve the right operand to a textual asm source operand. Today
@@ -1741,10 +2002,15 @@ impl<'a> FunctionEmitter<'a> {
             return OperandSource::Immediate(v);
         }
         match &e.kind {
-            ExprKind::Ident(name) => match self.locals.location_of(name) {
-                LocalLocation::Stack(off) => OperandSource::Local(off),
-                LocalLocation::Reg(reg) => OperandSource::Reg(reg),
-            },
+            ExprKind::Ident(name) => {
+                if self.globals.contains(name) {
+                    return OperandSource::Global(name.clone());
+                }
+                match self.locals.location_of(name) {
+                    LocalLocation::Stack(off) => OperandSource::Local(off),
+                    LocalLocation::Reg(reg) => OperandSource::Reg(reg),
+                }
+            }
             ExprKind::IntLit(_) => unreachable!("literals fold via try_const_eval"),
             ExprKind::Call { .. } => {
                 panic!("call as right operand not yet supported (need to preserve AX)")
@@ -1772,6 +2038,9 @@ impl<'a> FunctionEmitter<'a> {
             }
             ExprKind::ArrayIndex { .. } => {
                 panic!("`a[i]` as right operand of a binary op not yet supported (no fixture)")
+            }
+            ExprKind::StringLit(_) => {
+                panic!("string literal as right operand of a binary op not yet supported (no fixture)")
             }
         }
     }
@@ -1879,6 +2148,9 @@ enum OperandSource {
     /// Stack-resident local or param at a (signed) bp offset.
     Local(i16),
     Reg(Reg),
+    /// File-scope variable — addressed as `<width> ptr DGROUP:_<name>`.
+    /// Fixture 087: `add ax, word ptr DGROUP:_b`.
+    Global(String),
 }
 
 impl OperandSource {
@@ -1888,6 +2160,7 @@ impl OperandSource {
             Self::Immediate(v) => v.to_string(),
             Self::Local(off) => format!("word ptr {}", bp_addr(*off)),
             Self::Reg(r) => r.name().to_owned(),
+            Self::Global(name) => format!("word ptr DGROUP:_{name}"),
         }
     }
 
@@ -1896,6 +2169,7 @@ impl OperandSource {
         match self {
             Self::Immediate(v) => v.to_string(),
             Self::Local(off) => format!("byte ptr {}", bp_addr(*off)),
+            Self::Global(name) => format!("byte ptr DGROUP:_{name}"),
             // A register holding an int provides the low byte via
             // its `*L` half; we'd need a separate fixture to confirm
             // BCC's exact shape. Panic until we see one.

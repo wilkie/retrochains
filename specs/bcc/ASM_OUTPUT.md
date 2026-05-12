@@ -1307,6 +1307,140 @@ access. The threshold drop preempts that overhead.
 The deref width is `word ptr` for `int *`, `byte ptr` for `char *`
 (no fixture for the latter yet — inferred from the symmetry).
 
+## Globals and string literals (`083`–`089`)
+
+### File layout when globals are present
+
+Until this slice we treated `_DATA` and `_BSS` as always empty.
+With globals, the file layout changes in two distinct places:
+
+- **Initialized globals** land in a `_DATA` block at the **top** of
+  the file, between the empty segment scaffold and the first
+  `_TEXT segment` that holds the function code:
+  ```
+  _BSS	ends                       ← end of empty scaffold
+  _DATA	segment word public 'DATA' ← NEW
+  _<name>	label	word
+  	db	<lo>
+  	db	<hi>
+  _DATA	ends
+  _TEXT	segment byte public 'CODE' ← function code starts here
+  ```
+- **Uninitialized globals** land in a `_BSS` block at the **bottom**,
+  between `_main endp / _TEXT ends` and the final tail. The
+  function-end `?debug C E9` record *moves* from its usual spot
+  (inside `_TEXT`, before `_TEXT ends`) to inside the `_BSS` block,
+  right before `_BSS ends`:
+  ```
+  _main	endp
+  _TEXT	ends                       ← _TEXT closes first
+  _BSS	segment word public 'BSS'  ← NEW
+  _<name>	label	word
+  	db	2 dup (?)
+  	?debug	C E9                  ← moved here!
+  _BSS	ends
+  ```
+  When there are only initialized globals (no BSS content), the
+  `?debug C E9` stays in its usual spot inside `_TEXT`.
+
+### Per-global emission shape
+
+| Type   | Init    | Anchor                  | Storage          |
+|--------|---------|-------------------------|------------------|
+| int    | `= K`   | `_<name> label word`    | `db <lo> / db <hi>` (little-endian byte pair) |
+| char   | `= K`   | `_<name> label byte`    | `db K`           |
+| int    | (none)  | `_<name> label word`    | `db 2 dup (?)`   |
+| char   | (none)  | `_<name> label byte`    | `db 1 dup (?)`   |
+
+The byte-pair `db` form for an init'd int (fixture 084: `db 42 / db
+0`) is the same shape BCC uses for the linear-search switch value
+table — a recurring fingerprint.
+
+### Code references to globals
+
+Globals are referenced as `<width> ptr DGROUP:_<name>`. The
+`DGROUP:` override is mandatory; without it, the assembler would
+default to `DS:` which (under the small memory model) happens to
+also point to `DGROUP`, but the explicit form is what BCC always
+emits.
+
+Examples (fixture 085: write, 086: char read):
+```
+mov	word ptr DGROUP:_g,7        ; write to int global
+mov	ax,word ptr DGROUP:_g       ; read int global
+mov	al,byte ptr DGROUP:_g       ; read char global low byte
+cbw	                            ; sign-extend to int
+```
+
+### Char-on-right widening dance (`087`)
+
+When a char operand appears as the *right* side of an arithmetic op
+whose left side is an int (`a + b + c` with `a, b: int` and
+`c: char`), BCC can't just `add ax, byte ptr ...` — the partial
+sum is in AX and the char load would clobber it. The compiler
+emits a six-instruction widening dance:
+```
+push	ax                          ; save partial sum
+mov	al,byte ptr DGROUP:_c          ; load char low byte
+cbw	                              ; widen AL → AX
+mov	dx,ax                          ; save widened c in dx
+pop	ax                             ; restore partial sum
+add	ax,dx                          ; combine
+```
+
+The same dance applies regardless of whether the char operand is a
+global, a stack local, or a register local — we just don't have
+fixtures for the stack-/reg-local cases yet.
+
+### String literals
+
+String literals live in the `s@` block of the bottom `_DATA`
+section — the very label we'd been emitting as empty in every
+prior fixture. The block becomes:
+```
+_DATA	segment word public 'DATA'
+s@	label	byte
+	db	'hi'                       ; literal contents
+	db	0                           ; explicit NUL terminator
+_DATA	ends
+```
+
+Two distinct code shapes consume a literal:
+
+- **Address-of** (`char *s = "hi";` — fixture 088): direct
+  immediate load, no AX round-trip.
+  ```
+  mov	si,offset DGROUP:s@
+  ```
+  Contrast with `&x` (a runtime address), which always goes through
+  AX (`lea ax, [bp-N] / mov si, ax`). Here the literal's address is
+  a linker-resolved constant, so a `mov reg, offset` is enough.
+
+- **Constant-indexed direct** (`"hi"[0]` — fixture 089): folded at
+  compile time to a direct memory reference, no register involved.
+  ```
+  mov	al,byte ptr DGROUP:s@
+  cbw
+  ```
+
+Multi-literal programs (no fixture yet) presumably place each
+literal at a `s@+<offset>` byte position. Identical literals
+should dedupe to the same offset under any reasonable design;
+we use a `StringPool::intern` that dedupes by content, and assume
+this matches BCC.
+
+### Public list with globals
+
+The trailing `public` list grows to include each global, in LIFO
+order of declaration over the *combined* function + global stream.
+Fixture 087 (`int a; int b = 5; char c = 9; int main(...);`):
+```
+public _main
+public _c
+public _b
+public _a
+```
+
 ## Source-line comments
 
 BCC interleaves the source as comments. Observed layout for `004`:

@@ -1,0 +1,4 @@
+description = "String literal stored in a local `char *`, then indexed. Pins string-literal storage (likely an `s@` label in _DATA) and how its address is loaded (probably `mov si, offset s@`)."
+tool = "bcc"
+args = ["-S", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]
