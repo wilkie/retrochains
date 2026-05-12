@@ -14,6 +14,10 @@ update one of them deliberately.
   pinning mechanism that gives us byte-exact reproducibility.
 - [`FIXTURES.md`](FIXTURES.md) — the fixture corpus layout and the
   capture/verify harness contract.
+- [`GLOSSARY.md`](GLOSSARY.md) — definitions for terms used across
+  the specs and code (peephole, fingerprint, slot, segment override,
+  etc.). Skim it once; refer back when a spec uses a term that
+  isn't clicking.
 
 ## Per-tool discoveries
 
