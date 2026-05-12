@@ -178,7 +178,7 @@ impl Parser {
         let mut params = Vec::new();
         loop {
             let ty_tok = self.bump();
-            let ty = match ty_tok.kind {
+            let mut ty = match ty_tok.kind {
                 TokenKind::KwInt => Type::Int,
                 TokenKind::KwChar => Type::Char,
                 _ => return Err(ParseError::Unexpected {
@@ -187,6 +187,12 @@ impl Parser {
                     offset: ty_tok.span.start,
                 }),
             };
+            // Pointer stars wrap the base type, just like in a local
+            // declaration (fixture 095: `int sum(int *p)`).
+            while matches!(self.peek().kind, TokenKind::Star) {
+                self.bump();
+                ty = Type::Pointer(Box::new(ty));
+            }
             let name_tok = self.bump();
             let TokenKind::Ident(name) = name_tok.kind else {
                 return Err(ParseError::NotAnIdent { offset: name_tok.span.start });
@@ -754,6 +760,16 @@ impl Parser {
     fn parse_atom(&mut self) -> Result<Expr, ParseError> {
         let tok = self.bump();
         match tok.kind {
+            TokenKind::LParen => {
+                // Parenthesized expression. The parens don't survive
+                // into the AST — they only affect parse precedence.
+                let inner = self.parse_expr()?;
+                let close = self.expect(&TokenKind::RParen)?;
+                Ok(Expr {
+                    kind: inner.kind,
+                    span: Span::new(tok.span.start, close.span.end),
+                })
+            }
             TokenKind::IntLit(v) => Ok(Expr { kind: ExprKind::IntLit(v), span: tok.span }),
             TokenKind::StringLit(bytes) => {
                 let lit = Expr {

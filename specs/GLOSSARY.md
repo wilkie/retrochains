@@ -177,9 +177,18 @@ them from the register pool regardless of use count. _Fixture_: 080.
 ### Decay
 In C, an array name used in most expression contexts implicitly
 becomes a pointer to its first element. `f(a)` where `a` is an
-array is equivalent to `f(&a[0])`. We haven't pinned BCC's
-specific lowering of decay yet — our current fixtures use array
-indexing (`a[i]`) directly, not bare-array contexts.
+array is equivalent to `f(&a[0])`; `int *p = a;` is equivalent to
+`int *p = &a[0]`. BCC lowers both to the same `lea ax, word ptr
+[bp-N]` that `&a[0]` would produce. Fixtures 090 (`int *p = a;`)
+and 095 (`sum(a)`) pin this.
+
+### Direct deref
+A pointer dereference in a syntactic form BCC recognizes as a
+single addressed-load idiom — `*p`, `p[i]`, or `*(p + <constant>)`.
+Direct derefs contribute **2** to the pointer's enregistration
+use-count (vs. 1 for plain arithmetic like `p + i` or `*(p + i)`).
+The distinction shapes whether a pointer ends up in a register or
+on the stack — see fixtures 091 vs. 092.
 
 ### Global / file-scope variable
 A variable declared outside any function. Persists for the

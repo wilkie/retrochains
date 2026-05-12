@@ -243,21 +243,25 @@ fn write_tail(out: &mut Vec<u8>, unit: &crate::ast::Unit, strings: &codegen::Str
     out.extend_from_slice(b"_DATA\tends\r\n");
     out.extend_from_slice(b"_TEXT\tsegment byte public 'CODE'\r\n");
     out.extend_from_slice(b"_TEXT\tends\r\n");
-    // Public symbols are emitted in reverse declaration order — BCC
-    // walks its symbol table LIFO and we have to match that for
-    // byte-exactness. Both functions and globals participate; the
-    // ordering across the two is the reverse of source order.
-    for entry in unit.decl_order.iter().rev() {
-        match *entry {
-            crate::ast::TopLevelRef::Function(i) => {
-                let f = &unit.functions[i];
-                let _ = write!(out, "\tpublic\t{}\r\n", codegen::function_symbol(&f.name));
-            }
-            crate::ast::TopLevelRef::Global(i) => {
-                let g = &unit.globals[i];
-                let _ = write!(out, "\tpublic\t_{}\r\n", g.name);
-            }
-        }
+    // Public symbols are emitted in **reverse alphabetical** order.
+    // Earlier fixtures (009, 010, 087) happened to land in alpha
+    // order in source too, which led us to assume "reverse source
+    // order" — but fixture 095 (`int sum(...); int main(...)`,
+    // public list `sum, main`) disambiguates: source order is sum,
+    // main, alphabetical is main, sum, and the emitted order is
+    // sum, main — the reverse-alpha walk. The most likely
+    // explanation is that BCC keeps its symbol table sorted and
+    // walks it in reverse at TU end.
+    let mut names: Vec<String> = Vec::new();
+    for f in &unit.functions {
+        names.push(codegen::function_symbol(&f.name));
+    }
+    for g in &unit.globals {
+        names.push(format!("_{}", g.name));
+    }
+    names.sort();
+    for name in names.iter().rev() {
+        let _ = write!(out, "\tpublic\t{name}\r\n");
     }
     out.extend_from_slice(b"\tend\r\n");
 }

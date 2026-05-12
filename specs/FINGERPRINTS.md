@@ -118,17 +118,23 @@ then a single `?debug C E9` followed by `_TEXT ends`. Compilers that
 emit one segment per function (e.g., to make linking-out unused
 functions easier) would be distinguishable by this. _Fixture_: 009.
 
-### `public` symbols in **LIFO** order (DEFINITIVE)
+### `public` symbols in reverse-alphabetical order (DEFINITIVE)
 
 ```
 	public	_main
 	public	_f
 ```
 
-When a source file defines `f` first and `main` second, the publics
-appear with `main` first. This LIFO ordering is a BCC-specific artifact
-of its symbol-table walk. Almost no other compiler matches this — most
-emit definitions or publics in source order. _Fixture_: 009.
+The `public` list at end-of-file is sorted **reverse-alphabetical**
+by symbol name (both functions and globals participate in one
+combined sort). Initial fixtures (009, 010, 087) seemed to suggest
+"reverse declaration order" because source order happened to match
+alpha order; fixture 095 (`sum` defined first, `main` second,
+emitted as `sum, main`) disambiguates — that's the reverse-alpha
+walk (`sum > main`), not reverse-source. Most likely internal
+implementation: a sorted symbol table walked in reverse at TU end.
+
+Almost no other compiler matches this. _Fixtures_: 009, 087, 095.
 
 ### Function-symbol prefix (WEAK)
 
@@ -234,7 +240,8 @@ proof of BCC 2.0. _Fixtures_: all `-S` fixtures.
 ### Function index increments source-order (STRONG)
 
 The first function defined gets `@1@…`, the second `@2@…`, etc. This
-combines with the LIFO public-symbol ordering as a cross-check.
+combines with the reverse-alphabetical public-symbol ordering as a
+cross-check.
 
 ---
 
@@ -625,14 +632,46 @@ is mechanical (literals are linker-resolved constants vs. `&x`
 which is a runtime `lea`), but few compilers special-case it as
 visibly. _Fixture_: 088.
 
-### Pointer enregistration at ≥ 2 uses (STRONG)
+### Pointer direct-deref bonus (STRONG, refined)
 
-Plain `int` locals need ≥ 3 textual uses to land in a register,
-but pointers enregister at ≥ 2 uses. The likely reason is that
-pointer use almost always implies indirect addressing (`mov ax,
-[reg]`), and keeping a pointer on the stack costs an extra load
-per access — BCC drops the threshold to preempt that overhead.
-_Fixtures_: 080, 081.
+Pointer locals share the int `≥ 3 uses` enregistration threshold,
+but **direct dereferences contribute 2 uses each** to the pointer
+name. "Direct" means `*p`, `p[i]`, or `*(p + <constant>)` —
+syntactic forms BCC can fold into a single addressed-load
+idiom. A *variable* offset (`*(p + i)`) doesn't get the bonus,
+because the address arithmetic uses a temp register anyway.
+
+The earlier slice documented this as "pointer threshold is 2",
+which was an artifact of having only `*p`-style fixtures (where
+the bonus made the total exactly 3). Fixture 092 disambiguated:
+`int *p = a; ... return *(p + i);` has p with only `1 + 1 = 2`
+uses (no bonus, because the offset is variable), and p stays on
+the stack — confirming the int threshold rather than a relaxed
+pointer-specific one.
+
+_Fixtures_: 080, 081, 088, 091 (bonus applies → enregister);
+092 (no bonus → stack).
+
+### Array name decays to `lea ax, [bp-N]` (STRONG)
+
+Using an array name in a non-index expression context (`int *p = a;`,
+`f(a)`, etc.) emits the same effective-address load as `&a[0]`:
+`lea ax, word ptr [bp-N]`. The `word ptr` annotation on `lea`
+(which doesn't actually load data) is a BCC tic. _Fixtures_: 090, 095.
+
+### `p++` emits `stride` × inc/dec, not `add reg, K` (STRONG)
+
+For `int *p; p++;`, BCC emits **two** `inc <reg>` instructions
+(2 bytes total) rather than `add <reg>, 2` (3 bytes). For
+`char *s; s++;`, it's a single `inc`. The pattern continues from
+the `±2` int peephole in regular assignments. _Fixtures_: 090, 093.
+
+### `*(p + K)` folds to indexed addressing (STRONG)
+
+A constant-offset deref like `*(p + 1)` becomes `[reg + K*stride]`
+in one instruction (`mov ax, word ptr [si+2]`). Both source forms
+`*(p + 1)` and `p[1]` produce the *same* asm — BCC sees them as
+equivalent at the AST level. _Fixtures_: 091, 094.
 
 ### `switch` slot-reservation fingerprint (STRONG)
 

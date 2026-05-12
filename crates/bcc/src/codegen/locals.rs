@@ -123,18 +123,18 @@ pub struct ParamLoad {
     pub incoming_offset: u16,
 }
 
-/// Use count threshold for enregistering ints. A name with
-/// `>= INT_ENREGISTER_THRESHOLD` textual occurrences (init + reads +
-/// writes) gets a register if one is still available.
-const INT_ENREGISTER_THRESHOLD: u32 = 3;
-
-/// Threshold for enregistering pointers. Lower than the int threshold
-/// because pointer use almost always involves indirect addressing
-/// (`mov ax, [reg]`), which has no equivalent stack-source form —
-/// staying on the stack would cost an extra load per access. Fixtures
-/// 080 and 081 have pointers with exactly 2 uses (init + one deref),
-/// both of which enregister.
-const PTR_ENREGISTER_THRESHOLD: u32 = 2;
+/// Use count threshold for enregistering ints and pointers. A name
+/// with `>= ENREGISTER_THRESHOLD` textual occurrences (init + reads
+/// + writes, with `*p` and `p[i]` direct-derefs counting as 2) gets
+/// a register if one is still available.
+///
+/// Earlier slices used a lower threshold for pointers (≥ 2) to
+/// explain why `int *p` enregistered after just one `*p` use; fixture
+/// 092 then disproved that — `int *p = a; ... *(p + i)` keeps p on
+/// the stack even with the same nominal count. The correct
+/// reconciliation: pointers use the same threshold as ints, but a
+/// *direct* deref (`*p` or `p[K]`) contributes 2 to the count.
+const ENREGISTER_THRESHOLD: u32 = 3;
 
 /// Offset of the **first** incoming argument relative to `bp` after
 /// the standard small-model prologue (`push bp` then `mov bp,sp`):
@@ -234,8 +234,7 @@ impl Locals {
                 }
                 let uses = counts.get(&declared[i].name).copied().unwrap_or(0);
                 match &declared[i].ty {
-                    Type::Int => uses >= INT_ENREGISTER_THRESHOLD,
-                    Type::Pointer(_) => uses >= PTR_ENREGISTER_THRESHOLD,
+                    Type::Int | Type::Pointer(_) => uses >= ENREGISTER_THRESHOLD,
                     _ => false,
                 }
             })
@@ -267,7 +266,7 @@ impl Locals {
                     continue;
                 }
                 let uses = counts.get(&item.name).copied().unwrap_or(0);
-                if uses < INT_ENREGISTER_THRESHOLD {
+                if uses < ENREGISTER_THRESHOLD {
                     continue;
                 }
                 let Some(reg) = char_pool.next() else { break };
@@ -399,6 +398,27 @@ impl Locals {
 /// survive a call must stay on the stack (fixture 055).
 fn body_has_call(body: &[Stmt]) -> bool {
     body.iter().any(stmt_has_call)
+}
+
+/// If `e` is a "direct deref target" — `<ident>` or
+/// `<ident> + <constant>` or `<ident> - <constant>` — return the
+/// ident's name. Otherwise `None`. Used to decide whether `*<e>`
+/// should give the pointer name the enregistration bonus.
+fn direct_deref_target(e: &Expr) -> Option<String> {
+    use crate::ast::BinOp;
+    match &e.kind {
+        ExprKind::Ident(name) => Some(name.clone()),
+        ExprKind::BinOp { op, left, right }
+            if matches!(op, BinOp::Add | BinOp::Sub)
+                && crate::codegen::fold_const_global(right).is_some() =>
+        {
+            if let ExprKind::Ident(name) = &left.kind {
+                return Some(name.clone());
+            }
+            None
+        }
+        _ => None,
+    }
 }
 
 /// Collect every name that appears as the target of an `&x`
@@ -737,15 +757,22 @@ fn count_uses_stmt(stmt: &Stmt, counts: &mut HashMap<String, u32>) {
             }
         }
         StmtKind::ArrayAssign { array, index, value } => {
-            // Each `a[i] = v;` is a write to a slot of `a`, so counts
-            // as one use of the array's name plus the uses inside the
-            // index and the value.
-            *counts.entry(array.clone()).or_insert(0) += 1;
+            // `a[i] = v;` mirrors `a[i]` as an rvalue: direct deref
+            // counts the base name as 2 uses (read of address + use
+            // of memory). Arrays never enregister anyway, but the
+            // same statement could be a pointer-target indexed
+            // assign (`p[i] = v`) in a future fixture.
+            *counts.entry(array.clone()).or_insert(0) += 2;
             count_uses_expr(index, counts);
             count_uses_expr(value, counts);
         }
         StmtKind::DerefAssign { target, value } => {
-            count_uses_expr(target, counts);
+            if let ExprKind::Ident(name) = &target.kind {
+                // Same direct-deref bonus as `*p` in rvalue position.
+                *counts.entry(name.clone()).or_insert(0) += 2;
+            } else {
+                count_uses_expr(target, counts);
+            }
             count_uses_expr(value, counts);
         }
         StmtKind::ExprStmt(e) => count_uses_expr(e, counts),
@@ -789,13 +816,33 @@ fn count_uses_expr(e: &Expr, counts: &mut HashMap<String, u32>) {
             // is the use itself.
             *counts.entry(name.clone()).or_insert(0) += 1;
         }
-        ExprKind::Deref(operand) => count_uses_expr(operand, counts),
+        ExprKind::Deref(operand) => {
+            // A "direct" deref gives the pointer-name a +2 bonus
+            // toward enregistration. We treat three forms as direct:
+            //   `*p`                — bare ident
+            //   `*(p + <constant>)` — constant offset (BCC seems to
+            //                          fold this internally into the
+            //                          same shape as p[K])
+            //   `*(p - <constant>)` — same, with a negative offset
+            // The bonus does NOT apply to `*(p + <variable>)`
+            // (fixture 092 vs. 091): keeping the threshold gate at
+            // 3 with this distinction matches the captures.
+            if let Some(name) = direct_deref_target(operand) {
+                *counts.entry(name).or_insert(0) += 2;
+            } else {
+                count_uses_expr(operand, counts);
+            }
+        }
         ExprKind::ArrayIndex { array, index } => {
-            // `a[i]` is a read of `a` plus a read of `i`. When the
-            // array base is an ident, count one use of that name.
-            // String-literal bases don't contribute use counts —
-            // they aren't variables.
-            count_uses_expr(array, counts);
+            // `a[i]` (or `p[i]` for a pointer) gives the base name
+            // the same direct-deref bonus as `*p`. Fixture 088: `s`
+            // enregisters when used as `s[0]`. For non-Ident bases
+            // (e.g. string literals), no use-count contribution.
+            if let ExprKind::Ident(name) = &array.kind {
+                *counts.entry(name.clone()).or_insert(0) += 2;
+            } else {
+                count_uses_expr(array, counts);
+            }
             count_uses_expr(index, counts);
         }
         ExprKind::StringLit(_) => {}

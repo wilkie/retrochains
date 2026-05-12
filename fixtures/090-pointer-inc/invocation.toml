@@ -1,0 +1,4 @@
+description = "Initialize an int pointer to an array name (array decay), then increment it. Pins the `int *` increment stride (sizeof(int) = 2) and the array-name-as-pointer initialization shape."
+tool = "bcc"
+args = ["-S", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

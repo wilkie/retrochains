@@ -455,6 +455,16 @@ impl<'a> FunctionEmitter<'a> {
             UpdateOp::Inc => "inc",
             UpdateOp::Dec => "dec",
         };
+        // Pointer increment / decrement uses the pointee's size as
+        // stride. For `int *p`, `p++` becomes `inc reg / inc reg`
+        // (the +2 peephole — 2 bytes vs. 3 for `add reg, 2`),
+        // matching fixture 090. For `char *s`, `s++` is a single
+        // `inc reg` (stride 1), fixture 093.
+        let stride = self
+            .locals
+            .type_of(name)
+            .pointee()
+            .map_or(1, |p| u32::from(p.size_bytes()));
         match self.locals.location_of(name) {
             LocalLocation::Reg(reg) if reg.is_byte() => {
                 let _ = write!(self.out, "\tmov\tal,{}\r\n", reg.name());
@@ -462,7 +472,13 @@ impl<'a> FunctionEmitter<'a> {
                 let _ = write!(self.out, "\tmov\t{},al\r\n", reg.name());
             }
             LocalLocation::Reg(reg) => {
-                let _ = write!(self.out, "\t{mnemonic}\t{}\r\n", reg.name());
+                // Pointer stride > 1: repeat inc/dec stride times.
+                // (Matches the BCC +2 peephole; for stride > 2 BCC
+                // probably switches to `add reg, K` but no fixture
+                // pins the crossover yet.)
+                for _ in 0..stride {
+                    let _ = write!(self.out, "\t{mnemonic}\t{}\r\n", reg.name());
+                }
             }
             LocalLocation::Stack(off) => {
                 // Stack-resident ++/-- on a char uses the AL round-trip
@@ -1397,9 +1413,12 @@ impl<'a> FunctionEmitter<'a> {
                 }
                 // Non-constant init for a char would need a different
                 // shape (load to AL, store AL); no fixture yet.
+                // Pointers and ints share the int-like word-sized
+                // path: compute into AX, then store as `word ptr`.
                 assert!(
-                    matches!(ty, Type::Int),
-                    "non-constant init for `char` not yet supported (no fixture)"
+                    ty.is_int_like(),
+                    "non-constant init for non-int-like type {:?} not yet supported",
+                    ty
                 );
                 self.emit_expr_to_ax(init);
                 let _ = write!(self.out, "\tmov\tword ptr {},ax\r\n", bp_addr(off));
@@ -1506,17 +1525,33 @@ impl<'a> FunctionEmitter<'a> {
         let _ = write!(self.out, "\tlea\tax,word ptr {}\r\n", bp_addr(off));
     }
 
-    /// `*<ptr>` in rvalue position — load through a pointer. Pattern
-    /// (fixture 080, p in SI):
-    /// ```text
-    ///   mov ax, word ptr [si]
-    /// ```
-    /// Today `ptr` must be an `Ident` referring to a pointer local; a
-    /// general pointer expression (e.g. `*(p + 1)`) would need a
-    /// compute-into-BX step before the load.
+    /// `*<ptr>` in rvalue position. The inner pointer expression can
+    /// be a bare `Ident(p)` or — for fixtures 091, 092, 094 — a
+    /// `BinOp(Add, Ident(p), <offset>)` (and presumably Sub later).
+    /// Both lower to a `<width> ptr [<addressing-mode>]` load:
+    ///
+    /// - **`*<ident>`** → `[<reg>]` (the pointer must be enregistered;
+    ///   stack-resident pointers don't have an addressing form like
+    ///   `[[bp-N]]` so we'd need a temp load — no fixture yet).
+    /// - **`*(<ident> + K)`** with K constant → `[<reg> + K*stride]`
+    ///   (fixture 091: `*(p + 1)` with `p: int *` → `[si+2]`).
+    /// - **`*(<ident> + <i>)`** with i variable → the load/shl/add
+    ///   sequence with the result in BX (fixture 092). Both pointer
+    ///   and index can be either register- or stack-resident; only
+    ///   the all-stack form is captured today.
     fn emit_deref_to_ax(&mut self, ptr: &Expr) {
+        // `*(p + offset)` shapes go through a shared helper that
+        // builds the addressing mode.
+        if let ExprKind::BinOp { op: BinOp::Add, left, right } = &ptr.kind
+            && let ExprKind::Ident(name) = &left.kind
+        {
+            let ty = self.locals.type_of(name).clone();
+            if let Some(pointee) = ty.pointee() {
+                return self.emit_deref_pointer_plus_offset(name, pointee.clone(), right);
+            }
+        }
         let ExprKind::Ident(name) = &ptr.kind else {
-            panic!("non-ident pointer in `*p` not yet supported (no fixture)");
+            panic!("non-ident pointer in `*p` not yet supported (no fixture for {:?})", ptr.kind);
         };
         let ty = self.locals.type_of(name).clone();
         let Some(pointee) = ty.pointee() else {
@@ -1524,12 +1559,79 @@ impl<'a> FunctionEmitter<'a> {
         };
         let width = ptr_width(pointee);
         let addr_reg = match self.locals.location_of(name) {
-            LocalLocation::Reg(reg) => reg.name(),
+            LocalLocation::Reg(reg) => reg.name().to_owned(),
             LocalLocation::Stack(_) => {
-                panic!("stack-resident pointer dereference not yet supported (no fixture)");
+                panic!("stack-resident bare-`*p` dereference not yet supported (no fixture)");
             }
         };
-        let _ = write!(self.out, "\tmov\tax,{width} ptr [{addr_reg}]\r\n");
+        if matches!(*pointee, Type::Char) {
+            let _ = write!(self.out, "\tmov\tal,byte ptr [{addr_reg}]\r\n");
+            self.out.extend_from_slice(b"\tcbw\t\r\n");
+        } else {
+            let _ = write!(self.out, "\tmov\tax,{width} ptr [{addr_reg}]\r\n");
+        }
+    }
+
+    /// `*(<ptr> + <offset>)` for fixtures 091, 092, 094. The pointer
+    /// name + pointee type are extracted by the caller; `offset` is
+    /// the right side of the `+`.
+    fn emit_deref_pointer_plus_offset(
+        &mut self,
+        ptr_name: &str,
+        pointee: Type,
+        offset: &Expr,
+    ) {
+        let stride = u32::from(pointee.size_bytes());
+        let load_byte = matches!(pointee, Type::Char);
+        if let Some(k) = try_const_eval(offset) {
+            // Constant offset — fold to indexed addressing on the
+            // pointer register. Stack-resident pointers with a
+            // constant offset aren't observed yet; assume reg only.
+            let LocalLocation::Reg(reg) = self.locals.location_of(ptr_name) else {
+                panic!("stack-resident pointer in `*(p+K)` not yet supported (no fixture)");
+            };
+            let byte_off = k * stride;
+            let addr = if byte_off == 0 {
+                format!("[{}]", reg.name())
+            } else {
+                format!("[{}+{byte_off}]", reg.name())
+            };
+            if load_byte {
+                let _ = write!(self.out, "\tmov\tal,byte ptr {addr}\r\n");
+                self.out.extend_from_slice(b"\tcbw\t\r\n");
+            } else {
+                let _ = write!(self.out, "\tmov\tax,word ptr {addr}\r\n");
+            }
+            return;
+        }
+        // Variable offset. Fixture 092 (both p and i on the stack):
+        //   mov ax, word ptr [bp-i]
+        //   shl ax, 1               ; * stride (stride=2 for int)
+        //   mov bx, word ptr [bp-p]
+        //   add bx, ax
+        //   mov ax, word ptr [bx]
+        // Reg-resident variants are inferred but unobserved.
+        self.emit_expr_to_ax(offset);
+        if stride == 2 {
+            self.out.extend_from_slice(b"\tshl\tax,1\r\n");
+        } else if stride != 1 {
+            panic!("non-1/2 pointer stride not yet supported (no fixture)");
+        }
+        match self.locals.location_of(ptr_name) {
+            LocalLocation::Stack(off) => {
+                let _ = write!(self.out, "\tmov\tbx,word ptr {}\r\n", bp_addr(off));
+            }
+            LocalLocation::Reg(reg) => {
+                let _ = write!(self.out, "\tmov\tbx,{}\r\n", reg.name());
+            }
+        }
+        self.out.extend_from_slice(b"\tadd\tbx,ax\r\n");
+        if load_byte {
+            self.out.extend_from_slice(b"\tmov\tal,byte ptr [bx]\r\n");
+            self.out.extend_from_slice(b"\tcbw\t\r\n");
+        } else {
+            self.out.extend_from_slice(b"\tmov\tax,word ptr [bx]\r\n");
+        }
     }
 
     /// `a[<index>]` in rvalue position. The `array` side can be:
@@ -1861,6 +1963,18 @@ impl<'a> FunctionEmitter<'a> {
                     return;
                 }
                 let ty = self.locals.type_of(name).clone();
+                // Array-name decay: when the name refers to a local
+                // of array type and we're reading its *value*, the
+                // value is the address of element 0. Fixture 090
+                // (`int *p = a;`) and fixture 095 (`sum(a)`) both
+                // exercise this. Emitted exactly like `&a[0]`.
+                if matches!(ty, Type::Array { .. }) {
+                    let LocalLocation::Stack(off) = self.locals.location_of(name) else {
+                        unreachable!("array `{name}` should be stack-resident");
+                    };
+                    let _ = write!(self.out, "\tlea\tax,word ptr {}\r\n", bp_addr(off));
+                    return;
+                }
                 match self.locals.location_of(name) {
                     LocalLocation::Stack(off) if matches!(ty, Type::Char) => {
                         // Char on stack into AX: load AL then sign-extend.

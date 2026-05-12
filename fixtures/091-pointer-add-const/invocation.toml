@@ -1,0 +1,4 @@
+description = "Pointer plus a constant offset, dereferenced. Pins `*(p + K)` codegen — likely an indexed addressing mode `[reg + K*stride]`."
+tool = "bcc"
+args = ["-S", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

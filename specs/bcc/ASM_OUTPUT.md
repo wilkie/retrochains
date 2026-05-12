@@ -1307,6 +1307,123 @@ access. The threshold drop preempts that overhead.
 The deref width is `word ptr` for `int *`, `byte ptr` for `char *`
 (no fixture for the latter yet — inferred from the symmetry).
 
+## Pointer arithmetic and array decay (`090`–`095`)
+
+### Array name as a value (array decay)
+
+In C, an array name used in any non-index expression context
+decays to a pointer to its first element. BCC lowers this exactly
+like `&a[0]`:
+
+```
+lea	ax,word ptr [bp-N]    ; N = array's bp-offset
+```
+
+The address materializes in AX. Fixture 090 (`int *p = a;`) and
+fixture 095 (`sum(a)` at a call site) both use this form. A
+pointer assignment from an array decay then uses the standard
+"address → AX → destination register" pattern that `&x` uses.
+
+### Pointer dereference with offset
+
+`*(p + K)` and `*(p + i)` are equivalent to `p[K]` / `p[i]` in
+C, but BCC produces the same asm for either source form.
+
+- **Constant offset** (`*(p + K)`, fixture 091, 094): folded to
+  indexed addressing on the pointer register.
+  ```
+  mov	ax,word ptr [si+2]      ; *(p + 1) for int *p in SI
+  mov	al,byte ptr [si+1] / cbw ; *(s + 1) for char *s
+  ```
+- **Variable offset** (`*(p + i)`, fixture 092): falls back to a
+  load/shl/add sequence that produces the address in BX. With
+  both pointer and index stack-resident:
+  ```
+  mov	ax,word ptr [bp-i]    ; load i
+  shl	ax,1                   ; * stride
+  mov	bx,word ptr [bp-p]    ; load p
+  add	bx,ax                  ; bx = p + i*stride
+  mov	ax,word ptr [bx]      ; *bx
+  ```
+
+### Pointer ++ / -- uses pointee-size stride
+
+`p++` on a pointer increments by `sizeof(*p)`, and BCC emits the
+stride as multiple `inc` / `dec` ops on the pointer register
+(matching the `±2` int peephole pattern):
+
+- `int *p; p++;` → `inc si / inc si` (stride 2 — fixture 090)
+- `char *s; s++;` → `inc si` (stride 1 — fixture 093)
+
+For stride > 2 BCC probably switches to `add reg, K` (same
+crossover as the int +K peephole), but no fixture pins it.
+
+### Pointer parameters
+
+A function parameter of pointer type (`int *p`) is a 2-byte slot
+on the caller-built stack. The callee's prologue receives it
+exactly like an int parameter (fixture 095):
+
+```
+push	bp
+mov	bp,sp
+push	si
+mov	si,word ptr [bp+4]    ; receive `p` into SI
+```
+
+Enregistration applies — the pointer's direct-deref use inside
+the function gives it the +2 bonus, easily clearing the
+threshold.
+
+### Use-count rule refinement: direct vs. indirect deref
+
+Pointer enregistration is gated by the same `≥ 3 uses` threshold
+as ints, but **direct dereferences contribute 2 uses each** to
+the pointer name:
+
+| Form                         | Count for `p` |
+|------------------------------|---------------|
+| Init (`int *p = …;`)         | 1             |
+| `*p` (bare deref)            | 2             |
+| `*p = …;` (deref-assign)     | 2             |
+| `p[K]` / `p[i]`              | 2             |
+| `*(p + K)` (const offset)    | 2             |
+| `*(p - K)` (const offset)    | 2             |
+| `*(p + i)` (variable offset) | 1             |
+| `p + i` (bare arithmetic)    | 1             |
+| `p++` / `--p` / etc.         | 2             |
+
+This explains:
+- 080 (`*p`, 1 + 2 = 3): p enregisters.
+- 088 (`s[0]`, 1 + 2 = 3): s enregisters.
+- 091 (`*(p + 1)`, 1 + 2 = 3): p enregisters.
+- 092 (`*(p + i)`, 1 + 1 = 2): p stays on stack.
+
+The intuition: BCC's optimizer treats `*(p + <constant>)` as a
+single addressed-load idiom (foldable into a single `mov reg,
+[reg+K]`), so the pointer "earns" its register the same way a
+direct `*p` does. A variable offset requires a runtime address
+computation that uses a temp register anyway, so the pointer
+doesn't pay back the register cost.
+
+### Public-symbol list order: reverse alphabetical (correction)
+
+We previously documented the `public` list at the end of the
+file as appearing in **reverse declaration order**, which fit
+every prior fixture (the source order happened to match alpha
+order). Fixture 095 disambiguates: source order is `sum`,
+`main`, but the emitted list is:
+```
+public	_sum
+public	_main
+```
+
+Alphabetically `main < sum`, and the emitted order is the
+**reverse-alphabetical** walk (sum, main). The most likely
+internal implementation is a sorted symbol table walked in
+reverse — same outward behavior as "LIFO over a sorted table".
+Both functions and globals participate in one combined sort.
+
 ## Globals and string literals (`083`–`089`)
 
 ### File layout when globals are present

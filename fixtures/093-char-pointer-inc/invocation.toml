@@ -1,0 +1,4 @@
+description = "Char pointer increment, then dereference. Pins `char *` stride of 1 — likely a plain `inc <reg>` since sizeof(char) = 1, vs. `add <reg>, 2` for int pointers."
+tool = "bcc"
+args = ["-S", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]
