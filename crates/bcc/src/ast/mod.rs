@@ -31,6 +31,17 @@ pub struct Param {
     pub ty: Type,
 }
 
+/// One arm of a `switch`. `value: None` represents the `default:`
+/// arm. The span starts at the `case` / `default` keyword and ends
+/// one past the colon, so source-line tracking can emit the comment
+/// block tied to the arm's header line.
+#[derive(Debug)]
+pub struct SwitchCase {
+    pub value: Option<u32>,
+    pub span: Span,
+    pub body: Vec<Stmt>,
+}
+
 #[derive(Debug)]
 pub struct Stmt {
     pub kind: StmtKind,
@@ -69,11 +80,22 @@ pub enum StmtKind {
         step: Option<Expr>,
         body: Vec<Stmt>,
     },
-    /// `break;` — exit the innermost enclosing loop.
+    /// `break;` — exit the innermost enclosing loop or switch.
     Break,
     /// `continue;` — jump to the next iteration of the innermost
-    /// enclosing loop (i.e., to its check / step label).
+    /// enclosing loop (i.e., to its check / step label). Switches do
+    /// not catch `continue;` — it threads past them to the loop.
     Continue,
+    /// `switch (scrutinee) { case K: ...; default: ...; }`. Cases are
+    /// kept in source order; at most one may be a `default` (None
+    /// value). Each case's body extends until the next `case` /
+    /// `default` / closing brace — i.e. fall-through is modeled as
+    /// "no `break;` at the end", and codegen emits case bodies
+    /// linearly so control just continues into the next case label.
+    Switch {
+        scrutinee: Expr,
+        cases: Vec<SwitchCase>,
+    },
     /// Expression evaluated for its side effects, value discarded.
     /// Examples: `++x;`, `f();`. Plain expressions without side
     /// effects (`5;`) are syntactically valid but semantically a no-op

@@ -5,8 +5,8 @@
 //! single-pass forbids building a one-function-at-a-time variant later).
 
 use crate::ast::{
-    BinOp, Expr, ExprKind, Function, LogicalOp, Param, Stmt, StmtKind, Type, UnaryOp, Unit,
-    UpdateOp, UpdatePosition,
+    BinOp, Expr, ExprKind, Function, LogicalOp, Param, Stmt, StmtKind, SwitchCase, Type, UnaryOp,
+    Unit, UpdateOp, UpdatePosition,
 };
 use crate::lex::{Span, Token, TokenKind};
 
@@ -127,6 +127,7 @@ impl Parser {
             TokenKind::KwWhile => self.parse_while(),
             TokenKind::KwDo => self.parse_do_while(),
             TokenKind::KwFor => self.parse_for(),
+            TokenKind::KwSwitch => self.parse_switch(),
             TokenKind::KwBreak => {
                 let tok = self.bump();
                 let semi = self.expect(&TokenKind::Semicolon)?;
@@ -291,6 +292,67 @@ impl Parser {
             });
         }
         self.parse_expr()
+    }
+
+    /// `switch ( <expr> ) { (case <int>: <stmts> | default: <stmts>)* }`.
+    /// The case arms are kept in source order. Each arm's body extends
+    /// until the next `case` / `default` / `}` — `break;` is just a
+    /// regular statement inside the body, not a separator. We require
+    /// the brace; BCC may permit a single statement, but no fixture
+    /// has shown that and the grammar is cleaner this way.
+    fn parse_switch(&mut self) -> Result<Stmt, ParseError> {
+        let switch_tok = self.expect(&TokenKind::KwSwitch)?;
+        self.expect(&TokenKind::LParen)?;
+        let scrutinee = self.parse_expr()?;
+        self.expect(&TokenKind::RParen)?;
+        self.expect(&TokenKind::LBrace)?;
+        let mut cases: Vec<SwitchCase> = Vec::new();
+        while !matches!(self.peek().kind, TokenKind::RBrace | TokenKind::Eof) {
+            let (value, head_start) = match self.peek().kind {
+                TokenKind::KwCase => {
+                    let kw = self.bump();
+                    let int_tok = self.bump();
+                    let TokenKind::IntLit(v) = int_tok.kind else {
+                        return Err(ParseError::Unexpected {
+                            expected: "integer literal in `case`".to_owned(),
+                            found: int_tok.kind.describe().to_owned(),
+                            offset: int_tok.span.start,
+                        });
+                    };
+                    (Some(v), kw.span.start)
+                }
+                TokenKind::KwDefault => {
+                    let kw = self.bump();
+                    (None, kw.span.start)
+                }
+                _ => {
+                    let t = self.peek();
+                    return Err(ParseError::Unexpected {
+                        expected: "`case`, `default`, or `}`".to_owned(),
+                        found: t.kind.describe().to_owned(),
+                        offset: t.span.start,
+                    });
+                }
+            };
+            let colon = self.expect(&TokenKind::Colon)?;
+            let mut body = Vec::new();
+            while !matches!(
+                self.peek().kind,
+                TokenKind::KwCase | TokenKind::KwDefault | TokenKind::RBrace | TokenKind::Eof
+            ) {
+                body.push(self.parse_stmt()?);
+            }
+            cases.push(SwitchCase {
+                value,
+                span: Span::new(head_start, colon.span.end),
+                body,
+            });
+        }
+        let close = self.expect(&TokenKind::RBrace)?;
+        Ok(Stmt {
+            kind: StmtKind::Switch { scrutinee, cases },
+            span: Span::new(switch_tok.span.start, close.span.end),
+        })
     }
 
     /// `if ( <expr> ) <branch> [else <branch>]`. A branch is either

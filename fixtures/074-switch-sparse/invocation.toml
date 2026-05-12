@@ -1,0 +1,4 @@
+description = "Sparse switch with wide gaps (1, 10, 100, 1000). A jump table would be wasteful here — confirms chained-compare for sparse cases regardless of count."
+tool = "bcc"
+args = ["-S", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

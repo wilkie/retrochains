@@ -303,10 +303,14 @@ But notably **NOT applied to 8-bit registers** — `char c = 0;` is
 `mov dl, 0`, never `xor dl, dl`. This asymmetry is distinctive.
 _Fixtures_: 027, 047, 050.
 
-### `inc ax` / `dec ax` for `±1` on the working register (STRONG)
+### `inc ax` / `dec ax` for `±1`, doubled for `±2` (STRONG)
 
-`<reg> = <reg> + 1` (full assignment) goes through AX, with the
-constant collapsed to `inc ax` not `add ax, 1`. _Fixtures_: 027–031.
+`<reg> = <reg> ± K` (full assignment) goes through AX. For K = 1
+the rhs collapses to `inc ax` / `dec ax`; for K = 2 BCC emits the
+operation *twice* (`inc ax / inc ax`) — 2 bytes vs. 3 for `add ax, 2`.
+At K ≥ 3 the cost tied and BCC switches to `add ax, K` / `sub ax, K`
+(3 bytes). _Fixtures_: 027–031 (K=1), 076 case 1 (K=2), 076 case 2
+(K=3 with `add`).
 
 ### `inc <reg>` / `dec <reg>` directly for `++x` / `--x` / `x += 1` (DEFINITIVE)
 
@@ -509,6 +513,48 @@ fixed pattern is a strong tell. _Fixture_: 019.
 BCC uses `jl/jg/jle/jge` not the unsigned variants `jb/ja/jbe/jae`,
 even when both operands are non-negative. Reflects the signed default
 for C `int`. _Fixtures_: 019–024.
+
+### `switch` strategy fingerprint: three observable forms (DEFINITIVE)
+
+BCC picks one of exactly three dispatch shapes — the choice is a
+combined function of case count and density, and each shape has
+distinctive byte-level features:
+
+- **Chained compares (`cmp + je` chain ending in `jmp`)** for 3 or
+  fewer non-default cases. Triggers the `or ax,ax` peephole if any
+  case has value 0. _Fixtures_: 072, 075.
+- **Jump table** (`cmp / ja / shl / jmp word ptr cs:@<fn>@C<n>[bx]`)
+  for ≥ 4 contiguous cases starting at 0. Address table emitted
+  AFTER `_main endp` as `dw @<fn>@<slot>` entries under a `@<fn>@C<n>
+  label word` header. _Fixtures_: 073, 076.
+- **Linear-search loop** (`mov cx, N / mov bx, offset C<n> / loop
+  with je dispatch / jmp word ptr cs:[bx+OFF]`) for ≥ 4 sparse cases.
+  Two parallel tables (values then addresses), with **values
+  written as `db` byte pairs** in little-endian order (e.g. `1000`
+  → `db 232 / db 3`). Adds a hidden 2-byte stack slot (visible as
+  the prologue using `sub sp, N` with N including 2 extra bytes
+  beyond what user locals need). _Fixture_: 074.
+
+The presence of a `@<fn>@C<num>` label between `_main endp` and
+`?debug C E9` is a strong stand-alone tell — most compilers emit
+jump tables in `_DATA` or inline.
+
+The `<num>` itself is a deterministic-but-unexplained quantity:
+fixtures 073 (jump-table n=8, `C1244`) and 076 (jump-table n=4,
+`C876`) fit `92·n + 508`, and 074 (linear n=4, `C738`) fits
+`74·n + 442`. Whether these constants depend on anything else
+(function position, TU contents, surrounding constants) is an
+open question — see specs/bcc/ASM_OUTPUT.md.
+
+### `switch` slot-reservation fingerprint (STRONG)
+
+The slot counter advances past unused "ghost" slots before the
+first case body:
+- Chained / linear-search: `#non-default-cases + 2` ghost slots.
+- Jump-table: `3` ghost slots.
+
+Visible as label-number gaps: 072's first case label is `@1@170`
+(slot 5) rather than `@1@50`. _Fixtures_: 072–076.
 
 ---
 

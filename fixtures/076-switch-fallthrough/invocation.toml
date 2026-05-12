@@ -1,0 +1,4 @@
+description = "Cases without `break` fall through to the next case. Pins how BCC arranges the case bodies in linear order so fall-through just continues."
+tool = "bcc"
+args = ["-S", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

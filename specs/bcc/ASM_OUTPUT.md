@@ -512,9 +512,13 @@ emits (when `i` is in SI):
 
 Two things to note:
 
-1. **`x + 1` on a value already in AX becomes `inc ax`**, not
-   `add ax,1`. This is a constant-rhs peephole we haven't seen before.
-   (Probably symmetric `dec ax` for `x - 1`; needs a fixture.)
+1. **`x ± 1` on a value already in AX becomes `inc ax` / `dec ax`**,
+   not `add ax,1` / `sub ax,1`. **`x ± 2`** also folds — `r + 2`
+   compiles to *two* `inc ax`s in a row (2 bytes total vs. 3 for
+   `add ax,2`). Fixture 076 case 1 pins the `±2` half of this. At
+   `±3` and beyond, the cost of three or more inc/dec ties with
+   `add/sub ax, K` (3 bytes) and BCC switches back to the `add`/`sub`
+   form (fixture 076 case 2: `r + 3` → `add ax, 3`).
 2. The store back is via AX even though the rhs is computed in AX —
    BCC doesn't fuse the operation into the destination register. The
    shape is always `mov ax,<reg>` / `<op>` / `mov <reg>,ax`.
@@ -1037,6 +1041,163 @@ No conditional jumps, no labels — four straight-line instructions.
 This makes `!x` significantly smaller than a comparison-as-value
 expansion of `x == 0`.
 
+### `switch` statement (`072`, `075`; jump-table `073`, `076`; linear `074`)
+
+BCC picks one of three dispatch strategies for a switch statement
+based on the case-value pattern:
+
+- **Chained compares** — for a small number of cases or any case
+  set that's neither dense-from-zero nor sparse-with-many-arms.
+  Fixtures 072 (3 cases) and 075 (2 cases + default).
+- **Jump table** — for ≥ 4 contiguous cases starting at 0. Fixtures
+  073 (8 cases 0..7) and 076 (4 cases 0..3).
+- **Linear value search** — for sparse case sets with ≥ 4 cases.
+  Fixture 074 (cases 1, 10, 100, 1000).
+
+#### Chained-compare dispatch (`072`, `075`)
+
+Load scrutinee into AX once, then one `cmp + je` per case
+(in source order), then a trailing `jmp` to either the
+default body (if present) or the end-of-switch label:
+
+```
+	mov	ax,word ptr [bp-2]   ; load scrutinee
+	or	ax,ax                 ; case 0 uses the `or` peephole
+	je	short @1@170          ; ↳ case 0 body
+	cmp	ax,1
+	je	short @1@194          ; ↳ case 1 body
+	cmp	ax,2
+	je	short @1@218          ; ↳ case 2 body
+	jmp	short @1@242          ; ↳ end-of-switch (no default)
+```
+
+`case 0` triggers the `or ax,ax` short form (same one the `cmp
+<reg>,0` peephole uses elsewhere). The trailing `jmp` targets the
+default body if the switch has one; otherwise it falls past the
+last case to the end-of-switch label.
+
+Case bodies are emitted in source order — including default. Each
+arm gets its own label; bodies that include `break;` jump to the
+end-of-switch label. Bodies without `break;` fall through into the
+next arm's body (chained-fallthrough is implied but unobserved —
+fixture 076 falls through but uses the jump-table strategy).
+
+#### Slot reservation
+
+Each switch reserves a fixed number of *pre-dispatch* slots that
+get burned by the slot counter even though no labels actually
+land on them. The count depends on the dispatch strategy:
+
+| Strategy        | Pre-slots                      |
+|-----------------|--------------------------------|
+| Chained         | `#non-default-cases + 2`       |
+| Jump-table      | `3` (fixed)                    |
+| Linear-search   | `#cases + 2`                   |
+
+Then one slot per case body (in source order, default included),
+then one slot for the end-of-switch label that `break;` targets.
+For 072 (3 cases, no default): `5 + 3 + 1 = 9` slots → end at
+slot 8 (label `@1@242`), function exit at slot 9 (`@1@266`).
+For 075 (2 cases + default): `4 + 3 + 1 = 8` slots → end at
+slot 7 (`@1@218`), exit at slot 8 (`@1@242`).
+
+#### Jump-table dispatch (`073`, `076`)
+
+```
+	mov	bx,word ptr [bp-2]
+	cmp	bx,3                 ; bounds check (max case value)
+	ja	short @1@218         ; out-of-range → end-of-switch
+	shl	bx,1                 ; index = value * 2 (word entries)
+	jmp	word ptr cs:@1@C876[bx]
+```
+
+Two important shape details:
+
+- BCC uses **BX** (not AX) for the scrutinee — the only register
+  encoding for `jmp word ptr cs:LBL[reg]` indexed addressing.
+- The bounds check uses `ja` (unsigned), so negative scrutinees
+  also fail it (their two's-complement wrap puts them above the
+  max).
+
+The address table is emitted as data *after* `_main endp` but
+before `?debug C E9`:
+
+```
+_main	endp
+@1@C876	label	word
+	dw	@1@122
+	dw	@1@146
+	dw	@1@170
+	dw	@1@194
+```
+
+The data label uses the `@<func>@C<num>` form. The `C` prefix
+distinguishes data labels from code labels; **the `<num>` value
+does not follow the `50 + 24·k` code-label scheme** and we don't
+yet know what determines it. Empirically, fixtures 073 (8 cases →
+`C1244`) and 076 (4 cases → `C876`) both fit `92·n + 508`, but
+the constants `92` and `508` have no obvious source — this could
+be a coincidence of two data points. _See "Open questions"._
+
+#### Linear-search dispatch (`074`)
+
+For sparse cases (≥ 4 with non-contiguous values), BCC spills the
+scrutinee, loads CX with the case count and BX with a pointer to
+a parallel value table, then loops:
+
+```
+	mov	ax,word ptr [bp-2]
+	mov	word ptr [bp-4],ax    ; spill scrutinee (extra stack slot)
+	mov	cx,4                   ; case count
+	mov	bx,offset @1@C738
+@1@98:
+	mov	ax,word ptr cs:[bx]
+	cmp	ax,word ptr [bp-4]
+	je	short @1@170           ; ↳ dispatch jmp
+	inc	bx
+	inc	bx
+	loop	short @1@98
+	jmp	short @1@290           ; not found → end-of-switch
+@1@170:
+	jmp	word ptr cs:[bx+8]     ; +8 = offset to address table
+```
+
+The dispatch indirect-jmp uses `[bx + 2·case_count]` to land on
+the address table entry corresponding to the matched value (since
+the values table comes first and is `2·N` bytes long).
+
+The spill slot adds a 2-byte chunk to the stack frame — BCC
+allocates it AFTER user locals, so for fixture 074 (`int x` at
+`[bp-2]`) the spill lands at `[bp-4]` and the prologue uses `sub
+sp,4` (vs. `dec sp` ×2 for fixtures without spill).
+
+Two parallel tables emitted after `_main endp`: values then
+addresses. **Values are written byte-by-byte (`db`)** as
+little-endian halves of the 16-bit value (`1000` → `db 232 / db
+3`), which is a notable byte-exact fingerprint quirk — most other
+compilers emit `dw 1000`.
+
+```
+_main	endp
+@1@C738	label	word
+	db	1
+	db	0
+	db	10
+	db	0
+	db	100
+	db	0
+	db	232
+	db	3
+	dw	@1@194
+	dw	@1@218
+	dw	@1@242
+	dw	@1@266
+```
+
+Fixture 074 (4 cases → `C738`) fits the empirical formula
+`74·n + 442`, but with only one linear-search data point this is
+not yet a confirmed rule.
+
 ### Constant folding (`005`)
 
 BCC folds simple arithmetic on integer literals at compile time. Source
@@ -1104,6 +1265,16 @@ Three observations:
   `dec`→`sub` crossover.)
 - Two-operand `imul` (80186/286): does any `-mc`/`-ml` model or higher
   target switch BCC to it?
+- `@<func>@C<num>` data-label `<num>` formula. Jump-table fixtures
+  073 (n=8, C1244) and 076 (n=4, C876) both fit `92·n + 508`;
+  linear-search fixture 074 (n=4, C738) fits `74·n + 442`. These
+  empirical fits match every data point we have, but the constants
+  `92`, `508`, `74`, `442` have no obvious source — they're not
+  byte offsets within the function, not derivable from slot
+  numbering, and the choice of multiplier differs between
+  strategies. Capture a fixture with a different function/TU
+  shape (e.g. multiple constants, a switch later in the function,
+  two switches) and see whether the same formula still holds.
 - Call with arguments: cdecl push-and-pop pattern.
 - What does `-O`/`-G`/`-r`/`-Z` actually change in the output? We've
   only run with `-ms`.

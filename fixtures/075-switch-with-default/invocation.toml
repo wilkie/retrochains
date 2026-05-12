@@ -1,0 +1,4 @@
+description = "Switch with a default clause. Pins where the default body lands in the codegen and how it's reached when no case matches."
+tool = "bcc"
+args = ["-S", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

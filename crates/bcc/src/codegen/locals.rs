@@ -26,6 +26,7 @@
 use std::collections::HashMap;
 
 use crate::ast::{Expr, ExprKind, Function, Stmt, StmtKind, Type};
+use crate::codegen::plan::{pick_switch_strategy, SwitchStrategy};
 
 /// Round `n` up to the next multiple of `alignment` (a small power of 2).
 fn align_up(n: u16, alignment: u16) -> u16 {
@@ -143,6 +144,11 @@ pub struct Locals {
     saved_regs: Vec<Reg>,
     /// Register-promoted params; the prologue emits a `mov` per entry.
     param_loads: Vec<ParamLoad>,
+    /// For each linear-search switch (keyed by `Stmt.span.start`), the
+    /// signed bp-offset of its dedicated scrutinee-spill stack slot.
+    /// Empty when the function has no linear-search switch — fixture
+    /// 074 is the only one today.
+    switch_spill_offsets: HashMap<u32, i16>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -289,7 +295,27 @@ impl Locals {
         // emits two `dec sp`s, not one (fixture 055).
         stack_bytes = align_up(stack_bytes, 2);
 
-        Self { stack_bytes, by_name, saved_regs, param_loads }
+        // Linear-search switches need a 2-byte scrutinee spill slot
+        // (fixture 074: scrutinee at `[bp-4]` after the `int x` at
+        // `[bp-2]`). Allocate one slot per linear-search switch in
+        // the function — sequential switches each get their own slot
+        // even though the values can't outlast the switch; this
+        // matches what fixture 074 demonstrates (only the one switch,
+        // exactly one extra slot).
+        let mut switch_spill_offsets = HashMap::new();
+        collect_linear_search_switches(&function.body, |span_start| {
+            stack_bytes += 2;
+            let off = -i16::try_from(stack_bytes).expect("stack frame fits in i16");
+            switch_spill_offsets.insert(span_start, off);
+        });
+
+        Self {
+            stack_bytes,
+            by_name,
+            saved_regs,
+            param_loads,
+            switch_spill_offsets,
+        }
     }
 
     #[must_use]
@@ -317,6 +343,20 @@ impl Locals {
         self.entry(name).ty
     }
 
+    /// Signed bp-offset of the scrutinee-spill stack slot for a
+    /// linear-search switch (keyed by its statement span_start).
+    /// Panics for switches that aren't linear-search — only that
+    /// strategy reserves a spill slot.
+    #[must_use]
+    pub fn switch_spill_offset(&self, switch_span_start: u32) -> i16 {
+        *self.switch_spill_offsets.get(&switch_span_start).unwrap_or_else(|| {
+            panic!(
+                "no spill slot reserved for switch at byte {switch_span_start} \
+                 — should only be queried for linear-search switches"
+            )
+        })
+    }
+
     fn entry(&self, name: &str) -> &LocalEntry {
         self.by_name
             .get(name)
@@ -330,6 +370,39 @@ impl Locals {
 /// survive a call must stay on the stack (fixture 055).
 fn body_has_call(body: &[Stmt]) -> bool {
     body.iter().any(stmt_has_call)
+}
+
+/// Walk `stmts` and call `f(stmt.span.start)` for each `switch`
+/// statement whose strategy is `LinearSearch`. Recurses into nested
+/// constructs (loop bodies, if-branches, other switches' bodies).
+fn collect_linear_search_switches<F: FnMut(u32)>(stmts: &[Stmt], mut f: F) {
+    fn walk<F: FnMut(u32)>(stmts: &[Stmt], f: &mut F) {
+        for stmt in stmts {
+            match &stmt.kind {
+                StmtKind::Switch { cases, .. } => {
+                    if matches!(pick_switch_strategy(cases), SwitchStrategy::LinearSearch) {
+                        f(stmt.span.start);
+                    }
+                    for c in cases {
+                        walk(&c.body, f);
+                    }
+                }
+                StmtKind::If { then_branch, else_branch, .. } => {
+                    walk(then_branch, f);
+                    if let Some(b) = else_branch {
+                        walk(b, f);
+                    }
+                }
+                StmtKind::While { body, .. }
+                | StmtKind::DoWhile { body, .. }
+                | StmtKind::For { body, .. } => {
+                    walk(body, f);
+                }
+                _ => {}
+            }
+        }
+    }
+    walk(stmts, &mut f);
 }
 
 fn stmt_has_call(stmt: &Stmt) -> bool {
@@ -353,6 +426,9 @@ fn stmt_has_call(stmt: &Stmt) -> bool {
                 || body_has_call(body)
         }
         StmtKind::Break | StmtKind::Continue => false,
+        StmtKind::Switch { scrutinee, cases } => {
+            expr_has_call(scrutinee) || cases.iter().any(|c| body_has_call(&c.body))
+        }
         StmtKind::ExprStmt(e) => expr_has_call(e),
     }
 }
@@ -417,6 +493,13 @@ fn collect_decls(stmt: &Stmt, out: &mut Vec<DeclItem>) {
         StmtKind::While { body, .. } | StmtKind::DoWhile { body, .. } | StmtKind::For { body, .. } => {
             for s in body {
                 collect_decls(s, out);
+            }
+        }
+        StmtKind::Switch { cases, .. } => {
+            for c in cases {
+                for s in &c.body {
+                    collect_decls(s, out);
+                }
             }
         }
         StmtKind::Return(_)
@@ -494,6 +577,14 @@ fn count_uses_stmt(stmt: &Stmt, counts: &mut HashMap<String, u32>) {
             }
         }
         StmtKind::Break | StmtKind::Continue => {}
+        StmtKind::Switch { scrutinee, cases } => {
+            count_uses_expr(scrutinee, counts);
+            for c in cases {
+                for s in &c.body {
+                    count_uses_stmt(s, counts);
+                }
+            }
+        }
         StmtKind::ExprStmt(e) => count_uses_expr(e, counts),
     }
 }

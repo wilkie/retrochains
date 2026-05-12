@@ -14,8 +14,8 @@ use std::collections::HashMap;
 use std::io::Write as _;
 
 use crate::ast::{
-    BinOp, Expr, ExprKind, Function, LogicalOp, Stmt, StmtKind, Type, UnaryOp, Unit, UpdateOp,
-    UpdatePosition,
+    BinOp, Expr, ExprKind, Function, LogicalOp, Stmt, StmtKind, SwitchCase, Type, UnaryOp, Unit,
+    UpdateOp, UpdatePosition,
 };
 
 /// Maps each function's name to the declared types of its parameters,
@@ -68,7 +68,7 @@ fn bp_addr(off: i16) -> String {
         format!("[bp+{off}]")
     }
 }
-use plan::LabelPlan;
+use plan::{LabelPlan, SwitchStrategy};
 
 /// Emit the per-function chunk of an `-S` file for one function.
 pub fn emit_function(
@@ -104,12 +104,22 @@ struct FunctionEmitter<'a> {
     /// statements can look up their jump destination. The innermost
     /// loop sits at the top (index `len()-1`).
     loop_stack: Vec<LoopTargets>,
+    /// Data labels emitted between `_main endp` and `?debug C E9`,
+    /// staged here while the function body is being emitted. Used by
+    /// the jump-table and linear-search switch strategies, both of
+    /// which need a `@<func>@C<num> label word / dw / db` block after
+    /// the function ends. Empty for most functions.
+    post_function_data: Vec<u8>,
 }
 
+/// Innermost enclosing construct that catches `break;` (and maybe
+/// `continue;`). Pushed for `while` / `do-while` / `for` / `switch`.
+/// For switches, `continue_target_slot` is `None` — a `continue;` in
+/// a switch body threads past the switch to the enclosing loop.
 #[derive(Clone, Copy)]
 struct LoopTargets {
     break_target_slot: u32,
-    continue_target_slot: u32,
+    continue_target_slot: Option<u32>,
 }
 
 impl<'a> FunctionEmitter<'a> {
@@ -131,6 +141,7 @@ impl<'a> FunctionEmitter<'a> {
             label_plan: LabelPlan::build(function),
             signatures,
             loop_stack: Vec::new(),
+            post_function_data: Vec::new(),
         }
     }
 
@@ -218,6 +229,11 @@ impl<'a> FunctionEmitter<'a> {
         self.out.extend_from_slice(b"\tret\t\r\n");
 
         let _ = write!(self.out, "{sym}\tendp\r\n");
+        // Switch jump-tables and linear-search address tables live
+        // between `_main endp` and the next `?debug C E9` line. They
+        // were staged into `post_function_data` while the body was
+        // emitted (see `emit_switch_jump_table` / `_linear_search`).
+        self.out.extend_from_slice(&self.post_function_data);
     }
 
     fn emit_stmt(&mut self, stmt: &Stmt) {
@@ -272,6 +288,9 @@ impl<'a> FunctionEmitter<'a> {
                     body,
                 );
             }
+            StmtKind::Switch { scrutinee, cases } => {
+                self.emit_switch(stmt.span.start, scrutinee, cases);
+            }
             StmtKind::Break => {
                 self.advance_to_stmt_line(stmt);
                 let target = self.loop_stack.last().expect(
@@ -281,9 +300,15 @@ impl<'a> FunctionEmitter<'a> {
             }
             StmtKind::Continue => {
                 self.advance_to_stmt_line(stmt);
-                let target = self.loop_stack.last().expect(
-                    "`continue;` outside any enclosing loop — parser should reject this",
-                ).continue_target_slot;
+                // Walk outward looking for the topmost frame whose
+                // continue-slot is `Some(...)` — switch frames have
+                // `None` and get skipped.
+                let target = self
+                    .loop_stack
+                    .iter()
+                    .rev()
+                    .find_map(|f| f.continue_target_slot)
+                    .expect("`continue;` outside any enclosing loop — parser should reject this");
                 let _ = write!(self.out, "\tjmp\tshort {}\r\n", self.label_ref(target));
             }
             StmtKind::ExprStmt(expr) => {
@@ -415,7 +440,7 @@ impl<'a> FunctionEmitter<'a> {
         self.emit_label(plan.body_slot);
         self.loop_stack.push(LoopTargets {
             break_target_slot: plan.break_target_slot,
-            continue_target_slot: plan.continue_target_slot,
+            continue_target_slot: Some(plan.continue_target_slot),
         });
         for s in body {
             self.emit_stmt(s);
@@ -440,7 +465,7 @@ impl<'a> FunctionEmitter<'a> {
         self.emit_label(plan.body_slot);
         self.loop_stack.push(LoopTargets {
             break_target_slot: plan.break_target_slot,
-            continue_target_slot: plan.continue_target_slot,
+            continue_target_slot: Some(plan.continue_target_slot),
         });
         for s in body {
             self.emit_stmt(s);
@@ -479,7 +504,7 @@ impl<'a> FunctionEmitter<'a> {
         self.emit_label(plan.body_slot);
         self.loop_stack.push(LoopTargets {
             break_target_slot: plan.break_target_slot,
-            continue_target_slot: plan.continue_target_slot,
+            continue_target_slot: Some(plan.continue_target_slot),
         });
         for s in body {
             self.emit_stmt(s);
@@ -513,6 +538,393 @@ impl<'a> FunctionEmitter<'a> {
     fn advance_to_for_header_line(&mut self, for_span_start: u32) {
         let line = self.lines.line_of(for_span_start);
         self.advance_to_line(line);
+    }
+
+    /// Emit a `switch`. Three dispatch strategies are observable; we
+    /// currently implement only the **chained** one (fixtures 072,
+    /// 075). The shape (fixture 072: 3 cases including a `case 0`,
+    /// no default):
+    ///
+    /// ```text
+    ///   ; switch (x) {       ← header source-line block
+    ///   mov ax, word ptr [bp-2]   ; load scrutinee
+    ///   or  ax, ax                ; case 0 uses `or` (peephole, fixture 035)
+    ///   je  short <case 0 body>
+    ///   cmp ax, 1
+    ///   je  short <case 1 body>
+    ///   …
+    ///   jmp short <end>           ; or <default body> when present
+    /// <case 0 body>:
+    ///   ;     case 0: ...
+    ///   <body>
+    ///   jmp short <end>           ; from `break;`
+    /// …
+    /// <end>:
+    /// ```
+    ///
+    /// Cases are emitted in source order; the default case is placed
+    /// inline at its source position (fixture 075 puts it last because
+    /// that's where it appears in C). With no `break;` at the end of
+    /// a case body, control falls into the next case's label (the
+    /// fixture for that combination is 076, which uses the jump-table
+    /// strategy — chained-fallthrough is implied but unobserved).
+    fn emit_switch(&mut self, switch_span_start: u32, scrutinee: &Expr, cases: &[SwitchCase]) {
+        let plan = self.label_plan.switch_plan(switch_span_start).clone();
+        self.advance_to_stmt_line_at(switch_span_start);
+        match plan.strategy {
+            SwitchStrategy::Chained => {
+                self.emit_switch_chained(scrutinee, cases, &plan.case_slots, plan.end_slot);
+            }
+            SwitchStrategy::JumpTable => {
+                self.emit_switch_jump_table(scrutinee, cases, &plan.case_slots, plan.end_slot);
+            }
+            SwitchStrategy::LinearSearch => {
+                self.emit_switch_linear_search(
+                    switch_span_start,
+                    scrutinee,
+                    cases,
+                    &plan.case_slots,
+                    plan.end_slot,
+                );
+            }
+        }
+        self.emit_label(plan.end_slot);
+    }
+
+    /// Emit the chained-compare dispatch and all case bodies. After
+    /// this returns, the caller emits the end-of-switch label.
+    fn emit_switch_chained(
+        &mut self,
+        scrutinee: &Expr,
+        cases: &[SwitchCase],
+        case_slots: &[u32],
+        end_slot: u32,
+    ) {
+        // Load scrutinee into AX. Today only an ident-as-int — chars
+        // or non-trivial scrutinee expressions need fixtures to pin
+        // the exact shape (e.g. byte-register-then-cbw).
+        let ExprKind::Ident(name) = &scrutinee.kind else {
+            panic!("non-ident switch scrutinee not yet supported (no fixture)");
+        };
+        let ty = self.locals.type_of(name);
+        assert!(
+            matches!(ty, Type::Int),
+            "char-typed switch scrutinee not yet supported (no fixture)"
+        );
+        match self.locals.location_of(name) {
+            LocalLocation::Stack(off) => {
+                let _ = write!(self.out, "\tmov\tax,word ptr {}\r\n", bp_addr(off));
+            }
+            LocalLocation::Reg(reg) => {
+                let _ = write!(self.out, "\tmov\tax,{}\r\n", reg.name());
+            }
+        }
+        // Compare/branch chain: one cmp+je per non-default case in
+        // source order. `case 0` uses `or ax,ax` (cf. fixture 072).
+        let default_slot = cases
+            .iter()
+            .zip(case_slots)
+            .find_map(|(c, &s)| c.value.is_none().then_some(s));
+        for (case, &slot) in cases.iter().zip(case_slots) {
+            let Some(v) = case.value else { continue };
+            let v16 = v & 0xFFFF;
+            if v16 == 0 {
+                self.out.extend_from_slice(b"\tor\tax,ax\r\n");
+            } else {
+                let _ = write!(self.out, "\tcmp\tax,{v16}\r\n");
+            }
+            let _ = write!(self.out, "\tje\tshort {}\r\n", self.label_ref(slot));
+        }
+        // Trailing jmp: to default body if present, else end-of-switch.
+        let trailing = default_slot.unwrap_or(end_slot);
+        let _ = write!(self.out, "\tjmp\tshort {}\r\n", self.label_ref(trailing));
+        // Case bodies in source order. `break;` translates to a
+        // `jmp short <end>` via the loop_stack frame we push below.
+        self.loop_stack.push(LoopTargets {
+            break_target_slot: end_slot,
+            continue_target_slot: None,
+        });
+        for (case, &slot) in cases.iter().zip(case_slots) {
+            self.emit_label(slot);
+            let case_line = self.lines.line_of(case.span.start);
+            self.advance_to_line(case_line);
+            for s in &case.body {
+                self.emit_stmt(s);
+            }
+        }
+        self.loop_stack.pop();
+    }
+
+    /// Like `advance_to_stmt_line(stmt)`, but called with just the
+    /// span start when the caller doesn't have the full `Stmt`.
+    fn advance_to_stmt_line_at(&mut self, span_start: u32) {
+        let line = self.lines.line_of(span_start);
+        self.advance_to_line(line);
+    }
+
+    /// Emit the dense-jump-table dispatch (fixtures 073, 076). All
+    /// cases must be values `0..N-1` in source order; the planner
+    /// only picks this strategy when that holds.
+    ///
+    /// ```text
+    ///   mov bx, <scrutinee>
+    ///   cmp bx, <N-1>
+    ///   ja  short <end>
+    ///   shl bx, 1
+    ///   jmp word ptr cs:@<func>@C<num>[bx]
+    /// <case 0>:
+    ///   <body>            ; falls through to next label unless body breaks
+    /// <case 1>:
+    ///   <body>
+    /// …
+    /// <end>:
+    /// ```
+    ///
+    /// After `_main endp` (staged in `post_function_data`):
+    /// ```text
+    /// @<func>@C<num>	label	word
+    ///   dw @<func>@<case 0 slot>
+    ///   …
+    /// ```
+    ///
+    /// The dispatch loads the scrutinee into BX (not AX) because
+    /// `jmp word ptr cs:LBL[bx]` is the only encoding that lets us
+    /// index a code-segment table with a register. We currently
+    /// assume BX is not allocated to a local — when it is, BCC
+    /// would presumably save/restore it, but we have no fixture.
+    fn emit_switch_jump_table(
+        &mut self,
+        scrutinee: &Expr,
+        cases: &[SwitchCase],
+        case_slots: &[u32],
+        end_slot: u32,
+    ) {
+        // Sanity: planner picked this strategy only for dense 0..N-1.
+        let n = cases.len();
+        for (i, c) in cases.iter().enumerate() {
+            let expected = u32::try_from(i).unwrap_or(u32::MAX);
+            assert!(
+                c.value == Some(expected),
+                "jump-table strategy expects dense 0..N-1 cases; got {:?} at index {i}",
+                c.value,
+            );
+        }
+        let case_count = u32::try_from(n).unwrap_or(u32::MAX);
+        let max_value = case_count - 1;
+
+        // Load scrutinee into BX.
+        let ExprKind::Ident(name) = &scrutinee.kind else {
+            panic!("non-ident switch scrutinee not yet supported (no fixture)");
+        };
+        assert!(
+            matches!(self.locals.type_of(name), Type::Int),
+            "char-typed switch scrutinee not yet supported (no fixture)"
+        );
+        match self.locals.location_of(name) {
+            LocalLocation::Stack(off) => {
+                let _ = write!(self.out, "\tmov\tbx,word ptr {}\r\n", bp_addr(off));
+            }
+            LocalLocation::Reg(reg) => {
+                assert!(
+                    reg.name() != "bx",
+                    "scrutinee already in BX — no fixture for BX-resident switch scrutinee yet",
+                );
+                let _ = write!(self.out, "\tmov\tbx,{}\r\n", reg.name());
+            }
+        }
+
+        // Bounds check: anything > max_value (unsigned, since out-of-
+        // range negatives also overflow into > max when treated as
+        // unsigned) jumps to the end-of-switch.
+        let _ = write!(self.out, "\tcmp\tbx,{max_value}\r\n");
+        let _ = write!(self.out, "\tja\tshort {}\r\n", self.label_ref(end_slot));
+        self.out.extend_from_slice(b"\tshl\tbx,1\r\n");
+        let c_num = switch_c_num(SwitchStrategy::JumpTable, case_count);
+        let _ = write!(
+            self.out,
+            "\tjmp\tword ptr cs:@{}@C{c_num}[bx]\r\n",
+            self.func_idx,
+        );
+
+        // Case bodies in source order; `break;` inside a body emits a
+        // `jmp short <end>` via the loop_stack frame. Cases without
+        // `break;` fall through to the next case label.
+        self.loop_stack.push(LoopTargets {
+            break_target_slot: end_slot,
+            continue_target_slot: None,
+        });
+        for (case, &slot) in cases.iter().zip(case_slots) {
+            self.emit_label(slot);
+            let case_line = self.lines.line_of(case.span.start);
+            self.advance_to_line(case_line);
+            for s in &case.body {
+                self.emit_stmt(s);
+            }
+        }
+        self.loop_stack.pop();
+
+        // Stage the address table for emission after `_main endp`.
+        let _ = write!(
+            self.post_function_data,
+            "@{}@C{c_num}\tlabel\tword\r\n",
+            self.func_idx,
+        );
+        for &slot in case_slots {
+            let _ = write!(
+                self.post_function_data,
+                "\tdw\t{}\r\n",
+                self.label_ref(slot),
+            );
+        }
+    }
+
+    /// Emit the linear-value-search dispatch (fixture 074). Used
+    /// when cases are sparse (≥ 4 cases that aren't `0..N-1`).
+    ///
+    /// ```text
+    ///   mov ax, <scrutinee>
+    ///   mov word ptr [bp-<spill>], ax     ; spill to a stack slot
+    ///   mov cx, <case_count>
+    ///   mov bx, offset @<func>@C<num>
+    /// <loop top>:
+    ///   mov ax, word ptr cs:[bx]
+    ///   cmp ax, word ptr [bp-<spill>]
+    ///   je  short <dispatch>
+    ///   inc bx
+    ///   inc bx
+    ///   loop short <loop top>
+    ///   jmp short <end>                   ; not found
+    /// <dispatch>:
+    ///   jmp word ptr cs:[bx+<addr table offset>]
+    /// <case 0>:
+    ///   <body>
+    /// …
+    /// <end>:
+    /// ```
+    ///
+    /// After `_main endp`:
+    /// ```text
+    /// @<func>@C<num>	label	word
+    ///   db <val 0 low> / db <val 0 high>  ; values, little-endian bytes
+    ///   …
+    ///   dw @<func>@<case 0 slot>          ; parallel address table
+    ///   …
+    /// ```
+    ///
+    /// The "values written as `db` byte pairs" instead of `dw` is a
+    /// distinctive BCC fingerprint.
+    fn emit_switch_linear_search(
+        &mut self,
+        switch_span_start: u32,
+        scrutinee: &Expr,
+        cases: &[SwitchCase],
+        case_slots: &[u32],
+        end_slot: u32,
+    ) {
+        // Linear search has no default-case support in our fixtures.
+        assert!(
+            cases.iter().all(|c| c.value.is_some()),
+            "default inside a linear-search switch not yet supported (no fixture)"
+        );
+        let case_count = u32::try_from(cases.len()).unwrap_or(u32::MAX);
+        // Locals analyzer reserved a stack slot for the spilled
+        // scrutinee; look up its offset by this switch's span_start.
+        let spill_off = self.locals.switch_spill_offset(switch_span_start);
+
+        // Load scrutinee into AX (any local kind works).
+        let ExprKind::Ident(name) = &scrutinee.kind else {
+            panic!("non-ident switch scrutinee not yet supported (no fixture)");
+        };
+        assert!(
+            matches!(self.locals.type_of(name), Type::Int),
+            "char-typed switch scrutinee not yet supported (no fixture)"
+        );
+        match self.locals.location_of(name) {
+            LocalLocation::Stack(off) => {
+                let _ = write!(self.out, "\tmov\tax,word ptr {}\r\n", bp_addr(off));
+            }
+            LocalLocation::Reg(reg) => {
+                let _ = write!(self.out, "\tmov\tax,{}\r\n", reg.name());
+            }
+        }
+        let _ = write!(self.out, "\tmov\tword ptr {},ax\r\n", bp_addr(spill_off));
+
+        // Loop setup. CX = case count, BX = pointer to values table.
+        let _ = write!(self.out, "\tmov\tcx,{case_count}\r\n");
+        let c_num = switch_c_num(SwitchStrategy::LinearSearch, case_count);
+        let _ = write!(self.out, "\tmov\tbx,offset @{}@C{c_num}\r\n", self.func_idx);
+
+        // Pre-dispatch slot layout for linear-search (from fixture 074):
+        // - pre slots 0..5 unused (#cases + 2 ghost slots)
+        // - Wait: 074 reserves 6 pre-slots (#cases=4 + 2), but actually
+        //   2 of those slots are USED: @1@98 (loop-top) and @1@170
+        //   (dispatch). Let me re-check.
+        //
+        // 074 labels:
+        //   @1@98  = slot 2   (loop top)
+        //   @1@170 = slot 5   (dispatch indirect-jmp)
+        //   @1@194 = slot 6   (case 0 body)
+        //
+        // So pre-slots: 0, 1 unused; 2 = loop_top; 3, 4 unused;
+        // 5 = dispatch. case bodies start at 6. That matches `#cases + 2 = 6`
+        // pre-slots in total. The loop_top sits at slot 2 (= 0+2) and
+        // the dispatch at slot 5 (= #cases + 1).
+        let loop_top_slot = case_slots[0] - 4;
+        let dispatch_slot = case_slots[0] - 1;
+
+        self.emit_label(loop_top_slot);
+        self.out.extend_from_slice(b"\tmov\tax,word ptr cs:[bx]\r\n");
+        let _ = write!(self.out, "\tcmp\tax,word ptr {}\r\n", bp_addr(spill_off));
+        let _ = write!(self.out, "\tje\tshort {}\r\n", self.label_ref(dispatch_slot));
+        self.out.extend_from_slice(b"\tinc\tbx\r\n");
+        self.out.extend_from_slice(b"\tinc\tbx\r\n");
+        let _ = write!(self.out, "\tloop\tshort {}\r\n", self.label_ref(loop_top_slot));
+        let _ = write!(self.out, "\tjmp\tshort {}\r\n", self.label_ref(end_slot));
+        self.emit_label(dispatch_slot);
+        // The dispatch indirect-jmp: BX points to the matched value's
+        // entry; the parallel address table sits at BX + 2*case_count.
+        let addr_table_offset = case_count * 2;
+        let _ = write!(
+            self.out,
+            "\tjmp\tword ptr cs:[bx+{addr_table_offset}]\r\n",
+        );
+
+        // Case bodies in source order. Same break-target setup as the
+        // other strategies.
+        self.loop_stack.push(LoopTargets {
+            break_target_slot: end_slot,
+            continue_target_slot: None,
+        });
+        for (case, &slot) in cases.iter().zip(case_slots) {
+            self.emit_label(slot);
+            let case_line = self.lines.line_of(case.span.start);
+            self.advance_to_line(case_line);
+            for s in &case.body {
+                self.emit_stmt(s);
+            }
+        }
+        self.loop_stack.pop();
+
+        // Stage value table + address table for post-function emission.
+        let _ = write!(
+            self.post_function_data,
+            "@{}@C{c_num}\tlabel\tword\r\n",
+            self.func_idx,
+        );
+        for case in cases {
+            let v = case.value.expect("default handled by assert above") & 0xFFFF;
+            let lo = v & 0xFF;
+            let hi = (v >> 8) & 0xFF;
+            let _ = write!(self.post_function_data, "\tdb\t{lo}\r\n");
+            let _ = write!(self.post_function_data, "\tdb\t{hi}\r\n");
+        }
+        for &slot in case_slots {
+            let _ = write!(
+                self.post_function_data,
+                "\tdw\t{}\r\n",
+                self.label_ref(slot),
+            );
+        }
     }
 
     /// Emit a conditional branch: control flows to `true_slot` when
@@ -1099,15 +1511,20 @@ impl<'a> FunctionEmitter<'a> {
 
     /// Emit the right-hand side of a binary op, applying it to AX.
     fn emit_binary_right(&mut self, op: BinOp, e: &Expr) {
-        // +1 / -1 peephole: BCC emits `inc ax` for "AX = AX + 1" and
-        // `dec ax` for "AX = AX - 1" (one-byte encodings, smaller than
-        // the corresponding `add ax,1` / `sub ax,1`). Confirmed on
-        // fixtures 027–031 (all in `<reg> = <reg> + 1` form).
+        // ±1 / ±2 peephole: BCC emits `inc ax` / `dec ax` for ±1 (1
+        // byte each vs. 3 for `add ax, 1` / `sub ax, 1`), and a *pair*
+        // of `inc` / `dec` for ±2 (2 bytes vs. 3). At ±3 the cost of
+        // three inc/dec ties with `add/sub ax, K`, and BCC switches
+        // to the `add` / `sub` form. Confirmed on fixtures 027–031
+        // (±1) and 076 case 1 (`r = r + 2` → `inc ax / inc ax`).
         if matches!(op, BinOp::Add | BinOp::Sub)
-            && let Some(1) = try_const_eval(e)
+            && let Some(v) = try_const_eval(e)
+            && (v == 1 || v == 2)
         {
             let mnemonic = if matches!(op, BinOp::Add) { "inc" } else { "dec" };
-            let _ = write!(self.out, "\t{mnemonic}\tax\r\n");
+            for _ in 0..v {
+                let _ = write!(self.out, "\t{mnemonic}\tax\r\n");
+            }
             return;
         }
         let src = self.resolve_operand_source(e);
@@ -1190,8 +1607,9 @@ fn stmt_has_break(stmt: &Stmt) -> bool {
             body_has_break(then_branch)
                 || else_branch.as_ref().is_some_and(|b| body_has_break(b))
         }
-        // Nested loops shadow break/continue — handled by the
-        // wildcard. Return/Declare/Assign/ExprStmt etc.: never break.
+        // Nested loops AND nested switches shadow `break;` — they
+        // consume any break in their body, so the enclosing loop
+        // doesn't see it.
         _ => false,
     }
 }
@@ -1207,7 +1625,32 @@ fn stmt_has_continue(stmt: &Stmt) -> bool {
             body_has_continue(then_branch)
                 || else_branch.as_ref().is_some_and(|b| body_has_continue(b))
         }
+        // A switch does NOT consume `continue;` — the inner continue
+        // threads past it to the enclosing loop, so we have to look
+        // inside the case bodies.
+        StmtKind::Switch { cases, .. } => {
+            cases.iter().any(|c| body_has_continue(&c.body))
+        }
         _ => false,
+    }
+}
+
+/// Compute the `C<num>` suffix of the data-table label BCC uses for
+/// a jump-table or linear-search switch. The formulas below are
+/// **empirical fits** through our captured fixtures — they pin the
+/// labels for 073 (jump-table, 8 cases), 076 (jump-table, 4 cases)
+/// and 074 (linear-search, 4 cases), but we don't yet understand
+/// what determines the constants `508` and `442`, or whether they
+/// vary with anything other than `case_count` (e.g. function
+/// position, function size, surrounding constants). _Fingerprint
+/// open question; see `specs/FINGERPRINTS.md`._
+fn switch_c_num(strategy: SwitchStrategy, case_count: u32) -> u32 {
+    match strategy {
+        SwitchStrategy::JumpTable => 92 * case_count + 508,
+        SwitchStrategy::LinearSearch => 74 * case_count + 442,
+        SwitchStrategy::Chained => unreachable!(
+            "chained-compare switch has no data label and no `C<num>` to compute"
+        ),
     }
 }
 

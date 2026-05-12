@@ -14,7 +14,7 @@
 
 use std::collections::HashMap;
 
-use crate::ast::{Expr, ExprKind, Function, Stmt, StmtKind};
+use crate::ast::{Expr, ExprKind, Function, Stmt, StmtKind, SwitchCase};
 
 /// Compiled label assignments for one function.
 #[derive(Debug)]
@@ -24,8 +24,47 @@ pub struct LabelPlan {
     bases: HashMap<u32, u32>,
     /// `span.start` of a loop construct → its named slot assignments.
     loops: HashMap<u32, LoopPlan>,
+    /// `span.start` of a `switch` → its slot assignments.
+    switches: HashMap<u32, SwitchPlan>,
     /// Slot for the function exit label.
     exit_slot: u32,
+}
+
+/// Strategy BCC uses to dispatch a `switch`. The choice is made at
+/// plan time (it affects how many slots get reserved) and re-checked
+/// by codegen.
+///
+/// - **Chained**: a linear chain of `cmp / je` per case, with a
+///   trailing `jmp` to the default body (or end-of-switch if no
+///   default). BCC reserves `#non-default-cases + 2` pre-slots
+///   before the first case body — those slots are unused as code
+///   labels but get burned by the slot counter (fixtures 072, 075).
+///
+/// - **JumpTable**: bounds-check then `shl bx,1 / jmp word ptr cs:@<func>@C<n>[bx]`.
+///   Reserves 3 pre-slots, regardless of case count (fixtures 073, 076).
+///   Not yet implemented in codegen — planner panics for now.
+///
+/// - **LinearSearch**: spill scrutinee, walk a `dw` value table with
+///   `mov / cmp / je / inc / inc / loop`, indirect-jmp through a
+///   parallel address table. Reserves `#cases + 2` pre-slots
+///   (fixture 074). Not yet implemented.
+#[derive(Debug, Clone, Copy)]
+pub enum SwitchStrategy {
+    Chained,
+    JumpTable,
+    LinearSearch,
+}
+
+/// Slot assignments for one `switch` statement.
+///
+/// `case_slots` is parallel to the AST's `cases` vector, so the
+/// codegen can iterate `cases.iter().zip(case_slots)` to find each
+/// arm's body label. The `end_slot` is what `break;` targets.
+#[derive(Debug, Clone)]
+pub struct SwitchPlan {
+    pub strategy: SwitchStrategy,
+    pub case_slots: Vec<u32>,
+    pub end_slot: u32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -42,11 +81,19 @@ pub struct LoopPlan {
 impl LabelPlan {
     #[must_use]
     pub fn build(function: &Function) -> Self {
-        let mut counter = 0u32;
-        let mut bases = HashMap::new();
-        let mut loops = HashMap::new();
-        plan_stmts(&function.body, &mut counter, &mut bases, &mut loops);
-        Self { bases, loops, exit_slot: counter }
+        let mut ctx = PlanCtx {
+            counter: 0,
+            bases: HashMap::new(),
+            loops: HashMap::new(),
+            switches: HashMap::new(),
+        };
+        plan_stmts(&function.body, &mut ctx);
+        Self {
+            bases: ctx.bases,
+            loops: ctx.loops,
+            switches: ctx.switches,
+            exit_slot: ctx.counter,
+        }
     }
 
     /// Numeric label corresponding to a slot index.
@@ -77,48 +124,56 @@ impl LabelPlan {
             panic!("no loop plan entry for span starting at byte {span_start}")
         })
     }
-}
 
-fn plan_stmts(
-    stmts: &[Stmt],
-    counter: &mut u32,
-    bases: &mut HashMap<u32, u32>,
-    loops: &mut HashMap<u32, LoopPlan>,
-) {
-    for stmt in stmts {
-        plan_stmt(stmt, counter, bases, loops);
+    /// Slot assignments for a `switch` statement.
+    #[must_use]
+    pub fn switch_plan(&self, span_start: u32) -> &SwitchPlan {
+        self.switches.get(&span_start).unwrap_or_else(|| {
+            panic!("no switch plan entry for span starting at byte {span_start}")
+        })
     }
 }
 
-fn plan_stmt(
-    stmt: &Stmt,
-    counter: &mut u32,
-    bases: &mut HashMap<u32, u32>,
-    loops: &mut HashMap<u32, LoopPlan>,
-) {
+/// Per-function planner state, threaded through `plan_stmts` /
+/// `plan_stmt`. Folding the four pieces into one struct keeps the
+/// recursive call sites short.
+struct PlanCtx {
+    counter: u32,
+    bases: HashMap<u32, u32>,
+    loops: HashMap<u32, LoopPlan>,
+    switches: HashMap<u32, SwitchPlan>,
+}
+
+fn plan_stmts(stmts: &[Stmt], ctx: &mut PlanCtx) {
+    for stmt in stmts {
+        plan_stmt(stmt, ctx);
+    }
+}
+
+fn plan_stmt(stmt: &Stmt, ctx: &mut PlanCtx) {
     match &stmt.kind {
         StmtKind::Return(value) => {
             if let Some(e) = value {
-                plan_expr_value(e, counter, bases);
+                plan_expr_value(e, ctx);
             }
         }
         StmtKind::Declare { init, .. } => {
             if let Some(e) = init {
-                plan_expr_value(e, counter, bases);
+                plan_expr_value(e, ctx);
             }
         }
         StmtKind::If { cond, then_branch, else_branch } => {
-            plan_expr_condition(cond, counter, bases);
-            let base = *counter;
-            bases.insert(stmt.span.start, base);
-            *counter += if else_branch.is_some() { 3 } else { 2 };
-            plan_stmts(then_branch, counter, bases, loops);
+            plan_expr_condition(cond, ctx);
+            let base = ctx.counter;
+            ctx.bases.insert(stmt.span.start, base);
+            ctx.counter += if else_branch.is_some() { 3 } else { 2 };
+            plan_stmts(then_branch, ctx);
             if let Some(else_branch) = else_branch {
-                plan_stmts(else_branch, counter, bases, loops);
+                plan_stmts(else_branch, ctx);
             }
         }
         StmtKind::Assign { value, .. } | StmtKind::CompoundAssign { value, .. } => {
-            plan_expr_value(value, counter, bases);
+            plan_expr_value(value, ctx);
         }
         StmtKind::While { cond, body } => {
             // While layout: body slot, then body planning, then check
@@ -128,15 +183,15 @@ fn plan_stmt(
             // lands inside what would have been while's "+2 unused"
             // slot, requiring while's check/break-target to come
             // *after* the body's reservations).
-            let body_slot = *counter;
-            *counter += 1;
-            plan_expr_condition(cond, counter, bases);
-            plan_stmts(body, counter, bases, loops);
-            let check_slot = *counter;
-            *counter += 1;
-            let break_target_slot = *counter;
-            *counter += 1;
-            loops.insert(
+            let body_slot = ctx.counter;
+            ctx.counter += 1;
+            plan_expr_condition(cond, ctx);
+            plan_stmts(body, ctx);
+            let check_slot = ctx.counter;
+            ctx.counter += 1;
+            let break_target_slot = ctx.counter;
+            ctx.counter += 1;
+            ctx.loops.insert(
                 stmt.span.start,
                 LoopPlan {
                     body_slot,
@@ -149,15 +204,15 @@ fn plan_stmt(
         StmtKind::DoWhile { body, cond } => {
             // Do-while: same shape as while, just no trampoline jmp at
             // the top. Same slot reservation.
-            let body_slot = *counter;
-            *counter += 1;
-            plan_stmts(body, counter, bases, loops);
-            plan_expr_condition(cond, counter, bases);
-            let check_slot = *counter;
-            *counter += 1;
-            let break_target_slot = *counter;
-            *counter += 1;
-            loops.insert(
+            let body_slot = ctx.counter;
+            ctx.counter += 1;
+            plan_stmts(body, ctx);
+            plan_expr_condition(cond, ctx);
+            let check_slot = ctx.counter;
+            ctx.counter += 1;
+            let break_target_slot = ctx.counter;
+            ctx.counter += 1;
+            ctx.loops.insert(
                 stmt.span.start,
                 LoopPlan {
                     body_slot,
@@ -173,38 +228,38 @@ fn plan_stmt(
             // an extra "continue-target / step" slot before check +
             // break-target. Fixture 061 reserves 4 slots for a body
             // with 0 nested labels; 065 reserves 5 (3 + 2 nested).
-            let body_slot = *counter;
-            *counter += 1;
+            let body_slot = ctx.counter;
+            ctx.counter += 1;
             if let Some(e) = init {
-                plan_expr_value(e, counter, bases);
+                plan_expr_value(e, ctx);
             }
             if let Some(e) = cond {
-                plan_expr_condition(e, counter, bases);
+                plan_expr_condition(e, ctx);
             }
             if let Some(e) = step {
-                plan_expr_value(e, counter, bases);
+                plan_expr_value(e, ctx);
             }
-            let before_body = *counter;
-            plan_stmts(body, counter, bases, loops);
+            let before_body = ctx.counter;
+            plan_stmts(body, ctx);
             let continue_target_slot;
-            if *counter == before_body {
+            if ctx.counter == before_body {
                 // No nested labels in body — reserve a filler slot
                 // that doubles as the `continue;` landing if any.
-                continue_target_slot = *counter;
-                *counter += 1;
+                continue_target_slot = ctx.counter;
+                ctx.counter += 1;
             } else {
                 // Body's reservations consumed the slot that would
                 // have been the continue-target. We don't yet have
                 // a fixture for `continue` in a `for` with nested
                 // body labels; defaulting to check_slot is safe-ish
                 // but codegen will panic if it actually fires.
-                continue_target_slot = *counter;
+                continue_target_slot = ctx.counter;
             }
-            let check_slot = *counter;
-            *counter += 1;
-            let break_target_slot = *counter;
-            *counter += 1;
-            loops.insert(
+            let check_slot = ctx.counter;
+            ctx.counter += 1;
+            let break_target_slot = ctx.counter;
+            ctx.counter += 1;
+            ctx.loops.insert(
                 stmt.span.start,
                 LoopPlan {
                     body_slot,
@@ -214,42 +269,112 @@ fn plan_stmt(
                 },
             );
         }
+        StmtKind::Switch { scrutinee, cases } => {
+            plan_switch(stmt.span.start, scrutinee, cases, ctx);
+        }
         StmtKind::Break | StmtKind::Continue => {
             // No slot reservations.
         }
-        StmtKind::ExprStmt(e) => plan_expr_value(e, counter, bases),
+        StmtKind::ExprStmt(e) => plan_expr_value(e, ctx),
+    }
+}
+
+/// Reserve slots for a `switch`. Selects the dispatch strategy,
+/// burns the pre-dispatch slots (BCC's slot counter advances past
+/// labels the dispatch code could have but didn't end up needing),
+/// then walks each case body in source order — each gets one body
+/// slot, then its nested labels reserve normally. Finally the
+/// end-of-switch slot (the `break;` target).
+///
+/// Pre-slot counts (from fixtures 072–076):
+/// - chained: `non_default_count + 2`
+/// - jump-table: 3 (fixed)
+/// - linear-search: `non_default_count + 2`
+fn plan_switch(span_start: u32, scrutinee: &Expr, cases: &[SwitchCase], ctx: &mut PlanCtx) {
+    plan_expr_value(scrutinee, ctx);
+    let strategy = pick_switch_strategy(cases);
+    let non_default_count: u32 = cases
+        .iter()
+        .filter(|c| c.value.is_some())
+        .count()
+        .try_into()
+        .expect("case count fits in u32");
+    let pre_slots = match strategy {
+        SwitchStrategy::Chained | SwitchStrategy::LinearSearch => non_default_count + 2,
+        SwitchStrategy::JumpTable => 3,
+    };
+    ctx.counter += pre_slots;
+    let mut case_slots = Vec::with_capacity(cases.len());
+    for case in cases {
+        let body_slot = ctx.counter;
+        ctx.counter += 1;
+        case_slots.push(body_slot);
+        plan_stmts(&case.body, ctx);
+    }
+    let end_slot = ctx.counter;
+    ctx.counter += 1;
+    ctx.switches.insert(
+        span_start,
+        SwitchPlan { strategy, case_slots, end_slot },
+    );
+}
+
+/// Pick a dispatch strategy for a switch given its case list. Rules
+/// (heuristics, will be refined as more fixtures land):
+///
+/// - 0..N contiguous from 0 with N ≥ 4 → **JumpTable**
+///   (fixtures 073 with 8, 076 with 4)
+/// - Otherwise with ≥ 4 cases → **LinearSearch** (fixture 074)
+/// - Otherwise → **Chained** (fixtures 072 with 3, 075 with 2 + default)
+///
+/// Exposed beyond the planner so the locals analyzer can decide
+/// whether to reserve a stack-slot for the scrutinee-spill that
+/// linear-search needs.
+#[must_use]
+pub fn pick_switch_strategy(cases: &[SwitchCase]) -> SwitchStrategy {
+    let values: Vec<u32> = cases.iter().filter_map(|c| c.value).collect();
+    let dense_from_zero = values
+        .iter()
+        .enumerate()
+        .all(|(i, &v)| u32::try_from(i).is_ok_and(|j| v == j));
+    if dense_from_zero && values.len() >= 4 {
+        SwitchStrategy::JumpTable
+    } else if values.len() >= 4 {
+        SwitchStrategy::LinearSearch
+    } else {
+        SwitchStrategy::Chained
     }
 }
 
 /// Walk an expression in value position. Each comparison reserves 3 slots
 /// (its base goes into the map keyed by `expr.span.start`).
-fn plan_expr_value(e: &Expr, counter: &mut u32, bases: &mut HashMap<u32, u32>) {
+fn plan_expr_value(e: &Expr, ctx: &mut PlanCtx) {
     match &e.kind {
         ExprKind::BinOp { op, left, right } => {
-            plan_expr_value(left, counter, bases);
-            plan_expr_value(right, counter, bases);
+            plan_expr_value(left, ctx);
+            plan_expr_value(right, ctx);
             if op.is_comparison() {
-                let base = *counter;
-                bases.insert(e.span.start, base);
-                *counter += 3;
+                let base = ctx.counter;
+                ctx.bases.insert(e.span.start, base);
+                ctx.counter += 3;
             }
         }
         ExprKind::Unary { operand, .. } => {
-            plan_expr_value(operand, counter, bases);
+            plan_expr_value(operand, ctx);
         }
         ExprKind::Logical { left, right, .. } => {
-            let base = *counter;
-            bases.insert(e.span.start, base);
-            *counter += 4;
-            plan_expr_condition(left, counter, bases);
-            plan_expr_condition(right, counter, bases);
+            let base = ctx.counter;
+            ctx.bases.insert(e.span.start, base);
+            ctx.counter += 4;
+            plan_expr_condition(left, ctx);
+            plan_expr_condition(right, ctx);
         }
         ExprKind::AssignExpr { value, .. } => {
-            plan_expr_value(value, counter, bases);
+            plan_expr_value(value, ctx);
         }
         ExprKind::Call { args, .. } => {
             for a in args {
-                plan_expr_value(a, counter, bases);
+                plan_expr_value(a, ctx);
             }
         }
         ExprKind::IntLit(_) | ExprKind::Ident(_) | ExprKind::Update { .. } => {}
@@ -257,19 +382,19 @@ fn plan_expr_value(e: &Expr, counter: &mut u32, bases: &mut HashMap<u32, u32>) {
 }
 
 /// Walk an expression in condition position.
-fn plan_expr_condition(e: &Expr, counter: &mut u32, bases: &mut HashMap<u32, u32>) {
+fn plan_expr_condition(e: &Expr, ctx: &mut PlanCtx) {
     match &e.kind {
         ExprKind::BinOp { op, left, right } if op.is_comparison() => {
-            plan_expr_value(left, counter, bases);
-            plan_expr_value(right, counter, bases);
+            plan_expr_value(left, ctx);
+            plan_expr_value(right, ctx);
         }
         ExprKind::Logical { left, right, .. } => {
-            let base = *counter;
-            bases.insert(e.span.start, base);
-            *counter += 1;
-            plan_expr_condition(left, counter, bases);
-            plan_expr_condition(right, counter, bases);
+            let base = ctx.counter;
+            ctx.bases.insert(e.span.start, base);
+            ctx.counter += 1;
+            plan_expr_condition(left, ctx);
+            plan_expr_condition(right, ctx);
         }
-        _ => plan_expr_value(e, counter, bases),
+        _ => plan_expr_value(e, ctx),
     }
 }

@@ -1,0 +1,4 @@
+description = "Many dense cases (8 consecutive values). At this size BCC likely switches to a jump table — pins the threshold and the table layout."
+tool = "bcc"
+args = ["-S", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

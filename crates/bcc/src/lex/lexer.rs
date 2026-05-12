@@ -54,6 +54,7 @@ impl<'a> Lexer<'a> {
                 b'{' => { self.pos += 1; TokenKind::LBrace }
                 b'}' => { self.pos += 1; TokenKind::RBrace }
                 b';' => { self.pos += 1; TokenKind::Semicolon }
+                b':' => { self.pos += 1; TokenKind::Colon }
                 b',' => { self.pos += 1; TokenKind::Comma }
                 b'=' => self.lex_after_eq(),
                 b'!' => self.lex_after_bang(),
@@ -117,6 +118,9 @@ impl<'a> Lexer<'a> {
             b"do" => TokenKind::KwDo,
             b"break" => TokenKind::KwBreak,
             b"continue" => TokenKind::KwContinue,
+            b"switch" => TokenKind::KwSwitch,
+            b"case" => TokenKind::KwCase,
+            b"default" => TokenKind::KwDefault,
             other => TokenKind::Ident(String::from_utf8_lossy(other).into_owned()),
         }
     }
