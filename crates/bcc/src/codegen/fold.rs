@@ -32,7 +32,8 @@ pub fn try_const_eval(e: &Expr) -> Option<u32> {
         | ExprKind::AddressOf(_)
         | ExprKind::Deref(_)
         | ExprKind::ArrayIndex { .. }
-        | ExprKind::StringLit(_) => None,
+        | ExprKind::StringLit(_)
+        | ExprKind::Member { .. } => None,
         ExprKind::Unary { op, operand } => {
             let v = try_const_eval(operand)?;
             Some(match op {

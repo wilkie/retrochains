@@ -105,6 +105,16 @@ pub enum StmtKind {
     /// — usually an `Ident` for a pointer local, but in principle
     /// anything that evaluates to a pointer.
     DerefAssign { target: Expr, value: Expr },
+    /// `<base>.<field> = <value>;` or `<base>-><field> = <value>;`.
+    /// The `kind` distinguishes the two source forms — codegen uses
+    /// it to decide whether the base is a struct directly (for `.`)
+    /// or a pointer to a struct (for `->`).
+    MemberAssign {
+        base: Expr,
+        field: String,
+        kind: MemberKind,
+        value: Expr,
+    },
     /// `<name> <op>= <value>;` (compound assignment). The codegen
     /// is distinct from `Assign { name, value: name <op> value }` —
     /// BCC emits a tighter form using `<op> <dst>, <src>` directly
@@ -168,6 +178,28 @@ pub enum Type {
     /// enregister at a *lower* use threshold than ints (≥ 2 vs. ≥ 3),
     /// pinned by fixtures 080 and 081.
     Pointer(Box<Type>),
+    /// `struct <tag>? { <fields> }` — fields packed tightly with no
+    /// inter-field padding (so a `char` at offset 0 followed by an
+    /// `int` lands the int at offset 1, fixture 102). The total
+    /// size rounds up to a 2-byte multiple, which the parser bakes
+    /// into the recorded size at construction time. Anonymous
+    /// structs have `name: None`. Fixture 104's typedef of an
+    /// anonymous struct round-trips through this representation.
+    Struct {
+        name: Option<String>,
+        fields: Vec<StructField>,
+        /// Pre-computed total byte size including end-padding. Cached
+        /// here so `size_bytes()` doesn't have to re-walk the fields.
+        size: u16,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StructField {
+    pub name: String,
+    pub ty: Type,
+    /// Byte offset of this field within the containing struct.
+    pub offset: u16,
 }
 
 impl Type {
@@ -183,6 +215,7 @@ impl Type {
                 elem * u16::try_from(*len).expect("array byte size fits in u16")
             }
             Self::Pointer(_) => 2,
+            Self::Struct { size, .. } => *size,
         }
     }
 
@@ -197,7 +230,24 @@ impl Type {
             Self::Char => 1,
             Self::Array { elem, .. } => elem.alignment(),
             Self::Pointer(_) => 2,
+            // Struct alignment: 2 (word). The size rounding to even
+            // is part of the per-struct size computation, so this is
+            // mostly a placement-alignment hint when a struct is
+            // followed by another local.
+            Self::Struct { .. } => 2,
         }
+    }
+
+    /// Look up a field by name. Returns the field's offset and type
+    /// (cloned), or `None` if this isn't a struct or the field name
+    /// isn't present.
+    #[must_use]
+    pub fn field(&self, name: &str) -> Option<(u16, Type)> {
+        let Self::Struct { fields, .. } = self else { return None };
+        fields
+            .iter()
+            .find(|f| f.name == name)
+            .map(|f| (f.offset, f.ty.clone()))
     }
 
     /// Whether this type can sit in an int-pool register (SI/DI/DX/BX/CX).
@@ -276,6 +326,23 @@ pub enum ExprKind {
     /// contents (escapes resolved); codegen appends a trailing NUL
     /// when materializing the literal into the `s@` block.
     StringLit(Vec<u8>),
+    /// `<base>.<field>` or `<base>-><field>` in rvalue position.
+    /// `kind` distinguishes the syntactic form: `Dot` means base is
+    /// a struct directly (compute &struct + offset), `Arrow` means
+    /// base is a pointer-to-struct (load through pointer + offset).
+    Member {
+        base: Box<Expr>,
+        field: String,
+        kind: MemberKind,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemberKind {
+    /// `a.x` — base is a struct value (typically a stack local).
+    Dot,
+    /// `p->x` — base is a pointer to a struct.
+    Arrow,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

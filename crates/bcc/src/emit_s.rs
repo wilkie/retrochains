@@ -342,6 +342,10 @@ fn walk_calls(
             walk_calls_expr(target, defined, seen, ordered);
             walk_calls_expr(value, defined, seen, ordered);
         }
+        StmtKind::MemberAssign { base, value, .. } => {
+            walk_calls_expr(base, defined, seen, ordered);
+            walk_calls_expr(value, defined, seen, ordered);
+        }
         StmtKind::If { cond, then_branch, else_branch } => {
             walk_calls_expr(cond, defined, seen, ordered);
             for s in then_branch {
@@ -420,6 +424,7 @@ fn walk_calls_expr(
             walk_calls_expr(array, defined, seen, ordered);
             walk_calls_expr(index, defined, seen, ordered);
         }
+        ExprKind::Member { base, .. } => walk_calls_expr(base, defined, seen, ordered),
         ExprKind::Ident(_)
         | ExprKind::IntLit(_)
         | ExprKind::StringLit(_)

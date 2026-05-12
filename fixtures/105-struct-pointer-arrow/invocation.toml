@@ -1,0 +1,4 @@
+description = "Pointer to struct, accessed via `->`. Pins the `->` codegen (probably `mov ax, word ptr [reg]` for a zero-offset field, or `[reg+K]` for non-zero) and `&a` of a struct local."
+tool = "bcc"
+args = ["-S", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

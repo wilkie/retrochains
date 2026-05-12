@@ -183,6 +183,10 @@ fn plan_stmt(stmt: &Stmt, ctx: &mut PlanCtx) {
             plan_expr_value(target, ctx);
             plan_expr_value(value, ctx);
         }
+        StmtKind::MemberAssign { base, value, .. } => {
+            plan_expr_value(base, ctx);
+            plan_expr_value(value, ctx);
+        }
         StmtKind::While { cond, body } => {
             // While layout: body slot, then body planning, then check
             // and break-target. Matches fixtures 027, 063, 066. The
@@ -390,6 +394,7 @@ fn plan_expr_value(e: &Expr, ctx: &mut PlanCtx) {
             plan_expr_value(array, ctx);
             plan_expr_value(index, ctx);
         }
+        ExprKind::Member { base, .. } => plan_expr_value(base, ctx),
         ExprKind::IntLit(_)
         | ExprKind::Ident(_)
         | ExprKind::Update { .. }

@@ -1,0 +1,4 @@
+description = "Two-field struct, both fields written and read. Pins how BCC orders the fields in memory (lowest-address first) and the offsets emitted in code."
+tool = "bcc"
+args = ["-S", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

@@ -521,6 +521,16 @@ BCC uses `jl/jg/jle/jge` not the unsigned variants `jb/ja/jbe/jae`,
 even when both operands are non-negative. Reflects the signed default
 for C `int`. _Fixtures_: 019–024.
 
+### Packed structs with no inter-field padding (STRONG)
+
+BCC packs struct fields tightly: `{char c; int n;}` puts `c` at
+offset 0 and `n` at offset **1** (not 2 as most C compilers
+would for alignment). The int is therefore misaligned on the
+8086, but the chip handles it transparently. The total struct
+size rounds up to an even multiple of 2. Many later DOS
+compilers (MSC 5.x+, Watcom) pad to align — this is a distinctive
+BCC choice. _Fixture_: 102.
+
 ### `extrn _<name>:near` between `_TEXT ends` and publics (STRONG)
 
 Calls to functions not defined in this TU produce one

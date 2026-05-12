@@ -1,0 +1,4 @@
+description = "Function taking a `struct s *` parameter, called with `&a` from main. Pins struct-pointer parameters and the &local-struct + push idiom at the call site."
+tool = "bcc"
+args = ["-S", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

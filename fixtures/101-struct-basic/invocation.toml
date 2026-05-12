@@ -1,0 +1,4 @@
+description = "Simplest struct: one int field, written and read via `.`. Pins the field-offset codegen path and the stack-allocation size of a single-field struct."
+tool = "bcc"
+args = ["-S", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

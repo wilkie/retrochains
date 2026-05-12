@@ -1307,6 +1307,86 @@ access. The threshold drop preempts that overhead.
 The deref width is `word ptr` for `int *`, `byte ptr` for `char *`
 (no fixture for the latter yet — inferred from the symmetry).
 
+## Structs and typedef (`101`–`106`)
+
+### Layout: packed fields, even total size
+
+BCC packs struct fields tightly with **no inter-field padding**:
+`{char c; int n;}` lands `c` at offset 0 and `n` at offset 1 — the
+int is misaligned. The **total size** rounds up to an even
+number of bytes (a 3-byte struct gets 1 byte of trailing pad to
+become 4). Fixture 102 demonstrates: `sub sp, 4` with `c` at
+`[bp-4]` and `n` at `[bp-3]`.
+
+| Struct                  | Field offsets | Total size |
+|-------------------------|---------------|------------|
+| `{int x;}`              | 0             | 2          |
+| `{char c; int n;}`      | 0, 1          | 4 (3 + pad)|
+| `{int x; int y;}`       | 0, 2          | 4          |
+
+The struct itself has alignment 2 (so a struct followed by an int
+local stays word-aligned), but the *contents* don't pad to fit
+that alignment internally.
+
+### `.` access on a struct local (`101`–`103`)
+
+`a.x` lowers to a plain stack-local reference at the bp-offset of
+the field. For `struct point p` at `[bp-4]` with fields `x` at
+offset 0 and `y` at offset 2:
+
+```
+mov	word ptr [bp-4],10    ; p.x = 10
+mov	word ptr [bp-2],20    ; p.y = 20
+mov	ax,word ptr [bp-4]    ; load p.x
+add	ax,word ptr [bp-2]    ; add p.y
+```
+
+So `a.x` is structurally indistinguishable from a regular int
+local at the computed `bp - struct_base + field_off` offset.
+The width (`word ptr` / `byte ptr`) tracks the field type.
+
+### `->` access through a struct pointer (`105`, `106`)
+
+For `p->x` where `p` is a pointer-to-struct, BCC emits
+`[<reg> + field_off]`:
+
+```
+mov	word ptr [si],7       ; p->x = 7   (offset 0 → just [si])
+mov	ax,word ptr [si]      ; ax = p->x
+```
+
+For a non-zero offset (no fixture yet, inferred):
+`mov ax, word ptr [si+2]`. Identical shape to `*(p + K)` on a
+non-struct pointer (fixture 091), which is reassuring — `->` is
+in fact `(*p).<field>` semantically.
+
+`&struct_var` (taking the address of a struct local) emits the
+same `lea ax, word ptr [bp-N]` that any other `&local` produces.
+
+### typedef is a pure parse-time alias (`104`)
+
+`typedef struct { int x; } P;` followed by `P a; a.x = 7;` emits
+asm **byte-identical** to the equivalent `struct s { int x; }`
+form. The typedef just records the underlying type in a parser-
+side alias table; no AST node escapes for it.
+
+### Struct pointer as parameter (`106`)
+
+A `struct s *p` parameter behaves exactly like an `int *p`
+parameter: 2-byte slot at `[bp+4]`, enregisters with the same
+direct-deref bonus rule (so `p->x` in the body counts as 2 uses
+and easily clears the threshold).
+
+```
+_get	proc	near
+	push	bp
+	mov	bp,sp
+	push	si
+	mov	si,word ptr [bp+4]     ; receive `p` into SI
+	mov	ax,word ptr [si]       ; return p->x
+	…
+```
+
 ## External function calls and hello-world (`096`–`100`)
 
 ### Implicit and explicit extern functions

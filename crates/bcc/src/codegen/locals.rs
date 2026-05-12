@@ -448,6 +448,10 @@ fn collect_address_taken(stmt: &Stmt, out: &mut HashSet<String>) {
             expr_address_taken(target, out);
             expr_address_taken(value, out);
         }
+        StmtKind::MemberAssign { base, value, .. } => {
+            expr_address_taken(base, out);
+            expr_address_taken(value, out);
+        }
         StmtKind::If { cond, then_branch, else_branch } => {
             expr_address_taken(cond, out);
             for s in then_branch {
@@ -520,6 +524,7 @@ fn expr_address_taken(e: &Expr, out: &mut HashSet<String>) {
                 expr_address_taken(a, out);
             }
         }
+        ExprKind::Member { base, .. } => expr_address_taken(base, out),
         ExprKind::IntLit(_)
         | ExprKind::Ident(_)
         | ExprKind::Update { .. }
@@ -590,6 +595,9 @@ fn stmt_has_call(stmt: &Stmt) -> bool {
         StmtKind::DerefAssign { target, value } => {
             expr_has_call(target) || expr_has_call(value)
         }
+        StmtKind::MemberAssign { base, value, .. } => {
+            expr_has_call(base) || expr_has_call(value)
+        }
         StmtKind::ExprStmt(e) => expr_has_call(e),
     }
 }
@@ -606,6 +614,7 @@ fn expr_has_call(e: &Expr) -> bool {
         ExprKind::ArrayIndex { array, index } => {
             expr_has_call(array) || expr_has_call(index)
         }
+        ExprKind::Member { base, .. } => expr_has_call(base),
         ExprKind::Update { .. }
         | ExprKind::Ident(_)
         | ExprKind::IntLit(_)
@@ -676,6 +685,7 @@ fn collect_decls(stmt: &Stmt, out: &mut Vec<DeclItem>) {
         | StmtKind::CompoundAssign { .. }
         | StmtKind::ArrayAssign { .. }
         | StmtKind::DerefAssign { .. }
+        | StmtKind::MemberAssign { .. }
         | StmtKind::ExprStmt(_)
         | StmtKind::Break
         | StmtKind::Continue => {}
@@ -775,6 +785,25 @@ fn count_uses_stmt(stmt: &Stmt, counts: &mut HashMap<String, u32>) {
             }
             count_uses_expr(value, counts);
         }
+        StmtKind::MemberAssign { base, value, kind, .. } => {
+            // For `.` (Dot), the base is a struct lvalue — same
+            // counting as any other expression use. For `->` (Arrow),
+            // the base is a pointer that's about to be deref'd, so
+            // it gets the same +2 bonus we give `*p` (fixture 105
+            // expects `p` to enregister with init + p->x as direct
+            // deref + return p->x as another).
+            match kind {
+                crate::ast::MemberKind::Arrow => {
+                    if let ExprKind::Ident(name) = &base.kind {
+                        *counts.entry(name.clone()).or_insert(0) += 2;
+                    } else {
+                        count_uses_expr(base, counts);
+                    }
+                }
+                crate::ast::MemberKind::Dot => count_uses_expr(base, counts),
+            }
+            count_uses_expr(value, counts);
+        }
         StmtKind::ExprStmt(e) => count_uses_expr(e, counts),
     }
 }
@@ -847,6 +876,20 @@ fn count_uses_expr(e: &Expr, counts: &mut HashMap<String, u32>) {
         }
         ExprKind::StringLit(_) => {}
         ExprKind::IntLit(_) => {}
+        ExprKind::Member { base, kind, .. } => {
+            // `p->x` direct-derefs the pointer; `a.x` is just an
+            // access to a struct lvalue.
+            match kind {
+                crate::ast::MemberKind::Arrow => {
+                    if let ExprKind::Ident(name) = &base.kind {
+                        *counts.entry(name.clone()).or_insert(0) += 2;
+                    } else {
+                        count_uses_expr(base, counts);
+                    }
+                }
+                crate::ast::MemberKind::Dot => count_uses_expr(base, counts),
+            }
+        }
     }
 }
 

@@ -4,9 +4,11 @@
 //! once" case (which is all the early fixtures need; nothing in
 //! single-pass forbids building a one-function-at-a-time variant later).
 
+use std::collections::HashMap;
+
 use crate::ast::{
-    BinOp, Expr, ExprKind, Function, Global, LogicalOp, Param, Stmt, StmtKind, SwitchCase,
-    TopLevelRef, Type, UnaryOp, Unit, UpdateOp, UpdatePosition,
+    BinOp, Expr, ExprKind, Function, Global, LogicalOp, MemberKind, Param, Stmt, StmtKind,
+    StructField, SwitchCase, TopLevelRef, Type, UnaryOp, Unit, UpdateOp, UpdatePosition,
 };
 use crate::lex::{Span, Token, TokenKind};
 
@@ -24,12 +26,25 @@ pub enum ParseError {
 pub struct Parser {
     tokens: Vec<Token>,
     pos: usize,
+    /// Tagged struct definitions seen so far. Looking up `struct point`
+    /// as a type returns the recorded `Type::Struct{...}` here.
+    structs: HashMap<String, Type>,
+    /// typedef aliases. Each entry maps a name to its underlying type
+    /// (with structs already resolved). Looking up a name in this
+    /// table as a type returns the aliased type — same byte layout
+    /// as using the original name (fixture 104).
+    typedefs: HashMap<String, Type>,
 }
 
 impl Parser {
     #[must_use]
     pub fn new(tokens: Vec<Token>) -> Self {
-        Self { tokens, pos: 0 }
+        Self {
+            tokens,
+            pos: 0,
+            structs: HashMap::new(),
+            typedefs: HashMap::new(),
+        }
     }
 
     /// Parse a whole translation unit. Top-level items can be either
@@ -45,21 +60,52 @@ impl Parser {
         let mut globals = Vec::new();
         let mut decl_order = Vec::new();
         while !self.at_eof() {
-            // Look past type-keyword + optional `*`s to find the
-            // declarator name, then peek the token after it to decide
-            // between function and global. Limited lookahead — enough
-            // for what we support today.
-            let mut probe = 0usize;
-            // Type keyword.
-            if !matches!(self.peek_n(probe).kind, TokenKind::KwInt | TokenKind::KwChar) {
-                let t = self.peek_n(probe);
-                return Err(ParseError::Unexpected {
-                    expected: "type keyword (`int` or `char`) at top level".to_owned(),
-                    found: t.kind.describe().to_owned(),
-                    offset: t.span.start,
-                });
+            // typedef gets its own dispatch — it produces no AST node,
+            // just registers a name in the typedef table.
+            if matches!(self.peek().kind, TokenKind::KwTypedef) {
+                self.parse_typedef()?;
+                continue;
             }
-            probe += 1;
+            // A standalone `struct <name> { ... } ;` defines a struct
+            // type and adds it to the table without declaring any
+            // variable. (Our fixtures all combine the struct def with
+            // a following declaration, but supporting the bare form
+            // is cheap and matches BCC.)
+            if matches!(self.peek().kind, TokenKind::KwStruct)
+                && self.is_bare_struct_def()
+            {
+                self.parse_bare_struct_decl()?;
+                continue;
+            }
+            // Otherwise this top-level item is either a function or
+            // a global. Probe past the type to find the declarator
+            // name and decide.
+            let mut probe = 0usize;
+            // Skip the type prefix (int/char/struct ...). For
+            // struct types we need to skip the `struct` keyword
+            // plus the tag (and the inline definition braces if
+            // any, but those would have been consumed by the
+            // bare-struct path above).
+            match self.peek_n(probe).kind {
+                TokenKind::KwInt | TokenKind::KwChar => probe += 1,
+                TokenKind::KwStruct => {
+                    probe += 1;
+                    if matches!(self.peek_n(probe).kind, TokenKind::Ident(_)) {
+                        probe += 1;
+                    }
+                }
+                TokenKind::Ident(ref name) if self.typedefs.contains_key(name) => {
+                    probe += 1;
+                }
+                _ => {
+                    let t = self.peek_n(probe);
+                    return Err(ParseError::Unexpected {
+                        expected: "type at top level".to_owned(),
+                        found: t.kind.describe().to_owned(),
+                        offset: t.span.start,
+                    });
+                }
+            }
             // Pointer stars (zero or more).
             while matches!(self.peek_n(probe).kind, TokenKind::Star) {
                 probe += 1;
@@ -89,6 +135,161 @@ impl Parser {
         Ok(Unit { functions, globals, decl_order })
     }
 
+    /// `typedef <type> <name> ;`. Records `name` → type in the
+    /// typedef table; no AST node produced.
+    fn parse_typedef(&mut self) -> Result<(), ParseError> {
+        self.bump(); // `typedef`
+        let ty = self.parse_type()?;
+        let name_tok = self.bump();
+        let TokenKind::Ident(name) = name_tok.kind else {
+            return Err(ParseError::NotAnIdent { offset: name_tok.span.start });
+        };
+        self.expect(&TokenKind::Semicolon)?;
+        self.typedefs.insert(name, ty);
+        Ok(())
+    }
+
+    /// True when the current token is `struct` followed by the
+    /// shape `tag { ... } ;` (a bare definition with no following
+    /// declarator). This is the K&R/early-C90 `struct point { ... };`
+    /// form. With a declarator after the closing `}`, the parser
+    /// falls into the function/global path instead.
+    fn is_bare_struct_def(&self) -> bool {
+        if !matches!(self.peek().kind, TokenKind::KwStruct) {
+            return false;
+        }
+        // struct <ident>? { ... } ;
+        let mut probe = 1usize;
+        if matches!(self.peek_n(probe).kind, TokenKind::Ident(_)) {
+            probe += 1;
+        }
+        if !matches!(self.peek_n(probe).kind, TokenKind::LBrace) {
+            return false;
+        }
+        // Skip to matching `}`. We only need to find the depth-0
+        // close — body content can't have unmatched braces.
+        let mut depth = 0i32;
+        loop {
+            match self.peek_n(probe).kind {
+                TokenKind::LBrace => depth += 1,
+                TokenKind::RBrace => {
+                    depth -= 1;
+                    if depth == 0 {
+                        probe += 1;
+                        break;
+                    }
+                }
+                TokenKind::Eof => return false,
+                _ => {}
+            }
+            probe += 1;
+        }
+        matches!(self.peek_n(probe).kind, TokenKind::Semicolon)
+    }
+
+    /// Parse a bare `struct <tag>? { <fields> } ;`. Registers the
+    /// type under its tag (required for bare definitions — an
+    /// anonymous struct here would be unreferencable) and emits no
+    /// AST node.
+    fn parse_bare_struct_decl(&mut self) -> Result<(), ParseError> {
+        let ty = self.parse_struct_type()?;
+        self.expect(&TokenKind::Semicolon)?;
+        // The tag was already inserted into `self.structs` by
+        // parse_struct_type. Bare-decl semicolon just ends the
+        // statement.
+        let _ = ty;
+        Ok(())
+    }
+
+    /// Parse a type expression. Handles `int`, `char`, `struct
+    /// <tag> { ... }`, `struct <tag>`, and typedef'd names. Pointer
+    /// `*` modifiers are handled by the *caller* — this returns the
+    /// base type only.
+    fn parse_type(&mut self) -> Result<Type, ParseError> {
+        match self.peek().kind {
+            TokenKind::KwInt => {
+                self.bump();
+                Ok(Type::Int)
+            }
+            TokenKind::KwChar => {
+                self.bump();
+                Ok(Type::Char)
+            }
+            TokenKind::KwStruct => self.parse_struct_type(),
+            TokenKind::Ident(ref name) if self.typedefs.contains_key(name) => {
+                let ty = self.typedefs.get(name).expect("just checked").clone();
+                self.bump();
+                Ok(ty)
+            }
+            _ => {
+                let t = self.peek();
+                Err(ParseError::Unexpected {
+                    expected: "a type (`int`, `char`, `struct ...`, or typedef name)".to_owned(),
+                    found: t.kind.describe().to_owned(),
+                    offset: t.span.start,
+                })
+            }
+        }
+    }
+
+    /// `struct <tag>? { <fields> }` (with inline definition) or
+    /// `struct <tag>` (reference to a previously-defined tag). Side
+    /// effect: when an inline definition appears with a tag, the
+    /// resulting type is inserted into `self.structs`.
+    fn parse_struct_type(&mut self) -> Result<Type, ParseError> {
+        self.expect(&TokenKind::KwStruct)?;
+        let tag = if let TokenKind::Ident(name) = &self.peek().kind {
+            let name = name.clone();
+            self.bump();
+            Some(name)
+        } else {
+            None
+        };
+        if !matches!(self.peek().kind, TokenKind::LBrace) {
+            // Bare reference: `struct point` — must already be in
+            // the table.
+            let Some(name) = tag else {
+                let t = self.peek();
+                return Err(ParseError::Unexpected {
+                    expected: "struct tag or `{`".to_owned(),
+                    found: t.kind.describe().to_owned(),
+                    offset: t.span.start,
+                });
+            };
+            return self.structs.get(&name).cloned().ok_or_else(|| {
+                ParseError::Unsupported { offset: self.peek().span.start }
+            });
+        }
+        self.bump(); // `{`
+        let mut fields: Vec<StructField> = Vec::new();
+        let mut offset: u16 = 0;
+        while !matches!(self.peek().kind, TokenKind::RBrace | TokenKind::Eof) {
+            // Each field declaration: <type> <pointer-stars> <name> ;
+            let mut ty = self.parse_type()?;
+            while matches!(self.peek().kind, TokenKind::Star) {
+                self.bump();
+                ty = Type::Pointer(Box::new(ty));
+            }
+            let name_tok = self.bump();
+            let TokenKind::Ident(name) = name_tok.kind else {
+                return Err(ParseError::NotAnIdent { offset: name_tok.span.start });
+            };
+            self.expect(&TokenKind::Semicolon)?;
+            let field_size = ty.size_bytes();
+            fields.push(StructField { name, ty, offset });
+            offset += field_size;
+        }
+        self.expect(&TokenKind::RBrace)?;
+        // Round size up to even (fixture 102: `{char c; int n;}` is
+        // 4 bytes, not 3).
+        let size = if offset % 2 == 1 { offset + 1 } else { offset };
+        let ty = Type::Struct { name: tag.clone(), fields, size };
+        if let Some(name) = tag {
+            self.structs.insert(name, ty.clone());
+        }
+        Ok(ty)
+    }
+
     /// `<type-base> <pointer-stars>* <name> ('[' <int> ']')? [= <expr>] ;`
     /// at the top level. Same declarator shape as a local declaration
     /// (`parse_declare`); the difference is the resulting AST node
@@ -96,12 +297,7 @@ impl Parser {
     /// enclosing function context.
     fn parse_global(&mut self) -> Result<Global, ParseError> {
         let start = self.peek().span.start;
-        let ty_tok = self.bump();
-        let mut ty = match ty_tok.kind {
-            TokenKind::KwInt => Type::Int,
-            TokenKind::KwChar => Type::Char,
-            _ => unreachable!("caller verified int/char at top of probe"),
-        };
+        let mut ty = self.parse_type()?;
         while matches!(self.peek().kind, TokenKind::Star) {
             self.bump();
             ty = Type::Pointer(Box::new(ty));
@@ -189,16 +385,7 @@ impl Parser {
         }
         let mut params = Vec::new();
         loop {
-            let ty_tok = self.bump();
-            let mut ty = match ty_tok.kind {
-                TokenKind::KwInt => Type::Int,
-                TokenKind::KwChar => Type::Char,
-                _ => return Err(ParseError::Unexpected {
-                    expected: "parameter type".to_owned(),
-                    found: ty_tok.kind.describe().to_owned(),
-                    offset: ty_tok.span.start,
-                }),
-            };
+            let mut ty = self.parse_type()?;
             // Pointer stars wrap the base type, just like in a local
             // declaration (fixture 095: `int sum(int *p)`).
             while matches!(self.peek().kind, TokenKind::Star) {
@@ -235,7 +422,12 @@ impl Parser {
                     span: Span::new(start, semi.span.end),
                 })
             }
-            TokenKind::KwInt | TokenKind::KwChar => self.parse_declare(start),
+            TokenKind::KwInt | TokenKind::KwChar | TokenKind::KwStruct => {
+                self.parse_declare(start)
+            }
+            TokenKind::Ident(ref name) if self.typedefs.contains_key(name) => {
+                self.parse_declare(start)
+            }
             TokenKind::KwIf => self.parse_if(),
             TokenKind::KwWhile => self.parse_while(),
             TokenKind::KwDo => self.parse_do_while(),
@@ -331,6 +523,12 @@ impl Parser {
                     value,
                 }
             }
+            ExprKind::Member { base, field, kind: mk } => StmtKind::MemberAssign {
+                base: *base,
+                field,
+                kind: mk,
+                value,
+            },
             ExprKind::Ident(name) => StmtKind::Assign { name, value },
             _ => {
                 return Err(ParseError::Unsupported { offset: expr.span.start });
@@ -350,12 +548,7 @@ impl Parser {
     ///   widely supported in codegen; we'll parse and let the next
     ///   layer reject.
     fn parse_declare(&mut self, start: u32) -> Result<Stmt, ParseError> {
-        let ty_tok = self.bump();
-        let mut ty = match ty_tok.kind {
-            TokenKind::KwInt => Type::Int,
-            TokenKind::KwChar => Type::Char,
-            _ => unreachable!("caller peeked an int/char keyword"),
-        };
+        let mut ty = self.parse_type()?;
         // Pointer stars wrap the base type: `int **pp` is `Pointer(Pointer(Int))`.
         while matches!(self.peek().kind, TokenKind::Star) {
             self.bump();
@@ -770,6 +963,31 @@ impl Parser {
     }
 
     fn parse_atom(&mut self) -> Result<Expr, ParseError> {
+        let mut e = self.parse_primary()?;
+        // Postfix `.field` and `->field` can chain (`a.b.c`,
+        // `p->next->x`). Each step extends the parsed expression
+        // by wrapping it in a Member node.
+        loop {
+            let kind = match self.peek().kind {
+                TokenKind::Dot => MemberKind::Dot,
+                TokenKind::Arrow => MemberKind::Arrow,
+                _ => break,
+            };
+            self.bump();
+            let field_tok = self.bump();
+            let TokenKind::Ident(field) = field_tok.kind else {
+                return Err(ParseError::NotAnIdent { offset: field_tok.span.start });
+            };
+            let span = Span::new(e.span.start, field_tok.span.end);
+            e = Expr {
+                kind: ExprKind::Member { base: Box::new(e), field, kind },
+                span,
+            };
+        }
+        Ok(e)
+    }
+
+    fn parse_primary(&mut self) -> Result<Expr, ParseError> {
         let tok = self.bump();
         match tok.kind {
             TokenKind::LParen => {

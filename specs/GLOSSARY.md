@@ -190,6 +190,35 @@ function call, in the file tail between `_TEXT ends` and the
 `public` list. The linker resolves the references when combining
 this `.OBJ` with others.
 
+### Struct field layout
+How a `struct` lays its fields out in memory. BCC packs tightly
+with no padding between fields (an `int` after a `char` is
+misaligned at offset 1 — the 8086 handles unaligned word access
+fine). The total struct size rounds up to an even byte count
+(for word-alignment when used in arrays or sequenced with other
+locals). This packing rule is distinctive — most later DOS C
+compilers pad fields to alignment.
+
+### Member access
+`a.x` (dot) or `p->x` (arrow). The two source forms differ only
+in whether the base is a struct value (dot) or a pointer to a
+struct (arrow). Codegen-wise:
+- `.` → `[bp - <struct-offset> + <field-offset>]` (stack local
+  with field offset folded in)
+- `->` → `[<reg> + <field-offset>]` (register-indirect with
+  field offset)
+
+`p->x` is exactly `(*p).x` semantically, and BCC's asm matches
+`*(p + offset)` for the equivalent C source.
+
+### typedef
+A C name-alias for an existing type: `typedef struct { int x; }
+P;` makes `P` a synonym for that struct type. BCC handles
+typedefs as a pure parser-side alias table — they produce no
+asm output of their own, and code using the typedef'd name
+compiles byte-identically to code using the original type
+(fixture 104 vs 101).
+
 ### Prototype
 A function declaration without a body — `int puts(char *s);`.
 Tells the compiler the parameter and return types so it can

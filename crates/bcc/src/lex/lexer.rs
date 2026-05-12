@@ -62,6 +62,7 @@ impl<'a> Lexer<'a> {
                 b';' => { self.pos += 1; TokenKind::Semicolon }
                 b':' => { self.pos += 1; TokenKind::Colon }
                 b',' => { self.pos += 1; TokenKind::Comma }
+                b'.' => { self.pos += 1; TokenKind::Dot }
                 b'=' => self.lex_after_eq(),
                 b'!' => self.lex_after_bang(),
                 b'+' => self.lex_after_plus(),
@@ -128,6 +129,8 @@ impl<'a> Lexer<'a> {
             b"switch" => TokenKind::KwSwitch,
             b"case" => TokenKind::KwCase,
             b"default" => TokenKind::KwDefault,
+            b"struct" => TokenKind::KwStruct,
+            b"typedef" => TokenKind::KwTypedef,
             other => TokenKind::Ident(String::from_utf8_lossy(other).into_owned()),
         }
     }
@@ -155,12 +158,13 @@ impl<'a> Lexer<'a> {
     }
 
     /// Disambiguate `-`: `--` is decrement, `-=` is sub-assign,
-    /// bare `-` is subtraction.
+    /// `->` is member-via-pointer, bare `-` is subtraction.
     fn lex_after_minus(&mut self) -> TokenKind {
         self.pos += 1;
         match self.src.get(self.pos) {
             Some(&b'-') => { self.pos += 1; TokenKind::MinusMinus }
             Some(&b'=') => { self.pos += 1; TokenKind::MinusEq }
+            Some(&b'>') => { self.pos += 1; TokenKind::Arrow }
             _ => TokenKind::Minus,
         }
     }

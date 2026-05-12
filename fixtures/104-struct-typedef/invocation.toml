@@ -1,0 +1,4 @@
+description = "typedef of an anonymous struct, then a local of that typedef'd type. Pins typedef resolution at the parser level — the asm should be identical to using `struct ... { ... }` directly."
+tool = "bcc"
+args = ["-S", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]
