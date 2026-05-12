@@ -13,10 +13,13 @@ When a definition refers to another glossary entry, that entry is
 
 ### Oracle
 The original DOS-era toolchain we're reverse-engineering — `BCC.EXE`,
-`TASM.EXE`, `TLINK.EXE` running under DOSBox via the `@rawrs/borland-c-2`
-npm package, wrapped by `crates/oracle/`. The oracle is the ground
-truth: whatever it produces is by definition correct, and our **Rust
-reimplementation** is graded against its bytes.
+`TASM.EXE`, `TLINK.EXE` shipped in `BC2.zip` at the repo root, lazily
+unpacked into `.bc2/` and run under DOSBox by `crates/oracle/`. The
+DOSBox spawn is wrapped in `faketime` and input-file mtimes are
+pinned, for byte-exact determinism. The oracle is the ground truth:
+whatever it produces is by definition correct, and our Rust
+reimplementation is graded against its bytes. See
+`specs/RUNNING_BCC.md` for the invocation mechanics.
 
 ### Fixture
 A directory under `fixtures/<NNN>-<name>/` holding a small input

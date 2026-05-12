@@ -81,8 +81,8 @@ standard linting, testing, and layout best practice.
 
 - **`@borland-c20/bcc`** (in `packages/bcc/`) — TypeScript wrapper around the
   WASM build of `bcc-wasm`. This is the user-facing package. It mirrors the
-  original toolchain so callers can invoke `bcc`, `tlink`, and `tasm` the same
-  way `RUNNING_BCC.md` describes for `@rawrs/borland-c-2`.
+  original toolchain so callers can invoke `bcc`, `tlink`, and `tasm` with
+  the same CLI surface the original binaries expose.
 
 The TypeScript and JavaScript ecosystem will consist of pnpm, eslint, prettier,
 and use any best practice to structure its build system and testing practices.
