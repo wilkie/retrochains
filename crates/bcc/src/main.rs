@@ -1,6 +1,6 @@
 use std::process::ExitCode;
 
-use bcc::{CompileMode, emit_dash_s, parse_args};
+use bcc::{CompileMode, emit_dash_c, emit_dash_s, parse_args};
 
 fn main() -> ExitCode {
     match try_main() {
@@ -22,6 +22,11 @@ fn try_main() -> Result<(), Box<dyn std::error::Error>> {
             }
             Ok(())
         }
-        CompileMode::Object => Err("bcc -c: not yet implemented".into()),
+        CompileMode::Object => {
+            for src in &parsed.sources {
+                emit_dash_c(src)?;
+            }
+            Ok(())
+        }
     }
 }
