@@ -246,6 +246,10 @@ impl<'a> FunctionEmitter<'a> {
                 let loc = self.locals.location_of(name);
                 self.emit_assign_local(loc, value);
             }
+            StmtKind::CompoundAssign { name, op, value } => {
+                self.advance_to_stmt_line(stmt);
+                self.emit_compound_assign(name, *op, value);
+            }
             StmtKind::If { cond, then_branch, else_branch } => {
                 self.advance_to_stmt_line(stmt);
                 self.emit_if(stmt.span.start, cond, then_branch, else_branch.as_deref());
@@ -882,6 +886,86 @@ impl<'a> FunctionEmitter<'a> {
                 let _ = write!(self.out, "\tmov\tword ptr {},ax\r\n", bp_addr(off));
             }
             LocalLocation::Reg(reg) => self.emit_store_reg(reg, init),
+        }
+    }
+
+    /// Emit `name <op>= value;`. Fixtures 067–071 show BCC routes this
+    /// through a distinct codegen path that's *tighter* than the
+    /// expanded `name = name <op> value` form: when the target sits
+    /// in a register, the operation is performed directly on the
+    /// register with `<mnemonic> <reg>, <src>` instead of going
+    /// through AX. Peepholes:
+    ///
+    /// - `<reg> += 1` / `<reg> -= 1` → `inc <reg>` / `dec <reg>`
+    /// - `<reg> += K` / `<reg> -= K` (K != 1) → `add <reg>, K` / `sub <reg>, K`
+    /// - `<reg> += <src>` (src = mem or reg) → `add <reg>, <src>`
+    /// - Same shapes for `&=` / `|=` / `^=` with `and` / `or` / `xor`.
+    /// - `*=` doesn't have a `reg, imm` form on 8086, so it routes
+    ///   through AX via DX: `mov dx, <rhs> / mov ax, <reg> / imul dx
+    ///   / mov <reg>, ax`.
+    ///
+    /// Stack-resident targets are unobserved — every fixture so far
+    /// puts the target in a register. Panic until pinned.
+    fn emit_compound_assign(&mut self, name: &str, op: BinOp, value: &Expr) {
+        let LocalLocation::Reg(reg) = self.locals.location_of(name) else {
+            panic!(
+                "compound assignment on stack-resident `{name}` not yet supported (no fixture)"
+            );
+        };
+        assert!(
+            !reg.is_byte(),
+            "compound assignment on a char (byte-register) target not yet supported (no fixture)"
+        );
+        match op {
+            BinOp::Add | BinOp::Sub => {
+                if let Some(v) = try_const_eval(value) {
+                    let v16 = v & 0xFFFF;
+                    if v16 == 1 {
+                        let mnem = if matches!(op, BinOp::Add) { "inc" } else { "dec" };
+                        let _ = write!(self.out, "\t{mnem}\t{}\r\n", reg.name());
+                        return;
+                    }
+                    let mnem = if matches!(op, BinOp::Add) { "add" } else { "sub" };
+                    let _ = write!(self.out, "\t{mnem}\t{},{v16}\r\n", reg.name());
+                    return;
+                }
+                let src = self.resolve_operand_source(value);
+                let mnem = if matches!(op, BinOp::Add) { "add" } else { "sub" };
+                let _ = write!(self.out, "\t{mnem}\t{},{}\r\n", reg.name(), src.word());
+            }
+            BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor => {
+                let mnem = match op {
+                    BinOp::BitAnd => "and",
+                    BinOp::BitOr => "or",
+                    BinOp::BitXor => "xor",
+                    _ => unreachable!(),
+                };
+                let src = self.resolve_operand_source(value);
+                let _ = write!(self.out, "\t{mnem}\t{},{}\r\n", reg.name(), src.word());
+            }
+            BinOp::Mul => {
+                // `imul reg, imm` is 80186+; BCC uses single-operand
+                // `imul <src>` with AX, materializing the RHS in DX
+                // first (fixture 069).
+                if let Some(v) = try_const_eval(value) {
+                    let v16 = v & 0xFFFF;
+                    let _ = write!(self.out, "\tmov\tdx,{v16}\r\n");
+                } else {
+                    let src = self.resolve_operand_source(value);
+                    let _ = write!(self.out, "\tmov\tdx,{}\r\n", src.word());
+                }
+                let _ = write!(self.out, "\tmov\tax,{}\r\n", reg.name());
+                self.out.extend_from_slice(b"\timul\tdx\r\n");
+                let _ = write!(self.out, "\tmov\t{},ax\r\n", reg.name());
+            }
+            BinOp::Div | BinOp::Mod | BinOp::Shl | BinOp::Shr => {
+                panic!(
+                    "compound `{op:?}` not yet supported (no fixture); expected to route through AX with cwd+idiv or cl-loaded shifts"
+                );
+            }
+            BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
+                unreachable!("comparison ops are not compound-assignable in C")
+            }
         }
     }
 

@@ -117,7 +117,7 @@ fn plan_stmt(
                 plan_stmts(else_branch, counter, bases, loops);
             }
         }
-        StmtKind::Assign { value, .. } => {
+        StmtKind::Assign { value, .. } | StmtKind::CompoundAssign { value, .. } => {
             plan_expr_value(value, counter, bases);
         }
         StmtKind::While { cond, body } => {

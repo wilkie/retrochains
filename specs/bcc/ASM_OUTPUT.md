@@ -866,6 +866,37 @@ We don't yet have a fixture for `cmp <stack>, 0` — that path may
 still use the memory-immediate form, since `or` would write back to
 memory.
 
+### Compound assignment (`067`–`071`)
+
+`x op= y` is **not** equivalent to `x = x op y` at the asm level —
+BCC routes it through a much tighter codegen path. When the target
+is a register-resident `int`, the operation hits the register
+directly without going through AX.
+
+| Form                | Asm (target in `<reg>`)              |
+| ------------------- | ------------------------------------ |
+| `x += 1;`           | `inc <reg>`                          |
+| `x -= 1;`           | `dec <reg>`                          |
+| `x += K;` (K ≠ 1)   | `add <reg>, K`                       |
+| `x -= K;` (K ≠ 1)   | `sub <reg>, K`                       |
+| `x &= K;`           | `and <reg>, K`                       |
+| `x \|= K;`          | `or <reg>, K`                        |
+| `x ^= K;`           | `xor <reg>, K`                       |
+| `x += y;` (y in mem)| `add <reg>, word ptr [bp-N]`         |
+| `x *= K;`           | `mov dx, K / mov ax, <reg> / imul dx / mov <reg>, ax` |
+
+The `*=` form is the exception: `imul reg, imm` is 80186+ only, so
+BCC stays on the 8086-compatible single-operand `imul` and routes
+through AX. The multiplier goes into DX *first*, then AX is loaded
+from the register — note the order matters.
+
+This asm-level distinction is significant for fingerprinting / 
+decompilation: a function that contains `add <reg>, K` directly was
+almost certainly compiled from `x += K`, while one that emits
+`mov ax, <reg> / add ax, K / mov <reg>, ax` would have been
+`x = x + K`. The two source forms are equivalent in semantics but
+distinguishable in compiled output.
+
 ### `++` / `--` (`040`–`045`)
 
 `++x` and `--x` count as **two textual uses** of `x` in the

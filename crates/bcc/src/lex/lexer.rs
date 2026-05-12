@@ -59,12 +59,12 @@ impl<'a> Lexer<'a> {
                 b'!' => self.lex_after_bang(),
                 b'+' => self.lex_after_plus(),
                 b'-' => self.lex_after_minus(),
-                b'*' => { self.pos += 1; TokenKind::Star }
-                b'/' => { self.pos += 1; TokenKind::Slash }
-                b'%' => { self.pos += 1; TokenKind::Percent }
+                b'*' => self.lex_after_simple(TokenKind::Star, TokenKind::StarEq),
+                b'/' => self.lex_after_simple(TokenKind::Slash, TokenKind::SlashEq),
+                b'%' => self.lex_after_simple(TokenKind::Percent, TokenKind::PercentEq),
                 b'&' => self.lex_after_amp(),
                 b'|' => self.lex_after_pipe(),
-                b'^' => { self.pos += 1; TokenKind::Caret }
+                b'^' => self.lex_after_simple(TokenKind::Caret, TokenKind::CaretEq),
                 b'~' => { self.pos += 1; TokenKind::Tilde }
                 b'<' => self.lex_after_lt(),
                 b'>' => self.lex_after_gt(),
@@ -132,47 +132,59 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    /// Disambiguate `+`: `++` is increment, bare `+` is addition.
+    /// Disambiguate `+`: `++` is increment, `+=` is add-assign,
+    /// bare `+` is addition.
     fn lex_after_plus(&mut self) -> TokenKind {
         self.pos += 1;
-        if matches!(self.src.get(self.pos), Some(&b'+')) {
-            self.pos += 1;
-            TokenKind::PlusPlus
-        } else {
-            TokenKind::Plus
+        match self.src.get(self.pos) {
+            Some(&b'+') => { self.pos += 1; TokenKind::PlusPlus }
+            Some(&b'=') => { self.pos += 1; TokenKind::PlusEq }
+            _ => TokenKind::Plus,
         }
     }
 
-    /// Disambiguate `-`: `--` is decrement, bare `-` is subtraction.
+    /// Disambiguate `-`: `--` is decrement, `-=` is sub-assign,
+    /// bare `-` is subtraction.
     fn lex_after_minus(&mut self) -> TokenKind {
         self.pos += 1;
-        if matches!(self.src.get(self.pos), Some(&b'-')) {
-            self.pos += 1;
-            TokenKind::MinusMinus
-        } else {
-            TokenKind::Minus
+        match self.src.get(self.pos) {
+            Some(&b'-') => { self.pos += 1; TokenKind::MinusMinus }
+            Some(&b'=') => { self.pos += 1; TokenKind::MinusEq }
+            _ => TokenKind::Minus,
         }
     }
 
-    /// Disambiguate `&`: `&&` is logical-and, bare `&` is bitwise-and.
+    /// Helper for the simple "X" vs "X=" punctuation pairs
+    /// (`*` / `*=`, `/` / `/=`, `%` / `%=`, `^` / `^=`).
+    fn lex_after_simple(&mut self, bare: TokenKind, with_eq: TokenKind) -> TokenKind {
+        self.pos += 1;
+        if matches!(self.src.get(self.pos), Some(&b'=')) {
+            self.pos += 1;
+            with_eq
+        } else {
+            bare
+        }
+    }
+
+    /// Disambiguate `&`: `&&` is logical-and, `&=` is and-assign,
+    /// bare `&` is bitwise-and.
     fn lex_after_amp(&mut self) -> TokenKind {
         self.pos += 1;
-        if matches!(self.src.get(self.pos), Some(&b'&')) {
-            self.pos += 1;
-            TokenKind::AmpAmp
-        } else {
-            TokenKind::Ampersand
+        match self.src.get(self.pos) {
+            Some(&b'&') => { self.pos += 1; TokenKind::AmpAmp }
+            Some(&b'=') => { self.pos += 1; TokenKind::AmpEq }
+            _ => TokenKind::Ampersand,
         }
     }
 
-    /// Disambiguate `|`: `||` is logical-or, bare `|` is bitwise-or.
+    /// Disambiguate `|`: `||` is logical-or, `|=` is or-assign,
+    /// bare `|` is bitwise-or.
     fn lex_after_pipe(&mut self) -> TokenKind {
         self.pos += 1;
-        if matches!(self.src.get(self.pos), Some(&b'|')) {
-            self.pos += 1;
-            TokenKind::PipePipe
-        } else {
-            TokenKind::Pipe
+        match self.src.get(self.pos) {
+            Some(&b'|') => { self.pos += 1; TokenKind::PipePipe }
+            Some(&b'=') => { self.pos += 1; TokenKind::PipeEq }
+            _ => TokenKind::Pipe,
         }
     }
 

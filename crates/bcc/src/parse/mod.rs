@@ -143,18 +143,32 @@ impl Parser {
                     span: Span::new(tok.span.start, semi.span.end),
                 })
             }
-            // `<ident> = …` is an assignment; otherwise the line is an
-            // expression statement (`f();`, `++x;`, etc.).
-            TokenKind::Ident(_) if matches!(self.peek_n(1).kind, TokenKind::Equals) => {
+            // `<ident> = …` is an assignment; `<ident> +=` (and the
+            // other compound-assignment ops) becomes CompoundAssign.
+            // Otherwise the line is an expression statement.
+            TokenKind::Ident(_)
+                if matches!(self.peek_n(1).kind, TokenKind::Equals)
+                    || match_compound_op(&self.peek_n(1).kind).is_some() =>
+            {
                 let ident_tok = self.bump();
                 let TokenKind::Ident(name) = ident_tok.kind else { unreachable!() };
-                self.expect(&TokenKind::Equals)?;
-                let value = self.parse_expr()?;
-                let semi = self.expect(&TokenKind::Semicolon)?;
-                Ok(Stmt {
-                    kind: StmtKind::Assign { name, value },
-                    span: Span::new(start, semi.span.end),
-                })
+                if let Some(op) = match_compound_op(&self.peek().kind) {
+                    self.bump();
+                    let value = self.parse_expr()?;
+                    let semi = self.expect(&TokenKind::Semicolon)?;
+                    Ok(Stmt {
+                        kind: StmtKind::CompoundAssign { name, op, value },
+                        span: Span::new(start, semi.span.end),
+                    })
+                } else {
+                    self.expect(&TokenKind::Equals)?;
+                    let value = self.parse_expr()?;
+                    let semi = self.expect(&TokenKind::Semicolon)?;
+                    Ok(Stmt {
+                        kind: StmtKind::Assign { name, value },
+                        span: Span::new(start, semi.span.end),
+                    })
+                }
             }
             _ => {
                 // Expression statement.
@@ -573,6 +587,20 @@ fn match_update_op(t: &TokenKind) -> Option<UpdateOp> {
     match t {
         TokenKind::PlusPlus => Some(UpdateOp::Inc),
         TokenKind::MinusMinus => Some(UpdateOp::Dec),
+        _ => None,
+    }
+}
+
+fn match_compound_op(t: &TokenKind) -> Option<BinOp> {
+    match t {
+        TokenKind::PlusEq => Some(BinOp::Add),
+        TokenKind::MinusEq => Some(BinOp::Sub),
+        TokenKind::StarEq => Some(BinOp::Mul),
+        TokenKind::SlashEq => Some(BinOp::Div),
+        TokenKind::PercentEq => Some(BinOp::Mod),
+        TokenKind::AmpEq => Some(BinOp::BitAnd),
+        TokenKind::PipeEq => Some(BinOp::BitOr),
+        TokenKind::CaretEq => Some(BinOp::BitXor),
         _ => None,
     }
 }

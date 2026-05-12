@@ -336,7 +336,9 @@ fn stmt_has_call(stmt: &Stmt) -> bool {
     match &stmt.kind {
         StmtKind::Return(value) => value.as_ref().is_some_and(expr_has_call),
         StmtKind::Declare { init, .. } => init.as_ref().is_some_and(expr_has_call),
-        StmtKind::Assign { value, .. } => expr_has_call(value),
+        StmtKind::Assign { value, .. } | StmtKind::CompoundAssign { value, .. } => {
+            expr_has_call(value)
+        }
         StmtKind::If { cond, then_branch, else_branch } => {
             expr_has_call(cond)
                 || body_has_call(then_branch)
@@ -419,6 +421,7 @@ fn collect_decls(stmt: &Stmt, out: &mut Vec<DeclItem>) {
         }
         StmtKind::Return(_)
         | StmtKind::Assign { .. }
+        | StmtKind::CompoundAssign { .. }
         | StmtKind::ExprStmt(_)
         | StmtKind::Break
         | StmtKind::Continue => {}
@@ -446,6 +449,11 @@ fn count_uses_stmt(stmt: &Stmt, counts: &mut HashMap<String, u32>) {
         }
         StmtKind::Assign { name, value } => {
             *counts.entry(name.clone()).or_insert(0) += 1;
+            count_uses_expr(value, counts);
+        }
+        StmtKind::CompoundAssign { name, value, .. } => {
+            // `x += y` is a read + write of x. Same count as Update.
+            *counts.entry(name.clone()).or_insert(0) += 2;
             count_uses_expr(value, counts);
         }
         StmtKind::If { cond, then_branch, else_branch } => {

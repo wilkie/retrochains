@@ -46,9 +46,14 @@ pub enum StmtKind {
     /// `if (cond) then-body [else else-body]`.
     If { cond: Expr, then_branch: Vec<Stmt>, else_branch: Option<Vec<Stmt>> },
     /// `<name> = <value>;`. Currently only assignment to an existing
-    /// local (no compound assignment, no dereference); the parser
-    /// validates the LHS is a bare identifier.
+    /// local (no dereference); the parser validates the LHS is a bare
+    /// identifier.
     Assign { name: String, value: Expr },
+    /// `<name> <op>= <value>;` (compound assignment). The codegen
+    /// is distinct from `Assign { name, value: name <op> value }` —
+    /// BCC emits a tighter form using `<op> <dst>, <src>` directly
+    /// rather than the AX round-trip (fixtures 067-071).
+    CompoundAssign { name: String, op: BinOp, value: Expr },
     /// `while (cond) body`.
     While { cond: Expr, body: Vec<Stmt> },
     /// `do body while (cond);` — bottom-checking loop, body runs at

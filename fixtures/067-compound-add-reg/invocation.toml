@@ -1,0 +1,4 @@
+description = "`x += 1` on a register-resident int. Pins whether BCC's `+=1` shares the `++x` peephole (`inc <reg>`) or expands to the regular `x = x + 1` round-trip via AX."
+tool = "bcc"
+args = ["-S", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]
