@@ -19,6 +19,7 @@ path = "src/main.rs"
 [dependencies]
 obj = { path = "../obj" }
 x86 = { path = "../x86" }
+thiserror = "2"
 
 [lints]
 workspace = true

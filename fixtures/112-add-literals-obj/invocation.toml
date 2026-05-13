@@ -1,0 +1,4 @@
+description = "Return the sum of two literals (constant-folded by BCC to `mov ax,3`). Same source as 005-add-literals but -c."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

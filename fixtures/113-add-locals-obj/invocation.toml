@@ -1,0 +1,4 @@
+description = "Two int locals summed at return. Same source as 006-add-locals but -c. Exercises stack-frame setup (`sub sp,4`), `mov [bp-N],imm` stores, and `add ax,[bp-N]`."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

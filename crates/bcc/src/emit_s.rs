@@ -23,6 +23,10 @@ pub enum EmitError {
     Lex(#[from] crate::lex::LexError),
     #[error("parse: {0}")]
     Parse(#[from] crate::parse::ParseError),
+    #[error("internal: ASM output is not valid UTF-8: {0}")]
+    AsmNotUtf8(String),
+    #[error("assemble: {0}")]
+    Assemble(tasm::AsmError),
 }
 
 /// Compile one `.C` source to `.ASM` next to it in the current directory.
@@ -261,29 +265,40 @@ fn write_tail(out: &mut Vec<u8>, unit: &crate::ast::Unit, strings: &codegen::Str
     for name in &externs {
         let _ = write!(out, "\textrn\t_{name}:near\r\n");
     }
-    // Public symbols are emitted in **reverse alphabetical** order.
-    // Earlier fixtures (009, 010, 087) happened to land in alpha
-    // order in source too, which led us to assume "reverse source
-    // order" — but fixture 095 (`int sum(...); int main(...)`,
-    // public list `sum, main`) disambiguates: source order is sum,
-    // main, alphabetical is main, sum, and the emitted order is
-    // sum, main — the reverse-alpha walk. The most likely
-    // explanation is that BCC keeps its symbol table sorted and
-    // walks it in reverse at TU end.
-    let mut names: Vec<String> = Vec::new();
+    // Public symbols are bucketed by **home segment** (_TEXT, _DATA,
+    // _BSS in that fixed order), then **reverse-alphabetically sorted
+    // within each bucket**.
+    //
+    // The rule was disambiguated across four fixtures:
+    //   - 010 (`int f; int main` — both in _TEXT): output `_main, _f`
+    //     — global reverse-alpha happens to work.
+    //   - 095 (`int sum; int main` — both in _TEXT): output `_sum, _main`
+    //     — global reverse-alpha works (main < sum → reverse = sum, main).
+    //   - 087 (`int a; int b=5; char c=9; int main`): output
+    //     `_main, _c, _b, _a` — _TEXT then _DATA (c, b in reverse-alpha)
+    //     then _BSS (a). Global reverse-alpha would also produce this
+    //     by coincidence.
+    //   - 109 (`int x; int main`): output `_main, _x` — disambiguates.
+    //     Global reverse-alpha would give `_x, _main` (since x > m).
+    //     Per-segment reverse-alpha gives `_main` (in _TEXT) then `_x`
+    //     (in _BSS) → correct.
+    let mut text: Vec<String> = Vec::new();
+    let mut data: Vec<String> = Vec::new();
+    let mut bss: Vec<String> = Vec::new();
     for f in &unit.functions {
-        // Prototypes (body: None) don't get a `public` line — they
-        // didn't define a symbol in this TU.
         if f.body.is_some() {
-            names.push(codegen::function_symbol(&f.name));
+            text.push(codegen::function_symbol(&f.name));
         }
     }
     for g in &unit.globals {
-        names.push(format!("_{}", g.name));
+        let bucket = if g.init.is_some() { &mut data } else { &mut bss };
+        bucket.push(format!("_{}", g.name));
     }
-    names.sort();
-    for name in names.iter().rev() {
-        let _ = write!(out, "\tpublic\t{name}\r\n");
+    for bucket in [&mut text, &mut data, &mut bss] {
+        bucket.sort();
+        for name in bucket.iter().rev() {
+            let _ = write!(out, "\tpublic\t{name}\r\n");
+        }
     }
     out.extend_from_slice(b"\tend\r\n");
 }

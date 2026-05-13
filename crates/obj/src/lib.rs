@@ -157,6 +157,30 @@ impl ObjBuilder {
         self.write_record(LEDATA_16, &payload);
     }
 
+    /// `EXTDEF` — list of external symbol references. `type_idx` is
+    /// the TYPDEF index for each name; BCC always emits 0 (untyped).
+    /// Each entry contributes a 1-based EXTDEF index, used later by
+    /// FIXUPP target datums.
+    pub fn write_extdef(&mut self, names: &[&str]) {
+        let mut payload = Vec::new();
+        for name in names {
+            payload.push(u8::try_from(name.len()).expect("EXTDEF name fits"));
+            payload.extend_from_slice(name.as_bytes());
+            payload.push(0); // type idx
+        }
+        self.write_record(EXTDEF, &payload);
+    }
+
+    /// `FIXUPP` (16-bit form) with a caller-built payload. The payload
+    /// is a sequence of FIXUP subrecords (Locat + Fix Data + datums)
+    /// or THREAD subrecords. See `specs/formats/OMF.md` §FIXUPP for
+    /// the bit layout. Callers serialize subrecords themselves —
+    /// each fixup recipe has its own shape and the helpers here would
+    /// proliferate quickly.
+    pub fn write_fixupp(&mut self, payload: &[u8]) {
+        self.write_record(FIXUPP_16, payload);
+    }
+
     /// `MODEND` (16-bit) — end of module. We always use the no-
     /// start-address form (`flags = 0`); a `main` symbol becomes
     /// the entry point via the linker's separate PUBDEF lookup.
