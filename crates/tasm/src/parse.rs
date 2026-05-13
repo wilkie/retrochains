@@ -3,8 +3,8 @@
 //! than a real grammar.
 
 use crate::ir::{
-    AsmError, AsmResult, Group, Instr, JmpCond, Module, Reg8, SegAlign, SegCombine, SegItem,
-    Segment,
+    AsmError, AsmResult, Group, Instr, JmpCond, Module, Reg16, Reg8, SegAlign, SegCombine,
+    SegItem, Segment,
 };
 use crate::lex::{tokenize, Line};
 
@@ -330,46 +330,52 @@ fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
     let kw = line.keyword;
     let rest = line.rest.trim_end();
     match kw {
-        "push" if rest == "bp" => Ok(Instr::PushBp),
-        "push" if rest == "ax" => Ok(Instr::PushAx),
-        "pop" if rest == "bp" => Ok(Instr::PopBp),
-        "pop" if rest == "cx" => Ok(Instr::PopCx),
+        "push" => Reg16::parse(rest)
+            .map(|reg| Instr::PushReg16 { reg })
+            .ok_or_else(|| AsmError::new(line.line_no, format!("push: unsupported operand `{rest}`"))),
+        "pop" => Reg16::parse(rest)
+            .map(|reg| Instr::PopReg16 { reg })
+            .ok_or_else(|| AsmError::new(line.line_no, format!("pop: unsupported operand `{rest}`"))),
         "mov" => parse_mov(rest, line.line_no),
-        "dec" if rest == "sp" => Ok(Instr::DecSp),
         // Generic ALU forms `<op> ax,word ptr [bp+N]`. Some opcodes
         // also have special operand forms (`sub sp,imm`, `xor ax,ax`)
         // that take precedence — handled in the per-op parser below.
-        "add" => parse_alu_ax_mem(rest, line.line_no, "add", |o| Instr::AddAxBpRel { offset: o }),
+        "add" => parse_add(rest, line.line_no),
         "sub" => parse_sub(rest, line.line_no),
         "and" => parse_alu_ax_mem(rest, line.line_no, "and", |o| Instr::AndAxBpRel { offset: o }),
-        "or" => parse_alu_ax_mem(rest, line.line_no, "or", |o| Instr::OrAxBpRel { offset: o }),
-        "xor" if rest == "ax,ax" => Ok(Instr::XorAxAx),
-        "xor" => parse_alu_ax_mem(rest, line.line_no, "xor", |o| Instr::XorAxBpRel { offset: o }),
+        "or" => parse_or(rest, line.line_no),
+        "xor" => parse_xor(rest, line.line_no),
         "cmp" => parse_cmp(rest, line.line_no),
         "imul" => parse_single_op_word_ptr(rest, line.line_no, "imul", |o| Instr::ImulBpRel { offset: o }),
         "idiv" => parse_single_op_word_ptr(rest, line.line_no, "idiv", |o| Instr::IdivBpRel { offset: o }),
         "cwd" => Ok(Instr::Cwd),
+        "cbw" => Ok(Instr::Cbw),
+        "lea" => parse_lea(rest, line.line_no),
         "shl" if rest == "ax,cl" => Ok(Instr::ShlAxCl),
         "sar" if rest == "ax,cl" => Ok(Instr::SarAxCl),
         "inc" => {
             if let Some(reg) = Reg8::parse(rest) {
-                Ok(Instr::IncReg8 { reg })
-            } else {
-                Err(AsmError::new(
-                    line.line_no,
-                    format!("inc: unsupported operand form `{rest}`"),
-                ))
+                return Ok(Instr::IncReg8 { reg });
             }
+            if let Some(reg) = Reg16::parse(rest) {
+                return Ok(Instr::IncReg16 { reg });
+            }
+            Err(AsmError::new(
+                line.line_no,
+                format!("inc: unsupported operand form `{rest}`"),
+            ))
         }
         "dec" => {
             if let Some(reg) = Reg8::parse(rest) {
-                Ok(Instr::DecReg8 { reg })
-            } else {
-                Err(AsmError::new(
-                    line.line_no,
-                    format!("dec: unsupported operand form `{rest}`"),
-                ))
+                return Ok(Instr::DecReg8 { reg });
             }
+            if let Some(reg) = Reg16::parse(rest) {
+                return Ok(Instr::DecReg16 { reg });
+            }
+            Err(AsmError::new(
+                line.line_no,
+                format!("dec: unsupported operand form `{rest}`"),
+            ))
         }
         "je" | "jne" | "jl" | "jle" | "jg" | "jge" => parse_jmp_cond(kw, rest, line.line_no),
         "jmp" => {
@@ -411,15 +417,15 @@ fn parse_mov(operands: &str, line_no: usize) -> AsmResult<Instr> {
     let (lhs, rhs) = split_comma(operands).ok_or_else(|| {
         AsmError::new(line_no, format!("mov: expected `lhs,rhs`, got {operands:?}"))
     })?;
-    if lhs == "bp" && rhs == "sp" {
-        return Ok(Instr::MovBpSp);
-    }
-    if lhs == "sp" && rhs == "bp" {
-        return Ok(Instr::MovSpBp);
+    // Generic 16-bit reg-to-reg move (`mov bp,sp`, `mov sp,bp`,
+    // `mov ax,dx`, `mov si,ax`, etc.). Tried before per-register
+    // dispatch so it catches every reg-to-reg pair uniformly.
+    if let (Some(dst), Some(src)) = (Reg16::parse(lhs), Reg16::parse(rhs)) {
+        return Ok(Instr::MovReg16Reg16 { dst, src });
     }
     if lhs == "ax" {
-        if rhs == "dx" {
-            return Ok(Instr::MovAxDx);
+        if rhs == "word ptr [si]" {
+            return Ok(Instr::MovAxFromSiPtr);
         }
         if let Some(offset) = parse_bp_relative(rhs) {
             return Ok(Instr::MovAxBpRel { offset });
@@ -436,8 +442,22 @@ fn parse_mov(operands: &str, line_no: usize) -> AsmResult<Instr> {
                 symbol: symbol.to_string(),
             });
         }
+    }
+    // Generic 16-bit reg-imm load: `mov si,10`, `mov ax,42`, etc.
+    // Tried after the AX-specific paths above so that a reg-imm
+    // pattern doesn't shadow them.
+    if let Some(reg) = Reg16::parse(lhs) {
         if let Some(imm) = parse_imm16(rhs) {
-            return Ok(Instr::MovAxImm(imm));
+            return Ok(Instr::MovReg16Imm { reg, imm });
+        }
+    }
+    if lhs == "al" {
+        // `mov al,byte ptr DGROUP:_g` — 8-bit moffs8 load.
+        if let Some((group, symbol)) = parse_byte_group_symbol(rhs) {
+            return Ok(Instr::MovAlGroupSym {
+                group: group.to_string(),
+                symbol: symbol.to_string(),
+            });
         }
     }
     // Generic 8-bit register operand on the LHS.
@@ -478,6 +498,12 @@ fn parse_mov(operands: &str, line_no: usize) -> AsmResult<Instr> {
             return Ok(Instr::MovBpRelReg8 { offset, reg: src });
         }
     }
+    // LHS `word ptr [si]` — store through SI pointer (fixture 136).
+    if lhs == "word ptr [si]" {
+        if let Some(imm) = parse_imm16(rhs) {
+            return Ok(Instr::MovSiPtrImm { imm });
+        }
+    }
     Err(AsmError::new(
         line_no,
         format!("mov: unsupported operand form `{operands}`"),
@@ -516,8 +542,36 @@ fn parse_single_op_word_ptr(
     ))
 }
 
-/// `cmp <lhs>,<rhs>` covers two forms: `cmp ax,word ptr [bp+N]`
-/// (16-bit) and `cmp <reg8>,<imm8>` (fixture 124).
+/// `add <lhs>,<rhs>` covers `add ax,word ptr [bp+N]` (fixture 113),
+/// `add <reg16>,<reg16>` (fixture 127: `add ax,si`), and
+/// `add ax,word ptr DGROUP:<sym>` (fixture 131: globals).
+fn parse_add(operands: &str, line_no: usize) -> AsmResult<Instr> {
+    let (lhs, rhs) = split_comma(operands).ok_or_else(|| {
+        AsmError::new(line_no, format!("add: expected `lhs,rhs`, got {operands:?}"))
+    })?;
+    if let (Some(dst), Some(src)) = (Reg16::parse(lhs), Reg16::parse(rhs)) {
+        return Ok(Instr::AddReg16Reg16 { dst, src });
+    }
+    if lhs == "ax" {
+        if let Some(offset) = parse_bp_relative(rhs) {
+            return Ok(Instr::AddAxBpRel { offset });
+        }
+        if let Some((group, symbol)) = parse_group_symbol(rhs) {
+            return Ok(Instr::AddAxGroupSym {
+                group: group.to_string(),
+                symbol: symbol.to_string(),
+            });
+        }
+    }
+    Err(AsmError::new(
+        line_no,
+        format!("add: unsupported operand form `{operands}`"),
+    ))
+}
+
+/// `cmp <lhs>,<rhs>` covers three forms: `cmp ax,word ptr [bp+N]`
+/// (16-bit memory), `cmp <reg8>,<imm8>` (fixture 124), and
+/// `cmp <reg16>,<imm8>` sign-extended (fixture 126: `cmp si,10`).
 fn parse_cmp(operands: &str, line_no: usize) -> AsmResult<Instr> {
     let (lhs, rhs) = split_comma(operands).ok_or_else(|| {
         AsmError::new(line_no, format!("cmp: expected `lhs,rhs`, got {operands:?}"))
@@ -525,6 +579,16 @@ fn parse_cmp(operands: &str, line_no: usize) -> AsmResult<Instr> {
     if lhs == "ax" {
         if let Some(offset) = parse_bp_relative(rhs) {
             return Ok(Instr::CmpAxBpRel { offset });
+        }
+        // `cmp ax,K` — BCC uses the special AX-imm16 opcode (3D) for
+        // every constant K, not the generic 83 F8 form.
+        if let Some(imm) = parse_imm16(rhs) {
+            return Ok(Instr::CmpAxImm { imm });
+        }
+    }
+    if let Some(reg) = Reg16::parse(lhs) {
+        if let Some(imm) = parse_imm8_signed(rhs) {
+            return Ok(Instr::CmpReg16Imm8 { reg, imm });
         }
     }
     if let Some(reg) = Reg8::parse(lhs) {
@@ -535,6 +599,60 @@ fn parse_cmp(operands: &str, line_no: usize) -> AsmResult<Instr> {
     Err(AsmError::new(
         line_no,
         format!("cmp: unsupported operand form `{operands}`"),
+    ))
+}
+
+/// `lea <reg16>,word ptr [bp+N]` — load effective address. Currently
+/// only the bp-relative source form is recognized; other addressing
+/// modes will land with more fixtures.
+fn parse_lea(operands: &str, line_no: usize) -> AsmResult<Instr> {
+    let (lhs, rhs) = split_comma(operands).ok_or_else(|| {
+        AsmError::new(line_no, format!("lea: expected `lhs,rhs`, got {operands:?}"))
+    })?;
+    let dst = Reg16::parse(lhs)
+        .ok_or_else(|| AsmError::new(line_no, format!("lea: bad dst `{lhs}`")))?;
+    let offset = parse_bp_relative(rhs)
+        .ok_or_else(|| AsmError::new(line_no, format!("lea: unsupported source `{rhs}`")))?;
+    Ok(Instr::LeaReg16BpRel { dst, offset })
+}
+
+/// `or <lhs>,<rhs>` covers `or <reg16>,<reg16>` (fixture 132's
+/// `or ax,ax` zero-test idiom) and `or ax,word ptr [bp+N]`.
+fn parse_or(operands: &str, line_no: usize) -> AsmResult<Instr> {
+    let (lhs, rhs) = split_comma(operands).ok_or_else(|| {
+        AsmError::new(line_no, format!("or: expected `lhs,rhs`, got {operands:?}"))
+    })?;
+    if let (Some(dst), Some(src)) = (Reg16::parse(lhs), Reg16::parse(rhs)) {
+        return Ok(Instr::OrReg16Reg16 { dst, src });
+    }
+    if lhs == "ax" {
+        if let Some(offset) = parse_bp_relative(rhs) {
+            return Ok(Instr::OrAxBpRel { offset });
+        }
+    }
+    Err(AsmError::new(
+        line_no,
+        format!("or: unsupported operand form `{operands}`"),
+    ))
+}
+
+/// `xor <lhs>,<rhs>` covers two forms: `xor <reg16>,<reg16>` (the
+/// canonical zero-the-register idiom) and `xor ax,word ptr [bp+N]`.
+fn parse_xor(operands: &str, line_no: usize) -> AsmResult<Instr> {
+    let (lhs, rhs) = split_comma(operands).ok_or_else(|| {
+        AsmError::new(line_no, format!("xor: expected `lhs,rhs`, got {operands:?}"))
+    })?;
+    if let (Some(dst), Some(src)) = (Reg16::parse(lhs), Reg16::parse(rhs)) {
+        return Ok(Instr::XorReg16Reg16 { dst, src });
+    }
+    if lhs == "ax" {
+        if let Some(offset) = parse_bp_relative(rhs) {
+            return Ok(Instr::XorAxBpRel { offset });
+        }
+    }
+    Err(AsmError::new(
+        line_no,
+        format!("xor: unsupported operand form `{operands}`"),
     ))
 }
 
@@ -600,6 +718,15 @@ fn parse_imm8(s: &str) -> Option<u8> {
     }
 }
 
+/// Parse a decimal literal as a signed 8-bit value (sign-extends to
+/// i16 at the instruction's caller). Used for `cmp <reg16>,<imm>`
+/// where 83 /7 takes a sign-extended imm8.
+fn parse_imm8_signed(s: &str) -> Option<i8> {
+    let s = s.trim();
+    let v = s.parse::<i32>().ok()?;
+    i8::try_from(v).ok()
+}
+
 /// Parse a decimal literal as a 16-bit value. Returns `None` if the
 /// string isn't a bare decimal. (BCC always uses bare decimals in
 /// operands — no hex `42h` or octal forms.)
@@ -644,12 +771,19 @@ fn parse_offset_group_symbol(s: &str) -> Option<(&str, &str)> {
 }
 
 /// Parse `word ptr <group>:<symbol>` (e.g. `word ptr DGROUP:_x`).
-/// Returns `(group, symbol)` as borrowed slices.
+/// Returns `(group, symbol)`.
 fn parse_group_symbol(s: &str) -> Option<(&str, &str)> {
+    parse_group_symbol_with_width(s, "word ptr ")
+}
+
+/// Same, but requires `byte ptr` (`byte ptr DGROUP:_g`).
+fn parse_byte_group_symbol(s: &str) -> Option<(&str, &str)> {
+    parse_group_symbol_with_width(s, "byte ptr ")
+}
+
+fn parse_group_symbol_with_width<'a>(s: &'a str, prefix: &str) -> Option<(&'a str, &'a str)> {
     let s = s.trim();
-    let inside = s
-        .strip_prefix("word ptr ")
-        .or_else(|| s.strip_prefix("byte ptr "))?;
+    let inside = s.strip_prefix(prefix)?;
     let (group, sym) = inside.split_once(':')?;
     let group = group.trim();
     let sym = sym.trim();

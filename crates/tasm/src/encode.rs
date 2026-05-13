@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 
 use crate::ir::{
-    AsmError, AsmResult, FixupKind, FixupReq, Instr, Module, Reg8, SegItem, Segment,
+    AsmError, AsmResult, FixupKind, FixupReq, Instr, Module, SegItem, Segment,
 };
 
 /// One segment's encoded output. The notional `size` (used for the
@@ -180,22 +180,20 @@ fn encode_segment(
 
 fn instr_size(instr: &Instr) -> usize {
     match instr {
-        Instr::PushBp
-        | Instr::PopBp
-        | Instr::PushAx
-        | Instr::PopCx
-        | Instr::Ret
-        | Instr::DecSp => 1,
-        Instr::MovBpSp
-        | Instr::MovSpBp
-        | Instr::XorAxAx
-        | Instr::JmpShort(_)
-        | Instr::ShlAxCl
-        | Instr::SarAxCl
-        | Instr::MovAxDx => 2,
+        Instr::Ret => 1,
+        Instr::PushReg16 { .. }
+        | Instr::PopReg16 { .. }
+        | Instr::IncReg16 { .. }
+        | Instr::DecReg16 { .. } => 1,
+        Instr::MovReg16Reg16 { .. }
+        | Instr::XorReg16Reg16 { .. }
+        | Instr::AddReg16Reg16 { .. }
+        | Instr::OrReg16Reg16 { .. } => 2,
+        Instr::CmpReg16Imm8 { .. } | Instr::CmpAxImm { .. } => 3,
+        Instr::JmpShort(_) | Instr::ShlAxCl | Instr::SarAxCl => 2,
         Instr::Cwd => 1,
         Instr::JmpCondShort { .. } => 2,
-        Instr::MovAxImm(_) | Instr::SubSpImm(_) => 3,
+        Instr::MovReg16Imm { .. } | Instr::SubSpImm(_) => 3,
         Instr::MovAxBpRel { .. }
         | Instr::AddAxBpRel { .. }
         | Instr::SubAxBpRel { .. }
@@ -213,7 +211,14 @@ fn instr_size(instr: &Instr) -> usize {
         Instr::IncReg8 { .. } | Instr::DecReg8 { .. } => 2,
         Instr::CmpReg8Imm8 { .. } => 3,
         Instr::CallNear(_) => 3,
-        Instr::MovAxGroupSym { .. } | Instr::MovAxOffsetGroupSym { .. } => 3,
+        Instr::MovAxGroupSym { .. }
+        | Instr::MovAlGroupSym { .. }
+        | Instr::MovAxOffsetGroupSym { .. } => 3,
+        Instr::AddAxGroupSym { .. } => 4,
+        Instr::Cbw => 1,
+        Instr::LeaReg16BpRel { .. } => 3,
+        Instr::MovSiPtrImm { .. } => 4,
+        Instr::MovAxFromSiPtr => 2,
         Instr::MovBpRelImm { .. } | Instr::MovBpRelOffsetSym { .. } => 5,
         Instr::CallIndirectBpRel { .. } => 3,
     }
@@ -229,24 +234,46 @@ fn emit_instr(
     fixups: &mut Vec<FixupReq>,
 ) -> AsmResult<()> {
     match instr {
-        Instr::PushBp => out.push(0x55),
-        Instr::PushAx => out.push(0x50),
-        Instr::PopBp => out.push(0x5D),
-        Instr::PopCx => out.push(0x59),
-        Instr::MovBpSp => {
+        Instr::PushReg16 { reg } => out.push(0x50 | reg.code()),
+        Instr::PopReg16 { reg } => out.push(0x58 | reg.code()),
+        Instr::IncReg16 { reg } => out.push(0x40 | reg.code()),
+        Instr::DecReg16 { reg } => out.push(0x48 | reg.code()),
+        Instr::MovReg16Reg16 { dst, src } => {
+            // `mov r16,r16` → 8B (mod=11 dst<<3 src). Same encoding
+            // family as 8A for 8-bit registers.
             out.push(0x8B);
-            out.push(0xEC);
+            out.push(0b11_000_000 | (dst.code() << 3) | src.code());
         }
-        Instr::MovSpBp => {
-            out.push(0x8B);
-            out.push(0xE5);
-        }
-        Instr::XorAxAx => {
+        Instr::XorReg16Reg16 { dst, src } => {
+            // `xor r16,r16` → 33 (mod=11 dst<<3 src).
             out.push(0x33);
-            out.push(0xC0);
+            out.push(0b11_000_000 | (dst.code() << 3) | src.code());
         }
-        Instr::MovAxImm(imm) => {
-            out.push(0xB8);
+        Instr::AddReg16Reg16 { dst, src } => {
+            // `add r16,r16` → 03 (mod=11 dst<<3 src).
+            out.push(0x03);
+            out.push(0b11_000_000 | (dst.code() << 3) | src.code());
+        }
+        Instr::OrReg16Reg16 { dst, src } => {
+            // `or r16,r16` → 0B (mod=11 dst<<3 src).
+            out.push(0x0B);
+            out.push(0b11_000_000 | (dst.code() << 3) | src.code());
+        }
+        Instr::CmpReg16Imm8 { reg, imm } => {
+            // `cmp r16,imm8 (sign-extended)` → 83 (mod=11 /7 r/m=reg) ii.
+            // 83 is Grp1 r/m16,imm8 sign-extended; /7 selects CMP.
+            out.push(0x83);
+            out.push(0b11_111_000 | reg.code());
+            out.push(*imm as u8);
+        }
+        Instr::CmpAxImm { imm } => {
+            // `cmp ax,imm16` → 3D lo hi (AX-accumulator special form).
+            out.push(0x3D);
+            out.extend_from_slice(&imm.to_le_bytes());
+        }
+        Instr::MovReg16Imm { reg, imm } => {
+            // `mov r16,imm16` → B8+rc lo hi.
+            out.push(0xB8 | reg.code());
             out.extend_from_slice(&imm.to_le_bytes());
         }
         Instr::SubSpImm(imm) => {
@@ -254,7 +281,6 @@ fn emit_instr(
             out.push(0xEC);
             out.push(*imm);
         }
-        Instr::DecSp => out.push(0x4C),
         Instr::MovBpRelImm { offset, imm } => {
             let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
             out.push(0xC7);
@@ -356,11 +382,6 @@ fn emit_instr(
             out.push(0xD3);
             out.push(0xF8);
         }
-        Instr::MovAxDx => {
-            // `mov ax,dx` → 8B C2. ModR/M C2 = mod=11 reg=AX r/m=DX.
-            out.push(0x8B);
-            out.push(0xC2);
-        }
         Instr::JmpCondShort { cond, target } => {
             let target_off = symbols.get(target).map(|l| l.offset).ok_or_else(|| {
                 AsmError::new(0, format!("Jcc: unresolved label `{target}`"))
@@ -419,13 +440,45 @@ fn emit_instr(
         Instr::MovAxGroupSym { group, symbol } => {
             // `mov ax,word ptr <group>:<symbol>` → A1 lo hi.
             // Encoding A1 is `mov AX, moffs16` — segment-relative load.
-            emit_group_sym_lea(0xA1, group, symbol, symbols, group_idx, out, fixups)?;
+            emit_group_sym_lea(&[0xA1], group, symbol, symbols, group_idx, out, fixups)?;
+        }
+        Instr::MovAlGroupSym { group, symbol } => {
+            // `mov al,byte ptr <group>:<symbol>` → A0 lo hi.
+            // A0 is the 8-bit moffs8 sibling of A1.
+            emit_group_sym_lea(&[0xA0], group, symbol, symbols, group_idx, out, fixups)?;
         }
         Instr::MovAxOffsetGroupSym { group, symbol } => {
             // `mov ax,offset <group>:<symbol>` → B8 lo hi (mov ax,imm16
             // where imm16 = symbol's segment-relative offset). Same
             // FIXUPP shape as MovAxGroupSym.
-            emit_group_sym_lea(0xB8, group, symbol, symbols, group_idx, out, fixups)?;
+            emit_group_sym_lea(&[0xB8], group, symbol, symbols, group_idx, out, fixups)?;
+        }
+        Instr::AddAxGroupSym { group, symbol } => {
+            // `add ax,word ptr <group>:<symbol>` → 03 06 lo hi.
+            // ModR/M 06 = mod=00 reg=AX r/m=110 (disp16-only addressing).
+            emit_group_sym_lea(&[0x03, 0x06], group, symbol, symbols, group_idx, out, fixups)?;
+        }
+        Instr::Cbw => out.push(0x98),
+        Instr::LeaReg16BpRel { dst, offset } => {
+            // `lea r16,word ptr [bp+disp8]` → 8D xx dd. ModR/M xx =
+            // mod=01 reg=<dst-code> r/m=110 ([bp+disp8]).
+            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
+            out.push(0x8D);
+            out.push(0b01_000_110 | (dst.code() << 3));
+            out.push(disp as u8);
+        }
+        Instr::MovSiPtrImm { imm } => {
+            // `mov word ptr [si],imm16` → C7 04 lo hi. ModR/M 04 =
+            // mod=00 /0 r/m=100 ([si]).
+            out.push(0xC7);
+            out.push(0x04);
+            out.extend_from_slice(&imm.to_le_bytes());
+        }
+        Instr::MovAxFromSiPtr => {
+            // `mov ax,word ptr [si]` → 8B 04. ModR/M 04 = mod=00
+            // reg=AX r/m=100 ([si]).
+            out.push(0x8B);
+            out.push(0x04);
         }
         Instr::MovBpRelOffsetSym { offset, symbol } => {
             // `mov word ptr [bp+disp8],offset _f` → C7 46 dd lo hi.
@@ -489,11 +542,14 @@ fn emit_alu_ax_bp_rel(opcode: u8, offset: i16, out: &mut Vec<u8>) {
     out.push(disp as u8);
 }
 
-/// Shared helper for the two `mov ax,<form>:<sym>` instructions
-/// (A1-encoded load and B8-encoded offset-immediate). Both emit the
-/// same SegRelGroupTarget FIXUPP — the only difference is the opcode.
+/// Shared helper for `<op> {ax|al},<form>:<sym>` instructions where
+/// the encoding is `<opcode-prefix> <16-bit-symbol-offset>` plus a
+/// SegRelGroupTarget FIXUPP. Opcode-prefix length varies by op:
+///   1 byte for `mov ax,moffs16` (A1), `mov al,moffs8` (A0), and
+///   `mov ax,offset _sym` (B8). 2 bytes for `add ax,r/m16` with
+///   disp16-only addressing (03 06).
 fn emit_group_sym_lea(
-    opcode: u8,
+    opcode_prefix: &[u8],
     group: &str,
     symbol: &str,
     symbols: &Symbols,
@@ -508,7 +564,7 @@ fn emit_group_sym_lea(
         .get(group)
         .ok_or_else(|| AsmError::new(0, format!("group `{group}` not defined")))?;
     let target_seg_idx = u8::try_from(sym_loc.segment + 1).expect("target seg idx fits");
-    out.push(opcode);
+    out.extend_from_slice(opcode_prefix);
     let imm_start = out.len();
     out.extend_from_slice(&sym_loc.offset.to_le_bytes());
     fixups.push(FixupReq {
@@ -524,7 +580,7 @@ fn emit_group_sym_lea(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::{SegAlign, SegCombine};
+    use crate::ir::{Reg16, SegAlign, SegCombine};
 
     fn make_seg(name: &str) -> Segment {
         Segment {
@@ -540,12 +596,18 @@ mod tests {
     fn fixture_002_main_body() {
         let mut seg = make_seg("_TEXT");
         seg.items = vec![
-            SegItem::Instr(Instr::PushBp),
-            SegItem::Instr(Instr::MovBpSp),
-            SegItem::Instr(Instr::XorAxAx),
+            SegItem::Instr(Instr::PushReg16 { reg: Reg16::Bp }),
+            SegItem::Instr(Instr::MovReg16Reg16 {
+                dst: Reg16::Bp,
+                src: Reg16::Sp,
+            }),
+            SegItem::Instr(Instr::XorReg16Reg16 {
+                dst: Reg16::Ax,
+                src: Reg16::Ax,
+            }),
             SegItem::Instr(Instr::JmpShort("@1@50".into())),
             SegItem::Label("@1@50".into()),
-            SegItem::Instr(Instr::PopBp),
+            SegItem::Instr(Instr::PopReg16 { reg: Reg16::Bp }),
             SegItem::Instr(Instr::Ret),
         ];
         let module = Module {

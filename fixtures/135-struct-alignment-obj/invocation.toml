@@ -1,0 +1,4 @@
+description = "Mixed char+int struct, odd-aligned int field. -c parallel of 102. Exercises word ptr at odd bp-offset."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

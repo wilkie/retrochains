@@ -1,0 +1,4 @@
+description = "Single-field struct local. -c parallel of 101. Treated as a 2-byte int local in BCC's codegen."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

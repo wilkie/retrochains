@@ -1,0 +1,4 @@
+description = "3-case dense switch. -c parallel of 072. Chained-compare strategy (or ax,ax then cmp ax,N je @label x3). No FIXUPPs."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

@@ -80,24 +80,25 @@ pub struct Group {
 /// fixtures we widen this enum.
 #[derive(Debug)]
 pub enum Instr {
-    /// `push bp`
-    PushBp,
-    /// `pop bp`
-    PopBp,
-    /// `mov bp,sp`
-    MovBpSp,
-    /// `mov sp,bp`
-    MovSpBp,
-    /// `xor ax,ax`
-    XorAxAx,
-    /// `mov ax,<imm16>`
-    MovAxImm(u16),
+    /// `push <reg16>` — 50+rc (1-byte form). Covers push of any of
+    /// AX/CX/DX/BX/SP/BP/SI/DI.
+    PushReg16 { reg: Reg16 },
+    /// `pop <reg16>` — 58+rc.
+    PopReg16 { reg: Reg16 },
+    /// `mov <dst>,<src>` between 16-bit registers — 8B xx with
+    /// ModR/M mod=11 reg=dst-code r/m=src-code. Covers `mov bp,sp`,
+    /// `mov sp,bp`, `mov ax,dx`, `mov ax,si`, etc.
+    MovReg16Reg16 { dst: Reg16, src: Reg16 },
+    /// `xor <dst>,<src>` between 16-bit registers — 33 xx. The
+    /// canonical "zero the register" form is `xor reg,reg`.
+    XorReg16Reg16 { dst: Reg16, src: Reg16 },
+    /// `mov <reg16>,<imm16>` — B8+rc lo hi. Generic 16-bit register
+    /// immediate load (formerly MovAxImm).
+    MovReg16Imm { reg: Reg16, imm: u16 },
     /// `sub sp,<imm8>` — encoded as 83 EC ii (sign-extended imm8 form).
     /// Larger immediates would require the 81 EC encoding; BCC uses
     /// 83 EC for the small frame sizes we've seen (≤ 127 bytes).
     SubSpImm(u8),
-    /// `dec sp` — 1 byte, encoded as 4C.
-    DecSp,
     /// `mov word ptr [bp+<offset>],<imm16>` — BCC uses signed
     /// offsets (negative for locals, positive for params).
     MovBpRelImm { offset: i16, imm: u16 },
@@ -105,6 +106,27 @@ pub enum Instr {
     MovAxBpRel { offset: i16 },
     /// `add ax,word ptr [bp+<offset>]` — 03 46 dd
     AddAxBpRel { offset: i16 },
+    /// `add <dst>,<src>` between 16-bit registers — 03 xx with
+    /// ModR/M mod=11 reg=dst r/m=src. Used to fold a register-resident
+    /// operand into AX (fixture 127: `add ax,si`).
+    AddReg16Reg16 { dst: Reg16, src: Reg16 },
+    /// `or <dst>,<src>` between 16-bit registers — 0B xx. BCC uses
+    /// `or ax,ax` as a compare-against-zero idiom in switch dispatch.
+    OrReg16Reg16 { dst: Reg16, src: Reg16 },
+    /// `inc <reg16>` — 40+rc (1-byte form). Used heavily in loop
+    /// bodies and for register-resident pre/post-increment.
+    IncReg16 { reg: Reg16 },
+    /// `dec <reg16>` — 48+rc (1-byte form).
+    DecReg16 { reg: Reg16 },
+    /// `cmp <reg16>,<imm8>` — 83 (F8+rc) ii (Grp1 r/m16,imm8
+    /// sign-extended). Used when the immediate fits in a signed byte
+    /// and the register isn't AX (AX gets a different encoding).
+    CmpReg16Imm8 { reg: Reg16, imm: i8 },
+    /// `cmp ax,<imm16>` — 3D lo hi (special AX-accumulator opcode).
+    /// BCC prefers this over `83 F8 ii` for `cmp ax,K` because the
+    /// AX form has a dedicated opcode and is always 3 bytes
+    /// regardless of K's width.
+    CmpAxImm { imm: u16 },
     /// `sub ax,word ptr [bp+<offset>]` — 2B 46 dd
     SubAxBpRel { offset: i16 },
     /// `and ax,word ptr [bp+<offset>]` — 23 46 dd
@@ -152,8 +174,6 @@ pub enum Instr {
     /// `sar ax,cl` — D3 F8. Variable-count arithmetic (signed) right
     /// shift of AX. BCC uses SAR for signed `int >> ...`.
     SarAxCl,
-    /// `mov ax,dx` — 8B C2. Used after IDIV to pick up the remainder.
-    MovAxDx,
     /// `j<cc> short <label>` — Jcc rel8 family.
     JmpCondShort { cond: JmpCond, target: String },
     /// `jmp short <label>`
@@ -164,6 +184,25 @@ pub enum Instr {
     /// against a group-anchored data symbol. Emits `A1 lo hi` plus a
     /// FIXUPP request (frame = group, target = symbol's home segment).
     MovAxGroupSym { group: String, symbol: String },
+    /// `mov al,byte ptr <group>:<symbol>` — 8-bit moffs8 load
+    /// (A0 lo hi). Same FIXUPP shape as MovAxGroupSym.
+    MovAlGroupSym { group: String, symbol: String },
+    /// `add ax,word ptr <group>:<symbol>` — ADD r16,r/m16 with
+    /// disp16-only addressing (`03 06 lo hi`). Same FIXUPP shape.
+    AddAxGroupSym { group: String, symbol: String },
+    /// `cbw` — 98. Sign-extend AL to AX. Used after loading a `char`
+    /// global to widen it to int for arithmetic (fixture 130).
+    Cbw,
+    /// `lea <reg16>,word ptr [bp+<offset>]` — 8D xx dd. Load
+    /// effective address into a 16-bit register. Used by BCC to
+    /// compute the address of a stack local (e.g. for `p = &a;`
+    /// in fixture 136).
+    LeaReg16BpRel { dst: Reg16, offset: i16 },
+    /// `mov word ptr [si],<imm16>` — C7 04 lo hi. Store an
+    /// immediate through a pointer in SI (fixture 136's `p->x = 7`).
+    MovSiPtrImm { imm: u16 },
+    /// `mov ax,word ptr [si]` — 8B 04. Load through SI pointer.
+    MovAxFromSiPtr,
     /// `mov ax,offset <group>:<symbol>` — load AX with the address
     /// (offset within the group) of a data symbol. Emits `B8 lo hi`
     /// plus the same SegRelGroupTarget FIXUPP. Used for passing
@@ -178,12 +217,52 @@ pub enum Instr {
     /// stack-resident function pointer. Emits `FF 56 dd`. No FIXUPP
     /// (the address is loaded from the local at runtime).
     CallIndirectBpRel { offset: i16 },
-    /// `push ax`
-    PushAx,
-    /// `pop cx` — used to clean up cdecl-pushed arguments after a call.
-    PopCx,
     /// `ret`
     Ret,
+}
+
+/// 8086 16-bit general-purpose registers. The byte encoding is the
+/// standard x86 "reg" field (0..7): AX=0, CX=1, DX=2, BX=3, SP=4,
+/// BP=5, SI=6, DI=7. Used in ModR/M's reg field, as the low 3 bits
+/// of single-byte PUSH/POP/INC/DEC opcodes, and elsewhere.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reg16 {
+    Ax,
+    Cx,
+    Dx,
+    Bx,
+    Sp,
+    Bp,
+    Si,
+    Di,
+}
+
+impl Reg16 {
+    pub fn code(self) -> u8 {
+        match self {
+            Self::Ax => 0,
+            Self::Cx => 1,
+            Self::Dx => 2,
+            Self::Bx => 3,
+            Self::Sp => 4,
+            Self::Bp => 5,
+            Self::Si => 6,
+            Self::Di => 7,
+        }
+    }
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "ax" => Some(Self::Ax),
+            "cx" => Some(Self::Cx),
+            "dx" => Some(Self::Dx),
+            "bx" => Some(Self::Bx),
+            "sp" => Some(Self::Sp),
+            "bp" => Some(Self::Bp),
+            "si" => Some(Self::Si),
+            "di" => Some(Self::Di),
+            _ => None,
+        }
+    }
 }
 
 /// 8086 8-bit general-purpose registers. The byte encoding for each

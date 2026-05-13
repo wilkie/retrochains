@@ -1,0 +1,4 @@
+description = "for loop summing 0..9. -c parallel of 061. Exercises push/pop di, mov ax,si/di register-to-register, add ax,si."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

@@ -1,0 +1,4 @@
+description = "Initialized int global. Same source as 084 but -c. Exercises _DATA LEDATA with concrete bytes."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]
