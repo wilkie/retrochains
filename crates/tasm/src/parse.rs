@@ -346,7 +346,14 @@ fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
         "or" => parse_or(rest, line.line_no),
         "xor" => parse_xor(rest, line.line_no),
         "cmp" => parse_cmp(rest, line.line_no),
-        "imul" => parse_single_op_word_ptr(rest, line.line_no, "imul", |o| Instr::ImulBpRel { offset: o }),
+        "imul" => {
+            // Two forms: `imul word ptr [bp+N]` (BpRel) and
+            // `imul <reg16>` (single reg operand, fixture 155).
+            if let Some(reg) = Reg16::parse(rest) {
+                return Ok(Instr::ImulReg16 { reg });
+            }
+            parse_single_op_word_ptr(rest, line.line_no, "imul", |o| Instr::ImulBpRel { offset: o })
+        }
         "idiv" => parse_single_op_word_ptr(rest, line.line_no, "idiv", |o| Instr::IdivBpRel { offset: o }),
         "cwd" => Ok(Instr::Cwd),
         "cbw" => Ok(Instr::Cbw),
@@ -440,14 +447,20 @@ fn parse_mov(operands: &str, line_no: usize) -> AsmResult<Instr> {
         if let Some(offset) = parse_bp_relative(rhs) {
             return Ok(Instr::MovAxBpRel { offset });
         }
-        if let Some((group, symbol)) = parse_offset_group_symbol(rhs) {
-            return Ok(Instr::MovAxOffsetGroupSym {
+        if let Some((group, symbol)) = parse_group_symbol(rhs) {
+            return Ok(Instr::MovAxGroupSym {
                 group: group.to_string(),
                 symbol: symbol.to_string(),
             });
         }
-        if let Some((group, symbol)) = parse_group_symbol(rhs) {
-            return Ok(Instr::MovAxGroupSym {
+    }
+    // Generic 16-bit `mov <reg>,offset <group>:<sym>` (fixtures 108
+    // for AX, 157 for SI). Tried before reg-imm so it doesn't get
+    // shadowed by a misparse of `offset` as a label.
+    if let Some(reg) = Reg16::parse(lhs) {
+        if let Some((group, symbol)) = parse_offset_group_symbol(rhs) {
+            return Ok(Instr::MovReg16OffsetGroupSym {
+                reg,
                 group: group.to_string(),
                 symbol: symbol.to_string(),
             });
@@ -462,6 +475,9 @@ fn parse_mov(operands: &str, line_no: usize) -> AsmResult<Instr> {
         }
     }
     if lhs == "al" {
+        if rhs == "byte ptr [si]" {
+            return Ok(Instr::MovAlFromSiPtr);
+        }
         // `mov al,byte ptr DGROUP:_g` — 8-bit moffs8 load.
         if let Some((group, symbol)) = parse_byte_group_symbol(rhs) {
             return Ok(Instr::MovAlGroupSym {
@@ -607,6 +623,12 @@ fn parse_cmp(operands: &str, line_no: usize) -> AsmResult<Instr> {
         // every constant K, not the generic 83 F8 form.
         if let Some(imm) = parse_imm16(rhs) {
             return Ok(Instr::CmpAxImm { imm });
+        }
+    }
+    // `cmp word ptr [bp+N],imm8` — compare stack local to small imm.
+    if let Some(offset) = parse_word_bp_relative(lhs) {
+        if let Some(imm) = parse_imm8_signed(rhs) {
+            return Ok(Instr::CmpBpRelImm8 { offset, imm });
         }
     }
     if let Some(reg) = Reg16::parse(lhs) {

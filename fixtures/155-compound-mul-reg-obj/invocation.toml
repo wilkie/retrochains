@@ -1,0 +1,4 @@
+description = "x*=3 on enregistered local. -c parallel of 069. Exercises imul r16."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

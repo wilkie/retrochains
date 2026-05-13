@@ -1,0 +1,4 @@
+description = "x+=1 on enregistered local. -c parallel of 067. Should work as-is (inc r16)."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

@@ -130,6 +130,11 @@ pub enum Instr {
     /// AX form has a dedicated opcode and is always 3 bytes
     /// regardless of K's width.
     CmpAxImm { imm: u16 },
+    /// `cmp word ptr [bp+<offset>],<imm8>` — 83 7E dd ii. Compare a
+    /// stack local directly against a small sign-extended immediate.
+    /// BCC uses this for short-circuit logical lowering of patterns
+    /// like `if (x < K) ...` (fixture 149).
+    CmpBpRelImm8 { offset: i16, imm: i8 },
     /// `sub ax,word ptr [bp+<offset>]` — 2B 46 dd
     SubAxBpRel { offset: i16 },
     /// `and ax,word ptr [bp+<offset>]` — 23 46 dd
@@ -190,6 +195,12 @@ pub enum Instr {
     /// `mov al,byte ptr <group>:<symbol>` — 8-bit moffs8 load
     /// (A0 lo hi). Same FIXUPP shape as MovAxGroupSym.
     MovAlGroupSym { group: String, symbol: String },
+    /// `mov al,byte ptr [si]` — 8A 04. 8-bit load through SI pointer.
+    MovAlFromSiPtr,
+    /// `imul <reg16>` — F7 (mod=11 /5 r/m=reg). Single-operand signed
+    /// multiply with a register operand. Used when the operand is
+    /// register-resident, e.g. `x *= 3` after BCC enregisters x.
+    ImulReg16 { reg: Reg16 },
     /// `add ax,word ptr <group>:<symbol>` — ADD r16,r/m16 with
     /// disp16-only addressing (`03 06 lo hi`). Same FIXUPP shape.
     AddAxGroupSym { group: String, symbol: String },
@@ -218,11 +229,11 @@ pub enum Instr {
     NegReg16 { reg: Reg16 },
     /// `not <reg16>` — F7 (mod=11 /2 r/m=reg). One's-complement.
     NotReg16 { reg: Reg16 },
-    /// `mov ax,offset <group>:<symbol>` — load AX with the address
-    /// (offset within the group) of a data symbol. Emits `B8 lo hi`
-    /// plus the same SegRelGroupTarget FIXUPP. Used for passing
-    /// string literals and globals by-reference (fixture 108).
-    MovAxOffsetGroupSym { group: String, symbol: String },
+    /// `mov <reg16>,offset <group>:<symbol>` — load a 16-bit register
+    /// with the segment-relative address of a data symbol. Emits
+    /// `B8+rc lo hi` plus a SegRelGroupTarget FIXUPP. Covers fixture
+    /// 108 (`mov ax,...`) and fixture 157 (`mov si,...`).
+    MovReg16OffsetGroupSym { reg: Reg16, group: String, symbol: String },
     /// `mov word ptr [bp+<offset>],offset <symbol>` — store a
     /// function or data symbol's address into a stack local. Emits
     /// `C7 46 dd lo hi` plus a SegRelTargetFrameSegment FIXUPP. Used

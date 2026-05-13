@@ -1,0 +1,4 @@
+description = "x&&y as expression value. -c parallel of 059. Same compare idiom, different early-exit polarity."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

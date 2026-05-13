@@ -190,6 +190,7 @@ fn instr_size(instr: &Instr) -> usize {
         | Instr::AddReg16Reg16 { .. }
         | Instr::OrReg16Reg16 { .. } => 2,
         Instr::CmpReg16Imm8 { .. } | Instr::CmpAxImm { .. } => 3,
+        Instr::CmpBpRelImm8 { .. } => 4,
         Instr::JmpShort(_) | Instr::ShlAxCl | Instr::SarAxCl => 2,
         Instr::Cwd => 1,
         Instr::JmpCondShort { .. } => 2,
@@ -213,7 +214,9 @@ fn instr_size(instr: &Instr) -> usize {
         Instr::CallNear(_) => 3,
         Instr::MovAxGroupSym { .. }
         | Instr::MovAlGroupSym { .. }
-        | Instr::MovAxOffsetGroupSym { .. } => 3,
+        | Instr::MovReg16OffsetGroupSym { .. } => 3,
+        Instr::MovAlFromSiPtr => 2,
+        Instr::ImulReg16 { .. } => 2,
         Instr::AddAxGroupSym { .. } => 4,
         Instr::Cbw => 1,
         Instr::LeaReg16BpRel { .. } => 3,
@@ -271,6 +274,15 @@ fn emit_instr(
             // `cmp ax,imm16` → 3D lo hi (AX-accumulator special form).
             out.push(0x3D);
             out.extend_from_slice(&imm.to_le_bytes());
+        }
+        Instr::CmpBpRelImm8 { offset, imm } => {
+            // `cmp word ptr [bp+disp8],imm8 (sign-extended)` → 83 7E dd ii.
+            // ModR/M 7E = mod=01 /7(CMP) r/m=110([bp+disp8]).
+            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
+            out.push(0x83);
+            out.push(0x7E);
+            out.push(disp as u8);
+            out.push(*imm as u8);
         }
         Instr::MovReg16Imm { reg, imm } => {
             // `mov r16,imm16` → B8+rc lo hi.
@@ -458,11 +470,23 @@ fn emit_instr(
             // A0 is the 8-bit moffs8 sibling of A1.
             emit_group_sym_lea(&[0xA0], group, symbol, symbols, group_idx, out, fixups)?;
         }
-        Instr::MovAxOffsetGroupSym { group, symbol } => {
-            // `mov ax,offset <group>:<symbol>` → B8 lo hi (mov ax,imm16
-            // where imm16 = symbol's segment-relative offset). Same
-            // FIXUPP shape as MovAxGroupSym.
-            emit_group_sym_lea(&[0xB8], group, symbol, symbols, group_idx, out, fixups)?;
+        Instr::MovReg16OffsetGroupSym { reg, group, symbol } => {
+            // `mov r16,offset <group>:<symbol>` → (B8+rc) lo hi.
+            // Same FIXUPP shape as MovAxGroupSym. The single opcode
+            // byte varies by destination register.
+            let opcode = 0xB8 | reg.code();
+            emit_group_sym_lea(&[opcode], group, symbol, symbols, group_idx, out, fixups)?;
+        }
+        Instr::MovAlFromSiPtr => {
+            // `mov al,byte ptr [si]` → 8A 04. 8A is mov r8,r/m8.
+            // ModR/M 04 = mod=00 reg=AL r/m=100([si]).
+            out.push(0x8A);
+            out.push(0x04);
+        }
+        Instr::ImulReg16 { reg } => {
+            // `imul r16` → F7 (mod=11 /5 r/m=<reg>).
+            out.push(0xF7);
+            out.push(0b11_101_000 | reg.code());
         }
         Instr::AddAxGroupSym { group, symbol } => {
             // `add ax,word ptr <group>:<symbol>` → 03 06 lo hi.

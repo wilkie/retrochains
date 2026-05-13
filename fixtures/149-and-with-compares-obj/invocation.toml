@@ -1,0 +1,4 @@
+description = "Short-circuit AND with compares. -c parallel of 058. Exercises cmp [bp-N],imm8 and the jge/jle-over-mov idiom."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

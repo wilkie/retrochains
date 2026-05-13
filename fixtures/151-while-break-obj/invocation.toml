@@ -1,0 +1,4 @@
+description = "while loop with break. -c parallel of 063. Should work as-is."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]
