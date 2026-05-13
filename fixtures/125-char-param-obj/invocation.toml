@@ -1,0 +1,4 @@
+description = "char parameter passed by value. Same source as 052 but -c. Exercises positive-bp parameter loads (byte ptr [bp+4])."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

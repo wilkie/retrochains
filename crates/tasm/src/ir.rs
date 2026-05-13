@@ -115,6 +115,45 @@ pub enum Instr {
     XorAxBpRel { offset: i16 },
     /// `cmp ax,word ptr [bp+<offset>]` — 3B 46 dd
     CmpAxBpRel { offset: i16 },
+    /// `imul word ptr [bp+<offset>]` — F7 6E dd. Single-operand signed
+    /// multiply: AX = AX * src; high half goes to DX (discarded for
+    /// `int * int` returning `int`).
+    ImulBpRel { offset: i16 },
+    /// `idiv word ptr [bp+<offset>]` — F7 7E dd. Single-operand
+    /// signed divide of DX:AX by src; quotient in AX, remainder in
+    /// DX. Always preceded by `cwd` to sign-extend AX into DX.
+    IdivBpRel { offset: i16 },
+    /// `cwd` — 99. Sign-extend AX into DX:AX.
+    Cwd,
+    /// `mov <reg8>,byte ptr [bp+<offset>]` — 8A xx dd. Generic 8-bit
+    /// load from a stack local. Used for shift counts (CL) and char
+    /// locals/params (DL/BL/CL).
+    MovReg8BpRel { reg: Reg8, offset: i16 },
+    /// `mov byte ptr [bp+<offset>],<reg8>` — 88 xx dd. Store an 8-bit
+    /// register into a stack local.
+    MovBpRelReg8 { offset: i16, reg: Reg8 },
+    /// `mov <reg8>,<imm8>` — B0+rc ii. Set an 8-bit register to a
+    /// constant.
+    MovReg8Imm8 { reg: Reg8, imm: u8 },
+    /// `mov <dst>,<src>` — 8A xx. Copy between two 8-bit registers.
+    MovReg8Reg8 { dst: Reg8, src: Reg8 },
+    /// `mov byte ptr [bp+<offset>],<imm8>` — C6 46 dd ii. Store a
+    /// constant byte into a stack local (fixture 011's `char c=1`).
+    MovBpRelImm8 { offset: i16, imm: u8 },
+    /// `inc <reg8>` — FE C0+rc. Increment an 8-bit register.
+    IncReg8 { reg: Reg8 },
+    /// `dec <reg8>` — FE C8+rc. Decrement an 8-bit register.
+    DecReg8 { reg: Reg8 },
+    /// `cmp <reg8>,<imm8>` — 80 F8+rc ii. Compare an 8-bit register
+    /// to a constant.
+    CmpReg8Imm8 { reg: Reg8, imm: u8 },
+    /// `shl ax,cl` — D3 E0. Variable-count logical left shift of AX.
+    ShlAxCl,
+    /// `sar ax,cl` — D3 F8. Variable-count arithmetic (signed) right
+    /// shift of AX. BCC uses SAR for signed `int >> ...`.
+    SarAxCl,
+    /// `mov ax,dx` — 8B C2. Used after IDIV to pick up the remainder.
+    MovAxDx,
     /// `j<cc> short <label>` — Jcc rel8 family.
     JmpCondShort { cond: JmpCond, target: String },
     /// `jmp short <label>`
@@ -145,6 +184,50 @@ pub enum Instr {
     PopCx,
     /// `ret`
     Ret,
+}
+
+/// 8086 8-bit general-purpose registers. The byte encoding for each
+/// is the standard x86 "reg" field (0..7): AL=0, CL=1, DL=2, BL=3,
+/// AH=4, CH=5, DH=6, BH=7. Used both in ModR/M's reg field and as
+/// the low 3 bits of single-byte `MOV r8, imm8` opcodes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reg8 {
+    Al,
+    Cl,
+    Dl,
+    Bl,
+    Ah,
+    Ch,
+    Dh,
+    Bh,
+}
+
+impl Reg8 {
+    pub fn code(self) -> u8 {
+        match self {
+            Self::Al => 0,
+            Self::Cl => 1,
+            Self::Dl => 2,
+            Self::Bl => 3,
+            Self::Ah => 4,
+            Self::Ch => 5,
+            Self::Dh => 6,
+            Self::Bh => 7,
+        }
+    }
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "al" => Some(Self::Al),
+            "cl" => Some(Self::Cl),
+            "dl" => Some(Self::Dl),
+            "bl" => Some(Self::Bl),
+            "ah" => Some(Self::Ah),
+            "ch" => Some(Self::Ch),
+            "dh" => Some(Self::Dh),
+            "bh" => Some(Self::Bh),
+            _ => None,
+        }
+    }
 }
 
 /// Signed-comparison conditional-jump opcodes. The byte encoding of

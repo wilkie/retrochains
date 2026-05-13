@@ -3,7 +3,8 @@
 //! than a real grammar.
 
 use crate::ir::{
-    AsmError, AsmResult, Group, Instr, JmpCond, Module, SegAlign, SegCombine, SegItem, Segment,
+    AsmError, AsmResult, Group, Instr, JmpCond, Module, Reg8, SegAlign, SegCombine, SegItem,
+    Segment,
 };
 use crate::lex::{tokenize, Line};
 
@@ -344,7 +345,32 @@ fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
         "or" => parse_alu_ax_mem(rest, line.line_no, "or", |o| Instr::OrAxBpRel { offset: o }),
         "xor" if rest == "ax,ax" => Ok(Instr::XorAxAx),
         "xor" => parse_alu_ax_mem(rest, line.line_no, "xor", |o| Instr::XorAxBpRel { offset: o }),
-        "cmp" => parse_alu_ax_mem(rest, line.line_no, "cmp", |o| Instr::CmpAxBpRel { offset: o }),
+        "cmp" => parse_cmp(rest, line.line_no),
+        "imul" => parse_single_op_word_ptr(rest, line.line_no, "imul", |o| Instr::ImulBpRel { offset: o }),
+        "idiv" => parse_single_op_word_ptr(rest, line.line_no, "idiv", |o| Instr::IdivBpRel { offset: o }),
+        "cwd" => Ok(Instr::Cwd),
+        "shl" if rest == "ax,cl" => Ok(Instr::ShlAxCl),
+        "sar" if rest == "ax,cl" => Ok(Instr::SarAxCl),
+        "inc" => {
+            if let Some(reg) = Reg8::parse(rest) {
+                Ok(Instr::IncReg8 { reg })
+            } else {
+                Err(AsmError::new(
+                    line.line_no,
+                    format!("inc: unsupported operand form `{rest}`"),
+                ))
+            }
+        }
+        "dec" => {
+            if let Some(reg) = Reg8::parse(rest) {
+                Ok(Instr::DecReg8 { reg })
+            } else {
+                Err(AsmError::new(
+                    line.line_no,
+                    format!("dec: unsupported operand form `{rest}`"),
+                ))
+            }
+        }
         "je" | "jne" | "jl" | "jle" | "jg" | "jge" => parse_jmp_cond(kw, rest, line.line_no),
         "jmp" => {
             let r = rest.strip_prefix("short").map(str::trim_start).unwrap_or(rest);
@@ -392,6 +418,9 @@ fn parse_mov(operands: &str, line_no: usize) -> AsmResult<Instr> {
         return Ok(Instr::MovSpBp);
     }
     if lhs == "ax" {
+        if rhs == "dx" {
+            return Ok(Instr::MovAxDx);
+        }
         if let Some(offset) = parse_bp_relative(rhs) {
             return Ok(Instr::MovAxBpRel { offset });
         }
@@ -411,7 +440,23 @@ fn parse_mov(operands: &str, line_no: usize) -> AsmResult<Instr> {
             return Ok(Instr::MovAxImm(imm));
         }
     }
-    if let Some(offset) = parse_bp_relative(lhs) {
+    // Generic 8-bit register operand on the LHS.
+    if let Some(reg) = Reg8::parse(lhs) {
+        if let Some(offset) = parse_byte_bp_relative(rhs) {
+            return Ok(Instr::MovReg8BpRel { reg, offset });
+        }
+        if let Some(src) = Reg8::parse(rhs) {
+            return Ok(Instr::MovReg8Reg8 { dst: reg, src });
+        }
+        if let Some(imm) = parse_imm8(rhs) {
+            return Ok(Instr::MovReg8Imm8 { reg, imm });
+        }
+    }
+    // LHS `word ptr [bp+N]` — int-width stack store. We *require*
+    // the explicit `word ptr` prefix here so that `mov byte ptr
+    // [bp+N],1` doesn't route to the word-store path (which would
+    // emit a 5-byte C7 encoding instead of the correct 4-byte C6).
+    if let Some(offset) = parse_word_bp_relative(lhs) {
         if let Some(imm) = parse_imm16(rhs) {
             return Ok(Instr::MovBpRelImm { offset, imm });
         }
@@ -422,6 +467,15 @@ fn parse_mov(operands: &str, line_no: usize) -> AsmResult<Instr> {
                 offset,
                 symbol: sym.to_string(),
             });
+        }
+    }
+    // LHS `byte ptr [bp+N]` — 8-bit stack store.
+    if let Some(offset) = parse_byte_bp_relative(lhs) {
+        if let Some(imm) = parse_imm8(rhs) {
+            return Ok(Instr::MovBpRelImm8 { offset, imm });
+        }
+        if let Some(src) = Reg8::parse(rhs) {
+            return Ok(Instr::MovBpRelReg8 { offset, reg: src });
         }
     }
     Err(AsmError::new(
@@ -443,6 +497,45 @@ fn parse_sub(operands: &str, line_no: usize) -> AsmResult<Instr> {
     }
     // Otherwise: try the AX/mem form.
     parse_alu_ax_mem(operands, line_no, "sub", |o| Instr::SubAxBpRel { offset: o })
+}
+
+/// Generic `<op> word ptr [bp+<offset>]` parser — single-operand
+/// instructions like `imul`, `idiv`, `mul`, `div`, `neg`, `not`.
+fn parse_single_op_word_ptr(
+    operands: &str,
+    line_no: usize,
+    op_name: &str,
+    make: impl FnOnce(i16) -> Instr,
+) -> AsmResult<Instr> {
+    if let Some(offset) = parse_bp_relative(operands) {
+        return Ok(make(offset));
+    }
+    Err(AsmError::new(
+        line_no,
+        format!("{op_name}: unsupported operand form `{operands}`"),
+    ))
+}
+
+/// `cmp <lhs>,<rhs>` covers two forms: `cmp ax,word ptr [bp+N]`
+/// (16-bit) and `cmp <reg8>,<imm8>` (fixture 124).
+fn parse_cmp(operands: &str, line_no: usize) -> AsmResult<Instr> {
+    let (lhs, rhs) = split_comma(operands).ok_or_else(|| {
+        AsmError::new(line_no, format!("cmp: expected `lhs,rhs`, got {operands:?}"))
+    })?;
+    if lhs == "ax" {
+        if let Some(offset) = parse_bp_relative(rhs) {
+            return Ok(Instr::CmpAxBpRel { offset });
+        }
+    }
+    if let Some(reg) = Reg8::parse(lhs) {
+        if let Some(imm) = parse_imm8(rhs) {
+            return Ok(Instr::CmpReg8Imm8 { reg, imm });
+        }
+    }
+    Err(AsmError::new(
+        line_no,
+        format!("cmp: unsupported operand form `{operands}`"),
+    ))
 }
 
 /// Generic `<op> ax,word ptr [bp+<offset>]` parser. The four ALU
@@ -493,6 +586,18 @@ fn parse_jmp_cond(kw: &str, operands: &str, line_no: usize) -> AsmResult<Instr> 
 
 fn split_comma(s: &str) -> Option<(&str, &str)> {
     s.find(',').map(|i| (s[..i].trim(), s[i + 1..].trim()))
+}
+
+/// Parse a decimal literal as an 8-bit value. None if the string
+/// isn't a bare decimal in `-128..=255`.
+fn parse_imm8(s: &str) -> Option<u8> {
+    let s = s.trim();
+    let v = s.parse::<i32>().ok()?;
+    if (-128..=255).contains(&v) {
+        Some(v as u8)
+    } else {
+        None
+    }
 }
 
 /// Parse a decimal literal as a 16-bit value. Returns `None` if the
@@ -563,11 +668,39 @@ fn parse_group_symbol(s: &str) -> Option<(&str, &str)> {
 /// Parse `word ptr [bp<sign><offset>]` or `[bp<sign><offset>]`.
 /// Returns the signed displacement.
 fn parse_bp_relative(s: &str) -> Option<i16> {
+    parse_bp_relative_with_width(s, BpWidth::Any)
+}
+
+/// Same as [`parse_bp_relative`] but requires an explicit `byte ptr`
+/// prefix. Used when an 8-bit operand context shouldn't accidentally
+/// accept a `word ptr` reference.
+fn parse_byte_bp_relative(s: &str) -> Option<i16> {
+    parse_bp_relative_with_width(s, BpWidth::Byte)
+}
+
+/// Same as [`parse_bp_relative`] but requires an explicit `word ptr`
+/// prefix. Used on LHS stack-store opcodes where the width prefix
+/// chooses the opcode (C6 vs C7).
+fn parse_word_bp_relative(s: &str) -> Option<i16> {
+    parse_bp_relative_with_width(s, BpWidth::Word)
+}
+
+enum BpWidth {
+    Any,
+    Byte,
+    Word,
+}
+
+fn parse_bp_relative_with_width(s: &str, width: BpWidth) -> Option<i16> {
     let s = s.trim();
-    let inside = s
-        .strip_prefix("word ptr ")
-        .or_else(|| s.strip_prefix("byte ptr "))
-        .unwrap_or(s);
+    let inside = match width {
+        BpWidth::Any => s
+            .strip_prefix("word ptr ")
+            .or_else(|| s.strip_prefix("byte ptr "))
+            .unwrap_or(s),
+        BpWidth::Byte => s.strip_prefix("byte ptr ")?,
+        BpWidth::Word => s.strip_prefix("word ptr ")?,
+    };
     let inside = inside.strip_prefix('[')?.strip_suffix(']')?;
     let inside = inside.strip_prefix("bp")?;
     let inside = inside.trim_start();

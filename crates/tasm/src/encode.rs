@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 
 use crate::ir::{
-    AsmError, AsmResult, FixupKind, FixupReq, Instr, Module, SegItem, Segment,
+    AsmError, AsmResult, FixupKind, FixupReq, Instr, Module, Reg8, SegItem, Segment,
 };
 
 /// One segment's encoded output. The notional `size` (used for the
@@ -186,7 +186,14 @@ fn instr_size(instr: &Instr) -> usize {
         | Instr::PopCx
         | Instr::Ret
         | Instr::DecSp => 1,
-        Instr::MovBpSp | Instr::MovSpBp | Instr::XorAxAx | Instr::JmpShort(_) => 2,
+        Instr::MovBpSp
+        | Instr::MovSpBp
+        | Instr::XorAxAx
+        | Instr::JmpShort(_)
+        | Instr::ShlAxCl
+        | Instr::SarAxCl
+        | Instr::MovAxDx => 2,
+        Instr::Cwd => 1,
         Instr::JmpCondShort { .. } => 2,
         Instr::MovAxImm(_) | Instr::SubSpImm(_) => 3,
         Instr::MovAxBpRel { .. }
@@ -195,7 +202,16 @@ fn instr_size(instr: &Instr) -> usize {
         | Instr::AndAxBpRel { .. }
         | Instr::OrAxBpRel { .. }
         | Instr::XorAxBpRel { .. }
-        | Instr::CmpAxBpRel { .. } => 3,
+        | Instr::CmpAxBpRel { .. }
+        | Instr::ImulBpRel { .. }
+        | Instr::IdivBpRel { .. }
+        | Instr::MovReg8BpRel { .. }
+        | Instr::MovBpRelReg8 { .. } => 3,
+        Instr::MovReg8Imm8 { .. } => 2,
+        Instr::MovReg8Reg8 { .. } => 2,
+        Instr::MovBpRelImm8 { .. } => 4,
+        Instr::IncReg8 { .. } | Instr::DecReg8 { .. } => 2,
+        Instr::CmpReg8Imm8 { .. } => 3,
         Instr::CallNear(_) => 3,
         Instr::MovAxGroupSym { .. } | Instr::MovAxOffsetGroupSym { .. } => 3,
         Instr::MovBpRelImm { .. } | Instr::MovBpRelOffsetSym { .. } => 5,
@@ -258,6 +274,93 @@ fn emit_instr(
         Instr::OrAxBpRel { offset } => emit_alu_ax_bp_rel(0x0B, *offset, out),
         Instr::XorAxBpRel { offset } => emit_alu_ax_bp_rel(0x33, *offset, out),
         Instr::CmpAxBpRel { offset } => emit_alu_ax_bp_rel(0x3B, *offset, out),
+        Instr::ImulBpRel { offset } => {
+            // `imul word ptr [bp+disp8]` → F7 6E dd. F7 is the Grp3
+            // r/m16 escape; ModR/M 6E = mod=01 /5(IMUL) r/m=110.
+            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
+            out.push(0xF7);
+            out.push(0x6E);
+            out.push(disp as u8);
+        }
+        Instr::IdivBpRel { offset } => {
+            // `idiv word ptr [bp+disp8]` → F7 7E dd. ModR/M 7E = /7(IDIV).
+            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
+            out.push(0xF7);
+            out.push(0x7E);
+            out.push(disp as u8);
+        }
+        Instr::Cwd => out.push(0x99),
+        Instr::MovReg8BpRel { reg, offset } => {
+            // `mov <reg8>,byte ptr [bp+disp8]` → 8A xx dd. 8A = mov
+            // r8,r/m8. ModR/M = mod=01 reg=<reg-code> r/m=110.
+            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
+            out.push(0x8A);
+            out.push(0b01_000_110 | (reg.code() << 3));
+            out.push(disp as u8);
+        }
+        Instr::MovBpRelReg8 { offset, reg } => {
+            // `mov byte ptr [bp+disp8],<reg8>` → 88 xx dd. 88 = mov
+            // r/m8,r8 (note source/dest swap vs 8A). ModR/M = mod=01
+            // reg=<reg-code> r/m=110.
+            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
+            out.push(0x88);
+            out.push(0b01_000_110 | (reg.code() << 3));
+            out.push(disp as u8);
+        }
+        Instr::MovReg8Imm8 { reg, imm } => {
+            // `mov <reg8>,imm8` → B0+rc ii.
+            out.push(0xB0 | reg.code());
+            out.push(*imm);
+        }
+        Instr::MovReg8Reg8 { dst, src } => {
+            // `mov <dst>,<src>` (both r8) → 8A xx where xx is mod=11,
+            // reg=<dst-code>, r/m=<src-code>.
+            out.push(0x8A);
+            out.push(0b11_000_000 | (dst.code() << 3) | src.code());
+        }
+        Instr::MovBpRelImm8 { offset, imm } => {
+            // `mov byte ptr [bp+disp8],imm8` → C6 46 dd ii.
+            // C6 = mov r/m8,imm8. ModR/M 46 = mod=01 /0 r/m=110.
+            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
+            out.push(0xC6);
+            out.push(0x46);
+            out.push(disp as u8);
+            out.push(*imm);
+        }
+        Instr::IncReg8 { reg } => {
+            // `inc <reg8>` → FE C0+rc. FE = Grp4 r/m8. ModR/M mod=11
+            // /0 r/m=<reg-code>.
+            out.push(0xFE);
+            out.push(0xC0 | reg.code());
+        }
+        Instr::DecReg8 { reg } => {
+            // `dec <reg8>` → FE C8+rc. ModR/M mod=11 /1 r/m=<reg-code>.
+            out.push(0xFE);
+            out.push(0xC8 | reg.code());
+        }
+        Instr::CmpReg8Imm8 { reg, imm } => {
+            // `cmp <reg8>,imm8` → 80 F8+rc ii. 80 = Grp1 r/m8,imm8.
+            // ModR/M mod=11 /7(CMP) r/m=<reg-code>.
+            out.push(0x80);
+            out.push(0xF8 | reg.code());
+            out.push(*imm);
+        }
+        Instr::ShlAxCl => {
+            // `shl ax,cl` → D3 E0. D3 = Grp2 r/m16,CL. ModR/M E0 =
+            // mod=11 /4(SHL) r/m=000(AX).
+            out.push(0xD3);
+            out.push(0xE0);
+        }
+        Instr::SarAxCl => {
+            // `sar ax,cl` → D3 F8. ModR/M F8 = mod=11 /7(SAR) r/m=AX.
+            out.push(0xD3);
+            out.push(0xF8);
+        }
+        Instr::MovAxDx => {
+            // `mov ax,dx` → 8B C2. ModR/M C2 = mod=11 reg=AX r/m=DX.
+            out.push(0x8B);
+            out.push(0xC2);
+        }
         Instr::JmpCondShort { cond, target } => {
             let target_off = symbols.get(target).map(|l| l.offset).ok_or_else(|| {
                 AsmError::new(0, format!("Jcc: unresolved label `{target}`"))

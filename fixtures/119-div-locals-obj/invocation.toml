@@ -1,0 +1,4 @@
+description = "Two int locals divided at return. Same source as 012 but -c. Exercises CWD + single-operand IDIV (F7 /7)."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

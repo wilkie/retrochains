@@ -1,0 +1,4 @@
+description = "Two int locals multiplied at return. Same source as 008 but -c. Exercises single-operand IMUL (F7 /5)."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]
