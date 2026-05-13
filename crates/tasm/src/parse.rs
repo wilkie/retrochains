@@ -343,19 +343,21 @@ fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
             Ok(Instr::JmpShort(r.to_string()))
         }
         "call" => {
-            // `near ptr <label>` is the only form BCC's `-S` emits in
-            // small model. Strip the `near ptr` prefix; what remains
-            // is the target symbol.
-            let target = rest
+            // `call near ptr <label>` — direct near call.
+            if let Some(target) = rest
                 .strip_prefix("near ptr ")
                 .or_else(|| rest.strip_prefix("near\tptr "))
-                .ok_or_else(|| {
-                    AsmError::new(
-                        line.line_no,
-                        format!("call: unsupported operand form `{rest}`"),
-                    )
-                })?;
-            Ok(Instr::CallNear(target.trim().to_string()))
+            {
+                return Ok(Instr::CallNear(target.trim().to_string()));
+            }
+            // `call word ptr [bp+<offset>]` — indirect through stack.
+            if let Some(offset) = parse_bp_relative(rest) {
+                return Ok(Instr::CallIndirectBpRel { offset });
+            }
+            Err(AsmError::new(
+                line.line_no,
+                format!("call: unsupported operand form `{rest}`"),
+            ))
         }
         "ret" => Ok(Instr::Ret),
         _ => Err(AsmError::new(
@@ -404,6 +406,14 @@ fn parse_mov(operands: &str, line_no: usize) -> AsmResult<Instr> {
     if let Some(offset) = parse_bp_relative(lhs) {
         if let Some(imm) = parse_imm16(rhs) {
             return Ok(Instr::MovBpRelImm { offset, imm });
+        }
+        // `mov word ptr [bp-N],offset _f` — store function/data
+        // symbol's address into stack local (fixture 110).
+        if let Some(sym) = parse_offset_symbol(rhs) {
+            return Ok(Instr::MovBpRelOffsetSym {
+                offset,
+                symbol: sym.to_string(),
+            });
         }
     }
     Err(AsmError::new(
@@ -459,6 +469,23 @@ fn parse_imm16(s: &str) -> Option<u16> {
         }
     }
     None
+}
+
+/// Parse `offset <symbol>` (no group prefix) — e.g. `offset _f`.
+/// The frame for such fixups is the target's own segment (F5).
+fn parse_offset_symbol(s: &str) -> Option<&str> {
+    let s = s.trim();
+    let sym = s.strip_prefix("offset ")?;
+    let sym = sym.trim();
+    // Reject `offset GROUP:sym` forms here — those route through
+    // parse_offset_group_symbol instead.
+    if sym.contains(':') {
+        return None;
+    }
+    if sym.is_empty() {
+        return None;
+    }
+    Some(sym)
 }
 
 /// Parse `offset <group>:<symbol>` (e.g. `offset DGROUP:s@`).

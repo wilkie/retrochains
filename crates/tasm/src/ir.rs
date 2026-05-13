@@ -118,6 +118,15 @@ pub enum Instr {
     /// plus the same SegRelGroupTarget FIXUPP. Used for passing
     /// string literals and globals by-reference (fixture 108).
     MovAxOffsetGroupSym { group: String, symbol: String },
+    /// `mov word ptr [bp+<offset>],offset <symbol>` — store a
+    /// function or data symbol's address into a stack local. Emits
+    /// `C7 46 dd lo hi` plus a SegRelTargetFrameSegment FIXUPP. Used
+    /// for function-pointer init (fixture 110).
+    MovBpRelOffsetSym { offset: i16, symbol: String },
+    /// `call word ptr [bp+<offset>]` — indirect near call through a
+    /// stack-resident function pointer. Emits `FF 56 dd`. No FIXUPP
+    /// (the address is loaded from the local at runtime).
+    CallIndirectBpRel { offset: i16 },
     /// `push ax`
     PushAx,
     /// `pop cx` — used to clean up cdecl-pushed arguments after a call.
@@ -148,6 +157,12 @@ pub enum FixupKind {
     /// F5 (target), target method T6 (EXTDEF, no displacement). Used
     /// for near calls to extern functions (fixture 108's `_printf`).
     SelfRelExtern { extdef_idx: u8 },
+    /// Segment-relative 16-bit offset (M=1, location=1), frame method
+    /// F5 (target), target method T4 (SEGDEF, no displacement). Used
+    /// when storing a code symbol's address into memory — frame is
+    /// the target's segment because `_TEXT` is not in any group
+    /// (fixture 110's `mov [bp-2],offset _f`).
+    SegRelTargetFrameSegment { segment_idx: u8 },
 }
 
 /// A position-bound parse error. The line number is 1-based and refers

@@ -321,8 +321,12 @@ fn collect_extern_calls(unit: &crate::ast::Unit) -> Vec<String> {
     let mut ordered: Vec<String> = Vec::new();
     for f in &unit.functions {
         let Some(body) = &f.body else { continue };
+        // Per-function set of locals (params + declared variables).
+        // A Call whose name is a local is an indirect call through
+        // a function pointer, not an extern reference (fixture 110).
+        let mut locals: HashSet<String> = f.params.iter().map(|p| p.name.clone()).collect();
         for stmt in body {
-            walk_calls(stmt, &defined, &mut seen, &mut ordered);
+            walk_calls(stmt, &defined, &mut locals, &mut seen, &mut ordered);
         }
     }
     ordered
@@ -331,6 +335,7 @@ fn collect_extern_calls(unit: &crate::ast::Unit) -> Vec<String> {
 fn walk_calls(
     stmt: &crate::ast::Stmt,
     defined: &std::collections::HashSet<&str>,
+    locals: &mut std::collections::HashSet<String>,
     seen: &mut std::collections::HashSet<String>,
     ordered: &mut Vec<String>,
 ) {
@@ -338,108 +343,120 @@ fn walk_calls(
     match &stmt.kind {
         StmtKind::Return(e) => {
             if let Some(e) = e {
-                walk_calls_expr(e, defined, seen, ordered);
+                walk_calls_expr(e, defined, locals, seen, ordered);
             }
         }
-        StmtKind::Declare { init, .. } => {
+        StmtKind::Declare { name, init, .. } => {
             if let Some(e) = init {
-                walk_calls_expr(e, defined, seen, ordered);
+                walk_calls_expr(e, defined, locals, seen, ordered);
             }
+            locals.insert(name.clone());
         }
         StmtKind::Assign { value, .. } | StmtKind::CompoundAssign { value, .. } => {
-            walk_calls_expr(value, defined, seen, ordered);
+            walk_calls_expr(value, defined, locals, seen, ordered);
         }
         StmtKind::ArrayAssign { index, value, .. } => {
-            walk_calls_expr(index, defined, seen, ordered);
-            walk_calls_expr(value, defined, seen, ordered);
+            walk_calls_expr(index, defined, locals, seen, ordered);
+            walk_calls_expr(value, defined, locals, seen, ordered);
         }
         StmtKind::DerefAssign { target, value } => {
-            walk_calls_expr(target, defined, seen, ordered);
-            walk_calls_expr(value, defined, seen, ordered);
+            walk_calls_expr(target, defined, locals, seen, ordered);
+            walk_calls_expr(value, defined, locals, seen, ordered);
         }
         StmtKind::MemberAssign { base, value, .. } => {
-            walk_calls_expr(base, defined, seen, ordered);
-            walk_calls_expr(value, defined, seen, ordered);
+            walk_calls_expr(base, defined, locals, seen, ordered);
+            walk_calls_expr(value, defined, locals, seen, ordered);
         }
         StmtKind::If { cond, then_branch, else_branch } => {
-            walk_calls_expr(cond, defined, seen, ordered);
+            walk_calls_expr(cond, defined, locals, seen, ordered);
             for s in then_branch {
-                walk_calls(s, defined, seen, ordered);
+                walk_calls(s, defined, locals, seen, ordered);
             }
             if let Some(b) = else_branch {
                 for s in b {
-                    walk_calls(s, defined, seen, ordered);
+                    walk_calls(s, defined, locals, seen, ordered);
                 }
             }
         }
         StmtKind::While { cond, body } => {
-            walk_calls_expr(cond, defined, seen, ordered);
+            walk_calls_expr(cond, defined, locals, seen, ordered);
             for s in body {
-                walk_calls(s, defined, seen, ordered);
+                walk_calls(s, defined, locals, seen, ordered);
             }
         }
         StmtKind::DoWhile { body, cond } => {
             for s in body {
-                walk_calls(s, defined, seen, ordered);
+                walk_calls(s, defined, locals, seen, ordered);
             }
-            walk_calls_expr(cond, defined, seen, ordered);
+            walk_calls_expr(cond, defined, locals, seen, ordered);
         }
         StmtKind::For { init, cond, step, body } => {
             if let Some(e) = init {
-                walk_calls_expr(e, defined, seen, ordered);
+                walk_calls_expr(e, defined, locals, seen, ordered);
             }
             if let Some(e) = cond {
-                walk_calls_expr(e, defined, seen, ordered);
+                walk_calls_expr(e, defined, locals, seen, ordered);
             }
             if let Some(e) = step {
-                walk_calls_expr(e, defined, seen, ordered);
+                walk_calls_expr(e, defined, locals, seen, ordered);
             }
             for s in body {
-                walk_calls(s, defined, seen, ordered);
+                walk_calls(s, defined, locals, seen, ordered);
             }
         }
         StmtKind::Switch { scrutinee, cases } => {
-            walk_calls_expr(scrutinee, defined, seen, ordered);
+            walk_calls_expr(scrutinee, defined, locals, seen, ordered);
             for c in cases {
                 for s in &c.body {
-                    walk_calls(s, defined, seen, ordered);
+                    walk_calls(s, defined, locals, seen, ordered);
                 }
             }
         }
         StmtKind::Break | StmtKind::Continue => {}
-        StmtKind::ExprStmt(e) => walk_calls_expr(e, defined, seen, ordered),
+        StmtKind::ExprStmt(e) => walk_calls_expr(e, defined, locals, seen, ordered),
     }
 }
 
 fn walk_calls_expr(
     e: &crate::ast::Expr,
     defined: &std::collections::HashSet<&str>,
+    locals: &std::collections::HashSet<String>,
     seen: &mut std::collections::HashSet<String>,
     ordered: &mut Vec<String>,
 ) {
     use crate::ast::ExprKind;
     match &e.kind {
         ExprKind::Call { name, args } => {
-            if !defined.contains(name.as_str()) && seen.insert(name.clone()) {
+            // A call whose name is a known function in this TU is
+            // direct (no EXTRN needed). A call whose name is a local
+            // is an indirect call through a function pointer
+            // (fixture 110) — also no EXTRN. Everything else gets
+            // declared as an extern.
+            if !defined.contains(name.as_str())
+                && !locals.contains(name)
+                && seen.insert(name.clone())
+            {
                 ordered.push(name.clone());
             }
             for a in args {
-                walk_calls_expr(a, defined, seen, ordered);
+                walk_calls_expr(a, defined, locals, seen, ordered);
             }
         }
         ExprKind::BinOp { left, right, .. } | ExprKind::Logical { left, right, .. } => {
-            walk_calls_expr(left, defined, seen, ordered);
-            walk_calls_expr(right, defined, seen, ordered);
+            walk_calls_expr(left, defined, locals, seen, ordered);
+            walk_calls_expr(right, defined, locals, seen, ordered);
         }
         ExprKind::Unary { operand, .. } | ExprKind::Deref(operand) => {
-            walk_calls_expr(operand, defined, seen, ordered);
+            walk_calls_expr(operand, defined, locals, seen, ordered);
         }
-        ExprKind::AssignExpr { value, .. } => walk_calls_expr(value, defined, seen, ordered),
+        ExprKind::AssignExpr { value, .. } => {
+            walk_calls_expr(value, defined, locals, seen, ordered)
+        }
         ExprKind::ArrayIndex { array, index } => {
-            walk_calls_expr(array, defined, seen, ordered);
-            walk_calls_expr(index, defined, seen, ordered);
+            walk_calls_expr(array, defined, locals, seen, ordered);
+            walk_calls_expr(index, defined, locals, seen, ordered);
         }
-        ExprKind::Member { base, .. } => walk_calls_expr(base, defined, seen, ordered),
+        ExprKind::Member { base, .. } => walk_calls_expr(base, defined, locals, seen, ordered),
         ExprKind::Ident(_)
         | ExprKind::IntLit(_)
         | ExprKind::StringLit(_)

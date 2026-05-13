@@ -1339,7 +1339,20 @@ impl<'a> FunctionEmitter<'a> {
             self.emit_arg_into_ax(arg, arg_ty);
             self.out.extend_from_slice(b"\tpush\tax\r\n");
         }
-        let _ = write!(self.out, "\tcall\tnear ptr _{name}\r\n");
+        // Direct call to a function symbol vs. indirect call through
+        // a function-pointer local. The disambiguator is whether
+        // `name` names a local in this frame (fixture 110): if so,
+        // emit `call word ptr [bp-N]`; otherwise `call near ptr _N`.
+        if self.locals.has(name) {
+            let LocalLocation::Stack(off) = self.locals.location_of(name) else {
+                panic!(
+                    "indirect call through register-resident fn-ptr `{name}` not yet supported"
+                );
+            };
+            let _ = write!(self.out, "\tcall\tword ptr {}\r\n", bp_addr(off));
+        } else {
+            let _ = write!(self.out, "\tcall\tnear ptr _{name}\r\n");
+        }
         match args.len() {
             0 => {}
             1 | 2 => {
@@ -1413,6 +1426,21 @@ impl<'a> FunctionEmitter<'a> {
                 if let Some(v) = try_const_eval(init) {
                     let width = ptr_width(ty);
                     let _ = write!(self.out, "\tmov\t{width} ptr {},{v}\r\n", bp_addr(off));
+                    return;
+                }
+                // Function-pointer init: `int (*p)(void) = f;` →
+                // `mov word ptr [bp-N],offset _f`. We detect this by
+                // the init being a bare ident that names a function
+                // defined in this TU (fixture 110).
+                if let ExprKind::Ident(name) = &init.kind
+                    && self.signatures.params_of(name).is_some()
+                {
+                    let sym = function_symbol(name);
+                    let _ = write!(
+                        self.out,
+                        "\tmov\tword ptr {},offset {sym}\r\n",
+                        bp_addr(off)
+                    );
                     return;
                 }
                 // Non-constant init for a char would need a different

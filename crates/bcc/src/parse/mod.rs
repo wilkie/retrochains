@@ -554,6 +554,16 @@ impl Parser {
             self.bump();
             ty = Type::Pointer(Box::new(ty));
         }
+        // Function-pointer declarator: `<type> ( * <name> ) ( <params> )`.
+        // For fixture 110 (`int (*p)(void) = f;`) we don't need to model
+        // the function signature — calls through `p` work the same
+        // regardless of return type, and we never dereference it. So we
+        // collapse the type to `Pointer<Int>` (any pointer is 2 bytes,
+        // int-pool-eligible) and skip the param list.
+        if matches!(self.peek().kind, TokenKind::LParen) {
+            let (name, fp_ty) = self.parse_func_ptr_declarator(ty.clone())?;
+            return self.finish_declare(start, fp_ty, name);
+        }
         let name_tok = self.bump();
         let TokenKind::Ident(name) = &name_tok.kind else {
             return Err(ParseError::NotAnIdent { offset: name_tok.span.start });
@@ -575,6 +585,14 @@ impl Parser {
             self.expect(&TokenKind::RBracket)?;
             ty = Type::Array { elem: Box::new(ty), len };
         }
+        self.finish_declare(start, ty, name)
+    }
+
+    /// Common tail of `parse_declare` after the declarator (name +
+    /// pointer/array/func-ptr decoration) is known. Reads the optional
+    /// initializer and trailing semicolon, then yields a `Declare`
+    /// statement.
+    fn finish_declare(&mut self, start: u32, ty: Type, name: String) -> Result<Stmt, ParseError> {
         let init = if matches!(self.peek().kind, TokenKind::Equals) {
             self.bump();
             Some(self.parse_expr()?)
@@ -586,6 +604,43 @@ impl Parser {
             kind: StmtKind::Declare { ty, name, init },
             span: Span::new(start, semi.span.end),
         })
+    }
+
+    /// Parse `( * <name> ) ( <params> )`. The leading `(` is the
+    /// current token. Returns `(name, type)`; the type is a generic
+    /// near pointer (we don't model function signatures yet).
+    fn parse_func_ptr_declarator(
+        &mut self,
+        _base_return_type: Type,
+    ) -> Result<(String, Type), ParseError> {
+        self.expect(&TokenKind::LParen)?;
+        self.expect(&TokenKind::Star)?;
+        let name_tok = self.bump();
+        let TokenKind::Ident(name) = &name_tok.kind else {
+            return Err(ParseError::NotAnIdent { offset: name_tok.span.start });
+        };
+        let name = name.clone();
+        self.expect(&TokenKind::RParen)?;
+        self.expect(&TokenKind::LParen)?;
+        // Skip the parameter list. We don't record the signature, so
+        // we just step past tokens until the matching `)`.
+        let mut depth: u32 = 1;
+        while depth > 0 {
+            let t = self.bump();
+            match t.kind {
+                TokenKind::LParen => depth += 1,
+                TokenKind::RParen => depth -= 1,
+                TokenKind::Eof => {
+                    return Err(ParseError::Unexpected {
+                        expected: "`)` to close function-pointer parameter list".to_owned(),
+                        found: "end of input".to_owned(),
+                        offset: t.span.start,
+                    });
+                }
+                _ => {}
+            }
+        }
+        Ok((name, Type::Pointer(Box::new(Type::Int))))
     }
 
     /// `while ( <cond> ) <branch>`. Same branch shape as `if`.

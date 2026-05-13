@@ -191,7 +191,8 @@ fn instr_size(instr: &Instr) -> usize {
         Instr::MovAxBpRel { .. } | Instr::AddAxBpRel { .. } => 3,
         Instr::CallNear(_) => 3,
         Instr::MovAxGroupSym { .. } | Instr::MovAxOffsetGroupSym { .. } => 3,
-        Instr::MovBpRelImm { .. } => 5,
+        Instr::MovBpRelImm { .. } | Instr::MovBpRelOffsetSym { .. } => 5,
+        Instr::CallIndirectBpRel { .. } => 3,
     }
 }
 
@@ -300,6 +301,38 @@ fn emit_instr(
             // where imm16 = symbol's segment-relative offset). Same
             // FIXUPP shape as MovAxGroupSym.
             emit_group_sym_lea(0xB8, group, symbol, symbols, group_idx, out, fixups)?;
+        }
+        Instr::MovBpRelOffsetSym { offset, symbol } => {
+            // `mov word ptr [bp+disp8],offset _f` → C7 46 dd lo hi.
+            // The imm bytes carry the symbol's segment-relative
+            // offset (which TLINK will patch via the FIXUPP). The
+            // FIXUPP frame is F5 (target's own segment) because the
+            // target is in _TEXT, which is not in any group.
+            let sym_loc = symbols.get(symbol).ok_or_else(|| {
+                AsmError::new(0, format!("symbol `{symbol}` not defined in any segment"))
+            })?;
+            let target_seg_idx =
+                u8::try_from(sym_loc.segment + 1).expect("target seg idx fits");
+            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
+            out.push(0xC7);
+            out.push(0x46);
+            out.push(disp as u8);
+            let imm_start = out.len();
+            out.extend_from_slice(&sym_loc.offset.to_le_bytes());
+            fixups.push(FixupReq {
+                data_offset: u16::try_from(imm_start).expect("offset fits"),
+                kind: FixupKind::SegRelTargetFrameSegment {
+                    segment_idx: target_seg_idx,
+                },
+            });
+        }
+        Instr::CallIndirectBpRel { offset } => {
+            // `call word ptr [bp+disp8]` → FF 56 dd. ModR/M 56 =
+            // mod=01 /2(call near r/m16) r/m=110 ([bp+disp8]).
+            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
+            out.push(0xFF);
+            out.push(0x56);
+            out.push(disp as u8);
         }
         Instr::JmpShort(target) => {
             let target_off = symbols.get(target).map(|l| l.offset).ok_or_else(|| {

@@ -176,6 +176,17 @@ fn serialize_fixup(fx: &FixupReq, out: &mut Vec<u8>) {
             out.push(0x56);
             out.push(extdef_idx);
         }
+        FixupKind::SegRelTargetFrameSegment { segment_idx } => {
+            // M=1 segment-relative, Location=1 (16-bit offset)
+            //   Locat byte 0 = 1 1 0001 dd = 0xC4 | hi2
+            out.push(0xC4 | hi2 as u8);
+            out.push(lo8);
+            // Fix Data: F=0, frame=101 (target frame, no datum),
+            // T=0, P=1, tgt_low=00 → target method = 4 (SEGDEF no disp).
+            // Byte: 0101 0100 = 0x54.
+            out.push(0x54);
+            out.push(segment_idx);
+        }
     }
 }
 

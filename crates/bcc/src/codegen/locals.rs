@@ -366,6 +366,15 @@ impl Locals {
         self.entry(name).location
     }
 
+    /// Whether `name` refers to a local declared in this function.
+    /// False for function names, globals, externs, and unrelated
+    /// identifiers — letting callers disambiguate before trying a
+    /// `location_of` that would panic.
+    #[must_use]
+    pub fn has(&self, name: &str) -> bool {
+        self.by_name.contains_key(name)
+    }
+
     #[must_use]
     pub fn type_of(&self, name: &str) -> &Type {
         &self.entry(name).ty
