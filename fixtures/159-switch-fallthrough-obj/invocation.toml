@@ -1,0 +1,4 @@
+description = "Switch with case fallthrough (4 dense cases, jump-table dispatch). -c parallel of 076."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

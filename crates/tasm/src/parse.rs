@@ -111,6 +111,7 @@ impl<'a> Parser<'a> {
             }
             "extrn" => self.parse_extrn(&line)?,
             "db" => self.parse_db(&line)?,
+            "dw" => self.parse_dw(&line)?,
             // Empty keyword + label = lone `@1@50:` style label.
             "" => {
                 if let Some(label) = line.label {
@@ -257,6 +258,33 @@ impl<'a> Parser<'a> {
         ))
     }
 
+    fn parse_dw(&mut self, line: &Line<'_>) -> AsmResult<()> {
+        let seg = self.require_open_segment(line)?;
+        let rest = line.rest.trim();
+        // `dw @<label>` — emit 2 bytes referencing the label's
+        // segment-relative offset, with a FIXUPP. BCC uses this for
+        // jump-table entries.
+        if rest.starts_with('@') || rest.starts_with('_') {
+            self.module.segments[seg]
+                .items
+                .push(SegItem::DwSym(rest.to_string()));
+            return Ok(());
+        }
+        // `dw <integer>` — 2 raw bytes (little-endian). No fixture
+        // yet but easy to support.
+        if let Ok(v) = rest.parse::<i32>() {
+            if let Ok(v16) = i16::try_from(v).map(|x| x as u16).or_else(|_| u16::try_from(v)) {
+                let bytes = v16.to_le_bytes().to_vec();
+                self.module.segments[seg].items.push(SegItem::Db(bytes));
+                return Ok(());
+            }
+        }
+        Err(AsmError::new(
+            line.line_no,
+            format!("dw: unsupported form `{rest}`"),
+        ))
+    }
+
     fn parse_extrn(&mut self, line: &Line<'_>) -> AsmResult<()> {
         // `\textrn\t_name:near` — strip the `:near` type tag.
         let name = line
@@ -391,10 +419,20 @@ fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
                 format!("dec: unsupported operand form `{rest}`"),
             ))
         }
-        "je" | "jne" | "jl" | "jle" | "jg" | "jge" => parse_jmp_cond(kw, rest, line.line_no),
-        "jmp" => {
-            let r = rest.strip_prefix("short").map(str::trim_start).unwrap_or(rest);
-            Ok(Instr::JmpShort(r.to_string()))
+        "je" | "jne" | "jl" | "jle" | "jg" | "jge" | "ja" => {
+            parse_jmp_cond(kw, rest, line.line_no)
+        }
+        "jmp" => parse_jmp(rest, line.line_no),
+        "loop" => {
+            let target = rest
+                .strip_prefix("short")
+                .map(str::trim_start)
+                .unwrap_or(rest)
+                .trim();
+            if target.is_empty() {
+                return Err(AsmError::new(line.line_no, "loop: missing target"));
+            }
+            Ok(Instr::LoopShort { target: target.to_string() })
         }
         "call" => {
             // `call near ptr <label>` — direct near call.
@@ -444,9 +482,6 @@ fn parse_mov(operands: &str, line_no: usize) -> AsmResult<Instr> {
         if rhs == "word ptr [bx]" {
             return Ok(Instr::MovAxFromBxPtr);
         }
-        if let Some(offset) = parse_bp_relative(rhs) {
-            return Ok(Instr::MovAxBpRel { offset });
-        }
         if let Some((group, symbol)) = parse_group_symbol(rhs) {
             return Ok(Instr::MovAxGroupSym {
                 group: group.to_string(),
@@ -464,6 +499,21 @@ fn parse_mov(operands: &str, line_no: usize) -> AsmResult<Instr> {
                 group: group.to_string(),
                 symbol: symbol.to_string(),
             });
+        }
+        // `mov <reg>,offset <code-symbol>` — symbol with no group
+        // prefix, i.e. an intra-segment code label.
+        if let Some(symbol) = parse_offset_symbol(rhs) {
+            return Ok(Instr::MovReg16OffsetSym {
+                reg,
+                symbol: symbol.to_string(),
+            });
+        }
+        // Generic 16-bit bp-relative load: `mov ax,[bp-2]`,
+        // `mov bx,[bp-2]`, etc. Tried after the AX-specific
+        // group-symbol path above so that `mov ax,word ptr DGROUP:_x`
+        // routes through MovAxGroupSym, not here.
+        if let Some(offset) = parse_bp_relative(rhs) {
+            return Ok(Instr::MovReg16BpRel { reg, offset });
         }
     }
     // Generic 16-bit reg-imm load: `mov si,10`, `mov ax,42`, etc.
@@ -514,6 +564,17 @@ fn parse_mov(operands: &str, line_no: usize) -> AsmResult<Instr> {
                 symbol: sym.to_string(),
             });
         }
+        // `mov word ptr [bp-N],ax` — store AX. Fixture 160 uses this
+        // to stash the switch scrutinee into a stack slot before the
+        // linear-search loop walks it.
+        if rhs == "ax" {
+            return Ok(Instr::MovBpRelAx { offset });
+        }
+    }
+    // `mov ax,word ptr cs:[bx]` — CS-override load through BX. No
+    // displacement. Fixture 160's value-table walk.
+    if lhs == "ax" && rhs == "word ptr cs:[bx]" {
+        return Ok(Instr::MovAxFromCsBx);
     }
     // LHS `byte ptr [bp+N]` — 8-bit stack store.
     if let Some(offset) = parse_byte_bp_relative(lhs) {
@@ -601,6 +662,9 @@ fn parse_add(operands: &str, line_no: usize) -> AsmResult<Instr> {
                 symbol: symbol.to_string(),
             });
         }
+        if let Some(imm) = parse_imm16(rhs) {
+            return Ok(Instr::AddAxImm { imm });
+        }
     }
     Err(AsmError::new(
         line_no,
@@ -644,6 +708,45 @@ fn parse_cmp(operands: &str, line_no: usize) -> AsmResult<Instr> {
     Err(AsmError::new(
         line_no,
         format!("cmp: unsupported operand form `{operands}`"),
+    ))
+}
+
+/// `jmp` covers two forms BCC emits in -ms: `jmp short <label>`
+/// (intra-segment near jump, 2 bytes) and `jmp word ptr cs:<sym>[bx]`
+/// (jump-table dispatch, 5 bytes + FIXUPP — fixture 158).
+fn parse_jmp(operands: &str, line_no: usize) -> AsmResult<Instr> {
+    let s = operands.trim();
+    if let Some(rest) = s.strip_prefix("short").map(str::trim_start) {
+        return Ok(Instr::JmpShort(rest.to_string()));
+    }
+    if let Some(rest) = s.strip_prefix("word ptr cs:").map(str::trim_start) {
+        // Two forms:
+        //   1. `<symbol>[bx]` — jump-table base + index (fixture 158).
+        //   2. `[bx+<imm>]` — bare BX + disp8 (linear-search dispatch
+        //      where BX walks into adjacent value+label tables; the
+        //      disp lands at the start of the label table).
+        if let Some(disp_str) = rest.strip_prefix("[bx+").and_then(|s| s.strip_suffix(']')) {
+            let disp = disp_str.trim().parse::<u8>().map_err(|_| {
+                AsmError::new(
+                    line_no,
+                    format!("jmp cs:[bx+?]: bad displacement `{disp_str}`"),
+                )
+            })?;
+            return Ok(Instr::JmpIndirectCsBxDisp { disp });
+        }
+        if let Some(table) = rest.strip_suffix("[bx]") {
+            return Ok(Instr::JmpIndirectCsTableBx {
+                table: table.trim().to_string(),
+            });
+        }
+        return Err(AsmError::new(
+            line_no,
+            format!("jmp cs: unsupported operand `{rest}`"),
+        ));
+    }
+    Err(AsmError::new(
+        line_no,
+        format!("jmp: unsupported operand form `{operands}`"),
     ))
 }
 
@@ -750,6 +853,7 @@ fn parse_jmp_cond(kw: &str, operands: &str, line_no: usize) -> AsmResult<Instr> 
         "jle" => JmpCond::Le,
         "jg" => JmpCond::G,
         "jge" => JmpCond::Ge,
+        "ja" => JmpCond::A,
         _ => unreachable!("caller restricted the keyword"),
     };
     // `short <label>` — strip the optional `short` prefix.

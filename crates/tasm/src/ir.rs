@@ -57,6 +57,11 @@ pub enum SegItem {
     /// A `db` directive carrying concrete byte values. Goes into the
     /// LEDATA for the segment.
     Db(Vec<u8>),
+    /// A `dw <symbol>` directive — emits 2 bytes containing the
+    /// segment-relative offset of `<symbol>`, with a FIXUPP that
+    /// patches the bytes at link time. Used by BCC for jump-table
+    /// entries (fixture 158).
+    DwSym(String),
     /// `db N dup (?)` — reserve N bytes of uninitialized space. Grows
     /// the segment's notional size but emits nothing into LEDATA. BCC
     /// uses this in `_BSS` for globals.
@@ -105,8 +110,10 @@ pub enum Instr {
     /// `mov word ptr [bp+<offset>],<imm16>` — BCC uses signed
     /// offsets (negative for locals, positive for params).
     MovBpRelImm { offset: i16, imm: u16 },
-    /// `mov ax,word ptr [bp+<offset>]`
-    MovAxBpRel { offset: i16 },
+    /// `mov <reg16>,word ptr [bp+<offset>]` — generic 16-bit load
+    /// from a stack local into any 16-bit register. Encoding:
+    /// `8B xx dd` where ModR/M xx = mod=01 reg=<dst> r/m=110.
+    MovReg16BpRel { reg: Reg16, offset: i16 },
     /// `add ax,word ptr [bp+<offset>]` — 03 46 dd
     AddAxBpRel { offset: i16 },
     /// `add <dst>,<src>` between 16-bit registers — 03 xx with
@@ -130,6 +137,9 @@ pub enum Instr {
     /// AX form has a dedicated opcode and is always 3 bytes
     /// regardless of K's width.
     CmpAxImm { imm: u16 },
+    /// `add ax,<imm16>` — 05 lo hi (AX-accumulator special form).
+    /// Sibling of `CmpAxImm`. Used by BCC for `r = r + K` patterns.
+    AddAxImm { imm: u16 },
     /// `cmp word ptr [bp+<offset>],<imm8>` — 83 7E dd ii. Compare a
     /// stack local directly against a small sign-extended immediate.
     /// BCC uses this for short-circuit logical lowering of patterns
@@ -184,6 +194,12 @@ pub enum Instr {
     SarAxCl,
     /// `j<cc> short <label>` — Jcc rel8 family.
     JmpCondShort { cond: JmpCond, target: String },
+    /// `jmp word ptr cs:<table>[bx]` — indirect dispatch through a
+    /// jump table located in _TEXT, with BX scaled to a word index.
+    /// Encoded as `2E FF A7 lo hi` (cs override + FF /4 with mod=10
+    /// /4 r/m=BX). FIXUPP applies to the disp16 (target = the
+    /// table label's home segment).
+    JmpIndirectCsTableBx { table: String },
     /// `jmp short <label>`
     JmpShort(String),
     /// `call near ptr <label>` — E8 rel16. Intra-segment near call.
@@ -234,6 +250,26 @@ pub enum Instr {
     /// `B8+rc lo hi` plus a SegRelGroupTarget FIXUPP. Covers fixture
     /// 108 (`mov ax,...`) and fixture 157 (`mov si,...`).
     MovReg16OffsetGroupSym { reg: Reg16, group: String, symbol: String },
+    /// `mov <reg16>,offset <symbol>` — symbol with no group prefix,
+    /// i.e. an intra-segment code label. Emits `B8+rc lo hi` plus a
+    /// SegRelTargetFrameSegment FIXUPP (frame = target's segment).
+    /// Used by BCC's linear-search switch to load the address of a
+    /// value table in _TEXT (fixture 160).
+    MovReg16OffsetSym { reg: Reg16, symbol: String },
+    /// `mov word ptr [bp+<offset>],ax` — store AX to a stack local.
+    /// Encoding: 89 46 dd (mod=01 reg=AX r/m=110([bp+disp8])).
+    MovBpRelAx { offset: i16 },
+    /// `mov ax,word ptr cs:[bx]` — load AX through CS:BX (no
+    /// displacement). Encoding: 2E 8B 07. Used by linear-search
+    /// dispatch to read consecutive case values from a _TEXT table.
+    MovAxFromCsBx,
+    /// `jmp word ptr cs:[bx+<imm8>]` — indirect jump through
+    /// CS:BX+disp8. Encoding: 2E FF 67 dd. Used by linear-search
+    /// dispatch to dispatch to the matching label table entry
+    /// (the value table and label table are adjacent in memory).
+    JmpIndirectCsBxDisp { disp: u8 },
+    /// `loop short <label>` — E2 rel8. Decrement CX; jump if CX≠0.
+    LoopShort { target: String },
     /// `mov word ptr [bp+<offset>],offset <symbol>` — store a
     /// function or data symbol's address into a stack local. Emits
     /// `C7 46 dd lo hi` plus a SegRelTargetFrameSegment FIXUPP. Used
@@ -335,8 +371,7 @@ impl Reg8 {
     }
 }
 
-/// Signed-comparison conditional-jump opcodes. The byte encoding of
-/// each is `0x7X` where X is the low nibble, supplied by `opcode_byte`.
+/// Conditional-jump opcodes (Jcc rel8 family, 0x70-0x7F).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JmpCond {
     /// `je` / `jz` — zero flag set (equal)
@@ -351,14 +386,17 @@ pub enum JmpCond {
     G,
     /// `jge` / `jnl` — sign=overflow
     Ge,
+    /// `ja` / `jnbe` — CF=0 and ZF=0 (unsigned above). Used by BCC
+    /// for the jump-table bounds check: `cmp bx,N / ja default`.
+    A,
 }
 
 impl JmpCond {
-    /// Low nibble of the Jcc rel8 opcode (`74` + this).
     pub fn opcode_byte(self) -> u8 {
         match self {
             Self::E => 0x74,
             Self::Ne => 0x75,
+            Self::A => 0x77,
             Self::L => 0x7C,
             Self::Ge => 0x7D,
             Self::Le => 0x7E,

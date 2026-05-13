@@ -84,6 +84,7 @@ fn build_symbols(module: &Module) -> AsmResult<Symbols> {
                 }
                 SegItem::Proc(_) | SegItem::EndProc => {}
                 SegItem::Db(b) => pc += b.len() as u32,
+                SegItem::DwSym(_) => pc += 2,
                 SegItem::Pad(n) => pc += *n,
                 SegItem::Instr(instr) => pc += instr_size(instr) as u32,
             }
@@ -143,6 +144,28 @@ fn encode_segment(
                 sealed_pad = true;
                 bytes.extend_from_slice(b);
             }
+            SegItem::DwSym(name) => {
+                if sealed_bytes {
+                    return Err(AsmError::new(
+                        0,
+                        format!("segment {}: `dw` after padding not supported", seg.name),
+                    ));
+                }
+                sealed_pad = true;
+                let sym_loc = symbols.get(name).ok_or_else(|| {
+                    AsmError::new(0, format!("dw: symbol `{name}` not defined"))
+                })?;
+                let imm_start = bytes.len();
+                bytes.extend_from_slice(&sym_loc.offset.to_le_bytes());
+                let target_seg_idx =
+                    u8::try_from(sym_loc.segment + 1).expect("target seg idx fits");
+                fixups.push(FixupReq {
+                    data_offset: u16::try_from(imm_start).expect("offset fits"),
+                    kind: FixupKind::SegRelTargetFrameSegment {
+                        segment_idx: target_seg_idx,
+                    },
+                });
+            }
             SegItem::Pad(n) => {
                 if sealed_pad {
                     return Err(AsmError::new(
@@ -189,13 +212,19 @@ fn instr_size(instr: &Instr) -> usize {
         | Instr::XorReg16Reg16 { .. }
         | Instr::AddReg16Reg16 { .. }
         | Instr::OrReg16Reg16 { .. } => 2,
-        Instr::CmpReg16Imm8 { .. } | Instr::CmpAxImm { .. } => 3,
+        Instr::CmpReg16Imm8 { .. } | Instr::CmpAxImm { .. } | Instr::AddAxImm { .. } => 3,
         Instr::CmpBpRelImm8 { .. } => 4,
         Instr::JmpShort(_) | Instr::ShlAxCl | Instr::SarAxCl => 2,
         Instr::Cwd => 1,
         Instr::JmpCondShort { .. } => 2,
+        Instr::JmpIndirectCsTableBx { .. } => 5,
+        Instr::JmpIndirectCsBxDisp { .. } => 4,
+        Instr::LoopShort { .. } => 2,
+        Instr::MovBpRelAx { .. } => 3,
+        Instr::MovAxFromCsBx => 3,
+        Instr::MovReg16OffsetSym { .. } => 3,
         Instr::MovReg16Imm { .. } | Instr::SubSpImm(_) | Instr::AddSpImm(_) => 3,
-        Instr::MovAxBpRel { .. }
+        Instr::MovReg16BpRel { .. }
         | Instr::AddAxBpRel { .. }
         | Instr::SubAxBpRel { .. }
         | Instr::AndAxBpRel { .. }
@@ -275,6 +304,11 @@ fn emit_instr(
             out.push(0x3D);
             out.extend_from_slice(&imm.to_le_bytes());
         }
+        Instr::AddAxImm { imm } => {
+            // `add ax,imm16` → 05 lo hi.
+            out.push(0x05);
+            out.extend_from_slice(&imm.to_le_bytes());
+        }
         Instr::CmpBpRelImm8 { offset, imm } => {
             // `cmp word ptr [bp+disp8],imm8 (sign-extended)` → 83 7E dd ii.
             // ModR/M 7E = mod=01 /7(CMP) r/m=110([bp+disp8]).
@@ -311,10 +345,12 @@ fn emit_instr(
             out.push(disp as u8);
             out.extend_from_slice(&imm.to_le_bytes());
         }
-        Instr::MovAxBpRel { offset } => {
+        Instr::MovReg16BpRel { reg, offset } => {
+            // `mov r16,word ptr [bp+disp8]` → 8B xx dd. ModR/M xx =
+            // mod=01 reg=<reg-code> r/m=110 ([bp+disp8]).
             let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
             out.push(0x8B);
-            out.push(0x46);
+            out.push(0b01_000_110 | (reg.code() << 3));
             out.push(disp as u8);
         }
         Instr::AddAxBpRel { offset } => emit_alu_ax_bp_rel(0x03, *offset, out),
@@ -404,6 +440,86 @@ fn emit_instr(
             // `sar ax,cl` → D3 F8. ModR/M F8 = mod=11 /7(SAR) r/m=AX.
             out.push(0xD3);
             out.push(0xF8);
+        }
+        Instr::JmpIndirectCsBxDisp { disp } => {
+            // `jmp word ptr cs:[bx+disp8]` → 2E FF 67 dd.
+            // 2E = CS override, FF /4 = JMP near r/m16, ModR/M 67 =
+            // mod=01 reg=4(/4) r/m=111(BX) → [bx+disp8].
+            out.push(0x2E);
+            out.push(0xFF);
+            out.push(0x67);
+            out.push(*disp);
+        }
+        Instr::LoopShort { target } => {
+            // `loop short <label>` → E2 rel8.
+            let target_off = symbols.get(target).map(|l| l.offset).ok_or_else(|| {
+                AsmError::new(0, format!("loop: unresolved label `{target}`"))
+            })?;
+            let here = out.len() + 2;
+            let disp = i32::from(target_off) - here as i32;
+            let rel8 = i8::try_from(disp).map_err(|_| {
+                AsmError::new(0, format!("loop displacement {disp} out of i8 range"))
+            })?;
+            out.push(0xE2);
+            out.push(rel8 as u8);
+        }
+        Instr::MovBpRelAx { offset } => {
+            // `mov word ptr [bp+disp8],ax` → 89 46 dd. 89 is mov
+            // r/m16,r16 (source/dest swap vs 8B); ModR/M 46 = mod=01
+            // reg=AX r/m=110.
+            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
+            out.push(0x89);
+            out.push(0x46);
+            out.push(disp as u8);
+        }
+        Instr::MovAxFromCsBx => {
+            // `mov ax,word ptr cs:[bx]` → 2E 8B 07. ModR/M 07 =
+            // mod=00 reg=AX r/m=111(BX).
+            out.push(0x2E);
+            out.push(0x8B);
+            out.push(0x07);
+        }
+        Instr::MovReg16OffsetSym { reg, symbol } => {
+            // `mov r16,offset <code-symbol>` → (B8+rc) lo hi.
+            // FIXUPP frame = target's segment (F5), no group.
+            let sym_loc = symbols.get(symbol).ok_or_else(|| {
+                AsmError::new(0, format!("symbol `{symbol}` not defined"))
+            })?;
+            out.push(0xB8 | reg.code());
+            let imm_start = out.len();
+            out.extend_from_slice(&sym_loc.offset.to_le_bytes());
+            let target_seg_idx =
+                u8::try_from(sym_loc.segment + 1).expect("target seg idx fits");
+            fixups.push(FixupReq {
+                data_offset: u16::try_from(imm_start).expect("offset fits"),
+                kind: FixupKind::SegRelTargetFrameSegment {
+                    segment_idx: target_seg_idx,
+                },
+            });
+        }
+        Instr::JmpIndirectCsTableBx { table } => {
+            // `jmp word ptr cs:<table>[bx]` → 2E FF A7 lo hi.
+            // 2E = CS segment override prefix.
+            // FF = Grp5 r/m16.
+            // A7 = mod=10 /4(JMP near r/m16) r/m=111(BX, mod=10 →
+            //      [bx+disp16]).
+            // lo hi = the table label's segment-relative offset.
+            let sym_loc = symbols.get(table).ok_or_else(|| {
+                AsmError::new(0, format!("jmp cs:<sym>[bx]: unresolved label `{table}`"))
+            })?;
+            out.push(0x2E);
+            out.push(0xFF);
+            out.push(0xA7);
+            let imm_start = out.len();
+            out.extend_from_slice(&sym_loc.offset.to_le_bytes());
+            let target_seg_idx =
+                u8::try_from(sym_loc.segment + 1).expect("target seg idx fits");
+            fixups.push(FixupReq {
+                data_offset: u16::try_from(imm_start).expect("offset fits"),
+                kind: FixupKind::SegRelTargetFrameSegment {
+                    segment_idx: target_seg_idx,
+                },
+            });
         }
         Instr::JmpCondShort { cond, target } => {
             let target_off = symbols.get(target).map(|l| l.offset).ok_or_else(|| {
