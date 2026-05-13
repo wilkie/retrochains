@@ -15,7 +15,7 @@ mod lib_archive;
 mod obj_analysis;
 
 pub use lib_archive::{LibAnalysis, LibMember};
-pub use obj_analysis::ObjAnalysis;
+pub use obj_analysis::{MemoryModel, ObjAnalysis};
 
 /// Result of inspecting one input file or byte buffer.
 #[derive(Debug)]

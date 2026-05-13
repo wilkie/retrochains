@@ -101,8 +101,9 @@ fn print_obj_evidence(o: &ObjAnalysis, indent: &str) {
     if let Some(name) = &o.name {
         println!("{indent}name: {name}");
     }
+    println!("{indent}model: {}", o.memory_model().describe());
     println!(
-        "{indent}signals: translator={}, EA={}, E8={}, A1={}, bcc-lnames={}, bcc-segdefs={}, bcc-grpdef={}, bcc-prologue={}",
+        "{indent}signals: translator={}, EA={}, E8={}, A1={}, bcc-lnames={}, bcc-segdefs={}, bcc-grpdef={}, bcc-prologue={}, far-fixup={}",
         yn(o.has_bcc_translator()),
         yn(o.ea_marker.is_some()),
         yn(o.e8_trailer.is_some()),
@@ -111,13 +112,15 @@ fn print_obj_evidence(o: &ObjAnalysis, indent: &str) {
         yn(o.matches_bcc_segdefs()),
         yn(o.matches_bcc_grpdef()),
         yn(o.has_bcc_prologue()),
+        yn(o.has_far_fixup()),
     );
     if let Some(names) = &o.first_lnames {
         let preview: Vec<String> = names.iter().map(|n| format!("{n:?}")).collect();
         println!("{indent}lnames ({}): [{}]", names.len(), preview.join(", "));
     }
-    if !o.first_code_bytes.is_empty() {
-        let hex: Vec<String> = o.first_code_bytes.iter().map(|b| format!("{b:02x}")).collect();
+    let head = o.first_code_bytes();
+    if !head.is_empty() {
+        let hex: Vec<String> = head.iter().map(|b| format!("{b:02x}")).collect();
         println!("{indent}first_code_bytes: {}", hex.join(" "));
     }
 }
@@ -131,16 +134,26 @@ fn print_lib_members(l: &LibAnalysis, verbose: bool) {
         "  page_size={}, dict@0x{:x} ({} blocks), flags=0x{:02x}",
         l.page_size, l.dictionary_offset, l.dictionary_blocks, l.flags
     );
+    let models: Vec<String> = l
+        .model_counts
+        .iter()
+        .filter(|(slug, _)| **slug != "unknown")
+        .map(|(slug, n)| format!("{n} {slug}"))
+        .collect();
+    if !models.is_empty() {
+        println!("  models: {}", models.join(", "));
+    }
     if !verbose {
         return;
     }
     for m in &l.members {
         let name = m.analysis.name.as_deref().unwrap_or("?");
         println!(
-            "  @0x{:06x} {:32} {}",
+            "  @0x{:06x} {:32} {} / {}",
             m.start_offset,
             name,
-            m.analysis.tier().describe()
+            m.analysis.tier().describe(),
+            m.analysis.memory_model().describe(),
         );
     }
 }
@@ -197,8 +210,12 @@ fn json_entry(path: &std::path::Path, analysis: &Analysis, any_unknown: &mut boo
                 yn_bool(o.matches_bcc_lnames())
             ));
             s.push_str(&format!(
-                "      \"bcc_prologue\": {}\n",
+                "      \"bcc_prologue\": {},\n",
                 yn_bool(o.has_bcc_prologue())
+            ));
+            s.push_str(&format!(
+                "      \"memory_model\": \"{}\"\n",
+                o.memory_model().slug()
             ));
             if matches!(o.tier(), FingerprintTier::Unknown) {
                 *any_unknown = true;
@@ -209,12 +226,20 @@ fn json_entry(path: &std::path::Path, analysis: &Analysis, any_unknown: &mut boo
             s.push_str(&format!("      \"page_size\": {},\n", l.page_size));
             s.push_str(&format!("      \"member_count\": {},\n", l.members.len()));
             s.push_str("      \"tier_counts\": {\n");
-            let counts: Vec<String> = l
+            let tcounts: Vec<String> = l
                 .tier_counts
                 .iter()
                 .map(|(slug, n)| format!("        {}: {n}", json_string(slug)))
                 .collect();
-            s.push_str(&counts.join(",\n"));
+            s.push_str(&tcounts.join(",\n"));
+            s.push_str("\n      },\n");
+            s.push_str("      \"model_counts\": {\n");
+            let mcounts: Vec<String> = l
+                .model_counts
+                .iter()
+                .map(|(slug, n)| format!("        {}: {n}", json_string(slug)))
+                .collect();
+            s.push_str(&mcounts.join(",\n"));
             s.push_str("\n      }\n");
         }
         Analysis::Unknown { first_byte } => {

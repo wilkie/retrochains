@@ -18,6 +18,8 @@ pub struct LibAnalysis {
     pub members: Vec<LibMember>,
     /// Histogram of tier classifications across all members.
     pub tier_counts: BTreeMap<&'static str, usize>,
+    /// Histogram of memory-model classifications across all members.
+    pub model_counts: BTreeMap<&'static str, usize>,
 }
 
 #[derive(Debug)]
@@ -58,6 +60,7 @@ pub fn analyze(data: &[u8]) -> Result<LibAnalysis, AnalyzeError> {
 
     let mut members = Vec::new();
     let mut tier_counts: BTreeMap<&'static str, usize> = BTreeMap::new();
+    let mut model_counts: BTreeMap<&'static str, usize> = BTreeMap::new();
     let mut pos = page_size;
     let stop = (dict_offset as usize).min(data.len());
 
@@ -90,6 +93,9 @@ pub fn analyze(data: &[u8]) -> Result<LibAnalysis, AnalyzeError> {
         let after = pos + consumed_within_member;
         let tier = info.tier();
         *tier_counts.entry(tier.slug()).or_insert(0) += 1;
+        *model_counts
+            .entry(info.memory_model().slug())
+            .or_insert(0) += 1;
         members.push(LibMember { start_offset: pos, analysis: info });
         // Round up to the next page boundary.
         let rem = after % page_size;
@@ -103,5 +109,6 @@ pub fn analyze(data: &[u8]) -> Result<LibAnalysis, AnalyzeError> {
         flags,
         members,
         tier_counts,
+        model_counts,
     })
 }
