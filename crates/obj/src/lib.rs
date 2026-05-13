@@ -11,10 +11,6 @@
 //! byte 3+len-1:  checksum (chosen so the sum of every byte in the
 //!                          record, modulo 256, equals 0)
 //! ```
-//!
-//! This crate's API is **write-only** for now — the parts we need to
-//! match BCC's `-c` output. A reader (for ingesting OBJs we didn't
-//! produce, e.g. for the eventual `tlink`) will land in a follow-up.
 
 // Record type codes BCC emits. The 16-bit and 32-bit variants of each
 // record use adjacent codes (e.g. 0x98 vs 0x99 for SEGDEF). BCC under
@@ -30,6 +26,14 @@ pub const SEGDEF_16: u8 = 0x98;
 pub const GRPDEF: u8 = 0x9a;
 pub const FIXUPP_16: u8 = 0x9c;
 pub const LEDATA_16: u8 = 0xa0;
+pub const LIDATA_16: u8 = 0xa2;
+
+/// Library-archive header record (LIB file's first byte).
+pub const LIBHDR: u8 = 0xf0;
+/// Library-archive end-of-file marker.
+pub const LIBEND: u8 = 0xf1;
+/// Extended-dictionary record at the end of a LIB.
+pub const EXTDICT: u8 = 0xf2;
 
 /// Accumulating buffer for an OBJ file. Records are appended via the
 /// builder methods; the final bytes come out of `into_bytes()`.
@@ -195,6 +199,117 @@ impl ObjBuilder {
     }
 }
 
+/// Iterator-style reader over an OMF byte stream. Walks records
+/// from a borrowed `&[u8]`, yielding `Record` views without copying
+/// payload bytes. Stops at the end of the input or on a framing
+/// error.
+#[derive(Debug)]
+pub struct ObjReader<'a> {
+    data: &'a [u8],
+    pos: usize,
+}
+
+/// One OMF record borrowed from the input.
+#[derive(Debug)]
+pub struct Record<'a> {
+    /// Record type byte (e.g. 0x80 for THEADR, 0xA0 for LEDATA).
+    pub ty: u8,
+    /// Payload bytes (excluding the type byte, length field, and
+    /// checksum).
+    pub payload: &'a [u8],
+    /// Checksum byte from the record's tail.
+    pub checksum: u8,
+    /// Byte offset of the record's first byte within the input.
+    /// Useful for diagnostics and for skipping to inter-record
+    /// padding.
+    pub offset: usize,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ReadError {
+    #[error("at offset {offset}: truncated record (need {need} bytes, have {have})")]
+    Truncated { offset: usize, need: usize, have: usize },
+    #[error("at offset {offset}: zero-length record (type {ty:#x})")]
+    ZeroLength { offset: usize, ty: u8 },
+}
+
+impl<'a> ObjReader<'a> {
+    #[must_use]
+    pub fn new(data: &'a [u8]) -> Self {
+        Self { data, pos: 0 }
+    }
+
+    /// Byte position of the next record to read. After [`Self::next`]
+    /// returns `None` because the stream is exhausted, `pos()` equals
+    /// `data.len()`.
+    #[must_use]
+    pub fn pos(&self) -> usize {
+        self.pos
+    }
+
+    /// Fast-forward to a specific byte offset. Used to skip
+    /// inter-member padding inside a LIB archive.
+    pub fn seek(&mut self, pos: usize) {
+        self.pos = pos.min(self.data.len());
+    }
+
+    /// Read one record. Returns `Ok(Some(...))` on success, `Ok(None)`
+    /// at end of input, or `Err(...)` on a framing error.
+    ///
+    /// # Errors
+    /// Returns [`ReadError::Truncated`] if fewer bytes remain than the
+    /// record's framing says to read.
+    pub fn next(&mut self) -> Result<Option<Record<'a>>, ReadError> {
+        if self.pos >= self.data.len() {
+            return Ok(None);
+        }
+        let start = self.pos;
+        if self.data.len() - start < 3 {
+            return Err(ReadError::Truncated {
+                offset: start,
+                need: 3,
+                have: self.data.len() - start,
+            });
+        }
+        let ty = self.data[start];
+        let len = u16::from(self.data[start + 1]) | (u16::from(self.data[start + 2]) << 8);
+        if len == 0 {
+            return Err(ReadError::ZeroLength { offset: start, ty });
+        }
+        let len_usize = usize::from(len);
+        let need = 3 + len_usize;
+        if self.data.len() - start < need {
+            return Err(ReadError::Truncated {
+                offset: start,
+                need,
+                have: self.data.len() - start,
+            });
+        }
+        let payload = &self.data[start + 3..start + 3 + len_usize - 1];
+        let checksum = self.data[start + 3 + len_usize - 1];
+        self.pos = start + need;
+        Ok(Some(Record { ty, payload, checksum, offset: start }))
+    }
+}
+
+impl<'a> Record<'a> {
+    /// True when the record's bytes sum to 0 mod 256 (the OMF
+    /// checksum invariant). Borland tools often emit `0x00` as a
+    /// "checksum not present" sentinel, which fails this test;
+    /// real consumers (TLINK) accept either. Use this for
+    /// verification, not for rejection.
+    #[must_use]
+    pub fn checksum_valid(&self) -> bool {
+        let ty_sum = u32::from(self.ty);
+        let payload_sum: u32 = self.payload.iter().map(|&b| u32::from(b)).sum();
+        // Length field stored in the record (re-derive from payload size).
+        let len = u32::try_from(self.payload.len() + 1).expect("payload fits");
+        let len_sum = (len & 0xFF) + ((len >> 8) & 0xFF);
+        let total = ty_sum + len_sum + payload_sum + u32::from(self.checksum);
+        total % 256 == 0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -246,5 +361,28 @@ mod tests {
         let bytes = b.into_bytes();
         assert_eq!(bytes, vec![0x8a, 0x02, 0x00, 0x00, 0x74]);
         assert_checksum(&bytes);
+    }
+
+    /// Round-trip: write some records, read them back, confirm types
+    /// and payloads survive.
+    #[test]
+    fn reader_roundtrip() {
+        let mut b = ObjBuilder::new();
+        b.write_theadr("hello.c");
+        b.write_lnames(&["", "_TEXT", "CODE"]);
+        b.write_modend16_no_entry();
+        let bytes = b.into_bytes();
+
+        let mut r = ObjReader::new(&bytes);
+        let r1 = r.next().unwrap().unwrap();
+        assert_eq!(r1.ty, THEADR);
+        assert!(r1.checksum_valid());
+        let r2 = r.next().unwrap().unwrap();
+        assert_eq!(r2.ty, LNAMES);
+        assert!(r2.checksum_valid());
+        let r3 = r.next().unwrap().unwrap();
+        assert_eq!(r3.ty, MODEND_16);
+        assert!(r3.checksum_valid());
+        assert!(r.next().unwrap().is_none());
     }
 }

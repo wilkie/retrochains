@@ -1,0 +1,24 @@
+[package]
+name = "fingerprint"
+description = "Classify OBJ/LIB files by toolchain (Borland C++ 2.0 fingerprint detection). See specs/FINGERPRINTS.md."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lib]
+name = "fingerprint"
+path = "src/lib.rs"
+
+[[bin]]
+name = "xfingerprint"
+path = "src/main.rs"
+
+[dependencies]
+obj = { path = "../obj" }
+thiserror = "2"
+
+[lints]
+workspace = true

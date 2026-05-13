@@ -9,6 +9,7 @@ members = [
     "crates/bcc-wasm",
     "crates/oracle",
     "crates/fixtures",
+    "crates/fingerprint",
 ]
 
 [workspace.package]
