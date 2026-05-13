@@ -13,7 +13,7 @@ conventions.
 | [`ASM.md`](ASM.md)   | TASM-flavored MASM text assembly | Drafted  | BCC `-S`     | TASM         |
 | [`OMF.md`](OMF.md)   | Intel/Microsoft Object Module    | Drafted  | BCC `-c`, TASM | TLINK      |
 | `MZ_EXE.md`  | DOS MZ executable                     | Stub     | TLINK        | DOS / DOSBox |
-| `LIB_ARCHIVE.md` | Microsoft `.LIB` archive          | Stub     | TLIB         | TLINK        |
+| [`LIB_ARCHIVE.md`](LIB_ARCHIVE.md) | Microsoft `.LIB` archive    | Drafted  | TLIB         | TLINK        |
 | `DEBUG_INFO.md` | Borland Turbo Debugger symbols     | Stub     | BCC          | TD / TLINK   |
 
 For each tool's specific use of these formats — what records BCC chooses
