@@ -1,0 +1,4 @@
+description = "Negate a local. -c parallel of 037. Uses NEG ax (F7 D8)."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

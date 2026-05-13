@@ -1,0 +1,4 @@
+description = "One int arg by value. -c parallel of 033. Exercises positive-bp param load."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

@@ -351,8 +351,15 @@ fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
         "cwd" => Ok(Instr::Cwd),
         "cbw" => Ok(Instr::Cbw),
         "lea" => parse_lea(rest, line.line_no),
+        "neg" => Reg16::parse(rest)
+            .map(|reg| Instr::NegReg16 { reg })
+            .ok_or_else(|| AsmError::new(line.line_no, format!("neg: bad register `{rest}`"))),
+        "not" => Reg16::parse(rest)
+            .map(|reg| Instr::NotReg16 { reg })
+            .ok_or_else(|| AsmError::new(line.line_no, format!("not: bad register `{rest}`"))),
         "shl" if rest == "ax,cl" => Ok(Instr::ShlAxCl),
         "sar" if rest == "ax,cl" => Ok(Instr::SarAxCl),
+        "shl" => parse_shl_one(rest, line.line_no),
         "inc" => {
             if let Some(reg) = Reg8::parse(rest) {
                 return Ok(Instr::IncReg8 { reg });
@@ -426,6 +433,9 @@ fn parse_mov(operands: &str, line_no: usize) -> AsmResult<Instr> {
     if lhs == "ax" {
         if rhs == "word ptr [si]" {
             return Ok(Instr::MovAxFromSiPtr);
+        }
+        if rhs == "word ptr [bx]" {
+            return Ok(Instr::MovAxFromBxPtr);
         }
         if let Some(offset) = parse_bp_relative(rhs) {
             return Ok(Instr::MovAxBpRel { offset });
@@ -504,6 +514,12 @@ fn parse_mov(operands: &str, line_no: usize) -> AsmResult<Instr> {
             return Ok(Instr::MovSiPtrImm { imm });
         }
     }
+    // LHS `word ptr [bx]` — store through BX pointer (fixture 144).
+    if lhs == "word ptr [bx]" {
+        if let Some(imm) = parse_imm16(rhs) {
+            return Ok(Instr::MovBxPtrImm { imm });
+        }
+    }
     Err(AsmError::new(
         line_no,
         format!("mov: unsupported operand form `{operands}`"),
@@ -551,6 +567,13 @@ fn parse_add(operands: &str, line_no: usize) -> AsmResult<Instr> {
     })?;
     if let (Some(dst), Some(src)) = (Reg16::parse(lhs), Reg16::parse(rhs)) {
         return Ok(Instr::AddReg16Reg16 { dst, src });
+    }
+    if lhs == "sp" {
+        let imm = parse_imm16(rhs)
+            .ok_or_else(|| AsmError::new(line_no, format!("add sp,?: bad imm `{rhs}`")))?;
+        let imm_u8 = u8::try_from(imm)
+            .map_err(|_| AsmError::new(line_no, format!("add sp,{imm}: doesn't fit in u8")))?;
+        return Ok(Instr::AddSpImm(imm_u8));
     }
     if lhs == "ax" {
         if let Some(offset) = parse_bp_relative(rhs) {
@@ -600,6 +623,24 @@ fn parse_cmp(operands: &str, line_no: usize) -> AsmResult<Instr> {
         line_no,
         format!("cmp: unsupported operand form `{operands}`"),
     ))
+}
+
+/// `shl <reg16>,1` — D1 /4. The 1-bit shift form used by BCC to
+/// double a word-array index (`shl bx,1`). For multi-bit shifts the
+/// count goes through CL (see `ShlAxCl`).
+fn parse_shl_one(operands: &str, line_no: usize) -> AsmResult<Instr> {
+    let (lhs, rhs) = split_comma(operands).ok_or_else(|| {
+        AsmError::new(line_no, format!("shl: expected `lhs,rhs`, got {operands:?}"))
+    })?;
+    if rhs != "1" {
+        return Err(AsmError::new(
+            line_no,
+            format!("shl: only `<reg>,1` and `ax,cl` forms supported (got `{rhs}`)"),
+        ));
+    }
+    let reg = Reg16::parse(lhs)
+        .ok_or_else(|| AsmError::new(line_no, format!("shl: bad register `{lhs}`")))?;
+    Ok(Instr::ShlReg16One { reg })
 }
 
 /// `lea <reg16>,word ptr [bp+N]` — load effective address. Currently

@@ -1,0 +1,4 @@
+description = "Write/read a[i] with variable i. -c parallel of 079. Exercises shl r16,1 and [bx] indirect addressing."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

@@ -1,0 +1,4 @@
+description = "Write a[0]=5 then read. -c parallel of 078."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

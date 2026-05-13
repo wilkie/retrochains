@@ -1,0 +1,4 @@
+description = "Bitwise NOT of a local. -c parallel of 039. NOT ax (F7 D0)."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

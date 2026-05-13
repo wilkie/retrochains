@@ -1,0 +1,4 @@
+description = "Pointer to local, deref. -c parallel of 080. Exercises lea + mov ax,[si]."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

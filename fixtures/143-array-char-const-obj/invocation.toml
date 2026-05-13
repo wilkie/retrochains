@@ -1,0 +1,4 @@
+description = "char array with const index. -c parallel of 082. CBW after byte load."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

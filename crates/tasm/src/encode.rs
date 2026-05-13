@@ -193,7 +193,7 @@ fn instr_size(instr: &Instr) -> usize {
         Instr::JmpShort(_) | Instr::ShlAxCl | Instr::SarAxCl => 2,
         Instr::Cwd => 1,
         Instr::JmpCondShort { .. } => 2,
-        Instr::MovReg16Imm { .. } | Instr::SubSpImm(_) => 3,
+        Instr::MovReg16Imm { .. } | Instr::SubSpImm(_) | Instr::AddSpImm(_) => 3,
         Instr::MovAxBpRel { .. }
         | Instr::AddAxBpRel { .. }
         | Instr::SubAxBpRel { .. }
@@ -217,8 +217,9 @@ fn instr_size(instr: &Instr) -> usize {
         Instr::AddAxGroupSym { .. } => 4,
         Instr::Cbw => 1,
         Instr::LeaReg16BpRel { .. } => 3,
-        Instr::MovSiPtrImm { .. } => 4,
-        Instr::MovAxFromSiPtr => 2,
+        Instr::MovSiPtrImm { .. } | Instr::MovBxPtrImm { .. } => 4,
+        Instr::MovAxFromSiPtr | Instr::MovAxFromBxPtr => 2,
+        Instr::ShlReg16One { .. } | Instr::NegReg16 { .. } | Instr::NotReg16 { .. } => 2,
         Instr::MovBpRelImm { .. } | Instr::MovBpRelOffsetSym { .. } => 5,
         Instr::CallIndirectBpRel { .. } => 3,
     }
@@ -277,8 +278,18 @@ fn emit_instr(
             out.extend_from_slice(&imm.to_le_bytes());
         }
         Instr::SubSpImm(imm) => {
+            // `sub sp,imm8` → 83 EC ii (Grp1 r/m16,imm8 sign-extended;
+            // ModR/M EC = mod=11 /5(SUB) r/m=SP).
             out.push(0x83);
             out.push(0xEC);
+            out.push(*imm);
+        }
+        Instr::AddSpImm(imm) => {
+            // `add sp,imm8` → 83 C4 ii (ModR/M C4 = mod=11 /0(ADD)
+            // r/m=SP). Used for cdecl stack cleanup after multi-arg
+            // calls (fixture 138's `add sp,6`).
+            out.push(0x83);
+            out.push(0xC4);
             out.push(*imm);
         }
         Instr::MovBpRelImm { offset, imm } => {
@@ -479,6 +490,35 @@ fn emit_instr(
             // reg=AX r/m=100 ([si]).
             out.push(0x8B);
             out.push(0x04);
+        }
+        Instr::MovBxPtrImm { imm } => {
+            // `mov word ptr [bx],imm16` → C7 07 lo hi. ModR/M 07 =
+            // mod=00 /0 r/m=111 ([bx]).
+            out.push(0xC7);
+            out.push(0x07);
+            out.extend_from_slice(&imm.to_le_bytes());
+        }
+        Instr::MovAxFromBxPtr => {
+            // `mov ax,word ptr [bx]` → 8B 07. ModR/M 07 = mod=00
+            // reg=AX r/m=111 ([bx]).
+            out.push(0x8B);
+            out.push(0x07);
+        }
+        Instr::ShlReg16One { reg } => {
+            // `shl r16,1` → D1 (mod=11 /4 r/m=<reg>). D1 is Grp2
+            // r/m16,1; /4 selects SHL.
+            out.push(0xD1);
+            out.push(0b11_100_000 | reg.code());
+        }
+        Instr::NegReg16 { reg } => {
+            // `neg r16` → F7 (mod=11 /3 r/m=<reg>). F7 is Grp3 r/m16.
+            out.push(0xF7);
+            out.push(0b11_011_000 | reg.code());
+        }
+        Instr::NotReg16 { reg } => {
+            // `not r16` → F7 (mod=11 /2 r/m=<reg>).
+            out.push(0xF7);
+            out.push(0b11_010_000 | reg.code());
         }
         Instr::MovBpRelOffsetSym { offset, symbol } => {
             // `mov word ptr [bp+disp8],offset _f` → C7 46 dd lo hi.

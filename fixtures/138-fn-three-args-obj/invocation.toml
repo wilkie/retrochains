@@ -1,0 +1,4 @@
+description = "Three int args. -c parallel of 049. Multi-arg cdecl push order plus add sp,6 cleanup."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

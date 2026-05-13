@@ -99,6 +99,9 @@ pub enum Instr {
     /// Larger immediates would require the 81 EC encoding; BCC uses
     /// 83 EC for the small frame sizes we've seen (≤ 127 bytes).
     SubSpImm(u8),
+    /// `add sp,<imm8>` — encoded as 83 C4 ii. BCC uses this to clean
+    /// up the stack after a multi-arg call (fixture 138: `add sp,6`).
+    AddSpImm(u8),
     /// `mov word ptr [bp+<offset>],<imm16>` — BCC uses signed
     /// offsets (negative for locals, positive for params).
     MovBpRelImm { offset: i16, imm: u16 },
@@ -203,6 +206,18 @@ pub enum Instr {
     MovSiPtrImm { imm: u16 },
     /// `mov ax,word ptr [si]` — 8B 04. Load through SI pointer.
     MovAxFromSiPtr,
+    /// `mov word ptr [bx],<imm16>` — C7 07 lo hi. Store through BX
+    /// (used by indexed array writes after `lea bx,base + scale*i`).
+    MovBxPtrImm { imm: u16 },
+    /// `mov ax,word ptr [bx]` — 8B 07. Load through BX.
+    MovAxFromBxPtr,
+    /// `shl <reg16>,1` — D1 (mod=11 /4 r/m=reg). The 1-bit shift form
+    /// (BCC uses this to compute `i*2` for word-array indexing).
+    ShlReg16One { reg: Reg16 },
+    /// `neg <reg16>` — F7 (mod=11 /3 r/m=reg). Two's-complement negate.
+    NegReg16 { reg: Reg16 },
+    /// `not <reg16>` — F7 (mod=11 /2 r/m=reg). One's-complement.
+    NotReg16 { reg: Reg16 },
     /// `mov ax,offset <group>:<symbol>` — load AX with the address
     /// (offset within the group) of a data symbol. Emits `B8 lo hi`
     /// plus the same SegRelGroupTarget FIXUPP. Used for passing

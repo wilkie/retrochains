@@ -1,0 +1,4 @@
+description = "Read a[0] where a is int array. -c parallel of 077. Just bp-relative load."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]
