@@ -103,8 +103,20 @@ pub enum Instr {
     MovBpRelImm { offset: i16, imm: u16 },
     /// `mov ax,word ptr [bp+<offset>]`
     MovAxBpRel { offset: i16 },
-    /// `add ax,word ptr [bp+<offset>]`
+    /// `add ax,word ptr [bp+<offset>]` — 03 46 dd
     AddAxBpRel { offset: i16 },
+    /// `sub ax,word ptr [bp+<offset>]` — 2B 46 dd
+    SubAxBpRel { offset: i16 },
+    /// `and ax,word ptr [bp+<offset>]` — 23 46 dd
+    AndAxBpRel { offset: i16 },
+    /// `or ax,word ptr [bp+<offset>]` — 0B 46 dd
+    OrAxBpRel { offset: i16 },
+    /// `xor ax,word ptr [bp+<offset>]` — 33 46 dd
+    XorAxBpRel { offset: i16 },
+    /// `cmp ax,word ptr [bp+<offset>]` — 3B 46 dd
+    CmpAxBpRel { offset: i16 },
+    /// `j<cc> short <label>` — Jcc rel8 family.
+    JmpCondShort { cond: JmpCond, target: String },
     /// `jmp short <label>`
     JmpShort(String),
     /// `call near ptr <label>` — E8 rel16. Intra-segment near call.
@@ -133,6 +145,38 @@ pub enum Instr {
     PopCx,
     /// `ret`
     Ret,
+}
+
+/// Signed-comparison conditional-jump opcodes. The byte encoding of
+/// each is `0x7X` where X is the low nibble, supplied by `opcode_byte`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JmpCond {
+    /// `je` / `jz` — zero flag set (equal)
+    E,
+    /// `jne` / `jnz` — zero flag clear
+    Ne,
+    /// `jl` / `jnge` — sign≠overflow (signed less than)
+    L,
+    /// `jle` / `jng` — ZF=1 or sign≠overflow
+    Le,
+    /// `jg` / `jnle` — ZF=0 and sign=overflow
+    G,
+    /// `jge` / `jnl` — sign=overflow
+    Ge,
+}
+
+impl JmpCond {
+    /// Low nibble of the Jcc rel8 opcode (`74` + this).
+    pub fn opcode_byte(self) -> u8 {
+        match self {
+            Self::E => 0x74,
+            Self::Ne => 0x75,
+            Self::L => 0x7C,
+            Self::Ge => 0x7D,
+            Self::Le => 0x7E,
+            Self::G => 0x7F,
+        }
+    }
 }
 
 /// A relocation request emitted by the encoder. The assembler turns

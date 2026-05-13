@@ -1,0 +1,4 @@
+description = "Two int locals compared for equality, result returned (1 or 0). Same source as 020 but -c. Exercises CMP AX,mem and conditional-set idiom."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

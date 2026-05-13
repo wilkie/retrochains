@@ -3,7 +3,7 @@
 //! than a real grammar.
 
 use crate::ir::{
-    AsmError, AsmResult, Group, Instr, Module, SegAlign, SegCombine, SegItem, Segment,
+    AsmError, AsmResult, Group, Instr, JmpCond, Module, SegAlign, SegCombine, SegItem, Segment,
 };
 use crate::lex::{tokenize, Line};
 
@@ -334,10 +334,18 @@ fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
         "pop" if rest == "bp" => Ok(Instr::PopBp),
         "pop" if rest == "cx" => Ok(Instr::PopCx),
         "mov" => parse_mov(rest, line.line_no),
-        "xor" if rest == "ax,ax" => Ok(Instr::XorAxAx),
-        "sub" => parse_sub(rest, line.line_no),
         "dec" if rest == "sp" => Ok(Instr::DecSp),
-        "add" => parse_add(rest, line.line_no),
+        // Generic ALU forms `<op> ax,word ptr [bp+N]`. Some opcodes
+        // also have special operand forms (`sub sp,imm`, `xor ax,ax`)
+        // that take precedence — handled in the per-op parser below.
+        "add" => parse_alu_ax_mem(rest, line.line_no, "add", |o| Instr::AddAxBpRel { offset: o }),
+        "sub" => parse_sub(rest, line.line_no),
+        "and" => parse_alu_ax_mem(rest, line.line_no, "and", |o| Instr::AndAxBpRel { offset: o }),
+        "or" => parse_alu_ax_mem(rest, line.line_no, "or", |o| Instr::OrAxBpRel { offset: o }),
+        "xor" if rest == "ax,ax" => Ok(Instr::XorAxAx),
+        "xor" => parse_alu_ax_mem(rest, line.line_no, "xor", |o| Instr::XorAxBpRel { offset: o }),
+        "cmp" => parse_alu_ax_mem(rest, line.line_no, "cmp", |o| Instr::CmpAxBpRel { offset: o }),
+        "je" | "jne" | "jl" | "jle" | "jg" | "jge" => parse_jmp_cond(kw, rest, line.line_no),
         "jmp" => {
             let r = rest.strip_prefix("short").map(str::trim_start).unwrap_or(rest);
             Ok(Instr::JmpShort(r.to_string()))
@@ -433,25 +441,54 @@ fn parse_sub(operands: &str, line_no: usize) -> AsmResult<Instr> {
             .map_err(|_| AsmError::new(line_no, format!("sub sp,{imm}: doesn't fit in u8")))?;
         return Ok(Instr::SubSpImm(imm_u8));
     }
-    Err(AsmError::new(
-        line_no,
-        format!("sub: unsupported operand form `{operands}`"),
-    ))
+    // Otherwise: try the AX/mem form.
+    parse_alu_ax_mem(operands, line_no, "sub", |o| Instr::SubAxBpRel { offset: o })
 }
 
-fn parse_add(operands: &str, line_no: usize) -> AsmResult<Instr> {
+/// Generic `<op> ax,word ptr [bp+<offset>]` parser. The four ALU
+/// opcodes (add/sub/and/or/xor/cmp) share the same operand shape;
+/// only the resulting IR variant differs.
+fn parse_alu_ax_mem(
+    operands: &str,
+    line_no: usize,
+    op_name: &str,
+    make: impl FnOnce(i16) -> Instr,
+) -> AsmResult<Instr> {
     let (lhs, rhs) = split_comma(operands).ok_or_else(|| {
-        AsmError::new(line_no, format!("add: expected `lhs,rhs`, got {operands:?}"))
+        AsmError::new(line_no, format!("{op_name}: expected `lhs,rhs`, got {operands:?}"))
     })?;
     if lhs == "ax" {
         if let Some(offset) = parse_bp_relative(rhs) {
-            return Ok(Instr::AddAxBpRel { offset });
+            return Ok(make(offset));
         }
     }
     Err(AsmError::new(
         line_no,
-        format!("add: unsupported operand form `{operands}`"),
+        format!("{op_name}: unsupported operand form `{operands}`"),
     ))
+}
+
+fn parse_jmp_cond(kw: &str, operands: &str, line_no: usize) -> AsmResult<Instr> {
+    let cond = match kw {
+        "je" => JmpCond::E,
+        "jne" => JmpCond::Ne,
+        "jl" => JmpCond::L,
+        "jle" => JmpCond::Le,
+        "jg" => JmpCond::G,
+        "jge" => JmpCond::Ge,
+        _ => unreachable!("caller restricted the keyword"),
+    };
+    // `short <label>` — strip the optional `short` prefix.
+    let target = operands
+        .strip_prefix("short")
+        .map(str::trim_start)
+        .unwrap_or(operands)
+        .trim()
+        .to_string();
+    if target.is_empty() {
+        return Err(AsmError::new(line_no, format!("{kw}: missing target label")));
+    }
+    Ok(Instr::JmpCondShort { cond, target })
 }
 
 fn split_comma(s: &str) -> Option<(&str, &str)> {

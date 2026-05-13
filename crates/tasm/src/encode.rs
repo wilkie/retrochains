@@ -187,8 +187,15 @@ fn instr_size(instr: &Instr) -> usize {
         | Instr::Ret
         | Instr::DecSp => 1,
         Instr::MovBpSp | Instr::MovSpBp | Instr::XorAxAx | Instr::JmpShort(_) => 2,
+        Instr::JmpCondShort { .. } => 2,
         Instr::MovAxImm(_) | Instr::SubSpImm(_) => 3,
-        Instr::MovAxBpRel { .. } | Instr::AddAxBpRel { .. } => 3,
+        Instr::MovAxBpRel { .. }
+        | Instr::AddAxBpRel { .. }
+        | Instr::SubAxBpRel { .. }
+        | Instr::AndAxBpRel { .. }
+        | Instr::OrAxBpRel { .. }
+        | Instr::XorAxBpRel { .. }
+        | Instr::CmpAxBpRel { .. } => 3,
         Instr::CallNear(_) => 3,
         Instr::MovAxGroupSym { .. } | Instr::MovAxOffsetGroupSym { .. } => 3,
         Instr::MovBpRelImm { .. } | Instr::MovBpRelOffsetSym { .. } => 5,
@@ -245,11 +252,26 @@ fn emit_instr(
             out.push(0x46);
             out.push(disp as u8);
         }
-        Instr::AddAxBpRel { offset } => {
-            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
-            out.push(0x03);
-            out.push(0x46);
-            out.push(disp as u8);
+        Instr::AddAxBpRel { offset } => emit_alu_ax_bp_rel(0x03, *offset, out),
+        Instr::SubAxBpRel { offset } => emit_alu_ax_bp_rel(0x2B, *offset, out),
+        Instr::AndAxBpRel { offset } => emit_alu_ax_bp_rel(0x23, *offset, out),
+        Instr::OrAxBpRel { offset } => emit_alu_ax_bp_rel(0x0B, *offset, out),
+        Instr::XorAxBpRel { offset } => emit_alu_ax_bp_rel(0x33, *offset, out),
+        Instr::CmpAxBpRel { offset } => emit_alu_ax_bp_rel(0x3B, *offset, out),
+        Instr::JmpCondShort { cond, target } => {
+            let target_off = symbols.get(target).map(|l| l.offset).ok_or_else(|| {
+                AsmError::new(0, format!("Jcc: unresolved label `{target}`"))
+            })?;
+            let here = out.len() + 2;
+            let disp = i32::from(target_off) - here as i32;
+            let rel8 = i8::try_from(disp).map_err(|_| {
+                AsmError::new(
+                    0,
+                    format!("Jcc displacement {disp} out of i8 range to `{target}`"),
+                )
+            })?;
+            out.push(cond.opcode_byte());
+            out.push(rel8 as u8);
         }
         Instr::CallNear(target) => {
             // E8 lo hi. Resolve target's segment-relative offset.
@@ -352,6 +374,16 @@ fn emit_instr(
         Instr::Ret => out.push(0xC3),
     }
     Ok(())
+}
+
+/// Encode an `<op> ax,word ptr [bp+disp]` instruction. The opcode
+/// byte varies (03=add, 2B=sub, 23=and, 0B=or, 33=xor, 3B=cmp); the
+/// ModR/M byte is always 0x46 (mod=01, reg=000=AX, r/m=110=[bp+disp8]).
+fn emit_alu_ax_bp_rel(opcode: u8, offset: i16, out: &mut Vec<u8>) {
+    let disp = i8::try_from(offset).expect("bp-relative offset fits in i8");
+    out.push(opcode);
+    out.push(0x46);
+    out.push(disp as u8);
 }
 
 /// Shared helper for the two `mov ax,<form>:<sym>` instructions

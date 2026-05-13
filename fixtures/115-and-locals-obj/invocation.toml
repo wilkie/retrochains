@@ -1,0 +1,4 @@
+description = "Two int locals bitwise-AND'd at return. Same source as 014 but -c. Exercises AND AX,mem."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]
