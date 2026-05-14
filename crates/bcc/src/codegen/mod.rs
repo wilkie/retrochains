@@ -2639,6 +2639,24 @@ impl<'a> FunctionEmitter<'a> {
             .type_of(name)
             .cloned()
             .expect("caller already checked");
+        // `long g = K;` — two word stores, **high word first** then
+        // low word (fixture 205). Only constant RHS is fixtured.
+        if matches!(ty, Type::Long) {
+            let Some(v) = try_const_eval(value) else {
+                panic!("non-constant long assignment to global not yet supported (no fixture)");
+            };
+            let lo = v & 0xFFFF;
+            let hi = (v >> 16) & 0xFFFF;
+            let _ = write!(
+                self.out,
+                "\tmov\tword ptr DGROUP:_{name}+2,{hi}\r\n",
+            );
+            let _ = write!(
+                self.out,
+                "\tmov\tword ptr DGROUP:_{name},{lo}\r\n",
+            );
+            return;
+        }
         let width = if matches!(ty, Type::Char) { "byte" } else { "word" };
         if let Some(v) = try_const_eval(value) {
             let v_masked = if matches!(ty, Type::Char) { v & 0xFF } else { v & 0xFFFF };

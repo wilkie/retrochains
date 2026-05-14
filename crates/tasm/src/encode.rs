@@ -273,6 +273,7 @@ fn instr_size(instr: &Instr) -> usize {
         | Instr::MovAlGroupSym { .. }
         | Instr::MovReg16OffsetGroupSym { .. } => 3,
         Instr::MovReg16WordGroupSym { .. } => 4,
+        Instr::MovGroupSymImm16 { .. } => 6,
         Instr::MovAlFromSiPtr | Instr::MovAlFromBxPtr => 2,
         Instr::ImulReg16 { .. } => 2,
         Instr::AddAxGroupSym { .. } => 4,
@@ -638,6 +639,13 @@ fn emit_instr(
             // `mov ax,word ptr <group>:<symbol>` → A1 lo hi.
             // Encoding A1 is `mov AX, moffs16` — segment-relative load.
             emit_group_sym_lea(&[0xA1], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
+        }
+        Instr::MovGroupSymImm16 { group, symbol, offset, imm } => {
+            // `mov word ptr <group>:<sym>[+N], imm16` → C7 06 [addr]
+            // [imm16]. Same FIXUPP shape as the `MovAxGroupSym` load
+            // sibling, plus 2 trailing immediate bytes.
+            emit_group_sym_lea(&[0xC7, 0x06], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
+            out.extend_from_slice(&imm.to_le_bytes());
         }
         Instr::MovReg16WordGroupSym { reg, group, symbol, offset } => {
             // `mov <reg16>,word ptr <group>:<sym>` → 8B (mod=00

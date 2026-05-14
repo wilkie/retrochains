@@ -235,6 +235,18 @@ pub enum Instr {
     /// `A1 lo hi` plus a FIXUPP (frame = group, target = symbol's
     /// home segment); the `lo hi` carry `sym.offset + offset`.
     MovAxGroupSym { group: String, symbol: String, offset: i16 },
+    /// `mov word ptr <group>:<symbol>[+<offset>], imm16` — store an
+    /// immediate to a data-segment global. Emits `C7 06 [addr with
+    /// FIXUPP] [imm16]`; ModR/M `06` is `mod=00 reg=000(/0=MOV)
+    /// rm=110(disp16)`. Used by `g = K` for both 16- and 32-bit
+    /// globals (fixture 205 — long-global assignment writes the
+    /// high half via `_g+2`).
+    MovGroupSymImm16 {
+        group: String,
+        symbol: String,
+        offset: i16,
+        imm: u16,
+    },
     /// `mov <reg16>,word ptr <group>:<symbol>[+<offset>]` for non-AX
     /// destinations. Uses MOV r16,r/m16 with disp16-only addressing
     /// (`8B (mod=00 reg=<r> rm=110) lo hi`). Same FIXUPP shape as
