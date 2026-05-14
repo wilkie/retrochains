@@ -243,6 +243,11 @@ pub enum Instr {
     /// modify-write through SI used by compound member assignment
     /// `p->x += K` when SI holds `p` (fixture 182).
     AddSiPtrImm8 { imm: i8 },
+    /// `add word ptr [bp+disp8],<imm8 sign-extended>` — 83 46 dd ii.
+    /// Read-modify-write on a stack local; used by compound array
+    /// assignment `a[K] += V` when the index is constant (fixture
+    /// 184).
+    AddBpRelImm8 { offset: i16, imm: i8 },
     /// `mov ax,word ptr [si]` — 8B 04. Load through SI pointer.
     MovAxFromSiPtr,
     /// `mov word ptr [bx],<imm16>` — C7 07 lo hi. Store through BX

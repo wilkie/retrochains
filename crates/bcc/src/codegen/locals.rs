@@ -449,7 +449,8 @@ fn collect_address_taken(stmt: &Stmt, out: &mut HashSet<String>) {
         StmtKind::Assign { value, .. } | StmtKind::CompoundAssign { value, .. } => {
             expr_address_taken(value, out);
         }
-        StmtKind::ArrayAssign { indices, value, .. } => {
+        StmtKind::ArrayAssign { indices, value, .. }
+        | StmtKind::ArrayCompoundAssign { indices, value, .. } => {
             for ix in indices {
                 expr_address_taken(ix, out);
             }
@@ -615,7 +616,8 @@ fn stmt_has_call(stmt: &Stmt) -> bool {
         StmtKind::Switch { scrutinee, cases } => {
             expr_has_call(scrutinee) || cases.iter().any(|c| body_has_call(&c.body))
         }
-        StmtKind::ArrayAssign { indices, value, .. } => {
+        StmtKind::ArrayAssign { indices, value, .. }
+        | StmtKind::ArrayCompoundAssign { indices, value, .. } => {
             indices.iter().any(expr_has_call) || expr_has_call(value)
         }
         StmtKind::DerefAssign { target, value }
@@ -718,6 +720,7 @@ fn collect_decls(stmt: &Stmt, out: &mut Vec<DeclItem>) {
         | StmtKind::Assign { .. }
         | StmtKind::CompoundAssign { .. }
         | StmtKind::ArrayAssign { .. }
+        | StmtKind::ArrayCompoundAssign { .. }
         | StmtKind::DerefAssign { .. }
         | StmtKind::DerefCompoundAssign { .. }
         | StmtKind::MemberAssign { .. }
@@ -810,7 +813,8 @@ fn count_uses_stmt(stmt: &Stmt, counts: &mut HashMap<String, u32>) {
                 }
             }
         }
-        StmtKind::ArrayAssign { array, indices, value } => {
+        StmtKind::ArrayAssign { array, indices, value }
+        | StmtKind::ArrayCompoundAssign { array, indices, value, .. } => {
             // `a[i] = v;` mirrors `a[i]` as an rvalue: direct deref
             // counts the base name as 2 uses (read of address + use
             // of memory). Arrays never enregister anyway, but the

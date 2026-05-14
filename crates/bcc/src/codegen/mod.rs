@@ -374,6 +374,10 @@ impl<'a> FunctionEmitter<'a> {
                 self.advance_to_stmt_line(stmt);
                 self.emit_array_assign(array, indices, value);
             }
+            StmtKind::ArrayCompoundAssign { array, indices, op, value } => {
+                self.advance_to_stmt_line(stmt);
+                self.emit_array_compound_assign(array, indices, *op, value);
+            }
             StmtKind::DerefAssign { target, value } => {
                 self.advance_to_stmt_line(stmt);
                 self.emit_deref_assign(target, value);
@@ -1910,6 +1914,48 @@ impl<'a> FunctionEmitter<'a> {
             return;
         }
         panic!("non-constant rhs in variable-indexed array assign not yet supported (no fixture)");
+    }
+
+    /// `a[<i1>][<i2>]... <op>= <value>;` — read-modify-write on an
+    /// array element. Mirrors `emit_array_assign` for the all-const
+    /// index path; emits `<op> <width> ptr [bp-N],<imm>` instead of
+    /// `mov` (fixture 184).
+    fn emit_array_compound_assign(
+        &mut self,
+        array: &str,
+        indices: &[Expr],
+        op: BinOp,
+        value: &Expr,
+    ) {
+        let array_ty = self.locals.type_of(array).clone();
+        let LocalLocation::Stack(base_off) = self.locals.location_of(array) else {
+            panic!("array `{array}` should be stack-resident");
+        };
+        let Some((const_off, leaf_ty)) =
+            try_const_array_offset(&array_ty, indices.iter())
+        else {
+            panic!("variable-indexed array compound assign not yet supported (no fixture)");
+        };
+        let off = base_off + i16::try_from(const_off).unwrap_or(i16::MAX);
+        let store_byte = matches!(leaf_ty, Type::Char);
+        let width = if store_byte { "byte" } else { "word" };
+        let Some(v) = try_const_eval(value) else {
+            panic!("non-constant rhs in array compound assign not yet supported (no fixture)");
+        };
+        let v_masked = if store_byte { v & 0xFF } else { v & 0xFFFF };
+        let mnemonic = match op {
+            BinOp::Add => "add",
+            BinOp::Sub => "sub",
+            BinOp::BitAnd => "and",
+            BinOp::BitOr => "or",
+            BinOp::BitXor => "xor",
+            _ => panic!("compound op `{op:?}` on array element not yet supported (no fixture)"),
+        };
+        let _ = write!(
+            self.out,
+            "\t{mnemonic}\t{width} ptr {},{v_masked}\r\n",
+            bp_addr(off),
+        );
     }
 
 

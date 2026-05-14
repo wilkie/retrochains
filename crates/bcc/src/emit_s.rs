@@ -407,7 +407,8 @@ fn walk_calls(
         StmtKind::Assign { value, .. } | StmtKind::CompoundAssign { value, .. } => {
             walk_calls_expr(value, defined, locals, seen, ordered);
         }
-        StmtKind::ArrayAssign { indices, value, .. } => {
+        StmtKind::ArrayAssign { indices, value, .. }
+        | StmtKind::ArrayCompoundAssign { indices, value, .. } => {
             for ix in indices {
                 walk_calls_expr(ix, defined, locals, seen, ordered);
             }

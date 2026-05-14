@@ -142,6 +142,16 @@ pub enum StmtKind {
     /// ptr [reg], imm8` shape `MemberCompoundAssign` produces, just
     /// with no field offset (fixture 183).
     DerefCompoundAssign { target: Expr, op: BinOp, value: Expr },
+    /// `a[<i1>][<i2>]... <op>= <value>;` — compound assignment on an
+    /// array element. Indices follow the same outermost-to-innermost
+    /// convention as `ArrayAssign`. With all-constant indices BCC
+    /// emits a single `<op> <width> ptr [bp-N], imm` (fixture 184).
+    ArrayCompoundAssign {
+        array: String,
+        indices: Vec<Expr>,
+        op: BinOp,
+        value: Expr,
+    },
     /// `<name> <op>= <value>;` (compound assignment). The codegen
     /// is distinct from `Assign { name, value: name <op> value }` —
     /// BCC emits a tighter form using `<op> <dst>, <src>` directly

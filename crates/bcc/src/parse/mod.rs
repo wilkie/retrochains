@@ -785,6 +785,29 @@ impl Parser {
                     kind: StmtKind::DerefCompoundAssign { target: *target, op, value },
                     span,
                 }),
+                ExprKind::ArrayIndex { .. } => {
+                    // Walk the nested chain to the base ident, same as
+                    // the plain `ArrayAssign` path.
+                    let mut indices: Vec<Expr> = Vec::new();
+                    let mut cur = expr;
+                    let array = loop {
+                        match cur.kind {
+                            ExprKind::ArrayIndex { array, index } => {
+                                indices.push(*index);
+                                cur = *array;
+                            }
+                            ExprKind::Ident(name) => break name,
+                            _ => return Err(ParseError::Unsupported {
+                                offset: cur.span.start,
+                            }),
+                        }
+                    };
+                    indices.reverse();
+                    Ok(Stmt {
+                        kind: StmtKind::ArrayCompoundAssign { array, indices, op, value },
+                        span,
+                    })
+                }
                 _ => Err(ParseError::Unsupported { offset: expr.span.start }),
             };
         }

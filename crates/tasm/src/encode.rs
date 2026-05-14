@@ -252,6 +252,7 @@ fn instr_size(instr: &Instr) -> usize {
         Instr::LeaReg16BpRel { .. } => 3,
         Instr::MovSiPtrImm { .. } | Instr::MovBxPtrImm { .. } => 4,
         Instr::AddSiPtrImm8 { .. } => 3,
+        Instr::AddBpRelImm8 { .. } => 4,
         Instr::MovAxFromSiPtr | Instr::MovAxFromBxPtr => 2,
         Instr::ShlReg16One { .. } | Instr::NegReg16 { .. } | Instr::NotReg16 { .. } => 2,
         Instr::MovBpRelImm { .. } | Instr::MovBpRelOffsetSym { .. } => 5,
@@ -644,6 +645,15 @@ fn emit_instr(
             // mod=00 /0 r/m=100 ([si]).
             out.push(0x83);
             out.push(0x04);
+            out.push(*imm as u8);
+        }
+        Instr::AddBpRelImm8 { offset, imm } => {
+            // `add word ptr [bp+disp8],imm8 (sign-extended)` → 83 46 dd ii.
+            // ModR/M 46 = mod=01 /0(ADD) r/m=110 ([bp+disp8]).
+            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
+            out.push(0x83);
+            out.push(0x46);
+            out.push(disp as u8);
             out.push(*imm as u8);
         }
         Instr::MovAxFromSiPtr => {

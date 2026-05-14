@@ -1,0 +1,4 @@
+description = "`a[1] += 5` — compound assignment on an array element with a constant index. Expected to fold to `add word ptr [bp-N],5` where N is the offset of `a[1]`, same shape as the member/deref compound cases."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]
