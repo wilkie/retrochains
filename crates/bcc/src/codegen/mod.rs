@@ -2655,24 +2655,35 @@ impl<'a> FunctionEmitter<'a> {
                 );
                 return;
             }
-            // `g = g + K;` for a long global, K small (fits in i8).
-            // Fixture 207 emits load (high to AX, low to DX), add
-            // low half (`add dx,K`), carry into high (`adc ax,0`
-            // because K fits in 16 bits), then writeback (high to
-            // AX-form A3, low via 89/16).
-            if let ExprKind::BinOp { op: BinOp::Add, left, right } = &value.kind
+            // `g = g + K;` or `g = g - K;` for a long global, K small
+            // (fits in i8 — after sign flip for sub). BCC reuses one
+            // add/adc pattern for both: load (high→AX, low→DX), add
+            // the low half (`add dx,delta`), carry-propagate into the
+            // high half (`adc ax,carry`), then writeback (A3 + 89/16).
+            // For Add: delta = +K, carry = 0. For Sub: delta = -K,
+            // carry = -1 (sign-extension of the negative delta).
+            // Fixtures 207 (add) and 208 (sub).
+            if let ExprKind::BinOp { op, left, right } = &value.kind
+                && (matches!(op, BinOp::Add) || matches!(op, BinOp::Sub))
                 && let ExprKind::Ident(rhs_name) = &left.kind
                 && rhs_name == name
                 && let Some(k) = try_const_eval(right)
-                && let Ok(k_i8) = i8::try_from(k as i32)
             {
-                let _ = write!(self.out, "\tmov\tax,word ptr DGROUP:_{name}+2\r\n");
-                let _ = write!(self.out, "\tmov\tdx,word ptr DGROUP:_{name}\r\n");
-                let _ = write!(self.out, "\tadd\tdx,{k_i8}\r\n");
-                self.out.extend_from_slice(b"\tadc\tax,0\r\n");
-                let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name}+2,ax\r\n");
-                let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name},dx\r\n");
-                return;
+                let signed = k as i32;
+                let (delta, carry) = if matches!(op, BinOp::Add) {
+                    (signed, 0i16)
+                } else {
+                    (-signed, -1i16)
+                };
+                if let Ok(delta_i8) = i8::try_from(delta) {
+                    let _ = write!(self.out, "\tmov\tax,word ptr DGROUP:_{name}+2\r\n");
+                    let _ = write!(self.out, "\tmov\tdx,word ptr DGROUP:_{name}\r\n");
+                    let _ = write!(self.out, "\tadd\tdx,{delta_i8}\r\n");
+                    let _ = write!(self.out, "\tadc\tax,{carry}\r\n");
+                    let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name}+2,ax\r\n");
+                    let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name},dx\r\n");
+                    return;
+                }
             }
             panic!("non-constant long assignment to global not yet supported (no fixture)");
         }

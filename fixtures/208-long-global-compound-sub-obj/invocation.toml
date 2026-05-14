@@ -1,0 +1,4 @@
+description = "`g = g - 10` on a long global. Mirror of fixture 207 with `sub`/`sbb` instead of `add`/`adc`. Same load-arith-store shape: load (high to AX, low to DX), `sub dx,K`, `sbb ax,0`, store (high A3, low 89/16)."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]
