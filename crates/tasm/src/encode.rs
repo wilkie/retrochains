@@ -274,6 +274,10 @@ fn instr_size(instr: &Instr) -> usize {
         | Instr::MovReg16OffsetGroupSym { .. } => 3,
         Instr::MovReg16WordGroupSym { .. } => 4,
         Instr::MovGroupSymImm16 { .. } => 6,
+        Instr::MovGroupSymAx { .. } => 3,
+        Instr::MovGroupSymReg16 { .. } => 4,
+        Instr::AddReg16Imm8Sx { .. } => 3,
+        Instr::AdcAxImm16 { .. } => 3,
         Instr::MovAlFromSiPtr | Instr::MovAlFromBxPtr => 2,
         Instr::ImulReg16 { .. } => 2,
         Instr::AddAxGroupSym { .. } => 4,
@@ -645,6 +649,30 @@ fn emit_instr(
             // [imm16]. Same FIXUPP shape as the `MovAxGroupSym` load
             // sibling, plus 2 trailing immediate bytes.
             emit_group_sym_lea(&[0xC7, 0x06], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
+            out.extend_from_slice(&imm.to_le_bytes());
+        }
+        Instr::MovGroupSymAx { group, symbol, offset } => {
+            // `mov word ptr <group>:<sym>[+N], ax` → A3 lo hi
+            // (mov moffs16, AX) — the AX-specific store short form.
+            emit_group_sym_lea(&[0xA3], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
+        }
+        Instr::MovGroupSymReg16 { group, symbol, offset, reg } => {
+            // `mov word ptr <group>:<sym>[+N], <reg16>` → 89 (mod=00
+            // reg=<r> rm=110) lo hi. Non-AX dst takes the generic
+            // `mov r/m16, r16` opcode.
+            let modrm = 0b00_000_110 | (reg.code() << 3);
+            emit_group_sym_lea(&[0x89, modrm], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
+        }
+        Instr::AddReg16Imm8Sx { reg, imm } => {
+            // `add <reg16>, imm8sx` → 83 C(reg) ii. ModR/M C(reg) =
+            // mod=11 /0(ADD) rm=<reg>.
+            out.push(0x83);
+            out.push(0b11_000_000 | reg.code());
+            out.push(*imm as u8);
+        }
+        Instr::AdcAxImm16 { imm } => {
+            // `adc ax, imm16` → 15 lo hi.
+            out.push(0x15);
             out.extend_from_slice(&imm.to_le_bytes());
         }
         Instr::MovReg16WordGroupSym { reg, group, symbol, offset } => {

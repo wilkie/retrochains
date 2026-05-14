@@ -380,6 +380,7 @@ fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
         // also have special operand forms (`sub sp,imm`, `xor ax,ax`)
         // that take precedence — handled in the per-op parser below.
         "add" => parse_add(rest, line.line_no),
+        "adc" => parse_adc(rest, line.line_no),
         "sub" => parse_sub(rest, line.line_no),
         "and" => parse_alu_ax_mem(rest, line.line_no, "and", |o| Instr::AndAxBpRel { offset: o }),
         "or" => parse_or(rest, line.line_no),
@@ -649,6 +650,26 @@ fn parse_mov(operands: &str, line_no: usize) -> AsmResult<Instr> {
                 imm: imm as u16,
             });
         }
+        // Store AX → moffs16 short form (A3). Fixture 207 writes
+        // long-high via AX. Other regs (non-AX) take the generic
+        // `89 (modrm) ...` path below.
+        if rhs == "ax" {
+            let (sym, offset) = split_sym_offset(symbol);
+            return Ok(Instr::MovGroupSymAx {
+                group: group.to_string(),
+                symbol: sym.to_string(),
+                offset,
+            });
+        }
+        if let Some(reg) = Reg16::parse(rhs) {
+            let (sym, offset) = split_sym_offset(symbol);
+            return Ok(Instr::MovGroupSymReg16 {
+                group: group.to_string(),
+                symbol: sym.to_string(),
+                offset,
+                reg,
+            });
+        }
     }
     Err(AsmError::new(
         line_no,
@@ -673,6 +694,22 @@ fn parse_sub(operands: &str, line_no: usize) -> AsmResult<Instr> {
     }
     // Otherwise: try the AX/mem form.
     parse_alu_ax_mem(operands, line_no, "sub", |o| Instr::SubAxBpRel { offset: o })
+}
+
+/// `adc ax, imm16` — add-with-carry to AX. Fixture 207 (long arithmetic).
+fn parse_adc(operands: &str, line_no: usize) -> AsmResult<Instr> {
+    let (lhs, rhs) = split_comma(operands).ok_or_else(|| {
+        AsmError::new(line_no, format!("adc: expected `lhs,rhs`, got {operands:?}"))
+    })?;
+    if lhs == "ax" {
+        if let Some(imm) = parse_imm16(rhs) {
+            return Ok(Instr::AdcAxImm16 { imm: imm as u16 });
+        }
+    }
+    Err(AsmError::new(
+        line_no,
+        format!("adc: unsupported operand form `{operands}`"),
+    ))
 }
 
 /// Generic `<op> word ptr [bp+<offset>]` parser — single-operand
@@ -726,6 +763,14 @@ fn parse_add(operands: &str, line_no: usize) -> AsmResult<Instr> {
         }
         if let Some(imm) = parse_imm16(rhs) {
             return Ok(Instr::AddAxImm { imm });
+        }
+    }
+    // `add <reg16>, imm8sx` for non-AX dst (AX uses the shorter
+    // `05 lo hi` form via `AddAxImm`). Fixture 207 (`add dx, 10`
+    // for long-arithmetic low-half add).
+    if let Some(reg) = Reg16::parse(lhs) {
+        if let Some(imm) = parse_imm8_signed(rhs) {
+            return Ok(Instr::AddReg16Imm8Sx { reg, imm });
         }
     }
     // `add word ptr [si],<imm8>` — read-modify-write through SI.

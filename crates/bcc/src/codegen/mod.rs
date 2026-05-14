@@ -2640,22 +2640,41 @@ impl<'a> FunctionEmitter<'a> {
             .cloned()
             .expect("caller already checked");
         // `long g = K;` — two word stores, **high word first** then
-        // low word (fixture 205). Only constant RHS is fixtured.
+        // low word (fixture 205).
         if matches!(ty, Type::Long) {
-            let Some(v) = try_const_eval(value) else {
-                panic!("non-constant long assignment to global not yet supported (no fixture)");
-            };
-            let lo = v & 0xFFFF;
-            let hi = (v >> 16) & 0xFFFF;
-            let _ = write!(
-                self.out,
-                "\tmov\tword ptr DGROUP:_{name}+2,{hi}\r\n",
-            );
-            let _ = write!(
-                self.out,
-                "\tmov\tword ptr DGROUP:_{name},{lo}\r\n",
-            );
-            return;
+            if let Some(v) = try_const_eval(value) {
+                let lo = v & 0xFFFF;
+                let hi = (v >> 16) & 0xFFFF;
+                let _ = write!(
+                    self.out,
+                    "\tmov\tword ptr DGROUP:_{name}+2,{hi}\r\n",
+                );
+                let _ = write!(
+                    self.out,
+                    "\tmov\tword ptr DGROUP:_{name},{lo}\r\n",
+                );
+                return;
+            }
+            // `g = g + K;` for a long global, K small (fits in i8).
+            // Fixture 207 emits load (high to AX, low to DX), add
+            // low half (`add dx,K`), carry into high (`adc ax,0`
+            // because K fits in 16 bits), then writeback (high to
+            // AX-form A3, low via 89/16).
+            if let ExprKind::BinOp { op: BinOp::Add, left, right } = &value.kind
+                && let ExprKind::Ident(rhs_name) = &left.kind
+                && rhs_name == name
+                && let Some(k) = try_const_eval(right)
+                && let Ok(k_i8) = i8::try_from(k as i32)
+            {
+                let _ = write!(self.out, "\tmov\tax,word ptr DGROUP:_{name}+2\r\n");
+                let _ = write!(self.out, "\tmov\tdx,word ptr DGROUP:_{name}\r\n");
+                let _ = write!(self.out, "\tadd\tdx,{k_i8}\r\n");
+                self.out.extend_from_slice(b"\tadc\tax,0\r\n");
+                let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name}+2,ax\r\n");
+                let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name},dx\r\n");
+                return;
+            }
+            panic!("non-constant long assignment to global not yet supported (no fixture)");
         }
         let width = if matches!(ty, Type::Char) { "byte" } else { "word" };
         if let Some(v) = try_const_eval(value) {

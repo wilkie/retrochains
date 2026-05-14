@@ -247,6 +247,29 @@ pub enum Instr {
         offset: i16,
         imm: u16,
     },
+    /// `mov word ptr <group>:<symbol>[+<offset>], ax` — store AX to
+    /// a data-segment global. Emits `A3 lo hi` (mov moffs16, AX) —
+    /// AX-specific short form vs the generic `MOV r/m16, r16`.
+    /// Fixture 207 uses this for the high half of long-arithmetic
+    /// writeback.
+    MovGroupSymAx { group: String, symbol: String, offset: i16 },
+    /// `mov word ptr <group>:<symbol>[+<offset>], <reg16>` for
+    /// non-AX source. Emits `89 (mod=00 reg=<r> rm=110) lo hi`.
+    /// Fixture 207's low-word writeback uses DX → encodes as
+    /// `89 16 ...`.
+    MovGroupSymReg16 {
+        group: String,
+        symbol: String,
+        offset: i16,
+        reg: Reg16,
+    },
+    /// `add <reg16>, imm8 (sign-extended)` — Grp1 r/m16,imm8sx.
+    /// Encoding `83 C(rm) ii` where ModR/M is `mod=11 /0(ADD)
+    /// rm=<reg>`. Fixture 207 (`add dx,10`).
+    AddReg16Imm8Sx { reg: Reg16, imm: i8 },
+    /// `adc ax, imm16` — `15 lo hi`. AX-specific add-with-carry
+    /// short form. Fixture 207's high-half carry propagation.
+    AdcAxImm16 { imm: u16 },
     /// `mov <reg16>,word ptr <group>:<symbol>[+<offset>]` for non-AX
     /// destinations. Uses MOV r16,r/m16 with disp16-only addressing
     /// (`8B (mod=00 reg=<r> rm=110) lo hi`). Same FIXUPP shape as
