@@ -1677,6 +1677,41 @@ impl<'a> FunctionEmitter<'a> {
                 return self.emit_deref_pointer_plus_offset(name, pointee.clone(), right);
             }
         }
+        // `*p++` / `*p--`: post-update inside a deref (fixture 199).
+        // BCC saves the pre-update pointer in BX, advances the
+        // register-resident pointer by `stride` 1-byte `inc`/`dec`
+        // ops (when stride ≤ 2), then reads through `[bx]`.
+        if let ExprKind::Update { target, op, position: UpdatePosition::Post } = &ptr.kind {
+            let ty = self.locals.type_of(target).clone();
+            let Some(pointee) = ty.pointee() else {
+                panic!("`*{target}++`: not a pointer type");
+            };
+            let LocalLocation::Reg(reg) = self.locals.location_of(target) else {
+                panic!("stack-resident pointer in `*p++` not yet supported (no fixture)");
+            };
+            let reg_name = reg.name();
+            let stride = pointee.size_bytes();
+            let mnemonic = match op {
+                UpdateOp::Inc => "inc",
+                UpdateOp::Dec => "dec",
+            };
+            let _ = write!(self.out, "\tmov\tbx,{reg_name}\r\n");
+            if stride == 1 || stride == 2 {
+                for _ in 0..stride {
+                    let _ = write!(self.out, "\t{mnemonic}\t{reg_name}\r\n");
+                }
+            } else {
+                panic!("`*p++` with pointee stride > 2 not yet supported (no fixture)");
+            }
+            if matches!(*pointee, Type::Char) {
+                self.out.extend_from_slice(b"\tmov\tal,byte ptr [bx]\r\n");
+                self.out.extend_from_slice(b"\tcbw\t\r\n");
+            } else {
+                let width = ptr_width(pointee);
+                let _ = write!(self.out, "\tmov\tax,{width} ptr [bx]\r\n");
+            }
+            return;
+        }
         let (base_name, depth) = deref_chain_root(ptr);
         // Single-deref of a stack/register-resident local stays on
         // the original fast path (`mov al,byte ptr [si]` etc.) so
