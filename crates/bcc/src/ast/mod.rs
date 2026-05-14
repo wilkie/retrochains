@@ -208,6 +208,10 @@ pub enum Type {
     UInt,
     /// `char` — 1-byte signed (BCC's default for plain `char`).
     Char,
+    /// `long` / `long int` — 32-bit signed. Stored as a high/low word
+    /// pair (DX:AX in registers; two adjacent words in memory, low
+    /// word first / little-endian).
+    Long,
     /// `T a[N]` — contiguous run of `N` `T`-typed elements on the stack.
     /// Arrays never enregister; the name in expression contexts refers
     /// to a stack address. Today only constant `N` is supported (we
@@ -253,6 +257,7 @@ impl Type {
         match self {
             Self::Int | Self::UInt => 2,
             Self::Char => 1,
+            Self::Long => 4,
             Self::Array { elem, len } => {
                 let elem = elem.size_bytes();
                 elem * u16::try_from(*len).expect("array byte size fits in u16")
@@ -271,6 +276,7 @@ impl Type {
         match self {
             Self::Int | Self::UInt => 2,
             Self::Char => 1,
+            Self::Long => 2,
             Self::Array { elem, .. } => elem.alignment(),
             Self::Pointer(_) => 2,
             // Struct alignment: 2 (word). The size rounding to even

@@ -147,7 +147,7 @@ impl Parser {
             // bare-struct path above).
             match self.peek_n(probe).kind {
                 TokenKind::KwInt | TokenKind::KwChar => probe += 1,
-                TokenKind::KwUnsigned => {
+                TokenKind::KwUnsigned | TokenKind::KwLong => {
                     probe += 1;
                     if matches!(self.peek_n(probe).kind, TokenKind::KwInt) {
                         probe += 1;
@@ -353,6 +353,16 @@ impl Parser {
                     self.bump();
                 }
                 Ok(Type::UInt)
+            }
+            TokenKind::KwLong => {
+                self.bump();
+                // `long int` and bare `long` both mean `long` — 32-bit
+                // signed under the small model (fixture 203). Consume
+                // the optional `int`.
+                if matches!(self.peek().kind, TokenKind::KwInt) {
+                    self.bump();
+                }
+                Ok(Type::Long)
             }
             TokenKind::KwStruct => self.parse_struct_type(),
             TokenKind::KwUnion => self.parse_union_type(),
@@ -745,7 +755,8 @@ impl Parser {
             | TokenKind::KwChar
             | TokenKind::KwStruct
             | TokenKind::KwUnion
-            | TokenKind::KwUnsigned => self.parse_declare(start),
+            | TokenKind::KwUnsigned
+            | TokenKind::KwLong => self.parse_declare(start),
             TokenKind::KwStatic => self.parse_declare(start),
             TokenKind::Ident(ref name) if self.typedefs.contains_key(name) => {
                 self.parse_declare(start)
