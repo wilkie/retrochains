@@ -1,0 +1,4 @@
+description = "`return (int)g;` where g is `long` — narrowing cast from long to int. The high word is discarded; the low word becomes AX. BCC just loads `mov ax,word ptr DGROUP:_g` and ignores `_g+2`."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]
