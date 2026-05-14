@@ -1,0 +1,4 @@
+description = "`x + *p` — deref as RHS of a commutative op when LHS isn't constant-foldable. The commutative-swap rule (fixture 200) only fires when LHS is a constant, so here BCC keeps source order: load `x` into AX, then `add ax,word ptr [si]` directly. Tests `add` parallel to fixture 201's `sub`."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

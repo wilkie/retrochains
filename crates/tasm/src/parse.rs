@@ -696,6 +696,9 @@ fn parse_add(operands: &str, line_no: usize) -> AsmResult<Instr> {
         return Ok(Instr::AddSpImm(imm_u8));
     }
     if lhs == "ax" {
+        if rhs == "word ptr [si]" {
+            return Ok(Instr::AddAxFromSiPtr);
+        }
         if let Some(offset) = parse_bp_relative(rhs) {
             return Ok(Instr::AddAxBpRel { offset });
         }
