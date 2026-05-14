@@ -1911,6 +1911,36 @@ impl<'a> FunctionEmitter<'a> {
             }
             return;
         }
+        // 2D variable-index read: `a[i][j]` for `int a[M][N]`.
+        // Fixture 198. Other multi-dim depths aren't fixtured yet.
+        if indices.len() == 2 {
+            let (outer_stride, inner_stride, leaf_ty) = match &ty {
+                Type::Array { elem, .. } => match &**elem {
+                    inner_arr @ Type::Array { elem: inner_elem, .. } => (
+                        inner_arr.size_bytes(),
+                        inner_elem.size_bytes(),
+                        (**inner_elem).clone(),
+                    ),
+                    _ => panic!("`{array_name}[i][j]`: outer element isn't an array"),
+                },
+                _ => panic!("`{array_name}[i][j]`: not an array type"),
+            };
+            self.emit_array_addr_2d_to_bx(
+                indices[0],
+                indices[1],
+                outer_stride,
+                inner_stride,
+                base_off,
+            );
+            let width = ptr_width(&leaf_ty);
+            if matches!(leaf_ty, Type::Char) {
+                self.out.extend_from_slice(b"\tmov\tal,byte ptr [bx]\r\n");
+                self.out.extend_from_slice(b"\tcbw\t\r\n");
+            } else {
+                let _ = write!(self.out, "\tmov\tax,{width} ptr [bx]\r\n");
+            }
+            return;
+        }
         if indices.len() != 1 {
             panic!("multi-dim array read with non-constant indices not yet supported (no fixture)");
         }
@@ -2042,6 +2072,63 @@ impl<'a> FunctionEmitter<'a> {
         self.out.extend_from_slice(b"\tadd\tbx,ax\r\n");
     }
 
+    /// Two-dim variable-index address: lands `&a[i][j]` in BX. BCC's
+    /// pattern (fixture 198):
+    /// ```text
+    ///   mov ax, <outer-reg>       ; outer index into AX
+    ///   mov dx, <outer-stride>
+    ///   imul dx                   ; AX = outer * outer-stride (signed)
+    ///   mov dx, <inner-reg>       ; inner index into DX
+    ///   shl dx, 1                 ; only when inner-stride == 2
+    ///   add ax, dx                ; AX = outer*os + inner*is
+    ///   lea dx, word ptr [bp-base]
+    ///   add ax, dx                ; AX = base + total
+    ///   mov bx, ax
+    /// ```
+    /// Currently restricted to stride 2 on the inner axis (the only
+    /// fixtured case). Outer stride uses `imul` regardless of whether
+    /// it's a power of two — BCC seems to never `shl` the outer
+    /// multiplier in observed output, possibly because outer strides
+    /// aren't typically powers of two in C2.0-era code.
+    fn emit_array_addr_2d_to_bx(
+        &mut self,
+        outer_idx: &Expr,
+        inner_idx: &Expr,
+        outer_stride: u16,
+        inner_stride: u16,
+        base_off: i16,
+    ) {
+        let outer_reg = self.idx_reg_name(outer_idx);
+        let _ = write!(self.out, "\tmov\tax,{outer_reg}\r\n");
+        let _ = write!(self.out, "\tmov\tdx,{outer_stride}\r\n");
+        self.out.extend_from_slice(b"\timul\tdx\r\n");
+        let inner_reg = self.idx_reg_name(inner_idx);
+        let _ = write!(self.out, "\tmov\tdx,{inner_reg}\r\n");
+        if inner_stride == 2 {
+            self.out.extend_from_slice(b"\tshl\tdx,1\r\n");
+        } else if inner_stride != 1 {
+            panic!("2D inner-stride != {{1,2}} not yet supported (no fixture)");
+        }
+        self.out.extend_from_slice(b"\tadd\tax,dx\r\n");
+        let _ = write!(self.out, "\tlea\tdx,word ptr {}\r\n", bp_addr(base_off));
+        self.out.extend_from_slice(b"\tadd\tax,dx\r\n");
+        self.out.extend_from_slice(b"\tmov\tbx,ax\r\n");
+    }
+
+    /// Look up the register name for an index that's an Ident bound
+    /// to a register-resident local. Used by the 2D address helper.
+    fn idx_reg_name(&self, index: &Expr) -> &'static str {
+        let ExprKind::Ident(name) = &index.kind else {
+            panic!("non-ident multi-dim index not yet supported (no fixture)");
+        };
+        match self.locals.location_of(name) {
+            LocalLocation::Reg(reg) => reg.name(),
+            LocalLocation::Stack(_) => {
+                panic!("stack-resident multi-dim index not yet supported (no fixture)");
+            }
+        }
+    }
+
     /// `a[<i1>][<i2>]... = <value>;` — write into an array slot. With
     /// all-constant indices we fold to a single `mov <width> ptr
     /// [bp-N], K`. Otherwise (single-dim variable index, fixtures
@@ -2066,12 +2153,42 @@ impl<'a> FunctionEmitter<'a> {
             }
             panic!("non-constant rhs in constant-indexed array assign not yet supported (no fixture)");
         }
+        // 2D variable-index write: `a[i][j] = v` for `int a[M][N]`.
+        // Same chain as the read path (fixture 198), with a store
+        // through `[bx]` instead of a load.
+        if indices.len() == 2 {
+            let (outer_stride, inner_stride, leaf_ty) = match &array_ty {
+                Type::Array { elem, .. } => match &**elem {
+                    inner_arr @ Type::Array { elem: inner_elem, .. } => (
+                        inner_arr.size_bytes(),
+                        inner_elem.size_bytes(),
+                        (**inner_elem).clone(),
+                    ),
+                    _ => panic!("`{array}[i][j] = v`: outer element isn't an array"),
+                },
+                _ => panic!("`{array}[i][j] = v`: not an array type"),
+            };
+            self.emit_array_addr_2d_to_bx(
+                &indices[0],
+                &indices[1],
+                outer_stride,
+                inner_stride,
+                base_off,
+            );
+            let width = ptr_width(&leaf_ty);
+            let Some(v) = try_const_eval(value) else {
+                panic!("non-constant rhs in 2D array assign not yet supported (no fixture)");
+            };
+            let v_masked =
+                if matches!(leaf_ty, Type::Char) { v & 0xFF } else { v & 0xFFFF };
+            let _ = write!(self.out, "\tmov\t{width} ptr [bx],{v_masked}\r\n");
+            return;
+        }
         // Variable-index fallback: only the single-dim path is wired
-        // up today (covers fixtures 078, 142). Multi-dim with any
-        // non-const subscript would need extra address arithmetic;
-        // no fixture demands it yet.
+        // up today (covers fixtures 078, 142). Deeper multi-dim with
+        // any non-const subscript isn't fixtured.
         if indices.len() != 1 {
-            panic!("multi-dim array assign with non-constant indices not yet supported (no fixture)");
+            panic!("multi-dim (>2) array assign with non-constant indices not yet supported (no fixture)");
         }
         let elem = array_ty
             .array_elem()
