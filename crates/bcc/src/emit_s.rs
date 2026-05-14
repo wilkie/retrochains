@@ -199,11 +199,26 @@ fn emit_global_init(out: &mut Vec<u8>, ty: &crate::ast::Type, init: &crate::ast:
     // `db` lines, two per element. Excess initializers beyond `len`
     // would be an error in C; we don't fixture-test that path.
     if let ExprKind::InitList { items } = &init.kind {
-        let Type::Array { elem, .. } = ty else {
-            panic!("initializer list against non-array type not yet supported");
-        };
-        for item in items {
-            emit_scalar_global_bytes(out, elem, item);
+        match ty {
+            Type::Array { elem, .. } => {
+                for item in items {
+                    emit_global_init(out, elem, item);
+                }
+            }
+            Type::Struct { fields, .. } => {
+                if items.len() > fields.len() {
+                    panic!("too many initializers for struct ({} fields)", fields.len());
+                }
+                // Pair each item with the corresponding field's type
+                // in declaration order. Fixture 190 (`struct point g
+                // = {3, 7}`). Field-by-field, no padding for word-
+                // aligned fields in this fixture; alignment fillers
+                // for char-followed-by-int would need an extra fixture.
+                for (item, field) in items.iter().zip(fields.iter()) {
+                    emit_global_init(out, &field.ty, item);
+                }
+            }
+            _ => panic!("initializer list against {:?} not yet supported", ty),
         }
         return;
     }

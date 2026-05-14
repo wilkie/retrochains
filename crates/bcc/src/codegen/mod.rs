@@ -1203,12 +1203,13 @@ impl<'a> FunctionEmitter<'a> {
     fn try_lvalue_chain_addr(&self, e: &Expr) -> Option<(String, i32, Type)> {
         match &e.kind {
             ExprKind::Ident(name) => {
-                // Globals don't have bp-relative offsets; this helper
-                // is only meaningful for stack locals.
-                if self.globals.contains(name) {
-                    return None;
-                }
-                let ty = self.locals.type_of(name).clone();
+                // Look up in globals first, then locals. Caller decides
+                // whether to address via DGROUP-relative or bp-relative.
+                let ty = if let Some(gt) = self.globals.type_of(name) {
+                    gt.clone()
+                } else {
+                    self.locals.type_of(name).clone()
+                };
                 Some((name.clone(), 0, ty))
             }
             ExprKind::ArrayIndex { array, index } => {
@@ -2051,11 +2052,29 @@ impl<'a> FunctionEmitter<'a> {
         kind: crate::ast::MemberKind,
     ) {
         // Dot: try the lvalue-chain helper so `a.x`, `pts[1].x`, and
-        // nested `a.b.c` all fold to a single `[bp-N]` load.
+        // nested `a.b.c` all fold to a single load. Works for both
+        // stack locals (`[bp-N]`) and file-scope globals
+        // (`DGROUP:_<name>+K`, fixture 190).
         if matches!(kind, crate::ast::MemberKind::Dot) {
             if let Some((name, total_off, leaf_ty)) =
                 self.try_member_dot_chain(base, field)
             {
+                if self.globals.contains(&name) {
+                    let load_byte = matches!(leaf_ty, Type::Char);
+                    let width = if load_byte { "byte" } else { "word" };
+                    let addr = if total_off == 0 {
+                        format!("DGROUP:_{name}")
+                    } else {
+                        format!("DGROUP:_{name}+{total_off}")
+                    };
+                    if load_byte {
+                        let _ = write!(self.out, "\tmov\tal,byte ptr {addr}\r\n");
+                        self.out.extend_from_slice(b"\tcbw\t\r\n");
+                    } else {
+                        let _ = write!(self.out, "\tmov\tax,{width} ptr {addr}\r\n");
+                    }
+                    return;
+                }
                 let LocalLocation::Stack(base_bp) = self.locals.location_of(&name) else {
                     panic!("struct local `{name}` not stack-resident (unexpected)");
                 };
@@ -2123,15 +2142,24 @@ impl<'a> FunctionEmitter<'a> {
         value: &Expr,
     ) {
         // Dot path: try the lvalue-chain helper. Catches `a.x`,
-        // `pts[1].x`, nested `a.b.c`, etc.
+        // `pts[1].x`, nested `a.b.c`, and global `g.x`.
         let (dest, leaf_ty) = if matches!(kind, crate::ast::MemberKind::Dot)
             && let Some((name, total_off, leaf_ty)) = self.try_member_dot_chain(base, field)
         {
-            let LocalLocation::Stack(base_bp) = self.locals.location_of(&name) else {
-                panic!("struct local `{name}` not stack-resident (unexpected)");
+            let dest = if self.globals.contains(&name) {
+                if total_off == 0 {
+                    format!("DGROUP:_{name}")
+                } else {
+                    format!("DGROUP:_{name}+{total_off}")
+                }
+            } else {
+                let LocalLocation::Stack(base_bp) = self.locals.location_of(&name) else {
+                    panic!("struct local `{name}` not stack-resident (unexpected)");
+                };
+                let off = base_bp + i16::try_from(total_off).unwrap_or(i16::MAX);
+                bp_addr(off)
             };
-            let off = base_bp + i16::try_from(total_off).unwrap_or(i16::MAX);
-            (bp_addr(off), leaf_ty)
+            (dest, leaf_ty)
         } else {
             // Arrow (or a Dot whose base isn't a const-chain lvalue).
             let ExprKind::Ident(name) = &base.kind else {
@@ -2740,15 +2768,20 @@ impl<'a> FunctionEmitter<'a> {
                 panic!("string literal as right operand of a binary op not yet supported (no fixture)")
             }
             ExprKind::Member { base, field, kind: crate::ast::MemberKind::Dot } => {
-                // `a.x` / `pts[1].x` / `a.b.c` as a right operand:
-                // walk the lvalue chain to a single bp-relative slot.
+                // `a.x` / `pts[1].x` / `a.b.c` / global `g.x` as a
+                // right operand: walk the lvalue chain. Local chain
+                // → `[bp-N]`; global chain → `DGROUP:_<name>+K`.
                 // Fixture 103 (`return p.x + p.y;`),
-                // fixture 185 (`pts[1].x + pts[1].y`).
+                // fixture 185 (`pts[1].x + pts[1].y`),
+                // fixture 190 (global `g.x + g.y`).
                 let (name, total_off, _leaf_ty) = self
                     .try_member_dot_chain(base, field)
                     .unwrap_or_else(|| {
                         panic!("non-const-foldable member base in rhs not yet supported")
                     });
+                if self.globals.contains(&name) {
+                    return OperandSource::GlobalOffset { name, offset: total_off };
+                }
                 let LocalLocation::Stack(base_bp) = self.locals.location_of(&name) else {
                     panic!("struct local `{name}` not stack-resident");
                 };

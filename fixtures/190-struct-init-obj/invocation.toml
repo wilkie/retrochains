@@ -1,0 +1,4 @@
+description = "File-scope struct initialized with `{3, 7}`. Each member emits its bytes in field order. Read via `g.x + g.y` exercises the global-struct member-access path (no fixture covered this combination before)."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]
