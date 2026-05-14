@@ -189,7 +189,8 @@ fn plan_stmt(stmt: &Stmt, ctx: &mut PlanCtx) {
             plan_expr_value(target, ctx);
             plan_expr_value(value, ctx);
         }
-        StmtKind::MemberAssign { base, value, .. } => {
+        StmtKind::MemberAssign { base, value, .. }
+        | StmtKind::MemberCompoundAssign { base, value, .. } => {
             plan_expr_value(base, ctx);
             plan_expr_value(value, ctx);
         }

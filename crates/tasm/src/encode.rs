@@ -251,6 +251,7 @@ fn instr_size(instr: &Instr) -> usize {
         Instr::Cbw => 1,
         Instr::LeaReg16BpRel { .. } => 3,
         Instr::MovSiPtrImm { .. } | Instr::MovBxPtrImm { .. } => 4,
+        Instr::AddSiPtrImm8 { .. } => 3,
         Instr::MovAxFromSiPtr | Instr::MovAxFromBxPtr => 2,
         Instr::ShlReg16One { .. } | Instr::NegReg16 { .. } | Instr::NotReg16 { .. } => 2,
         Instr::MovBpRelImm { .. } | Instr::MovBpRelOffsetSym { .. } => 5,
@@ -636,6 +637,14 @@ fn emit_instr(
             out.push(0xC7);
             out.push(0x04);
             out.extend_from_slice(&imm.to_le_bytes());
+        }
+        Instr::AddSiPtrImm8 { imm } => {
+            // `add word ptr [si],imm8 (sign-extended)` → 83 04 ii.
+            // 83 is Grp1 r/m16,imm8-sx; /0 selects ADD; ModR/M 04 =
+            // mod=00 /0 r/m=100 ([si]).
+            out.push(0x83);
+            out.push(0x04);
+            out.push(*imm as u8);
         }
         Instr::MovAxFromSiPtr => {
             // `mov ax,word ptr [si]` → 8B 04. ModR/M 04 = mod=00

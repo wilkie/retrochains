@@ -752,7 +752,9 @@ impl Parser {
     /// only the new lvalue shapes through here.
     fn parse_expr_or_lvalue_assign(&mut self, start: u32) -> Result<Stmt, ParseError> {
         let expr = self.parse_expr()?;
-        if !matches!(self.peek().kind, TokenKind::Equals) {
+        if !matches!(self.peek().kind, TokenKind::Equals)
+            && match_compound_op(&self.peek().kind).is_none()
+        {
             // Plain expression statement.
             let semi = self.expect(&TokenKind::Semicolon)?;
             return Ok(Stmt {
@@ -760,8 +762,30 @@ impl Parser {
                 span: Span::new(start, semi.span.end),
             });
         }
-        // Assignment. Validate the parsed expression is a kind we
-        // know how to assign to.
+        // Compound assignment on a member lvalue: `p->x += v;` etc.
+        // Bare-ident compound assigns took the early path in
+        // `parse_stmt`; here we only see non-ident lvalues.
+        if let Some(op) = match_compound_op(&self.peek().kind) {
+            self.bump();
+            let value = self.parse_expr()?;
+            let semi = self.expect(&TokenKind::Semicolon)?;
+            let span = Span::new(start, semi.span.end);
+            let ExprKind::Member { base, field, kind: mk } = expr.kind else {
+                return Err(ParseError::Unsupported { offset: expr.span.start });
+            };
+            return Ok(Stmt {
+                kind: StmtKind::MemberCompoundAssign {
+                    base: *base,
+                    field,
+                    kind: mk,
+                    op,
+                    value,
+                },
+                span,
+            });
+        }
+        // Plain assignment. Validate the parsed expression is a kind
+        // we know how to assign to.
         self.bump(); // `=`
         let value = self.parse_expr()?;
         let semi = self.expect(&TokenKind::Semicolon)?;

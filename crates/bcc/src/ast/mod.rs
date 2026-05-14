@@ -126,6 +126,17 @@ pub enum StmtKind {
         kind: MemberKind,
         value: Expr,
     },
+    /// `<base>.<field> <op>= <value>;` or `<base>-><field> <op>= ...`.
+    /// Same shape as `MemberAssign` but the field gets a read-modify-
+    /// write at its effective address (fixture 182's `p->x += 5` →
+    /// `add word ptr [si], 5`).
+    MemberCompoundAssign {
+        base: Expr,
+        field: String,
+        kind: MemberKind,
+        op: BinOp,
+        value: Expr,
+    },
     /// `<name> <op>= <value>;` (compound assignment). The codegen
     /// is distinct from `Assign { name, value: name <op> value }` —
     /// BCC emits a tighter form using `<op> <dst>, <src>` directly

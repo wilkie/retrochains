@@ -459,7 +459,8 @@ fn collect_address_taken(stmt: &Stmt, out: &mut HashSet<String>) {
             expr_address_taken(target, out);
             expr_address_taken(value, out);
         }
-        StmtKind::MemberAssign { base, value, .. } => {
+        StmtKind::MemberAssign { base, value, .. }
+        | StmtKind::MemberCompoundAssign { base, value, .. } => {
             expr_address_taken(base, out);
             expr_address_taken(value, out);
         }
@@ -619,7 +620,8 @@ fn stmt_has_call(stmt: &Stmt) -> bool {
         StmtKind::DerefAssign { target, value } => {
             expr_has_call(target) || expr_has_call(value)
         }
-        StmtKind::MemberAssign { base, value, .. } => {
+        StmtKind::MemberAssign { base, value, .. }
+        | StmtKind::MemberCompoundAssign { base, value, .. } => {
             expr_has_call(base) || expr_has_call(value)
         }
         StmtKind::ExprStmt(e) => expr_has_call(e),
@@ -716,6 +718,7 @@ fn collect_decls(stmt: &Stmt, out: &mut Vec<DeclItem>) {
         | StmtKind::ArrayAssign { .. }
         | StmtKind::DerefAssign { .. }
         | StmtKind::MemberAssign { .. }
+        | StmtKind::MemberCompoundAssign { .. }
         | StmtKind::ExprStmt(_)
         | StmtKind::Break
         | StmtKind::Continue => {}
@@ -825,7 +828,8 @@ fn count_uses_stmt(stmt: &Stmt, counts: &mut HashMap<String, u32>) {
             }
             count_uses_expr(value, counts);
         }
-        StmtKind::MemberAssign { base, value, kind, .. } => {
+        StmtKind::MemberAssign { base, value, kind, .. }
+        | StmtKind::MemberCompoundAssign { base, value, kind, .. } => {
             // For `.` (Dot), the base is a struct lvalue — same
             // counting as any other expression use. For `->` (Arrow),
             // the base is a pointer that's about to be deref'd, so

@@ -1,0 +1,4 @@
+description = "Compound assignment through pointer-to-struct: `p->x += 5`. Common in real C. The codegen needs to read-modify-write through `[reg+off]` rather than the simple-assign one-shot store. Pins what BCC emits for this idiom."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

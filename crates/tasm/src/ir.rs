@@ -239,6 +239,10 @@ pub enum Instr {
     /// `mov word ptr [si],<imm16>` — C7 04 lo hi. Store an
     /// immediate through a pointer in SI (fixture 136's `p->x = 7`).
     MovSiPtrImm { imm: u16 },
+    /// `add word ptr [si],<imm8 sign-extended>` — 83 04 ii. Read-
+    /// modify-write through SI used by compound member assignment
+    /// `p->x += K` when SI holds `p` (fixture 182).
+    AddSiPtrImm8 { imm: i8 },
     /// `mov ax,word ptr [si]` — 8B 04. Load through SI pointer.
     MovAxFromSiPtr,
     /// `mov word ptr [bx],<imm16>` — C7 07 lo hi. Store through BX

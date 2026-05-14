@@ -382,6 +382,10 @@ impl<'a> FunctionEmitter<'a> {
                 self.advance_to_stmt_line(stmt);
                 self.emit_member_assign(base, field, *kind, value);
             }
+            StmtKind::MemberCompoundAssign { base, field, kind, op, value } => {
+                self.advance_to_stmt_line(stmt);
+                self.emit_member_compound_assign(base, field, *kind, *op, value);
+            }
             StmtKind::If { cond, then_branch, else_branch } => {
                 self.advance_to_stmt_line(stmt);
                 self.emit_if(stmt.span.start, cond, then_branch, else_branch.as_deref());
@@ -2039,6 +2043,76 @@ impl<'a> FunctionEmitter<'a> {
             return;
         }
         panic!("non-constant rhs in struct field assign not yet supported (no fixture)");
+    }
+
+    /// `<base>.<field> <op>= <value>;` — compound assignment through a
+    /// struct member. Computes the same `<dest>` operand as
+    /// `emit_member_assign`, then emits the matching arithmetic
+    /// instruction directly to memory (fixture 182's `p->x += 5`
+    /// becomes `add word ptr [si], 5`). Only constant RHS values are
+    /// fixture-supported today.
+    fn emit_member_compound_assign(
+        &mut self,
+        base: &Expr,
+        field: &str,
+        kind: crate::ast::MemberKind,
+        op: BinOp,
+        value: &Expr,
+    ) {
+        let ExprKind::Ident(name) = &base.kind else {
+            panic!("non-ident base in member compound assign not yet supported (no fixture)");
+        };
+        let base_ty = self.locals.type_of(name).clone();
+        let (field_off, field_ty) = match kind {
+            crate::ast::MemberKind::Dot => base_ty.field(field).unwrap_or_else(|| {
+                panic!("`{name}.{field} <op>= …`: no such field in {base_ty:?}")
+            }),
+            crate::ast::MemberKind::Arrow => {
+                let pointee = base_ty
+                    .pointee()
+                    .unwrap_or_else(|| panic!("`{name}->{field} <op>= …`: not a pointer"))
+                    .clone();
+                pointee.field(field).unwrap_or_else(|| {
+                    panic!("`{name}->{field} <op>= …`: no such field in {pointee:?}")
+                })
+            }
+        };
+        let store_byte = matches!(field_ty, Type::Char);
+        let width = if store_byte { "byte" } else { "word" };
+        let dest = match kind {
+            crate::ast::MemberKind::Dot => {
+                let LocalLocation::Stack(struct_off) = self.locals.location_of(name) else {
+                    panic!("struct local `{name}` not stack-resident (unexpected)");
+                };
+                let off = struct_off + i16::try_from(field_off).unwrap_or(i16::MAX);
+                bp_addr(off)
+            }
+            crate::ast::MemberKind::Arrow => {
+                let LocalLocation::Reg(reg) = self.locals.location_of(name) else {
+                    panic!(
+                        "stack-resident pointer in `p->x <op>= …` not yet supported (no fixture)"
+                    );
+                };
+                if field_off == 0 {
+                    format!("[{}]", reg.name())
+                } else {
+                    format!("[{}+{field_off}]", reg.name())
+                }
+            }
+        };
+        let Some(v) = try_const_eval(value) else {
+            panic!("non-constant rhs in member compound assign not yet supported (no fixture)");
+        };
+        let v_masked = if store_byte { v & 0xFF } else { v & 0xFFFF };
+        let mnemonic = match op {
+            BinOp::Add => "add",
+            BinOp::Sub => "sub",
+            BinOp::BitAnd => "and",
+            BinOp::BitOr => "or",
+            BinOp::BitXor => "xor",
+            _ => panic!("compound op `{op:?}` on member not yet supported (no fixture)"),
+        };
+        let _ = write!(self.out, "\t{mnemonic}\t{width} ptr {dest},{v_masked}\r\n");
     }
 
     /// `*<target> = <value>;` — indirect store. Pattern (fixture 081):

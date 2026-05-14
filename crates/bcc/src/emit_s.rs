@@ -417,7 +417,8 @@ fn walk_calls(
             walk_calls_expr(target, defined, locals, seen, ordered);
             walk_calls_expr(value, defined, locals, seen, ordered);
         }
-        StmtKind::MemberAssign { base, value, .. } => {
+        StmtKind::MemberAssign { base, value, .. }
+        | StmtKind::MemberCompoundAssign { base, value, .. } => {
             walk_calls_expr(base, defined, locals, seen, ordered);
             walk_calls_expr(value, defined, locals, seen, ordered);
         }

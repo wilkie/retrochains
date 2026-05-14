@@ -667,6 +667,13 @@ fn parse_add(operands: &str, line_no: usize) -> AsmResult<Instr> {
             return Ok(Instr::AddAxImm { imm });
         }
     }
+    // `add word ptr [si],<imm8>` — read-modify-write through SI.
+    // Fixture 182: `p->x += 5` where SI holds `p`.
+    if lhs == "word ptr [si]" {
+        if let Some(imm) = parse_imm8_signed(rhs) {
+            return Ok(Instr::AddSiPtrImm8 { imm });
+        }
+    }
     Err(AsmError::new(
         line_no,
         format!("add: unsupported operand form `{operands}`"),
