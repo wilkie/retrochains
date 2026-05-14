@@ -517,8 +517,41 @@ impl Parser {
         };
         let name = name.clone();
         self.expect(&TokenKind::LParen)?;
-        let params = self.parse_param_list()?;
+        let mut params = self.parse_param_list()?;
         self.expect(&TokenKind::RParen)?;
+
+        // K&R-style param-type declarations: a sequence of
+        // `<type> <name>;` between `)` and `{`. Each names a
+        // parameter from the bare-ident list and supplies its
+        // type. The bare-ident params were inserted with a
+        // placeholder `Int` type by `parse_param_list`; we
+        // overwrite as the declarations arrive. (BC2's headers
+        // use this form extensively.)
+        while !matches!(
+            self.peek().kind,
+            TokenKind::LBrace | TokenKind::Semicolon | TokenKind::Eof,
+        ) {
+            let mut ty = self.parse_type()?;
+            while matches!(self.peek().kind, TokenKind::Star) {
+                self.bump();
+                ty = Type::Pointer(Box::new(ty));
+            }
+            let name_tok = self.bump();
+            let TokenKind::Ident(pname) = &name_tok.kind else {
+                return Err(ParseError::NotAnIdent { offset: name_tok.span.start });
+            };
+            let pname = pname.clone();
+            self.expect(&TokenKind::Semicolon)?;
+            if let Some(p) = params.iter_mut().find(|p| p.name == pname) {
+                p.ty = ty;
+            } else {
+                return Err(ParseError::Unexpected {
+                    expected: "K&R type for a declared parameter".to_owned(),
+                    found: format!("declaration of `{pname}` which isn't in the param list"),
+                    offset: name_tok.span.start,
+                });
+            }
+        }
 
         // Prototype (just `;` after the param list) vs definition
         // (a `{ ... }` body). Fixture 097 has the prototype form.
@@ -554,6 +587,34 @@ impl Parser {
         if matches!(self.peek().kind, TokenKind::KwVoid) {
             self.bump();
             return Ok(Vec::new());
+        }
+        // Empty list `()` — no params declared. Accepts both prototype
+        // and K&R callers that pass through.
+        if matches!(self.peek().kind, TokenKind::RParen) {
+            return Ok(Vec::new());
+        }
+        // K&R-style: the first token is a plain identifier (and NOT a
+        // typedef-name acting as a type). Parse a bare comma-separated
+        // ident list and seed each param with a placeholder `Int` type;
+        // the post-`)` type-declaration block in `parse_function` will
+        // overwrite the placeholder where it has a matching entry.
+        if let TokenKind::Ident(ref name) = self.peek().kind
+            && !self.typedefs.contains_key(name)
+        {
+            let mut params = Vec::new();
+            loop {
+                let name_tok = self.bump();
+                let TokenKind::Ident(name) = name_tok.kind else {
+                    return Err(ParseError::NotAnIdent { offset: name_tok.span.start });
+                };
+                params.push(Param { name, ty: Type::Int });
+                if matches!(self.peek().kind, TokenKind::Comma) {
+                    self.bump();
+                } else {
+                    break;
+                }
+            }
+            return Ok(params);
         }
         let mut params = Vec::new();
         loop {
