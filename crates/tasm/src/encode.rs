@@ -279,7 +279,7 @@ fn instr_size(instr: &Instr) -> usize {
         Instr::Cbw => 1,
         Instr::LeaReg16BpRel { .. } => 3,
         Instr::MovSiPtrImm { .. } | Instr::MovBxPtrImm { .. } => 4,
-        Instr::AddSiPtrImm8 { .. } => 3,
+        Instr::AddSiPtrImm8 { .. } | Instr::AddBxPtrImm8 { .. } => 3,
         Instr::AddBpRelImm8 { .. } => 4,
         Instr::MovAxFromSiPtr | Instr::MovAxFromBxPtr | Instr::MovBxFromBxPtr => 2,
         Instr::ShlReg16One { .. } | Instr::NegReg16 { .. } | Instr::NotReg16 { .. } => 2,
@@ -686,6 +686,14 @@ fn emit_instr(
             // mod=00 /0 r/m=100 ([si]).
             out.push(0x83);
             out.push(0x04);
+            out.push(*imm as u8);
+        }
+        Instr::AddBxPtrImm8 { imm } => {
+            // `add word ptr [bx],imm8 (sign-extended)` → 83 07 ii.
+            // Same opcode + /0 as the SI sibling; only the rm field
+            // changes (111 = [bx]).
+            out.push(0x83);
+            out.push(0x07);
             out.push(*imm as u8);
         }
         Instr::AddBpRelImm8 { offset, imm } => {

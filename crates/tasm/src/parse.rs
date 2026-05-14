@@ -714,6 +714,13 @@ fn parse_add(operands: &str, line_no: usize) -> AsmResult<Instr> {
             return Ok(Instr::AddSiPtrImm8 { imm });
         }
     }
+    // `add word ptr [bx],<imm8>` — same shape via BX. Fixture 197
+    // (`*p += 5` for a global pointer that's been loaded into BX).
+    if lhs == "word ptr [bx]" {
+        if let Some(imm) = parse_imm8_signed(rhs) {
+            return Ok(Instr::AddBxPtrImm8 { imm });
+        }
+    }
     // `add word ptr [bp+N],<imm8>` — read-modify-write on a stack
     // local. Fixture 184: `a[1] += 5` folds to bp-relative add.
     if let Some(offset) = parse_word_bp_relative(lhs) {

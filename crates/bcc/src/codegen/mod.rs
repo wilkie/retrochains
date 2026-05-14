@@ -1677,25 +1677,7 @@ impl<'a> FunctionEmitter<'a> {
                 return self.emit_deref_pointer_plus_offset(name, pointee.clone(), right);
             }
         }
-        // Walk the deref chain: each level of `*` peels one pointer.
-        // `depth` counts levels seen *above* the base ident (so `*p`
-        // → 0, `**p` → 1, `***p` → 2). The base is always an Ident
-        // — non-ident bases (function calls, casts) aren't fixtured.
-        let mut depth = 0u32;
-        let mut cur = ptr;
-        let base_name = loop {
-            match &cur.kind {
-                ExprKind::Deref(inner) => {
-                    depth += 1;
-                    cur = inner;
-                }
-                ExprKind::Ident(name) => break name.as_str(),
-                _ => panic!(
-                    "non-ident pointer in `*p` not yet supported (no fixture for {:?})",
-                    cur.kind
-                ),
-            }
-        };
+        let (base_name, depth) = deref_chain_root(ptr);
         // Single-deref of a stack/register-resident local stays on
         // the original fast path (`mov al,byte ptr [si]` etc.) so
         // SI/DI-resident pointers don't bounce through BX.
@@ -1720,19 +1702,34 @@ impl<'a> FunctionEmitter<'a> {
             }
             return;
         }
-        // Chain path: walk through BX. Load the base pointer, emit
-        // `depth` intermediate `mov bx,[bx]` loads, then a final
-        // load to AX (or AL+cbw for char pointee). Fixture 195
-        // (`int **p` → `**p`) hits depth=1; fixture 193 hits
-        // depth=0 on a global.
+        // Chain path: land the address-to-be-deref'd-once-more in BX,
+        // then do the final load. Fixture 195 (`int **p` → `**p`)
+        // hits depth=1; fixture 193 hits depth=0 on a global.
+        let final_ty = self.emit_chain_to_bx(base_name, depth);
+        if matches!(final_ty, Type::Char) {
+            self.out.extend_from_slice(b"\tmov\tal,byte ptr [bx]\r\n");
+            self.out.extend_from_slice(b"\tcbw\t\r\n");
+        } else {
+            let width = ptr_width(&final_ty);
+            let _ = write!(self.out, "\tmov\tax,{width} ptr [bx]\r\n");
+        }
+    }
+
+    /// Walk a deref chain and land the address-to-be-deref'd-once-
+    /// more in BX. `depth` is the number of *visible* `*`s above the
+    /// base ident (so for `**p` called from the outer `*`, depth=1).
+    /// Emits the base load and `depth` intermediate `mov bx,[bx]`
+    /// chain steps; the caller emits the final read or write through
+    /// `[bx]`. Returns the type of the value at `[bx]` (after
+    /// `depth + 1` total pointer peels).
+    fn emit_chain_to_bx(&mut self, base_name: &str, depth: u32) -> Type {
+        let is_global = self.globals.type_of(base_name).is_some();
         let base_ty = if is_global {
             self.globals.type_of(base_name).expect("checked above").clone()
         } else {
             self.locals.type_of(base_name).clone()
         };
-        // Walk `depth + 1` levels of pointee to find the final
-        // loaded type. e.g. `**p` for `int **` → after 2 peels = int.
-        let mut final_ty = base_ty.clone();
+        let mut final_ty = base_ty;
         for _ in 0..=depth {
             let next = final_ty
                 .pointee()
@@ -1756,13 +1753,7 @@ impl<'a> FunctionEmitter<'a> {
         for _ in 0..depth {
             self.out.extend_from_slice(b"\tmov\tbx,word ptr [bx]\r\n");
         }
-        if matches!(final_ty, Type::Char) {
-            self.out.extend_from_slice(b"\tmov\tal,byte ptr [bx]\r\n");
-            self.out.extend_from_slice(b"\tcbw\t\r\n");
-        } else {
-            let width = ptr_width(&final_ty);
-            let _ = write!(self.out, "\tmov\tax,{width} ptr [bx]\r\n");
-        }
+        final_ty
     }
 
     /// `*(<ptr> + <offset>)` for fixtures 091, 092, 094. The pointer
@@ -2394,42 +2385,41 @@ impl<'a> FunctionEmitter<'a> {
     /// ```
     /// where SI holds the pointer.
     fn emit_deref_assign(&mut self, target: &Expr, value: &Expr) {
-        let ExprKind::Ident(name) = &target.kind else {
-            panic!("non-ident pointer in `*p = v` not yet supported (no fixture)");
-        };
-        // `*p = v` where `p` is a global pointer (fixture 194). Load
-        // `p` into BX from `DGROUP:_p`, then store through `[bx]`.
-        if let Some(gty) = self.globals.type_of(name) {
-            let gty = gty.clone();
-            let Some(pointee) = gty.pointee() else {
-                panic!("`*{name} = v`: global is not a pointer type");
+        let (base_name, depth) = deref_chain_root(target);
+        // Single-deref of a register-resident local pointer keeps the
+        // original fast path (`mov word ptr [si], v` etc.). Anything
+        // beyond that — globals, deeper chains — bounces through BX
+        // via the shared chain helper.
+        let is_global = self.globals.type_of(base_name).is_some();
+        if depth == 0 && !is_global {
+            let ty = self.locals.type_of(base_name).clone();
+            let Some(pointee) = ty.pointee() else {
+                panic!("`*{base_name} = v`: not a pointer type");
             };
             let width = ptr_width(pointee);
-            let Some(v) = try_const_eval(value) else {
-                panic!("non-constant rhs in global `*p = v` not yet supported (no fixture)");
+            let addr_reg = match self.locals.location_of(base_name) {
+                LocalLocation::Reg(reg) => reg.name(),
+                LocalLocation::Stack(_) => {
+                    panic!("stack-resident pointer in `*p = v` not yet supported (no fixture)");
+                }
             };
-            let v_masked = if matches!(*pointee, Type::Char) { v & 0xFF } else { v & 0xFFFF };
-            let _ = write!(self.out, "\tmov\tbx,word ptr DGROUP:_{name}\r\n");
-            let _ = write!(self.out, "\tmov\t{width} ptr [bx],{v_masked}\r\n");
-            return;
-        }
-        let ty = self.locals.type_of(name).clone();
-        let Some(pointee) = ty.pointee() else {
-            panic!("`*{name} = v`: not a pointer type");
-        };
-        let width = ptr_width(pointee);
-        let addr_reg = match self.locals.location_of(name) {
-            LocalLocation::Reg(reg) => reg.name(),
-            LocalLocation::Stack(_) => {
-                panic!("stack-resident pointer in `*p = v` not yet supported (no fixture)");
-            }
-        };
-        if let Some(v) = try_const_eval(value) {
+            let Some(v) = try_const_eval(value) else {
+                panic!("non-constant rhs in `*p = v` not yet supported (no fixture)");
+            };
             let v_masked = if matches!(*pointee, Type::Char) { v & 0xFF } else { v & 0xFFFF };
             let _ = write!(self.out, "\tmov\t{width} ptr [{addr_reg}],{v_masked}\r\n");
             return;
         }
-        panic!("non-constant rhs in `*p = v` not yet supported (no fixture)");
+        // Chain path: same prefix as the read side (fixtures 194 /
+        // 196), then a `mov <width> ptr [bx],<imm>` store. Only
+        // constant RHS is fixtured today.
+        let Some(v) = try_const_eval(value) else {
+            panic!("non-constant rhs in chained `*p = v` not yet supported (no fixture)");
+        };
+        let final_ty = self.emit_chain_to_bx(base_name, depth);
+        let width = ptr_width(&final_ty);
+        let v_masked = if matches!(final_ty, Type::Char) { v & 0xFF } else { v & 0xFFFF };
+        let _ = write!(self.out, "\tmov\t{width} ptr [bx],{v_masked}\r\n");
     }
 
     /// `*<target> <op>= <value>;` — read-modify-write through a
@@ -2437,27 +2427,10 @@ impl<'a> FunctionEmitter<'a> {
     /// address resolution, then emits `<op> <width> ptr [reg],imm`
     /// directly (fixture 183).
     fn emit_deref_compound_assign(&mut self, target: &Expr, op: BinOp, value: &Expr) {
-        let ExprKind::Ident(name) = &target.kind else {
-            panic!("non-ident pointer in `*p <op>= v` not yet supported (no fixture)");
-        };
-        let ty = self.locals.type_of(name).clone();
-        let Some(pointee) = ty.pointee() else {
-            panic!("`*{name} <op>= v`: not a pointer type");
-        };
-        let store_byte = matches!(*pointee, Type::Char);
-        let width = if store_byte { "byte" } else { "word" };
-        let addr_reg = match self.locals.location_of(name) {
-            LocalLocation::Reg(reg) => reg.name(),
-            LocalLocation::Stack(_) => {
-                panic!(
-                    "stack-resident pointer in `*p <op>= v` not yet supported (no fixture)"
-                );
-            }
-        };
+        let (base_name, depth) = deref_chain_root(target);
         let Some(v) = try_const_eval(value) else {
             panic!("non-constant rhs in `*p <op>= v` not yet supported (no fixture)");
         };
-        let v_masked = if store_byte { v & 0xFF } else { v & 0xFFFF };
         let mnemonic = match op {
             BinOp::Add => "add",
             BinOp::Sub => "sub",
@@ -2466,9 +2439,42 @@ impl<'a> FunctionEmitter<'a> {
             BinOp::BitXor => "xor",
             _ => panic!("compound op `{op:?}` on `*p` not yet supported (no fixture)"),
         };
+        // Single-deref local stays on the original fast path so a
+        // register-resident pointer (SI/DI) can drive the operand
+        // directly. Fixture 183 (`*p += K` for local `p` in SI).
+        let is_global = self.globals.type_of(base_name).is_some();
+        if depth == 0 && !is_global {
+            let ty = self.locals.type_of(base_name).clone();
+            let Some(pointee) = ty.pointee() else {
+                panic!("`*{base_name} <op>= v`: not a pointer type");
+            };
+            let store_byte = matches!(*pointee, Type::Char);
+            let width = if store_byte { "byte" } else { "word" };
+            let addr_reg = match self.locals.location_of(base_name) {
+                LocalLocation::Reg(reg) => reg.name(),
+                LocalLocation::Stack(_) => {
+                    panic!(
+                        "stack-resident pointer in `*p <op>= v` not yet supported (no fixture)"
+                    );
+                }
+            };
+            let v_masked = if store_byte { v & 0xFF } else { v & 0xFFFF };
+            let _ = write!(
+                self.out,
+                "\t{mnemonic}\t{width} ptr [{addr_reg}],{v_masked}\r\n",
+            );
+            return;
+        }
+        // Chain path: same prefix as the read/write counterparts
+        // (fixtures 194 / 196), then `<op> word ptr [bx],<imm>` in
+        // place. Fixture 197 (`*p += 5` for global `p`).
+        let final_ty = self.emit_chain_to_bx(base_name, depth);
+        let store_byte = matches!(final_ty, Type::Char);
+        let width = if store_byte { "byte" } else { "word" };
+        let v_masked = if store_byte { v & 0xFF } else { v & 0xFFFF };
         let _ = write!(
             self.out,
-            "\t{mnemonic}\t{width} ptr [{addr_reg}],{v_masked}\r\n",
+            "\t{mnemonic}\t{width} ptr [bx],{v_masked}\r\n",
         );
     }
 
@@ -3021,6 +3027,31 @@ fn switch_c_num(strategy: SwitchStrategy, case_count: u32) -> u32 {
 /// of stack-resident locals.
 fn ptr_width(ty: &Type) -> &'static str {
     if ty.size_bytes() == 1 { "byte" } else { "word" }
+}
+
+/// Walk a deref expression chain (`*p` → `(p, 0)`, `**p` → `(p, 1)`,
+/// `***p` → `(p, 2)`) and return the base ident name + the count of
+/// visible `*`s. The caller's implicit outer `*` (the one applied
+/// when reading/writing) is not counted. Used by both
+/// `emit_deref_to_ax` (read) and `emit_deref_assign` (write) so the
+/// chain prefix is shared.
+fn deref_chain_root(ptr: &Expr) -> (&str, u32) {
+    let mut depth = 0u32;
+    let mut cur = ptr;
+    let name = loop {
+        match &cur.kind {
+            ExprKind::Deref(inner) => {
+                depth += 1;
+                cur = inner;
+            }
+            ExprKind::Ident(name) => break name.as_str(),
+            _ => panic!(
+                "non-ident base in deref chain not yet supported (no fixture for {:?})",
+                cur.kind
+            ),
+        }
+    };
+    (name, depth)
 }
 
 /// Walk an array-type chain against an index list, summing
