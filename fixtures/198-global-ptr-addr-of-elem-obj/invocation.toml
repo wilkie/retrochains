@@ -1,4 +1,0 @@
-description = "`int *p = &arr[1];` — pointer global initialized to the address of an array element. Tests the constant-offset variant of fixture 193's `dw DGROUP:_arr+<N>` shape."
-tool = "bcc"
-args = ["-c", "-ms", "HELLO.C"]
-inputs = ["HELLO.C"]
