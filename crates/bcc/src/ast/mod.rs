@@ -174,6 +174,10 @@ pub enum StmtKind {
 pub enum Type {
     /// `int` — 16-bit signed under the small memory model.
     Int,
+    /// `unsigned` / `unsigned int` — 16-bit unsigned. Same byte layout
+    /// as `Int`; only comparisons and (eventually) shifts care about
+    /// the signedness.
+    UInt,
     /// `char` — 1-byte signed (BCC's default for plain `char`).
     Char,
     /// `T a[N]` — contiguous run of `N` `T`-typed elements on the stack.
@@ -219,7 +223,7 @@ impl Type {
     #[must_use]
     pub fn size_bytes(&self) -> u16 {
         match self {
-            Self::Int => 2,
+            Self::Int | Self::UInt => 2,
             Self::Char => 1,
             Self::Array { elem, len } => {
                 let elem = elem.size_bytes();
@@ -237,7 +241,7 @@ impl Type {
     #[must_use]
     pub fn alignment(&self) -> u16 {
         match self {
-            Self::Int => 2,
+            Self::Int | Self::UInt => 2,
             Self::Char => 1,
             Self::Array { elem, .. } => elem.alignment(),
             Self::Pointer(_) => 2,
@@ -247,6 +251,16 @@ impl Type {
             // followed by another local.
             Self::Struct { .. } => 2,
         }
+    }
+
+    /// True for `unsigned` integer types. Comparisons between operands
+    /// where at least one side is unsigned use the unsigned-jump
+    /// mnemonic family (`jb/jae/jbe/ja`) instead of the signed
+    /// (`jl/jge/jle/jg`). `char` is signed in BCC; `unsigned char`
+    /// would be a separate variant when a fixture demands it.
+    #[must_use]
+    pub fn is_unsigned(&self) -> bool {
+        matches!(self, Self::UInt)
     }
 
     /// Look up a field by name. Returns the field's offset and type
@@ -446,16 +460,22 @@ impl BinOp {
     /// The conditional-jump mnemonic to use when this comparison
     /// operator's result is **false**. For example, `<` is "less-than"
     /// — its inverse-on-false is "jump if not less", `jge`.
-    /// Returns `None` for non-comparison operators.
+    /// Returns `None` for non-comparison operators. `unsigned` selects
+    /// the `jb/jae/jbe/ja` family BCC uses when at least one operand
+    /// of an ordered comparison has unsigned type.
     #[must_use]
-    pub fn jump_if_false(self) -> Option<&'static str> {
-        Some(match self {
-            Self::Eq => "jne",
-            Self::Ne => "je",
-            Self::Lt => "jge",
-            Self::Le => "jg",
-            Self::Gt => "jle",
-            Self::Ge => "jl",
+    pub fn jump_if_false(self, unsigned: bool) -> Option<&'static str> {
+        Some(match (self, unsigned) {
+            (Self::Eq, _) => "jne",
+            (Self::Ne, _) => "je",
+            (Self::Lt, false) => "jge",
+            (Self::Le, false) => "jg",
+            (Self::Gt, false) => "jle",
+            (Self::Ge, false) => "jl",
+            (Self::Lt, true) => "jae",
+            (Self::Le, true) => "ja",
+            (Self::Gt, true) => "jbe",
+            (Self::Ge, true) => "jb",
             _ => return None,
         })
     }
@@ -465,14 +485,18 @@ impl BinOp {
     /// jump goes back to the body when the condition holds).
     /// Returns `None` for non-comparison operators.
     #[must_use]
-    pub fn jump_if_true(self) -> Option<&'static str> {
-        Some(match self {
-            Self::Eq => "je",
-            Self::Ne => "jne",
-            Self::Lt => "jl",
-            Self::Le => "jle",
-            Self::Gt => "jg",
-            Self::Ge => "jge",
+    pub fn jump_if_true(self, unsigned: bool) -> Option<&'static str> {
+        Some(match (self, unsigned) {
+            (Self::Eq, _) => "je",
+            (Self::Ne, _) => "jne",
+            (Self::Lt, false) => "jl",
+            (Self::Le, false) => "jle",
+            (Self::Gt, false) => "jg",
+            (Self::Ge, false) => "jge",
+            (Self::Lt, true) => "jb",
+            (Self::Le, true) => "jbe",
+            (Self::Gt, true) => "ja",
+            (Self::Ge, true) => "jae",
             _ => return None,
         })
     }

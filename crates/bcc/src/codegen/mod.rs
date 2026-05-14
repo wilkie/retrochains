@@ -1150,14 +1150,32 @@ impl<'a> FunctionEmitter<'a> {
         if let ExprKind::BinOp { op, left, right } = &cond.kind
             && op.is_comparison()
         {
+            let unsigned = self.cmp_is_unsigned(left, right);
             self.emit_compare(left, right);
             return (
-                op.jump_if_true().expect("comparison op has true mnemonic"),
-                op.jump_if_false().expect("comparison op has false mnemonic"),
+                op.jump_if_true(unsigned).expect("comparison op has true mnemonic"),
+                op.jump_if_false(unsigned).expect("comparison op has false mnemonic"),
             );
         }
         self.emit_zero_test(cond);
         ("jne", "je")
+    }
+
+    /// Whether a comparison between `left` and `right` should use the
+    /// unsigned jump mnemonics. Conservative: only inspects bare
+    /// `Ident` operands (the common case in our fixtures). An untyped
+    /// expression on either side defaults to signed, matching BCC's
+    /// "promote literals to int" behavior.
+    fn cmp_is_unsigned(&self, left: &Expr, right: &Expr) -> bool {
+        self.expr_is_unsigned(left) || self.expr_is_unsigned(right)
+    }
+
+    fn expr_is_unsigned(&self, e: &Expr) -> bool {
+        let ExprKind::Ident(name) = &e.kind else { return false };
+        if let Some(gt) = self.globals.type_of(name) {
+            return gt.is_unsigned();
+        }
+        self.locals.type_of(name).is_unsigned()
     }
 
     /// Emit a "test against zero" instruction for a non-comparison
@@ -2290,7 +2308,8 @@ impl<'a> FunctionEmitter<'a> {
         let base = self.label_plan.base(cmp_span_start);
         let false_slot = base + 1;
         let end_slot = base + 2;
-        let inv = op.jump_if_false().expect("comparison op has inverse jump");
+        let unsigned = self.cmp_is_unsigned(left, right);
+        let inv = op.jump_if_false(unsigned).expect("comparison op has inverse jump");
 
         self.emit_compare(left, right);
         let _ = write!(self.out, "\t{inv}\tshort {}\r\n", self.label_ref(false_slot));

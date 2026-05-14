@@ -394,6 +394,13 @@ pub enum JmpCond {
     /// `ja` / `jnbe` — CF=0 and ZF=0 (unsigned above). Used by BCC
     /// for the jump-table bounds check: `cmp bx,N / ja default`.
     A,
+    /// `jae` / `jnb` — CF=0 (unsigned above-or-equal). Used by BCC
+    /// for `if (u_a < u_b)` skip-branches with unsigned operands.
+    Ae,
+    /// `jb` / `jnae` — CF=1 (unsigned below).
+    B,
+    /// `jbe` / `jna` — CF=1 or ZF=1 (unsigned below-or-equal).
+    Be,
 }
 
 impl JmpCond {
@@ -401,6 +408,9 @@ impl JmpCond {
         match self {
             Self::E => 0x74,
             Self::Ne => 0x75,
+            Self::B => 0x72,
+            Self::Ae => 0x73,
+            Self::Be => 0x76,
             Self::A => 0x77,
             Self::L => 0x7C,
             Self::Ge => 0x7D,

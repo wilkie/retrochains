@@ -133,6 +133,12 @@ impl Parser {
             // bare-struct path above).
             match self.peek_n(probe).kind {
                 TokenKind::KwInt | TokenKind::KwChar => probe += 1,
+                TokenKind::KwUnsigned => {
+                    probe += 1;
+                    if matches!(self.peek_n(probe).kind, TokenKind::KwInt) {
+                        probe += 1;
+                    }
+                }
                 TokenKind::KwStruct => {
                     probe += 1;
                     if matches!(self.peek_n(probe).kind, TokenKind::Ident(_)) {
@@ -321,6 +327,15 @@ impl Parser {
             TokenKind::KwChar => {
                 self.bump();
                 Ok(Type::Char)
+            }
+            TokenKind::KwUnsigned => {
+                self.bump();
+                // `unsigned int` and bare `unsigned` are both
+                // unsigned-int; consume the optional `int`.
+                if matches!(self.peek().kind, TokenKind::KwInt) {
+                    self.bump();
+                }
+                Ok(Type::UInt)
             }
             TokenKind::KwStruct => self.parse_struct_type(),
             TokenKind::Ident(ref name) if self.typedefs.contains_key(name) => {
@@ -546,9 +561,10 @@ impl Parser {
                     span: Span::new(start, semi.span.end),
                 })
             }
-            TokenKind::KwInt | TokenKind::KwChar | TokenKind::KwStruct => {
-                self.parse_declare(start)
-            }
+            TokenKind::KwInt
+            | TokenKind::KwChar
+            | TokenKind::KwStruct
+            | TokenKind::KwUnsigned => self.parse_declare(start),
             TokenKind::KwStatic => self.parse_declare(start),
             TokenKind::Ident(ref name) if self.typedefs.contains_key(name) => {
                 self.parse_declare(start)
@@ -1225,6 +1241,7 @@ impl Parser {
             TokenKind::KwInt
             | TokenKind::KwChar
             | TokenKind::KwVoid
+            | TokenKind::KwUnsigned
             | TokenKind::KwStruct => true,
             TokenKind::Ident(ref name) if self.typedefs.contains_key(name) => true,
             _ => false,
