@@ -135,6 +135,7 @@ impl<'a> Lexer<'a> {
             b"static" => TokenKind::KwStatic,
             b"extern" => TokenKind::KwExtern,
             b"enum" => TokenKind::KwEnum,
+            b"sizeof" => TokenKind::KwSizeof,
             other => TokenKind::Ident(String::from_utf8_lossy(other).into_owned()),
         }
     }

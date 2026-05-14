@@ -1101,6 +1101,20 @@ impl Parser {
     /// require the operand to be a plain identifier today — no compound
     /// LHS like `*p++`.
     fn parse_unary(&mut self) -> Result<Expr, ParseError> {
+        // `sizeof(<type>)` folds to an integer literal at parse time.
+        // We support only the parenthesized type-name form today —
+        // `sizeof <expr>` would need a type checker to compute the
+        // operand's type, and no fixture forces it yet.
+        if matches!(self.peek().kind, TokenKind::KwSizeof) {
+            let kw = self.bump();
+            self.expect(&TokenKind::LParen)?;
+            let ty = self.parse_type()?;
+            let close = self.expect(&TokenKind::RParen)?;
+            return Ok(Expr {
+                kind: ExprKind::IntLit(u32::from(ty.size_bytes())),
+                span: Span::new(kw.span.start, close.span.end),
+            });
+        }
         if let Some(update_op) = match_update_op(&self.peek().kind) {
             let op_tok = self.bump();
             let name_tok = self.bump();

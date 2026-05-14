@@ -1,0 +1,4 @@
+description = "Simplest ternary: literal-then/literal-else with a compare condition. Pin BCC's emission shape for `?:` — likely a forward branch around the false arm, with the true value loaded into AX before the branch. Compare against the if/else shape (fixture 026) to see whether BCC distinguishes them or folds both into the same skeleton."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

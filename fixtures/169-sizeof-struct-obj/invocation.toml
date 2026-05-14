@@ -1,0 +1,4 @@
+description = "`sizeof(struct point)` where point = { int x; int y; }. Pin: BCC computes 4 at compile time using the same struct-size walker that drives stack-frame layout; the resulting OBJ should look identical to `return 4;`."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

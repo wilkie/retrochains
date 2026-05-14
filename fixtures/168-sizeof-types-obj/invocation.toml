@@ -1,0 +1,4 @@
+description = "`sizeof(int) + sizeof(char)` — both arguments fold to integer constants (2 + 1 = 3 under -ms). The OBJ should be indistinguishable from `return 3;` since the entire expression is compile-time. Pins: sizeof is a unary operator that takes either a type-name or an expression, accepted in any value position, never emitted at runtime."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]
