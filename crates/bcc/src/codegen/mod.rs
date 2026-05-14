@@ -1190,6 +1190,55 @@ impl<'a> FunctionEmitter<'a> {
         self.locals.type_of(name).is_unsigned()
     }
 
+    /// Resolve a stack-resident lvalue chain (`Ident`, `ArrayIndex`
+    /// with constant subscripts, `Member` via `Dot`, or any
+    /// composition of those) to `(base_name, total_byte_offset,
+    /// leaf_type)`. Returns `None` if the chain includes a
+    /// non-constant subscript, a pointer dereference, or anything
+    /// outside this lvalue shape. Used by the member/array codegen
+    /// to fold `pts[1].x` and friends into a single `[bp-N]` operand
+    /// (fixture 185).
+    fn try_lvalue_chain_addr(&self, e: &Expr) -> Option<(String, i32, Type)> {
+        match &e.kind {
+            ExprKind::Ident(name) => {
+                // Globals don't have bp-relative offsets; this helper
+                // is only meaningful for stack locals.
+                if self.globals.contains(name) {
+                    return None;
+                }
+                let ty = self.locals.type_of(name).clone();
+                Some((name.clone(), 0, ty))
+            }
+            ExprKind::ArrayIndex { array, index } => {
+                let (n, off, ty) = self.try_lvalue_chain_addr(array)?;
+                let k = i32::try_from(try_const_eval(index)?).ok()?;
+                let Type::Array { elem, .. } = &ty else { return None };
+                let stride = i32::from(elem.size_bytes());
+                let new_off = off.checked_add(k.checked_mul(stride)?)?;
+                Some((n, new_off, (**elem).clone()))
+            }
+            ExprKind::Member { base, field, kind: crate::ast::MemberKind::Dot } => {
+                self.try_member_dot_chain(base, field)
+            }
+            _ => None,
+        }
+    }
+
+    /// Wrapper for `try_lvalue_chain_addr` that takes the base and
+    /// field separately, matching what the member-codegen sites
+    /// already have on hand (they receive `base, field, kind` rather
+    /// than a synthesized `Member` expr).
+    fn try_member_dot_chain(
+        &self,
+        base: &Expr,
+        field: &str,
+    ) -> Option<(String, i32, Type)> {
+        let (n, off, ty) = self.try_lvalue_chain_addr(base)?;
+        let (field_off, field_ty) = ty.field(field)?;
+        let new_off = off.checked_add(i32::from(field_off))?;
+        Some((n, new_off, field_ty))
+    }
+
     /// Emit a "test against zero" instruction for a non-comparison
     /// expression — used in boolean contexts (`if (x)`, `x && y`).
     /// Today only `Ident`s are supported; other expressions panic.
@@ -1976,62 +2025,66 @@ impl<'a> FunctionEmitter<'a> {
         field: &str,
         kind: crate::ast::MemberKind,
     ) {
-        let ExprKind::Ident(name) = &base.kind else {
-            panic!("non-ident base in member access not yet supported (no fixture)");
-        };
-        let base_ty = self.locals.type_of(name).clone();
-        let (struct_ty, field_off, field_ty) = match kind {
-            crate::ast::MemberKind::Dot => {
-                let (off, ft) = base_ty.field(field).unwrap_or_else(|| {
-                    panic!("`{name}.{field}`: no such field in {base_ty:?}")
-                });
-                (base_ty.clone(), off, ft)
-            }
-            crate::ast::MemberKind::Arrow => {
-                let pointee = base_ty
-                    .pointee()
-                    .unwrap_or_else(|| panic!("`{name}->{field}`: not a pointer type"))
-                    .clone();
-                let (off, ft) = pointee.field(field).unwrap_or_else(|| {
-                    panic!("`{name}->{field}`: no such field in {pointee:?}")
-                });
-                (pointee, off, ft)
-            }
-        };
-        let load_byte = matches!(field_ty, Type::Char);
-        let _ = struct_ty;
-        match kind {
-            crate::ast::MemberKind::Dot => {
-                // `a.x`: a is on the stack at `[bp - N]`, field
-                // sits at offset `field_off` inside that block.
-                let LocalLocation::Stack(struct_off) = self.locals.location_of(name) else {
+        // Dot: try the lvalue-chain helper so `a.x`, `pts[1].x`, and
+        // nested `a.b.c` all fold to a single `[bp-N]` load.
+        if matches!(kind, crate::ast::MemberKind::Dot) {
+            if let Some((name, total_off, leaf_ty)) =
+                self.try_member_dot_chain(base, field)
+            {
+                let LocalLocation::Stack(base_bp) = self.locals.location_of(&name) else {
                     panic!("struct local `{name}` not stack-resident (unexpected)");
                 };
-                let off = struct_off + i16::try_from(field_off).unwrap_or(i16::MAX);
-                if load_byte {
+                let off = base_bp + i16::try_from(total_off).unwrap_or(i16::MAX);
+                if matches!(leaf_ty, Type::Char) {
                     let _ = write!(self.out, "\tmov\tal,byte ptr {}\r\n", bp_addr(off));
                     self.out.extend_from_slice(b"\tcbw\t\r\n");
                 } else {
                     let _ = write!(self.out, "\tmov\tax,word ptr {}\r\n", bp_addr(off));
                 }
+                return;
             }
+        }
+        // Arrow path (or Dot whose base isn't a const-chain lvalue):
+        // base must be a bare Ident referring to a pointer.
+        let ExprKind::Ident(name) = &base.kind else {
+            panic!("non-ident base in member access not yet supported (no fixture)");
+        };
+        let base_ty = self.locals.type_of(name).clone();
+        let (field_off, field_ty) = match kind {
+            crate::ast::MemberKind::Dot => base_ty.field(field).unwrap_or_else(|| {
+                panic!("`{name}.{field}`: no such field in {base_ty:?}")
+            }),
             crate::ast::MemberKind::Arrow => {
-                // `p->x`: p holds the address; field at `[reg + K]`.
-                let LocalLocation::Reg(reg) = self.locals.location_of(name) else {
-                    panic!("stack-resident pointer in `p->x` not yet supported (no fixture)");
-                };
-                let addr = if field_off == 0 {
-                    format!("[{}]", reg.name())
-                } else {
-                    format!("[{}+{field_off}]", reg.name())
-                };
-                if load_byte {
-                    let _ = write!(self.out, "\tmov\tal,byte ptr {addr}\r\n");
-                    self.out.extend_from_slice(b"\tcbw\t\r\n");
-                } else {
-                    let _ = write!(self.out, "\tmov\tax,word ptr {addr}\r\n");
-                }
+                let pointee = base_ty
+                    .pointee()
+                    .unwrap_or_else(|| panic!("`{name}->{field}`: not a pointer type"))
+                    .clone();
+                pointee.field(field).unwrap_or_else(|| {
+                    panic!("`{name}->{field}`: no such field in {pointee:?}")
+                })
             }
+        };
+        let load_byte = matches!(field_ty, Type::Char);
+        if matches!(kind, crate::ast::MemberKind::Arrow) {
+            // `p->x`: p holds the address; field at `[reg + K]`.
+            let LocalLocation::Reg(reg) = self.locals.location_of(name) else {
+                panic!("stack-resident pointer in `p->x` not yet supported (no fixture)");
+            };
+            let addr = if field_off == 0 {
+                format!("[{}]", reg.name())
+            } else {
+                format!("[{}+{field_off}]", reg.name())
+            };
+            if load_byte {
+                let _ = write!(self.out, "\tmov\tal,byte ptr {addr}\r\n");
+                self.out.extend_from_slice(b"\tcbw\t\r\n");
+            } else {
+                let _ = write!(self.out, "\tmov\tax,word ptr {addr}\r\n");
+            }
+        } else {
+            // Dot with an unsupported base shape — the chain helper
+            // already failed; surface a clear error.
+            panic!("non-ident base in `.x` access not yet supported (no fixture for {:?})", base.kind);
         }
     }
 
@@ -2044,49 +2097,61 @@ impl<'a> FunctionEmitter<'a> {
         kind: crate::ast::MemberKind,
         value: &Expr,
     ) {
-        let ExprKind::Ident(name) = &base.kind else {
-            panic!("non-ident base in member assign not yet supported (no fixture)");
-        };
-        let base_ty = self.locals.type_of(name).clone();
-        let (field_off, field_ty) = match kind {
-            crate::ast::MemberKind::Dot => base_ty.field(field).unwrap_or_else(|| {
-                panic!("`{name}.{field} = …`: no such field in {base_ty:?}")
-            }),
-            crate::ast::MemberKind::Arrow => {
-                let pointee = base_ty
-                    .pointee()
-                    .unwrap_or_else(|| panic!("`{name}->{field} = …`: not a pointer"))
-                    .clone();
-                pointee.field(field).unwrap_or_else(|| {
-                    panic!("`{name}->{field} = …`: no such field in {pointee:?}")
-                })
-            }
-        };
-        let store_byte = matches!(field_ty, Type::Char);
-        let width = if store_byte { "byte" } else { "word" };
-        // Compute the destination address-form: `[bp-N+K]` for Dot,
-        // `[reg+K]` for Arrow.
-        let dest = match kind {
-            crate::ast::MemberKind::Dot => {
-                let LocalLocation::Stack(struct_off) = self.locals.location_of(name) else {
-                    panic!("struct local `{name}` not stack-resident (unexpected)");
-                };
-                let off = struct_off + i16::try_from(field_off).unwrap_or(i16::MAX);
-                bp_addr(off)
-            }
-            crate::ast::MemberKind::Arrow => {
-                let LocalLocation::Reg(reg) = self.locals.location_of(name) else {
-                    panic!(
-                        "stack-resident pointer in `p->x = …` not yet supported (no fixture)"
-                    );
-                };
-                if field_off == 0 {
-                    format!("[{}]", reg.name())
-                } else {
-                    format!("[{}+{field_off}]", reg.name())
+        // Dot path: try the lvalue-chain helper. Catches `a.x`,
+        // `pts[1].x`, nested `a.b.c`, etc.
+        let (dest, leaf_ty) = if matches!(kind, crate::ast::MemberKind::Dot)
+            && let Some((name, total_off, leaf_ty)) = self.try_member_dot_chain(base, field)
+        {
+            let LocalLocation::Stack(base_bp) = self.locals.location_of(&name) else {
+                panic!("struct local `{name}` not stack-resident (unexpected)");
+            };
+            let off = base_bp + i16::try_from(total_off).unwrap_or(i16::MAX);
+            (bp_addr(off), leaf_ty)
+        } else {
+            // Arrow (or a Dot whose base isn't a const-chain lvalue).
+            let ExprKind::Ident(name) = &base.kind else {
+                panic!("non-ident base in member assign not yet supported (no fixture)");
+            };
+            let base_ty = self.locals.type_of(name).clone();
+            let (field_off, field_ty) = match kind {
+                crate::ast::MemberKind::Dot => base_ty.field(field).unwrap_or_else(|| {
+                    panic!("`{name}.{field} = …`: no such field in {base_ty:?}")
+                }),
+                crate::ast::MemberKind::Arrow => {
+                    let pointee = base_ty
+                        .pointee()
+                        .unwrap_or_else(|| panic!("`{name}->{field} = …`: not a pointer"))
+                        .clone();
+                    pointee.field(field).unwrap_or_else(|| {
+                        panic!("`{name}->{field} = …`: no such field in {pointee:?}")
+                    })
                 }
-            }
+            };
+            let dest = match kind {
+                crate::ast::MemberKind::Dot => {
+                    let LocalLocation::Stack(struct_off) = self.locals.location_of(name) else {
+                        panic!("struct local `{name}` not stack-resident (unexpected)");
+                    };
+                    let off = struct_off + i16::try_from(field_off).unwrap_or(i16::MAX);
+                    bp_addr(off)
+                }
+                crate::ast::MemberKind::Arrow => {
+                    let LocalLocation::Reg(reg) = self.locals.location_of(name) else {
+                        panic!(
+                            "stack-resident pointer in `p->x = …` not yet supported (no fixture)"
+                        );
+                    };
+                    if field_off == 0 {
+                        format!("[{}]", reg.name())
+                    } else {
+                        format!("[{}+{field_off}]", reg.name())
+                    }
+                }
+            };
+            (dest, field_ty)
         };
+        let store_byte = matches!(leaf_ty, Type::Char);
+        let width = if store_byte { "byte" } else { "word" };
         if let Some(v) = try_const_eval(value) {
             let v_masked = if store_byte { v & 0xFF } else { v & 0xFFFF };
             let _ = write!(self.out, "\tmov\t{width} ptr {dest},{v_masked}\r\n");
@@ -2622,20 +2687,19 @@ impl<'a> FunctionEmitter<'a> {
                 panic!("string literal as right operand of a binary op not yet supported (no fixture)")
             }
             ExprKind::Member { base, field, kind: crate::ast::MemberKind::Dot } => {
-                // `a.x` as a right operand: lowers to a stack-local
-                // operand at `[bp - struct_off + field_off]`. Fixture
-                // 103 (`return p.x + p.y;`).
-                let ExprKind::Ident(name) = &base.kind else {
-                    panic!("non-ident base in member rhs not yet supported");
-                };
-                let ty = self.locals.type_of(name).clone();
-                let (field_off, _ft) = ty
-                    .field(field)
-                    .unwrap_or_else(|| panic!("`{name}.{field}`: no such field"));
-                let LocalLocation::Stack(struct_off) = self.locals.location_of(name) else {
+                // `a.x` / `pts[1].x` / `a.b.c` as a right operand:
+                // walk the lvalue chain to a single bp-relative slot.
+                // Fixture 103 (`return p.x + p.y;`),
+                // fixture 185 (`pts[1].x + pts[1].y`).
+                let (name, total_off, _leaf_ty) = self
+                    .try_member_dot_chain(base, field)
+                    .unwrap_or_else(|| {
+                        panic!("non-const-foldable member base in rhs not yet supported")
+                    });
+                let LocalLocation::Stack(base_bp) = self.locals.location_of(&name) else {
                     panic!("struct local `{name}` not stack-resident");
                 };
-                let off = struct_off + i16::try_from(field_off).unwrap_or(i16::MAX);
+                let off = base_bp + i16::try_from(total_off).unwrap_or(i16::MAX);
                 OperandSource::Local(off)
             }
             ExprKind::Member { kind: crate::ast::MemberKind::Arrow, .. } => {

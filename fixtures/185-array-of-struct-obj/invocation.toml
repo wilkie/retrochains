@@ -1,0 +1,4 @@
+description = "Array of structs: `struct point pts[3];` with element access `pts[1].x = 7`. With a constant index, `pts[1].x` folds to a single `[bp-N]` slot at offset `base + 1*sizeof(struct point) + field_offset_x`. Tests array-index-of-struct → member access composition."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]
