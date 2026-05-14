@@ -1,0 +1,4 @@
+description = "`do {} while ()` with a `continue` in the body. Continue should jump to the check (the bottom-of-loop test), not the top. Pins what BCC's do-while emits for this branch — distinct from a regular while where continue jumps to the cond check at the top."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

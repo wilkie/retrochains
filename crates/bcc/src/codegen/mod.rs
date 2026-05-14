@@ -615,14 +615,16 @@ impl<'a> FunctionEmitter<'a> {
             self.emit_stmt(s);
         }
         self.loop_stack.pop();
+        // `continue` inside a do-while jumps to the slot just before
+        // the cmp/jump (it doubles as the check label). Only emit the
+        // label if the body actually uses it (fixture 186).
+        if body_has_continue(body) {
+            self.emit_label(plan.continue_target_slot);
+        }
         // Advance to the `while (cond);` line — it should appear as a
         // comment block before the cmp/jump (fixture 062).
         let cond_line = self.lines.line_of(cond.span.start);
         self.advance_to_line(cond_line);
-        // Do-while: no separate check label emitted in our captured
-        // fixture — the cmp/j-true sits right after the body. Continue,
-        // if used, would need a label; BCC's reservation suggests the
-        // check slot is the continue target, but a fixture is needed.
         self.emit_cond_branch(cond, Some(plan.body_slot), None);
         if body_has_break(body) {
             self.emit_label(plan.break_target_slot);
