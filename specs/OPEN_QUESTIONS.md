@@ -1,0 +1,127 @@
+# Open questions for byte-exact BCC compatibility
+
+Things we've observed but can't yet predict from rules. Each entry includes
+the smallest input that exposes the gap, what we know empirically, and the
+next investigation that would close it. Add new entries as we hit them.
+
+## Publics-list ordering
+
+**The question.** Given a translation unit, in what order does BCC emit the
+`public _xxx` directives at the end of the `-S` output (and the corresponding
+PUBDEF records in the `-c` OBJ)?
+
+**Why it matters.** PUBDEF order is part of the OBJ byte image. Two units
+with the same code but different publics order produce different `.OBJ`
+files; we lose byte-exactness even though the linked program would be
+identical.
+
+**Current rule (approximate).** Per-segment buckets `_TEXT`, `_DATA`, `_BSS`
+in that order, reverse-alphabetical sort within each bucket. Documented
+in `crates/bcc/src/emit_s.rs::write_tail`.
+
+**Confirmed gap.** Multi-character non-`main` symbols expose violations.
+19 captured probes (`int <var> = K; int main(void) {...}` permutations):
+
+| Source | Output |
+|--------|--------|
+| `aaa, main` | `_main, _aaa` |
+| `zzz, main` | `_zzz, _main` |
+| `aaaa, main` | `_main, _aaaa` |
+| `mmm, main` | `_main, _mmm` |
+| `xy, main` | `_xy, _main` |
+| `abc, main` | `_abc, _main` |
+| `cba, main` | `_cba, _main` |
+| `aaz, main` | `_main, _aaz` |
+| `abm, main` | `_abm, _main` |
+| `abz, main` | `_abz, _main` |
+| `p, main` | `_main, _p` |
+| `g, main` | `_main, _g` |
+| `aaa, mmm, zzz, main` | `_zzz, _main, _mmm, _aaa` |
+| `xy, aaa, main` | `_xy, _main, _aaa` |
+| `aaa, bbb, main` | `_bbb, _main, _aaa` |
+| `int add(); int main` | `_main, _add` |
+| `int sum(); int main` | `_sum, _main` |
+
+**What we've ruled out.** No simple closed-form fits all 19 probes:
+
+- byte-sum mod 8 (with or without `_`) — fits 9-11 of 19; `mmm` and `xy`
+  resist (sums place them on the wrong side of `main`).
+- first-char only, last-char only, first+last mod 8 — fail similar way.
+- first-2-bytes interpreted as 16-bit, mod 8 — fails for `mmm`, `xy`.
+- length-based, position-weighted sums — fail.
+- per-segment reverse-alpha (current rule) — fails when the unit has any
+  non-`main` multi-char variable.
+
+**Strong hypothesis.** BCC uses a positional/polynomial hash — likely
+`h = (h << 4) ^ c` or similar Turbo C-era construction — modulo a specific
+table size. The non-monotonicity in byte-sum (`xy` sum 241 hashes higher
+than `main` sum 421; `mmm` sum 327 hashes lower) is the giveaway.
+
+**To close.** Either (a) read Turbo C's hashing code if archived Borland
+source surfaces, or (b) fit the hash via constraint solving over ~50
+targeted probes designed to disambiguate `(h<<K)^c` for various K.
+
+**Slice tag.** Fixture `198-global-ptr-addr-of-elem-obj` exposed this and
+was removed; reinstate once the rule is decoded. The AST/parser scaffolding
+for `&<ident>[<const>]` is already in the codebase as dormant code.
+
+## LIB archives in BC2.zip — were they compiled by BCC itself?
+
+**The question.** BC2.zip's `LIB/*.LIB` files contain the runtime/CRT
+archives. Are the constituent OBJ records inside them byte-exact products
+of BCC 2.0 itself, or were they hand-assembled / produced by a different
+chain (TASM, an older BCC, etc.)?
+
+**Why it matters.** If they're BCC-compiled, the OBJ slice we emit should
+already cover their record shapes — a strong end-to-end test. If not,
+we'd need separate fixturing for any quirks in their format.
+
+**Status.** Open. Memory notes call this out as a fingerprinting task to
+do once our OBJ emitter has more coverage. See [LIB fingerprinting]
+working notes in user memory.
+
+**To close.** Fingerprint each OBJ record inside `LIB/CS.LIB` (etc.)
+against the patterns we've codified in `specs/formats/OMF.md` and our
+`tasm` encoder. Any record shape we can't reproduce identifies a feature
+gap.
+
+## Asymmetric `db` style for char-array storage
+
+**The question.** BCC emits two different `db` styles for storage that
+contains the same bytes:
+
+- **Named `char[]` global** (`char s[] = "hi"`, fixture 191):
+  ```
+  _s	label	byte
+  	db	104
+  	db	105
+  	db	0
+  ```
+  Per-byte numeric form.
+
+- **Anonymous string-pool entry** (`char *p = "hi"`, fixture 192;
+  function-scope `"hi"`, fixtures 088/157):
+  ```
+  s@	label	byte
+  	db	'hi'
+  	db	0
+  ```
+  Quoted-string form.
+
+**Why it matters.** Today we emit the right form for each context (per-byte
+for named arrays, quoted for the pool). But the *trigger* for picking one
+versus the other isn't fully understood — it might be string-pool-vs-named,
+or it might be source-syntax-driven (`= "..."` initializer vs. anonymous
+literal). The string-pool theory holds across all current fixtures, but
+there's no negative case that proves it (e.g. a named array initialized
+with a brace-list of bytes — would that take numeric or quoted form?).
+
+**To close.** Capture `char s[] = { 'h', 'i', 0 };` and compare against
+`char s[] = "hi"`. If the brace-init form also takes per-byte numeric, the
+trigger is "named storage = numeric, pool = quoted". If it takes quoted,
+the trigger is something else (probably about the initializer syntax).
+
+## Duplicate fixture number 170
+
+Cosmetic, not a compat blocker, but flag for cleanup: `170-cast-int-to-char-obj`
+and `170-fnptr-call-obj` share fixture number 170. Pick one to renumber.

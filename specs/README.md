@@ -18,6 +18,11 @@ update one of them deliberately.
   the specs and code (peephole, fingerprint, slot, segment override,
   etc.). Skim it once; refer back when a spec uses a term that
   isn't clicking.
+- [`OPEN_QUESTIONS.md`](OPEN_QUESTIONS.md) — byte-exactness blockers we
+  can't yet predict from rules. Each entry records the smallest input that
+  exposes the gap, what we've ruled out, and the next investigation to
+  close it. Add new entries when probing exposes behavior we don't
+  understand.
 
 ## Per-tool discoveries
 
