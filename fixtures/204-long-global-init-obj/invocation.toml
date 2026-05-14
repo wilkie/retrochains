@@ -1,0 +1,4 @@
+description = "`long g = 5;` — initialized long global. Tests `emit_global_init` against 4-byte literal: BCC emits the bytes in little-endian order. Confirms the storage layout for long values (low word first, high word second)."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

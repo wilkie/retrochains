@@ -304,13 +304,12 @@ fn emit_scalar_global_bytes(
         panic!("non-constant initializer at file scope (no fixture yet supports this)")
     });
     let size = ty.size_bytes();
-    if size == 1 {
-        let _ = write!(out, "\tdb\t{}\r\n", v & 0xFF);
-    } else {
-        // int (and pointer) globals: little-endian byte pair, same
-        // shape BCC uses for the linear-search switch value table.
-        let _ = write!(out, "\tdb\t{}\r\n", v & 0xFF);
-        let _ = write!(out, "\tdb\t{}\r\n", (v >> 8) & 0xFF);
+    // Emit `size` bytes little-endian, one `db <byte>` per byte.
+    // Covers `char` (1 byte), `int`/pointer (2 bytes), and `long`
+    // (4 bytes, fixture 204).
+    for i in 0..size {
+        let byte = (v >> (i * 8)) & 0xFF;
+        let _ = write!(out, "\tdb\t{byte}\r\n");
     }
 }
 
