@@ -98,10 +98,10 @@ impl Parser {
             // variable. (Our fixtures all combine the struct def with
             // a following declaration, but supporting the bare form
             // is cheap and matches BCC.)
-            if matches!(self.peek().kind, TokenKind::KwStruct)
-                && self.is_bare_struct_def()
+            if matches!(self.peek().kind, TokenKind::KwStruct | TokenKind::KwUnion)
+                && self.is_bare_record_def()
             {
-                self.parse_bare_struct_decl()?;
+                self.parse_bare_record_decl()?;
                 continue;
             }
             // Optional storage class. `static` and `extern` are
@@ -139,7 +139,7 @@ impl Parser {
                         probe += 1;
                     }
                 }
-                TokenKind::KwStruct => {
+                TokenKind::KwStruct | TokenKind::KwUnion => {
                     probe += 1;
                     if matches!(self.peek_n(probe).kind, TokenKind::Ident(_)) {
                         probe += 1;
@@ -262,13 +262,13 @@ impl Parser {
         Ok(())
     }
 
-    /// True when the current token is `struct` followed by the
-    /// shape `tag { ... } ;` (a bare definition with no following
+    /// True when the current token is `struct` or `union` followed by
+    /// the shape `tag { ... } ;` (a bare definition with no following
     /// declarator). This is the K&R/early-C90 `struct point { ... };`
     /// form. With a declarator after the closing `}`, the parser
     /// falls into the function/global path instead.
-    fn is_bare_struct_def(&self) -> bool {
-        if !matches!(self.peek().kind, TokenKind::KwStruct) {
+    fn is_bare_record_def(&self) -> bool {
+        if !matches!(self.peek().kind, TokenKind::KwStruct | TokenKind::KwUnion) {
             return false;
         }
         // struct <ident>? { ... } ;
@@ -300,16 +300,19 @@ impl Parser {
         matches!(self.peek_n(probe).kind, TokenKind::Semicolon)
     }
 
-    /// Parse a bare `struct <tag>? { <fields> } ;`. Registers the
-    /// type under its tag (required for bare definitions — an
-    /// anonymous struct here would be unreferencable) and emits no
-    /// AST node.
-    fn parse_bare_struct_decl(&mut self) -> Result<(), ParseError> {
-        let ty = self.parse_struct_type()?;
+    /// Parse a bare `struct <tag>? { <fields> } ;` or `union ...`.
+    /// Registers the type under its tag (required for bare
+    /// definitions — an anonymous record here would be unreferencable)
+    /// and emits no AST node.
+    fn parse_bare_record_decl(&mut self) -> Result<(), ParseError> {
+        let ty = if matches!(self.peek().kind, TokenKind::KwUnion) {
+            self.parse_union_type()?
+        } else {
+            self.parse_struct_type()?
+        };
         self.expect(&TokenKind::Semicolon)?;
-        // The tag was already inserted into `self.structs` by
-        // parse_struct_type. Bare-decl semicolon just ends the
-        // statement.
+        // The tag was already inserted into `self.structs` by the
+        // parser; the bare-decl semicolon just ends the statement.
         let _ = ty;
         Ok(())
     }
@@ -338,6 +341,7 @@ impl Parser {
                 Ok(Type::UInt)
             }
             TokenKind::KwStruct => self.parse_struct_type(),
+            TokenKind::KwUnion => self.parse_union_type(),
             TokenKind::Ident(ref name) if self.typedefs.contains_key(name) => {
                 let ty = self.typedefs.get(name).expect("just checked").clone();
                 self.bump();
@@ -373,7 +377,27 @@ impl Parser {
     /// effect: when an inline definition appears with a tag, the
     /// resulting type is inserted into `self.structs`.
     fn parse_struct_type(&mut self) -> Result<Type, ParseError> {
-        self.expect(&TokenKind::KwStruct)?;
+        self.parse_record_type(false)
+    }
+
+    fn parse_union_type(&mut self) -> Result<Type, ParseError> {
+        self.parse_record_type(true)
+    }
+
+    /// `struct <tag>? { <fields> }` or `union <tag>? { <fields> }`.
+    /// The body is identical; only field layout differs. For a union,
+    /// every field is at offset 0 and the total size is the max of
+    /// the field sizes (rounded up to a word). `Type::Struct` carries
+    /// the result regardless — codegen looks up offsets via the field
+    /// table either way, so the all-zero offsets just produce the
+    /// right addressing for unions.
+    fn parse_record_type(&mut self, is_union: bool) -> Result<Type, ParseError> {
+        let kw = if is_union {
+            TokenKind::KwUnion
+        } else {
+            TokenKind::KwStruct
+        };
+        self.expect(&kw)?;
         let tag = if let TokenKind::Ident(name) = &self.peek().kind {
             let name = name.clone();
             self.bump();
@@ -382,12 +406,12 @@ impl Parser {
             None
         };
         if !matches!(self.peek().kind, TokenKind::LBrace) {
-            // Bare reference: `struct point` — must already be in
-            // the table.
+            // Bare reference: `struct point` / `union u` — must already
+            // be in the table.
             let Some(name) = tag else {
                 let t = self.peek();
                 return Err(ParseError::Unexpected {
-                    expected: "struct tag or `{`".to_owned(),
+                    expected: "record tag or `{`".to_owned(),
                     found: t.kind.describe().to_owned(),
                     offset: t.span.start,
                 });
@@ -398,7 +422,8 @@ impl Parser {
         }
         self.bump(); // `{`
         let mut fields: Vec<StructField> = Vec::new();
-        let mut offset: u16 = 0;
+        let mut struct_offset: u16 = 0;
+        let mut union_max: u16 = 0;
         while !matches!(self.peek().kind, TokenKind::RBrace | TokenKind::Eof) {
             // Each field declaration: <type> <pointer-stars> <name> ;
             let mut ty = self.parse_type()?;
@@ -412,13 +437,21 @@ impl Parser {
             };
             self.expect(&TokenKind::Semicolon)?;
             let field_size = ty.size_bytes();
+            let offset = if is_union { 0 } else { struct_offset };
             fields.push(StructField { name, ty, offset });
-            offset += field_size;
+            if is_union {
+                if field_size > union_max {
+                    union_max = field_size;
+                }
+            } else {
+                struct_offset += field_size;
+            }
         }
         self.expect(&TokenKind::RBrace)?;
         // Round size up to even (fixture 102: `{char c; int n;}` is
-        // 4 bytes, not 3).
-        let size = if offset % 2 == 1 { offset + 1 } else { offset };
+        // 4 bytes, not 3). Same rule for unions: `{char c;}` rounds to 2.
+        let raw_size = if is_union { union_max } else { struct_offset };
+        let size = if raw_size % 2 == 1 { raw_size + 1 } else { raw_size };
         let ty = Type::Struct { name: tag.clone(), fields, size };
         if let Some(name) = tag {
             self.structs.insert(name, ty.clone());
@@ -564,6 +597,7 @@ impl Parser {
             TokenKind::KwInt
             | TokenKind::KwChar
             | TokenKind::KwStruct
+            | TokenKind::KwUnion
             | TokenKind::KwUnsigned => self.parse_declare(start),
             TokenKind::KwStatic => self.parse_declare(start),
             TokenKind::Ident(ref name) if self.typedefs.contains_key(name) => {
@@ -1242,7 +1276,8 @@ impl Parser {
             | TokenKind::KwChar
             | TokenKind::KwVoid
             | TokenKind::KwUnsigned
-            | TokenKind::KwStruct => true,
+            | TokenKind::KwStruct
+            | TokenKind::KwUnion => true,
             TokenKind::Ident(ref name) if self.typedefs.contains_key(name) => true,
             _ => false,
         }

@@ -1,0 +1,4 @@
+description = "Basic `union` with int+char fields. Total size = max field size = 2; both fields live at offset 0. Writing `v.i = 300` stores the word; reading `v.c` reads the low byte (sign-extended). Pins: union as a type with all-fields-offset-0 layout."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]
