@@ -1,0 +1,4 @@
+description = "Function pointer with arguments: `int (*op)(int, int) = add; op(3, 4)`. Fixture 110 already covers the `void`-arg form; this tests that calls through `op` push the cdecl-style args before `call word ptr [bp-N]`."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]
