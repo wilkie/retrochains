@@ -30,6 +30,7 @@ pub fn try_const_eval(e: &Expr) -> Option<u32> {
         | ExprKind::Logical { .. }
         | ExprKind::AssignExpr { .. }
         | ExprKind::AddressOf(_)
+        | ExprKind::AddressOfArrayElem { .. }
         | ExprKind::Deref(_)
         | ExprKind::ArrayIndex { .. }
         | ExprKind::StringLit(_)

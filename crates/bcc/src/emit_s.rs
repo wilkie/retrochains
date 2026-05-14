@@ -252,6 +252,18 @@ fn emit_global_init(
         let _ = write!(out, "\tdw\tDGROUP:_{target_name}\r\n");
         return;
     }
+    // `T *p = &arr[K];` (fixture 198) — same shape but with a
+    // constant byte offset baked in: `dw DGROUP:_arr+<offset>`.
+    if let (ExprKind::AddressOfArrayElem { array, byte_offset }, Type::Pointer(_)) =
+        (&init.kind, ty)
+    {
+        if *byte_offset == 0 {
+            let _ = write!(out, "\tdw\tDGROUP:_{array}\r\n");
+        } else {
+            let _ = write!(out, "\tdw\tDGROUP:_{array}+{byte_offset}\r\n");
+        }
+        return;
+    }
     // Aggregate initializer list — emit each item against the array's
     // element type. Fixture 189 (`int a[3] = {1, 2, 3}`) drops six
     // `db` lines, two per element. Excess initializers beyond `len`
@@ -385,43 +397,63 @@ fn write_tail(out: &mut Vec<u8>, unit: &crate::ast::Unit, strings: &codegen::Str
     for name in &externs {
         let _ = write!(out, "\textrn\t_{name}:near\r\n");
     }
-    // Public symbols are bucketed by **home segment** (_TEXT, _DATA,
-    // _BSS in that fixed order), then **reverse-alphabetically sorted
-    // within each bucket**.
+    // Public symbols split into two buckets by **identifier length
+    // including the leading underscore**: short (≤ 2 chars, i.e. a
+    // single source-character name like `g`, `p`, `s`) and long
+    // (≥ 3 chars). The long bucket emits first; within each bucket
+    // variables come before functions. Variables keep **source
+    // declaration order**; functions go **reverse-alphabetical**.
     //
-    // The rule was disambiguated across four fixtures:
-    //   - 010 (`int f; int main` — both in _TEXT): output `_main, _f`
-    //     — global reverse-alpha happens to work.
-    //   - 095 (`int sum; int main` — both in _TEXT): output `_sum, _main`
-    //     — global reverse-alpha works (main < sum → reverse = sum, main).
-    //   - 087 (`int a; int b=5; char c=9; int main`): output
-    //     `_main, _c, _b, _a` — _TEXT then _DATA (c, b in reverse-alpha)
-    //     then _BSS (a). Global reverse-alpha would also produce this
-    //     by coincidence.
-    //   - 109 (`int x; int main`): output `_main, _x` — disambiguates.
-    //     Global reverse-alpha would give `_x, _main` (since x > m).
-    //     Per-segment reverse-alpha gives `_main` (in _TEXT) then `_x`
-    //     (in _BSS) → correct.
-    let mut text: Vec<String> = Vec::new();
-    let mut data: Vec<String> = Vec::new();
-    let mut bss: Vec<String> = Vec::new();
-    for f in &unit.functions {
-        if f.body.is_some() {
-            text.push(codegen::function_symbol(&f.name));
-        }
-    }
+    // The rule was disambiguated across these fixtures:
+    //   - 010, 087, 109, 129, 181, 188: only `_main` is "long", all
+    //     other globals are 1-char "short" names. Both rules
+    //     coincide (short = reverse-alpha within the small bucket).
+    //   - 095 (`int sum(); int main()`): two long functions → reverse
+    //     alpha = `_sum, _main`.
+    //   - 179 (`int add(); int main()`): same shape → `_main, _add`
+    //     (reverse-alpha within functions, m < a flipped).
+    //   - 198 (`int arr[3]={…}; int *p; int main`): long bucket =
+    //     [variable arr, function main]; short = [p]. Output
+    //     `_arr, _main, _p`. The variable-before-function rule (vs.
+    //     reverse-alpha across the bucket) is what distinguishes
+    //     this from 095 / 179.
+    let mut long_vars: Vec<String> = Vec::new();
+    let mut long_fns: Vec<String> = Vec::new();
+    let mut short_vars: Vec<String> = Vec::new();
+    let mut short_fns: Vec<String> = Vec::new();
     for g in &unit.globals {
         if g.is_static || g.is_extern {
             continue;
         }
-        let bucket = if g.init.is_some() { &mut data } else { &mut bss };
-        bucket.push(format!("_{}", g.name));
-    }
-    for bucket in [&mut text, &mut data, &mut bss] {
-        bucket.sort();
-        for name in bucket.iter().rev() {
-            let _ = write!(out, "\tpublic\t{name}\r\n");
+        let sym = format!("_{}", g.name);
+        if sym.len() <= 2 {
+            short_vars.push(sym);
+        } else {
+            long_vars.push(sym);
         }
+    }
+    for f in &unit.functions {
+        if f.body.is_none() {
+            continue;
+        }
+        let sym = codegen::function_symbol(&f.name);
+        if sym.len() <= 2 {
+            short_fns.push(sym);
+        } else {
+            long_fns.push(sym);
+        }
+    }
+    long_fns.sort_by(|a, b| b.cmp(a));
+    short_fns.sort_by(|a, b| b.cmp(a));
+    let mut short_vars_rev = short_vars.clone();
+    short_vars_rev.sort_by(|a, b| b.cmp(a));
+    for name in long_vars
+        .iter()
+        .chain(long_fns.iter())
+        .chain(short_vars_rev.iter())
+        .chain(short_fns.iter())
+    {
+        let _ = write!(out, "\tpublic\t{name}\r\n");
     }
     // Data externs come after the public list (function externs come
     // before it, in `collect_extern_calls` order). Source order; the
@@ -630,7 +662,8 @@ fn walk_calls_expr(
         | ExprKind::IntLit(_)
         | ExprKind::StringLit(_)
         | ExprKind::Update { .. }
-        | ExprKind::AddressOf(_) => {}
+        | ExprKind::AddressOf(_)
+        | ExprKind::AddressOfArrayElem { .. } => {}
     }
 }
 

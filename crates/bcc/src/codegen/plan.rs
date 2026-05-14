@@ -430,6 +430,7 @@ fn plan_expr_value(e: &Expr, ctx: &mut PlanCtx) {
         | ExprKind::Ident(_)
         | ExprKind::Update { .. }
         | ExprKind::AddressOf(_)
+        | ExprKind::AddressOfArrayElem { .. }
         | ExprKind::StringLit(_) => {}
     }
 }

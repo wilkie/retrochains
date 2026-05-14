@@ -525,6 +525,9 @@ fn expr_address_taken(e: &Expr, out: &mut HashSet<String>) {
         ExprKind::AddressOf(name) => {
             out.insert(name.clone());
         }
+        ExprKind::AddressOfArrayElem { array, .. } => {
+            out.insert(array.clone());
+        }
         ExprKind::BinOp { left, right, .. } | ExprKind::Logical { left, right, .. } => {
             expr_address_taken(left, out);
             expr_address_taken(right, out);
@@ -659,6 +662,7 @@ fn expr_has_call(e: &Expr) -> bool {
         | ExprKind::Ident(_)
         | ExprKind::IntLit(_)
         | ExprKind::AddressOf(_)
+        | ExprKind::AddressOfArrayElem { .. }
         | ExprKind::StringLit(_) => false,
     }
 }
@@ -902,6 +906,9 @@ fn count_uses_expr(e: &Expr, counts: &mut HashMap<String, u32>) {
             // decide eligibility below; the count contribution here
             // is the use itself.
             *counts.entry(name.clone()).or_insert(0) += 1;
+        }
+        ExprKind::AddressOfArrayElem { array, .. } => {
+            *counts.entry(array.clone()).or_insert(0) += 1;
         }
         ExprKind::Deref(operand) => {
             // A "direct" deref gives the pointer-name a +2 bonus

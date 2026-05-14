@@ -366,6 +366,12 @@ pub enum ExprKind {
     /// to a bare ident today; the more general `&<lvalue>` (e.g.
     /// `&a[i]`) doesn't appear in fixtures yet.
     AddressOf(String),
+    /// `&<array>[<const>]` — address of a specific array element with
+    /// a compile-time constant index. The parser pre-computes
+    /// `byte_offset = index * sizeof(elem)` so codegen just emits the
+    /// label-plus-offset form (e.g. `DGROUP:_arr+2`). Currently only
+    /// fixture 198's file-scope `int *p = &arr[1];` exercises this.
+    AddressOfArrayElem { array: String, byte_offset: i32 },
     /// `*<ptr>` — pointer dereference in an rvalue context. The
     /// pointee width comes from the static type of `ptr`.
     Deref(Box<Expr>),

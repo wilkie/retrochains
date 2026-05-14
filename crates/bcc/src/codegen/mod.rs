@@ -2665,6 +2665,9 @@ impl<'a> FunctionEmitter<'a> {
             }
             ExprKind::Call { name, args } => self.emit_call(name, args),
             ExprKind::AddressOf(name) => self.emit_address_of(name),
+            ExprKind::AddressOfArrayElem { .. } => {
+                panic!("`&arr[K]` in value position not yet supported (no fixture)")
+            }
             ExprKind::Deref(operand) => self.emit_deref_to_ax(operand),
             ExprKind::ArrayIndex { array, index } => {
                 self.emit_array_index_to_ax(array, index);
@@ -2857,7 +2860,7 @@ impl<'a> FunctionEmitter<'a> {
             ExprKind::AssignExpr { .. } => {
                 panic!("assignment expression as right operand not yet supported (no fixture)")
             }
-            ExprKind::AddressOf(_) => {
+            ExprKind::AddressOf(_) | ExprKind::AddressOfArrayElem { .. } => {
                 panic!("`&x` as right operand of a binary op not yet supported (no fixture)")
             }
             ExprKind::Deref(_) => {

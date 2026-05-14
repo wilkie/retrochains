@@ -1572,14 +1572,44 @@ impl Parser {
                 span,
             });
         }
-        // Address-of: only `&<ident>` is supported today. The more
-        // general `&<lvalue>` doesn't appear in fixtures.
+        // Address-of: `&<ident>` for the bare-name case, plus
+        // `&<ident>[<const>]` for array-element addressing (fixture
+        // 198). The more general `&<lvalue>` form still isn't
+        // fixtured.
         if matches!(self.peek().kind, TokenKind::Ampersand) {
             let amp = self.bump();
             let name_tok = self.bump();
             let TokenKind::Ident(name) = name_tok.kind else {
                 return Err(ParseError::NotAnIdent { offset: name_tok.span.start });
             };
+            if matches!(self.peek().kind, TokenKind::LBracket) {
+                self.bump();
+                let idx_tok = self.bump();
+                let TokenKind::IntLit(idx) = idx_tok.kind else {
+                    return Err(ParseError::Unexpected {
+                        offset: idx_tok.span.start,
+                        expected: "integer literal index in `&arr[K]`".to_owned(),
+                        found: format!("{:?}", idx_tok.kind),
+                    });
+                };
+                let rb = self.expect(&TokenKind::RBracket)?;
+                let elem_size = match self.global_types.get(&name) {
+                    Some(Type::Array { elem, .. }) => i32::from(elem.size_bytes()),
+                    _ => {
+                        return Err(ParseError::Unexpected {
+                            offset: name_tok.span.start,
+                            expected: format!("global array name in `&{name}[K]`"),
+                            found: "non-array or unknown global".to_owned(),
+                        });
+                    }
+                };
+                let byte_offset = i32::try_from(idx).unwrap_or(i32::MAX) * elem_size;
+                let span = Span::new(amp.span.start, rb.span.end);
+                return Ok(Expr {
+                    kind: ExprKind::AddressOfArrayElem { array: name, byte_offset },
+                    span,
+                });
+            }
             let span = Span::new(amp.span.start, name_tok.span.end);
             return Ok(Expr {
                 kind: ExprKind::AddressOf(name),
