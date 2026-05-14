@@ -664,8 +664,10 @@ enum DeclKind {
 
 fn collect_decls(stmt: &Stmt, out: &mut Vec<DeclItem>) {
     match &stmt.kind {
-        StmtKind::Declare { ty, name, .. } => {
-            out.push(DeclItem { name: name.clone(), ty: ty.clone(), kind: DeclKind::Local });
+        StmtKind::Declare { ty, name, is_static, .. } => {
+            if !*is_static {
+                out.push(DeclItem { name: name.clone(), ty: ty.clone(), kind: DeclKind::Local });
+            }
         }
         StmtKind::If { then_branch, else_branch, .. } => {
             for s in then_branch {
@@ -708,13 +710,17 @@ fn count_uses_stmt(stmt: &Stmt, counts: &mut HashMap<String, u32>) {
                 count_uses_expr(e, counts);
             }
         }
-        StmtKind::Declare { name, init, .. } => {
+        StmtKind::Declare { name, init, is_static, .. } => {
             // A declaration counts as a use of the name only when it
             // initializes (since the init is a write). Uninitialized
             // `int x;` produces no asm and shouldn't compete with
             // initialized locals for the SI slot (fixture 066:
             // `int i = 0; int j;` ⇒ i → SI even though j has more
-            // textual uses overall).
+            // textual uses overall). Static locals don't compete for
+            // registers at all.
+            if *is_static {
+                return;
+            }
             if let Some(e) = init {
                 *counts.entry(name.clone()).or_insert(0) += 1;
                 count_uses_expr(e, counts);

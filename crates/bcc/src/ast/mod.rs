@@ -23,12 +23,15 @@ pub struct Unit {
 }
 
 /// One file-scope variable. `init = None` means the global lives in
-/// `_BSS`; `Some(...)` means `_DATA`.
+/// `_BSS`; `Some(...)` means `_DATA`. `is_static` suppresses the
+/// trailing `public _<name>` directive — the symbol stays private to
+/// this translation unit but is still allocated in DGROUP.
 #[derive(Debug)]
 pub struct Global {
     pub name: String,
     pub ty: Type,
     pub init: Option<Expr>,
+    pub is_static: bool,
     pub span: Span,
 }
 
@@ -86,8 +89,11 @@ pub struct Stmt {
 pub enum StmtKind {
     Return(Option<Expr>),
     /// `<type> <name> [= <init>];`. For now only `int` and a single
-    /// declarator with an optional initializer.
-    Declare { ty: Type, name: String, init: Option<Expr> },
+    /// declarator with an optional initializer. `is_static = true` means
+    /// the parser hoisted a synthetic `Global` for this name; codegen
+    /// must skip slot allocation, register use-counting, and initialization
+    /// code — references resolve through `GlobalTable` instead.
+    Declare { ty: Type, name: String, init: Option<Expr>, is_static: bool },
     /// `if (cond) then-body [else else-body]`.
     If { cond: Expr, then_branch: Vec<Stmt>, else_branch: Option<Vec<Stmt>> },
     /// `<name> = <value>;`. The bare-ident assignment form. Pointer-

@@ -157,9 +157,13 @@ fn plan_stmt(stmt: &Stmt, ctx: &mut PlanCtx) {
                 plan_expr_value(e, ctx);
             }
         }
-        StmtKind::Declare { init, .. } => {
-            if let Some(e) = init {
-                plan_expr_value(e, ctx);
+        StmtKind::Declare { init, is_static, .. } => {
+            // Static-local initializers run at module load, not as
+            // part of this function's label plan.
+            if !*is_static {
+                if let Some(e) = init {
+                    plan_expr_value(e, ctx);
+                }
             }
         }
         StmtKind::If { cond, then_branch, else_branch } => {

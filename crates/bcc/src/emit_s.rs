@@ -291,6 +291,9 @@ fn write_tail(out: &mut Vec<u8>, unit: &crate::ast::Unit, strings: &codegen::Str
         }
     }
     for g in &unit.globals {
+        if g.is_static {
+            continue;
+        }
         let bucket = if g.init.is_some() { &mut data } else { &mut bss };
         bucket.push(format!("_{}", g.name));
     }

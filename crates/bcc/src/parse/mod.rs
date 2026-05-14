@@ -34,6 +34,12 @@ pub struct Parser {
     /// table as a type returns the aliased type — same byte layout
     /// as using the original name (fixture 104).
     typedefs: HashMap<String, Type>,
+    /// Static locals hoisted out of function bodies. Each `static`
+    /// declaration inside a function adds a synthetic `Global` here;
+    /// `parse_unit` appends them after the regular file-scope globals
+    /// so they appear in `_DATA` and `GlobalTable` for the rest of
+    /// codegen.
+    pending_static_locals: Vec<Global>,
 }
 
 impl Parser {
@@ -44,6 +50,7 @@ impl Parser {
             pos: 0,
             structs: HashMap::new(),
             typedefs: HashMap::new(),
+            pending_static_locals: Vec::new(),
         }
     }
 
@@ -77,6 +84,17 @@ impl Parser {
                 self.parse_bare_struct_decl()?;
                 continue;
             }
+            // Optional storage class. Only `static` is supported, and
+            // only on globals — `static int foo() {}` would also be
+            // valid C but our codegen doesn't yet thread the private
+            // attribute through function emission, so we reject it
+            // until a fixture demands it.
+            let is_static = if matches!(self.peek().kind, TokenKind::KwStatic) {
+                self.bump();
+                true
+            } else {
+                false
+            };
             // Otherwise this top-level item is either a function or
             // a global. Probe past the type to find the declarator
             // name and decide.
@@ -123,15 +141,28 @@ impl Parser {
             // The token after the name disambiguates: `(` means
             // function, anything else means global decl.
             if matches!(self.peek_n(probe).kind, TokenKind::LParen) {
+                if is_static {
+                    let t = self.peek();
+                    return Err(ParseError::Unexpected {
+                        expected: "global declarator after `static`".to_owned(),
+                        found: "function definition".to_owned(),
+                        offset: t.span.start,
+                    });
+                }
                 let idx = functions.len();
                 functions.push(self.parse_function()?);
                 decl_order.push(TopLevelRef::Function(idx));
             } else {
                 let idx = globals.len();
-                globals.push(self.parse_global()?);
+                globals.push(self.parse_global(is_static)?);
                 decl_order.push(TopLevelRef::Global(idx));
             }
         }
+        // Append hoisted static locals after regular globals, keeping
+        // their relative source order. They aren't in `decl_order` —
+        // the LIFO `public` list only covers top-level symbols, and
+        // statics are private to this TU.
+        globals.extend(std::mem::take(&mut self.pending_static_locals));
         Ok(Unit { functions, globals, decl_order })
     }
 
@@ -295,7 +326,7 @@ impl Parser {
     /// (`parse_declare`); the difference is the resulting AST node
     /// (`Global` vs. `StmtKind::Declare`) and the absence of an
     /// enclosing function context.
-    fn parse_global(&mut self) -> Result<Global, ParseError> {
+    fn parse_global(&mut self, is_static: bool) -> Result<Global, ParseError> {
         let start = self.peek().span.start;
         let mut ty = self.parse_type()?;
         while matches!(self.peek().kind, TokenKind::Star) {
@@ -331,6 +362,7 @@ impl Parser {
             name,
             ty,
             init,
+            is_static,
             span: Span::new(start, semi.span.end),
         })
     }
@@ -425,6 +457,7 @@ impl Parser {
             TokenKind::KwInt | TokenKind::KwChar | TokenKind::KwStruct => {
                 self.parse_declare(start)
             }
+            TokenKind::KwStatic => self.parse_declare(start),
             TokenKind::Ident(ref name) if self.typedefs.contains_key(name) => {
                 self.parse_declare(start)
             }
@@ -548,6 +581,16 @@ impl Parser {
     ///   widely supported in codegen; we'll parse and let the next
     ///   layer reject.
     fn parse_declare(&mut self, start: u32) -> Result<Stmt, ParseError> {
+        // Optional `static` prefix. The parser hoists the declaration
+        // into `static_locals` (flushed onto `unit.globals` at the end
+        // of parsing) so codegen can resolve the name through the
+        // global table and skip per-call stack allocation/init.
+        let is_static = if matches!(self.peek().kind, TokenKind::KwStatic) {
+            self.bump();
+            true
+        } else {
+            false
+        };
         let mut ty = self.parse_type()?;
         // Pointer stars wrap the base type: `int **pp` is `Pointer(Pointer(Int))`.
         while matches!(self.peek().kind, TokenKind::Star) {
@@ -562,7 +605,7 @@ impl Parser {
         // int-pool-eligible) and skip the param list.
         if matches!(self.peek().kind, TokenKind::LParen) {
             let (name, fp_ty) = self.parse_func_ptr_declarator(ty.clone())?;
-            return self.finish_declare(start, fp_ty, name);
+            return self.finish_declare(start, fp_ty, name, is_static);
         }
         let name_tok = self.bump();
         let TokenKind::Ident(name) = &name_tok.kind else {
@@ -585,14 +628,22 @@ impl Parser {
             self.expect(&TokenKind::RBracket)?;
             ty = Type::Array { elem: Box::new(ty), len };
         }
-        self.finish_declare(start, ty, name)
+        self.finish_declare(start, ty, name, is_static)
     }
 
     /// Common tail of `parse_declare` after the declarator (name +
     /// pointer/array/func-ptr decoration) is known. Reads the optional
     /// initializer and trailing semicolon, then yields a `Declare`
-    /// statement.
-    fn finish_declare(&mut self, start: u32, ty: Type, name: String) -> Result<Stmt, ParseError> {
+    /// statement. When `is_static` is true, also pushes a synthetic
+    /// `Global` so the name is allocated in `_DATA` instead of on
+    /// the stack frame.
+    fn finish_declare(
+        &mut self,
+        start: u32,
+        ty: Type,
+        name: String,
+        is_static: bool,
+    ) -> Result<Stmt, ParseError> {
         let init = if matches!(self.peek().kind, TokenKind::Equals) {
             self.bump();
             Some(self.parse_expr()?)
@@ -600,9 +651,27 @@ impl Parser {
             None
         };
         let semi = self.expect(&TokenKind::Semicolon)?;
+        let span = Span::new(start, semi.span.end);
+        if is_static {
+            // The Global owns the initializer expression; the Stmt
+            // keeps only the name/type/span so codegen can fold the
+            // source line into the next comment block. Hoisting moves
+            // the init out so we don't need `Expr: Clone`.
+            self.pending_static_locals.push(Global {
+                name: name.clone(),
+                ty: ty.clone(),
+                init,
+                is_static: true,
+                span,
+            });
+            return Ok(Stmt {
+                kind: StmtKind::Declare { ty, name, init: None, is_static: true },
+                span,
+            });
+        }
         Ok(Stmt {
-            kind: StmtKind::Declare { ty, name, init },
-            span: Span::new(start, semi.span.end),
+            kind: StmtKind::Declare { ty, name, init, is_static },
+            span,
         })
     }
 

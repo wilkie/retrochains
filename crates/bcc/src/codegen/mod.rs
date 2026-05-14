@@ -336,14 +336,22 @@ impl<'a> FunctionEmitter<'a> {
                 let exit = self.exit_label_num();
                 let _ = write!(self.out, "\tjmp\tshort @{}@{exit}\r\n", self.func_idx);
             }
-            StmtKind::Declare { name, init, ty } => {
-                // Only emit the source-comment block when there's
-                // actually some asm to label. A declaration with no
-                // initializer produces no code, and BCC folds its
-                // source line into the next comment block (fixture
-                // 061: `int i; int sum = 0;` emits both lines in
-                // one block before `xor di,di`).
-                if let Some(init) = init {
+            StmtKind::Declare { name, init, ty, is_static } => {
+                // Static locals are hoisted by the parser into the
+                // unit's globals list, so the initializer is emitted
+                // once at file scope (load-time) rather than on every
+                // function entry. No per-call asm to emit here.
+                if *is_static {
+                    // The Declare stays in the AST so source-line
+                    // tracking can fold its line into the next comment
+                    // block, matching BCC's behavior for unused locals.
+                } else if let Some(init) = init {
+                    // Only emit the source-comment block when there's
+                    // actually some asm to label. A declaration with no
+                    // initializer produces no code, and BCC folds its
+                    // source line into the next comment block (fixture
+                    // 061: `int i; int sum = 0;` emits both lines in
+                    // one block before `xor di,di`).
                     self.advance_to_stmt_line(stmt);
                     let loc = self.locals.location_of(name);
                     self.emit_init_local(loc, ty, init);
