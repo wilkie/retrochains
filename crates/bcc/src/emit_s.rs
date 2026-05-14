@@ -413,7 +413,8 @@ fn walk_calls(
             }
             walk_calls_expr(value, defined, locals, seen, ordered);
         }
-        StmtKind::DerefAssign { target, value } => {
+        StmtKind::DerefAssign { target, value }
+        | StmtKind::DerefCompoundAssign { target, value, .. } => {
             walk_calls_expr(target, defined, locals, seen, ordered);
             walk_calls_expr(value, defined, locals, seen, ordered);
         }

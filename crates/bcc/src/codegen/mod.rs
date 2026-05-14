@@ -378,6 +378,10 @@ impl<'a> FunctionEmitter<'a> {
                 self.advance_to_stmt_line(stmt);
                 self.emit_deref_assign(target, value);
             }
+            StmtKind::DerefCompoundAssign { target, op, value } => {
+                self.advance_to_stmt_line(stmt);
+                self.emit_deref_compound_assign(target, *op, value);
+            }
             StmtKind::MemberAssign { base, field, kind, value } => {
                 self.advance_to_stmt_line(stmt);
                 self.emit_member_assign(base, field, *kind, value);
@@ -2141,6 +2145,46 @@ impl<'a> FunctionEmitter<'a> {
             return;
         }
         panic!("non-constant rhs in `*p = v` not yet supported (no fixture)");
+    }
+
+    /// `*<target> <op>= <value>;` — read-modify-write through a
+    /// dereferenced pointer. Same shape as `emit_deref_assign` for
+    /// address resolution, then emits `<op> <width> ptr [reg],imm`
+    /// directly (fixture 183).
+    fn emit_deref_compound_assign(&mut self, target: &Expr, op: BinOp, value: &Expr) {
+        let ExprKind::Ident(name) = &target.kind else {
+            panic!("non-ident pointer in `*p <op>= v` not yet supported (no fixture)");
+        };
+        let ty = self.locals.type_of(name).clone();
+        let Some(pointee) = ty.pointee() else {
+            panic!("`*{name} <op>= v`: not a pointer type");
+        };
+        let store_byte = matches!(*pointee, Type::Char);
+        let width = if store_byte { "byte" } else { "word" };
+        let addr_reg = match self.locals.location_of(name) {
+            LocalLocation::Reg(reg) => reg.name(),
+            LocalLocation::Stack(_) => {
+                panic!(
+                    "stack-resident pointer in `*p <op>= v` not yet supported (no fixture)"
+                );
+            }
+        };
+        let Some(v) = try_const_eval(value) else {
+            panic!("non-constant rhs in `*p <op>= v` not yet supported (no fixture)");
+        };
+        let v_masked = if store_byte { v & 0xFF } else { v & 0xFFFF };
+        let mnemonic = match op {
+            BinOp::Add => "add",
+            BinOp::Sub => "sub",
+            BinOp::BitAnd => "and",
+            BinOp::BitOr => "or",
+            BinOp::BitXor => "xor",
+            _ => panic!("compound op `{op:?}` on `*p` not yet supported (no fixture)"),
+        };
+        let _ = write!(
+            self.out,
+            "\t{mnemonic}\t{width} ptr [{addr_reg}],{v_masked}\r\n",
+        );
     }
 
     /// Assign to a file-scope variable: `<width> ptr DGROUP:_<name>`

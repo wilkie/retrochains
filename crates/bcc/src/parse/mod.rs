@@ -770,19 +770,23 @@ impl Parser {
             let value = self.parse_expr()?;
             let semi = self.expect(&TokenKind::Semicolon)?;
             let span = Span::new(start, semi.span.end);
-            let ExprKind::Member { base, field, kind: mk } = expr.kind else {
-                return Err(ParseError::Unsupported { offset: expr.span.start });
+            return match expr.kind {
+                ExprKind::Member { base, field, kind: mk } => Ok(Stmt {
+                    kind: StmtKind::MemberCompoundAssign {
+                        base: *base,
+                        field,
+                        kind: mk,
+                        op,
+                        value,
+                    },
+                    span,
+                }),
+                ExprKind::Deref(target) => Ok(Stmt {
+                    kind: StmtKind::DerefCompoundAssign { target: *target, op, value },
+                    span,
+                }),
+                _ => Err(ParseError::Unsupported { offset: expr.span.start }),
             };
-            return Ok(Stmt {
-                kind: StmtKind::MemberCompoundAssign {
-                    base: *base,
-                    field,
-                    kind: mk,
-                    op,
-                    value,
-                },
-                span,
-            });
         }
         // Plain assignment. Validate the parsed expression is a kind
         // we know how to assign to.

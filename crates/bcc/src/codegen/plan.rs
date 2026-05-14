@@ -185,7 +185,8 @@ fn plan_stmt(stmt: &Stmt, ctx: &mut PlanCtx) {
             }
             plan_expr_value(value, ctx);
         }
-        StmtKind::DerefAssign { target, value } => {
+        StmtKind::DerefAssign { target, value }
+        | StmtKind::DerefCompoundAssign { target, value, .. } => {
             plan_expr_value(target, ctx);
             plan_expr_value(value, ctx);
         }

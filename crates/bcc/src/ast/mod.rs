@@ -137,6 +137,11 @@ pub enum StmtKind {
         op: BinOp,
         value: Expr,
     },
+    /// `*<target> <op>= <value>;` — compound assignment through a
+    /// dereferenced pointer. Sibling of `DerefAssign`; same `add word
+    /// ptr [reg], imm8` shape `MemberCompoundAssign` produces, just
+    /// with no field offset (fixture 183).
+    DerefCompoundAssign { target: Expr, op: BinOp, value: Expr },
     /// `<name> <op>= <value>;` (compound assignment). The codegen
     /// is distinct from `Assign { name, value: name <op> value }` —
     /// BCC emits a tighter form using `<op> <dst>, <src>` directly

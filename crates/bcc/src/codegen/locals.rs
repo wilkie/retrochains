@@ -455,7 +455,8 @@ fn collect_address_taken(stmt: &Stmt, out: &mut HashSet<String>) {
             }
             expr_address_taken(value, out);
         }
-        StmtKind::DerefAssign { target, value } => {
+        StmtKind::DerefAssign { target, value }
+        | StmtKind::DerefCompoundAssign { target, value, .. } => {
             expr_address_taken(target, out);
             expr_address_taken(value, out);
         }
@@ -617,7 +618,8 @@ fn stmt_has_call(stmt: &Stmt) -> bool {
         StmtKind::ArrayAssign { indices, value, .. } => {
             indices.iter().any(expr_has_call) || expr_has_call(value)
         }
-        StmtKind::DerefAssign { target, value } => {
+        StmtKind::DerefAssign { target, value }
+        | StmtKind::DerefCompoundAssign { target, value, .. } => {
             expr_has_call(target) || expr_has_call(value)
         }
         StmtKind::MemberAssign { base, value, .. }
@@ -717,6 +719,7 @@ fn collect_decls(stmt: &Stmt, out: &mut Vec<DeclItem>) {
         | StmtKind::CompoundAssign { .. }
         | StmtKind::ArrayAssign { .. }
         | StmtKind::DerefAssign { .. }
+        | StmtKind::DerefCompoundAssign { .. }
         | StmtKind::MemberAssign { .. }
         | StmtKind::MemberCompoundAssign { .. }
         | StmtKind::ExprStmt(_)
@@ -819,7 +822,8 @@ fn count_uses_stmt(stmt: &Stmt, counts: &mut HashMap<String, u32>) {
             }
             count_uses_expr(value, counts);
         }
-        StmtKind::DerefAssign { target, value } => {
+        StmtKind::DerefAssign { target, value }
+        | StmtKind::DerefCompoundAssign { target, value, .. } => {
             if let ExprKind::Ident(name) = &target.kind {
                 // Same direct-deref bonus as `*p` in rvalue position.
                 *counts.entry(name.clone()).or_insert(0) += 2;
