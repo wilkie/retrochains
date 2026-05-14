@@ -1,0 +1,4 @@
+description = "Multi-global _BSS ordering. Source declares `x, c, a` but BCC emits alphabetically (`a, c, x`) with a 1-byte word-alignment pad between the byte-sized `c` and the word-sized `x`. Pins the BSS layout rule that fixture 180 sidestepped."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

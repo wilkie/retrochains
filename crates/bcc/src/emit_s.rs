@@ -155,13 +155,28 @@ fn write_init_globals(out: &mut Vec<u8>, unit: &crate::ast::Unit) {
 /// `_BSS ends` (fixture 087).
 fn write_bss_globals_with_debug(out: &mut Vec<u8>, unit: &crate::ast::Unit) {
     out.extend_from_slice(b"_BSS\tsegment word public 'BSS'\r\n");
-    for g in &unit.globals {
-        if g.is_extern || g.init.is_some() {
-            continue;
+    // BCC orders _BSS members alphabetically by mangled name (the
+    // `_<name>` form) and inserts a 1-byte filler `db 1 dup (?)` when
+    // the running offset is odd before a word-aligned global. Fixture
+    // 181 (`int x; char c; int a[5];` → emits `a, c, pad, x`) pins
+    // both rules.
+    let mut bss: Vec<&crate::ast::Global> = unit
+        .globals
+        .iter()
+        .filter(|g| !g.is_extern && g.init.is_none())
+        .collect();
+    bss.sort_by(|a, b| a.name.cmp(&b.name));
+    let mut offset: u16 = 0;
+    for g in bss {
+        let align = g.ty.alignment();
+        if align == 2 && offset % 2 == 1 {
+            out.extend_from_slice(b"\tdb\t1 dup (?)\r\n");
+            offset += 1;
         }
         emit_global_decl(out, &g.name, &g.ty);
         let size = g.ty.size_bytes();
         let _ = write!(out, "\tdb\t{size} dup (?)\r\n");
+        offset += size;
     }
     out.extend_from_slice(b"\t?debug\tC E9\r\n");
     out.extend_from_slice(b"_BSS\tends\r\n");
