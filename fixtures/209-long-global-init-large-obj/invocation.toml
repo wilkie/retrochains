@@ -1,0 +1,4 @@
+description = "`long g = 100000L;` — long global initialized to a value requiring the high word (100000 = 0x186A0). The 4-byte little-endian emission must produce the full 32-bit value, not silently truncate to 16 bits."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

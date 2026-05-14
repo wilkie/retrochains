@@ -306,6 +306,18 @@ impl<'a> Lexer<'a> {
                 break;
             }
         }
+        // Optional integer-type suffix. C90 has `L`/`l` for long,
+        // `U`/`u` for unsigned, and combinations (`UL`, `LU`, etc.).
+        // We accept and discard them — `IntLit(u32)` already holds
+        // enough range; the surrounding type context decides the
+        // ultimate width (e.g. `long g = 100000L;`, fixture 209).
+        while let Some(&b) = self.src.get(self.pos) {
+            if matches!(b, b'L' | b'l' | b'U' | b'u') {
+                self.pos += 1;
+            } else {
+                break;
+            }
+        }
         let v32 = u32::try_from(value).map_err(|_| LexError::IntOverflow { offset: off(start) })?;
         Ok(TokenKind::IntLit(v32))
     }
