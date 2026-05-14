@@ -183,9 +183,19 @@ fn write_bss_globals_with_debug(out: &mut Vec<u8>, unit: &crate::ast::Unit) {
 }
 
 /// `_<name> label <word|byte>` — the per-global anchor that
-/// precedes the actual storage `db`s.
+/// precedes the actual storage `db`s. For arrays the width is the
+/// element type's width (a char array gets `label byte` regardless
+/// of total size, fixture 191).
 fn emit_global_decl(out: &mut Vec<u8>, name: &str, ty: &crate::ast::Type) {
-    let width = if ty.size_bytes() >= 2 { "word" } else { "byte" };
+    use crate::ast::Type;
+    let width = match ty {
+        Type::Array { elem, .. } => {
+            if elem.size_bytes() >= 2 { "word" } else { "byte" }
+        }
+        _ => {
+            if ty.size_bytes() >= 2 { "word" } else { "byte" }
+        }
+    };
     let _ = write!(out, "_{name}\tlabel\t{width}\r\n");
 }
 
@@ -194,6 +204,18 @@ fn emit_global_decl(out: &mut Vec<u8>, name: &str, ty: &crate::ast::Type) {
 /// initializers at file scope aren't legal C anyway.
 fn emit_global_init(out: &mut Vec<u8>, ty: &crate::ast::Type, init: &crate::ast::Expr) {
     use crate::ast::{ExprKind, Type};
+    // `char s[] = "hi"` (fixture 191) — one `db <byte>` per char plus
+    // a trailing `db 0` for the NUL. Parser has already widened the
+    // array length to bytes.len()+1.
+    if let (ExprKind::StringLit(bytes), Type::Array { elem, .. }) = (&init.kind, ty) {
+        if matches!(**elem, Type::Char) {
+            for b in bytes {
+                let _ = write!(out, "\tdb\t{b}\r\n");
+            }
+            let _ = write!(out, "\tdb\t0\r\n");
+            return;
+        }
+    }
     // Aggregate initializer list — emit each item against the array's
     // element type. Fixture 189 (`int a[3] = {1, 2, 3}`) drops six
     // `db` lines, two per element. Excess initializers beyond `len`

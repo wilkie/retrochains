@@ -490,18 +490,27 @@ impl Parser {
             return Err(ParseError::NotAnIdent { offset: name_tok.span.start });
         };
         let name = name.clone();
+        // Array suffix. `[N]` gives an explicit count; `[]` defers
+        // the count until an initializer is seen (fixture 191's
+        // `char s[] = "hi";` → len 3).
+        let mut inferred_len_marker: Option<Box<Type>> = None;
         if matches!(self.peek().kind, TokenKind::LBracket) {
             self.bump();
-            let size_tok = self.bump();
-            let TokenKind::IntLit(len) = size_tok.kind else {
-                return Err(ParseError::Unexpected {
-                    expected: "array size (integer literal)".to_owned(),
-                    found: size_tok.kind.describe().to_owned(),
-                    offset: size_tok.span.start,
-                });
-            };
-            self.expect(&TokenKind::RBracket)?;
-            ty = Type::Array { elem: Box::new(ty), len };
+            if matches!(self.peek().kind, TokenKind::RBracket) {
+                self.bump();
+                inferred_len_marker = Some(Box::new(ty.clone()));
+            } else {
+                let size_tok = self.bump();
+                let TokenKind::IntLit(len) = size_tok.kind else {
+                    return Err(ParseError::Unexpected {
+                        expected: "array size (integer literal)".to_owned(),
+                        found: size_tok.kind.describe().to_owned(),
+                        offset: size_tok.span.start,
+                    });
+                };
+                self.expect(&TokenKind::RBracket)?;
+                ty = Type::Array { elem: Box::new(ty), len };
+            }
         }
         let init = if matches!(self.peek().kind, TokenKind::Equals) {
             self.bump();
@@ -509,6 +518,28 @@ impl Parser {
         } else {
             None
         };
+        if let Some(elem) = inferred_len_marker {
+            // Resolve the deferred array length from the initializer.
+            // String literals on a char-element array → bytes + 1
+            // (NUL). InitList → number of items. Anything else: error.
+            let len = match init.as_ref().map(|i| &i.kind) {
+                Some(ExprKind::StringLit(bytes)) => {
+                    u32::try_from(bytes.len() + 1).expect("string length fits in u32")
+                }
+                Some(ExprKind::InitList { items }) => {
+                    u32::try_from(items.len()).expect("init count fits in u32")
+                }
+                _ => {
+                    let t = self.peek();
+                    return Err(ParseError::Unexpected {
+                        expected: "initializer to infer array length from `[]`".to_owned(),
+                        found: "no initializer or unsupported init form".to_owned(),
+                        offset: t.span.start,
+                    });
+                }
+            };
+            ty = Type::Array { elem, len };
+        }
         let semi = self.expect(&TokenKind::Semicolon)?;
         self.global_types.insert(name.clone(), ty.clone());
         Ok(Global {
