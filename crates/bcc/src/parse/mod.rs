@@ -51,6 +51,18 @@ pub struct Parser {
     /// `parse_stmt` returns the first declarator; the parse-stmt
     /// callers drain this queue and append to the enclosing block.
     pending_extra_stmts: Vec<Stmt>,
+    /// Symbol → type for file-scope variables seen so far in the
+    /// source. `parse_global` inserts here; `sizeof <ident>` consults
+    /// this (plus `function_locals` for the current function) to fold
+    /// to a literal size at parse time. Lookups are exact-match, not
+    /// scoped — a redeclaration would overwrite the earlier entry.
+    global_types: HashMap<String, Type>,
+    /// Symbol → type for the locals + params of the function currently
+    /// being parsed. Reset on every `parse_function` entry, updated by
+    /// `finish_declare` and by K&R type declarations. Used by `sizeof
+    /// <ident>` to look up an operand's type without a separate
+    /// type-checker pass.
+    function_locals: HashMap<String, Type>,
 }
 
 impl Parser {
@@ -64,6 +76,8 @@ impl Parser {
             pending_static_locals: Vec::new(),
             enum_constants: HashMap::new(),
             pending_extra_stmts: Vec::new(),
+            global_types: HashMap::new(),
+            function_locals: HashMap::new(),
         }
     }
 
@@ -496,6 +510,7 @@ impl Parser {
             None
         };
         let semi = self.expect(&TokenKind::Semicolon)?;
+        self.global_types.insert(name.clone(), ty.clone());
         Ok(Global {
             name,
             ty,
@@ -519,6 +534,12 @@ impl Parser {
         self.expect(&TokenKind::LParen)?;
         let mut params = self.parse_param_list()?;
         self.expect(&TokenKind::RParen)?;
+        // Reset the per-function local-type map and seed it with the
+        // params so `sizeof <param>` resolves inside the body.
+        self.function_locals.clear();
+        for p in &params {
+            self.function_locals.insert(p.name.clone(), p.ty.clone());
+        }
 
         // K&R-style param-type declarations: a sequence of
         // `<type> <name>;` between `)` and `{`. Each names a
@@ -543,7 +564,7 @@ impl Parser {
             let pname = pname.clone();
             self.expect(&TokenKind::Semicolon)?;
             if let Some(p) = params.iter_mut().find(|p| p.name == pname) {
-                p.ty = ty;
+                p.ty = ty.clone();
             } else {
                 return Err(ParseError::Unexpected {
                     expected: "K&R type for a declared parameter".to_owned(),
@@ -551,6 +572,7 @@ impl Parser {
                     offset: name_tok.span.start,
                 });
             }
+            self.function_locals.insert(pname, ty);
         }
 
         // Prototype (just `;` after the param list) vs definition
@@ -926,6 +948,7 @@ impl Parser {
                     span: tail_span,
                 });
             } else {
+                self.function_locals.insert(tail_name.clone(), tail_ty.clone());
                 self.pending_extra_stmts.push(Stmt {
                     kind: StmtKind::Declare {
                         ty: tail_ty,
@@ -957,6 +980,7 @@ impl Parser {
                 span,
             });
         }
+        self.function_locals.insert(name.clone(), ty.clone());
         Ok(Stmt {
             kind: StmtKind::Declare { ty, name, init, is_static },
             span,
@@ -1339,6 +1363,19 @@ impl Parser {
     /// `++name`/`--name` (pre-increment / pre-decrement). The latter
     /// require the operand to be a plain identifier today — no compound
     /// LHS like `*p++`.
+    /// Return the static byte size of an expression, when known at
+    /// parse time. Today only bare-Ident operands are supported (look
+    /// the name up in the local-of-current-function or file-scope
+    /// tables); compound expressions return `None` and let the caller
+    /// report the failure. `sizeof` is the only consumer.
+    fn expr_static_size(&self, e: &Expr) -> Option<u16> {
+        let ExprKind::Ident(name) = &e.kind else { return None };
+        if let Some(ty) = self.function_locals.get(name) {
+            return Some(ty.size_bytes());
+        }
+        self.global_types.get(name).map(|ty| ty.size_bytes())
+    }
+
     /// True if the current `(` is followed by a type-name keyword
     /// (or a typedef alias). Caller is responsible for the `(` check;
     /// this just inspects token index 1.
@@ -1362,12 +1399,30 @@ impl Parser {
         // operand's type, and no fixture forces it yet.
         if matches!(self.peek().kind, TokenKind::KwSizeof) {
             let kw = self.bump();
-            self.expect(&TokenKind::LParen)?;
-            let ty = self.parse_type_name()?;
-            let close = self.expect(&TokenKind::RParen)?;
+            // Two operand shapes:
+            //   1. `sizeof ( <type> )` — fold via `parse_type_name`.
+            //   2. `sizeof <unary>`    — fold via the operand's static
+            //      type. `(<ident>)` is ambiguous with shape 1; we
+            //      resolve based on whether the next token after `(`
+            //      is a type-name keyword/typedef.
+            if matches!(self.peek().kind, TokenKind::LParen)
+                && self.is_type_name_after_lparen()
+            {
+                self.bump(); // `(`
+                let ty = self.parse_type_name()?;
+                let close = self.expect(&TokenKind::RParen)?;
+                return Ok(Expr {
+                    kind: ExprKind::IntLit(u32::from(ty.size_bytes())),
+                    span: Span::new(kw.span.start, close.span.end),
+                });
+            }
+            let operand = self.parse_unary()?;
+            let size = self.expr_static_size(&operand).ok_or_else(|| {
+                ParseError::Unsupported { offset: operand.span.start }
+            })?;
             return Ok(Expr {
-                kind: ExprKind::IntLit(u32::from(ty.size_bytes())),
-                span: Span::new(kw.span.start, close.span.end),
+                kind: ExprKind::IntLit(u32::from(size)),
+                span: Span::new(kw.span.start, operand.span.end),
             });
         }
         // Cast: `(<type>) <unary>`. Disambiguated from a parenthesized
