@@ -3027,8 +3027,19 @@ impl<'a> FunctionEmitter<'a> {
             ExprKind::AddressOf(_) | ExprKind::AddressOfArrayElem { .. } => {
                 panic!("`&x` as right operand of a binary op not yet supported (no fixture)")
             }
-            ExprKind::Deref(_) => {
-                panic!("`*p` as right operand of a binary op not yet supported (no fixture)")
+            ExprKind::Deref(inner) => {
+                // `*p` as RHS where `p` is a register-resident local
+                // pointer — fold to a `<width> ptr [<reg>]` operand
+                // (fixture 201). Other deref shapes (chained, global
+                // pointer, post-update) still need materialization.
+                if let ExprKind::Ident(name) = &inner.kind {
+                    if self.globals.type_of(name).is_none() {
+                        if let LocalLocation::Reg(reg) = self.locals.location_of(name) {
+                            return OperandSource::DerefReg(reg);
+                        }
+                    }
+                }
+                panic!("`*p` as right operand of a binary op only supported for register-resident local pointers (no fixture for {:?})", inner.kind)
             }
             ExprKind::ArrayIndex { .. } => {
                 // `g[K]` where `g` is a file-scope array — fold to
@@ -3256,6 +3267,10 @@ enum OperandSource {
     /// `<width> ptr DGROUP:_<name>+<offset>`. Fixture 189 uses
     /// `add ax, word ptr DGROUP:_a+2` for `a[1]`.
     GlobalOffset { name: String, offset: i32 },
+    /// `*p` where `p` is a register-resident local pointer —
+    /// addressed as `<width> ptr [<reg>]`. Fixture 201:
+    /// `sub ax,word ptr [si]` for `10 - *p` with `p` in SI.
+    DerefReg(Reg),
 }
 
 impl OperandSource {
@@ -3273,6 +3288,7 @@ impl OperandSource {
                     format!("word ptr DGROUP:_{name}+{offset}")
                 }
             }
+            Self::DerefReg(r) => format!("word ptr [{}]", r.name()),
         }
     }
 
@@ -3293,6 +3309,7 @@ impl OperandSource {
             // its `*L` half; we'd need a separate fixture to confirm
             // BCC's exact shape. Panic until we see one.
             Self::Reg(_) => panic!("shift count from a register local not yet supported"),
+            Self::DerefReg(r) => format!("byte ptr [{}]", r.name()),
         }
     }
 }

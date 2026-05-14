@@ -653,6 +653,10 @@ fn parse_sub(operands: &str, line_no: usize) -> AsmResult<Instr> {
             .map_err(|_| AsmError::new(line_no, format!("sub sp,{imm}: doesn't fit in u8")))?;
         return Ok(Instr::SubSpImm(imm_u8));
     }
+    // `sub ax,word ptr [si]` — deref through SI as RHS (fixture 201).
+    if lhs == "ax" && rhs == "word ptr [si]" {
+        return Ok(Instr::SubAxFromSiPtr);
+    }
     // Otherwise: try the AX/mem form.
     parse_alu_ax_mem(operands, line_no, "sub", |o| Instr::SubAxBpRel { offset: o })
 }

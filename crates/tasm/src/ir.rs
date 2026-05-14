@@ -161,6 +161,10 @@ pub enum Instr {
     CmpBpRelImm8 { offset: i16, imm: i8 },
     /// `sub ax,word ptr [bp+<offset>]` — 2B 46 dd
     SubAxBpRel { offset: i16 },
+    /// `sub ax,word ptr [si]` — 2B 04. ModR/M 04 = mod=00 reg=AX
+    /// rm=100([si]). Used when the right operand of a non-commutative
+    /// op is a deref of a register-resident pointer (fixture 201).
+    SubAxFromSiPtr,
     /// `and ax,word ptr [bp+<offset>]` — 23 46 dd
     AndAxBpRel { offset: i16 },
     /// `or ax,word ptr [bp+<offset>]` — 0B 46 dd

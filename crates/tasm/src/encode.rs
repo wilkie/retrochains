@@ -281,7 +281,10 @@ fn instr_size(instr: &Instr) -> usize {
         Instr::MovSiPtrImm { .. } | Instr::MovBxPtrImm { .. } => 4,
         Instr::AddSiPtrImm8 { .. } | Instr::AddBxPtrImm8 { .. } => 3,
         Instr::AddBpRelImm8 { .. } => 4,
-        Instr::MovAxFromSiPtr | Instr::MovAxFromBxPtr | Instr::MovBxFromBxPtr => 2,
+        Instr::MovAxFromSiPtr
+        | Instr::MovAxFromBxPtr
+        | Instr::MovBxFromBxPtr
+        | Instr::SubAxFromSiPtr => 2,
         Instr::ShlReg16One { .. } | Instr::NegReg16 { .. } | Instr::NotReg16 { .. } => 2,
         Instr::MovBpRelImm { .. } | Instr::MovBpRelOffsetSym { .. } => 5,
         Instr::CallIndirectBpRel { .. } => 3,
@@ -392,6 +395,12 @@ fn emit_instr(
         }
         Instr::AddAxBpRel { offset } => emit_alu_ax_bp_rel(0x03, *offset, out),
         Instr::SubAxBpRel { offset } => emit_alu_ax_bp_rel(0x2B, *offset, out),
+        Instr::SubAxFromSiPtr => {
+            // `sub ax,word ptr [si]` → 2B 04. 2B is `sub r16,r/m16`;
+            // ModR/M 04 = mod=00 reg=AX r/m=100 ([si]).
+            out.push(0x2B);
+            out.push(0x04);
+        }
         Instr::AndAxBpRel { offset } => emit_alu_ax_bp_rel(0x23, *offset, out),
         Instr::OrAxBpRel { offset } => emit_alu_ax_bp_rel(0x0B, *offset, out),
         Instr::XorAxBpRel { offset } => emit_alu_ax_bp_rel(0x33, *offset, out),
