@@ -1,0 +1,4 @@
+description = "`b = a;` long-to-long copy between two long globals. Tests the load/store sequence in isolation (no arithmetic): load both halves of `a` (high to AX, low to DX), then store both halves to `b`."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

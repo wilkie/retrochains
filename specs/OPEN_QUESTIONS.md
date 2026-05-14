@@ -15,9 +15,12 @@ with the same code but different publics order produce different `.OBJ`
 files; we lose byte-exactness even though the linked program would be
 identical.
 
-**Current rule (approximate).** Per-segment buckets `_TEXT`, `_DATA`, `_BSS`
-in that order, reverse-alphabetical sort within each bucket. Documented
-in `crates/bcc/src/emit_s.rs::write_tail`.
+**Current rule (approximate).** Functions (one bucket, reverse-alpha)
+emit first, then all data + bss globals merged into a single
+reverse-alpha sort. Documented in `crates/bcc/src/emit_s.rs::write_tail`.
+Refined by fixture 211 (`long a=5; long b; main` → `_main, _b, _a` even
+though `_a` is in `_DATA` and `_b` is in `_BSS` — they share the same
+short-bucket sort).
 
 **Confirmed gap.** Multi-character non-`main` symbols expose violations.
 19 captured probes (`int <var> = K; int main(void) {...}` permutations):

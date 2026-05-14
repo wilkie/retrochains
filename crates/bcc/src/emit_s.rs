@@ -416,9 +416,14 @@ fn write_tail(out: &mut Vec<u8>, unit: &crate::ast::Unit, strings: &codegen::Str
     //     alpha) then _BSS (a).
     //   - 109 (`int x; int main`): output `_main, _x` — disambiguates
     //     global vs per-segment reverse-alpha.
+    // Functions go first (reverse-alphabetical), then all data/bss
+    // globals merged into one reverse-alpha sort. Fixture 211
+    // (`long a=5; long b; main`) disambiguates per-segment from
+    // global short-bucket sorting: BCC emits `_main, _b, _a` even
+    // though `_a` is in _DATA and `_b` is in _BSS — they share one
+    // reverse-alpha ordering once functions are out of the way.
     let mut text: Vec<String> = Vec::new();
-    let mut data: Vec<String> = Vec::new();
-    let mut bss: Vec<String> = Vec::new();
+    let mut shorts: Vec<String> = Vec::new();
     for f in &unit.functions {
         if f.body.is_some() {
             text.push(codegen::function_symbol(&f.name));
@@ -428,14 +433,12 @@ fn write_tail(out: &mut Vec<u8>, unit: &crate::ast::Unit, strings: &codegen::Str
         if g.is_static || g.is_extern {
             continue;
         }
-        let bucket = if g.init.is_some() { &mut data } else { &mut bss };
-        bucket.push(format!("_{}", g.name));
+        shorts.push(format!("_{}", g.name));
     }
-    for bucket in [&mut text, &mut data, &mut bss] {
-        bucket.sort();
-        for name in bucket.iter().rev() {
-            let _ = write!(out, "\tpublic\t{name}\r\n");
-        }
+    text.sort();
+    shorts.sort();
+    for name in text.iter().rev().chain(shorts.iter().rev()) {
+        let _ = write!(out, "\tpublic\t{name}\r\n");
     }
     // Data externs come after the public list (function externs come
     // before it, in `collect_extern_calls` order). Source order; the

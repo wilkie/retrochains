@@ -2679,6 +2679,19 @@ impl<'a> FunctionEmitter<'a> {
                 );
                 return;
             }
+            // `g = h;` long-to-long copy between two long globals.
+            // Load h into AX:DX (high→AX, low→DX), then store into
+            // g. Fixture 211.
+            if let ExprKind::Ident(src_name) = &value.kind
+                && let Some(src_ty) = self.globals.type_of(src_name)
+                && matches!(src_ty, Type::Long)
+            {
+                let _ = write!(self.out, "\tmov\tax,word ptr DGROUP:_{src_name}+2\r\n");
+                let _ = write!(self.out, "\tmov\tdx,word ptr DGROUP:_{src_name}\r\n");
+                let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name}+2,ax\r\n");
+                let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name},dx\r\n");
+                return;
+            }
             // `g = g + K;` or `g = g - K;` for a long global, K small
             // (fits in i8 — after sign flip for sub). BCC reuses one
             // add/adc pattern for both: load (high→AX, low→DX), add
