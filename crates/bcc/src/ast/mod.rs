@@ -497,6 +497,18 @@ impl BinOp {
         )
     }
 
+    /// True for binary operators where `a OP b == b OP a` (`+`, `*`,
+    /// `&`, `|`, `^`, `==`, `!=`). BCC swaps operands when the left
+    /// is constant-foldable and the right isn't — `3 + *p` emits as
+    /// `*p + 3` so the harder-to-materialize operand lands in AX.
+    #[must_use]
+    pub fn is_commutative(self) -> bool {
+        matches!(
+            self,
+            Self::Add | Self::Mul | Self::BitAnd | Self::BitOr | Self::BitXor | Self::Eq | Self::Ne
+        )
+    }
+
     /// The conditional-jump mnemonic to use when this comparison
     /// operator's result is **false**. For example, `<` is "less-than"
     /// — its inverse-on-false is "jump if not less", `jge`.

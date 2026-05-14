@@ -2794,6 +2794,18 @@ impl<'a> FunctionEmitter<'a> {
                 if op.is_comparison() {
                     self.emit_comparison_as_value(e.span.start, *op, left, right);
                 } else {
+                    // Commutative-op operand swap: BCC prefers the
+                    // non-constant operand in AX so the immediate or
+                    // simpler operand can be the binop's RHS. Fixture
+                    // 200 (`3 + *p` → `*p + 3`).
+                    let (left, right) = if op.is_commutative()
+                        && try_const_eval(left).is_some()
+                        && try_const_eval(right).is_none()
+                    {
+                        (right.as_ref(), left.as_ref())
+                    } else {
+                        (left.as_ref(), right.as_ref())
+                    };
                     // Shifts encode the left operand's signedness in
                     // the mnemonic (`shr` vs `sar`); everything else
                     // is signedness-agnostic at the instruction level.

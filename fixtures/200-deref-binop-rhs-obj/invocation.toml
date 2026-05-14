@@ -1,0 +1,4 @@
+description = "`3 + *p` — dereference as the right operand of a binary op. AX is loaded with the left value (3), then `add ax,word ptr [si]` reads through the pointer directly without materializing `*p` into a temp first."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]
