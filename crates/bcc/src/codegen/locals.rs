@@ -485,14 +485,18 @@ fn collect_address_taken(stmt: &Stmt, out: &mut HashSet<String>) {
             expr_address_taken(cond, out);
         }
         StmtKind::For { init, cond, step, body } => {
-            if let Some(e) = init {
-                expr_address_taken(e, out);
+            if let Some(exprs) = init {
+                for e in exprs {
+                    expr_address_taken(e, out);
+                }
             }
             if let Some(e) = cond {
                 expr_address_taken(e, out);
             }
-            if let Some(e) = step {
-                expr_address_taken(e, out);
+            if let Some(exprs) = step {
+                for e in exprs {
+                    expr_address_taken(e, out);
+                }
             }
             for s in body {
                 collect_address_taken(s, out);
@@ -595,9 +599,12 @@ fn stmt_has_call(stmt: &Stmt) -> bool {
         StmtKind::While { cond, body } => expr_has_call(cond) || body_has_call(body),
         StmtKind::DoWhile { body, cond } => body_has_call(body) || expr_has_call(cond),
         StmtKind::For { init, cond, step, body } => {
-            init.as_ref().is_some_and(expr_has_call)
+            init.as_ref()
+                .is_some_and(|es| es.iter().any(expr_has_call))
                 || cond.as_ref().is_some_and(expr_has_call)
-                || step.as_ref().is_some_and(expr_has_call)
+                || step
+                    .as_ref()
+                    .is_some_and(|es| es.iter().any(expr_has_call))
                 || body_has_call(body)
         }
         StmtKind::Break | StmtKind::Continue => false,
@@ -769,14 +776,18 @@ fn count_uses_stmt(stmt: &Stmt, counts: &mut HashMap<String, u32>) {
             count_uses_expr(cond, counts);
         }
         StmtKind::For { init, cond, step, body } => {
-            if let Some(e) = init {
-                count_uses_expr(e, counts);
+            if let Some(exprs) = init {
+                for e in exprs {
+                    count_uses_expr(e, counts);
+                }
             }
             if let Some(e) = cond {
                 count_uses_expr(e, counts);
             }
-            if let Some(e) = step {
-                count_uses_expr(e, counts);
+            if let Some(exprs) = step {
+                for e in exprs {
+                    count_uses_expr(e, counts);
+                }
             }
             for s in body {
                 count_uses_stmt(s, counts);

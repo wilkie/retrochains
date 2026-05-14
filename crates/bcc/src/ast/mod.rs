@@ -134,14 +134,16 @@ pub enum StmtKind {
     /// `do body while (cond);` — bottom-checking loop, body runs at
     /// least once.
     DoWhile { body: Vec<Stmt>, cond: Expr },
-    /// `for (init; cond; step) body`. Any of init/cond/step may be
-    /// absent (C lets you omit each clause); we'll model that as
-    /// `Option<Expr>` (init/step as expressions only — we don't yet
-    /// support C99-style declarations in the init clause).
+    /// `for (init; cond; step) body`. Any clause may be omitted (C
+    /// lets you leave it blank). `init` and `step` are vectors so the
+    /// comma operator at the top of those clauses parses as a sequence
+    /// of expressions evaluated for their side effects, matching the
+    /// `for (i=0, j=10; ...; i++, j--)` idiom (fixture 172). Empty
+    /// clauses become `None`.
     For {
-        init: Option<Expr>,
+        init: Option<Vec<Expr>>,
         cond: Option<Expr>,
-        step: Option<Expr>,
+        step: Option<Vec<Expr>>,
         body: Vec<Stmt>,
     },
     /// `break;` — exit the innermost enclosing loop or switch.

@@ -428,14 +428,18 @@ fn walk_calls(
             walk_calls_expr(cond, defined, locals, seen, ordered);
         }
         StmtKind::For { init, cond, step, body } => {
-            if let Some(e) = init {
-                walk_calls_expr(e, defined, locals, seen, ordered);
+            if let Some(exprs) = init {
+                for e in exprs {
+                    walk_calls_expr(e, defined, locals, seen, ordered);
+                }
             }
             if let Some(e) = cond {
                 walk_calls_expr(e, defined, locals, seen, ordered);
             }
-            if let Some(e) = step {
-                walk_calls_expr(e, defined, locals, seen, ordered);
+            if let Some(exprs) = step {
+                for e in exprs {
+                    walk_calls_expr(e, defined, locals, seen, ordered);
+                }
             }
             for s in body {
                 walk_calls(s, defined, locals, seen, ordered);

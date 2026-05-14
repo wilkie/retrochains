@@ -246,14 +246,18 @@ fn plan_stmt(stmt: &Stmt, ctx: &mut PlanCtx) {
             // with 0 nested labels; 065 reserves 5 (3 + 2 nested).
             let body_slot = ctx.counter;
             ctx.counter += 1;
-            if let Some(e) = init {
-                plan_expr_value(e, ctx);
+            if let Some(exprs) = init {
+                for e in exprs {
+                    plan_expr_value(e, ctx);
+                }
             }
             if let Some(e) = cond {
                 plan_expr_condition(e, ctx);
             }
-            if let Some(e) = step {
-                plan_expr_value(e, ctx);
+            if let Some(exprs) = step {
+                for e in exprs {
+                    plan_expr_value(e, ctx);
+                }
             }
             let before_body = ctx.counter;
             plan_stmts(body, ctx);

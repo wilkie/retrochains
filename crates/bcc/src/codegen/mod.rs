@@ -398,9 +398,9 @@ impl<'a> FunctionEmitter<'a> {
             StmtKind::For { init, cond, step, body } => {
                 self.emit_for(
                     stmt.span.start,
-                    init.as_ref(),
+                    init.as_deref(),
                     cond.as_ref(),
-                    step.as_ref(),
+                    step.as_deref(),
                     body,
                 );
             }
@@ -620,16 +620,19 @@ impl<'a> FunctionEmitter<'a> {
     fn emit_for(
         &mut self,
         for_span_start: u32,
-        init: Option<&Expr>,
+        init: Option<&[Expr]>,
         cond: Option<&Expr>,
-        step: Option<&Expr>,
+        step: Option<&[Expr]>,
         body: &[Stmt],
     ) {
         let plan = self.label_plan.loop_plan(for_span_start);
-        // Init runs once, before the loop.
-        if let Some(e) = init {
+        // Init runs once, before the loop. Comma-separated clauses
+        // are emitted in source order; their values are discarded.
+        if let Some(exprs) = init {
             self.advance_to_for_header_line(for_span_start);
-            self.emit_expr_discard(e);
+            for e in exprs {
+                self.emit_expr_discard(e);
+            }
         }
         // Trampoline jump to the check.
         let _ = write!(self.out, "\tjmp\tshort {}\r\n", self.label_ref(plan.check_slot));
@@ -649,8 +652,10 @@ impl<'a> FunctionEmitter<'a> {
         if body_has_continue(body) {
             self.emit_label(plan.continue_target_slot);
         }
-        if let Some(e) = step {
-            self.emit_expr_discard(e);
+        if let Some(exprs) = step {
+            for e in exprs {
+                self.emit_expr_discard(e);
+            }
         }
         self.emit_label(plan.check_slot);
         if let Some(c) = cond {

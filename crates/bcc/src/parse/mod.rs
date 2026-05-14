@@ -46,6 +46,11 @@ pub struct Parser {
     /// as a runtime type. Anonymous enums and explicit `= N` initializers
     /// both flow through this table.
     enum_constants: HashMap<String, u32>,
+    /// Extra `Stmt`s produced by a single source-level declaration —
+    /// specifically the secondary declarators of `int i, j, sum;`.
+    /// `parse_stmt` returns the first declarator; the parse-stmt
+    /// callers drain this queue and append to the enclosing block.
+    pending_extra_stmts: Vec<Stmt>,
 }
 
 impl Parser {
@@ -58,6 +63,7 @@ impl Parser {
             typedefs: HashMap::new(),
             pending_static_locals: Vec::new(),
             enum_constants: HashMap::new(),
+            pending_extra_stmts: Vec::new(),
         }
     }
 
@@ -468,6 +474,7 @@ impl Parser {
         let mut body = Vec::new();
         while !matches!(self.peek().kind, TokenKind::RBrace | TokenKind::Eof) {
             body.push(self.parse_stmt()?);
+            body.extend(std::mem::take(&mut self.pending_extra_stmts));
         }
         let close = self.expect(&TokenKind::RBrace)?;
         let span = Span::new(start, close.span.end);
@@ -674,9 +681,10 @@ impl Parser {
         // regardless of return type, and we never dereference it. So we
         // collapse the type to `Pointer<Int>` (any pointer is 2 bytes,
         // int-pool-eligible) and skip the param list.
+        let base_ty = ty.clone();
         if matches!(self.peek().kind, TokenKind::LParen) {
             let (name, fp_ty) = self.parse_func_ptr_declarator(ty.clone())?;
-            return self.finish_declare(start, fp_ty, name, is_static);
+            return self.finish_declare(start, base_ty, fp_ty, name, is_static);
         }
         let name_tok = self.bump();
         let TokenKind::Ident(name) = &name_tok.kind else {
@@ -699,7 +707,7 @@ impl Parser {
             self.expect(&TokenKind::RBracket)?;
             ty = Type::Array { elem: Box::new(ty), len };
         }
-        self.finish_declare(start, ty, name, is_static)
+        self.finish_declare(start, base_ty, ty, name, is_static)
     }
 
     /// Common tail of `parse_declare` after the declarator (name +
@@ -711,6 +719,7 @@ impl Parser {
     fn finish_declare(
         &mut self,
         start: u32,
+        base_ty: Type,
         ty: Type,
         name: String,
         is_static: bool,
@@ -721,6 +730,73 @@ impl Parser {
         } else {
             None
         };
+        // Multi-declarator: `int i, j, sum;`. Each comma-separated
+        // tail declarator re-applies pointer stars and array suffix
+        // to a fresh copy of the base type and produces its own
+        // `Stmt::Declare`, pushed onto the pending queue so the
+        // block-parse drain picks them up after the primary stmt.
+        while matches!(self.peek().kind, TokenKind::Comma) {
+            self.bump();
+            let mut tail_ty = base_ty.clone();
+            while matches!(self.peek().kind, TokenKind::Star) {
+                self.bump();
+                tail_ty = Type::Pointer(Box::new(tail_ty));
+            }
+            let tail_name_tok = self.bump();
+            let TokenKind::Ident(tail_name) = &tail_name_tok.kind else {
+                return Err(ParseError::NotAnIdent { offset: tail_name_tok.span.start });
+            };
+            let tail_name = tail_name.clone();
+            if matches!(self.peek().kind, TokenKind::LBracket) {
+                self.bump();
+                let size_tok = self.bump();
+                let TokenKind::IntLit(len) = size_tok.kind else {
+                    return Err(ParseError::Unexpected {
+                        expected: "array size (integer literal)".to_owned(),
+                        found: size_tok.kind.describe().to_owned(),
+                        offset: size_tok.span.start,
+                    });
+                };
+                self.expect(&TokenKind::RBracket)?;
+                tail_ty = Type::Array { elem: Box::new(tail_ty), len };
+            }
+            let tail_init = if matches!(self.peek().kind, TokenKind::Equals) {
+                self.bump();
+                Some(self.parse_expr()?)
+            } else {
+                None
+            };
+            let tail_span = Span::new(tail_name_tok.span.start, tail_name_tok.span.end);
+            if is_static {
+                self.pending_static_locals.push(Global {
+                    name: tail_name.clone(),
+                    ty: tail_ty.clone(),
+                    init: tail_init,
+                    is_static: true,
+                    is_extern: false,
+                    span: tail_span,
+                });
+                self.pending_extra_stmts.push(Stmt {
+                    kind: StmtKind::Declare {
+                        ty: tail_ty,
+                        name: tail_name,
+                        init: None,
+                        is_static: true,
+                    },
+                    span: tail_span,
+                });
+            } else {
+                self.pending_extra_stmts.push(Stmt {
+                    kind: StmtKind::Declare {
+                        ty: tail_ty,
+                        name: tail_name,
+                        init: tail_init,
+                        is_static: false,
+                    },
+                    span: tail_span,
+                });
+            }
+        }
         let semi = self.expect(&TokenKind::Semicolon)?;
         let span = Span::new(start, semi.span.end);
         if is_static {
@@ -823,7 +899,7 @@ impl Parser {
         let init = if matches!(self.peek().kind, TokenKind::Semicolon) {
             None
         } else {
-            Some(self.parse_for_clause_expr()?)
+            Some(self.parse_for_clause_list(TokenKind::Semicolon)?)
         };
         self.expect(&TokenKind::Semicolon)?;
         let cond = if matches!(self.peek().kind, TokenKind::Semicolon) {
@@ -835,7 +911,7 @@ impl Parser {
         let step = if matches!(self.peek().kind, TokenKind::RParen) {
             None
         } else {
-            Some(self.parse_for_clause_expr()?)
+            Some(self.parse_for_clause_list(TokenKind::RParen)?)
         };
         self.expect(&TokenKind::RParen)?;
         let body = self.parse_branch()?;
@@ -844,6 +920,24 @@ impl Parser {
             kind: StmtKind::For { init, cond, step, body },
             span: Span::new(for_tok.span.start, end),
         })
+    }
+
+    /// Parse a comma-separated list of for-clause expressions, stopping
+    /// at `terminator` (semicolon for init, rparen for step). Each
+    /// expression follows `parse_for_clause_expr`'s assign-first rule.
+    fn parse_for_clause_list(
+        &mut self,
+        terminator: TokenKind,
+    ) -> Result<Vec<Expr>, ParseError> {
+        let mut exprs = vec![self.parse_for_clause_expr()?];
+        while matches!(self.peek().kind, TokenKind::Comma) {
+            self.bump();
+            exprs.push(self.parse_for_clause_expr()?);
+        }
+        // Caller still expects/consumes the terminator (we just peek
+        // to make sure the next token matches what they expect).
+        let _ = terminator;
+        Ok(exprs)
     }
 
     /// Parse a for-loop init/step clause. We accept `<ident> = <rhs>`
@@ -915,6 +1009,7 @@ impl Parser {
                 TokenKind::KwCase | TokenKind::KwDefault | TokenKind::RBrace | TokenKind::Eof
             ) {
                 body.push(self.parse_stmt()?);
+                body.extend(std::mem::take(&mut self.pending_extra_stmts));
             }
             cases.push(SwitchCase {
                 value,
@@ -960,11 +1055,15 @@ impl Parser {
             let mut body = Vec::new();
             while !matches!(self.peek().kind, TokenKind::RBrace | TokenKind::Eof) {
                 body.push(self.parse_stmt()?);
+                body.extend(std::mem::take(&mut self.pending_extra_stmts));
             }
             self.expect(&TokenKind::RBrace)?;
             Ok(body)
         } else {
-            Ok(vec![self.parse_stmt()?])
+            let stmt = self.parse_stmt()?;
+            let mut body = vec![stmt];
+            body.extend(std::mem::take(&mut self.pending_extra_stmts));
+            Ok(body)
         }
     }
 
