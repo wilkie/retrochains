@@ -1,0 +1,4 @@
+description = "`int *p = &g;` — global pointer initialized to the address of another global. Same `dw DGROUP:_g` FIXUPP shape as fixture 192's string-pool path, but the target is a named global rather than `s@`."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

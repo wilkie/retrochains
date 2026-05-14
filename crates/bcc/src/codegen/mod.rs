@@ -1680,6 +1680,27 @@ impl<'a> FunctionEmitter<'a> {
         let ExprKind::Ident(name) = &ptr.kind else {
             panic!("non-ident pointer in `*p` not yet supported (no fixture for {:?})", ptr.kind);
         };
+        // `*p` where `p` is a global pointer (fixture 193). Load `p`
+        // from `DGROUP:_p` into BX, then dereference. Same shape as
+        // the global-pointer-index path used for `p[K]`.
+        if let Some(gty) = self.globals.type_of(name) {
+            let gty = gty.clone();
+            let Some(pointee) = gty.pointee() else {
+                panic!("`*{name}`: global is not a pointer type");
+            };
+            let _ = write!(
+                self.out,
+                "\tmov\tbx,word ptr DGROUP:_{name}\r\n"
+            );
+            if matches!(*pointee, Type::Char) {
+                self.out.extend_from_slice(b"\tmov\tal,byte ptr [bx]\r\n");
+                self.out.extend_from_slice(b"\tcbw\t\r\n");
+            } else {
+                let width = ptr_width(pointee);
+                let _ = write!(self.out, "\tmov\tax,{width} ptr [bx]\r\n");
+            }
+            return;
+        }
         let ty = self.locals.type_of(name).clone();
         let Some(pointee) = ty.pointee() else {
             panic!("`*{name}`: not a pointer type");

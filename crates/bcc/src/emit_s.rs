@@ -244,6 +244,14 @@ fn emit_global_init(
             return;
         }
     }
+    // `T *p = &g;` (fixture 193) — pointer slot initialized to the
+    // DGROUP-relative address of another global. Same FIXUPP shape as
+    // the string-pool path, but the target is `_<name>` rather than
+    // `s@`.
+    if let (ExprKind::AddressOf(target_name), Type::Pointer(_)) = (&init.kind, ty) {
+        let _ = write!(out, "\tdw\tDGROUP:_{target_name}\r\n");
+        return;
+    }
     // Aggregate initializer list — emit each item against the array's
     // element type. Fixture 189 (`int a[3] = {1, 2, 3}`) drops six
     // `db` lines, two per element. Excess initializers beyond `len`
