@@ -26,12 +26,15 @@ pub struct Unit {
 /// `_BSS`; `Some(...)` means `_DATA`. `is_static` suppresses the
 /// trailing `public _<name>` directive — the symbol stays private to
 /// this translation unit but is still allocated in DGROUP.
+/// `is_extern` means the storage is defined in some other TU; we
+/// emit only an `extrn _<name>:<width>` declaration and no slot.
 #[derive(Debug)]
 pub struct Global {
     pub name: String,
     pub ty: Type,
     pub init: Option<Expr>,
     pub is_static: bool,
+    pub is_extern: bool,
     pub span: Span,
 }
 

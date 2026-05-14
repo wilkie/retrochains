@@ -1,0 +1,4 @@
+description = "`extern int g;` declaration — no storage allocated, reference to `g` becomes an EXTDEF + FIXUPP target. Counterpart to 162 (static-global): both omit the symbol from PUBDEF, but extern also omits the `_DATA` slot, whereas static keeps it."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

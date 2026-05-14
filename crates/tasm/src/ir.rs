@@ -433,6 +433,12 @@ pub enum FixupKind {
     /// the target's segment because `_TEXT` is not in any group
     /// (fixture 110's `mov [bp-2],offset _f`).
     SegRelTargetFrameSegment { segment_idx: u8 },
+    /// Segment-relative 16-bit offset (M=1, location=1), frame method
+    /// F1 (GRPDEF), target method T2 (EXTDEF, no displacement). Used
+    /// for `mov ax,word ptr DGROUP:_g` when `_g` is declared via
+    /// `extrn _g:word` (fixture 163). Same shape as SegRelGroupTarget
+    /// except the target is an external symbol instead of a segment.
+    SegRelGroupExtern { group_idx: u8, extdef_idx: u8 },
 }
 
 /// A position-bound parse error. The line number is 1-based and refers

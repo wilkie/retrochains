@@ -27,6 +27,7 @@ pub enum TokenKind {
     KwStruct,
     KwTypedef,
     KwStatic,
+    KwExtern,
     // Atoms
     Ident(String),
     IntLit(u32),
@@ -105,6 +106,7 @@ impl TokenKind {
             Self::KwStruct => "`struct`",
             Self::KwTypedef => "`typedef`",
             Self::KwStatic => "`static`",
+            Self::KwExtern => "`extern`",
             Self::Ident(_) => "identifier",
             Self::IntLit(_) => "integer literal",
             Self::StringLit(_) => "string literal",

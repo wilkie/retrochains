@@ -132,6 +132,7 @@ impl<'a> Lexer<'a> {
             b"struct" => TokenKind::KwStruct,
             b"typedef" => TokenKind::KwTypedef,
             b"static" => TokenKind::KwStatic,
+            b"extern" => TokenKind::KwExtern,
             other => TokenKind::Ident(String::from_utf8_lossy(other).into_owned()),
         }
     }

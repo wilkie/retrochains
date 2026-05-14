@@ -84,17 +84,24 @@ impl Parser {
                 self.parse_bare_struct_decl()?;
                 continue;
             }
-            // Optional storage class. Only `static` is supported, and
-            // only on globals — `static int foo() {}` would also be
-            // valid C but our codegen doesn't yet thread the private
-            // attribute through function emission, so we reject it
-            // until a fixture demands it.
-            let is_static = if matches!(self.peek().kind, TokenKind::KwStatic) {
-                self.bump();
-                true
-            } else {
-                false
-            };
+            // Optional storage class. `static` and `extern` are
+            // mutually exclusive prefixes. We support both on globals
+            // but neither on function definitions — codegen doesn't
+            // yet thread the private/external attribute through
+            // function emission.
+            let mut is_static = false;
+            let mut is_extern = false;
+            match self.peek().kind {
+                TokenKind::KwStatic => {
+                    self.bump();
+                    is_static = true;
+                }
+                TokenKind::KwExtern => {
+                    self.bump();
+                    is_extern = true;
+                }
+                _ => {}
+            }
             // Otherwise this top-level item is either a function or
             // a global. Probe past the type to find the declarator
             // name and decide.
@@ -141,10 +148,10 @@ impl Parser {
             // The token after the name disambiguates: `(` means
             // function, anything else means global decl.
             if matches!(self.peek_n(probe).kind, TokenKind::LParen) {
-                if is_static {
+                if is_static || is_extern {
                     let t = self.peek();
                     return Err(ParseError::Unexpected {
-                        expected: "global declarator after `static`".to_owned(),
+                        expected: "global declarator after `static`/`extern`".to_owned(),
                         found: "function definition".to_owned(),
                         offset: t.span.start,
                     });
@@ -154,7 +161,7 @@ impl Parser {
                 decl_order.push(TopLevelRef::Function(idx));
             } else {
                 let idx = globals.len();
-                globals.push(self.parse_global(is_static)?);
+                globals.push(self.parse_global(is_static, is_extern)?);
                 decl_order.push(TopLevelRef::Global(idx));
             }
         }
@@ -326,7 +333,7 @@ impl Parser {
     /// (`parse_declare`); the difference is the resulting AST node
     /// (`Global` vs. `StmtKind::Declare`) and the absence of an
     /// enclosing function context.
-    fn parse_global(&mut self, is_static: bool) -> Result<Global, ParseError> {
+    fn parse_global(&mut self, is_static: bool, is_extern: bool) -> Result<Global, ParseError> {
         let start = self.peek().span.start;
         let mut ty = self.parse_type()?;
         while matches!(self.peek().kind, TokenKind::Star) {
@@ -363,6 +370,7 @@ impl Parser {
             ty,
             init,
             is_static,
+            is_extern,
             span: Span::new(start, semi.span.end),
         })
     }
@@ -662,6 +670,7 @@ impl Parser {
                 ty: ty.clone(),
                 init,
                 is_static: true,
+                is_extern: false,
                 span,
             });
             return Ok(Stmt {

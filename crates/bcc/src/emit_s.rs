@@ -76,8 +76,12 @@ pub fn build_asm(
 
     // Initialized globals live in a `_DATA` block at the top of the
     // file, between the empty segment scaffold and the function-code
-    // `_TEXT segment`. Fixtures 084, 086, 087.
-    let has_init_globals = unit.globals.iter().any(|g| g.init.is_some());
+    // `_TEXT segment`. Fixtures 084, 086, 087. Externs declare storage
+    // elsewhere, so they don't contribute to _DATA or _BSS.
+    let has_init_globals = unit
+        .globals
+        .iter()
+        .any(|g| !g.is_extern && g.init.is_some());
     if has_init_globals {
         write_init_globals(&mut out, &unit);
     }
@@ -113,7 +117,10 @@ pub fn build_asm(
     // shape). With some, _TEXT closes first, _BSS opens, the globals
     // are emitted, and then `?debug C E9` lands just before `_BSS
     // ends` (fixtures 083, 085, 087).
-    let has_bss_globals = unit.globals.iter().any(|g| g.init.is_none());
+    let has_bss_globals = unit
+        .globals
+        .iter()
+        .any(|g| !g.is_extern && g.init.is_none());
     if has_bss_globals {
         out.extend_from_slice(b"_TEXT\tends\r\n");
         write_bss_globals_with_debug(&mut out, &unit);
@@ -133,6 +140,9 @@ pub fn build_asm(
 fn write_init_globals(out: &mut Vec<u8>, unit: &crate::ast::Unit) {
     out.extend_from_slice(b"_DATA\tsegment word public 'DATA'\r\n");
     for g in &unit.globals {
+        if g.is_extern {
+            continue;
+        }
         let Some(init) = &g.init else { continue };
         emit_global_decl(out, &g.name, &g.ty);
         emit_global_init(out, &g.ty, init);
@@ -146,7 +156,7 @@ fn write_init_globals(out: &mut Vec<u8>, unit: &crate::ast::Unit) {
 fn write_bss_globals_with_debug(out: &mut Vec<u8>, unit: &crate::ast::Unit) {
     out.extend_from_slice(b"_BSS\tsegment word public 'BSS'\r\n");
     for g in &unit.globals {
-        if g.init.is_some() {
+        if g.is_extern || g.init.is_some() {
             continue;
         }
         emit_global_decl(out, &g.name, &g.ty);
@@ -291,7 +301,7 @@ fn write_tail(out: &mut Vec<u8>, unit: &crate::ast::Unit, strings: &codegen::Str
         }
     }
     for g in &unit.globals {
-        if g.is_static {
+        if g.is_static || g.is_extern {
             continue;
         }
         let bucket = if g.init.is_some() { &mut data } else { &mut bss };
@@ -303,7 +313,31 @@ fn write_tail(out: &mut Vec<u8>, unit: &crate::ast::Unit, strings: &codegen::Str
             let _ = write!(out, "\tpublic\t{name}\r\n");
         }
     }
+    // Data externs come after the public list (function externs come
+    // before it, in `collect_extern_calls` order). Source order; the
+    // width keyword (`word`/`byte`) is derived from the C type.
+    for g in &unit.globals {
+        if !g.is_extern {
+            continue;
+        }
+        let width = extern_width(&g.ty);
+        let _ = write!(out, "\textrn\t_{}:{width}\r\n", g.name);
+    }
     out.extend_from_slice(b"\tend\r\n");
+}
+
+/// Map a C type to TASM's `extrn` width keyword. `int` → `word`,
+/// `char` → `byte`, pointer → `word` (near pointer under -ms). Arrays
+/// and structs as externs aren't fixture-tested yet; for now we fall
+/// back to `byte` so the assembler can still compute reasonable
+/// fixups.
+fn extern_width(ty: &crate::ast::Type) -> &'static str {
+    use crate::ast::Type;
+    match ty {
+        Type::Int | Type::Pointer(_) => "word",
+        Type::Char => "byte",
+        _ => "byte",
+    }
 }
 
 /// Walk the AST and collect every function name that's *called* but
