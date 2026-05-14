@@ -1,0 +1,4 @@
+description = "`long x = 5;` — stack-local long with constant init. Tests 4-byte stack allocation and two word-stores: high half at bp-N and low half at bp-(N-2), in BCC's high-first order (mirroring fixture 205's global pattern)."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

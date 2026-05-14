@@ -1515,6 +1515,30 @@ impl<'a> FunctionEmitter<'a> {
     fn emit_init_local(&mut self, loc: LocalLocation, ty: &Type, init: &Expr) {
         match loc {
             LocalLocation::Stack(off) => {
+                // `long x = K;` stack local — two word stores, high
+                // word at the upper slot offset then low word at the
+                // lower slot. Mirrors fixture 205's global-long shape.
+                // Fixture 210.
+                if matches!(ty, Type::Long) {
+                    let Some(v) = try_const_eval(init) else {
+                        panic!("non-constant long local init not yet supported (no fixture)");
+                    };
+                    let lo = v & 0xFFFF;
+                    let hi = (v >> 16) & 0xFFFF;
+                    // `off` points to the LOW word (lower address);
+                    // the high word lives at `off + 2`.
+                    let _ = write!(
+                        self.out,
+                        "\tmov\tword ptr {},{hi}\r\n",
+                        bp_addr(off + 2),
+                    );
+                    let _ = write!(
+                        self.out,
+                        "\tmov\tword ptr {},{lo}\r\n",
+                        bp_addr(off),
+                    );
+                    return;
+                }
                 // Stack init: prefer the immediate-store form when the
                 // initializer folds to a constant. For `char` we emit
                 // `byte ptr` (fixture 011); for `int`, `word ptr`.
