@@ -1,0 +1,4 @@
+description = "`(char)200` — constant-fold a cast at compile time. 200 = 0xC8; low byte interpreted as signed-8 is -56, sign-extended to int is 0xFF C8 = 65480. BCC should emit a single `mov ax,65480` (or `mov ax,-56`) without any cbw."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

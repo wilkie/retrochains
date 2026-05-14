@@ -35,6 +35,20 @@ pub fn try_const_eval(e: &Expr) -> Option<u32> {
         | ExprKind::StringLit(_)
         | ExprKind::Member { .. }
         | ExprKind::Ternary { .. } => None,
+        ExprKind::Cast { ty, operand } => {
+            let v = try_const_eval(operand)?;
+            // Truncate to the target type's width, then sign-extend
+            // back to a u32 so subsequent folding sees the same value
+            // BCC's runtime cast would produce. (We currently only
+            // emit int/char/pointer-sized types.)
+            Some(match ty {
+                crate::ast::Type::Char => {
+                    let b = (v & 0xFF) as i8;
+                    i32::from(b) as u32
+                }
+                _ => v & 0xFFFF,
+            })
+        }
         ExprKind::Unary { op, operand } => {
             let v = try_const_eval(operand)?;
             Some(match op {

@@ -2216,7 +2216,35 @@ impl<'a> FunctionEmitter<'a> {
             ExprKind::Ternary { cond, then_value, else_value } => {
                 self.emit_ternary_to_ax(e.span.start, cond, then_value, else_value);
             }
+            ExprKind::Cast { ty, operand } => {
+                self.emit_cast_to_ax(ty, operand);
+            }
         }
+    }
+
+    /// Lower `(<ty>) <operand>` into AX. The narrowing int→char case
+    /// (the only one with a fixture today, 170) fuses the load with
+    /// the truncate: `mov al, byte ptr [bp-N]; cbw` when the operand
+    /// is a stack-int local — exactly what BCC emits for reading a
+    /// char-typed local from that offset. Widening / no-op casts just
+    /// evaluate the operand into AX.
+    fn emit_cast_to_ax(&mut self, ty: &Type, operand: &Expr) {
+        if matches!(ty, Type::Char) {
+            if let ExprKind::Ident(name) = &operand.kind
+                && !self.globals.contains(name)
+            {
+                let op_ty = self.locals.type_of(name).clone();
+                if matches!(op_ty, Type::Int)
+                    && let LocalLocation::Stack(off) = self.locals.location_of(name)
+                {
+                    let _ =
+                        write!(self.out, "\tmov\tal,byte ptr {}\r\n", bp_addr(off));
+                    self.out.extend_from_slice(b"\tcbw\t\r\n");
+                    return;
+                }
+            }
+        }
+        self.emit_expr_to_ax(operand);
     }
 
     /// Emit a ternary `cond ? then : else` into AX. The shape BCC
@@ -2390,6 +2418,9 @@ impl<'a> FunctionEmitter<'a> {
             }
             ExprKind::Ternary { .. } => {
                 panic!("ternary as right operand of a binary op not yet supported (no fixture)")
+            }
+            ExprKind::Cast { .. } => {
+                panic!("cast as right operand of a binary op not yet supported (no fixture)")
             }
         }
     }

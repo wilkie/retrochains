@@ -354,6 +354,11 @@ pub enum ExprKind {
         then_value: Box<Expr>,
         else_value: Box<Expr>,
     },
+    /// `(<type>) <operand>` — an explicit type cast. Today we only
+    /// pin the narrowing case (int → char, fixture 170); widening
+    /// (char → int) requires the same `cbw` we emit when reading a
+    /// char local, so it lowers identically.
+    Cast { ty: Type, operand: Box<Expr> },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -1100,6 +1100,20 @@ impl Parser {
     /// `++name`/`--name` (pre-increment / pre-decrement). The latter
     /// require the operand to be a plain identifier today — no compound
     /// LHS like `*p++`.
+    /// True if the current `(` is followed by a type-name keyword
+    /// (or a typedef alias). Caller is responsible for the `(` check;
+    /// this just inspects token index 1.
+    fn is_type_name_after_lparen(&self) -> bool {
+        match self.peek_n(1).kind {
+            TokenKind::KwInt
+            | TokenKind::KwChar
+            | TokenKind::KwVoid
+            | TokenKind::KwStruct => true,
+            TokenKind::Ident(ref name) if self.typedefs.contains_key(name) => true,
+            _ => false,
+        }
+    }
+
     fn parse_unary(&mut self) -> Result<Expr, ParseError> {
         // `sizeof(<type>)` folds to an integer literal at parse time.
         // We support only the parenthesized type-name form today —
@@ -1113,6 +1127,22 @@ impl Parser {
             return Ok(Expr {
                 kind: ExprKind::IntLit(u32::from(ty.size_bytes())),
                 span: Span::new(kw.span.start, close.span.end),
+            });
+        }
+        // Cast: `(<type>) <unary>`. Disambiguated from a parenthesized
+        // expression by 1-token lookahead past the `(` — if the next
+        // token is a type-name keyword (or a typedef alias), it's a
+        // cast. Otherwise it's a parenthesized expression and falls
+        // through to `parse_primary`.
+        if matches!(self.peek().kind, TokenKind::LParen) && self.is_type_name_after_lparen() {
+            let lparen = self.bump();
+            let ty = self.parse_type()?;
+            self.expect(&TokenKind::RParen)?;
+            let operand = self.parse_unary()?;
+            let span = Span::new(lparen.span.start, operand.span.end);
+            return Ok(Expr {
+                kind: ExprKind::Cast { ty, operand: Box::new(operand) },
+                span,
             });
         }
         if let Some(update_op) = match_update_op(&self.peek().kind) {

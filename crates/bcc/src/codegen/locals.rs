@@ -539,6 +539,7 @@ fn expr_address_taken(e: &Expr, out: &mut HashSet<String>) {
             expr_address_taken(then_value, out);
             expr_address_taken(else_value, out);
         }
+        ExprKind::Cast { operand, .. } => expr_address_taken(operand, out),
         ExprKind::IntLit(_)
         | ExprKind::Ident(_)
         | ExprKind::Update { .. }
@@ -632,6 +633,7 @@ fn expr_has_call(e: &Expr) -> bool {
         ExprKind::Ternary { cond, then_value, else_value } => {
             expr_has_call(cond) || expr_has_call(then_value) || expr_has_call(else_value)
         }
+        ExprKind::Cast { operand, .. } => expr_has_call(operand),
         ExprKind::Update { .. }
         | ExprKind::Ident(_)
         | ExprKind::IntLit(_)
@@ -918,6 +920,7 @@ fn count_uses_expr(e: &Expr, counts: &mut HashMap<String, u32>) {
             count_uses_expr(then_value, counts);
             count_uses_expr(else_value, counts);
         }
+        ExprKind::Cast { operand, .. } => count_uses_expr(operand, counts),
     }
 }
 

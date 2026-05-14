@@ -399,6 +399,7 @@ fn plan_expr_value(e: &Expr, ctx: &mut PlanCtx) {
             plan_expr_value(index, ctx);
         }
         ExprKind::Member { base, .. } => plan_expr_value(base, ctx),
+        ExprKind::Cast { operand, .. } => plan_expr_value(operand, ctx),
         ExprKind::Ternary { cond, then_value, else_value } => {
             // Same skeleton as `if`-`else`: reserve 3 slots (base+0
             // stays unused to match BCC's numbering, base+1 is the

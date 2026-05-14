@@ -499,6 +499,9 @@ fn walk_calls_expr(
             walk_calls_expr(then_value, defined, locals, seen, ordered);
             walk_calls_expr(else_value, defined, locals, seen, ordered);
         }
+        ExprKind::Cast { operand, .. } => {
+            walk_calls_expr(operand, defined, locals, seen, ordered);
+        }
         ExprKind::Ident(_)
         | ExprKind::IntLit(_)
         | ExprKind::StringLit(_)
