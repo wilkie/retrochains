@@ -2352,6 +2352,22 @@ impl<'a> FunctionEmitter<'a> {
         let ExprKind::Ident(name) = &target.kind else {
             panic!("non-ident pointer in `*p = v` not yet supported (no fixture)");
         };
+        // `*p = v` where `p` is a global pointer (fixture 194). Load
+        // `p` into BX from `DGROUP:_p`, then store through `[bx]`.
+        if let Some(gty) = self.globals.type_of(name) {
+            let gty = gty.clone();
+            let Some(pointee) = gty.pointee() else {
+                panic!("`*{name} = v`: global is not a pointer type");
+            };
+            let width = ptr_width(pointee);
+            let Some(v) = try_const_eval(value) else {
+                panic!("non-constant rhs in global `*p = v` not yet supported (no fixture)");
+            };
+            let v_masked = if matches!(*pointee, Type::Char) { v & 0xFF } else { v & 0xFFFF };
+            let _ = write!(self.out, "\tmov\tbx,word ptr DGROUP:_{name}\r\n");
+            let _ = write!(self.out, "\tmov\t{width} ptr [bx],{v_masked}\r\n");
+            return;
+        }
         let ty = self.locals.type_of(name).clone();
         let Some(pointee) = ty.pointee() else {
             panic!("`*{name} = v`: not a pointer type");
