@@ -62,6 +62,15 @@ pub enum SegItem {
     /// patches the bytes at link time. Used by BCC for jump-table
     /// entries (fixture 158).
     DwSym(String),
+    /// `dw <group>:<symbol>[+N]` — same 2-byte slot as `DwSym` but
+    /// the FIXUPP carries a `<group>` frame instead of the symbol's
+    /// own segment. Used for file-scope `char *p = "lit"` (fixture
+    /// 192) where the slot must resolve via DGROUP.
+    DwGroupSym {
+        group: String,
+        symbol: String,
+        extra_offset: i16,
+    },
     /// `db N dup (?)` — reserve N bytes of uninitialized space. Grows
     /// the segment's notional size but emits nothing into LEDATA. BCC
     /// uses this in `_BSS` for globals.
@@ -218,11 +227,25 @@ pub enum Instr {
     /// `A1 lo hi` plus a FIXUPP (frame = group, target = symbol's
     /// home segment); the `lo hi` carry `sym.offset + offset`.
     MovAxGroupSym { group: String, symbol: String, offset: i16 },
+    /// `mov <reg16>,word ptr <group>:<symbol>[+<offset>]` for non-AX
+    /// destinations. Uses MOV r16,r/m16 with disp16-only addressing
+    /// (`8B (mod=00 reg=<r> rm=110) lo hi`). Same FIXUPP shape as
+    /// `MovAxGroupSym`. Fixture 192 uses this for `mov bx,word ptr
+    /// DGROUP:_p` when dereferencing a global pointer.
+    MovReg16WordGroupSym {
+        reg: Reg16,
+        group: String,
+        symbol: String,
+        offset: i16,
+    },
     /// `mov al,byte ptr <group>:<symbol>[+<offset>]` — 8-bit moffs8
     /// load (A0 lo hi). Same FIXUPP shape as MovAxGroupSym.
     MovAlGroupSym { group: String, symbol: String, offset: i16 },
     /// `mov al,byte ptr [si]` — 8A 04. 8-bit load through SI pointer.
     MovAlFromSiPtr,
+    /// `mov al,byte ptr [bx]` — 8A 07. 8-bit load through BX pointer.
+    /// Fixture 192 dereferences a global char pointer via BX.
+    MovAlFromBxPtr,
     /// `imul <reg16>` — F7 (mod=11 /5 r/m=reg). Single-operand signed
     /// multiply with a register operand. Used when the operand is
     /// register-resident, e.g. `x *= 3` after BCC enregisters x.

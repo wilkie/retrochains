@@ -74,6 +74,11 @@ pub fn build_asm(
     write_debug_header(&mut out, source_filename_lower, mtime);
     write_segment_scaffold(&mut out);
 
+    // The string pool is owned here so both initialized-global emission
+    // (file scope `char *p = "lit"` — fixture 192) and per-function code
+    // emission can intern into the same `s@`-relative table.
+    let mut strings = codegen::StringPool::default();
+
     // Initialized globals live in a `_DATA` block at the top of the
     // file, between the empty segment scaffold and the function-code
     // `_TEXT segment`. Fixtures 084, 086, 087. Externs declare storage
@@ -83,7 +88,7 @@ pub fn build_asm(
         .iter()
         .any(|g| !g.is_extern && g.init.is_some());
     if has_init_globals {
-        write_init_globals(&mut out, &unit);
+        write_init_globals(&mut out, &unit, &mut strings);
     }
 
     // _TEXT opens once for the whole translation unit; every function
@@ -91,7 +96,6 @@ pub fn build_asm(
     out.extend_from_slice(b"_TEXT\tsegment byte public 'CODE'\r\n");
     let signatures = codegen::Signatures::from_unit(&unit);
     let globals = codegen::GlobalTable::from_unit(&unit);
-    let mut strings = codegen::StringPool::default();
     // Function-index assignment skips prototypes — they don't get a
     // `@N@…` label scope of their own.
     let mut func_idx = 0u32;
@@ -137,7 +141,11 @@ pub fn build_asm(
 /// Emit initialized globals in `_DATA` at the top of the file.
 /// Each global gets a `_<name> label <word|byte>` followed by `db`
 /// bytes for its initialized value (little-endian).
-fn write_init_globals(out: &mut Vec<u8>, unit: &crate::ast::Unit) {
+fn write_init_globals(
+    out: &mut Vec<u8>,
+    unit: &crate::ast::Unit,
+    strings: &mut codegen::StringPool,
+) {
     out.extend_from_slice(b"_DATA\tsegment word public 'DATA'\r\n");
     for g in &unit.globals {
         if g.is_extern {
@@ -145,7 +153,7 @@ fn write_init_globals(out: &mut Vec<u8>, unit: &crate::ast::Unit) {
         }
         let Some(init) = &g.init else { continue };
         emit_global_decl(out, &g.name, &g.ty);
-        emit_global_init(out, &g.ty, init);
+        emit_global_init(out, &g.ty, init, strings);
     }
     out.extend_from_slice(b"_DATA\tends\r\n");
 }
@@ -202,7 +210,12 @@ fn emit_global_decl(out: &mut Vec<u8>, name: &str, ty: &crate::ast::Type) {
 /// Emit the `db` byte run for an initialized global's value. Only
 /// constant initializers are supported today — non-constant
 /// initializers at file scope aren't legal C anyway.
-fn emit_global_init(out: &mut Vec<u8>, ty: &crate::ast::Type, init: &crate::ast::Expr) {
+fn emit_global_init(
+    out: &mut Vec<u8>,
+    ty: &crate::ast::Type,
+    init: &crate::ast::Expr,
+    strings: &mut codegen::StringPool,
+) {
     use crate::ast::{ExprKind, Type};
     // `char s[] = "hi"` (fixture 191) — one `db <byte>` per char plus
     // a trailing `db 0` for the NUL. Parser has already widened the
@@ -216,6 +229,21 @@ fn emit_global_init(out: &mut Vec<u8>, ty: &crate::ast::Type, init: &crate::ast:
             return;
         }
     }
+    // `char *p = "lit"` (fixture 192) — pointer global gets a 2-byte
+    // slot in _DATA initialized to `DGROUP:s@[+N]`. The literal itself
+    // is interned into the same pool used by function-scope literals
+    // and emitted later in `write_tail`.
+    if let (ExprKind::StringLit(bytes), Type::Pointer(target)) = (&init.kind, ty) {
+        if matches!(**target, Type::Char) {
+            let offset = strings.intern(bytes);
+            if offset == 0 {
+                out.extend_from_slice(b"\tdw\tDGROUP:s@\r\n");
+            } else {
+                let _ = write!(out, "\tdw\tDGROUP:s@+{offset}\r\n");
+            }
+            return;
+        }
+    }
     // Aggregate initializer list — emit each item against the array's
     // element type. Fixture 189 (`int a[3] = {1, 2, 3}`) drops six
     // `db` lines, two per element. Excess initializers beyond `len`
@@ -224,7 +252,7 @@ fn emit_global_init(out: &mut Vec<u8>, ty: &crate::ast::Type, init: &crate::ast:
         match ty {
             Type::Array { elem, .. } => {
                 for item in items {
-                    emit_global_init(out, elem, item);
+                    emit_global_init(out, elem, item, strings);
                 }
             }
             Type::Struct { fields, .. } => {
@@ -237,7 +265,7 @@ fn emit_global_init(out: &mut Vec<u8>, ty: &crate::ast::Type, init: &crate::ast:
                 // aligned fields in this fixture; alignment fillers
                 // for char-followed-by-int would need an extra fixture.
                 for (item, field) in items.iter().zip(fields.iter()) {
-                    emit_global_init(out, &field.ty, item);
+                    emit_global_init(out, &field.ty, item, strings);
                 }
             }
             _ => panic!("initializer list against {:?} not yet supported", ty),

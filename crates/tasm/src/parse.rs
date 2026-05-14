@@ -270,6 +270,17 @@ impl<'a> Parser<'a> {
                 .push(SegItem::DwSym(rest.to_string()));
             return Ok(());
         }
+        // `dw <group>:<symbol>[+N]` — DGROUP-framed slot. Fixture 192
+        // (`char *p = "hi"` at file scope) drops `dw DGROUP:s@`.
+        if let Some((group, after)) = rest.split_once(':') {
+            let (sym, extra_offset) = split_sym_offset(after.trim());
+            self.module.segments[seg].items.push(SegItem::DwGroupSym {
+                group: group.trim().to_string(),
+                symbol: sym.to_string(),
+                extra_offset,
+            });
+            return Ok(());
+        }
         // `dw <integer>` — 2 raw bytes (little-endian). No fixture
         // yet but easy to support.
         if let Ok(v) = rest.parse::<i32>() {
@@ -492,6 +503,20 @@ fn parse_mov(operands: &str, line_no: usize) -> AsmResult<Instr> {
             });
         }
     }
+    // `mov <reg16>,word ptr <group>:<sym>[+N]` — generic disp16 load
+    // for non-AX destinations (AX has the shorter A1 path above).
+    // Fixture 192: `mov bx,word ptr DGROUP:_p`.
+    if let Some(reg) = Reg16::parse(lhs) {
+        if let Some((group, symbol)) = parse_group_symbol(rhs) {
+            let (sym, offset) = split_sym_offset(symbol);
+            return Ok(Instr::MovReg16WordGroupSym {
+                reg,
+                group: group.to_string(),
+                symbol: sym.to_string(),
+                offset,
+            });
+        }
+    }
     // Generic 16-bit `mov <reg>,offset <group>:<sym>` (fixtures 108
     // for AX, 157 for SI). Tried before reg-imm so it doesn't get
     // shadowed by a misparse of `offset` as a label.
@@ -532,6 +557,9 @@ fn parse_mov(operands: &str, line_no: usize) -> AsmResult<Instr> {
     if lhs == "al" {
         if rhs == "byte ptr [si]" {
             return Ok(Instr::MovAlFromSiPtr);
+        }
+        if rhs == "byte ptr [bx]" {
+            return Ok(Instr::MovAlFromBxPtr);
         }
         // `mov al,byte ptr DGROUP:_g` — 8-bit moffs8 load.
         if let Some((group, symbol)) = parse_byte_group_symbol(rhs) {

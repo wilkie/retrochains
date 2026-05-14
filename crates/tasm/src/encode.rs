@@ -84,7 +84,7 @@ fn build_symbols(module: &Module) -> AsmResult<Symbols> {
                 }
                 SegItem::Proc(_) | SegItem::EndProc => {}
                 SegItem::Db(b) => pc += b.len() as u32,
-                SegItem::DwSym(_) => pc += 2,
+                SegItem::DwSym(_) | SegItem::DwGroupSym { .. } => pc += 2,
                 SegItem::Pad(n) => pc += *n,
                 SegItem::Instr(instr) => pc += instr_size(instr) as u32,
             }
@@ -162,6 +162,33 @@ fn encode_segment(
                 fixups.push(FixupReq {
                     data_offset: u16::try_from(imm_start).expect("offset fits"),
                     kind: FixupKind::SegRelTargetFrameSegment {
+                        segment_idx: target_seg_idx,
+                    },
+                });
+            }
+            SegItem::DwGroupSym { group, symbol, extra_offset } => {
+                if sealed_bytes {
+                    return Err(AsmError::new(
+                        0,
+                        format!("segment {}: `dw` after padding not supported", seg.name),
+                    ));
+                }
+                sealed_pad = true;
+                let sym_loc = symbols.get(symbol).ok_or_else(|| {
+                    AsmError::new(0, format!("dw: symbol `{symbol}` not defined"))
+                })?;
+                let g_idx = *group_idx.get(group).ok_or_else(|| {
+                    AsmError::new(0, format!("dw: group `{group}` not defined"))
+                })?;
+                let target_seg_idx =
+                    u8::try_from(sym_loc.segment + 1).expect("target seg idx fits");
+                let value = sym_loc.offset.wrapping_add(*extra_offset as u16);
+                let imm_start = bytes.len();
+                bytes.extend_from_slice(&value.to_le_bytes());
+                fixups.push(FixupReq {
+                    data_offset: u16::try_from(imm_start).expect("offset fits"),
+                    kind: FixupKind::SegRelGroupTarget {
+                        group_idx: g_idx,
                         segment_idx: target_seg_idx,
                     },
                 });
@@ -245,7 +272,8 @@ fn instr_size(instr: &Instr) -> usize {
         Instr::MovAxGroupSym { .. }
         | Instr::MovAlGroupSym { .. }
         | Instr::MovReg16OffsetGroupSym { .. } => 3,
-        Instr::MovAlFromSiPtr => 2,
+        Instr::MovReg16WordGroupSym { .. } => 4,
+        Instr::MovAlFromSiPtr | Instr::MovAlFromBxPtr => 2,
         Instr::ImulReg16 { .. } => 2,
         Instr::AddAxGroupSym { .. } => 4,
         Instr::Cbw => 1,
@@ -595,6 +623,13 @@ fn emit_instr(
             // Encoding A1 is `mov AX, moffs16` — segment-relative load.
             emit_group_sym_lea(&[0xA1], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
         }
+        Instr::MovReg16WordGroupSym { reg, group, symbol, offset } => {
+            // `mov <reg16>,word ptr <group>:<sym>` → 8B (mod=00
+            // reg=<r> rm=110) lo hi. Generic disp16-only addressing
+            // for non-AX destinations; AX uses the shorter A1 form.
+            let modrm = 0b00_000_110 | (reg.code() << 3);
+            emit_group_sym_lea(&[0x8B, modrm], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
+        }
         Instr::MovAlGroupSym { group, symbol, offset } => {
             // `mov al,byte ptr <group>:<symbol>` → A0 lo hi.
             // A0 is the 8-bit moffs8 sibling of A1.
@@ -612,6 +647,12 @@ fn emit_instr(
             // ModR/M 04 = mod=00 reg=AL r/m=100([si]).
             out.push(0x8A);
             out.push(0x04);
+        }
+        Instr::MovAlFromBxPtr => {
+            // `mov al,byte ptr [bx]` → 8A 07. Same opcode as the
+            // SI form; ModR/M 07 = mod=00 reg=AL r/m=111([bx]).
+            out.push(0x8A);
+            out.push(0x07);
         }
         Instr::ImulReg16 { reg } => {
             // `imul r16` → F7 (mod=11 /5 r/m=<reg>).

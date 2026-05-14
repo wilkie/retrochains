@@ -1796,6 +1796,19 @@ impl<'a> FunctionEmitter<'a> {
         // Fixture 189 (`int a[3] = {1, 2, 3}; return a[0] + a[1] + a[2];`).
         if let Some(gty) = self.globals.type_of(array_name) {
             let gty = gty.clone();
+            // Global pointer indexed at depth 1: `p[i]` where `p: T*`.
+            // Equivalent to `*(p + i)` — load `p` into `bx` from
+            // `DGROUP:_p`, then dereference. Fixture 192
+            // (`char *p = "hi"; return p[0];`).
+            if let Some(pointee) = gty.pointee() {
+                if indices.len() == 1 {
+                    return self.emit_global_pointer_index_to_ax(
+                        array_name,
+                        pointee.clone(),
+                        indices[0],
+                    );
+                }
+            }
             if let Some((const_off, leaf_ty)) =
                 try_const_array_offset(&gty, indices.iter().copied())
             {
@@ -1862,6 +1875,32 @@ impl<'a> FunctionEmitter<'a> {
     /// to `*(p + index)`. Fixture 088: `s[0]` with `s: char *` in SI
     /// emits `mov al, byte ptr [si] / cbw`. Variable-indexed pointer
     /// access isn't observed yet — would need an add-into-bx step.
+    /// `p[K]` where `p` is a global pointer (not array). Load `p`
+    /// into BX from `DGROUP:_p`, then deref. Fixture 192
+    /// (`char *p = "hi"; return p[0];`).
+    fn emit_global_pointer_index_to_ax(&mut self, ptr_name: &str, pointee: Type, index: &Expr) {
+        let Some(k) = try_const_eval(index) else {
+            panic!("variable-indexed global pointer access not yet supported (no fixture)");
+        };
+        let _ = write!(
+            self.out,
+            "\tmov\tbx,word ptr DGROUP:_{ptr_name}\r\n"
+        );
+        let stride = u32::from(pointee.size_bytes());
+        let byte_off = k * stride;
+        let addr = if byte_off == 0 {
+            "[bx]".to_owned()
+        } else {
+            format!("[bx+{byte_off}]")
+        };
+        if matches!(pointee, Type::Char) {
+            let _ = write!(self.out, "\tmov\tal,byte ptr {addr}\r\n");
+            self.out.extend_from_slice(b"\tcbw\t\r\n");
+        } else {
+            let _ = write!(self.out, "\tmov\tax,word ptr {addr}\r\n");
+        }
+    }
+
     fn emit_pointer_index_to_ax(&mut self, ptr_name: &str, pointee: Type, index: &Expr) {
         let Some(k) = try_const_eval(index) else {
             panic!("variable-indexed pointer access not yet supported (no fixture)");
