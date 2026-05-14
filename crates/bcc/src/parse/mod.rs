@@ -685,18 +685,24 @@ impl Parser {
         let span = Span::new(start, semi.span.end);
         let kind = match expr.kind {
             ExprKind::Deref(ptr) => StmtKind::DerefAssign { target: *ptr, value },
-            ExprKind::ArrayIndex { array, index } => {
-                // The array side of an assign must be a named array
-                // local (or future global) — string literals are not
-                // assignable. Extract the ident name.
-                let ExprKind::Ident(name) = array.kind else {
-                    return Err(ParseError::Unsupported { offset: array.span.start });
+            ExprKind::ArrayIndex { .. } => {
+                // The LHS is potentially a nested chain `a[i][j]...`.
+                // Walk it to the base ident, collecting indices
+                // innermost-first, then reverse to source order.
+                let mut indices: Vec<Expr> = Vec::new();
+                let mut cur = expr;
+                let array = loop {
+                    match cur.kind {
+                        ExprKind::ArrayIndex { array, index } => {
+                            indices.push(*index);
+                            cur = *array;
+                        }
+                        ExprKind::Ident(name) => break name,
+                        _ => return Err(ParseError::Unsupported { offset: cur.span.start }),
+                    }
                 };
-                StmtKind::ArrayAssign {
-                    array: name,
-                    index: *index,
-                    value,
-                }
+                indices.reverse();
+                StmtKind::ArrayAssign { array, indices, value }
             }
             ExprKind::Member { base, field, kind: mk } => StmtKind::MemberAssign {
                 base: *base,
@@ -759,10 +765,12 @@ impl Parser {
             return Err(ParseError::NotAnIdent { offset: name_tok.span.start });
         };
         let name = name.clone();
-        // Array suffix: `[<int-literal>]`. C also allows `[]` for
-        // function parameters (decays to pointer) — we don't have
-        // a fixture for that yet.
-        if matches!(self.peek().kind, TokenKind::LBracket) {
+        // Array suffix: `[<int-literal>]`, repeated for multi-dim.
+        // Lengths are collected left-to-right, then wrapped innermost-
+        // first so `int a[2][3]` becomes `Array{2, Array{3, Int}}` —
+        // i.e. `a[i]` yields an `int[3]`.
+        let mut array_lens: Vec<u32> = Vec::new();
+        while matches!(self.peek().kind, TokenKind::LBracket) {
             self.bump();
             let size_tok = self.bump();
             let TokenKind::IntLit(len) = size_tok.kind else {
@@ -773,6 +781,9 @@ impl Parser {
                 });
             };
             self.expect(&TokenKind::RBracket)?;
+            array_lens.push(len);
+        }
+        for len in array_lens.into_iter().rev() {
             ty = Type::Array { elem: Box::new(ty), len };
         }
         self.finish_declare(start, base_ty, ty, name, is_static)
@@ -1493,24 +1504,28 @@ impl Parser {
                         span,
                     })
                 } else if matches!(self.peek().kind, TokenKind::LBracket) {
-                    // Array index `name[<expr>]`. Only one level today
-                    // — chained `a[i][j]` would need the indexed value
-                    // to itself be an array/pointer, which our type
-                    // system doesn't fully model.
-                    self.bump();
-                    let index = self.parse_expr()?;
-                    let close = self.expect(&TokenKind::RBracket)?;
-                    let array = Expr {
+                    // Array index `name[<expr>]`, chained as `a[i][j]`.
+                    // Each `[k]` wraps the previous expression in
+                    // another `ArrayIndex` — codegen walks the chain
+                    // when folding constant indices to a single offset.
+                    let mut acc = Expr {
                         kind: ExprKind::Ident(name.clone()),
                         span: tok.span,
                     };
-                    Ok(Expr {
-                        kind: ExprKind::ArrayIndex {
-                            array: Box::new(array),
-                            index: Box::new(index),
-                        },
-                        span: Span::new(tok.span.start, close.span.end),
-                    })
+                    while matches!(self.peek().kind, TokenKind::LBracket) {
+                        self.bump();
+                        let index = self.parse_expr()?;
+                        let close = self.expect(&TokenKind::RBracket)?;
+                        let span = Span::new(acc.span.start, close.span.end);
+                        acc = Expr {
+                            kind: ExprKind::ArrayIndex {
+                                array: Box::new(acc),
+                                index: Box::new(index),
+                            },
+                            span,
+                        };
+                    }
+                    Ok(acc)
                 } else {
                     Ok(Expr { kind: ExprKind::Ident(name.clone()), span: tok.span })
                 }

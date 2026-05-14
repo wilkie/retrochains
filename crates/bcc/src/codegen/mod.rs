@@ -370,9 +370,9 @@ impl<'a> FunctionEmitter<'a> {
                 self.advance_to_stmt_line(stmt);
                 self.emit_compound_assign(name, *op, value);
             }
-            StmtKind::ArrayAssign { array, index, value } => {
+            StmtKind::ArrayAssign { array, indices, value } => {
                 self.advance_to_stmt_line(stmt);
-                self.emit_array_assign(array, index, value);
+                self.emit_array_assign(array, indices, value);
             }
             StmtKind::DerefAssign { target, value } => {
                 self.advance_to_stmt_line(stmt);
@@ -1709,28 +1709,44 @@ impl<'a> FunctionEmitter<'a> {
         if let ExprKind::StringLit(bytes) = &array.kind {
             return self.emit_string_lit_index_to_ax(bytes, index);
         }
-        let ExprKind::Ident(array_name) = &array.kind else {
-            panic!("array base in `a[i]` must be an ident or string literal (no fixture for {:?})", array.kind);
+        // Walk a nested chain `a[i1][i2]...` down to the base ident,
+        // collecting indices from innermost to outermost. A bare
+        // `a[i]` lands here with `indices = [i]` after the reversal.
+        let mut indices: Vec<&Expr> = vec![index];
+        let mut cur = array;
+        let array_name = loop {
+            match &cur.kind {
+                ExprKind::ArrayIndex { array: inner, index: inner_ix } => {
+                    indices.push(inner_ix);
+                    cur = inner;
+                }
+                ExprKind::Ident(name) => break name.as_str(),
+                _ => panic!(
+                    "array base in `a[i]` must be an ident, nested array-index, or string literal (no fixture for {:?})",
+                    cur.kind,
+                ),
+            }
         };
-        let array = array_name.as_str();
-        let ty = self.locals.type_of(array).clone();
+        indices.reverse();
+        let ty = self.locals.type_of(array_name).clone();
         // `p[i]` where `p` is a pointer (not an array). Equivalent
         // to `*(p + i)`. Fixture 088: `s[0]` with `s: char *` in SI
-        // → `mov al, byte ptr [si] / cbw`.
+        // → `mov al, byte ptr [si] / cbw`. Only handled at depth 1.
         if let Some(pointee) = ty.pointee() {
-            return self.emit_pointer_index_to_ax(array, pointee.clone(), index);
+            if indices.len() != 1 {
+                panic!("multi-level index through a pointer not yet supported (no fixture)");
+            }
+            return self.emit_pointer_index_to_ax(array_name, pointee.clone(), indices[0]);
         }
-        let elem = ty
-            .array_elem()
-            .unwrap_or_else(|| panic!("`{array}[i]`: not an array type"));
-        let elem_size = elem.size_bytes();
-        let width = ptr_width(elem);
-        let LocalLocation::Stack(base_off) = self.locals.location_of(array) else {
-            panic!("array `{array}` should be stack-resident");
+        let LocalLocation::Stack(base_off) = self.locals.location_of(array_name) else {
+            panic!("array `{array_name}` should be stack-resident");
         };
-        if let Some(k) = try_const_eval(index) {
-            let off = base_off + i16::try_from(k * u32::from(elem_size)).unwrap_or(i16::MAX);
-            if matches!(*elem, Type::Char) {
+        if let Some((const_off, leaf_ty)) =
+            try_const_array_offset(&ty, indices.iter().copied())
+        {
+            let off = base_off + i16::try_from(const_off).unwrap_or(i16::MAX);
+            let width = ptr_width(&leaf_ty);
+            if matches!(leaf_ty, Type::Char) {
                 let _ = write!(self.out, "\tmov\tal,byte ptr {}\r\n", bp_addr(off));
                 self.out.extend_from_slice(b"\tcbw\t\r\n");
             } else {
@@ -1738,7 +1754,15 @@ impl<'a> FunctionEmitter<'a> {
             }
             return;
         }
-        self.emit_array_addr_to_bx(array, index, base_off, elem_size);
+        if indices.len() != 1 {
+            panic!("multi-dim array read with non-constant indices not yet supported (no fixture)");
+        }
+        let elem = ty
+            .array_elem()
+            .unwrap_or_else(|| panic!("`{array_name}[i]`: not an array type"));
+        let elem_size = elem.size_bytes();
+        let width = ptr_width(elem);
+        self.emit_array_addr_to_bx(array_name, indices[0], base_off, elem_size);
         if matches!(*elem, Type::Char) {
             self.out.extend_from_slice(b"\tmov\tal,byte ptr [bx]\r\n");
             self.out.extend_from_slice(b"\tcbw\t\r\n");
@@ -1835,23 +1859,21 @@ impl<'a> FunctionEmitter<'a> {
         self.out.extend_from_slice(b"\tadd\tbx,ax\r\n");
     }
 
-    /// `a[<index>] = <value>;` — write into an array slot. Same
-    /// constant/variable split as the read path.
-    fn emit_array_assign(&mut self, array: &str, index: &Expr, value: &Expr) {
-        let ty = self.locals.type_of(array).clone();
-        let elem = ty
-            .array_elem()
-            .unwrap_or_else(|| panic!("`{array}[i] = v`: not an array type"));
-        let elem_size = elem.size_bytes();
-        let width = ptr_width(elem);
+    /// `a[<i1>][<i2>]... = <value>;` — write into an array slot. With
+    /// all-constant indices we fold to a single `mov <width> ptr
+    /// [bp-N], K`. Otherwise (single-dim variable index, fixtures
+    /// 078/142) we compute `&a[i]` into BX and store through it.
+    fn emit_array_assign(&mut self, array: &str, indices: &[Expr], value: &Expr) {
+        let array_ty = self.locals.type_of(array).clone();
         let LocalLocation::Stack(base_off) = self.locals.location_of(array) else {
             panic!("array `{array}` should be stack-resident");
         };
-        if let Some(k) = try_const_eval(index) {
-            let off = base_off + i16::try_from(k * u32::from(elem_size)).unwrap_or(i16::MAX);
-            // Constant-index assign: same shape as `mov word ptr [bp-N], K`.
+        if let Some((const_off, leaf_ty)) = try_const_array_offset(&array_ty, indices.iter()) {
+            let off = base_off + i16::try_from(const_off).unwrap_or(i16::MAX);
+            let width = ptr_width(&leaf_ty);
             if let Some(v) = try_const_eval(value) {
-                let v_masked = if matches!(*elem, Type::Char) { v & 0xFF } else { v & 0xFFFF };
+                let v_masked =
+                    if matches!(leaf_ty, Type::Char) { v & 0xFF } else { v & 0xFFFF };
                 let _ = write!(
                     self.out,
                     "\tmov\t{width} ptr {},{v_masked}\r\n",
@@ -1861,7 +1883,19 @@ impl<'a> FunctionEmitter<'a> {
             }
             panic!("non-constant rhs in constant-indexed array assign not yet supported (no fixture)");
         }
-        self.emit_array_addr_to_bx(array, index, base_off, elem_size);
+        // Variable-index fallback: only the single-dim path is wired
+        // up today (covers fixtures 078, 142). Multi-dim with any
+        // non-const subscript would need extra address arithmetic;
+        // no fixture demands it yet.
+        if indices.len() != 1 {
+            panic!("multi-dim array assign with non-constant indices not yet supported (no fixture)");
+        }
+        let elem = array_ty
+            .array_elem()
+            .unwrap_or_else(|| panic!("`{array}[i] = v`: not an array type"));
+        let elem_size = elem.size_bytes();
+        let width = ptr_width(elem);
+        self.emit_array_addr_to_bx(array, &indices[0], base_off, elem_size);
         if let Some(v) = try_const_eval(value) {
             let v_masked = if matches!(*elem, Type::Char) { v & 0xFF } else { v & 0xFFFF };
             let _ = write!(self.out, "\tmov\t{width} ptr [bx],{v_masked}\r\n");
@@ -1869,6 +1903,7 @@ impl<'a> FunctionEmitter<'a> {
         }
         panic!("non-constant rhs in variable-indexed array assign not yet supported (no fixture)");
     }
+
 
     /// `<base>.<field>` or `<base>-><field>` in rvalue position.
     /// Computes the field's effective address and loads from there
@@ -2548,6 +2583,28 @@ fn switch_c_num(strategy: SwitchStrategy, case_count: u32) -> u32 {
 /// of stack-resident locals.
 fn ptr_width(ty: &Type) -> &'static str {
     if ty.size_bytes() == 1 { "byte" } else { "word" }
+}
+
+/// Walk an array-type chain against an index list, summing
+/// `stride * k` for each subscript when every index is a compile-time
+/// constant. Returns `(byte_offset, leaf_type)`. `None` if any index
+/// is non-constant or the type chain stops being `Type::Array` before
+/// all indices are consumed. Used by both array-read and array-assign
+/// codegen to fold `a[1][2]` into a single `[bp-N]` operand.
+fn try_const_array_offset<'a, I>(array_ty: &Type, indices: I) -> Option<(i32, Type)>
+where
+    I: IntoIterator<Item = &'a Expr>,
+{
+    let mut ty = array_ty.clone();
+    let mut off: i32 = 0;
+    for ix in indices {
+        let k = try_const_eval(ix)? as i32;
+        let Type::Array { elem, .. } = &ty else { return None };
+        let stride = i32::from(elem.size_bytes());
+        off = off.checked_add(k.checked_mul(stride)?)?;
+        ty = (**elem).clone();
+    }
+    Some((off, ty))
 }
 
 /// A resolved right-hand operand.

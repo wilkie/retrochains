@@ -449,8 +449,10 @@ fn collect_address_taken(stmt: &Stmt, out: &mut HashSet<String>) {
         StmtKind::Assign { value, .. } | StmtKind::CompoundAssign { value, .. } => {
             expr_address_taken(value, out);
         }
-        StmtKind::ArrayAssign { index, value, .. } => {
-            expr_address_taken(index, out);
+        StmtKind::ArrayAssign { indices, value, .. } => {
+            for ix in indices {
+                expr_address_taken(ix, out);
+            }
             expr_address_taken(value, out);
         }
         StmtKind::DerefAssign { target, value } => {
@@ -611,8 +613,8 @@ fn stmt_has_call(stmt: &Stmt) -> bool {
         StmtKind::Switch { scrutinee, cases } => {
             expr_has_call(scrutinee) || cases.iter().any(|c| body_has_call(&c.body))
         }
-        StmtKind::ArrayAssign { index, value, .. } => {
-            expr_has_call(index) || expr_has_call(value)
+        StmtKind::ArrayAssign { indices, value, .. } => {
+            indices.iter().any(expr_has_call) || expr_has_call(value)
         }
         StmtKind::DerefAssign { target, value } => {
             expr_has_call(target) || expr_has_call(value)
@@ -802,14 +804,16 @@ fn count_uses_stmt(stmt: &Stmt, counts: &mut HashMap<String, u32>) {
                 }
             }
         }
-        StmtKind::ArrayAssign { array, index, value } => {
+        StmtKind::ArrayAssign { array, indices, value } => {
             // `a[i] = v;` mirrors `a[i]` as an rvalue: direct deref
             // counts the base name as 2 uses (read of address + use
             // of memory). Arrays never enregister anyway, but the
             // same statement could be a pointer-target indexed
             // assign (`p[i] = v`) in a future fixture.
             *counts.entry(array.clone()).or_insert(0) += 2;
-            count_uses_expr(index, counts);
+            for ix in indices {
+                count_uses_expr(ix, counts);
+            }
             count_uses_expr(value, counts);
         }
         StmtKind::DerefAssign { target, value } => {

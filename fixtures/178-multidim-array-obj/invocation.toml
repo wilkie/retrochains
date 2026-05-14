@@ -1,0 +1,4 @@
+description = "Multi-dim array `int a[2][3]` with constant indices. Element [1][2] lives at offset 1*3*2 + 2*2 = 10 bytes from a[0][0]. With constant indices BCC should fold to a direct `word ptr [bp-N]` reference, not compute the offset at runtime."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

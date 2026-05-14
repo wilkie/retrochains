@@ -105,11 +105,13 @@ pub enum StmtKind {
     /// enough that lumping them into one node would just split into a
     /// match at codegen anyway.
     Assign { name: String, value: Expr },
-    /// `a[<index>] = <value>;`. `array` is the base name of a local
-    /// of array type (no pointer arithmetic yet — that would lower to
-    /// `DerefAssign` of a computed pointer). Index can be any int
-    /// expression; codegen specializes the constant-index case.
-    ArrayAssign { array: String, index: Expr, value: Expr },
+    /// `a[<i1>][<i2>]... = <value>;`. `array` is the base name of a
+    /// local of array type; `indices` holds the subscripts from
+    /// outermost to innermost (so `a[1][2]` has `indices = [1, 2]`).
+    /// Single-dim access still parses as a one-element `indices` vec.
+    /// Codegen specializes the all-constant-indices case to a direct
+    /// stack-offset store.
+    ArrayAssign { array: String, indices: Vec<Expr>, value: Expr },
     /// `*<target> = <value>;`. `target` is the pointer expression
     /// — usually an `Ident` for a pointer local, but in principle
     /// anything that evaluates to a pointer.

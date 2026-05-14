@@ -392,8 +392,10 @@ fn walk_calls(
         StmtKind::Assign { value, .. } | StmtKind::CompoundAssign { value, .. } => {
             walk_calls_expr(value, defined, locals, seen, ordered);
         }
-        StmtKind::ArrayAssign { index, value, .. } => {
-            walk_calls_expr(index, defined, locals, seen, ordered);
+        StmtKind::ArrayAssign { indices, value, .. } => {
+            for ix in indices {
+                walk_calls_expr(ix, defined, locals, seen, ordered);
+            }
             walk_calls_expr(value, defined, locals, seen, ordered);
         }
         StmtKind::DerefAssign { target, value } => {

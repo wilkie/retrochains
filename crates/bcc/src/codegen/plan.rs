@@ -179,8 +179,10 @@ fn plan_stmt(stmt: &Stmt, ctx: &mut PlanCtx) {
         StmtKind::Assign { value, .. } | StmtKind::CompoundAssign { value, .. } => {
             plan_expr_value(value, ctx);
         }
-        StmtKind::ArrayAssign { index, value, .. } => {
-            plan_expr_value(index, ctx);
+        StmtKind::ArrayAssign { indices, value, .. } => {
+            for ix in indices {
+                plan_expr_value(ix, ctx);
+            }
             plan_expr_value(value, ctx);
         }
         StmtKind::DerefAssign { target, value } => {
