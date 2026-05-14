@@ -1,0 +1,4 @@
+description = "Pointer cast `(int *)&x` — semantically a no-op (both sides are `int *`), but exercises pointer-type parsing inside a cast. The OBJ should match a hypothetical `int *p = &x;` without the cast: parse and discard the type decoration, lower the operand normally."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

@@ -339,6 +339,20 @@ impl Parser {
         }
     }
 
+    /// A complete type-name — base type plus trailing pointer stars.
+    /// Used by `sizeof(<type>)` and casts `(<type>) <expr>`, where the
+    /// stars apply to the type as a whole. Declarators must NOT use
+    /// this: in `int *a, b;` the `*` binds to `a` only and `b` is a
+    /// plain int, which the declarator path handles per-name.
+    fn parse_type_name(&mut self) -> Result<Type, ParseError> {
+        let mut ty = self.parse_type()?;
+        while matches!(self.peek().kind, TokenKind::Star) {
+            self.bump();
+            ty = Type::Pointer(Box::new(ty));
+        }
+        Ok(ty)
+    }
+
     /// `struct <tag>? { <fields> }` (with inline definition) or
     /// `struct <tag>` (reference to a previously-defined tag). Side
     /// effect: when an inline definition appears with a tag, the
@@ -669,8 +683,13 @@ impl Parser {
         } else {
             false
         };
-        let mut ty = self.parse_type()?;
+        let base_ty = self.parse_type()?;
         // Pointer stars wrap the base type: `int **pp` is `Pointer(Pointer(Int))`.
+        // Stars are per-declarator — `int *a, b;` makes `a` an `int*`
+        // and `b` a plain `int`, so we keep `base_ty` clean for the
+        // multi-declarator tail loop and decorate a separate `ty`
+        // copy for this first declarator.
+        let mut ty = base_ty.clone();
         while matches!(self.peek().kind, TokenKind::Star) {
             self.bump();
             ty = Type::Pointer(Box::new(ty));
@@ -681,7 +700,6 @@ impl Parser {
         // regardless of return type, and we never dereference it. So we
         // collapse the type to `Pointer<Int>` (any pointer is 2 bytes,
         // int-pool-eligible) and skip the param list.
-        let base_ty = ty.clone();
         if matches!(self.peek().kind, TokenKind::LParen) {
             let (name, fp_ty) = self.parse_func_ptr_declarator(ty.clone())?;
             return self.finish_declare(start, base_ty, fp_ty, name, is_static);
@@ -1221,7 +1239,7 @@ impl Parser {
         if matches!(self.peek().kind, TokenKind::KwSizeof) {
             let kw = self.bump();
             self.expect(&TokenKind::LParen)?;
-            let ty = self.parse_type()?;
+            let ty = self.parse_type_name()?;
             let close = self.expect(&TokenKind::RParen)?;
             return Ok(Expr {
                 kind: ExprKind::IntLit(u32::from(ty.size_bytes())),
@@ -1235,7 +1253,7 @@ impl Parser {
         // through to `parse_primary`.
         if matches!(self.peek().kind, TokenKind::LParen) && self.is_type_name_after_lparen() {
             let lparen = self.bump();
-            let ty = self.parse_type()?;
+            let ty = self.parse_type_name()?;
             self.expect(&TokenKind::RParen)?;
             let operand = self.parse_unary()?;
             let span = Span::new(lparen.span.start, operand.span.end);

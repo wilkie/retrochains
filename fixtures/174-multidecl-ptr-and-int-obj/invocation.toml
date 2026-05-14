@@ -1,0 +1,4 @@
+description = "Per-declarator pointer-star binding: `int *a, b;` declares `a` as `int*` and `b` as plain `int`. Then `b = 3` is a word store, `*a` is a deref load, and the result `*a + b` adds them. Pins the C90 rule that `*` binds tighter to the declarator than to the base type."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]
