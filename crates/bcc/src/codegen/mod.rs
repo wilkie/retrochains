@@ -2213,7 +2213,38 @@ impl<'a> FunctionEmitter<'a> {
             ExprKind::Member { base, field, kind } => {
                 self.emit_member_to_ax(base, field, *kind);
             }
+            ExprKind::Ternary { cond, then_value, else_value } => {
+                self.emit_ternary_to_ax(e.span.start, cond, then_value, else_value);
+            }
         }
+    }
+
+    /// Emit a ternary `cond ? then : else` into AX. The shape BCC
+    /// produces (fixture 166): test the condition with a reverse
+    /// branch to the false-arm label, emit the then-value into AX,
+    /// jump to the merge label, emit the false-arm label + else-value,
+    /// emit the merge label. Slot layout matches an `if`-`else`:
+    /// base+1 is the false arm, base+2 is the merge target.
+    fn emit_ternary_to_ax(
+        &mut self,
+        span_start: u32,
+        cond: &Expr,
+        then_value: &Expr,
+        else_value: &Expr,
+    ) {
+        let base = self.label_plan.base(span_start);
+        let false_slot = base + 1;
+        let merge_slot = base + 2;
+        self.emit_cond_branch(cond, None, Some(false_slot));
+        self.emit_expr_to_ax(then_value);
+        let _ = write!(
+            self.out,
+            "\tjmp\tshort {}\r\n",
+            self.label_ref(merge_slot),
+        );
+        self.emit_label(false_slot);
+        self.emit_expr_to_ax(else_value);
+        self.emit_label(merge_slot);
     }
 
     fn emit_comparison_as_value(
@@ -2356,6 +2387,9 @@ impl<'a> FunctionEmitter<'a> {
                 // `p->x` as a right operand would need a register-
                 // indirect operand source. No fixture yet.
                 panic!("`p->x` as right operand not yet supported (no fixture)")
+            }
+            ExprKind::Ternary { .. } => {
+                panic!("ternary as right operand of a binary op not yet supported (no fixture)")
             }
         }
     }

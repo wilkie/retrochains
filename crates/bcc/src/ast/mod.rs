@@ -344,6 +344,16 @@ pub enum ExprKind {
         field: String,
         kind: MemberKind,
     },
+    /// `<cond> ? <then-value> : <else-value>` — the conditional
+    /// (ternary) expression. The same skeleton an `if-else` produces,
+    /// but with arms loading values into AX instead of running
+    /// statements. Each ternary node reserves 3 label slots; the
+    /// false-arm and merge labels land at base+1 and base+2.
+    Ternary {
+        cond: Box<Expr>,
+        then_value: Box<Expr>,
+        else_value: Box<Expr>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

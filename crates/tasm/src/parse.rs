@@ -699,6 +699,9 @@ fn parse_cmp(operands: &str, line_no: usize) -> AsmResult<Instr> {
         if let Some(imm) = parse_imm8_signed(rhs) {
             return Ok(Instr::CmpReg16Imm8 { reg, imm });
         }
+        if let Some(rhs_reg) = Reg16::parse(rhs) {
+            return Ok(Instr::CmpReg16Reg16 { lhs: reg, rhs: rhs_reg });
+        }
     }
     if let Some(reg) = Reg8::parse(lhs) {
         if let Some(imm) = parse_imm8(rhs) {

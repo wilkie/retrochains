@@ -969,10 +969,31 @@ impl Parser {
     }
 
     fn parse_expr(&mut self) -> Result<Expr, ParseError> {
-        // Precedence ladder, lowest at the top: || < && < | < ^ < & <
-        // == != < relational < shift < additive < multiplicative <
-        // unary < atom.
-        self.parse_logor()
+        // Precedence ladder, lowest at the top: `?:` < || < && < | < ^
+        // < & < == != < relational < shift < additive < multiplicative
+        // < unary < atom. `?:` is right-associative.
+        self.parse_conditional()
+    }
+
+    /// `<cond> ? <then> : <else-conditional>` — right-associative.
+    fn parse_conditional(&mut self) -> Result<Expr, ParseError> {
+        let cond = self.parse_logor()?;
+        if !matches!(self.peek().kind, TokenKind::Question) {
+            return Ok(cond);
+        }
+        self.bump(); // `?`
+        let then_value = self.parse_expr()?; // `:` separates; then-value can be a full expr
+        self.expect(&TokenKind::Colon)?;
+        let else_value = self.parse_conditional()?; // right-associative
+        let span = Span::new(cond.span.start, else_value.span.end);
+        Ok(Expr {
+            kind: ExprKind::Ternary {
+                cond: Box::new(cond),
+                then_value: Box::new(then_value),
+                else_value: Box::new(else_value),
+            },
+            span,
+        })
     }
 
     fn parse_logor(&mut self) -> Result<Expr, ParseError> {

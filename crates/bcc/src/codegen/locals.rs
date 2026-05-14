@@ -534,6 +534,11 @@ fn expr_address_taken(e: &Expr, out: &mut HashSet<String>) {
             }
         }
         ExprKind::Member { base, .. } => expr_address_taken(base, out),
+        ExprKind::Ternary { cond, then_value, else_value } => {
+            expr_address_taken(cond, out);
+            expr_address_taken(then_value, out);
+            expr_address_taken(else_value, out);
+        }
         ExprKind::IntLit(_)
         | ExprKind::Ident(_)
         | ExprKind::Update { .. }
@@ -624,6 +629,9 @@ fn expr_has_call(e: &Expr) -> bool {
             expr_has_call(array) || expr_has_call(index)
         }
         ExprKind::Member { base, .. } => expr_has_call(base),
+        ExprKind::Ternary { cond, then_value, else_value } => {
+            expr_has_call(cond) || expr_has_call(then_value) || expr_has_call(else_value)
+        }
         ExprKind::Update { .. }
         | ExprKind::Ident(_)
         | ExprKind::IntLit(_)
@@ -904,6 +912,11 @@ fn count_uses_expr(e: &Expr, counts: &mut HashMap<String, u32>) {
                 }
                 crate::ast::MemberKind::Dot => count_uses_expr(base, counts),
             }
+        }
+        ExprKind::Ternary { cond, then_value, else_value } => {
+            count_uses_expr(cond, counts);
+            count_uses_expr(then_value, counts);
+            count_uses_expr(else_value, counts);
         }
     }
 }

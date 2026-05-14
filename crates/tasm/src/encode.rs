@@ -211,7 +211,8 @@ fn instr_size(instr: &Instr) -> usize {
         Instr::MovReg16Reg16 { .. }
         | Instr::XorReg16Reg16 { .. }
         | Instr::AddReg16Reg16 { .. }
-        | Instr::OrReg16Reg16 { .. } => 2,
+        | Instr::OrReg16Reg16 { .. }
+        | Instr::CmpReg16Reg16 { .. } => 2,
         Instr::CmpReg16Imm8 { .. } | Instr::CmpAxImm { .. } | Instr::AddAxImm { .. } => 3,
         Instr::CmpBpRelImm8 { .. } => 4,
         Instr::JmpShort(_) | Instr::ShlAxCl | Instr::SarAxCl => 2,
@@ -298,6 +299,12 @@ fn emit_instr(
             out.push(0x83);
             out.push(0b11_111_000 | reg.code());
             out.push(*imm as u8);
+        }
+        Instr::CmpReg16Reg16 { lhs, rhs } => {
+            // `cmp r16,r/m16` → 3B (mod=11 lhs<<3 rhs). LHS goes in
+            // the reg field, RHS in the r/m field.
+            out.push(0x3B);
+            out.push(0b11_000_000 | (lhs.code() << 3) | rhs.code());
         }
         Instr::CmpAxImm { imm } => {
             // `cmp ax,imm16` → 3D lo hi (AX-accumulator special form).

@@ -74,6 +74,7 @@ impl<'a> Lexer<'a> {
                 b'|' => self.lex_after_pipe(),
                 b'^' => self.lex_after_simple(TokenKind::Caret, TokenKind::CaretEq),
                 b'~' => { self.pos += 1; TokenKind::Tilde }
+                b'?' => { self.pos += 1; TokenKind::Question }
                 b'<' => self.lex_after_lt(),
                 b'>' => self.lex_after_gt(),
                 b'"' => self.lex_string_literal()?,

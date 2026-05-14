@@ -399,6 +399,18 @@ fn plan_expr_value(e: &Expr, ctx: &mut PlanCtx) {
             plan_expr_value(index, ctx);
         }
         ExprKind::Member { base, .. } => plan_expr_value(base, ctx),
+        ExprKind::Ternary { cond, then_value, else_value } => {
+            // Same skeleton as `if`-`else`: reserve 3 slots (base+0
+            // stays unused to match BCC's numbering, base+1 is the
+            // false-arm label, base+2 is the merge label after both
+            // arms have written AX).
+            plan_expr_condition(cond, ctx);
+            let base = ctx.counter;
+            ctx.bases.insert(e.span.start, base);
+            ctx.counter += 3;
+            plan_expr_value(then_value, ctx);
+            plan_expr_value(else_value, ctx);
+        }
         ExprKind::IntLit(_)
         | ExprKind::Ident(_)
         | ExprKind::Update { .. }

@@ -494,6 +494,11 @@ fn walk_calls_expr(
             walk_calls_expr(index, defined, locals, seen, ordered);
         }
         ExprKind::Member { base, .. } => walk_calls_expr(base, defined, locals, seen, ordered),
+        ExprKind::Ternary { cond, then_value, else_value } => {
+            walk_calls_expr(cond, defined, locals, seen, ordered);
+            walk_calls_expr(then_value, defined, locals, seen, ordered);
+            walk_calls_expr(else_value, defined, locals, seen, ordered);
+        }
         ExprKind::Ident(_)
         | ExprKind::IntLit(_)
         | ExprKind::StringLit(_)
