@@ -403,6 +403,12 @@ pub enum ExprKind {
     /// (char → int) requires the same `cbw` we emit when reading a
     /// char local, so it lowers identically.
     Cast { ty: Type, operand: Box<Expr> },
+    /// `{ <expr>, <expr>, ... }` — a brace-enclosed initializer list,
+    /// only valid as the RHS of a Declare/Global with an aggregate
+    /// type. Items are emitted in source order against the target's
+    /// element type. No runtime semantics — codegen consumes this
+    /// only at file-scope-init time today (fixture 189).
+    InitList { items: Vec<Expr> },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

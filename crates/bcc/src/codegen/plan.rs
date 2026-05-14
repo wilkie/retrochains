@@ -421,6 +421,11 @@ fn plan_expr_value(e: &Expr, ctx: &mut PlanCtx) {
             plan_expr_value(then_value, ctx);
             plan_expr_value(else_value, ctx);
         }
+        ExprKind::InitList { items } => {
+            for item in items {
+                plan_expr_value(item, ctx);
+            }
+        }
         ExprKind::IntLit(_)
         | ExprKind::Ident(_)
         | ExprKind::Update { .. }

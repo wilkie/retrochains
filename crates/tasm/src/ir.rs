@@ -212,22 +212,25 @@ pub enum Instr {
     JmpShort(String),
     /// `call near ptr <label>` — E8 rel16. Intra-segment near call.
     CallNear(String),
-    /// `mov ax,word ptr <group>:<symbol>` — segment-relative load
-    /// against a group-anchored data symbol. Emits `A1 lo hi` plus a
-    /// FIXUPP request (frame = group, target = symbol's home segment).
-    MovAxGroupSym { group: String, symbol: String },
-    /// `mov al,byte ptr <group>:<symbol>` — 8-bit moffs8 load
-    /// (A0 lo hi). Same FIXUPP shape as MovAxGroupSym.
-    MovAlGroupSym { group: String, symbol: String },
+    /// `mov ax,word ptr <group>:<symbol>[+<offset>]` — segment-
+    /// relative load against a group-anchored data symbol, optionally
+    /// at a constant byte offset (e.g. `_a+2` for `a[1]`). Emits
+    /// `A1 lo hi` plus a FIXUPP (frame = group, target = symbol's
+    /// home segment); the `lo hi` carry `sym.offset + offset`.
+    MovAxGroupSym { group: String, symbol: String, offset: i16 },
+    /// `mov al,byte ptr <group>:<symbol>[+<offset>]` — 8-bit moffs8
+    /// load (A0 lo hi). Same FIXUPP shape as MovAxGroupSym.
+    MovAlGroupSym { group: String, symbol: String, offset: i16 },
     /// `mov al,byte ptr [si]` — 8A 04. 8-bit load through SI pointer.
     MovAlFromSiPtr,
     /// `imul <reg16>` — F7 (mod=11 /5 r/m=reg). Single-operand signed
     /// multiply with a register operand. Used when the operand is
     /// register-resident, e.g. `x *= 3` after BCC enregisters x.
     ImulReg16 { reg: Reg16 },
-    /// `add ax,word ptr <group>:<symbol>` — ADD r16,r/m16 with
-    /// disp16-only addressing (`03 06 lo hi`). Same FIXUPP shape.
-    AddAxGroupSym { group: String, symbol: String },
+    /// `add ax,word ptr <group>:<symbol>[+<offset>]` — ADD r16,r/m16
+    /// with disp16-only addressing (`03 06 lo hi`). Same FIXUPP
+    /// shape; offset added to the symbol's location.
+    AddAxGroupSym { group: String, symbol: String, offset: i16 },
     /// `cbw` — 98. Sign-extend AL to AX. Used after loading a `char`
     /// global to widen it to int for arithmetic (fixture 130).
     Cbw,
@@ -262,11 +265,12 @@ pub enum Instr {
     NegReg16 { reg: Reg16 },
     /// `not <reg16>` — F7 (mod=11 /2 r/m=reg). One's-complement.
     NotReg16 { reg: Reg16 },
-    /// `mov <reg16>,offset <group>:<symbol>` — load a 16-bit register
-    /// with the segment-relative address of a data symbol. Emits
-    /// `B8+rc lo hi` plus a SegRelGroupTarget FIXUPP. Covers fixture
-    /// 108 (`mov ax,...`) and fixture 157 (`mov si,...`).
-    MovReg16OffsetGroupSym { reg: Reg16, group: String, symbol: String },
+    /// `mov <reg16>,offset <group>:<symbol>[+<offset>]` — load a
+    /// 16-bit register with the segment-relative address of a data
+    /// symbol (possibly at a constant offset). Emits `B8+rc lo hi`
+    /// plus a SegRelGroupTarget FIXUPP. Covers fixture 108
+    /// (`mov ax,...`) and fixture 157 (`mov si,...`).
+    MovReg16OffsetGroupSym { reg: Reg16, group: String, symbol: String, offset: i16 },
     /// `mov <reg16>,offset <symbol>` — symbol with no group prefix,
     /// i.e. an intra-segment code label. Emits `B8+rc lo hi` plus a
     /// SegRelTargetFrameSegment FIXUPP (frame = target's segment).

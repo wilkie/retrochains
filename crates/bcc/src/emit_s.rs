@@ -193,6 +193,28 @@ fn emit_global_decl(out: &mut Vec<u8>, name: &str, ty: &crate::ast::Type) {
 /// constant initializers are supported today — non-constant
 /// initializers at file scope aren't legal C anyway.
 fn emit_global_init(out: &mut Vec<u8>, ty: &crate::ast::Type, init: &crate::ast::Expr) {
+    use crate::ast::{ExprKind, Type};
+    // Aggregate initializer list — emit each item against the array's
+    // element type. Fixture 189 (`int a[3] = {1, 2, 3}`) drops six
+    // `db` lines, two per element. Excess initializers beyond `len`
+    // would be an error in C; we don't fixture-test that path.
+    if let ExprKind::InitList { items } = &init.kind {
+        let Type::Array { elem, .. } = ty else {
+            panic!("initializer list against non-array type not yet supported");
+        };
+        for item in items {
+            emit_scalar_global_bytes(out, elem, item);
+        }
+        return;
+    }
+    emit_scalar_global_bytes(out, ty, init);
+}
+
+fn emit_scalar_global_bytes(
+    out: &mut Vec<u8>,
+    ty: &crate::ast::Type,
+    init: &crate::ast::Expr,
+) {
     let v = codegen::fold_const_global(init).unwrap_or_else(|| {
         panic!("non-constant initializer at file scope (no fixture yet supports this)")
     });
@@ -525,6 +547,11 @@ fn walk_calls_expr(
         }
         ExprKind::Cast { operand, .. } => {
             walk_calls_expr(operand, defined, locals, seen, ordered);
+        }
+        ExprKind::InitList { items } => {
+            for item in items {
+                walk_calls_expr(item, defined, locals, seen, ordered);
+            }
         }
         ExprKind::Ident(_)
         | ExprKind::IntLit(_)

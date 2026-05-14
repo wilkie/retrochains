@@ -590,22 +590,22 @@ fn emit_instr(
                 }
             }
         }
-        Instr::MovAxGroupSym { group, symbol } => {
+        Instr::MovAxGroupSym { group, symbol, offset } => {
             // `mov ax,word ptr <group>:<symbol>` → A1 lo hi.
             // Encoding A1 is `mov AX, moffs16` — segment-relative load.
-            emit_group_sym_lea(&[0xA1], group, symbol, symbols, group_idx, extern_idx, out, fixups)?;
+            emit_group_sym_lea(&[0xA1], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
         }
-        Instr::MovAlGroupSym { group, symbol } => {
+        Instr::MovAlGroupSym { group, symbol, offset } => {
             // `mov al,byte ptr <group>:<symbol>` → A0 lo hi.
             // A0 is the 8-bit moffs8 sibling of A1.
-            emit_group_sym_lea(&[0xA0], group, symbol, symbols, group_idx, extern_idx, out, fixups)?;
+            emit_group_sym_lea(&[0xA0], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
         }
-        Instr::MovReg16OffsetGroupSym { reg, group, symbol } => {
+        Instr::MovReg16OffsetGroupSym { reg, group, symbol, offset } => {
             // `mov r16,offset <group>:<symbol>` → (B8+rc) lo hi.
             // Same FIXUPP shape as MovAxGroupSym. The single opcode
             // byte varies by destination register.
             let opcode = 0xB8 | reg.code();
-            emit_group_sym_lea(&[opcode], group, symbol, symbols, group_idx, extern_idx, out, fixups)?;
+            emit_group_sym_lea(&[opcode], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
         }
         Instr::MovAlFromSiPtr => {
             // `mov al,byte ptr [si]` → 8A 04. 8A is mov r8,r/m8.
@@ -618,10 +618,10 @@ fn emit_instr(
             out.push(0xF7);
             out.push(0b11_101_000 | reg.code());
         }
-        Instr::AddAxGroupSym { group, symbol } => {
+        Instr::AddAxGroupSym { group, symbol, offset } => {
             // `add ax,word ptr <group>:<symbol>` → 03 06 lo hi.
             // ModR/M 06 = mod=00 reg=AX r/m=110 (disp16-only addressing).
-            emit_group_sym_lea(&[0x03, 0x06], group, symbol, symbols, group_idx, extern_idx, out, fixups)?;
+            emit_group_sym_lea(&[0x03, 0x06], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
         }
         Instr::Cbw => out.push(0x98),
         Instr::LeaReg16BpRel { dst, offset } => {
@@ -763,6 +763,7 @@ fn emit_group_sym_lea(
     opcode_prefix: &[u8],
     group: &str,
     symbol: &str,
+    extra_offset: i16,
     symbols: &Symbols,
     group_idx: &HashMap<String, u8>,
     extern_idx: &HashMap<String, u8>,
@@ -774,12 +775,15 @@ fn emit_group_sym_lea(
         .ok_or_else(|| AsmError::new(0, format!("group `{group}` not defined")))?;
     // The symbol may be either defined in a segment of this module
     // (BCC's own globals) or an extern (defined in another TU). The
-    // FIXUPP target differs: SEGDEF vs EXTDEF.
+    // FIXUPP target differs: SEGDEF vs EXTDEF. `extra_offset` is the
+    // `+N` modifier on the operand (e.g. `_a+2` for `a[1]`); it's
+    // added to the symbol's location before encoding.
     if let Some(sym_loc) = symbols.get(symbol) {
         let target_seg_idx = u8::try_from(sym_loc.segment + 1).expect("target seg idx fits");
+        let value = sym_loc.offset.wrapping_add(extra_offset as u16);
         out.extend_from_slice(opcode_prefix);
         let imm_start = out.len();
-        out.extend_from_slice(&sym_loc.offset.to_le_bytes());
+        out.extend_from_slice(&value.to_le_bytes());
         fixups.push(FixupReq {
             data_offset: u16::try_from(imm_start).expect("offset fits"),
             kind: FixupKind::SegRelGroupTarget {
@@ -792,6 +796,14 @@ fn emit_group_sym_lea(
     if let Some(&ext_idx) = extern_idx.get(symbol) {
         // Extern: offset bytes are zero (the linker patches them via
         // the EXTDEF). FIXUPP target method = 2 (EXTDEF no disp).
+        // (Extern + `+N` offset isn't fixture-tested yet; would need
+        // the linker to pre-compute the displacement.)
+        if extra_offset != 0 {
+            return Err(AsmError::new(
+                0,
+                format!("extern `{symbol}` with `+{extra_offset}` offset not supported"),
+            ));
+        }
         out.extend_from_slice(opcode_prefix);
         let imm_start = out.len();
         out.extend_from_slice(&0u16.to_le_bytes());

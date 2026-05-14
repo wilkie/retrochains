@@ -484,9 +484,11 @@ fn parse_mov(operands: &str, line_no: usize) -> AsmResult<Instr> {
             return Ok(Instr::MovAxFromBxPtr);
         }
         if let Some((group, symbol)) = parse_group_symbol(rhs) {
+            let (sym, offset) = split_sym_offset(symbol);
             return Ok(Instr::MovAxGroupSym {
                 group: group.to_string(),
-                symbol: symbol.to_string(),
+                symbol: sym.to_string(),
+                offset,
             });
         }
     }
@@ -495,10 +497,12 @@ fn parse_mov(operands: &str, line_no: usize) -> AsmResult<Instr> {
     // shadowed by a misparse of `offset` as a label.
     if let Some(reg) = Reg16::parse(lhs) {
         if let Some((group, symbol)) = parse_offset_group_symbol(rhs) {
+            let (sym, offset) = split_sym_offset(symbol);
             return Ok(Instr::MovReg16OffsetGroupSym {
                 reg,
                 group: group.to_string(),
-                symbol: symbol.to_string(),
+                symbol: sym.to_string(),
+                offset,
             });
         }
         // `mov <reg>,offset <code-symbol>` — symbol with no group
@@ -531,9 +535,11 @@ fn parse_mov(operands: &str, line_no: usize) -> AsmResult<Instr> {
         }
         // `mov al,byte ptr DGROUP:_g` — 8-bit moffs8 load.
         if let Some((group, symbol)) = parse_byte_group_symbol(rhs) {
+            let (sym, offset) = split_sym_offset(symbol);
             return Ok(Instr::MovAlGroupSym {
                 group: group.to_string(),
-                symbol: symbol.to_string(),
+                symbol: sym.to_string(),
+                offset,
             });
         }
     }
@@ -658,9 +664,11 @@ fn parse_add(operands: &str, line_no: usize) -> AsmResult<Instr> {
             return Ok(Instr::AddAxBpRel { offset });
         }
         if let Some((group, symbol)) = parse_group_symbol(rhs) {
+            let (sym, offset) = split_sym_offset(symbol);
             return Ok(Instr::AddAxGroupSym {
                 group: group.to_string(),
-                symbol: symbol.to_string(),
+                symbol: sym.to_string(),
+                offset,
             });
         }
         if let Some(imm) = parse_imm16(rhs) {
@@ -985,6 +993,17 @@ fn parse_group_symbol_with_width<'a>(s: &'a str, prefix: &str) -> Option<(&'a st
         return None;
     }
     Some((group, sym))
+}
+
+/// Strip a trailing `+<integer>` from a symbol, returning
+/// `(name, offset)`. `_a+2` → `("_a", 2)`. No `+` → `(s, 0)`.
+fn split_sym_offset(s: &str) -> (&str, i16) {
+    if let Some((name, off)) = s.split_once('+') {
+        if let Ok(n) = off.trim().parse::<i16>() {
+            return (name.trim(), n);
+        }
+    }
+    (s, 0)
 }
 
 /// Parse `word ptr [bp<sign><offset>]` or `[bp<sign><offset>]`.

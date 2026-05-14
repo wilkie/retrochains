@@ -505,7 +505,7 @@ impl Parser {
         }
         let init = if matches!(self.peek().kind, TokenKind::Equals) {
             self.bump();
-            Some(self.parse_expr()?)
+            Some(self.parse_initializer()?)
         } else {
             None
         };
@@ -605,6 +605,39 @@ impl Parser {
     /// - `<type> <name> (, <type> <name>)*` — one or more typed params.
     ///
     /// The caller is responsible for the surrounding parens.
+    /// Parse an initializer expression — either a plain scalar
+    /// `parse_expr`, or a `{ <expr>, <expr>, ... }` aggregate list.
+    /// The list form is currently only meaningful at file scope
+    /// against an array type (fixture 189); the parser accepts it
+    /// anywhere a Declare/Global init slot allows, and the codegen
+    /// rejects unsupported shapes downstream.
+    fn parse_initializer(&mut self) -> Result<Expr, ParseError> {
+        if !matches!(self.peek().kind, TokenKind::LBrace) {
+            return self.parse_expr();
+        }
+        let lbrace = self.bump();
+        let mut items = Vec::new();
+        if !matches!(self.peek().kind, TokenKind::RBrace) {
+            loop {
+                items.push(self.parse_expr()?);
+                if matches!(self.peek().kind, TokenKind::Comma) {
+                    self.bump();
+                    // Allow a trailing comma before `}`.
+                    if matches!(self.peek().kind, TokenKind::RBrace) {
+                        break;
+                    }
+                } else {
+                    break;
+                }
+            }
+        }
+        let close = self.expect(&TokenKind::RBrace)?;
+        Ok(Expr {
+            kind: ExprKind::InitList { items },
+            span: Span::new(lbrace.span.start, close.span.end),
+        })
+    }
+
     fn parse_param_list(&mut self) -> Result<Vec<Param>, ParseError> {
         if matches!(self.peek().kind, TokenKind::KwVoid) {
             self.bump();

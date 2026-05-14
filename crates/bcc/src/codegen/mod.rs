@@ -1791,6 +1791,29 @@ impl<'a> FunctionEmitter<'a> {
             }
         };
         indices.reverse();
+        // Global array? Route to DGROUP-relative addressing.
+        // Fixture 189 (`int a[3] = {1, 2, 3}; return a[0] + a[1] + a[2];`).
+        if let Some(gty) = self.globals.type_of(array_name) {
+            let gty = gty.clone();
+            if let Some((const_off, leaf_ty)) =
+                try_const_array_offset(&gty, indices.iter().copied())
+            {
+                let width = ptr_width(&leaf_ty);
+                let addr = if const_off == 0 {
+                    format!("DGROUP:_{array_name}")
+                } else {
+                    format!("DGROUP:_{array_name}+{const_off}")
+                };
+                if matches!(leaf_ty, Type::Char) {
+                    let _ = write!(self.out, "\tmov\tal,byte ptr {addr}\r\n");
+                    self.out.extend_from_slice(b"\tcbw\t\r\n");
+                } else {
+                    let _ = write!(self.out, "\tmov\tax,{width} ptr {addr}\r\n");
+                }
+                return;
+            }
+            panic!("variable-indexed global array not yet supported (no fixture)");
+        }
         let ty = self.locals.type_of(array_name).clone();
         // `p[i]` where `p` is a pointer (not an array). Equivalent
         // to `*(p + i)`. Fixture 088: `s[0]` with `s: char *` in SI
@@ -2512,6 +2535,9 @@ impl<'a> FunctionEmitter<'a> {
             ExprKind::Cast { ty, operand } => {
                 self.emit_cast_to_ax(ty, operand);
             }
+            ExprKind::InitList { .. } => {
+                panic!("initializer list not legal in value position");
+            }
         }
     }
 
@@ -2683,7 +2709,32 @@ impl<'a> FunctionEmitter<'a> {
                 panic!("`*p` as right operand of a binary op not yet supported (no fixture)")
             }
             ExprKind::ArrayIndex { .. } => {
-                panic!("`a[i]` as right operand of a binary op not yet supported (no fixture)")
+                // `g[K]` where `g` is a file-scope array — fold to
+                // `word ptr DGROUP:_g+(K*stride)`. Fixture 189 emits
+                // `add ax, word ptr DGROUP:_a+2` for `a[1]`.
+                let mut indices: Vec<&Expr> = Vec::new();
+                let mut cur = e;
+                let name = loop {
+                    match &cur.kind {
+                        ExprKind::ArrayIndex { array, index } => {
+                            indices.push(index);
+                            cur = array;
+                        }
+                        ExprKind::Ident(n) => break n.clone(),
+                        _ => panic!("array-index rhs: non-ident base not supported"),
+                    }
+                };
+                indices.reverse();
+                let Some(gty) = self.globals.type_of(&name) else {
+                    panic!("array-indexed rhs only supported on globals so far");
+                };
+                let gty = gty.clone();
+                let (const_off, _leaf_ty) =
+                    try_const_array_offset(&gty, indices.iter().copied())
+                        .unwrap_or_else(|| {
+                            panic!("variable-indexed global array rhs not yet supported")
+                        });
+                OperandSource::GlobalOffset { name, offset: const_off }
             }
             ExprKind::StringLit(_) => {
                 panic!("string literal as right operand of a binary op not yet supported (no fixture)")
@@ -2714,6 +2765,9 @@ impl<'a> FunctionEmitter<'a> {
             }
             ExprKind::Cast { .. } => {
                 panic!("cast as right operand of a binary op not yet supported (no fixture)")
+            }
+            ExprKind::InitList { .. } => {
+                panic!("initializer list not legal as a binary-op operand")
             }
         }
     }
@@ -2846,6 +2900,10 @@ enum OperandSource {
     /// File-scope variable — addressed as `<width> ptr DGROUP:_<name>`.
     /// Fixture 087: `add ax, word ptr DGROUP:_b`.
     Global(String),
+    /// File-scope array element at a compile-time offset:
+    /// `<width> ptr DGROUP:_<name>+<offset>`. Fixture 189 uses
+    /// `add ax, word ptr DGROUP:_a+2` for `a[1]`.
+    GlobalOffset { name: String, offset: i32 },
 }
 
 impl OperandSource {
@@ -2856,6 +2914,13 @@ impl OperandSource {
             Self::Local(off) => format!("word ptr {}", bp_addr(*off)),
             Self::Reg(r) => r.name().to_owned(),
             Self::Global(name) => format!("word ptr DGROUP:_{name}"),
+            Self::GlobalOffset { name, offset } => {
+                if *offset == 0 {
+                    format!("word ptr DGROUP:_{name}")
+                } else {
+                    format!("word ptr DGROUP:_{name}+{offset}")
+                }
+            }
         }
     }
 
@@ -2865,6 +2930,13 @@ impl OperandSource {
             Self::Immediate(v) => v.to_string(),
             Self::Local(off) => format!("byte ptr {}", bp_addr(*off)),
             Self::Global(name) => format!("byte ptr DGROUP:_{name}"),
+            Self::GlobalOffset { name, offset } => {
+                if *offset == 0 {
+                    format!("byte ptr DGROUP:_{name}")
+                } else {
+                    format!("byte ptr DGROUP:_{name}+{offset}")
+                }
+            }
             // A register holding an int provides the low byte via
             // its `*L` half; we'd need a separate fixture to confirm
             // BCC's exact shape. Panic until we see one.
