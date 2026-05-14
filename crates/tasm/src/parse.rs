@@ -487,6 +487,10 @@ fn parse_mov(operands: &str, line_no: usize) -> AsmResult<Instr> {
     if let (Some(dst), Some(src)) = (Reg16::parse(lhs), Reg16::parse(rhs)) {
         return Ok(Instr::MovReg16Reg16 { dst, src });
     }
+    // `mov bx,word ptr [bx]` — chain step for `**p` (fixture 195).
+    if lhs == "bx" && rhs == "word ptr [bx]" {
+        return Ok(Instr::MovBxFromBxPtr);
+    }
     if lhs == "ax" {
         if rhs == "word ptr [si]" {
             return Ok(Instr::MovAxFromSiPtr);

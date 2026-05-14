@@ -281,7 +281,7 @@ fn instr_size(instr: &Instr) -> usize {
         Instr::MovSiPtrImm { .. } | Instr::MovBxPtrImm { .. } => 4,
         Instr::AddSiPtrImm8 { .. } => 3,
         Instr::AddBpRelImm8 { .. } => 4,
-        Instr::MovAxFromSiPtr | Instr::MovAxFromBxPtr => 2,
+        Instr::MovAxFromSiPtr | Instr::MovAxFromBxPtr | Instr::MovBxFromBxPtr => 2,
         Instr::ShlReg16One { .. } | Instr::NegReg16 { .. } | Instr::NotReg16 { .. } => 2,
         Instr::MovBpRelImm { .. } | Instr::MovBpRelOffsetSym { .. } => 5,
         Instr::CallIndirectBpRel { .. } => 3,
@@ -715,6 +715,13 @@ fn emit_instr(
             // reg=AX r/m=111 ([bx]).
             out.push(0x8B);
             out.push(0x07);
+        }
+        Instr::MovBxFromBxPtr => {
+            // `mov bx,word ptr [bx]` → 8B 1F. ModR/M 1F = mod=00
+            // reg=BX r/m=111 ([bx]). Same opcode as MovAxFromBxPtr;
+            // only the reg field of ModR/M differs.
+            out.push(0x8B);
+            out.push(0x1F);
         }
         Instr::ShlReg16One { reg } => {
             // `shl r16,1` → D1 (mod=11 /4 r/m=<reg>). D1 is Grp2

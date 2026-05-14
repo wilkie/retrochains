@@ -1677,46 +1677,91 @@ impl<'a> FunctionEmitter<'a> {
                 return self.emit_deref_pointer_plus_offset(name, pointee.clone(), right);
             }
         }
-        let ExprKind::Ident(name) = &ptr.kind else {
-            panic!("non-ident pointer in `*p` not yet supported (no fixture for {:?})", ptr.kind);
+        // Walk the deref chain: each level of `*` peels one pointer.
+        // `depth` counts levels seen *above* the base ident (so `*p`
+        // → 0, `**p` → 1, `***p` → 2). The base is always an Ident
+        // — non-ident bases (function calls, casts) aren't fixtured.
+        let mut depth = 0u32;
+        let mut cur = ptr;
+        let base_name = loop {
+            match &cur.kind {
+                ExprKind::Deref(inner) => {
+                    depth += 1;
+                    cur = inner;
+                }
+                ExprKind::Ident(name) => break name.as_str(),
+                _ => panic!(
+                    "non-ident pointer in `*p` not yet supported (no fixture for {:?})",
+                    cur.kind
+                ),
+            }
         };
-        // `*p` where `p` is a global pointer (fixture 193). Load `p`
-        // from `DGROUP:_p` into BX, then dereference. Same shape as
-        // the global-pointer-index path used for `p[K]`.
-        if let Some(gty) = self.globals.type_of(name) {
-            let gty = gty.clone();
-            let Some(pointee) = gty.pointee() else {
-                panic!("`*{name}`: global is not a pointer type");
+        // Single-deref of a stack/register-resident local stays on
+        // the original fast path (`mov al,byte ptr [si]` etc.) so
+        // SI/DI-resident pointers don't bounce through BX.
+        let is_global = self.globals.type_of(base_name).is_some();
+        if depth == 0 && !is_global {
+            let ty = self.locals.type_of(base_name).clone();
+            let Some(pointee) = ty.pointee() else {
+                panic!("`*{base_name}`: not a pointer type");
             };
-            let _ = write!(
-                self.out,
-                "\tmov\tbx,word ptr DGROUP:_{name}\r\n"
-            );
+            let width = ptr_width(pointee);
+            let addr_reg = match self.locals.location_of(base_name) {
+                LocalLocation::Reg(reg) => reg.name().to_owned(),
+                LocalLocation::Stack(_) => {
+                    panic!("stack-resident bare-`*p` dereference not yet supported (no fixture)");
+                }
+            };
             if matches!(*pointee, Type::Char) {
-                self.out.extend_from_slice(b"\tmov\tal,byte ptr [bx]\r\n");
+                let _ = write!(self.out, "\tmov\tal,byte ptr [{addr_reg}]\r\n");
                 self.out.extend_from_slice(b"\tcbw\t\r\n");
             } else {
-                let width = ptr_width(pointee);
-                let _ = write!(self.out, "\tmov\tax,{width} ptr [bx]\r\n");
+                let _ = write!(self.out, "\tmov\tax,{width} ptr [{addr_reg}]\r\n");
             }
             return;
         }
-        let ty = self.locals.type_of(name).clone();
-        let Some(pointee) = ty.pointee() else {
-            panic!("`*{name}`: not a pointer type");
+        // Chain path: walk through BX. Load the base pointer, emit
+        // `depth` intermediate `mov bx,[bx]` loads, then a final
+        // load to AX (or AL+cbw for char pointee). Fixture 195
+        // (`int **p` → `**p`) hits depth=1; fixture 193 hits
+        // depth=0 on a global.
+        let base_ty = if is_global {
+            self.globals.type_of(base_name).expect("checked above").clone()
+        } else {
+            self.locals.type_of(base_name).clone()
         };
-        let width = ptr_width(pointee);
-        let addr_reg = match self.locals.location_of(name) {
-            LocalLocation::Reg(reg) => reg.name().to_owned(),
-            LocalLocation::Stack(_) => {
-                panic!("stack-resident bare-`*p` dereference not yet supported (no fixture)");
+        // Walk `depth + 1` levels of pointee to find the final
+        // loaded type. e.g. `**p` for `int **` → after 2 peels = int.
+        let mut final_ty = base_ty.clone();
+        for _ in 0..=depth {
+            let next = final_ty
+                .pointee()
+                .unwrap_or_else(|| panic!("`*{base_name}`: chain too deep for its type"))
+                .clone();
+            final_ty = next;
+        }
+        if is_global {
+            let _ = write!(self.out, "\tmov\tbx,word ptr DGROUP:_{base_name}\r\n");
+        } else {
+            match self.locals.location_of(base_name) {
+                LocalLocation::Reg(reg) if reg.name() == "bx" => {}
+                LocalLocation::Reg(reg) => {
+                    let _ = write!(self.out, "\tmov\tbx,{}\r\n", reg.name());
+                }
+                LocalLocation::Stack(_) => {
+                    panic!("stack-resident pointer chain root not yet supported (no fixture)");
+                }
             }
-        };
-        if matches!(*pointee, Type::Char) {
-            let _ = write!(self.out, "\tmov\tal,byte ptr [{addr_reg}]\r\n");
+        }
+        for _ in 0..depth {
+            self.out.extend_from_slice(b"\tmov\tbx,word ptr [bx]\r\n");
+        }
+        if matches!(final_ty, Type::Char) {
+            self.out.extend_from_slice(b"\tmov\tal,byte ptr [bx]\r\n");
             self.out.extend_from_slice(b"\tcbw\t\r\n");
         } else {
-            let _ = write!(self.out, "\tmov\tax,{width} ptr [{addr_reg}]\r\n");
+            let width = ptr_width(&final_ty);
+            let _ = write!(self.out, "\tmov\tax,{width} ptr [bx]\r\n");
         }
     }
 

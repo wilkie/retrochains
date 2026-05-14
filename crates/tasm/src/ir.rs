@@ -281,6 +281,10 @@ pub enum Instr {
     MovBxPtrImm { imm: u16 },
     /// `mov ax,word ptr [bx]` — 8B 07. Load through BX.
     MovAxFromBxPtr,
+    /// `mov bx,word ptr [bx]` — 8B 1F. Chain step in `**p` style
+    /// double-indirect loads (fixture 195): keeps the running
+    /// pointer in BX while peeling one level of indirection.
+    MovBxFromBxPtr,
     /// `shl <reg16>,1` — D1 (mod=11 /4 r/m=reg). The 1-bit shift form
     /// (BCC uses this to compute `i*2` for word-array indexing).
     ShlReg16One { reg: Reg16 },
