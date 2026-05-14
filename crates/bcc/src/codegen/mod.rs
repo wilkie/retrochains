@@ -2198,8 +2198,12 @@ impl<'a> FunctionEmitter<'a> {
                 if op.is_comparison() {
                     self.emit_comparison_as_value(e.span.start, *op, left, right);
                 } else {
+                    // Shifts encode the left operand's signedness in
+                    // the mnemonic (`shr` vs `sar`); everything else
+                    // is signedness-agnostic at the instruction level.
+                    let unsigned = self.expr_is_unsigned(left);
                     self.emit_expr_to_ax(left);
-                    self.emit_binary_right(*op, right);
+                    self.emit_binary_right(*op, right, unsigned);
                 }
             }
             ExprKind::Unary { op, operand } => self.emit_unary(*op, operand),
@@ -2321,7 +2325,7 @@ impl<'a> FunctionEmitter<'a> {
     }
 
     /// Emit the right-hand side of a binary op, applying it to AX.
-    fn emit_binary_right(&mut self, op: BinOp, e: &Expr) {
+    fn emit_binary_right(&mut self, op: BinOp, e: &Expr, unsigned: bool) {
         // ±1 / ±2 peephole: BCC emits `inc ax` / `dec ax` for ±1 (1
         // byte each vs. 3 for `add ax, 1` / `sub ax, 1`), and a *pair*
         // of `inc` / `dec` for ±2 (2 bytes vs. 3). At ±3 the cost of
@@ -2351,11 +2355,11 @@ impl<'a> FunctionEmitter<'a> {
             self.emit_expr_to_ax(e);
             self.out.extend_from_slice(b"\tmov\tdx,ax\r\n");
             self.out.extend_from_slice(b"\tpop\tax\r\n");
-            emit_op_with_source(self.out, op, &OperandSource::Reg(Reg::Dx));
+            emit_op_with_source(self.out, op, &OperandSource::Reg(Reg::Dx), unsigned);
             return;
         }
         let src = self.resolve_operand_source(e);
-        emit_op_with_source(self.out, op, &src);
+        emit_op_with_source(self.out, op, &src, unsigned);
     }
 
     /// True iff `name` refers to an identifier (global or local)
@@ -2583,8 +2587,10 @@ impl OperandSource {
 }
 
 /// Emit the operator-specific instruction(s) given an already-loaded AX
-/// (left operand) and a source string for the right operand.
-fn emit_op_with_source(out: &mut Vec<u8>, op: BinOp, src: &OperandSource) {
+/// (left operand) and a source string for the right operand. `unsigned`
+/// selects `shr` over `sar` for `Shr` — the left operand's static type
+/// drives the choice (right is always the shift count).
+fn emit_op_with_source(out: &mut Vec<u8>, op: BinOp, src: &OperandSource, unsigned: bool) {
     match op {
         BinOp::Add => {
             let _ = write!(out, "\tadd\tax,{}\r\n", src.word());
@@ -2626,6 +2632,7 @@ fn emit_op_with_source(out: &mut Vec<u8>, op: BinOp, src: &OperandSource) {
             let _ = write!(out, "\tmov\tcl,{}\r\n", src.byte());
             let mnemonic = match op {
                 BinOp::Shl => "shl",
+                BinOp::Shr if unsigned => "shr",
                 BinOp::Shr => "sar",
                 _ => unreachable!(),
             };

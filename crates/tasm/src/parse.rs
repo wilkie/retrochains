@@ -394,6 +394,7 @@ fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
             .ok_or_else(|| AsmError::new(line.line_no, format!("not: bad register `{rest}`"))),
         "shl" if rest == "ax,cl" => Ok(Instr::ShlAxCl),
         "sar" if rest == "ax,cl" => Ok(Instr::SarAxCl),
+        "shr" if rest == "ax,cl" => Ok(Instr::ShrAxCl),
         "shl" => parse_shl_one(rest, line.line_no),
         "inc" => {
             if let Some(reg) = Reg8::parse(rest) {

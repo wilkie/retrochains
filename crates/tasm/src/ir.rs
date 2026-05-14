@@ -197,6 +197,9 @@ pub enum Instr {
     /// `sar ax,cl` — D3 F8. Variable-count arithmetic (signed) right
     /// shift of AX. BCC uses SAR for signed `int >> ...`.
     SarAxCl,
+    /// `shr ax,cl` — D3 E8. Variable-count logical (unsigned) right
+    /// shift of AX. BCC uses SHR for `unsigned >> ...` (fixture 176).
+    ShrAxCl,
     /// `j<cc> short <label>` — Jcc rel8 family.
     JmpCondShort { cond: JmpCond, target: String },
     /// `jmp word ptr cs:<table>[bx]` — indirect dispatch through a

@@ -215,7 +215,7 @@ fn instr_size(instr: &Instr) -> usize {
         | Instr::CmpReg16Reg16 { .. } => 2,
         Instr::CmpReg16Imm8 { .. } | Instr::CmpAxImm { .. } | Instr::AddAxImm { .. } => 3,
         Instr::CmpBpRelImm8 { .. } => 4,
-        Instr::JmpShort(_) | Instr::ShlAxCl | Instr::SarAxCl => 2,
+        Instr::JmpShort(_) | Instr::ShlAxCl | Instr::SarAxCl | Instr::ShrAxCl => 2,
         Instr::Cwd => 1,
         Instr::JmpCondShort { .. } => 2,
         Instr::JmpIndirectCsTableBx { .. } => 5,
@@ -447,6 +447,11 @@ fn emit_instr(
             // `sar ax,cl` → D3 F8. ModR/M F8 = mod=11 /7(SAR) r/m=AX.
             out.push(0xD3);
             out.push(0xF8);
+        }
+        Instr::ShrAxCl => {
+            // `shr ax,cl` → D3 E8. ModR/M E8 = mod=11 /5(SHR) r/m=AX.
+            out.push(0xD3);
+            out.push(0xE8);
         }
         Instr::JmpIndirectCsBxDisp { disp } => {
             // `jmp word ptr cs:[bx+disp8]` → 2E FF 67 dd.
