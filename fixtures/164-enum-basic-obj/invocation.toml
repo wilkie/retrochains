@@ -1,0 +1,4 @@
+description = "Bare `enum { A, B, C };` defines integer constants 0/1/2. The reference to `B` should lower to `mov ax,1` — same code as `return 1;`. Tests: enum keyword in lexer, anonymous-enum parsing, constant folding of enum identifiers, no OBJ-level evidence of the enum (no data, no debug record)."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

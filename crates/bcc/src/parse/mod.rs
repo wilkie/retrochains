@@ -40,6 +40,12 @@ pub struct Parser {
     /// so they appear in `_DATA` and `GlobalTable` for the rest of
     /// codegen.
     pending_static_locals: Vec<Global>,
+    /// Enum constants. Each `enum { ... }` member maps to its integer
+    /// value; `parse_primary` folds matching identifiers to `IntLit`
+    /// so codegen sees a pure constant and never has to model enum
+    /// as a runtime type. Anonymous enums and explicit `= N` initializers
+    /// both flow through this table.
+    enum_constants: HashMap<String, u32>,
 }
 
 impl Parser {
@@ -51,6 +57,7 @@ impl Parser {
             structs: HashMap::new(),
             typedefs: HashMap::new(),
             pending_static_locals: Vec::new(),
+            enum_constants: HashMap::new(),
         }
     }
 
@@ -71,6 +78,13 @@ impl Parser {
             // just registers a name in the typedef table.
             if matches!(self.peek().kind, TokenKind::KwTypedef) {
                 self.parse_typedef()?;
+                continue;
+            }
+            // `enum [tag] { ... };` — registers integer constants and
+            // emits no AST node. (We don't yet support `enum <tag>` as
+            // a type name in declarations; that would need a fixture.)
+            if matches!(self.peek().kind, TokenKind::KwEnum) {
+                self.parse_enum_decl()?;
                 continue;
             }
             // A standalone `struct <name> { ... } ;` defines a struct
@@ -171,6 +185,55 @@ impl Parser {
         // statics are private to this TU.
         globals.extend(std::mem::take(&mut self.pending_static_locals));
         Ok(Unit { functions, globals, decl_order })
+    }
+
+    /// `enum [tag] { id [= int-lit] [, ...] [,] } ;`. Each member is
+    /// registered in `enum_constants`; the next value defaults to
+    /// `previous + 1` (or 0 for the first), explicit initializers
+    /// reset the counter. No AST node produced — references to the
+    /// member names fold to `IntLit` in `parse_primary`.
+    fn parse_enum_decl(&mut self) -> Result<(), ParseError> {
+        self.bump(); // `enum`
+        // Optional tag — we don't yet use it as a type, but accept it
+        // so the keyword form `enum colors { RED, GREEN };` parses.
+        if matches!(self.peek().kind, TokenKind::Ident(_)) {
+            self.bump();
+        }
+        self.expect(&TokenKind::LBrace)?;
+        let mut next: u32 = 0;
+        loop {
+            if matches!(self.peek().kind, TokenKind::RBrace) {
+                break;
+            }
+            let name_tok = self.bump();
+            let TokenKind::Ident(name) = name_tok.kind else {
+                return Err(ParseError::NotAnIdent { offset: name_tok.span.start });
+            };
+            let value = if matches!(self.peek().kind, TokenKind::Equals) {
+                self.bump();
+                let lit_tok = self.bump();
+                let TokenKind::IntLit(v) = lit_tok.kind else {
+                    return Err(ParseError::Unexpected {
+                        expected: "integer literal after `=` in enum".to_owned(),
+                        found: lit_tok.kind.describe().to_owned(),
+                        offset: lit_tok.span.start,
+                    });
+                };
+                v
+            } else {
+                next
+            };
+            self.enum_constants.insert(name, value);
+            next = value.wrapping_add(1);
+            if matches!(self.peek().kind, TokenKind::Comma) {
+                self.bump();
+            } else {
+                break;
+            }
+        }
+        self.expect(&TokenKind::RBrace)?;
+        self.expect(&TokenKind::Semicolon)?;
+        Ok(())
     }
 
     /// `typedef <type> <name> ;`. Records `name` → type in the
@@ -1155,6 +1218,15 @@ impl Parser {
                 Ok(lit)
             }
             TokenKind::Ident(ref name) => {
+                // Enum constants fold to `IntLit` here — BCC's `-S`
+                // output never mentions the enum name (verified
+                // against fixture 164: `return B;` → `mov ax,1`).
+                if let Some(&value) = self.enum_constants.get(name) {
+                    return Ok(Expr {
+                        kind: ExprKind::IntLit(value),
+                        span: tok.span,
+                    });
+                }
                 // Postfix `()` makes it a function call.
                 if matches!(self.peek().kind, TokenKind::LParen) {
                     self.bump();
