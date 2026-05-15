@@ -2898,6 +2898,24 @@ impl<'a> FunctionEmitter<'a> {
                 let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name},dx\r\n");
                 return;
             }
+            // `g = a << 1;` long left-shift-by-one. BCC inlines as
+            // shl on the low half (CF gets the high bit) and rcl on
+            // the high half (rotates CF into the LSB). For shift
+            // counts >1 BCC switches to a runtime helper — not yet
+            // covered. Fixture 227.
+            if let ExprKind::BinOp { op: BinOp::Shl, left, right } = &value.kind
+                && let ExprKind::Ident(a) = &left.kind
+                && self.globals.type_of(a).map_or(false, |t| matches!(t, Type::Long))
+                && try_const_eval(right) == Some(1)
+            {
+                let _ = write!(self.out, "\tmov\tax,word ptr DGROUP:_{a}+2\r\n");
+                let _ = write!(self.out, "\tmov\tdx,word ptr DGROUP:_{a}\r\n");
+                let _ = write!(self.out, "\tshl\tdx,1\r\n");
+                let _ = write!(self.out, "\trcl\tax,1\r\n");
+                let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name}+2,ax\r\n");
+                let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name},dx\r\n");
+                return;
+            }
             // `g = -a;` long unary minus. 32-bit two's-complement
             // negate: neg high, neg low (sets CF iff low != 0), sbb
             // high,0 to fold the low-half carry back into the high.

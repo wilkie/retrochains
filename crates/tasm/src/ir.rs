@@ -390,6 +390,10 @@ pub enum Instr {
     /// `shl <reg16>,1` — D1 (mod=11 /4 r/m=reg). The 1-bit shift form
     /// (BCC uses this to compute `i*2` for word-array indexing).
     ShlReg16One { reg: Reg16 },
+    /// `rcl <reg16>,1` — D1 (mod=11 /2 r/m=reg). Rotate-left through
+    /// carry; used as the high-half partner to `shl` for long left
+    /// shift by 1 (fixture 227).
+    RclReg16One { reg: Reg16 },
     /// `neg <reg16>` — F7 (mod=11 /3 r/m=reg). Two's-complement negate.
     NegReg16 { reg: Reg16 },
     /// `not <reg16>` — F7 (mod=11 /2 r/m=reg). One's-complement.

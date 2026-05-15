@@ -409,6 +409,7 @@ fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
         "sar" if rest == "ax,cl" => Ok(Instr::SarAxCl),
         "shr" if rest == "ax,cl" => Ok(Instr::ShrAxCl),
         "shl" => parse_shl_one(rest, line.line_no),
+        "rcl" => parse_rcl_one(rest, line.line_no),
         "inc" => {
             if let Some(reg) = Reg8::parse(rest) {
                 return Ok(Instr::IncReg8 { reg });
@@ -1000,6 +1001,23 @@ fn parse_shl_one(operands: &str, line_no: usize) -> AsmResult<Instr> {
     let reg = Reg16::parse(lhs)
         .ok_or_else(|| AsmError::new(line_no, format!("shl: bad register `{lhs}`")))?;
     Ok(Instr::ShlReg16One { reg })
+}
+
+/// `rcl <reg16>,1` — D1 /2. Rotate-left-through-carry by one.
+/// Companion to `shl reg,1` for long left-shift-by-one (fixture 227).
+fn parse_rcl_one(operands: &str, line_no: usize) -> AsmResult<Instr> {
+    let (lhs, rhs) = split_comma(operands).ok_or_else(|| {
+        AsmError::new(line_no, format!("rcl: expected `lhs,rhs`, got {operands:?}"))
+    })?;
+    if rhs != "1" {
+        return Err(AsmError::new(
+            line_no,
+            format!("rcl: only `<reg>,1` form supported (got `{rhs}`)"),
+        ));
+    }
+    let reg = Reg16::parse(lhs)
+        .ok_or_else(|| AsmError::new(line_no, format!("rcl: bad register `{lhs}`")))?;
+    Ok(Instr::RclReg16One { reg })
 }
 
 /// `lea <reg16>,word ptr [bp+N]` — load effective address. Currently

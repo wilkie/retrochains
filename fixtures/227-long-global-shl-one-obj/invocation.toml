@@ -1,0 +1,4 @@
+description = "`g = a << 1;` long left-shift by one. Probe: does BCC inline (shl low,1; rcl high,1) or call a runtime helper?"
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]
