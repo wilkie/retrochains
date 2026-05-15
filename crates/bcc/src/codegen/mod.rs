@@ -1616,6 +1616,20 @@ impl<'a> FunctionEmitter<'a> {
                 let _ = write!(self.out, "\tmov\tax,word ptr DGROUP:_{name}\r\n");
                 return;
             }
+            // `return x;` for a long parameter or stack-local. Layout:
+            // `off` points to the low word (the lower stack address);
+            // the high word lives at `off + 2`. Load high to DX, low
+            // to AX per the ABI. Fixture 217.
+            if let ExprKind::Ident(name) = &e.kind
+                && matches!(self.locals.type_of(name), Type::Long)
+            {
+                let LocalLocation::Stack(off) = self.locals.location_of(name) else {
+                    panic!("register-resident long not yet supported (no fixture)");
+                };
+                let _ = write!(self.out, "\tmov\tdx,word ptr {}\r\n", bp_addr(off + 2));
+                let _ = write!(self.out, "\tmov\tax,word ptr {}\r\n", bp_addr(off));
+                return;
+            }
             panic!("non-constant long return value not yet supported (no fixture)");
         }
         self.emit_expr_to_ax(e);
