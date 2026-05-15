@@ -52,6 +52,12 @@ pub struct Function {
     /// Parameters in source order. The empty list represents `(void)`
     /// — C's "no parameters" spelling — not a variadic prototype.
     pub params: Vec<Param>,
+    /// Declared return type. Defaults to `Int` for the historical
+    /// fixtures that all return int; first non-int return type
+    /// (fixture 212, `long get()`) introduces variation here. Drives
+    /// the codegen at `return <expr>;` so the value is materialized
+    /// in the right register(s) for the ABI.
+    pub ret_ty: Type,
     /// The full byte range of the function definition, from the
     /// `int main…` opening through the closing `}` (or `;` for a
     /// prototype). Used to compute which source lines this function

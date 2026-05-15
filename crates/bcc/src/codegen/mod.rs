@@ -1508,6 +1508,29 @@ impl<'a> FunctionEmitter<'a> {
 
     fn emit_return_value_load(&mut self, value: Option<&Expr>) {
         let Some(e) = value else { return };
+        // Long return: standard 8086 32-bit return-value convention
+        // puts the high word in DX and the low word in AX. (Note
+        // BCC swaps the AX/DX roles when doing in-memory long
+        // arithmetic — see fixture 207 — but the boundary at
+        // `return` uses the ABI-standard layout.) Fixture 212.
+        if matches!(self.function.ret_ty, Type::Long) {
+            let Some(v) = try_const_eval(e) else {
+                panic!("non-constant long return value not yet supported (no fixture)");
+            };
+            let lo = v & 0xFFFF;
+            let hi = (v >> 16) & 0xFFFF;
+            if hi == 0 {
+                self.out.extend_from_slice(b"\txor\tdx,dx\r\n");
+            } else {
+                let _ = write!(self.out, "\tmov\tdx,{hi}\r\n");
+            }
+            if lo == 0 {
+                self.out.extend_from_slice(b"\txor\tax,ax\r\n");
+            } else {
+                let _ = write!(self.out, "\tmov\tax,{lo}\r\n");
+            }
+            return;
+        }
         self.emit_expr_to_ax(e);
     }
 

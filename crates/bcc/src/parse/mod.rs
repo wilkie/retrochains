@@ -564,9 +564,10 @@ impl Parser {
 
     fn parse_function(&mut self) -> Result<Function, ParseError> {
         let start = self.peek().span.start;
-        // Return type is always `int` today; we'll learn about non-int
-        // return types from a fixture.
-        self.expect(&TokenKind::KwInt)?;
+        // Parse the return type via the standard `parse_type` path.
+        // `int`, `long`, etc. all flow through here; fixture 212
+        // introduced the first non-int return type (`long get()`).
+        let ret_ty = self.parse_type()?;
         let name_tok = self.bump();
         let TokenKind::Ident(name) = &name_tok.kind else {
             return Err(ParseError::NotAnIdent { offset: name_tok.span.start });
@@ -623,6 +624,7 @@ impl Parser {
             return Ok(Function {
                 name,
                 params,
+                ret_ty,
                 span: Span::new(start, semi.span.end),
                 body: None,
             });
@@ -636,7 +638,7 @@ impl Parser {
         }
         let close = self.expect(&TokenKind::RBrace)?;
         let span = Span::new(start, close.span.end);
-        Ok(Function { name, params, span, body: Some(body) })
+        Ok(Function { name, params, ret_ty, span, body: Some(body) })
     }
 
     /// Parameter list inside the `(...)` of a function definition.
