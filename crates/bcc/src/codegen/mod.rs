@@ -2883,6 +2883,21 @@ impl<'a> FunctionEmitter<'a> {
                 let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name},ax\r\n");
                 return;
             }
+            // `g = ~a;` between two long globals. Independent per
+            // half (no carry), so it's just `not` on each register
+            // after the load. Fixture 225.
+            if let ExprKind::Unary { op: UnaryOp::BitNot, operand } = &value.kind
+                && let ExprKind::Ident(a) = &operand.kind
+                && self.globals.type_of(a).map_or(false, |t| matches!(t, Type::Long))
+            {
+                let _ = write!(self.out, "\tmov\tax,word ptr DGROUP:_{a}+2\r\n");
+                let _ = write!(self.out, "\tmov\tdx,word ptr DGROUP:_{a}\r\n");
+                let _ = write!(self.out, "\tnot\tdx\r\n");
+                let _ = write!(self.out, "\tnot\tax\r\n");
+                let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name}+2,ax\r\n");
+                let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name},dx\r\n");
+                return;
+            }
             // Long-to-long arithmetic/bitwise between two long globals:
             // `g = a + b;` / `g = a - b;` / `g = a & b;` (similarly
             // for `|`, `^`). Same skeleton: load a into (AX=high,

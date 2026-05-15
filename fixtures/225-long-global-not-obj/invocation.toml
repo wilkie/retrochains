@@ -1,0 +1,4 @@
+description = "`g = ~a;` long bitwise NOT. Each half is independently flipped — no carry/borrow."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]
