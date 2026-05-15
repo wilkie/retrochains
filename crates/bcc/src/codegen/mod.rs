@@ -579,6 +579,7 @@ impl<'a> FunctionEmitter<'a> {
         );
         let needs_then_entry = cond_has_top_or
             || self.is_long_signed_globals_cmp(cond)
+            || self.is_long_signed_const_cmp(cond)
             || self.is_long_ne_const(cond);
         let then_entry_slot = if needs_then_entry { Some(base) } else { None };
 
@@ -1145,6 +1146,26 @@ impl<'a> FunctionEmitter<'a> {
             && self.globals.type_of(b).map_or(false, |t| matches!(t, Type::Long))
     }
 
+    /// Whether `cond` is `<long_global> <op> K` for a signed
+    /// comparison op (`<,>,<=,>=`) with K small enough that both
+    /// halves fit a sign-extended imm8. BCC inlines K into the
+    /// `cmp <mem>, imm` instruction rather than loading into a
+    /// register first. Fixture 240.
+    fn is_long_signed_const_cmp(&self, cond: &Expr) -> bool {
+        let ExprKind::BinOp { op, left, right } = &cond.kind else { return false };
+        if !matches!(op, BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge) {
+            return false;
+        }
+        let ExprKind::Ident(name) = &left.kind else { return false };
+        if !self.globals.type_of(name).map_or(false, |t| matches!(t, Type::Long)) {
+            return false;
+        }
+        let Some(k) = try_const_eval(right) else { return false };
+        let hi = (k >> 16) as i32;
+        let lo = (k & 0xFFFF) as i32;
+        (-128..=127).contains(&hi) && (-128..=127).contains(&lo)
+    }
+
     /// Whether `cond` is `<long_global> != K` for a small const K —
     /// uses the chained-cmp pattern with both slots (jne→true,
     /// je→false). Fixture 239.
@@ -1206,6 +1227,31 @@ impl<'a> FunctionEmitter<'a> {
             let _ = write!(self.out, "\t{hi_to_false}\tshort {}\r\n", self.label_ref(fslot));
             let _ = write!(self.out, "\t{hi_to_true}\tshort {}\r\n", self.label_ref(tslot));
             let _ = write!(self.out, "\tcmp\tdx,word ptr DGROUP:_{b}\r\n");
+            let _ = write!(self.out, "\t{lo_to_false}\tshort {}\r\n", self.label_ref(fslot));
+            return;
+        }
+        // `<long_global> <op> K` for K with both halves fitting
+        // i8sx — same 3-jump shape as fixture 234 but using
+        // `cmp <mem>, imm` directly (no AX/DX load). Fixture 240.
+        if self.is_long_signed_const_cmp(cond)
+            && let ExprKind::BinOp { op, left, right } = &cond.kind
+            && let ExprKind::Ident(name) = &left.kind
+            && let Some(k) = try_const_eval(right)
+            && let (Some(tslot), Some(fslot)) = (true_slot, false_slot)
+        {
+            let hi = (k >> 16) as i32;
+            let lo = (k & 0xFFFF) as i32;
+            let (hi_to_false, hi_to_true, lo_to_false) = match op {
+                BinOp::Lt => ("jg", "jl",  "jae"),
+                BinOp::Gt => ("jl", "jg",  "jbe"),
+                BinOp::Le => ("jg", "jne", "ja"),
+                BinOp::Ge => ("jl", "jne", "jb"),
+                _ => unreachable!(),
+            };
+            let _ = write!(self.out, "\tcmp\tword ptr DGROUP:_{name}+2,{hi}\r\n");
+            let _ = write!(self.out, "\t{hi_to_false}\tshort {}\r\n", self.label_ref(fslot));
+            let _ = write!(self.out, "\t{hi_to_true}\tshort {}\r\n", self.label_ref(tslot));
+            let _ = write!(self.out, "\tcmp\tword ptr DGROUP:_{name},{lo}\r\n");
             let _ = write!(self.out, "\t{lo_to_false}\tshort {}\r\n", self.label_ref(fslot));
             return;
         }
