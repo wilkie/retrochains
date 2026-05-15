@@ -1,0 +1,4 @@
+description = "`g = a % b;` signed long modulo. Probe: helper name (presumably `N_LMOD@`) and whether stack convention matches `N_LDIV@`."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]
