@@ -1514,22 +1514,33 @@ impl<'a> FunctionEmitter<'a> {
         // arithmetic — see fixture 207 — but the boundary at
         // `return` uses the ABI-standard layout.) Fixture 212.
         if matches!(self.function.ret_ty, Type::Long) {
-            let Some(v) = try_const_eval(e) else {
-                panic!("non-constant long return value not yet supported (no fixture)");
-            };
-            let lo = v & 0xFFFF;
-            let hi = (v >> 16) & 0xFFFF;
-            if hi == 0 {
-                self.out.extend_from_slice(b"\txor\tdx,dx\r\n");
-            } else {
-                let _ = write!(self.out, "\tmov\tdx,{hi}\r\n");
+            if let Some(v) = try_const_eval(e) {
+                let lo = v & 0xFFFF;
+                let hi = (v >> 16) & 0xFFFF;
+                if hi == 0 {
+                    self.out.extend_from_slice(b"\txor\tdx,dx\r\n");
+                } else {
+                    let _ = write!(self.out, "\tmov\tdx,{hi}\r\n");
+                }
+                if lo == 0 {
+                    self.out.extend_from_slice(b"\txor\tax,ax\r\n");
+                } else {
+                    let _ = write!(self.out, "\tmov\tax,{lo}\r\n");
+                }
+                return;
             }
-            if lo == 0 {
-                self.out.extend_from_slice(b"\txor\tax,ax\r\n");
-            } else {
-                let _ = write!(self.out, "\tmov\tax,{lo}\r\n");
+            // `return g;` for a long global — load high to DX (8B
+            // form, no AX-specific short opcode for non-AX dst) then
+            // low to AX (A1 short form). Fixture 213.
+            if let ExprKind::Ident(name) = &e.kind
+                && let Some(src_ty) = self.globals.type_of(name)
+                && matches!(src_ty, Type::Long)
+            {
+                let _ = write!(self.out, "\tmov\tdx,word ptr DGROUP:_{name}+2\r\n");
+                let _ = write!(self.out, "\tmov\tax,word ptr DGROUP:_{name}\r\n");
+                return;
             }
-            return;
+            panic!("non-constant long return value not yet supported (no fixture)");
         }
         self.emit_expr_to_ax(e);
     }

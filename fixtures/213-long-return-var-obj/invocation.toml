@@ -1,0 +1,4 @@
+description = "`return g;` where g is a `long` global — load both halves into the return-convention registers (DX=high, AX=low) and return. Tests the variable form of fixture 212's constant-return path."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]
