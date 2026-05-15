@@ -3156,22 +3156,25 @@ impl<'a> FunctionEmitter<'a> {
             }
             // `g = a << K;` / `g = a >> K;` for K > 1 — BCC calls a
             // runtime helper: `N_LXLSH@` for left-shift (fixture
-            // 228), `N_LXRSH@` for signed right-shift (fixture 230).
-            // The register convention SWITCHES to the standard 32-bit
-            // ABI: DX=high, AX=low (input *and* output). CL holds
-            // the shift count. The helper is declared
+            // 228), `N_LXRSH@` for signed right-shift (fixture 230),
+            // `N_LXURSH@` for unsigned right-shift (fixture 244).
+            // The register convention SWITCHES to the standard
+            // 32-bit ABI: DX=high, AX=low (input *and* output). CL
+            // holds the shift count. The helper is declared
             // `extrn <name>:far` in the tail.
             if let ExprKind::BinOp { op, left, right } = &value.kind
                 && matches!(op, BinOp::Shl | BinOp::Shr)
                 && let ExprKind::Ident(a) = &left.kind
-                && self.globals.type_of(a).map_or(false, |t| matches!(t, Type::Long))
+                && let Some(a_ty) = self.globals.type_of(a)
+                && a_ty.is_long_like()
                 && let Some(k) = try_const_eval(right)
                 && k > 1
                 && k <= 255
             {
-                let helper = match op {
-                    BinOp::Shl => "N_LXLSH@",
-                    BinOp::Shr => "N_LXRSH@",
+                let helper = match (op, a_ty.is_unsigned()) {
+                    (BinOp::Shl, _)        => "N_LXLSH@",
+                    (BinOp::Shr, false)    => "N_LXRSH@",
+                    (BinOp::Shr, true)     => "N_LXURSH@",
                     _ => unreachable!(),
                 };
                 let k_u8 = k as u8;

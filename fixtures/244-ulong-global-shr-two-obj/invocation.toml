@@ -1,0 +1,4 @@
+description = "`unsigned long g = a >> 2;`. Probe: BCC should call a logical-shift helper (likely `N_LURSH@`) instead of `N_LXRSH@`."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]
