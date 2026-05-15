@@ -1,0 +1,4 @@
+description = "`g &= 15;` for long. Probes whether BCC emits memory-direct `and` for each half (parallel to `+=` slice 251 but bitwise / no carry)."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

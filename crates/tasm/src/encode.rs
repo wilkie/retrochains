@@ -298,6 +298,9 @@ fn instr_size(instr: &Instr) -> usize {
         | Instr::AdcGroupSymImm8Sx { .. }
         | Instr::SubGroupSymImm8Sx { .. }
         | Instr::SbbGroupSymImm8Sx { .. } => 5,
+        Instr::AndGroupSymImm16 { .. }
+        | Instr::OrGroupSymImm16 { .. }
+        | Instr::XorGroupSymImm16 { .. } => 6,
         Instr::Cbw => 1,
         Instr::LeaReg16BpRel { .. } => 3,
         Instr::MovSiPtrImm { .. } | Instr::MovBxPtrImm { .. } => 4,
@@ -841,6 +844,24 @@ fn emit_instr(
             // Grp1 r/m16,imm8sx with /3=SBB (fixture 250's `g--` high half).
             emit_group_sym_lea(&[0x83, 0x1E], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
             out.push(*imm as u8);
+        }
+        Instr::AndGroupSymImm16 { group, symbol, offset, imm } => {
+            // `and word ptr <group>:<sym>[+N], imm16` → 81 26 lo hi imm_lo imm_hi.
+            // Grp1 r/m16,imm16 with /4=AND (fixture 253's `g &= K`).
+            emit_group_sym_lea(&[0x81, 0x26], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
+            out.extend_from_slice(&imm.to_le_bytes());
+        }
+        Instr::OrGroupSymImm16 { group, symbol, offset, imm } => {
+            // `or word ptr <group>:<sym>[+N], imm16` → 81 0E lo hi imm_lo imm_hi.
+            // Grp1 r/m16,imm16 with /1=OR.
+            emit_group_sym_lea(&[0x81, 0x0E], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
+            out.extend_from_slice(&imm.to_le_bytes());
+        }
+        Instr::XorGroupSymImm16 { group, symbol, offset, imm } => {
+            // `xor word ptr <group>:<sym>[+N], imm16` → 81 36 lo hi imm_lo imm_hi.
+            // Grp1 r/m16,imm16 with /6=XOR.
+            emit_group_sym_lea(&[0x81, 0x36], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
+            out.extend_from_slice(&imm.to_le_bytes());
         }
         Instr::Cbw => out.push(0x98),
         Instr::LeaReg16BpRel { dst, offset } => {

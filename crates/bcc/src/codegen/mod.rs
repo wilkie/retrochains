@@ -1937,25 +1937,52 @@ impl<'a> FunctionEmitter<'a> {
     /// Stack-resident targets are unobserved — every fixture so far
     /// puts the target in a register. Panic until pinned.
     fn emit_compound_assign(&mut self, name: &str, op: BinOp, value: &Expr) {
-        // Long-like global `g += K` / `g -= K` with K fitting i8sx:
-        // memory-direct add/sub on the low half, then adc/sbb 0 on
-        // the high half. Distinct from `g = g + K` (slice 207) which
-        // uses the register-load pattern — BCC differentiates the
-        // two by AST shape. Fixture 251.
+        // Long-like global `g <op>= K` with K fitting i8sx (per
+        // half): memory-direct read-modify-write on each half. The
+        // high-half partner depends on the op family — add/sub need
+        // carry/borrow propagation (`adc/sbb high,0`), bitwise ops
+        // act independently (the same mnemonic against the high
+        // word of K). Distinct from `g = g <op> K` (slice 207) which
+        // uses the register-load pattern. Fixtures 251 (`+=`), 252
+        // (`-=`), 253 (`&=`).
         if let Some(ty) = self.globals.type_of(name)
             && ty.is_long_like()
-            && matches!(op, BinOp::Add | BinOp::Sub)
             && let Some(k) = try_const_eval(value)
-            && let Ok(k_i8) = i8::try_from(k as i32)
         {
-            let (lo_op, hi_op) = match op {
-                BinOp::Add => ("add", "adc"),
-                BinOp::Sub => ("sub", "sbb"),
-                _ => unreachable!(),
-            };
-            let _ = write!(self.out, "\t{lo_op}\tword ptr DGROUP:_{name},{k_i8}\r\n");
-            let _ = write!(self.out, "\t{hi_op}\tword ptr DGROUP:_{name}+2,0\r\n");
-            return;
+            let k_lo = (k & 0xFFFF) as i32;
+            let k_hi = (k >> 16) as i32;
+            // Arithmetic uses `83 /n` (imm8sx) so each half must fit
+            // i8sx; bitwise uses `81 /n` (imm16) which fits anything
+            // in 16 bits — no further restriction. Either way, k_hi
+            // for arith is always 0 (the partner is `adc/sbb 0`).
+            match op {
+                BinOp::Add | BinOp::Sub => {
+                    if let Ok(lo_i8) = i8::try_from(k_lo) {
+                        let (lo_op, hi_op) = if matches!(op, BinOp::Add) {
+                            ("add", "adc")
+                        } else {
+                            ("sub", "sbb")
+                        };
+                        let _ = write!(self.out, "\t{lo_op}\tword ptr DGROUP:_{name},{lo_i8}\r\n");
+                        let _ = write!(self.out, "\t{hi_op}\tword ptr DGROUP:_{name}+2,0\r\n");
+                        return;
+                    }
+                }
+                BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor => {
+                    let mnem = match op {
+                        BinOp::BitAnd => "and",
+                        BinOp::BitOr => "or",
+                        BinOp::BitXor => "xor",
+                        _ => unreachable!(),
+                    };
+                    let lo = (k_lo as i64) & 0xFFFF;
+                    let hi = (k_hi as i64) & 0xFFFF;
+                    let _ = write!(self.out, "\t{mnem}\tword ptr DGROUP:_{name},{lo}\r\n");
+                    let _ = write!(self.out, "\t{mnem}\tword ptr DGROUP:_{name}+2,{hi}\r\n");
+                    return;
+                }
+                _ => {}
+            }
         }
         let LocalLocation::Reg(reg) = self.locals.location_of(name) else {
             panic!(

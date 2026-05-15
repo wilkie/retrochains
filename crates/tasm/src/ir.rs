@@ -403,6 +403,35 @@ pub enum Instr {
         offset: i16,
         imm: i8,
     },
+    /// `and word ptr <group>:<symbol>[+<offset>], imm16` — Grp1
+    /// r/m16,imm16 with /4=AND (`81 26 lo hi imm_lo imm_hi`, 6 bytes).
+    /// BCC uses the wider imm16 form for bitwise compound assigns
+    /// even when the immediate fits in an i8sx — unlike arithmetic
+    /// `+=`/`-=` which use the shorter `83` form. Fixture 253.
+    AndGroupSymImm16 {
+        group: String,
+        symbol: String,
+        offset: i16,
+        imm: u16,
+    },
+    /// `or word ptr <group>:<symbol>[+<offset>], imm16` — Grp1
+    /// r/m16,imm16 with /1=OR (`81 0E lo hi imm_lo imm_hi`, 6 bytes).
+    /// Same imm16-always rule as `AndGroupSymImm16`.
+    OrGroupSymImm16 {
+        group: String,
+        symbol: String,
+        offset: i16,
+        imm: u16,
+    },
+    /// `xor word ptr <group>:<symbol>[+<offset>], imm16` — Grp1
+    /// r/m16,imm16 with /6=XOR (`81 36 lo hi imm_lo imm_hi`, 6 bytes).
+    /// Same imm16-always rule as `AndGroupSymImm16`.
+    XorGroupSymImm16 {
+        group: String,
+        symbol: String,
+        offset: i16,
+        imm: u16,
+    },
     /// `cbw` — 98. Sign-extend AL to AX. Used after loading a `char`
     /// global to widen it to int for arithmetic (fixture 130).
     Cbw,

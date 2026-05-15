@@ -766,6 +766,21 @@ fn parse_and(operands: &str, line_no: usize) -> AsmResult<Instr> {
             });
         }
     }
+    // `and word ptr <group>:<sym>[+N], imm16` — long compound
+    // `g &= K` (fixture 253). BCC always picks the imm16 form
+    // (`81 26`) for bitwise compound assigns, even when K would
+    // fit in i8sx — distinct from arithmetic `+=` which uses 83.
+    if let Some((group, symbol)) = parse_group_symbol(lhs) {
+        if let Some(imm) = parse_imm16(rhs) {
+            let (sym, offset) = split_sym_offset(symbol);
+            return Ok(Instr::AndGroupSymImm16 {
+                group: group.to_string(),
+                symbol: sym.to_string(),
+                offset,
+                imm,
+            });
+        }
+    }
     parse_alu_ax_mem(operands, line_no, "and", |o| Instr::AndAxBpRel { offset: o })
 }
 
@@ -1210,6 +1225,19 @@ fn parse_or(operands: &str, line_no: usize) -> AsmResult<Instr> {
             });
         }
     }
+    // `or word ptr <group>:<sym>[+N], imm16` — long compound
+    // `g |= K`. Same imm16-always rule as the `and` companion.
+    if let Some((group, symbol)) = parse_group_symbol(lhs) {
+        if let Some(imm) = parse_imm16(rhs) {
+            let (sym, offset) = split_sym_offset(symbol);
+            return Ok(Instr::OrGroupSymImm16 {
+                group: group.to_string(),
+                symbol: sym.to_string(),
+                offset,
+                imm,
+            });
+        }
+    }
     Err(AsmError::new(
         line_no,
         format!("or: unsupported operand form `{operands}`"),
@@ -1247,6 +1275,19 @@ fn parse_xor(operands: &str, line_no: usize) -> AsmResult<Instr> {
                 group: group.to_string(),
                 symbol: sym.to_string(),
                 offset,
+            });
+        }
+    }
+    // `xor word ptr <group>:<sym>[+N], imm16` — long compound
+    // `g ^= K`. Same imm16-always rule as the `and` companion.
+    if let Some((group, symbol)) = parse_group_symbol(lhs) {
+        if let Some(imm) = parse_imm16(rhs) {
+            let (sym, offset) = split_sym_offset(symbol);
+            return Ok(Instr::XorGroupSymImm16 {
+                group: group.to_string(),
+                symbol: sym.to_string(),
+                offset,
+                imm,
             });
         }
     }
