@@ -330,6 +330,13 @@ pub enum Instr {
     /// (fixture 222). Companion to existing `OrAxGroupSym` for
     /// the high half.
     OrDxGroupSym { group: String, symbol: String, offset: i16 },
+    /// `xor dx,word ptr <group>:<symbol>[+<offset>]` — XOR r16,r/m16
+    /// with DX dst (`33 16 lo hi`). Long bitwise XOR low half
+    /// (fixture 224).
+    XorDxGroupSym { group: String, symbol: String, offset: i16 },
+    /// `xor ax,word ptr <group>:<symbol>[+<offset>]` — XOR r16,r/m16
+    /// with AX dst (`33 06 lo hi`). Companion for the high half.
+    XorAxGroupSym { group: String, symbol: String, offset: i16 },
     /// `cmp word ptr <group>:<symbol>[+<offset>], imm8 (sx)` — Grp1
     /// r/m16,imm8sx with /7=CMP and disp16-only addressing
     /// (`83 3E lo hi ii`, 5 bytes). Used by long const-compare

@@ -2884,13 +2884,13 @@ impl<'a> FunctionEmitter<'a> {
                 return;
             }
             // Long-to-long arithmetic/bitwise between two long globals:
-            // `g = a + b;` / `g = a - b;` / `g = a & b;` (and similar
-            // for `|`, `^` once fixtured). Same skeleton: load a into
-            // (AX=high, DX=low), apply the op's pair to b's halves,
-            // store back. Add/Sub need carry/borrow (adc/sbb on the
-            // high half); bitwise ops are independent per-half so the
-            // high-half op is the same mnemonic. Fixtures 219 (add),
-            // 220 (sub), 221 (and).
+            // `g = a + b;` / `g = a - b;` / `g = a & b;` (similarly
+            // for `|`, `^`). Same skeleton: load a into (AX=high,
+            // DX=low), apply the op's pair to b's halves, store back.
+            // Add/Sub need carry/borrow (adc/sbb on the high half);
+            // bitwise ops are independent per-half so the high-half
+            // op is the same mnemonic. Fixtures 219 (add), 220 (sub),
+            // 221 (and), 222 (or), 224 (xor).
             if let ExprKind::BinOp { op, left, right } = &value.kind
                 && let Some((lo_op, hi_op)) = long_pair_op(*op)
                 && let ExprKind::Ident(a) = &left.kind
@@ -3512,6 +3512,7 @@ fn long_pair_op(op: BinOp) -> Option<(&'static str, &'static str)> {
         BinOp::Sub => Some(("sub", "sbb")),
         BinOp::BitAnd => Some(("and", "and")),
         BinOp::BitOr => Some(("or", "or")),
+        BinOp::BitXor => Some(("xor", "xor")),
         _ => None,
     }
 }

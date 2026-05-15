@@ -1066,6 +1066,26 @@ fn parse_xor(operands: &str, line_no: usize) -> AsmResult<Instr> {
         if let Some(offset) = parse_bp_relative(rhs) {
             return Ok(Instr::XorAxBpRel { offset });
         }
+        if let Some((group, symbol)) = parse_group_symbol(rhs) {
+            let (sym, offset) = split_sym_offset(symbol);
+            return Ok(Instr::XorAxGroupSym {
+                group: group.to_string(),
+                symbol: sym.to_string(),
+                offset,
+            });
+        }
+    }
+    // `xor dx, word ptr <group>:<sym>[+N]` — long bitwise XOR low
+    // half (fixture 224).
+    if lhs == "dx" {
+        if let Some((group, symbol)) = parse_group_symbol(rhs) {
+            let (sym, offset) = split_sym_offset(symbol);
+            return Ok(Instr::XorDxGroupSym {
+                group: group.to_string(),
+                symbol: sym.to_string(),
+                offset,
+            });
+        }
     }
     Err(AsmError::new(
         line_no,

@@ -288,7 +288,9 @@ fn instr_size(instr: &Instr) -> usize {
         | Instr::SbbAxGroupSym { .. }
         | Instr::AndDxGroupSym { .. }
         | Instr::AndAxGroupSym { .. }
-        | Instr::OrDxGroupSym { .. } => 4,
+        | Instr::OrDxGroupSym { .. }
+        | Instr::XorDxGroupSym { .. }
+        | Instr::XorAxGroupSym { .. } => 4,
         Instr::CmpGroupSymImm8Sx { .. } => 5,
         Instr::Cbw => 1,
         Instr::LeaReg16BpRel { .. } => 3,
@@ -764,6 +766,16 @@ fn emit_instr(
             // `or dx,word ptr <group>:<symbol>` → 0B 16 lo hi.
             // Opcode 0B (OR r16,r/m16); ModR/M 16 = reg=DX rm=disp16.
             emit_group_sym_lea(&[0x0B, 0x16], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
+        }
+        Instr::XorDxGroupSym { group, symbol, offset } => {
+            // `xor dx,word ptr <group>:<symbol>` → 33 16 lo hi.
+            // Opcode 33 (XOR r16,r/m16); ModR/M 16 = reg=DX rm=disp16.
+            emit_group_sym_lea(&[0x33, 0x16], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
+        }
+        Instr::XorAxGroupSym { group, symbol, offset } => {
+            // `xor ax,word ptr <group>:<symbol>` → 33 06 lo hi.
+            // Same opcode as the DX form; ModR/M reg field 000=AX.
+            emit_group_sym_lea(&[0x33, 0x06], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
         }
         Instr::CmpGroupSymImm8Sx { group, symbol, offset, imm } => {
             // `cmp word ptr <group>:<sym>[+N], imm8sx` → 83 3E lo hi ii.

@@ -1,0 +1,4 @@
+description = "`g = a ^ b;` long bitwise XOR. Same shape as fixtures 221/222: two independent per-half XOR ops, no carry."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]
