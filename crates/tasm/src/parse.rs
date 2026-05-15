@@ -382,6 +382,7 @@ fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
         "add" => parse_add(rest, line.line_no),
         "adc" => parse_adc(rest, line.line_no),
         "sub" => parse_sub(rest, line.line_no),
+        "sbb" => parse_sbb(rest, line.line_no),
         "and" => parse_alu_ax_mem(rest, line.line_no, "and", |o| Instr::AndAxBpRel { offset: o }),
         "or" => parse_or(rest, line.line_no),
         "xor" => parse_xor(rest, line.line_no),
@@ -692,8 +693,42 @@ fn parse_sub(operands: &str, line_no: usize) -> AsmResult<Instr> {
     if lhs == "ax" && rhs == "word ptr [si]" {
         return Ok(Instr::SubAxFromSiPtr);
     }
+    // `sub dx, word ptr <group>:<sym>[+N]` — long-to-long sub
+    // low-half (fixture 220).
+    if lhs == "dx" {
+        if let Some((group, symbol)) = parse_group_symbol(rhs) {
+            let (sym, offset) = split_sym_offset(symbol);
+            return Ok(Instr::SubDxGroupSym {
+                group: group.to_string(),
+                symbol: sym.to_string(),
+                offset,
+            });
+        }
+    }
     // Otherwise: try the AX/mem form.
     parse_alu_ax_mem(operands, line_no, "sub", |o| Instr::SubAxBpRel { offset: o })
+}
+
+/// `sbb ax, word ptr <group>:<sym>[+N]` — subtract-with-borrow,
+/// long-arithmetic high-half (fixture 220).
+fn parse_sbb(operands: &str, line_no: usize) -> AsmResult<Instr> {
+    let (lhs, rhs) = split_comma(operands).ok_or_else(|| {
+        AsmError::new(line_no, format!("sbb: expected `lhs,rhs`, got {operands:?}"))
+    })?;
+    if lhs == "ax" {
+        if let Some((group, symbol)) = parse_group_symbol(rhs) {
+            let (sym, offset) = split_sym_offset(symbol);
+            return Ok(Instr::SbbAxGroupSym {
+                group: group.to_string(),
+                symbol: sym.to_string(),
+                offset,
+            });
+        }
+    }
+    Err(AsmError::new(
+        line_no,
+        format!("sbb: unsupported operand form `{operands}`"),
+    ))
 }
 
 /// `adc ax, imm16` — add-with-carry to AX (fixture 207). Also

@@ -310,6 +310,14 @@ pub enum Instr {
     /// with AX as destination (`13 06 lo hi`). Companion to
     /// `AddDxGroupSym` for the high-half carry-in (fixture 219).
     AdcAxGroupSym { group: String, symbol: String, offset: i16 },
+    /// `sub dx,word ptr <group>:<symbol>[+<offset>]` — SUB r16,r/m16
+    /// with DX dst (`2B 16 lo hi`). Long-to-long subtraction's low-
+    /// half subtract (fixture 220).
+    SubDxGroupSym { group: String, symbol: String, offset: i16 },
+    /// `sbb ax,word ptr <group>:<symbol>[+<offset>]` — SBB r16,r/m16
+    /// with AX dst (`1B 06 lo hi`). High-half subtract-with-borrow
+    /// (fixture 220).
+    SbbAxGroupSym { group: String, symbol: String, offset: i16 },
     /// `cbw` — 98. Sign-extend AL to AX. Used after loading a `char`
     /// global to widen it to int for arithmetic (fixture 130).
     Cbw,

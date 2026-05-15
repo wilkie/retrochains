@@ -2842,19 +2842,27 @@ impl<'a> FunctionEmitter<'a> {
                 let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name},ax\r\n");
                 return;
             }
-            // `g = a + b;` long-to-long arithmetic between two
-            // long globals. Load a into (AX=high, DX=low); add/adc
-            // b's halves; store. Fixture 219.
-            if let ExprKind::BinOp { op: BinOp::Add, left, right } = &value.kind
+            // `g = a + b;` and `g = a - b;` — long-to-long arithmetic
+            // between two long globals. Load a into (AX=high, DX=low),
+            // apply the op's pair to b's halves (add+adc for `+`,
+            // sub+sbb for `-`), then store. Fixtures 219 (add) and
+            // 220 (sub).
+            if let ExprKind::BinOp { op, left, right } = &value.kind
+                && (matches!(op, BinOp::Add) || matches!(op, BinOp::Sub))
                 && let ExprKind::Ident(a) = &left.kind
                 && let ExprKind::Ident(b) = &right.kind
                 && self.globals.type_of(a).map_or(false, |t| matches!(t, Type::Long))
                 && self.globals.type_of(b).map_or(false, |t| matches!(t, Type::Long))
             {
+                let (lo_op, hi_op) = match op {
+                    BinOp::Add => ("add", "adc"),
+                    BinOp::Sub => ("sub", "sbb"),
+                    _ => unreachable!(),
+                };
                 let _ = write!(self.out, "\tmov\tax,word ptr DGROUP:_{a}+2\r\n");
                 let _ = write!(self.out, "\tmov\tdx,word ptr DGROUP:_{a}\r\n");
-                let _ = write!(self.out, "\tadd\tdx,word ptr DGROUP:_{b}\r\n");
-                let _ = write!(self.out, "\tadc\tax,word ptr DGROUP:_{b}+2\r\n");
+                let _ = write!(self.out, "\t{lo_op}\tdx,word ptr DGROUP:_{b}\r\n");
+                let _ = write!(self.out, "\t{hi_op}\tax,word ptr DGROUP:_{b}+2\r\n");
                 let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name}+2,ax\r\n");
                 let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name},dx\r\n");
                 return;

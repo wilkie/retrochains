@@ -283,7 +283,9 @@ fn instr_size(instr: &Instr) -> usize {
         Instr::AddAxGroupSym { .. }
         | Instr::OrAxGroupSym { .. }
         | Instr::AddDxGroupSym { .. }
-        | Instr::AdcAxGroupSym { .. } => 4,
+        | Instr::AdcAxGroupSym { .. }
+        | Instr::SubDxGroupSym { .. }
+        | Instr::SbbAxGroupSym { .. } => 4,
         Instr::Cbw => 1,
         Instr::LeaReg16BpRel { .. } => 3,
         Instr::MovSiPtrImm { .. } | Instr::MovBxPtrImm { .. } => 4,
@@ -733,6 +735,16 @@ fn emit_instr(
             // `adc ax,word ptr <group>:<symbol>` → 13 06 lo hi.
             // Same ModR/M as the `add ax` sibling; opcode 13 (ADC r16,r/m16).
             emit_group_sym_lea(&[0x13, 0x06], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
+        }
+        Instr::SubDxGroupSym { group, symbol, offset } => {
+            // `sub dx,word ptr <group>:<symbol>` → 2B 16 lo hi.
+            // Same shape as `AddDxGroupSym`; opcode 2B (SUB r16,r/m16).
+            emit_group_sym_lea(&[0x2B, 0x16], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
+        }
+        Instr::SbbAxGroupSym { group, symbol, offset } => {
+            // `sbb ax,word ptr <group>:<symbol>` → 1B 06 lo hi.
+            // Companion to AdcAxGroupSym; opcode 1B (SBB r16,r/m16).
+            emit_group_sym_lea(&[0x1B, 0x06], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
         }
         Instr::Cbw => out.push(0x98),
         Instr::LeaReg16BpRel { dst, offset } => {
