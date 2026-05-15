@@ -3330,16 +3330,22 @@ impl<'a> FunctionEmitter<'a> {
                     return;
                 }
             }
-            // `long g = i;` — widen an int global to long. Load
-            // into AX, sign-extend AX→DX:AX via `cwd`, then store
-            // high (DX) and low (AX). Fixture 254.
+            // `long g = i;` / `long g = u;` — widen an int-family
+            // global to long. Signed int sign-extends via `cwd`
+            // (fixture 254); `unsigned int` zero-extends by storing
+            // 0 directly into the high half (fixture 255). Either
+            // way: load into AX first, store high, then low.
             if let ExprKind::Ident(src_name) = &value.kind
                 && let Some(src_ty) = self.globals.type_of(src_name)
-                && matches!(src_ty, Type::Int)
+                && matches!(src_ty, Type::Int | Type::UInt)
             {
                 let _ = write!(self.out, "\tmov\tax,word ptr DGROUP:_{src_name}\r\n");
-                self.out.extend_from_slice(b"\tcwd\t\r\n");
-                let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name}+2,dx\r\n");
+                if matches!(src_ty, Type::UInt) {
+                    let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name}+2,0\r\n");
+                } else {
+                    self.out.extend_from_slice(b"\tcwd\t\r\n");
+                    let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name}+2,dx\r\n");
+                }
                 let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name},ax\r\n");
                 return;
             }
