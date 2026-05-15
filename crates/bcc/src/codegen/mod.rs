@@ -3330,6 +3330,29 @@ impl<'a> FunctionEmitter<'a> {
                     return;
                 }
             }
+            // `g = g + i;` long-self plus int-global. BCC widens
+            // i first (load to AX, cwd to DX:AX), then loads the
+            // long accumulator into BX:CX (high:low — different
+            // from the AX/DX convention used elsewhere because
+            // DX:AX is holding the widened int), adds with carry,
+            // and stores back. Fixture 257.
+            if let ExprKind::BinOp { op: BinOp::Add, left, right } = &value.kind
+                && let ExprKind::Ident(lhs_name) = &left.kind
+                && lhs_name == name
+                && let ExprKind::Ident(i_name) = &right.kind
+                && let Some(i_ty) = self.globals.type_of(i_name)
+                && matches!(i_ty, Type::Int)
+            {
+                let _ = write!(self.out, "\tmov\tax,word ptr DGROUP:_{i_name}\r\n");
+                self.out.extend_from_slice(b"\tcwd\t\r\n");
+                let _ = write!(self.out, "\tmov\tbx,word ptr DGROUP:_{name}+2\r\n");
+                let _ = write!(self.out, "\tmov\tcx,word ptr DGROUP:_{name}\r\n");
+                self.out.extend_from_slice(b"\tadd\tcx,ax\r\n");
+                self.out.extend_from_slice(b"\tadc\tbx,dx\r\n");
+                let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name}+2,bx\r\n");
+                let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name},cx\r\n");
+                return;
+            }
             // `long g = i;` / `long g = u;` — widen an int-family
             // global to long. Signed int sign-extends via `cwd`
             // (fixture 254); `unsigned int` zero-extends by storing

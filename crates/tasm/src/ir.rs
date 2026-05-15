@@ -129,6 +129,12 @@ pub enum Instr {
     /// ModR/M mod=11 reg=dst r/m=src. Used to fold a register-resident
     /// operand into AX (fixture 127: `add ax,si`).
     AddReg16Reg16 { dst: Reg16, src: Reg16 },
+    /// `adc <dst>,<src>` between 16-bit registers — 13 xx with
+    /// ModR/M mod=11 reg=dst r/m=src. Carry-propagation high-half
+    /// partner to a register-to-register `add` (fixture 257's
+    /// long-plus-int sum where the widened int sits in DX:AX and
+    /// the long accumulator in BX:CX).
+    AdcReg16Reg16 { dst: Reg16, src: Reg16 },
     /// `or <dst>,<src>` between 16-bit registers — 0B xx. BCC uses
     /// `or ax,ax` as a compare-against-zero idiom in switch dispatch.
     OrReg16Reg16 { dst: Reg16, src: Reg16 },

@@ -1,0 +1,4 @@
+description = "`g = g + i;` long + int. Probes whether BCC widens i to long then adds, or pushes through helper."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

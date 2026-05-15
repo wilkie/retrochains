@@ -829,6 +829,9 @@ fn parse_adc(operands: &str, line_no: usize) -> AsmResult<Instr> {
     let (lhs, rhs) = split_comma(operands).ok_or_else(|| {
         AsmError::new(line_no, format!("adc: expected `lhs,rhs`, got {operands:?}"))
     })?;
+    if let (Some(dst), Some(src)) = (Reg16::parse(lhs), Reg16::parse(rhs)) {
+        return Ok(Instr::AdcReg16Reg16 { dst, src });
+    }
     if lhs == "ax" {
         if let Some((group, symbol)) = parse_group_symbol(rhs) {
             let (sym, offset) = split_sym_offset(symbol);

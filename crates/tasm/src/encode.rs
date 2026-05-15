@@ -238,6 +238,7 @@ fn instr_size(instr: &Instr) -> usize {
         Instr::MovReg16Reg16 { .. }
         | Instr::XorReg16Reg16 { .. }
         | Instr::AddReg16Reg16 { .. }
+        | Instr::AdcReg16Reg16 { .. }
         | Instr::OrReg16Reg16 { .. }
         | Instr::CmpReg16Reg16 { .. } => 2,
         Instr::CmpReg16Imm8 { .. } | Instr::CmpAxImm { .. } | Instr::AddAxImm { .. } => 3,
@@ -351,6 +352,12 @@ fn emit_instr(
         Instr::AddReg16Reg16 { dst, src } => {
             // `add r16,r16` → 03 (mod=11 dst<<3 src).
             out.push(0x03);
+            out.push(0b11_000_000 | (dst.code() << 3) | src.code());
+        }
+        Instr::AdcReg16Reg16 { dst, src } => {
+            // `adc r16,r16` → 13 (mod=11 dst<<3 src). Same shape as
+            // `add r16,r16` but with carry propagation.
+            out.push(0x13);
             out.push(0b11_000_000 | (dst.code() << 3) | src.code());
         }
         Instr::OrReg16Reg16 { dst, src } => {
