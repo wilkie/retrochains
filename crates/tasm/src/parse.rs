@@ -922,6 +922,28 @@ fn parse_cmp(operands: &str, line_no: usize) -> AsmResult<Instr> {
         if let Some(imm) = parse_imm16(rhs) {
             return Ok(Instr::CmpAxImm { imm });
         }
+        // `cmp ax, word ptr <group>:<sym>[+N]` — high-half compare
+        // for the signed long-compare 3-jump pattern (fixture 234).
+        if let Some((group, symbol)) = parse_group_symbol(rhs) {
+            let (sym, offset) = split_sym_offset(symbol);
+            return Ok(Instr::CmpAxGroupSym {
+                group: group.to_string(),
+                symbol: sym.to_string(),
+                offset,
+            });
+        }
+    }
+    // `cmp dx, word ptr <group>:<sym>[+N]` — low-half companion for
+    // the signed long-compare 3-jump pattern (fixture 234).
+    if lhs == "dx" {
+        if let Some((group, symbol)) = parse_group_symbol(rhs) {
+            let (sym, offset) = split_sym_offset(symbol);
+            return Ok(Instr::CmpDxGroupSym {
+                group: group.to_string(),
+                symbol: sym.to_string(),
+                offset,
+            });
+        }
     }
     // `cmp word ptr [bp+N],imm8` — compare stack local to small imm.
     if let Some(offset) = parse_word_bp_relative(lhs) {

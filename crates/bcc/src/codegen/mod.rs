@@ -568,11 +568,17 @@ impl<'a> FunctionEmitter<'a> {
         // short-circuit-to-true; we need a label at the start of the
         // then-branch for them to land at. The if's base+0 slot —
         // unused for plain conds — serves as that "then-entry".
+        //
+        // Same need for signed long-vs-long compares (fixture 234):
+        // BCC's 3-jump pattern includes a `jl/jg` direct-to-body
+        // jump alongside the false-target jumps, so the body needs
+        // an explicit label.
         let cond_has_top_or = matches!(
             cond.kind,
             ExprKind::Logical { op: LogicalOp::Or, .. }
         );
-        let then_entry_slot = if cond_has_top_or { Some(base) } else { None };
+        let needs_then_entry = cond_has_top_or || self.is_long_signed_globals_cmp(cond);
+        let then_entry_slot = if needs_then_entry { Some(base) } else { None };
 
         if let Some(else_stmts) = else_branch {
             // if/else reserves 3 slots; the else label lives at +2.
@@ -1121,12 +1127,63 @@ impl<'a> FunctionEmitter<'a> {
     ///   the original true/false targets.
     /// - `a || b`: a's true → true_slot; a's false → fall through to
     ///   b's test (a's false target becomes `None`). Then b same.
+    /// Whether `cond` is a signed long-vs-long compare between two
+    /// long globals that needs the 3-jump pattern. Used by `emit_if`
+    /// to decide whether to allocate a `then_entry_slot` (the body
+    /// label) for the test's true-target jump.
+    fn is_long_signed_globals_cmp(&self, cond: &Expr) -> bool {
+        let ExprKind::BinOp { op, left, right } = &cond.kind else { return false };
+        if !matches!(op, BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge) {
+            return false;
+        }
+        let (ExprKind::Ident(a), ExprKind::Ident(b)) = (&left.kind, &right.kind) else {
+            return false;
+        };
+        self.globals.type_of(a).map_or(false, |t| matches!(t, Type::Long))
+            && self.globals.type_of(b).map_or(false, |t| matches!(t, Type::Long))
+    }
+
     fn emit_cond_branch(
         &mut self,
         cond: &Expr,
         true_slot: Option<u32>,
         false_slot: Option<u32>,
     ) {
+        // Signed long-vs-long compare between two long globals. BCC
+        // emits a 3-jump pattern: high-half signed cmp with `jg/jl`
+        // for definitive answers, low-half unsigned cmp for the
+        // tie-breaker. Caller must supply BOTH slots so the
+        // intermediate signed-direction jump can land at the body
+        // (true target). Fixture 234.
+        if self.is_long_signed_globals_cmp(cond)
+            && let ExprKind::BinOp { op, left, right } = &cond.kind
+            && let ExprKind::Ident(a) = &left.kind
+            && let ExprKind::Ident(b) = &right.kind
+            && let (Some(tslot), Some(fslot)) = (true_slot, false_slot)
+        {
+            // Choose the mnemonics by direction. For `a < b`:
+            //   high signed: jg → false (a>b not less), jl → true
+            //   low unsigned: jae → false (a>=b not strictly less)
+            // For `a > b`: swap roles — jl → false, jg → true,
+            // ja → true (strictly above, unsigned low).
+            // For `<=` and `>=`: the low-half tie-breaker flips
+            // from strict (jae/jbe) to non-strict (ja/jb).
+            let (hi_to_false, hi_to_true, lo_to_false) = match op {
+                BinOp::Lt => ("jg", "jl", "jae"),
+                BinOp::Gt => ("jl", "jg", "jbe"),
+                BinOp::Le => ("jg", "jl", "ja"),
+                BinOp::Ge => ("jl", "jg", "jb"),
+                _ => unreachable!(),
+            };
+            let _ = write!(self.out, "\tmov\tax,word ptr DGROUP:_{a}+2\r\n");
+            let _ = write!(self.out, "\tmov\tdx,word ptr DGROUP:_{a}\r\n");
+            let _ = write!(self.out, "\tcmp\tax,word ptr DGROUP:_{b}+2\r\n");
+            let _ = write!(self.out, "\t{hi_to_false}\tshort {}\r\n", self.label_ref(fslot));
+            let _ = write!(self.out, "\t{hi_to_true}\tshort {}\r\n", self.label_ref(tslot));
+            let _ = write!(self.out, "\tcmp\tdx,word ptr DGROUP:_{b}\r\n");
+            let _ = write!(self.out, "\t{lo_to_false}\tshort {}\r\n", self.label_ref(fslot));
+            return;
+        }
         // `<long_global> == K` for non-zero K — BCC emits a chained
         // cmp+jne pair: high half against (K>>16), low half against
         // (K&0xFFFF). Both halves use Grp1 imm8sx form, so each half

@@ -341,6 +341,14 @@ pub enum Instr {
     /// `xor ax,word ptr <group>:<symbol>[+<offset>]` — XOR r16,r/m16
     /// with AX dst (`33 06 lo hi`). Companion for the high half.
     XorAxGroupSym { group: String, symbol: String, offset: i16 },
+    /// `cmp ax,word ptr <group>:<symbol>[+<offset>]` — CMP r16,r/m16
+    /// with AX dst (`3B 06 lo hi`). High-half comparison for the
+    /// signed long-compare 3-jump pattern (fixture 234).
+    CmpAxGroupSym { group: String, symbol: String, offset: i16 },
+    /// `cmp dx,word ptr <group>:<symbol>[+<offset>]` — CMP r16,r/m16
+    /// with DX dst (`3B 16 lo hi`). Low-half companion for the
+    /// signed long-compare 3-jump pattern (fixture 234).
+    CmpDxGroupSym { group: String, symbol: String, offset: i16 },
     /// `push word ptr <group>:<symbol>[+<offset>]` — `FF 36 lo hi`,
     /// `FF /6 r/m16` with disp16-only addressing. Used by BCC to
     /// push long-arith helper arguments onto the stack (e.g.

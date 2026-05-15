@@ -1,0 +1,4 @@
+description = "`if (a < b)` for long globals. Probe: chained-cmp idiom (sign on high half, unsigned on low) or helper call?"
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]
