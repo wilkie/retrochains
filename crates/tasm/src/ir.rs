@@ -394,6 +394,14 @@ pub enum Instr {
     /// carry; used as the high-half partner to `shl` for long left
     /// shift by 1 (fixture 227).
     RclReg16One { reg: Reg16 },
+    /// `sar <reg16>,1` — D1 (mod=11 /7 r/m=reg). Arithmetic shift
+    /// right (sign-fill); high-half operation for signed long right
+    /// shift by 1 (fixture 229).
+    SarReg16One { reg: Reg16 },
+    /// `rcr <reg16>,1` — D1 (mod=11 /3 r/m=reg). Rotate-right through
+    /// carry; low-half partner for `sar` in long right shift by 1
+    /// (fixture 229).
+    RcrReg16One { reg: Reg16 },
     /// `neg <reg16>` — F7 (mod=11 /3 r/m=reg). Two's-complement negate.
     NegReg16 { reg: Reg16 },
     /// `not <reg16>` — F7 (mod=11 /2 r/m=reg). One's-complement.

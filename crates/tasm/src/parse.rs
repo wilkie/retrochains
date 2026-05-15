@@ -410,6 +410,8 @@ fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
         "shr" if rest == "ax,cl" => Ok(Instr::ShrAxCl),
         "shl" => parse_shl_one(rest, line.line_no),
         "rcl" => parse_rcl_one(rest, line.line_no),
+        "sar" => parse_sar_one(rest, line.line_no),
+        "rcr" => parse_rcr_one(rest, line.line_no),
         "inc" => {
             if let Some(reg) = Reg8::parse(rest) {
                 return Ok(Instr::IncReg8 { reg });
@@ -1018,6 +1020,40 @@ fn parse_rcl_one(operands: &str, line_no: usize) -> AsmResult<Instr> {
     let reg = Reg16::parse(lhs)
         .ok_or_else(|| AsmError::new(line_no, format!("rcl: bad register `{lhs}`")))?;
     Ok(Instr::RclReg16One { reg })
+}
+
+/// `sar <reg16>,1` — D1 /7. Arithmetic shift right by one (high-half
+/// op for signed long right-shift-by-one, fixture 229).
+fn parse_sar_one(operands: &str, line_no: usize) -> AsmResult<Instr> {
+    let (lhs, rhs) = split_comma(operands).ok_or_else(|| {
+        AsmError::new(line_no, format!("sar: expected `lhs,rhs`, got {operands:?}"))
+    })?;
+    if rhs != "1" {
+        return Err(AsmError::new(
+            line_no,
+            format!("sar: only `<reg>,1` and `ax,cl` forms supported (got `{rhs}`)"),
+        ));
+    }
+    let reg = Reg16::parse(lhs)
+        .ok_or_else(|| AsmError::new(line_no, format!("sar: bad register `{lhs}`")))?;
+    Ok(Instr::SarReg16One { reg })
+}
+
+/// `rcr <reg16>,1` — D1 /3. Rotate-right-through-carry by one.
+/// Companion to `sar reg,1` for long right-shift-by-one (fixture 229).
+fn parse_rcr_one(operands: &str, line_no: usize) -> AsmResult<Instr> {
+    let (lhs, rhs) = split_comma(operands).ok_or_else(|| {
+        AsmError::new(line_no, format!("rcr: expected `lhs,rhs`, got {operands:?}"))
+    })?;
+    if rhs != "1" {
+        return Err(AsmError::new(
+            line_no,
+            format!("rcr: only `<reg>,1` form supported (got `{rhs}`)"),
+        ));
+    }
+    let reg = Reg16::parse(lhs)
+        .ok_or_else(|| AsmError::new(line_no, format!("rcr: bad register `{lhs}`")))?;
+    Ok(Instr::RcrReg16One { reg })
 }
 
 /// `lea <reg16>,word ptr [bp+N]` — load effective address. Currently

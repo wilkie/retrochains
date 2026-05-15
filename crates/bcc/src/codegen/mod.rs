@@ -2926,6 +2926,24 @@ impl<'a> FunctionEmitter<'a> {
                 let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name},dx\r\n");
                 return;
             }
+            // `g = a >> 1;` signed long right-shift-by-one. Mirror of
+            // the `<< 1` path but with sar/rcr: high gets `sar` (LSB
+            // → CF, MSB sign-extends), low gets `rcr` (CF → MSB, LSB
+            // → CF). Register convention is AX=high, DX=low. Fixture
+            // 229.
+            if let ExprKind::BinOp { op: BinOp::Shr, left, right } = &value.kind
+                && let ExprKind::Ident(a) = &left.kind
+                && self.globals.type_of(a).map_or(false, |t| matches!(t, Type::Long))
+                && try_const_eval(right) == Some(1)
+            {
+                let _ = write!(self.out, "\tmov\tax,word ptr DGROUP:_{a}+2\r\n");
+                let _ = write!(self.out, "\tmov\tdx,word ptr DGROUP:_{a}\r\n");
+                let _ = write!(self.out, "\tsar\tax,1\r\n");
+                let _ = write!(self.out, "\trcr\tdx,1\r\n");
+                let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name}+2,ax\r\n");
+                let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name},dx\r\n");
+                return;
+            }
             // `g = a << K;` for K > 1 — BCC calls the runtime helper
             // `N_LXLSH@`. The register convention SWITCHES to the
             // standard 32-bit ABI: DX=high, AX=low (input *and*

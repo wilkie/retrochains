@@ -304,6 +304,8 @@ fn instr_size(instr: &Instr) -> usize {
         | Instr::AddAxFromSiPtr => 2,
         Instr::ShlReg16One { .. }
         | Instr::RclReg16One { .. }
+        | Instr::SarReg16One { .. }
+        | Instr::RcrReg16One { .. }
         | Instr::NegReg16 { .. }
         | Instr::NotReg16 { .. } => 2,
         Instr::MovBpRelImm { .. } | Instr::MovBpRelOffsetSym { .. } => 5,
@@ -871,6 +873,18 @@ fn emit_instr(
             // as SHL; /2 selects RCL.
             out.push(0xD1);
             out.push(0b11_010_000 | reg.code());
+        }
+        Instr::SarReg16One { reg } => {
+            // `sar r16,1` → D1 (mod=11 /7 r/m=<reg>). Same Grp2 opcode
+            // family; /7 selects SAR (signed shift right).
+            out.push(0xD1);
+            out.push(0b11_111_000 | reg.code());
+        }
+        Instr::RcrReg16One { reg } => {
+            // `rcr r16,1` → D1 (mod=11 /3 r/m=<reg>). Same Grp2 opcode
+            // family; /3 selects RCR.
+            out.push(0xD1);
+            out.push(0b11_011_000 | reg.code());
         }
         Instr::NegReg16 { reg } => {
             // `neg r16` → F7 (mod=11 /3 r/m=<reg>). F7 is Grp3 r/m16.
