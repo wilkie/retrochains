@@ -1,0 +1,4 @@
+description = "`long g = i;` widening int to long. Probes BCC's sign-extension pattern (likely cwd after loading i)."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

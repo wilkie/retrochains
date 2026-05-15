@@ -3087,6 +3087,7 @@ impl<'a> FunctionEmitter<'a> {
             // convention as global-to-global (high→AX, low→DX), with
             // bp-relative loads. Fixture 218 (`g = <long param>`).
             if let ExprKind::Ident(src_name) = &value.kind
+                && self.locals.has(src_name)
                 && self.locals.type_of(src_name).is_long_like()
             {
                 let LocalLocation::Stack(off) = self.locals.location_of(src_name) else {
@@ -3328,6 +3329,19 @@ impl<'a> FunctionEmitter<'a> {
                     let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name},dx\r\n");
                     return;
                 }
+            }
+            // `long g = i;` — widen an int global to long. Load
+            // into AX, sign-extend AX→DX:AX via `cwd`, then store
+            // high (DX) and low (AX). Fixture 254.
+            if let ExprKind::Ident(src_name) = &value.kind
+                && let Some(src_ty) = self.globals.type_of(src_name)
+                && matches!(src_ty, Type::Int)
+            {
+                let _ = write!(self.out, "\tmov\tax,word ptr DGROUP:_{src_name}\r\n");
+                self.out.extend_from_slice(b"\tcwd\t\r\n");
+                let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name}+2,dx\r\n");
+                let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name},ax\r\n");
+                return;
             }
             panic!("non-constant long assignment to global not yet supported (no fixture)");
         }
