@@ -3470,6 +3470,7 @@ fn long_pair_op(op: BinOp) -> Option<(&'static str, &'static str)> {
         BinOp::Add => Some(("add", "adc")),
         BinOp::Sub => Some(("sub", "sbb")),
         BinOp::BitAnd => Some(("and", "and")),
+        BinOp::BitOr => Some(("or", "or")),
         _ => None,
     }
 }

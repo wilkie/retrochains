@@ -325,6 +325,11 @@ pub enum Instr {
     /// `and ax,word ptr <group>:<symbol>[+<offset>]` — AND r16,r/m16
     /// with AX dst (`23 06 lo hi`). Companion for the high half.
     AndAxGroupSym { group: String, symbol: String, offset: i16 },
+    /// `or dx,word ptr <group>:<symbol>[+<offset>]` — OR r16,r/m16
+    /// with DX dst (`0B 16 lo hi`). Long bitwise OR low half
+    /// (fixture 222). Companion to existing `OrAxGroupSym` for
+    /// the high half.
+    OrDxGroupSym { group: String, symbol: String, offset: i16 },
     /// `cbw` — 98. Sign-extend AL to AX. Used after loading a `char`
     /// global to widen it to int for arithmetic (fixture 130).
     Cbw,

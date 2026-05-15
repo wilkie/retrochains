@@ -287,7 +287,8 @@ fn instr_size(instr: &Instr) -> usize {
         | Instr::SubDxGroupSym { .. }
         | Instr::SbbAxGroupSym { .. }
         | Instr::AndDxGroupSym { .. }
-        | Instr::AndAxGroupSym { .. } => 4,
+        | Instr::AndAxGroupSym { .. }
+        | Instr::OrDxGroupSym { .. } => 4,
         Instr::Cbw => 1,
         Instr::LeaReg16BpRel { .. } => 3,
         Instr::MovSiPtrImm { .. } | Instr::MovBxPtrImm { .. } => 4,
@@ -757,6 +758,11 @@ fn emit_instr(
             // `and ax,word ptr <group>:<symbol>` → 23 06 lo hi.
             // Same opcode as the DX form; ModR/M reg field 000=AX.
             emit_group_sym_lea(&[0x23, 0x06], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
+        }
+        Instr::OrDxGroupSym { group, symbol, offset } => {
+            // `or dx,word ptr <group>:<symbol>` → 0B 16 lo hi.
+            // Opcode 0B (OR r16,r/m16); ModR/M 16 = reg=DX rm=disp16.
+            emit_group_sym_lea(&[0x0B, 0x16], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
         }
         Instr::Cbw => out.push(0x98),
         Instr::LeaReg16BpRel { dst, offset } => {

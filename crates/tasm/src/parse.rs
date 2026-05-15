@@ -1022,6 +1022,18 @@ fn parse_or(operands: &str, line_no: usize) -> AsmResult<Instr> {
             });
         }
     }
+    // `or dx, word ptr <group>:<sym>[+N]` — long bitwise OR low half
+    // (fixture 222).
+    if lhs == "dx" {
+        if let Some((group, symbol)) = parse_group_symbol(rhs) {
+            let (sym, offset) = split_sym_offset(symbol);
+            return Ok(Instr::OrDxGroupSym {
+                group: group.to_string(),
+                symbol: sym.to_string(),
+                offset,
+            });
+        }
+    }
     Err(AsmError::new(
         line_no,
         format!("or: unsupported operand form `{operands}`"),
