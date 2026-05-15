@@ -3149,8 +3149,8 @@ impl<'a> FunctionEmitter<'a> {
             if let ExprKind::BinOp { op: BinOp::Mul, left, right } = &value.kind
                 && let ExprKind::Ident(a) = &left.kind
                 && let ExprKind::Ident(b) = &right.kind
-                && self.globals.type_of(a).map_or(false, |t| matches!(t, Type::Long))
-                && self.globals.type_of(b).map_or(false, |t| matches!(t, Type::Long))
+                && self.globals.type_of(a).map_or(false, |t| t.is_long_like())
+                && self.globals.type_of(b).map_or(false, |t| t.is_long_like())
             {
                 let _ = write!(self.out, "\tmov\tcx,word ptr DGROUP:_{a}+2\r\n");
                 let _ = write!(self.out, "\tmov\tbx,word ptr DGROUP:_{a}\r\n");
