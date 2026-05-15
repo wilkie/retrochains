@@ -2816,6 +2816,21 @@ impl<'a> FunctionEmitter<'a> {
                 let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name},dx\r\n");
                 return;
             }
+            // `g = x;` long-from-stack-local copy. Same in-memory
+            // convention as global-to-global (high→AX, low→DX), with
+            // bp-relative loads. Fixture 218 (`g = <long param>`).
+            if let ExprKind::Ident(src_name) = &value.kind
+                && matches!(self.locals.type_of(src_name), Type::Long)
+            {
+                let LocalLocation::Stack(off) = self.locals.location_of(src_name) else {
+                    panic!("register-resident long source not yet supported (no fixture)");
+                };
+                let _ = write!(self.out, "\tmov\tax,word ptr {}\r\n", bp_addr(off + 2));
+                let _ = write!(self.out, "\tmov\tdx,word ptr {}\r\n", bp_addr(off));
+                let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name}+2,ax\r\n");
+                let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name},dx\r\n");
+                return;
+            }
             // `g = f();` where `f` returns long. Call returns DX:AX
             // (high:low) per the standard ABI; store directly back
             // into the long global. Fixture 214.

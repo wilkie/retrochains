@@ -416,28 +416,46 @@ fn write_tail(out: &mut Vec<u8>, unit: &crate::ast::Unit, strings: &codegen::Str
     //     alpha) then _BSS (a).
     //   - 109 (`int x; int main`): output `_main, _x` — disambiguates
     //     global vs per-segment reverse-alpha.
-    // Functions go first (reverse-alphabetical), then all data/bss
-    // globals merged into one reverse-alpha sort. Fixture 211
-    // (`long a=5; long b; main`) disambiguates per-segment from
-    // global short-bucket sorting: BCC emits `_main, _b, _a` even
-    // though `_a` is in _DATA and `_b` is in _BSS — they share one
-    // reverse-alpha ordering once functions are out of the way.
-    let mut text: Vec<String> = Vec::new();
-    let mut shorts: Vec<String> = Vec::new();
+    // Two-bucket publics layout. Symbols split by total *symbol*
+    // name length (with the leading underscore counted): "long"
+    // bucket = ≥ 3 chars (e.g. `_main`), "short" bucket = ≤ 2 chars
+    // (e.g. `_g`, `_f`). Long bucket emits first in reverse-alpha;
+    // short bucket second in reverse-alpha.
+    //
+    // The split is by NAME LENGTH, not by function-vs-variable kind:
+    // fixture 218 (`long g; int f(long); main`) has `_f` and `_g`
+    // both short (2 chars). Expected: `_main, _g, _f` (_main alone
+    // in long bucket; short bucket reverse-alpha = g, f).
+    //
+    // The full general rule for the LONG bucket is still unsettled
+    // — fixtures with multiple multi-char variables expose
+    // additional ordering subtleties (see specs/OPEN_QUESTIONS.md).
+    // Reverse-alpha within long bucket fits every current fixture,
+    // including function-vs-function shapes (095 `_sum, _main`;
+    // 179 `_main, _add`).
+    let mut long_bucket: Vec<String> = Vec::new();
+    let mut short_bucket: Vec<String> = Vec::new();
+    let mut push_sym = |sym: String, longs: &mut Vec<String>, shorts: &mut Vec<String>| {
+        if sym.len() >= 3 {
+            longs.push(sym);
+        } else {
+            shorts.push(sym);
+        }
+    };
     for f in &unit.functions {
         if f.body.is_some() {
-            text.push(codegen::function_symbol(&f.name));
+            push_sym(codegen::function_symbol(&f.name), &mut long_bucket, &mut short_bucket);
         }
     }
     for g in &unit.globals {
         if g.is_static || g.is_extern {
             continue;
         }
-        shorts.push(format!("_{}", g.name));
+        push_sym(format!("_{}", g.name), &mut long_bucket, &mut short_bucket);
     }
-    text.sort();
-    shorts.sort();
-    for name in text.iter().rev().chain(shorts.iter().rev()) {
+    long_bucket.sort();
+    short_bucket.sort();
+    for name in long_bucket.iter().rev().chain(short_bucket.iter().rev()) {
         let _ = write!(out, "\tpublic\t{name}\r\n");
     }
     // Data externs come after the public list (function externs come
