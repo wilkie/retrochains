@@ -1937,6 +1937,26 @@ impl<'a> FunctionEmitter<'a> {
     /// Stack-resident targets are unobserved — every fixture so far
     /// puts the target in a register. Panic until pinned.
     fn emit_compound_assign(&mut self, name: &str, op: BinOp, value: &Expr) {
+        // Long-like global `g += K` / `g -= K` with K fitting i8sx:
+        // memory-direct add/sub on the low half, then adc/sbb 0 on
+        // the high half. Distinct from `g = g + K` (slice 207) which
+        // uses the register-load pattern — BCC differentiates the
+        // two by AST shape. Fixture 251.
+        if let Some(ty) = self.globals.type_of(name)
+            && ty.is_long_like()
+            && matches!(op, BinOp::Add | BinOp::Sub)
+            && let Some(k) = try_const_eval(value)
+            && let Ok(k_i8) = i8::try_from(k as i32)
+        {
+            let (lo_op, hi_op) = match op {
+                BinOp::Add => ("add", "adc"),
+                BinOp::Sub => ("sub", "sbb"),
+                _ => unreachable!(),
+            };
+            let _ = write!(self.out, "\t{lo_op}\tword ptr DGROUP:_{name},{k_i8}\r\n");
+            let _ = write!(self.out, "\t{hi_op}\tword ptr DGROUP:_{name}+2,0\r\n");
+            return;
+        }
         let LocalLocation::Reg(reg) = self.locals.location_of(name) else {
             panic!(
                 "compound assignment on stack-resident `{name}` not yet supported (no fixture)"
