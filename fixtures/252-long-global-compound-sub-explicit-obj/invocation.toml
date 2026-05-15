@@ -1,0 +1,4 @@
+description = "`g -= 5;` for long. Verifies slice 251's `-=` analogy emits the memory-direct sub/sbb pair."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]
