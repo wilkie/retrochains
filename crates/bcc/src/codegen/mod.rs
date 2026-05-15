@@ -2990,8 +2990,11 @@ impl<'a> FunctionEmitter<'a> {
             .cloned()
             .expect("caller already checked");
         // `long g = K;` — two word stores, **high word first** then
-        // low word (fixture 205).
-        if matches!(ty, Type::Long) {
+        // low word (fixture 205). Both `long` and `unsigned long`
+        // share the same byte-level emission for arithmetic and
+        // bitwise ops; only shifts (sar vs shr) and comparisons
+        // (signed vs unsigned jumps) need to branch on signedness.
+        if ty.is_long_like() {
             if let Some(v) = try_const_eval(value) {
                 let lo = v & 0xFFFF;
                 let hi = (v >> 16) & 0xFFFF;
@@ -3079,19 +3082,21 @@ impl<'a> FunctionEmitter<'a> {
                 let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name},dx\r\n");
                 return;
             }
-            // `g = a >> 1;` signed long right-shift-by-one. Mirror of
-            // the `<< 1` path but with sar/rcr: high gets `sar` (LSB
-            // → CF, MSB sign-extends), low gets `rcr` (CF → MSB, LSB
-            // → CF). Register convention is AX=high, DX=low. Fixture
-            // 229.
+            // `g = a >> 1;` long right-shift-by-one. Mirror of the
+            // `<< 1` path: high gets `sar`/`shr` (signed/unsigned),
+            // low gets `rcr` (CF threads from high LSB into low MSB).
+            // Register convention is AX=high, DX=low. Fixtures 229
+            // (signed), 243 (unsigned).
             if let ExprKind::BinOp { op: BinOp::Shr, left, right } = &value.kind
                 && let ExprKind::Ident(a) = &left.kind
-                && self.globals.type_of(a).map_or(false, |t| matches!(t, Type::Long))
+                && let Some(a_ty) = self.globals.type_of(a)
+                && a_ty.is_long_like()
                 && try_const_eval(right) == Some(1)
             {
+                let hi_op = if a_ty.is_unsigned() { "shr" } else { "sar" };
                 let _ = write!(self.out, "\tmov\tax,word ptr DGROUP:_{a}+2\r\n");
                 let _ = write!(self.out, "\tmov\tdx,word ptr DGROUP:_{a}\r\n");
-                let _ = write!(self.out, "\tsar\tax,1\r\n");
+                let _ = write!(self.out, "\t{hi_op}\tax,1\r\n");
                 let _ = write!(self.out, "\trcr\tdx,1\r\n");
                 let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name}+2,ax\r\n");
                 let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name},dx\r\n");

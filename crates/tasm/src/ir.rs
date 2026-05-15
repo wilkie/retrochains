@@ -411,6 +411,10 @@ pub enum Instr {
     /// right (sign-fill); high-half operation for signed long right
     /// shift by 1 (fixture 229).
     SarReg16One { reg: Reg16 },
+    /// `shr <reg16>,1` — D1 (mod=11 /5 r/m=reg). Logical shift
+    /// right (zero-fill); high-half operation for unsigned long
+    /// right shift by 1 (fixture 243).
+    ShrReg16One { reg: Reg16 },
     /// `rcr <reg16>,1` — D1 (mod=11 /3 r/m=reg). Rotate-right through
     /// carry; low-half partner for `sar` in long right shift by 1
     /// (fixture 229).

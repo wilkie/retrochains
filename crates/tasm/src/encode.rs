@@ -307,6 +307,7 @@ fn instr_size(instr: &Instr) -> usize {
         Instr::ShlReg16One { .. }
         | Instr::RclReg16One { .. }
         | Instr::SarReg16One { .. }
+        | Instr::ShrReg16One { .. }
         | Instr::RcrReg16One { .. }
         | Instr::NegReg16 { .. }
         | Instr::NotReg16 { .. } => 2,
@@ -897,6 +898,12 @@ fn emit_instr(
             // family; /7 selects SAR (signed shift right).
             out.push(0xD1);
             out.push(0b11_111_000 | reg.code());
+        }
+        Instr::ShrReg16One { reg } => {
+            // `shr r16,1` → D1 (mod=11 /5 r/m=<reg>). Same Grp2 opcode
+            // family; /5 selects SHR (logical shift right).
+            out.push(0xD1);
+            out.push(0b11_101_000 | reg.code());
         }
         Instr::RcrReg16One { reg } => {
             // `rcr r16,1` → D1 (mod=11 /3 r/m=<reg>). Same Grp2 opcode
