@@ -1176,7 +1176,7 @@ impl<'a> FunctionEmitter<'a> {
             return false;
         };
         let ExprKind::Ident(name) = &left.kind else { return false };
-        if !self.globals.type_of(name).map_or(false, |t| matches!(t, Type::Long)) {
+        if !self.globals.type_of(name).map_or(false, |t| t.is_long_like()) {
             return false;
         }
         let Some(k) = try_const_eval(right) else { return false };
@@ -1288,7 +1288,8 @@ impl<'a> FunctionEmitter<'a> {
         // form would invert to `je` and pick up later.
         if let ExprKind::BinOp { op: BinOp::Eq, left, right } = &cond.kind
             && let ExprKind::Ident(name) = &left.kind
-            && let Some(Type::Long) = self.globals.type_of(name)
+            && let Some(gty) = self.globals.type_of(name)
+            && gty.is_long_like()
             && let Some(k) = try_const_eval(right)
             && k != 0
             && true_slot.is_none()
@@ -1393,7 +1394,7 @@ impl<'a> FunctionEmitter<'a> {
             && matches!(op, BinOp::Eq | BinOp::Ne)
             && let ExprKind::Ident(name) = &left.kind
             && let Some(gty) = self.globals.type_of(name)
-            && matches!(gty, Type::Long)
+            && gty.is_long_like()
             && try_const_eval(right) == Some(0)
         {
             let _ = write!(self.out, "\tmov\tax,word ptr DGROUP:_{name}\r\n");
@@ -1675,7 +1676,7 @@ impl<'a> FunctionEmitter<'a> {
                 .and_then(|tys| tys.get(i))
                 .cloned()
                 .unwrap_or(Type::Int);
-            if matches!(arg_ty, Type::Long) {
+            if arg_ty.is_long_like() {
                 // Long arg: materialize (AX=high, DX=low), push
                 // high then low. 4 bytes per arg. Fixture 216.
                 self.emit_long_arg_push(arg);
@@ -1791,7 +1792,7 @@ impl<'a> FunctionEmitter<'a> {
         // BCC swaps the AX/DX roles when doing in-memory long
         // arithmetic — see fixture 207 — but the boundary at
         // `return` uses the ABI-standard layout.) Fixture 212.
-        if matches!(self.function.ret_ty, Type::Long) {
+        if self.function.ret_ty.is_long_like() {
             if let Some(v) = try_const_eval(e) {
                 let lo = v & 0xFFFF;
                 let hi = (v >> 16) & 0xFFFF;
@@ -1812,7 +1813,7 @@ impl<'a> FunctionEmitter<'a> {
             // low to AX (A1 short form). Fixture 213.
             if let ExprKind::Ident(name) = &e.kind
                 && let Some(src_ty) = self.globals.type_of(name)
-                && matches!(src_ty, Type::Long)
+                && src_ty.is_long_like()
             {
                 let _ = write!(self.out, "\tmov\tdx,word ptr DGROUP:_{name}+2\r\n");
                 let _ = write!(self.out, "\tmov\tax,word ptr DGROUP:_{name}\r\n");
@@ -1823,7 +1824,7 @@ impl<'a> FunctionEmitter<'a> {
             // the high word lives at `off + 2`. Load high to DX, low
             // to AX per the ABI. Fixture 217.
             if let ExprKind::Ident(name) = &e.kind
-                && matches!(self.locals.type_of(name), Type::Long)
+                && self.locals.type_of(name).is_long_like()
             {
                 let LocalLocation::Stack(off) = self.locals.location_of(name) else {
                     panic!("register-resident long not yet supported (no fixture)");
@@ -1845,7 +1846,7 @@ impl<'a> FunctionEmitter<'a> {
                 // word at the upper slot offset then low word at the
                 // lower slot. Mirrors fixture 205's global-long shape.
                 // Fixture 210.
-                if matches!(ty, Type::Long) {
+                if ty.is_long_like() {
                     let Some(v) = try_const_eval(init) else {
                         panic!("non-constant long local init not yet supported (no fixture)");
                     };
@@ -3013,7 +3014,7 @@ impl<'a> FunctionEmitter<'a> {
             // g. Fixture 211.
             if let ExprKind::Ident(src_name) = &value.kind
                 && let Some(src_ty) = self.globals.type_of(src_name)
-                && matches!(src_ty, Type::Long)
+                && src_ty.is_long_like()
             {
                 let _ = write!(self.out, "\tmov\tax,word ptr DGROUP:_{src_name}+2\r\n");
                 let _ = write!(self.out, "\tmov\tdx,word ptr DGROUP:_{src_name}\r\n");
@@ -3025,7 +3026,7 @@ impl<'a> FunctionEmitter<'a> {
             // convention as global-to-global (high→AX, low→DX), with
             // bp-relative loads. Fixture 218 (`g = <long param>`).
             if let ExprKind::Ident(src_name) = &value.kind
-                && matches!(self.locals.type_of(src_name), Type::Long)
+                && self.locals.type_of(src_name).is_long_like()
             {
                 let LocalLocation::Stack(off) = self.locals.location_of(src_name) else {
                     panic!("register-resident long source not yet supported (no fixture)");
@@ -3040,7 +3041,7 @@ impl<'a> FunctionEmitter<'a> {
             // (high:low) per the standard ABI; store directly back
             // into the long global. Fixture 214.
             if let ExprKind::Call { name: fname, args } = &value.kind
-                && self.signatures.ret_ty_of(fname).map_or(false, |t| matches!(t, Type::Long))
+                && self.signatures.ret_ty_of(fname).map_or(false, |t| t.is_long_like())
             {
                 self.emit_call(fname, args);
                 let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name}+2,dx\r\n");
@@ -3052,7 +3053,7 @@ impl<'a> FunctionEmitter<'a> {
             // after the load. Fixture 225.
             if let ExprKind::Unary { op: UnaryOp::BitNot, operand } = &value.kind
                 && let ExprKind::Ident(a) = &operand.kind
-                && self.globals.type_of(a).map_or(false, |t| matches!(t, Type::Long))
+                && self.globals.type_of(a).map_or(false, |t| t.is_long_like())
             {
                 let _ = write!(self.out, "\tmov\tax,word ptr DGROUP:_{a}+2\r\n");
                 let _ = write!(self.out, "\tmov\tdx,word ptr DGROUP:_{a}\r\n");
@@ -3071,7 +3072,7 @@ impl<'a> FunctionEmitter<'a> {
             // ABI convention (see the >1 path below). Fixture 227.
             if let ExprKind::BinOp { op: BinOp::Shl, left, right } = &value.kind
                 && let ExprKind::Ident(a) = &left.kind
-                && self.globals.type_of(a).map_or(false, |t| matches!(t, Type::Long))
+                && self.globals.type_of(a).map_or(false, |t| t.is_long_like())
                 && try_const_eval(right) == Some(1)
             {
                 let _ = write!(self.out, "\tmov\tax,word ptr DGROUP:_{a}+2\r\n");
@@ -3203,7 +3204,7 @@ impl<'a> FunctionEmitter<'a> {
             // Fixture 226.
             if let ExprKind::Unary { op: UnaryOp::Neg, operand } = &value.kind
                 && let ExprKind::Ident(a) = &operand.kind
-                && self.globals.type_of(a).map_or(false, |t| matches!(t, Type::Long))
+                && self.globals.type_of(a).map_or(false, |t| t.is_long_like())
             {
                 let _ = write!(self.out, "\tmov\tax,word ptr DGROUP:_{a}+2\r\n");
                 let _ = write!(self.out, "\tmov\tdx,word ptr DGROUP:_{a}\r\n");
@@ -3226,8 +3227,8 @@ impl<'a> FunctionEmitter<'a> {
                 && let Some((lo_op, hi_op)) = long_pair_op(*op)
                 && let ExprKind::Ident(a) = &left.kind
                 && let ExprKind::Ident(b) = &right.kind
-                && self.globals.type_of(a).map_or(false, |t| matches!(t, Type::Long))
-                && self.globals.type_of(b).map_or(false, |t| matches!(t, Type::Long))
+                && self.globals.type_of(a).map_or(false, |t| t.is_long_like())
+                && self.globals.type_of(b).map_or(false, |t| t.is_long_like())
             {
                 let _ = write!(self.out, "\tmov\tax,word ptr DGROUP:_{a}+2\r\n");
                 let _ = write!(self.out, "\tmov\tdx,word ptr DGROUP:_{a}\r\n");
