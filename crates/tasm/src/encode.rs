@@ -291,6 +291,7 @@ fn instr_size(instr: &Instr) -> usize {
         | Instr::OrDxGroupSym { .. }
         | Instr::XorDxGroupSym { .. }
         | Instr::XorAxGroupSym { .. } => 4,
+        Instr::PushGroupSym { .. } => 4,
         Instr::CmpGroupSymImm8Sx { .. } => 5,
         Instr::Cbw => 1,
         Instr::LeaReg16BpRel { .. } => 3,
@@ -787,6 +788,12 @@ fn emit_instr(
             // `xor ax,word ptr <group>:<symbol>` → 33 06 lo hi.
             // Same opcode as the DX form; ModR/M reg field 000=AX.
             emit_group_sym_lea(&[0x33, 0x06], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
+        }
+        Instr::PushGroupSym { group, symbol, offset } => {
+            // `push word ptr <group>:<sym>[+N]` → FF 36 lo hi.
+            // FF /6 r/m16 with disp16-only addressing (ModR/M 36 =
+            // mod=00 reg=110 rm=110).
+            emit_group_sym_lea(&[0xFF, 0x36], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
         }
         Instr::CmpGroupSymImm8Sx { group, symbol, offset, imm } => {
             // `cmp word ptr <group>:<sym>[+N], imm8sx` → 83 3E lo hi ii.

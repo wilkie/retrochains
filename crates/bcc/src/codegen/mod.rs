@@ -2944,6 +2944,29 @@ impl<'a> FunctionEmitter<'a> {
                 let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name},dx\r\n");
                 return;
             }
+            // `g = a / b;` signed long division. BCC calls helper
+            // `N_LDIV@` with operands passed on the STACK (cdecl
+            // order — b pushed first, so a sits at the lowest
+            // pushed address). High word pushed before low for each
+            // operand: push b+2, b, a+2, a. Result in DX:AX. Helper
+            // self-cleans the stack (no `add sp,8` after). Fixture
+            // 232.
+            if let ExprKind::BinOp { op: BinOp::Div, left, right } = &value.kind
+                && let ExprKind::Ident(a) = &left.kind
+                && let ExprKind::Ident(b) = &right.kind
+                && self.globals.type_of(a).map_or(false, |t| matches!(t, Type::Long))
+                && self.globals.type_of(b).map_or(false, |t| matches!(t, Type::Long))
+            {
+                let _ = write!(self.out, "\tpush\tword ptr DGROUP:_{b}+2\r\n");
+                let _ = write!(self.out, "\tpush\tword ptr DGROUP:_{b}\r\n");
+                let _ = write!(self.out, "\tpush\tword ptr DGROUP:_{a}+2\r\n");
+                let _ = write!(self.out, "\tpush\tword ptr DGROUP:_{a}\r\n");
+                self.out.extend_from_slice(b"\tcall\tnear ptr N_LDIV@\r\n");
+                self.helpers.insert("N_LDIV@".to_string());
+                let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name}+2,dx\r\n");
+                let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name},ax\r\n");
+                return;
+            }
             // `g = a * b;` long multiplication. BCC calls the runtime
             // helper `N_LXMUL@`. Calling convention: operand a in
             // (CX:BX)=(high:low), operand b in (DX:AX)=(high:low),

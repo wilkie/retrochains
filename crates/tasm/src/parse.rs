@@ -369,9 +369,22 @@ fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
     let kw = line.keyword;
     let rest = line.rest.trim_end();
     match kw {
-        "push" => Reg16::parse(rest)
-            .map(|reg| Instr::PushReg16 { reg })
-            .ok_or_else(|| AsmError::new(line.line_no, format!("push: unsupported operand `{rest}`"))),
+        "push" => {
+            if let Some(reg) = Reg16::parse(rest) {
+                return Ok(Instr::PushReg16 { reg });
+            }
+            // `push word ptr <group>:<sym>[+N]` — memory push of a
+            // long-arith helper argument (fixture 232).
+            if let Some((group, symbol)) = parse_group_symbol(rest) {
+                let (sym, offset) = split_sym_offset(symbol);
+                return Ok(Instr::PushGroupSym {
+                    group: group.to_string(),
+                    symbol: sym.to_string(),
+                    offset,
+                });
+            }
+            Err(AsmError::new(line.line_no, format!("push: unsupported operand `{rest}`")))
+        }
         "pop" => Reg16::parse(rest)
             .map(|reg| Instr::PopReg16 { reg })
             .ok_or_else(|| AsmError::new(line.line_no, format!("pop: unsupported operand `{rest}`"))),

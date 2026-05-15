@@ -341,6 +341,11 @@ pub enum Instr {
     /// `xor ax,word ptr <group>:<symbol>[+<offset>]` — XOR r16,r/m16
     /// with AX dst (`33 06 lo hi`). Companion for the high half.
     XorAxGroupSym { group: String, symbol: String, offset: i16 },
+    /// `push word ptr <group>:<symbol>[+<offset>]` — `FF 36 lo hi`,
+    /// `FF /6 r/m16` with disp16-only addressing. Used by BCC to
+    /// push long-arith helper arguments onto the stack (e.g.
+    /// fixture 232's `N_LDIV@` call).
+    PushGroupSym { group: String, symbol: String, offset: i16 },
     /// `cmp word ptr <group>:<symbol>[+<offset>], imm8 (sx)` — Grp1
     /// r/m16,imm8sx with /7=CMP and disp16-only addressing
     /// (`83 3E lo hi ii`, 5 bytes). Used by long const-compare
