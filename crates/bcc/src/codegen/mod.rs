@@ -1161,18 +1161,21 @@ impl<'a> FunctionEmitter<'a> {
             && let ExprKind::Ident(b) = &right.kind
             && let (Some(tslot), Some(fslot)) = (true_slot, false_slot)
         {
-            // Choose the mnemonics by direction. For `a < b`:
-            //   high signed: jg → false (a>b not less), jl → true
-            //   low unsigned: jae → false (a>=b not strictly less)
-            // For `a > b`: swap roles — jl → false, jg → true,
-            // ja → true (strictly above, unsigned low).
-            // For `<=` and `>=`: the low-half tie-breaker flips
-            // from strict (jae/jbe) to non-strict (ja/jb).
+            // Mnemonic table (verified against fixtures 234/235/
+            // 236/237). After `cmp ax, b+2`:
+            //   `<`  jg→false, jl→true,  then `cmp dx,b` jae→false
+            //   `>`  jl→false, jg→true,  then `cmp dx,b` jbe→false
+            //   `<=` jg→false, jne→true, then `cmp dx,b` ja→false
+            //   `>=` jl→false, jne→true, then `cmp dx,b` jb→false
+            // Strict comparisons use the signed jl/jg for the
+            // high-half true jump; non-strict use jne. The low-half
+            // tie-breaker uses the unsigned strict (jae/jbe) for
+            // strict and non-strict (ja/jb) for non-strict.
             let (hi_to_false, hi_to_true, lo_to_false) = match op {
-                BinOp::Lt => ("jg", "jl", "jae"),
-                BinOp::Gt => ("jl", "jg", "jbe"),
-                BinOp::Le => ("jg", "jl", "ja"),
-                BinOp::Ge => ("jl", "jg", "jb"),
+                BinOp::Lt => ("jg", "jl",  "jae"),
+                BinOp::Gt => ("jl", "jg",  "jbe"),
+                BinOp::Le => ("jg", "jne", "ja"),
+                BinOp::Ge => ("jl", "jne", "jb"),
                 _ => unreachable!(),
             };
             let _ = write!(self.out, "\tmov\tax,word ptr DGROUP:_{a}+2\r\n");

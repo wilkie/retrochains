@@ -1,0 +1,4 @@
+description = "`if (a >= b)` for long globals. Verifies the `>=` mnemonic mapping."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]
