@@ -241,6 +241,7 @@ fn instr_size(instr: &Instr) -> usize {
         | Instr::AdcReg16Reg16 { .. }
         | Instr::SubReg16Reg16 { .. }
         | Instr::SbbReg16Reg16 { .. }
+        | Instr::AndReg16Reg16 { .. }
         | Instr::OrReg16Reg16 { .. }
         | Instr::CmpReg16Reg16 { .. } => 2,
         Instr::CmpReg16Imm8 { .. } | Instr::CmpAxImm { .. } | Instr::AddAxImm { .. } => 3,
@@ -372,6 +373,11 @@ fn emit_instr(
             // `sbb r16,r16` → 1B (mod=11 dst<<3 src). Borrow-
             // propagation high-half partner to `sub r16,r16`.
             out.push(0x1B);
+            out.push(0b11_000_000 | (dst.code() << 3) | src.code());
+        }
+        Instr::AndReg16Reg16 { dst, src } => {
+            // `and r16,r16` → 23 (mod=11 dst<<3 src).
+            out.push(0x23);
             out.push(0b11_000_000 | (dst.code() << 3) | src.code());
         }
         Instr::OrReg16Reg16 { dst, src } => {

@@ -1,0 +1,4 @@
+description = "`g = g & i;` long-and-int. Probes BCC's pattern for bitwise ops with mixed widths (sign-extend i, then AND per half)."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

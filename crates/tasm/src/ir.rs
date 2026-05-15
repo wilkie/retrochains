@@ -143,6 +143,9 @@ pub enum Instr {
     /// ModR/M mod=11 reg=dst r/m=src (fixture 258's long-minus-int
     /// high-half borrow propagation).
     SbbReg16Reg16 { dst: Reg16, src: Reg16 },
+    /// `and <dst>,<src>` between 16-bit registers — 23 xx with
+    /// ModR/M mod=11 reg=dst r/m=src (fixture 259's long-and-int).
+    AndReg16Reg16 { dst: Reg16, src: Reg16 },
     /// `or <dst>,<src>` between 16-bit registers — 0B xx. BCC uses
     /// `or ax,ax` as a compare-against-zero idiom in switch dispatch.
     OrReg16Reg16 { dst: Reg16, src: Reg16 },

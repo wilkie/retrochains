@@ -3330,26 +3330,23 @@ impl<'a> FunctionEmitter<'a> {
                     return;
                 }
             }
-            // `g = g + i;` / `g = g - i;` long-self plus/minus int-
-            // global. BCC widens i first (load to AX, cwd to DX:AX),
-            // then loads the long accumulator into BX:CX (high:low —
-            // different from the AX/DX convention used elsewhere
-            // because DX:AX is holding the widened int), does the
-            // arithmetic with carry/borrow, and stores back.
-            // Fixtures 257 (`+`), 258 (`-`).
+            // `g = g <op> i;` long-self <op> int-global, for
+            // add/sub/and/or/xor. BCC widens i first (mov ax,
+            // _i / cwd to DX:AX), then loads the long accumulator
+            // into BX:CX (high:low — DX:AX is busy with the
+            // widened int), does the operation per half, and stores
+            // back. Arithmetic uses add/adc or sub/sbb for carry
+            // propagation; bitwise repeats the same mnemonic per
+            // half since they're independent. Fixtures 257 (`+`),
+            // 258 (`-`), 259 (`&`).
             if let ExprKind::BinOp { op, left, right } = &value.kind
-                && matches!(op, BinOp::Add | BinOp::Sub)
                 && let ExprKind::Ident(lhs_name) = &left.kind
                 && lhs_name == name
                 && let ExprKind::Ident(i_name) = &right.kind
                 && let Some(i_ty) = self.globals.type_of(i_name)
                 && matches!(i_ty, Type::Int)
+                && let Some((lo_op, hi_op)) = long_pair_op(*op)
             {
-                let (lo_op, hi_op) = match op {
-                    BinOp::Add => ("add", "adc"),
-                    BinOp::Sub => ("sub", "sbb"),
-                    _ => unreachable!(),
-                };
                 let _ = write!(self.out, "\tmov\tax,word ptr DGROUP:_{i_name}\r\n");
                 self.out.extend_from_slice(b"\tcwd\t\r\n");
                 let _ = write!(self.out, "\tmov\tbx,word ptr DGROUP:_{name}+2\r\n");
