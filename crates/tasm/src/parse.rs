@@ -383,7 +383,7 @@ fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
         "adc" => parse_adc(rest, line.line_no),
         "sub" => parse_sub(rest, line.line_no),
         "sbb" => parse_sbb(rest, line.line_no),
-        "and" => parse_alu_ax_mem(rest, line.line_no, "and", |o| Instr::AndAxBpRel { offset: o }),
+        "and" => parse_and(rest, line.line_no),
         "or" => parse_or(rest, line.line_no),
         "xor" => parse_xor(rest, line.line_no),
         "cmp" => parse_cmp(rest, line.line_no),
@@ -707,6 +707,36 @@ fn parse_sub(operands: &str, line_no: usize) -> AsmResult<Instr> {
     }
     // Otherwise: try the AX/mem form.
     parse_alu_ax_mem(operands, line_no, "sub", |o| Instr::SubAxBpRel { offset: o })
+}
+
+/// `and` covers `and ax,word ptr [bp+N]` (existing) plus the
+/// long-arithmetic group-sym forms `and {ax|dx},word ptr <group>:<sym>[+N]`
+/// (fixture 221).
+fn parse_and(operands: &str, line_no: usize) -> AsmResult<Instr> {
+    let (lhs, rhs) = split_comma(operands).ok_or_else(|| {
+        AsmError::new(line_no, format!("and: expected `lhs,rhs`, got {operands:?}"))
+    })?;
+    if lhs == "ax" {
+        if let Some((group, symbol)) = parse_group_symbol(rhs) {
+            let (sym, offset) = split_sym_offset(symbol);
+            return Ok(Instr::AndAxGroupSym {
+                group: group.to_string(),
+                symbol: sym.to_string(),
+                offset,
+            });
+        }
+    }
+    if lhs == "dx" {
+        if let Some((group, symbol)) = parse_group_symbol(rhs) {
+            let (sym, offset) = split_sym_offset(symbol);
+            return Ok(Instr::AndDxGroupSym {
+                group: group.to_string(),
+                symbol: sym.to_string(),
+                offset,
+            });
+        }
+    }
+    parse_alu_ax_mem(operands, line_no, "and", |o| Instr::AndAxBpRel { offset: o })
 }
 
 /// `sbb ax, word ptr <group>:<sym>[+N]` — subtract-with-borrow,

@@ -2842,23 +2842,21 @@ impl<'a> FunctionEmitter<'a> {
                 let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name},ax\r\n");
                 return;
             }
-            // `g = a + b;` and `g = a - b;` — long-to-long arithmetic
-            // between two long globals. Load a into (AX=high, DX=low),
-            // apply the op's pair to b's halves (add+adc for `+`,
-            // sub+sbb for `-`), then store. Fixtures 219 (add) and
-            // 220 (sub).
+            // Long-to-long arithmetic/bitwise between two long globals:
+            // `g = a + b;` / `g = a - b;` / `g = a & b;` (and similar
+            // for `|`, `^` once fixtured). Same skeleton: load a into
+            // (AX=high, DX=low), apply the op's pair to b's halves,
+            // store back. Add/Sub need carry/borrow (adc/sbb on the
+            // high half); bitwise ops are independent per-half so the
+            // high-half op is the same mnemonic. Fixtures 219 (add),
+            // 220 (sub), 221 (and).
             if let ExprKind::BinOp { op, left, right } = &value.kind
-                && (matches!(op, BinOp::Add) || matches!(op, BinOp::Sub))
+                && let Some((lo_op, hi_op)) = long_pair_op(*op)
                 && let ExprKind::Ident(a) = &left.kind
                 && let ExprKind::Ident(b) = &right.kind
                 && self.globals.type_of(a).map_or(false, |t| matches!(t, Type::Long))
                 && self.globals.type_of(b).map_or(false, |t| matches!(t, Type::Long))
             {
-                let (lo_op, hi_op) = match op {
-                    BinOp::Add => ("add", "adc"),
-                    BinOp::Sub => ("sub", "sbb"),
-                    _ => unreachable!(),
-                };
                 let _ = write!(self.out, "\tmov\tax,word ptr DGROUP:_{a}+2\r\n");
                 let _ = write!(self.out, "\tmov\tdx,word ptr DGROUP:_{a}\r\n");
                 let _ = write!(self.out, "\t{lo_op}\tdx,word ptr DGROUP:_{b}\r\n");
@@ -3463,6 +3461,19 @@ fn switch_c_num(strategy: SwitchStrategy, case_count: u32) -> u32 {
 /// `"byte"` for `char` (and char arrays), `"word"` for `int`,
 /// pointers, and int arrays. Currently used only by initialization
 /// of stack-resident locals.
+/// The (low-half, high-half) mnemonic pair for long-to-long arithmetic
+/// or bitwise ops. Add/Sub propagate carry/borrow into the high half
+/// (`adc`/`sbb`); bitwise ops act independently per half so high uses
+/// the same mnemonic as low.
+fn long_pair_op(op: BinOp) -> Option<(&'static str, &'static str)> {
+    match op {
+        BinOp::Add => Some(("add", "adc")),
+        BinOp::Sub => Some(("sub", "sbb")),
+        BinOp::BitAnd => Some(("and", "and")),
+        _ => None,
+    }
+}
+
 fn ptr_width(ty: &Type) -> &'static str {
     if ty.size_bytes() == 1 { "byte" } else { "word" }
 }

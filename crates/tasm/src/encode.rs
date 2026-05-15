@@ -285,7 +285,9 @@ fn instr_size(instr: &Instr) -> usize {
         | Instr::AddDxGroupSym { .. }
         | Instr::AdcAxGroupSym { .. }
         | Instr::SubDxGroupSym { .. }
-        | Instr::SbbAxGroupSym { .. } => 4,
+        | Instr::SbbAxGroupSym { .. }
+        | Instr::AndDxGroupSym { .. }
+        | Instr::AndAxGroupSym { .. } => 4,
         Instr::Cbw => 1,
         Instr::LeaReg16BpRel { .. } => 3,
         Instr::MovSiPtrImm { .. } | Instr::MovBxPtrImm { .. } => 4,
@@ -745,6 +747,16 @@ fn emit_instr(
             // `sbb ax,word ptr <group>:<symbol>` → 1B 06 lo hi.
             // Companion to AdcAxGroupSym; opcode 1B (SBB r16,r/m16).
             emit_group_sym_lea(&[0x1B, 0x06], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
+        }
+        Instr::AndDxGroupSym { group, symbol, offset } => {
+            // `and dx,word ptr <group>:<symbol>` → 23 16 lo hi.
+            // Opcode 23 (AND r16,r/m16) with DX dst.
+            emit_group_sym_lea(&[0x23, 0x16], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
+        }
+        Instr::AndAxGroupSym { group, symbol, offset } => {
+            // `and ax,word ptr <group>:<symbol>` → 23 06 lo hi.
+            // Same opcode as the DX form; ModR/M reg field 000=AX.
+            emit_group_sym_lea(&[0x23, 0x06], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
         }
         Instr::Cbw => out.push(0x98),
         Instr::LeaReg16BpRel { dst, offset } => {

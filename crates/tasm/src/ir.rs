@@ -318,6 +318,13 @@ pub enum Instr {
     /// with AX dst (`1B 06 lo hi`). High-half subtract-with-borrow
     /// (fixture 220).
     SbbAxGroupSym { group: String, symbol: String, offset: i16 },
+    /// `and dx,word ptr <group>:<symbol>[+<offset>]` — AND r16,r/m16
+    /// with DX dst (`23 16 lo hi`). Used by long bitwise AND for
+    /// the low half (fixture 221).
+    AndDxGroupSym { group: String, symbol: String, offset: i16 },
+    /// `and ax,word ptr <group>:<symbol>[+<offset>]` — AND r16,r/m16
+    /// with AX dst (`23 06 lo hi`). Companion for the high half.
+    AndAxGroupSym { group: String, symbol: String, offset: i16 },
     /// `cbw` — 98. Sign-extend AL to AX. Used after loading a `char`
     /// global to widen it to int for arithmetic (fixture 130).
     Cbw,

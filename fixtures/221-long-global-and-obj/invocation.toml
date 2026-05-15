@@ -1,0 +1,4 @@
+description = "`g = a & b;` long bitwise AND between three long globals. Simpler than add/sub: no carry between halves, just two independent 16-bit ANDs (one per half)."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]
