@@ -1465,6 +1465,7 @@ impl<'a> FunctionEmitter<'a> {
     /// 034 (2), 049 (3), 046/048 (4).
     fn emit_call(&mut self, name: &str, args: &[Expr]) {
         let param_tys = self.signatures.params_of(name);
+        let mut total_bytes: u32 = 0;
         for (i, arg) in args.iter().enumerate().rev() {
             // Param type for the i-th arg, defaulting to int when the
             // signature isn't known (extern function — no fixture yet).
@@ -1472,8 +1473,16 @@ impl<'a> FunctionEmitter<'a> {
                 .and_then(|tys| tys.get(i))
                 .cloned()
                 .unwrap_or(Type::Int);
-            self.emit_arg_into_ax(arg, arg_ty);
-            self.out.extend_from_slice(b"\tpush\tax\r\n");
+            if matches!(arg_ty, Type::Long) {
+                // Long arg: materialize (AX=high, DX=low), push
+                // high then low. 4 bytes per arg. Fixture 216.
+                self.emit_long_arg_push(arg);
+                total_bytes += 4;
+            } else {
+                self.emit_arg_into_ax(arg, arg_ty);
+                self.out.extend_from_slice(b"\tpush\tax\r\n");
+                total_bytes += 2;
+            }
         }
         // Direct call to a function symbol vs. indirect call through
         // a function-pointer local. The disambiguator is whether
@@ -1489,17 +1498,43 @@ impl<'a> FunctionEmitter<'a> {
         } else {
             let _ = write!(self.out, "\tcall\tnear ptr _{name}\r\n");
         }
-        match args.len() {
-            0 => {}
-            1 | 2 => {
-                for _ in args {
-                    self.out.extend_from_slice(b"\tpop\tcx\r\n");
-                }
+        // Cleanup: BCC uses `pop cx` per word when total ≤ 4 bytes,
+        // `add sp, N` for 6 bytes or more. The threshold is shared
+        // across int and long args — fixture 216's single long arg
+        // pushes 4 bytes and gets 2 pops, mirroring the 2-int-args
+        // shape.
+        if total_bytes == 0 {
+            // nothing
+        } else if total_bytes <= 4 {
+            for _ in 0..(total_bytes / 2) {
+                self.out.extend_from_slice(b"\tpop\tcx\r\n");
             }
-            n => {
-                let _ = write!(self.out, "\tadd\tsp,{}\r\n", n * 2);
-            }
+        } else {
+            let _ = write!(self.out, "\tadd\tsp,{total_bytes}\r\n");
         }
+    }
+
+    /// Materialize a long argument into AX (high) and DX (low), then
+    /// push both halves (high first, low second) per BCC's calling
+    /// convention. Fixture 216.
+    fn emit_long_arg_push(&mut self, arg: &Expr) {
+        let Some(v) = try_const_eval(arg) else {
+            panic!("non-constant long argument not yet supported (no fixture)");
+        };
+        let lo = v & 0xFFFF;
+        let hi = (v >> 16) & 0xFFFF;
+        if hi == 0 {
+            self.out.extend_from_slice(b"\txor\tax,ax\r\n");
+        } else {
+            let _ = write!(self.out, "\tmov\tax,{hi}\r\n");
+        }
+        if lo == 0 {
+            self.out.extend_from_slice(b"\txor\tdx,dx\r\n");
+        } else {
+            let _ = write!(self.out, "\tmov\tdx,{lo}\r\n");
+        }
+        self.out.extend_from_slice(b"\tpush\tax\r\n");
+        self.out.extend_from_slice(b"\tpush\tdx\r\n");
     }
 
     /// Place an argument into AX (the low byte of which is `al`) for
