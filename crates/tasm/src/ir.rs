@@ -384,6 +384,25 @@ pub enum Instr {
         offset: i16,
         imm: i8,
     },
+    /// `sub word ptr <group>:<symbol>[+<offset>], imm8 (sx)` — Grp1
+    /// r/m16,imm8sx with /5=SUB (`83 2E lo hi ii`, 5 bytes). Used
+    /// by long postfix `g--` (fixture 250): low-half memory-sub of 1.
+    SubGroupSymImm8Sx {
+        group: String,
+        symbol: String,
+        offset: i16,
+        imm: i8,
+    },
+    /// `sbb word ptr <group>:<symbol>[+<offset>], imm8 (sx)` — Grp1
+    /// r/m16,imm8sx with /3=SBB (`83 1E lo hi ii`, 5 bytes). Used
+    /// as the borrow-propagation high-half partner to
+    /// `SubGroupSymImm8Sx` for long `g--` / `g -= K` (fixture 250).
+    SbbGroupSymImm8Sx {
+        group: String,
+        symbol: String,
+        offset: i16,
+        imm: i8,
+    },
     /// `cbw` — 98. Sign-extend AL to AX. Used after loading a `char`
     /// global to widen it to int for arithmetic (fixture 130).
     Cbw,

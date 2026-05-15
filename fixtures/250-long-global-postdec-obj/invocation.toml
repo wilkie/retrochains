@@ -1,0 +1,4 @@
+description = "`g--;` for long global. Counterpart to slice 249 (`g++`); verifies the sub/sbb memory-direct pattern stubbed in by slice 249's codegen path."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

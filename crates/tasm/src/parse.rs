@@ -722,6 +722,19 @@ fn parse_sub(operands: &str, line_no: usize) -> AsmResult<Instr> {
             });
         }
     }
+    // `sub word ptr <group>:<sym>[+N], imm8sx` — read-modify-write
+    // on a data-segment global (low-half of long `g--`, fixture 250).
+    if let Some((group, symbol)) = parse_group_symbol(lhs) {
+        if let Some(imm) = parse_imm8_signed(rhs) {
+            let (sym, offset) = split_sym_offset(symbol);
+            return Ok(Instr::SubGroupSymImm8Sx {
+                group: group.to_string(),
+                symbol: sym.to_string(),
+                offset,
+                imm,
+            });
+        }
+    }
     // Otherwise: try the AX/mem form.
     parse_alu_ax_mem(operands, line_no, "sub", |o| Instr::SubAxBpRel { offset: o })
 }
@@ -773,6 +786,19 @@ fn parse_sbb(operands: &str, line_no: usize) -> AsmResult<Instr> {
         }
         if let Some(imm) = parse_imm16(rhs) {
             return Ok(Instr::SbbAxImm16 { imm: imm as u16 });
+        }
+    }
+    // `sbb word ptr <group>:<sym>[+N], imm8sx` — high-half borrow
+    // propagation for long `g--` (fixture 250).
+    if let Some((group, symbol)) = parse_group_symbol(lhs) {
+        if let Some(imm) = parse_imm8_signed(rhs) {
+            let (sym, offset) = split_sym_offset(symbol);
+            return Ok(Instr::SbbGroupSymImm8Sx {
+                group: group.to_string(),
+                symbol: sym.to_string(),
+                offset,
+                imm,
+            });
         }
     }
     Err(AsmError::new(

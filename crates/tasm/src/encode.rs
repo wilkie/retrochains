@@ -295,7 +295,9 @@ fn instr_size(instr: &Instr) -> usize {
         Instr::PushGroupSym { .. } => 4,
         Instr::CmpGroupSymImm8Sx { .. }
         | Instr::AddGroupSymImm8Sx { .. }
-        | Instr::AdcGroupSymImm8Sx { .. } => 5,
+        | Instr::AdcGroupSymImm8Sx { .. }
+        | Instr::SubGroupSymImm8Sx { .. }
+        | Instr::SbbGroupSymImm8Sx { .. } => 5,
         Instr::Cbw => 1,
         Instr::LeaReg16BpRel { .. } => 3,
         Instr::MovSiPtrImm { .. } | Instr::MovBxPtrImm { .. } => 4,
@@ -826,6 +828,18 @@ fn emit_instr(
             // `adc word ptr <group>:<sym>[+N], imm8sx` → 83 16 lo hi ii.
             // Grp1 r/m16,imm8sx with /2=ADC (fixture 249's `g++` high half).
             emit_group_sym_lea(&[0x83, 0x16], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
+            out.push(*imm as u8);
+        }
+        Instr::SubGroupSymImm8Sx { group, symbol, offset, imm } => {
+            // `sub word ptr <group>:<sym>[+N], imm8sx` → 83 2E lo hi ii.
+            // Grp1 r/m16,imm8sx with /5=SUB (fixture 250's `g--` low half).
+            emit_group_sym_lea(&[0x83, 0x2E], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
+            out.push(*imm as u8);
+        }
+        Instr::SbbGroupSymImm8Sx { group, symbol, offset, imm } => {
+            // `sbb word ptr <group>:<sym>[+N], imm8sx` → 83 1E lo hi ii.
+            // Grp1 r/m16,imm8sx with /3=SBB (fixture 250's `g--` high half).
+            emit_group_sym_lea(&[0x83, 0x1E], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
             out.push(*imm as u8);
         }
         Instr::Cbw => out.push(0x98),
