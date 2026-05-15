@@ -577,7 +577,9 @@ impl<'a> FunctionEmitter<'a> {
             cond.kind,
             ExprKind::Logical { op: LogicalOp::Or, .. }
         );
-        let needs_then_entry = cond_has_top_or || self.is_long_signed_globals_cmp(cond);
+        let needs_then_entry = cond_has_top_or
+            || self.is_long_signed_globals_cmp(cond)
+            || self.is_long_ne_const(cond);
         let then_entry_slot = if needs_then_entry { Some(base) } else { None };
 
         if let Some(else_stmts) = else_branch {
@@ -1143,6 +1145,26 @@ impl<'a> FunctionEmitter<'a> {
             && self.globals.type_of(b).map_or(false, |t| matches!(t, Type::Long))
     }
 
+    /// Whether `cond` is `<long_global> != K` for a small const K —
+    /// uses the chained-cmp pattern with both slots (jne→true,
+    /// je→false). Fixture 239.
+    fn is_long_ne_const(&self, cond: &Expr) -> bool {
+        let ExprKind::BinOp { op: BinOp::Ne, left, right } = &cond.kind else {
+            return false;
+        };
+        let ExprKind::Ident(name) = &left.kind else { return false };
+        if !self.globals.type_of(name).map_or(false, |t| matches!(t, Type::Long)) {
+            return false;
+        }
+        let Some(k) = try_const_eval(right) else { return false };
+        if k == 0 {
+            return false; // long != 0 uses the OR-then-test idiom (fixture 238)
+        }
+        let hi = (k >> 16) as i32;
+        let lo = (k & 0xFFFF) as i32;
+        (-128..=127).contains(&hi) && (-128..=127).contains(&lo)
+    }
+
     fn emit_cond_branch(
         &mut self,
         cond: &Expr,
@@ -1185,6 +1207,24 @@ impl<'a> FunctionEmitter<'a> {
             let _ = write!(self.out, "\t{hi_to_true}\tshort {}\r\n", self.label_ref(tslot));
             let _ = write!(self.out, "\tcmp\tdx,word ptr DGROUP:_{b}\r\n");
             let _ = write!(self.out, "\t{lo_to_false}\tshort {}\r\n", self.label_ref(fslot));
+            return;
+        }
+        // `<long_global> != K` for non-zero K — chained cmp with
+        // both slots: jne→true (high differs is definitive), then
+        // je→false (high equal AND low equal). Fall-through (low
+        // differs, high equal) lands at true. Fixture 239.
+        if self.is_long_ne_const(cond)
+            && let ExprKind::BinOp { op: BinOp::Ne, left, right } = &cond.kind
+            && let ExprKind::Ident(name) = &left.kind
+            && let Some(k) = try_const_eval(right)
+            && let (Some(tslot), Some(fslot)) = (true_slot, false_slot)
+        {
+            let hi = (k >> 16) as i32;
+            let lo = (k & 0xFFFF) as i32;
+            let _ = write!(self.out, "\tcmp\tword ptr DGROUP:_{name}+2,{hi}\r\n");
+            let _ = write!(self.out, "\tjne\tshort {}\r\n", self.label_ref(tslot));
+            let _ = write!(self.out, "\tcmp\tword ptr DGROUP:_{name},{lo}\r\n");
+            let _ = write!(self.out, "\tje\tshort {}\r\n", self.label_ref(fslot));
             return;
         }
         // `<long_global> == K` for non-zero K — BCC emits a chained
