@@ -926,6 +926,14 @@ fn parse_or(operands: &str, line_no: usize) -> AsmResult<Instr> {
         if let Some(offset) = parse_bp_relative(rhs) {
             return Ok(Instr::OrAxBpRel { offset });
         }
+        if let Some((group, symbol)) = parse_group_symbol(rhs) {
+            let (sym, offset) = split_sym_offset(symbol);
+            return Ok(Instr::OrAxGroupSym {
+                group: group.to_string(),
+                symbol: sym.to_string(),
+                offset,
+            });
+        }
     }
     Err(AsmError::new(
         line_no,

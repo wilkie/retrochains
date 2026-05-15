@@ -280,7 +280,7 @@ fn instr_size(instr: &Instr) -> usize {
         Instr::AdcAxImm16 { .. } => 3,
         Instr::MovAlFromSiPtr | Instr::MovAlFromBxPtr => 2,
         Instr::ImulReg16 { .. } => 2,
-        Instr::AddAxGroupSym { .. } => 4,
+        Instr::AddAxGroupSym { .. } | Instr::OrAxGroupSym { .. } => 4,
         Instr::Cbw => 1,
         Instr::LeaReg16BpRel { .. } => 3,
         Instr::MovSiPtrImm { .. } | Instr::MovBxPtrImm { .. } => 4,
@@ -715,6 +715,11 @@ fn emit_instr(
             // `add ax,word ptr <group>:<symbol>` → 03 06 lo hi.
             // ModR/M 06 = mod=00 reg=AX r/m=110 (disp16-only addressing).
             emit_group_sym_lea(&[0x03, 0x06], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
+        }
+        Instr::OrAxGroupSym { group, symbol, offset } => {
+            // `or ax,word ptr <group>:<symbol>` → 0B 06 lo hi.
+            // Same ModR/M as the `add` sibling; opcode 0B (OR r16,r/m16).
+            emit_group_sym_lea(&[0x0B, 0x06], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
         }
         Instr::Cbw => out.push(0x98),
         Instr::LeaReg16BpRel { dst, offset } => {

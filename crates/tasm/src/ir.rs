@@ -297,6 +297,11 @@ pub enum Instr {
     /// with disp16-only addressing (`03 06 lo hi`). Same FIXUPP
     /// shape; offset added to the symbol's location.
     AddAxGroupSym { group: String, symbol: String, offset: i16 },
+    /// `or ax,word ptr <group>:<symbol>[+<offset>]` — OR r16,r/m16
+    /// with disp16-only addressing (`0B 06 lo hi`). Used by long
+    /// comparison against zero (fixture 215): `mov ax,low / or
+    /// ax,high` sets ZF iff both halves are zero.
+    OrAxGroupSym { group: String, symbol: String, offset: i16 },
     /// `cbw` — 98. Sign-extend AL to AX. Used after loading a `char`
     /// global to widen it to int for arithmetic (fixture 130).
     Cbw,

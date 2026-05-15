@@ -1184,6 +1184,24 @@ impl<'a> FunctionEmitter<'a> {
     ///   `or <reg>, <reg>` peephole for register locals); the cond is
     ///   non-zero ⇔ true, so the mnemonic pair is `("jne", "je")`.
     fn emit_cond_test(&mut self, cond: &Expr) -> (&'static str, &'static str) {
+        // `<long_global> == 0` / `<long_global> != 0` — BCC folds the
+        // 32-bit comparison into `mov ax,low / or ax,high`, which
+        // sets ZF iff both halves are zero. Fixture 215.
+        if let ExprKind::BinOp { op, left, right } = &cond.kind
+            && matches!(op, BinOp::Eq | BinOp::Ne)
+            && let ExprKind::Ident(name) = &left.kind
+            && let Some(gty) = self.globals.type_of(name)
+            && matches!(gty, Type::Long)
+            && try_const_eval(right) == Some(0)
+        {
+            let _ = write!(self.out, "\tmov\tax,word ptr DGROUP:_{name}\r\n");
+            let _ = write!(self.out, "\tor\tax,word ptr DGROUP:_{name}+2\r\n");
+            return match op {
+                BinOp::Eq => ("je", "jne"),
+                BinOp::Ne => ("jne", "je"),
+                _ => unreachable!(),
+            };
+        }
         if let ExprKind::BinOp { op, left, right } = &cond.kind
             && op.is_comparison()
         {
