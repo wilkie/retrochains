@@ -696,12 +696,22 @@ fn parse_sub(operands: &str, line_no: usize) -> AsmResult<Instr> {
     parse_alu_ax_mem(operands, line_no, "sub", |o| Instr::SubAxBpRel { offset: o })
 }
 
-/// `adc ax, imm16` — add-with-carry to AX. Fixture 207 (long arithmetic).
+/// `adc ax, imm16` — add-with-carry to AX (fixture 207). Also
+/// `adc ax, word ptr <group>:<sym>[+N]` for long-to-long add
+/// high-half (fixture 219).
 fn parse_adc(operands: &str, line_no: usize) -> AsmResult<Instr> {
     let (lhs, rhs) = split_comma(operands).ok_or_else(|| {
         AsmError::new(line_no, format!("adc: expected `lhs,rhs`, got {operands:?}"))
     })?;
     if lhs == "ax" {
+        if let Some((group, symbol)) = parse_group_symbol(rhs) {
+            let (sym, offset) = split_sym_offset(symbol);
+            return Ok(Instr::AdcAxGroupSym {
+                group: group.to_string(),
+                symbol: sym.to_string(),
+                offset,
+            });
+        }
         if let Some(imm) = parse_imm16(rhs) {
             return Ok(Instr::AdcAxImm16 { imm: imm as u16 });
         }
@@ -771,6 +781,18 @@ fn parse_add(operands: &str, line_no: usize) -> AsmResult<Instr> {
     if let Some(reg) = Reg16::parse(lhs) {
         if let Some(imm) = parse_imm8_signed(rhs) {
             return Ok(Instr::AddReg16Imm8Sx { reg, imm });
+        }
+    }
+    // `add dx, word ptr <group>:<sym>[+N]` — long-arithmetic low-
+    // half add against a memory operand (fixture 219).
+    if lhs == "dx" {
+        if let Some((group, symbol)) = parse_group_symbol(rhs) {
+            let (sym, offset) = split_sym_offset(symbol);
+            return Ok(Instr::AddDxGroupSym {
+                group: group.to_string(),
+                symbol: sym.to_string(),
+                offset,
+            });
         }
     }
     // `add word ptr [si],<imm8>` — read-modify-write through SI.

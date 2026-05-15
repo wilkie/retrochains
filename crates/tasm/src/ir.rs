@@ -302,6 +302,14 @@ pub enum Instr {
     /// comparison against zero (fixture 215): `mov ax,low / or
     /// ax,high` sets ZF iff both halves are zero.
     OrAxGroupSym { group: String, symbol: String, offset: i16 },
+    /// `add dx,word ptr <group>:<symbol>[+<offset>]` — ADD r16,r/m16
+    /// with DX as destination (`03 16 lo hi`). Used by long-to-long
+    /// addition for the low-half add (fixture 219).
+    AddDxGroupSym { group: String, symbol: String, offset: i16 },
+    /// `adc ax,word ptr <group>:<symbol>[+<offset>]` — ADC r16,r/m16
+    /// with AX as destination (`13 06 lo hi`). Companion to
+    /// `AddDxGroupSym` for the high-half carry-in (fixture 219).
+    AdcAxGroupSym { group: String, symbol: String, offset: i16 },
     /// `cbw` — 98. Sign-extend AL to AX. Used after loading a `char`
     /// global to widen it to int for arithmetic (fixture 130).
     Cbw,

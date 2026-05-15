@@ -2842,6 +2842,23 @@ impl<'a> FunctionEmitter<'a> {
                 let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name},ax\r\n");
                 return;
             }
+            // `g = a + b;` long-to-long arithmetic between two
+            // long globals. Load a into (AX=high, DX=low); add/adc
+            // b's halves; store. Fixture 219.
+            if let ExprKind::BinOp { op: BinOp::Add, left, right } = &value.kind
+                && let ExprKind::Ident(a) = &left.kind
+                && let ExprKind::Ident(b) = &right.kind
+                && self.globals.type_of(a).map_or(false, |t| matches!(t, Type::Long))
+                && self.globals.type_of(b).map_or(false, |t| matches!(t, Type::Long))
+            {
+                let _ = write!(self.out, "\tmov\tax,word ptr DGROUP:_{a}+2\r\n");
+                let _ = write!(self.out, "\tmov\tdx,word ptr DGROUP:_{a}\r\n");
+                let _ = write!(self.out, "\tadd\tdx,word ptr DGROUP:_{b}\r\n");
+                let _ = write!(self.out, "\tadc\tax,word ptr DGROUP:_{b}+2\r\n");
+                let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name}+2,ax\r\n");
+                let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name},dx\r\n");
+                return;
+            }
             // `g = g + K;` or `g = g - K;` for a long global, K small
             // (fits in i8 — after sign flip for sub). BCC reuses one
             // add/adc pattern for both: load (high→AX, low→DX), add

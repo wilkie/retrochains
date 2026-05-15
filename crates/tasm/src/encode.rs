@@ -280,7 +280,10 @@ fn instr_size(instr: &Instr) -> usize {
         Instr::AdcAxImm16 { .. } => 3,
         Instr::MovAlFromSiPtr | Instr::MovAlFromBxPtr => 2,
         Instr::ImulReg16 { .. } => 2,
-        Instr::AddAxGroupSym { .. } | Instr::OrAxGroupSym { .. } => 4,
+        Instr::AddAxGroupSym { .. }
+        | Instr::OrAxGroupSym { .. }
+        | Instr::AddDxGroupSym { .. }
+        | Instr::AdcAxGroupSym { .. } => 4,
         Instr::Cbw => 1,
         Instr::LeaReg16BpRel { .. } => 3,
         Instr::MovSiPtrImm { .. } | Instr::MovBxPtrImm { .. } => 4,
@@ -720,6 +723,16 @@ fn emit_instr(
             // `or ax,word ptr <group>:<symbol>` → 0B 06 lo hi.
             // Same ModR/M as the `add` sibling; opcode 0B (OR r16,r/m16).
             emit_group_sym_lea(&[0x0B, 0x06], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
+        }
+        Instr::AddDxGroupSym { group, symbol, offset } => {
+            // `add dx,word ptr <group>:<symbol>` → 03 16 lo hi.
+            // ModR/M 16 = mod=00 reg=DX(010) rm=110 (disp16-only).
+            emit_group_sym_lea(&[0x03, 0x16], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
+        }
+        Instr::AdcAxGroupSym { group, symbol, offset } => {
+            // `adc ax,word ptr <group>:<symbol>` → 13 06 lo hi.
+            // Same ModR/M as the `add ax` sibling; opcode 13 (ADC r16,r/m16).
+            emit_group_sym_lea(&[0x13, 0x06], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
         }
         Instr::Cbw => out.push(0x98),
         Instr::LeaReg16BpRel { dst, offset } => {
