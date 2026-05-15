@@ -1,0 +1,4 @@
+description = "`g = g - i;` for long g, int i. Counterpart to slice 257 — should use the same BX:CX/DX:AX layout but with sub/sbb."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

@@ -239,6 +239,8 @@ fn instr_size(instr: &Instr) -> usize {
         | Instr::XorReg16Reg16 { .. }
         | Instr::AddReg16Reg16 { .. }
         | Instr::AdcReg16Reg16 { .. }
+        | Instr::SubReg16Reg16 { .. }
+        | Instr::SbbReg16Reg16 { .. }
         | Instr::OrReg16Reg16 { .. }
         | Instr::CmpReg16Reg16 { .. } => 2,
         Instr::CmpReg16Imm8 { .. } | Instr::CmpAxImm { .. } | Instr::AddAxImm { .. } => 3,
@@ -358,6 +360,18 @@ fn emit_instr(
             // `adc r16,r16` → 13 (mod=11 dst<<3 src). Same shape as
             // `add r16,r16` but with carry propagation.
             out.push(0x13);
+            out.push(0b11_000_000 | (dst.code() << 3) | src.code());
+        }
+        Instr::SubReg16Reg16 { dst, src } => {
+            // `sub r16,r16` → 2B (mod=11 dst<<3 src). Same ModR/M
+            // shape as `add r16,r16`; opcode 2B selects SUB.
+            out.push(0x2B);
+            out.push(0b11_000_000 | (dst.code() << 3) | src.code());
+        }
+        Instr::SbbReg16Reg16 { dst, src } => {
+            // `sbb r16,r16` → 1B (mod=11 dst<<3 src). Borrow-
+            // propagation high-half partner to `sub r16,r16`.
+            out.push(0x1B);
             out.push(0b11_000_000 | (dst.code() << 3) | src.code());
         }
         Instr::OrReg16Reg16 { dst, src } => {

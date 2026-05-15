@@ -699,6 +699,9 @@ fn parse_sub(operands: &str, line_no: usize) -> AsmResult<Instr> {
     let (lhs, rhs) = split_comma(operands).ok_or_else(|| {
         AsmError::new(line_no, format!("sub: expected `lhs,rhs`, got {operands:?}"))
     })?;
+    if let (Some(dst), Some(src)) = (Reg16::parse(lhs), Reg16::parse(rhs)) {
+        return Ok(Instr::SubReg16Reg16 { dst, src });
+    }
     if lhs == "sp" {
         let imm = parse_imm16(rhs)
             .ok_or_else(|| AsmError::new(line_no, format!("sub sp,?: bad imm `{rhs}`")))?;
@@ -790,6 +793,9 @@ fn parse_sbb(operands: &str, line_no: usize) -> AsmResult<Instr> {
     let (lhs, rhs) = split_comma(operands).ok_or_else(|| {
         AsmError::new(line_no, format!("sbb: expected `lhs,rhs`, got {operands:?}"))
     })?;
+    if let (Some(dst), Some(src)) = (Reg16::parse(lhs), Reg16::parse(rhs)) {
+        return Ok(Instr::SbbReg16Reg16 { dst, src });
+    }
     if lhs == "ax" {
         if let Some((group, symbol)) = parse_group_symbol(rhs) {
             let (sym, offset) = split_sym_offset(symbol);

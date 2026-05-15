@@ -135,6 +135,14 @@ pub enum Instr {
     /// long-plus-int sum where the widened int sits in DX:AX and
     /// the long accumulator in BX:CX).
     AdcReg16Reg16 { dst: Reg16, src: Reg16 },
+    /// `sub <dst>,<src>` between 16-bit registers — 2B xx with
+    /// ModR/M mod=11 reg=dst r/m=src (fixture 258's long-minus-int
+    /// low-half subtract).
+    SubReg16Reg16 { dst: Reg16, src: Reg16 },
+    /// `sbb <dst>,<src>` between 16-bit registers — 1B xx with
+    /// ModR/M mod=11 reg=dst r/m=src (fixture 258's long-minus-int
+    /// high-half borrow propagation).
+    SbbReg16Reg16 { dst: Reg16, src: Reg16 },
     /// `or <dst>,<src>` between 16-bit registers — 0B xx. BCC uses
     /// `or ax,ax` as a compare-against-zero idiom in switch dispatch.
     OrReg16Reg16 { dst: Reg16, src: Reg16 },
