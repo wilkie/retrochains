@@ -910,6 +910,19 @@ fn parse_cmp(operands: &str, line_no: usize) -> AsmResult<Instr> {
             return Ok(Instr::CmpBpRelImm8 { offset, imm });
         }
     }
+    // `cmp word ptr <group>:<sym>[+N],imm8sx` — long const-compare
+    // chained-cmp pattern (fixture 223: `if (g == K)` for long g).
+    if let Some((group, symbol)) = parse_group_symbol(lhs) {
+        if let Some(imm) = parse_imm8_signed(rhs) {
+            let (sym, offset) = split_sym_offset(symbol);
+            return Ok(Instr::CmpGroupSymImm8Sx {
+                group: group.to_string(),
+                symbol: sym.to_string(),
+                offset,
+                imm,
+            });
+        }
+    }
     if let Some(reg) = Reg16::parse(lhs) {
         if let Some(imm) = parse_imm8_signed(rhs) {
             return Ok(Instr::CmpReg16Imm8 { reg, imm });

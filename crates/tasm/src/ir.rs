@@ -330,6 +330,16 @@ pub enum Instr {
     /// (fixture 222). Companion to existing `OrAxGroupSym` for
     /// the high half.
     OrDxGroupSym { group: String, symbol: String, offset: i16 },
+    /// `cmp word ptr <group>:<symbol>[+<offset>], imm8 (sx)` — Grp1
+    /// r/m16,imm8sx with /7=CMP and disp16-only addressing
+    /// (`83 3E lo hi ii`, 5 bytes). Used by long const-compare
+    /// (fixture 223): two of these chained with `jne` for `g == K`.
+    CmpGroupSymImm8Sx {
+        group: String,
+        symbol: String,
+        offset: i16,
+        imm: i8,
+    },
     /// `cbw` — 98. Sign-extend AL to AX. Used after loading a `char`
     /// global to widen it to int for arithmetic (fixture 130).
     Cbw,

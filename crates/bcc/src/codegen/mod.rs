@@ -1119,6 +1119,47 @@ impl<'a> FunctionEmitter<'a> {
         true_slot: Option<u32>,
         false_slot: Option<u32>,
     ) {
+        // `<long_global> == K` for non-zero K — BCC emits a chained
+        // cmp+jne pair: high half against (K>>16), low half against
+        // (K&0xFFFF). Both halves use Grp1 imm8sx form, so each half
+        // must fit a sign-extended i8. Only the false-slot-only shape
+        // shows up in fixture 223 (`if (g == K) ...`); a true-slot
+        // form would invert to `je` and pick up later.
+        if let ExprKind::BinOp { op: BinOp::Eq, left, right } = &cond.kind
+            && let ExprKind::Ident(name) = &left.kind
+            && let Some(Type::Long) = self.globals.type_of(name)
+            && let Some(k) = try_const_eval(right)
+            && k != 0
+            && true_slot.is_none()
+            && let Some(fslot) = false_slot
+        {
+            let hi = (k >> 16) as i32;
+            let lo = (k & 0xFFFF) as i32;
+            // Each half must sign-extend cleanly from imm8. BCC has
+            // wider forms for out-of-range K (not yet observed); fall
+            // through to the generic path when this guard fails.
+            if (-128..=127).contains(&hi) && (-128..=127).contains(&lo) {
+                let _ = write!(
+                    self.out,
+                    "\tcmp\tword ptr DGROUP:_{name}+2,{hi}\r\n",
+                );
+                let _ = write!(
+                    self.out,
+                    "\tjne\tshort {}\r\n",
+                    self.label_ref(fslot),
+                );
+                let _ = write!(
+                    self.out,
+                    "\tcmp\tword ptr DGROUP:_{name},{lo}\r\n",
+                );
+                let _ = write!(
+                    self.out,
+                    "\tjne\tshort {}\r\n",
+                    self.label_ref(fslot),
+                );
+                return;
+            }
+        }
         if let ExprKind::Logical { op, left, right } = &cond.kind {
             // Restricted to top-level binary `&&` / `||`. Chained or
             // nested logical operators need a more careful target

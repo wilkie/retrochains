@@ -289,6 +289,7 @@ fn instr_size(instr: &Instr) -> usize {
         | Instr::AndDxGroupSym { .. }
         | Instr::AndAxGroupSym { .. }
         | Instr::OrDxGroupSym { .. } => 4,
+        Instr::CmpGroupSymImm8Sx { .. } => 5,
         Instr::Cbw => 1,
         Instr::LeaReg16BpRel { .. } => 3,
         Instr::MovSiPtrImm { .. } | Instr::MovBxPtrImm { .. } => 4,
@@ -763,6 +764,13 @@ fn emit_instr(
             // `or dx,word ptr <group>:<symbol>` → 0B 16 lo hi.
             // Opcode 0B (OR r16,r/m16); ModR/M 16 = reg=DX rm=disp16.
             emit_group_sym_lea(&[0x0B, 0x16], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
+        }
+        Instr::CmpGroupSymImm8Sx { group, symbol, offset, imm } => {
+            // `cmp word ptr <group>:<sym>[+N], imm8sx` → 83 3E lo hi ii.
+            // Grp1 r/m16,imm8sx with /7=CMP and disp16-only addressing.
+            // Long const-compare chained-cmp pattern (fixture 223).
+            emit_group_sym_lea(&[0x83, 0x3E], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
+            out.push(*imm as u8);
         }
         Instr::Cbw => out.push(0x98),
         Instr::LeaReg16BpRel { dst, offset } => {
