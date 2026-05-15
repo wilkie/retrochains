@@ -1,0 +1,4 @@
+description = "`unsigned long g = a / b;`. Probe: unsigned long division helper name (likely `N_LUDIV@`)."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

@@ -3102,24 +3102,32 @@ impl<'a> FunctionEmitter<'a> {
                 let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name},dx\r\n");
                 return;
             }
-            // `g = a / b;` / `g = a % b;` signed long division and
-            // modulo. BCC calls helper `N_LDIV@` (fixture 232) or
-            // `N_LMOD@` (fixture 233) with operands passed on the
-            // STACK (cdecl order — b pushed first, so a sits at the
-            // lowest pushed address). High word pushed before low
-            // for each operand: push b+2, b, a+2, a. Result in
-            // DX:AX. Helper self-cleans the stack (no `add sp,8`
-            // after).
+            // `g = a / b;` / `g = a % b;` long division and modulo.
+            // BCC calls helpers:
+            //   signed   /  → `N_LDIV@`   (fixture 232)
+            //   signed   %  → `N_LMOD@`   (fixture 233)
+            //   unsigned /  → `N_LUDIV@`  (fixture 245)
+            //   unsigned %  → (likely `N_LUMOD@`; not yet fixtured)
+            // Operands passed on the STACK (cdecl order — b pushed
+            // first, so a sits at the lowest pushed address). High
+            // word pushed before low for each operand: push b+2, b,
+            // a+2, a. Result in DX:AX. Helper self-cleans the
+            // stack (no `add sp,8` after).
             if let ExprKind::BinOp { op, left, right } = &value.kind
                 && matches!(op, BinOp::Div | BinOp::Mod)
                 && let ExprKind::Ident(a) = &left.kind
                 && let ExprKind::Ident(b) = &right.kind
-                && self.globals.type_of(a).map_or(false, |t| matches!(t, Type::Long))
-                && self.globals.type_of(b).map_or(false, |t| matches!(t, Type::Long))
+                && let Some(a_ty) = self.globals.type_of(a)
+                && a_ty.is_long_like()
+                && let Some(b_ty) = self.globals.type_of(b)
+                && b_ty.is_long_like()
             {
-                let helper = match op {
-                    BinOp::Div => "N_LDIV@",
-                    BinOp::Mod => "N_LMOD@",
+                let unsigned = a_ty.is_unsigned() || b_ty.is_unsigned();
+                let helper = match (op, unsigned) {
+                    (BinOp::Div, false) => "N_LDIV@",
+                    (BinOp::Mod, false) => "N_LMOD@",
+                    (BinOp::Div, true)  => "N_LUDIV@",
+                    (BinOp::Mod, true)  => "N_LUMOD@",
                     _ => unreachable!(),
                 };
                 let _ = write!(self.out, "\tpush\tword ptr DGROUP:_{b}+2\r\n");
