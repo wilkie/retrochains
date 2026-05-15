@@ -338,6 +338,31 @@ distinguishable asm. _Fixtures_: 068, 070.
 This is the same kind of signal as `inc <reg>` above but covers all
 compound operators (`-=`, `&=`, `|=`, `^=`).
 
+### Long compound assigns: arith uses imm8sx, bitwise uses imm16 (STRONG)
+
+For 32-bit `long` globals, BCC emits a memory-direct read-modify-write
+pair, **but the immediate encoding width is op-family dependent**:
+
+- `+=` / `-=` use `83 06 ...` / `83 2E ...` — Grp1 `r/m16, imm8sx`,
+  **5 bytes** per half. The high partner is always `adc 0` / `sbb 0`
+  (also 5 bytes each).
+- `&=` / `|=` / `^=` use `81 26 ...` / `81 0E ...` / `81 36 ...` —
+  Grp1 `r/m16, imm16`, **6 bytes** per half, **even when the
+  immediate trivially fits in an i8sx**.
+
+Concrete: `long g; g &= 15;` emits
+```
+and word ptr DGROUP:_g, 15        ; 81 26 lo hi 0F 00 (6 bytes)
+and word ptr DGROUP:_g+2, 0       ; 81 26 lo hi 00 00 (6 bytes)
+```
+The 4-byte saving from picking `83 26 lo hi 0F` (5 bytes) is left on
+the table. This isn't a TASM default — TASM's sign-extension heuristic
+would pick the shorter form for `15` if BCC asked for it. BCC's
+emission must specifically choose `81` for the bitwise compound
+shapes, while picking `83` for the arithmetic siblings. Distinct from
+slice-207-style `g = g <op> K` which routes through registers
+entirely. _Fixtures_: 251 (`+=` → 83), 253 (`&=` → 81).
+
 ### `or <reg>, <reg>` for `cmp <reg>, 0` (STRONG)
 
 When BCC compares a register-resident value against zero, it uses
