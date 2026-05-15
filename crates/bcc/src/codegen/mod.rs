@@ -2944,6 +2944,28 @@ impl<'a> FunctionEmitter<'a> {
                 let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name},dx\r\n");
                 return;
             }
+            // `g = a * b;` long multiplication. BCC calls the runtime
+            // helper `N_LXMUL@`. Calling convention: operand a in
+            // (CX:BX)=(high:low), operand b in (DX:AX)=(high:low),
+            // result returned in (DX:AX)=(high:low). Note the order
+            // of register loads is high before low for both operands.
+            // Fixture 231.
+            if let ExprKind::BinOp { op: BinOp::Mul, left, right } = &value.kind
+                && let ExprKind::Ident(a) = &left.kind
+                && let ExprKind::Ident(b) = &right.kind
+                && self.globals.type_of(a).map_or(false, |t| matches!(t, Type::Long))
+                && self.globals.type_of(b).map_or(false, |t| matches!(t, Type::Long))
+            {
+                let _ = write!(self.out, "\tmov\tcx,word ptr DGROUP:_{a}+2\r\n");
+                let _ = write!(self.out, "\tmov\tbx,word ptr DGROUP:_{a}\r\n");
+                let _ = write!(self.out, "\tmov\tdx,word ptr DGROUP:_{b}+2\r\n");
+                let _ = write!(self.out, "\tmov\tax,word ptr DGROUP:_{b}\r\n");
+                self.out.extend_from_slice(b"\tcall\tnear ptr N_LXMUL@\r\n");
+                self.helpers.insert("N_LXMUL@".to_string());
+                let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name}+2,dx\r\n");
+                let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name},ax\r\n");
+                return;
+            }
             // `g = a << K;` / `g = a >> K;` for K > 1 — BCC calls a
             // runtime helper: `N_LXLSH@` for left-shift (fixture
             // 228), `N_LXRSH@` for signed right-shift (fixture 230).

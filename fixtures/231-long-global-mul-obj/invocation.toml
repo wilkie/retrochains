@@ -1,0 +1,4 @@
+description = "`g = a * b;` long multiplication. Probe: which runtime helper does BCC use (presumably `N_LXMUL@`) and what's the operand-passing convention?"
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]
