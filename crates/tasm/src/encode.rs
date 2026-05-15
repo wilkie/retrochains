@@ -277,7 +277,7 @@ fn instr_size(instr: &Instr) -> usize {
         Instr::MovGroupSymAx { .. } => 3,
         Instr::MovGroupSymReg16 { .. } => 4,
         Instr::AddReg16Imm8Sx { .. } => 3,
-        Instr::AdcAxImm16 { .. } => 3,
+        Instr::AdcAxImm16 { .. } | Instr::SbbAxImm16 { .. } => 3,
         Instr::MovAlFromSiPtr | Instr::MovAlFromBxPtr => 2,
         Instr::ImulReg16 { .. } => 2,
         Instr::AddAxGroupSym { .. }
@@ -684,6 +684,12 @@ fn emit_instr(
         Instr::AdcAxImm16 { imm } => {
             // `adc ax, imm16` → 15 lo hi.
             out.push(0x15);
+            out.extend_from_slice(&imm.to_le_bytes());
+        }
+        Instr::SbbAxImm16 { imm } => {
+            // `sbb ax, imm16` → 1D lo hi. Companion to AdcAxImm16
+            // for the high half of long unary minus (fixture 226).
+            out.push(0x1D);
             out.extend_from_slice(&imm.to_le_bytes());
         }
         Instr::MovReg16WordGroupSym { reg, group, symbol, offset } => {

@@ -1,0 +1,4 @@
+description = "`g = -a;` long unary minus. 32-bit negate needs carry handling between halves (neg low; adc high,0; neg high — or similar)."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

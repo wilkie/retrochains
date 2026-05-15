@@ -754,6 +754,9 @@ fn parse_sbb(operands: &str, line_no: usize) -> AsmResult<Instr> {
                 offset,
             });
         }
+        if let Some(imm) = parse_imm16(rhs) {
+            return Ok(Instr::SbbAxImm16 { imm: imm as u16 });
+        }
     }
     Err(AsmError::new(
         line_no,

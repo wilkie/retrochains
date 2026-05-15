@@ -270,6 +270,10 @@ pub enum Instr {
     /// `adc ax, imm16` — `15 lo hi`. AX-specific add-with-carry
     /// short form. Fixture 207's high-half carry propagation.
     AdcAxImm16 { imm: u16 },
+    /// `sbb ax, imm16` — `1D lo hi`. AX-specific subtract-with-borrow
+    /// short form. Used by long unary minus (fixture 226) to combine
+    /// the carry from the low-half `neg` into the high half.
+    SbbAxImm16 { imm: u16 },
     /// `mov <reg16>,word ptr <group>:<symbol>[+<offset>]` for non-AX
     /// destinations. Uses MOV r16,r/m16 with disp16-only addressing
     /// (`8B (mod=00 reg=<r> rm=110) lo hi`). Same FIXUPP shape as
