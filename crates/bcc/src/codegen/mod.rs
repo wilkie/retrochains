@@ -2944,25 +2944,32 @@ impl<'a> FunctionEmitter<'a> {
                 let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name},dx\r\n");
                 return;
             }
-            // `g = a << K;` for K > 1 — BCC calls the runtime helper
-            // `N_LXLSH@`. The register convention SWITCHES to the
-            // standard 32-bit ABI: DX=high, AX=low (input *and*
-            // output of the helper). CL holds the shift count.
-            // Helper is declared `extrn N_LXLSH@:far` in the tail.
-            // Fixture 228.
-            if let ExprKind::BinOp { op: BinOp::Shl, left, right } = &value.kind
+            // `g = a << K;` / `g = a >> K;` for K > 1 — BCC calls a
+            // runtime helper: `N_LXLSH@` for left-shift (fixture
+            // 228), `N_LXRSH@` for signed right-shift (fixture 230).
+            // The register convention SWITCHES to the standard 32-bit
+            // ABI: DX=high, AX=low (input *and* output). CL holds
+            // the shift count. The helper is declared
+            // `extrn <name>:far` in the tail.
+            if let ExprKind::BinOp { op, left, right } = &value.kind
+                && matches!(op, BinOp::Shl | BinOp::Shr)
                 && let ExprKind::Ident(a) = &left.kind
                 && self.globals.type_of(a).map_or(false, |t| matches!(t, Type::Long))
                 && let Some(k) = try_const_eval(right)
                 && k > 1
                 && k <= 255
             {
+                let helper = match op {
+                    BinOp::Shl => "N_LXLSH@",
+                    BinOp::Shr => "N_LXRSH@",
+                    _ => unreachable!(),
+                };
                 let k_u8 = k as u8;
                 let _ = write!(self.out, "\tmov\tdx,word ptr DGROUP:_{a}+2\r\n");
                 let _ = write!(self.out, "\tmov\tax,word ptr DGROUP:_{a}\r\n");
                 let _ = write!(self.out, "\tmov\tcl,{k_u8}\r\n");
-                self.out.extend_from_slice(b"\tcall\tnear ptr N_LXLSH@\r\n");
-                self.helpers.insert("N_LXLSH@".to_string());
+                let _ = write!(self.out, "\tcall\tnear ptr {helper}\r\n");
+                self.helpers.insert(helper.to_string());
                 let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name}+2,dx\r\n");
                 let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name},ax\r\n");
                 return;
