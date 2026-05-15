@@ -293,7 +293,9 @@ fn instr_size(instr: &Instr) -> usize {
         | Instr::XorAxGroupSym { .. } => 4,
         Instr::CmpAxGroupSym { .. } | Instr::CmpDxGroupSym { .. } => 4,
         Instr::PushGroupSym { .. } => 4,
-        Instr::CmpGroupSymImm8Sx { .. } => 5,
+        Instr::CmpGroupSymImm8Sx { .. }
+        | Instr::AddGroupSymImm8Sx { .. }
+        | Instr::AdcGroupSymImm8Sx { .. } => 5,
         Instr::Cbw => 1,
         Instr::LeaReg16BpRel { .. } => 3,
         Instr::MovSiPtrImm { .. } | Instr::MovBxPtrImm { .. } => 4,
@@ -812,6 +814,18 @@ fn emit_instr(
             // Grp1 r/m16,imm8sx with /7=CMP and disp16-only addressing.
             // Long const-compare chained-cmp pattern (fixture 223).
             emit_group_sym_lea(&[0x83, 0x3E], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
+            out.push(*imm as u8);
+        }
+        Instr::AddGroupSymImm8Sx { group, symbol, offset, imm } => {
+            // `add word ptr <group>:<sym>[+N], imm8sx` → 83 06 lo hi ii.
+            // Grp1 r/m16,imm8sx with /0=ADD (fixture 249's `g++` low half).
+            emit_group_sym_lea(&[0x83, 0x06], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
+            out.push(*imm as u8);
+        }
+        Instr::AdcGroupSymImm8Sx { group, symbol, offset, imm } => {
+            // `adc word ptr <group>:<sym>[+N], imm8sx` → 83 16 lo hi ii.
+            // Grp1 r/m16,imm8sx with /2=ADC (fixture 249's `g++` high half).
+            emit_group_sym_lea(&[0x83, 0x16], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
             out.push(*imm as u8);
         }
         Instr::Cbw => out.push(0x98),

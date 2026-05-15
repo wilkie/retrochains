@@ -364,6 +364,26 @@ pub enum Instr {
         offset: i16,
         imm: i8,
     },
+    /// `add word ptr <group>:<symbol>[+<offset>], imm8 (sx)` — Grp1
+    /// r/m16,imm8sx with /0=ADD (`83 06 lo hi ii`, 5 bytes). Used
+    /// by long postfix `g++` (fixture 249): low-half memory-add of 1.
+    AddGroupSymImm8Sx {
+        group: String,
+        symbol: String,
+        offset: i16,
+        imm: i8,
+    },
+    /// `adc word ptr <group>:<symbol>[+<offset>], imm8 (sx)` — Grp1
+    /// r/m16,imm8sx with /2=ADC (`83 16 lo hi ii`, 5 bytes). Used
+    /// as the carry-propagation high-half partner to
+    /// `AddGroupSymImm8Sx` for long `g++` / `g += K` patterns
+    /// (fixture 249).
+    AdcGroupSymImm8Sx {
+        group: String,
+        symbol: String,
+        offset: i16,
+        imm: i8,
+    },
     /// `cbw` — 98. Sign-extend AL to AX. Used after loading a `char`
     /// global to widen it to int for arithmetic (fixture 130).
     Cbw,

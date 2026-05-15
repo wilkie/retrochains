@@ -506,6 +506,20 @@ impl<'a> FunctionEmitter<'a> {
     /// inc/dec al / mov <reg>, al` (fixture 047). BCC does not use
     /// `inc/dec <byte-reg>` directly.
     fn emit_update_in_place(&mut self, name: &str, op: UpdateOp) {
+        // Long globals (`g++` / `g--`) use a memory-direct
+        // add/adc pair (or sub/sbb for `--`). Acts on memory
+        // without loading into registers. Fixture 249 (`g++`).
+        if let Some(ty) = self.globals.type_of(name)
+            && ty.is_long_like()
+        {
+            let (lo_op, hi_op) = match op {
+                UpdateOp::Inc => ("add", "adc"),
+                UpdateOp::Dec => ("sub", "sbb"),
+            };
+            let _ = write!(self.out, "\t{lo_op}\tword ptr DGROUP:_{name},1\r\n");
+            let _ = write!(self.out, "\t{hi_op}\tword ptr DGROUP:_{name}+2,0\r\n");
+            return;
+        }
         let mnemonic = match op {
             UpdateOp::Inc => "inc",
             UpdateOp::Dec => "dec",

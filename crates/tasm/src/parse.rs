@@ -801,6 +801,19 @@ fn parse_adc(operands: &str, line_no: usize) -> AsmResult<Instr> {
             return Ok(Instr::AdcAxImm16 { imm: imm as u16 });
         }
     }
+    // `adc word ptr <group>:<sym>[+N], imm8sx` — high-half carry
+    // propagation for long `g++` etc. (fixture 249).
+    if let Some((group, symbol)) = parse_group_symbol(lhs) {
+        if let Some(imm) = parse_imm8_signed(rhs) {
+            let (sym, offset) = split_sym_offset(symbol);
+            return Ok(Instr::AdcGroupSymImm8Sx {
+                group: group.to_string(),
+                symbol: sym.to_string(),
+                offset,
+                imm,
+            });
+        }
+    }
     Err(AsmError::new(
         line_no,
         format!("adc: unsupported operand form `{operands}`"),
@@ -899,6 +912,20 @@ fn parse_add(operands: &str, line_no: usize) -> AsmResult<Instr> {
     if let Some(offset) = parse_word_bp_relative(lhs) {
         if let Some(imm) = parse_imm8_signed(rhs) {
             return Ok(Instr::AddBpRelImm8 { offset, imm });
+        }
+    }
+    // `add word ptr <group>:<sym>[+N], imm8sx` — read-modify-write
+    // on a data-segment global (low-half of long `g++` etc.,
+    // fixture 249).
+    if let Some((group, symbol)) = parse_group_symbol(lhs) {
+        if let Some(imm) = parse_imm8_signed(rhs) {
+            let (sym, offset) = split_sym_offset(symbol);
+            return Ok(Instr::AddGroupSymImm8Sx {
+                group: group.to_string(),
+                symbol: sym.to_string(),
+                offset,
+                imm,
+            });
         }
     }
     Err(AsmError::new(
