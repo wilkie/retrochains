@@ -25,7 +25,13 @@ use crate::ast::{
 /// `mov al,1 / push ax`, not `mov ax,1 / push ax`).
 #[derive(Debug, Default)]
 pub struct Signatures {
-    map: HashMap<String, Vec<Type>>,
+    map: HashMap<String, FunctionSig>,
+}
+
+#[derive(Debug)]
+struct FunctionSig {
+    params: Vec<Type>,
+    ret_ty: Type,
 }
 
 impl Signatures {
@@ -34,7 +40,15 @@ impl Signatures {
         let map = unit
             .functions
             .iter()
-            .map(|f| (f.name.clone(), f.params.iter().map(|p| p.ty.clone()).collect()))
+            .map(|f| {
+                (
+                    f.name.clone(),
+                    FunctionSig {
+                        params: f.params.iter().map(|p| p.ty.clone()).collect(),
+                        ret_ty: f.ret_ty.clone(),
+                    },
+                )
+            })
             .collect();
         Self { map }
     }
@@ -45,7 +59,16 @@ impl Signatures {
     /// we have no fixture for extern char-arg calls yet.
     #[must_use]
     pub fn params_of(&self, name: &str) -> Option<&[Type]> {
-        self.map.get(name).map(Vec::as_slice)
+        self.map.get(name).map(|s| s.params.as_slice())
+    }
+
+    /// Look up the declared return type of a function. Returns `None`
+    /// for unknown (extern) names. Used by call-site codegen to choose
+    /// the right ABI shape for the return value (e.g. fixture 214 —
+    /// stash DX:AX after a long-returning call).
+    #[must_use]
+    pub fn ret_ty_of(&self, name: &str) -> Option<&Type> {
+        self.map.get(name).map(|s| &s.ret_ty)
     }
 }
 
@@ -2724,6 +2747,17 @@ impl<'a> FunctionEmitter<'a> {
                 let _ = write!(self.out, "\tmov\tdx,word ptr DGROUP:_{src_name}\r\n");
                 let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name}+2,ax\r\n");
                 let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name},dx\r\n");
+                return;
+            }
+            // `g = f();` where `f` returns long. Call returns DX:AX
+            // (high:low) per the standard ABI; store directly back
+            // into the long global. Fixture 214.
+            if let ExprKind::Call { name: fname, args } = &value.kind
+                && self.signatures.ret_ty_of(fname).map_or(false, |t| matches!(t, Type::Long))
+            {
+                self.emit_call(fname, args);
+                let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name}+2,dx\r\n");
+                let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name},ax\r\n");
                 return;
             }
             // `g = g + K;` or `g = g - K;` for a long global, K small
