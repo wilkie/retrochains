@@ -1,0 +1,4 @@
+description = "`unsigned long a, b; if (a < b)`. Introduces `unsigned long` and the unsigned mnemonic family (ja/jb on the high half)."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

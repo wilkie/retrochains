@@ -149,6 +149,15 @@ impl Parser {
                 TokenKind::KwInt | TokenKind::KwChar => probe += 1,
                 TokenKind::KwUnsigned | TokenKind::KwLong => {
                     probe += 1;
+                    // `unsigned long` and `long unsigned` are valid
+                    // pairings — consume the partner keyword if
+                    // present before scanning for the optional `int`.
+                    if matches!(
+                        self.peek_n(probe).kind,
+                        TokenKind::KwLong | TokenKind::KwUnsigned
+                    ) {
+                        probe += 1;
+                    }
                     if matches!(self.peek_n(probe).kind, TokenKind::KwInt) {
                         probe += 1;
                     }
@@ -347,6 +356,14 @@ impl Parser {
             }
             TokenKind::KwUnsigned => {
                 self.bump();
+                // `unsigned long [int]` — 32-bit unsigned.
+                if matches!(self.peek().kind, TokenKind::KwLong) {
+                    self.bump();
+                    if matches!(self.peek().kind, TokenKind::KwInt) {
+                        self.bump();
+                    }
+                    return Ok(Type::ULong);
+                }
                 // `unsigned int` and bare `unsigned` are both
                 // unsigned-int; consume the optional `int`.
                 if matches!(self.peek().kind, TokenKind::KwInt) {
@@ -356,6 +373,15 @@ impl Parser {
             }
             TokenKind::KwLong => {
                 self.bump();
+                // `long unsigned [int]` — 32-bit unsigned (mirrors
+                // the `unsigned long` form above).
+                if matches!(self.peek().kind, TokenKind::KwUnsigned) {
+                    self.bump();
+                    if matches!(self.peek().kind, TokenKind::KwInt) {
+                        self.bump();
+                    }
+                    return Ok(Type::ULong);
+                }
                 // `long int` and bare `long` both mean `long` — 32-bit
                 // signed under the small model (fixture 203). Consume
                 // the optional `int`.

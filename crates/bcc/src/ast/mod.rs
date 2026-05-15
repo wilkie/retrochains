@@ -218,6 +218,10 @@ pub enum Type {
     /// pair (DX:AX in registers; two adjacent words in memory, low
     /// word first / little-endian).
     Long,
+    /// `unsigned long` — 32-bit unsigned. Same byte layout as `Long`;
+    /// only comparisons, shifts, and division care about the
+    /// signedness.
+    ULong,
     /// `T a[N]` — contiguous run of `N` `T`-typed elements on the stack.
     /// Arrays never enregister; the name in expression contexts refers
     /// to a stack address. Today only constant `N` is supported (we
@@ -263,7 +267,7 @@ impl Type {
         match self {
             Self::Int | Self::UInt => 2,
             Self::Char => 1,
-            Self::Long => 4,
+            Self::Long | Self::ULong => 4,
             Self::Array { elem, len } => {
                 let elem = elem.size_bytes();
                 elem * u16::try_from(*len).expect("array byte size fits in u16")
@@ -282,7 +286,7 @@ impl Type {
         match self {
             Self::Int | Self::UInt => 2,
             Self::Char => 1,
-            Self::Long => 2,
+            Self::Long | Self::ULong => 2,
             Self::Array { elem, .. } => elem.alignment(),
             Self::Pointer(_) => 2,
             // Struct alignment: 2 (word). The size rounding to even
@@ -300,7 +304,17 @@ impl Type {
     /// would be a separate variant when a fixture demands it.
     #[must_use]
     pub fn is_unsigned(&self) -> bool {
-        matches!(self, Self::UInt)
+        matches!(self, Self::UInt | Self::ULong)
+    }
+
+    /// Whether this type is a 32-bit long-family type (signed or
+    /// unsigned). Useful where the byte-level emission is identical
+    /// between `long` and `unsigned long` (arithmetic, in-memory
+    /// layout) and only the comparison/shift mnemonic family cares
+    /// about signedness.
+    #[must_use]
+    pub fn is_long_like(&self) -> bool {
+        matches!(self, Self::Long | Self::ULong)
     }
 
     /// Look up a field by name. Returns the field's offset and type

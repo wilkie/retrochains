@@ -1130,10 +1130,11 @@ impl<'a> FunctionEmitter<'a> {
     ///   the original true/false targets.
     /// - `a || b`: a's true → true_slot; a's false → fall through to
     ///   b's test (a's false target becomes `None`). Then b same.
-    /// Whether `cond` is a signed long-vs-long compare between two
-    /// long globals that needs the 3-jump pattern. Used by `emit_if`
-    /// to decide whether to allocate a `then_entry_slot` (the body
-    /// label) for the test's true-target jump.
+    /// Whether `cond` is a long-vs-long compare (signed or unsigned)
+    /// between two long-family globals that needs the 3-jump pattern.
+    /// Used by `emit_if` to decide whether to allocate a
+    /// `then_entry_slot` for the test's true-target jump. Fixtures
+    /// 234–237 (signed), 242 (unsigned).
     fn is_long_signed_globals_cmp(&self, cond: &Expr) -> bool {
         let ExprKind::BinOp { op, left, right } = &cond.kind else { return false };
         if !matches!(op, BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge) {
@@ -1142,22 +1143,23 @@ impl<'a> FunctionEmitter<'a> {
         let (ExprKind::Ident(a), ExprKind::Ident(b)) = (&left.kind, &right.kind) else {
             return false;
         };
-        self.globals.type_of(a).map_or(false, |t| matches!(t, Type::Long))
-            && self.globals.type_of(b).map_or(false, |t| matches!(t, Type::Long))
+        self.globals.type_of(a).map_or(false, |t| t.is_long_like())
+            && self.globals.type_of(b).map_or(false, |t| t.is_long_like())
     }
 
-    /// Whether `cond` is `<long_global> <op> K` for a signed
+    /// Whether `cond` is `<long_global> <op> K` for a relational
     /// comparison op (`<,>,<=,>=`) with K small enough that both
     /// halves fit a sign-extended imm8. BCC inlines K into the
-    /// `cmp <mem>, imm` instruction rather than loading into a
-    /// register first. Fixture 240.
+    /// `cmp <mem>, imm` instruction. Covers both signed and
+    /// unsigned long globals; signedness only affects the mnemonic
+    /// family chosen at emission time. Fixture 240 (signed).
     fn is_long_signed_const_cmp(&self, cond: &Expr) -> bool {
         let ExprKind::BinOp { op, left, right } = &cond.kind else { return false };
         if !matches!(op, BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge) {
             return false;
         }
         let ExprKind::Ident(name) = &left.kind else { return false };
-        if !self.globals.type_of(name).map_or(false, |t| matches!(t, Type::Long)) {
+        if !self.globals.type_of(name).map_or(false, |t| t.is_long_like()) {
             return false;
         }
         let Some(k) = try_const_eval(right) else { return false };
@@ -1204,21 +1206,21 @@ impl<'a> FunctionEmitter<'a> {
             && let ExprKind::Ident(b) = &right.kind
             && let (Some(tslot), Some(fslot)) = (true_slot, false_slot)
         {
-            // Mnemonic table (verified against fixtures 234/235/
-            // 236/237). After `cmp ax, b+2`:
-            //   `<`  jg→false, jl→true,  then `cmp dx,b` jae→false
-            //   `>`  jl→false, jg→true,  then `cmp dx,b` jbe→false
-            //   `<=` jg→false, jne→true, then `cmp dx,b` ja→false
-            //   `>=` jl→false, jne→true, then `cmp dx,b` jb→false
-            // Strict comparisons use the signed jl/jg for the
-            // high-half true jump; non-strict use jne. The low-half
-            // tie-breaker uses the unsigned strict (jae/jbe) for
-            // strict and non-strict (ja/jb) for non-strict.
-            let (hi_to_false, hi_to_true, lo_to_false) = match op {
-                BinOp::Lt => ("jg", "jl",  "jae"),
-                BinOp::Gt => ("jl", "jg",  "jbe"),
-                BinOp::Le => ("jg", "jne", "ja"),
-                BinOp::Ge => ("jl", "jne", "jb"),
+            // Mnemonic table. Signed (fixtures 234–237) vs unsigned
+            // (fixture 242) differs only in the high-half jumps:
+            // signed uses jl/jg, unsigned uses jb/ja. The non-strict
+            // high-half true jump is `jne` in both cases. Low-half
+            // is always unsigned (jae/jbe strict; ja/jb non-strict).
+            let unsigned = self.cmp_is_unsigned(left, right);
+            let (hi_to_false, hi_to_true, lo_to_false) = match (op, unsigned) {
+                (BinOp::Lt, false) => ("jg", "jl",  "jae"),
+                (BinOp::Gt, false) => ("jl", "jg",  "jbe"),
+                (BinOp::Le, false) => ("jg", "jne", "ja"),
+                (BinOp::Ge, false) => ("jl", "jne", "jb"),
+                (BinOp::Lt, true)  => ("ja", "jb",  "jae"),
+                (BinOp::Gt, true)  => ("jb", "ja",  "jbe"),
+                (BinOp::Le, true)  => ("ja", "jne", "ja"),
+                (BinOp::Ge, true)  => ("jb", "jne", "jb"),
                 _ => unreachable!(),
             };
             let _ = write!(self.out, "\tmov\tax,word ptr DGROUP:_{a}+2\r\n");
@@ -1241,11 +1243,16 @@ impl<'a> FunctionEmitter<'a> {
         {
             let hi = (k >> 16) as i32;
             let lo = (k & 0xFFFF) as i32;
-            let (hi_to_false, hi_to_true, lo_to_false) = match op {
-                BinOp::Lt => ("jg", "jl",  "jae"),
-                BinOp::Gt => ("jl", "jg",  "jbe"),
-                BinOp::Le => ("jg", "jne", "ja"),
-                BinOp::Ge => ("jl", "jne", "jb"),
+            let unsigned = self.globals.type_of(name).map_or(false, |t| t.is_unsigned());
+            let (hi_to_false, hi_to_true, lo_to_false) = match (op, unsigned) {
+                (BinOp::Lt, false) => ("jg", "jl",  "jae"),
+                (BinOp::Gt, false) => ("jl", "jg",  "jbe"),
+                (BinOp::Le, false) => ("jg", "jne", "ja"),
+                (BinOp::Ge, false) => ("jl", "jne", "jb"),
+                (BinOp::Lt, true)  => ("ja", "jb",  "jae"),
+                (BinOp::Gt, true)  => ("jb", "ja",  "jbe"),
+                (BinOp::Le, true)  => ("ja", "jne", "ja"),
+                (BinOp::Ge, true)  => ("jb", "jne", "jb"),
                 _ => unreachable!(),
             };
             let _ = write!(self.out, "\tcmp\tword ptr DGROUP:_{name}+2,{hi}\r\n");
