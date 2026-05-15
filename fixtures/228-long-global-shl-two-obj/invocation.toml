@@ -1,0 +1,4 @@
+description = "`g = a << 2;` long left-shift by two. Probe: does BCC unroll (two shl/rcl pairs) or call a runtime helper?"
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

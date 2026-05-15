@@ -96,6 +96,11 @@ pub fn build_asm(
     out.extend_from_slice(b"_TEXT\tsegment byte public 'CODE'\r\n");
     let signatures = codegen::Signatures::from_unit(&unit);
     let globals = codegen::GlobalTable::from_unit(&unit);
+    // Codegen-injected runtime-helper externs (e.g. `N_LXLSH@` for
+    // long left-shift, fixture 228). Accumulated across all
+    // functions, then merged into the publics-ordering bucket
+    // emission in `write_tail`.
+    let mut helpers: std::collections::HashSet<String> = std::collections::HashSet::new();
     // Function-index assignment skips prototypes — they don't get a
     // `@N@…` label scope of their own.
     let mut func_idx = 0u32;
@@ -112,6 +117,7 @@ pub fn build_asm(
             &signatures,
             &globals,
             &mut strings,
+            &mut helpers,
         );
     }
 
@@ -133,7 +139,7 @@ pub fn build_asm(
         out.extend_from_slice(b"_TEXT\tends\r\n");
     }
 
-    write_tail(&mut out, &unit, &strings);
+    write_tail(&mut out, &unit, &strings, &helpers);
     out.push(0x1A); // DOS EOF marker
     Ok(out)
 }
@@ -370,7 +376,12 @@ _BSS\tends\r\n";
     out.extend_from_slice(SCAFFOLD);
 }
 
-fn write_tail(out: &mut Vec<u8>, unit: &crate::ast::Unit, strings: &codegen::StringPool) {
+fn write_tail(
+    out: &mut Vec<u8>,
+    unit: &crate::ast::Unit,
+    strings: &codegen::StringPool,
+    helpers: &std::collections::HashSet<String>,
+) {
     // Collect external function references: any name called from
     // somewhere in the TU that isn't defined here. Each becomes an
     // `extrn _<name>:near` directive in the tail, between the
@@ -433,30 +444,50 @@ fn write_tail(out: &mut Vec<u8>, unit: &crate::ast::Unit, strings: &codegen::Str
     // Reverse-alpha within long bucket fits every current fixture,
     // including function-vs-function shapes (095 `_sum, _main`;
     // 179 `_main, _add`).
-    let mut long_bucket: Vec<String> = Vec::new();
-    let mut short_bucket: Vec<String> = Vec::new();
-    let mut push_sym = |sym: String, longs: &mut Vec<String>, shorts: &mut Vec<String>| {
+    // Each entry is (sort_key, emit_line). The sort_key is the symbol
+    // name (used for reverse-alpha within each length bucket); the
+    // emit_line is the formatted `public _x` or `extrn _x:near` text.
+    // Runtime-helper externs (e.g. `N_LXLSH@`, fixture 228) get
+    // merged in alongside publics — they participate in the same
+    // length-bucket + reverse-alpha sort.
+    let mut long_bucket: Vec<(String, String)> = Vec::new();
+    let mut short_bucket: Vec<(String, String)> = Vec::new();
+    let mut push_entry = |sym: String,
+                          line: String,
+                          longs: &mut Vec<(String, String)>,
+                          shorts: &mut Vec<(String, String)>| {
         if sym.len() >= 3 {
-            longs.push(sym);
+            longs.push((sym, line));
         } else {
-            shorts.push(sym);
+            shorts.push((sym, line));
         }
     };
     for f in &unit.functions {
         if f.body.is_some() {
-            push_sym(codegen::function_symbol(&f.name), &mut long_bucket, &mut short_bucket);
+            let sym = codegen::function_symbol(&f.name);
+            let line = format!("\tpublic\t{sym}\r\n");
+            push_entry(sym, line, &mut long_bucket, &mut short_bucket);
         }
     }
     for g in &unit.globals {
         if g.is_static || g.is_extern {
             continue;
         }
-        push_sym(format!("_{}", g.name), &mut long_bucket, &mut short_bucket);
+        let sym = format!("_{}", g.name);
+        let line = format!("\tpublic\t{sym}\r\n");
+        push_entry(sym, line, &mut long_bucket, &mut short_bucket);
     }
-    long_bucket.sort();
-    short_bucket.sort();
-    for name in long_bucket.iter().rev().chain(short_bucket.iter().rev()) {
-        let _ = write!(out, "\tpublic\t{name}\r\n");
+    // Runtime helpers: `:far` declaration (BCC convention). The
+    // helper name already carries its own prefix (e.g. `N_LXLSH@`),
+    // so we don't add the `_` mangling that C identifiers get.
+    for helper in helpers {
+        let line = format!("\textrn\t{helper}:far\r\n");
+        push_entry(helper.clone(), line, &mut long_bucket, &mut short_bucket);
+    }
+    long_bucket.sort_by(|a, b| a.0.cmp(&b.0));
+    short_bucket.sort_by(|a, b| a.0.cmp(&b.0));
+    for (_, line) in long_bucket.iter().rev().chain(short_bucket.iter().rev()) {
+        out.extend_from_slice(line.as_bytes());
     }
     // Data externs come after the public list (function externs come
     // before it, in `collect_extern_calls` order). Source order; the

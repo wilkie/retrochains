@@ -184,9 +184,10 @@ pub fn emit_function(
     signatures: &Signatures,
     globals: &GlobalTable,
     strings: &mut StringPool,
+    helpers: &mut std::collections::HashSet<String>,
 ) {
     let mut emitter = FunctionEmitter::new(
-        out, source, function, func_idx, signatures, globals, strings,
+        out, source, function, func_idx, signatures, globals, strings, helpers,
     );
     emitter.run();
 }
@@ -221,6 +222,11 @@ struct FunctionEmitter<'a> {
     /// which need a `@<func>@C<num> label word / dw / db` block after
     /// the function ends. Empty for most functions.
     post_function_data: Vec<u8>,
+    /// Runtime-helper symbols this function references (e.g.
+    /// `N_LXLSH@` for long left-shift). Shared across all functions
+    /// in the TU so the tail-emitter can declare each one once and
+    /// merge them into the publics ordering. Fixture 228.
+    helpers: &'a mut std::collections::HashSet<String>,
 }
 
 /// Innermost enclosing construct that catches `break;` (and maybe
@@ -242,6 +248,7 @@ impl<'a> FunctionEmitter<'a> {
         signatures: &'a Signatures,
         globals: &'a GlobalTable,
         strings: &'a mut StringPool,
+        helpers: &'a mut std::collections::HashSet<String>,
     ) -> Self {
         Self {
             out,
@@ -257,6 +264,7 @@ impl<'a> FunctionEmitter<'a> {
             strings,
             loop_stack: Vec::new(),
             post_function_data: Vec::new(),
+            helpers,
         }
     }
 
@@ -2900,9 +2908,11 @@ impl<'a> FunctionEmitter<'a> {
             }
             // `g = a << 1;` long left-shift-by-one. BCC inlines as
             // shl on the low half (CF gets the high bit) and rcl on
-            // the high half (rotates CF into the LSB). For shift
-            // counts >1 BCC switches to a runtime helper — not yet
-            // covered. Fixture 227.
+            // the high half (rotates CF into the LSB). Note the
+            // AX=high/DX=low convention here matches the rest of the
+            // long-arith block; for shift counts >1 BCC switches to
+            // the `N_LXLSH@` helper and the standard DX:AX=high:low
+            // ABI convention (see the >1 path below). Fixture 227.
             if let ExprKind::BinOp { op: BinOp::Shl, left, right } = &value.kind
                 && let ExprKind::Ident(a) = &left.kind
                 && self.globals.type_of(a).map_or(false, |t| matches!(t, Type::Long))
@@ -2914,6 +2924,29 @@ impl<'a> FunctionEmitter<'a> {
                 let _ = write!(self.out, "\trcl\tax,1\r\n");
                 let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name}+2,ax\r\n");
                 let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name},dx\r\n");
+                return;
+            }
+            // `g = a << K;` for K > 1 — BCC calls the runtime helper
+            // `N_LXLSH@`. The register convention SWITCHES to the
+            // standard 32-bit ABI: DX=high, AX=low (input *and*
+            // output of the helper). CL holds the shift count.
+            // Helper is declared `extrn N_LXLSH@:far` in the tail.
+            // Fixture 228.
+            if let ExprKind::BinOp { op: BinOp::Shl, left, right } = &value.kind
+                && let ExprKind::Ident(a) = &left.kind
+                && self.globals.type_of(a).map_or(false, |t| matches!(t, Type::Long))
+                && let Some(k) = try_const_eval(right)
+                && k > 1
+                && k <= 255
+            {
+                let k_u8 = k as u8;
+                let _ = write!(self.out, "\tmov\tdx,word ptr DGROUP:_{a}+2\r\n");
+                let _ = write!(self.out, "\tmov\tax,word ptr DGROUP:_{a}\r\n");
+                let _ = write!(self.out, "\tmov\tcl,{k_u8}\r\n");
+                self.out.extend_from_slice(b"\tcall\tnear ptr N_LXLSH@\r\n");
+                self.helpers.insert("N_LXLSH@".to_string());
+                let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name}+2,dx\r\n");
+                let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name},ax\r\n");
                 return;
             }
             // `g = -a;` long unary minus. 32-bit two's-complement
