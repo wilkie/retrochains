@@ -18,9 +18,10 @@ invariants) to lowest (per-construct peepholes, where single
 instances can be coincidental). Anything below the **"weak signal"**
 threshold needs to be observed in combination with others.
 
-## How to use this catalog (when the fingerprinter exists)
+## How to use this catalog
 
-A future fingerprint tool would:
+The `crates/fingerprint/` tool is the start of this recognizer. A fuller
+fingerprinter would:
 
 1. Disassemble a target binary (`.exe`, `.obj`, `.asm`).
 2. Search for each pattern below, accumulating evidence weights.
@@ -118,23 +119,24 @@ then a single `?debug C E9` followed by `_TEXT ends`. Compilers that
 emit one segment per function (e.g., to make linking-out unused
 functions easier) would be distinguishable by this. _Fixture_: 009.
 
-### `public` symbols in reverse-alphabetical order (DEFINITIVE)
+### `public` symbol ordering (STRONG, unresolved general rule)
 
 ```
 	public	_main
 	public	_f
 ```
 
-The `public` list at end-of-file is sorted **reverse-alphabetical**
-by symbol name (both functions and globals participate in one
-combined sort). Initial fixtures (009, 010, 087) seemed to suggest
-"reverse declaration order" because source order happened to match
-alpha order; fixture 095 (`sum` defined first, `main` second,
-emitted as `sum, main`) disambiguates — that's the reverse-alpha
-walk (`sum > main`), not reverse-source. Most likely internal
-implementation: a sorted symbol table walked in reverse at TU end.
+The `public` list at end-of-file is **not** source order. Early
+fixtures (009, 010, 087) could be explained as reverse declaration
+order, but fixture 095 (`sum` defined before `main`, emitted as
+`sum, main`) proves source order is insufficient.
 
-Almost no other compiler matches this. _Fixtures_: 009, 087, 095.
+For the committed fixture corpus, our emitter currently matches BCC with
+a length-bucket plus reverse-alphabetical approximation. Targeted probes
+outside that corpus show the real rule is more likely hash-bucket based;
+see `specs/OPEN_QUESTIONS.md`. Treat the non-source-order public list as
+a strong fingerprint, but do not treat plain reverse-alpha as a closed
+fact.
 
 ### Function-symbol prefix (WEAK)
 
@@ -192,8 +194,10 @@ not just one `dec sp`). _Fixture_: 055.
 
 ### Single exit label per function via `jmp short` (DEFINITIVE)
 
-Every `return` becomes `jmp short @<n>@50` to a single exit label,
-where the epilogue lives. Even an unconditional `return 0;` in a
+Every `return` becomes `jmp short @<n>@<slot-label>` to a single exit
+label, where the epilogue lives. In straight-line functions that label
+is `@<n>@50`; in functions that reserve earlier label slots it is a
+later `50 + 24*slot` value. Even an unconditional `return 0;` in a
 straight-line function still goes through this `jmp`. Most other
 compilers inline the `ret` at each return site.
 
@@ -240,8 +244,7 @@ proof of BCC 2.0. _Fixtures_: all `-S` fixtures.
 ### Function index increments source-order (STRONG)
 
 The first function defined gets `@1@…`, the second `@2@…`, etc. This
-combines with the reverse-alphabetical public-symbol ordering as a
-cross-check.
+combines with the non-source-order public-symbol list as a cross-check.
 
 ---
 
@@ -811,18 +814,20 @@ identification.
 - **BCC 2.0 vs 3.0 vs other Turbo C++ versions**: Most patterns
   likely identical (the calling convention is fixed), but specific
   peepholes may have evolved.
-- **Pre-built libraries**: Functions linked from the runtime would
-  have their own fingerprint. May actually be a *stronger* signal
-  than user code since libraries are deterministic.
-- **`.obj`-only vs `.exe`**: The OMF record encoding (when we build
-  the OBJ emitter) will introduce a whole new layer of fingerprints
-  (record-type ordering, fixup encoding, segment alignment).
+- **Pre-built libraries**: `LIB_ARCHIVE.md` shows the runtime archives
+  mix BCC-style and assembler-style members, and TLIB strips the direct
+  BCC translator COMENTs. We still need a fuller member-classification
+  pass and dictionary decoding.
+- **`.obj` vs `.exe`**: OMF record ordering/fixup encoding now provides
+  object-level fingerprints. TLINK's MZ executable layout is still
+  largely unfixtured.
 
-## What we want for the eventual fingerprinter
+## What we want next for the fingerprinter
 
-When we build the recognizer tool (probably as a separate crate):
+`crates/fingerprint/` already performs basic OBJ/LIB analysis. Useful
+next steps are:
 
-1. **A pattern database** parseable from this doc (or generated from
+1. **A pattern database** parseable from this doc or generated from
    fixtures directly).
 2. **Disassembler integration** — needs to read OMF `.obj`, MZ `.exe`,
    and probably PE `.exe` (later compilers).

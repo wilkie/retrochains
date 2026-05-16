@@ -13,9 +13,9 @@ compiler avoids them:
   generator must be wedged into supporting.
 - Byte-exact matching of `BCC.EXE` requires preserving BCC's
   idiosyncrasies (warning text, error positions, K&R acceptance,
-  single-pass declaration ordering, the *exact* source-comment
-  interleaving in `-S` output). Hand-rolled code lets us wedge in
-  BCC-specific behaviors at the exact site they fire.
+  declaration ordering, the *exact* source-comment interleaving in
+  `-S` output). Hand-rolled code lets us wedge in BCC-specific
+  behaviors at the exact site they fire.
 - We grow fixture-by-fixture. Adding "return integer literal" or
   "variable declaration with initializer" is a function or two of
   hand-written code each — no DSL/grammar maintenance burden.
@@ -25,17 +25,16 @@ parsers. There's a reason.
 
 ## Decisions
 
-- **Single-pass.** The parser drives codegen as it goes (via event
-  callbacks or a visitor), so symbols are resolved and assembly is
-  emitted in source order. This mirrors how BCC actually behaved — it
-  was a single-pass DOS-era compiler — and it falls out naturally for
-  matching the interleaved `;` source comments / generated asm pattern
-  in `-S` output (see `ASM_OUTPUT.md`).
-- **Defer the lexer hack** until a fixture requires it. Until then,
-  identifiers in declaration position must be one of the recognized
-  primitive type keywords (`int`, `char`, `void`, ...) or it's a parse
-  error. When the first `typedef`-using fixture lands, we add a
-  `typedefs: HashSet<String>` to the parser and have the lexer query it.
+- **Whole-unit AST today; source-order emission preserved.** The current
+  implementation tokenizes, parses a full translation-unit AST, and then
+  codegen walks that AST in source order. This is not a literal parser-
+  drives-codegen pipeline, but it preserves the ordering that matters for
+  BCC-style source comments, function labels, and symbol emission.
+- **Typedef classification is parser-side today.** The first typedef
+  fixtures have landed, so `Parser` now carries a typedef table and treats
+  matching identifiers as type names in declaration/type contexts. There
+  is not a separate lexer callback API; the lexer still produces ordinary
+  identifiers and the parser classifies them where needed.
 - **AST faithful to source order.** Preserve the order BCC saw the
   declarations and statements in. Preserve redundant parentheses and
   comment positions to the extent they affect output. We can normalize
@@ -50,25 +49,20 @@ src/
 │   ├── mod.rs       Lexer struct, public API
 │   ├── token.rs     Token enum + Span
 │   └── ...
-├── parse/       # Hand-written recursive descent
-│   ├── mod.rs       Parser struct, top-level entry points
-│   ├── decl.rs      Type specifiers, declarators (K&R + ANSI)
-│   ├── expr.rs      Expressions via precedence climbing
-│   ├── stmt.rs      Statements
-│   └── ...
+├── parse/       # Hand-written recursive descent (currently in mod.rs)
+│   └── mod.rs       Parser struct, top-level items, declarations,
+│                    statements, expressions, typedef/record tables
 ├── ast/         # AST types (faithful)
-├── sema/        # Symbol table, type-name classification, type rules
-├── codegen/     # IR → x86 asm; emits via the writer in emit_s
+├── codegen/     # AST → x86 asm; emits via the writer in emit_s
 ├── emit_s.rs    # The .ASM-file writer (header, segments, function frame)
+├── emit_obj.rs  # Direct -c path, using TASM/OMF support
 ├── cli.rs
 └── dos_time.rs
 ```
 
-`codegen/` is what emits the `xor ax,ax` / `mov ax,42` / `[bp-2]` etc.
-that today lives directly in `emit_s.rs`. As real codegen grows, the file
-writer in `emit_s.rs` shrinks to "open file, emit header, drive codegen,
-emit tail" and the operation-by-operation asm comes from the codegen
-module.
+`emit_s.rs` owns file-level scaffolding (macro preamble, segment
+scaffold, globals/string tail), while `codegen/` owns function bodies and
+most instruction-level BCC patterns.
 
 ## Source locations and spans
 
@@ -79,29 +73,28 @@ day one because BCC's error messages cite source positions and those
 messages eventually have to match in our captured stdout/stderr (when we
 care about that — currently advisory).
 
-## Growing-the-parser order (tracked against fixtures)
+## Growth Model
 
-The parser grows fixture-by-fixture. Each new fixture extends the parser
-by exactly what that fixture needs. Anticipated short-term order:
-
-1. **003** `return <int-literal>;` — integer-literal token, unary
-   `return` statement with an integer-literal expression.
-2. **004** `int <name> = <int-literal>;` — `int` type-specifier, simple
-   declarator, initializer; identifier-as-rvalue in `return <name>;`.
-3. Later: arithmetic expressions (precedence climbing), multiple
-   declarators, function calls, control flow.
+The parser still grows fixture-by-fixture. Early fixtures covered integer
+returns, local declarations, arithmetic, calls, and control flow; later
+fixtures added typedefs, structs/unions, enums, static locals,
+K&R-parameter declarations, casts, `sizeof`, pointers, arrays, function
+pointers, and `long`/`unsigned long` spellings. The document should not be
+read as a complete C grammar: implemented grammar exists only where a
+fixture has forced it.
 
 Whenever the parser refuses a construct, the verify failure should say
-*why* with a clear message — that's the cue to extend the parser.
+*why* with a clear message. That failure is the cue to capture the
+smallest oracle fixture for the construct before extending the parser.
 
 ## What we explicitly defer
 
 - Templates, namespaces, RTTI, exceptions (not in BC2.0 to relevant
   extent for our fixtures).
-- The full preprocessor — for early fixtures we don't run one; sources
-  have no `#include`s. When a fixture demands it, the preprocessor will
-  be its own module (likely `pre/`).
-- Floating-point literals, wide-char, multibyte, structs, unions, enums,
-  classes — added when fixtures require.
+- The full preprocessor — current fixtures avoid `#include` and macro
+  expansion. When a fixture demands it, the preprocessor should be its own
+  module.
+- Floating-point literals, wide-char, multibyte, C++ classes, templates,
+  exceptions, and full C/C++ diagnostic recovery.
 - Error recovery for malformed input — we just bail. BCC's specific
   recovery behavior gets matched only if a fixture exercises it.

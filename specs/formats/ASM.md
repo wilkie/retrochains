@@ -6,7 +6,8 @@ with framing rules tight enough that "byte-exact" is a meaningful
 goal.
 
 The spec source is Borland's TASM 2.0 manual plus the
-Borland-specific conventions observed across fixtures `001-103`.
+Borland-specific conventions observed across the committed BCC `-S`
+fixtures.
 For the BCC-specific patterns that *fill in* this envelope —
 prologues, codegen idioms, switch dispatch — see
 [`../bcc/ASM_OUTPUT.md`](../bcc/ASM_OUTPUT.md). For the OMF records
@@ -107,11 +108,13 @@ labels; the `@` makes them invisible to user code by convention.
 
 ### Single-exit labels
 
-Every function has exactly one exit point labeled `@<func-idx>@50`,
-where `func-idx` is a 1-based counter over functions in source
-order. `50` is the slot number for the epilogue (other slot numbers
-appear for switch dispatch, loop tops, etc. — see
-[`ASM_OUTPUT.md`](../bcc/ASM_OUTPUT.md#labels-and-slots)).
+Every function has exactly one exit point, but it is not always
+`@<func-idx>@50`. Labels use `@<func-idx>@<50 + 24*slot>`, where
+`func-idx` is a 1-based counter over function definitions in source
+order and `slot` is assigned by BCC's label planner. A straight-line
+function exits at slot 0 (`@1@50`); functions with earlier control-flow
+labels exit at a later slot. See
+[`ASM_OUTPUT.md`](../bcc/ASM_OUTPUT.md#label-numbering).
 
 ## Memory model assumptions
 

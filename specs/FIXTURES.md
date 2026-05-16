@@ -16,8 +16,9 @@ fixtures/
 │   ├── invocation.toml      # how to invoke the oracle / our toolchain
 │   ├── HELLO.C              # the source(s); DOS-style filenames are recommended
 │   └── expected/            # captured oracle outputs (the goldens)
-│       ├── stdout.txt       # captured stdout from the tool
-│       ├── exit_code        # ASCII integer
+│       ├── stdout           # captured stdout from the tool
+│       ├── stderr           # captured stderr; empty under DOSBox 0.74 today
+│       ├── manifest.toml    # exit code, output list, hashes, mtimes, invocation summary
 │       └── HELLO.ASM        # every output file the tool produced, by name
 └── 002-...
 ```
@@ -101,21 +102,18 @@ the oracle to drift from itself.
 
 ## Diff reporting
 
-Diffs are produced for each output file. Three levels of granularity
-exist; the harness picks the most informative one based on filename:
+The current harness reports two kinds of differences:
 
-1. **Format-aware** (preferred, when available): "COMENT record #3 of
-   HELLO.OBJ has comment class 0x9D, expected 0x9E." Powered by readers in
-   `crates/obj/` (OMF), `crates/x86/` (asm), and eventually a `crates/mz/`
-   for executables. These readers exist *before* the corresponding writers
-   — understanding what BCC produced is a prerequisite for producing the
-   same thing.
-2. **Text** for `.ASM` and `.TXT` outputs: unified diff.
-3. **Byte** as the always-available fallback: hex window with the byte
-   offset highlighted.
+1. **Manifest diffs** for exit code, output-file presence, output-file
+   size, SHA-256, mtime, and stream SHA-256.
+2. **Byte diffs** for file contents: either a length mismatch or a
+   16-byte hex window centered on the first differing byte.
 
-A failing fixture's report shows the diff at the most specific level
-available, plus the byte-level diff for completeness.
+Format-aware OMF/ASM/MZ diffs and text unified diffs are desirable future
+improvements, but they are not implemented in `xfix` today. Until they
+land, fixture failures should be investigated with the raw byte window,
+the captured `expected/` files, and the format readers in `crates/obj/`
+or the ad-hoc fingerprinting tools.
 
 ## Adding a fixture (workflow)
 

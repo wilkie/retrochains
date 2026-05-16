@@ -8,7 +8,8 @@ Existing docs:
   with `-S`: file structure, segment scaffolding, source-comment
   interleaving, codegen patterns observed so far.
 - [`PARSER.md`](PARSER.md) — our lexer/parser strategy: hand-written
-  recursive descent, single-pass, faithful AST, deferred lexer hack.
+  recursive descent, whole-unit AST today, source-order-preserving
+  emission, and fixture-driven grammar growth.
   This is *how* we plan to build the front-end, not what BCC's front-end
   does.
 

@@ -15,12 +15,13 @@ with the same code but different publics order produce different `.OBJ`
 files; we lose byte-exactness even though the linked program would be
 identical.
 
-**Current rule (approximate).** Functions (one bucket, reverse-alpha)
-emit first, then all data + bss globals merged into a single
-reverse-alpha sort. Documented in `crates/bcc/src/emit_s.rs::write_tail`.
-Refined by fixture 211 (`long a=5; long b; main` → `_main, _b, _a` even
-though `_a` is in `_DATA` and `_b` is in `_BSS` — they share the same
-short-bucket sort).
+**Current implementation rule (approximate).** Symbols are split by total
+mangled-name length (including the leading underscore): length >= 3 goes
+to the "long" bucket, length <= 2 goes to the "short" bucket. Each bucket
+is emitted reverse-alphabetically, long bucket first. This is documented
+in `crates/bcc/src/emit_s.rs::write_tail` and fits the committed fixture
+corpus, including fixture 218 (`_main, _g, _f`) where `_f` and `_g` are
+both short-bucket symbols.
 
 **Confirmed gap.** Multi-character non-`main` symbols expose violations.
 19 captured probes (`int <var> = K; int main(void) {...}` permutations):
@@ -52,8 +53,10 @@ short-bucket sort).
 - first-char only, last-char only, first+last mod 8 — fail similar way.
 - first-2-bytes interpreted as 16-bit, mod 8 — fails for `mmm`, `xy`.
 - length-based, position-weighted sums — fail.
-- per-segment reverse-alpha (current rule) — fails when the unit has any
-  non-`main` multi-char variable.
+- per-segment reverse-alpha — fails when the unit has any non-`main`
+  multi-char variable.
+- length-bucket reverse-alpha — fits committed fixtures but does not
+  explain the targeted probes listed above.
 
 **Strong hypothesis.** BCC uses a positional/polynomial hash — likely
 `h = (h << 4) ^ c` or similar Turbo C-era construction — modulo a specific
@@ -68,25 +71,26 @@ targeted probes designed to disambiguate `(h<<K)^c` for various K.
 was removed; reinstate once the rule is decoded. The AST/parser scaffolding
 for `&<ident>[<const>]` is already in the codebase as dormant code.
 
-## LIB archives in BC2.zip — were they compiled by BCC itself?
+## LIB archive member provenance and dictionary details
 
 **The question.** BC2.zip's `LIB/*.LIB` files contain the runtime/CRT
-archives. Are the constituent OBJ records inside them byte-exact products
-of BCC 2.0 itself, or were they hand-assembled / produced by a different
-chain (TASM, an older BCC, etc.)?
+archives. Which members are BCC-compiled C objects, which are hand-written
+assembler objects, and what archive metadata do we still need to decode?
 
 **Why it matters.** If they're BCC-compiled, the OBJ slice we emit should
 already cover their record shapes — a strong end-to-end test. If not,
 we'd need separate fixturing for any quirks in their format.
 
-**Status.** Open. Memory notes call this out as a fingerprinting task to
-do once our OBJ emitter has more coverage. See [LIB fingerprinting]
-working notes in user memory.
+**Status.** Partly answered. `specs/formats/LIB_ARCHIVE.md` records a
+probe over CS/MATHS/EMU/FP87/GRAPHICS/OLDSTRMS/CWINS: TLIB strips direct
+BCC fingerprint COMENTs, inserts empty class-0xA1 COMENTs, and the
+libraries are a mix of BCC-LNAMES-style members and assembler-style
+members. CS.LIB and OLDSTRMS.LIB are mostly BCC-style; GRAPHICS.LIB is
+entirely assembler-style in that probe.
 
-**To close.** Fingerprint each OBJ record inside `LIB/CS.LIB` (etc.)
-against the patterns we've codified in `specs/formats/OMF.md` and our
-`tasm` encoder. Any record shape we can't reproduce identifies a feature
-gap.
+**To close.** Decode the library dictionary format, run a full COMENT
+class histogram over every member, and classify ambiguous members whose
+LNAMES/SEGDEF shape is neither canonical BCC nor obvious assembler output.
 
 ## Asymmetric `db` style for char-array storage
 

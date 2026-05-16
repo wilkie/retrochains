@@ -1,8 +1,9 @@
 # BCC `-S` assembly output format
 
-What `BCC.EXE -S <source>.C` writes to `<source>.ASM`. All observations are
-drawn from fixtures `001-empty-main`, `003-return-constant`, and
-`004-int-variable`; cite the fixture each time a claim is extended.
+What `BCC.EXE -S <source>.C` writes to `<source>.ASM`. This document
+started from the first `-S` fixtures and has been extended as the
+fixture corpus grew. When a rule is not closed over the full corpus,
+the text should say which fixtures pin it and which cases remain open.
 
 ## File-level conventions
 
@@ -144,15 +145,18 @@ _TEXT	ends
 	end
 ```
 
-`s@` is another section-base label, this time for strings/static data
-(unused by our `-S`-only fixtures so far). The `_TEXT` is re-opened and
-re-closed in case later sections need it.
+`s@` is another section-base label, this time for string-pool data.
+It remains as an empty marker when a translation unit has no string
+literals, and it fills with `db` runs when literals are present. The
+`_TEXT` is re-opened and re-closed in case later sections need it.
 
-The `public _<sym>` lines appear **in reverse definition order**.
-Fixtures 009 and 010 both define `f` first and `main` second, but emit
-`public _main` before `public _f`. Probably an artifact of how BCC walks
-its internal symbol table (LIFO insertion); for byte-exactness we need to
-match it.
+The `public _<sym>` lines are **not source order**. Early fixtures 009
+and 010 looked like reverse definition order because `f` and `main`
+happened to fall that way, but later fixtures disprove that simple rule.
+The current implementation uses a fixture-fitting length-bucket plus
+reverse-alphabetical approximation; targeted probes suggest BCC's real
+symbol table order is hash-bucket based. See the dedicated public-order
+section below and `OPEN_QUESTIONS.md`.
 
 `end` closes the assembly file (TASM's end-of-source directive).
 
@@ -1586,23 +1590,25 @@ direct `*p` does. A variable offset requires a runtime address
 computation that uses a temp register anyway, so the pointer
 doesn't pay back the register cost.
 
-### Public-symbol list order: reverse alphabetical (correction)
+### Public-symbol list order: current approximation and open rule
 
-We previously documented the `public` list at the end of the
-file as appearing in **reverse declaration order**, which fit
-every prior fixture (the source order happened to match alpha
-order). Fixture 095 disambiguates: source order is `sum`,
-`main`, but the emitted list is:
+We previously documented the `public` list at the end of the file as
+appearing in **reverse declaration order**, which fit early fixtures only
+because source order happened to match the observed output. Fixture 095
+disambiguates: source order is `sum`, `main`, but the emitted list is:
 ```
 public	_sum
 public	_main
 ```
 
-Alphabetically `main < sum`, and the emitted order is the
-**reverse-alphabetical** walk (sum, main). The most likely
-internal implementation is a sorted symbol table walked in
-reverse — same outward behavior as "LIFO over a sorted table".
-Both functions and globals participate in one combined sort.
+Alphabetically `main < sum`, so reverse alphabetical explains that
+fixture and many others. Later targeted probes with multi-character
+non-`main` symbols show reverse alphabetical is still not the full rule.
+The current emitter matches the committed corpus with a length-bucket
+approximation (longer mangled symbols first, reverse-alpha within each
+bucket), but the likely real implementation is a hash-bucketed symbol
+table. PUBDEF order is byte-significant in `.OBJ`, so this remains an
+open compatibility question; see `specs/OPEN_QUESTIONS.md`.
 
 ## Globals and string literals (`083`–`089`)
 
@@ -1778,19 +1784,9 @@ Three observations:
 
 ## Open questions (track for future fixtures)
 
-- `@<n>@<m>` label scheme: `@n` steps per function (confirmed). `@50`
-  is the exit label number — does it step for additional labels
-  (else-branches, loops, gotos)? Probably 50 is just "the exit
-  label slot" and other labels get @51, @52, …
-- Why does `public` ordering appear to be LIFO over the symbol table?
-  When we add globals and externs, find out where they slot in.
-- Does the `s@` label ever become non-empty? Probably for string literals.
-- Are `d@`/`d@w` and `b@`/`b@w` ever positioned mid-segment, or always
-  at the segment head?
-- 3-byte stack frame: 3× `dec sp` or `sub sp,3`? (Pin down the
-  `dec`→`sub` crossover.)
-- Two-operand `imul` (80186/286): does any `-mc`/`-ml` model or higher
-  target switch BCC to it?
+- Public/PUBDEF ordering general rule. The current emitter uses a
+  length-bucket + reverse-alpha approximation that fits committed
+  fixtures, but targeted probes suggest a hash-bucketed symbol table.
 - `@<func>@C<num>` data-label `<num>` formula. Jump-table fixtures
   073 (n=8, C1244) and 076 (n=4, C876) both fit `92·n + 508`;
   linear-search fixture 074 (n=4, C738) fits `74·n + 442`. These
@@ -1801,6 +1797,9 @@ Three observations:
   strategies. Capture a fixture with a different function/TU
   shape (e.g. multiple constants, a switch later in the function,
   two switches) and see whether the same formula still holds.
-- Call with arguments: cdecl push-and-pop pattern.
+- Are `d@`/`d@w` and `b@`/`b@w` ever positioned mid-segment, or always
+  at the segment head?
+- Two-operand `imul` (80186/286): does any `-mc`/`-ml` model or higher
+  target switch BCC to it?
 - What does `-O`/`-G`/`-r`/`-Z` actually change in the output? We've
   only run with `-ms`.
