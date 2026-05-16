@@ -628,6 +628,11 @@ fn parse_mov(operands: &str, line_no: usize) -> AsmResult<Instr> {
         if rhs == "ax" {
             return Ok(Instr::MovBpRelAx { offset });
         }
+        // `mov word ptr [bp-N], <reg16>` for non-AX sources
+        // (fixture 286 stores DX as the low half of a long local).
+        if let Some(reg) = Reg16::parse(rhs) {
+            return Ok(Instr::MovBpRelReg16 { offset, reg });
+        }
     }
     // `mov ax,word ptr cs:[bx]` — CS-override load through BX. No
     // displacement. Fixture 160's value-table walk.
@@ -812,6 +817,13 @@ fn parse_sbb(operands: &str, line_no: usize) -> AsmResult<Instr> {
             return Ok(Instr::SbbAxImm16 { imm: imm as u16 });
         }
     }
+    // `sbb dx, word ptr [bp+N]` — long return-arith high-half
+    // borrow (fixture 285's `return a - b;` analog).
+    if lhs == "dx" {
+        if let Some(offset) = parse_bp_relative(rhs) {
+            return Ok(Instr::SbbDxBpRel { offset });
+        }
+    }
     // `sbb word ptr <group>:<sym>[+N], imm8sx` — high-half borrow
     // propagation for long `g--` (fixture 250).
     if let Some((group, symbol)) = parse_group_symbol(lhs) {
@@ -852,6 +864,23 @@ fn parse_adc(operands: &str, line_no: usize) -> AsmResult<Instr> {
         }
         if let Some(imm) = parse_imm16(rhs) {
             return Ok(Instr::AdcAxImm16 { imm: imm as u16 });
+        }
+    }
+    // `adc dx, word ptr <group>:<sym>[+N]` — long-arithmetic
+    // high-half carry propagation for the commuted `i + g` shape
+    // (fixture 281). Also `adc dx, word ptr [bp+N]` for the long
+    // return-arith pattern (fixture 285).
+    if lhs == "dx" {
+        if let Some((group, symbol)) = parse_group_symbol(rhs) {
+            let (sym, offset) = split_sym_offset(symbol);
+            return Ok(Instr::AdcDxGroupSym {
+                group: group.to_string(),
+                symbol: sym.to_string(),
+                offset,
+            });
+        }
+        if let Some(offset) = parse_bp_relative(rhs) {
+            return Ok(Instr::AdcDxBpRel { offset });
         }
     }
     // `adc word ptr <group>:<sym>[+N], imm8sx` — high-half carry
@@ -926,12 +955,16 @@ fn parse_add(operands: &str, line_no: usize) -> AsmResult<Instr> {
             return Ok(Instr::AddAxImm { imm });
         }
     }
-    // `add <reg16>, imm8sx` for non-AX dst (AX uses the shorter
-    // `05 lo hi` form via `AddAxImm`). Fixture 207 (`add dx, 10`
-    // for long-arithmetic low-half add).
+    // `add <reg16>, imm` for non-AX dst (AX uses the shorter
+    // `05 lo hi` form via `AddAxImm`). Pick imm8sx (`83 C(rm) ii`,
+    // 3 bytes — fixture 207) when the immediate fits; fall back to
+    // imm16 (`81 C(rm) lo hi`, 4 bytes — fixture 275) otherwise.
     if let Some(reg) = Reg16::parse(lhs) {
         if let Some(imm) = parse_imm8_signed(rhs) {
             return Ok(Instr::AddReg16Imm8Sx { reg, imm });
+        }
+        if let Some(imm) = parse_imm16(rhs) {
+            return Ok(Instr::AddReg16Imm16 { reg, imm });
         }
     }
     // `add dx, word ptr <group>:<sym>[+N]` — long-arithmetic low-
@@ -967,13 +1000,23 @@ fn parse_add(operands: &str, line_no: usize) -> AsmResult<Instr> {
             return Ok(Instr::AddBpRelImm8 { offset, imm });
         }
     }
-    // `add word ptr <group>:<sym>[+N], imm8sx` — read-modify-write
-    // on a data-segment global (low-half of long `g++` etc.,
-    // fixture 249).
+    // `add word ptr <group>:<sym>[+N], imm` — read-modify-write
+    // on a data-segment global. Prefer imm8sx (`83 06 ... ii`,
+    // 5 bytes — fixture 249's `g++`) when the immediate fits;
+    // fall back to imm16 (`81 06 ... lo hi`, 6 bytes — fixture
+    // 276's `g += 1000`) otherwise.
     if let Some((group, symbol)) = parse_group_symbol(lhs) {
+        let (sym, offset) = split_sym_offset(symbol);
         if let Some(imm) = parse_imm8_signed(rhs) {
-            let (sym, offset) = split_sym_offset(symbol);
             return Ok(Instr::AddGroupSymImm8Sx {
+                group: group.to_string(),
+                symbol: sym.to_string(),
+                offset,
+                imm,
+            });
+        }
+        if let Some(imm) = parse_imm16(rhs) {
+            return Ok(Instr::AddGroupSymImm16 {
                 group: group.to_string(),
                 symbol: sym.to_string(),
                 offset,
@@ -1032,12 +1075,22 @@ fn parse_cmp(operands: &str, line_no: usize) -> AsmResult<Instr> {
             return Ok(Instr::CmpBpRelImm8 { offset, imm });
         }
     }
-    // `cmp word ptr <group>:<sym>[+N],imm8sx` — long const-compare
-    // chained-cmp pattern (fixture 223: `if (g == K)` for long g).
+    // `cmp word ptr <group>:<sym>[+N], imm` — long const-compare
+    // chained-cmp pattern. Prefer imm8sx (`83 3E ...`, 5 bytes —
+    // fixture 223) when it fits; fall back to imm16 (`81 3E ...`,
+    // 6 bytes — fixture 282) for wider constants.
     if let Some((group, symbol)) = parse_group_symbol(lhs) {
+        let (sym, offset) = split_sym_offset(symbol);
         if let Some(imm) = parse_imm8_signed(rhs) {
-            let (sym, offset) = split_sym_offset(symbol);
             return Ok(Instr::CmpGroupSymImm8Sx {
+                group: group.to_string(),
+                symbol: sym.to_string(),
+                offset,
+                imm,
+            });
+        }
+        if let Some(imm) = parse_imm16(rhs) {
+            return Ok(Instr::CmpGroupSymImm16 {
                 group: group.to_string(),
                 symbol: sym.to_string(),
                 offset,

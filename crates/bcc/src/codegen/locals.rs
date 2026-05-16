@@ -185,8 +185,10 @@ impl Locals {
             // Every param takes a 2-byte slot on the stack regardless
             // of declared type — `char` gets promoted at the push site
             // by the caller. (We haven't pinned this with a `char`-
-            // param fixture; revisit when we have one.)
-            param_offset += 2;
+            // param fixture; revisit when we have one.) Long params
+            // take a 4-byte slot since they don't fit in a single
+            // word (fixture 285).
+            param_offset += if param.ty.is_long_like() { 4 } else { 2 };
             *counts.entry(param.name.clone()).or_insert(0) += 1;
         }
 

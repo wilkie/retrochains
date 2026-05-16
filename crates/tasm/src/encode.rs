@@ -252,12 +252,14 @@ fn instr_size(instr: &Instr) -> usize {
         Instr::JmpIndirectCsTableBx { .. } => 5,
         Instr::JmpIndirectCsBxDisp { .. } => 4,
         Instr::LoopShort { .. } => 2,
-        Instr::MovBpRelAx { .. } => 3,
+        Instr::MovBpRelAx { .. } | Instr::MovBpRelReg16 { .. } => 3,
         Instr::MovAxFromCsBx => 3,
         Instr::MovReg16OffsetSym { .. } => 3,
         Instr::MovReg16Imm { .. } | Instr::SubSpImm(_) | Instr::AddSpImm(_) => 3,
         Instr::MovReg16BpRel { .. }
         | Instr::AddAxBpRel { .. }
+        | Instr::AdcDxBpRel { .. }
+        | Instr::SbbDxBpRel { .. }
         | Instr::SubAxBpRel { .. }
         | Instr::AndAxBpRel { .. }
         | Instr::OrAxBpRel { .. }
@@ -281,6 +283,8 @@ fn instr_size(instr: &Instr) -> usize {
         Instr::MovGroupSymAx { .. } => 3,
         Instr::MovGroupSymReg16 { .. } => 4,
         Instr::AddReg16Imm8Sx { .. } => 3,
+        Instr::AddReg16Imm16 { .. } => 4,
+        Instr::AddGroupSymImm16 { .. } => 6,
         Instr::AdcAxImm16 { .. } | Instr::SbbAxImm16 { .. } => 3,
         Instr::MovAlFromSiPtr | Instr::MovAlFromBxPtr => 2,
         Instr::ImulReg16 { .. } => 2,
@@ -288,6 +292,7 @@ fn instr_size(instr: &Instr) -> usize {
         | Instr::OrAxGroupSym { .. }
         | Instr::AddDxGroupSym { .. }
         | Instr::AdcAxGroupSym { .. }
+        | Instr::AdcDxGroupSym { .. }
         | Instr::SubDxGroupSym { .. }
         | Instr::SbbAxGroupSym { .. }
         | Instr::AndDxGroupSym { .. }
@@ -304,7 +309,8 @@ fn instr_size(instr: &Instr) -> usize {
         | Instr::SbbGroupSymImm8Sx { .. } => 5,
         Instr::AndGroupSymImm16 { .. }
         | Instr::OrGroupSymImm16 { .. }
-        | Instr::XorGroupSymImm16 { .. } => 6,
+        | Instr::XorGroupSymImm16 { .. }
+        | Instr::CmpGroupSymImm16 { .. } => 6,
         Instr::Cbw => 1,
         Instr::LeaReg16BpRel { .. } => 3,
         Instr::MovSiPtrImm { .. } | Instr::MovBxPtrImm { .. } => 4,
@@ -454,6 +460,22 @@ fn emit_instr(
         }
         Instr::AddAxBpRel { offset } => emit_alu_ax_bp_rel(0x03, *offset, out),
         Instr::SubAxBpRel { offset } => emit_alu_ax_bp_rel(0x2B, *offset, out),
+        Instr::AdcDxBpRel { offset } => {
+            // `adc dx,word ptr [bp+disp8]` → 13 56 dd. ModR/M 56 =
+            // mod=01 reg=DX(010) rm=110.
+            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
+            out.push(0x13);
+            out.push(0x56);
+            out.push(disp as u8);
+        }
+        Instr::SbbDxBpRel { offset } => {
+            // `sbb dx,word ptr [bp+disp8]` → 1B 56 dd. Same ModR/M
+            // as AdcDxBpRel; opcode 1B is SBB r16,r/m16.
+            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
+            out.push(0x1B);
+            out.push(0x56);
+            out.push(disp as u8);
+        }
         Instr::SubAxFromSiPtr => {
             // `sub ax,word ptr [si]` → 2B 04. 2B is `sub r16,r/m16`;
             // ModR/M 04 = mod=00 reg=AX r/m=100 ([si]).
@@ -586,6 +608,15 @@ fn emit_instr(
             let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
             out.push(0x89);
             out.push(0x46);
+            out.push(disp as u8);
+        }
+        Instr::MovBpRelReg16 { offset, reg } => {
+            // `mov word ptr [bp+disp8], r16` → 89 (mod=01 reg rm=110) dd.
+            // Same opcode as `MovBpRelAx`; only the ModR/M reg field
+            // changes.
+            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
+            out.push(0x89);
+            out.push(0b01_000_110 | (reg.code() << 3));
             out.push(disp as u8);
         }
         Instr::MovAxFromCsBx => {
@@ -723,6 +754,19 @@ fn emit_instr(
             out.push(0b11_000_000 | reg.code());
             out.push(*imm as u8);
         }
+        Instr::AddReg16Imm16 { reg, imm } => {
+            // `add <reg16>, imm16` → 81 C(reg) lo hi. Same ModR/M
+            // as the imm8sx form; opcode 81 selects the wider imm.
+            out.push(0x81);
+            out.push(0b11_000_000 | reg.code());
+            out.extend_from_slice(&imm.to_le_bytes());
+        }
+        Instr::AddGroupSymImm16 { group, symbol, offset, imm } => {
+            // `add word ptr <group>:<sym>[+N], imm16` → 81 06 lo hi imm_lo imm_hi.
+            // Grp1 r/m16,imm16 with /0=ADD (fixture 276's `g += K` for big K).
+            emit_group_sym_lea(&[0x81, 0x06], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
+            out.extend_from_slice(&imm.to_le_bytes());
+        }
         Instr::AdcAxImm16 { imm } => {
             // `adc ax, imm16` → 15 lo hi.
             out.push(0x15);
@@ -790,6 +834,11 @@ fn emit_instr(
             // Same ModR/M as the `add ax` sibling; opcode 13 (ADC r16,r/m16).
             emit_group_sym_lea(&[0x13, 0x06], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
         }
+        Instr::AdcDxGroupSym { group, symbol, offset } => {
+            // `adc dx,word ptr <group>:<symbol>` → 13 16 lo hi.
+            // Opcode 13 (ADC r16,r/m16); ModR/M reg field 010=DX.
+            emit_group_sym_lea(&[0x13, 0x16], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
+        }
         Instr::SubDxGroupSym { group, symbol, offset } => {
             // `sub dx,word ptr <group>:<symbol>` → 2B 16 lo hi.
             // Same shape as `AddDxGroupSym`; opcode 2B (SUB r16,r/m16).
@@ -847,6 +896,12 @@ fn emit_instr(
             // Long const-compare chained-cmp pattern (fixture 223).
             emit_group_sym_lea(&[0x83, 0x3E], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
             out.push(*imm as u8);
+        }
+        Instr::CmpGroupSymImm16 { group, symbol, offset, imm } => {
+            // `cmp word ptr <group>:<sym>[+N], imm16` → 81 3E lo hi imm_lo imm_hi.
+            // Wider sibling for K outside i8sx range (fixture 282).
+            emit_group_sym_lea(&[0x81, 0x3E], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
+            out.extend_from_slice(&imm.to_le_bytes());
         }
         Instr::AddGroupSymImm8Sx { group, symbol, offset, imm } => {
             // `add word ptr <group>:<sym>[+N], imm8sx` → 83 06 lo hi ii.

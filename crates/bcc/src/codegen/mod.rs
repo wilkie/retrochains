@@ -594,6 +594,8 @@ impl<'a> FunctionEmitter<'a> {
         let needs_then_entry = cond_has_top_or
             || self.is_long_signed_globals_cmp(cond)
             || self.is_long_signed_const_cmp(cond)
+            || self.is_long_vs_int_cmp(cond)
+            || self.is_long_vs_int_ne(cond)
             || self.is_long_ne_const(cond);
         let then_entry_slot = if needs_then_entry { Some(base) } else { None };
 
@@ -1162,11 +1164,10 @@ impl<'a> FunctionEmitter<'a> {
     }
 
     /// Whether `cond` is `<long_global> <op> K` for a relational
-    /// comparison op (`<,>,<=,>=`) with K small enough that both
-    /// halves fit a sign-extended imm8. BCC inlines K into the
-    /// `cmp <mem>, imm` instruction. Covers both signed and
-    /// unsigned long globals; signedness only affects the mnemonic
-    /// family chosen at emission time. Fixture 240 (signed).
+    /// comparison op (`<,>,<=,>=`). BCC inlines K into the
+    /// `cmp <mem>, imm` instruction (per half), choosing the
+    /// shorter imm8sx form when each half fits and the wider imm16
+    /// otherwise. Fixtures 240 (i8sx), 282 (imm16).
     fn is_long_signed_const_cmp(&self, cond: &Expr) -> bool {
         let ExprKind::BinOp { op, left, right } = &cond.kind else { return false };
         if !matches!(op, BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge) {
@@ -1176,10 +1177,45 @@ impl<'a> FunctionEmitter<'a> {
         if !self.globals.type_of(name).map_or(false, |t| t.is_long_like()) {
             return false;
         }
-        let Some(k) = try_const_eval(right) else { return false };
-        let hi = (k >> 16) as i32;
-        let lo = (k & 0xFFFF) as i32;
-        (-128..=127).contains(&hi) && (-128..=127).contains(&lo)
+        try_const_eval(right).is_some()
+    }
+
+    /// Whether `cond` is a long-vs-int relational compare between
+    /// a long global and an int global. BCC widens the int with
+    /// `cwd` (DX:AX = widened i), then compares against g. The
+    /// 3-jump pattern uses operand-swapped mnemonics (since the
+    /// operand order is widened-int-LHS / long-RHS, but the
+    /// source semantics is long-LHS / int-RHS). Fixtures 273
+    /// (`<`), and 280 (`!=`) which uses a different shape.
+    fn is_long_vs_int_cmp(&self, cond: &Expr) -> bool {
+        let ExprKind::BinOp { op, left, right } = &cond.kind else { return false };
+        if !matches!(op, BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge) {
+            return false;
+        }
+        let (ExprKind::Ident(a), ExprKind::Ident(b)) = (&left.kind, &right.kind) else {
+            return false;
+        };
+        let a_ty = self.globals.type_of(a);
+        let b_ty = self.globals.type_of(b);
+        a_ty.map_or(false, |t| t.is_long_like())
+            && b_ty.map_or(false, |t| matches!(t, Type::Int))
+    }
+
+    /// Whether `cond` is `<long_global> != <int_global>`. Same
+    /// widen-via-cwd shape as `is_long_vs_int_cmp` but uses the
+    /// chained-cmp pattern with both slots (jne→true, je→false).
+    /// Fixture 280.
+    fn is_long_vs_int_ne(&self, cond: &Expr) -> bool {
+        let ExprKind::BinOp { op: BinOp::Ne, left, right } = &cond.kind else {
+            return false;
+        };
+        let (ExprKind::Ident(a), ExprKind::Ident(b)) = (&left.kind, &right.kind) else {
+            return false;
+        };
+        let a_ty = self.globals.type_of(a);
+        let b_ty = self.globals.type_of(b);
+        a_ty.map_or(false, |t| t.is_long_like())
+            && b_ty.map_or(false, |t| matches!(t, Type::Int))
     }
 
     /// Whether `cond` is `<long_global> != K` for a small const K —
@@ -1208,6 +1244,71 @@ impl<'a> FunctionEmitter<'a> {
         true_slot: Option<u32>,
         false_slot: Option<u32>,
     ) {
+        // `<long_global> <relop> <int_global>` mixed compare. BCC
+        // widens the int (mov ax, _i / cwd to DX:AX), then compares
+        // against g. The operand-order in the cmp is widened-int-LHS
+        // / long-RHS, but the source semantics is long-LHS /
+        // int-RHS — so the mnemonic flips (e.g. `g < i` lowers to
+        // `i > g`). Fixture 273.
+        if self.is_long_vs_int_cmp(cond)
+            && let ExprKind::BinOp { op, left, right } = &cond.kind
+            && let ExprKind::Ident(g) = &left.kind
+            && let ExprKind::Ident(i) = &right.kind
+            && let (Some(tslot), Some(fslot)) = (true_slot, false_slot)
+        {
+            // Flip the op: g <op> i ⇔ i <flipped> g (operands swapped).
+            // Then look up mnemonics for the flipped op.
+            let flipped = match op {
+                BinOp::Lt => BinOp::Gt,
+                BinOp::Gt => BinOp::Lt,
+                BinOp::Le => BinOp::Ge,
+                BinOp::Ge => BinOp::Le,
+                _ => unreachable!(),
+            };
+            // Reuse the same mnemonic table as the globals-vs-globals
+            // path. Signedness here is "either operand unsigned" →
+            // unsigned. Both long_like for unsigned check covers
+            // signed long + signed int = signed, etc.
+            let unsigned = self.globals.type_of(g).map_or(false, |t| t.is_unsigned())
+                || self.globals.type_of(i).map_or(false, |t| t.is_unsigned());
+            let (hi_to_false, hi_to_true, lo_to_false) = match (flipped, unsigned) {
+                (BinOp::Lt, false) => ("jg", "jl",  "jae"),
+                (BinOp::Gt, false) => ("jl", "jg",  "jbe"),
+                (BinOp::Le, false) => ("jg", "jne", "ja"),
+                (BinOp::Ge, false) => ("jl", "jne", "jb"),
+                (BinOp::Lt, true)  => ("ja", "jb",  "jae"),
+                (BinOp::Gt, true)  => ("jb", "ja",  "jbe"),
+                (BinOp::Le, true)  => ("ja", "jne", "ja"),
+                (BinOp::Ge, true)  => ("jb", "jne", "jb"),
+                _ => unreachable!(),
+            };
+            let _ = write!(self.out, "\tmov\tax,word ptr DGROUP:_{i}\r\n");
+            self.out.extend_from_slice(b"\tcwd\t\r\n");
+            let _ = write!(self.out, "\tcmp\tdx,word ptr DGROUP:_{g}+2\r\n");
+            let _ = write!(self.out, "\t{hi_to_false}\tshort {}\r\n", self.label_ref(fslot));
+            let _ = write!(self.out, "\t{hi_to_true}\tshort {}\r\n", self.label_ref(tslot));
+            let _ = write!(self.out, "\tcmp\tax,word ptr DGROUP:_{g}\r\n");
+            let _ = write!(self.out, "\t{lo_to_false}\tshort {}\r\n", self.label_ref(fslot));
+            return;
+        }
+        // `<long_global> != <int_global>` mixed inequality. Same
+        // widen-via-cwd as `<` but with the chained-cmp shape:
+        // jne→true on the high half (definitive), je→false on the
+        // low half (both equal → ==). Fixture 280.
+        if self.is_long_vs_int_ne(cond)
+            && let ExprKind::BinOp { left, right, .. } = &cond.kind
+            && let ExprKind::Ident(g) = &left.kind
+            && let ExprKind::Ident(i) = &right.kind
+            && let (Some(tslot), Some(fslot)) = (true_slot, false_slot)
+        {
+            let _ = write!(self.out, "\tmov\tax,word ptr DGROUP:_{i}\r\n");
+            self.out.extend_from_slice(b"\tcwd\t\r\n");
+            let _ = write!(self.out, "\tcmp\tdx,word ptr DGROUP:_{g}+2\r\n");
+            let _ = write!(self.out, "\tjne\tshort {}\r\n", self.label_ref(tslot));
+            let _ = write!(self.out, "\tcmp\tax,word ptr DGROUP:_{g}\r\n");
+            let _ = write!(self.out, "\tje\tshort {}\r\n", self.label_ref(fslot));
+            return;
+        }
         // Signed long-vs-long compare between two long globals. BCC
         // emits a 3-jump pattern: high-half signed cmp with `jg/jl`
         // for definitive answers, low-half unsigned cmp for the
@@ -1255,8 +1356,19 @@ impl<'a> FunctionEmitter<'a> {
             && let Some(k) = try_const_eval(right)
             && let (Some(tslot), Some(fslot)) = (true_slot, false_slot)
         {
+            // Each half is formatted as i8sx-decimal when it fits,
+            // u16-decimal otherwise — letting the assembler pick
+            // the `83 3E` (5 bytes) vs `81 3E` (6 bytes) opcode
+            // automatically. Fixtures 240 (i8sx), 282 (imm16).
             let hi = (k >> 16) as i32;
             let lo = (k & 0xFFFF) as i32;
+            let fmt = |v: i32| -> String {
+                if (-128..=127).contains(&v) {
+                    format!("{v}")
+                } else {
+                    format!("{}", v as u16)
+                }
+            };
             let unsigned = self.globals.type_of(name).map_or(false, |t| t.is_unsigned());
             let (hi_to_false, hi_to_true, lo_to_false) = match (op, unsigned) {
                 (BinOp::Lt, false) => ("jg", "jl",  "jae"),
@@ -1269,10 +1381,10 @@ impl<'a> FunctionEmitter<'a> {
                 (BinOp::Ge, true)  => ("jb", "jne", "jb"),
                 _ => unreachable!(),
             };
-            let _ = write!(self.out, "\tcmp\tword ptr DGROUP:_{name}+2,{hi}\r\n");
+            let _ = write!(self.out, "\tcmp\tword ptr DGROUP:_{name}+2,{}\r\n", fmt(hi));
             let _ = write!(self.out, "\t{hi_to_false}\tshort {}\r\n", self.label_ref(fslot));
             let _ = write!(self.out, "\t{hi_to_true}\tshort {}\r\n", self.label_ref(tslot));
-            let _ = write!(self.out, "\tcmp\tword ptr DGROUP:_{name},{lo}\r\n");
+            let _ = write!(self.out, "\tcmp\tword ptr DGROUP:_{name},{}\r\n", fmt(lo));
             let _ = write!(self.out, "\t{lo_to_false}\tshort {}\r\n", self.label_ref(fslot));
             return;
         }
@@ -1428,6 +1540,18 @@ impl<'a> FunctionEmitter<'a> {
                 op.jump_if_true(unsigned).expect("comparison op has true mnemonic"),
                 op.jump_if_false(unsigned).expect("comparison op has false mnemonic"),
             );
+        }
+        // Bare long-global ident in condition position — equivalent
+        // to `<long> != 0`. Use the OR-then-test idiom (fixture 284:
+        // `if (a || b)` for two longs lowers to two of these tests
+        // chained by short-circuit).
+        if let ExprKind::Ident(name) = &cond.kind
+            && let Some(gty) = self.globals.type_of(name)
+            && gty.is_long_like()
+        {
+            let _ = write!(self.out, "\tmov\tax,word ptr DGROUP:_{name}\r\n");
+            let _ = write!(self.out, "\tor\tax,word ptr DGROUP:_{name}+2\r\n");
+            return ("jne", "je");
         }
         self.emit_zero_test(cond);
         ("jne", "je")
@@ -1838,6 +1962,7 @@ impl<'a> FunctionEmitter<'a> {
             // the high word lives at `off + 2`. Load high to DX, low
             // to AX per the ABI. Fixture 217.
             if let ExprKind::Ident(name) = &e.kind
+                && self.locals.has(name)
                 && self.locals.type_of(name).is_long_like()
             {
                 let LocalLocation::Stack(off) = self.locals.location_of(name) else {
@@ -1845,6 +1970,36 @@ impl<'a> FunctionEmitter<'a> {
                 };
                 let _ = write!(self.out, "\tmov\tdx,word ptr {}\r\n", bp_addr(off + 2));
                 let _ = write!(self.out, "\tmov\tax,word ptr {}\r\n", bp_addr(off));
+                return;
+            }
+            // `return a + b;` / `return a - b;` for two long params/
+            // locals. Load a (high→DX, low→AX) per the ABI return
+            // convention, then add/sub b's halves with carry/borrow
+            // propagation. Fixture 285.
+            if let ExprKind::BinOp { op, left, right } = &e.kind
+                && matches!(op, BinOp::Add | BinOp::Sub)
+                && let ExprKind::Ident(a) = &left.kind
+                && let ExprKind::Ident(b) = &right.kind
+                && self.locals.has(a)
+                && self.locals.type_of(a).is_long_like()
+                && self.locals.has(b)
+                && self.locals.type_of(b).is_long_like()
+            {
+                let LocalLocation::Stack(a_off) = self.locals.location_of(a) else {
+                    panic!("register-resident long not yet supported (no fixture)");
+                };
+                let LocalLocation::Stack(b_off) = self.locals.location_of(b) else {
+                    panic!("register-resident long not yet supported (no fixture)");
+                };
+                let (lo_op, hi_op) = if matches!(op, BinOp::Add) {
+                    ("add", "adc")
+                } else {
+                    ("sub", "sbb")
+                };
+                let _ = write!(self.out, "\tmov\tdx,word ptr {}\r\n", bp_addr(a_off + 2));
+                let _ = write!(self.out, "\tmov\tax,word ptr {}\r\n", bp_addr(a_off));
+                let _ = write!(self.out, "\t{lo_op}\tax,word ptr {}\r\n", bp_addr(b_off));
+                let _ = write!(self.out, "\t{hi_op}\tdx,word ptr {}\r\n", bp_addr(b_off + 2));
                 return;
             }
             panic!("non-constant long return value not yet supported (no fixture)");
@@ -1861,24 +2016,37 @@ impl<'a> FunctionEmitter<'a> {
                 // lower slot. Mirrors fixture 205's global-long shape.
                 // Fixture 210.
                 if ty.is_long_like() {
-                    let Some(v) = try_const_eval(init) else {
-                        panic!("non-constant long local init not yet supported (no fixture)");
-                    };
-                    let lo = v & 0xFFFF;
-                    let hi = (v >> 16) & 0xFFFF;
-                    // `off` points to the LOW word (lower address);
-                    // the high word lives at `off + 2`.
-                    let _ = write!(
-                        self.out,
-                        "\tmov\tword ptr {},{hi}\r\n",
-                        bp_addr(off + 2),
-                    );
-                    let _ = write!(
-                        self.out,
-                        "\tmov\tword ptr {},{lo}\r\n",
-                        bp_addr(off),
-                    );
-                    return;
+                    if let Some(v) = try_const_eval(init) {
+                        let lo = v & 0xFFFF;
+                        let hi = (v >> 16) & 0xFFFF;
+                        // `off` points to the LOW word (lower address);
+                        // the high word lives at `off + 2`.
+                        let _ = write!(
+                            self.out,
+                            "\tmov\tword ptr {},{hi}\r\n",
+                            bp_addr(off + 2),
+                        );
+                        let _ = write!(
+                            self.out,
+                            "\tmov\tword ptr {},{lo}\r\n",
+                            bp_addr(off),
+                        );
+                        return;
+                    }
+                    // `long x = g;` long local from long-like global —
+                    // load (AX=high, DX=low) then store high (AX → off+2)
+                    // and low (DX → off). Fixture 286.
+                    if let ExprKind::Ident(src_name) = &init.kind
+                        && let Some(src_ty) = self.globals.type_of(src_name)
+                        && src_ty.is_long_like()
+                    {
+                        let _ = write!(self.out, "\tmov\tax,word ptr DGROUP:_{src_name}+2\r\n");
+                        let _ = write!(self.out, "\tmov\tdx,word ptr DGROUP:_{src_name}\r\n");
+                        let _ = write!(self.out, "\tmov\tword ptr {},ax\r\n", bp_addr(off + 2));
+                        let _ = write!(self.out, "\tmov\tword ptr {},dx\r\n", bp_addr(off));
+                        return;
+                    }
+                    panic!("non-constant long local init not yet supported (no fixture)");
                 }
                 // Stack init: prefer the immediate-store form when the
                 // initializer folds to a constant. For `char` we emit
@@ -1945,6 +2113,110 @@ impl<'a> FunctionEmitter<'a> {
         // word of K). Distinct from `g = g <op> K` (slice 207) which
         // uses the register-load pattern. Fixtures 251 (`+=`), 252
         // (`-=`), 253 (`&=`).
+        // Long-like global `g <op>= rhs` where rhs is another long
+        // global (mul/div/mod) — emit the same helper-call shapes
+        // as the `g = g <op> rhs` form (slices 231–233). The byte
+        // output is identical between `g = g op b` and `g op= b`
+        // for these ops. Fixtures 260 (`*=`), 261 (`/=`), 262 (`%=`).
+        if let Some(ty) = self.globals.type_of(name)
+            && ty.is_long_like()
+            && let ExprKind::Ident(b) = &value.kind
+            && self.globals.type_of(b).map_or(false, |t| t.is_long_like())
+        {
+            let unsigned = ty.is_unsigned()
+                || self.globals.type_of(b).map_or(false, |t| t.is_unsigned());
+            match op {
+                BinOp::Mul => {
+                    let _ = write!(self.out, "\tmov\tcx,word ptr DGROUP:_{b}+2\r\n");
+                    let _ = write!(self.out, "\tmov\tbx,word ptr DGROUP:_{b}\r\n");
+                    let _ = write!(self.out, "\tmov\tdx,word ptr DGROUP:_{name}+2\r\n");
+                    let _ = write!(self.out, "\tmov\tax,word ptr DGROUP:_{name}\r\n");
+                    self.out.extend_from_slice(b"\tcall\tnear ptr N_LXMUL@\r\n");
+                    self.helpers.insert("N_LXMUL@".to_string());
+                    let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name}+2,dx\r\n");
+                    let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name},ax\r\n");
+                    return;
+                }
+                BinOp::Div | BinOp::Mod => {
+                    let helper = match (op, unsigned) {
+                        (BinOp::Div, false) => "N_LDIV@",
+                        (BinOp::Mod, false) => "N_LMOD@",
+                        (BinOp::Div, true)  => "N_LUDIV@",
+                        (BinOp::Mod, true)  => "N_LUMOD@",
+                        _ => unreachable!(),
+                    };
+                    let _ = write!(self.out, "\tpush\tword ptr DGROUP:_{b}+2\r\n");
+                    let _ = write!(self.out, "\tpush\tword ptr DGROUP:_{b}\r\n");
+                    let _ = write!(self.out, "\tpush\tword ptr DGROUP:_{name}+2\r\n");
+                    let _ = write!(self.out, "\tpush\tword ptr DGROUP:_{name}\r\n");
+                    let _ = write!(self.out, "\tcall\tnear ptr {helper}\r\n");
+                    self.helpers.insert(helper.to_string());
+                    let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name}+2,dx\r\n");
+                    let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name},ax\r\n");
+                    return;
+                }
+                _ => {}
+            }
+        }
+        // Long-like global compound shifts. Two shapes:
+        //   K=1: inlined as `shl/sar/shr` + `rcl/rcr` (same as the
+        //        `=` form, slices 227/229/243). Fixtures 265, 266.
+        //   K>1: helper call, but with `mov cl, K` emitted BEFORE
+        //        the operand loads — distinct from the `=` form
+        //        (slices 228/230) where mov cl lands after the
+        //        operands. Fixtures 263, 264.
+        if let Some(ty) = self.globals.type_of(name)
+            && ty.is_long_like()
+            && matches!(op, BinOp::Shl | BinOp::Shr)
+            && let Some(k) = try_const_eval(value)
+            && k >= 1
+            && k <= 255
+        {
+            let unsigned = ty.is_unsigned();
+            if k == 1 {
+                let hi_op = match (op, unsigned) {
+                    (BinOp::Shl, _)     => "shl",
+                    (BinOp::Shr, false) => "sar",
+                    (BinOp::Shr, true)  => "shr",
+                    _ => unreachable!(),
+                };
+                let lo_op = if matches!(op, BinOp::Shl) { "rcl" } else { "rcr" };
+                // Convention: AX=high, DX=low (the `=` form's
+                // pattern). For `<<` the low-half op runs first
+                // (shl dx), then rotate carries into high (rcl ax).
+                // For `>>` the high runs first (sar ax), then
+                // rotate down into low (rcr dx).
+                let _ = write!(self.out, "\tmov\tax,word ptr DGROUP:_{name}+2\r\n");
+                let _ = write!(self.out, "\tmov\tdx,word ptr DGROUP:_{name}\r\n");
+                if matches!(op, BinOp::Shl) {
+                    let _ = write!(self.out, "\tshl\tdx,1\r\n");
+                    let _ = write!(self.out, "\trcl\tax,1\r\n");
+                } else {
+                    let _ = write!(self.out, "\t{hi_op}\tax,1\r\n");
+                    let _ = write!(self.out, "\t{lo_op}\tdx,1\r\n");
+                }
+                let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name}+2,ax\r\n");
+                let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name},dx\r\n");
+                return;
+            }
+            // K > 1: helper, with `mov cl, K` FIRST (compound-form
+            // reorder).
+            let helper = match (op, unsigned) {
+                (BinOp::Shl, _)     => "N_LXLSH@",
+                (BinOp::Shr, false) => "N_LXRSH@",
+                (BinOp::Shr, true)  => "N_LXURSH@",
+                _ => unreachable!(),
+            };
+            let k_u8 = k as u8;
+            let _ = write!(self.out, "\tmov\tcl,{k_u8}\r\n");
+            let _ = write!(self.out, "\tmov\tdx,word ptr DGROUP:_{name}+2\r\n");
+            let _ = write!(self.out, "\tmov\tax,word ptr DGROUP:_{name}\r\n");
+            let _ = write!(self.out, "\tcall\tnear ptr {helper}\r\n");
+            self.helpers.insert(helper.to_string());
+            let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name}+2,dx\r\n");
+            let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name},ax\r\n");
+            return;
+        }
         if let Some(ty) = self.globals.type_of(name)
             && ty.is_long_like()
             && let Some(k) = try_const_eval(value)
@@ -1957,16 +2229,23 @@ impl<'a> FunctionEmitter<'a> {
             // for arith is always 0 (the partner is `adc/sbb 0`).
             match op {
                 BinOp::Add | BinOp::Sub => {
+                    let (lo_op, hi_op) = if matches!(op, BinOp::Add) {
+                        ("add", "adc")
+                    } else {
+                        ("sub", "sbb")
+                    };
+                    // imm8sx-fits: emit compact `83 06 ... ii` (5 bytes)
+                    // — slice 251. Otherwise: wider `81 06 ... lo hi`
+                    // (6 bytes) — fixture 276. The high partner is
+                    // always `adc/sbb 0` (carry comes from low).
                     if let Ok(lo_i8) = i8::try_from(k_lo) {
-                        let (lo_op, hi_op) = if matches!(op, BinOp::Add) {
-                            ("add", "adc")
-                        } else {
-                            ("sub", "sbb")
-                        };
                         let _ = write!(self.out, "\t{lo_op}\tword ptr DGROUP:_{name},{lo_i8}\r\n");
-                        let _ = write!(self.out, "\t{hi_op}\tword ptr DGROUP:_{name}+2,0\r\n");
-                        return;
+                    } else {
+                        let lo_u16 = k_lo as u16;
+                        let _ = write!(self.out, "\t{lo_op}\tword ptr DGROUP:_{name},{lo_u16}\r\n");
                     }
+                    let _ = write!(self.out, "\t{hi_op}\tword ptr DGROUP:_{name}+2,0\r\n");
+                    return;
                 }
                 BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor => {
                     let mnem = match op {
@@ -3125,6 +3404,24 @@ impl<'a> FunctionEmitter<'a> {
                 let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name},dx\r\n");
                 return;
             }
+            // `g = a * 2;` long times constant 2 — BCC peepholes
+            // this to the same shl/rcl pattern as `g << 1` (slice
+            // 227), skipping the N_LXMUL@ helper. Fixture 283. For
+            // other small power-of-2 multipliers, BCC's behavior
+            // is unprobed (likely helper-call); not yet handled.
+            if let ExprKind::BinOp { op: BinOp::Mul, left, right } = &value.kind
+                && let ExprKind::Ident(a) = &left.kind
+                && self.globals.type_of(a).map_or(false, |t| t.is_long_like())
+                && try_const_eval(right) == Some(2)
+            {
+                let _ = write!(self.out, "\tmov\tax,word ptr DGROUP:_{a}+2\r\n");
+                let _ = write!(self.out, "\tmov\tdx,word ptr DGROUP:_{a}\r\n");
+                let _ = write!(self.out, "\tshl\tdx,1\r\n");
+                let _ = write!(self.out, "\trcl\tax,1\r\n");
+                let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name}+2,ax\r\n");
+                let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name},dx\r\n");
+                return;
+            }
             // `g = a << 1;` long left-shift-by-one. BCC inlines as
             // shl on the low half (CF gets the high bit) and rcl on
             // the high half (rotates CF into the LSB). Note the
@@ -3320,15 +3617,44 @@ impl<'a> FunctionEmitter<'a> {
                 } else {
                     (-signed, -1i16)
                 };
+                // imm8sx-fits emits `add dx, K_i8` (slice 207);
+                // otherwise emits the wider `add dx, K_i16`
+                // (fixture 275). Either way the high partner is
+                // `adc ax, carry` (carry=0 for Add, -1 for Sub).
+                let _ = write!(self.out, "\tmov\tax,word ptr DGROUP:_{name}+2\r\n");
+                let _ = write!(self.out, "\tmov\tdx,word ptr DGROUP:_{name}\r\n");
                 if let Ok(delta_i8) = i8::try_from(delta) {
-                    let _ = write!(self.out, "\tmov\tax,word ptr DGROUP:_{name}+2\r\n");
-                    let _ = write!(self.out, "\tmov\tdx,word ptr DGROUP:_{name}\r\n");
                     let _ = write!(self.out, "\tadd\tdx,{delta_i8}\r\n");
-                    let _ = write!(self.out, "\tadc\tax,{carry}\r\n");
-                    let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name}+2,ax\r\n");
-                    let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name},dx\r\n");
-                    return;
+                } else {
+                    let delta_u16 = (delta as i32) as u16;
+                    let _ = write!(self.out, "\tadd\tdx,{delta_u16}\r\n");
                 }
+                let _ = write!(self.out, "\tadc\tax,{carry}\r\n");
+                let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name}+2,ax\r\n");
+                let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name},dx\r\n");
+                return;
+            }
+            // `g = i + g;` int-LHS plus long-RHS, where the long
+            // RHS happens to be the assign target. BCC widens i
+            // into DX:AX (mov ax,_i / cwd), then uses MEMORY-direct
+            // add/adc on the long — no BX:CX scratch needed. The
+            // result lands directly in DX:AX (the widened-int
+            // registers) and stores back. Fixture 281.
+            if let ExprKind::BinOp { op, left, right } = &value.kind
+                && matches!(op, BinOp::Add)
+                && let ExprKind::Ident(i_name) = &left.kind
+                && let Some(i_ty) = self.globals.type_of(i_name)
+                && matches!(i_ty, Type::Int)
+                && let ExprKind::Ident(rhs_name) = &right.kind
+                && rhs_name == name
+            {
+                let _ = write!(self.out, "\tmov\tax,word ptr DGROUP:_{i_name}\r\n");
+                self.out.extend_from_slice(b"\tcwd\t\r\n");
+                let _ = write!(self.out, "\tadd\tax,word ptr DGROUP:_{name}\r\n");
+                let _ = write!(self.out, "\tadc\tdx,word ptr DGROUP:_{name}+2\r\n");
+                let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name}+2,dx\r\n");
+                let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name},ax\r\n");
+                return;
             }
             // `g = g <op> i;` long-self <op> int-global, for
             // add/sub/and/or/xor. BCC widens i first (mov ax,
@@ -3357,21 +3683,45 @@ impl<'a> FunctionEmitter<'a> {
                 let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name},cx\r\n");
                 return;
             }
-            // `long g = i;` / `long g = u;` — widen an int-family
-            // global to long. Signed int sign-extends via `cwd`
-            // (fixture 254); `unsigned int` zero-extends by storing
-            // 0 directly into the high half (fixture 255). Either
-            // way: load into AX first, store high, then low.
-            if let ExprKind::Ident(src_name) = &value.kind
+            // `long g = i;` / `long g = u;` / `long g = (long)i;` —
+            // widen an int-family global to long. Signed int
+            // sign-extends via `cwd` (fixture 254); `unsigned int`
+            // zero-extends by storing 0 directly into the high half
+            // (fixture 255). Either way: load into AX first, store
+            // high, then low. Peels an explicit `(long)` cast if
+            // present (fixture 279); BCC emits identical bytes for
+            // implicit and explicit forms.
+            let widening_src = match &value.kind {
+                ExprKind::Ident(name) => Some(name.as_str()),
+                ExprKind::Cast { ty: Type::Long, operand } => {
+                    if let ExprKind::Ident(name) = &operand.kind { Some(name.as_str()) } else { None }
+                }
+                _ => None,
+            };
+            if let Some(src_name) = widening_src
                 && let Some(src_ty) = self.globals.type_of(src_name)
-                && matches!(src_ty, Type::Int | Type::UInt)
+                && matches!(src_ty, Type::Int | Type::UInt | Type::Char)
             {
-                let _ = write!(self.out, "\tmov\tax,word ptr DGROUP:_{src_name}\r\n");
-                if matches!(src_ty, Type::UInt) {
-                    let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name}+2,0\r\n");
-                } else {
-                    self.out.extend_from_slice(b"\tcwd\t\r\n");
-                    let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name}+2,dx\r\n");
+                match src_ty {
+                    Type::Char => {
+                        // Signed char widens via cbw (byte→word)
+                        // then cwd (word→dword). Fixture 271.
+                        let _ = write!(self.out, "\tmov\tal,byte ptr DGROUP:_{src_name}\r\n");
+                        self.out.extend_from_slice(b"\tcbw\t\r\n");
+                        self.out.extend_from_slice(b"\tcwd\t\r\n");
+                        let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name}+2,dx\r\n");
+                    }
+                    Type::UInt => {
+                        // Zero-extend: store 0 directly into high.
+                        let _ = write!(self.out, "\tmov\tax,word ptr DGROUP:_{src_name}\r\n");
+                        let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name}+2,0\r\n");
+                    }
+                    Type::Int => {
+                        let _ = write!(self.out, "\tmov\tax,word ptr DGROUP:_{src_name}\r\n");
+                        self.out.extend_from_slice(b"\tcwd\t\r\n");
+                        let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name}+2,dx\r\n");
+                    }
+                    _ => unreachable!(),
                 }
                 let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name},ax\r\n");
                 return;

@@ -1,0 +1,4 @@
+description = "`g = g | i;` long-or-int. Verifies slice 259's analogy extends to OR."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

@@ -1,0 +1,4 @@
+description = "`g = i + g;` int first, long second. Probes whether BCC swaps operands."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

@@ -1,0 +1,4 @@
+description = "`a >>= 1;` for long. Probes K=1 compound right shift."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

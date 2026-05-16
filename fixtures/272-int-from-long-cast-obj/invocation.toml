@@ -1,0 +1,4 @@
+description = "`i = (int)g + 5;` long-truncated-then-int-add. Probes explicit cast in arithmetic expression."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

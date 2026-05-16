@@ -1,0 +1,4 @@
+description = "`g = -5;` long with negative const. Probes how BCC encodes the high half (0xFFFF for -5 low half)."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

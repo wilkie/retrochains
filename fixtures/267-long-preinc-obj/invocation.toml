@@ -1,0 +1,4 @@
+description = "`++g;` for long. Probes whether pre-inc emits the same as post-inc (slice 249) in stmt context."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

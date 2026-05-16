@@ -1539,6 +1539,7 @@ impl Parser {
             | TokenKind::KwChar
             | TokenKind::KwVoid
             | TokenKind::KwUnsigned
+            | TokenKind::KwLong
             | TokenKind::KwStruct
             | TokenKind::KwUnion => true,
             TokenKind::Ident(ref name) if self.typedefs.contains_key(name) => true,
@@ -1895,6 +1896,8 @@ fn match_compound_op(t: &TokenKind) -> Option<BinOp> {
         TokenKind::AmpEq => Some(BinOp::BitAnd),
         TokenKind::PipeEq => Some(BinOp::BitOr),
         TokenKind::CaretEq => Some(BinOp::BitXor),
+        TokenKind::ShlEq => Some(BinOp::Shl),
+        TokenKind::ShrEq => Some(BinOp::Shr),
         _ => None,
     }
 }

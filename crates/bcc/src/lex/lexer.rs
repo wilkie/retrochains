@@ -227,7 +227,15 @@ impl<'a> Lexer<'a> {
     fn lex_after_lt(&mut self) -> TokenKind {
         self.pos += 1;
         match self.src.get(self.pos) {
-            Some(&b'<') => { self.pos += 1; TokenKind::ShiftLeft }
+            Some(&b'<') => {
+                self.pos += 1;
+                if matches!(self.src.get(self.pos), Some(&b'=')) {
+                    self.pos += 1;
+                    TokenKind::ShlEq
+                } else {
+                    TokenKind::ShiftLeft
+                }
+            }
             Some(&b'=') => { self.pos += 1; TokenKind::Le }
             _ => TokenKind::Lt,
         }
@@ -238,7 +246,15 @@ impl<'a> Lexer<'a> {
     fn lex_after_gt(&mut self) -> TokenKind {
         self.pos += 1;
         match self.src.get(self.pos) {
-            Some(&b'>') => { self.pos += 1; TokenKind::ShiftRight }
+            Some(&b'>') => {
+                self.pos += 1;
+                if matches!(self.src.get(self.pos), Some(&b'=')) {
+                    self.pos += 1;
+                    TokenKind::ShrEq
+                } else {
+                    TokenKind::ShiftRight
+                }
+            }
             Some(&b'=') => { self.pos += 1; TokenKind::Ge }
             _ => TokenKind::Gt,
         }

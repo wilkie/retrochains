@@ -1,0 +1,4 @@
+description = "`long g = u;` ulong-to-long copy. Should be identical to slice 211 — just a per-half copy regardless of signedness."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]

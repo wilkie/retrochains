@@ -125,6 +125,13 @@ pub enum Instr {
     MovReg16BpRel { reg: Reg16, offset: i16 },
     /// `add ax,word ptr [bp+<offset>]` — 03 46 dd
     AddAxBpRel { offset: i16 },
+    /// `adc dx, word ptr [bp+disp8]` — `13 56 dd`. ADC r16,r/m16
+    /// with DX dst and bp-relative source. High-half carry
+    /// propagation for return-from-long-add (fixture 285).
+    AdcDxBpRel { offset: i16 },
+    /// `sbb dx, word ptr [bp+disp8]` — `1B 56 dd`. SBB r16,r/m16
+    /// companion to `AdcDxBpRel` for `return a - b;` of long params.
+    SbbDxBpRel { offset: i16 },
     /// `add <dst>,<src>` between 16-bit registers — 03 xx with
     /// ModR/M mod=11 reg=dst r/m=src. Used to fold a register-resident
     /// operand into AX (fixture 127: `add ax,si`).
@@ -284,6 +291,21 @@ pub enum Instr {
     /// Encoding `83 C(rm) ii` where ModR/M is `mod=11 /0(ADD)
     /// rm=<reg>`. Fixture 207 (`add dx,10`).
     AddReg16Imm8Sx { reg: Reg16, imm: i8 },
+    /// `add <reg16>, imm16` — Grp1 r/m16,imm16. Encoding
+    /// `81 C(rm) lo hi` where ModR/M is `mod=11 /0(ADD) rm=<reg>`.
+    /// Wider sibling to `AddReg16Imm8Sx` when the immediate doesn't
+    /// fit i8sx (fixture 275: `add dx,1000`).
+    AddReg16Imm16 { reg: Reg16, imm: u16 },
+    /// `add word ptr <group>:<symbol>[+<offset>], imm16` — Grp1
+    /// r/m16,imm16 with /0=ADD (`81 06 lo hi imm_lo imm_hi`,
+    /// 6 bytes). Wider sibling to `AddGroupSymImm8Sx` for
+    /// compound assigns where K doesn't fit i8sx (fixture 276).
+    AddGroupSymImm16 {
+        group: String,
+        symbol: String,
+        offset: i16,
+        imm: u16,
+    },
     /// `adc ax, imm16` — `15 lo hi`. AX-specific add-with-carry
     /// short form. Fixture 207's high-half carry propagation.
     AdcAxImm16 { imm: u16 },
@@ -331,6 +353,10 @@ pub enum Instr {
     /// with AX as destination (`13 06 lo hi`). Companion to
     /// `AddDxGroupSym` for the high-half carry-in (fixture 219).
     AdcAxGroupSym { group: String, symbol: String, offset: i16 },
+    /// `adc dx,word ptr <group>:<symbol>[+<offset>]` — ADC r16,r/m16
+    /// with DX dst (`13 16 lo hi`). Companion to `AdcAxGroupSym`
+    /// for the commuted `g = i + g` shape (fixture 281).
+    AdcDxGroupSym { group: String, symbol: String, offset: i16 },
     /// `sub dx,word ptr <group>:<symbol>[+<offset>]` — SUB r16,r/m16
     /// with DX dst (`2B 16 lo hi`). Long-to-long subtraction's low-
     /// half subtract (fixture 220).
@@ -371,6 +397,16 @@ pub enum Instr {
     /// push long-arith helper arguments onto the stack (e.g.
     /// fixture 232's `N_LDIV@` call).
     PushGroupSym { group: String, symbol: String, offset: i16 },
+    /// `cmp word ptr <group>:<symbol>[+<offset>], imm16` — Grp1
+    /// r/m16,imm16 with /7=CMP and disp16-only addressing
+    /// (`81 3E lo hi imm_lo imm_hi`, 6 bytes). Used when K is too
+    /// wide for i8sx in the chained-cmp pattern (fixture 282).
+    CmpGroupSymImm16 {
+        group: String,
+        symbol: String,
+        offset: i16,
+        imm: u16,
+    },
     /// `cmp word ptr <group>:<symbol>[+<offset>], imm8 (sx)` — Grp1
     /// r/m16,imm8sx with /7=CMP and disp16-only addressing
     /// (`83 3E lo hi ii`, 5 bytes). Used by long const-compare
@@ -523,6 +559,11 @@ pub enum Instr {
     /// `mov word ptr [bp+<offset>],ax` — store AX to a stack local.
     /// Encoding: 89 46 dd (mod=01 reg=AX r/m=110([bp+disp8])).
     MovBpRelAx { offset: i16 },
+    /// `mov word ptr [bp+disp8], <reg16>` — `89 (mod=01 reg rm=110) dd`.
+    /// Generic 16-bit-reg store to a bp-relative stack slot.
+    /// Companion to `MovBpRelAx` for non-AX sources (fixture 286
+    /// stores the low half via DX).
+    MovBpRelReg16 { offset: i16, reg: Reg16 },
     /// `mov ax,word ptr cs:[bx]` — load AX through CS:BX (no
     /// displacement). Encoding: 2E 8B 07. Used by linear-search
     /// dispatch to read consecutive case values from a _TEXT table.

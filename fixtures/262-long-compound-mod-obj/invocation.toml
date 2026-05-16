@@ -1,0 +1,4 @@
+description = "`a %= b;` for long. Probes whether `%=` reuses N_LMOD@ helper."
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]
