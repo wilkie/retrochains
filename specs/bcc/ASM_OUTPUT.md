@@ -1408,6 +1408,39 @@ a copy from the bytes — only its byte-width. Two structurally
 distinct C types that share a byte size produce identical OBJ
 output for the copy.
 
+For **stack destinations** of the same 4-byte size (fixture 415),
+the shape is the same word-pair but the store addresses become
+`[bp+off+2]` / `[bp+off]` — byte-identical to the `long x = g;`
+shape from fixture 288.
+
+For struct copies **larger than 4 bytes** (fixtures 413, 414),
+BCC routes through the runtime helper `N_SCOPY@`:
+
+```
+; a = b;  for a 6-byte (fixture 413) or 8-byte (fixture 414) struct
+mov ax, offset DGROUP:_a       ; dest offset
+push ds                        ; far pointer = (segment, offset)
+push ax
+mov ax, offset DGROUP:_b       ; src offset
+push ds
+push ax
+mov cx, N                      ; byte count (literal struct size)
+call near ptr N_SCOPY@         ; near call despite :far extern
+```
+
+The destination far pointer is pushed first (lands at higher SP);
+the helper reads dest at `[sp+4..7]` and src at `[sp..3]`. The
+byte count is the literal struct size — no header, no padding.
+The call uses the near opcode `E8 ?? ??` because the CRT helper
+lives in the same code segment under the `-ms` model (despite the
+`:far` extern declaration in the publics list).
+
+The **4-byte threshold** is a recognizer: inline AX:DX word-pair
+means 4-byte struct (indistinguishable from long-to-long copy);
+the 15-byte sequence `B8 ?? ?? 1E 50 B8 ?? ?? 1E 50 B9 NN 00 E8
+?? ??` means struct copy of `NN` bytes via `N_SCOPY@`. The CX
+immediate gives the struct's exact byte size.
+
 ### Struct pointer as parameter (`106`)
 
 A `struct s *p` parameter behaves exactly like an `int *p`
