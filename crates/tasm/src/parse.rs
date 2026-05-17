@@ -878,6 +878,13 @@ fn parse_sub(operands: &str, line_no: usize) -> AsmResult<Instr> {
     if lhs == "ax" && rhs == "word ptr [si]" {
         return Ok(Instr::SubAxFromSiPtr);
     }
+    // `sub al,imm8` — AL-specific 2-byte encoding (companion to
+    // `AddAlImm8`).
+    if lhs == "al" {
+        if let Some(imm) = parse_imm8(rhs) {
+            return Ok(Instr::SubAlImm8 { imm: imm as u8 });
+        }
+    }
     // `sub dx, word ptr <group>:<sym>[+N]` — long-to-long sub
     // low-half (fixture 220).
     if lhs == "dx" {
@@ -947,6 +954,12 @@ fn parse_and(operands: &str, line_no: usize) -> AsmResult<Instr> {
                 symbol: sym.to_string(),
                 offset,
             });
+        }
+    }
+    // `and al,imm8` — AL-specific 2-byte encoding.
+    if lhs == "al" {
+        if let Some(imm) = parse_imm8(rhs) {
+            return Ok(Instr::AndAlImm8 { imm: imm as u8 });
         }
     }
     if lhs == "dx" {
@@ -1236,6 +1249,12 @@ fn parse_add(operands: &str, line_no: usize) -> AsmResult<Instr> {
         }
         if let Some(imm) = parse_imm16(rhs) {
             return Ok(Instr::AddAxImm { imm });
+        }
+    }
+    // `add al,imm8` — AL-specific 2-byte encoding (fixture 529).
+    if lhs == "al" {
+        if let Some(imm) = parse_imm8(rhs) {
+            return Ok(Instr::AddAlImm8 { imm: imm as u8 });
         }
     }
     // `add <reg16>, imm` for non-AX dst (AX uses the shorter
@@ -1612,6 +1631,12 @@ fn parse_or(operands: &str, line_no: usize) -> AsmResult<Instr> {
             });
         }
     }
+    // `or al,imm8` — AL-specific 2-byte encoding.
+    if lhs == "al" {
+        if let Some(imm) = parse_imm8(rhs) {
+            return Ok(Instr::OrAlImm8 { imm: imm as u8 });
+        }
+    }
     // `or dx, word ptr <group>:<sym>[+N]` — long bitwise OR low half
     // (fixture 222).
     if lhs == "dx" {
@@ -1680,6 +1705,12 @@ fn parse_xor(operands: &str, line_no: usize) -> AsmResult<Instr> {
                 symbol: sym.to_string(),
                 offset,
             });
+        }
+    }
+    // `xor al,imm8` — AL-specific 2-byte encoding.
+    if lhs == "al" {
+        if let Some(imm) = parse_imm8(rhs) {
+            return Ok(Instr::XorAlImm8 { imm: imm as u8 });
         }
     }
     // `xor dx, word ptr <group>:<sym>[+N]` — long bitwise XOR low

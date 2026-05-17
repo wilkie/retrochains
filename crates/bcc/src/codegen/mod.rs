@@ -932,17 +932,32 @@ impl<'a> FunctionEmitter<'a> {
             );
             let _ = write!(self.out, "\tmov\tax,word ptr DGROUP:_{name}\r\n");
         } else {
-            let ty = self.locals.type_of(name);
-            assert!(
-                matches!(ty, Type::Int),
-                "char-typed switch scrutinee not yet supported (no fixture)"
-            );
-            match self.locals.location_of(name) {
-                LocalLocation::Stack(off) => {
-                    let _ = write!(self.out, "\tmov\tax,word ptr {}\r\n", bp_addr(off));
+            let ty = self.locals.type_of(name).clone();
+            // Char local: load AL then widen (cbw for signed, mov
+            // ah,0 for unsigned). Fixture 527 (`switch (c) { case
+            // 'A': ... }`).
+            if ty.is_char_like() {
+                match self.locals.location_of(name) {
+                    LocalLocation::Stack(off) => {
+                        let _ = write!(self.out, "\tmov\tal,byte ptr {}\r\n", bp_addr(off));
+                    }
+                    LocalLocation::Reg(reg) => {
+                        let _ = write!(self.out, "\tmov\tal,{}\r\n", reg.name());
+                    }
                 }
-                LocalLocation::Reg(reg) => {
-                    let _ = write!(self.out, "\tmov\tax,{}\r\n", reg.name());
+                self.emit_widen_al(&ty);
+            } else {
+                assert!(
+                    matches!(ty, Type::Int),
+                    "non-int local switch scrutinee not yet supported (no fixture)"
+                );
+                match self.locals.location_of(name) {
+                    LocalLocation::Stack(off) => {
+                        let _ = write!(self.out, "\tmov\tax,word ptr {}\r\n", bp_addr(off));
+                    }
+                    LocalLocation::Reg(reg) => {
+                        let _ = write!(self.out, "\tmov\tax,{}\r\n", reg.name());
+                    }
                 }
             }
         }
@@ -3329,6 +3344,27 @@ impl<'a> FunctionEmitter<'a> {
                 "compound assignment on stack-resident `{name}` not yet supported (no fixture)"
             );
         };
+        // Char compound on a byte-register local: round-trip through
+        // AL — `mov al, <reg>; <op> al, K; mov <reg>, al`. Fixture
+        // 529 (`char c = 'A'; c += 2;`).
+        if reg.is_byte()
+            && matches!(op, BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor)
+            && let Some(v) = try_const_eval(value)
+        {
+            let v8 = v & 0xFF;
+            let mnem = match op {
+                BinOp::Add => "add",
+                BinOp::Sub => "sub",
+                BinOp::BitAnd => "and",
+                BinOp::BitOr => "or",
+                BinOp::BitXor => "xor",
+                _ => unreachable!(),
+            };
+            let _ = write!(self.out, "\tmov\tal,{}\r\n", reg.name());
+            let _ = write!(self.out, "\t{mnem}\tal,{v8}\r\n");
+            let _ = write!(self.out, "\tmov\t{},al\r\n", reg.name());
+            return;
+        }
         assert!(
             !reg.is_byte(),
             "compound assignment on a char (byte-register) target not yet supported (no fixture)"

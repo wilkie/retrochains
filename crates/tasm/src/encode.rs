@@ -295,6 +295,11 @@ fn instr_size(instr: &Instr) -> usize {
         Instr::MovBpRelImm8 { .. } => 4,
         Instr::IncReg8 { .. } | Instr::DecReg8 { .. } => 2,
         Instr::CmpReg8Imm8 { .. } => 3,
+        Instr::AddAlImm8 { .. }
+        | Instr::SubAlImm8 { .. }
+        | Instr::AndAlImm8 { .. }
+        | Instr::OrAlImm8 { .. }
+        | Instr::XorAlImm8 { .. } => 2,
         Instr::CallNear(_) => 3,
         Instr::MovAxGroupSym { .. }
         | Instr::MovAlGroupSym { .. }
@@ -732,6 +737,32 @@ fn emit_instr(
             // ModR/M mod=11 /7(CMP) r/m=<reg-code>.
             out.push(0x80);
             out.push(0xF8 | reg.code());
+            out.push(*imm);
+        }
+        Instr::AddAlImm8 { imm } => {
+            // `add al,imm8` → 04 ii. AL-specific accumulator form
+            // (2 bytes). Fixture 529.
+            out.push(0x04);
+            out.push(*imm);
+        }
+        Instr::SubAlImm8 { imm } => {
+            // `sub al,imm8` → 2C ii.
+            out.push(0x2C);
+            out.push(*imm);
+        }
+        Instr::AndAlImm8 { imm } => {
+            // `and al,imm8` → 24 ii.
+            out.push(0x24);
+            out.push(*imm);
+        }
+        Instr::OrAlImm8 { imm } => {
+            // `or al,imm8` → 0C ii.
+            out.push(0x0C);
+            out.push(*imm);
+        }
+        Instr::XorAlImm8 { imm } => {
+            // `xor al,imm8` → 34 ii.
+            out.push(0x34);
             out.push(*imm);
         }
         Instr::ShlAxCl => {

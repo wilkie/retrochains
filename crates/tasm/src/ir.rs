@@ -325,6 +325,18 @@ pub enum Instr {
     /// `cmp <reg8>,<imm8>` — 80 F8+rc ii. Compare an 8-bit register
     /// to a constant.
     CmpReg8Imm8 { reg: Reg8, imm: u8 },
+    /// `add al,<imm8>` — 04 ii. AL-specific accumulator form (2
+    /// bytes vs. 3 for the generic `80 C0 ii`). Fixture 529 (char
+    /// compound add through AL).
+    AddAlImm8 { imm: u8 },
+    /// `sub al,<imm8>` — 2C ii. AL-specific sibling of `AddAlImm8`.
+    SubAlImm8 { imm: u8 },
+    /// `and al,<imm8>` — 24 ii. AL-specific sibling.
+    AndAlImm8 { imm: u8 },
+    /// `or al,<imm8>` — 0C ii. AL-specific sibling.
+    OrAlImm8 { imm: u8 },
+    /// `xor al,<imm8>` — 34 ii. AL-specific sibling.
+    XorAlImm8 { imm: u8 },
     /// `shl ax,cl` — D3 E0. Variable-count logical left shift of AX.
     ShlAxCl,
     /// `sar ax,cl` — D3 F8. Variable-count arithmetic (signed) right
