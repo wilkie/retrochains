@@ -896,6 +896,52 @@ when the name is in scope. Other codegen sites that check
 no further changes were needed for this fixture — but the pattern
 will likely need extending if more shadowing cases appear.
 
+## NULL pointer init
+
+Fixture `533` (`int *g = 0;`) — global pointer initialized to a
+null integer constant. The existing scalar-global-init path
+handles this directly: codegen emits `dw 0` for the 2-byte
+slot. No special-case needed because pointer types have the same
+2-byte width as int.
+
+## `return x++;`
+
+Fixture `534` (`int x; x = 5; return x++;`) — worked on the
+first try. The existing `emit_update_to_ax` already emits the
+post-increment sequence `mov ax, <reg>; inc <reg>` and the
+return path loads AX, which is exactly what BCC produces.
+
+## Char shift compound
+
+Fixture `535` (`char c; c = 4; c <<= 2;`) — BCC unrolls a char
+compound shift by a small constant K into K single-bit shifts
+directly on the byte register (`shl dl, 1; shl dl, 1`) rather
+than the AL round-trip used for add/sub/bitwise (fixture 529).
+The 8086 has no `r/m8, imm8` shift, only `r/m8, 1` and `r/m8,
+cl`, so unrolling beats the 3-byte CL setup for small K.
+`emit_compound_assign`'s byte-register path now handles
+`BinOp::Shl/Shr` by emitting K `<shl|sar|shr> <reg>, 1`
+instructions. Three new tasm IR variants (`ShlReg8One`,
+`SarReg8One`, `ShrReg8One`) encode `D0 /4|/7|/5 r/m=<reg>` for
+the byte form (sibling of `ShlReg16One`'s 16-bit form). Signed
+char's `>>=` lowers to `sar` (sign-fill); uchar would lower to
+`shr` (zero-fill — not yet fixtured at the byte width).
+
+### Publics-ordering rule — still partial
+
+While probing this batch, fixture `int echo(char c) { return c; }
+int main { return echo('Z'); }` (originally proposed as 535)
+revealed that the long-bucket forward/reverse rule has another
+hidden dimension I can't yet characterize. Probing 0..10
+parameter counts and different helper names shows BCC flips
+between forward and reverse seemingly based on the helper's
+name (`add` reverse, `helper` forward, `abc` forward, `addy`
+reverse) regardless of param count. This suggests an internal
+hash-bucket discriminator inside BCC's symbol table that we
+can't replicate without more reversing work. The original 535
+probe was replaced with a single-function fixture to sidestep
+the issue.
+
 ## What we explicitly defer
 
 - Templates, namespaces, RTTI, exceptions (not in BC2.0 to relevant
