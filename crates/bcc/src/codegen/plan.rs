@@ -16,6 +16,28 @@ use std::collections::HashMap;
 
 use crate::ast::{Expr, ExprKind, Function, Stmt, StmtKind, SwitchCase};
 
+/// True iff `body` contains a `continue;` that targets the
+/// enclosing loop (walks into nested `if`/`switch` since they
+/// don't consume `continue`). Mirrors the helper in
+/// `codegen/mod.rs`.
+fn body_has_continue(body: &[Stmt]) -> bool {
+    body.iter().any(stmt_has_continue)
+}
+
+fn stmt_has_continue(stmt: &Stmt) -> bool {
+    match &stmt.kind {
+        StmtKind::Continue => true,
+        StmtKind::If { then_branch, else_branch, .. } => {
+            body_has_continue(then_branch)
+                || else_branch.as_ref().is_some_and(|b| body_has_continue(b))
+        }
+        StmtKind::Switch { cases, .. } => {
+            cases.iter().any(|c| body_has_continue(&c.body))
+        }
+        _ => false,
+    }
+}
+
 /// Compiled label assignments for one function.
 #[derive(Debug)]
 pub struct LabelPlan {
@@ -267,18 +289,25 @@ fn plan_stmt(stmt: &Stmt, ctx: &mut PlanCtx) {
             }
             let before_body = ctx.counter;
             plan_stmts(body, ctx);
+            // Reserve a separate continue-target slot only when the
+            // body actually uses `continue;`. Without continue, the
+            // slot would just be unused chrome that shifts all
+            // downstream label numbers (regressing prior for-loop
+            // fixtures). Fixture 558 (`for (...) { if (...) continue;
+            // }`) is the first to need the distinct slot. The old
+            // "shares with check_slot when body had nested labels"
+            // branch collided when continue *was* present.
             let continue_target_slot;
-            if ctx.counter == before_body {
-                // No nested labels in body — reserve a filler slot
-                // that doubles as the `continue;` landing if any.
+            if body_has_continue(body) {
+                continue_target_slot = ctx.counter;
+                ctx.counter += 1;
+            } else if ctx.counter == before_body {
+                // No body reservations and no continue — match the
+                // historical filler-slot behavior for label-number
+                // stability with all prior for-loop fixtures.
                 continue_target_slot = ctx.counter;
                 ctx.counter += 1;
             } else {
-                // Body's reservations consumed the slot that would
-                // have been the continue-target. We don't yet have
-                // a fixture for `continue` in a `for` with nested
-                // body labels; defaulting to check_slot is safe-ish
-                // but codegen will panic if it actually fires.
                 continue_target_slot = ctx.counter;
             }
             let check_slot = ctx.counter;
