@@ -557,12 +557,18 @@ fn write_tail(
     // `_main, N_LXMUL@`. So 260 contradicts this rule too.
     //
     // Refined again: the discriminator is *short global is present
-    // OR a long global lands in _DATA (initialized)*. Fixture 494
+    // OR a long global lands in _DATA (initialized)* OR a function
+    // prototype precedes its definition*. Fixture 494
     // (`struct node head`, uninit → BSS, no short global) needs
     // reverse, while 498 (`char msg[16] = "hello"`, init → DATA, no
     // short global) needs forward. 260 short-globals-only pins the
     // short-only branch to reverse for the long bucket because that
     // bucket has neither a long global nor an initialized DATA item.
+    // 506 adds a third trigger: a forward declaration (`int
+    // helper(int);` before `int helper(int x) { ... }`) flips the
+    // order to forward. The underlying BCC symbol-table iteration
+    // appears to take this kind of "saw the symbol twice" event as
+    // a forward-iteration cue too.
     let long_has_data_global = unit
         .globals
         .iter()
@@ -573,6 +579,7 @@ fn write_tail(
         .iter()
         .filter(|g| !g.is_static && !g.is_extern)
         .any(|g| g.name.len() + 1 < 3);
+    let has_function_prototype = unit.functions.iter().any(|f| f.body.is_none());
     let long_has_global = !long_globals.is_empty();
     let mut long_bucket: Vec<(String, String)> = long_globals
         .into_iter()
@@ -582,7 +589,10 @@ fn write_tail(
     long_bucket.sort_by(|a, b| a.0.cmp(&b.0));
     short_bucket.sort_by(|a, b| a.0.cmp(&b.0));
     let long_iter: Box<dyn Iterator<Item = &(String, String)>> =
-        if (long_has_global && short_has_global) || long_has_data_global {
+        if (long_has_global && short_has_global)
+            || long_has_data_global
+            || has_function_prototype
+        {
             Box::new(long_bucket.iter())
         } else {
             Box::new(long_bucket.iter().rev())

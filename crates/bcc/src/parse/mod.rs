@@ -977,9 +977,20 @@ impl Parser {
                 self.bump();
                 ty = Type::Pointer(Box::new(ty));
             }
-            let name_tok = self.bump();
-            let TokenKind::Ident(name) = name_tok.kind else {
-                return Err(ParseError::NotAnIdent { offset: name_tok.span.start });
+            // Anonymous parameter — common in prototypes
+            // (`int helper(int);`, fixture 506). Synthesize a unique
+            // placeholder name; codegen ignores prototype params.
+            let name = if matches!(
+                self.peek().kind,
+                TokenKind::Comma | TokenKind::RParen,
+            ) {
+                format!("__anon_param_{}", params.len())
+            } else {
+                let name_tok = self.bump();
+                let TokenKind::Ident(name) = name_tok.kind else {
+                    return Err(ParseError::NotAnIdent { offset: name_tok.span.start });
+                };
+                name
             };
             params.push(Param { name, ty });
             if matches!(self.peek().kind, TokenKind::Comma) {
@@ -2240,9 +2251,19 @@ impl Parser {
             }
             TokenKind::IntLit(v) => Ok(Expr { kind: ExprKind::IntLit(v), span: tok.span }),
             TokenKind::StringLit(bytes) => {
+                // Adjacent string literals concatenate at parse time
+                // (`"hello, " "world"` → `"hello, world"`). Fixture 508.
+                let mut all = bytes;
+                let mut end = tok.span.end;
+                while let TokenKind::StringLit(_) = self.peek().kind {
+                    let next = self.bump();
+                    let TokenKind::StringLit(more) = next.kind else { unreachable!() };
+                    all.extend(more);
+                    end = next.span.end;
+                }
                 let lit = Expr {
-                    kind: ExprKind::StringLit(bytes),
-                    span: tok.span,
+                    kind: ExprKind::StringLit(all),
+                    span: Span::new(tok.span.start, end),
                 };
                 // String literals can be indexed in place: `"hi"[0]`.
                 if matches!(self.peek().kind, TokenKind::LBracket) {

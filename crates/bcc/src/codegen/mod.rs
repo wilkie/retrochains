@@ -802,8 +802,12 @@ impl<'a> FunctionEmitter<'a> {
                 self.emit_expr_discard(e);
             }
         }
-        // Trampoline jump to the check.
-        let _ = write!(self.out, "\tjmp\tshort {}\r\n", self.label_ref(plan.check_slot));
+        // Trampoline jump to the check. Skip when the cond is absent
+        // (`for(;;)`) — the body and check coincide so there's no
+        // condition to jump to. Fixture 507.
+        if cond.is_some() {
+            let _ = write!(self.out, "\tjmp\tshort {}\r\n", self.label_ref(plan.check_slot));
+        }
         self.emit_label(plan.body_slot);
         self.loop_stack.push(LoopTargets {
             break_target_slot: plan.break_target_slot,
