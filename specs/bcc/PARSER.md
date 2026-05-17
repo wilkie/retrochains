@@ -1000,6 +1000,26 @@ directly. The chained-cmp+je sequence after the load is
 unchanged. Ident scrutinees still hit the bespoke
 char-widen/global-load shortcuts.
 
+## `c = a % b;` — store DX directly
+
+Fixture `546` (`int a, b, c; ... c = a % b;`) — after `idiv`,
+the remainder lives in DX. The generic arith-to-AX path tacks
+on a `mov ax, dx` so callers can find the result in AX, but
+when the destination is a memory slot we can `mov [c], dx`
+directly and save 2 bytes. `emit_assign_local`'s stack-int
+branch now special-cases `BinOp::Mod` to emit `cwd; idiv <b>;
+mov [bp-N], dx` via a small helper `emit_arith_setup_for_mod`.
+
+## `++a[K]` peephole
+
+Fixture `547` (`int a[3]; ... ++a[1];`) — `emit_array_compound_
+assign` now folds K=1 add/sub into a single `inc|dec <width>
+ptr [bp-N]` instruction (1 byte saved vs. `add mem, 1`). A new
+tasm IR variant `IncBpRel` / `DecBpRel` encodes `FF 46|4E dd`
+(Grp5 /0 or /1 with mod=01 r/m=110 → `[bp]+disp8`). The same
+peephole was already in place for register-resident bare-ident
+locals; this extends it to memory-direct stack array elements.
+
 ## What we explicitly defer
 
 - Templates, namespaces, RTTI, exceptions (not in BC2.0 to relevant
