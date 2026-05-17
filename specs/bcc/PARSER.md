@@ -795,6 +795,20 @@ to a constant:
   encodes as `83 06 lo hi 05`, the 5-byte form) and the imm16
   form otherwise (`81 06 lo hi imm_lo imm_hi`).
 
+## Empty statement
+
+Fixture `522` (`for (i = 0; i < 100; i = i + 1) ;`) and `523`
+(`while (g) ;`) — C90's null statement `;` was a parse error
+because `parse_stmt` had no arm for bare semicolons. Added
+`StmtKind::Empty` and an entry in `parse_stmt` that consumes the
+single `;`. Codegen for `Empty` produces nothing (the loop's
+back-edge / condition handling still runs because they're owned
+by the surrounding `emit_for` / `emit_while`, not the body).
+Adding the new variant required no-op arms in every match on
+`StmtKind` (locals.rs use-counts, plan.rs label planner, emit_
+s.rs call walker, codegen/mod.rs emit_stmt) — same pattern as
+when `Goto`/`Label` were introduced.
+
 ## What we explicitly defer
 
 - Templates, namespaces, RTTI, exceptions (not in BC2.0 to relevant
