@@ -280,29 +280,38 @@ to align `_g`.
 
 ### Publics emission — long bucket direction
 
-The long bucket's sort direction depends on whether it contains a
-global. The earlier batch-49 "globals first then functions then
-helpers, each reverse-alpha within" rule worked for fixture `465`
-(`_buf, _main`) but fixture `491` (`_pts, _main`) contradicted it
-— oracle emits `_main, _pts`, not `_pts, _main`. Refined rule:
+The long bucket's sort direction depends on *both* whether the
+long bucket has a global *and* whether there's any short-named
+global in the source. Fixture `494`
+(`struct node head; int main { head.next = &head; }`) forced a
+further refinement of the rule. The current rule:
 
-- If the long bucket contains *any* global: emit the whole bucket
-  (globals, functions, and helpers mixed) in **forward**
-  alphabetical order.
-- Otherwise (functions and/or helpers only): emit in **reverse**
-  alphabetical order.
+- If the long bucket contains a global **and** the source has at
+  least one short-named global: emit the long bucket in
+  **forward** alphabetical order (globals, functions, helpers
+  mixed together).
+- Otherwise: emit in **reverse** alphabetical order.
 
-Verified against:
-- 095 (`_sum`, `_main`) — functions only → reverse-alpha →
+Pinning fixtures:
+
+- 095 (`_sum`, `_main`) — no short global → reverse →
   `_sum, _main`.
-- 179 (`_add`, `_main`) — functions only → reverse-alpha →
+- 179 (`_add`, `_main`) — no short global → reverse →
   `_main, _add`.
-- 260 (`_main`, `N_LXMUL@`) — function + helper, no global →
-  reverse-alpha → `_main, N_LXMUL@`.
-- 465 (`_buf`, `_main`) — global + function → forward-alpha →
+- 260 (`_main`, `N_LXMUL@`) — short globals `_a, _b` present,
+  but long bucket has no global → reverse →
+  `_main, N_LXMUL@`.
+- 465 (`_buf`, `_main`) — long global + short global → forward →
   `_buf, _main`.
-- 491 (`_pts`, `_main`) — global + function → forward-alpha →
+- 491 (`_pts`, `_main`) — long global + short global → forward →
   `_main, _pts`.
+- 494 (`_head`, `_main`) — long global only, no short global →
+  reverse → `_main, _head`.
+
+The intuition seems to be that BCC walks an internal data
+structure whose iteration order is sensitive to the *combination*
+of bucket populations, not just one bucket. The exact mechanism
+remains unclear; further fixtures may force more refinement.
 
 ## `signed` keyword
 
@@ -524,6 +533,43 @@ for the `= <init>` slot, so static locals with braced
 initializers (`static int a[3] = {10, 20, 30};` — fixture `493`)
 work. Scalar locals are unaffected: `parse_initializer` falls
 through to `parse_expr` when no `{` is seen.
+
+### Self-referential struct, forward struct decl, struct array field
+
+Fixture `494` (`struct node { int value; struct node *next; };`)
+needed `parse_record_type` to pre-register the tag as an empty
+placeholder *before* parsing fields so that
+`struct node *next` can resolve to a pointer to the in-progress
+struct. The placeholder is replaced with the complete type once
+all fields are parsed. The codegen for `head.next = &head;` was
+unsupported (non-constant rhs panic in `emit_member_assign`);
+now special-cases `&<global>` rhs to use the
+`MovGroupSymOffsetGroupSym` two-FIXUPP immediate-store form.
+
+Fixture `495` (`struct point; struct point *p; struct point
+{...};`) needed a bare forward-declaration form
+(`struct <tag>;`) in `parse_unit` to register the tag as an
+opaque placeholder so subsequent `struct <tag> *p;` resolves.
+The eventual full definition replaces the placeholder via the
+same `self.structs.insert` path.
+
+Fixture `496` (`int *f(void) { return &g; }`) needed
+`parse_function` to consume pointer stars between the return
+type and the function name — same shape as `parse_declare` /
+`parse_global` already had. Returning `int *` from a function
+flows through the existing pointer-typed return path; the
+top-level type-probe already accepted the stars.
+
+### Struct array fields, fnptr fields, struct-array-element write
+
+While building this batch I also tried `struct buffer { int len;
+int data[4]; }; b.data[2] = 42;`. The struct-field array suffix
+parsed (extended `parse_record_type` to consume `[N]`), but the
+*assignment* `b.data[2] = 42;` is a struct-field-of-array
+element-write that the current AST shape (`MemberAssign` /
+`ArrayAssign`) doesn't compose. Left for a future fixture. The
+struct-fnptr field (`int (*fn)(int);` in a struct) similarly
+needs new declarator support and is deferred.
 
 ## Comma operator
 
