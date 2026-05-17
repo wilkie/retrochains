@@ -749,7 +749,7 @@ fn walk_calls(
             }
         }
         StmtKind::Break | StmtKind::Continue => {}
-        StmtKind::Goto { .. } | StmtKind::Label { .. } => {}
+        StmtKind::Goto { .. } | StmtKind::Label { .. } | StmtKind::Empty => {}
         StmtKind::ExprStmt(e) => walk_calls_expr(e, defined, locals, seen, ordered),
     }
 }

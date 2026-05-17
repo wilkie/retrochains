@@ -101,6 +101,9 @@ pub struct Stmt {
 #[derive(Debug)]
 pub enum StmtKind {
     Return(Option<Expr>),
+    /// `;` — an empty statement. Produces no asm. Used as a
+    /// placeholder body in `for(init; cond; step) ;` (fixture 522).
+    Empty,
     /// `<type> <name> [= <init>];`. For now only `int` and a single
     /// declarator with an optional initializer. `is_static = true` means
     /// the parser hoisted a synthetic `Global` for this name; codegen

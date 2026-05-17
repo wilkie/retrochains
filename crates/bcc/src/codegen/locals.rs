@@ -528,7 +528,7 @@ fn collect_address_taken(stmt: &Stmt, out: &mut HashSet<String>) {
             }
         }
         StmtKind::Break | StmtKind::Continue => {}
-        StmtKind::Goto { .. } | StmtKind::Label { .. } => {}
+        StmtKind::Goto { .. } | StmtKind::Label { .. } | StmtKind::Empty => {}
         StmtKind::ExprStmt(e) => expr_address_taken(e, out),
     }
 }
@@ -654,7 +654,7 @@ fn stmt_has_call(stmt: &Stmt) -> bool {
         | StmtKind::MemberCompoundAssign { base, value, .. } => {
             expr_has_call(base) || expr_has_call(value)
         }
-        StmtKind::Goto { .. } | StmtKind::Label { .. } => false,
+        StmtKind::Goto { .. } | StmtKind::Label { .. } | StmtKind::Empty => false,
         StmtKind::ExprStmt(e) => expr_has_call(e),
     }
 }
@@ -760,7 +760,8 @@ fn collect_decls(stmt: &Stmt, out: &mut Vec<DeclItem>) {
         | StmtKind::Break
         | StmtKind::Continue
         | StmtKind::Goto { .. }
-        | StmtKind::Label { .. } => {}
+        | StmtKind::Label { .. }
+        | StmtKind::Empty => {}
     }
 }
 
@@ -898,7 +899,7 @@ fn count_uses_stmt(stmt: &Stmt, counts: &mut HashMap<String, u32>) {
             }
             count_uses_expr(value, counts);
         }
-        StmtKind::Goto { .. } | StmtKind::Label { .. } => {}
+        StmtKind::Goto { .. } | StmtKind::Label { .. } | StmtKind::Empty => {}
         StmtKind::ExprStmt(e) => count_uses_expr(e, counts),
     }
 }

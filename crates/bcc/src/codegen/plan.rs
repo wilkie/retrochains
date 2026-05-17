@@ -305,6 +305,9 @@ fn plan_stmt(stmt: &Stmt, ctx: &mut PlanCtx) {
             // No slot reservations — goto/label use user_<name>
             // labels not numbered BCC slots.
         }
+        StmtKind::Empty => {
+            // `;` placeholder body — no slots, no expressions.
+        }
         StmtKind::ExprStmt(e) => plan_expr_value(e, ctx),
     }
 }

@@ -1004,6 +1004,15 @@ impl Parser {
 
     fn parse_stmt(&mut self) -> Result<Stmt, ParseError> {
         let start = self.peek().span.start;
+        // Empty statement (`;`). Produces no asm. Used as a placeholder
+        // body in `for(init; cond; step) ;` (fixture 522).
+        if matches!(self.peek().kind, TokenKind::Semicolon) {
+            let semi = self.bump();
+            return Ok(Stmt {
+                kind: StmtKind::Empty,
+                span: Span::new(start, semi.span.end),
+            });
+        }
         match self.peek().kind {
             TokenKind::KwReturn => {
                 self.bump();

@@ -412,6 +412,9 @@ impl<'a> FunctionEmitter<'a> {
 
     fn emit_stmt(&mut self, stmt: &Stmt) {
         match &stmt.kind {
+            StmtKind::Empty => {
+                // `;` produces no asm. Fixture 522.
+            }
             StmtKind::Return(value) => {
                 self.advance_to_stmt_line(stmt);
                 self.emit_return_value_load(value.as_ref());
