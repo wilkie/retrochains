@@ -505,17 +505,29 @@ fn write_tail(
         let line = format!("\textrn\t{helper}:far\r\n");
         push_to_bucket(helper.clone(), line, &mut long_helpers, &mut short_bucket);
     }
-    long_globals.sort_by(|a, b| a.0.cmp(&b.0));
-    long_functions.sort_by(|a, b| a.0.cmp(&b.0));
-    long_helpers.sort_by(|a, b| a.0.cmp(&b.0));
+    // Long-bucket ordering rule (refined by fixture 491): if any
+    // global is present in the long bucket, emit the whole bucket
+    // in *forward* alphabetical order (mixed: globals, functions,
+    // helpers together). If only functions and/or helpers are
+    // present, emit in *reverse* alphabetical order. Fixture 095
+    // (`_sum`, `_main`) and 179 (`_add`, `_main`) pin reverse-alpha
+    // for function-only long buckets; fixtures 465 (`_buf` +
+    // `_main`) and 491 (`_pts` + `_main`) pin forward-alpha when a
+    // long global is mixed in.
+    let long_has_global = !long_globals.is_empty();
+    let mut long_bucket: Vec<(String, String)> = long_globals
+        .into_iter()
+        .chain(long_functions.into_iter())
+        .chain(long_helpers.into_iter())
+        .collect();
+    long_bucket.sort_by(|a, b| a.0.cmp(&b.0));
     short_bucket.sort_by(|a, b| a.0.cmp(&b.0));
-    for (_, line) in long_globals
-        .iter()
-        .rev()
-        .chain(long_functions.iter().rev())
-        .chain(long_helpers.iter().rev())
-        .chain(short_bucket.iter().rev())
-    {
+    let long_iter: Box<dyn Iterator<Item = &(String, String)>> = if long_has_global {
+        Box::new(long_bucket.iter())
+    } else {
+        Box::new(long_bucket.iter().rev())
+    };
+    for (_, line) in long_iter.chain(short_bucket.iter().rev()) {
         out.extend_from_slice(line.as_bytes());
     }
     // Data externs come after the public list (function externs come

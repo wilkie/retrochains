@@ -667,24 +667,37 @@ impl Parser {
             // Array suffix. `[N]` gives an explicit count; `[]`
             // defers the count until an initializer is seen
             // (fixture 191's `char s[] = "hi";` → len 3).
+            // Array suffix tail. First `[N]` (or `[]`) is special-
+            // cased: `[]` defers the length to be inferred from the
+            // initializer. Subsequent dimensions must be explicit.
+            // Multi-dim wraps innermost-first like `parse_declare`
+            // so `int a[2][3]` becomes `Array{2, Array{3, Int}}`.
+            // Fixture 492.
             let mut inferred_len_marker: Option<Box<Type>> = None;
-            if matches!(self.peek().kind, TokenKind::LBracket) {
+            let mut array_lens: Vec<u32> = Vec::new();
+            let mut first_suffix = true;
+            while matches!(self.peek().kind, TokenKind::LBracket) {
                 self.bump();
-                if matches!(self.peek().kind, TokenKind::RBracket) {
+                if first_suffix && matches!(self.peek().kind, TokenKind::RBracket) {
                     self.bump();
                     inferred_len_marker = Some(Box::new(ty.clone()));
-                } else {
-                    let size_tok = self.bump();
-                    let TokenKind::IntLit(len) = size_tok.kind else {
-                        return Err(ParseError::Unexpected {
-                            expected: "array size (integer literal)".to_owned(),
-                            found: size_tok.kind.describe().to_owned(),
-                            offset: size_tok.span.start,
-                        });
-                    };
-                    self.expect(&TokenKind::RBracket)?;
-                    ty = Type::Array { elem: Box::new(ty), len };
+                    first_suffix = false;
+                    continue;
                 }
+                let size_tok = self.bump();
+                let TokenKind::IntLit(len) = size_tok.kind else {
+                    return Err(ParseError::Unexpected {
+                        expected: "array size (integer literal)".to_owned(),
+                        found: size_tok.kind.describe().to_owned(),
+                        offset: size_tok.span.start,
+                    });
+                };
+                self.expect(&TokenKind::RBracket)?;
+                array_lens.push(len);
+                first_suffix = false;
+            }
+            for len in array_lens.into_iter().rev() {
+                ty = Type::Array { elem: Box::new(ty), len };
             }
             let init = if matches!(self.peek().kind, TokenKind::Equals) {
                 self.bump();
@@ -833,7 +846,11 @@ impl Parser {
         let mut items = Vec::new();
         if !matches!(self.peek().kind, TokenKind::RBrace) {
             loop {
-                items.push(self.parse_expr()?);
+                // Recurse for nested braces — multi-dim array
+                // initializers like `int a[2][3] = {{1,2,3},
+                // {4,5,6}};` (fixture 492) embed `InitList` inside
+                // `InitList`.
+                items.push(self.parse_initializer()?);
                 if matches!(self.peek().kind, TokenKind::Comma) {
                     self.bump();
                     // Allow a trailing comma before `}`.
@@ -1340,7 +1357,11 @@ impl Parser {
     ) -> Result<Stmt, ParseError> {
         let init = if matches!(self.peek().kind, TokenKind::Equals) {
             self.bump();
-            Some(self.parse_expr()?)
+            // `parse_initializer` accepts a braced `{ … }` initializer
+            // for aggregate locals (fixture 493: static int a[3] =
+            // {10, 20, 30};). Falls through to `parse_expr` for the
+            // scalar case.
+            Some(self.parse_initializer()?)
         } else {
             None
         };
@@ -1376,7 +1397,7 @@ impl Parser {
             }
             let tail_init = if matches!(self.peek().kind, TokenKind::Equals) {
                 self.bump();
-                Some(self.parse_expr()?)
+                Some(self.parse_initializer()?)
             } else {
                 None
             };
