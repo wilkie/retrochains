@@ -809,6 +809,35 @@ Adding the new variant required no-op arms in every match on
 s.rs call walker, codegen/mod.rs emit_stmt) — same pattern as
 when `Goto`/`Label` were introduced.
 
+## Char local compared to constant
+
+Fixture `524` (`char c; c = 'A'; if (c == 'B') ...`) — the
+stack-local compare path in `emit_compare` always emitted `cmp
+word ptr [bp-N], K`, but for a char local BCC uses the byte
+form `cmp byte ptr [bp-N], K` (encoded `80 7E disp8 imm8`). The
+fix: check `ty.is_char_like()` on the named local and emit the
+byte form. A new IR variant `CmpByteBpRelImm8` encodes it.
+Parser handles `cmp byte ptr [bp+N], imm8` via the existing
+`parse_byte_bp_relative` helper.
+
+## Negative case label
+
+Fixture `525` (`switch (x) { case -1: return 10; ... }`) —
+`parse_switch`'s case head only accepted `IntLit` directly. It
+now allows an optional leading `Minus` token and negates the
+literal via `wrapping_neg` so the case value stays a u32 with
+the same wrap-around semantics that `try_const_eval` produces
+for `-1`. Codegen needed no change — switch comparison already
+handles arbitrary u32 case values.
+
+While integrating this, found a bug in `emit_assign_local`'s
+stack-int immediate store: `try_const_eval` returns u32, so
+`x = -1` was emitting `mov word ptr [bp-2], 4294967295`. Now
+the path masks to `v & 0xFFFF` before formatting (matching the
+already-correct char form). All prior fixtures still hit the
+same byte output because their constants fit in 16 bits without
+sign-extension; only the negative-literal path tripped this.
+
 ## What we explicitly defer
 
 - Templates, namespaces, RTTI, exceptions (not in BC2.0 to relevant
