@@ -1991,27 +1991,107 @@ impl<'a> FunctionEmitter<'a> {
         }
     }
 
-    /// Materialize a long argument into AX (high) and DX (low), then
-    /// push both halves (high first, low second) per BCC's calling
-    /// convention. Fixture 216.
+    /// Push a long argument onto the call stack as two words, **high
+    /// half first, then low half** — so the low half ends up at the
+    /// lower bp-offset in the callee. Per BCC's calling convention.
+    /// Const args materialize into AX/DX first (fixture 216);
+    /// lvalues with known addresses push memory-direct (fixtures
+    /// 322–325).
     fn emit_long_arg_push(&mut self, arg: &Expr) {
-        let Some(v) = try_const_eval(arg) else {
-            panic!("non-constant long argument not yet supported (no fixture)");
-        };
-        let lo = v & 0xFFFF;
-        let hi = (v >> 16) & 0xFFFF;
-        if hi == 0 {
-            self.out.extend_from_slice(b"\txor\tax,ax\r\n");
-        } else {
-            let _ = write!(self.out, "\tmov\tax,{hi}\r\n");
+        if let Some(v) = try_const_eval(arg) {
+            let lo = v & 0xFFFF;
+            let hi = (v >> 16) & 0xFFFF;
+            if hi == 0 {
+                self.out.extend_from_slice(b"\txor\tax,ax\r\n");
+            } else {
+                let _ = write!(self.out, "\tmov\tax,{hi}\r\n");
+            }
+            if lo == 0 {
+                self.out.extend_from_slice(b"\txor\tdx,dx\r\n");
+            } else {
+                let _ = write!(self.out, "\tmov\tdx,{lo}\r\n");
+            }
+            self.out.extend_from_slice(b"\tpush\tax\r\n");
+            self.out.extend_from_slice(b"\tpush\tdx\r\n");
+            return;
         }
-        if lo == 0 {
-            self.out.extend_from_slice(b"\txor\tdx,dx\r\n");
-        } else {
-            let _ = write!(self.out, "\tmov\tdx,{lo}\r\n");
+        // Long global ident — push both halves memory-direct via
+        // `push word ptr DGROUP:_g+2 / push word ptr DGROUP:_g`.
+        // Fixture 322.
+        if let ExprKind::Ident(name) = &arg.kind
+            && let Some(gty) = self.globals.type_of(name)
+            && gty.is_long_like()
+        {
+            let _ = write!(self.out, "\tpush\tword ptr DGROUP:_{name}+2\r\n");
+            let _ = write!(self.out, "\tpush\tword ptr DGROUP:_{name}\r\n");
+            return;
         }
-        self.out.extend_from_slice(b"\tpush\tax\r\n");
-        self.out.extend_from_slice(b"\tpush\tdx\r\n");
+        // Long stack local — push both halves via `push word ptr
+        // [bp+off+2] / push word ptr [bp+off]`. Fixture 323.
+        if let ExprKind::Ident(name) = &arg.kind
+            && self.locals.has(name)
+            && self.locals.type_of(name).is_long_like()
+        {
+            let LocalLocation::Stack(off) = self.locals.location_of(name) else {
+                unreachable!("long is never register-resident");
+            };
+            let _ = write!(self.out, "\tpush\tword ptr {}\r\n", bp_addr(off + 2));
+            let _ = write!(self.out, "\tpush\tword ptr {}\r\n", bp_addr(off));
+            return;
+        }
+        // `*p` for `p: long *` register-resident — push both halves
+        // through the pointer register. Fixture 325.
+        if let ExprKind::Deref(operand) = &arg.kind
+            && let ExprKind::Ident(ptr_name) = &operand.kind
+            && self.locals.has(ptr_name)
+            && let Some(pointee) = self.locals.type_of(ptr_name).pointee()
+            && pointee.is_long_like()
+            && let LocalLocation::Reg(reg) = self.locals.location_of(ptr_name)
+        {
+            let r = reg.name();
+            let _ = write!(self.out, "\tpush\tword ptr [{r}+2]\r\n");
+            let _ = write!(self.out, "\tpush\tword ptr [{r}]\r\n");
+            return;
+        }
+        // Long dot-chain lvalue (`s.x`, `a[K].x`, …) — push both
+        // halves memory-direct at the resolved address. Fixture 326.
+        if let ExprKind::Member { base, field, kind: crate::ast::MemberKind::Dot } = &arg.kind
+            && let Some((src, total_off, leaf_ty)) = self.try_member_dot_chain(base, field)
+            && leaf_ty.is_long_like()
+        {
+            let (lo_addr, hi_addr) = if self.globals.contains(&src) {
+                (
+                    global_offset_addr(&src, total_off),
+                    global_offset_addr(&src, total_off + 2),
+                )
+            } else {
+                let LocalLocation::Stack(base_bp) = self.locals.location_of(&src) else {
+                    panic!("struct local `{src}` not stack-resident");
+                };
+                let off = base_bp + i16::try_from(total_off).unwrap_or(i16::MAX);
+                (bp_addr(off), bp_addr(off + 2))
+            };
+            let _ = write!(self.out, "\tpush\tword ptr {hi_addr}\r\n");
+            let _ = write!(self.out, "\tpush\tword ptr {lo_addr}\r\n");
+            return;
+        }
+        // Long array element (const index) on a global — push both
+        // halves at `_a + K*4`. Fixture 328.
+        if let ExprKind::ArrayIndex { array: arr_expr, index } = &arg.kind
+            && let ExprKind::Ident(arr_name) = &arr_expr.kind
+            && let Some(arr_ty) = self.globals.type_of(arr_name)
+            && let Some(elem) = arr_ty.array_elem()
+            && elem.is_long_like()
+            && let Some(k) = try_const_eval(index)
+        {
+            let byte_off = (k as i32) * 4;
+            let lo_addr = global_offset_addr(arr_name, byte_off);
+            let hi_addr = global_offset_addr(arr_name, byte_off + 2);
+            let _ = write!(self.out, "\tpush\tword ptr {hi_addr}\r\n");
+            let _ = write!(self.out, "\tpush\tword ptr {lo_addr}\r\n");
+            return;
+        }
+        panic!("non-constant long argument not yet supported (no fixture)");
     }
 
     /// Place an argument into AX (the low byte of which is `al`) for

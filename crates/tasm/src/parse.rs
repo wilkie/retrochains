@@ -383,6 +383,22 @@ fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
                     offset,
                 });
             }
+            // `push word ptr [bp+N]` — long-arg push from a stack
+            // local (fixture 323).
+            if let Some(offset) = parse_word_bp_relative(rest) {
+                return Ok(Instr::PushBpRel { offset });
+            }
+            // `push word ptr [si]` / `push word ptr [si+K]` —
+            // long-arg push through a pointer (fixture 325).
+            if rest == "word ptr [si]" {
+                return Ok(Instr::PushSiPtr);
+            }
+            if let Some(disp) = parse_word_si_disp(rest) {
+                if disp == 0 {
+                    return Ok(Instr::PushSiPtr);
+                }
+                return Ok(Instr::PushSiDisp { disp });
+            }
             Err(AsmError::new(line.line_no, format!("push: unsupported operand `{rest}`")))
         }
         "pop" => Reg16::parse(rest)

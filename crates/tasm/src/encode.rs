@@ -305,6 +305,8 @@ fn instr_size(instr: &Instr) -> usize {
         | Instr::XorAxGroupSym { .. } => 4,
         Instr::CmpAxGroupSym { .. } | Instr::CmpDxGroupSym { .. } => 4,
         Instr::PushGroupSym { .. } => 4,
+        Instr::PushBpRel { .. } | Instr::PushSiDisp { .. } => 3,
+        Instr::PushSiPtr => 2,
         Instr::CmpGroupSymImm8Sx { .. }
         | Instr::AddGroupSymImm8Sx { .. }
         | Instr::AdcGroupSymImm8Sx { .. }
@@ -924,6 +926,24 @@ fn emit_instr(
             // FF /6 r/m16 with disp16-only addressing (ModR/M 36 =
             // mod=00 reg=110 rm=110).
             emit_group_sym_lea(&[0xFF, 0x36], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
+        }
+        Instr::PushBpRel { offset } => {
+            // `push word ptr [bp+disp8]` → FF 76 dd.
+            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
+            out.push(0xFF);
+            out.push(0x76);
+            out.push(disp as u8);
+        }
+        Instr::PushSiPtr => {
+            // `push word ptr [si]` → FF 34.
+            out.push(0xFF);
+            out.push(0x34);
+        }
+        Instr::PushSiDisp { disp } => {
+            // `push word ptr [si+disp8]` → FF 74 dd.
+            out.push(0xFF);
+            out.push(0x74);
+            out.push(*disp as u8);
         }
         Instr::CmpGroupSymImm8Sx { group, symbol, offset, imm } => {
             // `cmp word ptr <group>:<sym>[+N], imm8sx` → 83 3E lo hi ii.

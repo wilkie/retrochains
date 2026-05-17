@@ -424,6 +424,18 @@ pub enum Instr {
     /// push long-arith helper arguments onto the stack (e.g.
     /// fixture 232's `N_LDIV@` call).
     PushGroupSym { group: String, symbol: String, offset: i16 },
+    /// `push word ptr [bp+disp8]` — `FF 76 dd`. ModR/M 76 =
+    /// mod=01 /6(PUSH) r/m=110 ([bp+disp8]). Used to push a long
+    /// argument's halves from a stack local (fixture 323).
+    PushBpRel { offset: i16 },
+    /// `push word ptr [si]` — `FF 34`. ModR/M 34 = mod=00 /6(PUSH)
+    /// r/m=100 ([si]). Low-half push for long-pointer deref-arg
+    /// (fixture 325).
+    PushSiPtr,
+    /// `push word ptr [si+disp8]` — `FF 74 dd`. ModR/M 74 = mod=01
+    /// /6(PUSH) r/m=100 ([si+disp8]). High-half push for
+    /// long-pointer deref-arg (fixture 325).
+    PushSiDisp { disp: i8 },
     /// `cmp word ptr <group>:<symbol>[+<offset>], imm16` — Grp1
     /// r/m16,imm16 with /7=CMP and disp16-only addressing
     /// (`81 3E lo hi imm_lo imm_hi`, 6 bytes). Used when K is too
