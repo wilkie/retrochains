@@ -4635,6 +4635,29 @@ impl<'a> FunctionEmitter<'a> {
         // share the same byte-level emission for arithmetic and
         // bitwise ops; only shifts (sar vs shr) and comparisons
         // (signed vs unsigned jumps) need to branch on signedness.
+        // Struct-to-struct copy assign at file scope. BCC compiles
+        // `a = b;` for two structs of the same type as a sequence of
+        // word loads/stores, **high-word first** in both the load and
+        // store pair — identical byte shape to the long-to-long copy
+        // (fixture 211). For a 4-byte struct (one long field, or two
+        // ints) the emission is byte-for-byte the long-copy AX:DX
+        // sequence regardless of which struct field types produced the
+        // size. Fixtures 410 (`{ int x; int y; }`), 411 (`{ int x; }`),
+        // 412 (`{ long x; }`). Note: 411 is single-word and currently
+        // takes the generic `mov ax / mov [_a], ax` path — same byte
+        // output, so we leave it alone for now and only special-case
+        // the 4-byte size.
+        if let Type::Struct { .. } = &ty
+            && let ExprKind::Ident(src_name) = &value.kind
+            && self.globals.type_of(src_name).map_or(false, |t| t == &ty)
+            && ty.size_bytes() == 4
+        {
+            let _ = write!(self.out, "\tmov\tax,word ptr DGROUP:_{src_name}+2\r\n");
+            let _ = write!(self.out, "\tmov\tdx,word ptr DGROUP:_{src_name}\r\n");
+            let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name}+2,ax\r\n");
+            let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name},dx\r\n");
+            return;
+        }
         if ty.is_long_like() {
             if let Some(v) = try_const_eval(value) {
                 let lo = v & 0xFFFF;
