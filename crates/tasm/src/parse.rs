@@ -1094,6 +1094,11 @@ fn parse_adc(operands: &str, line_no: usize) -> AsmResult<Instr> {
         if let Some(imm) = parse_imm8_signed(rhs) {
             return Ok(Instr::AdcSiDispImm8 { disp, imm });
         }
+        // `adc word ptr [si+disp], ax` — long `*p += y` high half
+        // carry from register-loaded RHS (fixture 398).
+        if rhs == "ax" {
+            return Ok(Instr::AdcSiDispAx { disp });
+        }
     }
     Err(AsmError::new(
         line_no,
@@ -1188,6 +1193,11 @@ fn parse_add(operands: &str, line_no: usize) -> AsmResult<Instr> {
     if lhs == "word ptr [si]" {
         if let Some(imm) = parse_imm8_signed(rhs) {
             return Ok(Instr::AddSiPtrImm8 { imm });
+        }
+        // `add word ptr [si], dx` — long `*p += y` low half through
+        // a register-resident long pointer in SI (fixture 398).
+        if rhs == "dx" {
+            return Ok(Instr::AddSiPtrDx);
         }
     }
     // `add word ptr [bx],<imm8>` — same shape via BX. Fixture 197

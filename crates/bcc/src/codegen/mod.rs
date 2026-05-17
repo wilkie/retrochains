@@ -4322,6 +4322,38 @@ impl<'a> FunctionEmitter<'a> {
             );
             return;
         }
+        // Arrow access (`p->x op= …`) where `p` is a register-resident
+        // pointer to a struct and `x` is a long field. The address
+        // pair is `[reg+off]` / `[reg+off+2]` — same skeleton as the
+        // other long-compound-to-memory destinations, just with
+        // register-base addressing. Fixture 399 (`p->x += K` for the
+        // first field, offset 0 → `[si]`/`[si+2]`).
+        if matches!(kind, crate::ast::MemberKind::Arrow)
+            && let ExprKind::Ident(p_name) = &base.kind
+            && self.locals.has(p_name)
+            && let Some(pointee) = self.locals.type_of(p_name).pointee()
+            && let Some((field_off, field_ty)) = pointee.clone().field(field)
+            && field_ty.is_long_like()
+            && let LocalLocation::Reg(reg) = self.locals.location_of(p_name)
+        {
+            let r = reg.name();
+            let (lo_addr, hi_addr) = if field_off == 0 {
+                (format!("[{r}]"), format!("[{r}+2]"))
+            } else {
+                (
+                    format!("[{r}+{field_off}]"),
+                    format!("[{r}+{}]", field_off + 2),
+                )
+            };
+            self.emit_long_compound_to_mem(
+                &lo_addr,
+                &hi_addr,
+                op,
+                value,
+                field_ty.is_unsigned(),
+            );
+            return;
+        }
         let ExprKind::Ident(name) = &base.kind else {
             panic!("non-ident base in member compound assign not yet supported (no fixture)");
         };
@@ -4440,6 +4472,32 @@ impl<'a> FunctionEmitter<'a> {
     /// directly (fixture 183).
     fn emit_deref_compound_assign(&mut self, target: &Expr, op: BinOp, value: &Expr) {
         let (base_name, depth) = deref_chain_root(target);
+        // Long pointee + register-resident pointer: route through the
+        // shared long-compound-to-memory helper. Picks up variable
+        // RHS (fixture 398: `*p += y`) for free since the helper
+        // already knows the destination addressing. Const RHS still
+        // falls through to the existing const-only fast paths
+        // immediately below.
+        let is_global = self.globals.type_of(base_name).is_some();
+        if depth == 0
+            && !is_global
+            && let ty = self.locals.type_of(base_name).clone()
+            && let Some(pointee) = ty.pointee()
+            && pointee.is_long_like()
+            && let LocalLocation::Reg(reg) = self.locals.location_of(base_name)
+        {
+            let r = reg.name();
+            let lo_addr = format!("[{r}]");
+            let hi_addr = format!("[{r}+2]");
+            self.emit_long_compound_to_mem(
+                &lo_addr,
+                &hi_addr,
+                op,
+                value,
+                pointee.is_unsigned(),
+            );
+            return;
+        }
         let Some(v) = try_const_eval(value) else {
             panic!("non-constant rhs in `*p <op>= v` not yet supported (no fixture)");
         };

@@ -635,6 +635,16 @@ pub enum Instr {
     /// `adc word ptr [si+disp8],<imm8sx>` — `83 54 dd ii`. Carry-
     /// propagation partner for long-pointer `*p += K` (fixture 311).
     AdcSiDispImm8 { disp: i8, imm: i8 },
+    /// `add word ptr [si],dx` — `01 14`. ADD r/m16,r16 form; ModR/M
+    /// `14` = mod=00 reg=DX(010) r/m=100=SI. Low-half memory-dest
+    /// add for `*p += y` (variable RHS through a register-resident
+    /// long pointer). Fixture 398.
+    AddSiPtrDx,
+    /// `adc word ptr [si+disp8],ax` — `11 44 dd`. ADC r/m16,r16
+    /// form; ModR/M `44 dd` = mod=01 reg=AX(000) r/m=100=SI with
+    /// disp8. High-half carry partner to `AddSiPtrDx` for the
+    /// variable-RHS long pointer compound. Fixture 398.
+    AdcSiDispAx { disp: i8 },
     /// `sub word ptr [si],<imm8sx>` — `83 2C ii`. Low-half partner
     /// for long-pointer `*p -= K`.
     SubSiPtrImm8 { imm: i8 },

@@ -345,6 +345,8 @@ fn instr_size(instr: &Instr) -> usize {
         Instr::MovDxFromSiPtr => 2,
         Instr::AddSiPtrImm8 { .. } | Instr::AddBxPtrImm8 { .. } | Instr::SubSiPtrImm8 { .. } => 3,
         Instr::AdcSiDispImm8 { .. } | Instr::SbbSiDispImm8 { .. } => 4,
+        Instr::AddSiPtrDx => 2,
+        Instr::AdcSiDispAx { .. } => 3,
         Instr::AddBpRelImm8 { .. }
         | Instr::AdcBpRelImm8 { .. }
         | Instr::SubBpRelImm8 { .. }
@@ -1222,6 +1224,19 @@ fn emit_instr(
             out.push(0x54);
             out.push(*disp as u8);
             out.push(*imm as u8);
+        }
+        Instr::AddSiPtrDx => {
+            // `add word ptr [si],dx` → 01 14. ModR/M 14 = mod=00
+            // reg=DX(010) r/m=100=SI.
+            out.push(0x01);
+            out.push(0x14);
+        }
+        Instr::AdcSiDispAx { disp } => {
+            // `adc word ptr [si+disp8],ax` → 11 44 dd. ModR/M
+            // 44 = mod=01 reg=AX(000) r/m=100=SI with disp8.
+            out.push(0x11);
+            out.push(0x44);
+            out.push(*disp as u8);
         }
         Instr::SubSiPtrImm8 { imm } => {
             // `sub word ptr [si],imm8sx` → 83 2C ii.
