@@ -861,6 +861,28 @@ of destination would emit different byte sequences for the
 arithmetic step at otherwise-symmetric memory-bound and return-
 bound sites.
 
+### Long arithmetic skeleton is source-storage-agnostic (STRONG)
+
+The four-instruction long-arith skeleton (`mov ax, <hi>; mov dx,
+<lo>; <op> dx, <rhs_lo>; <op|carry> ax, <rhs_hi>`) is **the same
+sequence** regardless of where the source operands live. Only the
+addressing-mode bytes inside each `mov`/`<op>` differ. Source
+shapes BCC freely substitutes into the skeleton:
+
+- Bare ident (long global): `DGROUP:_g+2` / `DGROUP:_g`
+- Bare ident (long stack): `[bp+off+2]` / `[bp+off]`
+- Struct field via dot/arrow (any base): folded byte-offset
+- Array element with const index: base + index*4
+- `*p` for register-resident long pointer: `[reg+2]` / `[reg]`
+
+A compiler with a less uniform pipeline might pre-spill struct
+fields or array elements through temporaries before doing the
+arithmetic, producing a longer byte sequence at those source
+shapes. BCC's emitter is shape-uniform — same number of instructions
+across all five storage classes. _Fixtures_: 207, 219 (globals);
+350 (g + K → stack); 352 (struct field + K); 353 (array elem +
+K); 354 (`*p + K`); 355 (struct + struct).
+
 ### Compound assign opcode tells constant-vs-variable RHS (STRONG)
 
 For long compound assigns to memory, the **opcode byte** of the

@@ -1880,6 +1880,55 @@ memory rather than BX:CX/DX:AX — see slice 281).
 `return a + b` for two long parameters uses the stack convention
 (DX=high, AX=low) — see fixture 285's six instructions above.
 
+**The arithmetic skeleton is source-storage-agnostic.** Both
+operands can be any long lvalue — bare ident (global/stack),
+struct field via dot/arrow chain, array element with constant
+index, or `*p` for a register-resident long pointer — and the
+generated sequence stays the same load/op/op/store shape. Only
+the addressing-mode bytes differ. Concrete examples:
+
+```
+; g = s.x + 5;  (long struct field + const)
+mov ax, word ptr DGROUP:_s+2
+mov dx, word ptr DGROUP:_s
+add dx, 5
+adc ax, 0
+mov word ptr DGROUP:_g+2, ax
+mov word ptr DGROUP:_g, dx
+```
+
+```
+; g = a[1] + 5;  (long array element + const)
+mov ax, word ptr DGROUP:_a+6
+mov dx, word ptr DGROUP:_a+4
+add dx, 5
+adc ax, 0
+mov word ptr DGROUP:_g+2, ax
+mov word ptr DGROUP:_g, dx
+```
+
+```
+; g = s.x + s.y;  (two long struct fields, same struct)
+mov ax, word ptr DGROUP:_s+2
+mov dx, word ptr DGROUP:_s
+add dx, word ptr DGROUP:_s+4
+adc ax, word ptr DGROUP:_s+6
+mov word ptr DGROUP:_g+2, ax
+mov word ptr DGROUP:_g, dx
+```
+
+```
+; h = *p + 5;  (long pointer deref + const, p in SI)
+mov ax, word ptr [si+2]
+mov dx, word ptr [si]
+add dx, 5
+adc ax, 0
+mov word ptr DGROUP:_h+2, ax
+mov word ptr DGROUP:_h, dx
+```
+
+_Fixtures_: 352–355.
+
 ### Compound assignment: arithmetic uses `83` (imm8sx), bitwise uses `81` (imm16)
 
 For longs, BCC emits a **memory-direct read-modify-write** pair (no
