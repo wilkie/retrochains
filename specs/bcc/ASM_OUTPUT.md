@@ -1379,6 +1379,35 @@ asm **byte-identical** to the equivalent `struct s { int x; }`
 form. The typedef just records the underlying type in a parser-
 side alias table; no AST node escapes for it.
 
+### Struct-value copy assign (`410`–`412`)
+
+`s_dst = s_src;` for two structs of the same type is compiled as a
+**word-by-word memory copy**, high-word first in both the load and
+store pair — byte-identical to the long-to-long copy shape (fixture
+211) when the struct is 4 bytes. The pattern is agnostic to the
+field types that produce the size: a `struct { int x; int y; }` and
+a `struct { long x; }` emit the *exact same bytes* for `a = b;` at
+file scope (fixtures 410, 412).
+
+```
+; a = b;  for `struct S { int x; int y; }` (fixture 410)  — or
+;         for `struct S { long x; }` (fixture 412) — same bytes
+mov ax, word ptr DGROUP:_b+2     ; high word first
+mov dx, word ptr DGROUP:_b
+mov word ptr DGROUP:_a+2, ax     ; store high
+mov word ptr DGROUP:_a, dx       ; store low
+```
+
+A single-word struct (e.g. `struct S { int x; }`) collapses to a
+one-word `mov ax / mov [_a], ax` (fixture 411) — byte-identical to
+a plain `int a = b;` copy. The bytes give no indication that the
+source-level type was a struct rather than an int.
+
+A disassembler cannot reverse-engineer the source-level *type* of
+a copy from the bytes — only its byte-width. Two structurally
+distinct C types that share a byte size produce identical OBJ
+output for the copy.
+
 ### Struct pointer as parameter (`106`)
 
 A `struct s *p` parameter behaves exactly like an `int *p`
