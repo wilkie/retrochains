@@ -672,6 +672,16 @@ missing slots are zero-filled out to the full byte size.
 items. This mirrors the trailing-zero pad behavior we added for
 fixed-length char-array string initializers in fixture 498.
 
+## Pointer compared to integer constant
+
+Fixture `504` (`int *g; if (g == 0) return 1;`) — comparing a
+global pointer to a constant must use the memory-direct
+`cmp word ptr DGROUP:_g, 0` form, not the load-then-compare
+sequence. The `emit_compare` int-global shortcut now triggers
+for any global whose type has a pointee, in addition to plain
+`int`/`unsigned`. The same `83 3E disp16 ii` (imm8sx) encoding
+applies; no new IR was needed.
+
 ## What we explicitly defer
 
 - Templates, namespaces, RTTI, exceptions (not in BC2.0 to relevant
