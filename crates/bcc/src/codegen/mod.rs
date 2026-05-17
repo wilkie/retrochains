@@ -1957,9 +1957,21 @@ impl<'a> FunctionEmitter<'a> {
             return;
         }
         if let (ExprKind::Ident(name), Some(rhs)) = (&left.kind, try_const_eval(right))
+            && self.locals.has(name)
             && let LocalLocation::Stack(off) = self.locals.location_of(name)
         {
             let _ = write!(self.out, "\tcmp\tword ptr {},{rhs}\r\n", bp_addr(off));
+            return;
+        }
+        // `<int-global> <relop> <const>` — emit a memory-direct
+        // compare `cmp word ptr DGROUP:_g, K`. BCC prefers the
+        // imm8sx form (`83 3E disp16 ii`) when K fits a signed
+        // byte; otherwise the imm16 form. Fixture 429.
+        if let (ExprKind::Ident(name), Some(rhs)) = (&left.kind, try_const_eval(right))
+            && let Some(gty) = self.globals.type_of(name)
+            && matches!(gty, Type::Int | Type::UInt)
+        {
+            let _ = write!(self.out, "\tcmp\tword ptr DGROUP:_{name},{rhs}\r\n");
             return;
         }
         self.emit_expr_to_ax(left);
@@ -2375,6 +2387,9 @@ impl<'a> FunctionEmitter<'a> {
     /// local, return that register. Otherwise `None`.
     fn ident_in_register(&self, e: &Expr) -> Option<Reg> {
         let ExprKind::Ident(name) = &e.kind else { return None };
+        if !self.locals.has(name) {
+            return None;
+        }
         match self.locals.location_of(name) {
             LocalLocation::Reg(r) => Some(r),
             LocalLocation::Stack(_) => None,
