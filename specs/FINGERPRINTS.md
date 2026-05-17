@@ -562,6 +562,62 @@ Combined with the per-arg cleanup rule, a single-long call cleans up
 with two `pop cx` (2 args' worth of words), not one. _Fixtures_: 216,
 217, 285.
 
+### Long-array global var-index: `<sym>[bx+disp]` not stack-array shape (STRONG)
+
+Variable-indexed access to a `long` element of a **global** array
+emits a 4-instruction sequence that's distinct from BCC's 5-
+instruction stack-array effective-address pattern:
+
+```
+mov bx, <index>              ; or mov bx, [bp-N] / mov bx, <reg>
+shl bx, 1
+shl bx, 1                    ; bx = i * 4 (long stride)
+mov ax, word ptr DGROUP:_a[bx+2]    ; 8B 87 lo hi (+FIXUPP)
+mov dx, word ptr DGROUP:_a[bx]      ; 8B 97 lo hi (+FIXUPP)
+```
+
+The `<sym>[bx+disp]` form (`mod=10 r/m=111` ModR/M) folds the symbol's
+segment-relative location into the disp16 slot at link time — there
+is **no** runtime `lea ax, word ptr [bp-N] / add bx, ax`. Stack
+arrays can't use this shape (no symbol to fold), so they pay the
+extra two instructions. _Fixture_: 303 vs 079; 305 (write) vs 184.
+
+### Stride is two `shl bx, 1`s, not `shl bx, 2` (STRONG)
+
+Even though BCC could fold `× 4` into one `shl bx, 2` (80186+, two
+bytes vs. four), it consistently emits `shl bx, 1 / shl bx, 1` for
+long-stride indexing — same 8086-compatibility choice that gives
+`inc ax / inc ax` for `r + 2` and avoids `imul reg, imm`. Same rule
+across stack-int and register-int index loads. _Fixture_: 303, 305,
+307.
+
+### Long-array element layout (STRONG)
+
+A `long a[N]` global has 4 bytes per element packed contiguously,
+each element little-endian: low word at element-relative offset 0,
+high word at offset 2. So `a[1]` of a long global at base 0 sits at
+bytes 4–5 (low) and 6–7 (high). An initialized `long a[3] = {1, 2,
+3}` emits **three 4-byte LE runs of `db`** — `db 1 / db 0 / db 0 /
+db 0 / db 2 / db 0 / db 0 / db 0 / db 3 / db 0 / db 0 / db 0`. The
+per-byte `db` (rather than `dw 1 / dw 0` per element) is the same
+shape BCC uses for initialized int globals and switch linear-search
+value tables — a consistent BCC idiom. _Fixtures_: 300, 301.
+
+### Index-into-BX picks the shortest form (STRONG)
+
+For variable-indexed array access (global or stack), BCC chooses
+between three BX loads based on where the index sits:
+
+- **Int stack local** — `mov bx, word ptr [bp-N]` (3 bytes).
+- **Int register local** — `mov bx, <reg>` (2 bytes). Most
+  common in loops where the index is the register-allocated loop
+  variable.
+- **Any other expression** — `<compute to AX> / mov bx, ax`.
+
+Never `lea bx, [<bp+N>]` directly. The asymmetry mirrors the
+"AX is the working register" pattern that shows up for `&x` and
+compound `*=`. _Fixtures_: 303 (stack), 307 (register).
+
 ---
 
 ## Calling-convention signatures

@@ -2143,6 +2143,133 @@ sign-vs-unsigned only at compare/divide time. _Fixtures_: 254, 255,
 _Fixtures_: 242 (unsigned long compare), 243 (`>>` peephole),
 244–247 (helpers), 277/278 (cast).
 
+### Long arrays
+
+Long arrays follow the same low/high word storage convention as scalar
+longs: each element occupies 4 bytes, low word at offset +0 of the
+element, high word at +2. Layout differs slightly by storage class.
+
+**Initialized global** (`long a[3] = {1, 2, 3};`) — one 4-byte LE pair
+per element, dropped into `_DATA` via the per-byte `db` idiom:
+
+```
+_a   label word
+     db 1 / db 0 / db 0 / db 0       ; a[0] = 1
+     db 2 / db 0 / db 0 / db 0       ; a[1] = 2
+     db 3 / db 0 / db 0 / db 0       ; a[2] = 3
+```
+
+**Uninitialized global** (`long a[3];`) — `db 12 dup (?)` in `_BSS`
+(reservation = `sizeof(elem) * count`).
+
+**Stack-local** (`long a[2];`) — frame grows by `4 * count` bytes. The
+ordering matches scalar locals: element 0 sits at the most-negative
+bp-offset, with elements climbing toward `bp`. Within each element,
+low at +0, high at +2.
+
+```
+sub sp, 8                            ; long a[2]; → 8-byte frame
+mov word ptr [bp-6], 0               ; a[0].high
+mov word ptr [bp-8], 5               ; a[0].low  = 5
+mov word ptr [bp-2], 0               ; a[1].high
+mov word ptr [bp-4], 7               ; a[1].low  = 7
+```
+
+### Long array element access — constant index
+
+A constant index folds to a direct memory operand at the
+element's byte offset. Read of `g = a[1]` for a global array:
+
+```
+mov ax, word ptr DGROUP:_a+6         ; high of a[1] (byte 6)
+mov dx, word ptr DGROUP:_a+4         ; low of a[1]  (byte 4)
+mov word ptr DGROUP:_g+2, ax         ; store high
+mov word ptr DGROUP:_g, dx           ; store low
+```
+
+For stack arrays, the same shape uses bp-relative addressing:
+
+```
+mov ax, word ptr [bp-2]              ; high of a[1] (local at bp-4)
+mov dx, word ptr [bp-4]              ; low of a[1]
+```
+
+Const-index *writes* drop the load: `a[1] = 42` becomes two
+`mov word ptr <addr>, K` calls — high half first, then low. The same
+high-first ordering as scalar long assigns.
+
+### Long array element access — variable index
+
+For globals, variable-indexed access uses **bx-indexed addressing
+with the symbol folded into the disp16**, *not* the 4-instruction
+stack-array effective-address pattern. The index is loaded into BX,
+scaled by 4 with two `shl bx, 1` (stride 4 = 2² — BCC stays on
+8086-compatible single-bit shifts), then both halves read via
+`<sym>[bx+disp]` where `disp` is 0 for low and 2 for high:
+
+```
+mov bx, word ptr [bp-2]              ; bx = i
+shl bx, 1
+shl bx, 1                            ; bx = i*4 (long stride)
+mov ax, word ptr DGROUP:_a[bx+2]     ; high of a[i]: 8B 87 lo hi + FIXUPP
+mov dx, word ptr DGROUP:_a[bx]       ; low  of a[i]: 8B 97 lo hi + FIXUPP
+mov word ptr DGROUP:_g+2, ax
+mov word ptr DGROUP:_g, dx
+```
+
+The disp16 bytes encoded into the instruction are the byte offset
+**within** the element (`02 00` for high, `00 00` for low); FIXUPP
+patches the symbol's segment-relative location *additively* so the
+final effective address is `<sym>+<elem-offset>+bx`.
+
+Variable-indexed *writes* parallel: `mov word ptr DGROUP:_a[bx+2], hi`
+/ `mov word ptr DGROUP:_a[bx], lo` (`C7 87 ...` encoding).
+
+### Index-into-BX is three shapes
+
+BCC picks the shortest of three forms for the BX load:
+
+- **Int stack local**: `mov bx, word ptr [bp-N]` — 3 bytes.
+- **Int register local**: `mov bx, <reg>` — 2 bytes (register-to-
+  register). Common in loops where the index is the loop variable
+  and clears the use-count threshold.
+- **Anything else** (constant expression unfolded, arithmetic, etc.):
+  compute into AX (the usual `emit_expr_to_ax` path), then
+  `mov bx, ax` — 2 bytes for the move plus whatever the compute cost.
+
+After the BX load, the two stride shifts are unconditional for `long`:
+`shl bx, 1 / shl bx, 1` regardless of whether the index sat in a
+register or on the stack. _Fixtures_: 303 (stack-int i), 305
+(stack-int i with write), 307 (register-int i in a `while` loop).
+
+### Stack-array vs global-array variable index differ in shape
+
+Worth noting that the global-array variable-index form is genuinely
+different from the stack-array effective-address compute documented
+earlier in this file. For stack arrays we have:
+
+```
+mov bx, <index>           ; or `mov bx, [bp-N]`
+shl bx, 1                 ; scale (× stride / 2)
+lea ax, word ptr [bp-N]   ; base address
+add bx, ax                ; bx = element address
+mov ax, word ptr [bx]     ; deref
+```
+
+For global arrays we have:
+
+```
+mov bx, <index>           ; same load shapes
+shl bx, 1
+shl bx, 1                 ; (×4 for long)
+mov ax, word ptr <sym>[bx+disp]   ; one instruction, FIXUPP folds <sym> in
+```
+
+The global form is 4 bytes shorter because the linker resolves the
+base symbol into the disp16 slot at link time, removing the runtime
+`lea + add bx, ax`. _Fixtures_: 303 vs 079 (stack int array variable
+index); 305 vs 184 (variable-indexed stack array write).
+
 ## Source-line comments
 
 BCC interleaves the source as comments. Observed layout for `004`:
