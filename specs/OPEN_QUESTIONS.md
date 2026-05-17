@@ -198,4 +198,53 @@ return type's byte size to the function's stack-frame reserve.
 Then emit the buffer-mediated copy at the assignment site. Plus
 the corresponding global-dest variant.
 
+## Long-typed ternary uses ABI register pair even at memory destination
+
+**The question.** When both branches of a `?:` are long-valued and
+the result is stored to a long destination (e.g. `r = g > 0 ? g :
+h;` for long globals `g, h, r`), BCC loads each branch into DX:AX
+(ABI convention: DX=high, AX=low) and stores back to the
+destination from DX:AX. This is unusual — the established memory-
+dest convention is AX=high / DX=low. So the ternary path uses the
+ABI register pair *even at memory-dest*, overriding the
+destination-driven rule observed across the long-arith batches.
+
+**Why it matters.** Our `emit_expr_to_ax` / `emit_ternary_to_ax`
+infrastructure assumes a single int-width result in AX. For long-
+typed ternary we need an `emit_expr_to_dxax` that produces a long
+value in DX:AX, plus an analogue of `emit_ternary_to_ax` that
+uses it for both branches and emits a two-word trailing store
+from DX:AX at the merge.
+
+**Confirmed gap.** Fixture candidates `r = g > 0 ? g : h;` (long
+globals) and `return g > 0 ? g : h;` (long return) were captured
+but replaced with int-only ternary variants because the
+infrastructure isn't in place. Oracle bytes for the global-dest
+case:
+```
+cmp [_g+2], 0          ; 3-jump long-vs-0 cond
+jl  else
+jg  then
+cmp [_g], 0
+jbe else
+then:
+mov dx, [_g+2]         ; load to ABI (DX=high) — NOT AX=high
+mov ax, [_g]
+jmp merge
+else:
+mov dx, [_h+2]
+mov ax, [_h]
+merge:
+mov [_r+2], dx         ; store from ABI registers (DX=high)
+mov [_r], ax
+```
+
+**To close.** Introduce an `emit_expr_to_dxax` family for long-
+valued expressions, plus a long-typed ternary path that uses it
+for both branches and emits a two-word trailing store for memory-
+dest cases. The "ABI register pair at memory-dest" observation
+may also apply to other long-valued expression contexts not yet
+probed (e.g. logical-result with long operands), so the helper
+has broader use.
+
 
