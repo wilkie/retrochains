@@ -619,6 +619,13 @@ pub enum Instr {
     /// (`80 7E disp8 ii`, 4 bytes). Used by char-local compare
     /// against constants (fixture 524: `if (c == 'B')`).
     CmpByteBpRelImm8 { offset: i16, imm: u8 },
+    /// `inc word ptr [bp+<offset>]` — FF 46 dd. Grp5 /0 against a
+    /// bp-relative stack local. Fixture 547 (`++a[1]` on an int
+    /// local array → `inc word ptr [bp-4]`).
+    IncBpRel { offset: i16 },
+    /// `dec word ptr [bp+<offset>]` — FF 4E dd. Companion to
+    /// `IncBpRel`.
+    DecBpRel { offset: i16 },
     /// `shl word ptr <group>:<symbol>[+<offset>],1` — D1 /4 r/m16,1
     /// against a data-segment global. Encoding: `D1 26 lo hi`.
     /// Fixture 539 (`int g; g <<= 2` unrolls to two such).

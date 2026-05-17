@@ -4418,6 +4418,18 @@ impl<'a> FunctionEmitter<'a> {
             panic!("non-constant rhs in array compound assign not yet supported (no fixture)");
         };
         let v_masked = if store_byte { v & 0xFF } else { v & 0xFFFF };
+        // `++a[K]` / `--a[K]` → `inc|dec <width> ptr [bp-N]`. Saves
+        // a byte over `add|sub mem, 1`. Fixture 547 (`++a[1]` on an
+        // int local array).
+        if v_masked == 1 && matches!(op, BinOp::Add | BinOp::Sub) {
+            let mnem = if matches!(op, BinOp::Add) { "inc" } else { "dec" };
+            let _ = write!(
+                self.out,
+                "\t{mnem}\t{width} ptr {}\r\n",
+                bp_addr(off),
+            );
+            return;
+        }
         let mnemonic = match op {
             BinOp::Add => "add",
             BinOp::Sub => "sub",
@@ -6196,6 +6208,17 @@ impl<'a> FunctionEmitter<'a> {
                     let _ = write!(self.out, "\tmov\tword ptr {},{rname}\r\n", bp_addr(off));
                     return;
                 }
+                // `c = a % b;` on int stack-locals — fold the
+                // post-idiv `mov ax, dx` away by storing DX directly
+                // into the destination. Fixture 546.
+                if let ExprKind::BinOp { op: BinOp::Mod, left, right } = &value.kind
+                    && !ty.is_char_like()
+                    && !ty.is_long_like()
+                {
+                    self.emit_arith_setup_for_mod(left, right);
+                    let _ = write!(self.out, "\tmov\tword ptr {},dx\r\n", bp_addr(off));
+                    return;
+                }
                 self.emit_expr_to_ax(value);
                 if ty.is_char_like() {
                     let _ = write!(self.out, "\tmov\tbyte ptr {},al\r\n", bp_addr(off));
@@ -6205,6 +6228,18 @@ impl<'a> FunctionEmitter<'a> {
             }
             LocalLocation::Reg(reg) => self.emit_store_reg(reg, value),
         }
+    }
+
+    /// Emit the `mov ax, <a>; cwd; idiv <b>` prefix shared by `%`
+    /// fast-paths that want the remainder left in DX (rather than
+    /// rounding through AX as the generic `emit_arith_op_to_ax`
+    /// does). Used by the int-stack `c = a % b;` peephole in
+    /// `emit_assign_local`. Fixture 546.
+    fn emit_arith_setup_for_mod(&mut self, left: &Expr, right: &Expr) {
+        self.emit_expr_to_ax(left);
+        let src = self.resolve_operand_source(right);
+        self.out.extend_from_slice(b"\tcwd\t\r\n");
+        let _ = write!(self.out, "\tidiv\t{}\r\n", src.word());
     }
 
     /// Store `expr`'s value into register `reg`. For 16-bit registers

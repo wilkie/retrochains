@@ -347,6 +347,7 @@ fn instr_size(instr: &Instr) -> usize {
         | Instr::SubGroupSymImm8Sx { .. }
         | Instr::SbbGroupSymImm8Sx { .. } => 5,
         Instr::IncGroupSym { .. } | Instr::DecGroupSym { .. } => 4,
+        Instr::IncBpRel { .. } | Instr::DecBpRel { .. } => 3,
         Instr::ShlGroupSymOne { .. }
         | Instr::SarGroupSymOne { .. }
         | Instr::ShrGroupSymOne { .. } => 4,
@@ -1254,6 +1255,20 @@ fn emit_instr(
             // Grp5 /0=INC r/m16 with mod=00 r/m=110 → `[disp16]`.
             // Fixture 512.
             emit_group_sym_lea(&[0xFF, 0x06], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
+        }
+        Instr::IncBpRel { offset } => {
+            // `inc word ptr [bp+disp8]` → FF 46 dd.
+            // ModR/M 46 = mod=01 reg=000(/0=INC) r/m=110([bp]+disp8).
+            // Fixture 547.
+            out.push(0xFF);
+            out.push(0x46);
+            out.push(*offset as u8);
+        }
+        Instr::DecBpRel { offset } => {
+            // `dec word ptr [bp+disp8]` → FF 4E dd. /1=DEC.
+            out.push(0xFF);
+            out.push(0x4E);
+            out.push(*offset as u8);
         }
         Instr::ShlGroupSymOne { group, symbol, offset } => {
             // `shl word ptr <group>:<sym>[+N],1` → D1 26 lo hi.

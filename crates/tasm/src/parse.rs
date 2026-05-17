@@ -475,6 +475,11 @@ fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
             if let Some(reg) = Reg16::parse(rest) {
                 return Ok(Instr::IncReg16 { reg });
             }
+            // `inc word ptr [bp+N]` — bp-relative stack-local
+            // increment (fixture 547: `++a[1]` on int array).
+            if let Some(offset) = parse_word_bp_relative(rest) {
+                return Ok(Instr::IncBpRel { offset });
+            }
             // `inc word ptr <group>:<sym>[+N]` — memory-direct
             // increment of a data-segment global. Fixture 512.
             if let Some((group, symbol)) = parse_group_symbol(rest) {
@@ -496,6 +501,11 @@ fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
             }
             if let Some(reg) = Reg16::parse(rest) {
                 return Ok(Instr::DecReg16 { reg });
+            }
+            // `dec word ptr [bp+N]` — bp-relative stack-local
+            // decrement.
+            if let Some(offset) = parse_word_bp_relative(rest) {
+                return Ok(Instr::DecBpRel { offset });
             }
             // `dec word ptr <group>:<sym>[+N]` — symmetric with inc.
             if let Some((group, symbol)) = parse_group_symbol(rest) {
