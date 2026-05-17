@@ -407,6 +407,40 @@ Single-extern fixtures never exposed the rule; fixture `481`
 (`extern int e1, e2;`) pinned reverse-declaration order:
 `extrn _e2:word` first, then `extrn _e1:word`.
 
+### `&<arr>[K]` for global arrays
+
+Fixture `483` exercises `p = &a[2];` where `a` is a global array.
+The runtime form is parallel to `&<global>`: emit the symbol+offset
+as an immediate. Two paths updated:
+
+- `emit_expr_to_ax` for `AddressOfArrayElem`: emit
+  `mov ax, offset DGROUP:_<array>[+<byte_offset>]` for global
+  arrays (stack-resident locals would need LEA; no fixture yet).
+- `emit_assign_global` for `<ptr-global> = &<arr>[K];`: emit
+  `mov word ptr DGROUP:_<p>, offset DGROUP:_<array>[+<byte_offset>]`
+  — uses the same two-FIXUPP `MovGroupSymOffsetGroupSym`
+  instruction added in batch 54 (the parser's
+  `parse_offset_group_symbol` already handles the `+N` suffix on
+  the source symbol).
+
+### `&<global>` as a call argument
+
+Fixture `482` (`f(&g);`) passes through the existing call-arg
+path: `emit_call` calls `emit_expr_to_ax` on the argument, which
+hits the new `emit_address_of` global branch and emits
+`mov ax, offset DGROUP:_<g>` before the `push ax`. No new case
+needed.
+
+### Extern array decay in expressions
+
+Fixture `484` (`extern int a[5]; return a[0];`) passes through the
+existing array-decay path. The codegen treats `a[0]` as a regular
+global-array index — `mov ax, word ptr DGROUP:_a` (extern resolves
+to base-of-array, offset 0). No new code; the existing
+`emit_array_index_to_ax` path handles extern arrays the same as
+defined ones since the address-lowering goes through the same
+`<group>:_<name>+<offset>` template.
+
 ## Comma operator
 
 `<expr>, <expr>` at expression level is a comma operator —
