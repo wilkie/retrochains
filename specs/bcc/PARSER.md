@@ -1033,6 +1033,25 @@ Three more probes hit existing paths byte-exactly:
   `int g = 2 + 3 * 4;` — `try_const_eval` already folds nested
   BinOps at parse time, so the slot emits `dw 14` directly.
 
+## `void` as a return type
+
+Fixture `552` (`static void set(int *p) { *p = 99; }`) — parser
+now accepts `void` as a return type. There's no dedicated
+`Type::Void`; codegen treats functions with no `return <expr>`
+statements identically regardless of declared return type, so
+`Type::Int` serves as a placeholder. `parse_type` matches
+`KwVoid` and the top-level type-probe in `parse_unit` includes
+it.
+
+While probing this, the publics-ordering rule revealed another
+dimension: `void f(int *p)` + `int main(void)` (no statics)
+emits `_main, _set` (forward), not the `_set, _main` reverse
+that `int f(int *p)` would produce. Tested with many helper
+names and the result depends on the helper's name in some hash-
+bucket way we still can't characterize. Worked around by making
+the helper `static` (which skips the PUBDEF emission entirely
+and sidesteps the ordering question).
+
 ## What we explicitly defer
 
 - Templates, namespaces, RTTI, exceptions (not in BC2.0 to relevant
