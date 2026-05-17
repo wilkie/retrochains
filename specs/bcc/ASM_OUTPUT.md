@@ -2968,6 +2968,44 @@ opcode skeleton parameterized purely by addressing — confirmed by
 fixtures 251 (global), batch 22 (stack-local shifts), 389–391
 (struct field), 392–394 (array element).
 
+The same destination-agnostic property holds for **compound
+shifts**. `s.x <<= K` and `a[1] <<= K` emit byte-identical
+sequences to `g <<= K` (fixtures 263–266) with only the disp16
+changing:
+
+```
+; s.x <<= 1;  (fixture 395)
+mov ax, word ptr DGROUP:_s+2     ; AX=high (memory-dest conv)
+mov dx, word ptr DGROUP:_s
+shl dx, 1
+rcl ax, 1
+mov word ptr DGROUP:_s+2, ax
+mov word ptr DGROUP:_s, dx
+
+; a[1] <<= 1;  (fixture 396 — same shape, different disp16)
+mov ax, word ptr DGROUP:_a+6
+mov dx, word ptr DGROUP:_a+4
+shl dx, 1
+rcl ax, 1
+mov word ptr DGROUP:_a+6, ax
+mov word ptr DGROUP:_a+4, dx
+
+; s.x <<= 2;  (fixture 397 — K>1, helper ABI for the load)
+mov cl, 2                        ; FIRST (compound-form reorder)
+mov dx, word ptr DGROUP:_s+2     ; DX=high (helper ABI)
+mov ax, word ptr DGROUP:_s
+call near ptr N_LXLSH@
+mov word ptr DGROUP:_s+2, dx
+mov word ptr DGROUP:_s, ax
+```
+
+So the "first-consumer-driven register convention" rule (formalized
+in batch 22) is also storage-agnostic: K=1 picks the memory-dest
+convention regardless of *which* memory the destination lives in,
+and K>1 picks the helper-ABI convention regardless of where the
+result eventually gets stored. The intermediate step's ABI wins
+in both cases; the trailing memory store adapts its addressing.
+
 ### Long stack-local arithmetic (`329`–`335`)
 
 Long binary arithmetic between two stack-local long operands with
