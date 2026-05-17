@@ -1828,6 +1828,15 @@ mov dx, word ptr [si+2]   ; high
 mov ax, word ptr [si]     ; low
 ```
 
+The same DX:AX-load shape extends to **any long lvalue** without
+extra plumbing: a struct field via dot-chain (`return s.x;` →
+`mov dx, [_s+2] / mov ax, [_s]`, fixture 363) and a constant-
+indexed array element (`return a[1];` → `mov dx, [_a+6] / mov ax,
+[_a+4]`, fixture 364) both fold into the same two-instruction
+prefix. The source-storage-agnostic skeleton documented for
+memory-bound long arithmetic applies here too — only the
+addressing-mode bytes differ.
+
 The single `jmp short @<f>@50` epilogue is the same as for ints —
 there is no separate long-return exit shape.
 
@@ -1848,6 +1857,53 @@ Two long params (fixture 285) use the same shape with `[bp+...]`
 operands. The register pairing follows the destination-driven
 rule documented earlier: DX=high, AX=low because the destination
 is the return register pair.
+
+The two-lvalue add/sub shape is also **source-storage-agnostic**
+on both sides — the four-instruction skeleton substitutes any
+mix of long-lvalue addressing modes:
+
+```
+; return s.x + s.y;  (fixture 365)
+mov dx, word ptr DGROUP:_s+2
+mov ax, word ptr DGROUP:_s
+add ax, word ptr DGROUP:_s+4
+adc dx, word ptr DGROUP:_s+6
+
+; return a[0] + a[1];  (fixture 366)
+mov dx, word ptr DGROUP:_a+2
+mov ax, word ptr DGROUP:_a
+add ax, word ptr DGROUP:_a+4
+adc dx, word ptr DGROUP:_a+6
+
+; return g + s.x;  (fixture 367 — mixed global + struct field)
+mov dx, word ptr DGROUP:_g+2
+mov ax, word ptr DGROUP:_g
+add ax, word ptr DGROUP:_s
+adc dx, word ptr DGROUP:_s+2
+```
+
+`return <lvalue> + K;` for a constant K folds the immediate
+directly into the `add`/`adc` of the return register pair. Note
+the operand swap relative to the memory-dest shape (fixture 207):
+since the destination is DX:AX (DX=high, AX=low), the constant is
+added to AX first, with carry/borrow into DX — opposite of the
+memory-bound `add dx, K / adc ax, 0` pattern. This is the
+destination-driven rule applied to a single-lvalue + constant
+shape.
+
+```
+; return g + 5;  (fixture 362)
+mov dx, word ptr DGROUP:_g+2     ; DX = g.high
+mov ax, word ptr DGROUP:_g       ; AX = g.low
+add ax, 5                        ; AX += K (low half)
+adc dx, 0                        ; DX += 0 + carry (high half)
+```
+
+The `adc dx, 0` is encoded `83 D2 00` (Grp1 r/m16, imm8sx; ModR/M
+`mod=11 /2 r/m=DX`) — the imm8sx form chosen for the same 3-byte
+reason as the constant-RHS compound shapes (the immediate fits
+in a signed byte, so the wider 4-byte `81 D2 00 00` form is not
+needed).
 
 ### Plain assignment and arithmetic
 

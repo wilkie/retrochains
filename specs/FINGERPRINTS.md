@@ -883,6 +883,20 @@ across all five storage classes. _Fixtures_: 207, 219 (globals);
 350 (g + K → stack); 352 (struct field + K); 353 (array elem +
 K); 354 (`*p + K`); 355 (struct + struct).
 
+The same source-storage-agnostic property holds when the
+destination is the **return register pair** (DX:AX). The
+4-instruction skeleton substitutes any mix of long-lvalue
+addressing modes for both operands; only the addressing bytes
+differ. _Fixtures_: 348 (global + global); 285 (param + param);
+365 (struct + struct); 366 (array-elem + array-elem); 367
+(mixed global + struct field). The same uniformity also extends
+to bare-lvalue returns (fixtures 363 struct field, 364 array
+element) and to single-lvalue + constant (fixture 362, `return
+g + K`). The combination — agnostic to source storage AND to
+result destination — makes BCC's long codegen surprisingly easy
+to recognize across what look syntactically like very different
+C expressions.
+
 ### Compound assign opcode tells constant-vs-variable RHS (STRONG)
 
 For long compound assigns to memory, the **opcode byte** of the
