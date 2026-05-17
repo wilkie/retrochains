@@ -246,6 +246,7 @@ fn instr_size(instr: &Instr) -> usize {
         | Instr::CmpReg16Reg16 { .. } => 2,
         Instr::CmpReg16Imm8 { .. } | Instr::CmpAxImm { .. } | Instr::AddAxImm { .. } => 3,
         Instr::CmpBpRelImm8 { .. } => 4,
+        Instr::CmpBpRelImm16 { .. } => 5,
         Instr::JmpShort(_) | Instr::ShlAxCl | Instr::SarAxCl | Instr::ShrAxCl => 2,
         Instr::ShlReg16Cl { .. } | Instr::SarReg16Cl { .. } | Instr::ShrReg16Cl { .. } => 2,
         Instr::Cwd => 1,
@@ -316,8 +317,9 @@ fn instr_size(instr: &Instr) -> usize {
         Instr::MovGroupSymReg16 { .. } => 4,
         Instr::AddReg16Imm8Sx { .. }
         | Instr::AdcReg16Imm8Sx { .. }
-        | Instr::SbbReg16Imm8Sx { .. } => 3,
-        Instr::AddReg16Imm16 { .. } => 4,
+        | Instr::SbbReg16Imm8Sx { .. }
+        | Instr::SubReg16Imm8Sx { .. } => 3,
+        Instr::AddReg16Imm16 { .. } | Instr::SubReg16Imm16 { .. } => 4,
         Instr::AddGroupSymImm16 { .. } => 6,
         Instr::AdcAxImm16 { .. } | Instr::SbbAxImm16 { .. } => 3,
         Instr::MovAlFromSiPtr | Instr::MovAlFromBxPtr => 2,
@@ -486,6 +488,16 @@ fn emit_instr(
             out.push(0x7E);
             out.push(disp as u8);
             out.push(*imm as u8);
+        }
+        Instr::CmpBpRelImm16 { offset, imm } => {
+            // `cmp word ptr [bp+disp8],imm16` → 81 7E dd lo hi.
+            // Same ModR/M as the imm8sx form; Grp1 r/m16,imm16 with
+            // /7=CMP. Fixture 563.
+            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
+            out.push(0x81);
+            out.push(0x7E);
+            out.push(disp as u8);
+            out.extend_from_slice(&imm.to_le_bytes());
         }
         Instr::MovReg16Imm { reg, imm } => {
             // `mov r16,imm16` → B8+rc lo hi.
@@ -1046,6 +1058,19 @@ fn emit_instr(
             // as the imm8sx form; opcode 81 selects the wider imm.
             out.push(0x81);
             out.push(0b11_000_000 | reg.code());
+            out.extend_from_slice(&imm.to_le_bytes());
+        }
+        Instr::SubReg16Imm8Sx { reg, imm } => {
+            // `sub <reg16>, imm8sx` → 83 E(reg) ii. ModR/M E(reg) =
+            // mod=11 /5(SUB) rm=<reg>.
+            out.push(0x83);
+            out.push(0b11_101_000 | reg.code());
+            out.push(*imm as u8);
+        }
+        Instr::SubReg16Imm16 { reg, imm } => {
+            // `sub <reg16>, imm16` → 81 E(reg) lo hi.
+            out.push(0x81);
+            out.push(0b11_101_000 | reg.code());
             out.extend_from_slice(&imm.to_le_bytes());
         }
         Instr::AddGroupSymImm16 { group, symbol, offset, imm } => {

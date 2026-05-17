@@ -271,6 +271,13 @@ pub enum Instr {
     /// BCC uses this for short-circuit logical lowering of patterns
     /// like `if (x < K) ...` (fixture 149).
     CmpBpRelImm8 { offset: i16, imm: i8 },
+    /// `cmp word ptr [bp+<offset>],<imm16>` — 81 7E dd lo hi.
+    /// Wide-immediate sibling of `CmpBpRelImm8` for constants that
+    /// don't fit a signed-byte immediate (fixture 563: `if (x <
+    /// -5)` where -5 sign-extends to 0xFFFB which fits imm8sx, but
+    /// e.g. -10 also does — the trigger is anything outside
+    /// [-128, 127] and many wider negatives end up here).
+    CmpBpRelImm16 { offset: i16, imm: u16 },
     /// `sub ax,word ptr [bp+<offset>]` — 2B 46 dd
     SubAxBpRel { offset: i16 },
     /// `sub ax,word ptr [si]` — 2B 04. ModR/M 04 = mod=00 reg=AX
@@ -452,6 +459,14 @@ pub enum Instr {
     /// Wider sibling to `AddReg16Imm8Sx` when the immediate doesn't
     /// fit i8sx (fixture 275: `add dx,1000`).
     AddReg16Imm16 { reg: Reg16, imm: u16 },
+    /// `sub <reg16>,<imm8sx>` — `83 E(reg) ii`. ModR/M E(reg) =
+    /// mod=11 /5(SUB) r/m=<reg>. Sibling of `AddReg16Imm8Sx` for
+    /// pointer-arithmetic compound subtract (fixture 564: `p -=
+    /// 2;` lowers to `sub si, 4`).
+    SubReg16Imm8Sx { reg: Reg16, imm: i8 },
+    /// `sub <reg16>, imm16` — `81 E(reg) lo hi`. Wide-immediate
+    /// sibling.
+    SubReg16Imm16 { reg: Reg16, imm: u16 },
     /// `add word ptr <group>:<symbol>[+<offset>], imm16` — Grp1
     /// r/m16,imm16 with /0=ADD (`81 06 lo hi imm_lo imm_hi`,
     /// 6 bytes). Wider sibling to `AddGroupSymImm8Sx` for

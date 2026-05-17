@@ -2096,7 +2096,8 @@ impl<'a> FunctionEmitter<'a> {
                 let _ = write!(self.out, "\tcmp\tbyte ptr {},{rhs8}\r\n", bp_addr(off));
                 return;
             }
-            let _ = write!(self.out, "\tcmp\tword ptr {},{rhs}\r\n", bp_addr(off));
+            let rhs16 = rhs & 0xFFFF;
+            let _ = write!(self.out, "\tcmp\tword ptr {},{rhs16}\r\n", bp_addr(off));
             return;
         }
         // `<int-global> <relop> <const>` — emit a memory-direct
@@ -2109,7 +2110,8 @@ impl<'a> FunctionEmitter<'a> {
             && let Some(gty) = self.globals.type_of(name)
             && (matches!(gty, Type::Int | Type::UInt) || gty.pointee().is_some())
         {
-            let _ = write!(self.out, "\tcmp\tword ptr DGROUP:_{name},{rhs}\r\n");
+            let rhs16 = rhs & 0xFFFF;
+            let _ = write!(self.out, "\tcmp\tword ptr DGROUP:_{name},{rhs16}\r\n");
             return;
         }
         // `<char-global> <relop> <const>` — byte-form memory

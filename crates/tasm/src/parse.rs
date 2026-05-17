@@ -915,6 +915,17 @@ fn parse_sub(operands: &str, line_no: usize) -> AsmResult<Instr> {
             return Ok(Instr::SubAlImm8 { imm: imm as u8 });
         }
     }
+    // `sub <reg16>, imm` — imm8sx form first (3 bytes), then imm16
+    // (4 bytes). Mirrors the AddReg16Imm8Sx / AddReg16Imm16 split.
+    // Fixture 564 (`p -= 2;` on int-pointer in SI → `sub si, 4`).
+    if let Some(reg) = Reg16::parse(lhs) {
+        if let Some(imm) = parse_imm8_signed(rhs) {
+            return Ok(Instr::SubReg16Imm8Sx { reg, imm });
+        }
+        if let Some(imm) = parse_imm16(rhs) {
+            return Ok(Instr::SubReg16Imm16 { reg, imm });
+        }
+    }
     // `sub dx, word ptr <group>:<sym>[+N]` — long-to-long sub
     // low-half (fixture 220).
     if lhs == "dx" {
@@ -1443,6 +1454,11 @@ fn parse_cmp(operands: &str, line_no: usize) -> AsmResult<Instr> {
         if let Some(imm) = parse_imm8_signed(rhs) {
             return Ok(Instr::CmpBpRelImm8 { offset, imm });
         }
+        // Wide-immediate sibling (`81 7E dd lo hi`) for constants
+        // that don't fit imm8sx. Fixture 563.
+        if let Some(imm) = parse_imm16(rhs) {
+            return Ok(Instr::CmpBpRelImm16 { offset, imm: imm as u16 });
+        }
     }
     // `cmp byte ptr <group>:<sym>[+N], imm8` — char-global compare
     // (`80 3E lo hi ii`, 5 bytes). Used by `if (c == 'A')` for
@@ -1911,11 +1927,21 @@ fn parse_imm8(s: &str) -> Option<u8> {
 
 /// Parse a decimal literal as a signed 8-bit value (sign-extends to
 /// i16 at the instruction's caller). Used for `cmp <reg16>,<imm>`
-/// where 83 /7 takes a sign-extended imm8.
+/// where 83 /7 takes a sign-extended imm8. We also accept u16 values
+/// in the upper half (32768..65535) by reinterpreting them as the
+/// equivalent i16 — codegen frequently passes negative constants as
+/// their unsigned 16-bit bit pattern (e.g. -5 = 65531). Fixture 563.
 fn parse_imm8_signed(s: &str) -> Option<i8> {
     let s = s.trim();
     let v = s.parse::<i32>().ok()?;
-    i8::try_from(v).ok()
+    if let Ok(b) = i8::try_from(v) {
+        return Some(b);
+    }
+    if (32_768..=65_535).contains(&v) {
+        let as_i16 = v as i16; // reinterpret bit pattern
+        return i8::try_from(as_i16).ok();
+    }
+    None
 }
 
 /// Parse a decimal literal as a 16-bit value. Returns `None` if the
