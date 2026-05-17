@@ -209,6 +209,39 @@ both tokens and yields `Type::UChar`; the existing post-`unsigned`
 `int`-consumption stays intact for the `unsigned int` and bare
 `unsigned` forms.
 
+### Coverage in locals, struct fields, arrays
+
+Fixtures `461`–`463` extend uchar to stack-local, struct-field, and
+array contexts. The codegen now factors the widening choice into a
+single `emit_widen_al(&ty)` helper — applied at every char-load
+site (`mov al, byte ptr <addr>` followed by widening). Each site
+threads through the leaf type (`leaf_ty`, `pointee`, `field_ty`)
+so signed `char` keeps `cbw` and `unsigned char` picks
+`mov ah, 0`. The local-assign path also gained a char-aware
+immediate-store shape: `mov byte ptr [bp-N], K` (`C6 46 ii ii`, 4
+bytes) instead of the previously-unconditional `mov word ptr
+[bp-N], K` (`C7 46 ii ww ww`, 5 bytes) for stack-resident char
+locals.
+
+### Struct sizing — raw vs. rounded
+
+Fixture `462` (`struct { unsigned char b; int x; }` in `_BSS`)
+pinned an unobserved corner: **BCC's struct intrinsic size is the
+raw field-sum, with no end-padding to a word boundary**. `_s`
+emits 3 bytes of BSS storage, not 4. The earlier "round size up to
+even" rule in `parse_record_type` was wrong — it conflated
+intrinsic size with local-frame allocation size. Removed the round
+for structs (kept for unions until a fixture pins their behavior).
+
+To preserve fixture `102`'s `[bp-4],9` / `[bp-3],42` layout, the
+*local frame allocator* now rounds each slot's size up to the
+type's alignment before adding it to the running `stack_bytes`
+cursor. So a 3-byte struct with alignment 2 occupies a 4-byte
+slot, with the struct base at the low (aligned) address and
+field offsets layered on top. The previous code already aligned
+the *start* of each slot to the type's alignment; rounding the
+size up to alignment as well closes the gap.
+
 ## What we explicitly defer
 
 - Templates, namespaces, RTTI, exceptions (not in BC2.0 to relevant
