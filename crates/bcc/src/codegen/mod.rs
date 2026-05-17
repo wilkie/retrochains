@@ -3274,6 +3274,23 @@ impl<'a> FunctionEmitter<'a> {
             let _ = write!(self.out, "\tmov\tword ptr {},ax\r\n", bp_addr(x_off));
             return;
         }
+        // Int/uint global compound add/sub with constant RHS —
+        // memory-direct `add|sub word ptr DGROUP:_g, K`. Fixture
+        // 519 (`g += 5`). TASM picks the imm8sx form when K fits a
+        // signed byte; the asm syntax doesn't differ.
+        if let Some(gty) = self.globals.type_of(name)
+            && matches!(gty, Type::Int | Type::UInt)
+            && matches!(op, BinOp::Add | BinOp::Sub)
+            && let Some(v) = try_const_eval(value)
+        {
+            let mnem = if matches!(op, BinOp::Add) { "add" } else { "sub" };
+            let v16 = v & 0xFFFF;
+            let _ = write!(
+                self.out,
+                "\t{mnem}\tword ptr DGROUP:_{name},{v16}\r\n",
+            );
+            return;
+        }
         // Int/uint global compound bitwise op with constant RHS —
         // memory-direct `<op> word ptr DGROUP:_g, K`. Fixture 517
         // (`g &= 15`). BCC always emits the imm16 form here; the
