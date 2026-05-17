@@ -130,14 +130,25 @@ through the same paths as any other int-typed constant.
 
 Escape sequences are shared with string literals via a single
 `decode_escape` helper: `\n`, `\t`, `\r`, `\0`, `\\`, `\'`, `\"`,
-and `\xHH` (one-or-more hex digits, taken mod 256). Octal escapes
-(`\NNN`) await a fixture. Multi-byte character constants (`'ab'`)
-also await a fixture.
+`\a` (0x07), `\b` (0x08), `\f` (0x0C), `\v` (0x0B), and `\xH...`
+(one-or-more hex digits, *greedily consumed*, taken mod 256).
+Octal escapes (`\NNN`) and multi-byte character constants (`'ab'`)
+await fixtures.
+
+BCC's `\x` is greedy and errors with "Numeric constant too large"
+when the cumulative value exceeds 0xFF — e.g. `"\x7Fb"` is parsed
+as `\x7Fb` (0x7FB), not `\x7F` + `b`. Our lexer matches the
+greedy parsing but silently masks to 0xFF rather than erroring;
+fixtures using `\x` must keep the value in range and either end
+the string immediately or follow with a non-hex character (fixture
+`455` uses `"\x41"`).
 
 Fixtures `449`–`451` cover printable ASCII (`'A'` → 65), the
 common-case named escape (`'\n'` → 10), and a hex escape at the
 upper end of the byte range (`'\xFF'` → 255). All three round-trip
-to identical bytes vs. the equivalent decimal forms.
+to identical bytes vs. the equivalent decimal forms. Fixtures
+`455`–`457` cover string escapes (`"\x41"`, `"\b"`, `"\f"`) — the
+shared `decode_escape` works equally well in either literal form.
 
 The store side picked up an assembler-level gap: `mov byte ptr
 DGROUP:_<g>, K` (encoded `C6 06 disp16 ii`) wasn't supported. Added
