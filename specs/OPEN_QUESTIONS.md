@@ -156,4 +156,46 @@ fixtures using hex literals and check they round-trip. Look for any
 oracle-side surprises (e.g. character constants `'\xFF'` for char literals,
 or `0L` long suffixes) at the same time.
 
+## Caller side of `>4-byte` struct return needs temp-buffer allocation
+
+**The question.** When the caller assigns the result of a function
+returning a >4-byte struct (e.g. `a = f();` for `struct S { int x, y, z; }`),
+BCC allocates a temporary stack buffer for the hidden return slot,
+passes a far pointer to it as the callee's hidden first arg, then
+copies temp → destination via `N_SCOPY@` after the call returns
+(verified empirically from the oracle bytes; not yet implemented in
+our codegen).
+
+**Why it matters.** The temp-buffer allocation affects the function's
+stack frame size (`sub sp, N` in prologue and `mov sp, bp` in
+epilogue). For a `main` with no other locals, the temp-buffer is
+the only thing that triggers `sub sp` and `mov sp, bp` — without it
+the prologue/epilogue is the simpler 3-byte shape. So the buffer
+needs to be accounted for at frame-emission time, not just at the
+assignment site.
+
+**Confirmed gap.** Fixture 423 (callee body) passes, but fixture 425
+was replaced with a discard-result variant because the caller-side
+`a = f();` codegen isn't implemented yet. The bytes for the >4-byte
+caller side are:
+```
+sub  sp, 6
+mov  ax, OFFSET _a; push ds; push ax     ; eventual dest
+push ss; lea ax, [bp-6]; push ax         ; temp buffer (f's hidden arg)
+call _f
+pop  cx; pop cx                          ; clean up temp ptr only
+lea  ax, [bp-6]; push ss; push ax        ; re-push as SCOPY src
+mov  cx, 6
+call N_SCOPY@                            ; copies temp → _a
+```
+Note BCC always routes through the temp — even though the
+destination is known statically, it doesn't pass `_a`'s far pointer
+directly to f as the hidden arg.
+
+**To close.** Add a pre-emission analysis that scans the function
+body for `<lvalue> = <call returning >4-byte struct>` and adds the
+return type's byte size to the function's stack-frame reserve.
+Then emit the buffer-mediated copy at the assignment site. Plus
+the corresponding global-dest variant.
+
 
