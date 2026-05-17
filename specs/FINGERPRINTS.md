@@ -818,6 +818,22 @@ store frame around AX and DX, finding `F7 D8 / F7 DA / 1D 00 00`
 adjacent in a binary is essentially conclusive proof of BCC long
 codegen. _Fixture_: 331.
 
+At the **return boundary** the same idiom appears with the registers
+swapped per the destination-driven rule (DX=high, AX=low at return):
+
+```
+neg dx                ; F7 DA — negate high
+neg ax                ; F7 D8 — negate low; CF=1 iff low was non-zero
+sbb dx, 0             ; 83 DA 00 — propagate borrow into high (DX -= CF)
+```
+
+The byte-pattern is `F7 DA / F7 D8 / 83 DA 00` — same three-instruction
+shape, AX/DX flipped, and the `sbb` switches to the imm8sx Grp1 form
+`83 DA 00` (3 bytes) since DX has no short-form `sbb` opcode the way
+AX does (`1D`). The choice of which sbb encoding to use is dictated
+by which register is "high" in the active destination convention.
+_Fixtures_: 371 (param neg at return), 373 (global neg at return).
+
 ### Long bitwise complement: `not dx / not ax` — low-first order (STRONG)
 
 For `~x` on a long, BCC emits `not dx` then `not ax` — **low half
@@ -829,7 +845,10 @@ Since bitwise unary has no carry/borrow dependency, the order is
 arbitrary for correctness. BCC's choice is consistent: bitwise
 unary uses low-first, arithmetic load/store uses high-first. A
 compiler that picked high-first for `not` (or low-first for the
-arithmetic load) would be distinguishable. _Fixture_: 332.
+arithmetic load) would be distinguishable. _Fixtures_: 332
+(memory-dest, low=DX); 372 (return-dest, low=AX — emits `not ax
+/ not dx`, mirroring the low-first rule under the swapped
+destination convention).
 
 ### Long stack-local arithmetic register convention is destination-driven (STRONG)
 

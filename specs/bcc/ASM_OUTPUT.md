@@ -1921,6 +1921,51 @@ reason as the constant-RHS compound shapes (the immediate fits
 in a signed byte, so the wider 4-byte `81 D2 00 00` form is not
 needed).
 
+`return -<long-lvalue>;` runs the canonical 32-bit two's-complement
+neg idiom across DX:AX. The order is forced by the flag chain:
+negate the high half first (its flag setting is discarded by the
+next instruction), negate the low half (which sets CF iff the low
+half was nonzero), then `sbb` the borrow back into the high half:
+
+```
+; return -x;  for a long param (fixture 371)
+mov dx, word ptr [bp+6]          ; high
+mov ax, word ptr [bp+4]          ; low
+neg dx                           ; F7 DA
+neg ax                           ; F7 D8 — CF = (ax != 0)
+sbb dx, 0                        ; 83 DA 00 — DX -= CF
+
+; return -g;  for a long global (fixture 373)
+mov dx, word ptr DGROUP:_g+2
+mov ax, word ptr DGROUP:_g
+neg dx
+neg ax
+sbb dx, 0
+```
+
+This is the destination-driven mirror of the memory-dest neg
+sequence (fixture 226: `neg ax / neg dx / sbb ax, 0`) — same
+three-instruction shape, AX/DX swapped because the return-pair
+puts the high half in DX. The trailing `sbb dx, 0` uses the
+imm8sx Grp1 form (`83 DA 00`) since DX has no short-form `sbb`
+opcode; the memory-dest variant gets to use AX's short form
+(`1D 00 00`).
+
+`return ~<long-lvalue>;` complements each half independently —
+no flag dependency, so BCC's consistent low-first order applies:
+
+```
+; return ~x;  for a long param (fixture 372)
+mov dx, word ptr [bp+6]
+mov ax, word ptr [bp+4]
+not ax                           ; F7 D0 — low first
+not dx                           ; F7 D2 — then high
+```
+
+The low-first order matches the bitwise-unary rule documented for
+memory-dest (`not dx / not ax` at fixture 332) — the "low" half
+just happens to be AX at return and DX at memory-dest.
+
 ### Plain assignment and arithmetic
 
 `g = K` for a long global stores high then low:
