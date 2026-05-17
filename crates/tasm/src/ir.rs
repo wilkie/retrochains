@@ -594,6 +594,23 @@ pub enum Instr {
         offset: i16,
         imm: u8,
     },
+    /// `inc word ptr <group>:<symbol>[+<offset>]` — INC r/m16 via
+    /// Grp5 /0 against a data-segment global. Encoding: `FF 06 lo
+    /// hi` (ModR/M 06 = mod=00 reg=000 r/m=110 → `[disp16]`).
+    /// Fixture 512 (`int g; g++;`).
+    IncGroupSym {
+        group: String,
+        symbol: String,
+        offset: i16,
+    },
+    /// `dec word ptr <group>:<symbol>[+<offset>]` — DEC r/m16 via
+    /// Grp5 /1 against a data-segment global. Encoding: `FF 0E lo
+    /// hi`.
+    DecGroupSym {
+        group: String,
+        symbol: String,
+        offset: i16,
+    },
     /// `add word ptr <group>:<symbol>[+<offset>], imm8 (sx)` — Grp1
     /// r/m16,imm8sx with /0=ADD (`83 06 lo hi ii`, 5 bytes). Used
     /// by long postfix `g++` (fixture 249): low-half memory-add of 1.

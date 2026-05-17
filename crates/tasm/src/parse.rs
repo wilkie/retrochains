@@ -455,6 +455,16 @@ fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
             if let Some(reg) = Reg16::parse(rest) {
                 return Ok(Instr::IncReg16 { reg });
             }
+            // `inc word ptr <group>:<sym>[+N]` — memory-direct
+            // increment of a data-segment global. Fixture 512.
+            if let Some((group, symbol)) = parse_group_symbol(rest) {
+                let (sym, offset) = split_sym_offset(symbol);
+                return Ok(Instr::IncGroupSym {
+                    group: group.to_string(),
+                    symbol: sym.to_string(),
+                    offset,
+                });
+            }
             Err(AsmError::new(
                 line.line_no,
                 format!("inc: unsupported operand form `{rest}`"),
@@ -466,6 +476,15 @@ fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
             }
             if let Some(reg) = Reg16::parse(rest) {
                 return Ok(Instr::DecReg16 { reg });
+            }
+            // `dec word ptr <group>:<sym>[+N]` — symmetric with inc.
+            if let Some((group, symbol)) = parse_group_symbol(rest) {
+                let (sym, offset) = split_sym_offset(symbol);
+                return Ok(Instr::DecGroupSym {
+                    group: group.to_string(),
+                    symbol: sym.to_string(),
+                    offset,
+                });
             }
             Err(AsmError::new(
                 line.line_no,

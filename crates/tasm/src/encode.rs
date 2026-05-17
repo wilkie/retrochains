@@ -340,6 +340,7 @@ fn instr_size(instr: &Instr) -> usize {
         | Instr::AdcGroupSymImm8Sx { .. }
         | Instr::SubGroupSymImm8Sx { .. }
         | Instr::SbbGroupSymImm8Sx { .. } => 5,
+        Instr::IncGroupSym { .. } | Instr::DecGroupSym { .. } => 4,
         Instr::AndGroupSymImm16 { .. }
         | Instr::OrGroupSymImm16 { .. }
         | Instr::XorGroupSymImm16 { .. }
@@ -1184,6 +1185,16 @@ fn emit_instr(
             // (fixture 452).
             emit_group_sym_lea(&[0x80, 0x3E], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
             out.push(*imm);
+        }
+        Instr::IncGroupSym { group, symbol, offset } => {
+            // `inc word ptr <group>:<sym>[+N]` → FF 06 lo hi.
+            // Grp5 /0=INC r/m16 with mod=00 r/m=110 → `[disp16]`.
+            // Fixture 512.
+            emit_group_sym_lea(&[0xFF, 0x06], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
+        }
+        Instr::DecGroupSym { group, symbol, offset } => {
+            // `dec word ptr <group>:<sym>[+N]` → FF 0E lo hi.
+            emit_group_sym_lea(&[0xFF, 0x0E], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
         }
         Instr::AddGroupSymImm8Sx { group, symbol, offset, imm } => {
             // `add word ptr <group>:<sym>[+N], imm8sx` → 83 06 lo hi ii.

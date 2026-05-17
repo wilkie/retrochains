@@ -600,6 +600,13 @@ impl<'a> FunctionEmitter<'a> {
             UpdateOp::Inc => "inc",
             UpdateOp::Dec => "dec",
         };
+        // Int/char globals: memory-direct `inc word ptr DGROUP:_g`
+        // (or `dec`). Fixture 512 (`g++; g++; return g;`).
+        if let Some(gty) = self.globals.type_of(name) {
+            let width = if gty.is_char_like() { "byte" } else { "word" };
+            let _ = write!(self.out, "\t{mnemonic}\t{width} ptr DGROUP:_{name}\r\n");
+            return;
+        }
         // Pointer increment / decrement uses the pointee's size as
         // stride. For `int *p`, `p++` becomes `inc reg / inc reg`
         // (the +2 peephole — 2 bytes vs. 3 for `add reg, 2`),
@@ -1957,6 +1964,14 @@ impl<'a> FunctionEmitter<'a> {
     /// expression — used in boolean contexts (`if (x)`, `x && y`).
     /// Today only `Ident`s are supported; other expressions panic.
     fn emit_zero_test(&mut self, cond: &Expr) {
+        // `if ((x = expr))` — evaluate the assignment expression
+        // into AX (leaving the value behind), then `or ax, ax` to
+        // set the flags. Fixture 513.
+        if let ExprKind::AssignExpr { .. } = &cond.kind {
+            self.emit_expr_to_ax(cond);
+            self.out.extend_from_slice(b"\tor\tax,ax\r\n");
+            return;
+        }
         let ExprKind::Ident(name) = &cond.kind else {
             panic!("non-ident boolean condition not yet supported (no fixture)");
         };
