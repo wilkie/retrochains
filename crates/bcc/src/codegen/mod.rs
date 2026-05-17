@@ -4777,6 +4777,35 @@ impl<'a> FunctionEmitter<'a> {
     /// ```
     /// where SI holds the pointer.
     fn emit_deref_assign(&mut self, target: &Expr, value: &Expr) {
+        // `*p++ = v;` — postfix increment of a register-resident pointer
+        // in lvalue position. BCC stores first (using the pre-increment
+        // address) then advances the pointer by sizeof(*p). Fixture 501.
+        if let ExprKind::Update {
+            target: name,
+            op: crate::ast::UpdateOp::Inc,
+            position: crate::ast::UpdatePosition::Post,
+        } = &target.kind
+        {
+            let ty = self.locals.type_of(name).clone();
+            let Some(pointee) = ty.pointee() else {
+                panic!("`*{name}++ = v`: not a pointer type");
+            };
+            let LocalLocation::Reg(reg) = self.locals.location_of(name) else {
+                panic!("stack-resident pointer in `*p++ = v` not supported");
+            };
+            let reg = reg.name();
+            let width = ptr_width(pointee);
+            let Some(v) = try_const_eval(value) else {
+                panic!("non-constant rhs in `*p++ = v` not yet supported (no fixture)");
+            };
+            let v_masked = if pointee.is_char_like() { v & 0xFF } else { v & 0xFFFF };
+            let _ = write!(self.out, "\tmov\t{width} ptr [{reg}],{v_masked}\r\n");
+            let stride = pointee.size_bytes();
+            for _ in 0..stride {
+                let _ = write!(self.out, "\tinc\t{reg}\r\n");
+            }
+            return;
+        }
         let (base_name, depth) = deref_chain_root(target);
         // Single-deref of a register-resident local pointer keeps the
         // original fast path (`mov word ptr [si], v` etc.). Anything
@@ -6102,11 +6131,29 @@ impl<'a> FunctionEmitter<'a> {
             ExprKind::Update { target, op, position } => {
                 self.emit_update_to_ax(target, *op, *position);
             }
-            ExprKind::AssignExpr { .. } => {
-                // No fixture yet exercises an assignment-expression
-                // in value position (we don't materialize its value).
-                // `for`-init/step go through `emit_expr_discard`.
-                panic!("AssignExpr in value position not yet supported (no fixture)");
+            ExprKind::AssignExpr { target, value } => {
+                // Chained assignment `a = b = c = 5;` lands here via
+                // the outer statement's RHS. Recursively evaluate the
+                // inner value into AX, then store AX into `target`.
+                // AX still holds the assigned value so the outer
+                // store reuses it. Fixture 500.
+                self.emit_expr_to_ax(value);
+                if self.globals.contains(target) {
+                    let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{target},ax\r\n");
+                } else {
+                    match self.locals.location_of(target) {
+                        LocalLocation::Stack(off) => {
+                            let _ = write!(
+                                self.out,
+                                "\tmov\tword ptr {},ax\r\n",
+                                bp_addr(off)
+                            );
+                        }
+                        LocalLocation::Reg(reg) => {
+                            let _ = write!(self.out, "\tmov\t{},ax\r\n", reg.name());
+                        }
+                    }
+                }
             }
             ExprKind::Call { name, args } => self.emit_call(name, args),
             ExprKind::AddressOf(name) => self.emit_address_of(name),

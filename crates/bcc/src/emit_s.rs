@@ -298,9 +298,20 @@ fn emit_global_init(
     // would be an error in C; we don't fixture-test that path.
     if let ExprKind::InitList { items } = &init.kind {
         match ty {
-            Type::Array { elem, .. } => {
+            Type::Array { elem, len } => {
                 for item in items {
                     emit_global_init(out, elem, item, strings);
+                }
+                // Partial initializer (`int a[5] = {1, 2}` — fixture
+                // 502). Pad the remaining slots with zero bytes,
+                // emitted as `db 0` lines matching what BCC does.
+                let written = items.len() as u32;
+                if *len > written {
+                    let pad_bytes =
+                        u32::from(elem.size_bytes()) * (*len - written);
+                    for _ in 0..pad_bytes {
+                        let _ = write!(out, "\tdb\t0\r\n");
+                    }
                 }
             }
             Type::Struct { fields, .. } => {

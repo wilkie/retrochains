@@ -1089,7 +1089,11 @@ impl Parser {
                     })
                 } else {
                     self.expect(&TokenKind::Equals)?;
-                    let value = self.parse_expr()?;
+                    // Allow `a = b = c = 5;` — the RHS itself can be an
+                    // assignment expression. `parse_for_clause_expr`
+                    // already handles `<ident> = <rhs>` recursively
+                    // (right-associative). Fixture 500.
+                    let value = self.parse_for_clause_expr()?;
                     let semi = self.expect(&TokenKind::Semicolon)?;
                     Ok(Stmt {
                         kind: StmtKind::Assign { name, value },
@@ -1681,7 +1685,10 @@ impl Parser {
             let ident_tok = self.bump();
             let TokenKind::Ident(name) = ident_tok.kind else { unreachable!() };
             self.expect(&TokenKind::Equals)?;
-            let rhs = self.parse_expr()?;
+            // Right-associative: `a = b = c` parses as `a = (b = c)`.
+            // Recurse so the RHS itself can be another assignment.
+            // Fixture 500.
+            let rhs = self.parse_for_clause_expr()?;
             let span = Span::new(ident_tok.span.start, rhs.span.end);
             return Ok(Expr {
                 kind: ExprKind::AssignExpr { target: name, value: Box::new(rhs) },
