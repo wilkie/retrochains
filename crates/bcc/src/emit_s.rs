@@ -519,9 +519,11 @@ fn write_tail(
         out.extend_from_slice(line.as_bytes());
     }
     // Data externs come after the public list (function externs come
-    // before it, in `collect_extern_calls` order). Source order; the
-    // width keyword (`word`/`byte`) is derived from the C type.
-    for g in &unit.globals {
+    // before it, in `collect_extern_calls` order). Emitted in
+    // *reverse declaration order* — fixture 481 (`extern int e1,
+    // e2;` → `extrn _e2:word / extrn _e1:word`) pins this; for
+    // single-extern fixtures the rule was invisible.
+    for g in unit.globals.iter().rev() {
         if !g.is_extern {
             continue;
         }

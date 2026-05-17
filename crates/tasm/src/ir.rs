@@ -352,6 +352,20 @@ pub enum Instr {
         offset: i16,
         imm: u16,
     },
+    /// `mov word ptr <group>:<dst>[+<offset>], offset <group>:<src>` —
+    /// store a globals' OFFSET as an immediate into another global's
+    /// slot. Encodes as `C7 06 <dst-disp> <src-imm16>` with TWO
+    /// FIXUPPs: one on the dst displacement, one on the imm16. Used
+    /// by `p = &x;` where both `p` and `x` are file-scope globals
+    /// (fixture 480).
+    MovGroupSymOffsetGroupSym {
+        dst_group: String,
+        dst_symbol: String,
+        dst_offset: i16,
+        src_group: String,
+        src_symbol: String,
+        src_offset: i16,
+    },
     /// `mov byte ptr <group>:<symbol>[+<offset>], imm8` — store
     /// immediate byte to a data-segment global. Encodes as
     /// `C6 06 [disp16 + FIXUPP] [imm8]`. Used by `c = 'A'` for char

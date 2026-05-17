@@ -301,6 +301,7 @@ fn instr_size(instr: &Instr) -> usize {
         Instr::MovReg16WordGroupSym { .. } => 4,
         Instr::MovGroupSymImm16 { .. } => 6,
         Instr::MovGroupSymImm8 { .. } => 5,
+        Instr::MovGroupSymOffsetGroupSym { .. } => 6,
         Instr::MovGroupSymAx { .. } => 3,
         Instr::MovGroupSymReg16 { .. } => 4,
         Instr::AddReg16Imm8Sx { .. }
@@ -909,6 +910,25 @@ fn emit_instr(
             emit_group_sym_lea(&[0xC6, 0x06], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
             out.push(*imm);
         }
+        Instr::MovGroupSymOffsetGroupSym {
+            dst_group, dst_symbol, dst_offset,
+            src_group, src_symbol, src_offset,
+        } => {
+            // `mov word ptr <dg>:<dsym>[+N], offset <sg>:<ssym>` →
+            // C7 06 <dst-disp> <src-imm>. Same shape as
+            // MovGroupSymImm16 but the imm16 is *itself* a relocation
+            // (offset of another global), so it carries its own
+            // FIXUPP. Used by `p = &x;` between two globals
+            // (fixture 480).
+            emit_group_sym_lea(
+                &[0xC7, 0x06], dst_group, dst_symbol, *dst_offset,
+                symbols, group_idx, extern_idx, out, fixups,
+            )?;
+            emit_group_sym_imm16(
+                src_group, src_symbol, *src_offset,
+                symbols, group_idx, extern_idx, out, fixups,
+            )?;
+        }
         Instr::MovGroupSymAx { group, symbol, offset } => {
             // `mov word ptr <group>:<sym>[+N], ax` → A3 lo hi
             // (mov moffs16, AX) — the AX-specific store short form.
@@ -1488,6 +1508,63 @@ fn emit_alu_ax_bp_rel(opcode: u8, offset: i16, out: &mut Vec<u8>) {
 ///   1 byte for `mov ax,moffs16` (A1), `mov al,moffs8` (A0), and
 ///   `mov ax,offset _sym` (B8). 2 bytes for `add ax,r/m16` with
 ///   disp16-only addressing (03 06).
+/// Emit a 2-byte group-relative symbol reference (no opcode
+/// prefix). Same FIXUPP shape as `emit_group_sym_lea` but without
+/// the leading opcode bytes — used when a symbol's offset appears
+/// as an immediate operand following another opcode-encoded
+/// relocation (e.g. the source-symbol imm16 in
+/// `Instr::MovGroupSymOffsetGroupSym`).
+fn emit_group_sym_imm16(
+    group: &str,
+    symbol: &str,
+    extra_offset: i16,
+    symbols: &Symbols,
+    group_idx: &HashMap<String, u8>,
+    extern_idx: &HashMap<String, u8>,
+    out: &mut Vec<u8>,
+    fixups: &mut Vec<FixupReq>,
+) -> AsmResult<()> {
+    let g_idx = *group_idx
+        .get(group)
+        .ok_or_else(|| AsmError::new(0, format!("group `{group}` not defined")))?;
+    if let Some(sym_loc) = symbols.get(symbol) {
+        let target_seg_idx = u8::try_from(sym_loc.segment + 1).expect("target seg idx fits");
+        let value = sym_loc.offset.wrapping_add(extra_offset as u16);
+        let imm_start = out.len();
+        out.extend_from_slice(&value.to_le_bytes());
+        fixups.push(FixupReq {
+            data_offset: u16::try_from(imm_start).expect("offset fits"),
+            kind: FixupKind::SegRelGroupTarget {
+                group_idx: g_idx,
+                segment_idx: target_seg_idx,
+            },
+        });
+        return Ok(());
+    }
+    if let Some(&ext_idx) = extern_idx.get(symbol) {
+        if extra_offset != 0 {
+            return Err(AsmError::new(
+                0,
+                format!("extern `{symbol}` with `+{extra_offset}` offset not supported"),
+            ));
+        }
+        let imm_start = out.len();
+        out.extend_from_slice(&0u16.to_le_bytes());
+        fixups.push(FixupReq {
+            data_offset: u16::try_from(imm_start).expect("offset fits"),
+            kind: FixupKind::SegRelGroupExtern {
+                group_idx: g_idx,
+                extdef_idx: ext_idx,
+            },
+        });
+        return Ok(());
+    }
+    Err(AsmError::new(
+        0,
+        format!("symbol `{symbol}` not defined in any segment"),
+    ))
+}
+
 fn emit_group_sym_lea(
     opcode_prefix: &[u8],
     group: &str,

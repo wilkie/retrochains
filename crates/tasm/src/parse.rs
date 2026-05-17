@@ -773,6 +773,24 @@ fn parse_mov(operands: &str, line_no: usize) -> AsmResult<Instr> {
             });
         }
     }
+    // LHS `word ptr <group>:<sym>[+N]`, RHS `offset <group>:<sym>`
+    // — store the address of one global into another. Fixture 480
+    // (`p = &x;` between two globals). Try before the imm16 path so
+    // the `offset` keyword isn't mis-parsed as a stray label.
+    if let Some((dst_group, dst_symbol)) = parse_group_symbol(lhs) {
+        if let Some((src_group, src_symbol)) = parse_offset_group_symbol(rhs) {
+            let (dst_sym, dst_offset) = split_sym_offset(dst_symbol);
+            let (src_sym, src_offset) = split_sym_offset(src_symbol);
+            return Ok(Instr::MovGroupSymOffsetGroupSym {
+                dst_group: dst_group.to_string(),
+                dst_symbol: dst_sym.to_string(),
+                dst_offset,
+                src_group: src_group.to_string(),
+                src_symbol: src_sym.to_string(),
+                src_offset,
+            });
+        }
+    }
     // LHS `word ptr <group>:<sym>[+N]` — store immediate to a
     // data-segment global. Fixture 205 (`long g = K;` writes two
     // halves: `_g+2` for the high word, `_g` for the low word).

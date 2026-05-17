@@ -3320,6 +3320,14 @@ impl<'a> FunctionEmitter<'a> {
     /// time, which the locals analyzer uses to force it off the
     /// register pool.
     fn emit_address_of(&mut self, name: &str) {
+        // `&<global>` — emit the symbol's offset as an immediate.
+        // Pattern from `p = &g;` at runtime, fixture 480 (the
+        // file-scope init form is handled separately via the static
+        // init path).
+        if self.globals.contains(name) {
+            let _ = write!(self.out, "\tmov\tax,offset DGROUP:_{name}\r\n");
+            return;
+        }
         let LocalLocation::Stack(off) = self.locals.location_of(name) else {
             panic!(
                 "`&{name}`: register-resident local cannot have its address taken \
@@ -5390,6 +5398,22 @@ impl<'a> FunctionEmitter<'a> {
                 self.out,
                 "\tmov\tword ptr DGROUP:_{name},{}\r\n",
                 reg.name(),
+            );
+            return;
+        }
+        // `<ptr-global> = &<global>;` — emit the direct immediate-
+        // store form `mov word ptr DGROUP:_p, offset DGROUP:_x`
+        // (`C7 06 <p-disp> <x-imm>`, 6 bytes with two FIXUPPs)
+        // instead of the AX-bounce `mov ax, offset _x / mov [_p],
+        // ax` (5 bytes — yes, shorter, but oracle prefers the
+        // single immediate-store form). Fixture 480.
+        if !ty.is_char_like()
+            && let ExprKind::AddressOf(src) = &value.kind
+            && self.globals.contains(src)
+        {
+            let _ = write!(
+                self.out,
+                "\tmov\tword ptr DGROUP:_{name},offset DGROUP:_{src}\r\n",
             );
             return;
         }
