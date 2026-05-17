@@ -2427,6 +2427,55 @@ impl<'a> FunctionEmitter<'a> {
                 self.helpers.insert("N_LXMUL@".to_string());
                 return;
             }
+            // `return <a> << K;` / `return <a> >> K;` for a long lvalue
+            // and constant K in [1,255]. Two shapes:
+            //   K=1: inline shift+rotate across DX:AX. The carry
+            //        propagates between halves, so the order is forced
+            //        by direction — left shifts low first (`shl ax, 1;
+            //        rcl dx, 1`), right shifts high first (`sar dx, 1;
+            //        rcr ax, 1`). Mirror of the memory-dest K=1 shape
+            //        (fixture 227) with the AX/DX roles swapped per
+            //        the destination-driven rule. Fixtures 377 (`<<1`),
+            //        378 (`>>1` signed).
+            //   K>1: load operand → DX:AX, `mov cl, K`, then call
+            //        `N_LXLSH@` / `N_LXRSH@` / `N_LXURSH@`. The helper
+            //        returns DX:AX = result, which is the return
+            //        register pair — no boundary move. `mov cl, K`
+            //        lands AFTER the operand load, matching the
+            //        non-compound (`=`-form) shape. Fixture 379.
+            if let ExprKind::BinOp { op, left, right } = &e.kind
+                && matches!(op, BinOp::Shl | BinOp::Shr)
+                && let Some((hi_addr, lo_addr)) = self.long_lvalue_addr_pair(left)
+                && let Some(k) = try_const_eval(right)
+                && k >= 1
+                && k <= 255
+            {
+                let unsigned = self.function.ret_ty.is_unsigned();
+                let _ = write!(self.out, "\tmov\tdx,word ptr {hi_addr}\r\n");
+                let _ = write!(self.out, "\tmov\tax,word ptr {lo_addr}\r\n");
+                if k == 1 {
+                    if matches!(op, BinOp::Shl) {
+                        self.out.extend_from_slice(b"\tshl\tax,1\r\n");
+                        self.out.extend_from_slice(b"\trcl\tdx,1\r\n");
+                    } else {
+                        let hi_op = if unsigned { "shr" } else { "sar" };
+                        let _ = write!(self.out, "\t{hi_op}\tdx,1\r\n");
+                        self.out.extend_from_slice(b"\trcr\tax,1\r\n");
+                    }
+                } else {
+                    let k_u8 = (k & 0xFF) as u8;
+                    let _ = write!(self.out, "\tmov\tcl,{k_u8}\r\n");
+                    let helper = match (op, unsigned) {
+                        (BinOp::Shl, _)     => "N_LXLSH@",
+                        (BinOp::Shr, false) => "N_LXRSH@",
+                        (BinOp::Shr, true)  => "N_LXURSH@",
+                        _ => unreachable!(),
+                    };
+                    let _ = write!(self.out, "\tcall\tnear ptr {helper}\r\n");
+                    self.helpers.insert(helper.to_string());
+                }
+                return;
+            }
             // `return a / b;` / `return a % b;` for two long lvalues.
             // The `N_LDIV@` / `N_LMOD@` helpers take 4 words on the
             // stack — dividend first (lower addresses), divisor
