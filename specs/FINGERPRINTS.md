@@ -592,6 +592,42 @@ distinct from compilers that would `mov ax, [g+2] / push ax / mov
 ax, [g] / push ax`. _Fixtures_: 322 (global), 323 (stack local),
 325 (ptr deref), 326 (struct field), 328 (array element).
 
+### Non-lvalue long args: push pair adapts to the producer's register convention (STRONG)
+
+When a long arg is a non-lvalue expression (arith, function call,
+helper call), BCC materializes it into DX:AX and then pushes — but
+the *order* of the two `push` mnemonics is determined by which
+register holds the high half after the producer step:
+
+| Producer step                  | High in | Push order            |
+|--------------------------------|---------|-----------------------|
+| Memory-dest arith (mem-dst)    | **AX**  | `push ax; push dx`    |
+| Long-returning user call (ABI) | **DX**  | `push dx; push ax`    |
+| Helper call (DX:AX-returning)  | **DX**  | `push dx; push ax`    |
+
+The stack-frame layout for the long arg is invariant (low at the
+lower SP, high at the higher) — only the mnemonic order flips to
+make the push achieve that layout. The push pair is *flexible*
+and adapts to whatever the producer left in the registers.
+
+This is a fourth manifestation of the rule we've been calling
+"destination-driven": the register-pair convention is set by
+whichever step in the chain has rigid ABI requirements. Here
+the rigid step is the **producer** (arith picks memory-dest,
+call/helper picks DX-high), and the **consumer** (the push
+pair) adapts. The other three contexts where the rule shows
+up: memory-dest arith (consumer is the store, AX-high flexible
+load picks the matching convention); return-bound arith
+(consumer is the return register pair, ABI fixed); helper-input
+arith (consumer is the helper, ABI fixed).
+
+A disassembler that sees `call <something>; push dx; push ax;
+call <outer>` recognizes "long-returning call piped into another
+function's long argument" — same shape whether the inner call
+is a CRT helper (mul/div/shift) or a user function returning
+long. _Fixtures_: 386 (arith expr arg, `push ax / push dx`),
+387 (user long-call arg), 388 (helper-call arg).
+
 ### Mixed int+long arg list pushed per-type, cleanup by byte-count (STRONG)
 
 An argument list with both `int` and `long` parameters pushes

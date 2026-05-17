@@ -2461,6 +2461,45 @@ add  sp, 6                    ; 3 words = 6 bytes, ≥3 → add sp
 The cleanup `add sp, N` is driven purely by total pushed bytes,
 agnostic to which words came from int args vs long args.
 
+#### Non-lvalue long arguments (`386`–`388`)
+
+When the long argument is a non-lvalue expression (arith,
+function call result, helper call result), BCC must first
+materialize the long into the DX:AX pair, then push. The push
+order — `push ax; push dx` vs `push dx; push ax` — depends on
+which register the producer step left the high half in:
+
+```
+; f(g + h);  — long arith expression as arg (fixture 386)
+mov ax, word ptr DGROUP:_g+2     ; AX = g.high (memory-dest conv)
+mov dx, word ptr DGROUP:_g       ; DX = g.low
+add dx, word ptr DGROUP:_h
+adc ax, word ptr DGROUP:_h+2
+push ax                          ; high (= AX) pushed first
+push dx                          ; low  (= DX) pushed second
+
+; f(g());  — long-returning call as arg (fixture 387)
+call near ptr _g                 ; DX:AX = result (ABI: DX=hi, AX=lo)
+push dx                          ; high (= DX) first
+push ax                          ; low  (= AX) second
+
+; f(g * h);  — helper call as arg (fixture 388)
+mov cx, word ptr DGROUP:_g+2     ; CX:BX = g (helper input A)
+mov bx, word ptr DGROUP:_g
+mov dx, word ptr DGROUP:_h+2     ; DX:AX = h (helper input B)
+mov ax, word ptr DGROUP:_h
+call near ptr N_LXMUL@           ; DX:AX = result
+push dx                          ; high (= DX) first
+push ax                          ; low  (= AX) second
+```
+
+The push-pair adapts to whichever register the producer placed
+the high half in. The stack-frame layout is invariant (low at
+lower SP, high at higher) — only the mnemonic order flips. This
+is the fourth context where the "first-consumer-driven register
+convention" rule manifests: here the consumer (the push pair)
+is *flexible* and adapts; the producer's convention wins.
+
 ### Widening and narrowing
 
 `long g = i` (int → long) widens via `cwd`:
