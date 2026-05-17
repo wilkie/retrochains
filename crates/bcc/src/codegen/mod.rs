@@ -1334,6 +1334,78 @@ impl<'a> FunctionEmitter<'a> {
         None
     }
 
+    /// Try to lower a non-constant long expression into a load/arith/
+    /// store skeleton landing at `dest_hi`/`dest_lo`. Returns true
+    /// when the value's shape was recognized and emitted; false if
+    /// the caller should fall through to its own panic/path.
+    ///
+    /// Handles:
+    /// - `<long-lvalue>` (plain copy): two loads + two stores.
+    /// - `<long-lvalue> <op> <const>` for `+`/`-`: load lvalue,
+    ///   add/sub imm to DX, adc/sbb 0/-1 to AX, store.
+    /// - `<long-lvalue> <op> <long-lvalue>` for `+`/`-`/`&`/`|`/`^`:
+    ///   load operand a, op against operand b's halves, store.
+    fn try_emit_long_value_to_dest(
+        &mut self,
+        value: &Expr,
+        dest_hi: &str,
+        dest_lo: &str,
+    ) -> bool {
+        // Plain copy: `<dest> = <long-lvalue>`.
+        if let Some((src_hi, src_lo)) = self.long_lvalue_addr_pair(value) {
+            // Only treat as a copy when value itself is the lvalue
+            // (not a sub-expression of a binop). We detect that by
+            // re-checking — long_lvalue_addr_pair returns Some only
+            // for lvalue-shaped exprs, so a top-level match here is
+            // the lvalue itself.
+            let _ = write!(self.out, "\tmov\tax,word ptr {src_hi}\r\n");
+            let _ = write!(self.out, "\tmov\tdx,word ptr {src_lo}\r\n");
+            let _ = write!(self.out, "\tmov\tword ptr {dest_hi},ax\r\n");
+            let _ = write!(self.out, "\tmov\tword ptr {dest_lo},dx\r\n");
+            return true;
+        }
+        // `<lvalue> <op> <const>` for arith ops.
+        if let ExprKind::BinOp { op, left, right } = &value.kind
+            && (matches!(op, BinOp::Add) || matches!(op, BinOp::Sub))
+            && let Some((src_hi, src_lo)) = self.long_lvalue_addr_pair(left)
+            && let Some(k) = try_const_eval(right)
+        {
+            let signed = k as i32;
+            let (delta, carry) = if matches!(op, BinOp::Add) {
+                (signed, 0i16)
+            } else {
+                (-signed, -1i16)
+            };
+            let _ = write!(self.out, "\tmov\tax,word ptr {src_hi}\r\n");
+            let _ = write!(self.out, "\tmov\tdx,word ptr {src_lo}\r\n");
+            if let Ok(delta_i8) = i8::try_from(delta) {
+                let _ = write!(self.out, "\tadd\tdx,{delta_i8}\r\n");
+            } else {
+                let delta_u16 = (delta as i32) as u16;
+                let _ = write!(self.out, "\tadd\tdx,{delta_u16}\r\n");
+            }
+            let _ = write!(self.out, "\tadc\tax,{carry}\r\n");
+            let _ = write!(self.out, "\tmov\tword ptr {dest_hi},ax\r\n");
+            let _ = write!(self.out, "\tmov\tword ptr {dest_lo},dx\r\n");
+            return true;
+        }
+        // `<lvalue_a> <op> <lvalue_b>` for `+`/`-`/`&`/`|`/`^`.
+        if let ExprKind::BinOp { op, left, right } = &value.kind
+            && let Some((lo_op, hi_op)) = long_pair_op(*op)
+            && let Some((a_hi, a_lo)) = self.long_lvalue_addr_pair(left)
+            && let Some((b_hi, b_lo)) = self.long_lvalue_addr_pair(right)
+        {
+            let _ = write!(self.out, "\tmov\tax,word ptr {a_hi}\r\n");
+            let _ = write!(self.out, "\tmov\tdx,word ptr {a_lo}\r\n");
+            let _ = write!(self.out, "\t{lo_op}\tdx,word ptr {b_lo}\r\n");
+            let _ = write!(self.out, "\t{hi_op}\tax,word ptr {b_hi}\r\n");
+            let _ = write!(self.out, "\tmov\tword ptr {dest_hi},ax\r\n");
+            let _ = write!(self.out, "\tmov\tword ptr {dest_lo},dx\r\n");
+            return true;
+        }
+        false
+    }
+
     /// Whether `cond` is `<long_var> <op> K` for a relational
     /// comparison op (`<,>,<=,>=`) on a long global or stack local.
     /// BCC inlines K into the `cmp <mem>, imm` instruction (per
@@ -2417,6 +2489,14 @@ impl<'a> FunctionEmitter<'a> {
                         let _ = write!(self.out, "\tmov\tword ptr {},dx\r\n", bp_addr(off));
                         return;
                     }
+                    // General long arith / lvalue-copy → stack local.
+                    // Handles `long x = g + h;`, `long x = s.x + 5;`,
+                    // `long x = a[1] + b[2];` etc. Fixture 357.
+                    let dest_hi = bp_addr(off + 2);
+                    let dest_lo = bp_addr(off);
+                    if self.try_emit_long_value_to_dest(init, &dest_hi, &dest_lo) {
+                        return;
+                    }
                     panic!("non-constant long local init not yet supported (no fixture)");
                 }
                 // Stack init: prefer the immediate-store form when the
@@ -3437,16 +3517,22 @@ impl<'a> FunctionEmitter<'a> {
                 // Long element: store both halves, high then low.
                 // Fixture 302 (`long a[3]; a[1] = 42;`).
                 if leaf_ty.is_long_like() {
-                    let Some(v) = try_const_eval(value) else {
-                        panic!("non-constant rhs in long-array element assign not yet supported (no fixture)");
-                    };
-                    let lo = (v & 0xFFFF) as u16;
-                    let hi = ((v >> 16) & 0xFFFF) as u16;
                     let lo_addr = global_offset_addr(array, const_off);
                     let hi_addr = global_offset_addr(array, const_off + 2);
-                    let _ = write!(self.out, "\tmov\tword ptr {hi_addr},{hi}\r\n");
-                    let _ = write!(self.out, "\tmov\tword ptr {lo_addr},{lo}\r\n");
-                    return;
+                    if let Some(v) = try_const_eval(value) {
+                        let lo = (v & 0xFFFF) as u16;
+                        let hi = ((v >> 16) & 0xFFFF) as u16;
+                        let _ = write!(self.out, "\tmov\tword ptr {hi_addr},{hi}\r\n");
+                        let _ = write!(self.out, "\tmov\tword ptr {lo_addr},{lo}\r\n");
+                        return;
+                    }
+                    // Non-constant RHS (e.g. `a[1] = g + h`): route
+                    // through the long-value-to-dest helper. Fixture
+                    // 359.
+                    if self.try_emit_long_value_to_dest(value, &hi_addr, &lo_addr) {
+                        return;
+                    }
+                    panic!("non-constant rhs in long-array element assign not yet supported (no fixture)");
                 }
                 let width = ptr_width(&leaf_ty);
                 let addr = global_offset_addr(array, const_off);
@@ -3785,15 +3871,21 @@ impl<'a> FunctionEmitter<'a> {
         // (DGROUP-relative or bp-relative dest) and `p->x` (register-
         // indirect dest). Fixtures 316, 317, 318.
         if leaf_ty.is_long_like() {
-            let Some(v) = try_const_eval(value) else {
-                panic!("non-constant rhs in long struct field assign not yet supported (no fixture)");
-            };
-            let lo = (v & 0xFFFF) as u16;
-            let hi = ((v >> 16) & 0xFFFF) as u16;
+            if let Some(v) = try_const_eval(value) {
+                let lo = (v & 0xFFFF) as u16;
+                let hi = ((v >> 16) & 0xFFFF) as u16;
+                let hi_dest = shift_dest_by_two(&dest);
+                let _ = write!(self.out, "\tmov\tword ptr {hi_dest},{hi}\r\n");
+                let _ = write!(self.out, "\tmov\tword ptr {dest},{lo}\r\n");
+                return;
+            }
+            // Non-constant RHS (e.g. `s.x = g + h`): route through
+            // the long-value-to-dest helper. Fixture 358.
             let hi_dest = shift_dest_by_two(&dest);
-            let _ = write!(self.out, "\tmov\tword ptr {hi_dest},{hi}\r\n");
-            let _ = write!(self.out, "\tmov\tword ptr {dest},{lo}\r\n");
-            return;
+            if self.try_emit_long_value_to_dest(value, &hi_dest, &dest) {
+                return;
+            }
+            panic!("non-constant rhs in long struct field assign not yet supported (no fixture)");
         }
         let store_byte = matches!(leaf_ty, Type::Char);
         let width = if store_byte { "byte" } else { "word" };
