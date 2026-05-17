@@ -324,6 +324,32 @@ Parser:
   `KwSigned`, completing the set started in batch 50) as a type
   start, so `enum color c;` works inside function bodies.
 
+Explicit member values (`enum flag { OFF = 0, ON = 1, AUTO = 7 }`)
+also flow through the same path — the body parser already accepted
+`= <int-lit>` per-member, and the values fold into `IntLit` at use
+sites (fixture `473`).
+
+The body form `enum [<tag>] { … } <decl>` (combined definition +
+declaration) works too. Fixture `474`'s
+`enum { A = 1, B = 2, C = 3 } x;` declares both the constants and
+a local `x`. Implementation factored `parse_enum_body` out of
+`parse_enum_decl` so `parse_type`'s enum branch can reuse it; the
+caller consumes through `}`, then the surrounding declare path
+sees the declarator.
+
+## `const` qualifier
+
+`const` is accepted as a discardable qualifier — BCC keeps the
+storage layout identical to the unqualified form. Fixture `475`
+(`const int g = 42`) emits a regular initialized int in `_DATA`
+(2 bytes), exactly like `int g = 42` would.
+
+Implementation: added `KwConst` token, a `while … KwConst` loop
+at the top of `parse_type` that silently consumes any number of
+`const` qualifiers, a matching consumer at the start of the
+top-level type-probe, and `KwConst` in `parse_stmt`'s declaration
+dispatch. No AST node — the qualifier is just dropped.
+
 ## Comma operator
 
 `<expr>, <expr>` at expression level is a comma operator —
