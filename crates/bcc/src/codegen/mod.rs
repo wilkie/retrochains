@@ -5340,6 +5340,22 @@ impl<'a> FunctionEmitter<'a> {
                         return;
                     }
                 }
+                // `struct S a; a = f();` for a 4-byte struct return.
+                // Same shape as the global-dest variant (fixture 424):
+                // the call leaves DX:AX = high:low, store back to the
+                // stack-local destination. Fixture 426.
+                if let Type::Struct { .. } = ty
+                    && ty.size_bytes() == 4
+                    && let ExprKind::Call { name: fname, args } = &value.kind
+                    && self.signatures
+                        .ret_ty_of(fname)
+                        .map_or(false, |t| matches!(t, Type::Struct { .. }) && t.size_bytes() == 4)
+                {
+                    self.emit_call(fname, args);
+                    let _ = write!(self.out, "\tmov\tword ptr {},dx\r\n", bp_addr(off + 2));
+                    let _ = write!(self.out, "\tmov\tword ptr {},ax\r\n", bp_addr(off));
+                    return;
+                }
                 // `long x; x = K;` — two word stores, high then low.
                 // Same shape as the init form (fixture 210/287).
                 if ty.is_long_like() {
