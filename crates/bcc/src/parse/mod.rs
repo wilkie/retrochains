@@ -855,6 +855,61 @@ impl Parser {
     /// only the new lvalue shapes through here.
     fn parse_expr_or_lvalue_assign(&mut self, start: u32) -> Result<Stmt, ParseError> {
         let expr = self.parse_expr()?;
+        // Statement-position postfix `++`/`--` on an lvalue. When the
+        // value isn't used, `lv++` is byte-identical to `lv += 1`, so
+        // we rewrite to the compound-assign form rather than threading
+        // a separate Update statement through every lvalue shape.
+        // Pre-form (`++lv`) is already parsed in `parse_unary` as a
+        // bare-ident-only Update; the lvalue cases reach here as the
+        // *result* of `parse_expr` and we handle them uniformly.
+        // Fixtures 401 (`s.x++;`), 402 (`p->x++;`), 403 (`a[1]++;`).
+        if let Some(update_op) = match_update_op(&self.peek().kind) {
+            let op_tok = self.bump();
+            let semi = self.expect(&TokenKind::Semicolon)?;
+            let span = Span::new(start, semi.span.end);
+            let op = match update_op {
+                UpdateOp::Inc => BinOp::Add,
+                UpdateOp::Dec => BinOp::Sub,
+            };
+            let value = Expr {
+                kind: ExprKind::IntLit(1),
+                span: Span::new(op_tok.span.start, op_tok.span.end),
+            };
+            return match expr.kind {
+                ExprKind::Member { base, field, kind: mk } => Ok(Stmt {
+                    kind: StmtKind::MemberCompoundAssign {
+                        base: *base, field, kind: mk, op, value,
+                    },
+                    span,
+                }),
+                ExprKind::Deref(target) => Ok(Stmt {
+                    kind: StmtKind::DerefCompoundAssign { target: *target, op, value },
+                    span,
+                }),
+                ExprKind::ArrayIndex { .. } => {
+                    let mut indices: Vec<Expr> = Vec::new();
+                    let mut cur = expr;
+                    let array = loop {
+                        match cur.kind {
+                            ExprKind::ArrayIndex { array, index } => {
+                                indices.push(*index);
+                                cur = *array;
+                            }
+                            ExprKind::Ident(name) => break name,
+                            _ => return Err(ParseError::Unsupported {
+                                offset: cur.span.start,
+                            }),
+                        }
+                    };
+                    indices.reverse();
+                    Ok(Stmt {
+                        kind: StmtKind::ArrayCompoundAssign { array, indices, op, value },
+                        span,
+                    })
+                }
+                _ => Err(ParseError::Unsupported { offset: expr.span.start }),
+            };
+        }
         if !matches!(self.peek().kind, TokenKind::Equals)
             && match_compound_op(&self.peek().kind).is_none()
         {
