@@ -370,6 +370,9 @@ fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
     let rest = line.rest.trim_end();
     match kw {
         "push" => {
+            if rest == "ds" {
+                return Ok(Instr::PushDs);
+            }
             if let Some(reg) = Reg16::parse(rest) {
                 return Ok(Instr::PushReg16 { reg });
             }

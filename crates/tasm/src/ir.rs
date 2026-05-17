@@ -510,6 +510,11 @@ pub enum Instr {
     /// /6(PUSH) r/m=100 ([si+disp8]). High-half push for
     /// long-pointer deref-arg (fixture 325).
     PushSiDisp { disp: i8 },
+    /// `push ds` — `1E` (single byte). Pushes the DS segment
+    /// register, used to form a far pointer to a DGROUP-resident
+    /// symbol before calling helpers like `N_SCOPY@` that take
+    /// far-pointer arguments. Fixture 413.
+    PushDs,
     /// `cmp word ptr <group>:<symbol>[+<offset>], imm16` — Grp1
     /// r/m16,imm16 with /7=CMP and disp16-only addressing
     /// (`81 3E lo hi imm_lo imm_hi`, 6 bytes). Used when K is too

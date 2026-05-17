@@ -328,6 +328,7 @@ fn instr_size(instr: &Instr) -> usize {
         Instr::PushGroupSym { .. } => 4,
         Instr::PushBpRel { .. } | Instr::PushSiDisp { .. } => 3,
         Instr::PushSiPtr => 2,
+        Instr::PushDs => 1,
         Instr::CmpGroupSymImm8Sx { .. }
         | Instr::AddGroupSymImm8Sx { .. }
         | Instr::AdcGroupSymImm8Sx { .. }
@@ -1110,6 +1111,10 @@ fn emit_instr(
             out.push(0xFF);
             out.push(0x74);
             out.push(*disp as u8);
+        }
+        Instr::PushDs => {
+            // `push ds` → 1E (single-byte segreg-push form).
+            out.push(0x1E);
         }
         Instr::CmpGroupSymImm8Sx { group, symbol, offset, imm } => {
             // `cmp word ptr <group>:<sym>[+N], imm8sx` → 83 3E lo hi ii.

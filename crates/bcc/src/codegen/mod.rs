@@ -4635,28 +4635,44 @@ impl<'a> FunctionEmitter<'a> {
         // share the same byte-level emission for arithmetic and
         // bitwise ops; only shifts (sar vs shr) and comparisons
         // (signed vs unsigned jumps) need to branch on signedness.
-        // Struct-to-struct copy assign at file scope. BCC compiles
-        // `a = b;` for two structs of the same type as a sequence of
-        // word loads/stores, **high-word first** in both the load and
-        // store pair — identical byte shape to the long-to-long copy
-        // (fixture 211). For a 4-byte struct (one long field, or two
-        // ints) the emission is byte-for-byte the long-copy AX:DX
-        // sequence regardless of which struct field types produced the
-        // size. Fixtures 410 (`{ int x; int y; }`), 411 (`{ int x; }`),
-        // 412 (`{ long x; }`). Note: 411 is single-word and currently
-        // takes the generic `mov ax / mov [_a], ax` path — same byte
-        // output, so we leave it alone for now and only special-case
-        // the 4-byte size.
+        // Struct-to-struct copy assign at file scope. Two emission
+        // shapes by size:
+        //   - **4 bytes**: BCC inlines a high-first AX:DX load/store
+        //     pair — byte-identical to a long-to-long copy (fixture
+        //     211). Source-level type is invisible at the byte level
+        //     (a `struct { int x; int y; }` and a `struct { long x; }`
+        //     produce the same bytes). Fixtures 410, 412.
+        //   - **>4 bytes**: BCC calls the runtime helper `N_SCOPY@`,
+        //     passing far pointers to dest and src (DS:offset, dest
+        //     pushed first) and the byte count in CX. Fixtures 413
+        //     (6-byte), 414 (8-byte).
+        // 1-byte and 2-byte struct copies still take the generic
+        // single-word path (fixture 411) — same byte output as a
+        // plain int copy.
         if let Type::Struct { .. } = &ty
             && let ExprKind::Ident(src_name) = &value.kind
             && self.globals.type_of(src_name).map_or(false, |t| t == &ty)
-            && ty.size_bytes() == 4
         {
-            let _ = write!(self.out, "\tmov\tax,word ptr DGROUP:_{src_name}+2\r\n");
-            let _ = write!(self.out, "\tmov\tdx,word ptr DGROUP:_{src_name}\r\n");
-            let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name}+2,ax\r\n");
-            let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name},dx\r\n");
-            return;
+            let size = ty.size_bytes();
+            if size == 4 {
+                let _ = write!(self.out, "\tmov\tax,word ptr DGROUP:_{src_name}+2\r\n");
+                let _ = write!(self.out, "\tmov\tdx,word ptr DGROUP:_{src_name}\r\n");
+                let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name}+2,ax\r\n");
+                let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name},dx\r\n");
+                return;
+            }
+            if size > 4 {
+                let _ = write!(self.out, "\tmov\tax,offset DGROUP:_{name}\r\n");
+                self.out.extend_from_slice(b"\tpush\tds\r\n");
+                self.out.extend_from_slice(b"\tpush\tax\r\n");
+                let _ = write!(self.out, "\tmov\tax,offset DGROUP:_{src_name}\r\n");
+                self.out.extend_from_slice(b"\tpush\tds\r\n");
+                self.out.extend_from_slice(b"\tpush\tax\r\n");
+                let _ = write!(self.out, "\tmov\tcx,{size}\r\n");
+                self.out.extend_from_slice(b"\tcall\tnear ptr N_SCOPY@\r\n");
+                self.helpers.insert("N_SCOPY@".to_string());
+                return;
+            }
         }
         if ty.is_long_like() {
             if let Some(v) = try_const_eval(value) {
@@ -5172,6 +5188,23 @@ impl<'a> FunctionEmitter<'a> {
     fn emit_assign_local(&mut self, loc: LocalLocation, ty: &Type, value: &Expr) {
         match loc {
             LocalLocation::Stack(off) => {
+                // Struct-to-stack copy assign. Same word-by-word
+                // high-first shape as the global-to-global path, but
+                // storing to `[bp+N]`. For a 4-byte struct, the bytes
+                // mirror the long-from-global-into-stack copy (fixture
+                // 288). Fixture 415 (`a = b;` where `a` is a stack
+                // local struct of size 4).
+                if let Type::Struct { .. } = ty
+                    && let ExprKind::Ident(src_name) = &value.kind
+                    && self.globals.type_of(src_name).map_or(false, |t| t == ty)
+                    && ty.size_bytes() == 4
+                {
+                    let _ = write!(self.out, "\tmov\tax,word ptr DGROUP:_{src_name}+2\r\n");
+                    let _ = write!(self.out, "\tmov\tdx,word ptr DGROUP:_{src_name}\r\n");
+                    let _ = write!(self.out, "\tmov\tword ptr {},ax\r\n", bp_addr(off + 2));
+                    let _ = write!(self.out, "\tmov\tword ptr {},dx\r\n", bp_addr(off));
+                    return;
+                }
                 // `long x; x = K;` — two word stores, high then low.
                 // Same shape as the init form (fixture 210/287).
                 if ty.is_long_like() {
