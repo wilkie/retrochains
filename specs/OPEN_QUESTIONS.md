@@ -128,3 +128,32 @@ with a brace-list of bytes — would that take numeric or quoted form?).
 trigger is "named storage = numeric, pool = quoted". If it takes quoted,
 the trigger is something else (probably about the initializer syntax).
 
+## C lexer doesn't accept hex literals
+
+**The question.** Does our C frontend need to support hex (`0xFF`),
+octal (`0755`), or other non-decimal integer literal syntax to match the
+BC2 corpus?
+
+**Current state.** Our lexer only handles plain decimal integer tokens.
+A simple `s.x &= 0xFF;` fails to parse with `bcc: parse: expected ';',
+got identifier` at the `0` after the `&=`. Empirically, the oracle BCC
+accepts `0xFF` and emits the same bytes it does for `255` — so the gap
+is parser-only, not codegen.
+
+**Why it matters.** Fixtures and downstream BC2 sources will use hex
+literals for bitmasks, addresses, character codes, and other naturally-
+hex values. We need to either (a) extend the lexer to recognize
+`0x[0-9a-fA-F]+` (and probably `0[0-7]+` octal), or (b) be willing to
+rewrite oracle-corpus inputs to use decimal, which doesn't scale.
+
+**Confirmed gap.** Discovered when capturing fixture 390 (`s.x &= 0xFF;`)
+— the oracle bytes for the decimal-rewritten `s.x &= 255;` are identical,
+proving the codegen behavior is signedness/value-driven and not syntax-
+driven. The lexer is the only blocker.
+
+**To close.** Add hex/octal handling to `lex::lexer`. Capture a few
+fixtures using hex literals and check they round-trip. Look for any
+oracle-side surprises (e.g. character constants `'\xFF'` for char literals,
+or `0L` long suffixes) at the same time.
+
+

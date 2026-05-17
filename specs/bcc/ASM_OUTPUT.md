@@ -2907,6 +2907,38 @@ For a field at offset N within the struct, the addresses become
 `[si+N]` and `[si+N+2]`. `p->x` for the first field (offset 0) is
 byte-identical to `*p` for a long pointer.
 
+#### Long struct-field compound assign (`389`–`391`)
+
+`s.x OP= …` for a long struct field emits byte-identically to the
+long-global compound shape (fixtures 251/253/339) — only the
+disp16 in each `[mem]` operand changes to fold in the field's
+in-struct offset:
+
+```
+; s.x += 5;  (fixture 389 — const RHS, +/-)
+add word ptr DGROUP:_s+0, 5       ; 83 06 disp16 05 (imm8sx)
+adc word ptr DGROUP:_s+2, 0       ; 83 16 disp16 00 (high half, adc 0)
+
+; s.x &= 255;  (fixture 390 — const RHS, bitwise)
+and word ptr DGROUP:_s+0, 255     ; 81 26 disp16 imm16 (always imm16 for bitwise)
+and word ptr DGROUP:_s+2, 0       ; 81 26 disp16 00 00
+
+; s.x += y;  (fixture 391 — variable RHS)
+mov ax, word ptr DGROUP:_y+2      ; load y → AX:DX (memory-dest conv)
+mov dx, word ptr DGROUP:_y
+add word ptr DGROUP:_s+0, dx      ; 01 16 disp16 — low half
+adc word ptr DGROUP:_s+2, ax      ; 11 06 disp16 — high half carry
+```
+
+The source-storage-agnostic / destination-storage-agnostic rule
+extends to compound assigns: struct fields, globals, and (per
+fixture batch 22) stack locals are interchangeable at the byte
+level — only the addressing mode of each `[mem]` operand differs.
+A disassembler can recognize the long-compound shape from the
+opcode sequence alone (`83 06/16 imm8` arith vs `81 26/06/etc
+imm16` bitwise vs `01 16 / 11 06` variable-RHS arith) without
+needing to know where the destination lives.
+
 ### Long stack-local arithmetic (`329`–`335`)
 
 Long binary arithmetic between two stack-local long operands with
