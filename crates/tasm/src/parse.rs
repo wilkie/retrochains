@@ -1522,6 +1522,10 @@ fn parse_shl_one(operands: &str, line_no: usize) -> AsmResult<Instr> {
             format!("shl: only `<reg>,1` and `ax,cl` forms supported (got `{rhs}`)"),
         ));
     }
+    // 8-bit form first (fixture 535: `shl dl,1`).
+    if let Some(reg) = Reg8::parse(lhs) {
+        return Ok(Instr::ShlReg8One { reg });
+    }
     let reg = Reg16::parse(lhs)
         .ok_or_else(|| AsmError::new(line_no, format!("shl: bad register `{lhs}`")))?;
     Ok(Instr::ShlReg16One { reg })
@@ -1556,6 +1560,9 @@ fn parse_sar_one(operands: &str, line_no: usize) -> AsmResult<Instr> {
             format!("sar: only `<reg>,1` and `ax,cl` forms supported (got `{rhs}`)"),
         ));
     }
+    if let Some(reg) = Reg8::parse(lhs) {
+        return Ok(Instr::SarReg8One { reg });
+    }
     let reg = Reg16::parse(lhs)
         .ok_or_else(|| AsmError::new(line_no, format!("sar: bad register `{lhs}`")))?;
     Ok(Instr::SarReg16One { reg })
@@ -1572,6 +1579,9 @@ fn parse_shr_one(operands: &str, line_no: usize) -> AsmResult<Instr> {
             line_no,
             format!("shr: only `<reg>,1` and `ax,cl` forms supported (got `{rhs}`)"),
         ));
+    }
+    if let Some(reg) = Reg8::parse(lhs) {
+        return Ok(Instr::ShrReg8One { reg });
     }
     let reg = Reg16::parse(lhs)
         .ok_or_else(|| AsmError::new(line_no, format!("shr: bad register `{lhs}`")))?;

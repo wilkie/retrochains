@@ -3371,6 +3371,30 @@ impl<'a> FunctionEmitter<'a> {
             let _ = write!(self.out, "\tmov\t{},al\r\n", reg.name());
             return;
         }
+        // Char compound shift on a byte-register local: unroll into K
+        // `<shl|sar|shr> <reg>, 1` instructions directly on the
+        // register — no AL round-trip. Fixture 535 (`char c <<= 2`
+        // → two `shl dl, 1`). The 8086 has no `r/m8, imm8` shift, so
+        // BCC always unrolls for small K and switches to a CL-loop
+        // for larger K (threshold not yet pinned).
+        if reg.is_byte()
+            && matches!(op, BinOp::Shl | BinOp::Shr)
+            && let Some(k) = try_const_eval(value)
+            && k >= 1
+            && k <= 8
+        {
+            let signed = !self.locals.type_of(name).is_unsigned();
+            let mnem = match op {
+                BinOp::Shl => "shl",
+                BinOp::Shr if signed => "sar",
+                BinOp::Shr => "shr",
+                _ => unreachable!(),
+            };
+            for _ in 0..k {
+                let _ = write!(self.out, "\t{mnem}\t{},1\r\n", reg.name());
+            }
+            return;
+        }
         assert!(
             !reg.is_byte(),
             "compound assignment on a char (byte-register) target not yet supported (no fixture)"

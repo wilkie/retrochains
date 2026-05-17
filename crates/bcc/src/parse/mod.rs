@@ -823,7 +823,7 @@ impl Parser {
         };
         let name = name.clone();
         self.expect(&TokenKind::LParen)?;
-        let mut params = self.parse_param_list()?;
+        let (mut params, _is_ansi_proto) = self.parse_param_list()?;
         self.expect(&TokenKind::RParen)?;
         // Reset the per-function local-type map and seed it with the
         // params so `sizeof <param>` resolves inside the body.
@@ -888,7 +888,14 @@ impl Parser {
         }
         let close = self.expect(&TokenKind::RBrace)?;
         let span = Span::new(start, close.span.end);
-        Ok(Function { name, params, ret_ty, span, body: Some(body), is_static: false })
+        Ok(Function {
+            name,
+            params,
+            ret_ty,
+            span,
+            body: Some(body),
+            is_static: false,
+        })
     }
 
     /// Parameter list inside the `(...)` of a function definition.
@@ -935,15 +942,20 @@ impl Parser {
         })
     }
 
-    fn parse_param_list(&mut self) -> Result<Vec<Param>, ParseError> {
+    /// Returns `(params, has_ansi_typed_param)` — the bool is true
+    /// when the parameter list named at least one typed parameter
+    /// (e.g. `int f(int x)` — fixture 535). Empty `(void)` / `()` and
+    /// K&R bare-ident lists both report `false`, since neither pins
+    /// a prototype signature at the call site.
+    fn parse_param_list(&mut self) -> Result<(Vec<Param>, bool), ParseError> {
         if matches!(self.peek().kind, TokenKind::KwVoid) {
             self.bump();
-            return Ok(Vec::new());
+            return Ok((Vec::new(), false));
         }
         // Empty list `()` — no params declared. Accepts both prototype
         // and K&R callers that pass through.
         if matches!(self.peek().kind, TokenKind::RParen) {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), false));
         }
         // K&R-style: the first token is a plain identifier (and NOT a
         // typedef-name acting as a type). Parse a bare comma-separated
@@ -966,7 +978,7 @@ impl Parser {
                     break;
                 }
             }
-            return Ok(params);
+            return Ok((params, false));
         }
         let mut params = Vec::new();
         loop {
@@ -999,7 +1011,7 @@ impl Parser {
                 break;
             }
         }
-        Ok(params)
+        Ok((params, true))
     }
 
     fn parse_stmt(&mut self) -> Result<Stmt, ParseError> {

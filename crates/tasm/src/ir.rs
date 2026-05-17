@@ -799,6 +799,14 @@ pub enum Instr {
     /// `shl <reg16>,1` — D1 (mod=11 /4 r/m=reg). The 1-bit shift form
     /// (BCC uses this to compute `i*2` for word-array indexing).
     ShlReg16One { reg: Reg16 },
+    /// `shl <reg8>,1` — D0 (mod=11 /4=SHL r/m=reg-code). 8-bit
+    /// sibling of `ShlReg16One`. Fixture 535 (`char c <<= 2`
+    /// unrolls to two `shl dl, 1`).
+    ShlReg8One { reg: Reg8 },
+    /// `sar <reg8>,1` — D0 (mod=11 /7=SAR r/m=reg-code).
+    SarReg8One { reg: Reg8 },
+    /// `shr <reg8>,1` — D0 (mod=11 /5=SHR r/m=reg-code).
+    ShrReg8One { reg: Reg8 },
     /// `rcl <reg16>,1` — D1 (mod=11 /2 r/m=reg). Rotate-left through
     /// carry; used as the high-half partner to `shl` for long left
     /// shift by 1 (fixture 227).

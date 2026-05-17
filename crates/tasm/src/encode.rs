@@ -380,7 +380,10 @@ fn instr_size(instr: &Instr) -> usize {
         | Instr::ShrReg16One { .. }
         | Instr::RcrReg16One { .. }
         | Instr::NegReg16 { .. }
-        | Instr::NotReg16 { .. } => 2,
+        | Instr::NotReg16 { .. }
+        | Instr::ShlReg8One { .. }
+        | Instr::SarReg8One { .. }
+        | Instr::ShrReg8One { .. } => 2,
         Instr::MovBpRelImm { .. } | Instr::MovBpRelOffsetSym { .. } => 5,
         Instr::CallIndirectBpRel { .. } => 3,
     }
@@ -1464,6 +1467,22 @@ fn emit_instr(
             // r/m16,1; /4 selects SHL.
             out.push(0xD1);
             out.push(0b11_100_000 | reg.code());
+        }
+        Instr::ShlReg8One { reg } => {
+            // `shl r8,1` → D0 (mod=11 /4 r/m=<reg-code>). 8-bit
+            // sibling of `ShlReg16One`. Fixture 535.
+            out.push(0xD0);
+            out.push(0b11_100_000 | reg.code());
+        }
+        Instr::SarReg8One { reg } => {
+            // `sar r8,1` → D0 (mod=11 /7 r/m=<reg-code>).
+            out.push(0xD0);
+            out.push(0b11_111_000 | reg.code());
+        }
+        Instr::ShrReg8One { reg } => {
+            // `shr r8,1` → D0 (mod=11 /5 r/m=<reg-code>).
+            out.push(0xD0);
+            out.push(0b11_101_000 | reg.code());
         }
         Instr::RclReg16One { reg } => {
             // `rcl r16,1` → D1 (mod=11 /2 r/m=<reg>). Same Grp2 opcode
