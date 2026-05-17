@@ -3006,6 +3006,47 @@ and K>1 picks the helper-ABI convention regardless of where the
 result eventually gets stored. The intermediate step's ABI wins
 in both cases; the trailing memory store adapts its addressing.
 
+The skeleton further extends to **pointer-target destinations**.
+`*p OP= …` and `p->x OP= …` for a register-resident long pointer
+emit byte-identically to the other destinations, with the address
+pair becoming `[reg]` / `[reg+2]` (or `[reg+off]` / `[reg+off+2]`
+for a non-zero field offset):
+
+```
+; *p += y;  where p in SI (fixture 398 — variable RHS through ptr)
+mov ax, word ptr DGROUP:_y+2
+mov dx, word ptr DGROUP:_y
+add word ptr [si], dx            ; 01 14 — opcode 01, ModR/M 14 ([si], DX)
+adc word ptr [si+2], ax          ; 11 44 02 — opcode 11, ModR/M 44 ([si+2], AX)
+
+; p->x += 5;  where p in SI, x at struct offset 0 (fixture 399)
+add word ptr [si], 5             ; 83 04 05 — byte-identical to `*p += 5`
+adc word ptr [si+2], 0           ; 83 54 02 00
+```
+
+`p->x` for the first field (offset 0) is byte-identical to `*p`
+— the field offset just folds invisibly into the addressing mode.
+Non-zero field offsets produce `[reg+off]` and `[reg+off+2]`
+instead.
+
+The skeleton now spans **six destination storage classes**:
+globals, stack locals, struct fields (global), struct fields
+(stack), array elements (global, const index), and pointer
+targets (register-resident pointer with optional field offset).
+The opcode pair for variable-RHS arith is invariant across all
+six — only the ModR/M byte changes:
+
+| Destination     | low-half opcode + ModR/M    | high-half opcode + ModR/M    |
+|-----------------|-----------------------------|------------------------------|
+| Global / field  | `01 16 disp16`              | `11 06 disp16`               |
+| `[bp+N]`        | `01 56 dd`                  | `11 46 dd`                   |
+| `[si]` / `[si+off]` | `01 14`  or `01 54 dd`  | `11 44 dd`                   |
+
+A disassembler can recognize "long compound with variable RHS"
+purely from the `01 .. / 11 ..` opcode pair without parsing the
+ModR/M byte — the variable-RHS choice (vs `83`/`81` for const
+RHS) is what distinguishes the source-level shape.
+
 ### Long stack-local arithmetic (`329`–`335`)
 
 Long binary arithmetic between two stack-local long operands with
