@@ -6289,6 +6289,29 @@ impl<'a> FunctionEmitter<'a> {
                     let _ = write!(self.out, "\tmov\tword ptr {},dx\r\n", bp_addr(off));
                     return;
                 }
+                // `char c = a[K];` — skip the AL→AX widening that
+                // `emit_array_index_to_ax` emits for char globals,
+                // since the byte store truncates back anyway. Fixture
+                // 567 (`char c = a[1]` where a is a global char[]).
+                if ty.is_char_like()
+                    && let ExprKind::ArrayIndex { array, index } = &value.kind
+                    && let ExprKind::Ident(arr_name) = &array.kind
+                    && let Some(gty) = self.globals.type_of(arr_name)
+                    && let Some(const_off) = try_const_array_offset(gty, std::iter::once(&**index))
+                        .map(|(off, _leaf)| off)
+                    && gty
+                        .array_elem()
+                        .is_some_and(|e| e.is_char_like())
+                {
+                    let addr = if const_off == 0 {
+                        format!("DGROUP:_{arr_name}")
+                    } else {
+                        format!("DGROUP:_{arr_name}+{const_off}")
+                    };
+                    let _ = write!(self.out, "\tmov\tal,byte ptr {addr}\r\n");
+                    let _ = write!(self.out, "\tmov\tbyte ptr {},al\r\n", bp_addr(off));
+                    return;
+                }
                 self.emit_expr_to_ax(value);
                 if ty.is_char_like() {
                     let _ = write!(self.out, "\tmov\tbyte ptr {},al\r\n", bp_addr(off));
