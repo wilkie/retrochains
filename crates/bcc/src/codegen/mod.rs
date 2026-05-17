@@ -5417,6 +5417,26 @@ impl<'a> FunctionEmitter<'a> {
             );
             return;
         }
+        // `<ptr-global> = &<arr>[K];` — same shape as the
+        // `&<global>` immediate-store above but with `+offset` on
+        // the source symbol. Fixture 483.
+        if !ty.is_char_like()
+            && let ExprKind::AddressOfArrayElem { array, byte_offset } = &value.kind
+            && self.globals.contains(array)
+        {
+            if *byte_offset == 0 {
+                let _ = write!(
+                    self.out,
+                    "\tmov\tword ptr DGROUP:_{name},offset DGROUP:_{array}\r\n",
+                );
+            } else {
+                let _ = write!(
+                    self.out,
+                    "\tmov\tword ptr DGROUP:_{name},offset DGROUP:_{array}+{byte_offset}\r\n",
+                );
+            }
+            return;
+        }
         // Non-constant: compute into AX, then store.
         self.emit_expr_to_ax(value);
         if ty.is_char_like() {
@@ -5963,8 +5983,26 @@ impl<'a> FunctionEmitter<'a> {
             }
             ExprKind::Call { name, args } => self.emit_call(name, args),
             ExprKind::AddressOf(name) => self.emit_address_of(name),
-            ExprKind::AddressOfArrayElem { .. } => {
-                panic!("`&arr[K]` in value position not yet supported (no fixture)")
+            ExprKind::AddressOfArrayElem { array, byte_offset } => {
+                // `&<arr>[K]` at runtime — for a global array, emit
+                // the symbol+offset as an immediate. Stack-resident
+                // local arrays would need LEA; no fixture for that
+                // case yet.
+                if self.globals.contains(array) {
+                    if *byte_offset == 0 {
+                        let _ = write!(
+                            self.out,
+                            "\tmov\tax,offset DGROUP:_{array}\r\n",
+                        );
+                    } else {
+                        let _ = write!(
+                            self.out,
+                            "\tmov\tax,offset DGROUP:_{array}+{byte_offset}\r\n",
+                        );
+                    }
+                } else {
+                    panic!("`&<local-arr>[K]` not yet supported (no fixture)")
+                }
             }
             ExprKind::Deref(operand) => self.emit_deref_to_ax(operand),
             ExprKind::ArrayIndex { array, index } => {
