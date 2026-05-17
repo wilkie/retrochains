@@ -1210,6 +1210,21 @@ locals tightly. Probe replaced with the int-array variant
 (fixture 570) until we have appetite to reverse-engineer the
 local frame padding rules.
 
+## Free passes (no code changes needed)
+
+Three more probes hit existing paths byte-exactly:
+
+- `572` — `if (a || b)` between two int globals: the bare-ident
+  short-circuit lowering already routed through `emit_cond_
+  branch` and the established or-skeleton.
+- `573` — `sizeof(int *)` returns 2: the parse-time
+  `parse_type_name` already handles the `int *` declarator and
+  `Type::Pointer(_).size_bytes()` is 2.
+- `574` — `continue` inside a `while`: the planner's
+  `continue_target_slot = check_slot` mapping for while was
+  already correct (continue → top of test). Distinct from the
+  for-loop case fixed in fixture 558.
+
 ## What we explicitly defer
 
 - Templates, namespaces, RTTI, exceptions (not in BC2.0 to relevant
