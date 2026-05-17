@@ -2901,6 +2901,52 @@ impl<'a> FunctionEmitter<'a> {
                     let _ = write!(self.out, "\t{mnem}\tword ptr {},{hi}\r\n", bp_addr(off + 2));
                     return;
                 }
+                BinOp::Shl | BinOp::Shr if k >= 1 && k <= 255 => {
+                    // Long stack-local compound shift. Two shapes
+                    // by K — mirrors the long-global compound shift
+                    // path (fixtures 263–266) but stores back to
+                    // `[bp+N]` instead of `DGROUP:_g+N`. K=1 inlines
+                    // shift+rotate against AX:DX (memory-dest
+                    // convention: AX=high, DX=low). K>1 routes
+                    // through the helper, which forces the helper
+                    // convention (DX=high, AX=low) for the load —
+                    // BCC's register-pair choice tracks the
+                    // intermediate operation, not the final memory
+                    // store. The `mov cl, K` lands FIRST (compound-
+                    // form reorder). Fixtures 383 (K=1 `<<`),
+                    // 384 (K=1 `>>` signed), 385 (K>1 `<<`).
+                    let unsigned = self.locals.type_of(name).is_unsigned();
+                    if k == 1 {
+                        let _ = write!(self.out, "\tmov\tax,word ptr {}\r\n", bp_addr(off + 2));
+                        let _ = write!(self.out, "\tmov\tdx,word ptr {}\r\n", bp_addr(off));
+                        if matches!(op, BinOp::Shl) {
+                            self.out.extend_from_slice(b"\tshl\tdx,1\r\n");
+                            self.out.extend_from_slice(b"\trcl\tax,1\r\n");
+                        } else {
+                            let hi_op = if unsigned { "shr" } else { "sar" };
+                            let _ = write!(self.out, "\t{hi_op}\tax,1\r\n");
+                            self.out.extend_from_slice(b"\trcr\tdx,1\r\n");
+                        }
+                        let _ = write!(self.out, "\tmov\tword ptr {},ax\r\n", bp_addr(off + 2));
+                        let _ = write!(self.out, "\tmov\tword ptr {},dx\r\n", bp_addr(off));
+                    } else {
+                        let helper = match (op, unsigned) {
+                            (BinOp::Shl, _)     => "N_LXLSH@",
+                            (BinOp::Shr, false) => "N_LXRSH@",
+                            (BinOp::Shr, true)  => "N_LXURSH@",
+                            _ => unreachable!(),
+                        };
+                        let k_u8 = (k & 0xFF) as u8;
+                        let _ = write!(self.out, "\tmov\tcl,{k_u8}\r\n");
+                        let _ = write!(self.out, "\tmov\tdx,word ptr {}\r\n", bp_addr(off + 2));
+                        let _ = write!(self.out, "\tmov\tax,word ptr {}\r\n", bp_addr(off));
+                        let _ = write!(self.out, "\tcall\tnear ptr {helper}\r\n");
+                        self.helpers.insert(helper.to_string());
+                        let _ = write!(self.out, "\tmov\tword ptr {},dx\r\n", bp_addr(off + 2));
+                        let _ = write!(self.out, "\tmov\tword ptr {},ax\r\n", bp_addr(off));
+                    }
+                    return;
+                }
                 _ => {}
             }
         }
