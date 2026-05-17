@@ -441,6 +441,37 @@ to base-of-array, offset 0). No new code; the existing
 defined ones since the address-lowering goes through the same
 `<group>:_<name>+<offset>` template.
 
+### `&<struct>.<field>` for globals
+
+Fixture `485` exercises `p = &s.y;` where `s` is a global struct.
+The parser now consumes any `.<field>[.<field>]*` chain after
+`&<ident>`, threading the type table to compute the cumulative
+field byte_offset and producing
+`ExprKind::AddressOfArrayElem { array, byte_offset }` — the same
+node shape `&<arr>[K]` produces. The existing
+`MovGroupSymOffsetGroupSym` immediate-store form then emits
+`mov word ptr DGROUP:_<p>, offset DGROUP:_<s>+<field-offset>`.
+
+### `&<local-arr>[K]` — LEA from bp-offset
+
+Fixture `486` exposed the missing local-array case in the
+`AddressOfArrayElem` codegen. For stack-resident local arrays we
+now emit `lea ax, word ptr [bp+off+K]` where `off` is the array's
+bp-relative offset and `K` is the byte offset of the indexed
+element. Encoded as `8D 46 disp8` for small offsets. The parser's
+`&<ident>[K]` path was previously restricted to *global* arrays —
+extended to also accept stack-resident locals by consulting
+`function_locals` when `global_types` doesn't have the name.
+
+### `typedef <type> *<name>;` — pointer typedef
+
+Fixture `487` (`typedef int *INTP; INTP p; p = &g;`) needed the
+typedef parser to consume pointer stars between the base type and
+the name. Added a `while … Star` loop in `parse_typedef` matching
+the existing shape in `parse_declare` and `parse_global`. The
+typedef table then stores the wrapped pointer type, and uses of
+`INTP` resolve to `Pointer(Int)`.
+
 ## Comma operator
 
 `<expr>, <expr>` at expression level is a comma operator —
