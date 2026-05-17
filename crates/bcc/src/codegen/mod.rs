@@ -2015,9 +2015,11 @@ impl<'a> FunctionEmitter<'a> {
         // compare `cmp word ptr DGROUP:_g, K`. BCC prefers the
         // imm8sx form (`83 3E disp16 ii`) when K fits a signed
         // byte; otherwise the imm16 form. Fixture 429.
+        // Pointer globals share the same word-sized cmp path
+        // (fixture 504: `if (g == 0)` with `int *g`).
         if let (ExprKind::Ident(name), Some(rhs)) = (&left.kind, try_const_eval(right))
             && let Some(gty) = self.globals.type_of(name)
-            && matches!(gty, Type::Int | Type::UInt)
+            && (matches!(gty, Type::Int | Type::UInt) || gty.pointee().is_some())
         {
             let _ = write!(self.out, "\tcmp\tword ptr DGROUP:_{name},{rhs}\r\n");
             return;
