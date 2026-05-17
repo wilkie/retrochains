@@ -611,7 +611,24 @@ impl<'a> FunctionEmitter<'a> {
         };
         // Int/char globals: memory-direct `inc word ptr DGROUP:_g`
         // (or `dec`). Fixture 512 (`g++; g++; return g;`).
+        // Global pointers scale by sizeof(pointee) — `++p` on `int
+        // *p` adds 2, lowering to `add word ptr [_p], 2` rather
+        // than `inc`. Fixture 561.
         if let Some(gty) = self.globals.type_of(name) {
+            if let Some(pointee) = gty.pointee() {
+                let stride = u32::from(pointee.size_bytes());
+                if stride != 1 {
+                    let arith = match op {
+                        UpdateOp::Inc => "add",
+                        UpdateOp::Dec => "sub",
+                    };
+                    let _ = write!(
+                        self.out,
+                        "\t{arith}\tword ptr DGROUP:_{name},{stride}\r\n",
+                    );
+                    return;
+                }
+            }
             let width = if gty.is_char_like() { "byte" } else { "word" };
             let _ = write!(self.out, "\t{mnemonic}\t{width} ptr DGROUP:_{name}\r\n");
             return;
@@ -2538,6 +2555,17 @@ impl<'a> FunctionEmitter<'a> {
 
     fn emit_return_value_load(&mut self, value: Option<&Expr>) {
         let Some(e) = value else { return };
+        // Char-returning function with a constant `return K;` —
+        // `mov al, K` (2 bytes) leaves AH undefined per the ABI for
+        // char return values, which is exactly what BCC emits for
+        // `char f() { return 'Z'; }`. Fixture 562.
+        if self.function.ret_ty.is_char_like()
+            && let Some(v) = try_const_eval(e)
+        {
+            let v8 = v & 0xFF;
+            let _ = write!(self.out, "\tmov\tal,{v8}\r\n");
+            return;
+        }
         // Struct return. Two shapes by size, paralleling the
         // struct-copy and struct-by-value-arg cases:
         //   - 4 bytes: load high to DX, low to AX — *byte-identical*
@@ -5857,6 +5885,20 @@ impl<'a> FunctionEmitter<'a> {
             );
             return;
         }
+        // `<ptr-global> = <arr-global>;` — global array decays to
+        // its base address. Same `mov word ptr [_p], offset _a`
+        // form as `p = &a;`. Fixture 561 (`int a[3]; int *p; p = a;`).
+        if !ty.is_char_like()
+            && let ExprKind::Ident(src) = &value.kind
+            && let Some(src_ty) = self.globals.type_of(src)
+            && matches!(src_ty, Type::Array { .. })
+        {
+            let _ = write!(
+                self.out,
+                "\tmov\tword ptr DGROUP:_{name},offset DGROUP:_{src}\r\n",
+            );
+            return;
+        }
         // `<ptr-global> = &<arr>[K];` — same shape as the
         // `&<global>` immediate-store above but with `+offset` on
         // the source symbol. Fixture 483.
@@ -6489,7 +6531,18 @@ impl<'a> FunctionEmitter<'a> {
                     }
                 }
             }
-            ExprKind::Call { name, args } => self.emit_call(name, args),
+            ExprKind::Call { name, args } => {
+                self.emit_call(name, args);
+                // Char-returning callee leaves only AL meaningful;
+                // widen to AX so the caller sees a full int. Signed
+                // char uses cbw; uchar uses `mov ah, 0`. Fixture 562.
+                if let Some(ret) = self.signatures.ret_ty_of(name)
+                    && ret.is_char_like()
+                {
+                    let ret = ret.clone();
+                    self.emit_widen_al(&ret);
+                }
+            }
             ExprKind::AddressOf(name) => self.emit_address_of(name),
             ExprKind::AddressOfArrayElem { array, byte_offset } => {
                 // `&<arr>[K]` at runtime — for a global array, emit
