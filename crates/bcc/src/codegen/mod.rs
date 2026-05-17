@@ -3921,7 +3921,13 @@ impl<'a> FunctionEmitter<'a> {
         {
             let lo_addr = global_offset_addr(array, const_off as i32);
             let hi_addr = global_offset_addr(array, const_off as i32 + 2);
-            self.emit_long_compound_to_mem(&lo_addr, &hi_addr, op, value);
+            self.emit_long_compound_to_mem(
+                &lo_addr,
+                &hi_addr,
+                op,
+                value,
+                leaf_ty.is_unsigned(),
+            );
             return;
         }
         let array_ty = self.locals.type_of(array).clone();
@@ -4167,14 +4173,63 @@ impl<'a> FunctionEmitter<'a> {
     /// `hi_addr`. The skeleton matches the long-global compound path
     /// (fixtures 251/253/339) and is destination-storage-agnostic —
     /// works for globals, struct fields, and array elements once the
-    /// caller has computed the right disp16 expressions.
+    /// caller has computed the right disp16 expressions. The
+    /// `dest_unsigned` flag only matters for `>>=` (chooses `sar` vs
+    /// `shr` for the high half / picks the signed-vs-unsigned shift
+    /// helper for K>1).
     fn emit_long_compound_to_mem(
         &mut self,
         lo_addr: &str,
         hi_addr: &str,
         op: BinOp,
         value: &Expr,
+        dest_unsigned: bool,
     ) {
+        // Shift compound: two shapes by K. K=1 inline uses memory-
+        // dest register convention (AX=high, DX=low) — the loaded
+        // pair matches the trailing store. K>1 routes through the
+        // helper and so loads with the helper ABI (DX=high, AX=low);
+        // the trailing store adapts. `mov cl, K` lands FIRST in the
+        // compound-form reorder. Mirrors the long-global compound-
+        // shift path (fixtures 263–266) and the long-stack-local
+        // compound-shift path (fixtures 383–385). Fixtures 395
+        // (struct field, K=1 `<<=`), 396 (array elem, K=1), 397
+        // (struct field, K=2 helper).
+        if matches!(op, BinOp::Shl | BinOp::Shr)
+            && let Some(k) = try_const_eval(value)
+            && (1..=255).contains(&k)
+        {
+            if k == 1 {
+                let _ = write!(self.out, "\tmov\tax,word ptr {hi_addr}\r\n");
+                let _ = write!(self.out, "\tmov\tdx,word ptr {lo_addr}\r\n");
+                if matches!(op, BinOp::Shl) {
+                    self.out.extend_from_slice(b"\tshl\tdx,1\r\n");
+                    self.out.extend_from_slice(b"\trcl\tax,1\r\n");
+                } else {
+                    let hi_op = if dest_unsigned { "shr" } else { "sar" };
+                    let _ = write!(self.out, "\t{hi_op}\tax,1\r\n");
+                    self.out.extend_from_slice(b"\trcr\tdx,1\r\n");
+                }
+                let _ = write!(self.out, "\tmov\tword ptr {hi_addr},ax\r\n");
+                let _ = write!(self.out, "\tmov\tword ptr {lo_addr},dx\r\n");
+            } else {
+                let helper = match (op, dest_unsigned) {
+                    (BinOp::Shl, _)     => "N_LXLSH@",
+                    (BinOp::Shr, false) => "N_LXRSH@",
+                    (BinOp::Shr, true)  => "N_LXURSH@",
+                    _ => unreachable!(),
+                };
+                let k_u8 = (k & 0xFF) as u8;
+                let _ = write!(self.out, "\tmov\tcl,{k_u8}\r\n");
+                let _ = write!(self.out, "\tmov\tdx,word ptr {hi_addr}\r\n");
+                let _ = write!(self.out, "\tmov\tax,word ptr {lo_addr}\r\n");
+                let _ = write!(self.out, "\tcall\tnear ptr {helper}\r\n");
+                self.helpers.insert(helper.to_string());
+                let _ = write!(self.out, "\tmov\tword ptr {hi_addr},dx\r\n");
+                let _ = write!(self.out, "\tmov\tword ptr {lo_addr},ax\r\n");
+            }
+            return;
+        }
         // Const RHS: `op [lo], k_lo / op|carry [hi], k_hi_or_0`.
         // Arith uses `83 /n` imm8sx (low half must fit i8sx; high
         // is `adc/sbb 0`). Bitwise uses `81 /n` imm16 (op-family-
@@ -4258,7 +4313,13 @@ impl<'a> FunctionEmitter<'a> {
                 let off = base_bp + i16::try_from(total_off).unwrap_or(i16::MAX);
                 (bp_addr(off), bp_addr(off + 2))
             };
-            self.emit_long_compound_to_mem(&lo_addr, &hi_addr, op, value);
+            self.emit_long_compound_to_mem(
+                &lo_addr,
+                &hi_addr,
+                op,
+                value,
+                leaf_ty.is_unsigned(),
+            );
             return;
         }
         let ExprKind::Ident(name) = &base.kind else {
