@@ -967,6 +967,19 @@ Signed `>>=` lowers to `sar` (sign-fill); unsigned `>>=` to
 unrolled `<reg>,1` peephole at this slot, unlike the byte-
 register char path (fixture 535).
 
+## Int global compound shift
+
+Fixture `539` (`int g; g = 80; g >>= 2;`) — int (or uint) global
+compound shift by a small constant K unrolls into K memory-
+direct shift-by-1 instructions, just like the byte-register
+char path (fixture 535) but with a `<group>:<sym>` memory
+operand. Three new tasm IR variants (`ShlGroupSymOne`,
+`SarGroupSymOne`, `ShrGroupSymOne`) encode `D1 26 | 3E | 2E lo
+hi`. The codegen path picks `shl` for `<<=`, `sar` for signed
+`>>=`, and `shr` for unsigned `>>=`. The unrolled emit slots in
+before the existing add/sub and bitwise int-global compound
+paths.
+
 ## What we explicitly defer
 
 - Templates, namespaces, RTTI, exceptions (not in BC2.0 to relevant
