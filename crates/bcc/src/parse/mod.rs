@@ -187,7 +187,7 @@ impl Parser {
             // any, but those would have been consumed by the
             // bare-struct path above).
             match self.peek_n(probe).kind {
-                TokenKind::KwInt | TokenKind::KwChar => probe += 1,
+                TokenKind::KwInt | TokenKind::KwChar | TokenKind::KwVoid => probe += 1,
                 TokenKind::KwUnsigned | TokenKind::KwLong | TokenKind::KwSigned => {
                     probe += 1;
                     // `unsigned long`, `long unsigned`, `signed long`,
@@ -452,6 +452,15 @@ impl Parser {
         }
         match self.peek().kind {
             TokenKind::KwInt => {
+                self.bump();
+                Ok(Type::Int)
+            }
+            TokenKind::KwVoid => {
+                // `void` as a return type. We don't have a dedicated
+                // `Type::Void` variant — Int serves as the placeholder
+                // since codegen treats functions with no `return <expr>`
+                // statements the same way regardless of declared ret
+                // type. Fixture 552 (`void set(int *p) { *p = 99; }`).
                 self.bump();
                 Ok(Type::Int)
             }
