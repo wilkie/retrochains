@@ -242,6 +242,53 @@ field offsets layered on top. The previous code already aligned
 the *start* of each slot to the type's alignment; rounding the
 size up to alignment as well closes the gap.
 
+### `unsigned char` as param / pointee / return
+
+Fixtures `464`–`466` extend uchar to function param, pointer
+target, and return type. Two more latent gaps surfaced:
+
+1. **Byte-store through a pointer register** wasn't supported in
+   the assembler — `mov byte ptr [si], imm8` (`C6 04 ii`, 3
+   bytes). Added as `Instr::MovSiPtrImm8`, paralleling the existing
+   word-form `MovSiPtrImm` (`C7 04 ww ww`). Fixture 465 uses it
+   for `*p = 200;` where `p: unsigned char *` in SI.
+2. **Return value widening differs by signedness**: signed `char`
+   return emits `cbw` after the AL load (fixture 156); unsigned
+   `char` return emits *no widening* — the value lives in AL alone
+   and the upper byte is left undefined. Fixture 466 pins the
+   uchar shape: `mov al, byte ptr DGROUP:_g / jmp short epilogue
+   / ret`, no `mov ah, 0`. `emit_return_value_load` now
+   short-circuits the uchar-ident case to emit just the byte load.
+
+### BSS layout — short bucket first
+
+Fixture `465` (uchar array + int global) exposed that BCC's _BSS
+member ordering is **not** pure alphabetical. The actual rule:
+*short-named globals (mangled `_<name>` length < 3) in alphabetical
+order first, then long-named globals in alphabetical order*. This
+is the same length-bucket discriminant the publics emission uses,
+applied to globals (and effectively the reverse of the publics
+emission order, filtered to BSS members).
+
+The earlier "alphabetical" reading happened to coincide on
+fixtures 181/234/462 because their names all fell in the same
+bucket. 465 has `_buf` (4 chars including underscore) in the long
+bucket and `_g` (2 chars) in the short bucket, so the buckets
+diverge: oracle emits `_g, _buf` (short → long) with no padding,
+not the alphabetical `_buf, _g` that would require a 1-byte pad
+to align `_g`.
+
+### Publics emission — long bucket split
+
+The long bucket itself splits further between globals, functions,
+and runtime helpers — each subgroup reverse-alpha within itself,
+concatenated in that fixed order. Fixture `465`'s publics are
+`_buf` (global, long) and `_main` (function, long); oracle emits
+`_buf, _main` (globals before functions), not the mixed
+reverse-alpha `_main, _buf` that would otherwise apply. Function-
+only and helper-only cases (095, 179, 260) collapse to the same
+result either way because the relevant subgroup is empty.
+
 ## What we explicitly defer
 
 - Templates, namespaces, RTTI, exceptions (not in BC2.0 to relevant
