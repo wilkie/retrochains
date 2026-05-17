@@ -1260,6 +1260,80 @@ impl<'a> FunctionEmitter<'a> {
         }
     }
 
+    /// `(high-addr, low-addr)` text for an arbitrary long-valued
+    /// lvalue expression. Covers: bare ident (global or stack),
+    /// dot-chain (`s.x`, `a[K].x`, nested), array index with
+    /// constant subscript (global or stack), and pointer deref
+    /// for a register-resident long pointer (`*p`).
+    ///
+    /// Returns `None` if the lvalue isn't a shape we know how to
+    /// fold into a constant address pair (e.g. variable array index,
+    /// stack-resident pointer).
+    fn long_lvalue_addr_pair(&self, e: &Expr) -> Option<(String, String)> {
+        // Bare ident.
+        if let ExprKind::Ident(name) = &e.kind
+            && self.ident_is_long_like(name)
+        {
+            return Some(self.long_addr_pair(name));
+        }
+        // Dot/arrow member chain folding to a constant address.
+        if let ExprKind::Member { base, field, kind: crate::ast::MemberKind::Dot } = &e.kind
+            && let Some((src, total_off, leaf_ty)) = self.try_member_dot_chain(base, field)
+            && leaf_ty.is_long_like()
+        {
+            if self.globals.contains(&src) {
+                return Some((
+                    global_offset_addr(&src, total_off + 2),
+                    global_offset_addr(&src, total_off),
+                ));
+            }
+            if let LocalLocation::Stack(base_bp) = self.locals.location_of(&src) {
+                let off = base_bp + i16::try_from(total_off).unwrap_or(i16::MAX);
+                return Some((bp_addr(off + 2), bp_addr(off)));
+            }
+        }
+        // Array index with constant subscript (global or stack array).
+        if let ExprKind::ArrayIndex { array: arr_expr, index } = &e.kind
+            && let ExprKind::Ident(arr_name) = &arr_expr.kind
+            && let Some(k) = try_const_eval(index)
+        {
+            let byte_off = (k as i32) * 4;
+            if let Some(arr_ty) = self.globals.type_of(arr_name)
+                && let Some(elem) = arr_ty.array_elem()
+                && elem.is_long_like()
+            {
+                return Some((
+                    global_offset_addr(arr_name, byte_off + 2),
+                    global_offset_addr(arr_name, byte_off),
+                ));
+            }
+            if self.locals.has(arr_name)
+                && let Some(elem) = self.locals.type_of(arr_name).array_elem()
+                && elem.is_long_like()
+            {
+                let LocalLocation::Stack(base_off) =
+                    self.locals.location_of(arr_name)
+                else {
+                    unreachable!("array is stack-resident");
+                };
+                let off = base_off + i16::try_from(byte_off).unwrap_or(i16::MAX);
+                return Some((bp_addr(off + 2), bp_addr(off)));
+            }
+        }
+        // `*p` for a register-resident long pointer.
+        if let ExprKind::Deref(operand) = &e.kind
+            && let ExprKind::Ident(ptr_name) = &operand.kind
+            && self.locals.has(ptr_name)
+            && let Some(pointee) = self.locals.type_of(ptr_name).pointee()
+            && pointee.is_long_like()
+            && let LocalLocation::Reg(reg) = self.locals.location_of(ptr_name)
+        {
+            let r = reg.name();
+            return Some((format!("[{r}+2]"), format!("[{r}]")));
+        }
+        None
+    }
+
     /// Whether `cond` is `<long_var> <op> K` for a relational
     /// comparison op (`<,>,<=,>=`) on a long global or stack local.
     /// BCC inlines K into the `cmp <mem>, imm` instruction (per
@@ -4198,40 +4272,40 @@ impl<'a> FunctionEmitter<'a> {
                 return;
             }
             // Long-to-long arithmetic/bitwise between two long globals:
-            // `g = a + b;` / `g = a - b;` / `g = a & b;` (similarly
-            // for `|`, `^`). Same skeleton: load a into (AX=high,
-            // DX=low), apply the op's pair to b's halves, store back.
-            // Add/Sub need carry/borrow (adc/sbb on the high half);
-            // bitwise ops are independent per-half so the high-half
-            // op is the same mnemonic. Fixtures 219 (add), 220 (sub),
-            // 221 (and), 222 (or), 224 (xor).
+            // `g = <lvalue_a> <op> <lvalue_b>;` for two long lvalues.
+            // Same skeleton: load a into (AX=high, DX=low), apply
+            // the op's pair to b's halves, store back. Add/Sub need
+            // carry/borrow; bitwise ops repeat the same mnemonic.
+            // Both lvalues can be any long ident (global/stack),
+            // struct field (dot-chain), array element (const index),
+            // or `*p` (register pointer). Fixtures 219, 220, 221,
+            // 222, 224 (globals-globals); 355 (struct fields).
             if let ExprKind::BinOp { op, left, right } = &value.kind
                 && let Some((lo_op, hi_op)) = long_pair_op(*op)
-                && let ExprKind::Ident(a) = &left.kind
-                && let ExprKind::Ident(b) = &right.kind
-                && self.globals.type_of(a).map_or(false, |t| t.is_long_like())
-                && self.globals.type_of(b).map_or(false, |t| t.is_long_like())
+                && let Some((a_hi, a_lo)) = self.long_lvalue_addr_pair(left)
+                && let Some((b_hi, b_lo)) = self.long_lvalue_addr_pair(right)
             {
-                let _ = write!(self.out, "\tmov\tax,word ptr DGROUP:_{a}+2\r\n");
-                let _ = write!(self.out, "\tmov\tdx,word ptr DGROUP:_{a}\r\n");
-                let _ = write!(self.out, "\t{lo_op}\tdx,word ptr DGROUP:_{b}\r\n");
-                let _ = write!(self.out, "\t{hi_op}\tax,word ptr DGROUP:_{b}+2\r\n");
+                let _ = write!(self.out, "\tmov\tax,word ptr {a_hi}\r\n");
+                let _ = write!(self.out, "\tmov\tdx,word ptr {a_lo}\r\n");
+                let _ = write!(self.out, "\t{lo_op}\tdx,word ptr {b_lo}\r\n");
+                let _ = write!(self.out, "\t{hi_op}\tax,word ptr {b_hi}\r\n");
                 let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name}+2,ax\r\n");
                 let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name},dx\r\n");
                 return;
             }
-            // `g = g + K;` or `g = g - K;` for a long global, K small
-            // (fits in i8 — after sign flip for sub). BCC reuses one
-            // add/adc pattern for both: load (high→AX, low→DX), add
-            // the low half (`add dx,delta`), carry-propagate into the
-            // high half (`adc ax,carry`), then writeback (A3 + 89/16).
-            // For Add: delta = +K, carry = 0. For Sub: delta = -K,
-            // carry = -1 (sign-extension of the negative delta).
-            // Fixtures 207 (add) and 208 (sub).
+            // `g = <long-lvalue> + K;` or `g = <long-lvalue> - K;` —
+            // load the lvalue's halves into (AX=high, DX=low) globals
+            // convention (since dest is the memory global `g`), then
+            // add/sub the low half and adc/sbb the high (carry=0 for
+            // Add, -1 for Sub). The lvalue can be any long ident
+            // (global or stack), struct field, array element (const
+            // index), or `*p` for a register-resident long pointer.
+            // Fixtures 207 / 208 (self-modify g), 275 (wide K), 352
+            // (struct field source), 353 (array element source), 354
+            // (deref source).
             if let ExprKind::BinOp { op, left, right } = &value.kind
                 && (matches!(op, BinOp::Add) || matches!(op, BinOp::Sub))
-                && let ExprKind::Ident(rhs_name) = &left.kind
-                && rhs_name == name
+                && let Some((hi_addr, lo_addr)) = self.long_lvalue_addr_pair(left)
                 && let Some(k) = try_const_eval(right)
             {
                 let signed = k as i32;
@@ -4244,8 +4318,8 @@ impl<'a> FunctionEmitter<'a> {
                 // otherwise emits the wider `add dx, K_i16`
                 // (fixture 275). Either way the high partner is
                 // `adc ax, carry` (carry=0 for Add, -1 for Sub).
-                let _ = write!(self.out, "\tmov\tax,word ptr DGROUP:_{name}+2\r\n");
-                let _ = write!(self.out, "\tmov\tdx,word ptr DGROUP:_{name}\r\n");
+                let _ = write!(self.out, "\tmov\tax,word ptr {hi_addr}\r\n");
+                let _ = write!(self.out, "\tmov\tdx,word ptr {lo_addr}\r\n");
                 if let Ok(delta_i8) = i8::try_from(delta) {
                     let _ = write!(self.out, "\tadd\tdx,{delta_i8}\r\n");
                 } else {
