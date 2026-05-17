@@ -942,6 +942,31 @@ can't replicate without more reversing work. The original 535
 probe was replaced with a single-function fixture to sidestep
 the issue.
 
+## `if (!x)` logical-not condition
+
+Fixture `536` (`int g; if (!g) return 1;`) — `!x` in a
+condition context lowers to the same flag-setting test as
+`x`, but the conditional jump's polarity flips. `emit_cond_
+test` now special-cases `Unary { op: Not, operand }` by
+recursing on `operand` and swapping the returned `(true_mnem,
+false_mnem)` tuple. Nested `!!x` collapses correctly through
+the recursion. The actual asm output is exactly what the
+unnegated test produces — only the JE/JNE pairing on the
+caller side differs.
+
+## Int local compound shift
+
+Fixture `537` (`int x; x = 1; x <<= 4;`) — register-resident
+int local compound shift. `emit_compound_assign`'s register-
+local branch now handles `BinOp::Shl`/`Shr` by emitting `mov
+cl, K; <shl|sar|shr> <reg>, cl`. Three new tasm IR variants
+(`ShlReg16Cl`, `SarReg16Cl`, `ShrReg16Cl`) generalize the
+existing `ShlAxCl`/`SarAxCl`/`ShrAxCl` to any 16-bit register.
+Signed `>>=` lowers to `sar` (sign-fill); unsigned `>>=` to
+`shr`. BCC always uses the CL form here even for K=1 — no
+unrolled `<reg>,1` peephole at this slot, unlike the byte-
+register char path (fixture 535).
+
 ## What we explicitly defer
 
 - Templates, namespaces, RTTI, exceptions (not in BC2.0 to relevant
