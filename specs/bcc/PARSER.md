@@ -1140,6 +1140,31 @@ The two halves compose: the call site doesn't need to know how
 the callee left AL — `signatures` provides the return type and
 the widen step always fires.
 
+## Compare with negative literal
+
+Fixture `563` (`int x; if (x < -5) ...`) — two layered fixes:
+
+- `emit_compare`'s stack-local and global-const paths masked
+  the const to u32 width when formatting (`{rhs}`), so `-5`
+  ended up as `4294967291` in the asm text. Both now mask to
+  `& 0xFFFF` before emitting.
+- TASM's `parse_imm8_signed` rejected u16 values in the upper
+  half (32768..65535) even when they reinterpret as a fitting
+  i8. The helper now reinterprets such values as `as i16` and
+  retries the i8 fit, so `cmp word ptr [bp-2], 65531` correctly
+  picks the imm8sx form (`83 7E dd FB`) BCC emits for `cmp ...,
+  -5`. The wide-immediate sibling `CmpBpRelImm16` (`81 7E dd lo
+  hi`) was added for true imm16 constants that don't fit i8sx.
+
+## Pointer compound subtract
+
+Fixture `564` (`int *p; p = a; p += 4; p -= 2;`) — `sub <reg16>,
+imm` had no parser/encoder route in tasm. Added `SubReg16Imm8Sx`
+(`83 E(reg) ii`, 3 bytes) and `SubReg16Imm16` (`81 E(reg) lo
+hi`, 4 bytes). The codegen pointer-stride scaling from fixture
+542 already does the multiply (`p -= 2;` on `int *` → 2*2 = 4)
+— this batch just made TASM accept the emitted asm.
+
 ## What we explicitly defer
 
 - Templates, namespaces, RTTI, exceptions (not in BC2.0 to relevant
