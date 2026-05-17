@@ -186,6 +186,17 @@ pub enum StmtKind {
     /// enclosing loop (i.e., to its check / step label). Switches do
     /// not catch `continue;` — it threads past them to the loop.
     Continue,
+    /// `goto <label>;` — unconditional jump to a labeled statement
+    /// elsewhere in the function. Lowered to a single `jmp short
+    /// <label>` (fixture 434). The target must be a `Label` statement
+    /// in the same function body.
+    Goto { label: String },
+    /// `<name>:` — label that names a position in the function so
+    /// `goto <name>;` can jump to it. The label itself emits no
+    /// bytes; codegen attaches the asm-label to the *next* emitted
+    /// instruction so the `jmp short` resolves to that position
+    /// (fixture 434).
+    Label { name: String },
     /// `switch (scrutinee) { case K: ...; default: ...; }`. Cases are
     /// kept in source order; at most one may be a `default` (None
     /// value). Each case's body extends until the next `case` /

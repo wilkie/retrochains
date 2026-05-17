@@ -139,6 +139,7 @@ impl<'a> Lexer<'a> {
             b"unsigned" => TokenKind::KwUnsigned,
             b"union" => TokenKind::KwUnion,
             b"long" => TokenKind::KwLong,
+            b"goto" => TokenKind::KwGoto,
             other => TokenKind::Ident(String::from_utf8_lossy(other).into_owned()),
         }
     }

@@ -300,6 +300,10 @@ fn plan_stmt(stmt: &Stmt, ctx: &mut PlanCtx) {
         StmtKind::Break | StmtKind::Continue => {
             // No slot reservations.
         }
+        StmtKind::Goto { .. } | StmtKind::Label { .. } => {
+            // No slot reservations — goto/label use user_<name>
+            // labels not numbered BCC slots.
+        }
         StmtKind::ExprStmt(e) => plan_expr_value(e, ctx),
     }
 }

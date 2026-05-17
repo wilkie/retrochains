@@ -526,6 +526,18 @@ impl<'a> FunctionEmitter<'a> {
                 self.advance_to_stmt_line(stmt);
                 self.emit_expr_discard(expr);
             }
+            StmtKind::Goto { label } => {
+                self.advance_to_stmt_line(stmt);
+                let _ = write!(
+                    self.out,
+                    "\tjmp\tshort @{}@user_{label}\r\n",
+                    self.func_idx,
+                );
+            }
+            StmtKind::Label { name } => {
+                self.advance_to_stmt_line(stmt);
+                let _ = write!(self.out, "@{}@user_{name}:\r\n", self.func_idx);
+            }
         }
     }
 
@@ -1913,6 +1925,11 @@ impl<'a> FunctionEmitter<'a> {
         let ExprKind::Ident(name) = &cond.kind else {
             panic!("non-ident boolean condition not yet supported (no fixture)");
         };
+        if let Some(gty) = self.globals.type_of(name) {
+            let width = if matches!(gty, Type::Char) { "byte" } else { "word" };
+            let _ = write!(self.out, "\tcmp\t{width} ptr DGROUP:_{name},0\r\n");
+            return;
+        }
         match self.locals.location_of(name) {
             LocalLocation::Stack(off) => {
                 let ty = self.locals.type_of(name);

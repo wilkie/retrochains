@@ -810,6 +810,31 @@ impl Parser {
                     span: Span::new(tok.span.start, semi.span.end),
                 })
             }
+            TokenKind::KwGoto => {
+                let tok = self.bump();
+                let name_tok = self.bump();
+                let TokenKind::Ident(label) = name_tok.kind else {
+                    return Err(ParseError::NotAnIdent { offset: name_tok.span.start });
+                };
+                let semi = self.expect(&TokenKind::Semicolon)?;
+                Ok(Stmt {
+                    kind: StmtKind::Goto { label },
+                    span: Span::new(tok.span.start, semi.span.end),
+                })
+            }
+            // `<name>:` — label statement. Distinguished from the
+            // bare-ident assignment / expression cases by a `:`
+            // following the identifier (rather than `=`, `(`, `[`,
+            // operator, etc.). Fixture 434.
+            TokenKind::Ident(_) if matches!(self.peek_n(1).kind, TokenKind::Colon) => {
+                let name_tok = self.bump();
+                let TokenKind::Ident(name) = name_tok.kind else { unreachable!() };
+                let colon = self.bump();
+                Ok(Stmt {
+                    kind: StmtKind::Label { name },
+                    span: Span::new(name_tok.span.start, colon.span.end),
+                })
+            }
             // `<ident> = …` is an assignment; `<ident> +=` (and the
             // other compound-assignment ops) becomes CompoundAssign.
             // Otherwise the line is an expression statement, or — for
