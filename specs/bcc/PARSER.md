@@ -1180,6 +1180,36 @@ a global. It emits `mov al, byte ptr DGROUP:_a+K; mov byte ptr
 through `emit_expr_to_ax` still widen because their consumers
 (arithmetic, ax-passing) need a full int.
 
+## `if (g & K)` bit test
+
+Fixture `569` (`int g; if (g & 1) ...`) — BCC uses the `test`
+instruction to set ZF directly from a masked memory read,
+avoiding the load-into-register-then-`and`-then-test path.
+`emit_cond_test` now special-cases `BinOp::BitAnd` with an int
+global LHS and a constant RHS: emit `test word ptr DGROUP:_g,
+K` (`F7 06 lo hi imm_lo imm_hi`, 6 bytes), then the standard
+`jne/je` pair. A new tasm IR variant `TestGroupSymImm16`
+encodes it.
+
+## `a += b;` between two int globals
+
+Fixture `571` (`int a; int b; a += b;`) — `emit_compound_
+assign` now handles the int-global + int-global case with `mov
+ax, [_b]; add word ptr [_a], ax`. The store-back uses the
+generic Grp1 r/m16, r16 form (`01 06 lo hi` for ADD; `29 06 lo
+hi` for SUB). Two new tasm IR variants `AddGroupSymReg16` /
+`SubGroupSymReg16` encode these.
+
+### Char-local array layout (deferred)
+
+Probed `char a[3]; char c; c = a[1];` and discovered BCC's
+local frame allocator pads char arrays to even byte boundaries
+*and* aligns the next local to the next even address, leaving
+the byte after the array as padding. Our allocator packs
+locals tightly. Probe replaced with the int-array variant
+(fixture 570) until we have appetite to reverse-engineer the
+local frame padding rules.
+
 ## What we explicitly defer
 
 - Templates, namespaces, RTTI, exceptions (not in BC2.0 to relevant
