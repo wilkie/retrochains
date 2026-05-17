@@ -35,6 +35,7 @@ pub enum TokenKind {
     KwLong,
     KwGoto,
     KwSigned,
+    KwConst,
     // Atoms
     Ident(String),
     IntLit(u32),
@@ -124,6 +125,7 @@ impl TokenKind {
             Self::KwLong => "`long`",
             Self::KwGoto => "`goto`",
             Self::KwSigned => "`signed`",
+            Self::KwConst => "`const`",
             Self::Ident(_) => "identifier",
             Self::IntLit(_) => "integer literal",
             Self::StringLit(_) => "string literal",

@@ -150,6 +150,11 @@ impl Parser {
             // a global. Probe past the type to find the declarator
             // name and decide.
             let mut probe = 0usize;
+            // `const` is a discardable qualifier — accept it before
+            // the type prefix. Fixture 475.
+            while matches!(self.peek_n(probe).kind, TokenKind::KwConst) {
+                probe += 1;
+            }
             // Skip the type prefix (int/char/struct ...). For
             // struct types we need to skip the `struct` keyword
             // plus the tag (and the inline definition braces if
@@ -257,6 +262,19 @@ impl Parser {
         if matches!(self.peek().kind, TokenKind::Ident(_)) {
             self.bump();
         }
+        self.parse_enum_body()?;
+        self.expect(&TokenKind::Semicolon)?;
+        Ok(())
+    }
+
+    /// Parse the `{ NAME [= int] (, NAME [= int])* [,] }` body of an
+    /// enum declaration. The caller has already consumed `enum
+    /// [<tag>]`. Registers each member in `enum_constants` and
+    /// consumes through the closing `}`. Used both by the standalone
+    /// `enum [tag] { … };` form (via `parse_enum_decl`) and by the
+    /// type-position `enum [tag] { … } <decl>` form (via
+    /// `parse_type`).
+    fn parse_enum_body(&mut self) -> Result<(), ParseError> {
         self.expect(&TokenKind::LBrace)?;
         let mut next: u32 = 0;
         loop {
@@ -290,7 +308,6 @@ impl Parser {
             }
         }
         self.expect(&TokenKind::RBrace)?;
-        self.expect(&TokenKind::Semicolon)?;
         Ok(())
     }
 
@@ -368,6 +385,12 @@ impl Parser {
     /// `*` modifiers are handled by the *caller* — this returns the
     /// base type only.
     fn parse_type(&mut self) -> Result<Type, ParseError> {
+        // `const` is purely a front-end qualifier — BCC accepts and
+        // discards it. A `const int g = 42` ends up as a plain int
+        // in _DATA (fixture 475 — _DATA size = 2 bytes for the int).
+        while matches!(self.peek().kind, TokenKind::KwConst) {
+            self.bump();
+        }
         match self.peek().kind {
             TokenKind::KwInt => {
                 self.bump();
@@ -443,13 +466,19 @@ impl Parser {
             TokenKind::KwStruct => self.parse_struct_type(),
             TokenKind::KwUnion => self.parse_union_type(),
             TokenKind::KwEnum => {
-                // `enum [<tag>]` as a type — enums are int-sized in
-                // BCC. Tag is consumed if present; we don't require
-                // it to be registered since enum members were already
-                // registered at the definition site. Fixture 470.
+                // `enum [<tag>] [{ … }]` as a type — enums are int-
+                // sized in BCC. Tag is consumed if present; we don't
+                // require it to be registered since enum members were
+                // already registered at the definition site. The
+                // body form (`enum { A, B } x;`) is also valid here:
+                // we parse the body to register members. Fixtures
+                // 470 (bare) and 474 (with body).
                 self.bump();
                 if matches!(self.peek().kind, TokenKind::Ident(_)) {
                     self.bump();
+                }
+                if matches!(self.peek().kind, TokenKind::LBrace) {
+                    self.parse_enum_body()?;
                 }
                 Ok(Type::Int)
             }
@@ -854,6 +883,7 @@ impl Parser {
             | TokenKind::KwUnsigned
             | TokenKind::KwLong
             | TokenKind::KwSigned
+            | TokenKind::KwConst
             | TokenKind::KwEnum => self.parse_declare(start),
             TokenKind::KwStatic => self.parse_declare(start),
             TokenKind::Ident(ref name) if self.typedefs.contains_key(name) => {
