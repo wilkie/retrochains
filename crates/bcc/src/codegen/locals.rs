@@ -461,7 +461,8 @@ fn collect_address_taken(stmt: &Stmt, out: &mut HashSet<String>) {
             expr_address_taken(value, out);
         }
         StmtKind::ArrayAssign { indices, value, .. }
-        | StmtKind::ArrayCompoundAssign { indices, value, .. } => {
+        | StmtKind::ArrayCompoundAssign { indices, value, .. }
+        | StmtKind::MemberArrayAssign { indices, value, .. } => {
             for ix in indices {
                 expr_address_taken(ix, out);
             }
@@ -641,7 +642,8 @@ fn stmt_has_call(stmt: &Stmt) -> bool {
             expr_has_call(scrutinee) || cases.iter().any(|c| body_has_call(&c.body))
         }
         StmtKind::ArrayAssign { indices, value, .. }
-        | StmtKind::ArrayCompoundAssign { indices, value, .. } => {
+        | StmtKind::ArrayCompoundAssign { indices, value, .. }
+        | StmtKind::MemberArrayAssign { indices, value, .. } => {
             indices.iter().any(expr_has_call) || expr_has_call(value)
         }
         StmtKind::DerefAssign { target, value }
@@ -749,6 +751,7 @@ fn collect_decls(stmt: &Stmt, out: &mut Vec<DeclItem>) {
         | StmtKind::CompoundAssign { .. }
         | StmtKind::ArrayAssign { .. }
         | StmtKind::ArrayCompoundAssign { .. }
+        | StmtKind::MemberArrayAssign { .. }
         | StmtKind::DerefAssign { .. }
         | StmtKind::DerefCompoundAssign { .. }
         | StmtKind::MemberAssign { .. }
@@ -851,6 +854,15 @@ fn count_uses_stmt(stmt: &Stmt, counts: &mut HashMap<String, u32>) {
             // same statement could be a pointer-target indexed
             // assign (`p[i] = v`) in a future fixture.
             *counts.entry(array.clone()).or_insert(0) += 2;
+            for ix in indices {
+                count_uses_expr(ix, counts);
+            }
+            count_uses_expr(value, counts);
+        }
+        StmtKind::MemberArrayAssign { base, indices, value, .. } => {
+            // `b.data[i] = v;` — same shape as ArrayAssign over `b`'s
+            // storage. Fixture 497.
+            *counts.entry(base.clone()).or_insert(0) += 2;
             for ix in indices {
                 count_uses_expr(ix, counts);
             }

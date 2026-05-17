@@ -461,6 +461,10 @@ impl<'a> FunctionEmitter<'a> {
                 self.advance_to_stmt_line(stmt);
                 self.emit_array_compound_assign(array, indices, *op, value);
             }
+            StmtKind::MemberArrayAssign { base, field, indices, value } => {
+                self.advance_to_stmt_line(stmt);
+                self.emit_member_array_assign(base, field, indices, value);
+            }
             StmtKind::DerefAssign { target, value } => {
                 self.advance_to_stmt_line(stmt);
                 self.emit_deref_assign(target, value);
@@ -3550,6 +3554,60 @@ impl<'a> FunctionEmitter<'a> {
         if let ExprKind::StringLit(bytes) = &array.kind {
             return self.emit_string_lit_index_to_ax(bytes, index);
         }
+        // `b.data[K]` — read an array element inside a struct field.
+        // With a constant index we can fold field offset + K*stride
+        // into a single byte displacement. Fixture 497.
+        if let ExprKind::Member {
+            base,
+            field,
+            kind: crate::ast::MemberKind::Dot,
+        } = &array.kind
+        {
+            if let ExprKind::Ident(base_name) = &base.kind
+                && let Some(k) = try_const_eval(index)
+            {
+                let base_ty = if self.globals.contains(base_name) {
+                    self.globals.type_of(base_name).unwrap().clone()
+                } else {
+                    self.locals.type_of(base_name).clone()
+                };
+                if let Some((field_off, field_ty)) = base_ty.field(field) {
+                    if let Type::Array { elem, .. } = field_ty {
+                        let stride = u32::from(elem.size_bytes());
+                        let total_off =
+                            u32::from(field_off) + (k as u32).wrapping_mul(stride);
+                        let elem_ty = *elem;
+                        let width = ptr_width(&elem_ty);
+                        let addr = if self.globals.contains(base_name) {
+                            if total_off == 0 {
+                                format!("DGROUP:_{base_name}")
+                            } else {
+                                format!("DGROUP:_{base_name}+{total_off}")
+                            }
+                        } else {
+                            let LocalLocation::Stack(struct_off) =
+                                self.locals.location_of(base_name)
+                            else {
+                                panic!("struct local `{base_name}` not stack-resident");
+                            };
+                            let off = struct_off
+                                + i16::try_from(total_off).unwrap_or(i16::MAX);
+                            bp_addr(off)
+                        };
+                        if elem_ty.is_char_like() {
+                            let _ = write!(self.out, "\tmov\tal,byte ptr {addr}\r\n");
+                            self.emit_widen_al(&elem_ty);
+                        } else {
+                            let _ = write!(
+                                self.out,
+                                "\tmov\tax,{width} ptr {addr}\r\n"
+                            );
+                        }
+                        return;
+                    }
+                }
+            }
+        }
         // Walk a nested chain `a[i1][i2]...` down to the base ident,
         // collecting indices from innermost to outermost. A bare
         // `a[i]` lands here with `indices = [i]` after the reversal.
@@ -4504,6 +4562,61 @@ impl<'a> FunctionEmitter<'a> {
             return;
         }
         panic!("long compound `{op:?}=` to memory not yet supported for this RHS shape (no fixture)");
+    }
+
+    /// `<base>.<field>[<i>] = <value>;` — write to an array element inside a
+    /// struct field. With all-constant indices we fold the field offset and
+    /// each index into a single byte displacement off the struct base, then
+    /// emit one `mov <width> ptr <dest>, <imm>`. Fixture 497.
+    fn emit_member_array_assign(
+        &mut self,
+        base: &str,
+        field: &str,
+        indices: &[Expr],
+        value: &Expr,
+    ) {
+        let base_ty = if self.globals.contains(base) {
+            self.globals.type_of(base).unwrap().clone()
+        } else {
+            self.locals.type_of(base).clone()
+        };
+        let (field_off, field_ty) = base_ty
+            .field(field)
+            .unwrap_or_else(|| panic!("`{base}.{field}[…]`: no such field in {base_ty:?}"));
+        // Walk through array dimensions matching the index count.
+        let mut elem_ty = field_ty;
+        let mut total_off = u32::from(field_off);
+        for ix in indices {
+            let Type::Array { elem, .. } = elem_ty else {
+                panic!("`{base}.{field}` indexed but not array");
+            };
+            let stride = u32::from(elem.size_bytes());
+            let k = try_const_eval(ix)
+                .unwrap_or_else(|| panic!("variable struct-field array index not supported"));
+            total_off = total_off.checked_add((k as u32).wrapping_mul(stride)).unwrap();
+            elem_ty = *elem;
+        }
+        let dest = if self.globals.contains(base) {
+            if total_off == 0 {
+                format!("DGROUP:_{base}")
+            } else {
+                format!("DGROUP:_{base}+{total_off}")
+            }
+        } else {
+            let LocalLocation::Stack(struct_off) = self.locals.location_of(base) else {
+                panic!("struct local `{base}` not stack-resident");
+            };
+            let off = struct_off + i16::try_from(total_off).unwrap_or(i16::MAX);
+            bp_addr(off)
+        };
+        let store_byte = elem_ty.is_char_like();
+        let width = if store_byte { "byte" } else { "word" };
+        if let Some(v) = try_const_eval(value) {
+            let v_masked = if store_byte { v & 0xFF } else { v & 0xFFFF };
+            let _ = write!(self.out, "\tmov\t{width} ptr {dest},{v_masked}\r\n");
+            return;
+        }
+        panic!("non-constant rhs in struct-field array assign not yet supported (no fixture)");
     }
 
     fn emit_member_compound_assign(

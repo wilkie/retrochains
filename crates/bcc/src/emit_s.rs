@@ -239,13 +239,21 @@ fn emit_global_init(
     use crate::ast::{ExprKind, Type};
     // `char s[] = "hi"` (fixture 191) — one `db <byte>` per char plus
     // a trailing `db 0` for the NUL. Parser has already widened the
-    // array length to bytes.len()+1.
-    if let (ExprKind::StringLit(bytes), Type::Array { elem, .. }) = (&init.kind, ty) {
+    // array length to bytes.len()+1. When the declared length exceeds
+    // the string size (fixture 498, `char msg[16] = "hello"`), pad the
+    // remainder with `db 0` lines out to the full declared length.
+    if let (ExprKind::StringLit(bytes), Type::Array { elem, len }) = (&init.kind, ty) {
         if (*elem).is_char_like() {
             for b in bytes {
                 let _ = write!(out, "\tdb\t{b}\r\n");
             }
             let _ = write!(out, "\tdb\t0\r\n");
+            let written = (bytes.len() + 1) as u32;
+            if *len > written {
+                for _ in written..*len {
+                    let _ = write!(out, "\tdb\t0\r\n");
+                }
+            }
             return;
         }
     }
@@ -484,7 +492,9 @@ fn write_tail(
             }
         };
     for f in &unit.functions {
-        if f.body.is_some() {
+        // Static function definitions are emitted in `_TEXT` but
+        // don't get a `public` declaration. Fixture 499.
+        if f.body.is_some() && !f.is_static {
             let sym = codegen::function_symbol(&f.name);
             let line = format!("\tpublic\t{sym}\r\n");
             push_to_bucket(sym, line, &mut long_functions, &mut short_bucket);
@@ -535,16 +545,24 @@ fn write_tail(
     // should emit forward. But oracle is reverse-alpha
     // `_main, N_LXMUL@`. So 260 contradicts this rule too.
     //
-    // Refined again: the discriminator is *long bucket has a
-    // global AND short bucket has a global*. 260 has short globals
-    // but the long bucket has no global → reverse. 465/491 have
-    // both → forward. 494 has long global but no short → reverse.
-    let long_has_global = !long_globals.is_empty();
+    // Refined again: the discriminator is *short global is present
+    // OR a long global lands in _DATA (initialized)*. Fixture 494
+    // (`struct node head`, uninit → BSS, no short global) needs
+    // reverse, while 498 (`char msg[16] = "hello"`, init → DATA, no
+    // short global) needs forward. 260 short-globals-only pins the
+    // short-only branch to reverse for the long bucket because that
+    // bucket has neither a long global nor an initialized DATA item.
+    let long_has_data_global = unit
+        .globals
+        .iter()
+        .filter(|g| !g.is_static && !g.is_extern)
+        .any(|g| g.init.is_some() && (g.name.len() + 1) >= 3);
     let short_has_global = unit
         .globals
         .iter()
         .filter(|g| !g.is_static && !g.is_extern)
         .any(|g| g.name.len() + 1 < 3);
+    let long_has_global = !long_globals.is_empty();
     let mut long_bucket: Vec<(String, String)> = long_globals
         .into_iter()
         .chain(long_functions.into_iter())
@@ -553,7 +571,7 @@ fn write_tail(
     long_bucket.sort_by(|a, b| a.0.cmp(&b.0));
     short_bucket.sort_by(|a, b| a.0.cmp(&b.0));
     let long_iter: Box<dyn Iterator<Item = &(String, String)>> =
-        if long_has_global && short_has_global {
+        if (long_has_global && short_has_global) || long_has_data_global {
             Box::new(long_bucket.iter())
         } else {
             Box::new(long_bucket.iter().rev())
@@ -643,7 +661,8 @@ fn walk_calls(
             walk_calls_expr(value, defined, locals, seen, ordered);
         }
         StmtKind::ArrayAssign { indices, value, .. }
-        | StmtKind::ArrayCompoundAssign { indices, value, .. } => {
+        | StmtKind::ArrayCompoundAssign { indices, value, .. }
+        | StmtKind::MemberArrayAssign { indices, value, .. } => {
             for ix in indices {
                 walk_calls_expr(ix, defined, locals, seen, ordered);
             }

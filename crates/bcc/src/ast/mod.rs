@@ -69,6 +69,10 @@ pub struct Function {
     /// don't produce asm output of their own, but they do feed the
     /// signature table so call sites know each parameter's type.
     pub body: Option<Vec<Stmt>>,
+    /// `static` prefix on the definition. Static functions are
+    /// emitted in `_TEXT` like any other function but don't get a
+    /// `public` declaration (fixture 499).
+    pub is_static: bool,
 }
 
 #[derive(Debug)]
@@ -118,6 +122,16 @@ pub enum StmtKind {
     /// Codegen specializes the all-constant-indices case to a direct
     /// stack-offset store.
     ArrayAssign { array: String, indices: Vec<Expr>, value: Expr },
+    /// `<base>.<field>[<i>] = <value>;` — write to an array element
+    /// inside a struct field. Codegen folds `<base>` to a base symbol
+    /// or stack offset, then adds the field offset and constant index
+    /// to land at a single memory destination. Fixture 497.
+    MemberArrayAssign {
+        base: String,
+        field: String,
+        indices: Vec<Expr>,
+        value: Expr,
+    },
     /// `*<target> = <value>;`. `target` is the pointer expression
     /// — usually an `Ident` for a pointer local, but in principle
     /// anything that evaluates to a pointer.

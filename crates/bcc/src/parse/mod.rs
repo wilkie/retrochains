@@ -251,16 +251,18 @@ impl Parser {
             // The token after the name disambiguates: `(` means
             // function, anything else means global decl.
             if matches!(self.peek_n(probe).kind, TokenKind::LParen) {
-                if is_static || is_extern {
+                if is_extern {
                     let t = self.peek();
                     return Err(ParseError::Unexpected {
-                        expected: "global declarator after `static`/`extern`".to_owned(),
+                        expected: "global declarator after `extern`".to_owned(),
                         found: "function definition".to_owned(),
                         offset: t.span.start,
                     });
                 }
                 let idx = functions.len();
-                functions.push(self.parse_function()?);
+                let mut f = self.parse_function()?;
+                f.is_static = is_static;
+                functions.push(f);
                 decl_order.push(TopLevelRef::Function(idx));
             } else {
                 let new_globals = self.parse_global(is_static, is_extern)?;
@@ -874,6 +876,7 @@ impl Parser {
                 ret_ty,
                 span: Span::new(start, semi.span.end),
                 body: None,
+                is_static: false,
             });
         }
 
@@ -885,7 +888,7 @@ impl Parser {
         }
         let close = self.expect(&TokenKind::RBrace)?;
         let span = Span::new(start, close.span.end);
-        Ok(Function { name, params, ret_ty, span, body: Some(body) })
+        Ok(Function { name, params, ret_ty, span, body: Some(body), is_static: false })
     }
 
     /// Parameter list inside the `(...)` of a function definition.
@@ -1301,23 +1304,49 @@ impl Parser {
         let kind = match expr.kind {
             ExprKind::Deref(ptr) => StmtKind::DerefAssign { target: *ptr, value },
             ExprKind::ArrayIndex { .. } => {
-                // The LHS is potentially a nested chain `a[i][j]...`.
-                // Walk it to the base ident, collecting indices
-                // innermost-first, then reverse to source order.
+                // The LHS is potentially a nested chain `a[i][j]...`,
+                // optionally rooted at a struct member access
+                // (`b.data[i]`). Walk it, collecting indices innermost-
+                // first, then reverse to source order. The root is
+                // either a bare `Ident` (→ ArrayAssign) or a `Member`
+                // whose base is an `Ident` (→ MemberArrayAssign, fixture
+                // 497).
+                let lv_span_start = expr.span.start;
                 let mut indices: Vec<Expr> = Vec::new();
                 let mut cur = expr;
-                let array = loop {
+                let root_kind;
+                loop {
                     match cur.kind {
                         ExprKind::ArrayIndex { array, index } => {
                             indices.push(*index);
                             cur = *array;
                         }
-                        ExprKind::Ident(name) => break name,
-                        _ => return Err(ParseError::Unsupported { offset: cur.span.start }),
+                        _ => {
+                            root_kind = cur.kind;
+                            break;
+                        }
                     }
-                };
+                }
                 indices.reverse();
-                StmtKind::ArrayAssign { array, indices, value }
+                match root_kind {
+                    ExprKind::Ident(array) => StmtKind::ArrayAssign { array, indices, value },
+                    ExprKind::Member {
+                        base,
+                        field,
+                        kind: crate::ast::MemberKind::Dot,
+                    } => {
+                        let ExprKind::Ident(base_name) = base.kind else {
+                            return Err(ParseError::Unsupported { offset: base.span.start });
+                        };
+                        StmtKind::MemberArrayAssign {
+                            base: base_name,
+                            field,
+                            indices,
+                            value,
+                        }
+                    }
+                    _ => return Err(ParseError::Unsupported { offset: lv_span_start }),
+                }
             }
             ExprKind::Member { base, field, kind: mk } => StmtKind::MemberAssign {
                 base: *base,
@@ -2130,25 +2159,43 @@ impl Parser {
 
     fn parse_atom(&mut self) -> Result<Expr, ParseError> {
         let mut e = self.parse_primary()?;
-        // Postfix `.field` and `->field` can chain (`a.b.c`,
-        // `p->next->x`). Each step extends the parsed expression
-        // by wrapping it in a Member node.
+        // Postfix `.field`, `->field`, and `[expr]` can chain (`a.b.c`,
+        // `p->next->x`, `b.data[2]`). Each step extends the parsed
+        // expression by wrapping it in a Member or ArrayIndex node.
         loop {
-            let kind = match self.peek().kind {
-                TokenKind::Dot => MemberKind::Dot,
-                TokenKind::Arrow => MemberKind::Arrow,
+            match self.peek().kind {
+                TokenKind::Dot | TokenKind::Arrow => {
+                    let kind = if matches!(self.peek().kind, TokenKind::Dot) {
+                        MemberKind::Dot
+                    } else {
+                        MemberKind::Arrow
+                    };
+                    self.bump();
+                    let field_tok = self.bump();
+                    let TokenKind::Ident(field) = field_tok.kind else {
+                        return Err(ParseError::NotAnIdent { offset: field_tok.span.start });
+                    };
+                    let span = Span::new(e.span.start, field_tok.span.end);
+                    e = Expr {
+                        kind: ExprKind::Member { base: Box::new(e), field, kind },
+                        span,
+                    };
+                }
+                TokenKind::LBracket => {
+                    self.bump();
+                    let index = self.parse_expr()?;
+                    let close = self.expect(&TokenKind::RBracket)?;
+                    let span = Span::new(e.span.start, close.span.end);
+                    e = Expr {
+                        kind: ExprKind::ArrayIndex {
+                            array: Box::new(e),
+                            index: Box::new(index),
+                        },
+                        span,
+                    };
+                }
                 _ => break,
-            };
-            self.bump();
-            let field_tok = self.bump();
-            let TokenKind::Ident(field) = field_tok.kind else {
-                return Err(ParseError::NotAnIdent { offset: field_tok.span.start });
-            };
-            let span = Span::new(e.span.start, field_tok.span.end);
-            e = Expr {
-                kind: ExprKind::Member { base: Box::new(e), field, kind },
-                span,
-            };
+            }
         }
         Ok(e)
     }

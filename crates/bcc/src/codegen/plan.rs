@@ -180,7 +180,8 @@ fn plan_stmt(stmt: &Stmt, ctx: &mut PlanCtx) {
             plan_expr_value(value, ctx);
         }
         StmtKind::ArrayAssign { indices, value, .. }
-        | StmtKind::ArrayCompoundAssign { indices, value, .. } => {
+        | StmtKind::ArrayCompoundAssign { indices, value, .. }
+        | StmtKind::MemberArrayAssign { indices, value, .. } => {
             for ix in indices {
                 plan_expr_value(ix, ctx);
             }
