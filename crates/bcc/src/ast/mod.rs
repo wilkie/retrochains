@@ -225,6 +225,11 @@ pub enum Type {
     UInt,
     /// `char` — 1-byte signed (BCC's default for plain `char`).
     Char,
+    /// `unsigned char` — 1-byte unsigned. Same byte layout as `Char`
+    /// for storage and load; differs at int-promotion (`mov ah, 0`
+    /// zero-extend vs. `cbw` sign-extend) and at compare (unsigned
+    /// jump mnemonic family).
+    UChar,
     /// `long` / `long int` — 32-bit signed. Stored as a high/low word
     /// pair (DX:AX in registers; two adjacent words in memory, low
     /// word first / little-endian).
@@ -277,7 +282,7 @@ impl Type {
     pub fn size_bytes(&self) -> u16 {
         match self {
             Self::Int | Self::UInt => 2,
-            Self::Char => 1,
+            Self::Char | Self::UChar => 1,
             Self::Long | Self::ULong => 4,
             Self::Array { elem, len } => {
                 let elem = elem.size_bytes();
@@ -296,7 +301,7 @@ impl Type {
     pub fn alignment(&self) -> u16 {
         match self {
             Self::Int | Self::UInt => 2,
-            Self::Char => 1,
+            Self::Char | Self::UChar => 1,
             Self::Long | Self::ULong => 2,
             Self::Array { elem, .. } => elem.alignment(),
             Self::Pointer(_) => 2,
@@ -311,11 +316,20 @@ impl Type {
     /// True for `unsigned` integer types. Comparisons between operands
     /// where at least one side is unsigned use the unsigned-jump
     /// mnemonic family (`jb/jae/jbe/ja`) instead of the signed
-    /// (`jl/jge/jle/jg`). `char` is signed in BCC; `unsigned char`
-    /// would be a separate variant when a fixture demands it.
+    /// (`jl/jge/jle/jg`).
     #[must_use]
     pub fn is_unsigned(&self) -> bool {
-        matches!(self, Self::UInt | Self::ULong)
+        matches!(self, Self::UInt | Self::ULong | Self::UChar)
+    }
+
+    /// True for the 1-byte char family (signed `char` and
+    /// `unsigned char`). Storage, load, and assign operations are
+    /// identical between the two; only int-promotion (sign-extend
+    /// vs. zero-extend) and comparison (signed vs. unsigned mnemonic
+    /// family) differ.
+    #[must_use]
+    pub fn is_char_like(&self) -> bool {
+        matches!(self, Self::Char | Self::UChar)
     }
 
     /// Whether this type is a 32-bit long-family type (signed or

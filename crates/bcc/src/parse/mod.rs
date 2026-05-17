@@ -158,6 +158,10 @@ impl Parser {
                     ) {
                         probe += 1;
                     }
+                    // `unsigned char` — single-byte unsigned form.
+                    if matches!(self.peek_n(probe).kind, TokenKind::KwChar) {
+                        probe += 1;
+                    }
                     if matches!(self.peek_n(probe).kind, TokenKind::KwInt) {
                         probe += 1;
                     }
@@ -363,6 +367,11 @@ impl Parser {
                         self.bump();
                     }
                     return Ok(Type::ULong);
+                }
+                // `unsigned char` — 1-byte unsigned.
+                if matches!(self.peek().kind, TokenKind::KwChar) {
+                    self.bump();
+                    return Ok(Type::UChar);
                 }
                 // `unsigned int` and bare `unsigned` are both
                 // unsigned-int; consume the optional `int`.

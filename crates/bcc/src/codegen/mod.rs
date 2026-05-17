@@ -642,7 +642,7 @@ impl<'a> FunctionEmitter<'a> {
                 // (fixture 055). Stack ints are still unobserved — keep
                 // the panic until a fixture forces us there.
                 assert!(
-                    matches!(ty, Type::Char),
+                    ty.is_char_like(),
                     "++/-- on a stack-resident int not yet supported (no fixture)"
                 );
                 let _ = write!(self.out, "\tmov\tal,byte ptr {}\r\n", bp_addr(off));
@@ -1934,14 +1934,14 @@ impl<'a> FunctionEmitter<'a> {
             panic!("non-ident boolean condition not yet supported (no fixture)");
         };
         if let Some(gty) = self.globals.type_of(name) {
-            let width = if matches!(gty, Type::Char) { "byte" } else { "word" };
+            let width = if gty.is_char_like() { "byte" } else { "word" };
             let _ = write!(self.out, "\tcmp\t{width} ptr DGROUP:_{name},0\r\n");
             return;
         }
         match self.locals.location_of(name) {
             LocalLocation::Stack(off) => {
                 let ty = self.locals.type_of(name);
-                let width = if matches!(ty, Type::Char) { "byte" } else { "word" };
+                let width = if ty.is_char_like() { "byte" } else { "word" };
                 let _ = write!(self.out, "\tcmp\t{width} ptr {},0\r\n", bp_addr(off));
             }
             LocalLocation::Reg(reg) => {
@@ -2004,7 +2004,7 @@ impl<'a> FunctionEmitter<'a> {
         // The char's int value is truncated to 8 bits. Fixture 452.
         if let (ExprKind::Ident(name), Some(rhs)) = (&left.kind, try_const_eval(right))
             && let Some(gty) = self.globals.type_of(name)
-            && matches!(gty, Type::Char)
+            && gty.is_char_like()
         {
             let rhs8 = rhs & 0xFF;
             let _ = write!(self.out, "\tcmp\tbyte ptr DGROUP:_{name},{rhs8}\r\n");
@@ -2389,7 +2389,7 @@ impl<'a> FunctionEmitter<'a> {
     /// 8-bit form so only AL is touched; AH is whatever happened to
     /// be there. For `int`, the standard 16-bit load.
     fn emit_arg_into_ax(&mut self, arg: &Expr, param_ty: Type) {
-        if !matches!(param_ty, Type::Char) {
+        if !param_ty.is_char_like() {
             self.emit_expr_to_ax(arg);
             return;
         }
@@ -2403,7 +2403,7 @@ impl<'a> FunctionEmitter<'a> {
         if let ExprKind::Ident(name) = &arg.kind {
             let ty = self.locals.type_of(name);
             assert!(
-                matches!(ty, Type::Char),
+                ty.is_char_like(),
                 "passing non-char `{name}` to a char parameter not yet supported (no fixture)"
             );
             match self.locals.location_of(name) {
@@ -3349,7 +3349,7 @@ impl<'a> FunctionEmitter<'a> {
             } else {
                 panic!("`*p++` with pointee stride > 2 not yet supported (no fixture)");
             }
-            if matches!(*pointee, Type::Char) {
+            if pointee.is_char_like() {
                 self.out.extend_from_slice(b"\tmov\tal,byte ptr [bx]\r\n");
                 self.out.extend_from_slice(b"\tcbw\t\r\n");
             } else {
@@ -3375,7 +3375,7 @@ impl<'a> FunctionEmitter<'a> {
                     panic!("stack-resident bare-`*p` dereference not yet supported (no fixture)");
                 }
             };
-            if matches!(*pointee, Type::Char) {
+            if pointee.is_char_like() {
                 let _ = write!(self.out, "\tmov\tal,byte ptr [{addr_reg}]\r\n");
                 self.out.extend_from_slice(b"\tcbw\t\r\n");
             } else {
@@ -3387,7 +3387,7 @@ impl<'a> FunctionEmitter<'a> {
         // then do the final load. Fixture 195 (`int **p` → `**p`)
         // hits depth=1; fixture 193 hits depth=0 on a global.
         let final_ty = self.emit_chain_to_bx(base_name, depth);
-        if matches!(final_ty, Type::Char) {
+        if final_ty.is_char_like() {
             self.out.extend_from_slice(b"\tmov\tal,byte ptr [bx]\r\n");
             self.out.extend_from_slice(b"\tcbw\t\r\n");
         } else {
@@ -3447,7 +3447,7 @@ impl<'a> FunctionEmitter<'a> {
         offset: &Expr,
     ) {
         let stride = u32::from(pointee.size_bytes());
-        let load_byte = matches!(pointee, Type::Char);
+        let load_byte = pointee.is_char_like();
         if let Some(k) = try_const_eval(offset) {
             // Constant offset — fold to indexed addressing on the
             // pointer register. Stack-resident pointers with a
@@ -3556,7 +3556,7 @@ impl<'a> FunctionEmitter<'a> {
                 } else {
                     format!("DGROUP:_{array_name}+{const_off}")
                 };
-                if matches!(leaf_ty, Type::Char) {
+                if leaf_ty.is_char_like() {
                     let _ = write!(self.out, "\tmov\tal,byte ptr {addr}\r\n");
                     self.out.extend_from_slice(b"\tcbw\t\r\n");
                 } else {
@@ -3584,7 +3584,7 @@ impl<'a> FunctionEmitter<'a> {
         {
             let off = base_off + i16::try_from(const_off).unwrap_or(i16::MAX);
             let width = ptr_width(&leaf_ty);
-            if matches!(leaf_ty, Type::Char) {
+            if leaf_ty.is_char_like() {
                 let _ = write!(self.out, "\tmov\tal,byte ptr {}\r\n", bp_addr(off));
                 self.out.extend_from_slice(b"\tcbw\t\r\n");
             } else {
@@ -3614,7 +3614,7 @@ impl<'a> FunctionEmitter<'a> {
                 base_off,
             );
             let width = ptr_width(&leaf_ty);
-            if matches!(leaf_ty, Type::Char) {
+            if leaf_ty.is_char_like() {
                 self.out.extend_from_slice(b"\tmov\tal,byte ptr [bx]\r\n");
                 self.out.extend_from_slice(b"\tcbw\t\r\n");
             } else {
@@ -3631,7 +3631,7 @@ impl<'a> FunctionEmitter<'a> {
         let elem_size = elem.size_bytes();
         let width = ptr_width(elem);
         self.emit_array_addr_to_bx(array_name, indices[0], base_off, elem_size);
-        if matches!(*elem, Type::Char) {
+        if elem.is_char_like() {
             self.out.extend_from_slice(b"\tmov\tal,byte ptr [bx]\r\n");
             self.out.extend_from_slice(b"\tcbw\t\r\n");
         } else {
@@ -3661,7 +3661,7 @@ impl<'a> FunctionEmitter<'a> {
         } else {
             format!("[bx+{byte_off}]")
         };
-        if matches!(pointee, Type::Char) {
+        if pointee.is_char_like() {
             let _ = write!(self.out, "\tmov\tal,byte ptr {addr}\r\n");
             self.out.extend_from_slice(b"\tcbw\t\r\n");
         } else {
@@ -3687,7 +3687,7 @@ impl<'a> FunctionEmitter<'a> {
         } else {
             format!("[{addr_reg}+{byte_off}]")
         };
-        if matches!(pointee, Type::Char) {
+        if pointee.is_char_like() {
             let _ = write!(self.out, "\tmov\tal,byte ptr {addr}\r\n");
             self.out.extend_from_slice(b"\tcbw\t\r\n");
         } else {
@@ -3910,7 +3910,7 @@ impl<'a> FunctionEmitter<'a> {
                 let addr = global_offset_addr(array, const_off);
                 if let Some(v) = try_const_eval(value) {
                     let v_masked =
-                        if matches!(leaf_ty, Type::Char) { v & 0xFF } else { v & 0xFFFF };
+                        if leaf_ty.is_char_like() { v & 0xFF } else { v & 0xFFFF };
                     let _ = write!(self.out, "\tmov\t{width} ptr {addr},{v_masked}\r\n");
                     return;
                 }
@@ -3965,7 +3965,7 @@ impl<'a> FunctionEmitter<'a> {
             let width = ptr_width(&leaf_ty);
             if let Some(v) = try_const_eval(value) {
                 let v_masked =
-                    if matches!(leaf_ty, Type::Char) { v & 0xFF } else { v & 0xFFFF };
+                    if leaf_ty.is_char_like() { v & 0xFF } else { v & 0xFFFF };
                 let _ = write!(
                     self.out,
                     "\tmov\t{width} ptr {},{v_masked}\r\n",
@@ -4002,7 +4002,7 @@ impl<'a> FunctionEmitter<'a> {
                 panic!("non-constant rhs in 2D array assign not yet supported (no fixture)");
             };
             let v_masked =
-                if matches!(leaf_ty, Type::Char) { v & 0xFF } else { v & 0xFFFF };
+                if leaf_ty.is_char_like() { v & 0xFF } else { v & 0xFFFF };
             let _ = write!(self.out, "\tmov\t{width} ptr [bx],{v_masked}\r\n");
             return;
         }
@@ -4019,7 +4019,7 @@ impl<'a> FunctionEmitter<'a> {
         let width = ptr_width(elem);
         self.emit_array_addr_to_bx(array, &indices[0], base_off, elem_size);
         if let Some(v) = try_const_eval(value) {
-            let v_masked = if matches!(*elem, Type::Char) { v & 0xFF } else { v & 0xFFFF };
+            let v_masked = if elem.is_char_like() { v & 0xFF } else { v & 0xFFFF };
             let _ = write!(self.out, "\tmov\t{width} ptr [bx],{v_masked}\r\n");
             return;
         }
@@ -4069,7 +4069,7 @@ impl<'a> FunctionEmitter<'a> {
             panic!("variable-indexed array compound assign not yet supported (no fixture)");
         };
         let off = base_off + i16::try_from(const_off).unwrap_or(i16::MAX);
-        let store_byte = matches!(leaf_ty, Type::Char);
+        let store_byte = leaf_ty.is_char_like();
         let width = if store_byte { "byte" } else { "word" };
         let Some(v) = try_const_eval(value) else {
             panic!("non-constant rhs in array compound assign not yet supported (no fixture)");
@@ -4117,7 +4117,7 @@ impl<'a> FunctionEmitter<'a> {
                 self.try_member_dot_chain(base, field)
             {
                 if self.globals.contains(&name) {
-                    let load_byte = matches!(leaf_ty, Type::Char);
+                    let load_byte = leaf_ty.is_char_like();
                     let width = if load_byte { "byte" } else { "word" };
                     let addr = if total_off == 0 {
                         format!("DGROUP:_{name}")
@@ -4136,7 +4136,7 @@ impl<'a> FunctionEmitter<'a> {
                     panic!("struct local `{name}` not stack-resident (unexpected)");
                 };
                 let off = base_bp + i16::try_from(total_off).unwrap_or(i16::MAX);
-                if matches!(leaf_ty, Type::Char) {
+                if leaf_ty.is_char_like() {
                     let _ = write!(self.out, "\tmov\tal,byte ptr {}\r\n", bp_addr(off));
                     self.out.extend_from_slice(b"\tcbw\t\r\n");
                 } else {
@@ -4165,7 +4165,7 @@ impl<'a> FunctionEmitter<'a> {
                 })
             }
         };
-        let load_byte = matches!(field_ty, Type::Char);
+        let load_byte = field_ty.is_char_like();
         if matches!(kind, crate::ast::MemberKind::Arrow) {
             // `p->x`: p holds the address; field at `[reg + K]`.
             let LocalLocation::Reg(reg) = self.locals.location_of(name) else {
@@ -4281,7 +4281,7 @@ impl<'a> FunctionEmitter<'a> {
             }
             panic!("non-constant rhs in long struct field assign not yet supported (no fixture)");
         }
-        let store_byte = matches!(leaf_ty, Type::Char);
+        let store_byte = leaf_ty.is_char_like();
         let width = if store_byte { "byte" } else { "word" };
         if let Some(v) = try_const_eval(value) {
             let v_masked = if store_byte { v & 0xFF } else { v & 0xFFFF };
@@ -4588,7 +4588,7 @@ impl<'a> FunctionEmitter<'a> {
             };
             (dest, field_ty)
         };
-        let store_byte = matches!(field_ty, Type::Char);
+        let store_byte = field_ty.is_char_like();
         let width = if store_byte { "byte" } else { "word" };
         let Some(v) = try_const_eval(value) else {
             panic!("non-constant rhs in member compound assign not yet supported (no fixture)");
@@ -4645,7 +4645,7 @@ impl<'a> FunctionEmitter<'a> {
             let Some(v) = try_const_eval(value) else {
                 panic!("non-constant rhs in `*p = v` not yet supported (no fixture)");
             };
-            let v_masked = if matches!(*pointee, Type::Char) { v & 0xFF } else { v & 0xFFFF };
+            let v_masked = if pointee.is_char_like() { v & 0xFF } else { v & 0xFFFF };
             let _ = write!(self.out, "\tmov\t{width} ptr [{addr_reg}],{v_masked}\r\n");
             return;
         }
@@ -4657,7 +4657,7 @@ impl<'a> FunctionEmitter<'a> {
         };
         let final_ty = self.emit_chain_to_bx(base_name, depth);
         let width = ptr_width(&final_ty);
-        let v_masked = if matches!(final_ty, Type::Char) { v & 0xFF } else { v & 0xFFFF };
+        let v_masked = if final_ty.is_char_like() { v & 0xFF } else { v & 0xFFFF };
         let _ = write!(self.out, "\tmov\t{width} ptr [bx],{v_masked}\r\n");
     }
 
@@ -4752,7 +4752,7 @@ impl<'a> FunctionEmitter<'a> {
                     _ => {}
                 }
             }
-            let store_byte = matches!(*pointee, Type::Char);
+            let store_byte = pointee.is_char_like();
             let width = if store_byte { "byte" } else { "word" };
             let v_masked = if store_byte { v & 0xFF } else { v & 0xFFFF };
             let _ = write!(
@@ -4765,7 +4765,7 @@ impl<'a> FunctionEmitter<'a> {
         // (fixtures 194 / 196), then `<op> word ptr [bx],<imm>` in
         // place. Fixture 197 (`*p += 5` for global `p`).
         let final_ty = self.emit_chain_to_bx(base_name, depth);
-        let store_byte = matches!(final_ty, Type::Char);
+        let store_byte = final_ty.is_char_like();
         let width = if store_byte { "byte" } else { "word" };
         let v_masked = if store_byte { v & 0xFF } else { v & 0xFFFF };
         let _ = write!(
@@ -5335,9 +5335,9 @@ impl<'a> FunctionEmitter<'a> {
             }
             panic!("non-constant long assignment to global not yet supported (no fixture)");
         }
-        let width = if matches!(ty, Type::Char) { "byte" } else { "word" };
+        let width = if ty.is_char_like() { "byte" } else { "word" };
         if let Some(v) = try_const_eval(value) {
-            let v_masked = if matches!(ty, Type::Char) { v & 0xFF } else { v & 0xFFFF };
+            let v_masked = if ty.is_char_like() { v & 0xFF } else { v & 0xFFFF };
             let _ = write!(
                 self.out,
                 "\tmov\t{width} ptr DGROUP:_{name},{v_masked}\r\n",
@@ -5346,7 +5346,7 @@ impl<'a> FunctionEmitter<'a> {
         }
         // Non-constant: compute into AX, then store.
         self.emit_expr_to_ax(value);
-        if matches!(ty, Type::Char) {
+        if ty.is_char_like() {
             let _ = write!(self.out, "\tmov\tbyte ptr DGROUP:_{name},al\r\n");
         } else {
             let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name},ax\r\n");
@@ -5770,12 +5770,20 @@ impl<'a> FunctionEmitter<'a> {
                 // to a `<width> ptr DGROUP:_<name>` reference rather
                 // than a stack/register access (fixtures 083–087).
                 if let Some(gty) = self.globals.type_of(name) {
-                    if matches!(gty, Type::Char) {
+                    if gty.is_char_like() {
                         let _ = write!(
                             self.out,
                             "\tmov\tal,byte ptr DGROUP:_{name}\r\n",
                         );
-                        self.out.extend_from_slice(b"\tcbw\t\r\n");
+                        if gty.is_unsigned() {
+                            // Unsigned char: zero-extend via `mov ah,0`
+                            // (B4 00, 2 bytes) — preserves the upper
+                            // bits as 0 instead of sign-extending the
+                            // 7th bit. Fixture 460.
+                            self.out.extend_from_slice(b"\tmov\tah,0\r\n");
+                        } else {
+                            self.out.extend_from_slice(b"\tcbw\t\r\n");
+                        }
                     } else {
                         let _ = write!(
                             self.out,
@@ -5798,7 +5806,7 @@ impl<'a> FunctionEmitter<'a> {
                     return;
                 }
                 match self.locals.location_of(name) {
-                    LocalLocation::Stack(off) if matches!(ty, Type::Char) => {
+                    LocalLocation::Stack(off) if ty.is_char_like() => {
                         // Char on stack into AX: load AL then sign-extend.
                         let _ = write!(self.out, "\tmov\tal,byte ptr {}\r\n", bp_addr(off));
                         self.out.extend_from_slice(b"\tcbw\t\r\n");
@@ -5897,7 +5905,7 @@ impl<'a> FunctionEmitter<'a> {
     /// char-typed local from that offset. Widening / no-op casts just
     /// evaluate the operand into AX.
     fn emit_cast_to_ax(&mut self, ty: &Type, operand: &Expr) {
-        if matches!(ty, Type::Char) {
+        if ty.is_char_like() {
             if let ExprKind::Ident(name) = &operand.kind
                 && !self.globals.contains(name)
             {
@@ -6027,7 +6035,7 @@ impl<'a> FunctionEmitter<'a> {
     /// detect when the right operand needs the widening dance.
     fn ident_is_char(&self, name: &str) -> bool {
         if let Some(ty) = self.globals.type_of(name) {
-            return matches!(ty, Type::Char);
+            return ty.is_char_like();
         }
         // The locals analyzer panics on unknown names, so only ask
         // if there's no global match.

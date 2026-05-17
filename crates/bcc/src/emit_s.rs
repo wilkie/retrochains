@@ -227,7 +227,7 @@ fn emit_global_init(
     // a trailing `db 0` for the NUL. Parser has already widened the
     // array length to bytes.len()+1.
     if let (ExprKind::StringLit(bytes), Type::Array { elem, .. }) = (&init.kind, ty) {
-        if matches!(**elem, Type::Char) {
+        if (*elem).is_char_like() {
             for b in bytes {
                 let _ = write!(out, "\tdb\t{b}\r\n");
             }
@@ -240,7 +240,7 @@ fn emit_global_init(
     // is interned into the same pool used by function-scope literals
     // and emitted later in `write_tail`.
     if let (ExprKind::StringLit(bytes), Type::Pointer(target)) = (&init.kind, ty) {
-        if matches!(**target, Type::Char) {
+        if (*target).is_char_like() {
             let offset = strings.intern(bytes);
             if offset == 0 {
                 out.extend_from_slice(b"\tdw\tDGROUP:s@\r\n");
