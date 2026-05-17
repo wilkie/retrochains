@@ -178,6 +178,37 @@ Verified with character-literal case labels (fixture `454`); the
 chained-compare dispatch then uses ordinary int constants since
 case labels are int-typed.
 
+## `unsigned char`
+
+`unsigned char` is a separate type variant (`Type::UChar`) from
+`char`. Storage and assignment are byte-identical to `char` —
+size 1, alignment 1, same `mov byte ptr DGROUP:_c, K` encoding for
+constant assignment (fixture `458`). The two diverge only on:
+
+1. **Comparison.** Unsigned-jump mnemonic family — `jbe/jb/ja/jae`
+   instead of `jle/jl/jg/jge`. `Type::is_unsigned()` includes
+   `UChar`, so the existing signedness-driven jump-selection path
+   picks the right mnemonic automatically. Fixture `459`:
+   `if (c > 200)` becomes `cmp byte ptr [_c], 200 / jbe …`.
+2. **Int promotion.** Zero-extend via `mov ah, 0` (`B4 00`, 2 bytes)
+   instead of sign-extend via `cbw` (`98`, 1 byte). Driven by
+   `gty.is_unsigned()` at the load site. Fixture `460`:
+   `g = c + 1` becomes `mov al, [_c] / mov ah, 0 / inc ax /
+   mov [_g], ax`.
+
+Since storage is shared, almost every `matches!(<t>, Type::Char)`
+site in the codegen was a storage-width check (`byte` vs. `word`).
+Those were converted en masse to `<t>.is_char_like()` which returns
+true for both `Char` and `UChar`. Sign-extension sites stayed
+explicit and consult `is_unsigned()` to pick between `cbw` and
+`mov ah, 0`.
+
+Parser: the top-level type-probe and `parse_type` both learned the
+`unsigned char` sequence. `unsigned` followed by `char` consumes
+both tokens and yields `Type::UChar`; the existing post-`unsigned`
+`int`-consumption stays intact for the `unsigned int` and bare
+`unsigned` forms.
+
 ## What we explicitly defer
 
 - Templates, namespaces, RTTI, exceptions (not in BC2.0 to relevant
