@@ -900,17 +900,25 @@ impl<'a> FunctionEmitter<'a> {
         let ExprKind::Ident(name) = &scrutinee.kind else {
             panic!("non-ident switch scrutinee not yet supported (no fixture)");
         };
-        let ty = self.locals.type_of(name);
-        assert!(
-            matches!(ty, Type::Int),
-            "char-typed switch scrutinee not yet supported (no fixture)"
-        );
-        match self.locals.location_of(name) {
-            LocalLocation::Stack(off) => {
-                let _ = write!(self.out, "\tmov\tax,word ptr {}\r\n", bp_addr(off));
-            }
-            LocalLocation::Reg(reg) => {
-                let _ = write!(self.out, "\tmov\tax,{}\r\n", reg.name());
+        if let Some(gty) = self.globals.type_of(name) {
+            assert!(
+                matches!(gty, Type::Int | Type::UInt),
+                "non-int global switch scrutinee not yet supported (no fixture)"
+            );
+            let _ = write!(self.out, "\tmov\tax,word ptr DGROUP:_{name}\r\n");
+        } else {
+            let ty = self.locals.type_of(name);
+            assert!(
+                matches!(ty, Type::Int),
+                "char-typed switch scrutinee not yet supported (no fixture)"
+            );
+            match self.locals.location_of(name) {
+                LocalLocation::Stack(off) => {
+                    let _ = write!(self.out, "\tmov\tax,word ptr {}\r\n", bp_addr(off));
+                }
+                LocalLocation::Reg(reg) => {
+                    let _ = write!(self.out, "\tmov\tax,{}\r\n", reg.name());
+                }
             }
         }
         // Compare/branch chain: one cmp+je per non-default case in
@@ -1989,6 +1997,17 @@ impl<'a> FunctionEmitter<'a> {
             && matches!(gty, Type::Int | Type::UInt)
         {
             let _ = write!(self.out, "\tcmp\tword ptr DGROUP:_{name},{rhs}\r\n");
+            return;
+        }
+        // `<char-global> <relop> <const>` — byte-form memory
+        // compare `cmp byte ptr DGROUP:_c, K` (encoded `80 3E ...`).
+        // The char's int value is truncated to 8 bits. Fixture 452.
+        if let (ExprKind::Ident(name), Some(rhs)) = (&left.kind, try_const_eval(right))
+            && let Some(gty) = self.globals.type_of(name)
+            && matches!(gty, Type::Char)
+        {
+            let rhs8 = rhs & 0xFF;
+            let _ = write!(self.out, "\tcmp\tbyte ptr DGROUP:_{name},{rhs8}\r\n");
             return;
         }
         self.emit_expr_to_ax(left);

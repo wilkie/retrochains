@@ -333,6 +333,7 @@ fn instr_size(instr: &Instr) -> usize {
         Instr::PushSs => 1,
         Instr::MovReg16SegReg { .. } => 2,
         Instr::CmpGroupSymImm8Sx { .. }
+        | Instr::CmpByteGroupSymImm8 { .. }
         | Instr::AddGroupSymImm8Sx { .. }
         | Instr::AdcGroupSymImm8Sx { .. }
         | Instr::SubGroupSymImm8Sx { .. }
@@ -1148,6 +1149,13 @@ fn emit_instr(
             // Wider sibling for K outside i8sx range (fixture 282).
             emit_group_sym_lea(&[0x81, 0x3E], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
             out.extend_from_slice(&imm.to_le_bytes());
+        }
+        Instr::CmpByteGroupSymImm8 { group, symbol, offset, imm } => {
+            // `cmp byte ptr <group>:<sym>[+N], imm8` → 80 3E lo hi ii.
+            // Grp1 r/m8,imm8 with /7=CMP for char-global compare-vs-const
+            // (fixture 452).
+            emit_group_sym_lea(&[0x80, 0x3E], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
+            out.push(*imm);
         }
         Instr::AddGroupSymImm8Sx { group, symbol, offset, imm } => {
             // `add word ptr <group>:<sym>[+N], imm8sx` → 83 06 lo hi ii.

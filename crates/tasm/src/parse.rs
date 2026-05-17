@@ -1335,6 +1335,20 @@ fn parse_cmp(operands: &str, line_no: usize) -> AsmResult<Instr> {
             return Ok(Instr::CmpBpRelImm8 { offset, imm });
         }
     }
+    // `cmp byte ptr <group>:<sym>[+N], imm8` — char-global compare
+    // (`80 3E lo hi ii`, 5 bytes). Used by `if (c == 'A')` for
+    // char globals (fixture 452).
+    if let Some((group, symbol)) = parse_byte_group_symbol(lhs) {
+        if let Some(imm) = parse_imm8(rhs) {
+            let (sym, offset) = split_sym_offset(symbol);
+            return Ok(Instr::CmpByteGroupSymImm8 {
+                group: group.to_string(),
+                symbol: sym.to_string(),
+                offset,
+                imm: imm as u8,
+            });
+        }
+    }
     // `cmp word ptr <group>:<sym>[+N], imm` — long const-compare
     // chained-cmp pattern. Prefer imm8sx (`83 3E ...`, 5 bytes —
     // fixture 223) when it fits; fall back to imm16 (`81 3E ...`,

@@ -559,6 +559,16 @@ pub enum Instr {
         offset: i16,
         imm: i8,
     },
+    /// `cmp byte ptr <group>:<symbol>[+<offset>], imm8` — Grp1
+    /// r/m8,imm8 with /7=CMP and disp16-only addressing
+    /// (`80 3E lo hi ii`, 5 bytes). Used by char-global compare
+    /// against constants (fixture 452: `if (c == 'A')`).
+    CmpByteGroupSymImm8 {
+        group: String,
+        symbol: String,
+        offset: i16,
+        imm: u8,
+    },
     /// `add word ptr <group>:<symbol>[+<offset>], imm8 (sx)` — Grp1
     /// r/m16,imm8sx with /0=ADD (`83 06 lo hi ii`, 5 bytes). Used
     /// by long postfix `g++` (fixture 249): low-half memory-add of 1.
