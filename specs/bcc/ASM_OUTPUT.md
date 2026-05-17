@@ -2085,6 +2085,53 @@ emits 2 `pop cx`. Two long args (4 pushes) flips to `add sp, 8`.
 _Fixtures_: 216 (`f(5L)` → push/push/pop/pop), 217 (`long f(long x)`
 reads `[bp+4]`/`[bp+6]`), 285 (two long params, second at `[bp+8]`).
 
+#### Non-constant long arguments (`322`–`328`)
+
+When a long argument is a non-constant lvalue (global, local, deref,
+struct field, array element), BCC pushes both halves **memory-direct**
+using `FF /6` Grp5 push variants — no `mov` to a register first.
+The high half pushes first, low half second (same order as the
+constant-arg path):
+
+| Source                       | High push                          | Low push                          |
+|------------------------------|------------------------------------|-----------------------------------|
+| Long global `g`              | `push word ptr DGROUP:_g+2`        | `push word ptr DGROUP:_g`         |
+| Long stack local `y`         | `push word ptr [bp+off+2]`         | `push word ptr [bp+off]`          |
+| `*p` (long pointer in `si`)  | `push word ptr [si+2]`             | `push word ptr [si]`              |
+| `s.x` (long field at off N)  | `push word ptr DGROUP:_s+N+2`      | `push word ptr DGROUP:_s+N`       |
+| `a[K]` (const index in long array) | `push word ptr DGROUP:_a+K*4+2` | `push word ptr DGROUP:_a+K*4`     |
+
+Encodings — every push opcode is `FF` plus a Grp5 `/6` ModR/M byte:
+
+```
+FF 36 lo hi       push word ptr DGROUP:_g                (4 bytes, FIXUPP-patched)
+FF 76 dd          push word ptr [bp+disp8]               (3 bytes)
+FF 34             push word ptr [si]                     (2 bytes, disp-less form)
+FF 74 dd          push word ptr [si+disp8]               (3 bytes)
+```
+
+Notable: the low-half push from `[si]` uses the **disp-less**
+`FF 34` form (2 bytes), while the high-half push from `[si+2]`
+uses `FF 74 02` (3 bytes). Same disp-less shortcut as the
+corresponding `mov dx, word ptr [si]` (`8B 14`) load.
+
+Mixed int+long argument lists push right-to-left as expected, each
+in its own type's shape — an int arg materializes into AX and emits
+`push ax`, while a long arg uses the two-push memory-direct shape.
+Fixture 327 (`f(7, g)` with `int a, long b`):
+
+```
+push word ptr DGROUP:_g+2     ; rightmost arg first, high half
+push word ptr DGROUP:_g       ; low half
+mov  ax, 7                    ; leftmost arg
+push ax
+call near ptr _f
+add  sp, 6                    ; 3 words = 6 bytes, ≥3 → add sp
+```
+
+The cleanup `add sp, N` is driven purely by total pushed bytes,
+agnostic to which words came from int args vs long args.
+
 ### Widening and narrowing
 
 `long g = i` (int → long) widens via `cwd`:

@@ -562,6 +562,45 @@ Combined with the per-arg cleanup rule, a single-long call cleans up
 with two `pop cx` (2 args' worth of words), not one. _Fixtures_: 216,
 217, 285.
 
+### Non-constant long args push memory-direct (STRONG)
+
+When the long-arg source is a non-constant lvalue (global, stack
+local, deref, struct field, array element), BCC pushes both halves
+**memory-direct** via `FF /6` Grp5 push variants — *not* through an
+AX/DX intermediate. Same "high pushed first" rule still holds.
+Encodings:
+
+```
+FF 36 lo hi    push word ptr DGROUP:_g          ; global (+FIXUPP)
+FF 76 dd       push word ptr [bp+disp8]         ; stack local
+FF 34          push word ptr [si]               ; ptr deref low (disp-less)
+FF 74 dd       push word ptr [si+disp8]         ; ptr deref high
+```
+
+The disp-less low-half shortcut (`FF 34`, 2 bytes vs. `FF 74 00` at
+3) is the same encoding choice BCC makes for the matching long-
+pointer **load** (`mov dx, word ptr [si]` = `8B 14`). Two memory-
+direct pushes per long arg, no register materialization step —
+distinct from compilers that would `mov ax, [g+2] / push ax / mov
+ax, [g] / push ax`. _Fixtures_: 322 (global), 323 (stack local),
+325 (ptr deref), 326 (struct field), 328 (array element).
+
+### Mixed int+long arg list pushed per-type, cleanup by byte-count (STRONG)
+
+An argument list with both `int` and `long` parameters pushes
+right-to-left (era-standard), but each arg uses its own type's push
+shape: an `int` arg materializes into AX and emits `push ax`, while
+a `long` arg uses the two-push memory-direct (or AX/DX) shape.
+Cleanup is driven purely by the total pushed byte count, agnostic
+to type — same threshold as the pure-int rule (≤4 bytes → `pop cx`
+per word, ≥6 → `add sp, N`). Fixture 327 (`int a, long b`): 3 words
+pushed = 6 bytes, cleanup is `add sp, 6`.
+
+This is mostly just consistency with the existing cleanup rule, but
+worth noting as the byte-count framing makes the rule simpler than
+"per-arg" would be — and a compiler that special-cased mixed lists
+would be distinguishable.
+
 ### Long-array global var-index: `<sym>[bx+disp]` not stack-array shape (STRONG)
 
 Variable-indexed access to a `long` element of a **global** array
