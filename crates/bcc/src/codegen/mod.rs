@@ -4154,6 +4154,80 @@ impl<'a> FunctionEmitter<'a> {
         op: BinOp,
         value: &Expr,
     ) {
+        // Long-field path. Resolve the dot/arrow chain to a (lo_addr,
+        // hi_addr) pair (struct field at its in-struct offset), then
+        // emit the long-compound shape — same skeleton as the long-
+        // global compound (fixtures 251/253/339) but with the field's
+        // formatted address. Fixtures 389 (`s.x += K`), 390
+        // (`s.x &= K` — bitwise uses imm16 even when K fits i8sx),
+        // 391 (`s.x += y` — variable RHS).
+        if matches!(kind, crate::ast::MemberKind::Dot)
+            && let Some((src, total_off, leaf_ty)) = self.try_member_dot_chain(base, field)
+            && leaf_ty.is_long_like()
+        {
+            let (lo_addr, hi_addr) = if self.globals.contains(&src) {
+                (
+                    global_offset_addr(&src, total_off),
+                    global_offset_addr(&src, total_off + 2),
+                )
+            } else {
+                let LocalLocation::Stack(base_bp) = self.locals.location_of(&src) else {
+                    panic!("struct local `{src}` not stack-resident");
+                };
+                let off = base_bp + i16::try_from(total_off).unwrap_or(i16::MAX);
+                (bp_addr(off), bp_addr(off + 2))
+            };
+            // Const RHS: `op [lo], k_lo / op|carry [hi], k_hi_or_0`.
+            // Arith uses `83 /n` imm8sx (low half must fit i8sx; high
+            // is `adc/sbb 0`). Bitwise uses `81 /n` imm16 (op-family-
+            // dependent encoding choice — same as global path).
+            if let Some(k) = try_const_eval(value) {
+                let k_lo = (k & 0xFFFF) as u16;
+                let k_hi = ((k >> 16) & 0xFFFF) as u16;
+                match op {
+                    BinOp::Add | BinOp::Sub => {
+                        let (lo_op, hi_op) = if matches!(op, BinOp::Add) {
+                            ("add", "adc")
+                        } else {
+                            ("sub", "sbb")
+                        };
+                        let lo_signed = k_lo as i16;
+                        if let Ok(lo_i8) = i8::try_from(lo_signed) {
+                            let _ = write!(self.out, "\t{lo_op}\tword ptr {lo_addr},{lo_i8}\r\n");
+                        } else {
+                            let _ = write!(self.out, "\t{lo_op}\tword ptr {lo_addr},{k_lo}\r\n");
+                        }
+                        let _ = write!(self.out, "\t{hi_op}\tword ptr {hi_addr},0\r\n");
+                        return;
+                    }
+                    BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor => {
+                        let mnem = match op {
+                            BinOp::BitAnd => "and",
+                            BinOp::BitOr  => "or",
+                            BinOp::BitXor => "xor",
+                            _ => unreachable!(),
+                        };
+                        let _ = write!(self.out, "\t{mnem}\tword ptr {lo_addr},{k_lo}\r\n");
+                        let _ = write!(self.out, "\t{mnem}\tword ptr {hi_addr},{k_hi}\r\n");
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+            // Variable RHS: load y into AX:DX (memory-dest conv),
+            // then memory-direct `<op> [field_lo], dx / <op|carry>
+            // [field_hi], ax`. Mirror of fixture 339 for a struct
+            // field destination.
+            if let Some((y_hi, y_lo)) = self.long_lvalue_addr_pair(value)
+                && let Some((lo_op, hi_op)) = long_pair_op(op)
+            {
+                let _ = write!(self.out, "\tmov\tax,word ptr {y_hi}\r\n");
+                let _ = write!(self.out, "\tmov\tdx,word ptr {y_lo}\r\n");
+                let _ = write!(self.out, "\t{lo_op}\tword ptr {lo_addr},dx\r\n");
+                let _ = write!(self.out, "\t{hi_op}\tword ptr {hi_addr},ax\r\n");
+                return;
+            }
+        }
         let ExprKind::Ident(name) = &base.kind else {
             panic!("non-ident base in member compound assign not yet supported (no fixture)");
         };

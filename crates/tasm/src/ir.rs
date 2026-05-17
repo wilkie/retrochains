@@ -449,6 +449,15 @@ pub enum Instr {
     /// with DX dst (`13 16 lo hi`). Companion to `AdcAxGroupSym`
     /// for the commuted `g = i + g` shape (fixture 281).
     AdcDxGroupSym { group: String, symbol: String, offset: i16 },
+    /// `add word ptr <group>:<symbol>[+<offset>], dx` — ADD r/m16,r16
+    /// (`01 16 lo hi`). Memory-destination low-half add of DX into
+    /// a global/struct-field low half, for `s.x += y` (variable RHS)
+    /// at a struct-field destination. Fixture 391.
+    AddGroupSymDx { group: String, symbol: String, offset: i16 },
+    /// `adc word ptr <group>:<symbol>[+<offset>], ax` — ADC r/m16,r16
+    /// (`11 06 lo hi`). High-half carry partner to `AddGroupSymDx`
+    /// for struct-field `+=` with variable RHS. Fixture 391.
+    AdcGroupSymAx { group: String, symbol: String, offset: i16 },
     /// `sub dx,word ptr <group>:<symbol>[+<offset>]` — SUB r16,r/m16
     /// with DX dst (`2B 16 lo hi`). Long-to-long subtraction's low-
     /// half subtract (fixture 220).

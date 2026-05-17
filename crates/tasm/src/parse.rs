@@ -1056,13 +1056,23 @@ fn parse_adc(operands: &str, line_no: usize) -> AsmResult<Instr> {
     // `adc word ptr <group>:<sym>[+N], imm8sx` — high-half carry
     // propagation for long `g++` etc. (fixture 249).
     if let Some((group, symbol)) = parse_group_symbol(lhs) {
+        let (sym, offset) = split_sym_offset(symbol);
         if let Some(imm) = parse_imm8_signed(rhs) {
-            let (sym, offset) = split_sym_offset(symbol);
             return Ok(Instr::AdcGroupSymImm8Sx {
                 group: group.to_string(),
                 symbol: sym.to_string(),
                 offset,
                 imm,
+            });
+        }
+        // `adc word ptr <group>:<sym>[+N], ax` — long compound `+=`
+        // high half carry against a global / struct-field destination
+        // with the register-loaded RHS high half. Fixture 391.
+        if rhs == "ax" {
+            return Ok(Instr::AdcGroupSymAx {
+                group: group.to_string(),
+                symbol: sym.to_string(),
+                offset,
             });
         }
     }
@@ -1220,6 +1230,16 @@ fn parse_add(operands: &str, line_no: usize) -> AsmResult<Instr> {
                 symbol: sym.to_string(),
                 offset,
                 imm,
+            });
+        }
+        // `add word ptr <group>:<sym>[+N], dx` — long compound `+=`
+        // low half against a global / struct-field destination with
+        // variable RHS already in DX. Fixture 391.
+        if rhs == "dx" {
+            return Ok(Instr::AddGroupSymDx {
+                group: group.to_string(),
+                symbol: sym.to_string(),
+                offset,
             });
         }
     }

@@ -314,6 +314,8 @@ fn instr_size(instr: &Instr) -> usize {
         | Instr::OrAxGroupSym { .. }
         | Instr::AddDxGroupSym { .. }
         | Instr::AdcAxGroupSym { .. }
+        | Instr::AddGroupSymDx { .. }
+        | Instr::AdcGroupSymAx { .. }
         | Instr::AdcDxGroupSym { .. }
         | Instr::SubDxGroupSym { .. }
         | Instr::SbbAxGroupSym { .. }
@@ -1023,6 +1025,20 @@ fn emit_instr(
             // `adc dx,word ptr <group>:<symbol>` → 13 16 lo hi.
             // Opcode 13 (ADC r16,r/m16); ModR/M reg field 010=DX.
             emit_group_sym_lea(&[0x13, 0x16], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
+        }
+        Instr::AddGroupSymDx { group, symbol, offset } => {
+            // `add word ptr <group>:<symbol>,dx` → 01 16 lo hi.
+            // Opcode 01 (ADD r/m16,r16); ModR/M 16 = mod=00 reg=DX
+            // rm=110 (disp16-only). Memory-dest sibling of
+            // `AddDxGroupSym` (which goes the other way, reg dst).
+            emit_group_sym_lea(&[0x01, 0x16], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
+        }
+        Instr::AdcGroupSymAx { group, symbol, offset } => {
+            // `adc word ptr <group>:<symbol>,ax` → 11 06 lo hi.
+            // Opcode 11 (ADC r/m16,r16); ModR/M 06 = mod=00 reg=AX
+            // rm=110 (disp16-only). High-half partner to
+            // `AddGroupSymDx` for memory-dest compound `+=`.
+            emit_group_sym_lea(&[0x11, 0x06], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
         }
         Instr::SubDxGroupSym { group, symbol, offset } => {
             // `sub dx,word ptr <group>:<symbol>` → 2B 16 lo hi.
