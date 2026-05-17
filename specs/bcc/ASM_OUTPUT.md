@@ -1533,6 +1533,54 @@ convention. The DX:AX-as-far-pointer pattern is distinct from
 the stack-pushed far pointer used by `N_SCOPY@` — same register
 pair, different semantic role per helper.
 
+### Struct-by-value function returns (`422`–`424`)
+
+Returning a struct by value mirrors the struct-copy / struct-arg
+4-byte threshold:
+
+**4-byte struct return** is *byte-identical to long return*. The
+callee loads high into DX and low into AX, hits its epilogue:
+
+```
+; struct S { int x; int y; } f(void) { return g; }   (fixture 422)
+mov dx, word ptr DGROUP:_g+2     ; high word → DX (ABI = high in DX)
+mov ax, word ptr DGROUP:_g       ; low word → AX
+; epilogue
+```
+
+The caller consumes the returned struct exactly like a long
+return (`a = f();` → `call _f / mov [_a+2], dx / mov [_a], ax`,
+fixture 424). At the byte level, "long return" and "4-byte struct
+return" are indistinguishable.
+
+**>4-byte struct return** uses a *hidden caller-provided return
+buffer*. The caller allocates space for the return value and
+passes a far pointer to that buffer as a hidden first argument at
+`[bp+4..7]`. The callee uses `N_SCOPY@` to fill the buffer, then
+returns the buffer's offset in AX:
+
+```
+; struct S f(void) { return g; }  for a 6-byte struct S (fixture 423)
+push word ptr [bp+6]             ; push hidden buffer-ptr (segment)
+push word ptr [bp+4]             ; push hidden buffer-ptr (offset)
+mov ax, offset DGROUP:_g         ; src offset
+push ds                          ; src segment
+push ax
+mov cx, 6                        ; byte count
+call near ptr N_SCOPY@           ; helper copies _g → caller's buffer
+mov ax, word ptr [bp+4]          ; AX = buffer offset (return value)
+; epilogue
+```
+
+The callee's first "regular" parameter would be at `[bp+8]`
+(after the 4-byte hidden buffer-ptr slot at `[bp+4..7]`).
+
+Note the helper choice: **return uses `N_SCOPY@`**, not
+`N_SPUSH@`. `N_SCOPY@` is the byte-copy primitive (stack-pushed
+far pointers, dest+src); `N_SPUSH@` is the stack-push primitive
+(DX:AX far pointer, src only). Return needs "copy into
+caller-provided buffer," not "push onto caller's stack."
+
 ### Struct pointer as parameter (`106`)
 
 A `struct s *p` parameter behaves exactly like an `int *p`
