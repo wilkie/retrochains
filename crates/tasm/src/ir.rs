@@ -345,6 +345,14 @@ pub enum Instr {
     /// `shr ax,cl` — D3 E8. Variable-count logical (unsigned) right
     /// shift of AX. BCC uses SHR for `unsigned >> ...` (fixture 176).
     ShrAxCl,
+    /// `shl <reg16>,cl` — D3 (mod=11 /4 r/m=<reg>). Variable-count
+    /// logical left shift of any 16-bit register. Fixture 537
+    /// (`int x; x <<= 4` lowers to `mov cl, 4; shl si, cl`).
+    ShlReg16Cl { reg: Reg16 },
+    /// `sar <reg16>,cl` — D3 (mod=11 /7 r/m=<reg>).
+    SarReg16Cl { reg: Reg16 },
+    /// `shr <reg16>,cl` — D3 (mod=11 /5 r/m=<reg>).
+    ShrReg16Cl { reg: Reg16 },
     /// `j<cc> short <label>` — Jcc rel8 family.
     JmpCondShort { cond: JmpCond, target: String },
     /// `jmp word ptr cs:<table>[bx]` — indirect dispatch through a

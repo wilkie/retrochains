@@ -1842,6 +1842,16 @@ impl<'a> FunctionEmitter<'a> {
     ///   `or <reg>, <reg>` peephole for register locals); the cond is
     ///   non-zero ⇔ true, so the mnemonic pair is `("jne", "je")`.
     fn emit_cond_test(&mut self, cond: &Expr) -> (&'static str, &'static str) {
+        // `if (!<expr>)` — generate the same flag-setting test as
+        // `<expr>` but swap the true/false jump mnemonics so the
+        // conditional jump takes the inverted path. Fixture 536
+        // (`if (!g)` on an int global lowers to `cmp [g], 0 / jne
+        // <skip-then>`). Nested `!!x` falls back into this case so
+        // the swap composes correctly.
+        if let ExprKind::Unary { op: crate::ast::UnaryOp::Not, operand } = &cond.kind {
+            let (t, f) = self.emit_cond_test(operand);
+            return (f, t);
+        }
         // `<long_global> == 0` / `<long_global> != 0` — BCC folds the
         // 32-bit comparison into `mov ax,low / or ax,high`, which
         // sets ZF iff both halves are zero. Fixture 215.
@@ -3441,9 +3451,30 @@ impl<'a> FunctionEmitter<'a> {
                 self.out.extend_from_slice(b"\timul\tdx\r\n");
                 let _ = write!(self.out, "\tmov\t{},ax\r\n", reg.name());
             }
-            BinOp::Div | BinOp::Mod | BinOp::Shl | BinOp::Shr => {
+            BinOp::Shl | BinOp::Shr => {
+                // `<int-reg> <<= K` / `>>= K` — load K into CL, then
+                // shift the register. BCC always uses CL even for
+                // K=1 (no `<reg>,1` peephole at this slot). Fixture
+                // 537 (`int x in SI; x <<= 4` → `mov cl, 4; shl si,
+                // cl`).
+                let signed = !self.locals.type_of(name).is_unsigned();
+                let mnem = match op {
+                    BinOp::Shl => "shl",
+                    BinOp::Shr if signed => "sar",
+                    BinOp::Shr => "shr",
+                    _ => unreachable!(),
+                };
+                if let Some(k) = try_const_eval(value) {
+                    let k8 = k & 0xFF;
+                    let _ = write!(self.out, "\tmov\tcl,{k8}\r\n");
+                    let _ = write!(self.out, "\t{mnem}\t{},cl\r\n", reg.name());
+                    return;
+                }
+                panic!("non-constant compound shift not yet supported (no fixture)");
+            }
+            BinOp::Div | BinOp::Mod => {
                 panic!(
-                    "compound `{op:?}` not yet supported (no fixture); expected to route through AX with cwd+idiv or cl-loaded shifts"
+                    "compound `{op:?}` not yet supported (no fixture); expected to route through AX with cwd+idiv"
                 );
             }
             BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {

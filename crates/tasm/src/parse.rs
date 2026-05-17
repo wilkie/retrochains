@@ -443,6 +443,26 @@ fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
         "shl" if rest == "ax,cl" => Ok(Instr::ShlAxCl),
         "sar" if rest == "ax,cl" => Ok(Instr::SarAxCl),
         "shr" if rest == "ax,cl" => Ok(Instr::ShrAxCl),
+        "shl" if rest.ends_with(",cl") => {
+            // Variable-count shift on any 16-bit reg (fixture 537:
+            // `mov cl, 4; shl si, cl` for `int x; x <<= 4`).
+            let r = rest.strip_suffix(",cl").unwrap_or(rest);
+            let reg = Reg16::parse(r)
+                .ok_or_else(|| AsmError::new(line.line_no, format!("shl: bad register `{r}`")))?;
+            Ok(Instr::ShlReg16Cl { reg })
+        }
+        "sar" if rest.ends_with(",cl") => {
+            let r = rest.strip_suffix(",cl").unwrap_or(rest);
+            let reg = Reg16::parse(r)
+                .ok_or_else(|| AsmError::new(line.line_no, format!("sar: bad register `{r}`")))?;
+            Ok(Instr::SarReg16Cl { reg })
+        }
+        "shr" if rest.ends_with(",cl") => {
+            let r = rest.strip_suffix(",cl").unwrap_or(rest);
+            let reg = Reg16::parse(r)
+                .ok_or_else(|| AsmError::new(line.line_no, format!("shr: bad register `{r}`")))?;
+            Ok(Instr::ShrReg16Cl { reg })
+        }
         "shl" => parse_shl_one(rest, line.line_no),
         "rcl" => parse_rcl_one(rest, line.line_no),
         "sar" => parse_sar_one(rest, line.line_no),

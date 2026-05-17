@@ -247,6 +247,7 @@ fn instr_size(instr: &Instr) -> usize {
         Instr::CmpReg16Imm8 { .. } | Instr::CmpAxImm { .. } | Instr::AddAxImm { .. } => 3,
         Instr::CmpBpRelImm8 { .. } => 4,
         Instr::JmpShort(_) | Instr::ShlAxCl | Instr::SarAxCl | Instr::ShrAxCl => 2,
+        Instr::ShlReg16Cl { .. } | Instr::SarReg16Cl { .. } | Instr::ShrReg16Cl { .. } => 2,
         Instr::Cwd => 1,
         Instr::JmpCondShort { .. } => 2,
         Instr::JmpIndirectCsTableBx { .. } => 5,
@@ -783,6 +784,21 @@ fn emit_instr(
             // `shr ax,cl` → D3 E8. ModR/M E8 = mod=11 /5(SHR) r/m=AX.
             out.push(0xD3);
             out.push(0xE8);
+        }
+        Instr::ShlReg16Cl { reg } => {
+            // `shl <reg16>,cl` → D3 (mod=11 /4 r/m=<reg>). Fixture 537.
+            out.push(0xD3);
+            out.push(0b11_100_000 | reg.code());
+        }
+        Instr::SarReg16Cl { reg } => {
+            // `sar <reg16>,cl` → D3 (mod=11 /7 r/m=<reg>).
+            out.push(0xD3);
+            out.push(0b11_111_000 | reg.code());
+        }
+        Instr::ShrReg16Cl { reg } => {
+            // `shr <reg16>,cl` → D3 (mod=11 /5 r/m=<reg>).
+            out.push(0xD3);
+            out.push(0b11_101_000 | reg.code());
         }
         Instr::JmpIndirectCsBxDisp { disp } => {
             // `jmp word ptr cs:[bx+disp8]` → 2E FF 67 dd.
