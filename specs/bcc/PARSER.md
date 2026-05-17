@@ -777,18 +777,23 @@ for the conditional branch. `emit_zero_test` now special-cases
 chain-assignment path landed in batch 61) and append the `or
 ax, ax` post-test.
 
-## Bitwise compound on int global
+## Compound assigns on int global
 
-Fixture `517` (`int g; g = 255; g &= 15;`) — `emit_compound_
-assign` had no int-global path, so any `g <bitop>= K` panicked
-on the local-only lookup. Added a memory-direct emit for
-`BinOp::BitAnd / BitOr / BitXor` against int (and uint) globals
-when the RHS folds to a constant: `<and|or|xor> word ptr
-DGROUP:_g, K`. The existing `AndGroupSymImm16` /
-`OrGroupSymImm16` / `XorGroupSymImm16` IR variants already
-encoded these (used for long globals); the only change was
-routing the int-global compound through them. BCC always uses
-the imm16 form here — no imm8sx peephole.
+Fixture `517` (`int g; g &= 15;`) and `519` (`g += 5;`) —
+`emit_compound_assign` had no int-global path, so any `g <op>=
+K` panicked on the local-only lookup. The fix added two memory-
+direct emit paths against int (and uint) globals when RHS folds
+to a constant:
+
+- `BinOp::BitAnd / BitOr / BitXor` → `<and|or|xor> word ptr
+  DGROUP:_g, K`. BCC always uses the imm16 form here (no
+  imm8sx peephole for bitwise ops). Routes through the existing
+  `AndGroupSymImm16` / `OrGroupSymImm16` / `XorGroupSymImm16`
+  IR variants (originally introduced for long globals).
+- `BinOp::Add / Sub` → `add|sub word ptr DGROUP:_g, K`. TASM
+  picks the imm8sx form when K fits a signed byte (so `g += 5`
+  encodes as `83 06 lo hi 05`, the 5-byte form) and the imm16
+  form otherwise (`81 06 lo hi imm_lo imm_hi`).
 
 ## What we explicitly defer
 
