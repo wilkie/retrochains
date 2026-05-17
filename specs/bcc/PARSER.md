@@ -757,6 +757,26 @@ Fixture `511` (`return sizeof("hi");`) — extended
 `bytes.len() + 1` to include the NUL terminator. The expression
 folds to an `IntLit` at parse time, just like `sizeof(<type>)`.
 
+## Global `g++` / `g--` statement
+
+Fixture `512` (`int g; g++; g++; return g;`) — `emit_update_in_
+place` previously handled only long globals via the `add/adc 1`
+pair. Plain int (and char) globals now emit the single
+memory-direct `inc word ptr DGROUP:_g` (or `dec` / `byte ptr`
+for char). Two new IR variants — `IncGroupSym` and `DecGroupSym`
+— encode the `FF 06 lo hi` and `FF 0E lo hi` forms (Grp5 /0 INC
+and /1 DEC, ModR/M r/m=110 → `[disp16]`).
+
+## Assignment expression in `if` condition
+
+Fixture `513` (`if ((x = 5)) return x;`) — when the condition
+is `AssignExpr`, BCC evaluates the assignment (storing the value
+and leaving it in AX), then emits `or ax, ax` to set the flags
+for the conditional branch. `emit_zero_test` now special-cases
+`ExprKind::AssignExpr`: route through `emit_expr_to_ax` (the
+chain-assignment path landed in batch 61) and append the `or
+ax, ax` post-test.
+
 ## What we explicitly defer
 
 - Templates, namespaces, RTTI, exceptions (not in BC2.0 to relevant
