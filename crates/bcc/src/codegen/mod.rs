@@ -394,7 +394,8 @@ impl<'a> FunctionEmitter<'a> {
                     self.emit_assign_global(name, value);
                 } else {
                     let loc = self.locals.location_of(name);
-                    self.emit_assign_local(loc, value);
+                    let ty = self.locals.type_of(name).clone();
+                    self.emit_assign_local(loc, &ty, value);
                 }
             }
             StmtKind::CompoundAssign { name, op, value } => {
@@ -489,7 +490,8 @@ impl<'a> FunctionEmitter<'a> {
             }
             ExprKind::AssignExpr { target, value } => {
                 let loc = self.locals.location_of(target);
-                self.emit_assign_local(loc, value);
+                let ty = self.locals.type_of(target).clone();
+                self.emit_assign_local(loc, &ty, value);
             }
             _ => {
                 self.emit_expr_to_ax(expr);
@@ -550,10 +552,23 @@ impl<'a> FunctionEmitter<'a> {
                 }
             }
             LocalLocation::Stack(off) => {
+                let ty = self.locals.type_of(name).clone();
+                // Long stack-local ++/-- — memory-direct add/adc 1 (or
+                // sub/sbb 1) on the two halves. Identical to the
+                // `x += 1` compound shape (fixtures 290, 291). Pre and
+                // post are byte-identical when the value is discarded.
+                if ty.is_long_like() {
+                    let (lo_op, hi_op) = match op {
+                        UpdateOp::Inc => ("add", "adc"),
+                        UpdateOp::Dec => ("sub", "sbb"),
+                    };
+                    let _ = write!(self.out, "\t{lo_op}\tword ptr {},1\r\n", bp_addr(off));
+                    let _ = write!(self.out, "\t{hi_op}\tword ptr {},0\r\n", bp_addr(off + 2));
+                    return;
+                }
                 // Stack-resident ++/-- on a char uses the AL round-trip
                 // (fixture 055). Stack ints are still unobserved — keep
                 // the panic until a fixture forces us there.
-                let ty = self.locals.type_of(name);
                 assert!(
                     matches!(ty, Type::Char),
                     "++/-- on a stack-resident int not yet supported (no fixture)"
@@ -1147,10 +1162,11 @@ impl<'a> FunctionEmitter<'a> {
     /// - `a || b`: a's true → true_slot; a's false → fall through to
     ///   b's test (a's false target becomes `None`). Then b same.
     /// Whether `cond` is a long-vs-long compare (signed or unsigned)
-    /// between two long-family globals that needs the 3-jump pattern.
+    /// between two long-family idents — either or both may be a long
+    /// global or a long stack local. Triggers the 3-jump pattern.
     /// Used by `emit_if` to decide whether to allocate a
     /// `then_entry_slot` for the test's true-target jump. Fixtures
-    /// 234–237 (signed), 242 (unsigned).
+    /// 234–237 (globals signed), 242 (globals unsigned), 297 (stack).
     fn is_long_signed_globals_cmp(&self, cond: &Expr) -> bool {
         let ExprKind::BinOp { op, left, right } = &cond.kind else { return false };
         if !matches!(op, BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge) {
@@ -1159,22 +1175,46 @@ impl<'a> FunctionEmitter<'a> {
         let (ExprKind::Ident(a), ExprKind::Ident(b)) = (&left.kind, &right.kind) else {
             return false;
         };
-        self.globals.type_of(a).map_or(false, |t| t.is_long_like())
-            && self.globals.type_of(b).map_or(false, |t| t.is_long_like())
+        self.ident_is_long_like(a) && self.ident_is_long_like(b)
     }
 
-    /// Whether `cond` is `<long_global> <op> K` for a relational
-    /// comparison op (`<,>,<=,>=`). BCC inlines K into the
-    /// `cmp <mem>, imm` instruction (per half), choosing the
-    /// shorter imm8sx form when each half fits and the wider imm16
-    /// otherwise. Fixtures 240 (i8sx), 282 (imm16).
+    fn ident_is_long_like(&self, name: &str) -> bool {
+        if let Some(gt) = self.globals.type_of(name) {
+            return gt.is_long_like();
+        }
+        self.locals.has(name) && self.locals.type_of(name).is_long_like()
+    }
+
+    /// `(high-addr, low-addr)` text for a long-like ident, either as
+    /// `DGROUP:_g+2` / `DGROUP:_g` (global) or `[bp+N+2]` / `[bp+N]`
+    /// (stack). Panics on a register-resident or non-existent ident
+    /// — callers should gate with `ident_is_long_like` first.
+    fn long_addr_pair(&self, name: &str) -> (String, String) {
+        if self.globals.contains(name) {
+            (format!("DGROUP:_{name}+2"), format!("DGROUP:_{name}"))
+        } else {
+            let LocalLocation::Stack(off) = self.locals.location_of(name) else {
+                unreachable!("long is never register-resident");
+            };
+            (bp_addr(off + 2), bp_addr(off))
+        }
+    }
+
+    /// Whether `cond` is `<long_var> <op> K` for a relational
+    /// comparison op (`<,>,<=,>=`) on a long global or stack local.
+    /// BCC inlines K into the `cmp <mem>, imm` instruction (per
+    /// half), choosing the shorter imm8sx form when each half fits
+    /// and the wider imm16 otherwise. Fixtures 240 (i8sx global),
+    /// 282 (imm16 global), 293 (i8sx stack local).
     fn is_long_signed_const_cmp(&self, cond: &Expr) -> bool {
         let ExprKind::BinOp { op, left, right } = &cond.kind else { return false };
         if !matches!(op, BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge) {
             return false;
         }
         let ExprKind::Ident(name) = &left.kind else { return false };
-        if !self.globals.type_of(name).map_or(false, |t| t.is_long_like()) {
+        let is_long_global = self.globals.type_of(name).map_or(false, |t| t.is_long_like());
+        let is_long_local = self.locals.has(name) && self.locals.type_of(name).is_long_like();
+        if !is_long_global && !is_long_local {
             return false;
         }
         try_const_eval(right).is_some()
@@ -1338,12 +1378,14 @@ impl<'a> FunctionEmitter<'a> {
                 (BinOp::Ge, true)  => ("jb", "jne", "jb"),
                 _ => unreachable!(),
             };
-            let _ = write!(self.out, "\tmov\tax,word ptr DGROUP:_{a}+2\r\n");
-            let _ = write!(self.out, "\tmov\tdx,word ptr DGROUP:_{a}\r\n");
-            let _ = write!(self.out, "\tcmp\tax,word ptr DGROUP:_{b}+2\r\n");
+            let (a_hi, a_lo) = self.long_addr_pair(a);
+            let (b_hi, b_lo) = self.long_addr_pair(b);
+            let _ = write!(self.out, "\tmov\tax,word ptr {a_hi}\r\n");
+            let _ = write!(self.out, "\tmov\tdx,word ptr {a_lo}\r\n");
+            let _ = write!(self.out, "\tcmp\tax,word ptr {b_hi}\r\n");
             let _ = write!(self.out, "\t{hi_to_false}\tshort {}\r\n", self.label_ref(fslot));
             let _ = write!(self.out, "\t{hi_to_true}\tshort {}\r\n", self.label_ref(tslot));
-            let _ = write!(self.out, "\tcmp\tdx,word ptr DGROUP:_{b}\r\n");
+            let _ = write!(self.out, "\tcmp\tdx,word ptr {b_lo}\r\n");
             let _ = write!(self.out, "\t{lo_to_false}\tshort {}\r\n", self.label_ref(fslot));
             return;
         }
@@ -1369,7 +1411,11 @@ impl<'a> FunctionEmitter<'a> {
                     format!("{}", v as u16)
                 }
             };
-            let unsigned = self.globals.type_of(name).map_or(false, |t| t.is_unsigned());
+            let unsigned = if let Some(gt) = self.globals.type_of(name) {
+                gt.is_unsigned()
+            } else {
+                self.locals.type_of(name).is_unsigned()
+            };
             let (hi_to_false, hi_to_true, lo_to_false) = match (op, unsigned) {
                 (BinOp::Lt, false) => ("jg", "jl",  "jae"),
                 (BinOp::Gt, false) => ("jl", "jg",  "jbe"),
@@ -1381,10 +1427,21 @@ impl<'a> FunctionEmitter<'a> {
                 (BinOp::Ge, true)  => ("jb", "jne", "jb"),
                 _ => unreachable!(),
             };
-            let _ = write!(self.out, "\tcmp\tword ptr DGROUP:_{name}+2,{}\r\n", fmt(hi));
+            // Choose between DGROUP-relative (global) and bp-relative
+            // (stack-local) operand text. Fixtures 240 (global), 293
+            // (stack local).
+            let (hi_addr, lo_addr) = if self.globals.contains(name) {
+                (format!("DGROUP:_{name}+2"), format!("DGROUP:_{name}"))
+            } else {
+                let LocalLocation::Stack(off) = self.locals.location_of(name) else {
+                    unreachable!("long is never register-resident");
+                };
+                (bp_addr(off + 2), bp_addr(off))
+            };
+            let _ = write!(self.out, "\tcmp\tword ptr {},{}\r\n", hi_addr, fmt(hi));
             let _ = write!(self.out, "\t{hi_to_false}\tshort {}\r\n", self.label_ref(fslot));
             let _ = write!(self.out, "\t{hi_to_true}\tshort {}\r\n", self.label_ref(tslot));
-            let _ = write!(self.out, "\tcmp\tword ptr DGROUP:_{name},{}\r\n", fmt(lo));
+            let _ = write!(self.out, "\tcmp\tword ptr {},{}\r\n", lo_addr, fmt(lo));
             let _ = write!(self.out, "\t{lo_to_false}\tshort {}\r\n", self.label_ref(fslot));
             return;
         }
@@ -1525,6 +1582,25 @@ impl<'a> FunctionEmitter<'a> {
         {
             let _ = write!(self.out, "\tmov\tax,word ptr DGROUP:_{name}\r\n");
             let _ = write!(self.out, "\tor\tax,word ptr DGROUP:_{name}+2\r\n");
+            return match op {
+                BinOp::Eq => ("je", "jne"),
+                BinOp::Ne => ("jne", "je"),
+                _ => unreachable!(),
+            };
+        }
+        // Same shape for a stack-resident long local vs 0 (fixture 292).
+        if let ExprKind::BinOp { op, left, right } = &cond.kind
+            && matches!(op, BinOp::Eq | BinOp::Ne)
+            && let ExprKind::Ident(name) = &left.kind
+            && self.locals.has(name)
+            && self.locals.type_of(name).is_long_like()
+            && try_const_eval(right) == Some(0)
+        {
+            let LocalLocation::Stack(off) = self.locals.location_of(name) else {
+                unreachable!("long is never register-resident");
+            };
+            let _ = write!(self.out, "\tmov\tax,word ptr {}\r\n", bp_addr(off));
+            let _ = write!(self.out, "\tor\tax,word ptr {}\r\n", bp_addr(off + 2));
             return match op {
                 BinOp::Eq => ("je", "jne"),
                 BinOp::Ne => ("jne", "je"),
@@ -2258,6 +2334,52 @@ impl<'a> FunctionEmitter<'a> {
                     let hi = (k_hi as i64) & 0xFFFF;
                     let _ = write!(self.out, "\t{mnem}\tword ptr DGROUP:_{name},{lo}\r\n");
                     let _ = write!(self.out, "\t{mnem}\tword ptr DGROUP:_{name}+2,{hi}\r\n");
+                    return;
+                }
+                _ => {}
+            }
+        }
+        // Long-like stack local compound assigns — memory-direct,
+        // same byte-width selection as the global path: arithmetic
+        // uses `83` (imm8sx, 4 bytes per half on stack), bitwise uses
+        // `81` (imm16, 5 bytes per half). Fixtures 288 (`+=`), 289
+        // (`&=`).
+        if self.locals.has(name)
+            && self.locals.type_of(name).is_long_like()
+            && let Some(k) = try_const_eval(value)
+        {
+            let LocalLocation::Stack(off) = self.locals.location_of(name) else {
+                unreachable!("long is never register-resident");
+            };
+            let k_lo = (k & 0xFFFF) as i32;
+            let k_hi = (k >> 16) as i32;
+            match op {
+                BinOp::Add | BinOp::Sub => {
+                    let (lo_op, hi_op) = if matches!(op, BinOp::Add) {
+                        ("add", "adc")
+                    } else {
+                        ("sub", "sbb")
+                    };
+                    if let Ok(lo_i8) = i8::try_from(k_lo) {
+                        let _ = write!(self.out, "\t{lo_op}\tword ptr {},{lo_i8}\r\n", bp_addr(off));
+                    } else {
+                        let lo_u16 = k_lo as u16;
+                        let _ = write!(self.out, "\t{lo_op}\tword ptr {},{lo_u16}\r\n", bp_addr(off));
+                    }
+                    let _ = write!(self.out, "\t{hi_op}\tword ptr {},0\r\n", bp_addr(off + 2));
+                    return;
+                }
+                BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor => {
+                    let mnem = match op {
+                        BinOp::BitAnd => "and",
+                        BinOp::BitOr => "or",
+                        BinOp::BitXor => "xor",
+                        _ => unreachable!(),
+                    };
+                    let lo = (k_lo as i64) & 0xFFFF;
+                    let hi = (k_hi as i64) & 0xFFFF;
+                    let _ = write!(self.out, "\t{mnem}\tword ptr {},{lo}\r\n", bp_addr(off));
+                    let _ = write!(self.out, "\t{mnem}\tword ptr {},{hi}\r\n", bp_addr(off + 2));
                     return;
                 }
                 _ => {}
@@ -3746,11 +3868,43 @@ impl<'a> FunctionEmitter<'a> {
         }
     }
 
-    fn emit_assign_local(&mut self, loc: LocalLocation, value: &Expr) {
+    fn emit_assign_local(&mut self, loc: LocalLocation, ty: &Type, value: &Expr) {
         match loc {
             LocalLocation::Stack(off) => {
-                // No fixture yet for "assign constant to stack local" —
-                // mirror the init form (immediate-store) when possible.
+                // `long x; x = K;` — two word stores, high then low.
+                // Same shape as the init form (fixture 210/287).
+                if ty.is_long_like() {
+                    if let Some(v) = try_const_eval(value) {
+                        let lo = v & 0xFFFF;
+                        let hi = (v >> 16) & 0xFFFF;
+                        let _ = write!(
+                            self.out,
+                            "\tmov\tword ptr {},{hi}\r\n",
+                            bp_addr(off + 2),
+                        );
+                        let _ = write!(
+                            self.out,
+                            "\tmov\tword ptr {},{lo}\r\n",
+                            bp_addr(off),
+                        );
+                        return;
+                    }
+                    // `x = g;` from a long-like global — mirror the
+                    // init-from-global shape (fixture 286 / 288 family):
+                    // load high into AX, low into DX, store back.
+                    if let ExprKind::Ident(src_name) = &value.kind
+                        && let Some(src_ty) = self.globals.type_of(src_name)
+                        && src_ty.is_long_like()
+                    {
+                        let _ = write!(self.out, "\tmov\tax,word ptr DGROUP:_{src_name}+2\r\n");
+                        let _ = write!(self.out, "\tmov\tdx,word ptr DGROUP:_{src_name}\r\n");
+                        let _ = write!(self.out, "\tmov\tword ptr {},ax\r\n", bp_addr(off + 2));
+                        let _ = write!(self.out, "\tmov\tword ptr {},dx\r\n", bp_addr(off));
+                        return;
+                    }
+                    panic!("non-constant long local assign not yet supported (no fixture)");
+                }
+                // Mirror the init form: immediate-store when possible.
                 if let Some(v) = try_const_eval(value) {
                     let _ = write!(self.out, "\tmov\tword ptr {},{v}\r\n", bp_addr(off));
                     return;

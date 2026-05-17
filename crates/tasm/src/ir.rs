@@ -201,6 +201,10 @@ pub enum Instr {
     XorAxBpRel { offset: i16 },
     /// `cmp ax,word ptr [bp+<offset>]` — 3B 46 dd
     CmpAxBpRel { offset: i16 },
+    /// `cmp dx,word ptr [bp+disp8]` — 3B 56 dd. Low-half companion to
+    /// `CmpAxBpRel` for the long-vs-long 3-jump compare on stack
+    /// locals (fixture 297).
+    CmpDxBpRel { offset: i16 },
     /// `imul word ptr [bp+<offset>]` — F7 6E dd. Single-operand signed
     /// multiply: AX = AX * src; high half goes to DX (discarded for
     /// `int * int` returning `int`).
@@ -510,6 +514,28 @@ pub enum Instr {
     /// assignment `a[K] += V` when the index is constant (fixture
     /// 184).
     AddBpRelImm8 { offset: i16, imm: i8 },
+    /// `adc word ptr [bp+disp8],<imm8 sign-extended>` — 83 56 dd ii.
+    /// Carry-propagation partner to `AddBpRelImm8` for the high half
+    /// of a long-local compound add (fixture 288).
+    AdcBpRelImm8 { offset: i16, imm: i8 },
+    /// `sub word ptr [bp+disp8],<imm8 sign-extended>` — 83 6E dd ii.
+    /// Compound `-=` low half on a long stack local.
+    SubBpRelImm8 { offset: i16, imm: i8 },
+    /// `sbb word ptr [bp+disp8],<imm8 sign-extended>` — 83 5E dd ii.
+    /// Borrow-propagation partner to `SubBpRelImm8`.
+    SbbBpRelImm8 { offset: i16, imm: i8 },
+    /// `and word ptr [bp+disp8],<imm16>` — 81 66 dd lo hi.
+    /// Compound `&=` on a long stack local; matches BCC's `81`
+    /// (imm16) selection for bitwise compound even when the
+    /// constant fits i8sx (fixture 289, mirrors fixture 253's
+    /// global rule).
+    AndBpRelImm16 { offset: i16, imm: u16 },
+    /// `or word ptr [bp+disp8],<imm16>` — 81 4E dd lo hi.
+    /// Compound `|=` partner to `AndBpRelImm16`.
+    OrBpRelImm16 { offset: i16, imm: u16 },
+    /// `xor word ptr [bp+disp8],<imm16>` — 81 76 dd lo hi.
+    /// Compound `^=` partner to `AndBpRelImm16`.
+    XorBpRelImm16 { offset: i16, imm: u16 },
     /// `mov ax,word ptr [si]` — 8B 04. Load through SI pointer.
     MovAxFromSiPtr,
     /// `mov word ptr [bx],<imm16>` — C7 07 lo hi. Store through BX

@@ -743,6 +743,13 @@ fn parse_sub(operands: &str, line_no: usize) -> AsmResult<Instr> {
             });
         }
     }
+    // `sub word ptr [bp+N], imm8sx` — long-local compound `-=` low
+    // half (fixture analog of 288).
+    if let Some(offset) = parse_word_bp_relative(lhs) {
+        if let Some(imm) = parse_imm8_signed(rhs) {
+            return Ok(Instr::SubBpRelImm8 { offset, imm });
+        }
+    }
     // Otherwise: try the AX/mem form.
     parse_alu_ax_mem(operands, line_no, "sub", |o| Instr::SubAxBpRel { offset: o })
 }
@@ -792,6 +799,13 @@ fn parse_and(operands: &str, line_no: usize) -> AsmResult<Instr> {
             });
         }
     }
+    // `and word ptr [bp+N], imm16` — long-local compound `&=`
+    // (fixture 289). Same imm16 rule as the global path.
+    if let Some(offset) = parse_word_bp_relative(lhs) {
+        if let Some(imm) = parse_imm16(rhs) {
+            return Ok(Instr::AndBpRelImm16 { offset, imm: imm as u16 });
+        }
+    }
     parse_alu_ax_mem(operands, line_no, "and", |o| Instr::AndAxBpRel { offset: o })
 }
 
@@ -835,6 +849,13 @@ fn parse_sbb(operands: &str, line_no: usize) -> AsmResult<Instr> {
                 offset,
                 imm,
             });
+        }
+    }
+    // `sbb word ptr [bp+N], imm8sx` — long-local compound `-=`
+    // high half borrow propagation.
+    if let Some(offset) = parse_word_bp_relative(lhs) {
+        if let Some(imm) = parse_imm8_signed(rhs) {
+            return Ok(Instr::SbbBpRelImm8 { offset, imm });
         }
     }
     Err(AsmError::new(
@@ -894,6 +915,13 @@ fn parse_adc(operands: &str, line_no: usize) -> AsmResult<Instr> {
                 offset,
                 imm,
             });
+        }
+    }
+    // `adc word ptr [bp+N], imm8sx` — long-local compound `+=` high
+    // half carry propagation (fixture 288).
+    if let Some(offset) = parse_word_bp_relative(lhs) {
+        if let Some(imm) = parse_imm8_signed(rhs) {
+            return Ok(Instr::AdcBpRelImm8 { offset, imm });
         }
     }
     Err(AsmError::new(
@@ -1067,6 +1095,11 @@ fn parse_cmp(operands: &str, line_no: usize) -> AsmResult<Instr> {
                 symbol: sym.to_string(),
                 offset,
             });
+        }
+        // `cmp dx, word ptr [bp+N]` — long-vs-long 3-jump compare on
+        // stack locals (fixture 297).
+        if let Some(offset) = parse_bp_relative(rhs) {
+            return Ok(Instr::CmpDxBpRel { offset });
         }
     }
     // `cmp word ptr [bp+N],imm8` — compare stack local to small imm.
@@ -1303,6 +1336,12 @@ fn parse_or(operands: &str, line_no: usize) -> AsmResult<Instr> {
             });
         }
     }
+    // `or word ptr [bp+N], imm16` — long-local compound `|=`.
+    if let Some(offset) = parse_word_bp_relative(lhs) {
+        if let Some(imm) = parse_imm16(rhs) {
+            return Ok(Instr::OrBpRelImm16 { offset, imm: imm as u16 });
+        }
+    }
     Err(AsmError::new(
         line_no,
         format!("or: unsupported operand form `{operands}`"),
@@ -1354,6 +1393,12 @@ fn parse_xor(operands: &str, line_no: usize) -> AsmResult<Instr> {
                 offset,
                 imm,
             });
+        }
+    }
+    // `xor word ptr [bp+N], imm16` — long-local compound `^=`.
+    if let Some(offset) = parse_word_bp_relative(lhs) {
+        if let Some(imm) = parse_imm16(rhs) {
+            return Ok(Instr::XorBpRelImm16 { offset, imm: imm as u16 });
         }
     }
     Err(AsmError::new(

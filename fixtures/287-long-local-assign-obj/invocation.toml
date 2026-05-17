@@ -1,0 +1,4 @@
+tool = "bcc"
+args = ["-c", "-ms", "HELLO.C"]
+inputs = ["HELLO.C"]
+description = "Pin long-local plain assign (no initializer). Tests stack store of high/low halves and the frame-size allocation for a single uninitialized long local."
