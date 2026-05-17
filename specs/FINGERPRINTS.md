@@ -859,25 +859,56 @@ read-modify-write differs depending on whether the source RHS was
 a constant or a variable. Both shapes use ModR/M `r/m=110` (mem-
 relative addressing); the opcode distinguishes them:
 
-| Compound | Constant RHS opcode      | Variable RHS opcode        |
-|----------|--------------------------|----------------------------|
-| `x +=`   | `83 /0` (low) + `83 /2` (adc, high) | `01` (low, src=DX) + `11` (adc, high, src=AX) |
-| `x -=`   | `83 /5` (low) + `83 /3` (sbb, high) | `29` (low, src=DX) + `19` (sbb, high, src=AX) |
-| `x &=`   | `81 /4`                  | (no fixture yet — likely `21`) |
-| `x \|=`  | `81 /1`                  | (no fixture yet — likely `09`) |
-| `x ^=`   | `81 /6`                  | (no fixture yet — likely `31`) |
+| Compound | Constant RHS                      | Variable RHS                  |
+|----------|-----------------------------------|-------------------------------|
+| `x +=`   | `83 /0` + `83 /2` (adc, high)     | `01` (src=DX) + `11` (src=AX) |
+| `x -=`   | `83 /5` + `83 /3` (sbb, high)     | `29` (src=DX) + `19` (src=AX) |
+| `x &=`   | `81 /4` + `81 /4` (high)          | `21` (src=DX) + `21` (src=AX) |
+| `x \|=`  | `81 /1` + `81 /1` (high)          | `09` (src=DX) + `09` (src=AX) |
+| `x ^=`   | `81 /6` + `81 /6` (high)          | `31` (src=DX) + `31` (src=AX) |
 
-Constant-RHS uses `Grp1 r/m16, imm8sx` (opcode `83`) or `Grp1
-r/m16, imm16` (opcode `81`). Variable-RHS uses the simpler
-`<op> r/m16, r16` opcodes (`01`/`11`/`29`/`19` and bitwise
-siblings).
+Constant-RHS uses `Grp1 r/m16, imm8sx` (opcode `83`, for `+=`/`-=`)
+or `Grp1 r/m16, imm16` (opcode `81`, for bitwise — BCC's
+op-family-dependent encoding choice). Variable-RHS uses the canonical
+`<op> r/m16, r16` opcodes (`01`/`11`/`29`/`19`/`21`/`09`/`31`).
 
 A disassembler can recover whether the source RHS was a literal
 *or* a named variable just by inspecting the opcode byte —
 without needing to see the prior load that brought the variable
 into AX:DX. The two byte sequences are distinct shapes for what
-the C language treats as the same operator. _Fixtures_: 288, 251
-(constant arith); 339, 340 (variable arith); 289 (constant bitwise).
+the C language treats as the same operator. _Fixtures_: 251, 288
+(constant `+=`); 253, 289 (constant `&=`); 339, 340 (variable `+=`/
+`-=`); 342–344 (variable bitwise).
+
+### Destination-driven helper-pair operand swap (STRONG)
+
+For long `*=` / `/=` / `%=` compound assigns, BCC loads the operands
+into the helper's argument slots in a **destination-driven**
+ordering — when the destination is one of the source operands (`x
+*= y` rather than `z = x * y`), the operand-to-slot mapping
+*swaps* so the helper's result deposit register-pair matches the
+destination's storage:
+
+| Form           | Mul op A (CX:BX) | Mul op B (DX:AX)  | Div divisor pushed | Div dividend pushed |
+|----------------|------------------|-------------------|--------------------|---------------------|
+| `z = x * y`    | x                | y                 | —                  | —                   |
+| `x *= y`       | y                | x                 | —                  | —                   |
+| `z = x / y`    | —                | —                 | y                  | x                   |
+| `x /= y`       | —                | —                 | y                  | x                   |
+
+The helpers themselves don't care — multiplication is commutative,
+division has a fixed argument order. BCC's choice is purely about
+*where the result needs to go*. For mul, the helper deposits in
+DX:AX, so the destination operand goes there (because it's
+already loaded and the result will overwrite it). For div, the
+push convention is fixed (divisor right-to-left), so only the
+result store differs from the `z =` form.
+
+A compiler that always picked the same operand-to-slot mapping
+regardless of the target form would emit different bytes between
+`z = x * y` and `x *= y`'s helper-input loads but produce the same
+*length* sequence — BCC's swap is a subtle byte-level signature.
+_Fixtures_: 336 vs 345 (mul); 337 vs 346 (div); 338 vs 347 (mod).
 
 ### Long stack-local mul/div/mod: helper shape inherited from globals (STRONG)
 

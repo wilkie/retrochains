@@ -2698,45 +2698,88 @@ loads the count as `byte ptr` even when K is itself an `int`
 local). The high-of-int byte is never consulted — undefined inputs
 above 31 are the programmer's problem.
 
-### Long compound assign with non-constant RHS (`339`, `340`)
+### Long compound assign with non-constant RHS (`339`–`347`)
 
-`x += y` and `x -= y` for two long stack locals use a memory-
-destination shape distinct from the constant-RHS path:
+All five long compound assigns (`+=`/`-=`/`&=`/`|=`/`^=`) for two
+long stack locals follow the same memory-destination shape: load y
+into AX:DX (globals convention — AX=high, DX=low), then memory-
+direct `<op> [bp+x_lo], dx` and `<op> [bp+x_hi], ax`. Arith uses
+carry/borrow propagation between the two halves; bitwise uses the
+same mnemonic per half (independent).
 
 ```
-mov ax, word ptr [bp+y_hi]      ; load y into AX:DX (globals conv)
+mov ax, word ptr [bp+y_hi]      ; load y into AX:DX
 mov dx, word ptr [bp+y_lo]
-add word ptr [bp+x_lo], dx      ; 01 56 dd — opcode `01` (r/m, r16)
-adc word ptr [bp+x_hi], ax      ; 11 46 dd
+<op> word ptr [bp+x_lo], dx     ; low-half store
+<op> word ptr [bp+x_hi], ax     ; high-half store (or carry/borrow partner for arith)
 ```
 
-vs. the constant-RHS path:
+The opcode byte differs by operator. Full table:
 
-```
-add word ptr [bp+x_lo], 5       ; 83 46 dd 05 — opcode `83` (r/m, imm8sx)
-adc word ptr [bp+x_hi], 0       ; 83 56 dd 00
-```
+| Op   | Constant RHS (`x op= K`)                      | Variable RHS (`x op= y`)                |
+|------|-----------------------------------------------|-----------------------------------------|
+| `+=` | `83 46 dd <K>` / `83 56 dd 00`                | `01 56 dd` / `11 46 dd`                 |
+| `-=` | `83 6E dd <K>` / `83 5E dd 00`                | `29 56 dd` / `19 46 dd`                 |
+| `&=` | `81 66 dd K K` / `81 66 dd K K`               | `21 56 dd` / `21 46 dd`                 |
+| `\|=` | `81 4E dd K K` / `81 4E dd K K`              | `09 56 dd` / `09 46 dd`                 |
+| `^=` | `81 76 dd K K` / `81 76 dd K K`               | `31 56 dd` / `31 46 dd`                 |
 
-Two distinct opcode families per op:
-
-| Op  | Constant RHS (`x += 5`)                    | Variable RHS (`x += y`)                  |
-|-----|--------------------------------------------|------------------------------------------|
-| `+` | `83 46 dd <K>` / `83 56 dd 00`             | `01 56 dd` / `11 46 dd`                  |
-| `-` | `83 6E dd <K>` / `83 5E dd 00`             | `29 56 dd` / `19 46 dd`                  |
-
-The constant-RHS opcodes (`83` Grp1 r/m16,imm8sx) and the variable-
-RHS opcodes (`01`/`29` and `11`/`19` — r/m, r16 forms) are
-mutually exclusive shapes — a disassembler can recover whether the
-source RHS was a literal or a variable from the opcode alone, even
-without seeing the surrounding load of `y` into AX:DX. Both forms
-are 3 or 4 bytes per half but encode different information.
+The constant-RHS opcodes (`83` Grp1 r/m16,imm8sx or `81` Grp1
+r/m16,imm16) and the variable-RHS opcodes (the canonical `r/m, r16`
+ALU forms) are mutually exclusive shapes — a disassembler can
+recover whether the source RHS was a literal or a variable from
+the opcode alone, even without seeing the surrounding load of `y`
+into AX:DX.
 
 The register pairing for the variable-RHS form is always AX=high,
 DX=low (globals convention) because the destination is memory.
-Even though the `add [mem], reg` form could in principle use any
+Even though the `<op> [mem], reg` form could in principle use any
 register for the source, BCC consistently picks DX for the low
 half store and AX for the high half store — matching its
 destination-driven register convention.
+
+### Long compound `*=` / `/=` / `%=` with non-constant RHS (`345`–`347`)
+
+Helper-routed compound forms route through the same helpers as the
+plain-assign forms, but with a destination-driven operand swap:
+since the result needs to land back into `x`'s register pair, BCC
+loads x and y into the *swapped* operand slots compared to
+`z = x op y`.
+
+**Multiply** (fixture 345, `x *= y`):
+
+```
+mov cx, word ptr [bp+y_hi]      ; RHS y → CX:BX (note: swapped from `z = x * y`)
+mov bx, word ptr [bp+y_lo]
+mov dx, word ptr [bp+x_hi]      ; LHS x → DX:AX
+mov ax, word ptr [bp+x_lo]
+call near ptr N_LXMUL@
+mov word ptr [bp+x_hi], dx      ; result back into x
+mov word ptr [bp+x_lo], ax
+```
+
+The swap is the destination-driven principle taken to its
+conclusion. In `z = x * y` (fixture 336), x→CX:BX and y→DX:AX
+so the result deposited by the helper lands "for free" in DX:AX
+ready to be stored into `z`. In `x *= y`, the result needs to land
+back into x, so x is loaded into DX:AX (where the result will
+appear), and y is loaded into CX:BX.
+
+**Divide/Modulo** (fixtures 346/347, `x /= y` / `x %= y`):
+
+```
+push word ptr [bp+y_hi]         ; divisor first (high, low)
+push word ptr [bp+y_lo]
+push word ptr [bp+x_hi]         ; dividend (high, low)
+push word ptr [bp+x_lo]
+call near ptr N_LDIV@           ; or N_LMOD@ / N_LUDIV@ / N_LUMOD@
+mov  word ptr [bp+x_hi], dx
+mov  word ptr [bp+x_lo], ax
+```
+
+The push order is divisor-first (right-to-left arg order), then
+dividend, then the helper deposits the result in DX:AX. Same shape
+as `z = x / y` but the result is stored back into x rather than z.
 
 ## Source-line comments
 
