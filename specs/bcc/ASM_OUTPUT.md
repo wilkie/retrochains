@@ -2394,6 +2394,104 @@ So the crossover sits between stride 2 and stride 3+ — same as the
 int compound `x += K` peephole, applied to pointer arithmetic.
 _Fixture_: 313.
 
+### Long function-call returns (`314`, `315`, `321`)
+
+A function with `long` return type returns its value in `DX:AX` (the
+standard 16-bit cdecl long ABI — DX=high, AX=low). The caller-side
+shape for receiving the value mirrors any other long write: store
+DX → high half, AX → low half, at whatever destination address the
+target requires.
+
+**Into a long global** (fixture 314, `g = f();`):
+
+```
+call near ptr _f
+mov  word ptr DGROUP:_g+2, dx
+mov  word ptr DGROUP:_g,   ax
+```
+
+**Into a long stack local** (fixture 315 init / 321 assign):
+
+```
+call near ptr _f
+mov  word ptr [bp-2], dx        ; high
+mov  word ptr [bp-4], ax        ; low
+```
+
+The init form (`long x = f();`) and assign form (`long x; x = f();`)
+produce identical bytes — the only difference upstream is whether
+the locals planner has already allocated `x`'s frame slot at the
+declaration site. Either way the call result lands directly in DX:AX
+and BCC's emitter stores both halves with non-AX `mov reg → mem`
+encodings (`89 56 fe` for `mov [bp-2], dx`, `89 46 fc` for `mov
+[bp-4], ax`).
+
+The order is **DX first, then AX** — same "high first, then low"
+rule that holds for every other long memory store. The caller never
+spills DX:AX into AX:DX (the globals-arithmetic convention) for a
+plain assign — that swap only happens when the long flows into a
+register-arithmetic computation.
+
+### Long struct fields (`316`–`320`)
+
+Long-typed struct fields share the same memory layout as scalar
+longs: low word at field-base offset, high word at field-base + 2.
+BCC's struct packing (no inter-field padding — see "Packed structs"
+in fingerprints) means the field's byte offset is exactly the sum
+of preceding field sizes, regardless of alignment requirements.
+
+For `struct S { int a; long x; }` global `s`, the layout is:
+
+```
+_s     label word
+       db ...     ; a at +0 (2 bytes)
+       db ...     ; x.low at +2 (2 bytes)
+       db ...     ; x.high at +4 (2 bytes)
+```
+
+So `s.x` low sits at `DGROUP:_s+2` and high at `DGROUP:_s+4`, *not*
+the +4/+6 a padded compiler would produce. _Fixture_: 320.
+
+**Long field write**, dot access on a global struct (fixture 316):
+
+```
+mov word ptr DGROUP:_s+2, 0       ; high (field x at offset 0 here)
+mov word ptr DGROUP:_s,   5       ; low
+```
+
+**Long field read**, dot access on a global struct (fixture 317,
+`g = s.x;`):
+
+```
+mov ax, word ptr DGROUP:_s+2      ; high
+mov dx, word ptr DGROUP:_s        ; low
+mov word ptr DGROUP:_g+2, ax      ; store high to g
+mov word ptr DGROUP:_g,   dx      ; store low
+```
+
+The pattern is mechanically the long-global-to-long-global copy
+with field offset folded into the addresses.
+
+**Long field on stack struct** (fixture 319) — same shape but the
+addresses are `[bp+off]` / `[bp+off+2]`:
+
+```
+mov word ptr [bp-2], 0            ; s.x.high
+mov word ptr [bp-4], 99           ; s.x.low
+```
+
+**Long field via struct pointer** (fixture 318, `p->x = 7;` where
+`p: struct S *` in SI):
+
+```
+mov word ptr [si+2], 0            ; high — same as raw long-ptr deref
+mov word ptr [si],   7            ; low
+```
+
+For a field at offset N within the struct, the addresses become
+`[si+N]` and `[si+N+2]`. `p->x` for the first field (offset 0) is
+byte-identical to `*p` for a long pointer.
+
 ## Source-line comments
 
 BCC interleaves the source as comments. Observed layout for `004`:

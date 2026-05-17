@@ -692,6 +692,67 @@ So `long *p; p++;` emits `add si, 4` (3 bytes), not four `inc si`s
 sits between stride 2 and stride 3 — same threshold as the int
 compound peephole. _Fixtures_: 093 (char*), 090 (int*), 313 (long*).
 
+### Every long memory store: high half first, then low (STRONG)
+
+A consistent invariant across every long memory write BCC emits:
+**the high half is stored before the low half**, regardless of
+storage class or operand shape. The same rule applies whether the
+value being stored is a constant, a register pair, or part of a
+read-modify-write chain.
+
+| Target                            | High store              | Low store               |
+|-----------------------------------|-------------------------|-------------------------|
+| Long global (const)               | `mov [_g+2], hi`        | `mov [_g], lo`          |
+| Long global (DX:AX from call)     | `mov [_g+2], dx`        | `mov [_g], ax`          |
+| Long global (AX:DX from arith)    | `mov [_g+2], ax`        | `mov [_g], dx`          |
+| Long stack local (const)          | `mov [bp+off+2], hi`    | `mov [bp+off], lo`      |
+| Long stack local (DX:AX from call)| `mov [bp+off+2], dx`    | `mov [bp+off], ax`      |
+| Long pointer deref (`*p = K`)     | `mov [si+2], hi`        | `mov [si], lo`          |
+| Long struct field                 | `mov [_s+off+2], hi`    | `mov [_s+off], lo`      |
+| Long array element (const idx)    | `mov [_a+off+2], hi`    | `mov [_a+off], lo`      |
+| Long array element (var idx)      | `mov [_a+bx+2], hi`     | `mov [_a+bx], lo`       |
+
+Note that the **load** order also follows the same "high first" rule
+when reading a long into a register pair (whether AX:DX globals-
+convention or DX:AX ABI-convention). So a long-to-long copy is
+always: load high, load low, store high, store low. _Fixtures_: 207,
+286, 308, 316, 318, 304, 302, 305, 314, 315.
+
+### Long function-call return: DX:AX ABI, stored high-first (STRONG)
+
+A function with `long` return value returns it in `DX:AX` (high:low
+— standard 16-bit cdecl ABI). The caller-side store directly writes
+both halves with `mov reg → mem` encodings (`89 56`/`89 46` for
+bp-relative stack stores, `A3`/`89 16` for moffs16 global stores)
+in **DX first, then AX** order — never the opposite. Distinguishable
+from a compiler that would route long return values through a stack
+spill before storing.
+
+_Fixtures_: 314 (global), 315 (long local init), 321 (long local
+assign).
+
+### Long struct fields: tight packing, +0/+2 element layout (STRONG)
+
+A struct containing `long` fields packs them with no padding —
+following BCC's general struct packing rule (already documented).
+For a long field at struct-relative offset N:
+
+- The low word lives at `<base>+N`
+- The high word lives at `<base>+N+2`
+
+The base depends on storage class: `DGROUP:_s` for a global struct,
+`[bp+struct_off]` for a stack struct, `[<reg>]` for a struct
+pointer's pointee. Reads and writes both use the same memory-direct
+two-word access pattern as any other long lvalue. `p->x` for a long
+field at offset 0 is byte-identical to `*p` for a long pointer.
+
+The lack of alignment padding makes `struct { int a; long x; }`
+land `x` at byte offset 2 — *not* the +4 a strict-alignment
+compiler would pick. The long's low half is on an even-aligned word
+(byte 2), but the natural-alignment slot for a 32-bit value would be
+byte 4. BCC accepts the misaligned access; the 8086 handles it
+transparently. _Fixtures_: 316–320.
+
 ---
 
 ## Calling-convention signatures
