@@ -5375,6 +5375,24 @@ impl<'a> FunctionEmitter<'a> {
             );
             return;
         }
+        // Register-resident int local on the RHS: store directly
+        // from the register (`mov [_g], si` — 89 36 disp16, 4 bytes)
+        // instead of bouncing through AX (`mov ax, si / mov [_g],
+        // ax` — 2+3 = 5 bytes). Fixture 477 (`g = x` where x is in
+        // SI).
+        if !ty.is_char_like()
+            && let ExprKind::Ident(src) = &value.kind
+            && self.locals.has(src)
+            && let LocalLocation::Reg(reg) = self.locals.location_of(src)
+            && !reg.is_byte()
+        {
+            let _ = write!(
+                self.out,
+                "\tmov\tword ptr DGROUP:_{name},{}\r\n",
+                reg.name(),
+            );
+            return;
+        }
         // Non-constant: compute into AX, then store.
         self.emit_expr_to_ax(value);
         if ty.is_char_like() {

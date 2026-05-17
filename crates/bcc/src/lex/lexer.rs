@@ -143,6 +143,8 @@ impl<'a> Lexer<'a> {
             b"goto" => TokenKind::KwGoto,
             b"signed" => TokenKind::KwSigned,
             b"const" => TokenKind::KwConst,
+            b"volatile" => TokenKind::KwVolatile,
+            b"register" => TokenKind::KwRegister,
             other => TokenKind::Ident(String::from_utf8_lossy(other).into_owned()),
         }
     }

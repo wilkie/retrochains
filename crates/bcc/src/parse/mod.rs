@@ -150,9 +150,13 @@ impl Parser {
             // a global. Probe past the type to find the declarator
             // name and decide.
             let mut probe = 0usize;
-            // `const` is a discardable qualifier — accept it before
-            // the type prefix. Fixture 475.
-            while matches!(self.peek_n(probe).kind, TokenKind::KwConst) {
+            // `const`, `volatile`, `register` are discardable
+            // qualifiers — accept any number of them before the type
+            // prefix. Fixtures 475, 476, 477.
+            while matches!(
+                self.peek_n(probe).kind,
+                TokenKind::KwConst | TokenKind::KwVolatile | TokenKind::KwRegister
+            ) {
                 probe += 1;
             }
             // Skip the type prefix (int/char/struct ...). For
@@ -237,9 +241,12 @@ impl Parser {
                 functions.push(self.parse_function()?);
                 decl_order.push(TopLevelRef::Function(idx));
             } else {
-                let idx = globals.len();
-                globals.push(self.parse_global(is_static, is_extern)?);
-                decl_order.push(TopLevelRef::Global(idx));
+                let new_globals = self.parse_global(is_static, is_extern)?;
+                for g in new_globals {
+                    let idx = globals.len();
+                    globals.push(g);
+                    decl_order.push(TopLevelRef::Global(idx));
+                }
             }
         }
         // Append hoisted static locals after regular globals, keeping
@@ -385,10 +392,13 @@ impl Parser {
     /// `*` modifiers are handled by the *caller* — this returns the
     /// base type only.
     fn parse_type(&mut self) -> Result<Type, ParseError> {
-        // `const` is purely a front-end qualifier — BCC accepts and
-        // discards it. A `const int g = 42` ends up as a plain int
-        // in _DATA (fixture 475 — _DATA size = 2 bytes for the int).
-        while matches!(self.peek().kind, TokenKind::KwConst) {
+        // `const`, `volatile`, `register` are purely front-end
+        // qualifiers — BCC accepts and discards them. Fixtures 475
+        // (const), 476 (volatile), 477 (register).
+        while matches!(
+            self.peek().kind,
+            TokenKind::KwConst | TokenKind::KwVolatile | TokenKind::KwRegister
+        ) {
             self.bump();
         }
         match self.peek().kind {
@@ -611,78 +621,91 @@ impl Parser {
     /// (`parse_declare`); the difference is the resulting AST node
     /// (`Global` vs. `StmtKind::Declare`) and the absence of an
     /// enclosing function context.
-    fn parse_global(&mut self, is_static: bool, is_extern: bool) -> Result<Global, ParseError> {
+    fn parse_global(&mut self, is_static: bool, is_extern: bool) -> Result<Vec<Global>, ParseError> {
         let start = self.peek().span.start;
-        let mut ty = self.parse_type()?;
-        while matches!(self.peek().kind, TokenKind::Star) {
-            self.bump();
-            ty = Type::Pointer(Box::new(ty));
-        }
-        let name_tok = self.bump();
-        let TokenKind::Ident(name) = &name_tok.kind else {
-            return Err(ParseError::NotAnIdent { offset: name_tok.span.start });
-        };
-        let name = name.clone();
-        // Array suffix. `[N]` gives an explicit count; `[]` defers
-        // the count until an initializer is seen (fixture 191's
-        // `char s[] = "hi";` → len 3).
-        let mut inferred_len_marker: Option<Box<Type>> = None;
-        if matches!(self.peek().kind, TokenKind::LBracket) {
-            self.bump();
-            if matches!(self.peek().kind, TokenKind::RBracket) {
+        let base_ty = self.parse_type()?;
+        let mut globals = Vec::new();
+        loop {
+            // Per-declarator pointer stars: `int *a, b;` makes `a`
+            // an `int*` and `b` a plain `int`.
+            let mut ty = base_ty.clone();
+            while matches!(self.peek().kind, TokenKind::Star) {
                 self.bump();
-                inferred_len_marker = Some(Box::new(ty.clone()));
-            } else {
-                let size_tok = self.bump();
-                let TokenKind::IntLit(len) = size_tok.kind else {
-                    return Err(ParseError::Unexpected {
-                        expected: "array size (integer literal)".to_owned(),
-                        found: size_tok.kind.describe().to_owned(),
-                        offset: size_tok.span.start,
-                    });
-                };
-                self.expect(&TokenKind::RBracket)?;
-                ty = Type::Array { elem: Box::new(ty), len };
+                ty = Type::Pointer(Box::new(ty));
             }
-        }
-        let init = if matches!(self.peek().kind, TokenKind::Equals) {
-            self.bump();
-            Some(self.parse_initializer()?)
-        } else {
-            None
-        };
-        if let Some(elem) = inferred_len_marker {
-            // Resolve the deferred array length from the initializer.
-            // String literals on a char-element array → bytes + 1
-            // (NUL). InitList → number of items. Anything else: error.
-            let len = match init.as_ref().map(|i| &i.kind) {
-                Some(ExprKind::StringLit(bytes)) => {
-                    u32::try_from(bytes.len() + 1).expect("string length fits in u32")
-                }
-                Some(ExprKind::InitList { items }) => {
-                    u32::try_from(items.len()).expect("init count fits in u32")
-                }
-                _ => {
-                    let t = self.peek();
-                    return Err(ParseError::Unexpected {
-                        expected: "initializer to infer array length from `[]`".to_owned(),
-                        found: "no initializer or unsupported init form".to_owned(),
-                        offset: t.span.start,
-                    });
-                }
+            let name_tok = self.bump();
+            let TokenKind::Ident(name) = &name_tok.kind else {
+                return Err(ParseError::NotAnIdent { offset: name_tok.span.start });
             };
-            ty = Type::Array { elem, len };
+            let name = name.clone();
+            let name_end = name_tok.span.end;
+            // Array suffix. `[N]` gives an explicit count; `[]`
+            // defers the count until an initializer is seen
+            // (fixture 191's `char s[] = "hi";` → len 3).
+            let mut inferred_len_marker: Option<Box<Type>> = None;
+            if matches!(self.peek().kind, TokenKind::LBracket) {
+                self.bump();
+                if matches!(self.peek().kind, TokenKind::RBracket) {
+                    self.bump();
+                    inferred_len_marker = Some(Box::new(ty.clone()));
+                } else {
+                    let size_tok = self.bump();
+                    let TokenKind::IntLit(len) = size_tok.kind else {
+                        return Err(ParseError::Unexpected {
+                            expected: "array size (integer literal)".to_owned(),
+                            found: size_tok.kind.describe().to_owned(),
+                            offset: size_tok.span.start,
+                        });
+                    };
+                    self.expect(&TokenKind::RBracket)?;
+                    ty = Type::Array { elem: Box::new(ty), len };
+                }
+            }
+            let init = if matches!(self.peek().kind, TokenKind::Equals) {
+                self.bump();
+                Some(self.parse_initializer()?)
+            } else {
+                None
+            };
+            if let Some(elem) = inferred_len_marker {
+                let len = match init.as_ref().map(|i| &i.kind) {
+                    Some(ExprKind::StringLit(bytes)) => {
+                        u32::try_from(bytes.len() + 1).expect("string length fits in u32")
+                    }
+                    Some(ExprKind::InitList { items }) => {
+                        u32::try_from(items.len()).expect("init count fits in u32")
+                    }
+                    _ => {
+                        let t = self.peek();
+                        return Err(ParseError::Unexpected {
+                            expected: "initializer to infer array length from `[]`".to_owned(),
+                            found: "no initializer or unsupported init form".to_owned(),
+                            offset: t.span.start,
+                        });
+                    }
+                };
+                ty = Type::Array { elem, len };
+            }
+            self.global_types.insert(name.clone(), ty.clone());
+            globals.push(Global {
+                name,
+                ty,
+                init,
+                is_static,
+                is_extern,
+                span: Span::new(start, name_end),
+            });
+            // Multi-declarator continuation: `int a, b, c;`. Each
+            // tail declarator re-applies pointer stars to a fresh
+            // copy of the base type. Fixture 478.
+            if matches!(self.peek().kind, TokenKind::Comma) {
+                self.bump();
+                continue;
+            }
+            break;
         }
-        let semi = self.expect(&TokenKind::Semicolon)?;
-        self.global_types.insert(name.clone(), ty.clone());
-        Ok(Global {
-            name,
-            ty,
-            init,
-            is_static,
-            is_extern,
-            span: Span::new(start, semi.span.end),
-        })
+        self.expect(&TokenKind::Semicolon)?;
+        Ok(globals)
     }
 
     fn parse_function(&mut self) -> Result<Function, ParseError> {
@@ -884,6 +907,8 @@ impl Parser {
             | TokenKind::KwLong
             | TokenKind::KwSigned
             | TokenKind::KwConst
+            | TokenKind::KwVolatile
+            | TokenKind::KwRegister
             | TokenKind::KwEnum => self.parse_declare(start),
             TokenKind::KwStatic => self.parse_declare(start),
             TokenKind::Ident(ref name) if self.typedefs.contains_key(name) => {
