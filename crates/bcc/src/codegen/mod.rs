@@ -2030,6 +2030,14 @@ impl<'a> FunctionEmitter<'a> {
             && self.locals.has(name)
             && let LocalLocation::Stack(off) = self.locals.location_of(name)
         {
+            // Char-typed stack locals use the byte-form compare
+            // (`80 7E disp8 imm8` — fixture 524).
+            let ty = self.locals.type_of(name);
+            if ty.is_char_like() {
+                let rhs8 = rhs & 0xFF;
+                let _ = write!(self.out, "\tcmp\tbyte ptr {},{rhs8}\r\n", bp_addr(off));
+                return;
+            }
             let _ = write!(self.out, "\tcmp\tword ptr {},{rhs}\r\n", bp_addr(off));
             return;
         }
@@ -6020,7 +6028,8 @@ impl<'a> FunctionEmitter<'a> {
                 }
                 // Mirror the init form: immediate-store when possible.
                 if let Some(v) = try_const_eval(value) {
-                    let _ = write!(self.out, "\tmov\tword ptr {},{v}\r\n", bp_addr(off));
+                    let v16 = v & 0xFFFF;
+                    let _ = write!(self.out, "\tmov\tword ptr {},{v16}\r\n", bp_addr(off));
                     return;
                 }
                 self.emit_expr_to_ax(value);

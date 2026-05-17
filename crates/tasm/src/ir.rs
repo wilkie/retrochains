@@ -594,6 +594,11 @@ pub enum Instr {
         offset: i16,
         imm: u8,
     },
+    /// `cmp byte ptr [bp+<offset>], imm8` — Grp1 r/m8,imm8 with
+    /// /7=CMP and bp-relative addressing
+    /// (`80 7E disp8 ii`, 4 bytes). Used by char-local compare
+    /// against constants (fixture 524: `if (c == 'B')`).
+    CmpByteBpRelImm8 { offset: i16, imm: u8 },
     /// `inc word ptr <group>:<symbol>[+<offset>]` — INC r/m16 via
     /// Grp5 /0 against a data-segment global. Encoding: `FF 06 lo
     /// hi` (ModR/M 06 = mod=00 reg=000 r/m=110 → `[disp16]`).

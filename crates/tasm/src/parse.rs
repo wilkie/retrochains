@@ -1402,6 +1402,13 @@ fn parse_cmp(operands: &str, line_no: usize) -> AsmResult<Instr> {
             });
         }
     }
+    // `cmp byte ptr [bp+N], imm8` — char-local compare
+    // (`80 7E dd ii`, 4 bytes). Fixture 524.
+    if let Some(offset) = parse_byte_bp_relative(lhs) {
+        if let Some(imm) = parse_imm8(rhs) {
+            return Ok(Instr::CmpByteBpRelImm8 { offset, imm: imm as u8 });
+        }
+    }
     // `cmp word ptr <group>:<sym>[+N], imm` — long const-compare
     // chained-cmp pattern. Prefer imm8sx (`83 3E ...`, 5 bytes —
     // fixture 223) when it fits; fall back to imm16 (`81 3E ...`,

@@ -341,6 +341,7 @@ fn instr_size(instr: &Instr) -> usize {
         | Instr::SubGroupSymImm8Sx { .. }
         | Instr::SbbGroupSymImm8Sx { .. } => 5,
         Instr::IncGroupSym { .. } | Instr::DecGroupSym { .. } => 4,
+        Instr::CmpByteBpRelImm8 { .. } => 4,
         Instr::AndGroupSymImm16 { .. }
         | Instr::OrGroupSymImm16 { .. }
         | Instr::XorGroupSymImm16 { .. }
@@ -1184,6 +1185,15 @@ fn emit_instr(
             // Grp1 r/m8,imm8 with /7=CMP for char-global compare-vs-const
             // (fixture 452).
             emit_group_sym_lea(&[0x80, 0x3E], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
+            out.push(*imm);
+        }
+        Instr::CmpByteBpRelImm8 { offset, imm } => {
+            // `cmp byte ptr [bp+disp8], imm8` → 80 7E dd ii.
+            // ModR/M 7E = mod=01 reg=111(/7=CMP) r/m=110([bp]+disp8).
+            // Fixture 524.
+            out.push(0x80);
+            out.push(0x7E);
+            out.push(*offset as u8);
             out.push(*imm);
         }
         Instr::IncGroupSym { group, symbol, offset } => {

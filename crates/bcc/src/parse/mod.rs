@@ -1735,6 +1735,14 @@ impl Parser {
             let (value, head_start) = match self.peek().kind {
                 TokenKind::KwCase => {
                     let kw = self.bump();
+                    // Optional leading `-` for negative case labels
+                    // (fixture 525: `case -1:`). The value still
+                    // canonicalizes as a u32 — we negate after
+                    // reading the bare integer literal.
+                    let negate = matches!(self.peek().kind, TokenKind::Minus);
+                    if negate {
+                        self.bump();
+                    }
                     let int_tok = self.bump();
                     let TokenKind::IntLit(v) = int_tok.kind else {
                         return Err(ParseError::Unexpected {
@@ -1743,6 +1751,7 @@ impl Parser {
                             offset: int_tok.span.start,
                         });
                     };
+                    let v = if negate { v.wrapping_neg() } else { v };
                     (Some(v), kw.span.start)
                 }
                 TokenKind::KwDefault => {
