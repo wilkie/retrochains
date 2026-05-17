@@ -173,6 +173,18 @@ fn bp_addr(off: i16) -> String {
         format!("[bp+{off}]")
     }
 }
+
+/// `DGROUP:_<sym>` or `DGROUP:_<sym>+<off>` — the asm-text form BCC
+/// uses when addressing into a global's body at a known offset (long
+/// halves, struct fields, array element bases). `off == 0` collapses
+/// to the bare symbol; otherwise `+<off>` is appended.
+fn global_offset_addr(sym: &str, off: i32) -> String {
+    if off == 0 {
+        format!("DGROUP:_{sym}")
+    } else {
+        format!("DGROUP:_{sym}+{off}")
+    }
+}
 use plan::{LabelPlan, SwitchStrategy};
 
 /// Emit the per-function chunk of an `-S` file for one function.
@@ -2885,6 +2897,35 @@ impl<'a> FunctionEmitter<'a> {
 
     /// Emit the 4-instruction sequence that lands `&a[index]` in BX
     /// (used as a shared head by `emit_array_index_to_ax` and
+    /// Load an integer index into BX and scale by 4 (long stride),
+    /// for variable-indexed long-array element access on globals
+    /// (the symbol's offset is then folded into the disp16 of the
+    /// `[bx+disp]` operand). BCC special-cases the load:
+    /// - Int stack local: `mov bx, word ptr [bp-N]` (3 bytes).
+    /// - Int register local: `mov bx, <reg>` (2 bytes).
+    /// - Anything else: compute into AX, then `mov bx, ax`.
+    /// Followed by two `shl bx, 1` (stride 4 = 2^2). Fixtures 303,
+    /// 305, 307.
+    fn emit_index_into_bx_long_stride(&mut self, index: &Expr) {
+        if let ExprKind::Ident(i_name) = &index.kind
+            && self.locals.has(i_name)
+        {
+            match self.locals.location_of(i_name) {
+                LocalLocation::Stack(off) => {
+                    let _ = write!(self.out, "\tmov\tbx,word ptr {}\r\n", bp_addr(off));
+                }
+                LocalLocation::Reg(reg) => {
+                    let _ = write!(self.out, "\tmov\tbx,{}\r\n", reg.name());
+                }
+            }
+        } else {
+            self.emit_expr_to_ax(index);
+            self.out.extend_from_slice(b"\tmov\tbx,ax\r\n");
+        }
+        self.out.extend_from_slice(b"\tshl\tbx,1\r\n");
+        self.out.extend_from_slice(b"\tshl\tbx,1\r\n");
+    }
+
     /// `emit_array_assign` for the variable-index case):
     /// ```text
     ///   mov bx, <index>
@@ -2982,12 +3023,82 @@ impl<'a> FunctionEmitter<'a> {
     /// [bp-N], K`. Otherwise (single-dim variable index, fixtures
     /// 078/142) we compute `&a[i]` into BX and store through it.
     fn emit_array_assign(&mut self, array: &str, indices: &[Expr], value: &Expr) {
+        // Global array? Route to DGROUP-relative addressing.
+        if let Some(gty) = self.globals.type_of(array) {
+            let gty = gty.clone();
+            if let Some((const_off, leaf_ty)) =
+                try_const_array_offset(&gty, indices.iter())
+            {
+                // Long element: store both halves, high then low.
+                // Fixture 302 (`long a[3]; a[1] = 42;`).
+                if leaf_ty.is_long_like() {
+                    let Some(v) = try_const_eval(value) else {
+                        panic!("non-constant rhs in long-array element assign not yet supported (no fixture)");
+                    };
+                    let lo = (v & 0xFFFF) as u16;
+                    let hi = ((v >> 16) & 0xFFFF) as u16;
+                    let lo_addr = global_offset_addr(array, const_off);
+                    let hi_addr = global_offset_addr(array, const_off + 2);
+                    let _ = write!(self.out, "\tmov\tword ptr {hi_addr},{hi}\r\n");
+                    let _ = write!(self.out, "\tmov\tword ptr {lo_addr},{lo}\r\n");
+                    return;
+                }
+                let width = ptr_width(&leaf_ty);
+                let addr = global_offset_addr(array, const_off);
+                if let Some(v) = try_const_eval(value) {
+                    let v_masked =
+                        if matches!(leaf_ty, Type::Char) { v & 0xFF } else { v & 0xFFFF };
+                    let _ = write!(self.out, "\tmov\t{width} ptr {addr},{v_masked}\r\n");
+                    return;
+                }
+                panic!("non-constant rhs in constant-indexed global array assign not yet supported (no fixture)");
+            }
+            // Variable-indexed global long-array write. Load `i` into
+            // BX (directly if it's a stack/reg local, otherwise via
+            // AX), shl twice for stride 4, then write `mov word ptr
+            // _a[bx+0], lo` and `mov word ptr _a[bx+2], hi`. Fixture
+            // 305.
+            if indices.len() == 1
+                && let Some(elem) = gty.array_elem()
+                && elem.is_long_like()
+            {
+                let Some(v) = try_const_eval(value) else {
+                    panic!("non-constant rhs in variable-indexed global long-array assign not yet supported (no fixture)");
+                };
+                let lo = (v & 0xFFFF) as u16;
+                let hi = ((v >> 16) & 0xFFFF) as u16;
+                let index = &indices[0];
+                self.emit_index_into_bx_long_stride(index);
+                let _ = write!(
+                    self.out,
+                    "\tmov\tword ptr DGROUP:_{array}[bx+2],{hi}\r\n",
+                );
+                let _ = write!(
+                    self.out,
+                    "\tmov\tword ptr DGROUP:_{array}[bx],{lo}\r\n",
+                );
+                return;
+            }
+            panic!("variable-indexed global array assign not yet supported (no fixture)");
+        }
         let array_ty = self.locals.type_of(array).clone();
         let LocalLocation::Stack(base_off) = self.locals.location_of(array) else {
             panic!("array `{array}` should be stack-resident");
         };
         if let Some((const_off, leaf_ty)) = try_const_array_offset(&array_ty, indices.iter()) {
             let off = base_off + i16::try_from(const_off).unwrap_or(i16::MAX);
+            // Long element on stack: store both halves, high then low.
+            // Fixture 304 (`long a[2]; a[0] = 5;`).
+            if leaf_ty.is_long_like() {
+                let Some(v) = try_const_eval(value) else {
+                    panic!("non-constant rhs in long-stack-array element assign not yet supported (no fixture)");
+                };
+                let lo = (v & 0xFFFF) as u16;
+                let hi = ((v >> 16) & 0xFFFF) as u16;
+                let _ = write!(self.out, "\tmov\tword ptr {},{hi}\r\n", bp_addr(off + 2));
+                let _ = write!(self.out, "\tmov\tword ptr {},{lo}\r\n", bp_addr(off));
+                return;
+            }
             let width = ptr_width(&leaf_ty);
             if let Some(v) = try_const_eval(value) {
                 let v_masked =
@@ -3846,6 +3957,63 @@ impl<'a> FunctionEmitter<'a> {
                     _ => unreachable!(),
                 }
                 let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name},ax\r\n");
+                return;
+            }
+            // `g = a[K];` for a long-element STACK array — load high
+            // (`[bp+base+K*4+2]`) then low (`[bp+base+K*4]`) into
+            // AX:DX (globals convention), then store. Fixture 306.
+            if let ExprKind::ArrayIndex { array: arr_expr, index } = &value.kind
+                && let ExprKind::Ident(arr_name) = &arr_expr.kind
+                && self.locals.has(arr_name)
+                && let Some(elem) = self.locals.type_of(arr_name).array_elem()
+                && elem.is_long_like()
+                && let Some(k) = try_const_eval(index)
+            {
+                let LocalLocation::Stack(base_off) = self.locals.location_of(arr_name) else {
+                    unreachable!("array is stack-resident");
+                };
+                let off = base_off + i16::try_from((k as i32) * 4).expect("offset fits");
+                let _ = write!(self.out, "\tmov\tax,word ptr {}\r\n", bp_addr(off + 2));
+                let _ = write!(self.out, "\tmov\tdx,word ptr {}\r\n", bp_addr(off));
+                let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name}+2,ax\r\n");
+                let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name},dx\r\n");
+                return;
+            }
+            // `g = a[K];` / `g = a[i];` for a long-element GLOBAL array RHS.
+            // Const index folds to `_a+K*4` / `_a+K*4+2`; var index
+            // uses bx-indexed addressing on the global. Fixtures 301
+            // (const index), 303 (var index).
+            if let ExprKind::ArrayIndex { array: arr_expr, index } = &value.kind
+                && let ExprKind::Ident(arr_name) = &arr_expr.kind
+                && let Some(arr_ty) = self.globals.type_of(arr_name)
+                && let Some(elem) = arr_ty.array_elem()
+                && elem.is_long_like()
+            {
+                let arr_name = arr_name.clone();
+                if let Some(k) = try_const_eval(index) {
+                    let byte_off = (k as i32) * 4;
+                    let lo_addr = global_offset_addr(&arr_name, byte_off);
+                    let hi_addr = global_offset_addr(&arr_name, byte_off + 2);
+                    let _ = write!(self.out, "\tmov\tax,word ptr {hi_addr}\r\n");
+                    let _ = write!(self.out, "\tmov\tdx,word ptr {lo_addr}\r\n");
+                    let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name}+2,ax\r\n");
+                    let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name},dx\r\n");
+                    return;
+                }
+                // Variable index — load `i` into BX, scale by 4 with
+                // two `shl bx, 1`s, then read both halves via
+                // `<sym>[bx+disp]`. Fixtures 303, 307.
+                self.emit_index_into_bx_long_stride(index);
+                let _ = write!(
+                    self.out,
+                    "\tmov\tax,word ptr DGROUP:_{arr_name}[bx+2]\r\n",
+                );
+                let _ = write!(
+                    self.out,
+                    "\tmov\tdx,word ptr DGROUP:_{arr_name}[bx]\r\n",
+                );
+                let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name}+2,ax\r\n");
+                let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name},dx\r\n");
                 return;
             }
             panic!("non-constant long assignment to global not yet supported (no fixture)");

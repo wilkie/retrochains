@@ -123,6 +123,29 @@ pub enum Instr {
     /// from a stack local into any 16-bit register. Encoding:
     /// `8B xx dd` where ModR/M xx = mod=01 reg=<dst> r/m=110.
     MovReg16BpRel { reg: Reg16, offset: i16 },
+    /// `mov <reg16>,word ptr <group>:<sym>[bx+disp]` — bx-indexed
+    /// load from a data-segment global. Used by variable-indexed
+    /// long-array reads (fixture 303). Encoding: `8B xx lo hi`
+    /// where ModR/M xx = mod=10 reg=<dst> r/m=111([bx]+disp16), and
+    /// the 16-bit displacement is FIXUPP-patched to the symbol's
+    /// offset plus the literal `disp`.
+    MovReg16GroupSymBxDisp {
+        reg: Reg16,
+        group: String,
+        symbol: String,
+        disp: u16,
+    },
+    /// `mov word ptr <group>:<sym>[bx+disp],<imm16>` — bx-indexed
+    /// store of an immediate to a data-segment global. Used by
+    /// variable-indexed long-array writes (fixture 305). Encoding:
+    /// `C7 87 lo hi imm_lo imm_hi`. ModR/M 87 = mod=10 /0(MOV)
+    /// r/m=111([bx]+disp16).
+    MovGroupSymBxDispImm {
+        group: String,
+        symbol: String,
+        disp: u16,
+        imm: u16,
+    },
     /// `add ax,word ptr [bp+<offset>]` — 03 46 dd
     AddAxBpRel { offset: i16 },
     /// `adc dx, word ptr [bp+disp8]` — `13 56 dd`. ADC r16,r/m16

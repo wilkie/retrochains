@@ -255,6 +255,8 @@ fn instr_size(instr: &Instr) -> usize {
         Instr::MovBpRelAx { .. } | Instr::MovBpRelReg16 { .. } => 3,
         Instr::MovAxFromCsBx => 3,
         Instr::MovReg16OffsetSym { .. } => 3,
+        Instr::MovReg16GroupSymBxDisp { .. } => 4,
+        Instr::MovGroupSymBxDispImm { .. } => 6,
         Instr::MovReg16Imm { .. } | Instr::SubSpImm(_) | Instr::AddSpImm(_) => 3,
         Instr::MovReg16BpRel { .. }
         | Instr::AddAxBpRel { .. }
@@ -799,6 +801,20 @@ fn emit_instr(
             // for non-AX destinations; AX uses the shorter A1 form.
             let modrm = 0b00_000_110 | (reg.code() << 3);
             emit_group_sym_lea(&[0x8B, modrm], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
+        }
+        Instr::MovReg16GroupSymBxDisp { reg, group, symbol, disp } => {
+            // `mov <reg16>,word ptr <group>:<sym>[bx+disp]` → 8B
+            // (mod=10 reg=<r> r/m=111([bx]+disp16)) lo hi. The disp16
+            // bytes are `<sym-offset> + <disp>`, FIXUPP-patched as the
+            // symbol's segment-relative location.
+            let modrm = 0b10_000_111 | (reg.code() << 3);
+            emit_group_sym_lea(&[0x8B, modrm], group, symbol, *disp as i16, symbols, group_idx, extern_idx, out, fixups)?;
+        }
+        Instr::MovGroupSymBxDispImm { group, symbol, disp, imm } => {
+            // `mov word ptr <group>:<sym>[bx+disp],imm16` → C7 87
+            // lo hi imm_lo imm_hi.
+            emit_group_sym_lea(&[0xC7, 0x87], group, symbol, *disp as i16, symbols, group_idx, extern_idx, out, fixups)?;
+            out.extend_from_slice(&imm.to_le_bytes());
         }
         Instr::MovAlGroupSym { group, symbol, offset } => {
             // `mov al,byte ptr <group>:<symbol>` → A0 lo hi.

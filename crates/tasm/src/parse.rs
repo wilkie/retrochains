@@ -517,6 +517,17 @@ fn parse_mov(operands: &str, line_no: usize) -> AsmResult<Instr> {
         if rhs == "word ptr [bx]" {
             return Ok(Instr::MovAxFromBxPtr);
         }
+        // bx-indexed form first — `[bx]`/`[bx+K]` inside the symbol
+        // part would otherwise get swallowed by `parse_group_symbol`.
+        // Fixture 303 (`mov ax, word ptr DGROUP:_a[bx+2]`).
+        if let Some((group, symbol, disp)) = parse_group_symbol_bx_disp(rhs) {
+            return Ok(Instr::MovReg16GroupSymBxDisp {
+                reg: Reg16::Ax,
+                group: group.to_string(),
+                symbol: symbol.to_string(),
+                disp,
+            });
+        }
         if let Some((group, symbol)) = parse_group_symbol(rhs) {
             let (sym, offset) = split_sym_offset(symbol);
             return Ok(Instr::MovAxGroupSym {
@@ -530,6 +541,17 @@ fn parse_mov(operands: &str, line_no: usize) -> AsmResult<Instr> {
     // for non-AX destinations (AX has the shorter A1 path above).
     // Fixture 192: `mov bx,word ptr DGROUP:_p`.
     if let Some(reg) = Reg16::parse(lhs) {
+        // bx-indexed form first — it has a `[` in the symbol part
+        // that `parse_group_symbol` would otherwise swallow.
+        // Fixture 303 (`mov ax, word ptr DGROUP:_a[bx+2]`).
+        if let Some((group, symbol, disp)) = parse_group_symbol_bx_disp(rhs) {
+            return Ok(Instr::MovReg16GroupSymBxDisp {
+                reg,
+                group: group.to_string(),
+                symbol: symbol.to_string(),
+                disp,
+            });
+        }
         if let Some((group, symbol)) = parse_group_symbol(rhs) {
             let (sym, offset) = split_sym_offset(symbol);
             return Ok(Instr::MovReg16WordGroupSym {
@@ -658,6 +680,21 @@ fn parse_mov(operands: &str, line_no: usize) -> AsmResult<Instr> {
     if lhs == "word ptr [bx]" {
         if let Some(imm) = parse_imm16(rhs) {
             return Ok(Instr::MovBxPtrImm { imm });
+        }
+    }
+    // LHS `word ptr <group>:<sym>[bx+disp]` — store immediate to a
+    // data-segment global through bx-indexed addressing. Used by
+    // variable-indexed long-array writes (fixture 305). Tried before
+    // the plain `<group>:<sym>+N` path since `[bx]` in the symbol
+    // part would otherwise get swallowed.
+    if let Some((group, symbol, disp)) = parse_group_symbol_bx_disp(lhs) {
+        if let Some(imm) = parse_imm16(rhs) {
+            return Ok(Instr::MovGroupSymBxDispImm {
+                group: group.to_string(),
+                symbol: symbol.to_string(),
+                disp,
+                imm: imm as u16,
+            });
         }
     }
     // LHS `word ptr <group>:<sym>[+N]` — store immediate to a
@@ -1552,6 +1589,31 @@ fn parse_group_symbol_with_width<'a>(s: &'a str, prefix: &str) -> Option<(&'a st
         return None;
     }
     Some((group, sym))
+}
+
+/// Parse `word ptr <group>:<sym>[bx]` or `word ptr <group>:<sym>[bx+K]`,
+/// returning `(group, sym, disp)`. The displacement defaults to 0 when
+/// `[bx]` has no `+K`. Used by variable-indexed long-array reads
+/// (fixture 303: `mov ax, word ptr DGROUP:_a[bx+2]`).
+fn parse_group_symbol_bx_disp(s: &str) -> Option<(&str, &str, u16)> {
+    let s = s.trim().strip_prefix("word ptr ")?;
+    let (group, rest) = s.split_once(':')?;
+    let group = group.trim();
+    // rest is `_sym[bx]` or `_sym[bx+K]`.
+    let (sym_part, idx_part) = rest.split_once('[')?;
+    let sym = sym_part.trim();
+    if !sym.starts_with('_') && !sym.starts_with('@') {
+        return None;
+    }
+    let idx = idx_part.strip_suffix(']')?.trim();
+    let disp = if idx == "bx" {
+        0u16
+    } else if let Some(k) = idx.strip_prefix("bx+") {
+        k.trim().parse::<u16>().ok()?
+    } else {
+        return None;
+    };
+    Some((group, sym, disp))
 }
 
 /// Strip a trailing `+<integer>` from a symbol, returning
