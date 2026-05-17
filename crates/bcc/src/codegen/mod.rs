@@ -2375,6 +2375,39 @@ impl<'a> FunctionEmitter<'a> {
                 let _ = write!(self.out, "\t{hi_op}\tdx,word ptr {b_hi}\r\n");
                 return;
             }
+            // `return -<long-lvalue>;` — long unary negation at return.
+            // Load operand into DX:AX (ABI return convention), then
+            // run the canonical 32-bit two's complement neg idiom
+            // with DX=high: negate high first (no flag dep), negate
+            // low (which sets CF iff low was nonzero), then sbb the
+            // borrow back into high. Mirror of the memory-dest neg
+            // idiom (fixture 226) with the register roles swapped
+            // per the destination-driven rule. Fixtures 371
+            // (param), 373 (global).
+            if let ExprKind::Unary { op: crate::ast::UnaryOp::Neg, operand } = &e.kind
+                && let Some((hi_addr, lo_addr)) = self.long_lvalue_addr_pair(operand)
+            {
+                let _ = write!(self.out, "\tmov\tdx,word ptr {hi_addr}\r\n");
+                let _ = write!(self.out, "\tmov\tax,word ptr {lo_addr}\r\n");
+                self.out.extend_from_slice(b"\tneg\tdx\r\n");
+                self.out.extend_from_slice(b"\tneg\tax\r\n");
+                self.out.extend_from_slice(b"\tsbb\tdx,0\r\n");
+                return;
+            }
+            // `return ~<long-lvalue>;` — long bitwise complement at
+            // return. Load operand into DX:AX, then flip each half
+            // independently. BCC emits low-first (`not ax / not dx`)
+            // — opposite of the neg case where the order is forced
+            // by the flag dependency. Fixture 372.
+            if let ExprKind::Unary { op: crate::ast::UnaryOp::BitNot, operand } = &e.kind
+                && let Some((hi_addr, lo_addr)) = self.long_lvalue_addr_pair(operand)
+            {
+                let _ = write!(self.out, "\tmov\tdx,word ptr {hi_addr}\r\n");
+                let _ = write!(self.out, "\tmov\tax,word ptr {lo_addr}\r\n");
+                self.out.extend_from_slice(b"\tnot\tax\r\n");
+                self.out.extend_from_slice(b"\tnot\tdx\r\n");
+                return;
+            }
             panic!("non-constant long return value not yet supported (no fixture)");
         }
         self.emit_expr_to_ax(e);

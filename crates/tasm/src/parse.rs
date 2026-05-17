@@ -943,6 +943,14 @@ fn parse_sbb(operands: &str, line_no: usize) -> AsmResult<Instr> {
             return Ok(Instr::SbbAxBpRel { offset });
         }
     }
+    // `sbb <reg16>, imm8sx` — high-half borrow back-propagation in
+    // the long unary-neg-at-return idiom (`sbb dx, 0` after `neg
+    // dx / neg ax`). Encoded as `83 D(reg) ii` (fixture 371).
+    if let Some(reg) = Reg16::parse(lhs) {
+        if let Some(imm) = parse_imm8_signed(rhs) {
+            return Ok(Instr::SbbReg16Imm8Sx { reg, imm });
+        }
+    }
     // `sbb dx, word ptr [bp+N]` — long return-arith high-half
     // borrow (fixture 285's `return a - b;` analog).
     if lhs == "dx" {

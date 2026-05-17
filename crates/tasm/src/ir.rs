@@ -377,6 +377,12 @@ pub enum Instr {
     /// propagation in long-return arith (e.g. `adc dx, 0` after
     /// `add ax, K`). Fixture 362.
     AdcReg16Imm8Sx { reg: Reg16, imm: i8 },
+    /// `sbb <reg16>,<imm8sx>` — `83 D(reg) ii`. ModR/M D(reg) =
+    /// mod=11 /3(SBB) r/m=<reg>. Used for the high-half borrow
+    /// back-propagation in long unary neg at return boundary
+    /// (e.g. `sbb dx, 0` closing out `neg dx / neg ax`). Fixture
+    /// 371.
+    SbbReg16Imm8Sx { reg: Reg16, imm: i8 },
     /// `add <reg16>, imm16` — Grp1 r/m16,imm16. Encoding
     /// `81 C(rm) lo hi` where ModR/M is `mod=11 /0(ADD) rm=<reg>`.
     /// Wider sibling to `AddReg16Imm8Sx` when the immediate doesn't
