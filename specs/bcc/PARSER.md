@@ -110,6 +110,17 @@ empirically verified during fixture `390`'s capture). So adding the
 lexer support didn't require any codegen changes; the literal value
 flows through `IntLit(u32)` regardless of source form.
 
+`IntLit(u32)` holds 32 bits and is wide enough for any long-sized
+hex literal that's actually used in BC2 corpus. The literal's
+target type is decided later by context, so a `long g = 0x12345678;`
+splits across two `mov` halves the usual way (fixture `446`), and
+the `L` suffix on `0xFFL` is accepted and discarded — context
+already knew the target was long (fixture `447`). A long-typed
+compound-assign with a hex mask (`g &= 0xFFFF;`) routes through the
+same `emit_long_compound_to_mem` skeleton as any other long-with-
+constant compound (fixture `448`); the hex form is purely
+front-end.
+
 ## What we explicitly defer
 
 - Templates, namespaces, RTTI, exceptions (not in BC2.0 to relevant
