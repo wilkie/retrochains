@@ -185,6 +185,45 @@ fn global_offset_addr(sym: &str, off: i32) -> String {
         format!("DGROUP:_{sym}+{off}")
     }
 }
+
+/// Given an asm address operand (one of: `DGROUP:_<sym>`,
+/// `DGROUP:_<sym>+N`, `[bp-N]`, `[bp+N]`, `[<reg>]`, `[<reg>+N]`),
+/// return the same operand shifted by +2 bytes. Used by the long-
+/// field member-assign path to derive the high-half address from
+/// the low-half address.
+fn shift_dest_by_two(dest: &str) -> String {
+    // `DGROUP:_<sym>` → `DGROUP:_<sym>+2`
+    // `DGROUP:_<sym>+N` → `DGROUP:_<sym>+(N+2)`
+    if let Some(rest) = dest.strip_prefix("DGROUP:_") {
+        if let Some((sym, off)) = rest.split_once('+') {
+            let n: i32 = off.parse().expect("global offset is integer");
+            return format!("DGROUP:_{sym}+{}", n + 2);
+        }
+        return format!("DGROUP:_{rest}+2");
+    }
+    // `[bp-N]` → `[bp-(N-2)]` (less negative); `[bp+N]` → `[bp+(N+2)]`.
+    if let Some(rest) = dest.strip_prefix("[bp") {
+        let body = rest.strip_suffix(']').expect("malformed bp-relative dest");
+        let n: i32 = body.parse().expect("bp offset is integer");
+        let shifted = n + 2;
+        return if shifted < 0 {
+            format!("[bp{shifted}]")
+        } else if shifted == 0 {
+            "[bp]".to_owned()
+        } else {
+            format!("[bp+{shifted}]")
+        };
+    }
+    // `[<reg>]` → `[<reg>+2]`; `[<reg>+N]` → `[<reg>+(N+2)]`.
+    if let Some(inside) = dest.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+        if let Some((reg, off)) = inside.split_once('+') {
+            let n: i32 = off.parse().expect("reg-indirect offset is integer");
+            return format!("[{reg}+{}]", n + 2);
+        }
+        return format!("[{inside}+2]");
+    }
+    panic!("shift_dest_by_two: unsupported dest form `{dest}`");
+}
 use plan::{LabelPlan, SwitchStrategy};
 
 /// Emit the per-function chunk of an `-S` file for one function.
@@ -2143,6 +2182,17 @@ impl<'a> FunctionEmitter<'a> {
                         let _ = write!(self.out, "\tmov\tword ptr {},dx\r\n", bp_addr(off));
                         return;
                     }
+                    // `long x = f();` long local from a function-call
+                    // RHS. The call returns DX:AX (ABI: DX=high, AX=
+                    // low); store DX → high (off+2), AX → low (off).
+                    // Same pattern as `long g = f();` at global level
+                    // (fixture 314). Fixture 315.
+                    if let ExprKind::Call { .. } = &init.kind {
+                        self.emit_expr_to_ax(init);
+                        let _ = write!(self.out, "\tmov\tword ptr {},dx\r\n", bp_addr(off + 2));
+                        let _ = write!(self.out, "\tmov\tword ptr {},ax\r\n", bp_addr(off));
+                        return;
+                    }
                     panic!("non-constant long local init not yet supported (no fixture)");
                 }
                 // Stack init: prefer the immediate-store form when the
@@ -3420,6 +3470,21 @@ impl<'a> FunctionEmitter<'a> {
             };
             (dest, field_ty)
         };
+        // Long-field store: emit two `mov word ptr <addr>, <half>`
+        // instructions (high first, then low). Works for both `s.x`
+        // (DGROUP-relative or bp-relative dest) and `p->x` (register-
+        // indirect dest). Fixtures 316, 317, 318.
+        if leaf_ty.is_long_like() {
+            let Some(v) = try_const_eval(value) else {
+                panic!("non-constant rhs in long struct field assign not yet supported (no fixture)");
+            };
+            let lo = (v & 0xFFFF) as u16;
+            let hi = ((v >> 16) & 0xFFFF) as u16;
+            let hi_dest = shift_dest_by_two(&dest);
+            let _ = write!(self.out, "\tmov\tword ptr {hi_dest},{hi}\r\n");
+            let _ = write!(self.out, "\tmov\tword ptr {dest},{lo}\r\n");
+            return;
+        }
         let store_byte = matches!(leaf_ty, Type::Char);
         let width = if store_byte { "byte" } else { "word" };
         if let Some(v) = try_const_eval(value) {
@@ -4122,6 +4187,32 @@ impl<'a> FunctionEmitter<'a> {
                 let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name},dx\r\n");
                 return;
             }
+            // `g = s.x;` / `g = a[K].x;` etc. — long field of a
+            // dot-chain lvalue. Resolves to a constant offset within
+            // some base storage (global, stack); load both halves
+            // memory-direct, then store. Fixture 317.
+            if let ExprKind::Member { base: mem_base, field, kind: crate::ast::MemberKind::Dot } = &value.kind
+                && let Some((src, total_off, leaf_ty)) = self.try_member_dot_chain(mem_base, field)
+                && leaf_ty.is_long_like()
+            {
+                let (lo_addr, hi_addr) = if self.globals.contains(&src) {
+                    (
+                        global_offset_addr(&src, total_off),
+                        global_offset_addr(&src, total_off + 2),
+                    )
+                } else {
+                    let LocalLocation::Stack(base_bp) = self.locals.location_of(&src) else {
+                        panic!("struct local `{src}` not stack-resident");
+                    };
+                    let off = base_bp + i16::try_from(total_off).unwrap_or(i16::MAX);
+                    (bp_addr(off), bp_addr(off + 2))
+                };
+                let _ = write!(self.out, "\tmov\tax,word ptr {hi_addr}\r\n");
+                let _ = write!(self.out, "\tmov\tdx,word ptr {lo_addr}\r\n");
+                let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name}+2,ax\r\n");
+                let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name},dx\r\n");
+                return;
+            }
             panic!("non-constant long assignment to global not yet supported (no fixture)");
         }
         let width = if matches!(ty, Type::Char) { "byte" } else { "word" };
@@ -4174,6 +4265,15 @@ impl<'a> FunctionEmitter<'a> {
                         let _ = write!(self.out, "\tmov\tdx,word ptr DGROUP:_{src_name}\r\n");
                         let _ = write!(self.out, "\tmov\tword ptr {},ax\r\n", bp_addr(off + 2));
                         let _ = write!(self.out, "\tmov\tword ptr {},dx\r\n", bp_addr(off));
+                        return;
+                    }
+                    // `x = f();` — function-call RHS returns DX:AX
+                    // (ABI). Store DX → high, AX → low. Same shape as
+                    // the init form (fixture 315). Fixture 321.
+                    if let ExprKind::Call { .. } = &value.kind {
+                        self.emit_expr_to_ax(value);
+                        let _ = write!(self.out, "\tmov\tword ptr {},dx\r\n", bp_addr(off + 2));
+                        let _ = write!(self.out, "\tmov\tword ptr {},ax\r\n", bp_addr(off));
                         return;
                     }
                     panic!("non-constant long local assign not yet supported (no fixture)");
