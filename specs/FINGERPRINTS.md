@@ -531,12 +531,12 @@ operand lives. _Fixtures_: 385 (`x <<= 2;` for a long stack param).
 
 ### Runtime helpers declared `:far`, merged into publics sort (STRONG)
 
-Long multiply/divide/mod/shift and struct copy route through
-pre-built runtime helpers in the Borland CRT: `N_LXLSH@`,
-`N_LXRSH@`, `N_LXURSH@`, `N_LXMUL@`, `N_LDIV@`, `N_LMOD@`,
-`N_LUDIV@`, `N_LUMOD@`, `N_SCOPY@`. The helper name is suffixed
-with `@`, and the extern declaration uses **`:far`** (BCC's
-user-function externs use `:near`):
+Long multiply/divide/mod/shift, struct copy, and struct-by-value
+arg-push route through pre-built runtime helpers in the Borland
+CRT: `N_LXLSH@`, `N_LXRSH@`, `N_LXURSH@`, `N_LXMUL@`, `N_LDIV@`,
+`N_LMOD@`, `N_LUDIV@`, `N_LUMOD@`, `N_SCOPY@`, `N_SPUSH@`. The
+helper name is suffixed with `@`, and the extern declaration uses
+**`:far`** (BCC's user-function externs use `:near`):
 ```
 extrn N_LXLSH@:far
 ```

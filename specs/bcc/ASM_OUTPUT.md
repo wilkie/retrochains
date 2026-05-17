@@ -1486,6 +1486,53 @@ mov word ptr [bp-2], ax          ; dest high
 mov word ptr [bp-4], dx          ; dest low
 ```
 
+### Struct-by-value function parameters (`419`–`421`)
+
+Passing a struct by value uses two different shapes depending on
+byte size, paralleling the struct-copy threshold:
+
+**4-byte struct arg** pushes the two words high-first — *byte-
+identical* to passing a `long`. `f(g)` for `struct S { int x;
+int y; } g;` emits the same `push [_g+2]; push [_g]` as
+`f((long)v)` would:
+
+```
+; f(g);  for `struct S { int x; int y; } g;` (fixture 419)
+push word ptr DGROUP:_g+2        ; high word first
+push word ptr DGROUP:_g
+call near ptr _f
+pop cx                           ; 4 bytes cleanup → 2 pops
+pop cx
+```
+
+**>4-byte struct arg** routes through `N_SPUSH@`, BCC's struct-
+push helper. Its calling convention differs from `N_SCOPY@` —
+the source far pointer is passed in **DX:AX** (segment in DX,
+offset in AX) rather than on the stack; only the byte count
+goes through CX:
+
+```
+; f(g);  for a 6-byte global struct (fixture 420)
+mov ax, offset DGROUP:_g         ; far ptr offset
+mov dx, ds                       ; 8C DA — far ptr segment
+mov cx, 6                        ; byte count
+call near ptr N_SPUSH@           ; helper pushes 6 bytes on stack
+call near ptr _f
+add sp, 6                        ; caller cleanup
+```
+
+**Callee side** (fixture 421): no marshaling. The struct bytes
+pushed by the caller are already in the callee's stack frame.
+`s.x` reads `[bp+4]` directly (first word of the struct),
+`s.y` reads `[bp+6]`, etc. — same bp-relative addressing as
+any other stack-local field access. No prologue copy needed.
+
+A new recognizer: `8C DA` (`mov dx, ds`) immediately before a
+helper call is highly suggestive of BCC's `N_SPUSH@` calling
+convention. The DX:AX-as-far-pointer pattern is distinct from
+the stack-pushed far pointer used by `N_SCOPY@` — same register
+pair, different semantic role per helper.
+
 ### Struct pointer as parameter (`106`)
 
 A `struct s *p` parameter behaves exactly like an `int *p`
