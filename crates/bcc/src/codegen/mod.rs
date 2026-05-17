@@ -2350,56 +2350,32 @@ impl<'a> FunctionEmitter<'a> {
                 let _ = write!(self.out, "\tadc\tdx,{carry}\r\n");
                 return;
             }
-            // `return a + b;` / `return a - b;` for two long params/
-            // locals. Load a (high→DX, low→AX) per the ABI return
-            // convention, then add/sub b's halves with carry/borrow
-            // propagation. Fixture 285.
+            // `return a + b;` / `return a - b;` for two long lvalues
+            // (params, stack locals, globals, struct fields, array
+            // elems, *p — any shape `long_lvalue_addr_pair` resolves).
+            // Source-storage-agnostic: load a (high→DX, low→AX) per
+            // the ABI return convention, then add/sub b's halves
+            // against the same registers with carry/borrow propagation.
+            // The lo op targets AX (low half) and the hi op targets
+            // DX (high half) — flipped from the memory-dest
+            // arithmetic shape (fixture 207), per the destination-
+            // driven register-pair rule. Fixtures 285 (locals),
+            // 348 (globals), 365 (struct fields), 366 (array elems),
+            // 367 (mixed global+struct).
             if let ExprKind::BinOp { op, left, right } = &e.kind
                 && matches!(op, BinOp::Add | BinOp::Sub)
-                && let ExprKind::Ident(a) = &left.kind
-                && let ExprKind::Ident(b) = &right.kind
-                && self.locals.has(a)
-                && self.locals.type_of(a).is_long_like()
-                && self.locals.has(b)
-                && self.locals.type_of(b).is_long_like()
-            {
-                let LocalLocation::Stack(a_off) = self.locals.location_of(a) else {
-                    panic!("register-resident long not yet supported (no fixture)");
-                };
-                let LocalLocation::Stack(b_off) = self.locals.location_of(b) else {
-                    panic!("register-resident long not yet supported (no fixture)");
-                };
-                let (lo_op, hi_op) = if matches!(op, BinOp::Add) {
-                    ("add", "adc")
-                } else {
-                    ("sub", "sbb")
-                };
-                let _ = write!(self.out, "\tmov\tdx,word ptr {}\r\n", bp_addr(a_off + 2));
-                let _ = write!(self.out, "\tmov\tax,word ptr {}\r\n", bp_addr(a_off));
-                let _ = write!(self.out, "\t{lo_op}\tax,word ptr {}\r\n", bp_addr(b_off));
-                let _ = write!(self.out, "\t{hi_op}\tdx,word ptr {}\r\n", bp_addr(b_off + 2));
-                return;
-            }
-            // `return a + b;` / `return a - b;` for two long globals.
-            // Same ABI-convention return registers (DX=high, AX=low),
-            // but the source loads come from DGROUP-relative memory.
-            // Fixture 348.
-            if let ExprKind::BinOp { op, left, right } = &e.kind
-                && matches!(op, BinOp::Add | BinOp::Sub)
-                && let ExprKind::Ident(a) = &left.kind
-                && let ExprKind::Ident(b) = &right.kind
-                && self.globals.type_of(a).map_or(false, |t| t.is_long_like())
-                && self.globals.type_of(b).map_or(false, |t| t.is_long_like())
+                && let Some((a_hi, a_lo)) = self.long_lvalue_addr_pair(left)
+                && let Some((b_hi, b_lo)) = self.long_lvalue_addr_pair(right)
             {
                 let (lo_op, hi_op) = if matches!(op, BinOp::Add) {
                     ("add", "adc")
                 } else {
                     ("sub", "sbb")
                 };
-                let _ = write!(self.out, "\tmov\tdx,word ptr DGROUP:_{a}+2\r\n");
-                let _ = write!(self.out, "\tmov\tax,word ptr DGROUP:_{a}\r\n");
-                let _ = write!(self.out, "\t{lo_op}\tax,word ptr DGROUP:_{b}\r\n");
-                let _ = write!(self.out, "\t{hi_op}\tdx,word ptr DGROUP:_{b}+2\r\n");
+                let _ = write!(self.out, "\tmov\tdx,word ptr {a_hi}\r\n");
+                let _ = write!(self.out, "\tmov\tax,word ptr {a_lo}\r\n");
+                let _ = write!(self.out, "\t{lo_op}\tax,word ptr {b_lo}\r\n");
+                let _ = write!(self.out, "\t{hi_op}\tdx,word ptr {b_hi}\r\n");
                 return;
             }
             panic!("non-constant long return value not yet supported (no fixture)");
