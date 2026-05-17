@@ -800,6 +800,10 @@ fn parse_sub(operands: &str, line_no: usize) -> AsmResult<Instr> {
                 offset,
             });
         }
+        // `sub dx, word ptr [bp+N]` — low-half stack-local long sub.
+        if let Some(offset) = parse_bp_relative(rhs) {
+            return Ok(Instr::SubDxBpRel { offset });
+        }
     }
     // `sub word ptr <group>:<sym>[+N], imm8sx` — read-modify-write
     // on a data-segment global (low-half of long `g--`, fixture 250).
@@ -860,6 +864,11 @@ fn parse_and(operands: &str, line_no: usize) -> AsmResult<Instr> {
                 offset,
             });
         }
+        // `and dx, word ptr [bp+N]` — low-half stack-local long AND
+        // (fixture 333).
+        if let Some(offset) = parse_bp_relative(rhs) {
+            return Ok(Instr::AndDxBpRel { offset });
+        }
     }
     // `and word ptr <group>:<sym>[+N], imm16` — long compound
     // `g &= K` (fixture 253). BCC always picks the imm16 form
@@ -906,6 +915,11 @@ fn parse_sbb(operands: &str, line_no: usize) -> AsmResult<Instr> {
         }
         if let Some(imm) = parse_imm16(rhs) {
             return Ok(Instr::SbbAxImm16 { imm: imm as u16 });
+        }
+        // `sbb ax, word ptr [bp+N]` — high-half borrow for stack-
+        // local long sub where result goes to memory (fixture 330).
+        if let Some(offset) = parse_bp_relative(rhs) {
+            return Ok(Instr::SbbAxBpRel { offset });
         }
     }
     // `sbb dx, word ptr [bp+N]` — long return-arith high-half
@@ -986,6 +1000,14 @@ fn parse_adc(operands: &str, line_no: usize) -> AsmResult<Instr> {
         }
         if let Some(offset) = parse_bp_relative(rhs) {
             return Ok(Instr::AdcDxBpRel { offset });
+        }
+    }
+    // `adc ax, word ptr [bp+N]` — high-half carry for stack-local
+    // long arithmetic where the result goes to memory (AX=high).
+    // Fixture 329.
+    if lhs == "ax" {
+        if let Some(offset) = parse_bp_relative(rhs) {
+            return Ok(Instr::AdcAxBpRel { offset });
         }
     }
     // `adc word ptr <group>:<sym>[+N], imm8sx` — high-half carry
@@ -1096,6 +1118,11 @@ fn parse_add(operands: &str, line_no: usize) -> AsmResult<Instr> {
                 symbol: sym.to_string(),
                 offset,
             });
+        }
+        // `add dx, word ptr [bp+N]` — low-half stack-local long add
+        // (fixture 329).
+        if let Some(offset) = parse_bp_relative(rhs) {
+            return Ok(Instr::AddDxBpRel { offset });
         }
     }
     // `add word ptr [si],<imm8>` — read-modify-write through SI.
@@ -1413,6 +1440,11 @@ fn parse_or(operands: &str, line_no: usize) -> AsmResult<Instr> {
                 offset,
             });
         }
+        // `or dx, word ptr [bp+N]` — low-half stack-local long OR
+        // (fixture 334).
+        if let Some(offset) = parse_bp_relative(rhs) {
+            return Ok(Instr::OrDxBpRel { offset });
+        }
     }
     // `or word ptr <group>:<sym>[+N], imm16` — long compound
     // `g |= K`. Same imm16-always rule as the `and` companion.
@@ -1471,6 +1503,10 @@ fn parse_xor(operands: &str, line_no: usize) -> AsmResult<Instr> {
                 symbol: sym.to_string(),
                 offset,
             });
+        }
+        // `xor dx, word ptr [bp+N]` — low-half stack-local long XOR.
+        if let Some(offset) = parse_bp_relative(rhs) {
+            return Ok(Instr::XorDxBpRel { offset });
         }
     }
     // `xor word ptr <group>:<sym>[+N], imm16` — long compound

@@ -4356,6 +4356,90 @@ impl<'a> FunctionEmitter<'a> {
                         let _ = write!(self.out, "\tmov\tword ptr {},ax\r\n", bp_addr(off));
                         return;
                     }
+                    // `z = x <op> y;` — long stack-local binary
+                    // arithmetic (`+`, `-`, `&`, `|`, `^`). Load x
+                    // into AX:DX (AX=high, DX=low globals-convention,
+                    // since dest is memory). Apply the op pair (with
+                    // carry/borrow for `+/-`, same mnemonic per half
+                    // for bitwise). Store AX/DX back. Fixtures 329
+                    // (add), 330 (sub), 333 (and), 334 (or).
+                    if let ExprKind::BinOp { op, left, right } = &value.kind
+                        && let Some((lo_op, hi_op)) = long_pair_op(*op)
+                        && let ExprKind::Ident(a) = &left.kind
+                        && let ExprKind::Ident(b) = &right.kind
+                        && self.locals.has(a)
+                        && self.locals.has(b)
+                        && self.locals.type_of(a).is_long_like()
+                        && self.locals.type_of(b).is_long_like()
+                    {
+                        let (LocalLocation::Stack(a_off), LocalLocation::Stack(b_off)) =
+                            (self.locals.location_of(a), self.locals.location_of(b))
+                        else {
+                            unreachable!("long is never register-resident");
+                        };
+                        let _ = write!(self.out, "\tmov\tax,word ptr {}\r\n", bp_addr(a_off + 2));
+                        let _ = write!(self.out, "\tmov\tdx,word ptr {}\r\n", bp_addr(a_off));
+                        let _ = write!(self.out, "\t{lo_op}\tdx,word ptr {}\r\n", bp_addr(b_off));
+                        let _ = write!(self.out, "\t{hi_op}\tax,word ptr {}\r\n", bp_addr(b_off + 2));
+                        let _ = write!(self.out, "\tmov\tword ptr {},ax\r\n", bp_addr(off + 2));
+                        let _ = write!(self.out, "\tmov\tword ptr {},dx\r\n", bp_addr(off));
+                        return;
+                    }
+                    // `z = x;` — long-from-long-local copy. Load
+                    // both halves into AX:DX, store both into z.
+                    // Fixture 335.
+                    if let ExprKind::Ident(src) = &value.kind
+                        && self.locals.has(src)
+                        && self.locals.type_of(src).is_long_like()
+                    {
+                        let LocalLocation::Stack(src_off) = self.locals.location_of(src) else {
+                            unreachable!("long is never register-resident");
+                        };
+                        let _ = write!(self.out, "\tmov\tax,word ptr {}\r\n", bp_addr(src_off + 2));
+                        let _ = write!(self.out, "\tmov\tdx,word ptr {}\r\n", bp_addr(src_off));
+                        let _ = write!(self.out, "\tmov\tword ptr {},ax\r\n", bp_addr(off + 2));
+                        let _ = write!(self.out, "\tmov\tword ptr {},dx\r\n", bp_addr(off));
+                        return;
+                    }
+                    // `z = -x;` long unary negation on a stack local.
+                    // BCC's idiom: neg AX / neg DX / sbb AX, 0 — see
+                    // "Long unary" in the ASM_OUTPUT spec. Fixture 331.
+                    if let ExprKind::Unary { op: UnaryOp::Neg, operand } = &value.kind
+                        && let ExprKind::Ident(src) = &operand.kind
+                        && self.locals.has(src)
+                        && self.locals.type_of(src).is_long_like()
+                    {
+                        let LocalLocation::Stack(src_off) = self.locals.location_of(src) else {
+                            unreachable!("long is never register-resident");
+                        };
+                        let _ = write!(self.out, "\tmov\tax,word ptr {}\r\n", bp_addr(src_off + 2));
+                        let _ = write!(self.out, "\tmov\tdx,word ptr {}\r\n", bp_addr(src_off));
+                        self.out.extend_from_slice(b"\tneg\tax\r\n");
+                        self.out.extend_from_slice(b"\tneg\tdx\r\n");
+                        self.out.extend_from_slice(b"\tsbb\tax,0\r\n");
+                        let _ = write!(self.out, "\tmov\tword ptr {},ax\r\n", bp_addr(off + 2));
+                        let _ = write!(self.out, "\tmov\tword ptr {},dx\r\n", bp_addr(off));
+                        return;
+                    }
+                    // `z = ~x;` long bitwise complement on a stack
+                    // local. Both halves independent: `not dx / not
+                    // ax`. Fixture 332.
+                    if let ExprKind::Unary { op: UnaryOp::BitNot, operand } = &value.kind
+                        && let ExprKind::Ident(src) = &operand.kind
+                        && self.locals.has(src)
+                        && self.locals.type_of(src).is_long_like()
+                    {
+                        let LocalLocation::Stack(src_off) = self.locals.location_of(src) else {
+                            unreachable!("long is never register-resident");
+                        };
+                        let _ = write!(self.out, "\tmov\tax,word ptr {}\r\n", bp_addr(src_off + 2));
+                        let _ = write!(self.out, "\tmov\tdx,word ptr {}\r\n", bp_addr(src_off));
+                        self.out.extend_from_slice(b"\tnot\tdx\r\n");
+                        self.out.extend_from_slice(b"\tnot\tax\r\n");
+                        let _ = write!(self.out, "\tmov\tword ptr {},ax\r\n", bp_addr(off + 2));
+                        let _ = write!(self.out, "\tmov\tword ptr {},dx\r\n", bp_addr(off));
+                        return;
+                    }
                     panic!("non-constant long local assign not yet supported (no fixture)");
                 }
                 // Mirror the init form: immediate-store when possible.

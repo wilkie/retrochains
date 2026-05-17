@@ -262,6 +262,13 @@ fn instr_size(instr: &Instr) -> usize {
         | Instr::AddAxBpRel { .. }
         | Instr::AdcDxBpRel { .. }
         | Instr::SbbDxBpRel { .. }
+        | Instr::AddDxBpRel { .. }
+        | Instr::AdcAxBpRel { .. }
+        | Instr::SubDxBpRel { .. }
+        | Instr::SbbAxBpRel { .. }
+        | Instr::AndDxBpRel { .. }
+        | Instr::OrDxBpRel { .. }
+        | Instr::XorDxBpRel { .. }
         | Instr::SubAxBpRel { .. }
         | Instr::AndAxBpRel { .. }
         | Instr::OrAxBpRel { .. }
@@ -488,6 +495,55 @@ fn emit_instr(
             // as AdcDxBpRel; opcode 1B is SBB r16,r/m16.
             let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
             out.push(0x1B);
+            out.push(0x56);
+            out.push(disp as u8);
+        }
+        Instr::AddDxBpRel { offset } => {
+            // `add dx,word ptr [bp+disp8]` → 03 56 dd.
+            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
+            out.push(0x03);
+            out.push(0x56);
+            out.push(disp as u8);
+        }
+        Instr::AdcAxBpRel { offset } => {
+            // `adc ax,word ptr [bp+disp8]` → 13 46 dd.
+            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
+            out.push(0x13);
+            out.push(0x46);
+            out.push(disp as u8);
+        }
+        Instr::SubDxBpRel { offset } => {
+            // `sub dx,word ptr [bp+disp8]` → 2B 56 dd.
+            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
+            out.push(0x2B);
+            out.push(0x56);
+            out.push(disp as u8);
+        }
+        Instr::SbbAxBpRel { offset } => {
+            // `sbb ax,word ptr [bp+disp8]` → 1B 46 dd.
+            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
+            out.push(0x1B);
+            out.push(0x46);
+            out.push(disp as u8);
+        }
+        Instr::AndDxBpRel { offset } => {
+            // `and dx,word ptr [bp+disp8]` → 23 56 dd.
+            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
+            out.push(0x23);
+            out.push(0x56);
+            out.push(disp as u8);
+        }
+        Instr::OrDxBpRel { offset } => {
+            // `or dx,word ptr [bp+disp8]` → 0B 56 dd.
+            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
+            out.push(0x0B);
+            out.push(0x56);
+            out.push(disp as u8);
+        }
+        Instr::XorDxBpRel { offset } => {
+            // `xor dx,word ptr [bp+disp8]` → 33 56 dd.
+            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
+            out.push(0x33);
             out.push(0x56);
             out.push(disp as u8);
         }

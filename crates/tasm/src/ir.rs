@@ -155,6 +155,28 @@ pub enum Instr {
     /// `sbb dx, word ptr [bp+disp8]` — `1B 56 dd`. SBB r16,r/m16
     /// companion to `AdcDxBpRel` for `return a - b;` of long params.
     SbbDxBpRel { offset: i16 },
+    /// `add dx, word ptr [bp+disp8]` — `03 56 dd`. Low-half add for
+    /// stack-local long arithmetic where the result goes to memory
+    /// (AX=high, DX=low globals convention). Fixture 329.
+    AddDxBpRel { offset: i16 },
+    /// `adc ax, word ptr [bp+disp8]` — `13 46 dd`. High-half adc
+    /// companion to `AddDxBpRel`. Fixture 329.
+    AdcAxBpRel { offset: i16 },
+    /// `sub dx, word ptr [bp+disp8]` — `2B 56 dd`. Low-half sub for
+    /// stack-local long arithmetic. Fixture 330.
+    SubDxBpRel { offset: i16 },
+    /// `sbb ax, word ptr [bp+disp8]` — `1B 46 dd`. High-half sbb
+    /// companion to `SubDxBpRel`. Fixture 330.
+    SbbAxBpRel { offset: i16 },
+    /// `and dx, word ptr [bp+disp8]` — `23 56 dd`. Low-half AND for
+    /// stack-local long bitwise arithmetic. Fixture 333.
+    AndDxBpRel { offset: i16 },
+    /// `or dx, word ptr [bp+disp8]` — `0B 56 dd`. Low-half OR for
+    /// stack-local long bitwise arithmetic. Fixture 334.
+    OrDxBpRel { offset: i16 },
+    /// `xor dx, word ptr [bp+disp8]` — `33 56 dd`. Low-half XOR for
+    /// stack-local long bitwise arithmetic.
+    XorDxBpRel { offset: i16 },
     /// `add <dst>,<src>` between 16-bit registers — 03 xx with
     /// ModR/M mod=11 reg=dst r/m=src. Used to fold a register-resident
     /// operand into AX (fixture 127: `add ax,si`).
