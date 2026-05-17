@@ -3047,6 +3047,31 @@ purely from the `01 .. / 11 ..` opcode pair without parsing the
 ModR/M byte — the variable-RHS choice (vs `83`/`81` for const
 RHS) is what distinguishes the source-level shape.
 
+**Statement-position `lv++` / `lv--` is byte-identical to
+`lv += 1` / `lv -= 1`** for any long lvalue. When the
+incremented/decremented value isn't used, BCC emits the same
+compound shape — `add [lo], 1 / adc [hi], 0` (or sub/sbb)
+into whichever destination the lvalue resolves to:
+
+```
+; s.x++;  (fixture 401 — byte-identical to s.x += 1, fixture 389)
+add word ptr DGROUP:_s+0, 1
+adc word ptr DGROUP:_s+2, 0
+
+; p->x++;  (fixture 402 — byte-identical to p->x += 1, fixture 399)
+add word ptr [si], 1
+adc word ptr [si+2], 0
+
+; a[1]++;  (fixture 403 — byte-identical to a[1] += 1, fixture 392)
+add word ptr DGROUP:_a+4, 1
+adc word ptr DGROUP:_a+6, 0
+```
+
+So a disassembler can't distinguish `lv++;` from `lv += 1;` at
+statement position — they share a single byte pattern. The two
+forms diverge only when the pre-value is consumed (`y = lv++;`),
+which the compound-assign shape can't produce directly.
+
 ### Long stack-local arithmetic (`329`–`335`)
 
 Long binary arithmetic between two stack-local long operands with
