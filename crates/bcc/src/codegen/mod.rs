@@ -2408,6 +2408,53 @@ impl<'a> FunctionEmitter<'a> {
                 self.out.extend_from_slice(b"\tnot\tdx\r\n");
                 return;
             }
+            // `return a * b;` for two long lvalues. The mul helper
+            // `N_LXMUL@` takes operands in CX:BX and DX:AX (each
+            // high:low) and returns the product in DX:AX — which
+            // happens to be the return register pair, so no store
+            // or move is needed at the boundary. Load order is first
+            // operand → CX:BX, second → DX:AX (same as memory-dest
+            // `z = x * y` shape). Fixture 374.
+            if let ExprKind::BinOp { op: BinOp::Mul, left, right } = &e.kind
+                && let Some((a_hi, a_lo)) = self.long_lvalue_addr_pair(left)
+                && let Some((b_hi, b_lo)) = self.long_lvalue_addr_pair(right)
+            {
+                let _ = write!(self.out, "\tmov\tcx,word ptr {a_hi}\r\n");
+                let _ = write!(self.out, "\tmov\tbx,word ptr {a_lo}\r\n");
+                let _ = write!(self.out, "\tmov\tdx,word ptr {b_hi}\r\n");
+                let _ = write!(self.out, "\tmov\tax,word ptr {b_lo}\r\n");
+                self.out.extend_from_slice(b"\tcall\tnear ptr N_LXMUL@\r\n");
+                self.helpers.insert("N_LXMUL@".to_string());
+                return;
+            }
+            // `return a / b;` / `return a % b;` for two long lvalues.
+            // The `N_LDIV@` / `N_LMOD@` helpers take 4 words on the
+            // stack — dividend first (lower addresses), divisor
+            // second — pushed right-to-left so the push order is:
+            // divisor.high, divisor.low, dividend.high, dividend.low.
+            // Result lands in DX:AX, which is the return register
+            // pair. Fixtures 375 (div), 376 (mod).
+            if let ExprKind::BinOp { op, left, right } = &e.kind
+                && matches!(op, BinOp::Div | BinOp::Mod)
+                && let Some((a_hi, a_lo)) = self.long_lvalue_addr_pair(left)
+                && let Some((b_hi, b_lo)) = self.long_lvalue_addr_pair(right)
+            {
+                let unsigned = self.function.ret_ty.is_unsigned();
+                let helper = match (op, unsigned) {
+                    (BinOp::Div, false) => "N_LDIV@",
+                    (BinOp::Mod, false) => "N_LMOD@",
+                    (BinOp::Div, true)  => "N_LUDIV@",
+                    (BinOp::Mod, true)  => "N_LUMOD@",
+                    _ => unreachable!(),
+                };
+                let _ = write!(self.out, "\tpush\tword ptr {b_hi}\r\n");
+                let _ = write!(self.out, "\tpush\tword ptr {b_lo}\r\n");
+                let _ = write!(self.out, "\tpush\tword ptr {a_hi}\r\n");
+                let _ = write!(self.out, "\tpush\tword ptr {a_lo}\r\n");
+                let _ = write!(self.out, "\tcall\tnear ptr {helper}\r\n");
+                self.helpers.insert(helper.to_string());
+                return;
+            }
             panic!("non-constant long return value not yet supported (no fixture)");
         }
         self.emit_expr_to_ax(e);
