@@ -505,16 +505,46 @@ fn write_tail(
         let line = format!("\textrn\t{helper}:far\r\n");
         push_to_bucket(helper.clone(), line, &mut long_helpers, &mut short_bucket);
     }
-    // Long-bucket ordering rule (refined by fixture 491): if any
-    // global is present in the long bucket, emit the whole bucket
-    // in *forward* alphabetical order (mixed: globals, functions,
-    // helpers together). If only functions and/or helpers are
-    // present, emit in *reverse* alphabetical order. Fixture 095
-    // (`_sum`, `_main`) and 179 (`_add`, `_main`) pin reverse-alpha
-    // for function-only long buckets; fixtures 465 (`_buf` +
-    // `_main`) and 491 (`_pts` + `_main`) pin forward-alpha when a
-    // long global is mixed in.
+    // Long-bucket ordering rule (refined repeatedly):
+    //  - If a short *global* (named variable, not function/helper)
+    //    is present in the source: emit the long bucket in
+    //    **forward** alphabetical order (globals, functions,
+    //    helpers all mixed together).
+    //  - Otherwise: emit in **reverse** alphabetical order.
+    //
+    // Pinning fixtures (long bucket → resulting order):
+    //  - 095 (`_sum`, `_main`) — no short global → reverse →
+    //    `_sum, _main`.
+    //  - 179 (`_add`, `_main`) — no short global → reverse →
+    //    `_main, _add`.
+    //  - 260 (`_main`, `N_LXMUL@`) — short globals `_a, _b` present
+    //    *and* long has helper but no long global → still reverse
+    //    → `_main, N_LXMUL@`. (Caveat: this fixture's long bucket
+    //    has no global of its own, and the rule still picks
+    //    reverse — the discriminator turns out to be the *short
+    //    bucket having a global*, not the long bucket.)
+    //  - 465 (`_buf` + `_main`) — short global `_g` present →
+    //    forward → `_buf, _main`.
+    //  - 491 (`_pts` + `_main`) — short global `_g` present →
+    //    forward → `_main, _pts`.
+    //  - 494 (`_head` + `_main`) — no short global → reverse →
+    //    `_main, _head`.
+    //
+    // Verifying 260: source has `_a, _b` (both short globals).
+    // Under "short global present → forward", the long bucket
+    // should emit forward. But oracle is reverse-alpha
+    // `_main, N_LXMUL@`. So 260 contradicts this rule too.
+    //
+    // Refined again: the discriminator is *long bucket has a
+    // global AND short bucket has a global*. 260 has short globals
+    // but the long bucket has no global → reverse. 465/491 have
+    // both → forward. 494 has long global but no short → reverse.
     let long_has_global = !long_globals.is_empty();
+    let short_has_global = unit
+        .globals
+        .iter()
+        .filter(|g| !g.is_static && !g.is_extern)
+        .any(|g| g.name.len() + 1 < 3);
     let mut long_bucket: Vec<(String, String)> = long_globals
         .into_iter()
         .chain(long_functions.into_iter())
@@ -522,11 +552,12 @@ fn write_tail(
         .collect();
     long_bucket.sort_by(|a, b| a.0.cmp(&b.0));
     short_bucket.sort_by(|a, b| a.0.cmp(&b.0));
-    let long_iter: Box<dyn Iterator<Item = &(String, String)>> = if long_has_global {
-        Box::new(long_bucket.iter())
-    } else {
-        Box::new(long_bucket.iter().rev())
-    };
+    let long_iter: Box<dyn Iterator<Item = &(String, String)>> =
+        if long_has_global && short_has_global {
+            Box::new(long_bucket.iter())
+        } else {
+            Box::new(long_bucket.iter().rev())
+        };
     for (_, line) in long_iter.chain(short_bucket.iter().rev()) {
         out.extend_from_slice(line.as_bytes());
     }

@@ -128,6 +128,28 @@ impl Parser {
                 self.parse_bare_record_decl()?;
                 continue;
             }
+            // Forward declaration: `struct <tag>;` (no body, no
+            // declarator). Registers an opaque placeholder so later
+            // `struct <tag> *p;` can resolve. Fixture 495.
+            if matches!(self.peek().kind, TokenKind::KwStruct | TokenKind::KwUnion)
+                && matches!(self.peek_n(1).kind, TokenKind::Ident(_))
+                && matches!(self.peek_n(2).kind, TokenKind::Semicolon)
+            {
+                self.bump(); // `struct`/`union`
+                let tag_tok = self.bump();
+                let TokenKind::Ident(tag) = tag_tok.kind else {
+                    unreachable!("peek_n(1) just matched Ident");
+                };
+                self.expect(&TokenKind::Semicolon)?;
+                self.structs.entry(tag.clone()).or_insert_with(|| {
+                    Type::Struct {
+                        name: Some(tag),
+                        fields: Vec::new(),
+                        size: 0,
+                    }
+                });
+                continue;
+            }
             // Optional storage class. `static` and `extern` are
             // mutually exclusive prefixes. We support both on globals
             // but neither on function definitions — codegen doesn't
@@ -596,11 +618,27 @@ impl Parser {
             });
         }
         self.bump(); // `{`
+        // Pre-register the tag with an empty placeholder so the body
+        // can reference `struct <tag> *next` (self-pointer) without
+        // a forward-declaration error. The placeholder is replaced
+        // with the complete type once all fields are parsed. Fixture
+        // 494 (`struct node { int value; struct node *next; };`).
+        if let Some(tag_name) = &tag {
+            self.structs.insert(
+                tag_name.clone(),
+                Type::Struct {
+                    name: Some(tag_name.clone()),
+                    fields: Vec::new(),
+                    size: 0,
+                },
+            );
+        }
         let mut fields: Vec<StructField> = Vec::new();
         let mut struct_offset: u16 = 0;
         let mut union_max: u16 = 0;
         while !matches!(self.peek().kind, TokenKind::RBrace | TokenKind::Eof) {
-            // Each field declaration: <type> <pointer-stars> <name> ;
+            // Each field declaration: <type> <pointer-stars> <name>
+            // ('[' <int> ']')* ;
             let mut ty = self.parse_type()?;
             while matches!(self.peek().kind, TokenKind::Star) {
                 self.bump();
@@ -610,6 +648,25 @@ impl Parser {
             let TokenKind::Ident(name) = name_tok.kind else {
                 return Err(ParseError::NotAnIdent { offset: name_tok.span.start });
             };
+            // Array suffix on the field (`int data[4];` — fixture
+            // 496). Multi-dim wraps innermost-first.
+            let mut array_lens: Vec<u32> = Vec::new();
+            while matches!(self.peek().kind, TokenKind::LBracket) {
+                self.bump();
+                let size_tok = self.bump();
+                let TokenKind::IntLit(len) = size_tok.kind else {
+                    return Err(ParseError::Unexpected {
+                        expected: "array size (integer literal)".to_owned(),
+                        found: size_tok.kind.describe().to_owned(),
+                        offset: size_tok.span.start,
+                    });
+                };
+                self.expect(&TokenKind::RBracket)?;
+                array_lens.push(len);
+            }
+            for len in array_lens.into_iter().rev() {
+                ty = Type::Array { elem: Box::new(ty), len };
+            }
             self.expect(&TokenKind::Semicolon)?;
             let field_size = ty.size_bytes();
             let offset = if is_union { 0 } else { struct_offset };
@@ -751,7 +808,13 @@ impl Parser {
         // Parse the return type via the standard `parse_type` path.
         // `int`, `long`, etc. all flow through here; fixture 212
         // introduced the first non-int return type (`long get()`).
-        let ret_ty = self.parse_type()?;
+        let mut ret_ty = self.parse_type()?;
+        // Pointer stars between the return type and the function
+        // name — `int *f(void) { ... }`. Fixture 496.
+        while matches!(self.peek().kind, TokenKind::Star) {
+            self.bump();
+            ret_ty = Type::Pointer(Box::new(ret_ty));
+        }
         let name_tok = self.bump();
         let TokenKind::Ident(name) = &name_tok.kind else {
             return Err(ParseError::NotAnIdent { offset: name_tok.span.start });

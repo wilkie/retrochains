@@ -4327,6 +4327,20 @@ impl<'a> FunctionEmitter<'a> {
             let _ = write!(self.out, "\tmov\t{width} ptr {dest},{v_masked}\r\n");
             return;
         }
+        // RHS is `&<global>` — emit the direct immediate-store
+        // form `mov word ptr <dest>,offset DGROUP:_<src>` (uses
+        // the same two-FIXUPP encoding `MovGroupSymOffsetGroupSym`).
+        // Fixture 494 (`head.next = &head`).
+        if !store_byte
+            && let ExprKind::AddressOf(src) = &value.kind
+            && self.globals.contains(src)
+        {
+            let _ = write!(
+                self.out,
+                "\tmov\t{width} ptr {dest},offset DGROUP:_{src}\r\n",
+            );
+            return;
+        }
         panic!("non-constant rhs in struct field assign not yet supported (no fixture)");
     }
 
