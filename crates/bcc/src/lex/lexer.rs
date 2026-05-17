@@ -312,10 +312,27 @@ impl<'a> Lexer<'a> {
     fn lex_int_literal(&mut self) -> Result<TokenKind, LexError> {
         let start = self.pos;
         let mut value: u64 = 0;
+        // C90 prefixes: `0x`/`0X` → hex; bare leading `0` followed by an
+        // octal digit → octal; otherwise decimal. A lone `0` (no prefix
+        // digit) is decimal zero — handled by the main decimal loop.
+        let radix: u32 =
+            if matches!(self.src.get(self.pos), Some(b'0'))
+                && matches!(self.src.get(self.pos + 1), Some(b'x' | b'X'))
+            {
+                self.pos += 2;
+                16
+            } else if matches!(self.src.get(self.pos), Some(b'0'))
+                && matches!(self.src.get(self.pos + 1), Some(b'0'..=b'7'))
+            {
+                self.pos += 1;
+                8
+            } else {
+                10
+            };
         while let Some(&b) = self.src.get(self.pos) {
-            if let Some(d) = (b as char).to_digit(10) {
+            if let Some(d) = (b as char).to_digit(radix) {
                 value = value
-                    .checked_mul(10)
+                    .checked_mul(u64::from(radix))
                     .and_then(|v| v.checked_add(u64::from(d)))
                     .ok_or(LexError::IntOverflow { offset: off(start) })?;
                 self.pos += 1;
