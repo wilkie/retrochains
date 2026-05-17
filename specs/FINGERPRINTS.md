@@ -897,6 +897,14 @@ result destination — makes BCC's long codegen surprisingly easy
 to recognize across what look syntactically like very different
 C expressions.
 
+The skeleton is also **op-family-agnostic** at return: the same
+load/op/op shape covers `+`/`-`/`&`/`|`/`^`. Arith ops chain
+carry into the high half (`adc`/`sbb`); bitwise ops use the
+same mnemonic on both halves and operate independently. The
+instruction count is identical across the five ops — only the
+op byte changes. _Fixtures_: 368 (`&`), 369 (`|`), 370 (`^`)
+on top of 348/285/365–367 (`+`).
+
 ### Compound assign opcode tells constant-vs-variable RHS (STRONG)
 
 For long compound assigns to memory, the **opcode byte** of the

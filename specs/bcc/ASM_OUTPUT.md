@@ -1858,9 +1858,12 @@ operands. The register pairing follows the destination-driven
 rule documented earlier: DX=high, AX=low because the destination
 is the return register pair.
 
-The two-lvalue add/sub shape is also **source-storage-agnostic**
-on both sides — the four-instruction skeleton substitutes any
-mix of long-lvalue addressing modes:
+The two-lvalue shape is also **source-storage-agnostic** on both
+sides and **op-family-agnostic** — the four-instruction skeleton
+substitutes any mix of long-lvalue addressing modes and any of
+`+`/`-`/`&`/`|`/`^`. For arith ops the high half carries (`adc`/
+`sbb`); for bitwise ops both halves use the same op since they
+operate independently (no carry chain):
 
 ```
 ; return s.x + s.y;  (fixture 365)
@@ -1880,7 +1883,20 @@ mov dx, word ptr DGROUP:_g+2
 mov ax, word ptr DGROUP:_g
 add ax, word ptr DGROUP:_s
 adc dx, word ptr DGROUP:_s+2
+
+; return g & h;  (fixture 368 — bitwise AND, same op both halves)
+mov dx, word ptr DGROUP:_g+2
+mov ax, word ptr DGROUP:_g
+and ax, word ptr DGROUP:_h
+and dx, word ptr DGROUP:_h+2
+
+; return g | h;  (fixture 369) — `or ax, ...; or dx, ...`
+; return g ^ h;  (fixture 370) — `xor ax, ...; xor dx, ...`
 ```
+
+The bitwise variants encode as `<op> r16, r/m16` with opcodes
+`23` (AND), `0B` (OR), `33` (XOR), ModR/M `06` / `16` for the
+disp16-only `r/m=110, reg=AX` / `reg=DX` forms.
 
 `return <lvalue> + K;` for a constant K folds the immediate
 directly into the `add`/`adc` of the return register pair. Note
