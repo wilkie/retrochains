@@ -3274,6 +3274,28 @@ impl<'a> FunctionEmitter<'a> {
             let _ = write!(self.out, "\tmov\tword ptr {},ax\r\n", bp_addr(x_off));
             return;
         }
+        // Int/uint global compound bitwise op with constant RHS —
+        // memory-direct `<op> word ptr DGROUP:_g, K`. Fixture 517
+        // (`g &= 15`). BCC always emits the imm16 form here; the
+        // imm8sx peephole is not used for bitwise ops.
+        if let Some(gty) = self.globals.type_of(name)
+            && matches!(gty, Type::Int | Type::UInt)
+            && matches!(op, BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor)
+            && let Some(v) = try_const_eval(value)
+        {
+            let mnem = match op {
+                BinOp::BitAnd => "and",
+                BinOp::BitOr => "or",
+                BinOp::BitXor => "xor",
+                _ => unreachable!(),
+            };
+            let v16 = v & 0xFFFF;
+            let _ = write!(
+                self.out,
+                "\t{mnem}\tword ptr DGROUP:_{name},{v16}\r\n",
+            );
+            return;
+        }
         let LocalLocation::Reg(reg) = self.locals.location_of(name) else {
             panic!(
                 "compound assignment on stack-resident `{name}` not yet supported (no fixture)"
