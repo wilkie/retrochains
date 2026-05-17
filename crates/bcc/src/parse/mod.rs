@@ -839,6 +839,74 @@ impl Parser {
                     })
                 }
             }
+            // Statement-position prefix `++lv;` / `--lv;` for an
+            // lvalue that isn't a bare ident. The `++ident;` form is
+            // handled by parse_unary's existing path; here we catch
+            // the postfix-extended cases (`++s.x;`, `--p->x;`,
+            // `--a[1];`) and rewrite to `lv += 1` / `lv -= 1`. At
+            // statement position the pre-value is discarded, so the
+            // compound-assign form produces byte-identical output to
+            // what BCC emits for the prefix update — confirmed against
+            // fixtures 404–406. Same byte equivalence batch 28 doc-
+            // umented for postfix.
+            TokenKind::PlusPlus | TokenKind::MinusMinus
+                if !(matches!(self.peek_n(1).kind, TokenKind::Ident(_))
+                    && !matches!(
+                        self.peek_n(2).kind,
+                        TokenKind::Dot
+                            | TokenKind::Arrow
+                            | TokenKind::LBracket
+                            | TokenKind::LParen,
+                    )) =>
+            {
+                let update_op = match_update_op(&self.peek().kind).unwrap();
+                let op_tok = self.bump();
+                let lv = self.parse_unary()?;
+                let semi = self.expect(&TokenKind::Semicolon)?;
+                let span = Span::new(start, semi.span.end);
+                let op = match update_op {
+                    UpdateOp::Inc => BinOp::Add,
+                    UpdateOp::Dec => BinOp::Sub,
+                };
+                let value = Expr {
+                    kind: ExprKind::IntLit(1),
+                    span: Span::new(op_tok.span.start, op_tok.span.end),
+                };
+                return match lv.kind {
+                    ExprKind::Member { base, field, kind: mk } => Ok(Stmt {
+                        kind: StmtKind::MemberCompoundAssign {
+                            base: *base, field, kind: mk, op, value,
+                        },
+                        span,
+                    }),
+                    ExprKind::Deref(target) => Ok(Stmt {
+                        kind: StmtKind::DerefCompoundAssign { target: *target, op, value },
+                        span,
+                    }),
+                    ExprKind::ArrayIndex { .. } => {
+                        let mut indices: Vec<Expr> = Vec::new();
+                        let mut cur = lv;
+                        let array = loop {
+                            match cur.kind {
+                                ExprKind::ArrayIndex { array, index } => {
+                                    indices.push(*index);
+                                    cur = *array;
+                                }
+                                ExprKind::Ident(name) => break name,
+                                _ => return Err(ParseError::Unsupported {
+                                    offset: cur.span.start,
+                                }),
+                            }
+                        };
+                        indices.reverse();
+                        Ok(Stmt {
+                            kind: StmtKind::ArrayCompoundAssign { array, indices, op, value },
+                            span,
+                        })
+                    }
+                    _ => Err(ParseError::Unsupported { offset: lv.span.start }),
+                };
+            }
             _ => self.parse_expr_or_lvalue_assign(start),
         }
     }
