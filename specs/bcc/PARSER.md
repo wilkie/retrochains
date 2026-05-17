@@ -300,6 +300,30 @@ since BCC's plain `char`/`int`/`long` are already signed. Fixtures
 same bytes as the unprefixed equivalents — the keyword is purely
 front-end.
 
+## `enum <tag>` as a type
+
+In addition to anonymous `enum { A, B, C };` (which only registers
+the member constants), `enum <tag>` can now also be used as a type
+name in declarations. Fixtures `470`–`472` exercise this as a
+global type, local type, and function-parameter type respectively.
+
+Codegen: `enum <tag>` lowers to `Type::Int` (BCC sizes enums as
+int). No special storage, comparison, or widening — purely a
+front-end alias.
+
+Parser:
+- The standalone `enum [<tag>] { … };` dispatcher in `parse_unit`
+  now only fires when an opening `{` follows the (optional) tag.
+  When the form is `enum <tag> <decl>` the dispatcher skips and the
+  type-prefix path handles it.
+- `parse_type` learned `enum [<tag>]` → `Type::Int` (the tag is
+  consumed if present but we don't require it to be in any tag
+  table — the enum members were registered at the definition site).
+- The top-level type-probe gained an `enum [<tag>]` arm.
+- `parse_stmt`'s declaration dispatch now accepts `KwEnum` (and
+  `KwSigned`, completing the set started in batch 50) as a type
+  start, so `enum color c;` works inside function bodies.
+
 ## Comma operator
 
 `<expr>, <expr>` at expression level is a comma operator —
