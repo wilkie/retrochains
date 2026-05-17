@@ -280,37 +280,40 @@ to align `_g`.
 
 ### Publics emission — long bucket direction
 
-The long bucket's sort direction depends on *both* whether the
-long bucket has a global *and* whether there's any short-named
-global in the source. Fixture `494`
-(`struct node head; int main { head.next = &head; }`) forced a
-further refinement of the rule. The current rule:
+The long bucket's sort direction depends on whether the source
+has either a short-named global *or* a long-named **initialized**
+global (one that lands in `_DATA`). Fixture `498`
+(`char msg[16] = "hello"; int main { return 0; }`) forced the
+latest refinement: even with no short global, a `_DATA`-resident
+long global flips the order to forward. The current rule:
 
 - If the long bucket contains a global **and** the source has at
-  least one short-named global: emit the long bucket in
-  **forward** alphabetical order (globals, functions, helpers
-  mixed together).
+  least one short-named global, **or** the source has at least one
+  long-named global with an initializer (in `_DATA`): emit the
+  long bucket in **forward** alphabetical order (globals,
+  functions, helpers mixed together).
 - Otherwise: emit in **reverse** alphabetical order.
 
 Pinning fixtures:
 
-- 095 (`_sum`, `_main`) — no short global → reverse →
-  `_sum, _main`.
-- 179 (`_add`, `_main`) — no short global → reverse →
-  `_main, _add`.
-- 260 (`_main`, `N_LXMUL@`) — short globals `_a, _b` present,
-  but long bucket has no global → reverse →
-  `_main, N_LXMUL@`.
-- 465 (`_buf`, `_main`) — long global + short global → forward →
-  `_buf, _main`.
-- 491 (`_pts`, `_main`) — long global + short global → forward →
-  `_main, _pts`.
-- 494 (`_head`, `_main`) — long global only, no short global →
-  reverse → `_main, _head`.
+- 095 (`_sum`, `_main`) — no short global, no DATA global →
+  reverse → `_sum, _main`.
+- 179 (`_add`, `_main`) — same → reverse → `_main, _add`.
+- 260 (`_main`, `N_LXMUL@`) — short globals `_a, _b` present, but
+  long bucket has no global → reverse → `_main, N_LXMUL@`.
+- 465 (`_buf`, `_main`) — long global + short global `_g` →
+  forward → `_buf, _main`.
+- 491 (`_pts`, `_main`) — long global + short global `_g` →
+  forward → `_main, _pts`.
+- 494 (`_head`, `_main`) — long BSS global only, no short global,
+  no DATA global → reverse → `_main, _head`.
+- 498 (`_msg`, `_main`) — long DATA global (`msg[16] = "hello"`)
+  → forward → `_main, _msg`.
 
-The intuition seems to be that BCC walks an internal data
-structure whose iteration order is sensitive to the *combination*
-of bucket populations, not just one bucket. The exact mechanism
+The intuition is that BCC's internal iteration order is sensitive
+to which symbol table buckets are non-empty: initialized-data
+globals and short-named globals both leave a record that flips a
+"forward iteration" mode for the long bucket. The exact mechanism
 remains unclear; further fixtures may force more refinement.
 
 ## `signed` keyword
@@ -562,14 +565,49 @@ top-level type-probe already accepted the stars.
 
 ### Struct array fields, fnptr fields, struct-array-element write
 
-While building this batch I also tried `struct buffer { int len;
-int data[4]; }; b.data[2] = 42;`. The struct-field array suffix
-parsed (extended `parse_record_type` to consume `[N]`), but the
-*assignment* `b.data[2] = 42;` is a struct-field-of-array
-element-write that the current AST shape (`MemberAssign` /
-`ArrayAssign`) doesn't compose. Left for a future fixture. The
-struct-fnptr field (`int (*fn)(int);` in a struct) similarly
-needs new declarator support and is deferred.
+Fixture `497` resolved the struct-field-of-array element write
+that was deferred from an earlier batch: `struct buffer { int
+len; int data[4]; }; b.data[2] = 42;`. Parser now adds `[expr]`
+to `parse_atom`'s postfix loop so `b.data[2]` parses as
+`ArrayIndex { array: Member { base: Ident(b), field: data },
+index: 2 }`. The lvalue walker in `parse_expr_or_lvalue_assign`
+detects this `ArrayIndex(Member(Ident, field), ...)` shape and
+lowers it to a new `StmtKind::MemberArrayAssign { base, field,
+indices, value }`. Codegen folds field-offset + Σ(idx·stride)
+into a single byte displacement off the struct base and emits
+one `mov word ptr DGROUP:_b+N, K` (or bp-relative for locals).
+For the rvalue side (`g = b.data[2]`), `emit_array_index_to_ax`
+has a similar fast-path that recognizes the same shape and emits
+a single `mov ax, word ptr DGROUP:_b+N`.
+
+The struct-fnptr field (`int (*fn)(int);` in a struct) similarly
+needs new declarator support and remains deferred.
+
+### Char array initialized to a shorter string
+
+Fixture `498` (`char msg[16] = "hello";`) — when the declared
+array length exceeds `bytes.len() + 1` (the bytes plus the NUL
+terminator), the remaining slots are zero-filled out to the
+declared length. `emit_global_init`'s string-literal-into-char-
+array path now emits `db <byte>` lines for each character, a
+trailing `db 0`, then additional `db 0` lines until the declared
+length is reached. The LEDATA payload in the resulting OBJ
+matches BCC byte-for-byte, including the trailing zero pad.
+
+### `static` function definitions
+
+Fixture `499` (`static int helper(int x) { return x + 1; } int
+main(void) { return helper(41); }`) — a function with `static`
+storage class is emitted in `_TEXT` like any other function
+*but* never gets a `public _helper` declaration. `parse_unit` now
+accepts `static` (and only `static`, not `extern`) before a
+function definition, recording it on `Function::is_static`.
+`emit_s.rs`'s publics loop skips static functions when building
+the long/short bucket. Codegen for calls is unchanged: the call
+site emits `call near ptr _helper` because TASM resolves
+`_helper` within the same `_TEXT` segment without needing an
+`extrn`. The `_helper` PUBDEF simply isn't emitted in the
+resulting OBJ, matching BCC's output.
 
 ## Comma operator
 
