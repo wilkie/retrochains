@@ -1165,6 +1165,21 @@ hi`, 4 bytes). The codegen pointer-stride scaling from fixture
 542 already does the multiply (`p -= 2;` on `int *` → 2*2 = 4)
 — this batch just made TASM accept the emitted asm.
 
+## `char c = a[K];` — skip widening peephole
+
+Fixture `567` (`char a[3] = {'x', 'y', 'z'}; char c = a[1];`) —
+`emit_array_index_to_ax` for a char global array loads `mov al,
+byte ptr [_a+K]` and then sign-extends with `cbw`. When the
+destination is itself a char slot (byte store truncates back),
+the `cbw` is purely wasted — BCC skips it.
+
+`emit_assign_local`'s stack branch now special-cases this
+shape: char-local target + char-array constant-index source on
+a global. It emits `mov al, byte ptr DGROUP:_a+K; mov byte ptr
+[bp-N], al` — 6 bytes — without the cbw. Other code paths
+through `emit_expr_to_ax` still widen because their consumers
+(arithmetic, ax-passing) need a full int.
+
 ## What we explicitly defer
 
 - Templates, namespaces, RTTI, exceptions (not in BC2.0 to relevant
