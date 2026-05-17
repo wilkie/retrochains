@@ -146,6 +146,27 @@ as `Instr::MovGroupSymImm8`, parallel to the existing word-form
 emitted the right asm text for char-typed globals; only the
 assembler needed to learn the form.
 
+Constant char arithmetic (`'Z' - 'A'`) folds at compile time the same
+way any int-constant arithmetic does, so a char-literal pair
+collapses to a single `mov word ptr DGROUP:_g, 25` (fixture `453`,
+no register touched).
+
+The compare side has an analogous byte-form: `cmp byte ptr
+DGROUP:_<c>, K` (encoded `80 3E disp16 ii`), distinct from the
+word-form `cmp word ptr DGROUP:_<g>, K` (`83 3E ...` / `81 3E ...`).
+BCC picks the byte form when the *left* operand is a char-typed
+global — even when the source-side compares against an int-promoted
+char literal like `if (c == 'A')`. Added as
+`Instr::CmpByteGroupSymImm8` and emitted by `emit_compare` for the
+char-global branch (fixture `452`).
+
+`switch (g)` against a global int scrutinee loads via the moffs16
+short form `mov ax, word ptr DGROUP:_g` (`A1 disp16`), the same
+load shape as any other int-global value-load — no special path.
+Verified with character-literal case labels (fixture `454`); the
+chained-compare dispatch then uses ordinary int constants since
+case labels are int-typed.
+
 ## What we explicitly defer
 
 - Templates, namespaces, RTTI, exceptions (not in BC2.0 to relevant
