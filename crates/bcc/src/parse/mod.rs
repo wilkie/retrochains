@@ -507,10 +507,17 @@ impl Parser {
             }
         }
         self.expect(&TokenKind::RBrace)?;
-        // Round size up to even (fixture 102: `{char c; int n;}` is
-        // 4 bytes, not 3). Same rule for unions: `{char c;}` rounds to 2.
+        // Struct size is the raw sum of field sizes (no inter-field
+        // padding, no end rounding). Fixture 462's BSS layout pins
+        // `{unsigned char b; int x;}` as 3 bytes, not 4. Stack-frame
+        // alignment to word boundary happens at frame allocation
+        // time, not here. Unions still need width rounding because
+        // every field overlaps at offset 0 and a single-char union
+        // would otherwise produce a 1-byte slot that mis-aligns the
+        // next int local (no fixture pins this yet — keep the round
+        // for unions to preserve fixture-103 behavior).
         let raw_size = if is_union { union_max } else { struct_offset };
-        let size = if raw_size % 2 == 1 { raw_size + 1 } else { raw_size };
+        let size = if is_union && raw_size % 2 == 1 { raw_size + 1 } else { raw_size };
         let ty = Type::Struct { name: tag.clone(), fields, size };
         if let Some(name) = tag {
             self.structs.insert(name, ty.clone());

@@ -1926,6 +1926,18 @@ impl<'a> FunctionEmitter<'a> {
         Some((n, new_off, field_ty))
     }
 
+    /// Emit the post-byte-load widening step needed to promote
+    /// AL → AX. Signed char promotes via `cbw` (1 byte, `98`).
+    /// Unsigned char promotes via `mov ah, 0` (2 bytes, `B4 00`)
+    /// to preserve zero in the upper bits.
+    fn emit_widen_al(&mut self, ty: &Type) {
+        if ty.is_unsigned() {
+            self.out.extend_from_slice(b"\tmov\tah,0\r\n");
+        } else {
+            self.out.extend_from_slice(b"\tcbw\t\r\n");
+        }
+    }
+
     /// Emit a "test against zero" instruction for a non-comparison
     /// expression — used in boolean contexts (`if (x)`, `x && y`).
     /// Today only `Ident`s are supported; other expressions panic.
@@ -3558,7 +3570,7 @@ impl<'a> FunctionEmitter<'a> {
                 };
                 if leaf_ty.is_char_like() {
                     let _ = write!(self.out, "\tmov\tal,byte ptr {addr}\r\n");
-                    self.out.extend_from_slice(b"\tcbw\t\r\n");
+                    self.emit_widen_al(&leaf_ty);
                 } else {
                     let _ = write!(self.out, "\tmov\tax,{width} ptr {addr}\r\n");
                 }
@@ -4126,7 +4138,7 @@ impl<'a> FunctionEmitter<'a> {
                     };
                     if load_byte {
                         let _ = write!(self.out, "\tmov\tal,byte ptr {addr}\r\n");
-                        self.out.extend_from_slice(b"\tcbw\t\r\n");
+                        self.emit_widen_al(&leaf_ty);
                     } else {
                         let _ = write!(self.out, "\tmov\tax,{width} ptr {addr}\r\n");
                     }
@@ -4138,7 +4150,7 @@ impl<'a> FunctionEmitter<'a> {
                 let off = base_bp + i16::try_from(total_off).unwrap_or(i16::MAX);
                 if leaf_ty.is_char_like() {
                     let _ = write!(self.out, "\tmov\tal,byte ptr {}\r\n", bp_addr(off));
-                    self.out.extend_from_slice(b"\tcbw\t\r\n");
+                    self.emit_widen_al(&leaf_ty);
                 } else {
                     let _ = write!(self.out, "\tmov\tax,word ptr {}\r\n", bp_addr(off));
                 }
@@ -5664,13 +5676,27 @@ impl<'a> FunctionEmitter<'a> {
                     }
                     panic!("non-constant long local assign not yet supported (no fixture)");
                 }
+                // Char-local store: byte-width immediate. Same byte
+                // form as the init path (mov byte ptr [bp-N], K).
+                // Fixture 461 (`c = 200;` for a uchar local).
+                if ty.is_char_like()
+                    && let Some(v) = try_const_eval(value)
+                {
+                    let v8 = v & 0xFF;
+                    let _ = write!(self.out, "\tmov\tbyte ptr {},{v8}\r\n", bp_addr(off));
+                    return;
+                }
                 // Mirror the init form: immediate-store when possible.
                 if let Some(v) = try_const_eval(value) {
                     let _ = write!(self.out, "\tmov\tword ptr {},{v}\r\n", bp_addr(off));
                     return;
                 }
                 self.emit_expr_to_ax(value);
-                let _ = write!(self.out, "\tmov\tword ptr {},ax\r\n", bp_addr(off));
+                if ty.is_char_like() {
+                    let _ = write!(self.out, "\tmov\tbyte ptr {},al\r\n", bp_addr(off));
+                } else {
+                    let _ = write!(self.out, "\tmov\tword ptr {},ax\r\n", bp_addr(off));
+                }
             }
             LocalLocation::Reg(reg) => self.emit_store_reg(reg, value),
         }
@@ -5807,18 +5833,30 @@ impl<'a> FunctionEmitter<'a> {
                 }
                 match self.locals.location_of(name) {
                     LocalLocation::Stack(off) if ty.is_char_like() => {
-                        // Char on stack into AX: load AL then sign-extend.
+                        // Char on stack into AX: load AL then widen.
+                        // Signed: `cbw` (1 byte). Unsigned:
+                        // `mov ah,0` (2 bytes). Fixture 461.
                         let _ = write!(self.out, "\tmov\tal,byte ptr {}\r\n", bp_addr(off));
-                        self.out.extend_from_slice(b"\tcbw\t\r\n");
+                        if ty.is_unsigned() {
+                            self.out.extend_from_slice(b"\tmov\tah,0\r\n");
+                        } else {
+                            self.out.extend_from_slice(b"\tcbw\t\r\n");
+                        }
                     }
                     LocalLocation::Stack(off) => {
                         let _ = write!(self.out, "\tmov\tax,word ptr {}\r\n", bp_addr(off));
                     }
                     LocalLocation::Reg(reg) if reg.is_byte() => {
                         // Char in a byte register into AX: copy AL then
-                        // sign-extend (fixture 053).
+                        // widen. Fixture 053 / 461 (register-resident
+                        // uchar). Signed picks `cbw`; unsigned picks
+                        // `mov ah,0`.
                         let _ = write!(self.out, "\tmov\tal,{}\r\n", reg.name());
-                        self.out.extend_from_slice(b"\tcbw\t\r\n");
+                        if ty.is_unsigned() {
+                            self.out.extend_from_slice(b"\tmov\tah,0\r\n");
+                        } else {
+                            self.out.extend_from_slice(b"\tcbw\t\r\n");
+                        }
                     }
                     LocalLocation::Reg(reg) => {
                         let _ = write!(self.out, "\tmov\tax,{}\r\n", reg.name());

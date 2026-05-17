@@ -305,8 +305,17 @@ impl Locals {
             } else {
                 match item.kind {
                     DeclKind::Local => {
+                        // Round the slot's size up to the type's
+                        // alignment so that e.g. a 3-byte struct
+                        // (`{char; int;}`) occupies a 4-byte slot
+                        // with the struct base at the low address —
+                        // matches BCC's layout for fixture 102 once
+                        // the struct's intrinsic size is the raw
+                        // field-sum (3) rather than pre-rounded (4).
+                        let slot_size =
+                            align_up(item.ty.size_bytes(), item.ty.alignment());
                         stack_bytes = align_up(stack_bytes, item.ty.alignment())
-                            + item.ty.size_bytes();
+                            + slot_size;
                         LocalLocation::Stack(
                             -i16::try_from(stack_bytes).expect("stack frame fits in i16"),
                         )
