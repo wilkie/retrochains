@@ -472,6 +472,24 @@ the existing shape in `parse_declare` and `parse_global`. The
 typedef table then stores the wrapped pointer type, and uses of
 `INTP` resolve to `Pointer(Int)`.
 
+### `typedef <type> <name>[N];` — array typedef
+
+Fixture `488` (`typedef int IARR[3]; IARR a;`) needed the
+typedef parser to consume an array-suffix tail. Added the same
+`while … LBracket` loop that `parse_declare` already uses,
+wrapping innermost-first so a multi-dim
+`typedef int M[2][3];` would yield `Array{2, Array{3, Int}}`.
+
+### `typedef struct { … } <name>;` and typedef-of-typedef
+
+Fixtures `489` (`typedef struct { int x; int y; } Point;`) and
+`490` (`typedef int INT; typedef INT *INTP;`) both passed first
+try. `parse_type` already handles inline `struct { … }` literals
+and resolves a typedef-name as the referent type when it appears
+where a type is expected — so a typedef whose base is another
+typedef just flows through. The pointer-of-typedef in 490
+exercises the right composition order at the typedef level.
+
 ## Comma operator
 
 `<expr>, <expr>` at expression level is a comma operator —
