@@ -515,6 +515,12 @@ pub enum Instr {
     /// symbol before calling helpers like `N_SCOPY@` that take
     /// far-pointer arguments. Fixture 413.
     PushDs,
+    /// `push ss` — `16` (single byte). Used analogously to
+    /// `PushDs` when the far-pointer target is a stack-resident
+    /// location: the segment half of the far pointer is SS rather
+    /// than DS. Fixture 416 (stack-destination struct copy via
+    /// `N_SCOPY@`).
+    PushSs,
     /// `cmp word ptr <group>:<symbol>[+<offset>], imm16` — Grp1
     /// r/m16,imm16 with /7=CMP and disp16-only addressing
     /// (`81 3E lo hi imm_lo imm_hi`, 6 bytes). Used when K is too

@@ -5188,22 +5188,64 @@ impl<'a> FunctionEmitter<'a> {
     fn emit_assign_local(&mut self, loc: LocalLocation, ty: &Type, value: &Expr) {
         match loc {
             LocalLocation::Stack(off) => {
-                // Struct-to-stack copy assign. Same word-by-word
-                // high-first shape as the global-to-global path, but
-                // storing to `[bp+N]`. For a 4-byte struct, the bytes
-                // mirror the long-from-global-into-stack copy (fixture
-                // 288). Fixture 415 (`a = b;` where `a` is a stack
-                // local struct of size 4).
+                // Struct-to-stack copy assign. Three shape branches
+                // by source storage and byte size:
+                //   - 4-byte from global: inline `mov ax / mov dx`
+                //     load + `[bp+off]` store pair (fixture 415).
+                //   - 4-byte from stack: same inline pair but both
+                //     load and store are bp-relative (fixture 417).
+                //   - > 4 bytes: route through `N_SCOPY@`. The
+                //     destination far pointer uses `PUSH SS` (segment
+                //     for stack-resident memory) instead of `PUSH DS`,
+                //     and the offset is loaded via LEA `[bp+off]`
+                //     instead of `mov OFFSET _sym`. Source picks SS
+                //     vs DS based on whether *it* is stack- or globals-
+                //     resident. Fixtures 416 (stack ← global), 418
+                //     (stack ← stack).
                 if let Type::Struct { .. } = ty
                     && let ExprKind::Ident(src_name) = &value.kind
-                    && self.globals.type_of(src_name).map_or(false, |t| t == ty)
-                    && ty.size_bytes() == 4
                 {
-                    let _ = write!(self.out, "\tmov\tax,word ptr DGROUP:_{src_name}+2\r\n");
-                    let _ = write!(self.out, "\tmov\tdx,word ptr DGROUP:_{src_name}\r\n");
-                    let _ = write!(self.out, "\tmov\tword ptr {},ax\r\n", bp_addr(off + 2));
-                    let _ = write!(self.out, "\tmov\tword ptr {},dx\r\n", bp_addr(off));
-                    return;
+                    let size = ty.size_bytes();
+                    let src_is_global = self.globals.type_of(src_name).map_or(false, |t| t == ty);
+                    let src_is_stack = self.locals.has(src_name)
+                        && self.locals.type_of(src_name) == ty;
+                    if (src_is_global || src_is_stack) && size == 4 {
+                        if src_is_global {
+                            let _ = write!(self.out, "\tmov\tax,word ptr DGROUP:_{src_name}+2\r\n");
+                            let _ = write!(self.out, "\tmov\tdx,word ptr DGROUP:_{src_name}\r\n");
+                        } else {
+                            let LocalLocation::Stack(src_off) = self.locals.location_of(src_name)
+                            else {
+                                panic!("struct local `{src_name}` not stack-resident");
+                            };
+                            let _ = write!(self.out, "\tmov\tax,word ptr {}\r\n", bp_addr(src_off + 2));
+                            let _ = write!(self.out, "\tmov\tdx,word ptr {}\r\n", bp_addr(src_off));
+                        }
+                        let _ = write!(self.out, "\tmov\tword ptr {},ax\r\n", bp_addr(off + 2));
+                        let _ = write!(self.out, "\tmov\tword ptr {},dx\r\n", bp_addr(off));
+                        return;
+                    }
+                    if (src_is_global || src_is_stack) && size > 4 {
+                        let _ = write!(self.out, "\tlea\tax,word ptr {}\r\n", bp_addr(off));
+                        self.out.extend_from_slice(b"\tpush\tss\r\n");
+                        self.out.extend_from_slice(b"\tpush\tax\r\n");
+                        if src_is_global {
+                            let _ = write!(self.out, "\tmov\tax,offset DGROUP:_{src_name}\r\n");
+                            self.out.extend_from_slice(b"\tpush\tds\r\n");
+                        } else {
+                            let LocalLocation::Stack(src_off) = self.locals.location_of(src_name)
+                            else {
+                                panic!("struct local `{src_name}` not stack-resident");
+                            };
+                            let _ = write!(self.out, "\tlea\tax,word ptr {}\r\n", bp_addr(src_off));
+                            self.out.extend_from_slice(b"\tpush\tss\r\n");
+                        }
+                        self.out.extend_from_slice(b"\tpush\tax\r\n");
+                        let _ = write!(self.out, "\tmov\tcx,{size}\r\n");
+                        self.out.extend_from_slice(b"\tcall\tnear ptr N_SCOPY@\r\n");
+                        self.helpers.insert("N_SCOPY@".to_string());
+                        return;
+                    }
                 }
                 // `long x; x = K;` — two word stores, high then low.
                 // Same shape as the init form (fixture 210/287).

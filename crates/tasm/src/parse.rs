@@ -373,6 +373,9 @@ fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
             if rest == "ds" {
                 return Ok(Instr::PushDs);
             }
+            if rest == "ss" {
+                return Ok(Instr::PushSs);
+            }
             if let Some(reg) = Reg16::parse(rest) {
                 return Ok(Instr::PushReg16 { reg });
             }
