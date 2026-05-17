@@ -1081,6 +1081,28 @@ Three new tasm IR variants — `AndReg8Imm8`, `OrReg8Imm8`,
 `XorReg8Imm8` — encode `80 /4|/1|/6 mod=11 r/m=<reg> imm8`.
 The AL-specific 2-byte forms (`AndAlImm8` etc.) stay for AL.
 
+## `continue;` inside a for-loop — separate slot
+
+Fixture `558` (`for (i = 0; i < 5; i = i + 1) { if (i == 2)
+continue; s = s + i; }`) — the label planner reserved
+`continue_target_slot` only when the body had *no* nested
+labels (the "filler-slot" case for fixtures like 061). When the
+body had nested labels (the `if` in 558 reserves two), the
+planner re-used the next slot as both the continue-target *and*
+the check-slot, so the emitter dropped two identical
+`@1@N:` lines and `continue;` jumped to whichever the assembler
+resolved first.
+
+The fix: planner now runs a `body_has_continue` probe alongside
+the body planning. When continue is present, it reserves a
+distinct continue-target slot regardless of nesting. When
+continue is absent and the body added no labels, it keeps the
+historical filler reservation so the downstream label numbers
+match the existing for-loop fixtures byte-for-byte. The
+`body_has_continue` helper is duplicated into `plan.rs` (it
+already lives in `codegen/mod.rs`); they walk the same Stmt
+shape and need to agree.
+
 ## What we explicitly defer
 
 - Templates, namespaces, RTTI, exceptions (not in BC2.0 to relevant
