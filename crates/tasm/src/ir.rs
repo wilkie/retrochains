@@ -146,6 +146,17 @@ pub enum Instr {
         disp: u16,
         imm: u16,
     },
+    /// `mov word ptr <group>:<sym>[bx+disp],<reg16>` — bx-indexed
+    /// store of a register to a data-segment global. Used by
+    /// variable-indexed int-array writes where the RHS is a
+    /// register-resident local (fixture 510: `a[i] = i` with `i`
+    /// in SI). Encoding: `89 mod=10 reg r/m=111 disp_lo disp_hi`.
+    MovGroupSymBxDispReg16 {
+        group: String,
+        symbol: String,
+        disp: u16,
+        reg: Reg16,
+    },
     /// `add ax,word ptr [bp+<offset>]` — 03 46 dd
     AddAxBpRel { offset: i16 },
     /// `adc dx, word ptr [bp+disp8]` — `13 56 dd`. ADC r16,r/m16

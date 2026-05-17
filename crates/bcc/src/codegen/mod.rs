@@ -4019,6 +4019,38 @@ impl<'a> FunctionEmitter<'a> {
                 }
                 panic!("non-constant rhs in constant-indexed global array assign not yet supported (no fixture)");
             }
+            // Variable-indexed global int-array write. Load `i` into
+            // BX, shl once for stride 2, then `mov word ptr
+            // _a[bx], <src>`. Fixture 510 (`a[i] = i`).
+            if indices.len() == 1
+                && let Some(elem) = gty.array_elem()
+                && matches!(elem, Type::Int | Type::UInt)
+            {
+                let index = &indices[0];
+                if let ExprKind::Ident(i_name) = &index.kind
+                    && self.locals.has(i_name)
+                {
+                    match self.locals.location_of(i_name) {
+                        LocalLocation::Stack(off) => {
+                            let _ = write!(self.out, "\tmov\tbx,word ptr {}\r\n", bp_addr(off));
+                        }
+                        LocalLocation::Reg(reg) => {
+                            let _ = write!(self.out, "\tmov\tbx,{}\r\n", reg.name());
+                        }
+                    }
+                } else {
+                    self.emit_expr_to_ax(index);
+                    self.out.extend_from_slice(b"\tmov\tbx,ax\r\n");
+                }
+                self.out.extend_from_slice(b"\tshl\tbx,1\r\n");
+                let src = self.resolve_operand_source(value);
+                let _ = write!(
+                    self.out,
+                    "\tmov\tword ptr DGROUP:_{array}[bx],{}\r\n",
+                    src.word(),
+                );
+                return;
+            }
             // Variable-indexed global long-array write. Load `i` into
             // BX (directly if it's a stack/reg local, otherwise via
             // AX), shl twice for stride 4, then write `mov word ptr

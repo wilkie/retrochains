@@ -1952,11 +1952,18 @@ impl Parser {
     /// tables); compound expressions return `None` and let the caller
     /// report the failure. `sizeof` is the only consumer.
     fn expr_static_size(&self, e: &Expr) -> Option<u16> {
-        let ExprKind::Ident(name) = &e.kind else { return None };
-        if let Some(ty) = self.function_locals.get(name) {
-            return Some(ty.size_bytes());
+        match &e.kind {
+            ExprKind::Ident(name) => {
+                if let Some(ty) = self.function_locals.get(name) {
+                    return Some(ty.size_bytes());
+                }
+                self.global_types.get(name).map(|ty| ty.size_bytes())
+            }
+            // `sizeof("hi")` — string literal sizes include the NUL
+            // terminator. Fixture 511.
+            ExprKind::StringLit(bytes) => Some(u16::try_from(bytes.len() + 1).ok()?),
+            _ => None,
         }
-        self.global_types.get(name).map(|ty| ty.size_bytes())
     }
 
     /// True if the current `(` is followed by a type-name keyword

@@ -257,6 +257,7 @@ fn instr_size(instr: &Instr) -> usize {
         Instr::MovReg16OffsetSym { .. } => 3,
         Instr::MovReg16GroupSymBxDisp { .. } => 4,
         Instr::MovGroupSymBxDispImm { .. } => 6,
+        Instr::MovGroupSymBxDispReg16 { .. } => 4,
         Instr::MovReg16Imm { .. } | Instr::SubSpImm(_) | Instr::AddSpImm(_) => 3,
         Instr::MovReg16BpRel { .. }
         | Instr::AddAxBpRel { .. }
@@ -1006,6 +1007,12 @@ fn emit_instr(
             // lo hi imm_lo imm_hi.
             emit_group_sym_lea(&[0xC7, 0x87], group, symbol, *disp as i16, symbols, group_idx, extern_idx, out, fixups)?;
             out.extend_from_slice(&imm.to_le_bytes());
+        }
+        Instr::MovGroupSymBxDispReg16 { group, symbol, disp, reg } => {
+            // `mov word ptr <group>:<sym>[bx+disp],reg16` →
+            // 89 (mod=10 reg=rrr r/m=111) lo hi. Fixture 510.
+            let modrm = 0b10_000_111 | (reg.code() << 3);
+            emit_group_sym_lea(&[0x89, modrm], group, symbol, *disp as i16, symbols, group_idx, extern_idx, out, fixups)?;
         }
         Instr::MovAlGroupSym { group, symbol, offset } => {
             // `mov al,byte ptr <group>:<symbol>` → A0 lo hi.

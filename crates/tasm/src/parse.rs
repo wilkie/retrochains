@@ -759,6 +759,16 @@ fn parse_mov(operands: &str, line_no: usize) -> AsmResult<Instr> {
                 imm: imm as u16,
             });
         }
+        // `mov word ptr <group>:<sym>[bx+disp], <reg16>` — bx-indexed
+        // store of a register. Fixture 510 (`a[i] = i` with `i` in SI).
+        if let Some(reg) = Reg16::parse(rhs) {
+            return Ok(Instr::MovGroupSymBxDispReg16 {
+                group: group.to_string(),
+                symbol: symbol.to_string(),
+                disp,
+                reg,
+            });
+        }
     }
     // LHS `byte ptr <group>:<sym>[+N]` — store immediate byte to a
     // data-segment global. Fixture 449 (`c = 'A'` for char global).
