@@ -2383,6 +2383,41 @@ impl<'a> FunctionEmitter<'a> {
 
     fn emit_return_value_load(&mut self, value: Option<&Expr>) {
         let Some(e) = value else { return };
+        // Struct return. Two shapes by size, paralleling the
+        // struct-copy and struct-by-value-arg cases:
+        //   - 4 bytes: load high to DX, low to AX — *byte-identical*
+        //     to a long return (DX:AX = high:low). Fixture 422.
+        //   - > 4 bytes: BCC has injected a hidden first param at
+        //     [bp+4..7] holding a far pointer to the caller's
+        //     return buffer. The callee pushes that buffer's far ptr
+        //     and the source's far ptr, calls `N_SCOPY@`, then
+        //     returns the buffer's offset in AX. Fixture 423.
+        if let Type::Struct { .. } = &self.function.ret_ty {
+            let size = self.function.ret_ty.size_bytes() as u32;
+            if size == 4
+                && let ExprKind::Ident(src_name) = &e.kind
+                && self.globals.type_of(src_name).map_or(false, |t| t == &self.function.ret_ty)
+            {
+                let _ = write!(self.out, "\tmov\tdx,word ptr DGROUP:_{src_name}+2\r\n");
+                let _ = write!(self.out, "\tmov\tax,word ptr DGROUP:_{src_name}\r\n");
+                return;
+            }
+            if size > 4
+                && let ExprKind::Ident(src_name) = &e.kind
+                && self.globals.type_of(src_name).map_or(false, |t| t == &self.function.ret_ty)
+            {
+                self.out.extend_from_slice(b"\tpush\tword ptr [bp+6]\r\n");
+                self.out.extend_from_slice(b"\tpush\tword ptr [bp+4]\r\n");
+                let _ = write!(self.out, "\tmov\tax,offset DGROUP:_{src_name}\r\n");
+                self.out.extend_from_slice(b"\tpush\tds\r\n");
+                self.out.extend_from_slice(b"\tpush\tax\r\n");
+                let _ = write!(self.out, "\tmov\tcx,{size}\r\n");
+                self.out.extend_from_slice(b"\tcall\tnear ptr N_SCOPY@\r\n");
+                self.helpers.insert("N_SCOPY@".to_string());
+                self.out.extend_from_slice(b"\tmov\tax,word ptr [bp+4]\r\n");
+                return;
+            }
+        }
         // Long return: standard 8086 32-bit return-value convention
         // puts the high word in DX and the low word in AX. (Note
         // BCC swaps the AX/DX roles when doing in-memory long
@@ -4716,6 +4751,21 @@ impl<'a> FunctionEmitter<'a> {
                 self.helpers.insert("N_SCOPY@".to_string());
                 return;
             }
+        }
+        // `a = f();` for `f` returning a 4-byte struct. Same shape
+        // as `g = f();` for a long-returning callee — the call
+        // leaves DX:AX = high:low and we store back to the struct
+        // destination. Byte-identical to the long-return store
+        // (fixture 214) for the 4-byte case. Fixture 424.
+        if let Type::Struct { .. } = &ty
+            && ty.size_bytes() == 4
+            && let ExprKind::Call { name: fname, args } = &value.kind
+            && self.signatures.ret_ty_of(fname).map_or(false, |t| t == &ty)
+        {
+            self.emit_call(fname, args);
+            let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name}+2,dx\r\n");
+            let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name},ax\r\n");
+            return;
         }
         if ty.is_long_like() {
             if let Some(v) = try_const_eval(value) {
