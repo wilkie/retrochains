@@ -2427,6 +2427,47 @@ impl<'a> FunctionEmitter<'a> {
                 self.helpers.insert("N_LXMUL@".to_string());
                 return;
             }
+            // `return <int_global>;` (or `return (long)i;`) when the
+            // function returns a long-family type — widen the int
+            // into DX:AX. Signed sign-extends via `cwd` (fixture
+            // 380); unsigned zero-extends via `xor dx, dx` (fixture
+            // 381). Distinct from the memory-dest widening shape
+            // (fixture 255: `mov [_g+2], 0`) — at return the high
+            // half is a register, so BCC writes zero with the
+            // shorter `xor dx, dx` (2 bytes) instead of an immediate
+            // store. Destination-driven, same logical operation.
+            let widening_src = match &e.kind {
+                ExprKind::Ident(name) => Some(name.as_str()),
+                ExprKind::Cast { ty: Type::Long, operand } => {
+                    if let ExprKind::Ident(name) = &operand.kind { Some(name.as_str()) } else { None }
+                }
+                _ => None,
+            };
+            if let Some(src_name) = widening_src
+                && let Some(src_ty) = self.globals.type_of(src_name)
+                && matches!(src_ty, Type::Int | Type::UInt)
+            {
+                let _ = write!(self.out, "\tmov\tax,word ptr DGROUP:_{src_name}\r\n");
+                match src_ty {
+                    Type::Int  => self.out.extend_from_slice(b"\tcwd\t\r\n"),
+                    Type::UInt => self.out.extend_from_slice(b"\txor\tdx,dx\r\n"),
+                    _ => unreachable!(),
+                }
+                return;
+            }
+            // `return g();` for a long-returning callee — direct
+            // passthrough: the callee's DX:AX result IS the return
+            // register pair, so the function emits `call near ptr
+            // _g` and goes straight to its epilogue. No moves, no
+            // stores. Same passthrough shape as the helper-call
+            // return (mul/div/shift); the only difference is the
+            // call target. Fixture 382.
+            if let ExprKind::Call { name: fname, args } = &e.kind
+                && args.is_empty()
+            {
+                let _ = write!(self.out, "\tcall\tnear ptr _{fname}\r\n");
+                return;
+            }
             // `return <a> << K;` / `return <a> >> K;` for a long lvalue
             // and constant K in [1,255]. Two shapes:
             //   K=1: inline shift+rotate across DX:AX. The carry
