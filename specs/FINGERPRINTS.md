@@ -618,6 +618,80 @@ Never `lea bx, [<bp+N>]` directly. The asymmetry mirrors the
 "AX is the working register" pattern that shows up for `&x` and
 compound `*=`. _Fixtures_: 303 (stack), 307 (register).
 
+### Long-pointer deref: ABI registers, disp-less low load (STRONG)
+
+A bare long-pointer deref (`g = *p` for `p: long *` in a register)
+reads using the **ABI** register pair (DX=high, AX=low), *not* the
+globals-arithmetic pair (AX=high, DX=low) that scalar long-global
+arithmetic uses. The high half loads with disp8 (`8B 44 02`); the
+low half uses the **disp-less** ModR/M form (`8B 14`):
+
+```
+mov ax, word ptr [si+2]    ; 8B 44 02   high
+mov dx, word ptr [si]      ; 8B 14      low (no disp byte)
+```
+
+Two distinct ModR/M shapes for the same `[si+0]` semantic — BCC
+picks the 1-byte-shorter `mod=00 r/m=100` encoding when disp=0.
+The high-first load order still holds. _Fixture_: 309.
+
+### Long-pointer compound assign: same `83`/`81` byte-width rule (STRONG)
+
+`*p += K` / `*p &= K` for a register-resident `long *` uses the same
+op-family imm width selection as long globals and long stack locals.
+Only the ModR/M `r/m` field changes:
+
+- Globals: `r/m=110` + disp16  → `83 06 lo hi K` / `81 26 lo hi K K2`
+- Stack:   `r/m=110` + disp8   → `83 46 dd K` / `81 66 dd K K2`
+- Pointer: `r/m=100` (`[si]`)  → `83 04 K` (low) / `83 54 02 00`
+  (`adc [si+2], 0` high partner)
+
+The choice of `83` (imm8sx) for arith and `81` (imm16) for bitwise
+is preserved across all three storage classes — a strong indicator
+that BCC's emitter selects opcode by source op, not by target
+addressing mode. _Fixture_: 311 (arith `+=`).
+
+### Array decay / `&<global>` skips AX round-trip (STRONG)
+
+When the destination is a register, `&<global>` and array decay
+both materialize as a direct `mov <reg>, offset DGROUP:_<sym>` —
+no `lea ax, ... / mov <reg>, ax` pair. Same shortcut as for string
+literals (fixture 088). Distinct from `&<stack-local>`, which
+**always** routes through AX (`lea ax, word ptr [bp-N] / mov <reg>,
+ax`) — stack addresses are runtime computations and need `lea`.
+
+This split lets a disassembler recover the source storage class of
+the address-of operand:
+
+| Source form           | Asm                                       |
+|-----------------------|-------------------------------------------|
+| `r = &stack_var`      | `lea ax, [bp-N] / mov <r>, ax`            |
+| `r = &global`         | `mov <r>, offset DGROUP:_<g>`             |
+| `r = global_array`    | `mov <r>, offset DGROUP:_<a>`             |
+| `r = "string literal"`| `mov <r>, offset DGROUP:s@`               |
+
+The bottom three look mechanically identical but for the symbol
+name, while the top has a distinctive `lea` prefix. _Fixtures_: 080
+(stack `&x`), 308 (`&global`), 313 (array decay), 088 (string lit).
+
+### Pointer ±K peephole crosses at stride 3 → `add reg, K` (STRONG)
+
+The pointer increment / decrement peephole walks the same threshold
+ladder as the int compound `x += K` peephole (see "`inc <reg>` /
+`dec <reg>` for `±1`, doubled for `±2`"), but applied to the
+*pointee size*:
+
+| Pointer type    | Stride | `p++` emits      | Bytes |
+|-----------------|--------|------------------|-------|
+| `char *`        | 1      | `inc <reg>`      | 1     |
+| `int *`         | 2      | `inc / inc`      | 2     |
+| `long *`        | 4      | `add <reg>, 4`   | 3     |
+
+So `long *p; p++;` emits `add si, 4` (3 bytes), not four `inc si`s
+(which would cost 4). The crossover from `inc`-repeats to `add`
+sits between stride 2 and stride 3 — same threshold as the int
+compound peephole. _Fixtures_: 093 (char*), 090 (int*), 313 (long*).
+
 ---
 
 ## Calling-convention signatures

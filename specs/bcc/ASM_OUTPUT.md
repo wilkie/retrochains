@@ -2270,6 +2270,130 @@ base symbol into the disp16 slot at link time, removing the runtime
 `lea + add bx, ax`. _Fixtures_: 303 vs 079 (stack int array variable
 index); 305 vs 184 (variable-indexed stack array write).
 
+### Long pointers (`308`–`313`)
+
+A `long *` is a 2-byte near pointer like every other pointer in the
+small model, but the *pointee* is 4 bytes — so deref operations
+expand to two-word memory accesses (high first, then low — same
+order as scalar long stores).
+
+#### Pointer init from a global address
+
+`long *p = &g;` and `long *p = a;` (array decay) both materialize the
+linker-resolved offset directly into the destination register, with
+no AX round-trip:
+
+```
+mov si, offset DGROUP:_g          ; long *p = &g;
+mov si, offset DGROUP:_a          ; long *p = a;  (array decay)
+```
+
+Distinct from `&<stack-local>` (which always routes through AX via
+`lea ax, word ptr [bp-N] / mov <reg>, ax`) because globals/arrays are
+link-time constants, not runtime addresses. The same shortcut already
+applies to string-literal initializers (fixture 088).
+
+#### Deref read: `g = *p`
+
+Loads high then low into the AX:DX globals-convention pair:
+
+```
+mov ax, word ptr [si+2]           ; high   — 8B 44 02
+mov dx, word ptr [si]             ; low    — 8B 14
+mov word ptr DGROUP:_g+2, ax      ; store high
+mov word ptr DGROUP:_g, dx        ; store low
+```
+
+The low-half load uses the **disp-less** `8B 14` form (ModR/M 14 =
+mod=00 reg=DX r/m=100 [si]), 2 bytes, while the high half uses the
+`8B 44 02` form with disp8 (3 bytes). The high-first load order is
+the same as for long globals and long stack locals — see "Long load
+order" — but the register convention here is the **ABI** layout
+(DX=high, AX=low) rather than the globals-arithmetic layout
+(AX=high, DX=low). A bare long-pointer deref reads into ABI registers
+because the result is treated as a "long value", not as the operand
+of a global-arithmetic chain.
+
+#### Deref write: `*p = K`
+
+Stores high then low. BCC writes the constant 0 to the high half
+first, then the actual low-half value:
+
+```
+mov word ptr [si+2], 0            ; high  — C7 44 02 00 00
+mov word ptr [si], 42             ; low   — C7 04 2A 00
+```
+
+The low-half store uses `C7 04 lo hi` (disp-less); the high uses
+`C7 44 02 lo hi` (disp8). Order matches the high-first rule for all
+long stores.
+
+#### Compound assign: `*p += K`
+
+Memory-direct read-modify-write, same op-family byte-width rule as
+for long globals and long stack locals:
+
+```
+add word ptr [si], 5              ; 83 04 05  (low,  3 bytes, imm8sx)
+adc word ptr [si+2], 0            ; 83 54 02 00 (high carry, 4 bytes)
+```
+
+The op-family selection (arith uses `83`, bitwise uses `81`) is the
+same across all three storage classes (global, stack-local, pointer-
+target). The ModR/M `r/m` field changes per addressing mode but the
+opcode byte and immediate-width choice don't.
+
+#### Long pointer parameters
+
+A `long *` parameter takes 2 stack bytes (it's a 2-byte pointer, not a
+4-byte long). The direct-deref bonus (see fingerprints) gives `*p`
+two use counts toward enregistration, so any function that derefs its
+long pointer parameter once already clears the int 3-use threshold:
+
+```
+_f      proc near
+        push bp
+        mov  bp, sp
+        push si
+        mov  si, word ptr [bp+4]   ; receive `p` into SI
+        mov  word ptr [si+2], 0    ; *p = K — through SI
+        mov  word ptr [si], 99
+```
+
+Identical prologue shape to an `int *` parameter; only the deref
+expands to two words instead of one.
+
+#### Indexed access: `p[K]` for register-resident pointer
+
+For a register-resident long pointer, `p[K]` lowers to the same
+memory-direct shape as `*(p + K)` — no separate array-style
+effective-address compute. Constant K folds the byte-offset into the
+ModR/M disp:
+
+```
+p[0] = 42:                         p[1] = 42:
+  mov word ptr [si+2], 0             mov word ptr [si+6], 0
+  mov word ptr [si], 42              mov word ptr [si+4], 42
+```
+
+This is the same idiom documented earlier as `*(p + K)` folding to
+indexed addressing — the source forms `p[K]`, `*(p + K)`, and `*p`
+(when K=0) all produce identical asm.
+
+#### Stride 4 → `add reg, K` peephole
+
+The pointer ±K peephole inherited from int pointers crosses to the
+`add reg, K` form **at stride 4**:
+
+- `char *s; s++;` → `inc si` (1 byte; stride 1).
+- `int *p; p++;` → `inc si / inc si` (2 bytes; stride 2 — 1 byte
+  cheaper than `add si, 2` at 3).
+- `long *p; p++;` → `add si, 4` (3 bytes; four `inc`s would cost 4).
+
+So the crossover sits between stride 2 and stride 3+ — same as the
+int compound `x += K` peephole, applied to pointer arithmetic.
+_Fixture_: 313.
+
 ## Source-line comments
 
 BCC interleaves the source as comments. Observed layout for `004`:
