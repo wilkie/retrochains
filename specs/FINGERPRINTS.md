@@ -1026,7 +1026,40 @@ pattern. A compiler that routed long return values through a
 different ABI (or that used a temporary spill) would have to
 emit fixup moves between the helper call and the epilogue. The
 absence of those moves is the fingerprint. _Fixtures_: 374
-(`*`), 375 (`/`), 376 (`%`).
+(`*`), 375 (`/`), 376 (`%`), 379 (`<< K` for K>1 via
+`N_LXLSH@`).
+
+### Long shift K=1 at return: order is direction-determined, not destination-driven (STRONG)
+
+Inline long shifts (K=1) at the return boundary still load DX:AX
+per the destination-driven rule (DX=high, AX=low), but the
+**order** of the two-instruction shift+rotate pair is fixed by
+direction, not destination:
+
+- `<<` always shifts the low half first, rotates the high half
+  second (the carry from low's MSB lands in high's LSB).
+- `>>` always shifts the high half first, rotates the low half
+  second (the carry from high's LSB lands in low's MSB).
+
+```
+; return x << 1;  (fixture 377)
+shl ax, 1                ; AX = low
+rcl dx, 1                ; DX = high — carry from AX into DX
+
+; return x >> 1;  signed (fixture 378)
+sar dx, 1                ; DX = high
+rcr ax, 1                ; AX = low — carry from DX into AX
+```
+
+The memory-dest K=1 shape (fixture 227, `shl dx, 1 / rcl ax, 1`)
+has the same low-first ordering — DX is just the low register
+there, and AX is the high. Only the register labels swap. So a
+disassembler sees two distinct byte sequences (`shl ax / rcl dx`
+vs `shl dx / rcl ax`) that map to the same source pattern under
+different destinations. Within each, the `shl/sar/shr` mnemonic
+always precedes `rcl/rcr` (the shift sets CF, the rotate
+consumes it), but which *register* gets shifted first flips
+with direction: low-first for `<<`, high-first for `>>`.
 
 ### Variable shift count loaded as `byte ptr` (STRONG)
 

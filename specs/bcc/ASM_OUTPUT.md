@@ -2010,6 +2010,54 @@ In memory address order (from SP up after the pushes), the layout
 is `dividend.low, dividend.high, divisor.low, divisor.high` —
 dividend at the lower addresses, divisor at the higher.
 
+`return <a> << K;` / `return <a> >> K;` for a long lvalue and a
+constant K follow two distinct shapes depending on K:
+
+**K=1** is inlined as a load + shift + rotate against DX:AX. The
+direction determines the order — left shifts go low-then-high so
+the carry from the low's high bit lands in the high's low bit;
+right shifts go high-then-low so the carry from the high's low
+bit lands in the low's high bit:
+
+```
+; return x << 1;  for a long param (fixture 377)
+mov dx, word ptr [bp+6]          ; high → DX
+mov ax, word ptr [bp+4]          ; low  → AX
+shl ax, 1                        ; D1 E0 — low half shifted, CF = old bit 15
+rcl dx, 1                        ; D1 D2 — high rotates CF in at bit 0
+
+; return x >> 1;  signed (fixture 378)
+mov dx, word ptr [bp+6]
+mov ax, word ptr [bp+4]
+sar dx, 1                        ; D1 FA — signed high shift, CF = old bit 0
+rcr ax, 1                        ; D1 D8 — low rotates CF in at bit 15
+```
+
+This is the mirror of the memory-dest K=1 shape (fixture 227:
+`shl dx,1 / rcl ax,1` where DX=low, AX=high) with AX/DX swapped
+per the destination-driven rule. The high-vs-low *order* is fixed
+by the carry chain; only which register plays each role flips.
+
+**K>1** routes through the same helpers as the memory-dest path
+(`N_LXLSH@` / `N_LXRSH@` / `N_LXURSH@`) — load operand into DX:AX,
+set CL to K, call. The helper returns DX:AX = return pair, so no
+boundary move is needed (same passthrough shape as mul/div):
+
+```
+; return x << 2;  (fixture 379)
+mov dx, word ptr [bp+6]
+mov ax, word ptr [bp+4]
+mov cl, 2                        ; CL = K
+call near ptr N_LXLSH@           ; result in DX:AX
+; (epilogue follows immediately)
+```
+
+The `mov cl, K` lands AFTER the operand load — same order as the
+non-compound `=`-form shape (fixture 228). Compound `<<=K` (fixture
+263) emits the `mov cl, K` BEFORE the operand load instead;
+that ordering distinguishes compound from `=`-form / return-form
+helper-call shifts.
+
 ### Plain assignment and arithmetic
 
 `g = K` for a long global stores high then low:
