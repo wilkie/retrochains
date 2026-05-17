@@ -3006,6 +3006,38 @@ and K>1 picks the helper-ABI convention regardless of where the
 result eventually gets stored. The intermediate step's ABI wins
 in both cases; the trailing memory store adapts its addressing.
 
+The same destination-agnostic property holds for **helper-call
+compounds** (`*=`, `/=`, `%=`). Mul loads RHS → CX:BX and the
+destination → DX:AX (the operand-to-slot swap from batch 23 —
+the compound's LHS-and-destination gets DX:AX, which is exactly
+where `N_LXMUL@` deposits its result, so no extra move is needed
+before the trailing store). Div/mod push four words in helper-
+standard order (divisor first in instruction time, dividend at
+lower SP), call, and store DX:AX back to the destination's
+address pair:
+
+```
+; s.x *= y;  (fixture 407 — struct field destination)
+mov cx, word ptr DGROUP:_y+2     ; y → CX:BX (RHS in helper slot B)
+mov bx, word ptr DGROUP:_y
+mov dx, word ptr DGROUP:_s+2     ; s.x → DX:AX (dest in helper slot A)
+mov ax, word ptr DGROUP:_s
+call near ptr N_LXMUL@
+mov word ptr DGROUP:_s+2, dx     ; store result back to s.x
+mov word ptr DGROUP:_s, ax
+
+; a[1] *= y;  (fixture 408 — identical shape, _a+4/_a+6 addressing)
+
+; s.x /= y;  (fixture 409 — div helper)
+push word ptr DGROUP:_y+2        ; divisor.high pushed first in time
+push word ptr DGROUP:_y
+push word ptr DGROUP:_s+2        ; dividend at lower SP after pushes
+push word ptr DGROUP:_s
+call near ptr N_LDIV@
+mov word ptr DGROUP:_s+2, dx
+mov word ptr DGROUP:_s, ax
+```
+
 The skeleton further extends to **pointer-target destinations**.
 `*p OP= …` and `p->x OP= …` for a register-resident long pointer
 emit byte-identically to the other destinations, with the address
