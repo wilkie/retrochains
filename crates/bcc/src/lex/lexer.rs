@@ -348,6 +348,10 @@ impl<'a> Lexer<'a> {
             b'\\' => b'\\',
             b'\'' => b'\'',
             b'"' => b'"',
+            b'a' => 0x07,
+            b'b' => 0x08,
+            b'f' => 0x0C,
+            b'v' => 0x0B,
             other => {
                 return Err(LexError::UnknownEscape {
                     ch: other as char,
