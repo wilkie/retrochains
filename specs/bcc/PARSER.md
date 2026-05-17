@@ -737,6 +737,26 @@ span) before returning a single `ExprKind::StringLit`. The
 combined literal flows through the existing pool path, so
 nothing downstream needed to change.
 
+## Variable-indexed global int-array store
+
+Fixture `510` (`int a[5]; for (i = 0; i < 5; i = i + 1) a[i] =
+i;`) — when the index of a global word-element array isn't a
+constant, codegen now loads it into BX (directly from a stack or
+register local), shifts left by 1 for the word stride, and emits
+`mov word ptr DGROUP:_a[bx], <src>` where `<src>` comes from
+`resolve_operand_source(value)`. A new IR variant
+`MovGroupSymBxDispReg16` encodes the `89 mod=10 reg r/m=111`
+form (e.g. `89 b7 lo hi` for SI) — the immediate-source sibling
+`MovGroupSymBxDispImm` was already in place for long-array
+writes (fixture 305).
+
+## `sizeof` of a string literal
+
+Fixture `511` (`return sizeof("hi");`) — extended
+`expr_static_size` to handle `ExprKind::StringLit`. The result is
+`bytes.len() + 1` to include the NUL terminator. The expression
+folds to an `IntLit` at parse time, just like `sizeof(<type>)`.
+
 ## What we explicitly defer
 
 - Templates, namespaces, RTTI, exceptions (not in BC2.0 to relevant
