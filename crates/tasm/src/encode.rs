@@ -352,6 +352,8 @@ fn instr_size(instr: &Instr) -> usize {
         | Instr::SubGroupSymImm8Sx { .. }
         | Instr::SbbGroupSymImm8Sx { .. } => 5,
         Instr::IncGroupSym { .. } | Instr::DecGroupSym { .. } => 4,
+        Instr::TestGroupSymImm16 { .. } => 6,
+        Instr::AddGroupSymReg16 { .. } | Instr::SubGroupSymReg16 { .. } => 4,
         Instr::IncBpRel { .. } | Instr::DecBpRel { .. } => 3,
         Instr::ShlGroupSymOne { .. }
         | Instr::SarGroupSymOne { .. }
@@ -1296,6 +1298,25 @@ fn emit_instr(
             out.push(0x7E);
             out.push(*offset as u8);
             out.push(*imm);
+        }
+        Instr::AddGroupSymReg16 { group, symbol, offset, reg } => {
+            // `add word ptr <group>:<sym>[+N], reg16` → 01 (mod=00
+            // reg=<r> r/m=110) lo hi. Fixture 571.
+            let modrm = 0b00_000_110 | (reg.code() << 3);
+            emit_group_sym_lea(&[0x01, modrm], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
+        }
+        Instr::SubGroupSymReg16 { group, symbol, offset, reg } => {
+            // `sub word ptr <group>:<sym>[+N], reg16` → 29 (mod=00
+            // reg=<r> r/m=110) lo hi.
+            let modrm = 0b00_000_110 | (reg.code() << 3);
+            emit_group_sym_lea(&[0x29, modrm], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
+        }
+        Instr::TestGroupSymImm16 { group, symbol, offset, imm } => {
+            // `test word ptr <group>:<sym>[+N], imm16` →
+            // F7 06 lo hi imm_lo imm_hi. Grp3 /0=TEST r/m16, imm16.
+            // Fixture 569.
+            emit_group_sym_lea(&[0xF7, 0x06], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
+            out.extend_from_slice(&imm.to_le_bytes());
         }
         Instr::IncGroupSym { group, symbol, offset } => {
             // `inc word ptr <group>:<sym>[+N]` → FF 06 lo hi.

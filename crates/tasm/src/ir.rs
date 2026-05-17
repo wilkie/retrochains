@@ -660,6 +660,36 @@ pub enum Instr {
     /// `shr word ptr <group>:<symbol>[+<offset>],1` — D1 /5 r/m16,1.
     /// Encoding: `D1 2E lo hi`. Unsigned `>>= 1` on uint global.
     ShrGroupSymOne { group: String, symbol: String, offset: i16 },
+    /// `add word ptr <group>:<symbol>[+<offset>], <reg16>` — Grp1
+    /// r/m16, r16 with /0=ADD. Encoding: `01 (mod=00 reg=<reg>
+    /// r/m=110) lo hi`. Fixture 571 (`a += b;` between two int
+    /// globals: load b to ax, then `add [_a], ax`).
+    AddGroupSymReg16 {
+        group: String,
+        symbol: String,
+        offset: i16,
+        reg: Reg16,
+    },
+    /// `sub word ptr <group>:<symbol>[+<offset>], <reg16>` — Grp1
+    /// r/m16, r16 with /5=SUB. Encoding: `29 (mod=00 reg=<reg>
+    /// r/m=110) lo hi`. Sibling of `AddGroupSymReg16`.
+    SubGroupSymReg16 {
+        group: String,
+        symbol: String,
+        offset: i16,
+        reg: Reg16,
+    },
+    /// `test word ptr <group>:<symbol>[+<offset>], imm16` — TEST
+    /// r/m16, imm16 via Grp3 /0 against a data-segment global.
+    /// Encoding: `F7 06 lo hi imm_lo imm_hi` (ModR/M 06 = mod=00
+    /// reg=000(/0=TEST) r/m=110 → `[disp16]`). Sets ZF/SF from the
+    /// AND result without storing it. Fixture 569 (`if (g & 1)`).
+    TestGroupSymImm16 {
+        group: String,
+        symbol: String,
+        offset: i16,
+        imm: u16,
+    },
     /// `inc word ptr <group>:<symbol>[+<offset>]` — INC r/m16 via
     /// Grp5 /0 against a data-segment global. Encoding: `FF 06 lo
     /// hi` (ModR/M 06 = mod=00 reg=000 r/m=110 → `[disp16]`).

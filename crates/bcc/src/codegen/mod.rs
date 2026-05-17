@@ -1879,6 +1879,23 @@ impl<'a> FunctionEmitter<'a> {
             let (t, f) = self.emit_cond_test(operand);
             return (f, t);
         }
+        // `if (<int-global> & K)` — bit-test against a constant
+        // mask. BCC emits `test word ptr [_g], K` (F7 06 lo hi
+        // imm16, 6 bytes) which sets ZF based on the AND result
+        // without storing it. Fixture 569.
+        if let ExprKind::BinOp { op: BinOp::BitAnd, left, right } = &cond.kind
+            && let ExprKind::Ident(name) = &left.kind
+            && let Some(gty) = self.globals.type_of(name)
+            && matches!(gty, Type::Int | Type::UInt)
+            && let Some(k) = try_const_eval(right)
+        {
+            let k16 = k & 0xFFFF;
+            let _ = write!(
+                self.out,
+                "\ttest\tword ptr DGROUP:_{name},{k16}\r\n",
+            );
+            return ("jne", "je");
+        }
         // `<long_global> == 0` / `<long_global> != 0` — BCC folds the
         // 32-bit comparison into `mov ax,low / or ax,high`, which
         // sets ZF iff both halves are zero. Fixture 215.
@@ -3389,6 +3406,26 @@ impl<'a> FunctionEmitter<'a> {
                     "\t{mnem}\tword ptr DGROUP:_{name},1\r\n",
                 );
             }
+            return;
+        }
+        // Int/uint global compound add/sub with another global as
+        // RHS — `mov ax, [_b]; <add|sub> word ptr DGROUP:_a, ax`.
+        // Fixture 571 (`a += b;`). The store-back uses Grp1 r/m16,
+        // r16 (`01 06` or `29 06`) — no IR change needed, the asm
+        // syntax `add word ptr DGROUP:_a, ax` is already routed.
+        if let Some(gty) = self.globals.type_of(name)
+            && matches!(gty, Type::Int | Type::UInt)
+            && matches!(op, BinOp::Add | BinOp::Sub)
+            && let ExprKind::Ident(rhs_name) = &value.kind
+            && let Some(rhs_ty) = self.globals.type_of(rhs_name)
+            && matches!(rhs_ty, Type::Int | Type::UInt)
+        {
+            let mnem = if matches!(op, BinOp::Add) { "add" } else { "sub" };
+            let _ = write!(self.out, "\tmov\tax,word ptr DGROUP:_{rhs_name}\r\n");
+            let _ = write!(
+                self.out,
+                "\t{mnem}\tword ptr DGROUP:_{name},ax\r\n",
+            );
             return;
         }
         // Int/uint global compound add/sub with constant RHS —
@@ -6290,27 +6327,44 @@ impl<'a> FunctionEmitter<'a> {
                     return;
                 }
                 // `char c = a[K];` — skip the AL→AX widening that
-                // `emit_array_index_to_ax` emits for char globals,
-                // since the byte store truncates back anyway. Fixture
-                // 567 (`char c = a[1]` where a is a global char[]).
+                // `emit_array_index_to_ax` emits for char arrays,
+                // since the byte store truncates back anyway. Two
+                // shapes:
+                //   - global array source: `mov al, byte ptr DGROUP:
+                //     _a+K` (fixture 567).
+                //   - local array source: `mov al, byte ptr [bp+K]`
+                //     (fixture 570).
                 if ty.is_char_like()
                     && let ExprKind::ArrayIndex { array, index } = &value.kind
                     && let ExprKind::Ident(arr_name) = &array.kind
-                    && let Some(gty) = self.globals.type_of(arr_name)
-                    && let Some(const_off) = try_const_array_offset(gty, std::iter::once(&**index))
-                        .map(|(off, _leaf)| off)
-                    && gty
-                        .array_elem()
-                        .is_some_and(|e| e.is_char_like())
                 {
-                    let addr = if const_off == 0 {
-                        format!("DGROUP:_{arr_name}")
-                    } else {
-                        format!("DGROUP:_{arr_name}+{const_off}")
-                    };
-                    let _ = write!(self.out, "\tmov\tal,byte ptr {addr}\r\n");
-                    let _ = write!(self.out, "\tmov\tbyte ptr {},al\r\n", bp_addr(off));
-                    return;
+                    if let Some(gty) = self.globals.type_of(arr_name)
+                        && let Some(const_off) = try_const_array_offset(gty, std::iter::once(&**index))
+                            .map(|(o, _leaf)| o)
+                        && gty.array_elem().is_some_and(|e| e.is_char_like())
+                    {
+                        let addr = if const_off == 0 {
+                            format!("DGROUP:_{arr_name}")
+                        } else {
+                            format!("DGROUP:_{arr_name}+{const_off}")
+                        };
+                        let _ = write!(self.out, "\tmov\tal,byte ptr {addr}\r\n");
+                        let _ = write!(self.out, "\tmov\tbyte ptr {},al\r\n", bp_addr(off));
+                        return;
+                    }
+                    if self.locals.has(arr_name)
+                        && let arr_ty = self.locals.type_of(arr_name).clone()
+                        && arr_ty.array_elem().is_some_and(|e| e.is_char_like())
+                        && let Some(const_off) =
+                            try_const_array_offset(&arr_ty, std::iter::once(&**index))
+                                .map(|(o, _leaf)| o)
+                        && let LocalLocation::Stack(base_off) = self.locals.location_of(arr_name)
+                    {
+                        let src_off = base_off + i16::try_from(const_off).unwrap_or(i16::MAX);
+                        let _ = write!(self.out, "\tmov\tal,byte ptr {}\r\n", bp_addr(src_off));
+                        let _ = write!(self.out, "\tmov\tbyte ptr {},al\r\n", bp_addr(off));
+                        return;
+                    }
                 }
                 self.emit_expr_to_ax(value);
                 if ty.is_char_like() {

@@ -422,6 +422,28 @@ fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
         "or" => parse_or(rest, line.line_no),
         "xor" => parse_xor(rest, line.line_no),
         "cmp" => parse_cmp(rest, line.line_no),
+        "test" => {
+            // `test word ptr <group>:<sym>[+N], imm16` — only shape
+            // fixture-pinned. Fixture 569 (`if (g & 1)`).
+            let (lhs, rhs) = split_comma(rest).ok_or_else(|| {
+                AsmError::new(line.line_no, format!("test: expected `lhs,rhs`, got {rest:?}"))
+            })?;
+            if let Some((group, symbol)) = parse_group_symbol(lhs) {
+                if let Some(imm) = parse_imm16(rhs) {
+                    let (sym, offset) = split_sym_offset(symbol);
+                    return Ok(Instr::TestGroupSymImm16 {
+                        group: group.to_string(),
+                        symbol: sym.to_string(),
+                        offset,
+                        imm,
+                    });
+                }
+            }
+            Err(AsmError::new(
+                line.line_no,
+                format!("test: unsupported operand form `{rest}`"),
+            ))
+        }
         "imul" => {
             // Two forms: `imul word ptr [bp+N]` (BpRel) and
             // `imul <reg16>` (single reg operand, fixture 155).
@@ -926,6 +948,18 @@ fn parse_sub(operands: &str, line_no: usize) -> AsmResult<Instr> {
             return Ok(Instr::SubReg16Imm16 { reg, imm });
         }
     }
+    // `sub word ptr <group>:<sym>[+N], <reg16>` — fixture 571 sibling.
+    if let Some((group, symbol)) = parse_group_symbol(lhs) {
+        if let Some(reg) = Reg16::parse(rhs) {
+            let (sym, offset) = split_sym_offset(symbol);
+            return Ok(Instr::SubGroupSymReg16 {
+                group: group.to_string(),
+                symbol: sym.to_string(),
+                offset,
+                reg,
+            });
+        }
+    }
     // `sub dx, word ptr <group>:<sym>[+N]` — long-to-long sub
     // low-half (fixture 220).
     if lhs == "dx" {
@@ -1396,6 +1430,17 @@ fn parse_add(operands: &str, line_no: usize) -> AsmResult<Instr> {
                 group: group.to_string(),
                 symbol: sym.to_string(),
                 offset,
+            });
+        }
+        // `add word ptr <group>:<sym>[+N], <reg16>` — generic
+        // memory-dest, reg-source. Fixture 571 (`a += b;` between
+        // two int globals → `add [_a], ax`).
+        if let Some(reg) = Reg16::parse(rhs) {
+            return Ok(Instr::AddGroupSymReg16 {
+                group: group.to_string(),
+                symbol: sym.to_string(),
+                offset,
+                reg,
             });
         }
     }
