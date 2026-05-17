@@ -337,18 +337,48 @@ a local `x`. Implementation factored `parse_enum_body` out of
 caller consumes through `}`, then the surrounding declare path
 sees the declarator.
 
-## `const` qualifier
+## `const` / `volatile` / `register` qualifiers
 
-`const` is accepted as a discardable qualifier — BCC keeps the
-storage layout identical to the unqualified form. Fixture `475`
-(`const int g = 42`) emits a regular initialized int in `_DATA`
-(2 bytes), exactly like `int g = 42` would.
+`const`, `volatile`, and `register` are accepted as discardable
+qualifiers — BCC keeps the storage layout identical to the
+unqualified form. Fixtures `475` (const global), `476` (volatile
+global), and `477` (register local) all round-trip to bytes that
+match the equivalent unqualified declaration.
 
-Implementation: added `KwConst` token, a `while … KwConst` loop
-at the top of `parse_type` that silently consumes any number of
-`const` qualifiers, a matching consumer at the start of the
-top-level type-probe, and `KwConst` in `parse_stmt`'s declaration
-dispatch. No AST node — the qualifier is just dropped.
+Implementation: a single `while` loop at the top of `parse_type`
+consumes any combination of these three keywords, and a parallel
+consumer runs at the start of the top-level type-probe. All three
+are also accepted as type-starts in `parse_stmt`'s declaration
+dispatch. No AST node — the qualifiers are just dropped.
+
+Note: BCC's actual `register` keyword is a *hint* that forces
+enregistration even below the natural use-count threshold (the
+oracle for `register int x; x = 5; g = x;` enregisters `x` into
+SI even though `x` only has 2 uses, below the int-enregistration
+threshold of 3). We don't yet honor that hint — fixture `477` uses
+`x` three times so it enregisters naturally; if a real fixture
+requires register-hint enregistration the allocator will need a
+new bias channel.
+
+### Register-resident int → global store
+
+While unblocking fixture `477` a separate gap turned up: `g = x`
+where `x` is a register-resident int local was emitted as
+`mov ax, si / mov word ptr [_g], ax` (5 bytes, AX round-trip).
+BCC emits the direct `mov word ptr [_g], si` (`89 36 disp16`, 4
+bytes). `emit_assign_global` now special-cases register-resident
+int RHS to use the register-source-to-global form via the existing
+`MovGroupSymReg16` instruction.
+
+## Multi-declarator globals
+
+`int a, b, c;` at file scope now works (fixture `478`).
+`parse_global` switched from returning a single `Global` to
+returning `Vec<Global>` — the comma loop mirrors the existing
+local-decl multi-declarator handling. Each tail declarator
+re-applies its own pointer stars and array suffix to a fresh
+copy of the base type, exactly like `int *a, b;` does for
+locals (fixture `174`).
 
 ## Comma operator
 
