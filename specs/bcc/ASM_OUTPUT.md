@@ -433,6 +433,15 @@ Crucially, user labels do **not** consume a slot from the numbered
 slot counter — i.e. adding a `goto`/`label` pair to a function does
 not shift any of the surrounding `@<func-idx>@50`/`@74`/… labels.
 
+Multiple `goto`s pointing to the same user label each emit their own
+independent `jmp short @<func-idx>@user_<name>` — no jump-table or
+shared-tail magic (fixture `437`). `goto` out of a `while` body
+lands at a user label placed *after* the loop's break-target slot —
+the loop's structure is unchanged (fixture `438`). A `goto` that
+skips over local-variable assignments leaves register-allocation
+decisions unchanged: any local that would have enregistered without
+the `goto` still does (fixture `439`).
+
 ### `if (cond) goto label;`
 
 The same inverted-test pattern used by `if`/`if-else` applies — the
