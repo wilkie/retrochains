@@ -78,6 +78,7 @@ impl<'a> Lexer<'a> {
                 b'<' => self.lex_after_lt(),
                 b'>' => self.lex_after_gt(),
                 b'"' => self.lex_string_literal()?,
+                b'\'' => self.lex_char_literal()?,
                 b if is_ident_start(b) => self.lex_ident_or_keyword(),
                 b if b.is_ascii_digit() => self.lex_int_literal()?,
                 other => {
@@ -261,10 +262,9 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    /// `"<chars>"` with simple C-style escape sequences. We handle
-    /// the escapes BCC's stdio formats most commonly want — newline,
-    /// tab, the two quote forms, backslash, and null. Fancier ones
-    /// (`\x`, `\<octal>`, `\a`, `\v`) wait for a fixture.
+    /// `"<chars>"` with simple C-style escape sequences. Calls
+    /// `decode_escape` for the per-escape decoder shared with
+    /// character literals.
     fn lex_string_literal(&mut self) -> Result<TokenKind, LexError> {
         let start = self.pos;
         self.pos += 1; // opening `"`
@@ -279,27 +279,7 @@ impl<'a> Lexer<'a> {
                     return Ok(TokenKind::StringLit(bytes));
                 }
                 b'\\' => {
-                    self.pos += 1;
-                    let Some(&esc) = self.src.get(self.pos) else {
-                        return Err(LexError::UnterminatedString { offset: off(start) });
-                    };
-                    self.pos += 1;
-                    let decoded = match esc {
-                        b'n' => b'\n',
-                        b't' => b'\t',
-                        b'r' => b'\r',
-                        b'0' => 0u8,
-                        b'\\' => b'\\',
-                        b'\'' => b'\'',
-                        b'"' => b'"',
-                        other => {
-                            return Err(LexError::UnknownEscape {
-                                ch: other as char,
-                                offset: off(self.pos - 1),
-                            });
-                        }
-                    };
-                    bytes.push(decoded);
+                    bytes.push(self.decode_escape(start)?);
                 }
                 _ => {
                     bytes.push(b);
@@ -307,6 +287,74 @@ impl<'a> Lexer<'a> {
                 }
             }
         }
+    }
+
+    /// `'<char>'` — character constant. C90 says character constants
+    /// have type `int`, so we emit `IntLit` directly. Same escape
+    /// alphabet as strings via `decode_escape`. Multi-byte constants
+    /// (`'ab'`) await a fixture.
+    fn lex_char_literal(&mut self) -> Result<TokenKind, LexError> {
+        let start = self.pos;
+        self.pos += 1; // opening `'`
+        let Some(&b) = self.src.get(self.pos) else {
+            return Err(LexError::UnterminatedString { offset: off(start) });
+        };
+        let value = if b == b'\\' {
+            self.decode_escape(start)?
+        } else {
+            self.pos += 1;
+            b
+        };
+        let Some(&close) = self.src.get(self.pos) else {
+            return Err(LexError::UnterminatedString { offset: off(start) });
+        };
+        if close != b'\'' {
+            return Err(LexError::UnexpectedChar {
+                ch: close as char,
+                offset: off(self.pos),
+            });
+        }
+        self.pos += 1;
+        Ok(TokenKind::IntLit(u32::from(value)))
+    }
+
+    /// Decode one C escape sequence starting at the backslash. The
+    /// caller passes the literal's start offset for error messages.
+    /// Advances `self.pos` past the escape. Returns the decoded byte.
+    fn decode_escape(&mut self, lit_start: usize) -> Result<u8, LexError> {
+        self.pos += 1; // backslash
+        let Some(&esc) = self.src.get(self.pos) else {
+            return Err(LexError::UnterminatedString { offset: off(lit_start) });
+        };
+        if matches!(esc, b'x' | b'X') {
+            self.pos += 1;
+            let hex_start = self.pos;
+            let mut value: u32 = 0;
+            while let Some(d) = self.src.get(self.pos).and_then(|b| (*b as char).to_digit(16)) {
+                value = value.wrapping_mul(16).wrapping_add(d);
+                self.pos += 1;
+            }
+            if self.pos == hex_start {
+                return Err(LexError::UnknownEscape { ch: esc as char, offset: off(hex_start - 1) });
+            }
+            return Ok((value & 0xFF) as u8);
+        }
+        self.pos += 1;
+        Ok(match esc {
+            b'n' => b'\n',
+            b't' => b'\t',
+            b'r' => b'\r',
+            b'0' => 0u8,
+            b'\\' => b'\\',
+            b'\'' => b'\'',
+            b'"' => b'"',
+            other => {
+                return Err(LexError::UnknownEscape {
+                    ch: other as char,
+                    offset: off(self.pos - 1),
+                });
+            }
+        })
     }
 
     fn lex_int_literal(&mut self) -> Result<TokenKind, LexError> {

@@ -300,6 +300,7 @@ fn instr_size(instr: &Instr) -> usize {
         | Instr::MovReg16OffsetGroupSym { .. } => 3,
         Instr::MovReg16WordGroupSym { .. } => 4,
         Instr::MovGroupSymImm16 { .. } => 6,
+        Instr::MovGroupSymImm8 { .. } => 5,
         Instr::MovGroupSymAx { .. } => 3,
         Instr::MovGroupSymReg16 { .. } => 4,
         Instr::AddReg16Imm8Sx { .. }
@@ -898,6 +899,13 @@ fn emit_instr(
             // sibling, plus 2 trailing immediate bytes.
             emit_group_sym_lea(&[0xC7, 0x06], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
             out.extend_from_slice(&imm.to_le_bytes());
+        }
+        Instr::MovGroupSymImm8 { group, symbol, offset, imm } => {
+            // `mov byte ptr <group>:<sym>[+N], imm8` → C6 06 [addr]
+            // [imm8]. Same FIXUPP shape but the byte opcode (C6 vs C7)
+            // and a single trailing immediate byte.
+            emit_group_sym_lea(&[0xC6, 0x06], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
+            out.push(*imm);
         }
         Instr::MovGroupSymAx { group, symbol, offset } => {
             // `mov word ptr <group>:<sym>[+N], ax` → A3 lo hi

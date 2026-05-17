@@ -754,6 +754,19 @@ fn parse_mov(operands: &str, line_no: usize) -> AsmResult<Instr> {
             });
         }
     }
+    // LHS `byte ptr <group>:<sym>[+N]` — store immediate byte to a
+    // data-segment global. Fixture 449 (`c = 'A'` for char global).
+    if let Some((group, symbol)) = parse_byte_group_symbol(lhs) {
+        if let Some(imm) = parse_imm8(rhs) {
+            let (sym, offset) = split_sym_offset(symbol);
+            return Ok(Instr::MovGroupSymImm8 {
+                group: group.to_string(),
+                symbol: sym.to_string(),
+                offset,
+                imm: imm as u8,
+            });
+        }
+    }
     // LHS `word ptr <group>:<sym>[+N]` — store immediate to a
     // data-segment global. Fixture 205 (`long g = K;` writes two
     // halves: `_g+2` for the high word, `_g` for the low word).

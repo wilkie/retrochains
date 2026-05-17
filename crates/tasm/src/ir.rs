@@ -352,6 +352,16 @@ pub enum Instr {
         offset: i16,
         imm: u16,
     },
+    /// `mov byte ptr <group>:<symbol>[+<offset>], imm8` — store
+    /// immediate byte to a data-segment global. Encodes as
+    /// `C6 06 [disp16 + FIXUPP] [imm8]`. Used by `c = 'A'` for char
+    /// globals (fixture 449).
+    MovGroupSymImm8 {
+        group: String,
+        symbol: String,
+        offset: i16,
+        imm: u8,
+    },
     /// `mov word ptr <group>:<symbol>[+<offset>], ax` — store AX to
     /// a data-segment global. Emits `A3 lo hi` (mov moffs16, AX) —
     /// AX-specific short form vs the generic `MOV r/m16, r16`.
