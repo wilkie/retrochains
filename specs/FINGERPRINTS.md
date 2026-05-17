@@ -1029,6 +1029,48 @@ absence of those moves is the fingerprint. _Fixtures_: 374
 (`*`), 375 (`/`), 376 (`%`), 379 (`<< K` for K>1 via
 `N_LXLSH@`).
 
+The rule generalizes beyond the CRT helpers: **any DX:AX-producing
+call at the return-value position** (including user functions
+declared as `long`-returning) collapses to the same call+epilogue
+byte pattern with no boundary move. Fixture 382 (`return g();`
+where `long g(void);`) demonstrates this for a user callee — the
+emitted body is just `call near ptr _g` followed by the standard
+exit jmp. A disassembler that sees a near-call followed
+immediately by `jmp short / pop bp / ret` cannot distinguish "tail
+helper call returning long" from "tail user call returning long"
+from the bytes alone — they're the same shape because the cdecl
+long-return ABI is the same target for both.
+
+### Int-to-long widening at return: `cwd` for signed, `xor dx, dx` for unsigned (STRONG)
+
+`return <int>;` from a long-returning function widens the int in
+place into DX:AX (the return register pair). The widening
+primitive differs by signedness:
+
+```
+; long f() { return i; }  for `int i` (fixture 380)
+mov ax, _i
+cwd                       ; 99 — DX:AX = sign-extend(AX)
+
+; unsigned long f() { return i; }  for `unsigned int i` (fixture 381)
+mov ax, _i
+xor dx, dx                ; 33 D2 — DX = 0
+```
+
+The **unsigned** form is what's distinctive: BCC's memory-dest
+zero-extend shape (fixture 255) writes the zero directly into
+the destination's high-half slot with `mov word ptr DGROUP:_g+2,
+0` (a 6-byte `C7 06 disp16 00 00` instruction). At return the
+destination's high half is a *register*, so BCC switches to the
+shorter `xor dx, dx` (2 bytes, `33 D2`). Same logical "set high
+half to zero", two different instruction families — chosen by
+where the high half lives. This is another instance of the
+destination-driven rule, applied to the zero-extend encoding
+choice. _Fixtures_: 254 (memory-dest signed widen) vs 380
+(return signed widen — both use `cwd`); 255 (memory-dest unsigned
+widen — direct memory store) vs 381 (return unsigned widen —
+`xor dx, dx`).
+
 ### Long shift K=1 at return: order is direction-determined, not destination-driven (STRONG)
 
 Inline long shifts (K=1) at the return boundary still load DX:AX

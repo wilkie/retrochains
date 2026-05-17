@@ -2058,6 +2058,48 @@ non-compound `=`-form shape (fixture 228). Compound `<<=K` (fixture
 that ordering distinguishes compound from `=`-form / return-form
 helper-call shifts.
 
+`return <int>;` from a long-returning function widens the int
+into DX:AX in place. Signed `int` sign-extends via `cwd`; unsigned
+`int` zero-extends via `xor dx, dx`:
+
+```
+; long f(void) { return i; }  for `int i` (fixture 380)
+mov ax, word ptr DGROUP:_i       ; AX = i
+cwd                              ; DX:AX = sign-extend(AX)
+
+; unsigned long f(void) { return i; }  for `unsigned int i` (fixture 381)
+mov ax, word ptr DGROUP:_i
+xor dx, dx                       ; DX = 0
+```
+
+The signed widening primitive (`cwd`) is the same as the memory-
+dest widening shape (fixture 254: `mov ax, _i / cwd / mov [_g+2],
+dx / mov [_g], ax`) — only the post-widen store differs. The
+*unsigned* widening differs more substantially: memory-dest writes
+the zero directly into the destination's high half with `mov word
+ptr DGROUP:_g+2, 0` (fixture 255, 6 bytes), while at return the
+destination's high half is the DX register, so BCC uses the 2-byte
+`xor dx, dx` to zero it. Destination-driven choice of zero-extend
+encoding.
+
+`return f();` for a long-returning callee `f` collapses to a
+2-instruction body (plus the standard prologue and epilogue):
+
+```
+; return g();  where `long g(void);` (fixture 382)
+call near ptr _g                 ; result in DX:AX (= return pair)
+; (epilogue follows immediately)
+```
+
+The callee's `ret` already leaves its DX:AX result in the
+position the outer caller will read. No moves, no stores. This
+is the same passthrough shape as the helper-call returns (mul/
+div/shift K>1), generalized to *any* DX:AX-producing call. A
+disassembler that sees a near-call directly followed by the
+function's `jmp short` exit knows the source-level expression
+was a tail call returning long — independent of whether the
+callee was a CRT helper or a user function.
+
 ### Plain assignment and arithmetic
 
 `g = K` for a long global stores high then low:
