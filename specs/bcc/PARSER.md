@@ -1200,15 +1200,14 @@ generic Grp1 r/m16, r16 form (`01 06 lo hi` for ADD; `29 06 lo
 hi` for SUB). Two new tasm IR variants `AddGroupSymReg16` /
 `SubGroupSymReg16` encode these.
 
-### Char-local array layout (deferred)
+### Char-local array layout (resolved in batch 86)
 
 Probed `char a[3]; char c; c = a[1];` and discovered BCC's
-local frame allocator pads char arrays to even byte boundaries
-*and* aligns the next local to the next even address, leaving
-the byte after the array as padding. Our allocator packs
-locals tightly. Probe replaced with the int-array variant
-(fixture 570) until we have appetite to reverse-engineer the
-local frame padding rules.
+local frame allocator pads char arrays to even byte boundaries,
+leaving the byte after the array as padding. Probe was replaced
+with the int-array variant (fixture 570) and the underlying
+padding rule was reverse-engineered when fixture 577 surfaced
+the same issue — see `char s[3]; char *p; ...` below.
 
 ## Free passes (no code changes needed)
 
@@ -1224,6 +1223,30 @@ Three more probes hit existing paths byte-exactly:
   `continue_target_slot = check_slot` mapping for while was
   already correct (continue → top of test). Distinct from the
   for-loop case fixed in fixture 558.
+
+## `char s[3]; char *p; p = s; p++; return *p;`
+
+Fixture `577` (char pointer increment over a local char array)
+forced the char-local-array layout question that was deferred
+after fixture 570. Diff showed `83 ec 04` (our `sub sp, 4`) vs
+BCC's `83 ec 06`: BCC rounds each array slot up to an even
+number of bytes regardless of element alignment, so `char s[3]`
+takes a 4-byte slot with `s[0]..s[2]` at `bp-4..bp-2` and `bp-1`
+left as padding. Fixed in `crates/bcc/src/codegen/locals.rs`
+by bumping `slot_size` by 1 when the type is `Array { .. }` and
+`slot_size % 2 == 1`. Retroactively resolves the deferred char-
+local-array layout note.
+
+## Free passes (batch 86)
+
+Two more probes hit existing paths byte-exactly:
+
+- `575` — `int g = 42; int x = g;` local init from a global: the
+  initializer path already routes through `emit_assign` and the
+  global-load codegen.
+- `576` — `r = (a == b);` comparison-as-value: `emit_eq` already
+  materializes the boolean into a register and the store path
+  was unchanged.
 
 ## What we explicitly defer
 
