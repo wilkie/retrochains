@@ -2939,6 +2939,35 @@ opcode sequence alone (`83 06/16 imm8` arith vs `81 26/06/etc
 imm16` bitwise vs `01 16 / 11 06` variable-RHS arith) without
 needing to know where the destination lives.
 
+The same skeleton extends to **array elements** with a constant
+index. `a[1] += K` for a long global array `a` emits byte-identically
+to `s.x += K` and `g += K`, with the disp16 resolving to `_a + K*4`
+instead of `_s + field_off` or `_g`:
+
+```
+; a[1] += 5;  (fixture 392 — const RHS, +)
+add word ptr DGROUP:_a+4, 5       ; 83 06 disp16 05
+adc word ptr DGROUP:_a+6, 0
+
+; a[1] &= 255;  (fixture 393 — const RHS, bitwise)
+and word ptr DGROUP:_a+4, 255     ; 81 26 disp16 imm16
+and word ptr DGROUP:_a+6, 0
+
+; a[1] += y;  (fixture 394 — variable RHS)
+mov ax, word ptr DGROUP:_y+2
+mov dx, word ptr DGROUP:_y
+add word ptr DGROUP:_a+4, dx      ; 01 16 disp16
+adc word ptr DGROUP:_a+6, ax      ; 11 06 disp16
+```
+
+Across the four storage classes documented so far for long
+compound-to-memory (globals, stack locals, struct fields, array
+elements at const index), only the disp16 in each `[mem]` operand
+changes. BCC's codegen treats long-compound-to-memory as a single
+opcode skeleton parameterized purely by addressing — confirmed by
+fixtures 251 (global), batch 22 (stack-local shifts), 389–391
+(struct field), 392–394 (array element).
+
 ### Long stack-local arithmetic (`329`–`335`)
 
 Long binary arithmetic between two stack-local long operands with
