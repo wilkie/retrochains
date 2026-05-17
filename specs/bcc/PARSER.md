@@ -1103,6 +1103,43 @@ match the existing for-loop fixtures byte-for-byte. The
 already lives in `codegen/mod.rs`); they walk the same Stmt
 shape and need to agree.
 
+## Global array decay → global pointer
+
+Fixture `561` (`int a[3]; int *p; p = a;`) — array-to-pointer
+decay at the assign site between two globals. `emit_assign_
+global` now special-cases `Ident(src)` where `src` is a global
+array, emitting the same `mov word ptr [_p], offset _a` form
+(two-FIXUPP `MovGroupSymOffsetGroupSym`) we already used for
+`p = &g;`. Without this, codegen mistakenly loaded the first
+word at `_a` as if it were a value.
+
+## Pointer global `++p` — stride
+
+Same fixture: `++p` on a global pointer scales by
+`sizeof(pointee)` instead of using `inc word ptr [_p]`. `emit_
+update_in_place` now checks for pointer globals: if the stride
+is ≠ 1 it emits `add|sub word ptr [_p], <stride>`. Char-pointer
+globals (stride 1) still use the `inc/dec` peephole.
+
+## Char return + caller-side widen
+
+Fixture `562` (`char get(void) { return 'Z'; } int main { int
+x = get(); }`):
+
+- **Callee**: `emit_return_value_load` now detects char return
+  type with a constant value and emits `mov al, K` (2 bytes)
+  instead of `mov ax, K` (3 bytes). AH is undefined per BCC's
+  char-return ABI.
+- **Caller**: `ExprKind::Call` in `emit_expr_to_ax` consults
+  `signatures.ret_ty_of(name)` and emits `cbw` (signed char) or
+  `mov ah, 0` (uchar) after the call, widening AL into AX
+  before downstream consumers (assignment, arithmetic) read
+  the full int.
+
+The two halves compose: the call site doesn't need to know how
+the callee left AL — `signatures` provides the return type and
+the widen step always fires.
+
 ## What we explicitly defer
 
 - Templates, namespaces, RTTI, exceptions (not in BC2.0 to relevant
