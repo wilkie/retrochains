@@ -302,7 +302,7 @@ fn instr_size(instr: &Instr) -> usize {
         Instr::MovGroupSymImm16 { .. } => 6,
         Instr::MovGroupSymAx { .. } => 3,
         Instr::MovGroupSymReg16 { .. } => 4,
-        Instr::AddReg16Imm8Sx { .. } => 3,
+        Instr::AddReg16Imm8Sx { .. } | Instr::AdcReg16Imm8Sx { .. } => 3,
         Instr::AddReg16Imm16 { .. } => 4,
         Instr::AddGroupSymImm16 { .. } => 6,
         Instr::AdcAxImm16 { .. } | Instr::SbbAxImm16 { .. } => 3,
@@ -907,6 +907,13 @@ fn emit_instr(
             // mod=11 /0(ADD) rm=<reg>.
             out.push(0x83);
             out.push(0b11_000_000 | reg.code());
+            out.push(*imm as u8);
+        }
+        Instr::AdcReg16Imm8Sx { reg, imm } => {
+            // `adc <reg16>, imm8sx` → 83 D(reg) ii. ModR/M D(reg) =
+            // mod=11 /2(ADC) rm=<reg>.
+            out.push(0x83);
+            out.push(0b11_010_000 | reg.code());
             out.push(*imm as u8);
         }
         Instr::AddReg16Imm16 { reg, imm } => {

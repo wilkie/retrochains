@@ -1011,6 +1011,15 @@ fn parse_adc(operands: &str, line_no: usize) -> AsmResult<Instr> {
             return Ok(Instr::AdcAxImm16 { imm: imm as u16 });
         }
     }
+    // `adc <reg16>, imm8sx` — high-half carry propagation for the
+    // long return-arith path `return g + K` where the high reg is
+    // DX (ABI return convention). Encoded as `83 D(reg) ii`
+    // (fixture 362).
+    if let Some(reg) = Reg16::parse(lhs) {
+        if let Some(imm) = parse_imm8_signed(rhs) {
+            return Ok(Instr::AdcReg16Imm8Sx { reg, imm });
+        }
+    }
     // `adc dx, word ptr <group>:<sym>[+N]` — long-arithmetic
     // high-half carry propagation for the commuted `i + g` shape
     // (fixture 281). Also `adc dx, word ptr [bp+N]` for the long

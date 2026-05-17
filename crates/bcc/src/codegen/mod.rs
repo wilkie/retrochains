@@ -2308,30 +2308,46 @@ impl<'a> FunctionEmitter<'a> {
                 }
                 return;
             }
-            // `return g;` for a long global — load high to DX (8B
-            // form, no AX-specific short opcode for non-AX dst) then
-            // low to AX (A1 short form). Fixture 213.
-            if let ExprKind::Ident(name) = &e.kind
-                && let Some(src_ty) = self.globals.type_of(name)
-                && src_ty.is_long_like()
-            {
-                let _ = write!(self.out, "\tmov\tdx,word ptr DGROUP:_{name}+2\r\n");
-                let _ = write!(self.out, "\tmov\tax,word ptr DGROUP:_{name}\r\n");
+            // `return <long-lvalue>;` — load high to DX, low to AX
+            // per the ABI return convention. Covers bare-ident long
+            // global (fixture 213), bare-ident long param/stack
+            // local (fixture 217), struct/union dot-chain field
+            // (fixture 363), and constant-indexed array element
+            // (fixture 364). `long_lvalue_addr_pair` returns the
+            // (high, low) address strings for any supported lvalue
+            // form, including DGROUP:_g+2/+0, DGROUP:_a+offN/N, and
+            // [bp+M+2]/[bp+M].
+            if let Some((hi_addr, lo_addr)) = self.long_lvalue_addr_pair(e) {
+                let _ = write!(self.out, "\tmov\tdx,word ptr {hi_addr}\r\n");
+                let _ = write!(self.out, "\tmov\tax,word ptr {lo_addr}\r\n");
                 return;
             }
-            // `return x;` for a long parameter or stack-local. Layout:
-            // `off` points to the low word (the lower stack address);
-            // the high word lives at `off + 2`. Load high to DX, low
-            // to AX per the ABI. Fixture 217.
-            if let ExprKind::Ident(name) = &e.kind
-                && self.locals.has(name)
-                && self.locals.type_of(name).is_long_like()
+            // `return <long-lvalue> + K;` / `... - K;` — load lvalue
+            // into DX(high)/AX(low), then add/sub the constant to
+            // AX (low) and propagate carry/borrow into DX. ABI
+            // return convention (DX=high, AX=low) — note this is
+            // the OPPOSITE register assignment from the memory-
+            // destination arithmetic shape (see fixture 207, which
+            // uses AX=high/DX=low when result is stored back to
+            // memory). The compound is also against AX directly,
+            // unlike the memory-dest path which adds to DX first.
+            // Fixture 362.
+            if let ExprKind::BinOp { op, left, right } = &e.kind
+                && (matches!(op, BinOp::Add) || matches!(op, BinOp::Sub))
+                && let Some((src_hi, src_lo)) = self.long_lvalue_addr_pair(left)
+                && let Some(k) = try_const_eval(right)
             {
-                let LocalLocation::Stack(off) = self.locals.location_of(name) else {
-                    panic!("register-resident long not yet supported (no fixture)");
+                let signed = k as i32;
+                let (delta, carry) = if matches!(op, BinOp::Add) {
+                    (signed, 0i16)
+                } else {
+                    (-signed, -1i16)
                 };
-                let _ = write!(self.out, "\tmov\tdx,word ptr {}\r\n", bp_addr(off + 2));
-                let _ = write!(self.out, "\tmov\tax,word ptr {}\r\n", bp_addr(off));
+                let _ = write!(self.out, "\tmov\tdx,word ptr {src_hi}\r\n");
+                let _ = write!(self.out, "\tmov\tax,word ptr {src_lo}\r\n");
+                let delta_u16 = (delta as i32) as u16;
+                let _ = write!(self.out, "\tadd\tax,{delta_u16}\r\n");
+                let _ = write!(self.out, "\tadc\tdx,{carry}\r\n");
                 return;
             }
             // `return a + b;` / `return a - b;` for two long params/
@@ -2384,21 +2400,6 @@ impl<'a> FunctionEmitter<'a> {
                 let _ = write!(self.out, "\tmov\tax,word ptr DGROUP:_{a}\r\n");
                 let _ = write!(self.out, "\t{lo_op}\tax,word ptr DGROUP:_{b}\r\n");
                 let _ = write!(self.out, "\t{hi_op}\tdx,word ptr DGROUP:_{b}+2\r\n");
-                return;
-            }
-            // `return *p;` for `p: long *` register-resident — load
-            // high through `[reg+2]` into DX, low through `[reg]`
-            // into AX (ABI return convention). Fixture 351.
-            if let ExprKind::Deref(operand) = &e.kind
-                && let ExprKind::Ident(ptr_name) = &operand.kind
-                && self.locals.has(ptr_name)
-                && let Some(pointee) = self.locals.type_of(ptr_name).pointee()
-                && pointee.is_long_like()
-                && let LocalLocation::Reg(reg) = self.locals.location_of(ptr_name)
-            {
-                let r = reg.name();
-                let _ = write!(self.out, "\tmov\tdx,word ptr [{r}+2]\r\n");
-                let _ = write!(self.out, "\tmov\tax,word ptr [{r}]\r\n");
                 return;
             }
             panic!("non-constant long return value not yet supported (no fixture)");
