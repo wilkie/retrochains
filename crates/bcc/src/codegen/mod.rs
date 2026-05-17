@@ -5985,9 +5985,9 @@ impl<'a> FunctionEmitter<'a> {
             ExprKind::AddressOf(name) => self.emit_address_of(name),
             ExprKind::AddressOfArrayElem { array, byte_offset } => {
                 // `&<arr>[K]` at runtime — for a global array, emit
-                // the symbol+offset as an immediate. Stack-resident
-                // local arrays would need LEA; no fixture for that
-                // case yet.
+                // the symbol+offset as an immediate. For a stack-
+                // resident local array, emit `lea ax, [bp+off+K]`
+                // where `off` is the local's bp-offset. Fixture 486.
                 if self.globals.contains(array) {
                     if *byte_offset == 0 {
                         let _ = write!(
@@ -6001,7 +6001,15 @@ impl<'a> FunctionEmitter<'a> {
                         );
                     }
                 } else {
-                    panic!("`&<local-arr>[K]` not yet supported (no fixture)")
+                    let LocalLocation::Stack(base_off) = self.locals.location_of(array) else {
+                        panic!("local array `{array}` should be stack-resident");
+                    };
+                    let total = base_off + i16::try_from(*byte_offset).unwrap_or(i16::MAX);
+                    let _ = write!(
+                        self.out,
+                        "\tlea\tax,word ptr {}\r\n",
+                        bp_addr(total),
+                    );
                 }
             }
             ExprKind::Deref(operand) => self.emit_deref_to_ax(operand),

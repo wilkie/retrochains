@@ -318,11 +318,17 @@ impl Parser {
         Ok(())
     }
 
-    /// `typedef <type> <name> ;`. Records `name` → type in the
-    /// typedef table; no AST node produced.
+    /// `typedef <type> [*]* <name> ;`. Records `name` → type in
+    /// the typedef table; no AST node produced. Pointer stars wrap
+    /// the base type so `typedef int *INTP;` records
+    /// `INTP → Pointer(Int)`. Fixture 487.
     fn parse_typedef(&mut self) -> Result<(), ParseError> {
         self.bump(); // `typedef`
-        let ty = self.parse_type()?;
+        let mut ty = self.parse_type()?;
+        while matches!(self.peek().kind, TokenKind::Star) {
+            self.bump();
+            ty = Type::Pointer(Box::new(ty));
+        }
         let name_tok = self.bump();
         let TokenKind::Ident(name) = name_tok.kind else {
             return Err(ParseError::NotAnIdent { offset: name_tok.span.start });
@@ -1887,8 +1893,9 @@ impl Parser {
         }
         // Address-of: `&<ident>` for the bare-name case, plus
         // `&<ident>[<const>]` for array-element addressing (fixture
-        // 198). The more general `&<lvalue>` form still isn't
-        // fixtured.
+        // 198) and `&<ident>.<field>` for struct-field addressing
+        // (fixture 485). The more general `&<lvalue>` form still
+        // isn't fixtured.
         if matches!(self.peek().kind, TokenKind::Ampersand) {
             let amp = self.bump();
             let name_tok = self.bump();
@@ -1906,13 +1913,13 @@ impl Parser {
                     });
                 };
                 let rb = self.expect(&TokenKind::RBracket)?;
-                let elem_size = match self.global_types.get(&name) {
+                let elem_size = match self.global_types.get(&name).or_else(|| self.function_locals.get(&name)) {
                     Some(Type::Array { elem, .. }) => i32::from(elem.size_bytes()),
                     _ => {
                         return Err(ParseError::Unexpected {
                             offset: name_tok.span.start,
-                            expected: format!("global array name in `&{name}[K]`"),
-                            found: "non-array or unknown global".to_owned(),
+                            expected: format!("array name in `&{name}[K]`"),
+                            found: "non-array or unknown identifier".to_owned(),
                         });
                     }
                 };
@@ -1920,6 +1927,47 @@ impl Parser {
                 let span = Span::new(amp.span.start, rb.span.end);
                 return Ok(Expr {
                     kind: ExprKind::AddressOfArrayElem { array: name, byte_offset },
+                    span,
+                });
+            }
+            // `&<ident>.<field>[.<field>]*` — chain of dot accesses
+            // into a struct value. Resolve to AddressOfArrayElem with
+            // the cumulative field byte_offset. Fixture 485 hits a
+            // single-step chain on a global struct.
+            if matches!(self.peek().kind, TokenKind::Dot) {
+                let base_ty = self.global_types.get(&name)
+                    .or_else(|| self.function_locals.get(&name))
+                    .cloned();
+                let Some(mut cur_ty) = base_ty else {
+                    return Err(ParseError::Unexpected {
+                        offset: name_tok.span.start,
+                        expected: format!("known struct in `&{name}.field`"),
+                        found: "unknown identifier".to_owned(),
+                    });
+                };
+                let mut total_off: i32 = 0;
+                let mut end = name_tok.span.end;
+                while matches!(self.peek().kind, TokenKind::Dot) {
+                    self.bump();
+                    let field_tok = self.bump();
+                    let TokenKind::Ident(field) = field_tok.kind else {
+                        return Err(ParseError::NotAnIdent { offset: field_tok.span.start });
+                    };
+                    let Some((field_off, field_ty)) = cur_ty.field(&field) else {
+                        return Err(ParseError::Unexpected {
+                            offset: field_tok.span.start,
+                            expected: format!("known field in `{cur_ty:?}`"),
+                            found: format!("`{field}`"),
+                        });
+                    };
+                    total_off = total_off.checked_add(i32::from(field_off))
+                        .expect("field offset fits in i32");
+                    cur_ty = field_ty;
+                    end = field_tok.span.end;
+                }
+                let span = Span::new(amp.span.start, end);
+                return Ok(Expr {
+                    kind: ExprKind::AddressOfArrayElem { array: name, byte_offset: total_off },
                     span,
                 });
             }
