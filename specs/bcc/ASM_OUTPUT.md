@@ -419,6 +419,46 @@ Verified against fixtures:
 The "unused" slots are presumably reservations BCC makes before
 knowing which branches will actually need a target.
 
+## User labels and `goto`
+
+C-source labels (the targets of `goto`) live in a separate namespace
+from BCC's slot-numbered labels — they take the form
+`@<func-idx>@user_<name>`, where `<name>` is the C identifier
+verbatim. A `goto skip;` emits `jmp short @<func-idx>@user_skip`; the
+matching `skip:` line emits `@<func-idx>@user_skip:`. Verified
+fixtures: `434` (forward `goto`, `eb 00`), `435` (backward `goto`,
+`eb f0`).
+
+Crucially, user labels do **not** consume a slot from the numbered
+slot counter — i.e. adding a `goto`/`label` pair to a function does
+not shift any of the surrounding `@<func-idx>@50`/`@74`/… labels.
+
+### `if (cond) goto label;`
+
+The same inverted-test pattern used by `if`/`if-else` applies — the
+`goto` body is just the unconditional branch:
+
+```
+	cmp	word ptr DGROUP:_g,0       ; cond test (global int here)
+	jz	@1@user_skip_inverted      ; over the goto (slot label, +1 skip)
+	jmp	short @1@user_skip         ; the goto itself
+@1@user_skip_inverted:                  ; if-skip slot, falls through
+	... g = 1; ...
+@1@user_skip:                           ; user label
+	... return 0; ...
+```
+
+Fixture `436` (`if (g) goto skip;`) verifies. The same `emit_if` path
+that drives any other `if` is reused; only the body changes.
+
+### Boolean `if (<global>)`
+
+Direct boolean tests against a global identifier emit a memory-direct
+compare (`cmp word ptr DGROUP:_<g>,0`, encoded as imm8sx
+`83 3E disp16 00`). This mirrors the existing global-vs-const compare
+path (fixture 429) — only the RHS is fixed at 0. Verified by fixture
+`436`.
+
 ## Register allocation for locals
 
 Even at default `-S -ms` (no `-O`), BCC enregisters some local `int`
