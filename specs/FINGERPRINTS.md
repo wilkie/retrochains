@@ -341,31 +341,6 @@ distinguishable asm. _Fixtures_: 068, 070.
 This is the same kind of signal as `inc <reg>` above but covers all
 compound operators (`-=`, `&=`, `|=`, `^=`).
 
-### Long compound assigns: arith uses imm8sx, bitwise uses imm16 (STRONG)
-
-For 32-bit `long` globals, BCC emits a memory-direct read-modify-write
-pair, **but the immediate encoding width is op-family dependent**:
-
-- `+=` / `-=` use `83 06 ...` / `83 2E ...` — Grp1 `r/m16, imm8sx`,
-  **5 bytes** per half. The high partner is always `adc 0` / `sbb 0`
-  (also 5 bytes each).
-- `&=` / `|=` / `^=` use `81 26 ...` / `81 0E ...` / `81 36 ...` —
-  Grp1 `r/m16, imm16`, **6 bytes** per half, **even when the
-  immediate trivially fits in an i8sx**.
-
-Concrete: `long g; g &= 15;` emits
-```
-and word ptr DGROUP:_g, 15        ; 81 26 lo hi 0F 00 (6 bytes)
-and word ptr DGROUP:_g+2, 0       ; 81 26 lo hi 00 00 (6 bytes)
-```
-The 4-byte saving from picking `83 26 lo hi 0F` (5 bytes) is left on
-the table. This isn't a TASM default — TASM's sign-extension heuristic
-would pick the shorter form for `15` if BCC asked for it. BCC's
-emission must specifically choose `81` for the bitwise compound
-shapes, while picking `83` for the arithmetic siblings. Distinct from
-slice-207-style `g = g <op> K` which routes through registers
-entirely. _Fixtures_: 251 (`+=` → 83), 253 (`&=` → 81).
-
 ### `or <reg>, <reg>` for `cmp <reg>, 0` (STRONG)
 
 When BCC compares a register-resident value against zero, it uses
@@ -412,6 +387,170 @@ formatting. _Fixture_: 036.
 
 ---
 
+## Long-arithmetic signatures
+
+These patterns only appear when the source uses `long` / `unsigned
+long`. A binary that emits none of them was either compiled from
+int-only source or pre-folded all 32-bit work into `int` pairs.
+
+### Long memory storage: low word at `+0`, high word at `+2` (STRONG)
+
+A 32-bit `long` global occupies 4 bytes laid out little-endian by
+word: `_g+0`/`_g+1` is the low half, `_g+2`/`_g+3` is the high half.
+Stack-resident longs follow the same convention — for a `long`
+parameter the low half is at `[bp+N]` and the high half is at
+`[bp+N+2]`. This means a long is read with two separate `word ptr`
+references whose offsets differ by 2. _Fixtures_: 204, 205, 217.
+
+### Two register conventions, context-dependent (STRONG)
+
+BCC uses *different* register-pair assignments for the high/low halves
+of a long depending on where the value lives:
+
+| Context              | High in | Low in | Reason                          |
+|----------------------|---------|--------|---------------------------------|
+| Global arithmetic    | **AX**  | **DX** | BCC's working-register pattern  |
+| Stack/param arithmetic | **DX** | **AX** | Matches the return ABI         |
+| Function return / helper call | **DX** | **AX** | Standard 16-bit cdecl long ABI |
+
+A function returning `long 5` emits `xor dx,dx / mov ax,5` (fixture
+212). A `g = g + 10` where g is global emits `mov ax,_g+2 / mov dx,_g
+/ add dx,10 / adc ax,0` — AX is high (fixture 207). A `return a + b`
+where both are long params emits `mov dx,[bp+6] / mov ax,[bp+4] / add
+ax,[bp+8] / adc dx,[bp+10]` — DX is high (fixture 285). The context
+swap is not seen in compilers that use one convention throughout.
+
+### Long load order: high-half first (STRONG)
+
+In both register conventions BCC loads the high half *before* the low
+half. For globals: `mov ax,_g+2` then `mov dx,_g`. For stack params:
+`mov dx,[bp+6]` then `mov ax,[bp+4]`. The arithmetic op then runs on
+the low half first (`add dx, …` or `add ax, …`) and propagates carry
+into the high half via `adc`. _Fixtures_: 207, 219, 285.
+
+### Compound assigns: `+=`/`-=` use imm8sx, `&=`/`|=`/`^=` use imm16 (STRONG)
+
+For 32-bit `long` globals, BCC emits a memory-direct read-modify-write
+pair, **but the immediate encoding width is op-family dependent**:
+
+- `+=` / `-=` use `83 06 ...` / `83 2E ...` — Grp1 `r/m16, imm8sx`,
+  **5 bytes** per half. The high partner is always `adc 0` / `sbb 0`
+  (also 5 bytes each).
+- `&=` / `|=` / `^=` use `81 26 ...` / `81 0E ...` / `81 36 ...` —
+  Grp1 `r/m16, imm16`, **6 bytes** per half, **even when the
+  immediate trivially fits in an i8sx**.
+
+Concrete: `long g; g &= 15;` emits
+```
+and word ptr DGROUP:_g, 15        ; 81 26 lo hi 0F 00 (6 bytes)
+and word ptr DGROUP:_g+2, 0       ; 81 26 lo hi 00 00 (6 bytes)
+```
+The 4-byte saving from picking `83 26 lo hi 0F` (5 bytes) is left on
+the table. This isn't a TASM default — TASM's sign-extension heuristic
+would pick the shorter form for `15` if BCC asked for it. BCC's
+emission must specifically choose `81` for the bitwise compound
+shapes, while picking `83` for the arithmetic siblings. Distinct from
+slice-207-style `g = g <op> K` which routes through registers
+entirely. _Fixtures_: 251 (`+=` → 83), 253 (`&=` → 81).
+
+### Long zero-compare via OR-then-test (STRONG)
+
+`if (g == 0)` for a long `g` lowers to `mov ax,_g / or ax,_g+2 / jne
+…`. The OR collapses the high and low halves into AX; if either was
+nonzero, ZF=0. Two memory loads and one OR instead of two separate
+compares against zero. Bare-long truth tests (`if (g)`) use the same
+shape. _Fixture_: 215.
+
+### 3-jump signed-long compare (STRONG)
+
+`if (a < b)` for two longs lowers to a high-half compare followed by
+a low-half compare, with **mixed signed/unsigned mnemonics**:
+
+```
+mov ax,_a+2
+mov dx,_a
+cmp ax,_b+2          ; high halves, signed
+jg  short @false     ; a.high > b.high → not less
+jl  short @true      ; a.high < b.high → less
+cmp dx,_b            ; equal high halves → low halves, UNSIGNED
+jae short @false     ; a.low >= b.low → not less
+@true:
+```
+
+The high cmp is signed (`jl`/`jg`), the low cmp is unsigned (`jb`/
+`ja`/`jae`/`jbe`) — necessary because the low word is conceptually a
+magnitude, not a signed value. For `unsigned long`, both halves use
+unsigned mnemonics. The "three jumps for one compare" shape is a
+strong tell — most compilers would helper-call out to a `long_cmp`
+runtime. _Fixtures_: 234–241.
+
+### `long g = g * 2` peepholed to `shl/rcl` (STRONG)
+
+`g = g * 2` (or any power-of-two-by-2 doubling) on a long global
+emits `mov ax,_g+2 / mov dx,_g / shl dx,1 / rcl ax,1 / mov _g+2,ax /
+mov _g,dx` — no helper call. The `shl/rcl` pair propagates the carry
+bit from the low half into the high half. Distinguishable from the
+general multiply path, which goes through `N_LXMUL@`. _Fixture_: 283.
+
+### Compound shift K>1 reorders `mov cl, K` to come first (STRONG)
+
+For `long a <<= K` with K>1, BCC emits `mov cl, K` **before** loading
+the long into DX:AX, not after as you might expect. The full shape:
+```
+mov cl, 2
+mov dx, word ptr DGROUP:_a+2
+mov ax, word ptr DGROUP:_a
+call near ptr N_LXLSH@
+mov word ptr DGROUP:_a+2, dx
+mov word ptr DGROUP:_a, ax
+```
+Compare with the non-compound form `a = a << K` (slice equivalent),
+which loads DX:AX *before* `mov cl`. The shift count establishes CL
+before the helper-input registers are touched, perhaps to leave DX:AX
+"hot" up to the call. _Fixtures_: 263 (`<<=`), 264 (`>>=`).
+
+### Runtime helpers declared `:far`, merged into publics sort (STRONG)
+
+Long multiply/divide/mod/shift route through pre-built runtime
+helpers in the Borland CRT: `N_LXLSH@`, `N_LXRSH@`, `N_LXURSH@`,
+`N_LXMUL@`, `N_LDIV@`, `N_LMOD@`, `N_LUDIV@`, `N_LUMOD@`. The helper
+name is suffixed with `@`, and the extern declaration uses **`:far`**
+(BCC's user-function externs use `:near`):
+```
+extrn N_LXLSH@:far
+```
+Helpers take their args as a `DX:AX` long (or two `DX:AX` longs
+pushed on the stack), and return their result in `DX:AX`. No caller
+stack cleanup is emitted — the helper pops its own arguments (likely
+via `ret 8`).
+
+The helper extern is **not** segregated into its own block — it
+joins the publics list at end-of-file, participating in the same
+length-bucket + reverse-alphabetical sort used for ordinary publics.
+A typical tail (`a <<= 2`):
+```
+public _main
+extrn N_LXLSH@:far
+public _a
+```
+Both the `:far` suffix and the merge-into-publics ordering are
+distinctive. _Fixtures_: 232 (`_LDIV@`), 263 (`N_LXLSH@`).
+
+### Long params occupy 4 stack bytes, push high-first (STRONG)
+
+A `long` argument is pushed as two `push <reg>` instructions, **high
+half first**, so the low half ends up at the lower bp-offset in the
+callee. A constant `long 5` is materialized as `xor ax,ax / mov dx,5
+/ push ax / push dx` (fixture 216). On the callee side, the first
+long parameter is read as `mov ax,[bp+4] / mov dx,[bp+6]` — `[bp+4]`
+low, `[bp+6]` high.
+
+Combined with the per-arg cleanup rule, a single-long call cleans up
+with two `pop cx` (2 args' worth of words), not one. _Fixtures_: 216,
+217, 285.
+
+---
+
 ## Calling-convention signatures
 
 ### Args pushed right-to-left, caller cleans (WEAK)
@@ -450,8 +589,10 @@ byte. _Fixture_: 052.
 
 After `push bp / mov bp, sp`, the first arg sits at `[bp+4]` (2 bytes
 saved `bp` + 2 bytes near-call return address). Each subsequent arg
-adds 2 to the offset. Distinctive vs medium/large models (`[bp+6]`,
-far call). _Fixture_: 033.
+adds **the previous arg's width** — 2 for `int`/`char`/pointer, 4 for
+`long`/`unsigned long`. Distinctive vs medium/large models (`[bp+6]`,
+far call). _Fixtures_: 033 (all ints), 285 (`long a, long b` lands b's
+low half at `[bp+8]`, not `[bp+6]`).
 
 ---
 

@@ -823,10 +823,15 @@ stack layout *above* `bp` is:
 | `[bp+6]`  | second argument                             |
 | `[bp+N]`  | further arguments at +2 each                |
 
-So the **leftmost** parameter sits closest to `bp`. Every `int` arg
-takes a 2-byte slot regardless of declared type — `char` arguments
-would presumably be promoted at the caller's push site to a 2-byte
-push (we don't have a fixture confirming this).
+So the **leftmost** parameter sits closest to `bp`. Each `int`/`char`/
+pointer arg takes a 2-byte slot — `char` arguments are promoted at the
+caller's push site to a 2-byte push (the high byte is undefined). A
+`long` arg takes **4 bytes** — its low half sits at the lower bp-offset
+and its high half at the next 2-byte offset. Fixture 285 (`long f(long
+a, long b)`) reads `a` from `[bp+4]/[bp+6]` and `b` from `[bp+8]/[bp+10]`.
+This means the second-parameter offset jumps depending on the first
+parameter's width; our `locals` layout pass walks param types one by
+one and adds 4 for `long`/`unsigned long`, 2 for everything else.
 
 In a medium or large memory model the return address grows to 4 bytes,
 shifting the first arg to `[bp+6]`. We currently only handle `-ms`.
@@ -1743,6 +1748,378 @@ public _c
 public _b
 public _a
 ```
+
+## Long and unsigned long (`200`–`286`)
+
+A `long` is 32 bits, BCC's only multi-word integer type. Adding it
+exposes a layer of codegen that doesn't appear in `int`-only code:
+explicit high/low register pairs, a small set of runtime helpers in
+the CRT, separate compound-assign byte-width choices for arithmetic
+vs. bitwise ops, a 3-jump compare pattern, and a parameter that
+occupies 4 stack bytes instead of 2. `unsigned long` shares the same
+codegen except that signed-jump mnemonics for compares become
+unsigned.
+
+### Storage layout
+
+A `long` global is 4 bytes — low word at offset `+0`, high word at
+offset `+2`. Each word is little-endian internally, so byte 0 is the
+LSB of the low word. An initialized `long _g = 5` emits four `db`
+bytes (`db 5 / db 0 / db 0 / db 0`), one per byte of the 32-bit
+value. An uninitialized long takes `db 4 dup (?)` in `_BSS`. Stack
+locals and parameters follow the same word-pair convention:
+`long x; x` is split across `[bp-N]` (low) and `[bp-N+2]` (high) for
+a stack local at offset N. For a parameter, low is at `[bp+M]` and
+high at `[bp+M+2]`.
+
+### Register conventions are context-dependent
+
+BCC uses *two different* register-pair assignments for the high and
+low halves of a long, depending on where the value lives:
+
+| Context                      | High in  | Low in  |
+|------------------------------|----------|---------|
+| Globals: arithmetic load     | **AX**   | **DX**  |
+| Stack/params: arithmetic load| **DX**   | **AX**  |
+| Function return / helper ABI | **DX**   | **AX**  |
+
+In all contexts, BCC loads the **high half first**, then the low
+half:
+- Global: `mov ax, _g+2` then `mov dx, _g`.
+- Stack: `mov dx, [bp+6]` then `mov ax, [bp+4]`.
+
+The arithmetic op then runs on the low half (`add dx, …` for globals;
+`add ax, …` for stack), and `adc` propagates carry into the high half.
+
+Return-value convention follows the standard 16-bit cdecl: `DX=high,
+AX=low`. `return 5L` emits `xor dx,dx / mov ax,5` (fixture 212). A
+`return long_param + long_param` keeps the result in DX:AX from the
+final `adc` (fixture 285).
+
+### Return and constant load
+
+`return <const>` for a long materializes the high and low halves
+separately:
+
+```
+xor dx, dx        ; high = 0
+mov ax, 5         ; low = 5
+jmp short @1@50   ; standard exit
+```
+
+For small positive constants the high is `xor dx,dx`; for negative
+constants both halves get explicit `mov` of the sign-extended value.
+`return <ident>` for a long parameter or global loads both halves
+into DX:AX:
+
+```
+mov dx, word ptr [bp+6]   ; high
+mov ax, word ptr [bp+4]   ; low
+```
+
+The single `jmp short @<f>@50` epilogue is the same as for ints —
+there is no separate long-return exit shape.
+
+### Plain assignment and arithmetic
+
+`g = K` for a long global stores high then low:
+
+```
+mov word ptr DGROUP:_g+2, 0       ; high = 0
+mov word ptr DGROUP:_g, 5         ; low = 5
+```
+
+The high is stored first when the value is a constant — for
+register-resident values the order can flip (see below).
+
+`g = a + b` with both operands long globals routes through AX:DX
+using the global convention (AX=high, DX=low):
+
+```
+mov ax, word ptr DGROUP:_a+2     ; AX = a.high
+mov dx, word ptr DGROUP:_a       ; DX = a.low
+add dx, word ptr DGROUP:_b       ; DX += b.low
+adc ax, word ptr DGROUP:_b+2     ; AX += b.high + carry
+mov word ptr DGROUP:_g+2, ax     ; store high
+mov word ptr DGROUP:_g, dx       ; store low
+```
+
+The same shape covers `g = a - b` (sub/sbb), `g = a + 10` (add
+imm/adc 0), and `g = i + g` commuted (loads from globals as DX:AX-on-
+memory rather than BX:CX/DX:AX — see slice 281).
+
+`return a + b` for two long parameters uses the stack convention
+(DX=high, AX=low) — see fixture 285's six instructions above.
+
+### Compound assignment: arithmetic uses `83` (imm8sx), bitwise uses `81` (imm16)
+
+For long globals, BCC emits a **memory-direct read-modify-write**
+pair (no DX:AX round-trip) for both arithmetic and bitwise compound
+assigns, but the immediate-width selection is op-family dependent.
+
+Arithmetic (`+=` / `-=`):
+
+```
+add word ptr DGROUP:_g, 5      ; 83 06 lo hi 05      (5 bytes, imm8sx)
+adc word ptr DGROUP:_g+2, 0    ; 83 16 lo hi 00      (5 bytes, imm8sx)
+```
+
+Bitwise (`&=` / `|=` / `^=`):
+
+```
+and word ptr DGROUP:_g, 15     ; 81 26 lo hi 0F 00   (6 bytes, imm16)
+and word ptr DGROUP:_g+2, 0    ; 81 26 lo hi 00 00   (6 bytes, imm16)
+```
+
+For bitwise compound the high partner is `op word ptr _g+2, <high
+K>` rather than the carry-propagating `adc/sbb 0` — bitwise ops don't
+carry. When K fits in i8sx, the bitwise path still picks the wider
+encoding (1 byte wasted per half). This *isn't* a TASM default —
+TASM's sign-extension heuristic would pick `83` for `15`. BCC's
+emitter must specifically request `81` for the bitwise compound
+shapes.
+
+For `*=` / `/=` / `%=`, the compound form routes through the helper
+ABI (see "Runtime helpers" below) since BCC has no memory-direct
+mul/div path. Same for shifts (see "Long compound shift" below).
+
+### `g = g op K` vs `g op= K`
+
+Just as for ints, `g = g + K` and `g += K` produce *different* asm
+even though they are semantically identical. The plain-assign form
+routes through AX:DX:
+
+```
+mov ax, _g+2 / mov dx, _g / add dx, 10 / adc ax, 0 / mov _g+2, ax / mov _g, dx
+```
+
+The compound form uses the memory-direct `83 06`/`83 16` pair. Both
+forms preserve the BCC compound-vs-plain fingerprint into long
+arithmetic.
+
+### `g = g * 2` peephole: `shl/rcl`
+
+`g = g * 2` on a long global skips the multiply helper and folds to
+a left-shift through the carry chain:
+
+```
+mov ax, word ptr DGROUP:_g+2
+mov dx, word ptr DGROUP:_g
+shl dx, 1
+rcl ax, 1
+mov word ptr DGROUP:_g+2, ax
+mov word ptr DGROUP:_g, dx
+```
+
+`shl dx, 1` shifts the low half left by 1; the bit shifted out goes
+to CF. `rcl ax, 1` rotates the high half left through CF, picking up
+that bit. Two instructions instead of an `N_LXMUL@` call. Likely
+extends to any constant doubling that fits in `shl/rcl` repeats,
+though no fixture pins K=4 etc. _Fixture_: 283.
+
+### Long compound shift reorders `mov cl, K` first
+
+For `long a <<= 2`, the shift count establishes CL **before** the
+helper inputs are loaded:
+
+```
+mov cl, 2
+mov dx, word ptr DGROUP:_a+2
+mov ax, word ptr DGROUP:_a
+call near ptr N_LXLSH@
+mov word ptr DGROUP:_a+2, dx
+mov word ptr DGROUP:_a, ax
+```
+
+Compare with the plain-assign form `a = a << K`, where `mov cl, K`
+comes *after* loading DX:AX. The reorder is small but distinguishing
+— our codegen must special-case the compound-shift K>1 path. K=1
+folds to `shl/rcl` (no helper, no CL load) — same as the `*2`
+peephole.
+
+### Runtime helpers
+
+Long multiply, divide, modulo, and variable-count shifts route through
+helpers in the Borland CRT:
+
+| Helper        | Operation                       |
+|---------------|---------------------------------|
+| `N_LXMUL@`    | signed/unsigned long multiply   |
+| `N_LDIV@`     | signed long divide              |
+| `N_LMOD@`     | signed long modulo              |
+| `N_LUDIV@`    | unsigned long divide            |
+| `N_LUMOD@`    | unsigned long modulo            |
+| `N_LXLSH@`    | long shift-left (CL count)      |
+| `N_LXRSH@`    | signed long shift-right         |
+| `N_LXURSH@`   | unsigned long shift-right       |
+
+Calling convention varies by helper:
+
+- **`N_LXMUL@`**: both operands passed as DX:AX pairs in registers
+  (not pushed). Result in DX:AX.
+- **`N_LDIV@` and family**: both operands pushed on the stack (high
+  first, then low — same as a normal `long` arg pair). Quotient or
+  remainder returned in DX:AX. **No caller stack cleanup** — the
+  helper pops its own 8 bytes of arguments (`ret 8`-style).
+- **`N_LXLSH@`/`N_LXRSH@`/`N_LXURSH@`**: shift count in CL, value in
+  DX:AX. Result in DX:AX.
+
+Helper extern declarations use `:far` (BCC's user-function externs
+use `:near`):
+
+```
+extrn N_LXLSH@:far
+```
+
+The helper extern is *not* segregated into its own block — it joins
+the publics list at end-of-file, participating in the same length-
+bucket + reverse-alphabetical sort used for ordinary publics. A
+typical `<<= 2` tail:
+
+```
+public _main
+extrn N_LXLSH@:far
+public _a
+```
+
+_Fixtures_: 232 (`N_LDIV@`), 245 (`N_LUDIV@`), 247 (`N_LXMUL@`), 263
+(`N_LXLSH@`).
+
+### Long compares: zero, vs-const, vs-long
+
+`if (g == 0)` for a long collapses both halves into AX via OR:
+
+```
+mov ax, _g
+or  ax, _g+2          ; ZF set iff both halves were 0
+jne short @<skip>
+```
+
+The OR sets ZF=1 iff both source halves were 0 (equivalent to
+testing whether the full 32-bit value is 0). Used for `g == 0`,
+`g != 0`, and bare-`if (g)` truth tests. _Fixtures_: 215, 238.
+
+`if (a < b)` for two long globals lowers to a high-half compare with
+3 possible outcomes, dispatched with a 3-jump pattern:
+
+```
+mov ax, _a+2
+mov dx, _a
+cmp ax, _b+2          ; high halves
+jg  short @false      ; signed: a.high > b.high → not less
+jl  short @true       ; signed: a.high < b.high → less
+cmp dx, _b            ; equal high → low halves
+jae short @false      ; UNSIGNED: a.low >= b.low → not less
+@true:
+```
+
+Three observations:
+
+1. The high comparison uses **signed** mnemonics (`jg`/`jl`); the low
+   uses **unsigned** (`jae`/`jb`/`ja`/`jbe`). For `unsigned long`,
+   both halves use unsigned.
+2. The mnemonics flip per operator. For `<=` the low-half test is
+   `ja @false`; for `>` it's `jbe @false`; etc. There is no compact
+   table — each of `<`/`<=`/`>`/`>=` picks its own jump triple.
+3. `==`/`!=` use a different shape: combine OR pattern for `== 0`,
+   or chained cmp + je for `== K`.
+
+For long-vs-int compares (mixed types, slice 273), BCC swaps the
+operand order to keep the long on the LHS and widens the int via
+`cwd` before the compare. The 3-jump pattern is otherwise the same.
+_Fixtures_: 234–242, 273.
+
+### Long parameters and arguments
+
+A `long` argument is pushed as two `push <reg>` instructions, **high
+half first**, so the low half ends up at the lower bp-offset in the
+callee. A constant `long 5` is materialized as:
+
+```
+xor ax, ax        ; AX = high (0)
+mov dx, 5         ; DX = low (5)
+push ax           ; push high first
+push dx           ; push low last (now at lower offset)
+call near ptr _f
+pop cx
+pop cx            ; cleanup: 2 pops, not 1
+```
+
+A long parameter takes **4 stack bytes**, not 2. For `long f(long a,
+long b)`:
+
+- `a.low` at `[bp+4]`, `a.high` at `[bp+6]`
+- `b.low` at `[bp+8]`, `b.high` at `[bp+10]`
+
+This means the bp-offset for the second parameter depends on the
+first parameter's width — see `crates/bcc/src/codegen/locals.rs` for
+the per-type advance: 4 bytes for `long`/`unsigned long`, 2 for
+everything else.
+
+The caller-side cleanup rule (`pop cx` × N for N ≤ 2 args, `add sp,
+N*2` for N ≥ 3) treats each pushed word as one "arg" for the
+threshold — a single long arg counts as 2, and a single-long call
+emits 2 `pop cx`. Two long args (4 pushes) flips to `add sp, 8`.
+_Fixtures_: 216 (`f(5L)` → push/push/pop/pop), 217 (`long f(long x)`
+reads `[bp+4]`/`[bp+6]`), 285 (two long params, second at `[bp+8]`).
+
+### Widening and narrowing
+
+`long g = i` (int → long) widens via `cwd`:
+
+```
+mov ax, word ptr DGROUP:_i      ; AX = int
+cwd                              ; DX:AX = sign-extended int (DX=high)
+mov word ptr DGROUP:_g+2, dx
+mov word ptr DGROUP:_g, ax
+```
+
+`long g = u` (unsigned int → unsigned long) zero-extends with a
+direct store:
+
+```
+mov ax, word ptr DGROUP:_u
+xor dx, dx                       ; or: mov word ptr DGROUP:_g+2, 0
+mov word ptr DGROUP:_g+2, dx
+mov word ptr DGROUP:_g, ax
+```
+
+`long g = c` (char → long) does `cbw / cwd` to chain the two
+widenings:
+
+```
+mov al, byte ptr DGROUP:_c
+cbw                              ; AL → AX (sign-extend)
+cwd                              ; AX → DX:AX (sign-extend)
+mov word ptr DGROUP:_g+2, dx
+mov word ptr DGROUP:_g, ax
+```
+
+`int g = (int)long_g` (long → int) just drops the high half:
+
+```
+mov ax, word ptr DGROUP:_lg     ; AX = low half only
+mov word ptr DGROUP:_g, ax       ; store as int
+```
+
+`unsigned long ↔ long` conversions are no-ops at the asm level — the
+bit pattern is identical and BCC trusts the type system to surface
+sign-vs-unsigned only at compare/divide time. _Fixtures_: 254, 255,
+256, 271, 272, 279, 277, 278.
+
+### Unsigned long
+
+`unsigned long` shares all the codegen above except for:
+
+- Compares: both halves use unsigned mnemonics (`jb`/`ja`/`jae`/`jbe`),
+  not the mixed signed-high/unsigned-low.
+- Divide/modulo route to `N_LUDIV@`/`N_LUMOD@`, not `N_LDIV@`/`N_LMOD@`.
+- Right shift routes to `N_LXURSH@`, not `N_LXRSH@`.
+- Widening from `unsigned int` zero-extends (direct `xor dx, dx`)
+  rather than `cwd`-sign-extending.
+
+_Fixtures_: 242 (unsigned long compare), 243 (`>>` peephole),
+244–247 (helpers), 277/278 (cast).
 
 ## Source-line comments
 

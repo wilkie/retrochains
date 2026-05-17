@@ -128,7 +128,3 @@ with a brace-list of bytes — would that take numeric or quoted form?).
 trigger is "named storage = numeric, pool = quoted". If it takes quoted,
 the trigger is something else (probably about the initializer syntax).
 
-## Duplicate fixture number 170
-
-Cosmetic, not a compat blocker, but flag for cleanup: `170-cast-int-to-char-obj`
-and `170-fnptr-call-obj` share fixture number 170. Pick one to renumber.
