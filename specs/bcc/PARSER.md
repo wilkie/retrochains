@@ -87,6 +87,29 @@ Whenever the parser refuses a construct, the verify failure should say
 *why* with a clear message. That failure is the cue to capture the
 smallest oracle fixture for the construct before extending the parser.
 
+## Integer literal forms
+
+C90 spells integer literals three ways and the lexer accepts all
+three:
+
+- `0x`/`0X` prefix → hex (`0xFF`, `0X1234`).
+- Bare leading `0` followed by an octal digit → octal (`0755` is 493,
+  *not* 755 — verified by fixture `445` whose oracle bytes encode
+  0x01ED).
+- Otherwise → decimal.
+
+A lone `0` is decimal zero — the octal check requires a trailing
+`0..=7` digit. Suffixes `L`/`l`/`U`/`u` and combinations are accepted
+and discarded as before; the surrounding type context decides the
+ultimate width. Fixtures `443`–`445` round-trip hex assignment, hex
+mask via compound-assign, and an octal literal respectively.
+
+Hex/octal and decimal codegen are *equivalent at the byte level* —
+`s.x &= 0xFF` and `s.x &= 255` produce identical OBJs (this was
+empirically verified during fixture `390`'s capture). So adding the
+lexer support didn't require any codegen changes; the literal value
+flows through `IntLit(u32)` regardless of source form.
+
 ## What we explicitly defer
 
 - Templates, namespaces, RTTI, exceptions (not in BC2.0 to relevant
