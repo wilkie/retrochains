@@ -312,8 +312,20 @@ impl Locals {
                         // matches BCC's layout for fixture 102 once
                         // the struct's intrinsic size is the raw
                         // field-sum (3) rather than pre-rounded (4).
-                        let slot_size =
+                        // For char arrays (alignment 1 but odd size),
+                        // BCC additionally pads the slot to even
+                        // bytes (fixture 577: `char s[3]` occupies a
+                        // 4-byte slot with `s[2]` at the highest
+                        // address byte and the byte above untouched).
+                        // Apply the same even-byte pad to any local
+                        // whose size_bytes is odd.
+                        let mut slot_size =
                             align_up(item.ty.size_bytes(), item.ty.alignment());
+                        if matches!(item.ty, Type::Array { .. })
+                            && slot_size % 2 == 1
+                        {
+                            slot_size += 1;
+                        }
                         stack_bytes = align_up(stack_bytes, item.ty.alignment())
                             + slot_size;
                         LocalLocation::Stack(
