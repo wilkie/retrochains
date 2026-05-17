@@ -1813,12 +1813,41 @@ constants both halves get explicit `mov` of the sign-extended value.
 into DX:AX:
 
 ```
-mov dx, word ptr [bp+6]   ; high
+mov dx, word ptr [bp+6]   ; high (param)
 mov ax, word ptr [bp+4]   ; low
+
+mov dx, word ptr DGROUP:_g+2   ; high (global; fixture 349)
+mov ax, word ptr DGROUP:_g     ; low
+```
+
+`return *p` for a register-resident `long *` follows the same
+shape, using `[si+2]`/`[si]` (`8B 54 02` / `8B 14`):
+
+```
+mov dx, word ptr [si+2]   ; high
+mov ax, word ptr [si]     ; low
 ```
 
 The single `jmp short @<f>@50` epilogue is the same as for ints —
 there is no separate long-return exit shape.
+
+`return <expr>` for a long-typed binary expression loads operands
+directly into the ABI return registers DX:AX (because the
+destination is the return registers), then runs the arithmetic
+in place:
+
+```
+; return g + h;  for two long globals (fixture 348)
+mov dx, word ptr DGROUP:_g+2     ; DX = g.high
+mov ax, word ptr DGROUP:_g       ; AX = g.low
+add ax, word ptr DGROUP:_h       ; AX += h.low
+adc dx, word ptr DGROUP:_h+2     ; DX += h.high + carry
+```
+
+Two long params (fixture 285) use the same shape with `[bp+...]`
+operands. The register pairing follows the destination-driven
+rule documented earlier: DX=high, AX=low because the destination
+is the return register pair.
 
 ### Plain assignment and arithmetic
 

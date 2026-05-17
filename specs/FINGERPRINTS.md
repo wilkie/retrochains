@@ -849,8 +849,17 @@ ABI convention). The choice is driven by where the result goes:
 So one disassembler heuristic for spotting BCC long arithmetic
 that's about to be stored is: AX:DX load order with AX getting the
 higher address. Distinct from the ABI pair which loads DX from the
-higher address. _Fixtures_: 329, 330, 333, 334 (memory-bound, AX=hi)
-vs. 285 (return, DX=hi).
+higher address. _Fixtures_: 329, 330, 333, 334 (memory-bound stack
+arith, AX=hi); 350 (`long x = g + K`, AX=hi); 285 (return from
+stack arith, DX=hi); 348 (return from global arith, DX=hi); 351
+(return from long-pointer deref, DX=hi).
+
+The rule generalizes across every long-arith shape encountered so
+far: the operand load order is driven by the destination, never by
+the source. A compiler that picked a fixed convention regardless
+of destination would emit different byte sequences for the
+arithmetic step at otherwise-symmetric memory-bound and return-
+bound sites.
 
 ### Compound assign opcode tells constant-vs-variable RHS (STRONG)
 
