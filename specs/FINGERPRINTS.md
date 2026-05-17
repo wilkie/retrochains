@@ -522,6 +522,13 @@ which loads DX:AX *before* `mov cl`. The shift count establishes CL
 before the helper-input registers are touched, perhaps to leave DX:AX
 "hot" up to the call. _Fixtures_: 263 (`<<=`), 264 (`>>=`).
 
+The same compound-form reorder holds for **stack-local** compound
+shifts — the destination form (global memory vs `[bp+N]`) doesn't
+affect it: `mov cl, K` still precedes the operand load. So the
+`cl` position is a clean byte-level distinguisher between compound
+and non-compound long shifts independent of where the long
+operand lives. _Fixtures_: 385 (`x <<= 2;` for a long stack param).
+
 ### Runtime helpers declared `:far`, merged into publics sort (STRONG)
 
 Long multiply/divide/mod/shift route through pre-built runtime
@@ -879,6 +886,27 @@ the source. A compiler that picked a fixed convention regardless
 of destination would emit different byte sequences for the
 arithmetic step at otherwise-symmetric memory-bound and return-
 bound sites.
+
+**Sharper statement of the rule**: the convention is driven by
+**whichever step first consumes the register pair**, not by the
+final storage location. The two diverge most clearly in stack-
+local compound shifts:
+
+- `x <<= 1` (fixture 383): the first consumer is the inline `shl/
+  rcl` pair, which works on either register assignment. BCC picks
+  AX=high to match the trailing memory store — so the *final
+  destination* (memory) does drive the choice here.
+- `x <<= 2` (fixture 385): the first consumer is `N_LXLSH@`,
+  which *demands* DX:AX = high:low. BCC loads accordingly, then
+  stores DX into `[bp+off+2]` and AX into `[bp+off]` — the final
+  memory store *adapts* to whatever the registers contain after
+  the helper.
+
+Both end at the same `[bp+N]` destination, but the load orders
+differ by K because the helper interposes a fixed-ABI step. The
+*final* destination matters only when the intermediate step is
+register-format-flexible; otherwise the intermediate step's ABI
+wins.
 
 ### Long arithmetic skeleton is source-storage-agnostic (STRONG)
 

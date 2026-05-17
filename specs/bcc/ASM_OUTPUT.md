@@ -3006,6 +3006,56 @@ Same helper choice rules apply: `N_LUDIV@`/`N_LUMOD@` for
 `unsigned long`; `N_LXMUL@` is signedness-agnostic (signed and
 unsigned long multiplication share the low 32 bits).
 
+### Long stack-local compound shift by a constant (`383`–`385`)
+
+`x <<= K` / `x >>= K` for a long stack local mirror the long-global
+compound-shift shape (fixtures 263–266) with `[bp+N]` addressing.
+Two cases by K, each emitted distinctly:
+
+**K=1 inline** uses memory-dest register convention (AX=high,
+DX=low) — the loaded pair matches the trailing memory store, so
+no swap is needed:
+
+```
+; x <<= 1;  for a long stack-local (fixture 383)
+mov ax, word ptr [bp+x_hi]      ; AX = x.high
+mov dx, word ptr [bp+x_lo]      ; DX = x.low
+shl dx, 1                       ; D1 E2 — low first
+rcl ax, 1                       ; D1 D0 — carry into high
+mov word ptr [bp+x_hi], ax
+mov word ptr [bp+x_lo], dx
+
+; x >>= 1;  signed (fixture 384)
+mov ax, word ptr [bp+x_hi]
+mov dx, word ptr [bp+x_lo]
+sar ax, 1                       ; D1 F8 — high first (signed)
+rcr dx, 1                       ; D1 DA — carry into low
+mov word ptr [bp+x_hi], ax
+mov word ptr [bp+x_lo], dx
+```
+
+**K>1** routes through the helper. The load convention flips to
+the **helper ABI** (DX=high, AX=low) — the helper demands DX:AX
+= high:low, and the trailing store adapts: DX → `[bp+x_hi]`, AX
+→ `[bp+x_lo]`. `mov cl, K` lands FIRST (compound-form reorder,
+same as the global case in fixture 263):
+
+```
+; x <<= 2;  (fixture 385)
+mov cl, 2                       ; B1 02 — FIRST (compound form)
+mov dx, word ptr [bp+x_hi]      ; DX = x.high (helper ABI)
+mov ax, word ptr [bp+x_lo]
+call near ptr N_LXLSH@
+mov word ptr [bp+x_hi], dx
+mov word ptr [bp+x_lo], ax
+```
+
+The K=1 and K>1 shapes pick *different register conventions* for
+loading the same long from the same `[bp+N]`. Which convention
+wins is determined by the **first consumer** of the register pair
+— the inline `shl/rcl` accepts either (so memory-dest wins), but
+the helper call doesn't (so helper-ABI wins).
+
 ### Long stack-local shift by a variable count (`341`)
 
 `z = x << n` and `z = x >> n` for a long `x` and an int `n` route
