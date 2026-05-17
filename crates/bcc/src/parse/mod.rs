@@ -101,11 +101,21 @@ impl Parser {
                 continue;
             }
             // `enum [tag] { ... };` — registers integer constants and
-            // emits no AST node. (We don't yet support `enum <tag>` as
-            // a type name in declarations; that would need a fixture.)
+            // emits no AST node. Only fire when an `{` follows the
+            // (optional) tag — otherwise `enum <tag> <decl>` is a
+            // use of the enum tag as a type and should fall through
+            // to the global/function path. Fixture 470.
             if matches!(self.peek().kind, TokenKind::KwEnum) {
-                self.parse_enum_decl()?;
-                continue;
+                let body_starts = if matches!(self.peek_n(1).kind, TokenKind::LBrace) {
+                    true
+                } else {
+                    matches!(self.peek_n(1).kind, TokenKind::Ident(_))
+                        && matches!(self.peek_n(2).kind, TokenKind::LBrace)
+                };
+                if body_starts {
+                    self.parse_enum_decl()?;
+                    continue;
+                }
             }
             // A standalone `struct <name> { ... } ;` defines a struct
             // type and adds it to the table without declaring any
@@ -167,6 +177,15 @@ impl Parser {
                     }
                 }
                 TokenKind::KwStruct | TokenKind::KwUnion => {
+                    probe += 1;
+                    if matches!(self.peek_n(probe).kind, TokenKind::Ident(_)) {
+                        probe += 1;
+                    }
+                }
+                TokenKind::KwEnum => {
+                    // `enum <tag> <decl>` — enum tag as a type. The
+                    // standalone `enum [tag] { ... };` form is handled
+                    // by the dispatcher above and never reaches here.
                     probe += 1;
                     if matches!(self.peek_n(probe).kind, TokenKind::Ident(_)) {
                         probe += 1;
@@ -423,6 +442,17 @@ impl Parser {
             }
             TokenKind::KwStruct => self.parse_struct_type(),
             TokenKind::KwUnion => self.parse_union_type(),
+            TokenKind::KwEnum => {
+                // `enum [<tag>]` as a type — enums are int-sized in
+                // BCC. Tag is consumed if present; we don't require
+                // it to be registered since enum members were already
+                // registered at the definition site. Fixture 470.
+                self.bump();
+                if matches!(self.peek().kind, TokenKind::Ident(_)) {
+                    self.bump();
+                }
+                Ok(Type::Int)
+            }
             TokenKind::Ident(ref name) if self.typedefs.contains_key(name) => {
                 let ty = self.typedefs.get(name).expect("just checked").clone();
                 self.bump();
@@ -822,7 +852,9 @@ impl Parser {
             | TokenKind::KwStruct
             | TokenKind::KwUnion
             | TokenKind::KwUnsigned
-            | TokenKind::KwLong => self.parse_declare(start),
+            | TokenKind::KwLong
+            | TokenKind::KwSigned
+            | TokenKind::KwEnum => self.parse_declare(start),
             TokenKind::KwStatic => self.parse_declare(start),
             TokenKind::Ident(ref name) if self.typedefs.contains_key(name) => {
                 self.parse_declare(start)
