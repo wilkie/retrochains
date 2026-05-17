@@ -121,6 +121,31 @@ same `emit_long_compound_to_mem` skeleton as any other long-with-
 constant compound (fixture `448`); the hex form is purely
 front-end.
 
+## Character literals
+
+Character constants (`'A'`, `'\n'`, `'\xFF'`) lex into
+`IntLit(u32)` — C90 says character constants have type `int`, so
+there's no separate `CharLit` token. The single-byte value flows
+through the same paths as any other int-typed constant.
+
+Escape sequences are shared with string literals via a single
+`decode_escape` helper: `\n`, `\t`, `\r`, `\0`, `\\`, `\'`, `\"`,
+and `\xHH` (one-or-more hex digits, taken mod 256). Octal escapes
+(`\NNN`) await a fixture. Multi-byte character constants (`'ab'`)
+also await a fixture.
+
+Fixtures `449`–`451` cover printable ASCII (`'A'` → 65), the
+common-case named escape (`'\n'` → 10), and a hex escape at the
+upper end of the byte range (`'\xFF'` → 255). All three round-trip
+to identical bytes vs. the equivalent decimal forms.
+
+The store side picked up an assembler-level gap: `mov byte ptr
+DGROUP:_<g>, K` (encoded `C6 06 disp16 ii`) wasn't supported. Added
+as `Instr::MovGroupSymImm8`, parallel to the existing word-form
+`Instr::MovGroupSymImm16` (`C7 06 ...`). The codegen side already
+emitted the right asm text for char-typed globals; only the
+assembler needed to learn the form.
+
 ## What we explicitly defer
 
 - Templates, namespaces, RTTI, exceptions (not in BC2.0 to relevant
