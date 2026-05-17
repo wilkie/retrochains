@@ -992,6 +992,13 @@ fn parse_and(operands: &str, line_no: usize) -> AsmResult<Instr> {
             return Ok(Instr::AndAlImm8 { imm: imm as u8 });
         }
     }
+    // `and <reg8>,imm8` for non-AL byte registers (3-byte generic
+    // form). Fixture 556 (`and dl, 0x1F`).
+    if let Some(reg) = Reg8::parse(lhs) {
+        if let Some(imm) = parse_imm8(rhs) {
+            return Ok(Instr::AndReg8Imm8 { reg, imm: imm as u8 });
+        }
+    }
     if lhs == "dx" {
         if let Some((group, symbol)) = parse_group_symbol(rhs) {
             let (sym, offset) = split_sym_offset(symbol);
@@ -1703,6 +1710,11 @@ fn parse_or(operands: &str, line_no: usize) -> AsmResult<Instr> {
             return Ok(Instr::OrAlImm8 { imm: imm as u8 });
         }
     }
+    if let Some(reg) = Reg8::parse(lhs) {
+        if let Some(imm) = parse_imm8(rhs) {
+            return Ok(Instr::OrReg8Imm8 { reg, imm: imm as u8 });
+        }
+    }
     // `or dx, word ptr <group>:<sym>[+N]` — long bitwise OR low half
     // (fixture 222).
     if lhs == "dx" {
@@ -1777,6 +1789,11 @@ fn parse_xor(operands: &str, line_no: usize) -> AsmResult<Instr> {
     if lhs == "al" {
         if let Some(imm) = parse_imm8(rhs) {
             return Ok(Instr::XorAlImm8 { imm: imm as u8 });
+        }
+    }
+    if let Some(reg) = Reg8::parse(lhs) {
+        if let Some(imm) = parse_imm8(rhs) {
+            return Ok(Instr::XorReg8Imm8 { reg, imm: imm as u8 });
         }
     }
     // `xor dx, word ptr <group>:<sym>[+N]` — long bitwise XOR low

@@ -2107,6 +2107,14 @@ impl<'a> FunctionEmitter<'a> {
             return;
         }
         self.emit_expr_to_ax(left);
+        // `<expr-in-ax> <relop> 0` — use `or ax, ax` (2 bytes) instead
+        // of `cmp ax, 0` (3 bytes) since both set ZF/SF the same way.
+        // Fixture 555 (`while ((c = g) > 0)` lowers the post-load
+        // zero test through this peephole).
+        if let Some(0) = try_const_eval(right) {
+            self.out.extend_from_slice(b"\tor\tax,ax\r\n");
+            return;
+        }
         let src = self.resolve_operand_source(right);
         let _ = write!(self.out, "\tcmp\tax,{}\r\n", src.word());
     }
@@ -3397,25 +3405,43 @@ impl<'a> FunctionEmitter<'a> {
                 "compound assignment on stack-resident `{name}` not yet supported (no fixture)"
             );
         };
-        // Char compound on a byte-register local: round-trip through
-        // AL — `mov al, <reg>; <op> al, K; mov <reg>, al`. Fixture
-        // 529 (`char c = 'A'; c += 2;`).
+        // Char compound on a byte-register local.
+        //
+        // BCC splits two ways:
+        //  - `+=` / `-=`: round-trip through AL so the 2-byte AL
+        //    accumulator forms (`04/2C ii`) can be used. With the
+        //    AL ±1 peephole (`fe c0/c8`) the total is still 6 bytes.
+        //  - `&=` / `|=` / `^=`: direct `<and|or|xor> <reg>, K`
+        //    (`80 /4|/1|/6 reg ii`, 3 bytes). Fixture 556 (`c &= 31`
+        //    on DL) shows the direct form is preferred for bitwise.
         if reg.is_byte()
-            && matches!(op, BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor)
+            && matches!(op, BinOp::Add | BinOp::Sub)
+            && let Some(v) = try_const_eval(value)
+        {
+            let v8 = v & 0xFF;
+            let _ = write!(self.out, "\tmov\tal,{}\r\n", reg.name());
+            if v8 == 1 {
+                let inc_mnem = if matches!(op, BinOp::Add) { "inc" } else { "dec" };
+                let _ = write!(self.out, "\t{inc_mnem}\tal\r\n");
+            } else {
+                let mnem = if matches!(op, BinOp::Add) { "add" } else { "sub" };
+                let _ = write!(self.out, "\t{mnem}\tal,{v8}\r\n");
+            }
+            let _ = write!(self.out, "\tmov\t{},al\r\n", reg.name());
+            return;
+        }
+        if reg.is_byte()
+            && matches!(op, BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor)
             && let Some(v) = try_const_eval(value)
         {
             let v8 = v & 0xFF;
             let mnem = match op {
-                BinOp::Add => "add",
-                BinOp::Sub => "sub",
                 BinOp::BitAnd => "and",
                 BinOp::BitOr => "or",
                 BinOp::BitXor => "xor",
                 _ => unreachable!(),
             };
-            let _ = write!(self.out, "\tmov\tal,{}\r\n", reg.name());
-            let _ = write!(self.out, "\t{mnem}\tal,{v8}\r\n");
-            let _ = write!(self.out, "\tmov\t{},al\r\n", reg.name());
+            let _ = write!(self.out, "\t{mnem}\t{},{v8}\r\n", reg.name());
             return;
         }
         // Char compound shift on a byte-register local: unroll into K

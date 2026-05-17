@@ -301,6 +301,9 @@ fn instr_size(instr: &Instr) -> usize {
         | Instr::AndAlImm8 { .. }
         | Instr::OrAlImm8 { .. }
         | Instr::XorAlImm8 { .. } => 2,
+        Instr::AndReg8Imm8 { .. }
+        | Instr::OrReg8Imm8 { .. }
+        | Instr::XorReg8Imm8 { .. } => 3,
         Instr::CallNear(_) => 3,
         Instr::MovAxGroupSym { .. }
         | Instr::MovAlGroupSym { .. }
@@ -771,6 +774,25 @@ fn emit_instr(
         Instr::XorAlImm8 { imm } => {
             // `xor al,imm8` → 34 ii.
             out.push(0x34);
+            out.push(*imm);
+        }
+        Instr::AndReg8Imm8 { reg, imm } => {
+            // `and <reg8>,imm8` → 80 (mod=11 /4 r/m=<reg>) ii.
+            // Grp1 r/m8,imm8 with /4=AND. Fixture 556.
+            out.push(0x80);
+            out.push(0b11_100_000 | reg.code());
+            out.push(*imm);
+        }
+        Instr::OrReg8Imm8 { reg, imm } => {
+            // `or <reg8>,imm8` → 80 (mod=11 /1 r/m=<reg>) ii.
+            out.push(0x80);
+            out.push(0b11_001_000 | reg.code());
+            out.push(*imm);
+        }
+        Instr::XorReg8Imm8 { reg, imm } => {
+            // `xor <reg8>,imm8` → 80 (mod=11 /6 r/m=<reg>) ii.
+            out.push(0x80);
+            out.push(0b11_110_000 | reg.code());
             out.push(*imm);
         }
         Instr::ShlAxCl => {

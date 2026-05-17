@@ -337,6 +337,15 @@ pub enum Instr {
     OrAlImm8 { imm: u8 },
     /// `xor al,<imm8>` — 34 ii. AL-specific sibling.
     XorAlImm8 { imm: u8 },
+    /// `and <reg8>,<imm8>` — 80 (mod=11 /4 r/m=<reg-code>) ii.
+    /// Generic byte-register bitwise AND, used for non-AL registers
+    /// (AL has the shorter `AndAlImm8` form `24 ii`). Fixture 556
+    /// (`char c &= 31` with c in DL).
+    AndReg8Imm8 { reg: Reg8, imm: u8 },
+    /// `or <reg8>,<imm8>` — 80 (mod=11 /1 r/m=<reg-code>) ii.
+    OrReg8Imm8 { reg: Reg8, imm: u8 },
+    /// `xor <reg8>,<imm8>` — 80 (mod=11 /6 r/m=<reg-code>) ii.
+    XorReg8Imm8 { reg: Reg8, imm: u8 },
     /// `shl ax,cl` — D3 E0. Variable-count logical left shift of AX.
     ShlAxCl,
     /// `sar ax,cl` — D3 F8. Variable-count arithmetic (signed) right
