@@ -444,7 +444,13 @@ impl<'a> FunctionEmitter<'a> {
             }
             StmtKind::Assign { name, value } => {
                 self.advance_to_stmt_line(stmt);
-                if self.globals.contains(name) {
+                // A local shadows a global of the same name (fixture
+                // 532). Check locals first.
+                if self.locals.has(name) {
+                    let loc = self.locals.location_of(name);
+                    let ty = self.locals.type_of(name).clone();
+                    self.emit_assign_local(loc, &ty, value);
+                } else if self.globals.contains(name) {
                     self.emit_assign_global(name, value);
                 } else {
                     let loc = self.locals.location_of(name);
@@ -6068,6 +6074,27 @@ impl<'a> FunctionEmitter<'a> {
                     let _ = write!(self.out, "\tmov\tword ptr {},{v16}\r\n", bp_addr(off));
                     return;
                 }
+                // `y = ++x;` where x is register-resident — update
+                // in place, then store the register direct to the
+                // stack slot (skip the AX round-trip). Fixture 530.
+                if let ExprKind::Update {
+                    target,
+                    op,
+                    position: crate::ast::UpdatePosition::Pre,
+                } = &value.kind
+                    && self.locals.has(target)
+                    && let LocalLocation::Reg(reg) = self.locals.location_of(target)
+                    && !reg.is_byte()
+                {
+                    let mnem = match op {
+                        crate::ast::UpdateOp::Inc => "inc",
+                        crate::ast::UpdateOp::Dec => "dec",
+                    };
+                    let rname = reg.name();
+                    let _ = write!(self.out, "\t{mnem}\t{rname}\r\n");
+                    let _ = write!(self.out, "\tmov\tword ptr {},{rname}\r\n", bp_addr(off));
+                    return;
+                }
                 self.emit_expr_to_ax(value);
                 if ty.is_char_like() {
                     let _ = write!(self.out, "\tmov\tbyte ptr {},al\r\n", bp_addr(off));
@@ -6169,10 +6196,15 @@ impl<'a> FunctionEmitter<'a> {
         match &e.kind {
             ExprKind::IntLit(_) => unreachable!("literals fold via try_const_eval"),
             ExprKind::Ident(name) => {
+                // A local shadows a global of the same name (fixture
+                // 532), so only take the global path when no local
+                // with this name is in scope.
                 // Globals first: if this name is file-scope, lower
                 // to a `<width> ptr DGROUP:_<name>` reference rather
                 // than a stack/register access (fixtures 083–087).
-                if let Some(gty) = self.globals.type_of(name) {
+                if !self.locals.has(name)
+                    && let Some(gty) = self.globals.type_of(name)
+                {
                     if gty.is_char_like() {
                         let _ = write!(
                             self.out,
