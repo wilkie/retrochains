@@ -318,10 +318,12 @@ impl Parser {
         Ok(())
     }
 
-    /// `typedef <type> [*]* <name> ;`. Records `name` → type in
-    /// the typedef table; no AST node produced. Pointer stars wrap
-    /// the base type so `typedef int *INTP;` records
-    /// `INTP → Pointer(Int)`. Fixture 487.
+    /// `typedef <type> [*]* <name> [\[N\]]* ;`. Records `name` →
+    /// type in the typedef table; no AST node produced. Pointer
+    /// stars wrap the base type so `typedef int *INTP;` records
+    /// `INTP → Pointer(Int)` (fixture 487). Array suffixes wrap
+    /// innermost-first so `typedef int IARR[3];` records
+    /// `IARR → Array{elem: Int, len: 3}` (fixture 488).
     fn parse_typedef(&mut self) -> Result<(), ParseError> {
         self.bump(); // `typedef`
         let mut ty = self.parse_type()?;
@@ -333,6 +335,23 @@ impl Parser {
         let TokenKind::Ident(name) = name_tok.kind else {
             return Err(ParseError::NotAnIdent { offset: name_tok.span.start });
         };
+        let mut array_lens: Vec<u32> = Vec::new();
+        while matches!(self.peek().kind, TokenKind::LBracket) {
+            self.bump();
+            let size_tok = self.bump();
+            let TokenKind::IntLit(len) = size_tok.kind else {
+                return Err(ParseError::Unexpected {
+                    expected: "array size (integer literal)".to_owned(),
+                    found: size_tok.kind.describe().to_owned(),
+                    offset: size_tok.span.start,
+                });
+            };
+            self.expect(&TokenKind::RBracket)?;
+            array_lens.push(len);
+        }
+        for len in array_lens.into_iter().rev() {
+            ty = Type::Array { elem: Box::new(ty), len };
+        }
         self.expect(&TokenKind::Semicolon)?;
         self.typedefs.insert(name, ty);
         Ok(())
