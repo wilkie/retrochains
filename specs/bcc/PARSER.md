@@ -1052,6 +1052,35 @@ bucket way we still can't characterize. Worked around by making
 the helper `static` (which skips the PUBDEF emission entirely
 and sidesteps the ordering question).
 
+## `cmp ax, 0` → `or ax, ax` peephole
+
+Fixture `555` (`while ((c = g) > 0) ...`) — when the right
+operand of a compare folds to 0 and the left has just been
+loaded into AX, BCC emits the 2-byte `or ax, ax` instead of the
+3-byte `cmp ax, 0`. Both set ZF/SF identically so the
+subsequent conditional jump works the same. Added at the tail
+of `emit_compare` (after all global/local fast paths).
+
+## Char compound: bitwise direct, arith via AL
+
+Fixture `556` (`char c; c &= 31;` with c in DL) revealed that
+BCC takes a different path for char compound based on the op
+family:
+
+- **Add/Sub**: route through AL — `mov al, <reg>; <add|sub> al,
+  K; mov <reg>, al`. AL has 2-byte accumulator forms (`04/2C
+  ii`) which beat the generic 3-byte form, so the round-trip
+  pays off after `inc/dec` peepholes are applied. K=1 now
+  collapses to `inc al`/`dec al` (fixture 553's int sibling
+  pattern, here in 8-bit form).
+- **And/Or/Xor**: emit `<and|or|xor> <reg>, K` directly with no
+  AL detour (3 bytes total). Bitwise ops don't get the AL-
+  accumulator advantage at K width 8, so the direct form wins.
+
+Three new tasm IR variants — `AndReg8Imm8`, `OrReg8Imm8`,
+`XorReg8Imm8` — encode `80 /4|/1|/6 mod=11 r/m=<reg> imm8`.
+The AL-specific 2-byte forms (`AndAlImm8` etc.) stay for AL.
+
 ## What we explicitly defer
 
 - Templates, namespaces, RTTI, exceptions (not in BC2.0 to relevant
