@@ -3316,6 +3316,33 @@ impl<'a> FunctionEmitter<'a> {
             let _ = write!(self.out, "\tmov\tword ptr {},ax\r\n", bp_addr(x_off));
             return;
         }
+        // Int/uint global compound shift with constant RHS — unroll
+        // into K `<shl|sar|shr> word ptr DGROUP:_g, 1` instructions
+        // directly on memory. Fixture 539 (`g >>= 2` for int global
+        // → two `sar word ptr [_g], 1`). Same unrolling principle as
+        // the char-register path (fixture 535).
+        if let Some(gty) = self.globals.type_of(name)
+            && matches!(gty, Type::Int | Type::UInt)
+            && matches!(op, BinOp::Shl | BinOp::Shr)
+            && let Some(k) = try_const_eval(value)
+            && k >= 1
+            && k <= 8
+        {
+            let signed = !gty.is_unsigned();
+            let mnem = match op {
+                BinOp::Shl => "shl",
+                BinOp::Shr if signed => "sar",
+                BinOp::Shr => "shr",
+                _ => unreachable!(),
+            };
+            for _ in 0..k {
+                let _ = write!(
+                    self.out,
+                    "\t{mnem}\tword ptr DGROUP:_{name},1\r\n",
+                );
+            }
+            return;
+        }
         // Int/uint global compound add/sub with constant RHS —
         // memory-direct `add|sub word ptr DGROUP:_g, K`. Fixture
         // 519 (`g += 5`). TASM picks the imm8sx form when K fits a

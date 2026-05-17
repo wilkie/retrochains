@@ -1546,6 +1546,16 @@ fn parse_shl_one(operands: &str, line_no: usize) -> AsmResult<Instr> {
     if let Some(reg) = Reg8::parse(lhs) {
         return Ok(Instr::ShlReg8One { reg });
     }
+    // `shl word ptr <group>:<sym>[+N], 1` — memory-direct on a
+    // global (fixture 539).
+    if let Some((group, symbol)) = parse_group_symbol(lhs) {
+        let (sym, offset) = split_sym_offset(symbol);
+        return Ok(Instr::ShlGroupSymOne {
+            group: group.to_string(),
+            symbol: sym.to_string(),
+            offset,
+        });
+    }
     let reg = Reg16::parse(lhs)
         .ok_or_else(|| AsmError::new(line_no, format!("shl: bad register `{lhs}`")))?;
     Ok(Instr::ShlReg16One { reg })
@@ -1583,6 +1593,14 @@ fn parse_sar_one(operands: &str, line_no: usize) -> AsmResult<Instr> {
     if let Some(reg) = Reg8::parse(lhs) {
         return Ok(Instr::SarReg8One { reg });
     }
+    if let Some((group, symbol)) = parse_group_symbol(lhs) {
+        let (sym, offset) = split_sym_offset(symbol);
+        return Ok(Instr::SarGroupSymOne {
+            group: group.to_string(),
+            symbol: sym.to_string(),
+            offset,
+        });
+    }
     let reg = Reg16::parse(lhs)
         .ok_or_else(|| AsmError::new(line_no, format!("sar: bad register `{lhs}`")))?;
     Ok(Instr::SarReg16One { reg })
@@ -1602,6 +1620,14 @@ fn parse_shr_one(operands: &str, line_no: usize) -> AsmResult<Instr> {
     }
     if let Some(reg) = Reg8::parse(lhs) {
         return Ok(Instr::ShrReg8One { reg });
+    }
+    if let Some((group, symbol)) = parse_group_symbol(lhs) {
+        let (sym, offset) = split_sym_offset(symbol);
+        return Ok(Instr::ShrGroupSymOne {
+            group: group.to_string(),
+            symbol: sym.to_string(),
+            offset,
+        });
     }
     let reg = Reg16::parse(lhs)
         .ok_or_else(|| AsmError::new(line_no, format!("shr: bad register `{lhs}`")))?;

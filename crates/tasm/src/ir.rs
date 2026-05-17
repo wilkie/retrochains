@@ -619,6 +619,16 @@ pub enum Instr {
     /// (`80 7E disp8 ii`, 4 bytes). Used by char-local compare
     /// against constants (fixture 524: `if (c == 'B')`).
     CmpByteBpRelImm8 { offset: i16, imm: u8 },
+    /// `shl word ptr <group>:<symbol>[+<offset>],1` — D1 /4 r/m16,1
+    /// against a data-segment global. Encoding: `D1 26 lo hi`.
+    /// Fixture 539 (`int g; g <<= 2` unrolls to two such).
+    ShlGroupSymOne { group: String, symbol: String, offset: i16 },
+    /// `sar word ptr <group>:<symbol>[+<offset>],1` — D1 /7 r/m16,1.
+    /// Encoding: `D1 3E lo hi`. Signed `>>= 1` on int global.
+    SarGroupSymOne { group: String, symbol: String, offset: i16 },
+    /// `shr word ptr <group>:<symbol>[+<offset>],1` — D1 /5 r/m16,1.
+    /// Encoding: `D1 2E lo hi`. Unsigned `>>= 1` on uint global.
+    ShrGroupSymOne { group: String, symbol: String, offset: i16 },
     /// `inc word ptr <group>:<symbol>[+<offset>]` — INC r/m16 via
     /// Grp5 /0 against a data-segment global. Encoding: `FF 06 lo
     /// hi` (ModR/M 06 = mod=00 reg=000 r/m=110 → `[disp16]`).
