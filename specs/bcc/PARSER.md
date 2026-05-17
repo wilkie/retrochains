@@ -980,6 +980,26 @@ hi`. The codegen path picks `shl` for `<<=`, `sar` for signed
 before the existing add/sub and bitwise int-global compound
 paths.
 
+## Pointer compound add/sub — stride scaling
+
+Fixture `542` (`int *p; p = a; p += 2;`) — pointer arithmetic in
+compound form scales the RHS by `sizeof(pointee)`. `emit_
+compound_assign`'s register-local Add/Sub path now multiplies
+the const RHS by the pointee's `size_bytes()` before emitting
+`add <reg>, scaled`. For `int *p` (stride 2), `p += 2` lowers
+to `add si, 4`. The K==1 → `inc` peephole is now checked against
+the *scaled* value, so it only fires when the actual byte
+delta is 1 (i.e. char pointer with K==1).
+
+## Switch on a non-ident scrutinee
+
+Fixture `544` (`switch (x + 1) { case 1: ... }`) — when the
+scrutinee isn't a bare ident, `emit_switch_chained` now routes
+through `emit_expr_to_ax` and lets the result land in AX
+directly. The chained-cmp+je sequence after the load is
+unchanged. Ident scrutinees still hit the bespoke
+char-widen/global-load shortcuts.
+
 ## What we explicitly defer
 
 - Templates, namespaces, RTTI, exceptions (not in BC2.0 to relevant
