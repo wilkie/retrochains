@@ -2237,6 +2237,59 @@ impl<'a> FunctionEmitter<'a> {
             let _ = write!(self.out, "\tpush\tword ptr {lo_addr}\r\n");
             return;
         }
+        // Long arg from a two-lvalue arith/bitwise expression
+        // (`f(a + b)`, `f(a & b)`, …). Compute into AX:DX using the
+        // memory-dest register convention (AX=high, DX=low), then
+        // push high (AX) first / low (DX) second so the long lands
+        // on the stack with low at the lower address. Fixture 386.
+        if let ExprKind::BinOp { op, left, right } = &arg.kind
+            && let Some((lo_op, hi_op)) = long_pair_op(*op)
+            && let Some((a_hi, a_lo)) = self.long_lvalue_addr_pair(left)
+            && let Some((b_hi, b_lo)) = self.long_lvalue_addr_pair(right)
+        {
+            let _ = write!(self.out, "\tmov\tax,word ptr {a_hi}\r\n");
+            let _ = write!(self.out, "\tmov\tdx,word ptr {a_lo}\r\n");
+            let _ = write!(self.out, "\t{lo_op}\tdx,word ptr {b_lo}\r\n");
+            let _ = write!(self.out, "\t{hi_op}\tax,word ptr {b_hi}\r\n");
+            self.out.extend_from_slice(b"\tpush\tax\r\n");
+            self.out.extend_from_slice(b"\tpush\tdx\r\n");
+            return;
+        }
+        // Long arg from a long-returning function call (`f(g())`
+        // where `long g();`). The call leaves the result in DX:AX
+        // (cdecl long-return ABI: DX=high, AX=low) — so to push
+        // high first BCC emits `push dx; push ax`. Note the
+        // *order* of pushes is flipped relative to the memory-
+        // dest path (fixture 386: `push ax; push dx`), because
+        // the producer step left the registers in the opposite
+        // convention. The push pair adapts to whatever the producer
+        // left in DX:AX. Fixture 387.
+        if let ExprKind::Call { name: fname, args } = &arg.kind
+            && args.is_empty()
+        {
+            let _ = write!(self.out, "\tcall\tnear ptr _{fname}\r\n");
+            self.out.extend_from_slice(b"\tpush\tdx\r\n");
+            self.out.extend_from_slice(b"\tpush\tax\r\n");
+            return;
+        }
+        // Long arg from a long mul (`f(g * h)`). Same passthrough
+        // pattern as the call case: helper returns DX:AX = high:
+        // low, so `push dx; push ax`. First operand → CX:BX,
+        // second → DX:AX (helper convention). Fixture 388.
+        if let ExprKind::BinOp { op: BinOp::Mul, left, right } = &arg.kind
+            && let Some((a_hi, a_lo)) = self.long_lvalue_addr_pair(left)
+            && let Some((b_hi, b_lo)) = self.long_lvalue_addr_pair(right)
+        {
+            let _ = write!(self.out, "\tmov\tcx,word ptr {a_hi}\r\n");
+            let _ = write!(self.out, "\tmov\tbx,word ptr {a_lo}\r\n");
+            let _ = write!(self.out, "\tmov\tdx,word ptr {b_hi}\r\n");
+            let _ = write!(self.out, "\tmov\tax,word ptr {b_lo}\r\n");
+            self.out.extend_from_slice(b"\tcall\tnear ptr N_LXMUL@\r\n");
+            self.helpers.insert("N_LXMUL@".to_string());
+            self.out.extend_from_slice(b"\tpush\tdx\r\n");
+            self.out.extend_from_slice(b"\tpush\tax\r\n");
+            return;
+        }
         panic!("non-constant long argument not yet supported (no fixture)");
     }
 
