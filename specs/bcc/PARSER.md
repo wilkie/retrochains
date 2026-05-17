@@ -378,7 +378,34 @@ returning `Vec<Global>` — the comma loop mirrors the existing
 local-decl multi-declarator handling. Each tail declarator
 re-applies its own pointer stars and array suffix to a fresh
 copy of the base type, exactly like `int *a, b;` does for
-locals (fixture `174`).
+locals (fixture `174`). Per-declarator initializers
+(`int a = 1, b = 2, c = 3;` — fixture `479`) and mixed forms
+(`int *p, y;` — fixture `480`, `extern int e1, e2;` —
+fixture `481`) all flow through the same loop.
+
+### `&<global>` at runtime
+
+Fixture `480` exposed two gaps:
+
+1. **`&<global>` in runtime expression position** —
+   `emit_address_of` only handled stack-resident locals. Now also
+   emits `mov ax, offset DGROUP:_<g>` for globals.
+2. **`<ptr-global> = &<global>;` direct immediate-store form** —
+   `mov word ptr DGROUP:_p, offset DGROUP:_x` (`C7 06 <p-disp>
+   <x-imm>`, 6 bytes with TWO FIXUPPs — one on each disp16). Added
+   as `Instr::MovGroupSymOffsetGroupSym`; encoder reuses
+   `emit_group_sym_lea` for the dst-disp FIXUPP and a new
+   `emit_group_sym_imm16` helper for the src-imm FIXUPP (same
+   shape, minus the opcode prefix). Without this special case the
+   codegen bounces through AX (`mov ax, offset _x / mov [_p], ax`,
+   5 bytes — shorter, but not what BCC emits).
+
+### Data-extern emit order
+
+The data-extern emit loop walks `unit.globals.iter().rev()`.
+Single-extern fixtures never exposed the rule; fixture `481`
+(`extern int e1, e2;`) pinned reverse-declaration order:
+`extrn _e2:word` first, then `extrn _e1:word`.
 
 ## Comma operator
 
