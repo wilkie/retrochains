@@ -925,11 +925,20 @@ impl<'a> FunctionEmitter<'a> {
         case_slots: &[u32],
         end_slot: u32,
     ) {
-        // Load scrutinee into AX. Today only an ident-as-int — chars
-        // or non-trivial scrutinee expressions need fixtures to pin
-        // the exact shape (e.g. byte-register-then-cbw).
+        // Load scrutinee into AX. Most cases are bare idents (with
+        // char-vs-int-vs-global routing), but non-trivial expressions
+        // like `switch (x + 1)` fall through to the generic
+        // expression evaluator. Fixture 544.
+        let scrut_loaded = match &scrutinee.kind {
+            ExprKind::Ident(_) => false,
+            _ => {
+                self.emit_expr_to_ax(scrutinee);
+                true
+            }
+        };
+        if !scrut_loaded {
         let ExprKind::Ident(name) = &scrutinee.kind else {
-            panic!("non-ident switch scrutinee not yet supported (no fixture)");
+            unreachable!();
         };
         if let Some(gty) = self.globals.type_of(name) {
             assert!(
@@ -966,6 +975,7 @@ impl<'a> FunctionEmitter<'a> {
                     }
                 }
             }
+        }
         }
         // Compare/branch chain: one cmp+je per non-default case in
         // source order. `case 0` uses `or ax,ax` (cf. fixture 072).
@@ -3438,15 +3448,24 @@ impl<'a> FunctionEmitter<'a> {
         );
         match op {
             BinOp::Add | BinOp::Sub => {
+                // Pointer compound add/sub: scale the RHS by the
+                // pointee's size in bytes (C pointer arithmetic).
+                // Fixture 542 (`int *p; p += 2` → `add si, 4` since
+                // `sizeof(int)==2`).
+                let stride = self
+                    .locals
+                    .type_of(name)
+                    .pointee()
+                    .map_or(1u32, |p| u32::from(p.size_bytes()));
                 if let Some(v) = try_const_eval(value) {
-                    let v16 = v & 0xFFFF;
-                    if v16 == 1 {
+                    let scaled = (v & 0xFFFF).wrapping_mul(stride) & 0xFFFF;
+                    if scaled == 1 {
                         let mnem = if matches!(op, BinOp::Add) { "inc" } else { "dec" };
                         let _ = write!(self.out, "\t{mnem}\t{}\r\n", reg.name());
                         return;
                     }
                     let mnem = if matches!(op, BinOp::Add) { "add" } else { "sub" };
-                    let _ = write!(self.out, "\t{mnem}\t{},{v16}\r\n", reg.name());
+                    let _ = write!(self.out, "\t{mnem}\t{},{scaled}\r\n", reg.name());
                     return;
                 }
                 let src = self.resolve_operand_source(value);
