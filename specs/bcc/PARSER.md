@@ -310,11 +310,24 @@ Pinning fixtures:
 - 498 (`_msg`, `_main`) — long DATA global (`msg[16] = "hello"`)
   → forward → `_main, _msg`.
 
+Fixture `506` (`int helper(int); int main { return helper(7); }
+int helper(int x) { ... }`) adds a third trigger: a function
+prototype (`body: None` followed later by a matching definition)
+flips the order to forward. Updated rule:
+
+- If `(long has global AND short has global)` OR `long has an
+  initialized DATA global` OR `there is any function prototype`,
+  use **forward** alphabetical for the long bucket.
+- Otherwise use **reverse**.
+
+Pinning fixture: 506 → forward → `_helper, _main`.
+
 The intuition is that BCC's internal iteration order is sensitive
 to which symbol table buckets are non-empty: initialized-data
-globals and short-named globals both leave a record that flips a
-"forward iteration" mode for the long bucket. The exact mechanism
-remains unclear; further fixtures may force more refinement.
+globals, short-named globals, and seen-twice symbols (prototype +
+def) all leave a record that flips a "forward iteration" mode for
+the long bucket. The exact mechanism remains unclear; further
+fixtures may force more refinement.
 
 ## `signed` keyword
 
@@ -681,6 +694,48 @@ sequence. The `emit_compare` int-global shortcut now triggers
 for any global whose type has a pointee, in addition to plain
 `int`/`unsigned`. The same `83 3E disp16 ii` (imm8sx) encoding
 applies; no new IR was needed.
+
+## Forward function declaration
+
+Fixture `506` (`int helper(int); int main(void) { return
+helper(7); } int helper(int x) { return x + 1; }`) — a
+function prototype followed later by the matching definition.
+Two parser changes:
+
+- `parse_param_list` now allows anonymous parameters (`int
+  helper(int)` with no parameter name). When the token after a
+  type is `,` or `)`, the parser synthesizes
+  `__anon_param_<n>` as the name. Codegen never references these
+  for a prototype-only Function (the body is `None`), so the
+  synthesized name is purely a slot-filler.
+- The publics ordering rule gains a third trigger: presence of
+  any function prototype (`body: None`) flips the long-bucket
+  emission to forward alphabetical. 506's expected output has
+  `_helper, _main` (alphabetical), where 095/179 with no
+  prototype use reverse.
+
+The prototype itself is emitted as a no-op (no asm, no PUBDEF).
+Only the actual definition contributes a `public _helper` line.
+
+## `for(;;)` — empty condition
+
+Fixture `507` (`int main(void) { int i; i = 0; for(;;) { if
+(i > 5) break; i = i + 1; } return i; }`) — when the for's cond
+is absent the trampoline `jmp short <check>` at loop entry is
+elided. BCC layouts the body directly at the loop label and
+falls through into the test/body without first jumping past the
+nothing-to-check guard. `emit_for` now skips the trampoline
+when `cond.is_none()`.
+
+## Adjacent string literal concatenation
+
+Fixture `508` (`char *s = "Hello, " "World";`) — C90 specifies
+that adjacent string-literal tokens concatenate at translation
+time. `parse_primary`'s StringLit arm now peeks for further
+StringLit tokens, appending their bytes (and extending the
+span) before returning a single `ExprKind::StringLit`. The
+combined literal flows through the existing pool path, so
+nothing downstream needed to change.
 
 ## What we explicitly defer
 
