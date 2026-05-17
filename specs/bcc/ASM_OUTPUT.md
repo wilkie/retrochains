@@ -442,6 +442,14 @@ skips over local-variable assignments leaves register-allocation
 decisions unchanged: any local that would have enregistered without
 the `goto` still does (fixture `439`).
 
+The same "user label as a transparent label" rule extends to every
+enclosing construct tried so far: `goto` out of a `for` body
+(fixture `440`), `goto` from a nested `if` body (fixture `441`),
+and `goto` inside a `do-while` body (fixture `442`). None of these
+shift surrounding slot-numbered labels; the loop/if itself reserves
+the same slots it would without the `goto`, and the user label
+lands wherever the C source puts it relative to those slots.
+
 ### `if (cond) goto label;`
 
 The same inverted-test pattern used by `if`/`if-else` applies — the
