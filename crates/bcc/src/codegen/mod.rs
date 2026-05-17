@@ -5869,9 +5869,28 @@ impl<'a> FunctionEmitter<'a> {
         else_value: &Expr,
     ) {
         let base = self.label_plan.base(span_start);
+        // Some compare shapes need an explicit then-entry label so the
+        // 3-jump long-vs-K cmp pattern (and `||` short-circuit-to-true)
+        // can land at the start of the then-arm. Mirrors the same
+        // pre-allocation logic in `emit_if`. Fixture 433 (`g > 0 ? 1
+        // : 0` for long `g`).
+        let cond_has_top_or = matches!(
+            cond.kind,
+            ExprKind::Logical { op: LogicalOp::Or, .. }
+        );
+        let needs_then_entry = cond_has_top_or
+            || self.is_long_signed_globals_cmp(cond)
+            || self.is_long_signed_const_cmp(cond)
+            || self.is_long_vs_int_cmp(cond)
+            || self.is_long_vs_int_ne(cond)
+            || self.is_long_ne_const(cond);
+        let true_slot = if needs_then_entry { Some(base) } else { None };
         let false_slot = base + 1;
         let merge_slot = base + 2;
-        self.emit_cond_branch(cond, None, Some(false_slot));
+        self.emit_cond_branch(cond, true_slot, Some(false_slot));
+        if let Some(t) = true_slot {
+            self.emit_label(t);
+        }
         self.emit_expr_to_ax(then_value);
         let _ = write!(
             self.out,
