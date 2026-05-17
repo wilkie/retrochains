@@ -722,6 +722,10 @@ fn walk_calls_expr(
                 walk_calls_expr(item, defined, locals, seen, ordered);
             }
         }
+        ExprKind::Comma { left, right } => {
+            walk_calls_expr(left, defined, locals, seen, ordered);
+            walk_calls_expr(right, defined, locals, seen, ordered);
+        }
         ExprKind::Ident(_)
         | ExprKind::IntLit(_)
         | ExprKind::StringLit(_)

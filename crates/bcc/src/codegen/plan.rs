@@ -430,6 +430,10 @@ fn plan_expr_value(e: &Expr, ctx: &mut PlanCtx) {
                 plan_expr_value(item, ctx);
             }
         }
+        ExprKind::Comma { left, right } => {
+            plan_expr_value(left, ctx);
+            plan_expr_value(right, ctx);
+        }
         ExprKind::IntLit(_)
         | ExprKind::Ident(_)
         | ExprKind::Update { .. }

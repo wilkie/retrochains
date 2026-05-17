@@ -466,6 +466,14 @@ pub enum ExprKind {
     /// element type. No runtime semantics — codegen consumes this
     /// only at file-scope-init time today (fixture 189).
     InitList { items: Vec<Expr> },
+    /// `<left>, <right>` — comma operator at expression level. Left
+    /// evaluates for side effects; right's value is the expression's
+    /// value. Only appears in contexts where the C grammar permits a
+    /// *comma-expression* (parenthesized, or at the top of an
+    /// expression statement). Inside argument lists or initializer
+    /// braces the comma is a separator, not the operator. Fixture
+    /// 469.
+    Comma { left: Box<Expr>, right: Box<Expr> },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

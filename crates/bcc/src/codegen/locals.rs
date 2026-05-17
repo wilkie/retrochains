@@ -569,6 +569,10 @@ fn expr_address_taken(e: &Expr, out: &mut HashSet<String>) {
                 expr_address_taken(item, out);
             }
         }
+        ExprKind::Comma { left, right } => {
+            expr_address_taken(left, out);
+            expr_address_taken(right, out);
+        }
         ExprKind::IntLit(_)
         | ExprKind::Ident(_)
         | ExprKind::Update { .. }
@@ -671,6 +675,7 @@ fn expr_has_call(e: &Expr) -> bool {
         }
         ExprKind::Cast { operand, .. } => expr_has_call(operand),
         ExprKind::InitList { items } => items.iter().any(expr_has_call),
+        ExprKind::Comma { left, right } => expr_has_call(left) || expr_has_call(right),
         ExprKind::Update { .. }
         | ExprKind::Ident(_)
         | ExprKind::IntLit(_)
@@ -981,6 +986,10 @@ fn count_uses_expr(e: &Expr, counts: &mut HashMap<String, u32>) {
             for item in items {
                 count_uses_expr(item, counts);
             }
+        }
+        ExprKind::Comma { left, right } => {
+            count_uses_expr(left, counts);
+            count_uses_expr(right, counts);
         }
     }
 }

@@ -556,6 +556,13 @@ impl<'a> FunctionEmitter<'a> {
                 let ty = self.locals.type_of(target).clone();
                 self.emit_assign_local(loc, &ty, value);
             }
+            ExprKind::Comma { left, right } => {
+                // Both halves of a comma in discard position are
+                // themselves discarded — neither contributes a value.
+                // Fixture 469's `a = 1, b = 2, ...` chain.
+                self.emit_expr_discard(left);
+                self.emit_expr_discard(right);
+            }
             _ => {
                 self.emit_expr_to_ax(expr);
             }
@@ -5945,6 +5952,13 @@ impl<'a> FunctionEmitter<'a> {
             ExprKind::InitList { .. } => {
                 panic!("initializer list not legal in value position");
             }
+            ExprKind::Comma { left, right } => {
+                // Comma operator: emit left for side effects (as if
+                // it were an expression statement) then emit right's
+                // value into AX. Fixture 469.
+                self.emit_expr_discard(left);
+                self.emit_expr_to_ax(right);
+            }
         }
     }
 
@@ -6210,6 +6224,9 @@ impl<'a> FunctionEmitter<'a> {
             }
             ExprKind::InitList { .. } => {
                 panic!("initializer list not legal as a binary-op operand")
+            }
+            ExprKind::Comma { .. } => {
+                panic!("comma expression as right operand of a binary op not yet supported (no fixture)")
             }
         }
     }

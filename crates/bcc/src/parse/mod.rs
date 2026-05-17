@@ -147,18 +147,18 @@ impl Parser {
             // bare-struct path above).
             match self.peek_n(probe).kind {
                 TokenKind::KwInt | TokenKind::KwChar => probe += 1,
-                TokenKind::KwUnsigned | TokenKind::KwLong => {
+                TokenKind::KwUnsigned | TokenKind::KwLong | TokenKind::KwSigned => {
                     probe += 1;
-                    // `unsigned long` and `long unsigned` are valid
-                    // pairings — consume the partner keyword if
-                    // present before scanning for the optional `int`.
+                    // `unsigned long`, `long unsigned`, `signed long`,
+                    // `long signed` are all valid pairings — consume
+                    // the partner keyword if present.
                     if matches!(
                         self.peek_n(probe).kind,
-                        TokenKind::KwLong | TokenKind::KwUnsigned
+                        TokenKind::KwLong | TokenKind::KwUnsigned | TokenKind::KwSigned
                     ) {
                         probe += 1;
                     }
-                    // `unsigned char` — single-byte unsigned form.
+                    // `unsigned char` / `signed char` — single-byte form.
                     if matches!(self.peek_n(probe).kind, TokenKind::KwChar) {
                         probe += 1;
                     }
@@ -379,6 +379,28 @@ impl Parser {
                     self.bump();
                 }
                 Ok(Type::UInt)
+            }
+            TokenKind::KwSigned => {
+                self.bump();
+                // `signed long [int]` — 32-bit signed (same as `long`).
+                if matches!(self.peek().kind, TokenKind::KwLong) {
+                    self.bump();
+                    if matches!(self.peek().kind, TokenKind::KwInt) {
+                        self.bump();
+                    }
+                    return Ok(Type::Long);
+                }
+                // `signed char` — 1-byte signed (same as plain `char`).
+                if matches!(self.peek().kind, TokenKind::KwChar) {
+                    self.bump();
+                    return Ok(Type::Char);
+                }
+                // `signed int` and bare `signed` are both signed-int
+                // (= plain `int`); consume the optional `int`.
+                if matches!(self.peek().kind, TokenKind::KwInt) {
+                    self.bump();
+                }
+                Ok(Type::Int)
             }
             TokenKind::KwLong => {
                 self.bump();
@@ -1899,7 +1921,25 @@ impl Parser {
             TokenKind::LParen => {
                 // Parenthesized expression. The parens don't survive
                 // into the AST — they only affect parse precedence.
-                let inner = self.parse_expr()?;
+                // Comma operator is permitted inside parens: chain
+                // `<ident-or-expr>, <expr>, ...` into nested `Comma {
+                // left, right }` nodes (left-associative). Each
+                // element parses via `parse_for_clause_expr` so that
+                // `(a = 1, b = 2, a + b)` recognizes the assignment-
+                // expressions as well. Fixture 469.
+                let mut inner = self.parse_for_clause_expr()?;
+                while matches!(self.peek().kind, TokenKind::Comma) {
+                    self.bump();
+                    let right = self.parse_for_clause_expr()?;
+                    let span = Span::new(inner.span.start, right.span.end);
+                    inner = Expr {
+                        kind: ExprKind::Comma {
+                            left: Box::new(inner),
+                            right: Box::new(right),
+                        },
+                        span,
+                    };
+                }
                 let close = self.expect(&TokenKind::RParen)?;
                 Ok(Expr {
                     kind: inner.kind,

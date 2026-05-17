@@ -36,7 +36,8 @@ pub fn try_const_eval(e: &Expr) -> Option<u32> {
         | ExprKind::StringLit(_)
         | ExprKind::Member { .. }
         | ExprKind::Ternary { .. }
-        | ExprKind::InitList { .. } => None,
+        | ExprKind::InitList { .. }
+        | ExprKind::Comma { .. } => None,
         ExprKind::Cast { ty, operand } => {
             let v = try_const_eval(operand)?;
             // Truncate to the target type's width, then sign-extend
