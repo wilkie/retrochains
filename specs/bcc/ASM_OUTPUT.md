@@ -1441,6 +1441,51 @@ the 15-byte sequence `B8 ?? ?? 1E 50 B8 ?? ?? 1E 50 B9 NN 00 E8
 ?? ??` means struct copy of `NN` bytes via `N_SCOPY@`. The CX
 immediate gives the struct's exact byte size.
 
+**Stack-resident operands** swap the segment register half of
+the far pointer: `PUSH DS` (`1E`) is used for DGROUP-resident
+operands, `PUSH SS` (`16`) for stack-resident operands. The
+offset half is computed at runtime via `LEA AX, [bp+off]`
+(instead of `mov AX, OFFSET _sym` for DGROUP operands), since
+stack offsets aren't fixupable. Either side (dest or src) picks
+its segment-register independently based on its own storage —
+so a stack-to-global copy would emit `PUSH SS / PUSH AX`
+(stack dest) followed by `PUSH DS / PUSH AX` (global src), and
+stack-to-stack uses `PUSH SS` twice:
+
+```
+; struct S a; a = b;  for `b` a global, `a` stack-resident,
+; > 4-byte struct (fixture 416)
+lea ax, word ptr [bp-6]          ; stack offset of dest
+push ss                          ; far-ptr segment is SS for stack
+push ax
+mov ax, offset DGROUP:_b         ; DGROUP offset of src
+push ds                          ; far-ptr segment is DS for globals
+push ax
+mov cx, 6
+call near ptr N_SCOPY@
+
+; both stack:  struct S a, b; a = b;  > 4-byte (fixture 418)
+lea ax, word ptr [bp-6]          ; dest
+push ss
+push ax
+lea ax, word ptr [bp-12]         ; src — also stack-resident
+push ss                          ; → both segments are SS
+push ax
+mov cx, 6
+call near ptr N_SCOPY@
+```
+
+For 4-byte structs at stack-to-stack (fixture 417), the inline
+AX:DX shape applies with both load and store bp-relative —
+byte-identical to a `long y; long x = y;` stack-to-stack copy:
+
+```
+mov ax, word ptr [bp-6]          ; src high
+mov dx, word ptr [bp-8]          ; src low
+mov word ptr [bp-2], ax          ; dest high
+mov word ptr [bp-4], dx          ; dest low
+```
+
 ### Struct pointer as parameter (`106`)
 
 A `struct s *p` parameter behaves exactly like an `int *p`
