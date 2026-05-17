@@ -273,6 +273,12 @@ fn instr_size(instr: &Instr) -> usize {
         | Instr::AdcBpRelAx { .. }
         | Instr::SubBpRelDx { .. }
         | Instr::SbbBpRelAx { .. }
+        | Instr::AndBpRelDx { .. }
+        | Instr::AndBpRelAx { .. }
+        | Instr::OrBpRelDx { .. }
+        | Instr::OrBpRelAx { .. }
+        | Instr::XorBpRelDx { .. }
+        | Instr::XorBpRelAx { .. }
         | Instr::SubAxBpRel { .. }
         | Instr::AndAxBpRel { .. }
         | Instr::OrAxBpRel { .. }
@@ -578,6 +584,42 @@ fn emit_instr(
             // `sbb word ptr [bp+disp8],ax` → 19 46 dd.
             let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
             out.push(0x19);
+            out.push(0x46);
+            out.push(disp as u8);
+        }
+        Instr::AndBpRelDx { offset } => {
+            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
+            out.push(0x21);
+            out.push(0x56);
+            out.push(disp as u8);
+        }
+        Instr::AndBpRelAx { offset } => {
+            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
+            out.push(0x21);
+            out.push(0x46);
+            out.push(disp as u8);
+        }
+        Instr::OrBpRelDx { offset } => {
+            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
+            out.push(0x09);
+            out.push(0x56);
+            out.push(disp as u8);
+        }
+        Instr::OrBpRelAx { offset } => {
+            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
+            out.push(0x09);
+            out.push(0x46);
+            out.push(disp as u8);
+        }
+        Instr::XorBpRelDx { offset } => {
+            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
+            out.push(0x31);
+            out.push(0x56);
+            out.push(disp as u8);
+        }
+        Instr::XorBpRelAx { offset } => {
+            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
+            out.push(0x31);
             out.push(0x46);
             out.push(disp as u8);
         }

@@ -2536,14 +2536,15 @@ impl<'a> FunctionEmitter<'a> {
                 _ => {}
             }
         }
-        // Long stack-local compound `+=` / `-=` with a long stack-
-        // local RHS (non-constant). Load y into AX:DX (AX=high,
-        // DX=low — globals convention since dest is memory), then
-        // `add [bp+x_lo], dx` + `adc [bp+x_hi], ax` (or sub/sbb).
-        // Fixture 339.
+        // Long stack-local compound `+=` / `-=` / `&=` / `|=` / `^=`
+        // with a long stack-local RHS (non-constant). Load y into
+        // AX:DX (AX=high, DX=low — globals convention since dest is
+        // memory), then memory-direct store with `<op> [mem], reg`.
+        // Arith uses carry/borrow propagation, bitwise repeats the
+        // same mnemonic. Fixtures 339, 340, 342, 343, 344.
         if self.locals.has(name)
             && self.locals.type_of(name).is_long_like()
-            && matches!(op, BinOp::Add | BinOp::Sub)
+            && let Some((lo_op, hi_op)) = long_pair_op(op)
             && let ExprKind::Ident(rhs_name) = &value.kind
             && self.locals.has(rhs_name)
             && self.locals.type_of(rhs_name).is_long_like()
@@ -2553,15 +2554,72 @@ impl<'a> FunctionEmitter<'a> {
             else {
                 unreachable!("long is never register-resident");
             };
-            let (lo_op, hi_op) = if matches!(op, BinOp::Add) {
-                ("add", "adc")
-            } else {
-                ("sub", "sbb")
-            };
             let _ = write!(self.out, "\tmov\tax,word ptr {}\r\n", bp_addr(y_off + 2));
             let _ = write!(self.out, "\tmov\tdx,word ptr {}\r\n", bp_addr(y_off));
             let _ = write!(self.out, "\t{lo_op}\tword ptr {},dx\r\n", bp_addr(x_off));
             let _ = write!(self.out, "\t{hi_op}\tword ptr {},ax\r\n", bp_addr(x_off + 2));
+            return;
+        }
+        // Long stack-local compound `*=` with a long stack-local RHS.
+        // Helper convention swaps from the `z = x * y` shape: here
+        // the destination is `x`, so x goes to DX:AX (where the
+        // helper deposits the result) and y goes to CX:BX. Fixture
+        // 345.
+        if self.locals.has(name)
+            && self.locals.type_of(name).is_long_like()
+            && matches!(op, BinOp::Mul)
+            && let ExprKind::Ident(rhs_name) = &value.kind
+            && self.locals.has(rhs_name)
+            && self.locals.type_of(rhs_name).is_long_like()
+        {
+            let (LocalLocation::Stack(x_off), LocalLocation::Stack(y_off)) =
+                (self.locals.location_of(name), self.locals.location_of(rhs_name))
+            else {
+                unreachable!("long is never register-resident");
+            };
+            let _ = write!(self.out, "\tmov\tcx,word ptr {}\r\n", bp_addr(y_off + 2));
+            let _ = write!(self.out, "\tmov\tbx,word ptr {}\r\n", bp_addr(y_off));
+            let _ = write!(self.out, "\tmov\tdx,word ptr {}\r\n", bp_addr(x_off + 2));
+            let _ = write!(self.out, "\tmov\tax,word ptr {}\r\n", bp_addr(x_off));
+            self.out.extend_from_slice(b"\tcall\tnear ptr N_LXMUL@\r\n");
+            self.helpers.insert("N_LXMUL@".to_string());
+            let _ = write!(self.out, "\tmov\tword ptr {},dx\r\n", bp_addr(x_off + 2));
+            let _ = write!(self.out, "\tmov\tword ptr {},ax\r\n", bp_addr(x_off));
+            return;
+        }
+        // Long stack-local compound `/=` / `%=` with a long stack-
+        // local RHS. Same push convention as the `z = x / y` shape
+        // (fixtures 337/338) but result lands back in x. Fixtures
+        // 346, 347.
+        if self.locals.has(name)
+            && self.locals.type_of(name).is_long_like()
+            && matches!(op, BinOp::Div | BinOp::Mod)
+            && let ExprKind::Ident(rhs_name) = &value.kind
+            && self.locals.has(rhs_name)
+            && self.locals.type_of(rhs_name).is_long_like()
+        {
+            let (LocalLocation::Stack(x_off), LocalLocation::Stack(y_off)) =
+                (self.locals.location_of(name), self.locals.location_of(rhs_name))
+            else {
+                unreachable!("long is never register-resident");
+            };
+            let unsigned = self.locals.type_of(name).is_unsigned()
+                || self.locals.type_of(rhs_name).is_unsigned();
+            let helper = match (op, unsigned) {
+                (BinOp::Div, false) => "N_LDIV@",
+                (BinOp::Mod, false) => "N_LMOD@",
+                (BinOp::Div, true)  => "N_LUDIV@",
+                (BinOp::Mod, true)  => "N_LUMOD@",
+                _ => unreachable!(),
+            };
+            let _ = write!(self.out, "\tpush\tword ptr {}\r\n", bp_addr(y_off + 2));
+            let _ = write!(self.out, "\tpush\tword ptr {}\r\n", bp_addr(y_off));
+            let _ = write!(self.out, "\tpush\tword ptr {}\r\n", bp_addr(x_off + 2));
+            let _ = write!(self.out, "\tpush\tword ptr {}\r\n", bp_addr(x_off));
+            let _ = write!(self.out, "\tcall\tnear ptr {helper}\r\n");
+            self.helpers.insert(helper.to_string());
+            let _ = write!(self.out, "\tmov\tword ptr {},dx\r\n", bp_addr(x_off + 2));
+            let _ = write!(self.out, "\tmov\tword ptr {},ax\r\n", bp_addr(x_off));
             return;
         }
         let LocalLocation::Reg(reg) = self.locals.location_of(name) else {

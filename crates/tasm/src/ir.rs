@@ -193,6 +193,22 @@ pub enum Instr {
     /// `sbb word ptr [bp+disp8],ax` — `19 46 dd`. Borrow-propagation
     /// partner to `SubBpRelDx`.
     SbbBpRelAx { offset: i16 },
+    /// `and word ptr [bp+disp8],dx` — `21 56 dd`. Long-stack compound
+    /// `&=` low half with register-loaded RHS (fixture 342).
+    AndBpRelDx { offset: i16 },
+    /// `and word ptr [bp+disp8],ax` — `21 46 dd`. High-half partner
+    /// to `AndBpRelDx`.
+    AndBpRelAx { offset: i16 },
+    /// `or word ptr [bp+disp8],dx` — `09 56 dd`. Long-stack compound
+    /// `|=` low half with register-loaded RHS (fixture 343).
+    OrBpRelDx { offset: i16 },
+    /// `or word ptr [bp+disp8],ax` — `09 46 dd`.
+    OrBpRelAx { offset: i16 },
+    /// `xor word ptr [bp+disp8],dx` — `31 56 dd`. Long-stack compound
+    /// `^=` low half with register-loaded RHS (fixture 344).
+    XorBpRelDx { offset: i16 },
+    /// `xor word ptr [bp+disp8],ax` — `31 46 dd`.
+    XorBpRelAx { offset: i16 },
     /// `add <dst>,<src>` between 16-bit registers — 03 xx with
     /// ModR/M mod=11 reg=dst r/m=src. Used to fold a register-resident
     /// operand into AX (fixture 127: `add ax,si`).

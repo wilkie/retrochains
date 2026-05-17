@@ -896,6 +896,12 @@ fn parse_and(operands: &str, line_no: usize) -> AsmResult<Instr> {
         if let Some(imm) = parse_imm16(rhs) {
             return Ok(Instr::AndBpRelImm16 { offset, imm: imm as u16 });
         }
+        if rhs == "dx" {
+            return Ok(Instr::AndBpRelDx { offset });
+        }
+        if rhs == "ax" {
+            return Ok(Instr::AndBpRelAx { offset });
+        }
     }
     parse_alu_ax_mem(operands, line_no, "and", |o| Instr::AndAxBpRel { offset: o })
 }
@@ -1484,6 +1490,12 @@ fn parse_or(operands: &str, line_no: usize) -> AsmResult<Instr> {
         if let Some(imm) = parse_imm16(rhs) {
             return Ok(Instr::OrBpRelImm16 { offset, imm: imm as u16 });
         }
+        if rhs == "dx" {
+            return Ok(Instr::OrBpRelDx { offset });
+        }
+        if rhs == "ax" {
+            return Ok(Instr::OrBpRelAx { offset });
+        }
     }
     Err(AsmError::new(
         line_no,
@@ -1546,6 +1558,12 @@ fn parse_xor(operands: &str, line_no: usize) -> AsmResult<Instr> {
     if let Some(offset) = parse_word_bp_relative(lhs) {
         if let Some(imm) = parse_imm16(rhs) {
             return Ok(Instr::XorBpRelImm16 { offset, imm: imm as u16 });
+        }
+        if rhs == "dx" {
+            return Ok(Instr::XorBpRelDx { offset });
+        }
+        if rhs == "ax" {
+            return Ok(Instr::XorBpRelAx { offset });
         }
     }
     Err(AsmError::new(
