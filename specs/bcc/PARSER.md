@@ -289,6 +289,39 @@ reverse-alpha `_main, _buf` that would otherwise apply. Function-
 only and helper-only cases (095, 179, 260) collapse to the same
 result either way because the relevant subgroup is empty.
 
+## `signed` keyword
+
+`signed`, `signed char`, `signed int`, `signed long [int]`,
+`long signed [int]` are all accepted by `parse_type` and lower to
+the corresponding signed types (`Type::Int`, `Type::Char`,
+`Type::Long`). Codegen is identical to the unprefixed forms
+since BCC's plain `char`/`int`/`long` are already signed. Fixtures
+`467` (`signed char`) and `468` (`signed int`) round-trip to the
+same bytes as the unprefixed equivalents — the keyword is purely
+front-end.
+
+## Comma operator
+
+`<expr>, <expr>` at expression level is a comma operator —
+distinct from the comma as argument-list / init-list separator.
+C grammar only permits it in a *comma-expression* context:
+parenthesized expressions and the top of expression statements.
+Implementation only handles the parenthesized form for now
+(`g = (a = 1, b = 2, a + b);` — fixture `469`).
+
+Each element inside the parens is parsed via
+`parse_for_clause_expr`, which already recognizes
+`<ident> = <expr>` as `ExprKind::AssignExpr`. The comma-separated
+elements chain left-associatively into nested
+`ExprKind::Comma { left, right }` nodes.
+
+Codegen: the left side is discarded (side effects only) and the
+right side produces the value. In `emit_expr_to_ax`, the comma
+maps to `emit_expr_discard(left)` then `emit_expr_to_ax(right)`.
+`emit_expr_discard` recursively handles Comma so nested chains
+like `(a = 1, b = 2, a + b)` discard all but the rightmost
+element correctly.
+
 ## What we explicitly defer
 
 - Templates, namespaces, RTTI, exceptions (not in BC2.0 to relevant
