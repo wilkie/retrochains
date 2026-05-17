@@ -4,7 +4,7 @@
 
 use crate::ir::{
     AsmError, AsmResult, Group, Instr, JmpCond, Module, Reg16, Reg8, SegAlign, SegCombine,
-    SegItem, Segment,
+    SegItem, Segment, SegReg,
 };
 use crate::lex::{tokenize, Line};
 
@@ -527,6 +527,13 @@ fn parse_mov(operands: &str, line_no: usize) -> AsmResult<Instr> {
     // dispatch so it catches every reg-to-reg pair uniformly.
     if let (Some(dst), Some(src)) = (Reg16::parse(lhs), Reg16::parse(rhs)) {
         return Ok(Instr::MovReg16Reg16 { dst, src });
+    }
+    // `mov <reg16>, <segreg>` — segment-register to general-purpose
+    // register copy (`mov dx, ds`, `mov dx, ss`). Used to form the
+    // segment half of a far pointer before calling helpers that
+    // take far pointers in DX:AX (e.g. `N_SPUSH@`). Fixture 420.
+    if let (Some(dst), Some(src)) = (Reg16::parse(lhs), SegReg::parse(rhs)) {
+        return Ok(Instr::MovReg16SegReg { dst, src });
     }
     // `mov bx,word ptr [bx]` — chain step for `**p` (fixture 195).
     if lhs == "bx" && rhs == "word ptr [bx]" {

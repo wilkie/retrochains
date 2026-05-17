@@ -1,0 +1,5 @@
+Borland C++  Version 2.0 Copyright (c) 1991 Borland International
+hello.c:
+Warning hello.c 2: Parameter 's' is never used in function f
+
+	Available memory 424048

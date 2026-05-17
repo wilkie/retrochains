@@ -2101,6 +2101,49 @@ impl<'a> FunctionEmitter<'a> {
                 // high then low. 4 bytes per arg. Fixture 216.
                 self.emit_long_arg_push(arg);
                 total_bytes += 4;
+            } else if let Type::Struct { .. } = &arg_ty {
+                // Struct-by-value arg. Two shapes by size:
+                //   - 4 bytes: push two words high-first, identical
+                //     to a long-arg push (fixture 419 byte-matches
+                //     fixture 322's long shape).
+                //   - > 4 bytes: route through `N_SPUSH@`. Helper
+                //     takes the source far pointer in DX:AX and the
+                //     byte count in CX; it pushes the bytes onto the
+                //     caller's stack in place. Fixture 420.
+                let size = arg_ty.size_bytes() as u32;
+                let ExprKind::Ident(src_name) = &arg.kind else {
+                    panic!("non-ident struct-by-value arg not yet supported (no fixture)");
+                };
+                let src_is_global = self.globals.type_of(src_name).is_some();
+                if size == 4 {
+                    if src_is_global {
+                        let _ = write!(self.out, "\tpush\tword ptr DGROUP:_{src_name}+2\r\n");
+                        let _ = write!(self.out, "\tpush\tword ptr DGROUP:_{src_name}\r\n");
+                    } else {
+                        let LocalLocation::Stack(src_off) = self.locals.location_of(src_name)
+                        else {
+                            panic!("struct local `{src_name}` not stack-resident");
+                        };
+                        let _ = write!(self.out, "\tpush\tword ptr {}\r\n", bp_addr(src_off + 2));
+                        let _ = write!(self.out, "\tpush\tword ptr {}\r\n", bp_addr(src_off));
+                    }
+                } else {
+                    if src_is_global {
+                        let _ = write!(self.out, "\tmov\tax,offset DGROUP:_{src_name}\r\n");
+                        self.out.extend_from_slice(b"\tmov\tdx,ds\r\n");
+                    } else {
+                        let LocalLocation::Stack(src_off) = self.locals.location_of(src_name)
+                        else {
+                            panic!("struct local `{src_name}` not stack-resident");
+                        };
+                        let _ = write!(self.out, "\tlea\tax,word ptr {}\r\n", bp_addr(src_off));
+                        self.out.extend_from_slice(b"\tmov\tdx,ss\r\n");
+                    }
+                    let _ = write!(self.out, "\tmov\tcx,{size}\r\n");
+                    self.out.extend_from_slice(b"\tcall\tnear ptr N_SPUSH@\r\n");
+                    self.helpers.insert("N_SPUSH@".to_string());
+                }
+                total_bytes += size;
             } else {
                 self.emit_arg_into_ax(arg, arg_ty);
                 self.out.extend_from_slice(b"\tpush\tax\r\n");

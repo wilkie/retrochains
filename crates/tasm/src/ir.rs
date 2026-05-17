@@ -521,6 +521,14 @@ pub enum Instr {
     /// than DS. Fixture 416 (stack-destination struct copy via
     /// `N_SCOPY@`).
     PushSs,
+    /// `mov <reg16>,<segreg>` — `8C` + ModR/M `mod=11 reg=<sreg>
+    /// r/m=<reg16>`. Copies a segment register's value into a
+    /// general-purpose register. BCC uses this to form the segment
+    /// half of a far pointer in DX before calling helpers that take
+    /// `DX:AX` far pointers (e.g. `N_SPUSH@`). The seg reg field is
+    /// 011=DS, 010=SS, 000=ES, 001=CS. Fixture 420 (`mov dx,ds`),
+    /// future stack-source variant (`mov dx,ss`).
+    MovReg16SegReg { dst: Reg16, src: SegReg },
     /// `cmp word ptr <group>:<symbol>[+<offset>], imm16` — Grp1
     /// r/m16,imm16 with /7=CMP and disp16-only addressing
     /// (`81 3E lo hi imm_lo imm_hi`, 6 bytes). Used when K is too
@@ -811,6 +819,36 @@ impl Reg16 {
             "bp" => Some(Self::Bp),
             "si" => Some(Self::Si),
             "di" => Some(Self::Di),
+            _ => None,
+        }
+    }
+}
+
+/// 8086 segment registers. The byte encoding goes in ModR/M's reg
+/// field for `MOV r/m, sreg` (opcode `8C`): ES=0, CS=1, SS=2, DS=3.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SegReg {
+    Es,
+    Cs,
+    Ss,
+    Ds,
+}
+
+impl SegReg {
+    pub fn code(self) -> u8 {
+        match self {
+            Self::Es => 0,
+            Self::Cs => 1,
+            Self::Ss => 2,
+            Self::Ds => 3,
+        }
+    }
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "es" => Some(Self::Es),
+            "cs" => Some(Self::Cs),
+            "ss" => Some(Self::Ss),
+            "ds" => Some(Self::Ds),
             _ => None,
         }
     }
