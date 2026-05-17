@@ -510,12 +510,22 @@ fn parse_mov(operands: &str, line_no: usize) -> AsmResult<Instr> {
     if lhs == "bx" && rhs == "word ptr [bx]" {
         return Ok(Instr::MovBxFromBxPtr);
     }
+    // `mov dx,word ptr [si]` — low-half read of `*p` for `p: long *`
+    // (fixture 309). Uses the shorter `8B 14` encoding (disp-less).
+    if lhs == "dx" && rhs == "word ptr [si]" {
+        return Ok(Instr::MovDxFromSiPtr);
+    }
     if lhs == "ax" {
         if rhs == "word ptr [si]" {
             return Ok(Instr::MovAxFromSiPtr);
         }
         if rhs == "word ptr [bx]" {
             return Ok(Instr::MovAxFromBxPtr);
+        }
+        // `mov ax,word ptr [si+disp8]` — high-half read of `*p`
+        // for `p: long *` (fixture 309).
+        if let Some(disp) = parse_word_si_disp(rhs) {
+            return Ok(Instr::MovAxSiDisp { disp });
         }
         // bx-indexed form first — `[bx]`/`[bx+K]` inside the symbol
         // part would otherwise get swallowed by `parse_group_symbol`.
@@ -676,6 +686,14 @@ fn parse_mov(operands: &str, line_no: usize) -> AsmResult<Instr> {
             return Ok(Instr::MovSiPtrImm { imm });
         }
     }
+    // LHS `word ptr [si+disp]` — store-imm to long pointer's high
+    // half (fixture 308: `*p = K` where `p: long *` in SI emits
+    // `mov word ptr [si+2], <high>` after the low-half partner).
+    if let Some(disp) = parse_word_si_disp(lhs) {
+        if let Some(imm) = parse_imm16(rhs) {
+            return Ok(Instr::MovSiDispImm { disp, imm });
+        }
+    }
     // LHS `word ptr [bx]` — store through BX pointer (fixture 144).
     if lhs == "word ptr [bx]" {
         if let Some(imm) = parse_imm16(rhs) {
@@ -787,6 +805,12 @@ fn parse_sub(operands: &str, line_no: usize) -> AsmResult<Instr> {
             return Ok(Instr::SubBpRelImm8 { offset, imm });
         }
     }
+    // `sub word ptr [si], imm8sx` — long-pointer `*p -= K` low half.
+    if lhs == "word ptr [si]" {
+        if let Some(imm) = parse_imm8_signed(rhs) {
+            return Ok(Instr::SubSiPtrImm8 { imm });
+        }
+    }
     // Otherwise: try the AX/mem form.
     parse_alu_ax_mem(operands, line_no, "sub", |o| Instr::SubAxBpRel { offset: o })
 }
@@ -895,6 +919,13 @@ fn parse_sbb(operands: &str, line_no: usize) -> AsmResult<Instr> {
             return Ok(Instr::SbbBpRelImm8 { offset, imm });
         }
     }
+    // `sbb word ptr [si+disp], imm8sx` — long-pointer `*p -= K`
+    // high-half borrow propagation.
+    if let Some(disp) = parse_word_si_disp(lhs) {
+        if let Some(imm) = parse_imm8_signed(rhs) {
+            return Ok(Instr::SbbSiDispImm8 { disp, imm });
+        }
+    }
     Err(AsmError::new(
         line_no,
         format!("sbb: unsupported operand form `{operands}`"),
@@ -959,6 +990,13 @@ fn parse_adc(operands: &str, line_no: usize) -> AsmResult<Instr> {
     if let Some(offset) = parse_word_bp_relative(lhs) {
         if let Some(imm) = parse_imm8_signed(rhs) {
             return Ok(Instr::AdcBpRelImm8 { offset, imm });
+        }
+    }
+    // `adc word ptr [si+disp], imm8sx` — long-pointer `*p += K`
+    // high-half carry propagation (fixture 311).
+    if let Some(disp) = parse_word_si_disp(lhs) {
+        if let Some(imm) = parse_imm8_signed(rhs) {
+            return Ok(Instr::AdcSiDispImm8 { disp, imm });
         }
     }
     Err(AsmError::new(
@@ -1589,6 +1627,19 @@ fn parse_group_symbol_with_width<'a>(s: &'a str, prefix: &str) -> Option<(&'a st
         return None;
     }
     Some((group, sym))
+}
+
+/// Parse `word ptr [si+K]` or `word ptr [si-K]` (also accepts `[si]`,
+/// returning disp=0). Returns the signed displacement.
+fn parse_word_si_disp(s: &str) -> Option<i8> {
+    let s = s.trim().strip_prefix("word ptr ")?;
+    let inside = s.strip_prefix('[')?.strip_suffix(']')?;
+    if inside == "si" {
+        return Some(0);
+    }
+    let rest = inside.strip_prefix("si")?;
+    let signed: i32 = rest.parse().ok()?;
+    i8::try_from(signed).ok()
 }
 
 /// Parse `word ptr <group>:<sym>[bx]` or `word ptr <group>:<sym>[bx+K]`,

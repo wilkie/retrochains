@@ -555,12 +555,21 @@ impl<'a> FunctionEmitter<'a> {
                 let _ = write!(self.out, "\tmov\t{},al\r\n", reg.name());
             }
             LocalLocation::Reg(reg) => {
-                // Pointer stride > 1: repeat inc/dec stride times.
-                // (Matches the BCC +2 peephole; for stride > 2 BCC
-                // probably switches to `add reg, K` but no fixture
-                // pins the crossover yet.)
-                for _ in 0..stride {
-                    let _ = write!(self.out, "\t{mnemonic}\t{}\r\n", reg.name());
+                // Pointer stride peephole: K=1 → `inc <reg>` (1 byte);
+                // K=2 → two `inc`s (2 bytes); K≥3 → `add <reg>, K`
+                // (3 bytes — same as the int compound ±K peephole).
+                // Stride 4 (long pointer) crosses the threshold: 4
+                // incs cost 4 bytes vs `add reg, 4` at 3. Fixture 313.
+                let add_mnem = match op {
+                    UpdateOp::Inc => "add",
+                    UpdateOp::Dec => "sub",
+                };
+                if stride <= 2 {
+                    for _ in 0..stride {
+                        let _ = write!(self.out, "\t{mnemonic}\t{}\r\n", reg.name());
+                    }
+                } else {
+                    let _ = write!(self.out, "\t{add_mnem}\t{},{stride}\r\n", reg.name());
                 }
             }
             LocalLocation::Stack(off) => {
@@ -3023,6 +3032,42 @@ impl<'a> FunctionEmitter<'a> {
     /// [bp-N], K`. Otherwise (single-dim variable index, fixtures
     /// 078/142) we compute `&a[i]` into BX and store through it.
     fn emit_array_assign(&mut self, array: &str, indices: &[Expr], value: &Expr) {
+        // Pointer-base: `p[K] = v` is sugar for `*(p + K) = v`. For a
+        // long-pointee constant index of 0, this is identical to
+        // `*p = v` — same memory-direct pair through `[reg]`/`[reg+2]`.
+        // Fixture 312 (`long *p; p[0] = 42;`).
+        if self.locals.has(array)
+            && let Some(pointee) = self.locals.type_of(array).pointee()
+            && indices.len() == 1
+            && let Some(k) = try_const_eval(&indices[0])
+        {
+            let pointee = pointee.clone();
+            let LocalLocation::Reg(reg) = self.locals.location_of(array) else {
+                panic!("stack-resident pointer indexed write not yet supported (no fixture)");
+            };
+            let r = reg.name();
+            let stride = u32::from(pointee.size_bytes());
+            let byte_off = (k * stride) as i32;
+            if pointee.is_long_like() {
+                let Some(v) = try_const_eval(value) else {
+                    panic!("non-constant rhs in `p[K] = v` (long pointee) not yet supported (no fixture)");
+                };
+                let lo = (v & 0xFFFF) as u16;
+                let hi = ((v >> 16) & 0xFFFF) as u16;
+                let lo_addr = if byte_off == 0 {
+                    format!("[{r}]")
+                } else {
+                    format!("[{r}+{byte_off}]")
+                };
+                let hi_addr = format!("[{r}+{}]", byte_off + 2);
+                let _ = write!(self.out, "\tmov\tword ptr {hi_addr},{hi}\r\n");
+                let _ = write!(self.out, "\tmov\tword ptr {lo_addr},{lo}\r\n");
+                return;
+            }
+            // Non-long pointer indexed write falls through to the
+            // existing emit_array_assign panic — no fixture has
+            // exercised `int *p; p[K] = v` yet.
+        }
         // Global array? Route to DGROUP-relative addressing.
         if let Some(gty) = self.globals.type_of(array) {
             let gty = gty.clone();
@@ -3472,13 +3517,26 @@ impl<'a> FunctionEmitter<'a> {
             let Some(pointee) = ty.pointee() else {
                 panic!("`*{base_name} = v`: not a pointer type");
             };
-            let width = ptr_width(pointee);
             let addr_reg = match self.locals.location_of(base_name) {
                 LocalLocation::Reg(reg) => reg.name(),
                 LocalLocation::Stack(_) => {
                     panic!("stack-resident pointer in `*p = v` not yet supported (no fixture)");
                 }
             };
+            // Long pointee: store both halves through `[reg]` /
+            // `[reg+2]`. High first, then low (matches all other
+            // long memory-direct stores). Fixture 308.
+            if pointee.is_long_like() {
+                let Some(v) = try_const_eval(value) else {
+                    panic!("non-constant rhs in long `*p = v` not yet supported (no fixture)");
+                };
+                let lo = (v & 0xFFFF) as u16;
+                let hi = ((v >> 16) & 0xFFFF) as u16;
+                let _ = write!(self.out, "\tmov\tword ptr [{addr_reg}+2],{hi}\r\n");
+                let _ = write!(self.out, "\tmov\tword ptr [{addr_reg}],{lo}\r\n");
+                return;
+            }
+            let width = ptr_width(pointee);
             let Some(v) = try_const_eval(value) else {
                 panic!("non-constant rhs in `*p = v` not yet supported (no fixture)");
             };
@@ -3524,8 +3582,6 @@ impl<'a> FunctionEmitter<'a> {
             let Some(pointee) = ty.pointee() else {
                 panic!("`*{base_name} <op>= v`: not a pointer type");
             };
-            let store_byte = matches!(*pointee, Type::Char);
-            let width = if store_byte { "byte" } else { "word" };
             let addr_reg = match self.locals.location_of(base_name) {
                 LocalLocation::Reg(reg) => reg.name(),
                 LocalLocation::Stack(_) => {
@@ -3534,6 +3590,39 @@ impl<'a> FunctionEmitter<'a> {
                     );
                 }
             };
+            // Long pointee: emit memory-direct read-modify-write pair
+            // through `[reg]` / `[reg+2]`. Same byte-width rule as
+            // the long-global compound assigns — arith uses imm8sx,
+            // bitwise uses imm16. Fixture 311.
+            if pointee.is_long_like() {
+                let k_lo = (v as i64) & 0xFFFF;
+                let k_hi = ((v as i64) >> 16) & 0xFFFF;
+                match op {
+                    BinOp::Add | BinOp::Sub => {
+                        let (lo_op, hi_op) = if matches!(op, BinOp::Add) {
+                            ("add", "adc")
+                        } else {
+                            ("sub", "sbb")
+                        };
+                        if let Ok(lo_i8) = i8::try_from(k_lo as i32) {
+                            let _ = write!(self.out, "\t{lo_op}\tword ptr [{addr_reg}],{lo_i8}\r\n");
+                        } else {
+                            let lo_u16 = k_lo as u16;
+                            let _ = write!(self.out, "\t{lo_op}\tword ptr [{addr_reg}],{lo_u16}\r\n");
+                        }
+                        let _ = write!(self.out, "\t{hi_op}\tword ptr [{addr_reg}+2],0\r\n");
+                        return;
+                    }
+                    BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor => {
+                        let _ = write!(self.out, "\t{mnemonic}\tword ptr [{addr_reg}],{k_lo}\r\n");
+                        let _ = write!(self.out, "\t{mnemonic}\tword ptr [{addr_reg}+2],{k_hi}\r\n");
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+            let store_byte = matches!(*pointee, Type::Char);
+            let width = if store_byte { "byte" } else { "word" };
             let v_masked = if store_byte { v & 0xFF } else { v & 0xFFFF };
             let _ = write!(
                 self.out,
@@ -4016,6 +4105,23 @@ impl<'a> FunctionEmitter<'a> {
                 let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name},dx\r\n");
                 return;
             }
+            // `g = *p;` for `p: long *` register-resident — load
+            // high through `[reg+2]` and low through `[reg]` into
+            // AX:DX (globals convention), then store. Fixture 309.
+            if let ExprKind::Deref(operand) = &value.kind
+                && let ExprKind::Ident(ptr_name) = &operand.kind
+                && self.locals.has(ptr_name)
+                && let Some(pointee) = self.locals.type_of(ptr_name).pointee()
+                && pointee.is_long_like()
+                && let LocalLocation::Reg(reg) = self.locals.location_of(ptr_name)
+            {
+                let r = reg.name();
+                let _ = write!(self.out, "\tmov\tax,word ptr [{r}+2]\r\n");
+                let _ = write!(self.out, "\tmov\tdx,word ptr [{r}]\r\n");
+                let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name}+2,ax\r\n");
+                let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name},dx\r\n");
+                return;
+            }
             panic!("non-constant long assignment to global not yet supported (no fixture)");
         }
         let width = if matches!(ty, Type::Char) { "byte" } else { "word" };
@@ -4120,6 +4226,30 @@ impl<'a> FunctionEmitter<'a> {
                     reg.name(),
                 );
             }
+            return;
+        }
+        // `&<global>` direct-to-register: same shape as the string-
+        // literal init — a linker-resolved constant, so a direct
+        // `mov <reg>, offset DGROUP:_<sym>` works (no AX round-trip).
+        // Fixture 308 (`long *p = &g;` with p in SI).
+        if let ExprKind::AddressOf(sym) = &expr.kind
+            && self.globals.contains(sym)
+        {
+            assert!(!reg.is_byte(), "global address into a byte register is impossible (pointer is 2 bytes)");
+            let _ = write!(self.out, "\tmov\t{},offset DGROUP:_{sym}\r\n", reg.name());
+            return;
+        }
+        // Array decay to a register-resident pointer: `<reg> = <arr>`
+        // where `arr` is a global array. Equivalent to `&arr[0]` —
+        // and like `&<global>` above, takes the direct `mov <reg>,
+        // offset DGROUP:_<sym>` form (no `lea / mov` round-trip).
+        // Fixture 313 (`long *p = a;`).
+        if let ExprKind::Ident(name) = &expr.kind
+            && let Some(gty) = self.globals.type_of(name)
+            && matches!(gty, Type::Array { .. })
+        {
+            assert!(!reg.is_byte(), "array address into a byte register is impossible");
+            let _ = write!(self.out, "\tmov\t{},offset DGROUP:_{name}\r\n", reg.name());
             return;
         }
         // Non-constant char init: untested. Best guess would be

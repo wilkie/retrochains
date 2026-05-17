@@ -523,10 +523,33 @@ pub enum Instr {
     /// `mov word ptr [si],<imm16>` — C7 04 lo hi. Store an
     /// immediate through a pointer in SI (fixture 136's `p->x = 7`).
     MovSiPtrImm { imm: u16 },
+    /// `mov word ptr [si+disp8],imm16` — `C7 44 dd lo hi`. Companion
+    /// to `MovSiPtrImm` for the high-half store of a long-pointer
+    /// write (`*p = K` where `p: long *`). Fixture 308.
+    MovSiDispImm { disp: i8, imm: u16 },
+    /// `mov ax,word ptr [si+disp8]` — `8B 44 dd`. ModR/M 44 = mod=01
+    /// reg=AX r/m=100 ([si+disp8]). High-half read for `*p` where
+    /// `p: long *` (fixture 309).
+    MovAxSiDisp { disp: i8 },
+    /// `mov dx,word ptr [si]` — `8B 14`. ModR/M 14 = mod=00 reg=DX
+    /// r/m=100. Low-half read for `*p` where `p: long *` (fixture
+    /// 309). The displacement-less form is `8B 14`, distinct from
+    /// `MovAxSiDisp` with disp=0 because BCC picks the shorter
+    /// encoding when no displacement is needed.
+    MovDxFromSiPtr,
     /// `add word ptr [si],<imm8 sign-extended>` — 83 04 ii. Read-
     /// modify-write through SI used by compound member assignment
     /// `p->x += K` when SI holds `p` (fixture 182).
     AddSiPtrImm8 { imm: i8 },
+    /// `adc word ptr [si+disp8],<imm8sx>` — `83 54 dd ii`. Carry-
+    /// propagation partner for long-pointer `*p += K` (fixture 311).
+    AdcSiDispImm8 { disp: i8, imm: i8 },
+    /// `sub word ptr [si],<imm8sx>` — `83 2C ii`. Low-half partner
+    /// for long-pointer `*p -= K`.
+    SubSiPtrImm8 { imm: i8 },
+    /// `sbb word ptr [si+disp8],<imm8sx>` — `83 5C dd ii`. High-half
+    /// borrow-propagation partner for long-pointer `*p -= K`.
+    SbbSiDispImm8 { disp: i8, imm: i8 },
     /// `add word ptr [bx],<imm8 sign-extended>` — 83 07 ii. Same
     /// shape as the SI variant; used by global / chained compound
     /// pointer assignment `*p += K` after loading `p` into BX

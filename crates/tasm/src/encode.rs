@@ -317,7 +317,11 @@ fn instr_size(instr: &Instr) -> usize {
         Instr::Cbw => 1,
         Instr::LeaReg16BpRel { .. } => 3,
         Instr::MovSiPtrImm { .. } | Instr::MovBxPtrImm { .. } => 4,
-        Instr::AddSiPtrImm8 { .. } | Instr::AddBxPtrImm8 { .. } => 3,
+        Instr::MovSiDispImm { .. } => 5,
+        Instr::MovAxSiDisp { .. } => 3,
+        Instr::MovDxFromSiPtr => 2,
+        Instr::AddSiPtrImm8 { .. } | Instr::AddBxPtrImm8 { .. } | Instr::SubSiPtrImm8 { .. } => 3,
+        Instr::AdcSiDispImm8 { .. } | Instr::SbbSiDispImm8 { .. } => 4,
         Instr::AddBpRelImm8 { .. }
         | Instr::AdcBpRelImm8 { .. }
         | Instr::SubBpRelImm8 { .. }
@@ -992,12 +996,56 @@ fn emit_instr(
             out.push(0x04);
             out.extend_from_slice(&imm.to_le_bytes());
         }
+        Instr::MovSiDispImm { disp, imm } => {
+            // `mov word ptr [si+disp8],imm16` → C7 44 dd lo hi.
+            // ModR/M 44 = mod=01 /0 r/m=100 ([si+disp8]).
+            out.push(0xC7);
+            out.push(0x44);
+            out.push(*disp as u8);
+            out.extend_from_slice(&imm.to_le_bytes());
+        }
+        Instr::MovAxSiDisp { disp } => {
+            // `mov ax,word ptr [si+disp8]` → 8B 44 dd. ModR/M 44 =
+            // mod=01 reg=AX r/m=100 ([si+disp8]).
+            out.push(0x8B);
+            out.push(0x44);
+            out.push(*disp as u8);
+        }
+        Instr::MovDxFromSiPtr => {
+            // `mov dx,word ptr [si]` → 8B 14. ModR/M 14 = mod=00
+            // reg=DX r/m=100 ([si]).
+            out.push(0x8B);
+            out.push(0x14);
+        }
         Instr::AddSiPtrImm8 { imm } => {
             // `add word ptr [si],imm8 (sign-extended)` → 83 04 ii.
             // 83 is Grp1 r/m16,imm8-sx; /0 selects ADD; ModR/M 04 =
             // mod=00 /0 r/m=100 ([si]).
             out.push(0x83);
             out.push(0x04);
+            out.push(*imm as u8);
+        }
+        Instr::AdcSiDispImm8 { disp, imm } => {
+            // `adc word ptr [si+disp8],imm8sx` → 83 54 dd ii.
+            // ModR/M 54 = mod=01 /2(ADC) r/m=100 ([si+disp8]).
+            out.push(0x83);
+            out.push(0x54);
+            out.push(*disp as u8);
+            out.push(*imm as u8);
+        }
+        Instr::SubSiPtrImm8 { imm } => {
+            // `sub word ptr [si],imm8sx` → 83 2C ii.
+            // ModR/M 2C = mod=00 /5(SUB) r/m=100.
+            out.push(0x83);
+            out.push(0x2C);
+            out.push(*imm as u8);
+        }
+        Instr::SbbSiDispImm8 { disp, imm } => {
+            // `sbb word ptr [si+disp8],imm8sx` → 83 5C dd ii.
+            // ModR/M 5C = mod=01 /3(SBB) r/m=100.
+            out.push(0x83);
+            out.push(0x5C);
+            out.push(*disp as u8);
             out.push(*imm as u8);
         }
         Instr::AddBxPtrImm8 { imm } => {
