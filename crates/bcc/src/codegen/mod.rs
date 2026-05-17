@@ -2741,6 +2741,18 @@ impl<'a> FunctionEmitter<'a> {
             }
             panic!("non-constant long return value not yet supported (no fixture)");
         }
+        // Unsigned-char return: BCC doesn't bother widening — the
+        // value lives in AL alone, the upper byte is left whatever.
+        // Compare with signed-char return (fixture 156): BCC emits
+        // `cbw` after the AL load to sign-extend. The two return
+        // shapes differ by exactly the widening step. Fixture 466.
+        if matches!(self.function.ret_ty, Type::UChar)
+            && let ExprKind::Ident(name) = &e.kind
+            && self.globals.type_of(name).map_or(false, |t| matches!(t, Type::UChar))
+        {
+            let _ = write!(self.out, "\tmov\tal,byte ptr DGROUP:_{name}\r\n");
+            return;
+        }
         self.emit_expr_to_ax(e);
     }
 
@@ -3389,7 +3401,7 @@ impl<'a> FunctionEmitter<'a> {
             };
             if pointee.is_char_like() {
                 let _ = write!(self.out, "\tmov\tal,byte ptr [{addr_reg}]\r\n");
-                self.out.extend_from_slice(b"\tcbw\t\r\n");
+                self.emit_widen_al(pointee);
             } else {
                 let _ = write!(self.out, "\tmov\tax,{width} ptr [{addr_reg}]\r\n");
             }
@@ -3401,7 +3413,7 @@ impl<'a> FunctionEmitter<'a> {
         let final_ty = self.emit_chain_to_bx(base_name, depth);
         if final_ty.is_char_like() {
             self.out.extend_from_slice(b"\tmov\tal,byte ptr [bx]\r\n");
-            self.out.extend_from_slice(b"\tcbw\t\r\n");
+            self.emit_widen_al(&final_ty);
         } else {
             let width = ptr_width(&final_ty);
             let _ = write!(self.out, "\tmov\tax,{width} ptr [bx]\r\n");

@@ -725,6 +725,12 @@ fn parse_mov(operands: &str, line_no: usize) -> AsmResult<Instr> {
             return Ok(Instr::MovSiPtrImm { imm });
         }
     }
+    // LHS `byte ptr [si]` — byte-store through SI pointer (fixture 465).
+    if lhs == "byte ptr [si]" {
+        if let Some(imm) = parse_imm8(rhs) {
+            return Ok(Instr::MovSiPtrImm8 { imm: imm as u8 });
+        }
+    }
     // LHS `word ptr [si+disp]` — store-imm to long pointer's high
     // half (fixture 308: `*p = K` where `p: long *` in SI emits
     // `mov word ptr [si+2], <high>` after the low-half partner).

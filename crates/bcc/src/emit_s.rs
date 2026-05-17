@@ -169,17 +169,31 @@ fn write_init_globals(
 /// `_BSS ends` (fixture 087).
 fn write_bss_globals_with_debug(out: &mut Vec<u8>, unit: &crate::ast::Unit) {
     out.extend_from_slice(b"_BSS\tsegment word public 'BSS'\r\n");
-    // BCC orders _BSS members alphabetically by mangled name (the
-    // `_<name>` form) and inserts a 1-byte filler `db 1 dup (?)` when
-    // the running offset is odd before a word-aligned global. Fixture
-    // 181 (`int x; char c; int a[5];` → emits `a, c, pad, x`) pins
-    // both rules.
-    let mut bss: Vec<&crate::ast::Global> = unit
-        .globals
-        .iter()
-        .filter(|g| !g.is_extern && g.init.is_none())
-        .collect();
-    bss.sort_by(|a, b| a.name.cmp(&b.name));
+    // BCC's _BSS layout: short-named globals (`_<n>` with name
+    // length < 3) first in alphabetical order, then long-named
+    // globals in alphabetical order. The same length-bucket
+    // discriminant the publics ordering uses; this is the *reverse*
+    // of the publics emission order, filtered to BSS members. A
+    // 1-byte filler `db 1 dup (?)` is inserted when the running
+    // offset is odd before a word-aligned global. Pinned by
+    // fixtures 181 (all 2-char names → alpha order `a, c, pad, x`),
+    // 462/234 (all 2-char names → alpha), and 465
+    // (`buf` (4) + `g` (2) → short bucket emits `g` first, then
+    // long bucket emits `buf` — no padding needed).
+    let mut short_bss: Vec<&crate::ast::Global> = Vec::new();
+    let mut long_bss: Vec<&crate::ast::Global> = Vec::new();
+    for g in unit.globals.iter().filter(|g| !g.is_extern && g.init.is_none()) {
+        let sym_len = g.name.len() + 1; // `_<name>` mangling
+        if sym_len < 3 {
+            short_bss.push(g);
+        } else {
+            long_bss.push(g);
+        }
+    }
+    short_bss.sort_by(|a, b| a.name.cmp(&b.name));
+    long_bss.sort_by(|a, b| a.name.cmp(&b.name));
+    let bss: Vec<&crate::ast::Global> =
+        short_bss.into_iter().chain(long_bss.into_iter()).collect();
     let mut offset: u16 = 0;
     for g in bss {
         let align = g.ty.alignment();
@@ -450,23 +464,30 @@ fn write_tail(
     // Runtime-helper externs (e.g. `N_LXLSH@`, fixture 228) get
     // merged in alongside publics — they participate in the same
     // length-bucket + reverse-alpha sort.
-    let mut long_bucket: Vec<(String, String)> = Vec::new();
+    // Long bucket splits further by kind: globals, then functions,
+    // then helpers (each subgroup reverse-alpha within itself).
+    // Fixture 465 (`unsigned char buf[3]; int g; int main(...)`):
+    // long bucket = `_buf` (global) + `_main` (function), oracle
+    // emits `_buf, _main` — globals first. Pure reverse-alpha would
+    // give `_main, _buf` and break 465. Function-only cases (179,
+    // 095) and helper-only cases (260) match either rule trivially.
+    let mut long_globals: Vec<(String, String)> = Vec::new();
+    let mut long_functions: Vec<(String, String)> = Vec::new();
+    let mut long_helpers: Vec<(String, String)> = Vec::new();
     let mut short_bucket: Vec<(String, String)> = Vec::new();
-    let mut push_entry = |sym: String,
-                          line: String,
-                          longs: &mut Vec<(String, String)>,
-                          shorts: &mut Vec<(String, String)>| {
-        if sym.len() >= 3 {
-            longs.push((sym, line));
-        } else {
-            shorts.push((sym, line));
-        }
-    };
+    let push_to_bucket =
+        |sym: String, line: String, longs: &mut Vec<(String, String)>, shorts: &mut Vec<(String, String)>| {
+            if sym.len() >= 3 {
+                longs.push((sym, line));
+            } else {
+                shorts.push((sym, line));
+            }
+        };
     for f in &unit.functions {
         if f.body.is_some() {
             let sym = codegen::function_symbol(&f.name);
             let line = format!("\tpublic\t{sym}\r\n");
-            push_entry(sym, line, &mut long_bucket, &mut short_bucket);
+            push_to_bucket(sym, line, &mut long_functions, &mut short_bucket);
         }
     }
     for g in &unit.globals {
@@ -475,18 +496,26 @@ fn write_tail(
         }
         let sym = format!("_{}", g.name);
         let line = format!("\tpublic\t{sym}\r\n");
-        push_entry(sym, line, &mut long_bucket, &mut short_bucket);
+        push_to_bucket(sym, line, &mut long_globals, &mut short_bucket);
     }
     // Runtime helpers: `:far` declaration (BCC convention). The
     // helper name already carries its own prefix (e.g. `N_LXLSH@`),
     // so we don't add the `_` mangling that C identifiers get.
     for helper in helpers {
         let line = format!("\textrn\t{helper}:far\r\n");
-        push_entry(helper.clone(), line, &mut long_bucket, &mut short_bucket);
+        push_to_bucket(helper.clone(), line, &mut long_helpers, &mut short_bucket);
     }
-    long_bucket.sort_by(|a, b| a.0.cmp(&b.0));
+    long_globals.sort_by(|a, b| a.0.cmp(&b.0));
+    long_functions.sort_by(|a, b| a.0.cmp(&b.0));
+    long_helpers.sort_by(|a, b| a.0.cmp(&b.0));
     short_bucket.sort_by(|a, b| a.0.cmp(&b.0));
-    for (_, line) in long_bucket.iter().rev().chain(short_bucket.iter().rev()) {
+    for (_, line) in long_globals
+        .iter()
+        .rev()
+        .chain(long_functions.iter().rev())
+        .chain(long_helpers.iter().rev())
+        .chain(short_bucket.iter().rev())
+    {
         out.extend_from_slice(line.as_bytes());
     }
     // Data externs come after the public list (function externs come

@@ -345,6 +345,7 @@ fn instr_size(instr: &Instr) -> usize {
         Instr::Cbw => 1,
         Instr::LeaReg16BpRel { .. } => 3,
         Instr::MovSiPtrImm { .. } | Instr::MovBxPtrImm { .. } => 4,
+        Instr::MovSiPtrImm8 { .. } => 3,
         Instr::MovSiDispImm { .. } => 5,
         Instr::MovAxSiDisp { .. } | Instr::MovDxSiDisp { .. } => 3,
         Instr::MovDxFromSiPtr => 2,
@@ -1214,6 +1215,14 @@ fn emit_instr(
             out.push(0xC7);
             out.push(0x04);
             out.extend_from_slice(&imm.to_le_bytes());
+        }
+        Instr::MovSiPtrImm8 { imm } => {
+            // `mov byte ptr [si],imm8` → C6 04 ii. Same ModR/M as
+            // the word-form, but the byte opcode (C6 vs C7) and a
+            // single immediate byte.
+            out.push(0xC6);
+            out.push(0x04);
+            out.push(*imm);
         }
         Instr::MovSiDispImm { disp, imm } => {
             // `mov word ptr [si+disp8],imm16` → C7 44 dd lo hi.

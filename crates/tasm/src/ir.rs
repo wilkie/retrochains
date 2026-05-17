@@ -648,6 +648,10 @@ pub enum Instr {
     /// `mov word ptr [si],<imm16>` — C7 04 lo hi. Store an
     /// immediate through a pointer in SI (fixture 136's `p->x = 7`).
     MovSiPtrImm { imm: u16 },
+    /// `mov byte ptr [si], imm8` — `C6 04 ii`. Byte-store immediate
+    /// through the SI pointer. ModR/M `04` = `mod=00 /0 r/m=100
+    /// ([si])`. Used by `*p = K;` for uchar pointers (fixture 465).
+    MovSiPtrImm8 { imm: u8 },
     /// `mov word ptr [si+disp8],imm16` — `C7 44 dd lo hi`. Companion
     /// to `MovSiPtrImm` for the high-half store of a long-pointer
     /// write (`*p = K` where `p: long *`). Fixture 308.
