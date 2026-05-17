@@ -870,6 +870,32 @@ the destination; the generic `80 C0+rc ii` 3-byte encoding
 appears only for non-AL byte registers, which we haven't
 fixtured yet.
 
+## `y = ++x;` direct-stack-store peephole
+
+Fixture `530` (`int x; int y; x = 5; y = ++x;`) — BCC fuses the
+pre-increment with the subsequent stack store, skipping the AX
+round-trip when the source is a register-resident local and the
+dest is a stack slot. `emit_assign_local`'s Stack branch now
+detects `Update { target, op, position: Pre }` against a
+non-byte reg-local and emits `<inc|dec> <reg>; mov word ptr
+[bp-N], <reg>` directly (4 bytes instead of 5 — saves the
+`mov ax, <reg>` step). Post-update keeps the round-trip because
+the expression value is the *old* register contents.
+
+## Local shadowing a global
+
+Fixture `532` (`int a; int main() { int a; a = 7; return a; }`)
+— C90 scoping says the local `a` hides the global `a` inside
+the function body. Codegen's ident resolution was global-first,
+so writes went to the global slot and reads via `a1 lo hi`
+(`mov ax, [_a]`). Both paths (`StmtKind::Assign` dispatch and
+`ExprKind::Ident` in `emit_expr_to_ax`) now check `locals.has`
+before the global table, falling through to the local lookup
+when the name is in scope. Other codegen sites that check
+`globals.contains` only matter when the local doesn't exist, so
+no further changes were needed for this fixture — but the pattern
+will likely need extending if more shadowing cases appear.
+
 ## What we explicitly defer
 
 - Templates, namespaces, RTTI, exceptions (not in BC2.0 to relevant
