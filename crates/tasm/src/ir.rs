@@ -177,6 +177,22 @@ pub enum Instr {
     /// `xor dx, word ptr [bp+disp8]` — `33 56 dd`. Low-half XOR for
     /// stack-local long bitwise arithmetic.
     XorDxBpRel { offset: i16 },
+    /// `add word ptr [bp+disp8],dx` — `01 56 dd`. Memory-destination
+    /// add of DX (low half of RHS) into a stack local's low half.
+    /// Long stack-local compound `+=` with non-constant RHS
+    /// (fixture 339).
+    AddBpRelDx { offset: i16 },
+    /// `adc word ptr [bp+disp8],ax` — `11 46 dd`. Carry-propagation
+    /// partner to `AddBpRelDx`. High half of `x += y` where `y` was
+    /// loaded with AX=high, DX=low.
+    AdcBpRelAx { offset: i16 },
+    /// `sub word ptr [bp+disp8],dx` — `29 56 dd`. Compound `-=` low
+    /// half on a long stack local with a register-loaded RHS.
+    /// Fixture 340.
+    SubBpRelDx { offset: i16 },
+    /// `sbb word ptr [bp+disp8],ax` — `19 46 dd`. Borrow-propagation
+    /// partner to `SubBpRelDx`.
+    SbbBpRelAx { offset: i16 },
     /// `add <dst>,<src>` between 16-bit registers — 03 xx with
     /// ModR/M mod=11 reg=dst r/m=src. Used to fold a register-resident
     /// operand into AX (fixture 127: `add ax,si`).

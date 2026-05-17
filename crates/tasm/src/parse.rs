@@ -824,6 +824,11 @@ fn parse_sub(operands: &str, line_no: usize) -> AsmResult<Instr> {
         if let Some(imm) = parse_imm8_signed(rhs) {
             return Ok(Instr::SubBpRelImm8 { offset, imm });
         }
+        // `sub word ptr [bp+N], dx` — long-stack compound `-=` low
+        // half with register-loaded RHS (fixture 340).
+        if rhs == "dx" {
+            return Ok(Instr::SubBpRelDx { offset });
+        }
     }
     // `sub word ptr [si], imm8sx` — long-pointer `*p -= K` low half.
     if lhs == "word ptr [si]" {
@@ -948,6 +953,11 @@ fn parse_sbb(operands: &str, line_no: usize) -> AsmResult<Instr> {
         if let Some(imm) = parse_imm8_signed(rhs) {
             return Ok(Instr::SbbBpRelImm8 { offset, imm });
         }
+        // `sbb word ptr [bp+N], ax` — long-stack compound `-=` high
+        // half borrow from register-loaded RHS (fixture 340).
+        if rhs == "ax" {
+            return Ok(Instr::SbbBpRelAx { offset });
+        }
     }
     // `sbb word ptr [si+disp], imm8sx` — long-pointer `*p -= K`
     // high-half borrow propagation.
@@ -1028,6 +1038,11 @@ fn parse_adc(operands: &str, line_no: usize) -> AsmResult<Instr> {
     if let Some(offset) = parse_word_bp_relative(lhs) {
         if let Some(imm) = parse_imm8_signed(rhs) {
             return Ok(Instr::AdcBpRelImm8 { offset, imm });
+        }
+        // `adc word ptr [bp+N], ax` — long-stack compound `+=` high
+        // half carry propagation from register-loaded RHS (339).
+        if rhs == "ax" {
+            return Ok(Instr::AdcBpRelAx { offset });
         }
     }
     // `adc word ptr [si+disp], imm8sx` — long-pointer `*p += K`
@@ -1144,6 +1159,11 @@ fn parse_add(operands: &str, line_no: usize) -> AsmResult<Instr> {
     if let Some(offset) = parse_word_bp_relative(lhs) {
         if let Some(imm) = parse_imm8_signed(rhs) {
             return Ok(Instr::AddBpRelImm8 { offset, imm });
+        }
+        // `add word ptr [bp+N], dx` — long-stack compound `+=` low
+        // half (fixture 339).
+        if rhs == "dx" {
+            return Ok(Instr::AddBpRelDx { offset });
         }
     }
     // `add word ptr <group>:<sym>[+N], imm` — read-modify-write
