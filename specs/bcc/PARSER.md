@@ -631,6 +631,47 @@ maps to `emit_expr_discard(left)` then `emit_expr_to_ax(right)`.
 like `(a = 1, b = 2, a + b)` discard all but the rightmost
 element correctly.
 
+## Chained assignment
+
+Fixture `500` (`int a, b, c; a = b = c = 5;`) — C's `=` is
+right-associative and yields a value, so `a = b = c = 5` parses
+as `a = (b = (c = 5))`. The statement-level dispatch for
+`<ident> = …` now uses `parse_for_clause_expr` (rather than
+`parse_expr`) for the RHS, so the RHS can itself be another
+`AssignExpr`. `parse_for_clause_expr` was made recursive on its
+RHS to support the chain.
+
+Codegen for `AssignExpr` in value position lives in
+`emit_expr_to_ax`: it recursively evaluates the inner value into
+AX, then emits one `mov word ptr <target>, ax` for the
+side-effect store. AX still holds the assigned value so the
+outer assignment reuses it. The resulting sequence for `a = b =
+c = 5;` is `mov ax, 5; mov [_c], ax; mov [_b], ax; mov [_a],
+ax` — one literal load and three stores, exactly what BCC emits.
+
+## `*p++ = v;` — store via pointer with postfix increment
+
+Fixture `501` (`*p++ = 7; *p++ = 8;` filling a local `int[3]`)
+exercises the postfix-increment pattern as an lvalue.
+`emit_deref_assign` now special-cases `DerefAssign { target:
+Update{p, Inc, Post}, value }`: it emits the store first (using
+the pre-increment register value as the address) and then
+advances the register by `sizeof(*p)` via `inc <reg>` per byte
+of stride. For `int *p` in SI, the result is `mov word ptr [si],
+v; inc si; inc si`. This relies on the pointer being
+register-resident — no fixture exercises stack-resident `p++`
+in this position yet.
+
+## Partial array initializer
+
+Fixture `502` (`int a[5] = {1, 2};`) — when an aggregate
+initializer has fewer items than the declared array length, the
+missing slots are zero-filled out to the full byte size.
+`emit_global_init`'s `InitList` arm now emits `db 0` lines for
+`(len - items.len()) * elem.size_bytes()` after the explicit
+items. This mirrors the trailing-zero pad behavior we added for
+fixed-length char-array string initializers in fixture 498.
+
 ## What we explicitly defer
 
 - Templates, namespaces, RTTI, exceptions (not in BC2.0 to relevant
