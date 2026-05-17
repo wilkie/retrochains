@@ -3908,6 +3908,22 @@ impl<'a> FunctionEmitter<'a> {
         op: BinOp,
         value: &Expr,
     ) {
+        // Long-element path. For both global (`long a[];`) and stack
+        // (`long a[N];` as a local) array bases with a constant index,
+        // a long array element behaves byte-identically to a long
+        // struct field at the same effective address — same compound
+        // skeletons, just a different disp16. Fixtures 392
+        // (`a[1] += K`), 393 (`a[1] &= K`), 394 (`a[1] += y`).
+        if let Some(g_ty) = self.globals.type_of(array)
+            && let Some((const_off, leaf_ty)) =
+                try_const_array_offset(g_ty, indices.iter())
+            && leaf_ty.is_long_like()
+        {
+            let lo_addr = global_offset_addr(array, const_off as i32);
+            let hi_addr = global_offset_addr(array, const_off as i32 + 2);
+            self.emit_long_compound_to_mem(&lo_addr, &hi_addr, op, value);
+            return;
+        }
         let array_ty = self.locals.type_of(array).clone();
         let LocalLocation::Stack(base_off) = self.locals.location_of(array) else {
             panic!("array `{array}` should be stack-resident");
@@ -4146,6 +4162,71 @@ impl<'a> FunctionEmitter<'a> {
     /// instruction directly to memory (fixture 182's `p->x += 5`
     /// becomes `add word ptr [si], 5`). Only constant RHS values are
     /// fixture-supported today.
+    /// Emit `<dest> op= <value>` where `<dest>` is a long memory
+    /// location whose halves' assembly addresses are `lo_addr` and
+    /// `hi_addr`. The skeleton matches the long-global compound path
+    /// (fixtures 251/253/339) and is destination-storage-agnostic —
+    /// works for globals, struct fields, and array elements once the
+    /// caller has computed the right disp16 expressions.
+    fn emit_long_compound_to_mem(
+        &mut self,
+        lo_addr: &str,
+        hi_addr: &str,
+        op: BinOp,
+        value: &Expr,
+    ) {
+        // Const RHS: `op [lo], k_lo / op|carry [hi], k_hi_or_0`.
+        // Arith uses `83 /n` imm8sx (low half must fit i8sx; high
+        // is `adc/sbb 0`). Bitwise uses `81 /n` imm16 (op-family-
+        // dependent encoding choice).
+        if let Some(k) = try_const_eval(value) {
+            let k_lo = (k & 0xFFFF) as u16;
+            let k_hi = ((k >> 16) & 0xFFFF) as u16;
+            match op {
+                BinOp::Add | BinOp::Sub => {
+                    let (lo_op, hi_op) = if matches!(op, BinOp::Add) {
+                        ("add", "adc")
+                    } else {
+                        ("sub", "sbb")
+                    };
+                    let lo_signed = k_lo as i16;
+                    if let Ok(lo_i8) = i8::try_from(lo_signed) {
+                        let _ = write!(self.out, "\t{lo_op}\tword ptr {lo_addr},{lo_i8}\r\n");
+                    } else {
+                        let _ = write!(self.out, "\t{lo_op}\tword ptr {lo_addr},{k_lo}\r\n");
+                    }
+                    let _ = write!(self.out, "\t{hi_op}\tword ptr {hi_addr},0\r\n");
+                    return;
+                }
+                BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor => {
+                    let mnem = match op {
+                        BinOp::BitAnd => "and",
+                        BinOp::BitOr  => "or",
+                        BinOp::BitXor => "xor",
+                        _ => unreachable!(),
+                    };
+                    let _ = write!(self.out, "\t{mnem}\tword ptr {lo_addr},{k_lo}\r\n");
+                    let _ = write!(self.out, "\t{mnem}\tword ptr {hi_addr},{k_hi}\r\n");
+                    return;
+                }
+                _ => {}
+            }
+        }
+        // Variable RHS: load y into AX:DX (memory-dest conv), then
+        // memory-direct `<op> [lo], dx / <op|carry> [hi], ax`. Mirror
+        // of fixture 339 for any memory destination.
+        if let Some((y_hi, y_lo)) = self.long_lvalue_addr_pair(value)
+            && let Some((lo_op, hi_op)) = long_pair_op(op)
+        {
+            let _ = write!(self.out, "\tmov\tax,word ptr {y_hi}\r\n");
+            let _ = write!(self.out, "\tmov\tdx,word ptr {y_lo}\r\n");
+            let _ = write!(self.out, "\t{lo_op}\tword ptr {lo_addr},dx\r\n");
+            let _ = write!(self.out, "\t{hi_op}\tword ptr {hi_addr},ax\r\n");
+            return;
+        }
+        panic!("long compound `{op:?}=` to memory not yet supported for this RHS shape (no fixture)");
+    }
+
     fn emit_member_compound_assign(
         &mut self,
         base: &Expr,
@@ -4177,56 +4258,8 @@ impl<'a> FunctionEmitter<'a> {
                 let off = base_bp + i16::try_from(total_off).unwrap_or(i16::MAX);
                 (bp_addr(off), bp_addr(off + 2))
             };
-            // Const RHS: `op [lo], k_lo / op|carry [hi], k_hi_or_0`.
-            // Arith uses `83 /n` imm8sx (low half must fit i8sx; high
-            // is `adc/sbb 0`). Bitwise uses `81 /n` imm16 (op-family-
-            // dependent encoding choice — same as global path).
-            if let Some(k) = try_const_eval(value) {
-                let k_lo = (k & 0xFFFF) as u16;
-                let k_hi = ((k >> 16) & 0xFFFF) as u16;
-                match op {
-                    BinOp::Add | BinOp::Sub => {
-                        let (lo_op, hi_op) = if matches!(op, BinOp::Add) {
-                            ("add", "adc")
-                        } else {
-                            ("sub", "sbb")
-                        };
-                        let lo_signed = k_lo as i16;
-                        if let Ok(lo_i8) = i8::try_from(lo_signed) {
-                            let _ = write!(self.out, "\t{lo_op}\tword ptr {lo_addr},{lo_i8}\r\n");
-                        } else {
-                            let _ = write!(self.out, "\t{lo_op}\tword ptr {lo_addr},{k_lo}\r\n");
-                        }
-                        let _ = write!(self.out, "\t{hi_op}\tword ptr {hi_addr},0\r\n");
-                        return;
-                    }
-                    BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor => {
-                        let mnem = match op {
-                            BinOp::BitAnd => "and",
-                            BinOp::BitOr  => "or",
-                            BinOp::BitXor => "xor",
-                            _ => unreachable!(),
-                        };
-                        let _ = write!(self.out, "\t{mnem}\tword ptr {lo_addr},{k_lo}\r\n");
-                        let _ = write!(self.out, "\t{mnem}\tword ptr {hi_addr},{k_hi}\r\n");
-                        return;
-                    }
-                    _ => {}
-                }
-            }
-            // Variable RHS: load y into AX:DX (memory-dest conv),
-            // then memory-direct `<op> [field_lo], dx / <op|carry>
-            // [field_hi], ax`. Mirror of fixture 339 for a struct
-            // field destination.
-            if let Some((y_hi, y_lo)) = self.long_lvalue_addr_pair(value)
-                && let Some((lo_op, hi_op)) = long_pair_op(op)
-            {
-                let _ = write!(self.out, "\tmov\tax,word ptr {y_hi}\r\n");
-                let _ = write!(self.out, "\tmov\tdx,word ptr {y_lo}\r\n");
-                let _ = write!(self.out, "\t{lo_op}\tword ptr {lo_addr},dx\r\n");
-                let _ = write!(self.out, "\t{hi_op}\tword ptr {hi_addr},ax\r\n");
-                return;
-            }
+            self.emit_long_compound_to_mem(&lo_addr, &hi_addr, op, value);
+            return;
         }
         let ExprKind::Ident(name) = &base.kind else {
             panic!("non-ident base in member compound assign not yet supported (no fixture)");
