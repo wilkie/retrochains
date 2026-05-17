@@ -337,7 +337,7 @@ fn instr_size(instr: &Instr) -> usize {
         Instr::LeaReg16BpRel { .. } => 3,
         Instr::MovSiPtrImm { .. } | Instr::MovBxPtrImm { .. } => 4,
         Instr::MovSiDispImm { .. } => 5,
-        Instr::MovAxSiDisp { .. } => 3,
+        Instr::MovAxSiDisp { .. } | Instr::MovDxSiDisp { .. } => 3,
         Instr::MovDxFromSiPtr => 2,
         Instr::AddSiPtrImm8 { .. } | Instr::AddBxPtrImm8 { .. } | Instr::SubSiPtrImm8 { .. } => 3,
         Instr::AdcSiDispImm8 { .. } | Instr::SbbSiDispImm8 { .. } => 4,
@@ -1168,6 +1168,12 @@ fn emit_instr(
             // reg=DX r/m=100 ([si]).
             out.push(0x8B);
             out.push(0x14);
+        }
+        Instr::MovDxSiDisp { disp } => {
+            // `mov dx,word ptr [si+disp8]` → 8B 54 dd.
+            out.push(0x8B);
+            out.push(0x54);
+            out.push(*disp as u8);
         }
         Instr::AddSiPtrImm8 { imm } => {
             // `add word ptr [si],imm8 (sign-extended)` → 83 04 ii.

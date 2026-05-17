@@ -603,6 +603,11 @@ pub enum Instr {
     /// `MovAxSiDisp` with disp=0 because BCC picks the shorter
     /// encoding when no displacement is needed.
     MovDxFromSiPtr,
+    /// `mov dx,word ptr [si+disp8]` — `8B 54 dd`. ModR/M 54 = mod=01
+    /// reg=DX(010) r/m=100 ([si+disp8]). High-half read for `*p`
+    /// where `p: long *` in the ABI return convention (DX=high).
+    /// Fixture 351.
+    MovDxSiDisp { disp: i8 },
     /// `add word ptr [si],<imm8 sign-extended>` — 83 04 ii. Read-
     /// modify-write through SI used by compound member assignment
     /// `p->x += K` when SI holds `p` (fixture 182).

@@ -531,6 +531,16 @@ fn parse_mov(operands: &str, line_no: usize) -> AsmResult<Instr> {
     if lhs == "dx" && rhs == "word ptr [si]" {
         return Ok(Instr::MovDxFromSiPtr);
     }
+    // `mov dx,word ptr [si+disp8]` — high-half read of `*p` for
+    // `p: long *` in the ABI return convention (fixture 351).
+    if lhs == "dx" {
+        if let Some(disp) = parse_word_si_disp(rhs) {
+            if disp == 0 {
+                return Ok(Instr::MovDxFromSiPtr);
+            }
+            return Ok(Instr::MovDxSiDisp { disp });
+        }
+    }
     if lhs == "ax" {
         if rhs == "word ptr [si]" {
             return Ok(Instr::MovAxFromSiPtr);

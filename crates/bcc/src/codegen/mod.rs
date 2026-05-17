@@ -2218,6 +2218,43 @@ impl<'a> FunctionEmitter<'a> {
                 let _ = write!(self.out, "\t{hi_op}\tdx,word ptr {}\r\n", bp_addr(b_off + 2));
                 return;
             }
+            // `return a + b;` / `return a - b;` for two long globals.
+            // Same ABI-convention return registers (DX=high, AX=low),
+            // but the source loads come from DGROUP-relative memory.
+            // Fixture 348.
+            if let ExprKind::BinOp { op, left, right } = &e.kind
+                && matches!(op, BinOp::Add | BinOp::Sub)
+                && let ExprKind::Ident(a) = &left.kind
+                && let ExprKind::Ident(b) = &right.kind
+                && self.globals.type_of(a).map_or(false, |t| t.is_long_like())
+                && self.globals.type_of(b).map_or(false, |t| t.is_long_like())
+            {
+                let (lo_op, hi_op) = if matches!(op, BinOp::Add) {
+                    ("add", "adc")
+                } else {
+                    ("sub", "sbb")
+                };
+                let _ = write!(self.out, "\tmov\tdx,word ptr DGROUP:_{a}+2\r\n");
+                let _ = write!(self.out, "\tmov\tax,word ptr DGROUP:_{a}\r\n");
+                let _ = write!(self.out, "\t{lo_op}\tax,word ptr DGROUP:_{b}\r\n");
+                let _ = write!(self.out, "\t{hi_op}\tdx,word ptr DGROUP:_{b}+2\r\n");
+                return;
+            }
+            // `return *p;` for `p: long *` register-resident — load
+            // high through `[reg+2]` into DX, low through `[reg]`
+            // into AX (ABI return convention). Fixture 351.
+            if let ExprKind::Deref(operand) = &e.kind
+                && let ExprKind::Ident(ptr_name) = &operand.kind
+                && self.locals.has(ptr_name)
+                && let Some(pointee) = self.locals.type_of(ptr_name).pointee()
+                && pointee.is_long_like()
+                && let LocalLocation::Reg(reg) = self.locals.location_of(ptr_name)
+            {
+                let r = reg.name();
+                let _ = write!(self.out, "\tmov\tdx,word ptr [{r}+2]\r\n");
+                let _ = write!(self.out, "\tmov\tax,word ptr [{r}]\r\n");
+                return;
+            }
             panic!("non-constant long return value not yet supported (no fixture)");
         }
         self.emit_expr_to_ax(e);
@@ -2271,6 +2308,39 @@ impl<'a> FunctionEmitter<'a> {
                         self.emit_expr_to_ax(init);
                         let _ = write!(self.out, "\tmov\tword ptr {},dx\r\n", bp_addr(off + 2));
                         let _ = write!(self.out, "\tmov\tword ptr {},ax\r\n", bp_addr(off));
+                        return;
+                    }
+                    // `long x = g + K;` / `long x = g - K;` long local
+                    // init from a long-global + constant. Same shape
+                    // as the global-global path (slice 207) but
+                    // storing into the stack local instead. Load g
+                    // into AX:DX (globals convention since dest is
+                    // memory), `add/sub dx, K_lo`, `adc/sbb ax,
+                    // K_carry`, store. Fixture 350.
+                    if let ExprKind::BinOp { op, left, right } = &init.kind
+                        && matches!(op, BinOp::Add | BinOp::Sub)
+                        && let ExprKind::Ident(src_name) = &left.kind
+                        && let Some(src_ty) = self.globals.type_of(src_name)
+                        && src_ty.is_long_like()
+                        && let Some(k) = try_const_eval(right)
+                    {
+                        let signed = k as i32;
+                        let (delta, carry) = if matches!(op, BinOp::Add) {
+                            (signed, 0i16)
+                        } else {
+                            (-signed, -1i16)
+                        };
+                        let _ = write!(self.out, "\tmov\tax,word ptr DGROUP:_{src_name}+2\r\n");
+                        let _ = write!(self.out, "\tmov\tdx,word ptr DGROUP:_{src_name}\r\n");
+                        if let Ok(delta_i8) = i8::try_from(delta) {
+                            let _ = write!(self.out, "\tadd\tdx,{delta_i8}\r\n");
+                        } else {
+                            let delta_u16 = (delta as i32) as u16;
+                            let _ = write!(self.out, "\tadd\tdx,{delta_u16}\r\n");
+                        }
+                        let _ = write!(self.out, "\tadc\tax,{carry}\r\n");
+                        let _ = write!(self.out, "\tmov\tword ptr {},ax\r\n", bp_addr(off + 2));
+                        let _ = write!(self.out, "\tmov\tword ptr {},dx\r\n", bp_addr(off));
                         return;
                     }
                     panic!("non-constant long local init not yet supported (no fixture)");
