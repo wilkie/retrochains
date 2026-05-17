@@ -1020,6 +1020,19 @@ tasm IR variant `IncBpRel` / `DecBpRel` encodes `FF 46|4E dd`
 peephole was already in place for register-resident bare-ident
 locals; this extends it to memory-direct stack array elements.
 
+## Free passes (no code changes needed)
+
+Three more probes hit existing paths byte-exactly:
+
+- `548` — int local compound mul `x *= 3;` — already routed
+  through the imul-via-AX skeleton.
+- `549` — `if (x == g)` (int local vs int global) — the generic
+  `emit_compare` Ident-load + memory-source path handles the
+  asymmetric operand types.
+- `550` — global int initialized to a folded constant expression
+  `int g = 2 + 3 * 4;` — `try_const_eval` already folds nested
+  BinOps at parse time, so the slot emits `dw 14` directly.
+
 ## What we explicitly defer
 
 - Templates, namespaces, RTTI, exceptions (not in BC2.0 to relevant
