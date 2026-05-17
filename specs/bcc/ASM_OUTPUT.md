@@ -3072,6 +3072,22 @@ statement position — they share a single byte pattern. The two
 forms diverge only when the pre-value is consumed (`y = lv++;`),
 which the compound-assign shape can't produce directly.
 
+The prefix forms `++lv;` and `--lv;` collapse to **the same**
+single byte pattern at statement position (fixtures 404–406).
+Three source-level shapes — `++lv;`, `lv++;`, `lv += 1;` — all
+emit identical bytes when the result value is discarded:
+
+```
+; ++s.x;     (fixture 404)
+; s.x++;     (fixture 401)  } all produce the same:
+; s.x += 1;  (fixture 389)  }   add word ptr DGROUP:_s+0, 1
+                            }   adc word ptr DGROUP:_s+2, 0
+```
+
+Similarly `--lv;` / `lv--;` / `lv -= 1;` collapse to `sub [lo],
+1 / sbb [hi], 0`. A disassembler reading the emitted bytes cannot
+recover which of the three source forms was used.
+
 ### Long stack-local arithmetic (`329`–`335`)
 
 Long binary arithmetic between two stack-local long operands with
