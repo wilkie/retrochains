@@ -838,6 +838,38 @@ already-correct char form). All prior fixtures still hit the
 same byte output because their constants fit in 16 bits without
 sign-extension; only the negative-literal path tripped this.
 
+## Switch on a char scrutinee
+
+Fixture `527` (`char c; c = 'B'; switch (c) { case 'A': ... }`)
+— `emit_switch_chained`'s scrutinee load asserted Int locals
+only. Char locals now load via `mov al, byte ptr [bp-N]; cbw`
+(or `mov ah, 0` for uchar via `emit_widen_al`), promoting the
+byte to AX before the chained `cmp ax, K / je` sequence. Case
+values are 16-bit constants regardless of scrutinee type — BCC
+uses `cmp ax, 0x42` even though the live value only occupies
+AL.
+
+## Char compound assign on a byte-register local
+
+Fixture `529` (`char c; c = 'A'; c += 2;`) — `emit_compound_
+assign` asserted out for byte-register dests. Added an AL-
+round-trip path for `Add/Sub/BitAnd/BitOr/BitXor` with a
+constant RHS:
+
+```
+mov al, <reg>
+<op> al, K
+mov <reg>, al
+```
+
+This required five new AL-specific tasm IR variants (`AddAlImm8`,
+`SubAlImm8`, `AndAlImm8`, `OrAlImm8`, `XorAlImm8`) for the
+2-byte accumulator forms (`04 ii`, `2C ii`, `24 ii`, `0C ii`,
+`34 ii`). BCC always picks the AL accumulator form when AL is
+the destination; the generic `80 C0+rc ii` 3-byte encoding
+appears only for non-AL byte registers, which we haven't
+fixtured yet.
+
 ## What we explicitly defer
 
 - Templates, namespaces, RTTI, exceptions (not in BC2.0 to relevant
