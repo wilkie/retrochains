@@ -2350,28 +2350,25 @@ impl<'a> FunctionEmitter<'a> {
                 let _ = write!(self.out, "\tadc\tdx,{carry}\r\n");
                 return;
             }
-            // `return a + b;` / `return a - b;` for two long lvalues
-            // (params, stack locals, globals, struct fields, array
-            // elems, *p — any shape `long_lvalue_addr_pair` resolves).
-            // Source-storage-agnostic: load a (high→DX, low→AX) per
-            // the ABI return convention, then add/sub b's halves
-            // against the same registers with carry/borrow propagation.
-            // The lo op targets AX (low half) and the hi op targets
-            // DX (high half) — flipped from the memory-dest
-            // arithmetic shape (fixture 207), per the destination-
-            // driven register-pair rule. Fixtures 285 (locals),
-            // 348 (globals), 365 (struct fields), 366 (array elems),
-            // 367 (mixed global+struct).
+            // `return a <op> b;` for two long lvalues (params, stack
+            // locals, globals, struct fields, array elems, *p — any
+            // shape `long_lvalue_addr_pair` resolves) and any op in
+            // `long_pair_op` (`+`/`-`/`&`/`|`/`^`). Source-storage-
+            // agnostic: load a (high→DX, low→AX) per the ABI return
+            // convention, then op b's halves against the same
+            // registers. The lo op targets AX and the hi op targets
+            // DX — flipped from the memory-dest shape (fixture 207),
+            // per the destination-driven register-pair rule. For
+            // arith ops the hi_op carries (`adc`/`sbb`); for bitwise
+            // it's the same op on each half. Fixtures 285 (locals
+            // add), 348 (globals add), 365 (struct fields add), 366
+            // (array elems add), 367 (mixed global+struct add), 368
+            // (`&`), 369 (`|`), 370 (`^`).
             if let ExprKind::BinOp { op, left, right } = &e.kind
-                && matches!(op, BinOp::Add | BinOp::Sub)
+                && let Some((lo_op, hi_op)) = long_pair_op(*op)
                 && let Some((a_hi, a_lo)) = self.long_lvalue_addr_pair(left)
                 && let Some((b_hi, b_lo)) = self.long_lvalue_addr_pair(right)
             {
-                let (lo_op, hi_op) = if matches!(op, BinOp::Add) {
-                    ("add", "adc")
-                } else {
-                    ("sub", "sbb")
-                };
                 let _ = write!(self.out, "\tmov\tdx,word ptr {a_hi}\r\n");
                 let _ = write!(self.out, "\tmov\tax,word ptr {a_lo}\r\n");
                 let _ = write!(self.out, "\t{lo_op}\tax,word ptr {b_lo}\r\n");
