@@ -4230,6 +4230,48 @@ impl<'a> FunctionEmitter<'a> {
             }
             return;
         }
+        // Helper-call compound (`*=`, `/=`, `%=`) with a long-lvalue
+        // RHS. Mul loads RHS → CX:BX, LHS → DX:AX (compound-form
+        // operand-to-slot swap — see batch 23 fingerprint), calls
+        // N_LXMUL@, stores DX:AX back. Div/mod push the four words
+        // right-to-left in their standard helper order (divisor
+        // first in time, dividend at lower addresses on the helper
+        // stack), call the unsigned/signed helper, and store the
+        // result. Fixtures 407 (struct mul), 408 (array mul), 409
+        // (struct div).
+        if matches!(op, BinOp::Mul | BinOp::Div | BinOp::Mod)
+            && let Some((y_hi, y_lo)) = self.long_lvalue_addr_pair(value)
+        {
+            match op {
+                BinOp::Mul => {
+                    let _ = write!(self.out, "\tmov\tcx,word ptr {y_hi}\r\n");
+                    let _ = write!(self.out, "\tmov\tbx,word ptr {y_lo}\r\n");
+                    let _ = write!(self.out, "\tmov\tdx,word ptr {hi_addr}\r\n");
+                    let _ = write!(self.out, "\tmov\tax,word ptr {lo_addr}\r\n");
+                    self.out.extend_from_slice(b"\tcall\tnear ptr N_LXMUL@\r\n");
+                    self.helpers.insert("N_LXMUL@".to_string());
+                }
+                BinOp::Div | BinOp::Mod => {
+                    let helper = match (op, dest_unsigned) {
+                        (BinOp::Div, false) => "N_LDIV@",
+                        (BinOp::Mod, false) => "N_LMOD@",
+                        (BinOp::Div, true)  => "N_LUDIV@",
+                        (BinOp::Mod, true)  => "N_LUMOD@",
+                        _ => unreachable!(),
+                    };
+                    let _ = write!(self.out, "\tpush\tword ptr {y_hi}\r\n");
+                    let _ = write!(self.out, "\tpush\tword ptr {y_lo}\r\n");
+                    let _ = write!(self.out, "\tpush\tword ptr {hi_addr}\r\n");
+                    let _ = write!(self.out, "\tpush\tword ptr {lo_addr}\r\n");
+                    let _ = write!(self.out, "\tcall\tnear ptr {helper}\r\n");
+                    self.helpers.insert(helper.to_string());
+                }
+                _ => unreachable!(),
+            }
+            let _ = write!(self.out, "\tmov\tword ptr {hi_addr},dx\r\n");
+            let _ = write!(self.out, "\tmov\tword ptr {lo_addr},ax\r\n");
+            return;
+        }
         // Const RHS: `op [lo], k_lo / op|carry [hi], k_hi_or_0`.
         // Arith uses `83 /n` imm8sx (low half must fit i8sx; high
         // is `adc/sbb 0`). Bitwise uses `81 /n` imm16 (op-family-
