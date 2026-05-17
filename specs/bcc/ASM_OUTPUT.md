@@ -2539,6 +2539,105 @@ For a field at offset N within the struct, the addresses become
 `[si+N]` and `[si+N+2]`. `p->x` for the first field (offset 0) is
 byte-identical to `*p` for a long pointer.
 
+### Long stack-local arithmetic (`329`–`335`)
+
+Long binary arithmetic between two stack-local long operands with
+the result going to a third stack-local mirrors the global-global
+shape: load operand A's halves into AX:DX (AX=high, DX=low —
+globals convention because the destination is memory, not the
+return register pair), apply the op-pair against B's halves via
+bp-relative memory operands, store AX/DX back.
+
+**Add** (`z = x + y`, fixture 329):
+
+```
+mov ax, word ptr [bp+x_hi]     ; AX = x.high
+mov dx, word ptr [bp+x_lo]     ; DX = x.low
+add dx, word ptr [bp+y_lo]     ; 03 56 dd
+adc ax, word ptr [bp+y_hi]     ; 13 46 dd
+mov word ptr [bp+z_hi], ax
+mov word ptr [bp+z_lo], dx
+```
+
+**Sub** (fixture 330) substitutes `sub`/`sbb` (`2B 56 dd` / `1B 46
+dd`). **Bitwise** (`&`/`|`/`^`, fixtures 333/334) use the same
+mnemonic on both halves (independent — no carry):
+
+```
+mov ax, [bp+x_hi]
+mov dx, [bp+x_lo]
+and dx, [bp+y_lo]              ; 23 56 dd
+and ax, [bp+y_hi]              ; 23 46 dd
+mov [bp+z_hi], ax
+mov [bp+z_lo], dx
+```
+
+Unlike the global-global path (which uses `op` for low and `op`-of-
+high-of-K for the high partner), the stack-stack path reaches both
+operands through bp-relative memory loads — never spilling to AX/DX
+intermediates between operands.
+
+The register-convention rule continues to be **destination-driven**:
+results flowing to memory use AX=high/DX=low so the final stores
+land naturally; results flowing to the return registers (fixture
+285) use DX=high/AX=low so the ABI is satisfied without a swap.
+
+### Long unary on a stack local (`331`, `332`)
+
+**Negation** (`z = -x;`, fixture 331) uses the classic 8086 long
+two's-complement idiom:
+
+```
+mov ax, [bp+x_hi]
+mov dx, [bp+x_lo]
+neg ax                          ; AX = -high (CF effect overwritten)
+neg dx                          ; DX = -low; CF=1 iff low_orig != 0
+sbb ax, 0                       ; AX -= CF — borrow propagates to high
+mov [bp+z_hi], ax
+mov [bp+z_lo], dx
+```
+
+The order is *not* the obvious "negate low first, propagate up". BCC
+instead negates the high half *first* — its CF effect is just
+discarded — then negates the low half (which sets CF based on
+whether the original low was non-zero), then `sbb ax, 0` consumes
+that CF to apply the borrow to the high half. The final result
+matches `0 - x` for the full 32-bit value.
+
+**Bitwise complement** (`z = ~x;`, fixture 332) is independent per
+half — no carry — so BCC emits the simpler `not` pair:
+
+```
+mov ax, [bp+x_hi]
+mov dx, [bp+x_lo]
+not dx                          ; F7 D2 — low first
+not ax                          ; F7 D0 — then high
+mov [bp+z_hi], ax
+mov [bp+z_lo], dx
+```
+
+Note the **low-first** mnemonic order for `not`, contrasting with
+the high-first order BCC uses for *loads* and *memory stores*. The
+order is arbitrary for bitwise ops (results don't depend on it),
+but BCC consistently picks low-then-high for bitwise unary
+sequences and high-then-low for arithmetic sequences (where carry
+forces an order).
+
+### Long-from-long-local copy (`335`)
+
+`z = x;` for two long stack locals is just the load/store pair:
+
+```
+mov ax, word ptr [bp+x_hi]
+mov dx, word ptr [bp+x_lo]
+mov word ptr [bp+z_hi], ax
+mov word ptr [bp+z_lo], dx
+```
+
+No memory-to-memory shortcut (8086 has none for full 32-bit). The
+high half loads first, stores last — same convention as everywhere
+else for long *memory writes*.
+
 ## Source-line comments
 
 BCC interleaves the source as comments. Observed layout for `004`:

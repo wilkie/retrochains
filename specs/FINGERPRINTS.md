@@ -792,6 +792,66 @@ compiler would pick. The long's low half is on an even-aligned word
 byte 4. BCC accepts the misaligned access; the 8086 handles it
 transparently. _Fixtures_: 316–320.
 
+### Long-neg idiom: `neg ax / neg dx / sbb ax, 0` (DEFINITIVE)
+
+`-x` for a 32-bit `long` lowers to a specific 3-instruction sequence
+once AX:DX hold the operand (AX=high, DX=low, globals convention):
+
+```
+neg ax                ; F7 D8 — negate high half (CF effect discarded)
+neg dx                ; F7 DA — negate low; CF=1 iff low was non-zero
+sbb ax, 0             ; 1D 00 00 — propagate borrow into high (AX -= CF)
+```
+
+The `neg ax` step comes **first** even though its CF setting gets
+clobbered by the subsequent `neg dx`. The order is non-obvious —
+the "natural" pattern would be `neg DX / sbb AX, 0 / neg AX` (low,
+propagate, high) — but BCC's ordering still produces the correct
+two's-complement result because the final value of CF (after `neg
+dx`) reflects whether the original low was non-zero, and `sbb ax, 0`
+correctly applies that borrow.
+
+The sequence is short enough that a coincidental match by another
+compiler is implausible: three specific opcodes in a specific order
+operating on the AX/DX pair. Combined with the surrounding load/
+store frame around AX and DX, finding `F7 D8 / F7 DA / 1D 00 00`
+adjacent in a binary is essentially conclusive proof of BCC long
+codegen. _Fixture_: 331.
+
+### Long bitwise complement: `not dx / not ax` — low-first order (STRONG)
+
+For `~x` on a long, BCC emits `not dx` then `not ax` — **low half
+first, then high half**. This contrasts with BCC's high-first
+ordering rule for *loads* (`mov ax, [hi] / mov dx, [lo]`) and
+*memory stores* (`mov [hi], ax / mov [lo], dx`).
+
+Since bitwise unary has no carry/borrow dependency, the order is
+arbitrary for correctness. BCC's choice is consistent: bitwise
+unary uses low-first, arithmetic load/store uses high-first. A
+compiler that picked high-first for `not` (or low-first for the
+arithmetic load) would be distinguishable. _Fixture_: 332.
+
+### Long stack-local arithmetic register convention is destination-driven (STRONG)
+
+For long binary arithmetic between stack-local operands `x` and `y`
+whose result `z` is also stack-resident, BCC picks AX=high / DX=low
+(the **globals-arithmetic convention**), not DX=high / AX=low (the
+ABI convention). The choice is driven by where the result goes:
+
+- Result → memory (global, stack, struct field, pointer-target) →
+  AX=high, DX=low. The natural `mov [hi], ax / mov [lo], dx` store
+  drops out without a register swap.
+- Result → return (`return a+b;` in a long-returning function) →
+  DX=high, AX=low. Matches the cdecl long ABI.
+- Result → helper call (`*= / /=` etc.) → DX=high, AX=low. The
+  runtime helpers take and return DX:AX = high:low.
+
+So one disassembler heuristic for spotting BCC long arithmetic
+that's about to be stored is: AX:DX load order with AX getting the
+higher address. Distinct from the ABI pair which loads DX from the
+higher address. _Fixtures_: 329, 330, 333, 334 (memory-bound, AX=hi)
+vs. 285 (return, DX=hi).
+
 ---
 
 ## Calling-convention signatures
