@@ -852,6 +852,66 @@ higher address. Distinct from the ABI pair which loads DX from the
 higher address. _Fixtures_: 329, 330, 333, 334 (memory-bound, AX=hi)
 vs. 285 (return, DX=hi).
 
+### Compound assign opcode tells constant-vs-variable RHS (STRONG)
+
+For long compound assigns to memory, the **opcode byte** of the
+read-modify-write differs depending on whether the source RHS was
+a constant or a variable. Both shapes use ModR/M `r/m=110` (mem-
+relative addressing); the opcode distinguishes them:
+
+| Compound | Constant RHS opcode      | Variable RHS opcode        |
+|----------|--------------------------|----------------------------|
+| `x +=`   | `83 /0` (low) + `83 /2` (adc, high) | `01` (low, src=DX) + `11` (adc, high, src=AX) |
+| `x -=`   | `83 /5` (low) + `83 /3` (sbb, high) | `29` (low, src=DX) + `19` (sbb, high, src=AX) |
+| `x &=`   | `81 /4`                  | (no fixture yet — likely `21`) |
+| `x \|=`  | `81 /1`                  | (no fixture yet — likely `09`) |
+| `x ^=`   | `81 /6`                  | (no fixture yet — likely `31`) |
+
+Constant-RHS uses `Grp1 r/m16, imm8sx` (opcode `83`) or `Grp1
+r/m16, imm16` (opcode `81`). Variable-RHS uses the simpler
+`<op> r/m16, r16` opcodes (`01`/`11`/`29`/`19` and bitwise
+siblings).
+
+A disassembler can recover whether the source RHS was a literal
+*or* a named variable just by inspecting the opcode byte —
+without needing to see the prior load that brought the variable
+into AX:DX. The two byte sequences are distinct shapes for what
+the C language treats as the same operator. _Fixtures_: 288, 251
+(constant arith); 339, 340 (variable arith); 289 (constant bitwise).
+
+### Long stack-local mul/div/mod: helper shape inherited from globals (STRONG)
+
+The long multiply/divide/modulo helpers (`N_LXMUL@`, `N_LDIV@`,
+`N_LMOD@`, `N_LUDIV@`, `N_LUMOD@`) have a fixed calling convention
+that BCC obeys whether the operands are globals or stack locals:
+
+- **Multiply**: operand A in `CX:BX` (high:low), operand B in
+  `DX:AX` (high:low). Result in `DX:AX`. _Not_ stack-passed.
+- **Divide/Modulo**: 4-word stack push, **divisor first** (high
+  then low), **dividend second** (high then low). Result in
+  `DX:AX`. Helper pops its own 8 args (no caller cleanup).
+
+The operand-A→CX:BX choice for multiply is distinctive — most
+compilers would route both operands through the same register
+pair. The divide convention's per-operand high-first push order
+matches BCC's general long-arg convention. _Fixtures_: 231 (global
+mul) / 336 (stack mul); 232 (global div) / 337 (stack div).
+
+### Variable shift count loaded as `byte ptr` (STRONG)
+
+For both `int` and `long` shifts by a variable count, BCC loads
+the shift count into `CL` using a **byte ptr** load — never a
+`word ptr` load followed by a register truncation:
+
+```
+mov cl, byte ptr [bp+n_off]    ; int n = 3; shift count load
+```
+
+The high byte of `n` is never read; the helper / `shl` only
+consumes CL. This mirrors the int shift's documented behavior
+(fixtures 017/018) and extends to long shift via helper (fixture
+341). _Fixtures_: 017, 018 (int), 341 (long).
+
 ---
 
 ## Calling-convention signatures

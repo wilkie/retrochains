@@ -2638,6 +2638,106 @@ No memory-to-memory shortcut (8086 has none for full 32-bit). The
 high half loads first, stores last — same convention as everywhere
 else for long *memory writes*.
 
+### Long stack-local mul/div/mod (`336`–`338`)
+
+`z = x * y` / `z = x / y` / `z = x % y` for long stack locals route
+through the runtime helpers exactly the same way the global path
+does — only the operand loads change. The helper convention is
+fixed: it doesn't care where the operands came from.
+
+**Multiply** (fixture 336, `N_LXMUL@`): operand a in CX:BX
+(high:low), operand b in DX:AX (high:low), result in DX:AX.
+
+```
+mov cx, word ptr [bp+x_hi]
+mov bx, word ptr [bp+x_lo]
+mov dx, word ptr [bp+y_hi]
+mov ax, word ptr [bp+y_lo]
+call near ptr N_LXMUL@
+mov word ptr [bp+z_hi], dx
+mov word ptr [bp+z_lo], ax
+```
+
+**Divide/Modulo** (fixtures 337/338, `N_LDIV@` / `N_LMOD@`): four
+stack pushes — divisor pushed first (high then low), dividend
+second (high then low). Result in DX:AX. Helper pops its own
+arguments (`ret 8`), so no caller cleanup.
+
+```
+push word ptr [bp+y_hi]
+push word ptr [bp+y_lo]
+push word ptr [bp+x_hi]
+push word ptr [bp+x_lo]
+call near ptr N_LDIV@
+mov word ptr [bp+z_hi], dx
+mov word ptr [bp+z_lo], ax
+```
+
+Same helper choice rules apply: `N_LUDIV@`/`N_LUMOD@` for
+`unsigned long`; `N_LXMUL@` is signedness-agnostic (signed and
+unsigned long multiplication share the low 32 bits).
+
+### Long stack-local shift by a variable count (`341`)
+
+`z = x << n` and `z = x >> n` for a long `x` and an int `n` route
+through `N_LXLSH@` / `N_LXRSH@` / `N_LXURSH@`, same as the global
+path. The shift count is loaded into CL as a **byte ptr** from `n`'s
+storage — only the low byte matters to the helper. The shape:
+
+```
+mov dx, word ptr [bp+x_hi]      ; DX = x.high (ABI for helper)
+mov ax, word ptr [bp+x_lo]      ; AX = x.low
+mov cl, byte ptr [bp+n_off]     ; CL = low byte of n
+call near ptr N_LXLSH@
+mov word ptr [bp+z_hi], dx
+mov word ptr [bp+z_lo], ax
+```
+
+Same byte-of-int pattern that the int shift uses (where `int >> K`
+loads the count as `byte ptr` even when K is itself an `int`
+local). The high-of-int byte is never consulted — undefined inputs
+above 31 are the programmer's problem.
+
+### Long compound assign with non-constant RHS (`339`, `340`)
+
+`x += y` and `x -= y` for two long stack locals use a memory-
+destination shape distinct from the constant-RHS path:
+
+```
+mov ax, word ptr [bp+y_hi]      ; load y into AX:DX (globals conv)
+mov dx, word ptr [bp+y_lo]
+add word ptr [bp+x_lo], dx      ; 01 56 dd — opcode `01` (r/m, r16)
+adc word ptr [bp+x_hi], ax      ; 11 46 dd
+```
+
+vs. the constant-RHS path:
+
+```
+add word ptr [bp+x_lo], 5       ; 83 46 dd 05 — opcode `83` (r/m, imm8sx)
+adc word ptr [bp+x_hi], 0       ; 83 56 dd 00
+```
+
+Two distinct opcode families per op:
+
+| Op  | Constant RHS (`x += 5`)                    | Variable RHS (`x += y`)                  |
+|-----|--------------------------------------------|------------------------------------------|
+| `+` | `83 46 dd <K>` / `83 56 dd 00`             | `01 56 dd` / `11 46 dd`                  |
+| `-` | `83 6E dd <K>` / `83 5E dd 00`             | `29 56 dd` / `19 46 dd`                  |
+
+The constant-RHS opcodes (`83` Grp1 r/m16,imm8sx) and the variable-
+RHS opcodes (`01`/`29` and `11`/`19` — r/m, r16 forms) are
+mutually exclusive shapes — a disassembler can recover whether the
+source RHS was a literal or a variable from the opcode alone, even
+without seeing the surrounding load of `y` into AX:DX. Both forms
+are 3 or 4 bytes per half but encode different information.
+
+The register pairing for the variable-RHS form is always AX=high,
+DX=low (globals convention) because the destination is memory.
+Even though the `add [mem], reg` form could in principle use any
+register for the source, BCC consistently picks DX for the low
+half store and AX for the high half store — matching its
+destination-driven register convention.
+
 ## Source-line comments
 
 BCC interleaves the source as comments. Observed layout for `004`:
