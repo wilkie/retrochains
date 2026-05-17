@@ -1853,31 +1853,53 @@ memory rather than BX:CX/DX:AX — see slice 281).
 
 ### Compound assignment: arithmetic uses `83` (imm8sx), bitwise uses `81` (imm16)
 
-For long globals, BCC emits a **memory-direct read-modify-write**
-pair (no DX:AX round-trip) for both arithmetic and bitwise compound
-assigns, but the immediate-width selection is op-family dependent.
+For longs, BCC emits a **memory-direct read-modify-write** pair (no
+DX:AX round-trip) for both arithmetic and bitwise compound assigns,
+but the immediate-width selection is op-family dependent. The rule
+holds for both globals and stack locals — only the ModR/M byte
+differs.
 
-Arithmetic (`+=` / `-=`):
+Arithmetic (`+=` / `-=`), global:
 
 ```
 add word ptr DGROUP:_g, 5      ; 83 06 lo hi 05      (5 bytes, imm8sx)
 adc word ptr DGROUP:_g+2, 0    ; 83 16 lo hi 00      (5 bytes, imm8sx)
 ```
 
-Bitwise (`&=` / `|=` / `^=`):
+Bitwise (`&=` / `|=` / `^=`), global:
 
 ```
 and word ptr DGROUP:_g, 15     ; 81 26 lo hi 0F 00   (6 bytes, imm16)
 and word ptr DGROUP:_g+2, 0    ; 81 26 lo hi 00 00   (6 bytes, imm16)
 ```
 
-For bitwise compound the high partner is `op word ptr _g+2, <high
-K>` rather than the carry-propagating `adc/sbb 0` — bitwise ops don't
-carry. When K fits in i8sx, the bitwise path still picks the wider
-encoding (1 byte wasted per half). This *isn't* a TASM default —
-TASM's sign-extension heuristic would pick `83` for `15`. BCC's
-emitter must specifically request `81` for the bitwise compound
-shapes.
+Same code shape applies to long *stack locals* — the ModR/M r/m field
+switches from mem16 (`r/m=110` with disp16) to mem8 (`r/m=110` with
+disp8), shrinking each half by one byte:
+
+```
+; long x; x += 10;    (x at [bp-4])
+add word ptr [bp-4], 10        ; 83 46 fc 0A          (4 bytes, imm8sx)
+adc word ptr [bp-2], 0         ; 83 56 fe 00          (4 bytes, imm8sx)
+
+; long x; x &= 7;
+and word ptr [bp-4], 7         ; 81 66 fc 07 00       (5 bytes, imm16)
+and word ptr [bp-2], 0         ; 81 66 fe 00 00       (5 bytes, imm16)
+```
+
+The ModR/M byte cycles through the Grp1 `/n` field: `/0` ADD (`46`),
+`/1` OR (`4E`), `/2` ADC (`56`), `/3` SBB (`5E`), `/4` AND (`66`),
+`/5` SUB (`6E`), `/6` XOR (`76`). Same /n choices as for globals
+(`06`/`0E`/`16`/`1E`/`26`/`2E`/`36`), only the `r/m` and addressing
+mode differ.
+
+For bitwise compound the high partner is `op <mem>, <high K>` rather
+than the carry-propagating `adc/sbb 0` — bitwise ops don't carry.
+When K fits in i8sx, the bitwise path still picks the wider encoding
+(1 byte wasted per half). This *isn't* a TASM default — TASM's
+sign-extension heuristic would pick `83` for `15`. BCC's emitter
+must specifically request `81` for the bitwise compound shapes,
+regardless of storage class.
 
 For `*=` / `/=` / `%=`, the compound form routes through the helper
 ABI (see "Runtime helpers" below) since BCC has no memory-direct

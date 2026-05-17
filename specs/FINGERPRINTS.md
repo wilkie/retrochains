@@ -430,15 +430,19 @@ into the high half via `adc`. _Fixtures_: 207, 219, 285.
 
 ### Compound assigns: `+=`/`-=` use imm8sx, `&=`/`|=`/`^=` use imm16 (STRONG)
 
-For 32-bit `long` globals, BCC emits a memory-direct read-modify-write
-pair, **but the immediate encoding width is op-family dependent**:
+For 32-bit `long`, BCC emits a memory-direct read-modify-write pair
+for compound assigns, **but the immediate encoding width is
+op-family dependent**:
 
-- `+=` / `-=` use `83 06 ...` / `83 2E ...` — Grp1 `r/m16, imm8sx`,
-  **5 bytes** per half. The high partner is always `adc 0` / `sbb 0`
-  (also 5 bytes each).
-- `&=` / `|=` / `^=` use `81 26 ...` / `81 0E ...` / `81 36 ...` —
-  Grp1 `r/m16, imm16`, **6 bytes** per half, **even when the
-  immediate trivially fits in an i8sx**.
+- `+=` / `-=` use Grp1 `r/m16, imm8sx` (opcode `83`) — `83 06 …` /
+  `83 2E …` for globals, `83 46 dd` / `83 6E dd` for stack locals.
+  The high partner is always `adc 0` / `sbb 0`, same width.
+- `&=` / `|=` / `^=` use Grp1 `r/m16, imm16` (opcode `81`) — `81 26 …`
+  / `81 0E …` / `81 36 …` for globals, `81 66 dd …` / `81 4E dd …`
+  / `81 76 dd …` for stack locals. The high partner uses the same
+  mnemonic against the high half of K (no carry/borrow involvement).
+  **Even when the immediate trivially fits in an i8sx**, BCC stays on
+  the wider form.
 
 Concrete: `long g; g &= 15;` emits
 ```
@@ -449,9 +453,18 @@ The 4-byte saving from picking `83 26 lo hi 0F` (5 bytes) is left on
 the table. This isn't a TASM default — TASM's sign-extension heuristic
 would pick the shorter form for `15` if BCC asked for it. BCC's
 emission must specifically choose `81` for the bitwise compound
-shapes, while picking `83` for the arithmetic siblings. Distinct from
-slice-207-style `g = g <op> K` which routes through registers
-entirely. _Fixtures_: 251 (`+=` → 83), 253 (`&=` → 81).
+shapes, while picking `83` for the arithmetic siblings.
+
+The same op-family selection holds for **long stack locals** — only
+the ModR/M byte changes (mem8-form `46`/`56`/`5E`/`66`/`6E`/`76`
+instead of mem16-form `06`/`16`/`1E`/`26`/`2E`/`36`), the
+imm8sx-vs-imm16 width choice is preserved. So a compound assign
+fingerprint applies whether the target lives in `DGROUP` or on the
+stack — useful when disassembling a function with no symbol info.
+
+Distinct from slice-207-style `g = g <op> K` which routes through
+registers entirely. _Fixtures_: 251 (global `+=` → 83), 253 (global
+`&=` → 81), 288 (stack `+=` → 83), 289 (stack `&=` → 81).
 
 ### Long zero-compare via OR-then-test (STRONG)
 
