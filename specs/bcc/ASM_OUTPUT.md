@@ -1966,6 +1966,50 @@ The low-first order matches the bitwise-unary rule documented for
 memory-dest (`not dx / not ax` at fixture 332) — the "low" half
 just happens to be AX at return and DX at memory-dest.
 
+`return <a> * <b>;` for two long lvalues routes through
+`N_LXMUL@`. The helper's result lands in DX:AX — which is the
+return register pair — so there is no store and no extra move at
+the boundary; the helper's `ret` puts the value where the
+function's caller will read it, then the function's epilogue
+runs immediately:
+
+```
+; return x * y;  for two long params (fixture 374)
+mov cx, word ptr [bp+6]          ; x.high → CX
+mov bx, word ptr [bp+4]          ; x.low  → BX
+mov dx, word ptr [bp+10]         ; y.high → DX
+mov ax, word ptr [bp+8]          ; y.low  → AX
+call near ptr N_LXMUL@           ; result in DX:AX (= return pair)
+; (epilogue follows immediately — no store, no move)
+```
+
+The first operand goes to CX:BX, second to DX:AX — same
+operand-to-slot mapping as the memory-dest `z = x * y` shape
+(fixture 231). Mul is commutative so the slot choice is purely
+about destination convenience.
+
+`return <a> / <b>;` and `return <a> % <b>;` route through
+`N_LDIV@` / `N_LMOD@` (or the unsigned siblings `N_LUDIV@` /
+`N_LUMOD@`). The 4-word push sequence is the same as the memory-
+dest div/mod shape (fixture 232): divisor pushed first in time
+(high then low), dividend second (high then low). The result
+again lands in DX:AX = return pair, so no boundary move:
+
+```
+; return x / y;  for two long params (fixture 375)
+push word ptr [bp+10]            ; y.high (divisor)
+push word ptr [bp+8]             ; y.low
+push word ptr [bp+6]             ; x.high (dividend)
+push word ptr [bp+4]             ; x.low
+call near ptr N_LDIV@            ; or N_LMOD@ — result in DX:AX
+
+; return x % y;  identical push shape, helper is N_LMOD@ (fixture 376)
+```
+
+In memory address order (from SP up after the pushes), the layout
+is `dividend.low, dividend.high, divisor.low, divisor.high` —
+dividend at the lower addresses, divisor at the higher.
+
 ### Plain assignment and arithmetic
 
 `g = K` for a long global stores high then low:

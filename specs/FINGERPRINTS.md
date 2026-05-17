@@ -1000,6 +1000,34 @@ pair. The divide convention's per-operand high-first push order
 matches BCC's general long-arg convention. _Fixtures_: 231 (global
 mul) / 336 (stack mul); 232 (global div) / 337 (stack div).
 
+### Helper-call return is a passthrough — no boundary move (STRONG)
+
+When a `long`-returning function ends with `return a * b`, `return
+a / b`, or `return a % b` (i.e. any helper-call shape as the
+return value), BCC emits **no** move or store between the helper
+`call` and the function's `jmp short / pop bp / ret` epilogue.
+The helpers `N_LXMUL@`, `N_LDIV@`, `N_LMOD@`, `N_LUDIV@`,
+`N_LUMOD@` all deposit their result in DX:AX, which is exactly
+the cdecl long-return register pair, so the helper's `ret`
+already leaves the value where the caller will read it.
+
+```
+... operand loads / pushes ...
+call near ptr N_LXMUL@   ; (or N_LDIV@ / N_LMOD@ ...)
+jmp short @<f>@<exit>
+pop bp
+ret
+```
+
+A disassembler can use this shape — `call <helper> / jmp short
+/ pop bp / ret` adjacent with no intervening register-shuffling
+instructions — as a recognizer for the `return a OP b` source
+pattern. A compiler that routed long return values through a
+different ABI (or that used a temporary spill) would have to
+emit fixup moves between the helper call and the epilogue. The
+absence of those moves is the fingerprint. _Fixtures_: 374
+(`*`), 375 (`/`), 376 (`%`).
+
 ### Variable shift count loaded as `byte ptr` (STRONG)
 
 For both `int` and `long` shifts by a variable count, BCC loads
