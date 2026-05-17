@@ -278,16 +278,31 @@ diverge: oracle emits `_g, _buf` (short → long) with no padding,
 not the alphabetical `_buf, _g` that would require a 1-byte pad
 to align `_g`.
 
-### Publics emission — long bucket split
+### Publics emission — long bucket direction
 
-The long bucket itself splits further between globals, functions,
-and runtime helpers — each subgroup reverse-alpha within itself,
-concatenated in that fixed order. Fixture `465`'s publics are
-`_buf` (global, long) and `_main` (function, long); oracle emits
-`_buf, _main` (globals before functions), not the mixed
-reverse-alpha `_main, _buf` that would otherwise apply. Function-
-only and helper-only cases (095, 179, 260) collapse to the same
-result either way because the relevant subgroup is empty.
+The long bucket's sort direction depends on whether it contains a
+global. The earlier batch-49 "globals first then functions then
+helpers, each reverse-alpha within" rule worked for fixture `465`
+(`_buf, _main`) but fixture `491` (`_pts, _main`) contradicted it
+— oracle emits `_main, _pts`, not `_pts, _main`. Refined rule:
+
+- If the long bucket contains *any* global: emit the whole bucket
+  (globals, functions, and helpers mixed) in **forward**
+  alphabetical order.
+- Otherwise (functions and/or helpers only): emit in **reverse**
+  alphabetical order.
+
+Verified against:
+- 095 (`_sum`, `_main`) — functions only → reverse-alpha →
+  `_sum, _main`.
+- 179 (`_add`, `_main`) — functions only → reverse-alpha →
+  `_main, _add`.
+- 260 (`_main`, `N_LXMUL@`) — function + helper, no global →
+  reverse-alpha → `_main, N_LXMUL@`.
+- 465 (`_buf`, `_main`) — global + function → forward-alpha →
+  `_buf, _main`.
+- 491 (`_pts`, `_main`) — global + function → forward-alpha →
+  `_main, _pts`.
 
 ## `signed` keyword
 
@@ -489,6 +504,26 @@ and resolves a typedef-name as the referent type when it appears
 where a type is expected — so a typedef whose base is another
 typedef just flows through. The pointer-of-typedef in 490
 exercises the right composition order at the typedef level.
+
+### Multi-dim global arrays and nested initializers
+
+Fixture `492` (`int a[2][3] = { {1,2,3}, {4,5,6} };`) needed two
+parser extensions:
+
+1. `parse_global` now loops the array suffix (`while LBracket`)
+   instead of accepting at most one `[N]`. First suffix may still
+   be `[]` for length-inference from the initializer.
+2. `parse_initializer` now recurses for nested braces. Multi-dim
+   array inits embed `InitList` inside `InitList`.
+
+### Local declarations: aggregate initializer
+
+`finish_declare` (the common tail for local Declare/static-local
+hoisting) now calls `parse_initializer` instead of `parse_expr`
+for the `= <init>` slot, so static locals with braced
+initializers (`static int a[3] = {10, 20, 30};` — fixture `493`)
+work. Scalar locals are unaffected: `parse_initializer` falls
+through to `parse_expr` when no `{` is seen.
 
 ## Comma operator
 
