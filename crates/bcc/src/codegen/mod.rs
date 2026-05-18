@@ -4198,6 +4198,38 @@ impl<'a> FunctionEmitter<'a> {
             let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name},ax\r\n");
             return;
         }
+        // Int/uint global compound `/=` / `%=` with a char/uchar
+        // local RHS. Similar register-pressure dance as the Mul
+        // arm, but BCC parks the widened RHS in BX (Div uses BX
+        // by convention; Mul used DX). The LHS load now needs
+        // both AX (dividend low) and DX (sign-extend via cwd),
+        // so the push/pop must stash AX before the cwd:
+        // `mov al, <c>; cbw; push ax; mov ax, <lhs>; cwd; pop
+        // bx; idiv bx; mov <lhs>, ax` (or `, dx` for `%=`).
+        // Signed `idiv` works for `uchar` RHS too — the
+        // zero-extended divisor is positive. Fixture 798.
+        if let Some(gty) = self.globals.type_of(name)
+            && matches!(gty, Type::Int | Type::UInt)
+            && matches!(op, BinOp::Div | BinOp::Mod)
+            && let Some(ty_rhs) = self.rhs_type_for_long_widening(&value.kind)
+            && matches!(ty_rhs, Type::Char | Type::UChar)
+            && let ExprKind::Ident(b) = &value.kind
+            && !self.globals.contains(b)
+        {
+            let _ = ty_rhs;
+            self.emit_expr_to_ax(value);
+            self.out.extend_from_slice(b"\tpush\tax\r\n");
+            let _ = write!(self.out, "\tmov\tax,word ptr DGROUP:_{name}\r\n");
+            self.out.extend_from_slice(b"\tcwd\t\r\n");
+            self.out.extend_from_slice(b"\tpop\tbx\r\n");
+            self.out.extend_from_slice(b"\tidiv\tbx\r\n");
+            let result_reg = if matches!(op, BinOp::Div) { "ax" } else { "dx" };
+            let _ = write!(
+                self.out,
+                "\tmov\tword ptr DGROUP:_{name},{result_reg}\r\n",
+            );
+            return;
+        }
         // Char/uchar global compound `*= K` — two shapes:
         //  - K is power of two: unroll `shl al, 1` log2(K) times
         //    around an AL load-modify-store. Fixture 690.
