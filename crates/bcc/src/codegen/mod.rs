@@ -3277,39 +3277,73 @@ impl<'a> FunctionEmitter<'a> {
         // output is identical between `g = g op b` and `g op= b`
         // for these ops. Fixtures 260 (`*=`), 261 (`/=`), 262 (`%=`).
         // Long compound on a long LHS (global or stack local) with
-        // a long RHS (global or stack local) — Add/Sub/Bit* shapes.
-        // BCC loads RHS into AX:DX (AX=high, DX=low) then applies
-        // memory-direct ops to the LHS destination, with carry/
-        // borrow for arith. Fixture 744 (global LHS + stack RHS),
-        // 745 (stack LHS + global RHS).
+        // a long RHS (global or stack local), but not both globals
+        // (which keeps the existing branch). Mul/Div/Mod use the
+        // long helper; Add/Sub/Bit* use the inline memory-direct
+        // shape. Fixtures 744-746 (Add/And), 747 (Mul).
         if let Some(ty_lhs) = self.lhs_long_type(name)
             && ty_lhs.is_long_like()
             && let ExprKind::Ident(b) = &value.kind
             && let Some(ty_rhs) = self.rhs_long_type_of_ident(b)
             && ty_rhs.is_long_like()
-            && matches!(
-                op,
-                BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor
-            )
-            && !(self.globals.contains(name)
-                && self.globals.contains(b)) // both-globals stays on the existing branch below
+            && !(self.globals.contains(name) && self.globals.contains(b))
         {
-            let _ = (ty_lhs, ty_rhs);
+            let unsigned = ty_lhs.is_unsigned() || ty_rhs.is_unsigned();
             let (rhs_lo, rhs_hi) = self.long_halves_of(b);
             let (lhs_lo, lhs_hi) = self.long_halves_of(name);
-            let _ = write!(self.out, "\tmov\tax,word ptr {rhs_hi}\r\n");
-            let _ = write!(self.out, "\tmov\tdx,word ptr {rhs_lo}\r\n");
-            let (lo_op, hi_op) = match op {
-                BinOp::Add => ("add", "adc"),
-                BinOp::Sub => ("sub", "sbb"),
-                BinOp::BitAnd => ("and", "and"),
-                BinOp::BitOr => ("or", "or"),
-                BinOp::BitXor => ("xor", "xor"),
-                _ => unreachable!(),
-            };
-            let _ = write!(self.out, "\t{lo_op}\tword ptr {lhs_lo},dx\r\n");
-            let _ = write!(self.out, "\t{hi_op}\tword ptr {lhs_hi},ax\r\n");
-            return;
+            match op {
+                BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor => {
+                    let _ = write!(self.out, "\tmov\tax,word ptr {rhs_hi}\r\n");
+                    let _ = write!(self.out, "\tmov\tdx,word ptr {rhs_lo}\r\n");
+                    let (lo_op, hi_op) = match op {
+                        BinOp::Add => ("add", "adc"),
+                        BinOp::Sub => ("sub", "sbb"),
+                        BinOp::BitAnd => ("and", "and"),
+                        BinOp::BitOr => ("or", "or"),
+                        BinOp::BitXor => ("xor", "xor"),
+                        _ => unreachable!(),
+                    };
+                    let _ = write!(self.out, "\t{lo_op}\tword ptr {lhs_lo},dx\r\n");
+                    let _ = write!(self.out, "\t{hi_op}\tword ptr {lhs_hi},ax\r\n");
+                    return;
+                }
+                // Long `g *= h` — RHS into CX:BX, LHS into DX:AX,
+                // helper call, write back. Same shape as the both-
+                // globals path. Fixture 747.
+                BinOp::Mul => {
+                    let _ = write!(self.out, "\tmov\tcx,word ptr {rhs_hi}\r\n");
+                    let _ = write!(self.out, "\tmov\tbx,word ptr {rhs_lo}\r\n");
+                    let _ = write!(self.out, "\tmov\tdx,word ptr {lhs_hi}\r\n");
+                    let _ = write!(self.out, "\tmov\tax,word ptr {lhs_lo}\r\n");
+                    self.out.extend_from_slice(b"\tcall\tnear ptr N_LXMUL@\r\n");
+                    self.helpers.insert("N_LXMUL@".to_string());
+                    let _ = write!(self.out, "\tmov\tword ptr {lhs_hi},dx\r\n");
+                    let _ = write!(self.out, "\tmov\tword ptr {lhs_lo},ax\r\n");
+                    return;
+                }
+                // Long `g /= h` / `g %= h` — push both halves of
+                // RHS then LHS, helper call, write back. Helper
+                // selection matches the both-globals path.
+                BinOp::Div | BinOp::Mod => {
+                    let helper = match (op, unsigned) {
+                        (BinOp::Div, false) => "N_LDIV@",
+                        (BinOp::Mod, false) => "N_LMOD@",
+                        (BinOp::Div, true)  => "N_LUDIV@",
+                        (BinOp::Mod, true)  => "N_LUMOD@",
+                        _ => unreachable!(),
+                    };
+                    let _ = write!(self.out, "\tpush\tword ptr {rhs_hi}\r\n");
+                    let _ = write!(self.out, "\tpush\tword ptr {rhs_lo}\r\n");
+                    let _ = write!(self.out, "\tpush\tword ptr {lhs_hi}\r\n");
+                    let _ = write!(self.out, "\tpush\tword ptr {lhs_lo}\r\n");
+                    let _ = write!(self.out, "\tcall\tnear ptr {helper}\r\n");
+                    self.helpers.insert(helper.to_string());
+                    let _ = write!(self.out, "\tmov\tword ptr {lhs_hi},dx\r\n");
+                    let _ = write!(self.out, "\tmov\tword ptr {lhs_lo},ax\r\n");
+                    return;
+                }
+                _ => {}
+            }
         }
         if let Some(ty) = self.globals.type_of(name)
             && ty.is_long_like()
