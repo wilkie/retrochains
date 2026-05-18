@@ -1527,6 +1527,11 @@ fn parse_sbb(operands: &str, line_no: usize) -> AsmResult<Instr> {
         if let Some(imm) = parse_imm8_signed(rhs) {
             return Ok(Instr::SbbSiDispImm8 { disp, imm });
         }
+        // `sbb word ptr [si+disp], dx` — long `*p -= int x` high
+        // half borrow.
+        if rhs == "dx" {
+            return Ok(Instr::SbbSiDispDx { disp });
+        }
     }
     Err(AsmError::new(
         line_no,
@@ -1652,6 +1657,11 @@ fn parse_adc(operands: &str, line_no: usize) -> AsmResult<Instr> {
         // carry from register-loaded RHS (fixture 398).
         if rhs == "ax" {
             return Ok(Instr::AdcSiDispAx { disp });
+        }
+        // `adc word ptr [si+disp], dx` — long `*p += int x` high
+        // half: DX holds cwd sign-extension (fixture 849).
+        if rhs == "dx" {
+            return Ok(Instr::AdcSiDispDx { disp });
         }
     }
     Err(AsmError::new(

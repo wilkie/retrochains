@@ -451,6 +451,7 @@ fn instr_size(instr: &Instr) -> usize {
         | Instr::OrAlBpRel { .. }
         | Instr::XorAlBpRel { .. } => 3,
         Instr::AdcSiDispAx { .. } => 3,
+        Instr::AdcSiDispDx { .. } | Instr::SbbSiDispDx { .. } => 3,
         Instr::AddBpRelImm8 { .. }
         | Instr::AdcBpRelImm8 { .. }
         | Instr::SubBpRelImm8 { .. }
@@ -2014,6 +2015,20 @@ fn emit_instr(
             // 44 = mod=01 reg=AX(000) r/m=100=SI with disp8.
             out.push(0x11);
             out.push(0x44);
+            out.push(*disp as u8);
+        }
+        Instr::AdcSiDispDx { disp } => {
+            // `adc word ptr [si+disp8],dx` → 11 54 dd. ModR/M
+            // 54 = mod=01 reg=DX(010) r/m=100=SI. Fixture 849.
+            out.push(0x11);
+            out.push(0x54);
+            out.push(*disp as u8);
+        }
+        Instr::SbbSiDispDx { disp } => {
+            // `sbb word ptr [si+disp8],dx` → 19 54 dd. Sub-with-
+            // borrow sibling.
+            out.push(0x19);
+            out.push(0x54);
             out.push(*disp as u8);
         }
         Instr::SubSiPtrImm8 { imm } => {

@@ -1198,6 +1198,15 @@ pub enum Instr {
     /// disp8. High-half carry partner to `AddSiPtrDx` for the
     /// variable-RHS long pointer compound. Fixture 398.
     AdcSiDispAx { disp: i8 },
+    /// `adc word ptr [si+disp8],dx` — `11 54 dd`. ADC r/m16,r16
+    /// with reg=DX(010) r/m=100=SI. High-half carry partner for
+    /// `long *p; *p += int x` (signed widening) where AX holds
+    /// the int low half and DX the cwd sign-extension. Fixture
+    /// 849.
+    AdcSiDispDx { disp: i8 },
+    /// `sbb word ptr [si+disp8],dx` — `19 54 dd`. Borrow sibling
+    /// for `long *p -= int x`.
+    SbbSiDispDx { disp: i8 },
     /// `sub word ptr [si],<imm8sx>` — `83 2C ii`. Low-half partner
     /// for long-pointer `*p -= K`.
     SubSiPtrImm8 { imm: i8 },

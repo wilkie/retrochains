@@ -5969,30 +5969,39 @@ impl<'a> FunctionEmitter<'a> {
                 let _ = write!(self.out, "\t{mnem}\tword ptr {dest},cl\r\n");
                 return;
             }
-            // Char-element compound with non-constant RHS — load
-            // dest into AL, then `<op> al, byte ptr <rhs>` against
-            // the low byte of the RHS (int gets truncated). Same
-            // shape as char-global var-RHS (fixture 680). Fixture
-            // 847.
+            // Char-element compound with non-constant RHS. BCC
+            // splits two ways by op family (same asymmetry as
+            // char-global compound, batch 121/122):
+            //  - `+=`/`-=`: AL-through (`mov al, <dest>; add al,
+            //    <rhs>; mov <dest>, al`) — arith canonicalizes
+            //    through the accumulator.
+            //  - `&=`/`|=`/`^=`: memory-direct (`mov al, <rhs>;
+            //    and byte ptr <dest>, al`).
+            // Fixture 847 (arith), 850 (bitwise).
             if store_byte
-                && matches!(
-                    op,
-                    BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor
-                )
+                && matches!(op, BinOp::Add | BinOp::Sub)
+                && try_const_eval(value).is_none()
+                && let Some(rhs_byte) = self.rhs_byte_addr(&value.kind)
+            {
+                let mnem = if matches!(op, BinOp::Add) { "add" } else { "sub" };
+                let _ = write!(self.out, "\tmov\tal,byte ptr {dest}\r\n");
+                let _ = write!(self.out, "\t{mnem}\tal,{rhs_byte}\r\n");
+                let _ = write!(self.out, "\tmov\tbyte ptr {dest},al\r\n");
+                return;
+            }
+            if store_byte
+                && matches!(op, BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor)
                 && try_const_eval(value).is_none()
                 && let Some(rhs_byte) = self.rhs_byte_addr(&value.kind)
             {
                 let mnem = match op {
-                    BinOp::Add => "add",
-                    BinOp::Sub => "sub",
                     BinOp::BitAnd => "and",
                     BinOp::BitOr => "or",
                     BinOp::BitXor => "xor",
                     _ => unreachable!(),
                 };
-                let _ = write!(self.out, "\tmov\tal,byte ptr {dest}\r\n");
-                let _ = write!(self.out, "\t{mnem}\tal,{rhs_byte}\r\n");
-                let _ = write!(self.out, "\tmov\tbyte ptr {dest},al\r\n");
+                let _ = write!(self.out, "\tmov\tal,{rhs_byte}\r\n");
+                let _ = write!(self.out, "\t{mnem}\tbyte ptr {dest},al\r\n");
                 return;
             }
             let Some(v) = try_const_eval(value) else {
@@ -6731,17 +6740,19 @@ impl<'a> FunctionEmitter<'a> {
         };
         let store_byte = field_ty.is_char_like();
         let width = if store_byte { "byte" } else { "word" };
-        // Char-field compound with variable RHS — mirrors the
-        // char-global var-RHS pattern (batch 121): load RHS into
-        // AL, then memory-direct `<op> byte ptr <dest>, al`. The
-        // `dest` already includes any non-zero field offset.
-        // Fixture 708 (`g.c += d`).
+        // Char-field compound with char-typed variable RHS —
+        // mirrors the char-global var-RHS pattern (batch 121):
+        // load RHS into AL, then memory-direct `<op> byte ptr
+        // <dest>, al`. The `dest` already includes any non-zero
+        // field offset. Fixture 708 (`g.c += d`).
         if store_byte
             && matches!(
                 op,
                 BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor
             )
             && try_const_eval(value).is_none()
+            && let Some(ty_rhs) = self.rhs_int_compound_type(&value.kind)
+            && matches!(ty_rhs, Type::Char | Type::UChar)
         {
             let src = self.resolve_operand_source(value);
             self.out.extend_from_slice(b"\tmov\tal,");
@@ -6755,6 +6766,36 @@ impl<'a> FunctionEmitter<'a> {
                 BinOp::BitXor => "xor",
                 _ => unreachable!(),
             };
+            let _ = write!(self.out, "\t{mnem}\tbyte ptr {dest},al\r\n");
+            return;
+        }
+        // Char-field compound with int-typed variable RHS (gets
+        // truncated to byte). Same op-family asymmetry as char-
+        // array (fixtures 847/850): arith goes through AL,
+        // bitwise stays memory-direct. Fixture 848.
+        if store_byte
+            && matches!(op, BinOp::Add | BinOp::Sub)
+            && try_const_eval(value).is_none()
+            && let Some(rhs_byte) = self.rhs_byte_addr(&value.kind)
+        {
+            let mnem = if matches!(op, BinOp::Add) { "add" } else { "sub" };
+            let _ = write!(self.out, "\tmov\tal,byte ptr {dest}\r\n");
+            let _ = write!(self.out, "\t{mnem}\tal,{rhs_byte}\r\n");
+            let _ = write!(self.out, "\tmov\tbyte ptr {dest},al\r\n");
+            return;
+        }
+        if store_byte
+            && matches!(op, BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor)
+            && try_const_eval(value).is_none()
+            && let Some(rhs_byte) = self.rhs_byte_addr(&value.kind)
+        {
+            let mnem = match op {
+                BinOp::BitAnd => "and",
+                BinOp::BitOr => "or",
+                BinOp::BitXor => "xor",
+                _ => unreachable!(),
+            };
+            let _ = write!(self.out, "\tmov\tal,{rhs_byte}\r\n");
             let _ = write!(self.out, "\t{mnem}\tbyte ptr {dest},al\r\n");
             return;
         }
