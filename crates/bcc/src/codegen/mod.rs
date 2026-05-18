@@ -3369,6 +3369,39 @@ impl<'a> FunctionEmitter<'a> {
             let _ = write!(self.out, "\tmov\tword ptr {lhs_lo},ax\r\n");
             return;
         }
+        // Long LHS `*= uint x` (unsigned widening). Zero-extension
+        // means CX can be cleared with `xor cx, cx` without
+        // disturbing DX, so BCC loads BX directly from the uint
+        // and skips the push/pop dance the signed path needs:
+        // `mov bx, <x>; xor cx, cx; mov dx, <lhs_hi>; mov ax,
+        // <lhs_lo>; call N_LXMUL@; store`. Fixture 772.
+        if let Some(ty_lhs) = self.lhs_long_type(name)
+            && ty_lhs.is_long_like()
+            && let ExprKind::Ident(b) = &value.kind
+            && let Some(ty_rhs) = self.rhs_type_for_long_widening(&value.kind)
+            && matches!(ty_rhs, Type::UInt)
+            && matches!(op, BinOp::Mul)
+        {
+            let _ = ty_lhs;
+            let (lhs_lo, lhs_hi) = self.long_halves_of(name);
+            let rhs_addr = if self.globals.contains(b) {
+                format!("DGROUP:_{b}")
+            } else {
+                let LocalLocation::Stack(off) = self.locals.location_of(b) else {
+                    unreachable!();
+                };
+                bp_addr(off)
+            };
+            let _ = write!(self.out, "\tmov\tbx,word ptr {rhs_addr}\r\n");
+            self.out.extend_from_slice(b"\txor\tcx,cx\r\n");
+            let _ = write!(self.out, "\tmov\tdx,word ptr {lhs_hi}\r\n");
+            let _ = write!(self.out, "\tmov\tax,word ptr {lhs_lo}\r\n");
+            self.out.extend_from_slice(b"\tcall\tnear ptr N_LXMUL@\r\n");
+            self.helpers.insert("N_LXMUL@".to_string());
+            let _ = write!(self.out, "\tmov\tword ptr {lhs_hi},dx\r\n");
+            let _ = write!(self.out, "\tmov\tword ptr {lhs_lo},ax\r\n");
+            return;
+        }
         // Long LHS `/= int x` / `%= int x` (signed widening). BCC
         // widens via `cwd`, pushes both halves of the widened RHS
         // (DX then AX, high then low), then pushes the two halves
