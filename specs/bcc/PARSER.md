@@ -1959,6 +1959,18 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Pointer subscript compound — op-family siblings
+
+Fixtures `866` (`int *p; p[1] -= y`), `867` (`int *p; p[1] &= y`),
+`868` (`int *p; p[1] |= y`).
+
+No new code — these exercise the `SubBxDispAx`/`AndBxDispAx`/
+`OrBxDispAx` IR variants introduced alongside `AddBxDispAx` in
+batch 181 (the same `<op> word ptr [bx+offset], ax` form for the
+global-pointer subscript path). 862 only fixture-covered the ADD
+op; these add explicit byte-exact regression coverage for SUB/AND/
+OR siblings. XOR is also wired but waits on a fixture probe.
+
 ## Pointer subscript compound — local, const-RHS, char pointee
 
 Fixtures `863` (`int *p; p[1] += y` — stack-local pointer in SI),
