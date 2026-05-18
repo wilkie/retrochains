@@ -1522,6 +1522,24 @@ immediate. 3 bytes vs the 4-byte generic `81 E0 lo hi`.
   `lea ax, [bp-1]` materializes the address, and `mov al,
   byte ptr [si]` reads through the pointer.
 
+## `x | K` / `x ^ K` — `or/xor ax, imm16` accumulator forms
+
+Fixtures `611` (`return x | 8;`) and `612` (`return x ^ 3;`) —
+mirrors of the batch-97 `and ax, imm16` fix. BCC uses the AX-
+specific 3-byte accumulator forms: `0D lo hi` for OR and `35
+lo hi` for XOR. Added `OrAxImm16` and `XorAxImm16` IR variants
+with their parser entries.
+
+## `x % K` / `x / K` — materialize divisor in BX
+
+Fixture `613` (`return x % 7;`) — the `idiv` instruction has
+no immediate form. BCC materializes the divisor in BX with
+`mov bx, K`, then `cwd; idiv bx`. `emit_op_with_source` for
+`Mod`/`Div` previously panicked on immediate sources. Added
+the imm path: emit `mov bx, K; cwd; idiv bx`, then for `Mod`
+append `mov ax, dx` (remainder). Symmetric with the compound
+`/= K` path landed in fixture 584.
+
 ### Deferred from batch 88
 
 - Probed `int a[5]; return sizeof(a);` (`582` first draft).
