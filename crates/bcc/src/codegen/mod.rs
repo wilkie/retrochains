@@ -3351,11 +3351,14 @@ impl<'a> FunctionEmitter<'a> {
         // mov dx, <lhs_hi>; mov ax, <lhs_lo>; pop cx; pop bx; call
         // N_LXMUL@; store`. The push/pop dance places RHS-high in
         // CX and RHS-low in BX — matching the helper's
-        // convention. Fixture 762.
+        // convention. Fixture 762. Also accepts `Type::Char` —
+        // `emit_expr_to_ax` emits the `cbw` byte-to-int step,
+        // and the same `cwd` finishes the long-widening. Fixture
+        // 785.
         if let Some(ty_lhs) = self.lhs_long_type(name)
             && ty_lhs.is_long_like()
             && let Some(ty_rhs) = self.rhs_type_for_long_widening(&value.kind)
-            && matches!(ty_rhs, Type::Int)
+            && matches!(ty_rhs, Type::Int | Type::Char)
             && matches!(op, BinOp::Mul)
         {
             let _ = ty_lhs;
@@ -3367,6 +3370,37 @@ impl<'a> FunctionEmitter<'a> {
             let _ = write!(self.out, "\tmov\tdx,word ptr {lhs_hi}\r\n");
             let _ = write!(self.out, "\tmov\tax,word ptr {lhs_lo}\r\n");
             self.out.extend_from_slice(b"\tpop\tcx\r\n");
+            self.out.extend_from_slice(b"\tpop\tbx\r\n");
+            self.out.extend_from_slice(b"\tcall\tnear ptr N_LXMUL@\r\n");
+            self.helpers.insert("N_LXMUL@".to_string());
+            let _ = write!(self.out, "\tmov\tword ptr {lhs_hi},dx\r\n");
+            let _ = write!(self.out, "\tmov\tword ptr {lhs_lo},ax\r\n");
+            return;
+        }
+        // Long LHS `*= uchar c` (unsigned-byte widening). Same
+        // `xor cx, cx` zero-extension as `*= uint`, but the uchar
+        // is materialized in AX via `mov al; mov ah, 0` — so AX
+        // is occupied. BCC inserts a `push ax; ...; pop bx`
+        // shuffle to free AX for the LHS-low load while
+        // preserving the widened RHS for BX:
+        // `mov al, <c>; mov ah, 0; xor cx, cx; mov dx, <lhs_hi>;
+        // push ax; mov ax, <lhs_lo>; pop bx; call N_LXMUL@;
+        // store`. Different from the `*= uint` arm (fixture 772)
+        // which loads BX directly from a 16-bit memory operand.
+        // Fixture 786.
+        if let Some(ty_lhs) = self.lhs_long_type(name)
+            && ty_lhs.is_long_like()
+            && let Some(ty_rhs) = self.rhs_type_for_long_widening(&value.kind)
+            && matches!(ty_rhs, Type::UChar)
+            && matches!(op, BinOp::Mul)
+        {
+            let _ = ty_lhs;
+            let (lhs_lo, lhs_hi) = self.long_halves_of(name);
+            self.emit_expr_to_ax(value);
+            self.out.extend_from_slice(b"\txor\tcx,cx\r\n");
+            let _ = write!(self.out, "\tmov\tdx,word ptr {lhs_hi}\r\n");
+            self.out.extend_from_slice(b"\tpush\tax\r\n");
+            let _ = write!(self.out, "\tmov\tax,word ptr {lhs_lo}\r\n");
             self.out.extend_from_slice(b"\tpop\tbx\r\n");
             self.out.extend_from_slice(b"\tcall\tnear ptr N_LXMUL@\r\n");
             self.helpers.insert("N_LXMUL@".to_string());
@@ -3411,11 +3445,14 @@ impl<'a> FunctionEmitter<'a> {
         // widens via `cwd`, pushes both halves of the widened RHS
         // (DX then AX, high then low), then pushes the two halves
         // of the LHS, calls the helper. Same push convention as
-        // the both-globals path. Fixture 763.
+        // the both-globals path. Fixture 763. Also accepts
+        // `Type::Char` — `emit_expr_to_ax` emits the `cbw` byte-
+        // to-int step, and the same `cwd` finishes the long-
+        // widening. Fixture 787.
         if let Some(ty_lhs) = self.lhs_long_type(name)
             && ty_lhs.is_long_like()
             && let Some(ty_rhs) = self.rhs_type_for_long_widening(&value.kind)
-            && matches!(ty_rhs, Type::Int)
+            && matches!(ty_rhs, Type::Int | Type::Char)
             && matches!(op, BinOp::Div | BinOp::Mod)
         {
             let unsigned = ty_lhs.is_unsigned();
