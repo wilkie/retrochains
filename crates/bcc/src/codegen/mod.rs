@@ -2322,15 +2322,66 @@ impl<'a> FunctionEmitter<'a> {
     /// Equivalents with `dec` for `--`. Stack-resident targets panic
     /// (no fixture yet).
     fn emit_update_to_ax(&mut self, target: &str, op: UpdateOp, position: UpdatePosition) {
-        let reg = match self.locals.location_of(target) {
-            LocalLocation::Reg(r) => r,
-            LocalLocation::Stack(_) => {
-                panic!("++/-- in expression on a stack-resident local not yet supported (no fixture)");
-            }
-        };
         let mnemonic = match op {
             UpdateOp::Inc => "inc",
             UpdateOp::Dec => "dec",
+        };
+        // Stack-resident char ++/-- in expression context: BCC uses
+        // memory-direct `inc|dec byte ptr [bp-N]` for the side
+        // effect, with the captured value loaded via `mov al,
+        // byte ptr [bp-N]` before (post) or after (pre) the
+        // memory inc/dec, then `cbw` to widen for the caller.
+        // Fixture 731 (`f(c++)` for stack-resident char c).
+        let reg = match self.locals.location_of(target) {
+            LocalLocation::Reg(r) => r,
+            LocalLocation::Stack(off) => {
+                let ty = self.locals.type_of(target).clone();
+                if ty.is_char_like() {
+                    let unsigned = ty.is_unsigned();
+                    match position {
+                        // Pre: AL detour. BCC threads the new value
+                        // through AL even for stack-resident char,
+                        // mirroring the way `++g` is lowered for
+                        // char globals (batch 128). `mov al, mem;
+                        // inc al; mov mem, al; cbw`. Fixture 732.
+                        UpdatePosition::Pre => {
+                            let _ = write!(
+                                self.out,
+                                "\tmov\tal,byte ptr {}\r\n",
+                                bp_addr(off),
+                            );
+                            let _ = write!(self.out, "\t{mnemonic}\tal\r\n");
+                            let _ = write!(
+                                self.out,
+                                "\tmov\tbyte ptr {},al\r\n",
+                                bp_addr(off),
+                            );
+                        }
+                        // Post: load value, memory-direct side
+                        // effect, widen. The captured value is the
+                        // pre-update one. Fixture 731.
+                        UpdatePosition::Post => {
+                            let _ = write!(
+                                self.out,
+                                "\tmov\tal,byte ptr {}\r\n",
+                                bp_addr(off),
+                            );
+                            let _ = write!(
+                                self.out,
+                                "\t{mnemonic}\tbyte ptr {}\r\n",
+                                bp_addr(off),
+                            );
+                        }
+                    }
+                    if unsigned {
+                        self.out.extend_from_slice(b"\tmov\tah,0\r\n");
+                    } else {
+                        self.out.extend_from_slice(b"\tcbw\t\r\n");
+                    }
+                    return;
+                }
+                panic!("++/-- in expression on a stack-resident non-char local not yet supported (no fixture)");
+            }
         };
         if reg.is_byte() {
             // Char ++/-- in expression context: load the byte into
