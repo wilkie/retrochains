@@ -1959,6 +1959,25 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `long` compound with mixed global/stack location
+
+Fixtures `743` (`a += b` both stack), `744` (`g += h` global
+LHS + stack RHS), `745` (`a += g` stack LHS + global RHS).
+
+- `743` — free pass; pre-existing long-stack-local
+  compound path (slices 290/339) handles a stack-local LHS
+  with a stack-local RHS uniformly.
+- `744` / `745` — needed a new arm. The existing long-
+  global-compound branch only matched when *both* operands
+  were globals. Added a "long LHS + long RHS regardless of
+  location" arm with the same `mov ax,<hi>; mov dx,<lo>;
+  <op> <lhs_lo>,dx; <carry> <lhs_hi>,ax` shape, guarded
+  with `!(both globals)` so the existing both-globals
+  branch keeps firing for fixtures 734-738.
+- Introduced small `lhs_long_type` / `rhs_long_type_of_ident`
+  / `long_halves_of` helpers to keep the new arm shape-
+  uniform regardless of storage location.
+
 ## `long` global compound `>>=` / `*=` / `%=` by variable
 
 Fixtures `740` (`g >>= h`), `741` (`g *= h`), `742` (`g %= h`).
