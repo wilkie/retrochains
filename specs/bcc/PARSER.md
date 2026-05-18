@@ -1959,6 +1959,36 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `ulong` compound `|=` / `^=` / `*=` with `uint` RHS
+
+Fixtures `770` (`g |= x`), `771` (`g ^= x`), `772` (`g *= x`).
+LHS is `unsigned long` global, RHS is `unsigned int` local.
+
+- `770` / `771` — free passes off batch 150's `Type::UInt` arm
+  (bitwise `or`/`xor` against memory with high-half `or 0` /
+  `xor 0` is a no-op preserving the zero-extended widening).
+- `772` — long `*= uint`: BCC widens the uint by **zero**-
+  extension into CX (`xor cx, cx`) — no `cwd`, no push/pop
+  dance the signed `*= int` path (fixture 762) needs. Since
+  zero-extension doesn't touch DX, BX is free to load from
+  the uint directly and the LHS halves slot into DX:AX
+  without contention:
+
+  ```
+  mov bx, word ptr <rhs>      ; load uint → BX
+  xor cx, cx                  ; zero-extend → CX
+  mov dx, word ptr <lhs_hi>
+  mov ax, word ptr <lhs_lo>
+  call near ptr N_LXMUL@
+  mov word ptr <lhs_hi>, dx
+  mov word ptr <lhs_lo>, ax
+  ```
+
+  Added a new arm in `emit_compound_assign` gated on
+  `long LHS + Type::UInt RHS + BinOp::Mul`, parallel to the
+  signed `*= int` arm at fixture 762. The helper `N_LXMUL@`
+  itself is sign-agnostic — only the widening shape changes.
+
 ## `long` compound with `unsigned int` RHS (zero-widening)
 
 Fixtures `767` (`g += x` unsigned), `768` (`g -= x`),
