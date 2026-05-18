@@ -1959,6 +1959,25 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `long` mixed-location shift and stack-LHS heavy ops
+
+Fixtures `749` (`g <<= h` global LHS + stack RHS),
+`750` (`a *= g` stack LHS + global RHS),
+`751` (`a >>= g` stack LHS + global RHS).
+
+- `749` — extended the mixed-location arm to also cover
+  `Shl|Shr`. Same `mov cl, byte ptr <rhs_lo>; mov dx,
+  <lhs_hi>; mov ax, <lhs_lo>; call N_LXLSH@/...; mov
+  <lhs_hi>, dx; mov <lhs_lo>, ax` shape as the both-globals
+  path — the `rhs_lo` address string already drops the
+  `word ptr` prefix so reusing it as `byte ptr <rhs_lo>`
+  Just Works.
+- `750` / `751` — free passes off the existing mixed-
+  location Mul / Shl|Shr arms. Confirms the
+  `long_halves_of` helper symmetrically handles the stack-
+  LHS case (helper returns `bp_addr(off)` and
+  `bp_addr(off+2)` instead of `DGROUP:_<sym>` / `+2`).
+
 ## `long` mixed-location `&=` / `*=` / `/=`
 
 Fixtures `746` (`g &= h` global LHS + stack RHS),
