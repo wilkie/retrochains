@@ -4142,21 +4142,21 @@ impl<'a> FunctionEmitter<'a> {
         }
         // Int/uint global compound add/sub/bit* with a non-const
         // RHS (int/uint, or char/uchar that widens through AX).
-        // RHS can be a local OR another global — `emit_expr_to_ax`
-        // handles both (and emits `cbw` / `mov ah, 0` for the
-        // byte-to-int widening). The same memory-direct `<op>
-        // word ptr DGROUP:_<name>, ax` finishes the int compound.
-        // Fixtures 794 (`g += char c`), 799 (int local RHS), 812
-        // (char global RHS).
+        // RHS can be a local, another global, or an array element
+        // — `emit_expr_to_ax` handles all of them and emits
+        // `cbw` / `mov ah, 0` for the byte-to-int widening. The
+        // same memory-direct `<op> word ptr DGROUP:_<name>, ax`
+        // finishes the int compound. Fixtures 794 (`g += char c`),
+        // 799 (int local RHS), 812 (char global RHS), 821
+        // (`g += a[1]` int array element).
         if let Some(gty) = self.globals.type_of(name)
             && matches!(gty, Type::Int | Type::UInt)
             && matches!(
                 op,
                 BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor
             )
-            && let Some(ty_rhs) = self.rhs_type_for_long_widening(&value.kind)
+            && let Some(ty_rhs) = self.rhs_int_compound_type(&value.kind)
             && matches!(ty_rhs, Type::Int | Type::UInt | Type::Char | Type::UChar)
-            && let ExprKind::Ident(_) = &value.kind
         {
             self.emit_expr_to_ax(value);
             let mnem = match op {
@@ -8596,6 +8596,56 @@ impl<'a> FunctionEmitter<'a> {
             Some(self.locals.type_of(name).clone())
         } else {
             None
+        }
+    }
+
+    /// Like `rhs_type_for_long_widening` but also resolves
+    /// `ArrayIndex` (returning element type), `Deref` (returning
+    /// pointee type), and `Member` (returning field type). Used
+    /// by the int-global compound arm to accept `g += a[K]`,
+    /// `g += *p`, and `g += s.x`. Fixtures 821, 822, 823.
+    fn rhs_int_compound_type(&self, e: &ExprKind) -> Option<Type> {
+        if let Some(t) = self.rhs_type_for_long_widening(e) {
+            return Some(t);
+        }
+        match e {
+            ExprKind::ArrayIndex { array, .. } => {
+                let ExprKind::Ident(arr_name) = &array.kind else { return None };
+                let ty = if let Some(t) = self.globals.type_of(arr_name) {
+                    t.clone()
+                } else if self.locals.has(arr_name) {
+                    self.locals.type_of(arr_name).clone()
+                } else {
+                    return None;
+                };
+                match ty {
+                    Type::Array { ref elem, .. } => Some((**elem).clone()),
+                    _ => None,
+                }
+            }
+            ExprKind::Deref(inner) => {
+                let ExprKind::Ident(p_name) = &inner.kind else { return None };
+                let ty = if let Some(t) = self.globals.type_of(p_name) {
+                    t.clone()
+                } else if self.locals.has(p_name) {
+                    self.locals.type_of(p_name).clone()
+                } else {
+                    return None;
+                };
+                ty.pointee().cloned()
+            }
+            ExprKind::Member { base, field, .. } => {
+                let ExprKind::Ident(base_name) = &base.kind else { return None };
+                let base_ty = if let Some(t) = self.globals.type_of(base_name) {
+                    t.clone()
+                } else if self.locals.has(base_name) {
+                    self.locals.type_of(base_name).clone()
+                } else {
+                    return None;
+                };
+                base_ty.field(field).map(|(_, ty)| ty)
+            }
+            _ => None,
         }
     }
 
