@@ -772,6 +772,18 @@ pub enum Instr {
     /// `shr word ptr <group>:<symbol>[+<offset>],1` — D1 /5 r/m16,1.
     /// Encoding: `D1 2E lo hi`. Unsigned `>>= 1` on uint global.
     ShrGroupSymOne { group: String, symbol: String, offset: i16 },
+    /// `shl byte ptr <group>:<symbol>[+<offset>],1` — `D0 /4 r/m8,1`
+    /// against a byte data-segment global. Encoding:
+    /// `D0 26 lo hi` + FIXUPP. 8-bit sibling of `ShlGroupSymOne`.
+    /// Char-global `<<=` unrolls K iterations of this for small K
+    /// (fixture 688: `g <<= 2` → two `shl byte ptr _g, 1`).
+    ShlGroupSymByteOne { group: String, symbol: String, offset: i16 },
+    /// `sar byte ptr <group>:<symbol>[+<offset>],1` — D0 /7 r/m8,1.
+    /// Encoding: `D0 3E lo hi`. Signed char `>>=` low-K unroll.
+    SarGroupSymByteOne { group: String, symbol: String, offset: i16 },
+    /// `shr byte ptr <group>:<symbol>[+<offset>],1` — D0 /5 r/m8,1.
+    /// Encoding: `D0 2E lo hi`. Unsigned char `>>=` low-K unroll.
+    ShrGroupSymByteOne { group: String, symbol: String, offset: i16 },
     /// `add word ptr <group>:<symbol>[+<offset>], <reg16>` — Grp1
     /// r/m16, r16 with /0=ADD. Encoding: `01 (mod=00 reg=<reg>
     /// r/m=110) lo hi`. Fixture 571 (`a += b;` between two int

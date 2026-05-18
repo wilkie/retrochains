@@ -3614,6 +3614,33 @@ impl<'a> FunctionEmitter<'a> {
             );
             return;
         }
+        // Char/uchar global compound `<<=` / `>>=` with constant K.
+        // BCC unrolls into K memory-direct shift-by-1 instructions
+        // (one per shift): `shl|sar|shr byte ptr _g, 1`. Signedness
+        // picks SAR vs SHR for `>>=` (signed char → SAR). Fixture
+        // 688 (`g <<= 2` → two `shl byte ptr _g, 1`).
+        if let Some(gty) = self.globals.type_of(name)
+            && matches!(gty, Type::Char | Type::UChar)
+            && matches!(op, BinOp::Shl | BinOp::Shr)
+            && let Some(k) = try_const_eval(value)
+            && k >= 1
+            && k <= 8
+        {
+            let unsigned = gty.is_unsigned();
+            let mnem = match op {
+                BinOp::Shl => "shl",
+                BinOp::Shr if unsigned => "shr",
+                BinOp::Shr => "sar",
+                _ => unreachable!(),
+            };
+            for _ in 0..k {
+                let _ = write!(
+                    self.out,
+                    "\t{mnem}\tbyte ptr DGROUP:_{name},1\r\n",
+                );
+            }
+            return;
+        }
         // Char/uchar global compound with constant byte RHS, two
         // shapes:
         //  - Arith (`+=` / `-=`): load-modify-store through AL —
