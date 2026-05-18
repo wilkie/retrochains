@@ -1589,6 +1589,48 @@ lowering produces when its result is used.
   a value): `emit_logical_not` materializes `1` or `0` into
   AX based on the operand's zero-test.
 
+## Chained `&&` / `||` — non-final operand short-circuit
+
+Fixtures `620` (`if (a && b && c)`) and `621` (`if (a || b ||
+c)`) — `emit_cond_branch` previously panicked with "nested
+`&&`/`||` operators not yet supported". The recursive `&&`
+case already inherited `(true_slot, false_slot)` for the right
+operand, so chained `&&` was already correct once the assert
+was lifted. The Or case was asymmetric: it passed `(None,
+false_slot)` to the right, expecting the caller to emit the
+true label immediately after — that's the "right falls through
+on true" optimization for flat `a || b`. For chained
+`(a || b) || c` (left-associative), the inner Or's right `b`
+isn't the final operand: between b's evaluation and the true
+label the outer Or emits `c`'s test, so b's "fall through on
+true" lands in the middle of c's test. Fixed by distinguishing
+final vs non-final Or via the outer `false_slot`: when
+`false_slot.is_some()` we're at the top of an if-cond chain
+(right can fall through); when `false_slot.is_none()` we're
+inside another Or's LHS (right must jump on true to the
+inherited `true_slot`).
+
+## Free passes (batch 101)
+
+- `622` — `char c; c = 1; c |= 32; return c;` (char compound
+  OR with constant): the existing char-register compound-
+  bitwise path (`or <reg8>, K`) already handled this — sibling
+  of fixture 556's `c &= 31`.
+
+### Deferred from batch 101
+
+Probed `int main(void) { int a[3] = {10, 20, 30}; return
+a[1]; }` (int local array with initializer list). BCC stores
+the initializer values in a `_DATA`-segment `d@w` block and
+copies them into the stack frame at function entry via
+`N_SCOPY@` (the same helper used for struct copies > 4 bytes).
+Our codegen panics with "non-constant init for non-int-like
+type Array { elem: Int, len: 3 }". Implementing this would
+need the init-data emitter plus the prologue-time
+`push ss; lea ax, [bp-N]; push ax; push ds; mov ax, offset
+d@w; push ax; mov cx, <size>; call N_SCOPY@` shape — sizable.
+Probe replaced with the char-compound-OR variant.
+
 ### Deferred from batch 88
 
 - Probed `int a[5]; return sizeof(a);` (`582` first draft).
