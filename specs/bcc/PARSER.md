@@ -1959,6 +1959,29 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `char` global pre vs post: `--g`, `g++`, `g--`
+
+Fixtures `701` (`--g`), `702` (`g++`), `703` (`g--`).
+
+- `701` and `703` — free passes off batch 127's char-global
+  update path (pre uses AL detour, post uses memory-direct).
+- `702` exposed that **BCC differentiates pre vs post even
+  when the result is discarded**. For `++g;` as an
+  expression statement, BCC emits the AL load-modify-store
+  (`mov al, _g; inc al; mov _g, al`, fixture 700); for
+  `g++;` discarded, BCC emits memory-direct
+  `inc byte ptr _g` (fixture 702). The two compile to
+  *different* machine code despite producing the same side
+  effect on `g`. Apparently BCC's pre-update lowering always
+  materializes the new value in AL even when caller doesn't
+  use it.
+- Threaded `UpdatePosition` through `emit_update_in_place`
+  and branched the char-global case on it. Pre → AL detour;
+  post → memory-direct. Added `IncGroupSymByte` /
+  `DecGroupSymByte` tasm IR variants (`FE 06|0E lo hi` +
+  FIXUPP, Grp4 r/m8 with mod=00 r/m=110) and the matching
+  parser entries (`inc byte ptr ...` / `dec byte ptr ...`).
+
 ## `char` global `>>=` / `%=` by variable, plus `++g`
 
 Fixtures `698` (signed `g >>= d`), `699` (signed `g %= d`),
