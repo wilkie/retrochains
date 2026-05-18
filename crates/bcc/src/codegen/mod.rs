@@ -5752,6 +5752,33 @@ impl<'a> FunctionEmitter<'a> {
         };
         let store_byte = field_ty.is_char_like();
         let width = if store_byte { "byte" } else { "word" };
+        // Char-field compound with variable RHS — mirrors the
+        // char-global var-RHS pattern (batch 121): load RHS into
+        // AL, then memory-direct `<op> byte ptr <dest>, al`. The
+        // `dest` already includes any non-zero field offset.
+        // Fixture 708 (`g.c += d`).
+        if store_byte
+            && matches!(
+                op,
+                BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor
+            )
+            && try_const_eval(value).is_none()
+        {
+            let src = self.resolve_operand_source(value);
+            self.out.extend_from_slice(b"\tmov\tal,");
+            self.out.extend_from_slice(src.byte().as_bytes());
+            self.out.extend_from_slice(b"\r\n");
+            let mnem = match op {
+                BinOp::Add => "add",
+                BinOp::Sub => "sub",
+                BinOp::BitAnd => "and",
+                BinOp::BitOr => "or",
+                BinOp::BitXor => "xor",
+                _ => unreachable!(),
+            };
+            let _ = write!(self.out, "\t{mnem}\tbyte ptr {dest},al\r\n");
+            return;
+        }
         let Some(v) = try_const_eval(value) else {
             panic!("non-constant rhs in member compound assign not yet supported (no fixture)");
         };
@@ -5769,7 +5796,17 @@ impl<'a> FunctionEmitter<'a> {
                 ((v_masked & 0xFF) as u8).wrapping_neg()
             };
             let _ = write!(self.out, "\tmov\tal,byte ptr {dest}\r\n");
-            let _ = write!(self.out, "\tadd\tal,{imm8}\r\n");
+            // K=1 peephole: `inc al` / `dec al` instead of
+            // `add al, 1` / `add al, 255`. Same byte count but
+            // matches BCC's char-field `++`/`--` lowering
+            // (fixture 709 `++g.c` → `inc al`).
+            if v_masked == 1 && matches!(op, BinOp::Add) {
+                self.out.extend_from_slice(b"\tinc\tal\r\n");
+            } else if v_masked == 1 && matches!(op, BinOp::Sub) {
+                self.out.extend_from_slice(b"\tdec\tal\r\n");
+            } else {
+                let _ = write!(self.out, "\tadd\tal,{imm8}\r\n");
+            }
             let _ = write!(self.out, "\tmov\tbyte ptr {dest},al\r\n");
             return;
         }
