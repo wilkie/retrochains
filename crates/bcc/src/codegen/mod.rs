@@ -3748,6 +3748,85 @@ impl<'a> FunctionEmitter<'a> {
             }
             return;
         }
+        // Char/uchar global compound `*=` with variable byte RHS.
+        // BCC widens through AL only (no sign-extension needed for
+        // 8-bit multiply), then 8-bit `imul byte ptr <src>` and
+        // store the low byte AL back. Fixture 695 (`g *= d` →
+        // `mov al, _g; imul byte ptr [bp-1]; mov _g, al`). 8-bit
+        // multiply doesn't differentiate signed/unsigned at the
+        // low-byte level, so BCC picks `imul` for both.
+        if let Some(gty) = self.globals.type_of(name)
+            && matches!(gty, Type::Char | Type::UChar)
+            && matches!(op, BinOp::Mul)
+            && try_const_eval(value).is_none()
+        {
+            let src = self.resolve_operand_source(value);
+            let _ = write!(self.out, "\tmov\tal,byte ptr DGROUP:_{name}\r\n");
+            self.out.extend_from_slice(b"\timul\t");
+            self.out.extend_from_slice(src.byte().as_bytes());
+            self.out.extend_from_slice(b"\r\n");
+            let _ = write!(self.out, "\tmov\tbyte ptr DGROUP:_{name},al\r\n");
+            return;
+        }
+        // Char/uchar global compound `/=` / `%=` with variable byte
+        // RHS. Same 8-bit divide pattern as the local form
+        // (fixtures 673 / 677): signed uses `cbw; idiv byte ptr
+        // <src>`, unsigned uses `mov ah, 0; div al, byte ptr
+        // <src>` with explicit AL accumulator in the TASM listing.
+        // Store quotient (AL) for `/=`, remainder (AH) for `%=`.
+        // Fixture 696 (signed `g /= d`).
+        if let Some(gty) = self.globals.type_of(name)
+            && matches!(gty, Type::Char | Type::UChar)
+            && matches!(op, BinOp::Div | BinOp::Mod)
+            && try_const_eval(value).is_none()
+        {
+            let unsigned = gty.is_unsigned();
+            let src = self.resolve_operand_source(value);
+            let _ = write!(self.out, "\tmov\tal,byte ptr DGROUP:_{name}\r\n");
+            if unsigned {
+                self.out.extend_from_slice(b"\tmov\tah,0\r\n");
+                self.out.extend_from_slice(b"\tdiv\tal,");
+            } else {
+                self.out.extend_from_slice(b"\tcbw\t\r\n");
+                self.out.extend_from_slice(b"\tidiv\t");
+            }
+            self.out.extend_from_slice(src.byte().as_bytes());
+            self.out.extend_from_slice(b"\r\n");
+            let result_reg = if matches!(op, BinOp::Div) { "al" } else { "ah" };
+            let _ = write!(
+                self.out,
+                "\tmov\tbyte ptr DGROUP:_{name},{result_reg}\r\n",
+            );
+            return;
+        }
+        // Char/uchar global compound `<<=` / `>>=` with variable
+        // byte RHS. BCC loads the shift count into CL then issues a
+        // memory-direct `<shl|sar|shr> byte ptr _g, cl` — no AL
+        // detour (the global stays in memory across the op).
+        // Fixture 697 (`g <<= d` → `mov cl, byte ptr [bp-1]; shl
+        // byte ptr _g, cl`).
+        if let Some(gty) = self.globals.type_of(name)
+            && matches!(gty, Type::Char | Type::UChar)
+            && matches!(op, BinOp::Shl | BinOp::Shr)
+            && try_const_eval(value).is_none()
+        {
+            let unsigned = gty.is_unsigned();
+            let src = self.resolve_operand_source(value);
+            self.out.extend_from_slice(b"\tmov\tcl,");
+            self.out.extend_from_slice(src.byte().as_bytes());
+            self.out.extend_from_slice(b"\r\n");
+            let mnem = match op {
+                BinOp::Shl => "shl",
+                BinOp::Shr if unsigned => "shr",
+                BinOp::Shr => "sar",
+                _ => unreachable!(),
+            };
+            let _ = write!(
+                self.out,
+                "\t{mnem}\tbyte ptr DGROUP:_{name},cl\r\n",
+            );
+            return;
+        }
         // Char/uchar global compound `+=` / `-=` / `&=` / `|=` /
         // `^=` with a non-constant byte RHS. BCC loads the RHS into
         // AL and then applies the op memory-direct to the global:

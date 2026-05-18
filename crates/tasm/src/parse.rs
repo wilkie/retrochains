@@ -496,10 +496,19 @@ fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
             // `mov cl, 4; shl si, cl` for `int x; x <<= 4`). Also
             // routes 8-bit variants (fixture 670 sibling: `shl dl,
             // cl`) — Reg8 is tried first since it doesn't overlap
-            // with any Reg16 name.
+            // with any Reg16 name. Memory-direct byte-global form
+            // (fixture 697: `shl byte ptr DGROUP:_g, cl`) follows.
             let r = rest.strip_suffix(",cl").unwrap_or(rest);
             if let Some(reg) = Reg8::parse(r) {
                 return Ok(Instr::ShlReg8Cl { reg });
+            }
+            if let Some((group, symbol)) = parse_byte_group_symbol(r) {
+                let (sym, offset) = split_sym_offset(symbol);
+                return Ok(Instr::ShlGroupSymByteCl {
+                    group: group.to_string(),
+                    symbol: sym.to_string(),
+                    offset,
+                });
             }
             let reg = Reg16::parse(r)
                 .ok_or_else(|| AsmError::new(line.line_no, format!("shl: bad register `{r}`")))?;
@@ -510,6 +519,14 @@ fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
             if let Some(reg) = Reg8::parse(r) {
                 return Ok(Instr::SarReg8Cl { reg });
             }
+            if let Some((group, symbol)) = parse_byte_group_symbol(r) {
+                let (sym, offset) = split_sym_offset(symbol);
+                return Ok(Instr::SarGroupSymByteCl {
+                    group: group.to_string(),
+                    symbol: sym.to_string(),
+                    offset,
+                });
+            }
             let reg = Reg16::parse(r)
                 .ok_or_else(|| AsmError::new(line.line_no, format!("sar: bad register `{r}`")))?;
             Ok(Instr::SarReg16Cl { reg })
@@ -518,6 +535,14 @@ fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
             let r = rest.strip_suffix(",cl").unwrap_or(rest);
             if let Some(reg) = Reg8::parse(r) {
                 return Ok(Instr::ShrReg8Cl { reg });
+            }
+            if let Some((group, symbol)) = parse_byte_group_symbol(r) {
+                let (sym, offset) = split_sym_offset(symbol);
+                return Ok(Instr::ShrGroupSymByteCl {
+                    group: group.to_string(),
+                    symbol: sym.to_string(),
+                    offset,
+                });
             }
             let reg = Reg16::parse(r)
                 .ok_or_else(|| AsmError::new(line.line_no, format!("shr: bad register `{r}`")))?;

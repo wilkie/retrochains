@@ -390,6 +390,9 @@ fn instr_size(instr: &Instr) -> usize {
         Instr::ShlGroupSymByteOne { .. }
         | Instr::SarGroupSymByteOne { .. }
         | Instr::ShrGroupSymByteOne { .. } => 4,
+        Instr::ShlGroupSymByteCl { .. }
+        | Instr::SarGroupSymByteCl { .. }
+        | Instr::ShrGroupSymByteCl { .. } => 4,
         Instr::CmpByteBpRelImm8 { .. } => 4,
         Instr::CmpByteSiPtrImm8 { .. } => 3,
         Instr::AndGroupSymImm16 { .. }
@@ -1614,6 +1617,19 @@ fn emit_instr(
         Instr::ShrGroupSymByteOne { group, symbol, offset } => {
             // `shr byte ptr <group>:<sym>[+N],1` → D0 2E lo hi.
             emit_group_sym_lea(&[0xD0, 0x2E], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
+        }
+        Instr::ShlGroupSymByteCl { group, symbol, offset } => {
+            // `shl byte ptr <group>:<sym>[+N],cl` → D2 26 lo hi.
+            // Fixture 697.
+            emit_group_sym_lea(&[0xD2, 0x26], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
+        }
+        Instr::SarGroupSymByteCl { group, symbol, offset } => {
+            // `sar byte ptr <group>:<sym>[+N],cl` → D2 3E lo hi.
+            emit_group_sym_lea(&[0xD2, 0x3E], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
+        }
+        Instr::ShrGroupSymByteCl { group, symbol, offset } => {
+            // `shr byte ptr <group>:<sym>[+N],cl` → D2 2E lo hi.
+            emit_group_sym_lea(&[0xD2, 0x2E], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
         }
         Instr::DecGroupSym { group, symbol, offset } => {
             // `dec word ptr <group>:<sym>[+N]` → FF 0E lo hi.
