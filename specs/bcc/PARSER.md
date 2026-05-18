@@ -1959,6 +1959,48 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `int` global compound with `char` / `uchar` local RHS
+
+Fixtures `794` (`g += char c`), `795` (`g += uchar c`),
+`796` (`g *= char c`) — extending compound coverage from
+long-LHS to int-LHS.
+
+- `794` / `795` — Add/Sub/Bit* with byte RHS: the
+  existing `emit_expr_to_ax` widening (cbw or `mov ah,
+  0`) already produces a 16-bit value in AX, and the
+  memory-direct `<op> word ptr DGROUP:_<g>, ax` shape
+  is identical to the same op with an int local RHS.
+
+  Added a new int-global-compound arm gated on
+  `Type::Int | Type::UInt` LHS, `Add/Sub/Bit*` op, and
+  `Type::Int | Type::UInt | Type::Char | Type::UChar`
+  local RHS. Placed after the existing global-RHS and
+  constant-RHS arms so those continue to take
+  precedence. This also unblocks `g += int x` (int
+  local RHS) which had been an unprobed gap.
+
+- `796` — int `*= char`: similar register-pressure
+  problem as the long `*= uchar` case (fixture 786).
+  AX holds the widened RHS after `cbw`, but `imul` on
+  16-bit operands consumes AX for the LHS. BCC inserts
+  a `push ax; ...; pop dx` shuffle:
+
+  ```
+  mov al, byte ptr <c>
+  cbw                          ; AX = char as int
+  push ax
+  mov ax, word ptr DGROUP:_<g> ; LHS
+  pop dx                       ; widened RHS → DX
+  imul dx                      ; DX:AX = AX * DX
+  mov word ptr DGROUP:_<g>, ax ; low-16 stored
+  ```
+
+  Added a new arm for int-global `*=` with byte local
+  RHS. `imul dx` is signed but produces the correct
+  low-16 for any operand combination — BCC also uses
+  signed `imul` for `*= uchar` (the zero-extended
+  dividend is positive, and the low-16 product matches).
+
 ## `ulong` compound `*=` / `/=` with `char` / `uchar` RHS
 
 Fixtures `791` (`g *= char c`), `792` (`g /= char c`),
