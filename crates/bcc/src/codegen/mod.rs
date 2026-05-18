@@ -3307,6 +3307,68 @@ impl<'a> FunctionEmitter<'a> {
             let _ = write!(self.out, "\t{hi_op}\tword ptr {lhs_hi},dx\r\n");
             return;
         }
+        // Long LHS `*= int x` (signed widening). BCC can't load
+        // both AX:DX (LHS) and BX:CX (widened RHS) simultaneously
+        // since `cwd` clobbers DX, so it routes the widened RHS
+        // through the stack: `mov ax, <x>; cwd; push ax; push dx;
+        // mov dx, <lhs_hi>; mov ax, <lhs_lo>; pop cx; pop bx; call
+        // N_LXMUL@; store`. The push/pop dance places RHS-high in
+        // CX and RHS-low in BX — matching the helper's
+        // convention. Fixture 762.
+        if let Some(ty_lhs) = self.lhs_long_type(name)
+            && ty_lhs.is_long_like()
+            && let Some(ty_rhs) = self.rhs_type_for_long_widening(&value.kind)
+            && matches!(ty_rhs, Type::Int)
+            && matches!(op, BinOp::Mul)
+        {
+            let _ = ty_lhs;
+            let (lhs_lo, lhs_hi) = self.long_halves_of(name);
+            self.emit_expr_to_ax(value);
+            self.out.extend_from_slice(b"\tcwd\t\r\n");
+            self.out.extend_from_slice(b"\tpush\tax\r\n");
+            self.out.extend_from_slice(b"\tpush\tdx\r\n");
+            let _ = write!(self.out, "\tmov\tdx,word ptr {lhs_hi}\r\n");
+            let _ = write!(self.out, "\tmov\tax,word ptr {lhs_lo}\r\n");
+            self.out.extend_from_slice(b"\tpop\tcx\r\n");
+            self.out.extend_from_slice(b"\tpop\tbx\r\n");
+            self.out.extend_from_slice(b"\tcall\tnear ptr N_LXMUL@\r\n");
+            self.helpers.insert("N_LXMUL@".to_string());
+            let _ = write!(self.out, "\tmov\tword ptr {lhs_hi},dx\r\n");
+            let _ = write!(self.out, "\tmov\tword ptr {lhs_lo},ax\r\n");
+            return;
+        }
+        // Long LHS `/= int x` / `%= int x` (signed widening). BCC
+        // widens via `cwd`, pushes both halves of the widened RHS
+        // (DX then AX, high then low), then pushes the two halves
+        // of the LHS, calls the helper. Same push convention as
+        // the both-globals path. Fixture 763.
+        if let Some(ty_lhs) = self.lhs_long_type(name)
+            && ty_lhs.is_long_like()
+            && let Some(ty_rhs) = self.rhs_type_for_long_widening(&value.kind)
+            && matches!(ty_rhs, Type::Int)
+            && matches!(op, BinOp::Div | BinOp::Mod)
+        {
+            let unsigned = ty_lhs.is_unsigned();
+            let helper = match (op, unsigned) {
+                (BinOp::Div, false) => "N_LDIV@",
+                (BinOp::Mod, false) => "N_LMOD@",
+                (BinOp::Div, true)  => "N_LUDIV@",
+                (BinOp::Mod, true)  => "N_LUMOD@",
+                _ => unreachable!(),
+            };
+            let (lhs_lo, lhs_hi) = self.long_halves_of(name);
+            self.emit_expr_to_ax(value);
+            self.out.extend_from_slice(b"\tcwd\t\r\n");
+            self.out.extend_from_slice(b"\tpush\tdx\r\n");
+            self.out.extend_from_slice(b"\tpush\tax\r\n");
+            let _ = write!(self.out, "\tpush\tword ptr {lhs_hi}\r\n");
+            let _ = write!(self.out, "\tpush\tword ptr {lhs_lo}\r\n");
+            let _ = write!(self.out, "\tcall\tnear ptr {helper}\r\n");
+            self.helpers.insert(helper.to_string());
+            let _ = write!(self.out, "\tmov\tword ptr {lhs_hi},dx\r\n");
+            let _ = write!(self.out, "\tmov\tword ptr {lhs_lo},ax\r\n");
+            return;
+        }
         // Long LHS shift by an int RHS — same helper-call shape as
         // `long <<= long h`, with the shift count read as `byte ptr`
         // out of the int's storage. Fixture 760.
