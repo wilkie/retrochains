@@ -5899,6 +5899,31 @@ impl<'a> FunctionEmitter<'a> {
         {
             let dest = global_offset_addr(array, const_off as i32);
             let store_byte = leaf_ty.is_char_like();
+            // Int-element compound with non-constant RHS — mirrors
+            // the int-global compound add path (fixture 794): load
+            // RHS into AX via emit_expr_to_ax (handles char/uchar
+            // widening too), then memory-direct `<op> word ptr
+            // <dest>, ax`. Fixture 833 (`a[1] += y`).
+            if !store_byte
+                && matches!(
+                    op,
+                    BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor
+                )
+                && try_const_eval(value).is_none()
+                && matches!(leaf_ty, Type::Int | Type::UInt)
+            {
+                self.emit_expr_to_ax(value);
+                let mnem = match op {
+                    BinOp::Add => "add",
+                    BinOp::Sub => "sub",
+                    BinOp::BitAnd => "and",
+                    BinOp::BitOr => "or",
+                    BinOp::BitXor => "xor",
+                    _ => unreachable!(),
+                };
+                let _ = write!(self.out, "\t{mnem}\tword ptr {dest},ax\r\n");
+                return;
+            }
             let Some(v) = try_const_eval(value) else {
                 panic!("non-constant rhs in global-array compound assign not yet supported (no fixture)");
             };
@@ -6636,6 +6661,52 @@ impl<'a> FunctionEmitter<'a> {
                 _ => unreachable!(),
             };
             let _ = write!(self.out, "\t{mnem}\tword ptr {dest},ax\r\n");
+            return;
+        }
+        // Int-field compound `<<=` / `>>=` with non-constant RHS
+        // — `mov cl, byte ptr <rhs>; shl word ptr <dest>, cl`.
+        // `dest` already includes any field offset. Fixture 835
+        // (`s.x <<= y`).
+        if !store_byte
+            && matches!(op, BinOp::Shl | BinOp::Shr)
+            && try_const_eval(value).is_none()
+            && matches!(field_ty, Type::Int | Type::UInt)
+            && let Some(rhs_byte) = self.rhs_byte_addr(&value.kind)
+        {
+            let unsigned = field_ty.is_unsigned();
+            let mnem = match (op, unsigned) {
+                (BinOp::Shl, _) => "shl",
+                (BinOp::Shr, false) => "sar",
+                (BinOp::Shr, true) => "shr",
+                _ => unreachable!(),
+            };
+            let _ = write!(self.out, "\tmov\tcl,{rhs_byte}\r\n");
+            let _ = write!(self.out, "\t{mnem}\tword ptr {dest},cl\r\n");
+            return;
+        }
+        // Int-field compound `*=` / `/=` / `%=` with non-constant
+        // local RHS — load LHS into AX, then `imul`/`idiv` against
+        // the RHS in `[bp+N]`. Mirrors the int-global path
+        // (fixtures 802, 803). Fixture 834 (`s.x *= y`).
+        if !store_byte
+            && matches!(op, BinOp::Mul | BinOp::Div | BinOp::Mod)
+            && try_const_eval(value).is_none()
+            && matches!(field_ty, Type::Int | Type::UInt)
+            && let ExprKind::Ident(b) = &value.kind
+            && !self.globals.contains(b)
+        {
+            let LocalLocation::Stack(off) = self.locals.location_of(b) else {
+                panic!("non-stack RHS in member compound Mul/Div not yet supported (no fixture)");
+            };
+            let _ = write!(self.out, "\tmov\tax,word ptr {dest}\r\n");
+            if matches!(op, BinOp::Mul) {
+                let _ = write!(self.out, "\timul\tword ptr {}\r\n", bp_addr(off));
+            } else {
+                self.out.extend_from_slice(b"\tcwd\t\r\n");
+                let _ = write!(self.out, "\tidiv\tword ptr {}\r\n", bp_addr(off));
+            }
+            let result_reg = if matches!(op, BinOp::Mul | BinOp::Div) { "ax" } else { "dx" };
+            let _ = write!(self.out, "\tmov\tword ptr {dest},{result_reg}\r\n");
             return;
         }
         let Some(v) = try_const_eval(value) else {
