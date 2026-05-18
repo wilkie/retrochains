@@ -1959,6 +1959,32 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `int` global compound `*=` / `/=` / `<<=` with array / deref / member RHS
+
+Fixtures `824` (`g *= a[1]`), `825` (`g /= *p`),
+`826` (`g <<= s.x`) — extending the Mul/Div/Shift arms
+to accept array / deref / member RHS forms:
+
+- `824` — `imul word ptr DGROUP:_a+2`: existing
+  `ImulGroupSym` encoder, but the arm now constructs the
+  address from a constant-indexed array via the new
+  `global_int_rhs_addr` helper.
+- `825` — `idiv word ptr [si]` for `*p` where `p` is
+  register-resident. New IR variants `ImulSiPtr` (F7 2C)
+  and `IdivSiPtr` (F7 3C) for the deref-through-SI
+  form. Codegen arm gated on register-resident int*
+  pointer.
+- `826` — `mov cl, byte ptr DGROUP:_s; shl word ptr
+  DGROUP:_g, cl`. The shift arm now uses a new
+  `rhs_byte_addr` helper that resolves the byte-pointer
+  form for any of Ident / ArrayIndex / Member RHS — and
+  for stack-resident bases — without needing per-form
+  branches.
+
+Two new helpers (`global_int_rhs_addr`,
+`rhs_byte_addr`) plus two new IR variants
+(`ImulSiPtr`, `IdivSiPtr`).
+
 ## `int` global compound `+=` with array / deref / member RHS
 
 Fixtures `821` (`g += a[1]`), `822` (`g += *p`),
