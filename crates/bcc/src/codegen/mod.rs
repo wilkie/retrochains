@@ -3768,17 +3768,32 @@ impl<'a> FunctionEmitter<'a> {
             }
             BinOp::Mul => {
                 // `imul reg, imm` is 80186+; BCC uses single-operand
-                // `imul <src>` with AX, materializing the RHS in DX
-                // first (fixture 069).
+                // `imul <src>` with AX. For a constant RHS the
+                // divisor materializes in DX first (fixture 069).
+                // For a memory-resident RHS (stack local or global)
+                // BCC uses `imul <mem>` directly — fixture 651 (`x
+                // *= y` with y at `[bp-2]` → `mov ax, si; imul word
+                // ptr [bp-2]; mov si, ax`).
                 if let Some(v) = try_const_eval(value) {
                     let v16 = v & 0xFFFF;
                     let _ = write!(self.out, "\tmov\tdx,{v16}\r\n");
+                    let _ = write!(self.out, "\tmov\tax,{}\r\n", reg.name());
+                    self.out.extend_from_slice(b"\timul\tdx\r\n");
                 } else {
                     let src = self.resolve_operand_source(value);
-                    let _ = write!(self.out, "\tmov\tdx,{}\r\n", src.word());
+                    let _ = write!(self.out, "\tmov\tax,{}\r\n", reg.name());
+                    match &src {
+                        OperandSource::Local(_)
+                        | OperandSource::Global(_)
+                        | OperandSource::GlobalOffset { .. } => {
+                            let _ = write!(self.out, "\timul\t{}\r\n", src.word());
+                        }
+                        _ => {
+                            let _ = write!(self.out, "\tmov\tdx,{}\r\n", src.word());
+                            self.out.extend_from_slice(b"\timul\tdx\r\n");
+                        }
+                    }
                 }
-                let _ = write!(self.out, "\tmov\tax,{}\r\n", reg.name());
-                self.out.extend_from_slice(b"\timul\tdx\r\n");
                 let _ = write!(self.out, "\tmov\t{},ax\r\n", reg.name());
             }
             BinOp::Shl | BinOp::Shr => {
