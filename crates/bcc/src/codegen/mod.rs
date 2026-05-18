@@ -2098,6 +2098,20 @@ impl<'a> FunctionEmitter<'a> {
             self.out.extend_from_slice(b"\tor\tax,ax\r\n");
             return;
         }
+        // `while (*p)` / `if (*p)` — deref of a register-resident
+        // pointer local: `cmp <width> ptr [<reg>], 0` directly,
+        // avoiding the round-trip through AX. Width follows the
+        // pointee type. Fixture 636.
+        if let ExprKind::Deref(operand) = &cond.kind
+            && let ExprKind::Ident(name) = &operand.kind
+            && self.locals.has(name)
+            && let LocalLocation::Reg(reg) = self.locals.location_of(name)
+            && let Some(pointee) = self.locals.type_of(name).pointee()
+        {
+            let width = if pointee.is_char_like() { "byte" } else { "word" };
+            let _ = write!(self.out, "\tcmp\t{width} ptr [{}],0\r\n", reg.name());
+            return;
+        }
         let ExprKind::Ident(name) = &cond.kind else {
             panic!("non-ident boolean condition not yet supported (no fixture)");
         };

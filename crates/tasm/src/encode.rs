@@ -363,6 +363,7 @@ fn instr_size(instr: &Instr) -> usize {
         | Instr::SarGroupSymOne { .. }
         | Instr::ShrGroupSymOne { .. } => 4,
         Instr::CmpByteBpRelImm8 { .. } => 4,
+        Instr::CmpByteSiPtrImm8 { .. } => 3,
         Instr::AndGroupSymImm16 { .. }
         | Instr::OrGroupSymImm16 { .. }
         | Instr::XorGroupSymImm16 { .. }
@@ -1348,6 +1349,14 @@ fn emit_instr(
             out.push(0x80);
             out.push(0x7E);
             out.push(*offset as u8);
+            out.push(*imm);
+        }
+        Instr::CmpByteSiPtrImm8 { imm } => {
+            // `cmp byte ptr [si], imm8` → 80 3C ii.
+            // ModR/M 3C = mod=00 reg=111(/7=CMP) r/m=100 ([si]).
+            // Fixture 636.
+            out.push(0x80);
+            out.push(0x3C);
             out.push(*imm);
         }
         Instr::AddGroupSymReg16 { group, symbol, offset, reg } => {
