@@ -1742,6 +1742,27 @@ use `mov dl, K; imul dl` — no fixture yet).
   nested if to the loop's break_target_slot, and the compound
   `+=` path emits `add <reg>, <op>` in place.
 
+## `while (*p)` — deref through reg-pointer as boolean
+
+Fixture `636` (`char *p; while (*p) { n++; p++; }`) —
+`emit_zero_test` panicked because the condition is `Deref(Ident
+p)`, not bare `Ident`. BCC's pattern with `p` enregistered in SI
+is `cmp byte ptr [si], 0; jne ...` directly (no AX round-trip).
+Added a `Deref(Ident reg-pointer)` arm to `emit_zero_test` that
+emits `cmp <width> ptr [<reg>], 0` with the width from the
+pointee. New tasm IR variant `CmpByteSiPtrImm8` encodes the
+byte form (`80 3C ii`).
+
+## Free passes (batch 106)
+
+- `635` — `char c = -1; return c;` (char neg-literal init):
+  the batch-105 char-init mask (`v & 0xFF`) handles the
+  negative value cleanly — `mov byte ptr [bp-1], 255`.
+- `637` — `int x; int y; x = 5; y = x * 3; return y;` (int
+  mul-const stored to local): the batch-99 `mov dx, 3; imul
+  dx` path routes through AX, then `mov word ptr [bp-N], ax`
+  stores the result.
+
 ### Deferred from batch 88
 
 - Probed `int a[5]; return sizeof(a);` (`582` first draft).
