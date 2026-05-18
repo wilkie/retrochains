@@ -405,6 +405,12 @@ pub enum Instr {
     /// `and <reg8>,<reg8>` — `22 (mod=11 reg=<dst> r/m=<src>)`.
     /// Char compound `&=` sibling.
     AndReg8Reg8 { dst: Reg8, src: Reg8 },
+    /// `or <reg8>,<reg8>` — `0A (mod=11 reg=<dst> r/m=<src>)`.
+    /// Char compound `|=` sibling.
+    OrReg8Reg8 { dst: Reg8, src: Reg8 },
+    /// `xor <reg8>,<reg8>` — `32 (mod=11 reg=<dst> r/m=<src>)`.
+    /// Char compound `^=` sibling.
+    XorReg8Reg8 { dst: Reg8, src: Reg8 },
     /// `shl ax,cl` — D3 E0. Variable-count logical left shift of AX.
     ShlAxCl,
     /// `sar ax,cl` — D3 F8. Variable-count arithmetic (signed) right
@@ -421,6 +427,17 @@ pub enum Instr {
     SarReg16Cl { reg: Reg16 },
     /// `shr <reg16>,cl` — D3 (mod=11 /5 r/m=<reg>).
     ShrReg16Cl { reg: Reg16 },
+    /// `shl <reg8>,cl` — `D2 (mod=11 /4 r/m=<reg>)`. Byte-register
+    /// variable-count logical left shift. Char compound `<<=` with
+    /// non-constant RHS.
+    ShlReg8Cl { reg: Reg8 },
+    /// `sar <reg8>,cl` — `D2 (mod=11 /7 r/m=<reg>)`. Signed byte
+    /// arithmetic right shift. Used by char `>>=` (BCC picks SAR
+    /// for plain `char`, fixture 670).
+    SarReg8Cl { reg: Reg8 },
+    /// `shr <reg8>,cl` — `D2 (mod=11 /5 r/m=<reg>)`. Unsigned-char
+    /// `>>=` variant, sibling of `SarReg8Cl`.
+    ShrReg8Cl { reg: Reg8 },
     /// `j<cc> short <label>` — Jcc rel8 family.
     JmpCondShort { cond: JmpCond, target: String },
     /// `jmp word ptr cs:<table>[bx]` — indirect dispatch through a

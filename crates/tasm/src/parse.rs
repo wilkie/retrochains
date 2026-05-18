@@ -472,20 +472,32 @@ fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
         "shr" if rest == "ax,cl" => Ok(Instr::ShrAxCl),
         "shl" if rest.ends_with(",cl") => {
             // Variable-count shift on any 16-bit reg (fixture 537:
-            // `mov cl, 4; shl si, cl` for `int x; x <<= 4`).
+            // `mov cl, 4; shl si, cl` for `int x; x <<= 4`). Also
+            // routes 8-bit variants (fixture 670 sibling: `shl dl,
+            // cl`) — Reg8 is tried first since it doesn't overlap
+            // with any Reg16 name.
             let r = rest.strip_suffix(",cl").unwrap_or(rest);
+            if let Some(reg) = Reg8::parse(r) {
+                return Ok(Instr::ShlReg8Cl { reg });
+            }
             let reg = Reg16::parse(r)
                 .ok_or_else(|| AsmError::new(line.line_no, format!("shl: bad register `{r}`")))?;
             Ok(Instr::ShlReg16Cl { reg })
         }
         "sar" if rest.ends_with(",cl") => {
             let r = rest.strip_suffix(",cl").unwrap_or(rest);
+            if let Some(reg) = Reg8::parse(r) {
+                return Ok(Instr::SarReg8Cl { reg });
+            }
             let reg = Reg16::parse(r)
                 .ok_or_else(|| AsmError::new(line.line_no, format!("sar: bad register `{r}`")))?;
             Ok(Instr::SarReg16Cl { reg })
         }
         "shr" if rest.ends_with(",cl") => {
             let r = rest.strip_suffix(",cl").unwrap_or(rest);
+            if let Some(reg) = Reg8::parse(r) {
+                return Ok(Instr::ShrReg8Cl { reg });
+            }
             let reg = Reg16::parse(r)
                 .ok_or_else(|| AsmError::new(line.line_no, format!("shr: bad register `{r}`")))?;
             Ok(Instr::ShrReg16Cl { reg })
@@ -1875,6 +1887,11 @@ fn parse_or(operands: &str, line_no: usize) -> AsmResult<Instr> {
             return Ok(Instr::OrReg8Imm8 { reg, imm: imm as u8 });
         }
     }
+    // `or <reg8>, <reg8>` — char compound `|=` between two byte
+    // registers (fixture 668: `or dl, al` = `0A D0`).
+    if let (Some(dst), Some(src)) = (Reg8::parse(lhs), Reg8::parse(rhs)) {
+        return Ok(Instr::OrReg8Reg8 { dst, src });
+    }
     // `or dx, word ptr <group>:<sym>[+N]` — long bitwise OR low half
     // (fixture 222).
     if lhs == "dx" {
@@ -1971,6 +1988,11 @@ fn parse_xor(operands: &str, line_no: usize) -> AsmResult<Instr> {
         if let Some(imm) = parse_imm8(rhs) {
             return Ok(Instr::XorReg8Imm8 { reg, imm: imm as u8 });
         }
+    }
+    // `xor <reg8>, <reg8>` — char compound `^=` between two byte
+    // registers (fixture 669: `xor dl, al` = `32 D0`).
+    if let (Some(dst), Some(src)) = (Reg8::parse(lhs), Reg8::parse(rhs)) {
+        return Ok(Instr::XorReg8Reg8 { dst, src });
     }
     // `xor dx, word ptr <group>:<sym>[+N]` — long bitwise XOR low
     // half (fixture 224).

@@ -3726,12 +3726,38 @@ impl<'a> FunctionEmitter<'a> {
             let _ = write!(self.out, "\tmov\t{},{result_reg}\r\n", reg.name());
             return;
         }
-        // Char compound `+=` / `-=` / `&=` with a non-constant RHS
-        // (another char local or global). BCC loads the RHS byte into
-        // AL via `mov al, byte ptr <src>` and then applies the op
-        // register-to-register (`add dl, al`, `sub dl, al`, `and dl,
-        // al`). Fixtures 665 (`c += d`), 666 (`c -= d`), 667 (`c &= d`).
-        if reg.is_byte() && matches!(op, BinOp::Add | BinOp::Sub | BinOp::BitAnd) {
+        // Char compound `<<=` / `>>=` with a non-constant RHS:
+        // load the RHS byte into CL with `mov cl, byte ptr <src>`,
+        // then shift the byte register by CL (`sar dl, cl` for
+        // signed `>>=`, `shr` for unsigned, `shl` for `<<=`).
+        // Fixture 670 (`c >>= d` with c in DL, d at [bp-1]).
+        if reg.is_byte() && matches!(op, BinOp::Shl | BinOp::Shr) {
+            let signed = !self.locals.type_of(name).is_unsigned();
+            let src = self.resolve_operand_source(value);
+            self.out.extend_from_slice(b"\tmov\tcl,");
+            self.out.extend_from_slice(src.byte().as_bytes());
+            self.out.extend_from_slice(b"\r\n");
+            let mnem = match op {
+                BinOp::Shl => "shl",
+                BinOp::Shr if signed => "sar",
+                BinOp::Shr => "shr",
+                _ => unreachable!(),
+            };
+            let _ = write!(self.out, "\t{mnem}\t{},cl\r\n", reg.name());
+            return;
+        }
+        // Char compound `+=` / `-=` / `&=` / `|=` / `^=` with a
+        // non-constant RHS (another char local or global). BCC loads
+        // the RHS byte into AL via `mov al, byte ptr <src>` and then
+        // applies the op register-to-register (`add dl, al`, etc.).
+        // Fixtures 665 (`c += d`), 666 (`c -= d`), 667 (`c &= d`),
+        // 668 (`c |= d`), 669 (`c ^= d`).
+        if reg.is_byte()
+            && matches!(
+                op,
+                BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor
+            )
+        {
             let src = self.resolve_operand_source(value);
             self.out.extend_from_slice(b"\tmov\tal,");
             self.out.extend_from_slice(src.byte().as_bytes());
@@ -3740,6 +3766,8 @@ impl<'a> FunctionEmitter<'a> {
                 BinOp::Add => "add",
                 BinOp::Sub => "sub",
                 BinOp::BitAnd => "and",
+                BinOp::BitOr => "or",
+                BinOp::BitXor => "xor",
                 _ => unreachable!(),
             };
             let _ = write!(self.out, "\t{mnem}\t{},al\r\n", reg.name());

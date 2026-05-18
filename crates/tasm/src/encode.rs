@@ -249,6 +249,7 @@ fn instr_size(instr: &Instr) -> usize {
         Instr::CmpBpRelImm16 { .. } => 5,
         Instr::JmpShort(_) | Instr::ShlAxCl | Instr::SarAxCl | Instr::ShrAxCl => 2,
         Instr::ShlReg16Cl { .. } | Instr::SarReg16Cl { .. } | Instr::ShrReg16Cl { .. } => 2,
+        Instr::ShlReg8Cl { .. } | Instr::SarReg8Cl { .. } | Instr::ShrReg8Cl { .. } => 2,
         Instr::Cwd => 1,
         Instr::JmpCondShort { .. } => 2,
         Instr::JmpIndirectCsTableBx { .. } => 5,
@@ -313,7 +314,9 @@ fn instr_size(instr: &Instr) -> usize {
         | Instr::XorReg8Imm8 { .. } => 3,
         Instr::AddReg8Reg8 { .. }
         | Instr::SubReg8Reg8 { .. }
-        | Instr::AndReg8Reg8 { .. } => 2,
+        | Instr::AndReg8Reg8 { .. }
+        | Instr::OrReg8Reg8 { .. }
+        | Instr::XorReg8Reg8 { .. } => 2,
         Instr::CallNear(_) => 3,
         Instr::MovAxGroupSym { .. }
         | Instr::MovAlGroupSym { .. }
@@ -913,6 +916,16 @@ fn emit_instr(
             out.push(0x22);
             out.push(0b11_000_000 | (dst.code() << 3) | src.code());
         }
+        Instr::OrReg8Reg8 { dst, src } => {
+            // `or <reg8>,<reg8>` → 0A (mod=11 reg=<dst> r/m=<src>).
+            out.push(0x0A);
+            out.push(0b11_000_000 | (dst.code() << 3) | src.code());
+        }
+        Instr::XorReg8Reg8 { dst, src } => {
+            // `xor <reg8>,<reg8>` → 32 (mod=11 reg=<dst> r/m=<src>).
+            out.push(0x32);
+            out.push(0b11_000_000 | (dst.code() << 3) | src.code());
+        }
         Instr::ShlAxCl => {
             // `shl ax,cl` → D3 E0. D3 = Grp2 r/m16,CL. ModR/M E0 =
             // mod=11 /4(SHL) r/m=000(AX).
@@ -942,6 +955,22 @@ fn emit_instr(
         Instr::ShrReg16Cl { reg } => {
             // `shr <reg16>,cl` → D3 (mod=11 /5 r/m=<reg>).
             out.push(0xD3);
+            out.push(0b11_101_000 | reg.code());
+        }
+        Instr::ShlReg8Cl { reg } => {
+            // `shl <reg8>,cl` → D2 (mod=11 /4 r/m=<reg>).
+            out.push(0xD2);
+            out.push(0b11_100_000 | reg.code());
+        }
+        Instr::SarReg8Cl { reg } => {
+            // `sar <reg8>,cl` → D2 (mod=11 /7 r/m=<reg>). Fixture 670
+            // (`sar dl, cl` = D2 FA).
+            out.push(0xD2);
+            out.push(0b11_111_000 | reg.code());
+        }
+        Instr::ShrReg8Cl { reg } => {
+            // `shr <reg8>,cl` → D2 (mod=11 /5 r/m=<reg>).
+            out.push(0xD2);
             out.push(0b11_101_000 | reg.code());
         }
         Instr::JmpIndirectCsBxDisp { disp } => {
