@@ -1959,6 +1959,39 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `ulong` compound `/=` / `%=` / `<<=` with `uint` RHS
+
+Fixtures `773` (`g /= x`), `774` (`g %= x`), `775` (`g <<= x`).
+LHS is `unsigned long` global, RHS is `unsigned int` local.
+
+- `773` — long `/= uint`: zero-extension lets BCC push a
+  literal `0` for the widened RHS high half via `xor ax,
+  ax; push ax`, then push the uint directly via `push word
+  ptr <rhs>` without going through AX (the signed path
+  needs AX for the `cwd`). Rest of the call shape matches
+  fixture 763's signed `/= int`:
+
+  ```
+  xor ax, ax
+  push ax                    ; widened RHS high (zero)
+  push word ptr <rhs>        ; widened RHS low (uint)
+  push word ptr <lhs_hi>
+  push word ptr <lhs_lo>
+  call near ptr N_LUDIV@
+  mov word ptr <lhs_hi>, dx
+  mov word ptr <lhs_lo>, ax
+  ```
+
+  Added a new arm in `emit_compound_assign` gated on
+  `long LHS + Type::UInt RHS + BinOp::Div|Mod`. Helper
+  picked from LHS signedness — `N_LUDIV@`/`N_LUMOD@` for
+  unsigned LHS, `N_LDIV@`/`N_LMOD@` otherwise.
+- `774` — free pass; same arm handles `Mod`.
+- `775` — free pass off batch 147's shift-by-int arm,
+  which already accepted both `Type::Int` and `Type::UInt`
+  for the shift count (only the LHS signedness picks
+  `N_LXLSH@` vs `N_LXURSH@`).
+
 ## `ulong` compound `|=` / `^=` / `*=` with `uint` RHS
 
 Fixtures `770` (`g |= x`), `771` (`g ^= x`), `772` (`g *= x`).
