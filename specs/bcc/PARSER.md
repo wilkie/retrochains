@@ -1959,6 +1959,29 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `char` update as function argument (stack-resident)
+
+Fixtures `731` (`f(c++)`), `732` (`f(++c)`), `733` (`f(c--)`)
+— BCC chose to keep `c` stack-resident here (the function-
+arg expression context apparently affects the allocator's
+eligibility check; not yet pinned to a rule). The generic
+`emit_update_to_ax` previously panicked with "stack-
+resident local not yet supported" for any char update.
+
+Added a stack-resident char branch to `emit_update_to_ax`
+with the same pre/post asymmetry observed elsewhere:
+
+- **Post** (`c++`): `mov al, byte ptr [bp-N]; inc byte ptr
+  [bp-N]; cbw` — captured value first, then memory-direct
+  side effect, then widen.
+- **Pre** (`++c`): `mov al, byte ptr [bp-N]; inc al; mov
+  byte ptr [bp-N], al; cbw` — AL detour. Stack-char pre
+  takes the same shape as char-global pre (batch 128) and
+  char-field pre (batch 130): BCC threads the new value
+  through AL rather than memory-direct `inc byte ptr`.
+
+Unsigned uses `mov ah, 0` for the widening step.
+
 ## `char` update as expression result (int destination)
 
 Fixtures `728` (`int r = c++`), `729` (`int r = ++c`),
