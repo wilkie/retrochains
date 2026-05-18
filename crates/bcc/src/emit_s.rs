@@ -581,6 +581,19 @@ fn write_tail(
         .any(|g| g.name.len() + 1 < 3);
     let has_function_prototype = unit.functions.iter().any(|f| f.body.is_none());
     let long_has_global = !long_globals.is_empty();
+    // If any global is long-typed (or a long array/struct
+    // containing longs), BCC reverts to reverse-alpha for the
+    // long bucket. Fixture 829 (`long g; long la[3]; int main`)
+    // pins this: the existing short-global-present-→-forward
+    // rule would give `_la, _main`, but oracle emits `_main,
+    // _la`. Fixture 218 (`long g; int f(long); main`) — short
+    // bucket only has `_g, _f`; long bucket only `_main` — also
+    // matches reverse-alpha.
+    let has_long_typed_global = unit
+        .globals
+        .iter()
+        .filter(|g| !g.is_static && !g.is_extern)
+        .any(|g| g.ty.contains_long());
     let mut long_bucket: Vec<(String, String)> = long_globals
         .into_iter()
         .chain(long_functions.into_iter())
@@ -589,9 +602,10 @@ fn write_tail(
     long_bucket.sort_by(|a, b| a.0.cmp(&b.0));
     short_bucket.sort_by(|a, b| a.0.cmp(&b.0));
     let long_iter: Box<dyn Iterator<Item = &(String, String)>> =
-        if (long_has_global && short_has_global)
-            || long_has_data_global
-            || has_function_prototype
+        if !has_long_typed_global
+            && ((long_has_global && short_has_global)
+                || long_has_data_global
+                || has_function_prototype)
         {
             Box::new(long_bucket.iter())
         } else {

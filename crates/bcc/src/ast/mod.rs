@@ -376,6 +376,21 @@ impl Type {
         matches!(self, Self::Long | Self::ULong)
     }
 
+    /// Recursively check whether this type contains a `long`-like
+    /// type anywhere (the type itself, or as an array element, or
+    /// inside a struct field). Used by the publics-ordering rule
+    /// in `emit_s.rs` to detect "any long global present"
+    /// (fixture 829).
+    #[must_use]
+    pub fn contains_long(&self) -> bool {
+        match self {
+            Self::Long | Self::ULong => true,
+            Self::Array { elem, .. } => elem.contains_long(),
+            Self::Struct { fields, .. } => fields.iter().any(|f| f.ty.contains_long()),
+            _ => false,
+        }
+    }
+
     /// Look up a field by name. Returns the field's offset and type
     /// (cloned), or `None` if this isn't a struct or the field name
     /// isn't present.

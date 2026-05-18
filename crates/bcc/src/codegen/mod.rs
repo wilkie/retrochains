@@ -3282,10 +3282,11 @@ impl<'a> FunctionEmitter<'a> {
         // bitwise-pair) to the LHS. Fixture 755. Also accepts
         // `Type::Char` RHS — `emit_expr_to_ax` emits the `cbw`
         // for the byte-to-int widening, and the same `cwd` then
-        // extends to long. Fixture 783.
+        // extends to long. Fixture 783. RHS can be Ident,
+        // ArrayIndex (fixture 827), or Member (fixture 828).
         if let Some(ty_lhs) = self.lhs_long_type(name)
             && ty_lhs.is_long_like()
-            && let Some(ty_rhs) = self.rhs_type_for_long_widening(&value.kind)
+            && let Some(ty_rhs) = self.rhs_int_compound_type(&value.kind)
             && matches!(ty_rhs, Type::Int | Type::Char)
             && matches!(
                 op,
@@ -3322,7 +3323,7 @@ impl<'a> FunctionEmitter<'a> {
         // Fixture 784.
         if let Some(ty_lhs) = self.lhs_long_type(name)
             && ty_lhs.is_long_like()
-            && let Some(ty_rhs) = self.rhs_type_for_long_widening(&value.kind)
+            && let Some(ty_rhs) = self.rhs_int_compound_type(&value.kind)
             && matches!(ty_rhs, Type::UInt | Type::UChar)
             && matches!(
                 op,
@@ -3677,6 +3678,37 @@ impl<'a> FunctionEmitter<'a> {
                     self.helpers.insert(helper.to_string());
                     let _ = write!(self.out, "\tmov\tword ptr {lhs_hi},dx\r\n");
                     let _ = write!(self.out, "\tmov\tword ptr {lhs_lo},ax\r\n");
+                    return;
+                }
+                _ => {}
+            }
+        }
+        // Long-RHS variant accepting ArrayIndex (const index) and
+        // Member in addition to plain Ident global. Same Mul/Div/
+        // Mod/Add/Sub/Bit* shapes; only the RHS address strings
+        // differ. Fixture 829 (`long_array[0]`).
+        if let Some(ty) = self.globals.type_of(name)
+            && ty.is_long_like()
+            && let Some((rhs_lo, rhs_hi, rhs_ty)) = self.long_rhs_halves(&value.kind)
+            && rhs_ty.is_long_like()
+            && !matches!(&value.kind, ExprKind::Ident(b) if self.globals.contains(b))
+        {
+            let unsigned = ty.is_unsigned() || rhs_ty.is_unsigned();
+            match op {
+                BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor => {
+                    let _ = write!(self.out, "\tmov\tax,word ptr {rhs_hi}\r\n");
+                    let _ = write!(self.out, "\tmov\tdx,word ptr {rhs_lo}\r\n");
+                    let (lo_op, hi_op) = match op {
+                        BinOp::Add => ("add", "adc"),
+                        BinOp::Sub => ("sub", "sbb"),
+                        BinOp::BitAnd => ("and", "and"),
+                        BinOp::BitOr => ("or", "or"),
+                        BinOp::BitXor => ("xor", "xor"),
+                        _ => unreachable!(),
+                    };
+                    let _ = write!(self.out, "\t{lo_op}\tword ptr DGROUP:_{name},dx\r\n");
+                    let _ = write!(self.out, "\t{hi_op}\tword ptr DGROUP:_{name}+2,ax\r\n");
+                    let _ = unsigned;
                     return;
                 }
                 _ => {}
@@ -8694,6 +8726,92 @@ impl<'a> FunctionEmitter<'a> {
                     let total = base_off + i16::try_from(field_off).ok()?;
                     Some(format!("byte ptr {}", bp_addr(total)))
                 }
+            }
+            _ => None,
+        }
+    }
+
+    /// Resolve a long-typed RHS expression to its (low, high)
+    /// address-string halves plus the result type. Supports
+    /// `Ident` (any long global or stack local), `ArrayIndex`
+    /// with constant index over a long array, and `Member` of
+    /// a struct whose field is long. Used by the long+long arm
+    /// to accept array elements and members. Fixture 829.
+    fn long_rhs_halves(&self, e: &ExprKind) -> Option<(String, String, Type)> {
+        match e {
+            ExprKind::Ident(n) => {
+                let ty = if let Some(t) = self.globals.type_of(n) {
+                    t.clone()
+                } else if self.locals.has(n) {
+                    self.locals.type_of(n).clone()
+                } else {
+                    return None;
+                };
+                if !ty.is_long_like() { return None; }
+                let (lo, hi) = self.long_halves_of(n);
+                Some((lo, hi, ty))
+            }
+            ExprKind::ArrayIndex { array, index } => {
+                let ExprKind::Ident(arr_name) = &array.kind else { return None };
+                let k = try_const_eval(index)?;
+                let arr_ty = if self.globals.contains(arr_name) {
+                    self.globals.type_of(arr_name)?.clone()
+                } else if self.locals.has(arr_name) {
+                    self.locals.type_of(arr_name).clone()
+                } else {
+                    return None;
+                };
+                let Type::Array { elem, .. } = arr_ty else { return None };
+                if !elem.is_long_like() { return None; }
+                let stride = u32::from(elem.size_bytes());
+                let off = (k as u32).wrapping_mul(stride);
+                let (lo, hi) = if self.globals.contains(arr_name) {
+                    let lo = if off == 0 {
+                        format!("DGROUP:_{arr_name}")
+                    } else {
+                        format!("DGROUP:_{arr_name}+{off}")
+                    };
+                    let hi = format!("DGROUP:_{arr_name}+{}", off + 2);
+                    (lo, hi)
+                } else {
+                    let LocalLocation::Stack(base) = self.locals.location_of(arr_name) else {
+                        return None;
+                    };
+                    let lo_off = base + i16::try_from(off).ok()?;
+                    let hi_off = lo_off + 2;
+                    (bp_addr(lo_off), bp_addr(hi_off))
+                };
+                Some((lo, hi, (*elem).clone()))
+            }
+            ExprKind::Member { base, field, .. } => {
+                let ExprKind::Ident(base_name) = &base.kind else { return None };
+                let base_ty = if self.globals.contains(base_name) {
+                    self.globals.type_of(base_name)?.clone()
+                } else if self.locals.has(base_name) {
+                    self.locals.type_of(base_name).clone()
+                } else {
+                    return None;
+                };
+                let (field_off, field_ty) = base_ty.field(field)?;
+                if !field_ty.is_long_like() { return None; }
+                let off = u32::from(field_off);
+                let (lo, hi) = if self.globals.contains(base_name) {
+                    let lo = if off == 0 {
+                        format!("DGROUP:_{base_name}")
+                    } else {
+                        format!("DGROUP:_{base_name}+{off}")
+                    };
+                    let hi = format!("DGROUP:_{base_name}+{}", off + 2);
+                    (lo, hi)
+                } else {
+                    let LocalLocation::Stack(base_off) = self.locals.location_of(base_name) else {
+                        return None;
+                    };
+                    let lo_off = base_off + i16::try_from(off).ok()?;
+                    let hi_off = lo_off + 2;
+                    (bp_addr(lo_off), bp_addr(hi_off))
+                };
+                Some((lo, hi, field_ty))
             }
             _ => None,
         }
