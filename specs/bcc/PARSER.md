@@ -1959,6 +1959,30 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## long member/array += int var; char array += int var
+
+Fixtures `845` (`s.l += y` long member), `846` (`la[1] += y`
+long array), `847` (`a[1] += y` char array, int RHS).
+
+- `845` — long member compound with int var RHS:
+  added `Type::Int|Type::Char` and `Type::UInt|Type::UChar`
+  widening paths in `emit_long_compound_to_mem`. Same
+  cwd/zero-extend logic as the long-LHS arms for global
+  destinations (fixture 755, 767), but with the destination
+  addresses passed in as opaque `lo_addr`/`hi_addr` strings
+  (works for struct field, array element, etc.).
+- `846` — free pass via batch 175 long-array path (the
+  array element gets routed through `emit_long_compound_to_mem`
+  with the new int-widening path).
+- `847` — char array compound with int var RHS truncated
+  to byte: `mov al, byte ptr <dest>; add al, byte ptr
+  <rhs>; mov byte ptr <dest>, al`. Five new AL/byte-bp IR
+  variants (`AddAlBpRel`, `SubAlBpRel`, `AndAlBpRel`,
+  `OrAlBpRel`, `XorAlBpRel` — `02|2A|22|0A|32 46 dd`).
+  These are AL-specific forms of `<op> r8, r/m8` that BCC
+  uses when truncating an int local to a byte for char-
+  compound destinations.
+
 ## `p->x += y`, `p->x *= y`, `p->x <<= y` (arrow member)
 
 Fixtures `842` / `843` / `844` — three free passes
