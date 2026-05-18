@@ -1118,6 +1118,17 @@ fn parse_and(operands: &str, line_no: usize) -> AsmResult<Instr> {
             return Ok(Instr::AndBpRelAx { offset });
         }
     }
+    // `and <reg16>, word ptr [bp+N]` — generic register-vs-stack
+    // bitwise AND for compound `&=` on a non-AX reg local (fixture
+    // 655: `x &= y` with x in SI). AX uses the AL-/short form via
+    // `parse_alu_ax_mem` below.
+    if let Some(reg) = Reg16::parse(lhs) {
+        if !matches!(reg, Reg16::Ax) {
+            if let Some(offset) = parse_bp_relative(rhs) {
+                return Ok(Instr::AndReg16BpRel { reg, offset });
+            }
+        }
+    }
     parse_alu_ax_mem(operands, line_no, "and", |o| Instr::AndAxBpRel { offset: o })
 }
 

@@ -284,6 +284,7 @@ fn instr_size(instr: &Instr) -> usize {
         | Instr::XorBpRelAx { .. }
         | Instr::SubAxBpRel { .. }
         | Instr::AndAxBpRel { .. }
+        | Instr::AndReg16BpRel { .. }
         | Instr::OrAxBpRel { .. }
         | Instr::XorAxBpRel { .. }
         | Instr::CmpAxBpRel { .. }
@@ -712,6 +713,14 @@ fn emit_instr(
             out.push(0x05);
         }
         Instr::AndAxBpRel { offset } => emit_alu_ax_bp_rel(0x23, *offset, out),
+        Instr::AndReg16BpRel { reg, offset } => {
+            // `and <reg16>,word ptr [bp+disp8]` → 23 (mod=01 reg=<r>
+            // r/m=110) dd. Fixture 655 (`and si, word ptr [bp-2]`).
+            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
+            out.push(0x23);
+            out.push(0b01_000_110 | (reg.code() << 3));
+            out.push(disp as u8);
+        }
         Instr::OrAxBpRel { offset } => emit_alu_ax_bp_rel(0x0B, *offset, out),
         Instr::XorAxBpRel { offset } => emit_alu_ax_bp_rel(0x33, *offset, out),
         Instr::CmpAxBpRel { offset } => emit_alu_ax_bp_rel(0x3B, *offset, out),

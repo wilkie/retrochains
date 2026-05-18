@@ -304,6 +304,12 @@ pub enum Instr {
     OrAxBpRel { offset: i16 },
     /// `xor ax,word ptr [bp+<offset>]` — 33 46 dd
     XorAxBpRel { offset: i16 },
+    /// `and <reg16>,word ptr [bp+<offset>]` — `23 (mod=01 reg=<r>
+    /// r/m=110) dd`. Generic int-register-vs-stack bitwise AND for
+    /// compound `&=` on a register local (fixture 655: `x &= y`
+    /// with x in SI, y at [bp-2] → `and si, word ptr [bp-2]` =
+    /// `23 76 dd`). AX keeps its dedicated variant above.
+    AndReg16BpRel { reg: Reg16, offset: i16 },
     /// `cmp ax,word ptr [bp+<offset>]` — 3B 46 dd
     CmpAxBpRel { offset: i16 },
     /// `cmp dx,word ptr [bp+disp8]` — 3B 56 dd. Low-half companion to

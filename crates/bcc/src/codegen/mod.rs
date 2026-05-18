@@ -3822,16 +3822,31 @@ impl<'a> FunctionEmitter<'a> {
                 // BX (DX is clobbered by `cwd`), then `mov ax, <reg>;
                 // cwd; idiv bx`. `/=` stores AX back, `%=` stores DX
                 // (the remainder). Fixtures 584 (`/=`) and 585 (`%=`).
+                // For a memory-resident variable RHS BCC uses `idiv
+                // <mem>` directly — fixture 653 (`x /= y` → `mov ax,
+                // si; cwd; idiv word ptr [bp-2]; mov si, ax`).
                 if let Some(v) = try_const_eval(value) {
                     let v16 = v & 0xFFFF;
                     let _ = write!(self.out, "\tmov\tbx,{v16}\r\n");
+                    let _ = write!(self.out, "\tmov\tax,{}\r\n", reg.name());
+                    self.out.extend_from_slice(b"\tcwd\t\r\n");
+                    self.out.extend_from_slice(b"\tidiv\tbx\r\n");
                 } else {
                     let src = self.resolve_operand_source(value);
-                    let _ = write!(self.out, "\tmov\tbx,{}\r\n", src.word());
+                    let _ = write!(self.out, "\tmov\tax,{}\r\n", reg.name());
+                    self.out.extend_from_slice(b"\tcwd\t\r\n");
+                    match &src {
+                        OperandSource::Local(_)
+                        | OperandSource::Global(_)
+                        | OperandSource::GlobalOffset { .. } => {
+                            let _ = write!(self.out, "\tidiv\t{}\r\n", src.word());
+                        }
+                        _ => {
+                            let _ = write!(self.out, "\tmov\tbx,{}\r\n", src.word());
+                            self.out.extend_from_slice(b"\tidiv\tbx\r\n");
+                        }
+                    }
                 }
-                let _ = write!(self.out, "\tmov\tax,{}\r\n", reg.name());
-                self.out.extend_from_slice(b"\tcwd\t\r\n");
-                self.out.extend_from_slice(b"\tidiv\tbx\r\n");
                 let result_reg = if matches!(op, BinOp::Div) { "ax" } else { "dx" };
                 let _ = write!(self.out, "\tmov\t{},{result_reg}\r\n", reg.name());
             }
