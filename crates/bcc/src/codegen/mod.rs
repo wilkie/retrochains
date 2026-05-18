@@ -3662,6 +3662,26 @@ impl<'a> FunctionEmitter<'a> {
             let _ = write!(self.out, "\tmov\t{},al\r\n", reg.name());
             return;
         }
+        // Char compound `/= K` / `%= K` — widen char to AX (cbw),
+        // load divisor into BX, then signed idiv. For `/=` store
+        // AL back; for `%=` store DL (the remainder's low byte).
+        // Fixture 640 (`c /= 4` → `mov al, cl; cbw; mov bx, 4;
+        // cwd; idiv bx; mov cl, al`). Shift unroll wouldn't match
+        // signed semantics (rounding differs for negative).
+        if reg.is_byte()
+            && matches!(op, BinOp::Div | BinOp::Mod)
+            && let Some(v) = try_const_eval(value)
+        {
+            let v16 = v & 0xFFFF;
+            let _ = write!(self.out, "\tmov\tal,{}\r\n", reg.name());
+            self.out.extend_from_slice(b"\tcbw\t\r\n");
+            let _ = write!(self.out, "\tmov\tbx,{v16}\r\n");
+            self.out.extend_from_slice(b"\tcwd\t\r\n");
+            self.out.extend_from_slice(b"\tidiv\tbx\r\n");
+            let result_reg = if matches!(op, BinOp::Div) { "al" } else { "dl" };
+            let _ = write!(self.out, "\tmov\t{},{result_reg}\r\n", reg.name());
+            return;
+        }
         assert!(
             !reg.is_byte(),
             "compound assignment on a char (byte-register) target not yet supported (no fixture)"

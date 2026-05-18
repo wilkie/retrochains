@@ -107,6 +107,13 @@ impl Reg {
     /// in BL, the third in CL.
     const CHAR_POOL: [Self; 3] = [Self::Dl, Self::Bl, Self::Cl];
 
+    /// Char pool variant used when the function body contains a signed
+    /// `idiv` (any `/` or `%` op, compound or expression). The `cwd`
+    /// preceding `idiv` clobbers DX, and BCC's allocator drops DL out
+    /// of the pool so the char target ends up in CL (or BL). Probed
+    /// via fixture 640.
+    const CHAR_POOL_DIV: [Self; 2] = [Self::Cl, Self::Bl];
+
     /// Registers BCC treats as callee-saved, in canonical push order.
     /// Everything else (DX, BX, CX, DL, BL, CL) is used by BCC without
     /// push/pop at the function boundary.
@@ -257,9 +264,17 @@ impl Locals {
         }
 
         // Char eligibles — only when the function makes no call, and
-        // never for chars whose address was taken.
+        // never for chars whose address was taken. When the body
+        // contains `idiv` (any `/` or `%` op), BCC drops DL from the
+        // char pool (cwd before idiv clobbers DX). Fixture 640.
+        let function_has_div = body_has_div_or_mod(function.body.as_deref().unwrap_or(&[]));
         if !function_makes_call {
-            let mut char_pool = Reg::CHAR_POOL.iter().copied();
+            let char_pool_slice: &[Reg] = if function_has_div {
+                &Reg::CHAR_POOL_DIV
+            } else {
+                &Reg::CHAR_POOL
+            };
+            let mut char_pool = char_pool_slice.iter().copied();
             for (i, item) in declared.iter().enumerate() {
                 if !matches!(item.ty, Type::Char) {
                     continue;
@@ -690,6 +705,119 @@ fn expr_has_call(e: &Expr) -> bool {
         ExprKind::Cast { operand, .. } => expr_has_call(operand),
         ExprKind::InitList { items } => items.iter().any(expr_has_call),
         ExprKind::Comma { left, right } => expr_has_call(left) || expr_has_call(right),
+        ExprKind::Update { .. }
+        | ExprKind::Ident(_)
+        | ExprKind::IntLit(_)
+        | ExprKind::AddressOf(_)
+        | ExprKind::AddressOfArrayElem { .. }
+        | ExprKind::StringLit(_) => false,
+    }
+}
+
+/// True iff any statement in `body` contains an integer divide or
+/// modulo (compound or expression form). Used to switch the char
+/// register pool from `[DL, BL, CL]` to `[CL, BL]` so the char
+/// local doesn't land in DL (which `cwd` would clobber). Fixture
+/// 640.
+fn body_has_div_or_mod(body: &[Stmt]) -> bool {
+    body.iter().any(stmt_has_div_or_mod)
+}
+
+fn stmt_has_div_or_mod(stmt: &Stmt) -> bool {
+    match &stmt.kind {
+        StmtKind::Return(value) => value.as_ref().is_some_and(expr_has_div_or_mod),
+        StmtKind::Declare { init, .. } => init.as_ref().is_some_and(expr_has_div_or_mod),
+        StmtKind::Assign { value, .. } => expr_has_div_or_mod(value),
+        StmtKind::CompoundAssign { op, value, .. } => {
+            matches!(op, crate::ast::BinOp::Div | crate::ast::BinOp::Mod)
+                || expr_has_div_or_mod(value)
+        }
+        StmtKind::If { cond, then_branch, else_branch } => {
+            expr_has_div_or_mod(cond)
+                || body_has_div_or_mod(then_branch)
+                || else_branch.as_ref().is_some_and(|b| body_has_div_or_mod(b))
+        }
+        StmtKind::While { cond, body } => {
+            expr_has_div_or_mod(cond) || body_has_div_or_mod(body)
+        }
+        StmtKind::DoWhile { body, cond } => {
+            body_has_div_or_mod(body) || expr_has_div_or_mod(cond)
+        }
+        StmtKind::For { init, cond, step, body } => {
+            init.as_ref()
+                .is_some_and(|es| es.iter().any(expr_has_div_or_mod))
+                || cond.as_ref().is_some_and(expr_has_div_or_mod)
+                || step
+                    .as_ref()
+                    .is_some_and(|es| es.iter().any(expr_has_div_or_mod))
+                || body_has_div_or_mod(body)
+        }
+        StmtKind::Switch { scrutinee, cases } => {
+            expr_has_div_or_mod(scrutinee)
+                || cases.iter().any(|c| body_has_div_or_mod(&c.body))
+        }
+        StmtKind::ArrayAssign { indices, value, .. }
+        | StmtKind::MemberArrayAssign { indices, value, .. } => {
+            indices.iter().any(expr_has_div_or_mod) || expr_has_div_or_mod(value)
+        }
+        StmtKind::ArrayCompoundAssign { op, indices, value, .. } => {
+            matches!(op, crate::ast::BinOp::Div | crate::ast::BinOp::Mod)
+                || indices.iter().any(expr_has_div_or_mod)
+                || expr_has_div_or_mod(value)
+        }
+        StmtKind::DerefAssign { target, value } => {
+            expr_has_div_or_mod(target) || expr_has_div_or_mod(value)
+        }
+        StmtKind::DerefCompoundAssign { op, target, value } => {
+            matches!(op, crate::ast::BinOp::Div | crate::ast::BinOp::Mod)
+                || expr_has_div_or_mod(target)
+                || expr_has_div_or_mod(value)
+        }
+        StmtKind::MemberAssign { base, value, .. } => {
+            expr_has_div_or_mod(base) || expr_has_div_or_mod(value)
+        }
+        StmtKind::MemberCompoundAssign { op, base, value, .. } => {
+            matches!(op, crate::ast::BinOp::Div | crate::ast::BinOp::Mod)
+                || expr_has_div_or_mod(base)
+                || expr_has_div_or_mod(value)
+        }
+        StmtKind::ExprStmt(e) => expr_has_div_or_mod(e),
+        StmtKind::Break
+        | StmtKind::Continue
+        | StmtKind::Goto { .. }
+        | StmtKind::Label { .. }
+        | StmtKind::Empty => false,
+    }
+}
+
+fn expr_has_div_or_mod(e: &Expr) -> bool {
+    match &e.kind {
+        ExprKind::BinOp { op, left, right } => {
+            matches!(op, crate::ast::BinOp::Div | crate::ast::BinOp::Mod)
+                || expr_has_div_or_mod(left)
+                || expr_has_div_or_mod(right)
+        }
+        ExprKind::Logical { left, right, .. } => {
+            expr_has_div_or_mod(left) || expr_has_div_or_mod(right)
+        }
+        ExprKind::Unary { operand, .. } => expr_has_div_or_mod(operand),
+        ExprKind::Call { args, .. } => args.iter().any(expr_has_div_or_mod),
+        ExprKind::AssignExpr { value, .. } => expr_has_div_or_mod(value),
+        ExprKind::Deref(operand) => expr_has_div_or_mod(operand),
+        ExprKind::ArrayIndex { array, index } => {
+            expr_has_div_or_mod(array) || expr_has_div_or_mod(index)
+        }
+        ExprKind::Member { base, .. } => expr_has_div_or_mod(base),
+        ExprKind::Ternary { cond, then_value, else_value } => {
+            expr_has_div_or_mod(cond)
+                || expr_has_div_or_mod(then_value)
+                || expr_has_div_or_mod(else_value)
+        }
+        ExprKind::Cast { operand, .. } => expr_has_div_or_mod(operand),
+        ExprKind::InitList { items } => items.iter().any(expr_has_div_or_mod),
+        ExprKind::Comma { left, right } => {
+            expr_has_div_or_mod(left) || expr_has_div_or_mod(right)
+        }
         ExprKind::Update { .. }
         | ExprKind::Ident(_)
         | ExprKind::IntLit(_)
