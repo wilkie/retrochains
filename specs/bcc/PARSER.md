@@ -1310,6 +1310,30 @@ relative form was supported.
   handled this; both chars promote to int per C90, the sum lands
   in AX, and `ret` returns it.
 
+## `f(a[K])` — direct `push word ptr [bp-N]` arg
+
+Fixture `589` (`int f(int x); int a[3]; f(a[1]);`) — the int-
+arg push path was emitting `mov ax, word ptr [bp-N]; push ax`
+(4 bytes) while BCC emits `push word ptr [bp-N]` (3 bytes)
+directly for memory-operand args. Added `try_direct_arg_push`
+to `emit_call`: when the arg is a const-index array element on
+a stack-resident int/ptr array, skip the AX round-trip and emit
+the `push m16` form. The broader cases (bare ident local, bare
+ident global) also use this shape in BCC but aren't currently
+exercised by any fixture; the peephole was kept narrow to avoid
+churning unrelated callers.
+
+## Free passes (batch 90)
+
+Two more probes hit existing paths byte-exactly:
+
+- `587` — descending `for (i = 10; i > 0; i--)`: the for-loop
+  planner already handles the postdec step and `i > 0` test
+  shape.
+- `588` — `int a; int b; ... return a > b ? a : b;` (ternary
+  over int globals): `emit_ternary` materializes both branches'
+  values into AX correctly.
+
 ### Deferred from batch 88
 
 - Probed `int a[5]; return sizeof(a);` (`582` first draft).
