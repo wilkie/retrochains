@@ -497,7 +497,9 @@ fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
             // routes 8-bit variants (fixture 670 sibling: `shl dl,
             // cl`) — Reg8 is tried first since it doesn't overlap
             // with any Reg16 name. Memory-direct byte-global form
-            // (fixture 697: `shl byte ptr DGROUP:_g, cl`) follows.
+            // (fixture 697: `shl byte ptr DGROUP:_g, cl`) and word
+            // form (fixture 805: `shl word ptr DGROUP:_g, cl`)
+            // follow.
             let r = rest.strip_suffix(",cl").unwrap_or(rest);
             if let Some(reg) = Reg8::parse(r) {
                 return Ok(Instr::ShlReg8Cl { reg });
@@ -505,6 +507,14 @@ fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
             if let Some((group, symbol)) = parse_byte_group_symbol(r) {
                 let (sym, offset) = split_sym_offset(symbol);
                 return Ok(Instr::ShlGroupSymByteCl {
+                    group: group.to_string(),
+                    symbol: sym.to_string(),
+                    offset,
+                });
+            }
+            if let Some((group, symbol)) = parse_group_symbol(r) {
+                let (sym, offset) = split_sym_offset(symbol);
+                return Ok(Instr::ShlGroupSymCl {
                     group: group.to_string(),
                     symbol: sym.to_string(),
                     offset,
@@ -527,6 +537,14 @@ fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
                     offset,
                 });
             }
+            if let Some((group, symbol)) = parse_group_symbol(r) {
+                let (sym, offset) = split_sym_offset(symbol);
+                return Ok(Instr::SarGroupSymCl {
+                    group: group.to_string(),
+                    symbol: sym.to_string(),
+                    offset,
+                });
+            }
             let reg = Reg16::parse(r)
                 .ok_or_else(|| AsmError::new(line.line_no, format!("sar: bad register `{r}`")))?;
             Ok(Instr::SarReg16Cl { reg })
@@ -539,6 +557,14 @@ fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
             if let Some((group, symbol)) = parse_byte_group_symbol(r) {
                 let (sym, offset) = split_sym_offset(symbol);
                 return Ok(Instr::ShrGroupSymByteCl {
+                    group: group.to_string(),
+                    symbol: sym.to_string(),
+                    offset,
+                });
+            }
+            if let Some((group, symbol)) = parse_group_symbol(r) {
+                let (sym, offset) = split_sym_offset(symbol);
+                return Ok(Instr::ShrGroupSymCl {
                     group: group.to_string(),
                     symbol: sym.to_string(),
                     offset,

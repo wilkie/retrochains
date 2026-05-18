@@ -832,6 +832,17 @@ pub enum Instr {
     /// `shr byte ptr <group>:<symbol>[+<offset>],1` — D0 /5 r/m8,1.
     /// Encoding: `D0 2E lo hi`. Unsigned char `>>=` low-K unroll.
     ShrGroupSymByteOne { group: String, symbol: String, offset: i16 },
+    /// `shl word ptr <group>:<symbol>[+<offset>],cl` — `D3 /4 r/m16`
+    /// with mod=00 r/m=110 → `D3 26 lo hi` + FIXUPP. Int-global
+    /// `<<= x` for non-constant shift count (fixture 805:
+    /// `mov cl, byte ptr [bp-2]; shl word ptr _g, cl`).
+    ShlGroupSymCl { group: String, symbol: String, offset: i16 },
+    /// `sar word ptr <group>:<symbol>[+<offset>],cl` — `D3 3E lo hi`.
+    /// Signed int-global `>>= x` sibling of `ShlGroupSymCl`.
+    SarGroupSymCl { group: String, symbol: String, offset: i16 },
+    /// `shr word ptr <group>:<symbol>[+<offset>],cl` — `D3 2E lo hi`.
+    /// Unsigned int-global `>>= x` sibling of `ShlGroupSymCl`.
+    ShrGroupSymCl { group: String, symbol: String, offset: i16 },
     /// `shl byte ptr <group>:<symbol>[+<offset>],cl` — `D2 /4 r/m8`
     /// with mod=00 r/m=110 → `D2 26 lo hi` + FIXUPP. Char-global
     /// `<<= d` for non-constant shift count (fixture 697:

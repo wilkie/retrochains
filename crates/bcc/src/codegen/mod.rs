@@ -4192,6 +4192,59 @@ impl<'a> FunctionEmitter<'a> {
             let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name},ax\r\n");
             return;
         }
+        // Int/uint global compound `<<=` / `>>=` with an int/uint
+        // local RHS. CL gets the shift count's low byte; the
+        // shift acts memory-direct on the global: `mov cl, byte
+        // ptr [bp+N]; shl word ptr DGROUP:_<g>, cl` (or sar/shr
+        // depending on signedness). Fixture 805.
+        if let Some(gty) = self.globals.type_of(name)
+            && matches!(gty, Type::Int | Type::UInt)
+            && matches!(op, BinOp::Shl | BinOp::Shr)
+            && let Some(ty_rhs) = self.rhs_type_for_long_widening(&value.kind)
+            && matches!(ty_rhs, Type::Int | Type::UInt | Type::Char | Type::UChar)
+            && let ExprKind::Ident(b) = &value.kind
+            && !self.globals.contains(b)
+        {
+            let unsigned = gty.is_unsigned();
+            let mnem = match (op, unsigned) {
+                (BinOp::Shl, _) => "shl",
+                (BinOp::Shr, false) => "sar",
+                (BinOp::Shr, true) => "shr",
+                _ => unreachable!(),
+            };
+            let LocalLocation::Stack(off) = self.locals.location_of(b) else {
+                unreachable!();
+            };
+            let _ = write!(self.out, "\tmov\tcl,byte ptr {}\r\n", bp_addr(off));
+            let _ = write!(self.out, "\t{mnem}\tword ptr DGROUP:_{name},cl\r\n");
+            return;
+        }
+        // Int/uint global compound `/=` / `%=` with an int/uint
+        // local RHS. Same mem-direct shape as Mul, but with
+        // `cwd` for the dividend sign-extension and `idiv word
+        // ptr [bp+N]`: `mov ax, _g; cwd; idiv word ptr <rhs>;
+        // mov _g, {ax|dx}`. Fixture 803.
+        if let Some(gty) = self.globals.type_of(name)
+            && matches!(gty, Type::Int | Type::UInt)
+            && matches!(op, BinOp::Div | BinOp::Mod)
+            && let Some(ty_rhs) = self.rhs_type_for_long_widening(&value.kind)
+            && matches!(ty_rhs, Type::Int | Type::UInt)
+            && let ExprKind::Ident(b) = &value.kind
+            && !self.globals.contains(b)
+        {
+            let LocalLocation::Stack(off) = self.locals.location_of(b) else {
+                unreachable!();
+            };
+            let _ = write!(self.out, "\tmov\tax,word ptr DGROUP:_{name}\r\n");
+            self.out.extend_from_slice(b"\tcwd\t\r\n");
+            let _ = write!(self.out, "\tidiv\tword ptr {}\r\n", bp_addr(off));
+            let result_reg = if matches!(op, BinOp::Div) { "ax" } else { "dx" };
+            let _ = write!(
+                self.out,
+                "\tmov\tword ptr DGROUP:_{name},{result_reg}\r\n",
+            );
+            return;
+        }
         // Int/uint global compound `*=` with a char/uchar local
         // RHS. `emit_expr_to_ax` materializes the widened byte in
         // AX, but AX is needed for the LHS load (which feeds
