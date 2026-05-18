@@ -4277,23 +4277,22 @@ impl<'a> FunctionEmitter<'a> {
             );
             return;
         }
-        // Int/uint global compound `*=` with a char/uchar local
-        // RHS. `emit_expr_to_ax` materializes the widened byte in
-        // AX, but AX is needed for the LHS load (which feeds
-        // `imul`). BCC inserts a `push ax; ...; pop dx` shuffle
-        // to park the widened RHS in DX while AX takes the LHS.
-        // `imul dx` then computes DX:AX = AX * DX (signed); the
-        // low-16 store back ignores DX. Note BCC uses signed
-        // `imul` even for `uchar` — the zero-extended dividend
-        // is positive so the low-16 product is identical. Fixture
-        // 796.
+        // Int/uint global compound `*=` with a char/uchar RHS
+        // (local or global). `emit_expr_to_ax` materializes the
+        // widened byte in AX, but AX is needed for the LHS load
+        // (which feeds `imul`). BCC inserts a `push ax; ...; pop
+        // dx` shuffle to park the widened RHS in DX while AX
+        // takes the LHS. `imul dx` then computes DX:AX = AX * DX
+        // (signed); the low-16 store back ignores DX. Note BCC
+        // uses signed `imul` even for `uchar` — the zero-extended
+        // dividend is positive so the low-16 product is
+        // identical. Fixture 796 (local), 815 (global).
         if let Some(gty) = self.globals.type_of(name)
             && matches!(gty, Type::Int | Type::UInt)
             && matches!(op, BinOp::Mul)
             && let Some(ty_rhs) = self.rhs_type_for_long_widening(&value.kind)
             && matches!(ty_rhs, Type::Char | Type::UChar)
-            && let ExprKind::Ident(b) = &value.kind
-            && !self.globals.contains(b)
+            && let ExprKind::Ident(_) = &value.kind
         {
             self.emit_expr_to_ax(value);
             self.out.extend_from_slice(b"\tpush\tax\r\n");
@@ -4304,22 +4303,22 @@ impl<'a> FunctionEmitter<'a> {
             return;
         }
         // Int/uint global compound `/=` / `%=` with a char/uchar
-        // local RHS. Similar register-pressure dance as the Mul
-        // arm, but BCC parks the widened RHS in BX (Div uses BX
-        // by convention; Mul used DX). The LHS load now needs
-        // both AX (dividend low) and DX (sign-extend via cwd),
-        // so the push/pop must stash AX before the cwd:
+        // RHS (local or global). Similar register-pressure dance
+        // as the Mul arm, but BCC parks the widened RHS in BX
+        // (Div uses BX by convention; Mul used DX). The LHS load
+        // now needs both AX (dividend low) and DX (sign-extend
+        // via cwd), so the push/pop must stash AX before the cwd:
         // `mov al, <c>; cbw; push ax; mov ax, <lhs>; cwd; pop
         // bx; idiv bx; mov <lhs>, ax` (or `, dx` for `%=`).
         // Signed `idiv` works for `uchar` RHS too — the
-        // zero-extended divisor is positive. Fixture 798.
+        // zero-extended divisor is positive. Fixture 798 (local),
+        // 816 (global).
         if let Some(gty) = self.globals.type_of(name)
             && matches!(gty, Type::Int | Type::UInt)
             && matches!(op, BinOp::Div | BinOp::Mod)
             && let Some(ty_rhs) = self.rhs_type_for_long_widening(&value.kind)
             && matches!(ty_rhs, Type::Char | Type::UChar)
-            && let ExprKind::Ident(b) = &value.kind
-            && !self.globals.contains(b)
+            && let ExprKind::Ident(_) = &value.kind
         {
             let _ = ty_rhs;
             self.emit_expr_to_ax(value);
