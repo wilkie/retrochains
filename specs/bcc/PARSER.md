@@ -1959,6 +1959,42 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `long` compound `/=` uchar and `<<=` char / uchar
+
+Fixtures `788` (`g /= uchar c`), `789` (`g <<= char c`),
+`790` (`g <<= uchar c`).
+
+- `788` — `/= uchar` is a new shape distinct from `/= uint`
+  (fixture 773) for the same register-pressure reason as
+  `*= uchar` (fixture 786): the uchar materializes in AX
+  (`mov ah, 0`), so BCC can't use AX as the source of the
+  pushed `0` for the widened RHS high half. It zeros DX
+  instead:
+
+  ```
+  mov al, byte ptr <c>
+  mov ah, 0                    ; AX = uchar (zero-ext)
+  xor dx, dx                   ; DX = 0 (rhs hi)
+  push dx
+  push ax
+  push word ptr <lhs_hi>
+  push word ptr <lhs_lo>
+  call near ptr <helper>
+  ```
+
+  Added a new arm in `emit_compound_assign` gated on
+  `long LHS + Type::UChar RHS + BinOp::Div|Mod`. Helper
+  picked from LHS signedness (`N_LDIV@`/`N_LMOD@` for
+  signed, `N_LUDIV@`/`N_LUMOD@` for unsigned).
+- `789` / `790` — free passes after extending the long-
+  LHS-shift arm's RHS-type gate from `Type::Int |
+  Type::UInt` to `Type::Int | Type::UInt | Type::Char |
+  Type::UChar`. The arm reads `CL` directly as `byte ptr
+  <addr>`, which works for any RHS width — CL only needs
+  the low byte and the C90 shift-count value space
+  (0..31 for long) fits in a byte regardless of RHS
+  signedness.
+
 ## `long` compound `*=` / `/=` with `char` / `uchar` RHS
 
 Fixtures `785` (`g *= char c`), `786` (`g *= uchar c`),
