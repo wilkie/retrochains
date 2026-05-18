@@ -1959,6 +1959,31 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Pointer subscript — mod, div, char postinc
+
+Fixtures `884` (`int *p; p[1] %= y` — mod compound), `885`
+(`int *p; p[1] /= y` — div compound), `886` (`char *p; p[1]++`
+— discarded char-pointer postinc).
+
+884 reuses 883's mul/div/mod arm, but two things were missing:
+- the **DX-result store** form (`mov word ptr [bx+disp], dx`)
+  for the `%=` op — added IR variant `MovBxDispDx` (`89 57 dd`
+  with ModR/M `57` = mod=01 reg=DX(010) r/m=111=BX).
+- a **BX reload after idiv** before the store. `imul` (single-
+  operand) doesn't clobber enough state to bother BCC, but
+  `idiv` does, so BCC re-emits `mov bx, _p` between the `idiv`
+  and the store. The codegen path now emits this reload on the
+  Div/Mod branch only — `imul` keeps the existing tighter
+  shape. Fixture 885 (div) needed this too; without the reload
+  the OBJ differed by 3 bytes against the oracle.
+
+886 needs the K=1 memory-direct peephole for char-pointee:
+`inc|dec byte ptr [bx+K]` (3 bytes) instead of the 11-byte AL-
+arith-through pattern. Added IR variants `IncBxDispByte` (`FE
+47 dd`) and `DecBxDispByte` (`FE 4F dd`) — Group FE byte
+counterparts to `IncBxDisp`. Codegen now detects `try_const_
+eval(value) == 1` early in the char-pointer compound arm.
+
 ## Pointer subscript — postdec, variable shift, mul
 
 Fixtures `881` (`int *p; p[1]--` — discarded postdec), `882`
