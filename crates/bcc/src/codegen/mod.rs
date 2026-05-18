@@ -9248,6 +9248,23 @@ impl<'a> FunctionEmitter<'a> {
         match e {
             ExprKind::Unary { operand, .. } => self.rhs_int_compound_type(&operand.kind),
             ExprKind::IntLit(_) => Some(Type::Int),
+            // Function calls return into AX under BCC's small-
+            // model convention. Assume int return; long-returning
+            // calls would route through a separate path. Fixture 854.
+            ExprKind::Call { .. } => Some(Type::Int),
+            // `!y` and `a && b` / `a || b` yield 0/1 in AX, int-
+            // typed. Fixture 856 (`g += !y`).
+            ExprKind::Logical { .. } => Some(Type::Int),
+            // Ternary in int-typed branches resolves to int.
+            // Fixture 855.
+            ExprKind::Ternary { then_value, else_value, .. } => {
+                let lt = self.rhs_int_compound_type(&then_value.kind)?;
+                let rt = self.rhs_int_compound_type(&else_value.kind)?;
+                if lt.is_long_like() || rt.is_long_like() {
+                    return None;
+                }
+                Some(Type::Int)
+            }
             ExprKind::BinOp { left, right, .. } => {
                 // If both operands resolve to non-long int-family
                 // types, the BinOp result is int-typed. Used for
