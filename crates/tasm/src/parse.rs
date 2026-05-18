@@ -575,6 +575,16 @@ fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
                     offset,
                 });
             }
+            // `inc byte ptr <group>:<sym>[+N]` — byte sibling
+            // (fixture 702: `g++;` discarded → memory-direct inc).
+            if let Some((group, symbol)) = parse_byte_group_symbol(rest) {
+                let (sym, offset) = split_sym_offset(symbol);
+                return Ok(Instr::IncGroupSymByte {
+                    group: group.to_string(),
+                    symbol: sym.to_string(),
+                    offset,
+                });
+            }
             Err(AsmError::new(
                 line.line_no,
                 format!("inc: unsupported operand form `{rest}`"),
@@ -596,6 +606,15 @@ fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
             if let Some((group, symbol)) = parse_group_symbol(rest) {
                 let (sym, offset) = split_sym_offset(symbol);
                 return Ok(Instr::DecGroupSym {
+                    group: group.to_string(),
+                    symbol: sym.to_string(),
+                    offset,
+                });
+            }
+            // `dec byte ptr <group>:<sym>[+N]` — byte sibling.
+            if let Some((group, symbol)) = parse_byte_group_symbol(rest) {
+                let (sym, offset) = split_sym_offset(symbol);
+                return Ok(Instr::DecGroupSymByte {
                     group: group.to_string(),
                     symbol: sym.to_string(),
                     offset,

@@ -806,6 +806,16 @@ pub enum Instr {
     /// `shr byte ptr <group>:<symbol>[+<offset>],cl` — `D2 2E lo hi`.
     /// Unsigned char-global `>>= d` sibling.
     ShrGroupSymByteCl { group: String, symbol: String, offset: i16 },
+    /// `inc byte ptr <group>:<symbol>[+<offset>]` — `FE /0 r/m8`
+    /// with mod=00 r/m=110 → `FE 06 lo hi` + FIXUPP. Memory-direct
+    /// byte increment on a data-segment global. BCC uses this only
+    /// for the **post-increment, discarded** path (fixture 702:
+    /// `g++;` standalone) — pre-increment routes through AL
+    /// instead (fixture 700).
+    IncGroupSymByte { group: String, symbol: String, offset: i16 },
+    /// `dec byte ptr <group>:<symbol>[+<offset>]` — `FE 0E lo hi`
+    /// (Grp4 /1). Sibling of `IncGroupSymByte` for `g--;`.
+    DecGroupSymByte { group: String, symbol: String, offset: i16 },
     /// `add word ptr <group>:<symbol>[+<offset>], <reg16>` — Grp1
     /// r/m16, r16 with /0=ADD. Encoding: `01 (mod=00 reg=<reg>
     /// r/m=110) lo hi`. Fixture 571 (`a += b;` between two int

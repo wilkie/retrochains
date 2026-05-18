@@ -561,8 +561,8 @@ impl<'a> FunctionEmitter<'a> {
     /// side-effect store, no value-load afterward.
     fn emit_expr_discard(&mut self, expr: &Expr) {
         match &expr.kind {
-            ExprKind::Update { target, op, .. } => {
-                self.emit_update_in_place(target, *op);
+            ExprKind::Update { target, op, position } => {
+                self.emit_update_in_place(target, *op, *position);
             }
             ExprKind::AssignExpr { target, value } => {
                 let loc = self.locals.location_of(target);
@@ -590,7 +590,7 @@ impl<'a> FunctionEmitter<'a> {
     /// Char register: round-trip through AL — `mov al, <reg> /
     /// inc/dec al / mov <reg>, al` (fixture 047). BCC does not use
     /// `inc/dec <byte-reg>` directly.
-    fn emit_update_in_place(&mut self, name: &str, op: UpdateOp) {
+    fn emit_update_in_place(&mut self, name: &str, op: UpdateOp, position: UpdatePosition) {
         // Long globals (`g++` / `g--`) use a memory-direct
         // add/adc pair (or sub/sbb for `--`). Acts on memory
         // without loading into registers. Fixture 249 (`g++`).
@@ -629,15 +629,25 @@ impl<'a> FunctionEmitter<'a> {
                     return;
                 }
             }
-            // Byte globals take an AL load-modify-store detour
-            // rather than memory-direct `inc byte ptr <g>` — matches
-            // BCC's consistent "byte arith goes through AL" pattern
-            // (also seen for `g += K`, fixture 683). Fixture 700
-            // (`++g` → `mov al, _g; inc al; mov _g, al`).
+            // Byte globals split on pre vs post:
+            //  - Pre (`++g`): AL load-modify-store — `mov al, _g;
+            //    inc al; mov _g, al`. BCC keeps the new value in AL
+            //    even when the expression is discarded. Fixture
+            //    700.
+            //  - Post (`g++`) when discarded: memory-direct
+            //    `inc byte ptr _g`. BCC notices the old value
+            //    isn't materialized. Fixture 702.
+            //
+            // (The post-not-discarded case lands at the
+            // expression-context update path, not here.)
             if gty.is_char_like() {
-                let _ = write!(self.out, "\tmov\tal,byte ptr DGROUP:_{name}\r\n");
-                let _ = write!(self.out, "\t{mnemonic}\tal\r\n");
-                let _ = write!(self.out, "\tmov\tbyte ptr DGROUP:_{name},al\r\n");
+                if matches!(position, UpdatePosition::Pre) {
+                    let _ = write!(self.out, "\tmov\tal,byte ptr DGROUP:_{name}\r\n");
+                    let _ = write!(self.out, "\t{mnemonic}\tal\r\n");
+                    let _ = write!(self.out, "\tmov\tbyte ptr DGROUP:_{name},al\r\n");
+                } else {
+                    let _ = write!(self.out, "\t{mnemonic}\tbyte ptr DGROUP:_{name}\r\n");
+                }
                 return;
             }
             let _ = write!(self.out, "\t{mnemonic}\tword ptr DGROUP:_{name}\r\n");

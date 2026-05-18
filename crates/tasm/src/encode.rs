@@ -393,6 +393,7 @@ fn instr_size(instr: &Instr) -> usize {
         Instr::ShlGroupSymByteCl { .. }
         | Instr::SarGroupSymByteCl { .. }
         | Instr::ShrGroupSymByteCl { .. } => 4,
+        Instr::IncGroupSymByte { .. } | Instr::DecGroupSymByte { .. } => 4,
         Instr::CmpByteBpRelImm8 { .. } => 4,
         Instr::CmpByteSiPtrImm8 { .. } => 3,
         Instr::AndGroupSymImm16 { .. }
@@ -1630,6 +1631,15 @@ fn emit_instr(
         Instr::ShrGroupSymByteCl { group, symbol, offset } => {
             // `shr byte ptr <group>:<sym>[+N],cl` → D2 2E lo hi.
             emit_group_sym_lea(&[0xD2, 0x2E], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
+        }
+        Instr::IncGroupSymByte { group, symbol, offset } => {
+            // `inc byte ptr <group>:<sym>[+N]` → FE 06 lo hi.
+            // Grp4 /0 r/m8 with mod=00 r/m=110. Fixture 702.
+            emit_group_sym_lea(&[0xFE, 0x06], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
+        }
+        Instr::DecGroupSymByte { group, symbol, offset } => {
+            // `dec byte ptr <group>:<sym>[+N]` → FE 0E lo hi.
+            emit_group_sym_lea(&[0xFE, 0x0E], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
         }
         Instr::DecGroupSym { group, symbol, offset } => {
             // `dec word ptr <group>:<sym>[+N]` → FF 0E lo hi.
