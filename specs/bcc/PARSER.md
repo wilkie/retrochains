@@ -1959,6 +1959,43 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `long` compound with `int` RHS (signed widening)
+
+Fixtures `755` (`g += x`), `756` (`g -= x`), `757` (`g &= x`)
+— mixed-width compound where the LHS is a long global and
+the RHS is an int.
+
+BCC widens the int via `cwd` into DX:AX before applying the
+memory-direct compound. For `+=`/`-=`, DX carries the sign-
+extension into the high-word add/sub with `adc`/`sbb`. For
+bitwise (`&=`, `|=`, `^=`) it applies the **same** op to
+both halves with DX — confirming BCC promotes the int to a
+signed long even before bitwise ops:
+
+```
+mov ax, word ptr [bp-N]    ; load int RHS
+cwd                          ; sign-extend AX → DX:AX
+add word ptr DGROUP:_g, ax   ; (or sub / and / or / xor)
+adc word ptr DGROUP:_g+2, dx ; (or sbb / and / or / xor)
+```
+
+Added a new arm in `emit_compound_assign` gated on
+`long LHS + Type::Int RHS + Add|Sub|Bit*`, using a new
+`rhs_type_for_long_widening` helper for the RHS type
+lookup. Added two tasm IR variants:
+- `AdcGroupSymDx` (`11 16 lo hi`) — high-half carry partner
+  for `long += int`.
+- `SbbGroupSymDx` (`19 16 lo hi`) — sibling for `long -= int`.
+
+The bitwise siblings (`and`/`or`/`xor word ptr <g>+2, dx`)
+already had their IR variants from batch 139 (the long-long
+arm uses AX for the high half; here we use DX, but the
+`AndGroupSymReg16`/etc. variants accept any reg).
+
+Unsigned-int RHS (`UInt`) is not yet probed; would use
+`xor dx, dx` / `mov dx, 0` instead of `cwd` for the
+widening step.
+
 ## `long` compound on deref, struct field, and array element
 
 Fixtures `752` (`*p += h` long pointer + long-var RHS),
