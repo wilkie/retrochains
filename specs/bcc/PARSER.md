@@ -1959,6 +1959,28 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `long` stack-LHS compound `+=` / `*=` with byte var
+
+Fixtures `818` (`a += char c`), `819` (`a += uchar c`),
+`820` (`a *= char c`) — three free passes confirming the
+long-LHS byte-RHS arms (fixtures 783, 784, 785) work
+identically with a stack-resident long.
+
+`long_halves_of` resolves to `[bp+off]` and `[bp+off+2]`
+for a stack long, so:
+
+- `818` / `819` — Add arm (signed/unsigned widening)
+  emits `cbw / mov ah, 0; cwd / -; add word ptr [bp+lo],
+  ax; adc word ptr [bp+hi], dx/0`. The widening logic
+  and op selection are unchanged from the global-LHS
+  version.
+- `820` — Mul arm (signed `cbw + cwd + push/pop dance`)
+  also writes back via `mov word ptr [bp+lo], ax; mov
+  word ptr [bp+hi], dx`.
+
+The "widening shape from RHS, addr form from LHS"
+split confirmed again across stack/global LHS.
+
 ## `int` global compound `*=` / `/=` with byte-global RHS
 
 Fixtures `815` (`g *= char c`), `816` (`g /= char c`),
