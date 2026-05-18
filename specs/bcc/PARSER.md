@@ -1905,6 +1905,25 @@ use the DX path.
   comparison path materializes both operands and emits the
   standard `cmp; jle <skip>` form.
 
+## `x /= y` / `x %= y` — `idiv <mem>` directly
+
+Fixtures `653` (`x /= y`) and `654` (`x %= y`) — mirror the
+batch-111 `imul <mem>` fix for division. BCC's compound divide
+on a register local with a memory-resident RHS emits `idiv
+word ptr [bp-N]` directly rather than materializing in BX
+first. Updated the `BinOp::Div | BinOp::Mod` arm of
+`emit_compound_assign_reg`: when the resolved source is
+`Local`/`Global`/`GlobalOffset`, emit `idiv <mem>` directly;
+constants and registers still use the BX path.
+
+## `and si, word ptr [bp+N]` — generic AND reg-vs-stack
+
+Fixture `655` (`x &= y` with x in SI, y at `[bp-2]`) — tasm
+had `AndAxBpRel` and `AndDxBpRel` but no SI/etc. variant.
+Added the generic `AndReg16BpRel` IR variant (`23 (mod=01
+reg=<r> r/m=110) dd`) — sibling of the batch-110
+`CmpReg16BpRel`. AX keeps its dedicated variant.
+
 ### Deferred from batch 88
 
 - Probed `int a[5]; return sizeof(a);` (`582` first draft).
