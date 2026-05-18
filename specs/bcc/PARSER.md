@@ -1472,6 +1472,36 @@ changes:
   already loads the char with sign extension via `cbw` and
   stores the widened word.
 
+## Free passes (batch 96)
+
+Three more probes hit existing paths byte-exactly with no code
+changes:
+
+- `605` — `int x; int y; x = 12; y = 10; return x | y;` (int
+  OR between two locals): the bitwise-op path already emits
+  `mov ax, <left>; or ax, <right>` for int operands.
+- `606` — `void f(void) { return; } int main(void) { f(); return
+  0; }` (void function with bare return): the void-return path
+  already drops the value-load and just emits the exit jump.
+- `607` — `int f(char c) { return c + 1; } int main(void) {
+  return f(5); }` (int return from `char + 1` arithmetic): the
+  char-param load through DL/CBW widens to AX, then `inc ax`
+  computes the int return value.
+
+### Deferred from batch 96
+
+Probed `char f(int x) { return x + 1; }` (a char-returning
+function whose body computes `x + 1` from an int param). BCC
+truncates the int param at the load — `mov al, byte ptr [bp+4];
+inc al` — instead of `mov ax, [bp+4]; inc ax`. Both produce
+the same low byte, but BCC's shape is 1 byte longer (`inc al`
+is 2 bytes vs `inc ax`'s 1) and matches the function's char
+return type. Implementing this would require routing char-
+returning function bodies through AL where the source is a
+narrow expression. Probe replaced with the `int f(char c)`
+direction (mirror image) — that one works through existing
+char-param widening.
+
 ### Deferred from batch 88
 
 - Probed `int a[5]; return sizeof(a);` (`582` first draft).
