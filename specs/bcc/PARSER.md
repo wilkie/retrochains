@@ -1689,6 +1689,30 @@ is a non-char ident on a register-resident local, emit `mov
   the CL form (since K=4 ≥ 4 per the new unroll cutoff above)
   — `mov cl, 4; shl ax, cl`.
 
+## `x - K` — BCC normalizes as `add ax, -K`
+
+Fixture `630` (`int x; x = 10; return x - 5;`) — BCC
+canonicalizes int subtract-const as the AX-accumulator
+`add ax, imm16` form (`05 FB FF` for `x - 5`) rather than
+the `sub ax, imm8sx` form (`83 E8 05`). Both are 3 bytes
+when K fits in i8, but `add ax, -K` keeps using 3 bytes for
+the full 16-bit range while `sub ax, K` would grow to 4
+bytes via `81 E8 lo hi` once K exceeds 127. Mirror of the
+batch-102 `c -= K` → `add al, -K` fix. Updated the `Sub` arm
+of `emit_op_with_source` to emit the negated-add form for
+immediate sources.
+
+## Free passes (batch 104)
+
+- `629` — `int x; x = 13; return x & 7;` (int AND with const
+  small enough to fit imm16): the `AndAxImm16` form added in
+  batch 97 already handles this (`25 07 00`).
+- `631` — `int a; int b; ... return (a + b) / 2;` (sum then
+  divide-by-const): the runtime add lands in AX; the const
+  divide goes through the batch-98 `mov bx, 2; cwd; idiv bx`
+  path. (Note: BCC does NOT use a `sar` peephole for divide
+  by power of 2 here — same shape as `/ 7`.)
+
 ### Deferred from batch 88
 
 - Probed `int a[5]; return sizeof(a);` (`582` first draft).
