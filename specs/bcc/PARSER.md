@@ -1959,6 +1959,29 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `char` global `>>=` / `%=` by variable, plus `++g`
+
+Fixtures `698` (signed `g >>= d`), `699` (signed `g %= d`),
+`700` (`++g`).
+
+- `698` — free pass off batch 126's `SarGroupSymByteCl`
+  (signed picks SAR for `>>=`).
+- `699` — free pass off batch 126's char-global `Div | Mod`
+  arm: signed mod stores AH back via `MovGroupSymReg8`
+  (added in batch 125).
+- `700` — exposed a codegen mismatch for char-global
+  `++` / `--`. Our codegen emitted memory-direct
+  `inc byte ptr _g` (analogous to the int-global
+  `inc word ptr _g` path of fixture 512), but BCC actually
+  takes an AL detour for byte globals:
+  `mov al, _g; inc al; mov _g, al`. That's consistent with
+  the broader BCC pattern — byte arith on globals always
+  routes through AL, never memory-direct — even though both
+  forms are valid 8086 encodings. Fix: in
+  `emit_update_in_place`, branch on `gty.is_char_like()`
+  and emit the AL load-modify-store; the existing int-
+  global path still emits the memory-direct form.
+
 ## `char` global `*=` / `/=` / `<<=` with variable RHS
 
 Fixtures `695` (`g *= d`), `696` (`g /= d`), `697` (`g <<= d`).
