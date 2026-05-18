@@ -1050,6 +1050,11 @@ fn parse_and(operands: &str, line_no: usize) -> AsmResult<Instr> {
                 offset,
             });
         }
+        // `and ax, imm16` — AX-specific accumulator form (fixture
+        // 609's `c & 4` after cbw widening: `25 04 00`).
+        if let Some(imm) = parse_imm16(rhs) {
+            return Ok(Instr::AndAxImm16 { imm: imm as u16 });
+        }
     }
     // `and al,imm8` — AL-specific 2-byte encoding.
     if lhs == "al" {

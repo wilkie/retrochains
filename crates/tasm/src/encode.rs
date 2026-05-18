@@ -321,7 +321,9 @@ fn instr_size(instr: &Instr) -> usize {
         | Instr::SubReg16Imm8Sx { .. } => 3,
         Instr::AddReg16Imm16 { .. } | Instr::SubReg16Imm16 { .. } => 4,
         Instr::AddGroupSymImm16 { .. } => 6,
-        Instr::AdcAxImm16 { .. } | Instr::SbbAxImm16 { .. } => 3,
+        Instr::AdcAxImm16 { .. }
+        | Instr::SbbAxImm16 { .. }
+        | Instr::AndAxImm16 { .. } => 3,
         Instr::MovAlFromSiPtr | Instr::MovAlFromBxPtr => 2,
         Instr::ImulReg16 { .. } | Instr::IdivReg16 { .. } => 2,
         Instr::AddAxGroupSym { .. }
@@ -1107,6 +1109,12 @@ fn emit_instr(
             // `sbb ax, imm16` → 1D lo hi. Companion to AdcAxImm16
             // for the high half of long unary minus (fixture 226).
             out.push(0x1D);
+            out.extend_from_slice(&imm.to_le_bytes());
+        }
+        Instr::AndAxImm16 { imm } => {
+            // `and ax, imm16` → 25 lo hi. AX-specific accumulator
+            // form (fixture 609's `c & 4` after cbw widening).
+            out.push(0x25);
             out.extend_from_slice(&imm.to_le_bytes());
         }
         Instr::MovReg16WordGroupSym { reg, group, symbol, offset } => {

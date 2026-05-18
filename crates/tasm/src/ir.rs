@@ -490,6 +490,10 @@ pub enum Instr {
     /// short form. Used by long unary minus (fixture 226) to combine
     /// the carry from the low-half `neg` into the high half.
     SbbAxImm16 { imm: u16 },
+    /// `and ax, imm16` — `25 lo hi`. AX-specific bitwise-AND short
+    /// form. Used by `c & K` after the char load + cbw widen (fixture
+    /// 609 — `25 04 00`).
+    AndAxImm16 { imm: u16 },
     /// `mov <reg16>,word ptr <group>:<symbol>[+<offset>]` for non-AX
     /// destinations. Uses MOV r16,r/m16 with disp16-only addressing
     /// (`8B (mod=00 reg=<r> rm=110) lo hi`). Same FIXUPP shape as
