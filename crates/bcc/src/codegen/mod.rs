@@ -2987,6 +2987,30 @@ impl<'a> FunctionEmitter<'a> {
             let _ = write!(self.out, "\tmov\tal,byte ptr DGROUP:_{name}\r\n");
             return;
         }
+        // Char-returning function with a bare-ident char-typed
+        // return: load the char into AL without widening. The return
+        // ABI for char-returning fns is "AL holds the value, AH is
+        // garbage". `cbw` is the caller's job after the call (since
+        // the caller may want the widened int). Fixture 643
+        // (`char f(char c) { return c; }`).
+        if self.function.ret_ty.is_char_like()
+            && let ExprKind::Ident(name) = &e.kind
+            && self.ident_is_char(name)
+        {
+            match self.locals.location_of(name) {
+                LocalLocation::Stack(off) => {
+                    let _ = write!(
+                        self.out,
+                        "\tmov\tal,byte ptr {}\r\n",
+                        bp_addr(off),
+                    );
+                }
+                LocalLocation::Reg(reg) => {
+                    let _ = write!(self.out, "\tmov\tal,{}\r\n", reg.name());
+                }
+            }
+            return;
+        }
         self.emit_expr_to_ax(e);
     }
 
