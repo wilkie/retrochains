@@ -1959,6 +1959,31 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `int` global compound `*=` / `/=` / `<<=` with global RHS
+
+Fixtures `809` (`g *= h`), `810` (`g /= h`), `811` (`g <<= h`)
+— int compound with another int **global** as the RHS.
+
+- `809` — `imul word ptr DGROUP:_h` directly against
+  memory. New IR variant `ImulGroupSym` (F7 2E lo hi:
+  Grp3 /5 with mod=00 r/m=110). The codegen arm fires
+  on `int-global LHS + int-global RHS + Mul|Div|Mod`,
+  parallel to fixture 802's local-RHS path but using
+  the new DGROUP-form encoder.
+- `810` — `/= h`: same arm with `cwd; idiv word ptr
+  DGROUP:_h`. New IR variant `IdivGroupSym` (F7 3E lo
+  hi). The push/cwd/pop dance the byte-RHS path needs
+  is avoided here — neither AX nor DX has competing
+  duties since `idiv` consumes both for the dividend
+  and the global is read directly from memory.
+- `811` — `<<= h`: extends batch 162's `Shl|Sar|Shr
+  GroupSymCl` arm to read CL from a global instead of
+  `[bp+N]`. The `mov cl, byte ptr DGROUP:_h` form was
+  already supported by the existing
+  `parse_byte_group_symbol` path in the parser; only
+  the codegen arm needed to drop its `!globals.contains
+  (b)` restriction.
+
 ## `int` / `uint` global compound shift siblings
 
 Fixtures `806` (`int g <<= char c`), `807` (`int g >>= int x`),
