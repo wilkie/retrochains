@@ -1959,6 +1959,31 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `char` struct local, field-var-RHS, and field `++`
+
+Fixtures `707` (`s.c += 5` on stack-resident struct local),
+`708` (`g.c += d` with variable RHS), `709` (`++g.c`).
+
+- `707` — free pass. Char struct field on a stack-local
+  struct works the same as on a global: the AL load-modify-
+  store template substitutes `bp_addr(struct_base +
+  field_off)` for `<dest>`. BCC emitted `mov al, byte ptr
+  [bp-2]; add al, 5; mov byte ptr [bp-2], al` and our
+  codegen produced the same.
+- `708` — variable-RHS char-field compound: BCC emits
+  `mov al, byte ptr <src>; add byte ptr <dest>, al` —
+  memory-direct add against the field, with the RHS pre-
+  loaded into AL. Same shape as char-global var (batch
+  121). Added an arm to `emit_member_compound_assign` gated
+  on `store_byte && op ∈ {Add|Sub|BitAnd|BitOr|BitXor} &&
+  try_const_eval(value).is_none()`.
+- `709` — `++g.c` parses as `g.c += 1` (the `Update` AST
+  node only targets bare identifiers). The AL detour path
+  fired but emitted `add al, 1` while BCC emits `inc al`.
+  Same byte count, different opcode. Added a K=1 peephole
+  in the byte-field arith arm: `add al, 1` → `inc al`,
+  `add al, 0xFF` (for `-= 1`) → `dec al`.
+
 ## `char` struct field + global-array element compound
 
 Fixtures `704` (`g.c += 5`, struct global, char field at
