@@ -1959,6 +1959,29 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `ulong` `>>=` uint and stack-LHS `ulong` `+=` / `*=` uint
+
+Fixtures `776` (`g >>= x`), `777` (`a += x` stack LHS),
+`778` (`a *= x` stack LHS) — three free passes confirming
+the unsigned-widening arms generalize:
+
+- `776` — same shift-by-int arm (fixture 760) that accepts
+  both `Type::Int` and `Type::UInt`; LHS signedness picks
+  `N_LXURSH@` over `N_LXRSH@`.
+- `777` — batch 150's `Type::UInt` Add/Sub/Bit* arm uses
+  `long_halves_of`, which already resolves to `[bp+off]`
+  addresses for a stack-resident long LHS. The memory-
+  direct shape (`add word ptr [bp-N], ax; adc word ptr
+  [bp-N+2], 0`) is location-agnostic.
+- `778` — batch 151's `*= uint` arm: `bx`/`cx` load and
+  call sequence is identical whether the LHS halves live
+  in DGROUP or on the stack, since the path materializes
+  DX:AX from the LHS regardless.
+
+No code changes needed — these confirm that the unsigned
+widening arms didn't accidentally bake in a global-only
+assumption.
+
 ## `ulong` compound `/=` / `%=` / `<<=` with `uint` RHS
 
 Fixtures `773` (`g /= x`), `774` (`g %= x`), `775` (`g <<= x`).
