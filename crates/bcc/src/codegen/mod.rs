@@ -6682,11 +6682,15 @@ impl<'a> FunctionEmitter<'a> {
                     // is signedness-agnostic at the instruction level.
                     let unsigned = self.expr_is_unsigned(left);
                     // RHS-clobbers-AX path: when the right operand is a
-                    // call, BCC evaluates RHS first (the call clobbers
-                    // AX anyway), pushes the result, then evaluates LHS
-                    // into AX and pops the saved result into DX before
-                    // applying the op. Fixture 593 (`n + sum(n-1)`).
-                    if matches!(right.kind, ExprKind::Call { .. }) {
+                    // call, or a char ident (whose load + cbw widen
+                    // clobbers AX), BCC evaluates RHS first, pushes
+                    // the result, then evaluates LHS into AX and pops
+                    // the saved result into DX before applying the
+                    // op. Fixture 593 (`n + sum(n-1)`), fixture 616
+                    // (`a + b` with b a char param).
+                    let rhs_clobbers_ax = matches!(right.kind, ExprKind::Call { .. })
+                        || matches!(&right.kind, ExprKind::Ident(n) if self.ident_is_char(n));
+                    if rhs_clobbers_ax {
                         self.emit_expr_to_ax(right);
                         self.out.extend_from_slice(b"\tpush\tax\r\n");
                         self.emit_expr_to_ax(left);
@@ -7327,9 +7331,10 @@ fn emit_op_with_source(out: &mut Vec<u8>, op: BinOp, src: &OperandSource, unsign
             if let OperandSource::Immediate(v) = src {
                 // `ax *= K` with K a small power of two unrolls into
                 // `shl ax, 1` repeated. Fixture 592 (`return x * 2`
-                // → `shl ax, 1`). Non-power-of-two immediates aren't
-                // yet exercised by a fixture; BCC's pattern in that
-                // case is `mov dx, K; imul dx`.
+                // → `shl ax, 1`). For non-power-of-2 immediates BCC
+                // materializes K in DX and uses the single-operand
+                // `imul dx`. Fixture 615 (`return x * 3` → `mov dx,
+                // 3; imul dx`).
                 let k = *v;
                 if k > 0 && (k & (k - 1)) == 0 && k <= 256 {
                     let shifts = k.trailing_zeros();
@@ -7337,7 +7342,9 @@ fn emit_op_with_source(out: &mut Vec<u8>, op: BinOp, src: &OperandSource, unsign
                         out.extend_from_slice(b"\tshl\tax,1\r\n");
                     }
                 } else {
-                    panic!("imul with non-power-of-2 immediate not yet supported (no fixture)");
+                    let v16 = k & 0xFFFF;
+                    let _ = write!(out, "\tmov\tdx,{v16}\r\n");
+                    out.extend_from_slice(b"\timul\tdx\r\n");
                 }
             } else {
                 let _ = write!(out, "\timul\t{}\r\n", src.word());
