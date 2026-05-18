@@ -441,7 +441,10 @@ fn instr_size(instr: &Instr) -> usize {
         | Instr::SubSiPtrAx
         | Instr::AndSiPtrAx
         | Instr::OrSiPtrAx
-        | Instr::XorSiPtrAx => 2,
+        | Instr::XorSiPtrAx
+        | Instr::ShlSiPtrCl
+        | Instr::SarSiPtrCl
+        | Instr::ShrSiPtrCl => 2,
         Instr::AdcSiDispAx { .. } => 3,
         Instr::AddBpRelImm8 { .. }
         | Instr::AdcBpRelImm8 { .. }
@@ -1949,6 +1952,21 @@ fn emit_instr(
             // `xor word ptr [si],ax` → 31 04.
             out.push(0x31);
             out.push(0x04);
+        }
+        Instr::ShlSiPtrCl => {
+            // `shl word ptr [si],cl` → D3 24. Grp2 /4(SHL) r/m=100. Fixture 840.
+            out.push(0xD3);
+            out.push(0x24);
+        }
+        Instr::SarSiPtrCl => {
+            // `sar word ptr [si],cl` → D3 3C. Grp2 /7(SAR) r/m=100.
+            out.push(0xD3);
+            out.push(0x3C);
+        }
+        Instr::ShrSiPtrCl => {
+            // `shr word ptr [si],cl` → D3 2C. Grp2 /5(SHR) r/m=100.
+            out.push(0xD3);
+            out.push(0x2C);
         }
         Instr::AdcSiDispAx { disp } => {
             // `adc word ptr [si+disp8],ax` → 11 44 dd. ModR/M

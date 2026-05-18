@@ -528,6 +528,9 @@ fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
             if let Some(reg) = Reg8::parse(r) {
                 return Ok(Instr::ShlReg8Cl { reg });
             }
+            if r == "word ptr [si]" {
+                return Ok(Instr::ShlSiPtrCl);
+            }
             if let Some((group, symbol)) = parse_byte_group_symbol(r) {
                 let (sym, offset) = split_sym_offset(symbol);
                 return Ok(Instr::ShlGroupSymByteCl {
@@ -553,6 +556,9 @@ fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
             if let Some(reg) = Reg8::parse(r) {
                 return Ok(Instr::SarReg8Cl { reg });
             }
+            if r == "word ptr [si]" {
+                return Ok(Instr::SarSiPtrCl);
+            }
             if let Some((group, symbol)) = parse_byte_group_symbol(r) {
                 let (sym, offset) = split_sym_offset(symbol);
                 return Ok(Instr::SarGroupSymByteCl {
@@ -577,6 +583,9 @@ fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
             let r = rest.strip_suffix(",cl").unwrap_or(rest);
             if let Some(reg) = Reg8::parse(r) {
                 return Ok(Instr::ShrReg8Cl { reg });
+            }
+            if r == "word ptr [si]" {
+                return Ok(Instr::ShrSiPtrCl);
             }
             if let Some((group, symbol)) = parse_byte_group_symbol(r) {
                 let (sym, offset) = split_sym_offset(symbol);

@@ -7036,6 +7036,61 @@ impl<'a> FunctionEmitter<'a> {
             let _ = write!(self.out, "\t{mnem}\tword ptr [{r}],ax\r\n");
             return;
         }
+        // Int-pointee `*p *= y` / `/= y` / `%= y` with non-const
+        // local RHS: `mov ax, word ptr [r]; imul/idiv word ptr
+        // [bp+N]; mov word ptr [r], ax|dx`. Fixture 839.
+        if depth == 0
+            && !is_global
+            && let ty = self.locals.type_of(base_name).clone()
+            && let Some(pointee) = ty.pointee()
+            && matches!(pointee, Type::Int | Type::UInt)
+            && let LocalLocation::Reg(reg) = self.locals.location_of(base_name)
+            && try_const_eval(value).is_none()
+            && matches!(op, BinOp::Mul | BinOp::Div | BinOp::Mod)
+            && let ExprKind::Ident(b) = &value.kind
+            && !self.globals.contains(b)
+        {
+            let LocalLocation::Stack(off) = self.locals.location_of(b) else {
+                panic!("non-stack RHS in deref compound Mul/Div not yet supported (no fixture)");
+            };
+            let r = reg.name();
+            let _ = write!(self.out, "\tmov\tax,word ptr [{r}]\r\n");
+            if matches!(op, BinOp::Mul) {
+                let _ = write!(self.out, "\timul\tword ptr {}\r\n", bp_addr(off));
+            } else {
+                self.out.extend_from_slice(b"\tcwd\t\r\n");
+                let _ = write!(self.out, "\tidiv\tword ptr {}\r\n", bp_addr(off));
+            }
+            let result_reg = if matches!(op, BinOp::Mul | BinOp::Div) { "ax" } else { "dx" };
+            let _ = write!(self.out, "\tmov\tword ptr [{r}],{result_reg}\r\n");
+            return;
+        }
+        // Int-pointee `*p <<= y` / `>>= y` with non-const RHS:
+        // `mov cl, byte ptr <rhs>; shl|sar|shr word ptr [r], cl`.
+        // Needs new IR variants for `<sh> word ptr [si], cl`.
+        // Fixture 840.
+        if depth == 0
+            && !is_global
+            && let ty = self.locals.type_of(base_name).clone()
+            && let Some(pointee) = ty.pointee()
+            && matches!(pointee, Type::Int | Type::UInt)
+            && let LocalLocation::Reg(reg) = self.locals.location_of(base_name)
+            && try_const_eval(value).is_none()
+            && matches!(op, BinOp::Shl | BinOp::Shr)
+            && let Some(rhs_byte) = self.rhs_byte_addr(&value.kind)
+        {
+            let r = reg.name();
+            let unsigned = pointee.is_unsigned();
+            let mnem = match (op, unsigned) {
+                (BinOp::Shl, _) => "shl",
+                (BinOp::Shr, false) => "sar",
+                (BinOp::Shr, true) => "shr",
+                _ => unreachable!(),
+            };
+            let _ = write!(self.out, "\tmov\tcl,{rhs_byte}\r\n");
+            let _ = write!(self.out, "\t{mnem}\tword ptr [{r}],cl\r\n");
+            return;
+        }
         let Some(v) = try_const_eval(value) else {
             panic!("non-constant rhs in `*p <op>= v` not yet supported (no fixture)");
         };

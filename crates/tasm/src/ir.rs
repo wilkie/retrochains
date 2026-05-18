@@ -1172,6 +1172,14 @@ pub enum Instr {
     OrSiPtrAx,
     /// `xor word ptr [si],ax` — `31 04`. Sibling for `*p ^= y`.
     XorSiPtrAx,
+    /// `shl word ptr [si],cl` — `D3 24`. Grp2 /4(SHL) r/m16 with
+    /// mod=00 r/m=100=SI. Variable-count shift through SI for
+    /// `*p <<= y`. Fixture 840.
+    ShlSiPtrCl,
+    /// `sar word ptr [si],cl` — `D3 3C`. Signed sibling.
+    SarSiPtrCl,
+    /// `shr word ptr [si],cl` — `D3 2C`. Unsigned sibling.
+    ShrSiPtrCl,
     /// `adc word ptr [si+disp8],ax` — `11 44 dd`. ADC r/m16,r16
     /// form; ModR/M `44 dd` = mod=01 reg=AX(000) r/m=100=SI with
     /// disp8. High-half carry partner to `AddSiPtrDx` for the
