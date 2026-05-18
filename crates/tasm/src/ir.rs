@@ -1160,6 +1160,18 @@ pub enum Instr {
     /// add for `*p += y` (variable RHS through a register-resident
     /// long pointer). Fixture 398.
     AddSiPtrDx,
+    /// `add word ptr [si],ax` — `01 04`. ADD r/m16,r16 with
+    /// reg=AX(000) r/m=100=SI. Used by `int *p; *p += y;` where
+    /// the int RHS is materialized in AX. Fixture 838.
+    AddSiPtrAx,
+    /// `sub word ptr [si],ax` — `29 04`. Sibling for `*p -= y`.
+    SubSiPtrAx,
+    /// `and word ptr [si],ax` — `21 04`. Sibling for `*p &= y`.
+    AndSiPtrAx,
+    /// `or word ptr [si],ax` — `09 04`. Sibling for `*p |= y`.
+    OrSiPtrAx,
+    /// `xor word ptr [si],ax` — `31 04`. Sibling for `*p ^= y`.
+    XorSiPtrAx,
     /// `adc word ptr [si+disp8],ax` — `11 44 dd`. ADC r/m16,r16
     /// form; ModR/M `44 dd` = mod=01 reg=AX(000) r/m=100=SI with
     /// disp8. High-half carry partner to `AddSiPtrDx` for the

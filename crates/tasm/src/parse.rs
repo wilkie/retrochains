@@ -1253,6 +1253,9 @@ fn parse_sub(operands: &str, line_no: usize) -> AsmResult<Instr> {
         if let Some(imm) = parse_imm8_signed(rhs) {
             return Ok(Instr::SubSiPtrImm8 { imm });
         }
+        if rhs == "ax" {
+            return Ok(Instr::SubSiPtrAx);
+        }
     }
     // Otherwise: try the AX/mem form.
     parse_alu_ax_mem(operands, line_no, "sub", |o| Instr::SubAxBpRel { offset: o })
@@ -1361,6 +1364,10 @@ fn parse_and(operands: &str, line_no: usize) -> AsmResult<Instr> {
         if let Some(imm) = parse_imm8(rhs) {
             return Ok(Instr::AndSiPtrByteImm8 { imm: imm as u8 });
         }
+    }
+    // `and word ptr [si], ax` — int `*p &= y` through SI.
+    if lhs == "word ptr [si]" && rhs == "ax" {
+        return Ok(Instr::AndSiPtrAx);
     }
     // `and byte ptr [bp+N], imm8` — char-local-array bitwise
     // compound (fixture 720).
@@ -1752,6 +1759,11 @@ fn parse_add(operands: &str, line_no: usize) -> AsmResult<Instr> {
         // a register-resident long pointer in SI (fixture 398).
         if rhs == "dx" {
             return Ok(Instr::AddSiPtrDx);
+        }
+        // `add word ptr [si], ax` — int `*p += y` through SI
+        // (fixture 838).
+        if rhs == "ax" {
+            return Ok(Instr::AddSiPtrAx);
         }
     }
     // `add word ptr [bx],<imm8>` — same shape via BX. Fixture 197
@@ -2289,6 +2301,10 @@ fn parse_or(operands: &str, line_no: usize) -> AsmResult<Instr> {
             return Ok(Instr::OrSiPtrByteImm8 { imm: imm as u8 });
         }
     }
+    // `or word ptr [si], ax` — int `*p |= y` through SI.
+    if lhs == "word ptr [si]" && rhs == "ax" {
+        return Ok(Instr::OrSiPtrAx);
+    }
     // `or byte ptr [bp+N], imm8` — char-local-array `|=`.
     if let Some(offset) = parse_byte_bp_relative(lhs) {
         if let Some(imm) = parse_imm8(rhs) {
@@ -2433,6 +2449,10 @@ fn parse_xor(operands: &str, line_no: usize) -> AsmResult<Instr> {
         if let Some(imm) = parse_imm8(rhs) {
             return Ok(Instr::XorSiPtrByteImm8 { imm: imm as u8 });
         }
+    }
+    // `xor word ptr [si], ax` — int `*p ^= y` through SI.
+    if lhs == "word ptr [si]" && rhs == "ax" {
+        return Ok(Instr::XorSiPtrAx);
     }
     // `xor byte ptr [bp+N], imm8` — char-local-array `^=`.
     if let Some(offset) = parse_byte_bp_relative(lhs) {

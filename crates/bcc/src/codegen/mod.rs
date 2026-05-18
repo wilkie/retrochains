@@ -5924,6 +5924,51 @@ impl<'a> FunctionEmitter<'a> {
                 let _ = write!(self.out, "\t{mnem}\tword ptr {dest},ax\r\n");
                 return;
             }
+            // Int-element compound `*=` / `/=` / `%=` with
+            // non-constant local int RHS — `mov ax, <dest>;
+            // imul/idiv word ptr [bp+N]; mov <dest>, ax|dx`.
+            // Mirrors fixture 802. Fixture 836 (`a[1] *= y`).
+            if !store_byte
+                && matches!(op, BinOp::Mul | BinOp::Div | BinOp::Mod)
+                && try_const_eval(value).is_none()
+                && matches!(leaf_ty, Type::Int | Type::UInt)
+                && let ExprKind::Ident(b) = &value.kind
+                && !self.globals.contains(b)
+            {
+                let LocalLocation::Stack(off) = self.locals.location_of(b) else {
+                    panic!("non-stack RHS in array compound Mul/Div not yet supported (no fixture)");
+                };
+                let _ = write!(self.out, "\tmov\tax,word ptr {dest}\r\n");
+                if matches!(op, BinOp::Mul) {
+                    let _ = write!(self.out, "\timul\tword ptr {}\r\n", bp_addr(off));
+                } else {
+                    self.out.extend_from_slice(b"\tcwd\t\r\n");
+                    let _ = write!(self.out, "\tidiv\tword ptr {}\r\n", bp_addr(off));
+                }
+                let result_reg = if matches!(op, BinOp::Mul | BinOp::Div) { "ax" } else { "dx" };
+                let _ = write!(self.out, "\tmov\tword ptr {dest},{result_reg}\r\n");
+                return;
+            }
+            // Int-element compound `<<=` / `>>=` with non-constant
+            // RHS — `mov cl, byte ptr <rhs>; shl/sar/shr word ptr
+            // <dest>, cl`. Fixture 837 (`a[1] <<= y`).
+            if !store_byte
+                && matches!(op, BinOp::Shl | BinOp::Shr)
+                && try_const_eval(value).is_none()
+                && matches!(leaf_ty, Type::Int | Type::UInt)
+                && let Some(rhs_byte) = self.rhs_byte_addr(&value.kind)
+            {
+                let unsigned = leaf_ty.is_unsigned();
+                let mnem = match (op, unsigned) {
+                    (BinOp::Shl, _) => "shl",
+                    (BinOp::Shr, false) => "sar",
+                    (BinOp::Shr, true) => "shr",
+                    _ => unreachable!(),
+                };
+                let _ = write!(self.out, "\tmov\tcl,{rhs_byte}\r\n");
+                let _ = write!(self.out, "\t{mnem}\tword ptr {dest},cl\r\n");
+                return;
+            }
             let Some(v) = try_const_eval(value) else {
                 panic!("non-constant rhs in global-array compound assign not yet supported (no fixture)");
             };
@@ -6959,6 +7004,36 @@ impl<'a> FunctionEmitter<'a> {
                 _ => unreachable!(),
             };
             let _ = write!(self.out, "\t{mnem}\tbyte ptr [{r}],al\r\n");
+            return;
+        }
+        // Int-pointee `*p <op>= y` (variable RHS): load RHS into
+        // AX (with widening if RHS is byte), then memory-direct
+        // `<op> word ptr [reg], ax`. Pointer must be register-
+        // resident. Fixture 838 (`*p += y` with p in SI, y at
+        // [bp-4]).
+        if depth == 0
+            && !is_global
+            && let ty = self.locals.type_of(base_name).clone()
+            && let Some(pointee) = ty.pointee()
+            && matches!(pointee, Type::Int | Type::UInt)
+            && let LocalLocation::Reg(reg) = self.locals.location_of(base_name)
+            && try_const_eval(value).is_none()
+            && matches!(
+                op,
+                BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor
+            )
+        {
+            let r = reg.name();
+            self.emit_expr_to_ax(value);
+            let mnem = match op {
+                BinOp::Add => "add",
+                BinOp::Sub => "sub",
+                BinOp::BitAnd => "and",
+                BinOp::BitOr => "or",
+                BinOp::BitXor => "xor",
+                _ => unreachable!(),
+            };
+            let _ = write!(self.out, "\t{mnem}\tword ptr [{r}],ax\r\n");
             return;
         }
         let Some(v) = try_const_eval(value) else {
