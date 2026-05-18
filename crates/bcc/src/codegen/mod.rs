@@ -4172,6 +4172,26 @@ impl<'a> FunctionEmitter<'a> {
             );
             return;
         }
+        // Int/uint global compound `*=` with an int/uint local
+        // RHS. No widening needed, so BCC uses `imul word ptr
+        // [bp+N]` directly (the F7 6E reg=5 form): `mov ax, _g;
+        // imul word ptr <rhs>; mov _g, ax`. Fixture 802.
+        if let Some(gty) = self.globals.type_of(name)
+            && matches!(gty, Type::Int | Type::UInt)
+            && matches!(op, BinOp::Mul)
+            && let Some(ty_rhs) = self.rhs_type_for_long_widening(&value.kind)
+            && matches!(ty_rhs, Type::Int | Type::UInt)
+            && let ExprKind::Ident(b) = &value.kind
+            && !self.globals.contains(b)
+        {
+            let LocalLocation::Stack(off) = self.locals.location_of(b) else {
+                unreachable!();
+            };
+            let _ = write!(self.out, "\tmov\tax,word ptr DGROUP:_{name}\r\n");
+            let _ = write!(self.out, "\timul\tword ptr {}\r\n", bp_addr(off));
+            let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name},ax\r\n");
+            return;
+        }
         // Int/uint global compound `*=` with a char/uchar local
         // RHS. `emit_expr_to_ax` materializes the widened byte in
         // AX, but AX is needed for the LHS load (which feeds
