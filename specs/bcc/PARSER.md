@@ -1959,6 +1959,44 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Pointer subscript — postdec, variable shift, mul
+
+Fixtures `881` (`int *p; p[1]--` — discarded postdec), `882`
+(`int *p; p[1] <<= y` — variable shift), `883` (`int *p; p[1]
+*= y` — multiplication compound).
+
+881 already works end-to-end: the `K=1` Add/Sub → `inc|dec`
+peephole + `DecBxDisp` IR variant landed in batch 187 covered
+the postdec form too (postinc and postdec both reduce to the
+same memory-direct `inc|dec word ptr [bx+K]` when the result
+is discarded).
+
+882 mirrors fixture 539's int-global variable shift, lifted to
+BX addressing: `mov bx, _p; mov cl, byte ptr [bp-N]; <shift>
+word ptr [bx+K*2], cl`. Three new IR variants `ShlBxDispCl`
+(`D3 67 dd`), `SarBxDispCl` (`D3 7F dd`), `ShrBxDispCl` (`D3
+6F dd`) — Group-2 variable-count shifts with mod=01 r/m=111=BX.
+Codegen routes through `rhs_byte_addr` for the CL load, picks
+SAR vs. SHR by signedness of the pointee.
+
+883 mirrors the int-global Mul/Div/Mod path (fixture 802),
+lifted to BX. BCC's shape:
+
+```
+mov bx, word ptr DGROUP:_p
+mov ax, word ptr [bx+K*2]   ; load LHS
+imul word ptr [bp-N]         ; multiply by stack RHS
+mov word ptr [bx+K*2], ax    ; store result
+```
+
+(For Div: same but `cwd; idiv`. For Mod: result reads from
+DX instead of AX.)
+
+Two new MOV IR variants needed: `MovAxBxDisp` (`8B 47 dd` —
+load through BX-disp8 into AX) and `MovBxDispAx` (`89 47 dd`
+— store sibling). The single-operand `imul word ptr [bp+N]`
+form already existed (`ImulBpRel`).
+
 ## Pointer subscript — shift, zero offset, postinc
 
 Fixtures `878` (`int *p; p[1] <<= 3` — shift compound), `879`
