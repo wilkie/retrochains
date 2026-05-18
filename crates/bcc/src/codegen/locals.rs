@@ -26,6 +26,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::ast::{Expr, ExprKind, Function, Stmt, StmtKind, Type};
+use crate::codegen::fold::try_const_eval;
 use crate::codegen::plan::{pick_switch_strategy, SwitchStrategy};
 
 /// Round `n` up to the next multiple of `alignment` (a small power of 2).
@@ -267,7 +268,15 @@ impl Locals {
         // never for chars whose address was taken. When the body
         // contains `idiv` (any `/` or `%` op), BCC drops DL from the
         // char pool (cwd before idiv clobbers DX). Fixture 640.
-        let function_has_div = body_has_div_or_mod(function.body.as_deref().unwrap_or(&[]));
+        let char_local_names: HashSet<&str> = declared
+            .iter()
+            .filter(|item| matches!(item.ty, Type::Char))
+            .map(|item| item.name.as_str())
+            .collect();
+        let function_has_div = body_has_div_or_mod(
+            function.body.as_deref().unwrap_or(&[]),
+            &char_local_names,
+        );
         if !function_makes_call {
             let char_pool_slice: &[Reg] = if function_has_div {
                 &Reg::CHAR_POOL_DIV
@@ -719,29 +728,37 @@ fn expr_has_call(e: &Expr) -> bool {
 /// register pool from `[DL, BL, CL]` to `[CL, BL]` so the char
 /// local doesn't land in DL (which `cwd` would clobber). Fixture
 /// 640.
-fn body_has_div_or_mod(body: &[Stmt]) -> bool {
-    body.iter().any(stmt_has_div_or_mod)
+fn body_has_div_or_mod(body: &[Stmt], char_locals: &HashSet<&str>) -> bool {
+    body.iter().any(|s| stmt_has_div_or_mod(s, char_locals))
 }
 
-fn stmt_has_div_or_mod(stmt: &Stmt) -> bool {
+fn stmt_has_div_or_mod(stmt: &Stmt, char_locals: &HashSet<&str>) -> bool {
     match &stmt.kind {
         StmtKind::Return(value) => value.as_ref().is_some_and(expr_has_div_or_mod),
         StmtKind::Declare { init, .. } => init.as_ref().is_some_and(expr_has_div_or_mod),
         StmtKind::Assign { value, .. } => expr_has_div_or_mod(value),
-        StmtKind::CompoundAssign { op, value, .. } => {
-            matches!(op, crate::ast::BinOp::Div | crate::ast::BinOp::Mod)
+        StmtKind::CompoundAssign { name, op, value } => {
+            // Char `/=` / `%=` with a non-constant RHS emits an 8-bit
+            // `idiv byte ptr <src>` (no `cwd`); DX stays intact, so it
+            // does not require dropping DL from CHAR_POOL. Fixture 673.
+            // Const-RHS char and any int compound still widen and emit
+            // `cwd` — those continue to count.
+            let target_is_8bit_form = matches!(op, crate::ast::BinOp::Div | crate::ast::BinOp::Mod)
+                && char_locals.contains(name.as_str())
+                && try_const_eval(value).is_none();
+            (matches!(op, crate::ast::BinOp::Div | crate::ast::BinOp::Mod) && !target_is_8bit_form)
                 || expr_has_div_or_mod(value)
         }
         StmtKind::If { cond, then_branch, else_branch } => {
             expr_has_div_or_mod(cond)
-                || body_has_div_or_mod(then_branch)
-                || else_branch.as_ref().is_some_and(|b| body_has_div_or_mod(b))
+                || body_has_div_or_mod(then_branch, char_locals)
+                || else_branch.as_ref().is_some_and(|b| body_has_div_or_mod(b, char_locals))
         }
         StmtKind::While { cond, body } => {
-            expr_has_div_or_mod(cond) || body_has_div_or_mod(body)
+            expr_has_div_or_mod(cond) || body_has_div_or_mod(body, char_locals)
         }
         StmtKind::DoWhile { body, cond } => {
-            body_has_div_or_mod(body) || expr_has_div_or_mod(cond)
+            body_has_div_or_mod(body, char_locals) || expr_has_div_or_mod(cond)
         }
         StmtKind::For { init, cond, step, body } => {
             init.as_ref()
@@ -750,11 +767,11 @@ fn stmt_has_div_or_mod(stmt: &Stmt) -> bool {
                 || step
                     .as_ref()
                     .is_some_and(|es| es.iter().any(expr_has_div_or_mod))
-                || body_has_div_or_mod(body)
+                || body_has_div_or_mod(body, char_locals)
         }
         StmtKind::Switch { scrutinee, cases } => {
             expr_has_div_or_mod(scrutinee)
-                || cases.iter().any(|c| body_has_div_or_mod(&c.body))
+                || cases.iter().any(|c| body_has_div_or_mod(&c.body, char_locals))
         }
         StmtKind::ArrayAssign { indices, value, .. }
         | StmtKind::MemberArrayAssign { indices, value, .. } => {

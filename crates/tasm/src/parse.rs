@@ -445,16 +445,23 @@ fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
             ))
         }
         "imul" => {
-            // Two forms: `imul word ptr [bp+N]` (BpRel) and
+            // Three forms: `imul word ptr [bp+N]` (BpRel),
+            // `imul byte ptr [bp+N]` (byte form, fixture 672), and
             // `imul <reg16>` (single reg operand, fixture 155).
             if let Some(reg) = Reg16::parse(rest) {
                 return Ok(Instr::ImulReg16 { reg });
+            }
+            if let Some(offset) = parse_byte_bp_relative(rest) {
+                return Ok(Instr::ImulByteBpRel { offset });
             }
             parse_single_op_word_ptr(rest, line.line_no, "imul", |o| Instr::ImulBpRel { offset: o })
         }
         "idiv" => {
             if let Some(reg) = Reg16::parse(rest) {
                 return Ok(Instr::IdivReg16 { reg });
+            }
+            if let Some(offset) = parse_byte_bp_relative(rest) {
+                return Ok(Instr::IdivByteBpRel { offset });
             }
             parse_single_op_word_ptr(rest, line.line_no, "idiv", |o| Instr::IdivBpRel { offset: o })
         }

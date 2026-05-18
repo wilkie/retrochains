@@ -3726,6 +3726,36 @@ impl<'a> FunctionEmitter<'a> {
             let _ = write!(self.out, "\tmov\t{},{result_reg}\r\n", reg.name());
             return;
         }
+        // Char compound `*=` with a non-constant byte RHS: load the
+        // dst into AL, then 8-bit `imul byte ptr <src>` (AX = AL *
+        // src), then store AL back to the byte register. Fixture
+        // 672 (`c *= d` → `mov al, dl; imul byte ptr [bp-1]; mov
+        // dl, al`).
+        if reg.is_byte() && matches!(op, BinOp::Mul) {
+            let src = self.resolve_operand_source(value);
+            let _ = write!(self.out, "\tmov\tal,{}\r\n", reg.name());
+            self.out.extend_from_slice(b"\timul\t");
+            self.out.extend_from_slice(src.byte().as_bytes());
+            self.out.extend_from_slice(b"\r\n");
+            let _ = write!(self.out, "\tmov\t{},al\r\n", reg.name());
+            return;
+        }
+        // Char compound `/=` / `%=` with a non-constant byte RHS:
+        // load dst into AL, sign-extend with cbw, 8-bit `idiv byte
+        // ptr <src>` (AL=quotient, AH=remainder), then store the
+        // quotient (or AH for `%=`) back. Fixture 673 (`c /= d` →
+        // `mov al, dl; cbw; idiv byte ptr [bp-1]; mov dl, al`).
+        if reg.is_byte() && matches!(op, BinOp::Div | BinOp::Mod) {
+            let src = self.resolve_operand_source(value);
+            let _ = write!(self.out, "\tmov\tal,{}\r\n", reg.name());
+            self.out.extend_from_slice(b"\tcbw\t\r\n");
+            self.out.extend_from_slice(b"\tidiv\t");
+            self.out.extend_from_slice(src.byte().as_bytes());
+            self.out.extend_from_slice(b"\r\n");
+            let result_reg = if matches!(op, BinOp::Div) { "al" } else { "ah" };
+            let _ = write!(self.out, "\tmov\t{},{result_reg}\r\n", reg.name());
+            return;
+        }
         // Char compound `<<=` / `>>=` with a non-constant RHS:
         // load the RHS byte into CL with `mov cl, byte ptr <src>`,
         // then shift the byte register by CL (`sar dl, cl` for

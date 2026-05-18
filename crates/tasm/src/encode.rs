@@ -297,6 +297,8 @@ fn instr_size(instr: &Instr) -> usize {
         | Instr::CmpReg16BpRel { .. }
         | Instr::ImulBpRel { .. }
         | Instr::IdivBpRel { .. }
+        | Instr::ImulByteBpRel { .. }
+        | Instr::IdivByteBpRel { .. }
         | Instr::MovReg8BpRel { .. }
         | Instr::MovBpRelReg8 { .. } => 3,
         Instr::MovReg8Imm8 { .. } => 2,
@@ -796,6 +798,22 @@ fn emit_instr(
             // `idiv word ptr [bp+disp8]` → F7 7E dd. ModR/M 7E = /7(IDIV).
             let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
             out.push(0xF7);
+            out.push(0x7E);
+            out.push(disp as u8);
+        }
+        Instr::ImulByteBpRel { offset } => {
+            // `imul byte ptr [bp+disp8]` → F6 6E dd. F6 = Grp3 r/m8
+            // escape; ModR/M 6E = mod=01 /5(IMUL) r/m=110. Fixture 672.
+            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
+            out.push(0xF6);
+            out.push(0x6E);
+            out.push(disp as u8);
+        }
+        Instr::IdivByteBpRel { offset } => {
+            // `idiv byte ptr [bp+disp8]` → F6 7E dd. ModR/M 7E = /7(IDIV).
+            // Fixture 673.
+            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
+            out.push(0xF6);
             out.push(0x7E);
             out.push(disp as u8);
         }

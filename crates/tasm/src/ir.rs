@@ -348,6 +348,17 @@ pub enum Instr {
     /// signed divide of DX:AX by src; quotient in AX, remainder in
     /// DX. Always preceded by `cwd` to sign-extend AX into DX.
     IdivBpRel { offset: i16 },
+    /// `imul byte ptr [bp+<offset>]` — `F6 (mod=01 /5 r/m=110) dd`
+    /// = `F6 6E dd`. 8-bit single-operand signed multiply: AX =
+    /// AL * src. Char compound `*=` with mem-resident RHS (fixture
+    /// 672: `c *= d` → `mov al, dl; imul byte ptr [bp-1]; mov dl, al`).
+    ImulByteBpRel { offset: i16 },
+    /// `idiv byte ptr [bp+<offset>]` — `F6 (mod=01 /7 r/m=110) dd`
+    /// = `F6 7E dd`. 8-bit single-operand signed divide of AX by
+    /// src; quotient in AL, remainder in AH. Char compound `/=`
+    /// and `%=` with mem-resident RHS (fixture 673: `c /= d` →
+    /// `mov al, dl; cbw; idiv byte ptr [bp-1]; mov dl, al`).
+    IdivByteBpRel { offset: i16 },
     /// `cwd` — 99. Sign-extend AX into DX:AX.
     Cwd,
     /// `mov <reg8>,byte ptr [bp+<offset>]` — 8A xx dd. Generic 8-bit
