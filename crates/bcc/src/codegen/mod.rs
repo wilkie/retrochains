@@ -766,6 +766,26 @@ impl<'a> FunctionEmitter<'a> {
             "logical condition (`&&`/`||`) in a `while` not yet supported (no fixture)"
         );
         let plan = self.label_plan.loop_plan(while_span_start);
+        // `while (K)` with K constant non-zero — BCC elides both the
+        // trampoline jump and the check label, leaving just `body /
+        // jmp body`. Continue jumps to body_slot directly. Fixture
+        // 599 (`while (1) { ... break; ... }`).
+        if matches!(try_const_eval(cond), Some(v) if v != 0) {
+            self.emit_label(plan.body_slot);
+            self.loop_stack.push(LoopTargets {
+                break_target_slot: plan.break_target_slot,
+                continue_target_slot: Some(plan.body_slot),
+            });
+            for s in body {
+                self.emit_stmt(s);
+            }
+            self.loop_stack.pop();
+            let _ = write!(self.out, "\tjmp\tshort {}\r\n", self.label_ref(plan.body_slot));
+            if body_has_break(body) {
+                self.emit_label(plan.break_target_slot);
+            }
+            return;
+        }
         // Trampoline jump to the check, then body label.
         let _ = write!(self.out, "\tjmp\tshort {}\r\n", self.label_ref(plan.check_slot));
         self.emit_label(plan.body_slot);
@@ -6435,6 +6455,22 @@ impl<'a> FunctionEmitter<'a> {
                         let _ = write!(self.out, "\tmov\tbyte ptr {},al\r\n", bp_addr(off));
                         return;
                     }
+                }
+                // `<stack-local> = &<global>;` — store the symbol's
+                // offset directly into the stack slot. BCC emits this
+                // as `C7 46 dd lo hi` with a FIXUPP, saving the
+                // intermediate `mov ax, offset ...; mov [bp-N], ax`
+                // pair. Fixture 601.
+                if !ty.is_char_like()
+                    && let ExprKind::AddressOf(sym) = &value.kind
+                    && self.globals.contains(sym)
+                {
+                    let _ = write!(
+                        self.out,
+                        "\tmov\tword ptr {},offset DGROUP:_{sym}\r\n",
+                        bp_addr(off),
+                    );
+                    return;
                 }
                 self.emit_expr_to_ax(value);
                 if ty.is_char_like() {

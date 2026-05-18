@@ -397,7 +397,9 @@ fn instr_size(instr: &Instr) -> usize {
         | Instr::ShlReg8One { .. }
         | Instr::SarReg8One { .. }
         | Instr::ShrReg8One { .. } => 2,
-        Instr::MovBpRelImm { .. } | Instr::MovBpRelOffsetSym { .. } => 5,
+        Instr::MovBpRelImm { .. }
+        | Instr::MovBpRelOffsetSym { .. }
+        | Instr::MovBpRelOffsetGroupSym { .. } => 5,
         Instr::CallIndirectBpRel { .. } => 3,
     }
 }
@@ -528,6 +530,20 @@ fn emit_instr(
             out.push(0x46);
             out.push(disp as u8);
             out.extend_from_slice(&imm.to_le_bytes());
+        }
+        Instr::MovBpRelOffsetGroupSym { offset, group, symbol, sym_offset } => {
+            // `mov word ptr [bp+disp8], offset <group>:<symbol>` →
+            // C7 46 dd lo hi. ModR/M 46 = mod=01 /0 r/m=110 ([bp+
+            // disp8]). The lo/hi imm is the symbol's offset, FIXUPP-
+            // relocated like `MovReg16OffsetGroupSym`.
+            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
+            out.push(0xC7);
+            out.push(0x46);
+            out.push(disp as u8);
+            emit_group_sym_imm16(
+                group, symbol, *sym_offset,
+                symbols, group_idx, extern_idx, out, fixups,
+            )?;
         }
         Instr::MovReg16BpRel { reg, offset } => {
             // `mov r16,word ptr [bp+disp8]` → 8B xx dd. ModR/M xx =

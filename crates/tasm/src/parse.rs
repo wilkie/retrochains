@@ -769,6 +769,18 @@ fn parse_mov(operands: &str, line_no: usize) -> AsmResult<Instr> {
                 symbol: sym.to_string(),
             });
         }
+        // `mov word ptr [bp-N], offset DGROUP:_g` — store group-
+        // qualified symbol offset into stack local (fixture 601's
+        // `p = &g;` peephole).
+        if let Some((group, symbol)) = parse_offset_group_symbol(rhs) {
+            let (sym, sym_offset) = split_sym_offset(symbol);
+            return Ok(Instr::MovBpRelOffsetGroupSym {
+                offset,
+                group: group.to_string(),
+                symbol: sym.to_string(),
+                sym_offset,
+            });
+        }
         // `mov word ptr [bp-N],ax` — store AX. Fixture 160 uses this
         // to stash the switch scrutinee into a stack slot before the
         // linear-search loop walks it.

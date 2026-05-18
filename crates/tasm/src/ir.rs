@@ -119,6 +119,12 @@ pub enum Instr {
     /// `mov word ptr [bp+<offset>],<imm16>` — BCC uses signed
     /// offsets (negative for locals, positive for params).
     MovBpRelImm { offset: i16, imm: u16 },
+    /// `mov word ptr [bp+<offset>],offset <group>:<symbol>[+<sym_offset>]`
+    /// — `C7 46 dd lo hi` + FIXUPP relocating the imm16 to the
+    /// symbol's offset. Used by BCC's `<stack-local> = &<global>`
+    /// peephole (fixture 601 stores `&g` into a stack pointer local
+    /// directly: `mov word ptr [bp-2], offset DGROUP:_g`).
+    MovBpRelOffsetGroupSym { offset: i16, group: String, symbol: String, sym_offset: i16 },
     /// `mov <reg16>,word ptr [bp+<offset>]` — generic 16-bit load
     /// from a stack local into any 16-bit register. Encoding:
     /// `8B xx dd` where ModR/M xx = mod=01 reg=<dst> r/m=110.
