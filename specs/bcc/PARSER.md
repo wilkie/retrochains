@@ -1959,6 +1959,35 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `long` global compound `+=` with array / member / long-array RHS
+
+Fixtures `827` (`g += a[1]` int array), `828` (`g += s.x`
+int member), `829` (`g += la[0]` long array).
+
+- `827` / `828` — extending the long-LHS Int/Char and
+  UInt/UChar widening arms to use the broader
+  `rhs_int_compound_type` helper (which resolves
+  ArrayIndex and Member in addition to Ident). The
+  widening logic (`cwd` for signed, `<hi_op> 0` for
+  unsigned) is unchanged.
+- `829` — new long-RHS variant accepting non-Ident RHS.
+  `long_rhs_halves` returns (low, high) DGROUP addresses
+  for ArrayIndex (const index, long element) and Member
+  (long field). Same emission shape as `long_global +=
+  long_global` (fixture 734) but with the array/member
+  addresses substituted.
+
+Also: this batch revealed a publics-ordering rule gap.
+BCC reverts to reverse-alpha for the long bucket when
+**any** global is long-typed (or wraps a long), even if
+short and long globals coexist (which normally
+triggered forward-alpha). Added `Type::contains_long()`
+and `has_long_typed_global` check in `emit_s.rs`.
+Pinned by fixture 829 (`long g; long la[3]; int main`)
+which expects `_main, _la, _g`; the prior rule emitted
+`_la, _main, _g`. Verified no regression across all
+existing long-global fixtures.
+
 ## `int` global compound `*=` / `/=` / `<<=` with array / deref / member RHS
 
 Fixtures `824` (`g *= a[1]`), `825` (`g /= *p`),
