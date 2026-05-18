@@ -3276,6 +3276,41 @@ impl<'a> FunctionEmitter<'a> {
         // as the `g = g <op> rhs` form (slices 231–233). The byte
         // output is identical between `g = g op b` and `g op= b`
         // for these ops. Fixtures 260 (`*=`), 261 (`/=`), 262 (`%=`).
+        // Long compound on a long LHS (global or stack local) with
+        // a long RHS (global or stack local) — Add/Sub/Bit* shapes.
+        // BCC loads RHS into AX:DX (AX=high, DX=low) then applies
+        // memory-direct ops to the LHS destination, with carry/
+        // borrow for arith. Fixture 744 (global LHS + stack RHS),
+        // 745 (stack LHS + global RHS).
+        if let Some(ty_lhs) = self.lhs_long_type(name)
+            && ty_lhs.is_long_like()
+            && let ExprKind::Ident(b) = &value.kind
+            && let Some(ty_rhs) = self.rhs_long_type_of_ident(b)
+            && ty_rhs.is_long_like()
+            && matches!(
+                op,
+                BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor
+            )
+            && !(self.globals.contains(name)
+                && self.globals.contains(b)) // both-globals stays on the existing branch below
+        {
+            let _ = (ty_lhs, ty_rhs);
+            let (rhs_lo, rhs_hi) = self.long_halves_of(b);
+            let (lhs_lo, lhs_hi) = self.long_halves_of(name);
+            let _ = write!(self.out, "\tmov\tax,word ptr {rhs_hi}\r\n");
+            let _ = write!(self.out, "\tmov\tdx,word ptr {rhs_lo}\r\n");
+            let (lo_op, hi_op) = match op {
+                BinOp::Add => ("add", "adc"),
+                BinOp::Sub => ("sub", "sbb"),
+                BinOp::BitAnd => ("and", "and"),
+                BinOp::BitOr => ("or", "or"),
+                BinOp::BitXor => ("xor", "xor"),
+                _ => unreachable!(),
+            };
+            let _ = write!(self.out, "\t{lo_op}\tword ptr {lhs_lo},dx\r\n");
+            let _ = write!(self.out, "\t{hi_op}\tword ptr {lhs_hi},ax\r\n");
+            return;
+        }
         if let Some(ty) = self.globals.type_of(name)
             && ty.is_long_like()
             && let ExprKind::Ident(b) = &value.kind
@@ -7980,6 +8015,39 @@ impl<'a> FunctionEmitter<'a> {
     /// Resolve the right operand to a textual asm source operand. Today
     /// either an immediate (constant-foldable), a register-resident
     /// local, or a `word ptr [bp-N]` stack local.
+    /// Resolve a long-type lookup by name across globals and
+    /// locals. Used by the long-compound-with-long-RHS path
+    /// (fixtures 744 / 745) to accept either source kind.
+    fn lhs_long_type(&self, name: &str) -> Option<Type> {
+        if let Some(t) = self.globals.type_of(name) {
+            Some(t.clone())
+        } else if self.locals.has(name) {
+            Some(self.locals.type_of(name).clone())
+        } else {
+            None
+        }
+    }
+    fn rhs_long_type_of_ident(&self, name: &str) -> Option<Type> {
+        self.lhs_long_type(name)
+    }
+    /// Format the (low, high) word-pointer address strings for a
+    /// long-type identifier (without the `word ptr` prefix —
+    /// callers add that themselves so the same helper covers both
+    /// load and store).
+    fn long_halves_of(&self, name: &str) -> (String, String) {
+        if self.globals.contains(name) {
+            (
+                format!("DGROUP:_{name}"),
+                format!("DGROUP:_{name}+2"),
+            )
+        } else {
+            let LocalLocation::Stack(off) = self.locals.location_of(name) else {
+                unreachable!("long never sits in a register");
+            };
+            (bp_addr(off), bp_addr(off + 2))
+        }
+    }
+
     fn resolve_operand_source(&self, e: &Expr) -> OperandSource {
         if let Some(v) = try_const_eval(e) {
             return OperandSource::Immediate(v);
