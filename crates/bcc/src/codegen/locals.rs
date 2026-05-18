@@ -270,7 +270,7 @@ impl Locals {
         // char pool (cwd before idiv clobbers DX). Fixture 640.
         let char_local_names: HashSet<&str> = declared
             .iter()
-            .filter(|item| matches!(item.ty, Type::Char))
+            .filter(|item| matches!(item.ty, Type::Char | Type::UChar))
             .map(|item| item.name.as_str())
             .collect();
         let function_has_div = body_has_div_or_mod(
@@ -285,7 +285,7 @@ impl Locals {
             };
             let mut char_pool = char_pool_slice.iter().copied();
             for (i, item) in declared.iter().enumerate() {
-                if !matches!(item.ty, Type::Char) {
+                if !matches!(item.ty, Type::Char | Type::UChar) {
                     continue;
                 }
                 if address_taken.contains(&item.name) {
