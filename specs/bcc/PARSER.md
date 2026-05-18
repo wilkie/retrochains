@@ -1265,6 +1265,42 @@ changes:
   frame layout came out byte-exact (we'd previously tested 1-
   and 3-arg variants but not 2).
 
+## Free passes (batch 88)
+
+Three more probes hit existing paths byte-exactly with no code
+changes:
+
+- `581` — `if (a && b)` (bare-ident logical-and between two int
+  globals): the and-skeleton (`emit_cond_branch` + cascading
+  branch on zero) handles this just like the bare-ident or-form
+  fixed in fixture 572.
+- `582` — `g--;` (int global postdec used as statement): the
+  postdec lowering already maps to `dec word ptr [_g]` for the
+  statement context.
+- `583` — `if (!(a < b))` (logical-not applied to a relational
+  expression): `emit_cond_branch` already inverts the
+  predicate, so `!(a < b)` lowers to `cmp; jl <then>` (the not-
+  taken edge falls through to the else).
+
+### Deferred from batch 88
+
+- Probed `int a[5]; return sizeof(a);` (`582` first draft).
+  Diff showed our prologue/epilogue still allocates the frame
+  (`sub sp, 10` + `mov sp, bp`) while BCC elides both because
+  the array is never referenced at runtime — only in `sizeof`,
+  which is constant-folded at parse time. The fix is a frame-
+  elision pass: skip the slot for any local whose only uses are
+  inside `sizeof`. Probe replaced with int-global postdec until
+  we have appetite to thread "live local" tracking into the
+  locals planner.
+- Probed `int a[5]; int i = 2; return a[i + 1];` (`583` first
+  draft). Our codegen panics at `emit_array_addr_to_bx` with
+  "non-ident array index not yet supported (no fixture)" — only
+  bare-ident array indices route through that path; a `BinaryOp`
+  index needs an `emit_expr_to_ax`/`mov bx, ax` prefix instead.
+  Probe replaced with the logical-not-of-compare variant until
+  the non-ident array index path lands.
+
 ## What we explicitly defer
 
 - Templates, namespaces, RTTI, exceptions (not in BC2.0 to relevant
