@@ -5079,7 +5079,7 @@ impl<'a> FunctionEmitter<'a> {
         indices: &[Expr],
         op: BinOp,
         value: &Expr,
-        _from_postfix: bool,
+        from_postfix: bool,
     ) {
         // Long-element path. For both global (`long a[];`) and stack
         // (`long a[N];` as a local) array bases with a constant index,
@@ -5118,6 +5118,17 @@ impl<'a> FunctionEmitter<'a> {
                 panic!("non-constant rhs in global-array compound assign not yet supported (no fixture)");
             };
             let v_masked = if store_byte { v & 0xFF } else { v & 0xFFFF };
+            // Postfix `a[K]++` / `a[K]--` (discarded): memory-direct
+            // `inc|dec byte ptr <dest>` (fixture 717).
+            if store_byte
+                && from_postfix
+                && v_masked == 1
+                && matches!(op, BinOp::Add | BinOp::Sub)
+            {
+                let mnem = if matches!(op, BinOp::Add) { "inc" } else { "dec" };
+                let _ = write!(self.out, "\t{mnem}\tbyte ptr {dest}\r\n");
+                return;
+            }
             if store_byte && matches!(op, BinOp::Add | BinOp::Sub) {
                 let imm8 = if matches!(op, BinOp::Add) {
                     (v_masked & 0xFF) as u8
@@ -5125,7 +5136,13 @@ impl<'a> FunctionEmitter<'a> {
                     ((v_masked & 0xFF) as u8).wrapping_neg()
                 };
                 let _ = write!(self.out, "\tmov\tal,byte ptr {dest}\r\n");
-                let _ = write!(self.out, "\tadd\tal,{imm8}\r\n");
+                if v_masked == 1 && matches!(op, BinOp::Add) {
+                    self.out.extend_from_slice(b"\tinc\tal\r\n");
+                } else if v_masked == 1 && matches!(op, BinOp::Sub) {
+                    self.out.extend_from_slice(b"\tdec\tal\r\n");
+                } else {
+                    let _ = write!(self.out, "\tadd\tal,{imm8}\r\n");
+                }
                 let _ = write!(self.out, "\tmov\tbyte ptr {dest},al\r\n");
                 return;
             }
@@ -5623,7 +5640,7 @@ impl<'a> FunctionEmitter<'a> {
         kind: crate::ast::MemberKind,
         op: BinOp,
         value: &Expr,
-        _from_postfix: bool,
+        from_postfix: bool,
     ) {
         // Long-field path. Resolve the dot/arrow chain to a (lo_addr,
         // hi_addr) pair (struct field at its in-struct offset), then
@@ -5791,6 +5808,18 @@ impl<'a> FunctionEmitter<'a> {
         // al`. BCC canonicalizes `-=` as `add al, (256-K)`. Char-
         // field bitwise (`&=` / `|=` / `^=`) keeps memory-direct.
         // Fixture 704 (`g.c += 5`).
+        // Postfix `g.c++` / `g.c--` (discarded): memory-direct
+        // `inc|dec byte ptr <dest>` — same pre-vs-post asymmetry as
+        // `g++` for char globals. Fixture 716 (`g.c++`).
+        if store_byte
+            && from_postfix
+            && v_masked == 1
+            && matches!(op, BinOp::Add | BinOp::Sub)
+        {
+            let mnem = if matches!(op, BinOp::Add) { "inc" } else { "dec" };
+            let _ = write!(self.out, "\t{mnem}\tbyte ptr {dest}\r\n");
+            return;
+        }
         if store_byte && matches!(op, BinOp::Add | BinOp::Sub) {
             let imm8 = if matches!(op, BinOp::Add) {
                 (v_masked & 0xFF) as u8
