@@ -3711,6 +3711,35 @@ impl<'a> FunctionEmitter<'a> {
                     let _ = unsigned;
                     return;
                 }
+                BinOp::Mul => {
+                    let _ = write!(self.out, "\tmov\tcx,word ptr {rhs_hi}\r\n");
+                    let _ = write!(self.out, "\tmov\tbx,word ptr {rhs_lo}\r\n");
+                    let _ = write!(self.out, "\tmov\tdx,word ptr DGROUP:_{name}+2\r\n");
+                    let _ = write!(self.out, "\tmov\tax,word ptr DGROUP:_{name}\r\n");
+                    self.out.extend_from_slice(b"\tcall\tnear ptr N_LXMUL@\r\n");
+                    self.helpers.insert("N_LXMUL@".to_string());
+                    let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name}+2,dx\r\n");
+                    let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name},ax\r\n");
+                    return;
+                }
+                BinOp::Div | BinOp::Mod => {
+                    let helper = match (op, unsigned) {
+                        (BinOp::Div, false) => "N_LDIV@",
+                        (BinOp::Mod, false) => "N_LMOD@",
+                        (BinOp::Div, true)  => "N_LUDIV@",
+                        (BinOp::Mod, true)  => "N_LUMOD@",
+                        _ => unreachable!(),
+                    };
+                    let _ = write!(self.out, "\tpush\tword ptr {rhs_hi}\r\n");
+                    let _ = write!(self.out, "\tpush\tword ptr {rhs_lo}\r\n");
+                    let _ = write!(self.out, "\tpush\tword ptr DGROUP:_{name}+2\r\n");
+                    let _ = write!(self.out, "\tpush\tword ptr DGROUP:_{name}\r\n");
+                    let _ = write!(self.out, "\tcall\tnear ptr {helper}\r\n");
+                    self.helpers.insert(helper.to_string());
+                    let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name}+2,dx\r\n");
+                    let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name},ax\r\n");
+                    return;
+                }
                 _ => {}
             }
         }
@@ -6582,6 +6611,31 @@ impl<'a> FunctionEmitter<'a> {
                 _ => unreachable!(),
             };
             let _ = write!(self.out, "\t{mnem}\tbyte ptr {dest},al\r\n");
+            return;
+        }
+        // Int-field compound with non-constant RHS — load RHS
+        // into AX, then memory-direct `<op> word ptr <dest>, ax`.
+        // emit_expr_to_ax handles int/char/uchar local/global
+        // widening (cbw or `mov ah, 0` as appropriate). Fixture
+        // 832 (`s.x += y`).
+        if !store_byte
+            && matches!(
+                op,
+                BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor
+            )
+            && try_const_eval(value).is_none()
+            && matches!(field_ty, Type::Int | Type::UInt)
+        {
+            self.emit_expr_to_ax(value);
+            let mnem = match op {
+                BinOp::Add => "add",
+                BinOp::Sub => "sub",
+                BinOp::BitAnd => "and",
+                BinOp::BitOr => "or",
+                BinOp::BitXor => "xor",
+                _ => unreachable!(),
+            };
+            let _ = write!(self.out, "\t{mnem}\tword ptr {dest},ax\r\n");
             return;
         }
         let Some(v) = try_const_eval(value) else {
