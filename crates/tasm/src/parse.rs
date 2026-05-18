@@ -963,6 +963,11 @@ fn parse_sub(operands: &str, line_no: usize) -> AsmResult<Instr> {
             return Ok(Instr::SubAlImm8 { imm: imm as u8 });
         }
     }
+    // `sub <reg8>, <reg8>` — char compound `-=` between two byte
+    // registers (fixture analog of 665 with `-=`).
+    if let (Some(dst), Some(src)) = (Reg8::parse(lhs), Reg8::parse(rhs)) {
+        return Ok(Instr::SubReg8Reg8 { dst, src });
+    }
     // `sub <reg16>, imm` — imm8sx form first (3 bytes), then imm16
     // (4 bytes). Mirrors the AddReg16Imm8Sx / AddReg16Imm16 split.
     // Fixture 564 (`p -= 2;` on int-pointer in SI → `sub si, 4`).
@@ -1082,6 +1087,11 @@ fn parse_and(operands: &str, line_no: usize) -> AsmResult<Instr> {
         if let Some(imm) = parse_imm8(rhs) {
             return Ok(Instr::AndReg8Imm8 { reg, imm: imm as u8 });
         }
+    }
+    // `and <reg8>, <reg8>` — char compound `&=` between two byte
+    // registers (fixture analog of 665 with `&=`).
+    if let (Some(dst), Some(src)) = (Reg8::parse(lhs), Reg8::parse(rhs)) {
+        return Ok(Instr::AndReg8Reg8 { dst, src });
     }
     if lhs == "dx" {
         if let Some((group, symbol)) = parse_group_symbol(rhs) {
@@ -1391,6 +1401,11 @@ fn parse_add(operands: &str, line_no: usize) -> AsmResult<Instr> {
         if let Some(imm) = parse_imm8(rhs) {
             return Ok(Instr::AddAlImm8 { imm: imm as u8 });
         }
+    }
+    // `add <reg8>, <reg8>` — char compound `+=` between two byte
+    // registers (fixture 665: `add dl, al` = `02 D0`).
+    if let (Some(dst), Some(src)) = (Reg8::parse(lhs), Reg8::parse(rhs)) {
+        return Ok(Instr::AddReg8Reg8 { dst, src });
     }
     // `add <reg16>, imm` for non-AX dst (AX uses the shorter
     // `05 lo hi` form via `AddAxImm`). Pick imm8sx (`83 C(rm) ii`,

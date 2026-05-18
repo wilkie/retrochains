@@ -311,6 +311,9 @@ fn instr_size(instr: &Instr) -> usize {
         Instr::AndReg8Imm8 { .. }
         | Instr::OrReg8Imm8 { .. }
         | Instr::XorReg8Imm8 { .. } => 3,
+        Instr::AddReg8Reg8 { .. }
+        | Instr::SubReg8Reg8 { .. }
+        | Instr::AndReg8Reg8 { .. } => 2,
         Instr::CallNear(_) => 3,
         Instr::MovAxGroupSym { .. }
         | Instr::MovAlGroupSym { .. }
@@ -893,6 +896,22 @@ fn emit_instr(
             out.push(0x80);
             out.push(0b11_110_000 | reg.code());
             out.push(*imm);
+        }
+        Instr::AddReg8Reg8 { dst, src } => {
+            // `add <reg8>,<reg8>` → 02 (mod=11 reg=<dst> r/m=<src>).
+            // Fixture 665 (`add dl, al` = 02 D0).
+            out.push(0x02);
+            out.push(0b11_000_000 | (dst.code() << 3) | src.code());
+        }
+        Instr::SubReg8Reg8 { dst, src } => {
+            // `sub <reg8>,<reg8>` → 2A (mod=11 reg=<dst> r/m=<src>).
+            out.push(0x2A);
+            out.push(0b11_000_000 | (dst.code() << 3) | src.code());
+        }
+        Instr::AndReg8Reg8 { dst, src } => {
+            // `and <reg8>,<reg8>` → 22 (mod=11 reg=<dst> r/m=<src>).
+            out.push(0x22);
+            out.push(0b11_000_000 | (dst.code() << 3) | src.code());
         }
         Instr::ShlAxCl => {
             // `shl ax,cl` → D3 E0. D3 = Grp2 r/m16,CL. ModR/M E0 =

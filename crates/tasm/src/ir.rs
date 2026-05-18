@@ -393,6 +393,18 @@ pub enum Instr {
     OrReg8Imm8 { reg: Reg8, imm: u8 },
     /// `xor <reg8>,<imm8>` — 80 (mod=11 /6 r/m=<reg-code>) ii.
     XorReg8Imm8 { reg: Reg8, imm: u8 },
+    /// `add <reg8>,<reg8>` — `02 (mod=11 reg=<dst> r/m=<src>)`.
+    /// Char compound `+=` between two byte locals: dst in a
+    /// byte register, src already loaded into AL via
+    /// `MovReg8BpRel`. Fixture 665 (`c += d` with c in DL,
+    /// d in AL → `add dl, al` = `02 D0`).
+    AddReg8Reg8 { dst: Reg8, src: Reg8 },
+    /// `sub <reg8>,<reg8>` — `2A (mod=11 reg=<dst> r/m=<src>)`.
+    /// Char compound `-=` sibling of `AddReg8Reg8`.
+    SubReg8Reg8 { dst: Reg8, src: Reg8 },
+    /// `and <reg8>,<reg8>` — `22 (mod=11 reg=<dst> r/m=<src>)`.
+    /// Char compound `&=` sibling.
+    AndReg8Reg8 { dst: Reg8, src: Reg8 },
     /// `shl ax,cl` — D3 E0. Variable-count logical left shift of AX.
     ShlAxCl,
     /// `sar ax,cl` — D3 F8. Variable-count arithmetic (signed) right

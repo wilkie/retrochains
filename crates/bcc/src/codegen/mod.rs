@@ -3726,6 +3726,25 @@ impl<'a> FunctionEmitter<'a> {
             let _ = write!(self.out, "\tmov\t{},{result_reg}\r\n", reg.name());
             return;
         }
+        // Char compound `+=` / `-=` / `&=` with a non-constant RHS
+        // (another char local or global). BCC loads the RHS byte into
+        // AL via `mov al, byte ptr <src>` and then applies the op
+        // register-to-register (`add dl, al`, `sub dl, al`, `and dl,
+        // al`). Fixtures 665 (`c += d`), 666 (`c -= d`), 667 (`c &= d`).
+        if reg.is_byte() && matches!(op, BinOp::Add | BinOp::Sub | BinOp::BitAnd) {
+            let src = self.resolve_operand_source(value);
+            self.out.extend_from_slice(b"\tmov\tal,");
+            self.out.extend_from_slice(src.byte().as_bytes());
+            self.out.extend_from_slice(b"\r\n");
+            let mnem = match op {
+                BinOp::Add => "add",
+                BinOp::Sub => "sub",
+                BinOp::BitAnd => "and",
+                _ => unreachable!(),
+            };
+            let _ = write!(self.out, "\t{mnem}\t{},al\r\n", reg.name());
+            return;
+        }
         assert!(
             !reg.is_byte(),
             "compound assignment on a char (byte-register) target not yet supported (no fixture)"
