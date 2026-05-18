@@ -6811,14 +6811,19 @@ impl<'a> FunctionEmitter<'a> {
                     // is signedness-agnostic at the instruction level.
                     let unsigned = self.expr_is_unsigned(left);
                     // RHS-clobbers-AX path: when the right operand is a
-                    // call, or a char ident (whose load + cbw widen
-                    // clobbers AX), BCC evaluates RHS first, pushes
-                    // the result, then evaluates LHS into AX and pops
-                    // the saved result into DX before applying the
-                    // op. Fixture 593 (`n + sum(n-1)`), fixture 616
-                    // (`a + b` with b a char param).
+                    // call, a char ident (whose load + cbw widen
+                    // clobbers AX), or a nested non-constant BinOp
+                    // (which produces its result in AX and so
+                    // clobbers any LHS already there), BCC evaluates
+                    // RHS first, pushes the result, then evaluates
+                    // LHS into AX and pops the saved result into DX
+                    // before applying the op. Fixture 593 (`n + sum(n
+                    // -1)`), 616 (`a + b` with b a char param), 645
+                    // (`x + y * 2`).
                     let rhs_clobbers_ax = matches!(right.kind, ExprKind::Call { .. })
-                        || matches!(&right.kind, ExprKind::Ident(n) if self.ident_is_char(n));
+                        || matches!(&right.kind, ExprKind::Ident(n) if self.ident_is_char(n))
+                        || (matches!(right.kind, ExprKind::BinOp { .. })
+                            && try_const_eval(right).is_none());
                     if rhs_clobbers_ax {
                         self.emit_expr_to_ax(right);
                         self.out.extend_from_slice(b"\tpush\tax\r\n");
