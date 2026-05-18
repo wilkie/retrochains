@@ -1959,6 +1959,52 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `long` compound with `int` / `char` / `uchar` RHS
+
+Fixtures `782` (`ulong g += int x`), `783` (`long g += char c`),
+`784` (`long g += uchar c`).
+
+- `782` — free pass: the existing `Type::Int` signed-widening
+  arm (fixture 755) is not gated on LHS signedness, so
+  `unsigned long g += int x` uses the same `cwd` sign-
+  extension. The result reinterprets the bit pattern as
+  unsigned long, which is correct under C90 conversion
+  rules (signed long can represent all signed int values,
+  so the int converts to long first; the long-to-ulong
+  step is a no-op at the bit level).
+- `783` — signed `char` widens to long via **two** stage
+  extensions: `cbw` widens AL→AX, `cwd` widens AX→DX:AX.
+  `emit_expr_to_ax` already emits the `cbw` step for a
+  char-typed local, so extending the signed-widening
+  arm's gate from `Type::Int` to `Type::Int | Type::Char`
+  lets it pick up char too — the `cwd` already there
+  finishes the long-widening:
+
+  ```
+  mov al, byte ptr <c>
+  cbw                          ; AL → AX (sign-extend)
+  cwd                          ; AX → DX:AX (sign-extend)
+  add word ptr <lhs_lo>, ax
+  adc word ptr <lhs_hi>, dx
+  ```
+- `784` — unsigned `char` uses the **zero-extension** path
+  (no `cwd`): `mov al, <c>; mov ah, 0` zero-extends to int,
+  then the same `<hi_op> 0` immediate-form trick from the
+  `Type::UInt` arm finishes the long-widening. Extended
+  that arm's gate from `Type::UInt` to `Type::UInt |
+  Type::UChar`:
+
+  ```
+  mov al, byte ptr <c>
+  mov ah, 0                    ; AL → AX (zero-extend)
+  add word ptr <lhs_lo>, ax
+  adc word ptr <lhs_hi>, 0     ; high-half via carry only
+  ```
+
+Reuse of `emit_expr_to_ax` for the byte-to-int widening
+means no new IR or encoding is needed — the byte-width
+step happens before the long compound path even begins.
+
 ## `ulong` stack `/= uint`, signed `long` `+= / *= uint`
 
 Fixtures `779` (`a /= x` stack ulong LHS), `780` (`g += x`
