@@ -2077,6 +2077,17 @@ impl<'a> FunctionEmitter<'a> {
             self.out.extend_from_slice(b"\tor\tax,ax\r\n");
             return;
         }
+        // `while (x--)` — postinc/postdec as a boolean: the
+        // current value of `x` is the test, then the side
+        // effect happens. BCC's shape: `mov ax, <x>; dec <x>;
+        // or ax, ax`. The Update lowering already produces the
+        // value-in-AX-and-side-effect sequence; follow with
+        // `or ax, ax` to set ZF. Fixture 619.
+        if let ExprKind::Update { position: crate::ast::UpdatePosition::Post, .. } = &cond.kind {
+            self.emit_expr_to_ax(cond);
+            self.out.extend_from_slice(b"\tor\tax,ax\r\n");
+            return;
+        }
         let ExprKind::Ident(name) = &cond.kind else {
             panic!("non-ident boolean condition not yet supported (no fixture)");
         };
