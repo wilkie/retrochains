@@ -1713,6 +1713,35 @@ immediate sources.
   path. (Note: BCC does NOT use a `sar` peephole for divide
   by power of 2 here — same shape as `/ 7`.)
 
+## `int x = -K;` — mask negative initializer to width
+
+Fixture `632` (`int x = -5; return x;`) — `try_const_eval`
+returns a u32 (`-5` becomes 0xFFFFFFFB = 4294967291 decimal),
+which leaked through the stack-init `mov word ptr [bp-N],
+{v}` write and produced an out-of-range imm. Fixed by masking
+`v & 0xFFFF` (int) or `v & 0xFF` (char) at the stack-init
+emit site. The global-init path already did this; the local-
+init path didn't.
+
+## `c *= K` (power-of-2 K) — round-trip + `shl al, 1` unroll
+
+Fixture `633` (`char c; c = 3; c *= 4;`) — char compound
+multiply previously hit the "char compound on byte target not
+yet supported" assert. BCC's pattern for K a small power of
+two is round-trip through AL with unrolled `shl al, 1`: `mov
+al, <reg>; shl al, 1; shl al, 1; mov <reg>, al`. Added that
+arm to `emit_compound_assign_reg` next to the char-shift
+sibling. Non-power-of-2 K still panics (BCC would presumably
+use `mov dl, K; imul dl` — no fixture yet).
+
+## Free passes (batch 105)
+
+- `634` — `for (i = 1; i <= 10; i++) { if (i > 5) break; sum +=
+  i; }` (for + nested-if + break + compound-add): the existing
+  for-loop body emission already routes `break` from inside a
+  nested if to the loop's break_target_slot, and the compound
+  `+=` path emits `add <reg>, <op>` in place.
+
 ### Deferred from batch 88
 
 - Probed `int a[5]; return sizeof(a);` (`582` first draft).
