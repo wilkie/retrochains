@@ -1959,6 +1959,48 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Pointer subscript — non-compound read/write/test
+
+Fixtures `887` (`int *p; p[1] = y` — plain assignment to global
+pointer subscript), `888` (`int *p; x = p[1]` — subscript as
+rvalue), `889` (`int *p; if (p[1])` — subscript in boolean
+context).
+
+888 already worked end-to-end: the rvalue subscript-load
+through a global pointer was already handled by an earlier
+`emit_expr_to_ax` path. The fixture just locks in the byte
+output.
+
+887 needs a new arm in `emit_array_assign` for the global-
+pointer base case. The function already chained through both
+local pointers (fixture 590) and global arrays via
+`try_const_array_offset`, but `globals.type_of(p)` returns a
+`Pointer` (not `Array`), so the offset helper rejected it and
+the function fell into the variable-index path that panics
+("variable-indexed global array assign not yet supported").
+Added a sibling arm gated on `gty.pointee()` + const single
+index + int/uint pointee: load the pointer into BX, then `mov
+word ptr [bx+K*2], <ax|imm>`. Same skeleton as the compound
+path from batch 181 — uses the existing `MovBxDispAx` from
+batch 188; var-RHS routes through `emit_expr_to_ax` first,
+const-RHS emits the imm form directly.
+
+889 needs both a codegen arm in `emit_zero_test` and a new IR
+variant. BCC's shape for `if (p[K])`:
+
+```
+mov bx, word ptr DGROUP:_p
+cmp word ptr [bx+K*2], 0
+je @label
+```
+
+The `cmp` uses the imm8sx form (4 bytes `83 7F dd 00`) — same
+preference as the flat global zero-tests. Added
+`CmpBxDispImm8 { disp: i8, imm: i8 }` with ModR/M `7F` =
+mod=01 reg=/7=CMP r/m=111=BX. The new `emit_zero_test` arm
+fires when the condition is an ArrayIndex of a global pointer
+with constant index.
+
 ## Pointer subscript — mod, div, char postinc
 
 Fixtures `884` (`int *p; p[1] %= y` — mod compound), `885`
