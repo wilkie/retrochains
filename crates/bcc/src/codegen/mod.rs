@@ -7273,6 +7273,55 @@ impl<'a> FunctionEmitter<'a> {
                     let _ = write!(self.out, "\t{mnem}\t{}\r\n", src_reg.name());
                     return;
                 }
+                // Char `d = c++` where both d and c are byte. BCC
+                // routes the byte through AL without `cbw`-widening,
+                // stores to the byte stack slot, then bumps the
+                // source register. Pattern: `mov al, <src>; mov
+                // byte ptr [bp-N], al; inc <src>`. Fixture 725.
+                if ty.is_char_like()
+                    && let ExprKind::Update {
+                        target,
+                        op,
+                        position: crate::ast::UpdatePosition::Post,
+                    } = &value.kind
+                    && self.locals.has(target)
+                    && let LocalLocation::Reg(src_reg) = self.locals.location_of(target)
+                    && src_reg.is_byte()
+                {
+                    let _ = write!(self.out, "\tmov\tal,{}\r\n", src_reg.name());
+                    let _ = write!(self.out, "\tmov\tbyte ptr {},al\r\n", bp_addr(off));
+                    let mnem = match op {
+                        crate::ast::UpdateOp::Inc => "inc",
+                        crate::ast::UpdateOp::Dec => "dec",
+                    };
+                    let _ = write!(self.out, "\t{mnem}\t{}\r\n", src_reg.name());
+                    return;
+                }
+                // Char `d = ++c` where both d and c are byte. BCC
+                // works through AL: load c into AL, bump AL, then
+                // write back to BOTH c and d. Pattern: `mov al,
+                // <src>; inc al; mov <src>, al; mov byte ptr [bp-
+                // N], al`. Fixture 727.
+                if ty.is_char_like()
+                    && let ExprKind::Update {
+                        target,
+                        op,
+                        position: crate::ast::UpdatePosition::Pre,
+                    } = &value.kind
+                    && self.locals.has(target)
+                    && let LocalLocation::Reg(src_reg) = self.locals.location_of(target)
+                    && src_reg.is_byte()
+                {
+                    let mnem = match op {
+                        crate::ast::UpdateOp::Inc => "inc",
+                        crate::ast::UpdateOp::Dec => "dec",
+                    };
+                    let _ = write!(self.out, "\tmov\tal,{}\r\n", src_reg.name());
+                    let _ = write!(self.out, "\t{mnem}\tal\r\n");
+                    let _ = write!(self.out, "\tmov\t{},al\r\n", src_reg.name());
+                    let _ = write!(self.out, "\tmov\tbyte ptr {},al\r\n", bp_addr(off));
+                    return;
+                }
                 self.emit_expr_to_ax(value);
                 if ty.is_char_like() {
                     let _ = write!(self.out, "\tmov\tbyte ptr {},al\r\n", bp_addr(off));
