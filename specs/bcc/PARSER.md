@@ -1959,6 +1959,32 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `ulong` stack `/= uint`, signed `long` `+= / *= uint`
+
+Fixtures `779` (`a /= x` stack ulong LHS), `780` (`g += x`
+signed long LHS), `781` (`g *= x` signed long LHS) — three
+more free passes confirming the unsigned-widening arms
+don't care about LHS signedness or location:
+
+- `779` — batch 152's `/= uint` arm uses `long_halves_of`
+  for the LHS push, which already produces `[bp+off]`
+  addresses for a stack-resident long. Helper picked from
+  LHS signedness as `N_LUDIV@`.
+- `780` — batch 150's `Type::UInt` Add/Sub/Bit* arm is
+  not gated on LHS signedness. Signed `long += uint x`
+  emits the same zero-extension shape (`add ax; adc 0`).
+  The result is a signed long but the bit pattern is
+  identical to the unsigned case for these ops.
+- `781` — batch 151's `*= uint` arm uses `N_LXMUL@`
+  regardless of signedness (the helper is sign-agnostic
+  for the low-32 result). LHS signedness is irrelevant
+  for the widening; the zero-extension `xor cx, cx` is
+  driven only by RHS being `Type::UInt`.
+
+No code changes needed. These complete the
+unsigned-widening matrix for compound long operators
+against a `uint` RHS variable.
+
 ## `ulong` `>>=` uint and stack-LHS `ulong` `+=` / `*=` uint
 
 Fixtures `776` (`g >>= x`), `777` (`a += x` stack LHS),
