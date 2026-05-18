@@ -323,7 +323,7 @@ fn instr_size(instr: &Instr) -> usize {
         Instr::AddGroupSymImm16 { .. } => 6,
         Instr::AdcAxImm16 { .. } | Instr::SbbAxImm16 { .. } => 3,
         Instr::MovAlFromSiPtr | Instr::MovAlFromBxPtr => 2,
-        Instr::ImulReg16 { .. } => 2,
+        Instr::ImulReg16 { .. } | Instr::IdivReg16 { .. } => 2,
         Instr::AddAxGroupSym { .. }
         | Instr::OrAxGroupSym { .. }
         | Instr::AddDxGroupSym { .. }
@@ -1147,6 +1147,11 @@ fn emit_instr(
             // `imul r16` → F7 (mod=11 /5 r/m=<reg>).
             out.push(0xF7);
             out.push(0b11_101_000 | reg.code());
+        }
+        Instr::IdivReg16 { reg } => {
+            // `idiv r16` → F7 (mod=11 /7 r/m=<reg>).
+            out.push(0xF7);
+            out.push(0b11_111_000 | reg.code());
         }
         Instr::AddAxGroupSym { group, symbol, offset } => {
             // `add ax,word ptr <group>:<symbol>` → 03 06 lo hi.

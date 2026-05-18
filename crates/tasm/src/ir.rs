@@ -507,6 +507,10 @@ pub enum Instr {
     /// multiply with a register operand. Used when the operand is
     /// register-resident, e.g. `x *= 3` after BCC enregisters x.
     ImulReg16 { reg: Reg16 },
+    /// `idiv <reg16>` — F7 (mod=11 /7 r/m=reg). Single-operand signed
+    /// divide with a register operand. Used for `int reg-local /= K`
+    /// (fixture 584) where BCC loads the divisor into BX.
+    IdivReg16 { reg: Reg16 },
     /// `add ax,word ptr <group>:<symbol>[+<offset>]` — ADD r16,r/m16
     /// with disp16-only addressing (`03 06 lo hi`). Same FIXUPP
     /// shape; offset added to the symbol's location.

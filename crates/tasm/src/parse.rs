@@ -452,7 +452,12 @@ fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
             }
             parse_single_op_word_ptr(rest, line.line_no, "imul", |o| Instr::ImulBpRel { offset: o })
         }
-        "idiv" => parse_single_op_word_ptr(rest, line.line_no, "idiv", |o| Instr::IdivBpRel { offset: o }),
+        "idiv" => {
+            if let Some(reg) = Reg16::parse(rest) {
+                return Ok(Instr::IdivReg16 { reg });
+            }
+            parse_single_op_word_ptr(rest, line.line_no, "idiv", |o| Instr::IdivBpRel { offset: o })
+        }
         "cwd" => Ok(Instr::Cwd),
         "cbw" => Ok(Instr::Cbw),
         "lea" => parse_lea(rest, line.line_no),
