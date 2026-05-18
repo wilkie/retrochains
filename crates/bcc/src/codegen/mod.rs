@@ -9255,6 +9255,29 @@ impl<'a> FunctionEmitter<'a> {
             // `!y` and `a && b` / `a || b` yield 0/1 in AX, int-
             // typed. Fixture 856 (`g += !y`).
             ExprKind::Logical { .. } => Some(Type::Int),
+            // Cast to an int-family type. The cast's target type
+            // determines the result. Fixture 857 (`g += (int)c`).
+            ExprKind::Cast { ty, .. } => {
+                if matches!(ty, Type::Int | Type::UInt | Type::Char | Type::UChar) {
+                    Some(ty.clone())
+                } else {
+                    None
+                }
+            }
+            // Comma operator: type is the last subexpression's
+            // type. Fixture 858.
+            ExprKind::Comma { right, .. } => self.rhs_int_compound_type(&right.kind),
+            // Assignment expression: yields the assigned value
+            // in AX. Type comes from the target ident. Fixture 859.
+            ExprKind::AssignExpr { target, .. } => {
+                if let Some(t) = self.globals.type_of(target) {
+                    Some(t.clone())
+                } else if self.locals.has(target) {
+                    Some(self.locals.type_of(target).clone())
+                } else {
+                    None
+                }
+            }
             // Ternary in int-typed branches resolves to int.
             // Fixture 855.
             ExprKind::Ternary { then_value, else_value, .. } => {
