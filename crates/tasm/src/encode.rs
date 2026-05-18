@@ -323,6 +323,7 @@ fn instr_size(instr: &Instr) -> usize {
         Instr::CallNear(_) => 3,
         Instr::MovAxGroupSym { .. }
         | Instr::MovAlGroupSym { .. }
+        | Instr::MovGroupSymAl { .. }
         | Instr::MovReg16OffsetGroupSym { .. } => 3,
         Instr::MovReg16WordGroupSym { .. } => 4,
         Instr::MovGroupSymImm16 { .. } => 6,
@@ -378,6 +379,9 @@ fn instr_size(instr: &Instr) -> usize {
         | Instr::AndGroupSymReg8 { .. }
         | Instr::OrGroupSymReg8 { .. }
         | Instr::XorGroupSymReg8 { .. } => 4,
+        Instr::AndGroupSymImm8 { .. }
+        | Instr::OrGroupSymImm8 { .. }
+        | Instr::XorGroupSymImm8 { .. } => 5,
         Instr::IncBpRel { .. } | Instr::DecBpRel { .. } => 3,
         Instr::ShlGroupSymOne { .. }
         | Instr::SarGroupSymOne { .. }
@@ -1307,6 +1311,11 @@ fn emit_instr(
             // A0 is the 8-bit moffs8 sibling of A1.
             emit_group_sym_lea(&[0xA0], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
         }
+        Instr::MovGroupSymAl { group, symbol, offset } => {
+            // `mov byte ptr <group>:<symbol>, al` → A2 lo hi.
+            // A2 is the moffs8 store sibling of A0/A3. Fixture 683.
+            emit_group_sym_lea(&[0xA2], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
+        }
         Instr::MovReg16OffsetGroupSym { reg, group, symbol, offset } => {
             // `mov r16,offset <group>:<symbol>` → (B8+rc) lo hi.
             // Same FIXUPP shape as MovAxGroupSym. The single opcode
@@ -1528,6 +1537,20 @@ fn emit_instr(
         Instr::XorGroupSymReg8 { group, symbol, offset, reg } => {
             let modrm = 0b00_000_110 | (reg.code() << 3);
             emit_group_sym_lea(&[0x30, modrm], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
+        }
+        Instr::AndGroupSymImm8 { group, symbol, offset, imm } => {
+            // `and byte ptr <group>:<sym>[+N], imm8` → 80 26 lo hi ii.
+            // Grp1 r/m8 imm8 with /4=AND, mod=00 r/m=110. Fixture 685.
+            emit_group_sym_lea(&[0x80, 0x26], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
+            out.push(*imm);
+        }
+        Instr::OrGroupSymImm8 { group, symbol, offset, imm } => {
+            emit_group_sym_lea(&[0x80, 0x0E], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
+            out.push(*imm);
+        }
+        Instr::XorGroupSymImm8 { group, symbol, offset, imm } => {
+            emit_group_sym_lea(&[0x80, 0x36], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
+            out.push(*imm);
         }
         Instr::TestGroupSymImm16 { group, symbol, offset, imm } => {
             // `test word ptr <group>:<sym>[+N], imm16` →

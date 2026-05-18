@@ -595,6 +595,13 @@ pub enum Instr {
     /// `mov al,byte ptr <group>:<symbol>[+<offset>]` — 8-bit moffs8
     /// load (A0 lo hi). Same FIXUPP shape as MovAxGroupSym.
     MovAlGroupSym { group: String, symbol: String, offset: i16 },
+    /// `mov byte ptr <group>:<symbol>[+<offset>], al` — 8-bit moffs8
+    /// store (`A2 lo hi`) + FIXUPP. AL-specific short form for
+    /// writing back to a data-segment byte global; used by the
+    /// char-global compound-with-constant load-modify-store path
+    /// (fixture 683: `g += 5` → `mov al, _g; add al, 5; mov _g,
+    /// al`).
+    MovGroupSymAl { group: String, symbol: String, offset: i16 },
     /// `mov al,byte ptr [si]` — 8A 04. 8-bit load through SI pointer.
     MovAlFromSiPtr,
     /// `mov al,byte ptr [bx]` — 8A 07. 8-bit load through BX pointer.
@@ -827,6 +834,34 @@ pub enum Instr {
         symbol: String,
         offset: i16,
         reg: Reg8,
+    },
+    /// `and byte ptr <group>:<symbol>[+<offset>], imm8` — Grp1 r/m8,
+    /// imm8 with /4=AND. Encoding: `80 26 lo hi ii` (ModR/M 26 =
+    /// mod=00 reg=100 r/m=110). Char-global compound `&=` with a
+    /// constant RHS (fixture 685: `g &= 15` → `80 26 lo hi 0F`).
+    /// Bitwise ops use memory-direct on globals while arith ops
+    /// (+/-) take an AL load-modify-store detour.
+    AndGroupSymImm8 {
+        group: String,
+        symbol: String,
+        offset: i16,
+        imm: u8,
+    },
+    /// `or byte ptr <group>:<symbol>[+<offset>], imm8` — Grp1 /1
+    /// sibling. Encoding: `80 0E lo hi ii`.
+    OrGroupSymImm8 {
+        group: String,
+        symbol: String,
+        offset: i16,
+        imm: u8,
+    },
+    /// `xor byte ptr <group>:<symbol>[+<offset>], imm8` — Grp1 /6
+    /// sibling. Encoding: `80 36 lo hi ii`.
+    XorGroupSymImm8 {
+        group: String,
+        symbol: String,
+        offset: i16,
+        imm: u8,
     },
     /// `test word ptr <group>:<symbol>[+<offset>], imm16` — TEST
     /// r/m16, imm16 via Grp3 /0 against a data-segment global.

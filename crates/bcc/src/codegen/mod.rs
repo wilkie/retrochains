@@ -3614,12 +3614,52 @@ impl<'a> FunctionEmitter<'a> {
             );
             return;
         }
+        // Char/uchar global compound with constant byte RHS, two
+        // shapes:
+        //  - Arith (`+=` / `-=`): load-modify-store through AL —
+        //    `mov al, _g; <add|sub> al, K; mov _g, al`. BCC
+        //    canonicalizes `c -= K` as `add al, (256 - K)` (matches
+        //    the broader add-neg-over-sub-const pattern). Fixtures
+        //    683 / 684.
+        //  - Bitwise (`&=` / `|=` / `^=`): memory-direct
+        //    `<op> byte ptr _g, K` (one instruction). Fixture 685.
+        //    Asymmetry vs the int-global path (which uses
+        //    memory-direct for arith too) is empirical; BCC seems to
+        //    pick mem-direct for bitwise but always load-modify-
+        //    store for byte arith.
+        if let Some(gty) = self.globals.type_of(name)
+            && matches!(gty, Type::Char | Type::UChar)
+            && matches!(
+                op,
+                BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor
+            )
+            && let Some(v) = try_const_eval(value)
+        {
+            let v8 = (v & 0xFF) as u8;
+            if matches!(op, BinOp::Add | BinOp::Sub) {
+                let imm = if matches!(op, BinOp::Add) { v8 } else { v8.wrapping_neg() };
+                let _ = write!(self.out, "\tmov\tal,byte ptr DGROUP:_{name}\r\n");
+                let _ = write!(self.out, "\tadd\tal,{imm}\r\n");
+                let _ = write!(self.out, "\tmov\tbyte ptr DGROUP:_{name},al\r\n");
+            } else {
+                let mnem = match op {
+                    BinOp::BitAnd => "and",
+                    BinOp::BitOr => "or",
+                    BinOp::BitXor => "xor",
+                    _ => unreachable!(),
+                };
+                let _ = write!(
+                    self.out,
+                    "\t{mnem}\tbyte ptr DGROUP:_{name},{v8}\r\n",
+                );
+            }
+            return;
+        }
         // Char/uchar global compound `+=` / `-=` / `&=` / `|=` /
         // `^=` with a non-constant byte RHS. BCC loads the RHS into
         // AL and then applies the op memory-direct to the global:
         // `mov al, byte ptr <src>; <op> byte ptr DGROUP:_<g>, al`
-        // (fixtures 680/681/682). Constant-RHS char globals are not
-        // yet probed.
+        // (fixtures 680/681/682).
         if let Some(gty) = self.globals.type_of(name)
             && matches!(gty, Type::Char | Type::UChar)
             && matches!(

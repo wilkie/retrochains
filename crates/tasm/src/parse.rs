@@ -912,6 +912,17 @@ fn parse_mov(operands: &str, line_no: usize) -> AsmResult<Instr> {
                 imm: imm as u8,
             });
         }
+        // `mov byte ptr <group>:<sym>, al` — moffs8 store short
+        // form (`A2 lo hi`). Used by the char-global compound-with-
+        // constant load-modify-store pattern (fixture 683).
+        if rhs == "al" {
+            let (sym, offset) = split_sym_offset(symbol);
+            return Ok(Instr::MovGroupSymAl {
+                group: group.to_string(),
+                symbol: sym.to_string(),
+                offset,
+            });
+        }
     }
     // LHS `word ptr <group>:<sym>[+N]`, RHS `offset <group>:<sym>`
     // — store the address of one global into another. Fixture 480
@@ -1203,6 +1214,16 @@ fn parse_and(operands: &str, line_no: usize) -> AsmResult<Instr> {
                 symbol: sym.to_string(),
                 offset,
                 reg,
+            });
+        }
+        // `and byte ptr <group>:<sym>, imm8` — char-global compound
+        // `&=` with constant RHS (fixture 685).
+        if let Some(imm) = parse_imm8(rhs) {
+            return Ok(Instr::AndGroupSymImm8 {
+                group: group.to_string(),
+                symbol: sym.to_string(),
+                offset,
+                imm: imm as u8,
             });
         }
     }
@@ -2017,6 +2038,14 @@ fn parse_or(operands: &str, line_no: usize) -> AsmResult<Instr> {
                 reg,
             });
         }
+        if let Some(imm) = parse_imm8(rhs) {
+            return Ok(Instr::OrGroupSymImm8 {
+                group: group.to_string(),
+                symbol: sym.to_string(),
+                offset,
+                imm: imm as u8,
+            });
+        }
     }
     Err(AsmError::new(
         line_no,
@@ -2128,6 +2157,14 @@ fn parse_xor(operands: &str, line_no: usize) -> AsmResult<Instr> {
                 symbol: sym.to_string(),
                 offset,
                 reg,
+            });
+        }
+        if let Some(imm) = parse_imm8(rhs) {
+            return Ok(Instr::XorGroupSymImm8 {
+                group: group.to_string(),
+                symbol: sym.to_string(),
+                offset,
+                imm: imm as u8,
             });
         }
     }
