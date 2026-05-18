@@ -1792,6 +1792,29 @@ changes:
   int): the standard cmp-as-branch path lowers `!=` to `cmp;
   jne` over the operand pair.
 
+## `char f(char c) { return c; }` — no widen on char return
+
+Fixture `643` — char-returning function with a char-typed
+return value. Our `emit_return_value_load` had a special
+arm for unsigned char globals (no widen) but otherwise fell
+through to `emit_expr_to_ax`, which widens char idents to AX
+via `cbw`. BCC's ABI for char-returning functions is "AL
+holds the value, AH is garbage" — the caller widens after
+the call if it needs an int. Added a signed-char-return arm
+that loads the char directly into AL (without cbw): `mov al,
+byte ptr [bp+N]` for stack chars or `mov al, <reg8>` for
+register chars. This addresses the deferred batch-96 item
+about char-returning function bodies through AL.
+
+## Free passes (batch 108)
+
+- `641` — `do { x++; } while (x != 5);` (do-while with `!=`
+  test): the do-while lowering and `!=` branch combine cleanly.
+- `642` — `char c; c = 16; c >>= 2;` (char compound right
+  shift, K=2): the existing char compound shift path unrolls
+  `sar al, 1` (signed) twice — sibling of fixture 535's
+  `c <<= 2`.
+
 ### Deferred from batch 88
 
 - Probed `int a[5]; return sizeof(a);` (`582` first draft).
