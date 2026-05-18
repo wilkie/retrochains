@@ -1959,6 +1959,35 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `int` global compound `/=` uchar, `%=` char, `*=` int
+
+Fixtures `800` (`g /= uchar c`), `801` (`g %= char c`),
+`802` (`g *= int x`) — fills out the int-compound dispatch.
+
+- `800` — free pass off batch 160's `Type::Char|Type::UChar
+  + Div|Mod` arm. The signed `idiv bx` correctly handles
+  zero-extended uchar divisor (always positive).
+- `801` — free pass via the same arm: `%=` differs only
+  in which register the helper stores back (`dx` vs `ax`),
+  which the arm already selects from the op variant.
+- `802` — int `*= int x`: no widening needed since both
+  operands are 16-bit, so BCC uses the single-operand
+  `imul word ptr [bp+N]` form (F7 6E dd) directly against
+  memory:
+
+  ```
+  mov ax, word ptr DGROUP:_<g>
+  imul word ptr [bp-N]         ; DX:AX = AX * mem
+  mov word ptr DGROUP:_<g>, ax ; low-16 stored
+  ```
+
+  Added a narrow arm in `emit_compound_assign` gated on
+  `int LHS + Type::Int|Type::UInt RHS + BinOp::Mul +
+  stack-local RHS`. Reuses the existing `ImulBpRel` IR
+  variant — codegen-only change. The byte-RHS Mul arm
+  (fixture 796) handles the push/pop shuffle case
+  separately.
+
 ## `int` global compound `*=` uchar, `/=` char, `+=` int
 
 Fixtures `797` (`g *= uchar c`), `798` (`g /= char c`),
