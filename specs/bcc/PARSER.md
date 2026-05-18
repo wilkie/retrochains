@@ -1959,6 +1959,27 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `char` global `<<=` const and `|=` / `^=` const free passes
+
+Fixtures `686` (`g |= 8`), `687` (`g ^= 31`), `688` (`g <<= 2`).
+
+- `686` / `687` — free passes off batch 122's bitwise mem-
+  direct shape: the `OrGroupSymImm8` / `XorGroupSymImm8`
+  encoders and parser entries added then already handled
+  these. Codegen's bitwise-const arm already covered all
+  three of `&|^`.
+- `688` — needed a new shape. BCC's `g <<= K` for char
+  global unrolls into K memory-direct `shl byte ptr _g, 1`
+  (encoding `D0 26 lo hi` + FIXUPP) — the same unroll
+  pattern as the int-global path but with the 8-bit `D0 /4`
+  opcode instead of the 16-bit `D1 /4`. Added
+  `ShlGroupSymByteOne` / `SarGroupSymByteOne` /
+  `ShrGroupSymByteOne` tasm IR variants and parser arms
+  (each `parse_*_one` now tries `parse_byte_group_symbol`
+  before falling through to register). Codegen path picks
+  signedness via `gty.is_unsigned()` (signed char → SAR,
+  unsigned char → SHR for `>>=`).
+
 ## `char` global compound with constant RHS
 
 Fixtures `683` (`g += 5`), `684` (`g -= 7`), `685` (`g &= 15`)
