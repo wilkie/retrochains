@@ -3476,6 +3476,40 @@ impl<'a> FunctionEmitter<'a> {
             let _ = write!(self.out, "\tmov\tword ptr {lhs_lo},ax\r\n");
             return;
         }
+        // Long LHS `/= uchar c` / `%= uchar c` (unsigned-byte
+        // widening). uchar materializes in AX via `mov ah, 0`, so
+        // unlike the `/= uint` arm BCC can't use AX to source the
+        // pushed `0` for the widened RHS high half — it zeroes DX
+        // instead: `mov al, <c>; mov ah, 0; xor dx, dx; push dx;
+        // push ax; push <lhs_hi>; push <lhs_lo>; call <helper>`.
+        // Helper still picked from LHS signedness. Fixture 788.
+        if let Some(ty_lhs) = self.lhs_long_type(name)
+            && ty_lhs.is_long_like()
+            && let Some(ty_rhs) = self.rhs_type_for_long_widening(&value.kind)
+            && matches!(ty_rhs, Type::UChar)
+            && matches!(op, BinOp::Div | BinOp::Mod)
+        {
+            let unsigned = ty_lhs.is_unsigned();
+            let helper = match (op, unsigned) {
+                (BinOp::Div, false) => "N_LDIV@",
+                (BinOp::Mod, false) => "N_LMOD@",
+                (BinOp::Div, true)  => "N_LUDIV@",
+                (BinOp::Mod, true)  => "N_LUMOD@",
+                _ => unreachable!(),
+            };
+            let (lhs_lo, lhs_hi) = self.long_halves_of(name);
+            self.emit_expr_to_ax(value);
+            self.out.extend_from_slice(b"\txor\tdx,dx\r\n");
+            self.out.extend_from_slice(b"\tpush\tdx\r\n");
+            self.out.extend_from_slice(b"\tpush\tax\r\n");
+            let _ = write!(self.out, "\tpush\tword ptr {lhs_hi}\r\n");
+            let _ = write!(self.out, "\tpush\tword ptr {lhs_lo}\r\n");
+            let _ = write!(self.out, "\tcall\tnear ptr {helper}\r\n");
+            self.helpers.insert(helper.to_string());
+            let _ = write!(self.out, "\tmov\tword ptr {lhs_hi},dx\r\n");
+            let _ = write!(self.out, "\tmov\tword ptr {lhs_lo},ax\r\n");
+            return;
+        }
         // Long LHS `/= uint x` / `%= uint x` (unsigned widening).
         // Zero-extension lets BCC push a literal 0 (`xor ax, ax;
         // push ax`) for the widened RHS high half, then push the
@@ -3517,14 +3551,18 @@ impl<'a> FunctionEmitter<'a> {
             let _ = write!(self.out, "\tmov\tword ptr {lhs_lo},ax\r\n");
             return;
         }
-        // Long LHS shift by an int RHS — same helper-call shape as
-        // `long <<= long h`, with the shift count read as `byte ptr`
-        // out of the int's storage. Fixture 760.
+        // Long LHS shift by an int/char RHS — same helper-call
+        // shape as `long <<= long h`, with the shift count read as
+        // `byte ptr` out of the RHS's storage. `mov cl, byte ptr
+        // <addr>` works regardless of RHS width (CL only needs the
+        // low byte) and regardless of RHS signedness (the shift
+        // count is bounded by long width anyway). Fixture 760
+        // (int/uint), fixture 789 (char/uchar).
         if let Some(ty_lhs) = self.lhs_long_type(name)
             && ty_lhs.is_long_like()
             && let ExprKind::Ident(b) = &value.kind
             && let Some(ty_rhs) = self.rhs_type_for_long_widening(&value.kind)
-            && matches!(ty_rhs, Type::Int | Type::UInt)
+            && matches!(ty_rhs, Type::Int | Type::UInt | Type::Char | Type::UChar)
             && matches!(op, BinOp::Shl | BinOp::Shr)
         {
             let unsigned = ty_lhs.is_unsigned();
