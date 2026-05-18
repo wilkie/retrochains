@@ -4140,6 +4140,64 @@ impl<'a> FunctionEmitter<'a> {
             );
             return;
         }
+        // Int/uint global compound add/sub/bit* with a non-const
+        // local RHS (int/uint or char/uchar that widens through
+        // AX). `emit_expr_to_ax` handles the byte-to-int widening
+        // (cbw for signed char, `mov ah, 0` for unsigned), and
+        // the same memory-direct `<op> word ptr DGROUP:_<name>,
+        // ax` finishes the int compound. Fixture 794 (`g += char c`).
+        if let Some(gty) = self.globals.type_of(name)
+            && matches!(gty, Type::Int | Type::UInt)
+            && matches!(
+                op,
+                BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor
+            )
+            && let Some(ty_rhs) = self.rhs_type_for_long_widening(&value.kind)
+            && matches!(ty_rhs, Type::Int | Type::UInt | Type::Char | Type::UChar)
+            && let ExprKind::Ident(b) = &value.kind
+            && !self.globals.contains(b)
+        {
+            self.emit_expr_to_ax(value);
+            let mnem = match op {
+                BinOp::Add => "add",
+                BinOp::Sub => "sub",
+                BinOp::BitAnd => "and",
+                BinOp::BitOr => "or",
+                BinOp::BitXor => "xor",
+                _ => unreachable!(),
+            };
+            let _ = write!(
+                self.out,
+                "\t{mnem}\tword ptr DGROUP:_{name},ax\r\n",
+            );
+            return;
+        }
+        // Int/uint global compound `*=` with a char/uchar local
+        // RHS. `emit_expr_to_ax` materializes the widened byte in
+        // AX, but AX is needed for the LHS load (which feeds
+        // `imul`). BCC inserts a `push ax; ...; pop dx` shuffle
+        // to park the widened RHS in DX while AX takes the LHS.
+        // `imul dx` then computes DX:AX = AX * DX (signed); the
+        // low-16 store back ignores DX. Note BCC uses signed
+        // `imul` even for `uchar` — the zero-extended dividend
+        // is positive so the low-16 product is identical. Fixture
+        // 796.
+        if let Some(gty) = self.globals.type_of(name)
+            && matches!(gty, Type::Int | Type::UInt)
+            && matches!(op, BinOp::Mul)
+            && let Some(ty_rhs) = self.rhs_type_for_long_widening(&value.kind)
+            && matches!(ty_rhs, Type::Char | Type::UChar)
+            && let ExprKind::Ident(b) = &value.kind
+            && !self.globals.contains(b)
+        {
+            self.emit_expr_to_ax(value);
+            self.out.extend_from_slice(b"\tpush\tax\r\n");
+            let _ = write!(self.out, "\tmov\tax,word ptr DGROUP:_{name}\r\n");
+            self.out.extend_from_slice(b"\tpop\tdx\r\n");
+            self.out.extend_from_slice(b"\timul\tdx\r\n");
+            let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name},ax\r\n");
+            return;
+        }
         // Char/uchar global compound `*= K` — two shapes:
         //  - K is power of two: unroll `shl al, 1` log2(K) times
         //    around an AL load-modify-store. Fixture 690.
