@@ -3307,6 +3307,41 @@ impl<'a> FunctionEmitter<'a> {
             let _ = write!(self.out, "\t{hi_op}\tword ptr {lhs_hi},dx\r\n");
             return;
         }
+        // Long LHS shift by an int RHS — same helper-call shape as
+        // `long <<= long h`, with the shift count read as `byte ptr`
+        // out of the int's storage. Fixture 760.
+        if let Some(ty_lhs) = self.lhs_long_type(name)
+            && ty_lhs.is_long_like()
+            && let ExprKind::Ident(b) = &value.kind
+            && let Some(ty_rhs) = self.rhs_type_for_long_widening(&value.kind)
+            && matches!(ty_rhs, Type::Int | Type::UInt)
+            && matches!(op, BinOp::Shl | BinOp::Shr)
+        {
+            let unsigned = ty_lhs.is_unsigned();
+            let helper = match (op, unsigned) {
+                (BinOp::Shl, _)     => "N_LXLSH@",
+                (BinOp::Shr, false) => "N_LXRSH@",
+                (BinOp::Shr, true)  => "N_LXURSH@",
+                _ => unreachable!(),
+            };
+            let (lhs_lo, lhs_hi) = self.long_halves_of(name);
+            let rhs_lo_byte = if self.globals.contains(b) {
+                format!("byte ptr DGROUP:_{b}")
+            } else {
+                let LocalLocation::Stack(off) = self.locals.location_of(b) else {
+                    unreachable!();
+                };
+                format!("byte ptr {}", bp_addr(off))
+            };
+            let _ = write!(self.out, "\tmov\tcl,{rhs_lo_byte}\r\n");
+            let _ = write!(self.out, "\tmov\tdx,word ptr {lhs_hi}\r\n");
+            let _ = write!(self.out, "\tmov\tax,word ptr {lhs_lo}\r\n");
+            let _ = write!(self.out, "\tcall\tnear ptr {helper}\r\n");
+            self.helpers.insert(helper.to_string());
+            let _ = write!(self.out, "\tmov\tword ptr {lhs_hi},dx\r\n");
+            let _ = write!(self.out, "\tmov\tword ptr {lhs_lo},ax\r\n");
+            return;
+        }
         // Long compound on a long LHS (global or stack local) with
         // a long RHS (global or stack local), but not both globals
         // (which keeps the existing branch). Mul/Div/Mod use the
