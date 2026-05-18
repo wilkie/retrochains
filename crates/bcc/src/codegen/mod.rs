@@ -629,8 +629,18 @@ impl<'a> FunctionEmitter<'a> {
                     return;
                 }
             }
-            let width = if gty.is_char_like() { "byte" } else { "word" };
-            let _ = write!(self.out, "\t{mnemonic}\t{width} ptr DGROUP:_{name}\r\n");
+            // Byte globals take an AL load-modify-store detour
+            // rather than memory-direct `inc byte ptr <g>` — matches
+            // BCC's consistent "byte arith goes through AL" pattern
+            // (also seen for `g += K`, fixture 683). Fixture 700
+            // (`++g` → `mov al, _g; inc al; mov _g, al`).
+            if gty.is_char_like() {
+                let _ = write!(self.out, "\tmov\tal,byte ptr DGROUP:_{name}\r\n");
+                let _ = write!(self.out, "\t{mnemonic}\tal\r\n");
+                let _ = write!(self.out, "\tmov\tbyte ptr DGROUP:_{name},al\r\n");
+                return;
+            }
+            let _ = write!(self.out, "\t{mnemonic}\tword ptr DGROUP:_{name}\r\n");
             return;
         }
         // Pointer increment / decrement uses the pointee's size as
