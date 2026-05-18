@@ -807,7 +807,7 @@ fn stmt_has_div_or_mod(stmt: &Stmt, char_locals: &HashSet<&str>) -> bool {
         StmtKind::DerefAssign { target, value } => {
             expr_has_div_or_mod(target) || expr_has_div_or_mod(value)
         }
-        StmtKind::DerefCompoundAssign { op, target, value } => {
+        StmtKind::DerefCompoundAssign { op, target, value, .. } => {
             matches!(op, crate::ast::BinOp::Div | crate::ast::BinOp::Mod)
                 || expr_has_div_or_mod(target)
                 || expr_has_div_or_mod(value)

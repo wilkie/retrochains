@@ -413,6 +413,8 @@ fn instr_size(instr: &Instr) -> usize {
         Instr::AndSiPtrByteImm8 { .. }
         | Instr::OrSiPtrByteImm8 { .. }
         | Instr::XorSiPtrByteImm8 { .. } => 3,
+        Instr::AddSiPtrReg8 { .. } | Instr::SubSiPtrReg8 { .. } => 2,
+        Instr::IncSiPtrByte | Instr::DecSiPtrByte => 2,
         Instr::AdcSiDispImm8 { .. } | Instr::SbbSiDispImm8 { .. } => 4,
         Instr::AddSiPtrDx => 2,
         Instr::AdcSiDispAx { .. } => 3,
@@ -1795,6 +1797,29 @@ fn emit_instr(
             out.push(0x83);
             out.push(0x2C);
             out.push(*imm as u8);
+        }
+        Instr::AddSiPtrReg8 { src } => {
+            // `add byte ptr [si], <reg8>` → 00 (mod=00 reg=<r>
+            // r/m=100). Fixture 713 (`add [si], al` = 00 04).
+            out.push(0x00);
+            out.push(0b00_000_100 | (src.code() << 3));
+        }
+        Instr::SubSiPtrReg8 { src } => {
+            // `sub byte ptr [si], <reg8>` → 28 (mod=00 reg=<r>
+            // r/m=100).
+            out.push(0x28);
+            out.push(0b00_000_100 | (src.code() << 3));
+        }
+        Instr::IncSiPtrByte => {
+            // `inc byte ptr [si]` → FE 04. Grp4 /0 r/m8 with
+            // mod=00 r/m=100. Fixture 714.
+            out.push(0xFE);
+            out.push(0x04);
+        }
+        Instr::DecSiPtrByte => {
+            // `dec byte ptr [si]` → FE 0C.
+            out.push(0xFE);
+            out.push(0x0C);
         }
         Instr::AndSiPtrByteImm8 { imm } => {
             // `and byte ptr [si],imm8` → 80 24 ii.

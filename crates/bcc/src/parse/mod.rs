@@ -1179,11 +1179,14 @@ impl Parser {
                     ExprKind::Member { base, field, kind: mk } => Ok(Stmt {
                         kind: StmtKind::MemberCompoundAssign {
                             base: *base, field, kind: mk, op, value,
+                            from_postfix: false,
                         },
                         span,
                     }),
                     ExprKind::Deref(target) => Ok(Stmt {
-                        kind: StmtKind::DerefCompoundAssign { target: *target, op, value },
+                        kind: StmtKind::DerefCompoundAssign {
+                            target: *target, op, value, from_postfix: false,
+                        },
                         span,
                     }),
                     ExprKind::ArrayIndex { .. } => {
@@ -1203,7 +1206,9 @@ impl Parser {
                         };
                         indices.reverse();
                         Ok(Stmt {
-                            kind: StmtKind::ArrayCompoundAssign { array, indices, op, value },
+                            kind: StmtKind::ArrayCompoundAssign {
+                                array, indices, op, value, from_postfix: false,
+                            },
                             span,
                         })
                     }
@@ -1250,11 +1255,14 @@ impl Parser {
                 ExprKind::Member { base, field, kind: mk } => Ok(Stmt {
                     kind: StmtKind::MemberCompoundAssign {
                         base: *base, field, kind: mk, op, value,
+                        from_postfix: true,
                     },
                     span,
                 }),
                 ExprKind::Deref(target) => Ok(Stmt {
-                    kind: StmtKind::DerefCompoundAssign { target: *target, op, value },
+                    kind: StmtKind::DerefCompoundAssign {
+                        target: *target, op, value, from_postfix: true,
+                    },
                     span,
                 }),
                 ExprKind::ArrayIndex { .. } => {
@@ -1274,7 +1282,9 @@ impl Parser {
                     };
                     indices.reverse();
                     Ok(Stmt {
-                        kind: StmtKind::ArrayCompoundAssign { array, indices, op, value },
+                        kind: StmtKind::ArrayCompoundAssign {
+                            array, indices, op, value, from_postfix: true,
+                        },
                         span,
                     })
                 }
@@ -1307,11 +1317,14 @@ impl Parser {
                         kind: mk,
                         op,
                         value,
+                        from_postfix: false,
                     },
                     span,
                 }),
                 ExprKind::Deref(target) => Ok(Stmt {
-                    kind: StmtKind::DerefCompoundAssign { target: *target, op, value },
+                    kind: StmtKind::DerefCompoundAssign {
+                        target: *target, op, value, from_postfix: false,
+                    },
                     span,
                 }),
                 ExprKind::ArrayIndex { .. } => {
@@ -1333,7 +1346,9 @@ impl Parser {
                     };
                     indices.reverse();
                     Ok(Stmt {
-                        kind: StmtKind::ArrayCompoundAssign { array, indices, op, value },
+                        kind: StmtKind::ArrayCompoundAssign {
+                            array, indices, op, value, from_postfix: false,
+                        },
                         span,
                     })
                 }

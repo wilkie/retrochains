@@ -466,9 +466,9 @@ impl<'a> FunctionEmitter<'a> {
                 self.advance_to_stmt_line(stmt);
                 self.emit_array_assign(array, indices, value);
             }
-            StmtKind::ArrayCompoundAssign { array, indices, op, value } => {
+            StmtKind::ArrayCompoundAssign { array, indices, op, value, from_postfix } => {
                 self.advance_to_stmt_line(stmt);
-                self.emit_array_compound_assign(array, indices, *op, value);
+                self.emit_array_compound_assign(array, indices, *op, value, *from_postfix);
             }
             StmtKind::MemberArrayAssign { base, field, indices, value } => {
                 self.advance_to_stmt_line(stmt);
@@ -478,17 +478,17 @@ impl<'a> FunctionEmitter<'a> {
                 self.advance_to_stmt_line(stmt);
                 self.emit_deref_assign(target, value);
             }
-            StmtKind::DerefCompoundAssign { target, op, value } => {
+            StmtKind::DerefCompoundAssign { target, op, value, from_postfix } => {
                 self.advance_to_stmt_line(stmt);
-                self.emit_deref_compound_assign(target, *op, value);
+                self.emit_deref_compound_assign(target, *op, value, *from_postfix);
             }
             StmtKind::MemberAssign { base, field, kind, value } => {
                 self.advance_to_stmt_line(stmt);
                 self.emit_member_assign(base, field, *kind, value);
             }
-            StmtKind::MemberCompoundAssign { base, field, kind, op, value } => {
+            StmtKind::MemberCompoundAssign { base, field, kind, op, value, from_postfix } => {
                 self.advance_to_stmt_line(stmt);
-                self.emit_member_compound_assign(base, field, *kind, *op, value);
+                self.emit_member_compound_assign(base, field, *kind, *op, value, *from_postfix);
             }
             StmtKind::If { cond, then_branch, else_branch } => {
                 self.advance_to_stmt_line(stmt);
@@ -5079,6 +5079,7 @@ impl<'a> FunctionEmitter<'a> {
         indices: &[Expr],
         op: BinOp,
         value: &Expr,
+        _from_postfix: bool,
     ) {
         // Long-element path. For both global (`long a[];`) and stack
         // (`long a[N];` as a local) array bases with a constant index,
@@ -5622,6 +5623,7 @@ impl<'a> FunctionEmitter<'a> {
         kind: crate::ast::MemberKind,
         op: BinOp,
         value: &Expr,
+        _from_postfix: bool,
     ) {
         // Long-field path. Resolve the dot/arrow chain to a (lo_addr,
         // hi_addr) pair (struct field at its in-struct offset), then
@@ -5934,7 +5936,13 @@ impl<'a> FunctionEmitter<'a> {
     /// dereferenced pointer. Same shape as `emit_deref_assign` for
     /// address resolution, then emits `<op> <width> ptr [reg],imm`
     /// directly (fixture 183).
-    fn emit_deref_compound_assign(&mut self, target: &Expr, op: BinOp, value: &Expr) {
+    fn emit_deref_compound_assign(
+        &mut self,
+        target: &Expr,
+        op: BinOp,
+        value: &Expr,
+        from_postfix: bool,
+    ) {
         let (base_name, depth) = deref_chain_root(target);
         // Long pointee + register-resident pointer: route through the
         // shared long-compound-to-memory helper. Picks up variable
@@ -5960,6 +5968,57 @@ impl<'a> FunctionEmitter<'a> {
                 value,
                 pointee.is_unsigned(),
             );
+            return;
+        }
+        // Postfix `lv++` / `lv--` (discarded) through a char pointer:
+        // BCC emits memory-direct `inc|dec byte ptr [reg]` rather
+        // than the AL detour used for prefix `++lv` / explicit
+        // `lv += 1`. Same pre-vs-post asymmetry as char-global
+        // (fixture 702 `g++`). Fixture 714 (`(*p)++` standalone).
+        if depth == 0
+            && !is_global
+            && from_postfix
+            && matches!(op, BinOp::Add | BinOp::Sub)
+            && try_const_eval(value) == Some(1)
+            && let ty = self.locals.type_of(base_name).clone()
+            && let Some(pointee) = ty.pointee()
+            && pointee.is_char_like()
+            && let LocalLocation::Reg(reg) = self.locals.location_of(base_name)
+        {
+            let mnem = if matches!(op, BinOp::Add) { "inc" } else { "dec" };
+            let _ = write!(self.out, "\t{mnem}\tbyte ptr [{}]\r\n", reg.name());
+            return;
+        }
+        // Char-pointee `*p <op>= d` (variable RHS): load RHS into
+        // AL, then memory-direct `<op> byte ptr [reg], al`. Mirrors
+        // the char-global var-RHS pattern (batch 121). Fixture 713
+        // (`*p += d` with p in SI, d at [bp-1]).
+        if depth == 0
+            && !is_global
+            && let ty = self.locals.type_of(base_name).clone()
+            && let Some(pointee) = ty.pointee()
+            && pointee.is_char_like()
+            && let LocalLocation::Reg(reg) = self.locals.location_of(base_name)
+            && try_const_eval(value).is_none()
+            && matches!(
+                op,
+                BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor
+            )
+        {
+            let r = reg.name();
+            let src = self.resolve_operand_source(value);
+            self.out.extend_from_slice(b"\tmov\tal,");
+            self.out.extend_from_slice(src.byte().as_bytes());
+            self.out.extend_from_slice(b"\r\n");
+            let mnem = match op {
+                BinOp::Add => "add",
+                BinOp::Sub => "sub",
+                BinOp::BitAnd => "and",
+                BinOp::BitOr => "or",
+                BinOp::BitXor => "xor",
+                _ => unreachable!(),
+            };
+            let _ = write!(self.out, "\t{mnem}\tbyte ptr [{r}],al\r\n");
             return;
         }
         let Some(v) = try_const_eval(value) else {

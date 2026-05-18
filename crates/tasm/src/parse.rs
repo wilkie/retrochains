@@ -585,6 +585,11 @@ fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
                     offset,
                 });
             }
+            // `inc byte ptr [si]` — char postinc through pointer
+            // (fixture 714: `(*p)++` discarded).
+            if rest == "byte ptr [si]" {
+                return Ok(Instr::IncSiPtrByte);
+            }
             Err(AsmError::new(
                 line.line_no,
                 format!("inc: unsupported operand form `{rest}`"),
@@ -619,6 +624,10 @@ fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
                     symbol: sym.to_string(),
                     offset,
                 });
+            }
+            // `dec byte ptr [si]` — char postdec through pointer.
+            if rest == "byte ptr [si]" {
+                return Ok(Instr::DecSiPtrByte);
             }
             Err(AsmError::new(
                 line.line_no,
@@ -1102,6 +1111,12 @@ fn parse_sub(operands: &str, line_no: usize) -> AsmResult<Instr> {
                 offset,
                 reg,
             });
+        }
+    }
+    // `sub byte ptr [si], <reg8>` — char-via-pointer arith `-=`.
+    if lhs == "byte ptr [si]" {
+        if let Some(src) = Reg8::parse(rhs) {
+            return Ok(Instr::SubSiPtrReg8 { src });
         }
     }
     // `sub byte ptr <group>:<sym>[+N], <reg8>` — char compound `-=`
@@ -1666,6 +1681,14 @@ fn parse_add(operands: &str, line_no: usize) -> AsmResult<Instr> {
                 offset,
                 reg,
             });
+        }
+    }
+    // `add byte ptr [si], <reg8>` — char-via-pointer arith with
+    // variable RHS already in the byte register (fixture 713:
+    // `add byte ptr [si], al`).
+    if lhs == "byte ptr [si]" {
+        if let Some(src) = Reg8::parse(rhs) {
+            return Ok(Instr::AddSiPtrReg8 { src });
         }
     }
     // `add byte ptr <group>:<sym>[+N], <reg8>` — char compound `+=`

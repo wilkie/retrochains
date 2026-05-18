@@ -159,12 +159,27 @@ pub enum StmtKind {
         kind: MemberKind,
         op: BinOp,
         value: Expr,
+        /// True when this node came from a postfix `lv++` / `lv--`
+        /// (statement-position, result discarded). False for the
+        /// prefix `++lv` form and for explicit `lv += K`. BCC's
+        /// byte-target codegen picks memory-direct `inc/dec byte
+        /// ptr <dest>` only for this case; everything else takes
+        /// the AL load-modify-store detour. Fixture 702 (`g++` on
+        /// char global was the first probe; member/array/deref
+        /// siblings show the same asymmetry).
+        from_postfix: bool,
     },
     /// `*<target> <op>= <value>;` — compound assignment through a
     /// dereferenced pointer. Sibling of `DerefAssign`; same `add word
     /// ptr [reg], imm8` shape `MemberCompoundAssign` produces, just
     /// with no field offset (fixture 183).
-    DerefCompoundAssign { target: Expr, op: BinOp, value: Expr },
+    DerefCompoundAssign {
+        target: Expr,
+        op: BinOp,
+        value: Expr,
+        /// See `MemberCompoundAssign::from_postfix`.
+        from_postfix: bool,
+    },
     /// `a[<i1>][<i2>]... <op>= <value>;` — compound assignment on an
     /// array element. Indices follow the same outermost-to-innermost
     /// convention as `ArrayAssign`. With all-constant indices BCC
@@ -174,6 +189,8 @@ pub enum StmtKind {
         indices: Vec<Expr>,
         op: BinOp,
         value: Expr,
+        /// See `MemberCompoundAssign::from_postfix`.
+        from_postfix: bool,
     },
     /// `<name> <op>= <value>;` (compound assignment). The codegen
     /// is distinct from `Assign { name, value: name <op> value }` —

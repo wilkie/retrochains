@@ -1073,6 +1073,21 @@ pub enum Instr {
     /// `sub word ptr [si],<imm8sx>` — `83 2C ii`. Low-half partner
     /// for long-pointer `*p -= K`.
     SubSiPtrImm8 { imm: i8 },
+    /// `add byte ptr [si], <reg8>` — `00 (mod=00 reg=<r> r/m=100)`.
+    /// Char-via-pointer arith compound with variable RHS already
+    /// loaded into the byte register (fixture 713: `*p += d` with
+    /// p in SI, d→AL → `mov al, byte ptr [bp-1]; add byte ptr
+    /// [si], al` = `00 04`).
+    AddSiPtrReg8 { src: Reg8 },
+    /// `inc byte ptr [si]` — `FE 04` (Grp4 /0 r/m8, mod=00
+    /// r/m=100). Memory-direct byte increment through SI. BCC
+    /// uses this for postfix `(*p)++` discarded (fixture 714);
+    /// prefix `++*p` and explicit `*p += 1` take the AL detour.
+    IncSiPtrByte,
+    /// `dec byte ptr [si]` — `FE 0C`. Sibling for `(*p)--`.
+    DecSiPtrByte,
+    /// `sub byte ptr [si], <reg8>` — `28 04` sibling.
+    SubSiPtrReg8 { src: Reg8 },
     /// `and byte ptr [si], imm8` — `80 24 ii`. Grp1 r/m8,imm8 with
     /// /4=AND, mod=00 r/m=100. Char-via-pointer bitwise compound
     /// (fixture 712: `*p &= 15`). Char arith goes through AL, but
