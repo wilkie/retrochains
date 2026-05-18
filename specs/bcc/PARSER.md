@@ -1959,6 +1959,24 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `char` field / array postfix `++` / `--`
+
+Fixtures `716` (`g.c++`), `717` (`a[2]++`), `718` (`++a[2]`).
+
+- `716` and `717` — same pre-vs-post asymmetry as `g++`
+  (batch 128) and `(*p)++` (batch 132), applied to the
+  member and array sites. Postfix-discarded compiles to
+  memory-direct `inc byte ptr <dest>`; prefix and explicit
+  compound use the AL detour. Wired the existing
+  `from_postfix` field (added batch 132) through
+  `emit_member_compound_assign` and the global-array arm of
+  `emit_array_compound_assign`; both gain a "char +
+  from_postfix + K=1 + Add|Sub → memory-direct" branch
+  before the AL-detour fallthrough.
+- `718` (`++a[2]`) — free pass. Confirms BCC takes the AL
+  detour for prefix array-element updates, same as
+  `++g.c` (fixture 709).
+
 ## `char` deref var-RHS and postfix `*p++` / `*p--`
 
 Fixtures `713` (`*p += d`), `714` (`(*p)++`), `715` (`(*p)--`).
