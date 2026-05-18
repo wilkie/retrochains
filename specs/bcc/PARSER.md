@@ -1569,6 +1569,26 @@ dx / op` shape.
   idiv bx` with no `mov ax, dx` follow-up (quotient is already
   in AX).
 
+## `while (x--)` — postdec as boolean condition
+
+Fixture `619` — `emit_zero_test` previously handled `Ident`,
+`AssignExpr`, and `Call`. Added a `Post`-update arm that
+materializes the value-then-side-effect sequence via
+`emit_expr_to_ax` and follows with `or ax, ax`. BCC's shape
+for `x--` in a boolean context (with `x` in SI) is `mov ax,
+si; dec si; or ax, ax` — exactly what the existing postdec
+lowering produces when its result is used.
+
+## Free passes (batch 100)
+
+- `617` — `int x; x = 0; if (!x) return 1; return 0;` (`!x`
+  on an int local in if-cond): `emit_cond_branch` already
+  inverts the test through the standard `or ax, ax; je
+  <then>` shape.
+- `618` — `int x; int r; x = 0; r = !x; return r;` (`!x` as
+  a value): `emit_logical_not` materializes `1` or `0` into
+  AX based on the operand's zero-test.
+
 ### Deferred from batch 88
 
 - Probed `int a[5]; return sizeof(a);` (`582` first draft).
