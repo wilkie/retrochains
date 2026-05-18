@@ -3614,6 +3614,58 @@ impl<'a> FunctionEmitter<'a> {
             );
             return;
         }
+        // Char/uchar global compound `*= K` where K is a power of
+        // two — load-modify-store through AL with unrolled `shl al,
+        // 1`. Fixture 690 (`g *= 4` → `mov al, _g; shl al, 1; shl
+        // al, 1; mov _g, al`). Same byte-shift unroll pattern as
+        // the char-local `*= K` path (fixture 633) but with the
+        // load and store wrapping the AL register through the
+        // global. Non-power-of-2 K likely uses a different shape
+        // (probably `mov bl, K; imul bl`); not yet probed.
+        if let Some(gty) = self.globals.type_of(name)
+            && matches!(gty, Type::Char | Type::UChar)
+            && matches!(op, BinOp::Mul)
+            && let Some(k) = try_const_eval(value)
+            && k > 0
+            && (k & (k - 1)) == 0
+            && k <= 256
+        {
+            let shifts = k.trailing_zeros();
+            let _ = write!(self.out, "\tmov\tal,byte ptr DGROUP:_{name}\r\n");
+            for _ in 0..shifts {
+                self.out.extend_from_slice(b"\tshl\tal,1\r\n");
+            }
+            let _ = write!(self.out, "\tmov\tbyte ptr DGROUP:_{name},al\r\n");
+            return;
+        }
+        // Char/uchar global compound `/=` / `%=` with constant K.
+        // BCC widens the global to AX (cbw), loads K into BX,
+        // sign-extends with cwd, then `idiv bx`. For `/=` stores
+        // AL (quotient) back; for `%=` stores DL (low byte of
+        // remainder). Fixture 691 (`g /= 4` → `mov al, _g; cbw;
+        // mov bx, 4; cwd; idiv bx; mov _g, al`). Same 16-bit
+        // signed-div pattern as char-local-const (fixture 640).
+        // Unsigned and the `%=` byte-store path are not yet probed
+        // and may use different instructions.
+        if let Some(gty) = self.globals.type_of(name)
+            && matches!(gty, Type::Char | Type::UChar)
+            && matches!(op, BinOp::Div | BinOp::Mod)
+            && let Some(v) = try_const_eval(value)
+            && matches!(gty, Type::Char)
+        {
+            let v16 = v & 0xFFFF;
+            let _ = write!(self.out, "\tmov\tal,byte ptr DGROUP:_{name}\r\n");
+            self.out.extend_from_slice(b"\tcbw\t\r\n");
+            let _ = write!(self.out, "\tmov\tbx,{v16}\r\n");
+            self.out.extend_from_slice(b"\tcwd\t\r\n");
+            self.out.extend_from_slice(b"\tidiv\tbx\r\n");
+            let result_reg = if matches!(op, BinOp::Div) { "al" } else { "dl" };
+            let _ = write!(
+                self.out,
+                "\tmov\tbyte ptr DGROUP:_{name},{result_reg}\r\n",
+            );
+            return;
+        }
         // Char/uchar global compound `<<=` / `>>=` with constant K.
         // BCC unrolls into K memory-direct shift-by-1 instructions
         // (one per shift): `shl|sar|shr byte ptr _g, 1`. Signedness
