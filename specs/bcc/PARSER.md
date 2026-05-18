@@ -1540,6 +1540,35 @@ the imm path: emit `mov bx, K; cwd; idiv bx`, then for `Mod`
 append `mov ax, dx` (remainder). Symmetric with the compound
 `/= K` path landed in fixture 584.
 
+## `x * K` — non-power-of-2 path
+
+Fixture `615` (`return x * 3;`) — the batch-91 `* K` peephole
+only covered powers of two (`shl ax, 1` unrolling). For other
+constants BCC materializes K in DX and uses single-operand
+`imul dx`. Added the non-power-of-2 arm: `mov dx, K; imul dx`.
+
+## Char-ident RHS — same RHS-first shape as `Call`
+
+Fixture `616` (`int f(int a, char b) { return a + b; }`) —
+loading a char clobbers AX through the `mov al, byte ptr ...;
+cbw` widen, so BCC evaluates the char RHS first, pushes the
+widened result, then loads the int LHS, pops into DX, and
+applies the op. Previously our `emit_binary_right` had a
+char-on-right pattern that produced a functionally equivalent
+result through `push ax / mov al,...; cbw / mov dx, ax / pop
+ax`, which is 2 bytes longer because of the extra `mov dx,
+ax`. Extended the batch-92 RHS-clobbers-AX check (originally
+just `Call`) to also fire on a char-typed `Ident` RHS, routing
+through the cleaner `evaluate RHS / push / evaluate LHS / pop
+dx / op` shape.
+
+## Free passes (batch 99)
+
+- `614` — `return x / 7;` (int divide by const): the batch-98
+  `Div` immediate path already covers this — `mov bx, K; cwd;
+  idiv bx` with no `mov ax, dx` follow-up (quotient is already
+  in AX).
+
 ### Deferred from batch 88
 
 - Probed `int a[5]; return sizeof(a);` (`582` first draft).
