@@ -1959,6 +1959,29 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `char` update as expression result (int destination)
+
+Fixtures `728` (`int r = c++`), `729` (`int r = ++c`),
+`730` (`int r = c--`) — char update result widened into an
+int destination.
+
+The generic `emit_update_to_ax` path produces the right
+*instructions* (load, widen, store, side-effect) but in the
+wrong *order* — BCC stores before the side effect on Post,
+and threads through AL with explicit write-back on Pre. Added
+two more char-aware fast paths in `emit_assign_local`:
+
+- **Char→int Post**: `mov al, <src>; cbw; mov [bp-N], ax;
+  inc <src>` — store the widened value, then bump source.
+  Unsigned uses `mov ah, 0` for widening.
+- **Char→int Pre**: `mov al, <src>; inc al; mov <src>, al;
+  cbw; mov [bp-N], ax` — bump AL, write back to source,
+  widen, store.
+
+Together with batch 136 (char destination), the byte-source
+update-as-expression path now matches BCC for both
+destination widths and both pre/post positions.
+
 ## `char` update as expression result (char destination)
 
 Fixtures `725` (`d = c++`), `726` (`d = c--`),
