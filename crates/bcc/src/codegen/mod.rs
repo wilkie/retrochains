@@ -3313,6 +3313,27 @@ impl<'a> FunctionEmitter<'a> {
                     let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name},ax\r\n");
                     return;
                 }
+                // Long `g <<= h` / `g >>= h` (both globals). Same
+                // helper-call shape as the K-constant K>1 path
+                // (slices 263/264), but the shift count comes from
+                // h's low byte: `mov cl, byte ptr DGROUP:_h`.
+                // Fixture 739 (`g <<= h`).
+                BinOp::Shl | BinOp::Shr => {
+                    let helper = match (op, unsigned) {
+                        (BinOp::Shl, _)     => "N_LXLSH@",
+                        (BinOp::Shr, false) => "N_LXRSH@",
+                        (BinOp::Shr, true)  => "N_LXURSH@",
+                        _ => unreachable!(),
+                    };
+                    let _ = write!(self.out, "\tmov\tcl,byte ptr DGROUP:_{b}\r\n");
+                    let _ = write!(self.out, "\tmov\tdx,word ptr DGROUP:_{name}+2\r\n");
+                    let _ = write!(self.out, "\tmov\tax,word ptr DGROUP:_{name}\r\n");
+                    let _ = write!(self.out, "\tcall\tnear ptr {helper}\r\n");
+                    self.helpers.insert(helper.to_string());
+                    let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name}+2,dx\r\n");
+                    let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name},ax\r\n");
+                    return;
+                }
                 // Long `g += h` / `g -= h` / `g &= h` / `g |= h` /
                 // `g ^= h` (both globals). BCC loads h's two halves
                 // into AX:DX (AX=high, DX=low) — the same convention

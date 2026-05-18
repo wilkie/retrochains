@@ -325,6 +325,7 @@ fn instr_size(instr: &Instr) -> usize {
         | Instr::MovAlGroupSym { .. }
         | Instr::MovGroupSymAl { .. }
         | Instr::MovReg16OffsetGroupSym { .. } => 3,
+        Instr::MovReg8GroupSym { .. } => 4,
         Instr::MovReg16WordGroupSym { .. } => 4,
         Instr::MovGroupSymImm16 { .. } => 6,
         Instr::MovGroupSymImm8 { .. } => 5,
@@ -1332,6 +1333,13 @@ fn emit_instr(
             // `mov al,byte ptr <group>:<symbol>` → A0 lo hi.
             // A0 is the 8-bit moffs8 sibling of A1.
             emit_group_sym_lea(&[0xA0], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
+        }
+        Instr::MovReg8GroupSym { reg, group, symbol, offset } => {
+            // `mov <reg8>,byte ptr <group>:<symbol>` → 8A (mod=00
+            // reg=<r> r/m=110) lo hi. Generic byte load for non-AL
+            // destinations. Fixture 739.
+            let modrm = 0b00_000_110 | (reg.code() << 3);
+            emit_group_sym_lea(&[0x8A, modrm], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
         }
         Instr::MovGroupSymAl { group, symbol, offset } => {
             // `mov byte ptr <group>:<symbol>, al` → A2 lo hi.

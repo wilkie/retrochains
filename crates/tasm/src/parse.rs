@@ -847,6 +847,17 @@ fn parse_mov(operands: &str, line_no: usize) -> AsmResult<Instr> {
         if let Some(imm) = parse_imm8(rhs) {
             return Ok(Instr::MovReg8Imm8 { reg, imm });
         }
+        // `mov <reg8>, byte ptr <group>:<sym>` for non-AL dst
+        // (fixture 739: `mov cl, byte ptr DGROUP:_h`).
+        if let Some((group, symbol)) = parse_byte_group_symbol(rhs) {
+            let (sym, offset) = split_sym_offset(symbol);
+            return Ok(Instr::MovReg8GroupSym {
+                reg,
+                group: group.to_string(),
+                symbol: sym.to_string(),
+                offset,
+            });
+        }
     }
     // LHS `word ptr [bp+N]` — int-width stack store. We *require*
     // the explicit `word ptr` prefix here so that `mov byte ptr

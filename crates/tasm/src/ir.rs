@@ -595,6 +595,18 @@ pub enum Instr {
     /// `mov al,byte ptr <group>:<symbol>[+<offset>]` — 8-bit moffs8
     /// load (A0 lo hi). Same FIXUPP shape as MovAxGroupSym.
     MovAlGroupSym { group: String, symbol: String, offset: i16 },
+    /// `mov <reg8>,byte ptr <group>:<symbol>[+<offset>]` for non-AL
+    /// dst — `8A (mod=00 reg=<r> r/m=110) lo hi` + FIXUPP. AL keeps
+    /// its shorter `A0`-form `MovAlGroupSym`. Used when BCC loads a
+    /// byte global into a non-AL byte register, e.g. `mov cl, byte
+    /// ptr DGROUP:_h` for long-shift-by-long-variable RHS (fixture
+    /// 739).
+    MovReg8GroupSym {
+        reg: Reg8,
+        group: String,
+        symbol: String,
+        offset: i16,
+    },
     /// `mov byte ptr <group>:<symbol>[+<offset>], al` — 8-bit moffs8
     /// store (`A2 lo hi`) + FIXUPP. AL-specific short form for
     /// writing back to a data-segment byte global; used by the
