@@ -1959,6 +1959,31 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `int` global compound `+=` char-global, `%=` global
+
+Fixtures `812` (`g += char_global c`), `813` (`g += uchar_global c`),
+`814` (`g %= int_global h`).
+
+- `812` — `int g += char c` where both are globals.
+  `emit_expr_to_ax` reads the char global via `mov al,
+  byte ptr DGROUP:_c; cbw`, then the existing mem-direct
+  `add word ptr DGROUP:_g, ax` shape finishes. Relaxed
+  the Add/Sub/Bit* arm's gate from "local RHS only" to
+  any RHS — the same generation works for char/uchar
+  globals and supersedes fixture 571's narrower Int+
+  Int-global arm at the same output bytes.
+- `813` — free pass via the same arm. `emit_expr_to_ax`
+  produces `mov al, ...; mov ah, 0` for the uchar zero-
+  extension.
+- `814` — free pass off batch 164's Mul/Div/Mod arm
+  which already gated `BinOp::Mod` and selects `dx` for
+  the store. Confirms `%=` works with global RHS.
+
+The old `Int+Int-global` Add/Sub arm at fixture 571
+remains in source (still fires first in source order)
+but is now redundant — same emitted bytes. Left in
+place for now since removing wouldn't change behavior.
+
 ## `int` global compound `*=` / `/=` / `<<=` with global RHS
 
 Fixtures `809` (`g *= h`), `810` (`g /= h`), `811` (`g <<= h`)
