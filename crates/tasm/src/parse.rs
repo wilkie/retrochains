@@ -1789,6 +1789,11 @@ fn parse_or(operands: &str, line_no: usize) -> AsmResult<Instr> {
                 offset,
             });
         }
+        // `or ax, imm16` — AX-specific accumulator form (fixture
+        // 611's `x | 8` → `0D 08 00`).
+        if let Some(imm) = parse_imm16(rhs) {
+            return Ok(Instr::OrAxImm16 { imm: imm as u16 });
+        }
     }
     // `or al,imm8` — AL-specific 2-byte encoding.
     if lhs == "al" {
@@ -1869,6 +1874,11 @@ fn parse_xor(operands: &str, line_no: usize) -> AsmResult<Instr> {
                 symbol: sym.to_string(),
                 offset,
             });
+        }
+        // `xor ax, imm16` — AX-specific accumulator form (fixture
+        // 612's `x ^ 3` → `35 03 00`).
+        if let Some(imm) = parse_imm16(rhs) {
+            return Ok(Instr::XorAxImm16 { imm: imm as u16 });
         }
     }
     // `xor al,imm8` — AL-specific 2-byte encoding.

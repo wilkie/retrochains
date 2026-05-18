@@ -323,7 +323,9 @@ fn instr_size(instr: &Instr) -> usize {
         Instr::AddGroupSymImm16 { .. } => 6,
         Instr::AdcAxImm16 { .. }
         | Instr::SbbAxImm16 { .. }
-        | Instr::AndAxImm16 { .. } => 3,
+        | Instr::AndAxImm16 { .. }
+        | Instr::OrAxImm16 { .. }
+        | Instr::XorAxImm16 { .. } => 3,
         Instr::MovAlFromSiPtr | Instr::MovAlFromBxPtr => 2,
         Instr::ImulReg16 { .. } | Instr::IdivReg16 { .. } => 2,
         Instr::AddAxGroupSym { .. }
@@ -1115,6 +1117,18 @@ fn emit_instr(
             // `and ax, imm16` → 25 lo hi. AX-specific accumulator
             // form (fixture 609's `c & 4` after cbw widening).
             out.push(0x25);
+            out.extend_from_slice(&imm.to_le_bytes());
+        }
+        Instr::OrAxImm16 { imm } => {
+            // `or ax, imm16` → 0D lo hi. AX-specific accumulator
+            // form (fixture 611's `x | 8`).
+            out.push(0x0D);
+            out.extend_from_slice(&imm.to_le_bytes());
+        }
+        Instr::XorAxImm16 { imm } => {
+            // `xor ax, imm16` → 35 lo hi. AX-specific accumulator
+            // form (fixture 612's `x ^ 3`).
+            out.push(0x35);
             out.extend_from_slice(&imm.to_le_bytes());
         }
         Instr::MovReg16WordGroupSym { reg, group, symbol, offset } => {

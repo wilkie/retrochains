@@ -7344,18 +7344,34 @@ fn emit_op_with_source(out: &mut Vec<u8>, op: BinOp, src: &OperandSource, unsign
             }
         }
         BinOp::Div => {
-            if matches!(src, OperandSource::Immediate(_)) {
-                panic!("idiv with immediate not supported (no such encoding)");
+            if let OperandSource::Immediate(v) = src {
+                // `idiv` has no immediate form. BCC materializes the
+                // divisor in BX, then `cwd; idiv bx`. Fixture 584
+                // already did this for compound `/=`; this is the
+                // expression-context sibling (no current fixture yet,
+                // but symmetric to the Mod arm below).
+                let v16 = v & 0xFFFF;
+                let _ = write!(out, "\tmov\tbx,{v16}\r\n");
+                out.extend_from_slice(b"\tcwd\t\r\n");
+                out.extend_from_slice(b"\tidiv\tbx\r\n");
+            } else {
+                out.extend_from_slice(b"\tcwd\t\r\n");
+                let _ = write!(out, "\tidiv\t{}\r\n", src.word());
             }
-            out.extend_from_slice(b"\tcwd\t\r\n");
-            let _ = write!(out, "\tidiv\t{}\r\n", src.word());
         }
         BinOp::Mod => {
-            if matches!(src, OperandSource::Immediate(_)) {
-                panic!("idiv with immediate not supported (no such encoding)");
+            if let OperandSource::Immediate(v) = src {
+                // `idiv` has no immediate form. BCC materializes the
+                // divisor in BX, then `cwd; idiv bx; mov ax, dx`.
+                // Fixture 613 (`return x % 7;`).
+                let v16 = v & 0xFFFF;
+                let _ = write!(out, "\tmov\tbx,{v16}\r\n");
+                out.extend_from_slice(b"\tcwd\t\r\n");
+                out.extend_from_slice(b"\tidiv\tbx\r\n");
+            } else {
+                out.extend_from_slice(b"\tcwd\t\r\n");
+                let _ = write!(out, "\tidiv\t{}\r\n", src.word());
             }
-            out.extend_from_slice(b"\tcwd\t\r\n");
-            let _ = write!(out, "\tidiv\t{}\r\n", src.word());
             out.extend_from_slice(b"\tmov\tax,dx\r\n");
         }
         BinOp::Shl | BinOp::Shr => {

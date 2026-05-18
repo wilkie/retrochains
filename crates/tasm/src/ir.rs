@@ -494,6 +494,12 @@ pub enum Instr {
     /// form. Used by `c & K` after the char load + cbw widen (fixture
     /// 609 — `25 04 00`).
     AndAxImm16 { imm: u16 },
+    /// `or ax, imm16` — `0D lo hi`. AX-specific bitwise-OR short
+    /// form (fixture 611's `x | 8` → `0D 08 00`).
+    OrAxImm16 { imm: u16 },
+    /// `xor ax, imm16` — `35 lo hi`. AX-specific bitwise-XOR short
+    /// form (fixture 612's `x ^ 3` → `35 03 00`).
+    XorAxImm16 { imm: u16 },
     /// `mov <reg16>,word ptr <group>:<symbol>[+<offset>]` for non-AX
     /// destinations. Uses MOV r16,r/m16 with disp16-only addressing
     /// (`8B (mod=00 reg=<r> rm=110) lo hi`). Same FIXUPP shape as
