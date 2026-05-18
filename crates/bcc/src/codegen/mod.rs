@@ -6051,10 +6051,88 @@ impl<'a> FunctionEmitter<'a> {
         // Global-pointer subscript compound: `p[K] op= …` for `int *p`
         // at file scope. BCC's shape: load the pointer into BX
         // (`mov bx, word ptr DGROUP:_<p>`), then memory-direct
-        // `<op> word ptr [bx+offset], ax` after evaluating the RHS.
-        // Offset = K * pointee_stride. Fixture 862 (`p[1] += y`).
+        // `<op> word ptr [bx+offset], <rhs>`. Offset = K *
+        // pointee_stride. Fixture 862 (`p[1] += y` — non-const RHS),
+        // 864 (`p[1] += K` — const RHS, imm8sx form).
         if let Some(g_ty) = self.globals.type_of(array)
             && let Some(pointee) = g_ty.pointee()
+            && indices.len() == 1
+            && let Some(k) = try_const_eval(&indices[0])
+            && matches!(pointee, Type::Int | Type::UInt)
+            && matches!(
+                op,
+                BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor
+            )
+        {
+            let stride = i32::from(pointee.size_bytes());
+            let off = (k as i32).wrapping_mul(stride);
+            let bx_disp = if off == 0 {
+                "[bx]".to_owned()
+            } else if off > 0 {
+                format!("[bx+{off}]")
+            } else {
+                format!("[bx-{}]", -off)
+            };
+            let mnem = match op {
+                BinOp::Add => "add",
+                BinOp::Sub => "sub",
+                BinOp::BitAnd => "and",
+                BinOp::BitOr => "or",
+                BinOp::BitXor => "xor",
+                _ => unreachable!(),
+            };
+            let _ = write!(self.out, "\tmov\tbx,word ptr DGROUP:_{array}\r\n");
+            if let Some(v) = try_const_eval(value) {
+                let v_masked = v & 0xFFFF;
+                let _ = write!(
+                    self.out,
+                    "\t{mnem}\tword ptr {bx_disp},{v_masked}\r\n",
+                );
+            } else {
+                self.emit_expr_to_ax(value);
+                let _ = write!(self.out, "\t{mnem}\tword ptr {bx_disp},ax\r\n");
+            }
+            return;
+        }
+        // Char-pointee global-pointer subscript compound: `char *p;
+        // p[K] += y`. BCC uses the AL-arith-through pattern plus a
+        // second `mov bx, _p` reload before the store (BCC doesn't
+        // keep BX alive across the byte arith). Fixture 865.
+        if let Some(g_ty) = self.globals.type_of(array)
+            && let Some(pointee) = g_ty.pointee()
+            && indices.len() == 1
+            && let Some(k) = try_const_eval(&indices[0])
+            && pointee.is_char_like()
+            && matches!(op, BinOp::Add | BinOp::Sub)
+            && try_const_eval(value).is_none()
+            && let Some(rhs_byte) = self.rhs_byte_addr(&value.kind)
+        {
+            let stride = i32::from(pointee.size_bytes());
+            let off = (k as i32).wrapping_mul(stride);
+            let bx_disp = if off == 0 {
+                "[bx]".to_owned()
+            } else if off > 0 {
+                format!("[bx+{off}]")
+            } else {
+                format!("[bx-{}]", -off)
+            };
+            let mnem = if matches!(op, BinOp::Add) { "add" } else { "sub" };
+            let _ = write!(self.out, "\tmov\tbx,word ptr DGROUP:_{array}\r\n");
+            let _ = write!(self.out, "\tmov\tal,byte ptr {bx_disp}\r\n");
+            let _ = write!(self.out, "\t{mnem}\tal,{rhs_byte}\r\n");
+            let _ = write!(self.out, "\tmov\tbx,word ptr DGROUP:_{array}\r\n");
+            let _ = write!(self.out, "\tmov\tbyte ptr {bx_disp},al\r\n");
+            return;
+        }
+        // Register-resident local-pointer subscript compound:
+        // `int *p; p[K] op= …` for a stack-local pointer held in a
+        // register (BCC's typical SI/DI placement). BCC's shape:
+        // `<op> word ptr [<reg>+K*stride], ax` after the RHS lands
+        // in AX. Same offset computation as the global-pointer path,
+        // just with register addressing. Fixture 863.
+        if self.locals.has(array)
+            && let Some(pointee) = self.locals.type_of(array).pointee()
+            && let LocalLocation::Reg(reg) = self.locals.location_of(array)
             && indices.len() == 1
             && let Some(k) = try_const_eval(&indices[0])
             && matches!(pointee, Type::Int | Type::UInt)
@@ -6066,14 +6144,14 @@ impl<'a> FunctionEmitter<'a> {
         {
             let stride = i32::from(pointee.size_bytes());
             let off = (k as i32).wrapping_mul(stride);
-            let bx_disp = if off == 0 {
-                "[bx]".to_owned()
+            let reg_name = reg.name();
+            let disp = if off == 0 {
+                format!("[{reg_name}]")
             } else if off > 0 {
-                format!("[bx+{off}]")
+                format!("[{reg_name}+{off}]")
             } else {
-                format!("[bx-{}]", -off)
+                format!("[{reg_name}-{}]", -off)
             };
-            let _ = write!(self.out, "\tmov\tbx,word ptr DGROUP:_{array}\r\n");
             self.emit_expr_to_ax(value);
             let mnem = match op {
                 BinOp::Add => "add",
@@ -6083,7 +6161,7 @@ impl<'a> FunctionEmitter<'a> {
                 BinOp::BitXor => "xor",
                 _ => unreachable!(),
             };
-            let _ = write!(self.out, "\t{mnem}\tword ptr {bx_disp},ax\r\n");
+            let _ = write!(self.out, "\t{mnem}\tword ptr {disp},ax\r\n");
             return;
         }
         let array_ty = self.locals.type_of(array).clone();

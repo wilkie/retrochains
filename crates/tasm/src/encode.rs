@@ -450,6 +450,13 @@ fn instr_size(instr: &Instr) -> usize {
         | Instr::AndBxDispAx { .. }
         | Instr::OrBxDispAx { .. }
         | Instr::XorBxDispAx { .. } => 3,
+        Instr::AddSiDispAx { .. }
+        | Instr::SubSiDispAx { .. }
+        | Instr::AndSiDispAx { .. }
+        | Instr::OrSiDispAx { .. }
+        | Instr::XorSiDispAx { .. } => 3,
+        Instr::AddBxDispImm8 { .. } | Instr::SubBxDispImm8 { .. } => 4,
+        Instr::MovAlBxDisp { .. } | Instr::MovBxDispAl { .. } => 3,
         Instr::AddAlBpRel { .. }
         | Instr::SubAlBpRel { .. }
         | Instr::AndAlBpRel { .. }
@@ -1988,6 +1995,60 @@ fn emit_instr(
         }
         Instr::XorBxDispAx { disp } => {
             out.push(0x31);
+            out.push(0x47);
+            out.push(*disp as u8);
+        }
+        Instr::AddSiDispAx { disp } => {
+            // `add word ptr [si+disp8],ax` → 01 44 dd. ModR/M `44`
+            // = mod=01 reg=AX(000) r/m=100=SI. Fixture 863.
+            out.push(0x01);
+            out.push(0x44);
+            out.push(*disp as u8);
+        }
+        Instr::SubSiDispAx { disp } => {
+            out.push(0x29);
+            out.push(0x44);
+            out.push(*disp as u8);
+        }
+        Instr::AndSiDispAx { disp } => {
+            out.push(0x21);
+            out.push(0x44);
+            out.push(*disp as u8);
+        }
+        Instr::OrSiDispAx { disp } => {
+            out.push(0x09);
+            out.push(0x44);
+            out.push(*disp as u8);
+        }
+        Instr::XorSiDispAx { disp } => {
+            out.push(0x31);
+            out.push(0x44);
+            out.push(*disp as u8);
+        }
+        Instr::AddBxDispImm8 { disp, imm } => {
+            // `add word ptr [bx+disp8],imm8sx` → 83 47 dd ii.
+            // Group-1 /0 (ADD), mod=01 r/m=111=BX. Fixture 864.
+            out.push(0x83);
+            out.push(0x47);
+            out.push(*disp as u8);
+            out.push(*imm as u8);
+        }
+        Instr::SubBxDispImm8 { disp, imm } => {
+            // `sub word ptr [bx+disp8],imm8sx` → 83 6F dd ii.
+            out.push(0x83);
+            out.push(0x6F);
+            out.push(*disp as u8);
+            out.push(*imm as u8);
+        }
+        Instr::MovAlBxDisp { disp } => {
+            // `mov al,byte ptr [bx+disp8]` → 8A 47 dd. Fixture 865.
+            out.push(0x8A);
+            out.push(0x47);
+            out.push(*disp as u8);
+        }
+        Instr::MovBxDispAl { disp } => {
+            // `mov byte ptr [bx+disp8],al` → 88 47 dd. Sibling.
+            out.push(0x88);
             out.push(0x47);
             out.push(*disp as u8);
         }

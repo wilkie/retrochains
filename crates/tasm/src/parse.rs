@@ -885,6 +885,14 @@ fn parse_mov(operands: &str, line_no: usize) -> AsmResult<Instr> {
         if rhs == "byte ptr [bx]" {
             return Ok(Instr::MovAlFromBxPtr);
         }
+        // `mov al,byte ptr [bx+disp8]` — char-pointer subscript
+        // load (fixture 865). disp=0 stays with `MovAlFromBxPtr`
+        // (2-byte form).
+        if let Some(disp) = parse_byte_bx_disp(rhs)
+            && disp != 0
+        {
+            return Ok(Instr::MovAlBxDisp { disp });
+        }
         // `mov al,byte ptr DGROUP:_g` — 8-bit moffs8 load.
         if let Some((group, symbol)) = parse_byte_group_symbol(rhs) {
             let (sym, offset) = split_sym_offset(symbol);
@@ -1011,6 +1019,15 @@ fn parse_mov(operands: &str, line_no: usize) -> AsmResult<Instr> {
         if let Some(imm) = parse_imm16(rhs) {
             return Ok(Instr::MovBxPtrImm { imm });
         }
+    }
+    // LHS `byte ptr [bx+disp8]` — byte-store through BX pointer at
+    // a small offset, used by `char *p; p[K] op= …` (fixture 865).
+    // disp=0 has no fixture yet so the 2-byte form is deferred.
+    if rhs == "al"
+        && let Some(disp) = parse_byte_bx_disp(lhs)
+        && disp != 0
+    {
+        return Ok(Instr::MovBxDispAl { disp });
     }
     // LHS `word ptr <group>:<sym>[bx+disp]` — store immediate to a
     // data-segment global through bx-indexed addressing. Used by
@@ -1277,6 +1294,22 @@ fn parse_sub(operands: &str, line_no: usize) -> AsmResult<Instr> {
     {
         return Ok(Instr::SubBxDispAx { disp });
     }
+    // `sub word ptr [si+disp8], ax` — sibling of `AddSiDispAx`
+    // (fixture 863).
+    if rhs == "ax"
+        && let Some(disp) = parse_word_si_disp(lhs)
+        && disp != 0
+    {
+        return Ok(Instr::SubSiDispAx { disp });
+    }
+    // `sub word ptr [bx+disp8],<imm8sx>` — const-RHS form
+    // (sibling of `AddBxDispImm8`).
+    if let Some(disp) = parse_word_bx_disp(lhs)
+        && disp != 0
+        && let Some(imm) = parse_imm8_signed(rhs)
+    {
+        return Ok(Instr::SubBxDispImm8 { disp, imm });
+    }
     // Otherwise: try the AX/mem form.
     parse_alu_ax_mem(operands, line_no, "sub", |o| Instr::SubAxBpRel { offset: o })
 }
@@ -1399,6 +1432,14 @@ fn parse_and(operands: &str, line_no: usize) -> AsmResult<Instr> {
         && disp != 0
     {
         return Ok(Instr::AndBxDispAx { disp });
+    }
+    // `and word ptr [si+disp8], ax` — sibling of `AddSiDispAx`
+    // (fixture 863).
+    if rhs == "ax"
+        && let Some(disp) = parse_word_si_disp(lhs)
+        && disp != 0
+    {
+        return Ok(Instr::AndSiDispAx { disp });
     }
     // `and byte ptr [bp+N], imm8` — char-local-array bitwise
     // compound (fixture 720).
@@ -1821,12 +1862,29 @@ fn parse_add(operands: &str, line_no: usize) -> AsmResult<Instr> {
     {
         return Ok(Instr::AddBxDispAx { disp });
     }
+    // `add word ptr [si+disp8], ax` — stack-local pointer subscript
+    // compound where BCC placed the pointer in SI (fixture 863).
+    // disp=0 stays with the existing `AddSiPtrAx` 2-byte form.
+    if rhs == "ax"
+        && let Some(disp) = parse_word_si_disp(lhs)
+        && disp != 0
+    {
+        return Ok(Instr::AddSiDispAx { disp });
+    }
     // `add word ptr [bx],<imm8>` — same shape via BX. Fixture 197
     // (`*p += 5` for a global pointer that's been loaded into BX).
     if lhs == "word ptr [bx]" {
         if let Some(imm) = parse_imm8_signed(rhs) {
             return Ok(Instr::AddBxPtrImm8 { imm });
         }
+    }
+    // `add word ptr [bx+disp8],<imm8sx>` — const-RHS form of the
+    // global-pointer subscript compound (fixture 864).
+    if let Some(disp) = parse_word_bx_disp(lhs)
+        && disp != 0
+        && let Some(imm) = parse_imm8_signed(rhs)
+    {
+        return Ok(Instr::AddBxDispImm8 { disp, imm });
     }
     // `add word ptr [bp+N],<imm8>` — read-modify-write on a stack
     // local. Fixture 184: `a[1] += 5` folds to bp-relative add.
@@ -2371,6 +2429,14 @@ fn parse_or(operands: &str, line_no: usize) -> AsmResult<Instr> {
     {
         return Ok(Instr::OrBxDispAx { disp });
     }
+    // `or word ptr [si+disp8], ax` — sibling of `AddSiDispAx`
+    // (fixture 863).
+    if rhs == "ax"
+        && let Some(disp) = parse_word_si_disp(lhs)
+        && disp != 0
+    {
+        return Ok(Instr::OrSiDispAx { disp });
+    }
     // `or byte ptr [bp+N], imm8` — char-local-array `|=`.
     if let Some(offset) = parse_byte_bp_relative(lhs) {
         if let Some(imm) = parse_imm8(rhs) {
@@ -2530,6 +2596,14 @@ fn parse_xor(operands: &str, line_no: usize) -> AsmResult<Instr> {
         && disp != 0
     {
         return Ok(Instr::XorBxDispAx { disp });
+    }
+    // `xor word ptr [si+disp8], ax` — sibling of `AddSiDispAx`
+    // (fixture 863).
+    if rhs == "ax"
+        && let Some(disp) = parse_word_si_disp(lhs)
+        && disp != 0
+    {
+        return Ok(Instr::XorSiDispAx { disp });
     }
     // `xor byte ptr [bp+N], imm8` — char-local-array `^=`.
     if let Some(offset) = parse_byte_bp_relative(lhs) {
@@ -2753,6 +2827,20 @@ fn parse_word_si_disp(s: &str) -> Option<i8> {
 /// `<op> word ptr [bx+offset], ax` (fixture 862).
 fn parse_word_bx_disp(s: &str) -> Option<i8> {
     let s = s.trim().strip_prefix("word ptr ")?;
+    let inside = s.strip_prefix('[')?.strip_suffix(']')?;
+    if inside == "bx" {
+        return Some(0);
+    }
+    let rest = inside.strip_prefix("bx")?;
+    let signed: i32 = rest.parse().ok()?;
+    i8::try_from(signed).ok()
+}
+
+/// Byte-width sibling of [`parse_word_bx_disp`]. Recognizes
+/// `byte ptr [bx]` and `byte ptr [bx+K]`/`byte ptr [bx-K]` used
+/// by char-pointer subscripts (`char *p; p[K] op= …`, fixture 865).
+fn parse_byte_bx_disp(s: &str) -> Option<i8> {
+    let s = s.trim().strip_prefix("byte ptr ")?;
     let inside = s.strip_prefix('[')?.strip_suffix(']')?;
     if inside == "bx" {
         return Some(0);

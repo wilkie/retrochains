@@ -1187,6 +1187,37 @@ pub enum Instr {
     OrBxDispAx { disp: i8 },
     /// `xor word ptr [bx+disp8],ax` — `31 47 dd`. Sibling.
     XorBxDispAx { disp: i8 },
+    /// `add word ptr [si+disp8],ax` — `01 44 dd`. ADD r/m16,r16
+    /// with ModR/M `44` = mod=01 reg=AX(000) r/m=100=SI. Memory-
+    /// dest add through a register-resident SI pointer at a small
+    /// signed offset. Used by `int *p; p[K] += y` for a stack-
+    /// local pointer that BCC placed in SI (fixture 863). disp=0
+    /// stays with the existing `AddSiPtrAx` (2-byte form).
+    AddSiDispAx { disp: i8 },
+    /// `sub word ptr [si+disp8],ax` — `29 44 dd`. Sibling.
+    SubSiDispAx { disp: i8 },
+    /// `and word ptr [si+disp8],ax` — `21 44 dd`. Sibling.
+    AndSiDispAx { disp: i8 },
+    /// `or word ptr [si+disp8],ax` — `09 44 dd`. Sibling.
+    OrSiDispAx { disp: i8 },
+    /// `xor word ptr [si+disp8],ax` — `31 44 dd`. Sibling.
+    XorSiDispAx { disp: i8 },
+    /// `add word ptr [bx+disp8],<imm8sx>` — `83 47 dd ii`. Group-1
+    /// `/0` with mod=01 r/m=111 = BX+disp8, imm8 sign-extended to
+    /// 16. Const-RHS form of global-pointer subscript compound
+    /// (fixture 864: `int *p; p[1] += 5`).
+    AddBxDispImm8 { disp: i8, imm: i8 },
+    /// `sub word ptr [bx+disp8],<imm8sx>` — `83 6F dd ii`. Group-1
+    /// `/5` with mod=01 r/m=111 = BX+disp8.
+    SubBxDispImm8 { disp: i8, imm: i8 },
+    /// `mov al,byte ptr [bx+disp8]` — `8A 47 dd`. MOV r8,r/m8 with
+    /// ModR/M `47` = mod=01 reg=AL(000) r/m=111=BX. 8-bit load
+    /// through a BX pointer at a small offset. Used by `char *p;
+    /// p[K] op= …` (fixture 865), where BCC reloads BX before
+    /// the store too.
+    MovAlBxDisp { disp: i8 },
+    /// `mov byte ptr [bx+disp8],al` — `88 47 dd`. Store sibling.
+    MovBxDispAl { disp: i8 },
     /// `add al,byte ptr [bp+<offset>]` — `02 46 dd`. ADD r8,r/m8
     /// with mod=01 reg=AL(000) r/m=110=BP+disp8. Char-array
     /// compound with non-const int RHS truncated to byte (fixture
