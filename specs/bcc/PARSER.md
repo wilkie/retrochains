@@ -1959,6 +1959,33 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `char` arrow-field and `*p` compound
+
+Fixtures `710` (`p->c += 5`), `711` (`*p += 5`), `712`
+(`*p &= 15`). All three with `p` register-resident in SI.
+
+- `710` and `711` — arith char through a pointer follows the
+  same AL detour as char-global: `mov al, byte ptr [si]; add
+  al, K; mov byte ptr [si], al`. The writeback step needed a
+  new tasm IR variant `MovSiPtrReg8` (`88 (mod=00 reg=<r>
+  r/m=100)`, encoding `88 04` for `mov [si], al`) — 8-bit
+  sibling of the existing `MovSiPtrReg16`. Codegen:
+  - `710` routed through `emit_member_compound_assign`'s
+    arrow-with-register-base path; my batch 129 char-field
+    arith arm already covered it once the writeback parsed.
+  - `711` routed through `emit_deref_compound_assign`'s
+    register-pointer fast path (line 5980). Was emitting
+    memory-direct `add byte ptr [reg], K`; added the AL
+    detour branch with the K=1 inc/dec peephole, mirroring
+    the char-field path.
+- `712` — char-via-pointer bitwise stays memory-direct:
+  `and byte ptr [si], 15`. Added tasm IR variants
+  `AndSiPtrByteImm8` / `OrSiPtrByteImm8` /
+  `XorSiPtrByteImm8` (encoding `80 24|0C|34 ii` — Grp1 r/m8
+  imm8 with mod=00 r/m=100). Codegen already emitted the
+  right text via the `mnemonic <width> ptr [reg], K` line;
+  only the parser/encoder side needed the new variants.
+
 ## `char` struct local, field-var-RHS, and field `++`
 
 Fixtures `707` (`s.c += 5` on stack-resident struct local),
