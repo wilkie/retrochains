@@ -1959,6 +1959,33 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `char` global compound with variable RHS
+
+Fixtures `680` (`g += d`), `681` (`g -= d`), `682` (`g &= d`)
+— first char-global compound-with-variable-RHS fixtures. The
+existing global-compound path only knew `int`/`uint` and
+`long`-like targets; char targets fell through to the
+`location_of(name)` panic ("unknown local in codegen") because
+codegen looked up the global name as a local.
+
+- BCC's pattern is two-instruction: load the RHS byte into AL
+  (`mov al, byte ptr <src>`), then memory-direct
+  `<op> byte ptr DGROUP:_<g>, al`. The accumulator register is
+  always AL (BCC never uses other byte regs here, even when
+  the RHS is itself in a byte register — it still routes
+  through AL).
+- Added `AddGroupSymReg8` / `SubGroupSymReg8` /
+  `AndGroupSymReg8` / `OrGroupSymReg8` / `XorGroupSymReg8`
+  tasm IR variants — byte siblings of the existing
+  `AddGroupSymReg16` / `SubGroupSymReg16`. Encoding shape is
+  uniform: `<opcode> (mod=00 reg=<r8> r/m=110) lo hi` +
+  FIXUPP for the disp16. Opcodes: `00` / `28` / `20` / `08` /
+  `30`. Parser entries gated on `parse_byte_group_symbol(lhs)`.
+- Codegen: new arm in `emit_compound_assign` keyed on
+  `globals.type_of(name)` being `Char | UChar`, op in the
+  arithmetic-bitwise set, and `try_const_eval(value).is_none()`
+  (constant RHS path is a separate shape — not yet probed).
+
 ## `unsigned char` `/=` / `%=` by variable — `div`-form pool
 
 Fixtures `677` (unsigned `c /= d`), `678` (unsigned `c %= d`),
