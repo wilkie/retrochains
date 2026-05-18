@@ -1959,6 +1959,38 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `char` parameter compound
+
+Fixtures `722` (`c += 5` on a char param), `723` (`c &= 15`),
+`724` (`c += d` between two char params) — all free passes.
+
+- Char parameters are enregistered into the same byte pool
+  (DL/BL/CL) as local char variables via the locals planner.
+  Once the param is in a byte register, the existing
+  CompoundAssign-on-byte-register path (batch 116/117)
+  handles all the arith/bitwise/shift ops without
+  modification. The probes confirm the param path is
+  byte-exact against BCC.
+
+### Deferred — char postinc as expression result
+
+Probed `d = c++;` and observed BCC emits:
+```
+mov al, dl                 ; load old c
+mov byte ptr [bp-1], al    ; store directly as byte (no widen)
+inc dl                     ; post-increment c
+```
+Our codegen instead emits `mov al, dl; cbw; inc dl; mov byte
+ptr [bp-1], al`. Two issues:
+1. Spurious `cbw` — char-to-char assignment widens through
+   AX in our emit_update_to_ax path, but BCC stores AL
+   directly when both source and destination are byte.
+2. Ordering — BCC stores then increments; we increment then
+   store. Same effect but different bytes.
+
+Held until a focused fix lands; replaced this batch's slot
+with the char-param `&= 15` free pass.
+
 ## `char` stack-local array compound
 
 Fixtures `719` (`a[2] += 5`), `720` (`a[2] &= 15`),
