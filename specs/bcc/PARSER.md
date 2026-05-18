@@ -1959,6 +1959,36 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## char member/array compound; arrow long member ADD
+
+Fixtures `848` (`s.c += y` char member), `849` (`p->l += y`
+arrow long member), `850` (`a[1] &= y` char array bitwise).
+
+- `848` — char member compound with int RHS uses the AL-
+  through pattern (same as fixture 847 char-array
+  arith). Existing char-field path was gated on char-
+  typed RHS only (mem-direct, fixture 708). Split into
+  two paths now: char RHS keeps mem-direct, int RHS
+  uses AL-through.
+- `849` — long pointee compound `*p += int x` (here
+  `p->l` which lowers to `(*p).l` with the pointer in
+  SI). `emit_long_compound_to_mem` widens the int via
+  `cwd` and emits `add word ptr [si], ax / adc word
+  ptr [si+2], dx`. New IR variants `AdcSiDispDx` (`11
+  54 dd`) and `SbbSiDispDx` (`19 54 dd`) for the high-
+  half carry/borrow with DX (existing `AdcSiDispAx`
+  was AX-only, used by long-long add).
+- `850` — char array `&=` int var: BCC keeps the bitwise
+  ops memory-direct rather than going through AL (the
+  same asymmetry as char-global compound, batch
+  121/122). Split the char-array Add/Sub/Bit* path into
+  two: arith uses AL-through, bitwise uses mem-direct.
+
+Also extended `emit_long_compound_to_mem` (member/array
+long compound) to accept the int-RHS widening case —
+opens up long member/array `+=` int var across both
+dot and arrow forms.
+
 ## long member/array += int var; char array += int var
 
 Fixtures `845` (`s.l += y` long member), `846` (`la[1] += y`
