@@ -317,6 +317,15 @@ pub enum Instr {
     /// `xor <reg16>,word ptr [bp+<offset>]` — `33 (mod=01 reg=<r>
     /// r/m=110) dd`. Sibling for compound `^=` (fixture 657).
     XorReg16BpRel { reg: Reg16, offset: i16 },
+    /// `add <reg16>,word ptr [bp+<offset>]` — `03 (mod=01 reg=<r>
+    /// r/m=110) dd`. Sibling for compound `+=` on a non-AX reg
+    /// local (fixture 661: `x += y` with x in SI, y at [bp-2]
+    /// → `add si, word ptr [bp-2]` = `03 76 dd`). AX keeps its
+    /// own `AddAxBpRel` variant.
+    AddReg16BpRel { reg: Reg16, offset: i16 },
+    /// `sub <reg16>,word ptr [bp+<offset>]` — `2B (mod=01 reg=<r>
+    /// r/m=110) dd`. Sibling for compound `-=` (fixture 660).
+    SubReg16BpRel { reg: Reg16, offset: i16 },
     /// `cmp ax,word ptr [bp+<offset>]` — 3B 46 dd
     CmpAxBpRel { offset: i16 },
     /// `cmp dx,word ptr [bp+disp8]` — 3B 56 dd. Low-half companion to

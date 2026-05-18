@@ -973,6 +973,14 @@ fn parse_sub(operands: &str, line_no: usize) -> AsmResult<Instr> {
         if let Some(imm) = parse_imm16(rhs) {
             return Ok(Instr::SubReg16Imm16 { reg, imm });
         }
+        // `sub <reg16>, word ptr [bp+N]` — generic register-vs-stack
+        // compound `-=` on a non-AX reg local (fixture 660). AX uses
+        // its dedicated `SubAxBpRel` variant (parse_alu_ax_mem below).
+        if !matches!(reg, Reg16::Ax) {
+            if let Some(offset) = parse_bp_relative(rhs) {
+                return Ok(Instr::SubReg16BpRel { reg, offset });
+            }
+        }
     }
     // `sub word ptr <group>:<sym>[+N], <reg16>` — fixture 571 sibling.
     if let Some((group, symbol)) = parse_group_symbol(lhs) {
@@ -1394,6 +1402,14 @@ fn parse_add(operands: &str, line_no: usize) -> AsmResult<Instr> {
         }
         if let Some(imm) = parse_imm16(rhs) {
             return Ok(Instr::AddReg16Imm16 { reg, imm });
+        }
+        // `add <reg16>, word ptr [bp+N]` — generic register-vs-stack
+        // compound `+=` on a non-AX reg local (fixture 661). AX uses
+        // its dedicated `AddAxBpRel` variant above.
+        if !matches!(reg, Reg16::Ax) {
+            if let Some(offset) = parse_bp_relative(rhs) {
+                return Ok(Instr::AddReg16BpRel { reg, offset });
+            }
         }
     }
     // `add dx, word ptr <group>:<sym>[+N]` — long-arithmetic low-

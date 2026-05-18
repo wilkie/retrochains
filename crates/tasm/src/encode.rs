@@ -289,6 +289,8 @@ fn instr_size(instr: &Instr) -> usize {
         | Instr::OrReg16BpRel { .. }
         | Instr::XorAxBpRel { .. }
         | Instr::XorReg16BpRel { .. }
+        | Instr::AddReg16BpRel { .. }
+        | Instr::SubReg16BpRel { .. }
         | Instr::CmpAxBpRel { .. }
         | Instr::CmpDxBpRel { .. }
         | Instr::CmpReg16BpRel { .. }
@@ -736,6 +738,23 @@ fn emit_instr(
             // r/m=110) dd. Fixture 657.
             let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
             out.push(0x33);
+            out.push(0b01_000_110 | (reg.code() << 3));
+            out.push(disp as u8);
+        }
+        Instr::AddReg16BpRel { reg, offset } => {
+            // `add <reg16>,word ptr [bp+disp8]` → 03 (mod=01 reg=<r>
+            // r/m=110) dd. Fixture 661 (`add si, word ptr [bp-2]`
+            // = 03 76 dd).
+            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
+            out.push(0x03);
+            out.push(0b01_000_110 | (reg.code() << 3));
+            out.push(disp as u8);
+        }
+        Instr::SubReg16BpRel { reg, offset } => {
+            // `sub <reg16>,word ptr [bp+disp8]` → 2B (mod=01 reg=<r>
+            // r/m=110) dd. Fixture 660.
+            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
+            out.push(0x2B);
             out.push(0b01_000_110 | (reg.code() << 3));
             out.push(disp as u8);
         }
