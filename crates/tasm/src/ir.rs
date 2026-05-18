@@ -361,6 +361,15 @@ pub enum Instr {
     /// signed divide of DX:AX by src; quotient in AX, remainder in
     /// DX. Always preceded by `cwd` to sign-extend AX into DX.
     IdivBpRel { offset: i16 },
+    /// `imul word ptr <group>:<symbol>[+<offset>]` — `F7 /5 r/m16`
+    /// with mod=00 r/m=110 → `F7 2E lo hi` + FIXUPP. Single-operand
+    /// signed multiply against a data-segment global. Fixture 809
+    /// (`int g; int h; g *= h`).
+    ImulGroupSym { group: String, symbol: String, offset: i16 },
+    /// `idiv word ptr <group>:<symbol>[+<offset>]` — `F7 /7 r/m16`
+    /// with mod=00 r/m=110 → `F7 3E lo hi` + FIXUPP. Signed
+    /// divide against a data-segment global. Fixture 810.
+    IdivGroupSym { group: String, symbol: String, offset: i16 },
     /// `imul byte ptr [bp+<offset>]` — `F6 (mod=01 /5 r/m=110) dd`
     /// = `F6 6E dd`. 8-bit single-operand signed multiply: AX =
     /// AL * src. Char compound `*=` with mem-resident RHS (fixture

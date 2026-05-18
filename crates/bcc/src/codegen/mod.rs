@@ -4192,18 +4192,44 @@ impl<'a> FunctionEmitter<'a> {
             let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name},ax\r\n");
             return;
         }
-        // Int/uint global compound `<<=` / `>>=` with an int/uint
-        // local RHS. CL gets the shift count's low byte; the
-        // shift acts memory-direct on the global: `mov cl, byte
-        // ptr [bp+N]; shl word ptr DGROUP:_<g>, cl` (or sar/shr
-        // depending on signedness). Fixture 805.
+        // Int/uint global compound `*=` / `/=` / `%=` with another
+        // int/uint global as RHS — `imul`/`idiv word ptr <group>:
+        // <sym>`. Same shape as the local-RHS path, just with a
+        // DGROUP operand. Fixture 809 (`*=`), 810 (`/=`).
+        if let Some(gty) = self.globals.type_of(name)
+            && matches!(gty, Type::Int | Type::UInt)
+            && matches!(op, BinOp::Mul | BinOp::Div | BinOp::Mod)
+            && let ExprKind::Ident(b) = &value.kind
+            && let Some(rhs_ty) = self.globals.type_of(b)
+            && matches!(rhs_ty, Type::Int | Type::UInt)
+        {
+            let _ = write!(self.out, "\tmov\tax,word ptr DGROUP:_{name}\r\n");
+            if matches!(op, BinOp::Mul) {
+                let _ = write!(self.out, "\timul\tword ptr DGROUP:_{b}\r\n");
+                let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name},ax\r\n");
+            } else {
+                self.out.extend_from_slice(b"\tcwd\t\r\n");
+                let _ = write!(self.out, "\tidiv\tword ptr DGROUP:_{b}\r\n");
+                let result_reg = if matches!(op, BinOp::Div) { "ax" } else { "dx" };
+                let _ = write!(
+                    self.out,
+                    "\tmov\tword ptr DGROUP:_{name},{result_reg}\r\n",
+                );
+            }
+            return;
+        }
+        // Int/uint global compound `<<=` / `>>=` with an int/uint/
+        // char/uchar RHS, whether local or another global. CL gets
+        // the shift count's low byte; the shift acts memory-
+        // direct on the global: `mov cl, byte ptr <addr>; shl
+        // word ptr DGROUP:_<g>, cl` (or sar/shr by LHS
+        // signedness). Fixture 805 (local RHS), 811 (global RHS).
         if let Some(gty) = self.globals.type_of(name)
             && matches!(gty, Type::Int | Type::UInt)
             && matches!(op, BinOp::Shl | BinOp::Shr)
             && let Some(ty_rhs) = self.rhs_type_for_long_widening(&value.kind)
             && matches!(ty_rhs, Type::Int | Type::UInt | Type::Char | Type::UChar)
             && let ExprKind::Ident(b) = &value.kind
-            && !self.globals.contains(b)
         {
             let unsigned = gty.is_unsigned();
             let mnem = match (op, unsigned) {
@@ -4212,10 +4238,15 @@ impl<'a> FunctionEmitter<'a> {
                 (BinOp::Shr, true) => "shr",
                 _ => unreachable!(),
             };
-            let LocalLocation::Stack(off) = self.locals.location_of(b) else {
-                unreachable!();
+            let rhs_byte = if self.globals.contains(b) {
+                format!("byte ptr DGROUP:_{b}")
+            } else {
+                let LocalLocation::Stack(off) = self.locals.location_of(b) else {
+                    unreachable!();
+                };
+                format!("byte ptr {}", bp_addr(off))
             };
-            let _ = write!(self.out, "\tmov\tcl,byte ptr {}\r\n", bp_addr(off));
+            let _ = write!(self.out, "\tmov\tcl,{rhs_byte}\r\n");
             let _ = write!(self.out, "\t{mnem}\tword ptr DGROUP:_{name},cl\r\n");
             return;
         }
