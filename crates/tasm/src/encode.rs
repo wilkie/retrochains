@@ -331,6 +331,7 @@ fn instr_size(instr: &Instr) -> usize {
         Instr::MovGroupSymOffsetGroupSym { .. } => 6,
         Instr::MovGroupSymAx { .. } => 3,
         Instr::MovGroupSymReg16 { .. } => 4,
+        Instr::MovGroupSymReg8 { .. } => 4,
         Instr::AddReg16Imm8Sx { .. }
         | Instr::AdcReg16Imm8Sx { .. }
         | Instr::SbbReg16Imm8Sx { .. }
@@ -1318,6 +1319,13 @@ fn emit_instr(
             // `mov byte ptr <group>:<symbol>, al` → A2 lo hi.
             // A2 is the moffs8 store sibling of A0/A3. Fixture 683.
             emit_group_sym_lea(&[0xA2], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
+        }
+        Instr::MovGroupSymReg8 { group, symbol, offset, reg } => {
+            // `mov byte ptr <group>:<symbol>, <reg8>` (non-AL) →
+            // 88 (mod=00 reg=<r> r/m=110) lo hi. Fixture 692 stores
+            // DL (idiv remainder low byte) → `88 16 lo hi`.
+            let modrm = 0b00_000_110 | (reg.code() << 3);
+            emit_group_sym_lea(&[0x88, modrm], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
         }
         Instr::MovReg16OffsetGroupSym { reg, group, symbol, offset } => {
             // `mov r16,offset <group>:<symbol>` → (B8+rc) lo hi.

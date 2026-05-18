@@ -923,6 +923,18 @@ fn parse_mov(operands: &str, line_no: usize) -> AsmResult<Instr> {
                 offset,
             });
         }
+        // `mov byte ptr <group>:<sym>, <reg8>` (non-AL) — generic
+        // 88-form store. Char-global `%= K` stores DL back (fixture
+        // 692).
+        if let Some(reg) = Reg8::parse(rhs) {
+            let (sym, offset) = split_sym_offset(symbol);
+            return Ok(Instr::MovGroupSymReg8 {
+                group: group.to_string(),
+                symbol: sym.to_string(),
+                offset,
+                reg,
+            });
+        }
     }
     // LHS `word ptr <group>:<sym>[+N]`, RHS `offset <group>:<sym>`
     // — store the address of one global into another. Fixture 480

@@ -3614,48 +3614,62 @@ impl<'a> FunctionEmitter<'a> {
             );
             return;
         }
-        // Char/uchar global compound `*= K` where K is a power of
-        // two — load-modify-store through AL with unrolled `shl al,
-        // 1`. Fixture 690 (`g *= 4` → `mov al, _g; shl al, 1; shl
-        // al, 1; mov _g, al`). Same byte-shift unroll pattern as
-        // the char-local `*= K` path (fixture 633) but with the
-        // load and store wrapping the AL register through the
-        // global. Non-power-of-2 K likely uses a different shape
-        // (probably `mov bl, K; imul bl`); not yet probed.
+        // Char/uchar global compound `*= K` — two shapes:
+        //  - K is power of two: unroll `shl al, 1` log2(K) times
+        //    around an AL load-modify-store. Fixture 690.
+        //  - otherwise: widen via `cbw` then 16-bit signed multiply
+        //    through DX (`mov dx, K; imul dx`). Note BCC picks DX
+        //    as the multiplier register here while `/=` uses BX —
+        //    presumably because `imul dx` doesn't touch a register
+        //    `div bx` wouldn't already need free. Fixture 693
+        //    (`g *= 3` → `mov al, _g; cbw; mov dx, 3; imul dx;
+        //    mov _g, al`).
         if let Some(gty) = self.globals.type_of(name)
             && matches!(gty, Type::Char | Type::UChar)
             && matches!(op, BinOp::Mul)
             && let Some(k) = try_const_eval(value)
-            && k > 0
-            && (k & (k - 1)) == 0
-            && k <= 256
         {
-            let shifts = k.trailing_zeros();
             let _ = write!(self.out, "\tmov\tal,byte ptr DGROUP:_{name}\r\n");
-            for _ in 0..shifts {
-                self.out.extend_from_slice(b"\tshl\tal,1\r\n");
+            if k > 0 && (k & (k - 1)) == 0 && k <= 256 {
+                let shifts = k.trailing_zeros();
+                for _ in 0..shifts {
+                    self.out.extend_from_slice(b"\tshl\tal,1\r\n");
+                }
+            } else {
+                let v16 = k & 0xFFFF;
+                self.out.extend_from_slice(b"\tcbw\t\r\n");
+                let _ = write!(self.out, "\tmov\tdx,{v16}\r\n");
+                self.out.extend_from_slice(b"\timul\tdx\r\n");
             }
             let _ = write!(self.out, "\tmov\tbyte ptr DGROUP:_{name},al\r\n");
             return;
         }
         // Char/uchar global compound `/=` / `%=` with constant K.
-        // BCC widens the global to AX (cbw), loads K into BX,
-        // sign-extends with cwd, then `idiv bx`. For `/=` stores
-        // AL (quotient) back; for `%=` stores DL (low byte of
-        // remainder). Fixture 691 (`g /= 4` → `mov al, _g; cbw;
-        // mov bx, 4; cwd; idiv bx; mov _g, al`). Same 16-bit
-        // signed-div pattern as char-local-const (fixture 640).
-        // Unsigned and the `%=` byte-store path are not yet probed
-        // and may use different instructions.
+        // BCC widens the global to AX, loads K into BX,
+        // sign-extends DX:AX with cwd, then `idiv bx`. For `/=`
+        // stores AL (quotient) back; for `%=` stores DL (low byte
+        // of remainder). Fixture 691 (signed `g /= 4`) and
+        // fixture 694 (unsigned `g /= 4`).
+        //
+        // Signed widening uses `cbw`; unsigned uses `mov ah, 0`.
+        // Interestingly BCC keeps the `cwd; idiv bx` (signed
+        // divide) sequence even for `unsigned char` — the
+        // zero-extended dividend fits in [0, 255] which is well
+        // within the positive `idiv` range, so signed division
+        // gives the right answer.
         if let Some(gty) = self.globals.type_of(name)
             && matches!(gty, Type::Char | Type::UChar)
             && matches!(op, BinOp::Div | BinOp::Mod)
             && let Some(v) = try_const_eval(value)
-            && matches!(gty, Type::Char)
         {
             let v16 = v & 0xFFFF;
+            let unsigned = gty.is_unsigned();
             let _ = write!(self.out, "\tmov\tal,byte ptr DGROUP:_{name}\r\n");
-            self.out.extend_from_slice(b"\tcbw\t\r\n");
+            if unsigned {
+                self.out.extend_from_slice(b"\tmov\tah,0\r\n");
+            } else {
+                self.out.extend_from_slice(b"\tcbw\t\r\n");
+            }
             let _ = write!(self.out, "\tmov\tbx,{v16}\r\n");
             self.out.extend_from_slice(b"\tcwd\t\r\n");
             self.out.extend_from_slice(b"\tidiv\tbx\r\n");

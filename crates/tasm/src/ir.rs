@@ -602,6 +602,17 @@ pub enum Instr {
     /// (fixture 683: `g += 5` → `mov al, _g; add al, 5; mov _g,
     /// al`).
     MovGroupSymAl { group: String, symbol: String, offset: i16 },
+    /// `mov byte ptr <group>:<symbol>[+<offset>], <reg8>` for non-AL
+    /// source — `88 (mod=00 reg=<r> r/m=110) lo hi` + FIXUPP. AL
+    /// keeps the shorter `A2` form via `MovGroupSymAl`. Used by
+    /// char-global `%= K` to store DL (low byte of the 16-bit idiv
+    /// remainder) back: fixture 692 → `88 16 lo hi`.
+    MovGroupSymReg8 {
+        group: String,
+        symbol: String,
+        offset: i16,
+        reg: Reg8,
+    },
     /// `mov al,byte ptr [si]` — 8A 04. 8-bit load through SI pointer.
     MovAlFromSiPtr,
     /// `mov al,byte ptr [bx]` — 8A 07. 8-bit load through BX pointer.
