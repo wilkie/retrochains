@@ -1959,6 +1959,27 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `long` compound `>>=` / `*=` / `/=` with `int` RHS
+
+Fixtures `761` (`g >>= x`), `762` (`g *= x`), `763` (`g /= x`).
+
+- `761` — free pass off batch 147's shift-by-int arm.
+- `762` — long `*= int`: BCC routes the cwd-widened RHS
+  through the stack since `cwd` clobbers DX, which the LHS
+  load also needs. Sequence: `mov ax, <x>; cwd; push ax;
+  push dx; mov dx, <lhs_hi>; mov ax, <lhs_lo>; pop cx; pop
+  bx; call N_LXMUL@; store`. Push/pop ordering places
+  RHS-high in CX and RHS-low in BX — matching the helper.
+- `763` — long `/= int`: simpler since `N_LDIV@` takes all
+  four halves via push, not via registers. BCC pushes the
+  widened RHS (high `dx`, then low `ax`), then the LHS's
+  two halves, calls the helper. Modulo and unsigned-LHS
+  variants take their existing helper-dispatch table.
+
+Asymmetry note: `*=` swaps the push-pop dance to free DX
+for the LHS load, while `/=` doesn't need to because the
+helper consumes everything off the stack.
+
 ## `long` compound `|=` / `^=` / `<<=` with `int` RHS
 
 Fixtures `758` (`g |= x`), `759` (`g ^= x`), `760` (`g <<= x`).
