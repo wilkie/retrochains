@@ -1959,6 +1959,36 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Pointer subscript — shift, zero offset, postinc
+
+Fixtures `878` (`int *p; p[1] <<= 3` — shift compound), `879`
+(`int *p; p[0] += y` — zero-offset disp), `880` (`int *p;
+p[1]++` — discarded postinc, the `K=1` add peephole).
+
+879 needs the zero-disp form of the BX-based mem-direct ALU
+ops — `add word ptr [bx], ax` etc. Added five `<op>BxPtrAx`
+variants (`AddBxPtrAx`/`SubBxPtrAx`/`AndBxPtrAx`/`OrBxPtrAx`/
+`XorBxPtrAx`) encoded as `01/29/21/09/31 07` (ModR/M `07` =
+mod=00 reg=AX(000) r/m=111=BX). 2-byte form vs. the 3-byte
+disp8 sibling — TASM picks the right encoding based on whether
+the operand text is `word ptr [bx]` or `word ptr [bx+N]`.
+
+880 needs `IncBxDisp { disp: i8 }` and `DecBxDisp` (`FF 47 dd`
+for INC `/0`, `FF 4F dd` for DEC `/1`). The codegen-side
+peephole was missing too: the global-pointer subscript path
+emitted `add word ptr [bx+2], 1` (4 bytes via the imm8sx form)
+instead of `inc word ptr [bx+2]` (3 bytes). Added the same
+`v_masked == 1 && Add|Sub → inc|dec` peephole that fixture 547
+exercises on the bp-relative array path.
+
+878 needs a Shl/Shr/Sar arm in the global-pointer subscript
+codegen — mirror of the int-global shift path (fixture 539):
+load BX once, then unroll `<shift> word ptr [bx+K*2], 1` for
+each bit of the (compile-time) shift count. Three new IR
+variants `ShlBxDispImm1` (`D1 67 dd`), `SarBxDispImm1` (`D1 7F
+dd`), `ShrBxDispImm1` (`D1 6F dd`) — all Group-2 1-bit shifts
+with mod=01 r/m=111=BX (no `C1` imm8 form on 8086).
+
 ## Pointer subscript — const bitwise, negative index, char const
 
 Fixtures `875` (`int *p; p[1] &= 15` — global int* const-RHS
