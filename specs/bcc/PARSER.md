@@ -1959,6 +1959,47 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `unsigned char` `/=` / `%=` by variable — `div`-form pool
+
+Fixtures `677` (unsigned `c /= d`), `678` (unsigned `c %= d`),
+`679` (unsigned `c *= d`). The first two closed the
+batch-119-deferred allocator drift for `div`-form byte
+operations; the third was a free pass.
+
+- BCC's TASM listing for unsigned byte division includes an
+  explicit accumulator operand — `div al,byte ptr [bp+N]`
+  rather than the bare-form `idiv byte ptr [bp+N]` used for
+  signed. The bytes encode the standard `F6 /6` with ModR/M
+  `76 dd`; the `al,` is just textual. Added `DivByteBpRel`
+  tasm IR variant with a dedicated parser arm (`"div"` =>
+  strips a leading `al,` from the operand) so the listing
+  matches.
+- Codegen: extended the byte-target `Div | Mod` arm of
+  `emit_compound_assign_reg` to branch on
+  `locals.type_of(name).is_unsigned()` and emit the
+  `mov ah, 0; div al,<src>` shape for unsigned (vs `cbw;
+  idiv <src>` for signed). The result store for `%=` reads
+  from AH in both shapes.
+- **Allocator** — BCC's pool changes for the
+  `div`-with-`mov-ah-0` shape: DL is dropped (reason still
+  unverified — see the batch-119 deferred note; this batch
+  pinned only the empirical *order*, not the *why*) and the
+  remaining slots are `[BL, CL]` (natural order — not the
+  reversed `[CL, BL]` used by the signed-16-bit-form pool,
+  where BL is consumed by the divisor). Added
+  `Reg::CHAR_POOL_UDIV = [BL, CL]` and a new
+  `body_has_uchar_byte_div_or_mod` walker that fires on any
+  unsigned-char compound `/=`/`%=` with non-constant RHS;
+  pool selection prioritizes the UDIV variant over
+  `CHAR_POOL_DIV` when both could match (UDIV is the more
+  specific shape since the signed 16-bit form needs `BX`
+  anyway).
+- `679` (`c *= d`, unsigned) was a free pass: BCC uses `imul`
+  (signed instruction) even for unsigned char multiply
+  because the low-byte result is identical, and DL stays in
+  the pool (the multiply doesn't trigger the
+  div-with-`mov-ah-0` rule).
+
 ## `char` `%=` by variable, plus `unsigned char` enregistration
 
 Fixtures `674` (signed `c %= d`), `675` (`unsigned char c >>= d`),
