@@ -814,6 +814,11 @@ pub enum Instr {
     /// Register-store through SI pointer. Used by non-constant
     /// `*p = v` (fixture 595: `*p = *p + 1` → `mov [si], ax`).
     MovSiPtrReg16 { src: Reg16 },
+    /// `mov word ptr [di],<reg16>` — 89 (mod=00 reg=<src> r/m=101).
+    /// Companion to `MovSiPtrReg16` for the second pointer-local
+    /// when BCC enregisters two pointers (fixture 628's `*p = x`
+    /// with `p` in DI).
+    MovDiPtrReg16 { src: Reg16 },
     /// `mov byte ptr [si], imm8` — `C6 04 ii`. Byte-store immediate
     /// through the SI pointer. ModR/M `04` = `mod=00 /0 r/m=100
     /// ([si])`. Used by `*p = K;` for uchar pointers (fixture 465).

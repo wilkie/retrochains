@@ -5304,6 +5304,24 @@ impl<'a> FunctionEmitter<'a> {
                 let _ = write!(self.out, "\tmov\t{width} ptr [{addr_reg}],{v_masked}\r\n");
                 return;
             }
+            // Direct-from-register-local peephole: when the RHS is
+            // a register-resident int local, skip the AX round-trip
+            // and store the register directly through the address
+            // register. Fixture 628 (`*p = x` with p in DI, x in SI
+            // → `mov [di], si`).
+            if !pointee.is_char_like()
+                && let ExprKind::Ident(src_name) = &value.kind
+                && self.locals.has(src_name)
+                && let LocalLocation::Reg(src_reg) = self.locals.location_of(src_name)
+                && !src_reg.is_byte()
+            {
+                let _ = write!(
+                    self.out,
+                    "\tmov\t{width} ptr [{addr_reg}],{}\r\n",
+                    src_reg.name(),
+                );
+                return;
+            }
             // Non-constant RHS: materialize the value in AX/AL,
             // then store through the address register. Fixture 595
             // (`*p = *p + 1` → `mov ax, [si]; inc ax; mov [si], ax`).
@@ -7409,14 +7427,28 @@ fn emit_op_with_source(out: &mut Vec<u8>, op: BinOp, src: &OperandSource, unsign
             out.extend_from_slice(b"\tmov\tax,dx\r\n");
         }
         BinOp::Shl | BinOp::Shr => {
-            let _ = write!(out, "\tmov\tcl,{}\r\n", src.byte());
             let mnemonic = match op {
                 BinOp::Shl => "shl",
                 BinOp::Shr if unsigned => "shr",
                 BinOp::Shr => "sar",
                 _ => unreachable!(),
             };
-            let _ = write!(out, "\t{mnemonic}\tax,cl\r\n");
+            // BCC unrolls expression-context shifts by 1, 2, or 3
+            // into repeated `<mn> ax, 1` rather than the `mov cl, K;
+            // <mn> ax, cl` pair — even when K=3 (which would be
+            // shorter as a CL load). Fixture 627 (`x >> 3` → three
+            // `sar ax, 1`). For K >= 4 BCC switches to the CL form.
+            if let OperandSource::Immediate(k) = src
+                && *k >= 1
+                && *k <= 3
+            {
+                for _ in 0..*k {
+                    let _ = write!(out, "\t{mnemonic}\tax,1\r\n");
+                }
+            } else {
+                let _ = write!(out, "\tmov\tcl,{}\r\n", src.byte());
+                let _ = write!(out, "\t{mnemonic}\tax,cl\r\n");
+            }
         }
         BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
             unreachable!("comparison op should take the cmp-as-value path");

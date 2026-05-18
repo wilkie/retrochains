@@ -816,6 +816,12 @@ fn parse_mov(operands: &str, line_no: usize) -> AsmResult<Instr> {
             return Ok(Instr::MovSiPtrReg16 { src });
         }
     }
+    // LHS `word ptr [di]` — store through DI pointer (fixture 628).
+    if lhs == "word ptr [di]" {
+        if let Some(src) = Reg16::parse(rhs) {
+            return Ok(Instr::MovDiPtrReg16 { src });
+        }
+    }
     // LHS `byte ptr [si]` — byte-store through SI pointer (fixture 465).
     if lhs == "byte ptr [si]" {
         if let Some(imm) = parse_imm8(rhs) {

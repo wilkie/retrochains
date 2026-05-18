@@ -371,7 +371,7 @@ fn instr_size(instr: &Instr) -> usize {
         Instr::LeaReg16BpRel { .. } => 3,
         Instr::MovSiPtrImm { .. } | Instr::MovBxPtrImm { .. } => 4,
         Instr::MovSiPtrImm8 { .. } => 3,
-        Instr::MovSiPtrReg16 { .. } => 2,
+        Instr::MovSiPtrReg16 { .. } | Instr::MovDiPtrReg16 { .. } => 2,
         Instr::MovSiDispImm { .. } => 5,
         Instr::MovAxSiDisp { .. } | Instr::MovDxSiDisp { .. } => 3,
         Instr::MovDxFromSiPtr => 2,
@@ -1476,6 +1476,12 @@ fn emit_instr(
             // r/m=100). ModR/M low 3 bits encode r/m=100 ([si]).
             out.push(0x89);
             out.push(0b00_000_100 | (src.code() << 3));
+        }
+        Instr::MovDiPtrReg16 { src } => {
+            // `mov word ptr [di],<reg16>` → 89 (mod=00 reg=<src>
+            // r/m=101). r/m=101 = [DI]. Fixture 628.
+            out.push(0x89);
+            out.push(0b00_000_101 | (src.code() << 3));
         }
         Instr::MovSiDispImm { disp, imm } => {
             // `mov word ptr [si+disp8],imm16` → C7 44 dd lo hi.
