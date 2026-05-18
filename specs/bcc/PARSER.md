@@ -1248,6 +1248,23 @@ Two more probes hit existing paths byte-exactly:
   materializes the boolean into a register and the store path
   was unchanged.
 
+## Free passes (batch 87)
+
+Three more probes hit existing paths byte-exactly with no code
+changes:
+
+- `578` — `if (a <= b) return 1; return 0;` (int signed less-
+  than-or-equal in if-cond): `emit_cond_branch` already lowers
+  `<=` to `cmp; jg <else>` with the correct signed predicate.
+- `579` — `return a >= b;` (int signed greater-than-or-equal as
+  return value): `emit_ge` materializes the boolean into AX and
+  the return path was unchanged.
+- `580` — `int f(int a, int b) { return a + b; }` (two-int-arg
+  callee + call from `main`): the cdecl call/return path
+  already pushes args right-to-left and the two-arg parameter
+  frame layout came out byte-exact (we'd previously tested 1-
+  and 3-arg variants but not 2).
+
 ## What we explicitly defer
 
 - Templates, namespaces, RTTI, exceptions (not in BC2.0 to relevant
