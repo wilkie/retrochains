@@ -1938,6 +1938,27 @@ y`) — three sibling fixes:
   register. BCC pattern: `mov cl, byte ptr [bp-2]; shl si,
   cl`.
 
+## `add` / `sub` reg-vs-stack for compound `+=` / `-=`
+
+Fixtures `659` (`x >>= y`, free pass via the batch-113
+non-constant shift extension), `660` (`x -= y` with x in SI,
+y at `[bp-2]`), and `661` (`x += y`) — completed the
+arithmetic siblings of the batch-112/113 bitwise BpRel set.
+
+- Added `AddReg16BpRel` (`03 mod=01 reg=<r> r/m=110 dd`) and
+  `SubReg16BpRel` (`2B ...`) tasm IR variants. Sibling of
+  `AndReg16BpRel`/`OrReg16BpRel`/`XorReg16BpRel`. AX keeps
+  its accumulator-form `AddAxBpRel`/`SubAxBpRel` variants.
+- Parser entries gated on `!matches!(reg, Reg16::Ax)` so the
+  AX accumulator paths still take precedence (AX uses the
+  shorter `03 46 dd`-equivalent? no: AX has its own dedicated
+  variant, the gate is for routing only).
+- No codegen change was needed — the existing
+  `emit_compound_assign_reg` `BinOp::Add`/`Sub` arm already
+  emits `add <reg>, word ptr [bp+N]` / `sub <reg>, word ptr
+  [bp+N]` as text; only the parser+encoder needed to
+  recognize the non-AX form.
+
 ### Deferred from batch 88
 
 - Probed `int a[5]; return sizeof(a);` (`582` first draft).
