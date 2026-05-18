@@ -1959,6 +1959,39 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `char` global compound with constant RHS
+
+Fixtures `683` (`g += 5`), `684` (`g -= 7`), `685` (`g &= 15`)
+— constant-RHS slice of char-global compound. The crash was
+the same as batch 121 (`location_of("g")` panics because g
+is global); the codegen shape is different from the
+variable-RHS path though, so it gets its own arm.
+
+- **Arith (`+=` / `-=`)**: load-modify-store through AL:
+  `mov al, byte ptr _g; add al, K; mov byte ptr _g, al`. BCC
+  always emits `add` even for `-=` — the immediate is the
+  two's-complement negation (e.g., `g -= 7` →
+  `add al, 249`). This matches the broader BCC pattern from
+  batch 86-era ("canonicalize `c -= K` as `add <reg>, -K`").
+- **Bitwise (`&=` / `|=` / `^=`)**: memory-direct, one
+  instruction: `<op> byte ptr _g, K` — encoded as
+  `80 (mod=00 reg=/n r/m=110) lo hi ii` + FIXUPP. The
+  asymmetry vs int globals (which use memory-direct for
+  arith too via `add word ptr _g, K`, fixture 519) is
+  empirical — apparently BCC's byte-arith path always takes
+  the AL detour.
+- Added IR variants:
+  - `MovGroupSymAl` — AL→moffs8 store (`A2 lo hi`).
+    Companion to the existing `MovAlGroupSym` (load).
+  - `AndGroupSymImm8` / `OrGroupSymImm8` /
+    `XorGroupSymImm8` — `80 /4` / `/1` / `/6` r/m8 imm8
+    against a global. Encoded as `80 26|0E|36 lo hi ii`.
+- Codegen: new arm in `emit_compound_assign` keyed on
+  `globals.type_of(name) == Char|UChar`, op in the arith-
+  bitwise set, and `try_const_eval(value).is_some()`. The
+  arith/bitwise split is internal to the arm — both shapes
+  share the same gate.
+
 ## `char` global compound with variable RHS
 
 Fixtures `680` (`g += d`), `681` (`g -= d`), `682` (`g &= d`)
