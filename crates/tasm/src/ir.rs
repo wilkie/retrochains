@@ -1027,6 +1027,13 @@ pub enum Instr {
     /// through the SI pointer. ModR/M `04` = `mod=00 /0 r/m=100
     /// ([si])`. Used by `*p = K;` for uchar pointers (fixture 465).
     MovSiPtrImm8 { imm: u8 },
+    /// `mov byte ptr [si], <reg8>` — `88 (mod=00 reg=<r> r/m=100)`.
+    /// 8-bit reg-to-mem store through SI. For AL → `88 04`. Used
+    /// by char-via-pointer compound when the destination is
+    /// dereferenced through a register-resident pointer (fixture
+    /// 710: `p->c += 5` with p in SI → `mov al, [si]; add al, 5;
+    /// mov [si], al`).
+    MovSiPtrReg8 { src: Reg8 },
     /// `mov word ptr [si+disp8],imm16` — `C7 44 dd lo hi`. Companion
     /// to `MovSiPtrImm` for the high-half store of a long-pointer
     /// write (`*p = K` where `p: long *`). Fixture 308.
@@ -1066,6 +1073,15 @@ pub enum Instr {
     /// `sub word ptr [si],<imm8sx>` — `83 2C ii`. Low-half partner
     /// for long-pointer `*p -= K`.
     SubSiPtrImm8 { imm: i8 },
+    /// `and byte ptr [si], imm8` — `80 24 ii`. Grp1 r/m8,imm8 with
+    /// /4=AND, mod=00 r/m=100. Char-via-pointer bitwise compound
+    /// (fixture 712: `*p &= 15`). Char arith goes through AL, but
+    /// bitwise stays memory-direct — same asymmetry as char-global.
+    AndSiPtrByteImm8 { imm: u8 },
+    /// `or byte ptr [si], imm8` — `80 0C ii`. Sibling for `|=`.
+    OrSiPtrByteImm8 { imm: u8 },
+    /// `xor byte ptr [si], imm8` — `80 34 ii`. Sibling for `^=`.
+    XorSiPtrByteImm8 { imm: u8 },
     /// `sbb word ptr [si+disp8],<imm8sx>` — `83 5C dd ii`. High-half
     /// borrow-propagation partner for long-pointer `*p -= K`.
     SbbSiDispImm8 { disp: i8, imm: i8 },

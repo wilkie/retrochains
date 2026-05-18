@@ -6024,6 +6024,28 @@ impl<'a> FunctionEmitter<'a> {
             let store_byte = pointee.is_char_like();
             let width = if store_byte { "byte" } else { "word" };
             let v_masked = if store_byte { v & 0xFF } else { v & 0xFFFF };
+            // Char-pointee arith follows the BCC byte-through-AL
+            // pattern: `mov al, byte ptr [reg]; add al, K (or
+            // inc/dec for K=1); mov byte ptr [reg], al`. Bitwise
+            // ops stay memory-direct. Fixture 711 (`*p += 5` with
+            // p in SI → `mov al, [si]; add al, 5; mov [si], al`).
+            if store_byte && matches!(op, BinOp::Add | BinOp::Sub) {
+                let imm8 = if matches!(op, BinOp::Add) {
+                    (v_masked & 0xFF) as u8
+                } else {
+                    ((v_masked & 0xFF) as u8).wrapping_neg()
+                };
+                let _ = write!(self.out, "\tmov\tal,byte ptr [{addr_reg}]\r\n");
+                if v_masked == 1 && matches!(op, BinOp::Add) {
+                    self.out.extend_from_slice(b"\tinc\tal\r\n");
+                } else if v_masked == 1 && matches!(op, BinOp::Sub) {
+                    self.out.extend_from_slice(b"\tdec\tal\r\n");
+                } else {
+                    let _ = write!(self.out, "\tadd\tal,{imm8}\r\n");
+                }
+                let _ = write!(self.out, "\tmov\tbyte ptr [{addr_reg}],al\r\n");
+                return;
+            }
             let _ = write!(
                 self.out,
                 "\t{mnemonic}\t{width} ptr [{addr_reg}],{v_masked}\r\n",

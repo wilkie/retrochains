@@ -904,6 +904,11 @@ fn parse_mov(operands: &str, line_no: usize) -> AsmResult<Instr> {
         if let Some(imm) = parse_imm8(rhs) {
             return Ok(Instr::MovSiPtrImm8 { imm: imm as u8 });
         }
+        // `mov byte ptr [si], <reg8>` — char-via-SI pointer store
+        // (fixture 710: writeback of `p->c += K`).
+        if let Some(src) = Reg8::parse(rhs) {
+            return Ok(Instr::MovSiPtrReg8 { src });
+        }
     }
     // LHS `word ptr [si+disp]` — store-imm to long pointer's high
     // half (fixture 308: `*p = K` where `p: long *` in SI emits
@@ -1258,6 +1263,13 @@ fn parse_and(operands: &str, line_no: usize) -> AsmResult<Instr> {
             if let Some(offset) = parse_bp_relative(rhs) {
                 return Ok(Instr::AndReg16BpRel { reg, offset });
             }
+        }
+    }
+    // `and byte ptr [si], imm8` — char-via-pointer bitwise compound
+    // (fixture 712: `*p &= 15`).
+    if lhs == "byte ptr [si]" {
+        if let Some(imm) = parse_imm8(rhs) {
+            return Ok(Instr::AndSiPtrByteImm8 { imm: imm as u8 });
         }
     }
     // `and byte ptr <group>:<sym>[+N], <reg8>` — char compound `&=`
@@ -2108,6 +2120,12 @@ fn parse_or(operands: &str, line_no: usize) -> AsmResult<Instr> {
             }
         }
     }
+    // `or byte ptr [si], imm8` — char-via-pointer `|=`.
+    if lhs == "byte ptr [si]" {
+        if let Some(imm) = parse_imm8(rhs) {
+            return Ok(Instr::OrSiPtrByteImm8 { imm: imm as u8 });
+        }
+    }
     // `or byte ptr <group>:<sym>[+N], <reg8>` — char compound `|=`
     // on a global.
     if let Some((group, symbol)) = parse_byte_group_symbol(lhs) {
@@ -2227,6 +2245,12 @@ fn parse_xor(operands: &str, line_no: usize) -> AsmResult<Instr> {
             if let Some(offset) = parse_bp_relative(rhs) {
                 return Ok(Instr::XorReg16BpRel { reg, offset });
             }
+        }
+    }
+    // `xor byte ptr [si], imm8` — char-via-pointer `^=`.
+    if lhs == "byte ptr [si]" {
+        if let Some(imm) = parse_imm8(rhs) {
+            return Ok(Instr::XorSiPtrByteImm8 { imm: imm as u8 });
         }
     }
     // `xor byte ptr <group>:<sym>[+N], <reg8>` — char compound `^=`

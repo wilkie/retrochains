@@ -405,10 +405,14 @@ fn instr_size(instr: &Instr) -> usize {
         Instr::MovSiPtrImm { .. } | Instr::MovBxPtrImm { .. } => 4,
         Instr::MovSiPtrImm8 { .. } => 3,
         Instr::MovSiPtrReg16 { .. } | Instr::MovDiPtrReg16 { .. } => 2,
+        Instr::MovSiPtrReg8 { .. } => 2,
         Instr::MovSiDispImm { .. } => 5,
         Instr::MovAxSiDisp { .. } | Instr::MovDxSiDisp { .. } => 3,
         Instr::MovDxFromSiPtr => 2,
         Instr::AddSiPtrImm8 { .. } | Instr::AddBxPtrImm8 { .. } | Instr::SubSiPtrImm8 { .. } => 3,
+        Instr::AndSiPtrByteImm8 { .. }
+        | Instr::OrSiPtrByteImm8 { .. }
+        | Instr::XorSiPtrByteImm8 { .. } => 3,
         Instr::AdcSiDispImm8 { .. } | Instr::SbbSiDispImm8 { .. } => 4,
         Instr::AddSiPtrDx => 2,
         Instr::AdcSiDispAx { .. } => 3,
@@ -1717,6 +1721,12 @@ fn emit_instr(
             out.push(0x89);
             out.push(0b00_000_100 | (src.code() << 3));
         }
+        Instr::MovSiPtrReg8 { src } => {
+            // `mov byte ptr [si],<reg8>` → 88 (mod=00 reg=<src>
+            // r/m=100). Byte sibling of MovSiPtrReg16. Fixture 710.
+            out.push(0x88);
+            out.push(0b00_000_100 | (src.code() << 3));
+        }
         Instr::MovDiPtrReg16 { src } => {
             // `mov word ptr [di],<reg16>` → 89 (mod=00 reg=<src>
             // r/m=101). r/m=101 = [DI]. Fixture 628.
@@ -1785,6 +1795,25 @@ fn emit_instr(
             out.push(0x83);
             out.push(0x2C);
             out.push(*imm as u8);
+        }
+        Instr::AndSiPtrByteImm8 { imm } => {
+            // `and byte ptr [si],imm8` → 80 24 ii.
+            // ModR/M 24 = mod=00 /4(AND) r/m=100. Fixture 712.
+            out.push(0x80);
+            out.push(0x24);
+            out.push(*imm);
+        }
+        Instr::OrSiPtrByteImm8 { imm } => {
+            // `or byte ptr [si],imm8` → 80 0C ii.
+            out.push(0x80);
+            out.push(0x0C);
+            out.push(*imm);
+        }
+        Instr::XorSiPtrByteImm8 { imm } => {
+            // `xor byte ptr [si],imm8` → 80 34 ii.
+            out.push(0x80);
+            out.push(0x34);
+            out.push(*imm);
         }
         Instr::SbbSiDispImm8 { disp, imm } => {
             // `sbb word ptr [si+disp8],imm8sx` → 83 5C dd ii.
