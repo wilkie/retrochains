@@ -1959,6 +1959,38 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `char` global `%=` / `*=` non-p2 / unsigned `/=`
+
+Fixtures `692` (signed `g %= 5`), `693` (signed `g *= 3`),
+`694` (unsigned `g /= 4`).
+
+- `692` — same 16-bit `cwd; idiv bx` chain as fixture 691's
+  `/=`, but the store target is **DL** (low byte of the DX
+  remainder) rather than AL. Required a new tasm IR variant
+  `MovGroupSymReg8` (`88 (mod=00 reg=<r> r/m=110) lo hi` +
+  FIXUPP) — the generic byte-store-to-global form for non-AL
+  sources; AL keeps the shorter `MovGroupSymAl` (`A2`).
+  Codegen's existing `BinOp::Div | BinOp::Mod` arm already
+  picked `dl` for `Mod`, so widening the arm to accept `Mod`
+  alongside `Div` was the only change.
+- `693` — non-power-of-2 char-global `*= K`: BCC emits a
+  16-bit signed multiply through DX (not BX): `mov al, _g;
+  cbw; mov dx, K; imul dx; mov _g, al`. Codegen's `*= K`
+  arm now branches inside on `(k & (k-1)) == 0` and emits
+  the unrolled `shl` shape only for power-of-2; everything
+  else takes the `cbw; mov dx, K; imul dx` path. The
+  register asymmetry vs `/=` (BX) is curious — BCC may pick
+  DX for `imul` because BX is reserved for indirect-load
+  patterns; not yet pinned to a hard rule.
+- `694` — unsigned-char global `/= K`: same 16-bit chain as
+  the signed case but with `mov ah, 0` instead of `cbw` for
+  widening. Surprisingly BCC keeps `cwd; idiv bx` (signed
+  divide) even for unsigned — the zero-extended dividend
+  fits in `[0, 255]` which is comfortably within the
+  positive `idiv` range. Codegen's `/=` arm now branches on
+  `gty.is_unsigned()` for the widening step only; the rest
+  of the chain is shared.
+
 ## `char` global `>>=` / `*=` / `/=` const
 
 Fixtures `689` (`g >>= 2`), `690` (`g *= 4`), `691` (`g /= 4`).
