@@ -1959,6 +1959,36 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `char` struct field + global-array element compound
+
+Fixtures `704` (`g.c += 5`, struct global, char field at
+offset 0), `705` (`g.c &= 15`, char field at offset 2),
+`706` (`a[2] += 5`, char global array).
+
+- `704` — char-struct-field arith: BCC uses the same AL
+  load-modify-store as for plain char globals
+  (`mov al, byte ptr <addr>; add al, K; mov byte ptr
+  <addr>, al`). The `<addr>` is `DGROUP:_<name>+<off>` or
+  bare `DGROUP:_<name>` when offset is 0. Our codegen was
+  using memory-direct `add byte ptr <addr>, K` (which
+  tasm's parser doesn't recognize and BCC doesn't emit).
+  Extended `emit_member_compound_assign` to branch on
+  `store_byte && matches!(op, Add | Sub)` for the AL detour
+  with the `add al, (256-K)` canonicalization for `-=`.
+- `705` — char-field bitwise stays memory-direct
+  (`and byte ptr <addr>, K`) — same asymmetry as
+  char-global (batch 122). Free pass off the existing
+  fall-through.
+- `706` — char-global-array element compound:
+  `emit_array_compound_assign` only had a long-global path
+  plus a stack-local path; it panicked with "unknown local
+  in codegen: a" for non-long globals. Added a global-non-
+  long arm that mirrors char-global codegen — same AL
+  detour for arith, memory-direct for bitwise, with the
+  address being `DGROUP:_<a>+<const_off>` from
+  `global_offset_addr`. Int-element globals also route
+  through this arm with memory-direct shape.
+
 ## `char` global pre vs post: `--g`, `g++`, `g--`
 
 Fixtures `701` (`--g`), `702` (`g++`), `703` (`g--`).
