@@ -465,6 +465,20 @@ fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
             }
             parse_single_op_word_ptr(rest, line.line_no, "idiv", |o| Instr::IdivBpRel { offset: o })
         }
+        "div" => {
+            // Unsigned byte div with explicit `al,` accumulator
+            // (BCC's TASM listing for unsigned char compound `/=`
+            // / `%=`, fixture 677): `div al,byte ptr [bp+N]`.
+            if let Some(stripped) = rest.strip_prefix("al,") {
+                if let Some(offset) = parse_byte_bp_relative(stripped.trim_start()) {
+                    return Ok(Instr::DivByteBpRel { offset });
+                }
+            }
+            Err(AsmError::new(
+                line.line_no,
+                format!("div: unsupported operand form `{rest}`"),
+            ))
+        }
         "cwd" => Ok(Instr::Cwd),
         "cbw" => Ok(Instr::Cbw),
         "lea" => parse_lea(rest, line.line_no),

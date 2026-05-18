@@ -359,6 +359,13 @@ pub enum Instr {
     /// and `%=` with mem-resident RHS (fixture 673: `c /= d` →
     /// `mov al, dl; cbw; idiv byte ptr [bp-1]; mov dl, al`).
     IdivByteBpRel { offset: i16 },
+    /// `div al,byte ptr [bp+<offset>]` — `F6 (mod=01 /6 r/m=110) dd`
+    /// = `F6 76 dd`. 8-bit single-operand unsigned divide of AX by
+    /// src. Unsigned-char compound `/=` and `%=` with mem-resident
+    /// RHS (fixture 677). TASM emits the explicit `al,` operand
+    /// in the listing for this case, so the parser/asm-listing
+    /// path must match that spelling.
+    DivByteBpRel { offset: i16 },
     /// `cwd` — 99. Sign-extend AX into DX:AX.
     Cwd,
     /// `mov <reg8>,byte ptr [bp+<offset>]` — 8A xx dd. Generic 8-bit

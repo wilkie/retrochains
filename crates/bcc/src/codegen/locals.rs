@@ -115,6 +115,17 @@ impl Reg {
     /// via fixture 640.
     const CHAR_POOL_DIV: [Self; 2] = [Self::Cl, Self::Bl];
 
+    /// Char pool variant used when the function body contains an
+    /// **unsigned** char compound `/=` / `%=` with non-constant RHS
+    /// — BCC emits the 8-bit `div` form (not `idiv`) with
+    /// `mov ah, 0` for widening. BCC still drops DL from the pool
+    /// (reason not yet pinned down — likely a conservative rule
+    /// that fires on any byte-form unsigned divide), but the
+    /// remaining order is BL-then-CL rather than the signed
+    /// 16-bit form's reversed CL-then-BL (where BL is consumed by
+    /// the divisor). Probed via fixture 677.
+    const CHAR_POOL_UDIV: [Self; 2] = [Self::Bl, Self::Cl];
+
     /// Registers BCC treats as callee-saved, in canonical push order.
     /// Everything else (DX, BX, CX, DL, BL, CL) is used by BCC without
     /// push/pop at the function boundary.
@@ -273,12 +284,23 @@ impl Locals {
             .filter(|item| matches!(item.ty, Type::Char | Type::UChar))
             .map(|item| item.name.as_str())
             .collect();
+        let uchar_local_names: HashSet<&str> = declared
+            .iter()
+            .filter(|item| matches!(item.ty, Type::UChar))
+            .map(|item| item.name.as_str())
+            .collect();
         let function_has_div = body_has_div_or_mod(
             function.body.as_deref().unwrap_or(&[]),
             &char_local_names,
         );
+        let function_has_uchar_byte_div = body_has_uchar_byte_div_or_mod(
+            function.body.as_deref().unwrap_or(&[]),
+            &uchar_local_names,
+        );
         if !function_makes_call {
-            let char_pool_slice: &[Reg] = if function_has_div {
+            let char_pool_slice: &[Reg] = if function_has_uchar_byte_div {
+                &Reg::CHAR_POOL_UDIV
+            } else if function_has_div {
                 &Reg::CHAR_POOL_DIV
             } else {
                 &Reg::CHAR_POOL
@@ -804,6 +826,38 @@ fn stmt_has_div_or_mod(stmt: &Stmt, char_locals: &HashSet<&str>) -> bool {
         | StmtKind::Goto { .. }
         | StmtKind::Label { .. }
         | StmtKind::Empty => false,
+    }
+}
+
+/// True iff any statement in `body` contains an *unsigned* char
+/// compound `/=` or `%=` with a non-constant RHS — the 8-bit
+/// `div`-with-`mov ah, 0` shape that drives the
+/// `CHAR_POOL_UDIV` selection (fixture 677).
+fn body_has_uchar_byte_div_or_mod(body: &[Stmt], uchar_locals: &HashSet<&str>) -> bool {
+    body.iter().any(|s| stmt_has_uchar_byte_div_or_mod(s, uchar_locals))
+}
+
+fn stmt_has_uchar_byte_div_or_mod(stmt: &Stmt, uchar_locals: &HashSet<&str>) -> bool {
+    match &stmt.kind {
+        StmtKind::CompoundAssign { name, op, value } => {
+            matches!(op, crate::ast::BinOp::Div | crate::ast::BinOp::Mod)
+                && uchar_locals.contains(name.as_str())
+                && try_const_eval(value).is_none()
+        }
+        StmtKind::If { then_branch, else_branch, .. } => {
+            body_has_uchar_byte_div_or_mod(then_branch, uchar_locals)
+                || else_branch
+                    .as_ref()
+                    .is_some_and(|b| body_has_uchar_byte_div_or_mod(b, uchar_locals))
+        }
+        StmtKind::While { body, .. } | StmtKind::DoWhile { body, .. } => {
+            body_has_uchar_byte_div_or_mod(body, uchar_locals)
+        }
+        StmtKind::For { body, .. } => body_has_uchar_byte_div_or_mod(body, uchar_locals),
+        StmtKind::Switch { cases, .. } => cases
+            .iter()
+            .any(|c| body_has_uchar_byte_div_or_mod(&c.body, uchar_locals)),
+        _ => false,
     }
 }
 

@@ -299,6 +299,7 @@ fn instr_size(instr: &Instr) -> usize {
         | Instr::IdivBpRel { .. }
         | Instr::ImulByteBpRel { .. }
         | Instr::IdivByteBpRel { .. }
+        | Instr::DivByteBpRel { .. }
         | Instr::MovReg8BpRel { .. }
         | Instr::MovBpRelReg8 { .. } => 3,
         Instr::MovReg8Imm8 { .. } => 2,
@@ -815,6 +816,14 @@ fn emit_instr(
             let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
             out.push(0xF6);
             out.push(0x7E);
+            out.push(disp as u8);
+        }
+        Instr::DivByteBpRel { offset } => {
+            // `div al,byte ptr [bp+disp8]` → F6 76 dd. ModR/M 76 = /6(DIV).
+            // Fixture 677.
+            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
+            out.push(0xF6);
+            out.push(0x76);
             out.push(disp as u8);
         }
         Instr::Cwd => out.push(0x99),

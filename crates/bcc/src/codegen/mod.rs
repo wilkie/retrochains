@@ -3740,16 +3740,29 @@ impl<'a> FunctionEmitter<'a> {
             let _ = write!(self.out, "\tmov\t{},al\r\n", reg.name());
             return;
         }
-        // Char compound `/=` / `%=` with a non-constant byte RHS:
-        // load dst into AL, sign-extend with cbw, 8-bit `idiv byte
-        // ptr <src>` (AL=quotient, AH=remainder), then store the
-        // quotient (or AH for `%=`) back. Fixture 673 (`c /= d` →
-        // `mov al, dl; cbw; idiv byte ptr [bp-1]; mov dl, al`).
+        // Char compound `/=` / `%=` with a non-constant byte RHS.
+        // Signed: load dst into AL, `cbw` to sign-extend, 8-bit
+        // `idiv byte ptr <src>` (AL=quotient, AH=remainder), then
+        // store the quotient (or AH for `%=`) back. Fixture 673
+        // (`c /= d` → `mov al, dl; cbw; idiv byte ptr [bp-1]; mov
+        // dl, al`).
+        //
+        // Unsigned: zero-extend via `mov ah, 0`, then 8-bit `div
+        // al, byte ptr <src>` — note BCC emits the explicit `al,`
+        // operand in the TASM listing. Fixture 677 (`c /= d` with
+        // unsigned char → `mov al, bl; mov ah, 0; div al, byte
+        // ptr [bp-1]; mov bl, al`).
         if reg.is_byte() && matches!(op, BinOp::Div | BinOp::Mod) {
+            let unsigned = self.locals.type_of(name).is_unsigned();
             let src = self.resolve_operand_source(value);
             let _ = write!(self.out, "\tmov\tal,{}\r\n", reg.name());
-            self.out.extend_from_slice(b"\tcbw\t\r\n");
-            self.out.extend_from_slice(b"\tidiv\t");
+            if unsigned {
+                self.out.extend_from_slice(b"\tmov\tah,0\r\n");
+                self.out.extend_from_slice(b"\tdiv\tal,");
+            } else {
+                self.out.extend_from_slice(b"\tcbw\t\r\n");
+                self.out.extend_from_slice(b"\tidiv\t");
+            }
             self.out.extend_from_slice(src.byte().as_bytes());
             self.out.extend_from_slice(b"\r\n");
             let result_reg = if matches!(op, BinOp::Div) { "al" } else { "ah" };
