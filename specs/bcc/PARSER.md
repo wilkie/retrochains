@@ -1959,6 +1959,17 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `*=` / `/=` / `%=` by variable — free pass
+
+Fixtures `662` (`x *= y`), `663` (`x /= y`), `664` (`x %= y`),
+all with x in SI and y at `[bp-2]`, all matched without any
+new code. The batch-111 `imul <mem>` and batch-112 `idiv <mem>`
+work that introduced the direct-memory forms for the constant-
+RHS path also handles the variable-RHS path because the
+codegen condition was already `matches!(src, Local | Global |
+GlobalOffset)` rather than a tighter constant check. No
+parser, encoder, or codegen change was required.
+
 ### Deferred from batch 88
 
 - Probed `int a[5]; return sizeof(a);` (`582` first draft).
