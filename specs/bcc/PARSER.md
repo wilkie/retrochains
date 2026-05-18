@@ -1959,6 +1959,31 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `long` compound `%=` int + stack-LHS variants
+
+Fixtures `764` (global `g %= x`), `765` (`a += x` stack LHS),
+`766` (`a *= x` stack LHS).
+
+- `764` — free pass off batch 148's `/=`/`%=` arm.
+- `765` — needed four new `<op> word ptr [bp+N], <reg16>` IR
+  variants for the long-stack += int shape:
+  - `AddBpRelAx` (`01 46 dd`) — sibling of the existing
+    `AddBpRelDx` (which writes DX for long-long). For the
+    int-RHS widening case, AX holds the int low word.
+  - `AdcBpRelDx` (`11 56 dd`) — high-half carry partner.
+    DX holds the cwd sign-extension.
+  - `SubBpRelAx` (`29 46 dd`) and `SbbBpRelDx` (`19 56 dd`)
+    — `-=` siblings.
+- `766` — free pass; the long-stack-LHS Mul path already
+  routed through the same `emit_long_compound_to_mem`-style
+  helper with the cwd-widened RHS pushed onto the stack.
+
+The asymmetry between Add/Sub (needing the new
+`AddBpRelAx`/`AdcBpRelDx` pair) and Mul (using stack
+push/pop) reflects BCC's two strategies: Add/Sub can do the
+op directly against memory; Mul has to set up registers in
+a specific order before calling the helper.
+
 ## `long` compound `>>=` / `*=` / `/=` with `int` RHS
 
 Fixtures `761` (`g >>= x`), `762` (`g *= x`), `763` (`g /= x`).
