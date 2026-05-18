@@ -1502,6 +1502,26 @@ narrow expression. Probe replaced with the `int f(char c)`
 direction (mirror image) — that one works through existing
 char-param widening.
 
+## `c & K` — `and ax, imm16` accumulator form
+
+Fixture `609` (`char c; c = 15; return c & 4;`) — after `mov
+al, byte ptr [bp-1]; cbw`, BCC emits `25 04 00` (`and ax,
+imm16`, the AX-specific accumulator form). Our tasm parser
+previously accepted only `and ax, <symbol-or-mem>` forms. Added
+the `AndAxImm16` IR variant with encoding `25 lo hi` plus a
+parser entry that fires when LHS is AX and RHS is a 16-bit
+immediate. 3 bytes vs the 4-byte generic `81 E0 lo hi`.
+
+## Free passes (batch 97)
+
+- `608` — `for (i = 0; i <= 5; i++) sum = sum + i;` (`<=` in
+  for-test): the for-loop check lowers `<=` to `cmp; jg
+  <break>` correctly.
+- `610` — `char c; char *p; p = &c; return *p;` (char pointer
+  to a stack char-local): `&c` forces `c` to a stack slot,
+  `lea ax, [bp-1]` materializes the address, and `mov al,
+  byte ptr [si]` reads through the pointer.
+
 ### Deferred from batch 88
 
 - Probed `int a[5]; return sizeof(a);` (`582` first draft).
