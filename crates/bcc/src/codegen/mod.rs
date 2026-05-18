@@ -4141,11 +4141,13 @@ impl<'a> FunctionEmitter<'a> {
             return;
         }
         // Int/uint global compound add/sub/bit* with a non-const
-        // local RHS (int/uint or char/uchar that widens through
-        // AX). `emit_expr_to_ax` handles the byte-to-int widening
-        // (cbw for signed char, `mov ah, 0` for unsigned), and
-        // the same memory-direct `<op> word ptr DGROUP:_<name>,
-        // ax` finishes the int compound. Fixture 794 (`g += char c`).
+        // RHS (int/uint, or char/uchar that widens through AX).
+        // RHS can be a local OR another global — `emit_expr_to_ax`
+        // handles both (and emits `cbw` / `mov ah, 0` for the
+        // byte-to-int widening). The same memory-direct `<op>
+        // word ptr DGROUP:_<name>, ax` finishes the int compound.
+        // Fixtures 794 (`g += char c`), 799 (int local RHS), 812
+        // (char global RHS).
         if let Some(gty) = self.globals.type_of(name)
             && matches!(gty, Type::Int | Type::UInt)
             && matches!(
@@ -4154,8 +4156,7 @@ impl<'a> FunctionEmitter<'a> {
             )
             && let Some(ty_rhs) = self.rhs_type_for_long_widening(&value.kind)
             && matches!(ty_rhs, Type::Int | Type::UInt | Type::Char | Type::UChar)
-            && let ExprKind::Ident(b) = &value.kind
-            && !self.globals.contains(b)
+            && let ExprKind::Ident(_) = &value.kind
         {
             self.emit_expr_to_ax(value);
             let mnem = match op {
