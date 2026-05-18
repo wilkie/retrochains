@@ -7273,6 +7273,66 @@ impl<'a> FunctionEmitter<'a> {
                     let _ = write!(self.out, "\t{mnem}\t{}\r\n", src_reg.name());
                     return;
                 }
+                // Char-src + int-dest postinc: `int r = c++` where c
+                // is in a byte register. BCC widens to AX (cbw),
+                // stores AX to the int slot, then bumps the source.
+                // Different from the generic `emit_update_to_ax`
+                // shape which inc'd before the store. Fixture 728.
+                if !ty.is_char_like()
+                    && let ExprKind::Update {
+                        target,
+                        op,
+                        position: crate::ast::UpdatePosition::Post,
+                    } = &value.kind
+                    && self.locals.has(target)
+                    && let LocalLocation::Reg(src_reg) = self.locals.location_of(target)
+                    && src_reg.is_byte()
+                {
+                    let unsigned = self.locals.type_of(target).is_unsigned();
+                    let _ = write!(self.out, "\tmov\tal,{}\r\n", src_reg.name());
+                    if unsigned {
+                        self.out.extend_from_slice(b"\tmov\tah,0\r\n");
+                    } else {
+                        self.out.extend_from_slice(b"\tcbw\t\r\n");
+                    }
+                    let _ = write!(self.out, "\tmov\tword ptr {},ax\r\n", bp_addr(off));
+                    let mnem = match op {
+                        crate::ast::UpdateOp::Inc => "inc",
+                        crate::ast::UpdateOp::Dec => "dec",
+                    };
+                    let _ = write!(self.out, "\t{mnem}\t{}\r\n", src_reg.name());
+                    return;
+                }
+                // Char-src + int-dest preinc: `int r = ++c`. BCC
+                // threads through AL: load c, bump AL, write back
+                // to c, then widen+store to the int slot. Fixture
+                // 729.
+                if !ty.is_char_like()
+                    && let ExprKind::Update {
+                        target,
+                        op,
+                        position: crate::ast::UpdatePosition::Pre,
+                    } = &value.kind
+                    && self.locals.has(target)
+                    && let LocalLocation::Reg(src_reg) = self.locals.location_of(target)
+                    && src_reg.is_byte()
+                {
+                    let unsigned = self.locals.type_of(target).is_unsigned();
+                    let mnem = match op {
+                        crate::ast::UpdateOp::Inc => "inc",
+                        crate::ast::UpdateOp::Dec => "dec",
+                    };
+                    let _ = write!(self.out, "\tmov\tal,{}\r\n", src_reg.name());
+                    let _ = write!(self.out, "\t{mnem}\tal\r\n");
+                    let _ = write!(self.out, "\tmov\t{},al\r\n", src_reg.name());
+                    if unsigned {
+                        self.out.extend_from_slice(b"\tmov\tah,0\r\n");
+                    } else {
+                        self.out.extend_from_slice(b"\tcbw\t\r\n");
+                    }
+                    let _ = write!(self.out, "\tmov\tword ptr {},ax\r\n", bp_addr(off));
+                    return;
+                }
                 // Char `d = c++` where both d and c are byte. BCC
                 // routes the byte through AL without `cbw`-widening,
                 // stores to the byte stack slot, then bumps the
