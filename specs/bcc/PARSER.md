@@ -1959,6 +1959,27 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `int` / `uint` global compound shift siblings
+
+Fixtures `806` (`int g <<= char c`), `807` (`int g >>= int x`),
+`808` (`uint g >>= int x`) — three free passes confirming
+batch 162's new memory-direct CL-shift arm generalizes:
+
+- `806` — Char RHS uses the same `mov cl, byte ptr <addr>`
+  load (CL only needs the low byte regardless of RHS
+  width). The arm's RHS-type gate already accepted
+  `Type::Char | Type::UChar`.
+- `807` — `>>=` on signed int picks `sar` (D3 3E)
+  rather than `shl`, via the existing signedness check
+  on the LHS type.
+- `808` — `>>=` on unsigned int picks `shr` (D3 2E).
+  Same arm, just `gty.is_unsigned()` flips the mnemonic.
+
+The `Shl|Sar|ShrGroupSymCl` IR variants added in batch
+162 cover all three operations and both signednesses
+via the encoding-byte selector. No code changes for
+this batch.
+
 ## `int` global compound `/=`, `%=`, `<<=` with int var
 
 Fixtures `803` (`g /= x`), `804` (`g %= x`), `805` (`g <<= x`)
