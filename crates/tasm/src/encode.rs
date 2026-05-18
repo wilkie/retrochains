@@ -351,6 +351,7 @@ fn instr_size(instr: &Instr) -> usize {
         | Instr::AdcAxGroupSym { .. }
         | Instr::AddGroupSymDx { .. }
         | Instr::AdcGroupSymAx { .. }
+        | Instr::SbbGroupSymAx { .. }
         | Instr::AdcDxGroupSym { .. }
         | Instr::SubDxGroupSym { .. }
         | Instr::SbbAxGroupSym { .. }
@@ -375,6 +376,9 @@ fn instr_size(instr: &Instr) -> usize {
         Instr::IncGroupSym { .. } | Instr::DecGroupSym { .. } => 4,
         Instr::TestGroupSymImm16 { .. } => 6,
         Instr::AddGroupSymReg16 { .. } | Instr::SubGroupSymReg16 { .. } => 4,
+        Instr::AndGroupSymReg16 { .. }
+        | Instr::OrGroupSymReg16 { .. }
+        | Instr::XorGroupSymReg16 { .. } => 4,
         Instr::AddGroupSymReg8 { .. }
         | Instr::SubGroupSymReg8 { .. }
         | Instr::AndGroupSymReg8 { .. }
@@ -1409,6 +1413,13 @@ fn emit_instr(
             // `AddGroupSymDx` for memory-dest compound `+=`.
             emit_group_sym_lea(&[0x11, 0x06], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
         }
+        Instr::SbbGroupSymAx { group, symbol, offset } => {
+            // `sbb word ptr <group>:<symbol>,ax` → 19 06 lo hi.
+            // Opcode 19 (SBB r/m16,r16); ModR/M 06 = mod=00 reg=AX
+            // rm=110. High-half borrow partner for `g -= h` long
+            // global compound (fixture 735).
+            emit_group_sym_lea(&[0x19, 0x06], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
+        }
         Instr::SubDxGroupSym { group, symbol, offset } => {
             // `sub dx,word ptr <group>:<symbol>` → 2B 16 lo hi.
             // Same shape as `AddDxGroupSym`; opcode 2B (SUB r16,r/m16).
@@ -1540,6 +1551,20 @@ fn emit_instr(
             // reg=<r> r/m=110) lo hi.
             let modrm = 0b00_000_110 | (reg.code() << 3);
             emit_group_sym_lea(&[0x29, modrm], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
+        }
+        Instr::AndGroupSymReg16 { group, symbol, offset, reg } => {
+            // `and word ptr <group>:<sym>[+N], reg16` → 21 (mod=00
+            // reg=<r> r/m=110) lo hi. Fixture 736.
+            let modrm = 0b00_000_110 | (reg.code() << 3);
+            emit_group_sym_lea(&[0x21, modrm], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
+        }
+        Instr::OrGroupSymReg16 { group, symbol, offset, reg } => {
+            let modrm = 0b00_000_110 | (reg.code() << 3);
+            emit_group_sym_lea(&[0x09, modrm], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
+        }
+        Instr::XorGroupSymReg16 { group, symbol, offset, reg } => {
+            let modrm = 0b00_000_110 | (reg.code() << 3);
+            emit_group_sym_lea(&[0x31, modrm], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
         }
         Instr::AddGroupSymReg8 { group, symbol, offset, reg } => {
             // `add byte ptr <group>:<sym>[+N], reg8` → 00 (mod=00

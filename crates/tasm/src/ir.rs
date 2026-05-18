@@ -656,6 +656,10 @@ pub enum Instr {
     /// (`11 06 lo hi`). High-half carry partner to `AddGroupSymDx`
     /// for struct-field `+=` with variable RHS. Fixture 391.
     AdcGroupSymAx { group: String, symbol: String, offset: i16 },
+    /// `sbb word ptr <group>:<symbol>[+<offset>], ax` — SBB r/m16,r16
+    /// (`19 06 lo hi`). High-half borrow partner for long-global
+    /// `g -= h` with both operands global (fixture 735).
+    SbbGroupSymAx { group: String, symbol: String, offset: i16 },
     /// `sub dx,word ptr <group>:<symbol>[+<offset>]` — SUB r16,r/m16
     /// with DX dst (`2B 16 lo hi`). Long-to-long subtraction's low-
     /// half subtract (fixture 220).
@@ -837,6 +841,29 @@ pub enum Instr {
     /// r/m16, r16 with /5=SUB. Encoding: `29 (mod=00 reg=<reg>
     /// r/m=110) lo hi`. Sibling of `AddGroupSymReg16`.
     SubGroupSymReg16 {
+        group: String,
+        symbol: String,
+        offset: i16,
+        reg: Reg16,
+    },
+    /// `and word ptr <group>:<symbol>[+<offset>], <reg16>` — `21 /r`
+    /// with mod=00 r/m=110. Long-global `g &= h` lowers both halves
+    /// through this shape (fixture 736).
+    AndGroupSymReg16 {
+        group: String,
+        symbol: String,
+        offset: i16,
+        reg: Reg16,
+    },
+    /// `or word ptr <group>:<symbol>[+<offset>], <reg16>` — `09 /r`.
+    OrGroupSymReg16 {
+        group: String,
+        symbol: String,
+        offset: i16,
+        reg: Reg16,
+    },
+    /// `xor word ptr <group>:<symbol>[+<offset>], <reg16>` — `31 /r`.
+    XorGroupSymReg16 {
         group: String,
         symbol: String,
         offset: i16,

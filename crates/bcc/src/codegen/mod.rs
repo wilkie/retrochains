@@ -3313,6 +3313,34 @@ impl<'a> FunctionEmitter<'a> {
                     let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name},ax\r\n");
                     return;
                 }
+                // Long `g += h` / `g -= h` / `g &= h` / `g |= h` /
+                // `g ^= h` (both globals). BCC loads h's two halves
+                // into AX:DX (AX=high, DX=low) — the same convention
+                // used for long-to-int truncation reads — then
+                // applies the op memory-direct to g, with carry/borrow
+                // propagation via `adc/sbb` for arith. Fixture 734
+                // (`+=`), 735 (`-=`), 736 (`&=`).
+                BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor => {
+                    let _ = write!(self.out, "\tmov\tax,word ptr DGROUP:_{b}+2\r\n");
+                    let _ = write!(self.out, "\tmov\tdx,word ptr DGROUP:_{b}\r\n");
+                    let (lo_op, hi_op) = match op {
+                        BinOp::Add => ("add", "adc"),
+                        BinOp::Sub => ("sub", "sbb"),
+                        BinOp::BitAnd => ("and", "and"),
+                        BinOp::BitOr => ("or", "or"),
+                        BinOp::BitXor => ("xor", "xor"),
+                        _ => unreachable!(),
+                    };
+                    let _ = write!(
+                        self.out,
+                        "\t{lo_op}\tword ptr DGROUP:_{name},dx\r\n",
+                    );
+                    let _ = write!(
+                        self.out,
+                        "\t{hi_op}\tword ptr DGROUP:_{name}+2,ax\r\n",
+                    );
+                    return;
+                }
                 _ => {}
             }
         }

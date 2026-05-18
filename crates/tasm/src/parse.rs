@@ -1303,6 +1303,19 @@ fn parse_and(operands: &str, line_no: usize) -> AsmResult<Instr> {
             return Ok(Instr::AndBpRelByteImm8 { offset, imm: imm as u8 });
         }
     }
+    // `and word ptr <group>:<sym>[+N], <reg16>` — long-global
+    // `g &= h` (fixture 736).
+    if let Some((group, symbol)) = parse_group_symbol(lhs) {
+        if let Some(reg) = Reg16::parse(rhs) {
+            let (sym, offset) = split_sym_offset(symbol);
+            return Ok(Instr::AndGroupSymReg16 {
+                group: group.to_string(),
+                symbol: sym.to_string(),
+                offset,
+                reg,
+            });
+        }
+    }
     // `and byte ptr <group>:<sym>[+N], <reg8>` — char compound `&=`
     // on a global (fixture 682).
     if let Some((group, symbol)) = parse_byte_group_symbol(lhs) {
@@ -1381,6 +1394,16 @@ fn parse_sbb(operands: &str, line_no: usize) -> AsmResult<Instr> {
                 symbol: sym.to_string(),
                 offset,
                 imm,
+            });
+        }
+        // `sbb word ptr <group>:<sym>[+N], ax` — high-half borrow
+        // partner for long-global `g -= h` (fixture 735).
+        if rhs == "ax" {
+            let (sym, offset) = split_sym_offset(symbol);
+            return Ok(Instr::SbbGroupSymAx {
+                group: group.to_string(),
+                symbol: sym.to_string(),
+                offset,
             });
         }
     }
@@ -2171,6 +2194,18 @@ fn parse_or(operands: &str, line_no: usize) -> AsmResult<Instr> {
             return Ok(Instr::OrBpRelByteImm8 { offset, imm: imm as u8 });
         }
     }
+    // `or word ptr <group>:<sym>[+N], <reg16>` — long-global `|=`.
+    if let Some((group, symbol)) = parse_group_symbol(lhs) {
+        if let Some(reg) = Reg16::parse(rhs) {
+            let (sym, offset) = split_sym_offset(symbol);
+            return Ok(Instr::OrGroupSymReg16 {
+                group: group.to_string(),
+                symbol: sym.to_string(),
+                offset,
+                reg,
+            });
+        }
+    }
     // `or byte ptr <group>:<sym>[+N], <reg8>` — char compound `|=`
     // on a global.
     if let Some((group, symbol)) = parse_byte_group_symbol(lhs) {
@@ -2302,6 +2337,18 @@ fn parse_xor(operands: &str, line_no: usize) -> AsmResult<Instr> {
     if let Some(offset) = parse_byte_bp_relative(lhs) {
         if let Some(imm) = parse_imm8(rhs) {
             return Ok(Instr::XorBpRelByteImm8 { offset, imm: imm as u8 });
+        }
+    }
+    // `xor word ptr <group>:<sym>[+N], <reg16>` — long-global `^=`.
+    if let Some((group, symbol)) = parse_group_symbol(lhs) {
+        if let Some(reg) = Reg16::parse(rhs) {
+            let (sym, offset) = split_sym_offset(symbol);
+            return Ok(Instr::XorGroupSymReg16 {
+                group: group.to_string(),
+                symbol: sym.to_string(),
+                offset,
+                reg,
+            });
         }
     }
     // `xor byte ptr <group>:<sym>[+N], <reg8>` — char compound `^=`
