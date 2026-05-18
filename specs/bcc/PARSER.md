@@ -1763,6 +1763,35 @@ byte form (`80 3C ii`).
   dx` path routes through AX, then `mov word ptr [bp-N], ax`
   stores the result.
 
+## `c /= K` / `c %= K` — char compound divide/modulo
+
+Fixture `640` (`char c; c = 12; c /= 4;`) — two related
+changes:
+
+1. **Codegen**: added the char compound div/mod arm in
+   `emit_compound_assign_reg`. Pattern (BCC):
+   `mov al, <reg>; cbw; mov bx, K; cwd; idiv bx; mov <reg>,
+   <al|dl>`. The cbw widens char to AX, idiv produces quotient
+   in AX and remainder in DX, then the low byte of the chosen
+   result stores back. Shift-unroll wouldn't match signed
+   semantics (rounding differs for negative values).
+2. **Allocator**: BCC drops DL from the char pool when the
+   function body contains any signed div/mod, because the
+   `cwd` preceding `idiv` clobbers DX. Probed by comparing
+   our output to BCC's — our planner had c in DL, BCC had it
+   in CL. Added `body_has_div_or_mod` walk and a new
+   `CHAR_POOL_DIV = [CL, BL]` variant that's selected when
+   the body has division.
+
+## Free passes (batch 107)
+
+- `638` — `int x; x = 5; if (x != 0) return 1; return 0;`
+  (int `!= 0` in if-cond): `emit_cond_branch` already emits
+  `cmp ax, 0; jne ...` for the comparison-with-zero pattern.
+- `639` — `int a; int b; ... if (a != b) return 1;` (int !=
+  int): the standard cmp-as-branch path lowers `!=` to `cmp;
+  jne` over the operand pair.
+
 ### Deferred from batch 88
 
 - Probed `int a[5]; return sizeof(a);` (`582` first draft).
