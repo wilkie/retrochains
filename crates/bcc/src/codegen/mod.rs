@@ -2132,6 +2132,29 @@ impl<'a> FunctionEmitter<'a> {
             let _ = write!(self.out, "\tcmp\t{width} ptr [{}],0\r\n", reg.name());
             return;
         }
+        // `if (p[K])` — global-pointer subscript in boolean context.
+        // BCC loads the pointer into BX and emits `cmp word ptr
+        // [bx+K*stride], 0` directly. Fixture 889.
+        if let ExprKind::ArrayIndex { array, index } = &cond.kind
+            && let ExprKind::Ident(name) = &array.kind
+            && let Some(gty) = self.globals.type_of(name)
+            && let Some(pointee) = gty.pointee()
+            && let Some(k) = try_const_eval(index)
+            && matches!(pointee, Type::Int | Type::UInt)
+        {
+            let stride = i32::from(pointee.size_bytes());
+            let off = (k as i32).wrapping_mul(stride);
+            let bx_disp = if off == 0 {
+                "[bx]".to_owned()
+            } else if off > 0 {
+                format!("[bx+{off}]")
+            } else {
+                format!("[bx-{}]", -off)
+            };
+            let _ = write!(self.out, "\tmov\tbx,word ptr DGROUP:_{name}\r\n");
+            let _ = write!(self.out, "\tcmp\tword ptr {bx_disp},0\r\n");
+            return;
+        }
         let ExprKind::Ident(name) = &cond.kind else {
             panic!("non-ident boolean condition not yet supported (no fixture)");
         };
@@ -5711,6 +5734,38 @@ impl<'a> FunctionEmitter<'a> {
                     return;
                 }
                 panic!("non-constant rhs in constant-indexed global array assign not yet supported (no fixture)");
+            }
+            // Global-pointer subscript assignment: `int *p; p[K] = v`.
+            // Load the pointer into BX, then `mov word ptr [bx+off],
+            // <ax|imm>`. Mirrors the local-pointer path (fixture 590)
+            // but the pointer lives in DGROUP, not a register.
+            // Fixture 887 (var RHS).
+            if let Some(pointee) = gty.pointee()
+                && indices.len() == 1
+                && let Some(k) = try_const_eval(&indices[0])
+                && matches!(pointee, Type::Int | Type::UInt)
+            {
+                let stride = i32::from(pointee.size_bytes());
+                let off = (k as i32).wrapping_mul(stride);
+                let bx_disp = if off == 0 {
+                    "[bx]".to_owned()
+                } else if off > 0 {
+                    format!("[bx+{off}]")
+                } else {
+                    format!("[bx-{}]", -off)
+                };
+                let _ = write!(self.out, "\tmov\tbx,word ptr DGROUP:_{array}\r\n");
+                if let Some(v) = try_const_eval(value) {
+                    let v_masked = v & 0xFFFF;
+                    let _ = write!(
+                        self.out,
+                        "\tmov\tword ptr {bx_disp},{v_masked}\r\n",
+                    );
+                } else {
+                    self.emit_expr_to_ax(value);
+                    let _ = write!(self.out, "\tmov\tword ptr {bx_disp},ax\r\n");
+                }
+                return;
             }
             // Variable-indexed global int-array write. Load `i` into
             // BX, shl once for stride 2, then `mov word ptr

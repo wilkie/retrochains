@@ -470,6 +470,7 @@ fn instr_size(instr: &Instr) -> usize {
         | Instr::XorBxPtrAx => 2,
         Instr::IncBxDisp { .. } | Instr::DecBxDisp { .. } => 3,
         Instr::IncBxDispByte { .. } | Instr::DecBxDispByte { .. } => 3,
+        Instr::CmpBxDispImm8 { .. } => 4,
         Instr::ShlBxDispImm1 { .. }
         | Instr::SarBxDispImm1 { .. }
         | Instr::ShrBxDispImm1 { .. } => 3,
@@ -2161,6 +2162,14 @@ fn emit_instr(
             out.push(0xFE);
             out.push(0x4F);
             out.push(*disp as u8);
+        }
+        Instr::CmpBxDispImm8 { disp, imm } => {
+            // `cmp word ptr [bx+disp8],imm8sx` → 83 7F dd ii.
+            // Fixture 889.
+            out.push(0x83);
+            out.push(0x7F);
+            out.push(*disp as u8);
+            out.push(*imm as u8);
         }
         Instr::ShlBxDispImm1 { disp } => {
             // `shl word ptr [bx+disp8],1` → D1 67 dd. Fixture 878.

@@ -1264,6 +1264,11 @@ pub enum Instr {
     IncBxDispByte { disp: i8 },
     /// `dec byte ptr [bx+disp8]` — `FE 4F dd`. Group FE `/1` sibling.
     DecBxDispByte { disp: i8 },
+    /// `cmp word ptr [bx+disp8],<imm8sx>` — `83 7F dd ii`. Group-1
+    /// `/7` (CMP) imm8sx form with mod=01 r/m=111=BX. Used by `if
+    /// (p[K])` — the zero-test BCC emits as `cmp word ptr
+    /// [bx+K*2], 0` (fixture 889).
+    CmpBxDispImm8 { disp: i8, imm: i8 },
     /// `shl word ptr [bx+disp8],1` — `D1 67 dd`. Group-2 `/4` (SHL)
     /// 1-bit shift with mod=01 r/m=111=BX. Used by `int *p; p[K]
     /// <<= N` (fixture 878: BCC unrolls into N repetitions of the

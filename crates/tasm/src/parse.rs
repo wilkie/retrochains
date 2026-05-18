@@ -2138,6 +2138,14 @@ fn parse_cmp(operands: &str, line_no: usize) -> AsmResult<Instr> {
             return Ok(Instr::CmpBpRelImm16 { offset, imm: imm as u16 });
         }
     }
+    // `cmp word ptr [bx+disp8], imm8sx` — pointer-subscript zero-
+    // test (fixture 889: `if (p[K])` → `cmp word ptr [bx+K*2], 0`).
+    if let Some(disp) = parse_word_bx_disp(lhs)
+        && disp != 0
+        && let Some(imm) = parse_imm8_signed(rhs)
+    {
+        return Ok(Instr::CmpBxDispImm8 { disp, imm });
+    }
     // `cmp byte ptr <group>:<sym>[+N], imm8` — char-global compare
     // (`80 3E lo hi ii`, 5 bytes). Used by `if (c == 'A')` for
     // char globals (fixture 452).
