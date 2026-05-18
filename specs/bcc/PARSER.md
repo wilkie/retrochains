@@ -1959,6 +1959,33 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Pointer subscript — return, compare-const, compare-var
+
+Fixtures `890` (`int *p; return p[1]` — subscript as the return
+value), `891` (`int *p; if (p[1] == 5)` — equality against a
+const), `892` (`int *p; if (p[1] == q)` — equality against a
+local var).
+
+All three already worked end-to-end without new code — they
+exercise the rvalue subscript-load path through `emit_expr_to_
+ax` plus the existing comparison helpers. The probes lock in
+byte-exact regression coverage for paths that previously had
+no fixture witness.
+
+**Recorded finding (BCC `-S` vs OBJ mismatch).** For fixture
+891 the oracle's ASM listing reads `mov bx, _p; cmp word ptr
+[bx+2], 5`, but the assembled OBJ bytes are actually `mov bx,
+_p; mov ax, word ptr [bx+2]; cmp ax, 5`. BCC's `-S` printer
+shows the memory-direct compare, but the internal OBJ pipeline
+emits the AX-through form. An early attempt to add a memory-
+direct cmp peephole to `emit_compare` matched the printed ASM
+but produced a 2-byte-shorter OBJ than the oracle. Reverted —
+falling through to `emit_expr_to_ax` + `cmp ax, imm` is what
+the unchanged code already did, and it matches the OBJ bytes.
+Fixture 889 (`if (p[K])`) is a real zero-test path through
+`emit_zero_test`; that one *does* match both the ASM listing
+and the OBJ bytes (`83 7F dd 00`, memory-direct).
+
 ## Pointer subscript — non-compound read/write/test
 
 Fixtures `887` (`int *p; p[1] = y` — plain assignment to global
