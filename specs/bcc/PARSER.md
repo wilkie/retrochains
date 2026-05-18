@@ -1959,6 +1959,42 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `char` `%=` by variable, plus `unsigned char` enregistration
+
+Fixtures `674` (signed `c %= d`), `675` (`unsigned char c >>= d`),
+`676` (`unsigned char c += d`).
+
+- `674` — signed `c %= d` was a free pass off batch-118's
+  `BinOp::Div | BinOp::Mod` byte arm. BCC keeps c in DL and
+  stores the remainder via `mov dl, ah` (8-bit `idiv`'s
+  remainder lives in AH).
+- `675` / `676` — `unsigned char` enregistration was broken:
+  `crates/bcc/src/codegen/locals.rs` filtered char-pool
+  eligibility on `Type::Char` only, leaving every `unsigned
+  char` local stack-resident and tripping the
+  "compound assignment on stack-resident" panic in codegen.
+  Widened both filters in the planner to `Type::Char |
+  Type::UChar`. The signedness propagates correctly downstream
+  via `is_unsigned()` (used in the shift-mnemonic pick and in
+  return-widen `cbw` vs `mov ah, 0`).
+
+### Deferred — unsigned char `/=` / `%=` register-allocation drift
+
+While probing, BCC's allocator visibly diverges from our pool:
+- Signed `c /= d` / `c %= d` (8-bit form) → c in **DL**.
+- Unsigned `c /= d` / `c %= d` (8-bit form, uses `div` and
+  `mov ah, 0`) → c in **BL**, not DL.
+
+This is independent of the existing `cwd`-clobber heuristic
+(neither shape emits `cwd`). Hypotheses: a separate "AH-as-
+widen-temp" gate, or BCC has a distinct pool order for
+unsigned byte div/mod. The TASM listing also uses a different
+syntax for unsigned (`div al, byte ptr [bp-1]`) vs signed
+(`idiv byte ptr [bp-1]`) — the explicit AL hints at a separate
+encoder path on BCC's side. Held until a probe pins it down;
+fixture slot used for an `unsigned char c += d` free-pass
+instead.
+
 ## `char` compound `<<=` / `*=` / `/=` by variable
 
 Fixtures `671` (`c <<= d`), `672` (`c *= d`), `673` (`c /= d`)
