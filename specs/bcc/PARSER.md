@@ -1959,6 +1959,34 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `long` compound with `unsigned int` RHS (zero-widening)
+
+Fixtures `767` (`g += x` unsigned), `768` (`g -= x`),
+`769` (`g &= x`). LHS is `unsigned long`, RHS is `unsigned
+int`.
+
+BCC handles unsigned widening with **no widening register**
+at all — just an immediate `0` for the high-half operand:
+
+```
+mov ax, word ptr [bp-N]    ; load uint RHS
+add word ptr DGROUP:_g, ax  ; add to low half
+adc word ptr DGROUP:_g+2, 0 ; carry-only propagation into high
+```
+
+Same skeleton works for `-=`/`&=`/`|=`/`^=`:
+- `+=` / `-=`: high-half op is `adc 0` / `sbb 0` (rides on
+  the carry/borrow from the low half).
+- `&=`: `and <hi>, 0` zeros the high half — matches the
+  zero-extended RHS semantics.
+- `|=` / `^=`: `or <hi>, 0` / `xor <hi>, 0` is a no-op,
+  preserving the high half.
+
+Added a new arm in `emit_compound_assign` gated on
+`Type::UInt` RHS. Reuses the existing `<op>GroupSymImm8Sx`
+encoders so the high-half-with-imm-0 step assembles via the
+short 5-byte form (`81|83 <modrm> ... 00`).
+
 ## `long` compound `%=` int + stack-LHS variants
 
 Fixtures `764` (global `g %= x`), `765` (`a += x` stack LHS),
