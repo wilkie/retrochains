@@ -1959,6 +1959,27 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `long` global compound `|=` / `^=` / `<<=` by variable
+
+Fixtures `737` (`g |= h`), `738` (`g ^= h`), `739` (`g <<= h`).
+
+- `737` / `738` — free passes off batch 139's
+  `BinOp::Add|Sub|BitAnd|BitOr|BitXor` arm for long-global
+  with long-variable RHS.
+- `739` — long-global shift by long-variable RHS. BCC's
+  pattern reuses the K-constant K>1 helper-call shape but
+  loads CL from h's low byte: `mov cl, byte ptr DGROUP:_h;
+  mov dx, _g+2; mov ax, _g; call N_LXLSH@; mov _g+2, dx;
+  mov _g, ax`. Added the branch in the long-global var-RHS
+  match alongside the arith/bitwise handler. Helper picks
+  `N_LXLSH@` / `N_LXRSH@` / `N_LXURSH@` based on op and
+  signedness — same dispatch table as the K-constant path.
+- Added `MovReg8GroupSym` tasm IR variant (`8A (mod=00
+  reg=<r> r/m=110) lo hi` + FIXUPP) — generic byte-global
+  load for non-AL destinations. AL keeps the shorter
+  `MovAlGroupSym` (`A0` moffs8 form). Codegen needed this
+  for the `mov cl, byte ptr DGROUP:_h` shape.
+
 ## `long` global compound with long variable RHS
 
 Fixtures `734` (`g += h`), `735` (`g -= h`), `736` (`g &= h`)
