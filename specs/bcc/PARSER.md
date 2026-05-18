@@ -1363,6 +1363,50 @@ repeated (no `imul` involved). Added that peephole; non-power-
 of-2 immediates still panic with an explicit "no fixture"
 marker (BCC's shape in that case is `mov dx, K; imul dx`).
 
+## `n + sum(n - 1)` — RHS-call evaluation order
+
+Fixture `593` (simple recursion `int sum(int n) { if (n <= 0)
+return 0; return n + sum(n - 1); }`) — `emit_expr_to_ax` for
+binary ops previously always evaluated LHS into AX first. BCC's
+pattern when the RHS is a call is right-first:
+
+```text
+  mov ax, si      ; (compute call arg from LHS-shared reg)
+  dec ax
+  push ax
+  call near ptr _sum
+  pop cx
+  push ax         ; save call result
+  mov ax, si      ; reload LHS
+  pop dx          ; restore saved result
+  add ax, dx
+```
+
+A call clobbers AX, so evaluating it first and saving the
+result before re-loading LHS avoids the extra `push/pop` of an
+already-in-AX value. Added the RHS-call branch to the BinOp arm
+of `emit_expr_to_ax`: when `right.kind` is `Call`, emit RHS to
+AX, push, emit LHS to AX, pop into DX, then apply the op with
+DX as the source operand.
+
+## `*p = v` — non-constant RHS for int/char pointees
+
+Fixture `595` (`int x; int *p; p = &x; *p = *p + 1;`) — the
+`*p = v` path on a register-resident pointer previously
+required a constant RHS. Extended the path: when the RHS isn't
+const-foldable, `emit_expr_to_ax(value)` materializes the
+value in AX/AL, then `mov <width> ptr [<reg>], ax/al` stores
+it. A new tasm IR variant `MovSiPtrReg16` encodes `mov word
+ptr [si], <reg16>` as `89 (mod=00 reg=<src> r/m=100)`; only
+the immediate form was previously supported.
+
+## Free passes (batch 92)
+
+- `594` — `int x; int y; x = 16; y = 2; return x >> y;`
+  (signed `int >> int` with a non-constant shift count): the
+  existing shift-by-CL lowering (`mov cl, byte ptr [y]; sar ax,
+  cl`) already byte-matches BCC.
+
 ### Deferred from batch 88
 
 - Probed `int a[5]; return sizeof(a);` (`582` first draft).
