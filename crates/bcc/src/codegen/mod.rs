@@ -3279,13 +3279,14 @@ impl<'a> FunctionEmitter<'a> {
         // Long LHS with int RHS (widening): `long g += int x`. BCC
         // widens the int via `cwd` (signed) into DX:AX, then
         // applies memory-direct add/adc (or sub/sbb, or
-        // bitwise-pair) to the LHS. Fixture 755. Unsigned-int RHS
-        // (UInt) uses `xor dx, dx` rather than `cwd`; not yet
-        // probed.
+        // bitwise-pair) to the LHS. Fixture 755. Also accepts
+        // `Type::Char` RHS — `emit_expr_to_ax` emits the `cbw`
+        // for the byte-to-int widening, and the same `cwd` then
+        // extends to long. Fixture 783.
         if let Some(ty_lhs) = self.lhs_long_type(name)
             && ty_lhs.is_long_like()
             && let Some(ty_rhs) = self.rhs_type_for_long_widening(&value.kind)
-            && matches!(ty_rhs, Type::Int)
+            && matches!(ty_rhs, Type::Int | Type::Char)
             && matches!(
                 op,
                 BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor
@@ -3314,11 +3315,15 @@ impl<'a> FunctionEmitter<'a> {
         // <lhs_hi>, 0`. For arith the `0` rides on the carry/
         // borrow from the low half (adc/sbb 0); for bitwise it
         // acts directly (and 0 zeros high, or/xor 0 is a no-op
-        // on high). Fixture 767.
+        // on high). Fixture 767. Also accepts `Type::UChar` RHS
+        // — `emit_expr_to_ax` emits `mov ah, 0` for the byte-to-
+        // int zero-extension, and the same `<hi_op> 0` finishes
+        // the long widening with no further widening register.
+        // Fixture 784.
         if let Some(ty_lhs) = self.lhs_long_type(name)
             && ty_lhs.is_long_like()
             && let Some(ty_rhs) = self.rhs_type_for_long_widening(&value.kind)
-            && matches!(ty_rhs, Type::UInt)
+            && matches!(ty_rhs, Type::UInt | Type::UChar)
             && matches!(
                 op,
                 BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor
