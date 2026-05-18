@@ -226,6 +226,19 @@ pub enum Instr {
     XorBpRelDx { offset: i16 },
     /// `xor word ptr [bp+disp8],ax` — `31 46 dd`.
     XorBpRelAx { offset: i16 },
+    /// `add word ptr [bp+disp8],ax` — `01 46 dd`. Low half of
+    /// `long += int x` for a stack LHS: AX holds the int RHS,
+    /// DX holds the cwd sign-extension. Fixture 765.
+    AddBpRelAx { offset: i16 },
+    /// `adc word ptr [bp+disp8],dx` — `11 56 dd`. High-half carry
+    /// partner to `AddBpRelAx` for the same `long += int` shape.
+    AdcBpRelDx { offset: i16 },
+    /// `sub word ptr [bp+disp8],ax` — `29 46 dd`. Long-stack
+    /// `-= int` low half.
+    SubBpRelAx { offset: i16 },
+    /// `sbb word ptr [bp+disp8],dx` — `19 56 dd`. High-half borrow
+    /// partner to `SubBpRelAx`.
+    SbbBpRelDx { offset: i16 },
     /// `add <dst>,<src>` between 16-bit registers — 03 xx with
     /// ModR/M mod=11 reg=dst r/m=src. Used to fold a register-resident
     /// operand into AX (fixture 127: `add ax,si`).

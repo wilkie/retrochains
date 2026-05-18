@@ -1192,6 +1192,11 @@ fn parse_sub(operands: &str, line_no: usize) -> AsmResult<Instr> {
         if rhs == "dx" {
             return Ok(Instr::SubBpRelDx { offset });
         }
+        // `sub word ptr [bp+N], ax` — long-stack `-= int` low half
+        // (sibling of AddBpRelAx).
+        if rhs == "ax" {
+            return Ok(Instr::SubBpRelAx { offset });
+        }
     }
     // `sub word ptr [si], imm8sx` — long-pointer `*p -= K` low half.
     if lhs == "word ptr [si]" {
@@ -1439,6 +1444,10 @@ fn parse_sbb(operands: &str, line_no: usize) -> AsmResult<Instr> {
         if rhs == "ax" {
             return Ok(Instr::SbbBpRelAx { offset });
         }
+        // `sbb word ptr [bp+N], dx` — sibling for `-= int` cwd path.
+        if rhs == "dx" {
+            return Ok(Instr::SbbBpRelDx { offset });
+        }
     }
     // `sbb word ptr [si+disp], imm8sx` — long-pointer `*p -= K`
     // high-half borrow propagation.
@@ -1553,6 +1562,12 @@ fn parse_adc(operands: &str, line_no: usize) -> AsmResult<Instr> {
         // half carry propagation from register-loaded RHS (339).
         if rhs == "ax" {
             return Ok(Instr::AdcBpRelAx { offset });
+        }
+        // `adc word ptr [bp+N], dx` — long-stack `+= int` high-half
+        // carry propagation; DX holds the cwd sign-extension
+        // (fixture 765).
+        if rhs == "dx" {
+            return Ok(Instr::AdcBpRelDx { offset });
         }
     }
     // `adc word ptr [si+disp], imm8sx` — long-pointer `*p += K`
@@ -1706,6 +1721,11 @@ fn parse_add(operands: &str, line_no: usize) -> AsmResult<Instr> {
         // half (fixture 339).
         if rhs == "dx" {
             return Ok(Instr::AddBpRelDx { offset });
+        }
+        // `add word ptr [bp+N], ax` — long-stack `+= int` low half
+        // (fixture 765, AX holds int RHS).
+        if rhs == "ax" {
+            return Ok(Instr::AddBpRelAx { offset });
         }
     }
     // `add word ptr <group>:<sym>[+N], imm` — read-modify-write

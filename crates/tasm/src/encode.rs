@@ -283,6 +283,10 @@ fn instr_size(instr: &Instr) -> usize {
         | Instr::OrBpRelAx { .. }
         | Instr::XorBpRelDx { .. }
         | Instr::XorBpRelAx { .. }
+        | Instr::AddBpRelAx { .. }
+        | Instr::AdcBpRelDx { .. }
+        | Instr::SubBpRelAx { .. }
+        | Instr::SbbBpRelDx { .. }
         | Instr::SubAxBpRel { .. }
         | Instr::AndAxBpRel { .. }
         | Instr::AndReg16BpRel { .. }
@@ -739,6 +743,34 @@ fn emit_instr(
             let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
             out.push(0x31);
             out.push(0x46);
+            out.push(disp as u8);
+        }
+        Instr::AddBpRelAx { offset } => {
+            // `add word ptr [bp+disp8],ax` → 01 46 dd.
+            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
+            out.push(0x01);
+            out.push(0x46);
+            out.push(disp as u8);
+        }
+        Instr::AdcBpRelDx { offset } => {
+            // `adc word ptr [bp+disp8],dx` → 11 56 dd.
+            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
+            out.push(0x11);
+            out.push(0x56);
+            out.push(disp as u8);
+        }
+        Instr::SubBpRelAx { offset } => {
+            // `sub word ptr [bp+disp8],ax` → 29 46 dd.
+            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
+            out.push(0x29);
+            out.push(0x46);
+            out.push(disp as u8);
+        }
+        Instr::SbbBpRelDx { offset } => {
+            // `sbb word ptr [bp+disp8],dx` → 19 56 dd.
+            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
+            out.push(0x19);
+            out.push(0x56);
             out.push(disp as u8);
         }
         Instr::SubAxFromSiPtr => {
