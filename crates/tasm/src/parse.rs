@@ -1032,6 +1032,19 @@ fn parse_sub(operands: &str, line_no: usize) -> AsmResult<Instr> {
             });
         }
     }
+    // `sub byte ptr <group>:<sym>[+N], <reg8>` — char compound `-=`
+    // on a global (fixture 681).
+    if let Some((group, symbol)) = parse_byte_group_symbol(lhs) {
+        let (sym, offset) = split_sym_offset(symbol);
+        if let Some(reg) = Reg8::parse(rhs) {
+            return Ok(Instr::SubGroupSymReg8 {
+                group: group.to_string(),
+                symbol: sym.to_string(),
+                offset,
+                reg,
+            });
+        }
+    }
     // `sub dx, word ptr <group>:<sym>[+N]` — long-to-long sub
     // low-half (fixture 220).
     if lhs == "dx" {
@@ -1178,6 +1191,19 @@ fn parse_and(operands: &str, line_no: usize) -> AsmResult<Instr> {
             if let Some(offset) = parse_bp_relative(rhs) {
                 return Ok(Instr::AndReg16BpRel { reg, offset });
             }
+        }
+    }
+    // `and byte ptr <group>:<sym>[+N], <reg8>` — char compound `&=`
+    // on a global (fixture 682).
+    if let Some((group, symbol)) = parse_byte_group_symbol(lhs) {
+        let (sym, offset) = split_sym_offset(symbol);
+        if let Some(reg) = Reg8::parse(rhs) {
+            return Ok(Instr::AndGroupSymReg8 {
+                group: group.to_string(),
+                symbol: sym.to_string(),
+                offset,
+                reg,
+            });
         }
     }
     parse_alu_ax_mem(operands, line_no, "and", |o| Instr::AndAxBpRel { offset: o })
@@ -1546,6 +1572,19 @@ fn parse_add(operands: &str, line_no: usize) -> AsmResult<Instr> {
         // two int globals → `add [_a], ax`).
         if let Some(reg) = Reg16::parse(rhs) {
             return Ok(Instr::AddGroupSymReg16 {
+                group: group.to_string(),
+                symbol: sym.to_string(),
+                offset,
+                reg,
+            });
+        }
+    }
+    // `add byte ptr <group>:<sym>[+N], <reg8>` — char compound `+=`
+    // on a data-segment global (fixture 680).
+    if let Some((group, symbol)) = parse_byte_group_symbol(lhs) {
+        let (sym, offset) = split_sym_offset(symbol);
+        if let Some(reg) = Reg8::parse(rhs) {
+            return Ok(Instr::AddGroupSymReg8 {
                 group: group.to_string(),
                 symbol: sym.to_string(),
                 offset,
@@ -1966,6 +2005,19 @@ fn parse_or(operands: &str, line_no: usize) -> AsmResult<Instr> {
             }
         }
     }
+    // `or byte ptr <group>:<sym>[+N], <reg8>` — char compound `|=`
+    // on a global.
+    if let Some((group, symbol)) = parse_byte_group_symbol(lhs) {
+        let (sym, offset) = split_sym_offset(symbol);
+        if let Some(reg) = Reg8::parse(rhs) {
+            return Ok(Instr::OrGroupSymReg8 {
+                group: group.to_string(),
+                symbol: sym.to_string(),
+                offset,
+                reg,
+            });
+        }
+    }
     Err(AsmError::new(
         line_no,
         format!("or: unsupported operand form `{operands}`"),
@@ -2064,6 +2116,19 @@ fn parse_xor(operands: &str, line_no: usize) -> AsmResult<Instr> {
             if let Some(offset) = parse_bp_relative(rhs) {
                 return Ok(Instr::XorReg16BpRel { reg, offset });
             }
+        }
+    }
+    // `xor byte ptr <group>:<sym>[+N], <reg8>` — char compound `^=`
+    // on a global.
+    if let Some((group, symbol)) = parse_byte_group_symbol(lhs) {
+        let (sym, offset) = split_sym_offset(symbol);
+        if let Some(reg) = Reg8::parse(rhs) {
+            return Ok(Instr::XorGroupSymReg8 {
+                group: group.to_string(),
+                symbol: sym.to_string(),
+                offset,
+                reg,
+            });
         }
     }
     Err(AsmError::new(

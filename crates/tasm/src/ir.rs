@@ -784,6 +784,50 @@ pub enum Instr {
         offset: i16,
         reg: Reg16,
     },
+    /// `add byte ptr <group>:<symbol>[+<offset>], <reg8>` — 8-bit
+    /// sibling of `AddGroupSymReg16`. Encoding: `00 (mod=00
+    /// reg=<reg> r/m=110) lo hi`. Char compound `+=` on a global
+    /// with non-constant RHS (fixture 680: `g += d` with d already
+    /// loaded into AL → `add byte ptr DGROUP:_g, al` = `00 06 lo
+    /// hi` + FIXUPP).
+    AddGroupSymReg8 {
+        group: String,
+        symbol: String,
+        offset: i16,
+        reg: Reg8,
+    },
+    /// `sub byte ptr <group>:<symbol>[+<offset>], <reg8>` — `28 /r`
+    /// sibling. Char compound `-=` on a global (fixture 681).
+    SubGroupSymReg8 {
+        group: String,
+        symbol: String,
+        offset: i16,
+        reg: Reg8,
+    },
+    /// `and byte ptr <group>:<symbol>[+<offset>], <reg8>` — `20 /r`
+    /// sibling. Char compound `&=` on a global (fixture 682).
+    AndGroupSymReg8 {
+        group: String,
+        symbol: String,
+        offset: i16,
+        reg: Reg8,
+    },
+    /// `or byte ptr <group>:<symbol>[+<offset>], <reg8>` — `08 /r`
+    /// sibling.
+    OrGroupSymReg8 {
+        group: String,
+        symbol: String,
+        offset: i16,
+        reg: Reg8,
+    },
+    /// `xor byte ptr <group>:<symbol>[+<offset>], <reg8>` — `30 /r`
+    /// sibling.
+    XorGroupSymReg8 {
+        group: String,
+        symbol: String,
+        offset: i16,
+        reg: Reg8,
+    },
     /// `test word ptr <group>:<symbol>[+<offset>], imm16` — TEST
     /// r/m16, imm16 via Grp3 /0 against a data-segment global.
     /// Encoding: `F7 06 lo hi imm_lo imm_hi` (ModR/M 06 = mod=00

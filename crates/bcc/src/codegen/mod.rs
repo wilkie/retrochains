@@ -3614,6 +3614,38 @@ impl<'a> FunctionEmitter<'a> {
             );
             return;
         }
+        // Char/uchar global compound `+=` / `-=` / `&=` / `|=` /
+        // `^=` with a non-constant byte RHS. BCC loads the RHS into
+        // AL and then applies the op memory-direct to the global:
+        // `mov al, byte ptr <src>; <op> byte ptr DGROUP:_<g>, al`
+        // (fixtures 680/681/682). Constant-RHS char globals are not
+        // yet probed.
+        if let Some(gty) = self.globals.type_of(name)
+            && matches!(gty, Type::Char | Type::UChar)
+            && matches!(
+                op,
+                BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor
+            )
+            && try_const_eval(value).is_none()
+        {
+            let src = self.resolve_operand_source(value);
+            self.out.extend_from_slice(b"\tmov\tal,");
+            self.out.extend_from_slice(src.byte().as_bytes());
+            self.out.extend_from_slice(b"\r\n");
+            let mnem = match op {
+                BinOp::Add => "add",
+                BinOp::Sub => "sub",
+                BinOp::BitAnd => "and",
+                BinOp::BitOr => "or",
+                BinOp::BitXor => "xor",
+                _ => unreachable!(),
+            };
+            let _ = write!(
+                self.out,
+                "\t{mnem}\tbyte ptr DGROUP:_{name},al\r\n",
+            );
+            return;
+        }
         let LocalLocation::Reg(reg) = self.locals.location_of(name) else {
             panic!(
                 "compound assignment on stack-resident `{name}` not yet supported (no fixture)"

@@ -373,6 +373,11 @@ fn instr_size(instr: &Instr) -> usize {
         Instr::IncGroupSym { .. } | Instr::DecGroupSym { .. } => 4,
         Instr::TestGroupSymImm16 { .. } => 6,
         Instr::AddGroupSymReg16 { .. } | Instr::SubGroupSymReg16 { .. } => 4,
+        Instr::AddGroupSymReg8 { .. }
+        | Instr::SubGroupSymReg8 { .. }
+        | Instr::AndGroupSymReg8 { .. }
+        | Instr::OrGroupSymReg8 { .. }
+        | Instr::XorGroupSymReg8 { .. } => 4,
         Instr::IncBpRel { .. } | Instr::DecBpRel { .. } => 3,
         Instr::ShlGroupSymOne { .. }
         | Instr::SarGroupSymOne { .. }
@@ -1501,6 +1506,28 @@ fn emit_instr(
             // reg=<r> r/m=110) lo hi.
             let modrm = 0b00_000_110 | (reg.code() << 3);
             emit_group_sym_lea(&[0x29, modrm], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
+        }
+        Instr::AddGroupSymReg8 { group, symbol, offset, reg } => {
+            // `add byte ptr <group>:<sym>[+N], reg8` → 00 (mod=00
+            // reg=<r> r/m=110) lo hi. Fixture 680.
+            let modrm = 0b00_000_110 | (reg.code() << 3);
+            emit_group_sym_lea(&[0x00, modrm], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
+        }
+        Instr::SubGroupSymReg8 { group, symbol, offset, reg } => {
+            let modrm = 0b00_000_110 | (reg.code() << 3);
+            emit_group_sym_lea(&[0x28, modrm], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
+        }
+        Instr::AndGroupSymReg8 { group, symbol, offset, reg } => {
+            let modrm = 0b00_000_110 | (reg.code() << 3);
+            emit_group_sym_lea(&[0x20, modrm], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
+        }
+        Instr::OrGroupSymReg8 { group, symbol, offset, reg } => {
+            let modrm = 0b00_000_110 | (reg.code() << 3);
+            emit_group_sym_lea(&[0x08, modrm], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
+        }
+        Instr::XorGroupSymReg8 { group, symbol, offset, reg } => {
+            let modrm = 0b00_000_110 | (reg.code() << 3);
+            emit_group_sym_lea(&[0x30, modrm], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
         }
         Instr::TestGroupSymImm16 { group, symbol, offset, imm } => {
             // `test word ptr <group>:<sym>[+N], imm16` →
