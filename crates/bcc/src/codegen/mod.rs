@@ -5969,6 +5969,32 @@ impl<'a> FunctionEmitter<'a> {
                 let _ = write!(self.out, "\t{mnem}\tword ptr {dest},cl\r\n");
                 return;
             }
+            // Char-element compound with non-constant RHS — load
+            // dest into AL, then `<op> al, byte ptr <rhs>` against
+            // the low byte of the RHS (int gets truncated). Same
+            // shape as char-global var-RHS (fixture 680). Fixture
+            // 847.
+            if store_byte
+                && matches!(
+                    op,
+                    BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor
+                )
+                && try_const_eval(value).is_none()
+                && let Some(rhs_byte) = self.rhs_byte_addr(&value.kind)
+            {
+                let mnem = match op {
+                    BinOp::Add => "add",
+                    BinOp::Sub => "sub",
+                    BinOp::BitAnd => "and",
+                    BinOp::BitOr => "or",
+                    BinOp::BitXor => "xor",
+                    _ => unreachable!(),
+                };
+                let _ = write!(self.out, "\tmov\tal,byte ptr {dest}\r\n");
+                let _ = write!(self.out, "\t{mnem}\tal,{rhs_byte}\r\n");
+                let _ = write!(self.out, "\tmov\tbyte ptr {dest},al\r\n");
+                return;
+            }
             let Some(v) = try_const_eval(value) else {
                 panic!("non-constant rhs in global-array compound assign not yet supported (no fixture)");
             };
@@ -6458,6 +6484,55 @@ impl<'a> FunctionEmitter<'a> {
             let _ = write!(self.out, "\tmov\tdx,word ptr {y_lo}\r\n");
             let _ = write!(self.out, "\t{lo_op}\tword ptr {lo_addr},dx\r\n");
             let _ = write!(self.out, "\t{hi_op}\tword ptr {hi_addr},ax\r\n");
+            return;
+        }
+        // Int RHS widening into long memory destination. emit_expr_to_ax
+        // loads y into AX (with cbw for char), then cwd extends to
+        // DX:AX, then memory-direct `add/adc` (or sub/sbb, or paired
+        // bitwise). Mirrors fixture 755 (`long_global += int x`) but
+        // for an arbitrary memory destination (struct field, array
+        // element). Fixture 845.
+        if let Some(ty_rhs) = self.rhs_int_compound_type(&value.kind)
+            && matches!(ty_rhs, Type::Int | Type::Char)
+            && matches!(
+                op,
+                BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor
+            )
+        {
+            self.emit_expr_to_ax(value);
+            self.out.extend_from_slice(b"\tcwd\t\r\n");
+            let (lo_op, hi_op) = match op {
+                BinOp::Add => ("add", "adc"),
+                BinOp::Sub => ("sub", "sbb"),
+                BinOp::BitAnd => ("and", "and"),
+                BinOp::BitOr => ("or", "or"),
+                BinOp::BitXor => ("xor", "xor"),
+                _ => unreachable!(),
+            };
+            let _ = write!(self.out, "\t{lo_op}\tword ptr {lo_addr},ax\r\n");
+            let _ = write!(self.out, "\t{hi_op}\tword ptr {hi_addr},dx\r\n");
+            return;
+        }
+        // UInt/UChar RHS widening (zero-extend) into long memory dest.
+        // Mirrors fixture 767 (`ulong_global += uint x`).
+        if let Some(ty_rhs) = self.rhs_int_compound_type(&value.kind)
+            && matches!(ty_rhs, Type::UInt | Type::UChar)
+            && matches!(
+                op,
+                BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor
+            )
+        {
+            self.emit_expr_to_ax(value);
+            let (lo_op, hi_op) = match op {
+                BinOp::Add => ("add", "adc"),
+                BinOp::Sub => ("sub", "sbb"),
+                BinOp::BitAnd => ("and", "and"),
+                BinOp::BitOr => ("or", "or"),
+                BinOp::BitXor => ("xor", "xor"),
+                _ => unreachable!(),
+            };
+            let _ = write!(self.out, "\t{lo_op}\tword ptr {lo_addr},ax\r\n");
+            let _ = write!(self.out, "\t{hi_op}\tword ptr {hi_addr},0\r\n");
             return;
         }
         panic!("long compound `{op:?}=` to memory not yet supported for this RHS shape (no fixture)");

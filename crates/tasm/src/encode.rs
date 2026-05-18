@@ -445,6 +445,11 @@ fn instr_size(instr: &Instr) -> usize {
         | Instr::ShlSiPtrCl
         | Instr::SarSiPtrCl
         | Instr::ShrSiPtrCl => 2,
+        Instr::AddAlBpRel { .. }
+        | Instr::SubAlBpRel { .. }
+        | Instr::AndAlBpRel { .. }
+        | Instr::OrAlBpRel { .. }
+        | Instr::XorAlBpRel { .. } => 3,
         Instr::AdcSiDispAx { .. } => 3,
         Instr::AddBpRelImm8 { .. }
         | Instr::AdcBpRelImm8 { .. }
@@ -1952,6 +1957,42 @@ fn emit_instr(
             // `xor word ptr [si],ax` → 31 04.
             out.push(0x31);
             out.push(0x04);
+        }
+        Instr::AddAlBpRel { offset } => {
+            // `add al,byte ptr [bp+disp8]` → 02 46 dd. ADD r8,r/m8
+            // with mod=01 reg=AL(000) r/m=110. Fixture 847.
+            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
+            out.push(0x02);
+            out.push(0x46);
+            out.push(disp as u8);
+        }
+        Instr::SubAlBpRel { offset } => {
+            // `sub al,byte ptr [bp+disp8]` → 2A 46 dd.
+            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
+            out.push(0x2A);
+            out.push(0x46);
+            out.push(disp as u8);
+        }
+        Instr::AndAlBpRel { offset } => {
+            // `and al,byte ptr [bp+disp8]` → 22 46 dd.
+            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
+            out.push(0x22);
+            out.push(0x46);
+            out.push(disp as u8);
+        }
+        Instr::OrAlBpRel { offset } => {
+            // `or al,byte ptr [bp+disp8]` → 0A 46 dd.
+            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
+            out.push(0x0A);
+            out.push(0x46);
+            out.push(disp as u8);
+        }
+        Instr::XorAlBpRel { offset } => {
+            // `xor al,byte ptr [bp+disp8]` → 32 46 dd.
+            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
+            out.push(0x32);
+            out.push(0x46);
+            out.push(disp as u8);
         }
         Instr::ShlSiPtrCl => {
             // `shl word ptr [si],cl` → D3 24. Grp2 /4(SHL) r/m=100. Fixture 840.

@@ -1172,6 +1172,19 @@ pub enum Instr {
     OrSiPtrAx,
     /// `xor word ptr [si],ax` — `31 04`. Sibling for `*p ^= y`.
     XorSiPtrAx,
+    /// `add al,byte ptr [bp+<offset>]` — `02 46 dd`. ADD r8,r/m8
+    /// with mod=01 reg=AL(000) r/m=110=BP+disp8. Char-array
+    /// compound with non-const int RHS truncated to byte (fixture
+    /// 847: `char a[3]; a[1] += y` where y is int).
+    AddAlBpRel { offset: i16 },
+    /// `sub al,byte ptr [bp+<offset>]` — `2A 46 dd`. Sibling.
+    SubAlBpRel { offset: i16 },
+    /// `and al,byte ptr [bp+<offset>]` — `22 46 dd`. Sibling.
+    AndAlBpRel { offset: i16 },
+    /// `or al,byte ptr [bp+<offset>]` — `0A 46 dd`. Sibling.
+    OrAlBpRel { offset: i16 },
+    /// `xor al,byte ptr [bp+<offset>]` — `32 46 dd`. Sibling.
+    XorAlBpRel { offset: i16 },
     /// `shl word ptr [si],cl` — `D3 24`. Grp2 /4(SHL) r/m16 with
     /// mod=00 r/m=100=SI. Variable-count shift through SI for
     /// `*p <<= y`. Fixture 840.

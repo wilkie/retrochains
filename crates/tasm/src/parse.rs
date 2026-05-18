@@ -1155,6 +1155,9 @@ fn parse_sub(operands: &str, line_no: usize) -> AsmResult<Instr> {
         if let Some(imm) = parse_imm8(rhs) {
             return Ok(Instr::SubAlImm8 { imm: imm as u8 });
         }
+        if let Some(offset) = parse_byte_bp_relative(rhs) {
+            return Ok(Instr::SubAlBpRel { offset });
+        }
     }
     // `sub <reg8>, <reg8>` — char compound `-=` between two byte
     // registers (fixture analog of 665 with `-=`).
@@ -1299,6 +1302,9 @@ fn parse_and(operands: &str, line_no: usize) -> AsmResult<Instr> {
     if lhs == "al" {
         if let Some(imm) = parse_imm8(rhs) {
             return Ok(Instr::AndAlImm8 { imm: imm as u8 });
+        }
+        if let Some(offset) = parse_byte_bp_relative(rhs) {
+            return Ok(Instr::AndAlBpRel { offset });
         }
     }
     // `and <reg8>,imm8` for non-AL byte registers (3-byte generic
@@ -1714,6 +1720,9 @@ fn parse_add(operands: &str, line_no: usize) -> AsmResult<Instr> {
     if lhs == "al" {
         if let Some(imm) = parse_imm8(rhs) {
             return Ok(Instr::AddAlImm8 { imm: imm as u8 });
+        }
+        if let Some(offset) = parse_byte_bp_relative(rhs) {
+            return Ok(Instr::AddAlBpRel { offset });
         }
     }
     // `add <reg8>, <reg8>` — char compound `+=` between two byte
@@ -2240,6 +2249,9 @@ fn parse_or(operands: &str, line_no: usize) -> AsmResult<Instr> {
         if let Some(imm) = parse_imm8(rhs) {
             return Ok(Instr::OrAlImm8 { imm: imm as u8 });
         }
+        if let Some(offset) = parse_byte_bp_relative(rhs) {
+            return Ok(Instr::OrAlBpRel { offset });
+        }
     }
     if let Some(reg) = Reg8::parse(lhs) {
         if let Some(imm) = parse_imm8(rhs) {
@@ -2390,6 +2402,9 @@ fn parse_xor(operands: &str, line_no: usize) -> AsmResult<Instr> {
     if lhs == "al" {
         if let Some(imm) = parse_imm8(rhs) {
             return Ok(Instr::XorAlImm8 { imm: imm as u8 });
+        }
+        if let Some(offset) = parse_byte_bp_relative(rhs) {
+            return Ok(Instr::XorAlBpRel { offset });
         }
     }
     if let Some(reg) = Reg8::parse(lhs) {
