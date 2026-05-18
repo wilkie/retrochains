@@ -1959,6 +1959,30 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `char` compound `|=` / `^=` / `>>=` by variable
+
+Fixtures `668` (`c |= d`), `669` (`c ^= d`), `670` (`c >>= d`)
+— the second slice of char-compound-by-variable.
+
+- `|=` / `^=`: added `OrReg8Reg8` (`0A`) and `XorReg8Reg8`
+  (`32`) tasm IR variants, mirroring batch-116's
+  `AddReg8Reg8`/`SubReg8Reg8`/`AndReg8Reg8`. Codegen branch in
+  `emit_compound_assign_reg` was widened to accept `BitOr` and
+  `BitXor` alongside the batch-116 set; same `mov al, byte
+  ptr <src>; <op> <reg>, al` pattern.
+- `>>=`: BCC's variable-count byte shift is `mov cl, byte ptr
+  <src>; sar <reg>, cl` (signed `char` picks SAR), encoded as
+  `D2 (mod=11 /4|/5|/7 r/m=<reg>)`. Added `ShlReg8Cl` /
+  `SarReg8Cl` / `ShrReg8Cl` tasm IR variants — siblings of
+  `ShlReg16Cl`/`SarReg16Cl`/`ShrReg16Cl` from batch 56-era.
+  Parser shares the same `<op> <reg>,cl` slot and tries
+  `Reg8` before `Reg16` (no name overlap).
+- Added a `reg.is_byte() && matches!(op, Shl | Shr)` arm to
+  `emit_compound_assign_reg`, placed before the
+  `BitAnd|BitOr|BitXor|Add|Sub` arm. The signedness comes from
+  `locals.type_of(name).is_unsigned()` — same convention as
+  the constant-RHS path.
+
 ## `char` compound `+=` / `-=` / `&=` by variable
 
 Fixtures `665` (`c += d`), `666` (`c -= d`), `667` (`c &= d`)
