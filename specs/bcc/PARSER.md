@@ -1959,6 +1959,32 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `char` stack-local array compound
+
+Fixtures `719` (`a[2] += 5`), `720` (`a[2] &= 15`),
+`721` (`a[2]++` postfix discarded), all on `char a[4]` as a
+stack local.
+
+- `719` — char-local-array arith. The stack-local arm of
+  `emit_array_compound_assign` had only an int-style
+  `<op> <width> ptr [bp-N], K` path; for char this is wrong
+  (BCC uses the AL detour). Reorganized the arm so that
+  char-element arith takes the AL load-modify-store
+  (`mov al, byte ptr [bp-N]; add al, K (or inc/dec for
+  K=1); mov byte ptr [bp-N], al`) — mirrors the
+  char-global-array path from batch 129.
+- `720` — char-local-array bitwise stays memory-direct:
+  `and byte ptr [bp-N], K`. Added tasm IR variants
+  `AndBpRelByteImm8` / `OrBpRelByteImm8` /
+  `XorBpRelByteImm8` (encoding `80 66|4E|76 dd ii` — Grp1
+  r/m8 imm8 with mod=01 r/m=110).
+- `721` — char-local-array postfix `a[K]++` (discarded):
+  memory-direct `inc byte ptr [bp-N]`. Same pre-vs-post
+  asymmetry as the global path. Added `IncBpRelByte` /
+  `DecBpRelByte` tasm IR (`FE 46|4E dd` — Grp4 /0|/1 r/m8
+  with mod=01 r/m=110) and parser arms. Codegen branches on
+  `from_postfix && store_byte && K=1 && Add|Sub`.
+
 ## `char` field / array postfix `++` / `--`
 
 Fixtures `716` (`g.c++`), `717` (`a[2]++`), `718` (`++a[2]`).
