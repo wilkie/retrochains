@@ -1959,6 +1959,33 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `char` global `*=` / `/=` / `<<=` with variable RHS
+
+Fixtures `695` (`g *= d`), `696` (`g /= d`), `697` (`g <<= d`).
+Three distinct shapes, all wrapping a memory-resident byte
+global, all reusing IR slots from earlier batches:
+
+- `695` — 8-bit `imul byte ptr <src>` through AL:
+  `mov al, _g; imul byte ptr [bp-1]; mov _g, al`. No
+  widening needed (8-bit imul writes low byte to AL, high
+  byte to AH, BCC discards AH). Reuses `ImulByteBpRel`
+  (batch 118).
+- `696` — signed 8-bit `idiv byte ptr <src>` through AL:
+  `mov al, _g; cbw; idiv byte ptr [bp-1]; mov _g, al`. The
+  unsigned variant would emit `mov ah, 0; div al, byte ptr
+  <src>` (codegen branches but no unsigned-char-global var
+  fixture lands yet); both store AL for `/=` and AH for
+  `%=`. Reuses `IdivByteBpRel` / `DivByteBpRel`.
+- `697` — memory-direct shift by CL, no AL detour:
+  `mov cl, byte ptr [bp-1]; shl byte ptr _g, cl`. Added
+  three new tasm IR variants —
+  `ShlGroupSymByteCl` / `SarGroupSymByteCl` /
+  `ShrGroupSymByteCl` — encoded as `D2 /4|/7|/5` with
+  ModR/M `mod=00 r/m=110` + disp16 + FIXUPP (e.g. `D2 26
+  lo hi` for shl). The shift-by-CL parser arms now try
+  `parse_byte_group_symbol` after `Reg8::parse` / before
+  `Reg16::parse`.
+
 ## `char` global `%=` / `*=` non-p2 / unsigned `/=`
 
 Fixtures `692` (signed `g %= 5`), `693` (signed `g *= 3`),
