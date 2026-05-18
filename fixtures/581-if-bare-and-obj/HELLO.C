@@ -1,0 +1,8 @@
+int a;
+int b;
+int main(void) {
+  a = 1;
+  b = 2;
+  if (a && b) return 1;
+  return 0;
+}
