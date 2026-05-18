@@ -1959,6 +1959,24 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `*p *= y`, `*p <<= y`, `*p &= y`
+
+Fixtures `839` (`*p *= y`), `840` (`*p <<= y`),
+`841` (`*p &= y`).
+
+- `839` — int-deref Mul: `mov ax, word ptr [si]; imul
+  word ptr [bp+N]; mov word ptr [si], ax`. Mirrors
+  fixture 836 (array Mul) with `[si]` instead of an
+  address. Reuses existing `MovAxSiPtr`, `ImulBpRel`,
+  and `MovSiPtrAx` IR. Codegen-only.
+- `840` — int-deref Shift: `mov cl, byte ptr <rhs>;
+  shl/sar/shr word ptr [si], cl`. New IR variants
+  `ShlSiPtrCl` / `SarSiPtrCl` / `ShrSiPtrCl` (D3 24 /
+  D3 3C / D3 2C — Grp2 /4|/7|/5 r/m=100). Sibling of
+  fixture 837 with the `[si]` form.
+- `841` — `*p &= y` free pass via batch 173's
+  `AndSiPtrAx` arm.
+
 ## `a[K] *= y`, `a[K] <<= y`, `*p += y`
 
 Fixtures `836` (`a[1] *= y`), `837` (`a[1] <<= y`),
