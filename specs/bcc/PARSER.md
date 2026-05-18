@@ -1959,6 +1959,64 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Compound LHS with non-Ident base
+
+Fixtures `860` (`a[1].x += y` — global struct-array element
+member), `861` (`o.inner.x += y` — nested dot chain through a
+global outer struct), `862` (`p[1] += y` — global int pointer
+subscripted by constant).
+
+860 and 861 already worked end-to-end: `try_member_dot_chain`
+already chains through `ArrayIndex` and nested `Member` bases
+via `try_lvalue_chain_addr`, so the resulting `(name, total_off,
+leaf_ty)` resolves to the same `DGROUP:_<name>+<off>` form the
+flat `s.x += y` path uses, and `emit_member_compound_assign`
+emits the same `mov ax, <rhs>; add word ptr DGROUP:_..., ax`
+shape that fixture `832` exercises. These probes verify the
+chain-folder doesn't drop offsets when the base is an
+ArrayIndex (line `_a+2` for `a[1].x`) or another Member
+(`_o+0` for `o.inner.x`, since `inner` is at offset 0 inside
+`Outer`).
+
+862 needed new code. BCC's shape for `int *p; p[K] += y`:
+
+```
+mov bx, word ptr DGROUP:_p
+mov ax, word ptr [bp-2]   ; emit_expr_to_ax for y
+add word ptr [bx+K*2], ax
+```
+
+`emit_array_compound_assign` only had paths for **array**-typed
+globals — when `array` is a global int *pointer*, the function
+fell through to `self.locals.type_of(array)` and panicked
+("unknown local in codegen: p"). Added a new guarded path:
+
+- `self.globals.type_of(array)` is `Some(Pointer(pointee))`,
+- single constant index → compile-time offset
+  (`K * pointee.size_bytes()`),
+- int pointee, `Add/Sub/BitAnd/BitOr/BitXor`, non-constant RHS.
+
+Emits `mov bx, word ptr DGROUP:_<p>` then routes through
+`emit_expr_to_ax` (which handles char/uchar widening too) and
+finishes with `<op> word ptr [bx+offset], ax`.
+
+The asm-level `<op> word ptr [bx+disp8], ax` form wasn't a
+recognized IR shape yet. Added five new variants —
+`AddBxDispAx`/`SubBxDispAx`/`AndBxDispAx`/`OrBxDispAx`/
+`XorBxDispAx`, all with `disp: i8`. Encoding is
+`<opcode> 47 dd` for ADD/SUB/AND/OR/XOR (`01/29/21/09/31`)
+where ModR/M byte `47` decodes as mod=01 reg=AX(000)
+r/m=111=BX+disp8. A new parser helper `parse_word_bx_disp`
+recognizes `word ptr [bx]` and `word ptr [bx+K]`/`[bx-K]`;
+the per-op parse arms restrict the new variants to `disp != 0`
+so a future `AddBxPtrAx` (disp=0, encoded `01 07`, 2 bytes
+vs. 3) can claim the zero-disp form when a fixture eventually
+exercises it.
+
+Char/uchar/long pointees and the Mul/Div/Mod/Shl/Shr op
+families are still deferred — same panic site, just with
+fixture coverage missing.
+
 ## `int g += (int)c` / `+= comma` / `+= (y=5)`
 
 Fixtures `857` (`g += (int)c` cast), `858` (`g += (a,b,c)`
