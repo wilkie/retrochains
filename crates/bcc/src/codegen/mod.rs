@@ -3321,6 +3321,29 @@ impl<'a> FunctionEmitter<'a> {
                     let _ = write!(self.out, "\tmov\tword ptr {lhs_lo},ax\r\n");
                     return;
                 }
+                // Long `g <<= h` / `g >>= h` (mixed location): same
+                // helper-call shape, CL loaded from RHS low byte
+                // (which lives at `byte ptr [bp+off]` for a stack
+                // RHS or `byte ptr DGROUP:_<sym>` for a global).
+                // Fixture 749 (global LHS + stack RHS).
+                BinOp::Shl | BinOp::Shr => {
+                    let helper = match (op, unsigned) {
+                        (BinOp::Shl, _)     => "N_LXLSH@",
+                        (BinOp::Shr, false) => "N_LXRSH@",
+                        (BinOp::Shr, true)  => "N_LXURSH@",
+                        _ => unreachable!(),
+                    };
+                    // `rhs_lo` is already an address (sans `word
+                    // ptr`); reuse for the byte form.
+                    let _ = write!(self.out, "\tmov\tcl,byte ptr {rhs_lo}\r\n");
+                    let _ = write!(self.out, "\tmov\tdx,word ptr {lhs_hi}\r\n");
+                    let _ = write!(self.out, "\tmov\tax,word ptr {lhs_lo}\r\n");
+                    let _ = write!(self.out, "\tcall\tnear ptr {helper}\r\n");
+                    self.helpers.insert(helper.to_string());
+                    let _ = write!(self.out, "\tmov\tword ptr {lhs_hi},dx\r\n");
+                    let _ = write!(self.out, "\tmov\tword ptr {lhs_lo},ax\r\n");
+                    return;
+                }
                 // Long `g /= h` / `g %= h` — push both halves of
                 // RHS then LHS, helper call, write back. Helper
                 // selection matches the both-globals path.
