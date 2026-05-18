@@ -1334,6 +1334,35 @@ Two more probes hit existing paths byte-exactly:
   over int globals): `emit_ternary` materializes both branches'
   values into AX correctly.
 
+## `int *p; p[K] = v;` — register-pointer indexed write
+
+Fixture `590` (`int g; int *p; p = &g; p[0] = 42;`) — the
+pointer-subscript-write path in `emit_array_assign` previously
+only handled long pointees, falling through to the generic
+"array should be stack-resident" panic for int pointers.
+Extended the path: when the pointee fits in a word, emit `mov
+<width> ptr [<reg>(+<off>)], <value>` directly. For `byte_off
+==0` the address is `[<reg>]`; otherwise `[<reg>+<off>]`. The
+non-constant RHS case still panics with an explicit "no fixture"
+marker.
+
+## `if (f())` — call as boolean condition
+
+Fixture `591` — `emit_zero_test` previously only handled `Ident`
+and `AssignExpr`. Added a `Call` arm that lowers to `call near
+ptr _f; or ax, ax`, matching BCC's pattern (the call leaves the
+return value in AX and `or` sets ZF for the conditional branch).
+
+## `*K` peephole — `shl ax, 1` for power-of-2 K
+
+Fixture `592` (`int f(int x) { return x * 2; } int main(void) {
+return f(g(3)); }`) — `emit_op_with_source` for `BinOp::Mul`
+previously panicked for any immediate. BCC's pattern for `* K`
+with K a small power of two is to unroll into `shl ax, 1`
+repeated (no `imul` involved). Added that peephole; non-power-
+of-2 immediates still panic with an explicit "no fixture"
+marker (BCC's shape in that case is `mov dx, K; imul dx`).
+
 ### Deferred from batch 88
 
 - Probed `int a[5]; return sizeof(a);` (`582` first draft).
