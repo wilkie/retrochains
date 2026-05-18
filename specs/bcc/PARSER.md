@@ -1959,6 +1959,32 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `char` compound `+=` / `-=` / `&=` by variable
+
+Fixtures `665` (`c += d`), `666` (`c -= d`), `667` (`c &= d`)
+— first char-compound-by-variable fixtures, all with c in DL
+and d at `[bp-1]`. BCC's pattern is to load the RHS byte into
+AL with `mov al, byte ptr <src>` and then apply the op
+register-to-register on the byte destination: `add dl, al`
+(`02 D0`), `sub dl, al` (`2A D0`), `and dl, al` (`22 D0`).
+
+- Added `AddReg8Reg8` / `SubReg8Reg8` / `AndReg8Reg8` tasm IR
+  variants. Encoding is `<op-opcode> (mod=11 reg=<dst>
+  r/m=<src>)`, opcodes `02` / `2A` / `22`. These are the first
+  `r/m8, r/m8`-pair instructions in the tasm IR — previously
+  byte arithmetic only existed against immediates
+  (`AddAlImm8`, `AndReg8Imm8`, etc.).
+- Added the variable-RHS arm to `emit_compound_assign_reg` in
+  `crates/bcc/src/codegen/mod.rs`, gated on
+  `reg.is_byte() && matches!(op, Add | Sub | BitAnd)`. The
+  branch sits between the existing `Mul`/`Div`/`Mod`/`Shl`/
+  `Shr` shortcuts (which require a constant RHS) and the
+  `!reg.is_byte()` assert that previously fired for variable
+  RHS. The branch uses `resolve_operand_source` and its
+  `.byte()` formatter — note that `byte()` still panics for a
+  byte-register-resident RHS, which is fine until a fixture
+  shows BCC choosing that allocation.
+
 ## `*=` / `/=` / `%=` by variable — free pass
 
 Fixtures `662` (`x *= y`), `663` (`x /= y`), `664` (`x %= y`),
