@@ -3276,6 +3276,37 @@ impl<'a> FunctionEmitter<'a> {
         // as the `g = g <op> rhs` form (slices 231–233). The byte
         // output is identical between `g = g op b` and `g op= b`
         // for these ops. Fixtures 260 (`*=`), 261 (`/=`), 262 (`%=`).
+        // Long LHS with int RHS (widening): `long g += int x`. BCC
+        // widens the int via `cwd` (signed) into DX:AX, then
+        // applies memory-direct add/adc (or sub/sbb, or
+        // bitwise-pair) to the LHS. Fixture 755. Unsigned-int RHS
+        // (UInt) uses `xor dx, dx` rather than `cwd`; not yet
+        // probed.
+        if let Some(ty_lhs) = self.lhs_long_type(name)
+            && ty_lhs.is_long_like()
+            && let Some(ty_rhs) = self.rhs_type_for_long_widening(&value.kind)
+            && matches!(ty_rhs, Type::Int)
+            && matches!(
+                op,
+                BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor
+            )
+        {
+            let _ = ty_lhs;
+            let (lhs_lo, lhs_hi) = self.long_halves_of(name);
+            self.emit_expr_to_ax(value);
+            self.out.extend_from_slice(b"\tcwd\t\r\n");
+            let (lo_op, hi_op) = match op {
+                BinOp::Add => ("add", "adc"),
+                BinOp::Sub => ("sub", "sbb"),
+                BinOp::BitAnd => ("and", "and"),
+                BinOp::BitOr => ("or", "or"),
+                BinOp::BitXor => ("xor", "xor"),
+                _ => unreachable!(),
+            };
+            let _ = write!(self.out, "\t{lo_op}\tword ptr {lhs_lo},ax\r\n");
+            let _ = write!(self.out, "\t{hi_op}\tword ptr {lhs_hi},dx\r\n");
+            return;
+        }
         // Long compound on a long LHS (global or stack local) with
         // a long RHS (global or stack local), but not both globals
         // (which keeps the existing branch). Mul/Div/Mod use the
@@ -8072,6 +8103,25 @@ impl<'a> FunctionEmitter<'a> {
     /// Resolve the right operand to a textual asm source operand. Today
     /// either an immediate (constant-foldable), a register-resident
     /// local, or a `word ptr [bp-N]` stack local.
+    /// Best-effort type lookup for the RHS of a long-compound
+    /// widening branch. Today only recognizes bare-ident sources
+    /// (`g += x`). Returns `None` for compound RHS expressions —
+    /// those would need a more general typing pass before they
+    /// can pick the right widening shape.
+    fn rhs_type_for_long_widening(&self, e: &ExprKind) -> Option<Type> {
+        let name = match e {
+            ExprKind::Ident(n) => n,
+            _ => return None,
+        };
+        if let Some(t) = self.globals.type_of(name) {
+            Some(t.clone())
+        } else if self.locals.has(name) {
+            Some(self.locals.type_of(name).clone())
+        } else {
+            None
+        }
+    }
+
     /// Resolve a long-type lookup by name across globals and
     /// locals. Used by the long-compound-with-long-RHS path
     /// (fixtures 744 / 745) to accept either source kind.

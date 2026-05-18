@@ -672,6 +672,14 @@ pub enum Instr {
     /// (`19 06 lo hi`). High-half borrow partner for long-global
     /// `g -= h` with both operands global (fixture 735).
     SbbGroupSymAx { group: String, symbol: String, offset: i16 },
+    /// `adc word ptr <group>:<symbol>[+<offset>], dx` — ADC r/m16,r16
+    /// with DX source (`11 16 lo hi`). Used by long-global `+= int`
+    /// after `cwd` puts the high-half sign-extension in DX
+    /// (fixture 755).
+    AdcGroupSymDx { group: String, symbol: String, offset: i16 },
+    /// `sbb word ptr <group>:<symbol>[+<offset>], dx` — SBB r/m16,r16
+    /// with DX source (`19 16 lo hi`). Sibling for `long -= int`.
+    SbbGroupSymDx { group: String, symbol: String, offset: i16 },
     /// `sub dx,word ptr <group>:<symbol>[+<offset>]` — SUB r16,r/m16
     /// with DX dst (`2B 16 lo hi`). Long-to-long subtraction's low-
     /// half subtract (fixture 220).

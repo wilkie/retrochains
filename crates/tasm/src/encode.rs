@@ -353,6 +353,8 @@ fn instr_size(instr: &Instr) -> usize {
         | Instr::AddGroupSymDx { .. }
         | Instr::AdcGroupSymAx { .. }
         | Instr::SbbGroupSymAx { .. }
+        | Instr::AdcGroupSymDx { .. }
+        | Instr::SbbGroupSymDx { .. }
         | Instr::AdcDxGroupSym { .. }
         | Instr::SubDxGroupSym { .. }
         | Instr::SbbAxGroupSym { .. }
@@ -1427,6 +1429,15 @@ fn emit_instr(
             // rm=110. High-half borrow partner for `g -= h` long
             // global compound (fixture 735).
             emit_group_sym_lea(&[0x19, 0x06], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
+        }
+        Instr::AdcGroupSymDx { group, symbol, offset } => {
+            // `adc word ptr <group>:<symbol>,dx` → 11 16 lo hi.
+            // ModR/M 16 = mod=00 reg=DX rm=110. Fixture 755.
+            emit_group_sym_lea(&[0x11, 0x16], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
+        }
+        Instr::SbbGroupSymDx { group, symbol, offset } => {
+            // `sbb word ptr <group>:<symbol>,dx` → 19 16 lo hi.
+            emit_group_sym_lea(&[0x19, 0x16], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
         }
         Instr::SubDxGroupSym { group, symbol, offset } => {
             // `sub dx,word ptr <group>:<symbol>` → 2B 16 lo hi.

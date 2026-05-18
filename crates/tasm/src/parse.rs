@@ -1417,6 +1417,16 @@ fn parse_sbb(operands: &str, line_no: usize) -> AsmResult<Instr> {
                 offset,
             });
         }
+        // `sbb word ptr <group>:<sym>[+N], dx` — long-global
+        // `-= int` widening high half.
+        if rhs == "dx" {
+            let (sym, offset) = split_sym_offset(symbol);
+            return Ok(Instr::SbbGroupSymDx {
+                group: group.to_string(),
+                symbol: sym.to_string(),
+                offset,
+            });
+        }
     }
     // `sbb word ptr [bp+N], imm8sx` — long-local compound `-=`
     // high half borrow propagation.
@@ -1517,6 +1527,16 @@ fn parse_adc(operands: &str, line_no: usize) -> AsmResult<Instr> {
         // with the register-loaded RHS high half. Fixture 391.
         if rhs == "ax" {
             return Ok(Instr::AdcGroupSymAx {
+                group: group.to_string(),
+                symbol: sym.to_string(),
+                offset,
+            });
+        }
+        // `adc word ptr <group>:<sym>[+N], dx` — long-global
+        // `+= int` widening high half (fixture 755, where the
+        // cwd-derived sign-extension lives in DX).
+        if rhs == "dx" {
+            return Ok(Instr::AdcGroupSymDx {
                 group: group.to_string(),
                 symbol: sym.to_string(),
                 offset,
