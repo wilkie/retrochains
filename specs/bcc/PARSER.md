@@ -1959,6 +1959,32 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `ulong` compound `*=` / `/=` with `char` / `uchar` RHS
+
+Fixtures `791` (`g *= char c`), `792` (`g /= char c`),
+`793` (`g /= uchar c`) — three free passes confirming
+the byte-RHS arms generalize across LHS signedness:
+
+- `791` — `Type::Char + Mul` arm picks `N_LXMUL@`, which
+  is sign-agnostic (the helper computes the low-32 of a
+  full 64-bit product, identical for both signednesses).
+  LHS being unsigned doesn't change the widening shape
+  (signed widening of the char via `cbw; cwd`).
+- `792` — `Type::Char + Div` arm picks the helper from
+  LHS signedness, so `ulong /= char` correctly emits
+  `N_LUDIV@`. The widening shape is still signed (`cbw;
+  cwd`) since the RHS is a signed char — the C90
+  conversion sequence is char → int → long (signed) →
+  ulong, and the bit-level result of the signed-to-
+  unsigned conversion is identity.
+- `793` — `Type::UChar + Div` arm (batch 157's new shape
+  with `xor dx, dx; push dx`) also picks helper from LHS
+  signedness, so `ulong /= uchar` emits `N_LUDIV@`.
+
+No code changes. The "widening shape from RHS type,
+helper from LHS signedness" split holds across all
+long-compound arms.
+
 ## `long` compound `/=` uchar and `<<=` char / uchar
 
 Fixtures `788` (`g /= uchar c`), `789` (`g <<= char c`),
