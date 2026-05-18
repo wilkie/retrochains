@@ -1959,6 +1959,27 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `p->x += y`, `p->x *= y`, `p->x <<= y` (arrow member)
+
+Fixtures `842` / `843` / `844` — three free passes
+confirming the int-field compound paths added in
+batches 171 and 172 generalize from `.` (Dot) to `->`
+(Arrow) member access:
+
+- The arm builds `dest` as `[<reg>]` (or `[<reg>+off]`
+  if field offset is non-zero) for arrow form, vs
+  `DGROUP:_<name>+<off>` for dot form. The Add/Sub/Bit*,
+  Mul/Div/Mod, and Shift paths use `dest` as opaque
+  text, so both addressing modes work without special-
+  casing.
+- `843`'s `imul word ptr [bp+N]` and `844`'s `shl word
+  ptr [si], cl` had previously been added for non-arrow
+  fixtures (834, 835) — they only depend on the dest
+  string format.
+
+No code changes — confirms the arrow member compound
+inherits everything from dot member compound.
+
 ## `*p *= y`, `*p <<= y`, `*p &= y`
 
 Fixtures `839` (`*p *= y`), `840` (`*p <<= y`),
