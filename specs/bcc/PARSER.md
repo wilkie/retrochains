@@ -1959,6 +1959,29 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `int g += -y` / `+= (y+1)` / `+= y*2` (expr RHS)
+
+Fixtures `851` (`g += -y` unary neg), `852` (`g += (y+1)`
+sub-expression), `853` (`g += y * 2`).
+
+- `851` — extended `rhs_int_compound_type` to recurse
+  into `ExprKind::Unary` (returning the operand's
+  type). `emit_expr_to_ax` already materializes the
+  negation in AX, then the existing memory-direct
+  `add word ptr <g>, ax` finishes.
+- `852` — extended `rhs_int_compound_type` to handle
+  `ExprKind::BinOp` with both operands int-typed (and
+  neither long-typed — long sub-expressions don't fit
+  in AX). `emit_expr_to_ax` computes the sub-expr
+  result in AX, then the mem-direct add finishes.
+- `853` — free pass via the same BinOp path. The
+  `y * 2` sub-expr resolves to int, AX gets the
+  multiply result, mem-direct add finishes.
+
+The helper now also recognizes `IntLit` (constants) —
+mostly for completeness; the const-folded paths take
+precedence in the dispatch chain.
+
 ## char member/array compound; arrow long member ADD
 
 Fixtures `848` (`s.c += y` char member), `849` (`p->l += y`
