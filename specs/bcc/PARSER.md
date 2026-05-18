@@ -1959,6 +1959,23 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `long` mixed-location `&=` / `*=` / `/=`
+
+Fixtures `746` (`g &= h` global LHS + stack RHS),
+`747` (`g *= h`), `748` (`g /= h`).
+
+- `746` — free pass off batch 142's new bit-arith arm.
+- `747` / `748` — needed extending. The new mixed-location
+  arm was previously Add/Sub/Bit-only; widened it to cover
+  Mul (CX:BX RHS + DX:AX LHS + `N_LXMUL@`) and Div/Mod
+  (push both pairs + `N_LDIV@`/`N_LMOD@`/`N_LUDIV@`/
+  `N_LUMOD@` by signedness). Both shapes reuse the same
+  `long_halves_of` helper to drive the address strings, so
+  the body of each arm is identical to the both-globals
+  branch with just the format args changed. Shifts not yet
+  probed in mixed-location form (helper path would need
+  the same generalization).
+
 ## `long` compound with mixed global/stack location
 
 Fixtures `743` (`a += b` both stack), `744` (`g += h` global
