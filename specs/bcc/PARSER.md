@@ -1959,6 +1959,44 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `int` global compound `*=` uchar, `/=` char, `+=` int
+
+Fixtures `797` (`g *= uchar c`), `798` (`g /= char c`),
+`799` (`g += int x`).
+
+- `797` — free pass off batch 159's int-compound Mul arm
+  which already gated on `Type::Char | Type::UChar`. The
+  signed `imul dx` produces the correct low-16 result
+  for any operand combination.
+- `798` — new shape for int `/= byte`: BCC reuses the
+  push/pop register-shuffle pattern but parks the
+  widened RHS in BX rather than DX (Div uses BX by
+  convention; Mul used DX). The LHS load needs both AX
+  and DX (the latter populated by `cwd`), so the push/
+  pop bracket has to fence both the AX load and the
+  cwd:
+
+  ```
+  mov al, byte ptr <c>
+  cbw                          ; AX = char as int
+  push ax                      ; save widened RHS
+  mov ax, word ptr DGROUP:_<g> ; AX = g
+  cwd                          ; DX:AX sign-ext g
+  pop bx                       ; widened RHS → BX
+  idiv bx                      ; AX = quotient, DX = remainder
+  mov word ptr DGROUP:_<g>, ax ; (or `, dx` for `%=`)
+  ```
+
+  Added a new arm in `emit_compound_assign` gated on
+  `int LHS + Type::Char|Type::UChar RHS + Div|Mod`. Signed
+  `idiv` is correct for both signed and unsigned byte
+  RHS (zero-extended byte is positive).
+- `799` — free pass off batch 159's Add/Sub/Bit* arm
+  which already accepts `Type::Int` local RHS. Confirms
+  the broader arm fires for int locals (closing a
+  previously unprobed gap — see fixture 571 only
+  covered the int-global RHS case).
+
 ## `int` global compound with `char` / `uchar` local RHS
 
 Fixtures `794` (`g += char c`), `795` (`g += uchar c`),
