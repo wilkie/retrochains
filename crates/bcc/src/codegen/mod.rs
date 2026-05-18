@@ -2050,6 +2050,13 @@ impl<'a> FunctionEmitter<'a> {
             self.out.extend_from_slice(b"\tor\tax,ax\r\n");
             return;
         }
+        // `if (f())` — call yields its result in AX, then `or ax, ax`
+        // sets ZF for the conditional branch. Fixture 591.
+        if let ExprKind::Call { .. } = &cond.kind {
+            self.emit_expr_to_ax(cond);
+            self.out.extend_from_slice(b"\tor\tax,ax\r\n");
+            return;
+        }
         let ExprKind::Ident(name) = &cond.kind else {
             panic!("non-ident boolean condition not yet supported (no fixture)");
         };
@@ -4326,9 +4333,20 @@ impl<'a> FunctionEmitter<'a> {
                 let _ = write!(self.out, "\tmov\tword ptr {lo_addr},{lo}\r\n");
                 return;
             }
-            // Non-long pointer indexed write falls through to the
-            // existing emit_array_assign panic — no fixture has
-            // exercised `int *p; p[K] = v` yet.
+            // `int *p; p[K] = v` — `mov word ptr [<reg>+byte_off],
+            // <value>` (or `[<reg>]` when byte_off==0). Fixture 590.
+            let width = ptr_width(&pointee);
+            let addr = if byte_off == 0 {
+                format!("[{r}]")
+            } else {
+                format!("[{r}+{byte_off}]")
+            };
+            if let Some(v) = try_const_eval(value) {
+                let v_masked = if pointee.is_char_like() { v & 0xFF } else { v & 0xFFFF };
+                let _ = write!(self.out, "\tmov\t{width} ptr {addr},{v_masked}\r\n");
+                return;
+            }
+            panic!("non-constant rhs in `int *p; p[K] = v` not yet supported (no fixture)");
         }
         // Global array? Route to DGROUP-relative addressing.
         if let Some(gty) = self.globals.type_of(array) {
@@ -7246,10 +7264,24 @@ fn emit_op_with_source(out: &mut Vec<u8>, op: BinOp, src: &OperandSource, unsign
             let _ = write!(out, "\txor\tax,{}\r\n", src.word());
         }
         BinOp::Mul => {
-            if matches!(src, OperandSource::Immediate(_)) {
-                panic!("imul with immediate not yet supported (80186+ only)");
+            if let OperandSource::Immediate(v) = src {
+                // `ax *= K` with K a small power of two unrolls into
+                // `shl ax, 1` repeated. Fixture 592 (`return x * 2`
+                // → `shl ax, 1`). Non-power-of-two immediates aren't
+                // yet exercised by a fixture; BCC's pattern in that
+                // case is `mov dx, K; imul dx`.
+                let k = *v;
+                if k > 0 && (k & (k - 1)) == 0 && k <= 256 {
+                    let shifts = k.trailing_zeros();
+                    for _ in 0..shifts {
+                        out.extend_from_slice(b"\tshl\tax,1\r\n");
+                    }
+                } else {
+                    panic!("imul with non-power-of-2 immediate not yet supported (no fixture)");
+                }
+            } else {
+                let _ = write!(out, "\timul\t{}\r\n", src.word());
             }
-            let _ = write!(out, "\timul\t{}\r\n", src.word());
         }
         BinOp::Div => {
             if matches!(src, OperandSource::Immediate(_)) {
