@@ -1657,6 +1657,38 @@ reg=AX r/m=101 ([DI])) and its parser entry.
   the bitwise-compound path already emits `xor <reg8>, K`
   (sibling of fixture 556's `c &= 31` and 622's `c |= 32`).
 
+## `x >> K` / `x << K` — unroll for K ≤ 3
+
+Fixture `627` (`return x >> 3;`) — BCC unrolls expression-
+context shifts by 1, 2, or 3 into `<sar|shr|shl> ax, 1`
+repeated, even when K=3 (where the unrolled 6 bytes is longer
+than the CL form's 4 bytes). For K ≥ 4 BCC switches to `mov
+cl, K; <op> ax, cl`. Probed K = 1, 2, 3, 4, 5, 8 to pin the
+threshold. Updated the `Shl`/`Shr` arm of `emit_op_with_source`:
+when the source is an immediate K in 1..=3, emit K copies of
+`<op> ax, 1`; otherwise fall back to the existing CL form.
+(Note: compound shifts like `x <<= 4` keep using `mov cl, K;
+shl reg, cl` per fixture 537 — this asymmetry between
+expression and compound context is BCC's, not ours.)
+
+## `*p = x` — register-source direct store
+
+Fixture `628` (`int f(int x, int *p) { *p = x; return x; }`)
+— with `p` enregistered in DI and `x` in SI, BCC stores SI
+directly to `[di]` via `89 35` (`mov [di], si`) — skipping the
+AX round-trip our codegen had used after batch 92. Added a
+peephole in the `*p = v` register-pointer path: when the RHS
+is a non-char ident on a register-resident local, emit `mov
+<width> ptr [<addr_reg>], <src_reg>` directly. Also added the
+`MovDiPtrReg16` tasm IR variant (`89 mod=00 reg=<src> r/m=101
+([DI])`) to encode it; only the SI form existed previously.
+
+## Free passes (batch 103)
+
+- `626` — `return x << 4;` (int shift-left by 4): falls into
+  the CL form (since K=4 ≥ 4 per the new unroll cutoff above)
+  — `mov cl, 4; shl ax, cl`.
+
 ### Deferred from batch 88
 
 - Probed `int a[5]; return sizeof(a);` (`582` first draft).
