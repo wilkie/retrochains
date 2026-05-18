@@ -1959,6 +1959,32 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `a[K] += y`, `s.x *= y`, `s.x <<= y` (non-const RHS)
+
+Fixtures `833` (`a[1] += y`), `834` (`s.x *= y`),
+`835` (`s.x <<= y`).
+
+- `833` — int-array-element compound with non-constant
+  RHS. `emit_array_compound_assign` previously panicked
+  in this case. Added a path that mirrors the int-global
+  Add/Sub/Bit* arm: `emit_expr_to_ax` produces AX from
+  the RHS (with any widening), then `<op> word ptr
+  <dest>, ax` writes back. `dest` already has the
+  constant index folded as `DGROUP:_a+<K*stride>`.
+- `834` — int-member compound `*=` with non-constant
+  local RHS. Added a path in `emit_member_compound_assign`
+  using `imul word ptr [bp+N]` directly against the
+  member address. Same shape as fixture 802 with the
+  member's effective address. Same path handles `/=`
+  and `%=` (selecting AX or DX for the store).
+- `835` — int-member compound `<<=` / `>>=`. Reuses the
+  `rhs_byte_addr` helper (batch 169) to load CL from
+  the RHS, then `shl/sar/shr word ptr <dest>, cl`.
+
+Three new paths in member/array compound; no new IR
+required — all shapes already encodable via the
+existing imul/idiv/shl word ptr forms.
+
 ## `long` `*=` long-array; `s.x += y` int-member compound
 
 Fixtures `830` (`g += la[1]`), `831` (`g *= la[0]`),
