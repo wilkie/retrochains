@@ -3072,9 +3072,17 @@ impl<'a> FunctionEmitter<'a> {
                 // Stack init: prefer the immediate-store form when the
                 // initializer folds to a constant. For `char` we emit
                 // `byte ptr` (fixture 011); for `int`, `word ptr`.
+                // Negative constants like `int x = -5;` come through
+                // `try_const_eval` as a wide u32; mask to the width
+                // tasm expects (fixture 632).
                 if let Some(v) = try_const_eval(init) {
                     let width = ptr_width(ty);
-                    let _ = write!(self.out, "\tmov\t{width} ptr {},{v}\r\n", bp_addr(off));
+                    let v_masked = if ty.is_char_like() { v & 0xFF } else { v & 0xFFFF };
+                    let _ = write!(
+                        self.out,
+                        "\tmov\t{width} ptr {},{v_masked}\r\n",
+                        bp_addr(off),
+                    );
                     return;
                 }
                 // Function-pointer init: `int (*p)(void) = f;` →
@@ -3620,6 +3628,24 @@ impl<'a> FunctionEmitter<'a> {
             for _ in 0..k {
                 let _ = write!(self.out, "\t{mnem}\t{},1\r\n", reg.name());
             }
+            return;
+        }
+        // Char compound `*= K` where K is a small power of two —
+        // round-trip through AL and unroll `shl al, 1`. Fixture 633
+        // (`c *= 4` → `mov al, dl; shl al, 1; shl al, 1; mov dl, al`).
+        if reg.is_byte()
+            && matches!(op, BinOp::Mul)
+            && let Some(k) = try_const_eval(value)
+            && k > 0
+            && (k & (k - 1)) == 0
+            && k <= 256
+        {
+            let shifts = k.trailing_zeros();
+            let _ = write!(self.out, "\tmov\tal,{}\r\n", reg.name());
+            for _ in 0..shifts {
+                self.out.extend_from_slice(b"\tshl\tal,1\r\n");
+            }
+            let _ = write!(self.out, "\tmov\t{},al\r\n", reg.name());
             return;
         }
         assert!(
