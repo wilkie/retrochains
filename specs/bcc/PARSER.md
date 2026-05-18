@@ -1959,6 +1959,34 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `char` update as expression result (char destination)
+
+Fixtures `725` (`d = c++`), `726` (`d = c--`),
+`727` (`d = ++c`) — char update result captured into another
+char (the batch-135 deferred case).
+
+The generic `emit_update_to_ax` path widens through AL with
+`cbw`, which is wasted work when the destination is byte —
+BCC keeps everything in AL without the widen. Added two
+char-aware fast paths in `emit_assign_local`'s
+`LocalLocation::Stack(off)` arm (parallel to the existing
+int fast path at line 7253):
+
+- **Post**: `mov al, <src>; mov byte ptr [bp-N], al; inc
+  <src>` (store the captured value, then bump source).
+- **Pre**: `mov al, <src>; inc al; mov <src>, al; mov byte
+  ptr [bp-N], al` (bump AL, write back to BOTH source and
+  destination from AL). Note BCC threads the new value
+  through AL rather than incrementing the source register
+  directly — keeps everything single-source so AL holds the
+  expression result for the subsequent store.
+
+The asymmetry vs the int destination path is that BCC also
+threads the int through AX with a single store; we don't
+yet need a different shape for that since `inc dl` followed
+by `mov [bp-N], dl` would skip the AL write. (Confirmed: the
+int fast path stores the register directly.)
+
 ## `char` parameter compound
 
 Fixtures `722` (`c += 5` on a char param), `723` (`c &= 15`),
