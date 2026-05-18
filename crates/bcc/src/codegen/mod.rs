@@ -3307,6 +3307,38 @@ impl<'a> FunctionEmitter<'a> {
             let _ = write!(self.out, "\t{hi_op}\tword ptr {lhs_hi},dx\r\n");
             return;
         }
+        // Long LHS + unsigned-int RHS: zero-extends rather than
+        // sign-extends, so BCC skips the cwd and instead uses an
+        // immediate-0 operand for the high-half op. `mov ax, <x>;
+        // <lo_op> word ptr <lhs_lo>, ax; <hi_op> word ptr
+        // <lhs_hi>, 0`. For arith the `0` rides on the carry/
+        // borrow from the low half (adc/sbb 0); for bitwise it
+        // acts directly (and 0 zeros high, or/xor 0 is a no-op
+        // on high). Fixture 767.
+        if let Some(ty_lhs) = self.lhs_long_type(name)
+            && ty_lhs.is_long_like()
+            && let Some(ty_rhs) = self.rhs_type_for_long_widening(&value.kind)
+            && matches!(ty_rhs, Type::UInt)
+            && matches!(
+                op,
+                BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor
+            )
+        {
+            let _ = ty_lhs;
+            let (lhs_lo, lhs_hi) = self.long_halves_of(name);
+            self.emit_expr_to_ax(value);
+            let (lo_op, hi_op) = match op {
+                BinOp::Add => ("add", "adc"),
+                BinOp::Sub => ("sub", "sbb"),
+                BinOp::BitAnd => ("and", "and"),
+                BinOp::BitOr => ("or", "or"),
+                BinOp::BitXor => ("xor", "xor"),
+                _ => unreachable!(),
+            };
+            let _ = write!(self.out, "\t{lo_op}\tword ptr {lhs_lo},ax\r\n");
+            let _ = write!(self.out, "\t{hi_op}\tword ptr {lhs_hi},0\r\n");
+            return;
+        }
         // Long LHS `*= int x` (signed widening). BCC can't load
         // both AX:DX (LHS) and BX:CX (widened RHS) simultaneously
         // since `cwd` clobbers DX, so it routes the widened RHS
