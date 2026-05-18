@@ -1959,6 +1959,30 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `a[K] *= y`, `a[K] <<= y`, `*p += y`
+
+Fixtures `836` (`a[1] *= y`), `837` (`a[1] <<= y`),
+`838` (`*p += y`).
+
+- `836` — array element Mul with non-const int local
+  RHS: `mov ax, <dest>; imul word ptr [bp+N]; mov
+  <dest>, ax`. Mirrors fixture 834 (member compound
+  Mul), just with the array-element address. Added to
+  `emit_array_compound_assign` alongside the existing
+  Add/Sub/Bit* var-RHS path.
+- `837` — array element Shift with non-const RHS:
+  `mov cl, byte ptr <rhs>; shl word ptr <dest>, cl`.
+  Reuses `rhs_byte_addr` (batch 169). Sibling of
+  fixture 835.
+- `838` — `*p += y` (int pointee, non-const RHS):
+  `emit_expr_to_ax(value); add word ptr [si], ax`.
+  New IR variants `AddSiPtrAx`, `SubSiPtrAx`,
+  `AndSiPtrAx`, `OrSiPtrAx`, `XorSiPtrAx` for the
+  `<op> r/m16, ax` form against `[si]` (encodings
+  `01|29|21|09|31` followed by `04`). Codegen arm
+  gated on pointer being register-resident with int
+  pointee.
+
 ## `a[K] += y`, `s.x *= y`, `s.x <<= y` (non-const RHS)
 
 Fixtures `833` (`a[1] += y`), `834` (`s.x *= y`),
