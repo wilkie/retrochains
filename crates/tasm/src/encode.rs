@@ -445,6 +445,11 @@ fn instr_size(instr: &Instr) -> usize {
         | Instr::ShlSiPtrCl
         | Instr::SarSiPtrCl
         | Instr::ShrSiPtrCl => 2,
+        Instr::AddBxDispAx { .. }
+        | Instr::SubBxDispAx { .. }
+        | Instr::AndBxDispAx { .. }
+        | Instr::OrBxDispAx { .. }
+        | Instr::XorBxDispAx { .. } => 3,
         Instr::AddAlBpRel { .. }
         | Instr::SubAlBpRel { .. }
         | Instr::AndAlBpRel { .. }
@@ -1958,6 +1963,33 @@ fn emit_instr(
             // `xor word ptr [si],ax` → 31 04.
             out.push(0x31);
             out.push(0x04);
+        }
+        Instr::AddBxDispAx { disp } => {
+            // `add word ptr [bx+disp8],ax` → 01 47 dd. ModR/M `47`
+            // = mod=01 reg=AX(000) r/m=111=BX. Fixture 862.
+            out.push(0x01);
+            out.push(0x47);
+            out.push(*disp as u8);
+        }
+        Instr::SubBxDispAx { disp } => {
+            out.push(0x29);
+            out.push(0x47);
+            out.push(*disp as u8);
+        }
+        Instr::AndBxDispAx { disp } => {
+            out.push(0x21);
+            out.push(0x47);
+            out.push(*disp as u8);
+        }
+        Instr::OrBxDispAx { disp } => {
+            out.push(0x09);
+            out.push(0x47);
+            out.push(*disp as u8);
+        }
+        Instr::XorBxDispAx { disp } => {
+            out.push(0x31);
+            out.push(0x47);
+            out.push(*disp as u8);
         }
         Instr::AddAlBpRel { offset } => {
             // `add al,byte ptr [bp+disp8]` → 02 46 dd. ADD r8,r/m8

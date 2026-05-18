@@ -6048,6 +6048,44 @@ impl<'a> FunctionEmitter<'a> {
             let _ = write!(self.out, "\t{mnemonic}\t{width} ptr {dest},{v_masked}\r\n");
             return;
         }
+        // Global-pointer subscript compound: `p[K] op= …` for `int *p`
+        // at file scope. BCC's shape: load the pointer into BX
+        // (`mov bx, word ptr DGROUP:_<p>`), then memory-direct
+        // `<op> word ptr [bx+offset], ax` after evaluating the RHS.
+        // Offset = K * pointee_stride. Fixture 862 (`p[1] += y`).
+        if let Some(g_ty) = self.globals.type_of(array)
+            && let Some(pointee) = g_ty.pointee()
+            && indices.len() == 1
+            && let Some(k) = try_const_eval(&indices[0])
+            && matches!(pointee, Type::Int | Type::UInt)
+            && matches!(
+                op,
+                BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor
+            )
+            && try_const_eval(value).is_none()
+        {
+            let stride = i32::from(pointee.size_bytes());
+            let off = (k as i32).wrapping_mul(stride);
+            let bx_disp = if off == 0 {
+                "[bx]".to_owned()
+            } else if off > 0 {
+                format!("[bx+{off}]")
+            } else {
+                format!("[bx-{}]", -off)
+            };
+            let _ = write!(self.out, "\tmov\tbx,word ptr DGROUP:_{array}\r\n");
+            self.emit_expr_to_ax(value);
+            let mnem = match op {
+                BinOp::Add => "add",
+                BinOp::Sub => "sub",
+                BinOp::BitAnd => "and",
+                BinOp::BitOr => "or",
+                BinOp::BitXor => "xor",
+                _ => unreachable!(),
+            };
+            let _ = write!(self.out, "\t{mnem}\tword ptr {bx_disp},ax\r\n");
+            return;
+        }
         let array_ty = self.locals.type_of(array).clone();
         let LocalLocation::Stack(base_off) = self.locals.location_of(array) else {
             panic!("array `{array}` should be stack-resident");

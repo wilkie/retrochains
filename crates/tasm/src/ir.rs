@@ -1172,6 +1172,21 @@ pub enum Instr {
     OrSiPtrAx,
     /// `xor word ptr [si],ax` — `31 04`. Sibling for `*p ^= y`.
     XorSiPtrAx,
+    /// `add word ptr [bx+disp8],ax` — `01 47 dd`. ADD r/m16,r16 with
+    /// ModR/M `47` = mod=01 reg=AX(000) r/m=111=BX. Memory-dest
+    /// add through a register-resident BX pointer at a small
+    /// positive offset. Used by `int *p; p[K] += y` for global
+    /// pointer `p` where BCC loads the pointer into BX and emits
+    /// `<op> word ptr [bx+K*2], ax` (fixture 862).
+    AddBxDispAx { disp: i8 },
+    /// `sub word ptr [bx+disp8],ax` — `29 47 dd`. Sibling.
+    SubBxDispAx { disp: i8 },
+    /// `and word ptr [bx+disp8],ax` — `21 47 dd`. Sibling.
+    AndBxDispAx { disp: i8 },
+    /// `or word ptr [bx+disp8],ax` — `09 47 dd`. Sibling.
+    OrBxDispAx { disp: i8 },
+    /// `xor word ptr [bx+disp8],ax` — `31 47 dd`. Sibling.
+    XorBxDispAx { disp: i8 },
     /// `add al,byte ptr [bp+<offset>]` — `02 46 dd`. ADD r8,r/m8
     /// with mod=01 reg=AL(000) r/m=110=BP+disp8. Char-array
     /// compound with non-const int RHS truncated to byte (fixture
