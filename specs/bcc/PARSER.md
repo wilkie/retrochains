@@ -1959,6 +1959,38 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Pointer subscript — const bitwise, negative index, char const
+
+Fixtures `875` (`int *p; p[1] &= 15` — global int* const-RHS
+bitwise), `876` (`int *p; p[-1] += y` — negative subscript via
+`p = &a[2]`), `877` (`char *p; p[1] += 5` — char* const-RHS
+ADD).
+
+875 needs the imm16 const-RHS form for bitwise — BCC always
+picks imm16 for AND/OR/XOR (no imm8sx peephole, same asymmetry
+as the flat `g &= K` path that batch 76 first observed). Added
+three new IR variants: `AndBxDispImm16` (`81 67 dd lo hi`),
+`OrBxDispImm16` (`81 4F dd lo hi`), `XorBxDispImm16` (`81 77 dd
+lo hi`) — all Group-1 with mod=01 r/m=111=BX+disp8. The codegen
+side already emits `and word ptr [bx+2], 15` for any int op-
+family with const RHS (the path landed in batch 182 / fixture
+864 with imm form picked at the TASM layer); only TASM needed
+new arms here.
+
+876 needs no new code: `parse_word_bx_disp` already accepts
+signed displacement, and codegen formats negative offsets as
+`[bx-N]`. The probe confirms the i8 signed range works on both
+sides of zero. (`p = &a[2]` lets `p[-1]` refer to a defined
+array element, avoiding undefined behavior in the source.)
+
+877 extends 865's char-pointee path to const RHS. The shape is
+the same AL-arith-through with BX-reload-between-load-and-store,
+just with `add al, 5` (the existing `AddAlImm8` 2-byte
+accumulator form) instead of `add al, byte ptr [bp-N]`. The
+gate now folds const and var paths through one `or_else` chain:
+`try_const_eval(value).map(|v| (v & 0xFF).to_string()).
+or_else(|| self.rhs_byte_addr(&value.kind))`.
+
 ## Pointer subscript — XOR and const-SUB coverage
 
 Fixtures `872` (`int *p; p[1] ^= y` — int* XOR), `873`
