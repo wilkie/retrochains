@@ -1959,6 +1959,34 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `char` deref var-RHS and postfix `*p++` / `*p--`
+
+Fixtures `713` (`*p += d`), `714` (`(*p)++`), `715` (`(*p)--`).
+
+- `713` — variable-RHS char-via-pointer arith. BCC loads RHS
+  into AL then `add byte ptr [si], al`. Two instructions, no
+  AL writeback. Added `AddSiPtrReg8` / `SubSiPtrReg8` tasm
+  IR variants (`00|28 04` for AL — `<opcode> (mod=00
+  reg=<r> r/m=100)`) and a new arm in
+  `emit_deref_compound_assign` for `char-pointee + non-const
+  RHS + arith/bitwise`.
+- `714` / `715` — postfix `(*p)++` / `(*p)--` (statement
+  position, discarded) compiles to memory-direct `inc|dec
+  byte ptr [si]` — same pre-vs-post asymmetry as `g++`
+  (batch 128). The AST didn't preserve the postfix-vs-
+  explicit distinction for `lv++ → lv += 1`; added a
+  `from_postfix: bool` field to `MemberCompoundAssign`,
+  `DerefCompoundAssign`, and `ArrayCompoundAssign`. Parser
+  sets it to `true` only in the postfix-update path. Codegen
+  branches on it for the `char + K=1 + arith` case to emit
+  memory-direct. Added `IncSiPtrByte` / `DecSiPtrByte` tasm
+  IR (`FE 04` / `FE 0C`) and parser arms.
+- Probed `++*p` and confirmed BCC uses the AL detour (same
+  as `*p += 1`); only the postfix form takes the memory-
+  direct path. Member and array siblings of this pattern
+  weren't probed yet — `g.c++` is known to behave the same
+  way (one probe), but no fixture lands in this batch.
+
 ## `char` arrow-field and `*p` compound
 
 Fixtures `710` (`p->c += 5`), `711` (`*p += 5`), `712`
