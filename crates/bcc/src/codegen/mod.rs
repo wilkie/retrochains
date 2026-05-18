@@ -9236,14 +9236,29 @@ impl<'a> FunctionEmitter<'a> {
 
     /// Like `rhs_type_for_long_widening` but also resolves
     /// `ArrayIndex` (returning element type), `Deref` (returning
-    /// pointee type), and `Member` (returning field type). Used
-    /// by the int-global compound arm to accept `g += a[K]`,
-    /// `g += *p`, and `g += s.x`. Fixtures 821, 822, 823.
+    /// pointee type), `Member` (returning field type), and
+    /// `Unary` (returning operand type, since neg/bitnot don't
+    /// widen). Used by the int-global compound arm to accept
+    /// `g += a[K]`, `g += *p`, `g += s.x`, `g += -y`. Fixtures
+    /// 821, 822, 823, 851.
     fn rhs_int_compound_type(&self, e: &ExprKind) -> Option<Type> {
         if let Some(t) = self.rhs_type_for_long_widening(e) {
             return Some(t);
         }
         match e {
+            ExprKind::Unary { operand, .. } => self.rhs_int_compound_type(&operand.kind),
+            ExprKind::IntLit(_) => Some(Type::Int),
+            ExprKind::BinOp { left, right, .. } => {
+                // If both operands resolve to non-long int-family
+                // types, the BinOp result is int-typed. Used for
+                // sub-expression RHS in int compound (fixture 852).
+                let lt = self.rhs_int_compound_type(&left.kind)?;
+                let rt = self.rhs_int_compound_type(&right.kind)?;
+                if lt.is_long_like() || rt.is_long_like() {
+                    return None;
+                }
+                Some(Type::Int)
+            }
             ExprKind::ArrayIndex { array, .. } => {
                 let ExprKind::Ident(arr_name) = &array.kind else { return None };
                 let ty = if let Some(t) = self.globals.type_of(arr_name) {
