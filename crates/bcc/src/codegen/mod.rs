@@ -4193,24 +4193,29 @@ impl<'a> FunctionEmitter<'a> {
             let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name},ax\r\n");
             return;
         }
-        // Int/uint global compound `*=` / `/=` / `%=` with another
-        // int/uint global as RHS — `imul`/`idiv word ptr <group>:
-        // <sym>`. Same shape as the local-RHS path, just with a
-        // DGROUP operand. Fixture 809 (`*=`), 810 (`/=`).
+        // Int/uint global compound `*=` / `/=` / `%=` with `*p`
+        // where `p` is a register-resident pointer (typically SI
+        // for int*). `imul`/`idiv word ptr [si]` uses the deref-
+        // through-register addressing form. Fixture 825.
         if let Some(gty) = self.globals.type_of(name)
             && matches!(gty, Type::Int | Type::UInt)
             && matches!(op, BinOp::Mul | BinOp::Div | BinOp::Mod)
-            && let ExprKind::Ident(b) = &value.kind
-            && let Some(rhs_ty) = self.globals.type_of(b)
-            && matches!(rhs_ty, Type::Int | Type::UInt)
+            && let ExprKind::Deref(inner) = &value.kind
+            && let ExprKind::Ident(p_name) = &inner.kind
+            && !self.globals.contains(p_name)
+            && let LocalLocation::Reg(reg) = self.locals.location_of(p_name)
+            && !reg.is_byte()
+            && let Some(pty) = self.locals.type_of(p_name).pointee()
+            && matches!(pty, Type::Int | Type::UInt)
         {
+            let reg_name = reg.name();
             let _ = write!(self.out, "\tmov\tax,word ptr DGROUP:_{name}\r\n");
             if matches!(op, BinOp::Mul) {
-                let _ = write!(self.out, "\timul\tword ptr DGROUP:_{b}\r\n");
+                let _ = write!(self.out, "\timul\tword ptr [{reg_name}]\r\n");
                 let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name},ax\r\n");
             } else {
                 self.out.extend_from_slice(b"\tcwd\t\r\n");
-                let _ = write!(self.out, "\tidiv\tword ptr DGROUP:_{b}\r\n");
+                let _ = write!(self.out, "\tidiv\tword ptr [{reg_name}]\r\n");
                 let result_reg = if matches!(op, BinOp::Div) { "ax" } else { "dx" };
                 let _ = write!(
                     self.out,
@@ -4219,18 +4224,45 @@ impl<'a> FunctionEmitter<'a> {
             }
             return;
         }
-        // Int/uint global compound `<<=` / `>>=` with an int/uint/
-        // char/uchar RHS, whether local or another global. CL gets
-        // the shift count's low byte; the shift acts memory-
-        // direct on the global: `mov cl, byte ptr <addr>; shl
-        // word ptr DGROUP:_<g>, cl` (or sar/shr by LHS
-        // signedness). Fixture 805 (local RHS), 811 (global RHS).
+        // Int/uint global compound `*=` / `/=` / `%=` with another
+        // int/uint value in a DGROUP slot — `imul`/`idiv word ptr
+        // <group>:<sym>[+offset]`. Same shape as the local-RHS
+        // path, just with a DGROUP operand. Accepts plain
+        // identifiers (fixture 809, 810), constant array indices
+        // (`a[K]` — fixture 824), and struct members (`s.x` —
+        // fixture 826's sibling).
+        if let Some(gty) = self.globals.type_of(name)
+            && matches!(gty, Type::Int | Type::UInt)
+            && matches!(op, BinOp::Mul | BinOp::Div | BinOp::Mod)
+            && let Some((rhs_addr, rhs_ty)) = self.global_int_rhs_addr(&value.kind)
+            && matches!(rhs_ty, Type::Int | Type::UInt)
+        {
+            let _ = write!(self.out, "\tmov\tax,word ptr DGROUP:_{name}\r\n");
+            if matches!(op, BinOp::Mul) {
+                let _ = write!(self.out, "\timul\tword ptr {rhs_addr}\r\n");
+                let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name},ax\r\n");
+            } else {
+                self.out.extend_from_slice(b"\tcwd\t\r\n");
+                let _ = write!(self.out, "\tidiv\tword ptr {rhs_addr}\r\n");
+                let result_reg = if matches!(op, BinOp::Div) { "ax" } else { "dx" };
+                let _ = write!(
+                    self.out,
+                    "\tmov\tword ptr DGROUP:_{name},{result_reg}\r\n",
+                );
+            }
+            return;
+        }
+        // Int/uint global compound `<<=` / `>>=` with int/uint/char/
+        // uchar RHS in any memory slot (local, global, array elem,
+        // struct member). CL is loaded from the low byte of the
+        // shift count; the shift acts memory-direct on the global.
+        // Fixture 805 (local), 811 (global), 826 (member).
         if let Some(gty) = self.globals.type_of(name)
             && matches!(gty, Type::Int | Type::UInt)
             && matches!(op, BinOp::Shl | BinOp::Shr)
-            && let Some(ty_rhs) = self.rhs_type_for_long_widening(&value.kind)
+            && let Some(ty_rhs) = self.rhs_int_compound_type(&value.kind)
             && matches!(ty_rhs, Type::Int | Type::UInt | Type::Char | Type::UChar)
-            && let ExprKind::Ident(b) = &value.kind
+            && let Some(rhs_byte) = self.rhs_byte_addr(&value.kind)
         {
             let unsigned = gty.is_unsigned();
             let mnem = match (op, unsigned) {
@@ -4238,14 +4270,6 @@ impl<'a> FunctionEmitter<'a> {
                 (BinOp::Shr, false) => "sar",
                 (BinOp::Shr, true) => "shr",
                 _ => unreachable!(),
-            };
-            let rhs_byte = if self.globals.contains(b) {
-                format!("byte ptr DGROUP:_{b}")
-            } else {
-                let LocalLocation::Stack(off) = self.locals.location_of(b) else {
-                    unreachable!();
-                };
-                format!("byte ptr {}", bp_addr(off))
             };
             let _ = write!(self.out, "\tmov\tcl,{rhs_byte}\r\n");
             let _ = write!(self.out, "\t{mnem}\tword ptr DGROUP:_{name},cl\r\n");
@@ -8596,6 +8620,128 @@ impl<'a> FunctionEmitter<'a> {
             Some(self.locals.type_of(name).clone())
         } else {
             None
+        }
+    }
+
+    /// Resolve an RHS expression to a `byte ptr <addr>` form
+    /// pointing at its low byte. Supports `Ident` (global or
+    /// stack local), `ArrayIndex` with constant index, and
+    /// `Member` of a stack or global struct. Used by the shift
+    /// arm to load CL with the shift count. Fixture 826.
+    fn rhs_byte_addr(&self, e: &ExprKind) -> Option<String> {
+        match e {
+            ExprKind::Ident(n) => {
+                if self.globals.contains(n) {
+                    Some(format!("byte ptr DGROUP:_{n}"))
+                } else if self.locals.has(n) {
+                    let LocalLocation::Stack(off) = self.locals.location_of(n) else {
+                        return None;
+                    };
+                    Some(format!("byte ptr {}", bp_addr(off)))
+                } else {
+                    None
+                }
+            }
+            ExprKind::ArrayIndex { array, index } => {
+                let ExprKind::Ident(arr_name) = &array.kind else { return None };
+                let k = try_const_eval(index)?;
+                let arr_ty = if self.globals.contains(arr_name) {
+                    self.globals.type_of(arr_name)?.clone()
+                } else if self.locals.has(arr_name) {
+                    self.locals.type_of(arr_name).clone()
+                } else {
+                    return None;
+                };
+                let Type::Array { elem, .. } = arr_ty else { return None };
+                let stride = u32::from(elem.size_bytes());
+                let off = (k as u32).wrapping_mul(stride);
+                if self.globals.contains(arr_name) {
+                    let addr = if off == 0 {
+                        format!("DGROUP:_{arr_name}")
+                    } else {
+                        format!("DGROUP:_{arr_name}+{off}")
+                    };
+                    Some(format!("byte ptr {addr}"))
+                } else {
+                    let LocalLocation::Stack(base) = self.locals.location_of(arr_name) else {
+                        return None;
+                    };
+                    let total = base + i16::try_from(off).ok()?;
+                    Some(format!("byte ptr {}", bp_addr(total)))
+                }
+            }
+            ExprKind::Member { base, field, .. } => {
+                let ExprKind::Ident(base_name) = &base.kind else { return None };
+                let base_ty = if self.globals.contains(base_name) {
+                    self.globals.type_of(base_name)?.clone()
+                } else if self.locals.has(base_name) {
+                    self.locals.type_of(base_name).clone()
+                } else {
+                    return None;
+                };
+                let (field_off, _) = base_ty.field(field)?;
+                if self.globals.contains(base_name) {
+                    let addr = if field_off == 0 {
+                        format!("DGROUP:_{base_name}")
+                    } else {
+                        format!("DGROUP:_{base_name}+{field_off}")
+                    };
+                    Some(format!("byte ptr {addr}"))
+                } else {
+                    let LocalLocation::Stack(base_off) = self.locals.location_of(base_name) else {
+                        return None;
+                    };
+                    let total = base_off + i16::try_from(field_off).ok()?;
+                    Some(format!("byte ptr {}", bp_addr(total)))
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Resolve an RHS expression to a DGROUP-relative address
+    /// string (`DGROUP:_<name>[+<offset>]`) plus the resulting
+    /// type, if it lives entirely in one DGROUP slot. Supports
+    /// `Ident` (whole global), `ArrayIndex` with constant index
+    /// (`a[K]`), and `Member` with `.` (`s.field`). Returns
+    /// `None` for stack-resident RHS or non-foldable expressions.
+    /// Used by the int-global Mul/Div arm to pick an `imul/idiv
+    /// word ptr <addr>` mem operand.
+    fn global_int_rhs_addr(&self, e: &ExprKind) -> Option<(String, Type)> {
+        match e {
+            ExprKind::Ident(n) => {
+                let ty = self.globals.type_of(n)?.clone();
+                Some((format!("DGROUP:_{n}"), ty))
+            }
+            ExprKind::ArrayIndex { array, index } => {
+                let ExprKind::Ident(arr_name) = &array.kind else { return None };
+                if !self.globals.contains(arr_name) { return None; }
+                let k = try_const_eval(index)?;
+                let arr_ty = self.globals.type_of(arr_name)?.clone();
+                let Type::Array { elem, .. } = arr_ty else { return None };
+                let stride = u32::from(elem.size_bytes());
+                let off = (k as u32).wrapping_mul(stride);
+                let addr = if off == 0 {
+                    format!("DGROUP:_{arr_name}")
+                } else {
+                    format!("DGROUP:_{arr_name}+{off}")
+                };
+                Some((addr, (*elem).clone()))
+            }
+            ExprKind::Member { base, field, .. } => {
+                let ExprKind::Ident(base_name) = &base.kind else { return None };
+                if !self.globals.contains(base_name) { return None; }
+                let base_ty = self.globals.type_of(base_name)?.clone();
+                let (field_off, field_ty) = base_ty.field(field)?;
+                let off = u32::from(field_off);
+                let addr = if off == 0 {
+                    format!("DGROUP:_{base_name}")
+                } else {
+                    format!("DGROUP:_{base_name}+{off}")
+                };
+                Some((addr, field_ty))
+            }
+            _ => None,
         }
     }
 

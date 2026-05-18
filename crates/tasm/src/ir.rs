@@ -370,6 +370,14 @@ pub enum Instr {
     /// with mod=00 r/m=110 → `F7 3E lo hi` + FIXUPP. Signed
     /// divide against a data-segment global. Fixture 810.
     IdivGroupSym { group: String, symbol: String, offset: i16 },
+    /// `imul word ptr [si]` — `F7 /5 r/m16` with mod=00 r/m=100
+    /// → `F7 2C`. Single-operand signed multiply against the
+    /// word pointed to by SI. Fixture 824's deref sibling.
+    ImulSiPtr,
+    /// `idiv word ptr [si]` — `F7 /7 r/m16` with mod=00 r/m=100
+    /// → `F7 3C`. Signed divide against the word pointed to by
+    /// SI. Fixture 825 (`g /= *p` with `p` register-resident).
+    IdivSiPtr,
     /// `imul byte ptr [bp+<offset>]` — `F6 (mod=01 /5 r/m=110) dd`
     /// = `F6 6E dd`. 8-bit single-operand signed multiply: AX =
     /// AL * src. Char compound `*=` with mem-resident RHS (fixture

@@ -408,6 +408,7 @@ fn instr_size(instr: &Instr) -> usize {
         | Instr::SarGroupSymCl { .. }
         | Instr::ShrGroupSymCl { .. } => 4,
         Instr::ImulGroupSym { .. } | Instr::IdivGroupSym { .. } => 4,
+        Instr::ImulSiPtr | Instr::IdivSiPtr => 2,
         Instr::IncGroupSymByte { .. } | Instr::DecGroupSymByte { .. } => 4,
         Instr::IncBpRelByte { .. } | Instr::DecBpRelByte { .. } => 3,
         Instr::CmpByteBpRelImm8 { .. } => 4,
@@ -881,6 +882,18 @@ fn emit_instr(
             // `idiv word ptr <group>:<sym>[+N]` → F7 3E lo hi. Grp3
             // /7 (IDIV) with mod=00 r/m=110 → ModR/M = 0x3E. Fixture 810.
             emit_group_sym_lea(&[0xF7, 0x3E], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
+        }
+        Instr::ImulSiPtr => {
+            // `imul word ptr [si]` → F7 2C. Grp3 /5 (IMUL) with
+            // mod=00 r/m=100 → ModR/M = 0x2C.
+            out.push(0xF7);
+            out.push(0x2C);
+        }
+        Instr::IdivSiPtr => {
+            // `idiv word ptr [si]` → F7 3C. Grp3 /7 (IDIV) with
+            // mod=00 r/m=100 → ModR/M = 0x3C. Fixture 825.
+            out.push(0xF7);
+            out.push(0x3C);
         }
         Instr::ImulByteBpRel { offset } => {
             // `imul byte ptr [bp+disp8]` → F6 6E dd. F6 = Grp3 r/m8

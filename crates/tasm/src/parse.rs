@@ -445,15 +445,19 @@ fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
             ))
         }
         "imul" => {
-            // Four forms: `imul word ptr [bp+N]` (BpRel),
+            // Five forms: `imul word ptr [bp+N]` (BpRel),
             // `imul byte ptr [bp+N]` (byte form, fixture 672),
             // `imul word ptr <group>:<sym>` (GroupSym, fixture 809),
+            // `imul word ptr [si]` (SiPtr, fixture 824 sibling),
             // and `imul <reg16>` (single reg operand, fixture 155).
             if let Some(reg) = Reg16::parse(rest) {
                 return Ok(Instr::ImulReg16 { reg });
             }
             if let Some(offset) = parse_byte_bp_relative(rest) {
                 return Ok(Instr::ImulByteBpRel { offset });
+            }
+            if rest == "word ptr [si]" {
+                return Ok(Instr::ImulSiPtr);
             }
             if let Some((group, symbol)) = parse_group_symbol(rest) {
                 let (sym, offset) = split_sym_offset(symbol);
@@ -471,6 +475,9 @@ fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
             }
             if let Some(offset) = parse_byte_bp_relative(rest) {
                 return Ok(Instr::IdivByteBpRel { offset });
+            }
+            if rest == "word ptr [si]" {
+                return Ok(Instr::IdivSiPtr);
             }
             if let Some((group, symbol)) = parse_group_symbol(rest) {
                 let (sym, offset) = split_sym_offset(symbol);
