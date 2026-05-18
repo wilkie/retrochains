@@ -1959,6 +1959,57 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Pointer subscript compound — local, const-RHS, char pointee
+
+Fixtures `863` (`int *p; p[1] += y` — stack-local pointer in SI),
+`864` (`int *p; p[1] += 5` — const RHS through a global pointer),
+`865` (`char *p; p[1] += y` — char pointee).
+
+863 picks up where 862 left off. BCC places stack-local
+pointers in a register (typically SI/DI), and the subscript
+compound becomes `<op> word ptr [si+K*2], ax`. Added a parallel
+arm in `emit_array_compound_assign` gated on `self.locals.has(
+array)` + `LocalLocation::Reg(reg)` + pointer pointee — same
+RHS-into-AX prep as 862, but the memory operand is `[<reg>+
+offset]` instead of `[bx+offset]`. New IR variants
+`AddSiDispAx`/`SubSiDispAx`/`AndSiDispAx`/`OrSiDispAx`/
+`XorSiDispAx` cover the asm form (encoded `01/29/21/09/31 44
+dd` — ModR/M `44` = mod=01 reg=AX(000) r/m=100=SI). disp=0
+stays with the existing 2-byte `AddSiPtrAx` family.
+
+864 lifts the const-RHS gate from 862's path: when `try_const_
+eval(value)` succeeds, emit `<op> word ptr [bx+offset], <K>`
+directly instead of routing through AX. New IR variants
+`AddBxDispImm8` / `SubBxDispImm8` encode the imm8sx form
+(`83 47 dd ii` for ADD/0, `83 6F dd ii` for SUB/5). BCC picks
+imm8sx when the constant fits a signed byte (just like the
+flat `g += 5` path picks `83 06 lo hi 05` over the imm16 form);
+AND/OR/XOR always use imm16 so they don't get the imm8sx
+variant. The shared code now branches on `try_const_eval`:
+const branch emits the imm form, var branch routes through
+`emit_expr_to_ax`.
+
+865 covers `char *p; p[K] += y` — BCC switches to the
+AL-arith-through pattern (same op-family asymmetry as char-
+global / char-array compound) and reloads BX between the load
+and the store:
+
+```
+mov bx, word ptr DGROUP:_p
+mov al, byte ptr [bx+K]
+add al, byte ptr [bp-N]
+mov bx, word ptr DGROUP:_p   ; reload — BCC doesn't keep BX live
+mov byte ptr [bx+K], al
+```
+
+Added a sibling arm gated on `pointee.is_char_like()` + `Add/
+Sub` + non-const byte RHS via `rhs_byte_addr`. New IR variants
+`MovAlBxDisp` (`8A 47 dd`) and `MovBxDispAl` (`88 47 dd`) for
+the load/store at `[bx+disp8]`; disp=0 stays with the existing
+`MovAlFromBxPtr` 2-byte form. Char-pointee bitwise (`&=`/`|=`/
+`^=`) and signed/unsigned distinctions are still deferred —
+each requires a separate probe to characterize the exact shape.
+
 ## Compound LHS with non-Ident base
 
 Fixtures `860` (`a[1].x += y` — global struct-array element
