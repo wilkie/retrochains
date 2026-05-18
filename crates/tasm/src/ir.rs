@@ -816,6 +816,13 @@ pub enum Instr {
     /// `dec byte ptr <group>:<symbol>[+<offset>]` — `FE 0E lo hi`
     /// (Grp4 /1). Sibling of `IncGroupSymByte` for `g--;`.
     DecGroupSymByte { group: String, symbol: String, offset: i16 },
+    /// `inc byte ptr [bp+<offset>]` — `FE 46 dd` (Grp4 /0 r/m8,
+    /// mod=01 r/m=110). Memory-direct byte increment on a stack
+    /// local. Used by char-local-array `a[K]++` discarded
+    /// (fixture 721).
+    IncBpRelByte { offset: i16 },
+    /// `dec byte ptr [bp+<offset>]` — `FE 4E dd`. Sibling for `--`.
+    DecBpRelByte { offset: i16 },
     /// `add word ptr <group>:<symbol>[+<offset>], <reg16>` — Grp1
     /// r/m16, r16 with /0=ADD. Encoding: `01 (mod=00 reg=<reg>
     /// r/m=110) lo hi`. Fixture 571 (`a += b;` between two int
@@ -1097,6 +1104,15 @@ pub enum Instr {
     OrSiPtrByteImm8 { imm: u8 },
     /// `xor byte ptr [si], imm8` — `80 34 ii`. Sibling for `^=`.
     XorSiPtrByteImm8 { imm: u8 },
+    /// `and byte ptr [bp+<offset>], imm8` — `80 (mod=01 /4 r/m=110)
+    /// dd ii` = `80 66 dd ii`. Grp1 r/m8 imm8 against a stack
+    /// local. Char-local-array bitwise compound (fixture 720:
+    /// `char a[4]; a[2] &= 15`).
+    AndBpRelByteImm8 { offset: i16, imm: u8 },
+    /// `or byte ptr [bp+<offset>], imm8` — `80 4E dd ii`. Sibling.
+    OrBpRelByteImm8 { offset: i16, imm: u8 },
+    /// `xor byte ptr [bp+<offset>], imm8` — `80 76 dd ii`. Sibling.
+    XorBpRelByteImm8 { offset: i16, imm: u8 },
     /// `sbb word ptr [si+disp8],<imm8sx>` — `83 5C dd ii`. High-half
     /// borrow-propagation partner for long-pointer `*p -= K`.
     SbbSiDispImm8 { disp: i8, imm: i8 },

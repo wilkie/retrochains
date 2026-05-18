@@ -394,6 +394,7 @@ fn instr_size(instr: &Instr) -> usize {
         | Instr::SarGroupSymByteCl { .. }
         | Instr::ShrGroupSymByteCl { .. } => 4,
         Instr::IncGroupSymByte { .. } | Instr::DecGroupSymByte { .. } => 4,
+        Instr::IncBpRelByte { .. } | Instr::DecBpRelByte { .. } => 3,
         Instr::CmpByteBpRelImm8 { .. } => 4,
         Instr::CmpByteSiPtrImm8 { .. } => 3,
         Instr::AndGroupSymImm16 { .. }
@@ -413,6 +414,9 @@ fn instr_size(instr: &Instr) -> usize {
         Instr::AndSiPtrByteImm8 { .. }
         | Instr::OrSiPtrByteImm8 { .. }
         | Instr::XorSiPtrByteImm8 { .. } => 3,
+        Instr::AndBpRelByteImm8 { .. }
+        | Instr::OrBpRelByteImm8 { .. }
+        | Instr::XorBpRelByteImm8 { .. } => 4,
         Instr::AddSiPtrReg8 { .. } | Instr::SubSiPtrReg8 { .. } => 2,
         Instr::IncSiPtrByte | Instr::DecSiPtrByte => 2,
         Instr::AdcSiDispImm8 { .. } | Instr::SbbSiDispImm8 { .. } => 4,
@@ -1647,6 +1651,21 @@ fn emit_instr(
             // `dec byte ptr <group>:<sym>[+N]` → FE 0E lo hi.
             emit_group_sym_lea(&[0xFE, 0x0E], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
         }
+        Instr::IncBpRelByte { offset } => {
+            // `inc byte ptr [bp+disp8]` → FE 46 dd. Grp4 /0 r/m8
+            // with mod=01 r/m=110. Fixture 721.
+            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
+            out.push(0xFE);
+            out.push(0x46);
+            out.push(disp as u8);
+        }
+        Instr::DecBpRelByte { offset } => {
+            // `dec byte ptr [bp+disp8]` → FE 4E dd.
+            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
+            out.push(0xFE);
+            out.push(0x4E);
+            out.push(disp as u8);
+        }
         Instr::DecGroupSym { group, symbol, offset } => {
             // `dec word ptr <group>:<sym>[+N]` → FF 0E lo hi.
             emit_group_sym_lea(&[0xFF, 0x0E], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
@@ -1838,6 +1857,31 @@ fn emit_instr(
             // `xor byte ptr [si],imm8` → 80 34 ii.
             out.push(0x80);
             out.push(0x34);
+            out.push(*imm);
+        }
+        Instr::AndBpRelByteImm8 { offset, imm } => {
+            // `and byte ptr [bp+disp8],imm8` → 80 66 dd ii.
+            // Grp1 /4=AND r/m8 imm8 with mod=01 r/m=110. Fixture 720.
+            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
+            out.push(0x80);
+            out.push(0x66);
+            out.push(disp as u8);
+            out.push(*imm);
+        }
+        Instr::OrBpRelByteImm8 { offset, imm } => {
+            // `or byte ptr [bp+disp8],imm8` → 80 4E dd ii.
+            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
+            out.push(0x80);
+            out.push(0x4E);
+            out.push(disp as u8);
+            out.push(*imm);
+        }
+        Instr::XorBpRelByteImm8 { offset, imm } => {
+            // `xor byte ptr [bp+disp8],imm8` → 80 76 dd ii.
+            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
+            out.push(0x80);
+            out.push(0x76);
+            out.push(disp as u8);
             out.push(*imm);
         }
         Instr::SbbSiDispImm8 { disp, imm } => {

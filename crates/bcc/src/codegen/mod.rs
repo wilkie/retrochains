@@ -5174,16 +5174,47 @@ impl<'a> FunctionEmitter<'a> {
             panic!("non-constant rhs in array compound assign not yet supported (no fixture)");
         };
         let v_masked = if store_byte { v & 0xFF } else { v & 0xFFFF };
-        // `++a[K]` / `--a[K]` → `inc|dec <width> ptr [bp-N]`. Saves
-        // a byte over `add|sub mem, 1`. Fixture 547 (`++a[1]` on an
-        // int local array).
-        if v_masked == 1 && matches!(op, BinOp::Add | BinOp::Sub) {
+        let dest = bp_addr(off);
+        // Postfix `a[K]++` / `a[K]--` (discarded) on char-array: BCC
+        // uses memory-direct `inc|dec byte ptr [bp-N]`. Sibling of
+        // the global-array case (fixture 717). Int arrays use the
+        // same shape (fixture 547) since `inc word ptr` already
+        // matches BCC's prefix behavior.
+        if store_byte
+            && from_postfix
+            && v_masked == 1
+            && matches!(op, BinOp::Add | BinOp::Sub)
+        {
             let mnem = if matches!(op, BinOp::Add) { "inc" } else { "dec" };
-            let _ = write!(
-                self.out,
-                "\t{mnem}\t{width} ptr {}\r\n",
-                bp_addr(off),
-            );
+            let _ = write!(self.out, "\t{mnem}\tbyte ptr {dest}\r\n");
+            return;
+        }
+        // Int-element `++a[K]` / prefix-K=1 reuse the memory-direct
+        // `inc word ptr` shape (fixture 547: `++a[1]` on int array).
+        if !store_byte && v_masked == 1 && matches!(op, BinOp::Add | BinOp::Sub) {
+            let mnem = if matches!(op, BinOp::Add) { "inc" } else { "dec" };
+            let _ = write!(self.out, "\t{mnem}\t{width} ptr {dest}\r\n");
+            return;
+        }
+        // Char-element arith (`a[K] += C`) — AL load-modify-store
+        // through `bp_addr(off)`, same shape as char-global compound
+        // (fixture 719). The K=1 peephole picks `inc al` over
+        // `add al, 1`.
+        if store_byte && matches!(op, BinOp::Add | BinOp::Sub) {
+            let imm8 = if matches!(op, BinOp::Add) {
+                (v_masked & 0xFF) as u8
+            } else {
+                ((v_masked & 0xFF) as u8).wrapping_neg()
+            };
+            let _ = write!(self.out, "\tmov\tal,byte ptr {dest}\r\n");
+            if v_masked == 1 && matches!(op, BinOp::Add) {
+                self.out.extend_from_slice(b"\tinc\tal\r\n");
+            } else if v_masked == 1 && matches!(op, BinOp::Sub) {
+                self.out.extend_from_slice(b"\tdec\tal\r\n");
+            } else {
+                let _ = write!(self.out, "\tadd\tal,{imm8}\r\n");
+            }
+            let _ = write!(self.out, "\tmov\tbyte ptr {dest},al\r\n");
             return;
         }
         let mnemonic = match op {
@@ -5196,8 +5227,7 @@ impl<'a> FunctionEmitter<'a> {
         };
         let _ = write!(
             self.out,
-            "\t{mnemonic}\t{width} ptr {},{v_masked}\r\n",
-            bp_addr(off),
+            "\t{mnemonic}\t{width} ptr {dest},{v_masked}\r\n",
         );
     }
 

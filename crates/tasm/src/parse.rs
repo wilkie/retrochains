@@ -590,6 +590,11 @@ fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
             if rest == "byte ptr [si]" {
                 return Ok(Instr::IncSiPtrByte);
             }
+            // `inc byte ptr [bp+N]` — char-local-array postinc
+            // (fixture 721).
+            if let Some(offset) = parse_byte_bp_relative(rest) {
+                return Ok(Instr::IncBpRelByte { offset });
+            }
             Err(AsmError::new(
                 line.line_no,
                 format!("inc: unsupported operand form `{rest}`"),
@@ -628,6 +633,10 @@ fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
             // `dec byte ptr [si]` — char postdec through pointer.
             if rest == "byte ptr [si]" {
                 return Ok(Instr::DecSiPtrByte);
+            }
+            // `dec byte ptr [bp+N]` — char-local-array postdec.
+            if let Some(offset) = parse_byte_bp_relative(rest) {
+                return Ok(Instr::DecBpRelByte { offset });
             }
             Err(AsmError::new(
                 line.line_no,
@@ -1285,6 +1294,13 @@ fn parse_and(operands: &str, line_no: usize) -> AsmResult<Instr> {
     if lhs == "byte ptr [si]" {
         if let Some(imm) = parse_imm8(rhs) {
             return Ok(Instr::AndSiPtrByteImm8 { imm: imm as u8 });
+        }
+    }
+    // `and byte ptr [bp+N], imm8` — char-local-array bitwise
+    // compound (fixture 720).
+    if let Some(offset) = parse_byte_bp_relative(lhs) {
+        if let Some(imm) = parse_imm8(rhs) {
+            return Ok(Instr::AndBpRelByteImm8 { offset, imm: imm as u8 });
         }
     }
     // `and byte ptr <group>:<sym>[+N], <reg8>` — char compound `&=`
@@ -2149,6 +2165,12 @@ fn parse_or(operands: &str, line_no: usize) -> AsmResult<Instr> {
             return Ok(Instr::OrSiPtrByteImm8 { imm: imm as u8 });
         }
     }
+    // `or byte ptr [bp+N], imm8` — char-local-array `|=`.
+    if let Some(offset) = parse_byte_bp_relative(lhs) {
+        if let Some(imm) = parse_imm8(rhs) {
+            return Ok(Instr::OrBpRelByteImm8 { offset, imm: imm as u8 });
+        }
+    }
     // `or byte ptr <group>:<sym>[+N], <reg8>` — char compound `|=`
     // on a global.
     if let Some((group, symbol)) = parse_byte_group_symbol(lhs) {
@@ -2274,6 +2296,12 @@ fn parse_xor(operands: &str, line_no: usize) -> AsmResult<Instr> {
     if lhs == "byte ptr [si]" {
         if let Some(imm) = parse_imm8(rhs) {
             return Ok(Instr::XorSiPtrByteImm8 { imm: imm as u8 });
+        }
+    }
+    // `xor byte ptr [bp+N], imm8` — char-local-array `^=`.
+    if let Some(offset) = parse_byte_bp_relative(lhs) {
+        if let Some(imm) = parse_imm8(rhs) {
+            return Ok(Instr::XorBpRelByteImm8 { offset, imm: imm as u8 });
         }
     }
     // `xor byte ptr <group>:<sym>[+N], <reg8>` — char compound `^=`
