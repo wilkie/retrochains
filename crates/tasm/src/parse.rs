@@ -1441,6 +1441,14 @@ fn parse_and(operands: &str, line_no: usize) -> AsmResult<Instr> {
     {
         return Ok(Instr::AndSiDispAx { disp });
     }
+    // `and byte ptr [bx+disp8], al` — char-pointer bitwise compound
+    // mem-direct form (fixture 870: `char *p; p[K] &= y`).
+    if rhs == "al"
+        && let Some(disp) = parse_byte_bx_disp(lhs)
+        && disp != 0
+    {
+        return Ok(Instr::AndBxDispAl { disp });
+    }
     // `and byte ptr [bp+N], imm8` — char-local-array bitwise
     // compound (fixture 720).
     if let Some(offset) = parse_byte_bp_relative(lhs) {
@@ -2437,6 +2445,14 @@ fn parse_or(operands: &str, line_no: usize) -> AsmResult<Instr> {
     {
         return Ok(Instr::OrSiDispAx { disp });
     }
+    // `or byte ptr [bx+disp8], al` — char-pointer bitwise compound
+    // (fixture 871: `char *p; p[K] |= y`).
+    if rhs == "al"
+        && let Some(disp) = parse_byte_bx_disp(lhs)
+        && disp != 0
+    {
+        return Ok(Instr::OrBxDispAl { disp });
+    }
     // `or byte ptr [bp+N], imm8` — char-local-array `|=`.
     if let Some(offset) = parse_byte_bp_relative(lhs) {
         if let Some(imm) = parse_imm8(rhs) {
@@ -2604,6 +2620,14 @@ fn parse_xor(operands: &str, line_no: usize) -> AsmResult<Instr> {
         && disp != 0
     {
         return Ok(Instr::XorSiDispAx { disp });
+    }
+    // `xor byte ptr [bx+disp8], al` — char-pointer bitwise compound
+    // (sibling of `AndBxDispAl` / `OrBxDispAl`).
+    if rhs == "al"
+        && let Some(disp) = parse_byte_bx_disp(lhs)
+        && disp != 0
+    {
+        return Ok(Instr::XorBxDispAl { disp });
     }
     // `xor byte ptr [bp+N], imm8` — char-local-array `^=`.
     if let Some(offset) = parse_byte_bp_relative(lhs) {

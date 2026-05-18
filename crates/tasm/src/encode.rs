@@ -457,6 +457,9 @@ fn instr_size(instr: &Instr) -> usize {
         | Instr::XorSiDispAx { .. } => 3,
         Instr::AddBxDispImm8 { .. } | Instr::SubBxDispImm8 { .. } => 4,
         Instr::MovAlBxDisp { .. } | Instr::MovBxDispAl { .. } => 3,
+        Instr::AndBxDispAl { .. }
+        | Instr::OrBxDispAl { .. }
+        | Instr::XorBxDispAl { .. } => 3,
         Instr::AddAlBpRel { .. }
         | Instr::SubAlBpRel { .. }
         | Instr::AndAlBpRel { .. }
@@ -2049,6 +2052,24 @@ fn emit_instr(
         Instr::MovBxDispAl { disp } => {
             // `mov byte ptr [bx+disp8],al` → 88 47 dd. Sibling.
             out.push(0x88);
+            out.push(0x47);
+            out.push(*disp as u8);
+        }
+        Instr::AndBxDispAl { disp } => {
+            // `and byte ptr [bx+disp8],al` → 20 47 dd. Fixture 870.
+            out.push(0x20);
+            out.push(0x47);
+            out.push(*disp as u8);
+        }
+        Instr::OrBxDispAl { disp } => {
+            // `or byte ptr [bx+disp8],al` → 08 47 dd.
+            out.push(0x08);
+            out.push(0x47);
+            out.push(*disp as u8);
+        }
+        Instr::XorBxDispAl { disp } => {
+            // `xor byte ptr [bx+disp8],al` → 30 47 dd.
+            out.push(0x30);
             out.push(0x47);
             out.push(*disp as u8);
         }

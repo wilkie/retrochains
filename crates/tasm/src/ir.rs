@@ -1218,6 +1218,14 @@ pub enum Instr {
     MovAlBxDisp { disp: i8 },
     /// `mov byte ptr [bx+disp8],al` — `88 47 dd`. Store sibling.
     MovBxDispAl { disp: i8 },
+    /// `and byte ptr [bx+disp8],al` — `20 47 dd`. AND r/m8,r8 with
+    /// ModR/M `47` = mod=01 reg=AL(000) r/m=111=BX. Bitwise
+    /// mem-direct form for `char *p; p[K] &= y` (fixture 870).
+    AndBxDispAl { disp: i8 },
+    /// `or byte ptr [bx+disp8],al` — `08 47 dd`. Sibling.
+    OrBxDispAl { disp: i8 },
+    /// `xor byte ptr [bx+disp8],al` — `30 47 dd`. Sibling.
+    XorBxDispAl { disp: i8 },
     /// `add al,byte ptr [bp+<offset>]` — `02 46 dd`. ADD r8,r/m8
     /// with mod=01 reg=AL(000) r/m=110=BP+disp8. Char-array
     /// compound with non-const int RHS truncated to byte (fixture

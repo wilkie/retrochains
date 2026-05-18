@@ -6097,7 +6097,7 @@ impl<'a> FunctionEmitter<'a> {
         // Char-pointee global-pointer subscript compound: `char *p;
         // p[K] += y`. BCC uses the AL-arith-through pattern plus a
         // second `mov bx, _p` reload before the store (BCC doesn't
-        // keep BX alive across the byte arith). Fixture 865.
+        // keep BX alive across the byte arith). Fixture 865, 869.
         if let Some(g_ty) = self.globals.type_of(array)
             && let Some(pointee) = g_ty.pointee()
             && indices.len() == 1
@@ -6122,6 +6122,40 @@ impl<'a> FunctionEmitter<'a> {
             let _ = write!(self.out, "\t{mnem}\tal,{rhs_byte}\r\n");
             let _ = write!(self.out, "\tmov\tbx,word ptr DGROUP:_{array}\r\n");
             let _ = write!(self.out, "\tmov\tbyte ptr {bx_disp},al\r\n");
+            return;
+        }
+        // Char-pointee global-pointer subscript bitwise compound:
+        // `char *p; p[K] &= y` (and `|=`/`^=`). BCC uses the same
+        // mem-direct shape as char-global / char-array bitwise:
+        // `mov al, <rhs>; <op> byte ptr [bx+K], al` — no BX reload,
+        // no AL pre-load. Fixtures 870, 871 (and pending XOR).
+        if let Some(g_ty) = self.globals.type_of(array)
+            && let Some(pointee) = g_ty.pointee()
+            && indices.len() == 1
+            && let Some(k) = try_const_eval(&indices[0])
+            && pointee.is_char_like()
+            && matches!(op, BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor)
+            && try_const_eval(value).is_none()
+            && let Some(rhs_byte) = self.rhs_byte_addr(&value.kind)
+        {
+            let stride = i32::from(pointee.size_bytes());
+            let off = (k as i32).wrapping_mul(stride);
+            let bx_disp = if off == 0 {
+                "[bx]".to_owned()
+            } else if off > 0 {
+                format!("[bx+{off}]")
+            } else {
+                format!("[bx-{}]", -off)
+            };
+            let mnem = match op {
+                BinOp::BitAnd => "and",
+                BinOp::BitOr => "or",
+                BinOp::BitXor => "xor",
+                _ => unreachable!(),
+            };
+            let _ = write!(self.out, "\tmov\tbx,word ptr DGROUP:_{array}\r\n");
+            let _ = write!(self.out, "\tmov\tal,{rhs_byte}\r\n");
+            let _ = write!(self.out, "\t{mnem}\tbyte ptr {bx_disp},al\r\n");
             return;
         }
         // Register-resident local-pointer subscript compound:
