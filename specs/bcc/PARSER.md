@@ -1959,6 +1959,40 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `int` global compound `/=`, `%=`, `<<=` with int var
+
+Fixtures `803` (`g /= x`), `804` (`g %= x`), `805` (`g <<= x`)
+— int-LHS / int-local-RHS variants.
+
+- `803` — int `/= int`: memory-direct `idiv word ptr
+  [bp+N]`. No widening needed since both operands are
+  16-bit, no register-shuffle since `idiv` consumes
+  DX:AX and a mem operand directly:
+
+  ```
+  mov ax, word ptr DGROUP:_<g>
+  cwd                              ; DX:AX = sign-ext g
+  idiv word ptr [bp-N]             ; AX = quot, DX = rem
+  mov word ptr DGROUP:_<g>, ax     ; (or `, dx` for %=)
+  ```
+
+  Added a new arm in `emit_compound_assign`. Reuses the
+  existing `IdivBpRel` IR variant — codegen-only.
+- `804` — free pass via the same arm: `%=` selects `dx`
+  for the store.
+- `805` — int `<<= int`: BCC loads the shift count into
+  CL from a `byte ptr [bp+N]` view, then shifts the int
+  global memory-direct via `shl word ptr DGROUP:_g, cl`.
+  The word-form `shl/sar/shr <mem>, cl` (D3 /4|/7|/5)
+  hadn't been used before — only the byte-form (D2 ...,
+  fixture 697). Added three new IR variants
+  `Shl|Sar|ShrGroupSymCl` with `D3 26/3E/2E lo hi`
+  encoding and parser entries for the `shl word ptr
+  DGROUP:_g, cl` syntax. Codegen arm gates on
+  `Type::Int | Type::UInt | Type::Char | Type::UChar`
+  RHS — CL only needs the low byte regardless of RHS
+  width.
+
 ## `int` global compound `/=` uchar, `%=` char, `*=` int
 
 Fixtures `800` (`g /= uchar c`), `801` (`g %= char c`),
