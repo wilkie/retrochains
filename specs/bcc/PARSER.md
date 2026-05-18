@@ -1455,6 +1455,23 @@ to-global address writes).
   handles comma-separated declarators in a single decl, and the
   locals planner allocates each in declaration order.
 
+## Free passes (batch 95)
+
+Three more probes hit existing paths byte-exactly with no code
+changes:
+
+- `602` — `return (a + b) * 2;` (parenthesized sum then `* 2`):
+  the runtime sum lands in AX via `add ax, <src>` and the new
+  `* 2` peephole from batch 91 turns the constant multiply
+  into `shl ax, 1`.
+- `603` — `int a; a = 5; ++a; ++a; return a;` (sequential
+  preincs on the same local): each `++a;` lowers to a register
+  `inc` independently.
+- `604` — `char c; int n; c = 5; n = c; return n;` (int =
+  char widening through assignment): `emit_assign_local`
+  already loads the char with sign extension via `cbw` and
+  stores the widened word.
+
 ### Deferred from batch 88
 
 - Probed `int a[5]; return sizeof(a);` (`582` first draft).
