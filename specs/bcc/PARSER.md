@@ -1883,6 +1883,28 @@ store.)
   combines the batch-99 `imul <src>` path with the batch-109
   RHS-clobbers-AX swap.
 
+## `x *= y` — `imul <mem>` directly for memory-source RHS
+
+Fixture `651` (`int x; int y; x *= y;` with x in SI and y at
+`[bp-2]`) — BCC uses `imul word ptr [bp-2]` directly rather
+than materializing the operand in DX first. Our existing
+compound-mul path always did the DX round-trip (`mov dx, src;
+imul dx`), which costs 2 extra bytes for a memory source.
+Updated the `BinOp::Mul` arm of `emit_compound_assign_reg`:
+when the resolved source is `Local`/`Global`/`GlobalOffset`,
+emit `imul <mem>` directly; constants and registers still
+use the DX path.
+
+## Free passes (batch 111)
+
+- `650` — `int x; int y; x = 5; y = -x; return y;` (neg of
+  var stored to another local): `emit_unary_neg` materializes
+  the negation in AX and the assign-local path stores it.
+- `652` — `if (a + b > 10)` (if with arith compare): the
+  comparison's left operand is a non-constant BinOp; the
+  comparison path materializes both operands and emits the
+  standard `cmp; jle <skip>` form.
+
 ### Deferred from batch 88
 
 - Probed `int a[5]; return sizeof(a);` (`582` first draft).
