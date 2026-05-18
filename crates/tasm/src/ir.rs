@@ -1239,6 +1239,36 @@ pub enum Instr {
     /// `xor word ptr [bx+disp8],<imm16>` — `81 77 dd lo hi`. Group-1
     /// `/6` sibling.
     XorBxDispImm16 { disp: i8, imm: u16 },
+    /// `add word ptr [bx],ax` — `01 07`. ADD r/m16,r16 with ModR/M
+    /// `07` = mod=00 reg=AX(000) r/m=111=BX. Zero-offset sibling of
+    /// `AddBxDispAx` — used by `int *p; p[0] += y` (fixture 879).
+    AddBxPtrAx,
+    /// `sub word ptr [bx],ax` — `29 07`. Sibling.
+    SubBxPtrAx,
+    /// `and word ptr [bx],ax` — `21 07`. Sibling.
+    AndBxPtrAx,
+    /// `or word ptr [bx],ax` — `09 07`. Sibling.
+    OrBxPtrAx,
+    /// `xor word ptr [bx],ax` — `31 07`. Sibling.
+    XorBxPtrAx,
+    /// `inc word ptr [bx+disp8]` — `FF 47 dd`. Group FF `/0` (INC
+    /// r/m16) with mod=01 r/m=111=BX+disp8. Used by `int *p; p[K]++`
+    /// (fixture 880) and `++p[K]` — BCC's `K=1` memory-direct
+    /// peephole on a pointer subscript LHS.
+    IncBxDisp { disp: i8 },
+    /// `dec word ptr [bx+disp8]` — `FF 4F dd`. Group FF `/1` sibling.
+    DecBxDisp { disp: i8 },
+    /// `shl word ptr [bx+disp8],1` — `D1 67 dd`. Group-2 `/4` (SHL)
+    /// 1-bit shift with mod=01 r/m=111=BX. Used by `int *p; p[K]
+    /// <<= N` (fixture 878: BCC unrolls into N repetitions of the
+    /// 1-bit shift on 8086, since `C1 /4 imm8` is 186+).
+    ShlBxDispImm1 { disp: i8 },
+    /// `sar word ptr [bx+disp8],1` — `D1 7F dd`. Group-2 `/7`
+    /// (SAR) sibling.
+    SarBxDispImm1 { disp: i8 },
+    /// `shr word ptr [bx+disp8],1` — `D1 6F dd`. Group-2 `/5`
+    /// (SHR) sibling.
+    ShrBxDispImm1 { disp: i8 },
     /// `add al,byte ptr [bp+<offset>]` — `02 46 dd`. ADD r8,r/m8
     /// with mod=01 reg=AL(000) r/m=110=BP+disp8. Char-array
     /// compound with non-const int RHS truncated to byte (fixture

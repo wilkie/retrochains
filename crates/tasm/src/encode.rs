@@ -463,6 +463,15 @@ fn instr_size(instr: &Instr) -> usize {
         Instr::AndBxDispImm16 { .. }
         | Instr::OrBxDispImm16 { .. }
         | Instr::XorBxDispImm16 { .. } => 5,
+        Instr::AddBxPtrAx
+        | Instr::SubBxPtrAx
+        | Instr::AndBxPtrAx
+        | Instr::OrBxPtrAx
+        | Instr::XorBxPtrAx => 2,
+        Instr::IncBxDisp { .. } | Instr::DecBxDisp { .. } => 3,
+        Instr::ShlBxDispImm1 { .. }
+        | Instr::SarBxDispImm1 { .. }
+        | Instr::ShrBxDispImm1 { .. } => 3,
         Instr::AddAlBpRel { .. }
         | Instr::SubAlBpRel { .. }
         | Instr::AndAlBpRel { .. }
@@ -2100,6 +2109,58 @@ fn emit_instr(
             out.push(*disp as u8);
             out.push((*imm & 0xFF) as u8);
             out.push((*imm >> 8) as u8);
+        }
+        Instr::AddBxPtrAx => {
+            // `add word ptr [bx],ax` → 01 07. ModR/M 07 = mod=00
+            // reg=AX(000) r/m=111=BX. Fixture 879.
+            out.push(0x01);
+            out.push(0x07);
+        }
+        Instr::SubBxPtrAx => {
+            out.push(0x29);
+            out.push(0x07);
+        }
+        Instr::AndBxPtrAx => {
+            out.push(0x21);
+            out.push(0x07);
+        }
+        Instr::OrBxPtrAx => {
+            out.push(0x09);
+            out.push(0x07);
+        }
+        Instr::XorBxPtrAx => {
+            out.push(0x31);
+            out.push(0x07);
+        }
+        Instr::IncBxDisp { disp } => {
+            // `inc word ptr [bx+disp8]` → FF 47 dd. Fixture 880.
+            out.push(0xFF);
+            out.push(0x47);
+            out.push(*disp as u8);
+        }
+        Instr::DecBxDisp { disp } => {
+            // `dec word ptr [bx+disp8]` → FF 4F dd.
+            out.push(0xFF);
+            out.push(0x4F);
+            out.push(*disp as u8);
+        }
+        Instr::ShlBxDispImm1 { disp } => {
+            // `shl word ptr [bx+disp8],1` → D1 67 dd. Fixture 878.
+            out.push(0xD1);
+            out.push(0x67);
+            out.push(*disp as u8);
+        }
+        Instr::SarBxDispImm1 { disp } => {
+            // `sar word ptr [bx+disp8],1` → D1 7F dd.
+            out.push(0xD1);
+            out.push(0x7F);
+            out.push(*disp as u8);
+        }
+        Instr::ShrBxDispImm1 { disp } => {
+            // `shr word ptr [bx+disp8],1` → D1 6F dd.
+            out.push(0xD1);
+            out.push(0x6F);
+            out.push(*disp as u8);
         }
         Instr::AddAlBpRel { offset } => {
             // `add al,byte ptr [bp+disp8]` → 02 46 dd. ADD r8,r/m8

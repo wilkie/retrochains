@@ -654,6 +654,13 @@ fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
             if let Some(offset) = parse_byte_bp_relative(rest) {
                 return Ok(Instr::IncBpRelByte { offset });
             }
+            // `inc word ptr [bx+disp8]` — pointer-subscript K=1
+            // peephole (fixture 880).
+            if let Some(disp) = parse_word_bx_disp(rest)
+                && disp != 0
+            {
+                return Ok(Instr::IncBxDisp { disp });
+            }
             Err(AsmError::new(
                 line.line_no,
                 format!("inc: unsupported operand form `{rest}`"),
@@ -696,6 +703,12 @@ fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
             // `dec byte ptr [bp+N]` — char-local-array postdec.
             if let Some(offset) = parse_byte_bp_relative(rest) {
                 return Ok(Instr::DecBpRelByte { offset });
+            }
+            // `dec word ptr [bx+disp8]` — sibling of `IncBxDisp`.
+            if let Some(disp) = parse_word_bx_disp(rest)
+                && disp != 0
+            {
+                return Ok(Instr::DecBxDisp { disp });
             }
             Err(AsmError::new(
                 line.line_no,
@@ -1288,6 +1301,9 @@ fn parse_sub(operands: &str, line_no: usize) -> AsmResult<Instr> {
     }
     // `sub word ptr [bx+disp8], ax` — sibling of `AddBxDispAx`
     // (fixture 862).
+    if rhs == "ax" && lhs == "word ptr [bx]" {
+        return Ok(Instr::SubBxPtrAx);
+    }
     if rhs == "ax"
         && let Some(disp) = parse_word_bx_disp(lhs)
         && disp != 0
@@ -1427,6 +1443,9 @@ fn parse_and(operands: &str, line_no: usize) -> AsmResult<Instr> {
     }
     // `and word ptr [bx+disp8], ax` — sibling of `AddBxDispAx`
     // (fixture 862).
+    if rhs == "ax" && lhs == "word ptr [bx]" {
+        return Ok(Instr::AndBxPtrAx);
+    }
     if rhs == "ax"
         && let Some(disp) = parse_word_bx_disp(lhs)
         && disp != 0
@@ -1871,9 +1890,10 @@ fn parse_add(operands: &str, line_no: usize) -> AsmResult<Instr> {
     }
     // `add word ptr [bx+disp8], ax` — global-pointer subscript
     // compound `int *p; p[K] += y` where BCC loaded the pointer
-    // into BX (fixture 862). Restricted to disp != 0 — disp=0
-    // (`word ptr [bx]`) is reserved for a future AddBxPtrAx variant
-    // if it's ever needed.
+    // into BX (fixture 862, 879).
+    if rhs == "ax" && lhs == "word ptr [bx]" {
+        return Ok(Instr::AddBxPtrAx);
+    }
     if rhs == "ax"
         && let Some(disp) = parse_word_bx_disp(lhs)
         && disp != 0
@@ -2205,6 +2225,13 @@ fn parse_shl_one(operands: &str, line_no: usize) -> AsmResult<Instr> {
             offset,
         });
     }
+    // `shl word ptr [bx+disp8], 1` — pointer-subscript shift
+    // (fixture 878: `int *p; p[K] <<= N` unrolls into N of these).
+    if let Some(disp) = parse_word_bx_disp(lhs)
+        && disp != 0
+    {
+        return Ok(Instr::ShlBxDispImm1 { disp });
+    }
     let reg = Reg16::parse(lhs)
         .ok_or_else(|| AsmError::new(line_no, format!("shl: bad register `{lhs}`")))?;
     Ok(Instr::ShlReg16One { reg })
@@ -2258,6 +2285,13 @@ fn parse_sar_one(operands: &str, line_no: usize) -> AsmResult<Instr> {
             offset,
         });
     }
+    // `sar word ptr [bx+disp8], 1` — pointer-subscript signed
+    // shift sibling.
+    if let Some(disp) = parse_word_bx_disp(lhs)
+        && disp != 0
+    {
+        return Ok(Instr::SarBxDispImm1 { disp });
+    }
     let reg = Reg16::parse(lhs)
         .ok_or_else(|| AsmError::new(line_no, format!("sar: bad register `{lhs}`")))?;
     Ok(Instr::SarReg16One { reg })
@@ -2293,6 +2327,13 @@ fn parse_shr_one(operands: &str, line_no: usize) -> AsmResult<Instr> {
             symbol: sym.to_string(),
             offset,
         });
+    }
+    // `shr word ptr [bx+disp8], 1` — pointer-subscript unsigned
+    // shift sibling.
+    if let Some(disp) = parse_word_bx_disp(lhs)
+        && disp != 0
+    {
+        return Ok(Instr::ShrBxDispImm1 { disp });
     }
     let reg = Reg16::parse(lhs)
         .ok_or_else(|| AsmError::new(line_no, format!("shr: bad register `{lhs}`")))?;
@@ -2441,6 +2482,9 @@ fn parse_or(operands: &str, line_no: usize) -> AsmResult<Instr> {
     }
     // `or word ptr [bx+disp8], ax` — sibling of `AddBxDispAx`
     // (fixture 862).
+    if rhs == "ax" && lhs == "word ptr [bx]" {
+        return Ok(Instr::OrBxPtrAx);
+    }
     if rhs == "ax"
         && let Some(disp) = parse_word_bx_disp(lhs)
         && disp != 0
@@ -2624,6 +2668,9 @@ fn parse_xor(operands: &str, line_no: usize) -> AsmResult<Instr> {
     }
     // `xor word ptr [bx+disp8], ax` — sibling of `AddBxDispAx`
     // (fixture 862).
+    if rhs == "ax" && lhs == "word ptr [bx]" {
+        return Ok(Instr::XorBxPtrAx);
+    }
     if rhs == "ax"
         && let Some(disp) = parse_word_bx_disp(lhs)
         && disp != 0

@@ -6084,13 +6084,60 @@ impl<'a> FunctionEmitter<'a> {
             let _ = write!(self.out, "\tmov\tbx,word ptr DGROUP:_{array}\r\n");
             if let Some(v) = try_const_eval(value) {
                 let v_masked = v & 0xFFFF;
-                let _ = write!(
-                    self.out,
-                    "\t{mnem}\tword ptr {bx_disp},{v_masked}\r\n",
-                );
+                // Same `++a[K]` / `--a[K]` memory-direct peephole
+                // the array path uses (fixture 547): const RHS of
+                // 1 for Add/Sub becomes `inc|dec word ptr [bx+K]`
+                // (2-3 bytes vs. 4 bytes for the imm8sx form).
+                // Fixture 880 (`p[1]++` discarded).
+                if v_masked == 1 && matches!(op, BinOp::Add | BinOp::Sub) {
+                    let m = if matches!(op, BinOp::Add) { "inc" } else { "dec" };
+                    let _ = write!(self.out, "\t{m}\tword ptr {bx_disp}\r\n");
+                } else {
+                    let _ = write!(
+                        self.out,
+                        "\t{mnem}\tword ptr {bx_disp},{v_masked}\r\n",
+                    );
+                }
             } else {
                 self.emit_expr_to_ax(value);
                 let _ = write!(self.out, "\t{mnem}\tword ptr {bx_disp},ax\r\n");
+            }
+            return;
+        }
+        // Int-pointer subscript shift compound with const RHS:
+        // `int *p; p[K] <<= N`. BCC unrolls into N repetitions of
+        // `<shift> word ptr [bx+K*2], 1` — same shape as the flat
+        // int-global shift path (fixture 539), just with BX-based
+        // addressing. Fixture 878 (`p[1] <<= 3`).
+        if let Some(g_ty) = self.globals.type_of(array)
+            && let Some(pointee) = g_ty.pointee()
+            && indices.len() == 1
+            && let Some(k) = try_const_eval(&indices[0])
+            && matches!(pointee, Type::Int | Type::UInt)
+            && matches!(op, BinOp::Shl | BinOp::Shr)
+            && let Some(n) = try_const_eval(value)
+            && n >= 1
+            && n <= 8
+        {
+            let stride = i32::from(pointee.size_bytes());
+            let off = (k as i32).wrapping_mul(stride);
+            let bx_disp = if off == 0 {
+                "[bx]".to_owned()
+            } else if off > 0 {
+                format!("[bx+{off}]")
+            } else {
+                format!("[bx-{}]", -off)
+            };
+            let signed = !pointee.is_unsigned();
+            let mnem = match op {
+                BinOp::Shl => "shl",
+                BinOp::Shr if signed => "sar",
+                BinOp::Shr => "shr",
+                _ => unreachable!(),
+            };
+            let _ = write!(self.out, "\tmov\tbx,word ptr DGROUP:_{array}\r\n");
+            for _ in 0..n {
+                let _ = write!(self.out, "\t{mnem}\tword ptr {bx_disp},1\r\n");
             }
             return;
         }
