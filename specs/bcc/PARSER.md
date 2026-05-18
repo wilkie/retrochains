@@ -1959,6 +1959,28 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `char` global `>>=` / `*=` / `/=` const
+
+Fixtures `689` (`g >>= 2`), `690` (`g *= 4`), `691` (`g /= 4`).
+
+- `689` — free pass off batch 123's shift-byte-one unroll
+  (`sar byte ptr _g, 1` × 2, signed char picks SAR).
+- `690` — char-global `*= K` for K a power of two:
+  load-modify-store through AL with `shl al, 1` unrolled
+  log2(K) times. Same shape as the char-local `*= K` path
+  (fixture 633). Added a codegen arm gated on the
+  power-of-two check; non-power-of-2 multipliers are not yet
+  probed and likely use a `mov bl, K; imul bl` chain.
+- `691` — char-global `/= K`: load via `mov al, _g`,
+  sign-extend with `cbw`, load divisor to BX, `cwd; idiv
+  bx`, store quotient back. Mirrors char-local-const
+  (fixture 640); the divisor goes through BX regardless of
+  K's value (no power-of-2 shortcut, since signed-div
+  rounding diverges from arithmetic shift for negatives).
+  The arm currently restricts to `Type::Char` (signed); the
+  unsigned-char path would use `div` and may have a
+  different widening / pool shape — held until probed.
+
 ## `char` global `<<=` const and `|=` / `^=` const free passes
 
 Fixtures `686` (`g |= 8`), `687` (`g ^= 31`), `688` (`g <<= 2`).
