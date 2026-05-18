@@ -1815,6 +1815,37 @@ about char-returning function bodies through AL.
   `sar al, 1` (signed) twice — sibling of fixture 535's
   `c <<= 2`.
 
+## Nested BinOp as RHS — extend RHS-clobbers-AX path
+
+Fixture `645` (`return x + y * 2;`) — when the right operand
+of a binary op is itself a non-constant BinOp (e.g., `y * 2`),
+its evaluation lands the result in AX. Previously
+`resolve_operand_source` panicked on a BinOp RHS. BCC's
+pattern matches the call-RHS path from batch 92:
+
+```text
+  mov ax, [bp-4]    ; y
+  shl ax, 1         ; y * 2
+  push ax           ; save RHS
+  mov ax, [bp-2]    ; x
+  pop dx            ; recover RHS
+  add ax, dx        ; x + (y*2)
+```
+
+Extended the `rhs_clobbers_ax` check in `emit_expr_to_ax`'s
+BinOp arm to also fire when `right.kind` is a non-constant
+BinOp. That routes through the existing RHS-first / push /
+LHS / pop dx / op-with-DX sequence.
+
+## Free passes (batch 109)
+
+- `644` — `int x; x = 5; x += x;` (self-compound-add): the
+  compound-add path emits `add <reg>, <reg>` cleanly even
+  when source and destination are the same.
+- `646` — `if (x == 5 || x == 10)` (logical OR with two `==`
+  cmps): the cmp-as-branch path lowers each `==` to `cmp; je`
+  and the OR-skeleton wires them together.
+
 ### Deferred from batch 88
 
 - Probed `int a[5]; return sizeof(a);` (`582` first draft).
