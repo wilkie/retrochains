@@ -1959,6 +1959,29 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Pointer subscript — XOR and const-SUB coverage
+
+Fixtures `872` (`int *p; p[1] ^= y` — int* XOR), `873`
+(`char *p; p[1] ^= y` — char* XOR), `874` (`int *p; p[1] -= 5`
+— const-RHS SUB for global int pointer).
+
+No new code — all three exercise IR variants that were wired up
+in earlier batches but lacked fixture coverage:
+
+- 872 → `XorBxDispAx` (added with the Add/Sub/And/Or family in
+  batch 181 / fixture 862).
+- 873 → `XorBxDispAl` (added with `AndBxDispAl`/`OrBxDispAl` in
+  batch 184 / fixture 870).
+- 874 → `SubBxDispImm8` (added with `AddBxDispImm8` in batch 182
+  / fixture 864).
+
+These fill the XOR holes for both word- and byte-width pointer
+subscript bitwise compound, and add explicit byte-exact
+regression coverage for the const-RHS SUB form. The remaining
+gaps in this family are bitwise-const variants (`p[K] &= 0xF`,
+etc.) — BCC uses the imm16 encoding there even for small
+constants, so they need a separate IR variant family.
+
 ## Char-pointer subscript — op-family expansion
 
 Fixtures `869` (`char *p; p[1] -= y` — SUB sibling of 865),
