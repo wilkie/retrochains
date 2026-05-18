@@ -1924,6 +1924,20 @@ Added the generic `AndReg16BpRel` IR variant (`23 (mod=01
 reg=<r> r/m=110) dd`) — sibling of the batch-110
 `CmpReg16BpRel`. AX keeps its dedicated variant.
 
+## `or` / `xor` reg-vs-stack and non-constant compound shift
+
+Fixtures `656` (`x |= y`), `657` (`x ^= y`), `658` (`x <<=
+y`) — three sibling fixes:
+
+- Added `OrReg16BpRel` (`0B mod=01 reg=<r> r/m=110 dd`) and
+  `XorReg16BpRel` (`33 ...`) tasm IR variants, mirrors of
+  `AndReg16BpRel` from batch 112.
+- Extended the `Shl`/`Shr` arm of `emit_compound_assign_reg`
+  to accept a non-constant RHS: load the low byte of the RHS
+  into CL with `mov cl, byte ptr <src>`, then shift the
+  register. BCC pattern: `mov cl, byte ptr [bp-2]; shl si,
+  cl`.
+
 ### Deferred from batch 88
 
 - Probed `int a[5]; return sizeof(a);` (`582` first draft).
