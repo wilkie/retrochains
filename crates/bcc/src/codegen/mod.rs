@@ -3434,6 +3434,47 @@ impl<'a> FunctionEmitter<'a> {
             let _ = write!(self.out, "\tmov\tword ptr {lhs_lo},ax\r\n");
             return;
         }
+        // Long LHS `/= uint x` / `%= uint x` (unsigned widening).
+        // Zero-extension lets BCC push a literal 0 (`xor ax, ax;
+        // push ax`) for the widened RHS high half, then push the
+        // uint directly via `push word ptr <rhs>` without going
+        // through AX. The helper consumes the same four words off
+        // the stack as the signed path. Fixture 773.
+        if let Some(ty_lhs) = self.lhs_long_type(name)
+            && ty_lhs.is_long_like()
+            && let ExprKind::Ident(b) = &value.kind
+            && let Some(ty_rhs) = self.rhs_type_for_long_widening(&value.kind)
+            && matches!(ty_rhs, Type::UInt)
+            && matches!(op, BinOp::Div | BinOp::Mod)
+        {
+            let unsigned = ty_lhs.is_unsigned();
+            let helper = match (op, unsigned) {
+                (BinOp::Div, false) => "N_LDIV@",
+                (BinOp::Mod, false) => "N_LMOD@",
+                (BinOp::Div, true)  => "N_LUDIV@",
+                (BinOp::Mod, true)  => "N_LUMOD@",
+                _ => unreachable!(),
+            };
+            let (lhs_lo, lhs_hi) = self.long_halves_of(name);
+            let rhs_addr = if self.globals.contains(b) {
+                format!("DGROUP:_{b}")
+            } else {
+                let LocalLocation::Stack(off) = self.locals.location_of(b) else {
+                    unreachable!();
+                };
+                bp_addr(off)
+            };
+            self.out.extend_from_slice(b"\txor\tax,ax\r\n");
+            self.out.extend_from_slice(b"\tpush\tax\r\n");
+            let _ = write!(self.out, "\tpush\tword ptr {rhs_addr}\r\n");
+            let _ = write!(self.out, "\tpush\tword ptr {lhs_hi}\r\n");
+            let _ = write!(self.out, "\tpush\tword ptr {lhs_lo}\r\n");
+            let _ = write!(self.out, "\tcall\tnear ptr {helper}\r\n");
+            self.helpers.insert(helper.to_string());
+            let _ = write!(self.out, "\tmov\tword ptr {lhs_hi},dx\r\n");
+            let _ = write!(self.out, "\tmov\tword ptr {lhs_lo},ax\r\n");
+            return;
+        }
         // Long LHS shift by an int RHS — same helper-call shape as
         // `long <<= long h`, with the shift count read as `byte ptr`
         // out of the int's storage. Fixture 760.
