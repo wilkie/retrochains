@@ -5102,6 +5102,44 @@ impl<'a> FunctionEmitter<'a> {
             );
             return;
         }
+        // Char/int global-array element with a constant index — same
+        // shapes as the corresponding char-global / int-global compound
+        // patterns, just with a `DGROUP:_<a>+<K>` address. Fixture 706
+        // (`a[2] += 5` for `char a[4]` global → `mov al, _a+2; add al,
+        // 5; mov _a+2, al`).
+        if let Some(g_ty) = self.globals.type_of(array)
+            && let Some((const_off, leaf_ty)) =
+                try_const_array_offset(g_ty, indices.iter())
+        {
+            let dest = global_offset_addr(array, const_off as i32);
+            let store_byte = leaf_ty.is_char_like();
+            let Some(v) = try_const_eval(value) else {
+                panic!("non-constant rhs in global-array compound assign not yet supported (no fixture)");
+            };
+            let v_masked = if store_byte { v & 0xFF } else { v & 0xFFFF };
+            if store_byte && matches!(op, BinOp::Add | BinOp::Sub) {
+                let imm8 = if matches!(op, BinOp::Add) {
+                    (v_masked & 0xFF) as u8
+                } else {
+                    ((v_masked & 0xFF) as u8).wrapping_neg()
+                };
+                let _ = write!(self.out, "\tmov\tal,byte ptr {dest}\r\n");
+                let _ = write!(self.out, "\tadd\tal,{imm8}\r\n");
+                let _ = write!(self.out, "\tmov\tbyte ptr {dest},al\r\n");
+                return;
+            }
+            let mnemonic = match op {
+                BinOp::Add => "add",
+                BinOp::Sub => "sub",
+                BinOp::BitAnd => "and",
+                BinOp::BitOr => "or",
+                BinOp::BitXor => "xor",
+                _ => panic!("compound op `{op:?}` on global-array element not yet supported (no fixture)"),
+            };
+            let width = if store_byte { "byte" } else { "word" };
+            let _ = write!(self.out, "\t{mnemonic}\t{width} ptr {dest},{v_masked}\r\n");
+            return;
+        }
         let array_ty = self.locals.type_of(array).clone();
         let LocalLocation::Stack(base_off) = self.locals.location_of(array) else {
             panic!("array `{array}` should be stack-resident");
@@ -5718,6 +5756,23 @@ impl<'a> FunctionEmitter<'a> {
             panic!("non-constant rhs in member compound assign not yet supported (no fixture)");
         };
         let v_masked = if store_byte { v & 0xFF } else { v & 0xFFFF };
+        // Char-field arith (`+=` / `-=`) follows the BCC byte-arith-
+        // through-AL pattern (same as plain char-global, batch 122):
+        // `mov al, byte ptr <dest>; add al, K; mov byte ptr <dest>,
+        // al`. BCC canonicalizes `-=` as `add al, (256-K)`. Char-
+        // field bitwise (`&=` / `|=` / `^=`) keeps memory-direct.
+        // Fixture 704 (`g.c += 5`).
+        if store_byte && matches!(op, BinOp::Add | BinOp::Sub) {
+            let imm8 = if matches!(op, BinOp::Add) {
+                (v_masked & 0xFF) as u8
+            } else {
+                ((v_masked & 0xFF) as u8).wrapping_neg()
+            };
+            let _ = write!(self.out, "\tmov\tal,byte ptr {dest}\r\n");
+            let _ = write!(self.out, "\tadd\tal,{imm8}\r\n");
+            let _ = write!(self.out, "\tmov\tbyte ptr {dest},al\r\n");
+            return;
+        }
         let mnemonic = match op {
             BinOp::Add => "add",
             BinOp::Sub => "sub",
