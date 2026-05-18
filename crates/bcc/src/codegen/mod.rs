@@ -1825,16 +1825,13 @@ impl<'a> FunctionEmitter<'a> {
             }
         }
         if let ExprKind::Logical { op, left, right } = &cond.kind {
-            // Restricted to top-level binary `&&` / `||`. Chained or
-            // nested logical operators need a more careful target
-            // tracking (each non-final operand's short-circuit must
-            // still jump rather than fall through); we'll lift this
-            // when a fixture forces a choice.
-            assert!(
-                !matches!(left.kind, ExprKind::Logical { .. })
-                    && !matches!(right.kind, ExprKind::Logical { .. }),
-                "nested `&&`/`||` operators not yet supported (no fixture)"
-            );
+            // The recursive structure handles chained `&&`/`||`
+            // (fixtures 620/621): each non-final operand short-
+            // circuits to the outer false_slot (for `&&`) or
+            // true_slot (for `||`), and the last operand inherits
+            // the outer (true, false) target pair. The recursion is
+            // safe as long as the AST nests left-associatively
+            // (parser default for `&&` and `||` in C).
             match op {
                 LogicalOp::And => {
                     // a false → false_slot; a true → fall through to b.
@@ -1844,10 +1841,23 @@ impl<'a> FunctionEmitter<'a> {
                 }
                 LogicalOp::Or => {
                     // a true → true_slot (jump); a false → fall through to b.
-                    // b: true → fall through (caller emits true_slot label
-                    // right after this call); false → false_slot.
+                    // For the rightmost (final) operand of an Or chain
+                    // the caller will emit `true_slot`'s label right
+                    // after, so b can fall through on true; that's the
+                    // case when `false_slot.is_some()` (we're at the
+                    // top of an if-cond Or chain). For non-final Ors
+                    // (this Or is itself the LHS of an outer Or — the
+                    // chained case from fixture 621) b's true must
+                    // jump explicitly, since the caller emits more
+                    // code (the outer Or's right operand) before the
+                    // true label.
                     self.emit_cond_branch(left, true_slot, None);
-                    self.emit_cond_branch(right, None, false_slot);
+                    let (right_true, right_false) = if false_slot.is_some() {
+                        (None, false_slot)
+                    } else {
+                        (true_slot, None)
+                    };
+                    self.emit_cond_branch(right, right_true, right_false);
                 }
             }
             return;
