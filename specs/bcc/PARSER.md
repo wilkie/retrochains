@@ -1425,6 +1425,36 @@ changes:
   immediate source already handles this (both operands resolve
   to the same register-resident local — `mov ax, si; imul si`).
 
+## `while (1)` — frame-less infinite loop
+
+Fixture `599` (`while (1) { if (g >= 3) break; g++; }`) — when
+the while condition is a const non-zero, BCC elides both the
+trampoline jump and the check label, leaving just `body_label /
+body / jmp body_label`. Added a constant-cond branch at the
+top of `emit_while`: when `try_const_eval(cond)` is `Some(v)`
+with `v != 0`, emit the body with `continue_target = body_slot`
+and a trailing `jmp body_slot`. The break-target label is still
+gated on `body_has_break`.
+
+## `<stack-local> = &<global>;` — direct-store peephole
+
+Fixture `601` (`int *p; int *q; p = &g; q = &g;`) — BCC stores
+the symbol's offset directly into the stack slot with `C7 46 dd
+lo hi` + FIXUPP, saving the AX round-trip used for runtime
+addresses. Added the peephole in `emit_assign_local`: when the
+RHS is `AddressOf(global_sym)` and the destination is a non-
+char stack slot, emit `mov word ptr [bp+off], offset DGROUP:_sym`.
+A new tasm IR variant `MovBpRelOffsetGroupSym` encodes that
+shape (sibling of `MovGroupSymOffsetGroupSym` used by global-
+to-global address writes).
+
+## Free passes (batch 94)
+
+- `600` — `int a, b, c; a = 1; b = 2; c = 3; return a + b + c;`
+  (multi-decl int locals on one line): the parser already
+  handles comma-separated declarators in a single decl, and the
+  locals planner allocates each in declaration order.
+
 ### Deferred from batch 88
 
 - Probed `int a[5]; return sizeof(a);` (`582` first draft).
