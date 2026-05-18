@@ -1846,6 +1846,43 @@ LHS / pop dx / op-with-DX sequence.
   cmps): the cmp-as-branch path lowers each `==` to `cmp; je`
   and the OR-skeleton wires them together.
 
+## `cmp <reg16>, word ptr [bp+N]` — generic register-vs-stack
+
+Fixture `648` (`for (i = 0; i < n; i++)` with i in SI and n at
+`[bp-2]`) — tasm previously only had `CmpAxBpRel` and
+`CmpDxBpRel`. Added the generic `CmpReg16BpRel` IR variant
+(`3B (mod=01 reg=<r> r/m=110) dd`), which handles SI/DI/BX/CX.
+AX and DX keep their dedicated variants since the long-compare
+scaffolding references them by name.
+
+## `<stack-int> = <reg-int>++` — direct-store postinc
+
+Fixture `649` (`r = x++` with x in SI and r at `[bp-2]`) — BCC
+stores SI directly to the stack slot, then applies the
+inc/dec: `mov word ptr [bp-2], si; inc si` (6 bytes vs our 7
+through AX). The generic `emit_update_to_ax` had a byte/word
+register confusion (`mov ax, dl` is invalid x86) and emitted
+the side effect before the store. Two fixes:
+
+1. `emit_update_to_ax` now handles byte registers via `mov
+   al, <reg8>; cbw` instead of the bogus word mov.
+2. Added an Assign-statement peephole in `emit_assign_local`:
+   when the RHS is `Update { Post, target: reg-int-local }`
+   and the destination is a non-char stack slot, store the
+   pre-update register directly and then inc/dec it.
+
+(Note: the matching char variant — `r = c++` with c in DL —
+is still 2 bytes off because the store happens after the
+inc instead of before. Deferred until a fixture forces a
+deeper restructure that defers the side effect to after the
+store.)
+
+## Free passes (batch 110)
+
+- `647` — `return a * b + c;` (three-way arith, mul then add):
+  combines the batch-99 `imul <src>` path with the batch-109
+  RHS-clobbers-AX swap.
+
 ### Deferred from batch 88
 
 - Probed `int a[5]; return sizeof(a);` (`582` first draft).
