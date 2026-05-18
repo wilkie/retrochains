@@ -1959,6 +1959,29 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `int` global compound `*=` / `/=` with byte-global RHS
+
+Fixtures `815` (`g *= char c`), `816` (`g /= char c`),
+`817` (`g *= uchar c`) — extending the byte-RHS `*=` /
+`/=` arms (fixtures 796, 798) from local-only to also
+accept global RHS:
+
+- `815` — `emit_expr_to_ax` reads the char global via
+  `mov al, byte ptr DGROUP:_c; cbw`, then the same
+  push/pop shuffle (`push ax; mov ax, <lhs>; pop dx;
+  imul dx`) finishes. No new IR or encoding — the byte-
+  global load was already supported.
+- `816` — same arm with `cwd` and `idiv bx` shuffle for
+  divide.
+- `817` — uchar RHS uses `mov ah, 0` rather than `cbw`,
+  but the same push/pop dance against AX/DX/BX. Signed
+  `imul` produces the correct low-16 product.
+
+Code change: dropped `!self.globals.contains(b)` from
+the two byte-RHS Mul/Div arms. The arms already used
+`emit_expr_to_ax` (which is global-aware), so the
+restriction was purely arbitrary scoping.
+
 ## `int` global compound `+=` char-global, `%=` global
 
 Fixtures `812` (`g += char_global c`), `813` (`g += uchar_global c`),
