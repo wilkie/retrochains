@@ -1226,6 +1226,19 @@ pub enum Instr {
     OrBxDispAl { disp: i8 },
     /// `xor byte ptr [bx+disp8],al` — `30 47 dd`. Sibling.
     XorBxDispAl { disp: i8 },
+    /// `and word ptr [bx+disp8],<imm16>` — `81 67 dd lo hi`. Group-1
+    /// `/4` (AND) with mod=01 r/m=111=BX, imm16 form. BCC picks
+    /// imm16 for AND/OR/XOR even when the constant fits a signed
+    /// byte — the imm8sx peephole only applies to ADD/SUB. Const-
+    /// RHS form of int-pointer subscript bitwise compound
+    /// (fixture 875: `int *p; p[1] &= 15`).
+    AndBxDispImm16 { disp: i8, imm: u16 },
+    /// `or word ptr [bx+disp8],<imm16>` — `81 4F dd lo hi`. Group-1
+    /// `/1` sibling.
+    OrBxDispImm16 { disp: i8, imm: u16 },
+    /// `xor word ptr [bx+disp8],<imm16>` — `81 77 dd lo hi`. Group-1
+    /// `/6` sibling.
+    XorBxDispImm16 { disp: i8, imm: u16 },
     /// `add al,byte ptr [bp+<offset>]` — `02 46 dd`. ADD r8,r/m8
     /// with mod=01 reg=AL(000) r/m=110=BP+disp8. Char-array
     /// compound with non-const int RHS truncated to byte (fixture

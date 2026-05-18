@@ -6097,15 +6097,17 @@ impl<'a> FunctionEmitter<'a> {
         // Char-pointee global-pointer subscript compound: `char *p;
         // p[K] += y`. BCC uses the AL-arith-through pattern plus a
         // second `mov bx, _p` reload before the store (BCC doesn't
-        // keep BX alive across the byte arith). Fixture 865, 869.
+        // keep BX alive across the byte arith). Fixtures 865, 869
+        // (var RHS), 877 (const RHS via imm8).
         if let Some(g_ty) = self.globals.type_of(array)
             && let Some(pointee) = g_ty.pointee()
             && indices.len() == 1
             && let Some(k) = try_const_eval(&indices[0])
             && pointee.is_char_like()
             && matches!(op, BinOp::Add | BinOp::Sub)
-            && try_const_eval(value).is_none()
-            && let Some(rhs_byte) = self.rhs_byte_addr(&value.kind)
+            && let Some(rhs_text) = try_const_eval(value)
+                .map(|v| (v & 0xFF).to_string())
+                .or_else(|| self.rhs_byte_addr(&value.kind))
         {
             let stride = i32::from(pointee.size_bytes());
             let off = (k as i32).wrapping_mul(stride);
@@ -6119,7 +6121,7 @@ impl<'a> FunctionEmitter<'a> {
             let mnem = if matches!(op, BinOp::Add) { "add" } else { "sub" };
             let _ = write!(self.out, "\tmov\tbx,word ptr DGROUP:_{array}\r\n");
             let _ = write!(self.out, "\tmov\tal,byte ptr {bx_disp}\r\n");
-            let _ = write!(self.out, "\t{mnem}\tal,{rhs_byte}\r\n");
+            let _ = write!(self.out, "\t{mnem}\tal,{rhs_text}\r\n");
             let _ = write!(self.out, "\tmov\tbx,word ptr DGROUP:_{array}\r\n");
             let _ = write!(self.out, "\tmov\tbyte ptr {bx_disp},al\r\n");
             return;

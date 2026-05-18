@@ -1449,6 +1449,16 @@ fn parse_and(operands: &str, line_no: usize) -> AsmResult<Instr> {
     {
         return Ok(Instr::AndBxDispAl { disp });
     }
+    // `and word ptr [bx+disp8], <imm>` — const-RHS bitwise compound
+    // via global int-pointer subscript (fixture 875: `int *p; p[K]
+    // &= 15`). BCC uses imm16 even when value fits i8 — same
+    // asymmetry as the flat `g &= K` path.
+    if let Some(disp) = parse_word_bx_disp(lhs)
+        && disp != 0
+        && let Some(imm) = parse_imm16(rhs)
+    {
+        return Ok(Instr::AndBxDispImm16 { disp, imm: imm as u16 });
+    }
     // `and byte ptr [bp+N], imm8` — char-local-array bitwise
     // compound (fixture 720).
     if let Some(offset) = parse_byte_bp_relative(lhs) {
@@ -2453,6 +2463,13 @@ fn parse_or(operands: &str, line_no: usize) -> AsmResult<Instr> {
     {
         return Ok(Instr::OrBxDispAl { disp });
     }
+    // `or word ptr [bx+disp8], <imm>` — sibling of `AndBxDispImm16`.
+    if let Some(disp) = parse_word_bx_disp(lhs)
+        && disp != 0
+        && let Some(imm) = parse_imm16(rhs)
+    {
+        return Ok(Instr::OrBxDispImm16 { disp, imm: imm as u16 });
+    }
     // `or byte ptr [bp+N], imm8` — char-local-array `|=`.
     if let Some(offset) = parse_byte_bp_relative(lhs) {
         if let Some(imm) = parse_imm8(rhs) {
@@ -2628,6 +2645,13 @@ fn parse_xor(operands: &str, line_no: usize) -> AsmResult<Instr> {
         && disp != 0
     {
         return Ok(Instr::XorBxDispAl { disp });
+    }
+    // `xor word ptr [bx+disp8], <imm>` — sibling of `AndBxDispImm16`.
+    if let Some(disp) = parse_word_bx_disp(lhs)
+        && disp != 0
+        && let Some(imm) = parse_imm16(rhs)
+    {
+        return Ok(Instr::XorBxDispImm16 { disp, imm: imm as u16 });
     }
     // `xor byte ptr [bp+N], imm8` — char-local-array `^=`.
     if let Some(offset) = parse_byte_bp_relative(lhs) {

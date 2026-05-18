@@ -460,6 +460,9 @@ fn instr_size(instr: &Instr) -> usize {
         Instr::AndBxDispAl { .. }
         | Instr::OrBxDispAl { .. }
         | Instr::XorBxDispAl { .. } => 3,
+        Instr::AndBxDispImm16 { .. }
+        | Instr::OrBxDispImm16 { .. }
+        | Instr::XorBxDispImm16 { .. } => 5,
         Instr::AddAlBpRel { .. }
         | Instr::SubAlBpRel { .. }
         | Instr::AndAlBpRel { .. }
@@ -2072,6 +2075,31 @@ fn emit_instr(
             out.push(0x30);
             out.push(0x47);
             out.push(*disp as u8);
+        }
+        Instr::AndBxDispImm16 { disp, imm } => {
+            // `and word ptr [bx+disp8],imm16` → 81 67 dd lo hi.
+            // Fixture 875.
+            out.push(0x81);
+            out.push(0x67);
+            out.push(*disp as u8);
+            out.push((*imm & 0xFF) as u8);
+            out.push((*imm >> 8) as u8);
+        }
+        Instr::OrBxDispImm16 { disp, imm } => {
+            // `or word ptr [bx+disp8],imm16` → 81 4F dd lo hi.
+            out.push(0x81);
+            out.push(0x4F);
+            out.push(*disp as u8);
+            out.push((*imm & 0xFF) as u8);
+            out.push((*imm >> 8) as u8);
+        }
+        Instr::XorBxDispImm16 { disp, imm } => {
+            // `xor word ptr [bx+disp8],imm16` → 81 77 dd lo hi.
+            out.push(0x81);
+            out.push(0x77);
+            out.push(*disp as u8);
+            out.push((*imm & 0xFF) as u8);
+            out.push((*imm >> 8) as u8);
         }
         Instr::AddAlBpRel { offset } => {
             // `add al,byte ptr [bp+disp8]` → 02 46 dd. ADD r8,r/m8
