@@ -1282,6 +1282,34 @@ changes:
   predicate, so `!(a < b)` lowers to `cmp; jl <then>` (the not-
   taken edge falls through to the else).
 
+## `int x /= K;` / `int x %= K;` on register-resident locals
+
+Fixtures `584` (`x /= 2`) and `585` (`x %= 5`) — `emit_compound_
+assign_reg` previously panicked for `Div`/`Mod`. The pattern
+BCC uses for an int-register local x in SI is:
+
+```text
+  mov bx, K       ; divisor (DX is clobbered by `cwd`)
+  mov ax, si      ; dividend
+  cwd             ; sign-extend AX into DX:AX
+  idiv bx         ; AX=quotient, DX=remainder
+  mov si, ax      ; for /= ; or  mov si, dx  for %=
+```
+
+The new arm in `emit_compound_assign_reg` materializes the RHS
+into BX (constant or register-source), runs the `mov ax/cwd/idiv`
+prefix, and stores AX (for `/=`) or DX (for `%=`) back to the
+target register. A new tasm IR variant `IdivReg16` encodes `idiv
+<reg>` as `F7 (mod=11 /7 r/m=reg)`; previously only the bp-
+relative form was supported.
+
+## Free passes (batch 89)
+
+- `586` — `char a; char b; a=1; b=2; return a + b;` (char + char
+  return): the char-add lowering through AL/AH widening already
+  handled this; both chars promote to int per C90, the sum lands
+  in AX, and `ret` returns it.
+
 ### Deferred from batch 88
 
 - Probed `int a[5]; return sizeof(a);` (`582` first draft).
