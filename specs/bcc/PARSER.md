@@ -1959,6 +1959,43 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `long` compound `*=` / `/=` with `char` / `uchar` RHS
+
+Fixtures `785` (`g *= char c`), `786` (`g *= uchar c`),
+`787` (`g /= char c`).
+
+- `785` — signed `*= char`: same push/pop dance as the
+  long `*= int` arm (fixture 762), prefixed by the `cbw`
+  step `emit_expr_to_ax` emits for a char-typed local.
+  Extended that arm's gate from `Type::Int` to
+  `Type::Int | Type::Char`.
+- `786` — unsigned `*= uchar`: a new shape distinct from
+  the `*= uint` arm (fixture 772) because the uchar lives
+  in AX (zero-extended via `mov ah, 0`), which collides
+  with the LHS-low load. BCC inserts a `push ax;
+  ...; pop bx` shuffle:
+
+  ```
+  mov al, byte ptr <c>
+  mov ah, 0                    ; AX = uchar (zero-ext)
+  xor cx, cx                   ; CX = 0 (rhs hi)
+  mov dx, word ptr <lhs_hi>
+  push ax                      ; save widened RHS lo
+  mov ax, word ptr <lhs_lo>    ; LHS lo
+  pop bx                       ; restore as RHS lo (BX)
+  call near ptr N_LXMUL@
+  ```
+
+  `*= uint` can skip this dance because the uint is loaded
+  directly from memory into BX. `*= uchar` cannot —
+  the byte→int widening forces AX. Added a new arm in
+  `emit_compound_assign` gated on `long LHS + Type::UChar
+  RHS + BinOp::Mul`.
+- `787` — signed `/= char`: same as `*= char`, just
+  extending the existing `/= int` arm's gate to also
+  accept `Type::Char`. The push order (high DX, then low
+  AX, then LHS halves) is unchanged.
+
 ## `long` compound with `int` / `char` / `uchar` RHS
 
 Fixtures `782` (`ulong g += int x`), `783` (`long g += char c`),
