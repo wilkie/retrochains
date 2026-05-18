@@ -3571,9 +3571,15 @@ impl<'a> FunctionEmitter<'a> {
             if v8 == 1 {
                 let inc_mnem = if matches!(op, BinOp::Add) { "inc" } else { "dec" };
                 let _ = write!(self.out, "\t{inc_mnem}\tal\r\n");
+            } else if matches!(op, BinOp::Sub) {
+                // BCC canonicalizes `c -= K` (char, K != 1) as `add
+                // al, -K` rather than `sub al, K` (same length, same
+                // result mod 256). Fixture 623 (`c -= 3` → `04 FD`).
+                let neg = (0u32.wrapping_sub(v8 as u32)) & 0xFF;
+                let neg_i8 = neg as i8;
+                let _ = write!(self.out, "\tadd\tal,{neg_i8}\r\n");
             } else {
-                let mnem = if matches!(op, BinOp::Add) { "add" } else { "sub" };
-                let _ = write!(self.out, "\t{mnem}\tal,{v8}\r\n");
+                let _ = write!(self.out, "\tadd\tal,{v8}\r\n");
             }
             let _ = write!(self.out, "\tmov\t{},al\r\n", reg.name());
             return;

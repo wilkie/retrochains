@@ -390,7 +390,8 @@ fn instr_size(instr: &Instr) -> usize {
         | Instr::MovAxFromBxPtr
         | Instr::MovBxFromBxPtr
         | Instr::SubAxFromSiPtr
-        | Instr::AddAxFromSiPtr => 2,
+        | Instr::AddAxFromSiPtr
+        | Instr::AddAxFromDiPtr => 2,
         Instr::ShlReg16One { .. }
         | Instr::RclReg16One { .. }
         | Instr::SarReg16One { .. }
@@ -701,6 +702,12 @@ fn emit_instr(
             // `sub` sibling, opcode 03 (add r16,r/m16).
             out.push(0x03);
             out.push(0x04);
+        }
+        Instr::AddAxFromDiPtr => {
+            // `add ax,word ptr [di]` → 03 05. ModR/M 05 = mod=00
+            // reg=AX r/m=101 ([DI]).
+            out.push(0x03);
+            out.push(0x05);
         }
         Instr::AndAxBpRel { offset } => emit_alu_ax_bp_rel(0x23, *offset, out),
         Instr::OrAxBpRel { offset } => emit_alu_ax_bp_rel(0x0B, *offset, out),

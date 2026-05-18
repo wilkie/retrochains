@@ -294,6 +294,10 @@ pub enum Instr {
     /// sibling; opcode 03 vs 2B. Fixture 202 uses this when the
     /// commutative-swap rule can't fire because LHS isn't a constant.
     AddAxFromSiPtr,
+    /// `add ax,word ptr [di]` — 03 05. Companion to `AddAxFromSiPtr`
+    /// for the second pointer-local when BCC enregisters two ptrs
+    /// (fixture 625's `*p + *q` with p in SI and q in DI).
+    AddAxFromDiPtr,
     /// `and ax,word ptr [bp+<offset>]` — 23 46 dd
     AndAxBpRel { offset: i16 },
     /// `or ax,word ptr [bp+<offset>]` — 0B 46 dd
