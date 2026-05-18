@@ -2312,6 +2312,26 @@ impl<'a> FunctionEmitter<'a> {
             UpdateOp::Inc => "inc",
             UpdateOp::Dec => "dec",
         };
+        if reg.is_byte() {
+            // Char ++/-- in expression context: load the byte into
+            // AL, sign-extend to AX, and apply the side effect to
+            // the byte register. For postinc/dec the load goes
+            // before the inc/dec so the captured value is the pre-
+            // update one. Fixture 649 (`r = c++` with c in DL).
+            match position {
+                UpdatePosition::Pre => {
+                    let _ = write!(self.out, "\t{mnemonic}\t{}\r\n", reg.name());
+                    let _ = write!(self.out, "\tmov\tal,{}\r\n", reg.name());
+                    self.out.extend_from_slice(b"\tcbw\t\r\n");
+                }
+                UpdatePosition::Post => {
+                    let _ = write!(self.out, "\tmov\tal,{}\r\n", reg.name());
+                    self.out.extend_from_slice(b"\tcbw\t\r\n");
+                    let _ = write!(self.out, "\t{mnemonic}\t{}\r\n", reg.name());
+                }
+            }
+            return;
+        }
         match position {
             UpdatePosition::Pre => {
                 let _ = write!(self.out, "\t{mnemonic}\t{}\r\n", reg.name());
@@ -6599,6 +6619,34 @@ impl<'a> FunctionEmitter<'a> {
                         "\tmov\tword ptr {},offset DGROUP:_{sym}\r\n",
                         bp_addr(off),
                     );
+                    return;
+                }
+                // `<stack-int> = <reg-int>++` / `--` — store the
+                // pre-update register value directly to the stack
+                // slot, then apply the side effect. Skips the AX
+                // round-trip our generic emit_update_to_ax path
+                // takes. Fixture 649.
+                if !ty.is_char_like()
+                    && let ExprKind::Update {
+                        target,
+                        op,
+                        position: crate::ast::UpdatePosition::Post,
+                    } = &value.kind
+                    && self.locals.has(target)
+                    && let LocalLocation::Reg(src_reg) = self.locals.location_of(target)
+                    && !src_reg.is_byte()
+                {
+                    let _ = write!(
+                        self.out,
+                        "\tmov\tword ptr {},{}\r\n",
+                        bp_addr(off),
+                        src_reg.name(),
+                    );
+                    let mnem = match op {
+                        crate::ast::UpdateOp::Inc => "inc",
+                        crate::ast::UpdateOp::Dec => "dec",
+                    };
+                    let _ = write!(self.out, "\t{mnem}\t{}\r\n", src_reg.name());
                     return;
                 }
                 self.emit_expr_to_ax(value);

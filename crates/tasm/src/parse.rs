@@ -1511,6 +1511,17 @@ fn parse_cmp(operands: &str, line_no: usize) -> AsmResult<Instr> {
             });
         }
     }
+    // `cmp <reg16>, word ptr [bp+N]` — generic register-vs-stack
+    // compare. Fixture 648 uses this for `cmp si, word ptr [bp-2]`.
+    // AX/DX have their dedicated variants above; this catches the
+    // remaining registers.
+    if let Some(reg) = Reg16::parse(lhs) {
+        if !matches!(reg, Reg16::Ax | Reg16::Dx) {
+            if let Some(offset) = parse_bp_relative(rhs) {
+                return Ok(Instr::CmpReg16BpRel { reg, offset });
+            }
+        }
+    }
     // `cmp dx, word ptr <group>:<sym>[+N]` — low-half companion for
     // the signed long-compare 3-jump pattern (fixture 234).
     if lhs == "dx" {

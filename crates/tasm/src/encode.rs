@@ -288,6 +288,7 @@ fn instr_size(instr: &Instr) -> usize {
         | Instr::XorAxBpRel { .. }
         | Instr::CmpAxBpRel { .. }
         | Instr::CmpDxBpRel { .. }
+        | Instr::CmpReg16BpRel { .. }
         | Instr::ImulBpRel { .. }
         | Instr::IdivBpRel { .. }
         | Instr::MovReg8BpRel { .. }
@@ -720,6 +721,15 @@ fn emit_instr(
             let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
             out.push(0x3B);
             out.push(0x56);
+            out.push(disp as u8);
+        }
+        Instr::CmpReg16BpRel { reg, offset } => {
+            // `cmp <reg16>,word ptr [bp+disp8]` → 3B (mod=01
+            // reg=<r> r/m=110) dd. Fixture 648 uses this for
+            // `cmp si, word ptr [bp-2]` (`3B 76 dd`).
+            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
+            out.push(0x3B);
+            out.push(0b01_000_110 | (reg.code() << 3));
             out.push(disp as u8);
         }
         Instr::ImulBpRel { offset } => {

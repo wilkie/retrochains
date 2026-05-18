@@ -310,6 +310,14 @@ pub enum Instr {
     /// `CmpAxBpRel` for the long-vs-long 3-jump compare on stack
     /// locals (fixture 297).
     CmpDxBpRel { offset: i16 },
+    /// `cmp <reg16>,word ptr [bp+<offset>]` — `3B (mod=01 reg=<r>
+    /// r/m=110) dd`. Generic register-vs-stack-local compare for
+    /// register-resident locals tested against memory. Fixture 648
+    /// (`i < n` with i in SI and n at `[bp-2]` → `cmp si, word ptr
+    /// [bp-2]` = `3B 76 dd`). AX (`3B 46`) and DX (`3B 56`) keep
+    /// their dedicated variants since they predate this one and the
+    /// long-compare paths reference them by name.
+    CmpReg16BpRel { reg: Reg16, offset: i16 },
     /// `imul word ptr [bp+<offset>]` — F7 6E dd. Single-operand signed
     /// multiply: AX = AX * src; high half goes to DX (discarded for
     /// `int * int` returning `int`).
