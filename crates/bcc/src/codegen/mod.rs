@@ -7361,7 +7361,19 @@ fn emit_op_with_source(out: &mut Vec<u8>, op: BinOp, src: &OperandSource, unsign
             let _ = write!(out, "\tadd\tax,{}\r\n", src.word());
         }
         BinOp::Sub => {
-            let _ = write!(out, "\tsub\tax,{}\r\n", src.word());
+            // BCC canonicalizes `ax - K` (immediate RHS, K != ±1, ±2 —
+            // those go through the inc/dec peephole upstream) as
+            // `add ax, -K` (the AX-accumulator imm16 form `05 lo hi`)
+            // rather than `sub ax, K`. Same 3 bytes when K fits in
+            // imm8sx and shorter than the imm16 sub form when K
+            // exceeds i8 range. Fixture 630 (`x - 5` → `05 FB FF`).
+            if let OperandSource::Immediate(k) = src {
+                let neg = (0u32.wrapping_sub(*k)) & 0xFFFF;
+                let neg_i16 = neg as i16;
+                let _ = write!(out, "\tadd\tax,{neg_i16}\r\n");
+            } else {
+                let _ = write!(out, "\tsub\tax,{}\r\n", src.word());
+            }
         }
         BinOp::BitAnd => {
             let _ = write!(out, "\tand\tax,{}\r\n", src.word());
