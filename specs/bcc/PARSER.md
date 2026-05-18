@@ -1959,6 +1959,23 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `long` global compound `>>=` / `*=` / `%=` by variable
+
+Fixtures `740` (`g >>= h`), `741` (`g *= h`), `742` (`g %= h`).
+All three free passes off pre-existing handlers:
+
+- `740` — batch 140's `Shl|Shr` arm for long-global with
+  long-var RHS (signed picks `N_LXRSH@`, unsigned would pick
+  `N_LXURSH@`).
+- `741` — existing `BinOp::Mul` arm (line 3287) for long-
+  global compound: `N_LXMUL@` helper with both operands
+  loaded into the convention CX:BX (RHS) / DX:AX (LHS).
+- `742` — existing `BinOp::Div | BinOp::Mod` arm: `N_LMOD@`
+  helper (signed; unsigned uses `N_LUMOD@`).
+
+The long-global compound-with-long-var arc is now byte-exact
+across all five arith ops + the bitwise/shift set.
+
 ## `long` global compound `|=` / `^=` / `<<=` by variable
 
 Fixtures `737` (`g |= h`), `738` (`g ^= h`), `739` (`g <<= h`).
