@@ -1959,6 +1959,27 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `long` compound on deref, struct field, and array element
+
+Fixtures `752` (`*p += h` long pointer + long-var RHS),
+`753` (`s.x += h` stack struct long field + long-var RHS),
+`754` (`a[1] += h` long array + long-var RHS). All three
+free passes off pre-existing infrastructure:
+
+- `752` — the long-pointee `*p += y` path (slice 398) was
+  already in place; it accepts any non-constant RHS via the
+  shared `emit_long_compound_to_mem` helper.
+- `753` — the stack-resident struct long-field arm
+  (slice 389) routes through the same long-compound-to-mem
+  helper with a bp-relative destination.
+- `754` — the const-index long array path (slice 393)
+  similarly accepts variable RHS through that helper.
+
+The `emit_long_compound_to_mem` helper is unifying enough
+that these three target shapes (`[reg]`, `[bp+off]`,
+`DGROUP:_<sym>+off`) all reuse the same low/high addr-pair
+codepath without per-shape branching.
+
 ## `long` mixed-location shift and stack-LHS heavy ops
 
 Fixtures `749` (`g <<= h` global LHS + stack RHS),
