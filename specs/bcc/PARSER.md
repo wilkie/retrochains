@@ -1959,6 +1959,29 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `long` `*=` long-array; `s.x += y` int-member compound
+
+Fixtures `830` (`g += la[1]`), `831` (`g *= la[0]`),
+`832` (`s.x += y`).
+
+- `830` — free pass via batch 170's long-RHS Add arm
+  with non-zero stride offset (`_la+4` for index 1 of
+  a long array).
+- `831` — extended the new long-RHS arm to cover `Mul`
+  (and `Div`/`Mod` for completeness). Same call-helper
+  shape as `long_global *= long_global` (fixture 260):
+  `mov cx, <rhs_hi>; mov bx, <rhs_lo>; mov dx, <lhs_hi>;
+  mov ax, <lhs_lo>; call N_LXMUL@; store`. With array
+  RHS, only the address strings differ.
+- `832` — `s.x += y` (int field, non-const RHS): added
+  a new path in `emit_member_compound_assign` for non-
+  byte int fields with non-constant RHS. Pattern is
+  the same as int-global compound add (`emit_expr_to_ax;
+  <op> word ptr <dest>, ax`) — `dest` already includes
+  any field offset folded into the struct address.
+  Previously this case panicked (`non-constant rhs in
+  member compound assign not yet supported`).
+
 ## `long` global compound `+=` with array / member / long-array RHS
 
 Fixtures `827` (`g += a[1]` int array), `828` (`g += s.x`
