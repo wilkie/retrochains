@@ -1959,6 +1959,32 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `int` global compound `+=` with array / deref / member RHS
+
+Fixtures `821` (`g += a[1]`), `822` (`g += *p`),
+`823` (`g += s.x`) — extending the int-global Add/Sub/
+Bit* arm to accept non-Ident RHS shapes:
+
+- `821` — `a[1]` (constant array index): emits `mov ax,
+  word ptr DGROUP:_a+2; add word ptr DGROUP:_g, ax`.
+  emit_expr_to_ax already folds the constant index into
+  the address offset.
+- `822` — `*p` (deref of register-resident pointer):
+  emits `mov ax, word ptr [si]; add word ptr DGROUP:_g,
+  ax`. emit_expr_to_ax handles the deref of a SI-bound
+  int pointer.
+- `823` — `s.x` (global struct member): emits `mov ax,
+  word ptr DGROUP:_s; add word ptr DGROUP:_g, ax`. The
+  member offset folds into the symbol+offset form.
+
+Added a new helper `rhs_int_compound_type` that
+resolves the result type for `ArrayIndex`, `Deref`, and
+`Member` in addition to plain `Ident`. The Add/Sub/Bit*
+arm now uses this broader helper, dropping the
+`ExprKind::Ident` gate. All three patterns produce the
+same memory-direct `<op> word ptr DGROUP:_<g>, ax`
+shape, so no new IR or encoding was needed.
+
 ## `long` stack-LHS compound `+=` / `*=` with byte var
 
 Fixtures `818` (`a += char c`), `819` (`a += uchar c`),
