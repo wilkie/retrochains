@@ -2332,6 +2332,14 @@ impl<'a> FunctionEmitter<'a> {
                     self.helpers.insert("N_SPUSH@".to_string());
                 }
                 total_bytes += size;
+            } else if let Some(push_form) = self.try_direct_arg_push(arg, &arg_ty) {
+                // Memory-operand peephole: when the arg is a simple
+                // load (stack-local int/ptr, global int/ptr, or a
+                // const-index array element resolving to one of those),
+                // skip the `mov ax, m / push ax` pair and emit `push
+                // word ptr <m>` directly. Fixture 589 (`f(a[1])`).
+                let _ = write!(self.out, "\t{push_form}\r\n");
+                total_bytes += 2;
             } else {
                 self.emit_arg_into_ax(arg, arg_ty);
                 self.out.extend_from_slice(b"\tpush\tax\r\n");
@@ -2522,6 +2530,31 @@ impl<'a> FunctionEmitter<'a> {
             return;
         }
         panic!("non-constant long argument not yet supported (no fixture)");
+    }
+
+    /// Memory-operand `push` peephole: if `arg` is a simple load of a
+    /// 2-byte value that resolves to a single addressing mode (stack
+    /// local, global, or const-index array element on either), return
+    /// the `push word ptr <m>` mnemonic string. The caller substitutes
+    /// the `mov ax, <m>; push ax` pair with `push word ptr <m>`,
+    /// saving one byte. Fixture 589 (`f(a[1])` over a local int array).
+    fn try_direct_arg_push(&self, arg: &Expr, param_ty: &Type) -> Option<String> {
+        if param_ty.is_char_like() || param_ty.is_long_like() {
+            return None;
+        }
+        if let ExprKind::ArrayIndex { array, index } = &arg.kind
+            && let ExprKind::Ident(arr_name) = &array.kind
+            && self.locals.has(arr_name)
+            && let arr_ty = self.locals.type_of(arr_name).clone()
+            && arr_ty.array_elem().is_some_and(|e| e.size_bytes() == 2)
+            && let Some((const_off, _leaf)) =
+                try_const_array_offset(&arr_ty, std::iter::once(&**index))
+            && let LocalLocation::Stack(base_off) = self.locals.location_of(arr_name)
+        {
+            let src_off = base_off + i16::try_from(const_off).unwrap_or(i16::MAX);
+            return Some(format!("push\tword ptr {}", bp_addr(src_off)));
+        }
+        None
     }
 
     /// Place an argument into AX (the low byte of which is `al`) for
