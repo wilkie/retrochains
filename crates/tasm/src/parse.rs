@@ -682,6 +682,13 @@ fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
             {
                 return Ok(Instr::IncBxDisp { disp });
             }
+            // `inc byte ptr [bx+disp8]` — char-pointer K=1
+            // peephole (fixture 886).
+            if let Some(disp) = parse_byte_bx_disp(rest)
+                && disp != 0
+            {
+                return Ok(Instr::IncBxDispByte { disp });
+            }
             Err(AsmError::new(
                 line.line_no,
                 format!("inc: unsupported operand form `{rest}`"),
@@ -730,6 +737,13 @@ fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
                 && disp != 0
             {
                 return Ok(Instr::DecBxDisp { disp });
+            }
+            // `dec byte ptr [bx+disp8]` — char-pointer K=1
+            // peephole sibling.
+            if let Some(disp) = parse_byte_bx_disp(rest)
+                && disp != 0
+            {
+                return Ok(Instr::DecBxDispByte { disp });
             }
             Err(AsmError::new(
                 line.line_no,
@@ -1078,6 +1092,14 @@ fn parse_mov(operands: &str, line_no: usize) -> AsmResult<Instr> {
         && disp != 0
     {
         return Ok(Instr::MovBxDispAx { disp });
+    }
+    // `mov word ptr [bx+disp8], dx` — DX-result store (fixture
+    // 884: `int *p; p[K] %= y` writes the idiv remainder).
+    if rhs == "dx"
+        && let Some(disp) = parse_word_bx_disp(lhs)
+        && disp != 0
+    {
+        return Ok(Instr::MovBxDispDx { disp });
     }
     // LHS `word ptr <group>:<sym>[bx+disp]` — store immediate to a
     // data-segment global through bx-indexed addressing. Used by

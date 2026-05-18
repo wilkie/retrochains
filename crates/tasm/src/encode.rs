@@ -469,6 +469,7 @@ fn instr_size(instr: &Instr) -> usize {
         | Instr::OrBxPtrAx
         | Instr::XorBxPtrAx => 2,
         Instr::IncBxDisp { .. } | Instr::DecBxDisp { .. } => 3,
+        Instr::IncBxDispByte { .. } | Instr::DecBxDispByte { .. } => 3,
         Instr::ShlBxDispImm1 { .. }
         | Instr::SarBxDispImm1 { .. }
         | Instr::ShrBxDispImm1 { .. } => 3,
@@ -476,6 +477,7 @@ fn instr_size(instr: &Instr) -> usize {
         | Instr::SarBxDispCl { .. }
         | Instr::ShrBxDispCl { .. } => 3,
         Instr::MovAxBxDisp { .. } | Instr::MovBxDispAx { .. } => 3,
+        Instr::MovBxDispDx { .. } => 3,
         Instr::AddAlBpRel { .. }
         | Instr::SubAlBpRel { .. }
         | Instr::AndAlBpRel { .. }
@@ -2148,6 +2150,18 @@ fn emit_instr(
             out.push(0x4F);
             out.push(*disp as u8);
         }
+        Instr::IncBxDispByte { disp } => {
+            // `inc byte ptr [bx+disp8]` → FE 47 dd. Fixture 886.
+            out.push(0xFE);
+            out.push(0x47);
+            out.push(*disp as u8);
+        }
+        Instr::DecBxDispByte { disp } => {
+            // `dec byte ptr [bx+disp8]` → FE 4F dd.
+            out.push(0xFE);
+            out.push(0x4F);
+            out.push(*disp as u8);
+        }
         Instr::ShlBxDispImm1 { disp } => {
             // `shl word ptr [bx+disp8],1` → D1 67 dd. Fixture 878.
             out.push(0xD1);
@@ -2194,6 +2208,12 @@ fn emit_instr(
             // `mov word ptr [bx+disp8],ax` → 89 47 dd. Store sibling.
             out.push(0x89);
             out.push(0x47);
+            out.push(*disp as u8);
+        }
+        Instr::MovBxDispDx { disp } => {
+            // `mov word ptr [bx+disp8],dx` → 89 57 dd. Fixture 884.
+            out.push(0x89);
+            out.push(0x57);
             out.push(*disp as u8);
         }
         Instr::AddAlBpRel { offset } => {

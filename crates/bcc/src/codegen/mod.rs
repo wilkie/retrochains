@@ -6209,6 +6209,11 @@ impl<'a> FunctionEmitter<'a> {
             } else {
                 self.out.extend_from_slice(b"\tcwd\t\r\n");
                 let _ = write!(self.out, "\tidiv\tword ptr {}\r\n", bp_addr(boff));
+                // BCC reloads BX after `idiv` (Div and Mod) before
+                // the store-back — `idiv` clobbers more state than
+                // `imul`, so BCC doesn't keep BX alive across it.
+                // Fixture 885 (div), 884 (mod).
+                let _ = write!(self.out, "\tmov\tbx,word ptr DGROUP:_{array}\r\n");
             }
             let result_reg = if matches!(op, BinOp::Mul | BinOp::Div) { "ax" } else { "dx" };
             let _ = write!(self.out, "\tmov\tword ptr {bx_disp},{result_reg}\r\n");
@@ -6218,7 +6223,7 @@ impl<'a> FunctionEmitter<'a> {
         // p[K] += y`. BCC uses the AL-arith-through pattern plus a
         // second `mov bx, _p` reload before the store (BCC doesn't
         // keep BX alive across the byte arith). Fixtures 865, 869
-        // (var RHS), 877 (const RHS via imm8).
+        // (var RHS), 877 (const RHS via imm8), 886 (K=1 peephole).
         if let Some(g_ty) = self.globals.type_of(array)
             && let Some(pointee) = g_ty.pointee()
             && indices.len() == 1
@@ -6238,6 +6243,18 @@ impl<'a> FunctionEmitter<'a> {
             } else {
                 format!("[bx-{}]", -off)
             };
+            // K=1 memory-direct peephole: `inc|dec byte ptr [bx+
+            // K]` (3 bytes vs. 11 for the AL-through pattern).
+            // BCC applies the same shape as char-global / char-
+            // array postinc (fixtures 717, 721). Fixture 886.
+            if let Some(v) = try_const_eval(value)
+                && (v & 0xFF) == 1
+            {
+                let m = if matches!(op, BinOp::Add) { "inc" } else { "dec" };
+                let _ = write!(self.out, "\tmov\tbx,word ptr DGROUP:_{array}\r\n");
+                let _ = write!(self.out, "\t{m}\tbyte ptr {bx_disp}\r\n");
+                return;
+            }
             let mnem = if matches!(op, BinOp::Add) { "add" } else { "sub" };
             let _ = write!(self.out, "\tmov\tbx,word ptr DGROUP:_{array}\r\n");
             let _ = write!(self.out, "\tmov\tal,byte ptr {bx_disp}\r\n");

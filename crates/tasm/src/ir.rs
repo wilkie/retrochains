@@ -1258,6 +1258,12 @@ pub enum Instr {
     IncBxDisp { disp: i8 },
     /// `dec word ptr [bx+disp8]` — `FF 4F dd`. Group FF `/1` sibling.
     DecBxDisp { disp: i8 },
+    /// `inc byte ptr [bx+disp8]` — `FE 47 dd`. Group FE `/0` (INC
+    /// r/m8) with mod=01 r/m=111=BX+disp8. Used by `char *p; p[K]++`
+    /// (fixture 886) — the byte sibling of `IncBxDisp`.
+    IncBxDispByte { disp: i8 },
+    /// `dec byte ptr [bx+disp8]` — `FE 4F dd`. Group FE `/1` sibling.
+    DecBxDispByte { disp: i8 },
     /// `shl word ptr [bx+disp8],1` — `D1 67 dd`. Group-2 `/4` (SHL)
     /// 1-bit shift with mod=01 r/m=111=BX. Used by `int *p; p[K]
     /// <<= N` (fixture 878: BCC unrolls into N repetitions of the
@@ -1286,6 +1292,10 @@ pub enum Instr {
     /// `mov word ptr [bx+disp8],ax` — `89 47 dd`. MOV r/m16,r16
     /// store sibling. Used by the `imul`/`idiv` store-back step.
     MovBxDispAx { disp: i8 },
+    /// `mov word ptr [bx+disp8],dx` — `89 57 dd`. MOV r/m16,r16
+    /// with reg=DX(010) r/m=111=BX+disp8. Used by `int *p; p[K]
+    /// %= y` (fixture 884: mod result is in DX after `idiv`).
+    MovBxDispDx { disp: i8 },
     /// `add al,byte ptr [bp+<offset>]` — `02 46 dd`. ADD r8,r/m8
     /// with mod=01 reg=AL(000) r/m=110=BP+disp8. Char-array
     /// compound with non-const int RHS truncated to byte (fixture
