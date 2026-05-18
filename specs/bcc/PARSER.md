@@ -1959,6 +1959,38 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Char-pointer subscript — op-family expansion
+
+Fixtures `869` (`char *p; p[1] -= y` — SUB sibling of 865),
+`870` (`char *p; p[1] &= y` — AND), `871` (`char *p; p[1] |= y`
+— OR).
+
+869 needs no new code: the existing 865 path matches `Add|Sub`,
+and BCC keeps the same AL-arith-through + BX-reload-between-
+load-and-store shape for SUB.
+
+870/871 expose the same op-family asymmetry that char-globals
+and char-arrays already have (batches 121/122, 177): bitwise
+compound stays *memory-direct* — no AL pre-load, no BX reload.
+BCC's shape:
+
+```
+mov bx, word ptr DGROUP:_p
+mov al, byte ptr [bp-N]   ; RHS into AL
+and byte ptr [bx+K], al    ; mem-direct AND
+```
+
+Added a sibling arm gated on `pointee.is_char_like()` + `BitAnd
+| BitOr | BitXor` + non-const byte RHS via `rhs_byte_addr`. New
+IR variants `AndBxDispAl` (`20 47 dd`), `OrBxDispAl` (`08 47
+dd`), `XorBxDispAl` (`30 47 dd`) cover the `<op> byte ptr [bx+
+disp8], al` asm form (ModR/M `47` = mod=01 reg=AL(000) r/m=111=
+BX+disp8). XOR is wired up but not yet fixture-covered.
+
+The `mov al, byte ptr [bp-N]` step lands via the existing
+`MovReg8BpRel` parser arm, and the `mov bx, word ptr DGROUP:_<p>`
+goes through the existing global word-load — both unchanged.
+
 ## Pointer subscript compound — op-family siblings
 
 Fixtures `866` (`int *p; p[1] -= y`), `867` (`int *p; p[1] &= y`),
