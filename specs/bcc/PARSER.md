@@ -1959,6 +1959,24 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `int g += f()` / `+= ?:` / `+= !y` (call / ternary / not)
+
+Fixtures `854` (`g += f()` call result), `855` (`g += y ? 1 : 2`
+ternary), `856` (`g += !y` logical not).
+
+Extended `rhs_int_compound_type` to handle:
+- `ExprKind::Call` — assume int return (most common; long-
+  returning calls would need a separate path).
+- `ExprKind::Logical` — `!y`, `a && b`, `a || b` always
+  yield 0/1 in AX, int-typed.
+- `ExprKind::Ternary` — recurses into both branches; if
+  both resolve to non-long int-family, result is int.
+
+emit_expr_to_ax handles each form already (call → CALL,
+logical → conditional branch into 0/1, ternary → if-
+else pattern). The same memory-direct `add word ptr
+<g>, ax` finishes for all three.
+
 ## `int g += -y` / `+= (y+1)` / `+= y*2` (expr RHS)
 
 Fixtures `851` (`g += -y` unary neg), `852` (`g += (y+1)`
