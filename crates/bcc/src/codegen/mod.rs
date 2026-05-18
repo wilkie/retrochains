@@ -5252,11 +5252,17 @@ impl<'a> FunctionEmitter<'a> {
                 return;
             }
             let width = ptr_width(pointee);
-            let Some(v) = try_const_eval(value) else {
-                panic!("non-constant rhs in `*p = v` not yet supported (no fixture)");
-            };
-            let v_masked = if pointee.is_char_like() { v & 0xFF } else { v & 0xFFFF };
-            let _ = write!(self.out, "\tmov\t{width} ptr [{addr_reg}],{v_masked}\r\n");
+            if let Some(v) = try_const_eval(value) {
+                let v_masked = if pointee.is_char_like() { v & 0xFF } else { v & 0xFFFF };
+                let _ = write!(self.out, "\tmov\t{width} ptr [{addr_reg}],{v_masked}\r\n");
+                return;
+            }
+            // Non-constant RHS: materialize the value in AX/AL,
+            // then store through the address register. Fixture 595
+            // (`*p = *p + 1` → `mov ax, [si]; inc ax; mov [si], ax`).
+            self.emit_expr_to_ax(value);
+            let reg_name = if pointee.is_char_like() { "al" } else { "ax" };
+            let _ = write!(self.out, "\tmov\t{width} ptr [{addr_reg}],{reg_name}\r\n");
             return;
         }
         // Chain path: same prefix as the read side (fixtures 194 /
@@ -6639,8 +6645,26 @@ impl<'a> FunctionEmitter<'a> {
                     // the mnemonic (`shr` vs `sar`); everything else
                     // is signedness-agnostic at the instruction level.
                     let unsigned = self.expr_is_unsigned(left);
-                    self.emit_expr_to_ax(left);
-                    self.emit_binary_right(*op, right, unsigned);
+                    // RHS-clobbers-AX path: when the right operand is a
+                    // call, BCC evaluates RHS first (the call clobbers
+                    // AX anyway), pushes the result, then evaluates LHS
+                    // into AX and pops the saved result into DX before
+                    // applying the op. Fixture 593 (`n + sum(n-1)`).
+                    if matches!(right.kind, ExprKind::Call { .. }) {
+                        self.emit_expr_to_ax(right);
+                        self.out.extend_from_slice(b"\tpush\tax\r\n");
+                        self.emit_expr_to_ax(left);
+                        self.out.extend_from_slice(b"\tpop\tdx\r\n");
+                        emit_op_with_source(
+                            self.out,
+                            *op,
+                            &OperandSource::Reg(Reg::Dx),
+                            unsigned,
+                        );
+                    } else {
+                        self.emit_expr_to_ax(left);
+                        self.emit_binary_right(*op, right, unsigned);
+                    }
                 }
             }
             ExprKind::Unary { op, operand } => self.emit_unary(*op, operand),

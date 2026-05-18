@@ -800,6 +800,9 @@ fn parse_mov(operands: &str, line_no: usize) -> AsmResult<Instr> {
         if let Some(imm) = parse_imm16(rhs) {
             return Ok(Instr::MovSiPtrImm { imm });
         }
+        if let Some(src) = Reg16::parse(rhs) {
+            return Ok(Instr::MovSiPtrReg16 { src });
+        }
     }
     // LHS `byte ptr [si]` — byte-store through SI pointer (fixture 465).
     if lhs == "byte ptr [si]" {
