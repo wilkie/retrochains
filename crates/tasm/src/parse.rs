@@ -547,6 +547,13 @@ fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
                     offset,
                 });
             }
+            // `shl word ptr [bx+disp8], cl` — pointer-subscript
+            // variable shift (fixture 882).
+            if let Some(disp) = parse_word_bx_disp(r)
+                && disp != 0
+            {
+                return Ok(Instr::ShlBxDispCl { disp });
+            }
             let reg = Reg16::parse(r)
                 .ok_or_else(|| AsmError::new(line.line_no, format!("shl: bad register `{r}`")))?;
             Ok(Instr::ShlReg16Cl { reg })
@@ -575,6 +582,13 @@ fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
                     offset,
                 });
             }
+            // `sar word ptr [bx+disp8], cl` — pointer-subscript
+            // variable signed shift (sibling of `ShlBxDispCl`).
+            if let Some(disp) = parse_word_bx_disp(r)
+                && disp != 0
+            {
+                return Ok(Instr::SarBxDispCl { disp });
+            }
             let reg = Reg16::parse(r)
                 .ok_or_else(|| AsmError::new(line.line_no, format!("sar: bad register `{r}`")))?;
             Ok(Instr::SarReg16Cl { reg })
@@ -602,6 +616,13 @@ fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
                     symbol: sym.to_string(),
                     offset,
                 });
+            }
+            // `shr word ptr [bx+disp8], cl` — pointer-subscript
+            // variable unsigned shift sibling.
+            if let Some(disp) = parse_word_bx_disp(r)
+                && disp != 0
+            {
+                return Ok(Instr::ShrBxDispCl { disp });
             }
             let reg = Reg16::parse(r)
                 .ok_or_else(|| AsmError::new(line.line_no, format!("shr: bad register `{r}`")))?;
@@ -808,6 +829,14 @@ fn parse_mov(operands: &str, line_no: usize) -> AsmResult<Instr> {
         // for `p: long *` (fixture 309).
         if let Some(disp) = parse_word_si_disp(rhs) {
             return Ok(Instr::MovAxSiDisp { disp });
+        }
+        // `mov ax,word ptr [bx+disp8]` — load through BX at a
+        // small offset (fixture 883: `int *p; p[K] *= y` loads
+        // LHS into AX before the imul).
+        if let Some(disp) = parse_word_bx_disp(rhs)
+            && disp != 0
+        {
+            return Ok(Instr::MovAxBxDisp { disp });
         }
         // bx-indexed form first — `[bx]`/`[bx+K]` inside the symbol
         // part would otherwise get swallowed by `parse_group_symbol`.
@@ -1041,6 +1070,14 @@ fn parse_mov(operands: &str, line_no: usize) -> AsmResult<Instr> {
         && disp != 0
     {
         return Ok(Instr::MovBxDispAl { disp });
+    }
+    // LHS `word ptr [bx+disp8]` — word-store through BX pointer
+    // (fixture 883: `int *p; p[K] *= y` store-back step).
+    if rhs == "ax"
+        && let Some(disp) = parse_word_bx_disp(lhs)
+        && disp != 0
+    {
+        return Ok(Instr::MovBxDispAx { disp });
     }
     // LHS `word ptr <group>:<sym>[bx+disp]` — store immediate to a
     // data-segment global through bx-indexed addressing. Used by

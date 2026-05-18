@@ -6141,6 +6141,79 @@ impl<'a> FunctionEmitter<'a> {
             }
             return;
         }
+        // Int-pointer subscript shift compound with variable RHS:
+        // `int *p; p[K] <<= y`. BCC loads the shift count into CL
+        // via the byte-RHS path, then `<shift> word ptr [bx+K*2],
+        // cl`. Mirrors the int-global variable shift path (batch
+        // 175 / fixture 802 family). Fixture 882.
+        if let Some(g_ty) = self.globals.type_of(array)
+            && let Some(pointee) = g_ty.pointee()
+            && indices.len() == 1
+            && let Some(k) = try_const_eval(&indices[0])
+            && matches!(pointee, Type::Int | Type::UInt)
+            && matches!(op, BinOp::Shl | BinOp::Shr)
+            && try_const_eval(value).is_none()
+            && let Some(rhs_byte) = self.rhs_byte_addr(&value.kind)
+        {
+            let stride = i32::from(pointee.size_bytes());
+            let off = (k as i32).wrapping_mul(stride);
+            let bx_disp = if off == 0 {
+                "[bx]".to_owned()
+            } else if off > 0 {
+                format!("[bx+{off}]")
+            } else {
+                format!("[bx-{}]", -off)
+            };
+            let signed = !pointee.is_unsigned();
+            let mnem = match op {
+                BinOp::Shl => "shl",
+                BinOp::Shr if signed => "sar",
+                BinOp::Shr => "shr",
+                _ => unreachable!(),
+            };
+            let _ = write!(self.out, "\tmov\tbx,word ptr DGROUP:_{array}\r\n");
+            let _ = write!(self.out, "\tmov\tcl,{rhs_byte}\r\n");
+            let _ = write!(self.out, "\t{mnem}\tword ptr {bx_disp},cl\r\n");
+            return;
+        }
+        // Int-pointer subscript Mul/Div/Mod compound:
+        // `int *p; p[K] *= y` (or `/=`, `%=`). BCC loads the LHS
+        // through BX into AX, then `imul`/`idiv` against the
+        // variable RHS, then stores back. Fixture 883
+        // (`p[1] *= y`).
+        if let Some(g_ty) = self.globals.type_of(array)
+            && let Some(pointee) = g_ty.pointee()
+            && indices.len() == 1
+            && let Some(k) = try_const_eval(&indices[0])
+            && matches!(pointee, Type::Int | Type::UInt)
+            && matches!(op, BinOp::Mul | BinOp::Div | BinOp::Mod)
+            && let ExprKind::Ident(b) = &value.kind
+            && !self.globals.contains(b)
+        {
+            let stride = i32::from(pointee.size_bytes());
+            let off = (k as i32).wrapping_mul(stride);
+            let bx_disp = if off == 0 {
+                "[bx]".to_owned()
+            } else if off > 0 {
+                format!("[bx+{off}]")
+            } else {
+                format!("[bx-{}]", -off)
+            };
+            let LocalLocation::Stack(boff) = self.locals.location_of(b) else {
+                panic!("non-stack RHS in pointer-subscript Mul/Div not yet supported (no fixture)");
+            };
+            let _ = write!(self.out, "\tmov\tbx,word ptr DGROUP:_{array}\r\n");
+            let _ = write!(self.out, "\tmov\tax,word ptr {bx_disp}\r\n");
+            if matches!(op, BinOp::Mul) {
+                let _ = write!(self.out, "\timul\tword ptr {}\r\n", bp_addr(boff));
+            } else {
+                self.out.extend_from_slice(b"\tcwd\t\r\n");
+                let _ = write!(self.out, "\tidiv\tword ptr {}\r\n", bp_addr(boff));
+            }
+            let result_reg = if matches!(op, BinOp::Mul | BinOp::Div) { "ax" } else { "dx" };
+            let _ = write!(self.out, "\tmov\tword ptr {bx_disp},{result_reg}\r\n");
+            return;
+        }
         // Char-pointee global-pointer subscript compound: `char *p;
         // p[K] += y`. BCC uses the AL-arith-through pattern plus a
         // second `mov bx, _p` reload before the store (BCC doesn't

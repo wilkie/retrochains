@@ -472,6 +472,10 @@ fn instr_size(instr: &Instr) -> usize {
         Instr::ShlBxDispImm1 { .. }
         | Instr::SarBxDispImm1 { .. }
         | Instr::ShrBxDispImm1 { .. } => 3,
+        Instr::ShlBxDispCl { .. }
+        | Instr::SarBxDispCl { .. }
+        | Instr::ShrBxDispCl { .. } => 3,
+        Instr::MovAxBxDisp { .. } | Instr::MovBxDispAx { .. } => 3,
         Instr::AddAlBpRel { .. }
         | Instr::SubAlBpRel { .. }
         | Instr::AndAlBpRel { .. }
@@ -2160,6 +2164,36 @@ fn emit_instr(
             // `shr word ptr [bx+disp8],1` → D1 6F dd.
             out.push(0xD1);
             out.push(0x6F);
+            out.push(*disp as u8);
+        }
+        Instr::ShlBxDispCl { disp } => {
+            // `shl word ptr [bx+disp8],cl` → D3 67 dd. Fixture 882.
+            out.push(0xD3);
+            out.push(0x67);
+            out.push(*disp as u8);
+        }
+        Instr::SarBxDispCl { disp } => {
+            // `sar word ptr [bx+disp8],cl` → D3 7F dd.
+            out.push(0xD3);
+            out.push(0x7F);
+            out.push(*disp as u8);
+        }
+        Instr::ShrBxDispCl { disp } => {
+            // `shr word ptr [bx+disp8],cl` → D3 6F dd.
+            out.push(0xD3);
+            out.push(0x6F);
+            out.push(*disp as u8);
+        }
+        Instr::MovAxBxDisp { disp } => {
+            // `mov ax,word ptr [bx+disp8]` → 8B 47 dd. Fixture 883.
+            out.push(0x8B);
+            out.push(0x47);
+            out.push(*disp as u8);
+        }
+        Instr::MovBxDispAx { disp } => {
+            // `mov word ptr [bx+disp8],ax` → 89 47 dd. Store sibling.
+            out.push(0x89);
+            out.push(0x47);
             out.push(*disp as u8);
         }
         Instr::AddAlBpRel { offset } => {

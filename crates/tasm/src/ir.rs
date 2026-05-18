@@ -1269,6 +1269,23 @@ pub enum Instr {
     /// `shr word ptr [bx+disp8],1` — `D1 6F dd`. Group-2 `/5`
     /// (SHR) sibling.
     ShrBxDispImm1 { disp: i8 },
+    /// `shl word ptr [bx+disp8],cl` — `D3 67 dd`. Group-2 `/4`
+    /// variable-count shift via CL. Used by `int *p; p[K] <<= y`
+    /// (fixture 882).
+    ShlBxDispCl { disp: i8 },
+    /// `sar word ptr [bx+disp8],cl` — `D3 7F dd`. Group-2 `/7`
+    /// signed sibling.
+    SarBxDispCl { disp: i8 },
+    /// `shr word ptr [bx+disp8],cl` — `D3 6F dd`. Group-2 `/5`
+    /// unsigned sibling.
+    ShrBxDispCl { disp: i8 },
+    /// `mov ax,word ptr [bx+disp8]` — `8B 47 dd`. MOV r16,r/m16
+    /// with mod=01 reg=AX(000) r/m=111=BX. Used by `int *p;
+    /// p[K] *= y` (fixture 883: load LHS through BX into AX).
+    MovAxBxDisp { disp: i8 },
+    /// `mov word ptr [bx+disp8],ax` — `89 47 dd`. MOV r/m16,r16
+    /// store sibling. Used by the `imul`/`idiv` store-back step.
+    MovBxDispAx { disp: i8 },
     /// `add al,byte ptr [bp+<offset>]` — `02 46 dd`. ADD r8,r/m8
     /// with mod=01 reg=AL(000) r/m=110=BP+disp8. Char-array
     /// compound with non-const int RHS truncated to byte (fixture
