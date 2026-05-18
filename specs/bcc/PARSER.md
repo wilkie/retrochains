@@ -1959,6 +1959,34 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `long` global compound with long variable RHS
+
+Fixtures `734` (`g += h`), `735` (`g -= h`), `736` (`g &= h`)
+— long-global compound with another long global as RHS.
+
+The existing `long g <op>= b` path (line 3279) only routed
+`Mul` and `Div/Mod` (helper calls); `Add/Sub/BitAnd/BitOr/
+BitXor` fell through to the local-lookup panic. BCC's
+pattern for these:
+
+```
+mov ax, word ptr DGROUP:_h+2     ; high of h
+mov dx, word ptr DGROUP:_h        ; low of h
+<lo_op> word ptr DGROUP:_g, dx    ; e.g. add / sub / and / or / xor
+<hi_op> word ptr DGROUP:_g+2, ax  ; matching carry/borrow op for arith
+```
+
+For arith, `hi_op` is `adc`/`sbb` (carry/borrow). For
+bitwise, `hi_op` is the same as `lo_op` (no carry across
+halves). Added the branch and these tasm IR variants:
+- `SbbGroupSymAx` — `19 06 lo hi` (high-half borrow partner
+  for long-global `-=`, sibling of the existing
+  `AdcGroupSymAx`).
+- `AndGroupSymReg16` / `OrGroupSymReg16` /
+  `XorGroupSymReg16` — `21|09|31 (mod=00 reg=<r> r/m=110)
+  lo hi` (long-word siblings of the byte variants from batch
+  121).
+
 ## `char` update as function argument (stack-resident)
 
 Fixtures `731` (`f(c++)`), `732` (`f(++c)`), `733` (`f(c--)`)
