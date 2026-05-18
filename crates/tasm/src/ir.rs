@@ -310,6 +310,13 @@ pub enum Instr {
     /// with x in SI, y at [bp-2] → `and si, word ptr [bp-2]` =
     /// `23 76 dd`). AX keeps its dedicated variant above.
     AndReg16BpRel { reg: Reg16, offset: i16 },
+    /// `or <reg16>,word ptr [bp+<offset>]` — `0B (mod=01 reg=<r>
+    /// r/m=110) dd`. Sibling of `AndReg16BpRel` for compound `|=`
+    /// (fixture 656).
+    OrReg16BpRel { reg: Reg16, offset: i16 },
+    /// `xor <reg16>,word ptr [bp+<offset>]` — `33 (mod=01 reg=<r>
+    /// r/m=110) dd`. Sibling for compound `^=` (fixture 657).
+    XorReg16BpRel { reg: Reg16, offset: i16 },
     /// `cmp ax,word ptr [bp+<offset>]` — 3B 46 dd
     CmpAxBpRel { offset: i16 },
     /// `cmp dx,word ptr [bp+disp8]` — 3B 56 dd. Low-half companion to

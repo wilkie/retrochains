@@ -1886,6 +1886,17 @@ fn parse_or(operands: &str, line_no: usize) -> AsmResult<Instr> {
             return Ok(Instr::OrBpRelAx { offset });
         }
     }
+    // `or <reg16>, word ptr [bp+N]` — generic register-vs-stack
+    // bitwise OR for compound `|=` on a non-AX reg local
+    // (fixture 656). AX uses the bp-rel variant via parse_alu_ax
+    // earlier in the function (handled by the lhs == "ax" arm).
+    if let Some(reg) = Reg16::parse(lhs) {
+        if !matches!(reg, Reg16::Ax) {
+            if let Some(offset) = parse_bp_relative(rhs) {
+                return Ok(Instr::OrReg16BpRel { reg, offset });
+            }
+        }
+    }
     Err(AsmError::new(
         line_no,
         format!("or: unsupported operand form `{operands}`"),
@@ -1969,6 +1980,16 @@ fn parse_xor(operands: &str, line_no: usize) -> AsmResult<Instr> {
         }
         if rhs == "ax" {
             return Ok(Instr::XorBpRelAx { offset });
+        }
+    }
+    // `xor <reg16>, word ptr [bp+N]` — generic register-vs-stack
+    // bitwise XOR for compound `^=` on a non-AX reg local
+    // (fixture 657).
+    if let Some(reg) = Reg16::parse(lhs) {
+        if !matches!(reg, Reg16::Ax) {
+            if let Some(offset) = parse_bp_relative(rhs) {
+                return Ok(Instr::XorReg16BpRel { reg, offset });
+            }
         }
     }
     Err(AsmError::new(

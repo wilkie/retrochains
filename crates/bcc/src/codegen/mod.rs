@@ -3815,7 +3815,15 @@ impl<'a> FunctionEmitter<'a> {
                     let _ = write!(self.out, "\t{mnem}\t{},cl\r\n", reg.name());
                     return;
                 }
-                panic!("non-constant compound shift not yet supported (no fixture)");
+                // Non-constant shift count — load the low byte of
+                // the RHS into CL via the same `mov cl, byte ptr
+                // ...` shape we use for constants (but with the
+                // operand source instead of an immediate). Fixture
+                // 658 (`x <<= y` → `mov cl, byte ptr [bp-2]; shl
+                // si, cl`).
+                let src = self.resolve_operand_source(value);
+                let _ = write!(self.out, "\tmov\tcl,{}\r\n", src.byte());
+                let _ = write!(self.out, "\t{mnem}\t{},cl\r\n", reg.name());
             }
             BinOp::Div | BinOp::Mod => {
                 // `<int-reg> /= K` (or `%= K`) — load divisor into
