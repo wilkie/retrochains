@@ -1631,6 +1631,32 @@ need the init-data emitter plus the prologue-time
 d@w; push ax; mov cx, <size>; call N_SCOPY@` shape — sizable.
 Probe replaced with the char-compound-OR variant.
 
+## `c -= K` — BCC normalizes as `add al, -K`
+
+Fixture `623` (`char c; c -= 3;`) — BCC canonicalizes char
+compound subtract as `add al, -K` (encoded `04 FD` for `c -=
+3`) rather than `sub al, K` (`2C 03`). Both are 2 bytes and
+produce the same result modulo 256, but BCC picks the `add`
+form consistently. Updated the char compound `+=`/`-=` arm in
+`emit_compound_assign_reg`: for `Sub` with K != 1, emit
+`add al, -K` (negation taken as i8). Char compound `+=` keeps
+emitting `add al, K`.
+
+## `add ax, word ptr [di]` — second-pointer dereference
+
+Fixture `625` (`int *p; int *q; ... return *p + *q;`) — BCC
+enregisters the two pointer locals into SI and DI; the
+sum lowers to `mov ax, [si]; add ax, [di]`. Our tasm
+previously only had `AddAxFromSiPtr` (`03 04`). Added the DI
+companion `AddAxFromDiPtr` (`03 05`, ModR/M 05 = mod=00
+reg=AX r/m=101 ([DI])) and its parser entry.
+
+## Free passes (batch 102)
+
+- `624` — `char c; c ^= 32;` (char compound XOR with const):
+  the bitwise-compound path already emits `xor <reg8>, K`
+  (sibling of fixture 556's `c &= 31` and 622's `c |= 32`).
+
 ### Deferred from batch 88
 
 - Probed `int a[5]; return sizeof(a);` (`582` first draft).
