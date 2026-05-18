@@ -1407,6 +1407,24 @@ the immediate form was previously supported.
   existing shift-by-CL lowering (`mov cl, byte ptr [y]; sar ax,
   cl`) already byte-matches BCC.
 
+## Free passes (batch 93)
+
+Three more probes hit existing paths byte-exactly with no code
+changes:
+
+- `596` — `int *p; p = &g; return p[0];` (int-pointer subscript
+  read, K=0): the deref-through-register read path already
+  emits `mov ax, word ptr [si]`, identical to `*p` since K=0.
+- `597` — `int f(int *p) { return *p; } int main(void) { int x;
+  x = 7; return f(&x); }` (passing `&local` as an int-pointer
+  arg): `&x` forces `x` to a stack slot, `lea ax, word ptr [bp-
+  N]` materializes the address, and the existing call path
+  pushes it.
+- `598` — `int main(void) { int x; x = 5; return x * x; }`
+  (square of a local): the `imul <src>` path with a non-
+  immediate source already handles this (both operands resolve
+  to the same register-resident local — `mov ax, si; imul si`).
+
 ### Deferred from batch 88
 
 - Probed `int a[5]; return sizeof(a);` (`582` first draft).
