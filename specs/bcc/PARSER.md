@@ -1959,6 +1959,26 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `int g += (int)c` / `+= comma` / `+= (y=5)`
+
+Fixtures `857` (`g += (int)c` cast), `858` (`g += (a,b,c)`
+comma), `859` (`g += (y=5)` assign expression).
+
+Three more RHS shapes for `rhs_int_compound_type`:
+- `ExprKind::Cast` — target type determines result; accept
+  any int-family target.
+- `ExprKind::Comma` — recurse into the right (last)
+  subexpression's type. emit_expr_to_ax evaluates each
+  subexpression for side effects and leaves the last in AX.
+- `ExprKind::AssignExpr` — look up the target's type via
+  globals/locals. emit_expr_to_ax stores the value and
+  leaves it in AX.
+
+Note `y++` as RHS (post-increment) was tried and deferred:
+BCC has a peephole that uses the RHS register directly
+(`add word ptr <g>, si; inc si`) rather than routing
+through AX. Requires a separate dispatch arm.
+
 ## `int g += f()` / `+= ?:` / `+= !y` (call / ternary / not)
 
 Fixtures `854` (`g += f()` call result), `855` (`g += y ? 1 : 2`
