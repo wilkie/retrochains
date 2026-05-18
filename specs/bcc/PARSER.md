@@ -1959,6 +1959,33 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `char` compound `<<=` / `*=` / `/=` by variable
+
+Fixtures `671` (`c <<= d`), `672` (`c *= d`), `673` (`c /= d`)
+— closes out the char-compound-by-variable arc.
+
+- `<<=`: free pass — batch-117's `Shl|Shr` byte arm in
+  `emit_compound_assign_reg` already covered `Shl`.
+- `*=`: BCC uses the 8-bit single-operand `imul byte ptr <src>`
+  (`F6 /5`). Added `ImulByteBpRel` tasm IR variant. Codegen
+  emits `mov al, <reg>; imul byte ptr <src>; mov <reg>, al`.
+- `/=` / `%=`: BCC uses the 8-bit `idiv byte ptr <src>`
+  (`F6 /7`) — *not* the 16-bit `cwd; idiv bx` shape used for
+  const-RHS char div. Added `IdivByteBpRel` tasm IR. Codegen
+  emits `mov al, <reg>; cbw; idiv byte ptr <src>; mov <reg>,
+  al|ah`. The 8-bit form has no `cwd`, so DX is preserved.
+- **Allocator refinement** (`crates/bcc/src/codegen/locals.rs`):
+  `body_has_div_or_mod` previously triggered `CHAR_POOL_DIV`
+  ([CL, BL], dropping DL) for any compound `/=` / `%=`. That
+  was overly aggressive: only the 16-bit form emits `cwd`,
+  and char compound with non-constant RHS uses the 8-bit form.
+  Threaded a `char_locals: &HashSet<&str>` through the walker
+  and skip the `cwd`-emitting count when the target is in
+  that set *and* the value is non-constant
+  (`try_const_eval(value).is_none()`). With the refinement,
+  fixture 673's `c` stays in DL (matching BCC) instead of
+  being demoted to CL.
+
 ## `char` compound `|=` / `^=` / `>>=` by variable
 
 Fixtures `668` (`c |= d`), `669` (`c ^= d`), `670` (`c >>= d`)
