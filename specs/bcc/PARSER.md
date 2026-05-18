@@ -1959,6 +1959,23 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `long` compound `|=` / `^=` / `<<=` with `int` RHS
+
+Fixtures `758` (`g |= x`), `759` (`g ^= x`), `760` (`g <<= x`).
+
+- `758` / `759` — free passes off batch 146's int-RHS arm
+  (the bitwise `<op>` is mirrored to both halves with `dx`
+  carrying the sign-extension).
+- `760` — added a long-LHS-shift-by-int-RHS arm. Same
+  helper-call shape as `long <<= long h` (batch 140) but
+  the shift count is loaded from a `byte ptr` view of the
+  int storage. Note `cl` only needs the low byte regardless
+  of whether the RHS is int (16 bits) or long (32 bits), so
+  the two shapes converge once `mov cl, byte ptr <addr>`
+  fires. Accepts both `Type::Int` and `Type::UInt` for the
+  RHS — shift count signedness doesn't affect the result;
+  only the LHS signedness picks `N_LXRSH@` vs `N_LXURSH@`.
+
 ## `long` compound with `int` RHS (signed widening)
 
 Fixtures `755` (`g += x`), `756` (`g -= x`), `757` (`g &= x`)
