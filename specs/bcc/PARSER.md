@@ -1959,6 +1959,53 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Pointer subscript — long compound (ADD, SUB, AND)
+
+Fixtures `899` (`long *p; p[1] -= 5L`), `900` (`long *p; p[1]
+&= 0xFL`), `901` (`long *p; p[1] += 5L`).
+
+BCC's shape for any long compound on a global-pointer subscript:
+
+```
+mov bx, word ptr DGROUP:_p
+<lo-op> word ptr [bx+off], <lo-imm>
+<hi-op> word ptr [bx+off+2], <hi-imm>
+```
+
+Where `<lo-op>`/`<hi-op>` is one of the long-arith op pairs
+(add/adc, sub/sbb, and/and, or/or, xor/xor) — same pairings as
+the long-global compound path (fixtures 251/253/339). For
+fixture 901's `+= 5L`: `add [bx+4], 5; adc [bx+6], 0`. For
+899's `-= 5L`: `sub [bx+4], 5; sbb [bx+6], 0`. For 900's `&=
+0xFL`: `and [bx+4], 0xF; and [bx+6], 0` (no carry — both halves
+just AND independently).
+
+Added a new arm in `emit_array_compound_assign` gated on
+`gty.pointee().is_long_like()` + const single index. Emits `mov
+bx, _p` once, then routes through the existing `emit_long_
+compound_to_mem` helper with `[bx+off]` / `[bx+off+2]` as the
+address pair. The helper already handles all long op families
+(add/sub/and/or/xor and the shift compounds) — the new arm
+just provides the BX-relative address pair to feed it.
+
+Two new IR variants needed at the TASM layer for the carry/
+borrow ops: `AdcBxDispImm8` (`83 57 dd ii` — Group-1 /2) and
+`SbbBxDispImm8` (`83 5F dd ii` — Group-1 /3). The bitwise high
+halves reuse `AndBxDispImm16` (etc., from batch 186). Other op
+families (Mul/Div/Mod, shifts) defer through the helper too;
+the helper's existing `N_LXLSH@` / `N_LDIV@` etc. helper-call
+paths work unchanged since they don't address through BX
+directly.
+
+**Deferred from this batch (parser-aside):** non-const long
+RHS for the assign form (`long *p; p[K] = x` where x is a
+long lvalue) and the rvalue subscript-load (`long y; y =
+p[K]`). Both need a `long_lvalue_addr_pair`-style helper that
+emits a `mov bx, _p` prefix and returns BX-relative addresses
+— the existing helper only returns plain memory addresses
+since it's `&self`, not `&mut self`. Punted with the existing
+"not yet supported" panic messages.
+
 ## Pointer subscript — char call arg, long assign, lt compare
 
 Fixtures `896` (`char *p; f(p[1])` — char-pointer subscript as
