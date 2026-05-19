@@ -1959,6 +1959,45 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Pointer subscript — long compound (OR, XOR, SHL)
+
+Fixtures `902` (`long *p; p[1] |= 0xFL`), `903` (`long *p; p[1]
+^= 0xFL`), `904` (`long *p; p[1] <<= 1`).
+
+902/903 reuse the long-pointer subscript arm from batch 194:
+the long-compound-to-mem helper already emits `or word ptr
+[bx+lo], <lo>; or word ptr [bx+hi], <hi>` (and XOR sibling),
+which TASM was already wired to encode via `OrBxDispImm16`/
+`XorBxDispImm16` (batch 186).
+
+904 exposed a new finding: BCC reloads BX between the inline
+register-arith and the store-back for the K=1 long-shift form:
+
+```
+mov bx, _p
+mov ax, [bx+6]
+mov dx, [bx+4]
+shl dx, 1
+rcl ax, 1
+mov bx, _p          ; reload — BCC doesn't keep BX live across shl/rcl
+mov [bx+6], ax
+mov [bx+4], dx
+```
+
+Same reload-after-arith pattern as `idiv` (batch 189 fixture 885)
+and the char-pointer-AL-arith path (batch 182 fixture 865).
+`emit_long_compound_to_mem` doesn't know the operand is BX-
+relative or what symbol to reload, so the new long-pointer arm
+in `emit_array_compound_assign` special-cases `Shl|Shr` with
+`K=1` and emits the full sequence inline (load high/low into
+AX/DX, inline shift, reload BX, store) rather than routing
+through the helper. One new IR variant: `MovDxBxDisp { disp: i8 }`
+(`8B 57 dd`) for the `mov dx, word ptr [bx+disp]` low-half load.
+
+(Other helper-call paths in the same arm — shift K>1, mul,
+div, mod — would also need BX reloads if exercised on this
+shape; deferred until a probe demands them.)
+
 ## Pointer subscript — long compound (ADD, SUB, AND)
 
 Fixtures `899` (`long *p; p[1] -= 5L`), `900` (`long *p; p[1]
