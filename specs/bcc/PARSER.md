@@ -1959,6 +1959,28 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Struct/negative/pointer initializers
+
+Fixtures `911` (`struct S { int x; int y; }; struct S s = {1,
+2};` — struct initializer), `912` (`int g = -1;` — negative
+int init), `913` (`char *p = "Hi";` — char pointer initialized
+to string literal).
+
+All three already work end-to-end. Coverage notes:
+
+- 911: struct-shaped initializer list `{1, 2}` lands two `dw`
+  entries (one per field) under the struct's symbol — same
+  layout as a non-aggregate global, just stride-2 per int
+  field.
+- 912: `-1` lands as `0FFFFh` in `_DATA` — the sign-extension
+  to 16 bits is handled by the same masking already in
+  `try_const_eval`.
+- 913: `char *p = "Hi"` emits the anonymous string constant in
+  `_DATA` (`db 'H','i',0`) and a relocated word in `_DATA` for
+  `_p` itself (pointing at the string's offset). The OBJ
+  contains the FIXUPP record linking the pointer's bytes to
+  the anonymous string's offset.
+
 ## String literal init, inferred array size, long init
 
 Fixtures `908` (`char a[] = "Hi";` — string literal in char
