@@ -1959,6 +1959,30 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Enum values, function-static, union
+
+Fixtures `917` (`enum E { A = 5, B = 10, C }; return C` —
+enum with explicit values + auto-increment for `C`), `918`
+(`int main() { static int g; ... }` — function-local static),
+`919` (`union U { int i; char c[2]; }; union U u;` — basic
+union with int/char overlay).
+
+All three already work end-to-end. Coverage notes:
+
+- 917: enumerator with explicit value sets the running counter
+  (`A = 5`, `B = 10`); the next unspecified enumerator (`C`)
+  auto-increments to `11`. The return-value path emits `mov
+  ax, 11`.
+- 918: `static` inside a function body promotes the local to a
+  file-scope BSS symbol — but the symbol is *not* public.
+  Codegen treats `g` like a private global (DGROUP-relative
+  addressing), not a stack slot.
+- 919: union layout — all members share the lowest offset
+  (offset 0). `u.i = 0x4142` writes a word; `u.c[0]` reads the
+  low byte (`0x42`, returned via `mov al, 0x42` widened to AX).
+  Union shares the global's storage size = `max(member size) =
+  2 bytes`.
+
 ## 2D array init, enum, typedef
 
 Fixtures `914` (`int a[2][3] = {{1,2,3},{4,5,6}}` — 2D array
