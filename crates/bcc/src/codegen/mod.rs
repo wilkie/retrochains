@@ -2173,6 +2173,22 @@ impl<'a> FunctionEmitter<'a> {
             let _ = write!(self.out, "\tcmp\tword ptr {bx_disp},0\r\n");
             return;
         }
+        // `if (a[K])` — stack-resident array element as a zero
+        // test. Same memory-direct shape as the int-local arm
+        // below, just with a bp-relative element offset. Width
+        // follows the leaf type (byte for char arrays, word for
+        // int). Fixture 980.
+        if let ExprKind::ArrayIndex { .. } = &cond.kind
+            && let Some((name, total_off, leaf_ty)) =
+                self.try_lvalue_chain_addr(cond)
+            && self.locals.has(&name)
+            && let LocalLocation::Stack(base_off) = self.locals.location_of(&name)
+        {
+            let elem_off = base_off + i16::try_from(total_off).unwrap_or(i16::MAX);
+            let width = if leaf_ty.is_char_like() { "byte" } else { "word" };
+            let _ = write!(self.out, "\tcmp\t{width} ptr {},0\r\n", bp_addr(elem_off));
+            return;
+        }
         let ExprKind::Ident(name) = &cond.kind else {
             panic!("non-ident boolean condition not yet supported (no fixture)");
         };
