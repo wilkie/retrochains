@@ -1959,6 +1959,50 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## char-ptr subscript read, parens-add cmp, int mul then add
+
+Fixtures `1019` (`char *p; return p[1];` — char-pointer
+subscript read through SI), `1020` (`if ((a + b) > 5)` —
+explicit-parens-add in if condition), `1021` (`int r = a *
+b; return r + 1;` — mul stored to a local, then add to a
+const).
+
+1019 needed the sibling of batch 233's byte-store IR. Added
+`MovReg8ByteSiDisp { reg, disp }` for `mov reg8, byte ptr
+[si+disp]`:
+- disp=0: `8A (00_reg_100)` = 2 bytes
+- disp!=0 fitting i8: `8A (01_reg_100) dd` = 3 bytes
+Parser matches `mov reg8, byte ptr [si+disp]` via the new
+`parse_byte_si_disp` helper (added in batch 233 for the
+sibling store).
+
+1020 already worked. The `(a + b) > 5` lowers as `mov ax,
+[bp-N]; add ax, [bp-M]; cmp ax, 5` — the parentheses are
+parsed but don't affect codegen since `+` and `>` already
+have the right precedence relationship.
+
+1021 already worked end-to-end. `r = a * b; return r + 1;`
+emits `mov ax, [bp-N]; imul [bp-M]; mov [r], ax; ...
+mov ax, [r]; add ax, 1`. Each statement is independent; no
+op-ordering peephole needed since the mul result is staged
+through a stack slot.
+
+**Recorded finding (deferred):**
+
+- **Operand-reorder for commutative ops mixing complex and
+  simple operands**: probed `return a * (b + c);` and got
+  a 4-byte difference. Our codegen evaluates `(b + c)`
+  into AX first, then pushes it, then loads `a` into AX,
+  then pops to DX and `imul dx`. BCC instead evaluates
+  `(b + c)` into AX first, then uses `imul word ptr <a>`
+  directly against the memory operand — no push/pop
+  round-trip. The optimization is to recognize when a
+  binop's "complex" side has already produced AX and the
+  "simple" side is mem-direct, then use the memory-form
+  of the second op rather than swapping through DX. Sibling
+  of existing memory-direct binop arms but applied to the
+  commutative-swap case.
+
 ## char-ptr subscript byte store, int ptr subscript write, int cmp imm16
 
 Fixtures `1016` (`char a[3]; char *p = a; p[1] = 'B';` —
