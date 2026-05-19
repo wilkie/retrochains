@@ -1959,7 +1959,54 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
-## Int sub two locals, postinc in if-body, int OR char
+## Long add two locals, ternary as init, char cast from int local
+
+Fixtures `1037` (`long a = 5L; long b = 10L; long c = a +
+b; return (int)c;` — long+long stack-local arithmetic
+materialized into a third stack-local, then truncating
+cast back to int for the return), `1038` (`int x = a ?
+b : c;` — ternary expression directly initializing a
+stack int local), `1039` (`int n = 65; char c = (char)n;
+return c;` — non-constant char init from an explicit cast
+of an int local).
+
+1037 and 1038 already worked end-to-end:
+
+- 1037: the long-arith arm in `emit_init_local`'s
+  `long_like` branch covers `long c = a + b` through
+  `try_emit_long_value_to_dest`, which loads both
+  operands into DX:AX, adds with carry, and stores to
+  the destination's HI/LO slots. The `(int)c` cast just
+  loads the low word of `c` into AX. Already covered
+  by the batch-119 long-arith dest-mem path (fixture
+  357 was the canonical probe).
+- 1038: ternary in an init position lowers to a
+  `branch on cond / mov ax, then / jmp end / lab: mov
+  ax, else / end:` sequence routed through
+  `emit_expr_to_ax`. The init-local arm then stores AX
+  to the stack slot. The condition `a` (int local) is
+  a non-zero test (`cmp word ptr [bp-N], 0; je <else>`),
+  the same shape as `if (a)` from much earlier. No
+  ternary-init-specific code needed — the general
+  ternary-as-expression path already wrote AX.
+
+1039 panicked at the assert in `emit_init_local`'s
+char-init fallback: `non-constant init for non-int-like
+type Char not yet supported`. BCC's expected shape is
+the tightest possible — load the LOW byte of the int's
+slot directly with `mov al, byte ptr [bp-Nn]` (since the
+int and its low byte share the same address in the
+small-endian frame), then store with `mov byte ptr [bp-
+Nc], al`. No widen/truncate round-trip through AX.
+
+Added a peephole arm: when the char init's RHS is
+`Cast { ty: Char, operand: Ident(src) }` and `src` is a
+stack int local, emit the two-byte `mov al, byte ptr ...
+; mov byte ptr ..., al` sequence directly. Other char-
+init RHS shapes still panic until pinned (no fixture
+yet).
+
+
 
 Fixtures `1034` (`int a = 10; int b = 3; return a - b;` —
 subtraction of two stack-resident int locals as the
