@@ -426,6 +426,12 @@ pub enum Instr {
     /// `cmp <reg8>,<imm8>` — 80 F8+rc ii. Compare an 8-bit register
     /// to a constant.
     CmpReg8Imm8 { reg: Reg8, imm: u8 },
+    /// `cmp al,byte ptr [bp+<offset>]` — 3A 46 dd. CMP r8, r/m8 with
+    /// AL as reg and `[bp+disp8]` as r/m. ModR/M 46 = mod=01 reg=000
+    /// (AL) r/m=110 (BP). Used by the char-vs-char compare peephole
+    /// — both operands are bytes, so no widening needed. Fixture
+    /// 951 (`c == d`), 952 (`c < d`).
+    CmpAlBpRel { offset: i16 },
     /// `add al,<imm8>` — 04 ii. AL-specific accumulator form (2
     /// bytes vs. 3 for the generic `80 C0 ii`). Fixture 529 (char
     /// compound add through AL).

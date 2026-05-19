@@ -2125,6 +2125,13 @@ fn parse_cmp(operands: &str, line_no: usize) -> AsmResult<Instr> {
     let (lhs, rhs) = split_comma(operands).ok_or_else(|| {
         AsmError::new(line_no, format!("cmp: expected `lhs,rhs`, got {operands:?}"))
     })?;
+    // `cmp al, byte ptr [bp+N]` — char-vs-char compare peephole.
+    // Fixture 951.
+    if lhs == "al" {
+        if let Some(offset) = parse_byte_bp_relative(rhs) {
+            return Ok(Instr::CmpAlBpRel { offset });
+        }
+    }
     if lhs == "ax" {
         if let Some(offset) = parse_bp_relative(rhs) {
             return Ok(Instr::CmpAxBpRel { offset });

@@ -312,6 +312,7 @@ fn instr_size(instr: &Instr) -> usize {
         Instr::MovBpRelImm8 { .. } => 4,
         Instr::IncReg8 { .. } | Instr::DecReg8 { .. } => 2,
         Instr::CmpReg8Imm8 { .. } => 3,
+        Instr::CmpAlBpRel { .. } => 3,
         Instr::AddAlImm8 { .. }
         | Instr::SubAlImm8 { .. }
         | Instr::AndAlImm8 { .. }
@@ -1034,6 +1035,14 @@ fn emit_instr(
             out.push(0x80);
             out.push(0xF8 | reg.code());
             out.push(*imm);
+        }
+        Instr::CmpAlBpRel { offset } => {
+            // `cmp al,byte ptr [bp+disp8]` → 3A 46 dd. 3A = CMP r8,
+            // r/m8. ModR/M 46 = mod=01 reg=000(AL) r/m=110(BP).
+            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
+            out.push(0x3A);
+            out.push(0x46);
+            out.push(disp as u8);
         }
         Instr::AddAlImm8 { imm } => {
             // `add al,imm8` → 04 ii. AL-specific accumulator form

@@ -2265,6 +2265,23 @@ impl<'a> FunctionEmitter<'a> {
             let _ = write!(self.out, "\tcmp\tbyte ptr DGROUP:_{name},{rhs8}\r\n");
             return;
         }
+        // `<char-stack> <relop> <char-stack>` — byte-byte compare
+        // directly: `mov al, byte ptr <lhs>; cmp al, byte ptr <rhs>`.
+        // No `cbw` widening since both sides are already byte values
+        // and the compare's signedness is encoded in the *jump*
+        // selection (jl/jb), not the operand width. Fixtures 951, 952.
+        if let (ExprKind::Ident(ln), ExprKind::Ident(rn)) = (&left.kind, &right.kind)
+            && self.locals.has(ln)
+            && self.locals.has(rn)
+            && self.locals.type_of(ln).is_char_like()
+            && self.locals.type_of(rn).is_char_like()
+            && let LocalLocation::Stack(loff) = self.locals.location_of(ln)
+            && let LocalLocation::Stack(roff) = self.locals.location_of(rn)
+        {
+            let _ = write!(self.out, "\tmov\tal,byte ptr {}\r\n", bp_addr(loff));
+            let _ = write!(self.out, "\tcmp\tal,byte ptr {}\r\n", bp_addr(roff));
+            return;
+        }
         self.emit_expr_to_ax(left);
         // `<expr-in-ax> <relop> 0` — use `or ax, ax` (2 bytes) instead
         // of `cmp ax, 0` (3 bytes) since both set ZF/SF the same way.
