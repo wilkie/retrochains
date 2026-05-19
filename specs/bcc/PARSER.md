@@ -1959,6 +1959,26 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## 2D array init, enum, typedef
+
+Fixtures `914` (`int a[2][3] = {{1,2,3},{4,5,6}}` — 2D array
+initializer), `915` (`enum E { A, B, C }; return B` — basic
+enum), `916` (`typedef int Int; Int g` — typedef alias for int).
+
+All three already work end-to-end. Coverage notes:
+
+- 914: nested initializer list — outer braces group by row,
+  inner braces fill each row's elements. The 6 ints land in
+  `_DATA` row-major as `dw 1; dw 2; dw 3; dw 4; dw 5; dw 6`.
+  `a[1][2]` reads at offset 5*2=10 from `_a`.
+- 915: enum values are int-typed constants — the enumerator
+  `B` materializes as the literal `1` in the return path
+  (`mov ax, 1`). No enum-tag entry in the OBJ — the type info
+  is purely parser-side.
+- 916: `typedef int Int` registers `Int` in the parser's
+  typedef table; `Int g` then parses identically to `int g`.
+  No OBJ-level difference between the two.
+
 ## Struct/negative/pointer initializers
 
 Fixtures `911` (`struct S { int x; int y; }; struct S s = {1,
