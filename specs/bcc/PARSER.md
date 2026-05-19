@@ -1959,6 +1959,43 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## do-while loops, while-global-cond
+
+Fixtures `920` (do-while with accumulator: `do { s += i; i++;
+} while (i < 5)`), `921` (basic do-while: `do { i++; } while
+(i < 3)`), `922` (`int g; while (g) g = g - 1;` — while loop
+with global zero-test condition).
+
+All three already work end-to-end. Coverage notes:
+
+- 920/921: do-while emits the body label at function entry,
+  then the condition check at the bottom with a backward branch
+  if true. No new IR — same shape as while-loop, just with the
+  condition test moved to after the body.
+- 922: while condition is a global zero-test. Reuses the
+  existing `emit_zero_test` Ident-of-global arm (`cmp word ptr
+  DGROUP:_g, 0`). The decrementing assignment `g = g - 1`
+  lowers to `dec word ptr DGROUP:_g` (memory-direct INC/DEC
+  peephole on int globals).
+
+**Recorded findings from this batch (deferred):**
+
+- **Function pointer assignment** (`int (*fp)(int) = f`): when
+  RHS is a function symbol (not a local pointer), codegen
+  panics with "unknown local in codegen: f". The assignment
+  side needs an arm that recognizes the RHS as a function
+  identifier and emits `mov word ptr <fp>, offset _f`.
+- **Array-as-function-parameter** (`int f(int a[])`): parser
+  fails at byte 11 with "expected `)`, got `[`" — the
+  declarator grammar inside parameter lists doesn't yet
+  accept the `T name[]` shorthand (must use `T *name`).
+- **Array-decay-in-call-args** (`f(b)` where `b` is `int b[3]`
+  and `f` expects `int *`): codegen emits `mov ax, word ptr
+  DGROUP:_b` (value load) instead of `mov ax, offset DGROUP:_b`
+  (address). The arg-prep path needs to detect array-typed
+  args being passed to pointer params and emit the offset
+  form.
+
 ## Enum values, function-static, union
 
 Fixtures `917` (`enum E { A = 5, B = 10, C }; return C` —
