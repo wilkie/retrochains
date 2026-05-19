@@ -1959,7 +1959,22 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
-## Char compound XOR/AND var, if-and of two compares
+## If-or of compares, return neg local, int compound shr const
+
+Fixtures `1106` (`if (a > 0 || b > 0) return 1;` —
+short-circuiting `||` of two compares as if-condition,
+sibling of fixture 1104's `&&`), `1107` (`int x = 42;
+return -x;` — int return of negation of a stack local),
+`1108` (`int x = 128; x >>= 3; return x;` — int
+compound shift-right by a constant K=3).
+
+All three already worked end-to-end. 1106's `||`
+generates the same kind of short-circuit graph as `&&`
+but with the LHS-true result skipping the RHS. 1107
+emits `mov ax, [bp-N]; neg ax`. 1108 picks the K ≤ 3
+unroll: `sar word ptr [bp-N], 1` repeated three times.
+
+
 
 Fixtures `1103` (`a ^= b;` — char compound XOR-assign
 with char-var RHS), `1104` (`if (a > 0 && b > 0)
