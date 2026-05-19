@@ -1959,6 +1959,37 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Stack array elem `&=` const, elem-to-elem copy, var-RHS compound
+
+Fixtures `986` (`int a[3]; ... a[1] &= 0x0F;` — stack int
+array compound bitwise AND with const), `987` (`int a[3];
+... a[2] = a[1];` — stack array elem copied from another
+elem of the same array), `988` (`int a[3]; int x; ... a[1]
+-= x;` — stack array compound sub with var RHS).
+
+986 and 987 worked end-to-end:
+
+- 986: the existing constant-RHS path in the array compound
+  assign branch already covered the bitwise case — same
+  `and word ptr [bp+(base+K*stride)], imm` shape as the
+  add/sub arms, just with a different mnemonic.
+- 987: the rvalue ArrayIndex path (batch 220) supplies the
+  `[bp+(base+K*2)]` operand source for the RHS, and the
+  assign-array-elem const-RHS-or-AX path (batch 222) stores
+  AX into the LHS element. Two `[bp+N]` operands, one
+  16-bit value moving through AX.
+
+988 needed an extension to the array-compound-assign arm at
+emit_array_compound_assign:~6670. The arm panicked on
+non-const RHS for stack-local arrays. Added a non-const arm
+mirroring the global-pointer-subscript compound path: load
+RHS to AX, emit `<op> word ptr [bp+(base+K*stride)], ax`
+where `<op>` is `add` / `sub` / `and` / `or` / `xor` based
+on the operator. Same five-op family as the existing const-
+RHS path; char-element non-const compound still panics
+(no fixture yet). Mirrors BCC's actual shape: `mov ax,
+[bp-8]; sub word ptr [bp-4], ax`.
+
 ## Stack array elem postinc, var-RHS write, mul-const
 
 Fixtures `983` (`int a[3]; a[1]++;` — stack int array elem
