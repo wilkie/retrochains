@@ -3478,16 +3478,27 @@ impl<'a> FunctionEmitter<'a> {
                     return;
                 }
                 // Non-constant char init. Peephole for `(char)<int-
-                // local>`: load the low byte of the source slot
-                // directly with `mov al, byte ptr [bp-Nn]`, then
-                // store with `mov byte ptr [bp-Nc], al`. Fixture
-                // 1039 (`char c = (char)n;`).
+                // local>` and the bare-ident `char b = a;` (a is
+                // either char or int local): load the low byte of
+                // the source slot directly with `mov al, byte ptr
+                // [bp-Nsrc]`, then store with `mov byte ptr [bp-Nc],
+                // al`. Fixture 1039 (`char c = (char)n;`), fixture
+                // 1040 (`char b = a;`).
                 if ty.is_char_like() {
-                    if let ExprKind::Cast { ty: cast_ty, operand } = &init.kind
+                    // Unwrap an outer `(char)` cast — the byte-load
+                    // sequence is the same whether the source was
+                    // already char or was cast from int.
+                    let src_expr = if let ExprKind::Cast { ty: cast_ty, operand } = &init.kind
                         && cast_ty.is_char_like()
-                        && let ExprKind::Ident(src_name) = &operand.kind
+                    {
+                        operand.as_ref()
+                    } else {
+                        init
+                    };
+                    if let ExprKind::Ident(src_name) = &src_expr.kind
                         && self.locals.has(src_name)
-                        && self.locals.type_of(src_name).is_int_like()
+                        && (self.locals.type_of(src_name).is_char_like()
+                            || self.locals.type_of(src_name).is_int_like())
                         && let LocalLocation::Stack(src_off) = self.locals.location_of(src_name)
                     {
                         let _ = write!(
