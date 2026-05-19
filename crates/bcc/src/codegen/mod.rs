@@ -3568,12 +3568,18 @@ impl<'a> FunctionEmitter<'a> {
                             return;
                         }
                     }
-                    // Char-shift-by-const init: `char c = a >> K;` /
-                    // `char c = a << K;`. Unlike `+/-/&/|/^`, shifts
-                    // promote to int per C — BCC emits `mov al,
-                    // <a>; cbw; sar ax, K; mov <c>, al` (or `shr`
-                    // for unsigned, `shl` for left-shift). Fixture
-                    // 1082 (`char c = a >> 1;`).
+                    // Char-shift-by-const init. Two distinct shapes:
+                    //  - `<<` (left shift): byte arithmetic on AL
+                    //    directly — `shl al, 1` repeated K times.
+                    //    No widen needed because the high bits fall
+                    //    off either way. Fixture 1085.
+                    //  - `>>` (right shift): C promotes char → signed
+                    //    int before the shift, so BCC widens with
+                    //    `cbw` (signed char) or `mov ah, 0` (unsigned
+                    //    char), then always `sar` regardless of the
+                    //    operand's signedness because the promoted
+                    //    type is signed int. Fixtures 1082, 1086,
+                    //    1087.
                     if let ExprKind::BinOp { op, left, right } = &src_expr.kind
                         && matches!(op, BinOp::Shr | BinOp::Shl)
                         && let ExprKind::Ident(src_name) = &left.kind
@@ -3583,29 +3589,40 @@ impl<'a> FunctionEmitter<'a> {
                         && let Some(k) = try_const_eval(right)
                     {
                         let unsigned = self.locals.type_of(src_name).is_unsigned();
-                        let mnem = match op {
-                            BinOp::Shl => "shl",
-                            BinOp::Shr => if unsigned { "shr" } else { "sar" },
-                            _ => unreachable!(),
-                        };
                         let k_u = (k as u32) & 0x1F;
                         let _ = write!(
                             self.out,
                             "\tmov\tal,byte ptr {}\r\n",
                             bp_addr(src_off)
                         );
-                        if !unsigned {
-                            self.out.extend_from_slice(b"\tcbw\r\n");
-                        } else {
-                            self.out.extend_from_slice(b"\txor\tah,ah\r\n");
-                        }
-                        if k_u <= 3 {
-                            for _ in 0..k_u {
-                                let _ = write!(self.out, "\t{mnem}\tax,1\r\n");
+                        if matches!(op, BinOp::Shl) {
+                            // Byte-level left shift on AL only.
+                            if k_u <= 3 {
+                                for _ in 0..k_u {
+                                    self.out.extend_from_slice(b"\tshl\tal,1\r\n");
+                                }
+                            } else {
+                                let _ = write!(self.out, "\tmov\tcl,{k_u}\r\n");
+                                self.out.extend_from_slice(b"\tshl\tal,cl\r\n");
                             }
                         } else {
-                            let _ = write!(self.out, "\tmov\tcl,{k_u}\r\n");
-                            let _ = write!(self.out, "\t{mnem}\tax,cl\r\n");
+                            // Right shift: widen, then signed `sar`
+                            // (promoted-int signedness — always
+                            // signed because both `char` and `uchar`
+                            // promote to `int`).
+                            if !unsigned {
+                                self.out.extend_from_slice(b"\tcbw\r\n");
+                            } else {
+                                self.out.extend_from_slice(b"\tmov\tah,0\r\n");
+                            }
+                            if k_u <= 3 {
+                                for _ in 0..k_u {
+                                    self.out.extend_from_slice(b"\tsar\tax,1\r\n");
+                                }
+                            } else {
+                                let _ = write!(self.out, "\tmov\tcl,{k_u}\r\n");
+                                self.out.extend_from_slice(b"\tsar\tax,cl\r\n");
+                            }
                         }
                         let _ = write!(
                             self.out,
