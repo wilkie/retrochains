@@ -2044,6 +2044,28 @@ impl<'a> FunctionEmitter<'a> {
         self.locals.type_of(name).is_unsigned()
     }
 
+    /// Like `expr_is_unsigned`, but applies C's integer-promotion
+    /// rule: a `char` / `unsigned char` operand is promoted to
+    /// `int` (signed) before a shift, because `int` can hold all
+    /// char values. The shift mnemonic (`sar` vs `shr`) follows the
+    /// *promoted* type's signedness, not the operand's declared
+    /// signedness. Used only by the shift dispatch path; comparison
+    /// retains the operand's original signedness because BCC emits
+    /// unsigned jumps (`jbe`/`jae`) for uchar compares.
+    /// Fixture 1015 (`uchar c >> 2` → `sar` after promotion).
+    fn expr_shift_is_unsigned(&self, e: &Expr) -> bool {
+        let ExprKind::Ident(name) = &e.kind else { return false };
+        let ty = if let Some(gt) = self.globals.type_of(name) {
+            gt
+        } else {
+            self.locals.type_of(name)
+        };
+        if ty.is_char_like() {
+            return false;
+        }
+        ty.is_unsigned()
+    }
+
     /// Resolve a stack-resident lvalue chain (`Ident`, `ArrayIndex`
     /// with constant subscripts, `Member` via `Dot`, or any
     /// composition of those) to `(base_name, total_byte_offset,
@@ -9465,7 +9487,14 @@ impl<'a> FunctionEmitter<'a> {
                     // Shifts encode the left operand's signedness in
                     // the mnemonic (`shr` vs `sar`); everything else
                     // is signedness-agnostic at the instruction level.
-                    let unsigned = self.expr_is_unsigned(left);
+                    // Use the promoted-type variant: char/uchar both
+                    // become signed `int` before a shift, so they
+                    // get `sar`. Fixture 1015.
+                    let unsigned = if matches!(op, BinOp::Shr) {
+                        self.expr_shift_is_unsigned(left)
+                    } else {
+                        self.expr_is_unsigned(left)
+                    };
                     // RHS-clobbers-AX path: when the right operand is a
                     // call, a char ident (whose load + cbw widen
                     // clobbers AX), or a nested non-constant BinOp
