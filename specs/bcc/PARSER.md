@@ -1959,7 +1959,36 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
-## Char init from char AND, int rebind const, return neg literal
+## Char ptr sub, char cmp zero as value, for loop accumulator
+
+Fixtures `1076` (`char a[5]; char *p = a+1; char *q =
+a+4; return q - p;` — pointer subtraction on two char
+pointers, stride=1 so no divide-by-elem-size step
+needed), `1077` (`char c = 0; int r = c == 0; return
+r;` — char equality test against zero with the boolean
+result stored into an int local), `1078` (`int i, s = 0;
+for (i = 0; i < 4; i++) s = s + i;` — for-loop summing
+0+1+2+3, the canonical iteration shape).
+
+All three already worked end-to-end:
+
+- 1076: `q - p` on char pointers emits `mov ax, <q>;
+  sub ax, <p>` directly — no element-size divide
+  because `sizeof(char) == 1`. The pointer-sub-sizeof
+  divide path (deferred from batch 249) only kicks in
+  for pointers to non-byte types, which this fixture
+  avoids.
+- 1077: `c == 0` lowers via the char-vs-zero compare
+  peephole to `cmp byte ptr <c>, 0; je .L1; xor ax, ax;
+  jmp .end; .L1: mov ax, 1; .end:`, then the int init
+  stores AX. Already covered by the compare-as-value
+  arm.
+- 1078: standard for-loop emission with the typical
+  pre-cond, body, post-update, jump-back shape. `s = s
+  + i` lowers as `mov ax, [bp-Ns]; add ax, [bp-Ni];
+  mov [bp-Ns], ax`. Already covered.
+
+
 
 Fixtures `1073` (`char a = 12; char b = 10; char c = a &
 b; return c;` — char init from a `&` binop on two char
