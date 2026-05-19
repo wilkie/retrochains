@@ -665,9 +665,21 @@ impl<'a> FunctionEmitter<'a> {
             .map_or(1, |p| u32::from(p.size_bytes()));
         match self.locals.location_of(name) {
             LocalLocation::Reg(reg) if reg.is_byte() => {
-                let _ = write!(self.out, "\tmov\tal,{}\r\n", reg.name());
-                let _ = write!(self.out, "\t{mnemonic}\tal\r\n");
-                let _ = write!(self.out, "\tmov\t{},al\r\n", reg.name());
+                // Pre vs post matters for byte-register stmt-position
+                // updates even when the value is discarded:
+                //  - Pre (`++c;`): BCC stages through AL — `mov al,
+                //    <reg>; inc al; mov <reg>, al`. Fixture 047,
+                //    050–054, etc.
+                //  - Post (`c++;`): direct `inc <reg>` / `dec <reg>`.
+                //    The byte-register form is preferred without the
+                //    AL detour. Fixture 1056.
+                if matches!(position, UpdatePosition::Pre) {
+                    let _ = write!(self.out, "\tmov\tal,{}\r\n", reg.name());
+                    let _ = write!(self.out, "\t{mnemonic}\tal\r\n");
+                    let _ = write!(self.out, "\tmov\t{},al\r\n", reg.name());
+                } else {
+                    let _ = write!(self.out, "\t{mnemonic}\t{}\r\n", reg.name());
+                }
             }
             LocalLocation::Reg(reg) => {
                 // Pointer stride peephole: K=1 → `inc <reg>` (1 byte);
