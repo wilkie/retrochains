@@ -1959,6 +1959,41 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Stack array elem in rvalue + memory-direct compare
+
+Fixtures `977` (`int a[3]; ...; return a[0] + a[1];` — two
+stack-array element reads added together), `978` (`int
+a[3]; ... if (a[1] == 10) return 1;` — stack-array element
+compared to constant in an if-condition), `979` (char-array
+sibling of 978).
+
+977 needed an extension to the rvalue ArrayIndex arm in
+`resolve_operand_source`. The existing arm at line ~10037
+folds `g[K]` (global) through `try_lvalue_chain_addr` to a
+`GlobalOffset`, but panicked for any non-global base.
+Added a local-array fall-through: when the resolved root
+is a stack-resident local, compute the bp-relative elem
+offset (`base_off + total_off`) and return
+`OperandSource::Local(elem_off)`. The downstream generic
+`add ax, word ptr [bp+N]` shape already handles that
+operand source.
+
+978 / 979 exposed a missed compare peephole. BCC emits a
+single memory-direct `cmp word ptr [bp+(base+K*stride)],
+K` (3-byte form `83 7E dd ii`) where our codegen was
+materializing the LHS into AX first (`mov ax, [bp-4]; cmp
+ax, 10` — 6 bytes). Added a new arm in `emit_compare`
+that, when LHS is an `ArrayIndex` whose root resolves to
+a stack local, emits the byte- or word-form memory-direct
+compare against the constant RHS. Same shape as the
+existing int/char global memory-direct compare paths just
+with `[bp+N]` instead of `DGROUP:_<name>`.
+
+The leaf type from `try_lvalue_chain_addr` drives the
+width: `is_char_like()` picks `cmp byte ptr ...,K`,
+otherwise `cmp word ptr ...,K`. Saves 3 bytes per
+compare on int arrays and 3 bytes on char arrays.
+
 ## `&&` of two compares, int double-init, array write/read
 
 Fixtures `974` (`if (a > 0 && b > 0) return 1;` — `&&`
