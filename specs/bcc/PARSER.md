@@ -1959,7 +1959,28 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
-## If-or of compares, return neg local, int compound shr const
+## Char compound shl const, long global large init, int self double
+
+Fixtures `1109` (`char c = 3; c <<= 2; return c;` —
+char compound shift-left by constant), `1110` (`long g
+= 100000L; return (int)g;` — global long initializer
+with a value > 0xFFFF that requires both halves to
+hold non-zero bits), `1111` (`int x = 5; x = x + x;
+return x;` — int reassign from self-double).
+
+All three already worked end-to-end:
+
+- 1109: char-compound-shl-const path uses the byte-
+  width form: `shl byte ptr [bp-N], 1` repeated K
+  times.
+- 1110: long global init splits the 32-bit constant
+  into two `dw` directives at the symbol's address.
+  100000 = 0x186A0; low=0x86A0, high=0x0001.
+- 1111: `x + x` lowers as `mov ax, [bp-N]; add ax,
+  [bp-N]; mov [bp-N], ax` — no aliasing concern, both
+  loads see the same value.
+
+
 
 Fixtures `1106` (`if (a > 0 || b > 0) return 1;` —
 short-circuiting `||` of two compares as if-condition,
