@@ -1959,6 +1959,32 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Shift by 8, char struct field cmp, two-field struct add
+
+Fixtures `992` (`int x = 1; return x << 8;` — shift by a
+const that's > 3, forcing the CL load path), `993`
+(`struct S { char c; } s; if (s.c == 'A')` — char struct
+field compared to char-literal const), `994` (`struct S
+{ int a; int b; } s; return s.a + s.b;` — local struct,
+write both fields, read both and add).
+
+All three already work end-to-end:
+
+- 992: BCC unrolls shifts by 1, 2, or 3 into repeated `shl
+  ax, 1`. For shift counts > 3 (or non-power-of-2 K), it
+  emits `mov cl, K; shl ax, cl` — the CL load path. Our
+  codegen already handled both shapes; this fixture pins
+  the >3 path. Fixture 121 covered count=3.
+- 993: char struct field cmp const lowers through the same
+  byte-form memory compare as a char global: `cmp byte ptr
+  DGROUP:_s+offset, K`. The chain-based compare peephole
+  from batch 224 handles `s.c` for both byte-typed and
+  word-typed leaves.
+- 994: two struct field reads + add. BCC emits `mov ax,
+  [bp+a]; add ax, [bp+b]` (or DGROUP-relative for globals).
+  Our generic `Member` rvalue path supplies the operand
+  source, and the generic binary-op emit handles the rest.
+
 ## Ptr local cmp zero, struct field var-RHS write, member cmp
 
 Fixtures `989` (`int *p; p = &g; if (p == 0) return 1;` —
