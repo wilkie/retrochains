@@ -3513,6 +3513,49 @@ impl<'a> FunctionEmitter<'a> {
                         );
                         return;
                     }
+                    // Char binop on two char locals stored back to a
+                    // char destination: BCC stays at byte width (no
+                    // int promotion) because the result is truncated
+                    // anyway. Pattern: `mov al, byte ptr <a>; <mnem>
+                    // al, byte ptr <b>; mov byte ptr <c>, al`.
+                    // Fixture 1046 (`char c = a + b;`).
+                    if let ExprKind::BinOp { op, left, right } = &src_expr.kind
+                        && let ExprKind::Ident(lname) = &left.kind
+                        && let ExprKind::Ident(rname) = &right.kind
+                        && self.locals.has(lname)
+                        && self.locals.has(rname)
+                        && self.locals.type_of(lname).is_char_like()
+                        && self.locals.type_of(rname).is_char_like()
+                        && let LocalLocation::Stack(loff) = self.locals.location_of(lname)
+                        && let LocalLocation::Stack(roff) = self.locals.location_of(rname)
+                    {
+                        let mnem = match op {
+                            BinOp::Add => Some("add"),
+                            BinOp::Sub => Some("sub"),
+                            BinOp::BitAnd => Some("and"),
+                            BinOp::BitOr => Some("or"),
+                            BinOp::BitXor => Some("xor"),
+                            _ => None,
+                        };
+                        if let Some(mnem) = mnem {
+                            let _ = write!(
+                                self.out,
+                                "\tmov\tal,byte ptr {}\r\n",
+                                bp_addr(loff)
+                            );
+                            let _ = write!(
+                                self.out,
+                                "\t{mnem}\tal,byte ptr {}\r\n",
+                                bp_addr(roff)
+                            );
+                            let _ = write!(
+                                self.out,
+                                "\tmov\tbyte ptr {},al\r\n",
+                                bp_addr(off)
+                            );
+                            return;
+                        }
+                    }
                     panic!("non-constant char local init shape not yet supported");
                 }
                 // Pointers and ints share the int-like word-sized
@@ -9408,6 +9451,25 @@ impl<'a> FunctionEmitter<'a> {
         {
             assert!(!reg.is_byte(), "array address into a byte register is impossible");
             let _ = write!(self.out, "\tmov\t{},offset DGROUP:_{name}\r\n", reg.name());
+            return;
+        }
+        // Pointer init from `<stack-array> + K_const`: fold the
+        // element offset into the LEA's displacement. BCC pattern is
+        // `lea ax, [bp+(base + K*stride)]; mov <reg>, ax` — no
+        // runtime add of the stride. Fixture 1047 (`int *p = a + 1;`).
+        if let ExprKind::BinOp { op: BinOp::Add, left, right } = &expr.kind
+            && let ExprKind::Ident(arr_name) = &left.kind
+            && self.locals.has(arr_name)
+            && let Some(elem_ty) = self.locals.type_of(arr_name).array_elem()
+            && let Some(k) = try_const_eval(right)
+            && let LocalLocation::Stack(base_off) = self.locals.location_of(arr_name)
+        {
+            assert!(!reg.is_byte(), "array+const into a byte register is impossible");
+            let stride = i32::from(elem_ty.size_bytes());
+            let adj_off = i32::from(base_off) + (k as i32) * stride;
+            let adj_off_i16 = i16::try_from(adj_off).expect("array+const offset fits in i16");
+            let _ = write!(self.out, "\tlea\tax,word ptr {}\r\n", bp_addr(adj_off_i16));
+            let _ = write!(self.out, "\tmov\t{},ax\r\n", reg.name());
             return;
         }
         // Non-constant char init: untested. Best guess would be
