@@ -1959,6 +1959,40 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Char init, void function, const variable
+
+Fixtures `926` (`char c = 'A';` — char global with char-literal
+init), `927` (`void set5(void) { g = 5; }` — void function
+with explicit void params), `928` (`const int c = 5; return c;`
+— const-qualified int global).
+
+All three already work end-to-end. Coverage:
+
+- 926: char literal `'A'` lowers to integer `65` masked to 8
+  bits; `db 65` lands in `_DATA` under `_c`.
+- 927: void return type plus explicit `void` parameter list —
+  function body just sets globals, return path emits bare
+  `ret` (no value materialization).
+- 928: `const` qualifier on a global accepted at parser; codegen
+  treats the global the same as a plain int. The qualifier
+  doesn't change the OBJ — no read-only segment, no extra
+  attributes. Modification through a writable lvalue would be
+  UB but the codegen doesn't enforce it.
+
+**Recorded findings (deferred):**
+
+- **Array of pointers with non-const RHS** (`int *q[2]; q[0] =
+  &a`): codegen panics "non-constant rhs in constant-indexed
+  global array assign not yet supported" — the global-array
+  store path's RHS handling doesn't yet accept address-of
+  expressions for pointer-typed elements. Needs an arm in
+  `emit_array_assign`'s global-array branch.
+- **Main with command-line args** (`int main(int argc, char
+  *argv[])`): same parser failure as fixture 922's array-as-
+  parameter — `T name[]` in the parameter list panics "expected
+  `)`, got `[`". Sized arrays (`char argv[16]`) likely also
+  fail; the workaround in callers' code is `char **argv`.
+
 ## Array decay in call args, bitwise NOT, comma expr
 
 Fixtures `923` (`int b[3]; f(b)` with `int *` param — array
