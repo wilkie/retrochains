@@ -1959,6 +1959,28 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Array/global initializers, static linkage
+
+Fixtures `905` (`int a[3] = {1, 2, 3};` — array initializer
+list), `906` (`int g = 42;` — int global with initializer),
+`907` (`static int g;` — file-scope static).
+
+All three already work end-to-end. The probes lock in byte-
+exact regression coverage for parser-level shapes that had been
+implemented in earlier batches but lacked explicit fixtures:
+
+- Array initializer lists land entries in `_DATA` as a sequence
+  of `dw K` lines under the symbol label (vs `_BSS` for
+  uninitialized arrays). Parser handles the `{ K0, K1, ... }`
+  shape inside `parse_initializer`.
+- Single-int initializer (`int g = 42;`) puts `_g` in `_DATA`
+  with a single `dw 42`.
+- `static` storage class produces a non-public symbol in the
+  OBJ — no `public _g` line, but the symbol is otherwise
+  identical (`_g` in `_BSS`). The `LEDATA`/`LIDATA` placement
+  and `_DATA`/`_BSS` segment selection don't change with
+  `static`; only the publics directory does.
+
 ## Pointer subscript — long compound (OR, XOR, SHL)
 
 Fixtures `902` (`long *p; p[1] |= 0xFL`), `903` (`long *p; p[1]
