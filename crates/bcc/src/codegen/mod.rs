@@ -9264,6 +9264,49 @@ impl<'a> FunctionEmitter<'a> {
                         return;
                     }
                 }
+                // `char b = s.c;` / `b = s.c;` — char-to-char copy
+                // through a struct-member load. Skip the `cbw`-widen
+                // that `emit_member_to_ax` would add for the int-
+                // promotion path, since the destination is char and
+                // the byte store truncates back anyway. Mirrors the
+                // char-array-elem peephole just above. Two shapes:
+                //   - global struct source: `mov al, byte ptr DGROUP:
+                //     _s+K`.
+                //   - local struct source: `mov al, byte ptr [bp+K]`.
+                // Fixture 1115.
+                if ty.is_char_like()
+                    && let ExprKind::Member { base, field, kind: crate::ast::MemberKind::Dot } =
+                        &value.kind
+                    && let Some((src_name, total_off, leaf_ty)) =
+                        self.try_member_dot_chain(base, field)
+                    && leaf_ty.is_char_like()
+                {
+                    if self.globals.contains(&src_name) {
+                        let addr = if total_off == 0 {
+                            format!("DGROUP:_{src_name}")
+                        } else {
+                            format!("DGROUP:_{src_name}+{total_off}")
+                        };
+                        let _ = write!(self.out, "\tmov\tal,byte ptr {addr}\r\n");
+                        let _ = write!(self.out, "\tmov\tbyte ptr {},al\r\n", bp_addr(off));
+                        return;
+                    }
+                    if let LocalLocation::Stack(base_bp) = self.locals.location_of(&src_name) {
+                        let src_off =
+                            base_bp + i16::try_from(total_off).unwrap_or(i16::MAX);
+                        let _ = write!(
+                            self.out,
+                            "\tmov\tal,byte ptr {}\r\n",
+                            bp_addr(src_off)
+                        );
+                        let _ = write!(
+                            self.out,
+                            "\tmov\tbyte ptr {},al\r\n",
+                            bp_addr(off)
+                        );
+                        return;
+                    }
+                }
                 // `<stack-local> = &<global>;` — store the symbol's
                 // offset directly into the stack slot. BCC emits this
                 // as `C7 46 dd lo hi` with a FIXUPP, saving the
