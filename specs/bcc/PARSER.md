@@ -1959,7 +1959,21 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
-## Char assign from char member, int compound add var, int return OR locals
+## Char compound shr const, global int compound add const, bitwise NOT global
+
+Fixtures `1118` (`char c = 16; c >>= 2; return c;` —
+char compound shift-right by constant), `1119` (`int g
+= 10; g += 7; return g;` — global int compound add by
+imm8 constant), `1120` (`int g = 7; return ~g;` —
+bitwise NOT applied to a global int).
+
+All three already worked end-to-end. 1118 follows the
+byte-width compound-shift path with K=2 picking the
+two-instruction unroll. 1119 uses the memory-direct
+form `add word ptr DGROUP:_g, 7`. 1120 emits `mov ax,
+word ptr DGROUP:_g; not ax`.
+
+
 
 Fixtures `1115` (`struct S { char c; }; s.c = 'Z'; b
 = s.c; return b;` — char local assigned from a char
