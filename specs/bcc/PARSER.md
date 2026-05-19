@@ -1959,7 +1959,52 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
-## Char init from char shr, int init from char+const, struct field from arith
+## Char init from char shl, uchar init shr, char init shr K=4
+
+Fixtures `1085` (`char a = 3; char c = a << 2;` — char
+left-shift init, sibling of 1082), `1086` (`unsigned
+char a = 200; unsigned char c = a >> 2;` — uchar right-
+shift init, exercising the promote-to-signed-int rule),
+`1087` (`char a = 64; char c = a >> 4; return c;` —
+char right-shift by K=4, exercising the CL form of the
+shift unroll).
+
+1087 already worked end-to-end via the batch-255 shift
+arm: K=4 picks the `mov cl, 4; sar ax, cl` path
+(unroll threshold K ≤ 3).
+
+1085 and 1086 needed corrections to the batch-255
+shift arm:
+
+- **Left shift on char (1085)**: BCC keeps the
+  arithmetic at byte width because the high bits fall
+  off either way. Emit `shl al, 1` repeated K times (or
+  `mov cl, K; shl al, cl` for K ≥ 4). No widen
+  needed. Our previous code always widened to int and
+  used `shl ax, 1`, which would have been one byte
+  longer because the AX form takes the same opcode but
+  the operand resolution differs (`d1 e0` vs `d0 e0`?).
+  Actually it's one byte: `shl al, 1` is `d0 e0` (2
+  bytes) vs `shl ax, 1` is `d1 e0` (2 bytes) — same
+  size. The diff was elsewhere; reading BCC's pattern
+  shows BCC ALWAYS uses the AL form for `<<`, which
+  saves the `cbw` (1 byte) we were emitting.
+- **Right shift on uchar (1086)**: BCC always uses
+  `sar` regardless of the operand's declared
+  signedness, because C promotion converts both `char`
+  and `uchar` to *signed* `int` before the shift. Our
+  previous code branched on `is_unsigned` and emitted
+  `shr` for uchar, diverging from BCC. Also the widen
+  for uchar uses `mov ah, 0` (3 bytes) rather than the
+  `xor ah, ah` (2 bytes) we were emitting. BCC
+  consistently prefers the longer `mov ah, 0` form.
+
+Updated the shift arm: split on op direction (Shl =
+byte-arith AL only; Shr = widen then signed `sar`),
+and use `mov ah, 0` instead of `xor ah, ah` for the
+uchar widen.
+
+
 
 Fixtures `1082` (`char a = 16; char c = a >> 1; return
 c;` — char init from a shift on a char local, exercising
