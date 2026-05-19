@@ -1959,6 +1959,30 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `<` / `>` as value, bitwise OR as value
+
+Fixtures `935` (`int x = 3; int y = 5; return x < y;` — `<`
+comparison as a return value), `936` (`return x > y;` — `>`
+as value), `937` (`int x = 0x12; int y = 0x34; return x | y;`
+— bitwise OR as value).
+
+All three already work end-to-end. The set fills out the
+remaining int-comparison and integer-bitwise shapes that
+hadn't yet been captured in OBJ form — `<=` and `>=` already
+had OBJ fixtures (578 / 579) and `<=` as-value got added in
+batch 205 (934). The signed-compare materialization is the
+same six-instruction shape across `<` / `>` / `<=` / `>=`:
+`cmp; jCC .true; xor ax, ax; jmp short .end; .true: mov ax,
+1; .end:`, where `CC` matches the source operator (`jl` for
+`<`, `jg` for `>`, etc.).
+
+937 covers the third bitwise-as-value sibling — `&` was
+already tested via `unsigned char` / `int` arms, `^` via the
+ternary path, but the `|` rvalue had no direct OBJ
+counterpart. BCC lowers `x | y` to `mov ax, [bp-N]; or ax,
+[bp-M]` for stack-resident locals, which our generic
+binary-op path already produces.
+
 ## Struct-array field rvalue, nested struct, `<=` as value
 
 Fixtures `932` (`struct S { int n; int a[3]; } s; s.n = 7;
