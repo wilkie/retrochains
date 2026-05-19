@@ -1959,6 +1959,36 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Int mul by 16, int div by var, int store through ptr
+
+Fixtures `1187` (`int a=5; return a*16;` — int mul
+by a power-of-two larger than 8, exercising the
+unroll-vs-CL threshold), `1188` (`int a=20; int
+b=4; return a/b;` — int divide by a variable),
+`1189` (`int a=1; int *p = &a; *p = 99; return a;`
+— store through a pointer to a local).
+
+1188 and 1189 already worked. 1188 uses the
+standard `cwd; idiv <mem>` form against the memory
+operand — variable RHS goes through the existing
+`emit_op_with_source` mem-form. 1189 emits `lea bx,
+[bp-Na]; mov [bp-Np], bx` for the address-of init,
+then `mov bx, [bp-Np]; mov word ptr [bx], 99` for
+the deref-store.
+
+1187 caught a real codegen bug: our mul-by-pow2
+path in `emit_op_with_source` always unrolled to
+N×`shl ax, 1`, ignoring the K≤3 unroll threshold
+that already governs explicit-shift expressions
+(see fixtures 110/627). For `*16` (K=4 shifts)
+this produced 8 bytes (4× `shl ax, 1`) vs BCC's
+4 bytes (`mov cl, 4; shl ax, cl`). Fixed by mirroring
+the shift threshold inside the mul-pow2 arm: shifts
+≤ 3 keep the unroll, shifts ≥ 4 emit the CL form.
+Spot-checked the existing mul-pow2 fixtures (1137
+`*8`, 283 `long*2`, 550, 592, 602, 645, 853) — all
+still match since their K values are ≤ 3 shifts.
+
 ## Int add three distinct, int multi-init stmt, char ge-cmp in if
 
 Fixtures `1184` (`int x=1; int y=2; int z=4;
