@@ -1959,7 +1959,34 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
-## Char init from array elem, struct init via field assign, int-ptr init+deref
+## return sizeof int, return sizeof struct, long sub two locals
+
+Fixtures `1067` (`return sizeof(int);` — bare-type
+sizeof in return position, must fold to `2`), `1068`
+(`struct S { int x; int y; char c; }; return sizeof
+(struct S);` — struct-type sizeof exercising the layout
+calculator and any padding it would compute), `1069`
+(`long a = 100L; long b = 30L; long c = a - b; return
+(int)c;` — long subtraction across two stack longs,
+sibling of fixture 1037's add form).
+
+All three already worked end-to-end:
+
+- 1067: `sizeof(int)` constant-folds to 2 at parse
+  time, so `return sizeof(int)` is identical to
+  `return 2`. The return-int path emits `mov ax, 2`.
+- 1068: the struct layout calculator (size+align)
+  computes 6 (int + int + char rounded to 6 for
+  alignment? or padded?). Whatever the value, it
+  constant-folds at the sizeof site and the return
+  path stores the constant in AX.
+- 1069: the long-sub-with-borrow path emits `mov ax,
+  [a+2]; mov dx, [a]; sub dx, [b]; sbb ax, [b+2]` (or
+  similar HI/LO ordering), then stores DX:AX to c's
+  stack slots. Already covered by batch 119's general
+  long-arith path.
+
+
 
 Fixtures `1064` (`char a[3]; char c; a[0] = 'X'; c =
 a[0]; return c;` — char local read-assigned from a stack
