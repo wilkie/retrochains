@@ -1959,6 +1959,38 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Int ge-cmp as int, int chained sub const, int shr by var
+
+Fixtures `1160` (`int a=5; int b=3; int r = a>=b;
+return r;` — signed `>=` materialized to int 0/1),
+`1161` (`int a=10; int b=3; int x = a-b-1;` —
+left-associative `a-b-1` chained subtraction), `1162`
+(`int a=32; int b=2; int x = a>>b;` — int signed
+right-shift by a variable count via CL).
+
+All three already worked end-to-end. 1160 reuses the
+batch-280 boolean-materialization sequence with the
+signed `jge` arm. 1161 emits `mov ax, [bp-Na]; sub
+ax, [bp-Nb]; sub ax, 1` then stores AX into the local
+slot. 1162 loads `b` into CL via `mov cx, [bp-Nb]`
+(BCC widens through CX) and emits `sar ax, cl` against
+the AX-loaded `a`.
+
+### Deferred from batch 281
+
+- Probed `char c = 7; char b = c--; return b;` (`1161`
+  first draft). Our char-local-init dispatch panics
+  with `non-constant char local init shape not yet
+  supported` for the `Postfix(Dec)` source-expr kind —
+  it currently recognizes only `Ident`, the `(char)`-
+  cast peephole, char-binop arith, char-shift-by-const,
+  and Dot-Member chains. BCC for this shape also
+  enregisters `c` (it lives in DL across the function,
+  not on the stack) which would need locals-planner
+  cooperation, not just a new init arm. Probe replaced
+  with the int chained-sub variant until we tackle
+  byte-register enregistration.
+
 ## Int OR of shift and val, while counter to three, char eq zero as int
 
 Fixtures `1157` (`int a=3; int b=5; int x=(a<<4)|b;
