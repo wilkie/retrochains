@@ -1959,7 +1959,39 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
-## Int return after compound add, parens add then mul, comma two assigns
+## Char assign from char member, int compound add var, int return OR locals
+
+Fixtures `1115` (`struct S { char c; }; s.c = 'Z'; b
+= s.c; return b;` — char local assigned from a char
+struct member, closing the deferred char-from-Member
+finding from batch 257), `1116` (`int x = 10; int y =
+7; x += y; return x;` — int compound add-assign with
+variable RHS), `1117` (`int a = 0x10; int b = 0x04;
+return a | b;` — int return from bitwise OR of two
+stack locals).
+
+1116 and 1117 already worked end-to-end. 1116 uses
+the standard int compound add path (`add word ptr [bp-
+N], <src>`); 1117 lowers `a | b` as `mov ax, [bp-Na];
+or ax, [bp-Nb]`.
+
+1115 was the deferred char-assign-from-Member case.
+Our fall-through routed through `emit_expr_to_ax`
+which calls `emit_member_to_ax`, which always widens
+the byte load to int via `cbw` (because the int-
+promotion path expects it). For a char destination
+that widen is wasted — the byte store truncates back
+anyway.
+
+Added a peephole in `emit_assign_local`'s char path:
+when the RHS is a `Dot`-kind `Member` whose leaf type
+is char-like (resolved via `try_member_dot_chain`),
+emit `mov al, byte ptr <field-addr>; mov byte ptr
+<dest>, al` directly without the cbw. Both global and
+stack struct sources are handled. Sibling of the
+existing char-array-elem peephole.
+
+
 
 Fixtures `1112` (`int x = 3; x += 5; return x;` — int
 compound add followed by a return that picks up the
