@@ -9554,6 +9554,27 @@ impl<'a> FunctionEmitter<'a> {
                     let _ = write!(self.out, "\tmov\tbyte ptr {},al\r\n", bp_addr(off));
                     return;
                 }
+                // Reg-to-mem copy: `<stack-local> = <reg-local>` —
+                // direct `mov word ptr [bp-N], <reg>` without the AX
+                // round-trip. Restricted to plain int on both sides
+                // (no pointers/arrays/chars/longs). Mirror of the
+                // mem-to-reg peephole in `emit_store_reg`. Fixture
+                // 1145 (`t = a;` with a in SI, t on stack).
+                if matches!(ty, Type::Int)
+                    && let ExprKind::Ident(src_name) = &value.kind
+                    && self.locals.has(src_name)
+                    && let LocalLocation::Reg(src_reg) = self.locals.location_of(src_name)
+                    && !src_reg.is_byte()
+                    && matches!(self.locals.type_of(src_name), Type::Int)
+                {
+                    let _ = write!(
+                        self.out,
+                        "\tmov\tword ptr {},{}\r\n",
+                        bp_addr(off),
+                        src_reg.name()
+                    );
+                    return;
+                }
                 self.emit_expr_to_ax(value);
                 if ty.is_char_like() {
                     let _ = write!(self.out, "\tmov\tbyte ptr {},al\r\n", bp_addr(off));
@@ -9670,6 +9691,26 @@ impl<'a> FunctionEmitter<'a> {
             && !reg.is_byte()
         {
             let _ = write!(self.out, "\tmov\t{},{}\r\n", reg.name(), src_reg.name());
+            return;
+        }
+        // Mem-to-reg copy: `<reg> = <stack-local>` where the RHS is
+        // a bare identifier for a stack-resident int local (not
+        // pointer/array — those have their own decay/address
+        // forms). BCC emits `mov <reg>, word ptr [bp-N]` directly,
+        // skipping the AX round-trip. Fixture 1145 (`b = t;` with t
+        // on stack, b in DI).
+        if let ExprKind::Ident(name) = &expr.kind
+            && self.locals.has(name)
+            && let LocalLocation::Stack(src_off) = self.locals.location_of(name)
+            && matches!(self.locals.type_of(name), Type::Int)
+            && !reg.is_byte()
+        {
+            let _ = write!(
+                self.out,
+                "\tmov\t{},word ptr {}\r\n",
+                reg.name(),
+                bp_addr(src_off)
+            );
             return;
         }
         // Non-constant char init: untested. Best guess would be
