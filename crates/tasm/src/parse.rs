@@ -507,6 +507,12 @@ fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
                     return Ok(Instr::DivByteBpRel { offset });
                 }
             }
+            // Unsigned 16-bit divide of DX:AX by a register. Sibling
+            // of `IdivReg16`. Fixture 948 (`unsigned a; return a / 7`
+            // → `mov bx, 7; xor dx, dx; div bx`).
+            if let Some(reg) = Reg16::parse(rest) {
+                return Ok(Instr::DivReg16 { reg });
+            }
             // Unsigned 16-bit divide of DX:AX by a stack local.
             // Sibling of `IdivBpRel`. Fixture 946.
             parse_single_op_word_ptr(rest, line.line_no, "div", |o| Instr::DivBpRel { offset: o })

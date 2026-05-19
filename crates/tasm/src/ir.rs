@@ -674,6 +674,11 @@ pub enum Instr {
     /// divide with a register operand. Used for `int reg-local /= K`
     /// (fixture 584) where BCC loads the divisor into BX.
     IdivReg16 { reg: Reg16 },
+    /// `div <reg16>` — F7 (mod=11 /6 r/m=reg). Single-operand
+    /// unsigned divide with a register operand. Sibling of
+    /// `IdivReg16` for the unsigned-RHS path with an immediate
+    /// divisor (BCC loads K into BX, then `div bx`). Fixture 948.
+    DivReg16 { reg: Reg16 },
     /// `add ax,word ptr <group>:<symbol>[+<offset>]` — ADD r16,r/m16
     /// with disp16-only addressing (`03 06 lo hi`). Same FIXUPP
     /// shape; offset added to the symbol's location.

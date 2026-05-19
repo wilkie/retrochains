@@ -4365,8 +4365,15 @@ impl<'a> FunctionEmitter<'a> {
                 let _ = write!(self.out, "\timul\tword ptr {rhs_addr}\r\n");
                 let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name},ax\r\n");
             } else {
-                self.out.extend_from_slice(b"\tcwd\t\r\n");
-                let _ = write!(self.out, "\tidiv\tword ptr {rhs_addr}\r\n");
+                // Unsigned LHS: `xor dx, dx; div` instead of `cwd;
+                // idiv`. Fixture 949.
+                let (widen, mnem) = if gty.is_unsigned() {
+                    (&b"\txor\tdx,dx\r\n"[..], "div")
+                } else {
+                    (&b"\tcwd\t\r\n"[..], "idiv")
+                };
+                self.out.extend_from_slice(widen);
+                let _ = write!(self.out, "\t{mnem}\tword ptr {rhs_addr}\r\n");
                 let result_reg = if matches!(op, BinOp::Div) { "ax" } else { "dx" };
                 let _ = write!(
                     self.out,
@@ -4414,9 +4421,16 @@ impl<'a> FunctionEmitter<'a> {
             let LocalLocation::Stack(off) = self.locals.location_of(b) else {
                 unreachable!();
             };
+            // Unsigned LHS: `xor dx, dx; div` instead of `cwd; idiv`.
+            // Fixture 949.
+            let (widen, mnem) = if gty.is_unsigned() {
+                (&b"\txor\tdx,dx\r\n"[..], "div")
+            } else {
+                (&b"\tcwd\t\r\n"[..], "idiv")
+            };
             let _ = write!(self.out, "\tmov\tax,word ptr DGROUP:_{name}\r\n");
-            self.out.extend_from_slice(b"\tcwd\t\r\n");
-            let _ = write!(self.out, "\tidiv\tword ptr {}\r\n", bp_addr(off));
+            self.out.extend_from_slice(widen);
+            let _ = write!(self.out, "\t{mnem}\tword ptr {}\r\n", bp_addr(off));
             let result_reg = if matches!(op, BinOp::Div) { "ax" } else { "dx" };
             let _ = write!(
                 self.out,
