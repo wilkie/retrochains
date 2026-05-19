@@ -1959,6 +1959,31 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `||` as value, `^` as value, `>>` as value
+
+Fixtures `938` (`int x = 1; int y = 2; return x || y;` —
+logical OR as a return value, not an `if` condition), `939`
+(`return x ^ y;` — bitwise XOR as value), `940`
+(`int x = 64; int y = 2; return x >> y;` — arithmetic right
+shift by a variable count as value).
+
+All three already work end-to-end:
+
+- 938: the `||`-as-value path was already producing the same
+  three-block shape BCC emits — load left, short-circuit to
+  `mov ax, 1` on true, fall through to test right, materialize
+  `0` or `1` via the boolean-result mini-CFG. Same six-byte
+  result-materialization as `==` / `<` / etc. but with two
+  evaluation positions instead of one.
+- 939: `mov ax, [bp-N]; xor ax, [bp-M]` — the generic
+  reg-vs-stack `xor` emit path covers the rvalue position too,
+  not just compound `^=`.
+- 940: variable-RHS arithmetic right shift loads the shift
+  count into CL (`mov cl, byte ptr [bp-M]`) and emits `sar ax,
+  cl`. The byte load uses the low byte of the source word,
+  which is correct for shift counts ≤ 31 (BCC doesn't mask).
+  Same CL-prep path as compound shifts (fixture 658).
+
 ## `<` / `>` as value, bitwise OR as value
 
 Fixtures `935` (`int x = 3; int y = 5; return x < y;` — `<`
