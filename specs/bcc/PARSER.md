@@ -1959,7 +1959,50 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
-## Char init from char binop, int-ptr from array+1, struct field assign
+## Int-ptr from &a[1], int return from char cast, char init from sub
+
+Fixtures `1049` (`int a[3]; int *p = &a[1]; a[1] = 99;
+return *p;` — explicit address-of-element form of the
+batch-243 `a + 1` shape), `1050` (`char c = 'A'; return
+(int)c;` — explicit `(int)` cast in return position),
+`1051` (`char a = 10; char b = 3; char c = a - b;
+return c;` — sibling of fixture 1046 exercising the
+`sub al, byte ptr <b>` byte-arith path).
+
+All three already worked end-to-end:
+
+- 1049: the AST shape for `&a[1]` is
+  `AddressOf(ArrayIndex(Ident("a"), IntLit(1)))`, which
+  routes through the array-element address path
+  (`emit_array_addr_to_bx` / `try_lvalue_chain_addr`)
+  and produces the same `lea ax, [bp+(base+K*stride)]`
+  computation as the batch-243 `a + 1` peephole. Both
+  forms emit the byte-identical address-load — the
+  parser distinguishes the two syntactic shapes but
+  codegen converges on one folded LEA.
+- 1050: `(int)c` in return position is the standard
+  char-load-and-widen sequence: `mov al, byte ptr <c>;
+  cbw`. The explicit cast is parsed but doesn't change
+  codegen — the return-int arm already widens char-like
+  return values via cbw.
+- 1051: the batch-243 char-binop peephole accepts any
+  op in `{+, -, &, |, ^}`. `sub` was added alongside
+  `add`/`and`/`or`/`xor` so this fixture goes through
+  the same `mov al, <a>; sub al, <b>; mov <c>, al`
+  shape with no new code.
+
+**Recorded finding (deferred):**
+
+- Probed `int gimme(void) { return 42; } int main(void) {
+  int n = gimme(); return n; }` as fixture 1050 first
+  draft. The OBJ differed by 1 byte at offset 160 (the
+  PUBDEF block): BCC emits `_gimme, _main` while we emit
+  `_main, _gimme`. Same public-symbol ordering rule we
+  haven't pinned (batches 218/236). Replaced with the
+  no-call char-cast shape until the ordering heuristic
+  is identified.
+
+
 
 Fixtures `1046` (`char a = 5; char b = 3; char c = a + b;
 return c;` — char init from a binary op on two char
