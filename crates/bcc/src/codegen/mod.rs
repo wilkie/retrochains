@@ -6668,6 +6668,32 @@ impl<'a> FunctionEmitter<'a> {
         let store_byte = leaf_ty.is_char_like();
         let width = if store_byte { "byte" } else { "word" };
         let Some(v) = try_const_eval(value) else {
+            // Non-constant RHS for an int element compound. Load RHS
+            // into AX, then `<op> word ptr [bp+elem_off], ax`. Same
+            // shape as the global-pointer-subscript compound (sibling
+            // path above). Fixture 988 (`a[1] -= x`).
+            if !store_byte
+                && matches!(
+                    op,
+                    BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor
+                )
+            {
+                self.emit_expr_to_ax(value);
+                let mnem = match op {
+                    BinOp::Add => "add",
+                    BinOp::Sub => "sub",
+                    BinOp::BitAnd => "and",
+                    BinOp::BitOr => "or",
+                    BinOp::BitXor => "xor",
+                    _ => unreachable!(),
+                };
+                let _ = write!(
+                    self.out,
+                    "\t{mnem}\tword ptr {},ax\r\n",
+                    bp_addr(off),
+                );
+                return;
+            }
             panic!("non-constant rhs in array compound assign not yet supported (no fixture)");
         };
         let v_masked = if store_byte { v & 0xFF } else { v & 0xFFFF };
