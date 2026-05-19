@@ -4921,8 +4921,13 @@ impl<'a> FunctionEmitter<'a> {
             let _ = write!(self.out, "\tmov\tal,byte ptr DGROUP:_{name}\r\n");
             if k > 0 && (k & (k - 1)) == 0 && k <= 256 {
                 let shifts = k.trailing_zeros();
-                for _ in 0..shifts {
-                    self.out.extend_from_slice(b"\tshl\tal,1\r\n");
+                if shifts <= 3 {
+                    for _ in 0..shifts {
+                        self.out.extend_from_slice(b"\tshl\tal,1\r\n");
+                    }
+                } else {
+                    let _ = write!(self.out, "\tmov\tcl,{shifts}\r\n");
+                    self.out.extend_from_slice(b"\tshl\tal,cl\r\n");
                 }
             } else {
                 let v16 = k & 0xFFFF;
@@ -5233,8 +5238,13 @@ impl<'a> FunctionEmitter<'a> {
         {
             let shifts = k.trailing_zeros();
             let _ = write!(self.out, "\tmov\tal,{}\r\n", reg.name());
-            for _ in 0..shifts {
-                self.out.extend_from_slice(b"\tshl\tal,1\r\n");
+            if shifts <= 3 {
+                for _ in 0..shifts {
+                    self.out.extend_from_slice(b"\tshl\tal,1\r\n");
+                }
+            } else {
+                let _ = write!(self.out, "\tmov\tcl,{shifts}\r\n");
+                self.out.extend_from_slice(b"\tshl\tal,cl\r\n");
             }
             let _ = write!(self.out, "\tmov\t{},al\r\n", reg.name());
             return;
