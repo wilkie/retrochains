@@ -1959,6 +1959,34 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Int mul by 256, char compound mul by 16, int init deref+add
+
+Fixtures `1193` (`int a=2; return a*256;` — int mul
+by 256, K=8 shifts), `1194` (`char c=3; c *= 16;
+return c;` — char compound mul by 16, K=4 shifts),
+`1195` (`int a=10; int *p=&a; int b = *p+5; return
+b;` — initialize an int from a pointer-dereference
+plus a constant).
+
+1193 and 1195 already worked after the batch-290
+fix. 1195 uses `mov bx, [bp-Np]; mov ax, [bx];
+add ax, 5; mov [bp-Nb], ax` — no extra address
+materialization since the int-init path can take an
+AX-resident value directly.
+
+1194 caught the analogous bug in the char compound
+`*=` paths — both the local (`reg.is_byte()`
+branch in `emit_compound_with_value`) and the
+global (`Type::Char | Type::UChar` branch in the
+global-compound dispatch) unconditionally unrolled
+all shifts, missing the K ≥ 4 → CL form. Fixed by
+mirroring the same threshold in both arms. Spot-
+checked all 15 char/long compound `*=` fixtures
+(`633`, `672`, `690`, `693`, `695`, `741`, `747`,
+`762`, `772`, `781`, `785`, `786`, `817`, `831`)
+— all still match since their K values are ≤ 3
+shifts.
+
 ## Int mul by 32, uint mul by 16, int deref RMW
 
 Fixtures `1190` (`int a=3; return a*32;` — int mul
