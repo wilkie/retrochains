@@ -1959,6 +1959,30 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Global int compound add var, int reg-to-reg assign, global char xor const
+
+Fixtures `1142` (`int g = 10; int x = 5; g += x;
+return g;` — global int compound add by a variable
+RHS), `1143` (`int x = 1; int y = 2; x = y; y = 99;
+return x;` — int reg-to-reg copy when both locals are
+register-resident), `1144` (`char g = 0x0F; g ^= 0x05;
+return g;` — global char compound XOR by constant).
+
+1142 and 1144 already worked end-to-end via the
+existing memory-direct compound paths.
+
+1143 emitted an unnecessary AX round-trip. With both
+x and y register-resident (SI and DI), our `x = y;`
+went `mov ax, di; mov si, ax` (4 bytes total). BCC
+emits the direct reg-to-reg form: `mov si, di` (2
+bytes).
+
+Added a reg-to-reg peephole to `emit_store_reg`: when
+the RHS is a bare-identifier naming another register-
+resident int local (both 16-bit), emit `mov <dest>,
+<src>` directly. Byte registers stay on the
+fall-through path.
+
 ## Long global shr by const, ternary two consts, struct field from field
 
 Fixtures `1139` (`long g = 1024L; g >>= 2; return
