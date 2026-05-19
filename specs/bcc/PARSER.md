@@ -1959,7 +1959,32 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
-## return sizeof int, return sizeof struct, long sub two locals
+## do-while counter, bitwise NOT local, stack array size 5
+
+Fixtures `1070` (`int x = 0; do { x++; } while (x < 3);
+return x;` — do-while loop counter, the rotating
+sibling of fixture 1044's while form), `1071` (`int x =
+5; return ~x;` — int local with bitwise complement
+applied at return), `1072` (`int a[5]; a[0]..a[4] = ...;
+return a[4];` — stack int array of size 5 with five
+constant-store writes and a final-element read).
+
+All three already worked end-to-end:
+
+- 1070: the do-while emits the back-edge loop with the
+  condition at the bottom: `<top>: inc word ptr [bp-N];
+  cmp word ptr [bp-N], 3; jl <top>`. The body executes
+  unconditionally on first iteration; the condition
+  decides whether to back-edge.
+- 1071: `~x` lowers via `emit_unary_not` to `mov ax,
+  [bp-N]; not ax`. Standard arm.
+- 1072: each `a[K] = imm` lowers to `mov word ptr
+  [bp+(base+K*2)], imm` via the stack-array-elem const-
+  store path. The size-5 array reserves 10 bytes; the
+  final read of a[4] is at `[bp-2]`. Already covered by
+  the standard stack-array path.
+
+
 
 Fixtures `1067` (`return sizeof(int);` — bare-type
 sizeof in return position, must fold to `2`), `1068`
