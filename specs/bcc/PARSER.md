@@ -1959,7 +1959,46 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
-## Return max int, stack char array writes, global int pre-dec stmt
+## Int shr const as stmt, int mul by pow2, ptr NULL cmp
+
+Fixtures `1136` (`int x = 64; x = x >> 2; return x;`
+— int compound shift as assign statement), `1137`
+(`int x = 5; return x * 8;` — int multiply by a power-
+of-2 constant), `1138` (`int x = 5; int *p = &x; if (p
+== 0) return 1; return 0;` — pointer compared to null
+in if-condition).
+
+All three already worked end-to-end. 1136 lowers `x =
+x >> 2` as `mov ax, [bp-N]; sar ax, 1; sar ax, 1; mov
+[bp-N], ax` (K=2 unroll). 1137 uses the power-of-2
+shift peephole: `mov ax, [bp-N]; shl ax, 1; shl ax,
+1; shl ax, 1`. 1138 emits the existing pointer-cmp-
+zero peephole.
+
+**Recorded findings (deferred):**
+
+- Probed `int g[3] = {...}; int i = 2; return g[i];`
+  as fixture 1136 first draft. Panic: "variable-
+  indexed global array not yet supported". The
+  global-array variable-index read path is unwritten —
+  the global-array-read codegen today expects a const
+  index. Sibling of the existing local-array-variable-
+  index path.
+- Probed `char c = 5; c *= 3; return c;` as fixture
+  1137 first draft. Our codegen emits `imul al, 3`
+  which the assembler rejects with "unsupported
+  operand form `3`" — 8086 has no `imul reg8, imm8`
+  encoding; the byte path must go via the AX form
+  (`mov al, 3; imul al`) or widen to int and use
+  `imul reg, imm`. Char-compound-mul-by-imm needs a
+  distinct lowering.
+- Probed `int a[3]; int i; for (i=0; i<3; i++) a[i]
+  = i;` as a follow-up. Panic: "non-constant rhs in
+  variable-indexed array assign not yet supported".
+  Sibling of the variable-indexed read deferral; the
+  write path with a non-constant RHS isn't wired up.
+
+
 
 Fixtures `1133` (`return 32767;` — return of i16 max
 positive literal), `1134` (`char s[3]; s[0]='X'; s[1]
