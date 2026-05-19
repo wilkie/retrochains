@@ -1959,6 +1959,52 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Null-ptr cast init, two stack arrays sum, int le-cmp as value
+
+Fixtures `1025` (`int *p = (int *)0; if (p == 0) return 1;` —
+local pointer initialized from a casted integer-zero, then
+compared to zero), `1026` (`int a[2]; int b[2]; a[0]=5;
+a[1]=10; b[0]=1; b[1]=2; return a[0] + b[0];` — two adjacent
+stack-array slots written and one elem from each summed),
+`1027` (`int x = 3; int y = 5; int r = x <= y; return r;` —
+relational `<=` materialized into an int local rather than
+consumed by a branch).
+
+All three already worked end-to-end:
+
+- 1025: `(int *)0` constant-folds to a null pointer; the
+  init lowers to `mov word ptr [bp-2], 0`. The `if (p ==
+  0)` then uses the existing stack-local-vs-zero zero-test
+  arm (`cmp word ptr [bp-2], 0; jne <skip>`) added in
+  batch 221's sibling — no new shape needed.
+- 1026: each `a[i] = K` / `b[i] = K` resolves to a
+  `mov word ptr [bp-N], imm16` store via the stack-array-
+  elem assign path. The final `a[0] + b[0]` loads one slot
+  into AX and adds the other directly (`add ax, word ptr
+  [bp-M]`). All paths already existed from batches 220/222.
+- 1027: `x <= y` in rvalue position lowers via the existing
+  compare-as-value path: `mov ax, [bp-N]; cmp ax, [bp-M];
+  jg .L1; mov ax, 1; jmp .L2; .L1: xor ax, ax; .L2:`. The
+  result lands in AX and the assign-local path stores it
+  to `r`. No new branch-cond shapes — `<=` uses `jg` as
+  the "not-le" jump just like the if-stmt path. The
+  batch-232 shift-vs-compare signedness split kept the
+  signed jump for signed int operands.
+
+**Recorded finding (deferred):**
+
+- **Public-symbol ordering for int-returning helper +
+  caller**: probed `int gimme(void) { return 'A'; } int
+  main(void) { return gimme(); }` as fixture 1027 first
+  draft. Public-symbol order in our PUBDEF was `_main,
+  _gimme` while BCC emits `_gimme, _main`. Same unidentified
+  ordering heuristic as the earlier `dbl/g/main` probe
+  (batch 218 series). The "all-int-typed" helper case
+  doesn't disambiguate cleanly against fixture 138's
+  `_main, _f` shape. Probe replaced with the int-le-cmp
+  shape until we have appetite for more probes targeting
+  the ordering rule.
+
 ## int `<<=` unroll for K≤3, char init expr, int `*=` pow2
 
 Fixtures `1022` (`int x = 3; x <<= 2;` — int compound shift
