@@ -1110,6 +1110,14 @@ fn parse_mov(operands: &str, line_no: usize) -> AsmResult<Instr> {
     {
         return Ok(Instr::MovBxDispDx { disp });
     }
+    // `mov word ptr [bx+disp8], imm16` — const word store through
+    // BX (fixture 897: `long *p; p[K] = v` writes both halves).
+    if let Some(disp) = parse_word_bx_disp(lhs)
+        && disp != 0
+        && let Some(imm) = parse_imm16(rhs)
+    {
+        return Ok(Instr::MovBxDispImm { disp, imm: imm as u16 });
+    }
     // LHS `word ptr <group>:<sym>[bx+disp]` — store immediate to a
     // data-segment global through bx-indexed addressing. Used by
     // variable-indexed long-array writes (fixture 305). Tried before

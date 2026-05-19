@@ -5767,6 +5767,42 @@ impl<'a> FunctionEmitter<'a> {
                 }
                 return;
             }
+            // Long-pointer subscript assignment: `long *p; p[K] = v`.
+            // `mov bx, _p; mov word ptr [bx+off+2], <hi>; mov word
+            // ptr [bx+off], <lo>`. High-first store convention same
+            // as long-global and long-array paths. Fixture 897.
+            if let Some(pointee) = gty.pointee()
+                && indices.len() == 1
+                && let Some(k) = try_const_eval(&indices[0])
+                && pointee.is_long_like()
+            {
+                let Some(v) = try_const_eval(value) else {
+                    panic!("non-constant rhs in `long *p; p[K] = v` not yet supported (no fixture)");
+                };
+                let stride = i32::from(pointee.size_bytes());
+                let off = (k as i32).wrapping_mul(stride);
+                let lo = (v & 0xFFFF) as u16;
+                let hi = ((v >> 16) & 0xFFFF) as u16;
+                let lo_addr = if off == 0 {
+                    "[bx]".to_owned()
+                } else if off > 0 {
+                    format!("[bx+{off}]")
+                } else {
+                    format!("[bx-{}]", -off)
+                };
+                let hi_off = off + 2;
+                let hi_addr = if hi_off > 0 {
+                    format!("[bx+{hi_off}]")
+                } else if hi_off < 0 {
+                    format!("[bx-{}]", -hi_off)
+                } else {
+                    "[bx]".to_owned()
+                };
+                let _ = write!(self.out, "\tmov\tbx,word ptr DGROUP:_{array}\r\n");
+                let _ = write!(self.out, "\tmov\tword ptr {hi_addr},{hi}\r\n");
+                let _ = write!(self.out, "\tmov\tword ptr {lo_addr},{lo}\r\n");
+                return;
+            }
             // Variable-indexed global int-array write. Load `i` into
             // BX, shl once for stride 2, then `mov word ptr
             // _a[bx], <src>`. Fixture 510 (`a[i] = i`).

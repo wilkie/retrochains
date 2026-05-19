@@ -1301,6 +1301,11 @@ pub enum Instr {
     /// with reg=DX(010) r/m=111=BX+disp8. Used by `int *p; p[K]
     /// %= y` (fixture 884: mod result is in DX after `idiv`).
     MovBxDispDx { disp: i8 },
+    /// `mov word ptr [bx+disp8],<imm16>` — `C7 47 dd lo hi`. MOV
+    /// r/m16,imm16 (Group with /0) at mod=01 r/m=111=BX+disp8.
+    /// Used by `long *p; p[K] = v` — two memory-direct stores at
+    /// `[bx+off+2]` (high) and `[bx+off]` (low). Fixture 897.
+    MovBxDispImm { disp: i8, imm: u16 },
     /// `push word ptr [bx+disp8]` — `FF 77 dd`. Group FF `/6` (PUSH
     /// r/m16) with mod=01 r/m=111=BX+disp8. Used by `f(p[K])` —
     /// BCC's memory-operand-push peephole on a global-pointer
