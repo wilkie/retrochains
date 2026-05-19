@@ -310,6 +310,7 @@ fn instr_size(instr: &Instr) -> usize {
         Instr::MovReg8Imm8 { .. } => 2,
         Instr::MovReg8Reg8 { .. } => 2,
         Instr::MovBpRelImm8 { .. } => 4,
+        Instr::MovByteSiDispImm8 { disp, .. } => if *disp == 0 { 3 } else { 4 },
         Instr::IncReg8 { .. } | Instr::DecReg8 { .. } => 2,
         Instr::CmpReg8Imm8 { .. } => 3,
         Instr::CmpAlBpRel { .. } => 3,
@@ -1017,6 +1018,20 @@ fn emit_instr(
             out.push(0xC6);
             out.push(0x46);
             out.push(disp as u8);
+            out.push(*imm);
+        }
+        Instr::MovByteSiDispImm8 { disp, imm } => {
+            // `mov byte ptr [si+disp],imm8` — C6 (mod /0 r/m=100) ii.
+            // disp=0 → mod=00 r/m=100 = 0x04 (3 bytes total);
+            // disp!=0 → mod=01 r/m=100 = 0x44 with disp8 (4 bytes).
+            out.push(0xC6);
+            if *disp == 0 {
+                out.push(0x04);
+            } else {
+                let d = i8::try_from(*disp).expect("si-rel disp fits in i8");
+                out.push(0x44);
+                out.push(d as u8);
+            }
             out.push(*imm);
         }
         Instr::IncReg8 { reg } => {

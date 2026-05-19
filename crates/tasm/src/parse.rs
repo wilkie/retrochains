@@ -1067,6 +1067,13 @@ fn parse_mov(operands: &str, line_no: usize) -> AsmResult<Instr> {
             return Ok(Instr::MovSiPtrReg16 { src });
         }
     }
+    // LHS `byte ptr [si+disp]` — byte store through SI pointer
+    // (fixture 1016: char-pointer subscript write).
+    if let Some(disp) = parse_byte_si_disp(lhs)
+        && let Some(imm) = parse_imm8(rhs)
+    {
+        return Ok(Instr::MovByteSiDispImm8 { disp: i16::from(disp), imm: imm as u8 });
+    }
     // LHS `word ptr [di]` — store through DI pointer (fixture 628).
     if lhs == "word ptr [di]" {
         if let Some(src) = Reg16::parse(rhs) {
@@ -3120,6 +3127,21 @@ fn parse_bp_relative(s: &str) -> Option<i16> {
 /// accept a `word ptr` reference.
 fn parse_byte_bp_relative(s: &str) -> Option<i16> {
     parse_bp_relative_with_width(s, BpWidth::Byte)
+}
+
+/// Parse `byte ptr [si]` or `byte ptr [si+K]`/`byte ptr [si-K]` —
+/// SI-based byte addressing with optional disp8. Returns the (signed)
+/// displacement. Used by the char-pointer subscript byte-store path
+/// (fixture 1016: `p[K] = 'X'` with p in SI).
+fn parse_byte_si_disp(s: &str) -> Option<i8> {
+    let s = s.trim().strip_prefix("byte ptr ")?;
+    let inside = s.strip_prefix('[')?.strip_suffix(']')?;
+    if inside == "si" {
+        return Some(0);
+    }
+    let rest = inside.strip_prefix("si")?;
+    let signed: i32 = rest.parse().ok()?;
+    i8::try_from(signed).ok()
 }
 
 /// Same as [`parse_bp_relative`] but requires an explicit `word ptr`

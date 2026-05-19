@@ -419,6 +419,13 @@ pub enum Instr {
     /// `mov byte ptr [bp+<offset>],<imm8>` — C6 46 dd ii. Store a
     /// constant byte into a stack local (fixture 011's `char c=1`).
     MovBpRelImm8 { offset: i16, imm: u8 },
+    /// `mov byte ptr [si+<disp>],<imm8>` — C6 (mod /0 r/m=100) ii.
+    /// disp=0 encodes as `C6 04 ii` (3 bytes, mod=00); disp!=0
+    /// fitting i8 encodes as `C6 44 dd ii` (4 bytes, mod=01). Used
+    /// by char-pointer subscript writes through an SI-resident
+    /// pointer: `p[K] = 'B'` lowers to a memory-direct byte store
+    /// through SI. Fixture 1016.
+    MovByteSiDispImm8 { disp: i16, imm: u8 },
     /// `inc <reg8>` — FE C0+rc. Increment an 8-bit register.
     IncReg8 { reg: Reg8 },
     /// `dec <reg8>` — FE C8+rc. Decrement an 8-bit register.
