@@ -3631,6 +3631,49 @@ impl<'a> FunctionEmitter<'a> {
                         );
                         return;
                     }
+                    // `char b = s.c;` — char init from a `Dot`-kind
+                    // Member whose leaf is char-like. Same byte-load
+                    // shape as the assign-from-Member peephole
+                    // (batch 266): `mov al, byte ptr <field-addr>;
+                    // mov byte ptr <dest>, al`. Fixture 1124.
+                    if let ExprKind::Member { base, field, kind: crate::ast::MemberKind::Dot } =
+                        &src_expr.kind
+                        && let Some((src_name, total_off, leaf_ty)) =
+                            self.try_member_dot_chain(base, field)
+                        && leaf_ty.is_char_like()
+                    {
+                        if self.globals.contains(&src_name) {
+                            let addr = if total_off == 0 {
+                                format!("DGROUP:_{src_name}")
+                            } else {
+                                format!("DGROUP:_{src_name}+{total_off}")
+                            };
+                            let _ = write!(self.out, "\tmov\tal,byte ptr {addr}\r\n");
+                            let _ = write!(
+                                self.out,
+                                "\tmov\tbyte ptr {},al\r\n",
+                                bp_addr(off)
+                            );
+                            return;
+                        }
+                        if let LocalLocation::Stack(base_bp) =
+                            self.locals.location_of(&src_name)
+                        {
+                            let src_off =
+                                base_bp + i16::try_from(total_off).unwrap_or(i16::MAX);
+                            let _ = write!(
+                                self.out,
+                                "\tmov\tal,byte ptr {}\r\n",
+                                bp_addr(src_off)
+                            );
+                            let _ = write!(
+                                self.out,
+                                "\tmov\tbyte ptr {},al\r\n",
+                                bp_addr(off)
+                            );
+                            return;
+                        }
+                    }
                     panic!("non-constant char local init shape not yet supported");
                 }
                 // Pointers and ints share the int-like word-sized
