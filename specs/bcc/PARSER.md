@@ -1959,6 +1959,31 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Int mul by 32, uint mul by 16, int deref RMW
+
+Fixtures `1190` (`int a=3; return a*32;` — int mul
+by 32, K=5 shifts, exercising the CL-form path
+added in batch 290), `1191` (`unsigned int u=5;
+return u*16;` — unsigned int mul by 16, K=4 shifts,
+confirming the threshold path is signedness-
+agnostic), `1192` (`int a=5; int *p=&a; *p =
+*p + 1; return a;` — read-modify-write through a
+pointer, both LHS and RHS go through the same
+deref).
+
+All three already worked end-to-end after the
+batch-290 mul-pow2 fix. 1190 and 1191 emit `mov cl,
+N; shl ax, cl` for K ≥ 4 shifts regardless of
+operand signedness — `imul` and `shl` produce the
+same low 16 bits whether the operand is treated as
+signed or unsigned, so BCC doesn't distinguish on
+the mul-pow2 path. 1192 emits `mov bx, [bp-Np];
+mov ax, [bx]; inc ax; mov bx, [bp-Np]; mov [bx],
+ax` — BCC reloads `p` into BX rather than caching it
+across the increment, since the LHS and RHS are
+independent sub-expressions in the AST and each
+gets its own address materialization.
+
 ## Int mul by 16, int div by var, int store through ptr
 
 Fixtures `1187` (`int a=5; return a*16;` — int mul
