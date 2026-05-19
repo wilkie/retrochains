@@ -1959,6 +1959,32 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Int add three distinct, int multi-init stmt, char ge-cmp in if
+
+Fixtures `1184` (`int x=1; int y=2; int z=4;
+return x+y+z;` — sum of three distinct-named locals
+as a single return expression), `1185` (`int a=1,
+b=2; return a+b;` — multi-declarator statement with
+each declarator carrying its own initializer, sibling
+of 1151 which was the bare-uninit-declarators form),
+`1186` (`char c=5; char d=3; if (c >= d) return 1;
+return 0;` — signed char `>=` compare used as an if
+condition rather than a value).
+
+All three already worked end-to-end. 1184 reuses
+the sum-three-locals fold from 1151 even though the
+locals have different names. 1185's parser path
+processes each declarator's initializer at the
+declaration site rather than lazily — so `a=1` and
+`b=2` each emit `mov word ptr [bp-N], imm` directly,
+matching the equivalent two-statement form. 1186
+widens both chars via `mov al, byte ptr <c>; cbw`
+(then push/pop because the second char also needs
+widening) then dispatches the signed `jge`/`jl`
+branch — char compares in if/while context use
+signed jumps per the batch-181/187 promote-to-signed-
+int rule we documented earlier.
+
 ## Int shr then mask, while multi-stmt, int assign-then-mul
 
 Fixtures `1181` (`int a=0x123; int x = (a>>4) &
