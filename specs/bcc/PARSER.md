@@ -1959,6 +1959,38 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Stack array elem as bool, plus const, char return
+
+Fixtures `980` (`if (a[1]) return 7;` — stack-array element
+as a boolean test in if), `981` (`return a[2] + 100;` —
+stack-array element added to a constant in return), `982`
+(`char a[3]; ...; return a[2];` — char stack-array element
+read and returned).
+
+981 and 982 worked end-to-end via the batch-220 rvalue
+ArrayIndex fallthrough — same `[bp+(base+K*stride)]`
+operand source that 977 added, plus the existing
+add-with-immediate and char-return paths.
+
+980 hit `emit_zero_test`'s "non-ident boolean condition"
+panic — the zero-test had arms for register-resident
+deref, global-pointer subscript, and identifier targets,
+but no arm for a stack-array element. Added one using the
+same `try_lvalue_chain_addr` helper as the rvalue and
+compare paths: when the cond is `ArrayIndex` whose root
+is a stack-local array, emit `cmp <width> ptr [bp+
+(base+K*stride)], 0` directly (byte for char arrays, word
+for int). Two bytes vs the AX-detour, identical to BCC.
+
+Three sites in codegen now share the chain-walk+local-
+fold pattern: `resolve_operand_source` (batch 220),
+`emit_compare` (batch 220), `emit_zero_test` (this batch).
+A future refactor could factor the "local-stack-array
+elem → bp-relative operand" computation into a single
+helper, but each site needs slightly different output
+(operand source vs cmp-vs-imm vs cmp-vs-0), so the dupe
+is small and obvious.
+
 ## Stack array elem in rvalue + memory-direct compare
 
 Fixtures `977` (`int a[3]; ...; return a[0] + a[1];` — two
