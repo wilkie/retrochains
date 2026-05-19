@@ -1959,6 +1959,26 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Int le-cmp as int, int shl by var, int mul by three
+
+Fixtures `1163` (`int a=3; int b=5; int r = a<=b;
+return r;` — signed `<=` materialized to int 0/1,
+sibling of 1160's `>=`), `1164` (`int a=4; int b=3;
+int x = a<<b;` — int left-shift by a variable count
+via CL, sibling of 1162's right-shift), `1165` (`int
+a=7; return a*3;` — int multiply by the small odd
+constant 3).
+
+All three already worked end-to-end. 1163 uses the
+boolean-materialization sequence with the signed `jle`
+arm. 1164 widens `b` through CX and emits `shl ax,
+cl`. 1165 emits the standard `mov ax, [bp-Na]; mov
+cx, 3; imul cx` — BCC does **not** lower `* 3` to
+`lea ax, [bx+bx*2]` or `mov dx, ax; shl ax, 1; add
+ax, dx`; it always reaches for `imul` once the constant
+isn't a power of two, even for tiny constants like 3
+or 5.
+
 ## Int ge-cmp as int, int chained sub const, int shr by var
 
 Fixtures `1160` (`int a=5; int b=3; int r = a>=b;
