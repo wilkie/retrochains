@@ -1959,6 +1959,41 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Array decay in call args, bitwise NOT, comma expr
+
+Fixtures `923` (`int b[3]; f(b)` with `int *` param — array
+decay), `924` (`return ~g` — bitwise NOT on global), `925`
+(`i = (j = 5, j + 1)` — comma expression in rvalue position).
+
+923 fixes the codegen bug recorded in batch 201: when an array
+identifier is passed to a pointer parameter, the arg-prep path
+emitted `mov ax, word ptr DGROUP:_b` (value load) instead of
+`mov ax, offset DGROUP:_b` (address). Added an array-decay arm
+in `emit_arg_into_ax` that checks the arg's type before
+falling through to `emit_expr_to_ax`:
+
+- Global array → `mov ax, offset DGROUP:_<name>` (3 bytes, no
+  relocation needed for offset).
+- Stack-local array → `lea ax, word ptr [bp-N]` (loads the
+  effective bp-relative address into AX).
+
+Both paths skip the value-load and produce the address
+directly. Same array-decay rule applies as in C's "array name
+in non-sizeof/non-address-of context becomes pointer to first
+element" — the call site is exactly that context. Other
+identifier types (non-array) still fall through to
+`emit_expr_to_ax`.
+
+924/925 already work end-to-end. Coverage:
+
+- 924: `~g` emits `mov ax, word ptr DGROUP:_g; not ax`. The
+  `not r/m16` form (Group3 /2) for AX is `F7 D0`.
+- 925: comma operator in rvalue position evaluates the left
+  subexpression for its side effects and discards the value,
+  then evaluates the right subexpression and uses its value.
+  Same lowering used in fixture 858 (compound RHS), now in
+  plain rvalue context.
+
 ## do-while loops, while-global-cond
 
 Fixtures `920` (do-while with accumulator: `do { s += i; i++;
