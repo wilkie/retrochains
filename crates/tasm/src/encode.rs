@@ -301,6 +301,7 @@ fn instr_size(instr: &Instr) -> usize {
         | Instr::CmpReg16BpRel { .. }
         | Instr::ImulBpRel { .. }
         | Instr::IdivBpRel { .. }
+        | Instr::DivBpRel { .. }
         | Instr::ImulByteBpRel { .. }
         | Instr::IdivByteBpRel { .. }
         | Instr::DivByteBpRel { .. }
@@ -923,6 +924,13 @@ fn emit_instr(
             let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
             out.push(0xF7);
             out.push(0x7E);
+            out.push(disp as u8);
+        }
+        Instr::DivBpRel { offset } => {
+            // `div word ptr [bp+disp8]` → F7 76 dd. ModR/M 76 = /6(DIV).
+            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
+            out.push(0xF7);
+            out.push(0x76);
             out.push(disp as u8);
         }
         Instr::ImulGroupSym { group, symbol, offset } => {

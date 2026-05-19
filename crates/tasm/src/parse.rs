@@ -507,10 +507,9 @@ fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
                     return Ok(Instr::DivByteBpRel { offset });
                 }
             }
-            Err(AsmError::new(
-                line.line_no,
-                format!("div: unsupported operand form `{rest}`"),
-            ))
+            // Unsigned 16-bit divide of DX:AX by a stack local.
+            // Sibling of `IdivBpRel`. Fixture 946.
+            parse_single_op_word_ptr(rest, line.line_no, "div", |o| Instr::DivBpRel { offset: o })
         }
         "cwd" => Ok(Instr::Cwd),
         "cbw" => Ok(Instr::Cbw),

@@ -361,6 +361,12 @@ pub enum Instr {
     /// signed divide of DX:AX by src; quotient in AX, remainder in
     /// DX. Always preceded by `cwd` to sign-extend AX into DX.
     IdivBpRel { offset: i16 },
+    /// `div word ptr [bp+<offset>]` — F7 76 dd. Single-operand
+    /// unsigned divide of DX:AX by src; quotient in AX, remainder
+    /// in DX. Always preceded by `xor dx, dx` to zero the upper
+    /// half (vs signed which uses `cwd`). ModR/M `76` = mod=01
+    /// /6(DIV) r/m=110. Fixture 946.
+    DivBpRel { offset: i16 },
     /// `imul word ptr <group>:<symbol>[+<offset>]` — `F7 /5 r/m16`
     /// with mod=00 r/m=110 → `F7 2E lo hi` + FIXUPP. Single-operand
     /// signed multiply against a data-segment global. Fixture 809

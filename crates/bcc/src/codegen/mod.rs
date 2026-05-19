@@ -10237,33 +10237,42 @@ fn emit_op_with_source(out: &mut Vec<u8>, op: BinOp, src: &OperandSource, unsign
             }
         }
         BinOp::Div => {
+            // For unsigned operands BCC uses `xor dx, dx; div <r/m>` —
+            // zeros the upper half rather than sign-extending via
+            // `cwd`, and uses the unsigned `div` instruction. Fixture
+            // 946 (`unsigned a, b; return a / b;`).
+            let (widen, mnem) = if unsigned {
+                (&b"\txor\tdx,dx\r\n"[..], "div")
+            } else {
+                (&b"\tcwd\t\r\n"[..], "idiv")
+            };
             if let OperandSource::Immediate(v) = src {
-                // `idiv` has no immediate form. BCC materializes the
-                // divisor in BX, then `cwd; idiv bx`. Fixture 584
-                // already did this for compound `/=`; this is the
-                // expression-context sibling (no current fixture yet,
-                // but symmetric to the Mod arm below).
+                // `idiv`/`div` has no immediate form. BCC materializes
+                // the divisor in BX, then `<widen>; <mnem> bx`.
+                // Fixture 584 (signed compound `/=`), 946 (unsigned).
                 let v16 = v & 0xFFFF;
                 let _ = write!(out, "\tmov\tbx,{v16}\r\n");
-                out.extend_from_slice(b"\tcwd\t\r\n");
-                out.extend_from_slice(b"\tidiv\tbx\r\n");
+                out.extend_from_slice(widen);
+                let _ = write!(out, "\t{mnem}\tbx\r\n");
             } else {
-                out.extend_from_slice(b"\tcwd\t\r\n");
-                let _ = write!(out, "\tidiv\t{}\r\n", src.word());
+                out.extend_from_slice(widen);
+                let _ = write!(out, "\t{mnem}\t{}\r\n", src.word());
             }
         }
         BinOp::Mod => {
+            let (widen, mnem) = if unsigned {
+                (&b"\txor\tdx,dx\r\n"[..], "div")
+            } else {
+                (&b"\tcwd\t\r\n"[..], "idiv")
+            };
             if let OperandSource::Immediate(v) = src {
-                // `idiv` has no immediate form. BCC materializes the
-                // divisor in BX, then `cwd; idiv bx; mov ax, dx`.
-                // Fixture 613 (`return x % 7;`).
                 let v16 = v & 0xFFFF;
                 let _ = write!(out, "\tmov\tbx,{v16}\r\n");
-                out.extend_from_slice(b"\tcwd\t\r\n");
-                out.extend_from_slice(b"\tidiv\tbx\r\n");
+                out.extend_from_slice(widen);
+                let _ = write!(out, "\t{mnem}\tbx\r\n");
             } else {
-                out.extend_from_slice(b"\tcwd\t\r\n");
-                let _ = write!(out, "\tidiv\t{}\r\n", src.word());
+                out.extend_from_slice(widen);
+                let _ = write!(out, "\t{mnem}\t{}\r\n", src.word());
             }
             out.extend_from_slice(b"\tmov\tax,dx\r\n");
         }
