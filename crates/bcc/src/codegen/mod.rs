@@ -5198,11 +5198,14 @@ impl<'a> FunctionEmitter<'a> {
                 let _ = write!(self.out, "\tmov\t{},ax\r\n", reg.name());
             }
             BinOp::Shl | BinOp::Shr => {
-                // `<int-reg> <<= K` / `>>= K` — load K into CL, then
-                // shift the register. BCC always uses CL even for
-                // K=1 (no `<reg>,1` peephole at this slot). Fixture
-                // 537 (`int x in SI; x <<= 4` → `mov cl, 4; shl si,
-                // cl`).
+                // `<int-reg> <<= K` / `>>= K` — small K (1, 2, 3)
+                // unrolls into repeated single-bit shifts (`<mnem>
+                // <reg>, 1`) since each shift is 2 bytes (`D1 /r`)
+                // vs 5 bytes for the `mov cl, K; <mnem> <reg>, cl`
+                // pair (4 bytes for K, but 5 total). K >= 4 uses
+                // the CL load. Same threshold BCC uses in
+                // expression context (fixture 626). Fixtures 537
+                // (K=4, CL form) and 1022 (K=2, unrolled).
                 let signed = !self.locals.type_of(name).is_unsigned();
                 let mnem = match op {
                     BinOp::Shl => "shl",
@@ -5211,6 +5214,13 @@ impl<'a> FunctionEmitter<'a> {
                     _ => unreachable!(),
                 };
                 if let Some(k) = try_const_eval(value) {
+                    let k = k as u16;
+                    if (1..=3).contains(&k) {
+                        for _ in 0..k {
+                            let _ = write!(self.out, "\t{mnem}\t{},1\r\n", reg.name());
+                        }
+                        return;
+                    }
                     let k8 = k & 0xFF;
                     let _ = write!(self.out, "\tmov\tcl,{k8}\r\n");
                     let _ = write!(self.out, "\t{mnem}\t{},cl\r\n", reg.name());
