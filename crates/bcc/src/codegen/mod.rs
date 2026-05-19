@@ -2739,6 +2739,27 @@ impl<'a> FunctionEmitter<'a> {
     /// be there. For `int`, the standard 16-bit load.
     fn emit_arg_into_ax(&mut self, arg: &Expr, param_ty: Type) {
         if !param_ty.is_char_like() {
+            // Array-decay-to-pointer at call sites: passing the bare
+            // name of an array global (or array stack local) where a
+            // pointer parameter is expected means the array's address,
+            // not its value. BCC emits `mov ax, offset DGROUP:_<a>`
+            // (or `lea ax, word ptr [bp-N]` for stack arrays) rather
+            // than loading. Fixture 923.
+            if let ExprKind::Ident(name) = &arg.kind {
+                if let Some(gty) = self.globals.type_of(name)
+                    && gty.array_elem().is_some()
+                {
+                    let _ = write!(self.out, "\tmov\tax,offset DGROUP:_{name}\r\n");
+                    return;
+                }
+                if self.locals.has(name)
+                    && self.locals.type_of(name).array_elem().is_some()
+                    && let LocalLocation::Stack(off) = self.locals.location_of(name)
+                {
+                    let _ = write!(self.out, "\tlea\tax,word ptr {}\r\n", bp_addr(off));
+                    return;
+                }
+            }
             self.emit_expr_to_ax(arg);
             return;
         }
