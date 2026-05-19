@@ -1959,6 +1959,38 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## char `<<`, `-`, `~` as value
+
+Fixtures `959` (`char c = 3; return c << 2;` — char left
+shift by constant, returned as value), `960` (`char c = 5;
+return -c;` — unary negation of a char), `961` (`char c =
+0; return ~c;` — bitwise NOT of a char).
+
+All three already work end-to-end:
+
+- 959: char-shift-by-constant lowers the char to AX via
+  `mov al, byte ptr [bp-1]; cbw`, then unrolls the shift
+  into `shl ax, 1` repeated (count 2 → two `shl ax, 1`
+  instructions, same shape as int 121). The post-widening
+  result is int-sized, matching the integer promotion
+  rule.
+- 960: char unary minus mirrors the int 145/146 path —
+  widen via `cbw`, then `neg ax` (`F7 D8`). The byte
+  source produces a signed-extended int operand, so the
+  negation is computed on the int.
+- 961: char bitwise NOT is the analogous `~int` path —
+  widen via `cbw`, then `not ax` (`F7 D0`). Same byte
+  count as the unary-minus path; the only difference is
+  the Group-3 sub-op (/2 for NOT vs /3 for NEG).
+
+The common shape across 959/960/961 confirms that the
+char-promotion-to-int rule is baked into every unary and
+binary expression-position emit. No char-sized arithmetic
+instructions are used in expression context — char
+arithmetic that stays char-sized is restricted to compound
+assigns where the destination is char-typed (fixtures
+529, 666–674, etc.).
+
 ## char OR / XOR const, char `!` as value
 
 Fixtures `956` (`char c = 15; return c | 4;` — char bitwise
