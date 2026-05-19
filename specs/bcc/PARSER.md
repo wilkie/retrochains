@@ -1959,6 +1959,42 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## unsigned int mod, div-by-const, compound `/=`
+
+Fixtures `947` (`unsigned a, b; return a % b;` — uint mod
+with var RHS), `948` (`unsigned a; return a / 7;` — uint div
+by constant), `949` (`unsigned g; unsigned b; g /= b;` — uint
+global compound divide-assign with int-local RHS).
+
+947 already passed end-to-end via the batch-209 fix — the
+expression-context `BinOp::Div`/`Mod` arms in
+`emit_op_with_source` route on `unsigned` and pick `xor dx,
+dx; div` whenever the LHS expression is unsigned. The mod-
+case is a free pass because the same widen-and-divide prefix
+applies; only the result register differs (`dx` for `%`, `ax`
+for `/`).
+
+948 needed a new tasm IR variant — the immediate-divisor
+path materializes the divisor in BX and then divides by BX
+(register operand, not memory). `IdivReg16` already covered
+the signed case; added `DivReg16 { reg }` for the unsigned
+case. Encoding is `F7 (mod=11 /6 r/m=<reg>)` — same Group3
+opcode as `IdivReg16`, just with /6 instead of /7. Parser
+recognizes bare `div <reg>` after the `div al,byte ptr ...`
+form has been ruled out.
+
+949 needed a per-site codegen patch. The
+`g <op>= local-RHS` path for div/mod with int-uint locals
+(line ~4413, the "Int/uint global compound `/=` / `%=` with
+an int/uint local RHS" arm) was hard-coded to `cwd; idiv`.
+Added the same `unsigned`-flag branch we added in batch 209
+to `emit_op_with_source` — when the LHS global is `UInt`,
+pick `xor dx, dx; div` instead. There are several more
+compound-assign sites with hardcoded `cwd; idiv` (lines
+~4340 for the deref-pointer RHS, ~4471 for the char-RHS
+widening dance, ~6383 for the long-pointer paths); future
+fixtures that hit those paths will need the same fix.
+
 ## unsigned int add, mul, div — `xor dx, dx; div`
 
 Fixtures `944` (`unsigned a = 5; unsigned b = 10; return a +
