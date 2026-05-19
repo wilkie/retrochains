@@ -1959,6 +1959,28 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Do-while counter, int mask then shl, int lt-const as int
+
+Fixtures `1169` (`int i=0; do { i++; } while (i<3);
+return i;` — minimal do-while loop with a counter,
+sibling of the 1158 while-counter shape), `1170`
+(`int a=0x123; int x = (a & 0xff) << 4; return x;` —
+mask-then-shift composition with hex constants),
+`1171` (`int a=5; int r = a<10; return r;` —
+compare-against-const variant of the lt-cmp family,
+sibling of 1166 where both sides were variables).
+
+All three already worked end-to-end. 1169 emits a
+top-label, body, then conditional `jl` back to the
+top — the do-while shape skips the entry-condition
+test and falls into the body once unconditionally
+(slot layout has only the top label, no fall-through
+exit slot). 1170 evaluates `(a & 0xff)` into AX with
+`and ax, 255` and then `shl ax, 4` (CL form per the
+batch-110 threshold: K=4 → CL). 1171 swaps the
+variable RHS for an `imm16` in the compare —
+`cmp ax, 10` rather than `cmp ax, [bp-Nb]`.
+
 ## Int lt-cmp as int, int gt-cmp as int, comma op in init
 
 Fixtures `1166` (`int a=3; int b=5; int r = a<b;
