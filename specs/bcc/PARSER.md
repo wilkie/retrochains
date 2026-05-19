@@ -1959,6 +1959,35 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Ptr local cmp zero, struct field var-RHS write, member cmp
+
+Fixtures `989` (`int *p; p = &g; if (p == 0) return 1;` —
+pointer local compared to zero in if), `990` (`s.x = v;`
+with v a stack local — struct field assigned from non-
+constant), `991` (`s.x = 5; if (s.x == 5)` — struct field
+compared to constant in if).
+
+989 already worked via the existing `if (var == 0)` zero-
+test path — pointer locals route through the same
+`cmp word ptr <var>, 0` shape as integer locals (the
+`pointee.is_some()` branch in the local-Ident arm).
+
+990 needed a small extension to `emit_member_assign`. The
+existing path panicked on non-const RHS. Added an int-field
+non-const arm: `emit_expr_to_ax(value); mov word ptr
+<dest>, ax`. Same shape as BCC: `mov ax, [bp-N]; mov word
+ptr DGROUP:_s, ax`. Restricted to non-char fields for now.
+
+991 exposed a missing memory-direct compare peephole for
+`<member-or-array> == const` against a global root. The
+batch-220/221 peephole only covered stack-local roots.
+Generalized that arm: when `try_lvalue_chain_addr` resolves
+to a global root, emit `cmp word ptr DGROUP:_<name>+off, K`
+(or byte form). Sibling of the local-root case, identical
+mnemonic and immediate-handling. Now covers `s.x`, `s.b.x`,
+`g.a[K]`, etc., on both globals and locals — every chain
+that resolves to a constant memory address.
+
 ## Stack array elem `&=` const, elem-to-elem copy, var-RHS compound
 
 Fixtures `986` (`int a[3]; ... a[1] &= 0x0F;` — stack int
