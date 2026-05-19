@@ -1959,7 +1959,37 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
-## Int-ptr from array+2, stack array assign from local, init then add
+## Three-way int sub, char postinc-as-stmt, comma-expr return
+
+Fixtures `1055` (`int a = 10; int b = 3; int c = 2;
+return a - b - c;` — three-way left-associative
+subtraction across three stack locals, sibling of
+fixture 1032's add form), `1056` (`char c = 'A'; c++;
+return c;` — char postincrement positioned as a stmt
+on its own line, value discarded), `1057` (`int x;
+return (x = 5, x + 1);` — int returned from a comma
+expression with an assignment side-effect).
+
+1055 and 1057 already worked end-to-end. 1057's comma
+expression evaluates `x = 5` for its side effect, then
+the comma value is `x + 1`, which is what gets returned
+— routed through the standard return-int path.
+
+1056 emitted 4 extra bytes — our `emit_update_in_place`
+arm for byte-register locals always stages through AL
+(`mov al, <reg>; inc al; mov <reg>, al`), but BCC only
+uses that for *pre*-increment. For *post*-increment as
+a discarded stmt, BCC emits the direct `inc <reg>` form
+(2 bytes).
+
+Pre vs post matters even when the value is discarded
+because BCC's frontend lowers them through different
+paths. Updated the byte-register arm to split: pre keeps
+the AL detour (fixtures 047/050–054/123–125/148/156 all
+exercise this); post emits `inc <reg>` / `dec <reg>`
+directly.
+
+
 
 Fixtures `1052` (`int a[4]; int *p = a + 2; a[2] = 55;
 return *p;` — sibling of fixture 1047 with K=2 instead
