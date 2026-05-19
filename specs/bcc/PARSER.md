@@ -1959,6 +1959,22 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Long compound add var, int return ne as value, neg of bitwise NOT
+
+Fixtures `1148` (`long g = 100L; long x = 5L; g += x;
+return (int)g;` — long global compound add by a local
+long var RHS), `1149` (`int a=5; int b=5; return a !=
+b;` — int return of != compare with the boolean result
+materialized as 0 or 1), `1150` (`int x = 5; return
+-~x;` — int return of negation of bitwise complement,
+the identity `-~x == x+1`).
+
+All three already worked end-to-end. 1148 uses the
+long compound add-with-carry path. 1149 emits the
+compare-as-value sequence with the `jne`/`xor ax,ax`
+boolean materialization. 1150 emits `mov ax, [bp-N];
+not ax; neg ax`.
+
 ## Int swap via temp, global long neg init, int sub-then-add
 
 Fixtures `1145` (`int a=1; int b=2; int t; t=a; a=b;
