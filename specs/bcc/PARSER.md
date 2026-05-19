@@ -1959,6 +1959,51 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Array-elem cmp self, uchar shr var, uchar shr const
+
+Fixtures `1013` (`if (a[0] == a[1])` — two stack-array
+elements compared to each other), `1014` (`uchar c; int n;
+return c >> n;` — uchar shifted by a variable count), `1015`
+(`uchar c = 128; return c >> 2;` — uchar shifted by a
+constant).
+
+1013 already worked end-to-end via the batch-220 rvalue
+ArrayIndex fallthrough — both operands resolve to `[bp+N]`
+operand sources, the compare emits `mov ax, [bp+N1]; cmp
+ax, [bp+N2]` then dispatches the signed jump.
+
+1014 and 1015 exposed a missed signedness rule. C's integer
+promotion converts char/uchar to *signed* int (because int
+can hold all char values), and the `>>` mnemonic should
+follow the promoted type — `sar` (arithmetic shift right)
+for signed int, not `shr` (logical shift right). Our
+codegen was carrying the operand's declared `unsigned`-ness
+through to the shift dispatch, so uchar got `shr` while
+BCC emits `sar`.
+
+Fix is a new helper `expr_shift_is_unsigned`: same as
+`expr_is_unsigned` but flattens char-like types to "not
+unsigned" (since they promote to signed int). The shift-
+dispatch site in `emit_expr_to_ax`'s BinOp path uses this
+variant for `Shr` only — comparisons keep using
+`expr_is_unsigned` because BCC actually departs from strict
+C90 promotion semantics there: uchar compares pick *unsigned*
+jumps (`jbe`/`jae`), not signed (fixture 459). Two distinct
+"unsigned" interpretations:
+
+|             | Shift (`>>`)         | Compare (`<`,`>=`, etc.) |
+|-------------|---------------------|--------------------------|
+| `int`       | sar (signed)        | jl/jge (signed)          |
+| `unsigned`  | shr (logical)       | jb/jae (unsigned)        |
+| `char`      | sar (signed)        | jl/jge (signed)          |
+| `uchar`     | sar (signed)        | jb/jae (unsigned)        |
+
+The shift column follows strict C promotion; the compare
+column follows BCC's choice of preserving the operand's
+unsignedness past the promotion. This was caught by 1015
+breaking the pre-existing 459 fixture during initial fix
+attempt — split the helpers to keep both byte-exact.
+
 ## char + int const, int cmp -1, int mul -3
 
 Fixtures `1010` (`char c = 1; return c + 100;` — char + int
