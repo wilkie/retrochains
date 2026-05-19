@@ -1959,6 +1959,44 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Global `--`/`++` in expression — postdec, char postinc, predec
+
+Fixtures `965` (`int g; x = g--;` — int global postdec as
+value), `966` (`char g; x = g++;` — char global postinc as
+value), `967` (`int g; x = --g;` — int global predec as
+value).
+
+965 and 967 already passed via batch 215's
+`emit_update_to_ax` fast-path plus the postinc-deferred
+peephole — `--` is just `inc` swapped for `dec` at every
+site, no separate code needed.
+
+966 needed a sibling peephole. The same ordering subtlety
+from 963 applies to char globals: BCC emits
+
+  mov al, byte ptr DGROUP:_g
+  cbw                           ; widen captured byte
+  mov word ptr [bp-2], ax       ; store to x
+  inc byte ptr DGROUP:_g        ; mutate AFTER store
+
+Whereas the generic `emit_update_to_ax` Post arm emits the
+inc *before* the widen+store. Added a char-global Post
+arm to the stack-local-assign peephole: load AL, widen
+(cbw or `mov ah, 0` for uchar), store AX to local, then
+deferred memory-direct inc/dec on the byte.
+
+After this batch the four-shape grid is complete:
+
+|              | Pre              | Post                  |
+|--------------|------------------|-----------------------|
+| int global   | inc + load (962) | load + store + inc (963) |
+| char global  | load + inc + cbw (964) | load + widen + store + inc (966) |
+
+The Post cases need the dedicated stack-assign peephole;
+the Pre cases work through the generic
+`emit_update_to_ax` because there's no use-vs-mutate
+ordering question.
+
 ## Global `++` / `--` in expression context
 
 Fixtures `962` (`int g; x = ++g;` — int global preinc as
