@@ -1959,6 +1959,34 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Global `++`/`--` in return and arithmetic
+
+Fixtures `968` (`return g++;` — int global postinc in return),
+`969` (`return ++g;` — int global preinc in return), `970`
+(`return g++ + 1;` — int global postinc as an arithmetic
+operand).
+
+All three work end-to-end after batches 215/216. In return
+position there's no follow-on `mov [bp-2], ax` store to
+defer past, so the generic `emit_update_to_ax` shape (load
++ inc together for post; inc + load for pre) lands in AX
+and the return path consumes it directly. No deferred-side-
+effect peephole is needed because the function-exit jump
+follows immediately.
+
+For 970, BCC emits `mov ax, g; inc word ptr g; add ax, 1`
+— the same load+inc pair from `emit_update_to_ax`, with
+the binary `+ 1` becoming the standard `add ax, K` step.
+The captured pre-update value flows into the arithmetic
+unchanged. Byte-for-byte match.
+
+Conclusion: the deferred-side-effect peephole from 963 /
+966 is specific to the `<stack-local> = <global>++/--`
+shape — when the use is a return, an arithmetic operand,
+or a function call, the side effect naturally happens
+before the value flows further, so the generic load+mutate
+ordering matches BCC.
+
 ## Global `--`/`++` in expression — postdec, char postinc, predec
 
 Fixtures `965` (`int g; x = g--;` — int global postdec as
