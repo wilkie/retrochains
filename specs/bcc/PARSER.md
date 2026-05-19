@@ -1959,6 +1959,31 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Int shr then mask, while multi-stmt, int assign-then-mul
+
+Fixtures `1181` (`int a=0x123; int x = (a>>4) &
+0xf; return x;` — extract-nibble pattern, shift then
+mask), `1182` (`int i=0; int s=0; while (i<4) { s
+= s + i; i = i + 1; } return s;` — while loop with
+a compound body containing two assignments), `1183`
+(`int a=3; int b=4; int x; x = a+b; return x*2;` —
+uninitialized declaration followed by an assignment,
+then the value is reused in a different statement).
+
+All three already worked end-to-end. 1181 emits the
+straight `mov ax, [bp-Na]; mov cl, 4; shr ax, cl;
+and ax, 15` sequence — both halves of the
+extract-nibble compose cleanly in AX without spill
+since the mask is an immediate. 1182's while body
+is a brace-block compound that the loop lowering
+already handles — emit each statement in sequence
+between the top label and the back-jump. 1183
+confirms the locals planner correctly tracks the
+declared-but-not-initialized `x` slot (no init
+emitted at the declaration site) and then the
+subsequent assignment uses the same word-store path
+as any other int assign.
+
 ## Int and-const-one, uint shr by const, int deref then add
 
 Fixtures `1178` (`int a=7; int x = a & 1; return
