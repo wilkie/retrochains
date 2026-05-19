@@ -1959,6 +1959,54 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## uint compound `%=`, char-vs-char compare peephole
+
+Fixtures `950` (`unsigned g; unsigned b; g %= b;` — uint
+global compound mod-assign), `951` (`char c, d; return c ==
+d;` — char-vs-char `==` as value), `952` (`return c < d;` —
+char-vs-char `<` as value).
+
+950 already passed via the batch-210 fix — the same arm at
+emit_compound_assign:~4413 covers both `/=` and `%=`, and
+the `gty.is_unsigned()` branch picks `xor dx, dx; div` for
+both ops. Only the result-register selection differs (`ax`
+for `/`, `dx` for `%`).
+
+951 and 952 exposed a long-standing missed peephole. The
+generic compare path was always emitting:
+
+  mov al, byte ptr [bp-1]
+  cbw                          ; widen to AX
+  cmp ax, word ptr [bp-2]      ; word-sized compare
+
+BCC instead emits a byte-byte compare with no widening:
+
+  mov al, byte ptr [bp-1]
+  cmp al, byte ptr [bp-2]      ; byte-byte compare
+
+Two savings: one byte for the elided `cbw`, plus the
+3-byte byte-form cmp (`3A 46 dd`) is one byte shorter than
+the 4-byte word-form `cmp ax, [bp-N]` (`3B 46 dd`). Net
+1-byte shrink per char-vs-char compare. Signed-vs-unsigned
+character interpretation is encoded in the *jump* selection
+(jl/jb), not in the cmp operand width — so the peephole is
+safe across signedness combinations.
+
+Implementation:
+
+- Added a fast-path arm at the top of `emit_compare`,
+  before the generic `emit_expr_to_ax(left)` fallthrough:
+  when both LHS and RHS are char-typed stack-resident
+  identifiers, emit `mov al, byte ptr <lhs>; cmp al, byte
+  ptr <rhs>` and return early.
+- New tasm IR variant `CmpAlBpRel { offset }` encoding the
+  three-byte form `3A 46 dd`. Parser recognizes `cmp
+  al,byte ptr [bp+N]` before the existing `cmp ax,…` arm.
+- Currently restricted to stack-resident locals — a future
+  fixture exercising char globals or char-register operands
+  would extend the peephole symmetrically (or use a more
+  general `CmpReg8Reg8`/`CmpReg8Mem8` shape).
+
 ## unsigned int mod, div-by-const, compound `/=`
 
 Fixtures `947` (`unsigned a, b; return a % b;` — uint mod
