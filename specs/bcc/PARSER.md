@@ -1959,6 +1959,24 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Int lt-cmp as int, int gt-cmp as int, comma op in init
+
+Fixtures `1166` (`int a=3; int b=5; int r = a<b;
+return r;`), `1167` (`int a=5; int b=3; int r =
+a>b; return r;`), `1168` (`int a=0; int b = (a=1,
+a+2); return b;` — comma operator as the initializer
+expression: side-effect the LHS (assign a), discard,
+then take the RHS value as the init value).
+
+All three already worked end-to-end. 1166/1167 complete
+the signed compare-as-int family alongside `==/!=/<=/>=`
+(1149/1159 and 1160/1163) using the matching `jl`/`jg`
+arms. 1168 reuses the existing comma-expression
+lowering: the LHS is emitted via `emit_expr_discard`
+(so `a = 1` writes to a's slot but doesn't leave a
+result in AX), then the RHS `a + 2` is evaluated into
+AX and the int-init store writes it to b.
+
 ## Int le-cmp as int, int shl by var, int mul by three
 
 Fixtures `1163` (`int a=3; int b=5; int r = a<=b;
