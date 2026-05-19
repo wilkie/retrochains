@@ -1959,7 +1959,41 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
-## Unsigned cmp const, sequential postinc, int shr const as value
+## Int cmp ne const, three-way add, int from neg local
+
+Fixtures `1031` (`int x = 5; if (x != 7) return 1; return
+0;` — int local compared with `!=` against a non-zero
+constant; the not-equal branch picks `je` as the "fall-
+through" jump), `1032` (`int a = 1; int b = 2; int c = 3;
+return a + b + c;` — three-way left-associative addition
+across three stack locals), `1033` (`int x = 5; int y =
+-x; return y;` — unary negation of a stack-local
+materialized into AX, then stored back to a second stack
+local).
+
+All three already worked end-to-end:
+
+- 1031: `!=` in if-condition lowers via the existing
+  compare-then-jump arm with `je <skip>` as the inverse-
+  branch dispatch. RHS is `7` (imm8sx), encoded via
+  `cmp word ptr [bp-N], 7` (`83 7E dd 07`, 4 bytes).
+  Already covered alongside `==` (its sibling), which we
+  captured back when `if (x == K)` first landed.
+- 1032: `a + b + c` parses left-associatively as `(a +
+  b) + c`. The codegen evaluates `a + b` into AX (load a,
+  add b), then adds c directly: `mov ax, [bp-N1]; add
+  ax, [bp-N2]; add ax, [bp-N3]`. No push/pop pair needed
+  since the LHS of the outer `+` already lives in AX
+  when the RHS is a memory-direct load. The mem-direct
+  binop arm was added back during the early arith
+  batches.
+- 1033: `-x` lowers via `emit_unary_neg`: load `x` into
+  AX, then `neg ax`. The init `int y = -x` stores AX to
+  `y`'s slot via the standard assign-local path. Already
+  covered (batch 110's sibling probe noted in passing
+  during fixture 650's free-pass).
+
+
 
 Fixtures `1028` (`unsigned int x = 100; if (x > 5) return 1;
 return 0;` — unsigned-typed local compared against an
