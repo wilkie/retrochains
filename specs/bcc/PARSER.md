@@ -1959,7 +1959,30 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
-## Char compound add var, int return char shr, sizeof used array
+## Char compound sub var, char init neg literal, int div by var
+
+Fixtures `1097` (`char a = 20; char b = 5; a -= b;
+return a;` — char compound sub-assign with a char-var
+RHS, sibling of fixture 1094's add form), `1098`
+(`char c = -5; return c;` — char init from a negative
+int literal that fits in the byte width), `1099` (`int
+x = 100; int y = 3; return x / y;` — int division by
+a variable RHS in return position).
+
+All three already worked end-to-end:
+
+- 1097: char compound `-= b` lowers via the standard
+  char-compound path: `mov al, <a>; sub al, <b>; mov
+  <a>, al`. Already covered.
+- 1098: `-5` constant-folds to 0xFB at parse time, then
+  the char-init constant path emits `mov byte ptr
+  [bp-N], 251` (the unsigned-wrapped byte value).
+  Already covered.
+- 1099: `x / y` lowers to `mov ax, [bp-Nx]; cwd; idiv
+  word ptr [bp-Ny]` then returns AX. The div-by-var
+  path was added in slice 200's idiv arm.
+
+
 
 Fixtures `1094` (`char a = 10; char b = 3; a += b;
 return a;` — char compound add-assign with a char-var
