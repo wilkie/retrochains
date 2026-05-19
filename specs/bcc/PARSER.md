@@ -1959,6 +1959,55 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## char + int const, int cmp -1, int mul -3
+
+Fixtures `1010` (`char c = 1; return c + 100;` — char + int
+constant in return), `1011` (`int x = -1; if (x == -1)` —
+int compared to negative literal), `1012` (`int x = 5;
+return x * -3;` — int times a negative non-power-of-2
+constant).
+
+All three already work end-to-end:
+
+- 1010: char widens via cbw, then `add ax, 100` against the
+  int-sized constant. Sibling of fixture 607 (`return c +
+  1`) — same widen-then-add shape; the integer constant
+  fits imm8sx.
+- 1011: existing `<int-local, const>` cmp arm emits `cmp
+  word ptr [bp-2], -1` (3 bytes via imm8sx, `83 7E FE FF`).
+  The negative literal is sign-extended at the assembly
+  level; the OBJ encoder picks `-1` as `FF` byte.
+- 1012: `x * -3` materializes -3 in DX (`mov dx, -3` →
+  imm16 form since -3 doesn't fit imm8 for `mov r16,
+  imm`), then `imul dx`. Negative constants don't trip the
+  power-of-2 unrolling path (which checks `k > 0`), so
+  they uniformly take the DX-load shape.
+
+**Recorded finding (deferred):**
+
+- **Non-static stack array initializer** (`int a[3] =
+  {10, 20, 30};`): codegen panics "non-constant init for
+  non-int-like type". BCC's actual lowering is interesting
+  — it emits the init data as raw `db` bytes in `_DATA`,
+  then calls `N_SCOPY@` to copy 6 bytes from DGROUP onto
+  the stack slot:
+    push ss
+    lea ax, [bp-6]
+    push ax
+    push ds
+    mov ax, offset DGROUP:d@w+0
+    push ax
+    mov cx, 6
+    call near ptr N_SCOPY@
+  Implementing this needs the codegen path for non-static
+  array locals with init to (a) append the literal bytes to
+  the data table, (b) emit the 7-instruction copy
+  preamble, and (c) wire the helper-symbol registration
+  (`N_SCOPY@`) for emit-time fixup. Same helper used by
+  the struct-copy path (fixtures 416/418); the difference
+  is that the source comes from a *literal* DGROUP segment
+  rather than a named global.
+
 ## Arrow field cmp const (peephole), array elem cmp, ternary in return
 
 Fixtures `1007` (`if (p->x == 5)` with p in SI — addresses
