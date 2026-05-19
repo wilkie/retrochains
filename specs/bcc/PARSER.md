@@ -1959,6 +1959,41 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Enum as array size, array elem cmp local, char return in arith
+
+Fixtures `1004` (`enum { N = 4 }; int a[N];` — enum constant
+used as an array size in a global decl), `1005` (`if (a[1]
+== x)` — stack-array element compared to a local variable),
+`1006` (`char f(void) { return 'A'; } return f() + 1;` — a
+char-returning function call used as an arithmetic operand).
+
+1004 needed a parser extension. The global-decl array-size
+grammar only accepted `IntLit` tokens — enum constants
+(stored in `self.enum_constants`) were rejected with
+"expected array size (integer literal), got identifier".
+Extended the size-token match to also accept `Ident`,
+looking up the name in the enum-constant table. The error
+message also gained "(integer literal or enum constant)" to
+reflect both forms. Same fix is still needed at the other 4
+array-size sites (typedef'd array types, struct fields,
+local declarations) — only the global-decl site is fixture-
+covered today.
+
+1005 already worked end-to-end. The compare-as-value path
+materialized the LHS array element through the batch-220
+operand-source rvalue and then ran the standard
+`mov ax, [bp+elem_off]; cmp ax, [bp+x_off]` shape. The
+memory-direct compare peephole (batch 220) only fires for
+constant RHS — here the RHS is a stack local, so the
+generic path applies.
+
+1006 already worked end-to-end. `char f()` returns its
+value in AL only; the caller calls `cbw` to widen AL→AX
+(signed-char) or `mov ah, 0` (uchar) before the
+arithmetic. Fixture 562/607 covered the widening side; this
+confirms the widened AX feeds straight into a subsequent
+`+ 1` via the standard `add ax, 1` op.
+
 ## Char stack array elem compound, postinc, arrow var-RHS
 
 Fixtures `1001` (`char a[3]; a[1] += 5;` — char stack array
