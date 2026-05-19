@@ -1959,7 +1959,35 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
-## Char init from char member, global int sub const, deref ptr to global
+## Int sum three locals, global int array neg init, mul then sub
+
+Fixtures `1127` (`int a = 1, b = 2, c = 3; int r = a +
+b + c; return r;` — three-way int sum stored into a
+local before return), `1128` (`int g[3] = {-1, -2,
+-3}; return g[0] + g[1] + g[2];` — global int array
+with negative initializer values), `1129` (`int a = 7;
+int b = 3; int c = 5; return a * b - c;` — return of
+mul-then-sub with three int locals).
+
+All three already worked end-to-end. 1127 and 1129
+exercise the int-binop chain (add-add and mul-sub).
+1128's negative-init stores each value as its
+unsigned-wrapped i16 form (`-1` → 0xFFFF, etc.) in the
+`dw` directive.
+
+**Recorded finding (deferred):**
+
+- Probed `struct S { char c; }; struct S *p = &s; char
+  b = p->c; return b;` as fixture 1127 first draft.
+  Hit the char-init panic — the batch-269 peephole
+  handles `Dot`-kind Member sources but not `Arrow`.
+  The Arrow form needs `mov bx, word ptr [bp-Np];
+  mov al, byte ptr [bx+field_off]; mov byte ptr
+  <dest>, al`, not the compile-time-folded address of
+  the Dot path. Deferred until a fixture forces the
+  pointer-dereferenced char-init shape.
+
+
 
 Fixtures `1124` (`struct S { char c; }; struct S s =
 {'Q'}; char b = s.c; return b;` — char init from a
