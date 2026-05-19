@@ -1959,6 +1959,30 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## char OR / XOR const, char `!` as value
+
+Fixtures `956` (`char c = 15; return c | 4;` — char bitwise
+OR with int constant, returned as value), `957` (`return c
+^ 4;` — char XOR const), `958` (`char c = 0; return !c;` —
+logical NOT of a char as a return value).
+
+All three already work end-to-end:
+
+- 956 / 957: the existing char-with-int-const arithmetic
+  path widens the char via `cbw` (or `mov al, byte ptr
+  [bp-1]; cbw`) and then emits `or ax, 4` / `xor ax, 4`
+  against an int-typed AX. The 16-bit OR/XOR with a small
+  constant uses the imm8sx Group-1 encoding (`83 /1 dd ii`
+  for OR, `83 /6 dd ii` for XOR), one byte shorter than the
+  imm16 form. Sibling of fixture 609 (char AND const).
+- 958: `!c` for a char operand lowers exactly like `!int` —
+  the operand is widened to AX, then the boolean-NOT
+  materialization runs through the standard mini-CFG
+  (`or ax, ax; jz .true; xor ax, ax; jmp .end; .true: mov
+  ax, 1; .end:`). The widening is `mov al, byte ptr [bp-1];
+  cbw`, and the rest is the same as fixture 618's `!x`
+  path on int.
+
 ## char compare to int/char-literal as value, uint neg
 
 Fixtures `953` (`char c = 5; return c < 10;` — char-vs-int
