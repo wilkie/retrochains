@@ -840,6 +840,14 @@ fn parse_mov(operands: &str, line_no: usize) -> AsmResult<Instr> {
             }
             return Ok(Instr::MovDxSiDisp { disp });
         }
+        // `mov dx,word ptr [bx+disp8]` — DX gets the low half of
+        // a long-pointer-subscript value before an inline shift
+        // (fixture 904: `long *p; p[K] <<= N`).
+        if let Some(disp) = parse_word_bx_disp(rhs)
+            && disp != 0
+        {
+            return Ok(Instr::MovDxBxDisp { disp });
+        }
     }
     if lhs == "ax" {
         if rhs == "word ptr [si]" {

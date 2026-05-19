@@ -1301,6 +1301,11 @@ pub enum Instr {
     /// with reg=DX(010) r/m=111=BX+disp8. Used by `int *p; p[K]
     /// %= y` (fixture 884: mod result is in DX after `idiv`).
     MovBxDispDx { disp: i8 },
+    /// `mov dx,word ptr [bx+disp8]` — `8B 57 dd`. MOV r16,r/m16
+    /// with reg=DX(010) r/m=111=BX+disp8. Used by `long *p; p[K]
+    /// <<= N` — DX gets the low half before the inline shift
+    /// (fixture 904).
+    MovDxBxDisp { disp: i8 },
     /// `mov word ptr [bx+disp8],<imm16>` — `C7 47 dd lo hi`. MOV
     /// r/m16,imm16 (Group with /0) at mod=01 r/m=111=BX+disp8.
     /// Used by `long *p; p[K] = v` — two memory-direct stores at

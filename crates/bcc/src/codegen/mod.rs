@@ -6008,6 +6008,32 @@ impl<'a> FunctionEmitter<'a> {
                 "[bx]".to_owned()
             };
             let _ = write!(self.out, "\tmov\tbx,word ptr DGROUP:_{array}\r\n");
+            // Shift K=1 special-case: BCC reloads BX between the
+            // register-arith and the store-back (BCC doesn't keep
+            // BX alive across `shl/rcl`). The shared helper doesn't
+            // know about the BX reload, so we inline this shape
+            // here rather than routing through it. Fixture 904
+            // (`p[1] <<= 1`).
+            if matches!(op, BinOp::Shl | BinOp::Shr)
+                && let Some(n) = try_const_eval(value)
+                && n == 1
+            {
+                let unsigned = pointee.is_unsigned();
+                let _ = write!(self.out, "\tmov\tax,word ptr {hi_addr}\r\n");
+                let _ = write!(self.out, "\tmov\tdx,word ptr {lo_addr}\r\n");
+                if matches!(op, BinOp::Shl) {
+                    self.out.extend_from_slice(b"\tshl\tdx,1\r\n");
+                    self.out.extend_from_slice(b"\trcl\tax,1\r\n");
+                } else {
+                    let hi_op = if unsigned { "shr" } else { "sar" };
+                    let _ = write!(self.out, "\t{hi_op}\tax,1\r\n");
+                    self.out.extend_from_slice(b"\trcr\tdx,1\r\n");
+                }
+                let _ = write!(self.out, "\tmov\tbx,word ptr DGROUP:_{array}\r\n");
+                let _ = write!(self.out, "\tmov\tword ptr {hi_addr},ax\r\n");
+                let _ = write!(self.out, "\tmov\tword ptr {lo_addr},dx\r\n");
+                return;
+            }
             self.emit_long_compound_to_mem(&lo_addr, &hi_addr, op, value, pointee.is_unsigned());
             return;
         }
