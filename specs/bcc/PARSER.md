@@ -1959,7 +1959,24 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
-## Char compound shr const, global int compound add const, bitwise NOT global
+## Struct array elem access, char compound div const, return global array elem
+
+Fixtures `1121` (`struct S { int x; }; struct S arr[2];
+arr[0].x = 5; arr[1].x = 7; return arr[0].x + arr[1].x;`
+— struct array element access with field assignment
+and read), `1122` (`char c = 20; c /= 4; return c;` —
+char compound div by constant), `1123` (`int g[3] =
+{10, 20, 30}; return g[1];` — return of global int
+array element).
+
+All three already worked end-to-end. 1121 lays out
+arr[2] as a stack region of 4 bytes (2 structs × 2
+bytes each), with `arr[0].x` at `[bp-4]` and `arr[1].x`
+at `[bp-2]`. 1122's char `c /= 4` lowers via the
+existing char-compound div path. 1123 emits `mov ax,
+word ptr DGROUP:_g+2`.
+
+
 
 Fixtures `1118` (`char c = 16; c >>= 2; return c;` —
 char compound shift-right by constant), `1119` (`int g
