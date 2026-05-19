@@ -1959,6 +1959,42 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Int swap via temp, global long neg init, int sub-then-add
+
+Fixtures `1145` (`int a=1; int b=2; int t; t=a; a=b;
+b=t;` — classic three-step swap exercising reg-to-mem
+and mem-to-reg copies between register and stack
+locals), `1146` (`long g = -1000L; return (int)g;` —
+global long with negative init), `1147` (`int a = 10;
+int b = 3; int c = 2; return a - b + c;` — left-
+associative sub-then-add chain).
+
+1146 and 1147 already worked end-to-end.
+
+1145 exercised two missed peepholes simultaneously:
+`t = a` (reg-to-mem) emitted `mov ax, si; mov [bp-N],
+ax` instead of BCC's `mov [bp-N], si`; `b = t` (mem-
+to-reg) emitted `mov ax, [bp-N]; mov di, ax` instead
+of `mov di, [bp-N]`.
+
+Added two siblings of the batch-275 reg-to-reg
+peephole:
+
+- **Mem-to-reg in `emit_store_reg`**: when the RHS is a
+  bare-ident naming a stack-resident plain `int`
+  local, emit `mov <reg>, word ptr [bp-N]` directly.
+- **Reg-to-mem in `emit_assign_local`**: when both the
+  destination and the RHS are plain `int` locals (dest
+  on stack, RHS in a register), emit `mov word ptr
+  [bp-N], <reg>` directly.
+
+Both are restricted to `Type::Int` exact match to
+avoid affecting pointer/array/char/long paths that
+have their own decay or widening sequences (a too-
+broad initial filter incorrectly matched stack-array-
+ident sources, breaking the array-decay-to-pointer
+shape — narrowed before commit).
+
 ## Global int compound add var, int reg-to-reg assign, global char xor const
 
 Fixtures `1142` (`int g = 10; int x = 5; g += x;
