@@ -1959,6 +1959,32 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Char shr const, char cmp int local, static-local init
+
+Fixtures `995` (`char c = 16; return c >> 2;` — char right-
+shift by a const, returned as value), `996` (`char c = 5;
+int x = 5; if (c == x)` — char compared to int local, mixed
+widths), `997` (`static int s = 42; return s;` — function-
+local static with non-zero initializer).
+
+All three already work end-to-end:
+
+- 995: char unrolls into widen-then-shift — `mov al, [bp-1];
+  cbw; sar ax, 1; sar ax, 1` (count=2). Promoted-to-int
+  pattern matches fixture 121's `<<` sibling. The signed
+  `sar` is chosen because char is signed by default in BCC.
+- 996: char-vs-int compare widens the char operand to int
+  first via cbw, then runs the standard `cmp ax, [bp-N]`.
+  The char is the LHS — `emit_compare` doesn't see the
+  char-vs-char fast-path (RHS is int), so the generic
+  promote-and-compare path handles it. BCC emits `mov al,
+  byte ptr [bp-1]; cbw; cmp ax, word ptr [bp-4]`.
+- 997: static locals with non-zero init are emitted in
+  `_DATA` rather than `_BSS` (since BSS only holds zero-
+  initialized symbols). Same shape as fixture 161/162 —
+  the static-local-with-init path was already covered;
+  this confirms it for a non-zero value.
+
 ## Shift by 8, char struct field cmp, two-field struct add
 
 Fixtures `992` (`int x = 1; return x << 8;` — shift by a
