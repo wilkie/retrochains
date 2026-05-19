@@ -1959,6 +1959,25 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Int OR of shift and val, while counter to three, char eq zero as int
+
+Fixtures `1157` (`int a=3; int b=5; int x=(a<<4)|b;
+return x;` — bitwise OR of a left-shifted value and a
+local, the classic nibble-packing pattern), `1158`
+(`int i=0; while (i<3) i++; return i;` — minimal
+while-loop with a counter), `1159` (`char c=0; int r=
+(c==0); return r;` — char==0 compare whose boolean
+result is stored into an int local).
+
+All three already worked end-to-end. 1157 emits AX-load
+of `a`, `shl ax, 4`, then `or ax, [bp-Nb]` before
+storing into `x`. 1158 uses the standard while-shape
+(`@1:` top label, body, jump back) and `inc word ptr
+<i>` for the increment. 1159 widens the char load to
+AX with `mov al, byte ptr <c>; cbw`, compares to 0,
+and uses the same boolean-materialization sequence as
+the int `!=` path (1149) but the equal-arm.
+
 ## Int postinc as RHS, int mod by const, conditional as RHS
 
 Fixtures `1154` (`int a=5; int b=a++; return a+b;` —
