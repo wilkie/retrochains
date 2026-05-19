@@ -1959,6 +1959,51 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Multi-var decl, `short`, `if` constant condition
+
+Fixtures `929` (`int a, b; a = 3; b = 4; return a + b;` —
+multi-variable declaration in a single statement), `930`
+(`short s = 5;` — `short` keyword as a 16-bit int alias),
+`931` (`if (1) { return 7; }` — literal-constant boolean
+condition).
+
+929 already works end-to-end — the parser's local-declaration
+loop accepts a comma-separated declarator list and the locals
+table allocates two distinct slots, both initialized by the
+subsequent assigns.
+
+930 needed one lexer change: the BC2.0 dialect accepts `short`
+everywhere `int` does and produces the same 16-bit storage.
+Rather than adding a separate `KwShort` token and threading it
+through every type-parsing site (declarations, casts, sizeof,
+function returns, struct fields, …), we map `short` directly
+to `TokenKind::KwInt` in `lex_ident`. This collapses `short` /
+`short int` / `unsigned short` into the existing `int` paths.
+The downside is `short int s;` would lex as `int int s;` and
+hit the dispatcher's "type at top level" failure — but no
+current fixture pairs the two keywords. When one shows up, we
+either add a dedicated `KwShort` or special-case the lexer's
+buffer to skip a trailing `int` after `short`.
+
+931 needed an `emit_if` fast-path. BCC constant-folds the
+condition entirely: `if (1) { return 7; } return 0;` emits the
+then-body inline (`mov ax, 7; jmp short @END`), then the
+following statement (`xor ax, ax; jmp short @END`) with no
+compare, no conditional jump, and no if-skip label between
+them. The else-branch (if any) becomes dead code that BCC
+emits anyway but never reaches. Implementation: at the top of
+`emit_if`, run `try_const_eval(cond)`. If it folds, emit only
+the relevant branch (then for non-zero, else for zero) and
+skip the label-plan slot reservation entirely. The branch-skip
+label that the conditional-jump path would emit is *not*
+needed because there's no jump aimed at it — control simply
+falls through to whatever comes next in the function body.
+
+Same flavor as the existing `while (K)` fast-path further
+down in this file: when a loop condition folds to a non-zero
+constant, BCC elides the trampoline jump and the check label.
+The `if (K)` shape is even simpler — no labels at all.
+
 ## Char init, void function, const variable
 
 Fixtures `926` (`char c = 'A';` — char global with char-literal
