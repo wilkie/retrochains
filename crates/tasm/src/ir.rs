@@ -1301,6 +1301,12 @@ pub enum Instr {
     /// with reg=DX(010) r/m=111=BX+disp8. Used by `int *p; p[K]
     /// %= y` (fixture 884: mod result is in DX after `idiv`).
     MovBxDispDx { disp: i8 },
+    /// `push word ptr [bx+disp8]` — `FF 77 dd`. Group FF `/6` (PUSH
+    /// r/m16) with mod=01 r/m=111=BX+disp8. Used by `f(p[K])` —
+    /// BCC's memory-operand-push peephole on a global-pointer
+    /// subscript arg (fixture 893: skips the `mov ax, [bx+K]; push
+    /// ax` pair for the shorter direct push).
+    PushBxDisp { disp: i8 },
     /// `add al,byte ptr [bp+<offset>]` — `02 46 dd`. ADD r8,r/m8
     /// with mod=01 reg=AL(000) r/m=110=BP+disp8. Char-array
     /// compound with non-const int RHS truncated to byte (fixture

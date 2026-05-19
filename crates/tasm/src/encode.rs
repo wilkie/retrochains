@@ -479,6 +479,7 @@ fn instr_size(instr: &Instr) -> usize {
         | Instr::ShrBxDispCl { .. } => 3,
         Instr::MovAxBxDisp { .. } | Instr::MovBxDispAx { .. } => 3,
         Instr::MovBxDispDx { .. } => 3,
+        Instr::PushBxDisp { .. } => 3,
         Instr::AddAlBpRel { .. }
         | Instr::SubAlBpRel { .. }
         | Instr::AndAlBpRel { .. }
@@ -2223,6 +2224,13 @@ fn emit_instr(
             // `mov word ptr [bx+disp8],dx` → 89 57 dd. Fixture 884.
             out.push(0x89);
             out.push(0x57);
+            out.push(*disp as u8);
+        }
+        Instr::PushBxDisp { disp } => {
+            // `push word ptr [bx+disp8]` → FF 77 dd. ModR/M `77` =
+            // mod=01 reg=/6(PUSH) r/m=111=BX. Fixture 893.
+            out.push(0xFF);
+            out.push(0x77);
             out.push(*disp as u8);
         }
         Instr::AddAlBpRel { offset } => {

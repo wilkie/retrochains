@@ -405,6 +405,15 @@ fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
                 }
                 return Ok(Instr::PushSiDisp { disp });
             }
+            // `push word ptr [bx+disp8]` — memory-operand push
+            // peephole on a global-pointer subscript arg (fixture
+            // 893). disp=0 has no fixture yet — left for a future
+            // `PushBxPtr` 2-byte form when one demands it.
+            if let Some(disp) = parse_word_bx_disp(rest)
+                && disp != 0
+            {
+                return Ok(Instr::PushBxDisp { disp });
+            }
             Err(AsmError::new(line.line_no, format!("push: unsupported operand `{rest}`")))
         }
         "pop" => Reg16::parse(rest)
