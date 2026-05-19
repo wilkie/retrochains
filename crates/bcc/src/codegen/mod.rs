@@ -10883,8 +10883,13 @@ fn emit_op_with_source(out: &mut Vec<u8>, op: BinOp, src: &OperandSource, unsign
                 let k = *v;
                 if k > 0 && (k & (k - 1)) == 0 && k <= 256 {
                     let shifts = k.trailing_zeros();
-                    for _ in 0..shifts {
-                        out.extend_from_slice(b"\tshl\tax,1\r\n");
+                    if shifts <= 3 {
+                        for _ in 0..shifts {
+                            out.extend_from_slice(b"\tshl\tax,1\r\n");
+                        }
+                    } else {
+                        let _ = write!(out, "\tmov\tcl,{shifts}\r\n");
+                        out.extend_from_slice(b"\tshl\tax,cl\r\n");
                     }
                 } else {
                     let v16 = k & 0xFFFF;
