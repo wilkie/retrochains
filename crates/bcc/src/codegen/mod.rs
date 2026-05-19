@@ -3477,8 +3477,33 @@ impl<'a> FunctionEmitter<'a> {
                     );
                     return;
                 }
-                // Non-constant init for a char would need a different
-                // shape (load to AL, store AL); no fixture yet.
+                // Non-constant char init. Peephole for `(char)<int-
+                // local>`: load the low byte of the source slot
+                // directly with `mov al, byte ptr [bp-Nn]`, then
+                // store with `mov byte ptr [bp-Nc], al`. Fixture
+                // 1039 (`char c = (char)n;`).
+                if ty.is_char_like() {
+                    if let ExprKind::Cast { ty: cast_ty, operand } = &init.kind
+                        && cast_ty.is_char_like()
+                        && let ExprKind::Ident(src_name) = &operand.kind
+                        && self.locals.has(src_name)
+                        && self.locals.type_of(src_name).is_int_like()
+                        && let LocalLocation::Stack(src_off) = self.locals.location_of(src_name)
+                    {
+                        let _ = write!(
+                            self.out,
+                            "\tmov\tal,byte ptr {}\r\n",
+                            bp_addr(src_off)
+                        );
+                        let _ = write!(
+                            self.out,
+                            "\tmov\tbyte ptr {},al\r\n",
+                            bp_addr(off)
+                        );
+                        return;
+                    }
+                    panic!("non-constant char local init shape not yet supported");
+                }
                 // Pointers and ints share the int-like word-sized
                 // path: compute into AX, then store as `word ptr`.
                 assert!(
