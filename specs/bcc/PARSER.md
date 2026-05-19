@@ -1959,6 +1959,48 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Global `++` in condition, char global postinc/preinc edge cases
+
+Fixtures `971` (`int g; if (g++) return 7;` — int global
+postinc as boolean condition), `972` (`char g; return g++;`
+— char global postinc in return), `973` (`char g; return
+++g + 1;` — char global preinc as arithmetic operand).
+
+All three already work end-to-end via the batch 215–217
+infrastructure plus the existing zero-test paths:
+
+- 971: `if (g++)` exercises the `emit_zero_test` Update-Post
+  arm (fixture 619) — the post-update value is loaded into
+  AX, the side effect mutates `g` in memory, and `or ax,
+  ax` sets ZF on the *pre*-update value. Combined with the
+  global-aware `emit_update_to_ax` fast-path (batch 215),
+  this works for global Update targets the same way it
+  already did for local ones.
+- 972/973: char globals in return / arithmetic context.
+  The `emit_update_to_ax` Post/Pre arms emit `mov al, mem;
+  inc al; mov mem, al; cbw` (Pre) or `mov al, mem; inc
+  mem; cbw` (Post), and the return / `+ 1` consumer feeds
+  off AX. No deferred-side-effect peephole needed since
+  there's no intermediate store.
+
+**Recorded finding (deferred):** Probed `dbl(g++)` —
+`int dbl(int x) { return x + x; } ... return dbl(g++);` —
+expected bytes match for the codegen but the **public
+symbol list ordering** differs. BCC emits `_dbl, _main, _g`
+(functions in *source order*, globals last) while we emit
+`_main, _dbl, _g` (functions in reverse-source / LIFO
+order). Existing fixture 138 (`int f(...) {...} int
+main(void) { f(1, 2, 3); }`) shows BCC emits `_main, _f`
+— the reverse-source order matches our current behavior.
+The two orderings contradict, so there's a BCC heuristic
+we haven't reconstructed yet. Replaced the `dbl(g++)`
+probe with the `if (g++)` boolean form which doesn't
+trigger the function-public-order codepath. To
+investigate: try multiple call-site shapes (called-by-
+main vs not, with-globals vs not, multiple callees) and
+look for the partition that selects source-order vs
+reverse-source.
+
 ## Global `++`/`--` in return and arithmetic
 
 Fixtures `968` (`return g++;` — int global postinc in return),
