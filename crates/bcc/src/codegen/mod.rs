@@ -3568,6 +3568,52 @@ impl<'a> FunctionEmitter<'a> {
                             return;
                         }
                     }
+                    // Char-shift-by-const init: `char c = a >> K;` /
+                    // `char c = a << K;`. Unlike `+/-/&/|/^`, shifts
+                    // promote to int per C — BCC emits `mov al,
+                    // <a>; cbw; sar ax, K; mov <c>, al` (or `shr`
+                    // for unsigned, `shl` for left-shift). Fixture
+                    // 1082 (`char c = a >> 1;`).
+                    if let ExprKind::BinOp { op, left, right } = &src_expr.kind
+                        && matches!(op, BinOp::Shr | BinOp::Shl)
+                        && let ExprKind::Ident(src_name) = &left.kind
+                        && self.locals.has(src_name)
+                        && self.locals.type_of(src_name).is_char_like()
+                        && let LocalLocation::Stack(src_off) = self.locals.location_of(src_name)
+                        && let Some(k) = try_const_eval(right)
+                    {
+                        let unsigned = self.locals.type_of(src_name).is_unsigned();
+                        let mnem = match op {
+                            BinOp::Shl => "shl",
+                            BinOp::Shr => if unsigned { "shr" } else { "sar" },
+                            _ => unreachable!(),
+                        };
+                        let k_u = (k as u32) & 0x1F;
+                        let _ = write!(
+                            self.out,
+                            "\tmov\tal,byte ptr {}\r\n",
+                            bp_addr(src_off)
+                        );
+                        if !unsigned {
+                            self.out.extend_from_slice(b"\tcbw\r\n");
+                        } else {
+                            self.out.extend_from_slice(b"\txor\tah,ah\r\n");
+                        }
+                        if k_u <= 3 {
+                            for _ in 0..k_u {
+                                let _ = write!(self.out, "\t{mnem}\tax,1\r\n");
+                            }
+                        } else {
+                            let _ = write!(self.out, "\tmov\tcl,{k_u}\r\n");
+                            let _ = write!(self.out, "\t{mnem}\tax,cl\r\n");
+                        }
+                        let _ = write!(
+                            self.out,
+                            "\tmov\tbyte ptr {},al\r\n",
+                            bp_addr(off)
+                        );
+                        return;
+                    }
                     panic!("non-constant char local init shape not yet supported");
                 }
                 // Pointers and ints share the int-like word-sized
