@@ -2282,6 +2282,36 @@ impl<'a> FunctionEmitter<'a> {
             let _ = write!(self.out, "\tcmp\tal,byte ptr {}\r\n", bp_addr(roff));
             return;
         }
+        // `<stack-array-elem> <relop> <const>` — memory-direct
+        // compare on a bp-relative array element. `cmp word ptr
+        // [bp+(base+K*stride)], imm`. Same shape as the int-global
+        // arm above, just with a bp-relative LHS. Sibling for char
+        // arrays uses the byte form. Fixtures 978, 979.
+        if let (ExprKind::ArrayIndex { .. }, Some(rhs)) =
+            (&left.kind, try_const_eval(right))
+            && let Some((name, total_off, leaf_ty)) =
+                self.try_lvalue_chain_addr(left)
+            && self.locals.has(&name)
+            && let LocalLocation::Stack(base_off) = self.locals.location_of(&name)
+        {
+            let elem_off = base_off + i16::try_from(total_off).unwrap_or(i16::MAX);
+            if leaf_ty.is_char_like() {
+                let rhs8 = rhs & 0xFF;
+                let _ = write!(
+                    self.out,
+                    "\tcmp\tbyte ptr {},{rhs8}\r\n",
+                    bp_addr(elem_off),
+                );
+            } else {
+                let rhs16 = rhs & 0xFFFF;
+                let _ = write!(
+                    self.out,
+                    "\tcmp\tword ptr {},{rhs16}\r\n",
+                    bp_addr(elem_off),
+                );
+            }
+            return;
+        }
         self.emit_expr_to_ax(left);
         // `<expr-in-ax> <relop> 0` — use `or ax, ax` (2 bytes) instead
         // of `cmp ax, 0` (3 bytes) since both set ZF/SF the same way.
@@ -10034,15 +10064,25 @@ impl<'a> FunctionEmitter<'a> {
                 // Also handles member→array chains like `s.a[K]` and
                 // global struct field arrays. Fixture 932 (`s.n +
                 // s.a[1]` with `struct { int n; int a[3]; } s`).
+                //
+                // For stack-resident local arrays the same offset
+                // arithmetic applies but the operand is a bp-relative
+                // `[bp+(base_off+K*stride)]`. Fixture 977.
                 let (name, total_off, _leaf_ty) = self
                     .try_lvalue_chain_addr(e)
                     .unwrap_or_else(|| {
                         panic!("variable-indexed global array rhs not yet supported")
                     });
-                if !self.globals.contains(&name) {
-                    panic!("array-indexed rhs only supported on globals so far");
+                if self.globals.contains(&name) {
+                    return OperandSource::GlobalOffset { name, offset: total_off };
                 }
-                OperandSource::GlobalOffset { name, offset: total_off }
+                if self.locals.has(&name)
+                    && let LocalLocation::Stack(base_off) = self.locals.location_of(&name)
+                {
+                    let elem_off = base_off + i16::try_from(total_off).unwrap_or(i16::MAX);
+                    return OperandSource::Local(elem_off);
+                }
+                panic!("array-indexed rhs not supported on `{name}`");
             }
             ExprKind::StringLit(_) => {
                 panic!("string literal as right operand of a binary op not yet supported (no fixture)")
