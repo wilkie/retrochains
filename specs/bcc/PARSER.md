@@ -1959,7 +1959,49 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
-## Long add two locals, ternary as init, char cast from int local
+## Char from char local, int mod by const, const-fold arith
+
+Fixtures `1040` (`char a = 'A'; char b = a; return b;` —
+char local initialized directly from another char local,
+the simplest "byte-to-byte copy" shape), `1041` (`int x =
+17; return x % 5;` — int modulo by a constant divisor in
+return position), `1042` (`int x = (1 + 2) * 3; return
+x;` — int init from a fully-constant compound expression
+that should fold to 9 at parse time).
+
+1041 and 1042 already worked end-to-end:
+
+- 1041: `x % 5` materializes the divisor in BX
+  (`mov bx, 5`), sign-extends AX into DX:AX with `cwd`,
+  then `idiv bx` — modulo result is in DX which is then
+  moved to AX for the return. The BX-load form was added
+  in slice 200's `idiv <bx>` arm for compound `%=` and
+  re-used here for the standalone `%` expression.
+- 1042: `try_const_eval` folds `(1 + 2) * 3` to `9` at
+  the init-evaluation step, then the stack-init's
+  constant arm emits `mov word ptr [bp-N], 9`. No
+  expression evaluation reaches codegen. Already
+  covered.
+
+1040 hit the new panic that batch 240 added — `non-
+constant char local init shape not yet supported`. The
+init expression is a bare `Ident("a")` rather than a
+`Cast` of one, so the cast-unwrap arm didn't apply. BCC
+emits the same `mov al, byte ptr [bp-Na]; mov byte ptr
+[bp-Nb], al` sequence whether or not the source was
+cast — the byte load doesn't care about the source's
+declared width since it always reads a single byte
+from `[bp+off]`.
+
+Generalized the peephole: optionally peel an outer
+`(char)` cast off the init, then accept any stack-local
+source whose declared type is char-like or int-like.
+Both the cast form (fixture 1039) and the bare-ident
+form (fixture 1040) now route through the same emit.
+Non-stack and non-ident char init RHS shapes still
+panic until pinned.
+
+
 
 Fixtures `1037` (`long a = 5L; long b = 10L; long c = a +
 b; return (int)c;` — long+long stack-local arithmetic
