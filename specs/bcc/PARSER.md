@@ -1959,6 +1959,38 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Pointer subscript — char call arg, long assign, lt compare
+
+Fixtures `896` (`char *p; f(p[1])` — char-pointer subscript as
+int call arg), `897` (`long *p; p[1] = 42L` — long-pointer
+subscript plain assign with const RHS), `898` (`int *p; if
+(p[1] < g)` — pointer-subscript less-than compare against a
+global).
+
+896 already worked end-to-end. `emit_arg_into_ax` widens the
+byte load to int via `cbw`/`mov ah,0` then pushes AX — same
+shape BCC uses. 898 also already worked: it lowers through
+the same `mov ax, [bx+disp]; cmp ax, word ptr DGROUP:_g`
+sequence the AX-through compare path produces, which happens
+to match BCC's actual OBJ bytes for this shape.
+
+897 needed a long-pointee arm in `emit_array_assign`'s global-
+pointer branch. BCC's shape:
+
+```
+mov bx, word ptr DGROUP:_p
+mov word ptr [bx+6], <hi>    ; high half at offset+2
+mov word ptr [bx+4], <lo>    ; low half at offset
+```
+
+Stride is 4 for long, so K=1 gives `[bx+4]` / `[bx+6]`. The
+high-first store ordering matches the existing long-global and
+long-array stores (batches around 302/322). Const RHS only —
+non-const long RHS still panics ("non-constant rhs in `long
+*p; p[K] = v` not yet supported"). New IR variant
+`MovBxDispImm { disp: i8, imm: u16 }` (`C7 47 dd lo hi`, 5
+bytes) — Group with `/0` (MOV r/m16,imm16), mod=01 r/m=111=BX.
+
 ## Pointer subscript — call arg, in arith, char rvalue
 
 Fixtures `893` (`int *p; f(p[1])` — subscript as call arg),
