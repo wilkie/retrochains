@@ -9903,29 +9903,19 @@ impl<'a> FunctionEmitter<'a> {
                 // `g[K]` where `g` is a file-scope array — fold to
                 // `word ptr DGROUP:_g+(K*stride)`. Fixture 189 emits
                 // `add ax, word ptr DGROUP:_a+2` for `a[1]`.
-                let mut indices: Vec<&Expr> = Vec::new();
-                let mut cur = e;
-                let name = loop {
-                    match &cur.kind {
-                        ExprKind::ArrayIndex { array, index } => {
-                            indices.push(index);
-                            cur = array;
-                        }
-                        ExprKind::Ident(n) => break n.clone(),
-                        _ => panic!("array-index rhs: non-ident base not supported"),
-                    }
-                };
-                indices.reverse();
-                let Some(gty) = self.globals.type_of(&name) else {
+                //
+                // Also handles member→array chains like `s.a[K]` and
+                // global struct field arrays. Fixture 932 (`s.n +
+                // s.a[1]` with `struct { int n; int a[3]; } s`).
+                let (name, total_off, _leaf_ty) = self
+                    .try_lvalue_chain_addr(e)
+                    .unwrap_or_else(|| {
+                        panic!("variable-indexed global array rhs not yet supported")
+                    });
+                if !self.globals.contains(&name) {
                     panic!("array-indexed rhs only supported on globals so far");
-                };
-                let gty = gty.clone();
-                let (const_off, _leaf_ty) =
-                    try_const_array_offset(&gty, indices.iter().copied())
-                        .unwrap_or_else(|| {
-                            panic!("variable-indexed global array rhs not yet supported")
-                        });
-                OperandSource::GlobalOffset { name, offset: const_off }
+                }
+                OperandSource::GlobalOffset { name, offset: total_off }
             }
             ExprKind::StringLit(_) => {
                 panic!("string literal as right operand of a binary op not yet supported (no fixture)")
