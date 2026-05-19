@@ -8948,6 +8948,34 @@ impl<'a> FunctionEmitter<'a> {
                     let _ = write!(self.out, "\t{mnem}\tword ptr DGROUP:_{target}\r\n");
                     return;
                 }
+                // `<stack-int> = <char-global>++` / `--` — load AL,
+                // widen via cbw (or mov ah, 0 for uchar), store AX to
+                // the stack slot, then defer the memory-direct
+                // inc/dec on the byte. Fixture 966.
+                if !ty.is_char_like()
+                    && let ExprKind::Update {
+                        target,
+                        op,
+                        position: crate::ast::UpdatePosition::Post,
+                    } = &value.kind
+                    && let Some(gty) = self.globals.type_of(target)
+                    && gty.is_char_like()
+                {
+                    let unsigned = gty.is_unsigned();
+                    let _ = write!(self.out, "\tmov\tal,byte ptr DGROUP:_{target}\r\n");
+                    if unsigned {
+                        self.out.extend_from_slice(b"\tmov\tah,0\r\n");
+                    } else {
+                        self.out.extend_from_slice(b"\tcbw\t\r\n");
+                    }
+                    let _ = write!(self.out, "\tmov\tword ptr {},ax\r\n", bp_addr(off));
+                    let mnem = match op {
+                        crate::ast::UpdateOp::Inc => "inc",
+                        crate::ast::UpdateOp::Dec => "dec",
+                    };
+                    let _ = write!(self.out, "\t{mnem}\tbyte ptr DGROUP:_{target}\r\n");
+                    return;
+                }
                 // `<stack-int> = <reg-int>++` / `--` — store the
                 // pre-update register value directly to the stack
                 // slot, then apply the side effect. Skips the AX
