@@ -1959,7 +1959,23 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
-## Global int array sum, int-ptr init and deref, char compound OR var
+## Char compound XOR/AND var, if-and of two compares
+
+Fixtures `1103` (`a ^= b;` — char compound XOR-assign
+with char-var RHS), `1104` (`if (a > 0 && b > 0)
+return 1;` — short-circuiting `&&` of two compares as
+an if-condition), `1105` (`a &= b;` — char compound
+AND-assign with char-var RHS).
+
+All three already worked end-to-end. 1103/1105 round
+out the char-compound permitted set alongside the
+add/sub/or covered earlier (fixtures 1094/1097/1102).
+1104's `&&` lowers via the existing short-circuit
+control-flow path: evaluate LHS compare with
+fall-through to the RHS compare, both jumping to a
+common "false" label on falsy result.
+
+
 
 Fixtures `1100` (`int g[3] = {1, 2, 3}; return g[0] +
 g[1] + g[2];` — global int array initializer with
