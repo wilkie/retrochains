@@ -1959,7 +1959,59 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
-## Int const-minus-var, int-ptr array write, char cmp in if-else
+## Char init from array elem, struct init via field assign, int-ptr init+deref
+
+Fixtures `1064` (`char a[3]; char c; a[0] = 'X'; c =
+a[0]; return c;` — char local read-assigned from a stack
+char-array element, then returned), `1065` (`struct S {
+int x; int y; }; s.x = 1; s.y = 2; return s.x + s.y;` —
+stack struct with two field writes and field sum
+return), `1066` (`int a[4]; int *p = a + 1; *p = 5;
+return *p;` — stack-resident int pointer initialized
+from a stack-array decay with constant offset).
+
+1064 and 1065 already worked end-to-end:
+
+- 1064: `c = a[0]` lowers to `mov al, byte ptr [bp-Na];
+  mov byte ptr [bp-Nc], al` via the stack-array-elem
+  byte-load and the assign-to-char-local path.
+- 1065: struct field assigns and the field-sum read
+  hit the standard `[bp+(struct_off + field_off)]`
+  arithmetic. Already covered.
+
+1066 exposed a gap. The batch-243 array+const peephole
+in `emit_store_reg` covered REGISTER-resident pointer
+init (`int *p = a + 1` with p in SI). The STACK-resident
+case (the harness assigns p to `[bp-N]` here because of
+how the locals planner distributes registers) routed
+through the generic `emit_expr_to_ax` path, which emits
+`lea ax, [bp+base]; inc/add ax, K; mov [bp-Np], ax` —
+the inc/add is wrong (stride-unaware) and BCC instead
+folds the offset into the LEA.
+
+Added the same array+const-offset peephole to
+`emit_init_local`'s int-like stack arm. Now stack
+pointer inits of the shape `<arr> + K_const` emit the
+single `lea ax, [bp+(base+K*stride)]; mov [bp-N], ax`
+sequence.
+
+**Recorded finding (deferred):**
+
+- Probed `int a[4]; int *p = a+1; int *q = a+3; return
+  q - p;` as fixture 1066 first draft. After the
+  stack-pointer-init fix above, our code computed
+  `sub ax, [bp-Np]` for the pointer diff but missed
+  BCC's `mov bx, 2; cwd; idiv bx` divide-by-element-
+  size sequence. The pointer-subtraction-with-pointee-
+  sizeof shape is a separate codegen change (need
+  to detect ptr-minus-ptr at the BinOp::Sub arm and
+  apply the divide tail for non-byte pointees).
+- Probed `int *p, *q` with both writing through SI/DI;
+  hit a missing tasm encoding `mov word ptr [di], imm`
+  (we only support SI). Sibling `MovDiPtrImm` IR
+  variant needed.
+
+
 
 Fixtures `1061` (`int x = 3; return 10 - x;` —
 subtraction with constant LHS and variable RHS, the
