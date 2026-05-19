@@ -1959,6 +1959,49 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Arrow field cmp const (peephole), array elem cmp, ternary in return
+
+Fixtures `1007` (`if (p->x == 5)` with p in SI — addresses
+the deferred batch-228 finding), `1008` (`if (a[1] == x)` —
+stack array elem compared to a local in an if condition),
+`1009` (`return x > 0 ? 100 : 200;` — ternary expression in
+return position).
+
+1007 needed both a tasm IR addition and a codegen peephole:
+
+- Added `CmpWordSiDispImm8Sx { disp, imm }` to tasm IR.
+  Encoding: `83 3C ii` for disp=0 (mod=00, 3 bytes); `83
+  7C dd ii` for disp!=0 fitting i8 (mod=01, 4 bytes).
+  Both forms use Group1 opcode `83` with /7=CMP and SI-
+  indirect r/m (r/m=100). Parser recognizes `cmp word
+  ptr [si+disp], imm` via the existing `parse_word_si_disp`
+  helper plus `parse_imm8_signed` for the RHS constant.
+- Added a fast-path arm in `emit_compare`: when LHS is
+  `Member { kind: Arrow }` whose base is a SI-resident
+  pointer local and whose field is non-char and the RHS
+  is a constant that fits imm8sx, emit `cmp word ptr
+  [si+field_off], K` directly. Restricted to SI for now
+  since tasm only has the SI form; a DI sibling would
+  follow the same pattern.
+
+Saves 1 byte vs the previous `mov ax, [si]; cmp ax, K`
+shape (4 bytes vs 5).
+
+1008 already worked end-to-end. The compare-as-value path
+materialized the LHS array element through the batch-220
+operand-source rvalue then ran the standard `mov ax,
+[bp+elem]; cmp ax, [bp+x]` shape. The memory-direct-cmp
+peephole (batch 220) only fires for constant RHS — here
+the RHS is a stack local, so the generic path applies.
+
+1009 already worked end-to-end. The ternary lowering
+materializes the boolean into the standard mini-CFG with
+two `mov ax, K` materializations of the constants 100 and
+200 — `cmp [bp-2], 0; jle .else; mov ax, 100; jmp .end;
+.else: mov ax, 200; .end: <return>`. Fixture 428/431
+covered the assign-to-global and nested-ternary variants;
+this confirms the return-position form is byte-equivalent.
+
 ## Enum as array size, array elem cmp local, char return in arith
 
 Fixtures `1004` (`enum { N = 4 }; int a[N];` — enum constant
