@@ -1959,6 +1959,31 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Int multi-decl statement, deref of ptr plus 1, char compound div pow2
+
+Fixtures `1151` (`int a, b, c; a=1; b=2; c=3; return
+a+b+c;` — single declaration statement with three
+comma-separated declarators), `1152` (`int a[3]; int
+*p = a; a[1] = 77; return *(p + 1);` — deref of a
+pointer-plus-constant expression rather than the array-
+subscript form), `1153` (`char c = 16; c /= 8;
+return c;` — char compound divide by a power-of-two
+constant).
+
+All three already worked end-to-end. 1151's parser
+already lowered a comma-separated declarator list to
+three independent locals so each `a=1`/`b=2`/`c=3`
+assignment uses the per-slot int store and the
+sum-three-locals add fold applies. 1152's `*(p+1)`
+parses as `Unary(Deref, Binary(Add, p, 1))` which the
+codegen already routes through the same scaled-pointer
+load that drives `p[1]`: BCC emits the `bx`-based
+`mov ax, [bx+2]` form. 1153 confirms the char-compound
+`/=` const path already collapses a power-of-two divisor
+to a right-shift rather than going through `idiv` —
+`c /= 8` emits as `sar` by 3 on the promoted byte (same
+sign-rule as the shift path); no byte-`idiv` was needed.
+
 ## Long compound add var, int return ne as value, neg of bitwise NOT
 
 Fixtures `1148` (`long g = 100L; long x = 5L; g += x;
