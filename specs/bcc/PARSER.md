@@ -1959,7 +1959,32 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
-## do-while counter, bitwise NOT local, stack array size 5
+## Char init from char AND, int rebind const, return neg literal
+
+Fixtures `1073` (`char a = 12; char b = 10; char c = a &
+b; return c;` — char init from a `&` binop on two char
+locals, sibling of fixture 1046's add and 1051's sub
+covering one more op in the byte-arith peephole's
+permitted set), `1074` (`int x = 5; x = 10; return x;`
+— int local initialized, then immediately reassigned
+to a different constant), `1075` (`return -7;` — bare
+return of a negative integer literal).
+
+All three already worked end-to-end:
+
+- 1073: the batch-243 char-binop peephole accepts `&`
+  along with `+/-/^/|`, so `a & b` emits `mov al, <a>;
+  and al, <b>; mov <c>, al`. Byte-arithmetic stays at
+  byte width because the destination is char.
+- 1074: the second assign `x = 10` is just another
+  constant-store to the same stack slot; no peephole
+  combines it with the init.
+- 1075: `-7` constant-folds to 0xFFF9 (sign-extended
+  i16), and the return-int path emits `mov ax, 65529`.
+  BCC writes negative constants as their unsigned-
+  wrapped form (same shape as fixture 036).
+
+
 
 Fixtures `1070` (`int x = 0; do { x++; } while (x < 3);
 return x;` — do-while loop counter, the rotating
