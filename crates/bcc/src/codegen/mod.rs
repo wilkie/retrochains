@@ -2384,6 +2384,51 @@ impl<'a> FunctionEmitter<'a> {
             UpdateOp::Inc => "inc",
             UpdateOp::Dec => "dec",
         };
+        // Global ++/-- in expression context. Int/uint uses
+        // memory-direct `inc word ptr DGROUP:_g` for the side effect
+        // plus a separate AX load for the captured value. Pre-update
+        // emits the side effect *before* the load; post-update loads
+        // first, then mutates. Char/uchar uses the AL detour
+        // (`mov al, mem; inc al; mov mem, al; cbw`) for Pre, and
+        // load-then-mutate for Post (the captured value is the
+        // pre-update one). Fixtures 962/963 (int) and 964 (char).
+        if let Some(gty) = self.globals.type_of(target) {
+            let gty = gty.clone();
+            if gty.is_char_like() {
+                let unsigned = gty.is_unsigned();
+                match position {
+                    UpdatePosition::Pre => {
+                        let _ = write!(self.out, "\tmov\tal,byte ptr DGROUP:_{target}\r\n");
+                        let _ = write!(self.out, "\t{mnemonic}\tal\r\n");
+                        let _ = write!(self.out, "\tmov\tbyte ptr DGROUP:_{target},al\r\n");
+                    }
+                    UpdatePosition::Post => {
+                        let _ = write!(self.out, "\tmov\tal,byte ptr DGROUP:_{target}\r\n");
+                        let _ = write!(self.out, "\t{mnemonic}\tbyte ptr DGROUP:_{target}\r\n");
+                    }
+                }
+                if unsigned {
+                    self.out.extend_from_slice(b"\tmov\tah,0\r\n");
+                } else {
+                    self.out.extend_from_slice(b"\tcbw\t\r\n");
+                }
+                return;
+            }
+            if matches!(gty, Type::Int | Type::UInt) || gty.pointee().is_some() {
+                match position {
+                    UpdatePosition::Pre => {
+                        let _ = write!(self.out, "\t{mnemonic}\tword ptr DGROUP:_{target}\r\n");
+                        let _ = write!(self.out, "\tmov\tax,word ptr DGROUP:_{target}\r\n");
+                    }
+                    UpdatePosition::Post => {
+                        let _ = write!(self.out, "\tmov\tax,word ptr DGROUP:_{target}\r\n");
+                        let _ = write!(self.out, "\t{mnemonic}\tword ptr DGROUP:_{target}\r\n");
+                    }
+                }
+                return;
+            }
+            panic!("++/-- in expression on non-int/non-char global `{target}` not yet supported (no fixture)");
+        }
         // Stack-resident char ++/-- in expression context: BCC uses
         // memory-direct `inc|dec byte ptr [bp-N]` for the side
         // effect, with the captured value loaded via `mov al,
@@ -8878,6 +8923,29 @@ impl<'a> FunctionEmitter<'a> {
                         "\tmov\tword ptr {},offset DGROUP:_{sym}\r\n",
                         bp_addr(off),
                     );
+                    return;
+                }
+                // `<stack-int> = <int-global>++` / `--` — BCC loads
+                // the pre-update value into AX, stores AX to the
+                // stack slot, *then* applies the memory-direct side
+                // effect. Order matters: defer the inc/dec until
+                // after the use. Fixture 963.
+                if !ty.is_char_like()
+                    && let ExprKind::Update {
+                        target,
+                        op,
+                        position: crate::ast::UpdatePosition::Post,
+                    } = &value.kind
+                    && let Some(gty) = self.globals.type_of(target)
+                    && (matches!(gty, Type::Int | Type::UInt) || gty.pointee().is_some())
+                {
+                    let _ = write!(self.out, "\tmov\tax,word ptr DGROUP:_{target}\r\n");
+                    let _ = write!(self.out, "\tmov\tword ptr {},ax\r\n", bp_addr(off));
+                    let mnem = match op {
+                        crate::ast::UpdateOp::Inc => "inc",
+                        crate::ast::UpdateOp::Dec => "dec",
+                    };
+                    let _ = write!(self.out, "\t{mnem}\tword ptr DGROUP:_{target}\r\n");
                     return;
                 }
                 // `<stack-int> = <reg-int>++` / `--` — store the
