@@ -1959,7 +1959,31 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
-## Struct array elem access, char compound div const, return global array elem
+## Char init from char member, global int sub const, deref ptr to global
+
+Fixtures `1124` (`struct S { char c; }; struct S s =
+{'Q'}; char b = s.c; return b;` — char init from a
+struct char member, sibling of fixture 1115's assign
+form), `1125` (`int g = 20; g -= 5; return g;` —
+global int compound sub by imm8 constant), `1126`
+(`int g = 42; int *p = &g; return *p;` — pointer init
+from global address, then return via deref).
+
+1125 and 1126 already worked end-to-end. 1125 uses
+the memory-direct form `sub word ptr DGROUP:_g, 5`.
+1126's `&g` lowers as `mov si, offset DGROUP:_g`; the
+`*p` deref then emits `mov ax, word ptr [si]`.
+
+1124 hit the char-init panic — the existing arms
+handled `Cast`/`Ident`/`BinOp`/`Shr`/`Shl` source
+shapes but not `Member`. Added a Member arm mirroring
+the batch-266 assign-from-Member peephole: when the
+init's RHS is a `Dot`-kind `Member` whose leaf type
+is char-like, emit `mov al, byte ptr <field-addr>;
+mov byte ptr <dest>, al` directly. Both global and
+stack struct sources handled.
+
+
 
 Fixtures `1121` (`struct S { int x; }; struct S arr[2];
 arr[0].x = 5; arr[1].x = 7; return arr[0].x + arr[1].x;`
