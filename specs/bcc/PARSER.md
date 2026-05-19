@@ -1959,6 +1959,59 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `&&` of two compares, int double-init, array write/read
+
+Fixtures `974` (`if (a > 0 && b > 0) return 1;` — `&&`
+joining two comparisons), `975` (`b = a + a;` —
+initializing an int from a binop), `976` (`a[0] = 5;
+a[1] = 10; a[2] = 20; return a[1];` — write each element
+of a stack-resident int array, then read one back).
+
+All three worked end-to-end:
+
+- 974: the `&&` condition lowers as two independent
+  zero-tests with the false-target jump landing at the
+  same skip label. BCC's pattern: each compare emits
+  `cmp; jle <skip>` independently, the if-body runs only
+  if both fall through. Our `emit_cond_branch` already
+  threads the same false-slot through both subterms.
+- 975: `b = a + a;` lowers to `mov ax, [bp-2]; add ax,
+  [bp-2]; mov [bp-4], ax` — the same `add r16, r/m16`
+  shape as `a + b` between two distinct locals, just
+  with the same operand used twice. Sibling of fixture
+  598 (`return x * x`).
+- 976: writing to a constant-indexed int-array element
+  lowers to `mov word ptr [bp+K*2], imm16` (or the imm8sx
+  form for small constants). Three writes, then a read of
+  one element via `mov ax, word ptr [bp+2]`. The bp-offset
+  arithmetic is constant-folded by `try_const_array_offset`.
+
+**Recorded findings (deferred):**
+
+- **Struct field `++` as value** (`r = s.x++;`): parser
+  panics "expected `;`, got `++`" at byte 79 — the postfix
+  parser doesn't yet accept `++`/`--` after a `Member`
+  expression. Needs an arm in the postfix loop to wrap a
+  Member node in `Update { Post }`.
+- **Char in for-loop bound** (`char c; for (c = 0; c < 5;
+  c++)`): codegen compiles but produces a 6-byte-different
+  OBJ. Two divergences from BCC: (1) BCC enregisters the
+  char in BL, we use DL — register-allocation policy
+  difference; (2) BCC's `inc bl` is one byte, ours goes
+  through the AL detour (`mov al, bl; inc al; mov bl, al`)
+  which is 4 bytes. (2) is a peephole we could add: when
+  `++c` targets a byte-register-resident char and the
+  result isn't observed (or the use can read the register
+  directly), emit `inc <reg8>` directly. Needs the
+  expression-context update path to detect "side-effect-
+  only" use, since the AL detour is correct for `r = c++`.
+- **Char self-binop assign** (`c = c + 1;` with char c):
+  codegen panics "non-constant char init/assign not yet
+  supported". BCC special-cases this as the AL-detour
+  shape (same as `c += 1`). Needs the char-assign path to
+  recognize `c = c <op> K` and route through the compound
+  path.
+
 ## Global `++` in condition, char global postinc/preinc edge cases
 
 Fixtures `971` (`int g; if (g++) return 7;` — int global
