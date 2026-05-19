@@ -3577,6 +3577,31 @@ impl<'a> FunctionEmitter<'a> {
                     "non-constant init for non-int-like type {:?} not yet supported",
                     ty
                 );
+                // Pointer init from `<stack-array> + K_const`: fold
+                // the element offset into the LEA's displacement so
+                // we emit `lea ax, [bp+(base+K*stride)]` directly
+                // instead of `lea ax, [bp+base]; add/inc ax, K`.
+                // Same shape as the register-init peephole in
+                // `emit_store_reg`. Fixture 1066 (`int *p = a + 1;`
+                // with p stack-resident).
+                if let ExprKind::BinOp { op: BinOp::Add, left, right } = &init.kind
+                    && let ExprKind::Ident(arr_name) = &left.kind
+                    && self.locals.has(arr_name)
+                    && let Some(elem_ty) = self.locals.type_of(arr_name).array_elem()
+                    && let Some(k) = try_const_eval(right)
+                    && let LocalLocation::Stack(base_off) = self.locals.location_of(arr_name)
+                {
+                    let stride = i32::from(elem_ty.size_bytes());
+                    let adj_off = i32::from(base_off) + (k as i32) * stride;
+                    let adj_off_i16 = i16::try_from(adj_off).expect("array+const offset fits in i16");
+                    let _ = write!(
+                        self.out,
+                        "\tlea\tax,word ptr {}\r\n",
+                        bp_addr(adj_off_i16)
+                    );
+                    let _ = write!(self.out, "\tmov\tword ptr {},ax\r\n", bp_addr(off));
+                    return;
+                }
                 self.emit_expr_to_ax(init);
                 let _ = write!(self.out, "\tmov\tword ptr {},ax\r\n", bp_addr(off));
             }
