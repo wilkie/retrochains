@@ -1959,6 +1959,33 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Static char init, char as cond, typedef long alias
+
+Fixtures `998` (`static char c = 'A'; return c;` — function-
+local static char with non-zero init), `999` (`char c = 1;
+if (c) return 7;` — char local as a boolean condition,
+no explicit compare), `1000` (`typedef long Big; Big g =
+100000L;` — typedef aliasing `long` and using the alias to
+declare a long global with a wide initializer).
+
+All three already work end-to-end:
+
+- 998: function-local static char with init lands in `_DATA`
+  (since the value is non-zero) as a `db 65` (`'A'`). Same
+  shape as fixture 161/162 for int statics; the char
+  variant uses the byte form. Codegen treats the static
+  as a private global (DGROUP-relative addressing).
+- 999: `if (c)` for a char local lowers as `cmp byte ptr
+  [bp-1], 0`. The existing `emit_zero_test` local-Ident arm
+  routes char-typed locals through the byte-form compare
+  (fixture 536 covered the global flavor).
+- 1000: `typedef long X;` registers `X` as an alias for
+  `Type::Long`. At the global decl site `Big g = 100000L;`
+  resolves `Big` via the typedef table and emits the long-
+  init shape (`dw lo; dw hi` in `_DATA`, two FIXUPPs).
+  Fixture 209 covered direct `long g = 100000L`; this
+  confirms the typedef-routed form is byte-equivalent.
+
 ## Char shr const, char cmp int local, static-local init
 
 Fixtures `995` (`char c = 16; return c >> 2;` — char right-
