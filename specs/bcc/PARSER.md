@@ -1959,6 +1959,60 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## unsigned int add, mul, div — `xor dx, dx; div`
+
+Fixtures `944` (`unsigned a = 5; unsigned b = 10; return a +
+b;` — uint add), `945` (`return a * b;` — uint mul), `946`
+(`return a / b;` — uint divide).
+
+944 and 945 already worked end-to-end:
+
+- 944: `add ax, [bp-N]` — same shape as signed int. The
+  high-half overflow doesn't matter for 16-bit-wide results.
+- 945: `imul word ptr [bp-N]` — BCC always uses `imul` here,
+  *even for unsigned operands*. The unsigned `mul` instruction
+  would only matter if we cared about the high half of a
+  32-bit product — but `int × int → int` discards DX in both
+  cases and `imul` and `mul` produce the same low-16-bit
+  result. Saves the codegen one signed-vs-unsigned branch.
+
+946 needed both an IR addition and a codegen change. BCC
+distinguishes signed and unsigned for division because the
+two instructions actually produce different results when AX
+has its sign bit set:
+
+- Signed (`int / int`): `cwd; idiv <r/m>` — sign-extends AX
+  into DX:AX, then `idiv` treats DX:AX as a 32-bit signed
+  dividend.
+- Unsigned (`unsigned / unsigned`): `xor dx, dx; div <r/m>` —
+  zero-extends, then `div` treats DX:AX as a 32-bit unsigned
+  dividend.
+
+For `unsigned a = 100; unsigned b = 7`, `cwd` would still
+produce DX=0 (sign bit is clear) and `idiv` would still
+return 14 — but the moment a value sets bit 15, the two paths
+diverge. BCC always emits the matching pair.
+
+Implementation:
+
+- New `DivBpRel { offset }` IR variant in tasm. Encoding
+  mirrors `IdivBpRel` but with ModR/M `0x76` (mod=01 /6=DIV
+  r/m=110) instead of `0x7E` (/7=IDIV). Three bytes: `F7 76
+  dd`. Parser recognizes `div word ptr [bp+N]` by routing
+  through the same `parse_single_op_word_ptr` helper, after
+  the explicit-AL byte form has been ruled out.
+- Updated `emit_op_with_source`'s `Div` and `Mod` arms to
+  pick `xor dx, dx; div` when the `unsigned` parameter is
+  true (the same flag already used to pick `shr` over `sar`).
+  Same selection for both the immediate-RHS path (via `bx`)
+  and the memory-RHS path.
+
+The other ~17 `cwd; idiv` sites in codegen aren't covered by
+this change — they're for compound `/=` / `%=` and long
+helpers, where the operand types are already constrained.
+A future uint-compound-divide fixture will exercise those
+sites; the per-site fix will follow the same pattern.
+
 ## int `--x`, `x--` as value, `char == -1`
 
 Fixtures `941` (`x = 5; y = --x;` — int pre-decrement as
