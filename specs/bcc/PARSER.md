@@ -1959,7 +1959,51 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
-## Int from char local, simple while-incr, char from int implicit
+## Char init from char binop, int-ptr from array+1, struct field assign
+
+Fixtures `1046` (`char a = 5; char b = 3; char c = a + b;
+return c;` — char init from a binary op on two char
+locals, byte-level arith without int promotion), `1047`
+(`int a[3]; int *p = a + 1; a[1] = 42; return *p;` —
+register-resident int pointer initialized from a
+stack-array decay + constant offset), `1048` (`struct S
+{ int x; int y; }; s.x = 42; s.y = 17; return s.x;` —
+struct-field assignment with two field writes and a
+field read for return).
+
+1048 already worked end-to-end — struct-field assigns
+and reads through the standard `bp_addr` arithmetic
+have been wired since the very first struct fixtures.
+
+1046 hit the batch-241 panic — char init from a binop
+RHS. BCC keeps the arithmetic at byte width when the
+destination is char: `mov al, byte ptr <a>; add al,
+byte ptr <b>; mov byte ptr <c>, al`. No int promotion
+because the result is truncated anyway.
+
+Added a char-init binop arm: when both operands are
+stack-resident char locals and the op is one of
+`+/-/&/|/^` (the byte-machinable group; `<<`, `>>`,
+`*`, `/`, `%` lack 8-bit reg-vs-mem forms on 8086),
+emit the three-instruction byte-arith sequence
+directly. Other char-init binop shapes (mixed types,
+non-stack operands) still panic until pinned.
+
+1047 emitted a buggy `lea ax, [bp-6]; inc ax; mov si,
+ax` — the `+1` was added as a literal byte rather than
+scaled by `sizeof(int)`. The `inc ax` would have left
+SI pointing at the high byte of `a[0]`, not at `a[1]`
+as the C source intends. BCC's pattern folds the
+element offset into the LEA: `lea ax, [bp-4]; mov si,
+ax` (because `&a[1]` = `&a[0] + 2 = [bp-6+2] = [bp-4]`).
+
+Added a register-init peephole in `emit_store_reg`: when
+the RHS is `<stack-array-ident> + K_const`, compute
+`base + K * elem_size` at compile time and emit one
+`lea ax, [bp+adj_off]; mov <reg>, ax` pair. Removes both
+the stride bug and the extra `inc/add` instruction.
+
+
 
 Fixtures `1043` (`char c = 'A'; int n = c; return n;` —
 int local initialized from a char local, implicit
