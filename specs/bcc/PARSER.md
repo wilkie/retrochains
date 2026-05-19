@@ -1959,7 +1959,34 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
-## Three-way int sub, char postinc-as-stmt, comma-expr return
+## Char postdec-as-stmt, int-ptr write to local, if-else two returns
+
+Fixtures `1058` (`char c = 5; c--; return c;` —
+sibling of fixture 1056 with `--` instead of `++`, used
+to confirm the byte-register stmt-position split also
+covers dec), `1059` (`int x = 0; int *p = &x; *p = 7;
+return x;` — int pointer to a stack local, dereference-
+write through the pointer, then read the local back),
+`1060` (`int x = 5; if (x > 0) return 1; else return
+2;` — if-else with each branch being a bare `return`).
+
+All three already worked end-to-end:
+
+- 1058: the batch-246 byte-register stmt arm dispatches
+  on the mnemonic (`inc` for `++`, `dec` for `--`) and
+  emits `dec <reg>` directly when the position is Post.
+- 1059: `&x` for a stack local lowers to `lea ax, [bp-
+  N]; mov si, ax` (or similar register), then `*p = 7`
+  is a memory-direct `mov word ptr [si], 7` store. Read
+  of `x` afterwards picks up the new value via its
+  stack slot.
+- 1060: the if-else codegen emits `cmp; jle .L1; mov ax,
+  1; jmp .end; .L1: mov ax, 2; .end:` then the function
+  epilogue. Each branch's `return` is a terminator that
+  doesn't get its own jump-to-end since the else
+  already takes over from the if's fallthrough.
+
+
 
 Fixtures `1055` (`int a = 10; int b = 3; int c = 2;
 return a - b - c;` — three-way left-associative
