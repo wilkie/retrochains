@@ -1959,7 +1959,45 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
-## Char init from char shl, uchar init shr, char init shr K=4
+## Int mul by 3, int init from array elem + const, return arr elem by var idx
+
+Fixtures `1088` (`int x = 7; return x * 3;` — int local
+multiplied by a non-power-of-2 constant), `1089` (`int
+a[3]; int v; a[0] = 5; v = a[0] + 100;` — int assign
+from array-elem-plus-const, exercising the standard
+load-plus-const path), `1090` (`int a[3]; int i = 1;
+... return a[i];` — return of stack-array element with
+runtime-index variable).
+
+All three already worked end-to-end. 1088 uses
+`imul` with an int constant; 1089 emits `mov ax, [bp-
+Na0]; add ax, 100; mov [bp-Nv], ax`; 1090 uses the
+variable-index array path that loads BX and uses
+`mov ax, [bx+bp+base]`.
+
+**Recorded findings (deferred):**
+
+- Probed `int x; return sizeof x;` as fixture 1088
+  first draft. BCC ELIDES the frame allocation for `x`
+  because the local is referenced only in `sizeof`,
+  never at runtime — emits `push bp; mov bp, sp` and
+  jumps straight to `mov ax, 2; ret`. We allocate
+  `dec sp; dec sp` and a matching `mov sp, bp` epilogue
+  for a 4-byte excess. The fix is the same "live local"
+  pass deferred from the early sizeof-of-array
+  probes (fixture 582 era).
+- Probed `struct S { char c; }; struct S s; char b; s.c
+  = 'Z'; b = s.c; return b;` as fixture 1089 first
+  draft. BCC's char-assign-from-char-member skips the
+  `cbw` between load and store because both sides are
+  byte-width. Our codegen routes through `emit_expr_to_
+  ax` which always widens, then stores AL — leaving
+  a stray 1-byte `cbw` that BCC doesn't emit. Sibling
+  of the char-init Member peephole already in
+  `emit_init_local`; needs the same peephole on the
+  *assign* path.
+
+
 
 Fixtures `1085` (`char a = 3; char c = a << 2;` — char
 left-shift init, sibling of 1082), `1086` (`unsigned
