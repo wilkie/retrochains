@@ -1959,6 +1959,30 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Int ne-zero as int, if-or-of-cmps, int mod pow2
+
+Fixtures `1175` (`int a=7; int r = a!=0; return r;`
+— int compared to literal zero with `!=`, sibling
+of 1172's `==0`), `1176` (`int a=0; int b=7; if
+(a>0 || b>0) return 1; return 0;` — short-circuit
+`||` of two int compares, sibling of 1174's `&&`),
+`1177` (`int a=17; return a%2;` — int modulo by 2,
+the smallest power-of-2 constant).
+
+All three already worked end-to-end. 1175 uses the
+boolean-materialization sequence with `jne`. 1176
+short-circuits via two `cmp; jg` pairs: the first
+success jumps directly to the true-arm body, the
+second failure falls through to the false arm — the
+`||` lowering is the dual of `&&`. 1177 confirms that
+unlike `c /= 8` on char (which collapses to `sar`,
+fixture 1153), int `% pow2` does **not** get a
+mask-with-AND optimization — BCC still emits the full
+`cwd; mov cx, 2; idiv cx` sequence and returns DX.
+For unsigned int the AND would be valid; for signed
+it isn't, so this is consistent with BCC keeping the
+signed-int divide pessimistic.
+
 ## Int eq-zero as int, int shl-then-or-const, if-and-of-cmps
 
 Fixtures `1172` (`int a=0; int r = a==0; return r;`
