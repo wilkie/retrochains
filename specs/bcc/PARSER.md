@@ -1959,7 +1959,22 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
-## Int sum three locals, global int array neg init, mul then sub
+## Int return XOR locals, int return AND const, nested if
+
+Fixtures `1130` (`int a = 0xA; int b = 0xC; return a ^
+b;` — int return of XOR of two int locals), `1131`
+(`int x = 0xFF; return x & 0x0F;` — int return of AND
+with a constant mask), `1132` (`if (a > 0) { if (b >
+0) return 1; } return 0;` — nested if with bracketed
+body).
+
+All three already worked end-to-end. 1130 lowers `a ^
+b` as `mov ax, [bp-Na]; xor ax, [bp-Nb]`. 1131 uses
+the accumulator form `and ax, 0x0F`. 1132 emits the
+two nested conditional branches with separate label
+slots.
+
+
 
 Fixtures `1127` (`int a = 1, b = 2, c = 3; int r = a +
 b + c; return r;` — three-way int sum stored into a
