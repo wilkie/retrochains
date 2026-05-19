@@ -1959,7 +1959,37 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
-## Char compound sub var, char init neg literal, int div by var
+## Global int array sum, int-ptr init and deref, char compound OR var
+
+Fixtures `1100` (`int g[3] = {1, 2, 3}; return g[0] +
+g[1] + g[2];` — global int array initializer with
+multi-element sum), `1101` (`int x = 7; int *p = &x;
+*p = 99; return x;` — int pointer to a stack-local
+with deref-write through the pointer), `1102` (`char a
+= 1; char b = 4; a |= b; return a;` — char compound OR
+with char-var RHS).
+
+All three already worked end-to-end. 1100's array
+initializer lays out as three word literals at `_g`,
+and the three reads use direct `mov ax, word ptr DGROUP:
+_g+K`. 1101 emits `lea ax, [bp-N]; mov si, ax` for the
+address, then `mov word ptr [si], 99` for the deref-
+write. 1102 follows the char compound bitwise path.
+
+**Recorded finding (deferred):**
+
+- Probed `int a[3]; int n = 1; int *p = a + n; a[1] =
+  42; return *p;` as fixture 1101 first draft. We emit
+  `lea ax, [bp+base]; add ax, [bp+n]; mov si, ax` —
+  forgetting to scale `n` by sizeof(int) = 2. BCC's
+  correct sequence is `mov ax, [bp+n]; shl ax, 1; lea
+  dx, [bp+base]; add ax, dx; mov si, ax`. Same stride
+  bug as the constant-K case (batches 243/249), but
+  with a runtime-variable offset that needs the shl.
+  Sibling fix: detect `<array> + <ident-int>` in the
+  pointer-init path, emit the shift-and-add sequence.
+
+
 
 Fixtures `1097` (`char a = 20; char b = 5; a -= b;
 return a;` — char compound sub-assign with a char-var
