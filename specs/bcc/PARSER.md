@@ -1959,7 +1959,28 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
-## Char postdec-as-stmt, int-ptr write to local, if-else two returns
+## Int const-minus-var, int-ptr array write, char cmp in if-else
+
+Fixtures `1061` (`int x = 3; return 10 - x;` —
+subtraction with constant LHS and variable RHS, the
+opposite operand order from the more common `x - K`
+shape), `1062` (`int a[3]; int *p = &a[1]; *p = 100;
+return a[1];` — int pointer to a specific array
+element, dereference-write through the pointer, then
+read the same element back), `1063` (`char a = 5;
+char b = 3; if (a > b) return 1; else return 2;` —
+char-vs-char compare in an if-else condition with
+two byte-register-resident operands).
+
+All three already worked end-to-end. 1061's `10 - x`
+lowers as `mov ax, 10; sub ax, [bp-N]` via the
+constant-LHS arm; 1062 routes the address-of-element
+through the batch-243 stack-array LEA peephole and the
+deref-write through `mov word ptr [si], 100`; 1063
+uses the char-vs-char compare peephole with `jbe` as
+the inverse jump for the if-else dispatch.
+
+
 
 Fixtures `1058` (`char c = 5; c--; return c;` —
 sibling of fixture 1056 with `--` instead of `++`, used
