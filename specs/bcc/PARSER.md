@@ -1959,6 +1959,43 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Pointer subscript — call arg, in arith, char rvalue
+
+Fixtures `893` (`int *p; f(p[1])` — subscript as call arg),
+`894` (`int *p; x = p[1] + 5` — subscript in arithmetic), `895`
+(`char *p; return p[1]` — char-pointer subscript as return value).
+
+894 and 895 already worked end-to-end without new code; the
+rvalue subscript-load through `emit_expr_to_ax` handles the
+arithmetic-binop and char-return paths.
+
+893's BCC `-S` listing shows the memory-operand-push peephole
+on the arg:
+
+```
+mov bx, word ptr DGROUP:_p
+push word ptr [bx+2]
+```
+
+But the actual OBJ bytes are `mov ax, word ptr [bx+2]; push ax`
+— **same `-S` vs OBJ discrepancy** as fixture 891. An early
+attempt to apply the peephole in `emit_call` (and the matching
+`PushBxDisp` IR variant + parser arm) emitted the listing-form
+bytes (`FF 77 02`, 3 bytes) and ended up 1 byte shorter than
+the oracle OBJ. Reverted the codegen — fall through to
+`emit_arg_into_ax` + `push ax` and the bytes match. The
+`PushBxDisp` IR variant (`FF 77 dd`) was left in place since
+the encoding itself is correct; it just doesn't get exercised
+by current fixtures.
+
+Recorded broadly: BCC's `-S` printer over-eagerly substitutes
+memory-direct forms (cmp, push) for the BX-indexed pointer-
+subscript case, but the OBJ pipeline always routes through AX
+for these. Compound-assign LHS (batches 181-189) and zero-test
+(889) use the memory-direct forms in both listings *and* OBJ;
+rvalue contexts (compare-with-const, push as call arg) only do
+so in listings.
+
 ## Pointer subscript — return, compare-const, compare-var
 
 Fixtures `890` (`int *p; return p[1]` — subscript as the return
