@@ -1959,6 +1959,26 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## String literal init, inferred array size, long init
+
+Fixtures `908` (`char a[] = "Hi";` — string literal in char
+array), `909` (`int a[] = {1, 2, 3};` — size-inferred array
+init), `910` (`long g = 0x12345678L;` — long global init).
+
+All three already work end-to-end. Coverage notes:
+
+- 908: parser handles the C90 abbreviation `char a[] =
+  "string"` — array size is `strlen("Hi") + 1 = 3`. Codegen
+  lands the bytes into `_DATA` as `db 'H','i',0`.
+- 909: same size-inference rule for `int a[] = {1, 2, 3};` —
+  the explicit list determines the array's element count, and
+  the (omitted) `[N]` in the declarator is filled in from the
+  list length.
+- 910: long initializer `0x12345678L` lands as a four-byte
+  data record split into two `dw` lines, low half first
+  (`dw 5678h; dw 1234h`) — same little-endian convention as
+  long stores.
+
 ## Array/global initializers, static linkage
 
 Fixtures `905` (`int a[3] = {1, 2, 3};` — array initializer
