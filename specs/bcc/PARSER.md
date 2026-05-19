@@ -1959,6 +1959,47 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Int and-const-one, uint shr by const, int deref then add
+
+Fixtures `1178` (`int a=7; int x = a & 1; return
+x;` — low-bit isolate via AND with constant 1),
+`1179` (`unsigned int u=100; return u>>2;` — unsigned
+int right-shift uses `shr` rather than `sar`, the
+unsigned-versus-signed dispatch hinging on the
+operand type), `1180` (`int a=5; int *p = &a;
+return *p + 1;` — deref through a pointer-to-local
+then add a constant).
+
+All three already worked end-to-end. 1178 emits the
+canonical `mov ax, [bp-Na]; and ax, 1` and stores
+the result. 1179 confirms BCC dispatches on operand
+signedness for shifts in value context the same way
+it does in compound context: `mov ax, [bp-Nu]; shr
+ax, 1; shr ax, 1` (K=2 → individual single-bit
+shifts, matching the batch-110 K≤3 unroll
+threshold). 1180 emits the LEA-into-BX path: `lea
+bx, [bp-Na]; mov [bp-Np], bx; ... mov bx, [bp-Np];
+mov ax, [bx]; inc ax` for the deref-then-add.
+
+### Deferred from batch 287
+
+- Probed `int a=5; int b=3; int r = !(a > b); return
+  r;` (`1178` first draft). 5-byte diff. BCC fuses
+  `!cmp` by inverting the jump (`jg` rather than
+  `jle`) so the boolean materialization produces the
+  inverted result directly: cmp, jg-to-zero-arm,
+  `mov ax, 1`, jmp, `xor ax, ax`. Our codegen
+  materializes the cmp as a normal 0/1 boolean and
+  then applies `!` via the generic `neg ax; sbb ax,
+  ax; inc ax` sequence (5 bytes), unaware that the
+  operand is itself a compare result that could have
+  emitted the inverted condition for free. The fix
+  is a `UnaryNot(Compare(...))` peephole in
+  `emit_expr_to_ax` that calls the boolean-
+  materialization helper with the inverted
+  jump-condition. Probe replaced with the
+  AND-const-1 variant until that peephole lands.
+
 ## Int ne-zero as int, if-or-of-cmps, int mod pow2
 
 Fixtures `1175` (`int a=7; int r = a!=0; return r;`
