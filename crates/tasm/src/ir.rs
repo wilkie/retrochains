@@ -426,6 +426,12 @@ pub enum Instr {
     /// pointer: `p[K] = 'B'` lowers to a memory-direct byte store
     /// through SI. Fixture 1016.
     MovByteSiDispImm8 { disp: i16, imm: u8 },
+    /// `mov <reg8>,byte ptr [si+<disp>]` — 8A (mod reg r/m=100).
+    /// disp=0 → `8A xx04` (mod=00, 2 bytes total); disp!=0 fitting
+    /// i8 → `8A xx44 dd` (mod=01, 3 bytes). Char-pointer subscript
+    /// read through an SI-resident pointer: `return p[K];` loads the
+    /// byte into AL. Fixture 1019.
+    MovReg8ByteSiDisp { reg: Reg8, disp: i16 },
     /// `inc <reg8>` — FE C0+rc. Increment an 8-bit register.
     IncReg8 { reg: Reg8 },
     /// `dec <reg8>` — FE C8+rc. Decrement an 8-bit register.

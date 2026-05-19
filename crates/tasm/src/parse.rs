@@ -1074,6 +1074,13 @@ fn parse_mov(operands: &str, line_no: usize) -> AsmResult<Instr> {
     {
         return Ok(Instr::MovByteSiDispImm8 { disp: i16::from(disp), imm: imm as u8 });
     }
+    // RHS `byte ptr [si+disp]` — byte load through SI pointer into an
+    // 8-bit register (fixture 1019: char-pointer subscript read).
+    if let Some(reg) = Reg8::parse(lhs)
+        && let Some(disp) = parse_byte_si_disp(rhs)
+    {
+        return Ok(Instr::MovReg8ByteSiDisp { reg, disp: i16::from(disp) });
+    }
     // LHS `word ptr [di]` — store through DI pointer (fixture 628).
     if lhs == "word ptr [di]" {
         if let Some(src) = Reg16::parse(rhs) {
