@@ -1959,6 +1959,38 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## int `<<=` unroll for K≤3, char init expr, int `*=` pow2
+
+Fixtures `1022` (`int x = 3; x <<= 2;` — int compound shift
+by constant, must unroll rather than use CL), `1023`
+(`char c = 'A' + 1;` — char initialized from a constant
+expression), `1024` (`int x = 3; x *= 4;` — int compound
+multiply by power-of-2 constant).
+
+1023 and 1024 already worked end-to-end. The `'A' + 1`
+expression is constant-folded at parse time to `66`; the
+char init lowers identically to fixture 011 (`char c = 1`).
+1024's `x *= 4` unrolls to two `shl si, 1` via the existing
+power-of-2 multiplication peephole.
+
+1022 exposed a missed unroll. The compound-shift-on-int-
+register arm (around line 5200) was always emitting the CL
+load (`mov cl, K; shl reg, cl`) regardless of K's
+magnitude. BCC actually unrolls for K = 1, 2, 3 into
+repeated `<mnem> <reg>, 1` (2 bytes each) and uses the CL
+form for K ≥ 4 (5 bytes). Same threshold as the expression-
+context shift (fixture 626) — the existing `Shl`/`Shr`
+arm in `emit_op_with_source` already does the unroll.
+Updated the compound-shift arm to match: when K ∈ {1, 2,
+3}, emit `<mnem> <reg>, 1` repeated K times; otherwise use
+the CL form. Saves 1 byte for K=2 (4 vs 5) and matches BCC
+byte-for-byte.
+
+Note this only affects compound shifts on register-resident
+int locals. The expression-position shift already unrolled
+correctly via `emit_op_with_source`; this batch closed the
+compound-shift arm gap.
+
 ## char-ptr subscript read, parens-add cmp, int mul then add
 
 Fixtures `1019` (`char *p; return p[1];` — char-pointer
