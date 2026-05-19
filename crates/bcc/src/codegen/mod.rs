@@ -2281,6 +2281,37 @@ impl<'a> FunctionEmitter<'a> {
             let _ = write!(self.out, "\tcmp\tbyte ptr DGROUP:_{name},{rhs8}\r\n");
             return;
         }
+        // `<reg-ptr>-><field> <relop> <const>` — memory-direct compare
+        // through a register-resident struct pointer. BCC emits `cmp
+        // word ptr [<reg>+off], K` directly (4 bytes for disp!=0, 3
+        // for disp=0). Restricted to SI (tasm only has the SI form
+        // today) and word fields with imm8sx constants. Fixture 1007.
+        if let (
+            ExprKind::Member {
+                base,
+                field,
+                kind: crate::ast::MemberKind::Arrow,
+            },
+            Some(rhs),
+        ) = (&left.kind, try_const_eval(right))
+            && let ExprKind::Ident(p_name) = &base.kind
+            && self.locals.has(p_name)
+            && let LocalLocation::Reg(reg) = self.locals.location_of(p_name)
+            && reg.name() == "si"
+            && let Some(pty) = self.locals.type_of(p_name).pointee()
+            && let Some((field_off, field_ty)) = pty.field(field)
+            && !field_ty.is_char_like()
+            && i8::try_from(rhs).is_ok()
+        {
+            let reg_name = reg.name();
+            let disp = if field_off == 0 {
+                format!("[{reg_name}]")
+            } else {
+                format!("[{reg_name}+{field_off}]")
+            };
+            let _ = write!(self.out, "\tcmp\tword ptr {disp},{rhs}\r\n");
+            return;
+        }
         // `<char-stack> <relop> <char-stack>` — byte-byte compare
         // directly: `mov al, byte ptr <lhs>; cmp al, byte ptr <rhs>`.
         // No `cbw` widening since both sides are already byte values

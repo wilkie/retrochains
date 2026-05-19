@@ -415,6 +415,7 @@ fn instr_size(instr: &Instr) -> usize {
         Instr::IncBpRelByte { .. } | Instr::DecBpRelByte { .. } => 3,
         Instr::CmpByteBpRelImm8 { .. } => 4,
         Instr::CmpByteSiPtrImm8 { .. } => 3,
+        Instr::CmpWordSiDispImm8Sx { disp, .. } => if *disp == 0 { 3 } else { 4 },
         Instr::AndGroupSymImm16 { .. }
         | Instr::OrGroupSymImm16 { .. }
         | Instr::XorGroupSymImm16 { .. }
@@ -1691,6 +1692,20 @@ fn emit_instr(
             out.push(0x80);
             out.push(0x3C);
             out.push(*imm);
+        }
+        Instr::CmpWordSiDispImm8Sx { disp, imm } => {
+            // `cmp word ptr [si+disp], imm8sx` → Grp1 /7 r/m16,imm8sx.
+            // Opcode 83. ModR/M: disp=0 → mod=00 r/m=100 = 0x3C;
+            // disp!=0 → mod=01 r/m=100 = 0x7C with disp8.
+            out.push(0x83);
+            if *disp == 0 {
+                out.push(0x3C);
+            } else {
+                let d = i8::try_from(*disp).expect("si-rel disp fits in i8");
+                out.push(0x7C);
+                out.push(d as u8);
+            }
+            out.push(*imm as u8);
         }
         Instr::AddGroupSymReg16 { group, symbol, offset, reg } => {
             // `add word ptr <group>:<sym>[+N], reg16` → 01 (mod=00

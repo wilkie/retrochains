@@ -2227,6 +2227,14 @@ fn parse_cmp(operands: &str, line_no: usize) -> AsmResult<Instr> {
             return Ok(Instr::CmpByteSiPtrImm8 { imm: imm as u8 });
         }
     }
+    // `cmp word ptr [si+disp], imm8sx` — Grp1 r/m16,imm8sx with
+    // SI-indirect addressing. Used by the arrow-field memory-direct
+    // compare peephole (`p->x == K` with p in SI). Fixture 1007.
+    if let Some(disp) = parse_word_si_disp(lhs)
+        && let Some(imm) = parse_imm8_signed(rhs)
+    {
+        return Ok(Instr::CmpWordSiDispImm8Sx { disp: i16::from(disp), imm });
+    }
     // `cmp word ptr <group>:<sym>[+N], imm` — long const-compare
     // chained-cmp pattern. Prefer imm8sx (`83 3E ...`, 5 bytes —
     // fixture 223) when it fits; fall back to imm16 (`81 3E ...`,

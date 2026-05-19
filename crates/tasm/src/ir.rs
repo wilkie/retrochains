@@ -837,6 +837,13 @@ pub enum Instr {
     /// with ModR/M `3C` = mod=00 r/m=100 ([si]). Used by `while
     /// (*p)` on a char pointer enregistered in SI (fixture 636).
     CmpByteSiPtrImm8 { imm: u8 },
+    /// `cmp word ptr [si+disp], imm8sx` — Grp1 r/m16,imm8sx with
+    /// /7=CMP and SI-indirect addressing. disp=0 encodes as
+    /// `83 3C ii` (mod=00, 3 bytes); disp!=0 fitting i8 encodes as
+    /// `83 7C dd ii` (mod=01, 4 bytes). Used by the arrow-field
+    /// memory-direct compare peephole (`if (p->x == K)` with p in
+    /// SI). Fixture 1007.
+    CmpWordSiDispImm8Sx { disp: i16, imm: i8 },
     /// `inc word ptr [bp+<offset>]` — FF 46 dd. Grp5 /0 against a
     /// bp-relative stack local. Fixture 547 (`++a[1]` on an int
     /// local array → `inc word ptr [bp-4]`).
