@@ -753,12 +753,28 @@ impl Parser {
                     continue;
                 }
                 let size_tok = self.bump();
-                let TokenKind::IntLit(len) = size_tok.kind else {
-                    return Err(ParseError::Unexpected {
-                        expected: "array size (integer literal)".to_owned(),
-                        found: size_tok.kind.describe().to_owned(),
-                        offset: size_tok.span.start,
-                    });
+                // Enum constants are accepted as array sizes —
+                // `enum { N = 4 }; int a[N];`. Fixture 1004.
+                let len = match &size_tok.kind {
+                    TokenKind::IntLit(n) => *n,
+                    TokenKind::Ident(name) => {
+                        let Some(v) = self.enum_constants.get(name).copied() else {
+                            return Err(ParseError::Unexpected {
+                                expected: "array size (integer literal or enum constant)"
+                                    .to_owned(),
+                                found: size_tok.kind.describe().to_owned(),
+                                offset: size_tok.span.start,
+                            });
+                        };
+                        v
+                    }
+                    _ => {
+                        return Err(ParseError::Unexpected {
+                            expected: "array size (integer literal or enum constant)".to_owned(),
+                            found: size_tok.kind.describe().to_owned(),
+                            offset: size_tok.span.start,
+                        });
+                    }
                 };
                 self.expect(&TokenKind::RBracket)?;
                 array_lens.push(len);
