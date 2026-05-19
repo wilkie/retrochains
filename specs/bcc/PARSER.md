@@ -1959,6 +1959,59 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Unsigned cmp const, sequential postinc, int shr const as value
+
+Fixtures `1028` (`unsigned int x = 100; if (x > 5) return 1;
+return 0;` — unsigned-typed local compared against an
+imm8, must use the unsigned jump form `jbe` rather than
+`jle`), `1029` (`int x = 1; x++; x++; return x;` — two
+back-to-back postincrements on the same stack-local with
+no intervening uses), `1030` (`int x = 128; int r = x >>
+4; return r;` — int shr by a constant K ≥ 4, materializes
+through `mov cl, K; sar reg, cl`).
+
+All three already worked end-to-end:
+
+- 1028: the `unsigned` storage-class flows to `expr_is_unsigned`
+  on the lhs of the compare; the compare arm picks `jbe` for
+  the "not greater-than" jump (unsigned form). RHS is imm8sx
+  (`5`) so the encoding is the existing `cmp word ptr [bp-N],
+  imm8sx` (`83 7E dd ii`, 4 bytes). No new shape needed —
+  the unsigned-jump dispatch was added back during the very
+  first unsigned-int batches.
+- 1029: each `x++` lowers to `inc word ptr [bp-N]` (3 bytes
+  via the existing `IncBpRel`/`DecBpRel` direct-memory IR
+  variants). The two increments are independent stmts with
+  no shared CSE, and BCC also emits the pair back-to-back —
+  no temporal coalescing. Already covered.
+- 1030: K=4 is above the K ≤ 3 unroll threshold, so the
+  shift arm picks the CL form: `mov ax, [bp-N]; mov cl, 4;
+  sar ax, cl`. The init `int r = x >> 4` then stores AX to
+  `r`'s stack slot. Already covered; `sar` is the signed-int
+  shift dispatch (batch 232's split keeps `>>` on signed-int
+  operands routed to `sar`).
+
+**Recorded finding (baseline failure count correction):**
+
+- Full regression now shows **12** pre-existing failures
+  rather than the previously recorded 11. Fixture
+  `586-char-add-char-obj` (`char a; char b; a=1; b=2;
+  return a+b;`) has been failing back to its capture in
+  commit 999b0ae — bisecting through every codegen
+  commit in the session shows the same 236-byte output,
+  while the oracle captured 238 bytes. The 2-byte
+  difference is in the operand-eval order for char-promoted
+  addition: BCC evaluates the LHS first, pushes it,
+  evaluates the RHS, then does `mov dx, ax; pop ax; add
+  ax, dx` (4 bytes of save/restore). We instead evaluate
+  the RHS first, push, evaluate the LHS, then `pop dx;
+  add ax, dx` (2 bytes of save/restore — we're tighter
+  than BCC by 2 bytes). The byte-exact invariant means
+  this counts as a divergence to fix even though we're
+  smaller. Deferred — needs an operand-order rule for
+  char-promoted commutative adds (LHS first, RHS second,
+  with `mov dx, ax; pop ax` rather than `pop dx`).
+
 ## Null-ptr cast init, two stack arrays sum, int le-cmp as value
 
 Fixtures `1025` (`int *p = (int *)0; if (p == 0) return 1;` —
