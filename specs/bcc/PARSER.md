@@ -1959,7 +1959,42 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
-## Return char struct field, global char return, int compound mul var
+## Char compound add var, int return char shr, sizeof used array
+
+Fixtures `1094` (`char a = 10; char b = 3; a += b;
+return a;` — char compound add-assign with a char-var
+RHS), `1095` (`char c = 16; return c >> 1;` — int
+return from char-shifted-by-const expression in return
+position), `1096` (`int a[5]; a[0] = 1; return sizeof
+a;` — sizeof of a stack array that's actually used at
+runtime, defeating any frame-elision quirk).
+
+All three already worked end-to-end:
+
+- 1094: char compound `+= b` on a stack char-local
+  uses the standard char-compound path: `mov al, <a>;
+  add al, <b>; mov <a>, al`. Already covered.
+- 1095: `c >> 1` in return position widens via cbw
+  then shifts the int value, then returns AX. The
+  shift result is the int-promoted value, not the
+  byte-truncated form — different from the char-init
+  shift path (batch 255) where the dest is char.
+- 1096: `sizeof a` where `a` is `int a[5]` folds to
+  10 at parse time, and the frame is allocated for
+  the runtime writes anyway, so no elision applies.
+  No divergence.
+
+**Recorded finding (deferred):**
+
+- Probed `int a[5]; a[0] = 1; return sizeof a[0];` as
+  fixture 1095 first draft. The parser doesn't accept
+  `sizeof a[0]` (the `a[0]` operand form for `sizeof`)
+  — only `sizeof(<type-name>)` is wired up. Adding the
+  expression-operand form would need a new grammar
+  branch in the unary parser plus type-of-expression
+  resolution for the result.
+
+
 
 Fixtures `1091` (`struct S { char c; }; s.c = 'Z';
 return s.c;` — return of a struct char field directly,
