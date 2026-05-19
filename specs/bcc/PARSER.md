@@ -1959,6 +1959,38 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Int postinc as RHS, int mod by const, conditional as RHS
+
+Fixtures `1154` (`int a=5; int b=a++; return a+b;` —
+post-increment used as an initializer expression so the
+pre-value flows into `b` and `a` then carries the
+incremented value), `1155` (`int x=17; return x%5;` —
+int modulo by a non-power-of-two constant), `1156`
+(`int r = (a > b) ? a : b;` — ternary conditional used
+as the initializer of a local).
+
+All three already worked end-to-end. 1154 uses the
+existing postinc-as-value path: load `a` into AX, store
+to `b`'s slot, then increment the source slot in place.
+1155 emits the standard `cwd; mov cx, 5; idiv cx` and
+returns DX. 1156 reuses the existing ternary-to-AX
+lowering and stores the merged AX into the local slot
+via the regular int-init store.
+
+### Deferred from batch 279
+
+- Probed `char s[5] = {1, 2, 3, 4, 5}; return s[0] +
+  s[4];` (`1155` first draft). Our codegen panics at
+  `non-constant init for non-int-like type Array { elem:
+  Char, len: 5 } not yet supported` — the stack-local
+  init-list path is only wired for scalar types; the
+  array+InitList shape needs a per-element store
+  sequence (analogous to the global-array path that
+  exists for fixtures 526 and 567 but emits into `[bp-
+  N+i]` for stack slots). Probe replaced with the int-
+  modulo variant until we add a stack-array init-list
+  lowering.
+
 ## Int multi-decl statement, deref of ptr plus 1, char compound div pow2
 
 Fixtures `1151` (`int a, b, c; a=1; b=2; c=3; return
