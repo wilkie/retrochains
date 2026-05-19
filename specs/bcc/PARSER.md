@@ -1959,6 +1959,20 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Char init OR/XOR, return sizeof(char)
+
+Fixtures `1079` (`char c = a | b;` — char init from char
+OR), `1080` (`char c = a ^ b;` — char init from char
+XOR), `1081` (`return sizeof(char);` — bare-type sizeof
+of char in return position).
+
+All three already worked end-to-end. 1079 and 1080
+exercise the batch-243 byte-arith peephole's remaining
+`|` and `^` mnemonics (alongside `+/-/&` already
+covered by fixtures 1046/1051/1073). 1081 constant-
+folds `sizeof(char)` to 1 at parse time, then the
+return-int path emits `mov ax, 1`.
+
 ## Char ptr sub, char cmp zero as value, for loop accumulator
 
 Fixtures `1076` (`char a[5]; char *p = a+1; char *q =
