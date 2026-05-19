@@ -1959,6 +1959,54 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Global `++` / `--` in expression context
+
+Fixtures `962` (`int g; x = ++g;` — int global preinc as
+value), `963` (`x = g++;` — int global postinc as value),
+`964` (`char g; x = ++g;` — char global preinc as value).
+
+All three previously panicked at `locals.rs:469` with
+"unknown local in codegen: g" — `emit_update_to_ax` walked
+the local-location-of path and assumed the target was a
+local. Added a global-aware fast-path at the top:
+
+- **Int/uint/pointer global, pre-update**: memory-direct
+  `inc word ptr DGROUP:_g; mov ax, word ptr DGROUP:_g` —
+  the side effect runs first, then the new value is loaded
+  into AX. Captured value is the post-update one.
+- **Int/uint/pointer global, post-update**: `mov ax, word
+  ptr DGROUP:_g; inc word ptr DGROUP:_g` — capture pre-
+  update value first, then mutate. (See ordering caveat
+  below.)
+- **Char/uchar global, pre-update**: AL detour: `mov al,
+  byte ptr DGROUP:_g; inc al; mov byte ptr DGROUP:_g, al;
+  cbw` (or `mov ah, 0` for uchar). Same shape as the
+  stack-resident char case (fixture 732), but referencing
+  DGROUP instead of `[bp-N]`.
+- **Char/uchar global, post-update**: `mov al, byte ptr
+  DGROUP:_g; inc byte ptr DGROUP:_g; cbw` — captured byte
+  is pre-update.
+
+963 also exposed a subtle ordering issue. BCC's actual
+output for `x = g++` (x stack-resident) is:
+
+  mov ax, word ptr DGROUP:_g    ; capture pre-update
+  mov word ptr [bp-2], ax       ; store to x
+  inc word ptr DGROUP:_g        ; mutate g AFTER the store
+
+The mutation happens *after* the use. Our generic
+`emit_update_to_ax` Post arm emits load+inc together,
+placing the inc between the load and the caller's store.
+Same instructions, different order — and BCC defers the
+side effect past the using statement.
+
+Added a peephole in the stack-local-assign path: when the
+RHS is `Update { Post }` on an int/uint global, emit `mov
+ax, _g; mov [target], ax; inc word ptr _g` directly,
+deferring the side effect past the store. Sibling of the
+existing `<stack-int> = <reg-int>++` peephole (fixture 649)
+for register-resident locals.
+
 ## char `<<`, `-`, `~` as value
 
 Fixtures `959` (`char c = 3; return c << 2;` — char left
