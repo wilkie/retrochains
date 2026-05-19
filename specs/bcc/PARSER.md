@@ -1959,6 +1959,30 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## int `--x`, `x--` as value, `char == -1`
+
+Fixtures `941` (`x = 5; y = --x;` — int pre-decrement as
+value), `942` (`x = 5; r = x--;` — int post-decrement as
+value), `943` (`char c = -1; if (c == -1) return 1;` — char
+compared against a negative literal).
+
+All three already work end-to-end:
+
+- 941: pre-decrement-as-value lowers to the same in-place
+  decrement followed by an AX load, mirroring the
+  pre-increment shape (fixture 530). BCC's pattern is `dec
+  word ptr [bp-N]; mov ax, [bp-N]` — the decrement modifies
+  the variable, and the AX load reads the *new* value as the
+  expression's result.
+- 942: post-decrement-as-value is the dual: `mov ax, [bp-N];
+  dec word ptr [bp-N]` — AX captures the *old* value before
+  the in-place decrement modifies the variable.
+- 943: `c == -1` with `c` a signed char promotes the char to
+  int via `cbw`, then compares with the int constant `-1`
+  (`0xFFFF`). BCC's pattern: `mov al, byte ptr [bp-1]; cbw;
+  cmp ax, -1`. The promotion is what makes the comparison work
+  — without sign-extension, `0xFF == 0xFFFF` would fail.
+
 ## `||` as value, `^` as value, `>>` as value
 
 Fixtures `938` (`int x = 1; int y = 2; return x || y;` —
