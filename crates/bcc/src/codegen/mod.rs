@@ -728,6 +728,24 @@ impl<'a> FunctionEmitter<'a> {
         then_branch: &[Stmt],
         else_branch: Option<&[Stmt]>,
     ) {
+        // `if (K)` with K a constant — BCC elides the compare/branch
+        // entirely. Non-zero K: emit the then-branch inline (the else,
+        // if any, is unreachable and BCC drops it too). Zero K: emit
+        // only the else-branch. No labels are reserved by the if at
+        // all; statements after the if continue sequentially.
+        // Fixture 931.
+        if let Some(v) = try_const_eval(cond) {
+            if v != 0 {
+                for s in then_branch {
+                    self.emit_stmt(s);
+                }
+            } else if let Some(else_stmts) = else_branch {
+                for s in else_stmts {
+                    self.emit_stmt(s);
+                }
+            }
+            return;
+        }
         let base = self.label_plan.base(if_span_start);
         // When the cond's outermost operator is `||`, the operands may
         // short-circuit-to-true; we need a label at the start of the

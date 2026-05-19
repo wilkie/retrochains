@@ -140,6 +140,10 @@ impl<'a> Lexer<'a> {
             b"unsigned" => TokenKind::KwUnsigned,
             b"union" => TokenKind::KwUnion,
             b"long" => TokenKind::KwLong,
+            // BCC treats `short` as a 16-bit synonym for `int`; we
+            // tokenize it as KwInt directly so the type-parsing paths
+            // don't each need a redundant arm. Fixture 930.
+            b"short" => TokenKind::KwInt,
             b"goto" => TokenKind::KwGoto,
             b"signed" => TokenKind::KwSigned,
             b"const" => TokenKind::KwConst,
