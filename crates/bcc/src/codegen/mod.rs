@@ -2303,30 +2303,55 @@ impl<'a> FunctionEmitter<'a> {
         // [bp+(base+K*stride)], imm`. Same shape as the int-global
         // arm above, just with a bp-relative LHS. Sibling for char
         // arrays uses the byte form. Fixtures 978, 979.
-        if let (ExprKind::ArrayIndex { .. }, Some(rhs)) =
+        //
+        // Also handles global-struct-field and global-array-member
+        // chains: `s.x` resolves to `(name="s", total_off=0)` and
+        // `s.a[K]` to `(name="s", total_off=field_off + K*stride)`,
+        // both routing through the same memory-direct cmp shape but
+        // against `DGROUP:_<name>+off`. Fixture 991 (`s.x == 5`).
+        if let (ExprKind::ArrayIndex { .. } | ExprKind::Member { kind: crate::ast::MemberKind::Dot, .. }, Some(rhs)) =
             (&left.kind, try_const_eval(right))
             && let Some((name, total_off, leaf_ty)) =
                 self.try_lvalue_chain_addr(left)
-            && self.locals.has(&name)
-            && let LocalLocation::Stack(base_off) = self.locals.location_of(&name)
         {
-            let elem_off = base_off + i16::try_from(total_off).unwrap_or(i16::MAX);
-            if leaf_ty.is_char_like() {
-                let rhs8 = rhs & 0xFF;
-                let _ = write!(
-                    self.out,
-                    "\tcmp\tbyte ptr {},{rhs8}\r\n",
-                    bp_addr(elem_off),
-                );
-            } else {
-                let rhs16 = rhs & 0xFFFF;
-                let _ = write!(
-                    self.out,
-                    "\tcmp\tword ptr {},{rhs16}\r\n",
-                    bp_addr(elem_off),
-                );
+            if self.locals.has(&name)
+                && let LocalLocation::Stack(base_off) = self.locals.location_of(&name)
+            {
+                let elem_off = base_off + i16::try_from(total_off).unwrap_or(i16::MAX);
+                if leaf_ty.is_char_like() {
+                    let rhs8 = rhs & 0xFF;
+                    let _ = write!(
+                        self.out,
+                        "\tcmp\tbyte ptr {},{rhs8}\r\n",
+                        bp_addr(elem_off),
+                    );
+                } else {
+                    let rhs16 = rhs & 0xFFFF;
+                    let _ = write!(
+                        self.out,
+                        "\tcmp\tword ptr {},{rhs16}\r\n",
+                        bp_addr(elem_off),
+                    );
+                }
+                return;
             }
-            return;
+            if self.globals.contains(&name) {
+                let addr = if total_off == 0 {
+                    format!("DGROUP:_{name}")
+                } else {
+                    format!("DGROUP:_{name}+{total_off}")
+                };
+                if leaf_ty.is_char_like() {
+                    let rhs8 = rhs & 0xFF;
+                    let _ = write!(self.out, "\tcmp\tbyte ptr {addr},{rhs8}\r\n");
+                } else {
+                    let rhs16 = rhs & 0xFFFF;
+                    let _ = write!(self.out, "\tcmp\tword ptr {addr},{rhs16}\r\n");
+                }
+                return;
+            }
+            // Fall through to generic AX-based compare for non-local,
+            // non-global roots (shouldn't normally happen).
         }
         self.emit_expr_to_ax(left);
         // `<expr-in-ax> <relop> 0` — use `or ax, ax` (2 bytes) instead
@@ -6964,6 +6989,14 @@ impl<'a> FunctionEmitter<'a> {
                 self.out,
                 "\tmov\t{width} ptr {dest},offset DGROUP:_{src}\r\n",
             );
+            return;
+        }
+        // Non-constant RHS for an int field: materialize into AX,
+        // then store AX to the field. Fixture 990 (`s.x = v;` with
+        // v a stack local).
+        if !store_byte {
+            self.emit_expr_to_ax(value);
+            let _ = write!(self.out, "\tmov\tword ptr {dest},ax\r\n");
             return;
         }
         panic!("non-constant rhs in struct field assign not yet supported (no fixture)");
