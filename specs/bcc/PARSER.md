@@ -1959,7 +1959,36 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
-## Int cmp ne const, three-way add, int from neg local
+## Int sub two locals, postinc in if-body, int OR char
+
+Fixtures `1034` (`int a = 10; int b = 3; return a - b;` —
+subtraction of two stack-resident int locals as the
+function's return value), `1035` (`int n = 5; if (n > 0)
+n++; return n;` — postincrement on a stack-local
+positioned inside a single-statement if-body, no braces),
+`1036` (`int a = 0x10; char b = 0x02; return a | b;` —
+int local OR'd with a char local; the char promotes to int
+via the standard `mov al, [bp-N]; cbw` widen sequence
+before the OR).
+
+All three already worked end-to-end:
+
+- 1034: `a - b` loads `a` into AX, then `sub ax, word ptr
+  [bp-Nb]` — same memory-direct binop arm used for `+`
+  and bitwise ops. Already covered.
+- 1035: `if (n > 0) n++;` parses the if-body as a single
+  expression-statement. The codegen emits `cmp word ptr
+  [bp-N], 0; jle <skip>; inc word ptr [bp-N]; <skip>:`.
+  The single-statement if-body already worked since the
+  if-stmt arm accepts any statement, not just blocks.
+  The postinc-as-stmt path uses `IncBpRel` directly when
+  the value isn't consumed.
+- 1036: the `|` arm sees a non-char LHS (int) and a char
+  RHS. The RHS evaluation goes through `emit_expr_to_ax`
+  which widens char-to-int via `cbw`. The OR then operates
+  on AX with the int-LHS source. Already covered.
+
+
 
 Fixtures `1031` (`int x = 5; if (x != 7) return 1; return
 0;` — int local compared with `!=` against a non-zero
