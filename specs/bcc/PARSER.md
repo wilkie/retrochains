@@ -1959,7 +1959,29 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
-## Int mul by 3, int init from array elem + const, return arr elem by var idx
+## Return char struct field, global char return, int compound mul var
+
+Fixtures `1091` (`struct S { char c; }; s.c = 'Z';
+return s.c;` — return of a struct char field directly,
+exercising widening from member-byte-read to int return
+value), `1092` (`char g = 'B'; int main() { return g; }`
+— global char init and read, the simplest cross-section
+of global-data + char-return), `1093` (`int x = 5; int
+y = 3; x *= y; return x;` — int compound mul-assign by
+a stack variable RHS).
+
+All three already worked end-to-end:
+
+- 1091: return-int-of-char widens via `mov al, byte
+  ptr [bp-N]; cbw` (the *return* path expects the cbw
+  since the return is int).
+- 1092: global char `g` is stored at `_g`, read via
+  `mov al, byte ptr DGROUP:_g; cbw` for the int return.
+- 1093: `x *= y` lowers via the batch-111 `imul <mem>`
+  path: `mov ax, [bp-Nx]; imul word ptr [bp-Ny]; mov
+  [bp-Nx], ax`. Already covered.
+
+
 
 Fixtures `1088` (`int x = 7; return x * 3;` — int local
 multiplied by a non-power-of-2 constant), `1089` (`int
