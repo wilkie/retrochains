@@ -1703,6 +1703,14 @@ fn parse_sbb(operands: &str, line_no: usize) -> AsmResult<Instr> {
             return Ok(Instr::SbbSiDispDx { disp });
         }
     }
+    // `sbb word ptr [bx+disp], imm8sx` — long-pointer subscript
+    // compound high-half borrow (sibling of `AdcBxDispImm8`).
+    if let Some(disp) = parse_word_bx_disp(lhs)
+        && disp != 0
+        && let Some(imm) = parse_imm8_signed(rhs)
+    {
+        return Ok(Instr::SbbBxDispImm8 { disp, imm });
+    }
     Err(AsmError::new(
         line_no,
         format!("sbb: unsupported operand form `{operands}`"),
@@ -1833,6 +1841,14 @@ fn parse_adc(operands: &str, line_no: usize) -> AsmResult<Instr> {
         if rhs == "dx" {
             return Ok(Instr::AdcSiDispDx { disp });
         }
+    }
+    // `adc word ptr [bx+disp], imm8sx` — long-pointer subscript
+    // compound high-half carry (fixture 901: `long *p; p[K] += K`).
+    if let Some(disp) = parse_word_bx_disp(lhs)
+        && disp != 0
+        && let Some(imm) = parse_imm8_signed(rhs)
+    {
+        return Ok(Instr::AdcBxDispImm8 { disp, imm });
     }
     Err(AsmError::new(
         line_no,

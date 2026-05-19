@@ -1306,6 +1306,14 @@ pub enum Instr {
     /// Used by `long *p; p[K] = v` — two memory-direct stores at
     /// `[bx+off+2]` (high) and `[bx+off]` (low). Fixture 897.
     MovBxDispImm { disp: i8, imm: u16 },
+    /// `adc word ptr [bx+disp8],<imm8sx>` — `83 57 dd ii`. Group-1
+    /// `/2` (ADC) imm8sx form with mod=01 r/m=111=BX+disp8. Carry-
+    /// propagation partner to `AddBxDispImm8` for long-pointer
+    /// subscript compound add (fixture 901).
+    AdcBxDispImm8 { disp: i8, imm: i8 },
+    /// `sbb word ptr [bx+disp8],<imm8sx>` — `83 5F dd ii`. Group-1
+    /// `/3` (SBB) sibling.
+    SbbBxDispImm8 { disp: i8, imm: i8 },
     /// `push word ptr [bx+disp8]` — `FF 77 dd`. Group FF `/6` (PUSH
     /// r/m16) with mod=01 r/m=111=BX+disp8. Used by `f(p[K])` —
     /// BCC's memory-operand-push peephole on a global-pointer

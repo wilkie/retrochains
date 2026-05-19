@@ -480,6 +480,7 @@ fn instr_size(instr: &Instr) -> usize {
         Instr::MovAxBxDisp { .. } | Instr::MovBxDispAx { .. } => 3,
         Instr::MovBxDispDx { .. } => 3,
         Instr::MovBxDispImm { .. } => 5,
+        Instr::AdcBxDispImm8 { .. } | Instr::SbbBxDispImm8 { .. } => 4,
         Instr::PushBxDisp { .. } => 3,
         Instr::AddAlBpRel { .. }
         | Instr::SubAlBpRel { .. }
@@ -2235,6 +2236,22 @@ fn emit_instr(
             out.push(*disp as u8);
             out.push((*imm & 0xFF) as u8);
             out.push((*imm >> 8) as u8);
+        }
+        Instr::AdcBxDispImm8 { disp, imm } => {
+            // `adc word ptr [bx+disp8],imm8sx` → 83 57 dd ii.
+            // Group-1 /2 (ADC). Fixture 901.
+            out.push(0x83);
+            out.push(0x57);
+            out.push(*disp as u8);
+            out.push(*imm as u8);
+        }
+        Instr::SbbBxDispImm8 { disp, imm } => {
+            // `sbb word ptr [bx+disp8],imm8sx` → 83 5F dd ii.
+            // Group-1 /3 (SBB).
+            out.push(0x83);
+            out.push(0x5F);
+            out.push(*disp as u8);
+            out.push(*imm as u8);
         }
         Instr::PushBxDisp { disp } => {
             // `push word ptr [bx+disp8]` → FF 77 dd. ModR/M `77` =

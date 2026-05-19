@@ -5979,6 +5979,38 @@ impl<'a> FunctionEmitter<'a> {
             );
             return;
         }
+        // Long-pointer subscript compound: `long *p; p[K] += v`.
+        // Load the pointer into BX once, then route through the
+        // long-compound-to-mem helper with `[bx+off]` / `[bx+off+2]`
+        // addresses. Same skeleton as the long-array path, just
+        // BX-based instead of DGROUP-direct. Fixture 901.
+        if let Some(g_ty) = self.globals.type_of(array)
+            && let Some(pointee) = g_ty.pointee()
+            && pointee.is_long_like()
+            && indices.len() == 1
+            && let Some(k) = try_const_eval(&indices[0])
+        {
+            let stride = i32::from(pointee.size_bytes());
+            let off = (k as i32).wrapping_mul(stride);
+            let lo_addr = if off == 0 {
+                "[bx]".to_owned()
+            } else if off > 0 {
+                format!("[bx+{off}]")
+            } else {
+                format!("[bx-{}]", -off)
+            };
+            let hi_off = off + 2;
+            let hi_addr = if hi_off > 0 {
+                format!("[bx+{hi_off}]")
+            } else if hi_off < 0 {
+                format!("[bx-{}]", -hi_off)
+            } else {
+                "[bx]".to_owned()
+            };
+            let _ = write!(self.out, "\tmov\tbx,word ptr DGROUP:_{array}\r\n");
+            self.emit_long_compound_to_mem(&lo_addr, &hi_addr, op, value, pointee.is_unsigned());
+            return;
+        }
         // Char/int global-array element with a constant index — same
         // shapes as the corresponding char-global / int-global compound
         // patterns, just with a `DGROUP:_<a>+<K>` address. Fixture 706
