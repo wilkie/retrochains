@@ -1959,6 +1959,36 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## char compare to int/char-literal as value, uint neg
+
+Fixtures `953` (`char c = 5; return c < 10;` — char-vs-int
+constant in return-value position), `954` (`char c = 'A';
+return c == 'A';` — char-vs-char-literal in return value),
+`955` (`unsigned a = 5; return -a;` — unary negation of an
+unsigned value).
+
+All three already work end-to-end:
+
+- 953: existing `<char-stack-local, const>` arm in
+  `emit_compare` handles this — `cmp byte ptr [bp-1], 10`
+  (the int literal is truncated to 8 bits since the LHS is
+  char-sized). Same `cmp byte ptr [bp+N], imm8` shape
+  (`80 7E dd ii`) as fixture 524 used in if-condition
+  position. Comparison-as-value lowering then materializes
+  the boolean result through the standard six-instruction
+  `cmp; jl .true; xor; jmp; .true: mov ax, 1` mini-CFG.
+- 954: same byte-form `cmp byte ptr [bp-1], 65` (`'A'` is
+  just the byte literal 65 — char literals are integer
+  rvalues in C90). Sibling of 953 with a different
+  comparison operator and a different RHS notation.
+- 955: unary minus on an unsigned int promotes to the same
+  signed-int `neg ax` (`F7 D8`) instruction. C90 says
+  `-(unsigned)` evaluates as `(UINT_MAX + 1) - operand`,
+  which on a wraparound two's-complement target is exactly
+  what `neg` produces. BCC and our codegen both treat the
+  operation identically to the signed case; no separate
+  unsigned arm needed.
+
 ## uint compound `%=`, char-vs-char compare peephole
 
 Fixtures `950` (`unsigned g; unsigned b; g %= b;` — uint
