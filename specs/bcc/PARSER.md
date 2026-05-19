@@ -1959,6 +1959,35 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## char-ptr subscript byte store, int ptr subscript write, int cmp imm16
+
+Fixtures `1016` (`char a[3]; char *p = a; p[1] = 'B';` —
+char-pointer subscript write needs a byte memory-direct
+store through an SI-resident pointer), `1017` (`int a[3];
+int *p = a; p[1] = 99;` — int-pointer subscript write,
+already covered word-store path), `1018` (`x = 1000; if (x
+== 1000)` — int local cmp imm16, exercises the wide-
+immediate form of `cmp word ptr [bp-N], imm`).
+
+1016 needed a new tasm IR variant. `MovByteSiDispImm8 {
+disp, imm }` encodes `mov byte ptr [si+disp], imm8`:
+- disp=0: `C6 04 ii` (3 bytes, ModR/M mod=00 r/m=100)
+- disp!=0 fitting i8: `C6 44 dd ii` (4 bytes, mod=01)
+Sibling of the existing `MovBpRelImm8` (bp-relative byte
+store). Parser accepts `byte ptr [si+disp]` LHS with imm8
+RHS via the new `parse_byte_si_disp` helper.
+
+1017 already worked end-to-end — the int-pointer subscript
+write went through the existing word-store-through-SI path
+(`MovSiPtrImm`, fixture 136's sibling). No char-specific
+shape needed since int stores already had the byte-vs-word
+distinction baked in.
+
+1018 already worked. `cmp word ptr [bp-N], 1000` uses the
+imm16 form of Group-1 CMP (`81 7E dd lo hi`, 6 bytes) since
+1000 doesn't fit imm8sx (-128..127). The existing
+`CmpBpRelImm16` IR variant (fixture 563) handled this.
+
 ## Array-elem cmp self, uchar shr var, uchar shr const
 
 Fixtures `1013` (`if (a[0] == a[1])` — two stack-array
