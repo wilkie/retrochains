@@ -6053,6 +6053,14 @@ impl<'a> FunctionEmitter<'a> {
                 );
                 return;
             }
+            // Non-constant RHS for an int/uint/pointer element:
+            // materialize RHS in AX, then store AX to the element.
+            // Fixture 984 (`a[0] = x` with x a stack local).
+            if !leaf_ty.is_char_like() {
+                self.emit_expr_to_ax(value);
+                let _ = write!(self.out, "\tmov\tword ptr {},ax\r\n", bp_addr(off));
+                return;
+            }
             panic!("non-constant rhs in constant-indexed array assign not yet supported (no fixture)");
         }
         // 2D variable-index write: `a[i][j] = v` for `int a[M][N]`.
