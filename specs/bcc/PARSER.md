@@ -1959,7 +1959,64 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
-## Int-ptr from &a[1], int return from char cast, char init from sub
+## Int-ptr from array+2, stack array assign from local, init then add
+
+Fixtures `1052` (`int a[4]; int *p = a + 2; a[2] = 55;
+return *p;` — sibling of fixture 1047 with K=2 instead
+of K=1; exercises the batch-243 array+const-offset
+LEA peephole with a different stride product), `1053`
+(`int a[3]; int v = 42; a[1] = v; return a[1];` —
+stack-array element assigned from an int local (variable
+RHS) rather than a constant), `1054` (`int x = 10; x =
+x + 5; return x;` — int init followed by a "rebind
+to self plus const" reassignment).
+
+All three already worked end-to-end. 1052 exercised the
+LEA peephole's offset math at K=2 (adj_off = base + 4
+bytes); 1053 went through the existing stack-array
+elem variable-RHS write path; 1054 has the assign
+arm with the constant-add peephole.
+
+**Recorded finding (public-symbol ordering — partial map):**
+
+Probed the symbol-ordering rule by running the oracle on
+`int <name>(void) { return 42; } int main(void) { int n
+= <name>(); return n; }` for many `<name>` choices. The
+PUBDEF order in the OBJ depends on the function name in
+ways not yet reduced to one rule, but the data points
+catalog:
+
+| name        | order        |
+|-------------|--------------|
+| f, a, b, c, d, e, g, h, i, k, l, m, z | main first |
+| aa          | main first   |
+| mm, ma, mae, mai, mainn? | main first (mainn is *name* first) |
+| main2       | main2 first  |
+| ff, fff, ffff, fffff, fb, fff | name first |
+| zz, abc, xyz | name first  |
+| helo, helper, helper2 | name first |
+| gimme, my_fn, mymain, mais, maib | name first |
+| _f          | _f first     |
+| _gimme      | main first   |
+
+Forward-declaring main *before* the helper in source order
+doesn't change the ordering for single-char or m-prefix
+names but does flip a few (e.g., `aa` and `f` then put
+main first regardless).
+
+Not alphabetical, not by length, not by source position.
+The pattern is consistent with a hash-table-bucket
+walk — the symbol's hash determines its position. We
+don't yet know the hash function or bucket count. Until
+pinned, any multi-function probe whose helper name
+falls in the "wrong" bucket will diverge.
+
+Going forward: avoid multi-function fixtures except where
+the helper name is single-character (`f`-class), or use
+forward-declared main + body-after for predictable
+ordering when needed.
+
+
 
 Fixtures `1049` (`int a[3]; int *p = &a[1]; a[1] = 99;
 return *p;` — explicit address-of-element form of the
