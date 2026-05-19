@@ -9658,6 +9658,20 @@ impl<'a> FunctionEmitter<'a> {
             let _ = write!(self.out, "\tmov\t{},ax\r\n", reg.name());
             return;
         }
+        // Reg-to-reg copy: `<reg> = <other-reg>` where the RHS is a
+        // bare identifier naming another register-resident int
+        // local. BCC emits `mov <dest>, <src>` directly, skipping
+        // the AX round-trip. Fixture 1143 (`x = y;` with both in
+        // SI/DI).
+        if let ExprKind::Ident(name) = &expr.kind
+            && self.locals.has(name)
+            && let LocalLocation::Reg(src_reg) = self.locals.location_of(name)
+            && !src_reg.is_byte()
+            && !reg.is_byte()
+        {
+            let _ = write!(self.out, "\tmov\t{},{}\r\n", reg.name(), src_reg.name());
+            return;
+        }
         // Non-constant char init: untested. Best guess would be
         // `<compute to AL> / mov <reg>, al`, but until a fixture pins
         // the load-to-AL path, bail.
