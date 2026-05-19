@@ -1959,7 +1959,41 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
-## Char from char local, int mod by const, const-fold arith
+## Int from char local, simple while-incr, char from int implicit
+
+Fixtures `1043` (`char c = 'A'; int n = c; return n;` —
+int local initialized from a char local, implicit
+widening that needs `mov al, byte ptr <src>; cbw; mov
+word ptr <dst>, ax`), `1044` (`int x = 0; while (x < 3)
+x++; return x;` — minimal while-loop with a single-stmt
+body, no braces), `1045` (`int n = 65; char c = n;
+return c;` — char init from an int local without an
+explicit cast, the implicit-narrowing sibling of fixture
+1039).
+
+All three already worked end-to-end:
+
+- 1043: the int-init arm of `emit_init_local` routes
+  through `emit_expr_to_ax`, which for an `Ident("c")`
+  whose type is char-like loads `mov al, byte ptr <src>;
+  cbw` and then the init stores `mov word ptr <dst>, ax`.
+  The char-widen-to-int sequence has been wired since
+  the very first char fixtures.
+- 1044: `while (x < 3) x++;` parses as a `WhileStmt` with
+  a single expression-statement body. The codegen
+  emits the standard back-edge loop: `<top>: cmp word
+  ptr [bp-N], 3; jge <end>; inc word ptr [bp-N]; jmp
+  <top>; <end>:`. Already covered by the early while-loop
+  fixtures.
+- 1045: thanks to batch 241's generalization, char init
+  from a bare-ident source (whether char or int local)
+  routes through the same byte-load peephole. `char c =
+  n;` with n int emits `mov al, byte ptr <n>; mov byte
+  ptr <c>, al` — the implicit narrowing is just "use the
+  low byte". Same byte sequence as the explicit-cast
+  form (fixture 1039).
+
+
 
 Fixtures `1040` (`char a = 'A'; char b = a; return b;` —
 char local initialized directly from another char local,
