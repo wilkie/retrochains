@@ -1959,6 +1959,46 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Struct-array field rvalue, nested struct, `<=` as value
+
+Fixtures `932` (`struct S { int n; int a[3]; } s; s.n = 7;
+s.a[1] = 9; return s.n + s.a[1];` — global struct with an int
+array field, used in an arithmetic rvalue), `933` (`struct A
+{ struct B b; }; s.b.x = 42; return s.b.x;` — nested struct
+member access via dot chain), `934` (`return x <= y;` — int
+`<=` comparison used as a return value, not an `if` condition).
+
+933 and 934 already worked end-to-end:
+
+- 933: the existing member-chain helpers (`try_lvalue_chain_addr`
+  / `try_member_dot_chain`) recurse through any number of Dot
+  member nodes, accumulating field offsets. For `s.b.x` with
+  both fields at offset 0, the chain resolves to
+  `DGROUP:_s+0`, and the store/load fold into `mov word ptr
+  DGROUP:_s, 42` / `mov ax, word ptr DGROUP:_s`.
+- 934: the integer comparison-as-value path already handled
+  `<=` via the same lowering as the `if`-condition path
+  (`cmp; setle al; movzx ax, al`-equivalent on 8086:
+  `cmp; jle .true; xor ax, ax; jmp .end; .true: mov ax, 1`).
+
+932 needed one codegen fix in `OperandSource` resolution.
+When a binary op had a member→array-index chain like `s.a[1]`
+on its right-hand side, the existing `ExprKind::ArrayIndex`
+arm walked the index list inline and panicked at the first
+`Member` node it encountered ("array-index rhs: non-ident
+base not supported"). Replaced the inline walk with a call to
+`try_lvalue_chain_addr`, the same helper the `Member` rvalue
+arm already used. That helper already recurses through
+ArrayIndex *and* Member nodes uniformly — once the
+ArrayIndex arm routes through it, mixed chains like
+`s.a[K]`, `g.b.c[K]`, and `arr[i].field[j]` all fold to a
+single `DGROUP:_<root>+<total_off>` operand. Cuts ~20 lines
+of duplicate walk logic.
+
+The arm still rejects non-global bases — local struct fields
+through ArrayIndex would need a `[bp-N+K]` operand instead,
+and no fixture exercises that path yet.
+
 ## Multi-var decl, `short`, `if` constant condition
 
 Fixtures `929` (`int a, b; a = 3; b = 4; return a + b;` —
