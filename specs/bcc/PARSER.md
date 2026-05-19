@@ -1959,7 +1959,25 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
-## Char compound shl const, long global large init, int self double
+## Int return after compound add, parens add then mul, comma two assigns
+
+Fixtures `1112` (`int x = 3; x += 5; return x;` — int
+compound add followed by a return that picks up the
+updated value), `1113` (`return (a + b) * c;` — int
+return with parens forcing addition before
+multiplication), `1114` (`return (a = 7, b = 11, a +
+b);` — comma operator chain with two assignments and a
+final value).
+
+All three already worked end-to-end. 1112 uses the
+existing compound-add and then a separate load for the
+return. 1113's `(a + b) * c` evaluates the parenthesized
+add first, pushes its result, then loads `c` and
+multiplies. 1114's comma chain executes the side-effect
+assigns in order, with the final `a + b` becoming the
+comma value returned.
+
+
 
 Fixtures `1109` (`char c = 3; c <<= 2; return c;` —
 char compound shift-left by constant), `1110` (`long g
