@@ -1959,6 +1959,43 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Char stack array elem compound, postinc, arrow var-RHS
+
+Fixtures `1001` (`char a[3]; a[1] += 5;` — char stack array
+element compound add with const), `1002` (`char a[3];
+a[1]++;` — char stack array element postinc as statement),
+`1003` (`struct S { int x; } a; struct S *p = &a; int v =
+42; p->x = v;` — arrow field assigned from a non-constant
+stack local).
+
+All three already work end-to-end via the existing array-
+compound / array-postinc / arrow-assign paths. The char
+array compound add lowers to `add byte ptr [bp+(base+K)],
+imm` (same encoding as fixture 720's compound-and). The
+char array postinc is `inc byte ptr [bp+(base+K)]`,
+sibling of fixture 547 (int) and 717 (char global).
+The arrow field var-RHS routes through `emit_member_assign`
+— the batch-224 non-const arm covers both global-struct
+and arrow-pointed-struct fields uniformly (the destination
+operand differs but the same `mov ax, <rhs>; mov <dest>,
+ax` lowering applies).
+
+**Recorded findings (deferred):**
+
+- **Enum constant as array size** (`enum { N = 4 }; int
+  a[N];`): parser fails "expected array size (integer
+  literal), got identifier". The array-size grammar only
+  accepts `IntLit`; needs to fold enum constants (already
+  registered in `enum_constants`) and possibly typedef'd
+  integer constants too.
+- **Memory-direct cmp for arrow field** (`if (p->x == 5)`
+  with p in SI): BCC emits `cmp word ptr [si], 5` (4 bytes,
+  imm8sx Group-1 form) — our codegen does `mov ax, [si];
+  cmp ax, 5` (5 bytes). The peephole exists in spirit (see
+  fixtures 891/1002 sibling probes) but tasm lacks the
+  `CmpWordSiPtrImm8Sx`/`Imm16` variants. Add the `83 3C ii`
+  and `81 3C lo hi` encodings to enable the peephole.
+
 ## Static char init, char as cond, typedef long alias
 
 Fixtures `998` (`static char c = 'A'; return c;` — function-
