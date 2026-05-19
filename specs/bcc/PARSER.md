@@ -1959,6 +1959,48 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Int eq-zero as int, int shl-then-or-const, if-and-of-cmps
+
+Fixtures `1172` (`int a=0; int r = a==0; return r;`
+— int compared to literal zero materialized as int,
+sibling of the 1159 char==0 case), `1173` (`int
+a=0x12; int x = (a << 8) | 0xff; return x;` — shift
+then OR with a constant rather than another variable),
+`1174` (`int a=5; int b=7; if (a>0 && b>0) return 1;
+return 0;` — short-circuit `&&` of two int compares
+in an if condition).
+
+All three already worked end-to-end. 1172 uses the
+boolean-materialization sequence with `cmp ax, 0`
+followed by the `je` arm. 1173 emits `mov ax, [bp-Na];
+mov cl, 8; shl ax, cl; or ax, 255` — the right-hand
+side being an immediate avoids the
+register-allocation issue documented below. 1174
+short-circuits via two `cmp; jle` pairs to the
+fall-through label — the `&&` lowering does the first
+compare, falls through on success to the second
+compare, and uses the same fall-through label for
+both failure jumps.
+
+### Deferred from batch 285
+
+- Probed `int a=0x12; int b=0x34; int x = (a & 0xff)
+  | (b << 8); return x;` (`1173` first draft). 1-byte
+  diff. BCC reorders the binop so the shift-needing
+  operand is computed first into AX, then loads the
+  other operand into DX with `mov dx, [bp-Na]; and
+  dx, 0xff` (longer encoding because not AX), and
+  finishes with `or dx, ax; mov [bp-Nx], dx` — keeping
+  both operands in registers across the OR with no
+  spill. Our codegen still pushes AX, computes the
+  other side into AX, pops to DX, then ORs. To match
+  we'd need a binop-via-DX path that picks register
+  vs. spill based on whether the simpler side can be
+  evaluated without clobbering. Probe replaced with
+  the `(a << 8) | 0xff` shape (immediate RHS, no
+  cross-operand register pressure) until we land that
+  allocator change.
+
 ## Do-while counter, int mask then shl, int lt-const as int
 
 Fixtures `1169` (`int i=0; do { i++; } while (i<3);
