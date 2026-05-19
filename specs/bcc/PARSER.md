@@ -1959,7 +1959,22 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
-## Int shr const as stmt, int mul by pow2, ptr NULL cmp
+## Long global shr by const, ternary two consts, struct field from field
+
+Fixtures `1139` (`long g = 1024L; g >>= 2; return
+(int)g;` — long global compound shift-right by
+constant), `1140` (`int x = 5; return x > 0 ? 100 :
+-1;` — ternary in return position with two int
+constant arms), `1141` (`s.x = 42; s.y = s.x; return
+s.y;` — struct field assigned from another field of
+the same struct).
+
+All three already worked end-to-end. 1139 uses the
+long-shift helper. 1140's ternary picks one of two
+constants based on the compare. 1141 does the field-
+to-field copy through AX.
+
+
 
 Fixtures `1136` (`int x = 64; x = x >> 2; return x;`
 — int compound shift as assign statement), `1137`
