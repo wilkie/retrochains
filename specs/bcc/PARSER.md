@@ -1959,6 +1959,36 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Stack array elem postinc, var-RHS write, mul-const
+
+Fixtures `983` (`int a[3]; a[1]++;` — stack int array elem
+postinc statement), `984` (`int a[3]; int x; a[0] = x;` —
+stack array elem assigned from a stack local), `985`
+(`return a[1] * 3;` — stack array elem times a small const).
+
+983 and 985 worked end-to-end:
+
+- 983: BCC emits `inc word ptr [bp+(base+K*stride)]` —
+  memory-direct increment on the bp-relative element. Our
+  existing array-postinc statement path already handles
+  stack arrays (sibling of fixture 547's preinc form).
+- 985: the rvalue path from batch 220 supplies the
+  `[bp+(base+K*2)]` operand source; the generic `*=` arm
+  unrolls `* 3` into `mov dx, 3; imul dx` after loading
+  the array elem into AX. Same shape as a `local * 3`
+  multiplication.
+
+984 needed a small extension to the array-assign path. The
+constant-indexed-array assign arm at `emit_array_assign:
+~6046` already had a const-RHS store but panicked for
+non-const RHS. Added a non-const arm for int/uint/pointer
+leaf types: `emit_expr_to_ax(value); mov word ptr [bp+
+elem_off], ax`. Same shape BCC emits for `a[0] = x` with x
+a stack local — `mov ax, [bp-N]; mov [bp+elem_off], ax`.
+Restricted to non-char leaves for now since a char-element
+non-const store needs the AL detour (byte register +
+narrow store); the panic message stays for that case.
+
 ## Stack array elem as bool, plus const, char return
 
 Fixtures `980` (`if (a[1]) return 7;` — stack-array element
