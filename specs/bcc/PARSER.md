@@ -1959,7 +1959,21 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
-## Int return XOR locals, int return AND const, nested if
+## Return max int, stack char array writes, global int pre-dec stmt
+
+Fixtures `1133` (`return 32767;` — return of i16 max
+positive literal), `1134` (`char s[3]; s[0]='X'; s[1]
+='Y'; s[2]='Z'; return s[1];` — stack char array
+with three byte stores and a read), `1135` (`int g =
+10; --g; return g;` — global int pre-dec as statement
+followed by a return).
+
+All three already worked end-to-end. 1133's literal
+folds to imm16 0x7FFF. 1134 emits three `mov byte ptr
+[bp-N+K], imm8` stores. 1135 uses `dec word ptr DGROUP:
+_g` directly.
+
+
 
 Fixtures `1130` (`int a = 0xA; int b = 0xC; return a ^
 b;` — int return of XOR of two int locals), `1131`
