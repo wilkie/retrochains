@@ -1959,7 +1959,39 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
-## Char init OR/XOR, return sizeof(char)
+## Char init from char shr, int init from char+const, struct field from arith
+
+Fixtures `1082` (`char a = 16; char c = a >> 1; return
+c;` — char init from a shift on a char local, exercising
+the C-standard promote-shift-truncate lowering), `1083`
+(`char c = 'A'; int n = c + 1; return n;` — int init
+from a char-plus-const expression, requiring the
+char-widen-to-int sequence), `1084` (`struct S { int x;
+int y; }; int a = 10; int b = 20; s.x = a + b; return
+s.x;` — struct field assignment with a binop on int
+locals as the RHS).
+
+1083 and 1084 already worked end-to-end. 1083 widens
+the char load with `mov al, <c>; cbw; add ax, 1` then
+stores AX to `n`'s int slot. 1084 evaluates `a + b`
+into AX via the int-binop arm, then stores to the
+struct field's `[bp+(s_off + 0)]` slot.
+
+1082 hit the char-init panic — the binop arm only
+covered `+/-/&/|/^` (byte-machinable ops). Shifts are
+different: C promotes char to int before shifting, so
+BCC emits `mov al, <a>; cbw; sar ax, K; mov <c>, al`
+(or `shr` for unsigned, `shl` for left-shift). The
+result still ends up in AL for the byte store.
+
+Added a shift arm to the char-init peephole. It handles
+constant K with the standard unroll: K ≤ 3 emits
+repeated `<mnem> ax, 1` (2 bytes each); K ≥ 4 emits
+`mov cl, K; <mnem> ax, cl` (4 bytes). Sign-pattern
+dispatch picks `sar` for signed-char `>>`, `shr` for
+unsigned-char `>>`, `shl` for `<<` regardless.
+
+
 
 Fixtures `1079` (`char c = a | b;` — char init from char
 OR), `1080` (`char c = a ^ b;` — char init from char
