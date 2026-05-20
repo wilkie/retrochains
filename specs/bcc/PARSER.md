@@ -1959,6 +1959,47 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Small switch: linear cmp-jcc chain; `case 0` uses `or ax,ax` shortcut
+
+Fixtures `1598` (2 cases no default), `1599` (1
+case + default), and `1600` (4-case switch on array
+element) all pass on the first capture.
+
+- `1598`: small switch (2-3 cases) lowers as a
+  **linear cmp-jcc chain**, not a jump table. The
+  scrutinee is loaded into AX, then each case is
+  tested in order with `cmp / je case_body`. After
+  all tests fail, an unconditional `jmp end` (with
+  no `default` clause) or `jmp default_body` takes
+  the fallthrough.
+- **`case 0` special-cased**: `or ax, ax / je`
+  (2-byte test) is used for the zero case instead of
+  the longer `cmp ax, 0 / je`. So switch-on-zero
+  gets the same 2-byte truthiness check as
+  `if (x)`.
+- Other case values use **`cmp ax, imm16`** via the
+  AX-specific `0x3D` short opcode (3 bytes total,
+  even for imm fitting in imm8 sign-ext range). BCC
+  canonicalises on `0x3D` for AX-with-imm cmp,
+  matching the AX-with-imm `add`/`sub`/`or` family
+  policy from [[batch-400-imm8-policy]].
+- Each case body ends with `jmp end_switch`
+  (joining all paths to a single end label). The
+  case bodies are laid out in source order *after*
+  the dispatch chain, with the end label after
+  them.
+- `1600`: confirms the same pattern for 4 cases +
+  default. Each cmp-jcc against {1, 2, 3} in order;
+  fallthrough goes to default. Body labels are
+  forward jumps from the dispatch.
+
+For larger switches (e.g. `072-switch-many-dense`
+not re-probed here), BCC uses a different jump-
+table strategy. The cutover between linear-chain
+and jump-table likely correlates with case
+density/count — needs a dedicated probe to
+characterise.
+
 ## do-while keeps body-first shape; side-effect in cond saves old value
 
 Fixtures `1595` (`do { i++; } while (i < 3);`),
