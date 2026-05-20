@@ -1959,6 +1959,27 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `c(b(a(x)))` three-fn chain, nested while 2x2, `a -= b[1]`
+
+Fixtures `1451` (`int a(int x) { return x+1; } int b
+(int x) { return a(x)+1; } int c(int x) { return b(x)+
+1; } return c(5);` — three-level function-call chain
+where each fn adds 1), `1452` (`int i=0; while (i<2) {
+j=0; while (j<2) { s++; j++; } i++; }` — nested
+while-loops counting iterations 2x2), and `1453`
+(`int a=20; int b[2]; b[1]=3; a -= b[1]; return a;` —
+int compound `-=` with stack-array element RHS) all
+pass on the first capture. `1451` confirms the call
+chain through three frames: `c(5)` pushes 5 into its
+frame, calls b, b calls a, a returns 6, b returns 7,
+c returns 8 — each fn just adds 1 to its arg. `1452`
+confirms nested-while frame management: outer test
++body+inc share `i`, inner test+body+inc share `j`,
+with `j=0` re-init each outer iteration. Total s = 4.
+`1453` confirms the stack-array elem RHS counterpart
+to `1336`'s `+=`: `mov ax,[bp-base+2] / sub word ptr
+[bp-a],ax`. Result 20-3 = 17.
+
 ## `switch (n % 3)`, struct with int-array field, `a + 'A'`
 
 Fixtures `1448` (`int classify(int n) { switch (n %
