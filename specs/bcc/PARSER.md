@@ -1959,6 +1959,26 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Unsigned int sub, `uint < uint` as int value, `uint -= const`
+
+Fixtures `1214` (`unsigned a=10,b=3; return a - b;` —
+unsigned subtraction returned as int), `1215` (`unsigned
+a=5,b=10; return a < b;` — unsigned less-than reified as
+the function return value), and `1216` (`unsigned a=10;
+a -= 3; return a;` — unsigned compound `-=` by const)
+all pass on the first capture. `1214` confirms that
+unsigned subtraction emits the same `sub` as signed (the
+underlying 16-bit subtract is sign-agnostic); the unsigned
+distinction only matters at the *compare* / *div* / *shr*
+level. `1215` is the value-position counterpart to the
+existing `175-unsigned-cmp-obj` (if-style): we see the
+unsigned-aware `jb` rather than `jl` driving the
+boolean-materialization sequence — so the cmp-as-int path
+properly threads the signedness through. `1216` is the
+unsigned analogue to int compound `-=`: identical
+`sub word ptr [bp-N],3` regardless of signedness, since
+the subtract itself doesn't differ at the encoding level.
+
 ## Char array elem compound `*=`, int local `+= -3`, char `+=` int RHS
 
 Fixtures `1211` (`char a[3]; a[0]=2; a[0] *= 5; return
