@@ -1959,6 +1959,25 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Int preinc result used, char-to-int cast, three-way if/else
+
+Fixtures `1199` (`int a=5; int b=++a; return b;` — int
+prefix `++` used as RHS), `1200` (`char c=5; int x=(int)c;
+return x;` — explicit char-to-int cast), and `1201`
+(`if (a>0) return 1; else if (a<0) return -1; else
+return 0;` — three-way if/else if/else chain) all pass on
+the first capture. `1199` confirms that `int b = ++a;`
+lowers the same as `++a; int b = a;` — pre-increment
+writes the bumped value back to the slot and leaves it in
+AX in time for the subsequent store. `1200` confirms that
+explicit `(int)c` lowers identically to implicit
+char-to-int promotion: a `cbw` on the byte loaded into
+AL, no extra cast machinery. `1201` closes a coverage gap
+for chained `if/else if/else`: each `else` branch flows
+through the same return-epilogue join, with the BCC
+tail-merge keeping a single `pop bp / ret` at the
+function exit rather than per-arm epilogues.
+
 ## Int mul by 64, int mod by var, char compound shl by two
 
 Fixtures `1196` (`int a=3; return a*64;` — int mul by 64,
