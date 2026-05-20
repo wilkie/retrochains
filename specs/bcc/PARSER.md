@@ -1959,6 +1959,29 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `ptr == ptr`, `fn(int a[])`, `||` short-circuit with side effect
+
+Fixtures `1235` (`int *p=&a; int *q=&b; return p == q;`
+— equality compare between two pointer values), `1236`
+(`int sum(int a[]) { return a[0]+a[1]; }` — function
+parameter declared with array syntax `int a[]`), and
+`1237` (`int a=0; int b=5; if (a || ++b) return b;` —
+the `||` RHS has a side effect on `b`) all pass on the
+first capture. `1235` confirms pointer-equality lowers
+identically to int-equality at the OBJ level: 16-bit
+`cmp` and `sete`-style boolean materialization; the
+type-checker's pointer awareness doesn't change the
+emitted code. `1236` confirms `int a[]` is parsed and
+treated as a synonym for `int *a` — caller passes the
+array base pointer (`b` decays), callee uses subscript
+on the pointer with the standard `mov bx,[bp+arg] / shl
+bx,1 / add bx,...` sequence. `1237` confirms `||`
+short-circuits: the RHS `++b` is only evaluated when
+the LHS is zero, so we see the LHS test branch to the
+RHS-evaluation block, and `b` is correctly incremented
+exactly once (since `a == 0`). The body's `return b`
+sees `b == 6`, confirming side-effect ordering.
+
 ## Pointer-to-pointer deref, `int = sizeof(int)`, `int += char`
 
 Fixtures `1232` (`int **pp = &p; return **pp;` —
