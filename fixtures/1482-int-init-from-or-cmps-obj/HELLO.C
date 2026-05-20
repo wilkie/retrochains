@@ -1,0 +1,6 @@
+int main(void) {
+  int a = 0;
+  int b = 5;
+  int x = (a > 0) || (b > 0);
+  return x;
+}
