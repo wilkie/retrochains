@@ -1959,6 +1959,30 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## For-loop `i += 2` step, `setIf(int, int*)`, `a &= -2`
+
+Fixtures `1328` (`for (i=0; i<10; i+=2) s += i;` —
+for-loop with `+= 2` step), `1329` (`void setIf(int x,
+int *p) { if (x > 0) *p = x; }` — function taking int
+and int-pointer args, conditionally writing through
+the pointer), and `1330` (`int a = 0xffff; a &= -2;
+return a;` — int compound `&=` with a negative
+constant) all pass on the first capture. `1328`
+confirms `+= const` as for-step: `add word ptr [bp-i],
+2` -- same encoding as a standalone compound add, no
+special for-step shortcut. Sum = 0+2+4+6+8 = 20.
+`1329` confirms two-arg ABI with mixed types: `x` and
+`p` both in adjacent word slots (`[bp+4]`, `[bp+6]`),
+the `if (x > 0)` branches over the `*p = x` block.
+The `*p = x` store goes through `mov bx,[bp+p] / mov
+ax,[bp+x] / mov [bx],ax`. `1330` confirms `&=` with
+negative const: -2 = 0xFFFE encodes as `and word ptr
+[bp-a],0FFFEh`. The two's-complement bit pattern is
+what's emitted, not a "negate then and". Result =
+0xFFFE = -2 in signed-int view, but C's int return is
+the bit pattern so we see -2 / 65534 depending on
+sign view.
+
 ## Int local `+= *p`, chained OR of three vars, `sizeof(a)/sizeof(a[0])`
 
 Fixtures `1325` (`int a=5; int *p=&b; a += *p; return
