@@ -1959,6 +1959,48 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Enregistration register order: SI, DI, DX, **BX** — 4 ints fit
+
+Fixtures `1502` (4 locals, 2 multi-use + 2 single-
+use), `1503` (4 locals **all** multi-use), and
+`1504` (1 local with 4 syntactic uses) all pass on
+the first capture and extend the enregistration
+findings:
+
+- `1502`: confirms the use-count rule under pressure
+  — `a` and `b` (both used twice) go to SI/DI; `c`
+  and `d` (both used once) stay on the stack at
+  `[bp-2]` / `[bp-4]`. Prologue: `sub sp, 4` only,
+  with `push si / push di`.
+- `1503` (**major finding**): when 4 ints are all
+  multi-use, all 4 go into registers — SI, DI, DX,
+  and `**BX**`. No `sub sp` at all (no stack
+  locals), and no `push bx` either — BCC treats BX
+  as scratch in this calling convention and doesn't
+  preserve it across the call from runtime startup.
+  Code shape per assignment: `mov ax, REG / inc ax /
+  mov REG, ax` (the inc-vs-add policy still applies
+  to the AX temp).
+- `1504`: 1 local with 4 syntactic uses → only SI
+  needed; BX, DI, DX stay free. Each `v = v + K`
+  round-trips through AX (`mov ax,si / op / mov
+  si,ax`) — there's no peephole that keeps the
+  result in AX and skips the store-back when the
+  next use is also via AX.
+
+Updated register-allocation table:
+| Order | Reg | Saved on entry?  |
+|-------|-----|------------------|
+| 1     | SI  | `push si`        |
+| 2     | DI  | `push di`        |
+| 3     | DX  | not saved        |
+| 4     | BX  | not saved        |
+
+The first two (SI, DI) are pushed in the prologue.
+DX and BX are treated as scratch — clobbered without
+preservation. The maximum simultaneous enregistered
+int count observed so far is 4.
+
 ## Enregistration heuristic narrowed: use-count threshold ≥ 2
 
 Fixtures `1499` (`(a+b) + (a-c)` — `a` used twice),
