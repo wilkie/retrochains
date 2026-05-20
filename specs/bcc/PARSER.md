@@ -1959,6 +1959,29 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Call in loop body, param as array idx, 3-arg ptr-write fn
+
+Fixtures `1283` (`for (i=1;i<=3;i++) s += dbl(i);` —
+function call inside a for-loop body, accumulating
+into a sum), `1284` (`int get(int i) { return arr[i];
+}` — param used as runtime array index into a global),
+and `1285` (`void setAt(char *p, int i, char v) { p[i]
+= v; }` — three-argument function writing through a
+char pointer with a runtime index) all pass on the
+first capture. `1283` confirms call inside loop: each
+iteration pushes `i`, calls `_dbl`, AX comes back,
+gets added to `s`. The frame holds `s`, `i` and
+neither needs spilling since the call only touches
+the int return slot. `1284` confirms param-driven
+subscript: `i` is read from `[bp+arg]`, scaled by 2
+via `shl ax,1`, and added to the global array base
+`_arr`. `1285` confirms 3-arg char-write: the third
+arg `v` (a char) lives in a word-sized slot per the
+cdecl-with-int-widening ABI (per `1271`'s finding),
+and the body computes `mov bx,[bp+p] / add bx,
+[bp+i] / mov al,[bp+v] / mov [bx],al` -- byte-store
+through the computed address.
+
 ## `a ^= 0xff`, switch-in-fn with returns, `f() ? :`
 
 Fixtures `1280` (`int a=0x55; a ^= 0xff; return a;` —
