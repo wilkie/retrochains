@@ -1959,6 +1959,46 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Narrowing-cast propagation calibrated: ADD/SUB/AND yes, MUL no
+
+Fixtures `1538` (`(char)(a - b)`), `1539` (`(char)(a
+& b)`), and `1540` (`(char)(a * b)`) all pass on the
+first capture. They further calibrate the byte-width
+propagation under `(char)` cast first seen in
+[[batch-406-cast-strpool]] / fixture `1535`.
+
+- `1538`: `(char)(a - b)` lowers to **byte-width
+  SUB** — `mov al,[bp-2] / sub al,[bp-4] / cbw`
+  using opcode `0x2A` (`sub r8, r/m8`). ✓ Sub joins
+  the byte-propagation family.
+- `1539`: `(char)(a & b)` lowers to **byte-width
+  AND** — `mov al,[bp-2] / and al,[bp-4] / cbw`
+  using opcode `0x22` (`and r8, r/m8`). ✓ AND joins
+  the family too.
+- `1540`: `(char)(a * b)` does **NOT** propagate.
+  Code: `mov ax,[bp-2] / imul word [bp-4] / cbw`
+  — full word-width `imul r/m16` (opcode `0xF7 /5`)
+  even though `(char)(a*b) == (char)((char)a*(char)b)`
+  mathematically and `imul r/m8` (single-byte form
+  with AL implicit) exists on the 8086. BCC's
+  byte-propagation pass deliberately excludes MUL.
+
+Updated propagation table for `(char) (a op b)`:
+| Op  | Byte propagated? | Byte-form opcode |
+|-----|------------------|------------------|
+| ADD | yes              | `0x02`           |
+| SUB | yes              | `0x2A`           |
+| AND | yes              | `0x22`           |
+| OR  | (not yet probed) | `0x0A`           |
+| XOR | (not yet probed) | `0x32`           |
+| MUL | **no**           | n/a (stays `F7 /5` word) |
+
+So far: arithmetic mod-2^k closed ops + bitwise AND
+propagate; MUL deliberately stays word-wide. Likely
+the IR's narrow-cast pass has a fixed allow-list of
+binops keyed by `byte-form encoding is available *and*
+preserves low-byte equality with word-form`.
+
 ## `(char)(a+b)` byte-width add, no string-literal pooling
 
 Fixtures `1535` (`return (char)(a + b);` — narrowing
