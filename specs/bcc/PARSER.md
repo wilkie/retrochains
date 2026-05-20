@@ -1959,6 +1959,37 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `int x = cmp && cmp`, `int x = !a`, `for (i;i<3;i++) a[i]=i`
+
+Fixtures `1466` (`int a=1, b=2; int x = (a==1) &&
+(b==2); return x;` — int initializer from logical-AND
+of two equality compares), `1467` (`int a=5; int x =
+!a; return x;` — int initializer from logical NOT),
+and `1468` (`int a[3]; int i; for (i=0; i<3; i++)
+a[i]=i; return a[2];` — for-loop writing through
+indexed array store) all pass on the first capture.
+`1466` confirms boolean materialization for `&&` into
+an int slot: `cmp [bp-2],1 / jne L_false / cmp
+[bp-4],2 / jne L_false / mov ax,1 / jmp L_done /
+L_false: xor ax,ax / L_done: mov [bp-6], ax`. The
+short-circuit emits two distinct jnes to a single
+false label; the true path materialises 1 via `mov
+ax,1` and the false path via `xor ax,ax`. `1467`
+confirms the classic 8086 `!x` idiom: `mov ax,[a] /
+neg ax / sbb ax,ax / inc ax`. `neg` sets CF when the
+operand is nonzero, `sbb ax,ax` materialises -1 or 0
+from CF, and `inc ax` flips it to 0 or 1. No
+`test`/`jcc`/branch is emitted — the result is fully
+data-flow. `1468` confirms the canonical for-loop
+shape: `i` enregistered into SI, body lowered as `mov
+bx,si / shl bx,1 / lea ax,[bp-6] / add bx,ax / mov
+[bx],si`, with `inc si / cmp si,3 / jl body` for the
+inc+test edge. The for-loop layout puts the test
+*after* the body (`jmp test` precedes the body on
+entry; `jl body` re-enters). `a[2]` returns as `[bp-
+2]` — the trailing-element offset folds to a single
+stack slot read.
+
 ## `x ^= x` self-XOR, `char *p = "Hi"; *p`, `a[1] += a[1]`
 
 Fixtures `1463` (`int x=7; x ^= x; return x;` —
