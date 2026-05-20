@@ -1959,6 +1959,28 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Array-size const arith, fn returns `char *`, `int * char` RHS
+
+Fixtures `1226` (`int a[3+2]; ... return a[4];` — array
+size is a constant arithmetic expression rather than a
+bare literal), `1227` (`char *greet(void) { return
+"hi"; } return greet()[0];` — function returns a string
+literal pointer, caller subscripts the return value),
+and `1228` (`int a=10; char c=3; return a * c;` —
+multiplication with `int` on LHS and `char` on RHS)
+all pass on the first capture. `1226` confirms the
+constant folder evaluates `3+2` to `5` during type
+checking so the array gets a single 10-byte
+reservation — no different from declaring `int a[5];`
+at the OBJ level. `1227` confirms function-return-
+through-subscript: the call returns the literal's near
+pointer in AX, the subscript path uses AX as the base
+register (typically moved to BX) for the byte load.
+`1228` confirms `int * char` promotes the RHS to int
+via `cbw`: load the char into AL, `cbw`, then `imul` —
+matching what we saw for `char + int` (1213) but on the
+multiply path.
+
 ## `char * char`, fn modifies param, `char *` arg write-through
 
 Fixtures `1223` (`char a=5; char b=4; int c = a*b;
