@@ -1959,6 +1959,26 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `zero(arr, 3)` mutating fn, sequential `for` loops, `a += two() + 3`
+
+Fixtures `1439` (`void zero(int *a, int n) { ... a[i]
+= 0; ... } int arr[3] = {1,2,3}; zero(arr, 3); return
+arr[1];` — function that zeroes an int array via
+pointer arg), `1440` (`for(i=0;i<3;i++) s+=i; for(i=
+0;i<2;i++) s+=10; return s;` — two sequential for-
+loops in the same function body), and `1441` (`int a=
+5; a += two() + 3; return a;` — int compound `+=`
+with `call() + const` RHS) all pass on the first
+capture. `1439` confirms array-mutation via fn-ptr-
+arg: caller passes `arr` (decay), callee writes 0
+through `a[i]`. After the call arr[1] = 0. `1440`
+confirms two sequential loops emit two independent
+test/body/step blocks — they share the `i` slot but
+each has its own labels. Final s = (0+1+2) + (10+10)
+= 23. `1441` confirms compound RHS combining a call
+and a const: call → AX = 2, `add ax,3` = 5, then
+`add word ptr [bp-a],ax`. Result 5+5 = 10.
+
 ## `char c %= 4`, five-local sum, `-a[1]` neg of arr elem
 
 Fixtures `1436` (`char c=17; c %= 4; return c;` —
