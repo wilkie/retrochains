@@ -1959,6 +1959,41 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Memory-dest RMW: `*p+=3`, `*p+=100`, `*p+=1000`
+
+Fixtures `1490` (`*p += 3`), `1491` (`*p += 100`),
+and `1492` (`*p += 1000`) all pass on the first
+capture and complete the encoding-table calibration
+started in the previous two batches. Here taking
+`&v` forces `v` to memory (`[bp-2]`) and `p` is
+enregistered into `SI`, so the compound add targets
+`[si]` (ModR/M = `0x04` = mod=00 rm=100). Observed
+encodings:
+- `1490` (+3): `83 04 03` — opcode `0x83 /0`, mod=00
+  rm=[si], imm8 sign-extended. 3 bytes.
+- `1491` (+100): `83 04 64` — same opcode, imm8
+  sign-ext (100 fits). 3 bytes.
+- `1492` (+1000): `81 04 e8 03` — opcode `0x81 /0`,
+  same ModR/M, imm16 follows. 4 bytes.
+
+So the imm8-sign-ext vs imm16 boundary at [-128,127]
+applies *identically* to memory and register
+destinations of `add /0`. The only difference is the
+ModR/M mode field (mod=11 for register, mod=00/01/10
+for memory). Crucially, BCC never emits any small-add
+unrolling for memory destinations — no `inc word
+[si]` chain, even though `inc r/m16` (`FF 06 ...` for
+[bp+disp] or `FF 04` for [si]) is one byte shorter
+than `83 04 01`. The `inc`/`dec` optimization is
+register-AX-only.
+
+Other observations from these fixtures: prologue uses
+`dec sp / dec sp` again to allocate the single 2-byte
+`v` slot — confirms the pattern from
+[[batch-384-2d-int-arr]]. `p` is set up via the
+canonical `lea ax,[bp-2] / mov si, ax` two-step (not
+`lea si, [bp-2]`).
+
 ## RMW non-AX add: `v+=3`, `v+=100`, `v+=1000` (imm8 vs imm16)
 
 Fixtures `1487` (`v += 3`), `1488` (`v += 100`), and
