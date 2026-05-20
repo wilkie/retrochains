@@ -1959,6 +1959,63 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Large model (-ml) initial probe: HELLO_TEXT, retf everywhere, push cs + call near
+
+Fixtures `1664` (trivial return-zero), `1665` (call
+inc(5)), and `1666` (global int access) are the
+**first batch captured under `-ml` (large model)**.
+All pass on the first capture. Cross-model
+differences vs small (-ms):
+
+- **Code segment name**: `_TEXT` → `HELLO_TEXT`. The
+  large model gives each translation unit its own
+  uniquely-named code segment, prefixed with the
+  module name (uppercased). The SEGDEF and LNAMES
+  records reflect this — `_TEXT` is replaced
+  throughout. This means we'll need different
+  string handling for the segment-name fields per
+  model.
+- **Function return**: every function uses **`retf`
+  (`0xcb`)** instead of near `ret` (`0xc3`). In
+  large model, *all* functions are far by default,
+  matching the explicit `far` qualifier in small
+  model ([[batch-445-pascal-far-fn]]).
+- **Function call sites**: intra-module calls use
+  **`push cs / call near (e8)`** (4 bytes) instead
+  of `call near` alone (3 bytes). The `push cs`
+  (`0x0E`) is the standard 1-byte trick that lets
+  the callee's `retf` pop both seg+off correctly.
+- **Globals**: still accessed via DS-relative
+  `a1 disp16` / `a3 disp16` — same as small model.
+  Borland's runtime startup sets DS=DGROUP, and as
+  long as the program doesn't change DS, globals
+  work the same way. The far-data-ness of large
+  model shows up only when **`&global`** is taken
+  (producing a 4-byte far pointer; not probed yet).
+- **Module-flag byte**: at OBJ offset ~0x4d, small
+  uses `7f`, large uses `7c`. Different bits in the
+  COMENT record's class byte indicating model.
+
+So the multi-model story:
+- The IR-level findings (register allocation,
+  inc/dec, encoding policies, loop normalisation,
+  switch dispatch, etc.) remain unchanged.
+- What differs is **fixed prefixes per call**
+  (`push cs`), **epilogue bytes** (`retf` not
+  `ret`), **segment-name strings**, and
+  **module-flag bytes**.
+
+For the Rust reimplementation:
+- Plumb a `memory_model` parameter from
+  `invocation.toml` (or a new `model` field) down
+  to the OBJ emitter.
+- Conditionally inject `push cs` before each
+  intra-module call when code is far.
+- Emit `retf` (`0xcb`) instead of `ret` (`0xc3`)
+  for all function epilogues when code is far.
+- Use the module-prefixed segment name in SEGDEF /
+  LNAMES.
+
 ## `return a<b`; `(5,7)` drops LHS; `while(n)` uses `or si,si`
 
 Fixtures `1661` (`return a < b;` direct return),
