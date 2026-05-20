@@ -1959,6 +1959,43 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Function params enregister like locals (use-count ≥ 2 → SI/DI/...)
+
+Fixtures `1526` (param `x` used 3x: `x*x + x`),
+`1527` (param `x` used 2x: `x+x`), and `1528` (two
+params `a` and `b` each used 2x in `(a-b)*(a+b)`)
+all pass on the first capture and extend the
+enregistration model to function parameters.
+
+- `1526`: `_f(int x)` reads from `[bp+4]` (the cdecl
+  first-arg slot) **once** into SI on entry — `mov
+  si, [bp+4]`. All three uses of `x` (`x*x` first
+  factor, `x*x` second factor, the trailing `+x`)
+  then operate on SI. So a multi-use param is
+  promoted into a register, the same as a multi-use
+  local. The arg slot at `[bp+4]` is never reloaded.
+- `1527`: `_f(int x)` with `x+x` (2 uses) similarly
+  enregisters `x` → SI via `mov si, [bp+4] / mov
+  ax,si / add ax,si`. Confirms the threshold is the
+  same ≥ 2 syntactic uses, including for parameters.
+- `1528`: two parameters, each used twice. **`a` →
+  SI** (`mov si, [bp+4]`), **`b` → DI** (`mov di,
+  [bp+6]`). Declaration order matches the
+  register-allocation order. The intermediate `(a+b)`
+  is computed into DX (a scratch register) before the
+  `imul`. Confirms params occupy `[bp+4]`, `[bp+6]`,
+  ... in cdecl, and that BCC's allocator treats them
+  uniformly with locals — the use-count heuristic
+  doesn't distinguish param-from-local.
+
+Implication for the encoder: when a function body
+has multi-use parameters, BCC always emits the
+`mov REG, [bp+N]` copy on entry (after the prologue
+push of REG), and then never touches the stack slot
+again. The Rust reimplementation needs to walk the
+function body to classify each parameter's syntactic
+use count *before* emitting the prologue.
+
 ## for-comma init, `(unsigned char)c` zero-extend via `mov ah,0`, sar by 15
 
 Fixtures `1523` (`for (i=0, s=0; i<3; i++) s += i;`),
