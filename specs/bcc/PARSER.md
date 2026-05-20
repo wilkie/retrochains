@@ -1959,6 +1959,29 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `char getc()` return, `a |= b[0]`, `compute(5)` multi-stmt
+
+Fixtures `1403` (`char getc(void) { return 'X'; }
+return getc();` — char-returning function called and
+returned as int), `1404` (`int b[2] = {0x0a, 0x05};
+int a=0xf0; a |= b[0]; return a;` — int compound `|=`
+with a global int-array element RHS), and `1405`
+(`int compute(int x) { int t = x + 1; t = t * 2;
+return t; } return compute(5);` — multi-statement
+function body with intermediate temp) all pass on the
+first capture. `1403` confirms char-returning fn:
+callee writes `'X'` (0x58) into AL, the AH bits are
+undefined per ABI, but main reads the *int* AX so the
+caller sees whatever AH happened to be -- BCC always
+writes a sign-extended int via `mov al,88 / cbw`
+(or similar) so the result is consistent. Final 88.
+`1404` confirms `|=` with global-arr-elem RHS: `mov
+ax,[_b+0] / or word ptr [bp-a],ax`. Result 0xF0 |
+0x0A = 0xFA = 250. `1405` confirms multi-stmt fn
+body: each stmt lowers independently, the temp `t`
+lives in a slot, ultimately returned via AX.
+(5+1)*2 = 12.
+
 ## `uchar + uchar` over 255, swap via struct ptrs, `a -= two()`
 
 Fixtures `1400` (`unsigned char a=200; unsigned char b=
