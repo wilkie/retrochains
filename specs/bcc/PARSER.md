@@ -1959,6 +1959,28 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Static local counter, `b = --a` (char), `if (a[1] > 7)`
+
+Fixtures `1304` (`int counter(void) { static int n=0;
+n++; return n; }` — function with a static-local counter
+called three times), `1305` (`char a=5; char b; b = --a;
+return b;` — char prefix decrement result captured into
+another char), and `1306` (`if (a[1] > 7) return 1;` —
+stack array element used directly as if-condition's
+comparison LHS) all pass on the first capture. `1304`
+confirms static-local persistence: `n` lives in `_DATA`
+or `_BSS` (not the stack), so the three calls observe
+the same memory; final return = 3. The static-local
+identifier is name-mangled but the symbol scope is
+file-local, matching the existing `997-static-local-
+int-init-nonzero-obj` shape. `1305` confirms char
+predec: `dec byte ptr [bp-a]` (slot decrements to 4),
+then load `al`, `cbw`, then store to `b` — both writes
+reflect the post-decrement value. `1306` confirms
+stack-array-elem cmp in if-cond: load `a[1]` via
+`[bp-base+2]`, then `cmp ax,7 / jle FALSE` — direct
+without any temporary copy.
+
 ## `char c &= int n`, `++(*p)`, int local `+= global`
 
 Fixtures `1301` (`char c=0xff; int n=0x3f; c &= n;
