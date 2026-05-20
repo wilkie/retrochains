@@ -1959,6 +1959,25 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `*getp() = 7`, `a -= b - c`, `char c &= 0x0f`
+
+Fixtures `1322` (`int *getp(void) { return &g; } *getp()
+= 7; return g;` — call returning a pointer that is then
+dereferenced and stored through), `1323` (`int a=30; int
+b=7; int c=2; a -= b - c; return a;` — int compound
+`-=` with a binop RHS using two locals), and `1324`
+(`char c = 0xff; c &= 0x0f; return c;` — char compound
+`&=` with a constant) all pass on the first capture.
+`1322` is the function-returns-pointer counterpart to
+`1289`'s int-ptr-postinc-deref: AX gets the address
+from the call, then `mov bx,ax / mov word ptr [bx],7`
+stores through it. Confirmed `*call() = value` works.
+`1323` confirms compound RHS w/ vars: 7-2=5 computed
+into AX, then `sub word ptr [bp-a],ax` -- 30-5=25.
+`1324` confirms char `&=` const: the constant is
+folded to a byte-immediate so we see `and byte ptr
+[bp-c],0Fh` directly, no widening. Final c = 0x0F.
+
 ## `int b = a++`, `int b = --a`, void setter via global
 
 Fixtures `1319` (`int a=5; int b = a++; return b;` —
