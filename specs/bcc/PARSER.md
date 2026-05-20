@@ -1959,6 +1959,51 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `far` pointers: 32-bit seg:off, `les` + `26` ES override
+
+Fixture `1649` (`int far *p = (int far *)&x; return
+*p;`) compiles cleanly in small model and reveals
+the **far-pointer codegen** model:
+
+- A `far` pointer is **32 bits** (2 words on stack):
+  - Lower word: offset
+  - Higher word: segment
+- Constructing a far pointer from a near address
+  uses **`mov [seg_slot], ss`** (opcode `8c /2`,
+  `mov r/m16, SS`) to capture the local's segment
+  (which is `SS` for stack-allocated `x`), then a
+  `mov [off_slot], ax` for the lea'd offset.
+- Loading the far pointer for deref uses **`les bx,
+  [bp+disp]`** (opcode `c4 /r`, "Load far pointer
+  into ES:reg") — single instruction loads both
+  offset into BX and segment into ES from the 4-byte
+  source.
+- The actual memory access through the far pointer
+  uses an **`ES:` segment-override prefix** (byte
+  `0x26`): `26 8b 07` = `mov ax, es:[bx]`.
+
+So the lowering pattern for `int far *p; *p = ...`:
+```
+8c 56 disp   ; mov [p_seg], ss          (or other seg)
+89 46 disp   ; mov [p_off], ax
+c4 5e disp   ; les bx, [p]
+26 8b 07     ; mov ax, es:[bx]          (or write equivalent)
+```
+
+For the Rust reimplementation: the far-pointer
+support is a known Borland extension — needs:
+- Recognising `far`/`near`/`huge` type qualifiers in
+  the parser.
+- Treating `int far *` as a 32-bit type (4 bytes,
+  word-aligned with high half = segment).
+- Emitting `8c /2` for segment captures, `c4 /r`
+  for far-pointer loads, and `26` prefixes for ES-
+  based memory access.
+- Stack locals' addresses naturally have `SS` as
+  segment; global/static would use `DS` (i.e. `8c
+  56 disp` for stack and `8c 5e disp` for DS-based
+  globals).
+
 ## `(int)(long+long)` skips high; long arg cdecl; long cmp folds int const
 
 Fixtures `1646` (`long a[2]; (int)(a[0]+a[1])`),
