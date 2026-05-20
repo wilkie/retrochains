@@ -1959,6 +1959,27 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `v = a[1]++`, linked-node `a.next->v`, `sumC` char arr
+
+Fixtures `1418` (`int a[3]; ... v = a[1]++; return
+a[1]*10 + v;` — post-increment of an array element
+captured into another local), `1419` (`struct N { int
+v; struct N *next; }; struct N b={2,0}; struct N a=
+{1,&b}; return a.next->v;` — global struct chained via
+pointer field), and `1420` (`int sumC(char *s, int n)
+{ ... t += s[i]; ... } char a[3]={1,2,3}; return
+sumC(a, 3);` — sum of char-array elements through fn
+arg) all pass on the first capture. `1418` confirms
+post-inc on array element: load a[1] (=20) into AX,
+v = 20, then `inc word ptr [bp-base+2]` makes a[1]=
+21. Return 21*10+20 = 230. `1419` confirms struct
+init with cross-struct pointer reference (`&b` in
+a's initializer at file scope): the global init
+record holds the OFFSET to b, then `a.next->v` does
+ptr-load then field-load. Result = b.v = 2. `1420`
+confirms char-array passed as char*: callee indexes
+`s[i]`, byte-loads, `cbw`-promotes, adds. 1+2+3 = 6.
+
 ## Popcount, min function, `c = a[1]` char arr elem
 
 Fixtures `1415` (`int popcount(int x) { int c=0;
