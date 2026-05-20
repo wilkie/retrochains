@@ -1959,6 +1959,50 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Infinite-loop forms all canonicalise to identical bytes
+
+Fixtures `1589` (`do { ... } while (1);`), `1590`
+(`for (i=0; ; i++) { ... }`), and `1591`
+(`for (;;) { ... }`) all pass on the first capture
+and **emit byte-identical code** to each other and to
+`1586` (`while (1) { ... }`). All four lower to:
+
+```
+prologue + push si
+33 f6        xor si, si            ; i = 0
+83 fe 03     cmp si, 3             ; loop_top:
+75 02        jne body
+eb 03        jmp loop_end          ; break
+              body:
+46           inc si                ; i++
+eb f6        jmp loop_top
+              loop_end:
+8b c6        mov ax, si
+eb 00        ret
+```
+
+So BCC's IR **canonicalises all "infinite loop" source
+forms** (`while(1)`, `do...while(1)`, `for(;;)`,
+`for(init; ; incr)`) into the same internal loop
+shape: a test-position-at-top loop with the
+`break`-cmp inside the body. Even the syntactic
+difference between an explicit `for`-increment
+clause and a body-tail post-increment collapses
+into the same encoding.
+
+This implies the IR has a **loop normaliser** that:
+1. Recognises constant-true conditions and removes
+   them.
+2. Promotes the `for`-incr expression into the body
+   tail (so the body becomes `body; incr;`).
+3. Emits a single template: `init / test-loop_top:
+   body / jmp loop_top / loop_end:`.
+
+For the Rust reimplementation, the loop-IR layer
+must perform this normalisation **before** codegen
+to match BCC byte-exact for all infinite-loop
+fixtures.
+
 ## const-cond loops: `while(1)` → `jmp` back; `while(0)` skips; `do…while(0)` no test
 
 Fixtures `1586` (`while (1) { ... break; }`), `1587`
