@@ -1959,6 +1959,31 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Int pointer diff, string-literal subscript, int array elem compound `*=`
+
+Fixtures `1208` (`int *p = &a[0]; int *q = &a[2]; return
+q - p;` — pointer-minus-pointer yielding an element
+count), `1209` (`return "abc"[1];` — subscript directly
+into a string literal), and `1210` (`int a[3]; a[0]=2;
+a[0] *= 5; return a[0];` — array-element compound
+multiply by const) all pass on the first capture. `1208`
+confirms our `int*` minus `int*` lowering: subtract the
+two pointer values then `sar ax,1` (i.e. divide-by-2 for
+the int element size). `1209` exercises the rarely-tested
+"string literal as an addressable expression" path —
+BCC emits the literal into `_TEXT` (or DGROUP for `-ms`)
+with a `LDATA`-style symbol and uses the same subscript
+lowering as for a `char` array. `1210` is the first
+compound `*=` we've tested on an `int` stack-array elem:
+the LHS lvalue is recomputed for both the load and the
+store, which means the index expression must be
+side-effect-free for a stable address — which it is here
+since `0` is a literal. Combined with the recent
+mul-pow2 K-threshold fixes, this confirms compound `*=`
+on `int` array elems with a non-pow2 constant uses the
+straightforward `mov dx,K / imul dx` lowering rather
+than the shift form.
+
 ## For-loop summing index, stack int-array sum, nested for-loop counter
 
 Fixtures `1205` (`for (i=0; i<3; i++) s += i;` — index
