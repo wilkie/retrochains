@@ -1959,6 +1959,72 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Struct by value: ≤4B inline pushes, >4B via `N_SPUSH@`; string literal in `_DATA`
+
+Fixtures `1688` (4-byte struct by value), `1689`
+(6-byte struct by value), and `1690` (string
+literal as arg) close the **struct-passing**
+picture.
+
+- `1688` (**small struct by value**): a 4-byte
+  struct (2 ints) is **decomposed into 2 word
+  pushes** in standard cdecl R-to-L order. Callee
+  accesses fields directly at `[bp+4]` (low field)
+  and `[bp+6]` (high field). No copy needed — the
+  struct IS the stack args. Caller cleans with
+  `pop cx; pop cx`.
+- `1689` (**large struct by value**): a 6-byte (or
+  larger) struct uses a new helper **`N_SPUSH@`**:
+  - `DX:AX` = source struct's far address
+  - `CX` = byte count
+  - Helper pushes the struct bytes onto the
+    caller's stack
+  Sequence:
+  ```
+  lea ax, [bp-6]    ; offset of local struct
+  mov dx, ss        ; segment (stack)
+  mov cx, 6         ; size
+  call N_SPUSH@
+  call _fn
+  add sp, 6         ; caller cleans
+  ```
+- **Struct-arg boundary**: the rule appears to be
+  **≤ 4 bytes → inline word pushes**, **> 4 bytes
+  → `N_SPUSH@`**. The 4-byte threshold matches the
+  DX:AX return-pair size — structs that fit in the
+  return registers are also passed via the cheap
+  inline pushes.
+- `1690` (**string literal arg**): the literal
+  `"ABC"` is placed in `_DATA` as `41 42 43 00`
+  (4 bytes with null terminator). At the call site,
+  `mov ax, imm16` (FIXUPP-resolved to the data
+  segment offset) loads the near pointer, which is
+  pushed as a regular word arg. The callee receives
+  it at `[bp+4]` as a 2-byte near `char *`.
+- `1690` also reconfirms char-iteration loop
+  pattern: `mov al, [si] / cbw / add di, ax / inc
+  si / cmp byte [si], 0 / jne body`. The `cbw`
+  (sign-extend AL→AX) is needed for the int
+  promotion of `*s`.
+
+Updated helper table:
+| Helper | Purpose | ABI |
+|--------|---------|-----|
+| `N_SCOPY@` | struct copy | `cx`=count, stack: dst-fp, src-fp; self-cleans 8 |
+| `N_SPUSH@` | struct push (call arg) | `dx:ax`=src-fp, `cx`=count; caller cleans byte count |
+| `N_FTOL@`  | FP→long              | (no args; FPU ST0) |
+| `N_LXMUL@` | long mul             | reg ABI (CX:BX, DX:AX) |
+| `N_LDIV@` / `N_LUDIV@` | long div  | stack-passed, self-clean |
+| `N_LMOD@` / `N_LUMOD@` | long mod  | stack-passed, self-clean |
+| `N_LXLSH@` / `N_LXRSH@` / `N_LXURSH@` | long shifts | reg + CL |
+| `FIDRQQ` | FP-lib init marker   | (linker symbol) |
+| `FIWRQQ` | FP-word-return marker | (linker symbol) |
+
+Both `N_SCOPY@` and `N_SPUSH@` cement the
+"compiler emits a `mov cx, size / call helper`
+pattern for struct value operations larger than a
+register pair" boundary.
+
 ## Large struct return: 2-stage copy via `N_SCOPY@` + scratch; static local = BSS
 
 Fixtures `1685` (3-int struct return), `1686`
