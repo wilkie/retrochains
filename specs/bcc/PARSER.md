@@ -1959,6 +1959,25 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Ternary as discarded side effect, `!!a`, int AND of two vars
+
+Fixtures `1202` (`int a=3; a > 0 ? a++ : a--; return a;` —
+the conditional is evaluated for its side effect with the
+result discarded), `1203` (`int a=5; int b = !!a; return
+b;` — double-negation as a 0-or-1 normalizer), and `1204`
+(`int a=0xff; int b=0x0f; return a & b;` — basic `int`
+AND between two locals) all pass on the first capture.
+`1202` confirms that a ternary in statement position
+lowers each arm into the same branch shape we use when
+the result is stored, but the arm-result is then dropped:
+no AX consolidation, just the side effect. `1203` shows
+that `!!a` collapses to two `cmp/sete`-style boolean
+materializations stacked back-to-back rather than being
+short-circuited to a single normalizer — BCC takes the
+expression as written. `1204` confirms our standard
+binop-via-stack-spill path for `&` on two locals: LHS
+into AX, push, RHS into AX, pop into DX, `and ax,dx`.
+
 ## Int preinc result used, char-to-int cast, three-way if/else
 
 Fixtures `1199` (`int a=5; int b=++a; return b;` — int
