@@ -1959,6 +1959,49 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## SHR/DIV stay word, SHL by 8 still byte (cl=8)
+
+Fixtures `1544` (`(char)(a >> 4)`), `1545` (`(char)(a
+/ b)`), and `1546` (`(char)(a << 8)`) finalise the
+narrowing-cast propagation table.
+
+- `1544`: SHR does **NOT** propagate. `(char)(a >>
+  4)` lowers to **word-width** `mov ax,[bp-2] / mov
+  cl,4 / sar ax,cl / cbw`. Correct because the low
+  byte of `a >> 4` depends on the *high byte* of
+  `a` (the high nibble shifts down into the low
+  byte's high nibble), so byte-form `sar al, 4`
+  would give a different result.
+- `1545`: DIV does **NOT** propagate. `(char)(a /
+  b)` lowers to **word-width** `mov ax,[bp-2] / cwd
+  / idiv word [bp-4] / cbw`. Division isn't closed
+  mod 2^k, and `idiv r/m8` takes AL/AH as dividend
+  (with AX being the dividend in word form) — BCC
+  always uses the word form under cast.
+- `1546`: SHL **does** propagate even for K=8 (and
+  presumably any K). `(char)(a << 8)` lowers to
+  byte-form `mov al,[bp-2] / mov cl,8 / shl al,cl /
+  cbw`. On 8086, `shl r/m8, cl` with cl=8 fully
+  clears the byte (count is not masked to 5 bits on
+  8086), giving 0 — same as `(low byte of (a <<
+  8))` which is also 0. So even for "obviously
+  pointless" shifts BCC still emits byte form when
+  there's a narrowing cast.
+
+Definitive `(char)(a op b)` propagation table:
+| Op  | Byte? | Reason |
+|-----|-------|--------|
+| ADD | yes   | carry only goes left |
+| SUB | yes   | borrow only goes left |
+| AND | yes   | bitwise, no cross-bit interaction |
+| OR  | yes   | bitwise, no cross-bit interaction |
+| XOR | yes   | bitwise, no cross-bit interaction |
+| SHL | yes   | high bits exit the byte; correct for any K |
+| SHR | **no**| high byte feeds into low byte's high bits |
+| DIV | **no**| not closed mod 2^k; AX:DX form needed |
+| MOD | **no**| same as DIV |
+| MUL | **no** (despite math allowing) | BCC excludes |
+
 ## Narrowing-cast complete: OR/XOR/SHL also byte-width
 
 Fixtures `1541` (`(char)(a | b)`), `1542` (`(char)(a
