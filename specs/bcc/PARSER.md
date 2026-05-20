@@ -1959,6 +1959,26 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `min3(5,3,8)`, fn with local int array, `a[0] ^= a[1]`
+
+Fixtures `1445` (`int min3(int a, int b, int c) { int
+m=a; if (b<m) m=b; if (c<m) m=c; return m; } min3(5,3,
+8);` — min-of-three via cascading if), `1446` (`int
+sum_local(void) { int a[3]; ... return a[0]+a[1]+a[2];
+}` — function with a local int array on its own
+stack), and `1447` (`char a[2]; a[0]=0xff; a[1]=0x0f;
+a[0] ^= a[1]; return a[0];` — char array element
+compound XOR with another array element) all pass on
+the first capture. `1445` confirms the classic min3
+shape: each cmp/if-update sequence runs in order; m
+ends with min. Result 3. `1446` confirms callee-stack
+array allocation: 3 ints in `a` = 6 bytes added to
+the frame, populated in-line, then summed. Sum 6.
+`1447` confirms char-arr-elem `^=` with arr-elem RHS:
+load `a[1]` byte → cbw → AX = 0x0F, XOR with
+`a[0]` byte loaded, narrow store back to a[0].
+Result 0xFF ^ 0x0F = 0xF0 = 240 (signed view: -16).
+
 ## Array-of-struct init, `add5(a[1])`, `a[i] = i * 10`
 
 Fixtures `1442` (`struct P arr[2] = {{1,2}, {3,4}};
