@@ -1959,6 +1959,44 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Enregistration heuristic narrowed: use-count threshold ≥ 2
+
+Fixtures `1499` (`(a+b) + (a-c)` — `a` used twice),
+`1500` (`while(a<b){c+=a; a++;}` — `a` and `c` each
+used twice in the loop body+test), and `1501` (same
+sum as `1496` but with declarations separated from
+initialisers) all pass on the first capture and
+together narrow the heuristic from
+[[batch-393-enreg-spill]].
+
+Observations:
+- `1499`: only `a` (used twice in two distinct
+  sub-expressions) goes to SI. `b` and `c` stay on
+  the stack at `[bp-2]` / `[bp-4]`. The
+  computation: `mov ax,si / add ax,[bp-2] / mov
+  dx,si / sub dx,[bp-4] / add ax,dx`.
+- `1500`: `a` → SI (read in cmp + written by `a++`),
+  `c` → DI (compound `c += a` reads and writes), but
+  `b` → `[bp-2]` (read once per cmp, syntactically
+  one occurrence).
+- `1501`: same lowering as `1496` — all on stack —
+  confirming that *initialiser-at-declaration vs.
+  initialiser-as-separate-statement* makes **no
+  difference**. The init counts the same either way.
+
+So the actual heuristic is: **enregister a local iff
+it has ≥ 2 syntactic uses (read or write) after its
+declaration, excluding the initialiser**. Each
+syntactic operand counts once (e.g. `a < b` is one
+read of `a` and one of `b`; `a++` is one use of `a`;
+`c += a` is one use of `a` and one use of `c`).
+Compound `+=` is one syntactic op even though
+semantically it reads and writes — BCC counts it as
+one. Under register pressure, the first ≥2-use
+locals claim SI/DI/DX in declaration order; the
+maximum simultaneous in-register count observed so
+far is 3.
+
 ## Enregistration heuristic: 3/4/5-local pure sum all spills
 
 Fixtures `1496` (`int a=1, b=2, c=3; return a+b+c;`),
