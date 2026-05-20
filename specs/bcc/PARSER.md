@@ -1959,6 +1959,46 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `v*100` via `imul r/m`, `cmp [bp-2],100` imm8-sext, `100 - v`
+
+Fixtures `1520` (`int v=5; v *= 100;`), `1521` (`if
+(v < 100)` against stack-resident v), and `1522`
+(`v = 100 - v` — non-commutative subtract with imm
+on left) all pass on the first capture.
+
+- `1520`: `v *= 100` lowers to `mov dx, 100 / mov
+  ax, si / imul dx / mov si, ax`. BCC uses the
+  single-operand `imul r/m16` (opcode `0xF7 /5`),
+  the only form available on 8086 — DX:AX gets the
+  full 32-bit product, low half remains in AX. **DX
+  is clobbered** by the multiply, so no other local
+  can be live in DX across an `imul`. This explains
+  why DX is the *third* enregistration slot
+  (clobbered both by call returns and by mul/div
+  ops).
+- `1521`: confirms **CMP joins ADD and SUB in the
+  imm8-sext family**. `cmp [bp-2], 100` lowers to
+  `83 7e fe 64` — opcode `0x83 /7`, mod=01 rm=110
+  ([bp+disp8]), imm8-sext = 100. So `cmp` uses the
+  short encoding for any imm in [-128,127]. Updated
+  encoding-policy classification: **arithmetic-with-
+  flags** ops (ADD `/0`, SUB `/5`, CMP `/7`) all use
+  `83 /N` imm8-sext when available; **bitwise**
+  (OR `/1`, AND `/4`, XOR `/6`) always use `81 /N`
+  imm16. ADC `/2` and SBB `/3` not yet probed.
+- `1522`: `v = 100 - v` lowers to `mov ax, 100 /
+  sub ax, si / mov si, ax`. BCC uses the `sub
+  r16, r/m16` form (opcode `0x2B`) with AX as
+  destination and SI as source — no `neg + add`
+  tricks. The constant goes in AX (left operand of
+  subtract) and the variable in SI (right operand).
+
+Note for the encoder: when emitting CMP against a
+memory operand `[bp+disp]` with imm fitting in
+[-128,127], use `83 /7 disp imm8` (4 bytes with
+disp8) to match BCC byte-exact, not the `81 /7
+disp imm16` (5 bytes) alternative.
+
 ## imm8-sext encoding policy: ADD/SUB yes, OR/AND/XOR no
 
 Fixtures `1517` (`x &= 0x7f` with x in SI), `1518`
