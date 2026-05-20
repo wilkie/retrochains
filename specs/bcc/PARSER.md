@@ -1959,6 +1959,29 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Unsigned int divide by 4, char div by var, global init bitwise expr
+
+Fixtures `1250` (`unsigned a=20; return a / 4;` —
+unsigned-int divide by a power-of-2 constant), `1251`
+(`char a=20; char b=4; return a / b;` — signed-char
+divide where divisor is a runtime variable), and `1252`
+(`int g = (1 << 8) | 3;` — global int initialized
+from a bitwise/shift constant expression) all pass on
+the first capture. `1250` is the unsigned counterpart
+to `1248`'s signed-divide-by-pow2: BCC emits `xor
+dx,dx / div` (unsigned 32-bit divide with zero-extended
+DX) rather than collapsing to `shr ax,2`. So for *both*
+signed and unsigned divide by pow2 BCC uses the full
+`div`/`idiv` path -- the mul-pow2 shift optimization is
+unilateral. `1251` confirms char/char division: both
+operands `cbw`'d to int, then standard signed `cwd /
+idiv` -- char is never division-special. `1252`
+confirms the constant folder handles `<<` and `|` in
+global initializer expressions: `(1 << 8) | 3 = 259`
+is folded at parse time and emitted as the 16-bit
+immediate `259` in the data segment, not a runtime
+computation in `_main`.
+
 ## Char deref store, int divide by 4, do-while summing
 
 Fixtures `1247` (`char *p = &c; *p = 42; return c;` —
