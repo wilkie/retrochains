@@ -1959,6 +1959,39 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## for-comma init, `(unsigned char)c` zero-extend via `mov ah,0`, sar by 15
+
+Fixtures `1523` (`for (i=0, s=0; i<3; i++) s += i;`),
+`1524` (`char c = -1; int u = (unsigned char)c;`),
+and `1525` (`int v=-1; return v >> 15;`) all pass on
+the first capture.
+
+- `1523`: the comma operator inside a for-init is
+  flattened — `i = 0, s = 0` produces *identical*
+  code to two separate statements: `xor si, si` then
+  `xor di, di`. Both locals enregister into SI/DI
+  (multi-use across loop body + cmp). The rest of the
+  for-loop shape matches [[batch-383-and-not-for-
+  fill]]'s template. So `(stmt1, stmt2)` in init is
+  pure parser sugar — no special codegen.
+- `1524` (**finding**): `(unsigned char)c` lowers to
+  `mov al, [bp-1] / mov ah, 0` — the **zero-extend
+  widening pattern** (`b4 00`, 2 bytes). This is
+  distinct from the signed-char promotion `cbw` (1
+  byte) seen in many other fixtures. Note BCC chose
+  `mov ah, 0` over the equally-sized `xor ah, ah`
+  (`30 e4`, also 2 bytes) — apparent preference for
+  the `mov-imm` form. After widening, the int store
+  goes through the 4-byte stack slot for `u`.
+- `1525`: confirms the shift threshold is purely
+  encoding-driven, not value-driven — `v >> 15`
+  still uses `mov cl, 15 / sar ax, cl` (3 bytes
+  total). There is no unroll up to bit-width even
+  when the shift count is large and would seem
+  candidate for special handling. The K ≥ 4
+  cl-loaded variant remains regardless of how close
+  to the int width K gets.
+
 ## `v*100` via `imul r/m`, `cmp [bp-2],100` imm8-sext, `100 - v`
 
 Fixtures `1520` (`int v=5; v *= 100;`), `1521` (`if
