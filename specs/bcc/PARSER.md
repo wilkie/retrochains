@@ -1959,6 +1959,37 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `arr[i].x` struct arr var idx, `int x = (a==b)`, `sizeof(*p)`
+
+Fixtures `1478` (`struct S {int x;}; struct S arr[3];
+int i=1; arr[i].x = 99; return arr[i].x;` — struct
+array with variable index), `1479` (`int a=7, b=7;
+int x = (a == b); return x;` — int initializer from
+bare `==` compare), and `1480` (`int x=0; int *p =
+&x; return sizeof(*p);` — sizeof of a dereferenced
+pointer) all pass on the first capture. `1478`
+confirms struct-array stride lowering: `sizeof(struct
+S) = 2` (single int field) is a power of two, so the
+scale is `mov bx,si / shl bx,1` (not `imul`) — same
+pow2 rule that applies to `int` element strides. The
+`.x` field offset is 0, so the LEDATA FIXUPP target
+for `_arr` produces an effective `[bx+_arr+0]`, no
+extra displacement add. Store and load both
+recompute the scaled offset — no CSE. Returns 99.
+`1479` matches the same boolean materialization
+template as the earlier `<` and `&&` cases, but the
+inverse jcc selected for `==` is `jne` (jump if not
+equal): `mov ax,[a] / cmp ax,[b] / jne L_false / mov
+ax,1 / jmp / xor ax,ax`. Result 1 since 7 == 7.
+`1480` confirms that `sizeof(*p)` is a pure compile-
+time fold: the deref is *not* evaluated at run time
+— no `mov ax,[si]` is emitted. Only `int x = 0; int
+*p = &x;` lower to real instructions (the unused-by-
+value `p` is still spilled to `[bp-4]`); the return
+becomes `mov ax, 2` directly. Confirms BCC honours
+the C rule that the operand of sizeof is
+unevaluated.
+
 ## stack `int a[3]={7}` partial, `char s[6]="hi"` stack, `(x>>4)&0xf`
 
 Fixtures `1475` (`int a[3] = {7}; return a[0] + a[1]
