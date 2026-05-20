@@ -1959,6 +1959,25 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `while (p < end)` ptr walk, `a *= 9`, `a / 3`
+
+Fixtures `1361` (`p = a; end = a+3; while (p < end)
+{ sum += *p; p++; } return sum;` — pointer-less-than
+loop walking an array via two pointers), `1362` (`int
+a=4; a *= 9; return a;` — int compound `*=` by
+non-pow2 const), and `1363` (`int a=20; return a /
+3;` — int divide by smallest non-pow2 prime const) all
+pass on the first capture (after one transient
+PulseAudio crash on the host that required a single
+retry of `1361`'s capture). `1361` confirms ptr-cmp
+in loop: `cmp word ptr [bp-p],[bp-end]` style with
+`jb` (or `jl` -- depends on whether pointers are
+signed-compared; need to inspect). Sum 1+2+3 = 6.
+`1362` confirms `*= 9` non-pow2: `mov dx,9 / imul
+dx`, result 36. `1363` confirms `/3` uses `cwd /
+idiv` regardless of being prime -- non-pow2 divides
+always go through `idiv`. Result 20/3 = 6.
+
 ## `a && b || c`, tail-recursive `sumto`, `setBoth(&s,a,b)`
 
 Fixtures `1358` (`if (a && b || c) return 1;` — mixed
