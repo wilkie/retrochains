@@ -1959,6 +1959,38 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## ptr cast no-op, `c + 3` cbw-then-add, `a[1]` returns `[bp-4]` direct
+
+Fixtures `1562` (`char *p = (char *)&x; return *p;`),
+`1563` (`char c=5; int i = c + 3; return i;`), and
+`1564` (`int a[3]; ...; return a[1];`) all pass on
+the first capture.
+
+- `1562`: pointer-type cast `(char *)&x` is a
+  **codegen no-op** — just affects how subsequent
+  derefs interpret width. `&x` is `lea ax,[bp-2] /
+  mov si,ax` (the usual address setup), then `*p`
+  is `mov al,[si] / cbw` (byte load because `p` is
+  now `char *`). Returns 0x34, the low byte of x.
+- `1563`: `c + 3` where c is char and result is int
+  triggers standard C integer promotion: `mov al,
+  [bp-1] / cbw / add ax, 3 / mov [bp-4], ax`. The
+  `cbw` promotes char to int *before* the add, and
+  the add then operates at word width using
+  `0x05 imm16`. This is the **inverse** of the
+  byte-propagation pass ([[batch-407-cast-binop-
+  table]]): when no narrowing cast surrounds the
+  expression, BCC always promotes char to int and
+  computes at word width.
+- `1564`: stack array `a[N]` with constant index N
+  uses **fully folded** `[bp+disp]` for the
+  element. `a[1]` is `[bp-4]` (base [bp-6], +1 * 2
+  bytes), with no `lea`/`add`/`shl` scaling at run
+  time. Just a direct memory access.
+
+These three fill in details that complete the basic
+type-conversion picture for the encoder.
+
 ## `v >>= 1` direct `sar si,1`, `if (reg-x)` uses `or si,si` shortcut
 
 Fixtures `1559` (`v >>= 1` with v in SI), `1560`
