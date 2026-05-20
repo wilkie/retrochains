@@ -1959,6 +1959,56 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Switch on `char` (cbw + table); default-only (no dispatch); reorder
+
+Fixtures `1607` (switch on `char` scrutinee with 4
+dense cases), `1608` (switch with only a default
+clause), and `1609` (4 dense cases in scrambled
+source order: `3, 1, 2, 0`) all pass on the first
+capture.
+
+- `1607`: char scrutinee triggers **byte-load + `cbw`
+  promotion** before the standard jump-table
+  dispatch: `mov al, [bp-1] / cbw / mov bx, ax / cmp
+  bx, 3 / ja default / shl bx, 1 / jmp cs:[bx +
+  table]`. The promotion is essentially zero-cost.
+  Negative chars (with sign-extended high byte set)
+  are correctly treated as out-of-range by the
+  unsigned `ja` bounds check.
+- `1608`: a switch containing **only `default:`** has
+  **no dispatch at all** — the scrutinee is
+  evaluated (stored to its slot if it has side
+  effects) but never tested. The default body runs
+  unconditionally. Two `eb 00` no-op jumps remain
+  as artifacts of the loop/dispatch template
+  (one between scrutinee setup and body, one after
+  body before end label) — consistent with BCC's
+  "always emit template skeleton" style.
+- `1609` (**important**): cases declared out of
+  source order (e.g. `case 3, case 1, case 2, case
+  0`) produce **case bodies in source order** but
+  **jump-table entries sorted by case value**. The
+  table indexed by value `i` always points at the
+  body for `case i`, regardless of which position
+  it appears in the source. So:
+  - Body layout: source order
+  - Table layout: sorted by case value
+  This means the encoder must sort cases by value
+  when generating the table, while emitting bodies
+  in source order with forward `jmp` to the
+  end_switch label.
+
+Updated final switch dispatch rules:
+- ≤ 3 cases: linear chain (tested in source order)
+- ≥ 4 dense: indexed jump-table (sorted by value,
+  bodies in source order)
+- ≥ 4 sparse: linear-search CS-table (sorted by
+  value)
+- char scrutinee: prefix `cbw` to promote to int
+  before any of the above
+- only `default`: no dispatch, body runs
+  unconditionally
+
 ## Switch dispatch: 3 strategies — linear, indexed-table, search-table
 
 Fixtures `1604` (4 sparse cases), `1605` (4 dense
