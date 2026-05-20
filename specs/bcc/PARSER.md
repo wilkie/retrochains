@@ -1959,6 +1959,51 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Enregistration extends to 5 regs: SI, DI, DX, BX, **CX**; fn-call ABI
+
+Fixtures `1505` (5 multi-use ints all simultaneously
+live), `1506` (2 multi-use ints with an intervening
+function call), and `1507` (multi-use int paired
+with a variable shift that needs CL) all pass on the
+first capture.
+
+- `1505` (**bigger finding**): 5 multi-use ints all
+  enregister — into SI, DI, DX, BX, and **CX**. No
+  stack allocation at all. So the enregistration
+  pool spans all 5 general-purpose registers that
+  aren't AX/BP/SP: `SI, DI, DX, BX, CX`. The order
+  appears to be the declaration order of the locals.
+- `1506` confirms the **caller-save / callee-save
+  split for register-allocated locals**: across a
+  `call _inc`, the locals in SI and DI are
+  *not* spilled — BCC relies on SI/DI being callee-
+  saved by the callee's `push si / push di`
+  prologue. Arg cleanup uses `pop cx` (CX is scratch
+  / caller-save and the simplest 2-byte reclaim).
+  Function return comes back in AX; BCC then stores
+  it into DI (the local's home register). This
+  implies BCC will *not* place a local in DX, BX, or
+  CX if its lifetime crosses a function call —
+  otherwise the call would clobber it. (Hypothesis
+  — needs a future probe with 3+ multi-use locals
+  straddling a call.)
+- `1507`: shift amount `n` is read only once
+  syntactically, so it stays on the stack as
+  expected. Notable detail: BCC loads it with `mov
+  cl, [bp-2]` (`8a 4e fe`, byte load) rather than
+  `mov cx, [bp-2]` (`8b 4e fe`) — same 3-byte length,
+  but byte load is preferred when only `cl` is
+  needed. The shift `sar ax, cl` follows immediately.
+
+Updated register-allocation table:
+| Order | Reg | Saved on entry? | Survives calls? |
+|-------|-----|------------------|-----------------|
+| 1     | SI  | `push si`        | yes             |
+| 2     | DI  | `push di`        | yes             |
+| 3     | DX  | not saved        | **no**          |
+| 4     | BX  | not saved        | **no**          |
+| 5     | CX  | not saved        | **no**          |
+
 ## Enregistration register order: SI, DI, DX, **BX** — 4 ints fit
 
 Fixtures `1502` (4 locals, 2 multi-use + 2 single-
