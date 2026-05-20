@@ -1959,6 +1959,57 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Long shl/cmp/udiv: `N_LXLSH@`, inline cmp, `N_LUDIV@`
+
+Fixtures `1631` (`long << var`), `1632` (`long <
+long` with two long operands), and `1633` (unsigned
+`long / long`) extend the long-arithmetic helper
+table:
+
+- `1631` (**N_LXLSH@**): long signed `<<` uses the
+  long-extended-left-shift helper, complement to
+  `N_LXRSH@`. Same register ABI (DX:AX + CL → DX:AX).
+- `1632` (**inline long compare** — no helper!):
+  signed `a < b` for longs is inlined as a
+  high-then-low two-step compare:
+  ```
+  mov ax, [a_high]
+  mov dx, [a_low]
+  cmp ax, [b_high]
+  jg false       ; a_high > b_high → not less
+  jl true        ; a_high < b_high → definitely less
+  cmp dx, [b_low]
+  jae false      ; equal high, but a_low >= b_low → not less
+  true:
+  mov ax, 1
+  jmp done
+  false:
+  xor ax, ax
+  done:
+  ```
+  High-word compare is **signed** (`jl`/`jg`); low-
+  word fallthrough is **unsigned** (`jae`) since the
+  low word has no independent sign bit. So BCC
+  recognises that long compares are cheap enough to
+  inline despite producing more bytes than a helper
+  call would.
+- `1633` (**N_LUDIV@**): unsigned long div uses a
+  distinct helper from signed (`N_LDIV@`). Same
+  stack-passed ABI, presumably self-clean.
+
+Updated long-helper table:
+| Helper      | Op           | ABI          |
+|-------------|--------------|--------------|
+| `N_LXMUL@`  | `long *`     | reg DX:AX,CX:BX |
+| `N_LDIV@`   | signed /     | stack, self-clean |
+| `N_LUDIV@`  | unsigned /   | stack, self-clean |
+| `N_LXRSH@`  | signed >>    | reg DX:AX,CL |
+| `N_LXLSH@`  | <<           | reg DX:AX,CL |
+| `(none)`    | `long` cmp   | **inlined** high/low |
+
+Still to probe: `N_LXURSH@` (unsigned >>), `N_LMOD@`
+/ `N_LUMOD@` (mod variants).
+
 ## Long arithmetic helpers: `N_LXMUL@`, `N_LDIV@`, `N_LXRSH@`
 
 Fixtures `1628` (`long * long`), `1629` (`long /
