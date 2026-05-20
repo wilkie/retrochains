@@ -1959,6 +1959,69 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Large struct return: 2-stage copy via `N_SCOPY@` + scratch; static local = BSS
+
+Fixtures `1685` (3-int struct return), `1686`
+(static local in fn), and `1687` (if/else with fn
+calls) close several open questions.
+
+- `1685` (**large struct return ABI**): structs
+  larger than 4 bytes use a **2-stage copy** via
+  `N_SCOPY@`:
+  1. **Caller** pushes far ptr to **final
+     destination** (4 bytes, seg+off).
+  2. **Caller** pushes far ptr to **scratch
+     buffer** (4 bytes) — a local on caller's
+     stack.
+  3. Caller calls the function.
+  4. **Callee** builds the struct locally, then
+     copies its local → scratch via `N_SCOPY@`
+     (using the scratch ptr from `[bp+4..7]`).
+  5. **Callee** returns the dest offset in AX (per
+     convention), with the scratch already
+     populated.
+  6. Caller `pop cx; pop cx` (cleans the scratch
+     ptr only — the dest ptr remains on stack).
+  7. Caller pushes scratch ptr again (as **source**
+     for N_SCOPY@).
+  8. Caller calls `N_SCOPY@` with `cx = byte
+     count`, dest still on stack from step 1,
+     source just pushed.
+  9. `N_SCOPY@` self-cleans 8 bytes.
+
+  So **two `N_SCOPY@` calls per struct-return
+  expression** (one inside callee, one in caller).
+  The 2-stage copy lets callee's local lifetime end
+  cleanly before the value lands in the final dest
+  — important when the call result feeds into a
+  larger expression (e.g., `g(mk())`).
+- `1685` also reveals new helper: **`N_SCOPY@`**
+  (struct copy) with ABI:
+  - Stack: dest far ptr (high), src far ptr (low)
+  - `CX`: byte count
+  - Self-cleans 8 bytes of stack args
+- `1686` (**static local**): a `static int n = 0;`
+  inside a function lives in **`_BSS`** (BSS-
+  zero-initialised since the initializer is 0).
+  Access is via direct memory `ff 06 [_n]` (inc
+  word [mem]) and `a1 [_n]` (mov AX, mem) — same
+  as a file-scope global. **No first-use init
+  guard** because BSS already zero-initialises at
+  program startup. If the static had a non-zero
+  initializer, it would be in `_DATA` instead.
+- `1687` (**if-else with calls**): standard branch
+  pattern — `or si, si / jle L_else / call f / jmp
+  L_done / call g`. The result variable `r` gets
+  enregistered into DI since it's used after both
+  branches.
+
+Open probes:
+- Pascal calling convention with struct return
+  (likely uses `ret imm16` for cleanup of hidden
+  ptr args).
+- struct passed by value as parameter (the
+  inverse of struct return).
+
 ## Return ABIs: int in AX, long in DX:AX, 4-byte struct in DX:AX, double on ST0
 
 Fixtures `1682` (2-int struct return), `1683` (long
