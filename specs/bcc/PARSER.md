@@ -1959,6 +1959,27 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## while-inside-for, `a |= s.x`, `c = (char)(a + 100)`
+
+Fixtures `1382` (`for(i=0;i<3;i++) { j=i; while (j>0)
+{ s++; j--; } } return s;` — while loop nested inside
+a for loop), `1383` (`struct S {int x;}; struct S
+s = {0x0f}; ... a |= s.x; return a;` — int compound
+`|=` with a struct-field RHS), and `1384` (`int a=5;
+char c; c = (char)(a + 100); return c;` — char
+narrow-cast applied to a parenthesized sum) all pass
+on the first capture. `1382` confirms a different
+nested-loop shape from `1369`'s nested-for: outer
+post-step (`i++`) and an inner condition-driven
+loop (`while (j > 0)`). Each i iteration does i
+increments of s. Total s = 0+1+2 = 3. `1383`
+confirms struct-field RHS for `|=`: `mov ax,[_s+0] /
+or word ptr [bp-a],ax`. Result 0xF0 | 0x0F = 0xFF =
+255. `1384` confirms cast-on-paren-expr: `a + 100`
+computes into AX (=105), then `(char)` narrows on
+store: `mov byte ptr [bp-c],al`. 105 fits in signed-
+byte range, so no truncation.
+
 ## `*(a + i)`, `if (!f())`, `a += b >> 1`
 
 Fixtures `1379` (`int a[3]; int i=1; return *(a + i);`
