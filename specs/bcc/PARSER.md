@@ -1959,6 +1959,24 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `a *= 7`, `abs2(?:)`, `if (a[1] == 10)`
+
+Fixtures `1349` (`int a=3; a *= 7; return a;` — int
+compound `*=` by non-pow2 const), `1350` (`int n=-5;
+return abs2(n < 0 ? -n : n);` — ternary inside a call
+argument expression), and `1351` (`int a[3]; ...
+if (a[1] == 10) return 1;` — array element equality
+compared in an if-cond) all pass on the first
+capture. `1349` confirms `*= 7` uses `mov dx,7 /
+imul dx` (non-pow2 path), result 21. `1350` confirms
+the ternary computes into AX (push for the call),
+with both arms writing AX before the join: `-n` is
+`mov ax,[n] / neg ax`, and `n` is `mov ax,[n]`.
+Result abs(-5) = 5. `1351` confirms array-elem
+equality in if: `mov ax,[bp-base+2] / cmp ax,10 /
+jne FALSE` -- the elem load happens first into AX,
+then the compare against the int-immediate.
+
 ## strcpy-style `cp(d,s)`, `a += b++`, `a += ++b`
 
 Fixtures `1346` (`void cp(char *d, char *s) { while
