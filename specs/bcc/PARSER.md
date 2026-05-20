@@ -1959,6 +1959,39 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## inc/dec-vs-add boundary: `v+3`, `v-1`, `v+100`
+
+Fixtures `1484` (`int v=5; int r = v + 3; return r;`),
+`1485` (`int v=5; int r = v - 1; return r;`), and
+`1486` (`int v=5; int r = v + 100; return r;`)
+together calibrate the boundary of the inc/dec-for-
+small-add optimization first observed in [[batch-388-
+arr-or-incpair]] / fixture `1483`. All pass on the
+first capture. `1484` confirms `+3` uses `add ax, 3`
+encoded as `05 03 00` (3-byte `add AX, imm16` form,
+opcode `0x05`) — *not* three `inc ax`. So the
+`inc`-chain optimization only applies to +1 and +2
+(where 1 or 2 bytes is strictly smaller than the
+3-byte `add` encoding); at +3 the byte counts tie and
+BCC prefers the single `add` instruction. `1485`
+confirms the symmetric path: `v - 1` lowers to `dec
+ax` (opcode `0x48`, 1 byte) — BCC's small-sub path
+mirrors small-add. `1486` confirms the AX-with-imm
+encoding for non-tiny constants: `v + 100` is `05 64
+00` (`add AX, imm16`), *not* the `83 c0 64` (`add
+r/m16, imm8` sign-extended) alternative. The two
+forms are both 3 bytes for AX; BCC's allocator
+canonicalises on the `0x05` opcode whenever the
+destination is AX. Summary of the integer-add encoding
+table for AX:
+- `+1`/`-1`: `40` / `48` (1 byte)
+- `+2`/`-2`: `40 40` / `48 48` (2 bytes)
+- `+N` for `N≥3`: `05 N N>>8` (3 bytes)
+- non-AX destinations (e.g. `[bp+disp]`) use `83 /0
+  disp imm8` when imm fits in 8 bits — different
+  policy, since the imm8-sign-extended form is one
+  byte shorter than imm16 for memory operands.
+
 ## `int x = a[0]+a[2]`, `int x = cmp || cmp`, `a[1] = v + 2`
 
 Fixtures `1481` (`int a[3]={10,20,30}; int x = a[0]
