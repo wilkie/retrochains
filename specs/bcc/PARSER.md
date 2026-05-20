@@ -1959,6 +1959,50 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Narrowing-cast complete: OR/XOR/SHL also byte-width
+
+Fixtures `1541` (`(char)(a | b)`), `1542` (`(char)(a
+^ b)`), and `1543` (`(char)(a << 2)`) all pass on the
+first capture and complete the narrowing-cast
+propagation calibration.
+
+- `1541`: `or al, [bp-4]` — byte OR (opcode `0x0A`).
+  ✓ OR propagates.
+- `1542`: `xor al, [bp-4]` — byte XOR (opcode `0x32`).
+  ✓ XOR propagates.
+- `1543`: `shl al, 1 / shl al, 1` — byte form `shl
+  r/m8, 1` (opcode `0xD0 /4`). The K ≤ 3 unroll
+  threshold also applies in byte-width, just on a
+  byte register instead of AX. ✓ SHL propagates (for
+  small K).
+
+Final propagation table for `(char) (a op b)`:
+| Op  | Byte propagated? | Byte-form opcode | Notes |
+|-----|------------------|------------------|-------|
+| ADD | yes              | `0x02`           | |
+| SUB | yes              | `0x2A`           | |
+| AND | yes              | `0x22`           | |
+| OR  | yes              | `0x0A`           | |
+| XOR | yes              | `0x32`           | |
+| SHL | yes              | `0xD0 /4` (K≤3) / `0xD2 /4` (K≥4) | K<8 safe |
+| MUL | **no**           | n/a              | stays `F7 /5` word |
+| DIV/MOD | not probed   | —                | likely no (high-byte dep) |
+| SHR | not probed       | —                | safe if K<8 |
+
+So BCC's narrow-cast pass has an allow-list of:
+add, sub, and, or, xor, shl. Multiplication is
+deliberately excluded — even though
+`(char)(a*b) == (char)((char)a*(char)b)`
+mathematically and 8086 has `mul r/m8`, BCC keeps it
+word-wide.
+
+For the encoder: when codegen encounters `(char) (a
+op b)` for any op in the allow-list, switch the
+binop emission from word form to byte form (using AL
+as accumulator, byte-form ModR/M, and `cbw` for
+extension on use), and remove the explicit `and ax,
+0xff` / sign-truncate step.
+
 ## Narrowing-cast propagation calibrated: ADD/SUB/AND yes, MUL no
 
 Fixtures `1538` (`(char)(a - b)`), `1539` (`(char)(a
