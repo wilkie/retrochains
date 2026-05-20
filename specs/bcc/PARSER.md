@@ -1959,6 +1959,58 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Bitfields: byte-level and/or mask+shift; union shares storage; enum const-folded
+
+Fixtures `1691` (bitfield struct), `1692` (union),
+and `1693` (enum constants) characterise three
+remaining C semantic shapes.
+
+- `1691` (**bitfield codegen**): a `struct B { a:4;
+  b:4; c:8; }` totals 16 bits = 2 bytes. BCC uses
+  **byte-level operations** for fields that fit
+  within a single byte:
+  - **Write `a` (bits 0-3 of byte 0)**: `and byte
+    [m], 0xf0` (clear) + `or byte [m], value`
+    (set). Uses 4-byte `80 /N` form.
+  - **Write `b` (bits 4-7 of byte 0)**: `and byte
+    [m], 0x0f` (clear) + `or byte [m], (value <<
+    4)` (set). Shifted value at parse time.
+  - **Write `c` (whole byte 1)**: `and byte [m+1],
+    0x00` (clear) + `or byte [m+1], value` (set).
+  - **Read `a`**: `mov al, [m] / and ax, 0x000f`
+    (mask).
+  - **Read `b`**: `mov dl, [m] / mov cl, 4 / shr
+    dx, cl / and dx, 0x000f` (shift+mask).
+  - **Read `c`**: `mov dl, [m+1] / and dx, 0x00ff`
+    (mask only — no shift needed).
+
+  Cross-byte bitfields would presumably use word
+  `81 /N` operations — not yet probed.
+- `1692` (**union**): a `union U { int i; char
+  c[2]; }` allocates `max(sizeof(members))` = 2
+  bytes. Both fields share the same storage —
+  `u.i = 0x1234` writes the word; `u.c[0]`
+  reads the low byte (= 0x34 since 8086 is little-
+  endian). No special codegen — each field is just
+  a typed view at offset 0.
+- `1693` (**enum constants**): enum values are
+  **constant-folded at parse time**. `x + HIGH -
+  LOW` where HIGH=20, LOW=5 lowers to `add ax,
+  15` directly — no enum symbol in the OBJ, no
+  runtime fetch, no separate constant pool. Enums
+  are essentially typed `#define` substitutions
+  with full constant arithmetic evaluation.
+
+Bitfield encoding policy is a key finding for
+Rust reimplementation:
+- Track per-field byte offset + bit offset + width.
+- Generate `and`/`or` byte ops when field fits in
+  one byte; word ops otherwise.
+- Shift only when bit-offset within the byte is
+  non-zero.
+- Mask only when reading (writes use clear+set
+  semantics that don't need a read first).
+
 ## Struct by value: ≤4B inline pushes, >4B via `N_SPUSH@`; string literal in `_DATA`
 
 Fixtures `1688` (4-byte struct by value), `1689`
