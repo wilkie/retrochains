@@ -1959,6 +1959,43 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `v >>= 1` direct `sar si,1`, `if (reg-x)` uses `or si,si` shortcut
+
+Fixtures `1559` (`v >>= 1` with v in SI), `1560`
+(`register int x; if (x)` with x in SI), and `1561`
+(`v &= 1` with v in SI) all pass on the first
+capture.
+
+- `1559`: confirms direct-on-home shift for **SAR**
+  too. `v >>= 1` lowers to `sar si, 1` (`D1 /7`,
+  ModR/M `FE`). Same shape as `shl si, 1` (`D1
+  /4`) from `1557`. So shift compound ops in both
+  directions skip the AX round-trip.
+- `1560` (**finding**): for a register-allocated
+  local, `if (x)` uses **`or si, si`** (`0B F6`, 2
+  bytes) instead of `cmp si, 0` (3 bytes with
+  `83 FE 00` imm8-sext or 4 bytes with imm16).
+  Saves 1 byte and produces the same flags. So
+  truthiness-against-zero uses different opcodes
+  based on operand location:
+  - Memory operand: `cmp [m], 0` (`83 /7 disp 00`)
+  - Register operand: `or REG, REG` (`0B mod=11
+    rm=reg/2-bytes`)
+- `1561`: confirms the imm16 AND encoding from
+  [[batch-400-imm8-policy]]. `v &= 1` with v in SI
+  emits `81 e6 01 00` (4 bytes), **not** the
+  legal-but-shorter `83 e6 01` (3 bytes imm8-sext).
+  The bitwise ops still always use `81 /N` imm16
+  form regardless of immediate value.
+
+Combined with the earlier batch findings, BCC's
+zero-test pattern is fully calibrated:
+| Operand location | Encoding | Bytes |
+|------------------|----------|-------|
+| Register (SI/DI/DX/BX/CX) | `or REG, REG` (`0B`) | 2 |
+| Memory `[bp+disp]` | `cmp [bp+disp], 0` (`83 /7`) | 4 (disp8) |
+| Memory direct `[m]` | `cmp [m], 0` (`83 /7`) | 5 (disp16) |
+
 ## `v = ~v` via `not ax`, `v <<= 1` direct `shl si,1`, `if (x)` via `cmp [m],0`
 
 Fixtures `1556` (`v = ~v`), `1557` (`v <<= 1` with v
