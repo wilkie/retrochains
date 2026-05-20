@@ -1959,6 +1959,53 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `N_LUMOD@`; int→long via `cwd`; uint→long zero-fills high
+
+Fixtures `1637` (`unsigned long % unsigned long`),
+`1638` (`(long)signed_int`), and `1639`
+(`(long)unsigned_int`) complete the long-helper
+picture and characterise integer-to-long widening.
+
+- `1637` (**N_LUMOD@**): unsigned long mod has its
+  own helper, distinct from signed `N_LMOD@`. Same
+  stack-passed self-cleaning ABI.
+- `1638` (**signed int → long via `cwd`**): the
+  widening lowers to `mov ax, [int] / cwd / mov
+  [high], dx / mov [low], ax`. The `cwd` (`0x99`)
+  is a 1-byte sign-extend instruction that fills DX
+  with copies of AX's MSB — exactly what's needed
+  for signed widening (DX = 0xFFFF if negative,
+  0x0000 if non-negative).
+- `1639` (**unsigned int → long zero-fills**): the
+  widening lowers to `mov ax, [uint] / mov word
+  [high], 0 / mov [low], ax`. The high half is
+  explicitly zeroed with a 5-byte
+  `c7 46 disp 00 00` (`mov [bp+disp], imm16`)
+  rather than via `cwd` (which would sign-extend
+  and produce the wrong result for values with the
+  high bit set).
+
+So the integer→long widening choice is **signedness-
+driven at the source-type level**:
+- `int` (signed) → long: `cwd` (1 byte to fill high)
+- `unsigned int` → long: `mov word [high], 0` (5
+  bytes)
+
+Final long-helper table now complete for arithmetic:
+| Helper | Op | ABI |
+|--------|-----|-----|
+| `N_LXMUL@`  | `long *`           | reg |
+| `N_LDIV@`   | signed `/`         | stack, self-clean |
+| `N_LUDIV@`  | unsigned `/`       | stack, self-clean |
+| `N_LMOD@`   | signed `%`         | stack, self-clean |
+| `N_LUMOD@`  | unsigned `%`       | stack, self-clean |
+| `N_LXLSH@`  | `<<`               | reg + CL |
+| `N_LXRSH@`  | signed `>>`        | reg + CL |
+| `N_LXURSH@` | unsigned `>>`      | reg + CL |
+| `(inline)`  | add/sub/and/or/xor | with carry chains |
+| `(inline)`  | comparisons         | hi/lo two-step |
+| `(inline)`  | int→long           | `cwd` or zero-fill |
+
 ## Long mod `N_LMOD@`, unsigned shr `N_LXURSH@`, add INLINED `adc`
 
 Fixtures `1634` (`unsigned long >> int`), `1635`
