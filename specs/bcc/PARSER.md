@@ -1959,6 +1959,35 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `&&` short-circuit with side effect, `fn(char a[])`, comma in for-init
+
+Fixtures `1238` (`int a=1; int b=5; if (a && ++b) return
+b;` — `&&` RHS has a side effect on `b`), `1239` (`int
+sum(char a[])` — `char` array passed via array-syntax
+param), and `1240` (`for (i=0, s=10; i<3; i++) s+=i;
+return s;` — comma operator in for-loop init expression)
+all pass on the first capture. `1238` is the AND
+counterpart to `1237`: when LHS `a` is truthy we fall
+through to evaluate `++b`, so `b` is bumped to 6 and
+returned. The branch shape mirrors the `||` case but
+with inverted polarity on the LHS test. `1239` confirms
+`char a[]` is a synonym for `char *a` — caller passes
+the global `b` (decay), callee subscripts using
+byte-load `mov al,[bx]/cbw`. `1240` confirms the
+comma-in-for-init lowering: both side effects (`i=0`
+and `s=10`) are emitted in source order before the
+test-step header — the comma's "evaluate LHS for side
+effect, then RHS" semantics are the same in for-init
+expression position as in expression-statement
+position.
+
+**Process note**: batch 307's first capture attempt
+hung indefinitely in DOSBox (only ~11 CPU seconds in
+25+ minutes) without producing OBJ output. Killing the
+stuck process and re-running succeeded on the first
+retry — likely an audio-init / SDL race on the WSL2
+host, not a fixture-correctness issue.
+
 ## `ptr == ptr`, `fn(int a[])`, `||` short-circuit with side effect
 
 Fixtures `1235` (`int *p=&a; int *q=&b; return p == q;`
