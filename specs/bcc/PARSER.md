@@ -1959,6 +1959,50 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `a[i]=99; a[i]` no CSE; 2-arg cleanup uses `pop cx; pop cx`
+
+Fixtures `1619` (5-int array init), `1620` (`a[i]
+= 99; return a[i]`), and `1621` (function via
+out-param `compute(5, &x)`) all pass on the first
+capture.
+
+- `1619`: confirms `N_SCOPY@` for 5-int array,
+  cx=10. The 5-element template `01 00 02 00 03 00
+  04 00 05 00` is laid in `_DATA`.
+- `1620` (**confirmation**): writing then reading
+  the same `a[i]` with variable `i` emits the full
+  address computation **twice** — no CSE.
+  ```
+  mov bx, si / shl bx, 1 / lea ax, [bp-6] / add bx, ax
+  mov [bx], 99
+  mov bx, si / shl bx, 1 / lea ax, [bp-6] / add bx, ax  ; ← recomputed!
+  mov ax, [bx]
+  ```
+  Same "no CSE on indexed access" pattern seen in
+  [[batch-384-2d-int-arr]] / fixture `1469`. The
+  identical 8-byte address sequence is reemitted.
+- `1621` (**finding**): for a 2-argument cdecl
+  call, the post-call arg cleanup uses **`pop cx ;
+  pop cx`** (2 bytes total) rather than `add sp,
+  4` (3 bytes). So:
+  | Arg cleanup size | Form | Bytes |
+  |------------------|------|-------|
+  | 2 bytes (1 arg) | `pop cx` | 1 |
+  | 4 bytes (2 args) | `pop cx ; pop cx` | 2 |
+  | 6 bytes (3 args) | (not yet probed; likely 3× `pop cx` or `add sp, 6`) |
+  BCC prefers pop chains over `add sp, N` for small
+  cleanup counts since pops are 1 byte each and
+  `add sp, imm8` is 3 bytes.
+
+Also notable from `1621`: function with a
+**pointer-out-parameter** (`int *r`) enregisters
+both params (`n` → SI, `r` → DI), confirms `*r =
+...` lowering uses `mov [di], ax` (no extra mov
+through AX since the writeback target is the
+register itself). The body `*r = n*n + 1` lowers
+as `mov ax, si / imul si / inc ax / mov [di], ax`
+— clean four-instruction sequence.
+
 ## Arrays always use `N_SCOPY@`; structs use inline only for ≤2 fields
 
 Fixtures `1616` (3-int struct), `1617` (2-int
