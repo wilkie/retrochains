@@ -1959,6 +1959,42 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `int x = a[0]+a[2]`, `int x = cmp || cmp`, `a[1] = v + 2`
+
+Fixtures `1481` (`int a[3]={10,20,30}; int x = a[0]
++ a[2]; return x;` — int initializer from sum of two
+constant-index array elements), `1482` (`int a=0,
+b=5; int x = (a>0) || (b>0); return x;` — int
+initializer from logical-OR of two compares), and
+`1483` (`int a[3]; int v=5; a[1] = v + 2; return
+a[1];` — store of `v + 2` expression to array
+element) all pass on the first capture. `1481`
+confirms folded-offset element access: `a[0]` reads
+`[bp-6]`, `a[2]` reads `[bp-2]`, summed with `mov ax,
+[bp-6] / add ax, [bp-2]`. The N_SCOPY@ helper still
+runs for the brace initializer first (template
+`0a 00 14 00 1e 00`). `1482` exposes the **``||``
+short-circuit shape**, the mirror of [[batch-383-and-
+not-for-fill]]'s `&&`: first compare uses a *non-
+inverted* jcc that jumps **forward to the true path**
+(`jg L_true`), then the second compare uses an
+inverted jcc (`jle L_false`) to bail to false. Both
+paths reconverge: `mov ax,1 / jmp L_done / xor ax,ax
+/ L_done`. The asymmetry of `&&` vs. `||` lives in
+which side gets the inverted vs. non-inverted jcc on
+the first compare — `&&` uses inverted (skip-to-
+false on fail), `||` uses non-inverted (skip-to-true
+on first success). Returns 1 because b=5>0. `1483`
+shows BCC's **inc-for-small-add** size optimization:
+`v + 2` lowers to `mov ax,[bp-8] / inc ax / inc ax`
+rather than `add ax, 2`. Two `inc ax` = 2 bytes (0x40
+twice); `add ax, 2` would be 3 bytes (`83 c0 02` for
+sign-extended imm8, or `05 02 00` for imm16). This is
+a stable pattern — fixture `1057` (`x + 1`) emits the
+same `inc ax` after the load. So integer adds of +1
+or +2 use `inc` chains; +3 and larger fall back to
+`add` (where the byte count ties or favors `add`).
+
 ## `arr[i].x` struct arr var idx, `int x = (a==b)`, `sizeof(*p)`
 
 Fixtures `1478` (`struct S {int x;}; struct S arr[3];
