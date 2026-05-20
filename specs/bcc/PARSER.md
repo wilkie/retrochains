@@ -1959,6 +1959,42 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## RMW non-AX add: `v+=3`, `v+=100`, `v+=1000` (imm8 vs imm16)
+
+Fixtures `1487` (`v += 3`), `1488` (`v += 100`), and
+`1489` (`v += 1000`) all pass on the first capture
+and together calibrate the non-AX register-add
+encoding. All three enregister `v` into `SI` (single
+hot local), so the RMW is `add si, imm`, not `add
+[bp+disp], imm` as the previous batch's note had
+hypothesised. Observed encodings:
+- `1487` (+3): `83 c6 03` — opcode `0x83 /0`, ModR/M
+  `0xc6` = mod=11/rm=110(si), imm8 sign-extended. 3
+  bytes.
+- `1488` (+100): `83 c6 64` — same `0x83 /0` opcode,
+  imm8 sign-extended (100 = 0x64 fits in
+  -128..127). Still 3 bytes.
+- `1489` (+1000): `81 c6 e8 03` — opcode `0x81 /0`,
+  same ModR/M, imm16 follows (0x03e8 = 1000). 4
+  bytes — imm doesn't fit in signed 8-bit.
+
+So for non-AX register destinations the imm8-sign-
+extended form `83 /0` is preferred for any value
+that fits in [-128,127]; outside that range, BCC
+falls back to `81 /0` with full imm16. This is
+distinct from the AX-with-imm policy
+([[batch-389-inc-dec-add]]), which canonicalises on
+the `05` opcode for any `+N` with `N≥3`.
+
+Correction to the previous batch's table: the
+"non-AX destinations" row referred to `[bp+disp]`
+memory operands, but the actual code path for a
+single-local RMW promotes the local into SI and uses
+the **register** form of `83 /0` instead. The
+ModR/M's mod field distinguishes (mod=11 for
+register, mod=00/01/10 for memory) but the imm8/16
+boundary is the same.
+
 ## inc/dec-vs-add boundary: `v+3`, `v-1`, `v+100`
 
 Fixtures `1484` (`int v=5; int r = v + 3; return r;`),
