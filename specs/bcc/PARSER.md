@@ -1959,6 +1959,48 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## addr-taken → forced to memory, `(uchar)int` vs `(char)int` cast widening
+
+Fixtures `1532` (ternary picks between `&x` and
+`&y`, then stores through the resulting pointer),
+`1533` (`int x; return (unsigned char)x;` zero-
+extend cast on int), and `1534` (`int x;
+return (char)x;` signed cast on int) all pass on the
+first capture.
+
+- `1532` (**refinement**): `x` and `y` both have
+  their addresses taken (`&x`, `&y`). They stay on
+  the stack (`[bp-2]`, `[bp-4]`) regardless of their
+  use count — the address would have nowhere to
+  point if they lived in a register. So
+  **address-taken locals are forced to memory** as
+  an *additional* constraint on top of the
+  use-count rule. The ternary itself lowers
+  straightforwardly: cmp / inverse-jcc / `lea ax,
+  [&x]` arm / jmp / `lea ax, [&y]` arm. Pointer `p`
+  goes to SI; `*p = 99` is `mov [si], 99`.
+- `1533`: `(unsigned char)x` on an int lowers to
+  **`mov al, [bp-2] / mov ah, 0`** — byte-load then
+  zero-extend. Same widening idiom as the char →
+  unsigned char cast in [[batch-402-comma-cast-shr]]
+  fixture `1524`. The cast is implemented as
+  "ignore high byte of source, then zero-extend in
+  destination" without an explicit AND.
+- `1534`: `(char)x` on an int lowers to **`mov al,
+  [bp-2] / cbw`** — byte-load then signed sign-
+  extend. The 1-byte `cbw` (opcode `0x98`) saves a
+  byte versus the `mov ah, 0` (`b4 00`, 2 bytes) of
+  the unsigned variant. So the encoder produces:
+  | Cast | Sequence | Bytes |
+  |------|----------|-------|
+  | `(unsigned char)int` | `mov al,[m] / mov ah,0` | 5 |
+  | `(char)int`          | `mov al,[m] / cbw`      | 4 |
+
+So the encoder treats narrowing-then-implicitly-
+widening as a byte-load of the low part followed by
+the appropriate sign/zero extension. Signed casts
+get the shorter encoding for free via `cbw`.
+
 ## Globals never enregister, `int *p` enregisters, reversed-cmp normalised
 
 Fixtures `1529` (global `int g` written and read
