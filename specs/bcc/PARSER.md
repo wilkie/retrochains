@@ -1959,6 +1959,46 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Long const shift still calls helper; `long * pow2` becomes shl helper
+
+Fixtures `1640` (`long >> 4` with constant shift),
+`1641` (`long * 4L` const pow2 multiply), and `1642`
+(`int i; long r = i + 1`) all pass on the first
+capture.
+
+- `1640`: even a **constant** long shift count still
+  calls **`N_LXRSH@`** (not inlined). Code emits
+  `mov cl, 4 / call N_LXRSH@`. So no shift-by-1
+  unrolling for longs — the helper is invoked for
+  any shift amount.
+- `1641`: `long * 4L` (pow2) is recognised and
+  lowered to **`N_LXLSH@` with cl=2** (log2 of 4) —
+  the same mul-by-pow2 → shift optimisation applies
+  to longs as to ints, but the shift itself goes
+  through the helper. So no `N_LXMUL@` call here.
+- `1642` (**C promotion rule confirmed**): `int + 1`
+  is computed at **int width first**: `mov ax,
+  [bp-2] / inc ax`. Only then is the int result
+  widened to long via `cwd` for the assignment to
+  `long r`. So integer-typed sub-expressions stay
+  int-width even when the result is assigned to a
+  long. Standard C type-promotion: only operands of
+  identical "rank" are operated on at their
+  common type; mixed-rank promotes the lower-rank
+  to the higher.
+
+This means long arithmetic only kicks in when both
+operands are long. `int + long` would (per C rules)
+promote the int to long first, then use long
+operations. Not yet probed.
+
+For the Rust reimplementation:
+- Don't inline long shifts even for constant counts.
+- Recognise `long * pow2` and convert to `<< log2`
+  before codegen (so the shift helper is used).
+- Implement C usual arithmetic conversions in the
+  IR.
+
 ## `N_LUMOD@`; int→long via `cwd`; uint→long zero-fills high
 
 Fixtures `1637` (`unsigned long % unsigned long`),
