@@ -1959,6 +1959,52 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## FP conv free via reg stack; FP arg = `sub sp / fstp qword [sp]`
+
+Fixtures `1676` (float→double), `1677` (double→
+float), and `1678` (function taking double param)
+all pass on the first capture.
+
+- `1676`/`1677`: **FP↔FP conversions are free** via
+  the FPU register stack. `float → double` is
+  `fld dword [f] / fstp qword [d]` — the FPU
+  internally operates at 80-bit extended precision,
+  so the precision conversion happens automatically
+  on load/store. No helper, no special opcodes —
+  just `fld <src-prec> / fstp <dst-prec>`.
+- `1678` (**FP argument passing**): a `double`
+  parameter is passed on the stack as 8 bytes, but
+  the push protocol differs from int args:
+  ```
+  fld dword [literal]      ; load source value
+  sub sp, 8                ; reserve 8 bytes for double arg
+  fstp qword [bp-8]        ; store-and-pop into reserved slot
+  nop ; wait               ; FPU sync
+  call _fn
+  add sp, 8                ; caller cleans (cdecl)
+  ```
+  So FP args use **`sub sp, N / fstp [sp]`** instead
+  of `push imm` chains. Cleanup uses **`add sp, 8`**
+  per 8-byte double (or `add sp, 4` per float).
+- **Double literal storage optimisation**: a `3.5`
+  (source-level double) is stored in `_DATA` as a
+  **4-byte float** when it round-trips losslessly
+  through float precision. The call site loads as
+  float and promotes to double via the FPU stack.
+  Saves 4 bytes per literal when applicable. BCC
+  checks the value at parse time and picks the
+  smaller storage form.
+- Callee accesses double param at `[bp+4]` as
+  qword: `9b dd 46 04 = fld qword [bp+4]`. Same
+  offset as a near pointer arg — the param's
+  bytes are just 8 wide instead of 2.
+
+So FP argument passing in cdecl uses a different
+push mechanism (FPU-store rather than CPU push)
+but otherwise follows the same stack discipline:
+caller-cleans, args at `[bp+4]+`, right-to-left
+order (not yet tested with multiple FP args).
+
 ## FP `1.0` via `fld1`; FP cmp uses `fstsw`+`sahf`; `int→float` via `fild`
 
 Fixtures `1673` (`a*b - 1.0f`), `1674` (FP `<` cmp),
