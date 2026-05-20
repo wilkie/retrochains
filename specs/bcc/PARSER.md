@@ -1959,6 +1959,61 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Switch dispatch: 3 strategies — linear, indexed-table, search-table
+
+Fixtures `1604` (4 sparse cases), `1605` (4 dense
+cases with non-zero base), and `1606` (3 dense
+cases with default) all pass on the first capture
+and complete the switch-dispatch classification:
+
+**Three distinct dispatch strategies:**
+
+1. **Linear cmp-jcc chain** (≤ 3 cases): each case
+   tested in turn with `cmp ax, value / je
+   case_body`. Default falls through. (Fixtures
+   `1598`, `1599`, `1600`, `1606`.)
+
+2. **Indexed jump-table** (≥ 4 *dense* cases):
+   - For 0-based dense (`case 0; case 1; ...`):
+     `cmp bx, max / ja default / shl bx, 1 / jmp
+     cs:[bx + table]`.
+   - For non-zero-base dense (`case 5; case 6;
+     ...`): identical but with a prefixing `sub
+     bx, base` to normalise the index to 0..N-1.
+   - Table holds N word-sized target offsets.
+3. **Linear-search CS-table** (≥ 4 *sparse* cases —
+   `1604`): novel third strategy! BCC emits a
+   linear-search loop using the 8086 `LOOP`
+   instruction:
+   ```
+   mov [bp-4], scrutinee   ; save to stack
+   mov cx, N               ; number of cases
+   mov bx, table_offset    ; CS-table base
+   search:
+     mov ax, cs:[bx]       ; read case value
+     cmp ax, [bp-4]        ; compare to scrutinee
+     je found
+     inc bx; inc bx        ; advance by 2
+     loop search           ; LOOP: dec cx, jnz
+   jmp default
+   found:
+     jmp cs:[bx + 2*N]     ; jump through paired
+                           ; target offset
+   ```
+   The CS-table stores the N case values
+   followed by N target offsets. The `jmp cs:
+   [bx + 2*N]` indexes 2*N bytes past the
+   matched value to find its corresponding target.
+
+So the lowering decision is:
+- ≤ 3 cases: linear chain
+- ≥ 4 dense consecutive: indexed jump-table (with
+  optional base subtract)
+- ≥ 4 not-dense: linear-search CS-table with `LOOP`
+
+The sparse strategy trades O(N) lookup time for
+compact table size (no gaps).
+
 ## Switch dispatch cutoff: **4 dense cases triggers jump-table**
 
 Fixtures `1601` (4 dense), `1602` (5 dense), and
