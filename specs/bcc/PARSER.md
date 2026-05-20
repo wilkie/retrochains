@@ -1959,6 +1959,27 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `do { } while (0)`, `if ((a = b))`, chained 4-arm ternary
+
+Fixtures `1433` (`int n=0; do { n++; } while (0);
+return n;` — do-while with a constant-zero condition,
+exercising the at-least-once semantic), `1434` (`int
+a; int b=5; if ((a = b)) return a; return 0;` —
+if-condition that contains an assignment, using the
+assigned value as the truthy test), and `1435` (`return
+a==0 ? 100 : a==1 ? 200 : a==2 ? 300 : 0;` — four-arm
+chained ternary as the return value) all pass on the
+first capture. `1433` confirms the do-while runs the
+body once regardless of the test: n increments to 1,
+then `cmp ...,0 / jne TOP` falls through. The
+constant-folded `0` may or may not get short-circuited
+to a hardcoded exit — the OBJ match shows BCC's
+actual choice. `1434` confirms assign-in-if-cond: AX
+gets the assigned value (5), `or ax,ax / je FALSE`.
+`1435` confirms the right-associative ternary chain:
+each `?:` is its own decision point, with the false
+arm cascading to the next test. Result 300.
+
 ## `char c += a*2`, identical-literal ptr eq, `s.x + a[1]`
 
 Fixtures `1430` (`int a=5; char c=10; c += a * 2;
