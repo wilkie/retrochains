@@ -1959,6 +1959,27 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `char c *= 3`, abs via ternary, `f(char_var)`
+
+Fixtures `1295` (`char c=5; c *= 3; return c;` — char
+compound `*=` by a non-pow2 constant), `1296` (`int
+absc(int a) { return a < 0 ? -a : a; }` — absolute
+value via ternary), and `1297` (`int f(int x) { return
+x + 1; } char c=10; return f(c);` — char variable
+passed as int parameter) all pass on the first
+capture. `1295` confirms char compound `*=` non-pow2:
+the LHS char loads via `cbw`, RHS const 3 goes into
+DX, `imul dx`, then narrows back via byte-store -- 5 *
+3 = 15. `1296` is the ternary variant of `1269`'s
+explicit if/return abs: both arms still consolidate
+into a single AX return-epilogue path. `1297` confirms
+caller-side char-to-int promotion at the call site:
+`c` is byte-loaded with `mov al,[bp-c] / cbw`, then
+the int-extended value is pushed -- matching the same
+"args are word-sized" ABI we documented for `1271` and
+`1285`. Char-to-int happens at the call, not in the
+callee.
+
 ## `f(*p)`, global `int *p = &arr[1]`, fn no-args loop sum
 
 Fixtures `1292` (`int a=42; int *p=&a; return f(*p);`
