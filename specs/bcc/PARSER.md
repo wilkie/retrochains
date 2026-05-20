@@ -1959,6 +1959,28 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Chained postdec, while body w/ continue, `char += 100`
+
+Fixtures `1244` (`int a=5; b=a--; c=a--; return
+b*10+c;` — two sequential postfix-decrements reading
+and updating the same slot), `1245` (`while (i<5) {
+i++; if (i==2) continue; s += i; } return s;` — while
+body with a `continue` skipping the rest), and `1246`
+(`char c=5; c += 100; return c;` — char compound `+=`
+by a large constant that's still in `char` range) all
+pass on the first capture. `1244` confirms each
+postfix-`--` lowers as load-into-AX, decrement-in-slot,
+return-old-value-in-AX — so the second `a--` reads 4
+(after the first decrement made `a=4`) and decrements
+to 3. Net: `b=5, c=4`, return = 54. `1245` confirms
+the `continue` lowering: a forward jump to the
+loop-step label (not the loop-test) since `while` has
+no separate step. `1246` confirms the char += large
+const path: the immediate `100` is encoded as a byte
+add (`add byte ptr [bp-N],100`) when it fits in a
+signed-byte slot — 100 is within [-128, 127], so no
+word-sized fallback.
+
 ## Signed `char >> var`, `int += s.x`, `a *= -3`
 
 Fixtures `1241` (`char a=8; int n=1; return a >> n;` —
