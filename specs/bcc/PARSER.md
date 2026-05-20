@@ -1959,6 +1959,26 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Array-of-struct init, `add5(a[1])`, `a[i] = i * 10`
+
+Fixtures `1442` (`struct P arr[2] = {{1,2}, {3,4}};
+return arr[1].x + arr[0].y;` — global array-of-struct
+with nested init list), `1443` (`int add5(int x) {
+return x + 5; } a[1]=10; return add5(a[1]);` —
+function call passing an array element by value), and
+`1444` (`for(i=0;i<3;i++) a[i] = i * 10; return a[2];`
+— array fill using a multiplication of the loop index)
+all pass on the first capture. `1442` confirms array-
+of-struct global init: four ints laid out contiguously
+in the data segment, each `{x,y}` pair occupying 4
+bytes. `arr[1].x` = 3, `arr[0].y` = 2. Total 5. `1443`
+confirms passing an array elem by value: `mov ax,
+[bp-base+2] / push ax / call _add5`. Result 10+5 = 15.
+`1444` confirms loop-driven array fill with index-mul
+RHS: each iteration computes `i * 10` into AX, then
+stores into the indexed slot via a separate base+
+offset address calc. a[2] = 20.
+
 ## `zero(arr, 3)` mutating fn, sequential `for` loops, `a += two() + 3`
 
 Fixtures `1439` (`void zero(int *a, int n) { ... a[i]
