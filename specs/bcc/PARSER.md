@@ -1959,6 +1959,42 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `a[i][j]` both var idx, `int x = (a<b)`, `int *p; *p = K`
+
+Fixtures `1469` (`int a[2][3]; int i=1, j=2; a[i][j]
+= 7; return a[i][j];` — 2D global array with variable
+indices on both dimensions), `1470` (`int a=3, b=7;
+int x = (a < b); return x;` — int initializer from
+single `<` compare), and `1471` (`int x=5; int *p =
+&x; *p = 99; return x;` — write through a local int
+pointer) all pass on the first capture. `1469`
+confirms full 2D address arithmetic with no CSE: row
+stride 6 (= 3 cols * 2 bytes) is computed as `mov
+ax,si / mov dx,6 / imul dx` (so BCC uses `imul` for
+non-pow2 row strides — does not decompose `*6` into
+shifts), then `mov dx,di / shl dx,1` for the inner
+index, `add ax,dx / mov bx,ax`, finally `mov
+[bx+_a],7` with a LEDATA FIXUPP on the `_a` base. The
+*identical* offset sequence is re-emitted verbatim
+before the load — there is no common-subexpression
+elimination across the store/load pair. `i` and `j`
+enregister into SI and DI. `1470` confirms the same
+boolean materialization template as [[batch-382-and-
+not-for-fill]] but for a bare compare without `&&`:
+`mov ax,[a] / cmp ax,[b] / jge L_false / mov ax,1 /
+jmp L_done / xor ax,ax / L_done:`. The branch is
+`jge` (signed not-less) — BCC emits the inverse
+condition to skip the true side. `1471` confirms `*p
+= K` lowering: `p` is enregistered into SI via the
+canonical `lea ax,[bp-2] / mov si,ax` pair (BCC
+routes the lea result through AX rather than
+emitting `lea si,[bp-2]` directly — a known regalloc
+inefficiency), then `*p = 99` becomes `mov [si], 99`
+(ModR/M `04` = `[si]` indirect, imm16 follows). Stack
+prologue uses `dec sp / dec sp` for the 2-byte `x`
+slot — for a single int, the two-byte literal
+decrement is preferred over `sub sp,2`.
+
 ## `int x = cmp && cmp`, `int x = !a`, `for (i;i<3;i++) a[i]=i`
 
 Fixtures `1466` (`int a=1, b=2; int x = (a==1) &&
