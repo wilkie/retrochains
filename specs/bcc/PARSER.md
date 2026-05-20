@@ -1959,6 +1959,29 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `do-while (i<5 && i>0)`, `sum3(1,2,3)`, four-var add
+
+Fixtures `1316` (`do { i++; } while (i < 5 && i > 0);
+return i;` — do-while with short-circuit `&&`
+condition), `1317` (`int sum3(int a, int b, int c) {
+return a + b + c; } return sum3(1, 2, 3);` — three-int
+sum function), and `1318` (`int a=1,b=2,c=3,d=4;
+return a + b + c + d;` — left-associative chain of
+four-var adds) all pass on the first capture. `1316`
+confirms `&&` in do-while: the test runs after the
+body, the LHS cmp short-circuits the back-edge (a
+false LHS skips to the loop-exit without testing
+RHS). Final i=5: `5<5` is false so the loop exits.
+`1317` confirms 3-int-arg cdecl: caller pushes
+`3,2,1`, callee reads at offsets `[bp+4],[bp+6],
+[bp+8]`. Body `a + b + c` chains via AX-spill: load
+a, add b, add c -- the chained-add walks left to
+right with `add` into AX rather than each operand
+spilling. `1318` confirms the same left-assoc chain
+for four locals: AX accumulates `a, +b, +c, +d` in
+sequence, no temp pushes required since the running
+total stays in AX. Returns 10.
+
 ## `getX(struct S*)`, `char c += a*b`, `a -= b - 1`
 
 Fixtures `1313` (`int getX(struct S *p) { return
