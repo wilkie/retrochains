@@ -1959,6 +1959,52 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## unsigned `/7` `xor dx,dx / div bx`, unsigned `<` uses `jae` inverse
+
+Fixtures `1577` (`unsigned v / 7`), `1578` (`unsigned
+a < unsigned b`), and `1579` (`unsigned v % 7`) all
+pass on the first capture and complete the signed-vs-
+unsigned arithmetic codegen calibration.
+
+- `1577`: unsigned non-pow2 div is **`xor dx, dx /
+  div bx`** — `xor dx,dx` zeroes the high word for
+  unsigned dividend, then `div r/m16` (opcode `F7
+  /6`, unsigned). No `cwd` (which would
+  sign-extend AX to DX:AX, wrong for unsigned).
+- `1578` (**finding**): unsigned `<` uses **`jae`**
+  (opcode `0x73`, jump-above-or-equal, the inverse
+  of `jb`) for the bool materialization template.
+  Compare to signed `<` which uses `jge` (opcode
+  `0x7D`). So jcc selection tracks signedness end-
+  to-end. Full inverse-jcc table for `if (a OP b)
+  return 1`:
+  | C op | signed | unsigned |
+  |------|--------|----------|
+  | `<`  | `jge` (7D) | `jae` (73) |
+  | `<=` | `jg`  (7F) | `ja`  (77) |
+  | `>`  | `jle` (7E) | `jbe` (76) |
+  | `>=` | `jl`  (7C) | `jb`  (72) |
+  | `==` | `jne` (75) | `jne` (75) |
+  | `!=` | `je`  (74) | `je`  (74) |
+- `1579`: unsigned non-pow2 mod uses the same
+  div pattern as `1577`, then **`mov ax, dx`** to
+  move the remainder from DX (where 8086 `div`
+  leaves it) into AX (return register). So mod
+  differs from div only in the trailing `mov ax,
+  dx` (3 bytes added).
+
+Updated arithmetic-codegen table is now complete:
+| Op | Signed | Unsigned |
+|----|--------|----------|
+| `*K` (pow2) | `shl ax, log2 K` | same |
+| `*K` (other) | `mov dx,K / imul dx` | same |
+| `/K` (pow2)  | `cwd / idiv bx`     | `shr ax, log2 K` |
+| `/K` (other) | `cwd / idiv bx`     | `xor dx,dx / div bx` |
+| `%K` (pow2)  | `cwd / idiv bx`     | `and ax, K-1` |
+| `%K` (other) | `cwd / idiv bx / mov ax,dx` | `xor dx,dx / div bx / mov ax,dx` |
+| `<` jcc      | `jge` inv           | `jae` inv |
+| ... etc     | ...                | ... |
+
 ## unsigned `%2` → `and ax,1`; mul always `imul` regardless of signedness
 
 Fixtures `1574` (`unsigned int v; return v % 2;`),
