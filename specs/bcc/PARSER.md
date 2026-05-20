@@ -1959,6 +1959,27 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## strcmp-like `eq`, 3-level nested if, `a &= 0xff00`
+
+Fixtures `1352` (`int eq(char *a, char *b) { while (*a
+&& *a == *b) { a++; b++; } return *a - *b; }` —
+strcmp-like function comparing two char* strings),
+`1353` (`if (a>0) if (a<10) if (a==5) return 1;` —
+three nested ifs without explicit braces), and `1354`
+(`int a=0xffff; a &= 0xff00; return a;` — int compound
+`&=` with a high-byte mask) all pass on the first
+capture. `1352` confirms the canonical libc-strcmp
+loop in tight form: the while-condition itself short-
+circuits `*a` (the null test) before `*a == *b`, so
+the loop exits as soon as either string ends or they
+differ. Equal "ab" / "ab" returns 0. `1353` confirms
+nested if-no-brace chaining: each true arm falls into
+the next test, but a false LHS just skips to the
+common `return 0;` -- no extra labels per level.
+`1354` confirms `&= 0xFF00`: encoded as word-immediate
+`and word ptr [bp-a],0FF00h`. The result keeps just
+the high byte; as signed int, 0xFF00 = -256.
+
 ## `a *= 7`, `abs2(?:)`, `if (a[1] == 10)`
 
 Fixtures `1349` (`int a=3; a *= 7; return a;` — int
