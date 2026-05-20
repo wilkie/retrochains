@@ -1959,6 +1959,53 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `int + long`: int gets `cwd`-promoted; long `==` two-step; long `&` two-word
+
+Fixtures `1643` (`int + long`), `1644` (`long ==
+long`), and `1645` (`long & long`) extend the long
+arithmetic picture.
+
+- `1643` (**mixed `int + long`**): the int operand
+  is promoted to long via **`cwd`** first, then
+  standard inline long add (add+adc). Sequence:
+  `mov ax,[i] / cwd / add ax,[b_low] / adc dx,
+  [b_high] / store r`. So C usual arithmetic
+  conversion (UAC) is applied at IR level —
+  int→long widening via cwd, then mixed-type
+  expression runs at long width.
+- `1644`: `long == long` is **inline** like `<`
+  but simpler — both `cmp` use `jne` to bail to
+  false. No signed/unsigned distinction needed
+  since equality is bit-pattern:
+  ```
+  cmp ax, [b_high]   ; high cmp
+  jne false
+  cmp dx, [b_low]    ; low cmp
+  jne false
+  ; true path
+  mov ax, 1 / jmp / xor ax,ax
+  ```
+- `1645`: `long & long` is **inline** two-word:
+  `and dx, [b_low] / and ax, [b_high] / store`. No
+  carry needed for bitwise ops. Same shape applies
+  to `|` and `^`.
+
+So the inline-vs-helper boundary for long ops:
+
+| Op | Inline | Helper |
+|----|--------|--------|
+| `+`, `-`     | yes (add+adc, sub+sbb) | — |
+| `&`, `|`, `^`| yes (two-word)         | — |
+| `==`, `!=`   | yes (two-step cmp)     | — |
+| `<`, `>`, `<=`, `>=` | yes (high signed, low unsigned) | — |
+| `*`          | —      | `N_LXMUL@` |
+| `/`, `%`     | —      | `N_L[U]DIV@` / `N_L[U]MOD@` |
+| `<<`, `>>`   | —      | `N_LX[U]LSH@` / `N_LXR[S]H@` |
+
+The boundary: arithmetic that requires multi-step
+loops (mul/div) or multi-bit shifts goes to helpers;
+single-pass two-word ops are inlined.
+
 ## Long const shift still calls helper; `long * pow2` becomes shl helper
 
 Fixtures `1640` (`long >> 4` with constant shift),
