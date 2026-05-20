@@ -1959,6 +1959,54 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Long mod `N_LMOD@`, unsigned shr `N_LXURSH@`, add INLINED `adc`
+
+Fixtures `1634` (`unsigned long >> int`), `1635`
+(`long % long`), and `1636` (`long + long`) extend
+the long-arith picture and reveal a key principle:
+**only the non-trivial ops use helpers**.
+
+- `1634` (**N_LXURSH@**): unsigned long shr uses
+  this distinct helper (vs signed `N_LXRSH@`).
+  Same DX:AX + CL register ABI.
+- `1635` (**N_LMOD@**): long mod uses its own
+  helper. Stack-passed ABI, self-clean, returns
+  remainder in DX:AX.
+- `1636` (**inline long add**): no helper. Lowers to
+  ```
+  mov ax, [a_high] / mov dx, [a_low]
+  add dx, [b_low]      ; low halves
+  adc ax, [b_high]     ; carry-propagating high halves
+  mov [r_high], ax / mov [r_low], dx
+  ```
+  Uses the 8086 `adc` instruction (opcode `0x13`)
+  to propagate carry from low to high. So **long
+  add/sub/and/or/xor are all inlined** with the
+  appropriate carry-propagating two-word sequence:
+  - `add` + `adc`
+  - `sub` + `sbb`
+  - `and` + `and` (no carry needed)
+  - `or`  + `or`
+  - `xor` + `xor`
+
+**Final long-helper table**:
+| Helper | Op | ABI |
+|--------|-----|-----|
+| `N_LXMUL@`  | `long *`          | reg DX:AX,CX:BX |
+| `N_LDIV@`   | signed `/`        | stack, self-clean |
+| `N_LUDIV@`  | unsigned `/`      | stack, self-clean |
+| `N_LMOD@`   | signed `%`        | stack, self-clean |
+| `N_LXLSH@`  | `<<`              | reg DX:AX, CL |
+| `N_LXRSH@`  | signed `>>`       | reg DX:AX, CL |
+| `N_LXURSH@` | unsigned `>>`     | reg DX:AX, CL |
+| **inline**  | `+`,`-`,`&`,`|`,`^` | two-word add+adc etc. |
+| **inline**  | comparisons       | high-then-low cmp |
+
+Still to probe: `N_LUMOD@` (unsigned mod), long
+conversions (int↔long, char↔long), long shift by
+constant (likely still helper since count comes via
+CL).
+
 ## Long shl/cmp/udiv: `N_LXLSH@`, inline cmp, `N_LUDIV@`
 
 Fixtures `1631` (`long << var`), `1632` (`long <
