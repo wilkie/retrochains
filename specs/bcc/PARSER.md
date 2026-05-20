@@ -1959,6 +1959,45 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `v*2` → `shl ax,1`; signed `/2` → `idiv`; unsigned `/2` → `shr ax,1`
+
+Fixtures `1571` (`v * 2` signed int), `1572` (`v / 2`
+signed int), and `1573` (`v / 2` unsigned int) all
+pass on the first capture and complete the
+mul/div-by-pow2 picture.
+
+- `1571`: signed `v * 2` lowers to `shl ax, 1`
+  (opcode `D1 /4`, 2 bytes). BCC preferred `shl ax,
+  1` over the equivalent `add ax, ax` (`03 C0`,
+  also 2 bytes) — encoder canonicalises on shl
+  for mul-by-pow2 regardless of size tie.
+- `1572` (**signed div not shortcut**): `v / 2`
+  with signed int lowers to **`mov bx, 2 / cwd /
+  idiv bx`** — full word-width signed division
+  using `idiv r/m16` (`F7 /7`). BCC does NOT
+  shortcut signed div-by-pow2 to `sar`, because
+  `sar` rounds toward `-∞` for negatives while C
+  signed div rounds toward zero. So divs of
+  potentially-negative values must use real div.
+- `1573` (**unsigned div IS shortcut**): `v / 2`
+  with unsigned int lowers to just `shr ax, 1`
+  (opcode `D1 /5`, 2 bytes). Unsigned div-by-pow2
+  is safe to lower to `shr` because both treat the
+  word as zero-extended positive, and `shr` rounds
+  toward zero (always positive). No `cwd` or
+  `idiv` instructions needed.
+
+This is one of the largest signed-vs-unsigned codegen
+differences. For the Rust reimplementation:
+- mul-by-pow2: always `shl REG, log2(K)` (signed or
+  unsigned doesn't matter for mul under truncation).
+- div-by-pow2: signed → `cwd / idiv`; unsigned →
+  `shr REG, log2(K)`.
+- mod-by-pow2: signed → `cwd / idiv` (preserved as
+  remainder in DX). Unsigned → could use `and REG,
+  K-1` but BCC's behaviour for unsigned mod-by-pow2
+  not yet probed.
+
 ## inc/dec shortcut: confirmed split — compound `±= 1` direct, longhand `= ± 1` round-trip
 
 Fixtures `1568` (`i = i + 1`), `1569` (`i -= 1`),
