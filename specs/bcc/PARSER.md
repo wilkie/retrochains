@@ -1959,6 +1959,28 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `while(1)+break`, global int arr partial init, `b += a[1]`
+
+Fixtures `1334` (`int i=0; while (1) { i++; if (i==5)
+break; } return i;` — infinite while-loop with an
+inner-if `break`), `1335` (`int a[5] = {1,2,3};
+return a[4];` — global int array with partial init
+list, accessing one of the implicitly-zeroed trailing
+elements), and `1336` (`int a[3]; ... b += a[1];
+return b;` — int local compound `+=` with a
+stack-array element as RHS) all pass on the first
+capture. `1334` confirms `while(1)` lowers to a
+top-label that becomes an unconditional back-edge --
+no test before the body. The `break` inside `if`
+emits a forward jump to the loop-exit label. `1335`
+confirms partial init: the first three int words get
+`1, 2, 3`, the remaining two get zero-fill in the
+data segment record (no runtime memset). `a[4]`
+returns 0. `1336` confirms stack-array element as
+compound RHS: index 1 → byte offset 2, load via
+`mov ax,[bp-base+2]`, add into the b slot. So 10 + 7
+= 17.
+
 ## `f(-3)` char param sign-ext, `a |= b | c`, `a - (b+c+d)`
 
 Fixtures `1331` (`int f(char c) { return c; } return
