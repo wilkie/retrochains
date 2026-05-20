@@ -1959,6 +1959,25 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `a % 3`, `if (p != 0)`, char arr fill `'X'`
+
+Fixtures `1364` (`int a=20; return a % 3;` — int mod by
+non-pow2 const), `1365` (`int *p = &x; if (p != 0)
+return *p;` — pointer-not-null check guarding a
+dereference), and `1366` (`for (i=0;i<5;i++) buf[i] =
+'X'; return buf[2];` — global char-array filled with
+a constant via for-loop) all pass on the first
+capture. `1364` is the mod counterpart to `1363`'s
+divide-by-3: same `cwd / idiv` path, remainder in DX
+moved into AX for return. 20 mod 3 = 2. `1365`
+confirms `p != 0` lowers identically to plain integer
+inequality: 16-bit cmp against zero, then `je FALSE
+/ jmp TRUE` -- no special-cased "pointer" form. The
+guarded `*p` then reads safely. `1366` confirms the
+canonical buf-fill loop: index var `i` iterates,
+`buf[i] = 'X'` stores `088h` byte through `mov
+[bx+_buf],al` where `bx = i` (char-stride 1).
+
 ## `while (p < end)` ptr walk, `a *= 9`, `a / 3`
 
 Fixtures `1361` (`p = a; end = a+3; while (p < end)
