@@ -1959,6 +1959,26 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `switch (n % 3)`, struct with int-array field, `a + 'A'`
+
+Fixtures `1448` (`int classify(int n) { switch (n %
+3) { ... } } return classify(7);` — switch dispatching
+on a modulo expression), `1449` (`struct S { int v[3];
+}; struct S s = {{1,2,3}}; return s.v[0] + s.v[2];` —
+struct whose only field is an int array, with brace-
+nested init), and `1450` (`int a = 5; return a + 'A';`
+— int sum with a char literal RHS) all pass on the
+first capture. `1448` confirms switch on expression:
+`n % 3` computes into AX first (via idiv), then the
+dense small-switch dispatch uses AX. 7%3=1 → 200.
+`1449` confirms struct-with-int-array layout: the
+struct takes the same space as the bare `int v[3]`
+(6 bytes), and `s.v[0]` etc. compute offsets through
+the struct first then the array. Sum 1+3 = 4. `1450`
+confirms char literal in int arith: `'A'` folds to 65
+at parse time, so we see `mov ax,[bp-a] / add ax,65`.
+Result 70.
+
 ## `min3(5,3,8)`, fn with local int array, `a[0] ^= a[1]`
 
 Fixtures `1445` (`int min3(int a, int b, int c) { int
