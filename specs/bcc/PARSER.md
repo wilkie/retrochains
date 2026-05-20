@@ -1959,6 +1959,41 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## imm8-sext encoding policy: ADD/SUB yes, OR/AND/XOR no
+
+Fixtures `1517` (`x &= 0x7f` with x in SI), `1518`
+(`x ^= 0x7f`), and `1519` (`v -= 5`) all pass on the
+first capture. Together with the previous batch's
+`1515` (`x |= 0xf`) and earlier [[batch-390-rmw-non-
+ax]] (`v += K`), they fully characterise BCC's
+imm8-sign-extended encoding policy for non-AX
+register destinations:
+
+| Op  | Opcode `/N` | imm8-sext form used? | Observation |
+|-----|-------------|----------------------|-------------|
+| ADD | `83 /0`     | **yes**              | `1487`,`1488` |
+| SUB | `83 /5`     | **yes** (`83 ee 05`) | `1519`      |
+| OR  | `81 /1` only| no (`81 ce 0f 00`)   | `1515`      |
+| AND | `81 /4` only| no (`81 e6 7f 00`)   | `1517`      |
+| XOR | `81 /6` only| no (`81 f6 7f 00`)   | `1518`      |
+
+So **arithmetic** ops (ADD, SUB) honour the imm8-
+sign-extended short encoding when the immediate fits
+in -128..127, saving 1 byte per instruction.
+**Bitwise logical** ops (OR, AND, XOR) always use
+the imm16 form, even when imm8-sext would be valid
+and shorter. The 8086 ISA defines `83 /1` (OR-imm8-
+sext), `83 /4` (AND-imm8-sext), `83 /6` (XOR-imm8-
+sext) as legal encodings, so this is BCC's selective
+choice — likely the encoder's instruction table
+simply omits those entries for the logical group.
+
+Practical consequence for the Rust reimplementation:
+when emitting AND/OR/XOR with imm in
+[-128,127] against a register, **must** use `81 /N
+imm16` (4 bytes) to match BCC byte-exact, not the
+shorter `83 /N imm8-sext` (3 bytes).
+
 ## `v*1024` → `shl cl=10`, `or si, 0xf` imm16 (not imm8), `{0}` still N_SCOPY@
 
 Fixtures `1514` (`int v=4; return v * 1024;` — mul
