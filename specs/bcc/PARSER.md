@@ -1959,6 +1959,62 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Large model: `int *` is far automatically; stack arr & enregistration unchanged
+
+Fixtures `1667` (`int *p = &g; *p = 99;`), `1668`
+(stack int array), and `1669` (multi-use locals
+with longhand assign) extend the large-model
+exploration.
+
+- `1667` (**`int *` is auto-far**): in large model,
+  `int *p` is automatically a **4-byte far
+  pointer**, even without an explicit `far`
+  qualifier. `&g` produces a `ds:offset` far
+  address — the code emits `mov [bp-2], ds`
+  (segment capture via `0x8c /3` mod=11 = mov r/m,
+  DS) and `mov [bp-4], 0` (offset, FIXUPP'd). The
+  deref-write `*p = 99` uses the standard `les bx,
+  [p] / mov es:[bx], 99` path with the `0x26` ES
+  prefix. So the small-model `int *p` shape (2-byte
+  near ptr, direct `[si]` deref) is replaced with
+  the far-ptr shape that was previously seen only
+  under the explicit `far` qualifier.
+- `1668` (**stack arrays unchanged**): a `int a[3]`
+  on the stack with constant indices generates
+  **identical code** to small model — `mov [bp+disp],
+  imm` for each store, `mov ax, [bp+disp]` for the
+  return. Stack-resident data implicitly uses SS, so
+  no far-pointer machinery is needed. Only the
+  epilogue byte differs (`5d cb` vs `5d c3`).
+- `1669` (**register allocation unchanged**): multi-
+  use ints still enregister into SI/DI via the same
+  use-count heuristic. The `a = a + 1` longhand
+  still uses the **AX round-trip** (`mov ax,si /
+  inc ax / mov si,ax`) — same as small model's
+  fixture `1568`. So **IR-level rules port
+  identically** across models. Only the epilogue
+  byte (`cb` vs `c3`) reflects the model.
+
+Cross-model rule summary for the code-generation
+encoder:
+- **IR-level**: register alloc, encoding policies,
+  inc/dec optimization, narrow-cast propagation,
+  loop normalisation, switch dispatch — **all port
+  identically**.
+- **ABI-level**: only the call ABI (push cs +
+  near vs near alone) and epilogue (`retf` vs
+  `ret`) change.
+- **Type-level**: `int *` width and codegen path
+  change based on data model:
+  - Near data: 2-byte ptr, `[si]` deref
+  - Far data: 4-byte ptr, `les + 26` deref
+- **OBJ structure**: segment naming
+  (`_TEXT` → `<MODULE>_TEXT`).
+
+So the multi-model story is **largely orthogonal**
+to the deep encoding findings — the encoder needs a
+small number of model-conditional emissions.
+
 ## Large model (-ml) initial probe: HELLO_TEXT, retf everywhere, push cs + call near
 
 Fixtures `1664` (trivial return-zero), `1665` (call
