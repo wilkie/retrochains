@@ -1959,6 +1959,24 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `a[0] == a[2]` char elem-elem, global arr `g[1] = v`, nested ternary
+
+Fixtures `1457` (`char a[3]; a[0]='X'; a[2]='X'; if
+(a[0] == a[2]) return 1;` — equality between two char-
+array elements), `1458` (`int g[3]; int v=42; g[1] =
+v; return g[1];` — store an int var into a global-
+array element), and `1459` (`int a=5; a += b > c ? 10
+: b < c ? 20 : 0; return a;` — int compound `+=` with
+nested ternary RHS) all pass on the first capture.
+`1457` confirms char-array element pair comparison:
+both load with `cbw`, then `cmp ax,dx / je TRUE`.
+With a[0]=a[2]='X', returns 1. `1458` confirms global
+arr store: var loaded into AX, then `mov [_g+2],ax`
+for index 1 (offset 2 bytes for int). `1459` is the
+two-level ternary in compound `+=`: outer test `b>c`
+is false → fall to inner ternary `b<c ? 20 : 0` →
+true → 20. a += 20 = 25.
+
 ## `if (c != 0)` char, `a -= ?: ternary RMW`, `a*b + c` fn
 
 Fixtures `1454` (`char c=5; if (c != 0) return 1;` —
