@@ -1959,6 +1959,43 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Enregistration heuristic: 3/4/5-local pure sum all spills
+
+Fixtures `1496` (`int a=1, b=2, c=3; return a+b+c;`),
+`1497` (4 locals), and `1498` (5 locals) — all pure
+"declare-with-literal-init then sum" — pass on the
+first capture. Notable result: **all three fixtures
+spill every local to the stack**. Code shape (for
+3-local case):
+`sub sp,6 / mov [bp-2],1 / mov [bp-4],2 /
+mov [bp-6],3 / mov ax,[bp-2] / add ax,[bp-4] /
+add ax,[bp-6]`. The 4-local and 5-local versions
+just extend the pattern.
+
+This contradicts the naive "BCC enregisters into SI,
+DI, DX in order until full" model. The earlier
+[[batch-392-char-idx-if-empty]] / fixture `1494`
+showed 3 ints in SI/DI/DX, but `1494` differs from
+`1496` in two ways: (a) its third local `int x;` had
+no initializer at declaration — only a conditional
+assignment in each arm of the if-else, and (b) `a`
+and `b` are read *twice* each (cmp + sub) before
+the return. So BCC's enregistration heuristic is
+*not* purely positional — it depends on usage
+density and/or initializer style. The "declared and
+literal-initialised then read once" pattern of `1496`
+falls below the enregistration threshold even at
+just 3 locals.
+
+Operational consequence: future fixtures that intend
+to probe register-allocation should reference each
+candidate local multiple times (e.g. in a compare or
+loop) rather than a single sum, otherwise the locals
+will silently fall to stack. The "single hot int
+local with compound-op" pattern from
+[[batch-390-rmw-non-ax]] is closer to the
+enregistration sweet spot.
+
 ## char as arr idx, if-else with 3 locals enregistered, empty `void f()`
 
 Fixtures `1493` (`int a[10]={0..9}; char c=3; return
