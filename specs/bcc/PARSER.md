@@ -1959,6 +1959,29 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `swap(int*, int*)`, `a[i+j]`, `s[i] = 'a' + i`
+
+Fixtures `1274` (`void swap(int *a, int *b) { int t =
+*a; *a = *b; *b = t; }` — swap-via-pointers function),
+`1275` (`a[i + j]` with both `i` and `j` runtime
+variables), and `1276` (`for (i=0;i<5;i++) s[i] = 'a' +
+i;` — char array fill with arithmetic-on-char-literal
+RHS) all pass on the first capture. `1274` confirms
+the two-ptr-arg shape: each arg slot holds the
+address, dereferenced via `mov bx,[bp+arg] / mov ax,
+[bx]` for read and `mov [bx],ax` for write -- the
+classic in-out parameter pattern. `1275` is the
+counterpart to `1257`'s constant-folded subscript:
+here the index `i + j` is computed at runtime, so we
+see the full `mov ax, [bp-i] / add ax, [bp-j] / shl
+ax,1 / mov bx, ax / add bx, offset _a / mov ax, [bx]`
+sequence. `1276` confirms char-arith fold for `'a' +
+i`: the char-literal `'a'` becomes the int `97`
+inside the loop body. With `s[i] = 'a' + i`, the
+runtime arithmetic happens in AX, then narrows to a
+byte store at the indexed array slot via `mov [bx+_s],
+al`.
+
 ## Fn `(int, char)`, for empty body, `while (i<j && i<3)`
 
 Fixtures `1271` (`int f(int n, char c)` — function
