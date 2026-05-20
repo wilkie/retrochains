@@ -1959,6 +1959,48 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `v<<0` folded away, two bool-cmp adds via push/pop, `v=-v` via `neg ax`
+
+Fixtures `1553` (`return v << 0;` — shift by zero),
+`1554` (`(a == b) + (c == d)` — sum of two
+materialized bools), and `1555` (`v = -v;` — negate
+in place) all pass on the first capture.
+
+- `1553`: `v << 0` is fully **folded to identity** —
+  no `shl` or `mov cl, 0` emitted. Just `mov ax,
+  [bp-2]` for the load. BCC's IR has a "shift by 0
+  → operand pass-through" rewrite.
+- `1554`: each `(a == b)` and `(c == d)` materializes
+  via the standard `cmp / jne / mov ax,1 / jmp / xor
+  ax,ax` template. To combine them, BCC emits the
+  first bool, **pushes AX to preserve it across the
+  second template**, emits the second bool, copies
+  it to DX, **pops the first bool back into AX**,
+  then `add ax, dx`. So the inter-template
+  preservation uses the stack — not a stack-local
+  slot, but raw `push ax / pop ax` — even though
+  a free register (e.g. SI/DI/BX) could have held
+  it. This suggests no IR-level value tracking
+  across the second cmp materialization: BCC treats
+  each bool template as opaque/clobbering of all
+  scratch regs.
+- `1555`: `v = -v` lowers to `mov ax, si / neg ax /
+  mov si, ax` — the standard RMW-via-AX pattern with
+  `neg r/m16` opcode `0xF7 /3`. BCC could have
+  emitted `neg si` directly (1 byte less), but
+  routes through AX for consistency with the
+  general RMW shape — same inefficiency seen with
+  `lea ax, [bp-N] / mov si, ax` for pointer setup
+  ([[batch-384-2d-int-arr]]).
+
+So BCC's codegen has a few systematic
+"AX-round-trip" inefficiencies: pointer-setup,
+unary-op-on-register, simple binop-on-register, etc.
+The pattern is "compute into AX, mov to home reg" —
+even when the home reg could be the direct
+destination of the operation. Worth replicating for
+byte-exactness.
+
 ## `register` overrides use-count; `*a++` int-ptr `inc si/inc si`
 
 Fixtures `1550` (`register int x = 5; return x;` —
