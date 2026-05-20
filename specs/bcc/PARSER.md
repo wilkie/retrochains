@@ -1959,6 +1959,45 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## 2-field struct init avoids N_SCOPY; `(int)(5+3)` fully folded
+
+Fixtures `1613` (`struct P {int x; int y;} p = {10,
+20};`), `1614` (`int x = (int)(5 + 3);`), and `1615`
+(`int x = (5 + 3);`) all pass on the first capture.
+
+- `1613`: 2-int struct local init lowers to **two
+  direct load+store pairs** — *not* `N_SCOPY@`. The
+  template `0a 00 14 00` (10, 20) sits in `_DATA`,
+  and the code emits:
+  ```
+  mov ax, [_template+2]   ; load second field (y=20)
+  mov dx, [_template+0]   ; load first field (x=10)
+  mov [bp-2], ax          ; store to p.y
+  mov [bp-4], dx          ; store to p.x
+  ```
+  So fields are loaded **high-offset first** then
+  low-offset, stored to their respective slots. The
+  rule: 1-word struct uses 1 load+store, 2-word
+  uses 2 load+stores. The `N_SCOPY@` helper kicks in
+  somewhere between 2 and 3 words (3-int array uses
+  N_SCOPY@, 2-int struct doesn't). So the threshold
+  is **≥ 3 words → N_SCOPY@, ≤ 2 → inline pairs**.
+- `1614` and `1615` are **byte-identical**:
+  `(int)(5 + 3)` and `(5 + 3)` both fold to the
+  constant 8 at parse time. The cast and the
+  parentheses are both pure parser sugar with no
+  codegen effect.
+
+Updated struct/array init lowering threshold:
+| Size (words) | Lowering |
+|--------------|----------|
+| 1 | direct `mov ax, [_template] / mov [bp-N], ax` |
+| 2 | two load+store pairs (no helper) |
+| ≥ 3 | `N_SCOPY@` memcpy helper |
+
+This means for the encoder: pick the lowering style
+based on the type's word count, not size in bytes.
+
 ## `(int)5` no-op cast, trailing comma in init, 1-field struct init
 
 Fixtures `1610` (`int x = (int)5;`), `1611` (`int
