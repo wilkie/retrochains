@@ -1959,6 +1959,49 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `c*c` int needs full promotion; signed vs unsigned char in mul
+
+Fixtures `1625` (signed `char * char`, int result),
+`1626` (unsigned `char * char`, int result), and
+`1627` (`(char)(unsigned int >> 4)`) all pass on the
+first capture.
+
+- `1625`: each `char` operand is **promoted to int**
+  before mul: `mov al,[bp-1] / cbw / push ax /
+  mov al,[bp-2] / cbw / mov dx,ax / pop ax / imul
+  dx`. So char*char with int result uses two `cbw`
+  promotions plus the standard `imul`. The
+  intermediate `push ax / pop ax` pair preserves
+  the first promoted value across the second
+  promotion (similar shape to bool-add in
+  [[batch-412-shift-zero-boolsum-neg]]).
+- `1626`: unsigned char promotion uses **`mov ah,
+  0`** (zero-extend, 2 bytes) instead of `cbw` (1
+  byte). For unsigned char `a` and `b`, the
+  promotion is `mov al,[bp-1] / mov ah,0 / mov
+  dl,[bp-2] / mov dh,0 / imul dx`. Notable: BCC
+  inlines the second operand promotion into DL/DH
+  directly (no push/pop), since the unsigned
+  promotion clobbers no useful flags. Still uses
+  `imul` (signed) — confirms [[batch-419-unsigned-
+  mod-mul]] that mul codegen is signedness-
+  agnostic.
+- `1627`: `(char)(unsigned int >> 4)` lowers as `mov
+  ax,[bp-2] / mov cl,4 / shr ax,cl / cbw`. The
+  unsigned right shift uses `D3 /5` (`shr`, not the
+  signed `sar`/`d3 f8`). Crucially, the narrowing
+  cast does **not** propagate to byte-width even
+  for unsigned `shr` — the cast pass excludes all
+  shift-right ops regardless of signedness.
+
+So the narrow-cast propagation rule from
+[[batch-409-cast-shr-shl8]] is sharpened: SHR is
+excluded **even when unsigned**. Only the signed/
+unsigned choice of opcode (`sar` vs `shr`) is
+affected by type signedness; the byte-width
+optimisation remains opcode-keyed, not signedness-
+keyed.
+
 ## Arg cleanup boundary: 3+ args → `add sp, N` (3 bytes)
 
 Fixtures `1622` (3 args), `1623` (4 args), and
