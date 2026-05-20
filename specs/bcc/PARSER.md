@@ -1959,6 +1959,77 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `break` jumps to epilogue; `continue` jumps to post-update; `test` for bit check
+
+Fixtures `1703` (do-while + break), `1704` (for +
+continue), and `1705` (multi-decl init) cover three
+control-flow shapes.
+
+- `1703` (**`break` inside loop**): emits a
+  **direct `jmp` to the loop epilogue** (or past
+  the loop's test/end). Bypasses the loop
+  condition entirely. The shape:
+  ```
+  ; loop body
+  cmp di, 5         ; sum > 5?
+  jle continue
+  jmp break_target  ; -> after loop
+  continue:
+  cmp si, 10        ; loop test
+  jl body
+  break_target:
+  ```
+  So `break` is a one-byte `jmp short` for nearby
+  loops, or `jmp near` (3 bytes) for distant ones.
+- `1704` (**`continue`**): emits a **`jmp` to the
+  loop's post-update / test step**, NOT to the
+  loop body. So `continue` skips the rest of the
+  body but still triggers `i++` (in a for loop)
+  and re-tests the loop condition. The shape:
+  ```
+  body:
+  test si, 1        ; check i & 1
+  jz no_skip
+  jmp continue_pt
+  no_skip:
+  add di, si        ; rest of body
+  continue_pt:
+  inc si            ; for's post-update
+  test:
+  cmp si, 10
+  jl body
+  ```
+- `1704` also reveals **`test reg, imm`** for the
+  bit check `if (i & 1)`. Opcode `f7 c6 01 00` =
+  `test si, 1`. This sets ZF based on AND result
+  *without* modifying SI — cheaper than `and si,
+  1 / jz` because the destructive AND would require
+  a temp. Then `jz` branches on the result. So
+  bit-test patterns lower to:
+  ```
+  test reg, mask    ; f7 /0 + imm16
+  jz / jnz target
+  ```
+- `1705` (**multi-decl init**): `int a = 1, b = 2,
+  c = 3;` produces **byte-identical** code to three
+  separate declarations. Each gets its own stack
+  slot with its own `mov [m], imm` init. Multi-
+  decl is a **parse-time syntactic shortcut** —
+  fully expanded into separate declarations before
+  codegen.
+- `1705` also confirms: locals with only 2 uses
+  (init + 1 read) **do NOT enregister**. The
+  threshold for enregistration appears to require
+  > 2 reads (or reads-across-statements), since
+  these 2-use locals stay on stack.
+
+Updated register-allocation rule:
+- Enregister a local when **read-count ≥ 2** in
+  expressions (NOT counting the init or single
+  write). Initial declaration alone doesn't
+  trigger enregistration even if it's followed by
+  one read.
+
 ## 2D array uses `imul` for row stride; goto = unconstrained jmp; `p->field` via `[bx]`
 
 Fixtures `1700` (2D array sum), `1701` (goto loop),
