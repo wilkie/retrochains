@@ -1959,6 +1959,29 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Char array elem compound `*=`, int local `+= -3`, char `+=` int RHS
+
+Fixtures `1211` (`char a[3]; a[0]=2; a[0] *= 5; return
+a[0];` — char-array element compound `*=` by a non-pow2
+const), `1212` (`int a=5; a += -3; return a;` — int
+local compound `+=` with a negative literal RHS), and
+`1213` (`char c=5; int n=3; c += n; return c;` — char
+local compound `+=` with an `int` RHS) all pass on the
+first capture. `1211` confirms the char-array-elem
+compound path uses the same K-threshold split as int
+mul: K=5 is non-pow2, so we go through `mov dx,5 / imul
+dx` rather than shifts, then narrow back to `byte ptr` on
+the store. `1212` confirms that the parser/lowering
+folds `+= -3` into the same emission as `-= 3` — the
+unary minus on the constant is constant-folded at parse
+time so we see `sub word ptr [bp-N],3`, not `add` with a
+negative immediate. `1213` confirms char-with-int-RHS
+promotion: the LHS `char` is `cbw`-extended to `int`,
+add, then narrow back via the existing byte-store path —
+matching what we already saw in the struct-field variant
+(`848-struct-member-char-compound-add-int-var-obj`) for
+the non-struct base case.
+
 ## Int pointer diff, string-literal subscript, int array elem compound `*=`
 
 Fixtures `1208` (`int *p = &a[0]; int *q = &a[2]; return
