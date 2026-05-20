@@ -1959,6 +1959,29 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `while (next() < 3)`, `arr[0] + arr[2]`, `s += (int)a[i]`
+
+Fixtures `1397` (`int next(void) { x++; return x; }
+while (next() < 3) ;` — while-loop whose condition is
+a function-call result, with the function mutating
+external state), `1398` (`char arr[3]; arr[0]='A';
+arr[1]='B'; arr[2]='C'; return arr[0] + arr[2];` —
+sum of two char-array elements returned as int), and
+`1399` (`char a[4] = {1,2,3,4}; for (i=0;i<4;i++) s
++= (int)a[i]; return s;` — sum of char-array elements
+with explicit `(int)` cast on each elem) all pass on
+the first capture. `1397` confirms call-as-cond
+inside a while-loop: each iteration calls `_next`,
+result in AX, `cmp ax,3 / jge END`. Side effects in
+`next` (`x++`) accumulate across iterations. Loop
+exits when x reaches 3, returns 3. `1398` is the
+double-element variant of `1342`: each elem `cbw`-
+promotes to int, then sum into AX. `1399` confirms
+explicit `(int)a[i]` cast: same `cbw` lowering as
+implicit promotion, no additional cast machinery --
+the cast is a no-op at the OBJ level when the
+underlying load already produces an int via cbw.
+
 ## `char *names[3]`, `(a==b) == (b<c)`, 4-way `if/else if/else`
 
 Fixtures `1394` (`char *names[3] = {"hi", "ab", "x"};
