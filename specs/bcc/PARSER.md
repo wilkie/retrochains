@@ -1959,6 +1959,43 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## const-cond loops: `while(1)` → `jmp` back; `while(0)` skips; `do…while(0)` no test
+
+Fixtures `1586` (`while (1) { ... break; }`), `1587`
+(`while (0) i++;`), and `1588` (`do i++; while (0);`)
+all pass on the first capture, covering the
+constant-condition loop forms.
+
+- `1586`: `while (1)` lowers to an unconditional
+  **`jmp` back to the loop top** — no cmp/jcc for
+  the test. `break` is `jmp loop_end` jumping past
+  the back-edge. Cleanest of the three patterns.
+- `1587`: `while (0)` lowers to a forward **`jmp $+1`
+  over the body** (dead code). The body `inc si`
+  is still emitted but unreachable. Same shape as
+  `if (0)` from `1585`.
+- `1588`: **`do { ... } while (0)`** lowers to
+  *just the body* — **no test or jump emitted**.
+  This is the idiomatic "execute body exactly
+  once" form used in macros, and BCC recognises it
+  fully (test folded AND no back-edge generated).
+
+So the constant-cond lowering table:
+| Form | Lowering |
+|------|----------|
+| `if (1)` | true body, jmp over dead false body |
+| `if (0)` | jmp over dead true body, false body |
+| `while (1)` | body + jmp back (no test) |
+| `while (0)` | jmp over dead body |
+| `do…while (0)` | body only (zero overhead) |
+| `do…while (1)` | (not yet probed; likely body + jmp back) |
+| `for (;;)` | (not yet probed; likely body + jmp back) |
+
+The do-while(0) case is the only one without dead
+code emission — because there's no body to skip
+(the body is what runs), and no back-edge to
+generate (cond is false so no loop).
+
 ## const-arith folded; `if (1)`/`if (0)` test folded but dead code emitted
 
 Fixtures `1583` (`int x = 100 - 7 * 3`), `1584` (`if
