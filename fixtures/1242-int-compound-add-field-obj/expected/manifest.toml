@@ -1,0 +1,15 @@
+outputs = []
+
+[run]
+exit_code = 1
+stdout_sha256 = "3944c13a4377d976dfa3ac9b77c39e149a13885c810966452cee16a08be51754"
+stderr_sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
+[oracle]
+tool = "bcc"
+args = [
+    "-c",
+    "-ms",
+    "HELLO.C",
+]
+fake_time = "1991-04-23T12:00:00Z"
