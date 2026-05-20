@@ -1959,6 +1959,24 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `gcd(12,8)` recursive, `char ^= 0xff`, `a %= b*c`
+
+Fixtures `1391` (`int gcd(int a, int b) { if (b==0)
+return a; return gcd(b, a % b); } return gcd(12, 8);`
+— recursive GCD via Euclidean algorithm), `1392`
+(`char c=0x55; c ^= 0xff; return c;` — char compound
+XOR with high-byte mask const), and `1393` (`int a=
+20; int b=3; int c=2; a %= b * c; return a;` — int
+compound `%=` with a product RHS) all pass on the
+first capture. `1391` confirms recursion through
+two distinct args + modulo expression as the
+recursive arg: gcd(12,8) → gcd(8,4) → gcd(4,0) → 4.
+`1392` confirms `^=` with byte const: `xor byte ptr
+[bp-c],0FFh`. Result 0x55 ^ 0xFF = 0xAA = 170 as
+unsigned, -86 as signed. `1393` confirms `%=` with
+product RHS: `b * c` into AX (=6), push, load a,
+cwd, idiv -- remainder back to a. 20 mod 6 = 2.
+
 ## Int local `*= char`, `a += (b+c)`, `a *= (b+c)`
 
 Fixtures `1388` (`int a=2; char c=3; a *= c; return a;`
