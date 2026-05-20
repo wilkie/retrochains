@@ -1959,6 +1959,30 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Signed `char >> var`, `int += s.x`, `a *= -3`
+
+Fixtures `1241` (`char a=8; int n=1; return a >> n;` —
+signed-char right-shift where the shift amount is a
+runtime variable), `1242` (`int a += s.x;` — int local
+compound `+=` with a struct-field RHS), and `1243`
+(`int a=5; a *= -3; return a;` — int compound `*=` by
+a negative constant) all pass on the first capture.
+`1241` confirms the signed-char shift goes through the
+standard char-to-int promote (`cbw`) and then `sar
+ax,cl` — the variable-amount path uses CL for the
+shift count even when the destination type is `char`,
+mirroring what the K≥4 mul-pow2 path does. `1242` is
+the field-RHS counterpart to `1234`'s plain int+=char:
+field load goes through the struct's global address
+(`mov ax,[_s+0]`) before the `add` into the local
+slot. `1243` confirms `*= -3` doesn't fold through the
+mul-pow2 shift path (since -3 isn't a power of two)
+and instead uses `mov dx,0FFFDh / imul dx` — the
+2's-complement encoding of -3 as a 16-bit constant.
+Notably this is *not* fused as `mul by 3 then neg`;
+BCC just feeds the negative immediate directly into the
+multiply.
+
 ## `&&` short-circuit with side effect, `fn(char a[])`, comma in for-init
 
 Fixtures `1238` (`int a=1; int b=5; if (a && ++b) return
