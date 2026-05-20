@@ -1959,6 +1959,27 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `a[1] == x` char vs int, sequential `+=/-=`, `countLen("hello")`
+
+Fixtures `1406` (`char a[3]; int x=5; ... if (a[1] ==
+x) return 1;` — char-array element compared to int
+variable in if-cond), `1407` (`int a=5; a += 10; a -=
+3; return a;` — sequential compound `+=` then `-=` on
+the same local), and `1408` (`int countLen(char *s) {
+int n=0; while (*s != 0) { n++; s++; } return n; }
+return countLen("hello");` — explicit-null-cmp
+strlen-style function call) all pass on the first
+capture. `1406` confirms char-int compare promotes
+char via `cbw`: load `a[1]` byte → `cbw` → cmp to x
+slot. With a[1]=5 and x=5, returns 1. `1407` confirms
+two compound statements on the same lvalue emit two
+independent in-place memory ops: `add word ptr [bp-
+a],10 / sub word ptr [bp-a],3`. Result 5+10-3 = 12.
+`1408` is the explicit-null variant of `1267`'s
+strlen (`while (*s)` implicit). The `!= 0` doesn't
+change codegen since BCC already lowers `while (*s)`
+as `cmp byte ptr [bx],0 / je END`. Length 5.
+
 ## `char getc()` return, `a |= b[0]`, `compute(5)` multi-stmt
 
 Fixtures `1403` (`char getc(void) { return 'X'; }
