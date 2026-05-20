@@ -1959,6 +1959,53 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Return ABIs: int in AX, long in DX:AX, 4-byte struct in DX:AX, double on ST0
+
+Fixtures `1682` (2-int struct return), `1683` (long
+return), and `1684` (double return) characterise the
+function-return ABI by type:
+
+- **int**: returned in AX (the standard for the 8086
+  cdecl).
+- **long** (`1683`): returned in **DX:AX** (high
+  half in DX, low half in AX). The same register
+  pair used by `N_LXMUL@` and other long helpers.
+- **Small struct ≤ 2 words** (`1682`): also
+  returned in **DX:AX**! For a `struct { int x;
+  int y; }`, the function loads `mov ax, [y_field]`
+  / `mov dx, [x_field]` from the local instance and
+  the caller stores both back to its receiving
+  variable via `mov [r_high], dx / mov [r_low],
+  ax`. So 4-byte structs share the long ABI.
+- **double** (`1684`): returned on the **FPU stack
+  top (ST0)**. Callee leaves `fld qword [literal]`
+  hanging on the FPU stack, then `ret`s with the
+  value still there. The caller immediately does
+  `fstp qword [dest]` after the call to capture it.
+  Zero memory traffic for the return value crossing
+  the call boundary — efficient.
+
+So the return ABI summary:
+| Return type | Mechanism |
+|-------------|-----------|
+| `char` / `short` / `int` / near `*` | AX |
+| `long` / `unsigned long` | DX:AX |
+| `far *` | DX:AX (offset in AX, segment in DX) |
+| 1-2 word struct | DX:AX |
+| 3+ word struct | (not yet probed; likely hidden ptr arg or static buffer) |
+| `float` / `double` | ST0 (FPU stack top) |
+| `void` | nothing (AX may be clobbered) |
+
+For the Rust reimplementation:
+- The callee emits stores to AX (or DX:AX, or ST0) just before the `ret`.
+- The caller knows the return type and emits the
+  corresponding capture immediately after the call:
+  - `mov [r], ax` (int)
+  - `mov [r_high], dx / mov [r_low], ax` (long)
+  - `fstp qword [r]` (double)
+
+Large-struct return is an open probe.
+
 ## Float array stride 4; global double full 8-byte storage; `fdiv` native
 
 Fixtures `1679` (float array), `1680` (double
