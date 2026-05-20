@@ -1959,6 +1959,30 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `f(-3)` char param sign-ext, `a |= b | c`, `a - (b+c+d)`
+
+Fixtures `1331` (`int f(char c) { return c; } return
+f(-3);` — function takes char param and returns its
+int promotion, called with a negative literal), `1332`
+(`int a=1; int b=2; int c=4; a |= b | c; return a;` —
+int compound `|=` whose RHS is itself an `|` of two
+locals), and `1333` (`int a=20; ... return a - (b + c
++ d);` — int subtract with a parenthesized three-term
+sum on the RHS) all pass on the first capture. `1331`
+confirms the callee-side char promotion: param `c` is
+in a word-slot per the cdecl widening ABI, callee
+reads byte `[bp+arg] / cbw` to promote and return.
+With c=-3 the slot already holds the widened -3 from
+the caller's push. Result -3 = exit_code 253. `1332`
+confirms `b | c` computed into AX first, then OR'd
+into the slot via `or word ptr [bp-a],ax`. Result
+1|6 = 7. `1333` confirms RHS-paren-expr lowering:
+`b + c + d` chains in AX, then `sub word ptr [bp-a],
+ax` -- but wait, the original `a - (...)` doesn't use
+compound, so it's actually: load a, sub the
+parenthesized sum from it, leaving result in AX.
+20 - 6 = 14.
+
 ## For-loop `i += 2` step, `setIf(int, int*)`, `a &= -2`
 
 Fixtures `1328` (`for (i=0; i<10; i+=2) s += i;` —
