@@ -1959,6 +1959,25 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `char c %= 4`, five-local sum, `-a[1]` neg of arr elem
+
+Fixtures `1436` (`char c=17; c %= 4; return c;` —
+char compound `%=` with a power-of-2 const), `1437`
+(`int a=1; b=2; c=3; d=4; e=5; return a+b+c+d+e;` —
+function with five int locals summed), and `1438`
+(`int a[3]; a[1]=5; return -a[1];` — unary minus
+applied to an array element load) all pass on the
+first capture. `1436` confirms `%=` for char with
+pow2 const goes through the usual `cwd / idiv` path
+(no shift-and shortcut for signed mod, per `1263`).
+17 mod 4 = 1. `1437` confirms 5-slot frame growth:
+each local is one word in the stack frame
+(`SUB SP, 10`), then five independent stores from
+immediates, then chained adds for the return. Sum
+1+2+3+4+5 = 15. `1438` confirms `neg` of array
+element: load `a[1]` into AX, `neg ax`, return.
+Result -5 → exit_code 251.
+
 ## `do { } while (0)`, `if ((a = b))`, chained 4-arm ternary
 
 Fixtures `1433` (`int n=0; do { n++; } while (0);
