@@ -1959,6 +1959,59 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Floating-point: 8087 FPU instructions with `9b` wait prefix; `FIDRQQ` + `N_FTOL@`
+
+Fixtures `1670` (`float f = 3.0f`), `1671` (`float
+a+b`), and `1672` (`double d = 3.0`) reveal the
+floating-point codegen — **completely separate
+toolchain** from integer code:
+
+- **FPU instructions used**: all FP ops are
+  Borland's 8087 FPU code-emission with each
+  instruction **prefixed with `0x9b` (WAIT)** for
+  CPU/FPU synchronisation on early machines. So
+  `9b d9 06 disp16` = `wait ; fld dword [m]`,
+  `9b d9 5e disp8` = `wait ; fstp dword [bp+d]`,
+  etc. The wait prefix is *always* emitted before
+  each FP instruction.
+- **EXTDEF `FIDRQQ`**: Borland's runtime emits this
+  magic external — the linker pulls in the FP
+  library if this symbol is referenced. Any TU
+  using float/double generates this.
+- **EXTDEF `N_FTOL@`**: float/double → long helper.
+  Called when casting `(int)f` or `(long)f`:
+  - FPU loads the value onto ST0
+  - call N_FTOL@
+  - Returns DX:AX (the 32-bit long, narrowed to int
+    by taking AX only)
+- **Float (4 bytes) vs double (8 bytes)**:
+  - Float ops: `9b d9 /N` (load/store dword,
+    arithmetic with dword mem operand uses `9b d8
+    /N`)
+  - Double ops: `9b dd /N` (load/store qword)
+  - The opcode group selects precision; the ModR/M
+    /N selects the operation.
+- **Float add** (`a + b`): `9b d9 06 [a]` (fld a),
+  `9b d8 06 [b]` (fadd b), `9b d9 5e [r]` (fstp r).
+  No CSE — load a, add b, store result; standard
+  three-instruction FP binop.
+- **Literal floats**: stored in `_DATA` as IEEE 754
+  little-endian — e.g. `3.0f` = `00 00 40 40` (4
+  bytes), `3.0` (double) = `00 00 00 00 00 00 08
+  40` (8 bytes).
+
+So FP support is a **distinct codegen path** that
+needs its own implementation in the Rust
+reimplementation:
+- FPU instruction encoder (with `0x9b` prefix
+  injection)
+- IEEE 754 constant encoding in `_DATA`
+- Plumbing for `FIDRQQ` (always emit when FP
+  detected) and `N_FTOL@` (emit when narrowing FP
+  to int/long)
+- Other helpers likely exist (e.g., long→float,
+  printf-fp-format) — not yet probed.
+
 ## Large model: `int *` is far automatically; stack arr & enregistration unchanged
 
 Fixtures `1667` (`int *p = &g; *p = 99;`), `1668`
