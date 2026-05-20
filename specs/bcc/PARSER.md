@@ -1959,6 +1959,30 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `a && b || c`, tail-recursive `sumto`, `setBoth(&s,a,b)`
+
+Fixtures `1358` (`if (a && b || c) return 1;` — mixed
+short-circuit `&&` and `||` in one if-condition),
+`1359` (`int sumto(int n, int acc) { if (n == 0)
+return acc; return sumto(n - 1, acc + n); }` — tail-
+recursive sum-of-1..n via accumulator), and `1360`
+(`void setBoth(struct S *p, int a, int b) { p->x = a;
+p->y = b; }` — function with struct-ptr arg writing
+two fields) all pass on the first capture. `1358`
+confirms `&&` binds tighter than `||` (standard C
+precedence): the expression parses as `(a && b) ||
+c`. With a=1, b=0, c=2: `(1 && 0) || 2` = `0 || 2` =
+true, so return 1. The lowering uses standard short-
+circuit jumps for each operator. `1359` confirms
+tail-recursive call: the recursive call replaces the
+return value, so each frame's epilogue immediately
+unwinds back through the chain. Final answer
+`sumto(5,0)` = 15. BCC does *not* tail-call-optimize
+to a jmp; we see real call/ret pairs. `1360` confirms
+3-arg fn with struct-ptr first and two ints: caller
+pushes `b,a,&s` (cdecl reverse); callee does two
+indirect stores through `[bp+p]`. Result 3+4 = 7.
+
 ## `pow(2,5)`, globals `a*b - 5`, signed `(-20)/4` char
 
 Fixtures `1355` (`int pow(int b, int e) { int r=1; ...
