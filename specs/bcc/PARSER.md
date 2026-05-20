@@ -1959,6 +1959,24 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Sum-of-squares, `char *p += 1`, iterative factorial
+
+Fixtures `1409` (`for (i=1; i<=4; i++) s += i * i;
+return s;` — sum-of-squares accumulator), `1410`
+(`char *p = "abc"; p += 1; return *p;` — char pointer
+compound-add by 1, then deref), and `1411` (`int r=
+1; for (i=1; i<=4; i++) r *= i; return r;` —
+iterative factorial via `*=` accumulator) all pass on
+the first capture. `1409` is a standard arith-in-loop
+pattern: each iteration `i * i` computes the square
+(via stack-spill mul of i with itself), then `+= s`.
+Sum 1+4+9+16 = 30. `1410` confirms char-ptr += const:
+`add word ptr [bp-p],1` (char-stride 1, immediate
+folded). Then `mov bx,[bp-p] / mov al,[bx] / cbw`
+reads 'b' = 98. `1411` is the iterative counterpart
+to `1220`'s recursive factorial: the loop variable
+multiplies into `r`. 1*1*2*3*4 = 24.
+
 ## `a[1] == x` char vs int, sequential `+=/-=`, `countLen("hello")`
 
 Fixtures `1406` (`char a[3]; int x=5; ... if (a[1] ==
