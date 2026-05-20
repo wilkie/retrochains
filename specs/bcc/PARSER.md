@@ -1959,6 +1959,40 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## inc/dec shortcut: confirmed split — compound `±= 1` direct, longhand `= ± 1` round-trip
+
+Fixtures `1568` (`i = i + 1`), `1569` (`i -= 1`),
+and `1570` (`i--`) directly compare the three forms
+of "decrement by 1" against a register-allocated
+local. All pass on the first capture.
+
+- `1568` (`i = i + 1`): `mov ax,si / inc ax / mov
+  si,ax` — **6 bytes**, AX round-trip. Confirms
+  the finding from [[batch-416-arr-of-ptrs-early-
+  return-loop-break]] / fixture `1567`.
+- `1569` (`i -= 1`): just `dec si` — **1 byte**,
+  direct on home register.
+- `1570` (`i--`): just `dec si` — **1 byte**,
+  direct.
+
+So 1569 and 1570 produce **byte-identical codegen**
+for the body, but 1568 is 5 bytes longer despite
+semantically identical behaviour. The split is by
+*syntactic form*:
+| Form | Codegen |
+|------|---------|
+| `i++`, `++i`, `i += 1` | `inc REG` (1 byte) |
+| `i = i + 1`            | `mov ax,REG / inc ax / mov REG,ax` (6 bytes) |
+| `i--`, `--i`, `i -= 1` | `dec REG` (1 byte) |
+| `i = i - 1`            | `mov ax,REG / dec ax / mov REG,ax` (6 bytes) |
+
+For byte-exact Rust reimplementation, the parser/IR
+must distinguish these forms — the
+"semantically equivalent" rewrites a modern compiler
+would unify must NOT be performed. The dec/inc-on-
+home-register pattern is opcode `0x40 + reg` (inc)
+and `0x48 + reg` (dec).
+
 ## `int *p[2]`, early `return` from void, `i = i - 1` misses `dec si`
 
 Fixtures `1565` (array of int pointers — `int
