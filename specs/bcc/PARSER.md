@@ -1959,6 +1959,34 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `x ^= x` self-XOR, `char *p = "Hi"; *p`, `a[1] += a[1]`
+
+Fixtures `1463` (`int x=7; x ^= x; return x;` —
+compound self-XOR), `1464` (`char *p = "Hi"; return
+*p;` — local pointer to string literal then deref),
+and `1465` (`int a[3]={1,2,3}; a[1] += a[1]; return
+a[1];` — array element compound-add to itself) all
+pass on the first capture. `1463` confirms BCC does
+not fold self-XOR to zero at this opt level: `x` is
+enregistered into SI, `mov si,7 / xor si,si` emits
+the literal XOR before the return. The XOR is the
+"r/m reg" form `33 f6` (xor si, si). `1464` confirms
+local `char *p = "literal"` lowering: the string
+"Hi\0" lives in `_DATA` (DGROUP), `p` is enregistered
+into SI initialized by `mov si, offset Hi` with a
+LEDATA fixup against DGROUP, then `mov al,[si] / cbw`
+loads and sign-extends the first char (`'H'` = 72) for
+the int-typed return. The pointer is never spilled to
+the stack. `1465` confirms array-element self
+compound-add: `a[1] += a[1]` lowers to `mov ax,
+[bp-4] / add [bp-4], ax` — RHS loaded once into AX,
+then `add r/m, r` performs the in-memory RMW with the
+same operand. The initial `{1,2,3}` initializer is
+copied to the stack via the standard `N_SCOPY@` six-
+byte memcpy helper (push ss + lea offset + push ds +
+push init-data offset + cx=6 + call). Final
+`a[1] = 4`.
+
 ## `n %= 7; n /= 2`, `**pp += 3`, `s += a[i]` var idx
 
 Fixtures `1460` (`int n=20; n %= 7; n /= 2; return n;`
