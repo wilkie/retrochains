@@ -1959,6 +1959,28 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Assignment as expression value, do-while var cond, stack char array for-fill
+
+Fixtures `1217` (`int b = (a = 7) + 3; return b;` — the
+inner `=` is used both for its side effect *and* for its
+value), `1218` (`int i=3; do { i--; } while (i); return
+i;` — do-while whose condition is a bare variable rather
+than a comparison), and `1219` (`char a[5]; for(i=0;i<5;
+i++) a[i] = i; return a[2];` — stack `char` array filled
+by a for-loop with index store) all pass on the first
+capture. `1217` confirms that assignment is treated as
+an rvalue with the assigned value left in AX after the
+store, so the subsequent `+ 3` can chain without
+re-loading from the slot. `1218` confirms the do-while
+test-on-bare-var path emits `or ax,ax / jne TOP` (the
+canonical zero-test) rather than the comparison-style
+`cmp / jne` we get when the condition is `i != 0`. `1219`
+exercises stack-char-array element store with a runtime
+index: `bx` holds the index, `mov [bp+bx-N], al`
+(byte-store), matching the existing read-side path —
+and confirms the for-loop counter post-step + body share
+the same slot for `i` without spilling.
+
 ## Unsigned int sub, `uint < uint` as int value, `uint -= const`
 
 Fixtures `1214` (`unsigned a=10,b=3; return a - b;` —
