@@ -1959,6 +1959,26 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Recursive `rpow(2,5)`, `a /= b[0]`, `buf[0] | buf[1]`
+
+Fixtures `1373` (`int rpow(int b, int e) { if (e==0)
+return 1; return b * rpow(b, e-1); } return rpow(2,
+5);` — recursive power function), `1374` (`int a=20;
+int b[2]; b[0]=4; a /= b[0]; return a;` — int local
+compound `/=` with a stack-array element RHS), and
+`1375` (`char buf[3]; buf[0]=0x30; buf[1]=0x05;
+return buf[0] | buf[1];` — OR of two char-array
+elements returned as int) all pass on the first
+capture. `1373` confirms recursion w/ mul-after-call:
+5 recursive frames before the base case (e==0 returns
+1), then unwind multiplying by `b` each frame. 2^5=
+32. `1374` confirms array-elem-RHS compound `/=`:
+load `b[0]` into AX, push, load `a` into AX, cwd,
+idiv [sp+0], result back to a. 20/4 = 5. `1375`
+confirms two char-arr elem OR: each elem byte-loads,
+`cbw`-promotes to int, OR'd in AX. 0x30 | 0x05 = 0x35
+= 53.
+
 ## `a += b>0 ? 10 : -10`, char arr elem `+=`, `a[idx()]`
 
 Fixtures `1370` (`int a=5; int b=3; a += b > 0 ? 10 :
