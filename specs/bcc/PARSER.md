@@ -1959,6 +1959,47 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `int *p[2]`, early `return` from void, `i = i - 1` misses `dec si`
+
+Fixtures `1565` (array of int pointers — `int
+*p[2]; p[0]=&a; p[1]=&b; *p[1]=99`), `1566` (early
+`return;` from void function), and `1567` (do-while
+with `break` inside an if) all pass on the first
+capture.
+
+- `1565`: confirms `int *p[2]` lowering — two
+  pointer slots laid out contiguously in the stack
+  frame. `p[0] = &a` is `lea ax,[bp-2] / mov
+  [bp-8], ax` (the second-from-top slot). `*p[1] =
+  99` lowers to **`mov bx,[bp-6] / mov [bx],
+  99`** — uses BX as the deref base register. Even
+  with no enregistration of `p` itself (it's a
+  stack array), each indexed pointer is loaded
+  through BX for the write.
+- `1566`: an early `return;` from a void function
+  lowers to **`jmp epilogue`**. The body code is
+  `if (cond) jmp epilogue / else { ... } / epilogue:`.
+  No extra "tail return" handling, no marker —
+  just an unconditional jump to the function's
+  prologue-matching epilogue label. Matches
+  conventional C codegen.
+- `1567` (**finding**): in a do-while loop body,
+  `i = i - 1` lowers to **`mov ax, si / dec ax /
+  mov si, ax`** (3 instructions, 6 bytes) — NOT
+  `dec si` (1 instruction, 1 byte). BCC's `dec`/
+  `inc` shortcut applies only to `++`/`--` and
+  compound `+=`/`-=` operators, not to longhand
+  `i = i - 1`. The IR parses the latter as a
+  generic `assign(i, sub(i, 1))` and lowers it via
+  the AX-round-trip RMW shape. So:
+  - `i--`, `--i`, `i -= 1` → `dec si` (1 byte)
+  - `i = i - 1` → `mov ax,si / dec ax / mov si,ax`
+    (6 bytes)
+  The semantics are identical but the codegen
+  differs by 5 bytes. `break` from a do-while loop
+  lowers to `jmp end_loop_label`, jumping past the
+  while-test directly to the epilogue.
+
 ## ptr cast no-op, `c + 3` cbw-then-add, `a[1]` returns `[bp-4]` direct
 
 Fixtures `1562` (`char *p = (char *)&x; return *p;`),
