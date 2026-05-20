@@ -1959,6 +1959,26 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `if` w/o else and compound body, discarded call, `char * int` LHS
+
+Fixtures `1229` (`if (a > 3) a *= 2; return a;` — a
+single-statement compound body with no else branch),
+`1230` (`f(5);` — a call whose return value is dropped
+in expression-statement position), and `1231` (`char c=3;
+int a=10; return c * a;` — multiplication with `char`
+on LHS and `int` on RHS) all pass on the first capture.
+`1229` confirms the `if-no-else` codegen: the false
+branch jumps directly to the post-body label with no
+synthetic empty arm. `1230` confirms call-as-statement:
+the return value still lands in AX as usual, but no
+store/use follows -- AX is implicitly clobbered. `1231`
+is the mirror of `1228` (`int * char`): the LHS `char`
+is `cbw`-promoted into AX, then the RHS `int` loads and
+`imul`s -- evaluation order is left-to-right regardless
+of which side is the narrow type, so the operand
+loading sequence differs from `1228` but the final
+encoding length is the same.
+
 ## Array-size const arith, fn returns `char *`, `int * char` RHS
 
 Fixtures `1226` (`int a[3+2]; ... return a[4];` — array
