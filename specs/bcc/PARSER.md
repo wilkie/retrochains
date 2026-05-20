@@ -1959,6 +1959,43 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `v*1024` → `shl cl=10`, `or si, 0xf` imm16 (not imm8), `{0}` still N_SCOPY@
+
+Fixtures `1514` (`int v=4; return v * 1024;` — mul
+by large pow2), `1515` (`int x=0x100; x |= 0xf;
+return x >> 4;` — OR with small imm then signed
+shr), and `1516` (`int a[3] = {0}; a[1] = 42; return
+a[1];` — stack array with all-zero brace init) all
+pass on the first capture.
+
+- `1514`: confirms the mul-by-pow2 → shift
+  optimisation applies for arbitrarily large powers
+  of two: `v * 1024` lowers to `mov cl, 10 / shl ax,
+  cl`. The shift amount 10 exceeds the unroll
+  threshold (K ≥ 4 → cl-loaded variant), as
+  expected. So the lowering is: pow2 N → shift by
+  log2(N); below 4 → unrolled `shl ax, 1`; at/above
+  4 → `mov cl, N / shl ax, cl`.
+- `1515`: **inconsistency finding** — for OR with a
+  small imm that fits in -128..127, BCC chooses the
+  imm16 form `81 /1` (4 bytes total `81 ce 0f 00`)
+  rather than the imm8-sign-ext form `83 /1` (3
+  bytes `83 ce 0f`), even though the latter is
+  legal and shorter. The add/sub family DOES use
+  `83 /0` for the imm8 form ([[batch-390-rmw-non-
+  ax]]), so the imm8-sign-ext optimisation is
+  selective per opcode group. Possibly BCC's
+  encoder simply omits the imm8 variant for OR / XOR
+  / AND.
+- `1516`: all-zero stack-array brace init **still
+  uses `N_SCOPY@`** with an all-zero 6-byte
+  template in `_DATA`. BCC does *not* take any
+  shortcut for the trivially-zero case — no `xor
+  ax,ax / mov [bp-N], ax / ...` chain, no `rep
+  stosw`. The memcpy-from-template path is the only
+  brace-init lowering for stack arrays, regardless
+  of the data being uniform zero.
+
 ## `++n` on SI-resident local, 3D `a[1][0][1]` folded, `if (bool_var)`
 
 Fixtures `1511` (`int n=5; return f(++n);` — int
