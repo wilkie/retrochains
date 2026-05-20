@@ -1959,6 +1959,26 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `do { i--; } while (i > 0)`, `while (i--)`, nested `for s += i*j`
+
+Fixtures `1367` (`int i=5; do { i--; } while (i > 0);
+return i;` — do-while with post-decrement body, signed
+test against 0), `1368` (`int i=10; int s=0; while (i--
+) s++; return s;` — while loop whose condition is a
+post-decrement (the classic count-down idiom)), and
+`1369` (`for(i=0;i<3;i++) for(j=0;j<2;j++) s += i*j;
+return s;` — nested for-loop summing index products)
+all pass on the first capture. `1367` decrements i
+five times from 5→0, exits when i==0, returns 0.
+`1368` is the canonical `while(N--)` countdown:
+post-decrement reads the pre-value as the test
+condition, then decrements. So the body runs while
+`i` was non-zero, i.e. 10 iterations -- s = 10.
+`1369` confirms nested loops with a product RHS:
+inner mul `i*j` runs each (i,j) pair, adds into s.
+Pairs (0,0)(0,1)(1,0)(1,1)(2,0)(2,1) → products
+0,0,0,1,0,2 → sum 3.
+
 ## `a % 3`, `if (p != 0)`, char arr fill `'X'`
 
 Fixtures `1364` (`int a=20; return a % 3;` — int mod by
