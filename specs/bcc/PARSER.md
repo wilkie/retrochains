@@ -1959,6 +1959,31 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Fn `(int, char)`, for empty body, `while (i<j && i<3)`
+
+Fixtures `1271` (`int f(int n, char c)` — function
+with mixed-width parameters, called as `f(10, 5)`),
+`1272` (`for (i=0; i<5; i++) ;` — for-loop whose body
+is a single null statement), and `1273` (`while (i<j
+&& i<3) i++;` — while loop whose condition is a
+short-circuit `&&` of two compares) all pass on the
+first capture. `1271` confirms the caller-side
+char-arg promotion: BC++ 2.0 widens `5` to a 16-bit
+push (cdecl assumes int-sized stack slots even for
+char params), and the callee's `c` is read as a
+word slot then `cbw`-promoted at use. So the
+function-call ABI is "everything in stack as int-
+sized words" regardless of declared param type --
+matching K&R-era conventions. `1272` confirms a
+null-statement loop body emits no body code: just
+init, test/exit, step, and the back-edge jump --
+the post-step rolls right into the test label. `1273`
+confirms `&&` inside a while-condition short-circuits
+the same as in an if: LHS comparison's false-jump
+exits the loop directly, RHS test only happens when
+LHS is true. No re-evaluation of LHS per iteration of
+the body -- just the conditional cycle.
+
 ## `max` via ternary, `absi`, nested `add(add(...),...)`
 
 Fixtures `1268` (`int max(int a, int b) { return a > b
