@@ -1959,6 +1959,35 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## char as arr idx, if-else with 3 locals enregistered, empty `void f()`
+
+Fixtures `1493` (`int a[10]={0..9}; char c=3; return
+a[c];` — signed char as int-array index), `1494`
+(`int a=10, b=3; int x; if (a>b) x=a-b; else x=0;
+return x;` — if-else with arith in both arms), and
+`1495` (`void f(void){} int main(){f(); return 7;}` —
+empty void function called from main) all pass on the
+first capture. `1493` confirms signed-char-as-index
+goes through `cbw`: `mov al,[bp-1] / cbw / shl ax,1
+/ mov bx,ax / mov ax,[bx+_a]`. The char gets a 2-byte
+stack slot (allocated by `dec sp / dec sp`) but only
+the high byte `[bp-1]` holds the value — `[bp-2]` is
+padding. BCC allocates a minimum 2-byte slot per
+local even for a 1-byte type. `1494` shows BCC will
+enregister *three* int locals when register pressure
+allows: `a` → SI, `b` → DI, `x` → DX. DX is normally
+a scratch register but BCC happily promotes a short-
+lived local into it. The if-else lowers to `cmp si,
+di / jle L_else / mov ax,si / sub ax,di / mov dx,ax
+/ jmp / L_else: xor dx,dx / L_done: mov ax,dx`. The
+`x = 0` arm becomes a one-cycle `xor dx,dx`. `1495`
+confirms empty-body emission: `void f()` becomes
+exactly 5 bytes — `55 8b ec 5d c3` (`push bp / mov
+bp,sp / pop bp / ret`). The prologue is *not*
+elided. `f` is still emitted as a PUBDEF. The call
+site is `e8 disp16` with the standard near-relative
+encoding/FIXUPP.
+
 ## Memory-dest RMW: `*p+=3`, `*p+=100`, `*p+=1000`
 
 Fixtures `1490` (`*p += 3`), `1491` (`*p += 100`),
