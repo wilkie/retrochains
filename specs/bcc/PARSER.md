@@ -1959,6 +1959,23 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Int local `*= char`, `a += (b+c)`, `a *= (b+c)`
+
+Fixtures `1388` (`int a=2; char c=3; a *= c; return a;`
+— int local compound `*=` with a char RHS), `1389`
+(`int a=5; int b=3; int c=2; a += (b + c); return a;`
+— int compound `+=` with parenthesized sum RHS), and
+`1390` (`int a=2; int b=3; int c=4; a *= (b + c);
+return a;` — int compound `*=` with parenthesized sum
+RHS) all pass on the first capture. `1388` is the
+local counterpart to `796`'s global int *= char: char
+`cbw`-promoted into AX, then `imul word ptr [bp-a]`
+back into a. Result 2*3 = 6. `1389` confirms paren-
+sum-RHS for `+=`: `b + c` computed into AX (=5), then
+`add word ptr [bp-a],ax`. Total 5+5 = 10. `1390`
+mirrors `1389` for `*=`: `b + c` into AX (=7), then
+imul against [bp-a]. Result 2*7 = 14.
+
 ## `sum(arr, 3)` array via ptr, `char a[5] = "ab"`, swap elems
 
 Fixtures `1385` (`int sum(int *a, int n) { ... for
