@@ -1959,6 +1959,52 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Bounded loops: `while`/`for` all canonicalise to bottom-test pattern
+
+Fixtures `1592` (`while (i < 3) i++;`), `1593` (`for
+(i = 0; i < 3; i++);` empty body), and `1594` (`while
+(i < 3) { i++; }`) all emit **byte-identical code**
+to each other. Combined with the existing for-loop
+fixtures (`1205`, `1500`, etc.), the bottom-test
+canonical pattern is now confirmed across all bounded
+loop forms:
+
+```
+xor si, si      ; init
+eb 01           ; jmp test
+46              ; body: inc si  (or other body)
+83 fe 03        ; test: cmp si, 3
+7c fa           ; jl body  (back-edge with signed-less)
+```
+
+So BCC's loop normaliser unifies all of these into
+the same shape:
+| Source form | Internal IR |
+|-------------|-------------|
+| `while (cond) body` | `for ( ; cond ; ) body` |
+| `for (init; cond; incr) body` | as-is |
+| `while (cond) { body; incr; }` | same as for-loop |
+
+The "incr" expression goes at body-tail (just before
+test) regardless of whether it came from a for-incr
+clause or was written explicitly at end of body.
+The test goes at the bottom; entry is via `jmp test`
+to skip the body before first iteration.
+
+For the Rust reimplementation, this means the IR
+must:
+1. Rewrite `while (cond) body` as a for-loop with no
+   init/incr but with same body.
+2. Always emit bottom-test pattern with forward jmp
+   on entry.
+
+The earlier-batch finding that infinite-loop variants
+([[batch-424-infinite-loops]]) all canonicalise to a
+*top-test* pattern (since the cond is trivially true,
+no test needs to be done; just jmp back from body
+tail) is the degenerate case of this same
+normalisation rule.
+
 ## Infinite-loop forms all canonicalise to identical bytes
 
 Fixtures `1589` (`do { ... } while (1);`), `1590`
