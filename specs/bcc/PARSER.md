@@ -1959,6 +1959,27 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `if (x >= 0)`, `a[char i]`, global `gp->x = 42`
+
+Fixtures `1427` (`int isnneg(int x) { if (x >= 0)
+return 1; return 0; } return isnneg(-5);` — non-
+negative check via `>=`), `1428` (`char a[5]; char i=
+'\002'; return a[i];` — array subscript using a char
+variable as the index), and `1429` (`struct S *gp =
+&g; gp->x = 42; return gp->x;` — global struct
+pointer initialized to global, then used for read-
+write through arrow field) all pass on the first
+capture. `1427` confirms `>=` lowers as the negation
+of `<`: `cmp ax,0 / jl FALSE` shape — equivalent to
+the existing `<` and `>` infrastructure. isnneg(-5)
+= 0. `1428` confirms char-as-index `cbw`-promotes
+to int for the address calculation: `mov al,[bp-i]
+/ cbw / mov bx,ax / mov al,[bx+...]`. Result 30.
+`1429` confirms global ptr-to-struct init from
+another global's address: gp's data record holds the
+OFFSET of g, then arrow access goes through the
+pointer. Returns 42.
+
 ## `*p = five()` deref-store call, iterative fib, char arr copy loop
 
 Fixtures `1424` (`int five(void){return 5;} *p =
