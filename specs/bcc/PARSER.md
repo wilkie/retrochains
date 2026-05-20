@@ -1959,6 +1959,27 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `char c &= int n`, `++(*p)`, int local `+= global`
+
+Fixtures `1301` (`char c=0xff; int n=0x3f; c &= n;
+return c;` — char compound `&=` with an int RHS),
+`1302` (`int *p = &g; *p = 5; ++(*p); return g;` —
+pre-increment through pointer dereference), and `1303`
+(`int g; int a=5; g=10; a += g; return a;` — int
+local compound `+=` with a global RHS) all pass on
+the first capture. `1301` is the `&=` counterpart to
+`1254`'s `|=` char-with-int-RHS: LHS char `cbw`-
+promoted, AND with int RHS, then narrowed byte-store.
+Result 0xFF & 0x3F = 0x3F = 63. `1302` confirms the
+prefix-`++(*p)` shape: dereference to address in BX,
+`inc word ptr [bx]` -- single in-place increment with
+no intermediate AX shuffle since the result isn't
+used. If used as an rvalue, the post-inc value would
+need to land in AX. `1303` confirms the global-RHS
+compound path: global read via `mov ax,[_g]` then
+`add word ptr [bp-a],ax` -- so the LHS stays in its
+slot, AX is just the transient RHS load.
+
 ## `b = a--`, `*p++ = v`, `char c = (char)a`
 
 Fixtures `1298` (`int a=5; int b; b = a--; return b;`
