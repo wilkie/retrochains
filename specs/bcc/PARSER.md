@@ -1959,6 +1959,68 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## FP `1.0` via `fld1`; FP cmp uses `fstsw`+`sahf`; `int→float` via `fild`
+
+Fixtures `1673` (`a*b - 1.0f`), `1674` (FP `<` cmp),
+and `1675` (`(float)int`) reveal more FP codegen
+details:
+
+- `1673`: **constant `1.0` uses `fld1`** (opcode
+  `d9 e8`, 2 bytes) instead of `fld dword [literal]`
+  (5 bytes + FIXUPP). BCC recognises specific FP
+  constants and uses the FPU's load-constant
+  instructions:
+  - `fld1` (`d9 e8`) — load 1.0
+  - `fldz` (`d9 ee`) — load 0.0 (not yet probed)
+  - `fldpi`, `fldl2e`, etc. — other constants
+  Saves both code bytes and a data slot.
+- Also from `1673`: **`fmul dword [m]`** (`d8 /1`)
+  for FP mul-mem; **`fsubp ST(1)`** (`de e9`) for
+  FP subtract-pop. So FP arithmetic has memory-
+  operand variants (`d8 /N`) and stack-popping
+  variants (`de /N`).
+- `1674` (**FP comparison ABI**): FP `<` lowers to:
+  ```
+  fld a
+  fcomp dword [b]         ; d8 /3, sets FPU status flags
+  fstsw word [bp+disp]    ; dd /7, save status word to mem
+  mov ax, [mem]           ; load status word
+  sahf                    ; 9e — copy AH to CPU flags
+  jae L_false             ; unsigned branch (FPU maps to above/below)
+  ```
+  The FPU status word's bits C3/C2/C0 map to ZF/PF/
+  CF when transferred via `sahf`. So FP compares
+  always use **unsigned-flavour jcc** (`jae`/`jb`/
+  etc.) regardless of source-level operator.
+- `1674` also reveals a new external: **`FIWRQQ`**
+  — Borland's word-return FP marker, emitted
+  whenever the program uses FP and produces a
+  word-sized return value.
+- `1675` (**int→float**): **`fild word [bp+disp]`**
+  (`df /0`) loads a word integer and auto-converts
+  to FP. No helper call needed — the FPU does the
+  conversion natively. So:
+  - `int → float`: just `fild` (1 instr, native)
+  - `float → int`: call **`N_FTOL@`** (helper-
+    based since 8086 has no native FP→int with
+    truncation that matches C semantics)
+
+Updated FP codegen catalogue:
+| Op | Encoding |
+|----|----------|
+| `fld dword [m]`  | `9b d9 /0` |
+| `fld qword [m]`  | `9b dd /0` |
+| `fld1`           | `9b d9 e8` |
+| `fild word [m]`  | `9b df /0` |
+| `fstp dword [m]` | `9b d9 /3` |
+| `fstp qword [m]` | `9b dd /3` |
+| `fadd dword [m]` | `9b d8 /0` |
+| `fmul dword [m]` | `9b d8 /1` |
+| `fsubp ST(1)`    | `9b de e9` |
+| `fcomp dword [m]`| `9b d8 /3` |
+| `fstsw word [m]` | `9b dd /7` |
+| `sahf`           | `9e` (no wait) |
+
 ## Floating-point: 8087 FPU instructions with `9b` wait prefix; `FIDRQQ` + `N_FTOL@`
 
 Fixtures `1670` (`float f = 3.0f`), `1671` (`float
