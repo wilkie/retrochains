@@ -1959,6 +1959,25 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `if (c != 0)` char, `a -= ?: ternary RMW`, `a*b + c` fn
+
+Fixtures `1454` (`char c=5; if (c != 0) return 1;` —
+char compared to zero with explicit `!=`), `1455`
+(`int a=5; int b=3; a -= a < b ? 0 : a - b; return a;`
+— int compound `-=` where the RHS is a ternary
+involving the same LHS), and `1456` (`int sum(int a,
+int b, int c) { return a*b + c; } sum(2,3,4);` — fn
+combining mul-then-add with three int args) all pass
+on the first capture. `1454` confirms `c != 0`
+lowers identically to using the char as a truthiness
+test: `mov al,[bp-c] / cbw / or ax,ax / je FALSE`
+(maybe with `cmp` instead of `or` due to the
+explicit form). `1455` shows the ternary computes
+into AX, then `sub word ptr [bp-a],ax`. a=5,b=3:
+`a<b` false → use `a-b` (=2) → a -= 2 = 3. So a
+becomes the min of a,b. `1456` confirms 3-arg
+fn with mul+add body: 2*3+4 = 10.
+
 ## `c(b(a(x)))` three-fn chain, nested while 2x2, `a -= b[1]`
 
 Fixtures `1451` (`int a(int x) { return x+1; } int b
