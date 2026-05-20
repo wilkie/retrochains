@@ -1959,6 +1959,39 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `++n` on SI-resident local, 3D `a[1][0][1]` folded, `if (bool_var)`
+
+Fixtures `1511` (`int n=5; return f(++n);` — int
+pre-increment as call arg), `1512` (3D global int
+array with all-constant indexing), and `1513` (bool
+materialized into int then used as `if` condition)
+all pass on the first capture.
+
+- `1511`: with `n` enregistered into SI (use count 2:
+  `++n` + the implicit read for the call arg),
+  pre-increment lowers to **`inc si`** (opcode `0x46`,
+  1 byte) directly on the register, then `mov ax,si /
+  push ax / call _f / pop cx`. The arg-materialisation
+  step doesn't reload from memory — the post-`inc`
+  register value is used directly. Returns 6.
+- `1512`: with all three indices constant, BCC folds
+  the multi-dim offset at compile time: `a[1][0][1]`
+  = `(1*4 + 0*2 + 1)*sizeof(int) = 10`. The store
+  becomes `mov word [_a+0x000a], 7` (a single
+  instruction with one LEDATA FIXUPP) and the load
+  is `mov ax, [_a+0x000a]`. No `imul` or `shl` for
+  any dim — fully folded.
+- `1513`: `int x = (a < b); if (x) ...` does **not**
+  fuse the bool materialisation with the test. BCC
+  emits the full template (`cmp / jge / mov ax,1 /
+  jmp / xor ax,ax`) into x's stack slot, then
+  re-reads it with `cmp word [bp-6], 0 / je
+  L_else`. A peephole could have skipped the
+  store/reload and jumped directly on the `a < b`
+  flags — BCC does not. None of `a, b, x` enregister
+  here because each has only 1 syntactic use after
+  initialisation, falling below the threshold.
+
 ## Call-crossing locals can only use SI/DI; 6th candidate spills
 
 Fixtures `1508` (3 multi-use ints, one live across a
