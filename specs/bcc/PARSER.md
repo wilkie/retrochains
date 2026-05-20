@@ -1959,6 +1959,54 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Array-of-struct linearised; 5-arg uses `add sp, 10`; `static` fn omits PUBDEF
+
+Fixtures `1706` (array of struct), `1707` (5-arg
+function), and `1708` (static function) cover three
+codegen-affecting cases.
+
+- `1706` (**array of struct**): `struct P a[2]`
+  lays out as `a[0].x, a[0].y, a[1].x, a[1].y` —
+  flat linear layout, each field accessible as
+  `[bp+disp]`. For constant indices, the disp is
+  baked in at parse time. The subtract `a[1].x +
+  a[1].y - a[0].x` uses **`sub ax, [m]`** (opcode
+  `2b /N`) — direct memory subtract, no separate
+  load needed.
+- `1707` (**5-arg cdecl**): args at `[bp+4]` to
+  `[bp+12]` in declaration order. Caller cleans
+  with **`add sp, 10`** (5 args × 2 bytes). The
+  `add sp, N` encoding (`83 c4 disp8` for N ≤ 127)
+  is 3 bytes regardless of N, so it's always more
+  efficient than ≥ 3 individual `pop cx` (also
+  1 byte each but with overhead) for any cleanup
+  ≥ 6 bytes. Confirms the cleanup-strategy boundary
+  from [[batch-435-arg-cleanup-boundary]].
+- `1708` (**`static` function**): the OBJ has
+  **no PUBDEF for `_helper`** — only `_main` is
+  exported. Static linkage means the symbol stays
+  internal; same-TU calls resolve via relative
+  offsets in the call's `e8` displacement. The
+  function bytes are still emitted to `_TEXT`,
+  just not exported.
+
+For the Rust reimplementation:
+- Track per-symbol linkage flag (extern vs static).
+- Emit `PUBDEF` records only for `extern`
+  (default) functions and globals.
+- `static` declarations still need their bytes
+  emitted to the appropriate segment, but no
+  external visibility — the linker won't see
+  them.
+
+This means each TU has 4 categories:
+1. Default `extern` (PUBDEF + emit)
+2. `static` (no PUBDEF, just emit)
+3. `extern` declaration without definition (EXTDEF
+   only, no emit)
+4. Local automatic (no record at all — lives
+   on stack)
+
 ## `break` jumps to epilogue; `continue` jumps to post-update; `test` for bit check
 
 Fixtures `1703` (do-while + break), `1704` (for +
