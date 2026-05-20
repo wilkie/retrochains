@@ -1959,6 +1959,50 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Globals never enregister, `int *p` enregisters, reversed-cmp normalised
+
+Fixtures `1529` (global `int g` written and read
+multiple times), `1530` (pointer parameter `int *p`
+dereferenced twice), and `1531` (`for (i=0; 3>i;
+i++)` — reversed cmp operand order) all pass on the
+first capture.
+
+- `1529` (**important rule**): **globals never get
+  enregistered**, regardless of use count. Each
+  `g = g + 1` lowers to `a1 [_g] / inc ax / a3
+  [_g]` (`mov ax,[_g] / inc ax / mov [_g], ax`).
+  The final `return g` re-loads from memory again
+  with another `mov ax, [_g]`. So the use-count
+  heuristic is **scoped to locals and parameters
+  only** — globals always stay in static storage,
+  presumably because they may be aliased through
+  pointers or modified by other translation units /
+  interrupts. The `a1`/`a3` opcodes are the AX-with-
+  direct-addr short forms (3 bytes each).
+- `1530`: pointer parameter `int *p` with two
+  derefs (`*p + *p`) enregisters into SI on entry —
+  `mov si, [bp+4] / mov ax, [si] / add ax, [si]`.
+  Both `[si]` reads share the same register
+  (declaration order #1 → SI). Confirms the use-
+  count rule applies to *all* parameter types, not
+  just plain ints.
+- `1531`: source `3 > i` is normalised to **`i < 3`**
+  before codegen. The for-loop test emits `cmp si,
+  3 / jl body` — with the variable on the **left**
+  side of the cmp regardless of which side it
+  appeared on in the source. So BCC has an IR-level
+  peephole that puts the variable on the cmp's LHS
+  (commuting if needed) and adjusts the jcc to
+  preserve semantics. Without it, `cmp 3, si` would
+  need different jcc selection.
+
+Implication for the Rust reimplementation:
+- the IR layer must normalise `K op var` to `var
+  inv-op K` for the relops before emitting cmps;
+- the codegen pass must distinguish "is this a
+  global?" early and never consider globals for
+  register allocation.
+
 ## Function params enregister like locals (use-count ≥ 2 → SI/DI/...)
 
 Fixtures `1526` (param `x` used 3x: `x*x + x`),
