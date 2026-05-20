@@ -1959,6 +1959,48 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## const-arith folded; `if (1)`/`if (0)` test folded but dead code emitted
+
+Fixtures `1583` (`int x = 100 - 7 * 3`), `1584` (`if
+(1) return 5; return 10;`), and `1585` (`if (0)
+return 5; return 10;`) all pass on the first capture
+and characterise BCC's constant-folding scope.
+
+- `1583`: full compile-time arithmetic folding —
+  `100 - 7 * 3` reduces to **79 (0x4F)** stored
+  directly into x's slot. The AST/parser layer
+  evaluates constant expressions before reaching
+  codegen.
+- `1584`: `if (1)` lowers to **`mov ax, 5 / jmp $+5
+  / mov ax, 10 / jmp epilogue`**. The test is
+  folded away (no `cmp` / `jcc`), but the dead
+  branch (`mov ax, 10`) is still emitted as
+  unreachable code. The `jmp` skips 5 bytes — the
+  exact length of the dead branch.
+- `1585`: `if (0)` lowers to **`jmp $+5 / mov ax, 5
+  / jmp epilogue / mov ax, 10`**. The test fold
+  emits an unconditional `jmp` to skip the dead
+  true branch, then falls through to the false
+  branch.
+
+So constant folding in BCC is **partial**: numeric
+expressions are fully evaluated (as in `1583`); but
+for `if (const)` the dead branch is still encoded as
+unreachable code — only the *test* is skipped. The
+encoder's IR doesn't have a "DCE after constant
+fold" pass. The Rust reimplementation must match
+this: emit both branches and connect them with the
+appropriate `jmp` instead of cmp/jcc.
+
+Combined with the [[batch-421-two-calltargets-strcond]]
+finding that `if ("X")` is *not* folded at all
+(emits the full template), the constant-folding
+boundary is:
+- Numeric/arithmetic operands: fully folded
+- `if (numeric_const)`: test folded, dead branch
+  kept
+- `if (literal_string)`: not folded; full template
+
 ## 2 call-targets: decl order; call+binop chains; `if ("X")` not folded
 
 Fixtures `1580` (2 multi-use locals both used as
