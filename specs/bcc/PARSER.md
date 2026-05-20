@@ -1959,6 +1959,30 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## For-loop summing index, stack int-array sum, nested for-loop counter
+
+Fixtures `1205` (`for (i=0; i<3; i++) s += i;` — index
+summed via compound `+=`), `1206` (`int a[3]; a[0]=1;
+a[1]=2; a[2]=3; return a[0]+a[1]+a[2];` — three-elem
+stack int-array sum), and `1207` (`for(i=0;i<2;i++) for
+(j=0;j<2;j++) s++;` — nested for-loop with inner-body
+counter) all pass on the first capture. `1205` closes the
+gap for a "real" for-loop counter pattern: init / test /
+post / body, with `i++` post-step lowering to `inc word
+ptr [bp-N]` and the body `s += i` going through the
+standard AX-spill `+= var` path. `1206` confirms our
+stack int-array layout: three contiguous words, byte
+offsets 0/2/4, each store via `mov [bp-N+k],ax` and the
+final `+` sum reusing the same slot bases. `1207`
+exercises nested-for control flow with both the inner
+and outer post-step + condition test, plus a hoisted
+inner test label that the parser's loop-context stack
+must keep distinct from the outer's. Note: `1206`'s
+first capture hit a transient DOSBox PulseAudio assert
+on the verify step; rerun succeeded — the OBJ file
+itself was captured cleanly. Not a codegen issue, just
+audio-init flakiness on the WSL2 host.
+
 ## Ternary as discarded side effect, `!!a`, int AND of two vars
 
 Fixtures `1202` (`int a=3; a > 0 ? a++ : a--; return a;` —
