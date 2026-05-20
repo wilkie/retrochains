@@ -1959,6 +1959,62 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Recursion via cdecl push+call; SI/DI callee-save; multi-return = one epilogue
+
+Fixtures `1697` (recursive factorial), `1698`
+(multi-return sign), and `1699` (3-arg function)
+confirm several call-related rules.
+
+- `1697` (**recursive function**): a recursive call
+  uses **standard cdecl push+call+pop** — each
+  recursion gets its own stack frame. The
+  enregistered parameter `n` lives in SI throughout
+  one frame. SI is **saved by the callee** via
+  `push si` in prologue and `pop si` in epilogue
+  (the `5e` byte before `5d c3`). This makes SI/DI
+  effectively **callee-preserved**: each function
+  that uses them saves and restores them, but the
+  caller doesn't need to.
+
+  Confirms SI/DI are callee-save by convention —
+  matches the use-count enregistration heuristic
+  ([[batch-411-register-allocation]]). Each
+  recursion level pushes its own copy.
+- `1698` (**multi-return single-epilogue**): a
+  function with multiple `return` statements has
+  **one epilogue** at the end. Each `return`
+  materializes the value in AX and jumps to the
+  shared epilogue (`5e 5d c3` or similar). No
+  per-return epilogue duplication. The body is:
+  ```
+  cmp / jcc → return-block-1 → jmp epilogue
+  cmp / jcc → return-block-2 → jmp epilogue
+  fallthrough return-block-3
+  epilogue: pop si / pop bp / ret
+  ```
+- `1699` (**3-arg cdecl**): args at `[bp+4]`,
+  `[bp+6]`, `[bp+8]` in **declaration order**
+  (right-to-left push leaves them in this order on
+  stack). Caller cleanup uses **`add sp, 6`**
+  (3-byte instruction) since 3 args = 6 bytes,
+  matching the ≥3-args boundary from
+  [[batch-435-arg-cleanup-boundary]]. Below 3
+  args, caller uses repeated `pop cx`.
+
+So the cdecl ABI summary is now complete:
+- **Args**: pushed right-to-left at 2-byte slots
+  starting at `[bp+4]`.
+- **Cleanup**: `pop cx` (1 byte each) for 1-2
+  args; `add sp, N` (3 bytes) for ≥3 args.
+- **Register saves**: SI/DI callee-saved when
+  used (push in prologue, pop in epilogue).
+- **Return register**: AX (int), DX:AX (long /
+  4B struct), ST0 (FP).
+- **Hidden args**: large struct return uses
+  hidden far-ptr-to-scratch as the
+  first push (caller pushes dest then scratch;
+  scratch is the callee's "where to write" hint).
+
 ## Cross-byte bitfield uses word ops; typedef = no-op; volatile = stack + no CSE
 
 Fixtures `1694` (cross-byte bitfield), `1695`
