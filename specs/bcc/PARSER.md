@@ -1959,6 +1959,28 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Factorial recursion, chained sub three vars, neg `int` `>> 1`
+
+Fixtures `1220` (`int fact(int n) { if (n<=1) return 1;
+return n * fact(n-1); } return fact(4);` — recursive
+function with self-call and multiply), `1221` (`int a=20,
+b=5,c=3; return a-b-c;` — chained subtract across three
+locals), and `1222` (`int a = -8; return a >> 1;` —
+arithmetic right-shift of a negative int) all pass on
+the first capture. `1220` is the factorial counterpart
+to the existing `593-recursion-sum-obj`: same frame /
+stack discipline, but the post-call work is `imul`
+instead of `add`, exercising the multiply-of-a-call-
+result path. `1221` confirms left-associativity for `-`
+across three locals: LHS subtract emits its result into
+AX, push, RHS local into AX, pop into DX, `sub dx,ax /
+mov ax,dx` -- the same binop-via-stack-spill pattern as
+batch 295's `&` of two vars. `1222` confirms that a
+negative-literal source with `>>` lowers to `sar ax,1`
+(arithmetic shift) rather than `shr` -- the parser
+correctly threads `int` signedness through the constant
+folder, even though the literal `-8` is a constant.
+
 ## Assignment as expression value, do-while var cond, stack char array for-fill
 
 Fixtures `1217` (`int b = (a = 7) + 3; return b;` — the
