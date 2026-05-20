@@ -1959,6 +1959,44 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Arrays always use `N_SCOPY@`; structs use inline only for ≤2 fields
+
+Fixtures `1616` (3-int struct), `1617` (2-int
+array), and `1618` (1-int array) refine the
+struct/array init lowering rule. **The threshold is
+type-kind dependent**:
+
+- `1618` (1-int array `int a[1] = {42};`) uses
+  **`N_SCOPY@`** with cx=2.
+- `1617` (2-int array `int a[2] = {10, 20};`) uses
+  **`N_SCOPY@`** with cx=4.
+- `1616` (3-int struct) uses **`N_SCOPY@`** with cx=6.
+
+Combined with `1612` (1-int struct) and `1613` (2-int
+struct) which **did not** use `N_SCOPY@`:
+
+| Type | 1 word | 2 words | ≥3 words |
+|------|--------|---------|----------|
+| **Struct** | inline mov+store | 2× inline | `N_SCOPY@` |
+| **Array**  | `N_SCOPY@`       | `N_SCOPY@` | `N_SCOPY@` |
+
+So **arrays always go through `N_SCOPY@`** for brace
+init, regardless of size — even `int a[1] = {42}`!
+**Structs**, on the other hand, get inline load+store
+pairs for 1- and 2-field cases.
+
+This is a notable kind-dependent codegen split.
+Likely an artifact of BCC's IR having distinct
+initialiser paths for arrays vs structs: structs may
+treat the brace init as a sequence of named field
+assignments (which the small-size optimiser can
+inline), while arrays use a uniform "copy from
+template" path.
+
+For the Rust reimplementation: pick the lowering
+based on the **type kind** (struct vs array), not
+just byte size.
+
 ## 2-field struct init avoids N_SCOPY; `(int)(5+3)` fully folded
 
 Fixtures `1613` (`struct P {int x; int y;} p = {10,
