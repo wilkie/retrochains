@@ -1959,6 +1959,29 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `f(a++)`, int cmp hex const, `strlen` as fn
+
+Fixtures `1265` (`int a=5; return f(a++);` — int
+post-increment used as a call argument), `1266` (`int
+a=0xff; if (a > 0x80) return 1;` — int compared to a
+hexadecimal constant), and `1267` (`int len(char *s) {
+int n=0; while (*s) { n++; s++; } return n; }
+return len("abc");` — strlen-style function whose body
+traverses a `char *` until it sees null) all pass on
+the first capture. `1265` confirms the postinc-as-arg
+shape: load `a` into AX, push, then `inc word ptr
+[a]` afterward — the pushed value is the pre-increment
+value, matching the postfix semantic. `1266` confirms
+hex constants fold to identical bytes as decimal:
+`0x80` becomes `128`, and the compare emits `cmp ax,
+128` -- the parser normalizes hex literals before
+codegen sees them. `1267` confirms the strlen idiom:
+the while body is a `cmp byte ptr [bx],0 / je END`
+exit test (using `bx` for the pointer), with `inc bx`
+as the step. The call site passes the literal "abc"
+pointer through the standard cdecl push, then reads
+length from AX.
+
 ## `char == 'X'`, int local `%= 4`, 3-arg FMA
 
 Fixtures `1262` (`char c='X'; if (c=='X') return 1;` —
