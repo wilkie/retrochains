@@ -1959,6 +1959,27 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `f(*p)`, global `int *p = &arr[1]`, fn no-args loop sum
+
+Fixtures `1292` (`int a=42; int *p=&a; return f(*p);`
+— dereferenced pointer used as a call argument),
+`1293` (`int *p = &arr[1];` at file scope — global
+pointer initialized to a specific array-element
+address), and `1294` (`int sum(void) { int s=0; int
+i; for (i=1;i<=4;i++) s += i; return s; }` — no-arg
+function summing 1..4 in a for-loop) all pass on the
+first capture. `1292` confirms a dereference inside
+a call's arg expression: AX gets the deref'd value,
+then `push ax` for the cdecl call. `1293` confirms
+the global ptr init can have a constant-fold-able
+sub-expression: `&arr[1]` becomes `OFFSET _arr + 2`
+in the global initializer record (the `1*sizeof(int)`
+is folded at parse time). `1294` confirms `sum()`
+shape: callee has its own `s`, `i` frame, runs the
+for-loop, returns AX -- the caller's `main` is the
+trivial `call _sum / pop bp / ret` form. Sum =
+1+2+3+4 = 10.
+
 ## `v = *p++`, struct-ptr arg, `a -= b*c`
 
 Fixtures `1289` (`int *p = a; int v = *p++; return v;`
