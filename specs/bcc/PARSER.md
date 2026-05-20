@@ -1959,6 +1959,48 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Call-crossing locals can only use SI/DI; 6th candidate spills
+
+Fixtures `1508` (3 multi-use ints, one live across a
+`call`), `1509` (6 multi-use ints, no calls), and
+`1510` (4 multi-use ints, *all* live across a call)
+all pass on the first capture and confirm the
+hypothesis from [[batch-396-cx-pool]]: **locals whose
+live range crosses a function call cannot use
+DX/BX/CX — only the callee-saved SI/DI**.
+
+- `1509`: 6 multi-use ints with no calls — first 5
+  fit into SI/DI/DX/BX/CX, the 6th (`f`) spills to
+  `[bp-2]`. So the maximum simultaneous in-register
+  count without a call is exactly 5, consistent with
+  the 5-register pool.
+- `1508`: 3 multi-use ints with `c` used as arg and
+  reassigned across `dbl(c)`. Result: `a` → DI, `c`
+  → SI, **`b` → stack at `[bp-2]`** even though `b`
+  is multi-use. Because all three locals are read
+  again in the final `return`, all live across the
+  call — but only 2 callee-saved regs are available.
+  The middle local `b` is the one that loses out.
+- `1510`: 4 multi-use ints all live across `dbl(d)`.
+  Result: `a` → DI, `b` → `[bp-2]`, `c` → `[bp-4]`,
+  `d` → SI. Only 2 enregistered, 2 spilled.
+
+Updated register-allocation rule:
+- **Without calls in the body**: pool is `{SI, DI,
+  DX, BX, CX}` — 5 slots, declaration order.
+- **With calls in the body**: locals that live
+  across a call may only occupy `{SI, DI}` — 2
+  slots. Locals whose live range does *not* cross
+  the call may still claim DX/BX/CX.
+
+Open question: when a local is the one passed as the
+arg AND reassigned by the call return value (like
+`c` in `1508` and `d` in `1510`), it appears to
+preferentially get **SI** rather than DI — but both
+batches have only a single such "call-target" local
+to test against. The other in-register local takes
+DI. Worth a 2-call-targets fixture to confirm.
+
 ## Enregistration extends to 5 regs: SI, DI, DX, BX, **CX**; fn-call ABI
 
 Fixtures `1505` (5 multi-use ints all simultaneously
