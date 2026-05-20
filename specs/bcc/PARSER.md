@@ -1959,6 +1959,47 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `interrupt` saves all regs + sets DS; `cdecl` explicit; `x - K` via `add ax, -K`
+
+Fixtures `1655` (`interrupt void isr()`), `1656`
+(`int cdecl add`), and `1657` (3-deep call chain
+with subtract) all pass on the first capture.
+
+- `1655` (**interrupt function**): emits a massive
+  9-register save prologue: `push ax / push bx /
+  push cx / push dx / push es / push ds / push si
+  / push di / push bp`. Then **re-establishes DS to
+  DGROUP** via `mov bp, DGROUP / mov ds, bp` (the
+  `bd disp` is FIXUPP'd to DGROUP). Body runs.
+  Epilogue pops everything in reverse and ends with
+  **`iret`** (opcode `0xCF`, 1 byte) — interrupt-
+  return that pops both flags and CS:IP. Classic
+  8086 ISR pattern.
+- `1656` (**explicit `cdecl`**): produces byte-
+  identical code to the default convention —
+  underscore-prefixed symbol `_add`, args at
+  `[bp+4]+` in declaration order (right-to-left
+  push), caller cleans with `pop cx; pop cx`. So
+  `cdecl` is a no-op qualifier in BCC's default
+  small-model setup.
+- `1657` (**`g(x) - 3`** encoding): subtract of a
+  constant `g(x) - 3` lowers to **`add ax, -3`**
+  (`05 fd ff` — opcode `0x05` add-AX-imm16 with
+  imm16 = 0xFFFD = -3 two's complement). BCC
+  canonicalises `x - K` (positive K) as `x + (-K)`
+  using the AX-with-imm ADD opcode, NOT as `sub ax,
+  K`. So subtract-of-positive-imm-from-AX uses ADD
+  with negative imm.
+
+These complete the calling-convention picture for
+the small model. The `interrupt` lowering will look
+the same in larger memory models — just with `iret`
+unchanged (always 1 byte). Multi-memory-model
+divergence will mostly affect the `near` vs `far`
+call sequences and pointer sizes (already
+characterised in [[batch-444-far-pointers]] and
+[[batch-445-pascal-far-fn]]).
+
 ## `huge` = far in deref; `pascal` callee-cleans+uppercase; `far` fn `push cs; call`
 
 Fixtures `1652` (`int huge *p`), `1653` (`pascal`
