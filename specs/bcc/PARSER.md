@@ -1959,6 +1959,38 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## stack `int a[3]={7}` partial, `char s[6]="hi"` stack, `(x>>4)&0xf`
+
+Fixtures `1475` (`int a[3] = {7}; return a[0] + a[1]
++ a[2];` — stack int array partial brace init), `1476`
+(`char s[6] = "hi"; return s[1];` — stack char array
+initialized from string literal), and `1477` (`int x =
+0x42; int y = (x >> 4) & 0xf; return y;` — nibble
+extract via signed shift then AND mask) all pass on
+the first capture. `1475` confirms partial brace init
+for stack arrays goes through the `N_SCOPY@` 6-byte
+memcpy helper: the initializer template is emitted in
+`_DATA` as `07 00 00 00 00 00` (declared length 3 *
+sizeof int = 6 bytes, padded with zeros for the
+omitted elements), and runtime copies the full
+template — there is no "init prefix then runtime
+zero-fill the rest" split. Return path simply sums
+[bp-6] + [bp-4] + [bp-2]. `1476` confirms the same
+`N_SCOPY@` path for `char s[N] = "literal"` on the
+stack: the template is `68 69 00 00 00 00` =
+`"hi\0\0\0\0"` (the C-string terminator is included,
+then zero-pad fills the rest of the declared length).
+`s[1]` reads `[bp-5]` then `cbw` sign-extends `'i'`
+(0x69, positive → 0x0069 = 105) for the int return.
+`1477` confirms BCC does **not** fuse shift+mask into
+a special nibble-extract or byte-extract pattern: `mov
+ax,[bp-2] / mov cl,4 / sar ax,cl / and ax,0x000f /
+mov [bp-4],ax`. Since the shift amount is K=4 (the
+unroll threshold), BCC uses the `cl`-loaded variant
+rather than unrolling. The `sar` (signed) is selected
+because `x` is `int`. AND with literal uses the `ax,
+imm16` short form (`25 0f 00`).
+
 ## stack-arr decay `f(a)`, `if (a[0]>a[1])`, `static int g[3]={...}`
 
 Fixtures `1472` (`int sum(int *p) { return p[0] +
