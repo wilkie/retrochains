@@ -1959,6 +1959,46 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `(int)5` no-op cast, trailing comma in init, 1-field struct init
+
+Fixtures `1610` (`int x = (int)5;`), `1611` (`int
+a[3] = {1, 2, 3,};` trailing comma), and `1612`
+(`struct S { int x; } s = {42};` single-field struct
+init) all pass on the first capture.
+
+- `1610`: `(int)5` cast is a complete codegen no-op
+  — emits identical code to `int x = 5`. Same-type
+  casts disappear at parsing.
+- `1611`: trailing comma in brace initializer is
+  accepted (a common C feature) and produces no
+  extra array elements. Data is exactly `01 00 02
+  00 03 00`. Code-equivalent to `{1,2,3}`.
+- `1612` (**finding**): single-int-field struct local
+  initializer **loads from a `_DATA` template via
+  `a1 disp16 / mov [bp-2], ax`** (with FIXUPP) —
+  NOT a direct `mov word [bp-2], 42` (which would be
+  the same size but constant-immediate). So BCC
+  uses the same "data-template + load+store" shape
+  for *single*-word struct inits as it does for
+  multi-word ones (via `N_SCOPY@`), just without
+  the memcpy helper since the size is one word.
+  This is mildly suboptimal vs. constant-imm-store
+  but consistent — BCC treats struct init uniformly
+  as data-template-copy. The template occupies 2
+  bytes in `_DATA` for the int field.
+
+So BCC's struct-init lowering rule:
+- 1-word struct (or single field): `mov ax,
+  [_template] / mov [bp-N], ax`
+- N-word struct: `push ss / lea ax,[bp-N] / push ax
+  / push ds / mov ax, _template / push ax / mov cx,
+  N*2 / call N_SCOPY@`
+
+The data-template approach is **always used** for
+struct local init, even when a direct
+constant-immediate store would be shorter or same
+size.
+
 ## Switch on `char` (cbw + table); default-only (no dispatch); reorder
 
 Fixtures `1607` (switch on `char` scrutinee with 4
