@@ -1959,6 +1959,42 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `volatile` blocks enregistration; `5+3` global init folds at compile time
+
+Fixtures `1547` (`dbl(a + b)` — binop result passed
+as arg), `1548` (`volatile int x; x = x + 1`), and
+`1549` (`int g = 5 + 3;`) all pass on the first
+capture.
+
+- `1547`: confirms the binop → push fast path:
+  `mov ax,[bp-2] / add ax,[bp-4] / push ax / call /
+  pop cx`. The `add ax,...` leaves the result in AX
+  ready for `push ax` — no intermediate stack
+  storage. `a` and `b` are single-use locals
+  (1 use after init in the `a+b`), so they stay on
+  stack.
+- `1548` (**finding**): **`volatile` forces a local
+  to stay in memory** regardless of use count.
+  Despite `x = x + 1; return x` being 2 syntactic
+  uses (would normally enregister `x` into SI),
+  BCC emits: `mov ax,[bp-2] / inc ax / mov [bp-2],
+  ax / mov ax,[bp-2]` — re-loading from memory even
+  immediately after the store. So `volatile` is a
+  third constraint that forces stack residence,
+  alongside (1) use-count < 2 and (2) address-taken.
+- `1549`: confirms compile-time arithmetic folding
+  for global initialisers — `int g = 5 + 3;` emits
+  the data byte sequence `08 00` (i.e. 8) directly
+  in `_DATA`. The expression `5 + 3` is fully
+  evaluated by the parser/AST layer before reaching
+  codegen.
+
+Combined "spill to memory" conditions for locals:
+1. Use count < 2 after declaration.
+2. Address taken (`&local` appears anywhere).
+3. Declared `volatile`.
+Any one of these forces the local into a stack slot.
+
 ## SHR/DIV stay word, SHL by 8 still byte (cl=8)
 
 Fixtures `1544` (`(char)(a >> 4)`), `1545` (`(char)(a
