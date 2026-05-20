@@ -1959,6 +1959,27 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Int local `+= *p`, chained OR of three vars, `sizeof(a)/sizeof(a[0])`
+
+Fixtures `1325` (`int a=5; int *p=&b; a += *p; return
+a;` — int local compound `+=` with a pointer-dereference
+RHS), `1326` (`int a=1; int b=2; int c=4; return a | b |
+c;` — chained bitwise OR of three locals), and `1327`
+(`int a[5]; int n = sizeof(a) / sizeof(a[0]); return
+n;` — element-count idiom using sizeof) all pass on
+the first capture. `1325` is the local counterpart to
+`822`'s global `g += *p`: read through the ptr into
+AX, then `add word ptr [bp-a],ax`. `1326` confirms
+chained `|` walks left-assoc through AX with `or
+ax,[bp-...]` accumulating each new operand -- same
+shape as `1318`'s chained add, since both `+` and `|`
+fit the same template. Result 1|2|4 = 7. `1327` is
+the canonical `ARRAY_SIZE` macro idiom: `sizeof(a)`
+= 10 (5 ints × 2 bytes), `sizeof(a[0])` = 2, and the
+divide folds at parse time to 5 -- so no runtime
+division. The `int n = 5` init becomes a single
+`mov word ptr [bp-n],5` instruction.
+
 ## `*getp() = 7`, `a -= b - c`, `char c &= 0x0f`
 
 Fixtures `1322` (`int *getp(void) { return &g; } *getp()
