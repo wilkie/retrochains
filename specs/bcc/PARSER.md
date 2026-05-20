@@ -1959,6 +1959,26 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `pow(2,5)`, globals `a*b - 5`, signed `(-20)/4` char
+
+Fixtures `1355` (`int pow(int b, int e) { int r=1; ...
+for (i=0;i<e;i++) r *= b; return r; }` — integer power
+function via loop), `1356` (`int a=10; int b=3; return
+a * b - 5;` — arithmetic on two file-scope int
+globals), and `1357` (`char a=-20; char b=4; return a/
+b;` — signed char division yielding negative result)
+all pass on the first capture. `1355` confirms a
+non-recursive power loop: `r=1, e=5, b=2` iterates
+five `r *= 2` mults, returning 32. The for-loop step
+combined with `r *= b` exercises both compound-mul-var
+and loop-step lowering. `1356` confirms global-global
+arithmetic at file scope: `mov ax,[_a] / imul word
+ptr [_b] / sub ax,5`. Result 10*3-5 = 25. `1357`
+confirms signed char division: both chars `cbw`-
+extended to int, then `cwd / idiv` for signed
+division. -20/4 = -5, returned as int. Exit code = 256
+-5 = 251.
+
 ## strcmp-like `eq`, 3-level nested if, `a &= 0xff00`
 
 Fixtures `1352` (`int eq(char *a, char *b) { while (*a
