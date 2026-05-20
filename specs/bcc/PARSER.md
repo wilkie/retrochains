@@ -1959,6 +1959,28 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `char == 'X'`, int local `%= 4`, 3-arg FMA
+
+Fixtures `1262` (`char c='X'; if (c=='X') return 1;` —
+char compared to a char literal in an if condition),
+`1263` (`int a=17; a %= 4; return a;` — int local
+compound `%=` with a power-of-2 constant), and `1264`
+(`int fma(int a, int b, int c) { return a*b+c; }
+return fma(2,3,4);` — 3-arg function returning `a*b+c`)
+all pass on the first capture. `1262` confirms char
+literals fold to byte immediates: `'X'` becomes `88`,
+the slot byte loads via `mov al,[bp-N] / cbw`, and the
+comparison is a word `cmp ax,88`. `1263` confirms
+`%=` with pow2 RHS uses the full `cwd / idiv` path
+(no shift/and fold) -- consistent with `1248`'s
+divide-by-pow2: neither `/` nor `%` shortcuts for
+signed-pow2. `1264` confirms 3-arg calling convention:
+caller pushes `c, b, a` in reverse (cdecl), callee
+reads them at `[bp+4], [bp+6], [bp+8]`. The body
+multiplies the first two args into AX with a stack
+spill, then adds the third arg slot -- no
+multiply-add fusion at the AST level.
+
 ## 2D int array store, fn returns comparison, int OR of two vars
 
 Fixtures `1259` (`int a[2][3]; a[1][2] = 7; return
