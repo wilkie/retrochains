@@ -1959,6 +1959,52 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `huge` = far in deref; `pascal` callee-cleans+uppercase; `far` fn `push cs; call`
+
+Fixtures `1652` (`int huge *p`), `1653` (`pascal`
+calling convention), and `1654` (`far` function) all
+pass on the first capture and reveal three more
+Borland extension codegen patterns.
+
+- `1652`: **`huge` and `far` produce byte-identical
+  code for simple deref** — both store 4 bytes
+  (seg:off), use `les` + `26` ES override. The
+  difference only shows up in pointer arithmetic
+  across segment boundaries (huge would normalise,
+  far wouldn't). Simple `*p` cases are
+  indistinguishable.
+- `1653` (**pascal calling convention**):
+  - **PUBDEF symbol is `ADD`** (uppercase, no
+    underscore prefix) — pascal name mangling
+    strips the C `_` and uppercases.
+  - **Args pushed left-to-right** (instead of
+    cdecl's right-to-left). Callee accesses first
+    arg at `[bp+6]` (pushed first → higher offset),
+    second arg at `[bp+4]`.
+  - **Callee cleans args via `ret imm16`** (opcode
+    `c2 04 00` for 4-byte cleanup). No caller post-
+    call `pop cx` / `add sp, N`. Saves bytes per
+    call site at cost of 3 bytes per function.
+- `1654` (**far function**):
+  - Callee uses **`retf`** (opcode `0xCB`, 1 byte)
+    instead of near `ret`.
+  - Args accessed at **`[bp+6]+`** because the far
+    return address occupies 4 bytes (seg:off)
+    instead of 2.
+  - **Caller emits `push cs ; call near`** (4 bytes)
+    instead of `call far ptr16:16` (5 bytes) when
+    calling within the same segment. The `push cs`
+    (opcode `0x0E`) pushes the return segment so
+    the callee's `retf` pops both seg+off correctly.
+
+These Borland extensions complete the basic
+calling-convention picture: cdecl (caller-cleans,
+underscore prefix, right-to-left), pascal (callee-
+cleans, UPPERCASE, left-to-right), and far/near
+distinguish near `ret` vs `retf` based on the call
+distance. Mixing models would generate `call far`
+(`9A` opcode) explicitly.
+
 ## `far` pointers: 32-bit seg:off, `les` + `26` ES override
 
 Fixture `1649` (`int far *p = (int far *)&x; return
