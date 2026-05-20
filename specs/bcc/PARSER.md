@@ -1959,6 +1959,28 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `getX(struct S*)`, `char c += a*b`, `a -= b - 1`
+
+Fixtures `1313` (`int getX(struct S *p) { return
+p->x; }` — function takes a struct pointer and returns
+a field), `1314` (`char c = 1; int a=3; int b=4; c +=
+a * b; return c;` — char compound `+=` with the RHS
+being a product of two int locals), and `1315` (`int
+a=20; int b=5; a -= b - 1; return a;` — int compound
+`-=` whose RHS is itself a subtraction) all pass on
+the first capture. `1313` confirms struct-ptr-getter:
+caller passes `&s` (the static-storage address of the
+global struct), callee does `mov bx,[bp+arg] / mov
+ax,[bx+0]` — direct field read at the deref'd ptr.
+`1314` confirms char-`+=`-int-mul: the int multiply
+runs into AX first via stack-spill, then narrow-store
+through char path: `cbw`-promote char LHS, add AX,
+narrow-store back. Result 1 + 12 = 13. `1315` confirms
+the binop-as-RHS of compound: `b - 1` computes into
+AX, then `sub word ptr [bp-a],ax`. So 20 - 4 = 16.
+The compound's RHS is its own expression tree, not a
+fused operand.
+
 ## Descending for-loop, `while (*++p)`, int from `-5` char
 
 Fixtures `1310` (`for (i=5; i>0; i--) s += i; return s;`
