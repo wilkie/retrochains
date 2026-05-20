@@ -1959,6 +1959,25 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Int mul by 64, int mod by var, char compound shl by two
+
+Fixtures `1196` (`int a=3; return a*64;` — int mul by 64,
+K=6 shifts), `1197` (`int a=17; int b=5; return a%b;` —
+int `%` by variable), and `1198` (`char c=3; c <<= 2;
+return c;` — char compound `<<=` by const 2) all pass on
+the first capture. `1196` is a regression probe for the
+mul-pow2 K≥4 threshold that batch 290 fixed in the
+general AX path: K=6 now correctly emits `mov cl,6 / shl
+ax,cl` rather than six unrolled `shl ax,1` instructions.
+`1198` covers char compound `<<=` by a small constant
+(K=2), which falls under the K≤3 unrolled-shift form for
+the char-compound path; combined with batch 292 (which
+fixed `*= 16` to mirror the K≤3 / K≥4 split), this
+confirms the char-compound shift/mul threshold is now
+consistent with the general AX path. `1197` confirms our
+`int % var` lowering still matches: `cwd / idiv bx` with
+the remainder coming out of DX.
+
 ## Int mul by 256, char compound mul by 16, int init deref+add
 
 Fixtures `1193` (`int a=2; return a*256;` — int mul
