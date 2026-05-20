@@ -1959,6 +1959,30 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `char *names[3]`, `(a==b) == (b<c)`, 4-way `if/else if/else`
+
+Fixtures `1394` (`char *names[3] = {"hi", "ab", "x"};
+return names[0][1];` — array of char-pointer init with
+three string literals, then double-subscript), `1395`
+(`if ((a == b) == (b < c)) return 1;` — equality
+between two comparison results), and `1396` (`if (a==0)
+return 0; else if (a==1) return 1; else if (a==2)
+return 2; else return 3;` — four-way if-else-if chain)
+all pass on the first capture. `1394` confirms global
+array-of-pointers init: each pointer slot is initialized
+with the address of its corresponding string literal,
+laid out in the data segment. `names[0][1]` does two
+deref-and-load: first `names[0]` = ptr to "hi",
+second `[1]` = 'i' = 105. `1395` confirms compare-as-
+int composed: each inner cmp materializes to 0 or 1
+via sete-style boolean materialization, then the outer
+`==` compares two int 0/1 values. Both inner are true
+(1==1), so outer is true → return 1. `1396` extends
+`1201`'s three-way pattern: each `else if` chains
+through the same false-jump target, accumulating until
+the final `else` catches the unmatched case. With a=2
+the third arm fires.
+
 ## `gcd(12,8)` recursive, `char ^= 0xff`, `a %= b*c`
 
 Fixtures `1391` (`int gcd(int a, int b) { if (b==0)
