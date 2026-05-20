@@ -1959,6 +1959,29 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `max` via ternary, `absi`, nested `add(add(...),...)`
+
+Fixtures `1268` (`int max(int a, int b) { return a > b
+? a : b; }` — max function written as a single ternary
+return), `1269` (`int absi(int a) { if (a < 0) return
+-a; return a; }` — absolute-value function with
+conditional negation and two-return shape), and `1270`
+(`return add(add(1,2), 3);` — call expression where
+the first arg is itself a call) all pass on the first
+capture. `1268` confirms the ternary-as-return arm:
+each side of `?:` writes its result to AX and jumps to
+the same return epilogue -- a single epilogue is
+shared. `1269` confirms unary negate `-a` lowers to
+`neg ax` after loading the slot, then the function
+returns; the alternative path returns `a` unchanged --
+both arms share the same epilogue. `1270` confirms
+nested call evaluation order: the inner `add(1,2)`
+runs first, its AX result is pushed as the outer
+call's first arg, then `3` is pushed -- no stack
+re-arrangement needed between the inner-return and
+the outer-call push since cdecl pushes args
+right-to-left.
+
 ## `f(a++)`, int cmp hex const, `strlen` as fn
 
 Fixtures `1265` (`int a=5; return f(a++);` — int
