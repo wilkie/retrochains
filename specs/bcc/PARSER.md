@@ -1959,6 +1959,29 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `if (a == -5)`, `unsigned char g = 200`, `buf[0]+buf[1]`
+
+Fixtures `1340` (`int a=-5; if (a == -5) return 1;
+return 0;` — int equality with a negative constant
+in if-cond), `1341` (`unsigned char g = 200; return
+g;` — global unsigned char initialized to a value
+above 127), and `1342` (`char buf[3] = "ab"; return
+buf[0] + buf[1];` — sum of two char-array elements
+returned as int) all pass on the first capture.
+`1340` confirms `cmp word ptr ...,-5` encodes the
+negative as 0xFFFB sign-extended through the 16-bit
+immediate. `1341` confirms unsigned-char init at 200
+is just `db 0C8h` in the data segment -- no
+sign-extension semantics for an unsigned type. On
+return, AL=200, and `cbw` (signed-byte to int) would
+turn it into -56 -- but BCC's char-as-int promotion
+checks the type: for `unsigned char` we'd expect
+`xor ah,ah` (zero-extend) instead. The match
+indicates BCC's actual behavior here. `1342`
+confirms char-array string init: `buf` gets `'a',
+'b', '\0'`, and `buf[0]+buf[1]` promotes each to int
+via `cbw`, sums to 97+98=195.
+
 ## `char a *= b`, `int a <<= 4`, `p[i]` var subscript
 
 Fixtures `1337` (`char a=5; char b=3; a *= b; return
