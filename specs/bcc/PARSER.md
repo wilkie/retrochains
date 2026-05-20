@@ -1959,6 +1959,25 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Popcount, min function, `c = a[1]` char arr elem
+
+Fixtures `1415` (`int popcount(int x) { int c=0;
+while (x) { if (x&1) c++; x >>= 1; } return c; }
+return popcount(0x55);` — popcount via bit-scan
+loop), `1416` (`int min(int a, int b) { if (a < b)
+return a; return b; }` — minimum-of-two function),
+and `1417` (`char a[3]; ... c = a[1]; return c;` —
+char local init from char-array element) all pass
+on the first capture. `1415` confirms a real-world
+bit-counting loop: `while (x)` tests against 0, `if
+(x & 1)` selects the low bit, `x >>= 1` shifts. For
+x = 0x55 = 01010101, four bits set → return 4.
+`1416` is the canonical min function; trivial
+control flow. `1417` confirms char-from-arr-elem
+init: load byte at `[bp-base+1]`, store byte at
+`[bp-c]`. Result 'Y' = 89. (1417 hit a transient
+DOSBox PulseAudio crash on verify; passed on retry.)
+
 ## `a[0] * a[2]`, `for (; *p; p++)`, `**pp = 42`
 
 Fixtures `1412` (`int a[3] = {2,3,4}; return a[0] *
