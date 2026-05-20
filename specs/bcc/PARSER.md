@@ -1959,6 +1959,26 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `a += b>0 ? 10 : -10`, char arr elem `+=`, `a[idx()]`
+
+Fixtures `1370` (`int a=5; int b=3; a += b > 0 ? 10 :
+-10; return a;` — int compound `+=` whose RHS is a
+ternary), `1371` (`char a[3]; a[1] = 20; a[1] += 5;
+return a[1];` — char-array element compound `+=` with
+a const), and `1372` (`int idx(void){return 1;} ...
+return a[idx()];` — array subscript using a function-
+call result as the index) all pass on the first
+capture. `1370` confirms ternary RHS materializes
+into AX before the compound add: arms write `10` or
+`-10` and join, then `add word ptr [bp-a],ax`.
+Result 5+10 = 15. `1371` confirms char-arr-elem
+compound `+=`: load `a[1]` byte → cbw → add → narrow
+store. Or: `add byte ptr [bx+_a+1],5` directly with a
+const index. Either way: 20+5 = 25. `1372` confirms
+call result as subscript: the call returns 1 in AX,
+then `shl ax,1 / add ax, offset _a / mov ax,[ax]`
+loads a[1] = 20.
+
 ## `do { i--; } while (i > 0)`, `while (i--)`, nested `for s += i*j`
 
 Fixtures `1367` (`int i=5; do { i--; } while (i > 0);
