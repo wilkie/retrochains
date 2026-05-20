@@ -1959,6 +1959,45 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `(int)(long+long)` skips high; long arg cdecl; long cmp folds int const
+
+Fixtures `1646` (`long a[2]; (int)(a[0]+a[1])`),
+`1647` (`long sqr(long x)` with long arg+return),
+and `1648` (`long < int_const`) all pass on the
+first capture.
+
+- `1646` (**narrow-cast on long add**): `(int)(long
+  + long)` discards the high-half computation just
+  like `(char)(int + int)` discards the high byte.
+  Code emits only `mov ax, [a_low] / add ax, [b_low]`
+  — **no `adc` on the high halves** since they would
+  be cast away. So BCC's narrow-cast propagation
+  pass works at the long-word level too, not just
+  the int-byte level.
+- `1647` (**long parameter passing**): a `long`
+  argument is passed as **two consecutive word
+  pushes**, with the **high half pushed first**
+  (lands at higher offset). Inside the callee:
+  - `[bp+4]` = low word
+  - `[bp+6]` = high word
+  Long return is via `DX:AX` register pair. After
+  the call site, **`pop cx; pop cx`** cleans 4 bytes
+  (matches the 2-arg cleanup rule from
+  [[batch-435-arg-cleanup-boundary]] — long counts
+  as 2 word-args worth of cleanup).
+- `1648` (**long cmp against int const**): the int
+  constant is **promoted to long at compile time**
+  — the cmp uses `cmp [bp+disp], 0` for the high
+  half (since int 10 has high=0) and `cmp [bp+disp],
+  10` for the low half. Both use the `83 /7` imm8-
+  sext encoding. So mixed long-vs-int-const cmp is
+  pre-folded at parse time, then the standard
+  inline two-step long compare runs.
+
+These three fixtures complete the long-type picture
+for codegen: aggregates, parameter passing, and
+type-promoted comparisons all work as expected.
+
 ## `int + long`: int gets `cwd`-promoted; long `==` two-step; long `&` two-word
 
 Fixtures `1643` (`int + long`), `1644` (`long ==
