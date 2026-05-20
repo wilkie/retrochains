@@ -1959,6 +1959,27 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `int b = a++`, `int b = --a`, void setter via global
+
+Fixtures `1319` (`int a=5; int b = a++; return b;` —
+int post-increment as the RHS of an initializer),
+`1320` (`int a=5; int b = --a; return b;` — int prefix
+decrement as the RHS of an initializer), and `1321`
+(`int g; void set(int v) { g = v; } set(42); return
+g;` — void setter that writes a global from its arg)
+all pass on the first capture. `1319` confirms the
+postfix-`++` in init expression position works
+identically to the regular RHS shape (`1265`): load
+pre-value into AX, store into `b`, then `inc` the
+source slot. `b=5, a=6`. `1320` confirms the prefix-
+`--` in init: `dec word ptr [bp-a]`, then load the
+*post*-decrement value into AX and store. `b=4, a=4`.
+`1321` confirms void-returning setter: the callee
+doesn't load AX before its `pop bp / ret`, so the
+caller sees whatever AX held at the call site (here
+discarded since the call is statement-position). The
+global `g` is updated, then `main` returns its value.
+
 ## `do-while (i<5 && i>0)`, `sum3(1,2,3)`, four-var add
 
 Fixtures `1316` (`do { i++; } while (i < 5 && i > 0);
