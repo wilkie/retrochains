@@ -1959,6 +1959,29 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Descending for-loop, `while (*++p)`, int from `-5` char
+
+Fixtures `1310` (`for (i=5; i>0; i--) s += i; return s;`
+— descending for-loop with post-decrement step), `1311`
+(`p = "ab"; while (*++p) n++;` — while-loop walking
+the string with prefix-increment-then-deref), and
+`1312` (`char c = -5; int x; x = c; return x;` — int
+local assigned from a negative-valued char, exercising
+sign-extension) all pass on the first capture. `1310`
+confirms the post-`--` step lowers to `dec word ptr
+[bp-i]` and the test compares to 0 with `or ax,ax /
+jng END` or the equivalent signed-comparison. Final
+s = 5+4+3+2+1 = 15. `1311` confirms the prefix-inc-
+deref idiom: each iteration `inc word ptr [bp-p]`
+(char-stride 1) then loads byte via `[bx]` for the
+test -- this is the C idiom for "skip the first char,
+walk until null". `1312` confirms char-to-int assign
+uses `cbw`: load `al` from the char slot (0xFB = -5
+signed-byte), `cbw` extends to `0xFFFB` = -5 in AX,
+then stored to the int slot. The return brings back
+-5 which the harness encodes as exit_code 251 (=
+256-5) for the shell.
+
 ## `a() + b()`, global `char *p = "abc"`, while-walk to zero
 
 Fixtures `1307` (`int a(void); int b(void); return a() +
