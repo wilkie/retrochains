@@ -1959,6 +1959,52 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `(char)(a+b)` byte-width add, no string-literal pooling
+
+Fixtures `1535` (`return (char)(a + b);` — narrowing
+cast over int addition), `1536` (`f("Hi") + f("Hi")`
+— same string literal in two distinct positions), and
+`1537` (`f("Hi") + f("Bye")` — different literals)
+all pass on the first capture.
+
+- `1535` (**major finding**): BCC propagates the
+  narrowing `(char)` cast *backwards* into the
+  binop. Rather than `mov ax,[a] / add ax,[b] / cbw`
+  (4 byte plus extension), it emits `mov al,[bp-2]
+  / add al,[bp-4] / cbw` — a **byte-width add**
+  (opcode `0x02`, `add r8, r/m8`) operating on just
+  the low bytes of `a` and `b`. This is
+  semantically equivalent (addition mod 2^8 ≡
+  truncation of mod 2^16) but generates different
+  bytes. The IR has a "narrow-cast-aware" pass that
+  rewrites `(char)(x op y)` to byte-width op + sign-
+  extend for ops where the low byte of the int
+  result equals the low byte of the byte-width
+  result (true for add/sub/and/or/xor/shl with
+  small counts; NOT for div/mod which depend on
+  high bytes). Must replicate byte-exactly.
+- `1536` and `1537` together prove **BCC does *not*
+  pool string literals**, even identical ones.
+  Fixture `1536` has the data segment contain `48
+  69 00 48 69 00` — *two* copies of `"Hi\0"`. The
+  second call's `mov ax, 3` selects offset 3 (the
+  second copy). If BCC pooled, both would resolve
+  to offset 0 and the data would be just `"Hi\0"`.
+  Fixture `1537` is structurally identical but with
+  different content (`"Hi\0Bye\0"`). Each literal
+  occurrence in source produces one fresh copy in
+  the OBJ's `_DATA` segment.
+
+Implication for the encoder:
+- narrowing-cast propagation is opcode-sensitive —
+  add/sub/and/or/xor can lower to byte-width
+  variants under `(char)` / `(unsigned char)`
+  casts; div/mod and shifts beyond 7 must stay
+  word-width.
+- the string-literal emission must keep each source
+  occurrence as a distinct LEDATA segment entry,
+  even when contents match.
+
 ## addr-taken → forced to memory, `(uchar)int` vs `(char)int` cast widening
 
 Fixtures `1532` (ternary picks between `&x` and
