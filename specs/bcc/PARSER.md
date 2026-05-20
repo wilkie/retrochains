@@ -1959,6 +1959,25 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `a[0] * a[2]`, `for (; *p; p++)`, `**pp = 42`
+
+Fixtures `1412` (`int a[3] = {2,3,4}; return a[0] *
+a[2];` — multiply of two global-array elements at
+const indices), `1413` (`for (; *p; p++) n++;` —
+for-loop with empty init, deref condition, and
+pointer step), and `1414` (`int *p=&x; int **pp=&p;
+**pp = 42; return x;` — store through a double-deref
+pointer-to-pointer) all pass on the first capture.
+`1412` confirms two-elem mul: `mov ax,[_a+0] / imul
+word ptr [_a+4]`. Result 2*4 = 8. `1413` is the for-
+loop equivalent of `1267`'s while-based strlen: the
+init is empty (no first-iter setup), the test is
+`*p`, the step is `p++`. Length of "ab" = 2. `1414`
+confirms write-through-pp: `mov bx,[bp-pp] / mov bx,
+[bx] / mov word ptr [bx],42`. So x gets 42 set
+through two indirections, then `return x` reads back
+42.
+
 ## Sum-of-squares, `char *p += 1`, iterative factorial
 
 Fixtures `1409` (`for (i=1; i<=4; i++) s += i * i;
