@@ -1959,6 +1959,62 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Cross-byte bitfield uses word ops; typedef = no-op; volatile = stack + no CSE
+
+Fixtures `1694` (cross-byte bitfield), `1695`
+(typedef int alias), and `1696` (volatile int)
+finalise the per-byte-vs-word bitfield rule and
+confirm two semantic-only qualifiers.
+
+- `1694` (**cross-byte bitfield**): when a bitfield
+  spans a byte boundary, BCC emits **word `81 /N`
+  operations** with a 2-byte mask. Layout for
+  `a:6, b:6, c:4` (= 16 bits):
+  - `a` (bits 0-5, in byte 0): byte ops `80 /N`,
+    mask `0xc0` for clear.
+  - `b` (bits 6-11, spans bytes 0-1): **word ops**
+    `81 /N`, mask `0xf03f` for clear, set value
+    `0x0080` (2 << 6).
+  - `c` (bits 12-15, in byte 1): byte ops `80 /N`,
+    mask `0x0f` for clear (high 4 bits of byte 1).
+  - Read of cross-byte `b` uses word load + 6-bit
+    shift + 6-bit mask.
+  So the rule is **per-field, not per-struct**:
+  fields fitting in one byte use byte ops; fields
+  crossing use word ops. The clear mask is the
+  bitwise-NOT of the field's bit-pattern within
+  the storage unit.
+- `1695` (**`typedef int`**): produces **byte-
+  identical** code to using the underlying type
+  directly. `typedef int u16; u16 add(u16, u16)`
+  is fully equivalent to `int add(int, int)`.
+  `typedef` is a **parse-time alias** with zero
+  codegen impact — same OBJ bytes as the
+  cdecl-explicit fixture (1656).
+- `1696` (**`volatile int`**): forces three things:
+  1. Variable lives in **memory** (not enregistered)
+     — the use-count heuristic is overridden.
+  2. **Every read re-fetches** from memory — no
+     CSE, even immediately after a write. The
+     `mov ax, [bp-2]` before return executes even
+     though we just wrote `[bp-2]` two instructions
+     earlier.
+  3. **Every write commits** to memory immediately.
+  So `volatile` disables enregistration and CSE for
+  this variable. Compare to plain `int n = 5; n =
+  n + 1; return n;` — n would normally enregister
+  into SI/DI with no memory traffic.
+
+For the Rust reimplementation:
+- Bitfield codegen: pick byte vs word ops based on
+  whether `(bit_offset + bit_width) <= 8` for
+  byte-fits, otherwise word ops.
+- `typedef`: handle at parser level only, never
+  reaches codegen.
+- `volatile`: tag the symbol; force memory
+  storage; emit load on every read, store on every
+  write; bypass register allocation.
+
 ## Bitfields: byte-level and/or mask+shift; union shares storage; enum const-folded
 
 Fixtures `1691` (bitfield struct), `1692` (union),
