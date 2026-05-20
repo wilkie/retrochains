@@ -1959,6 +1959,40 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Arg cleanup boundary: 3+ args → `add sp, N` (3 bytes)
+
+Fixtures `1622` (3 args), `1623` (4 args), and
+`1624` (5 args) probe the post-call arg-cleanup
+boundary. All pass on the first capture:
+- `1622` (3 args, 6 bytes): `add sp, 6` (`83 c4 06`,
+  3 bytes — same as 3× `pop cx` but BCC chose the
+  single instruction)
+- `1623` (4 args, 8 bytes): `add sp, 8` (`83 c4 08`,
+  3 bytes — saves 1 byte vs 4× pop)
+- `1624` (5 args, 10 bytes): `add sp, 10` (`83 c4
+  0a`, 3 bytes — saves 2 bytes vs 5× pop)
+
+**Final arg-cleanup table**:
+| Arg count | Bytes to clean | Encoding | Size |
+|-----------|----------------|----------|------|
+| 1 | 2 | `pop cx`           | 1 |
+| 2 | 4 | `pop cx; pop cx`   | 2 |
+| ≥ 3 | 2N | `add sp, 2N` (`83 c4 imm8`) | 3 |
+
+So the cutover is at exactly 3 args: BCC prefers
+pop chains for 1-2 args (1-2 bytes), and `add sp,
+imm8` for 3+ args (3 bytes flat). The 3-arg case is
+a tie in bytes (3× pop = `add sp, 6` = 3 bytes), and
+BCC chose `add sp` — likely because it's a single
+instruction with predictable timing on 8086. For
+4+ args, `add sp` strictly wins.
+
+The imm8 form `83 c4` (`add r/m16, imm8-sext`) is
+the same encoding family as the imm8-sext arithmetic
+ops ([[batch-400-imm8-policy]]). For args > 127
+bytes (very rare in practice), it would need to
+switch to imm16 form `81 c4 imm16` — not yet probed.
+
 ## `a[i]=99; a[i]` no CSE; 2-arg cleanup uses `pop cx; pop cx`
 
 Fixtures `1619` (5-int array init), `1620` (`a[i]
