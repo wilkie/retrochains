@@ -1959,6 +1959,39 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `return a<b`; `(5,7)` drops LHS; `while(n)` uses `or si,si`
+
+Fixtures `1661` (`return a < b;` direct return),
+`1662` (`int x = (5, 7);` comma op in init), and
+`1663` (`while (n)` truthiness) all pass on the
+first capture.
+
+- `1661`: a comparison result returned directly uses
+  the **same boolean materialisation template** as
+  if it were assigned to a variable. No "direct
+  return" optimisation — `cmp / inv-jcc / mov ax,
+  1 / jmp / xor ax,ax` always runs, and the result
+  in AX is just used as the return register.
+- `1662`: comma operator `(5, 7)` with constant LHS
+  **drops the LHS entirely** at compile time. Only
+  `mov [bp-2], 7` is emitted for `int x = (5, 7)`.
+  Constant sub-expressions with no side effects in
+  comma's left operand are discarded by the parser/
+  AST. If the LHS had side effects (function call,
+  assignment), it would have to be emitted —
+  worth a future probe.
+- `1663` (`while (n)`): standard bottom-test loop
+  with **`or si, si / jne body`** as the truthiness
+  test on register-resident `n`. Confirms the
+  zero-test shortcut for enregistered locals from
+  [[batch-414-cmp-zero-or-reg]] / fixture `1560`
+  works in loop condition context too.
+
+These three are all confirmations of previously-
+identified patterns applied in slightly different
+contexts. Useful for cross-checking but no new
+findings.
+
 ## Indirect call via `ff /2`; `n--` returns old via `dec [mem]`
 
 Fixtures `1658` (fn-ptr array indirect call), `1659`
