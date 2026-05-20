@@ -1959,6 +1959,28 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `*nextp("ab")`, `inc(&x)` twice, `a += (b=3, b+1)`
+
+Fixtures `1343` (`char *nextp(char *p) { return p + 1;
+} return *nextp("ab");` — function returning
+ptr+1, then dereferenced at the call site), `1344`
+(`void inc(int *p) { (*p)++; } inc(&x); inc(&x);
+return x;` — void function called twice with the
+same arg expression to incrementally mutate state),
+and `1345` (`int a=5; a += (b = 3, b + 1); return
+a;` — int compound `+=` whose RHS is a parenthesized
+comma expression (assign-and-read pattern)) all
+pass on the first capture. `1343` confirms ptr +
+const: `p + 1` becomes `bx + 1` for a char* stride
+of 1, then `[bx]` dereferences to 'b' (= 98).
+`1344` confirms two-call sequence with the same
+arg-expr: each call independently computes `&x`,
+pushes, calls `_inc`. So x = 5 → 6 → 7. `1345`
+confirms the comma operator as RHS: LHS `b=3`
+runs for its side effect (b updated to 3), RHS
+`b+1` becomes the comma-value (4), then the outer
+`+=` adds 4 into a, giving 9.
+
 ## `if (a == -5)`, `unsigned char g = 200`, `buf[0]+buf[1]`
 
 Fixtures `1340` (`int a=-5; if (a == -5) return 1;
