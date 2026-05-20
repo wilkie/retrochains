@@ -1959,6 +1959,27 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `*p = five()` deref-store call, iterative fib, char arr copy loop
+
+Fixtures `1424` (`int five(void){return 5;} *p =
+five(); return x;` — store function-call result
+through pointer dereference), `1425` (`int a=0, b=1;
+for (i=0;i<5;i++) { t=a+b; a=b; b=t; } return a;` —
+iterative Fibonacci via three-variable rolling
+update), and `1426` (`char src[3]="ab"; char dst[3];
+for(i=0;i<3;i++) dst[i] = src[i]; return dst[1];` —
+copy char-array elements via indexed loop) all pass
+on the first capture. `1424` confirms call-as-RHS of
+deref store: call lands in AX, then `mov bx,[bp-p] /
+mov word ptr [bx],ax`. `1425` runs five Fibonacci
+iterations: (0,1)→(1,1)→(1,2)→(2,3)→(3,5)→(5,8).
+Return a = 5. The three-var shuffle `t=a+b; a=b; b=
+t;` requires three memory loads + stores per
+iteration; no register-allocation fusion. `1426`
+confirms global char-arr to global char-arr copy:
+loaded byte-by-byte through `mov al,[bx+_src] / mov
+[bx+_dst],al`. dst[1] = 'b' = 98.
+
 ## `*p = *p + 1`, `-(-10)`, `a >>= 2; a <<= 1;`
 
 Fixtures `1421` (`*p = *p + 1; return a;` — read-
