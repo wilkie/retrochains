@@ -1959,6 +1959,26 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Pointer-to-pointer deref, `int = sizeof(int)`, `int += char`
+
+Fixtures `1232` (`int **pp = &p; return **pp;` —
+double-dereference of a pointer-to-pointer), `1233`
+(`int n = sizeof(int); return n;` — local int
+initialized from a `sizeof` expression), and `1234`
+(`int a=10; char c=3; a += c; return a;` — int local
+compound `+=` with a `char` RHS) all pass on the first
+capture. `1232` confirms `**pp` lowers as nested loads:
+`mov bx,[bp-N] / mov bx,[bx] / mov ax,[bx]` — each
+indirection costs one register-temp + one load, no
+fancy multi-deref fold. `1233` confirms `sizeof(int)`
+constant-folds at parse time to the literal `2`, so the
+init becomes a plain `mov word ptr [bp-N],2` — no
+runtime computation. `1234` confirms `int += char`
+promotes the RHS via `cbw` before the `add`: load char,
+`cbw`, then `add word ptr [bp-N],ax` — symmetric to
+`1213`'s `char += int` shape but with the narrow-type
+operand on the RHS rather than the LHS lvalue.
+
 ## `if` w/o else and compound body, discarded call, `char * int` LHS
 
 Fixtures `1229` (`if (a > 3) a *= 2; return a;` — a
