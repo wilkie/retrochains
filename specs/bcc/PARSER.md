@@ -1959,6 +1959,26 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `*p = *p + 1`, `-(-10)`, `a >>= 2; a <<= 1;`
+
+Fixtures `1421` (`*p = *p + 1; return a;` — read-
+modify-write through pointer using an explicit add
+rather than compound), `1422` (`int a = -10; return -
+a;` — unary minus on a negative-initialized variable),
+and `1423` (`int a=8; a >>= 2; a <<= 1; return a;` —
+sequential right-shift then left-shift on same local)
+all pass on the first capture. `1421` confirms the
+non-compound RMW path: load `*p` into AX (=5), add
+1 (AX=6), store back through `*p`. Result a = 6.
+This is the un-fused counterpart to a `(*p)++` --
+explicit add doesn't get the compound-inc shortcut.
+`1422` confirms `-a` on a negative-init var: -(-10)
+= 10, which is the standard `neg ax` after load.
+`1423` is two sequential compound shifts: `a >>= 2`
+folds to two unrolled `shr ax,1` (K<=3 threshold per
+batch 290), then `a <<= 1` similarly. 8>>2 = 2,
+then 2<<1 = 4.
+
 ## `v = a[1]++`, linked-node `a.next->v`, `sumC` char arr
 
 Fixtures `1418` (`int a[3]; ... v = a[1]++; return
