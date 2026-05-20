@@ -1959,6 +1959,26 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `a ^= 0xff`, switch-in-fn with returns, `f() ? :`
+
+Fixtures `1280` (`int a=0x55; a ^= 0xff; return a;` —
+int compound XOR with a mask), `1281` (`int classify
+(int x) { switch (x) { case 0: return 100; case 1:
+return 200; default: return 0; } }` — switch with
+explicit `return` from each case rather than `break`-
+to-join), and `1282` (`int f(void) { return 1; }
+return f() ? 10 : 20;` — function call result used as
+the ternary condition) all pass on the first capture.
+`1280` confirms `^=` with const folds into a single
+`xor word ptr [bp-N],0FFh` directly. `1281` is the
+case-returns variant of switch: each case ends with
+`return` rather than `break`, so no shared join point
+is reached -- BCC emits direct jumps to the function
+epilogue. `1282` confirms call-as-cond: AX is loaded
+from the call return, tested with `or ax,ax / jne`,
+then either branch runs through the standard ternary
+materialization to the return epilogue.
+
 ## `fib(6)`, `p = a + i`, `a &= (1<<n)-1`
 
 Fixtures `1277` (`int fib(int n) { if (n<2) return n;
