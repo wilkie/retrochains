@@ -1959,6 +1959,26 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `*(a + i)`, `if (!f())`, `a += b >> 1`
+
+Fixtures `1379` (`int a[3]; int i=1; return *(a + i);`
+— deref of pointer-plus-variable from array base
+directly), `1380` (`int f(void) { return 0; } if (!f())
+return 1;` — if-condition using logical-not on a call
+result), and `1381` (`int a=10; int b=4; a += b >> 1;
+return a;` — int compound `+=` with shift-expression
+RHS) all pass on the first capture. `1379` confirms
+`*(a + i)` decays the array name to a pointer, adds
+scaled index, then dereferences -- same lowering as
+`a[i]` but written through pointer syntax. Result 20.
+`1380` confirms `!f()`: call result lands in AX, `or
+ax,ax / je TRUE_BRANCH` shape (inverted) -- the
+if-cond's polarity flips so a *zero* call result is
+the "true" case. `1381` confirms shift-expr-as-RHS
+of compound: `b >> 1` computes into AX first (b=4
+shifts to 2), then `add word ptr [bp-a],ax`. Result
+10+2 = 12.
+
 ## `int n = 1 << 15`, `char c = 'a' + 1`, `a += (a+1, 2)`
 
 Fixtures `1376` (`int n = 1 << 15; return n;` — int
