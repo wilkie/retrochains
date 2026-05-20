@@ -1959,6 +1959,30 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Char deref store, int divide by 4, do-while summing
+
+Fixtures `1247` (`char *p = &c; *p = 42; return c;` —
+write a constant through a char pointer to a local
+slot), `1248` (`int x=20; return x / 4;` — signed-int
+divide by a power-of-2 constant), and `1249` (`do { s
++= i; i++; } while (i<5); return s;` — do-while loop
+summing the counter through compound `+=`) all pass
+on the first capture. `1247` confirms `*p = imm`
+through a char-pointer lvalue: `mov bx,[bp-N] / mov
+byte ptr [bx],42` -- a fixed byte-store immediate, no
+extension. `1248` is the divide-pow2 counterpart to
+the mul-pow2 K-threshold fixes: divide by 4 emits a
+genuine `cwd / idiv` because signed-divide-by-pow2
+must round toward zero (not just shift right, which
+rounds toward -inf for negatives) -- BCC does *not*
+shortcut to `sar ax,2` here. This was a useful
+confirmation since shift-form is the mul-pow2 default
+above K=4. `1249` confirms the do-while frame: body
+emits before the condition test, the test compares
+the slot to 5 with `cmp word ptr [bp-N],5 / jl
+TOP` -- a back-edge jump rather than the
+test-then-body shape we get from `while`.
+
 ## Chained postdec, while body w/ continue, `char += 100`
 
 Fixtures `1244` (`int a=5; b=a--; c=a--; return
