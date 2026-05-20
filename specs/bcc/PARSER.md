@@ -1959,6 +1959,27 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `int n = 1 << 15`, `char c = 'a' + 1`, `a += (a+1, 2)`
+
+Fixtures `1376` (`int n = 1 << 15; return n;` — int
+init from a shift that overflows signed int range),
+`1377` (`char c = 'a' + 1; return c;` — char init
+from char-literal-plus-int arithmetic), and `1378`
+(`int a=5; a += (a + 1, 2); return a;` — int compound
+`+=` whose RHS is a comma expression discarding an
+expression involving the LHS) all pass on the first
+capture. `1376` confirms the constant folder evaluates
+`1 << 15 = 32768`, which doesn't fit in signed int but
+just becomes 0x8000 = -32768 as the bit pattern. Init
+emits `mov word ptr [bp-n], 8000h`. Return value is
+-32768; exit-code interpretation depends on shell
+(low byte = 0). `1377` confirms char arith fold:
+`'a' + 1` = 97+1 = 98, init becomes `mov byte ptr [bp-
+c],62h`. `1378` confirms comma-as-compound-RHS: LHS
+`a+1` is evaluated for side effect (none here, value
+discarded), RHS `2` becomes the comma value, then
+outer `+=` adds 2 to a. Result a = 5+2 = 7.
+
 ## Recursive `rpow(2,5)`, `a /= b[0]`, `buf[0] | buf[1]`
 
 Fixtures `1373` (`int rpow(int b, int e) { if (e==0)
