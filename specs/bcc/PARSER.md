@@ -1959,6 +1959,31 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `fib(6)`, `p = a + i`, `a &= (1<<n)-1`
+
+Fixtures `1277` (`int fib(int n) { if (n<2) return n;
+return fib(n-1) + fib(n-2); }` — recursive Fibonacci
+with *two* recursive call sites in one expression),
+`1278` (`int *p; p = a + i; return *p;` — pointer-
+plus-variable arithmetic), and `1279` (`int a=0xff;
+int n=3; a &= (1<<n) - 1; return a;` — int compound
+`&=` with mask computed from a shift-minus-one) all
+pass on the first capture. `1277` is the two-recursive-
+call counterpart to `1220`'s factorial: the first
+`fib(n-1)` result is pushed before the second `fib(n-
+2)` call, then popped for the final `add`. The frame
+holds 4 bytes (just `n`) since `n-1` and `n-2` are
+both transient values. Fib(6) returns 8. `1278`
+confirms pointer-plus-variable: `i` is loaded, scaled
+by 2 via `shl ax,1` for the int-sized stride, then
+added to the array base address `_a` -- so `p`
+points at `a[1]`. `1279` confirms the entire RHS
+`(1<<n)-1` is computed at runtime since `n` is a
+variable: `mov ax,1 / mov cl,[bp-n] / shl ax,cl /
+dec ax / and [bp-a],ax`. Combined with `1255`'s
+`a |= (1<<b)`, this is the classic "low-N bit mask"
+runtime idiom.
+
 ## `swap(int*, int*)`, `a[i+j]`, `s[i] = 'a' + i`
 
 Fixtures `1274` (`void swap(int *a, int *b) { int t =
