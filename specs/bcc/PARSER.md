@@ -1983,6 +1983,19 @@ Notably this is *not* fused as `mul by 3 then neg`;
 BCC just feeds the negative immediate directly into the
 multiply.
 
+**Process note**: `1242`'s first source mixed
+declarations and statements (`s.x = 3; int a = 10;`)
+which BC++ 2.0 rejects with `Expression syntax in
+function main` — BC++ 2.0 is strictly C89, requiring
+all decls at the top of a block before any statement.
+Source was corrected to declare `int a` up front. The
+xfix verify originally "matched" the error-output
+shape (exit_code=1, no OBJ) — byte-exact at the
+shell-output level, but not exercising codegen.
+Always inspect `expected/manifest.toml` for
+`exit_code = 0` and an OBJ entry when capturing a
+positive probe.
+
 ## `&&` short-circuit with side effect, `fn(char a[])`, comma in for-init
 
 Fixtures `1238` (`int a=1; int b=5; if (a && ++b) return
