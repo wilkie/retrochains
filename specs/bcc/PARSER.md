@@ -1959,6 +1959,28 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Call w/ arith arg, `char |= int`, `int |= (1 << var)`
+
+Fixtures `1253` (`return f(5 + 3);` — function called
+with a literal-arithmetic expression as its argument),
+`1254` (`char c=5; int n=0xf0; c |= n; return c;` —
+char compound `|=` with an int RHS), and `1255` (`int
+a=3; int b=4; a |= (1 << b); return a;` — int compound
+`|=` whose RHS is a shift expression with a variable
+amount) all pass on the first capture. `1253` confirms
+the constant folder evaluates `5 + 3 = 8` at parse
+time, so the call site emits `mov ax,8 / push ax /
+call _f` -- no runtime add. `1254` is the symmetric
+counterpart to batch 305's `int += char`: char `|=`
+int promotes the LHS char to int via `cbw`, ORs in
+the int RHS, then narrows back via byte-store. The
+0xf0 high-nibble survives the narrow since it's still
+in char range, giving `c = 0xf5`. `1255` confirms
+`(1 << var)` is *not* constant-folded (RHS is a
+runtime variable), so we see `mov ax,1 / mov cl,
+[bp-N] / shl ax,cl` materialize the shifted value
+before the OR -- a runtime bit-set idiom.
+
 ## Unsigned int divide by 4, char div by var, global init bitwise expr
 
 Fixtures `1250` (`unsigned a=20; return a / 4;` —
