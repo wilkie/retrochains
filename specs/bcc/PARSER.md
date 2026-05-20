@@ -1959,6 +1959,29 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## strcpy-style `cp(d,s)`, `a += b++`, `a += ++b`
+
+Fixtures `1346` (`void cp(char *d, char *s) { while
+(*s) *d++ = *s++; *d = 0; }` — strcpy-style char-array
+copy with null terminator), `1347` (`int a=5; int b=3;
+a += b++; return a;` — int compound `+=` with postfix-
+increment RHS), and `1348` (`int a=5; int b=3; a += ++
+b; return a;` — int compound `+=` with prefix-
+increment RHS) all pass on the first capture. `1346`
+is the canonical libc-strcpy idiom in tight form: each
+loop iteration reads `*s` for the test, copies to
+`*d`, then bumps both pointers via postfix. The null
+sentinel test (`while (*s)`) exits when the source
+hits 0; the final `*d = 0` writes the null terminator.
+Confirms the `*d++ = *s++` shape doesn't need any
+intermediate stores. `1347` confirms `a += b++`:
+load `b` into AX (=3), `add ax,[bp-a]` mistake? Wait,
+let me re-check. Actually: AX = pre-inc value (3),
+then `inc b`, then `add [bp-a],ax`. So a = 5+3 = 8.
+`1348` confirms `a += ++b`: `inc b`, then load
+post-inc value (4) into AX, then `add [bp-a],ax`.
+So a = 5+4 = 9.
+
 ## `*nextp("ab")`, `inc(&x)` twice, `a += (b=3, b+1)`
 
 Fixtures `1343` (`char *nextp(char *p) { return p + 1;
