@@ -1959,6 +1959,54 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `register` overrides use-count; `*a++` int-ptr `inc si/inc si`
+
+Fixtures `1550` (`register int x = 5; return x;` —
+register keyword with single use), `1551` (`sum_n`
+with `while (n--) s += *a++;`), and `1552` (two
+globals `a = 3; b = 4; return a + b;`) all pass on
+the first capture.
+
+- `1550` (**finding**): the `register` keyword
+  **forces enregistration** even when the
+  use-count rule would not promote. `x` has only 1
+  syntactic use (the return) — normally it would
+  stay on stack — but with `register int x` it goes
+  to SI. So `register` is an explicit override
+  ("yes please enregister this") that complements
+  the implicit forcing flags (volatile prevents
+  enregistration, address-taken prevents it). The
+  hint *is* honored by BCC 2.0, unlike some later
+  compilers that ignore it.
+- `1551` shows the canonical "pointer + count loop":
+  `a` → SI (read+inc), `n` → DX (dec+test, scratch
+  reg used because no calls), `s` → DI (compound +=).
+  Two notable lowerings:
+  - **`a++` for `int *` advances by 2 via `inc si /
+    inc si`** — the same inc-chain optimisation as
+    integer `+= 2` ([[batch-388-arr-or-incpair]]),
+    applied to pointer arithmetic via the
+    sizeof(int)=2 stride.
+  - **`while (n--)`** lowers to `mov ax, dx / dec
+    dx / or ax, ax / jne body` — the postfix
+    decrement saves the *old* value of n into AX
+    before decrementing, then tests AX. This
+    materialises the "post" semantics correctly.
+- `1552`: confirms global-from-global binop uses the
+  memory-operand form. `a + b` where both are
+  globals lowers to `mov ax, [_a] / add ax, [_b]`
+  with the `0x03 06 disp16` form (`add r16, r/m16`,
+  disp16 direct), saving an extra `mov ax,[_b] /
+  add ax,ax` round-trip. Two LEDATA FIXUPPs (one
+  per global) but only one `add` instruction.
+
+So the enregistration-disqualifier list is now
+complete:
+- forced-OUT-of-register: use-count<2, `&` taken,
+  `volatile`
+- forced-INTO-register: `register` keyword (BCC
+  honours it)
+
 ## `volatile` blocks enregistration; `5+3` global init folds at compile time
 
 Fixtures `1547` (`dbl(a + b)` — binop result passed
