@@ -1959,6 +1959,29 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Early return from for, char-arith subscript, `int += a*b`
+
+Fixtures `1256` (`for (i=0;i<10;i++) { if (i==3)
+return i; } return -1;` — return statement nested
+inside a for-loop body), `1257` (`return arr['B' -
+'A'];` — array subscript with a char-literal arithmetic
+expression as the index), and `1258` (`int a=2; int
+b=3; int s=10; s += a * b; return s;` — int local
+compound `+=` whose RHS is the product of two local
+vars) all pass on the first capture. `1256` confirms
+that `return` from inside a loop body emits a direct
+jump to the function epilogue -- no loop-cleanup
+machinery, just the value into AX, jump to the
+single `pop bp / ret` site. `1257` confirms char
+literals fold to integers at parse time: `'B' - 'A'`
+becomes the literal `1`, and the subscript reduces to
+`arr[1]` -- a fixed offset, no runtime char arith
+emitted. `1258` is the binop-via-stack-spill pattern
+for the RHS: compute `a*b` into AX (push, load b,
+imul), then `add word ptr [bp-N], ax` for the
+compound store -- the multiply isn't fused with the
+slot-add.
+
 ## Call w/ arith arg, `char |= int`, `int |= (1 << var)`
 
 Fixtures `1253` (`return f(5 + 3);` — function called
