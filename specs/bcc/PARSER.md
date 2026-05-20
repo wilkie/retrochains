@@ -1959,6 +1959,51 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Float array stride 4; global double full 8-byte storage; `fdiv` native
+
+Fixtures `1679` (float array), `1680` (double
+global with init 3.14), and `1681` (double division)
+all pass on the first capture.
+
+- `1679`: a `float a[3]` on the stack lays elements
+  at 4-byte stride (`[bp-12]`, `[bp-8]`, `[bp-4]`).
+  Sum chain `a[0]+a[1]+a[2]` runs entirely on the
+  FPU stack without intermediate spills:
+  ```
+  fld [a[0]]
+  fadd [a[1]]
+  fadd [a[2]]
+  ```
+  The FPU's deeper register stack (8 slots)
+  accommodates these in-flight results — no need
+  to materialise intermediates to memory. Also
+  reconfirms **`fld1`** for the `1.0f` literal in
+  array element init.
+- `1680` (**global double full-precision**): a
+  global `double g = 3.14;` is stored in `_DATA` as
+  **8 bytes full double precision** — `1f 85 eb 51
+  b8 1e 09 40` (3.14 exactly as IEEE 754 double).
+  Unlike the local-literal optimisation in [[batch-
+  453-fp-conv]] which can downconvert to float
+  storage, globals must preserve the declared type
+  exactly. The load is `fld qword [_g]` (`9b dd /0`).
+- `1681` (**FP division native**): `double / double`
+  uses **`fdiv qword [m]`** (`dc /6`, ModR/M `76` =
+  mod=01 rm=110 [bp+d] /6=FDIV) directly. No
+  helper call — the FPU does all FP arithmetic
+  natively (add/sub/mul/div). Only the int
+  conversion needs `N_FTOL@`.
+
+Updated FP op encoding additions:
+| Op | Encoding |
+|----|----------|
+| `fdiv qword [m]`  | `9b dc /6` |
+| `fdiv dword [m]`  | `9b d8 /6` |
+| `fdivr qword [m]` | `9b dc /7` (reverse) |
+| `fdivr dword [m]` | `9b d8 /7` |
+
+So FP arithmetic is **entirely inline** — only `<-> int` conversion uses helpers. The Borland FP support is mostly just instruction emission with the 8087/8088 op set.
+
 ## FP conv free via reg stack; FP arg = `sub sp / fstp qword [sp]`
 
 Fixtures `1676` (float→double), `1677` (double→
