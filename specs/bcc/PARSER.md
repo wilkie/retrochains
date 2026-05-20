@@ -1959,6 +1959,29 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `char c += a*2`, identical-literal ptr eq, `s.x + a[1]`
+
+Fixtures `1430` (`int a=5; char c=10; c += a * 2;
+return c;` — char compound `+=` with int-mul RHS),
+`1431` (`char *p = "abc"; char *q = "abc"; if (p == q)
+return 1; return 0;` — equality between two pointers
+that each point to the same string literal text), and
+`1432` (`struct S { int x; }; struct S s={3}; int a[2]
+={5,7}; return s.x + a[1];` — sum of a struct-field
+load and an array-elem load) all pass on the first
+capture. `1430` confirms the char-`+=`-int-result
+shape: mul `a * 2` computes into AX (=10), then byte-
+narrow-add into c's slot. Result 10+10 = 20. `1431`
+confirms BCC behavior on duplicated string literals:
+both `"abc"` references can either share storage
+(literal pool dedup) or be separate -- the OBJ
+match shows whatever BCC actually does, and the
+return value reveals whether they're pooled. `1432`
+is the cross-aggregate sum: each load reads from a
+different global, both add into AX. 3+7 = 10.
+Process note: 1430's first verify hung in DOSBox
+(another flaky audio init); single retry passed.
+
 ## `if (x >= 0)`, `a[char i]`, global `gp->x = 42`
 
 Fixtures `1427` (`int isnneg(int x) { if (x >= 0)
