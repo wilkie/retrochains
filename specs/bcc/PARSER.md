@@ -1959,6 +1959,27 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `b = a--`, `*p++ = v`, `char c = (char)a`
+
+Fixtures `1298` (`int a=5; int b; b = a--; return b;`
+— int postfix-`--` result captured into another local),
+`1299` (`*p++ = 'A'; *p++ = 'B'; *p = 'C';` — char
+store through pointer with postinc, repeated), and
+`1300` (`int a=300; char c = (char)a; return c;` —
+char local initialized from a narrowing cast) all pass
+on the first capture. `1298` confirms the int-postdec
+read-then-decrement: AX gets `a`'s pre-value (5),
+slot decrements to 4, then `b = AX` writes 5 into b.
+`1299` confirms `*p++ = imm` byte-store-with-postinc:
+each statement writes its char immediate to `[bx]`
+then `inc bx` (char stride is 1) and stores `bx`
+back to `[bp-p]`. The final `*p = 'C'` skips the
+postinc since `p` isn't bumped. `1300` is the
+init-from-cast variant of `1288`: 300 = 0x012C, the
+narrow takes the low byte 0x2C = 44 and that value
+sign-extends to int when read back via `cbw` for the
+return.
+
 ## `char c *= 3`, abs via ternary, `f(char_var)`
 
 Fixtures `1295` (`char c=5; c *= 3; return c;` — char
