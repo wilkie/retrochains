@@ -1959,6 +1959,33 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `sum(arr, 3)` array via ptr, `char a[5] = "ab"`, swap elems
+
+Fixtures `1385` (`int sum(int *a, int n) { ... for
+(i=0;i<n;i++) s += a[i]; return s; } return sum(arr,
+3);` — sum function taking an int* pointer and length),
+`1386` (`char a[5] = "ab"; return a[3];` — global char
+array sized larger than the string-literal init), and
+`1387` (`int a[2]; t=a[0]; a[0]=a[1]; a[1]=t; return
+a[0];` — three-statement swap of two array elements
+through a temp) all pass on the first capture (after a
+single transient DOSBox hang on 1385's initial capture
+that required killing the stuck process and retrying).
+`1385` confirms array-as-ptr argument + loop sum:
+caller passes `arr` (base address) and `3`, callee
+indexes via `a[i]`. Sum 1+2+3 = 6. `1386` confirms
+oversized char-array partial string init: "ab\0"
+fills the first 3 bytes, remaining 2 zero-fill in the
+data segment record. `a[3]` returns 0. `1387` confirms
+the classic temp-swap idiom emits three independent
+load-store sequences with no fusion/elision -- just
+six word moves.
+
+**Process note**: batch 356 hit another DOSBox hang
+(third in this session, all on different fixtures);
+kill + retry succeeded each time. The host's PulseAudio
+init is unreliable.
+
 ## while-inside-for, `a |= s.x`, `c = (char)(a + 100)`
 
 Fixtures `1382` (`for(i=0;i<3;i++) { j=i; while (j>0)
