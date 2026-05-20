@@ -1959,6 +1959,52 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Switch dispatch cutoff: **4 dense cases triggers jump-table**
+
+Fixtures `1601` (4 dense), `1602` (5 dense), and
+`1603` (6 dense) all use a **jump-table dispatch**,
+while `1598` (2 cases) and `1600` (3-4 with sparse
+intent) and `132/072` (3 dense cases) all use linear
+cmp-jcc. The cutoff: **4 or more consecutive dense
+cases** triggers BCC's jump-table dispatch.
+
+Jump-table dispatch shape (from `1601`):
+```
+8b 5e fe       mov bx, [bp-2]      ; scrutinee → BX
+83 fb 03       cmp bx, 3           ; compare to max case
+77 1b          ja default          ; unsigned above → default/end
+d1 e3          shl bx, 1           ; scale by 2 (word offsets)
+2e ff a7 d16   jmp cs:[bx + table] ; indirect jmp through CS-prefixed
+                                   ; table base address
+```
+Followed by case bodies, with a 2-byte-per-entry
+table in the code segment containing the offset of
+each case's body label (relative to CS).
+
+Notable details:
+- **Bounds check is unsigned** (`ja`, opcode `0x77`)
+  — `case 0` is always covered, so anything `<0`
+  (signed-wise) is wraps to "above 3" in unsigned
+  terms and goes to default. So negative scrutinees
+  also go to default.
+- **`shl bx, 1`** scales the index since table
+  entries are 2 bytes (word offsets).
+- **`2e` prefix** (CS segment override) — the jump
+  table lives in the code segment (`_TEXT`), so the
+  indirect `jmp [bx + disp]` reads from CS.
+- The table itself has **2 bytes per case** + 0
+  bytes for default (default just falls through the
+  initial bounds check).
+
+So the lowering rule:
+- Dense 0..N-1 cases with N ≤ 3: linear cmp-jcc chain
+- Dense 0..N-1 cases with N ≥ 4: jump-table via
+  `cmp / ja / shl / jmp cs:[bx + table]`
+
+Sparse case sets (e.g. `case 1; case 5; case 10`)
+likely use linear chain regardless of count — needs
+a sparse-case probe to confirm.
+
 ## Small switch: linear cmp-jcc chain; `case 0` uses `or ax,ax` shortcut
 
 Fixtures `1598` (2 cases no default), `1599` (1
