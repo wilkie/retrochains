@@ -1959,6 +1959,28 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `char * char`, fn modifies param, `char *` arg write-through
+
+Fixtures `1223` (`char a=5; char b=4; int c = a*b;
+return c;` — char times char with int destination),
+`1224` (`int f(int x) { x++; return x; } return f(10);`
+— callee mutates its param), and `1225` (`void f(char
+*p){ *p = 7; } char c=0; f(&c); return c;` — caller
+passes `&c`, callee writes through the pointer arg) all
+pass on the first capture. `1223` confirms char×char
+goes through the standard char-to-int promotion: both
+operands `cbw`'d into AX/DX, `imul dx`, store the
+16-bit result into the `int` slot — no narrow-form
+mul. `1224` confirms params live in the same
+slot-relative frame as locals: `x++` lowers to `inc
+word ptr [bp+offset]` where `[bp+offset]` is the
+positional arg slot above the saved BP, and the return
+re-reads from that same slot. `1225` confirms the
+`void`-returning fn shape (no AX setup at return) plus
+`*p = const` byte store: callee `mov bx,[bp+arg] / mov
+byte ptr [bx],7`, caller stores `&c` to the slot and
+reads it back after the call.
+
 ## Factorial recursion, chained sub three vars, neg `int` `>> 1`
 
 Fixtures `1220` (`int fact(int n) { if (n<=1) return 1;
