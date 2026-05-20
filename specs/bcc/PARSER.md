@@ -1959,6 +1959,50 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## unsigned `%2` → `and ax,1`; mul always `imul` regardless of signedness
+
+Fixtures `1574` (`unsigned int v; return v % 2;`),
+`1575` (`unsigned int v; return v * 2;`), and `1576`
+(`unsigned int v; return v * 3;`) all pass on the
+first capture.
+
+- `1574` (**finding**): unsigned mod-by-pow2 K
+  lowers to **`and ax, K-1`** — for K=2 this is
+  `25 01 00` (`and AX, imm16`, the 3-byte short
+  form, opcode `0x25`). Saves 6+ bytes over the
+  `cwd / idiv bx` shape used for signed mod. So:
+  | Type / op | Codegen |
+  |-----------|---------|
+  | signed `%2`   | `mov bx,2 / cwd / idiv bx` |
+  | unsigned `%2` | `and ax, 1`                |
+- `1575`: unsigned `v * 2` lowers to **same**
+  `shl ax, 1` as signed (`D1 /4`). Mul-by-pow2
+  ignores signedness — addition/shifting is closed
+  mod 2^k for both.
+- `1576` (**finding**): unsigned `v * 3` uses
+  **`imul`** (signed mul, `F7 /5`), not `mul`
+  (unsigned mul, `F7 /4`). The bytes are `mov dx,
+  3 / imul dx` — same as signed `1520`. BCC always
+  uses signed `imul` for multiplication regardless
+  of operand signedness, because the low 16 bits
+  of the product are identical whether `imul` or
+  `mul` is used (C requires only the low word for
+  int*int truncation). So **mul codegen does not
+  distinguish signed/unsigned** — only div/mod does.
+
+Updated summary table for signedness-dependent
+arithmetic:
+| Op | Signed lowering | Unsigned lowering |
+|----|-----------------|-------------------|
+| `*K` | `imul` (or `shl` for K=pow2) | `imul` (or `shl` for K=pow2) — same |
+| `/K` (K=pow2) | `cwd / idiv bx` | `shr ax, log2(K)` |
+| `/K` (K≠pow2) | `cwd / idiv bx` | `xor dx,dx / div bx` |
+| `%K` (K=pow2) | `cwd / idiv bx` (remainder in DX) | `and ax, K-1` |
+| `%K` (K≠pow2) | `cwd / idiv bx` (remainder in DX) | `xor dx,dx / div bx` (DX) |
+
+(Last column for non-pow2 unsigned div/mod not yet
+probed but consistent with the 8086 ABI.)
+
 ## `v*2` → `shl ax,1`; signed `/2` → `idiv`; unsigned `/2` → `shr ax,1`
 
 Fixtures `1571` (`v * 2` signed int), `1572` (`v / 2`
