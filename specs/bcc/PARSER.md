@@ -1959,6 +1959,49 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Indirect call via `ff /2`; `n--` returns old via `dec [mem]`
+
+Fixtures `1658` (fn-ptr array indirect call), `1659`
+(`while (decr())` fn-call cond), and `1660` (array
+stores from binops) all pass on the first capture.
+
+- `1658` (**indirect near call**): calling through
+  a function pointer uses **`ff /2` (call near
+  r/m16)** — specifically `ff 56 disp` for `call
+  word [bp+disp]`. Same opcode family as data access
+  (`ff` with /2 ModR/M selects "call indirect" vs
+  /0 for inc, /1 dec, etc.). For an array of fn
+  pointers, each call site emits `ff 56 disp` with
+  the appropriate offset.
+- `1659` (**`n--` global**): returning post-
+  decrement of a global uses **`a1 [_n]`** (load
+  AX from global) followed by **`ff 0e disp`** —
+  `dec word [_n]` (opcode `ff /1` mod=00 rm=110
+  with disp16 = direct memory). So `return n--`
+  is a two-instruction post-decrement: load
+  pre-value into return register, then `dec word
+  [mem]` in place. No temp save needed since the
+  return value was captured before the dec.
+- `1660`: array stores from binops use the small-
+  expression shortcuts in expression context:
+  `a[2] = x - 1` lowers to `mov ax,si / dec ax /
+  mov [bp-2], ax`. So `expr - 1` does use `dec
+  ax` (1 byte) even in expression context — the
+  longhand `i = i - 1` AX-roundtrip
+  ([[batch-417-inc-dec-syntactic-split]]) was
+  specific to the assignment IR shape.
+
+The `ff /N` opcode family is now characterised:
+| /N | Op             | Notes |
+|----|----------------|-------|
+| /0 | `inc r/m16`    | (used for memory inc) |
+| /1 | `dec r/m16`    | (used for memory dec like `n--`) |
+| /2 | `call near r/m16` | (indirect call) |
+| /3 | `call far ptr16` | (far indirect) |
+| /4 | `jmp near r/m16` | (computed jump — switch table) |
+| /5 | `jmp far ptr16` | |
+| /6 | `push r/m16`   | |
+
 ## `interrupt` saves all regs + sets DS; `cdecl` explicit; `x - K` via `add ax, -K`
 
 Fixtures `1655` (`interrupt void isr()`), `1656`
