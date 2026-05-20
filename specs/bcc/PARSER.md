@@ -1959,6 +1959,62 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Long arithmetic helpers: `N_LXMUL@`, `N_LDIV@`, `N_LXRSH@`
+
+Fixtures `1628` (`long * long`), `1629` (`long /
+long`), and `1630` (`long >> int`) reveal the
+library-helper-based ABI for 32-bit `long`
+arithmetic. All pass on the first capture.
+
+- `1628` (**N_LXMUL@**): `long * long` calls the
+  `N_LXMUL@` helper. **Operands passed in registers**
+  using a high:low word pair convention:
+  - `cx:bx` = first operand (high:low)
+  - `dx:ax` = second operand (high:low)
+  - Result returned in `dx:ax`
+  Long locals stored as 2 word slots: high word at
+  lower offset, low word at higher offset (little-
+  endian word ordering — low word at lower address).
+  After call: `mov [bp-N], dx / mov [bp-N-2], ax` to
+  store the 32-bit result.
+- `1629` (**N_LDIV@**): `long / long` calls
+  `N_LDIV@` with **stack-passed args** (four pushes
+  for the two 32-bit operands, high-to-low order):
+  ```
+  push word [b_high] / push word [b_low]
+  push word [a_high] / push word [a_low]
+  call N_LDIV@
+  mov [r_high], dx / mov [r_low], ax
+  ```
+  Result returned in `dx:ax`. **No caller arg cleanup
+  visible** — the helper handles its own stack
+  cleanup (presumably via `ret 8`).
+- `1630` (**N_LXRSH@**): `long >> int` (signed)
+  uses the long-extended-right-shift helper. ABI:
+  - `dx:ax` = long value
+  - `cl` = shift count (byte-load from int)
+  - Returns `dx:ax`
+
+So **long arithmetic uses two distinct calling
+conventions**:
+- Register-based (CX:BX, DX:AX → DX:AX) for **mul**
+  and shifts.
+- Stack-based (4 pushes → DX:AX) for **div** /
+  **mod**.
+
+The helper names follow a `N_L[X]<op>@` pattern.
+Known helpers so far:
+| Helper | Op | ABI |
+|--------|-----|-----|
+| `N_LXMUL@` | `long *` | CX:BX, DX:AX → DX:AX |
+| `N_LDIV@`  | `long /` | stack-passed → DX:AX |
+| `N_LXRSH@` | `long >>` (signed) | DX:AX + CL → DX:AX |
+
+Likely more exist for: `N_LXLSH@` (shl), `N_LXURSH@`
+(unsigned shr), `N_LMOD@` (mod), `N_LUDIV@` /
+`N_LUMOD@` (unsigned div/mod), `N_LCMP@` (cmp), etc.
+Worth probing.
+
 ## `c*c` int needs full promotion; signed vs unsigned char in mul
 
 Fixtures `1625` (signed `char * char`, int result),
