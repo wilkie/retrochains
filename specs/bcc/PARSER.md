@@ -1959,6 +1959,26 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `v = *p++`, struct-ptr arg, `a -= b*c`
+
+Fixtures `1289` (`int *p = a; int v = *p++; return v;`
+— int-pointer postinc combined with dereference),
+`1290` (`void inc(struct S *p) { p->x++; }` — function
+takes a struct pointer and mutates a field), and
+`1291` (`int a=20; int b=3; int c=2; a -= b*c; return
+a;` — int compound `-=` whose RHS is a multiply of
+two locals) all pass on the first capture. `1289`
+confirms `*p++` int variant: load `*p` into AX via the
+ptr-deref word load, then `add word ptr [bp-p],2`
+(int-stride 2). The pre-increment value of `p` is
+already the address that was dereferenced. `1290`
+confirms struct-ptr arg + arrow-field postinc: the
+arg slot holds `&s`, the body computes
+`mov bx,[bp+p] / inc word ptr [bx+0]` -- compact and
+direct. `1291` confirms `-=` with multiply RHS: `b*c`
+is computed via stack-spill mul (load b, push, load c,
+imul), then `sub word ptr [bp-a],ax` -- so 20 - 6 = 14.
+
 ## `a += twice(3)`, `c = ?:`, `a += (char)b`
 
 Fixtures `1286` (`int a=5; a += twice(3); return a;` —
