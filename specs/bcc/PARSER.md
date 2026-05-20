@@ -1959,6 +1959,27 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## 2D int array store, fn returns comparison, int OR of two vars
+
+Fixtures `1259` (`int a[2][3]; a[1][2] = 7; return
+a[1][2];` — write and read a 2D int array element),
+`1260` (`int isEq(int x, int y) { return x == y; }` —
+function whose return is a comparison result), and
+`1261` (`int a=0xf0; int b=0x0f; return a | b;` —
+binop `|` between two local int vars) all pass on the
+first capture. `1259` confirms the row-major 2D layout:
+`a[1][2]` maps to byte offset `(1 * 3 + 2) * 2 = 10`,
+emitted as `mov [_a+10],...` and `mov ax,[_a+10]` —
+both addresses are constant-folded at compile time.
+`1260` confirms `return x == y` reuses the standard
+compare-as-int boolean-materialization (cmp, sete-style
+through conditional jump) — no special "return of
+boolean" shortcut. `1261` confirms `|` on two locals
+follows the same binop-via-stack-spill as `&` (batch
+295) and `-` (batch 301): LHS into AX, push, RHS into
+AX, pop into DX, `or ax,dx`. The bitwise operators
+share one codegen template.
+
 ## Early return from for, char-arith subscript, `int += a*b`
 
 Fixtures `1256` (`for (i=0;i<10;i++) { if (i==3)
