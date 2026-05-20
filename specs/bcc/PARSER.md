@@ -1959,6 +1959,29 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `a += twice(3)`, `c = ?:`, `a += (char)b`
+
+Fixtures `1286` (`int a=5; a += twice(3); return a;` —
+int local compound `+=` with a function call as RHS),
+`1287` (`c = x > 0 ? 'P' : 'N';` — assignment to a
+char whose RHS is a ternary returning char literals),
+and `1288` (`int a=5; int b=300; a += (char)b; return
+a;` — int local compound `+=` with the RHS narrowed
+by a `(char)` cast) all pass on the first capture.
+`1286` is the local-`+=`-from-call counterpart to
+854's global form: the call result lands in AX, then
+`add word ptr [bp-a],ax`. So 5 + twice(3) = 5 + 6 =
+11. `1287` confirms char destination from char-arm
+ternary: each arm of `?:` writes its char-literal as
+an int into AX (post char-to-int promotion), then the
+final store narrows back to the char slot via `mov
+[bp-c],al` -- so the int-width ternary materialization
+happens regardless of destination type. `1288`
+confirms the (char) cast narrows 300 (= 0x012C) to
+its low byte 0x2C (=44), then sign-extends back to int
+via `cbw` for the `+=`: 5 + 44 = 49. The cast is *not*
+a no-op since 300 doesn't fit in a signed-byte slot.
+
 ## Call in loop body, param as array idx, 3-arg ptr-write fn
 
 Fixtures `1283` (`for (i=1;i<=3;i++) s += dbl(i);` —
