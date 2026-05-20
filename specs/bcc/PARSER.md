@@ -1959,6 +1959,43 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## 2 call-targets: decl order; call+binop chains; `if ("X")` not folded
+
+Fixtures `1580` (2 multi-use locals both used as
+call-targets), `1581` (`int x = seven() + 3` — init
+from call-then-binop), and `1582` (`if ("X")` —
+string-literal as if condition) all pass on the
+first capture.
+
+- `1580` (**resolves open question**): when 2 locals
+  are both reassigned by call-returns (both
+  "call-targets"), they get SI and DI in
+  **declaration order** — `a` → SI, `b` → DI. The
+  earlier hypothesis from [[batch-397-call-cross]]
+  that "the call-target gets SI" only applied when
+  *exactly one* of the multi-use locals is a
+  call-target (in `1508`/`1510` only `c`/`d`
+  respectively was a call-target; the non-call-
+  target locals got DI). With multiple call-
+  targets competing, plain declaration order wins.
+- `1581`: a call result chains directly into a
+  follow-on binop: `call _seven / add ax, 3 / mov
+  [bp-2], ax`. No intermediate save — AX is the
+  call's return register and stays live for the
+  immediate `add`. So `f() + K` (or `f() op K` in
+  general) lowers cleanly to call-then-op.
+- `1582` (**missed optimisation**): `if ("X")` does
+  **not** get folded to constant-true. BCC emits
+  the full template: `mov ax, offset"X" / or ax,ax
+  / je L_else / mov ax,1 / jmp / xor ax,ax`. The
+  string-literal pointer is a known-non-null
+  compile-time value (C guarantees it), but BCC
+  doesn't recognise this in the IR — it emits the
+  generic truthiness test. (Note: at runtime the
+  test will succeed since linker resolves the
+  pointer to a non-zero address, but the test is
+  still wasted code.)
+
 ## unsigned `/7` `xor dx,dx / div bx`, unsigned `<` uses `jae` inverse
 
 Fixtures `1577` (`unsigned v / 7`), `1578` (`unsigned
