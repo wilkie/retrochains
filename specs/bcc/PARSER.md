@@ -1959,6 +1959,61 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## 2D array uses `imul` for row stride; goto = unconstrained jmp; `p->field` via `[bx]`
+
+Fixtures `1700` (2D array sum), `1701` (goto loop),
+and `1702` (`p->field` arrow operator) round out
+the basic control-flow and addressing patterns.
+
+- `1700` (**2D array indexing**): `a[i][j]` (where
+  i, j are variables) lowers to:
+  ```
+  mov ax, si           ; i in SI
+  mov dx, 6            ; row-stride bytes (3 ints × 2)
+  imul dx              ; ax = i * 6
+  mov dx, di           ; j in DI
+  shl dx, 1            ; j * 2 (element-size shortcut)
+  add ax, dx           ; combined byte offset
+  lea dx, [bp-12]      ; base of array
+  add ax, dx           ; final pointer offset
+  mov bx, ax
+  mov ax, [bx]         ; load element
+  ```
+  Notable: **`imul dx`** for the row stride (since
+  the row count is a constant ≥ 2 not a pow2),
+  **`shl dx, 1`** for `j * sizeof(int)` (pow2
+  shortcut). Mixed strategy based on operand
+  characteristics.
+- `1700` also uses **`CX` as a third
+  enregistered local** (sum accumulator) when SI
+  and DI are taken by i, j — confirms the {SI, DI,
+  DX, BX, CX} register pool from earlier batches.
+- `1701` (**`goto` lowering**): a `goto label`
+  emits a **plain `jmp`** to the label's address.
+  The `goto loop / goto done` pattern produces
+  **byte-identical code to a `while` loop** —
+  same `cmp / jl / inc / jmp` structure. The
+  compiler treats `goto` as just another control-
+  flow primitive; no special analysis.
+- `1702` (**`p->field` arrow operator**): lowers
+  to `mov bx, [p_ptr] / mov ax, [bx+field_offset]`.
+  For `a.next->v` (with `v` at field offset 0),
+  the load is just `mov ax, [bx]`. For non-zero
+  offset fields, ModR/M with disp8 (`8b 47 disp`)
+  or disp16 would be used. The arrow operator is
+  **two memory accesses**: load the pointer, then
+  deref + field offset in one combined load.
+
+So the small-model addressing toolkit is now
+complete:
+| Pattern | Encoding |
+|---------|----------|
+| `[bp+disp]` (local/param) | mod=01/10 rm=110 |
+| `[bx]` / `[bx+disp]` (ptr deref) | mod=00/01 rm=111 |
+| `[si]` / `[si+disp]` | mod=00/01 rm=100 |
+| `[disp16]` (direct global) | mod=00 rm=110 |
+| `[bx+si]` etc. (rare) | mod=00 rm=000-011 |
+
 ## Recursion via cdecl push+call; SI/DI callee-save; multi-return = one epilogue
 
 Fixtures `1697` (recursive factorial), `1698`
