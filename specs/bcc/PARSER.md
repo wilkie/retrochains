@@ -1959,6 +1959,33 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `char a *= b`, `int a <<= 4`, `p[i]` var subscript
+
+Fixtures `1337` (`char a=5; char b=3; a *= b; return
+a;` — char compound `*=` with a char-var RHS), `1338`
+(`int a=3; a <<= 4; return a;` — int compound `<<=`
+by K=4, the threshold where the unrolled-shift form
+transitions to CL-form), and `1339` (`int *p = a;
+return p[i];` — pointer-subscript with a runtime int
+index) all pass on the first capture. `1337` confirms
+char-`*=`-char goes through char-to-int promote on
+both sides via `cbw`, `imul` in word, then narrow-
+store. Result 5*3 = 15. `1338` confirms K=4 shift
+threshold: at K=4 BCC emits `mov cl,4 / shl ax,cl`
+rather than four unrolled `shl ax,1`, matching the
+mul-pow2 fix from batch 290. Result 3<<4 = 48.
+`1339` confirms pointer-subscript with variable idx:
+`mov bx,[bp-i] / shl bx,1 / add bx,[bp-p] / mov ax,
+[bx]` -- the int-stride scale (×2) is applied to the
+index before adding the ptr base.
+
+**Process note**: batch 340's verify of 1338 hung in
+DOSBox (~15min CPU) before producing output; killed
+the process, and the loop moved to 1339 which
+verified clean. Re-running 1338 verify alone passed
+on first retry. Same flaky audio-init pattern as
+batch 307 -- not a fixture issue.
+
 ## `while(1)+break`, global int arr partial init, `b += a[1]`
 
 Fixtures `1334` (`int i=0; while (1) { i++; if (i==5)
