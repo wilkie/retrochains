@@ -1959,6 +1959,24 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `n %= 7; n /= 2`, `**pp += 3`, `s += a[i]` var idx
+
+Fixtures `1460` (`int n=20; n %= 7; n /= 2; return n;`
+— sequential mod-then-divide compound assigns), `1461`
+(`int **pp = &p; **pp += 3; return x;` — compound `+=`
+through a double-deref pointer-to-pointer), and `1462`
+(`int a[3]={1,2,3}; int i=1; int s=10; s += a[i];
+return s;` — int compound `+=` with array element via
+runtime index) all pass on the first capture. `1460`
+confirms two compound idiv operations on the same
+slot: 20 mod 7 = 6, 6 / 2 = 3. Two `cwd / idiv` blocks
+back-to-back. `1461` confirms RMW through pp: load
+`p` from pp, then load slot via p, add 3, store back —
+three address layers. x = 5+3 = 8. `1462` confirms
+arr-elem-at-var-idx as compound RHS: `i` is scaled by
+2 (int stride), added to `_a`, byte-loaded into AX,
+then added into s. Result 10+2 = 12.
+
 ## `a[0] == a[2]` char elem-elem, global arr `g[1] = v`, nested ternary
 
 Fixtures `1457` (`char a[3]; a[0]='X'; a[2]='X'; if
