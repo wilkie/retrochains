@@ -1959,6 +1959,55 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## do-while keeps body-first shape; side-effect in cond saves old value
+
+Fixtures `1595` (`do { i++; } while (i < 3);`),
+`1596` (`while (i < 3) { s += i; i++; }` multi-stmt
+body), and `1597` (`while (i++ < 3);` side-effect in
+cond) all pass on the first capture.
+
+- `1595` (**finding**): `do { ... } while (cond)`
+  is the **one loop form that keeps its own shape**.
+  Lowering is `init / body / cmp / jcc back` —
+  **no leading `jmp test`** like the
+  while/for variants. The body runs once
+  unconditionally, then the test follows. This
+  matches the natural `do-while` semantics
+  (post-test loop) and is distinct from the bottom-
+  test pattern of the other forms.
+- `1596`: multi-statement while body — standard
+  bottom-test shape, both i and s enregister into
+  SI and DI (both multi-use). Body is just two
+  instructions (`add di, si / inc si`), then test.
+- `1597` (**finding**): `while (i++ < 3)` with the
+  side effect inside the condition lowers to:
+  ```
+  mov ax, si      ; save current i for compare
+  inc si          ; i++ side effect
+  cmp ax, 3       ; compare OLD i against 3
+  jl back         ; loop if old i < 3
+  ```
+  The postfix-increment saves the pre-increment
+  value into AX *before* applying the increment to
+  SI, then compares the saved AX. This correctly
+  implements the postfix `i++` semantics (uses old
+  value, then increments). A *leading* `eb 00`
+  (jmp to next instruction, 2 useless bytes) is
+  emitted because the canonicalisation always
+  inserts the "jmp test" at the top, even when the
+  body and test are the same instructions — a
+  systematic source of dead jumps.
+
+Final loop-form lowering catalog (six base shapes):
+| Form | Canonical lowering |
+|------|--------------------|
+| `if (cond) X else Y` | `cmp / inv-jcc L_else / X / jmp end / L_else: Y` |
+| `while (cond) X`     | `jmp test / X: ... / test: cmp / jcc back` |
+| `for (init; cond; incr) X` | `init / jmp test / X: incr / test: cmp / jcc back` |
+| `do { X } while (cond)` | `X / cmp / jcc back` (no leading jmp!) |
+| `while (1)` / `for (;;)` | `body / jmp back` (no test) |
+| `do { X } while (0)` | `X` only (no overhead) |
+
 ## Bounded loops: `while`/`for` all canonicalise to bottom-test pattern
 
 Fixtures `1592` (`while (i < 3) i++;`), `1593` (`for
