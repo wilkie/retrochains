@@ -1959,6 +1959,53 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `v = ~v` via `not ax`, `v <<= 1` direct `shl si,1`, `if (x)` via `cmp [m],0`
+
+Fixtures `1556` (`v = ~v`), `1557` (`v <<= 1` with v
+in SI), and `1558` (`if (x) return 1` with x on
+stack) all pass on the first capture.
+
+- `1556`: `~v` uses **`not ax`** (`F7 /2`, opcode
+  byte `D0`) via the AX round-trip — same shape as
+  `neg ax` (`F7 /3`) from [[batch-412-shift-zero-
+  boolsum-neg]] fixture `1555`. So single-operand
+  unary ops (`neg`, `not`) consistently use AX
+  round-trip when operating on a register-allocated
+  local.
+- `1557` (**inconsistency**): `v <<= 1` lowers to
+  **`shl si, 1`** (`D1 /4`, ModR/M `E6`) — direct on
+  the home register SI, **no** AX round-trip. So
+  the AX-round-trip pattern does *not* apply to
+  shift compound ops — shifts target the home
+  register directly. Likely because BCC's shift
+  emission is special-cased (the shift count is
+  fixed in CL, so the destination register is
+  always free to be the home).
+- `1558`: `if (x)` with x at `[bp-2]` lowers to
+  `cmp [bp-2], 0 / je L_else / mov ax,1 / jmp / xor
+  ax,ax`. The cmp uses the **`83 /7` imm8-sext
+  form** (4 bytes including disp8) against
+  immediate 0 — no shortcut to `or ax, ax` (which
+  would require loading first anyway). So
+  truthiness against a memory operand is the
+  natural `cmp r/m, 0`, not load-then-test.
+
+Updated AX-round-trip vs direct-register table:
+| Op             | AX round-trip? | Direct on home? |
+|----------------|----------------|------------------|
+| Unary `~`      | yes            | no               |
+| Unary `-`      | yes            | no               |
+| Shift `<<= 1`  | no             | yes (`D1 /4`)    |
+| Shift `>>= 1`  | (likely yes/no?)| not probed      |
+| `++` / `--`    | no             | yes (`inc si`)   |
+| Binop with mem | yes            | no               |
+| `lea` setup    | yes            | no               |
+
+So the AX-round-trip is selective — short ops with
+1-byte forms (`inc`, `dec`) and shift-with-immediate
+get direct-on-home emission; longer single-op
+patterns (`neg`, `not`, mem binops) go through AX.
+
 ## `v<<0` folded away, two bool-cmp adds via push/pop, `v=-v` via `neg ax`
 
 Fixtures `1553` (`return v << 0;` — shift by zero),
