@@ -1959,6 +1959,37 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## stack-arr decay `f(a)`, `if (a[0]>a[1])`, `static int g[3]={...}`
+
+Fixtures `1472` (`int sum(int *p) { return p[0] +
+p[1]; } int main(void) { int a[2]; a[0]=3; a[1]=4;
+return sum(a); }` — stack-array decay to int*
+parameter), `1473` (`int a[3]; a[0]=5; a[1]=3;
+a[2]=7; if (a[0] > a[1]) return 1; return 0;` —
+neighbour int-element compare in `if`), and `1474`
+(`static int g[3] = {7,8,9}; return g[1];` — static-
+qualified global int array with brace initializer)
+all pass on the first capture. `1472` confirms the
+canonical decay shape for stack arrays: caller emits
+`lea ax,[bp-4] / push ax / call _sum / pop cx` (one
+`pop cx` for the 2-byte cdecl cleanup), callee reads
+`mov si,[bp+4]` once and uses `mov ax,[si] / add ax,
+[si+2]` for `p[0]` and `p[1]` — no shift for the
+fixed index, just a literal +2 displacement in the
+ModR/M. `1473` confirms `if (a[0] > a[1])` as a one-
+sided branch: `mov ax,[bp-6] / cmp ax,[bp-4] / jle
+L0 / mov ax,1 / jmp L1 / L0: xor ax,ax / L1:`. The
+inverse jcc (`jle` for `>`) and the in-place `cmp
+ax, m16` form are the standard pattern. Result is 1
+since 5 > 3. `1474` confirms `static` global array
+emission: the LEDATA holds `07 00 08 00 09 00` in
+`_DATA`, but **no PUBDEF** is emitted for `g` — only
+`_main` appears in the PUBDEF record. The load `mov
+ax, [offset _g+2]` (with a LEDATA FIXUPP to the
+private symbol) uses the segment-relative offset
+directly. Static linkage = stripped from the public-
+symbol table while staying in the data segment.
+
 ## `a[i][j]` both var idx, `int x = (a<b)`, `int *p; *p = K`
 
 Fixtures `1469` (`int a[2][3]; int i=1, j=2; a[i][j]
