@@ -1959,6 +1959,28 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `a() + b()`, global `char *p = "abc"`, while-walk to zero
+
+Fixtures `1307` (`int a(void); int b(void); return a() +
+b();` — sum of two distinct function-call results),
+`1308` (`char *p = "abc"; return p[1];` — global char
+pointer initialized to a string literal), and `1309`
+(`while (a[i]) i++; return i;` — while-walk on a
+global int array until a zero is found) all pass on
+the first capture. `1307` confirms two sequential
+distinct calls into AX: the first call's return is
+pushed, then the second call runs, then `pop dx / add
+ax,dx`. Same stack-spill pattern as a non-call binop
+but each operand happens to be a `call`. `1308`
+confirms the string-literal-as-pointer-init: the
+global `p` holds the address of the literal's "abc\0"
+record in `_DATA` (or `DGROUP` depending on model),
+and `p[1]` deref reads 'b'. `1309` confirms a
+while-condition that loads an indexed array element
+each iteration: `mov bx,[bp-i] / shl bx,1 / mov ax,
+[bx+_a] / or ax,ax / je END` -- so the loop walks `i`
+forward until `a[i] == 0`, returning `i = 2`.
+
 ## Static local counter, `b = --a` (char), `if (a[1] > 7)`
 
 Fixtures `1304` (`int counter(void) { static int n=0;
