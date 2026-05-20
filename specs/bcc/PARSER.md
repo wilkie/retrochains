@@ -1959,6 +1959,27 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `uchar + uchar` over 255, swap via struct ptrs, `a -= two()`
+
+Fixtures `1400` (`unsigned char a=200; unsigned char b=
+100; return a + b;` — sum of two unsigned chars whose
+arithmetic result exceeds 255), `1401` (`void swap
+(struct S *a, struct S *b) { int t=a->x; a->x=b->x;
+b->x=t; }` — swap struct fields through two struct
+pointers), and `1402` (`int two(void) { return 2; }
+int a=10; a -= two(); return a;` — int compound `-=`
+with function-call result as RHS) all pass on the
+first capture. `1400` confirms uchar arithmetic: each
+uchar zero-extends to int via `xor ah,ah` (or `mov
+al,...` then implicit zero in ah), 200+100=300. Since
+return type is int, the 300 carries through without
+truncation. Exit-code low byte is 44 (300 mod 256).
+`1401` is the struct-ptr counterpart to `1274`'s int-
+ptr swap: same shape but the deref reads/writes use
+the `->x` field offset. After swap, s1.x=7. `1402`
+confirms `-=` with call result: call lands in AX,
+then `sub word ptr [bp-a],ax`. 10-2 = 8.
+
 ## `while (next() < 3)`, `arr[0] + arr[2]`, `s += (int)a[i]`
 
 Fixtures `1397` (`int next(void) { x++; return x; }
