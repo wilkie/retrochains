@@ -1959,6 +1959,69 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Long `>>1` = `sar/rcr`; `long == 0` = OR halves; `-long` = neg/neg/sbb
+
+Fixtures `1736` (long `>>1` inline), `1737` (long
+== 0 shortcut), and `1738` (long negation) complete
+the inline long-op characterisation.
+
+- `1736` (**long `>>1` inline**): signed `>> 1` on
+  a long is **inlined** as:
+  ```
+  sar high, 1    ; d1 f8 — arith shift right
+  rcr low, 1     ; d1 da — rotate carry right
+  ```
+  The `sar` shifts high right with sign preserved
+  and puts the low bit of high into CF. `rcr` then
+  rotates that CF into the top bit of low. So the
+  full 32-bit signed `>>1` is **2 instructions**.
+  Mirrors the `<<1` inline pattern (`shl/rcl`):
+  - `<<1`: `shl low / rcl high` (carry low→high)
+  - `>>1` (signed): `sar high / rcr low` (carry
+    high→low, sign preserved)
+  - `>>1` (unsigned): `shr high / rcr low` (not
+    yet probed)
+- `1737` (**long == 0 shortcut**): `if (a == 0)`
+  for a `long` uses the **OR-halves trick**:
+  ```
+  mov ax, a_low
+  or ax, a_high      ; ZF = (low | high) == 0
+  jne L_false
+  ```
+  Both halves OR'd into AX in one instruction; ZF
+  tests if all 32 bits are zero. **Much cheaper**
+  than the general 2-step long compare. Specific to
+  comparing against zero (both `==` and `!=`).
+- `1738` (**long negation `-a`**): inlined as
+  3 instructions:
+  ```
+  neg high       ; f7 d8 — negate high
+  neg low        ; f7 da — negate low, CF=1 if low!=0
+  sbb high, 0    ; 1d 00 00 — high -= CF (borrow propagation)
+  ```
+  Result: properly negated 32-bit value with carry
+  propagation between halves. Note the AX/DX
+  register roles in BCC's inline long ops:
+  **AX = HIGH, DX = LOW** for these in-flight
+  operations (opposite of the long return ABI's
+  DX = HIGH, AX = LOW).
+
+Inline long-op catalogue (all 4 bytes or less for
+the core operation):
+| Op | Sequence | Bytes |
+|----|----------|-------|
+| `a + b` | `add low / adc high` | 4 (with mem ops) |
+| `a - b` | `sub low / sbb high` | 4 |
+| `-a` | `neg high / neg low / sbb high, 0` | 7 |
+| `a == 0` | `mov ax, low / or ax, high` | 5 |
+| `a << 1` | `shl low / rcl high` | 4 |
+| `a >> 1` (s) | `sar high / rcr low` | 4 |
+| `a & b`, `|`, `^` | `op low, low / op high, high` | 4 |
+| `a == b` | `cmp high / jne / cmp low / jne` | varies |
+
+Long shifts by N>1 always use `N_LXLSH@`/`N_LXRSH@`
+helpers; shift-by-1 is the special inline case.
+
 ## `*long_p = K` = 2 word stores; printf cdecl R-to-L; long `<<1` inline `shl/rcl`
 
 Fixtures `1733` (long pointer deref-store), `1734`
