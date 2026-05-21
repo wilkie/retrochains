@@ -1959,6 +1959,47 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Chain assign reuses AX; pre/post-inc applies to call args; 2D arr row-major
+
+Fixtures `1817` (`a = b = c = 7`), `1818` (`++i` vs
+`j++` as call args), and `1819` (2D `a[2][2]` array)
+cover three remaining idioms.
+
+- `1817` (**chain assignment**): `a = b = c = 7`
+  evaluates right-to-left with AX reused:
+  ```
+  mov ax, 7
+  mov [c], ax
+  mov [b], ax       ; AX still holds 7
+  mov [a], ax       ; AX still holds 7
+  ```
+  The value flows up through the chain via the
+  register without reloading from memory.
+- `1818` (**pre/post-inc as call args**): same
+  rule as for assignment context applies to fn
+  call args:
+  - `identity(++i)` → `inc si / mov ax, si / push`
+    (inc first, then capture new value)
+  - `identity(j++)` → `mov ax, di / inc di / push`
+    (capture old value first, then inc)
+- `1819` (**2D array constant indices**): `int
+  a[2][2]` is laid out **row-major linear**:
+  | C index | Stack offset |
+  |---------|--------------|
+  | `a[0][0]` | `[bp-8]` |
+  | `a[0][1]` | `[bp-6]` |
+  | `a[1][0]` | `[bp-4]` |
+  | `a[1][1]` | `[bp-2]` |
+  
+  Compile-time-constant indices resolve to direct
+  `[bp+disp]` accesses — equivalent to a flat
+  `int a[4]`. No multiply needed for constant
+  index pairs.
+
+These three round out the idiom catalog: chain
+assignment via AX reuse, pre/post-inc in
+expressions, and row-major 2D layout.
+
 ## Ptr-walk: swapped cmp + `ja`; missing return falls through; assignment-as-arg
 
 Fixtures `1814` (ptr-walk array via `p < a + 5`),
