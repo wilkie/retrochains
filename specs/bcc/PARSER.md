@@ -1959,6 +1959,68 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Empty fn keeps prologue/epilogue; `while(1)+break` no fusion; `continue` = goto update
+
+Fixtures `1889` (empty function), `1890` (while(1)
+with break), and `1891` (continue in for) cover
+remaining control-flow shapes.
+
+- `1889` (**empty function keeps prologue/
+  epilogue**): `void noop(void) { }` still emits
+  `push bp / mov bp, sp / pop bp / ret` (4 bytes
+  total). No leaf-function optimization to skip
+  BP setup.
+- `1890` (**`while(1) + break` no fusion**):
+  `while (1) { body; if (cond) break; }` emits
+  ```
+  top:
+    body
+    cmp [v], k
+    jne L_skip          ; if NOT (cond), skip the break
+    jmp L_break         ; the break
+  L_skip:
+    jmp top             ; loop back
+  L_break:
+    ; after loop
+  ```
+  Notable: BCC does **NOT fuse** `if (cond)
+  break;` into a single `je L_break`. The `break`
+  is compiled as a regular goto, with the if's
+  own jcc chain preserved. This is wasteful — 7
+  bytes where 5 would suffice. Consistent with
+  BCC's "compile each statement independently"
+  philosophy.
+- `1891` (**`continue` = goto update**):
+  `for (init; cond; update) { ...; continue; ...; }`
+  with continue lowers to **jump to the update
+  step**:
+  ```
+  body:
+    ; ... if (i & 1) continue; ...
+    test si, 1
+    je L_not_odd
+    jmp L_continue       ; continue → skip rest of body
+  L_not_odd:
+    ; rest of body
+  L_continue:
+    inc si               ; update
+  test:
+    cmp si, 10
+    jl body
+  ```
+  So `continue` is **`goto <update-label>`** —
+  not `goto <test-label>`. The for-loop's update
+  always runs even on continue.
+
+For the Rust reimplementation:
+- Always emit prologue/epilogue, regardless of
+  function body size or content.
+- `while(1)` body + break: emit body, unconditional
+  jmp back; `break` jumps to past-the-loop. Don't
+  attempt to fuse `if-break` patterns.
+- `continue` jumps to update-clause; `break` jumps
+  past the loop entirely.
+
 ## `volatile` is no-op in BCC; do-while saves init jmp; forward decl resolves at parse
 
 Fixtures `1886` (volatile int), `1887` (do-while
