@@ -1959,6 +1959,57 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `-2` byte-identical to `-1` for trivial; `double` const stored as single in `_DATA`; `-f-` no-op trivial
+
+Fixtures `2135` (-2 286 target), `2136` (double
+arith), `2137` (-f- no float flag) complete the
+target/float survey.
+
+- `2135` (**`-2` 286 target**): byte-identical to
+  `-1` (80186) for trivial cases. Both use ENTER/
+  LEAVE/shl-imm. Differentiating tests would need
+  286-specific instructions (CMPSW, BOUND, etc.)
+  in the source.
+- `2136` (**double arithmetic**): doubles use
+  **8 bytes on stack**, but **constants exactly
+  representable in single-precision are stored as
+  4-byte singles** in `_DATA`:
+  ```
+  ; data: 1.5 = 00 00 c0 3f (single), 2.5 = 00 00 20 40
+  ; total 8 bytes for two double "constants"
+  ```
+  Operations use double-precision FPU instructions:
+  - `9b d9 06 [disp]` = FLD m32 (load single from data)
+  - `9b dd 5e f8` = FSTP m64 (store as double on stack)
+  - `9b dc 46 f0` = FADD m64 ([bp-16] = e)
+  - `9b dd 46 e8` = FLD m64 (load double for return)
+  
+  The FPU internally uses 80-bit precision, so
+  loading a single and storing as double is
+  lossless if the source value is exactly
+  representable as single.
+- `2137` (**`-f-` disable float emulation**):
+  for int-only code, byte-identical to default.
+  The flag only affects link-time library
+  selection.
+
+**Float-related flag summary**:
+| Flag | Codegen effect | Linkage effect |
+|------|----------------|-----------------|
+| (default) | Emit FPU ops with `9b` WAIT | Link emulation library |
+| `-f` | Same as default | (same) |
+| `-f87` | Same FPU ops | Skip emulation; require 8087 hardware |
+| `-f-` | Same for int-only code | Don't link float library at all |
+| `-f287` | Same | Require 80287 (286+ FPU) |
+
+For the Rust reimplementation:
+- Track `float`/`double` types; emit FPU ops with
+  WAIT prefix.
+- Optimise small `double` constants to single-
+  precision storage when representable exactly.
+- Float-flag selection mainly drives library
+  linkage; codegen is largely flag-agnostic.
+
 ## Float = FPU `9b d9/...` + N_FTOL@; `-1` enables 80186 ENTER/LEAVE/shl-imm; IEEE 754 single in `_DATA`
 
 Fixtures `2132` (float emulation), `2133` (-1
