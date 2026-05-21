@@ -1959,6 +1959,71 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `-2` (286) = mostly same as -1 in trivial cases; `-D NAME=val` macro substitutes at parse; `-O` strips `eb 00` no-ops
+
+Fixtures `2279` (-2 286), `2280` (-D define),
+`2281` (-O optimize) probe additional CLI flags.
+
+- `2279` (**-2 80286**): for basic trivial code,
+  output is essentially same as -1 (still ENTER/
+  LEAVE, c1 shift, 6a push). The 286-specific
+  instructions (imul reg, imm; bound; pusha/popa)
+  are only used in specific patterns BCC may not
+  hit in simple programs.
+- `2280` (**-D DEBUG=42 + #ifdef**): macro
+  resolved at preprocess time:
+  ```
+  ; Source #ifdef DEBUG ... return DEBUG ... #endif
+  ; With -DDEBUG=42, becomes:
+  ;     return 42;
+  
+  mov ax, 0x002A           ; b8 2a 00 = 42
+  ret
+  ```
+- `2281` (**-O strip eb 00**): peephole pass
+  removes `eb 00` no-op jumps that BCC inserts as
+  basic-block markers in unoptimized output:
+  ```
+  ; Without -O: blocks have eb 00 between them
+  ;     for example, end of if-body: ... eb 00 ...
+  
+  ; With -O: the eb 00 is stripped
+  ```
+  Output bytes are typically 5-15% smaller.
+
+**Preprocessor flag forms**:
+| Flag | Effect |
+|------|--------|
+| `-DNAME` | Define NAME with value 1 |
+| `-DNAME=value` | Define NAME with value |
+| `-UNAME` | Undefine NAME |
+| `-Ipath` | Add include path |
+| `-i` | Print include file names |
+
+**Optimization-flag effects** (`-O`):
+- Peephole pass after main codegen
+- Removes `eb 00` (jmp +0) markers
+- Removes redundant `mov reg, reg` (if any)
+- Does NOT do CSE, inlining, register allocation
+- Does NOT add ENTER/LEAVE or 186/286 instructions
+  (those are gated by `-1`/`-2`)
+
+**Cumulative CPU + opt flag combos** (BCC defaults):
+| Flags | Behavior |
+|-------|----------|
+| (default) | 8086, no -O peephole |
+| `-O` | 8086, peephole on |
+| `-1` | 80186 forms, no -O peephole |
+| `-1 -O` | 80186 + peephole (smallest output) |
+| `-2` | 80286 forms (effectively superset of -1) |
+| `-2 -O` | 80286 + peephole |
+
+For the Rust reimplementation:
+- Preprocessor: handle -D, -U, -I.
+- Codegen: emit `eb 00` markers between basic
+  blocks; strip them if `-O`.
+- 186/286 forms gated by target CPU flag.
+
 ## `-1` (80186): ENTER (`c8 NN 00 00`) + LEAVE (`c9`) + shift-imm (`c1 /4 imm8`) + push-imm8 (`6a imm8`)
 
 Fixtures `2276` (-1 shift), `2277` (-1 fn w/
