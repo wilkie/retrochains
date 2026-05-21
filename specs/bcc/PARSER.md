@@ -1959,6 +1959,79 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Switch jump-table: gaps point to L_after; default = `ja L_default`; non-1 base uses `sub bx, K`
+
+Fixtures `1904` (4 cases with gap), `1905` (4
+cases + default), and `1906` (cases starting at
+base 5) refine the jump-table mechanism.
+
+- `1904` (**gap in cases**): `case 1, 2, 4, 5`
+  (with case 3 missing) **still uses jump table**
+  — bounds check is `cmp bx, 4` (range = max -
+  min = 5-1 = 4), table has **5 entries**:
+  | Slot | Case | Target |
+  |------|------|--------|
+  | 0 | 1 | case 1 body |
+  | 1 | 2 | case 2 body |
+  | 2 | (missing 3) | **L_after** |
+  | 3 | 4 | case 4 body |
+  | 4 | 5 | case 5 body |
+  
+  Missing-case slots **point to L_after**
+  (past the switch) — equivalent to "no match,
+  fall through". So small gaps don't disable the
+  jump-table approach.
+  
+  Refined threshold: N ≥ 4 distinct cases AND
+  the case-value range is dense enough (gap-
+  tolerance threshold not yet pinned).
+- `1905` (**4 cases + default**): table has 4
+  entries (one per explicit case); the **bounds
+  check's `ja` targets the default body**
+  directly:
+  ```
+  cmp bx, 3
+  ja L_default       ; out-of-range → default
+  shl bx, 1
+  cs: jmp [bx + table]
+  ```
+  Default body laid out after case bodies, with
+  its own break.
+- `1906` (**non-1 base case value**): `case 5, 6,
+  7, 8` uses **`sub bx, 5`** (`83 eb 05`, 3
+  bytes) instead of `dec bx`. The bounds check
+  and jump-table protocol are otherwise
+  identical:
+  ```
+  mov bx, [x]
+  sub bx, 5            ; normalize to 0-based
+  cmp bx, 3            ; bounds (range = 3)
+  ja L_after
+  shl bx, 1
+  cs: jmp [bx + table]
+  ```
+  
+  Encoding choice:
+  - base = 1: `dec bx` (1B)
+  - base = K (≠ 1, fits imm8-sext): `sub bx, K`
+    (3B)
+  - base = K (imm16 only): `sub bx, K` (4B via
+    `81 eb`)
+
+For the Rust reimplementation:
+- Switch jump-table mechanism:
+  1. Compute base = min case value
+  2. Subtract base from input (dec for base=1, sub
+     bx, base otherwise)
+  3. Bounds check `cmp bx, (max-min)` + `ja
+     <default or L_after>`
+  4. `shl bx, 1`
+  5. `cs: jmp [bx + table]`
+  6. Table fills gaps with L_after (or default if
+     present)
+- Default present: `ja` target = default body
+- Default absent: `ja` target = L_after
+
 ## Switch jump-table threshold pinned: N ≥ 4 contiguous cases → jump table
 
 Fixtures `1901` (4 cases), `1902` (5 cases), and
