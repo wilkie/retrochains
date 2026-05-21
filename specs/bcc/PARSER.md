@@ -1959,6 +1959,67 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `register` enregisters into SI/DI; typedef = type-only no codegen; enum = parse-time int consts
+
+Fixtures `2069` (register), `2070` (typedef),
+`2071` (enum) finish the type-system survey.
+
+- `2069` (**`register int`**): two `register
+  int` declarations get enregistered into SI
+  and DI:
+  ```
+  be 05 00                ; mov si, 5 (x in SI)
+  bf 0a 00                ; mov di, 10 (y in DI)
+  mov ax, si / add ax, di
+  ```
+  For simple cases (≥2 reads, ≤2 register-eligible
+  locals), BCC would enregister anyway, so the
+  effect is mostly a hint. May make a difference
+  with many candidate locals.
+- `2070` (**`typedef`**): byte-identical to using
+  the base type directly. **Purely type-system**;
+  no codegen effect. `typedef int mytype; mytype
+  x = 10;` ≡ `int x = 10;`.
+- `2071` (**`enum`**): enum values are **parse-
+  time integer constants** (like `#define` but
+  type-checked):
+  - `RED` = 0, `GREEN` = 1, `BLUE` = 2 by default
+  - `enum color c = GREEN` stores `1` (2-byte int)
+  - `c * 10 + RED + BLUE` folds the constants
+    `0 + 2 → 2` at parse time
+  - Result emits as `c * 10 + 2` with `inc ax /
+    inc ax` (`40 40`, 2 bytes) for the +2.
+
+**Small-constant add optimisation**:
+| Adjust | Encoding | Bytes |
+|--------|----------|-------|
+| +1 | `inc reg` | 1 |
+| +2 | `inc reg / inc reg` | 2 |
+| +3 to +127 | `add reg, imm8` (sext) | 3 |
+| +128 to +32767 | `add reg, imm16` (AX) or `add reg, imm16` (mod-rm) | 3 |
+
+So `inc reg` is preferred for +1/+2 over `add
+reg, imm8` (3 bytes).
+
+**Type-keyword summary**:
+| Keyword | Effect |
+|---------|--------|
+| `register` | Hint for enregistration |
+| `typedef` | Type alias (no codegen) |
+| `enum` | Parse-time int consts (no runtime tag) |
+| `const` | Type qualifier (no codegen) |
+| `volatile` | Type qualifier (no codegen at -O0) |
+| `extern` | Symbol declaration (no definition emitted) |
+
+For the Rust reimplementation:
+- `register`: pass to register allocator as a
+  preference hint.
+- `typedef`: resolve to underlying type at parse.
+- `enum`: emit values as int constants; no enum
+  type information in the OBJ.
+- Small-const adds: prefer `inc reg` × N for
+  N ≤ 2.
+
 ## `interrupt` = save all regs + load DS + IRET; `volatile`/`const` no codegen diff in trivial cases
 
 Fixtures `2066` (interrupt fn), `2067` (volatile),
