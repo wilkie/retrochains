@@ -1959,6 +1959,64 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Struct arr-field inline; struct-by-value pushed reverse-mem-order; `o.p->v` 2-step deref
+
+Fixtures `1871` (struct with array field), `1872`
+(struct passed by value), and `1873` (chained
+struct ptr deref) cover three remaining struct
+shapes.
+
+- `1871` (**struct with array field**): `struct {
+  int n; int data[3]; }` is laid out **linearly
+  with no padding**:
+  | Field | Offset |
+  |-------|--------|
+  | `n` | 0 |
+  | `data[0]` | 2 |
+  | `data[1]` | 4 |
+  | `data[2]` | 6 |
+  Total size: 8 bytes. Array-as-struct-field is
+  just **inline storage**; constant indices on
+  the array resolve at parse time to specific
+  flat offsets.
+- `1872` (**struct passed by value**): a 4-byte
+  struct `P {int x; int y;}` is passed by **field-
+  by-field push in REVERSE memory order**:
+  ```
+  push word [q.y]    ; ff 76 06 — higher offset first
+  push word [q.x]    ; ff 76 04 — lower offset last
+  call sum_p
+  pop / pop          ; 59 59 — 4 bytes cleanup
+  ```
+  This puts the struct in **memory order** in the
+  callee's stack frame ([bp+4]=x, [bp+6]=y).
+  Same effect as `memcpy`-ing the source into the
+  arg-slot, but with explicit pushes.
+  
+  For larger structs (>4B), [[batch-XXX-struct-
+  push]] (N_SPUSH@ helper) is used. For 4B
+  structs, BCC uses inline pushes.
+- `1873` (**chained struct ptr deref `o.p->v`**):
+  lowers to:
+  ```
+  mov bx, [o.p]      ; 8b 5e fc — load ptr to BX
+  mov ax, [bx]       ; 8b 07    — deref to get .v
+  ```
+  No fusion or special handling for chained
+  derefs. Pointer loaded **once** into BX; then
+  one field access. If v had non-zero offset
+  (`bx+disp`), the second load would use
+  `mov ax, [bx+disp]`.
+
+For the Rust reimplementation:
+- Struct layout: linear, no padding (8086 ABI).
+  Array fields use sequential element offsets.
+- Struct by value (size ≤ 4): inline field-by-
+  field push in reverse memory order at call
+  site.
+- Chained deref `s->f`: emit ptr load to BX, then
+  field load via `[bx+disp]`.
+
 ## Cross-model uniformity: compact/medium/large share IR-level codegen; differ only at boundaries
 
 Fixtures `1868` (compact static local), `1869`
