@@ -1959,6 +1959,66 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Huge ptr family: `N_PADA@`/`N_PSBA@`/`N_PSBP@`/`N_PCMP@`
+
+Fixtures `1772` (huge ptr ==), `1773` (huge ptr1 -
+huge ptr2), and `1774` (huge ptr--) complete the
+huge-pointer helper family.
+
+- `1772` (**huge `==` uses `N_PCMP@`**): compares
+  two huge pointers via the helper. ABI:
+  - DX:AX = first huge ptr (seg:off)
+  - CX:BX = second huge ptr
+  - Returns flags (ZF set if equal)
+  
+  Note: helper compares the **normalized physical
+  addresses**, not just bit-for-bit seg:off — so
+  `0000:0010 == 0001:0000` correctly (both refer to
+  same physical 0x10).
+- `1773` (**huge ptr difference**): `p2 - p1`
+  (element count) uses **two helpers in sequence**:
+  1. **`N_PSBP@`** computes byte-difference
+     between the two normalized huge pointers
+     (returns a long).
+  2. **`N_LDIV@`** divides that long by
+     `sizeof(element)` (= 2 for int) to get the
+     element count.
+  
+  So C's pointer-subtraction semantics for huge
+  pointers needs two helper calls.
+- `1774` (**huge `p--` uses `N_PSBA@`**): the
+  Subtract-And-assign counterpart to `N_PADA@`
+  (Add-And-assign from 1771). Same ABI pattern:
+  - DX:AX = far ptr to the pointer variable
+  - CX:BX = decrement magnitude (32-bit)
+  - Modifies the pointer in place with proper
+    normalization.
+
+Complete huge-pointer helper family:
+| Helper | C source | ABI |
+|--------|----------|-----|
+| `N_PADA@` | `p++` / `p += n` | dx:ax=&p, cx:bx=n |
+| `N_PSBA@` | `p--` / `p -= n` | dx:ax=&p, cx:bx=n |
+| `N_PSBP@` | `p1 - p2` (bytes) | dx:ax=p2, cx:bx=p1 → long |
+| `N_PCMP@` | `p1 == p2` etc. | dx:ax=p1, cx:bx=p2 → flags |
+| (presumed) `N_PADP@` | `p + n` (value) | not yet probed |
+| (presumed) `N_PSBC@` | comparison forms | not yet probed |
+
+Borland's naming pattern: `N_P` = pointer helper, 3-letter
+suffix indicates operation:
+- `ADA` = ADd-Assign
+- `SBA` = SuBtract-Assign
+- `SBP` = SuBtract-Pointer (returns long)
+- `CMP` = CoMPare
+- `@` = external symbol marker
+
+For the Rust reimplementation:
+- Track `huge` qualifier on pointer types separately
+  from `far`.
+- Emit the appropriate `N_P*@` helper based on
+  operator: `+=`/`++` → ADA, `-=`/`--` → SBA, `==`/
+  `!=` → CMP, `-` (ptr-ptr) → SBP + LDIV.
+
 ## Tiny = same as small (model byte only); Huge adds DS save/restore + `N_PADA@`
 
 Fixtures `1769` (`-mt` tiny), `1770` (`-mh` huge),
