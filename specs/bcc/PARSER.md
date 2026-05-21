@@ -1959,6 +1959,52 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Unsigned div pow2 = shr unrolled; signed div ALWAYS uses idiv (no shift, even for pow2)
+
+Fixtures `2084` (unsigned div by 4), `2085`
+(signed div by 4), `2086` (signed div by 7)
+characterise division codegen.
+
+- `2084` (**`unsigned int / 4`**): emits **2
+  unrolled `shr ax, 1`** (`d1 e8 d1 e8`, 4
+  bytes). Same threshold as left-shift: N ≤ 3
+  unrolled, N ≥ 4 CL-form.
+- `2085` (**`int / 4` SIGNED**): does **NOT**
+  use shift! Uses `idiv bx`:
+  ```
+  mov ax, [x]
+  mov bx, 4              ; bb 04 00 (divisor in BX)
+  cwd                     ; 99 (sign-extend AX into DX:AX)
+  idiv bx                 ; f7 fb (signed divide)
+  ```
+  6 bytes for the divide. **Correct semantics**:
+  arithmetic right shift would round toward -∞
+  for negative x (e.g., `-5 / 4 = -1` per C, but
+  `-5 >> 2 = -2`).
+- `2086` (**`int / 7` signed, non-pow2**): same
+  `idiv bx` pattern. Divisor is 7 instead of 4
+  — otherwise byte-identical to signed-div-by-4.
+
+**Division codegen summary**:
+| Operation | Encoding | Bytes |
+|-----------|----------|-------|
+| `unsigned / 2` | `shr ax, 1` | 2 |
+| `unsigned / pow2-N (N ≤ 3)` | N× `shr ax, 1` | 2N |
+| `unsigned / pow2-N (N ≥ 4)` | `mov cl, N / shr ax, cl` (CL-form) | 4 |
+| `unsigned / non-pow2` | `mov bx, N / xor dx, dx / div bx` | (probably 6-7) |
+| `int / any` (signed) | `mov bx, N / cwd / idiv bx` | 6 |
+
+So **signed div always uses idiv** — no shift
+optimization even for pow2. This is the correct
+C semantics for negative dividends.
+
+For the Rust reimplementation:
+- `unsigned / pow2`: emit shift right (logical).
+- `signed / anything`: emit `mov bx, divisor /
+  cwd / idiv bx`.
+- `unsigned / non-pow2`: emit `mov bx, divisor /
+  xor dx, dx / div bx`.
+
 ## Confirmed: shift ≤3 = unrolled (NOT byte-optimal at N=3); shift ≥4 = CL-form
 
 Fixtures `2081` (x * 8 = shift 3), `2082` (x * 2
