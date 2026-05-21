@@ -1959,6 +1959,62 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Pascal 4-args = `ret 8`; `cdecl` keyword = default; pascal→pascal call needs no cleanup
+
+Fixtures `2063` (pascal 4 args), `2064` (cdecl
+explicit), `2065` (pascal→pascal) complete the
+calling-convention picture.
+
+- `2063` (**pascal with 4 args = `ret 8`**):
+  callee body:
+  ```
+  ; SUM4:
+  mov ax, [bp+10]         ; a (first pushed, highest)
+  add ax, [bp+8]          ; b
+  add ax, [bp+6]          ; c
+  add ax, [bp+4]          ; d
+  pop bp / c2 08 00        ; ret 8 (= 4 args × 2)
+  ```
+  Caller pushes 1, 2, 3, 4 in L-to-R order; no
+  cleanup. **Callee always cleans regardless of
+  arg count**.
+- `2064` (**`cdecl` keyword = default**):
+  byte-identical output to omitting the keyword.
+  Symbol `_helper` (with underscore), `c3` near
+  ret, caller cleanup. Just an explicit
+  affirmation.
+- `2065` (**pascal calls pascal**): both fns use
+  pascal convention. The caller (OUTER) pushes
+  via `ff 76 04` (push word [bp+4]) — no
+  intermediate load. Then `e8` call near, no
+  cleanup. INNER returns with `ret 2`.
+  ```
+  ; OUTER (pascal):
+  push bp / mov bp, sp
+  push word [bp+4]         ; ff 76 04 — y arg
+  call INNER               ; e8 ea ff
+  ; (no cleanup — INNER did c2 02 00)
+  shl ax, 1                 ; y * 2
+  pop bp / c2 02 00         ; ret 2 (OUTER cleans for its caller)
+  ```
+  Main (default cdecl) calls OUTER same way (no
+  cleanup since OUTER cleans).
+
+**Calling-convention summary, complete**:
+| Convention | Args | Cleanup | Naming | Keyword |
+|-----------|------|---------|--------|---------|
+| cdecl (default) | R-to-L | Caller (post-call cleanup) | `_name` | `cdecl` (explicit) or omit |
+| pascal | L-to-R | Callee (`ret imm16`) | `NAME` (UPPER, no `_`) | `pascal` |
+| `near` modifier | (preserves convention) | (preserves) | (preserves) | `near` |
+| `far` modifier | (preserves convention) | (preserves) | (preserves) | `far` |
+
+For the Rust reimplementation:
+- `cdecl` keyword: same codegen as default.
+- pascal `ret imm16`: `c2 [imm16]`, total cleanup bytes = N_args × 2.
+- Pascal-to-pascal calls: omit caller cleanup.
+- Mixing conventions in same file is fine; each fn
+  follows its declared convention.
+
 ## `far fn` in small / `near fn` in medium: per-fn override of model default; `pascal` = L-to-R + callee-clean + UPPER
 
 Fixtures `2060` (`int far helper` in small),
