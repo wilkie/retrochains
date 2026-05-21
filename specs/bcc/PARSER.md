@@ -1959,6 +1959,61 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Escapes parse-time resolved; nested ternary linear chain; args eval R-to-L
+
+Fixtures `1823` (escape sequences in string),
+`1824` (nested ternary), and `1825` (`sum3(i++,
+i++, i++)`) close several remaining shapes.
+
+- `1823` (**string escape sequences**): `"A\nB\t"`
+  is resolved at parse time to bytes `41 0a 42 09
+  00` in `_DATA`. `\n` → 0x0A, `\t` → 0x09. No
+  codegen for escapes — purely a parser-level
+  transformation.
+- `1824` (**nested ternary**): `x<0 ? -1 : (x==0 ?
+  0 : 1)` lowers to a **linear chain of cmp/jcc**
+  with materialization into AX:
+  ```
+  or si, si
+  jge L1            ; if NOT < 0
+  mov ax, -1
+  jmp store
+  L1:
+  or si, si
+  jne L2            ; if NOT == 0
+  xor ax, ax        ; 0
+  jmp store
+  L2:
+  mov ax, 1
+  store:
+  mov [r], ax
+  ```
+  Nested ternaries don't get fused or specially
+  optimized — just sequential evaluation.
+- `1825` (**`sum3(i++, i++, i++)` arg order**):
+  arguments are **evaluated right-to-left** and
+  pushed in that order (matching cdecl R-to-L):
+  - First evaluated/pushed: rightmost `i++` (i=5,
+    push 5, inc to 6)
+  - Second: middle `i++` (i=6, push 6, inc to 7)
+  - Third: leftmost `i++` (i=7, push 7, inc to 8)
+  
+  In callee: `a` (leftmost) = 7 (last pushed),
+  `b` = 6, `c` (rightmost) = 5. Sum = 18.
+  
+  Note: C's order-of-evaluation for fn arg
+  expressions is **unspecified** in the spec — BCC
+  chose right-to-left, matching the push order.
+  Different compilers may differ.
+
+For the Rust reimplementation:
+- Resolve escapes at parse time, embed result
+  bytes in `_DATA`.
+- Lower nested ternary as a flat chain of
+  cmp/jcc/jmp with single mov-target.
+- Evaluate fn-call args **right-to-left** for
+  side-effect-bearing expressions.
+
 ## 3D array row-major nesting; arr-of-struct iter = stride-4 shl×2
 
 Fixtures `1820` (3D array constant-indexed), `1821`
