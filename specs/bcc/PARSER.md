@@ -1959,6 +1959,72 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Float return on FPU TOP; `(float)int` via FILD m16; `float→double` auto-promotes via FLD m32/FSTP m64
+
+Fixtures `2144` (double fn return), `2145` (int→
+float), `2146` (float→double promotion at call)
+characterise float conversion mechanisms.
+
+- `2144` (**double return on FPU TOP**): callee
+  leaves result on the FPU stack, NOT in AX or
+  DX:AX. Caller picks up the FPU TOP after the
+  call:
+  ```
+  ; callee:
+  9b dd 46 04            ; FLD m64 [bp+4] (load arg)
+  9b d8 36 [disp]        ; FDIV m32 const
+  ; result on FPU TOP
+  pop bp / ret           ; return — result still on FPU stack
+  
+  ; caller, after the call:
+  ; FPU TOP holds the result; can FSTP or FCOMP
+  ```
+  Different from int returns (AX) or long returns
+  (DX:AX).
+- `2145` (**`(float)int` via FILD**): integer→float
+  conversion uses **`FILD m16`** (load int into
+  FPU), then `FSTP m32` to store as float:
+  ```
+  mov [tmp], i             ; spill int to memory
+  9b df 46 fa              ; FILD m16 (load 16-bit int to FPU)
+  9b d9 5e fa              ; FSTP m32 (store as float)
+  ```
+- `2146` (**`float → double` auto via FPU**):
+  promotion happens **implicitly** through the
+  FPU's internal precision. Load as m32, store
+  as m64:
+  ```
+  9b d9 46 fc              ; FLD m32 (load float)
+  ; FPU internally has 80-bit value
+  9b dd 5e f4              ; FSTP m64 (store as double)
+  ```
+  No explicit conversion call needed.
+
+**Float conversion summary**:
+| From | To | Mechanism | Cost |
+|------|-----|-----------|------|
+| `int` | `float`/`double` | `FILD m16` + FSTP m32/m64 | ~10 bytes |
+| `float` | `double` | `FLD m32 / FSTP m64` (FPU widens) | 8 bytes |
+| `double` | `float` | `FLD m64 / FSTP m32` (FPU narrows) | 8 bytes |
+| `float`/`double` | `int` | `FLD / call N_FTOL@` | ~7 bytes |
+| `float`/`double` | `long` | `FLD / call N_FTOL@` | ~7 bytes |
+
+**Return-value conventions** (updated):
+| Type | Return register |
+|------|------------------|
+| `char` | AL (high byte undef) |
+| `int`, `short`, near ptr | AX |
+| `long`, far ptr | DX:AX |
+| `float`, `double` | FPU TOP (ST(0)) |
+| `struct ≤ 4 bytes` | AX or DX:AX |
+| `struct > 4 bytes` | via N_SCOPY@ (callee writes to a slot) |
+
+For the Rust reimplementation:
+- Float return: leave on FPU stack; caller pops
+  as needed.
+- int→float: spill int + FILD m16 + FSTP m32/m64.
+- float↔double: FLD/FSTP with different precisions.
+
 ## FMUL = `d8 /1`, FDIV = `d8 /6` (m32); passing `double` arg = `add sp,-8` + FSTP m64 [sp]
 
 Fixtures `2141` (float mul), `2142` (float div),
