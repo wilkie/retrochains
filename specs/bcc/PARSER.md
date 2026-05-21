@@ -1959,6 +1959,86 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `**pp` = 2 chained loads; post-inc captures-then-increments; **block-locals share slots**
+
+Fixtures `1964` (`**pp` double deref), `1965`
+(post-inc with result used), `1966` (block-scoped
+locals) cover three patterns.
+
+- `1964` (**`**pp` double deref**):
+  ```
+  mov si, [pp]        ; pp into si
+  mov bx, [si]        ; *pp into bx
+  mov ax, [bx]        ; **pp into ax
+  ```
+  Same chained-load pattern as struct deref or
+  linked-list traversal. Two register-load steps;
+  no special optimization.
+- `1965` (**post-inc with result used**):
+  `y = x++ + 10`:
+  ```
+  mov ax, si          ; capture OLD x (= 5)
+  inc si              ; x becomes 6 (post-inc)
+  add ax, 10          ; ax = 15
+  mov [y], ax
+  ```
+  Standard pattern: capture pre-increment value
+  before modifying. Confirmed across many fixtures.
+- `1966` (**block-locals share stack slots!**):
+  ```c
+  int sum = 0;
+  { int x = 10; sum += x; }
+  { int y = 20; sum += y; }
+  ```
+  emits with **x and y SHARING `[bp-2]`** — since
+  their scopes don't overlap, BCC reuses the
+  stack slot:
+  ```
+  ; block 1:
+  c7 46 fe 0a 00       ; x = 10 (at [bp-2])
+  03 76 fe              ; sum += x
+  ; block 2:
+  c7 46 fe 14 00       ; y = 20 (at [bp-2] — SAME slot!)
+  03 76 fe              ; sum += y
+  ```
+  Stack frame allocates only **1 slot (2 bytes)**
+  for these two non-overlapping locals.
+  
+  This is a real **slot-reuse optimization** —
+  BCC does perform some scope-based stack
+  packing. Adds a meaningful exception to the
+  "no optimizations" rule.
+
+For the Rust reimplementation:
+- Double deref `**p`: emit `mov si/bx, [p] / mov
+  bx, [si] / mov ax, [bx]`.
+- Post-inc capture-then-increment is universal
+  across all use contexts.
+- **Block-scoped locals**: track lexical scope;
+  reuse stack slots for variables whose scopes
+  don't overlap. Each fn computes max
+  "concurrent live" locals to size its frame.
+
+So the optimization catalog for BCC 2.0:
+1. **Constant folding** for compile-time-known
+   expressions (arithmetic, sizeof).
+2. **Pow2 mul/div** → shift instructions.
+3. **Unsigned mod-pow2** → AND-with-(N-1).
+4. **`x ± 1`** → inc/dec.
+5. **AX-form opcodes** when destination is AX.
+6. **imm8-sext** for ADD/SUB/CMP when value fits.
+7. **Inverse-jcc folding** for `!cmp` and bool
+   contexts.
+8. **Short-circuit `&&`/`||`** via jcc chains.
+9. **Switch jump table** for ≥4 contiguous cases.
+10. **`(int)(y >> 16)`** → direct read of y.hi.
+11. **String literal concatenation** at parse.
+12. **Sizeof DCE** for arrays only used in sizeof.
+13. **Block-scoped local slot reuse** ← NEW.
+
+Everything else is "compile each statement
+independently with no fusion".
+
 ## Globals declared-order in `_DATA`; uninit globals in `_BSS`; static array persists across calls
 
 Fixtures `1961` (multiple inited globals), `1962`
