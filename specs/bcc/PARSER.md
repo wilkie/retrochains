@@ -1959,6 +1959,60 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `*long_p = K` = 2 word stores; printf cdecl R-to-L; long `<<1` inline `shl/rcl`
+
+Fixtures `1733` (long pointer deref-store), `1734`
+(printf variadic call), and `1735` (long shift-by-1
+inlined) close several remaining shapes.
+
+- `1733` (**writing a long through a pointer**):
+  emits **two word stores** through the pointer
+  with `[si]` and `[si+2]` addressing:
+  ```
+  mov word [si+2], 0x000f    ; high half — c7 44 02 0f 00
+  mov word [si],   0x4240    ; low half — c7 04 40 42
+  ```
+  The 32-bit constant is split into two 16-bit
+  imm16s at parse time; each half stored to its
+  word slot. No N_SCOPY@ needed — long is just two
+  word writes.
+- `1734` (**variadic printf**): a vararg call uses
+  **standard cdecl R-to-L push** with caller
+  cleanup:
+  ```
+  mov ax, 42
+  push ax            ; arg 2 first (rightmost)
+  mov ax, &"%d\n"    ; FIXUPP'd to data
+  push ax            ; arg 1 (fmt)
+  call _printf       ; FIXUPP'd external call
+  pop cx / pop cx    ; cleanup 4 bytes
+  ```
+  Caller-cleanup is essential for variadic — the
+  callee doesn't know the arg count, so it can't
+  do callee-cleanup. **All cdecl functions can be
+  variadic** because the protocol is the same.
+- `1735` (**long `<<1` inlined**): a long shift-by-
+  1 is **inlined** as `shl low / rcl high` — uses
+  the carry flag to propagate the shifted-out bit
+  from low half to low bit of high half:
+  ```
+  shl dx, 1          ; d1 e2 — low << 1, CF = top bit
+  rcl ax, 1          ; d1 d0 — high << 1 with CF in low bit
+  ```
+  Total 4 bytes for the shift core (vs ~8 bytes
+  for calling `N_LXLSH@`). Long shift-by-1 is the
+  **only inlined long shift**; shift-by-N (N>1)
+  still uses `N_LXLSH@` ([[batch-440-long-shifts]])
+  even for constant N.
+
+For the Rust reimplementation:
+- Long pointer-store splits constants at parse time
+  into low/high words.
+- Variadic call signatures are codegen-identical
+  to fixed-arity cdecl — no special protocol.
+- Long shift-by-1 should be inlined as `shl/rcl`;
+  shift-by-N for N≥2 emits the helper call.
+
 ## `int→char` = byte load; `uchar→int` = `mov ah,0`; `schar→int` = `cbw`
 
 Fixtures `1730` (int→char cast), `1731` (uchar→int
