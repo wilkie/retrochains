@@ -1959,6 +1959,52 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Pow-2 mul: shift ≤2 = unrolled `shl ax, 1`; shift ≥4 = CL-form; non-pow2 = `mov dx, N / imul dx`
+
+Fixtures `2078` (x * 4), `2079` (x * 16), `2080`
+(x * 7) characterise multiplication codegen.
+
+- `2078` (**`x * 4` = shift by 2**): emits **2
+  `shl ax, 1`** (`d1 e0 d1 e0`, 4 bytes). Same
+  byte count as CL-form (`b1 02 d3 e0`), but
+  BCC picks unrolled for N=2.
+- `2079` (**`x * 16` = shift by 4**): emits
+  **CL-form**: `b1 04 d3 e0` (4 bytes). With N=4,
+  unrolled would be 8 bytes — CL-form wins
+  decisively.
+- `2080` (**`x * 7` non-pow2**): emits **`mov
+  dx, N / imul dx`** (`ba 07 00 f7 ea`, 5
+  bytes):
+  ```
+  mov ax, [x]
+  mov dx, 7              ; ba 07 00 (load multiplier)
+  imul dx                 ; f7 ea (signed multiply, AX *= DX)
+  ```
+  Result in AX (low half) — for 16-bit int the
+  high half (DX) is discarded.
+
+**Multiplication-encoding rule**:
+| Multiplier | Encoding | Bytes |
+|------------|----------|-------|
+| 0 | `mov ax, 0` or `xor ax, ax` (identity-fold) | 2-3 |
+| 1 | `mov ax, x` only (identity-fold) | 0 (no mul op) |
+| 2 | `shl ax, 1` (`d1 e0`) | 2 |
+| 4 | `shl ax, 1 / shl ax, 1` (unrolled) | 4 |
+| 8 | (probably) `mov cl, 3 / shl ax, cl` CL-form | 4 |
+| 16, 32, ... 32768 | CL-form `mov cl, N / shl ax, cl` | 4 |
+| Non-pow2 | `mov dx, N / imul dx` | 5 |
+
+**Shift-by-N threshold**: same as the general shift
+rule:
+- shift ≤ 2 → unrolled `shl ax, 1`
+- shift ≥ 3 → CL-form `mov cl, N / shl ax, cl`
+
+For the Rust reimplementation:
+- Mul by pow2: detect pow2 multiplier, emit shift.
+- Mul by 1: identity-fold (just load).
+- Mul by 0: zero-fold (direct store 0).
+- Mul by non-pow2: `mov dx, multiplier / imul dx`.
+
 ## Const-combined +5-5 emits `add ax, 0` (NOT folded back to identity); +1+1+1 = single add 3
 
 Fixtures `2075` (x + 1 + 1 + 1), `2076` (x + 5 -
