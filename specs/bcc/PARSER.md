@@ -1959,6 +1959,80 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Multi-arg printf R-to-L w/ natural sizes; `while(i--)` test-old/body-new; strcmp loop = nested byte cmps
+
+Fixtures `2201` (printf mixed types), `2202`
+(while postdec), `2203` (strcmp-like loop) cover
+multi-arg push and loop idioms.
+
+- `2201` (**printf with int, long, double mix**):
+  args pushed R-to-L in natural sizes:
+  ```
+  ; Source: printf("%d %ld %f\n", i, l, d);
+  
+  ; Push d (rightmost):
+  FLD m64 [d] / add sp, -8 / FSTP m64 [sp]    ; 8 bytes
+  
+  ; Push l (middle):
+  push word [l.hi]                              ; HIGH first
+  push word [l.lo]                              ; LOW second (lower stack addr)
+  
+  ; Push i:
+  push word [i]                                  ; 2 bytes
+  
+  ; Push fmt addr:
+  mov ax, 8 / push ax                            ; 2 bytes
+  
+  call _printf
+  add sp, 0x10                                   ; cleanup 16 = 8+4+2+2
+  ```
+- `2202` (**`while (i--)` confirmed**): test uses
+  OLD i; body uses NEW i (post-decrement):
+  ```
+  jmp test
+  body:
+    add di, si              ; sum += i (using NEW i)
+  test:
+    mov ax, si              ; capture OLD i
+    dec si                  ; i--
+    or ax, ax               ; test OLD
+    jne body
+  ```
+  For i=10, body runs 10 times with NEW i = 9,8,...,0.
+  Sum = 0+1+...+9 = 45.
+- `2203` (**strcmp-like loop**): `while (*a &&
+  *b && *a == *b) { a++; b++; }` lowers to a
+  nested byte-test chain:
+  ```
+  loop:
+    cmp byte [si], 0          ; test *a
+    je L_exit
+    cmp byte [di], 0          ; test *b
+    je L_exit
+    mov al, [si]              ; *a
+    cmp al, [di]              ; *a == *b ?
+    jne L_exit
+    inc si / inc di           ; a++, b++ (post-cond)
+  L_exit:
+  ```
+
+**Multi-arg push order — final**:
+For `f(a, b, c)` cdecl with types (T1, T2, T3):
+1. Push c (size of T3 first)
+2. Push b (size of T2)
+3. Push a (size of T1)
+4. Call f
+5. Cleanup `add sp, total_bytes` (or `pop cx × N` if ≤ 4 bytes)
+
+Each long is pushed as `hi / lo` (so lo ends at lower offset).
+Each double via `add sp,-8 / FSTP m64`.
+Each int/ptr via single push word.
+
+For the Rust reimplementation:
+- Push args in source-right-to-source-left.
+- For each arg, emit the per-type push sequence.
+- Track total bytes for cleanup.
+
 ## Printf float varargs promotes to double (FLD m32 + FSTP m64); char promotes via cbw; strcpy R-to-L ptrs
 
 Fixtures `2198` (printf float promoted), `2199`
