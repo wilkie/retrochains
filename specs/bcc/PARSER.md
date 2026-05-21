@@ -1959,6 +1959,43 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## 3-arg eval order confirmed R-to-L; shift+mask no fusion; int overflow wraps naturally
+
+Fixtures `2030` (3-arg side effects), `2031` (bit
+extract), `2032` (int overflow) cover three more
+patterns.
+
+- `2030` (**3-arg side-effect order = R-to-L
+  confirmed**): `sum3(log(1), log(2), log(3))`
+  observes log(3) first, log(2), log(1) last.
+  Side-effect-order matches push-order (cdecl
+  R-to-L). With 3 calls and 2-digit-traces:
+  order builds as 3 → 32 → 321. Final order =
+  321.
+- `2031` (**bit extract via shift+mask**): `(x >>
+  8) & 0x0F`:
+  ```
+  mov ax, [x]
+  mov cl, 8 / shr ax, cl       ; shift
+  and ax, 0x0F                  ; mask (AX-form imm16)
+  ```
+  No fusion. Standard sequence.
+- `2032` (**int overflow wraps**): `30000 + 5000
+  = 35000` (wraps to -30536 in signed int, or
+  35000 in unsigned). BCC emits standard `add`
+  — no overflow check, just modulo-65536
+  arithmetic.
+  
+  C89 says signed overflow is UB; BCC's
+  behavior is "just do the add, wrap silently."
+
+For the Rust reimplementation:
+- N-arg side effects: emit args R-to-L (each call
+  emits the inner subexpression, then push).
+- Shift+mask: no special fusion; emit each
+  operation independently.
+- int arithmetic: no overflow checks; let it wrap.
+
 ## String arg = FIXUPP offset push; sizeof types parse-time const; `return (a,b)` yields b
 
 Fixtures `2027` (string arg), `2028` (sizeof
