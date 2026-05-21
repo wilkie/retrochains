@@ -1959,6 +1959,66 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `cmp m, 0x1234` uses `81 /7` (imm16); `x*K` via DX+imul; `x/K` via cwd+idiv
+
+Fixtures `1718` (cmp imm16), `1719` (mul by non-
+pow2 17), and `1720` (signed div by 3) confirm
+arithmetic encoding shapes for the encoding-policy
+boundary cases.
+
+- `1718` (**cmp with imm16**): `if (x == 0x1234)`
+  emits **`81 7e fe 34 12`** (`cmp word [bp-2],
+  0x1234`) — the full `81 /7` imm16 form (5 bytes).
+  Since 0x1234 doesn't fit in imm8-sext (which
+  would sign-extend `0x12` byte to `0x0012`), the
+  imm16 encoding is **required**. Reconfirms the
+  imm8-sext policy from earlier batches.
+- `1719` (**mul by non-pow2 17**): lowers to:
+  ```
+  mov ax, x         ; 8b 46 fe
+  mov dx, 17        ; ba 11 00
+  imul dx           ; f7 ea — signed mul ax * dx → dx:ax
+  store ax → r
+  ```
+  Constant goes to **DX** then `imul dx` does the
+  signed multiply via the implicit-AX form (`f7
+  /5`). Result low half in AX. No `mul` (unsigned)
+  used here — BCC always emits `imul` per the
+  signedness rule.
+- `1720` (**signed div by 3**): lowers to:
+  ```
+  mov ax, x         ; 8b 46 fe
+  mov bx, 3         ; bb 03 00
+  cwd               ; 99 — sign-extend AX→DX:AX
+  idiv bx           ; f7 fb — signed div DX:AX / BX → AX=quot
+  store ax → r
+  ```
+  The divisor goes to **BX**. **`cwd`** is required
+  before `idiv` to properly sign-extend the
+  16-bit AX into the 32-bit DX:AX dividend. The
+  `idiv` operates on a 32-bit dividend / 16-bit
+  divisor → 16-bit quotient. Compare to **unsigned**
+  div which would use `xor dx, dx / div bx` (the
+  ZF-extension version) instead of `cwd / idiv`.
+
+Updated arithmetic-with-constant table:
+| Operation | Encoding | Notes |
+|-----------|----------|-------|
+| `x + K` (small) | `inc ax` / `83 /0 imm8` | imm8-sext if fits |
+| `x + K` (large) | `05 imm16` (AX) or `81 /0 imm16` | full imm16 |
+| `x * 2^N` | `shl ax, N` | pow2 shortcut |
+| `x * K` (non-pow2) | `mov dx, K / imul dx` | always imul |
+| `x / 2^N` (unsigned) | `shr ax, N` | pow2 shortcut |
+| `x / 2^N` (signed) | (likely `sar`) | not yet probed for general N |
+| `x / K` (signed) | `mov bx, K / cwd / idiv bx` | helper-free |
+| `x / K` (unsigned) | `mov bx, K / xor dx,dx / div bx` | helper-free |
+| `cmp x, K` (small) | `83 /7 imm8` | imm8-sext |
+| `cmp x, K` (large) | `81 /7 imm16` | full imm16 |
+
+So integer divide/multiply are entirely inline (no
+helpers like the long-arithmetic ones); only long
+ops use helpers.
+
 ## `x &= K` via `81 /N reg, imm16`; ternary = jcc + 2 movs; nested calls inner-first
 
 Fixtures `1715` (bitwise compound assign), `1716`
