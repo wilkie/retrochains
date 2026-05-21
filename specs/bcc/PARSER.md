@@ -1959,6 +1959,51 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `char a[] = "ABC"` uses N_SCOPY@; array decays to ptr at call site; sizeof dead-codes
+
+Fixtures `1883` (char array init from string),
+`1884` (array decay to ptr arg), and `1885`
+(sizeof arr) cover three array-related shapes.
+
+- `1883` (**`char a[] = "ABC"` uses N_SCOPY@**):
+  string-literal init of a local char array calls
+  the helper:
+  ```
+  push ss / lea ax, [a] / push ax    ; dest = SS:offset
+  push ds / mov ax, "ABC"@ / push ax ; source = DS:offset of literal
+  mov cx, 4                          ; count = 4 (3 chars + \0)
+  call N_SCOPY@
+  ```
+  Same helper used for struct copying in [[batch-
+  520-struct-return]]. The string literal is in
+  `_DATA` (`ABC\0` bytes); local array allocated
+  on stack; copy happens at function entry.
+- `1884` (**array decay at call site**): `first(a)`
+  where `a` is `int[3]` emits `lea ax, [a] / push
+  ax` — just a **pointer push**. The array decays
+  to `int *` per C semantics. Callee receives a
+  regular pointer; uses `mov si, [p] / mov ax,
+  [si]` to deref.
+- `1885` (**`sizeof(a) / sizeof(a[0])` fully
+  resolved at parse time**): `n = sizeof(a) /
+  sizeof(a[0])` compiles to **`mov [n], 10`** —
+  the division is computed at parse time (20/2 =
+  10). Notably, **the array `a` is never even
+  allocated** since it's only referenced in
+  sizeof. Stack frame has just 2 bytes for `n`.
+  
+  Confirms: `sizeof` is always a compile-time
+  constant; arrays referenced ONLY by sizeof are
+  dead-code-eliminated.
+
+For the Rust reimplementation:
+- `char a[] = "..."` lowers to N_SCOPY@ at fn entry,
+  with src = string literal in `_DATA`.
+- Array-to-pointer decay: emit `lea / push` at
+  call site; type system tracks the decay.
+- `sizeof` evaluates to compile-time integer; arrays
+  used only in sizeof can be omitted from stack.
+
 ## Bitfield byte vs word granularity; enum = int; typedef = parser-level alias
 
 Fixtures `1880` (bitfield spans byte boundary),
