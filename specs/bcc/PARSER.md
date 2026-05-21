@@ -1959,6 +1959,89 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Large frames use `81 ec NN NN` + bp+disp16 (`8d 86 disp16`); ptr+N scales at compile time; 8 args = `add sp, 16` cleanup
+
+Fixtures `2267` (large local frame), `2268` (8
+args fn), `2269` (ptr arithmetic) cover scaling
+mechanics for large offsets and pointer math.
+
+- `2267` (**large frame, disp16 form**): for
+  `int a[100]` (200 bytes), prologue uses imm16
+  sub form and ModR/M uses bp+disp16:
+  ```
+  ; Prologue:
+  push bp / mov bp, sp
+  81 ec c8 00              ; sub sp, 200 (imm16 form, 4B)
+  push si
+  
+  ; Access a[i]:
+  mov bx, si / shl bx, 1
+  8d 86 38 ff              ; lea ax, [bp + 0xFF38] (= bp - 200)
+                            ; ModR/M /86 disp16 = bp+disp16 form (4B vs 3B)
+  add bx, ax               ; &a[i]
+  mov [bx], si             ; a[i] = i
+  ```
+- `2268` (**8 args function**): arg offsets fit
+  in disp8 (max +18 for 8th arg):
+  ```
+  ; In sum8(a,b,c,d,e,f,g,h):
+  mov ax, [bp+4]            ; a
+  add ax, [bp+6]            ; + b
+  ...
+  add ax, [bp+18]           ; + h (max disp8 for typical fn)
+  
+  ; Caller after call:
+  add sp, 16                 ; cleanup 8 args × 2 bytes
+  ```
+  For a fn with > 60 args (~127B offsets), the
+  callee would start using disp16 form for the
+  later args.
+- `2269` (**ptr arithmetic `p + 2` / `p - 2`**):
+  scaled by sizeof at compile time:
+  ```
+  mov si, &a[5]
+  
+  ; q = p + 2 (= +4 bytes for int*):
+  mov ax, si / add ax, 4
+  
+  ; r = p - 2 (= -4 bytes):
+  mov ax, si / add ax, 0xFFFC   (= -4 signed)
+  
+  ; q - r (element diff):
+  sub ax, [r]
+  cwd / mov bx, 2 / idiv bx     ; / sizeof
+  ```
+
+**ModR/M displacement forms** (8086):
+| Form | Bytes | Range | Use |
+|------|-------|-------|-----|
+| `/06 disp16` | 3 | absolute | direct addressing |
+| `/06 disp8` | (N/A; no disp8 for direct) | - | - |
+| `/46 disp8` | 2 | -128 to +127 | small bp/bx offsets |
+| `/86 disp16` | 3 | full 16-bit | large bp/bx offsets |
+
+For BCC, threshold for switching disp8 → disp16
+is when the offset cannot fit in signed 8 bits.
+ARRAY bases inside large fns commonly trigger
+this (e.g., `bp + 0xFF38` for a frame > 128 bytes).
+
+**Pointer arithmetic encoding**:
+- `p + N` (N const): `add ax, N*sizeof` (one inst)
+- `p + var` (var dynamic): compute `var*sizeof`
+  via shifts, then `add`
+- `p - N` (N const): `add ax, -(N*sizeof)` (the
+  -N is sign-extended imm16)
+- `p++` / `++p`: `add ax, sizeof` (or `inc` × N
+  if size ≤ 2)
+- `p - q` (both ptr): `sub` byte diff, then
+  `cwd / idiv sizeof`
+
+For the Rust reimplementation:
+- Track frame size at fn entry; emit `81 ec`
+  imm16 form if > 127.
+- Use `bp+disp16` ModR/M when offset > 127.
+- Scale ptr arith by sizeof at compile time.
+
 ## Per-fn static vars get distinct `_DATA` slots; `static` fn = no PUBDEF; `int a[]` ≡ `int *a` byte-identical
 
 Fixtures `2264` (per-fn statics), `2265` (static
