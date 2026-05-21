@@ -1959,6 +1959,67 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Sparse switch search-table CS-relative; block scope reuses slots; typedef fn-ptr identical
+
+Fixtures `1742` (sparse switch large base), `1743`
+(block-scoped declarations), and `1744` (typedef
+fn pointer) cover three remaining shapes.
+
+- `1742` (**sparse switch with large base**):
+  Confirmed the **search-table dispatch strategy**:
+  ```
+  mov ax, x
+  mov [scrutinee_slot], ax
+  mov cx, N_cases       ; loop count
+  mov bx, &case_value_table
+  loop_start:
+  mov ax, cs:[bx]       ; 2e 8b 07 — read case value from CS
+  cmp ax, [scrutinee]
+  je dispatch           ; 74 06 — short forward
+  inc bx ; inc bx       ; advance 2 bytes
+  loop loop_start       ; e2 f4 — dec cx, jump if non-zero
+  jmp default
+  dispatch:
+  jmp word ptr cs:[bx + 2*N_cases]
+  ```
+  Key insights:
+  - **`2e` CS-override prefix** is used for table reads — case values and offsets are stored in code segment (right after the dispatch code).
+  - **`loop`** instruction (`e2 rel8`) drives the iteration — single instruction handles dec+jcc.
+  - **Two parallel tables**: N case values followed by N target offsets, indexed via `[bx + 2*N]` adjustment.
+  - Used when N ≥ 4 and cases are sparse (non-dense).
+
+  This is distinct from the indexed-table strategy (dense cases) which uses `(scrutinee - base) * 2` as direct table index without a search loop.
+- `1743` (**block scope reuses stack slots**): a
+  nested `{ }` block's locals can reuse slots that
+  earlier (now-out-of-scope) locals occupied:
+  ```
+  Block 1: a at [bp-2], b at [bp-4]
+  Block 2: c at [bp-2]    ← reuses a's slot!
+  ```
+  Total frame is only 4 bytes (2 + 2 = 4 for the
+  max in-scope at any point) instead of 6 (a + b
+  + c). BCC tracks variable lifetimes via lexical
+  scope and recycles slots.
+- `1744` (**typedef fn-ptr identical to direct**):
+  `typedef int (*op_t)(int); op_t f = dbl; f(7)`
+  produces **byte-identical** code to `int (*f)(int)
+  = dbl; f(7)`. `typedef` for function-pointer
+  types is purely syntactic. Indirect call uses
+  `ff 56 disp` (`ff /2` call near r/m16 with
+  bp-relative address).
+
+For the Rust reimplementation:
+- Track variable lifetimes during AST scope
+  analysis; assign stack offsets after a "max
+  concurrent live set" pass to enable slot reuse.
+- Switch dispatch strategy selection:
+  - 1-3 cases → linear `cmp/je` chain
+  - 4+ cases, dense → indexed table
+  - 4+ cases, sparse → search-table with `loop` +
+    `cs:[bx]` reads
+- typedef fully resolved at parse time, never
+  reaches codegen.
+
 ## Large frame uses `sub sp, imm16` + disp16; switch-default-only no dispatch; EXTDEF for extern
 
 Fixtures `1739` (200-byte stack frame), `1740`
