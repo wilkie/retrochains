@@ -1959,6 +1959,56 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Local aggregate-init boundary: ≤4B struct = 2 movs; >4B struct or any array = N_SCOPY@
+
+Fixtures `1793` (`int a[5] = {0}` all zeros),
+`1794` (3-field struct init), and `1795` (2-field
+struct init) refine the aggregate-init boundary
+further.
+
+- `1793` (**all-zeros array still uses N_SCOPY@**):
+  even `int a[5] = {0}` (all 10 bytes zero) emits
+  the **N_SCOPY@ call** with a 10-byte zero
+  template in `_DATA`. BCC doesn't optimize this
+  to `rep stosw` or a zero-fill loop. The zero
+  template wastes 10 bytes in the OBJ but the
+  codegen path is uniform.
+- `1794` (**3-field struct → N_SCOPY@**): `struct
+  P { int x, y, z; } p = {10, 20, 30};` (6 bytes)
+  uses N_SCOPY@ from a template in `_DATA`. Same
+  as arrays of any size.
+- `1795` (**2-field struct → inline movs**): a
+  4-byte struct `{int x, y;} = {10, 20}` uses
+  **inline initialization** via two `mov`
+  instructions reading from the template:
+  ```
+  mov ax, [_template + 2]    ; y value
+  mov dx, [_template + 0]    ; x value
+  mov [p_y_slot], ax
+  mov [p_x_slot], dx
+  ```
+  No N_SCOPY@ call — just two direct-memory loads
+  and stores. Saves the helper call overhead.
+
+So the **aggregate-init boundary** is:
+| Aggregate | Size | Init mechanism |
+|-----------|------|----------------|
+| struct (≤ 4 bytes) | 1-2 words | Inline 1-2 movs from template |
+| struct (> 4 bytes) | 3+ words | N_SCOPY@ from template |
+| array (any size) | always | N_SCOPY@ from template |
+
+The 4-byte boundary matches the DX:AX return-pair
+size — same as the struct-return ABI ([[batch-455-
+return-abi]]). Borland's design consistently uses
+this width as the "register pair fits" cutoff.
+
+For the Rust reimplementation:
+- Emit inline mov-from-template only for ≤4B
+  structs.
+- All arrays (even tiny ones) go through N_SCOPY@.
+- Zero-init aggregates aren't specially optimized
+  — same N_SCOPY@ path.
+
 ## Static local non-zero init → `_DATA`; local arr `{...}` init always uses `N_SCOPY@`
 
 Fixtures `1790` (static local int with init = 5),
