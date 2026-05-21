@@ -1959,6 +1959,63 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `int * double` = FILD m16 + FMUL m64; double == 0.0 = FLDZ + FCOMPP; printf varargs = R-to-L + caller cleanup
+
+Fixtures `2192` (int × double), `2193` (double ==
+0.0), `2194` (printf with 3 args) cover three
+mixed/varargs idioms.
+
+- `2192` (**`int * double` promotion**): int gets
+  loaded into FPU via **FILD m16** (the 16-bit
+  integer load), then FMUL m64 with the double:
+  ```
+  mov [tmp], i              ; spill int to memory
+  9b df 46 ec               ; FILD m16 (load 16-bit int → FPU as float)
+  9b dc 4e f6               ; FMUL m64 [d]
+  9b dd 5e ee               ; FSTP m64 [r]
+  ```
+  FILD opcodes by integer width:
+  - `df /0` = FILD m16 (16-bit)
+  - `db /0` = FILD m32 (32-bit)
+  - `df /5` = FILD m64 (64-bit)
+- `2193` (**`double == 0.0` via FLDZ + FCOMPP**):
+  same pattern as float-vs-zero (fixture 2151):
+  ```
+  9b dd 46 f8               ; FLD m64 [d]
+  9b d9 ee                  ; FLDZ (load 0.0 to FPU)
+  9b de d9                  ; FCOMPP (compare and pop both)
+  9b dd 7e f6               ; FSTSW m16
+  90 / 9b 8b 46 f6 / 9e     ; status → AX → flags
+  jne L_false               ; (for == test)
+  ```
+  Single FLDZ avoids needing a 0.0 constant in
+  `_DATA`. Works the same for both float and
+  double.
+- `2194` (**`printf(fmt, a, b, c)` varargs**):
+  ```
+  push 3 / push 2 / push 1  ; R-to-L per cdecl
+  mov ax, 0 / push ax        ; push fmt string addr (FIXUPP)
+  call _printf               ; e8 [disp] (FIXUPP)
+  add sp, 8                  ; caller cleanup 4 args × 2B
+  ```
+  
+  String "a=%d b=%d c=%d\n\0" stored in `_DATA`
+  (16 bytes).
+
+**Variadic call summary**:
+| Aspect | Detail |
+|--------|--------|
+| Arg push order | R-to-L (cdecl convention) |
+| Cleanup | Caller — `add sp, N*2` for N word args |
+| Varargs receiver | Reads via pointer math from `&first_named_arg` |
+| `va_list` access | (not yet probed — likely `&...` semantics) |
+
+For the Rust reimplementation:
+- Mixed int + double: spill int, emit FILD m16 +
+  FMUL m64.
+- Use FLDZ/FLD1 for float/double 0.0/1.0 consts.
+- Variadic calls: push R-to-L; caller cleanup.
+
 ## `(long)int` = cwd sign-ext; `(long)unsigned int` = zero store; long+int promotes via cwd
 
 Fixtures `2189` (signed int → long), `2190`
