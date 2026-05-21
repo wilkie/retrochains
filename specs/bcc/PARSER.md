@@ -1959,6 +1959,77 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Adjacent string literals concatenated at parse time; numeric bases all → int; `\0` in literal ≠ terminator
+
+Fixtures `2237` (string concat), `2238` (dec/hex/
+oct literals), `2239` (escape sequences) cover
+lexer-side text literal handling.
+
+- `2237` (**adjacent string literal concat**):
+  `"hello" " " "world"` → single string "hello
+  world\0" in `_DATA`. Parser-level
+  concatenation, zero runtime cost. C89 standard
+  behavior.
+- `2238` (**numeric literal bases**): all three
+  resolve to the same internal int value at
+  parse time:
+  - `100` (decimal) → 0x64
+  - `0x64` (hex, leading `0x`) → 0x64
+  - `0144` (octal, leading `0`) → 0x64
+  
+  All three stores emit `c7 46 disp 64 00` (mov
+  imm16 = 100). No base distinction in codegen.
+- `2239` (**escape sequences in char arr init**):
+  `"a\nb\tc\0d"` stored as:
+  ```
+  61 0a 62 09 63 00 64 00     ; 8 bytes
+  'a' \n  'b' \t  'c' \0  'd' \0
+  ```
+  Key observation: `\0` is just a byte (0x00),
+  NOT a terminator for the array initializer.
+  The literal continues with 'd' after the
+  embedded null. The trailing null is the
+  standard C string terminator.
+
+**Escape sequence catalogue** (BCC 2.0 recognised):
+| Escape | Value | Meaning |
+|--------|-------|---------|
+| `\n` | 0x0A | newline |
+| `\t` | 0x09 | tab |
+| `\r` | 0x0D | carriage return |
+| `\0` | 0x00 | null (NOT terminator in literal) |
+| `\\` | 0x5C | backslash |
+| `\'` | 0x27 | single quote |
+| `\"` | 0x22 | double quote |
+| `\a` | 0x07 | alert/bell |
+| `\b` | 0x08 | backspace |
+| `\f` | 0x0C | form feed |
+| `\v` | 0x0B | vertical tab |
+| `\xHH` | 0xHH | hex escape (probable) |
+| `\NNN` | octal | octal escape (probable) |
+
+**Numeric literal recognition**:
+| Prefix | Base |
+|--------|------|
+| (default, leading nonzero) | 10 (decimal) |
+| `0` (leading zero, NOT `0x`) | 8 (octal) |
+| `0x` or `0X` | 16 (hex) |
+| `0b` or `0B` | (NOT supported — C99+ only) |
+| Suffix `L`/`l` | long |
+| Suffix `U`/`u` | unsigned |
+| Suffix `F`/`f` | float |
+| (no suffix on float) | double |
+
+For the Rust reimplementation:
+- Lexer: recognize and concatenate adjacent
+  string literals.
+- Lexer: parse numeric bases, return canonical
+  int/long/float value.
+- Lexer: handle escape sequences in char and
+  string literals.
+- Embedded `\0` does NOT terminate the literal
+  body (only the trailing null does).
+
 ## Comma op = sequential statements; `op= imm16` = `81 /N imm16`; 2D array arg decays to ptr (stride at compile time)
 
 Fixtures `2234` (comma operator), `2235` (bitwise
