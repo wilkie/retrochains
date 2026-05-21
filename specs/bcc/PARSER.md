@@ -1959,6 +1959,58 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Globals laid out src-order in `_DATA`; PUBDEF emits reverse-order; init+uninit partitioned `_DATA`/`_BSS`
+
+Fixtures `2159` (3 init globals), `2160` (mixed
+init/uninit), `2161` (uninit global array) refine
+global layout rules.
+
+- `2159` (**multi-init globals, source order**):
+  layout in `_DATA` follows source order (a at 0,
+  b at 2, c at 4). PUBDEF entries emit in
+  **reverse** (`_c, _b, _a`) — likely artifact of
+  BCC's parser stack-pushing symbols. Layout is
+  correct; PUBDEF order is just metadata.
+- `2160` (**mixed init/uninit globals**):
+  partitioning across segments:
+  - `_DATA`: a at offset 0, c at offset 2 (skipping
+    b which is uninit)
+  - `_BSS`: b at offset 0
+  
+  PUBDEF: `_c` (DATA off 2), `_b` (BSS off 0), `_a`
+  (DATA off 0). Each symbol references its own
+  segment via the segment-index field.
+  
+  Init/uninit ordering in source doesn't change
+  storage segment — only the offsets within each
+  segment respect the source order of like-typed
+  vars.
+- `2161` (**uninit global array**): `int arr[5];`
+  goes in `_BSS` with size 10 bytes (5 ints).
+  Single PUBDEF for `_arr`. Access via `[disp16]`
+  with FIXUPP per element offset.
+
+**Global layout rules** (final):
+1. Initialized globals → `_DATA`, in source-
+   declaration order, packed without padding.
+2. Uninitialized globals (tentative defs) →
+   `_BSS`, in source-declaration order, packed.
+3. Tentative defs and init defs **partitioned**
+   into separate segments — relative offsets
+   within each segment match source order of
+   that type.
+4. PUBDEF emits in **reverse declaration order**
+   (artifact of BCC's parser).
+5. Each PUBDEF entry includes the segment index
+   so the linker knows where the symbol lives.
+
+For the Rust reimplementation:
+- Maintain two lists during parse: init-globals
+  (going to `_DATA`) and tentative-defs (going to
+  `_BSS`). Emit each in source order.
+- PUBDEF emission: walk symbols in reverse order
+  to match BCC's layout.
+
 ## Static global var = `_DATA` not exported; `extern var` = EXTDEF; uninit `int g;` = `_BSS` tentative
 
 Fixtures `2156` (static global), `2157` (extern
