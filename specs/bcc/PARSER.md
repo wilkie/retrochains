@@ -1959,6 +1959,51 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Var-shift = `mov cl,[byte] / shr/sar`; ++x vs x++ order; string concat parse-time
+
+Fixtures `1727` (shift by var), `1728` (pre vs post
+inc as rvalue), and `1729` (adjacent string
+literal concat) cover three remaining shapes.
+
+- `1727` (**shift by variable**): `x >> n` lowers
+  to:
+  ```
+  mov ax, x          ; 8b 46 disp
+  mov cl, byte [n]   ; 8a 4e disp - LOW BYTE only
+  sar ax, cl         ; d3 f8 - signed shift
+  ```
+  Notable: `mov cl, byte [n]` (`8a /N`) loads only
+  the low byte — saves 1 byte since shift amount
+  uses only CL's low 5 bits anyway. And **signed
+  `>>` uses `sar`** (`d3 /7`), unsigned would use
+  `shr` (`d3 /5`). Same opcode group, signedness
+  in /N.
+- `1728` (**pre vs post inc as rvalue**):
+  - `a = ++x` emits **`inc si / mov ax, si`** —
+    inc FIRST, then capture NEW value.
+  - `b = y++` emits **`mov ax, di / inc di`** —
+    capture OLD value FIRST, then inc.
+  Both leave the variable incremented; the
+  difference is which value is captured into the
+  destination. The opcode order at the bytestream
+  level directly encodes the C semantics.
+- `1729` (**adjacent string literal concat**):
+  `"AB" "CD"` becomes **a single literal "ABCD"**
+  (5 bytes `41 42 43 44 00`) in `_DATA`. The two
+  literals are **joined at parse time** with one
+  null terminator. Standard C89 spec behavior.
+  Code accesses via `mov al, [si+2]` for `s[2]`,
+  resolving to 'C'.
+
+Var-shift encoding catalog:
+| Op | Encoding |
+|----|----------|
+| `shl ax, cl` (any) | `d3 e0` |
+| `shr ax, cl` (unsigned) | `d3 e8` |
+| `sar ax, cl` (signed) | `d3 f8` |
+| `mov cl, byte [m]` | `8a 4e disp` |
+| `mov cl, byte [reg]` | `8a 0?` (depends on reg) |
+
 ## Unsigned mod-pow2 = AND mask; shift count ≥3 uses CL-form; signed mod = full idiv
 
 Fixtures `1724` (unsigned mod by 8), `1725`
