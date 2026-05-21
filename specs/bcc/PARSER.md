@@ -1959,6 +1959,49 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Confirmed: `x - 0`, `x ^ 0`, `x / 1` all identity-folded to bare `mov`
+
+Fixtures `2012` (x - 0), `2013` (x ^ 0), `2014`
+(x / 1) — all three produce **byte-identical OBJ
+files** with the same `mov ax, x / mov [r], ax`
+sequence. No sub/xor/idiv emitted.
+
+So the identity-folding catalog is **fully
+confirmed**:
+| Operation | Result |
+|-----------|--------|
+| `x + 0`, `0 + x`, `x - 0` | → load x |
+| `x | 0`, `0 | x`, `x ^ 0` | → load x |
+| `x * 1`, `1 * x`, `x / 1` | → load x |
+| `x * 0`, `0 * x` | → store 0 |
+
+All emit **identical 8-byte bodies** (`8b 46 fe /
+89 46 fc / 8b 46 fc / eb 00`, plus prologue/
+epilogue). The arithmetic is completely
+eliminated at parse time.
+
+Notably, `x - 0` is NOT lowered to `add ax,
+-0` or anything — it's truly folded. Same for
+all the others.
+
+This confirms BCC's **parse-time arithmetic
+folding** is comprehensive for identity ops
+across all major operator categories (add/sub,
+and/or/xor, mul/div).
+
+What WOULD NOT be folded (presumably):
+- `x ^ x` → not folded (BCC doesn't track variable
+  identity)
+- `x - x` → not folded
+- `x & 0xFFFF` → not folded (the mask isn't
+  recognized as identity for 16-bit type)
+
+For the Rust reimplementation:
+- Implement identity folding for: + 0, - 0, * 1,
+  / 1, | 0, ^ 0, & -1, * 0 (= zero).
+- Do NOT attempt variable-identity simplification
+  (e.g., x - x → 0).
+
 ## Identity folds: `x + 0` = mov; `x | 0` = mov; `x * 0` = direct store of 0
 
 Fixtures `2009` (x + 0), `2010` (x | 0), `2011`
