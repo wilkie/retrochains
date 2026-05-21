@@ -1959,6 +1959,53 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `(a && b) || c` precedence; `if (fn())` = call+or-ax; `!!x` folds in bool context
+
+Fixtures `1862` (`a && b || c` precedence), `1863`
+(`if (fn())`), and `1864` (`!!x`) cover the
+remaining boolean idioms.
+
+- `1862` (**mixed `&&`/`||` precedence**): parsed
+  as `(a && b) || c` (`&&` binds tighter). The
+  codegen converges short-circuit paths via
+  forward jumps:
+  ```
+  cmp [a], 0
+  je  L_test_c      ; a=0: && fails, try ||'s rhs
+  cmp [b], 0
+  jne L_true        ; (a && b) true: skip || rhs
+  L_test_c:
+  cmp [c], 0
+  je  L_false
+  L_true: ...
+  ```
+  Both `&&` operands' "false" paths land at the
+  `||`'s rhs test; if the `&&` succeeds, jumps
+  directly to true.
+- `1863` (**`if (fn())`**): emits `call _yes / or
+  ax, ax / je L_false`. The function's return
+  value (in AX) is tested via the 2-byte zero-test
+  `or ax, ax`. No special handling — same as `if
+  (var)` when var is in AX.
+- `1864` (**`!!x` folds in bool context**): `if
+  (!!x)` lowers to **just** `cmp [x], 0 / je
+  L_false / ...` — same as `if (x)`. BCC
+  **recognizes the boolean-identity** at parse
+  time, eliminating the double-negation sequence.
+  
+  Only when `!!x` is used **as a value** (e.g.,
+  `int b = !!x;`) would the full `neg/sbb/inc /
+  neg/sbb/inc` materialization sequence emit.
+
+For the Rust reimplementation:
+- Track the **context** (boolean vs value) when
+  lowering `!`, `&&`, `||`. In boolean context,
+  emit jcc-based short-circuit. In value context,
+  materialize into AX via the bool-template
+  sequence.
+- `!!x` in boolean context: identity, just emit `x`'s
+  test directly.
+
 ## 3-clause `&&` linearises; `!cmp` folds via inverted jcc; comma yields last operand
 
 Fixtures `1859` (`a && b && c`), `1860` (`!(a <
