@@ -1959,6 +1959,99 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Nested-block scope = separate slots (shadowing); large arrays = `sub sp, N`; enregistration is conservative
+
+Fixtures `2258` (nested-block shadowing), `2259`
+(large local arr), `2260` (10 locals) cover
+stack-frame and enregistration mechanics.
+
+- `2258` (**nested block scoping**): each `{`
+  ... `}` introduces a new scope. Shadowing
+  variables get distinct stack slots. The
+  innermost was enregistered (SI):
+  ```
+  ; int x = 1 (outer)
+  mov word [bp-2], 1
+  
+  ; { int x = 2; (middle)
+  mov word [bp-4], 2
+  
+  ; { int x = 3; (innermost — REGISTER)
+  mov si, 3
+  
+  ; innermost x = x + 10
+  mov ax, si / add ax, 10 / mov si, ax
+  
+  ; }} (blocks close — no cleanup needed)
+  
+  ; return outer x
+  mov ax, [bp-2]
+  ```
+  Outer x is at [bp-2], middle at [bp-4], inner
+  in SI. After inner blocks close, control just
+  returns to outer scope — no stack cleanup
+  needed since BCC always allocates max frame
+  at fn entry.
+- `2259` (**large local array**): `int a[50]`
+  allocates 100 bytes via:
+  ```
+  add sp, -100         ; 83 ec 64 (= sub sp, 100)
+  ```
+  Same prologue pattern, just larger immediate.
+  8086's 16-bit SP supports frames up to 64KB.
+- `2260` (**10 locals all enregistration-eligible
+  but in memory**):
+  ```
+  ; 10 ints, allocated 20 bytes:
+  add sp, -20
+  
+  ; All 10 init stores to memory:
+  mov word [bp-2], 1
+  mov word [bp-4], 2
+  ...
+  mov word [bp-20], 10
+  
+  ; All 10 loads + adds:
+  mov ax, [bp-2]
+  add ax, [bp-4]
+  ...
+  add ax, [bp-20]
+  ```
+  NO enregistration despite many candidates.
+
+**BCC enregistration heuristic** (refined):
+- Variables marked `register`: enregistered if free
+  reg available
+- Loop counters / iterators: enregistered (e.g.
+  for (i=...; ...; i++))
+- Innermost shadowing variable: enregistered when
+  outer scope has unused regs
+- Plain mostly-unused locals: kept in memory
+- Variables whose address is taken (`&x`): always
+  memory
+- Variables used > 2 times: usually enregistered
+- "Hot" path variables: prioritised for SI/DI
+
+Heuristic appears to be **conservative** — prefer
+memory over registers unless there's a clear
+benefit. This makes codegen predictable but
+sometimes leaves performance on the table.
+
+**Stack frame allocation summary**:
+| Local count | Stack alloc |
+|-------------|-------------|
+| 0 locals | No `sub sp` (or `sub sp, 0`) |
+| 1-2 ints | `sub sp, 4` (single 8-bit imm via `83`) |
+| 3-63 ints | `sub sp, N` (`83 ec N` 3B) |
+| 64+ bytes | `add sp, -N` 16-bit imm form (`81 c4 NN NN`) |
+
+For the Rust reimplementation:
+- Track scope nesting; shadowing → new slots.
+- Aggregate locals at fn entry; emit `sub sp, N`
+  prologue.
+- Enregistration: register-qualified + loop
+  counters as priorities; rest in memory.
+
 ## Recursion = regular call (no special handling); mutual recursion via fwd-decl; NO tail-call elimination
 
 Fixtures `2255` (factorial), `2256` (mutual
