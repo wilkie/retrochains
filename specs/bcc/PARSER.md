@@ -1959,6 +1959,67 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Long shift threshold: N=1 inline (shl/rcl), N≥2 helper; `long %` uses separate N_LMOD@
+
+Fixtures `2177` (long << 3), `2178` (long << 4),
+`2179` (long %) refine long shift inlining and
+introduce the N_LMOD@ helper.
+
+- `2177` (**`long << 3` uses N_LXLSH@**): NOT
+  inlined! BCC emits the helper call:
+  ```
+  mov dx, [a.hi] / mov ax, [a.lo]
+  mov cl, 3                  ; b1 03
+  call N_LXLSH@              ; e8 [disp]
+  ```
+- `2178` (**`long << 4` uses N_LXLSH@**): identical
+  to 2177 except CL = 4.
+- `2179` (**`long % long` uses N_LMOD@**): separate
+  helper from N_LDIV@. Same calling convention
+  (stack-pushed args, DX:AX result):
+  ```
+  push b.hi / push b.lo / push a.hi / push a.lo
+  call N_LMOD@               ; e8 [disp]
+  ; result: DX:AX = a mod b
+  ```
+
+**Refined long-shift threshold**:
+- N == 1: **inline** `shl dx, 1 / rcl ax, 1` (4
+  bytes)
+- N ≥ 2 (any constant or variable): **N_LXLSH@**
+  helper (~10 bytes including setup)
+
+So only `<< 1` gets the inline treatment because
+the 8086 has the special 1-byte-shift form `shl
+reg, 1` (without needing CL or immediate). For
+N ≥ 2 the helper is preferred regardless of byte
+count, presumably because:
+- N=2: 8 bytes unrolled (2× shl/rcl) vs ~10 helper —
+  near tie, BCC picks helper for consistency
+- N=3+: helper clearly cheaper
+
+**Long helper symbols** (complete list so far):
+| Helper | Purpose |
+|--------|---------|
+| `N_LXMUL@` | long signed multiply |
+| `N_LDIV@` | long signed divide (quotient) |
+| `N_LMOD@` | long signed modulo (remainder) |
+| `N_LXLSH@` | long left shift |
+| `N_LXRSH@` | long right shift (signed) |
+| `N_LXURSH@` | long right shift (unsigned) — guess |
+| `N_LUMUL@` | long unsigned multiply — guess |
+| `N_LUDIV@` | long unsigned divide — guess |
+| `N_LUMOD@` | long unsigned modulo — guess |
+| `N_FTOL@` | float→long |
+| `N_OVERFLOW@` | stack overflow |
+| `N_SCOPY@` | struct copy |
+| `N_SPUSH@` | struct push |
+
+For the Rust reimplementation:
+- `long << 1` inline; all other long shifts via
+  N_LXLSH@ (signed) or N_LXURSH@ (unsigned).
+- `long %` via N_LMOD@ helper.
+
 ## `long ==` inline (hi+lo cmp); `long <` = signed-hi + unsigned-lo branch; `long << 1` = `shl/rcl` inline
 
 Fixtures `2174` (long ==), `2175` (long <), `2176`
