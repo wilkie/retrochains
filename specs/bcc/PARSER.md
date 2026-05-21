@@ -1959,6 +1959,73 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `char s[] = "..."` runtime-copies via `N_SCOPY@`; `!x` = `neg/sbb/inc` idiom
+
+Fixtures `1712` (`char s[] = "ABC"`), `1713`
+(global int array with initializer), and `1714`
+(`!!x` double negation) cover three init/op shapes.
+
+- `1712` (**char array init from string literal**):
+  uses `N_SCOPY@` to copy the literal from `_DATA`
+  to the local stack array at runtime. NOT a
+  static initializer — the array is dynamically
+  populated each time the function runs. Sequence:
+  ```
+  push ss / lea ax, [bp+dst] / push ax    ; dest fp
+  push ds / mov ax, &literal / push ax    ; src fp
+  mov cx, 4                                ; length + 1
+  call N_SCOPY@                            ; copies
+  ```
+  String literal "ABC" is stored in `_DATA` as
+  `41 42 43 00` (4 bytes including null).
+- `1713` (**global array initialized**): a file-
+  scope `int a[] = {10, 20, 30}` places the data
+  **directly in `_DATA`** (not BSS) as `0a 00 14
+  00 1e 00`. No N_SCOPY@, no init code — the
+  values are baked into the OBJ's LEDATA records
+  and loaded by the OS image loader. Element access
+  in code uses `add ax, [_a + 2*i]` (`03 06 disp16`)
+  via FIXUPP-resolved direct memory operands.
+- `1714` (**`!x` boolean idiom**): lowers to a
+  **3-instruction sequence** with the canonical
+  8086 boolean-ize pattern:
+  ```
+  neg ax        ; f7 d8 - sets CF=1 if AX != 0
+  sbb ax, ax    ; 1b c0 - AX = -CF, so 0xffff or 0
+  inc ax        ; 40    - flip: 0 if was non-zero
+                ;              1 if was zero
+  ```
+  Total: 5 bytes. The `neg / sbb / inc` idiom
+  converts any non-zero value to 0, zero to 1.
+  `!!x` applies this twice, which has the effect of
+  converting any value to a clean 0-or-1 boolean.
+  No special handling — BCC doesn't recognise
+  `!!` as a fold opportunity, it just emits the
+  sequence twice.
+
+Two distinct array-init paths now characterised:
+| Source | Mechanism |
+|--------|-----------|
+| local `char s[] = "lit"` | runtime `N_SCOPY@` |
+| local `int a[3] = {1,2,3}` (small) | inline `mov [m], imm` stores |
+| local `int a[10] = {…}` (large) | `N_SCOPY@` (already seen) |
+| global `int a[] = {1,2,3}` | direct `_DATA` placement (no init code) |
+| global `char s[] = "ABC"` | direct `_DATA` placement (no init code) |
+
+The boundary for local-aggregate init: small (~4
+words?) gets inline stores; larger uses N_SCOPY@
+from a template in _DATA.
+
+For the Rust reimplementation:
+- Choose between inline init stores and N_SCOPY@
+  based on aggregate size at the per-declaration
+  level.
+- Place global initializers directly in `_DATA`
+  LEDATA records.
+- Implement the `!x` lowering as the
+  `neg / sbb ax,ax / inc ax` idiom (5 bytes)
+  rather than `cmp ax, 0 / sete al / movzx`.
+
 ## `sizeof` fully folded; string literals packed in `_DATA`; `<<0` `>>0` `|0` no-ops
 
 Fixtures `1709` (sizeof folded), `1710` (array of
