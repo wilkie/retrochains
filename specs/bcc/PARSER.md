@@ -1959,6 +1959,57 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `x/D` and `x%D` NOT fused (2 idivs); `==0` mem uses `cmp [m], 0`; `== -1` uses imm8-sext
+
+Fixtures `2090` (div + mod), `2091` (cmp == 0
+mem), `2092` (cmp == -1 mem) reveal three
+optimization points.
+
+- `2090` (**div + mod NOT fused**): even with
+  same divisor, BCC emits **two separate idiv
+  instructions** — one for q, one for r:
+  ```
+  ; quotient:
+  mov ax, [x] / mov bx, 7 / cwd / idiv bx
+  mov [q], ax
+  ; remainder:
+  mov ax, [x] / mov bx, 7 / cwd / idiv bx
+  mov [r], dx
+  ```
+  ~12 bytes of redundancy. Missed CSE — a single
+  idiv produces both q (AX) and r (DX) at once.
+  Confirms BCC's per-statement codegen (no CSE).
+- `2091` (**`if (x == 0)` with memory operand**):
+  emits `cmp word [bp+disp], 0` (`83 7e fe 00`,
+  4 bytes). NOT `or reg, reg` since x is in
+  memory, not a register. Compare to fixture
+  [[2024]] where x was enregistered — that used
+  the 2-byte `or si, si` form.
+  
+  Memory form: 4 bytes (`83 7e disp 00`).
+  Register form: 2 bytes (`0b f6` for SI).
+- `2092` (**`if (x == -1)` with memory**): emits
+  `cmp word [bp+disp], -1` (`83 7e fe ff`, 4
+  bytes). Uses the **imm8-sext form** (`83 /7`)
+  since -1 fits as a sign-extended imm8 (0xFF).
+  Avoids the longer `81 /7 reg imm16` (5 bytes).
+
+**Zero/-1 comparison summary**:
+| Operand | Encoding | Bytes |
+|---------|----------|-------|
+| `x == 0`, x in reg | `or reg, reg` + jcc | 2 + 2 |
+| `x == 0`, x in [bp+disp] | `cmp word [bp+disp], 0` (imm8-sext) | 4 |
+| `x == -1`, x in [bp+disp] | `cmp word [bp+disp], -1` (imm8-sext) | 4 |
+| `x == imm16-not-fitting`, x in [bp+disp] | `cmp word [bp+disp], imm16` (`81 /7`) | 5 |
+| `x == 0`, x in [global] | `cmp word [disp16], 0` (imm8-sext) | 5 |
+
+For the Rust reimplementation:
+- Don't try to fuse `x / D` and `x % D` — emit
+  two separate idivs (matches BCC byte-for-byte).
+- Choose cmp form based on operand storage:
+  reg → `or`/`test`, mem (small const) →
+  `83 /7`, mem (large const) → `81 /7`.
+
 ## Unsigned mod pow2 = `and ax, (N-1)`; signed mod = idiv with DX as result (NOT and-mask)
 
 Fixtures `2087` (unsigned % 4), `2088` (signed %
