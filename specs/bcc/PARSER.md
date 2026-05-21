@@ -1959,6 +1959,81 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `continue` in for = jmp to update; nested break = innermost end label only; `goto` = unconditional jmp
+
+Fixtures `2228` (continue), `2229` (nested break),
+`2230` (goto) cover the remaining control-flow
+non-locals.
+
+- `2228` (**`continue` in for-loop**): jumps to
+  the **update** label (between body and test),
+  NOT the test directly:
+  ```
+  ; for (i=0; i<10; i++) { if (i&1) continue; s+=i; }
+  body:
+    test ax, 1
+    je not_odd
+    jmp continue_lbl    ; <-- continue
+  not_odd:
+    add s, i
+  continue_lbl:           ; update slot
+    inc i
+  test:
+    cmp i, 10
+    jl body
+  ```
+  So for is unique in having a separate
+  continue-target. while/do-while continue jumps
+  directly to the test.
+- `2229` (**nested loop break, inner only**):
+  each loop has its own end_of_loop label; break
+  jumps to the **innermost** enclosing one:
+  ```
+  outer_body:
+    inner_body:
+      cmp j, 2
+      jl skip
+      jmp inner_end          ; break inner
+    skip:
+      ...
+    inner_update / inner_test
+    inner_end:
+    outer_update / outer_test
+  outer_end:
+  ```
+- `2230` (**`goto label`**): direct
+  unconditional jmp to the label:
+  ```
+  ; goto done;  →  jmp done
+  ; if (c) goto done;  →  cmp c / jcc-inverse skip / jmp done; skip:
+  ```
+
+**Control-flow non-locals summary**:
+| Construct | Behavior |
+|-----------|----------|
+| `break` | `jmp innermost_loop_end` or `jmp switch_end` |
+| `continue` (while/do) | `jmp test` |
+| `continue` (for) | `jmp update` (separate label between body and test) |
+| `goto label` | `jmp label` (direct unconditional) |
+| `if (c) goto X` | `cmp c / jcc-inverse skip / jmp X / skip:` |
+| `return` | `jmp fn_epilogue` (or fall through) |
+
+**Why for needs a separate continue target**:
+The for-loop's update step (`i++`) must run on
+continue. In while/do, no update step exists, so
+continue jumps directly to the test. The for-
+specific label is the only loop-structural
+difference between for and while.
+
+For the Rust reimplementation:
+- Maintain a stack of (loop_end, continue_target)
+  labels for nested loops.
+- break / continue emit `jmp` to the innermost
+  matching label.
+- Switch nests separately for break (switch_end
+  label), but doesn't capture continue.
+- goto: emit jmp directly to the label symbol.
+
 ## do-while = simplest loop form (no top jmp); for empty-init = jmp-test header; for empty-cond = unconditional jmp
 
 Fixtures `2225` (do-while), `2226` (for empty
