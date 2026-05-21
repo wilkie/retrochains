@@ -1959,6 +1959,54 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Pass-by-value writes arg slot only; ptr-arg uses `[si+disp]`; static = global codegen
+
+Fixtures `1865` (modify arg no effect), `1866`
+(modify array via ptr), and `1867` (static local
+counter) cover param-passing and storage rules.
+
+- `1865` (**arg modify confined to callee**):
+  `x = 99` inside callee writes to **`[bp+4]`**
+  (the callee's arg-slot copy), NOT the caller's
+  storage. After return, caller's x unchanged.
+  Standard C pass-by-value semantics — confirms
+  the arg is a local copy.
+- `1866` (**ptr-arg indexed access**): `a[0] =
+  10` and `a[1] = 20` via `int *a` lower to:
+  ```
+  mov si, [a]               ; load ptr
+  mov word [si], 10         ; c7 04 0a 00   (4B, no disp)
+  mov word [si+2], 20       ; c7 44 02 14 00 (5B, disp8)
+  ```
+  ModR/M encodings:
+  | Form | ModR/M | Bytes |
+  |------|--------|-------|
+  | `[si]` | `04` (mod=00, rm=100) | base+imm16 = 4 |
+  | `[si+disp8]` | `44` (mod=01, rm=100) | base+disp8+imm16 = 5 |
+  | `[si+disp16]` | `84` (mod=10, rm=100) | base+disp16+imm16 = 6 |
+  Per-access disp width selection (same rule as for `[bp+disp]`).
+- `1867` (**static local = global codegen**):
+  `static int n = 0;` inside a function:
+  - Storage: `_BSS` (zero-init) at file scope
+  - Access: **direct addressing `[disp16]`**, NOT
+    stack-relative
+  - `inc [n]`: `ff 06 disp16` (4 bytes)
+  - `mov ax, [n]`: `a1 disp16` (3 bytes, AX-form
+    for memory load)
+  
+  So `static` only affects **linkage** (internal)
+  and **storage duration** (program-lifetime). At
+  codegen, statics are identical to globals.
+
+For the Rust reimplementation:
+- Function arg modifications write to `[bp+disp]`
+  in the callee, never propagate back.
+- Pointer-arg array access: per-element `[reg+
+  disp]` with disp width chosen per access.
+- Static locals: emit as globals in `_BSS` (or
+  `_DATA` if non-zero-init), use unique mangled
+  name to avoid file-scope name conflicts.
+
 ## `(a && b) || c` precedence; `if (fn())` = call+or-ax; `!!x` folds in bool context
 
 Fixtures `1862` (`a && b || c` precedence), `1863`
