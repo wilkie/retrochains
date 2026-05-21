@@ -1959,6 +1959,68 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## 4 enregistered locals: BX joins pool; fn-call doesn't disrupt SI/DI; array-store loop strength
+
+Fixtures `1805` (3 nested loops with 4 locals),
+`1806` (fn call in loop), and `1807` (`a[i] = i*i`
++ sum loop) reveal more register-allocation
+detail.
+
+- `1805` (**4 locals all enregister**): with sum +
+  i + j + k all needing slots, BCC uses **{SI, DI,
+  DX, BX}** — extending the pool to 4 registers.
+  So the **3-cap rule is a soft default**: when
+  more locals qualify than 3, BCC pulls BX (and
+  presumably CX) into the pool. Earlier "3-cap"
+  observation ([[batch-481-register-allocation]])
+  reflected functions where 3 was enough.
+  
+  Revised: register pool **{SI, DI, DX, BX, CX}**
+  with up to 5 slots, but BCC tries to reserve
+  BX/CX for scratch when fewer than ~4 locals
+  need slots.
+- `1806` (**call-crossing locals**): functions
+  called inside loops **do not disrupt enregistration**
+  of the caller's locals — SI/DI hold sum and i
+  throughout the loop, including across the call.
+  This works because **SI/DI are callee-save**:
+  the callee pushes/pops them in its own prologue/
+  epilogue, so the caller's values survive.
+
+  Refines the earlier "call-crossing forces stack"
+  rule from [[batch-411-register-allocation]] —
+  that may have been about DX (caller-save) not
+  SI/DI.
+- `1807` (**array-store loop**): `a[i] = i*i`
+  emits 7 instructions per iteration:
+  ```
+  mov bx, si             ; i
+  shl bx, 1              ; i*2 (byte offset)
+  lea ax, [a]            ; base
+  add bx, ax             ; &a[i]
+  mov ax, si / imul si   ; i*i
+  mov [bx], ax           ; store
+  ```
+  No induction-variable strength reduction — BCC
+  recomputes the address from scratch each
+  iteration. A more optimised compiler would
+  maintain a pointer and increment it.
+
+So the register pool is more flexible than initially
+characterised:
+- Default: 3 locals into {SI, DI, DX}, BX/CX scratch.
+- Pressure: 4-5 locals into {SI, DI, DX, BX, CX},
+  all enregistered, scratch goes to stack.
+- Call-crossing for SI/DI: fine (callee-save).
+- Call-crossing for DX/BX/CX: may force stack (not
+  yet probed precisely).
+
+For the Rust reimplementation:
+- Implement 5-slot register pool with use-count
+  weighting.
+- Track call-crossing per variable; prefer SI/DI
+  (callee-save) for call-crossing locals.
+
 ## `while(1)` ≡ `for(;;)`; nested loops separate; inner induction may win register
 
 Fixtures `1802` (while(1) + break), `1803` (for(;;)
