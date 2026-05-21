@@ -1959,6 +1959,75 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Globals declared-order in `_DATA`; uninit globals in `_BSS`; static array persists across calls
+
+Fixtures `1961` (multiple inited globals), `1962`
+(mixed init/uninit globals), `1963` (static array
+persists) cover global storage semantics.
+
+- `1961` (**globals in `_DATA` declaration order**):
+  ```c
+  int a = 10; int b = 20; int c = 30;
+  ```
+  emits in `_DATA` as **`0a 00 14 00 1e 00`** (10,
+  20, 30) at consecutive offsets 0, 2, 4. Each
+  exported in PUBDEF separately. Access via
+  direct addressing:
+  - `a1 disp16` (mov ax, [m]) for the first AX
+    load
+  - `03 06 disp16` (add ax, [m]) for subsequent
+    adds
+  All disp16 values are FIXUPP'd at link time.
+- `1962` (**init globals in `_DATA`, zero-init in
+  `_BSS`**):
+  ```c
+  int initialized = 42;       // _DATA
+  int zeroed;                  // _BSS
+  int more_init = 99;          // _DATA
+  ```
+  OBJ has **two segments**:
+  - `_DATA`: holds `initialized` and `more_init`
+    with their explicit values
+  - `_BSS`: holds `zeroed` (zero-filled at load
+    time by DOS/runtime)
+  
+  This is the classic separation that keeps the
+  EXE smaller (BSS doesn't store zeros explicitly).
+- `1963` (**static array persists**): `static int
+  data[3] = {7, 11, 13};` inside a function:
+  - Stored in **`_DATA`** with initial values
+  - Persists across function calls — not stack-
+    allocated
+  - Access via `[bx + table_addr]` with FIXUPP
+  ```
+  mov si, [i]
+  mov bx, si / shl bx, 1            ; bx = i*2
+  inc word [bx + table_offset]      ; increment
+  mov bx, si / shl bx, 1            ; recompute
+  mov ax, [bx + table_offset]       ; load
+  ```
+  Each call sees the previous call's
+  modifications. Confirms `static` storage
+  duration semantics — same as global, just
+  with file-local linkage.
+
+**Global storage segments summary**:
+| Variable kind | Segment | Notes |
+|---------------|---------|-------|
+| `int x = K;` | `_DATA` | Initialized with value K |
+| `int x;` | `_BSS` | Zero-filled at startup |
+| `static int x = K;` (file scope) | `_DATA` | Internal linkage |
+| `static int x;` (file scope) | `_BSS` | Zero, internal linkage |
+| `static int x = K;` (in fn) | `_DATA` | Internal, persists |
+| `static int x;` (in fn) | `_BSS` | Zero, persists |
+
+For the Rust reimplementation:
+- Track all globals; place initialized in `_DATA`
+  with their values in declaration order, zero-
+  inits in `_BSS`.
+- Static locals: same as globals but with name
+  mangling for file-local uniqueness.
+
 ## K&R `()` = `(void)`; `extern int` in EXTDEF + FIXUPP; expr-stmt computes but discards
 
 Fixtures `1958` (K&R `()` fn decl), `1959`
