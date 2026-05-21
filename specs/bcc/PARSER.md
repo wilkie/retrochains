@@ -1959,6 +1959,81 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `pascal` = UPPERCASE name + L-to-R push + `ret N` callee cleanup; `interrupt` = save all + IRET; `cdecl` = default
+
+Fixtures `2246` (pascal), `2247` (interrupt),
+`2248` (explicit cdecl) pin the calling
+conventions.
+
+- `2246` (**pascal**):
+  - Symbol: **`PSUM`** (UPPERCASE, NO underscore
+    prefix) — vs cdecl `_psum`
+  - Args pushed **LEFT-TO-RIGHT** at call site
+    (vs cdecl R-to-L)
+  - **Callee cleans up** via `ret N`:
+    ```
+    c2 04 00         ; ret 4 (callee pops 4 bytes)
+    ```
+  - Caller emits NO cleanup after call
+- `2247` (**interrupt**): completely different
+  function structure:
+  ```
+  ; Prologue (9 pushes):
+  push ax / push bx / push cx / push dx
+  push es / push ds
+  push si / push di / push bp
+  
+  ; Fix up DS to point at this module's data:
+  mov bp, DGROUP
+  mov ds, bp
+  
+  ; Standard frame setup:
+  mov bp, sp
+  
+  ; ... body ...
+  
+  ; Epilogue (9 pops in reverse):
+  pop bp / pop di / pop si
+  pop ds / pop es
+  pop dx / pop cx / pop bx / pop ax
+  
+  ; IRET (not ret):
+  cf
+  ```
+- `2248` (**explicit cdecl**): byte-identical to
+  default — `_csum`, R-to-L push, caller cleanup.
+  The keyword is a no-op confirming default.
+
+**Calling convention summary** (final):
+| Convention | Name | Push order | Cleanup | Return |
+|------------|------|------------|---------|--------|
+| `cdecl` (default) | `_funcname` | R-to-L | Caller (`add sp` / `pop cx`) | `c3` (ret near) or `cb` (ret far) |
+| `pascal` | `FUNCNAME` (upper, no `_`) | L-to-R | Callee (`c2 NN 00` ret N) | `c2 NN 00` |
+| `interrupt` | `_funcname` | (no args usual) | (full reg save/restore) | `cf` (IRET) |
+
+**Pascal symbol naming**: the symbol table entry
+for `psum` declared as `pascal` shows `PSUM`
+(uppercase). Linker likely matches case-
+sensitively, so callers must agree (typically
+both sides have the same `pascal` declaration).
+
+**Interrupt fn details**:
+- Saves AX, BX, CX, DX (data regs)
+- Saves ES, DS (segment regs)
+- Saves SI, DI (index regs)
+- Saves BP (frame ptr)
+- Restores DS to module's DGROUP (since interrupts
+  fire with caller's DS)
+- Returns with IRET (pops IP, CS, flags)
+
+For the Rust reimplementation:
+- Track calling convention attribute per fn.
+- Pascal: emit UPPERCASE PUBDEF symbol + `c2 NN
+  00` ret + L-to-R caller pushes.
+- Interrupt: emit save-all prologue + IRET +
+  DGROUP DS fixup.
+- cdecl: default; no special handling.
+
 ## `volatile`/`const` accepted but no-ops at codegen; `register` is effective (enregisters)
 
 Fixtures `2243` (volatile), `2244` (const), `2245`
