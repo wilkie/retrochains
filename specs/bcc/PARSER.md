@@ -1959,6 +1959,52 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `x * 4` ≡ `x << 2` codegen; `unsigned x % 2` ≡ `x & 1`; `**pp` = 2 mem loads `8b 1c / 8b 07`
+
+Fixtures `2216` (mul-pow2 vs shift), `2217` (mod-2
+vs and-1), `2218` (double deref) verify expected
+equivalences.
+
+- `2216` (**`x * 4` ≡ `x << 2`**): both lower to
+  `shl ax, 1 / shl ax, 1` (4 bytes). BCC's pow-2
+  recognition makes them byte-identical.
+- `2217` (**unsigned `x % 2` ≡ `x & 1`**): both
+  lower to `and ax, 1` (`25 01 00`, 3 bytes).
+  Unsigned-only — signed `% 2` would need idiv
+  for correct -1 % 2 = -1 semantics.
+- `2218` (**double deref `**pp`**): clean two-
+  load sequence:
+  ```
+  mov si, pp_addr           ; load pp (outer ptr)
+  mov bx, [si]              ; bx = *pp = inner ptr
+  mov ax, [bx]              ; ax = **pp = value
+  ```
+  Total 4 bytes for the two derefs (`8b 1c / 8b
+  07`).
+
+**Codegen-equivalence summary**:
+| C expression | Equivalent | Bytes |
+|--------------|------------|-------|
+| `x * 1` | `x` (identity-fold) | 0 (no op) |
+| `x * 2^N` (N ≤ 3) | N× `shl ax, 1` | 2N |
+| `x * 2^N` (N ≥ 4) | `mov cl, N / shl ax, cl` | 4 |
+| `x << N` | (same as above) | (same) |
+| `unsigned x % 2^N` | `and ax, (2^N - 1)` | 3 |
+| `unsigned x / 2^N` | `shr` (logical) | 2N or 4 |
+| `unsigned x & (2^N - 1)` | (same as %) | 3 |
+
+So **BCC fully normalises** these idioms at parse
+time — `x * 4` and `x << 2` are not just
+semantically equal but emit the exact same opcode
+bytes. The `*` and `<<` (and similarly `%` and
+`&`) entered the same codegen path.
+
+For the Rust reimplementation:
+- Detect pow-2 multipliers; lower to shift.
+- Detect pow-2-minus-1 masks; lower to AND.
+- Double deref: emit two indirect loads through
+  the same or different registers.
+
 ## Large model = same as medium (far code, near data via DGROUP); huge is the only model w/ far DATA
 
 Fixtures `2213` (large fn call), `2214` (large
