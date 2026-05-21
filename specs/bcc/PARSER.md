@@ -1959,6 +1959,53 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Ptr-walk: swapped cmp + `ja`; missing return falls through; assignment-as-arg
+
+Fixtures `1814` (ptr-walk array via `p < a + 5`),
+`1815` (function missing return for some paths),
+and `1816` (`sqr(n = 7) + n` assignment in arg)
+cover three control-flow / value-flow shapes.
+
+- `1814` (**pointer-walk loop comparison**):
+  `for (p = a; p < a + 5; p++)` lowers to:
+  ```
+  lea ax, [bp+0]    ; ax = &(a+5) = one-past-end
+  cmp ax, si        ; flags = ax - si (NOTE: ax is dest!)
+  ja body           ; loop while ax > si == p < a+5
+  ```
+  
+  **Notable**: BCC **swaps the cmp operands** so the
+  reg-field (= dest) holds the upper bound and the
+  r/m field holds the iterator. With the swap,
+  unsigned-above (`ja`) correctly continues while
+  `p < a+5`. Pointer comparisons use unsigned
+  semantics — this works because all SS-addressed
+  values within a function frame have ascending
+  addresses.
+- `1815` (**missing return**): a function declared
+  `int` that doesn't return on some path simply
+  **falls through to the epilogue with AX
+  uninitialized** (whatever value happens to be in
+  AX). C makes this UB; BCC emits no safety
+  zero-init.
+- `1816` (**assignment-in-argument**): `sqr(n = 7)`
+  evaluates the assignment as `mov ax, 7; mov [n],
+  ax`, then `push ax` (using the assignment's
+  value). The expression's value is the RHS, per
+  C semantics. After the call, `+ n` reads from
+  [n] (which got stored).
+
+For the Rust reimplementation:
+- Pointer-comparison loop tests can be encoded as
+  `cmp upper_bound, iterator / ja body` — uses
+  reg-r/m swap to enable unsigned-above test.
+- Don't add safety code for missing return paths —
+  emit only what the source specifies; the AX value
+  is whatever's there.
+- Assignment expressions yield their RHS value;
+  emit the store side-effect, then use AX as the
+  value.
+
 ## Multi-init refs earlier; fn-ptr struct-field call via `ff 56`; `const int` not folded
 
 Fixtures `1811` (multi-init with expressions),
