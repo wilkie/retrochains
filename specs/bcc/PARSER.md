@@ -1959,6 +1959,63 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## FP compares: `fcomp qword` + `jne`/`jb`/`ja`; double array stride 8
+
+Fixtures `1754` (FP `==`), `1755` (double array
+sum), and `1756` (FP `>=`) finalise the FP compare
+encoding picture.
+
+- `1754` (**FP `==`**): uses **`fcomp qword [b]`**
+  (`dc /3`) — the double variant of fcomp (vs `d8
+  /3` for float). The full sequence:
+  ```
+  fld qword [a]
+  fcomp qword [b]      ; dc /3
+  fstsw word [m]       ; save FPU status
+  mov ax, [m]
+  sahf                 ; copy AH → CPU flags
+  jne L_false          ; 75 — branch if not equal
+  ```
+- `1755` (**double array stride 8**): `double a[3]`
+  on stack lays elements at 8-byte stride. The
+  `fld1` constant load is used for `1.0` (still
+  cheaper than literal). Multi-fadd chain runs
+  entirely on FPU stack — no intermediates spilled
+  to memory.
+- `1756` (**FP `>=`**): same fcomp+fstsw+sahf
+  setup, but uses **`jb`** (`72`) for the false
+  branch (`>=` true means CF=0; CF=1 means `<` is
+  true so `jb` jumps to false). The FP-to-CPU flag
+  mapping via `sahf`:
+  | FPU state | C3 (→ZF) | C0 (→CF) | Triggered jcc |
+  |-----------|----------|----------|---------------|
+  | a > b | 0 | 0 | `ja` (above) |
+  | a == b | 1 | 0 | `je`/`jae` |
+  | a < b | 0 | 1 | `jb` (below) |
+  | unordered | 1 | 1 | `jbe` |
+
+  So source-level FP operators map to **unsigned-
+  flavour jcc** in inverse form:
+  | Operator | False-branch jcc |
+  |----------|------------------|
+  | `==` | `jne` (75) |
+  | `!=` | `je` (74) |
+  | `<`  | `jae` (73) |
+  | `<=` | `ja` (77) |
+  | `>`  | `jbe` (76) |
+  | `>=` | `jb` (72) |
+
+Updated FP-encoding summary:
+| Op | Float | Double |
+|----|-------|--------|
+| fcomp m | `9b d8 /3` | `9b dc /3` |
+| fcompp (stack) | `9b de d9` | (same) |
+| fcom m | `9b d8 /2` | `9b dc /2` |
+
+The fcom variants are for non-popping compares
+(rare since BCC tends to use fcomp for compare-
+and-pop in expressions).
+
 ## FP mul `dc /1`; `int + double` promotes via `fild`; FP negate via `fchs`
 
 Fixtures `1751` (double*double), `1752` (int +
