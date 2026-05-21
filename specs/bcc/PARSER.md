@@ -1959,6 +1959,49 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Number bases parse-time uniform; for-update comma = 2 ops; char const = int
+
+Fixtures `1826` (octal/hex/dec literals), `1827`
+(comma in for-update), and `1828` (char escape
+constants) cover three parser-level shapes.
+
+- `1826` (**number bases**): `0x1F`, `077`, `42`
+  all resolve to **same imm16 form** at parse
+  time. Base prefix (`0x`, `0`, none) is
+  consumed by the lexer; the OBJ stores binary
+  values uniformly via `c7 46 disp imm16`. Source-
+  level base is purely lexical convenience.
+- `1827` (**comma in for-update**): `for (i=0,
+  j=10; ...; i++, j--)` emits **both update
+  statements sequentially** — `inc si / dec di`
+  — at the loop's post-update point. No special
+  comma handling; just statement sequencing.
+  
+  Also notable: with 3 multi-use locals (sum, i,
+  j), all 3 enregister into DX, SI, DI. DX is
+  used here for `sum` (1st declared with multiple
+  reads) because the more common SI/DI got the
+  loop induction variables.
+- `1828` (**char constants**): `'X'`, `'\n'`,
+  `'\t'`, `'\\'` are resolved at parse time to
+  **int values** (10, 9, 92, 65 respectively).
+  Stored via `mov word [m], imm16` since char
+  literals have type `int` in C (per K&R / C89
+  semantics). Escape sequences and printable chars
+  follow the same parse-time resolution.
+
+All three cases reinforce: **the C source-level
+representation (base, escape, syntax form) is
+purely lexical** — the OBJ contains only the
+resolved binary values. BCC's parser does all
+the resolution before codegen sees the values.
+
+This matches a common rule across all the
+constant-folding evidence: any expression composed
+entirely of compile-time-knowable values is
+reduced to a single binary constant before being
+emitted. Source diversity → single binary form.
+
 ## Escapes parse-time resolved; nested ternary linear chain; args eval R-to-L
 
 Fixtures `1823` (escape sequences in string),
