@@ -1959,6 +1959,63 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `near` overrides model default; mixed near/far in same TU; dense switch always CS-relative
+
+Fixtures `1748` (near ptr in -ml), `1749` (near fn
+in -ml), and `1750` (dense switch in -ml) show how
+explicit `near`/`far` qualifiers interact with the
+memory model defaults.
+
+- `1748` (**`near` ptr in -ml**): an explicit
+  `int near *p` in large model produces a **2-byte
+  pointer** with `mov ax, [si]` direct deref —
+  same as the small-model default. The `near`
+  qualifier **overrides** the model's far-data
+  default. Useful for ptr-to-stack (which uses SS
+  anyway and doesn't need a far ptr).
+- `1749` (**`near` fn in -ml**): a `int near
+  helper(int x)` in large model gets:
+  - **near return** (`5d c3`) instead of `5d cb`
+  - **args at `[bp+4]`** (not `[bp+6]`) because the
+    return address is now near (2 bytes not 4)
+  - **caller emits plain `call near`** (`e8`)
+    without `push cs`
+  
+  So a single TU can have **mixed near and far
+  functions**. The compiler tracks each function's
+  ABI based on its declaration and emits the
+  correct call/ret pair. main is far (model default)
+  while helper is near.
+- `1750` (**dense switch in -ml**): the indexed-
+  table dispatch uses **`cs:[bx + offset]`** (`2e
+  ff /4`) — **identical to small model**. CS-
+  relative addressing doesn't depend on the data
+  model since the jump table lives in the code
+  segment. Both small and large models produce
+  byte-identical switch dispatch sequences (modulo
+  the surrounding function ABI bytes).
+
+So the model interaction is per-function-symbol-level:
+
+| Qualifier | Effect in -ms | Effect in -ml |
+|-----------|---------------|---------------|
+| (default) | near (matches model) | far (matches model) |
+| `near` fn | near (same) | **near** (overrides) |
+| `far` fn | **far** (overrides) | far (same) |
+| (default) ptr to data | near (matches model) | far (matches model) |
+| `near *` | near (same) | **near** (overrides) |
+| `far *` | **far** (overrides) | far (same) |
+
+This per-function tracking is important for the
+Rust reimplementation:
+- Track `ABI = near|far` per fn-decl symbol based
+  on qualifier + model default.
+- Emit `push cs` + `e8` for far-call sites; just
+  `e8` for near-call sites.
+- Emit `ret` (`c3`) or `retf` (`cb`) in epilogue
+  per function's own ABI flag.
+- Param offsets: `bp+4` (near) or `bp+6` (far).
+
 ## -ml: params at `[bp+6]+`; long add unchanged; mul unchanged; struct call uses `push cs`
 
 Fixtures `1745` (long add in -ml), `1746` (struct
