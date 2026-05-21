@@ -1959,6 +1959,67 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Signed `long >> 1` = `sar/rcr` inline; ulong % = N_LUMOD@; `-long` = `neg/neg/sbb` (3-instruction idiom)
+
+Fixtures `2183` (signed long >> 1), `2184` (ulong
+%), `2185` (long unary -) complete the long-
+operator catalogue.
+
+- `2183` (**signed `long >> 1` inline**): uses
+  **SAR** (arithmetic right shift) on the high
+  half:
+  ```
+  ax = a.hi / dx = a.lo
+  sar ax, 1            ; d1 f8 — ARITHMETIC right (preserves sign)
+  rcr dx, 1            ; d1 da — rotate low through carry
+  ```
+  For -1 >> 1, SAR keeps the sign bit set → result
+  stays -1. (Contrast: SHR would give a huge
+  unsigned positive number.)
+- `2184` (**ulong %**): uses **N_LUMOD@** helper
+  (distinct from signed N_LMOD@). Same calling
+  convention (stack-push, DX:AX return).
+- `2185` (**unary `-` on long**): 5-byte inline
+  idiom:
+  ```
+  ax = a.hi / dx = a.lo
+  neg ax              ; f7 d8 — flip high
+  neg dx              ; f7 da — flip low (CF set if dx was nonzero)
+  sbb ax, 0           ; 1d 00 00 — adjust high by borrow from low
+  ```
+  Beautiful: the SBB propagates the borrow from
+  low's negation into the high half. Total 5
+  bytes (2+2+3).
+
+**Long-shift inline cases (complete)**:
+| Operation | Form |
+|-----------|------|
+| `long << 1` (signed/unsigned) | `shl dx, 1 / rcl ax, 1` (4B) |
+| `unsigned long >> 1` | `shr ax, 1 / rcr dx, 1` (4B) |
+| `signed long >> 1` | `sar ax, 1 / rcr dx, 1` (4B) |
+| `-long` (unary minus) | `neg ax / neg dx / sbb ax, 0` (5B) |
+| `~long` (bitwise NOT) | `not ax / not dx` (4B, probable) |
+| Long shift by N ≥ 2 or var | Helper (N_LXLSH@, etc.) |
+
+**Long helper catalogue (final, confirmed)**:
+| Helper | Op | Sign |
+|--------|-----|------|
+| `N_LXMUL@` | × | both share |
+| `N_LDIV@` | / | signed |
+| `N_LMOD@` | % | signed |
+| `N_LUDIV@` | / | unsigned |
+| `N_LUMOD@` | % | unsigned |
+| `N_LXLSH@` | << | both share |
+| `N_LXRSH@` | >> | signed (probable) |
+| `N_LXURSH@` | >> | unsigned (probable) |
+| `N_FTOL@` | float→long | both |
+
+For the Rust reimplementation:
+- Signed long >> 1: emit `sar/rcr`.
+- Ulong %: emit N_LUMOD@ helper call.
+- Long unary minus: emit `neg/neg/sbb 0` 5-byte
+  idiom.
+
 ## Ulong mul = N_LXMUL@ (shared signed); ulong div = N_LUDIV@ separate; ulong >> 1 inline `shr/rcr`
 
 Fixtures `2180` (ulong mul), `2181` (ulong div),
