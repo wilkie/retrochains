@@ -1959,6 +1959,56 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Static local non-zero init → `_DATA`; local arr `{...}` init always uses `N_SCOPY@`
+
+Fixtures `1790` (static local int with init = 5),
+`1791` (`int a[3] = {1,2,3}`), and `1792` (`int
+a[6] = {1..6}`) refine the local-aggregate-init
+codegen rules.
+
+- `1790` (**static local with non-zero init →
+  `_DATA`**): `static int n = 5;` places n in
+  **`_DATA`** with the initial value baked into
+  LEDATA (`05 00`). The function accesses it
+  via `inc word [_n]` (`ff 06 disp`) and `mov ax,
+  [_n]` (`a1 disp`) — FIXUPP-resolved direct memory.
+  
+  Contrast with `static int n = 0;` (or no init)
+  which would go to `_BSS` (no LEDATA needed since
+  loader zeros BSS at startup).
+- `1791` (**`int a[3] = {1,2,3}` uses `N_SCOPY@`**):
+  An aggregate initializer for a local array
+  **always uses `N_SCOPY@`** to copy from a
+  template in `_DATA` — NOT inline `mov [m], imm`
+  stores. The 3-int template (6 bytes) is in DATA;
+  N_SCOPY@ copies it onto the stack.
+- `1792` (**same for `int a[6]`**): identical
+  shape, just 12 bytes of template.
+
+So the **local-aggregate-init rule** is:
+| Pattern | Codegen |
+|---------|---------|
+| `int a[3];` then `a[0]=1; a[1]=2; ...` | Inline `mov [bp+disp], imm` per element |
+| `int a[3] = {1,2,3};` | Template in `_DATA` + `N_SCOPY@` |
+| `int a[N];` (no init) | `sub sp, N*2` only, no init code |
+
+So **aggregate-init in declaration always uses
+N_SCOPY@**, regardless of size — even for 3-ints
+which would be only 12 bytes of inline stores. The
+template+copy approach is more compact: 6 bytes
+of template in `_DATA` + ~15 bytes of call setup,
+vs 18 bytes (3 × `c7 46 disp imm16`).
+
+For larger arrays, N_SCOPY@ becomes increasingly
+efficient. BCC's design choice: always template+
+copy for aggregate-init syntax; programmers who
+want inline stores write separate assignments.
+
+For the Rust reimplementation:
+- When emitting local aggregate-init from `{...}`:
+  emit template to `_DATA`, then call `N_SCOPY@`
+  with appropriate count and src/dest far pointers.
+
 ## Fn-ptr arg call via `[bp+4]`; uninit local has no init code; uninit globals → BSS
 
 Fixtures `1787` (fn taking fn-ptr arg), `1788`
