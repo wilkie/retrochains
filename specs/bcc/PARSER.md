@@ -1959,6 +1959,66 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `-d` via FCHS (`d9 e0`); `d += K` = FADD m64; double const NOT exact-as-single stored as 8B
+
+Fixtures `2147` (double negate), `2148` (compound
+assign), `2149` (double ==) refine double-codegen
+details.
+
+- `2147` (**unary `-d` = FCHS**): emits `9b d9
+  e0` (3 bytes total: WAIT + FCHS = `d9 /4`).
+  Toggles the sign bit on FPU TOP. No memory
+  access.
+- `2148` (**`d += K` compound assign**): for
+  commutative ops:
+  ```
+  FLD m32/m64 K              ; load constant
+  FADD m64 [d]                ; top += d (commutative)
+  FSTP m64 [d]                ; store back
+  ```
+  Uses `dc /0` (FADD m64) reading from `[d]`.
+  Same pattern for `d *= K` with `dc /1` (FMUL
+  m64).
+- `2149` (**`a == b` double eq**): emits FCOMP
+  m64 / FSTSW / SAHF / **`jne`** (not jbe/ja).
+  Equality only needs ZF, so the unsigned-vs-
+  signed distinction doesn't matter — `jne`
+  works for both.
+  
+  Notable: const `3.14` here is stored as **full
+  8-byte double** in `_DATA` (`1f 85 eb 51 b8 1e
+  09 40`). 3.14 is NOT exactly representable as
+  single, so the optimisation that would shrink
+  it to 4 bytes (seen in 2136 with 1.5/2.5)
+  doesn't apply.
+
+**FPU misc opcodes** (`d9` family for m32-ish ops):
+| Opcode | Mnemonic | Description |
+|--------|----------|-------------|
+| `d9 06 [m]` | FLD m32 | Load single |
+| `d9 1e [m]` | FSTP m32 | Store+pop single |
+| `d9 e0` | FCHS | Negate (toggle sign bit) |
+| `d9 e1` | FABS | Absolute value |
+| `d9 e4` | FTST | Test against 0 |
+| `d9 e8` | FLD1 | Push 1.0 |
+| `d9 ee` | FLDZ | Push 0.0 |
+| `d9 fe` | FSIN | Sine (286+) |
+| `d9 ff` | FCOS | Cosine (286+) |
+
+**Double-constant single-optimisation rule**:
+- Const exactly representable as single → store
+  as 4 bytes in `_DATA`, load via FLD m32 (FPU
+  widens to 80-bit naturally, FSTP m64 to var)
+- Const NOT exactly representable → store as 8
+  bytes in `_DATA`, load via FLD m64
+
+For the Rust reimplementation:
+- Unary `-` on float/double: emit FCHS.
+- Compound assign with commutative op: load
+  const, op-with-var, store.
+- Double const storage: check exact-single
+  representability; emit 4B or 8B accordingly.
+
 ## Float return on FPU TOP; `(float)int` via FILD m16; `float→double` auto-promotes via FLD m32/FSTP m64
 
 Fixtures `2144` (double fn return), `2145` (int→
