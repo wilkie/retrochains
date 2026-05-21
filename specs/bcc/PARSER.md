@@ -1959,6 +1959,61 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Compound `<<=` shifts reg directly; `*=` round-trips AX; `&=` uses `81 /4 reg imm16`
+
+Fixtures `1940` (`x <<= 3`), `1941` (`x *= 7`),
+`1942` (`x &= 0xFF`) cover compound-assignment
+codegen for enregistered variables.
+
+- `1940` (**`x <<= 3` on register**): emits 3
+  unrolled `shl si, 1` directly on the register
+  — no AX roundtrip:
+  ```
+  shl si, 1            ; d1 e6
+  shl si, 1            ; d1 e6
+  shl si, 1            ; d1 e6
+  ```
+  Same N≤3 unroll / N≥4 CL-form rule applies.
+  Targeting a register directly is more compact
+  than going through AX.
+- `1941` (**`x *= 7` on register**): mul requires
+  AX, so a roundtrip:
+  ```
+  mov dx, 7            ; ba 07 00
+  mov ax, si           ; reg → AX
+  imul dx              ; AX *= DX
+  mov si, ax           ; AX → reg
+  ```
+  No way to mul a register by an immediate without
+  using AX/DX on 8086. Roundtrip cost: 4 extra
+  bytes vs in-place would be.
+- `1942` (**`x &= 0xFF` on register**): emits
+  **`81 /4 reg imm16`** (4 bytes) directly:
+  ```
+  and si, 0xFF         ; 81 e6 ff 00
+  ```
+  No AX form needed since the generic `81 /N`
+  encoding works for any 16-bit register. Result
+  stays in the target register.
+
+**Compound-assignment on register summary**:
+| Op | Encoding | Bytes |
+|----|----------|-------|
+| `<<=` (≤3) | `shl reg, 1` × N | 2N |
+| `<<=` (≥4) | `mov cl, K / shl reg, cl` | 4 |
+| `*=` (any K) | `mov dx,K / mov ax,reg / imul dx / mov reg,ax` | 9+ |
+| `+=` (±1) | `inc reg` or `dec reg` | 1 |
+| `+=` (other) | `add reg, imm` (imm8-sext if fits) | 3 or 4 |
+| `&=`/`|=`/`^=` | `81 /N reg imm16` | 4 |
+
+For the Rust reimplementation:
+- Track variable's location (register vs memory)
+  per use; emit register-direct forms when
+  possible.
+- Mul-assign always uses AX/DX roundtrip on 8086.
+- Bitwise compound assigns use generic `81 /N`
+  encoding.
+
 ## Signed mod uses idiv (read DX); mul by neg uses two's-comp; zero-test: `or reg` vs `cmp [m], 0`
 
 Fixtures `1937` (signed mod pow2), `1938` (mul by
