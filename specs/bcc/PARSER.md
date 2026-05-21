@@ -1959,6 +1959,75 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Int→long via cwd (signed) vs zero-fill (unsigned); nested struct = flat layout; `>>16` = high half
+
+Fixtures `1949` (int→long signed), `1950` (nested
+struct), `1951` (unsigned int→long zero-ext)
+document type-aware casts and nested-struct
+layout.
+
+- `1949` (**signed int→long uses cwd**): `(long)x`
+  for signed int x emits **`cwd`** to sign-extend
+  AX → DX:AX:
+  ```
+  mov ax, [x]
+  cwd                  ; sign-extend to dx:ax
+  mov [y.hi], dx
+  mov [y.lo], ax
+  ```
+  For x = -5 (0xFFFB), DX becomes 0xFFFF (sign-
+  extended -1), preserving the negative value as
+  -5L = 0xFFFFFFFB.
+  
+  Also: `(int)(y >> 16)` is **recognized at parse
+  time as a direct read of `y.hi`** — no shift
+  instruction emitted. The high half is just
+  accessed at `[bp+disp+2]`.
+- `1950` (**nested struct flat layout**):
+  ```c
+  struct Outer { int n; struct Inner {int x; int y;} inner; };
+  ```
+  lays out as:
+  | Field | Offset |
+  |-------|--------|
+  | `o.n` | 0 |
+  | `o.inner.x` | 2 |
+  | `o.inner.y` | 4 |
+  Total: 6 bytes. Nested struct fields use
+  **summed offsets** (outer field offset + inner
+  field offset). No special wrapping or alignment.
+- `1951` (**unsigned int→long uses zero-fill**):
+  `(long)unsigned_x` does NOT use cwd — it does
+  **explicit zero-fill of the high half**:
+  ```
+  mov ax, [x]
+  mov [y.hi], 0         ; zero-fill, NOT cwd
+  mov [y.lo], ax
+  ```
+  For x = 0x8000, zero-fill gives y = 0x00008000
+  (correct unsigned promotion). Sign-extend would
+  have given 0xFFFF8000 (wrong for unsigned).
+  
+  Then `y >> 8` uses **N_LXRSH@** (long unsigned
+  right shift helper) since the long type tracks
+  the originating unsigned signedness.
+
+**Int↔long cast summary**:
+| Cast | Mechanism |
+|------|-----------|
+| signed int → long | `cwd` sign-extend (DX = AX's sign) |
+| unsigned int → long | Zero-fill via `mov [hi], 0` |
+| long → int (truncate) | Just use low half (`y.lo`) |
+| `(int)(y >> N*16)` where N=1 | Direct read of `y.hi` (no shift) |
+
+For the Rust reimplementation:
+- Track signedness through casts; emit cwd for
+  signed promotion, zero-fill for unsigned.
+- Recognize `>> 16` truncations as direct half
+  access.
+- Nested struct fields: sum outer-field-offset +
+  inner-field-offset for the final access offset.
+
 ## Long ABI: stored little-endian halves; args pushed hi-first; arr stride 4B per elem
 
 Fixtures `1946` (fn returning long), `1947` (mixed
