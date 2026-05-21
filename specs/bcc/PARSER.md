@@ -1959,6 +1959,43 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Cleanup encoding: 0 args = no cleanup; 1-2 args = `pop cx` (preserves AX); 3+ = `add sp, N`
+
+Fixtures `2033` (0 args), `2034` (1 arg), `2035`
+(2 args) characterise the **post-call cleanup**
+encoding.
+
+- `2033` (**0 args = no cleanup**): just `call`
+  + `ret`. No `pop` or `add sp` emitted.
+- `2034` (**1 arg = `pop cx`**): 2-byte cleanup
+  via single `pop cx` (`59`, 1 byte).
+  - Critically uses **`pop cx`** (`59`), NOT
+    `pop ax` (`58`) — preserves AX which holds
+    the return value. CX is caller-saved so
+    clobbering is fine.
+- `2035` (**2 args = `pop cx` × 2**): 4-byte
+  cleanup via two `pop cx` instructions (2
+  bytes total). Cheaper than `add sp, 4` (3
+  bytes).
+
+**Cleanup encoding hierarchy**:
+| N args | Cleanup | Bytes |
+|--------|---------|-------|
+| 0 | (none) | 0 |
+| 1 | `pop cx` | 1 |
+| 2 | `pop cx / pop cx` | 2 |
+| 3 | `add sp, 6` (imm8-sext) | 3 |
+| 4+ | `add sp, N*2` (imm8-sext or imm16) | 3-4 |
+
+So the boundary is at N=3 args, where pops (3 bytes
+for 3 pops) and add-sp (3 bytes) are tied — BCC
+picks `add sp` for clarity/consistency.
+
+For the Rust reimplementation:
+- 0 args: omit cleanup
+- 1-2 args: emit `59` (pop cx) per arg
+- 3+ args: emit `83 c4 imm8` (add sp, N*2)
+
 ## 3-arg eval order confirmed R-to-L; shift+mask no fusion; int overflow wraps naturally
 
 Fixtures `2030` (3-arg side effects), `2031` (bit
