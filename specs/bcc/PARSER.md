@@ -1959,6 +1959,80 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## In small model: `near` no-op; `far` data ptr = 4B + LES + ES override; `far` fn = `push cs / call near` + `cb`
+
+Fixtures `2249` (near in small), `2250` (far data
+ptr in small), `2251` (far fn in small) probe
+explicit pointer-size keywords.
+
+- `2249` (**`near` in small**): byte-identical to
+  default. Pointer is 2 bytes, no segment
+  involvement. `near` qualifier is a no-op.
+- `2250` (**`far` data ptr in small**): brings
+  huge-style 4-byte pointer access into small
+  model:
+  ```
+  ; Construct p (far ptr = offset + segment):
+  lea ax, [x]
+  mov [p.seg], ss            ; 8c 56 fc — store SS as segment
+  mov [p.off], ax
+  
+  ; Dereference *p:
+  les bx, [p]                ; c4 5e fa — load offset+segment
+  mov ax, es:[bx]            ; 26 8b 07 — with ES override (3B)
+  ```
+  Cost: 6 bytes for ptr (vs 2), 3-5 bytes per
+  deref (vs 2-3).
+- `2251` (**`far` fn in small, same TU**): the
+  far fn has `cb` (retf) instead of `c3`. The
+  caller within the same translation unit uses
+  the **`push cs / call near`** intra-CS
+  optimization (4 bytes), same as medium model's
+  default:
+  ```
+  ; In _helper (far fn):
+  ...
+  5d cb              ; pop bp / retf
+  
+  ; Caller (same TU):
+  0e                ; push cs
+  e8 NN NN          ; call near (rel16)
+  ```
+
+**Pointer-size qualifier summary** (in small model):
+| Qualifier | Pointer | Deref | Notes |
+|-----------|---------|-------|-------|
+| (default) | 2B near | `[bx]` or `[bp+d]` 2-3B | DS implicit |
+| `near` | 2B near | Same as default | No-op |
+| `far` | 4B (off+seg) | `les / mov es:[bx]` 5B | Explicit segment |
+| `huge` | 4B + normalised | (varies) | Normalised after arith |
+
+**Far fn call form depends on whether target is
+intra-segment**:
+- Same TU + intra-CS: `push cs / call near` (4B)
+- Different TU (extern): full `9a` (5B with seg
+  FIXUPP)
+
+**8086 segment override prefixes**:
+| Prefix | Override | Use case |
+|--------|----------|----------|
+| 0x26 | ES | far pointer access |
+| 0x2E | CS | code reads (rare) |
+| 0x36 | SS | (rare; default for [bp]) |
+| 0x3E | DS | (default; usually elided) |
+| 0x64 | FS | (286+ only) |
+| 0x65 | GS | (286+ only) |
+
+For BCC 2.0 8086 target, only `26` (ES) is
+emitted, for far data access.
+
+For the Rust reimplementation:
+- Track per-pointer model (near/far/huge).
+- Far ptr load: emit `c4 [m]` (LES).
+- Far ptr deref: emit segment-override prefix
+  `26` before the access.
+- Far fn intra-TU: emit `push cs / call near`.
+
 ## `pascal` = UPPERCASE name + L-to-R push + `ret N` callee cleanup; `interrupt` = save all + IRET; `cdecl` = default
 
 Fixtures `2246` (pascal), `2247` (interrupt),
