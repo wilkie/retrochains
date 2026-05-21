@@ -1959,6 +1959,66 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `volatile` is no-op in BCC; do-while saves init jmp; forward decl resolves at parse
+
+Fixtures `1886` (volatile int), `1887` (do-while
+with zero test), and `1888` (forward fn decl)
+cover three remaining type/control-flow shapes.
+
+- `1886` (**`volatile` is effectively no-op**):
+  `volatile int x = 0; x = 1; x = 2; return x;`
+  emits **all three stores** plus the load.
+  Notable: a non-volatile version would emit
+  **identical code** because BCC **never performs
+  dead-store elimination** (or any other
+  optimization that would remove the qualifier's
+  purpose).
+  
+  So in BCC 2.0, `volatile` is a **type-system
+  marker** with **zero codegen effect** — the
+  compiler already preserves all side-effects by
+  default.
+- `1887` (**do-while saves the init jmp**):
+  ```
+  ; no jmp to test at top
+  body:
+    add di, si      ; sum += i
+    dec si          ; i--
+    or si, si       ; test i (zero-test shortcut)
+    jne body        ; loop while non-zero
+  ```
+  Saves 2 bytes vs while-bottom-test pattern (no
+  `jmp test` at the top, since do-while
+  guarantees ≥1 iteration). The test uses cheap
+  `or si, si` since condition is just a variable.
+- `1888` (**forward decl + later defn**):
+  ```c
+  int callee(int x);
+  int main(void) { return callee(7); }
+  int callee(int x) { ... }
+  ```
+  Compiles cleanly. The forward decl provides the
+  prototype; main's `call _callee` uses a forward
+  relative near-call (`e8 +disp`) since both
+  functions are in the same segment. Symbol
+  resolution happens at parse time.
+  
+  Note: function order in source = order in OBJ;
+  main appears before _callee in symbol table.
+  The forward call's displacement is resolved
+  during codegen pass when the target function's
+  position is known.
+
+For the Rust reimplementation:
+- `volatile` qualifier: trackable in type system,
+  no codegen change (BCC never optimized stores
+  anyway).
+- do-while: emit body first, test at bottom,
+  conditional jump back. No init jmp.
+- Forward fn decls: resolve via two-pass parse
+  (collect prototypes first) or back-patch
+  during codegen.
+
 ## `char a[] = "ABC"` uses N_SCOPY@; array decays to ptr at call site; sizeof dead-codes
 
 Fixtures `1883` (char array init from string),
