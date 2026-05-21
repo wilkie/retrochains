@@ -1959,6 +1959,79 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Recursion = regular call (no special handling); mutual recursion via fwd-decl; NO tail-call elimination
+
+Fixtures `2255` (factorial), `2256` (mutual
+recursion via fwd decl), `2257` (tail-call check
+— BCC doesn't TCE) cover function-call recursion
+patterns.
+
+- `2255` (**recursive factorial**): just a normal
+  `call near` to self. Each invocation gets a
+  fresh BP frame via the standard prologue:
+  ```
+  ; In fact(int n):
+  cmp si, 1                  ; n <= 1?
+  jg L_recurse
+  mov ax, 1                  ; base case
+  jmp end
+  L_recurse:
+    mov ax, si
+    dec ax                   ; n - 1
+    push ax
+    e8 [rel]                  ; call _fact (intra-TU)
+    pop cx
+    imul si                  ; ax *= n
+  end:
+  ```
+  Recursion "just works" via the call/ret/BP
+  discipline.
+- `2256` (**mutual recursion via fwd decl**): the
+  forward declaration `int is_odd(int n);` lets
+  BCC's parser know is_odd exists when compiling
+  is_even. Both fns end up in the same `_TEXT`
+  segment with intra-TU `e8 [rel]` calls (filled
+  in at compile-time once all symbols seen).
+  No EXTDEF needed for forward intra-TU refs.
+- `2257` (**no tail-call elimination**): `return
+  helper(x)` lowers to full call + epilogue:
+  ```
+  ; In wrapper(int x): return helper(x);
+  push word [bp+4]            ; arg
+  e8 [rel]                    ; call _helper
+  pop cx                       ; cleanup
+  ; (no special handling — standard epilogue)
+  mov sp, bp
+  pop bp
+  ret
+  ```
+  BCC does NOT collapse this into `jmp _helper`.
+  Consistent with simple non-optimizing compiler.
+
+**Recursion / call optimizations in BCC**:
+| Optimization | BCC behavior |
+|--------------|--------------|
+| Tail-call elimination | Not performed |
+| Tail-recursion → loop | Not performed |
+| Inlining | Not performed |
+| Common-subexpression elimination | Not performed |
+| Dead-code elimination | Not performed |
+| Constant propagation across blocks | Not performed |
+| Loop unrolling | Not performed (except const-shift unroll for `<< 1` etc.) |
+
+So calls have no special collapsing — every C
+function call results in a real machine call,
+prologue, epilogue, ret. Recursion goes through
+the same call mechanism. Stack depth = recursion
+depth × (BP saved + locals + ret addr).
+
+For the Rust reimplementation:
+- Recursive calls: emit standard call
+  instruction; no special handling.
+- Tail calls: do NOT collapse to jmp.
+- Mutual recursion: track forward references in
+  the symbol table; backpatch rel16 at EOF.
+
 ## `typedef fn ptr` is parse-time alias; multi-fn TU = one _TEXT seg + per-fn PUBDEF; extern fn = EXTDEF + FIXUPP'd call
 
 Fixtures `2252` (typedef fn ptr), `2253` (5 fns
