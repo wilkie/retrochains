@@ -1959,6 +1959,66 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `typedef fn ptr` is parse-time alias; multi-fn TU = one _TEXT seg + per-fn PUBDEF; extern fn = EXTDEF + FIXUPP'd call
+
+Fixtures `2252` (typedef fn ptr), `2253` (5 fns
+in one TU), `2254` (extern decl no body) cover
+function-level translation-unit organization.
+
+- `2252` (**`typedef int (*BinOp)(int,int)`**):
+  pure parse-time alias. Codegen identical to
+  using the raw type:
+  ```
+  ; In apply(BinOp f, int a, int b):
+  push word [bp+8]                ; b
+  push word [bp+6]                ; a
+  ff 56 04                        ; call near [bp+4] — through f
+  ```
+- `2253` (**multi-fn same TU**): all fns share
+  one `_TEXT` segment in the small model. Each
+  fn gets its own PUBDEF entry. Bodies emitted
+  in declaration order; PUBDEF emission order
+  appears to be based on internal symbol table
+  layout (not strict declaration order). The
+  caller's relative calls (`e8 [rel]`) are filled
+  in directly at compile time since all targets
+  are intra-segment.
+- `2254` (**extern fn decl no body**): only an
+  EXTDEF entry; no PUBDEF, no body. Call sites
+  use FIXUPP'd `e8 00 00`:
+  ```
+  e8 00 00                ; call near (rel16)
+                          ; FIXUPP relocates the rel16 at link time
+  ```
+  Linker assumes the extern target ends up in
+  the same code segment as the caller (small/
+  compact model). For medium/large/huge with
+  extern, would use `9a [off][seg]` full far
+  call instead.
+
+**Translation-unit symbol summary**:
+| Declaration | PUBDEF | EXTDEF | Body | Notes |
+|-------------|--------|--------|------|-------|
+| Defined globally | ✓ | ✗ | ✓ | Exported |
+| Defined `static` | ✗ | ✗ | ✓ | Local-only |
+| `extern` declared, used | ✗ | ✓ | ✗ | Linker resolves |
+| `extern` declared, unused | ✗ | ✗ | ✗ | Elided |
+| `typedef` | ✗ | ✗ | ✗ | Parse-time only |
+
+**Multi-fn TU emission order**:
+- Bodies in `_TEXT`: declaration order
+- PUBDEFs: appears to be hash-table iteration
+  order (not strict declaration order)
+- EXTDEFs: appears in use-order
+
+For the Rust reimplementation:
+- Maintain a per-TU symbol table.
+- Emit one `_TEXT` segment per TU containing all
+  global fn bodies in declaration order.
+- Emit PUBDEFs for non-static globals.
+- Emit EXTDEFs for referenced undefined symbols.
+- Treat typedef as a parse-time alias only.
+
 ## In small model: `near` no-op; `far` data ptr = 4B + LES + ES override; `far` fn = `push cs / call near` + `cb`
 
 Fixtures `2249` (near in small), `2250` (far data
