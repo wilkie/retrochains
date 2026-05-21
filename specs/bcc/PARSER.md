@@ -1959,6 +1959,62 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Static-no-init in `_DATA` zero-fill; empty stmts emit nothing; binary ops eval RIGHT-to-left
+
+Fixtures `2048` (static no init), `2049` (empty
+stmts), `2050` (3 trivial fns + composed expr)
+cover three further idioms.
+
+- `2048` (**static int arr no init**): placed in
+  `_DATA` with **size 6 bytes, NO LEDATA** — the
+  segment is zero-filled by default. SEGDEF
+  declares the length; loader provides the zero
+  bytes. No init bytes emitted.
+  
+  Access via direct addressing with FIXUPP
+  (same as initialised statics).
+- `2049` (**empty statements emit nothing**):
+  `;` `;` `;` produce **zero bytes** in the
+  output. They're skipped at parse time.
+- `2050` (**right-to-left binary op eval**):
+  `zero() + one() * neg_one()` parses as `zero()
+  + (one() * neg_one())`. Codegen order:
+  1. **neg_one() first** (rightmost) → AX = -1
+  2. push AX (save)
+  3. **one()** → AX = 1
+  4. mov dx, ax
+  5. pop ax (= -1 from neg_one)
+  6. imul dx → AX = -1*1 = -1
+  7. push -1 (save the * result)
+  8. **zero()** (leftmost) → AX = 0
+  9. pop dx (= -1)
+  10. add ax, dx → -1
+  
+  So **binary operators evaluate RHS first**, then
+  LHS, consistent with cdecl R-to-L for fn args.
+  
+  Also notable: `_zero` body uses `xor ax, ax`
+  (2 bytes) for returning 0; `_one`/`_neg_one`
+  use `mov ax, imm16` (3 bytes). So **only the
+  literal 0 gets the xor optimisation**; -1, 1,
+  etc. use the standard mov.
+
+**Order-of-eval summary**:
+| Construct | Eval order |
+|-----------|------------|
+| Fn args | Right-to-left (matches push order) |
+| Binary operator operands (`a + b`, etc.) | Right-to-left |
+| Comma operator (`a, b`) | Left-to-right (C standard, sequence point) |
+| && / || | Left-to-right (short-circuit) |
+
+So **side-effects within binary ops are observable RIGHT-first**, which surprises programmers used to GCC's left-first cdecl convention.
+
+For the Rust reimplementation:
+- Static no init: emit SEGDEF with the size; no LEDATA bytes (zero-filled).
+- Empty stmts: emit nothing.
+- Binary ops: evaluate RHS first, then LHS.
+- Constant 0 in expressions: emit `xor ax, ax`; other constants use `mov ax, imm16`.
+
 ## `while(--x)` = `dec/jne` (no cmp); arr decays via `lea`; static int arr = `_DATA` init list
 
 Fixtures `2045` (while predec), `2046` (arr decay
