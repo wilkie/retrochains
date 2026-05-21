@@ -1959,6 +1959,77 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Cross-model uniformity: compact/medium/large share IR-level codegen; differ only at boundaries
+
+Fixtures `1868` (compact static local), `1869`
+(medium `&&`), and `1870` (large array via ptr)
+verify that **IR-level codegen patterns port
+unchanged across models**; differences appear
+only at function-call boundaries and pointer
+representations.
+
+- `1868` (**compact static local**): the codegen
+  is **byte-identical to small-model** for the
+  function body — `ff 06 disp16` (inc word [n])
+  and `a1 disp16` (mov ax, [n]) via direct DS-
+  relative addressing. Compact's "far data" only
+  matters when explicit pointers cross segments.
+  Function still uses near `ret` (`c3`) since
+  compact has near code.
+- `1869` (**medium `&&`**): codegen for `if (a &&
+  b)` is **byte-identical to small-model** through
+  the cmp/jcc chain and bool template. The ONLY
+  difference is the function ends with **`5d cb`**
+  (pop bp + **retf**) instead of small's `5d c3`
+  (pop bp + ret near). Medium has far code, so all
+  function returns are far.
+- `1870` (**large array via ptr**): pointer ABI
+  changes significantly. `int *` is now 4 bytes
+  (segment + offset):
+  - Callee loads ptr with **`les bx, [bp+6]`** (5
+    bytes: `c4 5e 06`) for ES:BX
+  - Stores use ES override prefix: **`26 c7 07
+    imm16`** (`es: mov word [bx], imm16`, 5 bytes)
+  - Each access **reloads** ES:BX (no CSE)
+  
+  At the call site, BCC uses a **synthetic far
+  call**:
+  ```
+  push ss            ; 16    — push data segment
+  lea ax, [x]        ; 8d 46 fc
+  push ax            ; 50    — push offset
+  push cs            ; 0e    — push CS for retf
+  call near _fill    ; e8 disp16 — near call (4B)
+  ```
+  Total `push cs / call near` = 4 bytes, SHORTER
+  than `callf seg:offset` (5 bytes via `9a`). The
+  callee's `retf` correctly pops both CS and IP.
+  
+  This is a Borland-specific optimization: within
+  the same segment, fake the far-call protocol
+  using cheaper near-call mechanics.
+
+**Cross-model summary**:
+| Aspect | Changes per model? |
+|--------|---------------------|
+| Arithmetic/logic codegen | NO — uniform |
+| Register allocation | NO — uniform |
+| Boolean/comparison patterns | NO — uniform |
+| Encoding policies (imm8-sext, AX-form) | NO — uniform |
+| Function `ret` vs `retf` | YES — code-segment-far means retf |
+| Pointer width (2 vs 4 bytes) | YES — data-segment-far means 4B |
+| Pointer-deref instructions | YES — `mov bx,m / mov [bx]` vs `les bx,m / es: mov [bx]` |
+| Synthetic far-call | YES — large/medium use `push cs / call near` |
+
+So **the bulk of the IR-level findings port unchanged**; only the **ABI/pointer boundary** changes per model. This matches the earlier observation from the multi-model fixtures.
+
+For the Rust reimplementation:
+- Codegen for non-pointer ops should be model-
+  agnostic (shared code path).
+- ABI layer: per-model functions for `ret/retf`
+  selection, pointer width, push-CS-call-near vs
+  callf.
+
 ## Pass-by-value writes arg slot only; ptr-arg uses `[si+disp]`; static = global codegen
 
 Fixtures `1865` (modify arg no effect), `1866`
