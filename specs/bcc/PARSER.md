@@ -1959,6 +1959,52 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Static fn = internal linkage no PUBDEF; string concat parse-time; arr of fn-ptr = word slots
+
+Fixtures `1916` (static fn), `1917` (string
+literal concatenation), `1918` (array of fn ptrs)
+cover linkage, parser, and indirect-call shapes.
+
+- `1916` (**static fn = internal linkage**):
+  `static int hidden(int x) { ... }` is **NOT
+  listed in PUBDEF** — only `_main` appears in
+  the exported symbols. The call from main to
+  hidden uses a **direct relative near-call**
+  (`e8 disp`) with no FIXUPP, since both are in
+  the same OBJ.
+  
+  Other TUs cannot reference the static fn (no
+  symbol exported for linker). Standard C internal-
+  linkage semantics.
+- `1917` (**string literals concatenate at parse**):
+  `"Hello, " "World!"` becomes a **single string
+  literal** "Hello, World!" in `_DATA`. The lexer
+  handles the concatenation; codegen sees one
+  combined literal.
+- `1918` (**array of fn pointers**): `int
+  (*fns[2])(int)` allocates **2 word slots** on
+  stack:
+  ```
+  c7 46 fc 00 00         ; fns[0] = _add1 (FIXUPP)
+  c7 46 fe 0b 00         ; fns[1] = _add2 (FIXUPP)
+  ; call fns[0](10):
+  mov ax, 10 / push ax
+  call near [bp+fc]       ; ff 56 fc — indirect via slot
+  ```
+  Each call uses `ff 56 disp` (call near [bp+disp])
+  with the slot's stack offset. Same indirect-
+  call opcode as for any fn-ptr access.
+
+For the Rust reimplementation:
+- `static` linkage: omit from PUBDEF; internal-
+  only symbol table entry.
+- String literal concatenation: handle in lexer,
+  combine adjacent string tokens into single
+  literal before codegen.
+- Array of fn-ptrs: each slot is a near-ptr (2B
+  in small model, 4B in large); call via `ff 56
+  disp` indirect-call.
+
 ## Switch on long: two-phase search-table; struct-of-6 uses `imul`; signed `>=` uses `jl`
 
 Fixtures `1913` (switch on long), `1914` (array
