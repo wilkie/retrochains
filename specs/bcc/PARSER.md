@@ -1959,6 +1959,114 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## sizeof types pinned (char=1, int=2, long=4, double=8); sizeof doesn't eval; signed bitfield = shl+sar; zero-width forces align; cross-byte uses word ops
+
+Fixtures `2297`-`2302` cover sizeof and bitfield
+mechanics.
+
+- `2297` (**sizeof types**): all folded at parse
+  time. Returns `mov ax, 15` (= 1+2+4+8). BCC
+  type sizes:
+  - char: 1
+  - short / int / near ptr: 2
+  - long / float / far ptr / huge ptr: 4
+  - double: 8
+- `2298` (**sizeof doesn't evaluate**): `sizeof
+  (++i)` does NOT emit the increment. `i` stays
+  5. Per C standard — sizeof's argument is an
+  unevaluated context.
+- `2299` (**sizeof arr vs ptr arg**):
+  - `sizeof(arr)` in declaring scope = actual
+    array size (20 for `int[10]`)
+  - `sizeof(p)` where p is a parameter declared as
+    `int p[10]` = 2 (decays to near pointer)
+  Returns 20 + 2 = 22.
+- `2300` (**signed vs unsigned bitfield**):
+  ```
+  ; struct S { signed int s : 4; unsigned int u : 4; };
+  ; x.s = -1; x.u = 15; return x.s + (int)x.u;
+  
+  ; Read x.u (unsigned, low byte high nibble):
+  mov al, [byte]
+  mov cl, 4
+  shr ax, cl                 ; logical right shift
+  and ax, 0x0F               ; mask to 4 bits
+  
+  ; Read x.s (signed, low byte low nibble):
+  mov al, [byte]
+  mov cl, 12
+  shl ax, cl                 ; shift left to align sign bit with byte's bit 15
+  mov cl, 12
+  sar ax, cl                 ; arithmetic right shift (sign-extends)
+  ```
+  Signed bitfield extraction uses shl + sar
+  pattern for sign extension. Unsigned uses shr +
+  and.
+- `2301` (**cross-byte bitfield via word ops**):
+  ```
+  ; struct X { unsigned int lo : 6; unsigned int hi : 6; };
+  ; hi spans bits 6-11 (across byte boundary)
+  
+  ; Read lo (within byte 0): use byte op
+  mov al, [byte0]
+  and ax, 0x3F
+  
+  ; Read hi (cross-byte): use WORD op + shift + mask
+  mov dx, word [bp-N]        ; load both bytes
+  mov cl, 6
+  shr dx, cl                  ; shift to position
+  and dx, 0x3F                ; mask
+  ```
+- `2302` (**zero-width bitfield = alignment**):
+  ```
+  ; struct Z { unsigned int a : 3; unsigned int : 0; unsigned int b : 3; };
+  ; The :0 forces next field to the next byte
+  
+  ; Write a to bits 0-2 of byte 0:
+  and byte [bp-2], 0xF8 / or byte [bp-2], 0x05
+  
+  ; Write b to bits 0-2 of byte 1 (NEW byte due to :0):
+  and byte [bp-1], 0xF8 / or byte [bp-1], 0x06
+  
+  ; sizeof(struct Z) = 2
+  ```
+
+**Bitfield extraction patterns**:
+| Type | Position | Method |
+|------|----------|--------|
+| Unsigned in byte | bits 0-N | `mov al, [m] / and ax, mask` |
+| Unsigned in byte | bits N-M | `mov al, [m] / shr ax, N / and ax, mask` |
+| Signed in byte | bits 0-N | `mov al, [m] / shl ax, (16-N-1) / sar ax, (16-N-1)` |
+| Unsigned cross-byte | spans bytes | `mov dx, [m] (word) / shr dx, N / and dx, mask` |
+| Signed cross-byte | spans bytes | same + shl/sar for sign |
+
+**Bitfield write pattern**:
+1. Load byte (or word for cross-byte)
+2. AND with NOT(mask << position) — clear field
+3. AND value with mask, shift to position
+4. OR into the loaded byte/word
+5. Store back
+
+For within-byte writes, BCC uses byte ops (`80
+/N r/m8, imm8`). For cross-byte, word ops (`81
+/N r/m16, imm16`).
+
+**Bitfield rules (BCC 2.0)**:
+- LSB-first packing
+- Don't naturally cross storage-unit boundaries
+  unless declared so (or sized to span)
+- Zero-width unnamed bitfield (`: 0`) forces
+  alignment to next storage unit
+- Signed bitfields sign-extend on read (shl + sar)
+- Unsigned bitfields zero-extend (shr + and)
+
+For the Rust reimplementation:
+- Bitfield layout: track byte/bit position per
+  field, considering :0 alignment forcers.
+- Extraction: emit byte or word ops based on
+  field span.
+- Sign-extend signed fields with shl/sar pair.
+
 ## `#` stringize, `##` token-paste, `defined()`; macro double-eval on arg side-effect; `#line` codegen-invisible; small-frame `dec sp` prologue
 
 Fixtures `2291`-`2296` cover advanced preprocessor
