@@ -1959,6 +1959,64 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Nested struct flat-laid; union shares storage (little-endian observable); bitfields packed LSB-first
+
+Fixtures `2102` (nested struct init), `2103`
+(union), `2104` (bitfields) cover three composite-
+type patterns.
+
+- `2102` (**nested struct flat-laid**):
+  ```c
+  struct Outer { int id; struct Inner inner; int tail; };
+  static struct Outer o = {1, {10, 20}, 100};
+  ```
+  Data emits 8 bytes flat: `01 00 0a 00 14 00 64
+  00`. Brace nesting in init parses but
+  doesn't change layout — same as `{1, 10, 20,
+  100}` with flat layout. Inner fields accessed
+  as direct offsets from Outer's base.
+- `2103` (**union shares storage, little-endian**):
+  `u.as_int = 0x4142` writes a word; reading via
+  `u.as_bytes[0]` returns 0x42 (low byte), `u.
+  as_bytes[1]` returns 0x41 (high byte). **Little-
+  endian observable**. Union size = max(member
+  sizes).
+- `2104` (**bitfields packed LSB-first**):
+  ```c
+  struct Bits { unsigned a:3; unsigned b:5; unsigned c:8; };
+  ```
+  Storage: 2 bytes total. Layout:
+  - byte 0 bits 0..2 = a (LSB-first)
+  - byte 0 bits 3..7 = b
+  - byte 1 = c
+  
+  Write pattern (e.g., `bf.a = 5`):
+  ```
+  and byte [bp+disp], 0xf8        ; clear field bits
+  or  byte [bp+disp], 5            ; set new value
+  ```
+  Read pattern (e.g., `bf.b`):
+  ```
+  mov al, [bp+disp]
+  shr ax, 3 (× 3, unrolled)        ; shift field to LSB
+  and ax, 0x1f                      ; mask field width (5 bits = 0x1f)
+  ```
+
+**Composite-init/access summary**:
+| Construct | Layout/Storage | Codegen pattern |
+|-----------|----------------|------------------|
+| Nested struct | Flat (no padding inserted) | Direct offsets |
+| Union | Shared, size = max(members) | Same offset for all members |
+| Bitfields | Packed LSB-first in storage units | and+or for write; shr+and for read |
+
+For the Rust reimplementation:
+- Nested struct: emit as flat byte sequence
+  without padding.
+- Union: track member offsets all as 0; storage
+  size = max.
+- Bitfields: pack LSB-first; emit and/or for
+  writes, shr+and for reads.
+
 ## Typedef-arr transparent; struct w/ ptr field init = FIXUPP to inline string; arr-of-struct flat layout
 
 Fixtures `2099` (typedef array), `2100` (struct
