@@ -1959,6 +1959,55 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Stack frames word-aligned (127→128); `x * 1` identity-folded away
+
+Fixtures `2006` (127B frame), `2007` (128B frame),
+`2008` (mul by 1) cover frame-alignment and
+identity-folding.
+
+- `2006` (**127B local array → 128B frame**):
+  `char a[127]` allocates **128 bytes** on stack
+  (word-aligned, rounded up). Sub-sp uses
+  imm16 form since 128 > imm8-sext max:
+  ```
+  81 ec 80 00            ; sub sp, 128
+  ```
+  `a[0]` at `[bp-128]` (= 0x80 = imm8-sext for
+  -128, fits disp8). `a[126]` at `[bp-2]` (disp8).
+- `2007` (**128B local array → 128B frame**):
+  same `81 ec 80 00`. `a[127]` at `[bp-1]`.
+  Both arrays end up with the same 128-byte
+  allocation.
+- `2008` (**`x * 1` identity-folded**): `x * 1`
+  is recognised at parse time as **identity**:
+  ```
+  mov ax, x             ; just load, no mul
+  mov [r], ax
+  ```
+  No `imul` emitted. Adds to the optimization
+  catalog:
+  - `x * 1` → `mov` (just load)
+  - `x * 0` → presumably also folded (not yet probed)
+  - `x + 0`, `x - 0`, `x | 0`, `x & -1` → likely
+    also folded
+  - `x ^ x` → presumably NOT folded (BCC doesn't
+    seem to track variable identity)
+
+**Stack frame size rule**:
+| Source local size | Allocated bytes |
+|-------------------|------------------|
+| Even N | N |
+| Odd N | N + 1 (round up to word) |
+| > 127 | uses `81 ec imm16` for sub sp |
+| ≤ 127 | uses `83 ec imm8-sext` for sub sp |
+| N = 1, 2 | `dec sp` × N (2-byte total) |
+
+For the Rust reimplementation:
+- Stack frame: word-align by rounding odd-byte
+  totals up.
+- Identity folding: `x * 1` → load; similar for
+  other ops with identity-constants.
+
 ## Large local arr uses `sub sp imm16`+disp16 access; nested calls chain; char args = no auto-promotion
 
 Fixtures `2003` (large local array — 200 bytes),
