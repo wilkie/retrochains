@@ -1959,6 +1959,64 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Large frame uses `sub sp, imm16` + disp16; switch-default-only no dispatch; EXTDEF for extern
+
+Fixtures `1739` (200-byte stack frame), `1740`
+(switch with only default), and `1741` (extern fn
+decl) close out the call/frame/dispatch picture.
+
+- `1739` (**large stack frame**): a 200-byte local
+  array forces use of **`sub sp, 200`** via the
+  `81 /5 imm16` form (4 bytes total: `81 ec c8
+  00`). Then `mov [bp-200], imm` uses **disp16
+  addressing** (mod=10, `c7 86 38 ff 07 00`) — the
+  offset `0xff38` = -200 in two's complement
+  doesn't fit imm8.
+
+  **Stack frame allocation tiers**:
+  | Size N | Encoding | Bytes |
+  |--------|----------|-------|
+  | N=1 | `dec sp` (`4c`) | 1 |
+  | N=2 | `dec sp ; dec sp` | 2 |
+  | 3 ≤ N ≤ 127 | `sub sp, imm8` (`83 ec imm8`) | 3 |
+  | N > 127 | `sub sp, imm16` (`81 ec imm16`) | 4 |
+
+  **Stack frame addressing tiers** for `[bp+disp]`:
+  | |disp| | Encoding (mod) | Bytes |
+  |--------|--------------|-------|
+  | 0 | mod=00 (rare) | (no disp) |
+  | ≤ 127 | mod=01 disp8 | 1 extra |
+  | > 127 | mod=10 disp16 | 2 extra |
+
+  So `mov [bp+disp8], imm16` = 4 bytes, `mov
+  [bp+disp16], imm16` = 5 bytes. Same instruction,
+  larger displacement field.
+- `1740` (**switch with default-only**): emits **no
+  dispatch table** — just `jmp short 0` (`eb 00`)
+  followed by the default body. Since there are
+  no case labels, no scrutinee comparison is needed
+  — execution always falls into default. The
+  `eb 00` is a 2-byte break-target placeholder for
+  the switch's end label.
+- `1741` (**`extern` declared, not defined**): only
+  emits an **EXTDEF record** for the function. The
+  call site uses **`e8 imm16`** (near relative call)
+  with `0x0000` placeholder; the linker resolves
+  via FIXUPP at link time. No code body emitted for
+  the external. Confirms symbol-linkage categories
+  ([[batch-463-static-fn]]).
+
+Final symbol-linkage / emit categories:
+| Category | OBJ output |
+|----------|------------|
+| `extern` (default) fn, defined | PUBDEF + emit + EXTDEF (for callers) |
+| `static` fn, defined | emit only (no PUBDEF) |
+| `extern` fn, declared not defined | EXTDEF only |
+| Local automatic | (no symbol output) |
+| `extern` global, defined | PUBDEF + LEDATA/BSS |
+| `static` global, defined | LEDATA/BSS only |
+| `extern` global, declared only | EXTDEF only |
+
 ## Long `>>1` = `sar/rcr`; `long == 0` = OR halves; `-long` = neg/neg/sbb
 
 Fixtures `1736` (long `>>1` inline), `1737` (long
