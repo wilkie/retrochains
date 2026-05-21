@@ -1959,6 +1959,97 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `-N` = per-fn `cmp [___brklvl], sp` + N_OVERFLOW@ helper; `-A` codegen-identical; `-r-` disables enregistration
+
+Fixtures `2261` (-N), `2262` (-A), `2263` (-r-)
+cover three CLI flags affecting codegen.
+
+- `2261` (**`-N` stack overflow check**): each
+  fn's prologue gets a check:
+  ```
+  push bp / mov bp, sp / sub sp, N
+  ; -N check:
+  cmp [___brklvl], sp    ; 39 26 00 00
+  jb +3                   ; 72 03 — branch past helper if OK
+  call N_OVERFLOW@        ; e8 00 00 — overflow → invoke handler
+  ; ... function body ...
+  ```
+  Adds EXTDEFs for `N_OVERFLOW@` and `___brklvl`.
+  Overhead: ~9 bytes per fn.
+- `2262` (**`-A` ANSI mode**): codegen identical
+  to default. The flag enforces strict ANSI
+  conformance during parsing (rejects K&R-style
+  syntax), but valid C compiles to the same
+  bytes.
+- `2263` (**`-r-` disable register vars**):
+  forces all variables to memory:
+  ```
+  ; Without -r-: i in SI, sum in DI (no stack use)
+  ; With -r-:
+  mov word [bp-4], 0       ; sum = 0 in memory
+  mov word [bp-2], 1       ; i = 1 in memory
+  jmp test
+  body:
+    mov ax, [i]
+    add [sum], ax
+    inc word [i]
+  test:
+    cmp word [i], 10
+    jle body
+  ```
+
+**Stack overflow check details** (`-N` flag):
+- `___brklvl` is a global linker symbol (typically
+  set by the startup code to point at the bottom
+  of the stack-safe region, just above the heap)
+- Check happens AFTER locals are allocated (so SP
+  reflects the new frame size)
+- `cmp [___brklvl], sp` followed by `jb` — note
+  the operand order: `cmp A, B` computes A - B
+  and sets flags. JB taken if A < B (unsigned)
+- If SP went BELOW brklvl, the stack has grown
+  into the heap → call `N_OVERFLOW@` which
+  typically aborts the program
+- Adds ~9 bytes per function
+
+**ANSI mode `-A` impact**:
+- Disables K&R syntax acceptance (no implicit
+  `int` returns, no untyped fn args, etc.)
+- Disables Borland extensions (interrupt, near/
+  far if not preceded by `_`)
+- Codegen byte-identical for ANSI-conforming source
+
+**`-r-` impact**:
+- Suppresses all enregistration including loop
+  counters and accumulators
+- Useful for debug builds (stable memory addresses)
+- Larger code, slower execution
+
+**BCC CLI flag catalogue** (codegen-affecting):
+| Flag | Effect |
+|------|--------|
+| `-c` | Compile only, no link |
+| `-ms`/`-mc`/`-mm`/`-ml`/`-mh` | Memory model |
+| `-O` | Strip eb 00 no-ops |
+| `-d` | Merge duplicate string literals |
+| `-1` | 80186 instructions (ENTER/LEAVE/shl-imm) |
+| `-2` | 80286 instructions |
+| `-K` | char defaults to unsigned |
+| `-N` | Stack overflow check |
+| `-A` | Strict ANSI mode (no Borland exts) |
+| `-r-` | Disable register variables |
+| `-f-` | No floating point linkage |
+| `-G` | Optimize for speed (vs size) |
+| `-D NAME=val` | Define preprocessor macro |
+| `-I path` | Add include path |
+
+For the Rust reimplementation:
+- `-N`: emit per-fn brklvl check + N_OVERFLOW@.
+- `-A`: parser strictness only (no codegen
+  difference for valid ANSI input).
+- `-r-`: skip enregistration; emit all vars to
+  memory.
+
 ## Nested-block scope = separate slots (shadowing); large arrays = `sub sp, N`; enregistration is conservative
 
 Fixtures `2258` (nested-block shadowing), `2259`
