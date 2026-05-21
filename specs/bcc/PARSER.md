@@ -1959,6 +1959,69 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Large local arr uses `sub sp imm16`+disp16 access; nested calls chain; char args = no auto-promotion
+
+Fixtures `2003` (large local array — 200 bytes),
+`2004` (deeply nested calls), `2005` (mixed
+int/char args) cover three more shapes.
+
+- `2003` (**large local array**): `int a[100]`
+  needs **200 bytes**. Stack allocation uses
+  imm16 form:
+  ```
+  81 ec c8 00            ; sub sp, 200 (imm16, since 200 > imm8-sext)
+  ```
+  Element access uses **per-element disp8/disp16
+  choice**:
+  - `a[0]` at `[bp-200]` (= bp+0xff38): needs
+    disp16, uses `c7 86 disp16 imm16` (6 bytes)
+  - `a[50]` at `[bp-100]` (= bp+0x9c): fits
+    disp8 sign-extended (-100), uses `c7 46 disp8
+    imm16` (5 bytes)
+  - `a[99]` at `[bp-2]`: disp8, 5 bytes
+  
+  ModR/M variants:
+  - `46 disp8` = mod=01 [bp+disp8]
+  - `86 disp16 disp16` = mod=10 [bp+disp16]
+- `2004` (**5-deep nested call**): each `s(...)`
+  is push/call/pop/push for the next:
+  ```
+  xor ax, ax / push ax / call s / pop / push ax / call s / ... 
+  ```
+  5 calls = 30 bytes of call-overhead bytes
+  (5 × 6 bytes each: 1 push + 3 call + 1 pop + 1
+  push). Result flows through AX.
+- `2005` (**mixed int/char args — no auto-promote
+  when proto matches**): when calling
+  `sum(int, char, int, char)` with a `char`
+  param, the caller emits **byte mov + push word
+  with garbage high byte**:
+  ```
+  mov al, 'B' / push ax        ; high byte = garbage
+  ```
+  Caller does NOT promote char→int when the
+  callee's prototype says the param IS a char.
+  Callee uses byte ops on the low half.
+  
+  Contrasts with [[1993-uchar-promotion]]: when
+  passing `char` to a fn taking `int`, caller
+  promotes (cbw/mov ah, 0). The promotion
+  depends on the **callee's prototype**.
+
+So **C's prototype matters** for arg passing:
+- Param type matches arg type: pass as-is (with
+  garbage high bytes for sub-int sizes)
+- Param type is int, arg type is char: caller
+  promotes (cbw for signed, mov ah, 0 for unsigned)
+
+For the Rust reimplementation:
+- Large frame allocation: emit `81 ec imm16` for
+  >127 bytes.
+- Per-element disp8/disp16 selection based on
+  offset magnitude.
+- Arg passing: consult callee's prototype to
+  decide whether to promote sub-int args.
+
 ## `sum = *p++` (byte) = `mov al,[si]/cbw/inc si`; cmp reg,imm16 = `81 /7`; large arg = mov+push
 
 Fixtures `2000` (byte read postinc), `2001` (cmp
