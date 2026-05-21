@@ -1959,6 +1959,55 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Typedef-arr transparent; struct w/ ptr field init = FIXUPP to inline string; arr-of-struct flat layout
+
+Fixtures `2099` (typedef array), `2100` (struct
+with ptr field init), `2101` (array of struct)
+exercise composite-type initializers.
+
+- `2099` (**typedef array transparent**):
+  ```c
+  typedef int IntArr5[5];
+  static IntArr5 a = {1,2,3,4,5};
+  ```
+  Byte-identical to `static int a[5] = {...}`.
+  Typedef of array types is fully transparent at
+  codegen.
+- `2100` (**struct with `char *name`**): the
+  string literal is placed in `_DATA` right
+  after the struct, and the struct's ptr field
+  is initialised via FIXUPP to point to it:
+  ```
+  ; _DATA layout:
+  offset 0..1:  ptr_to_apple (FIXUPP, resolves to offset 4)
+  offset 2..3:  qty (= 5)
+  offset 4..9:  "apple\0"
+  ```
+  So `{"apple", 5}` emits the struct followed by
+  the inline string literal. The ptr is a 2-byte
+  near offset.
+- `2101` (**array of struct flat layout**):
+  ```c
+  static struct P pts[3] = {{1,2}, {3,4}, {5,6}};
+  ```
+  Data emits `01 00 02 00 03 00 04 00 05 00 06
+  00` (12 bytes for 3 structs × 4 bytes). Array
+  stride = sizeof(struct) = 4. Field access:
+  - pts[i].x at offset i*4
+  - pts[i].y at offset i*4 + 2
+
+**Composite-init summary**:
+| Form | Layout |
+|------|--------|
+| `typedef T arr[N]; static T a[]=...;` | Same as direct array (transparent) |
+| `static struct {char *p; int n;} s = {"x", 5}` | struct then inline string; ptr FIXUPP'd |
+| `static struct S arr[N] = {...}` | N structs flat row-major; stride = sizeof(struct) |
+
+For the Rust reimplementation:
+- Track typedef'd array types; emit as primitive array.
+- Struct with string literal field: emit struct bytes, then string, with FIXUPP for the ptr.
+- Array of struct: emit struct-stride sequence.
+
 ## `char s[3]="abc"` drops `\0` (classic C trap); larger arr zero-pads; struct partial init zero-pads
 
 Fixtures `2096` (char s[3]="abc"), `2097` (char
