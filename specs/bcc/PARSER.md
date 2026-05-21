@@ -1959,6 +1959,68 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `sizeof` fully folded; string literals packed in `_DATA`; `<<0` `>>0` `|0` no-ops
+
+Fixtures `1709` (sizeof folded), `1710` (array of
+string pointers), and `1711` (shift/or by zero)
+characterise three constant-folding and storage
+shapes.
+
+- `1709` (**`sizeof` is a compile-time constant**):
+  the entire expression `sizeof(int) + sizeof(char)
+  + sizeof(long)` (= 2+1+4=7) folds to a single
+  `mov ax, 7`. The function body is **3 bytes**.
+  Confirms the type sizes:
+  - `char` = 1 byte
+  - `int` = 2 bytes
+  - `long` = 4 bytes
+  - (FP not yet probed for sizeof — `float` = 4,
+    `double` = 8)
+- `1710` (**string literals packed**): multiple
+  string literals `"AB"`, `"CD"`, `"EF"` are
+  **concatenated sequentially in `_DATA`** with
+  null terminators (= 9 bytes: `41 42 00 43 44 00
+  45 46 00`). Each `strs[i] = "..."` initialization
+  stores the offset to that literal's start (with
+  FIXUPP) — `strs[0]` gets offset 0, `strs[1]`
+  gets 3 (after "AB\0"), etc. So **deduplication
+  isn't performed** — distinct literal text means
+  distinct storage. The store instruction emits
+  the displacement as the FIXUPP target; the
+  linker resolves to actual data segment offset.
+- `1711` (**identity-shift/OR folded**):
+  - `x << 0` → just `x` (no shift instructions)
+  - `x >> 0` → just `x`
+  - `x | 0` → just `x`
+  All three assignments lower to **simple stores**
+  of x's value, without the corresponding bitwise/
+  shift operation. For `c = x | 0` where x is in
+  SI, BCC emits **`mov [c], si`** directly (3
+  bytes) — bypassing the usual `mov ax, src / mov
+  dst, ax` two-instruction pattern. This is a
+  "register-to-memory direct store" shortcut for
+  same-register-as-source cases.
+
+Constant folding catalogue confirmed:
+| Identity | Folded to |
+|----------|-----------|
+| `x + 0` / `0 + x` | `x` |
+| `x - 0` | `x` |
+| `x * 0` | `0` |
+| `x * 1` | `x` |
+| `x * 2^N` | `shl x, N` |
+| `x << 0` / `x >> 0` | `x` |
+| `x | 0` / `x ^ 0` | `x` |
+| `x & 0` | `0` |
+| `x & 0xFFFF` (full mask) | `x` |
+| `sizeof(T)` | `sizeof(T)` constant |
+| `(int_const) op (int_const)` | full evaluation |
+
+So BCC has a comprehensive parse-time constant
+folding pass that handles all the standard
+identities — important for the Rust
+reimplementation to replicate exactly.
+
 ## Array-of-struct linearised; 5-arg uses `add sp, 10`; `static` fn omits PUBDEF
 
 Fixtures `1706` (array of struct), `1707` (5-arg
