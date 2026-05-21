@@ -1959,6 +1959,59 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Huge model = far data + `push ds/mov ds,seg/.../pop ds`; `far *` ptr = LES BX; `near *` redundant in -ms
+
+Fixtures `2057` (huge -mh), `2058` (explicit `far
+*` in small), `2059` (explicit `near *` in small)
+explore far data and the explicit far/near
+keywords.
+
+- `2057` (**huge model -mh**): segment names
+  include `HELLO_TEXT`, `HELLO_DATA`, **`FAR_DATA`**
+  — confirming far data. Each access loads DS:
+  ```
+  1e                      ; push ds (save)
+  b8 [seg] [seg]          ; mov ax, segment_of_g (FIXUPP type=segment)
+  8e d8                   ; mov ds, ax
+  a1 [off] [off]          ; mov ax, [g] (FIXUPP for offset)
+  1f                      ; pop ds (restore)
+  ```
+  **11 bytes** for one data access — expensive!
+- `2058` (**`int far *p` in small model**): the
+  far ptr is **4 bytes** (offset + segment):
+  ```
+  8c 5e fe                ; mov [bp-2], ds (high half = segment from DS)
+  c7 46 fc 00 00          ; mov [bp-4], 0 (FIXUPP for offset, low half)
+  ```
+  Deref via LES:
+  ```
+  c4 5e fc                ; les bx, [bp-4]  (offset→bx, seg→es)
+  26 8b 07                ; mov ax, ES:[bx]
+  ```
+  The `c4 /r` (LES) instruction is the canonical
+  far-ptr load.
+- `2059` (**`int near *p` in small model**):
+  **byte-identical to default** (no near keyword)
+  — `near` is a no-op in small model:
+  ```
+  be 00 00                ; mov si, 0 (FIXUPP for offset)
+  8b 04                   ; mov ax, [si]
+  ```
+
+**Far/near pointer summary**:
+| Type | Size | Construction | Deref |
+|------|------|--------------|-------|
+| `int *` (small-model default) | 2B | mov ax, offset (FIXUPP) | `8b /r` or `a1` |
+| `int near *` (small) | 2B | (same as default) | (same) |
+| `int far *` | 4B | mov [high], ds + mov [low], offset (FIXUPP) | `c4 /r` (les) then `26 8b /r` |
+| `int *` in huge model | 4B (implicit far) | same as far | same as far |
+
+For the Rust reimplementation:
+- Far ptr type: track 4-byte representation.
+- Far ptr load (construct): `mov [high], ds` (if from local DGROUP) + `mov [low], offset` with FIXUPP.
+- Far ptr deref: emit LES (`c4 /r`) then segment-override prefixed mov (`26 8b /r`).
+- Huge model data access: emit the full `push ds / mov ds, seg / ... / pop ds` envelope around the access.
+
 ## Medium model: intra-seg call = `push cs / call near`; arg at `[bp+6]`; retf `cb`; data still near
 
 Fixtures `2054` (medium fn call), `2055` (medium
