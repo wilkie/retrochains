@@ -1959,6 +1959,43 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Threshold uniform for shl/shr; `x * pow2` recognises and applies same rule
+
+Fixtures `1835` (`x << 3`), `1836` (`x * 32` =
+shl by 5), and `1837` (`x * 4` = shl by 2) verify
+the unroll-vs-CL-form threshold applies uniformly
+across shift opcode families.
+
+- `1835`: `shl ax, 1` × 3 (6 bytes, unrolled at
+  N=3) — same shape as `shr` at N=3.
+- `1836`: `mov cl, 5 / shl ax, cl` (4 bytes, CL
+  form at N=5).
+- `1837`: `shl ax, 1` × 2 (4 bytes, unrolled at
+  N=2) — `x * 4` correctly recognised as shl by 2.
+
+So the **uniform shift threshold rule applies to**:
+- `shl` (left shift / unsigned `<<` / signed `<<` /
+  `x * pow2`)
+- `shr` (unsigned right shift / unsigned `/ pow2`)
+- (presumably `sar` for signed right shift — not
+  yet probed)
+
+The `x * pow2` optimization is **recognized at
+parse time** and lowered to the same shl encoding
+as a direct `x << log2(pow2)`. So fixture 1836
+(`x * 32`) is byte-identical to what `x << 5`
+would produce.
+
+Updated rule:
+- For all shift ops (shl/shr/sar) with constant
+  count N:
+  - N ≤ 3: unrolled `shift ax, 1` × N
+  - N ≥ 4: `mov cl, N / shift ax, cl`
+- For `x * 2^N` with N > 0: convert to `x << N`
+  at parse time, then apply above.
+- For `x / 2^N` (unsigned only) with N > 0:
+  convert to `x >> N`, then apply above.
+
 ## Shift unroll-vs-CL threshold pinned: N ≤ 3 unrolled, N ≥ 4 CL-form
 
 Fixtures `1832` (N=4), `1833` (N=5), `1834` (N=6)
