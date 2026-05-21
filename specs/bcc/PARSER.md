@@ -1959,6 +1959,53 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `add ax, K`: `inc` for ±1, AX-form for imm8/imm16; `x*2` = `shl ax, 1`
+
+Fixtures `1841` (`x + 50` to AX), `1842` (`x * 2`),
+and `1843` (`x + 1` to AX) complete the per-constant
+add-encoding picture.
+
+- `1841` (**`x + 50` uses `05` AX-form**): even
+  though 50 fits imm8-sext (3 bytes via `83 c0
+  32`) which would tie with the AX-form (`05 32
+  00`, 3 bytes), BCC consistently picks the
+  **`05` AX-form** when the destination is AX.
+  No reason to prefer one over the other for byte
+  count, but BCC's choice is consistent.
+- `1842` (**`x * 2` uses `shl ax, 1`**): the
+  pow2-mul shortcut for N=1 is **`shl ax, 1`** (2
+  bytes via `d1 e0`). Cheapest possible
+  multiplication.
+- `1843` (**`x + 1` uses `inc ax`**): 1-byte
+  encoding (`40`). The 1-byte register-inc/dec
+  opcodes (`40-47` for inc, `48-4F` for dec) are
+  preferred over `83 c0 01` (3 bytes) or `05 01
+  00` (3 bytes).
+
+**Final add-AX encoding hierarchy** (in order of
+preference, smallest first):
+| K value | Encoding | Bytes |
+|---------|----------|-------|
+| +1 | `inc ax` (`40`) | 1 |
+| -1 | `dec ax` (`48`) | 1 |
+| imm8-sext fits (other) | `05 imm16` (BCC pick) | 3 |
+| imm16 only | `05 imm16` | 3 |
+
+For non-AX registers, the choices are:
+| K value | Encoding | Bytes |
+|---------|----------|-------|
+| ±1 | `inc/dec reg` (`40-4F`) | 1 |
+| imm8-sext fits | `83 /0 reg imm8` | 3 |
+| imm16 only | `81 /0 reg imm16` | 4 |
+
+So **1-byte inc/dec** is always preferred for ±1,
+regardless of which register. For larger constants
+the AX-form imm16 (3 bytes) wins on AX; non-AX
+must use `83`/`81` /N.
+
+This completes the constant-arithmetic encoding
+picture for the small-model code generator.
+
 ## `sar` same threshold; `add ax, imm16` uses 0x05 AX-form (3B); AND uses 0x25 always
 
 Fixtures `1838` (`sar` by 3), `1839` (`add ax,
