@@ -1959,6 +1959,62 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## strlen pattern uses byte cmp; out-param `int **pp` via `mov [si], imm`; arr-clear uses `mov [bx], 0`
+
+Fixtures `1931` (strlen pattern), `1932` (out-
+param `int**`), `1933` (array clear via loop)
+cover more pointer/array idioms.
+
+- `1931` (**strlen pattern**): both pointers
+  enregister (s in DI, p in SI):
+  ```
+  mov di, [s]
+  mov si, di            ; p = s
+  jmp test
+  body:
+    inc si              ; p++
+  test:
+    cmp byte [si], 0    ; 80 3c 00 — byte cmp
+    jne body            ; loop while non-zero
+  mov ax, si / sub ax, di    ; p - s
+  ```
+  Byte compare `80 /7 disp imm8` (3 bytes for
+  `[SI]` with imm0). Most compact form for
+  testing the byte at a pointer. After: `p - s`
+  via `sub ax, di` gives the length (since
+  pointer arithmetic on byte ptrs is in bytes).
+- `1932` (**out-param `int **pp`**): callee gets
+  ptr-to-ptr in `[bp+4]`, stores `&storage` at
+  the target:
+  ```
+  mov si, [pp]
+  mov word [si], imm16    ; c7 04 imm16 + FIXUPP to _storage
+  ```
+  The `c7 04` is `mov word [si], imm16` (4
+  bytes). With FIXUPP, the imm16 resolves to
+  the static's address.
+  
+  Caller pushes `&local_p`, gets back a modified
+  local_p, then derefs as usual.
+- `1933` (**array clear via loop**): emits **`mov
+  word [bx], 0`** per iteration (`c7 07 00 00`, 4
+  bytes). No `rep stosw` or `xor + stos`
+  optimization. Each iteration recomputes `&a[i]`
+  via the standard `shl + lea + add` sequence.
+  
+  BCC's "no optimization" rule holds — `int a[5]
+  = {0}` initialization gets N_SCOPY@ from zero
+  data; explicit loop just emits per-element
+  stores.
+
+For the Rust reimplementation:
+- strlen-style loop: enregister both ptrs, use
+  byte-cmp `cmp byte [si], 0 / jne body / sub
+  ax, di` epilogue.
+- Out-param: `mov si, [pp] / mov [si], val`.
+- Array clear via loop: per-iteration `mov word
+  [bx], 0`. No `rep stos*` (not used by BCC).
+
 ## Linked-list traverse via `[bx+disp]` chain; fn ret ptr in AX; set via ptr-arg = `mov [si], val`
 
 Fixtures `1928` (self-referential struct), `1929`
