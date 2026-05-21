@@ -1959,6 +1959,71 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Float = FPU `9b d9/...` + N_FTOL@; `-1` enables 80186 ENTER/LEAVE/shl-imm; IEEE 754 single in `_DATA`
+
+Fixtures `2132` (float emulation), `2133` (-1
+target), `2134` (-1 + shift by 4) cover float
+support and 80186-target codegen.
+
+- `2132` (**float = FPU + 8087 emulation library**):
+  ```
+  9b d9 06 [disp]          ; WAIT + FLD m32 (load float)
+  9b d9 5e fc              ; WAIT + FSTP m32 (store)
+  9b d9 46 fc              ; WAIT + FLD m32 (load back)
+  e8 [disp]                 ; call N_FTOL@ (float→long conversion)
+  ```
+  - `9b` prefix = WAIT (FPU sync for 8086 boards
+    with separate 8087 chip)
+  - FPU opcodes `d8`-`df` (FLD, FSTP, FADD, etc.)
+  - Helper symbols: `FIDRQQ` (emulation library
+    entry), `N_FTOL@` (float-to-long)
+  
+  Constants like `3.14f` stored as **IEEE 754
+  single-precision** in `_DATA`: `c3 f5 48 40` =
+  0x4048F5C3 = 3.14.
+- `2133` (**`-1` enables 80186 target**): emits
+  shorter/newer instructions:
+  - **`ENTER imm16, imm8`** (`c8 04 00 00`) =
+    push bp / mov bp, sp / sub sp, 4. 4 bytes
+    vs 5 bytes for the discrete sequence.
+  - **`LEAVE`** (`c9`) = mov sp, bp / pop bp. 1
+    byte vs 3 bytes.
+  - **`shl reg, imm8`** (`c1 /4 reg imm8`) =
+    direct shift-by-N. 3 bytes regardless of N.
+    Removes the CL-form `mov cl, N / shl reg,
+    cl` (4 bytes) and the unrolled shl-by-1 ×
+    N for small N.
+- `2134` (**-1 + shift by 4**): just `c1 e0 04`
+  (3 bytes). Confirms 80186 shift is always 3
+  bytes — no threshold-based switching.
+
+**8086 vs 80186 shift comparison**:
+| Shift N | 8086 (default) | 80186 (-1) |
+|---------|----------------|-------------|
+| 1 | `d1 e0` (2B) | `c1 e0 01` (3B) |
+| 2 | 2× `d1 e0` (4B) | `c1 e0 02` (3B) |
+| 3 | 3× `d1 e0` (6B) | `c1 e0 03` (3B) |
+| 4+ | `mov cl, N / d3 e0` (4B) | `c1 e0 N` (3B) |
+
+So **80186 shift is uniform 3 bytes**, beating
+8086 for N ≥ 2.
+
+**80186 prologue/epilogue replacement**:
+| 8086 | 80186 (-1) |
+|------|-------------|
+| `55 8b ec 83 ec N` (6B) | `c8 N 00` (4B for N ≤ 255) |
+| `8b e5 5d c3` (4B) | `c9 c3` (2B) |
+
+Saves ~4 bytes per function.
+
+For the Rust reimplementation:
+- Track `-1` flag; emit ENTER/LEAVE/shl-imm
+  variants instead of discrete instructions.
+- Float: emit FPU instructions with `9b` WAIT
+  prefix; call N_FTOL@ for float-to-int.
+- IEEE 754 single-precision encoding for `float`
+  literals.
+
 ## `-N` stack-overflow check via `N_OVERFLOW@`; `-K` char unsigned (zero-ext); `-D` CLI define = #define
 
 Fixtures `2129` (-N stack check), `2130` (-K
