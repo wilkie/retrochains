@@ -1959,6 +1959,66 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `x &= K` via `81 /N reg, imm16`; ternary = jcc + 2 movs; nested calls inner-first
+
+Fixtures `1715` (bitwise compound assign), `1716`
+(min via ternary), and `1717` (nested function
+calls) cover three remaining shapes.
+
+- `1715` (**bitwise compound on register**): `x
+  &= 0x0f0f` on SI-resident x lowers directly to
+  **`and si, 0x0f0f`** (`81 e6 0f 0f`, 4 bytes).
+  Same shape for `|=` (`81 ce ...`) and `^=` (`81
+  f6 ...`). No AX round-trip — the register-with-
+  imm16 form modifies the register in place.
+  - `81 /4 reg, imm16` = AND (4 bytes)
+  - `81 /1 reg, imm16` = OR
+  - `81 /6 reg, imm16` = XOR
+  Each takes 4 bytes vs the alternative `mov ax, si
+  / and ax, K / mov si, ax` (8 bytes). So compound
+  assign on register locals is the cheap path
+  whenever the constant doesn't fit `imm8-sext`
+  (which AND/OR/XOR don't use anyway per the
+  encoding policy — [[batch-407-imm8-sext-policy]]
+  notes that AND/OR/XOR always use `81 /N` imm16
+  form).
+- `1716` (**ternary `a<b ? a : b`**): lowers to:
+  ```
+  cmp si, di         ; a vs b
+  jge L_else         ; inverse condition (>= used as NOT <)
+  mov ax, si         ; then branch: a
+  jmp L_done
+  L_else:
+  mov ax, di         ; else branch: b
+  L_done:
+  mov [m], ax        ; store result
+  ```
+  Note: the **inverse condition** `jge` is used to
+  skip the "then" branch when `a < b` is false. So
+  the test selects the **opposite** of the source-
+  level operator. Both branches materialize into AX,
+  then a single store lands the result.
+- `1717` (**nested call `sqr(inc(4))`**): evaluates
+  **inner-first**: push 4, call inc, pop, push AX,
+  call sqr, pop. The intermediate result in AX is
+  reused directly as the outer call's argument via
+  `push ax` after the inner `pop cx`. No temporary
+  spill to stack/memory for the intermediate.
+  Sequence:
+  ```
+  mov ax, 4
+  push ax            ; inc's arg
+  call _inc
+  pop cx             ; cleanup inc's arg
+  push ax            ; sqr's arg (= inc's return)
+  call _sqr
+  pop cx
+  ```
+
+These three round out the basic codegen catalogue
+— compound assign forms, ternary boolean-select,
+and nested function call sequencing all confirmed.
+
 ## `char s[] = "..."` runtime-copies via `N_SCOPY@`; `!x` = `neg/sbb/inc` idiom
 
 Fixtures `1712` (`char s[] = "ABC"`), `1713`
