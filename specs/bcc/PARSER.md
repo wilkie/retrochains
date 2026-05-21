@@ -1959,6 +1959,59 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Unsigned `<=` uses `ja`; bounds check via short-circuit; `char` ret = AL only + cbw
+
+Fixtures `1985` (unsigned `<=`), `1986` (bounds
+check pattern), `1987` (char return) close out
+common idioms.
+
+- `1985` (**unsigned `a <= b`**): false-branch jcc
+  is **`ja`** (`0x77`, unsigned above) — inverse
+  of `<=`. Completes the unsigned-cmp jcc table.
+- `1986` (**bounds check `i >= 0 && i < 5`**):
+  short-circuit && with signed-cmp per operand:
+  ```
+  ; i >= 0 test:
+  or si, si              ; cheap zero-test for i
+  jl L_else              ; if i < 0, branch out
+  ; i < 5 test:
+  cmp si, 5
+  jge L_else             ; if i >= 5, branch out
+  ; ... bounds-check passed body
+  ```
+  Each operand's inverse-jcc goes to the same
+  L_else target. `i >= 0` uses `or si, si` for
+  the cheaper zero-test (since the constant is
+  0).
+- `1987` (**`char` return = AL only**): function
+  returning `char` sets **only AL** (low byte of
+  AX); AH is undefined. Caller:
+  ```
+  call _get_char
+  mov [c], al              ; 88 46 ff — byte store
+  mov al, [c]              ; 8a 46 ff — byte load
+  cbw                      ; 98 — sign-extend to int (since char is signed)
+  ```
+  Char locals get **byte-sized stack slots** at
+  odd offsets (e.g., `[bp-1]`).
+
+**Unsigned-cmp jcc table** (complete, for false-
+branch):
+| Op | Unsigned false-jcc | Opcode |
+|----|--------------------|--------|
+| `<`  | `jae` (`jnc`)    | 73 |
+| `<=` | `ja`             | 77 |
+| `>`  | `jbe`            | 76 |
+| `>=` | `jb` (`jc`)      | 72 |
+| `==` | `jne`            | 75 |
+| `!=` | `je`             | 74 |
+
+For the Rust reimplementation:
+- Unsigned-cmp jcc choice: use ja/jbe/jae/jb
+  per operator (false-branch is inverse).
+- char return: emit `mov al, val` only; caller
+  treats AL as the byte result.
+
 ## Unsigned cmp uses `jbe`/`jae` for inverse; ptr arith scales by sizeof; ptr sub = `idiv`
 
 Fixtures `1982` (unsigned `x > 100`), `1983`
