@@ -1959,6 +1959,61 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Pool fill order confirmed `{SI, BX, DI, CX, DX}`; 1 fn call enough to restrict; mul+call combo
+
+Fixtures `1979` (5 locals, no mul/call), `1980`
+(5 locals + 1 fn call), `1981` (mul + call mix)
+pin down the register-allocation context rules.
+
+- `1979` (**pool fill order = {SI, BX, DI, CX,
+  DX}**): with no call/mul, 5 locals enregister
+  in order:
+  - a → SI
+  - b → BX
+  - c → DI
+  - d → CX
+  - e → DX
+  
+  So the **pool fill order** is:
+  ```
+  {SI, BX, DI, CX, DX}
+  ```
+  Declaration-order assignment, this is the
+  preference sequence.
+- `1980` (**1 fn call → already restricted**):
+  with only ONE fn call in the function:
+  - a → SI
+  - c → DI (skipping b, since b would be in BX
+    which is caller-saved)
+  - b, d, e → stack
+  
+  The restriction is **presence-based**, not
+  frequency-based. Any fn call disables the
+  BX/CX/DX slots for enregistration.
+- `1981` (**mul + call combo**): both restrictions
+  apply. Pool = {SI, DI}, but in this fixture
+  the locals are each used only once (below
+  the ≥2-read threshold), so nothing enregisters
+  at all.
+
+**Final register-allocation rule** (definitive):
+1. **Identify candidates**: locals/params with
+   ≥2 reads in expression contexts.
+2. **Determine pool**:
+   - With fn calls → pool = {SI, DI} (2 slots)
+   - With imul/idiv but no fn calls → pool = {SI,
+     BX, DI, CX} (4 slots)
+   - Else → pool = {SI, BX, DI, CX, DX} (5 slots)
+3. **Assign candidates** in declaration order to
+   pool slots in pool-fill order.
+4. **Overflow candidates** go to stack.
+
+For the Rust reimplementation: implement this
+exact 4-step allocator. The pool fill order
+must be SI, BX, DI, CX, DX (preserving SI as
+first since it's callee-saved and often used
+for the primary local/accumulator).
+
 ## 5 regs w/o mul; **fn calls restrict pool to callee-saved {SI, DI}**; empty fn keeps prologue
 
 Fixtures `1976` (7 locals, NO mul), `1977` (fn
