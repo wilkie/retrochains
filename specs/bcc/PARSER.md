@@ -1959,6 +1959,55 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Narrowing casts = direct low-byte/word access; `*p++ = byte` = `mov [si],imm8 / inc si`
+
+Fixtures `1997` (int→char), `1998` (long→int),
+`1999` (byte writes via post-inc ptr) cover
+narrowing casts and byte-write idioms.
+
+- `1997` (**`(char)int` narrowing**): direct low-
+  byte read — `mov al, [x]`. Since int is stored
+  little-endian, the low byte is at the variable's
+  base address. No mask/shift needed.
+  ```
+  mov al, [x]              ; load low byte (low addr)
+  mov [c], al              ; byte store
+  ```
+- `1998` (**`(int)long` narrowing**): direct low-
+  word read — `mov ax, [x.lo]` (the low half is
+  at the lower offset).
+  ```
+  mov ax, [x.lo]           ; mov ax, [bp-4] (low at lower addr)
+  mov [n], ax
+  ```
+  No truncation instruction; the type system gives
+  byte-precise access to the wanted part.
+- `1999` (**`*p++ = byte_const`**): emits **`mov
+  byte [si], imm8 / inc si`** (4 bytes):
+  ```
+  c6 04 'A'                ; mov byte [si], 'A'
+  46                        ; inc si (post-inc)
+  ```
+  ModR/M `04` = mod=00 reg=000 rm=100 = [SI].
+  Store **before** increment, matching post-inc
+  semantics with the assignment expression's
+  value.
+
+**Narrowing-cast summary**:
+| Cast | Mechanism |
+|------|-----------|
+| `(char)int` | Read low byte at the variable's base addr |
+| `(int)long` | Read low word at the variable's base addr |
+| `(char)long` | Read byte at base (= low byte of low half) |
+| `(int)expression-in-AX` | No-op (AX is already a word) |
+| `(char)expression-in-AX` | Use AL (low byte), AH undefined |
+
+For the Rust reimplementation:
+- Narrowing casts: emit direct partial-read at
+  the lower-offset bytes; no mask/shift needed.
+- Byte writes via post-inc ptr: emit `mov byte
+  [reg], imm8 / inc reg` per source statement.
+
 ## `short` == `int` on 8086; multi static locals = declaration order in `_DATA`; fn-ptr arr call
 
 Fixtures `1994` (short vs int), `1995` (multi
