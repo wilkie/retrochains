@@ -1959,6 +1959,62 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Multi-fn PUBDEF = reverse-source, main last; implicit-int return ok; K&R fn syntax supported
+
+Fixtures `2162` (3 fns + main PUBDEF order), `2163`
+(implicit int return), `2164` (K&R-style decl)
+cover three function-syntax behaviours.
+
+- `2162` (**multi-fn PUBDEF order**): fns appear
+  in PUBDEF as **reverse declaration order, with
+  `main` last**:
+  ```
+  Source: a_fn, b_fn, c_fn, main
+  PUBDEF: c_fn (offset 0x14), b_fn (0x0a),
+          a_fn (0x00), main (0x1e)
+  ```
+  Helpers reversed; `main` placed at end. Each
+  fn is its own PUBDEF record.
+- `2163` (**implicit int return**): `helper(int x)
+  { return x + 1; }` — no explicit return type
+  defaults to `int` per K&R/C89. Same OBJ as
+  `int helper(int x)`.
+- `2164` (**K&R-style fn declaration**):
+  ```c
+  int add(a, b)
+  int a, b;
+  {
+    return a + b;
+  }
+  ```
+  Parameter declarations between the parameter
+  list and body. Same OBJ as ANSI-style. BCC
+  supports both styles.
+
+**Function-syntax tolerance summary** (BCC accepts):
+| Form | Status |
+|------|--------|
+| ANSI `int f(int a, int b)` | Standard |
+| K&R `int f(a, b) int a, b;` | Supported (K&R-style) |
+| Implicit-int `f(int x)` | Supported (K&R) |
+| Implicit args `int f()` | Old-style, no arg checking |
+| Function prototype `int f(int);` | Supported |
+| Varargs `int f(int, ...)` | Supported |
+
+**PUBDEF emission order** (combined):
+| Symbol type | Order |
+|-------------|-------|
+| Variables (same segment) | Reverse declaration order |
+| Functions (helpers) | Reverse declaration order |
+| Function `main` | Always last in PUBDEF |
+| Across segments | Within-segment order independent |
+
+For the Rust reimplementation:
+- Accept K&R fn syntax (or warn).
+- Default return type = int when not specified.
+- PUBDEF emission: reverse symbol list per
+  segment, defer `main` to end.
+
 ## Globals laid out src-order in `_DATA`; PUBDEF emits reverse-order; init+uninit partitioned `_DATA`/`_BSS`
 
 Fixtures `2159` (3 init globals), `2160` (mixed
