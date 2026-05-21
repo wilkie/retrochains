@@ -1959,6 +1959,62 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## 2D arr passes as ptr; partial init uses N_SCOPY@ from zero-padded `_DATA`; global arr in `_DATA`
+
+Fixtures `1922` (pass 2D array), `1923` (partial
+init), `1924` (global init array) cover array
+initialization and passing semantics.
+
+- `1922` (**2D array as ptr arg**): `int a[2][2]`
+  parameter is just a **pointer to the start**.
+  Callee accesses elements via flat indexing:
+  ```
+  mov si, [a]               ; load ptr to first row
+  mov ax, [si]              ; a[0][0]
+  add ax, [si+2]            ; a[0][1]
+  add ax, [si+4]            ; a[1][0]
+  add ax, [si+6]            ; a[1][1]
+  ```
+  Despite the source-level `[2][2]` shape, codegen
+  treats it as flat — uses constant disp8 offsets
+  for each element. The outer dimension decays
+  to pointer; inner dimensions are baked into
+  the offsets.
+- `1923` (**partial init `int a[5] = {1, 2}`**):
+  initializer values stored in `_DATA` with the
+  rest **zero-filled** per C semantics:
+  ```
+  ; _DATA: 01 00 02 00 00 00 00 00 00 00  (1, 2, 0, 0, 0)
+  ```
+  Then **N_SCOPY@** copies the 10 bytes from
+  `_DATA` to the local array on stack at fn
+  entry. Same protocol as `char a[] = "ABC"`
+  but for ints.
+- `1924` (**global array init in `_DATA`**):
+  `int table[5] = {100, 200, 300, 400, 500}` is
+  stored directly in `_DATA` at file scope:
+  ```
+  ; _DATA: 64 00 c8 00 2c 01 90 01 f4 01
+  ```
+  `_table` exported in PUBDEF. Access `table[2]`
+  uses **`a1 disp16`** (AX-form mov from direct
+  address) with FIXUPP for table+4 offset.
+
+So **arrays-with-init storage hierarchy**:
+| Scope | Storage | Init mechanism |
+|-------|---------|---------------|
+| Local | Stack | N_SCOPY@ from `_DATA` template at fn entry |
+| Static local | `_DATA` | Init values directly stored |
+| Global | `_DATA` (or `_BSS` if zero-init) | Init values directly stored |
+
+For the Rust reimplementation:
+- 2D-array param: emit as ptr, use flat indexing
+  with row*width*sizeof + col*sizeof.
+- Partial init: emit zero-padded template in
+  `_DATA`, emit N_SCOPY@ at fn entry.
+- Global/static array init: emit directly in
+  `_DATA`/`_BSS` with values.
+
 ## Bool→int = full template; do-while-cmp loops back via fwd-jcc; string table = ptrs into `_DATA`
 
 Fixtures `1919` (bool-to-int store), `1920`
