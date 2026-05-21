@@ -1959,6 +1959,53 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## 3D array row-major nesting; arr-of-struct iter = stride-4 shl×2
+
+Fixtures `1820` (3D array constant-indexed), `1821`
+(array of struct iteration), and `1822` (loop
+init + sum array) confirm multi-dim layout rules.
+
+- `1820` (**3D array `int a[2][2][2]`**): row-major
+  layout with offsets computed at parse time for
+  constant indices:
+  - `a[i][j][k]` offset = `(i*4 + j*2 + k) * 2`
+  - `a[0][0][0]` at `[bp-16]`
+  - `a[0][1][1]` at `[bp-10]` (offset 6)
+  - `a[1][1][1]` at `[bp-2]` (offset 14)
+  
+  N-dimensional arrays extend the 2D pattern —
+  flat linear storage with row-major nesting:
+  inner dimensions vary fastest.
+- `1821` (**array of struct iteration**): `a[i].x`
+  with variable i uses stride-4 (= `sizeof(struct
+  P)`) multiplication via **2× `shl bx, 1`**:
+  ```
+  mov bx, si           ; i
+  shl bx, 1            ; *2
+  shl bx, 1            ; *2 (= *4)
+  lea ax, [a + field]  ; base + field offset
+  add bx, ax
+  mov ax, [bx]         ; read field
+  ```
+  Each field access recomputes the address —
+  no induction-variable optimization across .x and
+  .y in the same iteration.
+- `1822` (**loop init + sum array**): two sequential
+  loops with the same iteration variable i (SI),
+  accumulator (DI). Standard pattern; each
+  iteration recomputes the element address via
+  `shl + lea + add`.
+
+For the Rust reimplementation:
+- N-dimensional array indexing with constant
+  indices: precompute the linear offset at parse
+  time.
+- N-dimensional with variable indices: emit
+  multiplication for each dimension (sizeof × index)
+  + base.
+- Array-of-struct iteration: stride = sizeof(struct);
+  if pow2 → shifts; else imul.
+
 ## Chain assign reuses AX; pre/post-inc applies to call args; 2D arr row-major
 
 Fixtures `1817` (`a = b = c = 7`), `1818` (`++i` vs
