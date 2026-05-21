@@ -1959,6 +1959,55 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Unsigned mod pow2 = `and ax, (N-1)`; signed mod = idiv with DX as result (NOT and-mask)
+
+Fixtures `2087` (unsigned % 4), `2088` (signed %
+4), `2089` (signed % 7) cover modulo codegen.
+
+- `2087` (**`unsigned int % 4`**): emits **`25
+  03 00`** (`and ax, 3`, AX-form imm16, 3 bytes).
+  Uses the identity `x % 2^n = x & (2^n - 1)`.
+- `2088` (**`int % 4` SIGNED**): does NOT use
+  and-mask! Uses `idiv` and takes the remainder
+  from DX:
+  ```
+  mov ax, [x]
+  mov bx, 4
+  cwd
+  idiv bx
+  mov [r], dx              ; remainder is in DX
+  ```
+  9 bytes for the modulo. Correct semantics —
+  `-5 % 4 = -1` per C, but `-5 & 3 = 3`.
+- `2089` (**`int % 7` signed**): same idiv
+  pattern; divisor differs. Result from DX.
+
+So the **only difference between `/` and `%`** is
+whether you write AX (quotient) or DX
+(remainder) after `idiv`.
+
+**Division and modulo combined summary**:
+| Operation | Quotient (`/`) | Remainder (`%`) |
+|-----------|----------------|------------------|
+| `unsigned / pow2`, `unsigned % pow2` | `shr` (logical) | `and reg, (N-1)` |
+| `unsigned / non-pow2`, `unsigned % non-pow2` | `xor dx, dx / div bx` (q=AX) | `xor dx, dx / div bx` (r=DX) |
+| `signed / any`, `signed % any` | `cwd / idiv bx` (q=AX) | `cwd / idiv bx` (r=DX) |
+
+`int` (signed) ALWAYS uses idiv for both ops. Pow2
+optimisation is **unsigned-only**.
+
+**Useful trick — combining `/` and `%`**: when
+both `x/4` and `x%4` are computed on the same x,
+BCC could (in principle) compute them with a
+single `idiv` (q in AX, r in DX). Not yet probed
+whether BCC actually does this.
+
+For the Rust reimplementation:
+- `unsigned % pow2`: emit `and ax, N-1` (AX-form
+  imm16, 3B).
+- `signed %`: emit same as `signed /` but store
+  DX instead of AX.
+
 ## Unsigned div pow2 = shr unrolled; signed div ALWAYS uses idiv (no shift, even for pow2)
 
 Fixtures `2084` (unsigned div by 4), `2085`
