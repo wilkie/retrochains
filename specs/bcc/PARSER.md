@@ -1959,6 +1959,54 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `int→char` = byte load; `uchar→int` = `mov ah,0`; `schar→int` = `cbw`
+
+Fixtures `1730` (int→char cast), `1731` (uchar→int
+zero-extend), and `1732` (signed char→int sign-
+extend) characterise the char/int conversion
+codegen.
+
+- `1730` (**`(char)int` narrowing**): no explicit
+  shift or mask — just **`mov al, byte [m]`** to
+  read the low byte. The 1-byte store `mov [c], al`
+  (`88 /N`) then commits. Truncation is implicit
+  in the byte-width access. So narrowing is **free**:
+  ```
+  mov al, byte [int_var]    ; 8a /N (read low byte)
+  mov [char_var], al         ; 88 /N (store byte)
+  ```
+- `1731` (**`(int)unsigned char` zero-extend**):
+  uses **`mov ah, 0`** (`b4 00`, 2 bytes) to zero
+  the high byte after `mov al, [uc]`. The
+  combination yields AX with low byte = uc and high
+  byte = 0.
+- `1732` (**`(int)signed char` sign-extend**): uses
+  **`cbw`** (`98`, 1 byte) — convert byte to word
+  by sign-extending AL into AH. Mirrors the int→
+  long pattern (`cwd`):
+  - `cbw` (`98`) — AL → AX (sign extend)
+  - `cwd` (`99`) — AX → DX:AX (sign extend)
+
+So the widening conversions follow the same per-
+signedness rule across all widths:
+| Conversion | Signed | Unsigned |
+|------------|--------|----------|
+| `char → int` | `cbw` (1B) | `mov ah, 0` (2B) |
+| `int → long` | `cwd` (1B) | `mov word [high], 0` (5B) |
+
+**Char-init byte instructions**:
+- `mov byte [m], imm8` = `c6 /N + disp + imm8`
+- `mov al, byte [m]` = `8a /N`
+- `mov byte [m], al` = `88 /N`
+
+So initing a char with a constant uses `c6 imm8`
+(3-4 bytes), distinct from `c7 imm16` for words.
+
+This completes the char/int conversion picture.
+Char arithmetic always happens at int width (via
+implicit promotion); narrowing back to char drops
+the high byte without explicit work.
+
 ## Var-shift = `mov cl,[byte] / shr/sar`; ++x vs x++ order; string concat parse-time
 
 Fixtures `1727` (shift by var), `1728` (pre vs post
