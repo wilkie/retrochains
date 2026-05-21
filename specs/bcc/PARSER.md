@@ -1959,6 +1959,59 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Signed mod uses idiv (read DX); mul by neg uses two's-comp; zero-test: `or reg` vs `cmp [m], 0`
+
+Fixtures `1937` (signed mod pow2), `1938` (mul by
+negative), `1939` (cmp `x > 0` memory) confirm
+edge cases.
+
+- `1937` (**signed mod uses idiv, NOT AND**):
+  signed `x % 4` cannot use the AND-with-(N-1)
+  trick (that's only correct for unsigned). BCC
+  emits the **full idiv sequence**:
+  ```
+  mov ax, [x]
+  mov bx, 4
+  cwd
+  idiv bx
+  mov [r], dx       ; remainder in DX
+  ```
+  For `-5 % 4`: -5 % 4 = -1 (truncated toward
+  zero) per C89 semantics. DX holds -1. Confirms:
+  the AND-pow2 optimization is UNSIGNED-only.
+- `1938` (**mul by negative**): `x * -3` uses
+  same pattern: `mov dx, -3 / imul dx`. The
+  negative constant stored as its 16-bit two's-
+  complement (`fffd`). Result low 16 bits same
+  for signed and unsigned semantics.
+- `1939` (**cmp `x > 0` memory operand**):
+  ```
+  cmp word [x], 0       ; 83 7e fe 00 (imm8-sext 0, 4 bytes)
+  jle L_false            ; 7e 05 (signed inverse)
+  ```
+  Notable: in-memory zero-test uses `cmp [m], 0`
+  (4 bytes) because `or [m], [m]` doesn't exist;
+  only register-or-register shortcut.
+
+**Zero-test encoding hierarchy**:
+| Operand location | Encoding | Bytes |
+|------------------|----------|-------|
+| In register (e.g., SI) | `or si, si` | 2 |
+| In memory | `cmp word [m], 0` | 4 |
+| In AX | `or ax, ax` | 2 |
+
+So enregistered variables get the cheaper 2-byte
+zero-test via `or reg, reg`; in-memory variables
+use 4-byte `cmp [m], imm8-sext-0`.
+
+For the Rust reimplementation:
+- Signed mod: always go through idiv + DX (no
+  AND optimization).
+- Negative const mul: 16-bit two's-complement
+  encoding, same `imul` instruction.
+- Zero-test: pick `or reg, reg` if value is in a
+  register, else `cmp [m], 0`.
+
 ## Mul imm: `mov dx,K / imul dx`; UNSIGNED mod pow2 → `and ax, N-1`; signed div via cwd+idiv
 
 Fixtures `1934` (mul by 12345), `1935` (unsigned
