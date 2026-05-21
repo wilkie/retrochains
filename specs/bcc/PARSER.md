@@ -1959,6 +1959,74 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `interrupt` = save all regs + load DS + IRET; `volatile`/`const` no codegen diff in trivial cases
+
+Fixtures `2066` (interrupt fn), `2067` (volatile),
+`2068` (const) explore three special qualifiers.
+
+- `2066` (**`interrupt` keyword**): emits the
+  canonical DOS ISR shape — full register save,
+  reload DS to DGROUP, IRET:
+  ```
+  ; _my_isr:
+  push ax / push bx / push cx / push dx    ; 50 53 51 52
+  push es / push ds                          ; 06 1e
+  push si / push di / push bp                ; 56 57 55
+  mov bp, segment_of_DGROUP                  ; bd [seg] [seg] (FIXUPP)
+  mov ds, bp                                  ; 8e dd (reload DS)
+  mov bp, sp                                  ; 8b ec (frame, AFTER ds load)
+  ; ...body...
+  pop bp / pop di / pop si                   ; 5d 5f 5e
+  pop ds / pop es                             ; 1f 07
+  pop dx / pop cx / pop bx / pop ax           ; 5a 59 5b 58
+  iret                                        ; cf
+  ```
+  Total prologue: 16 bytes; epilogue: 13 bytes.
+  Uses **`iret`** (`cf`, 1 byte) which pops
+  flags + cs + ip (vs `ret` / `retf`).
+- `2067` (**`volatile`**): in the trivial case
+  `v = 1; v = 2; return v;`, BCC emits both
+  stores then a load. **Byte-identical to
+  non-volatile** for this case — because BCC
+  already doesn't do DCE/CSE. Volatile only
+  shows up if BCC would otherwise optimise
+  (which it rarely does). Probably a no-op in
+  most cases.
+- `2068` (**`const`**): `return c;` for `const
+  int c = 42;` emits a runtime **load** (`a1 00
+  00` with FIXUPP), NOT inline-fold to `mov ax,
+  42`. **`const` is a type qualifier only** —
+  doesn't enable parse-time const propagation.
+  
+  Compare:
+  - `return 42` → `b8 2a 00` (mov ax, 42)
+  - `return c` (with const c=42) → `a1 00 00` (load from memory)
+
+**Type qualifier summary**:
+| Qualifier | Codegen effect | Note |
+|-----------|----------------|------|
+| `const` | None at OBJ level | Type-system only |
+| `volatile` | None (BCC doesn't DCE/CSE anyway) | Defensive |
+| `register` | Hint for enregistration (when possible) | Discretionary |
+| `static` | Local lifetime → `_DATA` placement | Storage class |
+| `extern` | Declares, doesn't define | Symbol-table |
+
+**Calling-convention keyword summary** (updated):
+| Keyword | Effect |
+|---------|--------|
+| `cdecl` | Default — R-to-L args, caller cleans, `_name` |
+| `pascal` | L-to-R args, callee cleans (`ret imm16`), `NAME` |
+| `near` | Force near call/ret (`c3`) |
+| `far` | Force far call/ret (`cb`, `[bp+6]`) |
+| `interrupt` | Full reg save + ds reload + IRET |
+
+For the Rust reimplementation:
+- `interrupt`: emit the full ISR prologue/epilogue;
+  no normal `push bp / mov bp, sp` (BP saved later).
+- `volatile`/`const`: type-system tracking only;
+  no codegen difference for current optimisation
+  level.
+
 ## Pascal 4-args = `ret 8`; `cdecl` keyword = default; pascal→pascal call needs no cleanup
 
 Fixtures `2063` (pascal 4 args), `2064` (cdecl
