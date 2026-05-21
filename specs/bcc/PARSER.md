@@ -1959,6 +1959,70 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## long/ = N_LDIV@ via stack-push; long shift = N_LXLSH@ in regs; long+ inline `add/adc`
+
+Fixtures `2171` (long div), `2172` (long shift),
+`2173` (long add) characterise long-arithmetic
+helper conventions and inline ops.
+
+- `2171` (**long / long → N_LDIV@**): pushes
+  args on stack, then calls:
+  ```
+  push word [b.hi] / push word [b.lo]     ; divisor (hi, lo)
+  push word [a.hi] / push word [a.lo]     ; dividend (hi, lo)
+  call N_LDIV@                             ; e8 [disp]
+  ; result in DX:AX (quotient)
+  ```
+  **Different calling convention** from N_LXMUL@:
+  N_LDIV@ uses stack push, N_LXMUL@ uses
+  registers (CX:BX + DX:AX).
+- `2172` (**long << var → N_LXLSH@**):
+  ```
+  mov dx, [a.hi] / mov ax, [a.lo]
+  mov cl, [n]              ; shift count (single byte)
+  call N_LXLSH@            ; e8 [disp]
+  ; result in DX:AX (shifted long)
+  ```
+  Register-passed (DX:AX + CL).
+- `2173` (**long + long inline, no helper**):
+  ```
+  mov ax, [a.lo] / mov dx, [a.hi]
+  add ax, [b.lo]           ; 03 /r — adds low halves, CF set
+  adc dx, [b.hi]           ; 13 /r — adds high halves WITH CARRY
+  mov [r.lo], ax / mov [r.hi], dx
+  ```
+  ADC (`13 /r`) propagates carry from the low add.
+  Total 8 bytes for the long add. No helper call.
+
+**Long operations by category** (refined):
+| Op | Inline or helper? | Helper symbol |
+|----|-------------------|----------------|
+| `long + long` | INLINE (`add` + `adc`) | none |
+| `long - long` | INLINE (`sub` + `sbb`) | none |
+| `long & long` | INLINE (`and` × 2) | none |
+| `long | long` | INLINE (`or` × 2) | none |
+| `long ^ long` | INLINE (`xor` × 2) | none |
+| `long * long` | HELPER | `N_LXMUL@` (reg-passed) |
+| `long / long` | HELPER | `N_LDIV@` (stack-push) |
+| `long % long` | HELPER | `N_LDIV@` (use rem) |
+| `long << count` | HELPER (if var count) | `N_LXLSH@` (reg-passed) |
+| `long >> count` | HELPER | `N_LXRSH@` (signed) / `N_LXURSH@` (unsigned) |
+| `long == long`, `< >` etc. | INLINE (cmp + sbb/etc.) | none |
+
+**Helper calling-convention summary**:
+| Helper | Convention |
+|--------|------------|
+| `N_LXMUL@`, `N_LXLSH@`, `N_LXRSH@` | Reg-passed (DX:AX, CX:BX or CL) |
+| `N_LDIV@` | Stack-pushed (divisor then dividend) |
+| `N_FTOL@` | FPU TOP → DX:AX |
+| `N_SCOPY@`, `N_SPUSH@` | DS:SI src, ES:DI dst, CX count |
+
+For the Rust reimplementation:
+- Long mul/div/shift: emit external calls to the
+  right helper with the right convention.
+- Long add/sub/bitops: emit inline `add+adc` /
+  `sub+sbb` / `and×2` etc.
+
 ## int*int = `imul m16` (truncates DX); unsigned cmp uses `jae`/`jb`; long*long via N_LXMUL@
 
 Fixtures `2168` (int mul w/ overflow), `2169`
