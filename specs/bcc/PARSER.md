@@ -1959,6 +1959,74 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Long ABI: stored little-endian halves; args pushed hi-first; arr stride 4B per elem
+
+Fixtures `1946` (fn returning long), `1947` (mixed
+int/long args), `1948` (array of long) document
+the complete long ABI.
+
+- `1946` (**long storage and return**): a long
+  value `x` in memory has the **low half at lower
+  address**:
+  - `x.lo` at `[bp+disp]` (lower address)
+  - `x.hi` at `[bp+disp+2]` (higher address)
+  
+  Return convention: **DX:AX = high:low** halves.
+  Function stores intermediate result into local
+  long then loads back into DX:AX from the
+  correct positions.
+  
+  Long expression codegen can have peculiar
+  intermediate orderings — BCC sometimes computes
+  with swapped semantics in DX:AX and uses the
+  local storage as a swap-staging buffer. The
+  final return convention is restored.
+- `1947` (**mixed int/long args**): long arg
+  passed as **two word pushes, hi FIRST then
+  lo**. So the call site for `mix(1, 100L, 1000)`:
+  ```
+  push 1000        ; c (rightmost int)
+  push 0           ; b.hi (long high half)
+  push 100         ; b.lo (long low half — LAST pushed of b)
+  push 1           ; a (leftmost int)
+  call _mix
+  add sp, 8        ; 4 args × 2 bytes
+  ```
+  In callee:
+  - `[bp+4]` = a
+  - `[bp+6]` = b.lo (long low half — closer to bp)
+  - `[bp+8]` = b.hi
+  - `[bp+10]` = c
+  Long arg occupies **4 consecutive bytes** with
+  lo at lower offset.
+- `1948` (**array of long**): each element is **4
+  bytes** with low half at lower address:
+  - `a[0]` at `[bp-12..bp-9]`: `.lo` at -12, `.hi`
+    at -10
+  - `a[1]` at `[bp-8..bp-5]`: `.lo` at -8, `.hi`
+    at -6
+  - `a[2]` at `[bp-4..bp-1]`: `.lo` at -4, `.hi`
+    at -2
+  Stride = 4 bytes per element. Standard array
+  layout extended for 4-byte type.
+
+**Long memory and ABI summary**:
+| Aspect | Detail |
+|--------|--------|
+| Memory storage | Low half at lower addr (little-endian halves) |
+| Register return | DX:AX = high:low |
+| Arg push order | Hi pushed FIRST, lo pushed last |
+| Arg slot in callee | Lo at lower offset, hi at higher offset |
+| Array stride | 4 bytes per long element |
+
+For the Rust reimplementation:
+- All long operations use little-endian halves
+  in memory and stack frames.
+- Long arg push: emit hi-push then lo-push (so
+  lo ends at lower offset in callee).
+- Long return: emit DX = high, AX = low at fn
+  end.
+
 ## while-cond fn call; arg-is-cmp materializes via bool template; `x-2` uses add-imm not dec×2
 
 Fixtures `1943` (`while (fn() < 5)`), `1944`
