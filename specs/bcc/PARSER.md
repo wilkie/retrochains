@@ -1959,6 +1959,55 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Identity folds: `x + 0` = mov; `x | 0` = mov; `x * 0` = direct store of 0
+
+Fixtures `2009` (x + 0), `2010` (x | 0), `2011`
+(x * 0) confirm/extend the identity-folding
+catalog.
+
+- `2009` (**`x + 0` identity-folded**): NO `add`
+  emitted. Just `mov ax, x`. The +0 is recognised
+  at parse time as a no-op.
+- `2010` (**`x | 0` identity-folded**): NO `or`
+  emitted. Just `mov ax, x`. The OR with 0
+  preserves the value.
+- `2011` (**`x * 0` zero-folded directly**): NO
+  `imul` AND NO load of x. Emits `c7 46 disp 00
+  00` (direct store of 0) — the entire
+  computation is replaced by the constant 0.
+  
+  Notable: x is still **stored** (its assignment
+  emits `c7 46 fe 2a 00`), even though never
+  used. Confirms BCC's no-DCE policy — only the
+  ARITHMETIC EXPRESSION is folded; the
+  surrounding statements are emitted as-is.
+
+**Complete identity/constant-folding catalog**:
+| Operation | Fold |
+|-----------|------|
+| `x + 0`, `0 + x` | → `x` (just load) |
+| `x - 0` | → `x` (probably) |
+| `x | 0` | → `x` |
+| `x ^ 0` | → `x` (probably) |
+| `x & -1` (all ones) | → `x` (probably) |
+| `x * 1`, `1 * x` | → `x` |
+| `x * 0`, `0 * x` | → `0` (direct store) |
+| `x / 1` | → `x` (probably) |
+| Constant + constant | computed at parse time |
+| Any expression of compile-time constants | computed at parse time |
+
+So BCC's optimisation focus is **identity ops
+and compile-time constants**, not data-flow or
+algebraic simplifications. The folds happen at
+parse time before codegen sees the expression.
+
+For the Rust reimplementation:
+- Identity ops: detect `K op X` and `X op K` for
+  known identities; emit the simpler form.
+- Zero-product: `X * 0` → direct constant 0 emit.
+- Const-const: compute at parse time, emit
+  result.
+
 ## Stack frames word-aligned (127→128); `x * 1` identity-folded away
 
 Fixtures `2006` (127B frame), `2007` (128B frame),
