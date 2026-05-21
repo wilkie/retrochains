@@ -1959,6 +1959,44 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Default doesn't count toward N; 2 cases linear; imm16 base uses `81 eb`
+
+Fixtures `1910` (3 cases + default), `1911` (2
+cases only), `1912` (base 200 imm16) refine the
+switch case-count and base-encoding rules.
+
+- `1910` (**3 cases + default = linear chain**):
+  the **4-case threshold counts only explicit
+  cases** — default doesn't push it over. 3
+  explicit cases + default still uses linear
+  cmp/je with `jmp L_default` as final fallback.
+- `1911` (**2 cases = linear**): confirms 2 cases
+  uses cmp/je chain (well below threshold).
+- `1912` (**base 200 → imm16 sub**): when base
+  doesn't fit imm8-sext, BCC uses **`81 eb imm16`**
+  (sub r16, imm16, 4 bytes):
+  ```
+  mov bx, [x]
+  sub bx, 200            ; 81 eb c8 00 (imm16 form, 4 bytes)
+  cmp bx, 3
+  ja L_after
+  ; ... rest same as before
+  ```
+
+**Final base-normalize encoding hierarchy**:
+| Base value | Encoding | Bytes |
+|------------|----------|-------|
+| 0 | (omitted) | 0 |
+| 1 | `dec bx` | 1 |
+| -128..127 (≠ 0,1) | `83 eb imm8` | 3 |
+| else | `81 eb imm16` | 4 |
+
+For the Rust reimplementation:
+- Threshold for jump-table: count explicit cases
+  (NOT default).
+- Base-normalize: 0 omit, 1 dec, fits imm8-sext
+  sub-imm8, else sub-imm16.
+
 ## NEW: 3rd switch strategy — linear-search table for sparse N ≥ 4 cases (uses `loop` insn)
 
 Fixtures `1907` (base 0), `1908` (huge-gap),
