@@ -1959,6 +1959,44 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `char s[3]="abc"` drops `\0` (classic C trap); larger arr zero-pads; struct partial init zero-pads
+
+Fixtures `2096` (char s[3]="abc"), `2097` (char
+s[6]="ab"), `2098` (struct partial init) refine
+the static-init rules.
+
+- `2096` (**`char s[3] = "abc"` drops null**):
+  data emits just `61 62 63` (3 bytes). The
+  null terminator is **dropped** when the declared
+  size matches the string length without room
+  for it. **Classic C trap** — programmers who
+  write `char s[3] = "abc"` lose the null.
+- `2097` (**`char s[6] = "ab"` zero-pads
+  including null**): data emits `61 62 00 00 00
+  00` (6 bytes). "ab" + null at index 2 +
+  three more zero bytes for padding.
+- `2098` (**struct partial init**): `static
+  struct S s = {10, 20};` (3-int struct) data
+  emits `0a 00 14 00 00 00` (6 bytes). Like
+  array partial init — unmentioned fields are
+  **zero-padded**.
+
+**Static-init filling summary**:
+| Init form | Declared size | Result |
+|-----------|---------------|--------|
+| `int arr[N] = {a, b, ...}` (M ≤ N items) | N | first M filled, rest zero |
+| `int arr[] = {a, b, ...}` | M | exactly M items |
+| `char s[N] = "...str..."` (strlen+1 ≤ N) | N | string + null + zero-pad |
+| `char s[N] = "...str..."` (strlen == N) | N | string only, **null dropped** |
+| `char s[] = "...str..."` | strlen+1 | string + null |
+| `struct S s = {a, b, ...}` | sizeof(struct) | first fields filled, rest zero |
+
+For the Rust reimplementation:
+- Static char-array init with exact-size: drop null.
+- Static array partial init: zero-pad tail.
+- Static struct partial init: zero-pad unmentioned
+  fields.
+
 ## Partial arr init zero-pads tail; implicit size = init count; `char s[]="abc"` includes `\0`
 
 Fixtures `2093` (partial int init), `2094`
