@@ -1959,6 +1959,64 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Medium model: extern fn = full CALL FAR (`9a`); fn ptr = 4B (CS+offset); static fn = intra-seg same as global
+
+Fixtures `2210` (medium extern fn), `2211` (medium
+fn ptr), `2212` (medium static fn) characterise
+medium-model function calls.
+
+- `2210` (**medium extern fn → full CALL FAR**):
+  for cross-segment extern calls, BCC emits the
+  **full 5-byte CALL FAR** with FIXUPP for both
+  offset and segment:
+  ```
+  push fmt_offset
+  9a 00 00 00 00         ; CALL FAR _printf (FIXUPP for offset+segment)
+  pop cx
+  retf (cb)
+  ```
+  Contrast with intra-segment medium calls (push
+  cs + call near = 4 bytes).
+- `2211` (**medium fn ptr = 4 bytes**): function
+  pointers in medium model are **far pointers**
+  (offset + segment, 4 bytes):
+  ```
+  ; Construct fp:
+  mov [fp.seg], cs         ; 8c 4e fe (use CS as segment)
+  mov [fp.off], offset_of_dbl   ; c7 46 fc 00 00 (FIXUPP)
+  
+  ; Call through fp:
+  ff 5e fc                 ; call far [bp-4]
+                            ; ModR/M /3 = call far indirect through m32
+  ```
+  ModR/M `5e disp8` = /3 = call far indirect.
+- `2212` (**medium static fn**): no PUBDEF, intra-
+  segment `push cs / call near`. Same as global
+  default fn in medium model. The `static`
+  modifier only affects symbol visibility, not
+  the call form.
+
+**Medium-model call forms (complete)**:
+| Call type | Form | Bytes |
+|-----------|------|-------|
+| Same-CS intra-segment (default or static) | `0e e8 [rel]` (push cs + call near) | 4 |
+| Cross-segment extern | `9a [off] [seg]` (CALL FAR, FIXUPP) | 5 |
+| Through near fn ptr (forced) | `ff /2 [m]` | varies |
+| Through far fn ptr (default in medium) | `ff /3 [m]` | varies |
+
+**Far-pointer encoding (medium model)**:
+- fn pointer = 4 bytes (segment + offset, little-endian)
+- Constructed: `mov [hi], cs` + `mov [lo], offset_fixup`
+- Dereferenced: `ff /3` (call far indirect)
+
+For the Rust reimplementation:
+- Medium model extern: emit `9a 00 00 00 00` with
+  FIXUPP for both offset and segment.
+- Medium fn pointers: 4 bytes, construct via cs
+  + offset FIXUPP.
+- Calls through fn ptr: `ff /3` for far, `ff /2`
+  for near.
+
 ## Large struct return = hidden ptr arg + N_SCOPY@; struct arr index = i × stride; struct fn-ptr call via `ff /2`
 
 Fixtures `2207` (struct return >4B), `2208`
