@@ -1959,6 +1959,48 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Partial arr init zero-pads tail; implicit size = init count; `char s[]="abc"` includes `\0`
+
+Fixtures `2093` (partial int init), `2094`
+(implicit size), `2095` (char arr from string)
+cover array initializer semantics.
+
+- `2093` (**`int arr[5] = {1, 2}`**): explicit
+  values fill from index 0; remaining slots
+  **zero-padded**. Data emits `01 00 02 00 00
+  00 00 00 00 00` (10 bytes total — matches
+  declared size, NOT init count).
+- `2094` (**`int arr[] = {10, 20, 30, 40}`**):
+  **implicit size = init count**. Data emits
+  `0a 00 14 00 1e 00 28 00` (8 bytes for 4
+  ints). Array sized to fit the explicit list.
+- `2095` (**`char s[] = "abc"`**): sized to
+  `strlen + 1` to include the **null terminator**.
+  Data emits `61 62 63 00` (4 bytes for 3-char
+  string).
+
+**Array initializer summary**:
+| Form | Sizing | Tail filling |
+|------|--------|---------------|
+| `int arr[5] = {1, 2}` | declared (5) | zero-pad remaining |
+| `int arr[5] = {1, 2, 3, 4, 5}` | declared (5) | none (full) |
+| `int arr[] = {1, 2, 3}` | init count (3) | n/a |
+| `char s[] = "abc"` | strlen+1 (4) | n/a |
+| `char s[3] = "abc"` | declared (3) | might TRUNCATE null! |
+| `char s[10] = "abc"` | declared (10) | zero-pad tail |
+
+For string literals as array initializers, the
+**null terminator is implicitly included** when
+size is implicit or sufficient.
+
+For the Rust reimplementation:
+- Track declared vs implicit array size.
+- Emit explicit init values in order.
+- For declared > init count: emit zero bytes for
+  the remainder.
+- String literal init: include `\0` if room
+  remains.
+
 ## `x/D` and `x%D` NOT fused (2 idivs); `==0` mem uses `cmp [m], 0`; `== -1` uses imm8-sext
 
 Fixtures `2090` (div + mod), `2091` (cmp == 0
