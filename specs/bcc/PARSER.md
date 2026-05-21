@@ -1959,6 +1959,60 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `-O` strips trailing `eb 00` no-op (-2B per expr); `-d` merges string dupes; `-G` no observable effect
+
+Fixtures `2123` (-G flag), `2124` (-d merge
+strings), `2125` (-O jump opt) probe BCC command-
+line flags' codegen effects.
+
+- `2123` (**`-G` flag**): byte-identical to default
+  for the trivial case. May affect more complex
+  cases (it's documented as "select for speed").
+  No observable effect here.
+- `2124` (**`-d` merge duplicate strings**):
+  identical string literals `"hello"` and
+  `"hello"` (declared in separate global decls)
+  are **merged** to a single copy in `_DATA`.
+  Both pointers reference the same offset. With
+  `-d`, `a == b` is true; without it, they're
+  separate copies.
+- `2125` (**`-O` jump optimization**): strips the
+  trailing **`eb 00` (jmp +0)** no-op that BCC
+  normally emits at the end of expressions:
+  ```
+  ; Default:
+  ... 33 c0 / eb 00 / 8b e5 / 5d c3  (15 bytes)
+  
+  ; With -O:
+  ... 33 c0 / 8b e5 / 5d c3  (13 bytes)
+  ```
+  Saves **2 bytes per expression site**. Also
+  shortens preceding jcc distances. The
+  ubiquitous `eb 00` we've seen throughout the
+  corpus is BCC's structural no-op — `-O`
+  recognizes and removes it.
+
+**BCC command-line flag summary** (codegen-
+relevant):
+| Flag | Effect |
+|------|--------|
+| `-c` | Compile only (no link) |
+| `-ms` / `-mc` / `-mm` / `-ml` / `-mh` | Memory model |
+| `-O` | Optimize jumps — removes `eb 00` no-ops |
+| `-G` | Optimize for speed (no observable diff trivial) |
+| `-d` | Merge duplicate strings in `_DATA` |
+| `-w<class>` | Warning control |
+| `-D<name>=<val>` | Define preprocessor symbol |
+| `-U<name>` | Undefine preprocessor symbol |
+| `-I<dir>` | Include path |
+| `-v` | Source debug info |
+
+For the Rust reimplementation:
+- Match `-O` by removing the trailing-`eb 00`
+  emission (and shortening preceding jcc by 2).
+- Match `-d` by deduplicating string literals
+  in `_DATA` at link/emission time.
+
 ## `asm { ... }` block syntax; `#pragma warn` PP-only; pseudo-registers `_AX`/etc. in C exprs
 
 Fixtures `2120` (asm block), `2121` (pragma warn),
