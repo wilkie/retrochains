@@ -1959,6 +1959,62 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Medium = far-code, near-data; Compact = near-code, far-data; segment capture varies
+
+Fixtures `1766` (medium `-mm` fn call), `1767`
+(compact `-mc` fn call), and `1768` (compact &global)
+extend cross-model coverage to all 4 standard
+memory models.
+
+- `1766` (**`-mm` medium**): far code, near data.
+  - Segment name: **`HELLO_TEXT`** (like -ml).
+  - Function ABI: `retf`, args at `[bp+6]`, `push
+    cs ; call near` at sites. **Identical to -ml
+    for code-only ops**.
+  - Data ABI: would be near (DS-relative) since
+    "near data" is the model — but this fixture
+    doesn't touch globals.
+- `1767` (**`-mc` compact**): near code, far data.
+  - Segment name: **`_TEXT`** (like -ms).
+  - Function ABI: `ret` (near), args at `[bp+4]`,
+    `call near` at sites. **Identical to -ms for
+    code-only ops**.
+  - Data ABI: would be far when address-taken.
+- `1768` (**`-mc` `&global`**): confirms compact's
+  far-data nature. `int *p = &g` produces a **4-
+  byte far pointer**:
+  ```
+  mov [bp-2], ds        ; 8c 5e fe — capture DS (not SS!)
+  mov [bp-4], &g        ; FIXUPP'd offset
+  les bx, [p]
+  mov es:[bx], 42        ; 26 prefix
+  ```
+  Notable: the segment capture is **`mov [m], ds`**
+  (`8c /3`) since g lives in DS, not `mov [m], ss`
+  (`8c /2`) like for stack-local addresses. Function
+  itself uses near `5d c3` ret.
+
+Final memory-model matrix:
+| Model | Code | Data | Seg name | retX | call site |
+|-------|------|------|----------|------|-----------|
+| `-ms` small | near | near | `_TEXT` | ret | call near |
+| `-mc` compact | near | far  | `_TEXT` | ret | call near |
+| `-mm` medium | far  | near | `HELLO_TEXT` | retf | push cs / call near |
+| `-ml` large | far  | far  | `HELLO_TEXT` | retf | push cs / call near |
+
+And **segment-register capture by storage class**:
+| Storage | Segment | Capture opcode |
+|---------|---------|----------------|
+| stack (local) | SS | `8c /2` |
+| global / static (DS) | DS | `8c /3` |
+| code (CS) | CS | `8c /1` (rare) |
+| ES, GS, FS | — | `8c /0`, etc. |
+
+For the Rust reimplementation:
+- `code_model: Near|Far` → controls call/ret + push cs + seg name + arg offset base.
+- `data_model: Near|Far` → controls pointer width and seg capture for & operator.
+- These are **independent** parameters — small=NN, compact=NF, medium=FN, large=FF.
+
 ## `register` keyword forces enreg; use-count breaks ties; `&x` forces stack
 
 Fixtures `1763` (register keyword), `1764` (varying
