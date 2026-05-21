@@ -1959,6 +1959,46 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Shift unroll-vs-CL threshold pinned: N ≤ 3 unrolled, N ≥ 4 CL-form
+
+Fixtures `1832` (N=4), `1833` (N=5), `1834` (N=6)
+pin down the exact threshold for the shift-by-N
+codegen.
+
+All three use the CL form (`mov cl, N / shr ax,
+cl`, 4 bytes total). Combined with earlier
+findings:
+| N | Encoding | Bytes |
+|---|----------|-------|
+| 1 | `shr ax, 1` | 2 |
+| 2 | `shr ax, 1` × 2 | 4 |
+| 3 | `shr ax, 1` × 3 | 6 |
+| **4** | **`mov cl, 4 / shr ax, cl`** | 4 |
+| 5 | `mov cl, 5 / shr ax, cl` | 4 |
+| 6 | `mov cl, 6 / shr ax, cl` | 4 |
+| 8 | `mov cl, 8 / shr ax, cl` | 4 |
+
+So the **exact rule**: **N ≤ 3 unrolled, N ≥ 4 CL-form**.
+
+The choice for N=2 is interesting — unrolled (4 bytes)
+is tied with CL form (4 bytes) but BCC still unrolls.
+Possibly a **performance** consideration on 8086 where
+`shr ax, 1` is faster than `shr ax, cl` (which has a
+cycle penalty per shift). So the threshold is about
+total cycle count, not just byte count.
+
+For N=3: unrolled is 6 bytes (longer) but still chosen
+— suggesting BCC prioritises smaller per-shift cycles
+over total bytes up through N=3.
+
+For the Rust reimplementation:
+- Emit unrolled `shr/shl/sar ax, 1` for N ∈ {1, 2, 3}.
+- Emit CL-form `mov cl, N / shift ax, cl` for N ≥ 4.
+
+This refines and **supersedes** the earlier "N ≥ 3 →
+CL form" claim from [[batch-469-shift-threshold]] —
+the correct threshold is **N ≥ 4**.
+
 ## `-x` uses `neg`; `~x` uses `not`; shift-by-3 unrolled (threshold > 3)
 
 Fixtures `1829` (`-x` unary minus), `1830` (`~x`
