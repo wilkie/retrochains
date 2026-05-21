@@ -1959,6 +1959,46 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `imul` for unsigned mul; `div` for unsigned div (`xor dx,dx`); sentinel loop `cmp [si],0`
+
+Fixtures `1847` (unsigned `* unsigned`), `1848`
+(unsigned `/ unsigned`), and `1849` (array sentinel
+loop) confirm or refine three encoding rules.
+
+- `1847` (**`imul` for unsigned mul**): BCC uses
+  **`imul`** (`f7 /5`) for unsigned multiplication
+  too. For 16x16 → 16-bit (low half) results, `imul`
+  and `mul` produce identical low halves, so BCC
+  uses `imul` uniformly regardless of signedness.
+  (Confirms earlier finding from [[batch-437-long-
+  mul]].)
+- `1848` (**`div` for unsigned div**): unsigned
+  division uses **`xor dx, dx / div m16`** (`33 d2 /
+  f7 76 disp`), compared to signed `cwd / idiv`:
+  | Op | Setup | Divide |
+  |----|-------|--------|
+  | signed `/` | `cwd` (sign-extend AX to DX:AX) | `idiv` (`f7 /7`) |
+  | unsigned `/` | `xor dx, dx` (zero-extend) | `div` (`f7 /6`) |
+  
+  Both 3 instructions; signedness drives sign-
+  extend vs zero-extend of the high half.
+- `1849` (**sentinel loop**): `while (*p)` lowers
+  to **`cmp word [si], 0`** (`83 /7` with imm8-
+  sext 0, 3 bytes) + `jne body`. Tests the
+  pointer-dereferenced value against zero via the
+  imm8-sext compare.
+
+So the full int-arithmetic encoding now covers:
+| Op | Signed | Unsigned |
+|----|--------|----------|
+| `*` (low 16 bits) | `imul m16` (`f7 /5`) | same |
+| `/` 16-bit | `cwd / idiv` | `xor dx,dx / div` |
+| `%` 16-bit | (same, read DX) | (same, read DX) |
+
+The `mul` (`f7 /4`) instruction (32-bit result in
+DX:AX) is **never used** by BCC for ints — only
+the low half via `imul` is wanted.
+
 ## `while(--n)` = `dec/jne` (3B); `==`/`!=` inverse jcc; unsigned cmp uses `jae`/`jb`
 
 Fixtures `1844` (`while (--n)`), `1845` (`==`/`!=`
