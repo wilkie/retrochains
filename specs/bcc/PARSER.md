@@ -1959,6 +1959,83 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## >4B struct return uses hidden ptr + N_SCOPY@ (×2); shift+or = or-with-mem; bitfields work
+
+Fixtures `1877` (6B struct return), `1878` (byte
+packing `(hi<<8)|lo`), and `1879` (bitfields in
+BCC 2.0) cover remaining struct/bit shapes.
+
+- `1877` (**>4B struct return = hidden ptr +
+  N_SCOPY@ × 2**):
+  Caller side:
+  ```
+  ; allocates t (6B) AND temp (6B) — 12 bytes total
+  ; push hidden FAR ptr to TEMP (4B)
+  call _make_t
+  pop / pop                ; cleanup hidden ptr
+  ; push FAR ptr to TEMP (source), FAR ptr to t (dest)
+  mov cx, 6
+  call N_SCOPY@            ; copy temp → t
+  ```
+  Callee side (`make_t`):
+  ```
+  ; fill local r
+  ; push hidden dest ptr as source-for-copy
+  ; push FAR ptr to local r as source
+  mov cx, 6
+  call N_SCOPY@            ; copy local r → hidden dest
+  mov ax, [bp+4]           ; return dest offset in AX
+  ```
+  So **TWO copies** happen: local r → caller's
+  temp (via N_SCOPY@ in callee), then temp →
+  caller's named destination (via N_SCOPY@ in
+  caller). This wasteful double-copy is a result
+  of how BCC chains the temp-buffer protocol.
+  
+  N_SCOPY@ likely uses pascal/stdcall (callee
+  cleans args) since no cleanup visible after the
+  in-caller N_SCOPY@ call.
+- `1878` (**`(hi << 8) | lo` = shift then or-with-
+  mem**):
+  ```
+  mov ax, [hi]
+  mov cl, 8 / shl ax, cl       ; shift
+  or ax, [lo]                  ; or-with-memory (0b /r m16)
+  ```
+  The OR uses `0b 46 fc` (or r16, [bp+disp]) — 3
+  bytes. No fusion of shift+or into a single
+  operation, but each step uses the optimal
+  encoding.
+- `1879` (**bitfields WORK in BCC 2.0**): a
+  `struct {unsigned a:4; unsigned b:4; unsigned
+  c:8;}` is packed into a word at byte granularity:
+  - `b.a`: low nibble of byte 0
+  - `b.b`: high nibble of byte 0
+  - `b.c`: byte 1
+  
+  Write codegen: clear-mask (AND) + set-mask (OR)
+  via **byte ops**:
+  ```
+  and byte [bp+disp], ~mask    ; 80 66 disp mask  — clear bits
+  or  byte [bp+disp], val      ; 80 4e disp val   — set bits
+  ```
+  Read codegen: load byte → AND with mask →
+  shift down if not at LSB → AND again for safety.
+  
+  Notable: bitfields prefer **byte granularity** when
+  the field doesn't cross a byte boundary. `b.c`
+  (full byte) uses [bp-1] directly.
+
+For the Rust reimplementation:
+- For >4B struct returns: caller allocates temp,
+  pushes hidden ptr, then N_SCOPY@'s the temp to
+  the named dest. Callee uses N_SCOPY@ to copy
+  its local result into the hidden dest.
+- `(x << K) | y` lowers to shl then or-with-mem
+  (no fusion).
+- Bitfields: byte-granular when possible; clear-
+  then-set via byte AND/OR with masks.
+
 ## 6B struct uses N_SPUSH@; ≤4B struct returns in DX:AX; structs have NO padding
 
 Fixtures `1874` (6-byte struct by value), `1875`
