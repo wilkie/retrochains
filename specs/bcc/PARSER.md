@@ -1959,6 +1959,59 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Ulong mul = N_LXMUL@ (shared signed); ulong div = N_LUDIV@ separate; ulong >> 1 inline `shr/rcr`
+
+Fixtures `2180` (ulong mul), `2181` (ulong div),
+`2182` (ulong >> 1) complete the long-helper
+characterization.
+
+- `2180` (**unsigned long × → N_LXMUL@**): **same**
+  helper as signed long multiply. Multiplication's
+  low 32 bits are bit-pattern-identical for signed
+  vs unsigned — BCC discards the high half anyway,
+  so a single helper suffices.
+- `2181` (**unsigned long / → N_LUDIV@**):
+  **separate** helper from signed `N_LDIV@`. Same
+  calling convention (stack-pushed args), but the
+  routine handles unsigned-specific overflow and
+  rounding correctly.
+- `2182` (**unsigned `long >> 1` inline**):
+  ```
+  ax = a.hi / dx = a.lo
+  shr ax, 1            ; d1 e8 — LOGICAL right shift on high
+  rcr dx, 1            ; d1 da — rotate low through carry
+  ; result: ax:dx = a >> 1 (logical)
+  ```
+  Uses **SHR** (logical, fills with 0) on the high
+  half. Signed `long >> 1` would use **SAR**
+  (arithmetic, preserves sign bit) instead.
+
+**Long helper symbols catalogue** (confirmed):
+| Helper | Op | Signedness | Confirmed by fixture |
+|--------|-----|-----------|------------------------|
+| `N_LXMUL@` | × | both | 2170 (signed), 2180 (unsigned) |
+| `N_LDIV@` | / | signed | 2171 |
+| `N_LMOD@` | % | signed | 2179 |
+| `N_LUDIV@` | / | unsigned | 2181 (confirms guess) |
+| `N_LUMOD@` | % | unsigned | (probable, not yet probed) |
+| `N_LXLSH@` | << | both | 2172, 2177, 2178 |
+| `N_LXRSH@` | >> | signed | (probable) |
+| `N_LXURSH@` | >> | unsigned | (probable) |
+| `N_FTOL@` | float→long | both | 2132, others |
+
+**Long-shift inline cases** (final):
+| Shift | Form |
+|-------|------|
+| `<< 1` signed/unsigned | `shl dx, 1 / rcl ax, 1` (4 bytes) |
+| `>> 1` UNSIGNED | `shr ax, 1 / rcr dx, 1` (4 bytes) |
+| `>> 1` SIGNED | `sar ax, 1 / rcr dx, 1` (4 bytes) [probable] |
+| `<< N`, `>> N` (N ≥ 2) | N_LXLSH@ / N_LXRSH@ / N_LXURSH@ |
+
+For the Rust reimplementation:
+- Ulong mul: same N_LXMUL@ as signed.
+- Ulong div/mod: N_LUDIV@/N_LUMOD@ (distinct from signed).
+- N=1 long shifts: inline shl/rcl, shr/rcr, sar/rcr per signedness.
+
 ## Long shift threshold: N=1 inline (shl/rcl), N≥2 helper; `long %` uses separate N_LMOD@
 
 Fixtures `2177` (long << 3), `2178` (long << 4),
