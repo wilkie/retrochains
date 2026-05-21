@@ -1959,6 +1959,63 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `~long` = `not/not` inline (4B); `long == 0` uses `or low, high` zero-test; same for `if (long)`
+
+Fixtures `2186` (~long), `2187` (long == 0), `2188`
+(`if (long)`) finish the long-unary survey.
+
+- `2186` (**`~long` bitwise NOT**): inline via two
+  `not` instructions:
+  ```
+  ax = a.hi / dx = a.lo
+  not dx               ; f7 d2 — flip low
+  not ax               ; f7 d0 — flip high
+  ```
+  No carry propagation needed (bitwise op). 4
+  bytes total.
+- `2187` (**`long == 0` via OR**): single `or`
+  combines both halves into a zero-test:
+  ```
+  mov ax, [a.lo]
+  or ax, [a.hi]        ; 0b 46 fe — ZF iff both halves zero
+  jne L_skip           ; (skip the body — a != 0)
+  ; body: return 0
+  ```
+  Clever optimisation: instead of two cmp+jne,
+  single `or` sets ZF iff the combined long is
+  zero.
+- `2188` (**`if (long_val)` as condition**): same
+  OR-pattern but with `je` (skip if zero):
+  ```
+  mov ax, [a.lo]
+  or ax, [a.hi]
+  je L_false           ; 74 05 — skip body if zero
+  ```
+
+**`long` zero-test pattern**:
+| Source | jcc | Sense |
+|--------|-----|-------|
+| `if (a)` or `if (a != 0)` | `je` (skip if zero) | execute body if non-zero |
+| `if (a == 0)` | `jne` (skip if non-zero) | execute body if zero |
+
+Matches the int register-form pattern (`or reg,
+reg`) we saw earlier. The long version just uses
+a memory operand for the second half.
+
+**Long unary ops** (complete):
+| Op | Form | Bytes |
+|----|------|-------|
+| `-a` | `neg ax / neg dx / sbb ax, 0` | 5 |
+| `~a` | `not dx / not ax` | 4 |
+| `(unsigned long)a` | (no-op, type-only) | 0 |
+| `(long)int` | sign-extend via cwd | 1-3 |
+| `if (a)` / `if (!a)` / `a == 0` / `a != 0` | `or low, high` + jcc | 5-7 |
+
+For the Rust reimplementation:
+- `~long`: emit `not dx / not ax` (no helper).
+- `long == 0` test: emit `or low, high` then
+  appropriate jcc.
+
 ## Signed `long >> 1` = `sar/rcr` inline; ulong % = N_LUMOD@; `-long` = `neg/neg/sbb` (3-instruction idiom)
 
 Fixtures `2183` (signed long >> 1), `2184` (ulong
