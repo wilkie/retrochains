@@ -1959,6 +1959,55 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## 5-locals fills full pool; 1-read locals stack; params enregister too
+
+Fixtures `1850` (5 locals), `1851` (3 locals
+across call, all 1-read), and `1852` (function
+params enregistering) refine the register-
+allocation rule.
+
+- `1850` (**5 multi-use locals fill full pool**):
+  with 5 locals all needing slots, BCC uses **all
+  5 registers**: SI, BX, DI, CX, DX (in
+  declaration order, with the pool {SI, DI, DX, BX,
+  CX}). No scratch reserved when register pressure
+  is high. Confirms the pool's full extent.
+  
+  Notable: declaration order maps to register
+  selection: a→SI, b→BX, c→DI, d→CX, e→DX.
+  This may suggest an internal pool order:
+  ```
+  {SI, BX, DI, CX, DX}
+  ```
+  (or perhaps {SI, BX, DI, CX, DX} as the BCC
+  fill-order — need more probes to confirm).
+- `1851` (**1-read locals stay on stack**): 3
+  locals each used only once (init + return) all
+  stay on stack — even though the function makes a
+  call. The threshold for enregistration is firmly
+  **≥ 2 reads** in expressions, regardless of
+  surrounding context.
+- `1852` (**params enregister too**): function
+  parameters with ≥ 2 reads also enregister.
+  In `do_calc(a, b, c, d)` where a is used twice
+  (in `x = a+b` and in `return ...+a`) and d is
+  used twice, BCC loads a→SI and d→DI in the
+  prologue:
+  ```
+  mov si, [bp+4]    ; a → SI
+  mov di, [bp+10]   ; d → DI
+  ```
+  Then uses SI/DI throughout the body. Params and
+  locals follow the same enregistration rules.
+
+For the Rust reimplementation:
+- Count reads (uses in expression contexts) for
+  every local AND parameter.
+- Variables with ≥ 2 reads enregister using the
+  full pool {SI, BX, DI, CX, DX}.
+- Prologue includes loads for enregistered params
+  (`mov reg, [bp+disp]`).
+
 ## `imul` for unsigned mul; `div` for unsigned div (`xor dx,dx`); sentinel loop `cmp [si],0`
 
 Fixtures `1847` (unsigned `* unsigned`), `1848`
