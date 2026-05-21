@@ -1959,6 +1959,60 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `#undef`+`#define` redefines; `defined()` operator; `asm` keyword = literal inline assembly
+
+Fixtures `2117` (undef), `2118` (defined()), `2119`
+(asm) cover three preprocessor/extension idioms.
+
+- `2117` (**`#undef` then `#define` redefines**):
+  ```c
+  #define X 10
+  int a = X;        // a = 10
+  #undef X
+  #define X 99
+  int b = X;        // b = 99
+  ```
+  Macros are dictionary-style: definition-order
+  matters. Use-site reflects the definition at
+  that point.
+- `2118` (**`defined()` operator in `#if`**):
+  `#if defined(NAME)` ≡ `#ifdef NAME`, and `#if
+  !defined(NAME)` ≡ `#ifndef NAME`. Both
+  recognised in BCC's PP.
+- `2119` (**`asm` keyword**): Borland-specific
+  inline assembly. Each `asm <instr>` emits one
+  literal assembly instruction:
+  ```c
+  asm mov ax, x;             // emits 8b 46 fe (mov ax, [bp-2])
+  asm add ax, 1;             // emits 05 01 00 (add ax, 1, AX-form imm16)
+  ```
+  The inline assembler **does NOT optimise**:
+  `asm add ax, 1` emits the literal `05 01 00`
+  (3 bytes), NOT `inc ax` (1 byte). This contrasts
+  with BCC's normal `+1` optimisation for C code.
+  
+  Multiple `asm` statements can be chained. Local
+  C variables (`x`) can be referenced — BCC
+  generates the right `[bp+disp]` for them.
+
+**Preprocessor/extension summary (updated)**:
+| Construct | Effect |
+|-----------|--------|
+| `#define X V` | Macro substitution |
+| `#undef X` | Remove macro |
+| `#if defined(X)`, `#ifdef X` | Conditional compilation |
+| `#if !defined(X)`, `#ifndef X` | Inverse |
+| `asm <instruction>` | Inline ASM (Borland extension, literal — no opts) |
+
+For the Rust reimplementation:
+- Preprocessor: dictionary semantics for define/
+  undef; track definition order.
+- `defined()` operator: implement in PP-expression
+  evaluator.
+- `asm` keyword: parse as Borland-specific
+  statement; emit literal opcodes from the
+  assembler.
+
 ## `//` comments supported (extension); `#define` expanded at PP; `#ifdef` removes untaken branch
 
 Fixtures `2114` (C++ comments), `2115` (#define
