@@ -1959,6 +1959,50 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Char literal = parse-time int; `\xNN`/`\NNN` byte escapes; adjacent strings concat at parse
+
+Fixtures `2111` (char literals), `2112` (hex/
+octal escapes in strings), `2113` (adjacent
+string concat) cover three more lexer behaviours.
+
+- `2111` (**char literal = parse-time int**):
+  `'A'`, `'\n'`, `'\0'` evaluate to 65, 10, 0
+  respectively at parse time. Each fits in
+  `imm16`, stored via `c7 46 disp imm16`. Per
+  C standard, char literals have type `int`.
+- `2112` (**hex/octal byte escapes**): `"\xAB
+  \101\x7F"` decodes to `ab 41 7f`:
+  - `\xNN` = hex byte (1-2 hex digits)
+  - `\NNN` = octal byte (1-3 octal digits, `\101
+    = 65 = 'A'`)
+  
+  Both are byte-valued, not int — they fit in a
+  single char.
+- `2113` (**adjacent strings concatenate at
+  parse**): `"Hello, " "World!"` emitted as the
+  single string `Hello, World!` (13 chars + null
+  = 14 bytes in `_DATA`). Concatenation is a
+  lexical/preprocessing step per C standard. NO
+  runtime concat — single literal.
+
+**Lexer summary (lex-time data)**:
+| Token | Result | Type |
+|-------|--------|------|
+| `0xABCD` | hex int | `int` (or `unsigned int` if > INT_MAX) |
+| `0177` | octal int | `int` (= 127) |
+| `100` | decimal int | `int` |
+| `'A'` | int (65) | `int` |
+| `'\n'` | int (10) | `int` |
+| `'\xAB'` | int (171) | `int` |
+| `"abc"` | char[4] | `char[]` (with implicit `\0`) |
+| `"a" "b"` | concatenated string | single `char[]` |
+| `'\101'` (in string) | octal byte (65) | byte in string |
+
+For the Rust reimplementation:
+- Lex char literal → int value (parse the escape).
+- Lex string literal: parse all escapes, concat
+  adjacent strings, append implicit `\0`.
+
 ## `goto label` = `jmp`; escape sequences decode at parse; octal literals (leading 0)
 
 Fixtures `2108` (goto), `2109` (string escapes),
