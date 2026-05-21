@@ -1959,6 +1959,73 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Cross-byte bitfield = word op; signed bitfield read = `shl/sar` sign-extend; 1-bit `=1` skips clear
+
+Fixtures `2105` (1-bit flag bitfields), `2106`
+(cross-byte bitfield), `2107` (signed bitfield)
+deepen the bitfield characterisation.
+
+- `2105` (**1-bit flag, multi-byte spanning field**):
+  ```c
+  struct Flags { unsigned f1:1; unsigned f2:1; unsigned val:14; };
+  ```
+  - `fl.f1 = 1`: just `or byte [bp+disp], 1` (no
+    clear-first — assumes bit was 0; works only
+    if storage was zero-initialised, **buggy
+    for auto locals**).
+  - `fl.f2 = 0`: `and byte [bp+disp], 0xfd`
+    (clear bit).
+  - `fl.val = 1000`: val spans bits 2..15, so
+    needs WORD ops: `and word [m], 0x0003` (clear
+    val bits) + `or word [m], 0x0fa0` (set val
+    bits = 1000 << 2).
+- `2106` (**cross-byte spanning bitfield**):
+  ```c
+  struct Cross { unsigned lo:6; unsigned mid:6; unsigned hi:4; };
+  ```
+  Storage: lo at byte 0 bits 0..5, mid spans
+  byte 0 bits 6..7 + byte 1 bits 0..3, hi at
+  byte 1 bits 4..7.
+  
+  For mid (crosses byte boundary): word op
+  required:
+  ```
+  and word [bp+disp], 0xf03f      ; clear mid bits
+  or  word [bp+disp], 0x0a00       ; set mid = 40 << 6
+  ```
+- `2107` (**signed bitfield read = shl/sar**):
+  for `int x : 4`, read uses sign-extension via
+  shift-left-then-arithmetic-right:
+  ```
+  mov al, [bp+disp]
+  mov cl, 12 / shl ax, cl          ; align field in bits 12..15
+  mov cl, 12 / sar ax, cl          ; arithmetic right = sign-extend
+  ```
+  10 bytes per signed-bitfield read. Beautiful
+  8086 trick — putting the field in the high
+  bits and arithmetic-shifting back fills the
+  high bits with the sign.
+
+**Bitfield encoding summary**:
+| Operation | Single-byte field | Cross-byte field |
+|-----------|-------------------|-------------------|
+| Write `field = K` (unsigned, K fits) | `and byte [m], mask / or byte [m], K<<shift` (8 bytes) | `and word [m], mask / or word [m], K<<shift` (10 bytes) |
+| Write `field = 1` (1-bit) | `or byte [m], (1<<shift)` (4 bytes — clear skipped) | (same word) |
+| Read unsigned | `mov al, [m] / shr / and width-mask` | `mov ax, [m] / shr / and width-mask` |
+| Read signed | `mov al, [m] / shl (16-w-pos) / sar (16-w)` | same with word load |
+
+So **cross-byte bitfields force word ops**; signed
+bitfields use the sign-extending shift trick.
+
+For the Rust reimplementation:
+- Detect when bitfield spans byte boundary →
+  emit word-sized and/or.
+- For `unsigned 1-bit = 1`: skip the clear (BCC's
+  optimization — but be aware of correctness
+  caveats for uninitialised auto vars).
+- Signed bitfield read: shl to align in high
+  bits, sar back to extract.
+
 ## Nested struct flat-laid; union shares storage (little-endian observable); bitfields packed LSB-first
 
 Fixtures `2102` (nested struct init), `2103`
