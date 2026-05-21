@@ -1959,6 +1959,102 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `fn()` ≡ `fn(void)` in BCC codegen; self-ref struct via fwd ptr; `0 && ...` jumps OVER (not elided); arr[0] vs ->y same access; fn-ptr param call via `ff /2 [bp+disp]`
+
+Fixtures `2309`-`2314` cover assorted constructs.
+
+- `2309` (**`fn()` ≡ `fn(void)`**): byte-identical
+  function bodies. K&R `()` syntax accepted; same
+  codegen as ANSI `(void)`. (Strict ANSI mode
+  with `-A` may differ at parser level for
+  diagnostics, but codegen unchanged.)
+- `2310` (**self-referencing struct**): `struct
+  Node { ...; struct Node *next; };` — works
+  because the pointer's size is known regardless
+  of pointee. Static init `{1, &n2}` produces a
+  FIXUPP for the `next` field pointing to n2:
+  ```
+  _DATA layout:
+    [02 00] [00 00]            ; n2: v=2, next=NULL
+    [01 00] [&n2 FIXUPP]        ; n1: v=1, next=&n2
+  
+  ; n1.v + n1.next->v
+  mov bx, [n1.next]            ; = &n2
+  mov ax, [n1.v]                ; = 1
+  add ax, [bx]                  ; += n2.v
+  ```
+- `2311` (**`0 && X` short-circuit**): BCC emits
+  an unconditional `jmp` OVER the right operand
+  (which is still compiled into the binary, just
+  unreachable at runtime):
+  ```
+  ; r = (0 && side_effect(&x));
+  mov word [x], 0
+  jmp +17                       ; skip right operand
+  
+  ; (skipped at runtime, but still in OBJ):
+  lea ax, [x] / push ax
+  call _side_effect
+  ; ...
+  
+  ; r = 0 (the && result when left is false)
+  ```
+  So this is **runtime short-circuit** (not DCE).
+  The right operand's machine code is still
+  emitted, just bypassed by the `jmp`.
+- `2312` (**`extern int arr[];`**): incomplete-
+  type external. EXTDEF emitted; size unknown to
+  this TU. Access via FIXUPP to linker-resolved
+  address.
+- `2313` (**`.` direct vs `->` ptr-deref**):
+  - `p.x` (static p): direct memory access via
+    `a1 disp16` (FIXUPP'd)
+  - `pp->y` (through ptr): `mov ax, [bx+disp]`
+    where bx holds the pointer
+  Same final access mechanism, just different
+  base-address computation.
+- `2314` (**fn ptr as parameter**): callee calls
+  through stack arg:
+  ```
+  ; In apply(int (*f)(int), int x):
+  push word [bp+6]              ; x
+  ff 56 04                     ; call near [bp+4]  (= f)
+  pop cx                        ; cleanup
+  ```
+  ModR/M `56 disp8` = /2 = call near indirect
+  through [bp+disp8].
+
+**Short-circuit & const-folding interaction**:
+- `0 && X`: emits jmp over X's evaluation
+- `1 || X`: emits jmp over X's evaluation
+- `1 && X`: emits X's evaluation (no skip needed
+  since condition is needed)
+- `0 || X`: emits X's evaluation
+- For NON-const operands: standard short-circuit
+  branching with cmp+jcc
+
+Note that BCC compiles the right operand even
+when it's known unreachable, then emits a jmp
+over it. This is wasteful in code size but
+simple — no DCE pass.
+
+**Function-pointer call-site forms** (complete):
+| Source | Encoding |
+|--------|----------|
+| `f(args)` (direct fn call) | `e8 [rel]` near, `9a [rel][seg]` far |
+| `(*fp)(args)` or `fp(args)` (single ptr local) | `ff 56 disp` ([bp+disp]) |
+| `fns[0](args)` (static array const idx) | `ff 16 disp16` (direct indirect) |
+| `fns[i](args)` (var idx) | `ff 97 disp16` ([bx+disp16]) |
+| `s->fn(args)` (via struct field ptr) | `ff /2 [bx+disp]` or `ff 16 disp16` |
+
+For the Rust reimplementation:
+- Self-ref struct: track forward-declared type
+  for pointer field resolution.
+- Const-folded short-circuit: emit unconditional
+  jmp over dead operand (still compile it).
+- Fn ptr in stack arg: emit `ff 56 disp` for
+  `[bp+disp]` indirect.
+
 ## Inline asm w/ C vars; static fn-ptr arr = FIXUPP'd ptrs in _DATA; typedef parse-only; enum const-folded; var-idx fn-ptr call via `ff /2 [bx+disp]`
 
 Fixtures `2303`-`2308` cover inline asm, typedef
