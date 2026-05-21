@@ -1959,6 +1959,73 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Tiny = same as small (model byte only); Huge adds DS save/restore + `N_PADA@`
+
+Fixtures `1769` (`-mt` tiny), `1770` (`-mh` huge),
+and `1771` (huge ptr arith in -ms) complete the
+**full 6-model coverage**.
+
+- `1769` (**`-mt` tiny**): produces **byte-
+  identical code to `-ms`** at the per-function
+  level. Same `_TEXT`/`_DATA` segments, same call/
+  ret encoding. Differs only in the **COMENT model
+  marker byte** (`08` for tiny vs `09` for small)
+  which tells the linker to merge all segments
+  into one (max 64K total program).
+- `1770` (**`-mh` huge**): introduces **per-module
+  DS swap** in every function:
+  ```
+  _func:
+  push bp
+  mov bp, sp
+  push ds                   ; 1e — save caller's DS
+  mov ax, MOD_DGROUP        ; b8 imm16 (FIXUPP)
+  mov ds, ax                ; 8e d8 — switch to our DGROUP
+  ; body
+  pop ds                    ; 1f — restore caller's DS
+  retf                      ; cb
+  ```
+  Plus new segment name `HELLO_DATA` (the module's
+  own data segment, parallel to `HELLO_TEXT` for
+  code). So huge model adds **~6 bytes of DS save/
+  load** to every function prologue and **1 byte
+  of DS restore** to every epilogue. Each TU
+  effectively has its own data segment.
+- `1771` (**huge ptr arith uses `N_PADA@`**):
+  with `int huge *p`, doing `p++` calls **`N_PADA@`**
+  (huge pointer add). The helper:
+  - **DX:AX** = far ptr to operand pointer
+  - **CX:BX** = 32-bit increment value
+  - Adjusts the segment:offset so the result is
+    properly **normalized** across 64K boundaries
+
+  This is the **key distinction** between far and
+  huge pointers:
+  - `far *` `p++`: increments offset only (1651) —
+    breaks at 64K boundaries
+  - `huge *` `p++`: uses `N_PADA@` to renormalize
+    the segment:offset — properly handles >64K data
+
+Full 6-model coverage matrix:
+| Model | Code | Data | Seg name | retX | call site | Special |
+|-------|------|------|----------|------|-----------|---------|
+| `-mt` tiny | near | near | `_TEXT` | ret | call near | merged at link |
+| `-ms` small | near | near | `_TEXT` | ret | call near | (default) |
+| `-mc` compact | near | far  | `_TEXT` | ret | call near | & = 4B fp |
+| `-mm` medium | far  | near | `HELLO_TEXT` | retf | push cs/call | |
+| `-ml` large | far  | far  | `HELLO_TEXT` | retf | push cs/call | & = 4B fp |
+| `-mh` huge | far  | far  | `HELLO_TEXT`+`HELLO_DATA` | retf | push cs/call | DS swap, N_PADA@ |
+
+And **huge-pointer helper**:
+| Helper | Purpose | ABI |
+|--------|---------|-----|
+| `N_PADA@` | huge ptr addition | dx:ax = ptr, cx:bx = inc; normalises |
+| (presumably `N_PCMP@`, `N_PSBA@`, etc. for cmp/sub) | not yet probed | |
+
+This completes the cross-model story. For the Rust
+reimplementation, all 6 models are characterised
+and the model-conditional emission is well-bounded.
+
 ## Medium = far-code, near-data; Compact = near-code, far-data; segment capture varies
 
 Fixtures `1766` (medium `-mm` fn call), `1767`
