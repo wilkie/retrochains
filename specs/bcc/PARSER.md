@@ -1959,6 +1959,65 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Switch jump-table threshold pinned: N ≥ 4 contiguous cases → jump table
+
+Fixtures `1901` (4 cases), `1902` (5 cases), and
+`1903` (6 cases) pin down the exact threshold for
+jump-table-based switch lowering.
+
+All three use **jump tables** with the same
+template:
+```
+mov bx, [x]
+dec bx                  ; bx -= 1 (lowest case)
+cmp bx, N-1             ; bounds check (N = case count)
+ja L_after              ; out-of-range
+shl bx, 1               ; word index
+cs: jmp [bx + table]    ; indirect jump
+
+; data segment (in code):
+table: dw L_case1, L_case2, ..., L_caseN
+```
+
+The bounds check uses N-1 as the upper limit:
+- 4 cases: `cmp bx, 3`
+- 5 cases: `cmp bx, 4`
+- 6 cases: `cmp bx, 5`
+- 8 cases: `cmp bx, 7`
+
+Combined with earlier findings:
+| N cases | Codegen |
+|---------|---------|
+| 3 (1894) | Linear cmp/je chain |
+| 4 (1901) | Jump table |
+| 5 (1902) | Jump table |
+| 6 (1903) | Jump table |
+| 8 (1898) | Jump table |
+| 3 sparse (1897) | Linear cmp/je chain |
+
+**Exact threshold**: **N ≥ 4 contiguous cases →
+jump table**. For N ≤ 3 OR sparse cases, linear
+chain is used.
+
+The contiguity requirement is critical: even with
+N ≥ 4, if cases are sparse (e.g., 10, 100, 1000),
+the jump table would have huge gaps and BCC falls
+back to linear chain.
+
+For the Rust reimplementation:
+- Analyze case-value distribution:
+  - If N ≥ 4 AND cases form a contiguous range
+    (max - min == N - 1): emit jump table
+  - Else: emit linear cmp/je chain
+- Jump-table emission:
+  - `mov bx, [x] / sub bx, min / cmp bx, N-1 /
+    ja default / shl bx, 1 / cs: jmp [bx +
+    table_offset]`
+  - Table in code segment with N word entries
+- Update [[batch-525-switch]] reference: that
+  earlier note's "always linear" claim was wrong
+  for N ≥ 4 contiguous.
+
 ## CORRECTION: switch with 8 contiguous cases uses JUMP TABLE; char-switch promotes via cbw; static arr in `_DATA`
 
 Fixtures `1898` (8 contiguous cases), `1899`
