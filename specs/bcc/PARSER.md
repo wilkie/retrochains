@@ -1959,6 +1959,76 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `-1` (80186): ENTER (`c8 NN 00 00`) + LEAVE (`c9`) + shift-imm (`c1 /4 imm8`) + push-imm8 (`6a imm8`)
+
+Fixtures `2276` (-1 shift), `2277` (-1 fn w/
+locals), `2278` (no -1 baseline) pin the 80186
+instruction usage.
+
+- `2276` (**-1 + shift by 4**): with `-1`,
+  uses 3-byte `c1 /4 reg, imm8` form:
+  ```
+  c1 e0 04                  ; shl ax, 4 (80186 only)
+  ```
+  vs 8086's 4-byte `b1 04 / d3 e0` cl-form.
+  Also uses ENTER/LEAVE for prologue/epilogue:
+  ```
+  c8 04 00 00              ; ENTER 4, 0 (push bp + mov bp,sp + sub sp,4)
+  ; ... body ...
+  c9                        ; LEAVE (mov sp,bp + pop bp)
+  c3                        ; ret
+  ```
+- `2277` (**-1 + fn w/ locals**): each fn with
+  locals uses ENTER/LEAVE:
+  ```
+  c8 06 00 00              ; ENTER 6, 0 (6 bytes of locals)
+  push si                   ; save callee-saved reg
+  ; ... body ...
+  pop si
+  c9 / c3
+  ```
+  main (no locals, just one push imm8 arg) uses
+  plain push bp + mov bp, sp (3B) since ENTER 0
+  would be 4B; LEAVE used in epilogue anyway:
+  ```
+  55 8b ec                  ; push bp / mov bp, sp
+  6a 0a                     ; push 10 (80186 push imm8)
+  e8 NN NN                  ; call fn
+  pop cx
+  5d c3                     ; (main keeps plain epilogue since LEAVE = pop bp)
+  ```
+- `2278` (**no -1, shift by 4**): standard 8086
+  cl-form `b1 04 / d3 e0` (4 bytes).
+
+**80186 (`-1`) instruction usage**:
+| Instruction | 8086 form | 80186 form | Savings |
+|-------------|-----------|------------|---------|
+| Prologue w/ locals | `55 8b ec 83 ec NN` (6B) | `c8 NN 00 00` (4B) | 2B |
+| Prologue no locals | `55 8b ec` (3B) | (still 3B, ENTER 0 = 4B) | 0 |
+| Epilogue | `8b e5 5d` (3B) | `c9` (1B) | 2B |
+| Push small imm | `b8 NN NN / 50` (4B) | `6a NN` (2B) | 2B |
+| Push large imm | `b8 NN NN / 50` (4B) | `68 NN NN` (3B) | 1B |
+| Shift by const N>1 | `b1 N / d3 /4` (4B) | `c1 /4 imm8` (3B) | 1B |
+| Shift by 1 | `d1 /4 reg` (2B) | (same) | 0 |
+| imul reg, imm | (N/A) | `69 /r imm16` (4B) | n/a |
+
+**ENTER specifics** (80186):
+- `c8 nn nn 00` — ENTER nn (local-bytes), 0 (nesting-level)
+- Pushes BP, sets BP=SP, then SUB SP, nn
+- 4 bytes total, vs 6 bytes for the 8086 sequence
+- BCC always uses level=0 (no nested fn support)
+
+**ENTER not used** when:
+- No locals (saves 1 byte over ENTER 0)
+- main / leaf fns with no frame needed
+
+For the Rust reimplementation:
+- Track 80186 target (-1 flag).
+- For prologue with locals N > 0: emit ENTER nn.
+- For epilogue: emit LEAVE.
+- For shifts by const: emit `c1 /4 imm8`.
+- For small imm pushes: emit `6a imm8`.
+
 ## Int shift threshold pinned: N=1,2,3 unrolled `d1 e0`; N≥4 cl-form `b1 N / d3 e0`; var shift = `8a /4 / d3 e0`
 
 Fixtures `2273` (N=2), `2274` (N=3), `2275` (var
