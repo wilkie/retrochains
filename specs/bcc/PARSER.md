@@ -1959,6 +1959,74 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `char *arr[]` = N pointers w/ FIXUPP; non-static aggregate init = N_SCOPY@ from _DATA at fn entry
+
+Fixtures `2231` (array of string pointers),
+`2232` (2D array on stack), `2233` (string-init
+non-static char arr) cover initialization
+mechanisms.
+
+- `2231` (**array of string pointers**): 
+  ```
+  ; _DATA layout:
+  06 00 0c 00 11 00        ; 3 near pointers (FIXUPP'd)
+  61 6c 70 68 61 00        ; "alpha\0" at offset 6
+  62 65 74 61 00            ; "beta\0" at offset 12
+  67 61 6d 6d 61 00        ; "gamma\0" at offset 17
+  ```
+  Indexing `names[i][j]`:
+  ```
+  mov bx, [names + i*2]      ; load ptr
+  mov al, [bx + j]           ; deref byte
+  ```
+- `2232` (**non-static 2D array on stack**):
+  ```
+  ; In _DATA: 1,2,3,4,5,6,7,8,9 (9 ints, 18 bytes)
+  
+  ; In main:
+  push ss / lea ax, [m] / push ax        ; dest = stack slot
+  push ds / mov ax, 0 / push ax           ; src = _DATA init
+  mov cx, 18 (sizeof)                     ; bytes to copy
+  call N_SCOPY@
+  ```
+  Indexing `m[i][j]`: compile-time offset = `i *
+  cols * sizeof + j * sizeof`. For 3×3 ints,
+  `m[1][1]` at offset 8 from base.
+- `2233` (**non-static `char buf[16] = "hello"`**):
+  same N_SCOPY@ mechanism — `"hello\0..."` (16
+  bytes including trailing zeros) in `_DATA`,
+  copied to stack buf at fn entry:
+  ```
+  push ss / lea ax, [buf] / push
+  push ds / push 0 (offset of "hello\0...")
+  mov cx, 16
+  call N_SCOPY@
+  ```
+
+**Non-static aggregate initialization summary**:
+| Initializer | Mechanism |
+|-------------|-----------|
+| Scalar: `int x = 42` | `mov [x], 42` direct store at fn entry |
+| Array: `int a[3] = {...}` | N_SCOPY@ from _DATA template |
+| String: `char s[N] = "..."` | N_SCOPY@ (template padded to N bytes) |
+| 2D array: `int m[3][3] = {...}` | N_SCOPY@ (row-major flat) |
+| Struct: `struct S s = {...}` | N_SCOPY@ from _DATA template |
+| Aggregate of pointers | N_SCOPY@ (template has FIXUPP'd ptrs) |
+
+**Static vs non-static**:
+- Static: init data lives in `_DATA` directly; no
+  copy needed (the variable IS the _DATA slot)
+- Non-static: init data lives in `_DATA` as a
+  template; N_SCOPY@ copies it to the stack slot
+  at function entry
+
+For the Rust reimplementation:
+- Track aggregate initializers; emit _DATA
+  template + N_SCOPY@ call at fn entry for non-
+  static.
+- Multidim arrays: compute row-major layout,
+  pad strings to declared size.
+
 ## `continue` in for = jmp to update; nested break = innermost end label only; `goto` = unconditional jmp
 
 Fixtures `2228` (continue), `2229` (nested break),
