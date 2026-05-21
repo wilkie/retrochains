@@ -1959,6 +1959,87 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Preprocessor mechanics: object/fn-like macros expand inline + folded; `#if/elif/else` chooses one branch; `#undef`+redefine works; multi-line via `\`
+
+Fixtures `2285`-`2290` cover preprocessor
+mechanisms.
+
+- `2285` (**object macro**): `#define ANSWER 42`
+  then `return ANSWER` → `mov ax, 42`. Substituted
+  at preprocess time, then parser const-folds.
+- `2286` (**function-like macro**): `MAX(a,b)`
+  expands inline at the call site as the ternary
+  expression — NO function call:
+  ```
+  ; return MAX(x, y);  → return ((x) > (y) ? (x) : (y));
+  mov si, 7              ; x
+  mov di, 12             ; y
+  cmp si, di
+  jle false
+  mov ax, si             ; x is max
+  jmp end
+  false:
+    mov ax, di           ; y is max
+  ```
+- `2287` (**#if/#elif/#else**): branch chosen at
+  preprocess time. Only the taken branch ends up
+  in the parsed source. With MODE=2: returns 20.
+- `2288` (**#undef + redefine**): `#undef` removes
+  the macro; subsequent `#define` gives a new
+  value. Final value (20) at use site.
+- `2289` (**nested macros**): expanded transitively
+  until no more substitutions possible. Then
+  resulting arithmetic is const-folded:
+  `C = (B*2) = ((A+3)*2) = ((5+3)*2) = 16`.
+- `2290` (**multi-line macro via `\`**): line
+  continuation merges into one logical body.
+  `ADD3(1,2,3)` → 6.
+
+**Preprocessor mechanics summary**:
+| Directive | Behavior |
+|-----------|----------|
+| `#define NAME val` | Object macro; substitute literally |
+| `#define NAME(args) body` | Fn-like macro; substitute with args bound |
+| `#undef NAME` | Remove macro binding |
+| `#if expr` | Evaluate at preprocess time; branch on result |
+| `#ifdef NAME` | True if NAME is defined |
+| `#ifndef NAME` | True if NAME is NOT defined |
+| `#elif expr` | else-if for #if |
+| `#else` | else clause |
+| `#endif` | Close #if/#ifdef/#ifndef |
+| `#include "file"` | Inline contents of file (project) |
+| `#include <file>` | Inline contents of file (system) |
+| `#error msg` | Abort compilation with msg |
+| `#line N` | Set current line number |
+| `#pragma X` | Implementation-defined directive |
+| `\` at line end | Continuation (next line is same logical line) |
+
+**Macro expansion order**:
+1. Tokenize source
+2. Expand all #define/#undef/#include directives
+3. Evaluate #if/#elif/#else, removing dead branches
+4. Expand function-like macros at use sites
+5. Apply token-paste (##) and stringize (#) operators
+6. Re-tokenize expansion result if it contains directives
+
+The C preprocessor does NOT recursively expand a
+macro within its own expansion (prevents infinite
+recursion). After full expansion, the result is
+plain C tokens for the parser.
+
+**No codegen distinction**: in the OBJ, there's
+no trace of whether `return 42` came from a
+literal or `return ANSWER` with `#define ANSWER
+42`. All preprocessor work happens before AST
+construction.
+
+For the Rust reimplementation:
+- Implement a separate preprocessor pass.
+- Track macro bindings in a stack (for
+  redefinition behavior).
+- Resolve #if expressions at preprocess time.
+- Apply # and ## operators per C standard.
+
 ## `-d` merges duplicate string literals (single `_DATA` copy); `-K` makes `char` unsigned (zero-ext via `mov ah, 0`)
 
 Fixtures `2282` (-d merge effect), `2283` (no -d
