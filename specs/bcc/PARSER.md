@@ -1959,6 +1959,58 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Global double no-init in BSS (8B); strlen loop pattern; `imul m16` for paren expr
+
+Fixtures `1757` (uninitialized global double),
+`1758` (strlen-like loop), and `1759` (paren
+precedence `(a+b)*c`) cover three additional
+shapes.
+
+- `1757` (**global double in BSS**): an uninitialized
+  `double g;` allocates **8 bytes in `_BSS`** —
+  zero-initialized by the loader. The store/load
+  uses **`fstp/fld qword [direct]`** (`9b dd /3
+  disp16` and `/0 disp16`) with FIXUPP'd direct-
+  memory addressing. ModR/M `1e` for store, `06`
+  for load (mod=00 rm=110 = disp16-direct).
+- `1758` (**strlen-like loop**): standard pattern
+  for iterating over a null-terminated string:
+  ```
+  mov si, s_param      ; pointer
+  xor di, di           ; n = 0
+  jmp test
+  body:
+  inc di               ; n++
+  inc si               ; s++
+  test:
+  cmp byte [si], 0     ; *s == 0?
+  jne body             ; loop while non-zero
+  ```
+  Bottom-test pattern, byte load via `cmp byte [si],
+  imm8` (`80 3c 00`, 3 bytes: opcode `80 /7` + ModR/
+  M for [si] + imm8). Single-byte `inc si` for
+  pointer advance.
+- `1759` (**`(a + b) * c`**): paren grouping
+  computes `a + b` first into AX, then **`imul
+  word [bp-6]`** (`f7 /5` with mod=01 [bp+disp])
+  multiplies AX directly by the memory operand —
+  no separate load of c into a register. So memory
+  operands work natively for `imul`:
+  ```
+  imul r/m16        ; f7 /5 + ModR/M + disp
+  ```
+  Same `f7` opcode group as `neg` (`/3`), `not`
+  (`/2`), `div` (`/6`), `idiv` (`/7`), `mul` (`/4`),
+  `imul` (`/5`).
+
+For the Rust reimplementation:
+- Globals: split on initializer presence — initd
+  → `_DATA` LEDATA, uninitialized → `_BSS` size
+  reservation.
+- `imul`/`idiv` can take memory operands directly
+  via mod=01/10 — no need to materialize the source
+  into a register first.
+
 ## FP compares: `fcomp qword` + `jne`/`jb`/`ja`; double array stride 8
 
 Fixtures `1754` (FP `==`), `1755` (double array
