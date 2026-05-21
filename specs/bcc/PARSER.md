@@ -1959,6 +1959,66 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `-N` stack-overflow check via `N_OVERFLOW@`; `-K` char unsigned (zero-ext); `-D` CLI define = #define
+
+Fixtures `2129` (-N stack check), `2130` (-K
+unsigned char), `2131` (-D CLI define) cover three
+more BCC flags.
+
+- `2129` (**`-N` stack overflow checking**): each
+  function with stack allocation gets an
+  overflow-check prologue:
+  ```
+  push bp / mov bp, sp
+  sub sp, 0x28              ; allocate locals (40 bytes here)
+  cmp [__brklvl], sp        ; compare break level vs sp
+  jb skip                    ; jb = jump if below (sp > brklvl = safe)
+  call N_OVERFLOW@           ; otherwise call overflow handler
+  ```
+  External refs introduced: `N_OVERFLOW@`,
+  `___brklvl`. Adds ~8 bytes per stack-frame
+  function. Useful for catching stack overruns
+  at runtime.
+- `2130` (**`-K` default char is unsigned**):
+  changes the default signedness of `char` from
+  signed to unsigned:
+  ```
+  ; With -K (char = unsigned):
+  mov al, [c] / mov ah, 0      ; zero-extend
+  
+  ; Default (char = signed):
+  mov al, [c] / cbw             ; sign-extend
+  ```
+  Affects all `(int)char_val` conversions. C
+  standard leaves char signedness implementation-
+  defined; BCC defaults to signed, `-K` makes it
+  unsigned.
+- `2131` (**`-D<name>=<value>` CLI define**):
+  identical to `#define <name> <value>` at PP.
+  `-DFOO=42` makes the `#ifdef FOO` branch active
+  and `FOO` substitute as 42. Useful for build-
+  config.
+
+**Flag-effect master summary** (codegen-relevant):
+| Flag | Effect | Output bytes (vs default) |
+|------|--------|----------------------------|
+| `-O` | Remove trailing `eb 00` | -2 per expr |
+| `-d` | Merge dup string literals | -strlen per dup |
+| `-G` | (no observable trivial diff) | 0 |
+| `-r-` | Disable register alloc | +varies (worse) |
+| `-N` | Stack overflow check | +8 per stack-fn |
+| `-K` | char defaults unsigned | changes cbw → mov ah, 0 |
+| `-Dx=y` | Define macro at CLI | (PP-time only) |
+| `-Ux` | Undefine macro at CLI | (PP-time only) |
+| `-Ipath` | Add include path | (PP-time only) |
+
+For the Rust reimplementation:
+- `-N`: emit the stack-check prologue when set.
+- `-K`: track char signedness via flag; emit
+  cbw or mov ah, 0 accordingly.
+- `-D`/`-U`: feed into PP's macro table before
+  source processing.
+
 ## `-O` consistent across expr sites; `-r-` disables reg-alloc (vars in mem); recursion -O removes ~4B
 
 Fixtures `2126` (-O multi expr), `2127` (-r-
