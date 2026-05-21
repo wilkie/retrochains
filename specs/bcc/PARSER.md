@@ -1959,6 +1959,59 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Int shift threshold pinned: N=1,2,3 unrolled `d1 e0`; N≥4 cl-form `b1 N / d3 e0`; var shift = `8a /4 / d3 e0`
+
+Fixtures `2273` (N=2), `2274` (N=3), `2275` (var
+shift) pin down BCC's int shift threshold.
+
+- `2273` (**int shift by 2**): 2 unrolled `d1 e0`
+  (4 bytes total).
+- `2274` (**int shift by 3**): 3 unrolled `d1 e0`
+  (6 bytes total).
+- `2275` (**int shift by var**): cl-form with
+  byte load of the shift count:
+  ```
+  mov ax, [x]
+  8a 4e fc                  ; mov cl, [n] (low byte of int)
+  d3 e0                     ; shl ax, cl
+  ```
+  Uses `8a /4 [m]` = mov r8, r/m8 to load only the
+  low byte. On 8086, `shl reg, cl` doesn't mask
+  CL (unlike 286+), so shifts > 15 zero the int.
+
+**Refined int shift threshold (FINAL)**:
+| N | Form | Bytes |
+|---|------|-------|
+| N=1 | `d1 /4 reg` | 2 |
+| N=2 | 2 × `d1 /4 reg` (unrolled) | 4 |
+| N=3 | 3 × `d1 /4 reg` (unrolled) | 6 |
+| N=4+ | `b1 N / d3 /4 reg` (cl-form) | 4 |
+| Var | `8a /4 [n] / d3 /4 reg` | 5+ |
+
+So N=4 is the breakeven: 4 unrolled = 8 bytes vs
+cl-form = 4 bytes. BCC chooses the shorter option.
+
+**Right shift signed (SAR) and unsigned (SHR)**
+likely use the same threshold rule, just with `/7`
+(SAR) or `/5` (SHR) ModR/M instead of `/4` (SHL).
+
+**Variable shift quirk** (8086):
+- 8086's `shl reg, cl` uses CL as-is without
+  masking (in contrast to 286+ which masks to mod
+  32)
+- For int (16-bit) shifts where CL > 15, result
+  is 0 (all bits shifted out)
+- BCC loads only the low byte of the count
+  variable via `mov cl, [m]` (8-bit move)
+- Even if count > 255 stored in an int, only the
+  low 8 bits reach CL
+
+For the Rust reimplementation:
+- For shift by const N: emit N unrolled `d1 /4`
+  if N ≤ 3, else `b1 N / d3 /4` cl-form.
+- For shift by var: load low byte via `8a /4`,
+  then `d3 /4` cl-form.
+
 ## No rotate-pattern recognition (emits 2 shifts + or); int shift by 4+ uses `b1 N / d3 e0` cl-form; chained ternary nests
 
 Fixtures `2270` (rotate emulation), `2271`
