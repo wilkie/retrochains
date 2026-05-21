@@ -1959,6 +1959,56 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## strcpy loop pattern; mul-by-9 uses imul (no shl+add); per-access disp8 vs disp16
+
+Fixtures `1808` (strcpy-like `while (*d++ = *s++)`),
+`1809` (`x * 9`), and `1810` (large array with
+mixed offsets) reveal three details.
+
+- `1808` (**strcpy-like loop**): the `*d++ = *s++`
+  pattern lowers to:
+  ```
+  mov bx, dx      ; save s
+  inc dx          ; s++
+  mov al, [bx]    ; load *s
+  mov bx, di      ; save d
+  inc di          ; d++
+  mov [bx], al    ; store *d = *s
+  or al, al       ; test for null
+  jne body
+  ```
+  6 instructions for the body. The **post-increment
+  pattern** uses BX as a "save the old value"
+  register: `mov bx, ptr / inc ptr / [bx]`. The
+  assigned value remains in AL for the null-test
+  via `or al, al`.
+- `1809` (**`x * 9` uses imul**): BCC does NOT
+  recognize `shl + add` strength reduction for
+  mul-by-non-pow2 constants like 9 (= 8+1). Just
+  uses `mov dx, 9 / imul dx` (generic path). Only
+  pow2 mul is folded to `shl`; other constants
+  always use `imul`.
+- `1810` (**per-access disp8 vs disp16**): in a
+  function with a large array (160 bytes), different
+  element accesses pick disp width independently:
+  - `a[0]` at offset `bp-160` uses **disp16** (`c7
+    86 60 ff imm16`, 6 bytes per store)
+  - `a[70]` at offset `bp-20` uses **disp8** (`c7
+    46 ec imm16`, 4 bytes per store)
+  
+  Each instruction picks the smallest displacement
+  that fits its offset. So the **same function can
+  mix disp8 and disp16 addressing** based on each
+  access's magnitude.
+
+For the Rust reimplementation:
+- Implement post-increment pointer pattern with
+  BX as the "old value" stash.
+- Don't bother with shl+add strength reduction —
+  just emit imul for all non-pow2 constants.
+- Per-instruction displacement-width selection
+  based on offset magnitude.
+
 ## 4 enregistered locals: BX joins pool; fn-call doesn't disrupt SI/DI; array-store loop strength
 
 Fixtures `1805` (3 nested loops with 4 locals),
