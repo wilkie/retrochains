@@ -1959,6 +1959,67 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `(long)int` = cwd sign-ext; `(long)unsigned int` = zero store; long+int promotes via cwd
+
+Fixtures `2189` (signed int → long), `2190`
+(unsigned int → long), `2191` (long + int mixed)
+cover long-promotion mechanisms.
+
+- `2189` (**`(long)signed int` = cwd**): single
+  byte sign-extension:
+  ```
+  mov ax, [i]
+  cwd                  ; 99 — sign-extend AX into DX:AX
+  mov [l.hi], dx
+  mov [l.lo], ax
+  ```
+  CWD copies AX's sign bit (bit 15) to all bits
+  of DX. For i = -5 (0xFFFB), DX becomes 0xFFFF.
+- `2190` (**`(long)unsigned int` = zero store**):
+  zero-extension via direct mov of 0:
+  ```
+  mov ax, [u]
+  mov word [l.hi], 0     ; c7 46 fc 00 00 — direct zero store
+  mov [l.lo], ax
+  ```
+  Note: BCC does NOT use `xor dx, dx` (2 bytes) +
+  store dx. Instead emits the 5-byte direct mov
+  imm16 = 0. Possibly because the destination is
+  already memory.
+- `2191` (**long + int mixed**): the int is
+  **promoted to long first** (via cwd), then the
+  long+long inline add idiom runs:
+  ```
+  mov ax, [i]
+  cwd                   ; promote i to (DX:AX)
+  mov bx, [l.hi]
+  mov cx, [l.lo]
+  add cx, ax            ; lo + lo
+  adc bx, dx            ; hi + hi + carry
+  ```
+  So 4 registers used (AX, DX, BX, CX) to hold
+  both 32-bit operands.
+
+**Long promotion patterns**:
+| Source | Mechanism | Bytes |
+|--------|-----------|-------|
+| `signed int` → `long` | `cwd` | 1 |
+| `unsigned int` → `long` | `mov word [hi], 0` | 5 (or alternative: `xor dx, dx` 2B + store) |
+| `signed char` → `long` | `cbw` (→ AX) then `cwd` (→ DX:AX) | 2 |
+| `unsigned char` → `long` | `mov ah, 0` then `mov word [hi], 0` | 7 |
+| `long` → `int` | Take low word directly | 0 (free truncation) |
+| `long` → `char` | Take low byte directly | 0 (free truncation) |
+
+For mixed arith with promotion, the smaller type
+is widened first, then both run through the
+larger type's arithmetic.
+
+For the Rust reimplementation:
+- (long)int signed: emit `cwd` after the int load.
+- (long)int unsigned: emit direct zero store to
+  the high half.
+- Mixed long+int: promote the int first.
+
 ## `~long` = `not/not` inline (4B); `long == 0` uses `or low, high` zero-test; same for `if (long)`
 
 Fixtures `2186` (~long), `2187` (long == 0), `2188`
