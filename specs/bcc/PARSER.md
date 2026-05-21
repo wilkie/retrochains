@@ -1959,6 +1959,57 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `while(--x)` = `dec/jne` (no cmp); arr decays via `lea`; static int arr = `_DATA` init list
+
+Fixtures `2045` (while predec), `2046` (arr decay
+in fn call), `2047` (static int arr init) cover
+three idioms.
+
+- `2045` (**`while (--x)` = `dec / jne` only**):
+  the dec instruction sets ZF; no separate cmp
+  needed:
+  ```
+  jmp test
+  body:
+    inc si               ; count++
+  test:
+    dec di                ; --x (sets flags)
+    jne body              ; loop while result != 0
+  ```
+  3 bytes for test+update (`4f / 75 fc`). For x
+  = 5: 4 iterations (dec to 4,3,2,1 — all
+  non-zero), exit on dec to 0.
+- `2046` (**array decay = lea + push**):
+  ```
+  lea ax, [bp-6]           ; address of arr[0]
+  push ax                   ; push the address
+  ```
+  Array name in expression context decays to
+  pointer (= address of first element). `lea`
+  computes the effective address; `push ax`
+  pushes it.
+- `2047` (**static int arr with init list**):
+  values emitted in `_DATA` in order (`0a 00 14
+  00 1e 00` = 10, 20, 30 little-endian).
+  Access uses direct addressing:
+  ```
+  mov ax, [arr[0]]         ; a1 disp16 (FIXUPP)
+  add ax, [arr[1]]         ; 03 06 disp16
+  add ax, [arr[2]]         ; 03 06 disp16
+  ```
+  Static globals/locals live in `_DATA` and use
+  the AX-form `a1`/`a3` for load/store (3 bytes)
+  and the modrm-form `03 06 disp16` for add (4
+  bytes).
+
+For the Rust reimplementation:
+- `while (--x)`: emit `dec / jne` directly (no
+  preceding cmp).
+- Array decay in call/expression: emit `lea` to
+  compute address, then push.
+- Static arr with init list: emit `_DATA` bytes
+  in order; FIXUPP each access.
+
 ## `fn(a[i])` push via stack slot directly; `a[i] = fn()` stores AX; cmp with fn result swaps operands
 
 Fixtures `2042` (arr elem as fn arg), `2043` (arr
