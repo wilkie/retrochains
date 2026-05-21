@@ -1959,6 +1959,70 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## while-cond fn call; arg-is-cmp materializes via bool template; `x-2` uses add-imm not dec×2
+
+Fixtures `1943` (`while (fn() < 5)`), `1944`
+(`fn(a == c)`), `1945` (recursive fib) cover
+remaining mixed-context shapes.
+
+- `1943` (**while-cond with fn call**): empty
+  body but explicit `jmp test` at top:
+  ```
+  jmp test           ; while-top-test init jmp
+  body:
+    ; empty
+  test:
+    call _read_inc
+    cmp ax, 5
+    jl body          ; loop while ax < 5
+  ```
+  Body has no instructions, but the structure
+  still emits the init jmp + body label + test.
+  Standard while encoding.
+- `1944` (**`fn(a == c)` arg-is-cmp**): the
+  comparison `a == c` is evaluated in **value
+  context** (because it's an arg), so the full
+  bool-materialization template emits:
+  ```
+  mov ax, [a] / cmp ax, [c]
+  jne L_false
+  mov ax, 1 / jmp end
+  L_false: xor ax, ax
+  end: push ax           ; AX = 0 or 1
+  call _print
+  ```
+  Confirms: comparisons in arg position always
+  materialize into AX before push.
+- `1945` (**recursive fib**): standard recursive
+  call pattern. Notable: **`x - 2` uses `add ax,
+  -2`** (3 bytes via AX-form imm16, `05 fe ff`),
+  **NOT `dec ax / dec ax`** (would be 2 bytes).
+  
+  So BCC's `±1` → `inc`/`dec` optimization is
+  **only for value exactly ±1**, never combined
+  for ±2 or larger constants. `x - 2` is treated
+  as a single arithmetic op via `add ax, -2`.
+
+**`x ± K` encoding for AX target**:
+| K value | Encoding | Bytes |
+|---------|----------|-------|
+| +1 | `inc ax` | 1 |
+| -1 | `dec ax` | 1 |
+| +2..127 | `add ax, K` AX-form imm8-sext or imm16 | 3 |
+| -2..-128 | `add ax, K` (encoded as imm16 negative) | 3 |
+| > 127 or < -128 | `add ax, imm16` | 3 |
+
+For ±1 in AX: 1 byte. For everything else: 3 bytes
+via AX-form. No `dec×2` optimization.
+
+For the Rust reimplementation:
+- Empty while body: still emit `jmp test / body
+  label / test label` skeleton.
+- Comparisons in arg position: materialize via
+  bool template (cmp/jcc/mov1/jmp/xor).
+- `x ± 1`: emit inc/dec. Everything else: emit
+  add with the signed-value imm16.
+
 ## Compound `<<=` shifts reg directly; `*=` round-trips AX; `&=` uses `81 /4 reg imm16`
 
 Fixtures `1940` (`x <<= 3`), `1941` (`x *= 7`),
