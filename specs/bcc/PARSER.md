@@ -1959,6 +1959,69 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## 6-arg call: 4B per push; long arg = 2 word-pushes hi-first; chained calls bottom-up
+
+Fixtures `1925` (6 args), `1926` (long arg),
+`1927` (chained calls) cover remaining call-site
+shapes.
+
+- `1925` (**6 args**): each int constant arg is
+  pushed via **`mov ax, imm / push ax`** (4 bytes
+  per arg), pushed right-to-left. After call,
+  cleanup uses **single `add sp, N*2`**:
+  ```
+  mov ax, 6 / push ax    ; b8 06 00 50
+  mov ax, 5 / push ax
+  mov ax, 4 / push ax
+  mov ax, 3 / push ax
+  mov ax, 2 / push ax
+  mov ax, 1 / push ax
+  call _sum6
+  add sp, 12             ; cleanup 6 × 2 bytes
+  ```
+  Note: BCC does **NOT use 80186+'s `push imm16`**
+  (`68 imm16`, 3 bytes) — uses 8086-compatible
+  `mov + push` (4 bytes) instead. BCC targets
+  8086 only.
+- `1926` (**long arg**): a long value pushed as
+  **two word-pushes, hi first then lo**:
+  ```
+  ff 76 fe        ; push [y.hi]  (higher offset pushed first)
+  ff 76 fc        ; push [y.lo]
+  call _truncate_long
+  pop / pop       ; 4 bytes cleanup
+  ```
+  In callee, `[bp+4]` = lo half (last pushed),
+  `[bp+6]` = hi half. Memory order: low at
+  smaller offset. Matches little-endian
+  representation.
+- `1927` (**chained calls bottom-up**): `f(g(h(x)))`
+  evaluates innermost first:
+  ```
+  xor ax, ax / push ax     ; x = 0
+  call h                    ; ax = h(0)
+  pop                      ; cleanup
+  push ax                   ; new arg = h(0)
+  call g                    ; ax = g(h(0))
+  pop
+  push ax
+  call f                    ; ax = f(g(h(0)))
+  pop
+  ```
+  Each call's result (in AX) is immediately
+  pushed as the next call's arg. No deep stack
+  buildup.
+
+For the Rust reimplementation:
+- Multi-arg calls: `mov ax, val / push ax` per
+  arg (8086-compatible, NOT `push imm`).
+- Cleanup: single `add sp, N*2` after call
+  (cdecl).
+- Long arg: 2 word-pushes, hi first; callee sees
+  lo at [bp+4], hi at [bp+6].
+- Chained calls: evaluate inner first, push
+  result, then outer.
+
 ## 2D arr passes as ptr; partial init uses N_SCOPY@ from zero-padded `_DATA`; global arr in `_DATA`
 
 Fixtures `1922` (pass 2D array), `1923` (partial
