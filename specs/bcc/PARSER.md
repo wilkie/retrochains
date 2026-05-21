@@ -1959,6 +1959,56 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## K&R `()` = `(void)`; `extern int` in EXTDEF + FIXUPP; expr-stmt computes but discards
+
+Fixtures `1958` (K&R `()` fn decl), `1959`
+(`extern int`), `1960` (discarded expr-stmt)
+cover three smaller language features.
+
+- `1958` (**K&R `()` = `(void)`**): `int get42()
+  { return 42; }` with no `void` keyword
+  compiles identically to `int get42(void)`.
+  No proto means no arg-type checking — but
+  for zero-arg fn definitions the codegen is
+  the same. Call site emits no pushes, no
+  cleanup.
+- `1959` (**`extern int outer`**): the extern
+  decl adds **`_outer` to EXTDEF** (external
+  symbol table). Access uses **`a1 0000`** (mov
+  ax direct address, with FIXUPP) — link-time
+  resolves the imm16 to outer's actual offset.
+  
+  No storage allocated in this TU; another TU
+  must define `outer`. The OBJ requires linking
+  with a definition.
+- `1960` (**discarded expr-stmt**): `x + 1;`
+  (statement with unused result) **emits the
+  computation**:
+  ```
+  mov ax, si       ; load x
+  inc ax           ; compute x + 1
+  ; (result in AX, discarded — no store)
+  ```
+  Wasteful but consistent with BCC's "compile
+  each statement" rule. The increment is
+  computed but not stored.
+  
+  Subsequent `x++` properly increments via `inc
+  si` (the variable's register slot).
+
+So **no dead-code elimination** even for
+side-effect-free expressions. Every C source
+expression generates instructions, regardless
+of usefulness.
+
+For the Rust reimplementation:
+- K&R `()` fn defn: treat as `(void)` (no args)
+  for codegen purposes.
+- `extern` decls: add to EXTDEF, generate
+  FIXUPPs at use sites.
+- Expression statements: emit the computation
+  even if result is discarded. No DCE.
+
 ## Struct modify via ptr; 2B struct returns in AX only; rotate idiom NOT recognised
 
 Fixtures `1955` (struct modify via ptr), `1956`
