@@ -1959,6 +1959,63 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `int f()` empty-paren = `(void)` in def; nested `#if` works; `#line` no OBJ effect
+
+Fixtures `2165` (empty paren), `2166` (nested
+`#if`), `2167` (`#line` directive) cover three
+remaining syntactic patterns.
+
+- `2165` (**`int trivial()` empty parens**): in a
+  function **definition**, treated as `(void)`
+  (no parameters). At call sites in K&R C, such
+  a fn would accept any args (unchecked); BCC's
+  parser handles both forms uniformly. OBJ
+  identical to `int trivial(void)`.
+- `2166` (**nested `#if`**): `#if LEVEL > 0 / #if
+  LEVEL > 1 / #if LEVEL > 2 / #endif × 3` —
+  each level evaluated independently at PP time.
+  With LEVEL=2:
+  - Outer: TAKEN (10 > 0)
+  - Middle: TAKEN (LEVEL > 1)
+  - Inner: NOT TAKEN
+  
+  Result: `x = 10 + 100 = 110`. Only the taken
+  branches reach the compiler.
+- `2167` (**`#line N "fname"`**): updates the
+  preprocessor's idea of the current line and
+  file. Used for `__LINE__`, `__FILE__`, warning/
+  error message attribution. **No OBJ effect** —
+  purely diagnostic.
+
+**Preprocessor directive summary** (final):
+| Directive | Effect | OBJ change |
+|-----------|--------|------------|
+| `#define X V` | Macro substitution | (indirect via expansion) |
+| `#undef X` | Remove macro | (indirect) |
+| `#ifdef X / #ifndef X / #endif` | Conditional inclusion | (indirect) |
+| `#if expr / #elif / #else / #endif` | General conditional | (indirect) |
+| `#include "f"` / `#include <f>` | File inclusion | (indirect via content) |
+| `#pragma ...` | BCC-specific options | (varies) |
+| `#error msg` | Compile error | (none — kills compile) |
+| `#line N "fname"` | Override line/file | NONE |
+| `defined(X)` | PP-expr operator | (indirect) |
+
+**Function-declaration form-equivalence**:
+| Form | Treatment in definition | Treatment in call |
+|------|---------------------------|---------------------|
+| `int f()` | No params (= void) | Any args (K&R: unchecked) |
+| `int f(void)` | No params (= void) | Zero args required |
+| `int f(int a, int b)` | Two params | Two args required |
+| `int f(a, b) int a, b;` | K&R style, 2 params | Two args |
+| `int f(int, ...)` | Varargs (at least 1) | At least 1 arg |
+
+For the Rust reimplementation:
+- Empty parens in fn def = void params.
+- Nested `#if`: implement with a stack of "is
+  this branch taken" flags.
+- `#line` directive: update PP's source-location
+  state; no codegen effect.
+
 ## Multi-fn PUBDEF = reverse-source, main last; implicit-int return ok; K&R fn syntax supported
 
 Fixtures `2162` (3 fns + main PUBDEF order), `2163`
