@@ -1959,6 +1959,67 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Printf float varargs promotes to double (FLD m32 + FSTP m64); char promotes via cbw; strcpy R-to-L ptrs
+
+Fixtures `2198` (printf float promoted), `2199`
+(printf char promoted), `2200` (strcpy call)
+confirm "default argument promotions" for varargs
+and external calls.
+
+- `2198` (**printf float → double promotion**):
+  ```
+  FLD m32 [f]            ; load float (FPU widens to 80-bit)
+  add sp, -8              ; allocate 8B for double
+  FSTP m64 [sp]          ; store as DOUBLE (not m32!)
+  push fmt
+  call _printf
+  add sp, 10              ; cleanup 8B + 2B
+  ```
+  Per C standard, **float is promoted to double**
+  for varargs. The FPU's internal 80-bit precision
+  makes this lossless.
+- `2199` (**printf char → int promotion**):
+  ```
+  mov al, [c]
+  cbw                     ; SIGN-extend to AX (char is signed)
+  push ax                  ; push as int (2 bytes)
+  push fmt
+  call _printf
+  pop cx / pop cx        ; cleanup 4 bytes
+  ```
+  Per C standard, **char/short are promoted to
+  int** for varargs. `cbw` for signed char; would
+  be `mov ah, 0` for unsigned char.
+- `2200` (**strcpy(dest, src) call**): standard
+  cdecl R-to-L push:
+  ```
+  push [src_addr]         ; "hello"
+  push [dest_addr]         ; buf
+  call _strcpy
+  pop cx / pop cx         ; cleanup 4B (2 ptrs)
+  ```
+
+**Default argument promotions** (for varargs/no-
+prototype calls):
+| Source type | Promoted to | Mechanism |
+|-------------|-------------|-----------|
+| `char` (signed) | `int` | `cbw` |
+| `unsigned char` | `int` | `mov ah, 0` |
+| `short` | `int` | (already int width) |
+| `float` | `double` | FLD m32 + FSTP m64 |
+| `int`, `long`, `double`, ptr | (no promotion) | direct push |
+| `struct` | (passed as-is) | N_SPUSH@ for >4B |
+
+These promotions are why varargs functions can
+safely assume args at minimum int-width / double-
+precision-float in the stack frame.
+
+For the Rust reimplementation:
+- Varargs/no-prototype calls: emit promotion code
+  for char (cbw), unsigned char (mov ah, 0),
+  float (FLD/FSTP m64).
+- Multi-arg external calls: push R-to-L.
+
 ## Printf double arg = add sp,-8 + FSTP m64; long arg = push hi/lo; string arg = push addr
 
 Fixtures `2195` (printf double), `2196` (printf
