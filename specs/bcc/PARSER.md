@@ -1959,6 +1959,59 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `goto label` = `jmp`; escape sequences decode at parse; octal literals (leading 0)
+
+Fixtures `2108` (goto), `2109` (string escapes),
+`2110` (octal/hex literals) cover three lexical
+and control-flow patterns.
+
+- `2108` (**`goto label`**): emits **unconditional
+  `jmp`** to the label address. Same as a while-
+  loop's back-edge:
+  ```
+  start:
+    inc si              ; x++
+    cmp si, 5
+    jge skip
+    jmp start           ; eb f8 (goto)
+  skip:
+  ```
+  No structural difference between `goto` and an
+  unconditional loop edge.
+- `2109` (**string escape sequences**): `"\n\t\r
+  \\\\"` decodes to `0a 09 0d 5c 5c 00` (with
+  implicit null at end). All standard C escapes:
+  | Escape | Value |
+  |--------|-------|
+  | `\n` | 0x0a |
+  | `\t` | 0x09 |
+  | `\r` | 0x0d |
+  | `\b` | 0x08 |
+  | `\f` | 0x0c |
+  | `\v` | 0x0b |
+  | `\a` | 0x07 |
+  | `\0` | 0x00 |
+  | `\\` | 0x5c |
+  | `\"` | 0x22 |
+  | `\'` | 0x27 |
+  | `\?` | 0x3f |
+  | `\xNN` | hex byte |
+  | `\NNN` | octal byte |
+- `2110` (**integer literals**): three syntaxes:
+  - `0x...` (hex): `0xABCD = 0xABCD = 43981`
+  - `0...` (leading 0 = **octal**): `0177 = 127`
+  - `N...` (no leading 0 = decimal): `1000 = 1000`
+  
+  Each emits via `c7 46 disp imm16` for stack
+  init.
+
+For the Rust reimplementation:
+- `goto`: emit `jmp` to the labelled address.
+- Lex char escapes per the table above.
+- Lex integer literals: detect `0x` prefix (hex),
+  `0` prefix with no `x` (octal), otherwise
+  decimal.
+
 ## Cross-byte bitfield = word op; signed bitfield read = `shl/sar` sign-extend; 1-bit `=1` skips clear
 
 Fixtures `2105` (1-bit flag bitfields), `2106`
