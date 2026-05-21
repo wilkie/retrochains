@@ -1959,6 +1959,91 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `#` stringize, `##` token-paste, `defined()`; macro double-eval on arg side-effect; `#line` codegen-invisible; small-frame `dec sp` prologue
+
+Fixtures `2291`-`2296` cover advanced preprocessor
+mechanics and small-frame allocation.
+
+- `2291` (**`#x` stringize**): converts macro arg
+  to a string literal at preprocess time:
+  ```
+  #define STR(x) #x
+  STR(hello)              → "hello"
+  ```
+  In `_DATA`: "hello\0" as the string contents.
+- `2292` (**`a##b` token-paste**): concatenates
+  two tokens into one identifier:
+  ```
+  #define CAT(a, b) a##b
+  CAT(x, y)               → xy (one identifier)
+  ```
+  The fixture references `xy` which was declared
+  separately — token-paste produces the literal
+  identifier text.
+- `2293` (**macro arg with side effect**): the
+  classic SQUARE(++i) double-evaluation bug:
+  ```
+  #define SQUARE(x) ((x) * (x))
+  SQUARE(++i)             → ((++i) * (++i))
+  ```
+  BCC emits two `inc` instructions and a mul.
+  For initial i=0: i becomes 2; result = 1*2 = 2
+  (or 2*1, order is UB but commutative). No
+  warning emitted.
+- `2294` (**macro precedence bug**): without
+  parens around x in the macro body:
+  ```
+  #define DOUBLE(x) x * 2
+  DOUBLE(3 + 4)           → 3 + 4 * 2 = 11
+                            (NOT (3+4)*2 = 14)
+  ```
+  Confirms macro expansion is pure textual
+  substitution — operator precedence applies at
+  the call site.
+- `2295` (**`defined()` operator**): valid only in
+  `#if`/`#elif`:
+  ```
+  #if defined(FOO) && !defined(BAR)
+  ; → 1 && 1 → 1 → take this branch
+  ```
+- `2296` (**`#line N "file"`**): codegen-invisible.
+  Affects only error messages and (potentially)
+  debug info. Same OBJ bytes as without it.
+
+**Frame allocation byte-count optimization**:
+- `sub sp, 2` (1 int local): `4c 4c` (dec sp / dec
+  sp = 2 bytes, vs `83 ec 02` 3 bytes)
+- `sub sp, 4` (2 int locals): `83 ec 04` (3 bytes,
+  vs `4c × 4` = 4 bytes)
+- `sub sp, N` (N up to 127): `83 ec N` (3 bytes)
+- `sub sp, N` (N > 127): `81 ec NN NN` (4 bytes)
+
+So **`dec sp / dec sp` only wins for N=2**. Above
+that, the `83 ec` imm8 form is shorter.
+
+**Macro pitfalls to test**:
+- Arg side-effect double-eval (SQUARE(++i))
+- Operator precedence (DOUBLE(3+4))
+- Token-paste at preprocess time (CAT)
+- Stringize at preprocess time (STR)
+- `defined()` only in #if/#elif
+
+**Full preprocessor operator catalogue**:
+| Op | Where | Effect |
+|----|-------|--------|
+| `#x` | in macro body | Stringize: arg → "arg" |
+| `a##b` | in macro body | Token-paste: → ab (single token) |
+| `defined(X)` | in #if/#elif | 1 if X defined, 0 else |
+| `\` | end of line | Continue logical line |
+| `# directive` | start of line | Preprocessor directive |
+
+For the Rust reimplementation:
+- Preprocessor: implement #, ##, defined().
+- Track macro arg lists; substitute on expansion
+  (textual, NOT semantic).
+- Small frame allocation: emit `dec sp × 2` for
+  sub sp,2; else use `83 ec` imm8 form.
+
 ## Preprocessor mechanics: object/fn-like macros expand inline + folded; `#if/elif/else` chooses one branch; `#undef`+redefine works; multi-line via `\`
 
 Fixtures `2285`-`2290` cover preprocessor
