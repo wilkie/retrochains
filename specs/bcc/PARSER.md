@@ -1959,6 +1959,69 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Signed div-by-pow2 uses `idiv` (NOT `sar`); unsigned uses unrolled `shr`; mod reads DX
+
+Fixtures `1721` (signed div by 4 = pow2), `1722`
+(unsigned div by 4), and `1723` (signed mod by 7)
+clarify the div/mod codegen rules.
+
+- `1721` (**SIGNED div by pow2 — full `idiv`!**):
+  even for divisor 4, signed `x / 4` uses
+  **`mov bx, 4 / cwd / idiv bx`** — NOT `sar`. The
+  rationale: `sar` rounds toward negative infinity,
+  but C signed `/` rounds toward zero (truncation).
+  For negative dividends, `sar` would give wrong
+  results (e.g., `-7 sar 1` = -4 but `-7 / 2` = -3).
+  So BCC plays it safe with idiv for signed
+  division by any constant, pow2 or not.
+- `1722` (**unsigned div by pow2 — unrolled
+  `shr`**): unsigned `x / 4` uses **`shr ax, 1`
+  twice** (`d1 e8 d1 e8`, 4 bytes total). BCC
+  unrolls the shift for small N rather than using
+  `mov cl, N / shr ax, cl`. For N ≥ some threshold
+  (probably ≥ 4 or 5), it switches to the cl-based
+  form. Unsigned semantics correctly match `shr`
+  (round toward 0 = floor for positive numbers).
+- `1723` (**signed mod uses idiv, reads DX**):
+  signed `x % 7` is the **same idiv sequence** as
+  signed div, but **stores DX** (the remainder)
+  instead of AX (the quotient). The two operations
+  share the entire computational path:
+  ```
+  mov ax, x
+  mov bx, K
+  cwd
+  idiv bx
+  ; → AX = quotient, DX = remainder
+  mov [r], dx        ; for mod
+  ; OR
+  mov [r], ax        ; for div
+  ```
+  So BCC emits one `idiv` and picks the output
+  register at the consumer. If both `x/K` and `x%K`
+  appeared in the same expression, BCC could
+  theoretically fuse them — not yet probed.
+
+So the **div/mod encoding rule** by signedness and
+divisor shape:
+| Operation | Divisor | Encoding |
+|-----------|---------|----------|
+| signed `/` | const pow2 | `idiv bx` (cannot use sar) |
+| signed `/` | const non-pow2 | `idiv bx` |
+| signed `/` | variable | `idiv bx` |
+| unsigned `/` | const pow2 | `shr ax, 1` × N (unrolled) |
+| unsigned `/` | const non-pow2 | `xor dx, dx / div bx` |
+| unsigned `/` | variable | `xor dx, dx / div bx` |
+| signed `%` | const pow2 | `idiv bx` (read DX) |
+| signed `%` | any | `idiv bx` (read DX) |
+| unsigned `%` | const pow2 | `and ax, K-1` (mask shortcut!) |
+| unsigned `%` | other | `xor dx,dx / div bx` (read DX) |
+
+Note the asymmetric optimisation: **unsigned mod
+by pow2 = AND mask** (cheapest), but **signed mod
+by pow2** can't use the mask because of negative
+numbers, so falls back to full idiv.
+
 ## `cmp m, 0x1234` uses `81 /7` (imm16); `x*K` via DX+imul; `x/K` via cwd+idiv
 
 Fixtures `1718` (cmp imm16), `1719` (mul by non-
