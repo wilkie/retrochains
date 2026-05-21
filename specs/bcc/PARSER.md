@@ -1959,6 +1959,63 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `extern fn` = EXTDEF + FIXUPP'd call; fwd-decl no impact; `static` fn = no PUBDEF, intra-seg call
+
+Fixtures `2153` (extern fn), `2154` (fwd decl),
+`2155` (static fn) cover function-symbol mechanics.
+
+- `2153` (**`extern int printf(...)` call**): the
+  external function generates an **EXTDEF** record
+  in the OBJ symbol table. Call site uses `e8 00
+  00` with FIXUPP to resolve at link time:
+  ```
+  ; symbol table:
+  88 0a 00 07 _printf 00 71            ; EXTDEF
+  
+  ; main calls printf:
+  mov ax, 0          ; b8 00 00 (FIXUPP for string)
+  push ax
+  call _printf       ; e8 00 00 (FIXUPP for fn addr)
+  pop cx
+  ```
+  Varargs `(...)` in the prototype is just a
+  type-check escape — doesn't affect call-site
+  codegen for fixed-arity calls.
+- `2154` (**forward decl**): `int helper(int x);`
+  then later `int helper(int x) { ... }`. Forward
+  decl is **purely type-system** — no codegen
+  effect. Both `_helper` and `_main` are PUBDEF
+  exports. Order in the OBJ matches source order.
+- `2155` (**`static` fn**): file-local — **NO
+  PUBDEF** for `_internal_helper`. Only `_main`
+  is exported:
+  ```
+  ; PUBDEF section: only _main
+  ; _internal_helper code is inline but invisible
+  
+  ; main calls helper via direct rel-near call:
+  call _internal_helper       ; e8 e9 ff (intra-segment, NO FIXUPP)
+  ```
+  The static fn becomes invisible to other
+  translation units. Call uses an internal
+  relative offset — no link-time resolution
+  needed.
+
+**Function-symbol summary**:
+| Modifier | OBJ effect | Call mechanism |
+|----------|------------|-----------------|
+| (default global) | PUBDEF (exported) | `e8 [rel]` intra-fn, or FIXUPP'd for ext |
+| `static` | (not in PUBDEF) | `e8 [rel]` intra-segment |
+| `extern` (no body) | EXTDEF (imported) | `e8 [rel]` with FIXUPP |
+| Forward decl | (No symbol effect) | (Same as global) |
+
+For the Rust reimplementation:
+- `extern` w/ no body: emit EXTDEF; FIXUPP at
+  call site.
+- `static` fn: omit from PUBDEF; intra-segment
+  call.
+- Forward decl: type-system only.
+
 ## Double arr index = `BX = i; BX << 3; FLD m64 [BX]`; FLDZ/FLD1 for 0/1 consts; cmp w/ 0 = FLDZ+FCOMPP
 
 Fixtures `2150` (double arr elem access), `2151`
