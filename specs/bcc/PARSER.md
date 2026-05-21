@@ -1959,6 +1959,48 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Small-add asymmetry: `x+1`/`+2` = inc, `x-1` = dec, but `x-2` = `add ax, -2` (NOT dec dec)
+
+Fixtures `2072` (x + 3), `2073` (x - 1), `2074`
+(x - 2) refine the small-constant add/sub
+encoding rule.
+
+- `2072` (**`x + 3`**): emits **`05 03 00`** —
+  `add ax, 3` in AX-form imm16 (3 bytes). NOT
+  `83 c0 03` (modrm imm8-sext, also 3 bytes) and
+  NOT 3 incs (3 bytes). BCC picks the AX-form
+  for AX.
+- `2073` (**`x - 1`**): emits **`48`** — `dec
+  ax` (1 byte). Mirrors `x + 1` → `inc ax`.
+- `2074` (**`x - 2`**): emits **`05 fe ff`** —
+  `add ax, -2` (= 0xFFFE) (3 bytes, AX-form
+  imm16). **NOT `dec ax / dec ax` (2 bytes)!**
+  BCC misses this optimization — sub by 2 goes
+  through the general add-with-negated-constant
+  path.
+
+**Refined small-add/sub encoding rule** (corrected):
+| Operation | Encoding | Bytes |
+|-----------|----------|-------|
+| `x + 1` | `inc ax` (`40`) | 1 |
+| `x + 2` | `inc ax / inc ax` (`40 40`) | 2 |
+| `x + 3` to `x + 127` | `add ax, imm16` AX-form (`05 imm16`) | 3 |
+| `x + 128` to `x + 65535` | `add ax, imm16` AX-form (`05 imm16`) | 3 |
+| `x - 1` | `dec ax` (`48`) | 1 |
+| `x - 2` and above | `add ax, -N` AX-form (`05 imm16`) | 3 |
+
+So the optimization is **asymmetric**:
+- inc/dec only for ±1
+- inc inc only for +2 (NOT dec dec for -2)
+- otherwise AX-form `05 imm16` add
+
+For the Rust reimplementation:
+- `x + 1` → `40` (1B)
+- `x + 2` → `40 40` (2B)
+- `x - 1` → `48` (1B)
+- All other small-const add/sub on AX → `05 imm16` (3B, AX-form)
+- Note: BCC does NOT use the imm8-sext modrm form (`83 /0` or `83 /5`) for AX even when imm fits — always prefers AX-form.
+
 ## `register` enregisters into SI/DI; typedef = type-only no codegen; enum = parse-time int consts
 
 Fixtures `2069` (register), `2070` (typedef),
