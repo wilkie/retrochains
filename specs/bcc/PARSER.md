@@ -1959,6 +1959,109 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## R-to-L arg eval w/ comma op; local shadows global completely; `!x` = `neg/sbb r,r/inc` arithmetic idiom; const ternary folds; multi-return = multi-jmp to epilogue
+
+Fixtures `2315`-`2320` cover assorted idioms and
+edge cases.
+
+- `2315` (**comma op in args, R-to-L**): args
+  evaluated right-to-left in cdecl order, each
+  arg fully evaluated (comma chain included)
+  before next:
+  ```
+  ; sum2((x = 10, x), (x = 20, x))
+  mov si, 5           ; x = 5 init
+  mov si, 20          ; right arg: x = 20 first
+  push si              ; push 20
+  mov si, 10          ; left arg: x = 10
+  push si              ; push 10
+  call sum2           ; result = 30
+  ; After: x = 10 (last written)
+  ```
+- `2316` (**local shadows global**): inner local
+  `g` completely hides the global `g = 100`. The
+  global is dead in this TU but still present in
+  `_DATA`. Codegen never references it.
+- `2317` (**`!x` arithmetic idiom**):
+  ```
+  ; !x lowers to:
+  mov ax, x
+  neg ax              ; CF = (x != 0)
+  sbb ax, ax          ; ax = -CF (0 or -1)
+  inc ax              ; ax = 1-CF (1 if x==0, 0 if x!=0)
+  ```
+  3 instructions (5 bytes). For `!!x`, apply
+  twice (10 bytes).
+- `2318` (**const ternary folds**): `(1 ? &a :
+  &b)` resolves to `&a` at compile time. The
+  unused branch (`&b`) doesn't emit any code:
+  ```
+  lea ax, [a]
+  mov si, ax           ; p = &a directly
+  mov word [si], 5     ; *p = 5
+  ```
+- `2319` (**multiple returns**): each `return X`
+  emits `mov ax, X / jmp epilogue`. Function
+  epilogue appears once at the end:
+  ```
+  ; if (x < 0) return -1;
+  test x / jge skip / mov ax, -1 / jmp end
+  ; if (x == 0) return 0;
+  test x / jne skip2 / xor ax, ax / jmp end
+  ; if (x < 10) return 1;
+  cmp x, 10 / jge skip3 / mov ax, 1 / jmp end
+  ; return 2;
+  mov ax, 2
+  end:
+    (epilogue)
+  ```
+- `2320` (**static array large init**): all 20
+  init values placed directly in `_DATA` at
+  compile time. No runtime init code emitted —
+  just direct memory loads via `a1`/`03 06`
+  forms.
+
+**`!x` lowering pattern in detail**:
+The 3-instruction `neg / sbb / inc` idiom
+converts any value to a normalized boolean (0 or
+1):
+- For x == 0: neg gives CF=0, sbb gives 0, inc
+  gives 1
+- For x != 0: neg gives CF=1, sbb gives -1, inc
+  gives 0
+
+For `!!x`, apply twice:
+- After first `!`: ax = 0 (if x!=0) or 1 (if x==0)
+- After second `!`: ax = 1 (if x!=0) or 0 (if x==0)
+- Net: 1 if x non-zero, 0 if x zero — true boolean
+
+Total cost: 10 bytes. An alternative `cmp x, 0 /
+setne al / movzx ax, al` is 286+ only.
+
+**Arg-evaluation order (final, confirmed)**:
+1. Args pushed right-to-left (cdecl)
+2. Each arg's expression is FULLY evaluated
+   (including comma chains and side effects)
+   BEFORE pushing
+3. Result on stack after all pushes: arg1 at
+   lowest stack addr, argN at highest
+4. Callee reads args at `[bp+4]`, `[bp+6]`, ...
+
+**Multi-return function shape**:
+- Multiple `return X` statements all jmp to a
+  single epilogue label
+- Epilogue: pop callee-saved + leave + ret
+- Optimizer may merge multiple "mov ax, K / jmp
+  end" sequences if all share the same constant
+  return value
+
+For the Rust reimplementation:
+- Right-to-left arg eval: emit pushes in reverse
+  source order; each fully resolved.
+- `!x`: emit `neg/sbb r,r/inc` 3-instr sequence.
+- Multi-return: emit single epilogue with multiple
+  jumps in.
+
 ## `fn()` ≡ `fn(void)` in BCC codegen; self-ref struct via fwd ptr; `0 && ...` jumps OVER (not elided); arr[0] vs ->y same access; fn-ptr param call via `ff /2 [bp+disp]`
 
 Fixtures `2309`-`2314` cover assorted constructs.
