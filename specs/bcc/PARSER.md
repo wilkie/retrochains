@@ -1959,6 +1959,74 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `register` keyword forces enreg; use-count breaks ties; `&x` forces stack
+
+Fixtures `1763` (register keyword), `1764` (varying
+use counts), and `1765` (address-taken var)
+clarify the register allocation policy further.
+
+- `1763` (**`register` keyword**): `register int
+  n;` explicitly enregisters n into SI even though
+  there are 5 locals total. The `register` hint
+  takes priority over other selection criteria,
+  guaranteeing the variable gets a register slot.
+- `1764` (**3 locals, all enregister**): with
+  exactly 3 multi-use locals (no spills), each
+  gets its own register: rare→DI, often→SI,
+  seldom→DX. So the register pool ordering for
+  3 simultaneous locals is **{DI, SI, DX}** when
+  no register-keyword hints are present.
+
+  Combined with `1760`'s observation (`a→SI,
+  c→DI, e→DX` when a, c, e win the 3-slot lottery
+  against b, d, f):
+  - When all qualifying locals fit, the
+    declaration-order maps to a specific register
+    sequence.
+  - When more qualify than fit, **use-count breaks
+    the tie**: locals with higher read-count win
+    register slots over locals with lower counts.
+  - In 1760, a/c/e have 3 uses each, b/d/f have 2
+    uses each — so the 3-use group wins all 3
+    slots regardless of declaration order parity.
+  - In 1764, all 3 qualify; assignment is DI/SI/DX
+    by declaration order (though precise mapping
+    may depend on register pressure analysis).
+
+- `1765` (**`&x` forces stack**): when `&x` is
+  taken, x **stays on the stack** regardless of
+  use count — needed so the address is addressable.
+  `*p = *p + 3` becomes:
+  ```
+  mov ax, [si]       ; load *p
+  add ax, 3
+  mov [si], ax       ; store *p
+  ```
+  And `x = x + 1` becomes a memory-RMW:
+  ```
+  mov ax, [bp-2]
+  inc ax
+  mov [bp-2], ax
+  ```
+  The pointer p, however, enregisters into SI
+  (it's an automatic local without taken address).
+
+Updated register-allocation rule (final):
+1. **Mandatory enregistration** (override pool
+   limits): `register` keyword.
+2. **Mandatory stack**: `&var` taken, `volatile`
+   qualifier.
+3. **Candidates**: remaining locals with read-count
+   ≥ 2 in expressions (init/single-write doesn't
+   count).
+4. **Selection**: up to 3 candidates win register
+   slots. When more qualify than slots:
+   - Higher use-count breaks ties first.
+   - Among equal use counts, declaration order
+     (earliest wins).
+5. **Pool**: {SI, DI, DX}. BX/CX reserved for
+   scratch.
+
 ## 6 locals → only 3 enregister (SI/DI/DX); array param decays; mutual recursion uses relative
 
 Fixtures `1760` (6 multi-use locals), `1761` (array
