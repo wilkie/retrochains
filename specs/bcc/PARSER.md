@@ -1959,6 +1959,67 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Per-fn static vars get distinct `_DATA` slots; `static` fn = no PUBDEF; `int a[]` ≡ `int *a` byte-identical
+
+Fixtures `2264` (per-fn statics), `2265` (static
+fn internal linkage), `2266` (array vs ptr arg)
+cover function-scope storage and parameter
+equivalence.
+
+- `2264` (**per-fn static vars**): each fn's
+  `static int counter` gets its own slot in
+  `_DATA`. No mangling needed since they're not
+  exported:
+  ```
+  _DATA layout:
+    [00 00]    ; counter for next_a (init 0)
+    [64 00]    ; counter for next_b (init 100)
+  
+  next_a body: inc word [0] / mov ax, [0]
+  next_b body: inc word [2] / mov ax, [2]
+  ```
+  Statics behave like global ints in `_DATA`,
+  just not exported (no PUBDEF).
+- `2265` (**`static` function**): no PUBDEF
+  entry — symbol not exported across TUs. Body
+  emitted normally in `_TEXT`. Intra-TU callers
+  use `e8 [rel]` since target's offset is known
+  at compile time.
+- `2266` (**`int a[]` ≡ `int *a` as parameter**):
+  BYTE-IDENTICAL function bodies for sum_arr and
+  sum_ptr. Per C standard, array parameters
+  decay to pointers — no distinction in codegen.
+
+**Storage class & linkage summary**:
+| Storage | Linkage | PUBDEF | EXTDEF | `_DATA` slot |
+|---------|---------|--------|--------|--------------|
+| `int x = 5;` (global init) | external | ✓ | ✗ | ✓ initialized |
+| `int x;` (global uninit) | external | ✓ | ✗ | ✓ in `_BSS` |
+| `static int x = 5;` (file scope) | internal | ✗ | ✗ | ✓ initialized |
+| `static int x;` (file scope) | internal | ✗ | ✗ | ✓ in `_BSS` |
+| `static int x = 5;` (block scope) | none | ✗ | ✗ | ✓ initialized |
+| `static int x;` (block scope) | none | ✗ | ✗ | ✓ in `_BSS` |
+| `int x;` (local) | none | ✗ | ✗ | ✗ stack |
+| `extern int x;` | external | ✗ | ✓ | ✗ (defined elsewhere) |
+| `int f(...)` (global) | external | ✓ | ✗ | n/a (text) |
+| `static int f(...)` | internal | ✗ | ✗ | n/a (text) |
+| `extern int f(...);` | external | ✗ | ✓ if used | n/a |
+
+**Parameter type equivalences** (C standard):
+| Declared form | Actual passed | Same as |
+|---------------|---------------|---------|
+| `int a[]` | int * (pointer) | `int *a` |
+| `int a[10]` | int * (pointer; 10 ignored) | `int *a` |
+| `int a[][10]` | pointer to int[10] | `int (*a)[10]` |
+| `int f(int)` | function ptr to f | `int (*f)(int)` |
+
+For the Rust reimplementation:
+- Per-fn statics: emit unique `_DATA` slots; track
+  scope via name mangling internally (no PUBDEF).
+- `static` fn: emit body, skip PUBDEF.
+- Parameter decay: treat `int a[]` and `int *a`
+  identically in codegen.
+
 ## `-N` = per-fn `cmp [___brklvl], sp` + N_OVERFLOW@ helper; `-A` codegen-identical; `-r-` disables enregistration
 
 Fixtures `2261` (-N), `2262` (-A), `2263` (-r-)
