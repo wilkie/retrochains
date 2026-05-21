@@ -1959,6 +1959,57 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `sum = *p++` (byte) = `mov al,[si]/cbw/inc si`; cmp reg,imm16 = `81 /7`; large arg = mov+push
+
+Fixtures `2000` (byte read postinc), `2001` (cmp
+with imm16), `2002` (large imm arg) cover three
+remaining patterns.
+
+- `2000` (**`sum = *p++` for byte ptr**): emits:
+  ```
+  mov al, [si]            ; 8a 04 — byte load (2B)
+  cbw                      ; 98 — sign-ext (1B, since char signed)
+  ; ... (use AX)
+  inc si                   ; 46 — p++ (1B)
+  ```
+  Total 4 bytes per read+increment. For pure
+  `*p` without post-inc, omit the `inc si`.
+- `2001` (**cmp r16, imm16 not fitting imm8-sext**):
+  emits **`81 /7 reg imm16`** (4 bytes):
+  ```
+  81 fe f4 01            ; cmp si, 500
+  ```
+  ModR/M `fe` = mod=11 reg=111 (/7) rm=110 (SI).
+  Compare to imm8-sext form (`83 /7 reg imm8`, 3
+  bytes) for values fitting -128..127.
+- `2002` (**large immediate arg**): `identity(12345)`
+  emits standard `mov ax, imm16 / push ax`:
+  ```
+  b8 39 30                ; mov ax, 12345
+  50                       ; push ax
+  ```
+  4 bytes total. Same pattern regardless of value
+  magnitude. No 80186+ `push imm16` shortcut.
+
+**Byte vs word arithmetic-encoding hierarchy**:
+| Operation | Byte (1B operand) | Word (2B operand) |
+|-----------|--------------------|--------------------|
+| Load const | `mov al, imm8` (2B) | `mov ax, imm16` (3B) |
+| Load [m] | `mov al, [m]` (3B, AX-form) | `mov ax, [m]` (3B, AX-form) |
+| Store imm | `mov byte [m], imm8` (4B, `c6 /0`) | `mov word [m], imm16` (5B, `c7 /0`) |
+| Cmp imm fit imm8 | `cmp byte [m], imm8` (4B, `80 /7`) | `cmp word [m], imm8-sext` (4B, `83 /7`) |
+| Cmp imm16 | (n/a) | `cmp word [m], imm16` (6B, `81 /7`) |
+| Inc/dec ptr | `inc reg` (1B) | `inc reg / inc reg` (2B for int*) |
+
+For the Rust reimplementation:
+- Byte read+postinc: emit `mov al, [reg] / cbw /
+  inc reg` (for char) or omit cbw (for uchar +
+  emit `mov ah, 0` if int needed).
+- Cmp r16 imm16 (non-imm8-sext): use `81 /7
+  imm16`.
+- Large imm args: `mov ax / push ax`, no
+  80186-only shortcuts.
+
 ## Narrowing casts = direct low-byte/word access; `*p++ = byte` = `mov [si],imm8 / inc si`
 
 Fixtures `1997` (int→char), `1998` (long→int),
