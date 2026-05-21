@@ -1959,6 +1959,56 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Static global var = `_DATA` not exported; `extern var` = EXTDEF; uninit `int g;` = `_BSS` tentative
+
+Fixtures `2156` (static global), `2157` (extern
+var), `2158` (tentative def) characterise global
+variable storage classes.
+
+- `2156` (**`static int internal_g = 42;`**):
+  goes in `_DATA` (segment 2, length 2) with the
+  init value. **NOT in PUBDEF** — file-local
+  symbol. Access via `a1 [disp16]` with FIXUPP
+  to the local DATA segment.
+- `2157` (**`extern int external_g;`**): no
+  storage; **EXTDEF** entry for `_external_g`.
+  Code references it via `a1 [disp16]` with
+  FIXUPP. The OBJ won't link unless another OBJ
+  provides `_external_g` as PUBDEF.
+- `2158` (**`int g;` tentative def**): goes in
+  **`_BSS`** (block-started-by-symbol — zero-
+  filled at load time). Exported in PUBDEF at
+  `_BSS` segment offset 0. Different from `_DATA`
+  storage:
+  ```
+  SEGDEF for _BSS: length 2 (one int)
+  PUBDEF: _g at _BSS offset 0
+  ; main:
+  c7 06 00 00 2a 00       ; mov word [_g], 42 (FIXUPP)
+  a1 00 00                 ; mov ax, [_g] (FIXUPP)
+  ```
+
+**Global variable storage class summary**:
+| Declaration | Storage | Symbol export | Init |
+|-------------|---------|----------------|------|
+| `int g = 42;` (file scope) | `_DATA` | PUBDEF | Explicit |
+| `int g;` (tentative def) | `_BSS` | PUBDEF | Zero (load-time) |
+| `static int g = 42;` | `_DATA` | (not exported) | Explicit |
+| `static int g;` | `_BSS` | (not exported) | Zero |
+| `extern int g;` | (none) | EXTDEF (referenced) | (def elsewhere) |
+| `extern int g = 42;` | `_DATA` | PUBDEF | Explicit (overrides extern) |
+| Local `static int g` | `_DATA` (fn-scoped) | (not exported) | Explicit or zero |
+
+So **`_DATA` is for initialized globals**, **`_BSS`
+is for zero-filled** (uninitialized or zero-init),
+and **storage class** (static vs default) controls
+PUBDEF emission.
+
+For the Rust reimplementation:
+- Tentative defs: emit to `_BSS` segment, not `_DATA`.
+- `static` modifier: omit from PUBDEF.
+- `extern` decl: emit EXTDEF; no storage.
+
 ## `extern fn` = EXTDEF + FIXUPP'd call; fwd-decl no impact; `static` fn = no PUBDEF, intra-seg call
 
 Fixtures `2153` (extern fn), `2154` (fwd decl),
