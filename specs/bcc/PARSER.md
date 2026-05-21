@@ -1959,6 +1959,49 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Confirmed: shift ≤3 = unrolled (NOT byte-optimal at N=3); shift ≥4 = CL-form
+
+Fixtures `2081` (x * 8 = shift 3), `2082` (x * 2
+= shift 1), `2083` (x * 32 = shift 5) pin the
+shift-threshold rule.
+
+- `2081` (**`x * 8` = shift by 3**): emits **3
+  unrolled `shl ax, 1`** (`d1 e0 d1 e0 d1 e0`,
+  6 bytes). NOT byte-count optimal — CL-form
+  (`b1 03 d3 e0`) would be 4 bytes. BCC's rule
+  is structural (≤3 unrolled), not size-driven.
+- `2082` (**`x * 2` = shift by 1**): `d1 e0` (2
+  bytes). Sanity check.
+- `2083` (**`x * 32` = shift by 5**): `b1 05 d3
+  e0` (4 bytes CL-form).
+
+**Correct shift-by-N threshold rule**:
+| Shift count N | Form | Bytes |
+|----------------|------|-------|
+| 1 | `shl ax, 1` (`d1 e0`) | 2 |
+| 2 | `shl ax, 1 / shl ax, 1` | 4 |
+| 3 | `shl ax, 1 / shl ax, 1 / shl ax, 1` | 6 (NOT optimal) |
+| 4+ | `mov cl, N / shl ax, cl` (CL-form) | 4 |
+
+So **N ≤ 3 unrolled** is the rule, even when N=3
+costs an extra 2 bytes vs CL-form. The threshold
+is purely structural — BCC doesn't optimise for
+size in this specific case.
+
+**Updated multiplication table** (shift-thresh
+fixed):
+| Multiplier | Encoding | Bytes |
+|------------|----------|-------|
+| 2 | `shl ax, 1` | 2 |
+| 4 | 2× `shl ax, 1` | 4 |
+| **8** | **3× `shl ax, 1` (6B, not CL-form)** | 6 |
+| 16, 32, ... 32768 | CL-form | 4 |
+| Non-pow2 | `mov dx, N / imul dx` | 5 |
+
+For the Rust reimplementation:
+- Shift by N: choose unrolled for N ≤ 3, CL-form
+  for N ≥ 4 — regardless of byte-count tie-breaking.
+
 ## Pow-2 mul: shift ≤2 = unrolled `shl ax, 1`; shift ≥4 = CL-form; non-pow2 = `mov dx, N / imul dx`
 
 Fixtures `2078` (x * 4), `2079` (x * 16), `2080`
