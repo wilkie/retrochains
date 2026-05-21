@@ -1959,6 +1959,52 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Multi-init refs earlier; fn-ptr struct-field call via `ff 56`; `const int` not folded
+
+Fixtures `1811` (multi-init with expressions),
+`1812` (fn-ptr struct field), and `1813` (`const
+int` folding) cover three more shapes.
+
+- `1811` (**multi-init with cross-references**):
+  `int a = 5, b = a + 1, c = b * 2;` works as
+  expected — each later initializer references the
+  earlier-evaluated variable. Register allocation
+  applies per-variable based on read-count:
+  - a (used twice): SI
+  - b (used twice): DI
+  - c (used once, only in return): stack
+  
+  Variables initialized to expressions still
+  qualify for register allocation; init expressions
+  are evaluated left-to-right with prior
+  declarations visible.
+- `1812` (**fn-ptr struct-field call**): `o.f(o.arg)`
+  emits **`ff 56 disp`** (`call near [bp+disp]`)
+  where disp is the offset of `o.f` within the local
+  struct. Same opcode as for local fn-ptr variables
+  and fn-ptr parameters. The struct-field-offset is
+  baked in at the ModR/M displacement.
+- `1813` (**`const int` NOT folded**): `const int
+  n = 5; return n * 7;` still allocates a stack
+  slot, stores 5, loads it for the multiplication.
+  BCC does **not** treat `const` as a hint for
+  compile-time folding — the qualifier is purely
+  for type-system enforcement (no writes allowed).
+
+For the Rust reimplementation:
+- Multi-init: emit each init's code in declaration
+  order, with subsequent ones able to read prior
+  values.
+- Fn-ptr struct field: emit `ff /2 [bp+disp]` with
+  appropriate field offset.
+- `const` doesn't gate folding — only the parse-
+  time constant-folding pass for literal expressions.
+
+So BCC's optimization is **purely syntactic** — it
+folds compile-time constants when they appear
+directly in expressions (1+2, sizeof(int), etc.) but
+not when they hide behind `const` declarations.
+
 ## strcpy loop pattern; mul-by-9 uses imul (no shl+add); per-access disp8 vs disp16
 
 Fixtures `1808` (strcpy-like `while (*d++ = *s++)`),
