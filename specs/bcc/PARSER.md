@@ -1959,6 +1959,58 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `short` == `int` on 8086; multi static locals = declaration order in `_DATA`; fn-ptr arr call
+
+Fixtures `1994` (short vs int), `1995` (multi
+static locals), `1996` (fn-ptr array call) cover
+type aliasing and storage layout.
+
+- `1994` (**`short` is `int`**): in BCC 2.0,
+  `short` and `int` are **both 2 bytes**. Stored
+  with `c7 46 disp imm16` for both — no
+  distinction. The `short` keyword is purely
+  source-level; codegen treats them identically.
+  
+  C type sizes in BCC 2.0:
+  | Type | Size |
+  |------|------|
+  | char, unsigned char | 1 byte |
+  | int, unsigned int, short, unsigned short | 2 bytes |
+  | long, unsigned long | 4 bytes |
+  | float | 4 bytes |
+  | double | 8 bytes |
+  | near ptr | 2 bytes |
+  | far ptr | 4 bytes |
+- `1995` (**multi static locals = declaration
+  order**): `static int id; static int count;`
+  in one function lays them out in `_DATA` in
+  **source-declaration order**:
+  - id at offset 0
+  - count at offset 2
+  
+  Each accessed via `[disp16]` direct addressing
+  with FIXUPP to the function-local static block.
+  Zero-init statics get 4 bytes total in `_DATA`
+  (could also live in `_BSS` for the zero-init
+  case, but here BCC puts them in `_DATA`).
+- `1996` (**fn-ptr array call**): same pattern as
+  fixture [[1918-array-of-fn-ptrs]]:
+  ```
+  c7 46 fc 00 00       ; ops[0] = _op_add (FIXUPP)
+  c7 46 fe 0d 00       ; ops[1] = _op_sub
+  ff 56 fc             ; call near [ops[0]]
+  ff 56 fe             ; call near [ops[1]]
+  ```
+  Each call indirect via `[bp+disp]` slot using
+  `ff /2` opcode.
+
+For the Rust reimplementation:
+- Type tracking: short, int, unsigned short,
+  unsigned int → 2-byte. Treat as same kind for
+  codegen purposes.
+- Static locals: emit each at successive offsets
+  in `_DATA` for the containing function.
+
 ## uchar arg passed as word (hi undef); 2D char arr flat row-major; caller promotes byte args
 
 Fixtures `1991` (uchar arg), `1992` (2D char
