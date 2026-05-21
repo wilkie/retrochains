@@ -1959,6 +1959,56 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Switch fallthrough = same target; no-default = direct `jmp end`; sparse cases linear too
+
+Fixtures `1895` (case fallthrough), `1896` (no
+default), and `1897` (sparse cases) complete the
+switch picture.
+
+- `1895` (**case fallthrough = same target**):
+  ```c
+  case 1:
+  case 2:
+    r = 10; break;
+  ```
+  Both `case 1` and `case 2` get `je L_case1_2`
+  pointing at the **same body**. No code
+  duplication; just multiple labels for one body.
+  Most efficient possible representation of
+  fallthrough.
+- `1896` (**switch without default = jmp end**):
+  after all case tests:
+  ```
+  cmp ax, 1 / je L_case1
+  cmp ax, 2 / je L_case2
+  jmp L_end          ; no default: skip directly to end
+  ```
+  No default body, just skip past.
+- `1897` (**sparse cases use linear chain too**):
+  `case 10: ... case 100: ... case 1000:` emits
+  the same cmp/je sequence regardless of value
+  spread. Case constants encoded as imm16 (e.g.,
+  `3d e8 03` for cmp ax, 1000). No jump-table
+  specialization even for large gaps.
+
+So **all switch shapes use linear cmp/je chain**:
+- Fallthrough: shared body via multiple jcc → same target
+- No default: skip past via `jmp end`
+- Sparse / dense / few / many cases: all linear
+
+This is consistent with BCC's "compile each case
+independently" approach. No advanced
+specialization. Per-case overhead is constant:
+~5 bytes (3 cmp + 2 je) regardless of value
+density.
+
+For the Rust reimplementation:
+- All switches lower to linear cmp/je chains.
+- Fallthrough: emit single body, multiple labels
+  pointing at it.
+- No default: `jmp end` after the chain.
+- Case constants always imm16 (or AX-form `3d`).
+
 ## `goto` doesn't fuse with `if`; dead code after return emitted; `switch` = linear cmp/je chain
 
 Fixtures `1892` (goto label), `1893` (dead code
