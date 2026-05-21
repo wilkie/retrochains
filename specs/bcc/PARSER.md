@@ -1959,6 +1959,46 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `-x` uses `neg`; `~x` uses `not`; shift-by-3 unrolled (threshold > 3)
+
+Fixtures `1829` (`-x` unary minus), `1830` (`~x`
+bitwise not), and `1831` (unsigned `x >> 3`)
+refine the unary-op and shift-threshold rules.
+
+- `1829` (**`-x` unary minus**): emits **`neg ax`**
+  (`f7 /3`, 2 bytes). Dedicated negation instruction;
+  cheaper than `xor ax, ax / sub ax, x`.
+- `1830` (**`~x` bitwise NOT**): emits **`not ax`**
+  (`f7 /2`, 2 bytes). Dedicated NOT instruction.
+  Both `neg` and `not` are 1-byte opcode + 1-byte
+  ModR/M = 2 bytes total.
+- `1831` (**unsigned `x >> 3` STILL UNROLLED**):
+  uses **`shr ax, 1` × 3** (6 bytes), NOT the
+  CL-form. This **contradicts the earlier-stated
+  N ≥ 3 threshold** from [[batch-469-shift-threshold]].
+  
+  Refined observation:
+  - N=1: 2 bytes (1 shr)
+  - N=2: 4 bytes (2 shr)
+  - N=3: 6 bytes (3 shr) — still unrolled!
+  - N=8: 4 bytes (mov cl, 8 / shr ax, cl) — CL form
+  
+  So the true threshold is **somewhere between
+  N=3 and N=8** (not yet pinned down). Likely
+  N ≥ 4 or N ≥ 5. The original "≥3" finding was
+  an over-claim from the N=8 example alone.
+  
+  Empirically: BCC unrolls up through at least
+  N=3 even when CL-form would be shorter.
+
+For the Rust reimplementation:
+- `neg` and `not` for unary minus and bitwise NOT.
+- Shift-by-N threshold for unsigned: use unrolled
+  shr for N ≤ 3 (or whatever exact threshold), CL-
+  form for higher.
+- Need more probes to pin down the exact unroll-vs-
+  CL threshold (probably N=4 or N=5).
+
 ## Number bases parse-time uniform; for-update comma = 2 ops; char const = int
 
 Fixtures `1826` (octal/hex/dec literals), `1827`
