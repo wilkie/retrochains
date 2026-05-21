@@ -1959,6 +1959,63 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `if (0)` skip via jmp; `if (1)` fall-through no test; `while (0)` jmp past body — bodies still emitted
+
+Fixtures `2021` (if 0), `2022` (if 1), `2023`
+(while 0) show **constant-condition control-flow
+folding**.
+
+- `2021` (**`if (0) ... else ...`**): emits
+  unconditional **`jmp <else>`** at the top —
+  no cmp/jcc test. Then-body is dead code in
+  output:
+  ```
+  jmp L_else
+  L_then: mov si, 99   ; dead
+  jmp L_end
+  L_else: mov si, 5     ; executed
+  L_end:
+  ```
+- `2022` (**`if (1) ... else ...`**): NO cmp/jcc
+  test, NO unconditional jmp. Just **fall-through
+  to then**; jmp over else:
+  ```
+  mov si, 5             ; then-body, executed
+  jmp L_end             ; skip else
+  L_else: mov si, 99    ; dead
+  L_end:
+  ```
+- `2023` (**`while (0) body`**): emits **`jmp
+  past-body`** at the top — no init jmp / cmp /
+  jcc structure. Body is dead:
+  ```
+  jmp L_end
+  L_body: mov si, 99    ; dead
+  L_end:
+  ```
+
+So constant conditions are **recognised at parse
+time**, eliminating the cmp/jcc test, but **both
+branches are still emitted** as dead code (no
+DCE).
+
+**Constant-condition control-flow summary**:
+| Pattern | Codegen |
+|---------|---------|
+| `if (literal-0) T else E` | `jmp E` + then(dead) + jmp + else |
+| `if (literal-1) T else E` | (no test) + then + jmp + else(dead) |
+| `if (literal-0) T` (no else) | (skip via jmp) + then(dead) |
+| `if (literal-1) T` (no else) | (no test) + then |
+| `while (literal-0) body` | `jmp past-body` + body(dead) |
+| `while (literal-1) body` | body + `jmp top` (infinite loop, no test) |
+| `do {body} while (0)` | body + (no jcc, fall through to end) |
+| `do {body} while (1)` | body + `jmp top` (infinite) |
+
+For the Rust reimplementation:
+- Constant-cond if/while: detect literal-0 / literal-1
+  at parse time; emit direct jmp/fall-through.
+- Don't perform DCE; emit dead bodies as-is.
+
 ## Const-expr fully folded; adjacent consts combined (`x+5+3`→`x+8`); `x && 0` → direct false-jmp
 
 Fixtures `2018` (full const expr), `2019` (`x + 5
