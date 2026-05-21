@@ -1959,6 +1959,49 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Long mod-pow2 = N_LMOD@ (no AND); ulong `>>1` = `shr/rcr`; `long * 1L` folds to identity
+
+Fixtures `1781` (signed long mod by pow2), `1782`
+(unsigned long `>>1`), and `1783` (long * 1L)
+extend the long-arithmetic folding picture.
+
+- `1781` (**signed long mod by pow2 still uses
+  helper**): `a % 4L` (signed long) lowers to a
+  full **`N_LMOD@` call**, NOT inlined as
+  `and ax, 3 / and dx, 0`. Same reasoning as
+  signed int mod by pow2 ([[batch-468-signed-mod-
+  pow2]]) — AND-mask gives wrong (unsigned) result
+  for negative dividends. The 4-byte divisor 4L is
+  pushed onto the stack.
+- `1782` (**unsigned long `>>1` inline**): mirrors
+  the signed long `>>1` from [[batch-473-long-shr-
+  1]] but with `shr` (logical) instead of `sar`
+  (arithmetic) for the high half:
+  ```
+  shr high, 1     ; d1 e8 — zero-fill high bit
+  rcr low, 1      ; d1 da — rotate CF into top of low
+  ```
+  The `rcr` is the same for both signed and unsigned
+  (it doesn't preserve sign, just chains carry).
+  Only the high-half opcode differs (`sar`/`shr`).
+- `1783` (**`long * 1L` folds to identity**):
+  multiplication by 1 (long) is recognised at parse
+  time — **no `N_LXMUL@` call**, just a `mov`
+  copy of a to r. Same as `int * 1` folding.
+  Extends the constant-folding catalogue to longs:
+  - `long * 1L` → identity (mov copy)
+  - `long + 0L` → identity (presumed)
+  - `long << 0` → identity (presumed)
+  - `long * 0L` → 0L (presumed)
+
+For the Rust reimplementation:
+- Mirror the AND-mask vs idiv decision for
+  signed/unsigned mod at all widths.
+- Long shifts by 1 inline as `shift-high / rcr-low`
+  with the appropriate signedness opcode for the
+  high half.
+- Apply identity-folding to long ops at parse time.
+
 ## Ptr arith stride matches type; `(int)ptr` = no-op cast; K&R `()` accepted
 
 Fixtures `1778` (char* vs int* pointer arithmetic),
