@@ -1959,6 +1959,50 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Arrays ALWAYS use N_SCOPY@; inline path is struct-only
+
+Fixtures `1799` (`int a[2] = {5,10}` 4-byte
+array), `1800` (`int a[1] = {7}` 2-byte array),
+and `1801` (`char a[2] = {'A','B'}` 2-byte char
+array) reveal that arrays never use the inline
+mov path — they always go through `N_SCOPY@`,
+even when the size would qualify a struct for the
+inline shortcut.
+
+- `1799` (4-byte int array): N_SCOPY@ with 4-byte
+  template. Same size as 2-int struct (which uses
+  2 inline movs) — but the array version uses the
+  helper.
+- `1800` (2-byte int array): N_SCOPY@ with 2-byte
+  template. Same size as 1-int struct (1 inline
+  mov) — array uses helper.
+- `1801` (2-byte char array): N_SCOPY@. Even 2
+  bytes of char data goes through the helper.
+
+So the **revised aggregate-init rule**:
+| Type | Size | Init mechanism |
+|------|------|----------------|
+| Struct, 2 bytes (1 word) | 1 word | 1 inline mov via AX |
+| Struct, 4 bytes (2 words, even-byte) | 2 words | 2 inline movs via AX, DX |
+| Struct, 3 bytes / odd-byte | N/A | N_SCOPY@ |
+| Struct, > 4 bytes | any | N_SCOPY@ |
+| **Array of any element / any size** | any | **N_SCOPY@** |
+
+So the rule simplifies to: **inline path is reserved
+for word-aligned 1-2 word structs**; everything else
+(odd-byte structs, arrays of any shape) uses N_SCOPY@.
+
+This is consistent with the **type-based homogeneity**
+in BCC's parser — arrays as a type-class always go
+through the bulk-copy path; structs get the
+optimization when shape allows.
+
+For the Rust reimplementation:
+- If aggregate-type is struct AND size ∈ {2, 4}
+  AND fields are word-aligned: emit inline movs.
+- Otherwise: emit N_SCOPY@ with template in `_DATA`
+  + dest pointer on stack.
+
 ## 2-byte struct = 1 mov; long-field struct = 2 movs; odd-byte struct = N_SCOPY@
 
 Fixtures `1796` (1-int struct = 2B), `1797` (1-
