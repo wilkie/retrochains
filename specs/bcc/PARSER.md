@@ -1959,6 +1959,86 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Comma op = sequential statements; `op= imm16` = `81 /N imm16`; 2D array arg decays to ptr (stride at compile time)
+
+Fixtures `2234` (comma operator), `2235` (bitwise
+compound assignment), `2236` (2D arr as fn arg)
+cover three orthogonal mechanisms.
+
+- `2234` (**comma operator**): each subexpression
+  evaluated left-to-right for side effects; only
+  the LAST expression's value is the comma
+  expression's value:
+  ```
+  ; (a = 5, b = 10, a + b)
+  mov [a], 5            ; side effect 1
+  mov [b], 10           ; side effect 2
+  mov ax, [a]
+  add ax, [b]           ; value of the whole expression
+  ```
+- `2235` (**bitwise compound assignment to reg**):
+  uses `81 /N imm16` form (4 bytes):
+  ```
+  81 ce 0f 00            ; or si, 0x000F (/1 = OR)
+  81 e6 f0 ff            ; and si, 0xFFF0 (/4 = AND)
+  81 f6 aa aa            ; xor si, 0xAAAA (/6 = XOR)
+  ```
+  ModR/M `/N` selects the operation; reg field
+  selects the register (ce=SI for /1, e6=SI for
+  /4, f6=SI for /6).
+- `2236` (**2D array as fn arg**): **decays to
+  near pointer**! Only 2 bytes pushed (offset).
+  Inside callee, compile-time stride still
+  computes correct offsets:
+  ```
+  ; In main:
+  push offset(g)              ; just the offset
+  call _sum
+  
+  ; In sum(int m[3][3]):
+  mov si, [bp+4]              ; the near ptr
+  mov ax, [si]                ; m[0][0] (offset 0)
+  add ax, [si+8]              ; m[1][1] (i=1*3*2+1*2 = 8)
+  add ax, [si+16]             ; m[2][2] (offset 16)
+  ```
+
+**Array-arg decay rules** (refined):
+| C type | Passed as | Bytes |
+|--------|-----------|-------|
+| `int a[]` (1D) | near `int *` | 2 |
+| `int a[3][3]` | near pointer | 2 |
+| `int (*a)[3]` (ptr-to-row) | near pointer | 2 |
+| `int **a` (ptr-to-ptr) | near pointer | 2 |
+| `char *a[]` | near pointer (to array of ptrs) | 2 |
+| Struct (>4B) | full struct via N_SPUSH@ | sizeof |
+| Struct (≤4B) | per-field push | 2N |
+
+The compiler still TYPECHECKS at compile time —
+the array's row-size information is preserved
+in the type, so the callee can compute correct
+offsets. But the runtime representation is just
+the pointer to the first byte.
+
+**Bitwise compound assignment encoding**:
+| Op | ModR/M | Reg w/ imm16 |
+|----|--------|---------------|
+| `\|=` | `81 /1` | `81 ce xx xx` (SI), `81 c8 xx xx` (AX), etc. |
+| `&=` | `81 /4` | `81 e6 xx xx` (SI), etc. |
+| `^=` | `81 /6` | `81 f6 xx xx` (SI), etc. |
+| `+=` | `81 /0` | `81 c6 xx xx` (SI) |
+| `-=` | `81 /5` | `81 ee xx xx` (SI) |
+
+(For small imm8, the `83 /N imm8` 3-byte form may
+be used instead.)
+
+For the Rust reimplementation:
+- Comma op: emit subexpressions sequentially;
+  keep value of last.
+- Compound assignment to reg + imm: emit `81 /N`
+  form.
+- Array args: decay to pointer; track type for
+  offset computation in callee.
+
 ## `char *arr[]` = N pointers w/ FIXUPP; non-static aggregate init = N_SCOPY@ from _DATA at fn entry
 
 Fixtures `2231` (array of string pointers),
