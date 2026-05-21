@@ -1959,6 +1959,81 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## CORRECTION: switch with 8 contiguous cases uses JUMP TABLE; char-switch promotes via cbw; static arr in `_DATA`
+
+Fixtures `1898` (8 contiguous cases), `1899`
+(switch on char), and `1900` (static array
+lookup) overturn the earlier "all switches use
+linear chain" claim and document table-driven
+switch.
+
+- `1898` (**8 cases use JUMP TABLE** — overturns
+  prior finding):
+  ```
+  mov bx, [x]
+  dec bx                ; bx = x - lowest_case (1 here)
+  cmp bx, 7             ; bounds: 8-1
+  ja L_after            ; out-of-range → skip switch
+  shl bx, 1             ; bx *= 2 (word index)
+  cs: jmp [bx + table]  ; INDIRECT JUMP via table
+  
+  ; data in code segment:
+  table: dw L_case1, L_case2, L_case3, ..., L_case8
+  ```
+  This **overturns** the claim from
+  [[batch-525-switch]] that BCC always uses
+  linear chain. **BCC uses a jump table for
+  dense contiguous cases with sufficient count**.
+  
+  Threshold for jump table is **somewhere
+  between 4 and 8** cases (not yet pinned down).
+  Sparse cases (1897) and few cases (1894 with
+  3) still use linear chain.
+  
+  The jump table is stored **in the code segment**
+  (CS:), with each entry being a 2-byte offset
+  to the case body. The bounds check before the
+  table dispatch handles out-of-range values
+  (including those past the highest case).
+- `1899` (**char-switch promotes via cbw**):
+  switch on a `char` variable emits:
+  ```
+  mov al, [c]
+  cbw                  ; sign-extend AL → AX
+  ; then cmp ax, K / je ... for each case
+  ```
+  Char arg is promoted to int (signed sign-
+  extension) before the switch's cmp. With 3
+  cases here, linear chain is used (below jump-
+  table threshold).
+- `1900` (**static array in `_DATA`**): `static
+  int table[5] = {10, 20, 30, 40, 50}` is
+  emitted in `_DATA` with the initial values:
+  ```
+  table: dw 10, 20, 30, 40, 50    ; 0a 00 14 00 1e 00 28 00 32 00
+  ```
+  Accessed via `mov ax, [bx + table]` (with
+  FIXUPP for table's address). Same codegen
+  as a static array at file scope.
+
+**Revised switch lowering rules**:
+| Case shape | Codegen |
+|------------|---------|
+| Few cases (≤ ~4) | Linear cmp/je chain |
+| Many sparse cases | Linear cmp/je chain |
+| Many DENSE contiguous cases | Jump table |
+
+For the Rust reimplementation:
+- Switch lowering: analyze case-value distribution
+  - If dense+contiguous and count ≥ N (threshold
+    TBD, likely 4-5): emit jump table in CS
+  - Else: emit linear cmp/je chain
+- Jump table: subtract base, bounds check, shl bx
+  1, `cs: jmp [bx + table_offset]`.
+- Char switch: cbw before cmp (sign-extend to int).
+- Static array initializers: place in `_DATA`
+  with values at FIXUPP-resolved offsets.
+
 ## Switch fallthrough = same target; no-default = direct `jmp end`; sparse cases linear too
 
 Fixtures `1895` (case fallthrough), `1896` (no
