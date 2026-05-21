@@ -1959,6 +1959,63 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Fn returns ptr via AX; 3-call cascade direct; `long + int_const` = add/adc
+
+Fixtures `1775` (function returns int *), `1776`
+(3-level call cascade), and `1777` (mixed
+`(long)i * l + 7`) cover three remaining shapes.
+
+- `1775` (**fn returning pointer**): emits **`mov
+  ax, FIXUPP_to_symbol`** (3 bytes) for `return
+  &g;`. Standard near pointer return in AX. The
+  link-time FIXUPP resolves to the actual data
+  segment offset.
+- `1776` (**3-level call cascade**): `sqr(dbl(inc
+  (2)))` evaluates innermost-first with sequential
+  push/call/pop pairs. Each call's return AX is
+  directly reused via `push ax` as the next
+  outer call's arg — no intermediate spilling:
+  ```
+  mov ax, 2 / push ax
+  call _inc / pop cx
+  push ax            ; inc's result
+  call _dbl / pop cx
+  push ax            ; dbl(inc(2))
+  call _sqr / pop cx
+  ```
+- `1777` (**`(long)i * l + 7`**): mixed long
+  arithmetic with int constant tail.
+  - Promote int i to long via `cwd`.
+  - **Register shuffle via stack** to put (long)i
+    in CX:BX and l in DX:AX (the N_LXMUL@ ABI):
+    ```
+    push ax        ; low of (long)i
+    push dx        ; high of (long)i
+    mov dx, l_high
+    mov ax, l_low
+    pop cx         ; high → CX
+    pop bx         ; low → BX
+    call N_LXMUL@
+    ```
+  - **Add int constant `+ 7` to long**: inlined as
+    `add ax, 7 / adc dx, 0` (5 bytes). The 7 is
+    treated as a long with high=0; `adc dx, 0`
+    propagates the carry from the low-half add
+    into the high half.
+
+So `long + int_const` is **always inlined** (no
+helper needed since carry propagation is just 2
+instructions). Same for `long - int_const` (would
+use `sub ax, K / sbb dx, 0`).
+
+The register-shuffle pattern in 1777 is notable
+because BCC uses the stack as a temporary swap
+space when the two long operands need to be in
+specific register pairs (CX:BX vs DX:AX) and
+both come from memory. Push low/high, load the
+other, pop in reverse — effectively swapping
+without a 3rd register.
+
 ## Huge ptr family: `N_PADA@`/`N_PSBA@`/`N_PSBP@`/`N_PCMP@`
 
 Fixtures `1772` (huge ptr ==), `1773` (huge ptr1 -
