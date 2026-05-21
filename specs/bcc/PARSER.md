@@ -1959,6 +1959,54 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Bitfield byte vs word granularity; enum = int; typedef = parser-level alias
+
+Fixtures `1880` (bitfield spans byte boundary),
+`1881` (enum semantics), and `1882` (typedef
+chain) cover three type-system shapes.
+
+- `1880` (**bitfield granularity follows field
+  bounds**): for `struct {hi:6; span:6; lo:4}`,
+  BCC picks read/write granularity per-field:
+  - `hi:6` (bits 0-5 of byte 0, fits in 1 byte):
+    **byte ops** — `80 66 disp` AND, `80 4e disp`
+    OR
+  - `span:6` (bits 6-7 byte 0 + bits 0-3 byte 1,
+    crosses boundary): **word ops** — `81 66
+    disp` AND-word, `81 4e disp` OR-word
+  - `lo:4` (bits 4-7 of byte 1, fits in 1 byte):
+    byte ops on [bp-1]
+  
+  So **fields that fit in a byte use byte ops;
+  fields that cross use word ops**. Reads follow
+  the same rule (mov al vs mov ax).
+- `1881` (**enum is int**): enum constants resolve
+  at parse time to integer values. `enum Color c
+  = GREEN;` compiles to `c = 2` (literal int).
+  `c + RED` compiles to `c + 1`. No type
+  distinction at codegen.
+- `1882` (**typedef is parser alias**): `typedef
+  int my_int; typedef my_int alias_int;` is
+  purely lexical. Identical codegen to direct
+  `int` declarations. Type aliases are resolved
+  at parse time; only the underlying type reaches
+  codegen.
+
+So the C type system has two layers:
+- **Compile-time only** (parser/checker): enum,
+  typedef, const qualifier, `(unsigned)` int cast
+- **Runtime-affecting**: signedness (changes
+  sar/shr/idiv/div choice), pointer types
+  (changes far/near, segment fixups), struct
+  layout (offsets), bitfield positions
+
+For the Rust reimplementation:
+- enum constants → integer values at parse time
+- typedef → resolve to base type at parse time
+- bitfield granularity: choose byte vs word ops
+  based on whether the field crosses a byte
+  boundary
+
 ## >4B struct return uses hidden ptr + N_SCOPY@ (×2); shift+or = or-with-mem; bitfields work
 
 Fixtures `1877` (6B struct return), `1878` (byte
