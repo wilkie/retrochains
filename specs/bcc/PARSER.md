@@ -1959,6 +1959,56 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `if(long)` = OR-halves; partial array init zero-fills `_DATA`; `static` global no PUBDEF
+
+Fixtures `1784` (`if(long)` truthiness), `1785`
+(partial array initializer), and `1786` (static
+vs extern globals) cover three remaining shapes.
+
+- `1784` (**`if (long)` truthiness**): uses the
+  **OR-halves trick** identical to `long == 0`:
+  ```
+  mov ax, low
+  or ax, high      ; ZF set iff both halves zero
+  je L_false       ; or jne for falsy
+  ```
+  3 instructions test all 32 bits. Same shortcut
+  from [[batch-473-long-cmp-zero]] applies for
+  if-truthiness.
+- `1785` (**partial array init zero-fills**): an
+  initializer like `int a[5] = {1, 2}` zero-fills
+  the remaining 3 elements. BCC places the **whole
+  array in `_DATA`** as 10 bytes `01 00 02 00 00 00
+  00 00 00 00`. Could theoretically split into
+  `_DATA` (initialized prefix) + `_BSS` (zero
+  suffix) for large arrays, but BCC keeps it simple.
+- `1786` (**static vs extern globals**): both go
+  to **`_DATA`** packed sequentially, but:
+  - `static int s = 10`: no PUBDEF (internal
+    linkage). Same-TU references resolve at codegen.
+  - `int g = 20`: PUBDEF emitted (external
+    linkage). Visible to linker.
+  Both accessed via direct-memory `a1 disp` / `03 06
+  disp` with FIXUPP. Confirms static-globals follow
+  the same emit-but-don't-export rule as static
+  functions ([[batch-463-static-fn]]).
+
+So `static` storage class is consistent across:
+- Functions: emit to `_TEXT`, no PUBDEF.
+- Initialized globals: emit to `_DATA`, no PUBDEF.
+- Uninitialized globals (presumed): reserve in
+  `_BSS`, no PUBDEF.
+- Locals: BSS for static-local (no PUBDEF since
+  they're not externally visible anyway).
+
+For the Rust reimplementation:
+- Implement OR-halves zero-test for long
+  if-truthiness (same code as `long == 0`).
+- Zero-fill `_DATA` for partial aggregate init —
+  no need to split into BSS.
+- Track linkage flag per symbol: emit PUBDEF only
+  for default-extern (non-static) symbols.
+
 ## Long mod-pow2 = N_LMOD@ (no AND); ulong `>>1` = `shr/rcr`; `long * 1L` folds to identity
 
 Fixtures `1781` (signed long mod by pow2), `1782`
