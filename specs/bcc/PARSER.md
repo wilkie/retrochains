@@ -1959,6 +1959,86 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Float add = `9b d8 /0` (FADD m32); double cmp = FCOMP/FSTSW/SAHF + unsigned jcc; double arrs = 8B
+
+Fixtures `2138` (float add), `2139` (double cmp),
+`2140` (double array) characterise FPU operations
+in detail.
+
+- `2138` (**float add**): uses **`9b d8 /0`**
+  (FADD m32, single-precision add):
+  ```
+  9b d9 46 fc          ; FLD m32 [a]
+  9b d8 46 f8          ; FADD m32 [b]
+  9b d9 5e f4          ; FSTP m32 [s]
+  ```
+  FPU opcodes by precision/family:
+  - `d8` = m32 arith operations
+  - `d9` = m32 load/store + misc FPU
+  - `dc` = m64 arith operations
+  - `dd` = m64 load/store + misc FPU
+- `2139` (**double comparison**): uses the
+  FCOMP/FSTSW/SAHF pattern:
+  ```
+  9b d9 06 [disp]        ; FLD m32 (3.5 const, single in _DATA)
+  9b dd 5e f8            ; FSTP m64 [d] (store as double)
+  9b dd 46 f8            ; FLD m64 [d]
+  9b d8 1e [disp]        ; FCOMP m32 (compare against 2.0, pop)
+  9b dd 7e f6            ; FSTSW m16 (store status word)
+  90                      ; NOP
+  9b 8b 46 f6            ; mov ax, status
+  9e                      ; SAHF (set flags from AH)
+  7e 05                  ; jle/jbe (UNSIGNED jcc — FPU maps to above/below)
+  ```
+  External `FIWRQQ` (FPU init/word) added.
+  
+  Float cmp emits **unsigned jcc** (`ja`, `jb`,
+  `jae`, `jbe`) because FPU comparison results
+  map to "above/below/equal" — not "signed".
+- `2140` (**double array**): elements stored as
+  **full 8 bytes each** in `_DATA`:
+  ```
+  ; 3 doubles: 00 00 00 00 00 00 f0 3f (1.0)
+  ;            00 00 00 00 00 00 00 40 (2.0)
+  ;            00 00 00 00 00 00 08 40 (3.0)
+  ; Total 24 bytes.
+  ```
+  Access: `9b dd 06 [offset]` (FLD m64).
+  
+  Contrast with scalar double init (2136): scalar
+  consts optimised to single (4B) when exactly
+  representable. Array elements must be full 8B
+  for indexed access.
+
+**FPU instruction summary** (key opcodes):
+| Opcode | Mnemonic | Description |
+|--------|----------|-------------|
+| `d8 /0` | FADD m32 | Add single |
+| `d8 /3` | FCOMP m32 | Cmp+pop single |
+| `d9 06 [m]` | FLD m32 | Load single |
+| `d9 1e [m]` | FSTP m32 | Store+pop single |
+| `dc /0` | FADD m64 | Add double |
+| `dc /3` | FCOMP m64 | Cmp+pop double |
+| `dd 06 [m]` | FLD m64 | Load double |
+| `dd 1e [m]` | FSTP m64 | Store+pop double |
+| `dd 3e [m]` | FSTSW m16 | Status word to memory |
+| `df e0` | FSTSW ax | Status word to AX (286+) |
+| `9b ...` | WAIT prefix | Sync 8087 |
+
+**Float vs double storage**:
+| Context | Float | Double |
+|---------|-------|--------|
+| Scalar var | 4B stack | 8B stack |
+| Scalar const | 4B in _DATA | 4B if exact-single, else 8B |
+| Array elem | 4B stride | 8B stride |
+| Struct field | 4B | 8B |
+
+For the Rust reimplementation:
+- Emit FPU instructions per precision (m32 vs m64).
+- Use unsigned jcc after FCOMP+FSTSW+SAHF.
+- Detect exact-single representable double consts
+  for scalar (NOT array) storage optimisation.
+
 ## `-2` byte-identical to `-1` for trivial; `double` const stored as single in `_DATA`; `-f-` no-op trivial
 
 Fixtures `2135` (-2 286 target), `2136` (double
