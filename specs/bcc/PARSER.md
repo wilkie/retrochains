@@ -1959,6 +1959,57 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `fn(a[i])` push via stack slot directly; `a[i] = fn()` stores AX; cmp with fn result swaps operands
+
+Fixtures `2042` (arr elem as fn arg), `2043` (arr
+store from fn), `2044` (cmp against fn result)
+cover three idioms involving fn calls + memory.
+
+- `2042` (**`dbl(a[1])` push direct**): for
+  constant-indexed array element as fn arg, BCC
+  pushes directly via the stack slot:
+  ```
+  ff 76 fc                ; push word [a[1]]  (= [bp-4])
+  call _dbl
+  pop
+  ```
+  3 bytes for the push — no intermediate
+  load+push.
+- `2043` (**`a[i] = fn(val)` store result**):
+  ```
+  mov ax, val / push ax
+  call _square
+  pop
+  mov [a[i]], ax           ; store return value directly
+  ```
+  Standard pattern: result lives in AX after the
+  call; store to the array slot.
+- `2044` (**`if (x > fn())` cmp with swapped
+  operands**): the call result lives in AX; BCC
+  swaps the cmp operands to fit:
+  ```
+  call _get_threshold
+  cmp ax, [x]             ; reversed operand order (ax as dest)
+  jge L_false             ; jge for the reversed sense
+  ```
+  Since cmp's operands are swapped (`ax - [x]`
+  instead of `[x] - ax`), the inverse-jcc is
+  `jge` (instead of `jle` if we'd written `cmp
+  [x], ax`).
+  
+  Same swap trick as the pointer-walk loop at
+  [[1814-pointer-walk]] — saves bytes by using
+  the AX-form cmp.
+
+For the Rust reimplementation:
+- `fn(arr[i])`: emit `push [arr+offset]` directly,
+  no intermediate load.
+- `arr[i] = fn()`: call then store AX to the
+  array slot.
+- cmp with fn result: prefer cmp with ax as
+  reg-field (swapping operands), adjust jcc
+  accordingly.
+
 ## Infinite loops `while(1)`/`for(;;)`/`do-while(1)` = body + jmp top; no test emitted
 
 Fixtures `2039` (while(1)), `2040` (for(;;)),
