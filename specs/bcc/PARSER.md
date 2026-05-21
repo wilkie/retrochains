@@ -1959,6 +1959,45 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Cleanup is byte-based not arg-based: long-arg (4B) uses pops; int+long (6B) uses add sp
+
+Fixtures `2036` (3 int args = 6B), `2037` (long
+arg = 4B), `2038` (int+long = 6B) refine the
+cleanup encoding rule.
+
+- `2036` (**3 args = 6B = add sp, 6**): `add sp,
+  6` (3 bytes via imm8-sext). Confirms ≥6 bytes
+  triggers the add-sp form.
+- `2037` (**long arg = 4B = pop cx × 2**): a
+  single long arg pushes 4 bytes (high then low
+  half). Cleanup uses `pop cx × 2` (2 bytes) —
+  same as 2 int args. **Bytes, not args, determine
+  the cleanup form**.
+- `2038` (**int + long = 6B = add sp, 6**):
+  total bytes pushed = 2 + 4 = 6. Cleanup uses
+  add sp, 6. Confirms the byte-count rule.
+
+**Refined cleanup encoding rule** (by total bytes
+pushed):
+| Total bytes pushed | Cleanup | Bytes used |
+|---------------------|---------|------------|
+| 0 | (none) | 0 |
+| 2 | `pop cx` | 1 |
+| 4 | `pop cx × 2` | 2 |
+| ≥6 | `add sp, N` (imm8-sext or imm16) | 3-4 |
+
+So 0/2/4 bytes use the `pop cx` form (cheap for
+small cleanups); 6+ bytes uses `add sp, N` (constant
+3-byte form). The threshold is byte-count, not
+arg-count — making it work uniformly for mixed
+int/long args.
+
+For the Rust reimplementation:
+- Compute total push bytes for the call site.
+- Choose cleanup form per the table above.
+- Use `pop cx` (not `pop ax`) to preserve the
+  return value in AX.
+
 ## Cleanup encoding: 0 args = no cleanup; 1-2 args = `pop cx` (preserves AX); 3+ = `add sp, N`
 
 Fixtures `2033` (0 args), `2034` (1 arg), `2035`
