@@ -1959,6 +1959,64 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Short-circuit `&&` chains `je/jne`; `||` jumps to true; each operand standalone tested
+
+Fixtures `1856` (`a && b`), `1857` (`a || b`), and
+`1858` (`x > 0 && x < 10`) characterise the short-
+circuit boolean operators.
+
+- `1856` (**`if (a && b)`**): lowers to
+  **sequential cmp+je-on-false**:
+  ```
+  cmp [a], 0
+  je L_false        ; short-circuit: if a == 0, skip
+  cmp [b], 0
+  je L_false        ; if b == 0, false
+  ; fall through to true
+  L_true: mov ax, 1 / jmp end
+  L_false: xor ax, ax
+  ```
+  Both operands use the **same false-target**, so
+  any zero in the chain skips. Classic short-
+  circuit codegen.
+- `1857` (**`if (a || b)`**): lowers to **jne-on-
+  first then je-on-second**:
+  ```
+  cmp [a], 0
+  jne L_true        ; short-circuit: if a != 0, skip to true
+  cmp [b], 0
+  je L_false        ; if b == 0, false
+  L_true: mov ax, 1 / jmp end
+  L_false: xor ax, ax
+  ```
+  The first operand jumps **forward to true** if
+  non-zero; the second uses the standard false-
+  branch. So `||` is encoded as "any non-zero
+  wins early."
+- `1858` (**`x > 0 && x < 10`**): combines `&&`
+  with comparisons. Each comparison uses signed
+  jcc (since x is signed):
+  - `x > 0` → `or si, si / jle L_false` (uses
+    zero-test shortcut for `>0`)
+  - `x < 10` → `cmp si, 10 / jge L_false`
+  Both branches go to a single false-target.
+
+So the **logical operator codegen** is:
+| Op | Pattern |
+|----|---------|
+| `&&` | both operands' inverse-jcc → same false-target |
+| `||` | first operand's true-jcc → true-target; second operand's inverse-jcc → false-target |
+
+This matches the inverse-condition pattern used
+throughout BCC's branching.
+
+For the Rust reimplementation:
+- `&&` emits: lhs-cond / inv-jcc false / rhs-cond /
+  inv-jcc false / true-block / jmp end / false-
+  block.
+- `||` emits: lhs-cond / true-jcc trueblk / rhs-
+  cond / inv-jcc false / trueblk / falseblk.
+
 ## `if(x & MASK)` = `test [m], imm16`; shift+mask not fused; `(unsigned)int` = no-op
 
 Fixtures `1853` (`if (x & 0x40)` bit test), `1854`
