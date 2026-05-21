@@ -1959,6 +1959,47 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Ptr arith stride matches type; `(int)ptr` = no-op cast; K&R `()` accepted
+
+Fixtures `1778` (char* vs int* pointer arithmetic),
+`1779` (cast pointer to int), and `1780` (K&R empty
+parens) cover three remaining language shapes.
+
+- `1778` (**pointer arithmetic stride**): `p++`
+  emits a stride based on the pointee size:
+  | Pointee | `p++` instructions |
+  |---------|--------------------|
+  | char (1) | `inc reg` (1 byte) |
+  | int  (2) | `inc reg ; inc reg` (2 bytes) |
+  | long (4) | `add reg, 4` (3 bytes; not yet probed) |
+  | double (8) | `add reg, 8` |
+  
+  Also reconfirms: char write uses `c6 /N + imm8`
+  (`mov byte [si], 7`); int write uses `c7 /N +
+  imm16` (`mov word [si], 20`).
+- `1779` (**`(int)ptr` no-op cast**): the cast is
+  **purely a type-system fiction** in small model
+  — both `int` and `int *` are 2 bytes, so the
+  pointer's bits are reinterpreted as int with no
+  emission. The expression `v - v` does NOT fold to
+  0 — BCC emits `sub ax, si` (2 bytes) as if it
+  matters. So **same-register self-subtract is
+  not optimised** at this level.
+- `1780` (**K&R `()` syntax**): `int get42()` and
+  `int main()` (empty parens, no `void`) compile
+  to **byte-identical code** as `int get42(void)`
+  and `int main(void)`. Permissive K&R legacy —
+  BCC doesn't enforce argument checking when the
+  prototype is omitted.
+
+For the Rust reimplementation:
+- Pointer arithmetic emits stride-appropriate
+  inc/inc... or add reg, N based on `sizeof(*p)`.
+- `(int)ptr` and `(ptr)int` casts in small model
+  emit no conversion code — just register reuse.
+- K&R `int f()` decl should be accepted, treated
+  as "any args" matching ANSI default.
+
 ## Fn returns ptr via AX; 3-call cascade direct; `long + int_const` = add/adc
 
 Fixtures `1775` (function returns int *), `1776`
