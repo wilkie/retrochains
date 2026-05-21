@@ -1959,6 +1959,71 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Mul imm: `mov dx,K / imul dx`; UNSIGNED mod pow2 → `and ax, N-1`; signed div via cwd+idiv
+
+Fixtures `1934` (mul by 12345), `1935` (unsigned
+mod 8), `1936` (signed div by 13) cover the
+mul/div/mod codegen for non-trivial constants.
+
+- `1934` (**mul by large imm**): emits **`mov
+  dx, imm16 / imul dx`** (5 bytes):
+  ```
+  mov ax, [x]
+  mov dx, 12345        ; ba 39 30
+  imul dx              ; f7 ea
+  ```
+  No strength reduction except for pow2 (which
+  uses `shl`). Constant goes through DX register.
+- `1935` (**unsigned mod pow2 = AND**): a key
+  optimization! For unsigned `x % pow2`, BCC
+  emits **`and ax, (pow2 - 1)`** instead of
+  div/idiv:
+  ```
+  mov ax, [x]
+  and ax, 7            ; 25 07 00 — for x % 8
+  ```
+  Mod-by-pow2 mapping:
+  - `x % 2`  → `and ax, 1`
+  - `x % 4`  → `and ax, 3`
+  - `x % 8`  → `and ax, 7`
+  - `x % 16` → `and ax, 15`
+  - etc.
+  
+  **Only safe for UNSIGNED** — signed mod's sign
+  depends on the dividend's sign, so simple AND
+  doesn't work (would give wrong result for
+  negatives). For signed, BCC uses `cwd / idiv`
+  and reads DX for the remainder.
+- `1936` (**signed div by non-pow2 const**):
+  ```
+  mov ax, [x]
+  mov bx, 13           ; bb 0d 00 — divisor in BX
+  cwd                  ; sign-extend AX → DX:AX
+  idiv bx              ; f7 fb (signed div by r16)
+  ```
+  Total: 5 bytes. The divisor must go into a
+  register since `idiv` has no immediate form.
+  Result in AX (quotient), DX has remainder.
+
+**Complete mul/div/mod summary**:
+| Op | Strategy |
+|----|----------|
+| `* pow2` | `shl` (unrolled ≤3 or CL form ≥4) |
+| `* K` (non-pow2) | `mov dx, K / imul dx` |
+| unsigned `/ pow2` | `shr` (unrolled ≤3 or CL form ≥4) |
+| signed `/ K` | `mov bx, K / cwd / idiv bx` |
+| unsigned `/ K` (non-pow2) | `mov bx, K / xor dx,dx / div bx` |
+| signed `% K` | (same as signed div, read DX) |
+| **unsigned `% pow2`** | **`and ax, (pow2-1)`** ← optimization! |
+| unsigned `% K` (non-pow2) | div + DX |
+
+For the Rust reimplementation:
+- Mul by const K: shl for pow2, else mov dx, K +
+  imul dx.
+- Unsigned mod pow2: emit `and ax, (K-1)` — never
+  use div for this case.
+- Signed mod: always go through idiv + DX.
+
 ## strlen pattern uses byte cmp; out-param `int **pp` via `mov [si], imm`; arr-clear uses `mov [bx], 0`
 
 Fixtures `1931` (strlen pattern), `1932` (out-
