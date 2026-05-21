@@ -1959,6 +1959,54 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `while(--n)` = `dec/jne` (3B); `==`/`!=` inverse jcc; unsigned cmp uses `jae`/`jb`
+
+Fixtures `1844` (`while (--n)`), `1845` (`==`/`!=`
+materialization), and `1846` (unsigned `<`) confirm
+several optimisation and signedness rules.
+
+- `1844` (**`while (--n)` = dec + jne**): the loop
+  test combines the decrement and zero-test into
+  **`dec di / jne body`** (3 bytes total: `4f 75
+  fc`). The `dec` instruction sets ZF based on
+  the result, so the `jne` directly branches on
+  it — no separate `cmp` needed. Beautifully
+  compact loop test.
+- `1845` (**`==` vs `!=` materialization**): both
+  use the same boolean template (`cmp / jcc / mov
+  ax, 1 / jmp / xor ax, ax`) but with **inverse
+  jcc**:
+  - `==` true → `jne` (75) for false branch
+  - `!=` true → `je` (74) for false branch
+  Consistent with the inverse-condition pattern
+  applied throughout BCC's codegen.
+- `1846` (**unsigned `<` uses `jae`**): for
+  `unsigned a < unsigned b`, BCC emits **`jae`**
+  (`0x73`, unsigned above-or-equal) for the false
+  branch. Critical for correct unsigned semantics:
+  `0x8000 < 0x0001` is FALSE unsigned (32768 > 1)
+  but TRUE signed (-32768 < 1).
+
+So **signedness drives jcc choice**:
+| Op | Signed (jcc-false) | Unsigned (jcc-false) |
+|----|--------------------|----------------------|
+| `<`  | `jge` (7D) | `jae`/`jnc` (73) |
+| `<=` | `jg`  (7F) | `ja`/`jnbe` (77) |
+| `>`  | `jle` (7E) | `jbe`/`jna` (76) |
+| `>=` | `jl`  (7C) | `jb`/`jc` (72) |
+| `==` | `jne` (75) | (same) |
+| `!=` | `je`  (74) | (same) |
+
+So FP-cmp uses unsigned-flavour jcc too (per [[batch-
+479-fp-cmp]]), matching the FPU's status-word
+mapping via `sahf`.
+
+For the Rust reimplementation:
+- Combine dec+test loop conditions where the source
+  is `while (--var)` or `do {...} while (--var)`.
+- Choose jcc based on operand signedness (track
+  signed vs unsigned types in the IR).
+
 ## `add ax, K`: `inc` for ±1, AX-form for imm8/imm16; `x*2` = `shl ax, 1`
 
 Fixtures `1841` (`x + 50` to AX), `1842` (`x * 2`),
