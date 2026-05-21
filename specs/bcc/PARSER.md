@@ -1959,6 +1959,59 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Fn-ptr arg call via `[bp+4]`; uninit local has no init code; uninit globals → BSS
+
+Fixtures `1787` (fn taking fn-ptr arg), `1788`
+(uninit local int), and `1789` (uninit globals)
+clarify the global-storage and uninit semantics.
+
+- `1787` (**fn-ptr as parameter**): the callee
+  invokes the fn ptr via **`ff 56 04`** = `call
+  near [bp+4]`. Same `ff /2` indirect call as for
+  local fn ptrs, just with `[bp+disp]` addressing
+  for the parameter slot. Caller passes the ptr via
+  `mov ax, &fn / push ax`. No special protocol for
+  fn-ptr args.
+- `1788` (**uninitialized local int**): `int x;`
+  (no init) allocates the stack slot via `dec sp`
+  but emits **no init store**. The slot contains
+  garbage. Distinct from `int x = 0;` which would
+  emit `mov word [m], 0`. Reading before assignment
+  is UB; programmers must write first.
+- `1789` (**uninitialized globals → BSS**): `int g;
+  int h;` (no init at file scope) reserves
+  **2 bytes each in `_BSS`** segment with PUBDEFs:
+  - BSS SEGDEF size = 4 bytes (2 ints).
+  - Both PUBDEFs emitted (external linkage by
+    default).
+  - OS loader zero-initializes BSS at startup —
+    no space in OBJ for the zero values.
+  
+  Initialized globals would go to **`_DATA`** with
+  their values baked into LEDATA records.
+
+Combining with `1786` and earlier rules, the global
+storage decision matrix is:
+| Source | Storage | OBJ | PUBDEF |
+|--------|---------|-----|--------|
+| `int g = 0;` | `_DATA` | LEDATA with 00 00 | yes |
+| `int g = 1;` | `_DATA` | LEDATA with 01 00 | yes |
+| `int g;` (no init) | `_BSS` | size in SEGDEF | yes |
+| `static int s = 1;` | `_DATA` | LEDATA | no |
+| `static int s;` | `_BSS` | size in SEGDEF | no |
+
+Note: `int g = 0;` could theoretically go to BSS
+(since it's zero), but BCC keeps it in DATA. Same
+for `static int s = 0;`.
+
+For the Rust reimplementation:
+- Track per-global: has-init flag → `_DATA` vs
+  `_BSS`; linkage flag → PUBDEF or not.
+- Uninit locals just `sub sp` for the slot; no
+  init store.
+- Fn-ptr params accessed at `[bp+disp]` and called
+  via `ff /2`.
+
 ## `if(long)` = OR-halves; partial array init zero-fills `_DATA`; `static` global no PUBDEF
 
 Fixtures `1784` (`if(long)` truthiness), `1785`
