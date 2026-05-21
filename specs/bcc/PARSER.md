@@ -1959,6 +1959,54 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## String arg = FIXUPP offset push; sizeof types parse-time const; `return (a,b)` yields b
+
+Fixtures `2027` (string arg), `2028` (sizeof
+various types), `2029` (comma in return) cover
+three remaining idioms.
+
+- `2027` (**string arg to fn**): passing a string
+  literal:
+  ```
+  mov ax, 0              ; b8 00 00 (with FIXUPP to string)
+  push ax
+  call _len_to_end
+  pop
+  ```
+  String stored in `_DATA`; FIXUPP at the imm16
+  resolves to the literal's offset at link time.
+  
+  Callee uses `while (*s++)` pattern: save s in
+  bx, inc s, cmp byte [bx], 0, jne loop.
+- `2028` (**sizeof types**): all values resolved
+  at parse time:
+  ```c
+  sizeof(int) = 2, sizeof(long) = 4
+  sizeof(char) = 1, sizeof(int *) = 2 (small model)
+  ```
+  Each emits `c7 46 disp imm16` storing the
+  constant — no runtime sizeof computation.
+- `2029` (**`return (a, b)` yields b**): comma
+  in return evaluates both subexpressions in
+  order, returns the value of the LAST:
+  ```
+  ; x = x + 1 (side effect)
+  mov ax, si / inc ax / mov si, ax
+  ; y = y * 2 (side effect + returned value)
+  mov ax, di / shl ax, 1 / mov di, ax
+  ; ax holds the last result (= new y)
+  ret
+  ```
+  Standard comma operator semantics.
+
+For the Rust reimplementation:
+- String literal args: emit string in `_DATA`,
+  push FIXUPP'd offset at call site.
+- sizeof: resolve at parse time using the type
+  table.
+- Comma in return: emit all subexpressions; the
+  last one's AX is the return value.
+
 ## `if(x)` ≡ `if(x!=0)` ident codegen; `while(x--)` captures-then-decs; arg eval R-to-L confirmed
 
 Fixtures `2024` (if x vs if x!=0), `2025` (while
