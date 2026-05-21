@@ -1959,6 +1959,61 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## FP mul `dc /1`; `int + double` promotes via `fild`; FP negate via `fchs`
+
+Fixtures `1751` (double*double), `1752` (int +
+double mixed), and `1753` (FP negation) extend the
+FP encoding catalogue.
+
+- `1751` (**double mul**): `a * b` (both double)
+  uses **`fmul qword [b]`** (`dc /1`). Same `dc`
+  opcode group as add (`/0`), div (`/6`), reverse-
+  div (`/7`).
+- `1752` (**`int + double` promotion**): mixed-type
+  expression promotes int to FP via **`fild word
+  [i_temp]`** (`df /0`), then adds: `fadd qword
+  [d]`. BCC copies `i` to a stack temp first (`mov
+  ax, [i] / mov [tmp], ax`) because `fild` needs
+  memory operand. So the C usual-arithmetic-
+  conversion for int + FP happens at FPU-load
+  time, not via a separate integer→FP conversion
+  step.
+- `1753` (**FP negate**): `-double` uses **`fchs`**
+  (`d9 e0`, 2 bytes) — the FPU's change-sign
+  instruction (flips sign bit of ST0). No memory
+  access, no helper. Compares to integer negate
+  `neg ax` (`f7 d8`, also 2 bytes).
+
+Extended FP-opcode catalogue with these additions:
+| Op | Encoding | Notes |
+|----|----------|-------|
+| `fld dword [m]` | `9b d9 /0` | float load |
+| `fld qword [m]` | `9b dd /0` | double load |
+| `fild word [m]` | `9b df /0` | int-as-FP load (sign-ext) |
+| `fild dword [m]` | `9b db /0` | long-as-FP load (not yet probed) |
+| `fld1`, `fldz` | `9b d9 e8/ee` | constant loads |
+| `fstp dword [m]` | `9b d9 /3` | float store-pop |
+| `fstp qword [m]` | `9b dd /3` | double store-pop |
+| `fistp word [m]` | `9b df /3` | FP-to-int store (not yet probed) |
+| `fadd dword [m]` | `9b d8 /0` | |
+| `fadd qword [m]` | `9b dc /0` | |
+| `fsub dword [m]` | `9b d8 /4` | |
+| `fsub qword [m]` | `9b dc /4` | |
+| `fmul dword [m]` | `9b d8 /1` | |
+| `fmul qword [m]` | `9b dc /1` | |
+| `fdiv dword [m]` | `9b d8 /6` | |
+| `fdiv qword [m]` | `9b dc /6` | |
+| `fchs` | `9b d9 e0` | change sign |
+| `fcomp dword [m]` | `9b d8 /3` | compare-pop |
+| `fstsw word [m]` | `9b dd /7` | save status word |
+| `sahf` | `9e` (no wait) | flags ← AH |
+
+So the FP encoding rule: opcode group selects
+operand precision (`d8`=float-mem, `d9`=float
+stack/const, `dc`=double-mem, `dd`=double
+stack/store, `df`=int-mem), and `/N` selects the
+specific operation within the group.
+
 ## `near` overrides model default; mixed near/far in same TU; dense switch always CS-relative
 
 Fixtures `1748` (near ptr in -ml), `1749` (near fn
