@@ -1959,6 +1959,68 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## 5 regs w/o mul; **fn calls restrict pool to callee-saved {SI, DI}**; empty fn keeps prologue
+
+Fixtures `1976` (7 locals, NO mul), `1977` (fn
+call restricts pool), `1978` (empty fn keeps
+prologue) clarify register-allocation context-
+sensitivity.
+
+- `1976` (**7 locals, no mul → DX used**):
+  without imul/idiv, BCC enregisters **5 vars**:
+  - a → DI
+  - b → DX
+  - c → BX
+  - d → CX
+  - r (sum) → SI
+  - e, f, g → stack
+  
+  All 5 pool registers used. Confirms: without
+  mul/div, the full 5-register pool {SI, DI, BX,
+  CX, DX} is available.
+- `1977` (**fn calls restrict pool to {SI, DI}**):
+  this is a **major refinement**. With fn calls
+  present, only **2 registers** (SI and DI)
+  enregister:
+  - a → DI
+  - r → SI
+  - b, c → stack
+  
+  Because cdecl callee-saved registers are SI/DI,
+  but BX/CX/DX are **caller-saved** (callee can
+  clobber them). BCC's register allocator
+  detects fn calls and restricts to **callee-
+  saved-only** to avoid the need for save/restore
+  around every call.
+- `1978` (**empty fn keeps prologue**): confirms
+  once more — `int empty(void) { return 0; }`
+  emits full `push bp / mov bp, sp / xor ax,ax /
+  pop bp / ret`. No bp-omission optimization
+  regardless of frame need.
+
+**Register-allocation context table (revised)**:
+| Function characteristics | Available pool | Notes |
+|--------------------------|----------------|-------|
+| No mul/div, no fn calls | {SI, DI, BX, CX, DX} = 5 slots | Full pool |
+| With imul/idiv, no fn calls | {SI, DI, BX, CX} = 4 slots | DX reserved as imul high |
+| With fn calls | {SI, DI} = 2 slots | Callee-saved only |
+| With both | {SI, DI} = 2 slots | Most restrictive |
+
+For the Rust reimplementation:
+- Analyze function body for: fn calls, mul/div
+  ops.
+- Choose pool accordingly:
+  - Fn calls present → restrict to {SI, DI}
+  - imul/idiv present → exclude DX
+  - Else → full pool
+- Locals ranked by use-count (or declaration
+  order); assign in pool order.
+
+This explains why functions with many fn calls
+often have most locals on the stack — BCC can't
+safely use the AX/BX/CX/DX registers across the
+calls.
+
 ## 7 locals: only 4 enregister (DX reserved); nested calls use arg-stack; mixed cmp via cast
 
 Fixtures `1973` (7 multi-use locals), `1974`
