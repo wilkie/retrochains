@@ -1959,6 +1959,60 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `while(1)` ≡ `for(;;)`; nested loops separate; inner induction may win register
+
+Fixtures `1802` (while(1) + break), `1803` (for(;;)
++ break), and `1804` (nested for loops) cover
+remaining loop shapes.
+
+- `1802` (**`while (1)`**) and `1803` (**`for (;;)`**)
+  produce **byte-identical code shapes** — both
+  emit the standard infinite loop:
+  ```
+  body:
+  inc reg / ...      ; body
+  cmp / jle continue
+  jmp break_target
+  continue:
+  jmp body
+  ```
+  No conditional test before body; just unconditional
+  jump back to body from continue point.
+- `1804` (**nested loops**): standard structure
+  with no fusion or special handling. Outer
+  iteration `i` ends up on **stack** while inner
+  iteration `j` got **DI** (register). With:
+  - sum (1st declared): SI
+  - i (2nd, outer-loop only): stack
+  - j (3rd, inner-loop): DI
+  
+  Despite declaration order suggesting i should get
+  the register slot, **the inner-loop induction
+  variable won** — possibly due to loop-depth
+  weighting in BCC's register allocator. Hot inner-
+  loop variables get priority over outer overhead
+  variables when register slots are limited.
+
+This refines the register-allocation rule from
+[[batch-482-register-allocation]]: among equally-
+qualified candidates, **loop-depth weighting** can
+override pure declaration order. Variables accessed
+in deeper loops are weighted higher.
+
+So the final register-selection priority:
+1. `register` keyword (mandatory).
+2. Highest read-count in expressions.
+3. Loop-depth-weighted read count (inner loops
+   count more).
+4. Earliest declaration (tiebreak).
+
+For the Rust reimplementation:
+- Compute per-variable "weighted use count" =
+  `sum over all reads of: 1 * (loop_depth + 1)`
+  (or similar weighting).
+- Select up to 3 highest-weighted into SI, DI,
+  DX.
+
 ## Arrays ALWAYS use N_SCOPY@; inline path is struct-only
 
 Fixtures `1799` (`int a[2] = {5,10}` 4-byte
