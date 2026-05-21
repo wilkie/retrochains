@@ -1959,6 +1959,70 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Printf double arg = add sp,-8 + FSTP m64; long arg = push hi/lo; string arg = push addr
+
+Fixtures `2195` (printf double), `2196` (printf
+string), `2197` (printf long) pin the varargs
+arg-push conventions per type.
+
+- `2195` (**printf with `double` arg**):
+  ```
+  FLD m64 [3.14]            ; load double (3.14 not exact-single, 8B)
+  add sp, -8                 ; allocate 8 bytes for double arg
+  FSTP m64 [sp]             ; store double on stack
+  push ax                    ; push fmt addr
+  WAIT + call _printf
+  add sp, 10                 ; cleanup 8B (double) + 2B (string)
+  ```
+  Cleanup = `add sp, 10` (8 + 2 = 10 bytes).
+- `2196` (**printf with string arg**): just
+  pushes the 2-byte near pointer:
+  ```
+  push [hello_addr]          ; 2 bytes
+  push [fmt_addr]            ; 2 bytes
+  call _printf
+  pop cx / pop cx           ; cleanup 4 bytes (falls into pop-cx threshold)
+  ```
+- `2197` (**printf with `long` arg**):
+  ```
+  push word [n.hi]           ; high half pushed FIRST
+  push word [n.lo]           ; low half pushed SECOND
+  push [fmt_addr]
+  call _printf
+  add sp, 6                  ; cleanup 4B long + 2B string = 6B
+  ```
+  Push order: hi then lo. On stack (which grows
+  down), this puts lo at lower addr (sp+0), hi
+  at higher (sp+2) — the standard little-endian
+  long layout that printf expects.
+
+**Varargs arg-push sizes by type**:
+| Type | Bytes pushed | How |
+|------|--------------|-----|
+| `char`, `short` | 2 (promoted to int) | (single push) |
+| `int`, near ptr | 2 | push word |
+| `long`, `unsigned long` | 4 | push hi / push lo |
+| `float` | 4 (promoted to double) | add sp,-4 + FSTP m32 |
+| `double` | 8 | add sp,-8 + FSTP m64 |
+| Struct | sizeof(struct) | N_SPUSH@ helper |
+| String literal | 2 | push offset |
+
+Note: per C standard, `float` arg through varargs
+is **promoted to `double`** (so 8 bytes total).
+
+**Cleanup pattern reminder**:
+- 0 bytes: no cleanup
+- 2 bytes: pop cx
+- 4 bytes: pop cx × 2
+- 6+ bytes: add sp, N
+
+For the Rust reimplementation:
+- Printf-style varargs: push args R-to-L per type
+  with the right size. Cleanup based on total
+  bytes pushed.
+- Float-through-varargs: promote to double before
+  pushing.
+
 ## `int * double` = FILD m16 + FMUL m64; double == 0.0 = FLDZ + FCOMPP; printf varargs = R-to-L + caller cleanup
 
 Fixtures `2192` (int × double), `2193` (double ==
