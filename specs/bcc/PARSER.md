@@ -1959,6 +1959,67 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Medium model: intra-seg call = `push cs / call near`; arg at `[bp+6]`; retf `cb`; data still near
+
+Fixtures `2054` (medium fn call), `2055` (medium
+recursion), `2056` (medium string arg) reveal
+medium model's call/return shapes.
+
+- `2054` (**intra-segment call = `0e e8 [rel]`**):
+  ```
+  push 41                         ; arg
+  0e                              ; push cs (1B)
+  e8 ea ff                        ; call near _helper (3B)
+  pop cx                           ; cleanup
+  ```
+  Total 4 bytes for the call + push cs, vs 5
+  bytes for full CALL FAR (`9a [off] [seg]` with
+  FIXUPP). Since caller and callee are in the
+  **same code segment**, push cs gives the
+  correct segment for the eventual `retf`.
+  
+  The callee returns with `5d cb` (pop bp / retf)
+  which pops both offset and segment.
+- `2055` (**recursive intra-seg call**): same
+  `0e e8 [rel]` pattern for the recursive call.
+  ```
+  push (n-1)
+  0e
+  e8 e7 ff                        ; call near _fact (recursive)
+  pop cx
+  imul si                          ; * n
+  ```
+  Optimization applies to any intra-segment call
+  in medium/large models.
+- `2056` (**string arg from `_DATA`**): string
+  literal still in `_DATA` (DGROUP near). Push as
+  2-byte near offset with FIXUPP. Same as small
+  model:
+  ```
+  mov ax, 0                        ; b8 00 00 (FIXUPP)
+  push ax
+  0e
+  e8 d8 ff                        ; call near _strlen_local
+  ```
+
+**Medium-model stack frame** (and large model):
+```
+[bp+0]: saved BP
+[bp+2]: return offset
+[bp+4]: return segment           <-- extra 2 bytes
+[bp+6]: first arg
+```
+Args start at `[bp+6]` instead of `[bp+4]` due
+to the far return address.
+
+For the Rust reimplementation:
+- Medium/large code: emit `push cs / call near`
+  for intra-segment calls (avoids the FIXUPP
+  segment field).
+- Use `retf` (`cb`) for function returns in
+  medium/large.
+- Arg offsets: start at `[bp+6]` in medium/large.
+
 ## Memory-model byte-level diffs: near vs far code (`c3` vs `cb` ret); code-seg name per-file in mm/ml
 
 **First pivot away from small-only**: fixtures
