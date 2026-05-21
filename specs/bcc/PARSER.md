@@ -1959,6 +1959,82 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `long ==` inline (hi+lo cmp); `long <` = signed-hi + unsigned-lo branch; `long << 1` = `shl/rcl` inline
+
+Fixtures `2174` (long ==), `2175` (long <), `2176`
+(long << const) refine long comparison and shift
+inlining.
+
+- `2174` (**`long ==` inline**): two-step compare:
+  ```
+  ax = a.hi / dx = a.lo
+  cmp ax, [b.hi]
+  jne L_false           ; high halves differ → unequal
+  cmp dx, [b.lo]
+  jne L_false           ; low halves differ → unequal
+  ; else equal
+  ```
+- `2175` (**`long <` signed inline**): three-stage
+  comparison handling sign correctly:
+  ```
+  ax = a.hi / dx = a.lo
+  cmp ax, [b.hi]       ; compare HIGH halves (SIGNED)
+  jg L_false            ; a > b (signed) → false
+  jl L_true             ; a < b (signed) → true
+  cmp dx, [b.lo]       ; high halves equal; compare LOW (UNSIGNED)
+  jae L_false           ; a.lo >= b.lo → false
+  ; else true
+  ```
+  Classic signed-32 comparison: high half compared
+  as signed (because sign bit lives there), low
+  half as unsigned (because it has no sign bit).
+- `2176` (**`long << 1` inline**): for small const
+  shifts, NO helper call:
+  ```
+  ax = a.hi / dx = a.lo
+  shl dx, 1             ; shift low half, top bit → CF
+  rcl ax, 1             ; rotate high through carry
+  ; result: ax:dx = a << 1 (AX=hi, DX=lo)
+  ```
+  Beautiful 8086 trick: shift+rotate-through-carry
+  propagates the top bit of low into bottom of
+  high. Likely unrolled for N ≤ 3, helper for
+  N ≥ 4.
+
+**Long register-allocation note**: BCC uses
+different conventions in different contexts:
+- **Inline shift**: AX = high, DX = low (so
+  `shl dx, 1 / rcl ax, 1` works)
+- **N_LXMUL@ helper**: DX = high, AX = low (in
+  arg+result, standard "DX:AX")
+- **Inline cmp**: AX = high, DX = low (since cmp
+  is order-independent for `==`)
+- **Inline add/sub**: AX = low, DX = high (so
+  `add ax, [b.lo] / adc dx, [b.hi]` works)
+
+Inconsistent! The convention depends on the
+operation's instruction semantics. Track this
+per-op when generating code.
+
+**Long inline-vs-helper summary** (updated):
+| Op | Inline form | Helper |
+|----|-------------|--------|
+| `==`, `!=` | hi-cmp+jne, lo-cmp+jne | none |
+| `<`, `<=`, `>`, `>=` (signed) | signed hi-cmp + unsigned lo-cmp | none |
+| `+`, `-` | `add/adc`, `sub/sbb` | none |
+| `&`, `|`, `^` | 2× bitwise | none |
+| `<< 1`, `<< 2`, `<< 3` | `shl/rcl` × N | none |
+| `<< var` or `<< ≥4` | (HELPER) | `N_LXLSH@` |
+| `*` | (HELPER) | `N_LXMUL@` |
+| `/`, `%` | (HELPER) | `N_LDIV@` |
+
+For the Rust reimplementation:
+- Long comparisons: emit hi-first / lo-second.
+- Signed long compare: signed jcc on hi, unsigned
+  on lo.
+- Small const shifts: emit `shl/rcl` × N.
+- Track per-op register convention (hi/lo).
+
 ## long/ = N_LDIV@ via stack-push; long shift = N_LXLSH@ in regs; long+ inline `add/adc`
 
 Fixtures `2171` (long div), `2172` (long shift),
