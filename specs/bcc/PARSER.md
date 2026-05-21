@@ -1959,6 +1959,63 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Loop-body local not enregistered; arr/struct-arr full init uses N_SCOPY@ template
+
+Fixtures `1970` (loop body local), `1971` (int
+array full init), `1972` (array of struct init)
+cover remaining init shapes.
+
+- `1970` (**loop-body local NOT enregistered**):
+  `int t = i * 2;` inside the for-body is
+  allocated at `[bp-2]` and stored each
+  iteration — NOT enregistered:
+  ```
+  body:
+    mov ax, si / shl ax, 1     ; ax = i*2
+    mov [t], ax                ; store to [bp-2]
+    add di, [t]                ; sum += t
+    inc si
+  ```
+  Even though `t` is used twice per iteration
+  (init and add), BCC doesn't enregister it.
+  Conservative: register allocator only
+  considers function-scope locals, not block-
+  scoped variables inside loops.
+- `1971` (**full array init uses N_SCOPY@**):
+  `int a[5] = {1,2,3,4,5}` uses the **same
+  N_SCOPY@ protocol** as partial init:
+  - `_DATA` holds the template (10 bytes of int
+    values)
+  - Stack array allocated via `sub sp, 10`
+  - N_SCOPY@ copies template → stack at fn entry
+  No alternative for fully-initialized arrays;
+  always copy.
+- `1972` (**array of struct init**): same
+  protocol with the struct values laid out
+  **flat** in `_DATA`:
+  ```
+  data: 01 00 02 00 03 00 04 00 05 00 06 00
+        ^      ^      ^      ^      ^      ^
+        arr[0].x .y   arr[1].x .y   arr[2].x .y
+  ```
+  12-byte copy via N_SCOPY@. Nested aggregates
+  are flattened into a single linear template.
+
+So **all array/struct initializers** use the
+universal pattern:
+1. Lay out the initialized data flat in `_DATA`
+2. Allocate the stack space in fn prologue
+3. Call N_SCOPY@ to copy template → stack at
+   fn entry
+
+For the Rust reimplementation:
+- Loop-body locals: treat as block-scoped, no
+  enregistration consideration.
+- Aggregate initializers (array, struct, array
+  of struct, struct of array, etc.): flatten
+  into `_DATA` template, emit N_SCOPY@ in
+  prologue.
+
 ## Block-slot reuse: N sequential blocks share; nested respects scope; byte-granular sharing
 
 Fixtures `1967` (3 sequential blocks), `1968`
