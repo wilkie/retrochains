@@ -1959,6 +1959,83 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `goto` doesn't fuse with `if`; dead code after return emitted; `switch` = linear cmp/je chain
+
+Fixtures `1892` (goto label), `1893` (dead code
+after return), and `1894` (switch statement)
+finalise the control-flow catalog.
+
+- `1892` (**`if (cond) goto X;` no fusion**): like
+  `if (cond) break;`, BCC compiles as:
+  ```
+  cmp si, 5
+  jge L_skip      ; inverse-jcc
+  jmp loop        ; the goto (unconditional)
+  L_skip:
+  ```
+  Could have been `jl loop` (one instruction) but
+  BCC keeps the cmp/jcc/jmp pattern per its "each
+  statement independent" rule.
+- `1893` (**dead code after return is emitted**):
+  ```c
+  return x;       // first return
+  x = 99;         // dead
+  return x + 1;   // dead
+  ```
+  compiles to:
+  ```
+  mov ax, si
+  jmp epilogue     ; first return
+  ; DEAD CODE follows:
+  mov si, 99
+  mov ax, si / inc ax
+  epilogue:
+  pop si / pop bp / ret
+  ```
+  BCC emits the dead code into the OBJ. No DCE.
+  Confirms: **BCC 2.0 performs zero optimizations**
+  beyond syntactic constant folding.
+- `1894` (**switch = linear cmp/je chain**): no
+  jump table; each case becomes a cmp+je pair:
+  ```
+  mov ax, [x]
+  cmp ax, 1 / je L_case1
+  cmp ax, 2 / je L_case2
+  cmp ax, 3 / je L_case3
+  jmp L_default
+  L_case1: ...; jmp L_end
+  L_case2: ...; jmp L_end
+  L_case3: ...; jmp L_end
+  L_default: ...; jmp L_end
+  L_end:
+  ```
+  Per-case cost: 5 bytes (3 cmp + 2 je). The
+  `break` after each case becomes `jmp L_end`.
+  Default goes to its own block. All case bodies
+  share a single L_end target.
+  
+  This is simple but suboptimal for dense
+  enum-like switches. A jump table (`jmp [table +
+  case*2]`) would be O(1) and smaller for >4
+  cases, but BCC always uses the linear chain.
+
+So **BCC's compilation philosophy** is:
+1. Compile each statement independently — no
+   peephole fusion with surrounding context
+2. No dead-code elimination — emit what the source
+   specifies, including unreachable code
+3. No control-flow optimisations — switches are
+   linear chains, not jump tables; if-break/if-
+   goto get inverse-condition compilation
+4. Only syntactic constant folding (compile-time
+   constants in expressions); no algebraic
+   simplification, no CSE, no DCE
+
+This makes BCC's codegen **highly predictable** —
+each source statement maps to a small, fixed
+sequence of instructions. Easy to byte-exact
+reproduce.
+
 ## Empty fn keeps prologue/epilogue; `while(1)+break` no fusion; `continue` = goto update
 
 Fixtures `1889` (empty function), `1890` (while(1)
