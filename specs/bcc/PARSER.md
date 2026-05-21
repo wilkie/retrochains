@@ -1959,6 +1959,64 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## FMUL = `d8 /1`, FDIV = `d8 /6` (m32); passing `double` arg = `add sp,-8` + FSTP m64 [sp]
+
+Fixtures `2141` (float mul), `2142` (float div),
+`2143` (passing double as arg) complete the
+float-operator and float-call survey.
+
+- `2141` (**float mul**): `9b d8 /1 [m]` = FMUL
+  m32. ModR/M `4e` = /1 reg-field.
+- `2142` (**float div**): `9b d8 /6 [m]` = FDIV
+  m32. ModR/M `76` = /6 reg-field.
+- `2143` (**passing `double` to fn**): caller uses
+  **`add sp, -8`** (allocate, NOT push) + FSTP
+  m64 to fill the slot, then call:
+  ```
+  ; In main:
+  9b d9 06 [const_addr]      ; FLD m32 (7.5 stored as single)
+  83 c4 f8                    ; add sp, -8 (subtract 8)
+  9b dd 5e f8                 ; FSTP m64 [sp] (store as double in arg slot)
+  90                           ; NOP
+  9b e8 de ff                 ; WAIT + call dbl_to_int
+  83 c4 08                    ; add sp, 8 (cleanup)
+  ```
+  Cleanup is `add sp, 8` (3 bytes) instead of 4
+  pops, since 8-byte cleanup > 4-byte threshold.
+  Callee accesses double arg at `[bp+4]`:
+  ```
+  9b dd 46 04                 ; FLD m64 [bp+4]
+  ```
+
+**FPU `d8 /reg` family complete** (m32 arith):
+| `/reg` | Mnemonic | Description |
+|--------|----------|-------------|
+| `/0` | FADD m32 | Add |
+| `/1` | FMUL m32 | Multiply |
+| `/2` | FCOM m32 | Compare (no pop) |
+| `/3` | FCOMP m32 | Compare + pop |
+| `/4` | FSUB m32 | Subtract |
+| `/5` | FSUBR m32 | Reverse subtract |
+| `/6` | FDIV m32 | Divide |
+| `/7` | FDIVR m32 | Reverse divide |
+
+Similar `dc /reg` family exists for m64 (double-
+precision) operations.
+
+**Float arg passing summary**:
+| Arg type | Caller emit | Bytes |
+|----------|-------------|-------|
+| `float` | sub sp, 4 + FSTP m32 [sp] | 6+ |
+| `double` | sub sp, 8 (= add sp, -8) + FSTP m64 [sp] | 6+ |
+| Promote `float` → `double` at call | (same as `double`) | (FPU's natural extension) |
+
+For the Rust reimplementation:
+- FPU `d8 /reg` family for m32 arith; `dc /reg`
+  for m64.
+- Float arg passing: `add sp, -N` + FSTP m32/m64
+  pattern.
+- Always emit WAIT (`9b`) before each FPU op.
+
 ## Float add = `9b d8 /0` (FADD m32); double cmp = FCOMP/FSTSW/SAHF + unsigned jcc; double arrs = 8B
 
 Fixtures `2138` (float add), `2139` (double cmp),
