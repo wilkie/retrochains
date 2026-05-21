@@ -1959,6 +1959,58 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## 2-byte struct = 1 mov; long-field struct = 2 movs; odd-byte struct = N_SCOPY@
+
+Fixtures `1796` (1-int struct = 2B), `1797` (1-
+long struct = 4B), and `1798` (int+char struct =
+3B) refine the aggregate-init boundary to the
+byte level.
+
+- `1796` (**1-field 2-byte struct**): `struct { int
+  x; } = {42}` uses a **single mov** through AX —
+  `mov ax, [template] / mov [p_x], ax`. No N_SCOPY@.
+- `1797` (**1-field 4-byte struct (long)**): `struct
+  { long a; } = {100L}` uses **2 movs** (one per
+  half via AX and DX):
+  ```
+  mov ax, [template + 2]    ; high
+  mov dx, [template + 0]    ; low
+  mov [p_high], ax
+  mov [p_low], dx
+  ```
+  So the inline path treats the long as 2 word-
+  halves, same shape as a 2-int struct (`1795`).
+- `1798` (**3-byte struct (int+char) uses
+  N_SCOPY@**): even though only 3 bytes, BCC can't
+  inline because the int+char layout doesn't fit
+  into word-aligned mov pairs. Template in `_DATA`
+  is packed (3 bytes: `64 00 41`); local slot is
+  padded to 4 bytes; N_SCOPY@ copies exactly 3
+  bytes (the padding byte is not initialized).
+
+Refined boundary by **structural shape**:
+| Size | Layout | Init mechanism |
+|------|--------|----------------|
+| 2 bytes | 1 word | 1 mov via AX |
+| 4 bytes | 2 words (int+int OR long) | 2 movs via AX/DX |
+| 3 bytes | int+char (odd) | N_SCOPY@ |
+| > 4 bytes | any | N_SCOPY@ |
+
+So the rule is **"can the struct be loaded/stored
+as 1 or 2 word-aligned chunks?"**. Word-aligned
+2-byte and 4-byte structs inline; odd-byte
+structs always go through the byte-precise
+N_SCOPY@.
+
+Local slot is **padded to even size** for word
+alignment even though template is packed.
+
+For the Rust reimplementation:
+- 1 word struct → 1 inline mov from template
+- 2 word struct (including long) → 2 inline movs
+- Mixed/odd-byte struct → N_SCOPY@ with packed
+  template + over-allocated slot
+
 ## Local aggregate-init boundary: ≤4B struct = 2 movs; >4B struct or any array = N_SCOPY@
 
 Fixtures `1793` (`int a[5] = {0}` all zeros),
