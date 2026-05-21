@@ -1959,6 +1959,77 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Switch on long: two-phase search-table; struct-of-6 uses `imul`; signed `>=` uses `jl`
+
+Fixtures `1913` (switch on long), `1914` (array
+of 6-byte struct), `1915` (signed `>=` cmp) cover
+remaining shapes.
+
+- `1913` (**switch on long = 2-phase search**):
+  switch on `long x` (32-bit) uses the linear-
+  search-table strategy with **two-phase compare**
+  per iteration:
+  ```
+  loop_top:
+  cs: mov ax, [bx]          ; load case.lo
+  cmp ax, [temp.lo]
+  jne L_next                 ; lo mismatch → next
+  cs: mov ax, [bx+6]         ; load case.hi (table offset = 6 bytes for 3 cases × 2)
+  cmp ax, [temp.hi]
+  je L_found                 ; both match → use this case
+  L_next:
+  inc bx / inc bx
+  loop loop_top              ; CX-- + jump if non-zero
+  jmp L_after
+  L_found:
+  cs: jmp [bx + 12]          ; offset to body-target table (12 = 2 × 6)
+  
+  ; THREE tables in code segment:
+  case_lo_table:     dw 1, 2, 3
+  case_hi_table:     dw 0, 0, 0
+  body_offset_table: dw L_c1, L_c2, L_c3
+  ```
+  Long switches **always use search-table**
+  (never jump-table) — a 32-bit-indexed jump
+  table would be impractical.
+- `1914` (**non-pow2 struct stride uses imul**):
+  `struct R {int a; int b; int c;}` (sizeof = 6)
+  arrays use **`imul`** for index computation:
+  ```
+  mov ax, i / mov dx, 6 / imul dx     ; ax = i * 6
+  lea dx, [base + field_offset]       ; field-specific base
+  add ax, dx                          ; final addr
+  mov bx, ax / mov [bx], ...
+  ```
+  No CSE across fields in the same iteration —
+  each field access recomputes `i * 6` via imul.
+  Pow2 strides use shl (cheaper); non-pow2
+  always uses imul.
+- `1915` (**signed `>=` uses `jl`**): false-
+  branch jcc for `a >= b` is `jl` (`0x7C`,
+  signed jump-if-less). Inverse of `>=` is `<`,
+  hence `jl`.
+
+**Complete signed-cmp jcc table** (false-branch):
+| Op | False-jcc | Opcode |
+|----|-----------|--------|
+| `<` | `jge` | 7D |
+| `<=` | `jg` | 7F |
+| `>` | `jle` | 7E |
+| `>=` | `jl` | 7C |
+| `==` | `jne` | 75 |
+| `!=` | `je` | 74 |
+
+For the Rust reimplementation:
+- Long switch: always emit search-table with two-
+  phase compare. Three tables (case.lo, case.hi,
+  body-target) of `N * 2` bytes each in code
+  segment.
+- Array of struct with non-pow2 stride: `mov ax,
+  idx / mov dx, sizeof / imul dx`.
+- Track operand signedness, choose jcc per
+  signedness × operator matrix.
+
 ## Default doesn't count toward N; 2 cases linear; imm16 base uses `81 eb`
 
 Fixtures `1910` (3 cases + default), `1911` (2
