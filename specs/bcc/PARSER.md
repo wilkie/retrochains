@@ -1959,6 +1959,66 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## uchar→int via `mov ah, 0`; bool arith materialises each cmp; empty-body while w/ side-effect-cond
+
+Fixtures `1988` (unsigned char return), `1989`
+(bool arith), `1990` (empty-body while) cover
+three more idioms.
+
+- `1988` (**unsigned char → int = `mov ah, 0`**):
+  unsigned char return in AL only. Caller zero-
+  extends with `mov ah, 0` (`b4 00`, 2 bytes):
+  ```
+  call _get_ub
+  mov [c], al               ; byte store
+  mov al, [c] / mov ah, 0   ; load + zero-extend
+  ```
+  Compare to signed char which uses `cbw` (1 byte
+  sign-extend).
+  
+  **Char → int conversion summary**:
+  | Source type | Extension | Bytes |
+  |-------------|-----------|-------|
+  | `char` (signed) | `cbw` | 1 |
+  | `unsigned char` | `mov ah, 0` | 2 |
+- `1989` (**bool arith — each cmp materialised**):
+  `(a == b) + (a == c)` materialises **each
+  comparison separately** via the full bool
+  template, then sums:
+  ```
+  ; first cmp:
+  cmp si, [b] / jne L_f1 / mov ax, 1 / jmp end1
+  L_f1: xor ax, ax
+  end1: push ax              ; save 1st bool
+  ; second cmp:
+  cmp si, [c] / jne L_f2 / mov ax, 1 / jmp end2
+  L_f2: xor ax, ax
+  end2: pop dx / add dx, ax  ; combine
+  ```
+  No fusion; each comparison generates a full
+  template. Booleans treated as ints (0 or 1).
+- `1990` (**empty-body while with side-effect**):
+  `while (fn() < 5) ;` confirms the pattern:
+  ```
+  jmp test
+  body:        ; empty
+  test:
+    call _inc_counter
+    cmp ax, 5
+    jl body
+  ```
+  No body instructions; just the test repeats
+  until false. The fn call's side effect (++counter)
+  is the only loop progress.
+
+For the Rust reimplementation:
+- Unsigned char → int: emit `mov ah, 0`; signed
+  char → int: emit `cbw`.
+- Bool arith in expressions: materialise each
+  cmp via the value-context template.
+- Empty-body loops: still emit `jmp test / body /
+  test` skeleton.
+
 ## Unsigned `<=` uses `ja`; bounds check via short-circuit; `char` ret = AL only + cbw
 
 Fixtures `1985` (unsigned `<=`), `1986` (bounds
