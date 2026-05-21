@@ -1959,6 +1959,75 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## 6B struct uses N_SPUSH@; ≤4B struct returns in DX:AX; structs have NO padding
+
+Fixtures `1874` (6-byte struct by value), `1875`
+(struct returned by value), and `1876` (struct
+with char + int = no padding) complete the
+struct ABI picture.
+
+- `1874` (**6-byte struct by value uses
+  `N_SPUSH@`**): for structs > 4 bytes, BCC calls
+  the helper:
+  ```
+  lea ax, [s]        ; source offset
+  mov dx, ss         ; source segment
+  mov cx, 6          ; size in bytes
+  call N_SPUSH@      ; helper pushes 6 bytes onto stack
+  call _sum_t
+  add sp, 6          ; cleanup
+  ```
+  The helper takes far ptr `(DX:AX)` and count `CX`,
+  copies the struct onto the stack via repeated
+  push (or some equivalent). Confirms the >4B
+  threshold for helper invocation.
+- `1875` (**≤4B struct returned in DX:AX**): a
+  `struct P {int x; int y;}` (4 bytes) is returned
+  via the **DX:AX register pair**:
+  - **AX** = first field (low half) — `r.x` = 10
+  - **DX** = second field (high half) — `r.y` = 20
+  
+  Caller stores both back to the destination:
+  ```
+  call make_p
+  mov [p.y], dx      ; high half
+  mov [p.x], ax      ; low half
+  ```
+  This is the classic MS-DOS 8086 small-struct
+  return convention. For structs > 4B, a hidden
+  caller-allocated buffer ptr is used (not yet
+  probed).
+- `1876` (**structs have NO padding for
+  alignment**): `struct { char c; int n; }` lays
+  out as:
+  | Field | Offset | Size |
+  |-------|--------|------|
+  | `c` (char) | 0 | 1 |
+  | `n` (int) | **1** | 2 |
+  Total: 3 bytes. The int is at an **odd byte
+  offset** (1) — accessed via unaligned word
+  load/store. 8086 allows this with a cycle
+  penalty.
+  
+  Stack allocation **rounds up** to word boundary
+  (4 bytes for a 3-byte struct) — for SP alignment,
+  not field alignment.
+
+So the **struct ABI** is:
+- Pack: NO padding, tight byte-aligned fields
+- Stack-alloc: round up to word (preserve SP word-
+  alignment)
+- Pass-by-value: ≤4B inline pushes (reverse-mem
+  order), >4B uses N_SPUSH@ helper
+- Return: ≤4B in DX:AX, >4B via hidden buffer ptr
+
+For the Rust reimplementation:
+- Pack structs tight; track field byte offsets.
+- Round stack frame to word for SP alignment.
+- Emit N_SPUSH@ call for >4B by-value passes;
+  inline pushes for ≤4B.
+- Emit DX:AX return for ≤4B; hidden ptr for >4B.
+
 ## Struct arr-field inline; struct-by-value pushed reverse-mem-order; `o.p->v` 2-step deref
 
 Fixtures `1871` (struct with array field), `1872`
