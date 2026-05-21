@@ -1959,6 +1959,56 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Unsigned mod-pow2 = AND mask; shift count ≥3 uses CL-form; signed mod = full idiv
+
+Fixtures `1724` (unsigned mod by 8), `1725`
+(unsigned div by 256), and `1726` (signed mod by
+8) finalise the div/mod codegen rules.
+
+- `1724` (**unsigned mod by pow2 = AND mask**): `x
+  % 8` (unsigned) lowers to **`and ax, 7`** (`25
+  07 00`, 3 bytes via AX-imm16 form). This is the
+  optimal pow2-mod shortcut: `x % 2^N = x & (2^N -
+  1)`. Confirms the asymmetric optimisation —
+  unsigned mod by pow2 is **one instruction**.
+- `1725` (**unsigned div by large pow2 uses CL-
+  form**): `x / 256` (unsigned) = `x >> 8` lowers
+  to **`mov cl, 8 / shr ax, cl`** (4 bytes). For
+  shift count N, the unrolled form costs `2*N`
+  bytes; CL-form is fixed 4 bytes. So the boundary
+  is:
+  - N = 1: unrolled (2 bytes) — single `shr ax, 1`
+  - N = 2: unrolled (4 bytes) — two `shr ax, 1`
+    (matches CL-form bytes)
+  - N ≥ 3: CL-form (4 bytes wins)
+  Empirically BCC uses unrolled for N=2 ([[batch-
+  468-div-mod]]) and CL-form for N=8. The exact
+  threshold appears to be **N ≥ 3 → CL-form**.
+- `1726` (**signed mod by pow2 = full idiv**): `x
+  % 8` (signed) uses **the full `idiv` sequence**,
+  NOT the AND mask. Reason: AND gives unsigned 0..7,
+  but signed mod can be negative for negative
+  dividends (`-7 % 8 = -7`). BCC plays it safe with
+  idiv for all signed mod regardless of divisor.
+  Code: `mov bx, 8 / cwd / idiv bx / mov [r], dx`
+  — 9 bytes.
+
+So the **asymmetric pow2 optimisation** is now
+fully characterised:
+| Op | Pow2-N | Bytes | Encoding |
+|----|--------|-------|----------|
+| unsigned `x / 2^N` | 1 | 2 | `shr ax, 1` |
+| unsigned `x / 2^N` | 2 | 4 | `shr ax, 1` × 2 |
+| unsigned `x / 2^N` | ≥3 | 4 | `mov cl, N / shr ax, cl` |
+| unsigned `x % 2^N` | any | 3 | `and ax, K-1` |
+| signed `x / 2^N` | any | 8 | `mov bx, K / cwd / idiv bx` |
+| signed `x % 2^N` | any | 9 | (same idiv, read DX) |
+
+Signed division never benefits from pow2 shortcuts
+due to C's truncation-toward-zero semantics. The
+9+ byte idiv sequence is the floor for signed
+div/mod.
+
 ## Signed div-by-pow2 uses `idiv` (NOT `sar`); unsigned uses unrolled `shr`; mod reads DX
 
 Fixtures `1721` (signed div by 4 = pow2), `1722`
