@@ -1959,6 +1959,62 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## No overflow check (silent wrap); `ptr - ptr` = byte-diff / sizeof via idiv; missing return = AX undefined
+
+Fixtures `2240` (int overflow), `2241` (ptr - ptr
+difference), `2242` (function without return)
+cover three undefined-behavior edge cases.
+
+- `2240` (**int overflow silent wrap**): standard
+  `add ax, [y]` — no overflow check, no special
+  jcc. Pure 8086 modular ALU semantics. For
+  32000 + 1000 = 33000, result wraps to -32536
+  (signed) or 33000 (unsigned interpretation).
+- `2241` (**`ptr - ptr` = element count**): emits
+  byte-diff then divide by sizeof:
+  ```
+  mov ax, [a]
+  sub ax, [b]              ; ax = byte difference
+  mov bx, 2                 ; sizeof(int)
+  cwd                       ; sign-extend for idiv
+  idiv bx                   ; ax = byte_diff / sizeof
+  ```
+  Uses SIGNED division because the difference
+  can be negative (if a < b). Result is the
+  number of ELEMENTS between the pointers.
+- `2242` (**function missing return**): callee
+  just falls through to epilogue without setting
+  AX. **Whatever was in AX at fall-through point
+  becomes the "return value"**. No warning, no
+  zero-init, no nop. For `noret(5)` with `y = x*2`,
+  AX happens to be 10 after `shl ax, 1`, so the
+  caller sees 10.
+
+**Undefined-behaviour summary** (BCC tactics):
+| UB scenario | BCC behavior |
+|-------------|--------------|
+| Signed int overflow | Silent wrap (raw `add`) |
+| Unsigned int overflow | Silent wrap (same instruction) |
+| Long overflow | Silent wrap (`add/adc`) |
+| Float overflow | FPU NaN/inf (FPU handles) |
+| Missing return (non-void fn) | AX = whatever was last there |
+| `ptr - ptr` (different arrays) | (UB) — same idiv mechanism, garbage |
+| Null pointer deref | (UB) — no check; reads/writes addr 0 |
+| Division by zero | INT 0 (8086 trap) |
+| Stack overflow | `N_OVERFLOW@` if `-N`, else silent corruption |
+
+So **BCC is a "trust the programmer" compiler** —
+no UB checks, no defensive code, no warnings for
+fall-through. The only runtime check is the
+optional `-N` stack overflow guard.
+
+For the Rust reimplementation:
+- Emit raw `add/sub/mul` for int arithmetic.
+- `ptr - ptr`: emit byte-diff then `cwd / idiv
+  sizeof`.
+- Function without return: emit epilogue
+  unchanged. Do NOT zero AX or warn.
+
 ## Adjacent string literals concatenated at parse time; numeric bases all → int; `\0` in literal ≠ terminator
 
 Fixtures `2237` (string concat), `2238` (dec/hex/
