@@ -1959,6 +1959,56 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `if(x & MASK)` = `test [m], imm16`; shift+mask not fused; `(unsigned)int` = no-op
+
+Fixtures `1853` (`if (x & 0x40)` bit test), `1854`
+(`(x >> 4) & 0x0F` nibble extraction), and `1855`
+(`(unsigned int)int` cast) cover three small but
+notable codegen optimisations.
+
+- `1853` (**bit test optimised to `test [m], imm`**):
+  `if (x & MASK)` lowers to **`f7 46 disp imm16`**
+  (`test word [bp+disp], imm16`, 5 bytes). Sets
+  flags from the AND result **without modifying
+  memory**. Then `je` branches on ZF. Saves 1 byte
+  vs the load + and + jcc sequence.
+  
+  So `x & MASK` in a **boolean context** (`if`,
+  `while`, ternary condition) is recognised and
+  optimised to `test`. In an **expression context**
+  (used as value), it would use `and ax, MASK`
+  instead.
+- `1854` (**shift+mask not fused**): `(x >> 4) &
+  0x0F` emits both operations sequentially:
+  ```
+  mov ax, x
+  mov cl, 4 / sar ax, cl    ; signed shift since x is int
+  and ax, 0x0F              ; AX-form
+  ```
+  No special fusion. The shift here uses `sar`
+  (signed) because x is `int` (signed).
+- `1855` (**`(unsigned)int` no-op cast**): casting
+  signed to unsigned int emits **no conversion
+  code** — just a `mov`. Both are 16-bit; the cast
+  is purely a type-system attribute. The behavioral
+  difference shows in subsequent ops:
+  ```
+  signed x; x >> 8  → sar (arithmetic, sign-fill)
+  unsigned u; u >> 8 → shr (logical, zero-fill)
+  ```
+  After the no-op cast, the same bit pattern is
+  reinterpreted; later shift uses the appropriate
+  opcode for the new type.
+
+For the Rust reimplementation:
+- Recognise `x & MASK` in boolean context →
+  emit `test [m], imm` instead of `and / jcc`.
+- Track signedness through expressions; emit
+  sar/shr based on the operand's type at each
+  shift point.
+- Int↔uint casts emit no code in small/large
+  model (both 2-byte ints).
+
 ## 5-locals fills full pool; 1-read locals stack; params enregister too
 
 Fixtures `1850` (5 locals), `1851` (3 locals
