@@ -1959,6 +1959,71 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Const-expr fully folded; adjacent consts combined (`x+5+3`→`x+8`); `x && 0` → direct false-jmp
+
+Fixtures `2018` (full const expr), `2019` (`x + 5
++ 3` const-combination), `2020` (`x && 0`) show
+that BCC's parse-time folding is **more
+sophisticated** than just literal identity.
+
+- `2018` (**full const expression**): `(2*3) +
+  (4*5) - 1` is fully computed at parse time:
+  ```
+  mov word [r], 0x19    ; r = 25 (direct constant store)
+  ```
+  All operators evaluated; only the final
+  constant emitted.
+- `2019` (**adjacent constants combined**): `x +
+  5 + 3` parsed as `((x + 5) + 3)` but BCC
+  **combines the constants** at parse time:
+  ```
+  mov ax, [x]
+  add ax, 8             ; not 5+3 separately, but the sum 8
+  ```
+  So adjacent-constant folding works **across
+  left-to-right associative expressions**, not
+  just `K op K` cases.
+- `2020` (**`x && 0` → direct false-jmp**):
+  ```
+  cmp [x], 0
+  je  L_false           ; first operand's inverse-jcc
+  jmp L_false           ; second operand is literal-0 → unconditional jmp to false
+  L_true: mov ax, 1     ; dead code (unreachable)
+  jmp end
+  L_false: xor ax, ax
+  end:
+  ```
+  The second operand being literal 0 produces an
+  **unconditional `jmp L_false`** (since 0 is
+  always false). The "true" branch becomes dead
+  code in the output but is still emitted.
+  
+  So BCC recognises **literal boolean constants**
+  in && and || and emits direct jumps, but
+  doesn't eliminate the resulting dead code.
+
+**Updated folding catalog**:
+| Pattern | Effect |
+|---------|--------|
+| All-const expr | Computed at parse time |
+| `x op K1 op K2` (associative) | Constants combined first |
+| `x && literal-0` | Direct jmp to false branch (body dead) |
+| `x || literal-1` | Direct jmp to true branch (else dead) |
+| `0 + x`, `x + 0`, `x - 0` | → `x` (identity) |
+| `0 * x`, `x * 0` | → 0 (zero-product) |
+| `x ^ x`, `x - x` | NOT folded (no var-identity) |
+| `x & -1` | NOT folded (only literal 0/1) |
+
+For the Rust reimplementation:
+- Full const expression folding via recursive
+  evaluation.
+- Combine adjacent constants in associative
+  chains.
+- Boolean literal in && / ||: emit direct jmp
+  past the dead branch.
+- Don't bother with DCE — keep emitting dead
+  code as it appears in the source.
+
 ## Boundaries: `x ^ x`/`x - x` NOT folded; `x & 0xFFFF` NOT folded — only literal-0/1 ops folded
 
 Fixtures `2015` (x ^ x), `2016` (x - x), `2017`
