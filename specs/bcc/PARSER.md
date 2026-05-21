@@ -1959,6 +1959,74 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Block-slot reuse: N sequential blocks share; nested respects scope; byte-granular sharing
+
+Fixtures `1967` (3 sequential blocks), `1968`
+(nested blocks), `1969` (different-sized block
+locals) refine the block-slot-reuse rule.
+
+- `1967` (**N sequential blocks share slot**):
+  three sequential blocks each with a local
+  variable all share **the same `[bp-2]` slot**:
+  ```
+  ; block 1: a
+  c7 46 fe 01 00   ; a = 1 at [bp-2]
+  03 76 fe          ; sum += a
+  ; block 2: b — reuses [bp-2]
+  c7 46 fe 02 00   ; b = 2
+  03 76 fe          ; sum += b
+  ; block 3: c — reuses [bp-2] again
+  c7 46 fe 03 00   ; c = 3
+  03 76 fe          ; sum += c
+  ```
+  Only 1 slot allocated for N sequential
+  non-overlapping locals.
+- `1968` (**nested blocks respect outer scope**):
+  ```c
+  int outer = 100;
+  { int inner = 50; outer += inner; }
+  ```
+  Outer enregisters (used twice — init + return)
+  in SI. Inner gets `[bp-2]`. **No slot reuse
+  between outer and inner** since their lifetimes
+  overlap (outer is still alive when inner is
+  created).
+- `1969` (**byte-granular slot sharing**):
+  different-sized block locals can share too:
+  ```c
+  { long a = 100L; sum += (int)a; }    // a = 4 bytes at [bp-4..bp-1]
+  { int b = 50;    sum += b; }         // b = 2 bytes at [bp-2..bp-1]
+  ```
+  `b` reuses **the HIGH HALF of a's slot** (the
+  top 2 bytes). So slot reuse is **byte-
+  granular** — BCC tracks the actual byte ranges
+  of dead variables, not just whole-variable
+  slots.
+
+So the block-slot-reuse algorithm is:
+1. Track byte-range liveness for every local
+2. When entering a block, look for **N
+   contiguous dead bytes** (from finished
+   scopes) before allocating new stack
+3. Allocate at the lowest available range that
+   fits
+
+For the Rust reimplementation:
+- Maintain a per-byte-range liveness map within
+  the function's stack frame.
+- On entering a block, scan for free byte-ranges
+  of the required size; reuse if found.
+- Else allocate new bytes at the bottom of the
+  current frame (incrementing `sub sp` by the
+  new variable's size).
+- On block exit, mark the variable's byte range
+  as dead/free.
+
+This single optimization keeps stack frames as
+compact as possible — frame size = max
+"concurrently live local bytes" across the
+function.
+
 ## `**pp` = 2 chained loads; post-inc captures-then-increments; **block-locals share slots**
 
 Fixtures `1964` (`**pp` double deref), `1965`
