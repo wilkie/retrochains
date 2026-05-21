@@ -1959,6 +1959,75 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## do-while = simplest loop form (no top jmp); for empty-init = jmp-test header; for empty-cond = unconditional jmp
+
+Fixtures `2225` (do-while), `2226` (for empty
+init), `2227` (for empty cond + break) cover the
+remaining loop variants.
+
+- `2225` (**do/while**): simplest loop layout —
+  body first, then conditional jcc back:
+  ```
+  ; (init declarations done outside)
+  body:
+    body...
+    cond_test
+    jcc body
+  ```
+  No initial jump to test. Body runs at least
+  once. For i=0..4 (5 iters): sum = 0+1+2+3+4=10.
+- `2226` (**for with empty init**): standard for-
+  loop layout — still has the `jmp test` at top:
+  ```
+  ; (init done before — empty here means no
+  ;  additional init code in the loop)
+  jmp test
+  body:
+    body
+    update
+  test:
+    cond_test
+    jcc body
+  ```
+  Empty init is a no-op slot, but the `jmp test`
+  still emits to skip the body the first time.
+- `2227` (**for with empty cond + break**): empty
+  condition = always-true = unconditional `jmp
+  body` at the bottom:
+  ```
+  body:
+    body
+    update
+  jmp body         ; unconditional (empty cond = true)
+  end_of_loop:
+  ```
+  Break translates to `jmp end_of_loop` — same in
+  all loops.
+
+**Loop layout summary** (final):
+| Loop | Layout |
+|------|--------|
+| `while (c) b` | `jmp test; body: b; test: c → jcc body` |
+| `do b while (c)` | `body: b; c → jcc body` (no top jmp) |
+| `for (i; c; u) b` | `i; jmp test; body: b; u; test: c → jcc body` |
+| `for (i; ; u) b` (empty cond) | `i; body: b; u; jmp body` (unconditional) |
+| `for (; c; u) b` (empty init) | `jmp test; body: b; u; test: c → jcc body` |
+| `for (;;) b` | `body: b; jmp body` |
+| `break` | `jmp end_of_loop` |
+| `continue` | `jmp test_or_update` |
+
+So **while** and **for** share the same skeleton
+(jmp-test-first) regardless of which clauses are
+empty. The difference is just where init/update
+go. **do/while** is unique in having no top jump.
+
+For the Rust reimplementation:
+- do/while: emit body THEN test.
+- for/while: emit jmp-to-test at top.
+- Empty cond: emit unconditional jmp instead of
+  cond_test.
+- break: jmp end_of_loop.
+
 ## Switch only-default = unconditional body; fall-through = linear bodies; multi-case shares one target
 
 Fixtures `2222` (switch default-only), `2223`
