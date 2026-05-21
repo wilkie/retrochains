@@ -1959,6 +1959,119 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `while(1)` = unconditional jmp at bottom; `do {} while(0)` = body once no loop; partial init zero-fills; nested struct flat layout
+
+Fixtures `2321`-`2326` cover const-condition
+elision and aggregate initialization padding.
+
+- `2321` (**`while(1)`**): no test, just an
+  unconditional jmp back to body. Loop only
+  exits via `break`:
+  ```
+  body:
+    inc si                  ; i++
+    cmp si, 5
+    jl skip                 ; if i < 5 continue
+    jmp end                  ; break
+  skip:
+    jmp body                 ; unconditional loop-back
+  end:
+  ```
+- `2322` (**`do {} while(0)`**): body emitted
+  once, NO loop-back. The const-false test elides
+  the loop entirely:
+  ```
+  mov si, 5                 ; x = 5
+  inc si                    ; x++ (body runs once)
+  ; (no test, no jmp)
+  ```
+  This is the canonical `do { ... } while(0)`
+  idiom used in macros to force statement-block
+  semantics — BCC reduces it to inline code.
+- `2323` (**partial array init zero-fill**):
+  ```
+  ; int a[10] = {1, 2, 3};
+  _DATA:
+    [01 00] [02 00] [03 00]   ; explicit init
+    [00 00] [00 00] [00 00]   ; zero-fill the rest
+    [00 00] [00 00] [00 00] [00 00]
+  ```
+  Per C standard: any uninitialized aggregate
+  members are zero-initialized. 20 bytes total in
+  `_DATA`.
+- `2324` (**union of struct and long**): both
+  members share the SAME storage. Writing to
+  union.parts.lo/hi populates the same bytes
+  that union.whole would read as a long:
+  ```
+  ; u.parts.lo at [bp-4] = 0x1234
+  ; u.parts.hi at [bp-2] = 0x5678
+  
+  ; Reading u.whole >> 16 = high 16 bits
+  ; = 0x5678 (just load offset -2)
+  ```
+  No struct/union-specific instructions; pure
+  memory aliasing.
+- `2325` (**`char s[10] = "abc"`**):
+  ```
+  _DATA:
+    [61 62 63 00]            ; "abc\0"
+    [00 00 00 00 00 00]      ; zero-fill rest
+  ```
+  String init places the literal + null, then
+  pads with zeros to declared size.
+- `2326` (**nested struct init**): members laid
+  out flat in memory order:
+  ```
+  ; struct Outer { struct Inner { int a; int b; } i; int c; };
+  ; static struct Outer o = {{10, 20}, 30};
+  
+  _DATA:
+    [0a 00]                  ; o.i.a at offset 0
+    [14 00]                  ; o.i.b at offset 2
+    [1e 00]                  ; o.c   at offset 4
+  ```
+  Access via direct offsets: `mov ax, [o]`,
+  `add ax, [o+2]`, `add ax, [o+4]`.
+
+**Aggregate initialization rules (final, BCC 2.0)**:
+| Form | Behavior |
+|------|----------|
+| `int a[N] = {a, b, c}` | First N init'd, rest zero-fill |
+| `int a[] = {a, b, c}` | Size = number of inits |
+| `char s[N] = "..."` | String + \0, padded w/ zeros to N |
+| `char s[] = "..."` | Size = strlen + 1 |
+| `struct {} s = {a, b, c}` | Members in order |
+| Nested `{{...}, ...}` | Recursive per-member |
+| Static: in `_DATA` (init) or `_BSS` (zero) | |
+| Auto (non-static): `N_SCOPY@` from `_DATA` template | |
+
+**Const-condition elision rules (final)**:
+| Source | Effect |
+|--------|--------|
+| `if (1)` | Body emitted; no test |
+| `if (0)` | Body NOT emitted (or jmp-over emitted but body still in OBJ) |
+| `while (1)` | Body + unconditional jmp back at bottom |
+| `while (0)` | Loop entirely elided |
+| `do {} while (1)` | Body + unconditional jmp back |
+| `do {} while (0)` | Body once, NO loop-back |
+| `for (;;) ` | Same as while(1) |
+| `1 && X` | Right operand evaluated |
+| `0 && X` | jmp over X (X compiled but dead) |
+| `1 || X` | jmp over X (X compiled but dead) |
+| `0 || X` | Right operand evaluated |
+| `1 ? A : B` | A evaluated, B elided |
+| `0 ? A : B` | B evaluated, A elided |
+
+For the Rust reimplementation:
+- Aggregate init: zero-fill the rest, emit
+  template to `_DATA`.
+- Nested struct: flatten via member offsets.
+- Union: alias storage; same byte addresses for
+  all members.
+- const-condition elision: special-case at parse
+  time for the patterns in the table above.
+
 ## R-to-L arg eval w/ comma op; local shadows global completely; `!x` = `neg/sbb r,r/inc` arithmetic idiom; const ternary folds; multi-return = multi-jmp to epilogue
 
 Fixtures `2315`-`2320` cover assorted idioms and
