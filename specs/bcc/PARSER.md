@@ -1959,6 +1959,56 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `if(x)` ≡ `if(x!=0)` ident codegen; `while(x--)` captures-then-decs; arg eval R-to-L confirmed
+
+Fixtures `2024` (if x vs if x!=0), `2025` (while
+x--), `2026` (fn call side-effect args) confirm
+three patterns.
+
+- `2024` (**`if (x)` ≡ `if (x != 0)`**): both
+  forms produce **IDENTICAL bytes** — `or si, si
+  / je skip`. BCC recognises the explicit `!= 0`
+  comparison as equivalent to truthiness.
+  
+  This means programmers can write either form
+  with no codegen difference; BCC normalises
+  both to the zero-test idiom.
+- `2025` (**`while (x--)` captures OLD value**):
+  ```
+  body:
+    inc si              ; count++
+  test:
+    mov ax, di          ; capture OLD x
+    dec di              ; x-- (post-dec)
+    or ax, ax           ; test OLD value
+    jne body            ; loop while OLD != 0
+  ```
+  Critical: the test uses the **pre-decrement
+  value**. For x=5, loop runs 5 iterations
+  (testing 5,4,3,2,1); on x=0 the test sees 0
+  and exits (x then becomes -1).
+- `2026` (**arg eval right-to-left, confirmed**):
+  `add(trace(1), trace(2))` evaluates:
+  ```
+  push 2 / call trace / pop      ; trace(2) first
+  push ax                         ; save trace(2) result
+  push 1 / call trace / pop      ; trace(1) second
+  push ax                         ; save trace(1) result
+  call add                        ; add(t1, t2)
+  ```
+  Right-to-left: trace(2) before trace(1).
+  Matches the cdecl push order. Side-effects
+  observable as right-to-left.
+
+For the Rust reimplementation:
+- Normalise `if (x)` and `if (x != 0)` to the
+  same test (or reg, reg / jcc).
+- `while (x--)`: emit capture-then-decrement
+  before the test.
+- Fn arg evaluation: emit subexpressions
+  right-to-left, with each result pushed before
+  the next is evaluated.
+
 ## `if (0)` skip via jmp; `if (1)` fall-through no test; `while (0)` jmp past body — bodies still emitted
 
 Fixtures `2021` (if 0), `2022` (if 1), `2023`
