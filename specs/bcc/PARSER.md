@@ -1959,6 +1959,56 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Memory-model byte-level diffs: near vs far code (`c3` vs `cb` ret); code-seg name per-file in mm/ml
+
+**First pivot away from small-only**: fixtures
+`2051` (compact -mc), `2052` (medium -mm), `2053`
+(large -ml) all compile **the same source**
+`int g = 42; int main() { return g; }`. The
+differences are the **memory model**.
+
+- `2051` (**compact, -mc**): **identical to small**
+  for this trivial source. Single `_TEXT` segment,
+  `5d c3` (pop bp / near ret). Data in `_DATA` via
+  DGROUP, access by `a1 disp16`.
+- `2052` (**medium, -mm**): code segment renamed
+  to **`HELLO_TEXT`** (= per-file `<fname>_TEXT`).
+  Return is **`5d cb`** (pop bp / **far ret**).
+  Data still `a1 disp16` via DGROUP (near data).
+- `2053` (**large, -ml**): byte-identical to
+  medium for this trivial test — `HELLO_TEXT` for
+  code, `5d cb` for far ret, `a1 disp16` for
+  data.
+
+**Memory-model summary** (from these probes):
+| Model | Code | Data (trivial) | Code seg | RET |
+|-------|------|----------------|----------|-----|
+| small (-ms) | near | near | `_TEXT` | `c3` |
+| compact (-mc) | near | near | `_TEXT` | `c3` |
+| medium (-mm) | far | near | `<fname>_TEXT` | `cb` |
+| large (-ml) | far | near | `<fname>_TEXT` | `cb` |
+| huge (-mh) | far | far | (not yet probed) | (not yet probed) |
+
+So the two key bits visible in OBJ output:
+1. **Code segment naming**: small/compact use the
+   single global `_TEXT`; medium/large use a
+   per-source-file `<fname>_TEXT`.
+2. **Function return**: small/compact use `c3`
+   (near ret 0xC3); medium/large use `cb` (far
+   ret 0xCB).
+
+Data access in the trivial case is identical (`a1
+disp16`) for all four because the global g lives
+in DGROUP'd `_DATA`. To distinguish compact/large
+from small/medium, we'd need multi-segment data or
+explicit `far` data — not yet probed.
+
+For the Rust reimplementation:
+- Parse model from `-ms` / `-mc` / `-mm` / `-ml`.
+- Code segment: emit `_TEXT` for s/c, `<fname>_TEXT` for m/l.
+- Function epilogue: emit `c3` for s/c near ret, `cb` for m/l far ret.
+- Data: keep DGROUP near in all base cases.
+
 ## Static-no-init in `_DATA` zero-fill; empty stmts emit nothing; binary ops eval RIGHT-to-left
 
 Fixtures `2048` (static no init), `2049` (empty
