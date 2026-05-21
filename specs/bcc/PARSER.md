@@ -1959,6 +1959,61 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Linked-list traverse via `[bx+disp]` chain; fn ret ptr in AX; set via ptr-arg = `mov [si], val`
+
+Fixtures `1928` (self-referential struct), `1929`
+(fn returning ptr), `1930` (set via ptr arg)
+cover pointer-laden patterns.
+
+- `1928` (**linked-list traversal**):
+  `struct Node {int v; struct Node *next;}` lays
+  out as 4 bytes per node. `a.next->next->v`
+  chains via repeated `mov bx, [bx+disp]`:
+  ```
+  mov bx, [a.next]      ; 8b 5e fe — load first ptr
+  mov bx, [bx+2]        ; 8b 5f 02 — follow .next field
+  mov ax, [bx]          ; 8b 07    — read .v field (offset 0)
+  ```
+  Each link in the chain = `mov bx, [bx+next_field_offset]`.
+  Top-level `a.next` is **reloaded per chained-
+  expression** — no CSE.
+- `1929` (**fn returns ptr**): returns the
+  **target's offset in AX** (16-bit in small
+  model). For `return &g;` where g is a global:
+  ```
+  mov ax, 0             ; b8 00 00 (with FIXUPP to _g)
+  ret
+  ```
+  Caller stores AX as a ptr and derefs via `mov
+  bx, ax / mov ax, [bx]`.
+- `1930` (**set via ptr arg**): callee pattern:
+  ```
+  mov si, [p]           ; load ptr from arg
+  mov ax, [v]           ; load value
+  mov [si], ax          ; 89 04 — store via ptr
+  ```
+  `mov [si], ax` is 2 bytes (`89 04`). The `04`
+  ModR/M = mod=00 reg=AX rm=100 ([SI]).
+  
+  At call site:
+  ```
+  mov ax, 42 / push ax       ; v arg
+  lea ax, [x] / push ax      ; &x arg
+  call _set
+  add sp, 4
+  ```
+  The `&x` is computed with `lea ax, [bp+disp]`
+  (cheaper than separate calc), then pushed.
+
+For the Rust reimplementation:
+- Chained ptr-deref `s->f->g`: emit successive
+  `mov bx, [bx+offset]` loads with each field's
+  offset.
+- Fn returns ptr: return offset in AX (small) or
+  DX:AX (far model).
+- Set via ptr arg: `mov si/bx, [p] / mov [si],
+  val`. Use lea for `&local` addressing.
+
 ## 6-arg call: 4B per push; long arg = 2 word-pushes hi-first; chained calls bottom-up
 
 Fixtures `1925` (6 args), `1926` (long arg),
