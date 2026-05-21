@@ -1959,6 +1959,63 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `asm { ... }` block syntax; `#pragma warn` PP-only; pseudo-registers `_AX`/etc. in C exprs
+
+Fixtures `2120` (asm block), `2121` (pragma warn),
+`2122` (pseudo-reg + asm) cover BCC extensions.
+
+- `2120` (**`asm { ... }` block**): multi-line
+  inline assembly in braces. Each line emits one
+  instruction. Equivalent to multiple `asm
+  <instr>;` statements:
+  ```c
+  asm {
+    mov ax, x
+    add ax, 5
+    mov x, ax
+  }
+  ```
+  Output: `8b 46 fe / 05 05 00 / 89 46 fe` (9
+  bytes). Same as the separate-line form.
+- `2121` (**`#pragma warn -ccc`**): disables a
+  specific warning class at PP level. **No OBJ
+  effect** — the directive only influences the
+  compiler's warning emission, not the code.
+- `2122` (**pseudo-registers `_AX`, `_BX`, ...**):
+  Borland-specific: `_AX` in a C expression reads
+  the current AX register value. Combined with
+  inline asm to do byte-swap:
+  ```c
+  asm mov ax, x          // load x into AX
+  asm xchg ah, al        // swap bytes (86 c4)
+  return _AX;            // return current AX
+  ```
+  No `mov ax, ax` shuffling — `_AX` directly
+  exposes the register. Result: `0x1234` → `0x3412`
+  (byte-swapped).
+
+**Pseudo-register summary** (BCC extension):
+| Pseudo | Register |
+|--------|----------|
+| `_AX`, `_BX`, `_CX`, `_DX` | 16-bit GP |
+| `_AL`, `_BL`, `_CL`, `_DL` | low 8-bit halves |
+| `_AH`, `_BH`, `_CH`, `_DH` | high 8-bit halves |
+| `_SI`, `_DI`, `_BP`, `_SP` | index/stack |
+| `_CS`, `_DS`, `_SS`, `_ES` | segment |
+| `_FLAGS` | flags word (some variants) |
+
+These are useful when interfacing inline asm with
+C code — the C statement after the asm can pick
+up the asm's result without an explicit `mov` to
+a C variable.
+
+For the Rust reimplementation:
+- Parse `asm { ... }` block syntax.
+- Pragmas: emit as no-op directives, with side
+  effects on warning state.
+- Pseudo-registers: parse as primary expressions
+  that map directly to register operands.
+
 ## `#undef`+`#define` redefines; `defined()` operator; `asm` keyword = literal inline assembly
 
 Fixtures `2117` (undef), `2118` (defined()), `2119`
