@@ -1959,6 +1959,130 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Args > 127B offset use `/86 disp16`; `(char*)p + 4` is byte arith; `int (*p)[3]` strides by row; `(*p)++` = `inc word [si]`; ptr casts no-op
+
+Fixtures `2327`-`2332` cover encoding scales,
+pointer arithmetic kinds, and casts.
+
+- `2327` (**many args needing disp16**): fn with
+  64 int args. ggg (59th arg) at offset +120
+  fits disp8, but lll (64th arg) at offset +130
+  exceeds it:
+  ```
+  ; In many(... ggg, ..., lll):
+  8b 46 78               ; mov ax, [bp+0x78]  (ggg, disp8)
+  03 86 82 00            ; add ax, [bp+0x82]  (lll, disp16)
+  ```
+  ModR/M `/86 disp16` (4-byte form) for the
+  disp16 access; `/46 disp8` (3-byte) for ggg.
+- `2328` (**pointer cast int arith**):
+  `(int *)((char *)p + 4)` does **byte
+  arithmetic** (char* doesn't scale):
+  ```
+  mov ax, [p]
+  add ax, 4              ; raw byte add — char* arith
+  mov si, ax              ; cast back to int*
+  mov ax, [si]            ; *q = a[2]
+  ```
+  For int*, +N scales by sizeof; for char*, +N is
+  literal bytes. The cast is a type-only change.
+- `2329` (**`int (*p)[3]` row-stride pointer**):
+  p points to an array-of-3-ints. `p + 1`
+  advances by sizeof(int[3]) = 6 bytes:
+  ```
+  mov si, mat                ; si = &mat[0]
+  mov ax, [si+2]             ; (*p)[1] = mat[0][1]
+  add ax, [si+10]            ; (*(p+1))[2] = mat[1][2]
+  add ax, [si+12]            ; (*(p+2))[0] = mat[2][0]
+  ```
+  Stride embedded in compile-time offsets.
+- `2330` (**static vs auto init cost**):
+  ```
+  ; static int counter = 100; — initialized ONCE at startup
+  _DATA: [64 00]               ; the 100 sits here
+  
+  ; In sm():
+  inc word [counter_addr]     ; ff 06 00 00 (FIXUPP)
+  mov ax, [counter_addr]
+  
+  ; int counter = 100; — initialized EACH call:
+  mov si, 100                  ; be 64 00 (runtime!)
+  inc si
+  ```
+  Static = zero per-call init cost; auto = 3 byte
+  init each call.
+- `2331` (**`(*p)++` and `++*p` collapse to `inc
+  word [si]`**):
+  ```
+  mov si, [p]
+  inc word [si]              ; ff 04 — (*p)++
+  inc word [si]              ; ff 04 — ++*p
+  ```
+  When the value isn't used, pre/post difference
+  disappears.
+- `2332` (**fn ptr cast through void* no-op**):
+  ```
+  ; fp = offset(two);    ; just 2 bytes (near ptr)
+  ; vp = (void*)fp;       ; copy same 2 bytes
+  ; fp2 = (...)(vp);     ; copy back same 2 bytes
+  ; fp2();
+  
+  c7 46 fe 00 00            ; fp = FIXUPP
+  mov ax, [fp]
+  mov [vp], ax              ; just copy
+  mov ax, [vp]
+  mov [fp2], ax             ; just copy
+  ff 56 fa                   ; call near [fp2]
+  ```
+  All casts are pure type system; same bit pattern
+  flows through.
+
+**Pointer arithmetic scaling table**:
+| Pointer type | `p + N` adds | Sizeof(*p) |
+|--------------|--------------|------------|
+| `char *` | N bytes | 1 |
+| `short *` | N × 2 bytes | 2 |
+| `int *` | N × 2 bytes | 2 |
+| `long *` | N × 4 bytes | 4 |
+| `float *` | N × 4 bytes | 4 |
+| `double *` | N × 8 bytes | 8 |
+| `void *` | N bytes (extension) | 1 |
+| `T (*)[K]` (ptr-to-array) | N × K × sizeof(T) | K × sizeof(T) |
+| `T **` | N × 2 bytes (near) | 2 |
+| Struct ptr | N × sizeof(struct) | sizeof(struct) |
+
+**ModR/M displacement threshold (refined)**:
+- offset in [-128, 127]: disp8 form `/46 disp8` (3B)
+- offset outside: disp16 form `/86 disp16` (4B)
+- Per-access decision; BCC picks per ModR/M
+
+**Type-cast codegen impact** (pointer-related):
+| Cast | Codegen |
+|------|---------|
+| Same-size T1* → T2* | No-op (pure type) |
+| char* → int* (read) | Same |
+| int* → char* (read) | Same |
+| Function ptr → void* | No-op (same offset) |
+| void* → function ptr | No-op (same offset) |
+| Cross-model conversion | (e.g., far-to-near may need segment handling) |
+
+**Static vs auto initializer costs (final)**:
+| Storage | Where init lives | Per-call cost |
+|---------|------------------|---------------|
+| `static int x = N` | `_DATA` template | 0 bytes |
+| `static int x` (uninit) | `_BSS` zeros | 0 bytes |
+| `int x = N` (auto) | Inlined in prologue | ~5 bytes/var |
+| `int x` (auto, uninit) | (no init code) | 0 bytes |
+
+For the Rust reimplementation:
+- Track arg/local offsets; emit disp8 vs disp16
+  per access.
+- Scale ptr arith by sizeof of pointee.
+- Casts on pointers: type system only, no
+  codegen.
+- Static init: emit `_DATA` template once;
+  auto init: emit `mov` in prologue.
+
 ## `while(1)` = unconditional jmp at bottom; `do {} while(0)` = body once no loop; partial init zero-fills; nested struct flat layout
 
 Fixtures `2321`-`2326` cover const-condition
