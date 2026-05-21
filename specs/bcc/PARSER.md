@@ -1959,6 +1959,56 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `-O` consistent across expr sites; `-r-` disables reg-alloc (vars in mem); recursion -O removes ~4B
+
+Fixtures `2126` (-O multi expr), `2127` (-r-
+disable reg-alloc), `2128` (-O recursive
+factorial) confirm/refine flag effects.
+
+- `2126` (**-O across multi-expr**): no `eb 00`
+  between expressions or before epilogue. Both x
+  and y still enregister (SI/DI) — `-O` doesn't
+  change register allocation, just removes the
+  trailing no-op.
+- `2127` (**`-r-` disables register allocation**):
+  3 locals → 3 stack slots (`83 ec 06` for 6
+  bytes). All accesses via `[bp+disp]`. None
+  enregistered into SI/DI/BX:
+  ```
+  c7 46 fe 05 00          ; x = 5 (stack)
+  c7 46 fc 0a 00          ; y = 10 (stack)
+  c7 46 fa 14 00          ; z = 20 (stack)
+  mov ax, [x] / add ax, [y] / add ax, [z]
+  ```
+  Larger code, more memory traffic. Useful only
+  for debug/analysis.
+- `2128` (**-O recursive factorial**): `-O`
+  removes `eb 00` at every expression site. In
+  recursive functions with multiple expressions,
+  saves 2 bytes per site. Net savings = 2 × N
+  sites.
+
+**Optimization-flag effects** (full):
+| Flag | Effect | Per-fn bytes saved |
+|------|--------|---------------------|
+| `-O` | Remove `eb 00` no-ops at expression ends | ~2 × #expr |
+| `-d` | Merge duplicate string literals | varies |
+| `-G` | (no observable trivial effect) | 0 |
+| `-r` (default on) | Enable register allocation | (vars in SI/DI/BX) |
+| `-r-` | DISABLE register allocation | -varies (worse code) |
+
+**Register-allocation control summary**:
+- Default (`-r` on): up to ~3 enregistered ints
+  per function (pool {SI, BX, DI, CX, DX} per
+  rules).
+- `-r-`: all locals on stack.
+
+For the Rust reimplementation:
+- `-O`: trivially implementable as "don't emit
+  the trailing `eb 00`."
+- `-r-`: skip the register-allocation phase;
+  emit every local as a stack slot.
+
 ## `-O` strips trailing `eb 00` no-op (-2B per expr); `-d` merges string dupes; `-G` no observable effect
 
 Fixtures `2123` (-G flag), `2124` (-d merge
