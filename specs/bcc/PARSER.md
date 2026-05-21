@@ -1959,6 +1959,49 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `//` comments supported (extension); `#define` expanded at PP; `#ifdef` removes untaken branch
+
+Fixtures `2114` (C++ comments), `2115` (#define
+macros), `2116` (#ifdef) cover preprocessor
+behaviour.
+
+- `2114` (**C++-style `//` comments**): BCC 2.0
+  **supports `//` comments as an extension** (not
+  part of C89). Same OBJ output as if the
+  comments weren't there — stripped at PP.
+- `2115` (**`#define` macros**): both object-like
+  (`#define MAX 100`) and function-like (`#define
+  DOUBLE(x) ((x)*2)`) macros expand at PP.
+  `DOUBLE(20)` substitutes to `((20)*2) = 40`,
+  which constant-folds. Compiler sees only the
+  post-expansion source. Symbol `MAX` becomes
+  literal 100 wherever used.
+- `2116` (**`#ifdef`/`#else`/`#endif`**): resolves
+  at preprocessing. Only the **taken branch** is
+  in the compiled OBJ. The untaken branch is
+  invisible — no conditional code at all.
+
+**Preprocessor summary**:
+| Directive | Resolution | Output effect |
+|-----------|------------|----------------|
+| `//` comment | Lex strip | None |
+| `/* */` comment | Lex strip | None |
+| `#define X 100` | Lex substitution | `X` → `100` |
+| `#define F(x) ((x)*2)` | Lex substitution + paren | Function-like macro expansion |
+| `#ifdef X / #else / #endif` | PP-time | Only one branch compiled |
+| `#include "file"` | PP-time | File inlined |
+| `#include <file>` | PP-time | System file inlined |
+| `#pragma`, `#error`, etc. | (BCC-specific) | Various |
+
+So preprocessing is **fully lexical** and runs
+before BCC's tokenizer sees the source.
+
+For the Rust reimplementation:
+- Implement `//` comments alongside `/* */`.
+- Macro expansion in lex/PP phase.
+- `#ifdef` etc. control inclusion before the
+  parser runs.
+
 ## Char literal = parse-time int; `\xNN`/`\NNN` byte escapes; adjacent strings concat at parse
 
 Fixtures `2111` (char literals), `2112` (hex/
