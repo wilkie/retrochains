@@ -1959,6 +1959,67 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Switch only-default = unconditional body; fall-through = linear bodies; multi-case shares one target
+
+Fixtures `2222` (switch default-only), `2223`
+(fall-through), `2224` (multi-case shared body)
+cover switch-statement edge cases.
+
+- `2222` (**switch with only default**): no cases
+  to check — default body executed unconditionally:
+  ```
+  ; switch (x) { default: r = 99; break; }
+  ; (no jcc structure, just the body)
+  mov word [r], 99
+  ; jmp +0 (no-op for break/end)
+  ```
+- `2223` (**fall-through cases**): each case body
+  emitted in order; no inter-case jmp; control
+  flows through:
+  ```
+  ; switch(x) { case 1: r+=10; case 2: r+=20; case 3: r+=30; }
+  cmp ax, 1 / je case1
+  cmp ax, 2 / je case2
+  cmp ax, 3 / je case3
+  jmp end                 ; no default — fall out
+  case1: add si, 10
+  case2: add si, 20       ; falls through from case1
+  case3: add si, 30       ; falls through from case2
+  end:
+  ```
+  For x=1, all three case bodies execute: r = 10+20+30 = 60.
+- `2224` (**multi-case shared action**): all `case
+  N:` labels for the same action point to a
+  single shared target — body emitted once:
+  ```
+  ; switch(x) { case 1: case 2: case 3: r=100; break; default: r=0; }
+  cmp ax, 1 / je shared
+  cmp ax, 2 / je shared    ; same target
+  cmp ax, 3 / je shared    ; same target
+  jmp default              ; (no match)
+  shared:
+    mov si, 100
+    jmp end                 ; break
+  default:
+    xor si, si
+  end:
+  ```
+
+**Switch codegen tactics summary** (refined):
+| Pattern | Tactic |
+|---------|--------|
+| Default only | Emit body unconditionally |
+| Fall-through | Linear bodies, no inter-case jmp |
+| Multi-case same action | Shared label target |
+| Dense cases (≥ 4 contiguous) | Jump table |
+| Sparse cases (≤ 3 or non-contiguous) | Linear cmp/je chain |
+| Sparse but ≥ 4 cases | Search table |
+
+For the Rust reimplementation:
+- Default-only switch: bypass jcc; emit body.
+- Multi-case same action: dedup labels.
+- Fall-through: no extra jmp between case bodies.
+
 ## `(char)int` = free low-byte load; `(int)uchar` = `mov ah, 0`; `char + int` = cbw then add
 
 Fixtures `2219` (int↔char round-trip), `2220`
