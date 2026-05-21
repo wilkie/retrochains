@@ -1959,6 +1959,57 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## 3-clause `&&` linearises; `!cmp` folds via inverted jcc; comma yields last operand
+
+Fixtures `1859` (`a && b && c`), `1860` (`!(a <
+b)`), and `1861` (`x = (n++, n++, n++)`) cover
+remaining boolean/comma edge cases.
+
+- `1859` (**3-clause `&&`**): emits **3 sequential
+  cmp+je pairs** with progressively-shorter
+  forward jumps to the same false-target (17, 11,
+  5 bytes). Each subexpression tested in order;
+  any zero skips to false. Standard `&&`
+  linearisation extended to N clauses.
+- `1860` (**`!(a < b)` folds via inverted jcc**):
+  the `!` of a comparison is **simplified at parse
+  time** — no boolean materialization needed.
+  ```
+  cmp ax, b
+  jl L_false        ; flipped from jge — was "false-branch for <" = jge; with ! it inverts to jl
+  ; true block
+  ```
+  Effectively: `!(a < b)` lowers to the same code
+  as `if (a >= b)` (with the true/false branches
+  arranged so the false-branch jcc is `jl`).
+  
+  General rule: **`!` on any comparison flips the
+  false-branch jcc** at parse time, never
+  computing the boolean value of the inner cmp.
+- `1861` (**comma yields last operand**): `(n++,
+  n++, n++)` discards intermediate values; only
+  the **last operand's value** is yielded. With
+  n=0 initial:
+  ```
+  xor si, si        ; n = 0
+  inc si            ; 1st n++ (value discarded), n=1
+  inc si            ; 2nd n++ (value discarded), n=2
+  mov [x], si       ; x = 2 (pre-inc value of 3rd n++)
+  inc si            ; 3rd n++'s post-inc, n=3
+  ```
+  Each subexpression emits its side-effect; the
+  last one's value is captured into the
+  assignment target (handled with the same pre-/
+  post-inc capture-order rule).
+
+For the Rust reimplementation:
+- `&&` and `||` always emit short-circuit jcc
+  chains, never materialise intermediate booleans.
+- `!` on a comparison flips the jcc; never compute
+  the boolean and negate.
+- Comma operator emits each subexpr for side
+  effects, captures only the last as value.
+
 ## Short-circuit `&&` chains `je/jne`; `||` jumps to true; each operand standalone tested
 
 Fixtures `1856` (`a && b`), `1857` (`a || b`), and
