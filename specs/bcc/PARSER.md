@@ -1959,6 +1959,57 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## -ml: params at `[bp+6]+`; long add unchanged; mul unchanged; struct call uses `push cs`
+
+Fixtures `1745` (long add in -ml), `1746` (struct
+by value in -ml), and `1747` (mul by 17 in -ml)
+extend the large-model coverage and confirm cross-
+model orthogonality.
+
+- `1745` (**long add in large model**): the inline
+  `add low / adc high` sequence is **byte-identical**
+  to small model — the only OBJ-level difference is
+  `5d cb` (retf) instead of `5d c3` (ret) in the
+  epilogue. Long arithmetic helpers (which would
+  appear as EXTDEFs) would also be unchanged
+  names. So IR-level long-op encoding is fully
+  model-independent.
+- `1746` (**small struct by value in -ml**): the
+  decomposition into 2 word pushes is the same,
+  but the param offsets shift:
+  ```
+  small (-ms):  arg1 at [bp+4], arg2 at [bp+6]
+  large (-ml):  arg1 at [bp+6], arg2 at [bp+8]
+  ```
+  The +2 shift accounts for the **4-byte far
+  return address** (seg + off) on the stack instead
+  of 2 bytes. Call site uses the **`push cs ;
+  call near`** 4-byte sequence (vs 3-byte `call
+  near` in small).
+- `1747` (**mul by 17 in -ml**): `mov dx, 17 /
+  imul dx` is byte-identical to small model except
+  the `5d cb` retf. Confirms integer arithmetic
+  operations are fully model-independent.
+
+So the cross-model parameter rules:
+| Slot | Small (`-ms`) | Large (`-ml`) |
+|------|---------------|---------------|
+| saved BP | [bp+0..1] | [bp+0..1] |
+| return addr | [bp+2..3] (near) | [bp+2..5] (far) |
+| arg1 | [bp+4..5] | [bp+6..7] |
+| arg2 | [bp+6..7] | [bp+8..9] |
+| ... | each +2 from arg1 | each +2 from arg1 |
+
+For the Rust reimplementation:
+- Parameterize `arg_offset_base = (small ? 4 : 6)`
+  in the codegen.
+- The `near` vs `far` ABI is purely an emission-
+  layer concern — the parser/AST stays the same.
+- Adding new -ml fixtures cheaply verifies that
+  the encoder's model parameter works correctly
+  by re-running the same C source under different
+  flags.
+
 ## Sparse switch search-table CS-relative; block scope reuses slots; typedef fn-ptr identical
 
 Fixtures `1742` (sparse switch large base), `1743`
