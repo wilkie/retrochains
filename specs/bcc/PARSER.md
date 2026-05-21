@@ -1959,6 +1959,59 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `sar` same threshold; `add ax, imm16` uses 0x05 AX-form (3B); AND uses 0x25 always
+
+Fixtures `1838` (`sar` by 3), `1839` (`add ax,
+1000` AX-form), and `1840` (AND with 127 / 128)
+verify the shift-threshold uniformity and the
+AX-imm encoding preferences.
+
+- `1838` (**`sar` follows threshold**): signed
+  `x >> 3` emits **three `sar ax, 1` unrolled**
+  (`d1 f8 d1 f8 d1 f8`). Same threshold rule as
+  `shl/shr` — uniform across all shift opcode
+  families.
+- `1839` (**`add ax, imm16` uses 0x05 AX-form**):
+  for `x + 1000` where x is in AX, BCC emits
+  **`05 e8 03`** (`add AX, imm16`, 3 bytes) instead
+  of the generic `81 c0 imm16` (4 bytes). AX has
+  dedicated short-form opcodes for many arithmetic
+  ops:
+  | Op | AX-form (3B) | Generic (4B) |
+  |----|-------------|--------------|
+  | `add ax, imm16` | `05 imm16` | `81 c0 imm16` |
+  | `sub ax, imm16` | `2d imm16` | `81 e8 imm16` |
+  | `cmp ax, imm16` | `3d imm16` | `81 f8 imm16` |
+  | `and ax, imm16` | `25 imm16` | `81 e0 imm16` |
+  | `or  ax, imm16` | `0d imm16` | `81 c8 imm16` |
+  | `xor ax, imm16` | `35 imm16` | `81 f0 imm16` |
+  
+  BCC consistently prefers AX-forms when applicable.
+- `1840` (**AND always uses imm16, never imm8-
+  sext**): both `x & 127` (= 0x7F, fits imm8-sext)
+  and `x & 128` (= 0x80, doesn't fit imm8-sext)
+  emit the **`25 imm16` AX-form** (3 bytes).
+  AND/OR/XOR **never** use the `83 /N imm8-sext`
+  encoding — the sign-extension of high bit would
+  be wrong for bitwise ops. Always full imm16,
+  ensuring correct semantics for high-bit-set
+  values.
+
+So the encoding-policy table is now fully
+characterised:
+- **ADD/SUB/CMP**: imm8-sext (`83 /N`) when value
+  fits, else imm16 (or AX-form `0X` if dest is AX)
+- **AND/OR/XOR**: always imm16 (or AX-form),
+  never imm8-sext (would break bit-pattern
+  semantics)
+
+For the Rust reimplementation:
+- Prefer AX-form opcodes (`05`, `2d`, `3d`, `25`,
+  `0d`, `35`) over generic ones when the
+  destination is AX.
+- Bitwise ops always use full imm16 (or imm8
+  with `80 /N` for byte ops).
+
 ## Threshold uniform for shl/shr; `x * pow2` recognises and applies same rule
 
 Fixtures `1835` (`x << 3`), `1836` (`x * 32` =
