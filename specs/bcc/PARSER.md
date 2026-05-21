@@ -1959,6 +1959,59 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Struct modify via ptr; 2B struct returns in AX only; rotate idiom NOT recognised
+
+Fixtures `1955` (struct modify via ptr), `1956`
+(2B struct return), `1957` (rotate via shifts +
+or) cover three smaller idioms.
+
+- `1955` (**struct modify via ptr arg**): callee
+  pattern:
+  ```
+  mov si, [p]              ; load ptr
+  mov ax, [x] / mov [si], ax        ; p->x = x at offset 0
+  mov ax, [y] / mov [si+2], ax      ; p->y = y at offset 2
+  ```
+  Each field uses `[si]` (2B) for offset 0, or
+  `[si+disp]` (3B) for non-zero offsets. Ptr
+  loaded once into SI for all field accesses.
+- `1956` (**2B struct return = AX only**): a
+  struct with a single 2-byte field returns in
+  **just AX** (no DX). Same protocol as int:
+  ```
+  mov ax, [o.x]
+  ret
+  ```
+  Caller does `mov [s.x], ax`. So **1-int
+  struct return = int return**.
+- `1957` (**rotate idiom NOT recognised**): `(x
+  << 4) | (x >> 12)` (a logical rotate-left by 4)
+  emits the literal sequence:
+  ```
+  mov ax, [x] / mov cl, 4 / shl ax, cl
+  mov dx, [x] / mov cl, 12 / shr dx, cl
+  or ax, dx
+  ```
+  ~10 bytes. BCC does **not recognize the rotate
+  pattern** to emit `mov cl, 4 / rol ax, cl` (4
+  bytes). No advanced pattern-matching beyond
+  arithmetic constant folding.
+
+**Struct return size matrix** (refined):
+| Struct size | Return mechanism |
+|-------------|------------------|
+| 2 bytes (1 int) | AX only (same as int) |
+| 4 bytes (2 ints) | DX:AX |
+| > 4 bytes | Hidden dest ptr + N_SCOPY@ × 2 |
+
+For the Rust reimplementation:
+- Struct modify via ptr: load ptr to BX/SI, each
+  field stored via `[reg+offset]`.
+- Tiny structs (≤2B): return like the underlying
+  scalar.
+- No rotate idiom recognition — emit literal shifts
+  + or.
+
 ## ≤4B struct asg = inline mov-pair; >4B = N_SCOPY@; many calls = push/pop accumulate
 
 Fixtures `1952` (4B struct asg), `1953` (8B struct
