@@ -1959,6 +1959,45 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Infinite loops `while(1)`/`for(;;)`/`do-while(1)` = body + jmp top; no test emitted
+
+Fixtures `2039` (while(1)), `2040` (for(;;)),
+`2041` (do-while(1)) confirm infinite-loop
+codegen.
+
+- `2039` (**`while (1) { body }`**): no test
+  emitted at the top. Just body + unconditional
+  `jmp` back:
+  ```
+  L_top:
+    body
+    jmp L_top                ; eb f6 (no test)
+  L_break:
+  ```
+- `2040` (**`for (i=0;; i++) { body }`**): empty
+  cond treated as always-true. Init runs first,
+  then loop: body + update + jmp top.
+- `2041` (**`do {body} while (1)`**): **byte-
+  identical** to `while (1) {body}` — both
+  compile to body + jmp top.
+
+**Infinite-loop codegen summary**:
+| Construct | Codegen |
+|-----------|---------|
+| `while (1) {body}` | `L_top:` body + `jmp L_top` |
+| `do {body} while (1)` | (same — byte-identical) |
+| `for (init;; update) {body}` | init + `L_top:` body + update + `jmp L_top` |
+| `for (;;) {body}` | `L_top:` body + `jmp L_top` |
+| `while (literal-non-zero N) {body}` | (probably same as while(1)) |
+
+Always-true conditions elide the test entirely.
+The cmp/jcc is eliminated at parse time.
+
+For the Rust reimplementation:
+- Detect literal-non-zero conditions in if/while/
+  do/for; elide the test instruction.
+- Always emit `jmp top` for the back-edge.
+
 ## Cleanup is byte-based not arg-based: long-arg (4B) uses pops; int+long (6B) uses add sp
 
 Fixtures `2036` (3 int args = 6B), `2037` (long
