@@ -1959,6 +1959,82 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `-d` merges duplicate string literals (single `_DATA` copy); `-K` makes `char` unsigned (zero-ext via `mov ah, 0`)
+
+Fixtures `2282` (-d merge effect), `2283` (no -d
+baseline), `2284` (-K unsigned char) characterise
+data-side flags.
+
+- `2282` (**-d merge strings**): both pointers
+  `a` and `b` point to the same string in
+  `_DATA`:
+  ```
+  _DATA layout (-d):
+    [04 00]              ; a → offset 4
+    [04 00]              ; b → offset 4 (SAME!)
+    [hello\0]            ; "hello" at offset 4
+  
+  Total: 10 bytes
+  ```
+  `a == b` returns 1.
+- `2283` (**no -d, separate strings**):
+  ```
+  _DATA layout (no -d):
+    [04 00]              ; a → offset 4
+    [0a 00]              ; b → offset 10 (different)
+    [hello\0]            ; first copy at offset 4
+    [hello\0]            ; second copy at offset 10
+  
+  Total: 16 bytes
+  ```
+  `a == b` returns 0. Code generated is identical
+  between -d and no-d; only data differs.
+- `2284` (**-K unsigned char**): `(int)char` uses
+  zero-extend `mov ah, 0` instead of `cbw`:
+  ```
+  ; With -K, c = 200 (unsigned char):
+  mov al, [c]
+  mov ah, 0                ; b4 00 (zero-extend)
+  mov [n], ax              ; n = 200
+  ```
+  Without -K (signed char), `cbw` would sign-
+  extend 0xC8 → 0xFFC8 = -56.
+
+**Data-side flag effects**:
+| Flag | Effect on data | Effect on code |
+|------|----------------|----------------|
+| `-d` | Merge duplicate string literals | None |
+| `-K` | None | Char→int uses zero-ext (mov ah, 0) |
+| `-f-` | None (no float linkage) | (probable) |
+
+**Char signedness comparison**:
+```
+char c = 200;     // 0xC8 — signed = -56, unsigned = 200
+int n = c;
+
+// Without -K (signed char):
+mov al, [c]
+cbw            ; ah = 0xFF (sign bit replication) → n = 0xFFC8 = -56
+
+// With -K (unsigned char):
+mov al, [c]
+mov ah, 0       ; ah = 0x00 → n = 0x00C8 = 200
+```
+
+**String literal merging**:
+- Without `-d`: each occurrence of `"hello"` gets
+  its own slot in `_DATA`
+- With `-d`: identical strings share a single
+  slot, reducing data size
+- Comparison: `"abc" == "abc"` (literal == literal)
+  is TRUE with -d, FALSE (usually) without
+
+For the Rust reimplementation:
+- `-d`: implement string-literal deduplication
+  pass before `_DATA` emission.
+- `-K`: make char default unsigned; emit
+  `mov ah, 0` for char→int casts.
+
 ## `-2` (286) = mostly same as -1 in trivial cases; `-D NAME=val` macro substitutes at parse; `-O` strips `eb 00` no-ops
 
 Fixtures `2279` (-2 286), `2280` (-D define),
