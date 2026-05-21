@@ -1959,6 +1959,82 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## NEW: 3rd switch strategy — linear-search table for sparse N ≥ 4 cases (uses `loop` insn)
+
+Fixtures `1907` (base 0), `1908` (huge-gap),
+`1909` (negative base) uncover a **third switch
+codegen strategy** plus boundary refinements.
+
+- `1907` (**base = 0 omits subtract**): when the
+  lowest case value is 0, BCC **omits the
+  normalization step** entirely:
+  ```
+  mov bx, [x]
+  cmp bx, 3            ; bounds (no sub needed, x already 0-based)
+  ja L_after
+  shl bx, 1
+  cs: jmp [bx + table]
+  ```
+  Most compact form (4 fewer bytes than base≠0).
+- `1908` (**large gap → linear-search TABLE**):
+  cases 1, 2, 3, 50 (huge gap) use a **brand new
+  strategy** — neither jump table nor cmp/je chain:
+  ```
+  mov [tmp], x
+  mov cx, 4              ; loop count = N cases
+  mov bx, value_table    ; ptr to case-value table
+  loop_top:
+  cs: mov ax, [bx]       ; load case value
+  cmp ax, [tmp]
+  je L_found             ; match → use this case
+  inc bx / inc bx        ; bx += 2 (next value)
+  loop loop_top          ; CX-- + jump if non-zero
+  jmp L_default          ; no match
+  L_found:
+  cs: jmp [bx + 8]       ; bx points into value_table;
+                          ; +8 = offset to corresponding target_table entry
+  
+  ; two parallel tables in code segment:
+  value_table:  dw 1, 2, 3, 50      ; the case values
+  target_table: dw L_c1, L_c2, L_c3, L_c50  ; corresponding bodies
+  ```
+  The `bx + 8` trick: BX iterates the value-
+  table; once matched, the matching index also
+  identifies the target-table entry at offset
+  `+sizeof(value_table)` (= 8 bytes for 4 cases).
+  
+  Uses the **`loop` instruction** (`e2 rel8`) for
+  compact CX-counted iteration. This is a
+  **third codegen strategy** for switch:
+  - Linear cmp/je chain (for ≤ 3 cases or sparse-
+    few)
+  - Jump table (≥ 4 cases, range small)
+  - **Linear-search value table** (≥ 4 cases,
+    range large)
+  
+  Threshold for jump-table vs linear-search-table
+  not yet pinned, but ≥ ~10× more values than
+  cases probably triggers the switch.
+- `1909` (**negative base**): cases -2 to 1 (base
+  -2) uses `sub bx, -2` encoded as `83 eb fe`
+  (imm8-sext to 0xFFFE = -2). Negative bases work
+  correctly via sign-extension semantics of
+  imm8-sext.
+
+**Three switch strategies summary**:
+| Pattern | Detection | Lowering |
+|---------|-----------|----------|
+| Linear chain | N ≤ 3 OR sparse with small N | cmp ax, K / je ... per case |
+| Jump table | N ≥ 4, range small | sub/dec normalize, bounds, shl, cs:jmp [table] |
+| Search table | N ≥ 4, range large | cx-count loop over value_table, cs:jmp [bx+offset] |
+
+For the Rust reimplementation:
+- Add the linear-search-table strategy to switch
+  lowering.
+- Base = 0: omit normalization step.
+- Base < 0: use `sub bx, K` (imm8-sext handles
+  negative).
+
 ## Switch jump-table: gaps point to L_after; default = `ja L_default`; non-1 base uses `sub bx, K`
 
 Fixtures `1904` (4 cases with gap), `1905` (4
