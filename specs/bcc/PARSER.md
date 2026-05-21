@@ -1959,6 +1959,61 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## uchar arg passed as word (hi undef); 2D char arr flat row-major; caller promotes byte args
+
+Fixtures `1991` (uchar arg), `1992` (2D char
+array init), `1993` (uchar args promoted) cover
+char/uchar parameter passing semantics.
+
+- `1991` (**uchar arg passed as full word**):
+  even though the param is `unsigned char`, BCC
+  pushes a **16-bit word** (high byte
+  undefined). Callee uses byte ops on the low
+  half:
+  ```
+  ; in callee:
+  mov bl, [bp+4]            ; load byte from arg slot
+  ; ... operate on bl, zero-extend via b4 00 as needed
+  ```
+  Caller pushes via `mov al, [c] / push ax` —
+  high byte AH whatever-was-there.
+- `1992` (**2D char array init**): `char grid[2]
+  [3]` lays out **flat 6 bytes row-major** in
+  `_DATA` template ("ABCDEF"); N_SCOPY@ copies
+  to stack at fn entry. Constant indices resolve
+  to byte offsets via row*width + col.
+- `1993` (**uchar args promoted to int at call
+  site**): when passing `unsigned char` values
+  to a fn taking `int`:
+  ```
+  mov al, [x]               ; load byte
+  mov ah, 0                 ; zero-extend
+  push ax                   ; push as int
+  ```
+  Caller does the byte→int promotion **before
+  the push**. Consistent with C's integer-
+  promotion rules.
+
+**Char/uchar promotion summary**:
+| Source | Target | Where | Mechanism |
+|--------|--------|-------|-----------|
+| `char` value | `int` use | Site of use | `cbw` (1B, sign-ext) |
+| `unsigned char` value | `int` use | Site of use | `mov ah, 0` (2B, zero-ext) |
+| `char` arg | `int` arg | At call site | `cbw` then push |
+| `unsigned char` arg | `int` arg | At call site | `mov ah, 0` then push |
+| Byte return | Byte | In AL only | High half undef |
+
+So **callers handle the promotion**, not callees.
+This matches K&R C semantics where all char args
+are promoted to int by the caller.
+
+For the Rust reimplementation:
+- Track char/uchar/short types through expressions.
+- Emit sign/zero-extend at promotion points.
+- Caller emits the promotion before push; callee
+  reads only the low half (signed extension is
+  caller's responsibility for sub-int args).
+
 ## uchar→int via `mov ah, 0`; bool arith materialises each cmp; empty-body while w/ side-effect-cond
 
 Fixtures `1988` (unsigned char return), `1989`
