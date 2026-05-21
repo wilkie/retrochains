@@ -1959,6 +1959,72 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Bool→int = full template; do-while-cmp loops back via fwd-jcc; string table = ptrs into `_DATA`
+
+Fixtures `1919` (bool-to-int store), `1920`
+(do-while with cmp), `1921` (string table) cover
+three more idioms.
+
+- `1919` (**bool→int store uses full template**):
+  `int b = (x > 0);` (value context) emits the
+  full materialization:
+  ```
+  or si, si              ; zero-test x
+  jle L_false            ; inverse jcc (NOT >  is <=)
+  mov ax, 1
+  jmp end
+  L_false: xor ax, ax
+  end: mov [b], ax
+  ```
+  Same template for all comparison-to-int
+  assignments. Contrast with **boolean context**
+  (in `if`/`while`) which just emits cmp+jcc and
+  doesn't materialize.
+- `1920` (**do-while-cmp loops back via fwd-
+  jcc**): `do { body; i++; } while (i < 10);`
+  emits:
+  ```
+  body:
+    add di, si      ; sum += i
+    inc si          ; i++
+    cmp si, 10
+    jl body         ; loop while i < 10
+  ```
+  Note: **`jl` is the forward-sense jcc** here —
+  jump-if-less = continue while i < 10. Do-while
+  loops back when the condition is TRUE, so the
+  jcc direction is **non-inverse** (matching the
+  source-level comparator).
+  
+  Contrast with `if (i < 10) X;` where the jcc
+  for the false-branch is `jge` (inverse).
+- `1921` (**string table = ptrs into `_DATA`**):
+  `char *table[3] = ...` assigns FIXUPP'd offsets
+  to slots. The strings themselves are stored
+  consecutively in `_DATA`:
+  ```
+  ; data:  AB\0CD\0EF\0  at offsets 0, 3, 6
+  c7 46 fa 00 00         ; table[0] = "AB"@0
+  c7 46 fc 03 00         ; table[1] = "CD"@3
+  c7 46 fe 06 00         ; table[2] = "EF"@6
+  ```
+  Access `table[1][0]` is 2-step: load ptr from
+  slot, then deref the ptr.
+
+**Boolean vs value context revisited**:
+| Context | Codegen |
+|---------|---------|
+| boolean (if/while/for cond) | cmp + jcc directly |
+| value (assigned, returned) | cmp/jcc + mov ax,1/jmp/xor ax,ax template |
+
+For the Rust reimplementation:
+- Track expression context (boolean vs value); use
+  different lowering for comparisons.
+- do-while bottom-test uses fwd-sense jcc; while-
+  top-test uses inverse-sense jcc.
+- String table = array of offset-FIXUPPs into
+  consecutive strings in `_DATA`.
+
 ## Static fn = internal linkage no PUBDEF; string concat parse-time; arr of fn-ptr = word slots
 
 Fixtures `1916` (static fn), `1917` (string
