@@ -1959,6 +1959,65 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## ≤4B struct asg = inline mov-pair; >4B = N_SCOPY@; many calls = push/pop accumulate
+
+Fixtures `1952` (4B struct asg), `1953` (8B struct
+asg), `1954` (many fn calls) cover struct-copy
+and accumulation patterns.
+
+- `1952` (**4B struct asg = inline mov-pair**):
+  for `struct P {int x; int y;}` (4 bytes), `b =
+  a` emits:
+  ```
+  mov ax, [a.y]       ; load high field
+  mov dx, [a.x]       ; load low field
+  mov [b.y], ax
+  mov [b.x], dx
+  ```
+  All fields loaded into registers (AX + DX),
+  then stored. No helper call. Fast for small
+  structs.
+- `1953` (**>4B struct asg uses N_SCOPY@**): same
+  threshold as pass-by-value. For 8-byte struct:
+  ```
+  lea ax, [y]            ; dest offset
+  push ss / push ax      ; dest far ptr
+  lea ax, [x]            ; source offset
+  push ss / push ax      ; source far ptr
+  mov cx, 8              ; size
+  call N_SCOPY@
+  ```
+  Same protocol as struct pass-by-value and struct
+  return — universal struct-copy mechanism.
+- `1954` (**accumulating multiple fn calls**):
+  `sqr(1) + sqr(2) + ... + sqr(5)` uses a **stack-
+  based accumulator**:
+  ```
+  push 1 / call sqr / pop                  ; ax = 1
+  push ax / push 2 / call sqr / pop        ; ax = 4
+  mov dx, ax / pop ax / add ax, dx         ; ax = 5 (1+4)
+  push ax / push 3 / call sqr / pop        ; ax = 9
+  mov dx, ax / pop ax / add ax, dx         ; ax = 14 (5+9)
+  ...
+  ```
+  Each new result pushed temporarily, then
+  retrieved and summed with the new call's
+  result. Standard left-to-right C evaluation.
+
+**Universal struct-copy thresholds**:
+| Operation | ≤4B | >4B |
+|-----------|------|-----|
+| Pass-by-value | Inline pushes (reverse mem-order) | N_SPUSH@ |
+| Return | DX:AX | Hidden dest ptr + N_SCOPY@ × 2 |
+| Assignment | Inline mov-pair | N_SCOPY@ |
+
+For the Rust reimplementation:
+- ≤4B struct asg: emit 2 register-mov pairs.
+- >4B struct asg: emit N_SCOPY@ call with dest/src
+  far ptrs + size in CX.
+- Multi-call accumulation: use AX as running
+  accumulator, save via push before each call.
+
 ## Int→long via cwd (signed) vs zero-fill (unsigned); nested struct = flat layout; `>>16` = high half
 
 Fixtures `1949` (int→long signed), `1950` (nested
