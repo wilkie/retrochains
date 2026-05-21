@@ -1959,6 +1959,76 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `volatile`/`const` accepted but no-ops at codegen; `register` is effective (enregisters)
+
+Fixtures `2243` (volatile), `2244` (const), `2245`
+(register) test C qualifier handling.
+
+- `2243` (**volatile**): emits **two separate
+  loads** of x for `a = x; b = x;`:
+  ```
+  mov ax, [x] / mov [a], ax
+  mov ax, [x] / mov [b], ax    ; reloaded (not cached)
+  ```
+  But BCC doesn't do CSE/load-caching anyway, so
+  this is what would happen WITHOUT volatile too.
+  Effectively a no-op at codegen.
+- `2244` (**const local int**): N is given a
+  normal stack slot, loaded from memory for
+  comparison:
+  ```
+  mov word [N], 10
+  ; ... later:
+  cmp si, [N]                  ; not "cmp si, 10"
+  ```
+  BCC does NOT fold const-qualified variables to
+  compile-time literals. Const is purely a type-
+  system marker (for diagnostic warnings).
+- `2245` (**register int**): variable goes into
+  SI (or DI) — effective:
+  ```
+  mov si, 1                    ; i = 1 (in SI register)
+  ; loop body uses SI directly
+  ```
+  Confirms that `register` is the ONE qualifier
+  that actively affects codegen.
+
+**C qualifier handling summary**:
+| Qualifier | Codegen impact |
+|-----------|----------------|
+| `volatile` | None (BCC doesn't cache anyway) |
+| `const` | None (BCC doesn't fold) |
+| `register` | Hints enregistration (SI/DI/CX/...) |
+| `static` | Changes symbol export (no PUBDEF) |
+| `extern` | Changes symbol export (EXTDEF, no slot) |
+| `auto` | Default for locals (no effect) |
+| `near` | Forces near ptr (2B) in non-small models |
+| `far` | Forces far ptr (4B) in non-huge models |
+| `cdecl` | Default calling convention |
+| `pascal` | Reverses arg order; callee cleanup |
+| `interrupt` | Saves/restores all regs; iret |
+
+So most modifiers don't change codegen at all —
+they affect typechecking or symbol-table state.
+Only `register`, `near`/`far`, and the calling
+conventions actually shape code emission.
+
+**Why volatile is a no-op in BCC**:
+BCC is a simple compiler that performs:
+- Parse-time constant folding
+- Parse-time identity folding (x+0, x*1)
+- Parse-time pow-2 strength reduction
+- Per-statement register allocation
+
+It does NOT perform CSE, DCE, loop hoisting, or
+load forwarding. So `volatile` has nothing to
+suppress.
+
+For the Rust reimplementation:
+- Track qualifiers in the type system.
+- Honor `register` for enregistration hint.
+- `volatile`/`const` codegen = same as without.
+
 ## No overflow check (silent wrap); `ptr - ptr` = byte-diff / sizeof via idiv; missing return = AX undefined
 
 Fixtures `2240` (int overflow), `2241` (ptr - ptr
