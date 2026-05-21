@@ -1959,6 +1959,62 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Unsigned cmp uses `jbe`/`jae` for inverse; ptr arith scales by sizeof; ptr sub = `idiv`
+
+Fixtures `1982` (unsigned `x > 100`), `1983`
+(char* vs int* arithmetic), `1984` (`q - p` ptr
+subtract) cover pointer arithmetic semantics.
+
+- `1982` (**unsigned cmp uses unsigned jcc**):
+  `unsigned x > 100` emits:
+  ```
+  cmp word [x], 100      ; 83 7e disp 64 (imm8-sext)
+  jbe L_false             ; 76 — unsigned below-or-equal
+  ```
+  Uses `jbe` (`0x76`) as the false-branch jcc.
+  Operands' unsigned type → unsigned jcc, even
+  for small constants.
+- `1983` (**ptr arith scales by sizeof at parse**):
+  ```c
+  char *cp; cp += 1;    // inc cp (+1 byte)
+  int *ip;  ip += 1;    // inc ip; inc ip (+2 bytes)
+  ```
+  emits:
+  ```
+  46            ; inc si (cp by sizeof(char) = 1)
+  47 47         ; inc di; inc di (ip by sizeof(int) = 2)
+  ```
+  The `+= 1` is **silently multiplied by
+  sizeof(element)** at parse time. For pow2 sizes
+  (1, 2, 4) the increment is direct; for odd
+  sizes (e.g., 3 for a 3-byte struct) would use
+  `add ptr, K`.
+- `1984` (**ptr subtraction divides by sizeof**):
+  `q - p` for `int *` pointers emits:
+  ```
+  mov ax, [q]
+  sub ax, [p]            ; byte difference
+  mov bx, 2              ; sizeof(int)
+  cwd
+  idiv bx                ; signed divide → element count
+  ```
+  Result is the **element count**, signed (can be
+  negative if q < p). Uses `idiv` (not shr) for
+  general correctness across signs.
+  
+  For sizeof = 1 (char*), no division needed.
+  For other sizes, divide by sizeof.
+
+For the Rust reimplementation:
+- Track operand signedness for all cmps; use
+  jbe/jae/ja/jb for unsigned, jle/jge/jg/jl for
+  signed.
+- Pointer arithmetic: scale increments/decrements
+  by sizeof(element) at parse time. Emit minimal
+  inc count for pow2; add for non-pow2.
+- Pointer subtraction: emit byte-diff then
+  signed-divide by sizeof.
+
 ## Pool fill order confirmed `{SI, BX, DI, CX, DX}`; 1 fn call enough to restrict; mul+call combo
 
 Fixtures `1979` (5 locals, no mul/call), `1980`
