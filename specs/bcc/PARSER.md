@@ -1959,6 +1959,55 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Const-combined +5-5 emits `add ax, 0` (NOT folded back to identity); +1+1+1 = single add 3
+
+Fixtures `2075` (x + 1 + 1 + 1), `2076` (x + 5 -
+2), `2077` (x + 5 - 5) confirm const-combination
+behaviour and reveal an **optimization gap**.
+
+- `2075` (**`x + 1 + 1 + 1` = `x + 3`**): same
+  output as `x + 3`. Const-combination across
+  multiple +1's:
+  ```
+  mov ax, [x]
+  add ax, 3                 ; single add of folded constant
+  ```
+- `2076` (**`x + 5 - 2` = `x + 3`**): mixed
+  add/sub of constants folds to net (`+3`). Same
+  output as `x + 3`.
+- `2077` (**`x + 5 - 5`**): combines to `x +
+  0`, but BCC **emits `add ax, 0`** (3-byte
+  no-op) instead of identity-folding it away!
+  ```
+  mov ax, [x]
+  05 00 00                  ; add ax, 0 (no-op, NOT eliminated)
+  ```
+  
+  **Optimization gap**: identity-fold for `+ 0`
+  only triggers on a LITERAL 0 in the source. If
+  the constant-combination phase produces 0,
+  the result is NOT re-fed into the identity
+  check.
+
+So BCC's optimization order is:
+1. Parse expression
+2. Const-combine adjacent constants
+3. Check for literal-identity ONLY for the
+   original source literals — not for combined
+   results
+
+This is consistent with BCC's simple single-pass
+strategy.
+
+For the Rust reimplementation:
+- Const-combine first (folds adjacent constants).
+- Re-check identity-folds AFTER const-combination
+  to catch the `x + 5 - 5` case. (Note: this
+  would NOT match BCC byte-for-byte; to match,
+  we must emit the redundant `add 0`.)
+- Alternative: implement only the parse-time
+  literal identity check (matches BCC).
+
 ## Small-add asymmetry: `x+1`/`+2` = inc, `x-1` = dec, but `x-2` = `add ax, -2` (NOT dec dec)
 
 Fixtures `2072` (x + 3), `2073` (x - 1), `2074`
