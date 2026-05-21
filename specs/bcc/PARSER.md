@@ -1959,6 +1959,52 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Boundaries: `x ^ x`/`x - x` NOT folded; `x & 0xFFFF` NOT folded — only literal-0/1 ops folded
+
+Fixtures `2015` (x ^ x), `2016` (x - x), `2017`
+(x & 0xFFFF) probe the **boundaries** of BCC's
+identity-folding.
+
+- `2015` (**`x ^ x` NOT folded**): emits literal
+  `xor ax, si` (`33 c6`). BCC does not recognize
+  same-variable optimization (would require
+  variable-identity tracking).
+- `2016` (**`x - x` NOT folded**): emits literal
+  `sub ax, si` (`2b c6`). Same reason.
+- `2017` (**`x & 0xFFFF` NOT folded**): emits
+  literal `and ax, 0xFFFF` (`25 ff ff`). Even
+  though 0xFFFF is the identity-mask for 16-bit
+  AND, BCC doesn't recognize it.
+  
+  Notable: the AND with 0xFFFF is a no-op for
+  int, but BCC still emits it. So **`x & -1`
+  also NOT folded**.
+
+**Refined identity-folding rule** (boundary
+clarified):
+| Pattern | Folded? |
+|---------|---------|
+| `x + 0`, `0 + x` | YES |
+| `x - 0` | YES |
+| `x * 1`, `1 * x`, `x / 1` | YES |
+| `x | 0`, `x ^ 0` | YES |
+| `x * 0` | YES (folds to 0) |
+| `x ^ x`, `x - x` | NO (same-var not tracked) |
+| `x & 0xFFFF`, `x & -1` | NO (only literal 0/1 patterns recognized) |
+| Any expression of compile-time constants | YES (full constant folding) |
+
+So the identity-folding catalog is **strictly
+literal-0/1 based**:
+- For additive/bitwise ops: only literal 0
+- For multiplicative ops: only literal 1 (and 0
+  for *)
+
+For the Rust reimplementation:
+- Implement identity folding for literal 0 and
+  literal 1 patterns only.
+- Do NOT attempt variable-identity simplification
+  or all-ones-mask recognition.
+
 ## Confirmed: `x - 0`, `x ^ 0`, `x / 1` all identity-folded to bare `mov`
 
 Fixtures `2012` (x - 0), `2013` (x ^ 0), `2014`
