@@ -1959,6 +1959,76 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## 7 locals: only 4 enregister (DX reserved); nested calls use arg-stack; mixed cmp via cast
+
+Fixtures `1973` (7 multi-use locals), `1974`
+(`f(g(...), h(...))` nested), `1975` (mixed
+signed/unsigned cmp) cover more register-
+allocator behavior.
+
+- `1973` (**7 locals → only 4 enregister**):
+  with 8 multi-read candidates (7 locals + 1
+  derived `r`), BCC enregisters **only 4**:
+  - `a` → DI
+  - `b` → BX
+  - `c` → CX
+  - `r` → SI (the accumulator)
+  - `d, e, f, g` → stack
+  
+  So **DX is NOT used** for a local. Likely
+  reserved as scratch (especially because the
+  function uses `imul`, which produces the high
+  half in DX). With imul present, the pool
+  effectively becomes 4: {SI, DI, BX, CX}.
+  
+  Refined rule:
+  - Without imul/idiv: pool = {SI, DI, BX, CX, DX}
+    (5 slots, see [[batch-511-five-locals]])
+  - With imul/idiv: DX reserved, pool = {SI, DI,
+    BX, CX} (4 slots)
+- `1974` (**nested calls use arg-stack as scratch**):
+  `f(g(...), h(...))` evaluates right-to-left:
+  ```
+  ; compute h(3, 4):
+  push 4 / push 3 / call h / pop / pop          ; ax = 7
+  push ax                                        ; save as outer's 2nd arg
+  ; compute g(1, 2):
+  push 2 / push 1 / call g / pop / pop          ; ax = 3
+  push ax                                        ; save as outer's 1st arg
+  ; call f:
+  call f / pop / pop                             ; ax = result
+  ```
+  Each inner call's result is **pushed directly
+  as the corresponding arg of the outer call**.
+  No temporary stack variables; the args stack
+  doubles as scratch.
+- `1975` (**mixed signed/unsigned cmp via cast**):
+  `(int)u` makes the comparison **signed**:
+  ```
+  mov ax, [s]                ; -1 (= 0xffff)
+  cmp ax, [u]
+  jge L_false                ; signed jge for inverse of <
+  ```
+  For s = -1, u = 1: signed `-1 < 1` is TRUE
+  (return 1). Unsigned `0xffff < 1` would be
+  FALSE. The cast forces signed-cmp semantics.
+  
+  Type-driven jcc choice: BCC tracks the type of
+  each operand and chooses the appropriate jcc.
+
+**Refined register-allocation pool**:
+- No mul/div: {SI, DI, BX, CX, DX} = 5 slots
+- With imul/idiv: {SI, DI, BX, CX} = 4 slots
+  (DX reserved as imul's high-half target)
+
+For the Rust reimplementation:
+- Track whether the function uses mul/div ops;
+  reserve DX accordingly.
+- Nested calls: use args-stack as scratch for
+  inner results.
+- Cast-driven cmp signedness: track operand
+  types through casts.
+
 ## Loop-body local not enregistered; arr/struct-arr full init uses N_SCOPY@ template
 
 Fixtures `1970` (loop body local), `1971` (int
