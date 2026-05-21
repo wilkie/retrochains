@@ -1959,6 +1959,71 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Small struct returns/args in DX:AX or stack-push; large structs use N_SPUSH@ helper
+
+Fixtures `2204` (struct return), `2205` (struct
+arg ≤ 4B), `2206` (struct arg > 4B) pin the
+struct-by-value ABI.
+
+- `2204` (**small struct return ≤ 4 bytes**):
+  callee builds the struct in memory, then loads
+  fields into DX:AX:
+  ```
+  ; In make_pt:
+  ; build struct on stack
+  mov dx, [p.y]              ; high half = field 1
+  mov ax, [p.x]              ; low half = field 0
+  ret
+  
+  ; Caller:
+  call _make_pt
+  mov [p.y], dx              ; store fields back
+  mov [p.x], ax
+  ```
+  Same convention as long return (DX:AX).
+- `2205` (**small struct arg ≤ 4 bytes**): pushed
+  as whole struct (field by field), one word per
+  field:
+  ```
+  push word [pt.y]            ; high-offset field first
+  push word [pt.x]            ; low-offset field second
+  call _sum_pt
+  pop cx / pop cx            ; cleanup 4 bytes
+  ```
+  Push order ensures memory layout matches:
+  after pushes, callee sees [bp+4]=x, [bp+6]=y.
+- `2206` (**large struct arg > 4 bytes via
+  N_SPUSH@**): for struct sizes > 4 bytes, BCC
+  calls the **N_SPUSH@** helper:
+  ```
+  lea ax, [bg]                ; AX = struct offset
+  mov dx, ss                  ; DX = struct segment (SS for stack vars)
+  mov cx, 8                   ; CX = byte count
+  call N_SPUSH@               ; helper pushes struct
+  call _sum_big
+  add sp, 8                   ; cleanup struct size
+  ```
+  N_SPUSH@ signature:
+  - In: DX:AX = source ptr (segment:offset), CX = bytes
+  - Effect: pushes the struct's bytes onto the caller's stack
+
+**Struct-by-value ABI**:
+| Direction | Size | Mechanism |
+|-----------|------|-----------|
+| Return ≤ 4B | int (2B) or "long" (4B) | DX:AX |
+| Return > 4B | (not yet probed — likely caller-provided slot) | N_SCOPY@? |
+| Arg ≤ 4B | 1-2 push words | direct push per field |
+| Arg > 4B | N bytes pushed | N_SPUSH@ helper |
+
+For the Rust reimplementation:
+- Struct return ≤ 4B: emit fields → DX:AX before
+  ret.
+- Struct return > 4B: investigate the caller-
+  slot convention.
+- Struct arg ≤ 4B: emit per-field pushes (high-
+  offset field first).
+- Struct arg > 4B: emit N_SPUSH@ helper call.
+
 ## Multi-arg printf R-to-L w/ natural sizes; `while(i--)` test-old/body-new; strcmp loop = nested byte cmps
 
 Fixtures `2201` (printf mixed types), `2202`
