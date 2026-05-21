@@ -1959,6 +1959,125 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Globals shared across fns via FIXUPP'd memops; typedef struct = anon+alias; fn returns ptr/fn-ptr in AX; **dense switch = CS-relative jump table** via `2e ff a7 disp16`
+
+Fixtures `2333`-`2338` cover multi-fn globals,
+typedef variations, ptr/fn-ptr returns, and the
+JUMP TABLE optimization for dense switches.
+
+- `2333` (**globals shared across fns**): both
+  inc() and inc2() access `counter` via FIXUPP:
+  ```
+  ; inc():
+  ff 06 00 00                  ; inc word [counter]
+  
+  ; inc2():
+  83 06 00 00 02              ; add word [counter], 2
+  
+  ; main:
+  call _inc / call _inc2 / call _inc
+  a1 00 00                     ; mov ax, [counter]
+  ```
+  Global `counter` PUBDEF'd; other TUs can reference.
+- `2334` (**typedef anonymous struct**): `typedef
+  struct { ... } Point;` works as expected.
+  Codegen identical to plain anonymous struct.
+- `2335` (**fn returns ptr to struct**): pointer
+  returned in AX as a 2-byte near pointer:
+  ```
+  ; struct P *get(void): returns &p_static
+  b8 00 00                     ; mov ax, offset(p) FIXUPP
+  
+  ; Caller:
+  call _get
+  mov si, ax                    ; q = result
+  mov ax, [si]                  ; q->x
+  add ax, [si+2]                ; q->y
+  ```
+- `2336` (**fn returns fn ptr**): also a 2-byte
+  near pointer in AX:
+  ```
+  ; In get_op:
+  b8 00 00                     ; mov ax, offset(dbl) FIXUPP
+  
+  ; In main:
+  call _get_op
+  mov [fp], ax
+  push 7
+  ff 56 fe                     ; call near [fp]
+  ```
+- `2337` (**DENSE SWITCH = JUMP TABLE**): for 10
+  contiguous cases (0-9), BCC emits a **jump
+  table** stored inline in `_TEXT`:
+  ```
+  ; switch (x) with cases 0..9 + default
+  
+  mov bx, [x]
+  cmp bx, 9
+  ja default                    ; out-of-range
+  shl bx, 1                     ; × sizeof(word) = 2
+  2e ff a7 NN NN               ; jmp CS:[bx + table_offset]
+                                ; ModR/M /4 = jmp near indirect
+                                ; 0x2e = CS prefix override
+                                ; rm=111 + disp16 = [BX+disp16]
+  
+  ; Case bodies (each ends with return -> jmp to epilogue):
+  case0: mov ax, 100 / jmp end_switch
+  case1: mov ax, 101 / jmp end_switch
+  ...
+  case9: mov ax, 109 / jmp end_switch
+  default: xor ax, ax / jmp end_switch
+  end_switch: (epilogue)
+  
+  ; Jump table (inline data in _TEXT):
+  dw case0_offset
+  dw case1_offset
+  ...
+  dw case9_offset
+  ```
+  Hugely efficient: O(1) dispatch regardless of N.
+  
+- `2338` (**1-element flex array idiom**): `char
+  data[1];` at end of struct — used pre-C99 as
+  variable-length-struct hack. Sized as 1 byte;
+  total struct = sum of fields. Caller is
+  expected to allocate more space and index
+  `data[N]` beyond the 1 declared.
+
+**Switch dispatch strategies (refined, FINAL)**:
+| Pattern | Strategy |
+|---------|----------|
+| 1-3 cases (sparse) | Linear cmp/je chain |
+| 4-7 cases (mixed) | Linear cmp/je chain |
+| ≥ ~8 DENSE contiguous cases | **Jump table** with `2e ff a7 disp16` |
+| Sparse but many cases (gaps) | Linear cmp/je or search table |
+| Default-only | Body unconditionally |
+| Multi-case same body | Shared target label |
+
+**Jump table encoding details**:
+- Range check: `cmp x, max / ja default`
+- Index calc: `shl bx, 1` (× sizeof(word))
+- Indirect jmp: `2e ff a7 disp16` (CS:[BX+disp16])
+- Table: N word-sized offsets, inline in `_TEXT`
+- CS override (`0x2e`) because table is in code segment
+
+**Function return ABIs (final)**:
+| Return type | Mechanism |
+|-------------|-----------|
+| int, near ptr, fn ptr | AX |
+| long | DX:AX |
+| Small struct ≤ 4B | DX:AX |
+| Large struct > 4B | Hidden caller ptr + N_SCOPY@ |
+| float/double | ST(0) (FPU stack top) |
+| void | (no return) |
+
+For the Rust reimplementation:
+- Track contiguous case range during switch
+  parsing; emit jump table if ≥ ~8 dense cases.
+- CS-relative table emission: append to `_TEXT`
+  after case bodies.
+- Same indirect-jmp encoding (`2e ff a7 disp16`).
+
 ## Args > 127B offset use `/86 disp16`; `(char*)p + 4` is byte arith; `int (*p)[3]` strides by row; `(*p)++` = `inc word [si]`; ptr casts no-op
 
 Fixtures `2327`-`2332` cover encoding scales,
