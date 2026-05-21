@@ -1959,6 +1959,67 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `(char)int` = free low-byte load; `(int)uchar` = `mov ah, 0`; `char + int` = cbw then add
+
+Fixtures `2219` (int↔char round-trip), `2220`
+(uchar→int), `2221` (char+int) finalise the
+narrowing/widening table.
+
+- `2219` (**`(char)int` then `(int)char`**):
+  ```
+  ; (char)n — free truncation via low-byte load:
+  mov al, [n]              ; loads low byte (n at base addr)
+  mov [c], al              ; byte store
+  
+  ; (int)c — sign-extend:
+  mov al, [c]
+  cbw                       ; sign-extend AL → AX
+  mov [r], ax
+  ```
+  Round-trip preserves low byte; sign of result
+  depends on bit 7 of the low byte.
+- `2220` (**`(int)unsigned char` zero-extends**):
+  uses `mov ah, 0` (2 bytes, vs cbw's 1 byte):
+  ```
+  mov al, [uc]
+  mov ah, 0                ; b4 00 — zero-extend
+  mov [n], ax
+  ```
+  For uc = 200: n = 200 (positive, preserved).
+  With cbw it would be n = -56 (sign-extended).
+- `2221` (**`char + int` promotion**): char is
+  promoted to int first via cbw, then added:
+  ```
+  mov al, [c]
+  cbw                       ; promote to int
+  add ax, [n]
+  ```
+
+**Type-conversion summary** (final, complete):
+| Operation | Mechanism | Bytes |
+|-----------|-----------|-------|
+| `(char)int` | Load low byte | 0-3 |
+| `(int)signed char` | `cbw` (sign-ext) | 1 |
+| `(int)unsigned char` | `mov ah, 0` | 2 |
+| `(long)signed int` | `cwd` (sign-ext) | 1 |
+| `(long)unsigned int` | `mov [hi], 0` | 5 |
+| `(int)long` | Read low word | 0-3 |
+| `(double)int` | spill + FILD m16 | ~8 |
+| `(double)float` | FLD m32 / FSTP m64 | 8 |
+| `(int)float`, `(int)double` | FLD + call N_FTOL@ | ~7 |
+| `char + int`, `char op int` | cbw on char first | varies |
+| `int + long` | cwd on int first | varies |
+| `float + double` | FLD m32 widens (automatic) | varies |
+
+So **promotion always widens the smaller type**
+before the operation. BCC follows C's "usual
+arithmetic conversions" rules.
+
+For the Rust reimplementation:
+- Track types per expression node.
+- Insert promotion instructions before mixed-type
+  ops based on the "usual conversions" rules.
+
 ## `x * 4` ≡ `x << 2` codegen; `unsigned x % 2` ≡ `x & 1`; `**pp` = 2 mem loads `8b 1c / 8b 07`
 
 Fixtures `2216` (mul-pow2 vs shift), `2217` (mod-2
