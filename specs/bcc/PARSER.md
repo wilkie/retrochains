@@ -1959,6 +1959,85 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Large struct return = hidden ptr arg + N_SCOPY@; struct arr index = i × stride; struct fn-ptr call via `ff /2`
+
+Fixtures `2207` (struct return >4B), `2208`
+(struct array iteration), `2209` (struct with fn
+ptr field) complete the struct survey.
+
+- `2207` (**large struct return via N_SCOPY@**):
+  caller passes a **hidden pointer arg** to its
+  receiving slot before the explicit args.
+  Callee:
+  1. Builds the struct locally on stack
+  2. Calls N_SCOPY@ to copy local → caller's slot
+  
+  Calling sequence:
+  ```
+  ; Caller:
+  push ss / push offset(bg)       ; hidden dest ptr (caller's slot)
+  push X                            ; explicit args
+  call _make_big
+  add sp, N                         ; cleanup explicit args
+  
+  ; In callee make_big (simplified):
+  ; ... build local b ...
+  push word [bp+6] / push word [bp+4]    ; dest segment+offset (hidden arg)
+  push ss / push offset(local_b)          ; src
+  mov cx, 8                                ; sizeof
+  call N_SCOPY@                            ; helper does the copy
+  mov ax, [bp+4]                           ; return slot offset
+  ret
+  ```
+- `2208` (**indexed struct array access**):
+  `pts[i].field` = `*((char*)pts + i*sizeof(struct) + field_offset)`. Index multiplied by struct
+  size via unrolled shifts:
+  ```
+  mov ax, i / shl ax, 1 / shl ax, 1     ; ax = i * 4 (= sizeof struct P)
+  mov bx, ax
+  add bx, pts                            ; bx = &pts[i]
+  mov ax, [bx]                           ; pts[i].x
+  add ax, [bx+2]                         ; + pts[i].y
+  ```
+- `2209` (**struct with fn-ptr field**): indirect
+  call via memory operand:
+  ```
+  ff 16 00 00          ; call near [ops[0].fn] (FIXUPP for ops[0])
+  ; result in AX
+  ```
+  ModR/M `16 disp16` = call near indirect through
+  m16 (direct addressing with FIXUPP).
+
+**Struct-return ABI (complete)**:
+| Struct size | Mechanism |
+|-------------|-----------|
+| 1-2 bytes (int-sized) | Return in AX |
+| 3-4 bytes | Return in DX:AX (high:low) |
+| > 4 bytes | Hidden ptr arg + N_SCOPY@ at end of callee |
+
+**Helper symbols (final catalogue)**:
+| Helper | Purpose |
+|--------|---------|
+| `N_LXMUL@` | long signed/unsigned multiply |
+| `N_LDIV@` | long signed divide |
+| `N_LMOD@` | long signed modulo |
+| `N_LUDIV@` | long unsigned divide |
+| `N_LUMOD@` | long unsigned modulo |
+| `N_LXLSH@` | long left shift (≥ 2) |
+| `N_LXRSH@` | long signed right shift |
+| `N_LXURSH@` | long unsigned right shift (probable) |
+| `N_FTOL@` | float/double → long |
+| `N_SPUSH@` | push struct on stack (arg passing) |
+| `N_SCOPY@` | copy struct memory-to-memory (return) |
+| `N_OVERFLOW@` | stack overflow handler (-N flag) |
+
+For the Rust reimplementation:
+- Struct return > 4B: add hidden ptr arg first;
+  callee calls N_SCOPY@ to fill caller's slot.
+- Indexed struct: emit `i * sizeof(struct)` via
+  shifts, then add base + field offset.
+- Fn-ptr in struct: emit `ff /2 [m]` indirect call.
+
 ## Small struct returns/args in DX:AX or stack-push; large structs use N_SPUSH@ helper
 
 Fixtures `2204` (struct return), `2205` (struct
