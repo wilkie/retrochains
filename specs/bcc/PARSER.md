@@ -1959,6 +1959,59 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## 6 locals → only 3 enregister (SI/DI/DX); array param decays; mutual recursion uses relative
+
+Fixtures `1760` (6 multi-use locals), `1761` (array
+parameter), and `1762` (mutual recursion) clarify
+the register allocation cap and call mechanics.
+
+- `1760` (**register allocation cap = 3 locals**):
+  with 6 locals all used 2+ times in source, BCC
+  enregisters **only the 1st, 3rd, 5th declared**
+  into SI, DI, DX respectively. The 2nd, 4th, 6th
+  stay on stack despite meeting the threshold.
+  
+  So even though the register pool is {SI, DI,
+  DX, BX, CX} (5 regs), BCC caps at **3 locals
+  per function**, reserving BX and CX for **scratch
+  use** (e.g., `[bx]` derefs, shift counts). When
+  more variables qualify than slots available, BCC
+  picks the **earliest-declared ones** to enregister.
+- `1761` (**array parameter decays**): `int sum(int
+  a[])` receives a **2-byte near pointer** at
+  `[bp+4]`, not the array data. Callee uses `[si]`,
+  `[si+2]`, `[si+4]` for element access (standard
+  pointer arithmetic with constant offsets). Caller
+  uses `lea ax, [x] / push ax` to pass the array's
+  address. Confirms C's array-to-pointer decay at
+  function boundaries.
+- `1762` (**mutual recursion**): both functions
+  in the same TU; the forward `int even(int n);`
+  declaration lets `_odd` call `_even` before
+  `_even`'s definition. The call sites use
+  **`e8 imm16`** (relative call) with offsets
+  computed at codegen time within the TU — **no
+  EXTDEF** needed since both are local. PUBDEFs
+  emitted for both _odd and _even.
+
+Updated register allocation rule:
+- Pool: {SI, DI, DX} (3 enregistration slots), BX
+  and CX kept as scratch.
+- Selection: variables with read-count ≥ 2 in
+  source; if more than 3 qualify, take the
+  **earliest-declared** 3.
+- Spilled qualifying variables stay on stack with
+  the same `[bp+disp]` access as un-qualifying
+  locals.
+- Address-taken / volatile / register keyword
+  override the heuristic.
+
+For the Rust reimplementation:
+- Implement the use-count + declaration-order
+  selection.
+- Reserve BX, CX for transient ops (memory deref,
+  shift counts).
+
 ## Global double no-init in BSS (8B); strlen loop pattern; `imul m16` for paren expr
 
 Fixtures `1757` (uninitialized global double),
