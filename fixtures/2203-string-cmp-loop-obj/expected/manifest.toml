@@ -1,0 +1,19 @@
+[run]
+exit_code = 0
+stdout_sha256 = "1578a17a658a9da15d75f134526b5fcad7eee30f7db55deb5ace1f20e043e038"
+stderr_sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
+[[outputs]]
+name = "HELLO.OBJ"
+size = 325
+sha256 = "c8939070324e08ed6fb94d4113f13fe7f71e82214b793dd34a4e774f126b1048"
+mtime = "1991-04-23T12:00:00Z"
+
+[oracle]
+tool = "bcc"
+args = [
+    "-c",
+    "-ms",
+    "HELLO.C",
+]
+fake_time = "1991-04-23T12:00:00Z"
