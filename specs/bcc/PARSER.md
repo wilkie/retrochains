@@ -1959,6 +1959,84 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Double arr index = `BX = i; BX << 3; FLD m64 [BX]`; FLDZ/FLD1 for 0/1 consts; cmp w/ 0 = FLDZ+FCOMPP
+
+Fixtures `2150` (double arr elem access), `2151`
+(float != 0 cmp), `2152` (float * 2.0) cover
+double-array indexing and FPU constant tricks.
+
+- `2150` (**double arr indexed access**): index
+  scaled by 8 (sizeof(double)) via 3 unrolled
+  `shl bx, 1`:
+  ```
+  mov bx, i              ; load index
+  shl bx, 1 × 3          ; multiply by 8 (= shift by 3)
+  FLD m64 [bx+arr_base]   ; 9b dd 87 disp16 (with FIXUPP)
+  ```
+  ModR/M `87` = mod=10 reg=000 rm=111 (BX+disp16).
+  
+  Notable: even for `i = const 1` (parse-time
+  known), BCC still emits the load+shift sequence
+  — no constant-fold of array indexing.
+  
+  External symbol `__turboFloat` added: a
+  flag-symbol that signals float code presence
+  (linker uses it to detect float-using objects).
+- `2151` (**float != 0 cmp uses FLDZ + FCOMPP**):
+  loads 0.0 via the **FLDZ** instruction (no
+  memory access), then FCOMPP to compare both
+  values:
+  ```
+  9b d9 e8               ; FLD1 (= 1.0 const, for the assign of 1.0f)
+  9b d9 5e fc            ; FSTP m32 [f]
+  9b d9 46 fc            ; FLD m32 [f]
+  9b d9 ee               ; FLDZ (load 0.0 to FPU)
+  9b de d9               ; FCOMPP (de /3 — compare and pop both)
+  9b dd 7e fa            ; FSTSW m16
+  90 / 9b 8b / 9e / 74 05 ; status → AX → flags → je L_false
+  ```
+  Saves 4 bytes (no `0.0` constant in `_DATA`).
+- `2152` (**float * 2.0** no special opt): BCC
+  does NOT use `FADD ST(0), ST(0)` (which would
+  double the value) or any other trick. Just
+  loads 2.0 from `_DATA` and FMUL:
+  ```
+  9b d9 46 fc            ; FLD m32 [f]
+  9b d8 0e 04 00         ; FMUL m32 [2.0]
+  ```
+
+**FPU constant instructions** (load specific
+values without memory):
+| Opcode | Mnemonic | Value |
+|--------|----------|-------|
+| `d9 e8` | FLD1 | 1.0 |
+| `d9 e9` | FLDL2T | log2(10) |
+| `d9 ea` | FLDL2E | log2(e) |
+| `d9 eb` | FLDPI | π |
+| `d9 ec` | FLDLG2 | log10(2) |
+| `d9 ed` | FLDLN2 | ln(2) |
+| `d9 ee` | FLDZ | 0.0 |
+
+BCC uses **FLD1** and **FLDZ** for 1.0 and 0.0
+constants. Other constants in source (like 2.0,
+3.14) go through `_DATA` storage.
+
+**Double-array stride encoding**:
+- For `int i` index: `mov bx, i / shl bx, 1 × 3
+  / FLD m64 [bx+disp16]` (8 bytes setup + 5 bytes
+  FLD)
+- Stride is hard-coded shift-by-log2(sizeof)
+- Same pattern for float arrays (shift-by-2 = 4B
+  stride), char arrays (no shift), etc.
+
+For the Rust reimplementation:
+- Float consts 0.0 and 1.0: emit FLDZ/FLD1.
+- Other float consts: store in `_DATA` and FLD.
+- Array indexing: emit shift-by-log2(stride) +
+  indexed load.
+- Track `__turboFloat` external for float-using
+  objects.
+
 ## `-d` via FCHS (`d9 e0`); `d += K` = FADD m64; double const NOT exact-as-single stored as 8B
 
 Fixtures `2147` (double negate), `2148` (compound
