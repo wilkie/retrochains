@@ -1959,6 +1959,70 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## int*int = `imul m16` (truncates DX); unsigned cmp uses `jae`/`jb`; long*long via N_LXMUL@
+
+Fixtures `2168` (int mul w/ overflow), `2169`
+(unsigned cmp), `2170` (long mul) cover three
+arithmetic-width patterns.
+
+- `2168` (**`int * int` with overflow**): uses
+  `f7 /5 [m16]` (imul m16, signed multiply):
+  ```
+  mov ax, a
+  imul word [b]          ; f7 6e fc → DX:AX = a*b
+  mov [r], ax             ; only AX stored — DX (high half) discarded
+  ```
+  Silent truncation to 16 bits. For 1000 × 100 =
+  100000 = 0x000186A0, BCC stores AX = 0x86A0 (=
+  -31072 signed) into r.
+- `2169` (**unsigned `<`**): emits **unsigned jcc**
+  family (`ja`, `jae`, `jb`, `jbe`) instead of
+  signed (`jl`, `jle`, `jg`, `jge`):
+  ```
+  mov ax, a / cmp ax, [b]
+  jae L_false              ; 73 05 — unsigned inverse of <
+  ```
+  The C type system (signed vs unsigned) drives
+  the jcc family selection.
+- `2170` (**long * long**): can't use single `imul`
+  (which is 16×16 → 32). Calls helper:
+  ```
+  External: N_LXMUL@ (long multiply)
+  
+  ; setup:
+  mov cx, a.hi / mov bx, a.lo
+  mov dx, b.hi / mov ax, b.lo
+  call N_LXMUL@           ; e8 [disp] with FIXUPP
+  ; result: DX:AX (low 32 bits of product)
+  ```
+  
+  N_LXMUL@ helper signature:
+  - In: CX:BX = arg1, DX:AX = arg2
+  - Out: DX:AX = product (low 32 bits)
+  
+  Adds to the helper-functions catalogue:
+  N_LXMUL@, N_LDIV@, N_LXLSH@, N_LXRSH@, N_FTOL@,
+  N_SCOPY@, N_SPUSH@, N_OVERFLOW@.
+
+**Multi-byte arithmetic helpers** (BCC runtime):
+| Helper | Operation | Input | Output |
+|--------|-----------|-------|--------|
+| `N_LXMUL@` | long multiply | CX:BX, DX:AX | DX:AX (low 32 bits) |
+| `N_LDIV@` | long signed div | CX:BX (denom), DX:AX (num) | DX:AX (quot), CX:BX (rem) |
+| `N_LXLSH@` | long left shift | DX:AX, CL (shift count) | DX:AX |
+| `N_LXRSH@` | long right shift (signed) | DX:AX, CL | DX:AX |
+| `N_FTOL@` | float→long | FPU TOP | DX:AX |
+| `N_SCOPY@` | struct copy | DS:SI src, ES:DI dst, CX bytes | (memory) |
+| `N_SPUSH@` | struct push | DS:SI src, CX bytes | (pushed on stack) |
+| `N_OVERFLOW@` | stack overflow handler | (called when SP < __brklvl) | (terminates) |
+
+For the Rust reimplementation:
+- int*int: emit `imul m16`, discard DX.
+- Unsigned cmp: use ja/jae/jb/jbe based on the C
+  type signedness.
+- long ops: emit external call to the appropriate
+  N_LXXXX@ helper with the standard regs.
+
 ## `int f()` empty-paren = `(void)` in def; nested `#if` works; `#line` no OBJ effect
 
 Fixtures `2165` (empty paren), `2166` (nested
