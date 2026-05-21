@@ -1,0 +1,3 @@
+tool = "bcc"
+args = ["-c", "-ms", "-DDEBUG=42", "HELLO.C"]
+inputs = ["HELLO.C"]
