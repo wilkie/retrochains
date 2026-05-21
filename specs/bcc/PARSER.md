@@ -1959,6 +1959,53 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Large model = same as medium (far code, near data via DGROUP); huge is the only model w/ far DATA
+
+Fixtures `2213` (large fn call), `2214` (large
+global int), `2215` (large global arr) clarify
+what's different in large vs medium model for
+basic code.
+
+- `2213` (**large model fn call**): **byte-
+  identical** to medium model — `push cs / call
+  near` (`0e e8 [rel]`) intra-segment, `cb` far
+  ret.
+- `2214` (**large model global int**): **byte-
+  identical** to medium model — near DATA access
+  via DGROUP (`a1 disp16`). No segment override.
+- `2215` (**large model global array**): same
+  near data access pattern. No `push ds` envelope
+  needed.
+
+**Memory model differences observed** (final):
+| Model | Code | Data | Code seg | Data access |
+|-------|------|------|----------|-------------|
+| small (-ms) | near | near | `_TEXT` | `a1 disp16` |
+| compact (-mc) | near | near | `_TEXT` | `a1 disp16` |
+| medium (-mm) | far | near | `<fname>_TEXT` | `a1 disp16` (DGROUP) |
+| large (-ml) | far | near | `<fname>_TEXT` | `a1 disp16` (DGROUP) |
+| huge (-mh) | far | **far** | `<fname>_TEXT` | `push ds / mov ds, seg / a1 / pop ds` |
+
+So **only huge model has FAR data** in the basic
+case. Compact and large in BCC 2.0 are effectively
+same as small/medium respectively, as far as basic
+codegen goes. Differences would only manifest with
+explicit `far` data declarations or huge-data
+scenarios (data > 64K).
+
+The 5 models compress to 3 effective code-class
+behaviours:
+- "near code + near data": small, compact
+- "far code + near data": medium, large
+- "far code + far data": huge
+
+For the Rust reimplementation:
+- Treat compact = small for trivial cases; large
+  = medium for trivial cases.
+- Differentiating compact/large from their pairs
+  requires explicit `far` data or > 64K data
+  sections.
+
 ## Medium model: extern fn = full CALL FAR (`9a`); fn ptr = 4B (CS+offset); static fn = intra-seg same as global
 
 Fixtures `2210` (medium extern fn), `2211` (medium
