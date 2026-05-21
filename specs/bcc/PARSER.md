@@ -1959,6 +1959,97 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## Inline asm w/ C vars; static fn-ptr arr = FIXUPP'd ptrs in _DATA; typedef parse-only; enum const-folded; var-idx fn-ptr call via `ff /2 [bx+disp]`
+
+Fixtures `2303`-`2308` cover inline asm, typedef
+chains, enums, and fn-ptr arrays.
+
+- `2303` (**asm simple mov**): the asm body emits
+  directly inline. No register save/restore:
+  ```
+  push bp / mov bp, sp
+  mov ax, 42                ; from `asm { mov ax, 42; }`
+  xor ax, ax                ; from `return 0;` (overwrites asm's ax)
+  ; epilogue
+  ```
+- `2304` (**asm with C variable**): C local
+  variables in asm get translated to BP-relative
+  ModR/M:
+  ```
+  ; asm { mov ax, x; add ax, 5; mov x, ax; }
+  ; where x is at [bp-2]
+  
+  mov ax, [bp-2]            ; 8b 46 fe
+  add ax, 5                  ; 05 05 00
+  mov [bp-2], ax            ; 89 46 fe
+  ```
+- `2305` (**static fn-ptr array, indexed-const
+  calls**): `_DATA` contains 3 FIXUPP'd near
+  pointers. Calls via `ff 16 disp16` (direct
+  indirect):
+  ```
+  _DATA: [_a addr][_b addr][_c addr]  ; 6 bytes, 3 FIXUPPs
+  
+  ff 16 00 00                ; call near [&fns[0]]
+  ff 16 02 00                ; call near [&fns[1]]
+  ff 16 04 00                ; call near [&fns[2]]
+  ```
+- `2306` (**typedef chain**): pure parser alias.
+  `Int1 = int`, `Int2 = Int1`, ... all collapse to
+  `int`. Byte-identical to plain `int a, b, c`.
+- `2307` (**enum with mixed init**): values
+  resolved at parse time. Implicit values
+  continue from the last explicit (B = A+1, D =
+  C+1, E5 = D+1):
+  ```
+  enum E { A = 1, B, C = 10, D, E5 };
+  ;       A=1, B=2, C=10, D=11, E5=12
+  ; A + B + C + D + E5 = 36, folded to mov ax, 36
+  ```
+- `2308` (**var-idx fn-ptr call**): for `ops[i]()`
+  with variable i:
+  ```
+  ; Compute index × sizeof(ptr):
+  mov bx, si                 ; i
+  shl bx, 1                  ; × 2 (near ptr size)
+  
+  ; Indirect call through [bx + ops_base]:
+  ff 97 NN NN                ; call near [bx+disp16]
+                              ; ModR/M /2 rm=111 = [BX+disp16]
+  ```
+
+**Inline asm summary**:
+| Pattern | BCC handling |
+|---------|--------------|
+| `asm { mov ax, 42; }` | Emits `mov ax, 42` literally |
+| `asm { mov ax, x; }` (C local) | Translates `x` → `[bp+disp]` |
+| `asm { mov ax, global; }` | Translates → direct disp16 |
+| Labels inside asm | (limited; see fixture 2123 elision) |
+| Multiple instructions | All emitted sequentially |
+| Register modification | NOT saved/restored around block |
+
+**Type-alias mechanisms** (all parser-only):
+- `typedef T NAME` — alias for an existing type
+- Forward-declared structs / unions
+- enum tags vs enum values (values are int consts)
+- All collapse to underlying type for codegen
+
+**Function-pointer arr call forms**:
+| Form | Encoding |
+|------|----------|
+| `fns[0]()` (const idx) | `ff 16 disp16` (direct indirect) |
+| `fns[i]()` (var idx) | `ff 97 disp16` ([bx+disp16] indirect) |
+| `(*fp)()` (single fp) | `ff /2 [bp+disp]` (local var) |
+| `fp()` (single fp) | (same as above, * is implicit) |
+
+For the Rust reimplementation:
+- Inline asm: pass through directly; translate C
+  var names to ModR/M addressing.
+- Typedef: collapse during AST construction.
+- Enum: store as int constants in the symbol table.
+- Var-idx fn ptr call: compute index×sizeof in
+  reg, emit `ff 97 disp16`.
+
 ## sizeof types pinned (char=1, int=2, long=4, double=8); sizeof doesn't eval; signed bitfield = shl+sar; zero-width forces align; cross-byte uses word ops
 
 Fixtures `2297`-`2302` cover sizeof and bitfield
