@@ -1959,6 +1959,86 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## `far fn` in small / `near fn` in medium: per-fn override of model default; `pascal` = L-to-R + callee-clean + UPPER
+
+Fixtures `2060` (`int far helper` in small),
+`2061` (`int near helper` in medium), `2062`
+(`pascal` calling convention) explore per-function
+overrides and alternative calling conventions.
+
+- `2060` (**`int far helper(...)` in -ms**): the
+  function-level `far` keyword **promotes** one
+  function to far while leaving others as model
+  default:
+  ```
+  ; _helper:
+  push bp / mov bp, sp
+  mov ax, [bp+6]                 ; arg shifts to +6 (far ret = 4B)
+  inc ax
+  pop bp / cb                     ; retf
+  
+  ; _main calling _helper (intra-segment since same _TEXT):
+  push 41
+  0e                              ; push cs
+  e8 ea ff                        ; call near _helper
+  ```
+  Main itself stays NEAR (returns `c3`).
+- `2061` (**`int near helper(...)` in -mm**):
+  the `near` keyword **demotes** a function in
+  medium/large to near, saving the push cs:
+  ```
+  ; _helper:
+  push bp / mov bp, sp
+  mov ax, [bp+4]                  ; arg at +4 (near ret = 2B)
+  inc ax
+  pop bp / c3                     ; near ret
+  
+  ; _main calling _helper (no push cs needed):
+  push 41
+  e8 eb ff                        ; call near _helper
+  ```
+  Main itself stays FAR in medium model (returns `cb`).
+- `2062` (**`pascal` calling convention**): three
+  major differences from cdecl:
+  1. **Symbol name UPPERCASE, NO leading underscore**:
+     `HELPER` (not `_helper`).
+  2. **Args pushed LEFT-to-RIGHT**: in source
+     order `helper(50, 8)` → push 50 first, push 8
+     second. So 'a' is at [bp+6] (pushed first =
+     higher address), 'b' at [bp+4].
+  3. **Callee cleans the stack** via `ret imm16`:
+     `c2 04 00` = `ret 4` (pops 4 args bytes).
+     Caller does NO cleanup.
+  
+  ```
+  ; HELPER:
+  push bp / mov bp, sp
+  mov ax, [bp+6]                  ; a (first pushed)
+  sub ax, [bp+4]                  ; b
+  pop bp / c2 04 00               ; ret 4 (callee cleans)
+  
+  ; _main calling HELPER:
+  push 50                          ; a, L-to-R
+  push 8                           ; b
+  e8 e3 ff                         ; call HELPER
+  ; NO cleanup — callee did it
+  ```
+
+**Function-keyword/convention summary**:
+| Keyword/conv | Effect | Args | Cleanup | Naming |
+|--------------|--------|------|---------|--------|
+| (default cdecl) | per-model default | R-to-L | caller | `_name` |
+| `near` | force near (model overrides irrelevant in -ms/-mc) | R-to-L | caller | `_name` |
+| `far` | force far (use `cb` retf, shift offsets) | R-to-L | caller | `_name` |
+| `pascal` | force pascal convention | L-to-R | callee (`ret imm16`) | `NAME` (UPPER, no underscore) |
+
+For the Rust reimplementation:
+- Per-fn `near`/`far` keywords: track at parse time,
+  generate the correct call/ret pair.
+- `pascal` convention: emit args L-to-R, use `ret
+  imm16` in callee, use uppercase no-underscore
+  symbol names.
+
 ## Huge model = far data + `push ds/mov ds,seg/.../pop ds`; `far *` ptr = LES BX; `near *` redundant in -ms
 
 Fixtures `2057` (huge -mh), `2058` (explicit `far
