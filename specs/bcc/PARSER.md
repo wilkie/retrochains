@@ -1959,6 +1959,89 @@ arithmetic siblings of the batch-112/113 bitwise BpRel set.
   [bp+N]` as text; only the parser+encoder needed to
   recognize the non-AX form.
 
+## No rotate-pattern recognition (emits 2 shifts + or); int shift by 4+ uses `b1 N / d3 e0` cl-form; chained ternary nests
+
+Fixtures `2270` (rotate emulation), `2271`
+(popcount), `2272` (chained ternary) probe
+optimization opportunities BCC does/doesn't take.
+
+- `2270` (**rotate via shifts**): `(x << 4) | (x
+  >> 12)` is NOT recognized as a rotate-left-by-
+  4. BCC emits two separate shifts + an OR:
+  ```
+  mov ax, si              ; copy of x
+  mov cl, 4
+  shl ax, cl              ; x << 4
+  mov dx, si              ; second copy
+  mov cl, 12
+  shr dx, cl              ; x >> 12 (logical, unsigned)
+  or ax, dx               ; combine
+  ```
+  Uses `b1 N / d3 e0` (cl-form) instead of N
+  unrolled `d1 e0` because **N ≥ 4 for ints**:
+  - N=1: `d1 /4 reg` (2B)
+  - N=2,3: probably 2-3 unrolled (4-6B; needs
+    verifying)
+  - N ≥ 4: `b1 N / d3 /4 reg` (4B, cl-form wins)
+- `2271` (**popcount loop**): straightforward
+  per-bit loop. No special instruction or pattern
+  recognition. Same codegen any compiler without
+  intrinsics would emit:
+  ```
+  while_top:
+    or si, si          ; test x != 0
+    je end
+    mov ax, si
+    and ax, 1          ; bit 0
+    add di, ax         ; n += bit
+    shr si, 1          ; x >>= 1
+    jmp while_top
+  end:
+  ```
+- `2272` (**chained ternary**): `(c1) ? a : (c2)
+  ? b : c` lowers to right-associative nested
+  if-else with cmp+jcc+value+jmp per level:
+  ```
+  ; (x > 0) ? 1 : (x < 0) ? -1 : 0
+  test x
+  jle outer_false
+  mov ax, 1 / jmp end
+  outer_false:
+    test x (again)
+    jge zero
+    mov ax, -1 / jmp end
+  zero:
+    xor ax, ax
+  end:
+  ```
+
+**Pattern recognition NOT performed in BCC**:
+- ROL/ROR via shift+or
+- popcount (single-instruction on 286+ via lookup
+  table or via BSF/BSR)
+- min/max via cmp + cmov (cmov is 386+ anyway)
+- bit-test idioms like `(x & (1 << n)) != 0`
+- swap via XOR trick
+- abs via cmp + neg
+
+**Int shift threshold** (vs long):
+| Shift type | N | Form |
+|------------|---|------|
+| Int shift | 1 | `d1 /4 reg` (2B) |
+| Int shift | 2-3 | unrolled or cl-form |
+| Int shift | 4+ | `b1 N / d3 /4 reg` (cl-form, 4B) |
+| Int shift | var | `mov cl, [src] / d3 /4 reg` |
+| Long shift | 1 | inline `shl dx, 1 / rcl ax, 1` (4B) |
+| Long shift | 2+ | N_LXLSH@ helper |
+
+For the Rust reimplementation:
+- Don't pattern-match rotate or popcount; emit
+  the equivalent series of primitives.
+- For int shifts: emit N unrolled `d1 e0` for N <
+  4, else cl-form.
+- For chained ternary: emit nested if/else
+  pattern per ternary level.
+
 ## Large frames use `81 ec NN NN` + bp+disp16 (`8d 86 disp16`); ptr+N scales at compile time; 8 args = `add sp, 16` cleanup
 
 Fixtures `2267` (large local frame), `2268` (8
