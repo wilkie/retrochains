@@ -4168,3 +4168,38 @@ Findings:
 - Function call return propagates directly to outer function's
   return — no extra store/load via local.
 
+
+## `do { body; } while (cond);` — body first, condition at END (no initial jmp)
+
+Fixture `2902-do-while-loop-obj`:
+
+```c
+int run(int n) {
+  int s = 0;
+  do {
+    s = s + 1;
+    n = n - 1;
+  } while (n > 0);
+  return s;
+}
+```
+
+```
+                               ; LOOP_TOP:
+8b c7 40 8b f8                 s = s + 1
+8b c6 48 8b f0                 n = n - 1
+0b f6                          or si, si        (peephole for n > 0)
+7f f2                          jg → LOOP_TOP    (signed > 0)
+                               ; (fall through to epi)
+```
+
+Findings:
+- **`do-while` saves the initial `jmp → COND`** that `while` and
+  `for` emit at loop entry.
+- Body always executes at least once; condition tested at the
+  bottom for the back-edge.
+- For `while`/`for`: `jmp → COND; BODY; COND; j<cond> → BODY` (with
+  extra 2B initial jmp).
+- For `do-while`: `BODY; COND; j<cond> → BODY` (2B shorter).
+- Useful when you know the loop runs ≥ 1 time.
+

@@ -2482,3 +2482,27 @@ Findings:
 - Sar opcode is `d1 f8` (1-bit), `d3 f8` (cl-form).
 - Unsigned would use `shr` opcode `d1 e8` / `d3 e8`.
 
+
+## `x * -2` — full imul (no strength reduction for negative pow-2)
+
+Fixture `2898-mul-neg-2-obj`:
+
+```c
+return x * -2;
+```
+
+```
+8b 46 fe                       mov ax, x
+ba fe ff                       mov dx, -2 (0xFFFE)
+f7 ea                          imul dx
+```
+
+Findings:
+- `x * -K` uses **full imul**, NO strength reduction.
+- Even for `x * -2`, BCC doesn't emit `shl ax, 1; neg ax` (4B,
+  which would beat current 8B).
+- Strength reduction is **positive power-of-2 only**. Negative
+  multipliers always pay the full imul cost.
+- Confirms multiplication folding asymmetry: `+K`, `*+K` get
+  peepholes; `-K`, `*-K` don't.
+

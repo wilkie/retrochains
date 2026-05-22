@@ -1586,3 +1586,32 @@ Findings:
 - Source-form choice doesn't help here — BCC's char-global path
   is just suboptimal.
 
+
+## Local `char c; c += 1;` — DL register promotion, AL↔DL bounce
+
+Fixture `2897-local-char-plus-eq-obj`:
+
+```c
+char c = 'A';
+c += 1;
+return c;
+```
+
+```
+b2 41                          mov dl, 'A'      (c promoted to DL)
+8a c2                          mov al, dl       (copy to AL for inc)
+fe c0                          inc al
+8a d0                          mov dl, al       (store back to DL)
+8a c2                          mov al, dl       (reload for return)
+98                             cbw
+```
+
+Findings:
+- Local char gets **DL register promotion** in leaf fn (similar to
+  int's si/di promotion but at byte level).
+- Compound assignment is **inefficient**: bounces AL↔DL multiple
+  times. Could be `inc dl; mov al, dl; cbw` (4B) but BCC emits
+  ~6B of AL↔DL transfers.
+- Total 11 bytes for the body. BCC's char codegen path is less
+  polished than int.
+

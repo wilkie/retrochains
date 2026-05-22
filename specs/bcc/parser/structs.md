@@ -3098,3 +3098,30 @@ Findings:
 - Same shape as `int x = y` (`2812`).
 - Reaffirms threshold: `≤ 4B inline` (1B/2B/4B), `≥ 5B helper`.
 
+
+## 2-byte struct return — single AX (same as int return)
+
+Fixture `2899-struct2b-byval-ret-obj`:
+
+```c
+struct W { int v; };
+struct W make(int n) {
+  struct W w;
+  w.v = n;
+  return w;
+}
+```
+
+```
+4c 4c                          dec sp twice (local w)
+8b 46 04                       mov ax, n
+89 46 fe                       w.v = ax
+8b 46 fe                       reload w for return (AX)
+```
+
+Findings:
+- 2-byte struct return = **AX-only**, NO hidden ptr, NO N_SCOPY@.
+- Same shape as int return.
+- Confirms struct return rule: 1B=AL, 2B=AX, 3B=helper, 4B=DX:AX,
+  5+=helper.
+
