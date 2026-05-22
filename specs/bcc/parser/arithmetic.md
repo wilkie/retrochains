@@ -1739,3 +1739,40 @@ Findings:
   unsigned shifts ARE safe because they round down which matches
   unsigned divide.
 
+
+## Unsigned `u % 2^N` — `and ax, mask` (no div)
+
+Fixture `2590-umod-pow2-obj`:
+
+```c
+unsigned int u;
+u = 1000;
+return u % 8;
+```
+
+```
+55 8b ec 4c 4c                 prologue + 2B local
+c7 46 fe e8 03                 u = 1000
+8b 46 fe                       mov ax, u
+25 07 00                       and ax, 0x0007       ; AX-acc form
+eb 00 8b e5 5d c3              epilogue
+```
+
+Findings:
+- **Unsigned `u % 2^N` is compiled as `and ax, (2^N - 1)`** —
+  the textbook mask-the-low-N-bits optimization. NO `div` or
+  `idiv` instruction.
+- Uses the **AX-accumulator form `25 imm16`** (3 bytes) since
+  the mask is a 16-bit constant.
+- Mask values for common divisors:
+  - `u % 2` → `and ax, 1` (`25 01 00`)
+  - `u % 4` → `and ax, 3` (`25 03 00`)
+  - `u % 8` → `and ax, 7` (`25 07 00`)
+  - `u % 16` → `and ax, 15` (`25 0F 00`)
+  - `u % 256` → `and ax, 255` (`25 ff 00`)
+- Signed `s % 2^N` CANNOT use this directly (sign of result
+  depends on sign of dividend per C), so it would use `idiv`.
+  To probe.
+- Compare to unsigned `u / 2^N` which uses `shr` (`2519`) — both
+  optimizations apply, and BCC takes both when applicable.
+

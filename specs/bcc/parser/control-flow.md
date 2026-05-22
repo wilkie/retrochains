@@ -3114,3 +3114,62 @@ Findings:
 - So **break shape is loop-kind-independent**, **continue shape
   varies by loop kind**.
 
+
+## `if (...) ... else if (...) ... else` — extra unreachable jmp per branch
+
+Fixture `2587-if-else-chain-obj`:
+
+```c
+if      (x == 1) return 10;
+else if (x == 2) return 20;
+else if (x == 3) return 30;
+else             return 99;
+```
+
+```
+55 8b ec 56                    prologue + push si
+be 03 00                       mov si, 3
+                               ; --- if x==1 ---
+83 fe 01                       cmp si, 1
+75 07                          jne → else1
+b8 0a 00                       mov ax, 10
+eb 1f                          jmp → epi
+eb 1d                          jmp → epi    (UNREACHABLE!)
+                               ; --- else1: if x==2 ---
+83 fe 02                       cmp si, 2
+75 07                          jne → else2
+b8 14 00                       mov ax, 20
+eb 13                          jmp → epi
+eb 11                          jmp → epi    (UNREACHABLE!)
+                               ; --- else2: if x==3 ---
+83 fe 03                       cmp si, 3
+75 07                          jne → else3
+b8 1e 00                       mov ax, 30
+eb 07                          jmp → epi
+eb 05                          jmp → epi    (UNREACHABLE!)
+                               ; --- else3 ---
+b8 63 00                       mov ax, 99
+eb 00 5e 5d c3                 epilogue
+```
+
+Findings:
+- Each then-branch with an explicit `return` is followed by a
+  **second, unreachable `jmp` to epi**. BCC structurally emits:
+  ```
+  cmp; jne ELSE; THEN_BODY; jmp EPI;
+                            jmp END_IF;
+  ELSE: ...
+  END_IF: ...
+  ```
+  The "jmp EPI" comes from the return; the "jmp END_IF" would
+  normally bridge over the else-branch. Both are emitted even
+  when the first is final.
+- This pattern **wastes 2 bytes per if-else with a returning then**.
+  No dead-code elimination.
+- The dead jmp's disp also shrinks meaningfully along the chain
+  (0x1d, 0x11, 0x05) — BCC computes disps with full structural
+  awareness, just doesn't prune them.
+- **Source structure preserved 1:1 in OBJ**: if-else cascades
+  produce nested branch blocks with predictable shape, which
+  makes our reimpl's job easier — we just emit the same shape.
+

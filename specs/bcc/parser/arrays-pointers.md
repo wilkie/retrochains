@@ -4200,3 +4200,43 @@ Findings:
 - This confirms: pointer arithmetic with constant offsets always
   folds to a baseregister+disp form, even for negative offsets.
 
+
+## `*p++ = K` for char* — `mov byte [si], imm8; inc si` (4 bytes per write)
+
+Fixture `2589-deref-postinc-write-obj`:
+
+```c
+char buf[5];
+int main(void) {
+  char *p;
+  p = buf;
+  *p++ = 'A';
+  *p++ = 'B';
+  return 0;
+}
+```
+
+```
+55 8b ec 56                    prologue + push si
+be 00 00                       mov si, _buf (FIXUPP)
+c6 04 41                       mov byte [si], 'A'
+46                             inc si
+c6 04 42                       mov byte [si], 'B'
+46                             inc si
+33 c0                          xor ax, ax
+eb 00 5e 5d c3                 epilogue
+```
+
+Findings:
+- `*p++ = K` for char* compiles as **`c6 04 imm8; 46`** — direct
+  byte store at `[si]` followed by single-byte inc.
+- ModR/M `04` = mod 00, r/m 100 → `[si]` with no displacement.
+- Total: **4 bytes per write-and-advance**. Two consecutive ops
+  = 8 bytes — BCC does NOT coalesce them into a single 2-byte
+  word store (which would be `c7 04 imm16` = 4 bytes for both
+  if the bytes happened to be word-aligned).
+- The return `0` uses `xor ax, ax` (2B) per the standard zero-load
+  peephole.
+- This is the idiomatic "string-building" pattern in C — and BCC
+  emits the compact form expected.
+

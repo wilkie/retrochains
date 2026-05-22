@@ -2354,3 +2354,124 @@ Findings:
   discarded. No type-directed elision of the helper call itself
   because the helper computes the full product internally.
 
+
+## Long divide — `N_LDIV@` helper with STACK args, callee-cleans-up via epilogue
+
+Fixture `2585-long-div-obj`:
+
+```c
+long a = 1000000L;
+long b = 7L;
+return (int)(a / b);
+```
+
+```
+55 8b ec 83 ec 08              prologue + 8B locals (2 longs)
+c7 46 fe 0f 00                 a HIGH = 0x000F
+c7 46 fc 40 42                 a LOW  = 0x4240
+c7 46 fa 00 00                 b HIGH = 0
+c7 46 f8 07 00                 b LOW  = 7
+ff 76 fa                       push word [bp-6]    ; b HIGH
+ff 76 f8                       push word [bp-8]    ; b LOW
+ff 76 fe                       push word [bp-2]    ; a HIGH
+ff 76 fc                       push word [bp-4]    ; a LOW
+e8 00 00                       call N_LDIV@         ; (EXTDEF FIXUPP)
+                               ; NO `add sp, 8` here! Epilogue restores.
+eb 00 8b e5 5d c3              epilogue
+```
+
+Findings:
+- Long divide uses **`N_LDIV@`** helper. Note the symbol prefix
+  differs from multiply (`N_LXMUL@`) — there's NO consistent
+  "LX" infix across all long ops. Possible naming:
+  - `N_LXRSH@` / `N_LXURSH@` — shift right (signed/unsigned)
+  - `N_LXMUL@` — multiply
+  - `N_LDIV@` / probably `N_LUDIV@` — divide (signed/unsigned)
+- **Helper ABI uses STACK args** (not registers like LXMUL@):
+  4 words pushed in order LOW(b), HIGH(b), LOW(a), HIGH(a)
+  — i.e., divisor first, then dividend. Reading the pushes
+  bottom-up, the call sees: `divisor_high, divisor_low,
+  dividend_high, dividend_low`.
+- **`add sp, 8` cleanup is ELIDED** — BCC relies on the
+  function's epilogue `mov sp, bp` (`8b e5`) to restore sp.
+  This saves 3 bytes per helper call when applicable.
+  Conditions:
+  - Function has locals allocated via `sub sp` (so `mov sp, bp`
+    is already in the epilogue path).
+  - The call is the LAST thing before the epilogue — no
+    subsequent stack ops depend on sp being immediately correct.
+- The cast `(int)(a/b)` then just keeps AX (the helper's
+  DX:AX result low half).
+
+## `s << 16` for long — folded to byte-swap, NO helper call
+
+Fixture `2586-long-lsh-obj`:
+
+```c
+long s = 1L;
+s = s << 16;
+return (int)s;
+```
+
+```
+55 8b ec 83 ec 04              prologue + 4B local
+c7 46 fe 00 00                 s HIGH = 0
+c7 46 fc 01 00                 s LOW = 1
+8b 46 fc                       ax = s LOW (= 1)
+89 46 fe                       [bp-2] = ax       ; s HIGH := old LOW
+c7 46 fc 00 00                 [bp-4] = 0        ; s LOW := 0
+8b 46 fc                       ax = s LOW (= 0, after shift)
+eb 00 8b e5 5d c3              epilogue
+```
+
+Findings:
+- **`s << 16` on a long is folded at compile time to a WORD SWAP**:
+  the LOW word moves to HIGH, the LOW word becomes 0. NO library
+  helper call.
+- This generalizes: shifts by **exact multiples of 16** on long
+  values trade word slots — they can be expressed as moves and
+  constants without any actual shift instruction.
+  - `<< 16` → low → high, low := 0
+  - `<< 32` (but that's all of long) → both halves := 0 (or UB?)
+  - `>> 16` (unsigned) → high → low, high := 0
+  - `>> 16` (signed) → high → low (sign-extended), high := sign
+- For shifts that aren't multiples of 16, BCC falls back to the
+  library helper (`N_LXRSH@`, `N_LXURSH@`, `N_LXLSH@`).
+- This is a critical peephole — the helper call cost is ~5 bytes
+  vs 3-7 bytes for the inline byte-swap.
+
+
+## Long array initializer — 4 bytes per element, little-endian
+
+Fixture `2588-long-arr-init-obj`:
+
+```c
+long table[3] = { 0x12345678L, -1L, 0L };
+int main(void) {
+  return (int)table[1];
+}
+```
+
+`_DATA` bytes (12 = 3 × 4):
+```
+78 56 34 12     ; table[0] = 0x12345678 little-endian
+ff ff ff ff     ; table[1] = -1L (two's complement)
+00 00 00 00     ; table[2] = 0L
+```
+
+Main body:
+```
+55 8b ec                       prologue
+a1 04 00                       mov ax, [_table + 4]  ; LOW word of table[1]
+eb 00 5d c3                    epilogue
+```
+
+Findings:
+- Each long element = 4 bytes packed little-endian.
+- `table[K]` for long array folds to byte offset `K × 4`.
+- `(int)table[1]` cast: only the low word is loaded — `mov ax,
+  [_table + 4]`. The high word at `_table + 6` is unread.
+- This matches the per-scalar long layout (`2560`): HIGH word at
+  higher address (offset 2 within the long), LOW at offset 0.
+- 3-element long array has `sizeof = 12` in `_BSS` / `_DATA`.
+
