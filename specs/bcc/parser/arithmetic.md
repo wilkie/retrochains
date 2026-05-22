@@ -2257,3 +2257,48 @@ Findings:
 - Source-form sensitivity persists: `0 - x` vs `-x` differ. Use
   unary forms for byte-optimal code.
 
+
+## More identity peepholes confirmed
+
+Fixtures `2741`-`2743`:
+
+| pattern | folded? |
+|---------|---------|
+| `x / 1` | ✓ IDENTITY (no div/idiv) |
+| `1 * x` | ✓ IDENTITY (commutative)  |
+| `0 + x` | ✓ IDENTITY (commutative)  |
+
+Findings:
+- **`x / 1` is identity-folded** (`2741`) — no idiv instruction.
+  Saves ~6 bytes per division.
+- BCC's constant-fold recognizes commutative arrangements: both
+  `1 * x` (`2742`) and `x * 1` (`2729`) fold; both `0 + x` (`2743`)
+  and `x + 0` (`2730`) fold.
+- Updated identity table — these all emit just `mov ax, x`:
+
+| pattern         | result | folded? |
+|-----------------|--------|---------|
+| `x + 0`, `0 + x`| x      | ✓ |
+| `x - 0`         | x      | ✓ |
+| `x * 1`, `1 * x`| x      | ✓ |
+| `x / 1`         | x      | ✓ |
+| `x | 0`         | x      | ✓ |
+| `x ^ 0`         | x      | ✓ |
+
+## `x / -1` — NOT folded to `neg x`
+
+Fixture `2744-sdiv-neg1-obj`:
+
+```
+8b 46 fe                       mov ax, x
+bb ff ff                       mov bx, -1 (0xFFFF)
+99 f7 fb                       cwd; idiv bx
+```
+
+Findings:
+- `x / -1` uses **full idiv path** with `-1` as divisor — NOT
+  folded to `neg x` (which would be 2 bytes).
+- Mathematically `x / -1 == -x`, but BCC doesn't recognize this.
+- Source-form sensitivity: write `-x` explicitly for 8-byte
+  savings (idiv setup is ~6B, vs `neg ax` = 2B).
+

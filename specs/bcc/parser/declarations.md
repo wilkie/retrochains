@@ -1001,3 +1001,40 @@ Findings:
 - Local frame reserved 2 bytes for x regardless of whether it has
   an initializer.
 
+
+## Register promotion to DX in leaf functions
+
+Fixture `2746-for-comma-inc-obj`:
+
+```c
+int main(void) {
+  int i, j, s;     /* 3 locals */
+  s = 0;
+  for (i = 0, j = 10; i < 3; i = i + 1, j = j - 1) {
+    s = s + i + j;
+  }
+  return s;
+}
+```
+
+```
+55 8b ec 56 57                 prologue + push si, di
+33 d2                          xor dx, dx       ; s = 0 (in DX!)
+33 f6                          xor si, si       ; i = 0
+bf 0a 00                       mov di, 10       ; j = 10
+...
+```
+
+Findings:
+- **In leaf functions (no calls inside)**, BCC can promote a THIRD
+  local to **DX** in addition to SI and DI.
+- This works because DX is normally caller-saved (clobbered by
+  any call), but a leaf function makes no calls — DX is safe.
+- So register-promotion candidates per function:
+  - Always available: SI, DI (callee-preserved)
+  - Available in leaf functions only: DX (caller-saved)
+  - The function would push SI/DI in prologue if used; DX needs
+    no save (caller doesn't expect it preserved).
+- The comma-separated inc clause `i = i+1, j = j-1` compiles as
+  two sequential AX-acc operations in source order.
+

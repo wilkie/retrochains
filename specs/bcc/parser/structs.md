@@ -2745,3 +2745,39 @@ Findings:
   `c7` opcode (mov mem,imm16). Both at moffs16 form (`06`).
 - Word loads via `a1 disp16` work regardless of address alignment.
 
+
+## 6-byte struct copy `s2 = s1` — USES `N_SCOPY@` helper
+
+Fixture `2745-large-struct-copy-obj`:
+
+```c
+struct Six { int a; int b; int c; };
+int main(void) {
+  struct Six s1, s2;
+  s1.a = 1; s1.b = 2; s1.c = 3;
+  s2 = s1;
+  return s2.b;
+}
+```
+
+```
+55 8b ec 83 ec 0c              prologue + 12B locals (2 × 6B structs)
+c7 46 fa ...                   3 field stores: s1.a, s1.b, s1.c
+8d 46 f4                       lea ax, [bp-12]   ; dst = &s2
+16 50                          push ss; push ax
+8d 46 fa                       lea ax, [bp-6]    ; src = &s1
+16 50                          push ss; push ax
+b9 06 00                       mov cx, 6         ; count
+e8 00 00                       call N_SCOPY@     ; (EXTDEF)
+8b 46 f6                       mov ax, s2.b
+```
+
+Findings:
+- **6-byte struct copy uses `N_SCOPY@` helper**, NOT inlined.
+- Compare to **4-byte struct copy** (`2611`) which IS inlined
+  (load + store both fields).
+- Threshold for inline-vs-helper struct copy:
+  - Size ≤ 4 (one DX:AX pair) → inlined load/store pairs
+  - Size ≥ 5 (or maybe ≥ 6?) → N_SCOPY@ helper call
+- Need to probe 5-byte copy to nail the exact boundary.
+
