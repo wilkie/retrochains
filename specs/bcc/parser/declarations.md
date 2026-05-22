@@ -790,3 +790,68 @@ Findings:
 - The `inc ax` peephole still fires for `+ 1` even when stored to
   global memory.
 
+
+## `extern int g_count;` — EXTDEF only, no storage
+
+Fixture `2576-extern-int-obj`:
+
+```c
+extern int g_count;
+int read_count(void) {
+  return g_count;
+}
+```
+
+OBJ symbols:
+- `_g_count` — **EXTDEF** (declared, not defined here)
+- `_read_count` — PUBDEF + body
+
+Body:
+```
+55 8b ec                       prologue
+a1 00 00                       mov ax, [_g_count]   ; FIXUPP _g_count (EXTDEF)
+eb 00 5d c3                    epilogue
+```
+
+Findings:
+- `extern` declaration produces **only an EXTDEF record** — no
+  storage in `_DATA` or `_BSS` is allocated in this TU.
+- The reference uses the standard moffs16 load (`a1 disp16`) with
+  a FIXUPP that targets the external symbol. Linker resolves it.
+- This is the parallel to extern function declarations (which we've
+  seen as EXTDEFs throughout). The OBJ knows g_count's TYPE (int =
+  2-byte moffs16 access) but not its location.
+
+## Function declaration without body — EXTDEF for the symbol
+
+Fixture `2577-fn-decl-only-obj`:
+
+```c
+int foo(int x);
+int main(void) {
+  return foo(7);
+}
+```
+
+OBJ symbols:
+- `_foo` — **EXTDEF** (declared, not defined)
+- `_main` — PUBDEF + body
+
+main body:
+```
+55 8b ec                       prologue
+b8 07 00 50                    push 7
+e8 00 00                       call _foo            ; FIXUPP, EXTDEF
+59                             pop cx               ; cleanup 1 arg
+eb 00 5d c3                    epilogue
+```
+
+Findings:
+- Function prototype WITHOUT definition gets EXTDEF treatment.
+- Same shape as call to library function (`puts`, etc.) — BCC
+  doesn't distinguish "library function" from "user prototype":
+  any undefined-here function becomes an EXTDEF for the linker.
+- The forward declaration carries type info (return-type, args) so
+  BCC knows the call signature, push order, and cleanup convention
+  even without a body.
+

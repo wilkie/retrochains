@@ -1571,3 +1571,61 @@ Findings:
 | 4+ contig  | dense table | `cmp; ja default; shl; jmp CS:[bx+]` |
 | 4+ sparse  | search table | `loop` linear scan, dual tables    |
 
+
+## 2-case switch — LINEAR CHAIN (cmp+je per case)
+
+Fixture `2573-switch-two-cases-obj`:
+
+```c
+switch (x) {
+  case 1: return 10;
+  case 2: return 20;
+}
+return 99;
+```
+
+```
+8b 46 fe                       mov ax, x
+3d 01 00                       cmp ax, 1
+74 07                          je → case 1 body
+3d 02 00                       cmp ax, 2
+74 07                          je → case 2 body
+eb 0a                          jmp → default
+                               ; bodies + default follow
+```
+
+Findings:
+- 2-case switch uses **sequential cmp+je per case**, then `jmp default`.
+- Uses `3d imm16` (AX-accumulator cmp form, 3 bytes) for each case.
+
+## 3-case switch — STILL linear chain (even sparse)
+
+Fixture `2574-switch-three-cases-obj` (cases 1, 2, 5):
+
+```
+8b 46 fe                       mov ax, x
+3d 01 00 74 0c                 cmp+je case 1
+3d 02 00 74 0c                 cmp+je case 2
+3d 05 00 74 0c                 cmp+je case 5
+eb 0f                          jmp default
+```
+
+Findings:
+- 3-case switch ALSO uses linear chain — even when cases are non-
+  contiguous (1, 2, 5). The table dispatch (dense or search) does
+  not kick in below 4 cases.
+- **Complete switch threshold table**:
+
+| N cases  | layout             |
+|----------|--------------------|
+| 1        | if-equiv (cmp+je+jmp default) |
+| 2        | linear chain (2× cmp+je) |
+| 3        | linear chain (3× cmp+je) — confirmed sparse too |
+| 4+ contig| dense table        |
+| 4+ sparse| search table       |
+
+  Per-case cost in linear chain: 5 bytes (cmp 3B + je 2B).
+  At N=4 the table-dispatch overhead (range check + indirect jmp)
+  starts paying off — dense table is ~12B header + 2B/entry,
+  search table is ~14B header + 4B/entry.
+

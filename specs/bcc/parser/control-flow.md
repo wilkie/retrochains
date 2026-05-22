@@ -3032,3 +3032,46 @@ Findings:
 - Conditional uses `jl` (signed less-than) — matches signed `int i`.
 - Same "test-at-bottom" frame as while (`2561`).
 
+
+## `continue` in `for(;;)` — jumps to INCREMENT clause, not COND-TEST
+
+Fixture `2578-continue-in-loop-obj`:
+
+```c
+for (i = 0; i < 5; i = i + 1) {
+  if (i == 2) continue;
+  s = s + i;
+}
+```
+
+```
+33 ff 33 f6                    init (di=s=0, si=i=0)
+eb 12                          jmp → COND
+                               ; --- BODY ---
+83 fe 02                       cmp si, 2
+75 02                          jne → SKIP-CONTINUE
+eb 06                          jmp → INC          ; CONTINUE = jmp to INC
+                               ; SKIP-CONTINUE:
+8b c7 03 c6 8b f8              s = s + i
+                               ; INC (continue target):
+8b c6 40 8b f0                 i = i + 1
+                               ; COND:
+83 fe 05                       cmp si, 5
+7c e9                          jl → BODY
+```
+
+Findings:
+- **`continue` jumps to the for-loop's INCREMENT clause**, not the
+  condition test. So the increment STILL runs before the next
+  condition check. This matches C semantics — `for(i=0;i<5;i++)`
+  with continue still advances i.
+- `if (cond) continue` compiles to `cmp; jne SKIP; jmp INC` — same
+  double-jump shape as `break` (`2516`), but jumping to a DIFFERENT
+  target.
+- The increment clause label sits between the body and the cond-test.
+  So for a `while(cond) { ... continue; }`, continue would jump
+  directly to the cond-test (no inc clause).
+- This means the parser must emit a distinct "continue target" label
+  per loop level (the for-inc clause), which is structurally
+  different from the cond-test label.
+

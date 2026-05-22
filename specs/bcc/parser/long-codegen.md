@@ -2240,3 +2240,48 @@ Findings:
   `[bp-2]` holds the HIGH word, `[bp-4]` the LOW (for a long at
   `[bp-4..-1]`).
 
+
+## Long signed right shift — runtime helper `N_LXRSH@`
+
+Fixture `2575-long-sar-obj`:
+
+```c
+long s = -16L;
+s = s >> 2;
+return (int)s;
+```
+
+```
+55 8b ec 83 ec 04              prologue + 4B local (long s)
+c7 46 fe ff ff                 [bp-2] = 0xFFFF  (HIGH of -16L)
+c7 46 fc f0 ff                 [bp-4] = 0xFFF0  (LOW of -16L)
+8b 56 fe                       mov dx, [bp-2]   ; HIGH → dx
+8b 46 fc                       mov ax, [bp-4]   ; LOW  → ax
+b1 02                          mov cl, 2        ; shift count
+e8 00 00                       call N_LXRSH@    ; (EXTDEF FIXUPP)
+89 56 fe                       [bp-2] = dx      ; store back HIGH
+89 46 fc                       [bp-4] = ax      ; store back LOW
+8b 46 fc                       mov ax, [bp-4]   ; (int)s = LOW
+eb 00 8b e5 5d c3              epilogue
+```
+
+Findings:
+- Long shifts use a **runtime library helper**, NOT inline shifts.
+  The 8086 lacks a single 32-bit shift instruction; doing it inline
+  would require 2× shift + carry-flip per bit (~6 instructions per
+  shift). The library function is cheaper after about 2-3 shifts.
+- Helper convention:
+  - Input: **DX:AX = the long value**, **CL = shift count**
+  - Output: **DX:AX = shifted result**
+  - Helper preserves bp, si, di (cdecl-conformant)
+- Helper names so far observed:
+  - `N_LXRSH@` — signed long right shift (this fixture)
+  - `N_SCOPY@` — struct/string copy (`2509`, `2526`)
+  - Expected siblings: `N_LXLSH@` (left shift), `N_LXRSU@`
+    (unsigned right shift), multiply/divide helpers.
+- The helper is called WITHOUT pushing args — DX:AX/CL are the
+  ABI. This is a **fast-call convention** specific to long-arith
+  helpers, distinct from cdecl push-stack convention.
+- No cleanup needed after — helper consumes DX:AX/CL and returns
+  in DX:AX, no stack pushes.
+
