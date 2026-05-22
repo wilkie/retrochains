@@ -401,3 +401,26 @@ Probe replaced with the char-compound-OR variant.
   fits in a 6-byte stack frame. Byte access uses
   `mov al, [bp+disp]` then `cbw` for int contexts; word access for
   `len` uses ordinary `mov ax, [bp+disp]`.
+
+## Free passes (batch 671)
+
+- `2376` — `int a[5]; p = &a[3];` (address-of array element with
+  constant index): `lea ax, [bp-4]` — offset `bp - 4` is computed
+  at parse time (bp-10 base + 3*2 stride = bp-4). No runtime
+  stride mul. The pointer enregisters into SI. Re-confirms
+  constant subscript = compile-time offset folding.
+- `2378` — `struct Op { int (*fn)(int); }; op.fn = add5;
+  op.fn(10);` (function pointer stored in a struct field, called
+  through the field). Same `ff 56 disp` encoding as calling a
+  stack-local function pointer — BCC treats the struct field as
+  just another BP-relative memory operand. Re-confirms indirect
+  call through any near memory operand.
+- `2380` — `int * const p = &x;` (const POINTER, not pointer to
+  const). The `const` qualifier on the pointer is parser-only;
+  codegen is **byte-identical** to `int *p = &x;`. The qualifier
+  enforces no-reassignment at parse time but generates no
+  protection bytes. Re-confirms type qualifiers
+  (`const`/`volatile`/`register`) carry no codegen weight beyond
+  enregistration hints. Note: `*p = 42;` (writing through the
+  pointer) is allowed since the const-ness is on the pointer
+  itself, not the pointee.

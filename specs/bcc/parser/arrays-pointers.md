@@ -3670,3 +3670,72 @@ eb 01                   ; jmp test
 `80 3c 00` is `cmp byte ptr [si], 0` (`mod=00 r/m=100` = `[si]`,
 no displacement). Compare-with-zero against a byte through a register
 pointer.
+
+## `sizeof(array)` arithmetic folded at compile time (fixture `2375`)
+
+`return sizeof(a) - sizeof(p);` where `a` is `int a[5]` and `p` is
+`int *`. BCC folds the entire expression at parse time:
+
+```
+b8 08 00                ; mov ax, 8   ← (5*2) - 2 = 8, computed at parse
+```
+
+No runtime sizeof emit. Confirms `sizeof` is a constant expression
+and integer arithmetic between sizeof results is constant-folded.
+This includes when one operand is `sizeof(array_object)` (= total
+bytes = 10) and the other is `sizeof(pointer)` (= 2). The C90 rule
+that arrays don't decay inside `sizeof` is also implicitly confirmed
+— if `sizeof(a)` had decayed to `sizeof(int*)`, the result would be 0.
+
+## Negative array subscript — signed disp8 in ModR/M (fixture `2377`)
+
+`p[-1]` with `p` a pointer compiles to a single load with a
+**negative-displacement** ModR/M:
+
+```
+8b 44 fe        ; mov ax, [si + (-2)]   ← disp8 = 0xFE = -2 signed
+```
+
+Encoding details:
+- `8b` = `mov r16, r/m16`
+- `44` = ModR/M `mod=01, reg=000 (ax), rm=100 ([si]+disp8)`
+- `fe` = disp8 (= -2 in signed two's complement)
+
+So `p[K]` for a constant negative `K` collapses to disp8 access — no
+separate `sub` instruction needed for the negative offset. The
+compile-time stride computation (`K * sizeof(*p) = -1 * 2 = -2`)
+produces a value that fits in the signed-byte disp8 range
+(-128..+127), letting the access fold into one instruction.
+
+For larger negative offsets that don't fit in disp8, BCC would
+presumably emit disp16 (`8b 84 NN NN`) — outside this fixture's
+scope.
+
+## `(c ? a : b)[i]` — ternary of arrays returns a pointer (fixture `2379`)
+
+Conditional expressions over arrays exploit array-to-pointer decay:
+the ternary doesn't return an array, it returns a pointer to the
+chosen array. Both branches compile a `lea` of the array's stack
+address.
+
+```c
+return (c ? a : b)[1];
+```
+
+```
+83 7e f2 00             ; cmp [c], 0
+74 05                   ; je b_branch
+8d 46 fa                ; lea ax, [bp-6]   ← &a[0]
+eb 03                   ; jmp end_cond
+                        ; b_branch:
+8d 46 f4                ; lea ax, [bp-12]  ← &b[0]
+                        ; end_cond:
+8b d8                   ; mov bx, ax       ← BX = chosen ptr
+8b 47 02                ; mov ax, [bx + 2] ← [1] = 1 * sizeof(int)
+```
+
+Each branch computes the array's address via `lea` and lands it in
+AX. After the ternary join, the result is moved to BX and the
+subscript adds the constant `+2` for `[1]`. Confirms: array-typed
+expressions decay to pointers when not the operand of `sizeof` or
+`&`, including inside ternary operands.
