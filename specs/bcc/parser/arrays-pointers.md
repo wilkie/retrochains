@@ -3582,3 +3582,91 @@ So the codegen path for `fns[K](arg)` is just: compute the slot
 displacement at compile time (constant-index subscript), then emit a
 single `ff 56 disp8`. No `mov ax,[bp-6] / call ax` round-trip — the
 ModR/M form already supports indirect-call-through-memory.
+
+## `char *names[] = {"alice", "bob", "carol"};` — string-literal pointer array (fixture `2345`)
+
+A file-scope `char *names[]` initialized from string literals allocates
+two segments worth of data:
+
+1. **Pointer slots in `_DATA`**: 3 near pointers × 2 bytes = 6 bytes,
+   one per array element. Each slot's value is the offset of its
+   string in `_DATA` — resolved via three FIXUPP records.
+2. **The string literal bodies** also in `_DATA`, NUL-terminated.
+
+Element access `names[K][0]` lowers to:
+
+```
+8b 1e 00 00             ; mov bx, [_names+K*2]  (FIXUPP'd)
+8a 07                   ; mov al, [bx]          ← *names[K]
+98                      ; cbw                   ← widen to int
+```
+
+So the indirection is explicit: load the pointer, then deref. There
+is no fused `mov al, [_strN]` shortcut even though the pointer is a
+constant — the compiler treats `names[K]` as an ordinary subscript
+that produces a pointer rvalue at runtime.
+
+Chained `+` of the three character loads goes through the standard
+push/pop accumulator pattern (each cbw'd char gets pushed, then
+popped+added to the next).
+
+## 2D array with runtime-variable indices — fixture `2346`
+
+`int m[3][4]` with both indices variable forces a runtime stride
+computation. The address `&m[i][j]` is `&m[0][0] + i*8 + j*2` (outer
+stride 4 elems × 2 bytes = 8, inner stride 2). BCC computes this with
+three `shl bx, 1` for the ×8 stride:
+
+```
+8b de                   ; mov bx, i
+d1 e3 d1 e3 d1 e3       ; shl bx, 1 ×3  (= ×8 outer stride)
+8b c7                   ; mov ax, j
+d1 e0                   ; shl ax, 1     (= ×2 inner stride)
+03 d8                   ; add bx, ax
+8d 46 e8                ; lea ax, [bp-24]  ← &m[0][0]
+03 d8                   ; add bx, ax    ← bx = full element address
+c7 07 4d 00             ; mov [bx], 77
+```
+
+Confirms the **N=3 shift-unroll threshold**: `shl bx, 1 / shl bx, 1 /
+shl bx, 1` (6 bytes) beats `mov cl, 3 / shl bx, cl` (5 bytes) only by
+1 byte but BCC consistently prefers the unrolled form at N=3. (N=4
+would tip into `cl`-form.)
+
+The same address-compute sequence is emitted **twice** — once for the
+write `m[i][j] = 77`, once for the read `return m[i][j]`. No CSE.
+Each subscript expression is lowered independently.
+
+## `char *` pointer subtraction — fixture `2347`
+
+For `char *p - char *s` BCC emits a direct word subtract with no
+divide, since `sizeof(char) = 1`:
+
+```
+8d 46 fa                ; lea ax, [bp-6]   ← &s[0]
+50                      ; push ax
+8b c6                   ; mov ax, si       ← p (enregistered)
+5a                      ; pop dx           ← &s[0]
+2b c2                   ; sub ax, dx       ← p - s
+```
+
+Contrast with `int *` subtraction (fixture `2241`), which inserts an
+`idiv` by `sizeof(int) = 2` after the subtract. The compiler routes
+on the pointee type at compile time.
+
+The `while (*p) p++;` walk-to-NUL uses the classic test-at-top
+template — `jmp` to the test first, then loop body, then test:
+
+```
+8d 46 fa 8b f0          ; p = &s[0]
+eb 01                   ; jmp test
+                        ; loop:
+46                      ; inc si           ← p++
+                        ; test:
+80 3c 00                ; cmp byte ptr [si], 0
+75 fa                   ; jne loop (-6)
+```
+
+`80 3c 00` is `cmp byte ptr [si], 0` (`mod=00 r/m=100` = `[si]`,
+no displacement). Compare-with-zero against a byte through a register
+pointer.

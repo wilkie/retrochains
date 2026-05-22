@@ -304,3 +304,17 @@ Probe replaced with the char-compound-OR variant.
   comparison path materializes both operands and emits the
   standard `cmp; jle <skip>` form.
 
+
+## Free passes (batch 666)
+
+- `2348` — `int fact(int n) { return n<=1 ? 1 : n*fact(n-1); }`
+  (recursive factorial): re-confirms recursion = ordinary near
+  `call` + `pop cx` cleanup; `imul si` form multiplies the return
+  value by the enregistered `n`. (Originally covered by `2255`.)
+- `2349` — `unsigned int x % 8` → `and ax, 7` (accumulator form
+  `25 07 00`). Re-confirms the unsigned-mod-pow2 peephole.
+  (Originally covered by `1935`.)
+- `2350` — `signed int x % 8` does NOT use AND — emits
+  `mov bx, 8 / cwd / idiv bx / mov ax, dx`. Confirms that the
+  peephole gates on signedness (signed `%` of a negative value
+  cannot be expressed as bitwise AND).
