@@ -3539,3 +3539,35 @@ Findings:
 | `while (cond) { }`       | initial `jmp → COND`; test-at-bottom |
 | `do {} while (cond)`     | test-at-bottom, no entry jmp |
 
+
+## Range check `x > 0 && x < 10` — mixed test forms in && chain
+
+Fixture `2666-range-check-obj`:
+
+```c
+int in_range(int x) {
+  if (x > 0 && x < 10) return 1;
+  return 0;
+}
+```
+
+```
+55 8b ec 56 8b 76 04           prologue + mov si, x
+0b f6                          or si, si        ; test x  (FIRST: vs zero)
+7e 0a                          jle → FALSE      ; if x <= 0
+83 fe 0a                       cmp si, 10       ; test (SECOND: vs constant)
+7d 05                          jge → FALSE      ; if x >= 10
+b8 01 00 eb 04                 ax = 1; jmp epi
+33 c0 eb 00 5e 5d c3           FALSE: ax = 0; epilogue
+```
+
+Findings:
+- Each operand of `&&` independently picks its test form:
+  - `x > 0` → `or si, si; jle FALSE` (2-byte test against zero)
+  - `x < 10` → `cmp si, 10; jge FALSE` (3-byte test vs constant)
+- The chain converges on a single FALSE label, consistent with
+  general && shape (`2505`).
+- Both branches use signed comparisons (`jle`, `jge`) because
+  the operands are signed int.
+- This is the canonical range-check pattern; very compact.
+

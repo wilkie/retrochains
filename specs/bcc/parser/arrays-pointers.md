@@ -4568,3 +4568,97 @@ Findings:
 - The user could write `int a[3] = {0};` for a brace-initialized
   zero-filled array — to probe how BCC compiles that.
 
+
+## Local `int a[N] = { 0 }` — uses N_SCOPY@ from `_DATA` source
+
+Fixture `2663-arr-brace-zero-obj`:
+
+```c
+int a[4] = { 0 };       /* 4 ints = 8 bytes, brace-init zero-fills */
+```
+
+```
+55 8b ec 83 ec 08              prologue + 8B local
+16                             push ss
+8d 46 f8                       lea ax, [bp-8]      ; dst-off
+50                             push ax
+1e                             push ds
+b8 00 00                       mov ax, 0           ; src-off (FIXUPP _DATA)
+50                             push ax
+b9 08 00                       mov cx, 8           ; bytes to copy
+e8 00 00                       call N_SCOPY@       ; (EXTDEF)
+8b 46 fc                       return a[2]
+eb 00 8b e5 5d c3              epilogue
+```
+
+`_DATA` contains an 8-byte all-zero region (the source for the copy).
+
+Findings:
+- **Brace-initialized local array uses `N_SCOPY@`** to copy from a
+  `_DATA`-resident initializer block to the stack — even when the
+  initializer is all zeros.
+- This is the SAME path as `char s[] = "hi"` (`2509`) — brace-init
+  of a local array always means "copy initializer from `_DATA`".
+- Distinct from `int a[3]; a[0]=0; a[1]=0; a[2]=0;` (`2661`) which
+  uses 3 separate `mov word [mem], 0` stores. The two source forms
+  have DIFFERENT codegen:
+  - **`int a[N] = {0};`** → N_SCOPY@ + N×2 zero bytes in `_DATA`
+  - **Individual `a[K] = 0;` stores** → N × 5 byte immediates
+- For N=4 ints, N_SCOPY@ path is ~12 bytes + 8 bytes data + 4-byte
+  arg list = larger; the explicit-store path is N×5 = 20 bytes.
+  BCC doesn't choose based on size — it goes by source form.
+
+
+## `void set(int *p, int v) { *p = v; }` — 4-instruction body
+
+Fixture `2667-ptr-arg-write-obj`:
+
+```
+55 8b ec                       prologue
+56                             push si
+8b 76 04                       mov si, p
+8b 46 06                       mov ax, v
+89 04                          [si] = ax    ; *p = v (no-disp store)
+5e 5d c3                       pop si; ret  (void)
+```
+
+Findings:
+- The minimal "write through pointer" function: load pointer to
+  si, load value to ax, store via `[si]`.
+- The store `89 04` = `mov [si], ax` (no disp = 2 bytes total).
+- Void fn → no `eb 00` placeholder before pop bp.
+- Total body: 11 bytes including all prologue/epilogue. This is
+  near the minimum for any 2-arg fn that does anything.
+
+## Global `int *p = &g` — `_DATA` pointer slot with FIXUPP to target
+
+Fixture `2668-global-ptr-init-amp-obj`:
+
+```c
+int g = 99;
+int *p = &g;
+int main(void) {
+  return *p;
+}
+```
+
+`_DATA` (4 bytes):
+- offset 0: `63 00` (g = 99)
+- offset 2: `00 00` (p, FIXUPP to `_g` = offset 0)
+
+```
+55 8b ec                       prologue
+8b 1e 02 00                    mov bx, [_p]    ; (FIXUPP _p, disp16)
+8b 07                          mov ax, [bx]    ; *p = g
+eb 00 5d c3                    epilogue
+```
+
+Findings:
+- `int *p = &g` global gets a 2-byte pointer slot in `_DATA`,
+  FIXUPP'd to point to `_g` at link time.
+- The data `00 00` in the OBJ is a placeholder — the FIXUPP record
+  tells the linker to overwrite it with `_g`'s actual offset in
+  the final binary.
+- `*p` is a 2-load chain: get the pointer, dereference. Same shape
+  as `**pp` (`2570`) but one less level.
+

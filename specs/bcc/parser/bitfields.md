@@ -571,3 +571,56 @@ Findings:
   Bit 15 unused (the 15th bit of the container).
 - Position shift uses cl-form (shift count 5 ≥ 4 → cl).
 
+
+## Setting a 1-bit bitfield to 1 — `or byte [mem], 1` ONLY (no AND-clear)
+
+Fixture `2665-struct-bitfield-mix-obj`:
+
+```c
+struct S {
+  unsigned flag : 1;
+  unsigned kind : 7;
+  int value;
+};
+struct S s;
+s.flag = 1;
+```
+
+```
+80 0e 00 00 01                 or byte [_s + 0], 0x01  ; just OR (no AND-clear)
+```
+
+Findings:
+- **`s.flag = 1` for a 1-bit field with value 1** emits ONLY the
+  `or byte [mem], imm` step — NO preceding `and byte [mem], ~mask`.
+- This is a peephole: when the source value's bits FILL the field
+  exactly, the AND-clear is unnecessary because OR with the
+  field's mask achieves the same final bits.
+- Compare to multi-bit / partial-value writes (`2529`, `2533`)
+  which need BOTH `and` and `or`.
+- Peephole rules:
+  - **Set bitfield to all-1s (max value in field)** → only OR
+  - **Set bitfield to 0** → only AND with `~mask`
+  - **Other constant values** → AND + OR
+  - **Variable RHS** → AND + OR (can't know value at compile time)
+
+## Mixed bitfield + regular field — struct layout packed (NOT aligned)
+
+Same fixture: `struct { unsigned flag:1; unsigned kind:7; int value; }`
+
+Layout:
+- offset 0: byte holding flag (bit 0) + kind (bits 1-7) = 1 byte
+- offset 1: int value (2 bytes, UNALIGNED at odd offset)
+- total sizeof = 3 bytes
+
+The int store `s.value = 42` emits `c7 06 disp16 imm16` with
+disp16 = `_s + 1` — the int sits at an odd offset, but BCC
+handles unaligned word writes fine.
+
+Findings:
+- BCC packs struct fields TIGHTLY with no inter-field padding.
+- Bitfields use the smallest container; the regular int follows
+  immediately at the next byte offset (possibly unaligned).
+- Word access at an odd offset works on 8086 (no alignment fault),
+  just two byte cycles instead of one — performance cost only.
+

@@ -1213,3 +1213,44 @@ Findings:
 - This is a critical peephole for tight character-recognition
   code (parsers, lexers, etc.): `if (c == '\n')`, `if (c == '\t')`.
 
+
+## `strlen` idiom `while (*s) { n++; s++; }` — compact while+byte-cmp loop
+
+Fixture `2664-iter-string-obj`:
+
+```c
+int strlen_simple(const char *s) {
+  int n = 0;
+  while (*s) {
+    n = n + 1;
+    s = s + 1;
+  }
+  return n;
+}
+```
+
+```
+55 8b ec 56 57                 prologue + push si, di
+8b 76 04                       mov si, s
+33 ff                          xor di, di       ; n = 0
+eb 0a                          jmp → COND
+                               ; BODY:
+8b c7 40 8b f8                 n = n + 1 (AX-acc, 5B)
+8b c6 40 8b f0                 s = s + 1 (AX-acc, 5B)
+                               ; COND:
+80 3c 00                       cmp byte [si], 0
+75 f1                          jnz → BODY
+8b c7                          return n
+eb 00 5f 5e 5d c3              epilogue
+```
+
+Findings:
+- Classic C strlen idiom compiles to a tight test-at-bottom while.
+- Both `n` and `s` register-promoted (di and si). Caller-saved.
+- **`while (*s)` test = byte-direct `cmp byte [si], 0`** (3B,
+  same as `2561`). No load to register, no cbw promote.
+- The AX-acc pattern for both `n = n + 1` and `s = s + 1` costs
+  10 bytes per iteration of body bookkeeping. Using `++n; ++s;`
+  would shave 8 bytes off (2 × `inc reg`).
+- This is a useful template for our reimpl's "string-scan" recognition.
+
