@@ -1359,3 +1359,39 @@ Findings:
   - Mixed signed + unsigned → split via AX and DX (no spill)
 - This is a subtle compile-time choice based on operand types.
 
+
+## `(char)int` truncation cast — single `mov al, [mem]` (byte load = truncation)
+
+Fixture `2707-int-to-char-cast-obj`:
+
+```c
+char trunc8(int x) {
+  return (char)x;
+}
+```
+
+```
+55 8b ec                       prologue
+8a 46 04                       mov al, [bp+4]    ; byte load = truncation
+eb 00 5d c3                    epilogue
+```
+
+Findings:
+- `(char)int` cast = **byte load of just the low byte**. Single
+  `mov al, [bp+disp8]` (3 bytes via `8a 46 disp`). NO explicit
+  truncation step (no `and ax, 0xFF`, no shift, nothing).
+- The cast IS the byte load — addressing mode handles truncation
+  automatically.
+- Cast summary table:
+
+| from → to            | bytes | instructions |
+|----------------------|-------|--------------|
+| `(int) int`          | 0B    | no-op |
+| `(unsigned) int`     | 0B    | no-op (`2591`) |
+| `(char) int`         | 3B    | byte load of low byte |
+| `(int) char` signed  | 4B    | byte load + cbw |
+| `(int) char` unsigned| 4B    | byte load + `mov ah,0` |
+| `(long) int` signed  | 1B    | cwd |
+| `(long) int` unsigned| 2B    | xor dx,dx |
+| `(int) long`         | 3B    | load low word only |
+

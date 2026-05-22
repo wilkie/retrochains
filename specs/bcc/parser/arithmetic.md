@@ -2017,3 +2017,31 @@ Findings:
   loads the first addend, and pops the product back into dx. Same
   push/pop pattern we've seen for char+char arithmetic.
 
+
+## `return a + b;` — minimal sum function (4-byte expression)
+
+Fixture `2710-sum-fn-obj`:
+
+```c
+int sum(int a, int b) {
+  return a + b;
+}
+```
+
+```
+55 8b ec                       prologue
+8b 46 04                       mov ax, a    ; (3B)
+03 46 06                       add ax, b    ; (3B, mem-source)
+eb 00 5d c3                    epilogue
+```
+
+Findings:
+- Two-int sum: **6-byte body** (load + mem-source add), 5 bytes
+  for prologue/epi → 11 bytes total.
+- The canonical "AX with memory operand" pattern: load first
+  operand to AX, then `add ax, [mem]` for the second. No
+  intermediate register copy.
+- For more operands (a + b + c), each subsequent `add ax, [mem]`
+  is 3 bytes. So `a + b + c + d` would be 4 × 3 = 12 bytes for
+  the additions.
+

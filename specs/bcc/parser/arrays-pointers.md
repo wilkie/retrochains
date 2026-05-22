@@ -4895,3 +4895,39 @@ Findings:
 - The ARRAY-vs-POINTER distinction shows up here: arrays embed
   inline, pointers add an indirection step (+ 2 bytes per access).
 
+
+## `p + n` for `int *p, int n` — shl-scale + push/pop spill + add
+
+Fixture `2709-ptr-plus-int-obj`:
+
+```c
+int *advance(int *p, int n) {
+  return p + n;
+}
+```
+
+```
+55 8b ec                       prologue
+8b 46 06                       mov ax, n
+d1 e0                          shl ax, 1         ; scale by sizeof(int)
+50                             push ax           ; spill scaled n
+8b 46 04                       mov ax, p
+5a                             pop dx            ; restore scaled n
+03 c2                          add ax, dx        ; p + scaled-n
+eb 00 5d c3                    epilogue
+```
+
+Findings:
+- `p + n` for `int *p` (sizeof=2) and variable `n`:
+  1. Load `n`, shl 1 (scale by sizeof(int))
+  2. Push the scaled value to spill
+  3. Load `p`
+  4. Pop the spilled scaled value into DX
+  5. Add ax, dx
+- The push/pop spill mirrors `char + char` / `n + s[0]` patterns —
+  both operands need AX, so one gets spilled to stack.
+- For `char *`, no shift needed (sizeof=1); the spill might be
+  avoided since n can be added directly. To probe.
+- For `long *`, the scale would be `shl shl` (= shl by 2 = ×4),
+  doubling the shift but same spill pattern.
+

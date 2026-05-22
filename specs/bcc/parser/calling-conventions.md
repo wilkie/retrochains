@@ -1356,3 +1356,31 @@ Findings:
 - Variable-arg push via `ff 76 disp8` (3B) saves 1B over the
   constant-arg form.
 
+
+## Char constant as call arg — `mov al, imm8; push ax` (3B, saves 1B vs int)
+
+Fixture `2706-mixed-arg-types-obj`:
+
+```c
+int combine(int a, char b, int c);
+return combine(10, 'X', 30);
+```
+
+```
+b8 1e 00 50                    arg3 (int 30): mov ax,30 + push ax (4B)
+b0 58 50                       arg2 (char 'X'): mov al,0x58 + push ax (3B)
+b8 0a 00 50                    arg1 (int 10): mov ax,10 + push ax (4B)
+e8 00 00                       call _combine
+83 c4 06                       add sp, 6 (3 args)
+```
+
+Findings:
+- **Char constant arg**: `mov al, imm8` (2B) + `push ax` (1B) = 3B.
+- **Int constant arg**: `mov ax, imm16` (3B) + `push ax` (1B) = 4B.
+- 1-byte savings per char-constant arg.
+- The pushed AX has GARBAGE in AH (high byte) for char args.
+  The callee reads only AL (`mov al, [bp+disp]`), so AH garbage
+  is harmless.
+- Stack frame slot for char arg is still 2 bytes (cdecl word
+  alignment) — the wasted high byte is the cost of cdecl uniformity.
+

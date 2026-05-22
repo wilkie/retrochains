@@ -970,3 +970,34 @@ Findings:
 - So each individual local in a huge frame may pay 1 extra byte if its
   position requires disp16 — but only those positioned beyond -128.
 
+
+## `int x = a + b;` — declaration-with-init = declaration + assignment
+
+Fixture `2708-local-init-expr-obj`:
+
+```c
+int compute(int a, int b) {
+  int x = a + b;
+  return x;
+}
+```
+
+```
+55 8b ec                       prologue
+4c 4c                          dec sp, dec sp    (2B for x)
+8b 46 04                       mov ax, a
+03 46 06                       add ax, b
+89 46 fe                       x = ax
+8b 46 fe                       mov ax, x         (reload for return)
+eb 00 8b e5 5d c3              epilogue
+```
+
+Findings:
+- `int x = expr;` compiles **identically to `int x; x = expr;`** —
+  declaration-with-init is just syntactic sugar.
+- The expression is computed into AX, stored to the local slot,
+  then (in this case) reloaded for return. No CSE between the
+  store and the load.
+- Local frame reserved 2 bytes for x regardless of whether it has
+  an initializer.
+

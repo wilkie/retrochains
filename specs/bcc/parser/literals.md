@@ -435,3 +435,30 @@ Findings:
 - The cast itself emits zero bytes (per `2591`); the value-fold
   evaluates the expression to its bit pattern at parse time.
 
+
+## `return -1` — `mov ax, 0xFFFF` (no special negative handling)
+
+Fixture `2705-return-neg1-obj`:
+
+```c
+int err(void) {
+  return -1;
+}
+```
+
+```
+55 8b ec                       prologue
+b8 ff ff                       mov ax, 0xFFFF (= -1 two's complement)
+eb 00 5d c3                    epilogue
+```
+
+Findings:
+- `return -1` compiles to **`mov ax, 0xFFFF`** (3 bytes, opcode b8).
+  NO special handling for negative literals.
+- The bit pattern IS the value; the type interpretation (signed
+  vs unsigned) is the caller's concern.
+- Same bytes for `return 0xFFFF`, `return 65535U`, `return -1`,
+  `return (int)~0`, etc. — they all collapse to the same imm16.
+- Confirms: BCC's constant evaluator folds any expression to a
+  bit pattern at parse time.
+
