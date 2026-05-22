@@ -1,0 +1,6 @@
+Borland C++  Version 2.0 Copyright (c) 1991 Borland International
+hello.c:
+Warning hello.c 4: 'x' is assigned a value that is never used in function forgotten
+Warning hello.c 4: Function should return a value in function forgotten
+
+	Available memory 424304
