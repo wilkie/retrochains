@@ -4279,3 +4279,29 @@ Findings:
 - Inner body's post-increment runs every iteration; outer body's
   post runs once per outer iteration.
 
+
+## `for (...; ...; ...) {}` empty body — full scaffold preserved
+
+Fixture `2924-for-empty-body-obj`:
+
+```c
+for (i = 0; i < n; i = i + 1) { }
+```
+
+```
+33 f6                          i = 0
+eb 05                          jmp → COND
+                               ; (body is empty - nothing here)
+                               ; POST:
+8b c6 40 8b f0                 i = i + 1
+                               ; COND:
+3b 76 04                       cmp si, n
+7c f6                          jl → POST
+```
+
+Findings:
+- Empty for-body emits **full scaffold**: init + jmp-to-cond +
+  post + cond + back-edge.
+- NO body elision — the loop runs N times doing the post-step.
+- Useful as a "spin/delay" idiom.
+

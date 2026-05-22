@@ -5816,3 +5816,32 @@ Findings:
   `T arr[N]`, and `T *arr` all denote the same pointer type.
 - BCC treats them identically at codegen.
 
+
+## `p = p + 1` for int* — SUBOPTIMAL vs `++p` (6B inc vs 2B)
+
+Fixture `2922-ptr-plus-eq-1-obj`:
+
+```c
+int *step(int *p) {
+  p = p + 1;
+  return p;
+}
+```
+
+```
+8b 76 04                       mov si, p
+8b c6                          mov ax, si       (bounce to AX)
+40 40                          inc ax; inc ax   (+2 = sizeof(int))
+8b f0                          mov si, ax       (back to si)
+8b c6                          mov ax, si       (for return)
+```
+
+Findings:
+- `p = p + 1` for int* = **AX-acc bounce**: load si→ax, inc×2, ax→si.
+- 6 bytes for the increment itself vs 2 bytes (`inc si; inc si`)
+  for `++p`.
+- **Source form matters significantly**: prefer `++p` over `p = p + 1`
+  for 4B savings.
+- Same suboptimality probably affects all `p = p + K` forms vs
+  `p += K` or `p++/++p`.
+

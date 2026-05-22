@@ -1252,3 +1252,30 @@ Findings:
   (3-local register slot allocation).
 - ~25 bytes total for the 3-way max expression.
 
+
+## `*p && *q` — short-circuit with direct `cmp [reg], 0`
+
+Fixture `2925-deref-and-deref-obj`:
+
+```c
+if (*p && *q) return 1;
+return 0;
+```
+
+```
+8b 76 04 8b 7e 06              p → si, q → di
+83 3c 00                       cmp word [si], 0    (test *p)
+74 0a                          je → FALSE
+83 3d 00                       cmp word [di], 0    (test *q)
+74 05                          je → FALSE
+```
+
+Findings:
+- `*p` test uses **`cmp word [si], 0`** (`83 3c 00`, 3B) — direct
+  memory-immediate compare with no-disp form.
+- ModR/M `3c` = mod 00, op-ext 111 (cmp), r/m 100 (`[si]`).
+- No need to load `*p` into AX first; the cmp reads directly from
+  memory via the register.
+- Short-circuit semantics preserved: if `*p == 0`, skip evaluating
+  `*q` entirely.
+

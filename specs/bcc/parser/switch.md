@@ -2221,3 +2221,37 @@ Findings:
 - Same N=4 contig threshold; sub adds 3 bytes vs zero-based form.
 - Table size still = N entries (= range + 1).
 
+
+## Switch 4-contig negative-start (`-1, 0, 1, 2`) — `inc bx` peephole!
+
+Fixture `2921-switch-4-neg-start-obj`:
+
+```c
+switch (x) {
+  case -1: return 10;
+  case 0: return 20;
+  case 1: return 30;
+  case 2: return 40;
+}
+```
+
+```
+8b 5e 04                       mov bx, x
+43                             inc bx            (NORMALIZE: +1 = -(-1))
+83 fb 03                       cmp bx, 3
+77 1b                          ja → DEFAULT
+d1 e3                          shl bx, 1
+2e ff a7 disp16                jmp CS:[bx + table]
+```
+
+Findings:
+- For `min_case = -1`, BCC uses **`inc bx`** (1B) instead of
+  `sub bx, -1` (`83 eb ff`, 3B). Saves 2 bytes!
+- The peephole: when the offset to normalize is ±1, use `inc`/`dec`
+  instead of `sub`/`add`.
+- General rule:
+  - `min == 0`: no normalization needed
+  - `min == 1`: `dec bx` (1B)
+  - `min == -1`: `inc bx` (1B)
+  - other: `sub bx, min_case` (3B for imm8)
+
