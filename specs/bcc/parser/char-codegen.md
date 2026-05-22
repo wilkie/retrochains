@@ -1493,3 +1493,28 @@ Findings:
 - Compare to `unsigned char` which would emit `mov ah, 0` instead
   of `cbw`.
 
+
+## `c + 1` for char (returns int) — byte load + cbw + inc
+
+Fixture `2871-char-plus-1-obj`:
+
+```c
+int succ(char c) {
+  return c + 1;
+}
+```
+
+```
+8a 46 04                       mov al, c        (byte load)
+98                             cbw              (char→int promote)
+40                             inc ax           (+1 peephole)
+```
+
+Findings:
+- Total 5 bytes for the expression.
+- `+1` peephole (`inc ax`) still applies after cbw promotion.
+- Sequence: byte load → promote → inc. Each step is its own
+  byte-level op; no fancy combination.
+- For `c + 2`, would use `inc ax; inc ax` (2B); for `c + K` with
+  K >= 3, would use `add ax, K`.
+

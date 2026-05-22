@@ -3027,3 +3027,118 @@ Findings:
   though we're comparing signed longs. The signed-ness is encoded
   in the HIGH word; the LOW word is a magnitude.
 
+
+## Unsigned long `a < b` — UNSIGNED for BOTH halves
+
+Fixture `2867-ulong-cmp-lt-obj`:
+
+```c
+int u_less(unsigned long a, unsigned long b) {
+  if (a < b) return 1;
+  return 0;
+}
+```
+
+```
+3b 46 0a                       cmp ax, b.HIGH
+77 0c                          ja  → FALSE   (UNSIGNED!)
+72 05                          jb  → TRUE    (UNSIGNED!)
+3b 56 08                       cmp dx, b.LOW
+73 05                          jae → FALSE   (UNSIGNED)
+```
+
+Findings:
+- Unsigned long compare uses **unsigned jumps for both HIGH and LOW**.
+- Compare to signed long (`2864`) which uses **signed for HIGH,
+  unsigned for LOW**.
+- The sign-handling difference is in the HIGH-word compare only.
+- Updated long-compare rule:
+
+| compare    | HIGH jump  | LOW jump   |
+|------------|------------|------------|
+| signed     | jg/jl etc  | jae/jb etc (always unsigned for low) |
+| unsigned   | ja/jb etc  | jae/jb etc |
+
+## Long `a == b` — two sequential cmp-jne, both target FALSE
+
+Fixture `2868-long-cmp-eq-obj`:
+
+```
+cmp ax, b.HIGH
+75 0a                          jne → FALSE
+cmp dx, b.LOW
+75 05                          jne → FALSE
+                               ; TRUE: ...
+```
+
+Findings:
+- Long `==` = TWO cmp-jne, both branch to FALSE.
+- If EITHER half differs, immediately FALSE.
+- Fall-through to TRUE only if both halves match.
+- ~18 bytes total for the compare.
+
+## Long `a != b` — early-exit on true (dual of `==`)
+
+Fixture `2869-long-cmp-ne-obj`:
+
+```
+cmp ax, b.HIGH
+75 05                          jne → TRUE     (HIGH differs, defin. !=)
+cmp dx, b.LOW
+74 05                          je  → FALSE    (HIGH=, LOW= → they ARE equal)
+                               ; TRUE: ...
+```
+
+Findings:
+- Long `!=` = HIGH differs → immediate TRUE. Else LOW equal → FALSE.
+  Else (LOW differs) → TRUE via fall-through.
+- Optimized branch directions: jne for "early exit true", je for "early exit false".
+- ~18 bytes total — same size as `==`, different branch directions.
+
+## Long subtract `a - b` — INLINE `sub + sbb` (4-byte op chain)
+
+Fixture `2870-long-sub-obj`:
+
+```c
+long diff(long a, long b) {
+  return a - b;
+}
+```
+
+```
+8b 56 06                       mov dx, a.HIGH
+8b 46 04                       mov ax, a.LOW
+2b 46 08                       sub ax, b.LOW
+1b 56 0a                       sbb dx, b.HIGH    (subtract WITH BORROW)
+```
+
+Findings:
+- Long subtract is INLINE: `sub` for LOW, `sbb` for HIGH.
+- `sbb` propagates the borrow flag from `sub`.
+- Same pattern as long ADD (uses `add + adc`).
+- No helper needed for add/sub since x86 has carry/borrow chain.
+- Total 12 bytes for the expression body.
+
+## Unsigned long add `a + b` — INLINE `add + adc` (signed/unsigned identical)
+
+Fixture `2872-ulong-add-obj`:
+
+```c
+unsigned long add(unsigned long a, unsigned long b) {
+  return a + b;
+}
+```
+
+```
+8b 56 06                       mov dx, a.HIGH
+8b 46 04                       mov ax, a.LOW
+03 46 08                       add ax, b.LOW
+13 56 0a                       adc dx, b.HIGH    (add WITH CARRY)
+```
+
+Findings:
+- Long add: `add` for LOW, `adc` for HIGH (carry chain).
+- **Signed and unsigned long add are byte-identical** — bit-level
+  operation is the same.
+- 12 bytes total for the expression.
+
