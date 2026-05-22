@@ -4697,3 +4697,59 @@ Findings:
   adds one register load.
 - Void fn → no `eb 00` placeholder.
 
+
+## `int a[5] = { 10, 20, 30 }` — partial init zero-fills trailing slots
+
+Fixture `2683-arr-partial-init-obj`:
+
+```c
+int a[5] = { 10, 20, 30 };
+```
+
+`_DATA` (10 bytes):
+```
+0a 00 14 00 1e 00 00 00 00 00
+| ---- | ---- | ---- | ---- | ----
+ a[0]=10 a[1]=20 a[2]=30 a[3]=0 a[4]=0
+```
+
+Findings:
+- C90 brace-initializer rule: explicit values fill consecutive
+  slots; remaining slots are **zero-filled** automatically.
+- BCC emits the full 10 bytes in `_DATA`, with trailing zeros baked
+  in. No runtime initialization step.
+- Same rule as char arrays (`2561` "hi" + zero-fills to size 5).
+- For zero-fill of LOCAL arrays (`int a[5] = {0};`), BCC uses
+  `N_SCOPY@` (`2663`); for GLOBAL arrays, the zero-fill is just
+  bytes in `_DATA`.
+
+## `int (*row)[3]` pointer-to-array — offset-folds same as direct array
+
+Fixture `2686-ptr-to-array-obj`:
+
+```c
+int matrix[2][3] = { { 1, 2, 3 }, { 4, 5, 6 } };
+int main(void) {
+  int (*row)[3];
+  row = &matrix[1];
+  return (*row)[2];
+}
+```
+
+```
+55 8b ec 56                    prologue + push si
+be 06 00                       mov si, _matrix + 6 (FIXUPP)    ; &matrix[1]
+8b 44 04                       mov ax, [si + 4]                ; (*row)[2]
+eb 00 5e 5d c3                 epilogue
+```
+
+Findings:
+- `&matrix[1]` for `int matrix[2][3]` = base + (1 × 3 cols × 2B) =
+  `_matrix + 6`. Constant-subscript fully folded.
+- `(*row)[2]` for row→int[3] = `[si + (2 × 2B)]` = `[si + 4]`.
+- The C distinction between "array of arrays" and "pointer to
+  array" exists only in the type system; codegen treats `(*row)[K]`
+  identically to `arr[i][K]` once the addresses are computed.
+- Net result for this fixture: `(*row)[2]` = `matrix + 6 + 4` =
+  `matrix + 10` = `matrix[1][2]`. Correct.
+

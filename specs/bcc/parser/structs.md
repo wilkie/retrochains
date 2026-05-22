@@ -2544,3 +2544,41 @@ Findings:
 - Confirms the offset-folding rule: any chain of struct-field +
   const-subscript folds to a single integer offset at parse time.
 
+
+## `make().a + make().b` — two calls, save first via push/pop spill
+
+Fixture `2682-struct-ret-literal-obj`:
+
+```c
+struct Pair { int a; int b; };
+struct Pair make(void);
+int main(void) {
+  return make().a + make().b;
+}
+```
+
+```
+55 8b ec                       prologue
+e8 00 00                       call _make (1st)
+                               ; AX = field0 (a), DX = field1
+50                             push ax              ; save 1st .a
+e8 00 00                       call _make (2nd)
+                               ; AX = field0, DX = field1 (the .b we want)
+58                             pop ax               ; restore 1st .a
+03 c2                          add ax, dx           ; 1st.a + 2nd.b
+eb 00 5d c3                    epilogue
+```
+
+Findings:
+- `make().a + make().b` calls make() TWICE per C semantics — once
+  per source-side occurrence.
+- After the FIRST call, AX = first.a (field0). BCC saves it via
+  `push ax`.
+- After the SECOND call, DX = second.b (field1). The accumulator
+  computes `pop ax + dx`.
+- Critically: BCC was able to use DX DIRECTLY (no `mov ax, dx` to
+  extract field1) because the operation is `+= field1` — the add
+  with register-source DX takes 2 bytes (`03 c2`) regardless.
+- Per-call cost: 4 bytes for call + 1 byte for push (1st only) +
+  1 byte for pop = 6 bytes overhead. Plus the actual fn body.
+

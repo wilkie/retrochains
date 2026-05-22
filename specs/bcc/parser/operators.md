@@ -886,3 +886,31 @@ Findings:
   each arm STORES to x independently. The ternary form
   centralizes the store at the JOIN point — 1 store vs 2.
 
+
+## `b = x > y` (comparison-as-int) — if-else pattern producing 0 or 1 in AX
+
+Fixture `2681-bool-as-int-obj`:
+
+```c
+int b = x > y;     /* b = 1 if x > y, else 0 */
+```
+
+```
+8b 46 fe                       mov ax, x
+3b 46 fc                       cmp ax, y
+7e 05                          jle → ELSE
+b8 01 00                       ax = 1
+eb 02                          jmp → JOIN
+33 c0                          ELSE: xor ax, ax
+                               ; JOIN:
+89 46 fa                       b = ax
+```
+
+Findings:
+- C's "comparison as int value" semantics (result is 0 or 1) needs
+  explicit codegen since the 8086 has no `setcc`-style instruction.
+- BCC emits a tiny if-else: `cmp; jle ELSE; mov ax, 1; jmp; xor ax, ax`.
+  Total: 9 bytes for the boolean conversion.
+- Compare to using it in an if condition (`if (x > y) ...`) which
+  doesn't need to materialize the boolean — just branches directly.
+

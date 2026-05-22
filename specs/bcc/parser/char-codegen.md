@@ -1292,3 +1292,38 @@ Findings:
 - DL chosen over AL because AL is the "return value" register;
   DL is a free scratch.
 
+
+## Char-to-char assignment — pure byte path (no promote/truncate)
+
+Fixture `2685-char-param-to-local-obj`:
+
+```c
+int copy(char c) {
+  char d;
+  d = c;
+  return d;
+}
+```
+
+```
+55 8b ec 4c 4c                 prologue + 2B local
+8a 46 04                       mov al, c        (byte load)
+88 46 ff                       [bp-1] = al      (byte store at odd offset)
+8a 46 ff                       mov al, d
+98                             cbw              (promote for int return)
+eb 00 8b e5 5d c3              epilogue
+```
+
+Findings:
+- Char-to-char assignment uses **pure byte path**: `mov al, [src];
+  mov [dst], al`. NO 16-bit promote-then-truncate.
+- Local char stored at **odd `[bp-1]`** (single-byte at the top of
+  the 2-byte local reserve, leaving [bp-2] unused for this case).
+- Standard byte ops:
+  - `mov al, [bp+disp]` = `8a 46 disp` (3B)
+  - `mov [bp+disp], al` = `88 46 disp` (3B)
+- `cbw` only at the final return where the value goes back to int
+  context.
+- This is the optimal char-handling shape: byte ops throughout,
+  promote only at the int boundary.
+

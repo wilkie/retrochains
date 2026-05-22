@@ -1876,3 +1876,39 @@ Findings:
   is `int` per C90), so a byte compare wouldn't match if the high
   byte of AX was non-zero.
 
+
+## Switch with case 0 — `or ax, ax` peephole replaces `cmp ax, 0`
+
+Fixture `2684-enum-in-switch-obj`:
+
+```c
+enum Color { RED, GREEN, BLUE };  // RED=0, GREEN=1, BLUE=2
+switch (c) {
+  case RED:   return 0xF00;
+  case GREEN: return 0x0F0;
+  case BLUE:  return 0x00F;
+}
+```
+
+```
+8b 46 04                       mov ax, c
+0b c0                          or ax, ax           ; CASE 0 = "or"!
+74 0c                          je → RED body
+3d 01 00                       cmp ax, 1           ; CASE 1
+74 0c                          je → GREEN body
+3d 02 00                       cmp ax, 2           ; CASE 2
+74 0c                          je → BLUE body
+eb 0f                          jmp → default
+```
+
+Findings:
+- **Case value 0 triggers a switch-dispatch peephole**: BCC emits
+  `or ax, ax` (2 bytes) instead of `cmp ax, 0` (3 bytes) for the
+  zero-test. Same opcode used for standalone `x == 0` tests.
+- Subsequent non-zero cases use the full `cmp ax, imm16` (3B) form.
+- Per-case savings: 1 byte ONLY for case 0.
+- Confirms that BCC's "test against zero" peephole applies in any
+  context — standalone if, switch dispatch, do-while cond, etc.
+- Enum values are folded at compile time (RED → 0, GREEN → 1, etc.);
+  the OBJ has no record of the enum names.
+
