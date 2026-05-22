@@ -928,3 +928,45 @@ Findings:
 | 3-127       | `sub sp, imm8`       | 3B    |
 | 128+        | `sub sp, imm16`      | 4B    |
 
+
+## Frame > 127 bytes — `sub sp, imm16` + disp16 ModR/M for far locals
+
+Fixture `2633-huge-frame-obj`:
+
+```c
+int main(void) {
+  int arr[80];           /* 160 bytes! */
+  arr[0] = 1;
+  arr[79] = 2;
+  return arr[0] + arr[79];
+}
+```
+
+```
+55 8b ec                       prologue
+81 ec a0 00                    sub sp, 160       ; imm16 form (4 bytes)
+c7 86 60 ff 01 00              [bp + 0xff60] = 1 ; arr[0] uses disp16
+c7 46 fe 02 00                 [bp - 2] = 2      ; arr[79] uses disp8
+8b 86 60 ff                    mov ax, [bp + 0xff60]
+03 46 fe                       add ax, [bp - 2]
+eb 00 8b e5 5d c3              epilogue
+```
+
+Findings:
+- **160-byte frame uses `81 ec imm16`** (`81 /5 imm16` = sub sp, imm16,
+  4 bytes). The threshold:
+  - 0       → nothing
+  - 1-2     → `dec sp` × N
+  - 3-127   → `sub sp, imm8` (3 bytes)
+  - **128+  → `sub sp, imm16` (4 bytes)**
+- Per-access addressing mode is chosen by the displacement magnitude:
+  - `arr[79]` at `bp - 2`: |disp| ≤ 127 → ModR/M `46 fe` (disp8 form,
+    3-byte total `mov [bp+disp8], imm16`).
+  - `arr[0]` at `bp - 160`: |disp| > 127 → ModR/M `86 disp16` (4-byte
+    total `mov [bp+disp16], imm16`).
+- ModR/M encoding:
+  - mod 01 (disp8): r/m 110 = `[bp + disp8]` → `46 disp8`
+  - mod 10 (disp16): r/m 110 = `[bp + disp16]` → `86 disp16-lo disp16-hi`
+- So each individual local in a huge frame may pay 1 extra byte if its
+  position requires disp16 — but only those positioned beyond -128.
+

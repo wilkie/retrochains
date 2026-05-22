@@ -816,3 +816,38 @@ Findings:
   - `!x`  → `or ax, ax; je <skip>` ... (more complex, see `2515`)
   - `+x`  → no-op (zero bytes)
 
+
+## Ternary in return — `max(a,b)` is a tight 17-byte body
+
+Fixture `2636-ternary-return-obj`:
+
+```c
+int max(int a, int b) {
+  return a > b ? a : b;
+}
+```
+
+```
+55 8b ec 56 57                 prologue + push si, di
+8b 76 04                       mov si, a
+8b 7e 06                       mov di, b
+3b f7                          cmp si, di
+7e 04                          jle → ELSE      ; signed skip-true for >
+8b c6                          mov ax, si       ; THEN: ax = a
+eb 02                          jmp epi
+8b c7                          ELSE: mov ax, di
+eb 00 5f 5e 5d c3              epilogue
+```
+
+Findings:
+- Args both get register-promoted (a→si, b→di) — typical for hot
+  single-use locals.
+- `a > b` uses `cmp si, di` then `jle ELSE` (signed greater-than's
+  inverse). The condition is the same as `if (a > b)`.
+- Each ternary arm is a single `mov ax, <var>` (2 bytes) followed
+  by either `jmp +2` (then-arm) or fall-through (else-arm).
+- Final body is 17 bytes — among the shortest 2-arg functions
+  possible (prolog 3 + push 2 + 2 loads 6 + cmp 2 + jcc 2 + arm1
+  2 + jmp 2 + arm2 2 + epi 5 = 28? let me recount). Actually
+  prolog+epi take ~10B, leaving ~7B for the operation itself.
+

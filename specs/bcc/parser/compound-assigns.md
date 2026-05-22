@@ -2776,3 +2776,37 @@ Findings:
 - ModR/M `e6` = mod 11, opcode-ext 100 (shl), r/m 110 (si). The
   d1 opcode = single-bit shift.
 
+
+## `g += K` on global int — `add word [mem], imm8` (no AX-acc)
+
+Fixture `2638-global-add-assign-obj`:
+
+```c
+int g = 100;
+int bump(void) {
+  g += 5;
+  return g;
+}
+```
+
+```
+55 8b ec                       prologue
+83 06 00 00 05                 add word [_g], 5    ; FIXUPP, imm8 sign-ext
+a1 00 00                       mov ax, [_g]        ; reload for return
+eb 00 5d c3                    epilogue
+```
+
+Findings:
+- `g += K` for a global int compiles to **`add word [mem], imm8`**
+  (`83 06 disp16 imm8` = 5 bytes, sign-extended imm8). Direct
+  memory-add, no load-modify-store through AX.
+- ModR/M `06` = mod 00, opcode-ext 000 (add), r/m 110 (disp16-only).
+  Same form as the global-cmp `83 3e disp16 imm8` (from `2516`).
+- For imm > 127, BCC would switch to `81 06 disp16 imm16` (6 bytes
+  total) — the non-sign-extended imm16 form.
+- After the compound add, BCC RELOADS `[_g]` for the return value
+  — no CSE between the add and the load (same "values flow through
+  memory" pattern observed throughout).
+- Compares well to `++g` (would emit `inc word [mem]` = 4 bytes via
+  the `ff 06 disp16` form), saving 1 byte by inc'ing without imm.
+

@@ -2547,3 +2547,31 @@ Findings:
 - Without the cast, the same expression would emit `mov ax, low(a);
   mov dx, high(a); add ax, low(b); adc dx, high(b)`.
 
+
+## Long return literal — `mov dx, HIGH; mov ax, LOW`
+
+Fixture `2635-fn-return-long-obj`:
+
+```c
+long get(void) {
+  return 0x12345678L;
+}
+```
+
+```
+55 8b ec                       prologue
+ba 34 12                       mov dx, 0x1234   ; HIGH word
+b8 78 56                       mov ax, 0x5678   ; LOW word
+eb 00 5d c3                    epilogue
+```
+
+Findings:
+- A long literal returned from a function loads as **two mov-imm16
+  instructions in order (HIGH first → DX, then LOW → AX)**.
+- Each mov is 3 bytes (opcode + imm16). Total 6 bytes for the
+  long value loaded.
+- Confirms the return convention: **DX = HIGH word, AX = LOW word**
+  for any 32-bit value (long, struct{long}, struct{int,int}).
+- Load order matches the data-store order observed in `2521`,
+  `2532`, etc.: HIGH first, LOW second.
+

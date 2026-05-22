@@ -369,3 +369,30 @@ Findings:
 - BCC's parser evaluates the `-1` literal at compile time and
   emits the resulting word.
 
+
+## `char arr[N] = { 'h', 'i', 0, 'x', 'y', 0 }` — exact byte init
+
+Fixture `2637-char-arr-explicit-nul-obj`:
+
+```c
+char msg[6] = { 'h', 'i', 0, 'x', 'y', 0 };
+```
+
+`_DATA` bytes (6 = exact):
+```
+68 69 00 78 79 00       ; h i \0 x y \0
+```
+
+Findings:
+- An explicit char-init list emits each character as a separate
+  byte in `_DATA`. Embedded `0` values are preserved (no NUL
+  terminator interpretation — this isn't a string literal).
+- Equivalent in bytes to a string literal `"hi\0xy"` with a
+  trailing `\0` added, but the brace form is the only way to put
+  embedded NULs at arbitrary positions cleanly.
+- The init list size matches the array size exactly — no zero-fill
+  needed because the source has 6 explicit values.
+- Compare to `char buf[5] = "hi"` (`2561`) which zero-fills the
+  remaining 3 bytes. The brace form has NO zero-fill if all slots
+  are filled by the user.
+

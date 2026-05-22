@@ -2264,3 +2264,35 @@ Findings:
 - This is a **clean peephole**: struct-return functions are
   inherently efficient at returning their first int-field.
 
+
+## `make().b` field-1 access — `call; mov ax, dx` (2 bytes extra)
+
+Fixture `2634-struct-ret-field-b-obj`:
+
+```c
+struct Pair { int a; int b; };
+struct Pair make(void);
+int main(void) {
+  return make().b;
+}
+```
+
+```
+55 8b ec                       prologue
+e8 00 00                       call _make (FIXUPP)
+                               ; DX = field1, AX = field0
+8b c2                          mov ax, dx       ; field1 → AX (2B extra)
+eb 00 5d c3                    epilogue
+```
+
+Findings:
+- For struct-return functions, the DX:AX convention means:
+  - **`fn().field0`** = 0 bytes extra (`2629`)
+  - **`fn().field1`** = 2 bytes extra (`mov ax, dx`)
+- This makes the FIRST field of a struct slightly cheaper to access
+  immediately after a call than later fields. Source-side ordering
+  can exploit this — putting the most-accessed field first.
+- For struct > 4 bytes (uses `N_SCOPY@` + hidden return ptr), all
+  field accesses would go through memory loads on the destination
+  struct, regardless of field position.
+
