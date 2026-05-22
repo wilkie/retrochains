@@ -488,3 +488,24 @@ Probe replaced with the char-compound-OR variant.
   first), r2 gets the pre-incremented value (since post-inc bumps
   after the store). Confirms pre/post-inc semantics for rvalue
   capture.
+
+## Free passes (batch 675)
+
+- `2400` — `char s[10] = "hi";` (char array initialized from a
+  string shorter than the array): `_DATA` gets 'h', 'i', 0, then 7
+  more zero bytes from a LIDATA fill. Accesses use the `a0 disp16`
+  byte-load form. Re-confirms char-array-from-shorter-string =
+  zero-pad rest.
+- `2402` — `add(i++, j--)` (postinc and postdec in function-call
+  args): R-to-L evaluation — `j` is captured + decremented first
+  and pushed (= arg b), then `i` is captured + incremented and
+  pushed (= arg a). Cleanup uses `59 59` (pop cx twice) for a
+  4-byte cleanup, NOT `add sp, 4`. Confirms the cleanup-form
+  threshold: 2-arg (4-byte) cleanup = pop cx × 2; ≥3-arg
+  (≥6-byte) cleanup = add sp, imm8.
+- `2403` — `int a[] = {7, 11, 13, 17, 19};` (array size inferred
+  from initializer): `_DATA` holds 5 word values (10 bytes total).
+  Symbol `_a` exported in PUBDEF. Accesses use the
+  FIXUPP'd `[_a+disp]` forms (`a1 disp16` for `a[0]`, `add ax,
+  [_a+8]` for `a[4]`). Re-confirms implicit-size + global array
+  layout.

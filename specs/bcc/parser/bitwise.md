@@ -245,3 +245,37 @@ counterpart. BCC lowers `x | y` to `mov ax, [bp-N]; or ax,
 [bp-M]` for stack-resident locals, which our generic
 binary-op path already produces.
 
+
+## `if (mask & expr)` — uses `test` not `and` (fixture `2399`)
+
+When a bitwise-AND result is used directly as a branch condition,
+BCC emits the `test` instruction (which sets flags without storing
+the result) instead of computing the AND into a register and then
+comparing it:
+
+```c
+if (mask & (1 << i)) count = count + 1;
+```
+
+```
+b8 01 00                ; mov ax, 1
+8a ca                   ; mov cl, dl   (i → cl)
+d3 e0                   ; shl ax, cl   (1 << i)
+85 46 fe                ; test ax, [bp-2]   ← TEST not AND
+74 05                   ; jz skip       ← branch on the test result
+```
+
+Encoding details:
+- `85 46 fe` = `test r/m16, r16` — sets ZF based on `(ax & [bp-2])`
+  without writing the result anywhere.
+- Saves 1-2 bytes vs `and ax, [bp-2] / jz` (which would clobber AX
+  with the AND result).
+
+So **`if (expr1 & expr2)` becomes `test / jz/jnz`** when the AND
+result isn't otherwise consumed. This is the compare-as-branch
+extension to bitwise operators: when the consumer is a single
+conditional jump, materialize the operation as a flag-setting
+instruction.
+
+Applies analogously to other bitwise idioms in pure-branch contexts
+(probably `or`, but not exercised in this fixture).

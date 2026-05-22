@@ -1534,3 +1534,61 @@ offset 0), `705` (`g.c &= 15`, char field at offset 2),
   `global_offset_addr`. Int-element globals also route
   through this arm with memory-direct shape.
 
+
+## Small struct-to-struct assignment — inlined word moves (fixture `2404`)
+
+`b = a;` for a 4-byte struct (two ints) is **inlined as 4 word
+operations** through AX and DX — no `N_SCOPY@` helper:
+
+```c
+struct Point { int x; int y; };
+struct Point a, b;
+a.x = 10; a.y = 20;
+b = a;
+```
+
+```
+8b 46 fe                ; mov ax, [bp-2]   ← a.y
+8b 56 fc                ; mov dx, [bp-4]   ← a.x
+89 46 fa                ; mov [bp-6], ax   ← b.y
+89 56 f8                ; mov [bp-8], dx   ← b.x
+```
+
+So for a 4-byte struct: 2 loads (one per member, into AX/DX) + 2
+stores. Total 12 bytes of code, vs. ~20 bytes for the helper-call
+path (push args, call N_SCOPY@, cleanup).
+
+Larger structs (already-documented `> 4 bytes`) flip to the
+N_SCOPY@ helper. So the threshold:
+
+| Struct size | Assignment codegen |
+|---|---|
+| ≤ 4 bytes | Inline N word loads + N word stores (interleaved through AX, DX, ...) |
+| > 4 bytes | `N_SCOPY@` helper call |
+
+Two ints fit in AX+DX simultaneously, hence the two-register
+interleave here. The order (read `a.y` first, then `a.x`) is
+arbitrary from a correctness standpoint since source and destination
+don't alias.
+
+For the struct **initialization** case (`struct S s = {1, 2, 3};`),
+the data-template + N_SCOPY@ form is used uniformly per earlier
+findings — that's a different code path from struct-to-struct copy.
+
+## Union byte-order — little-endian confirmed (fixture `2401`)
+
+```c
+union IntBytes { unsigned int i; unsigned char b[2]; };
+u.i = 0xABCD;
+return u.b[0] + u.b[1];   // = 0xCD + 0xAB = 376
+```
+
+The union's int member and char array share the same 2-byte
+storage. The byte-order witness:
+
+- `u.b[0]` is at byte offset 0 → **low byte** of the int → 0xCD
+- `u.b[1]` is at byte offset 1 → **high byte** of the int → 0xAB
+
+Confirms 8086's little-endian byte order: the low-address byte holds
+the low-order bits of multi-byte values. This applies to all
+multi-byte types (int, long, struct fields).
