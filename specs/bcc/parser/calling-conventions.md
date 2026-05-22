@@ -1330,3 +1330,29 @@ Findings:
 - Confirms: ternary-as-expression always uses AX as the value
   carrier; the post-JOIN code uses it for whatever next step needs.
 
+
+## Passthrough call `return helper(v)` — 8-byte body
+
+Fixture `2699-passthrough-arg-obj`:
+
+```c
+int wrap(int v) {
+  return helper(v);
+}
+```
+
+```
+55 8b ec                       prologue
+ff 76 04                       push word [bp+4]   ; push v
+e8 00 00                       call _helper       (FIXUPP)
+59                             pop cx             ; cleanup
+eb 00 5d c3                    epilogue
+```
+
+Findings:
+- The minimum-overhead "passthrough" wrapper: 8 bytes for the
+  expression (push + call + pop) + 5 bytes for prologue/epi.
+- AX is preserved as the wrap's return value (no extra copy).
+- Variable-arg push via `ff 76 disp8` (3B) saves 1B over the
+  constant-arg form.
+

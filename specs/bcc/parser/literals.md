@@ -420,3 +420,18 @@ Findings:
   fully evaluated by the parser; runtime never executes any init
   code.
 
+
+## `unsigned int u = (unsigned int)-1` — folds to `0xFFFF`
+
+Fixture `2704-uint-neg-init-obj`:
+
+`_DATA` (2 bytes): `ff ff` (= 0xFFFF = 65535 unsigned)
+
+Findings:
+- `(unsigned int)-1` folds at compile time to the bit pattern `0xFFFF`.
+  Same bytes as `int v = -1` (`2599`) — the type interpretation
+  differs but the storage is identical.
+- Signed↔unsigned reinterpretation is bit-preserving in BCC.
+- The cast itself emits zero bytes (per `2591`); the value-fold
+  evaluates the expression to its bit pattern at parse time.
+

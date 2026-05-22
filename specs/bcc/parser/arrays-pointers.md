@@ -4785,3 +4785,113 @@ Findings:
 - For K > 127 or K < -128, BCC would switch to `81 /7 disp imm16`
   (5 bytes) — still 1 byte shorter than the load-then-cmp form.
 
+
+## `a[K]++` (postinc on array element) — load OLD, then inc in-place
+
+Fixture `2700-arr-elem-postinc-obj`:
+
+```c
+int a[3];
+int main(void) {
+  a[1] = 10;
+  return a[1]++;
+}
+```
+
+```
+c7 06 02 00 0a 00              [_a + 2] = 10        ; a[1] = 10
+a1 02 00                       mov ax, [_a + 2]     ; LOAD OLD (3B)
+ff 06 02 00                    inc word [_a + 2]    ; INC in-place (4B)
+```
+
+Findings:
+- `a[K]++` (postfix) sequence:
+  1. **Load OLD value** to AX (so the expression result = OLD)
+  2. **Increment memory in-place** via `inc word [mem]`
+- Total 7 bytes for the postinc op (3B load + 4B inc).
+- Compare to **`++a[K]`** (prefix, `2616`): same opcodes,
+  REVERSED order (inc first, then load).
+  - `++a[K]`: `inc word [mem]; mov ax, [mem]` (4+3=7B, returns NEW)
+  - `a[K]++`: `mov ax, [mem]; inc word [mem]` (3+4=7B, returns OLD)
+- Same total bytes; semantically different (new vs old value).
+
+## Global `int *mid = &arr[2]` — FIXUPP'd ptr to mid-array
+
+Fixture `2701-ptr-mid-array-obj`:
+
+```c
+int arr[5] = { 10, 20, 30, 40, 50 };
+int *mid = &arr[2];
+```
+
+`_DATA` layout (12 bytes):
+- offsets 0-9: arr = `0a 00 14 00 1e 00 28 00 32 00` (5 ints)
+- offset 10: mid = `04 00` (FIXUPP to `_arr + 4` = `&arr[2]`)
+
+Findings:
+- `&arr[K]` for global init folds at compile time: the disp16 in
+  the pointer's slot becomes `K × sizeof(*arr)`, and the FIXUPP
+  relocates the target to `_arr`.
+- Final ptr value: `_arr + 4` → matches `&arr[2]`.
+- Access via `*mid`: 2-load chain (`mov bx, [mid]; mov ax, [bx]`).
+
+
+## `if (s == 0)` for char* — same as int* (or si,si + jne)
+
+Fixture `2702-char-ptr-null-eq-obj`:
+
+```c
+int check(char *s) {
+  if (s == 0) return -1;
+  return s[0];
+}
+```
+
+```
+55 8b ec 56                    prologue + push si
+8b 76 04                       mov si, s
+0b f6                          or si, si       ; test s
+75 05                          jne → ELSE
+b8 ff ff                       return -1 (0xFFFF)
+eb 05                          jmp epi
+8a 04                          ELSE: mov al, [si]   ; s[0]
+98                             cbw
+eb 00 5e 5d c3                 epilogue
+```
+
+Findings:
+- Pointer null-check is **type-irrelevant**: byte-identical for
+  `int *`, `char *`, `void *`, `struct X *`, etc.
+- `or reg, reg; jne <skip-then>` is the universal "test pointer
+  for zero" pattern.
+- `return -1` uses `mov ax, 0xFFFF` (3B).
+
+## `w->data[K]` where `data` is a pointer field
+
+Fixture `2703-struct-ptr-member-obj`:
+
+```c
+struct Wrap { int *data; };
+int peek(struct Wrap *w) {
+  return w->data[1];
+}
+```
+
+```
+55 8b ec 56                    prologue + push si
+8b 76 04                       mov si, w
+8b 1c                          mov bx, [si]      ; w->data (the POINTER)
+8b 47 02                       mov ax, [bx + 2]  ; data[1]
+eb 00 5e 5d c3                 epilogue
+```
+
+Findings:
+- When `data` is a POINTER field (not embedded array), accessing
+  `w->data[K]` is a **two-step deref**:
+  1. `mov bx, [si]` — load the pointer value
+  2. `mov ax, [bx + K×2]` — subscript via pointer
+- Compare to `b->data[K]` where `data` is an EMBEDDED ARRAY field
+  (`2676`): only ONE load needed (`mov ax, [si + offset_of_data + K×2]`).
+- The ARRAY-vs-POINTER distinction shows up here: arrays embed
+  inline, pointers add an indirection step (+ 2 bytes per access).
+
