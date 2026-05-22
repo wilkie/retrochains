@@ -2311,3 +2311,94 @@ All three already work end-to-end. Coverage notes:
   args being passed to pointer params and emit the offset
   form.
 
+
+## `goto` backward (loop reconstruction) — fixture `2340`
+
+`label: ...; if (cond) goto label;` is the K&R way to write a loop.
+BCC handles it via the same template it uses for any `if (cond) stmt`:
+inverted comparison + skip-around + unconditional `jmp` back. The
+backward `jmp` uses the `eb` short form (-128..+127 disp8).
+
+```c
+top:
+  sum = sum + i;
+  i = i + 1;
+  if (i < 5) goto top;
+```
+
+```
+; loop body inline (no fresh prologue per iteration — i,sum enregistered SI,DI)
+8b c7 03 c6 8b f8       ; sum += i
+8b c6 40 8b f0          ; i = i + 1
+83 fe 05                ; cmp si, 5
+7d 02                   ; jge +2      ← skip the jmp if !(i<5)
+eb ee                   ; jmp -18     ← backward goto top (short form)
+```
+
+Both `i` and `sum` were enregistered (SI, DI) since they are the only
+two locals — confirms the enregistration pool can carry across a
+backward branch with no spill. The conditional was emitted as
+`cmp/jge/jmp` (invert + skip) rather than `cmp/jl` direct — `goto`
+shares the if-stmt lowering path.
+
+## `goto` forward (skip code) — fixture `2341`
+
+Forward `goto done;` to skip code uses the same `eb disp8` short form.
+
+```c
+  if (x > 0) goto done;
+  x = 99;
+done:
+  return x;
+```
+
+```
+be 05 00                ; mov si, 5 (x)
+0b f6                   ; or si, si        ← test for !=0
+7e 02                   ; jle +2           ← invert (x≤0): skip the goto
+eb 03                   ; jmp +3           ← forward goto done
+be 63 00                ; mov si, 99
+; done:
+8b c6 eb 00             ; return si
+```
+
+Two notes: (a) `x > 0` for a positive-likely value compiles to
+`or reg, reg / jle` (zero-test peephole), not the literal
+`cmp si, 0 / jg done`. (b) `goto done;` is again lowered as
+`jcc skip; jmp done` — the `goto` keyword doesn't get a direct
+conditional-jump shortcut.
+
+## Nested ternary — sub-expressions re-evaluated, no CSE (fixture `2344`)
+
+When the same ternary appears twice within a nested ternary expression,
+BCC emits each occurrence in full — there is **no common-subexpression
+elimination**.
+
+```c
+m = (a > b ? a : b) > c ? (a > b ? a : b) : c;
+```
+
+The inner `(a > b ? a : b)` is emitted twice — once as the LHS of the
+outer comparison, and again as the if-true branch of the outer ternary:
+
+```
+; Inner ternary #1 — drives the outer compare
+3b f7 7e 04 8b c6 eb 02 8b c7   ; (a>b ? a : b) → ax
+3b c2                            ; cmp ax, c
+7e 0c                            ; jle pick_c
+; Inner ternary #2 — re-evaluated for the true branch
+3b f7 7e 04 8b c6 eb 02 8b c7   ; (a>b ? a : b) → ax  (identical)
+eb 02
+; pick_c:
+8b c2                            ; mov ax, c
+89 46 fe                         ; m = ax
+```
+
+a, b, c are enregistered (SI, DI, DX) so the re-evaluation is cheap
+(`cmp + 2 movs + 2 jmps` = 10 bytes), but it still doubles the
+ternary's code size. Confirms BCC treats the ternary purely as a
+syntactic expansion at codegen time — no caching of evaluated
+sub-expressions across the `?` / `:` boundaries.
+
+Also confirms the `dec sp / dec sp` small-frame heuristic for a single
+2-byte local (`m`) — `4c 4c` is shorter than `83 ec 02`.

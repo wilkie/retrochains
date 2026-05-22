@@ -3551,3 +3551,34 @@ Fixtures `713` (`*p += d`), `714` (`(*p)++`), `715` (`(*p)--`).
   weren't probed yet — `g.c++` is known to behave the same
   way (one probe), but no fixture lands in this batch.
 
+
+## Array of function pointers — fixture `2343`
+
+`int (*fns[3])(int);` declares 3 near function pointers in the stack
+frame, occupying 2 bytes each = 6 bytes total. The array is local so
+elements live in BP-relative slots. Initialization is three
+`mov word ptr [bp-N], imm16` stores with FIXUPP records resolving each
+function address.
+
+```
+; main prologue
+55 8b ec 83 ec 06       ; sub sp, 6  (3 near ptrs)
+c7 46 fa 00 00          ; mov [bp-6], offset add1   ← FIXUPP'd
+c7 46 fc 0b 00          ; mov [bp-4], offset add2   ← FIXUPP'd
+c7 46 fe 17 00          ; mov [bp-2], offset add3   ← FIXUPP'd
+```
+
+Indirect calls through array elements use `call near [bp+disp]`
+(`ff 56 disp8`) — the same encoding as any indirect call through a
+stack-resident near pointer:
+
+```
+b8 0a 00 50             ; push 10
+ff 56 fa                ; call near [bp-6]   ← fns[0](10)
+59                      ; pop cx             ← cdecl cleanup of 1 arg
+```
+
+So the codegen path for `fns[K](arg)` is just: compute the slot
+displacement at compile time (constant-index subscript), then emit a
+single `ff 56 disp8`. No `mov ax,[bp-6] / call ax` round-trip — the
+ModR/M form already supports indirect-call-through-memory.

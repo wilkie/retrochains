@@ -508,3 +508,32 @@ deferring the side effect past the store. Sibling of the
 existing `<stack-int> = <reg-int>++` peephole (fixture 649)
 for register-resident locals.
 
+
+## `static` local with non-zero initializer — fixture `2342`
+
+`static int n = 42;` inside a function declares storage with
+function lifetime but global scope of storage. BCC emits the variable
+into `_DATA` (the initialized segment), not `_BSS`, since the
+initializer is non-zero. The initial value (`2a 00`) appears in the
+OBJ's `_DATA` LEDATA record alongside any other initialized globals.
+
+The variable is **anonymous** at the OBJ symbol-table level — the
+`PUBDEF` list contains only `_main` and `_counter`, no name for the
+static. Internal references compile to plain `mov ax, [disp16]`
+(`a1 NN NN`) with FIXUPP records resolving the displacement against
+`_DATA` at link time.
+
+```
+; counter() body:
+55 8b ec                ; prologue (no stack — n is global storage)
+a1 00 00                ; mov ax, [_DATA:n]  (FIXUPP'd)
+40                      ; inc ax
+a3 00 00                ; mov [_DATA:n], ax
+a1 00 00                ; mov ax, [_DATA:n]  (return n — separate reload)
+eb 00 5d c3             ; jmp 0; epilogue
+```
+
+The two reads (`n = n + 1` and `return n`) are NOT fused: BCC emits
+two separate `a1 NN NN` loads. This is the same lack-of-CSE we see
+for ordinary globals — no read-after-write tracking. Confirms static
+locals are globals-with-a-different-scope-rule for codegen purposes.

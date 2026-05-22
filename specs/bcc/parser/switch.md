@@ -1222,3 +1222,45 @@ from the call return, tested with `or ax,ax / jne`,
 then either branch runs through the standard ternary
 materialization to the return epilogue.
 
+
+## Sparse switch — search-table strategy (fixture `2339`)
+
+Four sparse case labels (`1`, `5`, `10`, `100`) — too sparse for a
+dense indexed jump table, but ≥4 cases is enough that BCC declines
+the linear `cmp/je` chain. Instead it emits a **search-table**: a
+short loop over an inline value table, followed by an indirect jump
+through a parallel offset table.
+
+```
+mov  cx, 4              ; b9 04 00      ← case count
+mov  bx, offset table   ; bb 49 00      ← FIXUPP'd to inline data
+cs:mov ax, [bx]         ; 2e 8b 07      ← read next case value
+cmp  ax, [bp-4]         ; 3b 46 fc      ← vs scrutinee
+je   found              ; 74 06
+inc  bx / inc  bx       ; 43 43          ← step 2 bytes
+loop top                ; e2 f4
+jmp  default            ; eb 18
+found:
+cs:jmp [bx + 8]         ; 2e ff 67 08    ← indirect jmp via offset table
+```
+
+The data table is emitted in `_TEXT` right after the function body:
+
+```
+01 00 05 00 0a 00 64 00   ; case values: 1, 5, 10, 100 (word each)
+2c 00 31 00 36 00 3b 00   ; case body offsets (word each)
+```
+
+So **BCC has three switch dispatch strategies**:
+
+| Strategy | Trigger | Codegen |
+|---|---|---|
+| Linear chain | small N (≤3) | per-case `cmp ax, K / je body` |
+| Search table | ≥4 sparse cases | value+offset tables in CS, `loop` scan + indirect `jmp [bx+disp]` |
+| Indexed (dense) jump | ≥8 contiguous cases | `shl bx, 1 / 2e ff a7 disp16` direct CS-indirect jmp |
+
+Threshold between linear and search-table is N=4 (4 cases here triggered
+search-table). Threshold between search-table and dense is density: the
+2337 fixture had 10 contiguous cases and chose dense; this one has 4
+non-contiguous cases (range 1..100) and chose search. Density >50% of
+the range may be the rule.
