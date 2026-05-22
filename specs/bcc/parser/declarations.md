@@ -1314,3 +1314,48 @@ Findings:
 - Same shape as `int x = expr;` for any expression source.
 - The reload for return (3B) is standard non-CSE behavior.
 
+
+## `int a[3];` local (no init) — just `sub sp, 6` (no zero-fill)
+
+Fixture `2813-local-arr-no-init-obj`:
+
+```c
+int a[3];
+a[0] = 10; a[1] = 20; a[2] = 30;
+return a[0] + a[1] + a[2];
+```
+
+```
+83 ec 06                       sub sp, 6   (3 ints)
+c7 46 fa 0a 00                 a[0] = 10
+...
+8b 46 fa 03 46 fc 03 46 fe     return a[0]+a[1]+a[2]
+```
+
+Findings:
+- Local int array without initializer is just **stack allocation**
+  (`sub sp, N×2`). Contents undefined until written.
+- NO implicit zero-fill for locals (unlike globals which go to BSS).
+- Sum-of-array uses AX-accumulator chain: `mov ax, a[0]; add ax,
+  a[1]; add ax, a[2]` (3B + 3B + 3B = 9 bytes).
+
+## Global-to-global copy `g_a = g_b;` — load + store through AX
+
+Fixture `2814-global-to-global-obj`:
+
+```c
+int g_a, g_b;
+void copy(void) { g_a = g_b; }
+```
+
+```
+a1 02 00                       mov ax, [_g_b] (FIXUPP)
+a3 00 00                       [_g_a] = ax    (FIXUPP)
+```
+
+Findings:
+- Global-to-global copy = 6 bytes (3B load + 3B store). Two
+  FIXUPPs (one per symbol).
+- x86 lacks mem-mem move for general regs, so AX is the conduit.
+- Same shape as local-from-global (`2812`).
+

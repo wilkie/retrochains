@@ -1534,3 +1534,27 @@ Findings:
 - Total 13 bytes for a 2-call chain (8B inner + 5B outer push+call+pop).
 - Generalizable: `h(g(f(v)))` would be 8 + 5 + 5 = 18 bytes.
 
+
+## Zero-arg fn-ptr call — `ff 16 disp16` only (4 bytes, no push/cleanup)
+
+Fixture `2818-fnptr-no-args-obj`:
+
+```c
+int (*hook)(void);
+int trigger(void) {
+  return hook();
+}
+```
+
+```
+ff 16 00 00                    call word ptr [_hook]  (FIXUPP)
+```
+
+Findings:
+- Zero-arg fn-ptr call = **just the indirect call instruction**.
+  No push (no args), no cleanup (sp unchanged).
+- 4 bytes total for the entire call.
+- Compare to 1-arg call: adds `push ax` (1B) + `pop cx` (1B) = +2B.
+- Compare to direct fn call (zero-arg): `e8 disp16` (3B with FIXUPP).
+  Fn-ptr is 1B more for the `ff 16` modr/m.
+

@@ -5406,3 +5406,56 @@ Findings:
 - Same shape as a fully-initialized array; the zero bytes are
   literal, not BSS-relocated.
 
+
+## `(*pp)->x` vs `**pp` (at field offset 0) — BYTE-IDENTICAL
+
+Fixture `2815-deref-then-field-obj`:
+
+```c
+struct P { int x; int y; };
+int extract(struct P **pp) {
+  return (*pp)->x;
+}
+```
+
+```
+8b 76 04                       mov si, pp
+8b 1c                          mov bx, [si]    ; *pp
+8b 07                          mov ax, [bx]    ; (*pp)->x (x at offset 0)
+```
+
+Findings:
+- `(*pp)->x` for offset-0 field = **byte-identical** to `**pp`
+  (`2721`). 3-load chain (pp → si → bx → ax).
+- BCC parser collapses both forms to the same AST and codegen.
+- For non-zero field offset (e.g. `->y`), would emit `mov ax,
+  [bx + offset]` instead of `mov ax, [bx]`.
+
+## `o->p->v` (ptr-chain with intermediate ptr field) — same 3-load chain
+
+Fixture `2816-ptr-chain-deref-obj`:
+
+```c
+struct Inner { int v; };
+struct Outer { struct Inner *p; };
+int peek(struct Outer *o) {
+  return o->p->v;
+}
+```
+
+**Body byte-identical to `(*pp)->x`** (`2815`):
+
+```
+8b 76 04                       mov si, o
+8b 1c                          mov bx, [si]    ; o->p (Inner pointer at offset 0)
+8b 07                          mov ax, [bx]    ; o->p->v (v at offset 0)
+```
+
+Findings:
+- Multi-level ptr-field traversal collapses to **one `mov reg,
+  [reg]` per dereference step**.
+- `o->p->v` (Outer→Inner→int) uses 3 loads = 3+2+2 = 7 bytes.
+- Same shape as `**pp` and `(*pp)->x` when all fields are at
+  offset 0. Different offsets would change the disp on the final
+  load.
+

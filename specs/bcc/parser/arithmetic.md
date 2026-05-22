@@ -2302,3 +2302,34 @@ Findings:
 - Source-form sensitivity: write `-x` explicitly for 8-byte
   savings (idiv setup is ~6B, vs `neg ax` = 2B).
 
+
+## `int + char` — usual arithmetic conversions promote char first
+
+Fixture `2817-int-plus-char-obj`:
+
+```c
+int mix(int a, char b) {
+  return a + b;
+}
+```
+
+```
+8a 46 06                       mov al, b      (byte load)
+98                             cbw            (char → int promotion)
+50                             push ax        (spill)
+8b 46 04                       mov ax, a
+5a                             pop dx         (restore promoted b)
+03 c2                          add ax, dx
+```
+
+Findings:
+- C "usual arithmetic conversions" promote char to int **before**
+  the binary op. BCC emits cbw faithfully.
+- Push/pop spill needed because both operands compete for AX
+  (same pattern as `char + char` from `2558`, `int + ptr` from
+  `2709`).
+- Total 11 bytes for the expression (`8a 46 06 98 50 8b 46 04 5a
+  03 c2`).
+- For `unsigned char + int`, BCC would use `mov ah, 0` (zero-
+  extend, 2B) instead of cbw (1B).
+
