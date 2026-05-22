@@ -629,3 +629,38 @@ as the step. The call site passes the literal "abc"
 pointer through the standard cdecl push, then reads
 length from AX.
 
+
+## `int` ↔ `unsigned int` cast — type-only, no codegen (fixture `2387`)
+
+`unsigned int u = (unsigned int)x;` for an `int x` emits **no
+conversion code** — the cast is byte-identical to a plain assign:
+
+```c
+int x = -5;
+unsigned int u = (unsigned int)x;
+return (int)(u / 2);
+```
+
+```
+c7 46 fe fb ff          ; x = -5 (0xFFFB)
+8b 46 fe                ; mov ax, x
+89 46 fc                ; u = ax     ← cast bytes = plain assign
+8b 46 fc                ; mov ax, u
+d1 e8                   ; shr ax, 1  ← unsigned div by 2 = shr (NOT sar)
+```
+
+What matters is that the cast **propagates the type** for later
+operations. The subsequent `u / 2` lowers to `shr ax, 1` (the
+unsigned shift, opcode `/5` = `d1 e8`) rather than `sar ax, 1`
+(`/7` = `d1 f8`) because `u`'s declared type is `unsigned int` at
+that point.
+
+Without the cast, treating x = -5 as signed and dividing by 2 would
+give `sar` semantics (= -3). With the cast, it's unsigned division
+(0xFFFB / 2 = 0x7FFD = 32765). So the cast carries type information
+through the assignment, even though no bytes change.
+
+Confirms: signed↔unsigned casts on same-width integers are
+**type-system-only** in BCC. They steer opcode selection (`shr` vs
+`sar`, `div` vs `idiv`, `jbe` vs `jle`) for downstream operations
+but emit nothing at the cast site.

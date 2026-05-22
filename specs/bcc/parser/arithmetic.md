@@ -1505,3 +1505,49 @@ helpers, where the operand types are already constrained.
 A future uint-compound-divide fixture will exercise those
 sites; the per-site fix will follow the same pattern.
 
+
+## `x % 1` and `x << 0` fold to constants (fixture `2391`, `2392`)
+
+The identity-fold table extends with two more rules:
+
+**`x % 1` → `0`** (fixture `2391`): for any integer `x`, the modulo
+of 1 is mathematically always 0. BCC folds this at parse time and
+emits a bare `xor ax, ax` — neither `x` nor the divisor `1` appears
+in the assembly:
+
+```c
+x = 42;
+return x % 1;
+```
+
+```
+33 c0                   ; xor ax, ax   ← entire `x % 1` collapses to 0
+```
+
+**`x << 0` → `x`** (fixture `2392`): shift-by-zero is the identity
+operation. BCC elides the shift entirely:
+
+```c
+x = 100;
+return x << 0;
+```
+
+```
+8b 46 fe                ; mov ax, x    ← no shift instruction emitted
+```
+
+So the identity-fold catalog (extending earlier `x + 0` / `x - 0` /
+`x | 0` / `x ^ 0` / `x / 1` / `x * 1` / `x * 0` rules):
+
+| Source | Folds to |
+|---|---|
+| `x + 0`, `x - 0`, `x \| 0`, `x ^ 0` | bare `mov` |
+| `x / 1`, `x * 1`, `x << 0`, `x >> 0` | bare `mov` |
+| `x * 0`, `x % 1` | constant `0` (`xor ax, ax` or direct store) |
+| `x & -1` | bare `mov` (already covered) |
+
+Identity folds happen at parse time on integer literal RHS. The
+folds gate on the RHS being an int literal of the specific value —
+not on type or runtime knowledge of the LHS. So `x % var` where
+`var` happens to be 1 at runtime does NOT fold (runtime modulo, full
+idiv).

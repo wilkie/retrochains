@@ -442,3 +442,22 @@ Probe replaced with the char-compound-OR variant.
   and high at `[bp-2]` (little-endian halves), the cast emits
   `mov ax, [bp-4]` and the high half is discarded. Re-confirms
   long-to-int = drop the high word, no truncation work.
+
+## Free passes (batch 673)
+
+- `2388` — `int r = (a > b);` (bool-to-int materialization): the
+  standard branching template lands a 0 or 1 in AX —
+  `cmp/jle false; mov ax, 1; jmp end; xor ax, ax`. Re-confirms
+  bool-to-int costs ~8 bytes and uses the false-branch zero via
+  `xor ax, ax`.
+- `2389` — `f(i--)` (postdec inside function-call arg): old value
+  captured to AX before the decrement (`mov ax, si / dec si /
+  push ax`), so the callee sees `i`'s old value while the caller's
+  `i` reflects the decremented one after the call returns. Standard
+  postdec-in-arg mechanics.
+- `2390` — `struct Point pts[3];` accessed with constant indices
+  (`pts[1].x`, `pts[2].y`): array-of-struct layout is flat
+  consecutive — 3 × 4-byte structs = 12-byte stack reserve. Each
+  `pts[K].field` folds at compile time to `[bp-12 + K*4 + offset]`,
+  reachable as a single `mov ax, [bp+disp8]`. Re-confirms struct
+  array layout has no inter-element padding.
