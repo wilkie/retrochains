@@ -2867,3 +2867,31 @@ Findings:
   too: structs ≤ register-pair size pass as bytes-on-stack with no
   struct-copy overhead.
 
+
+## `struct { char; char; int }` — 4 bytes total, fields packed
+
+Fixture `2792-char-field-init-obj`:
+
+```c
+struct H { char tag; char ver; int val; };
+struct H rec = { 'X', 1, 42 };
+return rec.val;
+```
+
+`_DATA` for `_rec` (4 bytes): `58 01 2a 00`
+- offset 0: tag = `'X'` (0x58)
+- offset 1: ver = `1`
+- offset 2: val = `42` (low byte 0x2A, high byte 0x00)
+
+```
+a1 02 00                       mov ax, [_rec + 2]   ; read rec.val
+```
+
+Findings:
+- Sizeof = 4 bytes (1 + 1 + 2). Fields packed, no padding inserted.
+- Initializer in declaration order: char takes 1B, int takes 2B.
+- `rec.val` at offset 2 (after two chars). Single moffs16 load.
+- Same packing rule as `2718` (`{char; int}` = 3 bytes); the int
+  field happens to be even-aligned here only because the two chars
+  sum to an even offset.
+

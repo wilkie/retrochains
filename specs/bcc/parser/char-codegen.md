@@ -1395,3 +1395,29 @@ Findings:
 | `(long) int` unsigned| 2B    | xor dx,dx |
 | `(int) long`         | 3B    | load low word only |
 
+
+## `int x = c;` (char→int implicit promotion) — byte load + cbw
+
+Fixture `2793-char-asgn-int-obj`:
+
+```c
+int promote(char c) {
+  int x = c;
+  return x;
+}
+```
+
+```
+4c 4c                          dec sp twice (x)
+8a 46 04                       mov al, c    (byte load)
+98                             cbw          (sign-extend AL→AX)
+89 46 fe                       x = ax
+```
+
+Findings:
+- Implicit char→int conversion in assignment = **byte load + cbw**
+  (4 bytes for the conversion).
+- Same shape as explicit `(int)char` cast (`2538`).
+- The conversion is signed by default (cbw, not `mov ah, 0`).
+  For `unsigned char`, BCC would use `mov ah, 0` for zero-extension.
+

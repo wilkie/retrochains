@@ -965,3 +965,29 @@ Findings:
   instead of `^= 0xFFFF` saves 2 bytes** at the source-form level.
 - BCC's source-form sensitivity: same semantics, different bytes.
 
+
+## `if (!p)` for pointer — same as `if (p == 0)`
+
+Fixture `2794-bang-ptr-obj`:
+
+```c
+int check(char *p) {
+  if (!p) return -1;
+  return 0;
+}
+```
+
+```
+83 7e 04 00                    cmp word [bp+4], 0
+75 05                          jne → SKIP-THEN
+b8 ff ff                       return -1
+```
+
+Findings:
+- `!p` for pointer compiles to **identical bytes** as `p == 0`
+  (`2702`).
+- BCC's parser folds `!ptr` and `ptr == 0` to the same internal
+  form at the AST level.
+- All three of `!p`, `p == 0`, `p == NULL` produce identical bytes
+  (assuming `NULL` is defined as `0` or `(void *)0`).
+

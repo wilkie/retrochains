@@ -522,3 +522,31 @@ Findings:
   `_op`, exactly like uninitialized fn-ptr (`2750`) and any other
   fn-ptr call.
 
+
+## `sizeof(type)` expressions — multi-term folded to single immediate
+
+Fixture `2791-sizeof-type-obj`:
+
+```c
+int sizes(void) {
+  return sizeof(int) + sizeof(long) + sizeof(char);
+}
+```
+
+```
+b8 07 00                       mov ax, 7   (2 + 4 + 1)
+```
+
+Findings:
+- Multi-term `sizeof(type)` expressions fold to a single immediate
+  at compile time. The whole expression evaluates to `2 + 4 + 1 = 7`.
+- BCC sizes (small model):
+
+| type        | sizeof |
+|-------------|--------|
+| `char`      | 1      |
+| `short` / `int` | 2 |
+| `long`      | 4      |
+| `void *` / any ptr | 2 |
+| `struct X`  | sum of fields (no padding) |
+

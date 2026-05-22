@@ -2747,3 +2747,45 @@ Findings:
 - The conversion is byte truncation at the load site, no
   bit-manipulation instructions.
 
+
+## Long `>> 2` (signed) — `N_LXRSH@` helper with CL count
+
+Fixture `2789-local-long-shr-obj`:
+
+```c
+long shrink(long v) {
+  return v >> 2;
+}
+```
+
+```
+8b 56 06                       mov dx, v.high
+8b 46 04                       mov ax, v.low
+b1 02                          mov cl, 2 (count)
+e8 00 00                       call N_LXRSH@
+```
+
+Findings:
+- Long signed right-shift uses **`N_LXRSH@` helper**, never inline.
+- DX:AX = long operand, CL = shift count (set before call).
+- Total 11 bytes for the shift (8B setup + 3B call FIXUPP).
+- For `>> 16` (multiple of 16), BCC would use byte-swap fold (see
+  long-codegen earlier) instead of the helper.
+
+## Global ulong load — HIGH-then-LOW pair (standard long return)
+
+Fixture `2790-global-ulong-obj`:
+
+`_DATA` for `_counter` (4 bytes): `be ba fe ca` (= 0xCAFEBABE LE)
+
+```
+8b 16 02 00                    mov dx, [_counter + 2] (HIGH)
+a1 00 00                       mov ax, [_counter]     (LOW)
+```
+
+Findings:
+- Returning a long-typed global = standard HIGH-then-LOW load pair.
+- 7 bytes total (4B for dx + 3B for ax).
+- Signed-vs-unsigned long load is IDENTICAL bytes — the
+  type interpretation matters only for ops that read it.
+
