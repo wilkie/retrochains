@@ -1421,3 +1421,32 @@ Findings:
 - The conversion is signed by default (cbw, not `mov ah, 0`).
   For `unsigned char`, BCC would use `mov ah, 0` for zero-extension.
 
+
+## `c >> 4` for char (promote first, then shift) — `cbw + sar ax, cl`
+
+Fixture `2807-char-shr-4-obj`:
+
+```c
+int nibble(char c) {
+  return (int)(c >> 4);
+}
+```
+
+```
+8a 46 04                       mov al, c    (byte load)
+98                             cbw          (sign-extend AL→AX, char→int)
+b1 04                          mov cl, 4
+d3 f8                          sar ax, cl   (signed arithmetic shift)
+```
+
+Findings:
+- C "integer promotion": char operand is promoted to int **before**
+  the shift. The shift operates on the sign-extended int.
+- Total 8 bytes for the operation: cbw (1B) + cl-form shift (4B) +
+  byte load (3B).
+- **`sar ax, cl`** opcode is `d3 f8` (signed arithmetic shift right).
+- Compare to int `>> 4` which is 4 bytes (no cbw needed) for the
+  shift portion; char adds 1 byte for the promotion.
+- For unsigned char, BCC would emit `mov ah, 0` (zero-extend, 2B)
+  instead of cbw, then `shr` (unsigned) instead of `sar`.
+

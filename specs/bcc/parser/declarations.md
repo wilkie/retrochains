@@ -1287,3 +1287,30 @@ Findings:
   3. Then `mov [mem], reg` (4B) wins
 - For first-use stores, the AX-acc form is the default.
 
+
+## `int x = g;` (local from global) — standard load-store through AX
+
+Fixture `2812-local-from-global-obj`:
+
+```c
+int g = 42;
+int main(void) {
+  int x = g;
+  return x;
+}
+```
+
+```
+4c 4c                          dec sp twice (x)
+a1 00 00                       mov ax, [_g]     (moffs16+FIXUPP)
+89 46 fe                       x = ax
+8b 46 fe                       return x
+```
+
+Findings:
+- Local-from-global = load through AX (mem-to-mem can't directly,
+  x86 lacks single-instruction mem-mem move for general regs).
+- 3B load + 3B store = 6 bytes for the copy.
+- Same shape as `int x = expr;` for any expression source.
+- The reload for return (3B) is standard non-CSE behavior.
+

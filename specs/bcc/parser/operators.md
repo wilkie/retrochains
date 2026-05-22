@@ -991,3 +991,32 @@ Findings:
 - All three of `!p`, `p == 0`, `p == NULL` produce identical bytes
   (assuming `NULL` is defined as `0` or `(void *)0`).
 
+
+## Ternary as function argument — JOIN-then-push (inline)
+
+Fixture `2811-ternary-arg-obj`:
+
+```c
+return helper(v > 0 ? v : -v);
+```
+
+```
+8b 76 04                       mov si, v
+0b f6                          or si, si        ; peephole
+7e 04                          jle → ELSE
+8b c6                          mov ax, si       (THEN: v)
+eb 04                          jmp → JOIN
+8b c6 f7 d8                    mov ax, si; neg ax  (ELSE: -v)
+                               ; JOIN:
+50                             push ax          (push result)
+e8 00 00                       call _helper
+```
+
+Findings:
+- Ternary as fn argument compiles **inline** — both arms reach the
+  JOIN point (with the result in AX), then `push ax` to put it on
+  the call stack.
+- NO intermediate spill to a local variable.
+- Same JOIN pattern as ternary in any other position; only the
+  consumer of the result differs (push for call vs store/return).
+

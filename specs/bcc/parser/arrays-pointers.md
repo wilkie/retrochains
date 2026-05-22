@@ -5391,3 +5391,18 @@ Findings:
 - The deref-then-postinc semantics: the OLD pointer is used for
   the deref, then p is bumped.
 
+
+## `int arr[5] = { 1, 2 }` — partial init pads remainder with zeros
+
+Fixture `2810-arr-partial-init-obj`:
+
+`_DATA` for `_arr` (10 bytes): `01 00 02 00 00 00 00 00 00 00`
+
+Findings:
+- Partial init: explicit values fill leading positions, remainder
+  is **zero-padded** (C standard rule).
+- 10 full bytes laid out in `_DATA`, with 4B from the initializer
+  and 6B of zeros for `arr[2..4]`.
+- Same shape as a fully-initialized array; the zero bytes are
+  literal, not BSS-relocated.
+

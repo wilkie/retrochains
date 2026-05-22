@@ -2895,3 +2895,25 @@ Findings:
   field happens to be even-aligned here only because the two chars
   sum to an even offset.
 
+
+## `struct { int; char }` — 3 bytes, NO trailing padding
+
+Fixture `2809-struct-end-char-obj`:
+
+```c
+struct T { int a; char b; };
+struct T t = { 100, 'X' };
+```
+
+`_DATA` for `_t` (3 bytes): `64 00 58`
+- offset 0-1: a = 100 (0x64)
+- offset 2: b = 'X' (0x58)
+
+Findings:
+- Sizeof(struct T) = **3 bytes** (2 + 1). NO trailing padding to
+  round to even size.
+- BCC packs to exact byte count — no struct end-padding.
+- Mirrors `2718` for `{char; int}` (also 3 bytes).
+- Trailing chars stay at their natural offset; the next struct
+  in an array would start at the next byte (odd offset OK).
+
