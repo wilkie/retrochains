@@ -1785,3 +1785,54 @@ Findings:
 - This generalizes: `case 1: case 2: case 3: body;` would produce
   3 cmp+je dispatches all to one body.
 
+
+## Nested switch — independent dispatch + body block per level
+
+Fixture `2641-nested-switch-obj`:
+
+```c
+switch (x) {
+  case 1:
+    switch (y) {
+      case 2: return 12;
+    }
+    return 10;
+  case 2: return 20;
+}
+return 0;
+```
+
+Body sketch:
+```
+; --- outer dispatch ---
+mov ax, x
+cmp ax, 1; je OUTER_CASE_1
+cmp ax, 2; je OUTER_CASE_2
+jmp DEFAULT
+
+; --- OUTER_CASE_1 body (includes inner switch) ---
+mov ax, y
+cmp ax, 2; je INNER_CASE_2
+jmp AFTER_INNER
+INNER_CASE_2:
+  ax = 12; jmp epi
+AFTER_INNER:
+  ax = 10; jmp epi
+
+; --- OUTER_CASE_2 body ---
+ax = 20; jmp epi
+
+; --- DEFAULT ---
+xor ax, ax
+```
+
+Findings:
+- Nested switches are **structurally independent** — each switch
+  has its own dispatch chain and body region. No shared dispatch
+  state.
+- The inner switch lives entirely inside its enclosing case's
+  body, with its own labels for cases and post-switch.
+- No special "inner switch overrides break/continue" mechanics
+  needed at the codegen level — labels are scoped naturally by
+  position in the byte stream.
+

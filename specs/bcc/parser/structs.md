@@ -2296,3 +2296,43 @@ Findings:
   field accesses would go through memory loads on the destination
   struct, regardless of field position.
 
+
+## Union with mixed-size members — sizeof = max, all share offset 0
+
+Fixture `2642-union-mixed-size-obj`:
+
+```c
+union U {
+  char c;
+  long l;
+};
+union U u;
+int main(void) {
+  u.l = 0x12345678L;
+  return u.c;
+}
+```
+
+`_BSS` for `_u`: 4 bytes (= sizeof(long), the largest member)
+
+```
+55 8b ec                       prologue
+c7 06 02 00 34 12              [_u + 2] = 0x1234  ; long HIGH
+c7 06 00 00 78 56              [_u + 0] = 0x5678  ; long LOW
+a0 00 00                       mov al, [_u + 0]   ; u.c = LOW byte = 0x78
+98                             cbw
+eb 00 5d c3                    epilogue
+```
+
+Findings:
+- `sizeof(union U) = max(sizeof(members))`. Here:
+  - sizeof(char) = 1
+  - sizeof(long) = 4
+  - sizeof(union U) = 4
+- All members start at **offset 0**. So `u.c` and `u.l` alias the
+  same address. The char overlaps with the LOW byte of the long.
+- Little-endian layout means `u.c` (after `u.l = 0x12345678`)
+  reads the LSB = `0x78`.
+- Members of different sizes coexisting: the smaller member just
+  doesn't use the high bytes.
+

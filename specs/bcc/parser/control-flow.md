@@ -3345,3 +3345,47 @@ Findings:
 - `e9 disp16` = unconditional jmp near (3 bytes). The disp16 is
   signed relative to the byte after the jmp.
 
+
+## Three-way sign check — two sequential `or reg, reg` tests
+
+Fixture `2644-sign-three-way-obj`:
+
+```c
+int sign(int x) {
+  if (x > 0) return 1;
+  if (x < 0) return -1;
+  return 0;
+}
+```
+
+```
+55 8b ec 56                    prologue + push si
+8b 76 04                       mov si, x
+0b f6                          or si, si       ; test x  (first test)
+7e 05                          jle → SKIP-POS   ; if x <= 0
+b8 01 00                       ax = 1
+eb 0d                          jmp epi
+                               ; SKIP-POS:
+0b f6                          or si, si       ; test x  AGAIN
+7d 05                          jge → SKIP-NEG   ; if x >= 0
+b8 ff ff                       ax = -1
+eb 04                          jmp epi
+                               ; SKIP-NEG (= x == 0):
+33 c0                          ax = 0
+eb 00 5e 5d c3                 epilogue
+```
+
+Findings:
+- Each `if (x cmp 0)` is independent and **re-tests x** via
+  `or si, si` — NO flag reuse across statements, even though x
+  hasn't been modified. This is the "independent ifs" invariant
+  from `2515`.
+- `or reg, reg` (1 byte: opcode `0b /r r/m` = 2 bytes total) is
+  the preferred form for "compare to zero" — shorter than
+  `cmp reg, 0` (3 bytes `83 fe 00`).
+- Skip-true branches:
+  - `if (x > 0)` → `jle` (signed less-or-equal, 0x7E)
+  - `if (x < 0)` → `jge` (signed greater-or-equal, 0x7D)
+- The implicit "else x == 0" falls through to the final `xor ax, ax`.
+- Returning `-1`: `mov ax, 0xFFFF` (3B, `b8 ff ff`).
+

@@ -4443,3 +4443,36 @@ Findings:
 - For row counts that aren't powers of 2 (e.g. `m[3][5]`), the
   row stride would need `mov dx, 10; imul dx` instead of shifts.
 
+
+## `if (!p)` for pointer — byte-identical to `if (p == 0)`
+
+Fixture `2643-null-ptr-bang-obj`:
+
+```c
+int check(int *p) {
+  if (!p) return -1;
+  return *p;
+}
+```
+
+```
+55 8b ec 56                    prologue + push si
+8b 76 04                       mov si, p
+0b f6                          or si, si       ; test p (= 0?)
+75 05                          jne → ELSE      ; skip-true if p != 0
+b8 ff ff                       ax = 0xFFFF (= -1)
+eb 04                          jmp epi
+                               ; ELSE:
+8b 04                          mov ax, [si]    ; *p
+eb 00 5e 5d c3                 epilogue
+```
+
+Findings:
+- Pointer null-check `!p` compiles **identically to `p == 0`**:
+  `or reg, reg; jne <skip-then>`. Pointers are byte-tested as
+  ints for boolean conditions.
+- This is consistent with `!x` for int (`2515`) and `while (*p)`
+  (`2605`) — BCC's bool-test layer is type-agnostic.
+- `return -1` uses `mov ax, 0xFFFF` (3 bytes) — the same path as
+  any int literal load. No sign-aware shortcut.
+

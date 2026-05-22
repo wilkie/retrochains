@@ -2810,3 +2810,66 @@ Findings:
 - Compares well to `++g` (would emit `inc word [mem]` = 4 bytes via
   the `ff 06 disp16` form), saving 1 byte by inc'ing without imm.
 
+
+## `g -= K` on global int — `sub word [mem], imm8`
+
+Fixture `2639-global-sub-assign-obj`:
+
+```c
+int g = 100;
+int dec5(void) {
+  g -= 5;
+  return g;
+}
+```
+
+```
+55 8b ec                       prologue
+83 2e 00 00 05                 sub word [_g], 5   ; FIXUPP, imm8 sign-ext
+a1 00 00                       mov ax, [_g]       ; reload
+eb 00 5d c3                    epilogue
+```
+
+Findings:
+- Same shape as `g += K` (`2638`), only opcode-ext bit differs:
+  - ADD = opcode-ext 0 → ModR/M `06`
+  - SUB = opcode-ext 5 → ModR/M `2e`
+- 5 bytes: `83 2e disp16 imm8`. Sign-extended imm8 covers values
+  -128..+127. For larger constants, BCC would switch to `81 2e
+  disp16 imm16` (6 bytes).
+
+## `++g` on global int — `inc word [mem]` (1 byte shorter than `g += 1`)
+
+Fixture `2640-global-preinc-obj`:
+
+```c
+int g = 0;
+int next(void) {
+  return ++g;
+}
+```
+
+```
+55 8b ec                       prologue
+ff 06 00 00                    inc word [_g]      ; FIXUPP (4B)
+a1 00 00                       mov ax, [_g]       ; reload
+eb 00 5d c3                    epilogue
+```
+
+Findings:
+- `++g` on global compiles to **`inc word [mem]`** = `ff /0 disp16`
+  (4 bytes), 1 byte SHORTER than `g += 1` (which would emit
+  `83 06 disp16 01` = 5 bytes).
+- This is the same `inc word [mem]` peephole as `++a[K]` (`2616`).
+- The `return ++g;` still reloads g from memory for the return —
+  no CSE across the inc.
+- Operator/form size table for global int compound:
+
+| op       | bytes | form                              |
+|----------|-------|-----------------------------------|
+| `++g`    | 4B    | `inc word [mem]`                  |
+| `--g`    | 4B    | `dec word [mem]`                  |
+| `g += K` | 5B    | `add word [mem], imm8`            |
+| `g -= K` | 5B    | `sub word [mem], imm8`            |
+| `g |= K` | 5B    | `or word [mem], imm8` (sign-ext)  |
+
