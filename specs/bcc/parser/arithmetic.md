@@ -1551,3 +1551,37 @@ folds gate on the RHS being an int literal of the specific value —
 not on type or runtime knowledge of the LHS. So `x % var` where
 `var` happens to be 1 at runtime does NOT fold (runtime modulo, full
 idiv).
+
+## `(0 == x)` commutes to `(x == 0)` — same bytes (fixture `2393`)
+
+The equality comparison `0 == x` produces **byte-identical** OBJ to
+`x == 0`. BCC normalizes the operand order at parse time, putting
+the constant on the right so the standard `cmp m, imm` form
+applies.
+
+```c
+if (0 == x) { r = 10; } else { r = 20; }
+```
+
+```
+83 7e fe 00             ; cmp word ptr [bp-2], 0    ← x on left (memory), 0 on right (imm)
+75 05                   ; jne else_branch
+be 0a 00 eb 03          ; r = 10; jmp end
+be 14 00                ; r = 20
+```
+
+Encoding details:
+- `83 7e fe 00` = `cmp word [bp-2], imm8-sext-0` — the imm8-sext
+  form for small constants.
+- `75` = `jne` — branches on the inverted truth (if NOT equal, take
+  else branch).
+
+So `==` and `!=` are **commutative at the codegen level** in BCC:
+`a == b`, `b == a`, `a == K`, `K == a` all collapse to the same
+`cmp <non-const>, <const>` pattern when one operand is a constant.
+This applies even for non-trivial constants (e.g., `(5 == x)` would
+emit `cmp [m], 5`).
+
+For ordered comparisons (`<`, `>`, `<=`, `>=`) the commute would
+flip the predicate (`5 < x` is `x > 5`); not exercised in this
+fixture but consistent with the rule.

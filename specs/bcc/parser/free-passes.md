@@ -461,3 +461,30 @@ Probe replaced with the char-compound-OR variant.
   `pts[K].field` folds at compile time to `[bp-12 + K*4 + offset]`,
   reachable as a single `mov ax, [bp+disp8]`. Re-confirms struct
   array layout has no inter-element padding.
+
+## Free passes (batch 674)
+
+- `2395` — `return (a = a + 1, b);` (comma operator in return
+  expression): each comma-separated subexpression evaluated for
+  side effect in order; only the last expression's value reaches
+  AX. Standard comma semantics work in return position.
+- `2396` — `add(dbl(3), dbl(5))` (nested function calls as
+  arguments): R-to-L evaluation — `dbl(5)` runs first, its result
+  is pushed on the stack as a save, then `dbl(3)` runs, then both
+  results are pushed in argument order for `add()`. Re-confirms
+  "chained calls bottom-up" arg-eval pattern.
+- `2397` — `char *words[]; for (i=0;i<4;i++) sum += words[i][0];`
+  (variable-indexed array of string pointers): the indexed pointer
+  load uses `mov bx, [bx + offset_of_words]` (encoding
+  `8b 9f disp16`) — a single combined instruction that adds the
+  scaled index to the global array base and loads the pointer.
+  Then `mov al, [bx]` derefs the loaded pointer for `[0]`. Confirms
+  the `[bx+disp16]` ModR/M form is used when the global array base
+  is FIXUPP-resolved.
+- `2398` — `r1 = ++x; r2 = x++;` (pre/post-inc as RHS): pre-inc
+  bumps then captures; post-inc captures then bumps. The ordering
+  is visible as `inc si / mov r1, si / mov r2, si / inc si` —
+  r1 gets the post-incremented value (since pre-inc happens
+  first), r2 gets the pre-incremented value (since post-inc bumps
+  after the store). Confirms pre/post-inc semantics for rvalue
+  capture.

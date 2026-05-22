@@ -2518,3 +2518,35 @@ Two consequences:
 
 Confirms labels are resolved purely positionally at codegen and
 don't generate any per-label instruction.
+
+## `if (cond) ;` — empty body still emits the test (fixture `2394`)
+
+A bare semicolon as the if body is a syntactically valid empty
+statement. BCC emits the full condition test and skip jump, with
+the skip distance being zero (`jle +0` / similar):
+
+```c
+if (x > 0)
+  ;
+return x;
+```
+
+```
+be 05 00                ; mov si, 5 (x)
+0b f6                   ; or si, si       ← test
+7e 00                   ; jle +0          ← skip target is the next instruction
+8b c6                   ; mov ax, si      ← return x
+```
+
+The `7e 00` reads as "if x ≤ 0, skip 0 bytes" — a no-op control
+flow. BCC keeps this skeleton because:
+
+1. The condition's side effects must still execute. (`if (f()) ;`
+   still calls `f()`.)
+2. The codegen path doesn't have a "body is empty, elide the test"
+   special case.
+
+So **empty if bodies cost 4 bytes** here (`0b f6 / 7e 00` for an
+or-zero-test + skip): the cmp/test plus a zero-displacement jump.
+Consistent with control flow being structurally lowered without
+peephole elision of unreachable paths.
