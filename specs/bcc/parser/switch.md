@@ -1912,3 +1912,40 @@ Findings:
 - Enum values are folded at compile time (RED → 0, GREEN → 1, etc.);
   the OBJ has no record of the enum names.
 
+
+## Switch with ONLY default — `jmp default` (no dispatch)
+
+Fixture `2720-switch-default-only-obj`:
+
+```c
+int x = 7;
+switch (x) {
+  default: return 99;
+}
+return 0;
+```
+
+```
+55 8b ec 4c 4c                 prologue + 2B local
+c7 46 fe 07 00                 x = 7
+eb 00                          jmp → default (2B)
+                               ; default body:
+b8 63 00                       ax = 99
+eb 04                          jmp → epi
+                               ; UNREACHABLE post-switch:
+33 c0                          ax = 0
+eb 00 8b e5 5d c3              epilogue
+```
+
+Findings:
+- **Switch with only `default:` skips dispatch entirely** — no
+  load of the switch expression, no `cmp`, no test. Just `jmp` to
+  the default body.
+- The 2-byte `eb 00` (default-position jmp) here is the only
+  remnant of the dispatch logic — and it's the standard "go to
+  next instruction" jmp BCC always emits.
+- This is the cleanest "always execute" case: dispatch is fully
+  elided because no labeled case can match (none exist).
+- The post-switch code (`return 0`) is unreachable but emitted —
+  consistent with no-DCE pattern.
+

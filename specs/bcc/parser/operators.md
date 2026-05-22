@@ -914,3 +914,54 @@ Findings:
 - Compare to using it in an if condition (`if (x > y) ...`) which
   doesn't need to materialize the boolean — just branches directly.
 
+
+## Ternary as variable initializer — same shape as ternary-in-assignment
+
+Fixture `2719-ternary-in-init-obj`:
+
+```c
+int m = a > b ? a : b;
+return m;
+```
+
+```
+4c 4c                          dec sp twice (m)
+56 57                          push si, di
+8b 76 04 8b 7e 06              load a, b
+3b f7                          cmp si, di
+7e 04 8b c6 eb 02 8b c7        ternary arms via AX
+89 46 fe                       m = ax (JOIN store)
+8b 46 fe                       return m
+```
+
+Findings:
+- `int m = cond ? a : b;` compiles **identically to `int m;
+  m = cond ? a : b;`** — declaration-with-init is sugar.
+- Both arms put result in AX, JOIN merges, store to m.
+- Confirms ternary-as-expression uses AX as universal carrier.
+
+## `x ^= 0xFFFF` is NOT folded to `~x`
+
+Fixture `2722-xor-assign-imm-obj`:
+
+```c
+int x = 0xAAAA;
+x ^= 0xFFFF;
+return x;
+```
+
+```
+be aa aa                       mov si, 0xAAAA
+81 f6 ff ff                    xor si, 0xFFFF    ; xor imm16 (4B)
+8b c6                          mov ax, x
+```
+
+Findings:
+- `x ^= 0xFFFF` emits **`xor reg, imm16`** (4 bytes), NOT `not
+  reg` (which would be 2 bytes and semantically equivalent).
+- BCC does NOT fold `^ 0xFFFF` to `~` — source form is preserved.
+- Compare to `~x` (`2632`) which DOES use `not ax` (2 bytes).
+- For full-mask XOR with the all-1s constant, **using `~x`
+  instead of `^= 0xFFFF` saves 2 bytes** at the source-form level.
+- BCC's source-form sensitivity: same semantics, different bytes.
+

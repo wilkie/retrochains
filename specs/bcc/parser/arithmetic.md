@@ -2045,3 +2045,36 @@ Findings:
   is 3 bytes. So `a + b + c + d` would be 4 × 3 = 12 bytes for
   the additions.
 
+
+## `x * 2` — STRENGTH REDUCTION to `shl ax, 1`
+
+Fixture `2717-fn-with-local-obj`:
+
+```c
+int compute(void) {
+  int t = 42;
+  return t * 2;
+}
+```
+
+```
+55 8b ec 4c 4c                 prologue + 2B local
+c7 46 fe 2a 00                 t = 42
+8b 46 fe                       mov ax, t
+d1 e0                          shl ax, 1         ; *2 → STRENGTH REDUCTION
+eb 00 8b e5 5d c3              epilogue
+```
+
+Findings:
+- **`x * 2` uses `shl ax, 1`** (2 bytes) — NOT `mov dx, 2; imul dx`
+  (5 bytes). BCC has a strength-reduction peephole for multiply
+  by power of 2.
+- Saves **3 bytes** vs the generic imul form.
+- Likely the rule is "multiply by 2^N → N shifts" (within the N≤3
+  unroll threshold). To probe `*4`, `*8`.
+- Compare to `* 7` (`2604`) which uses the full imul. Non-pow-2
+  constants go through imul.
+- This **contradicts an earlier claim** that BCC never does
+  multiplication strength reduction. The mistake was missing `*2`
+  — only non-pow-2 constants force imul.
+

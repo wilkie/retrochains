@@ -2714,3 +2714,34 @@ Findings:
   bytes, field bytes in declaration order.
 - Const subscript folds to a single moffs16 load.
 
+
+## Field at ODD offset — `struct { char; int; }` packs to 3 bytes
+
+Fixture `2718-struct-odd-offset-obj`:
+
+```c
+struct S { char tag; int value; };
+struct S s;
+s.tag = 'A';
+s.value = 1000;
+return s.value;
+```
+
+```
+55 8b ec                       prologue
+c6 06 00 00 41                 [_s + 0] = 'A'      ; s.tag byte (5B)
+c7 06 01 00 e8 03              [_s + 1] = 1000     ; s.value (UNALIGNED word, 6B)
+a1 01 00                       mov ax, [_s + 1]    ; read s.value
+eb 00 5d c3                    epilogue
+```
+
+Findings:
+- `sizeof(struct S) = 3` bytes (1 + 2). Fields PACKED tightly,
+  no alignment padding inserted by BCC.
+- `s.value` (int field) at struct offset 1 — **UNALIGNED word
+  access** at odd address. The 8086 handles this fine (2 byte
+  cycles instead of 1, but no fault).
+- Byte stores use `c6` opcode (mov mem,imm8); word stores use
+  `c7` opcode (mov mem,imm16). Both at moffs16 form (`06`).
+- Word loads via `a1 disp16` work regardless of address alignment.
+

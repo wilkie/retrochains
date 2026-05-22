@@ -4963,3 +4963,33 @@ Findings:
 | `int *`      | shl ×1    | 11B (`mov + shl + push + mov + pop + add`) |
 | `long *`     | shl ×2    | likely 13B (probe) |
 
+
+## `**pp` read — 3-load chain (8-byte body)
+
+Fixture `2721-double-deref-read-obj`:
+
+```c
+int peek(int **pp) {
+  return **pp;
+}
+```
+
+```
+55 8b ec 56                    prologue + push si
+8b 76 04                       mov si, pp        (3B)
+8b 1c                          mov bx, [si]      ; *pp (2B no-disp)
+8b 07                          mov ax, [bx]      ; **pp (2B no-disp)
+eb 00 5e 5d c3                 epilogue
+```
+
+Findings:
+- `**pp` read = **3-load chain**: pp → si → bx → ax. Total 7
+  bytes for the expression body.
+- Each deref step is 2 bytes (`mov reg, [reg]` no-disp form).
+- Compare to **`**pp = v` write** (`2680`) which is 5 instructions
+  including the value load — both forms are tight.
+- Compare to single-deref `*p` read which is 2 fewer bytes (no
+  intermediate `mov bx, [si]` step).
+- Generalizes: each `*` adds one `mov reg, [reg]` step on the read
+  side.
+
