@@ -1264,3 +1264,44 @@ search-table). Threshold between search-table and dense is density: the
 2337 fixture had 10 contiguous cases and chose dense; this one has 4
 non-contiguous cases (range 1..100) and chose search. Density >50% of
 the range may be the rule.
+
+## Dense jump table — threshold revised (fixture `2359`)
+
+Earlier finding from fixture `2337` set the dense-jump-table threshold
+at ≥8 contiguous cases. Fixture `2359` refines this: BCC chose the
+dense indexed strategy for **just 4 cases** (`case 1: case 2: case 3:`
+sharing a body, plus a separate `case 4:`). So the threshold is
+**≥4 cases when fully contiguous**.
+
+Fall-through (`case 1: case 2: case 3:` with no `break` between them)
+materializes as **identical jump-table entries** pointing to the same
+body offset:
+
+```
+4b              ; dec bx           ← normalize: case base = 1, so bx = x - 1
+83 fb 03        ; cmp bx, 3        ← (4 cases - 1)
+77 11           ; ja default
+d1 e3           ; shl bx, 1
+2e ff a7 30 00  ; jmp cs:[bx + 0x30]
+
+; jump table (4 entries):
+1d 00 1d 00 1d 00 22 00   ; case1, case2, case3 → 0x1d; case4 → 0x22
+```
+
+The first 3 entries are duplicates. So `case 1: case 2: case 3:` with
+no break is implemented entirely at jump-table level — no extra code
+in the body for fall-through, just 3 duplicate table entries pointing
+at the same code.
+
+The `dec bx` (`4b`, single byte) is the optimal form of "subtract base
+1" when the case range starts at 1. Larger bases use `83 eb K` (sub
+bx, K imm8) or `81 eb K` (sub bx, K imm16). Confirms case-base
+normalization is independent of the table itself.
+
+**Revised switch dispatch table**:
+
+| Strategy | Trigger | Codegen |
+|---|---|---|
+| Linear chain | ≤3 cases | per-case `cmp ax, K / je body` |
+| Search table | ≥4 sparse cases (gaps too wide for dense) | value+offset tables in CS, `loop` scan + indirect `jmp [bx+disp]` |
+| **Dense jump table** | **≥4 contiguous cases** | normalize base (`dec bx` / `sub bx, K`); `shl bx, 1`; `2e ff a7 disp16` direct CS-indirect jmp |

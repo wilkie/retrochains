@@ -537,3 +537,57 @@ The two reads (`n = n + 1` and `return n`) are NOT fused: BCC emits
 two separate `a1 NN NN` loads. This is the same lack-of-CSE we see
 for ordinary globals — no read-after-write tracking. Confirms static
 locals are globals-with-a-different-scope-rule for codegen purposes.
+
+## `static` at file scope — function not in `PUBDEF` (fixture `2358`)
+
+`static int helper(int x);` at file scope is internally linked. The
+function body is still emitted in `_TEXT`, but the **`PUBDEF` record
+omits its symbol** — only callers within the same translation unit can
+find it, and the linker has no name to resolve.
+
+Comparing OBJ symbol tables:
+- Ordinary `int helper(int x)`: `PUBDEF` lists `_main` AND `_helper`
+- `static int helper(int x)`: `PUBDEF` lists ONLY `_main`
+
+The call site within `main()` still uses a near `call` with a
+file-relative offset (`e8 e7 ff` = call -25), so the static function
+is reachable from within the file but invisible to the linker. This
+is the standard internal-linkage encoding: emit body, suppress
+`PUBDEF`.
+
+## K&R-style function declaration — byte-identical to ANSI (fixture `2360`)
+
+```c
+int add3(a, b, c)
+int a;
+int b;
+int c;
+{ ... }
+```
+
+BCC's parser accepts both K&R and ANSI prototype syntax, and the two
+forms produce **byte-identical OBJ output**: same argument layout
+(`[bp+4]`, `[bp+6]`, `[bp+8]`), same R-to-L push order, same cdecl
+cleanup. The K&R style is purely a syntactic alternative — the
+trailing `int a; int b; int c;` declaration block fills in the types
+that would normally be in the parameter list.
+
+A 3-arg call cleans up with `add sp, 6` (`83 c4 06`) rather than three
+`pop cx` (`59 59 59`), confirming the cleanup-form threshold: >4
+bytes uses `add sp, imm8`. (Two args = 4 bytes = `add sp, 4` per the
+earlier-documented `0x83 0xc4 0x04` form; three args = 6 bytes = same
+opcode with imm8=6.)
+
+## Empty function body — minimal prologue/epilogue (fixture `2357`)
+
+`void noop(void) {}` still emits a full prologue and epilogue:
+
+```
+55 8b ec                ; push bp; mov bp, sp  (prologue — even with no locals)
+5d c3                   ; pop bp; ret          (epilogue)
+```
+
+Total 5 bytes. BCC does not elide the prologue/epilogue for empty
+bodies — the `mov bp, sp` instruction always runs even though no
+[bp+offset] addressing follows. Confirms function entry/exit is
+unconditional, not driven by whether the body actually uses BP.

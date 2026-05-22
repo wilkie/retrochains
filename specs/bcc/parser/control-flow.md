@@ -2402,3 +2402,63 @@ sub-expressions across the `?` / `:` boundaries.
 
 Also confirms the `dec sp / dec sp` small-frame heuristic for a single
 2-byte local (`m`) — `4c 4c` is shorter than `83 ec 02`.
+
+## `do { ... } while (--n);` — dec+jne combined (fixture `2361`)
+
+When the loop condition is exactly the side-effect expression `--n`,
+BCC fuses the decrement with the test into a single `dec / jne back`
+pair. No separate `cmp` is emitted — the `dec` instruction sets flags
+already.
+
+```c
+do {
+  sum = sum + n;
+} while (--n);
+```
+
+```
+be 05 00                ; n = 5 (SI — enregistered)
+33 ff                   ; sum = 0 (DI — enregistered)
+; loop:
+8b c7 03 c6 8b f8       ; sum += n
+4e                      ; dec si        ← --n  (sets ZF)
+75 f7                   ; jne loop (-9) ← test the dec result
+```
+
+So when both source pattern AND register live-state match, BCC
+collapses to the minimum 3-byte loop tail: `dec / jne disp8`. This is
+the optimal countdown-loop encoding. Contrast with explicit
+`while (i < n)` which needs `cmp / jl` after each modification.
+
+## Short-circuit `&&` in a loop condition — separate cmp+jcc per operand (fixture `2362`)
+
+`while (*p == *q && *p)` is the strcmp-walk idiom. Each `&&` operand
+gets its own `cmp + jcc` — no boolean materialization in this
+position (no need to land in AX, since the only consumer is a branch).
+
+```
+; test (after the first-pass jmp-to-test):
+8a 04                   ; mov al, [si]    ← *p
+3a 05                   ; cmp al, [di]    ← *q  (byte cmp, no widening)
+75 05                   ; jne exit        ← short-circuit: if *p != *q, exit
+80 3c 00                ; cmp byte ptr [si], 0
+75 f3                   ; jne loop_body   ← if *p != 0, continue
+                        ; fallthrough to exit
+```
+
+Two notes:
+
+1. `*p == *q` for char pointers uses **byte-width compare**
+   (`8a 04 / 3a 05`) — no `cbw` widening to int. The comparison
+   happens entirely in AL.
+2. **`&&` short-circuit emits no `bool` value** in this branch-only
+   context. The `cmp` sets flags directly for the `jcc` — no
+   intermediate `mov ax, 0/1`. This is the same compare-as-branch
+   path used by `if (a == b)`.
+
+The final `(int)(*p - *q)` (after the loop exits) DOES widen via
+`cbw`, since the result needs to land in AX as an int. So char-vs-int
+contexts are decided per-expression, not globally.
+
+The `while` loop again uses the jmp-to-test-first template: skip the
+increment block on first iteration via `eb 02`.
