@@ -2488,3 +2488,33 @@ Two short jumps with inverted condition, same as any `if (cond) goto
 end;`. No special "return statement" opcode — early returns reuse
 the `goto end` lowering. Confirms `return;` and `goto epilogue;` are
 the same construct at codegen time.
+
+## Multiple labels on one statement — same address (fixture `2373`)
+
+`top: mid: end: x = x + 1;` — three labels stacked on the same
+statement. All three resolve to the **same code address** (the start
+of `x = x + 1`'s emitted code). No padding, no nop between them.
+
+```c
+goto mid;
+top:
+mid:
+end:
+  x = x + 1;
+```
+
+```
+eb 00                   ; goto mid  ← jmp +0 (no-op since target is the next byte)
+8b c6 40 8b f0          ; x = x + 1 (top: mid: end: all point here)
+```
+
+Two consequences:
+
+1. Labels carry zero code-size cost — they're pure name-to-position
+   mappings.
+2. A `goto label` whose target is the immediately following
+   instruction collapses to `eb 00` (jmp +0). BCC doesn't peephole
+   this away.
+
+Confirms labels are resolved purely positionally at codegen and
+don't generate any per-label instruction.

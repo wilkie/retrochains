@@ -378,3 +378,26 @@ Probe replaced with the char-compound-OR variant.
   newline-separated form (3-int stack frame `83 ec 06`, three
   `mov [bp-N], K` stores, then add chain). Confirms line breaks
   carry no semantic weight in BCC's lexer.
+
+## Free passes (batch 670)
+
+- `2369` — nested switches each with 2 cases (`switch (x) { case 1:
+  switch (y) { case 1:... } } `): both switches under the
+  4-case-contiguous dense threshold, so each uses the **linear
+  cmp/je chain**. Each switch's `break` targets the END of THAT
+  switch (correctly handles nested break propagation via separate
+  exit labels).
+- `2371` — `int sum(struct Pair *p) { return p->a + p->b; }`
+  (passing struct via pointer instead of by value): callee
+  enregisters `p` into SI; `p->a` = `mov ax, [si]`, `p->b` =
+  `add ax, [si+2]`. Caller uses `lea ax, [bp-4] / push ax` to pass
+  the address. (Avoiding by-value struct args since BCC hangs
+  capture on `int sum(struct Pair p)` in our environment — passing
+  small structs by value via DX:AX is documented elsewhere but the
+  BCC -c capture path appears flaky there.)
+- `2372` — `struct Buf { int len; char data[4]; }` (struct
+  combining int and char-array members): layout is `len` at offset
+  0 (2 bytes), `data[0..3]` at offsets 2..5. Total 6-byte struct
+  fits in a 6-byte stack frame. Byte access uses
+  `mov al, [bp+disp]` then `cbw` for int contexts; word access for
+  `len` uses ordinary `mov ax, [bp+disp]`.

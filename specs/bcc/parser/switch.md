@@ -1305,3 +1305,63 @@ normalization is independent of the table itself.
 | Linear chain | ≤3 cases | per-case `cmp ax, K / je body` |
 | Search table | ≥4 sparse cases (gaps too wide for dense) | value+offset tables in CS, `loop` scan + indirect `jmp [bx+disp]` |
 | **Dense jump table** | **≥4 contiguous cases** | normalize base (`dec bx` / `sub bx, K`); `shl bx, 1`; `2e ff a7 disp16` direct CS-indirect jmp |
+
+## Default-only switch — dispatch elided (fixture `2370`)
+
+`switch (x) { default: r = 99; break; }` (no explicit cases) skips
+the dispatch entirely. The scrutinee is still loaded but no `cmp`
+sequence follows — the default body runs unconditionally.
+
+```
+8b 46 fe                ; mov ax, [x]   ← scrutinee load (still happens)
+                        ; (no cmp/je sequence — no explicit cases)
+eb 00                   ; jmp +0        ← no-op stand-in
+be 63 00                ; mov si, 99    ← default body
+eb 00                   ; jmp end (break)
+```
+
+The `eb 00` is the residual jump that any switch generates between
+dispatch and body block — here it's a no-op since dispatch produced
+nothing. Confirms BCC's switch compiler doesn't special-case the
+zero-case form, just emits an empty dispatch.
+
+## `default:` source position vs. dispatch order (fixture `2374`)
+
+Placing `default:` BEFORE the explicit cases:
+
+```c
+switch (x) {
+  default: r = 99; break;
+  case 1: r = 11; break;
+  case 2: r = 22; break;
+}
+```
+
+BCC dispatches like this:
+
+```
+; Dispatch (in case-source order excluding default):
+3d 01 00 / 74 0c        ; cmp ax, 1 / je case_1
+3d 02 00 / 74 0c        ; cmp ax, 2 / je case_2
+eb 00                   ; (jmp +0 — fall through to default body)
+; default body (first in code, matching source order):
+be 63 00 / eb 0a        ; mov si, 99; jmp end (skip explicit cases)
+; case_1 body:
+be 0b 00 / eb 05        ; mov si, 11; jmp end
+; case_2 body:
+be 16 00 / eb 00        ; mov si, 22; jmp end
+; end
+```
+
+So **`default:`'s source position affects CODE LAYOUT** (the
+default body is emitted first since it appeared first in source)
+**but NOT DISPATCH ORDER** (all explicit `case` comparisons happen
+first, default is the fallthrough). After the dispatch's last
+`cmp/je` falls through, the default body runs; each explicit case
+then has its own `jmp end` to skip over any subsequent bodies.
+
+This proves BCC separates two concerns: case dispatch order is
+fixed (explicit cases first, default last) while body emission
+follows source order. The skip-jumps between bodies handle
+correctness regardless of whether default lives in the middle or
+the top of the case bodies.
