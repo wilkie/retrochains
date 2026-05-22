@@ -679,3 +679,30 @@ Probe replaced with the char-compound-OR variant.
   array filled via sequential assignment — not init list).
   Standard `mov [bp+disp], reg` for each store. No init-list
   short-circuit since assignments are statements, not initializers.
+
+## Free passes (batch 684)
+
+- `2453` — `int arr[5] = {100, 200};` (global array with explicit
+  size > number of initializers): `_DATA` reserves 10 bytes; the 2
+  explicit values plus 3 LIDATA zero-fills produce the standard
+  partial-init layout. Same pattern as fixture `2366` but at file
+  scope.
+- `2454` — `int sum(int a[], int n)` (function with array param of
+  unspecified size + count param): `int a[]` is byte-identical to
+  `int *a` — the missing size is informational only. Standard loop
+  with `a[i]` lowering to `[si + 2*i]` via shift+add.
+- `2455` — `c = (char)i;` (int-to-char narrowing cast): emits
+  `mov al, [bp-2]` (LOW byte of i) then `mov [c], al`. The cast
+  discards the high byte by simply choosing the byte-width load
+  instruction. No mask or truncation work needed.
+- `2456` — non-void function without a `return` statement: AX
+  contains whatever was last there (the local store via
+  `mov [bp-2], 42` doesn't touch AX, so it returns whatever the
+  caller left). Standard UB — re-confirms the documented "missing
+  return = AX undefined" behavior.
+- `2457` — `int x = ~0;` (bitwise NOT of zero): folds at parse to
+  `0xFFFF` = -1. Emitted as `mov [bp-2], 0xFFFF`. Same constant-
+  fold path as other `~K` cases.
+- `2458` — `int x = compute();` (local initialized from a function
+  call): standard `call / mov [bp-N], ax` pattern. The initializer
+  context lowers identically to `int x; x = compute();`.
