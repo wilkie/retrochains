@@ -2789,3 +2789,94 @@ Findings:
 - Signed-vs-unsigned long load is IDENTICAL bytes — the
   type interpretation matters only for ops that read it.
 
+
+## Signed `long >> 16` — byte-swap fold (4 bytes total!)
+
+Fixture `2795-long-shr-16-obj`:
+
+```c
+long top(long v) {
+  return v >> 16;
+}
+```
+
+```
+8b 46 06                       mov ax, v.HIGH   ; new low = old high
+99                             cwd              ; sign-extend → new high
+```
+
+Findings:
+- `v >> 16` for signed long compiles to **`mov ax, [bp+6]; cwd`**
+  — just 4 bytes total!
+- The semantics: shifting a 32-bit value right by 16 makes the new
+  LOW word = the old HIGH word; the new HIGH word = the sign bit
+  of the old HIGH word (replicated by `cwd`).
+- For unsigned, BCC would emit `mov ax, [bp+6]; xor dx, dx` (5B,
+  zero-fill instead of sign-fill).
+- Compare to `>> 2` (`2789`) which uses the 11-byte helper call.
+- **Lesson**: source-form choice matters — write `>> 16` for the
+  fast byte-swap fold; other shift amounts pay the helper cost.
+
+
+## Local `long arr[3]` with var-index access — BX-based address calc
+
+Fixture `2798-local-long-arr-obj`:
+
+```c
+long arr[3];
+arr[0] = 100L; arr[1] = 200L; arr[2] = 300L;
+return arr[i];
+```
+
+```
+83 ec 0c                       sub sp, 12 (3 longs)
+                               ; per-element init (HIGH first, then LOW):
+c7 46 f6 00 00                 arr[0].HIGH = 0
+c7 46 f4 64 00                 arr[0].LOW = 100
+...
+                               ; var-index access:
+8b 5e 04                       mov bx, i
+d1 e3 d1 e3                    shl bx, 1 × 2     ; i * 4 (sizeof(long))
+8d 46 f4                       lea ax, [bp-12]   ; &arr[0]
+03 d8                          add bx, ax        ; bx = &arr[i]
+8b 57 02                       mov dx, [bx + 2]  ; HIGH word
+8b 07                          mov ax, [bx]      ; LOW word
+```
+
+Findings:
+- Long-array variable index uses **BX as the address register**,
+  computed via `mov + shl×2 + lea + add` (10 bytes).
+- Init order per element: **HIGH first, then LOW** (offset+2, then
+  offset+0). Same as global long arrays (`2782`).
+- Once BX = &arr[i], the load is the standard 5-byte HIGH+LOW pair.
+
+
+## `unsigned long a * b` — `N_LXMUL@` with fast-call regs (CX:BX, DX:AX)
+
+Fixture `2799-ulong-mul-obj`:
+
+```c
+unsigned long product(unsigned long a, unsigned long b) {
+  return a * b;
+}
+```
+
+```
+8b 4e 06                       mov cx, a.HIGH (= [bp+6])
+8b 5e 04                       mov bx, a.LOW  (= [bp+4])
+8b 56 0a                       mov dx, b.HIGH (= [bp+10])
+8b 46 08                       mov ax, b.LOW  (= [bp+8])
+e8 00 00                       call N_LXMUL@   (FIXUPP)
+```
+
+Findings:
+- Long multiplication uses **`N_LXMUL@` helper with FAST-CALL**:
+  - **CX:BX** = first operand (high:low)
+  - **DX:AX** = second operand (high:low)
+  - Return: DX:AX
+- Args loaded directly into registers — no stack push.
+- Same helper for signed and unsigned (since multiply low 32 bits
+  is the same regardless of signedness).
+- Compare to long divide (`N_LDIV@`) which uses STACK args
+  (different convention per helper).
+

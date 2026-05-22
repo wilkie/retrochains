@@ -5262,3 +5262,81 @@ Findings:
   3-shift unroll (6B). Strength reduction follows the same
   unroll/cl threshold as explicit shifts.
 
+
+## `uchar buf[i]` (var index) — `mov al, [si + disp16]` + `mov ah, 0`
+
+Fixture `2796-uchar-arr-var-idx-obj`:
+
+```c
+unsigned char buf[10];
+int fetch(int i) {
+  return buf[i];
+}
+```
+
+```
+8b 76 04                       mov si, i
+8a 84 00 00                    mov al, [si + _buf]   ; uchar byte load (4B)
+b4 00                          mov ah, 0             ; zero-extend (unsigned)
+```
+
+Findings:
+- Uchar array variable-index uses **`mov al, [si + disp16]`** = 4B
+  via ModR/M `84 disp16` (mod 10, r/m 100 = `[si + disp16]`).
+- No shift scaling because sizeof(char) = 1.
+- **`mov ah, 0` (2B)** for unsigned zero-extension — NOT `cbw`
+  (which would be signed). 1 byte more than cbw but correct.
+- Compare to signed `char` (`2538`): would use `cbw` (1B) instead.
+
+
+## Local pointer `int *p = 0;` — `c7 46 disp8 0 0` (just like int = 0)
+
+Fixture `2797-local-ptr-init-zero-obj`:
+
+```c
+int *p;
+p = 0;
+if (p == 0) return 1;
+return 0;
+```
+
+```
+c7 46 fe 00 00                 p = 0 (5B mem-imm store)
+83 7e fe 00                    cmp word [bp-2], 0
+75 05                          jne → SKIP
+```
+
+Findings:
+- `p = 0` for a pointer = mem-imm store of `0x0000`. Same shape
+  as `int x = 0`.
+- NULL is just 0 in BCC (small model). No special encoding.
+- `if (p == 0)` uses the same single-use direct cmp form as int.
+
+
+## `if (data)` for global array — NOT optimized as known-non-null
+
+Fixture `2800-if-arr-name-obj`:
+
+```c
+int data[10];
+int probe(void) {
+  if (data) return 1;
+  return 0;
+}
+```
+
+```
+b8 00 00                       mov ax, &_data (FIXUPP)
+0b c0                          or ax, ax
+74 05                          je → ZERO
+```
+
+Findings:
+- `if (data)` for an array name = decays to pointer (= address
+  of `data[0]`), which is always non-null at runtime.
+- BCC **does NOT optimize** "known non-null" — emits the full test:
+  `mov ax, &_data; or ax, ax; je`.
+- 7 bytes wasted for a test that will always succeed.
+- The non-DCE pattern strikes again: BCC trusts the source code's
+  intent rather than folding away semantically-trivial tests.
+
