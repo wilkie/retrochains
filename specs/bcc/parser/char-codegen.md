@@ -1470,3 +1470,26 @@ Findings:
   3B). Char and int identity are the same size — only the opcode
   differs (8a for byte, 8b for word).
 
+
+## `signed char` parameter — byte-identical to plain `char`
+
+Fixture `2838-signed-char-arg-obj`:
+
+```c
+int promote(signed char c) {
+  return c;
+}
+```
+
+```
+8a 46 04                       mov al, c
+98                             cbw
+```
+
+Findings:
+- `signed char` is **byte-identical** to plain `char`. BCC's
+  default `char` is signed.
+- The `signed` qualifier on char is a no-op at codegen.
+- Compare to `unsigned char` which would emit `mov ah, 0` instead
+  of `cbw`.
+

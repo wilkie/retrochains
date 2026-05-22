@@ -5491,3 +5491,55 @@ Findings:
 - Reusing bx is a peephole: avoids `mov si, [_pp]; mov bx, [si]`
   (5B) for the first two steps.
 
+
+## `arr[++i]` — preinc folds into index expression
+
+Fixture `2837-arr-preinc-idx-obj`:
+
+```c
+int arr[10];
+int peek(int i) {
+  return arr[++i];
+}
+```
+
+```
+8b 76 04                       mov si, i
+46                             inc si             ; ++i (preinc)
+8b de                          mov bx, si         ; copy to bx
+d1 e3                          shl bx, 1          ; scale
+8b 87 00 00                    mov ax, [bx + _arr] (FIXUPP)
+```
+
+Findings:
+- `arr[++i]` evaluates ++i first (pre-increment), then uses the
+  new value as the index.
+- 7 bytes for the expression (1B inc + 2B mov + 2B shl + 4B load).
+- Same shape as `arr[i]` (var index) plus a leading inc.
+- ModR/M `87 00 00` for `[bx + disp16]` with FIXUPP'd disp.
+
+## `struct{int} items[i]` (var index, sizeof=2) — `shl bx, 1` scale
+
+Fixture `2841-struct-arr-var-idx-obj`:
+
+```c
+struct Item { int code; };
+struct Item items[5];
+int fetch(int i) {
+  return items[i].code;
+}
+```
+
+```
+8b 5e 04                       mov bx, i
+d1 e3                          shl bx, 1     ; scale by sizeof(struct)
+8b 87 00 00                    mov ax, [bx + _items + 0]
+```
+
+Findings:
+- Struct array variable index scales by `sizeof(struct)` via shl
+  (for power-of-2 sizes).
+- `.code` at offset 0 means no additional disp on the base load.
+- For non-zero field offsets, would emit `mov ax, [bx + _items +
+  offset]` — same load, different disp.
+

@@ -961,3 +961,26 @@ eb 00 5d c3                    epilogue
 `void *` byte-identical to any other pointer return: 2-byte pointer
 in AX. Type erasure is purely at the C type system level.
 
+
+## `(char *)int_val` cast — no-op (pointer = 2-byte int in small model)
+
+Fixture `2840-int-to-ptr-cast-obj`:
+
+```c
+char *as_ptr(int v) {
+  return (char *)v;
+}
+```
+
+```
+8b 46 04                       mov ax, v    (just load, no cast bytes)
+```
+
+Findings:
+- `(char *)int` cast = NO bytes emitted. Pointer and int are both
+  2 bytes in small model; bit pattern is preserved.
+- Same goes for the inverse `(int)ptr` (already documented).
+- Pointer ↔ int casts are codegen-free in small model.
+- This is the "raw pointer arithmetic" idiom — useful for DOS
+  programs that need to construct specific memory addresses.
+

@@ -1592,3 +1592,27 @@ Findings:
   both cases — so the garbage is harmless, but cbw is more
   "correct."
 
+
+## Calling through fn-ptr PARAMETER — `ff 56 disp8` (3 bytes)
+
+Fixture `2839-fn-takes-fnptr-obj`:
+
+```c
+int invoke(int (*op)(int), int v) {
+  return op(v);
+}
+```
+
+```
+ff 76 06                       push v ([bp+6])
+ff 56 04                       call word ptr [bp+4]   ; bp-rel indirect
+59                             pop cx (1-arg cleanup)
+```
+
+Findings:
+- Indirect call through a fn-ptr **parameter** uses `ff 56 disp8`
+  (3 bytes) — 1 byte smaller than calling through a global fn-ptr
+  (`ff 16 disp16`, 4 bytes).
+- Saves a byte due to bp-relative disp8 vs absolute disp16.
+- ModR/M `56 04` = mod 01, op-ext 010 (call near), r/m 110 ([bp+disp8]).
+

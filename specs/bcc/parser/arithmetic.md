@@ -2432,3 +2432,31 @@ Findings:
   uses cl-form. (Even at N=3 where unroll is bigger, BCC stays
   with unroll for cycle reasons.)
 
+
+## `int + unsigned int` — byte-identical to `int + int`
+
+Fixture `2842-mixed-sign-add-obj`:
+
+```c
+int mix(int a, unsigned int b) {
+  return (int)(a + b);
+}
+```
+
+```
+8b 46 04 03 46 06              mov ax, a; add ax, b
+```
+
+Findings:
+- Signed + unsigned int addition is **byte-identical** to int +
+  int (`2710`). At codegen, signedness doesn't matter for add.
+- The C "usual arithmetic conversions" rule promotes to unsigned
+  for mixed signed/unsigned int, but the bit-level operation is
+  the same — both produce the correct low-16-bit result.
+- Same observation for sub/xor/or/and/mul (low bits only).
+- Signedness DOES matter for:
+  - Compare: `jl/jge` (signed) vs `jb/jae` (unsigned)
+  - Shift right: `sar` (signed) vs `shr` (unsigned)
+  - Divide: `idiv` (signed) vs `div` (unsigned)
+  - Promotion: `cbw` (signed) vs `mov ah, 0` (unsigned)
+
