@@ -789,3 +789,25 @@ Probe replaced with the char-compound-OR variant.
   ternary branches): each branch evaluates its own comma sequence
   for side effect then provides the final value to AX. Standard
   ternary template + standard comma — composed cleanly.
+
+## Free passes (batch 688)
+
+- `2477` — `do { body; } while (0);` (do-while with constant-false
+  condition): body runs exactly once; the test+back-jump are
+  ENTIRELY ELIDED. Just body + epilogue. Re-confirms the
+  while(0)-elision peephole.
+- `2479` — `r = (a == b) == c;` (chained equality): first `a == b`
+  produces bool 0/1 in AX, then compared against c via standard
+  `cmp/jcc/mov 1/jmp/xor` template. No special chain folding.
+- `2480` — mixed small + medium frame (106-byte total): all locals
+  fit in disp8 range (max negative -106). Uses `83 ec 6a` for
+  `sub sp, 106`; all accesses use disp8 ModR/M. Re-confirms the
+  >127 threshold for tipping into disp16 [[large-frame-disp16]].
+- `2481` — `x * 6` (non-power-of-2 mul): standard
+  `mov ax, x / mov dx, 6 / imul dx` (4 + 3 + 2 = 9 bytes including
+  the load). No LEA-based optimization since 8086 lacks the 32-bit
+  scaled-addressing modes.
+- `2482` — `struct Vec { int arr[3]; } v = {{10, 20, 30}};` (nested
+  brace init for array inside struct): laid out flat in `_DATA` as
+  3 word values. The inner braces are syntactic — same OBJ as
+  `{10, 20, 30}` without the nested braces.

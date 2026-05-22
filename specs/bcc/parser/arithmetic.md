@@ -1649,3 +1649,57 @@ during the parse-time evaluation, but the final result still narrows
 to the destination type at the store. So `0x12345678` as a 32-bit
 literal stored to int discards the high 16 bits (per long-to-int
 narrowing-cast rules documented elsewhere).
+
+## `!!x` — `!` applied twice, NOT collapsed to "is non-zero" (fixture `2478`)
+
+`r = !!x;` is a common idiom for "convert any non-zero value to 1".
+BCC emits the full `neg/sbb/inc` logical-NOT idiom **twice** — no
+peephole collapses the double-negation:
+
+```
+8b 46 fe                ; ax = x
+f7 d8                   ; neg ax           ← first !x
+1b c0                   ; sbb ax, ax
+40                      ; inc ax
+f7 d8                   ; neg ax           ← second !x  (same sequence)
+1b c0                   ; sbb ax, ax
+40                      ; inc ax
+89 46 fc                ; r = ax
+```
+
+Total: 12 bytes for `!!x` (= 2 × 6-byte `neg/sbb/inc`). A
+hypothetical peephole could collapse this to "is x non-zero, 0 or
+1" via:
+
+```
+; Hypothetical (not what BCC emits):
+8b 46 fe                ; ax = x
+f7 d8 1b c0 40          ; standard !x → produces 1 if x==0, else 0
+f7 d8 1b c0 40          ; ... and we'd still need a second one!
+```
+
+Wait — there's no shorter sequence on the 8086 that produces 0/1
+directly from "is non-zero" without a conditional branch. The
+neg/sbb/inc idiom IS the optimal branchless form. So actually
+`!!x` requires the double-application even on optimized compilers.
+
+The fixture confirms: BCC doesn't collapse `!!x` to just "test x
+and produce 0/1" via a different idiom — it always uses the
+canonical neg/sbb/inc twice.
+
+A semantically equivalent shorter form would be:
+
+```
+8b 46 fe                ; ax = x
+0b c0                   ; or ax, ax  (test if zero)
+75 03                   ; jne nonzero
+33 c0                   ; xor ax, ax
+eb 02                   ; jmp end
+                        ; nonzero:
+b8 01 00                ; mov ax, 1
+```
+
+= ~10 bytes with a branch. BCC's branchless 12-byte version is
+slightly larger but contains no branches — typical-case faster on
+8086 (no pipeline disruption on its 1-byte queue). Confirms BCC
+prefers branchless idioms even when slightly larger.
