@@ -2653,3 +2653,33 @@ node before codegen sees them.
 So the `(*pfn)(...)` idiom (common in K&R code) carries zero codegen
 cost — the leading `*` is purely syntactic noise from the compiler's
 perspective.
+
+## `continue` — jumps to test, not loop top (fixtures `2441`, `2446`)
+
+`continue` inside `while`/`do-while`/`for` jumps to the **test** (or
+the `update` clause for `for`), NOT back to the body-start. This
+means side effects in the loop's increment expression still execute
+on a `continue`.
+
+For `while (cond) { body; continue; rest }`:
+
+```
+                        ; loop_top:
+8b c6 40 8b f0          ; ... loop body (which has i = i + 1) ...
+83 fe 05                ; cmp si, 5      ← compare for continue cond
+75 02                   ; jne skip_continue
+eb 06                   ; jmp test       ← continue: jump to test
+                        ; skip_continue:
+8b c7 03 c6 8b f8       ; rest of body (sum += i)
+                        ; test (also continue target):
+83 fe 0a                ; cmp si, 10
+7c e9                   ; jl loop_top
+```
+
+For `do { body; continue; rest } while (cond)`, same pattern — the
+`continue` target is the test at the bottom, not the body top.
+
+So `continue` is structurally a **`jmp` forward to the test**, which
+allows any pending increment work (in for loops) or test to run.
+The control-flow lowering treats `continue` exactly like
+`if (cond) ; else { rest }` plus an unconditional jmp.

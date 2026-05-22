@@ -636,3 +636,27 @@ Probe replaced with the char-compound-OR variant.
   normalizes to `inc / inc` (2 bytes) since BCC prefers two `inc`
   over `add ax, 2`. Confirms the asymmetric small-add peephole
   (`+2 = inc inc` but `-2 = add ax, -2`, NOT `dec dec`).
+
+## Free passes (batch 682)
+
+- `2442` — `typedef int (*op_t)(int); op_t f = dbl;` (typedef for
+  function-pointer type): byte-identical to declaring `int (*f)
+  (int) = dbl;` directly. Typedef is parser-only — the alias
+  resolves to the same fn-ptr type at codegen.
+- `2443` — `x |= (1 << k);` with variable `k` (variable-shift bit
+  set): emits `b8 01 00 / mov cl, k / d3 e0 / or si, ax` — the
+  shift uses cl-form since `k` is runtime. Standard variable-shift
+  bit-set idiom (compare with [[x-and-not-shift-K-fixture-2426]]
+  for the constant-`k` fold).
+- `2444` — `a = 30000; b = 5000; return a + b;` (runtime int
+  overflow): values stored as 0x7530 and 0x1388; `add ax, [b]`
+  produces 0x88B8 (= -30536 signed). No overflow check or warning
+  — the hardware ADD wraps silently. Confirms [[int-overflow-wraps]]
+  applies to runtime arithmetic as well as compile-time fold.
+- `2445` — `int a, b, c = 7;` (multi-declaration where only the
+  last has an initializer): a, b reserved without init; c
+  initialized at decl. Stack layout assigns offsets in source
+  order: `a→[bp-2], b→[bp-4], c→[bp-6]`. Only `c`'s `mov [bp-6],
+  7` is emitted at decl-time; a and b get values later from the
+  assignment statements. Confirms per-declarator initializer
+  emission.
