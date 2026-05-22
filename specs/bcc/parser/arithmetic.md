@@ -2078,3 +2078,79 @@ Findings:
   multiplication strength reduction. The mistake was missing `*2`
   — only non-pow-2 constants force imul.
 
+
+## Multiply by power-of-2 — strength reduction follows shift threshold
+
+Fixtures `2723-mul-4`, `2724-mul-8`, `2725-mul-16`, `2727-umul-4`:
+
+| Source       | BCC emits                          | Bytes |
+|--------------|------------------------------------|-------|
+| `x * 2`      | `shl ax, 1`                        | 2B    |
+| `x * 4`      | `shl ax, 1; shl ax, 1`             | 4B    |
+| `x * 8`      | `shl ax, 1; shl ax, 1; shl ax, 1`  | 6B    |
+| `x * 16`     | `mov cl, 4; shl ax, cl`            | 4B    |
+| `x * 32`     | `mov cl, 5; shl ax, cl` (probable) | 4B    |
+
+Findings:
+- **Strength reduction for `*2^N`** follows the same unroll-vs-cl
+  threshold as explicit shifts (`<<`): unroll for N ≤ 3, switch to
+  `mov cl, N; shl ax, cl` at N ≥ 4.
+- **`*16` is BYTE-SHORTER than `*8`** (4B vs 6B) due to the
+  cl-form switch! Source choice between equivalent expressions
+  can change byte count.
+- Unsigned (`umul-4`) uses identical bytes — same `shl` is correct
+  for both signed and unsigned multiplication (low bits identical,
+  high bits discarded).
+- The "imul fallback" only kicks in for non-pow-2 constants.
+
+## `x * 3` (non-pow-2) — fallback to `mov dx, K; imul dx`
+
+Fixture `2726-mul-3-obj`:
+
+```c
+return x * 3;
+```
+
+```
+8b 46 fe                       mov ax, x
+ba 03 00                       mov dx, 3
+f7 ea                          imul dx
+```
+
+Findings:
+- Non-pow-2 multipliers use **full imul** (5 bytes: 3B mov + 2B imul).
+- BCC does NOT decompose `* 3` as `(x << 1) + x` (which would be
+  `mov bx, x; shl ax, 1; add ax, bx` = ~6 bytes — slightly larger
+  anyway). So imul wins.
+- The strength reduction is strict: ONLY power-of-2 multipliers
+  get the shift treatment.
+
+## `x * 0` — constant-folded to `xor ax, ax`
+
+Fixture `2728-mul-0-obj`:
+
+```c
+int x = 7;
+return x * 0;
+```
+
+```
+c7 46 fe 07 00                 x = 7
+33 c0                          xor ax, ax       ; result = 0
+```
+
+Findings:
+- `x * 0` is **fully constant-folded to 0** at compile time.
+  NO `imul`, NO shift — just `xor ax, ax` (2B) for the return.
+- BCC's constant evaluator is aggressive enough to catch
+  multiply-by-0 even when one operand is variable.
+- Likely similar for `x * 1` (identity → just the value of x).
+- Peephole hierarchy for multiplication:
+
+| pattern         | result                       |
+|-----------------|------------------------------|
+| `x * 0`         | constant-fold to 0           |
+| `x * 1`         | identity (probe)             |
+| `x * 2^N`       | shl strength reduction       |
+| `x * other`     | `mov dx, K; imul dx`         |
+
