@@ -4074,3 +4074,49 @@ Findings:
   no runtime cost — same byte sequence as `{1,2,3,4,5,6}` would
   produce.
 
+
+## `*p++` for char* — single `inc reg` (1 byte)
+
+Fixture `2557-char-ptr-postinc-obj`:
+
+```c
+char buf[5];
+int main(void) {
+  char *p;
+  char c;
+  p = buf;
+  c = *p++;
+  return c;
+}
+```
+
+```
+55 8b ec 4c 4c                 prologue + 2B local
+56                             push si
+be 00 00                       mov si, &buf (FIXUPP)
+8a 04                          mov al, [si]          ; *p (byte load)
+88 46 ff                       mov [bp-1], al        ; c = *p (byte at [bp-1])
+46                             inc si                ; p++ (sizeof char = 1)
+8a 46 ff                       mov al, c
+98                             cbw
+eb 00 5e 8b e5 5d c3           epilogue
+```
+
+Findings:
+- **`p++` for `char*` (sizeof=1) emits a SINGLE `inc reg` (1 byte)**.
+- Inc-vs-add table now complete:
+
+| sizeof | bytes for `p++`     | instruction(s)         |
+|--------|---------------------|------------------------|
+| 1      | 1B                  | `inc reg`              |
+| 2      | 2B                  | `inc reg; inc reg`     |
+| 4      | 3B                  | `add reg, 4`           |
+
+  Threshold: BCC uses inc-chain for delta ≤ 2, switches to `add reg, imm8`
+  at delta = 4. (delta = 3 to be probed.)
+- **Char local `c` is stored at `[bp-1]`** (odd-byte address), filling
+  the otherwise-padded slot of the 2-byte reserve. So 1-byte chars at
+  function scope DO use the odd half of the even-padded frame.
+- Byte store uses `88 46 ff` (`mov [bp-1], al`, opcode `88` = byte store).
+- Char return path: `mov al, c; cbw` for int-context return.
+

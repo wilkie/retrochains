@@ -1104,3 +1104,44 @@ Findings:
   Multiplication-by-2 would emit `shl ax, 1` instead. **Source-level
   rewriting matters** — BCC does NOT canonicalize x+x and x*2.
 
+
+## 8-arg call — 32 bytes of push setup, `add sp, 16` cleanup
+
+Fixture `2559-call-eight-args-obj`:
+
+```c
+int add8(int a, int b, int c, int d, int e, int f, int g, int h);
+int main(void) {
+  return add8(1, 2, 3, 4, 5, 6, 7, 8);
+}
+```
+
+```
+55 8b ec                       prologue
+b8 08 00 50                    push 8 (arg8)    ; first pushed (R-to-L)
+b8 07 00 50                    push 7
+b8 06 00 50                    push 6
+b8 05 00 50                    push 5
+b8 04 00 50                    push 4
+b8 03 00 50                    push 3
+b8 02 00 50                    push 2
+b8 01 00 50                    push 1 (arg1)    ; last pushed (next to call)
+e8 00 00                       call _add8 (FIXUPP)
+83 c4 10                       add sp, 16       ; cleanup 8 args × 2B
+eb 00 5d c3                    epilogue
+```
+
+Findings:
+- 8 args = 8 × 4 bytes per push (mov+push) = **32 bytes of arg-prep**.
+- **Cleanup: `add sp, imm8`** (3 bytes, `83 c4 imm8` — sign-extended).
+  Works for any cleanup ≤ 127 bytes (63 args).
+- For >127 bytes of args (>63 args), would switch to `add sp, imm16`
+  (`81 c4 imm16`, 4 bytes).
+- Per-call cleanup cost table:
+
+| arg count | cleanup form         | bytes |
+|-----------|----------------------|-------|
+| 1         | `pop cx`             | 1B    |
+| 2-63      | `add sp, imm8`       | 3B    |
+| 64+       | `add sp, imm16`      | 4B    |
+

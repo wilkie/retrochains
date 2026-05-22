@@ -1993,3 +1993,39 @@ Findings:
   with FIXUPP `_b` — confirms BCC computes the offset once at
   parse time per access.
 
+
+## Struct passed by pointer — `[si+disp8]` per field
+
+Fixture `2556-struct-ptr-arg-obj`:
+
+```c
+struct Big { int x; int y; int z; int w; };
+int sum(struct Big *p) {
+  return p->x + p->y + p->z + p->w;
+}
+```
+
+```
+55 8b ec                       prologue
+56                             push si
+8b 76 04                       mov si, p             ; p in si
+8b 04                          mov ax, [si]          ; p->x   offset 0
+03 44 02                       add ax, [si+2]        ; p->y   offset 2
+03 44 04                       add ax, [si+4]        ; p->z   offset 4
+03 44 06                       add ax, [si+6]        ; p->w   offset 6
+eb 00 5e 5d c3                 epilogue
+```
+
+Findings:
+- The idiomatic "pass struct by pointer" pattern: load pointer to si,
+  then access fields via `[si+disp8]` for each.
+- Compare to **pass struct by value**: pushing 16 bytes per call vs
+  pushing 2 bytes (the pointer). Always pointer is cheaper for
+  structs > 2-4 bytes.
+- `p->field` decodes to `[si + field-offset]` directly — no special
+  `->` codegen, just pointer-deref + offset arithmetic folded.
+- The AX-accumulator pattern flows through all 4 adds — first field
+  loaded with `mov`, then each subsequent with `add ax, [...]` using
+  direct memory source.
+- Total body for 4 field sum = 14 bytes (load + 3 adds + epi).
+

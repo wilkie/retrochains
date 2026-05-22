@@ -2159,3 +2159,41 @@ Findings:
   these two; BCC tracks signedness through the type system and picks
   the right widening at the cast site.
 
+
+## Global `long v = -1000000L` — 4 bytes little-endian two's complement
+
+Fixture `2560-long-neg-init-obj`:
+
+```c
+long v = -1000000L;
+int main(void) {
+  return (int)v;
+}
+```
+
+`_DATA` bytes for `_v`: `c0 bd f0 ff`  (= `0xFFF0BDC0` = -1000000)
+
+Main body:
+```
+55 8b ec                       prologue
+a1 00 00                       mov ax, [_v]      ; LOW word only
+eb 00 5d c3                    epilogue
+```
+
+Findings:
+- Negative long literal emits as **4 bytes little-endian two's-
+  complement** in `_DATA`. No special "negate at runtime" sequence —
+  fully constant-folded.
+- Bytes for `-1000000` (= 0xFFF0BDC0):
+  - byte 0 (LOW LOW):  c0
+  - byte 1 (LOW HIGH): bd
+  - byte 2 (HIGH LOW): f0
+  - byte 3 (HIGH HIGH): ff
+  Reading as two little-endian words: low word = 0xBDC0,
+  high word = 0xFFF0.
+- `(int)v` cast TRUNCATES to the low word: a single `mov ax, [_v]`
+  loads `0xBDC0` from offset 0. The high word at offset 2 is never
+  read.
+- This generalizes: any `(int)long_var` cast = moffs16 word load at
+  the long's BASE address (which holds the low word in little-endian).
+

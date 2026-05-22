@@ -567,3 +567,40 @@ Findings:
 - Postfix `i--` (to probe) likely uses a different shape: capture
   OLD value to a temp, then dec.
 
+
+## Postfix `i--` — `mov [v], reg` BEFORE the `dec`
+
+Fixture `2555-postdec-int-obj`:
+
+```c
+int i, v;
+i = 10;
+v = i--;
+return v + i;
+```
+
+```
+55 8b ec 4c 4c                 prologue + 2B local for v
+56                             push si              ; i in si
+be 0a 00                       mov si, 10
+89 76 fe                       mov [bp-2], si       ; v = i (OLD value FIRST)
+4e                             dec si               ; i-- AFTER store
+8b 46 fe                       mov ax, v
+03 c6                          add ax, si           ; v + i
+eb 00 5e 8b e5 5d c3           epilogue
+```
+
+Findings:
+- Postfix `i--` flips the order from prefix `--i` (`2554`):
+  - **Prefix**:  `dec si; mov [bp-2], si`  (modify, then store)
+  - **Postfix**: `mov [bp-2], si; dec si`  (store, then modify)
+- Same bytes total (4 bytes), same opcodes — just instruction ORDER
+  swapped. A clean, direct mapping from pre/post semantics to code
+  position.
+- Compare to the AX-accumulator form `v = i; i = i - 1;` which would
+  emit 3 instructions (mov ax,si; mov [v],ax; dec ax/mov si,ax style).
+  So BCC distinguishes:
+  - `v = i--` → direct dec
+  - `v = i; i = i - 1;` → AX-accumulator pattern (3 instr per modify)
+- The form-sensitivity from `2554` is symmetric for pre and post.
+

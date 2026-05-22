@@ -1031,3 +1031,52 @@ Findings:
 - The "hi\0" literal is 3 bytes in `_DATA`; the FIXUPP relocates
   the `be 00 00` immediate to point to it.
 
+
+## `char + char` — both promoted via cbw, push/pop stack spill
+
+Fixture `2558-char-add-char-obj`:
+
+```c
+int main(void) {
+  char a;
+  char b;
+  a = 10;
+  b = 20;
+  return a + b;
+}
+```
+
+```
+55 8b ec 4c 4c                 prologue + 2B local (2 chars in 2-byte slot)
+c6 46 ff 0a                    a = 10           ; byte store at [bp-1]
+c6 46 fe 14                    b = 20           ; byte store at [bp-2]
+8a 46 ff                       mov al, a
+98                             cbw              ; promote a
+50                             push ax          ; SPILL a to stack
+8a 46 fe                       mov al, b
+98                             cbw              ; promote b
+8b d0                          mov dx, ax       ; b → dx
+58                             pop ax           ; restore a
+03 c2                          add ax, dx       ; a + b (both int-promoted)
+eb 00 8b e5 5d c3              epilogue
+```
+
+Findings:
+- `char + char` requires integer promotion on BOTH operands BEFORE
+  the add. Each cbw destroys the AH that the other operand might
+  use, so the codegen has to save one operand somehow.
+- **BCC's chosen pattern: push/pop stack spill.**
+  - Load a → AX (`8a 46 disp + cbw`)
+  - **Push AX**
+  - Load b → AX, then mov to DX
+  - **Pop AX** (restore a)
+  - Add ax, dx
+- More efficient alternatives exist (e.g. swap roles so first
+  operand goes to BX or DX directly), but BCC's pattern is the
+  "mechanical" one: always go through AX for each promotion, spill
+  via stack between them.
+- Char locals share a 2-byte slot at `[bp-1]` and `[bp-2]` — packed.
+- This shape generalizes: any binary op on TWO chars (add, sub, etc.)
+  pays this 4-byte overhead (push + pop + mov-dx) on top of the
+  per-operand promotion.
+
