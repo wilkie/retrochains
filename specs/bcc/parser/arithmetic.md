@@ -2213,3 +2213,47 @@ Findings:
 - Confirms `u % 2^N` → `and ax, (2^N - 1)` peephole works for any
   power-of-2 modulus. Mask is `2^N - 1`.
 
+
+## Identity/annihilator peephole map (`x op K` cases)
+
+Fixtures `2735`-`2740` confirm BCC's selective constant-folding:
+
+### Identities — FOLDED (no instruction emitted)
+
+| pattern | result | folded? |
+|---------|--------|---------|
+| `x + 0` | x      | ✓ identity |
+| `x - 0` | x      | ✓ identity |
+| `x * 1` | x      | ✓ identity |
+| `x | 0` | x      | ✓ identity |
+| `x ^ 0` | x      | ✓ identity |
+
+All these emit just `mov ax, x` — the operation is dropped.
+
+### Annihilators — INCONSISTENTLY folded
+
+| pattern | result | folded? | emits |
+|---------|--------|---------|-------|
+| `x * 0` | 0      | ✓ FOLDED | `xor ax, ax` (2B, no x load) |
+| `x & 0` | 0      | ✗ NOT folded | `mov ax, x; and ax, 0` (5B) |
+
+**`* 0` is special-cased**: the multiplicative annihilator is
+recognized and folded to constant 0. `& 0` (the AND annihilator)
+is NOT folded — BCC emits the actual `and ax, 0` which costs 5B.
+
+### Non-identity / non-annihilator — full code
+
+| pattern  | emits |
+|----------|-------|
+| `0 - x`  | `xor ax, ax; sub ax, x` (5B) — NOT folded to `neg x` (2B). Source form matters! |
+| `x - x`  | `mov ax, x; sub ax, x` (5B) — NOT folded to 0 |
+
+Findings:
+- BCC's constant folding focuses on **identity peepholes**, where
+  the operation entirely drops out. The savings are 2-5 bytes per
+  occurrence.
+- The single annihilator peephole `* 0 → 0` is the exception; other
+  annihilators (`& 0`, `% 1`, etc.) are not recognized.
+- Source-form sensitivity persists: `0 - x` vs `-x` differ. Use
+  unary forms for byte-optimal code.
+
