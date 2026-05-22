@@ -833,3 +833,25 @@ Probe replaced with the char-compound-OR variant.
 - `2488` — manual string-cmp loop with early-exit via incrementing
   `i` past the bound: stitches `for`-loop + `if`-inside-body + body
   manipulation of loop index. Standard.
+
+## Free passes (batch 690)
+
+- `2489` — `(x >> 4) & 0xF` (nibble extraction): unsigned shift
+  via `mov cl, 4 / shr ax, cl` (cl-form since N ≥ 4), then `and ax,
+  imm16` accumulator form (`25 0f 00`). Standard nibble-extract,
+  no fusion possible on 8086.
+- `2490` — calling `mystery(5)` before its definition (implicit
+  declaration): same as fixture `2417` — BCC accepts; the function
+  defined later in the file is reachable via the forward `e8`
+  call. Both `_main` and `_mystery` in PUBDEF.
+- `2491` — `(int)c` where c = 0xFF (signed char): sign-extends via
+  `cbw` to `0xFFFF` = -1. Re-confirms char is signed by default;
+  int-from-char widening goes through `cbw`.
+- `2493` — `int sum_row(int (*row)[3])` (pointer to row of 3 ints):
+  parameter is a 2-byte near pointer; `(*row)[K]` accesses use the
+  pointer + constant offset. Caller passes `&m[1]` (= row 1
+  address = `&m[0][0] + 6`).
+- `2494` — `int *get_storage(void)` returning a pointer to a
+  global: `mov ax, offset _storage` (FIXUPP'd) in the callee.
+  Caller stores returned ptr to p, then writes through it.
+  Standard fn-returning-ptr mechanics.

@@ -664,3 +664,46 @@ Confirms: signed↔unsigned casts on same-width integers are
 **type-system-only** in BCC. They steer opcode selection (`shr` vs
 `sar`, `div` vs `idiv`, `jbe` vs `jle`) for downstream operations
 but emit nothing at the cast site.
+
+## `static const int K = 100;` — NOT constant-propagated (fixture `2492`)
+
+`const`-qualified variables in BCC are **stored in memory** and
+**loaded on each use**, like any non-const variable. BCC does NOT
+fold uses of `K` into a literal at the call sites.
+
+```c
+static const int K = 100;
+return K + 5;
+```
+
+```
+a1 00 00                ; mov ax, [_K]   ← FIXUPP'd memory read
+05 05 00                ; add ax, 5
+```
+
+Compare with a hypothetical constant-propagation pass that would
+emit:
+
+```
+b8 69 00                ; mov ax, 105     ← K + 5 folded at compile time
+```
+
+C90 strictly: `const int K` is NOT an integer constant expression
+(per §6.6 — only enums and macros are). So a conforming compiler
+isn't required to fold. BCC complies but goes no further: even
+when the const initializer is a literal known at parse time, the
+fold doesn't happen.
+
+So `const` in BCC is purely a **type-system flag** that prevents
+writes to the variable. Codegen-wise:
+- `int x = 100;` → store to `_DATA`, loads via FIXUPP
+- `const int x = 100;` → **byte-identical** OBJ (load via FIXUPP)
+- `static const int K = 100;` → same as `static int K = 100;` plus
+  PUBDEF suppression (static effect)
+- `#define K 100` → fully inlined; uses become `mov ax, 100`-style
+  literals
+
+For genuinely-constant integer use cases, `#define` or `enum {K =
+100};` give better codegen than `const int`. BCC's behavior matches
+the C90 standard letter, not the spirit of "const = compile-time-
+known".
