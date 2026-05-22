@@ -1592,3 +1592,35 @@ storage. The byte-order witness:
 Confirms 8086's little-endian byte order: the low-address byte holds
 the low-order bits of multi-byte values. This applies to all
 multi-byte types (int, long, struct fields).
+
+## Variable-indexed `a[i].field` — separate addr-compute per access (fixture `2438`)
+
+`struct Point a[3]; a[i].x + a[i].y;` with variable `i` computes the
+address for each field access independently — no common-subexpression
+elimination between the two accesses to the same `a[i]`:
+
+```
+; a[i].x:
+8b de                   ; bx = i (si)
+d1 e3 d1 e3             ; bx <<= 2  (i * sizeof(Point) = i*4)
+8d 46 f4                ; lea ax, [bp-12]   ← &a[0].x
+03 d8                   ; bx += ax           ← bx = &a[i].x
+8b 07                   ; mov ax, [bx]       ← a[i].x
+
+; a[i].y (recomputes from scratch):
+8b de                   ; bx = i
+d1 e3 d1 e3             ; bx <<= 2
+8d 56 f6                ; lea dx, [bp-10]   ← &a[0].y  (different base!)
+03 da                   ; bx += dx
+03 07                   ; add ax, [bx]      ← a[i].y
+```
+
+Both accesses share the `i*4` scaling, but BCC re-emits the
+`shl bx, 1` pair both times. The two lea targets differ
+(`&a[0].x` vs `&a[0].y`) since each field has its own base
+displacement.
+
+A CSE optimization could compute `i*4` once and reuse it for all
+fields of the same `a[i]` — but BCC doesn't perform this. Each
+subscript expression is lowered independently, consistent with the
+broader no-CSE pattern documented elsewhere.

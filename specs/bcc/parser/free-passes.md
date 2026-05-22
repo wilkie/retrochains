@@ -607,3 +607,32 @@ Probe replaced with the char-compound-OR variant.
   condition): compiles to `cmp word ptr [p], 0 / jz else` —
   standard null-pointer test. The pointer's full 16-bit value is
   compared to 0; NULL is `0x0000`.
+
+## Free passes (batch 681)
+
+- `2435` — iterating over an array of function pointers and
+  calling each: `for (i=0; i<3; i++) sum += ops[i](10);` —
+  variable-indexed fn-pointer call uses
+  `shl bx,1 / mov bx, [bx + offset_ops] / push arg / ff 56 disp`
+  pattern. Each iteration recomputes the indexed access. Re-confirms
+  variable-indexed fn-pointer array invocation.
+- `2436` — `struct Point pts[3] = {{1,2},{3,4},{5,6}};` (file-scope
+  struct array with nested initializer): laid out flat in `_DATA`
+  as 6 words. `pts[K].field` folds to `[pts + K*4 + offset]`. Symbol
+  `_pts` in PUBDEF (no static). Re-confirms global struct array
+  layout.
+- `2437` — `do { if (i==3) break; i++; } while (1);` (do-while
+  with `break` and constant-true condition): `while (1)` at the
+  bottom emits NO test — just `eb f2` backward jmp. Same elision
+  as while(1) at the top. `break` becomes `jmp end`.
+- `2439` — `dbl(++i);` (pre-inc inside function argument): the
+  pre-inc executes BEFORE the value is captured for the push.
+  Order: `inc si / mov ax, si / push ax / call`. With i=5, the
+  callee receives 6.
+- `2440` — `single((a=5, a+2));` (comma operator in parenthesized
+  arg position): the comma sequence is a SINGLE argument since the
+  outer parens delimit a single expression. `a=5` runs for side
+  effect, then `a+2` (= 7) is the value pushed. Also: `a+2`
+  normalizes to `inc / inc` (2 bytes) since BCC prefers two `inc`
+  over `add ax, 2`. Confirms the asymmetric small-add peephole
+  (`+2 = inc inc` but `-2 = add ax, -2`, NOT `dec dec`).
