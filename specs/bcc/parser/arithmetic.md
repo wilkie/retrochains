@@ -1881,3 +1881,68 @@ Findings:
 - The 8086 has no `imul reg, imm` (186/286 feature), so the
   scratch-register load is mandatory.
 
+
+## **All multiplication uses `imul`** (signed and unsigned identical)
+
+Fixture `2609-umul-obj`:
+
+```c
+unsigned int u = 1000;
+return (int)(u * 5);
+```
+
+```
+55 8b ec 4c 4c                 prologue + 2B local
+c7 46 fe e8 03                 u = 1000
+8b 46 fe                       mov ax, u
+ba 05 00                       mov dx, 5
+f7 ea                          imul dx          ; SIGNED multiply
+eb 00 8b e5 5d c3              epilogue
+```
+
+Findings:
+- BCC uses **`imul` for BOTH signed and unsigned** multiplications.
+  The low 16 bits of an 8086 multiply are bit-identical regardless
+  of signedness — only the high half (DX) interpretation differs.
+- Since BCC only keeps the low word (discards DX), `imul` and `mul`
+  produce the same result.
+- Consistent with the long-multiply helper (`N_LXMUL@`) being a
+  single helper for both signs.
+- So the operator table simplifies:
+
+| op type      | signed                          | unsigned                       |
+|--------------|----------------------------------|--------------------------------|
+| × any K      | mov dx,K + imul dx              | mov dx,K + **imul dx** (same!) |
+| ÷ pow-2      | cwd + idiv                      | shr                            |
+| ÷ non-pow-2  | cwd + idiv                      | xor dx,dx + div                |
+| % pow-2      | cwd + idiv + mov ax,dx          | and ax, (2^N-1)                |
+| % non-pow-2  | cwd + idiv + mov ax,dx          | xor dx,dx + div + mov ax,dx    |
+
+- The signed/unsigned split applies to DIV but NOT MUL.
+
+## Unsigned `u / K` (non-pow-2) — `xor dx,dx; div bx` (no `mov ax, dx`)
+
+Fixture `2610-udiv-non-pow2-obj`:
+
+```c
+unsigned int u = 1000;
+return (int)(u / 10);
+```
+
+```
+55 8b ec 4c 4c                 prologue + 2B local
+c7 46 fe e8 03                 u = 1000
+8b 46 fe                       mov ax, u
+bb 0a 00                       mov bx, 10
+33 d2                          xor dx, dx       ; zero-extend
+f7 f3                          div bx           ; unsigned divide
+                               ; NO mov ax,dx — quotient is in AX
+eb 00 8b e5 5d c3              epilogue
+```
+
+Findings:
+- For `/` (quotient), BCC keeps AX directly. The remainder (in DX
+  after the divide) is unused.
+- Distinguishes from `%` which requires `mov ax, dx` after the
+  divide.
+

@@ -4327,3 +4327,37 @@ Findings:
   indirect load (vs `arr[K]` for plain int arr which is just
   `mov ax, [arr + K*2]`).
 
+
+## `char arr[i]` with var index — single `mov al, [si + disp16]` (no scaling)
+
+Fixture `2613-char-arr-var-idx-obj`:
+
+```c
+char arr[5] = "abcd";
+int main(void) {
+  int i;
+  i = 2;
+  return arr[i];
+}
+```
+
+```
+55 8b ec 56                    prologue + push si
+be 02 00                       mov si, 2          ; i in si
+8a 84 00 00                    mov al, [si + _arr]   ; byte load (FIXUPP)
+98                             cbw                   ; promote
+eb 00 5e 5d c3                 epilogue
+```
+
+Findings:
+- `char arr[i]` for variable index = **single byte load** at
+  `[si + _arr]`. NO shift/scaling because `sizeof(char) = 1`.
+- Compare to `int arr[i]` which needs `shl bx, 1` for scaling.
+- ModR/M `84` = mod 10 (disp16), r/m 100 → `[si + disp16]`.
+  The disp16 is FIXUPP'd to `_arr`.
+- 4-byte total for the array access (2-byte opcode + 2-byte disp16
+  via FIXUPP).
+- `cbw` promotes the AL byte to AX for the int return context.
+- The char[5] = "abcd" partial init zero-fills to 5 bytes: `61 62
+  63 64 00`.
+

@@ -2117,3 +2117,90 @@ Findings:
 
   All collapse to a single disp16+FIXUPP load/store.
 
+
+## Local struct-to-struct copy `s2 = s1` — inlined load-pair / store-pair
+
+Fixture `2611-struct-local-copy-obj`:
+
+```c
+struct P { int x; int y; };
+int main(void) {
+  struct P s1;
+  struct P s2;
+  s1.x = 7;
+  s1.y = 9;
+  s2 = s1;
+  return s2.x + s2.y;
+}
+```
+
+```
+55 8b ec 83 ec 08              prologue + 8B (2 structs)
+c7 46 fc 07 00                 s1.x = 7    ; [bp-4]
+c7 46 fe 09 00                 s1.y = 9    ; [bp-2]
+8b 46 fe                       mov ax, s1.y   ; load FIELD-2 first
+8b 56 fc                       mov dx, s1.x   ; load FIELD-1 into DX
+89 46 fa                       s2.y = ax      ; store FIELD-2 first
+89 56 f8                       s2.x = dx      ; store FIELD-1
+8b 46 f8                       mov ax, s2.x
+03 46 fa                       add ax, s2.y
+eb 00 8b e5 5d c3              epilogue
+```
+
+Findings:
+- Small (≤4B) struct-to-struct copy via direct name `s2 = s1` is
+  **inlined**: NO `N_SCOPY@` call.
+- Pattern: **load BOTH fields into registers BEFORE storing either**:
+  - field2 → AX
+  - field1 → DX
+  - then field2 store, then field1 store
+  This avoids load-store interleaving.
+- **Field order is REVERSED in the load/store pair**: y first
+  (into AX), x second (into DX). Same shape as the `*p1 = *p2`
+  pointer-copy in `2495`.
+- Source-name copy and pointer-deref copy emit identical bytes
+  (modulo addressing modes for stack-local vs pointer-target).
+- Locals layout (declaration order, highest address first):
+  - s1@[bp-4..-1]: x@[bp-4], y@[bp-2]
+  - s2@[bp-8..-5]: x@[bp-8], y@[bp-6]
+
+
+## Caller receiving 4-byte struct return — DX:AX → store both fields
+
+Fixture `2614-call-receive-struct-obj`:
+
+```c
+struct Pair { int a; int b; };
+struct Pair make(void);
+int main(void) {
+  struct Pair p;
+  p = make();
+  return p.a + p.b;
+}
+```
+
+```
+55 8b ec 83 ec 04              prologue + 4B local p
+e8 00 00                       call _make           ; (EXTDEF)
+                               ; receive DX:AX:
+89 56 fe                       p.b = dx    ; HIGH field at [bp-2]
+89 46 fc                       p.a = ax    ; LOW field at [bp-4]
+8b 46 fc                       mov ax, p.a
+03 46 fe                       add ax, p.b
+eb 00 8b e5 5d c3              epilogue
+```
+
+Findings:
+- After calling a function returning a 4-byte struct, the **caller
+  reads DX:AX as (HIGH = field2, LOW = field1)** and stores both
+  to the destination struct's slots.
+- Mirrors the producer-side findings from `2524`: callee puts
+  `ax = field0, dx = field1`. Caller reverses: `[+0] = ax,
+  [+2] = dx`.
+- **NO N_SCOPY@ call at the call site** for 4-byte struct return —
+  the register convention handles the value.
+- The post-call writes-then-reads is unoptimized (writes ax then
+  re-reads `[bp-4]` instead of using ax directly). Standard BCC
+  "values flow through memory" pattern.
+- No stack cleanup after the call — the helper consumes no args.
+

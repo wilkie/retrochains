@@ -3211,3 +3211,37 @@ Findings:
   opcode `80 /7` = cmp byte r/m with imm8, ModR/M `3c` = mod 00
   r/m 100 = `[si]`, then imm8 = 0.
 
+
+## `if (a && b) ... else ...` — `&&` chain joins at ELSE, then-jmp dead
+
+Fixture `2612-and-with-else-obj`:
+
+```c
+if (a && b) return 10;
+else return 20;
+```
+
+```
+83 7e fe 00                    cmp word [bp-2], 0   ; test a
+74 0d                          je → ELSE
+83 7e fc 00                    cmp word [bp-4], 0   ; test b
+74 07                          je → ELSE
+                               ; THEN:
+b8 0a 00                       mov ax, 10
+eb 07                          jmp → epi
+eb 05                          jmp → epi   (UNREACHABLE dead)
+                               ; ELSE:
+b8 14 00                       mov ax, 20
+eb 00 8b e5 5d c3              epilogue
+```
+
+Findings:
+- `if (a && b)` uses the canonical `&&` chain shape from `2505`:
+  N cmp/je instructions, all converging on a single FALSE label
+  (here ELSE, since the explicit `else` is present).
+- The dead "jmp end_if" emitted between THEN and ELSE is the same
+  as the if-else-chain pattern from `2587`. **2 wasted bytes per
+  if-then-else block.**
+- Source-form preservation: the explicit `else` makes the FALSE
+  target be the else-body's address, not the post-block address.
+
