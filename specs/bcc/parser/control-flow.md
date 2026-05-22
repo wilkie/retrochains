@@ -3245,3 +3245,40 @@ Findings:
 - Source-form preservation: the explicit `else` makes the FALSE
   target be the else-body's address, not the post-block address.
 
+
+## Mixed `a && (b || c)` — single flat chain with mixed je/jne
+
+Fixture `2615-mixed-and-or-obj`:
+
+```c
+if (a && (b || c)) return 7;
+return 0;
+```
+
+```
+83 7e fe 00 74 11              cmp a; je → FALSE         (AND-context: 0 → false)
+83 7e fc 00 75 06              cmp b; jne → TRUE         (OR-context: nz → true)
+83 7e fa 00 74 05              cmp c; je → FALSE         (OR-context last: 0 → false)
+                               ; TRUE:
+b8 07 00 eb 04                 ax = 7; jmp epi
+                               ; FALSE:
+33 c0 eb 00                    xor ax, ax
+8b e5 5d c3                    epilogue
+```
+
+Findings:
+- Nested boolean trees flatten to a **single chain of cmp +
+  conditional-jump** instructions, with the jump TYPE (`je` vs
+  `jne`) chosen by the operand's logical context:
+  - `je → FALSE` for AND-context operands (and the LAST operand of
+    an OR-chain) — falsey value short-circuits.
+  - `jne → TRUE` for OR-context operands (all but the last) —
+    truthy value short-circuits.
+- The merge structure stays simple: ONE common TRUE label and ONE
+  common FALSE label, both at the end before the epilogue. All
+  branches converge.
+- Precedence and parens are baked into the operand-context
+  determination at parse time; codegen sees a flat sequence with
+  per-position labels.
+- This generalizes to any depth of nested `&&`/`||`.
+

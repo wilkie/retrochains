@@ -4361,3 +4361,36 @@ Findings:
 - The char[5] = "abcd" partial init zero-fills to 5 bytes: `61 62
   63 64 00`.
 
+
+## `++a[K]` const subscript — `inc word [mem]` direct mem-inc
+
+Fixture `2616-pre-inc-arr-obj`:
+
+```c
+int a[3];
+int main(void) {
+  a[0] = 10;
+  return ++a[0];
+}
+```
+
+```
+55 8b ec                       prologue
+c7 06 00 00 0a 00              [_a + 0] = 10        ; FIXUPP
+ff 06 00 00                    inc word [_a + 0]    ; ++a[0] FIXUPP
+a1 00 00                       mov ax, [_a + 0]     ; load result (FIXUPP)
+eb 00 5d c3                    epilogue
+```
+
+Findings:
+- `++a[K]` with constant subscript = **`inc word [moffs16]`** (4
+  bytes, opcode `ff 06 disp16`). Direct memory increment, no
+  load-modify-store cycle.
+- ModR/M `06` = mod 00, opcode-ext 000 (inc), r/m 110 (disp16).
+- Compare to `a[K] = a[K] + 1` which would use AX-acc pattern
+  (load → inc → store, ~9 bytes). The `++` form triggers the
+  efficient `inc word [mem]` peephole.
+- The post-`++` LOAD for the return value is a separate fetch
+  (no register-coalescing across the inc). So total = 4B (inc)
+  + 3B (load) = 7 bytes to compute "increment and return".
+

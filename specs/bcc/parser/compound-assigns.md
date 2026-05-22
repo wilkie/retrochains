@@ -2743,3 +2743,36 @@ Findings:
   `--i` direct dec — single-instruction compound ops apply to the
   variable register itself.
 
+
+## `x <<= N` — direct shift on register var (compound op skips AX-acc)
+
+Fixture `2617-shl-assign-obj`:
+
+```c
+int x = 7;
+x <<= 2;
+return x;
+```
+
+```
+55 8b ec 56                    prologue + push si
+be 07 00                       mov si, 7         ; x in si
+d1 e6                          shl si, 1
+d1 e6                          shl si, 1         ; (= shl si, 2 unrolled)
+8b c6                          mov ax, si        ; return x
+eb 00 5e 5d c3                 epilogue
+```
+
+Findings:
+- `x <<= 2` for register-promoted x emits **two `shl reg, 1`** DIRECTLY
+  on the variable register — NO AX-accumulator detour.
+- Confirms that compound bitwise/shift ops (`<<=`, `>>=`, `|=`, `&=`,
+  `^=`) apply directly to the variable's register when the var is
+  reg-promoted. Same as `--i`, `|= imm`.
+- Compare to `x = x << 2` (full assignment with arith) which would
+  go through AX. **Source form (`<<=` vs `= ... << ...`) matters.**
+- Unroll-vs-cl rule still applies: shift count 2 ≤ 3 → unroll; if
+  count were ≥4, would emit `mov cl, N; shl reg, cl`.
+- ModR/M `e6` = mod 11, opcode-ext 100 (shl), r/m 110 (si). The
+  d1 opcode = single-bit shift.
+

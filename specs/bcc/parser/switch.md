@@ -1741,3 +1741,47 @@ Findings:
   reached only if all bodies fall through (none here, since each
   returns).
 
+
+## Empty case fall-into-next — shared body via TWO dispatch jumps to SAME label
+
+Fixture `2620-empty-case-fall-obj`:
+
+```c
+switch (x) {
+  case 1:
+  case 2:
+    return 12;
+  case 3:
+    return 30;
+}
+```
+
+```
+3d 01 00 74 0c                 cmp x, 1; je → BODY_12
+3d 02 00 74 07                 cmp x, 2; je → BODY_12  (SAME TARGET as case 1!)
+3d 03 00 74 07                 cmp x, 3; je → BODY_30
+eb 0a                          jmp → after-switch
+                               ; BODY_12 (case 1 + case 2):
+b8 0c 00 eb 09                 mov ax, 12; jmp epi
+                               ; BODY_30 (case 3):
+b8 1e 00 eb 04                 mov ax, 30; jmp epi
+                               ; after-switch:
+33 c0 eb 00                    xor ax, ax (return 0)
+8b e5 5d c3                    epilogue
+```
+
+Findings:
+- An EMPTY case label that falls into the next case (no body
+  between them) compiles to **TWO dispatch jumps targeting the
+  SAME body address**. Body is emitted ONCE.
+- `case 1: case 2: return 12;` → 2 cmp+je pairs both pointing to
+  the same `mov ax, 12; jmp epi`. Single body.
+- This is the case-label-coalescing rule: multiple label-only
+  statements before a body produce N dispatch entries → 1 body.
+- The disp8 values shrink along the chain:
+  - case 1 → +12 (further forward)
+  - case 2 → +7 (closer)
+  - case 3 → +7 (different body)
+- This generalizes: `case 1: case 2: case 3: body;` would produce
+  3 cmp+je dispatches all to one body.
+

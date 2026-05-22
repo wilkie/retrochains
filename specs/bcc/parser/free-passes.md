@@ -1046,3 +1046,34 @@ that influences operator selection (e.g. `jl` vs `jb` for compares,
 `shr` vs `sar`, `mul` vs `imul`). The CAST itself never produces
 bytes — it just changes how subsequent ops are emitted.
 
+
+## Free pass: `const` qualifier has no codegen effect
+
+Fixture `2618-const-char-ptr-obj`:
+
+```c
+int peek(const char *s) {
+  return s[0];
+}
+```
+
+```
+55 8b ec 56                    prologue + push si
+8b 76 04                       mov si, s
+8a 04                          mov al, [si]
+98                             cbw
+eb 00 5e 5d c3                 epilogue
+```
+
+The body is **byte-identical** to the same function with `char *s`
+(no `const`). The `const` qualifier emits zero OBJ bytes — it's
+purely a type-system / read-only-enforcement concept that BCC
+parses but doesn't propagate to codegen.
+
+Joins the family of zero-byte qualifiers:
+- `register` (`2582`)
+- `const`
+- `signed`/`unsigned` casts (same-size) (`2591`)
+- `auto` (implicit default)
+- `typedef` names (`2545`)
+

@@ -855,3 +855,45 @@ Findings:
   BCC knows the call signature, push order, and cleanup convention
   even without a body.
 
+
+## Mixed `extern` and `static` in one TU — independent symbol-table entries
+
+Fixture `2619-static-and-extern-obj`:
+
+```c
+extern int ext_v;
+static int loc_v = 5;
+int get(void) {
+  return ext_v + loc_v;
+}
+```
+
+OBJ symbols:
+- `_ext_v` — **EXTDEF** (declared, not defined here)
+- `_get` — **PUBDEF** (defined here, visible to linker)
+- `loc_v` — **internal storage** in `_DATA` (2 bytes = `05 00`), NO PUBDEF
+
+Body:
+```
+55 8b ec                       prologue
+a1 00 00                       mov ax, [_ext_v]    ; FIXUPP (EXTDEF resolves at link)
+03 06 00 00                    add ax, [_loc_v]    ; FIXUPP (internal symbol)
+eb 00 5d c3                    epilogue
+```
+
+Findings:
+- A single TU can mix extern (resolved at link by another TU),
+  static (private to this TU but in segments), and public symbols
+  (PUBDEF for linker visibility). They coexist without conflict.
+- All three use the same FIXUPP-based memory access from code; the
+  difference is purely in the OBJ's symbol-table records:
+  - PUBDEF: this TU defines + exports
+  - EXTDEF: this TU references but doesn't define
+  - Internal (static): this TU defines but doesn't export
+- Storage placement:
+  - EXTDEF: no segment allocation in this OBJ
+  - Static-initialized (loc_v = 5): `_DATA` with the value
+  - Static zero-init (loc_v = 0): would go to `_BSS`
+  - PUBDEF global: same as static for storage; only the PUBDEF
+    record differs.
+
