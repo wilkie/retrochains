@@ -1243,3 +1243,33 @@ Findings:
 - Same pattern for any zero-arg extern (puts(""), getchar(),
   etc.) and zero-arg user functions.
 
+
+## 3-int call with VARIABLE args — `push word [bp+disp]` (3B each, NOT 4B)
+
+Fixture `2688-three-int-call-obj`:
+
+```c
+int x = 1, y = 2, z = 3;
+return triple(x, y, z);
+```
+
+```
+ff 76 fa                       push word [bp-6]    ; z (1st pushed, R-to-L)
+ff 76 fc                       push word [bp-4]    ; y
+ff 76 fe                       push word [bp-2]    ; x
+e8 00 00                       call _triple        (FIXUPP)
+83 c4 06                       add sp, 6           ; cleanup 3 args
+```
+
+Findings:
+- For **variable args** (loaded from memory), BCC uses **`ff /6
+  r/m16`** = `push word [mem]` = 3 bytes per push.
+- For **constant args** (like `triple(1, 2, 3)`), BCC emits 4 bytes
+  per arg (`mov ax, imm16` + `push ax`, see `2527`).
+- So **variable args save 1 byte each vs constants**. 3-arg call:
+  - All-const: 12B push setup
+  - All-var: 9B push setup
+- ModR/M `76` = mod 01, opcode-ext 110 (push), r/m 110 (bp+disp8).
+- Push order is unchanged: R-to-L per cdecl. Cleanup is
+  `add sp, 6` for 3 args (3B).
+

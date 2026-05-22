@@ -1327,3 +1327,35 @@ Findings:
 - This is the optimal char-handling shape: byte ops throughout,
   promote only at the int boundary.
 
+
+## `signed char + unsigned char` — different scratch regs, NO push/pop spill
+
+Fixture `2690-sc-vs-uc-promote-obj`:
+
+```c
+int both(signed char s, unsigned char u) {
+  return s + u;
+}
+```
+
+```
+55 8b ec                       prologue
+8a 46 04                       mov al, s
+98                             cbw              ; signed → AX
+8a 56 06                       mov dl, u
+b6 00                          mov dh, 0        ; unsigned → DX (zero-extend)
+03 c2                          add ax, dx
+eb 00 5d c3                    epilogue
+```
+
+Findings:
+- Signed char goes to AX via cbw; unsigned char goes to DX via
+  `mov dh, 0`. **Different scratch registers avoid the push/pop
+  spill** seen in `2558` (char + char where BOTH used AX).
+- Net: 4-byte savings vs the double-cbw-AX case.
+- Operand-pair routing for char arithmetic:
+  - Two signed chars → both via AX (cbw twice) → push/pop spill
+  - Two unsigned chars → probably similar with mov-ah-0 → spill
+  - Mixed signed + unsigned → split via AX and DX (no spill)
+- This is a subtle compile-time choice based on operand types.
+

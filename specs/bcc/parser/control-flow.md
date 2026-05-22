@@ -3641,3 +3641,68 @@ Findings:
   both source kinds in the same accumulator pattern.
 - Comma in for-INC clause would behave the same way.
 
+
+## For-loop count-down `for (i=N; i>0; i=i-1)` — `or si, si` for zero-test
+
+Fixture `2691-for-countdown-obj`:
+
+```c
+for (i = 10; i > 0; i = i - 1) {
+  s = s + i;
+}
+```
+
+```
+33 ff                          xor di, di         ; s = 0
+be 0a 00                       mov si, 10         ; i = 10
+eb 0b                          jmp → COND
+                               ; BODY:
+8b c7 03 c6 8b f8              s = s + i (AX-acc)
+                               ; INC clause:
+8b c6 48 8b f0                 i = i - 1 (AX-acc: mov ax,si + dec + mov si,ax)
+                               ; COND:
+0b f6                          or si, si          ; vs-zero peephole (2B)
+7f f1                          jg → BODY
+```
+
+Findings:
+- The `i > 0` test uses the **`or si, si` zero-compare peephole**
+  (2 bytes) instead of `cmp si, 0` (3 bytes) — 1 byte saved.
+- The `--i` equivalent would emit single `dec si` (1 byte) for the
+  inc clause vs the 5-byte AX-acc form `i = i - 1`. So a tighter
+  source form yields 4 fewer bytes per iteration.
+- `jg` (signed greater) skips the loop when i <= 0.
+- Cleanest count-down idiom would be `for (i = N; i--; )` which
+  uses the post-dec value-and-modify in one step. To probe.
+
+## `goto end` followed by dead code — BCC emits the dead code
+
+Fixture `2692-label-target-obj`:
+
+```c
+int x = 0;
+goto end;
+x = 99;        /* UNREACHABLE */
+end:
+return x;
+```
+
+```
+55 8b ec 56                    prologue + push si
+33 f6                          xor si, si       ; x = 0
+eb 03                          jmp → end (+3)
+be 63 00                       mov si, 99       ; UNREACHABLE: emitted anyway
+                               ; end:
+8b c6                          mov ax, x
+eb 00 5e 5d c3                 epilogue
+```
+
+Findings:
+- BCC **emits dead code after `goto`** — the `mov si, 99` is
+  unreachable but appears in the OBJ.
+- No dead-code elimination. Consistent with the dead-jmp pattern
+  in if-else returns (`2587`).
+- Source structure preserved literally. The reimpl must mirror
+  this: emit each statement as written, do not skip unreachable
+  ones.
+

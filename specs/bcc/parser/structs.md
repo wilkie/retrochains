@@ -2582,3 +2582,40 @@ Findings:
 - Per-call cost: 4 bytes for call + 1 byte for push (1st only) +
   1 byte for pop = 6 bytes overhead. Plus the actual fn body.
 
+
+## 4-char struct return — packed into DX:AX (byte-by-byte)
+
+Fixture `2689-struct-4chars-ret-obj`:
+
+```c
+struct Quad { char a; char b; char c; char d; };
+struct Quad make(void) {
+  struct Quad q;
+  q.a = 'A'; q.b = 'B'; q.c = 'C'; q.d = 'D';
+  return q;
+}
+```
+
+```
+55 8b ec 83 ec 04              prologue + 4B local
+c6 46 fc 41                    [bp-4] = 'A' (byte)   ; q.a
+c6 46 fd 42                    [bp-3] = 'B' (byte)   ; q.b
+c6 46 fe 43                    [bp-2] = 'C' (byte)   ; q.c
+c6 46 ff 44                    [bp-1] = 'D' (byte)   ; q.d
+8b 56 fe                       mov dx, [bp-2]       ; DX = (D,C) HIGH word
+8b 46 fc                       mov ax, [bp-4]       ; AX = (B,A) LOW word
+eb 00 8b e5 5d c3              epilogue
+```
+
+Findings:
+- 4-byte struct of 4 chars returns in **DX:AX** like any other
+  4-byte type. Confirms the size-based rule applies regardless
+  of field type composition.
+- The return value layout in registers:
+  - AL = q.a (byte 0)
+  - AH = q.b (byte 1)
+  - DL = q.c (byte 2)
+  - DH = q.d (byte 3)
+- Byte stores use `c6 46 disp imm8` (4 bytes each).
+- Word loads at struct offsets 0 and 2 pull two bytes each.
+

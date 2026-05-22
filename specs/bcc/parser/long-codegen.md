@@ -2645,3 +2645,22 @@ Findings:
   with `00 00` immediates — no shorter form unless wider init
   forms exist.
 
+
+## Local `long v = 0x12345678L` — HIGH word first, then LOW
+
+Fixture `2687-local-long-pos-obj`:
+
+```
+55 8b ec 83 ec 04              prologue + 4B local
+c7 46 fe 34 12                 [bp-2] = 0x1234 (HIGH)
+c7 46 fc 78 56                 [bp-4] = 0x5678 (LOW)
+8b 46 fc                       mov ax, v.LOW    ; (int) cast
+eb 00 8b e5 5d c3              epilogue
+```
+
+Findings:
+- Confirms the long store pattern: **HIGH word stored first at
+  the higher address `[bp-2]`, then LOW at `[bp-4]`**.
+- Same shape for positive and negative long literals (`2678`):
+  10 bytes for the assignment (2 × 5-byte `mov word [bp+disp], imm16`).
+
