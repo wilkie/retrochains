@@ -3772,3 +3772,37 @@ This is the standard portable way to extract the low byte of a
 multi-byte value in C90 code — works thanks to BCC's permissive
 type-system handling at cast sites and the platform's little-endian
 storage.
+
+## `(*p)--` — direct memory decrement via pointer (fixture `2449`)
+
+`r = (*p)--;` lowers to a direct memory-decrement, no register
+round-trip:
+
+```c
+int x = 10;
+int *p = &x;
+r = (*p)--;     // r = 10, x becomes 9
+```
+
+```
+8b 04                   ; mov ax, [si]    ← read *p into AX (old value for r)
+ff 0c                   ; dec word ptr [si]  ← decrement *p in memory directly
+89 46 fc                ; r = ax           (the OLD value)
+```
+
+Encoding `ff 0c`:
+- `ff` = single-operand op
+- `0c` = ModR/M `mod=00 reg=001 rm=100` = `/1 = dec` on `r/m=100 = [si]`
+
+So `dec word ptr [si]` modifies `*p` in place without load-modify-
+store. The old value was already captured to AX before the
+decrement, providing the post-decrement rvalue.
+
+Compares with `r = (*p)++` which would use `inc word ptr [si]` (the
+`/0` subop) — same template, different opcode bit.
+
+This memory-direct form parallels the documented `g++` /
+`g--` peephole for globals; here it works for the
+`pointer-dereference-then-postdec` pattern too. The key is that both
+sides of the modify (read + write) target the same memory operand,
+so BCC peepholes through the `mov [src], reg / op [src]` pair.

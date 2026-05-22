@@ -872,3 +872,37 @@ register itself). The body `*r = n*n + 1` lowers
 as `mov ax, si / imul si / inc ax / mov [di], ax`
 — clean four-instruction sequence.
 
+
+## Static file-scope fn-ptr — `ff 16 disp16` (call moffs16 indirect) (fixture `2450`)
+
+`static int (*fp)(int) = adder;` declares a file-scope (non-public)
+function pointer initialized to the address of `adder`. Calling
+through it emits the **`ff 16 disp16`** memory-indirect call form
+(absolute memory operand):
+
+```c
+static int (*fp)(int) = adder;
+return fp(5);
+```
+
+```
+b8 05 00 50             ; push 5
+ff 16 00 00             ; call near [_fp]   ← FIXUPP'd to fp's address in _DATA
+59                      ; pop cx
+```
+
+Encoding `ff 16 disp16`:
+- `ff` = single-operand op
+- `16` = ModR/M `mod=00 reg=010 rm=110` = `/2 = call near` on
+  `r/m=110 = [disp16]` (direct memory)
+- `00 00` = disp16 = `_fp`'s address (FIXUPP'd at link time)
+
+Distinct from:
+- `ff 56 disp8` = `call near [bp+disp8]` — local fn-ptr on stack
+- `ff 96 disp16` = `call near [bp+disp16]` — far stack local
+- `ff 17` = `call near [bx]` — register-pointed
+- `ff 16 disp16` = `call near [moffs16]` — **absolute global**
+
+The `_DATA` section reserves 2 bytes for `_fp`, initialized via
+FIXUPP to point at `_adder`. Since `_fp` is `static`, no PUBDEF —
+only `_adder` is exported.

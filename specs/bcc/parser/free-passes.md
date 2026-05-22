@@ -660,3 +660,22 @@ Probe replaced with the char-compound-OR variant.
   7` is emitted at decl-time; a and b get values later from the
   assignment statements. Confirms per-declarator initializer
   emission.
+
+## Free passes (batch 683)
+
+- `2447` — `r = (x = 5, x + 10);` (comma in initializer position):
+  `x = 5` runs for side effect, `x + 10` (= 15) is the value
+  stored to r. Standard comma operator. Re-confirms last-value-wins
+  in initializer context.
+- `2448` — `add((5), (7))` (redundant parens around call args):
+  byte-identical to `add(5, 7)` — parens around individual args
+  carry zero codegen weight. R-to-L push: `push 7 / push 5 / call /
+  pop cx pop cx` (4-byte cleanup as `59 59`).
+- `2451` — `char first(void) { return 'A'; }` returning char:
+  `mov al, 0x41 / ret` — value lands in **AL** (low byte of AX),
+  not full AX. Caller stores via `mov [bp-1], al` (byte store).
+  Re-confirms char-return ABI: low byte in AL, high byte undefined.
+- `2452` — `int a[3]; a[0] = x; a[1] = y; a[2] = x+y;` (local
+  array filled via sequential assignment — not init list).
+  Standard `mov [bp+disp], reg` for each store. No init-list
+  short-circuit since assignments are statements, not initializers.
