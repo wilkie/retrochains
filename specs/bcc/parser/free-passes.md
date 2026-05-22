@@ -1077,3 +1077,25 @@ Joins the family of zero-byte qualifiers:
 - `auto` (implicit default)
 - `typedef` names (`2545`)
 
+
+## `const int` parameter — byte-identical to plain `int`
+
+Fixture `2757-const-int-param-obj`:
+
+```c
+int identity(const int x) {
+  return x;
+}
+```
+
+```
+55 8b ec                       prologue
+8b 46 04                       mov ax, x       ; just load and return
+eb 00 5d c3                    epilogue
+```
+
+`const int x` byte-identical to `int x` — confirms `const`
+qualifier is zero-byte for parameters too, joining the existing
+free-pass family: `const char *` (`2618`), `const struct *` (`2624`),
+`const int` global (`2662`).
+

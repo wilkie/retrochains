@@ -4993,3 +4993,31 @@ Findings:
 - Generalizes: each `*` adds one `mov reg, [reg]` step on the read
   side.
 
+
+## 2D char array with const subscripts — single byte offset fold
+
+Fixture `2758-char-2d-arr-obj`:
+
+```c
+char grid[2][3] = { { 'A', 'B', 'C' }, { 'D', 'E', 'F' } };
+return grid[1][1];
+```
+
+`_DATA` (6 bytes): `41 42 43 44 45 46` ("ABCDEF" row-major)
+
+```
+55 8b ec                       prologue
+a0 04 00                       mov al, [_grid + 4]   ; grid[1][1] at offset 4
+98                             cbw
+eb 00 5d c3                    epilogue
+```
+
+Findings:
+- 2D char array initializer = bytes laid out row-major in `_DATA`
+  (`row0col0, row0col1, ... row1col0, ...`).
+- `grid[1][1]` const subscripts fold to byte offset `1×3 + 1 = 4`.
+- Char element accessed via `moffs8` form (`a0 disp16`, 3B), then
+  cbw for int promotion.
+- Same shape as 2D int arrays from `2535`/`2512`, just with byte
+  loads instead of word loads.
+

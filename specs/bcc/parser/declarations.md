@@ -1098,3 +1098,68 @@ Findings:
 - Generalization: EXTDEF vs PUBDEF is a link-time concern — the
   generated code is byte-identical regardless.
 
+
+## Non-leaf fn with 3 locals — NO DX promotion (only SI + stack)
+
+Fixture `2753-three-locals-nonleaf-obj`:
+
+```c
+int compute(int a) {
+  int b, c, d;
+  b = a + 1;
+  c = a + 2;
+  d = helper(a);    /* CALL — non-leaf */
+  return b + c + d;
+}
+```
+
+```
+83 ec 06                       sub sp, 6        ; 3 locals on stack
+56                             push si          ; only SI promoted (for `a`)
+                               ; b, c, d all in memory [bp-2..-6]
+```
+
+Findings:
+- **In a non-leaf function (has internal calls), DX is NOT
+  promoted** — only SI (and possibly DI) are available.
+- DX is caller-saved (volatile across calls), so promoting a
+  long-lived local to DX would lose its value at any call site.
+- Updated register-promotion rule:
+
+| context              | available regs for locals |
+|----------------------|---------------------------|
+| leaf function        | SI, DI, DX (up to 3)      |
+| non-leaf function    | SI, DI (up to 2)          |
+| any (>3 locals)      | none — all spill to stack |
+
+## 2 locals in leaf — STILL no promotion (usage-based, not count-based)
+
+Fixture `2754-two-locals-leaf-obj`:
+
+```c
+int main(void) {
+  int a, b;
+  a = 5; b = 7;
+  return a + b;
+}
+```
+
+```
+83 ec 04                       sub sp, 4       ; both on stack!
+c7 46 fe 05 00                 a = 5 [bp-2]
+c7 46 fc 07 00                 b = 7 [bp-4]
+8b 46 fe 03 46 fc              return a + b
+```
+
+Findings:
+- Despite being a leaf fn with only 2 locals, BCC keeps **both in
+  memory** — neither promoted to SI/DI.
+- This suggests promotion is **usage-aware**, not purely count-based:
+  - In `2746` (3 locals in a for-loop, used per iter) → all promoted.
+  - In `2754` (2 single-use locals) → none promoted.
+- BCC's promotion heuristic likely weighs "usage frequency"
+  (especially inside loops) — single-use locals don't justify
+  the register reservation cost (push si/di in prologue).
+- Refined rule: **register promotion is BOTH count- AND usage-
+  bounded**. Pure count-based modeling will miss real cases.
+

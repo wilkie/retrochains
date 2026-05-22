@@ -2806,3 +2806,37 @@ Findings:
   - **`sizeof ≥ 5` → `N_SCOPY@` helper**
 - The 4-byte boundary aligns with DX:AX register-pair capacity.
 
+
+## 8-byte struct{long, long} return — N_SCOPY@ (consistent with size ≥5 rule)
+
+Fixture `2755-struct-8b-ret-obj`:
+
+8-byte struct return uses N_SCOPY@ with count=8. Confirms the rule:
+sizes ≤4 use register return (AL/AX/DX:AX), sizes ≥5 use the
+helper. The struct field types don't change the rule.
+
+## 3-level nested struct field — single folded offset
+
+Fixture `2756-nested-3level-obj`:
+
+```c
+struct C { int v; };
+struct B { struct C c; };
+struct A { struct B b; };
+struct A obj;
+obj.b.c.v = 42;
+return obj.b.c.v;
+```
+
+```
+c7 06 00 00 2a 00              [_obj + 0] = 42    ; obj.b.c.v
+a1 00 00                       mov ax, [_obj + 0]
+```
+
+Findings:
+- N-level nested member access folds to a single byte offset at
+  parse time. Here all fields are at offset 0 of their parent →
+  total offset = 0.
+- Same shape as `obj.i.v` (`2503`) but 3 levels deep. Nesting
+  depth doesn't matter — codegen sees one offset per access.
+
