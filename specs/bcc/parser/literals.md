@@ -550,3 +550,30 @@ Findings:
 | `void *` / any ptr | 2 |
 | `struct X`  | sum of fields (no padding) |
 
+
+## String literal with escapes `"a\tb\n"` — escapes folded to byte values
+
+Fixture `2805-str-escape-obj`:
+
+```c
+char *banner = "a\tb\n";
+```
+
+`_DATA`:
+- `_banner` (2 bytes): `02 00` (FIXUPP target = the string)
+- String (5 bytes at offset 2): `61 09 62 0a 00` = `"a\tb\n\0"`
+
+Findings:
+- C escape sequences are converted to their 1-byte values at parse
+  time:
+  - `\t` → 0x09 (tab)
+  - `\n` → 0x0A (LF)
+  - `\r` → 0x0D (CR)
+  - `\0` → 0x00 (NUL)
+  - `\\` → 0x5C (backslash)
+  - `\"` → 0x22 (double quote)
+  - `\'` → 0x27 (apostrophe)
+- Null terminator (`00`) is appended automatically.
+- String literal lives in `_DATA`; pointer-init globals get FIXUPP'd
+  to the string's offset.
+

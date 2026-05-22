@@ -1506,3 +1506,31 @@ Findings:
   by value).
 - This is the C "array-to-pointer decay" rule at codegen level.
 
+
+## Nested fn calls `f(g(v))` — `push v; call g; pop cx; push ax; call f; pop cx`
+
+Fixture `2804-nested-fn-calls-obj`:
+
+```c
+int inc1(int x);
+int inc2(int x);
+int both(int v) {
+  return inc1(inc2(v));
+}
+```
+
+```
+ff 76 04                       push v        ; arg for inc2
+e8 00 00                       call _inc2
+59                             pop cx        ; 1-arg cleanup
+50                             push ax       ; result → arg for inc1
+e8 00 00                       call _inc1
+59                             pop cx
+```
+
+Findings:
+- Nested calls chain via AX: inner call → push AX → outer call.
+- Each call has its own cleanup (no merging).
+- Total 13 bytes for a 2-call chain (8B inner + 5B outer push+call+pop).
+- Generalizable: `h(g(f(v)))` would be 8 + 5 + 5 = 18 bytes.
+

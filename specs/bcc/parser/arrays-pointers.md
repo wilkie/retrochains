@@ -5340,3 +5340,54 @@ Findings:
 - The non-DCE pattern strikes again: BCC trusts the source code's
   intent rather than folding away semantically-trivial tests.
 
+
+## `int *p = data;` (init global ptr from array name) — FIXUPP to `_data + 0`
+
+Fixture `2802-ptr-init-arr-obj`:
+
+```c
+int data[5] = { 10, 20, 30, 40, 50 };
+int *p = data;
+```
+
+`_DATA`:
+- `_data` (10 bytes): `0a 00 14 00 1e 00 28 00 32 00`
+- `_p` (2 bytes): `00 00` (FIXUPP target = `_data + 0`)
+
+```
+8b 1e 0a 00                    mov bx, [_p]    (the ptr value)
+8b 07                          mov ax, [bx]    (*p)
+```
+
+Findings:
+- `int *p = data;` stores the offset of `data` (= `_data + 0`)
+  as the pointer value. FIXUPP relocates at link time.
+- Same shape as `int *mid = &arr[2];` (`2701`) but with offset 0.
+- Access via `*p` is a 2-load chain (load p into bx, deref to ax).
+
+## `*p++ = K` — mem-imm write + double-inc (6 bytes total)
+
+Fixture `2803-star-pp-write-obj`:
+
+```c
+void store(int *p) {
+  *p++ = 42;
+}
+```
+
+```
+8b 76 04                       mov si, p
+c7 04 2a 00                    [si] = 42         (mem-imm no-disp, 4B)
+46 46                          inc si; inc si    (postinc by sizeof(int))
+```
+
+Findings:
+- `*p++ = K` for int* p:
+  1. Load p into si
+  2. Mem-imm write to `[si]` with no displacement
+  3. Increment si by 2 (sizeof(int)) via **DOUBLE INC**
+- 4+2 = 6 bytes for the write+inc.
+- Compare to `*p++` read (`2554`) — same `inc si; inc si` pattern.
+- The deref-then-postinc semantics: the OLD pointer is used for
+  the deref, then p is bumped.
+

@@ -2880,3 +2880,52 @@ Findings:
 - Compare to long divide (`N_LDIV@`) which uses STACK args
   (different convention per helper).
 
+
+## Unsigned `long >> 16` — `mov ax, HIGH; xor dx, dx` (5B, 1B BIGGER than signed!)
+
+Fixture `2801-ulong-shr-16-obj`:
+
+```c
+unsigned long top(unsigned long v) {
+  return v >> 16;
+}
+```
+
+```
+8b 46 06                       mov ax, v.HIGH
+33 d2                          xor dx, dx     ; ZERO-fill (unsigned)
+```
+
+Findings:
+- Unsigned `>> 16` uses `mov + xor dx, dx` (5 bytes).
+- Signed `>> 16` (`2795`) uses `mov + cwd` (4 bytes).
+- **Surprising**: unsigned is **1 byte LARGER** for this operation!
+  Usually unsigned saves bytes (no cbw/cwd), but the byte-swap
+  fold for `>> 16` specifically needs to zero-fill the high word —
+  cwd (1B) replicates sign cheaper than xor dx, dx (2B) zeroes.
+
+## `if (g)` for global long — `or` peephole combines halves
+
+Fixture `2806-if-long-test-obj`:
+
+```c
+long g_count;
+if (g_count) return 1;
+return 0;
+```
+
+```
+a1 00 00                       mov ax, [_g_count]      (LOW)
+0b 06 02 00                    or ax, [_g_count + 2]   (HIGH)
+74 05                          je → ZERO
+```
+
+Findings:
+- **Long zero-test peephole**: load LOW into AX, then **or with HIGH
+  word in memory** (`0b 06 disp16`, 4B). If the OR result is zero,
+  both halves were zero → long is zero.
+- Total test cost: 3B (load) + 4B (or-with-mem) + 2B (je) = **9
+  bytes** for the long zero-test.
+- Much cheaper than testing each half separately (would be 14+B).
+- Sign-irrelevant: same shape for signed and unsigned longs.
+
