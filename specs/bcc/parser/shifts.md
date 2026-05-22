@@ -1699,3 +1699,39 @@ same either way; the runtime is what differs.
 
 Confirms: shift codegen is purely structural (`d3 e0/e8/f8` etc.)
 with the count passed verbatim. No range-clamping at compile time.
+
+## Unsigned divide by 8 — three single-bit `shr` (not shifted by cl)
+
+Fixture `2513-unsigned-div-pow2-obj`:
+
+```c
+unsigned int u;
+u = 1000;
+return u / 8;
+```
+
+```
+55 8b ec 4c 4c                prologue + 2B local
+c7 46 fe e8 03                u = 1000 (0x03e8)
+8b 46 fe                      mov ax, u
+d1 e8                         shr ax, 1
+d1 e8                         shr ax, 1
+d1 e8                         shr ax, 1
+eb 00 8b e5 5d c3             epilogue
+```
+
+Findings:
+- `unsigned int / 8` is unrolled as **three single-bit `shr ax, 1`**
+  (each 2 bytes, total 6). BCC does NOT switch to the `shr ax, cl`
+  form (which would be `b1 03; d3 e8` = 4 bytes total) — three
+  unrolled shifts win on byte count for shift-by-3.
+- **No `div` instruction**: unsigned divide by power-of-2 is pure
+  shifts. Compare to *signed* `int / 8` (would need `idiv` because
+  arithmetic right-shift of negative values rounds the wrong way
+  per C semantics).
+- The threshold "unroll vs `shr cl,N`" — at shift-3 it's 6 bytes
+  unrolled vs 4 bytes via cl. BCC prefers the unroll here, so the
+  decision is not pure byte-minimization. Likely the threshold is
+  at 4+ shifts (where unrolled = 8 bytes > 4 bytes via cl).
+- d1 /5 = `shr r/m16, 1` (single-bit form).
+

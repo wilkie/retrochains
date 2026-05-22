@@ -409,3 +409,41 @@ Findings:
   the just-computed ax holds the value, BCC re-reads it. Sequence-
   point boundary behaves like the earlier comma-expr finding.
 
+
+## `!x` and `x == 0` produce identical bytes
+
+Fixture `2515-bang-vs-eq-zero-obj`:
+
+```c
+int x = 0;
+if (!x) return 1;
+if (x == 0) return 2;
+return 3;
+```
+
+Body (extracted):
+```
+33 f6                  xor si, si           ; x = 0 (in si)
+0b f6                  or si, si            ; FIRST: !x test
+75 05                  jnz +5
+b8 01 00 eb 0e         then: ax=1, jmp epi
+0b f6                  or si, si            ; SECOND: x == 0 test
+75 05                  jnz +5
+b8 02 00 eb 05         then: ax=2, jmp epi
+b8 03 00               else: ax=3
+eb 00 5e 5d c3         epilogue
+```
+
+Findings:
+- `!x` and `x == 0` emit the **SAME instruction shape**:
+  `or reg, reg; jnz <else>`. Byte-for-byte identical. The parser-
+  level distinction (logical-not vs equality-with-zero) is
+  flattened to one IR form before codegen.
+- No flag reuse between sequential ifs — each emits its own
+  `or si, si` even though si hasn't changed between them. This is
+  a missed peephole opportunity but a reliable invariant: independent
+  ifs are independent tests.
+- This is the canonicalization we can rely on: in our parser IR, we
+  can normalize `!x` → `x == 0` (or vice versa) and produce
+  identical bytes either way.
+

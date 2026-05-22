@@ -866,3 +866,37 @@ Findings:
   returns and for some larger struct copies. So small `char[]` and
   large structs share the helper path.
 
+
+## Char-returning function — loads AL only, leaves AH untouched
+
+Fixture `2514-noarg-char-ret-obj`:
+
+```c
+char which(void) {
+  return 'Q';
+}
+```
+
+```
+55                            push bp
+8b ec                         mov bp, sp
+b0 51                         mov al, 0x51  ; 'Q' — AL only, AH UNTOUCHED
+eb 00                         jmp $+2       ; default-position epi
+5d                            pop bp
+c3                            ret
+```
+
+Findings:
+- Char-return loads ONLY `al` with the character literal (opcode `b0`,
+  2 bytes). The high byte `ah` is never written — callers reading
+  the return as a `char` use only AL, so AH is undefined.
+- Saves 1 byte vs the int-return `mov ax, imm16` form (`b8 51 00`).
+- The default-position `eb 00` jump-to-epi IS emitted. **Confirms**:
+  non-void return functions ALWAYS emit `eb 00` before their pop bp,
+  regardless of body length (compared to void's body-falls-through-
+  into-pop pattern).
+- This is the canonical char-return prologue/body/epilogue shape;
+  it's the shortest possible function except for the absolute minimum
+  (a void function with empty body would be `55 8b ec 5d c3` = 5
+  bytes; this is 9).
+

@@ -3955,3 +3955,47 @@ Findings:
 - This generalizes to N-dimensional arrays with constant indices:
   all collapse to a single `disp16 + FIXUPP` regardless of rank.
 
+
+## `*p++` for int* — uses `inc reg; inc reg` (NOT `add reg, 2`)
+
+Fixture `2518-deref-post-inc-obj`:
+
+```c
+int a[3];
+int main(void) {
+  int *p;
+  int v;
+  p = a;
+  v = *p++;
+  return v;
+}
+```
+
+```
+55 8b ec 4c 4c                  prologue + 2B local for v
+56                              push si
+be 00 00                        mov si, 0          ; p = _a (FIXUPP _a)
+8b 04                           mov ax, [si]       ; *p
+89 46 fe                        mov [bp-2], ax     ; v = *p
+46                              inc si             ; p++ (byte 1 of 2)
+46                              inc si             ; p++ (byte 2 of 2)
+8b 46 fe                        mov ax, v
+eb 00 5e 8b e5 5d c3            epilogue
+```
+
+Findings:
+- `p++` for an `int*` (`sizeof(int) = 2`) emits as **two `inc reg`
+  instructions** (`46 46` = 2 bytes), NOT `add reg, 2` (`83 c6 02`
+  = 3 bytes). One-byte savings via the inc peephole.
+- The "++" comes AFTER the deref-and-store, respecting the postfix
+  semantic — exactly the source order.
+- Pointer `p` lives in si (single use beyond init), but the source
+  variable `v` is on the stack because it's the address-taken
+  target of an assignment. Even with only-one-use, the
+  expression-result `v` is forced to memory before being returned —
+  no register coalescing across the assignment.
+- Confirms a pattern: any `+= 2` on an int-typed register that's a
+  pointer becomes `inc; inc` rather than `add reg, 2`. To probe:
+  does `p++` for `long*` (sizeof=4) become `inc;inc;inc;inc`, or
+  switch to `add reg, 4`?
+

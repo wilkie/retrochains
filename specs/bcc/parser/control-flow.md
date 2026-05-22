@@ -2816,3 +2816,89 @@ Findings:
   is *exactly* where the body starts — no entry-condition pre-check
   like `while(){}` has.
 
+
+## `for(;;) { ...; if (cond) break; }` — break is a jmp past a jmp
+
+Fixture `2516-for-infinite-obj`:
+
+```c
+int g;
+for (;;) {
+  g = g + 1;
+  if (g > 100) break;
+}
+return g;
+```
+
+```
+55 8b ec                       prologue
+                               ; ---- LOOP TOP ----
+a1 00 00                       mov ax, [_g]              ; FIXUPP _g
+40                             inc ax
+a3 00 00                       mov [_g], ax              ; FIXUPP _g
+83 3e 00 00 64                 cmp word [_g], 100        ; FIXUPP _g
+7e 02                          jle +2 → SKIP-BREAK
+eb 02                          jmp +2 → after-loop
+                               ; ---- SKIP-BREAK ----
+eb ee                          jmp -18 → LOOP TOP
+                               ; ---- after-loop ----
+a1 00 00                       mov ax, [_g]              ; return g
+eb 00 5d c3                    epilogue
+```
+
+Findings:
+- `for(;;)` has zero init/cond/inc, so the **LOOP TOP is the body's
+  first instruction** — no entry stub.
+- `if (g > 100) break` compiles to a TWO-jump sequence:
+  - `cmp ... ; jle SKIP-BREAK` — i.e., the conditional CONTINUES the
+    loop when condition is FALSE.
+  - Then `jmp after-loop` — the actual break.
+  This double-jump shape (jle past a jmp) is **literally** the IR
+  `if (cond) { break; }` → "if (!cond) goto skip; break-jmp".
+- The conditional uses **`cmp word [_g], 100`** (direct mem operand)
+  for the compare — no load to register first. This is the
+  `83 3e disp16 imm8` form (sign-extended imm8).
+- The unconditional back-edge is `eb ee` (= jmp -18), reaching back
+  to the LOOP TOP — 18-byte loop body fits in disp8.
+- `++g` on a global directly uses `mov ax, [_g]; inc ax; mov [_g], ax`
+  — the AX accumulator pattern persists even for globals (no
+  `inc word [_g]` peephole, which would be 4 bytes vs the 7 used).
+
+
+## `goto top;` — same bytes as a `while`-back-edge
+
+Fixture `2517-goto-label-obj`:
+
+```c
+int i = 0;
+top:
+  i = i + 1;
+  if (i < 3) goto top;
+return i;
+```
+
+```
+55 8b ec 56                    prologue + push si
+33 f6                          xor si, si       ; i in si
+                               ; ---- top: ----
+8b c6                          mov ax, si       ; i++ via AX
+40                             inc ax
+8b f0                          mov si, ax
+83 fe 03                       cmp si, 3
+7d 02                          jge +2 → skip-goto
+eb f4                          jmp -12 → top
+                               ; ---- skip-goto ----
+8b c6                          mov ax, si       ; return i
+eb 00 5e 5d c3                 epilogue
+```
+
+Findings:
+- `goto top` compiles to a plain `jmp disp8` to the label. The
+  conditional-goto shape `if (i < 3) goto top` is identical to a
+  `while (i < 3)` back-edge: `cmp; jge past-jmp; jmp -N`. So
+  **goto and structured back-edges produce the same bytes**.
+- The AX-accumulator pattern is unbroken: `i++` is 3 instructions
+  (`mov ax, si; inc ax; mov si, ax`) NOT the single `inc si`.
+  Consistent with `2510` and `2516` — this is the canonical
+  expression-evaluation shape, not an edge case.
+
