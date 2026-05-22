@@ -1433,3 +1433,27 @@ Findings:
 - Same body as if the function had been written as `return *p;`.
 - This is BCC's "single-assignment alias" optimization.
 
+
+## `--g; return g;` for global — `dec word [_g]` + reload
+
+Fixture `2858-global-predec-obj`:
+
+```c
+int g;
+int dec_get(void) {
+  --g;
+  return g;
+}
+```
+
+```
+ff 0e 00 00                    dec word [_g]   (mem-imm dec, 4B FIXUPP)
+a1 00 00                       mov ax, [_g]    (reload for return)
+```
+
+Findings:
+- `--g` for global = `dec word [mem]` (4B). ModR/M `0e` = mod 00,
+  op-ext 001 (dec), r/m 110 (disp16).
+- Mirrors `++g` (`2638`) which uses `inc word [mem]` = `ff 06 disp16`.
+- Reload via `mov ax, [mem]` (3B) gives the NEW value for return.
+

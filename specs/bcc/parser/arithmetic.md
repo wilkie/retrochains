@@ -2460,3 +2460,25 @@ Findings:
   - Divide: `idiv` (signed) vs `div` (unsigned)
   - Promotion: `cbw` (signed) vs `mov ah, 0` (unsigned)
 
+
+## Signed `v >> 3` — 3 UNROLLED `sar ax, 1` (mirrors unsigned)
+
+Fixture `2855-sar-3-obj`:
+
+```c
+int shr(int v) {
+  return v >> 3;
+}
+```
+
+```
+8b 46 04                       mov ax, v
+d1 f8 d1 f8 d1 f8              sar ax, 1 × 3 (3 unrolled signed shifts)
+```
+
+Findings:
+- Signed `>> 3` uses 3 UNROLLED `sar ax, 1` (`d1 f8`), 6B total.
+- Same threshold as unsigned: N ≤ 3 unrolls, N ≥ 4 uses cl-form.
+- Sar opcode is `d1 f8` (1-bit), `d3 f8` (cl-form).
+- Unsigned would use `shr` opcode `d1 e8` / `d3 e8`.
+

@@ -5642,3 +5642,74 @@ Findings:
 - `add ax, [bx]` (3B `03 07`) reads through bx as mem source.
 - Both `i` and `s` are promoted to si/di (loop variables).
 
+
+## Large global array (`int big[200]` = 400B) — same disp16 access
+
+Fixture `2856-large-global-arr-obj`:
+
+```c
+int big[200];   /* BSS, 400 bytes */
+int peek(int i) {
+  return big[i];
+}
+```
+
+```
+8b 5e 04                       mov bx, i
+d1 e3                          shl bx, 1
+8b 87 00 00                    mov ax, [bx + _big] (FIXUPP, disp16)
+```
+
+Findings:
+- 400-byte global array uses **same code** as small arrays — disp16
+  addressing handles up to 64K of data (small model limit).
+- BSS segment size grew to fit, but codegen is unchanged.
+- ModR/M `87 00 00` for `[bx + disp16]` — same as smaller arrays.
+
+## Global ptr array `char *messages[3] = {"a","b","c"};` — string table idiom
+
+Fixture `2860-ptr-arr-init-obj`:
+
+`_DATA` layout:
+- offsets 0-5: 3 char* slots (each FIXUPP'd to its string)
+- offsets 6+: contiguous string data ("hello\0world\0test\0")
+
+```
+8b 5e 04                       mov bx, i
+d1 e3                          shl bx, 1
+8b 87 00 00                    mov ax, [bx + _messages]
+```
+
+Findings:
+- Each ptr slot holds its string's offset; FIXUPP relocates at link.
+- Strings laid out CONTIGUOUSLY in `_DATA` after the ptr table.
+- Access via bx-scaled index (sizeof(char*) = 2 = same as int).
+- The "string table" idiom (`char *strs[N] = {...}`) is the
+  standard C pattern; BCC handles it as expected.
+
+
+## `(*p)++` postfix — load OLD then inc in place (mirrors `++(*p)`)
+
+Fixture `2857-postinc-deref-obj`:
+
+```c
+int bump(int *p) {
+  return (*p)++;
+}
+```
+
+```
+8b 76 04                       mov si, p
+8b 04                          mov ax, [si]    ; load OLD value first
+ff 04                          inc word [si]   ; then inc in place
+```
+
+Findings:
+- `(*p)++` (postfix) = **load THEN inc** (4 bytes).
+- Compare to **`++(*p)`** (prefix, `2762`): inc THEN load (also 4B).
+- Same opcodes, REVERSED order — matches the semantic difference:
+  - postfix: return OLD, modify in place
+  - prefix: modify in place, return NEW
+- Compare to non-ptr postfix `a[K]++` (`2700`): same pattern but
+  with disp16 instead of no-disp (4B+4B=8B for non-zero offset).
+

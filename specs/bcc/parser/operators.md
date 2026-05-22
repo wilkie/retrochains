@@ -1133,3 +1133,32 @@ Findings:
 - The AX-carries-value pattern works because `=` is an expression
   returning the assigned value.
 
+
+## `return a < b;` — JOIN-as-bool pattern (0/1 from comparison)
+
+Fixture `2859-cmp-lt-fn-obj`:
+
+```c
+int less(int a, int b) {
+  return a < b;
+}
+```
+
+```
+8b 46 04                       mov ax, a
+3b 46 06                       cmp ax, b
+7d 05                          jge → ELSE       (signed inverse of jl)
+b8 01 00                       ax = 1
+eb 02                          jmp epi
+33 c0                          ax = 0
+```
+
+Findings:
+- Boolean-from-comparison `a < b` uses a **ternary-like JOIN**: if
+  the condition is true, ax = 1; else ax = 0.
+- 14 bytes for the bool-from-cmp expression.
+- For signed `<`: `jge → ELSE` (inverse). Unsigned `<` would use
+  `jae` (inverse of `jb`).
+- C's `<`, `<=`, `>`, `>=`, `==`, `!=` all produce 0/1 ints via
+  this same JOIN pattern.
+
