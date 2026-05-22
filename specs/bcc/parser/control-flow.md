@@ -3306,3 +3306,42 @@ Findings:
   the equivalent `for (...) x++;` would be far shorter, since
   `x++` uses `inc reg` directly (1 byte per inc).
 
+
+## Long forward conditional jump — `j<inv> +3; jmp disp16` trampoline
+
+Fixture `2627-disp16-jne-obj` — 32 successive `x = x + 1` in an
+if-then body. Forward displacement to ELSE > 127.
+
+```
+33 f6                          xor si, si        ; x = 0
+0b f6                          or si, si         ; test x
+74 03                          je +3 → SKIP-LONG-JMP
+e9 a4 00                       jmp +164 → ELSE
+                               ; SKIP-LONG-JMP / THEN body:
+... 32× (mov ax, si; inc ax; mov si, ax) = 160 bytes
+8b c6 eb 04                    ax = x ; jmp epi
+33 c0 eb 00                    ELSE: ax = 0
+5e 5d c3                       epilogue
+```
+
+Findings:
+- **8086 has no conditional disp16 jumps** (those are 80386+).
+  When BCC needs to jump >127 bytes on a condition, it INVERTS
+  the condition and emits a 2-byte short jump over a 3-byte
+  `jmp disp16`. Total 5 bytes:
+  - `j<inverted-cond> +3` (skip the long jmp = take the conditional path)
+  - `jmp disp16` (target = original conditional target)
+- So `if (x == 0)` with a 160-byte then-body compiles as:
+  ```
+  or si, si
+  je +3        ; if x==0, skip the long jmp (fall into then-body)
+  jmp ELSE     ; else, take the long jmp
+  THEN body
+  ```
+- This is **5 bytes total** vs 2 bytes for a regular short `jne`.
+  BCC pays this cost only when displacement exceeds ±127.
+- Pattern generalizes: every `j<cond>` family member gets the
+  same trampoline treatment when needed.
+- `e9 disp16` = unconditional jmp near (3 bytes). The disp16 is
+  signed relative to the byte after the jmp.
+

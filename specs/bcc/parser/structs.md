@@ -2233,3 +2233,34 @@ Findings:
 - This makes the FIRST field of a struct cheaper to access through
   a pointer than later fields.
 
+
+## `make().a` — struct-return + field-zero access = ZERO extraction cost
+
+Fixture `2629-struct-ret-field-obj`:
+
+```c
+struct Pair { int a; int b; };
+struct Pair make(void);
+int main(void) {
+  return make().a;
+}
+```
+
+```
+55 8b ec                       prologue
+e8 00 00                       call _make (FIXUPP)
+                               ; DX:AX returned; AX = field0 = a
+eb 00 5d c3                    epilogue
+```
+
+Findings:
+- A struct-return function's `field0` is already in AX after the
+  call (since DX:AX = HIGH:LOW maps field1:field0). Accessing
+  `.a` (the first field) requires **zero additional bytes**.
+- The `make().a` expression compiles to just the call — no field
+  extraction. The call result IS the return value.
+- For `make().b` (field 1), BCC would need `mov ax, dx` (2 bytes)
+  to extract DX → AX. To probe.
+- This is a **clean peephole**: struct-return functions are
+  inherently efficient at returning their first int-field.
+

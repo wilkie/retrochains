@@ -749,3 +749,70 @@ Findings:
 - Branch is `75 05` (jne) — skip the true-path if not equal.
 - Total: 3 (load) + 3 (cmp) + 2 (jne) = 8 bytes for the test.
 
+
+## `if (x <= K)` signed — `cmp + jg <else>`
+
+Fixture `2631-le-cmp-obj`:
+
+```c
+int x = 5;
+if (x <= 10) return 1;
+return 0;
+```
+
+```
+83 7e fe 0a                    cmp word [bp-2], 10
+7f 05                          jg → FALSE          (signed, skip-true)
+```
+
+Findings:
+- `<=` for signed maps to `jg` (jump if greater) as the SKIP-TRUE
+  branch — skip the then-body when `x > K`.
+- The skip-condition is the LOGICAL NEGATION of the source
+  predicate: `x <= K` → branch on `x > K`.
+- Complete signed compare table (skip-true forms):
+
+| C op | skip-true branch | opcode |
+|------|------------------|--------|
+| `<`  | jge              | 0x7D   |
+| `<=` | jg               | 0x7F   |
+| `>`  | jle              | 0x7E   |
+| `>=` | jl               | 0x7C   |
+| `==` | jne              | 0x75   |
+| `!=` | je               | 0x74   |
+
+  And unsigned counterparts (from `2536`):
+  | `<`  | jae | 0x73 |
+  | `<=` | ja  | 0x77 |
+  | `>`  | jbe | 0x76 |
+  | `>=` | jb  | 0x72 |
+
+
+## Bitwise NOT `~x` — single `not ax` (2 bytes)
+
+Fixture `2632-bit-not-obj`:
+
+```c
+int x = 0x0F0F;
+return ~x;
+```
+
+```
+55 8b ec 4c 4c                 prologue + 2B local
+c7 46 fe 0f 0f                 x = 0x0F0F
+8b 46 fe                       mov ax, x
+f7 d0                          not ax           ; bitwise complement
+eb 00 8b e5 5d c3              epilogue
+```
+
+Findings:
+- `~x` compiles to **`not ax`** (`f7 d0`, 2 bytes). The `f7 /2`
+  opcode with r/m 000 = ax.
+- Same shape as unary `-x` (`f7 d8` = `neg ax`), just opcode-ext 2
+  vs 3.
+- Unary operator table:
+  - `-x`  → `neg ax` (`f7 d8`)
+  - `~x`  → `not ax` (`f7 d0`)
+  - `!x`  → `or ax, ax; je <skip>` ... (more complex, see `2515`)
+  - `+x`  → no-op (zero bytes)
+

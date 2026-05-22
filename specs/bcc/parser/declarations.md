@@ -897,3 +897,34 @@ Findings:
   - PUBDEF global: same as static for storage; only the PUBDEF
     record differs.
 
+
+## Function with 8 ints — `sub sp, imm8` reserves 16-byte frame
+
+Fixture `2628-large-frame-obj`:
+
+```c
+int a; int b; int c; int d;
+int e; int f; int g; int h;
+```
+
+```
+55 8b ec 83 ec 10              prologue + sub sp, 16
+                               ; 8 init stores: c7 46 disp imm16 (5B each = 40B)
+                               ; 7 add ax, [bp-disp]: 3B each (21B)
+8b e5 5d c3                    leave (mov sp, bp; pop bp; ret)
+```
+
+Findings:
+- 8 ints × 2B = 16-byte frame uses **`sub sp, imm8`** (`83 ec 10`,
+  3 bytes — `83 /5` with imm8 sign-extended).
+- Locals laid out in **declaration order from highest address**:
+  - a@[bp-2], b@[bp-4], c@[bp-6], ..., h@[bp-16]
+- Frame-reserve threshold:
+
+| frame size  | instruction          | bytes |
+|-------------|----------------------|-------|
+| 0           | (nothing)            | 0B    |
+| 1-2         | `dec sp` × N         | 1-2B  |
+| 3-127       | `sub sp, imm8`       | 3B    |
+| 128+        | `sub sp, imm16`      | 4B    |
+

@@ -4394,3 +4394,52 @@ Findings:
   (no register-coalescing across the inc). So total = 4B (inc)
   + 3B (load) = 7 bytes to compute "increment and return".
 
+
+## `m[i][j]` 2D array with VAR indices — runtime row-stride mult via shifts
+
+Fixture `2630-2d-arr-var-idx-obj`:
+
+```c
+int m[3][4];
+int i = 1, j = 2;
+m[i][j] = 99;
+return m[i][j];
+```
+
+```
+55 8b ec 56 57                 prologue + push si, di
+be 01 00                       i = 1 (si)
+bf 02 00                       j = 2 (di)
+                               ; ---- m[i][j] = 99 ----
+8b de                          mov bx, i
+d1 e3 d1 e3 d1 e3              shl bx, 1 × 3        ; bx = i × 8 (row stride)
+8b c7                          mov ax, j
+d1 e0                          shl ax, 1            ; ax = j × 2
+03 d8                          add bx, ax           ; bx = full byte offset
+c7 87 00 00 63 00              mov word [bx + _m], 99  ; STORE (FIXUPP)
+                               ; ---- m[i][j] READ (same arithmetic redone) ----
+8b de d1 e3 d1 e3 d1 e3        i × 8 again
+8b c7 d1 e0                    j × 2 again
+03 d8                          bx = offset
+8b 87 00 00                    mov ax, [bx + _m]
+eb 00 5f 5e 5d c3              epilogue
+```
+
+Findings:
+- `m[i][j]` with both indices VARIABLE computes the byte offset at
+  runtime: `i × (cols × sizeof) + j × sizeof`.
+- For `int m[3][4]`: row stride = 4 × 2 = 8 bytes → **3 shl bx, 1**
+  (under N≤3 unroll rule). Element stride = 2 → 1 shl.
+- Index arithmetic costs:
+  - `i × row-stride` = 3 shifts (6 bytes for stride = 8)
+  - `j × sizeof` = 1 shift (2 bytes)
+  - Add = `03 d8` (2 bytes)
+  - Total = 10 bytes of index math per access.
+- **NO CSE between store and load** — both accesses recompute the
+  index from scratch. So `m[i][j] = 99; return m[i][j];` pays the
+  10-byte cost twice.
+- `mov [bx + _m]` uses ModR/M `87` (mod 10, r/m 111 = [bx + disp16])
+  with FIXUPP'd disp16 = `_m`.
+- For row counts that aren't powers of 2 (e.g. `m[3][5]`), the
+  row stride would need `mov dx, 10; imul dx` instead of shifts.
+
