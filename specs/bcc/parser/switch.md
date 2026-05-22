@@ -2255,3 +2255,37 @@ Findings:
   - `min == -1`: `inc bx` (1B)
   - other: `sub bx, min_case` (3B for imm8)
 
+
+## Switch min=1 — `dec bx` peephole (completes normalization rule set)
+
+Fixture `2928-switch-min-1-obj`:
+
+```c
+switch (x) {
+  case 1: return 10;
+  case 2: return 20;
+  case 3: return 30;
+  case 4: return 40;
+}
+```
+
+```
+8b 5e 04                       mov bx, x
+4b                             dec bx           (-1 normalizes min=1 to 0)
+83 fb 03                       cmp bx, 3
+...
+```
+
+Findings:
+- Confirms the **normalization peephole** for dense-table switch:
+
+| `min_case` | normalization | bytes |
+|------------|---------------|-------|
+| 0          | (none)        | 0B    |
+| 1          | `dec bx`      | 1B    |
+| -1         | `inc bx`      | 1B    |
+| other      | `sub bx, K`   | 3B (imm8) |
+
+- For larger constants would use `sub bx, imm16` (4B).
+- ±1 special-cased — saves 2B over the generic sub form.
+

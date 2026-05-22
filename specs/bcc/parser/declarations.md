@@ -1457,3 +1457,45 @@ Findings:
 - Mirrors `++g` (`2638`) which uses `inc word [mem]` = `ff 06 disp16`.
 - Reload via `mov ax, [mem]` (3B) gives the NEW value for return.
 
+
+## `char buf[5]` local — rounded UP to 6 bytes for stack alignment
+
+Fixture `2927-local-char-arr-zero-obj`:
+
+```c
+char buf[5];
+buf[0] = 'A';
+buf[1] = 'B';
+```
+
+```
+83 ec 06                       sub sp, 6  (5 rounded to 6)
+c6 46 fa 41                    buf[0] = 'A' ([bp-6])
+c6 46 fb 42                    buf[1] = 'B' ([bp-5])
+```
+
+Findings:
+- Local char arrays of odd size are **rounded UP to even** for
+  stack word alignment. `char[5]` → 6 bytes allocated.
+- Byte element access via `c6 46 disp8 imm8` (4B byte store).
+- The extra byte is padding (unused).
+
+## Empty `void` function — 5-byte body (no `eb 00` placeholder)
+
+Fixture `2930-void-fn-obj`:
+
+```c
+void nop(void) { }
+```
+
+```
+55 8b ec                       push bp; mov bp, sp
+5d c3                          pop bp; ret
+```
+
+Findings:
+- Empty void function = **5 bytes total** (just prologue + ret).
+- NO trailing `eb 00` placeholder jmp (which non-void fns emit
+  before the epilogue).
+- The truly-minimal function in BCC.
+

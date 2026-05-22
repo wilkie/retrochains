@@ -1279,3 +1279,27 @@ Findings:
 - Short-circuit semantics preserved: if `*p == 0`, skip evaluating
   `*q` entirely.
 
+
+## Comma operator `(expr1, expr2)` — sequential evaluation, expr2 is result
+
+Fixture `2931-comma-expr-obj`:
+
+```c
+return (a = a + 1, a + b);
+```
+
+```
+8b 76 04                       mov si, a
+8b c6 40 8b f0                 a = a + 1 (AX-acc)
+8b c6                          mov ax, a (= a + 1)
+03 46 06                       add ax, b
+```
+
+Findings:
+- Comma operator evaluates **left-to-right**, expr1 for side
+  effects, expr2 for the result.
+- BCC promotes `a` to si (modified parameter), uses standard
+  AX-acc patterns for both expressions.
+- The two expressions are emitted sequentially in source order;
+  expr1's result is discarded, expr2's value goes through AX.
+

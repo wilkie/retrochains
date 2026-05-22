@@ -5845,3 +5845,27 @@ Findings:
 - Same suboptimality probably affects all `p = p + K` forms vs
   `p += K` or `p++/++p`.
 
+
+## Pointer comparison `a < b` — UNSIGNED jumps (jb/jae/etc)
+
+Fixture `2929-struct-ptr-lt-obj`:
+
+```c
+struct P *a, *b;
+if (a < b) return 1;
+```
+
+```
+8b 46 04                       mov ax, a
+3b 46 06                       cmp ax, b
+73 05                          jae → ELSE       (UNSIGNED inverse of jb)
+```
+
+Findings:
+- Pointer comparisons use **UNSIGNED jumps** (`jb`, `ja`, `jae`,
+  `jbe`) regardless of source operator.
+- Pointers represent memory addresses (non-negative), so unsigned
+  comparison is the semantically correct choice.
+- Same rule as `unsigned int` comparison (`2867`).
+- Compare to signed int `<` which uses `jge` (signed) inverse.
+
