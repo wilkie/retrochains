@@ -2176,3 +2176,48 @@ Findings:
 - BCC chooses this when case values aren't contiguous (otherwise
   would use dense table from `2907`).
 
+
+## 3 contig cases at non-zero — STILL linear chain
+
+Fixture `2915-switch-3-contig-offset-obj`:
+
+```c
+switch (x) {
+  case 5: return 50;
+  case 6: return 60;
+  case 7: return 70;
+}
+```
+
+Body uses linear `cmp ax, K; je → CASE_K` per case. Confirms threshold:
+**N < 4 always linear**, regardless of case-value starting offset.
+
+## 4 contig cases at non-zero offset — dense table with `sub bx, min`
+
+Fixture `2916-switch-4-contig-nonzero-obj`:
+
+```c
+switch (x) {
+  case 5: return 50;
+  case 6: return 60;
+  case 7: return 70;
+  case 8: return 80;
+}
+```
+
+```
+8b 5e 04                       mov bx, x
+83 eb 05                       sub bx, 5     (subtract min_case!)
+83 fb 03                       cmp bx, 3     (range = max - min)
+77 1b                          ja → DEFAULT
+d1 e3                          shl bx, 1
+2e ff a7 2f 00                 jmp CS:[bx + table]
+```
+
+Findings:
+- Dense-table dispatch for non-zero-starting contiguous cases
+  uses **`sub bx, min_case`** (3B) to normalize the index to 0.
+- Range check: `cmp bx, (max - min)`.
+- Same N=4 contig threshold; sub adds 3 bytes vs zero-based form.
+- Table size still = N entries (= range + 1).
+

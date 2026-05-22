@@ -5793,3 +5793,26 @@ Findings:
 - ModR/M `97 disp16` = mod 10, reg 010 (dx), r/m 111 ([bx+disp16]).
 - Standard idiom for function-result-as-index assignment.
 
+
+## `char buf[]` parameter — identical to `char *buf` (array decay in declarations)
+
+Fixture `2919-char-arr-param-obj`:
+
+```c
+int first(char buf[]) {
+  return buf[0];
+}
+```
+
+```
+8b 76 04                       mov si, buf
+8a 04                          mov al, [si]
+98                             cbw
+```
+
+Findings:
+- `char buf[]` parameter is **byte-identical** to `char *buf`.
+- C array-decay rule: in parameter declarations, `T arr[]`,
+  `T arr[N]`, and `T *arr` all denote the same pointer type.
+- BCC treats them identically at codegen.
+

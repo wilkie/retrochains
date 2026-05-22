@@ -2506,3 +2506,28 @@ Findings:
 - Confirms multiplication folding asymmetry: `+K`, `*+K` get
   peepholes; `-K`, `*-K` don't.
 
+
+## `(a + b) * c` — `imul word [mem]` mem-source form
+
+Fixture `2917-a-plus-b-times-c-obj`:
+
+```c
+int compute(int a, int b, int c) {
+  return (a + b) * c;
+}
+```
+
+```
+8b 46 04                       mov ax, a
+03 46 06                       add ax, b
+f7 6e 08                       imul word [bp+8]   (3B, mem-source!)
+```
+
+Findings:
+- `imul` can take a **memory source operand** directly: `f7 6e
+  disp8` (mod 01, op-ext 101, r/m 110 = [bp+disp8]).
+- Saves vs `mov dx, c; imul dx` (5B → 3B).
+- Total 9 bytes for the entire 3-operand expression `(a+b)*c`.
+- BCC uses mem-source imul when the multiplier is from memory (not
+  a constant).
+

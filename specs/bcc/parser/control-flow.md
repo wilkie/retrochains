@@ -4239,3 +4239,43 @@ Findings:
 - Compare to `while (--n)` which runs **N-1 times** (no body when
   predec hits 0 immediately).
 
+
+## Nested for-loops — 3-local register promotion (si/di/dx)
+
+Fixture `2920-nested-for-obj`:
+
+```c
+int matrix_sum(int n, int m) {
+  int i, j, s = 0;
+  for (i = 0; i < n; i = i + 1) {
+    for (j = 0; j < m; j = j + 1) {
+      s = s + 1;
+    }
+  }
+  return s;
+}
+```
+
+```
+33 d2 33 f6 eb 18              s=0 (dx), i=0 (si), jmp → OUTER_COND
+                               ; OUTER_BODY:
+33 ff eb 0a                    j=0 (di), jmp → INNER_COND
+                               ; INNER_BODY:
+8b c2 40 8b d0                 s = s + 1 (AX-acc via DX)
+8b c7 40 8b f8                 j = j + 1
+                               ; INNER_COND:
+3b 7e 06 7c f1                 cmp di, m; jl → INNER_BODY
+                               ; (outer post)
+8b c6 40 8b f0                 i = i + 1
+                               ; OUTER_COND:
+3b 76 04 7c e3                 cmp si, n; jl → OUTER_BODY
+```
+
+Findings:
+- All 3 loop locals (`s`, `i`, `j`) promoted to `si`, `di`, `dx`
+  in this leaf function — full 3-local register slot allocation.
+- Nested loop structure: each `for` follows standard `init; jmp →
+  cond; body; post; cond; j<cond> → body` pattern.
+- Inner body's post-increment runs every iteration; outer body's
+  post runs once per outer iteration.
+

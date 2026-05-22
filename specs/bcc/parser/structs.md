@@ -3143,3 +3143,28 @@ Findings:
 - Consistent with `{char; int}` = 3B (`2718`), `{int; char}` = 3B
   (`2854`), `{char; char; int}` = 4B (`2792`).
 
+
+## `p->y = v` (field at offset 2) — `mov [si + disp8], ax` (4B)
+
+Fixture `2918-struct-nonzero-write-obj`:
+
+```c
+struct P { int x; int y; };
+void set_y(struct P *p, int v) {
+  p->y = v;
+}
+```
+
+```
+8b 76 04                       mov si, p
+8b 46 06                       mov ax, v
+89 44 02                       mov [si + 2], ax   (disp8 form, 3B + 1B disp = 4B)
+```
+
+Findings:
+- Non-zero field offset write uses `mov [si + disp8], ax` (`89 44
+  disp8`, 3B + 1 = 4B). ModR/M `44 02` = mod 01, reg 000 (ax), r/m
+  100 ([si + disp8]).
+- Compare to `p->x = v` (offset 0) which uses `mov [si], ax`
+  (`89 04`, 2B). Field-zero saves 1 byte.
+
