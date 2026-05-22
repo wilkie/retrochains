@@ -1511,3 +1511,63 @@ Findings:
   to the table's start.
 - All bodies (case AND default) end with `jmp <EPI>` for merge.
 
+
+## Sparse switch (4+ non-contiguous cases) — **search table**, NOT jump table
+
+Fixture `2567-switch-sparse-search-obj`:
+
+```c
+int x = 10;
+switch (x) {
+  case 1:   return 11;
+  case 10:  return 22;
+  case 100: return 33;
+  case 500: return 44;
+}
+return 0;
+```
+
+Key main body sections:
+```
+83 ec 04                       sub sp, 4              ; 4B = x + temp
+c7 46 fe 0a 00                 x = 10
+8b 46 fe                       mov ax, x
+89 46 fc                       mov [bp-4], ax         ; spill x to compare slot
+b9 04 00                       mov cx, 4              ; case count
+bb 45 00                       mov bx, &case-values  ; (FIXUPP)
+                               ; ---- LINEAR SEARCH LOOP ----
+2e 8b 07                       mov ax, CS:[bx]        ; next case value
+3b 46 fc                       cmp ax, [bp-4]
+74 06                          je → MATCH
+43 43                          inc bx; inc bx         ; advance pointer
+e2 f4                          loop -12 → LOOP TOP
+eb 18                          jmp → DEFAULT          ; no match
+                               ; ---- MATCH ----
+2e ff 67 08                    jmp word ptr CS:[bx+8] ; skip case-values (4×2B), index handler offset
+                               ; ---- case bodies (mov ax,K; jmp epi) ----
+                               ; ---- default body (xor ax,ax) ----
+                               ; ---- search tables (in _TEXT) ----
+01 00 0a 00 64 00 f4 01         ; CASE VALUES: 1, 10, 100, 500
+29 00 2e 00 33 00 38 00         ; HANDLER OFFSETS: 4 FIXUPP'd code offsets
+```
+
+Findings:
+- **Sparse switch (4+ non-contiguous cases) uses a LINEAR SEARCH
+  TABLE**, not the dense jump-table from `2550`.
+- Two parallel tables in `_TEXT`:
+  - **CASE VALUES**: N × 2-byte case constants
+  - **HANDLER OFFSETS**: N × 2-byte FIXUPP'd code offsets to bodies
+- Dispatch uses **`loop` instruction** (`e2 disp8`) — decrements CX
+  and branches if non-zero. This implies a 256-case maximum because
+  `loop` uses disp8.
+- On match, the offset between the matched case-value and the
+  corresponding handler is exactly `+8` bytes = `(case-count - matched-index) × 2 + matched-index × 2 = case-count × 2`. So `jmp word ptr CS:[bx + case_count*2]` retrieves the handler.
+- Switch strategy thresholds (now complete):
+
+| case count | layout      | dispatch                            |
+|------------|-------------|-------------------------------------|
+| 1          | linear      | `cmp; je body; jmp default`         |
+| 2-3        | linear chain (to probe) | sequential cmp/je       |
+| 4+ contig  | dense table | `cmp; ja default; shl; jmp CS:[bx+]` |
+| 4+ sparse  | search table | `loop` linear scan, dual tables    |
+

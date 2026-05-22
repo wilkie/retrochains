@@ -749,3 +749,44 @@ to keep the OBJ smaller.
 
 Same rule applies at file scope: `int g;` (no init) goes to `_BSS`,
 `int g = 5;` goes to `_DATA`.
+
+## Function-scope `static int n = 0` — `_BSS` storage, NO PUBDEF
+
+Fixture `2572-fn-static-int-obj`:
+
+```c
+int counter(void) {
+  static int n = 0;
+  n = n + 1;
+  return n;
+}
+```
+
+OBJ symbols:
+- `_counter` — PUBDEF (the function)
+- `n` — NO PUBDEF (static = local linkage)
+- `n` lives in `_BSS` segment, 2 bytes (since init = 0)
+
+Body:
+```
+55 8b ec                       prologue
+a1 00 00                       mov ax, [n]            ; load (FIXUPP)
+40                             inc ax                 ; n + 1 peephole
+a3 00 00                       mov [n], ax            ; store (FIXUPP)
+a1 00 00                       mov ax, [n]            ; RELOAD for return
+eb 00 5d c3                    epilogue
+```
+
+Findings:
+- **Function-scope `static` behaves identically to file-scope static**:
+  - Zero-init → `_BSS` (not `_DATA`)
+  - No PUBDEF, so the linker can't see it from other OBJs
+  - Persists across function calls
+- The variable has internal linkage; its name (whatever BCC chose
+  internally) doesn't escape into the PUBDEF table.
+- `n = n + 1` uses the **AX-accumulator pattern** (load + inc +
+  store), then **RELOADS for the return value** — no CSE between
+  the store and the load.
+- The `inc ax` peephole still fires for `+ 1` even when stored to
+  global memory.
+

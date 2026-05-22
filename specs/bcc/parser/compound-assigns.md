@@ -2707,3 +2707,39 @@ Findings:
   some values, but BCC always uses imul. Source-form `x + x + x + x + x`
   would emit 4 adds instead — to probe.
 
+
+## `x |= imm` — `or reg, imm16` direct on register (NOT imm8 sign-ext form)
+
+Fixture `2571-or-assign-obj`:
+
+```c
+int x;
+x = 0xF000;
+x |= 0x000F;
+return x;
+```
+
+```
+55 8b ec 56                    prologue + push si
+be 00 f0                       mov si, 0xF000           ; x in si
+81 ce 0f 00                    or si, 0x000F            ; imm16 form
+8b c6                          mov ax, si
+eb 00 5e 5d c3                 epilogue
+```
+
+Findings:
+- `x |= imm` emits **`or reg, imm16`** (`81 /1 ce imm16`, 4 bytes)
+  EVEN when the immediate fits in 8 bits.
+- Could use the sign-extended `83 ce imm8` form (3 bytes) — for
+  `0x0F` the sign-extension to `0x000F` is correct here — but BCC
+  doesn't take that peephole. Same defensive behavior we saw for
+  XOR (`2507`).
+- This is likely because for bitwise ops, sign-extended values can
+  be wrong (`0xFF → 0xFFFF` flips high bits unintentionally). BCC
+  picks the always-safe imm16 form.
+- The compound-assign goes **directly on the register** holding x
+  (ModR/M `ce` = mod 11, opcode-ext 001=or, r/m 110=si). NO
+  AX-accumulator pattern (load to ax, op, store back). Same as
+  `--i` direct dec — single-instruction compound ops apply to the
+  variable register itself.
+

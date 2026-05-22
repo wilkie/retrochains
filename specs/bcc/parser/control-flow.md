@@ -2990,3 +2990,45 @@ Findings:
   `inc reg`. So **the source FORM matters**: `n++` would emit `inc
   di` directly, but `n = n + 1` always goes through AX.
 
+
+## `for(init; cond; inc)` — init outside, increment APPENDED to body
+
+Fixture `2568-for-full-form-obj`:
+
+```c
+for (i = 0; i < 5; i = i + 1) {
+  s = s + i;
+}
+```
+
+```
+33 ff 33 f6                    init: di=0 (s), si=0 (i)
+eb 0b                          jmp → COND
+                               ; ---- BODY (includes the for's INC clause) ----
+8b c7 03 c6 8b f8              s = s + i  (AX-acc)
+8b c6 40 8b f0                 i = i + 1  (AX-acc, the for-INC clause)
+                               ; ---- COND ----
+83 fe 05                       cmp si, 5
+7c f0                          jl -16 → BODY (signed branch)
+8b c7                          return s
+```
+
+Findings:
+- `for(init; cond; inc) { body }` desugars to:
+  ```
+  init;
+  goto COND;
+  TOP: body; inc;
+  COND: if (cond) goto TOP;
+  ```
+- The **for-loop's INCREMENT clause is appended to the body** —
+  not a separate region. So from a codegen perspective, `for` is
+  identical to:
+  ```
+  init; while (cond) { body; inc; }
+  ```
+- Both `s` and `i` get register promotion to di/si even though
+  `s = 0` is OUTSIDE the for in the source.
+- Conditional uses `jl` (signed less-than) — matches signed `int i`.
+- Same "test-at-bottom" frame as while (`2561`).
+

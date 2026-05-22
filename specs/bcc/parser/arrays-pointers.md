@@ -4120,3 +4120,46 @@ Findings:
 - Byte store uses `88 46 ff` (`mov [bp-1], al`, opcode `88` = byte store).
 - Char return path: `mov al, c; cbw` for int-context return.
 
+
+## `int **pp` — chained dereference via single register
+
+Fixture `2570-ptr-to-ptr-obj`:
+
+```c
+int x = 42;
+int *p = &x;
+int **pp = &p;
+int main(void) {
+  return **pp;
+}
+```
+
+`_DATA` (6 bytes, declaration order):
+```
+2a 00     ; x = 42 at offset 0
+00 00     ; p (= &x) at offset 2, FIXUPP _x
+02 00     ; pp (= &p) at offset 4, FIXUPP _p
+```
+
+Main body:
+```
+55 8b ec                       prologue
+8b 1e 04 00                    mov bx, [_pp]          ; bx = pp's value (= addr of p)
+8b 1f                          mov bx, [bx]           ; bx = *pp (= addr of x)
+8b 07                          mov ax, [bx]           ; ax = **pp (= 42)
+eb 00 5d c3                    epilogue
+```
+
+Findings:
+- `**pp` produces **three sequential loads**, all chained through
+  bx. Each `mov bx, [bx]` (`8b 1f` = mod 00 r/m 111 = `[bx]`) is
+  the canonical deref step.
+- Final deref lands in ax for the return value.
+- No optimization for known-at-compile-time chains (pp, p, x all
+  initialized to known addresses) — BCC dereferences all three at
+  runtime.
+- Globals laid out in **source declaration order** in `_DATA`:
+  x@0, p@2, pp@4.
+- The init expressions `&x`, `&p` are FIXUPP'd at link time —
+  these are inter-segment relocations within `_DATA`.
+

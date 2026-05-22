@@ -2197,3 +2197,46 @@ Findings:
 - This generalizes: any `(int)long_var` cast = moffs16 word load at
   the long's BASE address (which holds the low word in little-endian).
 
+
+## `(int)(a + b)` for ulong — type-directed eager truncation
+
+Fixture `2569-ulong-add-obj`:
+
+```c
+unsigned long a;
+unsigned long b;
+a = 0x10000UL;
+b = 0x20002UL;
+return (int)(a + b);
+```
+
+```
+55 8b ec 83 ec 08              prologue + 8B locals (2 longs × 4B)
+                               ; a = 0x10000 → HIGH=1, LOW=0
+c7 46 fe 01 00                 [bp-2] = 0x0001    ; a HIGH
+c7 46 fc 00 00                 [bp-4] = 0x0000    ; a LOW
+                               ; b = 0x20002 → HIGH=2, LOW=2
+c7 46 fa 02 00                 [bp-6] = 0x0002    ; b HIGH
+c7 46 f8 02 00                 [bp-8] = 0x0002    ; b LOW
+                               ; return (int)(a + b)
+8b 46 fc                       mov ax, [bp-4]     ; a.LOW
+03 46 f8                       add ax, [bp-8]     ; + b.LOW
+eb 00 8b e5 5d c3              epilogue
+```
+
+Findings:
+- **`(int)long_expr` triggers EAGER truncation**: BCC sees the cast
+  and only emits the bits of computation needed for the low word.
+  Here `a + b` would normally be a 32-bit add (low word add + high
+  word adc), but only the low-word add is emitted.
+- The high-word `adc` is **NOT** emitted — the high half of the
+  result wouldn't be used after the int-cast anyway. This is
+  correct: `(int)(a + b) == int(low(a) + low(b))` regardless of
+  any carry, because the carry only affects the high word.
+- This generalizes: a `(int)` cast over a multi-word arithmetic
+  expression EXCISES the high-word work.
+- Long-store byte order in memory is unchanged: HIGH word at
+  higher address (offset 2 within the long), LOW at offset 0. So
+  `[bp-2]` holds the HIGH word, `[bp-4]` the LOW (for a long at
+  `[bp-4..-1]`).
+
