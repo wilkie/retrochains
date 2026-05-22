@@ -1624,3 +1624,34 @@ A CSE optimization could compute `i*4` once and reuse it for all
 fields of the same `a[i]` — but BCC doesn't perform this. Each
 subscript expression is lowered independently, consistent with the
 broader no-CSE pattern documented elsewhere.
+
+## `sizeof(struct X)` returns packed byte total (fixture `2474`)
+
+`struct Three { int x; char c; int y; };` — without padding, this is
+5 bytes (2 + 1 + 2). BCC's `sizeof` returns exactly 5, confirming
+the [[struct-fields-packed-no-padding]] layout:
+
+```c
+struct Three { int x; char c; int y; };
+return sizeof(struct Three);
+```
+
+```
+b8 05 00                ; mov ax, 5
+```
+
+Compare to an aligning compiler (would pad to 6 bytes: int+pad+char
++pad+int, or similar). BCC: 5 bytes flat.
+
+The sizeof folds at compile time — no runtime computation, just the
+literal `mov ax, 5`. Confirms:
+- Struct sizes are compile-time constants in all expression contexts
+- The size is the **packed byte count**, not a rounded-up
+  alignment-aware value
+- This applies regardless of how the struct is used (sizeof, stack
+  allocation, file-scope reserve)
+
+So when a struct's individual stack frame rounds up (e.g. fixture
+`2420`'s 9-byte struct reserves 10 bytes), that's a **stack
+alignment** rule, NOT the struct's intrinsic size — the struct
+itself is still 9 bytes by `sizeof`.

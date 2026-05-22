@@ -766,3 +766,26 @@ Probe replaced with the char-compound-OR variant.
   `mov bx, [bp+arr0_offset] / mov [bx], 100` — load the pointer
   from the array slot, then deref-write. Standard ptr-array
   mechanics.
+
+## Free passes (batch 687)
+
+- `2471` — bitfield read/write: `struct { uint a:3; uint b:4; }`
+  with `f.a = 5; f.b = 10;`. Standard bitfield packing applies
+  (LSB-first within word). Re-confirms bitfield mechanics from
+  earlier fixtures.
+- `2472` — `int sum3(int *a)`-style array-as-pointer arg: caller
+  passes `lea ax, [bp-N] / push ax`; callee accesses `a[K]` via
+  `mov si, [bp+4] / mov ax, [si+2*K]`. Standard ptr-arg + indexed
+  read.
+- `2473` — `while (--i) body;` (pre-decrement as while
+  condition): `eb fwd / body / dec si / jne back` — the jmp-to-
+  test first; the dec sets ZF directly for the test. Identical
+  template to the [[do-while-dec-only]] finding from fixture
+  `2361`, modulo body placement.
+- `2475` — `x = make();` (assigning from a function returning a
+  small 4-byte struct): the struct fits in DX:AX per the ABI; the
+  caller stores `[bp+a_off] = ax / [bp+b_off] = dx`.
+- `2476` — `c ? (a=5, 10) : (b=7, 20);` (comma operator inside
+  ternary branches): each branch evaluates its own comma sequence
+  for side effect then provides the final value to AX. Standard
+  ternary template + standard comma — composed cleanly.
