@@ -2943,3 +2943,50 @@ Findings:
   when the cascade completes successfully — the `jmp +4` to epi
   is from the explicit `return 7` body.
 
+
+## `while (*p != 0)` — test-at-bottom shape, direct `cmp byte [si], 0`
+
+Fixture `2561-while-sentinel-obj`:
+
+```c
+char buf[5] = "hi";
+int main(void) {
+  char *p = buf;
+  int n = 0;
+  while (*p != 0) {
+    n = n + 1;
+    p = p + 1;
+  }
+  return n;
+}
+```
+
+```
+55 8b ec 56 57                 prologue + push si, di
+be 00 00                       mov si, _buf (FIXUPP)    ; p in si
+33 ff                          xor di, di               ; n in di
+eb 0a                          jmp +10 → COND
+                               ; ---- LOOP-BODY ----
+8b c7 40 8b f8                 n = n+1 (AX-accum)
+8b c6 40 8b f0                 p = p+1 (AX-accum)
+                               ; ---- COND ----
+80 3c 00                       cmp byte [si], 0         ; direct mem-to-imm8
+75 f1                          jnz -15 → BODY
+8b c7                          mov ax, di               ; return n
+eb 00 5f 5e 5d c3              epilogue
+```
+
+Findings:
+- **`while`** uses **test-at-bottom** structure: initial `jmp +N → COND`,
+  then body, then condition with backward `jnz/jne` to body start.
+  Compare to `do/while` (no initial jump) and `for(;;)` (no entry stub).
+- The sentinel check `*p != 0` emits as **`cmp byte ptr [si], 0`**
+  (`80 3c 00`, opcode `80` /7 byte-cmp with imm8, ModR/M `3c` = mod 00
+  r/m 100 = `[si]`, then `00` is the imm8). 3 bytes total, NO load
+  to register first.
+- `_buf` initialized with `"hi"` produces 5-byte _DATA segment with
+  `68 69 00 00 00` — char[] partial init **zero-fills the rest**.
+- Note: `n = n + 1` uses the AX-accumulator pattern (3 instr) — NOT
+  `inc reg`. So **the source FORM matters**: `n++` would emit `inc
+  di` directly, but `n = n + 1` always goes through AX.
+

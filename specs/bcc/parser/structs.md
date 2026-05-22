@@ -2029,3 +2029,45 @@ Findings:
   direct memory source.
 - Total body for 4 field sum = 14 bytes (load + 3 adds + epi).
 
+
+## Union of int and char[2] — alias same offset, little-endian access
+
+Fixture `2563-union-int-char-obj`:
+
+```c
+union U { int i; char c[2]; };
+union U u;
+int main(void) {
+  u.i = 0x1234;
+  return u.c[0] + u.c[1];
+}
+```
+
+```
+55 8b ec                       prologue
+c7 06 00 00 34 12              [_u+0] = 0x1234      ; u.i write (FIXUPP)
+a0 00 00                       mov al, [_u+0]       ; u.c[0]   (= 0x34, LSB)
+98                             cbw
+50                             push ax              ; spill
+a0 01 00                       mov al, [_u+1]       ; u.c[1]   (= 0x12, MSB)
+98                             cbw
+8b d0                          mov dx, ax
+58                             pop ax
+03 c2                          add ax, dx
+eb 00 5d c3                    epilogue
+```
+
+Findings:
+- Union members alias the same storage: `u.i` and `u.c[0]` both at
+  `_u+0`. Sizeof(union U) = 2 (max of member sizes).
+- **Little-endian byte order confirmed**: writing `u.i = 0x1234`
+  produces `34 12` in memory. So `u.c[0] = 0x34` (LSB),
+  `u.c[1] = 0x12` (MSB). Same as long byte order.
+- All access happens via direct moffs8/moffs16 (`a0`/`c7 06`) at the
+  appropriate offset within `_u`. No alias-aware codegen; the parser
+  type system tracks which member name maps to which offset.
+- The sum `c[0] + c[1]` uses the **push/pop spill pattern** from
+  `2558` — both bytes promoted via cbw, with stack-spill between
+  them since both compete for AX.
+- This is the canonical pattern for type punning via union in C.
+

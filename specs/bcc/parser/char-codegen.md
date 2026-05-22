@@ -1080,3 +1080,39 @@ Findings:
   pays this 4-byte overhead (push + pop + mov-dx) on top of the
   per-operand promotion.
 
+
+## `signed char c = -128` — `0x80` byte, cbw sign-extends to `0xFF80`
+
+Fixture `2566-schar-neg-promote-obj`:
+
+```c
+int main(void) {
+  signed char c;
+  c = -128;
+  return c + 1;
+}
+```
+
+```
+55 8b ec 4c 4c                 prologue + 2B local
+c6 46 ff 80                    mov byte [bp-1], 0x80      ; c = -128
+8a 46 ff                       mov al, c
+98                             cbw                        ; sign-extend
+40                             inc ax                     ; +1 peephole
+eb 00 8b e5 5d c3              epilogue
+```
+
+Findings:
+- `signed char c = -128` stores the byte **`0x80`** at `[bp-1]`
+  (two's complement). The 0x80 byte has its sign bit set.
+- `cbw` is the right tool: it takes AL = 0x80 and produces
+  AX = 0xFF80 (= -128 as signed int). The sign extends correctly
+  at the boundary value. This is the standard signed-char promote.
+- `c + 1` uses the `inc ax` peephole (1 byte) — same as `int + 1`.
+- Result: `0xFF80 + 1 = 0xFF81` = -127 (signed).
+- Confirms the cbw promotion preserves value semantics across the
+  signed-char range — no surprises at -128.
+- Operator table holds:
+  - Signed char promote: cbw (1B)
+  - Unsigned char promote: mov ah, 0 (2B)
+

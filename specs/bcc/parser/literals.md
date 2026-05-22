@@ -319,3 +319,38 @@ Findings:
 - Each string is null-terminated and packed back-to-back; no
   alignment padding between strings.
 
+
+## Mixed globals + string literal — declaration order in `_DATA`
+
+Fixture `2565-string-then-data-obj`:
+
+```c
+int n = 42;
+char *s = "ZZ";
+int main(void) {
+  return n + s[0];
+}
+```
+
+`_DATA` layout (7 bytes total):
+```
+2a 00       ; offset 0: _n = 42
+04 00       ; offset 2: _s = &"ZZ" (= _DATA + 4, FIXUPP'd)
+5a 5a 00    ; offset 4: "ZZ\0" literal
+```
+
+Findings:
+- Globals are laid out in **declaration order** in `_DATA`. Each
+  occupies its declared size: 2B for int, 2B for char* (near ptr).
+- The string literal `"ZZ"` lands in the SAME `_DATA` segment,
+  immediately after the regular globals. So mixed init goes in
+  one contiguous segment.
+- The pointer `_s` is FIXUPP'd to point to offset 4 (where the
+  string lives) in `_DATA`. The FIXUPP target is the segment, with
+  disp16=4 in the storage.
+- This contrasts with `char s[] = "ZZ"` where s would BE the bytes
+  (no pointer indirection). The `char *s` form uses a separate
+  pointer slot + the literal.
+- The expression `n + s[0]` uses the **push/pop pattern** again to
+  juggle int and char (cbw-promoted) results through AX.
+

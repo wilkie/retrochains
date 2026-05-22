@@ -2667,3 +2667,43 @@ parser, encoder, or codegen change was required.
   Probe replaced with the logical-not-of-compare variant until
   the non-ident array index path lands.
 
+
+## `x *= 5` for signed int — `imul reg16` (no immediate form on 8086)
+
+Fixture `2562-mult-assign-obj`:
+
+```c
+int main(void) {
+  int x;
+  x = 7;
+  x *= 5;
+  return x;
+}
+```
+
+```
+55 8b ec 56                    prologue + push si
+be 07 00                       mov si, 7              ; x in si
+ba 05 00                       mov dx, 5              ; rhs operand into dx
+8b c6                          mov ax, si             ; ax = x
+f7 ea                          imul dx                ; dx:ax = ax × dx
+8b f0                          mov si, ax             ; x = low half
+8b c6                          mov ax, si             ; return x
+eb 00 5e 5d c3                 epilogue
+```
+
+Findings:
+- `x *= 5` for **signed int** uses **`imul reg16`** (`f7 ea` =
+  opcode-ext 5 = imul, r/m 010 = dx). The 8086 `imul` does NOT
+  have an immediate form (added in 186/286), so BCC must:
+  1. Load the constant into a scratch register (dx here)
+  2. `imul dx` — gives DX:AX = AX × DX
+  3. Keep only the low half (AX); high half (DX) discarded
+- For **unsigned**, BCC would use **`mul`** (`f7 e2`, opcode-ext 4).
+- This means even simple constant multiplies cost 4-5 bytes
+  (mov+imul) plus the 2-3 byte load for x. No way to fold the
+  constant into a single instruction on 8086.
+- Could potentially optimize `x * 5` as `x * 4 + x` (shl + add) for
+  some values, but BCC always uses imul. Source-form `x + x + x + x + x`
+  would emit 4 adds instead — to probe.
+

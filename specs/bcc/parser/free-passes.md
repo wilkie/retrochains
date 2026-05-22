@@ -939,3 +939,51 @@ This means the parser's expression evaluator must fold constant-
 expressions when computing initializers. Operator precedence
 respected: `*` before `+`.
 
+
+## Free pass: `si` and `di` are CALLEE-PRESERVED across calls
+
+Fixture `2564-recursive-factorial-obj`:
+
+```c
+int fact(int n) {
+  if (n <= 1) return 1;
+  return n * fact(n - 1);
+}
+```
+
+```
+55 8b ec                       prologue
+56                             push si             ; SAVE si (callee-preserved)
+8b 76 04                       mov si, n           ; n in si
+83 fe 01                       cmp si, 1
+7f 05                          jg → ELSE
+b8 01 00                       mov ax, 1           ; return 1
+eb 0c                          jmp epi
+                               ; ELSE:
+8b c6                          mov ax, si
+48                             dec ax              ; n - 1
+50                             push ax
+e8 e8 ff                       call fact (rel -24)  ; RECURSION
+59                             pop cx
+f7 ee                          imul si              ; ax × n (si still has n!)
+eb 00 5e 5d c3                 epilogue (pop si included)
+```
+
+Findings:
+- `si` is **callee-preserved**: pushed in prologue (`56`), popped in
+  epilogue (`5e`). So a caller can keep a value in si across a
+  function call WITHOUT manual spilling.
+- Here `n` is loaded into si BEFORE the recursive call, and
+  `imul si` AFTER the call works — si is still valid. The
+  recursive `fact()` had its own `push si` in prologue to save
+  whatever the caller's si was, then used si for its own n.
+- Same applies to `di`. Both are part of the cdecl "non-volatile"
+  set in BCC.
+- `ax`, `cx`, `dx`, `bx` are caller-saved (volatile across calls).
+- This **eliminates a class of spill/reload pairs** in our codegen:
+  values placed in si/di before a call don't need to be saved by
+  the caller.
+- Recursive call uses `e8 rel16` with backward offset reaching the
+  function's own entry point. The FIXUPP record handles symbolic
+  resolution.
+
