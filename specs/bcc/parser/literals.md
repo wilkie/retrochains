@@ -227,3 +227,28 @@ For the Rust reimplementation:
 - Do NOT attempt variable-identity simplification
   or all-ones-mask recognition.
 
+
+## String literal subscript — folds to `mov al, [disp16]` (fixture `2381`)
+
+`"ABCDEF"[2]` — constant subscript of a string literal compiles to a
+**single byte load with absolute disp16**, no pointer materialization:
+
+```
+a0 02 00                ; mov al, [0x0002]   ← FIXUPP-relative to string base + 2
+98                      ; cbw                ← widen to int for return
+```
+
+The opcode `a0 disp16` is the AL-form `mov al, moffs8` — a special
+accumulator-only encoding that takes a 16-bit absolute address. The
+`02 00` displacement is the FIXUPP offset that the linker resolves
+to "string base + 2" once the string literal `"ABCDEF\0"` (`41 42 43
+44 45 46 00`) is placed in `_DATA`.
+
+So `"STR"[K]` for a constant `K`:
+- The compiler treats the literal subscript as `*(literal + K)`.
+- `literal + K` is itself a constant (linker-resolved address +
+  parse-time `K`).
+- The deref folds to the single `a0 disp16` byte-load form.
+
+No `mov bx, offset str / mov al, [bx+K]` round-trip — BCC peepholes
+directly to the moffs8 form.

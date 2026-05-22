@@ -1639,3 +1639,37 @@ variants `ShlBxDispImm1` (`D1 67 dd`), `SarBxDispImm1` (`D1 7F
 dd`), `ShrBxDispImm1` (`D1 6F dd`) — all Group-2 1-bit shifts
 with mod=01 r/m=111=BX (no `C1` imm8 form on 8086).
 
+
+## `unsigned char >> K` — promotes to int, uses `sar` (fixture `2382`)
+
+`unsigned char x = 0xC0; return x >> 1;` does NOT use `shr` on a
+byte register. Instead, BCC follows C's default integer promotions:
+the `unsigned char` value widens to `int` first (via `mov ah, 0`
+zero-extend), and the shift is performed on AX with the **`int`
+shift opcode `sar`**:
+
+```
+c6 46 ff c0             ; uchar x = 0xC0
+8a 46 ff                ; mov al, x      (byte load)
+b4 00                   ; mov ah, 0      (zero-extend uchar → int)
+d1 f8                   ; sar ax, 1      ← /7 = sar, NOT /5 = shr
+```
+
+This is semantically equivalent here because after zero-extension AX
+is always non-negative (high bit clear), so `sar` and `shr` produce
+the same result. But the *encoding* is `d1 f8` (`/7`) not `d1 e8`
+(`/5`).
+
+Why? After promotion, the operand TYPE is `int` (signed), so BCC
+selects the signed shift opcode based on type, not on the original
+source type. The unsignedness of the original `char` is "forgotten"
+once promotion happens.
+
+So **`>>` on a promoted-to-int value always emits `sar`**, even when
+the source was unsigned. Truly-unsigned shift right (`shr`) requires
+the operand to be `unsigned int` at the point of the shift — promote
+explicitly with `(unsigned int)x >> 1` to get `shr`.
+
+(For comparison, `unsigned int >> 1` documented earlier emits `d1 e8`
+= shr. The difference is whether the type IS unsigned int at the
+shift site.)

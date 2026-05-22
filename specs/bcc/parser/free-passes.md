@@ -424,3 +424,21 @@ Probe replaced with the char-compound-OR variant.
   enregistration hints. Note: `*p = 42;` (writing through the
   pointer) is allowed since the const-ness is on the pointer
   itself, not the pointee.
+
+## Free passes (batch 672)
+
+- `2383` — `int (*pick(void))(int) { return doubled; } f = pick(); f(7);`
+  (function returning a function pointer): the returned `doubled`
+  address is `mov ax, offset doubled` (FIXUPP'd at link), then
+  ordinary `89 46 fe` to save to `f`, then `ff 56 fe` indirect call
+  via `f`. Re-confirms function-pointer return mechanics.
+- `2385` — `r = (a++ > 0) ? b : c;` (postinc inside ternary
+  condition): the postinc captures `a`'s old value into AX, then
+  `inc si` bumps the enregistered `a`. The condition test
+  (`or ax, ax / jle skip`) uses the captured old value. Standard
+  ternary template otherwise.
+- `2386` — `int r = (int)L;` (long-to-int narrowing cast): the
+  cast is just a **low-half read**. With L's low half at `[bp-4]`
+  and high at `[bp-2]` (little-endian halves), the cast emits
+  `mov ax, [bp-4]` and the high half is discarded. Re-confirms
+  long-to-int = drop the high word, no truncation work.

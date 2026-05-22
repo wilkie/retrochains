@@ -1365,3 +1365,43 @@ fixed (explicit cases first, default last) while body emission
 follows source order. The skip-jumps between bodies handle
 correctness regardless of whether default lives in the middle or
 the top of the case bodies.
+
+## `case 0:` — zero-test peephole (`or ax, ax`) (fixture `2384`)
+
+When a switch case label is exactly `0` and the dispatch is the
+linear chain, BCC swaps the `cmp ax, 0 / je body` (5 bytes) for the
+shorter `or ax, ax / je body` (4 bytes) — the same zero-test peephole
+used by `if (x == 0)`.
+
+```c
+enum Color { RED, GREEN, BLUE };  // RED = 0
+switch (c) {
+  case RED: ...        // case 0
+  case GREEN: ...      // case 1
+  case BLUE: ...       // case 2
+}
+```
+
+```
+8b 46 fe                ; mov ax, c
+0b c0                   ; or ax, ax           ← case 0 — zero-test peephole
+74 0c                   ; je RED_body
+3d 01 00                ; cmp ax, 1           ← case 1 — standard cmp form
+74 0c                   ; je GREEN_body
+3d 02 00                ; cmp ax, 2
+74 0c                   ; je BLUE_body
+```
+
+Saves 1 byte per `case 0:` arm. Most useful when enum values start
+at zero (the C90 default), which they do in every enum unless an
+explicit value reassigns. So most switch-on-enum dispatches benefit
+from this when the chain form is selected (≤3 cases).
+
+For the search-table or dense-jump-table strategies, the zero-test
+peephole doesn't apply — the dispatch doesn't compare individual
+case values.
+
+Confirms enum constants fold to their integer values at parse time
+(RED=0, GREEN=1, BLUE=2), and case-label arithmetic peepholes (like
+zero-test) apply uniformly to any compile-time-constant label
+expression.
