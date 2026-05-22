@@ -3074,3 +3074,27 @@ Findings:
   (`2817`).
 - This is the standard "pad struct to word" calling convention.
 
+
+## 2-byte struct copy `b = a` — inline single int copy (6B)
+
+Fixture `2892-struct2b-copy-obj`:
+
+```c
+struct W { int v; };
+struct W a, b;
+a.v = 42;
+b = a;
+return b.v;
+```
+
+```
+8b 46 fe                       mov ax, a
+89 46 fc                       mov b, ax
+```
+
+Findings:
+- 2-byte struct copy = **inline single int copy** (load + store
+  via AX, 6 bytes).
+- Same shape as `int x = y` (`2812`).
+- Reaffirms threshold: `≤ 4B inline` (1B/2B/4B), `≥ 5B helper`.
+

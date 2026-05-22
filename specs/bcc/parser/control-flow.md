@@ -4140,3 +4140,31 @@ Findings:
 - Compare to switch (3 cases below dense-table threshold) which is
   similar — both use linear chain dispatch.
 
+
+## if-else with both arms as fn calls — dead-jmp between arms preserved
+
+Fixture `2894-if-else-both-call-obj`:
+
+```c
+if (flag) return yes();
+else return no();
+```
+
+```
+83 7e 04 00                    cmp flag, 0
+74 07                          je → ELSE
+e8 00 00                       call _yes
+eb 07                          jmp → epi
+eb 05                          (DEAD jmp - emitted but unreachable)
+                               ; ELSE:
+e8 00 00                       call _no
+```
+
+Findings:
+- if-else with both arms making calls = standard cmp-and-branch
+  pattern. AX carries the call's result implicitly.
+- BCC still emits the dead "jump past else" between THEN-return
+  and ELSE, consistent with no-DCE pattern (`2779`, etc.).
+- Function call return propagates directly to outer function's
+  return — no extra store/load via local.
+

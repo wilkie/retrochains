@@ -5740,3 +5740,25 @@ Findings:
 - Compare to `arr[i]` (read) which adds a final `mov ax, [bx]`.
   &-form skips the dereference — just returns the address.
 
+
+## `arr[0] = arr[1]` for global int array — load+store via AX
+
+Fixture `2896-arr-copy-elem-obj`:
+
+```c
+int arr[5];
+void duplicate(void) {
+  arr[0] = arr[1];
+}
+```
+
+```
+a1 02 00                       mov ax, [_arr + 2]   (arr[1] = offset 2)
+a3 00 00                       [_arr + 0] = ax      (arr[0] = offset 0)
+```
+
+Findings:
+- Const-subscript array element copy = load + store via AX (6B).
+- Same shape as `g_a = g_b` for two globals (`2814`).
+- Subscripts fold to disp16 immediates in moffs16 form.
+

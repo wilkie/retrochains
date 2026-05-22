@@ -1560,3 +1560,29 @@ Findings:
   form (`ff 06 disp16`, 4B).
 - Suboptimal 4B-extra cost per char-global increment.
 
+
+## `char_global += 1` — same suboptimal 8-byte pattern as `++char_global`
+
+Fixture `2891-char-plus-eq-1-obj`:
+
+```c
+char g;
+void bump(void) {
+  g += 1;
+}
+```
+
+**Byte-identical body to `2887`** (`++g`):
+```
+a0 00 00 fe c0 a2 00 00
+```
+
+Findings:
+- `g += 1` and `++g` produce **identical 8-byte bodies** for char
+  globals.
+- BCC misses the `inc byte [mem]` peephole for BOTH source forms.
+- For int globals, both `g += 1` and `++g` get the 4B `inc word
+  [mem]` peephole. For chars, neither does.
+- Source-form choice doesn't help here — BCC's char-global path
+  is just suboptimal.
+

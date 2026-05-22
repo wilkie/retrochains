@@ -2050,3 +2050,29 @@ Findings:
   avoid surprises; this fixture shows BCC handles mid-position
   correctly but the layout is non-obvious.
 
+
+## Empty switch `switch (x) { }` — 2-byte no-op (no dispatch, no expr eval)
+
+Fixture `2893-switch-empty-obj`:
+
+```c
+int empty(int x) {
+  switch (x) { }
+  return 0;
+}
+```
+
+```
+55 8b ec                       prologue
+eb 00                          jmp +0   (no-op skip past empty switch)
+33 c0                          return 0
+```
+
+Findings:
+- Empty switch (no cases, no default) compiles to **just a 2-byte
+  `jmp +0`** (placeholder).
+- The switch expression `x` is NOT evaluated, NOT loaded, NOT
+  compared. Pure elision.
+- Consistent with `switch (x) { default: ... }` (`2720`) which also
+  skipped dispatch. Empty bodies, default-only — both elide.
+
