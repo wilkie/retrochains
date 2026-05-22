@@ -1958,3 +1958,38 @@ Findings:
   structs get reg returns but NOT reg args. Caller's burden is
   always stack-marshalling for struct args.
 
+
+## Struct with embedded array — fields laid out contiguously, no padding
+
+Fixture `2553-struct-embedded-arr-obj`:
+
+```c
+struct Box { int tag; int data[3]; };
+struct Box b;
+int main(void) {
+  b.tag = 7;
+  b.data[1] = 42;
+  return b.data[1];
+}
+```
+
+```
+55 8b ec                       prologue
+c7 06 00 00 07 00              [_b + 0] = 7         ; b.tag (FIXUPP)
+c7 06 04 00 2a 00              [_b + 4] = 42        ; b.data[1] (FIXUPP)
+a1 04 00                       ax = [_b + 4]        ; same offset (FIXUPP)
+eb 00 5d c3                    epilogue
+```
+
+Findings:
+- `struct Box` layout: `tag` at offset 0, `data` at offset 2 (right
+  after `tag`). `data[1]` is at offset 2 + 1×2 = 4 in the struct.
+- `sizeof(struct Box) = 8` (2 for tag + 6 for data[3]). Embedded
+  array adds `count × element-size` with NO padding.
+- `b.data[1]` with const index folds to a single byte offset
+  + FIXUPP at the struct's symbol. Same shape as nested struct
+  fields (`2503`) and 2D-arrays (`2512`).
+- The lvalue and rvalue uses of `b.data[1]` both emit `disp16=4`
+  with FIXUPP `_b` — confirms BCC computes the offset once at
+  parse time per access.
+

@@ -530,3 +530,40 @@ Findings:
   is context-sensitive, not a one-shot transformation.
 - `_arr` lives in `_BSS` with size 10 (matches the LIDATA reserve).
 
+
+## Prefix `--i` — `dec reg` BEFORE the store (NOT AX-accumulator)
+
+Fixture `2554-predec-int-obj`:
+
+```c
+int i, v;
+i = 10;
+v = --i;
+return v + i;
+```
+
+```
+55 8b ec 4c 4c                 prologue + 2B local for v
+56                             push si              ; i in si
+be 0a 00                       mov si, 10           ; i = 10
+4e                             dec si               ; --i (modify FIRST)
+89 76 fe                       mov [bp-2], si       ; v = i (the NEW value)
+8b 46 fe                       mov ax, v
+03 c6                          add ax, si           ; v + i
+eb 00 5e 8b e5 5d c3           epilogue
+```
+
+Findings:
+- **Prefix `--i`** emits `dec reg` (1 byte, opcode `4e` for si) DIRECTLY
+  on the register holding i — then stores the new value to v.
+- This is **different from the AX-accumulator pattern** seen in
+  `2510`/`2517` for `i = i - 1` (which used 3 instructions:
+  `mov ax, si; dec ax; mov si, ax`). When the user writes the
+  decrement as a UNARY OPERATOR `--i`, BCC takes the direct-`dec`
+  path; when written as `i = i - 1`, it goes through ax.
+- So the SEMANTIC choice of `--i` vs `i = i - 1` produces different
+  byte sequences in BCC, despite being equivalent in source. Worth
+  recording: BCC's codegen is shape-sensitive to expression form.
+- Postfix `i--` (to probe) likely uses a different shape: capture
+  OLD value to a temp, then dec.
+

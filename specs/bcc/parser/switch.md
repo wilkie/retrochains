@@ -1449,3 +1449,65 @@ Findings:
   `return 0` from the source. No invisible "switch end" label or
   bookkeeping — the source's structure is preserved 1:1.
 
+
+## 4 contiguous cases — dispatches via `jmp word ptr CS:[bx+disp16]` table
+
+Fixture `2550-switch-four-contig-obj`:
+
+```c
+int x = 2;
+switch (x) {
+  case 0: return 10;
+  case 1: return 20;
+  case 2: return 30;
+  case 3: return 40;
+}
+return 99;
+```
+
+```
+55 8b ec 4c 4c                 prologue + 2B local
+c7 46 fe 02 00                 x = 2
+8b 5e fe                       mov bx, x
+83 fb 03                       cmp bx, 3
+77 1b                          ja +27 → DEFAULT       ; UNSIGNED range check
+d1 e3                          shl bx, 1              ; bx *= 2 (entry size)
+2e ff a7 36 00                 jmp word ptr CS:[bx+0x0036]
+                               ; --- case 0 body ---
+b8 0a 00                       mov ax, 10
+eb 14                          jmp → EPI
+                               ; --- case 1 body ---
+b8 14 00                       mov ax, 20
+eb 0f                          jmp → EPI
+                               ; --- case 2 body ---
+b8 1e 00                       mov ax, 30
+eb 0a                          jmp → EPI
+                               ; --- case 3 body ---
+b8 28 00                       mov ax, 40
+eb 05                          jmp → EPI
+                               ; --- default ---
+b8 63 00                       mov ax, 99
+eb 00 8b e5 5d c3              epilogue
+                               ; --- jump table (in _TEXT, 8 bytes) ---
+19 00 1e 00 23 00 28 00        ; 4 entries, each FIXUPP'd to case offset
+```
+
+Findings:
+- **Dense jump-table threshold = 4 contiguous cases**. (Earlier
+  fixtures showed: 1 case = if-equivalent, 2-3 still to probe but
+  expected linear; 4+ contiguous → table.)
+- **Range check uses `ja` (unsigned)**: `cmp bx, MAX; ja DEFAULT`.
+  Treats the switch expression as if it could be any 16-bit value —
+  negative values map to "above MAX" via unsigned interpretation,
+  routing to default. So even with signed `int x`, the dispatch is
+  done unsigned-style.
+- **Dispatch instruction = `2e ff a7 disp16`** (5 bytes):
+  `jmp word ptr CS:[bx+disp16]`. The `2e` segment override is
+  essential — the jump table lives in the code segment.
+- **Table entries are 2-byte word offsets** into the code segment,
+  each carrying a FIXUPP to relocate to the case body's address.
+- The table itself is laid out **after the default body**, at the
+  end of the function's code. The "disp16" in the dispatch points
+  to the table's start.
+- All bodies (case AND default) end with `jmp <EPI>` for merge.
+

@@ -1059,3 +1059,48 @@ Findings:
 - The fn-ptr-call shape preserves cdecl convention: caller pushes
   args R-to-L, callee returns via AX, caller cleans up the stack.
 
+
+## Nested call chain `inc(dbl(inc(5)))` — strict push/call/pop sequence
+
+Fixture `2552-nested-call-chain-obj`:
+
+```c
+int inc(int x) { return x + 1; }
+int dbl(int x) { return x + x; }
+int main(void) {
+  return inc(dbl(inc(5)));
+}
+```
+
+main body:
+```
+55 8b ec               prologue
+b8 05 00               mov ax, 5
+50                     push ax              ; arg of innermost inc(5)
+e8 db ff               call _inc            ; (FIXUPP, near rel16)
+59                     pop cx               ; cleanup 1 arg (popped value ignored)
+50                     push ax              ; push inc-result as dbl's arg
+e8 e1 ff               call _dbl
+59                     pop cx               ; cleanup
+50                     push ax              ; push dbl-result as outer inc's arg
+e8 d1 ff               call _inc
+59                     pop cx               ; cleanup
+eb 00 5d c3            epilogue
+```
+
+Findings:
+- Nested calls evaluate **innermost first** (the order arguments
+  appear), strictly sequential.
+- Between each call, the cycle is exactly:
+  `push ax  → call  → pop cx  → push ax → ...`
+- The just-returned AX from the previous call is the next call's
+  argument. BCC doesn't try to optimize away the redundant
+  pop-then-push: it ALWAYS cleans up cdecl-style after each call,
+  then re-pushes for the next.
+- This generalizes: any expression tree of single-arg call chains
+  emits as N times `push ax; call; pop cx; ...` no matter how deep.
+- Notable subtle bytes: `dbl(x)` was written as `x + x`, not `x * 2`,
+  so BCC emits `mov ax, si; add ax, si` (literal interpretation).
+  Multiplication-by-2 would emit `shl ax, 1` instead. **Source-level
+  rewriting matters** — BCC does NOT canonicalize x+x and x*2.
+

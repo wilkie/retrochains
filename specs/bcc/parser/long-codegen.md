@@ -2127,3 +2127,35 @@ Findings:
 | int → long          | `cwd` (1B)           |
 | unsigned int → long | `xor dx, dx` (2B)    |
 
+
+## `(long)unsigned int` — zero-extend via `xor dx, dx`
+
+Fixture `2549-uint-to-long-cast-obj`:
+
+```c
+long widen(unsigned int u) {
+  return (long)u;
+}
+```
+
+```
+55 8b ec                       prologue
+8b 46 04                       mov ax, u
+33 d2                          xor dx, dx          ; zero-extend
+eb 00 5d c3                    epilogue
+```
+
+Findings:
+- **`(long)u` for unsigned int** uses **`xor dx, dx`** (`33 d2`, 2 bytes)
+  to clear the high half — zero-extension.
+- Confirms the widening cast table:
+
+| from → to            | bytes              |
+|----------------------|--------------------|
+| signed int → long    | `cwd` (1B)         |
+| unsigned int → long  | `xor dx, dx` (2B)  |
+
+- The signedness of the source is the ONLY thing that distinguishes
+  these two; BCC tracks signedness through the type system and picks
+  the right widening at the cast site.
+

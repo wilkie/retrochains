@@ -278,3 +278,44 @@ parsed as `\123` (= octal 123 = 83) followed by `'4'`.
 Limit: 3 octal digits max per the C standard. `\0` is the special
 single-zero case (NUL terminator), since it's `\` followed by a
 single octal digit `0` followed by end-of-octal-digits.
+
+## `char *names[] = { "Al", "Bo", "Cy" }` — pointer table + interleaved strings in _DATA
+
+Fixture `2551-array-of-strptr-obj`:
+
+```c
+char *names[] = { "Al", "Bo", "Cy" };
+int main(void) {
+  return names[1][0];
+}
+```
+
+`_DATA` layout (15 bytes):
+```
+06 00 09 00 0c 00     ; pointer table: 3 × 2B offsets (FIXUPPs into _DATA)
+41 6c 00              ; "Al\0" at offset 6
+42 6f 00              ; "Bo\0" at offset 9
+43 79 00              ; "Cy\0" at offset 12
+```
+
+Main body:
+```
+55 8b ec                       prologue
+8b 1e 02 00                    mov bx, [_names+2]    ; bx = names[1]
+8a 07                          mov al, [bx]          ; *names[1]
+98                             cbw                   ; → int
+eb 00 5d c3                    epilogue
+```
+
+Findings:
+- BCC lays out the **pointer table first**, then **packs the strings
+  immediately after** in the same `_DATA` segment. The pointers
+  themselves are FIXUPPs into `_DATA` at the string offsets.
+- This is the canonical "array of string pointers" layout — no
+  fragmentation. Same `_DATA` segment for all parts.
+- `names[1][0]` requires **two memory loads**: first the pointer
+  (`mov bx, moffs16`), then the byte (`mov al, [bx]`). No fold to
+  a single moffs8 because the pointer indirection breaks the chain.
+- Each string is null-terminated and packed back-to-back; no
+  alignment padding between strings.
+
