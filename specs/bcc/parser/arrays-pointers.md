@@ -4535,3 +4535,36 @@ Findings:
   to sign-extend before divide.
 - 12 bytes for the full diff: 3B load + 3B sub + 3B mov bx + 1B cwd + 2B idiv.
 
+
+## Local array zero-init via 3 stores — each `mov [bp+disp], 0` is 5 bytes
+
+Fixture `2661-local-arr-zero-init-obj`:
+
+```c
+int a[3];
+a[0] = 0; a[1] = 0; a[2] = 0;
+return a[1];
+```
+
+```
+55 8b ec 83 ec 06              prologue + 6B local (a[3] = 6B)
+c7 46 fa 00 00                 a[0] = 0   ([bp-6])
+c7 46 fc 00 00                 a[1] = 0   ([bp-4])
+c7 46 fe 00 00                 a[2] = 0   ([bp-2])
+8b 46 fc                       mov ax, a[1]
+eb 00 8b e5 5d c3              epilogue
+```
+
+Findings:
+- Each `a[K] = 0` (literal zero store) compiles to **`mov word
+  [bp+disp], 0`** = 5 bytes (`c7 46 disp 00 00`).
+- For N stores: 5N bytes. No peephole for "zero-fill array" or
+  reuse of `mov ax, 0` across stores.
+- An alternative `xor ax, ax; mov [bp-6], ax; mov [bp-4], ax;
+  mov [bp-2], ax` would be 2 + 3 + 3 + 3 = 11 bytes — BCC's
+  pure-store approach (15 bytes for 3) is LONGER than the
+  AX-route here. So BCC's choice is "always direct memory store
+  with imm16" regardless of repetition.
+- The user could write `int a[3] = {0};` for a brace-initialized
+  zero-filled array — to probe how BCC compiles that.
+

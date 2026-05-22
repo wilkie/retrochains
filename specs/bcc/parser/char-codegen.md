@@ -1157,3 +1157,59 @@ Findings:
 - Sum uses the **push/pop spill pattern** (`2558`, `2563`) for two
   cbw-promoted operands.
 
+
+## Global `char g = 'Z'` — 1-byte storage, `mov al, moffs8` load
+
+Fixture `2657-global-char-obj`:
+
+`_DATA` contents (1 byte): `5a` (= 'Z')
+
+```
+55 8b ec                       prologue
+a0 00 00                       mov al, [_g]     (FIXUPP, moffs8 form 3B)
+98                             cbw              (promote for int return)
+eb 00 5d c3                    epilogue
+```
+
+Findings:
+- Global `char` occupies **exactly 1 byte** in `_DATA` — NOT
+  padded to 2 bytes. The next global would start at an odd offset.
+- Reading uses **`a0 disp16`** (3 bytes) — the moffs8 form of
+  "mov AL, [moffs16-addr]". Distinct from `a1 disp16` (mov AX,
+  moffs16) used for int globals.
+- `cbw` promotes for int-context return.
+
+
+## `if (c == K)` for char — DIRECT byte memory compare
+
+Fixture `2660-char-eq-int-obj`:
+
+```c
+int test(char c) {
+  if (c == 'A') return 1;
+  return 0;
+}
+```
+
+```
+55 8b ec                       prologue
+80 7e 04 41                    cmp byte [bp+4], 'A'    (4B byte form!)
+75 05                          jne → false
+b8 01 00 eb 04                 true: ax = 1; jmp epi
+33 c0 eb 00                    false: xor ax, ax
+5d c3                          ret
+```
+
+Findings:
+- `if (c == K)` with `char c` and char literal `K` uses the
+  **`cmp byte ptr [mem], imm8`** form (`80 /7 mem imm8` = 4 bytes).
+  NO cbw promote, NO load into a register.
+- This is a **special-case optimization** for equality of byte
+  values: BCC bypasses the int-promotion rule and uses byte ops.
+- Contrast with `switch (c)` (`2655`) which DOES use cbw + int
+  compares. Equality compare in an if-statement takes the
+  efficient byte path; switch takes the int path.
+- ModR/M `7e` = mod 01, opcode-ext 111 (cmp), r/m 110 (bp+disp8).
+- This is a critical peephole for tight character-recognition
+  code (parsers, lexers, etc.): `if (c == '\n')`, `if (c == '\t')`.
+

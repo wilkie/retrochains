@@ -3500,3 +3500,42 @@ Findings:
   step. `for (i=0; i<N; i++)` would also produce `inc si` since
   the result of `++` isn't used.
 
+
+## `do { ... } while (0)` — runs once, NO backward jump
+
+Fixture `2659-do-while-zero-obj`:
+
+```c
+do {
+  x = x + 7;
+} while (0);
+return x;
+```
+
+```
+55 8b ec 56                    prologue + push si
+33 f6                          xor si, si       ; x = 0
+                               ; --- DO body (executes once) ---
+8b c6 05 07 00 8b f0           x = x + 7 (AX-acc)
+                               ; --- while (0) FULLY ELIDED ---
+8b c6                          return x
+eb 00 5e 5d c3                 epilogue
+```
+
+Findings:
+- `do { } while (0)` recognizes the constant-false condition and
+  emits **NO conditional jump and NO `cmp; jne`** — the loop body
+  just falls through. Pure straight-line code.
+- This is the textbook "execute once" macro idiom; BCC handles it
+  optimally — zero loop-overhead bytes.
+- Pattern summary:
+
+| loop                     | bytes for the test+jump  |
+|--------------------------|---------------------------|
+| `while (1) { }`          | `jmp backward` (2-3B)    |
+| `do {} while (1)`        | `jmp backward` (2-3B)    |
+| `while (0) { }`          | body completely SKIPPED (probe) |
+| `do {} while (0)`        | **NO test, NO jump** — body runs once |
+| `while (cond) { }`       | initial `jmp → COND`; test-at-bottom |
+| `do {} while (cond)`     | test-at-bottom, no entry jmp |
+

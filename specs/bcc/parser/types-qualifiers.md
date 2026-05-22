@@ -846,3 +846,49 @@ Findings:
 - `void *vp = &x` global init: FIXUPP to `_x` makes the pointer
   point to the int. Works in `_DATA` like any typed pointer init.
 
+
+## `unsigned int` return — byte-identical to `int` return
+
+Fixture `2658-uint-return-obj`:
+
+```c
+unsigned int get(void) {
+  return 50000U;
+}
+```
+
+```
+55 8b ec                       prologue
+b8 50 c3                       mov ax, 50000 (= 0xC350)
+eb 00 5d c3                    epilogue
+```
+
+Findings:
+- `unsigned int` return uses the SAME convention as `int`: value in
+  AX. The bit pattern `0xC350` is loaded as-is; the caller
+  interprets the type.
+- BCC emits no special "is unsigned" prologue/epilogue work. The
+  signedness is purely a parser type-tracking concern.
+
+## `const int g = 100` global — byte-identical to plain `int g`
+
+Fixture `2662-const-global-int-obj`:
+
+`_DATA` (2 bytes): `64 00` (= 100)
+
+```
+55 8b ec                       prologue
+a1 00 00                       mov ax, [_max_v] (FIXUPP)
+eb 00 5d c3                    epilogue
+```
+
+Findings:
+- `const int g` lays out IDENTICALLY to `int g`: 2 bytes in `_DATA`,
+  loaded via `a1` moffs16 each access.
+- **NO constant propagation**: even though `max_v` is provably the
+  literal 100, BCC loads it from memory on every reference. Same
+  finding as `2492` for `static const int`.
+- The `const` qualifier emits ZERO bytes — it's purely a parser-side
+  type-system check (write attempts get errors, but the value can
+  still change via aliasing).
+
