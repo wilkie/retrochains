@@ -3923,3 +3923,71 @@ Findings:
   doesn't change the per-break codegen.
 - Code-size cost: 2 bytes per break (disp8 form).
 
+
+## `v < 0` (single-use param) — `cmp [mem], 0` direct form
+
+Fixture `2778-v-lt-zero-obj`:
+
+```c
+if (v < 0) return -1;
+return 1;
+```
+
+```
+83 7e 04 00                    cmp word [bp+4], 0   ; mem-imm cmp (5B)
+7d 05                          jge → SKIP-TRUE
+b8 ff ff                       return -1
+eb 05                          jmp epi
+b8 01 00                       return 1
+```
+
+Findings:
+- For **single-use param zero-compare**, BCC uses direct
+  `cmp word [bp+disp], 0` form (`83 7e disp8 imm8` = 5B).
+- Contrast with the `or si, si` peephole (`2776`/`2779`) which
+  requires the value already in si.
+- Total test cost:
+
+| pattern              | bytes    | requires      |
+|----------------------|----------|---------------|
+| `cmp [bp+D], 0; j*`  | 5B + 2B  | value at known stack slot |
+| `or reg, reg; j*`    | 2B + 2B  | value in si/di |
+| `cmp ax, 0; j*`      | 3B + 2B  | value in AX    |
+
+- The `or` peephole only beats the others when the value happens
+  to already be in si/di.
+
+## Nested if-else — dead else-fallthrough jmp preserved
+
+Fixture `2779-nested-if-else-obj`:
+
+```c
+if (x > 0) {
+  if (x > 100) return 2;
+  return 1;
+} else {
+  return 0;
+}
+```
+
+```
+8b 76 04                       mov si, x
+0b f6                          or si, si        ; x>0 peephole (in si because reused!)
+7e 11                          jle +17 → ELSE
+83 fe 64 7e 05                 cmp si, 100; jle → fall-through
+b8 02 00 eb 0b                 return 2
+b8 01 00 eb 06                 return 1
+eb 04                          jmp +4 → epi  (DEAD else-fallthrough!)
+33 c0                          return 0 (else)
+eb 00                          epi
+```
+
+Findings:
+- BCC emits a **dead `jmp` over the else branch** at the end of the
+  THEN body, even when THEN always returns. Consistent with the
+  no-DCE pattern from many other fixtures.
+- Multiple `return` statements each emit `mov ax, K; jmp epi` →
+  multiple disp8 jumps to the same epi target.
+- `v > 0` triggers `or si, si` peephole here because v is **reused**
+  in the inner `v > 100` compare — so it's worth promoting to si.
+

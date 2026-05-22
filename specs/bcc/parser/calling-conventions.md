@@ -1448,3 +1448,29 @@ Findings:
 - BCC will only ACTUALLY work at runtime if something initializes
   the pointer first (here it would be 0 → null-call → crash).
 
+
+## 2-arg fn-pointer call — same form as direct call
+
+Fixture `2781-fnptr-2args-obj`:
+
+```c
+int (*op)(int, int);
+int call(int a, int b) {
+  return op(a, b);
+}
+```
+
+```
+ff 76 06                       push word [bp+6]    ; b
+ff 76 04                       push word [bp+4]    ; a
+ff 16 00 00                    call word ptr [_op] (FIXUPP)
+59 59                          pop cx; pop cx     ; 2-arg cleanup (2B)
+```
+
+Findings:
+- 2-arg fn-pointer call uses identical args/cleanup as direct call:
+  push right-to-left, indirect call, 2-arg cleanup is **2× `pop cx`**
+  (2B, per `2712` correction).
+- The only difference from direct call is the call instruction
+  (`ff 16 disp16` for indirect, `e8 disp16` for direct).
+

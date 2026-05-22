@@ -1258,3 +1258,32 @@ Findings:
 - The second store goes through AX (`8b c6 40` for v+1, then a3)
   because the value gets modified into AX first.
 
+
+## CORRECTION: reg-direct store peephole requires value pre-loaded in non-AX reg
+
+Fixture `2777-reg-direct-store-obj`:
+
+```c
+int g;
+void store(int v) {
+  g = v;
+}
+```
+
+```
+8b 46 04                       mov ax, v       ; AX-acc, NOT si!
+a3 00 00                       [_g] = ax       ; via AX (a3 form)
+```
+
+Findings:
+- For a **bare global-write of a param** with no other uses, BCC
+  uses the **AX-acc form** (`mov ax, [bp+disp]; mov [g], ax` = 6B).
+- The **reg-direct store peephole** (`89 36 disp16` for si) from
+  `2776` only kicks in when the value is **already pre-loaded
+  into si/di** for OTHER reasons (here, the predicate compare).
+- So the peephole requires:
+  1. Value lives in non-AX reg (si/di) from prior promotion or use
+  2. Store destination is global memory
+  3. Then `mov [mem], reg` (4B) wins
+- For first-use stores, the AX-acc form is the default.
+

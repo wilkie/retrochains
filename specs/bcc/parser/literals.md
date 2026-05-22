@@ -480,3 +480,23 @@ Findings:
   high word at `[_max + 2]` is unread. Same pattern as `2521`/
   `2532` for long truncation.
 
+
+## `int g = 42;` — initialized global → `_DATA` segment
+
+Fixture `2780-global-int-init-obj`:
+
+`_DATA` for `_g`: `2a 00` (= 42)
+
+Findings:
+- Initialized global goes to `_DATA` segment with the literal
+  bytes; uninitialized globals go to `_BSS` (zero-filled).
+- Code access is **identical** regardless of segment (moffs16
+  `a1 disp16` with FIXUPP). Only segment placement differs.
+- Segment usage:
+
+| init?  | segment  | bytes laid out |
+|--------|----------|----------------|
+| `int g`        | `_BSS`  | (none, zero-filled at load time) |
+| `int g = 0`    | `_DATA` | `00 00` |
+| `int g = 42`   | `_DATA` | `2a 00` |
+

@@ -2688,3 +2688,31 @@ Findings:
 - Same shape as `(int)long_local` (`2521`) and `(int)long_global`
   (`2560`).
 
+
+## `arr[K]` for `long arr[]` const subscript — high+low load pair
+
+Fixture `2782-long-arr-elem-obj`:
+
+```c
+long arr[3] = { 100L, 200L, 300L };
+long pick(void) { return arr[1]; }
+```
+
+```
+8b 16 06 00                    mov dx, [_arr + 6]   ; HIGH word of arr[1]
+a1 04 00                       mov ax, [_arr + 4]   ; LOW word of arr[1]
+```
+
+`_DATA` layout (12 bytes):
+- arr[0]: `64 00 00 00` (= 100L)
+- arr[1]: `c8 00 00 00` (= 200L)
+- arr[2]: `2c 01 00 00` (= 300L)
+
+Findings:
+- `long arr[K]` const subscript folds to two loads at byte offsets
+  `K × 4` and `K × 4 + 2`.
+- **Load order: HIGH word first** (`mov dx, [+6]`), then LOW word
+  (`mov ax, [+4]`). Matches the convention for direct long loads.
+- Total 7 bytes for the read (4B for dx + 3B for ax).
+- Compare to int arr[K] which is 1 word load (3B).
+
