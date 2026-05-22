@@ -1405,3 +1405,47 @@ Confirms enum constants fold to their integer values at parse time
 (RED=0, GREEN=1, BLUE=2), and case-label arithmetic peepholes (like
 zero-test) apply uniformly to any compile-time-constant label
 expression.
+
+## Single-case switch — degenerates to `cmp+je`, NO dispatch table
+
+Fixture `2542-switch-single-case-obj`:
+
+```c
+int x;
+x = 1;
+switch (x) {
+  case 1: return 10;
+}
+return 0;
+```
+
+```
+55 8b ec 4c 4c                 prologue + 2B local
+c7 46 fe 01 00                 x = 1
+8b 46 fe                       mov ax, x
+3d 01 00                       cmp ax, 1            ; AX-accumulator cmp
+74 02                          je +2 → case-1
+eb 05                          jmp +5 → after-switch
+                               ; case 1:
+b8 0a 00                       mov ax, 10
+eb 04                          jmp +4 → epi
+                               ; after-switch / default:
+33 c0                          xor ax, ax
+eb 00 8b e5 5d c3              epilogue
+```
+
+Findings:
+- Single-case switch is **identical in cost to an if-equivalent**.
+  No dispatch table or search-table — just `cmp+je <case-body>;
+  jmp <after>`. So the jump-table threshold is **at least 2 cases**
+  (and from earlier findings, the dense table starts at 4+ contiguous
+  cases).
+- The `cmp ax, imm16` uses the **AX-accumulator form** (`3d` opcode,
+  3 bytes total). Same length as the generic `83 f8 imm8` for fits-
+  in-imm8, but BCC picked the AX form regardless of immediate width.
+- The case body ends with `jmp epi` — switch doesn't fall through
+  to the (implicit) default; the case explicitly `return`'s.
+- The "after-switch" code (`xor ax, ax; jmp epi`) IS the post-switch
+  `return 0` from the source. No invisible "switch end" label or
+  bookkeeping — the source's structure is preserved 1:1.
+

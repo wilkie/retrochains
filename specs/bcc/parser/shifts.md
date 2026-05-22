@@ -1801,3 +1801,42 @@ Findings:
 - So the shift-codegen rule is uniform: ≤3 → unroll, ≥4 → cl-form,
   no special cases for shift-by-8 / shift-by-16 etc.
 
+
+## Signed right-shift `s >> N` uses `sar` (NOT `idiv`)
+
+Fixture `2540-signed-shr-obj`:
+
+```c
+int s;
+s = -16;
+return s >> 2;
+```
+
+```
+55 8b ec 4c 4c                 prologue + 2B local
+c7 46 fe f0 ff                 s = -16 (0xfff0)
+8b 46 fe                       mov ax, s
+d1 f8                          sar ax, 1              ; arithmetic shift
+d1 f8                          sar ax, 1
+eb 00 8b e5 5d c3              epilogue
+```
+
+Findings:
+- Signed **`s >> N`** uses **`sar`** (arithmetic right shift,
+  opcode `d1 f8` with mod 11, opcode-ext 111, r/m 000=ax).
+  Sar preserves the sign bit (MSB) for negative values, rounding
+  toward -infinity.
+- Crucial distinction from signed `s / 2^N`:
+  - **`s >> N`** → `sar` (rounds toward -infinity)
+  - **`s / 2^N`** → `cwd + idiv` (rounds toward zero)
+  They give DIFFERENT results for negative non-multiples (e.g.
+  `-7 >> 1 = -4` vs `-7 / 2 = -3`).
+- The N≤3 unroll rule applies: `s >> 2` → 2× `d1 f8` (4 bytes).
+  At N≥4 it'd switch to cl-form (`b1 N; d3 f8`).
+- Operator table:
+
+| type      | `>>` opcode | `/` opcode |
+|-----------|-------------|-------------|
+| unsigned  | shr (`d1 e8`) | shr or `shr cl` (pow-2 only) |
+| signed    | sar (`d1 f8`) | idiv (always) |
+

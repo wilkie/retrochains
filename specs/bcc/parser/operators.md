@@ -495,3 +495,38 @@ Branch opcode pairs to track:
 (Where the listed condition is "the inverted branch that skips the
 true-path" — what BCC actually emits.)
 
+
+## `sizeof(arr)` vs `sizeof(p)` — distinct types, both fold at compile time
+
+Fixture `2541-sizeof-array-vs-ptr-obj`:
+
+```c
+int arr[5];
+int main(void) {
+  int *p;
+  p = arr;
+  return sizeof(arr) + sizeof(p);
+}
+```
+
+```
+55 8b ec 4c 4c                 prologue + 2B local for p
+c7 46 fe 00 00                 p = &arr (FIXUPP _arr)
+b8 0c 00                       mov ax, 12              ; folded sum
+eb 00 8b e5 5d c3              epilogue
+```
+
+Findings:
+- `sizeof(arr)` for `int arr[5]` = **10** bytes (5 × sizeof(int)).
+  The array type is preserved for sizeof — does NOT decay.
+- `sizeof(p)` for `int *p` = **2** bytes (small memory model
+  near pointer).
+- The sum (10 + 2 = 12) is **fully folded at compile time**: emitted
+  as a single `mov ax, 12` (3 bytes). The runtime never executes a
+  size computation.
+- Despite `p = arr` triggering array-to-pointer decay in that
+  assignment expression, BCC's type system **preserves the original
+  `int[5]` type at the `sizeof(arr)` site** — confirming that decay
+  is context-sensitive, not a one-shot transformation.
+- `_arr` lives in `_BSS` with size 10 (matches the LIDATA reserve).
+

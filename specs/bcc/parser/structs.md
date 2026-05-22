@@ -1887,3 +1887,74 @@ Findings:
 - The 32-bit literal `0x12345678` is split: HIGH = 0x1234, LOW =
   0x5678. Two separate `c7 46 disp imm16` stores. No 32-bit ops.
 
+
+## 1-byte struct return — packed into AL alone
+
+Fixture `2537-struct-1b-ret-obj`:
+
+```c
+struct Tiny { char c; };
+struct Tiny make(void) {
+  struct Tiny t;
+  t.c = 'A';
+  return t;
+}
+```
+
+```
+55 8b ec                       prologue
+4c 4c                          dec sp; dec sp        ; 2B local (1B padded)
+c6 46 fe 41                    [bp-2] = 'A'           ; byte store
+8a 46 fe                       mov al, [bp-2]         ; byte load
+eb 00 8b e5 5d c3              epilogue
+```
+
+Findings:
+- 1-byte struct return uses **AL only** (single `mov al, [bp-2]`).
+  AH is left undefined. Caller reads AL only.
+- The local frame reserves 2 bytes (`dec sp; dec sp`) for the 1-byte
+  struct — **stack slots are even-padded**, even for sub-word structs.
+- This completes the size→strategy mapping:
+
+| sizeof | strategy |
+|--------|----------|
+| 1      | AL only |
+| 2      | AX (low=field0, high=field1) |
+| 3      | N_SCOPY@ + hidden ptr |
+| 4      | DX:AX (ax=low, dx=high) |
+| ≥ 5    | N_SCOPY@ + hidden ptr |
+
+The pattern: sizes that match an integer type (1, 2, 4) use register
+returns; sizes that don't (3, 5, 6, 7, ...) go through `N_SCOPY@`.
+
+## Struct ≤4B as function arg — pushed as raw bytes, accessed via [bp+disp]
+
+Fixture `2538-struct-4b-arg-obj`:
+
+```c
+struct Pair { int a; int b; };
+int sum(struct Pair p) {
+  return p.a + p.b;
+}
+```
+
+```
+55 8b ec                       prologue
+8b 46 04                       mov ax, [bp+4]          ; p.a
+03 46 06                       add ax, [bp+6]          ; + p.b (mem operand!)
+eb 00 5d c3                    epilogue
+```
+
+Findings:
+- **Struct arguments are ALWAYS passed on the stack**, regardless
+  of size. No DX:AX register-passing for the by-value struct param,
+  even though it's exactly 4 bytes and could fit.
+- The caller pushes the struct's raw bytes contiguously; callee
+  accesses fields at known `[bp + base + field-offset]`.
+- The `add ax, [bp+6]` uses a **direct memory operand** — no
+  intermediate `mov` to load p.b. So the AX-accumulator pattern
+  allows ALU-with-memory-source ops, saving the intermediate move.
+- Conclusion: register-passing-convention is **asymmetric** — small
+  structs get reg returns but NOT reg args. Caller's burden is
+  always stack-marshalling for struct args.
+

@@ -963,3 +963,34 @@ Findings:
   - Unsigned char: `8a 46 disp; b4 00`      (4B)
   Same total length; differ only in the third+ bytes.
 
+
+## `unsigned char` return — `and al, imm8` (AL-accumulator form)
+
+Fixture `2539-uchar-ret-obj`:
+
+```c
+unsigned char low(int x) {
+  return (unsigned char)(x & 0xFF);
+}
+```
+
+```
+55 8b ec                       prologue
+8a 46 04                       mov al, [bp+4]         ; AL = low byte of x
+24 ff                          and al, 0xFF           ; & 0xFF (AL form)
+eb 00 5d c3                    epilogue
+```
+
+Findings:
+- The cast `(unsigned char)(x & 0xFF)` folds to **AL-only byte ops**.
+  BCC reads only the low byte of x via `mov al, [bp+4]` (opcode `8a`,
+  byte form).
+- **`and al, 0xFF` is NOT optimized away** even though it's a no-op
+  on AL — BCC emits `24 ff` (2 bytes). The AL-accumulator form
+  (opcode `24`) is 2 bytes vs `80 e0 ff` (3 bytes) generic-form.
+- AH is left undefined; uchar return contract uses only AL.
+- The signed/unsigned distinction at the param matters: this fn
+  reads `int x` so it accesses [bp+4] as a byte (low half). If x
+  were declared `unsigned char` instead, the param would still
+  occupy a 16-bit slot but the body would be the same.
+
