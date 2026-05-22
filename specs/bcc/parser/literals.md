@@ -500,3 +500,25 @@ Findings:
 | `int g = 0`    | `_DATA` | `00 00` |
 | `int g = 42`   | `_DATA` | `2a 00` |
 
+
+## `int (*op)(int) = handler;` — fn-ptr global init with FIXUPP
+
+Fixture `2783-fnptr-init-obj`:
+
+`_DATA` (2 bytes for `_op`): `00 00` (placeholder)
+FIXUPP at op's offset → `_handler` (EXTDEF since no definition in this TU)
+
+```
+b8 07 00 50                    push 7
+ff 16 00 00                    call word ptr [_op] (FIXUPP)
+59                             pop cx (1-arg cleanup)
+```
+
+Findings:
+- Initialized function-pointer global = 2-byte _DATA slot + FIXUPP
+  targeting the function symbol. The placeholder bytes are `00 00`
+  pre-link; linker resolves to the function's offset.
+- Call site is `ff 16 disp16` (4B) for the indirect call through
+  `_op`, exactly like uninitialized fn-ptr (`2750`) and any other
+  fn-ptr call.
+

@@ -2716,3 +2716,34 @@ Findings:
 - Total 7 bytes for the read (4B for dx + 3B for ax).
 - Compare to int arr[K] which is 1 word load (3B).
 
+
+## `int x = (int)L;` for global long — single LOW-word load
+
+Fixture `2788-int-from-long-asgn-obj`:
+
+```c
+long L = 0x12345678L;
+int main(void) {
+  int x = (int)L;
+  return x;
+}
+```
+
+`_DATA` (4 bytes for L): `78 56 34 12` (= 0x12345678 little-endian)
+
+```
+4c 4c                          dec sp twice (2B for x)
+a1 00 00                       mov ax, [_L]    ; LOW word only (= 0x5678)
+89 46 fe                       x = ax
+8b 46 fe                       reload x for return
+```
+
+Findings:
+- `(int)long_global` = single `mov ax, [_L]` (3B with FIXUPP). The
+  high word at `[_L + 2]` is unread. Same shape as `(int)long_local`
+  (`2521`), `(int)long_param` (`2732`), and `(int)long_global` in
+  `2560`.
+- `_DATA` long bytes are little-endian: `0x12345678` → `78 56 34 12`.
+- The conversion is byte truncation at the load site, no
+  bit-manipulation instructions.
+

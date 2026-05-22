@@ -1474,3 +1474,35 @@ Findings:
 - The only difference from direct call is the call instruction
   (`ff 16 disp16` for indirect, `e8 disp16` for direct).
 
+
+## Array-to-pointer decay at call site — `lea ax, [bp-N]; push ax`
+
+Fixture `2787-arr-decay-arg-obj`:
+
+```c
+int sumof(int *p, int n);
+int call_with_arr(void) {
+  int a[3];
+  /* ... a initialized ... */
+  return sumof(a, 3);
+}
+```
+
+```
+b8 03 00 50                    push 3
+8d 46 fa                       lea ax, [bp-6]   ; &a[0]
+50                             push ax
+e8 00 00                       call _sumof
+59 59                          2-arg cleanup
+```
+
+Findings:
+- Passing an array as an argument = **`lea ax, &a[0]; push ax`**
+  (5 bytes). Array decays to a pointer to its first element.
+- NO N_SCOPY@ struct-copy — the whole array isn't passed by value;
+  only the pointer is.
+- ModR/M `8d 46 disp8` for the lea = 3 bytes. Plus `push ax` (1B).
+  Total: 4 bytes for the address push (vs. 6+ for pushing a struct
+  by value).
+- This is the C "array-to-pointer decay" rule at codegen level.
+

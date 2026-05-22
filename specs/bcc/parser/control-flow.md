@@ -3991,3 +3991,56 @@ Findings:
 - `v > 0` triggers `or si, si` peephole here because v is **reused**
   in the inner `v > 100` compare — so it's worth promoting to si.
 
+
+## `if (g)` — direct `cmp word [_g], 0` (no register load)
+
+Fixture `2784-if-global-test-obj`:
+
+```c
+int g;
+if (g) return 1;
+return 0;
+```
+
+```
+83 3e 00 00 00                 cmp word [_g], 0 (mem-imm cmp, 5B, FIXUPP)
+74 05                          je → ZERO
+```
+
+Findings:
+- `if (g)` for a global int uses **`cmp word [_g], 0`** directly
+  (no AX load). 5 bytes for the cmp + FIXUPP, 2 for the branch.
+- ModR/M `3e` = mod 00, op-ext 111 (cmp), r/m 110 (disp16 form).
+- Compare to local `if (x)` (`83 7e disp8 0` = 5B with bp-rel) —
+  same idea, different addressing mode.
+- This is cheaper than loading into AX first (`mov ax, [_g]; or
+  ax, ax; je` would be 7B vs 7B — actually similar). But the
+  direct-mem form avoids touching AX.
+
+## `for (i=0; i<n; i = i+1)` — `cmp reg, [bp+disp]` for var bound
+
+Fixture `2785-for-var-bound-obj`:
+
+```c
+int sum_to(int n) {
+  int i, s;
+  s = 0;
+  for (i = 0; i < n; i = i + 1) s = s + i;
+  return s;
+}
+```
+
+COND:
+```
+3b 76 04                       cmp si, [bp+4]   ; i < n (reg vs mem)
+7c f0                          jl → BODY
+```
+
+Findings:
+- For variable upper bound, BCC emits **`cmp reg, [mem]`** (3 bytes
+  via `3b 76 disp8`). The promoted loop counter (si) is compared
+  directly against the memory operand for `n`.
+- ModR/M `76 04` = mod 01, reg 110 (si), r/m 110 (`[bp+disp8]`).
+- Both `s` and `i` are promoted to si/di since they're used inside
+  the loop — confirms usage-based promotion (`2754`/`2746`).
+

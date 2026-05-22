@@ -2840,3 +2840,30 @@ Findings:
 - Same shape as `obj.i.v` (`2503`) but 3 levels deep. Nesting
   depth doesn't matter — codegen sees one offset per access.
 
+
+## Struct-by-value parameter (sizeof=2) — identical to int param
+
+Fixture `2786-struct2b-byval-obj`:
+
+```c
+struct Two { int v; };
+int extract(struct Two s) {
+  return s.v;
+}
+```
+
+```
+55 8b ec                       prologue
+8b 46 04                       mov ax, [bp+4]    ; load just the int (struct is 2B)
+eb 00 5d c3                    epilogue
+```
+
+Findings:
+- A 2-byte struct passed by value is **transparent at codegen** —
+  reads identically to an int param.
+- The struct's "field offset" of 0 means `s.v` = `[bp+4]` directly.
+- Caller would push as one word (presumably via push reg or push mem).
+- This is the "small struct fits in DX:AX" rule applied to args
+  too: structs ≤ register-pair size pass as bytes-on-stack with no
+  struct-copy overhead.
+
