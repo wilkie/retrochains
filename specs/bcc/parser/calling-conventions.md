@@ -980,3 +980,42 @@ Findings:
   intra-segment call. (Large/huge memory model would emit `9a` far
   call with seg:off.)
 
+
+## 3-arg call — R-to-L push order, `mov ax,imm; push ax` for each, `add sp,6` cleanup
+
+Fixture `2527-call-three-args-obj`:
+
+```c
+int add3(int a, int b, int c);
+int main(void) {
+  return add3(1, 2, 3);
+}
+```
+
+```
+55 8b ec                    prologue
+b8 03 00                    mov ax, 3
+50                          push ax            ; arg3 FIRST (R-to-L)
+b8 02 00                    mov ax, 2
+50                          push ax            ; arg2
+b8 01 00                    mov ax, 1
+50                          push ax            ; arg1 (closest to call)
+e8 00 00                    call _add3         ; EXTDEF
+83 c4 06                    add sp, 6          ; cleanup 3 words
+eb 00 5d c3                 epilogue
+```
+
+Findings:
+- **3 args = 12 bytes of push setup**: each arg costs 4 bytes
+  (`mov ax, imm16` 3B + `push ax` 1B). BCC never uses `push imm16`
+  because that's an 80186+ instruction; the target is 8086.
+- **Multi-arg cleanup is `add sp, N`** — `83 c4 06` (3 bytes) for
+  3 args. Confirms the threshold:
+  - 1 arg → `pop cx` (1B)
+  - ≥2 args → `add sp, N` (3B)
+- Push order is strict **R-to-L cdecl**: arg3 pushed first lands at
+  the bottom of the call's arg block; arg1 pushed last sits just
+  below the return address.
+- This is the canonical "external function call" shape — combines
+  with EXTDEF for the symbol and a FIXUPP on the disp16 of `e8`.
+

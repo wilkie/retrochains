@@ -1770,3 +1770,34 @@ Findings:
   threshold.
 - This is worth catching as a peephole rule in our IR.
 
+
+## Shift-by-8 (byte swap) — uses generic `mov cl, 8; shr ax, cl`
+
+Fixture `2528-unsigned-shr-8-obj`:
+
+```c
+unsigned int u;
+u = 0xABCD;
+return u >> 8;
+```
+
+```
+55 8b ec 4c 4c                prologue + 2B local
+c7 46 fe cd ab                u = 0xABCD
+8b 46 fe                      mov ax, u
+b1 08                         mov cl, 8
+d3 e8                         shr ax, cl
+eb 00 8b e5 5d c3             epilogue
+```
+
+Findings:
+- Shifting an unsigned int by exactly 8 (which is "move AH to AL,
+  zero AH") uses the **generic cl-form** (`b1 08; d3 e8` = 4 bytes).
+- BCC does NOT take the **byte-aware shortcut** that would be even
+  shorter: `mov al, ah; mov ah, 0` (3 bytes: `8a c4; b4 00` no
+  that's 4 bytes too; or `88 e0` mov al,ah = 2B + `b4 00` mov ah,0
+  = 2B = 4B total — same length, but BCC ignores byte-register
+  tricks).
+- So the shift-codegen rule is uniform: ≤3 → unroll, ≥4 → cl-form,
+  no special cases for shift-by-8 / shift-by-16 etc.
+

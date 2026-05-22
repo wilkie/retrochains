@@ -933,3 +933,33 @@ Findings:
   bytes total to get a sign-extended int into AX). A reusable
   template.
 
+
+## `unsigned char` parameter — uses `mov ah, 0` (NOT `xor ah, ah`)
+
+Fixture `2525-uchar-param-promote-obj`:
+
+```c
+int compute(unsigned char c) {
+  return c + 1;
+}
+```
+
+```
+55 8b ec                    prologue
+8a 46 04                    mov al, [bp+4]     ; low byte
+b4 00                       mov ah, 0          ; ZERO-EXTEND
+40                          inc ax             ; c + 1
+eb 00 5d c3                 epilogue
+```
+
+Findings:
+- `unsigned char` promote uses **`mov ah, 0`** (`b4 00`, 2 bytes) to
+  zero-extend — NOT `xor ah, ah` (also 2 bytes, but clobbers flags).
+  Both are the same length; BCC prefers the flag-preserving form.
+- Contrast with **signed `char`** (`2523`) which uses `cbw` (1 byte)
+  to sign-extend AL → AX.
+- Promote-template byte signatures:
+  - Signed char:   `8a 46 disp; 98`         (4B)
+  - Unsigned char: `8a 46 disp; b4 00`      (4B)
+  Same total length; differ only in the third+ bytes.
+

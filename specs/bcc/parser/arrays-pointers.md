@@ -3999,3 +3999,40 @@ Findings:
   does `p++` for `long*` (sizeof=4) become `inc;inc;inc;inc`, or
   switch to `add reg, 4`?
 
+
+## `a[i << K]` — explicit shift NOT fused with sizeof scaling
+
+Fixture `2530-array-idx-shifted-obj`:
+
+```c
+int a[10];
+int main(void) {
+  int i;
+  i = 3;
+  return a[i << 1];
+}
+```
+
+```
+55 8b ec 4c 4c                prologue + 2B local
+c7 46 fe 03 00                i = 3
+8b 5e fe                      mov bx, i
+d1 e3                         shl bx, 1                ; explicit `i << 1`
+d1 e3                         shl bx, 1                ; sizeof(int) = 2 scaling
+8b 87 00 00                   mov ax, [bx + _a]        ; FIXUPP _a
+eb 00 8b e5 5d c3             epilogue
+```
+
+Findings:
+- `a[i << 1]` for `int a[]` (sizeof=2) emits **two separate `shl bx, 1`**
+  — one for the user-written `i << 1`, one for the implicit sizeof
+  scaling. BCC does **NOT fuse** them into a single `shl bx, 2` or
+  `shl bx, cl` with cl=2.
+- This means the array-index codegen is purely compositional:
+  - Compute the index rvalue (whatever its expression form is)
+  - Then apply the sizeof-scale shift
+- For the shift-by-2 final result, the unroll-vs-cl rule still
+  picks the unroll path (2 single-bit shifts under N≤3).
+- ModR/M `87` = mod 10, r/m 111 → `[bx + disp16]`; disp16 carries
+  FIXUPP for `_a`.
+

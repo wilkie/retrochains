@@ -468,3 +468,60 @@ Rust reimplementation:
 - Mask only when reading (writes use clear+set
   semantics that don't need a read first).
 
+
+## Bitfield write+read — `and/or` byte-mask pair, read via `shr; and`
+
+Fixture `2529-bitfield-pack-obj`:
+
+```c
+struct Flags {
+  unsigned a : 3;
+  unsigned b : 5;
+};
+struct Flags f;
+int main(void) {
+  f.a = 5;
+  f.b = 17;
+  return f.b;
+}
+```
+
+```
+55 8b ec                            prologue
+                                    ; --- f.a = 5 (bits 0..2) ---
+80 26 00 00 f8                      and byte [_f+0], 0xF8    ; mask = 11111000
+80 0e 00 00 05                      or  byte [_f+0], 0x05
+                                    ; --- f.b = 17 (bits 3..7) ---
+80 26 00 00 07                      and byte [_f+0], 0x07    ; mask = 00000111
+80 0e 00 00 88                      or  byte [_f+0], 0x88    ; 17 << 3 = 0x88
+                                    ; --- return f.b ---
+a0 00 00                            mov al, [_f]             ; FIXUPP
+d1 e8                               shr ax, 1                ; position-shift
+d1 e8                               shr ax, 1
+d1 e8                               shr ax, 1
+25 1f 00                            and ax, 0x001F           ; width-mask
+eb 00 5d c3                         epilogue
+```
+
+Findings:
+- **Bitfield write** = clear-then-set:
+  `and byte [mem], ~bitfield-mask; or byte [mem], shifted-value`.
+  Each store is 5 bytes (`80 26/0e disp16 imm8` with FIXUPP). The
+  imm8 is a byte-mask because both fields fit in one byte.
+- **Bitfield read** = byte-load (`a0` moffs8, 3 bytes) + position-
+  shift (3× `d1 e8` for a shift of 3 — unroll under N≤3 rule) +
+  width-mask (`and ax, 0x001F` = 3 bytes).
+- The width-mask is wider than necessary (mask AX, not AL) — but
+  it's correct because AH might contain garbage after the byte
+  load; the `and ax, 0x1F` cleans both halves. Cleaner than doing
+  `mov al, [mem]; xor ah, ah; ...` (would add 2B for the clear).
+- The struct `{ unsigned a:3; unsigned b:5; }` fits in **1 byte**
+  total — BCC packs bitfields into the smallest container that
+  holds them. (To probe: what happens when the next field crosses
+  a byte boundary?)
+- All four stores reference [_f + 0] with FIXUPP — bitfield storage
+  starts at offset 0 in the struct.
+- Note: bitfield writes are not load-modify-store — they use
+  `and byte [mem], imm; or byte [mem], imm` (direct memory ops).
+  This is shorter than load-into-reg, modify, store-back.
+

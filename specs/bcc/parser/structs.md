@@ -1771,3 +1771,52 @@ Findings:
   definitely switch to hidden-pointer-arg + N_SCOPY@ (already
   observed in earlier fixtures).
 
+
+## 3-byte struct return — DOES use hidden-ptr + N_SCOPY@ (NOT DX:AX)
+
+Fixture `2526-struct-3b-ret-obj`:
+
+```c
+struct Three { int x; char c; };
+struct Three make(void) {
+  struct Three s;
+  s.x = 100;
+  s.c = 'Z';
+  return s;
+}
+```
+
+```
+55 8b ec                    prologue
+83 ec 04                    sub sp, 4              ; 4B local (3B struct padded)
+c7 46 fc 64 00              s.x = 100              ; [bp-4]
+c6 46 fe 5a                 s.c = 'Z'              ; [bp-2], byte store
+ff 76 06                    push word [bp+6]       ; caller-passed dst SEG
+ff 76 04                    push word [bp+4]       ; caller-passed dst OFF
+8d 46 fc                    lea ax, [bp-4]         ; src OFF = &s
+16                          push ss                ; src SEG = ss
+50                          push ax
+b9 03 00                    mov cx, 3              ; count = 3 bytes
+e8 00 00                    call N_SCOPY@          ; (EXTDEF)
+8b 46 04                    mov ax, [bp+4]         ; return value = dst OFF
+eb 00 8b e5 5d c3           epilogue
+```
+
+Findings:
+- **3-byte struct return DOES use the hidden-pointer convention**:
+  the caller passes `(dst-seg, dst-off)` as two extra args at
+  `[bp+4]`/`[bp+6]`. The callee copies its local struct over via
+  `N_SCOPY@`. THEN returns the dst pointer in AX.
+- So the DX:AX-as-return rule from `2524` applies **only** when
+  the struct is EXACTLY 4 bytes — not "≤ 4". 3-byte struct uses
+  helper, 4-byte struct uses DX:AX. Likely rule: **DX:AX path is
+  used only when sizeof == 4 AND the struct is two ints** (or maybe
+  any 4-byte type), otherwise → N_SCOPY@.
+- The N_SCOPY@ arg order (top of stack first as call sees them):
+  `count = cx`, then on stack: `src-off, src-seg, dst-off, dst-seg`.
+  Reading pushes in reverse: dst-seg pushed first → bottom; src-off
+  pushed last → top.
+- The return convention is **"AX = original dst-off"** — caller
+  knows the dest by the same pointer, so AX is informational.
+- Local-struct alignment: 3-byte struct gets `sub sp, 4` (even-pad).
+
