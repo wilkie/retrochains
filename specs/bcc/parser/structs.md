@@ -1820,3 +1820,70 @@ Findings:
   knows the dest by the same pointer, so AX is informational.
 - Local-struct alignment: 3-byte struct gets `sub sp, 4` (even-pad).
 
+
+## 2-byte struct return — packed into AX alone
+
+Fixture `2531-struct-2b-ret-obj`:
+
+```c
+struct Pair { char a; char b; };
+struct Pair make(void) {
+  struct Pair p;
+  p.a = 'X';
+  p.b = 'Y';
+  return p;
+}
+```
+
+```
+55 8b ec 4c 4c                prologue + 2B local
+c6 46 fe 58                   p.a = 'X' (byte at [bp-2])
+c6 46 ff 59                   p.b = 'Y' (byte at [bp-1])
+8b 46 fe                      mov ax, [bp-2]    ; read both bytes as word
+eb 00 8b e5 5d c3             epilogue
+```
+
+Findings:
+- **2-byte struct return = packed into AX** with a single
+  word-sized load. Low byte (p.a at offset 0) lands in AL,
+  high byte (p.b at offset 1) lands in AH — natural little-endian.
+- **NO N_SCOPY@ helper call**, no use of DX.
+- So the size-to-strategy map is now:
+  - `sizeof == 2` → packed into AX
+  - `sizeof == 3` → N_SCOPY@ + hidden ptr (`2526`)
+  - `sizeof == 4` → DX:AX (`2524`)
+  - `sizeof >= 5` → N_SCOPY@ + hidden ptr
+- Probably also: `sizeof == 1` → packed into AL only. To probe.
+
+## 4-byte struct holding a `long` — also DX:AX
+
+Fixture `2532-struct-long-ret-obj`:
+
+```c
+struct Big { long v; };
+struct Big make(void) {
+  struct Big b;
+  b.v = 0x12345678L;
+  return b;
+}
+```
+
+```
+55 8b ec 83 ec 04              prologue + 4B local
+c7 46 fe 34 12                 [bp-2] = 0x1234        ; HIGH word first
+c7 46 fc 78 56                 [bp-4] = 0x5678        ; LOW word
+8b 56 fe                       mov dx, [bp-2]         ; dx = HIGH
+8b 46 fc                       mov ax, [bp-4]         ; ax = LOW
+eb 00 8b e5 5d c3              epilogue
+```
+
+Findings:
+- A struct of exactly 4 bytes holding a single long uses the **same
+  DX:AX return path** as `{int x; int y}` (`2524`). So the
+  return-strategy decision is **based on sizeof alone**, not on
+  field count or types.
+- **Long store-to-stack writes HIGH word first** (at [bp-2]), then
+  LOW word (at [bp-4]) — same order as `2521`.
+- The 32-bit literal `0x12345678` is split: HIGH = 0x1234, LOW =
+  0x5678. Two separate `c7 46 disp imm16` stores. No 32-bit ops.
+

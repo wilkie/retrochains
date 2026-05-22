@@ -447,3 +447,51 @@ Findings:
   can normalize `!x` → `x == 0` (or vice versa) and produce
   identical bytes either way.
 
+
+## Unsigned comparison uses unsigned branches (`jae`/`jb`)
+
+Fixture `2536-unsigned-cmp-obj`:
+
+```c
+int main(void) {
+  unsigned int u;
+  u = 50000;
+  if (u < 100) return 1;
+  return 0;
+}
+```
+
+```
+55 8b ec 4c 4c                 prologue + 2B local
+c7 46 fe 50 c3                 u = 50000 (0xC350)
+83 7e fe 64                    cmp word [bp-2], 100
+73 05                          jae +5 → FALSE        ; UNSIGNED!
+b8 01 00                       true: ax = 1
+eb 04                          jmp epi
+33 c0                          false: ax = 0
+eb 00 8b e5 5d c3              epilogue
+```
+
+Findings:
+- **Unsigned `u < 100`** emits **`jae` (`0x73`)** — the unsigned
+  "above-or-equal" branch. Skips the "true" path when `u >= 100`
+  (treating both as unsigned).
+- Compare to signed: `if (s < 100)` would emit **`jge` (`0x7D`)**.
+- The byte difference is exactly ONE bit (`0x73` vs `0x7D`): a
+  type-aware codegen distinction that's invisible if values stay
+  in 0..32767 but corrupts comparisons in 32768..65535.
+- **Critical for byte-exactness**: our parser must propagate
+  signed/unsigned through expression types and pick the right
+  branch family at every comparison site.
+
+Branch opcode pairs to track:
+| C op | Signed | Unsigned |
+|------|--------|----------|
+| `<`  | jge=`0x7D` (skip-true) | jae=`0x73` |
+| `>`  | jle=`0x7E`             | jbe=`0x76` |
+| `<=` | jg=`0x7F`              | ja=`0x77`  |
+| `>=` | jl=`0x7C`              | jb=`0x72`  |
+
+(Where the listed condition is "the inverted branch that skips the
+true-path" — what BCC actually emits.)
+

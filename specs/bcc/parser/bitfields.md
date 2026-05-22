@@ -525,3 +525,49 @@ Findings:
   `and byte [mem], imm; or byte [mem], imm` (direct memory ops).
   This is shorter than load-into-reg, modify, store-back.
 
+
+## Bitfield crossing byte boundary — switches to word-sized and/or
+
+Fixture `2533-bitfield-cross-byte-obj`:
+
+```c
+struct Wide {
+  unsigned a : 5;
+  unsigned b : 5;
+  unsigned c : 5;
+};
+struct Wide w;
+int main(void) {
+  w.b = 17;
+  return w.b;
+}
+```
+
+```
+55 8b ec                            prologue
+                                    ; --- w.b = 17 (bits 5..9, crosses byte boundary) ---
+81 26 00 00 1f fc                   and word [_w+0], 0xFC1F   ; 16-bit mask
+81 0e 00 00 20 02                   or  word [_w+0], 0x0220   ; 17 << 5 = 0x220
+                                    ; --- return w.b ---
+a1 00 00                            mov ax, [_w+0]            ; word load
+b1 05                               mov cl, 5
+d3 e8                               shr ax, cl                ; position-shift via cl
+25 1f 00                            and ax, 0x001F            ; width-mask
+eb 00 5d c3                         epilogue
+```
+
+Findings:
+- When a bitfield CROSSES a byte boundary, BCC switches to:
+  - **`and word [mem], imm16` / `or word [mem], imm16`** (6 bytes each).
+  - **Word load** (`a1` moffs16, 3 bytes) for the read.
+- Compare to single-byte case (`2529`): byte versions (`80 26/0e`,
+  `a0`) — 1 byte shorter per instruction.
+- BCC picks the SMALLEST container that holds all the struct's
+  bitfields:
+  - `5+5+5 = 15` bits → 2-byte word container, `sizeof(struct) = 2`.
+  - `3+5 = 8` bits → 1-byte container, `sizeof(struct) = 1`.
+- **Bit packing is LSB-first** (little-endian by bit position): field a
+  is bits 0..4, field b is bits 5..9, field c is bits 10..14.
+  Bit 15 unused (the 15th bit of the container).
+- Position shift uses cl-form (shift count 5 ≥ 4 → cl).
+

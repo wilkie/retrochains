@@ -4036,3 +4036,41 @@ Findings:
 - ModR/M `87` = mod 10, r/m 111 → `[bx + disp16]`; disp16 carries
   FIXUPP for `_a`.
 
+
+## 2D array initializer — single flat LEDATA, row-major
+
+Fixture `2535-2d-array-init-obj`:
+
+```c
+int m[2][3] = { { 1, 2, 3 }, { 4, 5, 6 } };
+int main(void) {
+  return m[1][2];
+}
+```
+
+`_DATA` bytes for `_m`:
+```
+01 00 02 00 03 00 04 00 05 00 06 00     ; row 0: 1,2,3 then row 1: 4,5,6
+```
+
+Main body:
+```
+55 8b ec                       prologue
+a1 0a 00                       mov ax, [_m + 10]   ; m[1][2]
+eb 00 5d c3                    epilogue
+```
+
+Findings:
+- 2D array `int m[2][3]` initializer flattens to a **single
+  contiguous 12-byte LEDATA** in `_DATA`. Row-major order (row 0
+  first, then row 1). NO separators or padding between rows.
+- `m[1][2]` constant subscript folds to byte offset 10: row 1
+  × (3 cols × 2B) + col 2 × 2B = 6 + 4 = 10.
+- Single `mov ax, moffs16` (`a1` opcode, 3 bytes) — no
+  runtime row-stride multiplication.
+- Confirms the rule from `2512`: N-dimensional arrays with all
+  constant subscripts collapse to a single byte offset + FIXUPP.
+- The "shape" of the source initializer (nested braces) carries
+  no runtime cost — same byte sequence as `{1,2,3,4,5,6}` would
+  produce.
+

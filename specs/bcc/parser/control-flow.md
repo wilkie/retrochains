@@ -2902,3 +2902,44 @@ Findings:
   Consistent with `2510` and `2516` — this is the canonical
   expression-evaluation shape, not an edge case.
 
+
+## `||` short-circuit — `jnz <true>` for all but last, `jz <false>` for last
+
+Fixture `2534-or-shortcircuit-obj`:
+
+```c
+if (a || b) return 7;
+return 0;
+```
+
+```
+55 8b ec 83 ec 04              prologue + 4B locals
+c7 46 fe 00 00                 a = 0
+c7 46 fc 01 00                 b = 1
+83 7e fe 00                    cmp word [bp-2], 0    ; test a
+75 06                          jnz +6 → TRUE         ; a≠0 → short-circuit TRUE
+83 7e fc 00                    cmp word [bp-4], 0    ; test b
+74 05                          jz +5  → FALSE        ; b==0 → FALSE
+                               ; TRUE-PATH (a≠0 fallthrough, or b≠0 here):
+b8 07 00                       mov ax, 7
+eb 04                          jmp epi
+                               ; FALSE-PATH:
+33 c0                          xor ax, ax
+eb 00 8b e5 5d c3              epilogue
+```
+
+Findings:
+- `||` is structurally the dual of `&&`:
+  - **All but the LAST operand**: `cmp; jnz <TRUE-PATH>` —
+    short-circuit to TRUE if non-zero.
+  - **The LAST operand**: `cmp; jz <FALSE-PATH>` — short-circuit
+    to FALSE if zero, fall through to TRUE.
+- Merge structure is identical to `&&`: single TRUE-path and
+  single FALSE-path joining at the epilogue.
+- All conditional jumps are short (disp8).
+- Pattern flips between `je`/`jz` (AND) and `jne`/`jnz` (OR) —
+  one bit toggled in the jump opcode (`74` ↔ `75`).
+- Both AND and OR fall through (no jump) into the TRUE-path
+  when the cascade completes successfully — the `jmp +4` to epi
+  is from the explicit `return 7` body.
+
