@@ -4203,3 +4203,39 @@ Findings:
 - For `do-while`: `BODY; COND; j<cond> → BODY` (2B shorter).
 - Useful when you know the loop runs ≥ 1 time.
 
+
+## `do { ... } while (--n);` — TIGHTEST count-down loop (3B per iter)
+
+Fixture `2903-do-predec-obj`:
+
+```c
+do {
+  s = s + 1;
+} while (--n);
+```
+
+```
+                               ; LOOP_TOP:
+8b c6 40 8b f0                 s = s + 1
+4f                             dec di         (--n, 1B)
+75 f8                          jne → LOOP_TOP (2B)
+                               ; (fall through)
+```
+
+Findings:
+- **3-byte cond+back-jump** per iteration (`dec reg; jne disp8`).
+- Combined with do-while's "no initial jmp" optimization, this is
+  the **minimum-cost loop iteration in BCC**.
+- Iteration count: loops while `--n` is non-zero, so runs **N times**
+  for n=N (decrement first, exit when result is 0).
+- Wait — `--n` decrements and tests new value. So n=5: 4,3,2,1,0
+  (test 0 fails). Runs 5 iterations because the body runs BEFORE
+  the cond (do-while semantics). Actually:
+  - Iteration 1: body, --n=4, true → loop
+  - Iteration 2: body, --n=3, true → loop
+  - ...
+  - Iteration 5: body, --n=0, false → exit
+  - So runs **N times** total (body runs N times for n=N).
+- Compare to `while (--n)` which runs **N-1 times** (no body when
+  predec hits 0 immediately).
+

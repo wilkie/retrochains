@@ -3125,3 +3125,21 @@ Findings:
 - Confirms struct return rule: 1B=AL, 2B=AX, 3B=helper, 4B=DX:AX,
   5+=helper.
 
+
+## `struct{char; int; char}` packing — 4 bytes (offsets 0, 1, 3)
+
+Fixture `2908-struct-3field-pack-obj`:
+
+```c
+struct M { char a; int b; char c; };
+sizeof(struct M);   /* = 4 */
+```
+
+Findings:
+- Sizeof = **4 bytes**: 1 (char a) + 2 (int b, unaligned at offset 1)
+  + 1 (char c at offset 3) = 4.
+- Layout: `[0]=a, [1..2]=b, [3]=c`. No padding inserted anywhere.
+- BCC continues to pack to exact byte count even with 3 fields.
+- Consistent with `{char; int}` = 3B (`2718`), `{int; char}` = 3B
+  (`2854`), `{char; char; int}` = 4B (`2792`).
+

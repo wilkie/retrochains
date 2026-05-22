@@ -2076,3 +2076,47 @@ Findings:
 - Consistent with `switch (x) { default: ... }` (`2720`) which also
   skipped dispatch. Empty bodies, default-only — both elide.
 
+
+## DENSE TABLE switch (4+ contiguous cases) — `jmp CS:[bx + table]`
+
+Fixture `2907-switch-4-contig-obj`:
+
+```c
+switch (x) {
+  case 0: return 100;
+  case 1: return 110;
+  case 2: return 120;
+  case 3: return 130;
+}
+```
+
+```
+8b 5e 04                       mov bx, x
+83 fb 03                       cmp bx, 3
+77 1b                          ja → DEFAULT     (UNSIGNED > 3)
+d1 e3                          shl bx, 1        (scale × 2)
+2e ff a7 2c 00                 jmp CS:[bx + table]  (INDIRECT JUMP TABLE!)
+                               ; case bodies follow:
+b8 64 00 eb 13                 case 0: return 100
+b8 6e 00 eb 0e                 case 1: return 110
+b8 78 00 eb 09                 case 2: return 120
+b8 82 00 eb 04                 case 3: return 130
+                               ; DEFAULT (or post-switch):
+33 c0 eb 00
+```
+
+Table in code segment: `12 00 17 00 1c 00 21 00` (4 × disp16 to bodies)
+
+Findings:
+- **Threshold for dense-table dispatch: 4 contiguous cases** (`0..3`).
+- Steps:
+  1. Range check: `cmp bx, max_case; ja → DEFAULT` (unsigned for
+     two-sided range, handles negative values too).
+  2. Scale index by 2 (`shl bx, 1` for word-sized table).
+  3. Indirect jump via `2e ff a7 disp16` = `jmp CS:[bx + table]`.
+  4. Bodies are after the dispatch, each ending with `jmp → epi`.
+- The **`2e` prefix** is CS segment override — the table lives in
+  the CODE segment, not _DATA, since the switch is in TEXT.
+- ModR/M `a7 disp16` = mod 10, op-ext 100 (jmp), r/m 111 ([bx + disp16]).
+- Table format: N × 16-bit offsets (relative to start of table).
+

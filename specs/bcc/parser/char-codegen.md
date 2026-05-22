@@ -1615,3 +1615,29 @@ Findings:
 - Total 11 bytes for the body. BCC's char codegen path is less
   polished than int.
 
+
+## `char c >= 0` — `cmp byte [bp+disp], 0` direct (no promotion)
+
+Fixture `2904-char-ge-zero-obj`:
+
+```c
+int nonneg(char c) {
+  if (c >= 0) return 1;
+  return 0;
+}
+```
+
+```
+80 7e 04 00                    cmp byte [bp+4], 0   (byte cmp, 4B)
+7c 05                          jl → ELSE (signed < 0)
+```
+
+Findings:
+- Char comparison with constant 0 uses **`cmp byte [mem], imm8`**
+  form (`80 7e disp8 imm8`, 4B). NO int promotion needed.
+- ModR/M `7e 04` = mod 01, r/m 110 = `[bp+disp8]`. Opcode `80` is
+  `cmp r/m8, imm8`.
+- Signed `>= 0` → `jl → ELSE` (`7c`, signed less-than).
+- 4B+2B = 6B for the test — same size as int's optimized form.
+- This shows char comparison can skip the cbw step entirely.
+
