@@ -2929,3 +2929,61 @@ Findings:
 - Much cheaper than testing each half separately (would be 14+B).
 - Sign-irrelevant: same shape for signed and unsigned longs.
 
+
+## Local `long v = 0x12345678L;` — HIGH-first stores
+
+Fixture `2828-local-long-init-obj`:
+
+```c
+long v = 0x12345678L;
+return v;
+```
+
+```
+83 ec 04                       sub sp, 4
+c7 46 fe 34 12                 [bp-2] = 0x1234 (HIGH word)
+c7 46 fc 78 56                 [bp-4] = 0x5678 (LOW word)
+8b 56 fe                       mov dx, v.HIGH
+8b 46 fc                       mov ax, v.LOW
+```
+
+Findings:
+- Local long init writes **HIGH first** (`[bp-2]`), then LOW
+  (`[bp-4]`). Storage layout: LOW at lower address (`[bp-4]`),
+  HIGH at higher address (`[bp-2]`).
+- Read order also HIGH-then-LOW (`mov dx, HIGH; mov ax, LOW`),
+  matching long-return ABI.
+- Same shape as global long return (`2790`).
+
+## `ulong / 10UL` — `N_LUDIV@` helper with STACK args
+
+Fixture `2829-ulong-div-10-obj`:
+
+```c
+unsigned long div10(unsigned long v) {
+  return v / 10UL;
+}
+```
+
+```
+33 c0                          xor ax, ax       (HIGH of 10UL = 0)
+ba 0a 00                       mov dx, 10       (LOW of 10UL)
+50                             push ax          (push HIGH first)
+52                             push dx          (push LOW)
+ff 76 06                       push v.HIGH
+ff 76 04                       push v.LOW
+e8 00 00                       call N_LUDIV@    (FIXUPP)
+                               ; NO visible cleanup — helper self-cleans
+```
+
+Findings:
+- Unsigned long divide uses **`N_LUDIV@` helper with STACK args**
+  (different from `N_LXMUL@` fast-call regs).
+- Stack layout from top: `[sp] = numerator.LOW, [sp+2] = numerator.HIGH,
+  [sp+4] = divisor.LOW, [sp+6] = divisor.HIGH`.
+- Helper does its own arg cleanup (no `add sp, N` at caller).
+- Return: DX:AX = quotient.
+- For signed long divide: would use `N_LDIV@` (different helper).
+- The constant 10UL is materialized via `xor ax,ax; mov dx, 10`
+  (efficient: 5 bytes for the 4-byte long).
+

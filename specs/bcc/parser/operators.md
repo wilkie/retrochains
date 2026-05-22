@@ -1079,3 +1079,27 @@ Findings:
   only after BOTH operands.
 - 20 bytes total for the || chain.
 
+
+## `!a && b` — `!` folds into the branch condition
+
+Fixture `2825-not-and-obj`:
+
+```c
+if (!a && b) return 1;
+```
+
+```
+83 7e 04 00                    cmp a, 0
+75 0b                          jne → FALSE   ; (!a = false: if a != 0 skip)
+83 7e 06 00                    cmp b, 0
+74 05                          je → FALSE    ; standard b == 0 → false
+```
+
+Findings:
+- `!a` folds into the branch direction: instead of testing `a == 0`
+  with `je → FALSE` (the `a && b` form), `!a` uses `jne → FALSE`.
+- Same total bytes as `(a == 0) && b` — both forms are
+  byte-identical at the cmp+branch.
+- Generalizable: `!expr` in any boolean context flips the branch
+  condition that consumes it.
+

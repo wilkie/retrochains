@@ -2333,3 +2333,77 @@ Findings:
 - For `unsigned char + int`, BCC would use `mov ah, 0` (zero-
   extend, 2B) instead of cbw (1B).
 
+
+## Signed `x / 4` — full idiv, NO shr strength reduction
+
+Fixture `2826-sdiv-4-obj`:
+
+```c
+return x / 4;
+```
+
+```
+8b 46 fe                       mov ax, x
+bb 04 00                       mov bx, 4
+99                             cwd
+f7 fb                          idiv bx
+```
+
+Findings:
+- **Signed integer divide by power-of-2 does NOT strength-reduce
+  to `sar`** — uses full idiv (1+3+3 = 7 bytes for div op).
+- Reason: `sar` rounds **toward negative infinity** while C's `/`
+  rounds **toward zero**. They differ for negative numerators
+  (e.g. `-1 / 2 == 0` but `-1 sar 1 == -1`). So sar isn't a
+  semantic equivalent for signed division.
+- Multiplication CAN strength-reduce to shl (the high bits
+  discard handles signed overflow); division can't.
+
+## Signed `x / -4` — full idiv with negative immediate
+
+Fixture `2827-sdiv-neg4-obj`:
+
+```
+bb fc ff                       mov bx, -4 (0xFFFC)
+99 f7 fb                       cwd; idiv bx
+```
+
+Findings:
+- `/ -4` uses **full idiv with `0xFFFC` as divisor**. No special
+  case for negative constants.
+- BCC does NOT fold `x / -4` to `-(x / 4)` or any equivalent.
+
+
+## `unsigned short >> 1` — `shr ax, 1` (2 bytes)
+
+Fixture `2830-ushort-shr-obj`:
+
+```c
+unsigned short half(unsigned short v) {
+  return v >> 1;
+}
+```
+
+```
+8b 46 04                       mov ax, v
+d1 e8                          shr ax, 1   (unsigned shift right)
+```
+
+Findings:
+- Smallest shift form: 2 bytes (`d1 e8` for shr, `d1 f8` for sar).
+- Unsigned shift uses `shr` (`d1 /5`); signed uses `sar` (`d1 /7`).
+- For >= 4-count shifts, switches to cl-form (`mov cl, N; shr ax, cl`).
+
+Updated unsigned right-shift cost table (for `v >> N`):
+
+| N    | unrolled | cl-form  | chosen |
+|------|----------|----------|--------|
+| 1    | 2B       | 4B       | 2B     |
+| 2    | 4B       | 4B       | 4B (unrolled) |
+| 3    | 6B       | 4B       | 4B (cl) — boundary |
+| 4+   | 8B+      | 4B       | 4B (cl) |
+| 16   | (helper for long) | (helper) | — |
+
+Note: per `2519`, unrolled wins for N ≤ 2 (or maybe 3); cl-form
+wins for N ≥ 4 (definite). Boundary at N=3 needs probing.
+
