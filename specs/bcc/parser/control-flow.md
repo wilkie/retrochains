@@ -2462,3 +2462,29 @@ contexts are decided per-expression, not globally.
 
 The `while` loop again uses the jmp-to-test-first template: skip the
 increment block on first iteration via `eb 02`.
+
+## Explicit `return;` in `void` function — jmp to epilogue (fixture `2364`)
+
+A bare `return;` statement inside a `void` function compiles to a
+`jmp` to the function's epilogue. The early-out pattern `if (x < 0)
+return;` follows the standard inverted-if template:
+
+```c
+if (x < 0) return;
+x = x + 1;
+```
+
+```
+8b 76 04                ; mov si, [bp+4] (x)
+0b f6                   ; or si, si       ← test sign
+7d 02                   ; jge +2          ← skip the early-return if x >= 0
+eb 05                   ; jmp epilogue    ← early return
+8b c6 40 8b f0          ; x = x + 1
+5e 5d c3                ; epilogue: pop si; pop bp; ret
+```
+
+`0b f6 / 7d 02 / eb 05` — `or reg, reg / jge skip / jmp epilogue`.
+Two short jumps with inverted condition, same as any `if (cond) goto
+end;`. No special "return statement" opcode — early returns reuse
+the `goto end` lowering. Confirms `return;` and `goto epilogue;` are
+the same construct at codegen time.

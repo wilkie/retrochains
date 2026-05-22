@@ -591,3 +591,19 @@ Total 5 bytes. BCC does not elide the prologue/epilogue for empty
 bodies — the `mov bp, sp` instruction always runs even though no
 [bp+offset] addressing follows. Confirms function entry/exit is
 unconditional, not driven by whether the body actually uses BP.
+
+## `static` at file scope on variables — also non-public (fixture `2365`)
+
+`static int arr[3] = {10, 20, 30};` at file scope follows the same
+internal-linkage rule as `static` functions (fixture `2358`): the
+storage IS in `_DATA` with the initializer, but the `PUBDEF` record
+**does not export** the `_arr` symbol. Same-TU code references it
+through ordinary `mov ax, [_arr+disp]` with FIXUPP records resolved
+locally; cross-TU code can never name it.
+
+Combined with the function case, BCC's `static` at file scope is
+implemented uniformly: emit the body/data, suppress the `PUBDEF`.
+
+Contrast with `int arr[5] = {7, 8};` at file scope (no `static`,
+fixture `2366`) — that does emit `_arr` in `PUBDEF`. So the
+`static` keyword's only OBJ-level effect is `PUBDEF` suppression.

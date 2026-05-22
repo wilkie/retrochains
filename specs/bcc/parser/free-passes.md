@@ -355,3 +355,26 @@ Probe replaced with the char-compound-OR variant.
   — the cl-form is used since N=15 is ≥ 4. Signed shift right uses
   `sar` (arithmetic), preserving sign. Confirms the
   N≥4-tips-into-cl-form threshold and signed-shift = sar selection.
+
+## Free passes (batch 669)
+
+- `2363` — `for (i = 0, j = 10; i < 5; i = i+1, j = j-1)` (comma
+  operator in for init and update clauses): each comma-separated
+  sub-expression is evaluated for side effect in source order. All
+  three locals (i, j, sum) enregister into SI, DI, DX. Standard
+  for-loop template (init, jmp test, body, update, test, jcc back).
+- `2366` — `int arr[5] = {7, 8};` (partial array initializer at
+  file scope): BCC emits the 2 explicit values plus 3 zero-fills
+  via LIDATA records, matching the C standard. Symbol IS in PUBDEF
+  (no `static`), consistent with [[static-fn-file-local]] /
+  [[static-arr-file-scope]] which suppress it.
+- `2367` — `r = a > b ? a++ : b++;` (ternary with postinc in each
+  branch): the standard ternary materialization template runs each
+  branch's `mov ax, regN / inc regN` (postfix = old value to AX,
+  then bump the source). Result lands in AX then is stored to r.
+  Re-confirms postinc + ternary mechanics.
+- `2368` — `int a; int b; int c; a=1; b=2; c=3; return a+b+c;` all
+  on one source line. Tokenization-only — identical OBJ to the
+  newline-separated form (3-int stack frame `83 ec 06`, three
+  `mov [bp-N], K` stores, then add chain). Confirms line breaks
+  carry no semantic weight in BCC's lexer.
