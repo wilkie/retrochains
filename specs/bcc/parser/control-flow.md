@@ -3075,3 +3075,42 @@ Findings:
   per loop level (the for-inc clause), which is structurally
   different from the cond-test label.
 
+
+## `break` in `while` — same shape as in `for`, just jmp to after-loop
+
+Fixture `2583-break-in-while-obj`:
+
+```c
+while (i < 10) {
+  if (i == 4) break;
+  i = i + 1;
+}
+```
+
+```
+33 f6                          xor si, si        ; i = 0
+eb 0c                          jmp → COND
+                               ; --- BODY ---
+83 fe 04                       cmp si, 4
+75 02                          jne → SKIP-BREAK
+eb 0a                          jmp → after-loop  (BREAK)
+                               ; SKIP-BREAK:
+8b c6 40 8b f0                 i = i + 1
+                               ; --- COND ---
+83 fe 0a                       cmp si, 10
+7c ef                          jl → BODY (signed)
+                               ; after-loop:
+8b c6                          mov ax, i
+```
+
+Findings:
+- `break` in `while` uses the **same double-jump pattern** as
+  `break` in `for` (`2516`): `cmp; jne SKIP; jmp after-loop`.
+- The target label "after-loop" is the same regardless of loop
+  kind; the only difference between loops is where `continue`
+  targets:
+  - `while`/`do`: continue → COND
+  - `for`:        continue → INCREMENT clause (`2578`)
+- So **break shape is loop-kind-independent**, **continue shape
+  varies by loop kind**.
+

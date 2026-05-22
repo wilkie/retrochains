@@ -987,3 +987,35 @@ Findings:
   function's own entry point. The FIXUPP record handles symbolic
   resolution.
 
+
+## Free pass: `register` keyword has no codegen effect
+
+Fixture `2582-register-int-obj`:
+
+```c
+int main(void) {
+  register int x;
+  x = 7;
+  x = x + 3;
+  return x;
+}
+```
+
+```
+55 8b ec 56                    prologue + push si
+be 07 00                       mov si, 7         ; x in si
+8b c6 05 03 00 8b f0           x = x + 3 (AX-acc)
+8b c6                          mov ax, x
+eb 00 5e 5d c3                 epilogue
+```
+
+Findings:
+- The `register` storage class is **purely a hint with no byte
+  effect** in BCC. The same source without `register` produces the
+  same OBJ when BCC chooses register-promotion (which it does for
+  any hot local that has no address-of operator and a reasonable
+  use count).
+- So our parser can drop `register` after parsing — no need to
+  carry it through to codegen IR.
+- Tracks alongside `auto` (default) which also has no effect.
+

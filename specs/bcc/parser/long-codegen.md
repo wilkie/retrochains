@@ -2285,3 +2285,72 @@ Findings:
 - No cleanup needed after — helper consumes DX:AX/CL and returns
   in DX:AX, no stack pushes.
 
+
+## Unsigned long right shift — `N_LXURSH@` helper (different from signed)
+
+Fixture `2579-ulong-shr-helper-obj`:
+
+```c
+unsigned long u = 0xF0000000UL;
+u = u >> 2;
+return (int)u;
+```
+
+Same call shape as signed long shift (`2575`), but the EXTDEF
+symbol is `N_LXURSH@` instead of `N_LXRSH@`:
+
+| operator           | symbol     |
+|--------------------|------------|
+| signed `long >> N` | `N_LXRSH@` |
+| unsigned `long >> N` | `N_LXURSH@` |
+| left shift (any)   | likely `N_LXLSH@` — to probe |
+| signed `long * long` | `N_LXMUL@` (see below) |
+
+Findings:
+- **Helper naming distinguishes signedness via "U" infix**:
+  `N_LXRSH@` (signed sar) vs `N_LXURSH@` (unsigned shr). Adding
+  one character to the symbol changes the rounding/sign behavior.
+- Left shifts are the same for signed and unsigned (both fill
+  with zeros on the right) — probably a single `N_LXLSH@` helper.
+- ABI matches `2575`: DX:AX = value, CL = count, returns DX:AX.
+
+## Long multiplication — `N_LXMUL@` helper
+
+Fixture `2580-long-mult-obj`:
+
+```c
+long a = 1000L;
+long b = 2L;
+return (int)(a * b);
+```
+
+```
+55 8b ec 83 ec 08              prologue + 8B locals (2 longs)
+c7 46 fe 00 00                 a HIGH = 0
+c7 46 fc e8 03                 a LOW = 1000
+c7 46 fa 00 00                 b HIGH = 0
+c7 46 f8 02 00                 b LOW = 2
+8b 4e fe                       cx = a HIGH
+8b 5e fc                       bx = a LOW
+8b 56 fa                       dx = b HIGH
+8b 46 f8                       ax = b LOW
+e8 00 00                       call N_LXMUL@   ; (EXTDEF FIXUPP)
+                               ; DX:AX = product (low 32 bits)
+eb 00 8b e5 5d c3              epilogue
+```
+
+Findings:
+- Long-multiply helper ABI:
+  - **CX:BX = first operand (a)**: CX=HIGH, BX=LOW
+  - **DX:AX = second operand (b)**: DX=HIGH, AX=LOW
+  - **Return: DX:AX = product (low 32 bits)**; high 32 bits discarded
+- All four scratch registers (AX, BX, CX, DX) are consumed by the
+  input — caller must spill anything live in those before the call.
+- One helper covers both signed and unsigned multiply because the
+  low 32 bits of the product are bit-pattern-identical regardless
+  of signedness interpretation. (Same as int8086 `imul` vs `mul`
+  giving identical low-word results.)
+- `(int)(a*b)` after the helper just keeps AX — DX (high half) is
+  discarded. No type-directed elision of the helper call itself
+  because the helper computes the full product internally.
+

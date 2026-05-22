@@ -4163,3 +4163,40 @@ Findings:
 - The init expressions `&x`, `&p` are FIXUPP'd at link time —
   these are inter-segment relocations within `_DATA`.
 
+
+## Negative subscript `p[-1]` — uses signed disp8 in ModR/M
+
+Fixture `2584-neg-arr-idx-obj`:
+
+```c
+int a[5];
+int main(void) {
+  int *p;
+  p = &a[2];          /* = _a + 4 */
+  return p[-1] + p[0];
+}
+```
+
+```
+55 8b ec 56                    prologue + push si
+be 04 00                       mov si, _a + 4 (FIXUPP)    ; p = &a[2]
+8b 44 fe                       mov ax, [si-2]             ; p[-1]
+03 04                          add ax, [si]               ; + p[0]
+eb 00 5e 5d c3                 epilogue
+```
+
+Findings:
+- **Negative subscript on a pointer folds to a signed disp8 in
+  ModR/M**: `p[-1]` for `int*` (sizeof=2) → `[si + 0xfe]` where
+  `0xfe` is `-2` as a signed byte.
+- ModR/M encoding `44` = mod 01, r/m 100 → `[si + disp8]`, then
+  the disp8 `0xfe` is interpreted as signed (-2).
+- `&a[2]` for const index folds to `_a + 4` with FIXUPP — no
+  runtime address arithmetic, even when the offset is into the
+  middle of the array.
+- The two-fetch sum `p[-1] + p[0]` uses the AX-accumulator pattern
+  with direct memory operands on the second fetch (`add ax,
+  [si]`).
+- This confirms: pointer arithmetic with constant offsets always
+  folds to a baseregister+disp form, even for negative offsets.
+

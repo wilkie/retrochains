@@ -1629,3 +1629,61 @@ Findings:
   starts paying off — dense table is ~12B header + 2B/entry,
   search table is ~14B header + 4B/entry.
 
+
+## Switch case fallthrough — NO jmp between cases (default C semantic)
+
+Fixture `2581-switch-fallthrough-obj`:
+
+```c
+switch (x) {
+  case 1:
+    r = r + 1;
+    /* FALLTHROUGH (no break) */
+  case 2:
+    r = r + 10;
+    break;
+  case 3:
+    r = r + 100;
+}
+```
+
+Main body (cases section):
+```
+                               ; --- case 1 body ---
+8b c6 40 8b f0                 r = r + 1
+                               ; (NO jmp here — falls through!)
+                               ; --- case 2 body ---
+8b c6 05 0a 00 8b f0           r = r + 10
+eb 07                          jmp → after-switch  (the BREAK)
+                               ; --- case 3 body ---
+8b c6 05 64 00 8b f0           r = r + 100
+                               ; (falls through to after-switch)
+                               ; --- after-switch ---
+8b c6                          mov ax, r
+```
+
+Findings:
+- **Case fallthrough is the default**: BCC inserts NO instruction
+  between case bodies. Case 1's last instruction is followed
+  immediately by case 2's first.
+- An explicit `break` compiles to `jmp <after-switch>`.
+- The last case (case 3) here also has no break, so it just falls
+  off the end of the switch (= reach the after-switch label).
+- Note: this 3-case switch (cases 1, 2, 3 — all contiguous!) STILL
+  uses linear chain, not dense table. Confirms that **the
+  threshold for dense table is strictly N ≥ 4, even when cases are
+  contiguous**.
+- This means BCC's switch desugars to:
+  ```
+  if      (x == 1) goto case_1;
+  else if (x == 2) goto case_2;
+  ...
+  else goto after_switch;
+  case_1: body1;     /* fall through */
+  case_2: body2; break;
+  ...
+  after_switch:
+  ```
+  The dispatch is JUST the chain of cmp/je; each `case label:`
+  becomes a goto target, and `break` is a jmp to after-switch.
+
