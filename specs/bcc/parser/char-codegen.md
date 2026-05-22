@@ -1518,3 +1518,18 @@ Findings:
 - For `c + 2`, would use `inc ax; inc ax` (2B); for `c + K` with
   K >= 3, would use `add ax, K`.
 
+
+## `unsigned char get(unsigned char c) { return c; }` — 3-byte body, no extension
+
+Fixture `2881-uchar-ret-fn-obj`:
+
+```
+8a 46 04                       mov al, c
+```
+
+Findings:
+- Unsigned char identity = same 3-byte body as signed char (`2824`).
+- NO zero-extension to AH. Char return ABI doesn't define AH.
+- The caller is responsible for any extension if needed.
+- Char return is byte-identical for signed and unsigned variants.
+

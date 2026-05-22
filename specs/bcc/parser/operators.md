@@ -1212,3 +1212,43 @@ Findings:
 - This is the classic `max(a, b)` idiom in two source forms; both
   produce identical bytes.
 
+
+## Nested ternary `a > b ? (a > c ? a : c) : (b > c ? b : c)`
+
+Fixture `2883-nested-ternary-obj`:
+
+```c
+int max3(int a, int b, int c) {
+  return a > b ? (a > c ? a : c) : (b > c ? b : c);
+}
+```
+
+```
+                               ; outer compare
+3b fa                          cmp di (a), dx (b)
+7e 0c                          jle → outer-ELSE
+                               ; outer THEN: inner1 (a > c ? a : c)
+3b fe                          cmp di, si (c)
+7e 04                          jle → inner1-ELSE
+8b c7                          ax = di (a)
+eb 02                          jmp → final-JOIN
+8b c6                          ax = si (c)
+eb 0a                          jmp → final-JOIN
+                               ; outer ELSE: inner2 (b > c ? b : c)
+3b d6                          cmp dx, si
+7e 04                          jle → inner2-ELSE
+8b c2                          ax = dx (b)
+eb 02                          jmp → final-JOIN
+8b c6                          ax = si (c)
+                               ; final-JOIN: epilogue
+```
+
+Findings:
+- Nested ternaries compile to **nested JOIN-via-AX patterns**.
+- Each ternary produces its result in AX; the outer ternary's
+  branches each select between two inner ternary results.
+- All branches converge at the final JOIN point.
+- All 3 params promoted to di/dx/si in this leaf function
+  (3-local register slot allocation).
+- ~25 bytes total for the 3-way max expression.
+

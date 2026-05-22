@@ -3262,3 +3262,47 @@ Findings:
   left-shifts (`<< 2`, `<< 3`, etc.) likely use the helper.
 - 8086 has `rcl r16, 1` opcode `d1 d2` (rotate left 1 through CF).
 
+
+## Long `<< 2` — `N_LXLSH@` helper (only `<< 1` is inlined)
+
+Fixture `2879-long-shl-2-obj`:
+
+```c
+long lshl2(long a) {
+  return a << 2;
+}
+```
+
+```
+8b 56 06                       mov dx, a.HIGH
+8b 46 04                       mov ax, a.LOW
+b1 02                          mov cl, 2
+e8 00 00                       call N_LXLSH@  (long left-shift helper)
+```
+
+Findings:
+- Long `<< 2` uses **`N_LXLSH@` helper** with CL=count, DX:AX=value.
+- Confirms long shift policy:
+
+| shift amount | strategy        | bytes |
+|--------------|-----------------|-------|
+| `<< 1`       | inline `shl+rcl`| 4B    |
+| `<< 16`      | byte-swap fold  | 5B    |
+| `<< 32`      | zero both halves (probable) | 4B |
+| `<< 2+`      | `N_LXLSH@` helper | 8B  |
+
+- Only `<< 1` and shifts-by-multiples-of-16 are special-cased.
+  All others pay the helper call.
+
+## Unsigned long `<< 1` — byte-identical to signed `<< 1`
+
+Fixture `2880-ulong-shl-1-obj`:
+
+```
+d1 e0                          shl ax, 1
+d1 d2                          rcl dx, 1
+```
+
+Same body as signed `<< 1` (`2878`). Left shift is signedness-agnostic
+(top bit is just bit 31 of the 32-bit value).
+

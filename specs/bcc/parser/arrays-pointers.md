@@ -5713,3 +5713,30 @@ Findings:
 - Compare to non-ptr postfix `a[K]++` (`2700`): same pattern but
   with disp16 instead of no-disp (4B+4B=8B for non-zero offset).
 
+
+## `&arr[i]` (var index, global array) — `shl + add ax, &arr`
+
+Fixture `2884-ptr-arr-var-idx-obj`:
+
+```c
+int arr[10];
+int *get(int i) {
+  return &arr[i];
+}
+```
+
+```
+8b 46 04                       mov ax, i
+d1 e0                          shl ax, 1
+05 00 00                       add ax, &_arr  (FIXUPP, 3B `05 imm16`)
+```
+
+Findings:
+- `&arr[i]` for global array = compute the byte offset, then ADD
+  the array's base address.
+- 8 bytes for the full expression (load + shift + add).
+- Uses `add ax, imm16` (`05 imm16`, 3B AX-acc form) with FIXUPP
+  carrying the array base.
+- Compare to `arr[i]` (read) which adds a final `mov ax, [bx]`.
+  &-form skips the dereference — just returns the address.
+
