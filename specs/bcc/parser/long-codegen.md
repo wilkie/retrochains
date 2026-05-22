@@ -2475,3 +2475,43 @@ Findings:
   higher address (offset 2 within the long), LOW at offset 0.
 - 3-element long array has `sizeof = 12` in `_BSS` / `_DATA`.
 
+
+## Struct{long} as fn arg + `b.v + 1` — inline `add ax, 1; adc dx, 0`
+
+Fixture `2592-struct-long-arg-obj`:
+
+```c
+struct Big { long v; };
+long take(struct Big b) {
+  return b.v + 1;
+}
+```
+
+```
+55 8b ec                       prologue
+8b 56 06                       mov dx, [bp+6]    ; b.v HIGH
+8b 46 04                       mov ax, [bp+4]    ; b.v LOW
+05 01 00                       add ax, 1         ; LOW + 1
+83 d2 00                       adc dx, 0         ; HIGH + carry
+eb 00 5d c3                    epilogue
+```
+
+Findings:
+- 4-byte struct passed by value: caller pushes 4 bytes; callee reads
+  LOW at `[bp+4]` and HIGH at `[bp+6]`. Same stack layout as a
+  raw `long` arg (LOW lower, HIGH higher).
+- **Long + 1 is inlined** as `add ax, imm; adc dx, 0` — NO helper
+  call. The 32-bit add is just two 16-bit instructions linked by
+  the carry flag.
+- `83 d2 00` = `adc reg, imm8` (sign-extended); opcode-ext 010 = adc,
+  r/m 010 = dx, then imm8 = 0. So adding a constant 1 to a long is
+  `add ax, 1; adc dx, 0` — 3 + 3 = 6 bytes.
+- This means **long add/sub by constant is ALWAYS inline**. Only
+  long mul/div/shift use helpers. The add+carry pattern handles
+  any 32-bit add of `imm16` or `imm32` cleanly.
+- For `long + long`, BCC would presumably emit `add ax, [other-LOW];
+  adc dx, [other-HIGH]` — likely also inline. To probe.
+- The struct-passing convention here is the same as raw-long: the
+  struct's fields are LAID OUT identically to the underlying scalar.
+  So `struct{long}` and `long` are byte-identical for arg passing.
+

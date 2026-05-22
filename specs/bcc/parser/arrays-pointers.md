@@ -4240,3 +4240,42 @@ Findings:
 - This is the idiomatic "string-building" pattern in C — and BCC
   emits the compact form expected.
 
+
+## Global `int *p = 0` — explicit init goes to `_DATA` (not `_BSS`)
+
+Fixture `2594-global-ptr-null-obj`:
+
+```c
+int *p = 0;
+int main(void) {
+  if (p == 0) return 1;
+  return 0;
+}
+```
+
+`_DATA` (2 bytes): `00 00`
+
+Main body:
+```
+55 8b ec                       prologue
+83 3e 00 00 00                 cmp word [_p], 0    ; direct mem-to-imm cmp
+75 05                          jnz → false
+b8 01 00                       return 1
+eb 04                          jmp epi
+33 c0                          xor ax, ax (return 0)
+eb 00 5d c3                    epilogue
+```
+
+Findings:
+- Global with **explicit `= 0` init goes to `_DATA`**, NOT `_BSS`.
+  Even though the bit pattern is identical (zero), the explicit
+  initializer keyword distinguishes the two segments. Compare to
+  uninitialized globals which go to `_BSS`.
+- `if (p == 0)` compiles to **`cmp word [mem], 0`** (5 bytes,
+  `83 3e disp16 imm8`) — direct memory comparison, no load to
+  register. ModR/M `3e` = mod 00, opcode-ext 111 (cmp), r/m 110
+  (disp16-only).
+- This is the same compact mem-cmp form we saw for byte
+  `cmp byte [si], 0` in the while-sentinel (`2561`).
+- Result `1` vs `0` returns via standard mov-ax-K + xor-ax,ax patterns.
+

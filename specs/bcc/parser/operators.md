@@ -604,3 +604,87 @@ Findings:
   - `v = i; i = i - 1;` → AX-accumulator pattern (3 instr per modify)
 - The form-sensitivity from `2554` is symmetric for pre and post.
 
+
+## `a = b = c = 7` — single AX load, multi-store right-to-left
+
+Fixture `2595-assign-chain-obj`:
+
+```c
+int main(void) {
+  int a;
+  int b;
+  int c;
+  a = b = c = 7;
+  return a + b + c;
+}
+```
+
+```
+55 8b ec 83 ec 06              prologue + 6B locals
+b8 07 00                       mov ax, 7
+89 46 fa                       [bp-6] = ax     ; c (rightmost) = 7
+89 46 fc                       [bp-4] = ax     ; b = 7
+89 46 fe                       [bp-2] = ax     ; a (leftmost) = 7
+8b 46 fe                       mov ax, a
+03 46 fc                       add ax, b
+03 46 fa                       add ax, c
+eb 00 8b e5 5d c3              epilogue
+```
+
+Findings:
+- Right-associative assign: `a = b = c = 7` parses as
+  `a = (b = (c = 7))`. BCC evaluates AS A SINGLE COMPUTATION:
+  - `7` loads into AX **once**
+  - Then stores to c, b, a in that order (right to left)
+- The value `7` is **reused across all three stores** — no reload,
+  no chain. This is a real optimization vs the naive lowering
+  `c = 7; b = c; a = b;` which would emit 3 loads + 3 stores.
+- The locals are laid out in declaration order from highest address:
+  - a@[bp-2] (declared first, closest to bp)
+  - b@[bp-4]
+  - c@[bp-6] (declared last, furthest)
+- This is a "value flows once, stores propagate" pattern that
+  generalizes to longer chains (any depth N reuses AX once).
+
+
+## Comma operator with register-promoted vars — direct `mov reg, imm`
+
+Fixture `2596-comma-stmt-obj`:
+
+```c
+int main(void) {
+  int x;
+  int y;
+  x = 1; y = 2;
+  x = (x = 10, y = 20, x + y);
+  return x;
+}
+```
+
+```
+55 8b ec 56 57                 prologue + push si, di
+be 01 00                       mov si, 1       ; x = 1 DIRECT (no AX)
+bf 02 00                       mov di, 2       ; y = 2 DIRECT
+be 0a 00                       mov si, 10      ; x = 10 (first comma)
+bf 14 00                       mov di, 20      ; y = 20 (second comma)
+8b c6                          mov ax, si
+03 c7                          add ax, di      ; x + y
+8b f0                          mov si, ax      ; x = (...)
+8b c6                          mov ax, si
+eb 00 5f 5e 5d c3              epilogue
+```
+
+Findings:
+- **Direct constant assigns to register-promoted vars use direct
+  `mov reg, imm`** (e.g. `be 01 00` = `mov si, 1`). NO AX-acc
+  detour. This is the byte-shortest form.
+- Compare to arithmetic-result assigns: `x = expr` where expr is
+  not a pure constant still goes through AX (load expr to ax,
+  store ax → reg). The compute-vs-direct distinction is:
+  - **Constant rvalue** → direct `mov reg, imm`
+  - **Computed rvalue** → flow through ax, then mov reg, ax
+- The comma operator emits each sub-expression in source order,
+  each "speaking" its rule. The final value-of-comma is the LAST
+  sub-expression's value (here `x + y` = 30), used as the value
+  of the outer assignment.
+

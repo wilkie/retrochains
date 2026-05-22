@@ -1019,3 +1019,30 @@ Findings:
   carry it through to codegen IR.
 - Tracks alongside `auto` (default) which also has no effect.
 
+
+## Free pass: same-size signedness cast `(unsigned int)int` is a NO-OP
+
+Fixture `2591-signed-to-unsigned-cast-obj`:
+
+```c
+unsigned int convert(int s) {
+  return (unsigned int)s;
+}
+```
+
+```
+55 8b ec                       prologue
+8b 46 04                       mov ax, s
+eb 00 5d c3                    epilogue
+```
+
+The cast emits **zero bytes**. `(unsigned int)` and `(int)` differ
+only in the type system; at the bit level a 16-bit signed and
+unsigned value are identical. Same applies to `(unsigned char)char`
+and `(unsigned long)long` for same-size conversions.
+
+This generalizes: signedness in BCC is purely a parser-side concept
+that influences operator selection (e.g. `jl` vs `jb` for compares,
+`shr` vs `sar`, `mul` vs `imul`). The CAST itself never produces
+bytes — it just changes how subsequent ops are emitted.
+

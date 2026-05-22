@@ -1116,3 +1116,44 @@ Findings:
   - Signed char promote: cbw (1B)
   - Unsigned char promote: mov ah, 0 (2B)
 
+
+## `signed char arr[]` — bytes directly stored, no padding
+
+Fixture `2593-signed-char-arr-obj`:
+
+```c
+signed char arr[3] = { -1, 0, 127 };
+int main(void) {
+  return arr[0] + arr[2];
+}
+```
+
+`_DATA` bytes:
+```
+ff 00 7f       ; -1, 0, 127 (signed byte values)
+```
+
+Main body:
+```
+55 8b ec                       prologue
+a0 00 00                       mov al, [_arr+0]    ; arr[0] = 0xFF
+98                             cbw                 ; → ax = 0xFFFF (-1)
+50                             push ax             ; spill
+a0 02 00                       mov al, [_arr+2]    ; arr[2] = 0x7F
+98                             cbw                 ; → ax = 0x007F (127)
+8b d0                          mov dx, ax
+58                             pop ax
+03 c2                          add ax, dx          ; -1 + 127 = 126
+eb 00 5d c3                    epilogue
+```
+
+Findings:
+- `signed char arr[N]` initializer = N bytes packed in `_DATA`,
+  one byte per element, no padding.
+- Each `arr[K]` read uses `mov al, moffs8` (`a0` opcode) — direct
+  AL load from a fixed memory offset, 3 bytes.
+- Sign-extension via `cbw` matches signed-char convention.
+  `0xFF` → `0xFFFF` (= -1), `0x7F` → `0x007F` (= 127).
+- Sum uses the **push/pop spill pattern** (`2558`, `2563`) for two
+  cbw-promoted operands.
+
