@@ -5021,3 +5021,110 @@ Findings:
 - Same shape as 2D int arrays from `2535`/`2512`, just with byte
   loads instead of word loads.
 
+
+## `*p + n` — 8-byte body (load ptr + deref + add mem)
+
+Fixture `2759-ptr-int-params-obj`:
+
+```c
+int compute(int *p, int n) {
+  return *p + n;
+}
+```
+
+```
+55 8b ec 56                    prologue + push si
+8b 76 04                       mov si, p
+8b 04                          mov ax, [si]      ; *p (2B no-disp)
+03 46 06                       add ax, n (mem-source)
+eb 00 5e 5d c3                 epilogue
+```
+
+Findings:
+- 5-byte expression body: `mov si, p` (3B) + `mov ax, [si]` (2B) +
+  `add ax, [bp+6]` (3B) = 8 bytes for the full expression.
+- The AX-accumulator-with-memory-operand pattern handles the add
+  efficiently without an intermediate register.
+
+## `return &a[2]` for global array — single `mov ax, imm16+FIXUPP`
+
+Fixture `2760-fn-ret-ptr-obj`:
+
+```c
+int a[5];
+int *get_third(void) { return &a[2]; }
+```
+
+```
+b8 04 00                       mov ax, &a[2] (= _a + 4, FIXUPP)
+eb 00 5d c3                    epilogue
+```
+
+Findings:
+- `&a[K]` for a global array folds to a single 3-byte
+  `mov ax, imm16` with FIXUPP. The byte offset `K × sizeof(*a)` is
+  baked into the immediate; the FIXUPP relocates to `_a`.
+- Minimal 3-byte body for "return pointer to known location."
+
+## `++(*p)` — direct `inc word [si]` (2 bytes)
+
+Fixture `2762-preinc-deref-obj`:
+
+```c
+int bump(int *p) {
+  return ++(*p);
+}
+```
+
+```
+8b 76 04                       mov si, p
+ff 04                          inc word [si]    ; ++(*p) DIRECT mem-inc
+8b 04                          mov ax, [si]     ; reload result
+```
+
+Findings:
+- `++(*p)` emits **`inc word [si]`** (2 bytes, no-disp form
+  `ff /0` r/m 100).
+- Saves vs. via-register: would be `mov ax, [si]; inc ax; mov [si],
+  ax` (7 bytes).
+- The `(*p)++` postfix version (`2554`-style) would do the load
+  first, then the inc — same instruction count, different order.
+
+## `int m[][N]` flex outer dim — byte-identical to explicit size
+
+Fixture `2763-flex-arr-init-obj`:
+
+```c
+int m[][3] = { { 1, 2, 3 }, { 4, 5, 6 } };
+return m[1][2];
+```
+
+Byte-identical to the `int m[2][3] = {...}` version (`2535`): same
+12-byte LIDATA layout, same single moffs16 load at offset 10.
+
+Findings:
+- The `[]` syntax with initializer is parser-level sugar — BCC
+  infers the size from the brace count.
+- Codegen sees the same array type (`int[2][3]`) regardless of
+  whether you wrote `[]` or `[2]` for the outer dim.
+
+## `if (a != b)` for ptr ne — int-style compare
+
+Fixture `2764-struct-ptr-ne-obj`:
+
+```c
+if (a != b) return 1;
+return 0;
+```
+
+```
+8b 46 04                       mov ax, a
+3b 46 06                       cmp ax, b
+74 05                          je → FALSE      ; skip-true if equal
+```
+
+Findings:
+- Pointer inequality `a != b` uses the same `mov + cmp + je/jne`
+  shape as int inequality. Pointers are 2-byte ints in small model.
+- Skip-true branch for `!=` is `je` (jump if equal — opposite).
+
