@@ -811,3 +811,25 @@ Probe replaced with the char-compound-OR variant.
   brace init for array inside struct): laid out flat in `_DATA` as
   3 word values. The inner braces are syntactic — same OBJ as
   `{10, 20, 30}` without the nested braces.
+
+## Free passes (batch 689)
+
+- `2483` — `char *empty = "";` (pointer initialized from empty
+  string literal): `_DATA` stores 1 byte (NUL terminator); `empty`
+  is a 2-byte pointer FIXUPP'd to the NUL's address. `empty[0]`
+  reads the NUL = 0.
+- `2485` — `x = (x | 0xFF00) & 0xFFFE; x = x ^ 0x000F;` (chained
+  bitwise ops on a uint local): standard sequential codegen —
+  `mov ax, x / or ax, 0xFF00 / and ax, 0xFFFE / mov x, ax / mov
+  ax, x / xor ax, 0x000F / mov x, ax`. Each op produces an
+  intermediate that's stored back, no CSE/fusion.
+- `2486` — `sizeof("")` (sizeof empty string literal): returns 1
+  (the NUL terminator). Compile-time fold. Re-confirms string
+  literal includes its terminator in `sizeof`.
+- `2487` — `int sum_grid(int g[2][3])` (2D array as function
+  parameter): decays to `int (*g)[3]` (pointer to row of 3). Inside
+  the callee, `g[0][0]` and `g[1][2]` fold to offsets `0` and `8`
+  from the row-base pointer. Standard 2D-decay mechanics.
+- `2488` — manual string-cmp loop with early-exit via incrementing
+  `i` past the bound: stitches `for`-loop + `if`-inside-body + body
+  manipulation of loop index. Standard.

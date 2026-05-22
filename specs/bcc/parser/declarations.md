@@ -719,3 +719,33 @@ keep the next slot word-aligned for BP-relative addressing.
 Confirms a notable difference from later-era compilers that
 default to aligned struct fields. Borland C++ 2.0's default is pack
 without padding (`#pragma pack(1)` equivalent).
+
+## Zero-init `static int n;` lives in `_BSS` (fixture `2484`)
+
+`static int n;` without an explicit initializer — BCC allocates the
+variable in **`_BSS`** (uninitialized data), not `_DATA`. The
+segment record reflects this:
+
+```
+SEGDEF for _BSS: size 2 bytes (= 1 int)
+```
+
+The OBJ doesn't store an initial value — the linker/loader
+zero-fills `_BSS` at program startup. References from the function
+body use the same FIXUPP'd `mov ax, [n] / inc / mov [n], ax` form
+as any other global.
+
+Contrast with explicit-init form (fixture `2342`'s `static int n =
+42;`):
+- `static int n;` → goes in `_BSS`, OBJ stores no init data
+- `static int n = 0;` → semantically same (init to 0), but BCC may
+  go either way depending on canonicalization
+- `static int n = 42;` → goes in `_DATA` with the literal `42`
+
+So **zero is the discriminator** between `_DATA` and `_BSS` for
+static locals. Other compilers might place zero-init statics in
+`_DATA` (treating them as initialized to zero); BCC opts for `_BSS`
+to keep the OBJ smaller.
+
+Same rule applies at file scope: `int g;` (no init) goes to `_BSS`,
+`int g = 5;` goes to `_DATA`.
