@@ -2407,3 +2407,28 @@ Updated unsigned right-shift cost table (for `v >> N`):
 Note: per `2519`, unrolled wins for N ≤ 2 (or maybe 3); cl-form
 wins for N ≥ 4 (definite). Boundary at N=3 needs probing.
 
+
+## `unsigned >> 3` — UNROLLED (3 shr, 6B), NOT cl-form (4B)
+
+Fixture `2831-ushr-3-obj`:
+
+```c
+return v >> 3;
+```
+
+```
+8b 46 04                       mov ax, v
+d1 e8 d1 e8 d1 e8              shr ax, 1 × 3 (3 unrolled shifts)
+```
+
+Findings:
+- `>> 3` uses **3 single-bit shifts unrolled** = 6 bytes.
+- Cl-form (`mov cl, 3; shr ax, cl`) would be **4 bytes** — smaller!
+- BCC chooses unrolled anyway at N=3.
+- **Probable reason**: unrolled 3-shift is faster than cl-form on
+  8086 (no `mov cl` overhead + each `shr r, 1` is fastest variant).
+  BCC values cycle count over byte count here.
+- Threshold confirmed: `N ≤ 3` always unrolls, `N ≥ 4` always
+  uses cl-form. (Even at N=3 where unroll is bigger, BCC stays
+  with unroll for cycle reasons.)
+

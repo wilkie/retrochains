@@ -4044,3 +4044,32 @@ Findings:
 - Both `s` and `i` are promoted to si/di since they're used inside
   the loop — confirms usage-based promotion (`2754`/`2746`).
 
+
+## `for (;;) { ... }` infinite loop — back-jmp at end (no init/cond/post)
+
+Fixture `2832-for-ever-break-obj`:
+
+```c
+for (;;) {
+  if (i == n) break;
+  i = i + 1;
+}
+```
+
+```
+                               ; LOOP_TOP:
+3b 76 04                       cmp si, n
+75 02                          jne → skip-break
+eb 07                          jmp → AFTER_LOOP   (break)
+                               ; skip-break:
+8b c6 40 8b f0                 i = i + 1
+eb f2                          jmp -14 → LOOP_TOP
+                               ; AFTER_LOOP:
+```
+
+Findings:
+- `for (;;)` with empty init/cond/post emits the body directly,
+  followed by an unconditional `jmp` back to LOOP_TOP.
+- No condition check, no skip-init, no skip-post.
+- Same shape as `while (1)`. The two forms are byte-identical.
+

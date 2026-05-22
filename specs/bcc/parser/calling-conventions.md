@@ -1558,3 +1558,37 @@ Findings:
 - Compare to direct fn call (zero-arg): `e8 disp16` (3B with FIXUPP).
   Fn-ptr is 1B more for the `ff 16` modr/m.
 
+
+## Variable char passed to int-arg fn — byte load + cbw + push (promotion)
+
+Fixture `2836-char-to-int-arg-obj`:
+
+```c
+int eat(int x);
+int call(char c) {
+  return eat(c);
+}
+```
+
+```
+8a 46 04                       mov al, c       (byte load)
+98                             cbw             (sign-extend char→int!)
+50                             push ax
+e8 00 00                       call _eat
+59                             pop cx
+```
+
+Findings:
+- **Variable char argument** to an int parameter uses cbw to
+  promote: byte load + cbw + push. The pushed AX has properly
+  sign-extended AH.
+- Contrast with **literal char arg** (`'X'`, `2706`): pushes
+  `mov al, imm8; push ax` with **garbage in AH**.
+- Difference: BCC's codegen path applies default-argument
+  promotion when the source is a variable expression (which is
+  type-evaluated), but takes a shortcut for char literals (which
+  are folded directly into the immediate).
+- Callee reading via `mov al, [bp+disp]` only cares about AL in
+  both cases — so the garbage is harmless, but cbw is more
+  "correct."
+

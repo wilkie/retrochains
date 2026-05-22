@@ -1949,3 +1949,37 @@ Findings:
 - The post-switch code (`return 0`) is unreachable but emitted —
   consistent with no-DCE pattern.
 
+
+## Switch with NEGATIVE cases — same linear chain as positive
+
+Fixture `2834-switch-neg-cases-obj`:
+
+```c
+switch (x) {
+  case -1: return 10;
+  case 0:  return 20;
+  case 1:  return 30;
+}
+```
+
+```
+8b 46 04                       mov ax, x
+3d ff ff                       cmp ax, -1 (0xFFFF)
+74 0b                          je → CASE_-1
+0b c0                          or ax, ax     (test == 0 peephole, 2B)
+74 0c                          je → CASE_0
+3d 01 00                       cmp ax, 1
+74 0c                          je → CASE_1
+                               ; (no default → falls through)
+```
+
+Findings:
+- 3 cases use **linear chain** (not dense table). Threshold for
+  table dispatch is 4+ contiguous cases.
+- Negative case value `-1` uses `cmp ax, 0xFFFF` (`3d ff ff`, 3B
+  imm16). No special handling vs positive.
+- Comparison with 0 uses the **`or ax, ax` peephole** (`0b c0`,
+  2B), saving 1 byte vs `cmp ax, 0` (3B).
+- Negative + zero + positive in mixed order works fine — order is
+  source-order; no sorting.
+

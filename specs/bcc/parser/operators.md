@@ -1103,3 +1103,33 @@ Findings:
 - Generalizable: `!expr` in any boolean context flips the branch
   condition that consumes it.
 
+
+## Chained assignment `a = b = c = 7;` — right-to-left, AX carries value
+
+Fixture `2835-chained-assign-obj`:
+
+```c
+int a, b, c;
+a = b = c = 7;
+return a + b + c;
+```
+
+```
+b8 07 00                       mov ax, 7
+89 46 fa                       c = ax   (rightmost first!)
+89 46 fc                       b = ax
+89 46 fe                       a = ax
+8b 46 fe 03 46 fc 03 46 fa     return a + b + c
+```
+
+Findings:
+- `a = b = c = 7` evaluates **right-to-left** per C semantics.
+- AX holds the value (7) and is stored to each target without
+  reload between stores.
+- Total 12 bytes for the chained assignment (3B mov ax + 3 × 3B
+  store).
+- More efficient than naive `c = 7; b = c; a = b;` which would
+  reload between each store (~18 bytes).
+- The AX-carries-value pattern works because `=` is an expression
+  returning the assigned value.
+

@@ -2943,3 +2943,48 @@ Findings:
   uses its own field-offset which happens to be 0 for all in this
   union.
 
+
+## 3-byte struct return — N_SCOPY@ with hidden destination pointer
+
+Fixture `2833-struct3-ret-obj`:
+
+```c
+struct T3 { int a; char b; };   /* sizeof = 3 */
+struct T3 make(void) {
+  struct T3 t;
+  t.a = 100; t.b = 'X';
+  return t;
+}
+```
+
+```
+83 ec 04                       sub sp, 4 (local t)
+c7 46 fc 64 00                 t.a = 100 ([bp-4])
+c6 46 fe 58                    t.b = 'X' ([bp-2])
+ff 76 06                       push hidden_dst.HIGH (= ss)
+ff 76 04                       push hidden_dst.LOW  (= ptr offset)
+8d 46 fc 16 50                 lea ax, [bp-4]; push ss; push ax (src far)
+b9 03 00                       cx = 3 (count)
+e8 00 00                       call N_SCOPY@
+8b 46 04                       mov ax, hidden_dst.LOW (return)
+```
+
+Findings:
+- **3-byte struct return uses N_SCOPY@ with hidden-pointer
+  convention**, NOT register pair return.
+- Threshold-by-size for struct return:
+  - **size 1**: AL
+  - **size 2**: AX
+  - **size 3**: HIDDEN PTR + N_SCOPY@ (this fixture!)
+  - **size 4**: DX:AX
+  - **size 5+**: HIDDEN PTR + N_SCOPY@
+- Calling convention:
+  - Caller passes hidden dst ptr as the FIRST arg (before visible args)
+  - Callee builds the struct in its local frame
+  - Callee SCOPY@s the struct into the hidden dst
+  - Callee returns the hidden dst ptr as AX
+- So 3B fails to register-pair-fit even though `int+char` could
+  theoretically pack into one int (low+high byte). BCC only uses
+  reg-pair return for sizes that EXACTLY match register pair
+  widths (1=AL, 2=AX, 4=DX:AX).
+
