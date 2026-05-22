@@ -2091,3 +2091,39 @@ Findings:
   `mov ax, [bp-4]`. The high half [bp-2] is discarded — no zero-
   extension, no movzx. Cast = address selection.
 
+
+## `(long)x` for signed int — sign-extend via `cwd` (1 byte)
+
+Fixture `2548-int-to-long-cast-obj`:
+
+```c
+long widen(int x) {
+  return (long)x;
+}
+```
+
+```
+55 8b ec                       prologue
+8b 46 04                       mov ax, x
+99                             cwd                ; sign-extend ax → dx:ax
+eb 00 5d c3                    epilogue
+```
+
+Findings:
+- **`(long)x` for signed `int x`** uses **`cwd`** (`99`, 1 byte):
+  AX → DX:AX, with DX = 0xFFFF if AX negative, 0x0000 otherwise.
+- Long return convention: **DX:AX** (same as struct{long} from
+  `2532`). DX = HIGH word, AX = LOW word.
+- For **unsigned int → long** cast, BCC would use **`xor dx, dx`**
+  (`33 d2`, 2 bytes) to zero-extend. To probe.
+- This is the inverse of the truncating `(int)long_v` cast from
+  `2521`, which loaded only the low word of the long.
+- Cast operator table for primitive widening:
+
+| from → to           | bytes                |
+|---------------------|----------------------|
+| signed char → int   | `cbw` (1B)           |
+| unsigned char → int | `mov ah, 0` (2B)     |
+| int → long          | `cwd` (1B)           |
+| unsigned int → long | `xor dx, dx` (2B)    |
+

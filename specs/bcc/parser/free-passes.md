@@ -885,3 +885,57 @@ slot entirely (no `dec sp` / `sub sp`). The body becomes a single
 this. So sizeof is fully type-level, never producing any reference
 that would mark a local as live.
 
+
+## Free pass: `typedef struct {} T;` byte-identical to `struct T {};`
+
+Fixture `2545-typedef-struct-obj`:
+
+```c
+typedef struct { int x; int y; } Point;
+Point p;
+int main(void) {
+  p.x = 7;
+  p.y = 9;
+  return p.x + p.y;
+}
+```
+
+emits the EXACT same bytes as:
+```c
+struct Point { int x; int y; };
+struct Point p;
+int main(void) {
+  p.x = 7; p.y = 9;
+  return p.x + p.y;
+}
+```
+
+The typedef adds zero OBJ bytes; it's purely a name binding inside
+the parser symbol table. By the time codegen sees `p.x`, it's
+working with the offset 0 of a 4-byte struct — the `Point` name
+has been resolved away.
+
+This generalizes the earlier `Vec[3]` finding: typedef of array,
+typedef of struct, typedef of primitives — all behave the same.
+Codegen IR sees only the resolved type.
+
+## Free pass: global init expression constant-folded
+
+Fixture `2547-global-init-expr-obj`:
+
+```c
+int n = 2 + 3 * 4;     /* C90 requires constant init expression */
+```
+
+Lands in `_DATA` as the **single byte sequence `0e 00`** (=14, the
+folded result). BCC evaluates `3 * 4 = 12` then `2 + 12 = 14` at
+compile time and emits the literal. So the OBJ:
+
+- Has `_n` in `_DATA` (not `_BSS`, since initialized)
+- Carries 2 bytes of init data: `0e 00`
+- Has NO init-time function or constructor
+
+This means the parser's expression evaluator must fold constant-
+expressions when computing initializers. Operator precedence
+respected: `*` before `+`.
+

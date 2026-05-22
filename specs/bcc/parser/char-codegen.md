@@ -994,3 +994,40 @@ Findings:
   were declared `unsigned char` instead, the param would still
   occupy a 16-bit slot but the body would be the same.
 
+
+## `char *s = "hi"` — pointer-to-_DATA, NOT a copy
+
+Fixture `2546-char-ptr-from-strlit-obj`:
+
+```c
+int main(void) {
+  char *s;
+  s = "hi";
+  return s[1];
+}
+```
+
+```
+55 8b ec                       prologue
+56                             push si
+be 00 00                       mov si, 0          ; s = offset of "hi" in _DATA (FIXUPP)
+8a 44 01                       mov al, [si+1]     ; s[1] = 'i'
+98                             cbw                ; sign-extend char→int
+eb 00 5e 5d c3                 epilogue
+```
+
+Findings:
+- `char *s = "hi"` stores only the **pointer** to the string literal
+  in `_DATA`. NO N_SCOPY@ call; no local byte copy. The literal
+  lives at `_DATA[offset 0]` and s points to it.
+- Critically distinct from `char s[] = "hi"` (`2509`), which:
+  - reserves 4 bytes on the stack
+  - calls N_SCOPY@ to copy the 3 bytes from _DATA → stack
+- The two declarations have very different runtime cost and
+  semantics: `char *s` is a pointer; `char s[]` is a local array.
+- `s` here gets register promotion (`si`) since it's only used once
+  after init.
+- `s[1]` returns char → cbw promotes to int for the int return value.
+- The "hi\0" literal is 3 bytes in `_DATA`; the FIXUPP relocates
+  the `be 00 00` immediate to point to it.
+

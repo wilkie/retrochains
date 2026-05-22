@@ -1840,3 +1840,39 @@ Findings:
 | unsigned  | shr (`d1 e8`) | shr or `shr cl` (pow-2 only) |
 | signed    | sar (`d1 f8`) | idiv (always) |
 
+
+## Variable shift count — `mov cl, [n_addr]` byte-load
+
+Fixture `2543-shift-var-count-obj`:
+
+```c
+int x = 100;
+int n = 3;
+return x >> n;
+```
+
+```
+55 8b ec 83 ec 04                 prologue + 4B locals
+c7 46 fe 64 00                    x = 100               ; [bp-2]
+c7 46 fc 03 00                    n = 3                 ; [bp-4]
+8b 46 fe                          mov ax, x
+8a 4e fc                          mov cl, byte [bp-4]   ; LOW BYTE of n
+d3 f8                             sar ax, cl            ; signed shift
+eb 00 8b e5 5d c3                 epilogue
+```
+
+Findings:
+- For a **variable shift count**, BCC loads only the **low byte
+  of the count into CL** via `mov cl, byte ptr [...]` (opcode `8a`).
+  The high byte of the count variable is discarded — the 8086
+  shift instructions only consume CL anyway, and shift counts in
+  C are always small.
+- Save: byte-load (`8a 4e fc` = 3B) vs word-load + register-rename
+  (`8b 4e fc` 3B + use cl — same size but no penalty for byte).
+- The shift opcode is `d3 f8` for signed (sar), would be `d3 e8`
+  for unsigned (shr) — same operand encoding, different opcode-ext
+  bit (5 vs 7).
+- No special path for "shift count is a variable but its value is
+  knowable at this site" — even if BCC could constant-fold n=3,
+  it doesn't here because the assignment crosses sequence points.
+

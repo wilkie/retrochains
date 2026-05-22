@@ -1019,3 +1019,43 @@ Findings:
 - This is the canonical "external function call" shape — combines
   with EXTDEF for the symbol and a FIXUPP on the disp16 of `e8`.
 
+
+## Function-pointer stored in local — indirect call via `call word ptr [bp-disp]`
+
+Fixture `2544-fn-ptr-store-call-obj`:
+
+```c
+int square(int x) { return x * x; }
+int main(void) {
+  int (*fp)(int);
+  fp = square;
+  return fp(5);
+}
+```
+
+main body:
+```
+55 8b ec 4c 4c               prologue + 2B local
+c7 46 fe 00 00               fp = &square (FIXUPP _square, disp16=0)
+b8 05 00                     mov ax, 5
+50                           push ax                 ; arg
+ff 56 fe                     call word ptr [bp-2]    ; INDIRECT
+59                           pop cx                  ; cleanup 1-arg
+eb 00 8b e5 5d c3            epilogue
+```
+
+Findings:
+- Function-pointer **storage** in small memory model = 2-byte near
+  pointer. Store via `c7 46 disp imm16` with FIXUPP for the target
+  function symbol.
+- **Indirect call via stack-resident fp** uses
+  `ff 56 disp8` = `call word ptr [bp+disp8]` (3 bytes).
+  ModR/M `56` = mod 01, opcode-ext 010 (call near absolute
+  indirect), r/m 110 (bp+disp8).
+- For a stack-resident fp at [bp-disp16], the encoding would be
+  `ff 96 disp16` (4 bytes).
+- Compare to a global fn-pointer at file scope (`2516`-style global
+  storage), which used `ff 16 disp16` (`call word ptr [disp16]`).
+- The fn-ptr-call shape preserves cdecl convention: caller pushes
+  args R-to-L, callee returns via AX, caller cleans up the stack.
+
