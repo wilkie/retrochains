@@ -1215,3 +1215,31 @@ Findings:
   callee side** (`2511` showed void callees skip the `eb 00`
   default-position jmp before pop bp).
 
+
+## Zero-arg extern call — `call rel16` only, no cleanup
+
+Fixture `2675-extern-fn-call-obj`:
+
+```c
+int getchar(void);
+int main(void) {
+  int c = getchar();
+  return c + 1;
+}
+```
+
+```
+55 8b ec 4c 4c                 prologue + 2B local
+e8 00 00                       call _getchar (EXTDEF FIXUPP)
+89 46 fe                       c = ax           ; result already in AX
+8b 46 fe 40                    mov ax, c; inc ax
+eb 00 8b e5 5d c3              epilogue
+```
+
+Findings:
+- Zero-arg call has **minimum overhead**: just the 3-byte
+  `e8 disp16` near-call. No push args, no cleanup.
+- Result conventionally in AX. Caller can read directly.
+- Same pattern for any zero-arg extern (puts(""), getchar(),
+  etc.) and zero-arg user functions.
+

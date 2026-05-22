@@ -396,3 +396,41 @@ Findings:
   low byte.
 - ModR/M `f6` = mod 11, opcode-ext 110 (xor), r/m 110 (si).
 
+
+## `if (x & MASK)` — uses `test` instruction (NOT `and` + `cmp`)
+
+Fixture `2679-mask-test-obj`:
+
+```c
+int check_flag(int x) {
+  if (x & 0x04) return 1;
+  return 0;
+}
+```
+
+```
+55 8b ec                       prologue
+f7 46 04 04 00                 test word [bp+4], 0x0004    ; TEST inst
+74 05                          je → FALSE                  ; (x & 4) == 0
+b8 01 00                       ax = 1
+eb 04                          jmp epi
+33 c0                          ax = 0
+eb 00 5d c3                    epilogue
+```
+
+Findings:
+- **`if (x & MASK)` triggers a `test` peephole**: emits the `test
+  r/m16, imm16` instruction (`f7 46 disp imm16`, 5 bytes), which
+  computes AND but discards the result, setting flags only.
+- Compare to a naive expansion:
+  - `mov ax, x` (3B) + `and ax, mask` (4B if imm16) + `or ax, ax`
+    (2B) + `je FALSE` (2B) = 11 bytes
+  - `test [mem], imm16` (5B) + `je FALSE` (2B) = 7 bytes
+  - **Savings: ~4 bytes per bitmask check.**
+- BCC recognizes the pattern `if (x & K)` (or `if (x & K) == 0`)
+  and uses `test` directly. The destination of `&` doesn't need to
+  be preserved.
+- ModR/M `46` = mod 01, opcode-ext 000 (test), r/m 110 (bp+disp8).
+- This is one of the most important micro-optimizations for
+  flag-tracking code (e.g., `if (flags & ALLOW_X)`).
+

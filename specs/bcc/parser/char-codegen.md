@@ -1254,3 +1254,41 @@ Findings:
   would shave 8 bytes off (2 × `inc reg`).
 - This is a useful template for our reimpl's "string-scan" recognition.
 
+
+## Char range check `c >= '0' && c <= '9'` — caches char in DL, byte cmp imm8
+
+Fixture `2677-digit-check-obj`:
+
+```c
+int is_digit(char c) {
+  if (c >= '0' && c <= '9') return 1;
+  return 0;
+}
+```
+
+```
+55 8b ec                       prologue
+8a 56 04                       mov dl, c              ; cache char in DL!
+80 fa 30                       cmp dl, '0'            ; byte cmp (3B)
+7c 0a                          jl → FALSE             ; signed branch
+80 fa 39                       cmp dl, '9'
+7f 05                          jg → FALSE
+b8 01 00 eb 04                 ax = 1; jmp epi
+33 c0                          FALSE: ax = 0
+eb 00 5d c3                    epilogue
+```
+
+Findings:
+- **Char range check caches `c` in DL** (the byte register) and
+  reuses it across both compares. No re-load from memory.
+- Each compare uses **`cmp dl, imm8`** = `80 fa imm8` (3 bytes) —
+  the byte form. NO cbw promote, NO load into AX.
+- Branches use signed `jl`/`jg` (char default-signed in BCC).
+- 3-instruction setup + 5-instruction per arm = ~13 bytes for the
+  whole range check. Very compact.
+- Compare to int-version which would be 3B cmp + 2B jcc = same per
+  compare. The char vs int byte-cmp form is the same length but
+  skips the cbw.
+- DL chosen over AL because AL is the "return value" register;
+  DL is a free scratch.
+

@@ -2616,3 +2616,32 @@ Findings:
 | shift by mult of 16    | inline (byte-swap fold, `2586`) |
 | compare                | inline (probe needed)      |
 
+
+## Local `long v = -1L` — two 5-byte word stores
+
+Fixture `2678-local-long-neg-obj`:
+
+```c
+long v = -1L;
+return (int)v;
+```
+
+```
+55 8b ec 83 ec 04              prologue + 4B local
+c7 46 fe ff ff                 [bp-2] = 0xFFFF    ; v.HIGH = -1
+c7 46 fc ff ff                 [bp-4] = 0xFFFF    ; v.LOW = -1
+8b 46 fc                       mov ax, [bp-4]     ; (int) cast = low word
+eb 00 8b e5 5d c3              epilogue
+```
+
+Findings:
+- Local long literal store = **two 5-byte `c7 46 disp imm16`**
+  instructions. HIGH word stored first to `[bp-2]`, LOW word
+  second to `[bp-4]`. Total 10 bytes for the assignment.
+- For `-1L`, both halves are `0xFFFF` (two's complement).
+- No optimization for "all-1s long" — same instruction count as
+  any non-zero long literal.
+- For zero-init (`long v = 0L`), BCC would still emit 2 stores
+  with `00 00` immediates — no shorter form unless wider init
+  forms exist.
+

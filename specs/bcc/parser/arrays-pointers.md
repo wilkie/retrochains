@@ -4662,3 +4662,38 @@ Findings:
 - `*p` is a 2-load chain: get the pointer, dereference. Same shape
   as `**pp` (`2570`) but one less level.
 
+
+## `**pp = v` — chained deref store, 5-instruction body
+
+Fixture `2680-double-deref-write-obj`:
+
+```c
+void set(int **pp, int v) {
+  **pp = v;
+}
+```
+
+```
+55 8b ec 56                    prologue + push si
+8b 76 04                       mov si, pp
+8b 1c                          mov bx, [si]    ; bx = *pp
+8b 46 06                       mov ax, v
+89 07                          [bx] = ax       ; **pp = v
+5e 5d c3                       pop si; ret  (void)
+```
+
+Findings:
+- Chained pointer-write `**pp = v` = 5 instructions:
+  1. Load `pp` value to si
+  2. Load `*pp` (= inner pointer) to bx via `mov bx, [si]`
+  3. Load `v` to ax
+  4. Store via `[bx]`
+  5. Return
+- ModR/M shapes:
+  - `1c` = mod 00, r/m 100 = `[si]` (no disp)
+  - `07` = mod 00, r/m 111 = `[bx]` (no disp)
+- Compare to single-deref `*p = v` (`2667`): adds 2 bytes for the
+  extra deref step (`mov bx, [si]`). Each level of indirection
+  adds one register load.
+- Void fn → no `eb 00` placeholder.
+

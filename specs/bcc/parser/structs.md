@@ -2516,3 +2516,31 @@ Findings:
 - `(int)p.v` truncates by loading only `p.v.LOW` (the low word
   at offset 0).
 
+
+## `p->data[K]` (struct ptr + array field + const subscript) — single offset fold
+
+Fixture `2676-struct-ptr-arr-field-obj`:
+
+```c
+struct Bag { int n; int data[4]; };
+int get(struct Bag *b) {
+  return b->data[2];
+}
+```
+
+```
+55 8b ec 56                    prologue + push si
+8b 76 04                       mov si, b
+8b 44 06                       mov ax, [si + 6]    ; b->data[2]
+eb 00 5e 5d c3                 epilogue
+```
+
+Findings:
+- `b->data[2]` for struct Bag:
+  - `b->data` starts at struct offset 2 (after `n` int = 2 bytes)
+  - `[2]` adds `2 × sizeof(int) = 4 bytes`
+  - Total offset from b's base: 2 + 4 = **6 bytes**
+- Compiles to single `mov ax, [si + 6]` (disp8 form, 3 bytes).
+- Confirms the offset-folding rule: any chain of struct-field +
+  const-subscript folds to a single integer offset at parse time.
+
