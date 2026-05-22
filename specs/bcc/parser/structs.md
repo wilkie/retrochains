@@ -1655,3 +1655,43 @@ So when a struct's individual stack frame rounds up (e.g. fixture
 `2420`'s 9-byte struct reserves 10 bytes), that's a **stack
 alignment** rule, NOT the struct's intrinsic size — the struct
 itself is still 9 bytes by `sizeof`.
+
+## Struct copy via pointer — fully inlined, no helper call
+
+Fixture `2495-struct-copy-via-ptr-obj`: `*dst = *src` for a 4-byte
+`struct Pair { int a; int b; }` reached through `struct Pair *`.
+
+```c
+void copy(struct Pair *dst, struct Pair *src) {
+  *dst = *src;
+}
+```
+
+```
+55                    push bp
+8b ec                 mov bp, sp
+56                    push si
+57                    push di
+8b 76 04              mov si, [bp+4]    ; dst
+8b 7e 06              mov di, [bp+6]    ; src
+8b 45 02              mov ax, [di+2]    ; src->b (FIELD b FIRST)
+8b 15                 mov dx, [di]      ; src->a (no disp; ModR/M 15)
+89 44 02              mov [si+2], ax    ; dst->b
+89 14                 mov [si], dx      ; dst->a
+5f 5e 5d c3           pop di/si/bp; ret
+```
+
+Key observations:
+- **Both source fields are loaded BEFORE any store** (ax holds b, dx
+  holds a). This avoids load-store-load-store serialization.
+- **Field b is loaded first**, then field a — opposite of declaration
+  order. This is consistent regardless of layout.
+- **No call to `N_SCOPY@`** — at 4 bytes the inline expansion wins.
+  (Compare to larger structs returned by value, which DO use
+  `N_SCOPY@`.) The threshold for "inline vs helper" for pointer-based
+  struct assign is at least 4 bytes — to be probed further.
+- Uses two general regs (ax and dx) rather than chaining through one,
+  trading register pressure for parallelism.
+- ModR/M form `15` is mod 00, r/m 101 = `[di]` with no displacement;
+  `44 02` is mod 01, r/m 100 = `[si+disp8]` with disp8=2.
+

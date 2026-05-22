@@ -855,3 +855,33 @@ Probe replaced with the char-compound-OR variant.
   global: `mov ax, offset _storage` (FIXUPP'd) in the callee.
   Caller stores returned ptr to p, then writes through it.
   Standard fn-returning-ptr mechanics.
+
+## Free pass: typedef of array == raw array in parameter slots
+
+`typedef int Vec[3]; void f(Vec v)` and `void f(int v[3])` and
+`void f(int *v)` all emit the same calling-convention bytes and
+the same body for `v[i]`. We never need to track "is this a
+typedef'd array" in the codegen-facing IR — by the time we reach
+emit, the type has decayed to `int *` and the typedef name has been
+resolved away. Fixture `2497-typedef-array-obj` confirms this for
+sum-of-elements; the typedef adds zero bytes to the OBJ.
+
+## Free pass: enum is just int
+
+`enum E { A=1, B=2 };` followed by `enum E x; x = B;` is byte-identical
+to `int x; x = 2;`. No metadata in the OBJ remembers the enum
+identity; the only thing the parser uses enum for is binding the
+identifier `B` to the integer 2 at lookup time. Fixture
+`2496-enum-explicit-vals-obj` confirms with 0x14 (=20) appearing
+inline as a 16-bit literal.
+
+## Free pass: `sizeof(expr)` skips local reserve for unused vars
+
+When the only mention of a local is inside `sizeof`, BCC's
+liveness pass treats it as un-referenced and elides the stack
+slot entirely (no `dec sp` / `sub sp`). The body becomes a single
+`mov ax, K` from the folded sizeof. Fixture
+`2498-sizeof-paren-expr-obj` is a one-instruction body proving
+this. So sizeof is fully type-level, never producing any reference
+that would mark a local as live.
+

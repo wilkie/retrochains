@@ -707,3 +707,72 @@ For genuinely-constant integer use cases, `#define` or `enum {K =
 100};` give better codegen than `const int`. BCC's behavior matches
 the C90 standard letter, not the spirit of "const = compile-time-
 known".
+
+## enum with explicit values — int-sized, fully inlined
+
+Fixture `2496-enum-explicit-vals-obj`:
+
+```c
+enum Color { RED = 10, GREEN = 20, BLUE = 30 };
+int main(void) {
+  enum Color c;
+  c = GREEN;
+  return c;
+}
+```
+
+```
+55                    push bp
+8b ec                 mov bp, sp
+4c                    dec sp
+4c                    dec sp                ; 2-byte local
+c7 46 fe 14 00        mov word [bp-2], 20   ; c = GREEN (0x14)
+8b 46 fe              mov ax, [bp-2]        ; return c
+eb 00                 jmp $+2
+8b e5 5d c3           leave; ret
+```
+
+Findings:
+- `enum Color` occupies **2 bytes** — same as `int`, NOT shrunk to
+  `char` even when all values would fit in a byte. (Explicit values
+  10, 20, 30 all fit in `char`, but BCC keeps the int width.)
+- Explicit values are baked in as integer literals at every use site.
+  No symbol or relocation references `GREEN` — the value 20 appears
+  inline.
+- Local frame reserve for **2 bytes uses `dec sp; dec sp`** rather
+  than `sub sp, 2`. Confirms the small-frame peephole holds for
+  enum-typed locals exactly as for int locals.
+
+
+## typedef of array-of-int — decays to pointer in function param
+
+Fixture `2497-typedef-array-obj`:
+
+```c
+typedef int Vec[3];
+int sum(Vec v) {
+  return v[0] + v[1] + v[2];
+}
+```
+
+```
+55 8b ec 56           prologue + push si
+8b 76 04              mov si, [bp+4]    ; v (parameter)
+8b 04                 mov ax, [si]      ; v[0]
+03 44 02              add ax, [si+2]    ; v[1]
+03 44 04              add ax, [si+4]    ; v[2]
+eb 00 5e 5d c3        epilogue
+```
+
+Findings:
+- `Vec v` as a parameter decays to `int *v` — IDENTICAL codegen to
+  writing `int v[3]` or `int *v` directly. The typedef adds zero
+  signal to the OBJ: caller passes a pointer (2 bytes) on the
+  stack at `[bp+4]`.
+- Subscript chain reuses si as a base pointer, accumulating into ax
+  with `add ax, [si+disp8]` for each element. No LEA needed: indices
+  are constants and fold to a disp8 added directly to si.
+- This is the canonical "array decay" rule: any array-typed function
+  parameter — direct, via typedef, multi-level — collapses to
+  `pointer-to-element`.
+

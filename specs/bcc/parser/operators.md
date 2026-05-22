@@ -295,3 +295,73 @@ lowering: the LHS is emitted via `emit_expr_discard`
 result in AX), then the RHS `a + 2` is evaluated into
 AX and the int-init store writes it to b.
 
+
+## sizeof of an expression — pure compile-time fold
+
+Fixture `2498-sizeof-paren-expr-obj`:
+
+```c
+int main(void) {
+  int x;
+  return sizeof(x + 1);
+}
+```
+
+```
+55 8b ec              prologue
+b8 02 00              mov ax, 2          ; sizeof(int + int) → 2
+eb 00 5d c3           epilogue (NO local reserve!)
+```
+
+Findings:
+- `sizeof(x + 1)` evaluates ONLY the type of the expression
+  (`int + int` → `int` → 2). x is never loaded; the result is
+  the literal `mov ax, 2`.
+- **`int x` declared but unused → NO local reserve**. The prologue
+  goes straight from `mov bp, sp` to the function body — no
+  `dec sp` or `sub sp` to allocate a frame slot for x. So BCC's
+  liveness pass elides locals that are never accessed (including
+  by sizeof, which is type-only).
+- Compare to `2496` where `c` was both declared AND used (assigned,
+  returned) — there `dec sp; dec sp` reserves 2 bytes. The trigger
+  is "is the variable referenced by a value-needing op," not just
+  declaration.
+
+
+## Comma expression in assignment RHS — sequence point reloads
+
+Fixture `2500-comma-expr-in-assign-obj`:
+
+```c
+int main(void) {
+  int x;
+  int y;
+  x = (y = 3, y + 4);
+  return x;
+}
+```
+
+```
+55 8b ec              prologue
+83 ec 04              sub sp, 4              ; 4-byte locals (x@-2, y@-4)
+c7 46 fc 03 00        mov word [bp-4], 3     ; y = 3
+8b 46 fc              mov ax, [bp-4]         ; RELOAD y (no CSE)
+05 04 00              add ax, 4              ; ax = y + 4
+89 46 fe              mov [bp-2], ax         ; x = (...)
+8b 46 fe              mov ax, [bp-2]         ; RELOAD x for return
+eb 00                 jmp $+2
+8b e5 5d c3           epilogue
+```
+
+Findings:
+- The **comma operator's sequence point is respected**: BCC stores
+  y, then *reloads* y from memory — even though ax already contained
+  3 right before the store. NO common-subexpression elimination
+  across sequence points.
+- Then it stores to x AND immediately reloads x for the return —
+  another visible "no CSE / no register-coalesce" moment. Two
+  redundant loads (`8b 46 fc` and `8b 46 fe`).
+- **4-byte local reserve uses `sub sp, 4`**, NOT `dec sp` × 4. So the
+  small-frame peephole threshold is at 1-2 bytes; ≥3 bytes uses
+  `sub sp, imm8`. (Confirms 2-byte case in `2496` uses dec×2.)
+

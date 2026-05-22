@@ -3806,3 +3806,43 @@ This memory-direct form parallels the documented `g++` /
 `pointer-dereference-then-postdec` pattern too. The key is that both
 sides of the modify (read + write) target the same memory operand,
 so BCC peepholes through the `mov [src], reg / op [src]` pair.
+
+## a[i++] = K with i just initialized — NOT constant-folded
+
+Fixture `2499-postfix-inc-subscript-obj`:
+
+```c
+int a[4];
+int main(void) {
+  int i;
+  i = 0;
+  a[i++] = 7;
+  return i;
+}
+```
+
+```
+55 8b ec 56           prologue + push si
+33 f6                 xor si, si           ; i = 0
+8b de                 mov bx, si           ; bx = i (for indexing)
+d1 e3                 shl bx, 1            ; bx = i * sizeof(int) = i*2
+c7 87 00 00 07 00     mov word [bx + _a], 7    ; a[i] = 7 (FIXUPP for _a)
+46                    inc si               ; i++
+8b c6                 mov ax, si           ; return i
+eb 00 5e 5d c3        epilogue
+```
+
+Findings:
+- BCC does **NOT** constant-fold the postfix-subscript even when the
+  index variable was just initialized to 0. `i` lives in si; bx is a
+  scratch copy that gets shifted into a byte offset. The store
+  literally indexes `_a` at runtime.
+- ModR/M form `87` is mod 10, r/m 111 → `[bx + disp16]`; the disp16
+  is the FIXUPP for `_a` at link time. So all `array[var-index]`
+  stores on a global use this exact instruction shape.
+- Postfix increment uses single `inc si` (1 byte) AFTER the store
+  side-effect completes — sequence point honored.
+- Note: si holds `i` (the live value); bx holds the *byte-scaled
+  index*. BCC always shifts a fresh copy rather than mutating the
+  user variable.
+
