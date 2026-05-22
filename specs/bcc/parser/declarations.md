@@ -607,3 +607,42 @@ implemented uniformly: emit the body/data, suppress the `PUBDEF`.
 Contrast with `int arr[5] = {7, 8};` at file scope (no `static`,
 fixture `2366`) — that does emit `_arr` in `PUBDEF`. So the
 `static` keyword's only OBJ-level effect is `PUBDEF` suppression.
+
+## Large frame (>127 bytes) — `81 ec disp16` + disp16 ModR/M (fixture `2409`)
+
+`int big[80];` requires 160 bytes of stack, which exceeds the disp8
+range. BCC switches both the `sub sp` form and the per-access
+ModR/M form to disp16:
+
+```c
+int big[80];
+big[0] = 1;    // at [bp-160], requires disp16
+big[79] = 99;  // at [bp-2], fits in disp8
+return big[0] + big[79];
+```
+
+```
+55 8b ec                ; standard prologue
+81 ec a0 00             ; sub sp, 0xA0      ← imm16 form (= -160)
+c7 86 60 ff 01 00       ; mov [bp + 0xFF60], 1   ← disp16 ModR/M (0xFF60 = -160 signed)
+c7 46 fe 63 00          ; mov [bp - 2], 99      ← disp8 ModR/M (fits in ±127)
+8b 86 60 ff             ; mov ax, [bp + 0xFF60] ← disp16 read
+03 46 fe                ; add ax, [bp - 2]      ← disp8 read
+```
+
+Encoding details:
+- `81 ec a0 00` = `sub r/m16, imm16` — 4 bytes vs `83 ec NN`
+  (`sub r/m16, imm8-sext`, 3 bytes) for ≤127.
+- `c7 86 disp16 imm16` = `mov [bp + disp16], imm16` (6 bytes) for
+  far locals.
+- `c7 46 disp8 imm16` = `mov [bp + disp8], imm16` (5 bytes) for
+  near locals.
+
+The compiler picks the **per-access** form based on whether the
+specific local's offset fits in disp8 — within a single function,
+some accesses can use disp8 (cheaper) while others use disp16. Not
+all-or-nothing.
+
+ModR/M `/46` is `mod=01 reg=000 rm=110` (`[bp+disp8]`); `/86` is
+`mod=10 reg=000 rm=110` (`[bp+disp16]`). The 1-bit difference in
+`mod` selects the displacement width.

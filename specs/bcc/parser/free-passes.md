@@ -509,3 +509,16 @@ Probe replaced with the char-compound-OR variant.
   FIXUPP'd `[_a+disp]` forms (`a1 disp16` for `a[0]`, `add ax,
   [_a+8]` for `a[4]`). Re-confirms implicit-size + global array
   layout.
+
+## Free passes (batch 676)
+
+- `2405` — `int arr[] = {1+2, 3*4, 100-7};` (constant arithmetic
+  in array initializer): each initializer expression folded at
+  parse time to `3, 12, 93`. `_DATA` contains the raw word values;
+  no runtime evaluation. Re-confirms constant folding extends
+  through arithmetic operators in initializer contexts.
+- `2410` — `typedef int A; typedef A B; typedef B C; C x;` (3-level
+  typedef chain): resolves transitively to `int` at parse time.
+  `C x;` has byte-identical OBJ to `int x;`. Confirms typedef is
+  purely a name alias — chained or not, it carries no codegen
+  weight.

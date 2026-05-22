@@ -1673,3 +1673,29 @@ explicitly with `(unsigned int)x >> 1` to get `shr`.
 (For comparison, `unsigned int >> 1` documented earlier emits `d1 e8`
 = shr. The difference is whether the type IS unsigned int at the
 shift site.)
+
+## Shift by more than the bit width — emitted literally (fixture `2406`)
+
+`int x; return x >> 24;` where `int` is 16 bits — BCC emits the
+shift with `cl = 24` without folding or normalizing:
+
+```
+c7 46 fe 64 00          ; x = 100
+8b 46 fe                ; mov ax, x
+b1 18                   ; mov cl, 24     ← shift count > 16 (bit width)
+d3 f8                   ; sar ax, cl
+```
+
+BCC does **no validation or folding** of over-large shift counts.
+The C standard says shifting by ≥ the bit width is undefined
+behavior; BCC trusts the input. On 8086 hardware, `sar` with
+`cl=24` actually shifts 24 times (which, for signed int, eventually
+fills with the sign bit).
+
+For unsigned shift right (`shr`) with cl ≥ 16 on a 16-bit operand,
+the result is implementation-dependent on the actual CPU (8086 vs
+80186+ differ — the 80186 masks `cl & 0x1F`). BCC's emit is the
+same either way; the runtime is what differs.
+
+Confirms: shift codegen is purely structural (`d3 e0/e8/f8` etc.)
+with the count passed verbatim. No range-clamping at compile time.

@@ -2550,3 +2550,77 @@ So **empty if bodies cost 4 bytes** here (`0b f6 / 7e 00` for an
 or-zero-test + skip): the cmp/test plus a zero-displacement jump.
 Consistent with control flow being structurally lowered without
 peephole elision of unreachable paths.
+
+## Multiple `return` statements — single epilogue, no flag reuse (fixture `2407`)
+
+A function with multiple `return` paths converges all of them on a
+single epilogue label via `jmp`:
+
+```c
+int classify(int x) {
+  if (x < 0) return -1;
+  if (x == 0) return 0;
+  if (x < 10) return 1;
+  return 2;
+}
+```
+
+```
+8b 76 04                ; mov si, x
+0b f6                   ; or si, si       ← test x < 0
+7d 05                   ; jge skip1       (if x >= 0)
+b8 ff ff                ; ax = -1
+eb 17                   ; jmp epilogue
+; skip1:
+0b f6                   ; or si, si       ← test x == 0  (REPEATED!)
+75 04                   ; jne skip2
+33 c0                   ; ax = 0
+eb 0f                   ; jmp epilogue
+; skip2:
+83 fe 0a                ; cmp si, 10      ← test x < 10
+7d 05                   ; jge skip3
+b8 01 00                ; ax = 1
+eb 05                   ; jmp epilogue
+; skip3:
+b8 02 00                ; ax = 2
+eb 00                   ; jmp epilogue
+; epilogue:
+5e 5d c3                ; pop si; pop bp; ret
+```
+
+Two observations:
+
+1. **Each return loads AX with the value, then `jmp` to the shared
+   epilogue.** BCC never duplicates the epilogue per return — only
+   one `pop si; pop bp; ret` exists in the function.
+2. **No flag reuse**: the first test (`x < 0`) uses `or si, si /
+   jge`. The second test (`x == 0`) uses the *same* `or si, si`
+   again — even though the value in `si` is unchanged and the
+   flags from the previous `or` are still valid. BCC re-emits the
+   test from scratch.
+
+So BCC's IR doesn't track live flags across statement boundaries.
+Each comparison is lowered independently. A peephole that elides
+the second `or si, si` when the value is provably unchanged would
+save 2 bytes per redundant test — but BCC doesn't implement it.
+
+## `while (--n) ;` — empty body, jmp-to-test still emitted (fixture `2408`)
+
+```
+be 05 00                ; n = 5
+eb 00                   ; jmp test      ← still emitted even with empty body
+                        ; (loop body is empty)
+                        ; test:
+4e                      ; dec si        (--n)
+75 fd                   ; jne loop_top (-3)
+```
+
+The unconditional jmp to the test is the standard while-template
+preamble — emitted regardless of body content. For empty bodies it
+collapses to `eb 00` (jmp +0). Same pattern as the empty-if-body
+case.
+
+So the loop costs **5 bytes** for the while skeleton (`eb 00 / dec /
+jne disp8`) even when the body is empty. Confirms: control-flow
+templates are emitted structurally, not optimized away on empty
+content.
