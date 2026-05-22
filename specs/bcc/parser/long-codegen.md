@@ -3306,3 +3306,44 @@ d1 d2                          rcl dx, 1
 Same body as signed `<< 1` (`2878`). Left shift is signedness-agnostic
 (top bit is just bit 31 of the 32-bit value).
 
+
+## Long `>> 1` — INLINE `sar dx, 1; rcr ax, 1` (4 bytes, mirror of `<< 1`)
+
+Fixture `2885-long-shr-1-obj`:
+
+```c
+long lshr1(long a) {
+  return a >> 1;
+}
+```
+
+```
+d1 fa                          sar dx, 1   (HIGH: signed shift right)
+d1 d8                          rcr ax, 1   (LOW: rotate right through carry)
+```
+
+Findings:
+- Signed long `>> 1` is **INLINE 4 bytes** — mirror of `<< 1`.
+- Order: HIGH first (sar), then LOW (rcr) — carry flows from HIGH
+  to LOW (opposite direction from left-shift).
+- This **contradicts** my earlier finding for `>> 2` (`2789`) which
+  used the helper — confirming the policy: **`>> 1` is inlined,
+  `>> 2+` uses `N_LXRSH@`** (mirror of left-shift policy).
+
+## Unsigned long `>> 1` — `shr dx, 1; rcr ax, 1` (4B, different HIGH opcode)
+
+Fixture `2886-ulong-shr-1-obj`:
+
+```
+d1 ea                          shr dx, 1   (HIGH: unsigned)
+d1 d8                          rcr ax, 1   (LOW: rotate)
+```
+
+Findings:
+- Unsigned long `>> 1` differs ONLY in the HIGH-word opcode:
+  - Signed: `sar dx, 1` (`d1 fa`, op-ext 7)
+  - Unsigned: `shr dx, 1` (`d1 ea`, op-ext 5)
+- LOW word always uses `rcr ax, 1` (rotate-through-carry has no
+  sign distinction).
+- Same 4-byte cost for both.
+

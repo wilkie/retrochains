@@ -1533,3 +1533,30 @@ Findings:
 - The caller is responsible for any extension if needed.
 - Char return is byte-identical for signed and unsigned variants.
 
+
+## `++g` for char global — load+inc+store (8B, SUBOPTIMAL)
+
+Fixture `2887-char-preinc-obj`:
+
+```c
+char g;
+void bump(void) {
+  ++g;
+}
+```
+
+```
+a0 00 00                       mov al, [_g]    (byte load via moffs8)
+fe c0                          inc al          (byte inc reg)
+a2 00 00                       mov [_g], al    (byte store)
+```
+
+Findings:
+- `++char_global` = load + inc + store **via AL** (8 bytes total).
+- **BCC misses the peephole**: could emit `inc byte [_g]` (`fe 06
+  disp16`, 4B), which is the byte-mem-inc form. But BCC always
+  goes through AL for char globals.
+- Compare to `++int_global` (`2638`) which DOES use the mem-inc
+  form (`ff 06 disp16`, 4B).
+- Suboptimal 4B-extra cost per char-global increment.
+

@@ -2013,3 +2013,40 @@ Findings:
 - BCC treats fall-through purely syntactically: `case 1: case 2:`
   is just two cases at the same address.
 
+
+## Switch with `default:` in the MIDDLE — source order preserved for body layout
+
+Fixture `2890-switch-default-mid-obj`:
+
+```c
+switch (x) {
+  case 1: return 10;
+  default: return 99;
+  case 2: return 20;
+}
+```
+
+```
+3d 01 00 74 07                 cmp ax, 1; je → CASE_1
+3d 02 00 74 0c                 cmp ax, 2; je → CASE_2
+eb 05                          jmp → DEFAULT
+                               ; CASE_1 (source order):
+b8 0a 00 eb 0a                 return 10
+                               ; DEFAULT (between case 1 and 2 in source):
+b8 63 00 eb 05                 return 99
+                               ; CASE_2:
+b8 14 00 eb 00                 return 20
+```
+
+Findings:
+- **Dispatch logic is unaffected**: cases tested first, fall to
+  default if none match. Same dispatch as when default is at the end.
+- **Body layout follows SOURCE ORDER**: case_1 body, then default
+  body, then case_2 body — exactly as written.
+- Consequence: a case with NO `break` could fall through into the
+  default body if default is the next-source case. Source order
+  matters for fall-through semantics.
+- Most C style guides recommend putting `default` at the end to
+  avoid surprises; this fixture shows BCC handles mid-position
+  correctly but the layout is non-obvious.
+
