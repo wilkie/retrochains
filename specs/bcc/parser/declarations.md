@@ -1038,3 +1038,63 @@ Findings:
 - The comma-separated inc clause `i = i+1, j = j-1` compiles as
   two sequential AX-acc operations in source order.
 
+
+## 4+ locals — BCC gives up register promotion entirely
+
+Fixture `2748-four-locals-obj`:
+
+```c
+int a, b, c, d;
+a = 1; b = 2; c = 3; d = 4;
+return a + b + c + d;
+```
+
+```
+83 ec 08                       sub sp, 8       ; ALL 4 locals on stack
+c7 46 fe 01 00                 a = 1 [bp-2]
+c7 46 fc 02 00                 b = 2 [bp-4]
+c7 46 fa 03 00                 c = 3 [bp-6]
+c7 46 f8 04 00                 d = 4 [bp-8]
+8b 46 fe                       mov ax, a
+03 46 fc                       add ax, b
+03 46 fa                       add ax, c
+03 46 f8                       add ax, d
+```
+
+Findings:
+- **With 4 locals, BCC gives up register promotion entirely** —
+  all 4 spill to stack.
+- Compare to `2746` (3 locals in leaf function) where BCC promoted
+  all 3 to si/di/dx.
+- **Register-promotion ceiling**: leaf fns can promote up to 3
+  locals (si/di/dx); 4+ → spill all.
+- BCC does NOT pick a subset to promote when over the limit; it's
+  all-or-nothing.
+
+
+## Writing to `extern int` global — identical bytes to PUBDEF global
+
+Fixture `2752-extern-data-write-obj`:
+
+```c
+extern int sink;
+void send(int v) {
+  sink = v;
+}
+```
+
+```
+55 8b ec                       prologue
+8b 46 04                       mov ax, v
+a3 00 00                       [_sink] = ax (FIXUPP for EXTDEF)
+5d c3                          pop bp; ret
+```
+
+Findings:
+- Writing to an `extern` global emits **identical code** to writing
+  to a locally-defined global (`a3 disp16`).
+- The only difference is the symbol-table record: `_sink` is EXTDEF
+  (resolved at link time) rather than PUBDEF + storage.
+- Generalization: EXTDEF vs PUBDEF is a link-time concern — the
+  generated code is byte-identical regardless.
+

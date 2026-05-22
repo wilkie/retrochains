@@ -3823,3 +3823,40 @@ Findings:
 - The prefix-decrement form fuses test+modify into one instruction
   pair, no separate `or` or `cmp` needed. Optimal.
 
+
+## `while (--n)` — TIGHTEST count-down loop (iterates N-1 times)
+
+Fixture `2749-for-predec-count-obj`:
+
+```c
+int countdown(int n) {
+  int s = 0;
+  while (--n) {
+    s = s + 1;
+  }
+  return s;
+}
+```
+
+```
+8b 7e 04                       mov di, n
+33 f6                          xor si, si
+eb 05                          jmp → COND
+                               ; BODY:
+8b c6 40 8b f0                 s = s + 1 (5B AX-acc)
+                               ; COND:
+4f                             dec di         ; --n
+75 f8                          jne -8 → BODY
+8b c6                          return s
+```
+
+Findings:
+- `while (--n)` shares the **tight 3-byte condition** with
+  `for (i=N; --i; )` (`2733`): `dec reg; jne disp8`.
+- **Iteration count**: `while (--n)` loops **N-1 times** (decrement
+  first, then test; exits when result is 0).
+- Compare to `for (i=N; i--; )` (`2694`) which loops **N times**
+  (postfix tests old value).
+- Both forms are byte-optimal for count-down; the choice depends
+  on whether you want N or N-1 iterations.
+

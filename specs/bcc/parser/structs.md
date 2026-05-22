@@ -2781,3 +2781,28 @@ Findings:
   - Size ≥ 5 (or maybe ≥ 6?) → N_SCOPY@ helper call
 - Need to probe 5-byte copy to nail the exact boundary.
 
+
+## 5-byte struct copy — uses `N_SCOPY@` (boundary confirmed)
+
+Fixture `2747-struct-5b-copy-obj`:
+
+```c
+struct Five { int a; int b; char c; };
+s2 = s1;  /* both 5-byte struct */
+```
+
+```
+8d 46 f4 16 50                 dst = &s2 (lea + push ss + push)
+8d 46 fa 16 50                 src = &s1
+b9 05 00                       count = 5
+e8 00 00                       call N_SCOPY@
+```
+
+Findings:
+- **5-byte struct copy uses `N_SCOPY@` helper**. Same path as 6-byte
+  copy (`2745`).
+- **Threshold confirmed**: struct-copy via assignment uses
+  - `sizeof ≤ 4` → INLINED (load + store per field/register pair)
+  - **`sizeof ≥ 5` → `N_SCOPY@` helper**
+- The 4-byte boundary aligns with DX:AX register-pair capacity.
+

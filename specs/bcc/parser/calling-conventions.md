@@ -1420,3 +1420,31 @@ Findings:
 - This is a beautiful nano-optimization — most function calls have
   1-2 args, and BCC saves 1B on the cleanup for 2-arg cases.
 
+
+## Calling a global fn-pointer (uninitialized) — same `ff 16 disp16`
+
+Fixture `2750-direct-fnptr-call-obj`:
+
+```c
+int (*global_fn)(int);    /* uninit → _BSS */
+int main(void) {
+  return global_fn(42);
+}
+```
+
+```
+b8 2a 00 50                    push 42
+ff 16 00 00                    call word ptr [_global_fn] (FIXUPP)
+59                             pop cx (cleanup 1 arg)
+```
+
+Findings:
+- Calling a global function-pointer uses **`ff 16 disp16`** (4B)
+  whether the pointer is initialized or uninitialized.
+- Uninitialized `int (*op)(int);` lives in `_BSS` (2 bytes for the
+  near pointer); initialized version goes to `_DATA` with FIXUPP.
+- Either way, the CALL bytes are identical — the difference is
+  purely in the symbol table / segment placement.
+- BCC will only ACTUALLY work at runtime if something initializes
+  the pointer first (here it would be 0 → null-call → crash).
+

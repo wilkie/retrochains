@@ -918,3 +918,28 @@ Findings:
   which then folds to bytes `ff ff`.
 - Same as a regular `int s = -1;`.
 
+
+## `(short)int` — no-op cast (same size)
+
+Fixture `2751-short-cast-obj`:
+
+```c
+short narrow(int x) {
+  return (short)x;
+}
+```
+
+```
+55 8b ec                       prologue
+8b 46 04                       mov ax, x      ; just load (cast is no-op)
+eb 00 5d c3                    epilogue
+```
+
+Findings:
+- `(short)int` cast emits ZERO bytes — `short` and `int` are both
+  16 bits in BCC.
+- Same as `(int)short`, `(unsigned)int`, `(unsigned short)short`,
+  etc. — any same-size cast is a no-op.
+- The cast only matters in the type system (signedness, type
+  identity); the bit pattern is preserved.
+
