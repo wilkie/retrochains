@@ -3042,3 +3042,35 @@ Findings:
 - Confirms `2809` (also `{int,char}` 3B) and `2792` (3B with two
   chars at offsets 0,1).
 
+
+## 3-byte struct{int, char} byval arg — occupies 4 stack slots (padded)
+
+Fixture `2866-struct3-byval-arg-obj`:
+
+```c
+struct S3 { int a; char b; };   /* sizeof = 3 */
+int extract(struct S3 s) {
+  return s.a + s.b;
+}
+```
+
+```
+8a 46 06                       mov al, s.b ([bp+6])    (char byte)
+98                             cbw                      (sign-extend)
+50                             push ax                  (spill)
+8b 46 04                       mov ax, s.a ([bp+4])    (int word)
+5a                             pop dx
+03 c2                          add ax, dx
+```
+
+Findings:
+- 3-byte struct passed by value occupies **4 stack slots** —
+  rounded up to word alignment for the push.
+- Stack layout: `[bp+4..5] = s.a (2B int)`, `[bp+6] = s.b (1B char)`,
+  `[bp+7] = padding (unspecified)`.
+- Caller pushes the struct as 2 word pushes (one for `a`, one
+  with `b` in LOW byte + padding in HIGH).
+- Byte-identical access pattern to `int + char` separate args
+  (`2817`).
+- This is the standard "pad struct to word" calling convention.
+

@@ -2987,3 +2987,43 @@ Findings:
 - The constant 10UL is materialized via `xor ax,ax; mov dx, 10`
   (efficient: 5 bytes for the 4-byte long).
 
+
+## Signed `long a < b` — INLINE 3-step lexicographic compare (no helper!)
+
+Fixture `2864-long-cmp-lt-obj`:
+
+```c
+int less_long(long a, long b) {
+  if (a < b) return 1;
+  return 0;
+}
+```
+
+```
+8b 46 06                       mov ax, a.HIGH ([bp+6])
+8b 56 04                       mov dx, a.LOW  ([bp+4])
+3b 46 0a                       cmp ax, b.HIGH ([bp+10])
+7f 0c                          jg  +12 → FALSE  (a.HIGH > b.HIGH, definitive)
+7c 05                          jl  +5  → TRUE   (a.HIGH < b.HIGH, definitive)
+3b 56 08                       cmp dx, b.LOW ([bp+8])
+73 05                          jae +5 → FALSE  (UNSIGNED: dx >= b.LOW → a >= b)
+                               ; TRUE:
+b8 01 00 eb 04                 return 1
+                               ; FALSE:
+33 c0                          return 0
+```
+
+Findings:
+- **Long signed compare is INLINE, NOT a helper call.**
+- 3-step lexicographic compare:
+  1. **Compare HIGH words SIGNED** (for the sign bit / overall sign)
+  2. If HIGH equal, **compare LOW words UNSIGNED** (low halves are
+     bit patterns, not signed)
+  3. Combine results
+- ~18-20 bytes for the long compare vs 6 bytes for int compare.
+- Why no helper? Compare is just cmp+branch — no helper needed.
+  Long ops that need real computation (mul, div, shift) use helpers.
+- **Subtle**: the LOW compare uses UNSIGNED form (`jae`/`jb`) even
+  though we're comparing signed longs. The signed-ness is encoded
+  in the HIGH word; the LOW word is a magnitude.
+

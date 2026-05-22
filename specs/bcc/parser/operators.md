@@ -1162,3 +1162,53 @@ Findings:
 - C's `<`, `<=`, `>`, `>=`, `==`, `!=` all produce 0/1 ints via
   this same JOIN pattern.
 
+
+## Complete signed comparison branch-inversion table
+
+Fixtures `2861`-`2863` complete the signed compare family:
+
+| C op  | inverse jump  | opcode | byte for jump-to-ELSE pattern |
+|-------|---------------|--------|--------------------------------|
+| `<`   | `jge`         | `7d`   | (`2859`) |
+| `<=`  | `jg`          | `7f`   | (`2861`) |
+| `>`   | `jle`         | `7e`   | (`2862`) |
+| `>=`  | `jl`          | `7c`   | (`2863`) |
+| `==`  | `jne`         | `75`   | (many) |
+| `!=`  | `je`          | `74`   | (`2702`, etc.) |
+
+For unsigned: replace with `jae` (73), `ja` (77), `jbe` (76), `jb` (72).
+
+All comparisons follow the same 14-byte JOIN pattern for "bool from
+comparison": `cmp; j<inv> → ELSE; mov ax, 1; jmp epi; ELSE: mov ax, 0`.
+
+
+## `if (a > b) r = a; else r = b;` — same code as ternary `r = a > b ? a : b`
+
+Fixture `2865-if-else-assign-obj`:
+
+```c
+if (a > b) r = a;
+else r = b;
+return r;
+```
+
+```
+8b 76 04 8b 7e 06              a → si, b → di
+3b f7                          cmp si, di
+7e 04                          jle → ELSE
+8b d6                          r = a (r in dx, leaf fn promotion)
+eb 02                          jmp → JOIN
+8b d7                          r = b
+                               ; JOIN:
+8b c2                          mov ax, dx (return r)
+```
+
+Findings:
+- IF-ELSE that assigns the same var in both arms compiles
+  **identically to the ternary form** `r = (cond) ? a : b`.
+- BCC promotes a, b, r to si, di, dx (leaf fn, 3-local promotion).
+- The control-flow pattern is the SAME: condition → branch → store
+  → jmp-to-join → ELSE-store → join.
+- This is the classic `max(a, b)` idiom in two source forms; both
+  produce identical bytes.
+
