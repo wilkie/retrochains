@@ -4103,3 +4103,40 @@ Findings:
   preceding init and trailing inc compiles identically.
 - Confirms the "for is sugar for while" mental model at codegen.
 
+
+## Else-if chain `if-else if-else if-else` — sequential cmp+jne+body
+
+Fixture `2850-else-if-chain-obj`:
+
+```c
+if (x == 1) return 10;
+else if (x == 2) return 20;
+else if (x == 3) return 30;
+else return 0;
+```
+
+```
+83 fe 01 75 07                 cmp si, 1; jne → ELSE_1
+b8 0a 00 eb 1e                 return 10
+eb 1c                          (DEAD jmp)
+                               ; ELSE_1:
+83 fe 02 75 07                 cmp si, 2; jne → ELSE_2
+b8 14 00 eb 12                 return 20
+eb 10                          (DEAD jmp)
+                               ; ELSE_2:
+83 fe 03 75 07                 cmp si, 3; jne → ELSE_3
+b8 1e 00 eb 06                 return 30
+eb 04                          (DEAD jmp)
+                               ; ELSE_3:
+33 c0                          return 0
+```
+
+Findings:
+- Each `else if` clause emits its own cmp+jne with skip-then branch.
+- BCC emits a **DEAD jmp** between each then-block and the next
+  else clause, even when the then-block always returns.
+  Consistent no-DCE pattern.
+- 10 bytes per case (cmp 3B + jne 2B + body 5B). Plus 2B dead jmp.
+- Compare to switch (3 cases below dense-table threshold) which is
+  similar — both use linear chain dispatch.
+

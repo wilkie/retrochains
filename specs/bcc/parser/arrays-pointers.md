@@ -5590,3 +5590,55 @@ Findings:
 - Same shape as `int *p = data;` (`2802`) but with a single int
   target instead of an array.
 
+
+## `s[i]` for char* + int var — `add bx,i; mov al,[bx]; cbw` (no scale)
+
+Fixture `2851-str-idx-var-obj`:
+
+```c
+int read_at(char *s, int i) {
+  return s[i];
+}
+```
+
+```
+8b 5e 04                       mov bx, s
+03 5e 06                       add bx, i      (no shift, sizeof(char)=1)
+8a 07                          mov al, [bx]
+98                             cbw            (char → int promotion)
+```
+
+Findings:
+- `char *s + i` doesn't scale (sizeof=1); just `add bx, i` directly.
+- `add bx, [bp+6]` uses mem-source add (3B `03 5e disp8`).
+- Total 9 bytes for the expression including cbw.
+- Compare to `int *a + i` which needs `shl bx, 1` (2B more) for scaling.
+
+## Array sum loop `for (i; i<n; i++) s += a[i];` — bx-addressed read in loop
+
+Fixture `2849-array-sum-fn-obj`:
+
+```c
+int total(int *a, int n) {
+  int i, s;
+  s = 0;
+  for (i = 0; i < n; i = i + 1) {
+    s = s + a[i];
+  }
+  return s;
+}
+```
+
+Loop body:
+```
+8b c6 d1 e0                    mov ax, i; shl ax, 1   (scale)
+8b 5e 04 03 d8                 mov bx, a; add bx, ax  (bx = &a[i])
+8b c7 03 07 8b f8              s = s + [bx]  (AX-acc with [bx] mem source)
+```
+
+Findings:
+- Per-iteration cost: 2B scale + 3B mov + 2B add (bx setup) + 2B
+  load via mem-source + 4B s update + 2B loop = ~15 bytes/iter.
+- `add ax, [bx]` (3B `03 07`) reads through bx as mem source.
+- Both `i` and `s` are promoted to si/di (loop variables).
+

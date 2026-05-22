@@ -3015,3 +3015,30 @@ Findings:
 - This generalizes: small structs ≤4B passed by value have zero
   overhead vs separate args.
 
+
+## `struct{int a; char b}` global — char at offset 2 (3-byte struct)
+
+Fixture `2854-struct-char-at-2-obj`:
+
+```c
+struct R { int a; char b; };
+struct R r;
+r.a = 1; r.b = 'Z';
+return r.b;
+```
+
+```
+c7 06 00 00 01 00              [_r + 0] = 1   (r.a, mem-imm 6B)
+c6 06 02 00 5a                 [_r + 2] = 'Z' (r.b, mem-imm 5B)
+a0 02 00                       mov al, [_r + 2]   (r.b load)
+98                             cbw
+```
+
+Findings:
+- Sizeof = 3 (2 + 1), no trailing padding.
+- Field `a` at offset 0 (word), `b` at offset 2 (byte).
+- Char store via `c6 06 disp16 imm8` (5B); word store via `c7 06
+  disp16 imm16` (6B). Different opcodes for byte vs word.
+- Confirms `2809` (also `{int,char}` 3B) and `2792` (3B with two
+  chars at offsets 0,1).
+

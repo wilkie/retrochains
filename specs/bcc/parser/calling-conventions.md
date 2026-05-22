@@ -1616,3 +1616,34 @@ Findings:
 - Saves a byte due to bp-relative disp8 vs absolute disp16.
 - ModR/M `56 04` = mod 01, op-ext 010 (call near), r/m 110 ([bp+disp8]).
 
+
+## `f(g(v,1), h(w,2))` nested calls multi-arg — right-to-left eval
+
+Fixture `2853-nested-multi-arg-obj`:
+
+```c
+return op(op(v, 1), op(w, 2));
+```
+
+```
+                               ; First: RIGHTMOST inner = op(w, 2)
+b8 02 00 50                    push 2
+ff 76 06                       push w
+e8 00 00 59 59                 call op + 2-arg cleanup
+50                             push ax (= outer arg 2)
+                               ; Second: LEFT inner = op(v, 1)
+b8 01 00 50                    push 1
+ff 76 04                       push v
+e8 00 00 59 59                 call op + cleanup
+50                             push ax (= outer arg 1)
+                               ; Outer: op(arg1, arg2)
+e8 00 00 59 59                 call op + cleanup
+```
+
+Findings:
+- Nested calls in cdecl evaluate **right-to-left at the outer
+  level**: the rightmost outer arg is computed first.
+- Each inner call's result is pushed as the outer's arg slot.
+- Total ~30 bytes for the 3-call chain.
+- AX is the conduit between each inner call and its consumer.
+

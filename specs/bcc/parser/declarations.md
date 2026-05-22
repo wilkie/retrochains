@@ -1406,3 +1406,30 @@ Findings:
 - BCC mangles the symbol internally to avoid clashes if multiple
   functions have same-named statics.
 
+
+## `int *q = p;` — q shares storage with p (no new slot)
+
+Fixture `2852-ptr-from-param-obj`:
+
+```c
+int peek(int *p) {
+  int *q;
+  q = p;
+  return *q;
+}
+```
+
+```
+8b 76 04                       mov si, p     (becomes q via reg-promotion)
+8b 04                          mov ax, [si]  (= *q = *p)
+```
+
+Findings:
+- When a local `q` is assigned directly from a param `p` and used
+  for the same purpose, **BCC promotes q to the same register as
+  p would use** (SI here). No separate stack slot.
+- Effectively `q = p` is a no-op: both names alias the same
+  register location.
+- Same body as if the function had been written as `return *p;`.
+- This is BCC's "single-assignment alias" optimization.
+
