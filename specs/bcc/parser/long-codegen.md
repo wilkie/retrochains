@@ -1,0 +1,2045 @@
+# `long` / `unsigned long` codegen
+
+This file is part of the BCC parser/codegen behavior catalog. See [`../PARSER.md`](../PARSER.md) for the index.
+
+## `(long)int` = cwd sign-ext; `(long)unsigned int` = zero store; long+int promotes via cwd
+
+Fixtures `2189` (signed int → long), `2190`
+(unsigned int → long), `2191` (long + int mixed)
+cover long-promotion mechanisms.
+
+- `2189` (**`(long)signed int` = cwd**): single
+  byte sign-extension:
+  ```
+  mov ax, [i]
+  cwd                  ; 99 — sign-extend AX into DX:AX
+  mov [l.hi], dx
+  mov [l.lo], ax
+  ```
+  CWD copies AX's sign bit (bit 15) to all bits
+  of DX. For i = -5 (0xFFFB), DX becomes 0xFFFF.
+- `2190` (**`(long)unsigned int` = zero store**):
+  zero-extension via direct mov of 0:
+  ```
+  mov ax, [u]
+  mov word [l.hi], 0     ; c7 46 fc 00 00 — direct zero store
+  mov [l.lo], ax
+  ```
+  Note: BCC does NOT use `xor dx, dx` (2 bytes) +
+  store dx. Instead emits the 5-byte direct mov
+  imm16 = 0. Possibly because the destination is
+  already memory.
+- `2191` (**long + int mixed**): the int is
+  **promoted to long first** (via cwd), then the
+  long+long inline add idiom runs:
+  ```
+  mov ax, [i]
+  cwd                   ; promote i to (DX:AX)
+  mov bx, [l.hi]
+  mov cx, [l.lo]
+  add cx, ax            ; lo + lo
+  adc bx, dx            ; hi + hi + carry
+  ```
+  So 4 registers used (AX, DX, BX, CX) to hold
+  both 32-bit operands.
+
+**Long promotion patterns**:
+| Source | Mechanism | Bytes |
+|--------|-----------|-------|
+| `signed int` → `long` | `cwd` | 1 |
+| `unsigned int` → `long` | `mov word [hi], 0` | 5 (or alternative: `xor dx, dx` 2B + store) |
+| `signed char` → `long` | `cbw` (→ AX) then `cwd` (→ DX:AX) | 2 |
+| `unsigned char` → `long` | `mov ah, 0` then `mov word [hi], 0` | 7 |
+| `long` → `int` | Take low word directly | 0 (free truncation) |
+| `long` → `char` | Take low byte directly | 0 (free truncation) |
+
+For mixed arith with promotion, the smaller type
+is widened first, then both run through the
+larger type's arithmetic.
+
+For the Rust reimplementation:
+- (long)int signed: emit `cwd` after the int load.
+- (long)int unsigned: emit direct zero store to
+  the high half.
+- Mixed long+int: promote the int first.
+
+## `~long` = `not/not` inline (4B); `long == 0` uses `or low, high` zero-test; same for `if (long)`
+
+Fixtures `2186` (~long), `2187` (long == 0), `2188`
+(`if (long)`) finish the long-unary survey.
+
+- `2186` (**`~long` bitwise NOT**): inline via two
+  `not` instructions:
+  ```
+  ax = a.hi / dx = a.lo
+  not dx               ; f7 d2 — flip low
+  not ax               ; f7 d0 — flip high
+  ```
+  No carry propagation needed (bitwise op). 4
+  bytes total.
+- `2187` (**`long == 0` via OR**): single `or`
+  combines both halves into a zero-test:
+  ```
+  mov ax, [a.lo]
+  or ax, [a.hi]        ; 0b 46 fe — ZF iff both halves zero
+  jne L_skip           ; (skip the body — a != 0)
+  ; body: return 0
+  ```
+  Clever optimisation: instead of two cmp+jne,
+  single `or` sets ZF iff the combined long is
+  zero.
+- `2188` (**`if (long_val)` as condition**): same
+  OR-pattern but with `je` (skip if zero):
+  ```
+  mov ax, [a.lo]
+  or ax, [a.hi]
+  je L_false           ; 74 05 — skip body if zero
+  ```
+
+**`long` zero-test pattern**:
+| Source | jcc | Sense |
+|--------|-----|-------|
+| `if (a)` or `if (a != 0)` | `je` (skip if zero) | execute body if non-zero |
+| `if (a == 0)` | `jne` (skip if non-zero) | execute body if zero |
+
+Matches the int register-form pattern (`or reg,
+reg`) we saw earlier. The long version just uses
+a memory operand for the second half.
+
+**Long unary ops** (complete):
+| Op | Form | Bytes |
+|----|------|-------|
+| `-a` | `neg ax / neg dx / sbb ax, 0` | 5 |
+| `~a` | `not dx / not ax` | 4 |
+| `(unsigned long)a` | (no-op, type-only) | 0 |
+| `(long)int` | sign-extend via cwd | 1-3 |
+| `if (a)` / `if (!a)` / `a == 0` / `a != 0` | `or low, high` + jcc | 5-7 |
+
+For the Rust reimplementation:
+- `~long`: emit `not dx / not ax` (no helper).
+- `long == 0` test: emit `or low, high` then
+  appropriate jcc.
+
+## `long ==` inline (hi+lo cmp); `long <` = signed-hi + unsigned-lo branch; `long << 1` = `shl/rcl` inline
+
+Fixtures `2174` (long ==), `2175` (long <), `2176`
+(long << const) refine long comparison and shift
+inlining.
+
+- `2174` (**`long ==` inline**): two-step compare:
+  ```
+  ax = a.hi / dx = a.lo
+  cmp ax, [b.hi]
+  jne L_false           ; high halves differ → unequal
+  cmp dx, [b.lo]
+  jne L_false           ; low halves differ → unequal
+  ; else equal
+  ```
+- `2175` (**`long <` signed inline**): three-stage
+  comparison handling sign correctly:
+  ```
+  ax = a.hi / dx = a.lo
+  cmp ax, [b.hi]       ; compare HIGH halves (SIGNED)
+  jg L_false            ; a > b (signed) → false
+  jl L_true             ; a < b (signed) → true
+  cmp dx, [b.lo]       ; high halves equal; compare LOW (UNSIGNED)
+  jae L_false           ; a.lo >= b.lo → false
+  ; else true
+  ```
+  Classic signed-32 comparison: high half compared
+  as signed (because sign bit lives there), low
+  half as unsigned (because it has no sign bit).
+- `2176` (**`long << 1` inline**): for small const
+  shifts, NO helper call:
+  ```
+  ax = a.hi / dx = a.lo
+  shl dx, 1             ; shift low half, top bit → CF
+  rcl ax, 1             ; rotate high through carry
+  ; result: ax:dx = a << 1 (AX=hi, DX=lo)
+  ```
+  Beautiful 8086 trick: shift+rotate-through-carry
+  propagates the top bit of low into bottom of
+  high. Likely unrolled for N ≤ 3, helper for
+  N ≥ 4.
+
+**Long register-allocation note**: BCC uses
+different conventions in different contexts:
+- **Inline shift**: AX = high, DX = low (so
+  `shl dx, 1 / rcl ax, 1` works)
+- **N_LXMUL@ helper**: DX = high, AX = low (in
+  arg+result, standard "DX:AX")
+- **Inline cmp**: AX = high, DX = low (since cmp
+  is order-independent for `==`)
+- **Inline add/sub**: AX = low, DX = high (so
+  `add ax, [b.lo] / adc dx, [b.hi]` works)
+
+Inconsistent! The convention depends on the
+operation's instruction semantics. Track this
+per-op when generating code.
+
+**Long inline-vs-helper summary** (updated):
+| Op | Inline form | Helper |
+|----|-------------|--------|
+| `==`, `!=` | hi-cmp+jne, lo-cmp+jne | none |
+| `<`, `<=`, `>`, `>=` (signed) | signed hi-cmp + unsigned lo-cmp | none |
+| `+`, `-` | `add/adc`, `sub/sbb` | none |
+| `&`, `|`, `^` | 2× bitwise | none |
+| `<< 1`, `<< 2`, `<< 3` | `shl/rcl` × N | none |
+| `<< var` or `<< ≥4` | (HELPER) | `N_LXLSH@` |
+| `*` | (HELPER) | `N_LXMUL@` |
+| `/`, `%` | (HELPER) | `N_LDIV@` |
+
+For the Rust reimplementation:
+- Long comparisons: emit hi-first / lo-second.
+- Signed long compare: signed jcc on hi, unsigned
+  on lo.
+- Small const shifts: emit `shl/rcl` × N.
+- Track per-op register convention (hi/lo).
+
+## Int→long via cwd (signed) vs zero-fill (unsigned); nested struct = flat layout; `>>16` = high half
+
+Fixtures `1949` (int→long signed), `1950` (nested
+struct), `1951` (unsigned int→long zero-ext)
+document type-aware casts and nested-struct
+layout.
+
+- `1949` (**signed int→long uses cwd**): `(long)x`
+  for signed int x emits **`cwd`** to sign-extend
+  AX → DX:AX:
+  ```
+  mov ax, [x]
+  cwd                  ; sign-extend to dx:ax
+  mov [y.hi], dx
+  mov [y.lo], ax
+  ```
+  For x = -5 (0xFFFB), DX becomes 0xFFFF (sign-
+  extended -1), preserving the negative value as
+  -5L = 0xFFFFFFFB.
+  
+  Also: `(int)(y >> 16)` is **recognized at parse
+  time as a direct read of `y.hi`** — no shift
+  instruction emitted. The high half is just
+  accessed at `[bp+disp+2]`.
+- `1950` (**nested struct flat layout**):
+  ```c
+  struct Outer { int n; struct Inner {int x; int y;} inner; };
+  ```
+  lays out as:
+  | Field | Offset |
+  |-------|--------|
+  | `o.n` | 0 |
+  | `o.inner.x` | 2 |
+  | `o.inner.y` | 4 |
+  Total: 6 bytes. Nested struct fields use
+  **summed offsets** (outer field offset + inner
+  field offset). No special wrapping or alignment.
+- `1951` (**unsigned int→long uses zero-fill**):
+  `(long)unsigned_x` does NOT use cwd — it does
+  **explicit zero-fill of the high half**:
+  ```
+  mov ax, [x]
+  mov [y.hi], 0         ; zero-fill, NOT cwd
+  mov [y.lo], ax
+  ```
+  For x = 0x8000, zero-fill gives y = 0x00008000
+  (correct unsigned promotion). Sign-extend would
+  have given 0xFFFF8000 (wrong for unsigned).
+  
+  Then `y >> 8` uses **N_LXRSH@** (long unsigned
+  right shift helper) since the long type tracks
+  the originating unsigned signedness.
+
+**Int↔long cast summary**:
+| Cast | Mechanism |
+|------|-----------|
+| signed int → long | `cwd` sign-extend (DX = AX's sign) |
+| unsigned int → long | Zero-fill via `mov [hi], 0` |
+| long → int (truncate) | Just use low half (`y.lo`) |
+| `(int)(y >> N*16)` where N=1 | Direct read of `y.hi` (no shift) |
+
+For the Rust reimplementation:
+- Track signedness through casts; emit cwd for
+  signed promotion, zero-fill for unsigned.
+- Recognize `>> 16` truncations as direct half
+  access.
+- Nested struct fields: sum outer-field-offset +
+  inner-field-offset for the final access offset.
+
+## Long ABI: stored little-endian halves; args pushed hi-first; arr stride 4B per elem
+
+Fixtures `1946` (fn returning long), `1947` (mixed
+int/long args), `1948` (array of long) document
+the complete long ABI.
+
+- `1946` (**long storage and return**): a long
+  value `x` in memory has the **low half at lower
+  address**:
+  - `x.lo` at `[bp+disp]` (lower address)
+  - `x.hi` at `[bp+disp+2]` (higher address)
+  
+  Return convention: **DX:AX = high:low** halves.
+  Function stores intermediate result into local
+  long then loads back into DX:AX from the
+  correct positions.
+  
+  Long expression codegen can have peculiar
+  intermediate orderings — BCC sometimes computes
+  with swapped semantics in DX:AX and uses the
+  local storage as a swap-staging buffer. The
+  final return convention is restored.
+- `1947` (**mixed int/long args**): long arg
+  passed as **two word pushes, hi FIRST then
+  lo**. So the call site for `mix(1, 100L, 1000)`:
+  ```
+  push 1000        ; c (rightmost int)
+  push 0           ; b.hi (long high half)
+  push 100         ; b.lo (long low half — LAST pushed of b)
+  push 1           ; a (leftmost int)
+  call _mix
+  add sp, 8        ; 4 args × 2 bytes
+  ```
+  In callee:
+  - `[bp+4]` = a
+  - `[bp+6]` = b.lo (long low half — closer to bp)
+  - `[bp+8]` = b.hi
+  - `[bp+10]` = c
+  Long arg occupies **4 consecutive bytes** with
+  lo at lower offset.
+- `1948` (**array of long**): each element is **4
+  bytes** with low half at lower address:
+  - `a[0]` at `[bp-12..bp-9]`: `.lo` at -12, `.hi`
+    at -10
+  - `a[1]` at `[bp-8..bp-5]`: `.lo` at -8, `.hi`
+    at -6
+  - `a[2]` at `[bp-4..bp-1]`: `.lo` at -4, `.hi`
+    at -2
+  Stride = 4 bytes per element. Standard array
+  layout extended for 4-byte type.
+
+**Long memory and ABI summary**:
+| Aspect | Detail |
+|--------|--------|
+| Memory storage | Low half at lower addr (little-endian halves) |
+| Register return | DX:AX = high:low |
+| Arg push order | Hi pushed FIRST, lo pushed last |
+| Arg slot in callee | Lo at lower offset, hi at higher offset |
+| Array stride | 4 bytes per long element |
+
+For the Rust reimplementation:
+- All long operations use little-endian halves
+  in memory and stack frames.
+- Long arg push: emit hi-push then lo-push (so
+  lo ends at lower offset in callee).
+- Long return: emit DX = high, AX = low at fn
+  end.
+
+## 6-arg call: 4B per push; long arg = 2 word-pushes hi-first; chained calls bottom-up
+
+Fixtures `1925` (6 args), `1926` (long arg),
+`1927` (chained calls) cover remaining call-site
+shapes.
+
+- `1925` (**6 args**): each int constant arg is
+  pushed via **`mov ax, imm / push ax`** (4 bytes
+  per arg), pushed right-to-left. After call,
+  cleanup uses **single `add sp, N*2`**:
+  ```
+  mov ax, 6 / push ax    ; b8 06 00 50
+  mov ax, 5 / push ax
+  mov ax, 4 / push ax
+  mov ax, 3 / push ax
+  mov ax, 2 / push ax
+  mov ax, 1 / push ax
+  call _sum6
+  add sp, 12             ; cleanup 6 × 2 bytes
+  ```
+  Note: BCC does **NOT use 80186+'s `push imm16`**
+  (`68 imm16`, 3 bytes) — uses 8086-compatible
+  `mov + push` (4 bytes) instead. BCC targets
+  8086 only.
+- `1926` (**long arg**): a long value pushed as
+  **two word-pushes, hi first then lo**:
+  ```
+  ff 76 fe        ; push [y.hi]  (higher offset pushed first)
+  ff 76 fc        ; push [y.lo]
+  call _truncate_long
+  pop / pop       ; 4 bytes cleanup
+  ```
+  In callee, `[bp+4]` = lo half (last pushed),
+  `[bp+6]` = hi half. Memory order: low at
+  smaller offset. Matches little-endian
+  representation.
+- `1927` (**chained calls bottom-up**): `f(g(h(x)))`
+  evaluates innermost first:
+  ```
+  xor ax, ax / push ax     ; x = 0
+  call h                    ; ax = h(0)
+  pop                      ; cleanup
+  push ax                   ; new arg = h(0)
+  call g                    ; ax = g(h(0))
+  pop
+  push ax
+  call f                    ; ax = f(g(h(0)))
+  pop
+  ```
+  Each call's result (in AX) is immediately
+  pushed as the next call's arg. No deep stack
+  buildup.
+
+For the Rust reimplementation:
+- Multi-arg calls: `mov ax, val / push ax` per
+  arg (8086-compatible, NOT `push imm`).
+- Cleanup: single `add sp, N*2` after call
+  (cdecl).
+- Long arg: 2 word-pushes, hi first; callee sees
+  lo at [bp+4], hi at [bp+6].
+- Chained calls: evaluate inner first, push
+  result, then outer.
+
+## `if(long)` = OR-halves; partial array init zero-fills `_DATA`; `static` global no PUBDEF
+
+Fixtures `1784` (`if(long)` truthiness), `1785`
+(partial array initializer), and `1786` (static
+vs extern globals) cover three remaining shapes.
+
+- `1784` (**`if (long)` truthiness**): uses the
+  **OR-halves trick** identical to `long == 0`:
+  ```
+  mov ax, low
+  or ax, high      ; ZF set iff both halves zero
+  je L_false       ; or jne for falsy
+  ```
+  3 instructions test all 32 bits. Same shortcut
+  from [[batch-473-long-cmp-zero]] applies for
+  if-truthiness.
+- `1785` (**partial array init zero-fills**): an
+  initializer like `int a[5] = {1, 2}` zero-fills
+  the remaining 3 elements. BCC places the **whole
+  array in `_DATA`** as 10 bytes `01 00 02 00 00 00
+  00 00 00 00`. Could theoretically split into
+  `_DATA` (initialized prefix) + `_BSS` (zero
+  suffix) for large arrays, but BCC keeps it simple.
+- `1786` (**static vs extern globals**): both go
+  to **`_DATA`** packed sequentially, but:
+  - `static int s = 10`: no PUBDEF (internal
+    linkage). Same-TU references resolve at codegen.
+  - `int g = 20`: PUBDEF emitted (external
+    linkage). Visible to linker.
+  Both accessed via direct-memory `a1 disp` / `03 06
+  disp` with FIXUPP. Confirms static-globals follow
+  the same emit-but-don't-export rule as static
+  functions ([[batch-463-static-fn]]).
+
+So `static` storage class is consistent across:
+- Functions: emit to `_TEXT`, no PUBDEF.
+- Initialized globals: emit to `_DATA`, no PUBDEF.
+- Uninitialized globals (presumed): reserve in
+  `_BSS`, no PUBDEF.
+- Locals: BSS for static-local (no PUBDEF since
+  they're not externally visible anyway).
+
+For the Rust reimplementation:
+- Implement OR-halves zero-test for long
+  if-truthiness (same code as `long == 0`).
+- Zero-fill `_DATA` for partial aggregate init —
+  no need to split into BSS.
+- Track linkage flag per symbol: emit PUBDEF only
+  for default-extern (non-static) symbols.
+
+## Fn returns ptr via AX; 3-call cascade direct; `long + int_const` = add/adc
+
+Fixtures `1775` (function returns int *), `1776`
+(3-level call cascade), and `1777` (mixed
+`(long)i * l + 7`) cover three remaining shapes.
+
+- `1775` (**fn returning pointer**): emits **`mov
+  ax, FIXUPP_to_symbol`** (3 bytes) for `return
+  &g;`. Standard near pointer return in AX. The
+  link-time FIXUPP resolves to the actual data
+  segment offset.
+- `1776` (**3-level call cascade**): `sqr(dbl(inc
+  (2)))` evaluates innermost-first with sequential
+  push/call/pop pairs. Each call's return AX is
+  directly reused via `push ax` as the next
+  outer call's arg — no intermediate spilling:
+  ```
+  mov ax, 2 / push ax
+  call _inc / pop cx
+  push ax            ; inc's result
+  call _dbl / pop cx
+  push ax            ; dbl(inc(2))
+  call _sqr / pop cx
+  ```
+- `1777` (**`(long)i * l + 7`**): mixed long
+  arithmetic with int constant tail.
+  - Promote int i to long via `cwd`.
+  - **Register shuffle via stack** to put (long)i
+    in CX:BX and l in DX:AX (the N_LXMUL@ ABI):
+    ```
+    push ax        ; low of (long)i
+    push dx        ; high of (long)i
+    mov dx, l_high
+    mov ax, l_low
+    pop cx         ; high → CX
+    pop bx         ; low → BX
+    call N_LXMUL@
+    ```
+  - **Add int constant `+ 7` to long**: inlined as
+    `add ax, 7 / adc dx, 0` (5 bytes). The 7 is
+    treated as a long with high=0; `adc dx, 0`
+    propagates the carry from the low-half add
+    into the high half.
+
+So `long + int_const` is **always inlined** (no
+helper needed since carry propagation is just 2
+instructions). Same for `long - int_const` (would
+use `sub ax, K / sbb dx, 0`).
+
+The register-shuffle pattern in 1777 is notable
+because BCC uses the stack as a temporary swap
+space when the two long operands need to be in
+specific register pairs (CX:BX vs DX:AX) and
+both come from memory. Push low/high, load the
+other, pop in reverse — effectively swapping
+without a 3rd register.
+
+## -ml: params at `[bp+6]+`; long add unchanged; mul unchanged; struct call uses `push cs`
+
+Fixtures `1745` (long add in -ml), `1746` (struct
+by value in -ml), and `1747` (mul by 17 in -ml)
+extend the large-model coverage and confirm cross-
+model orthogonality.
+
+- `1745` (**long add in large model**): the inline
+  `add low / adc high` sequence is **byte-identical**
+  to small model — the only OBJ-level difference is
+  `5d cb` (retf) instead of `5d c3` (ret) in the
+  epilogue. Long arithmetic helpers (which would
+  appear as EXTDEFs) would also be unchanged
+  names. So IR-level long-op encoding is fully
+  model-independent.
+- `1746` (**small struct by value in -ml**): the
+  decomposition into 2 word pushes is the same,
+  but the param offsets shift:
+  ```
+  small (-ms):  arg1 at [bp+4], arg2 at [bp+6]
+  large (-ml):  arg1 at [bp+6], arg2 at [bp+8]
+  ```
+  The +2 shift accounts for the **4-byte far
+  return address** (seg + off) on the stack instead
+  of 2 bytes. Call site uses the **`push cs ;
+  call near`** 4-byte sequence (vs 3-byte `call
+  near` in small).
+- `1747` (**mul by 17 in -ml**): `mov dx, 17 /
+  imul dx` is byte-identical to small model except
+  the `5d cb` retf. Confirms integer arithmetic
+  operations are fully model-independent.
+
+So the cross-model parameter rules:
+| Slot | Small (`-ms`) | Large (`-ml`) |
+|------|---------------|---------------|
+| saved BP | [bp+0..1] | [bp+0..1] |
+| return addr | [bp+2..3] (near) | [bp+2..5] (far) |
+| arg1 | [bp+4..5] | [bp+6..7] |
+| arg2 | [bp+6..7] | [bp+8..9] |
+| ... | each +2 from arg1 | each +2 from arg1 |
+
+For the Rust reimplementation:
+- Parameterize `arg_offset_base = (small ? 4 : 6)`
+  in the codegen.
+- The `near` vs `far` ABI is purely an emission-
+  layer concern — the parser/AST stays the same.
+- Adding new -ml fixtures cheaply verifies that
+  the encoder's model parameter works correctly
+  by re-running the same C source under different
+  flags.
+
+## Long `>>1` = `sar/rcr`; `long == 0` = OR halves; `-long` = neg/neg/sbb
+
+Fixtures `1736` (long `>>1` inline), `1737` (long
+== 0 shortcut), and `1738` (long negation) complete
+the inline long-op characterisation.
+
+- `1736` (**long `>>1` inline**): signed `>> 1` on
+  a long is **inlined** as:
+  ```
+  sar high, 1    ; d1 f8 — arith shift right
+  rcr low, 1     ; d1 da — rotate carry right
+  ```
+  The `sar` shifts high right with sign preserved
+  and puts the low bit of high into CF. `rcr` then
+  rotates that CF into the top bit of low. So the
+  full 32-bit signed `>>1` is **2 instructions**.
+  Mirrors the `<<1` inline pattern (`shl/rcl`):
+  - `<<1`: `shl low / rcl high` (carry low→high)
+  - `>>1` (signed): `sar high / rcr low` (carry
+    high→low, sign preserved)
+  - `>>1` (unsigned): `shr high / rcr low` (not
+    yet probed)
+- `1737` (**long == 0 shortcut**): `if (a == 0)`
+  for a `long` uses the **OR-halves trick**:
+  ```
+  mov ax, a_low
+  or ax, a_high      ; ZF = (low | high) == 0
+  jne L_false
+  ```
+  Both halves OR'd into AX in one instruction; ZF
+  tests if all 32 bits are zero. **Much cheaper**
+  than the general 2-step long compare. Specific to
+  comparing against zero (both `==` and `!=`).
+- `1738` (**long negation `-a`**): inlined as
+  3 instructions:
+  ```
+  neg high       ; f7 d8 — negate high
+  neg low        ; f7 da — negate low, CF=1 if low!=0
+  sbb high, 0    ; 1d 00 00 — high -= CF (borrow propagation)
+  ```
+  Result: properly negated 32-bit value with carry
+  propagation between halves. Note the AX/DX
+  register roles in BCC's inline long ops:
+  **AX = HIGH, DX = LOW** for these in-flight
+  operations (opposite of the long return ABI's
+  DX = HIGH, AX = LOW).
+
+Inline long-op catalogue (all 4 bytes or less for
+the core operation):
+| Op | Sequence | Bytes |
+|----|----------|-------|
+| `a + b` | `add low / adc high` | 4 (with mem ops) |
+| `a - b` | `sub low / sbb high` | 4 |
+| `-a` | `neg high / neg low / sbb high, 0` | 7 |
+| `a == 0` | `mov ax, low / or ax, high` | 5 |
+| `a << 1` | `shl low / rcl high` | 4 |
+| `a >> 1` (s) | `sar high / rcr low` | 4 |
+| `a & b`, `|`, `^` | `op low, low / op high, high` | 4 |
+| `a == b` | `cmp high / jne / cmp low / jne` | varies |
+
+Long shifts by N>1 always use `N_LXLSH@`/`N_LXRSH@`
+helpers; shift-by-1 is the special inline case.
+
+## `int + long`: int gets `cwd`-promoted; long `==` two-step; long `&` two-word
+
+Fixtures `1643` (`int + long`), `1644` (`long ==
+long`), and `1645` (`long & long`) extend the long
+arithmetic picture.
+
+- `1643` (**mixed `int + long`**): the int operand
+  is promoted to long via **`cwd`** first, then
+  standard inline long add (add+adc). Sequence:
+  `mov ax,[i] / cwd / add ax,[b_low] / adc dx,
+  [b_high] / store r`. So C usual arithmetic
+  conversion (UAC) is applied at IR level —
+  int→long widening via cwd, then mixed-type
+  expression runs at long width.
+- `1644`: `long == long` is **inline** like `<`
+  but simpler — both `cmp` use `jne` to bail to
+  false. No signed/unsigned distinction needed
+  since equality is bit-pattern:
+  ```
+  cmp ax, [b_high]   ; high cmp
+  jne false
+  cmp dx, [b_low]    ; low cmp
+  jne false
+  ; true path
+  mov ax, 1 / jmp / xor ax,ax
+  ```
+- `1645`: `long & long` is **inline** two-word:
+  `and dx, [b_low] / and ax, [b_high] / store`. No
+  carry needed for bitwise ops. Same shape applies
+  to `|` and `^`.
+
+So the inline-vs-helper boundary for long ops:
+
+| Op | Inline | Helper |
+|----|--------|--------|
+| `+`, `-`     | yes (add+adc, sub+sbb) | — |
+| `&`, `|`, `^`| yes (two-word)         | — |
+| `==`, `!=`   | yes (two-step cmp)     | — |
+| `<`, `>`, `<=`, `>=` | yes (high signed, low unsigned) | — |
+| `*`          | —      | `N_LXMUL@` |
+| `/`, `%`     | —      | `N_L[U]DIV@` / `N_L[U]MOD@` |
+| `<<`, `>>`   | —      | `N_LX[U]LSH@` / `N_LXR[S]H@` |
+
+The boundary: arithmetic that requires multi-step
+loops (mul/div) or multi-bit shifts goes to helpers;
+single-pass two-word ops are inlined.
+
+## Long compound add var, int return ne as value, neg of bitwise NOT
+
+Fixtures `1148` (`long g = 100L; long x = 5L; g += x;
+return (int)g;` — long global compound add by a local
+long var RHS), `1149` (`int a=5; int b=5; return a !=
+b;` — int return of != compare with the boolean result
+materialized as 0 or 1), `1150` (`int x = 5; return
+-~x;` — int return of negation of bitwise complement,
+the identity `-~x == x+1`).
+
+All three already worked end-to-end. 1148 uses the
+long compound add-with-carry path. 1149 emits the
+compare-as-value sequence with the `jne`/`xor ax,ax`
+boolean materialization. 1150 emits `mov ax, [bp-N];
+not ax; neg ax`.
+
+## Int swap via temp, global long neg init, int sub-then-add
+
+Fixtures `1145` (`int a=1; int b=2; int t; t=a; a=b;
+b=t;` — classic three-step swap exercising reg-to-mem
+and mem-to-reg copies between register and stack
+locals), `1146` (`long g = -1000L; return (int)g;` —
+global long with negative init), `1147` (`int a = 10;
+int b = 3; int c = 2; return a - b + c;` — left-
+associative sub-then-add chain).
+
+1146 and 1147 already worked end-to-end.
+
+1145 exercised two missed peepholes simultaneously:
+`t = a` (reg-to-mem) emitted `mov ax, si; mov [bp-N],
+ax` instead of BCC's `mov [bp-N], si`; `b = t` (mem-
+to-reg) emitted `mov ax, [bp-N]; mov di, ax` instead
+of `mov di, [bp-N]`.
+
+Added two siblings of the batch-275 reg-to-reg
+peephole:
+
+- **Mem-to-reg in `emit_store_reg`**: when the RHS is a
+  bare-ident naming a stack-resident plain `int`
+  local, emit `mov <reg>, word ptr [bp-N]` directly.
+- **Reg-to-mem in `emit_assign_local`**: when both the
+  destination and the RHS are plain `int` locals (dest
+  on stack, RHS in a register), emit `mov word ptr
+  [bp-N], <reg>` directly.
+
+Both are restricted to `Type::Int` exact match to
+avoid affecting pointer/array/char/long paths that
+have their own decay or widening sequences (a too-
+broad initial filter incorrectly matched stack-array-
+ident sources, breaking the array-decay-to-pointer
+shape — narrowed before commit).
+
+## Long global shr by const, ternary two consts, struct field from field
+
+Fixtures `1139` (`long g = 1024L; g >>= 2; return
+(int)g;` — long global compound shift-right by
+constant), `1140` (`int x = 5; return x > 0 ? 100 :
+-1;` — ternary in return position with two int
+constant arms), `1141` (`s.x = 42; s.y = s.x; return
+s.y;` — struct field assigned from another field of
+the same struct).
+
+All three already worked end-to-end. 1139 uses the
+long-shift helper. 1140's ternary picks one of two
+constants based on the compare. 1141 does the field-
+to-field copy through AX.
+
+
+
+Fixtures `1136` (`int x = 64; x = x >> 2; return x;`
+— int compound shift as assign statement), `1137`
+(`int x = 5; return x * 8;` — int multiply by a power-
+of-2 constant), `1138` (`int x = 5; int *p = &x; if (p
+== 0) return 1; return 0;` — pointer compared to null
+in if-condition).
+
+All three already worked end-to-end. 1136 lowers `x =
+x >> 2` as `mov ax, [bp-N]; sar ax, 1; sar ax, 1; mov
+[bp-N], ax` (K=2 unroll). 1137 uses the power-of-2
+shift peephole: `mov ax, [bp-N]; shl ax, 1; shl ax,
+1; shl ax, 1`. 1138 emits the existing pointer-cmp-
+zero peephole.
+
+**Recorded findings (deferred):**
+
+- Probed `int g[3] = {...}; int i = 2; return g[i];`
+  as fixture 1136 first draft. Panic: "variable-
+  indexed global array not yet supported". The
+  global-array variable-index read path is unwritten —
+  the global-array-read codegen today expects a const
+  index. Sibling of the existing local-array-variable-
+  index path.
+- Probed `char c = 5; c *= 3; return c;` as fixture
+  1137 first draft. Our codegen emits `imul al, 3`
+  which the assembler rejects with "unsupported
+  operand form `3`" — 8086 has no `imul reg8, imm8`
+  encoding; the byte path must go via the AX form
+  (`mov al, 3; imul al`) or widen to int and use
+  `imul reg, imm`. Char-compound-mul-by-imm needs a
+  distinct lowering.
+- Probed `int a[3]; int i; for (i=0; i<3; i++) a[i]
+  = i;` as a follow-up. Panic: "non-constant rhs in
+  variable-indexed array assign not yet supported".
+  Sibling of the variable-indexed read deferral; the
+  write path with a non-constant RHS isn't wired up.
+
+
+
+Fixtures `1133` (`return 32767;` — return of i16 max
+positive literal), `1134` (`char s[3]; s[0]='X'; s[1]
+='Y'; s[2]='Z'; return s[1];` — stack char array
+with three byte stores and a read), `1135` (`int g =
+10; --g; return g;` — global int pre-dec as statement
+followed by a return).
+
+All three already worked end-to-end. 1133's literal
+folds to imm16 0x7FFF. 1134 emits three `mov byte ptr
+[bp-N+K], imm8` stores. 1135 uses `dec word ptr DGROUP:
+_g` directly.
+
+
+
+Fixtures `1130` (`int a = 0xA; int b = 0xC; return a ^
+b;` — int return of XOR of two int locals), `1131`
+(`int x = 0xFF; return x & 0x0F;` — int return of AND
+with a constant mask), `1132` (`if (a > 0) { if (b >
+0) return 1; } return 0;` — nested if with bracketed
+body).
+
+All three already worked end-to-end. 1130 lowers `a ^
+b` as `mov ax, [bp-Na]; xor ax, [bp-Nb]`. 1131 uses
+the accumulator form `and ax, 0x0F`. 1132 emits the
+two nested conditional branches with separate label
+slots.
+
+
+
+Fixtures `1127` (`int a = 1, b = 2, c = 3; int r = a +
+b + c; return r;` — three-way int sum stored into a
+local before return), `1128` (`int g[3] = {-1, -2,
+-3}; return g[0] + g[1] + g[2];` — global int array
+with negative initializer values), `1129` (`int a = 7;
+int b = 3; int c = 5; return a * b - c;` — return of
+mul-then-sub with three int locals).
+
+All three already worked end-to-end. 1127 and 1129
+exercise the int-binop chain (add-add and mul-sub).
+1128's negative-init stores each value as its
+unsigned-wrapped i16 form (`-1` → 0xFFFF, etc.) in the
+`dw` directive.
+
+**Recorded finding (deferred):**
+
+- Probed `struct S { char c; }; struct S *p = &s; char
+  b = p->c; return b;` as fixture 1127 first draft.
+  Hit the char-init panic — the batch-269 peephole
+  handles `Dot`-kind Member sources but not `Arrow`.
+  The Arrow form needs `mov bx, word ptr [bp-Np];
+  mov al, byte ptr [bx+field_off]; mov byte ptr
+  <dest>, al`, not the compile-time-folded address of
+  the Dot path. Deferred until a fixture forces the
+  pointer-dereferenced char-init shape.
+
+
+
+Fixtures `1124` (`struct S { char c; }; struct S s =
+{'Q'}; char b = s.c; return b;` — char init from a
+struct char member, sibling of fixture 1115's assign
+form), `1125` (`int g = 20; g -= 5; return g;` —
+global int compound sub by imm8 constant), `1126`
+(`int g = 42; int *p = &g; return *p;` — pointer init
+from global address, then return via deref).
+
+1125 and 1126 already worked end-to-end. 1125 uses
+the memory-direct form `sub word ptr DGROUP:_g, 5`.
+1126's `&g` lowers as `mov si, offset DGROUP:_g`; the
+`*p` deref then emits `mov ax, word ptr [si]`.
+
+1124 hit the char-init panic — the existing arms
+handled `Cast`/`Ident`/`BinOp`/`Shr`/`Shl` source
+shapes but not `Member`. Added a Member arm mirroring
+the batch-266 assign-from-Member peephole: when the
+init's RHS is a `Dot`-kind `Member` whose leaf type
+is char-like, emit `mov al, byte ptr <field-addr>;
+mov byte ptr <dest>, al` directly. Both global and
+stack struct sources handled.
+
+
+
+Fixtures `1121` (`struct S { int x; }; struct S arr[2];
+arr[0].x = 5; arr[1].x = 7; return arr[0].x + arr[1].x;`
+— struct array element access with field assignment
+and read), `1122` (`char c = 20; c /= 4; return c;` —
+char compound div by constant), `1123` (`int g[3] =
+{10, 20, 30}; return g[1];` — return of global int
+array element).
+
+All three already worked end-to-end. 1121 lays out
+arr[2] as a stack region of 4 bytes (2 structs × 2
+bytes each), with `arr[0].x` at `[bp-4]` and `arr[1].x`
+at `[bp-2]`. 1122's char `c /= 4` lowers via the
+existing char-compound div path. 1123 emits `mov ax,
+word ptr DGROUP:_g+2`.
+
+
+
+Fixtures `1118` (`char c = 16; c >>= 2; return c;` —
+char compound shift-right by constant), `1119` (`int g
+= 10; g += 7; return g;` — global int compound add by
+imm8 constant), `1120` (`int g = 7; return ~g;` —
+bitwise NOT applied to a global int).
+
+All three already worked end-to-end. 1118 follows the
+byte-width compound-shift path with K=2 picking the
+two-instruction unroll. 1119 uses the memory-direct
+form `add word ptr DGROUP:_g, 7`. 1120 emits `mov ax,
+word ptr DGROUP:_g; not ax`.
+
+
+
+Fixtures `1115` (`struct S { char c; }; s.c = 'Z'; b
+= s.c; return b;` — char local assigned from a char
+struct member, closing the deferred char-from-Member
+finding from batch 257), `1116` (`int x = 10; int y =
+7; x += y; return x;` — int compound add-assign with
+variable RHS), `1117` (`int a = 0x10; int b = 0x04;
+return a | b;` — int return from bitwise OR of two
+stack locals).
+
+1116 and 1117 already worked end-to-end. 1116 uses
+the standard int compound add path (`add word ptr [bp-
+N], <src>`); 1117 lowers `a | b` as `mov ax, [bp-Na];
+or ax, [bp-Nb]`.
+
+1115 was the deferred char-assign-from-Member case.
+Our fall-through routed through `emit_expr_to_ax`
+which calls `emit_member_to_ax`, which always widens
+the byte load to int via `cbw` (because the int-
+promotion path expects it). For a char destination
+that widen is wasted — the byte store truncates back
+anyway.
+
+Added a peephole in `emit_assign_local`'s char path:
+when the RHS is a `Dot`-kind `Member` whose leaf type
+is char-like (resolved via `try_member_dot_chain`),
+emit `mov al, byte ptr <field-addr>; mov byte ptr
+<dest>, al` directly without the cbw. Both global and
+stack struct sources are handled. Sibling of the
+existing char-array-elem peephole.
+
+
+
+Fixtures `1112` (`int x = 3; x += 5; return x;` — int
+compound add followed by a return that picks up the
+updated value), `1113` (`return (a + b) * c;` — int
+return with parens forcing addition before
+multiplication), `1114` (`return (a = 7, b = 11, a +
+b);` — comma operator chain with two assignments and a
+final value).
+
+All three already worked end-to-end. 1112 uses the
+existing compound-add and then a separate load for the
+return. 1113's `(a + b) * c` evaluates the parenthesized
+add first, pushes its result, then loads `c` and
+multiplies. 1114's comma chain executes the side-effect
+assigns in order, with the final `a + b` becoming the
+comma value returned.
+
+
+
+Fixtures `1109` (`char c = 3; c <<= 2; return c;` —
+char compound shift-left by constant), `1110` (`long g
+= 100000L; return (int)g;` — global long initializer
+with a value > 0xFFFF that requires both halves to
+hold non-zero bits), `1111` (`int x = 5; x = x + x;
+return x;` — int reassign from self-double).
+
+All three already worked end-to-end:
+
+- 1109: char-compound-shl-const path uses the byte-
+  width form: `shl byte ptr [bp-N], 1` repeated K
+  times.
+- 1110: long global init splits the 32-bit constant
+  into two `dw` directives at the symbol's address.
+  100000 = 0x186A0; low=0x86A0, high=0x0001.
+- 1111: `x + x` lowers as `mov ax, [bp-N]; add ax,
+  [bp-N]; mov [bp-N], ax` — no aliasing concern, both
+  loads see the same value.
+
+
+
+Fixtures `1106` (`if (a > 0 || b > 0) return 1;` —
+short-circuiting `||` of two compares as if-condition,
+sibling of fixture 1104's `&&`), `1107` (`int x = 42;
+return -x;` — int return of negation of a stack local),
+`1108` (`int x = 128; x >>= 3; return x;` — int
+compound shift-right by a constant K=3).
+
+All three already worked end-to-end. 1106's `||`
+generates the same kind of short-circuit graph as `&&`
+but with the LHS-true result skipping the RHS. 1107
+emits `mov ax, [bp-N]; neg ax`. 1108 picks the K ≤ 3
+unroll: `sar word ptr [bp-N], 1` repeated three times.
+
+
+
+Fixtures `1103` (`a ^= b;` — char compound XOR-assign
+with char-var RHS), `1104` (`if (a > 0 && b > 0)
+return 1;` — short-circuiting `&&` of two compares as
+an if-condition), `1105` (`a &= b;` — char compound
+AND-assign with char-var RHS).
+
+All three already worked end-to-end. 1103/1105 round
+out the char-compound permitted set alongside the
+add/sub/or covered earlier (fixtures 1094/1097/1102).
+1104's `&&` lowers via the existing short-circuit
+control-flow path: evaluate LHS compare with
+fall-through to the RHS compare, both jumping to a
+common "false" label on falsy result.
+
+
+
+Fixtures `1100` (`int g[3] = {1, 2, 3}; return g[0] +
+g[1] + g[2];` — global int array initializer with
+multi-element sum), `1101` (`int x = 7; int *p = &x;
+*p = 99; return x;` — int pointer to a stack-local
+with deref-write through the pointer), `1102` (`char a
+= 1; char b = 4; a |= b; return a;` — char compound OR
+with char-var RHS).
+
+All three already worked end-to-end. 1100's array
+initializer lays out as three word literals at `_g`,
+and the three reads use direct `mov ax, word ptr DGROUP:
+_g+K`. 1101 emits `lea ax, [bp-N]; mov si, ax` for the
+address, then `mov word ptr [si], 99` for the deref-
+write. 1102 follows the char compound bitwise path.
+
+**Recorded finding (deferred):**
+
+- Probed `int a[3]; int n = 1; int *p = a + n; a[1] =
+  42; return *p;` as fixture 1101 first draft. We emit
+  `lea ax, [bp+base]; add ax, [bp+n]; mov si, ax` —
+  forgetting to scale `n` by sizeof(int) = 2. BCC's
+  correct sequence is `mov ax, [bp+n]; shl ax, 1; lea
+  dx, [bp+base]; add ax, dx; mov si, ax`. Same stride
+  bug as the constant-K case (batches 243/249), but
+  with a runtime-variable offset that needs the shl.
+  Sibling fix: detect `<array> + <ident-int>` in the
+  pointer-init path, emit the shift-and-add sequence.
+
+
+
+Fixtures `1097` (`char a = 20; char b = 5; a -= b;
+return a;` — char compound sub-assign with a char-var
+RHS, sibling of fixture 1094's add form), `1098`
+(`char c = -5; return c;` — char init from a negative
+int literal that fits in the byte width), `1099` (`int
+x = 100; int y = 3; return x / y;` — int division by
+a variable RHS in return position).
+
+All three already worked end-to-end:
+
+- 1097: char compound `-= b` lowers via the standard
+  char-compound path: `mov al, <a>; sub al, <b>; mov
+  <a>, al`. Already covered.
+- 1098: `-5` constant-folds to 0xFB at parse time, then
+  the char-init constant path emits `mov byte ptr
+  [bp-N], 251` (the unsigned-wrapped byte value).
+  Already covered.
+- 1099: `x / y` lowers to `mov ax, [bp-Nx]; cwd; idiv
+  word ptr [bp-Ny]` then returns AX. The div-by-var
+  path was added in slice 200's idiv arm.
+
+
+
+Fixtures `1094` (`char a = 10; char b = 3; a += b;
+return a;` — char compound add-assign with a char-var
+RHS), `1095` (`char c = 16; return c >> 1;` — int
+return from char-shifted-by-const expression in return
+position), `1096` (`int a[5]; a[0] = 1; return sizeof
+a;` — sizeof of a stack array that's actually used at
+runtime, defeating any frame-elision quirk).
+
+All three already worked end-to-end:
+
+- 1094: char compound `+= b` on a stack char-local
+  uses the standard char-compound path: `mov al, <a>;
+  add al, <b>; mov <a>, al`. Already covered.
+- 1095: `c >> 1` in return position widens via cbw
+  then shifts the int value, then returns AX. The
+  shift result is the int-promoted value, not the
+  byte-truncated form — different from the char-init
+  shift path (batch 255) where the dest is char.
+- 1096: `sizeof a` where `a` is `int a[5]` folds to
+  10 at parse time, and the frame is allocated for
+  the runtime writes anyway, so no elision applies.
+  No divergence.
+
+**Recorded finding (deferred):**
+
+- Probed `int a[5]; a[0] = 1; return sizeof a[0];` as
+  fixture 1095 first draft. The parser doesn't accept
+  `sizeof a[0]` (the `a[0]` operand form for `sizeof`)
+  — only `sizeof(<type-name>)` is wired up. Adding the
+  expression-operand form would need a new grammar
+  branch in the unary parser plus type-of-expression
+  resolution for the result.
+
+
+
+Fixtures `1091` (`struct S { char c; }; s.c = 'Z';
+return s.c;` — return of a struct char field directly,
+exercising widening from member-byte-read to int return
+value), `1092` (`char g = 'B'; int main() { return g; }`
+— global char init and read, the simplest cross-section
+of global-data + char-return), `1093` (`int x = 5; int
+y = 3; x *= y; return x;` — int compound mul-assign by
+a stack variable RHS).
+
+All three already worked end-to-end:
+
+- 1091: return-int-of-char widens via `mov al, byte
+  ptr [bp-N]; cbw` (the *return* path expects the cbw
+  since the return is int).
+- 1092: global char `g` is stored at `_g`, read via
+  `mov al, byte ptr DGROUP:_g; cbw` for the int return.
+- 1093: `x *= y` lowers via the batch-111 `imul <mem>`
+  path: `mov ax, [bp-Nx]; imul word ptr [bp-Ny]; mov
+  [bp-Nx], ax`. Already covered.
+
+
+
+Fixtures `1088` (`int x = 7; return x * 3;` — int local
+multiplied by a non-power-of-2 constant), `1089` (`int
+a[3]; int v; a[0] = 5; v = a[0] + 100;` — int assign
+from array-elem-plus-const, exercising the standard
+load-plus-const path), `1090` (`int a[3]; int i = 1;
+... return a[i];` — return of stack-array element with
+runtime-index variable).
+
+All three already worked end-to-end. 1088 uses
+`imul` with an int constant; 1089 emits `mov ax, [bp-
+Na0]; add ax, 100; mov [bp-Nv], ax`; 1090 uses the
+variable-index array path that loads BX and uses
+`mov ax, [bx+bp+base]`.
+
+**Recorded findings (deferred):**
+
+- Probed `int x; return sizeof x;` as fixture 1088
+  first draft. BCC ELIDES the frame allocation for `x`
+  because the local is referenced only in `sizeof`,
+  never at runtime — emits `push bp; mov bp, sp` and
+  jumps straight to `mov ax, 2; ret`. We allocate
+  `dec sp; dec sp` and a matching `mov sp, bp` epilogue
+  for a 4-byte excess. The fix is the same "live local"
+  pass deferred from the early sizeof-of-array
+  probes (fixture 582 era).
+- Probed `struct S { char c; }; struct S s; char b; s.c
+  = 'Z'; b = s.c; return b;` as fixture 1089 first
+  draft. BCC's char-assign-from-char-member skips the
+  `cbw` between load and store because both sides are
+  byte-width. Our codegen routes through `emit_expr_to_
+  ax` which always widens, then stores AL — leaving
+  a stray 1-byte `cbw` that BCC doesn't emit. Sibling
+  of the char-init Member peephole already in
+  `emit_init_local`; needs the same peephole on the
+  *assign* path.
+
+
+
+Fixtures `1085` (`char a = 3; char c = a << 2;` — char
+left-shift init, sibling of 1082), `1086` (`unsigned
+char a = 200; unsigned char c = a >> 2;` — uchar right-
+shift init, exercising the promote-to-signed-int rule),
+`1087` (`char a = 64; char c = a >> 4; return c;` —
+char right-shift by K=4, exercising the CL form of the
+shift unroll).
+
+1087 already worked end-to-end via the batch-255 shift
+arm: K=4 picks the `mov cl, 4; sar ax, cl` path
+(unroll threshold K ≤ 3).
+
+1085 and 1086 needed corrections to the batch-255
+shift arm:
+
+- **Left shift on char (1085)**: BCC keeps the
+  arithmetic at byte width because the high bits fall
+  off either way. Emit `shl al, 1` repeated K times (or
+  `mov cl, K; shl al, cl` for K ≥ 4). No widen
+  needed. Our previous code always widened to int and
+  used `shl ax, 1`, which would have been one byte
+  longer because the AX form takes the same opcode but
+  the operand resolution differs (`d1 e0` vs `d0 e0`?).
+  Actually it's one byte: `shl al, 1` is `d0 e0` (2
+  bytes) vs `shl ax, 1` is `d1 e0` (2 bytes) — same
+  size. The diff was elsewhere; reading BCC's pattern
+  shows BCC ALWAYS uses the AL form for `<<`, which
+  saves the `cbw` (1 byte) we were emitting.
+- **Right shift on uchar (1086)**: BCC always uses
+  `sar` regardless of the operand's declared
+  signedness, because C promotion converts both `char`
+  and `uchar` to *signed* `int` before the shift. Our
+  previous code branched on `is_unsigned` and emitted
+  `shr` for uchar, diverging from BCC. Also the widen
+  for uchar uses `mov ah, 0` (3 bytes) rather than the
+  `xor ah, ah` (2 bytes) we were emitting. BCC
+  consistently prefers the longer `mov ah, 0` form.
+
+Updated the shift arm: split on op direction (Shl =
+byte-arith AL only; Shr = widen then signed `sar`),
+and use `mov ah, 0` instead of `xor ah, ah` for the
+uchar widen.
+
+
+
+Fixtures `1082` (`char a = 16; char c = a >> 1; return
+c;` — char init from a shift on a char local, exercising
+the C-standard promote-shift-truncate lowering), `1083`
+(`char c = 'A'; int n = c + 1; return n;` — int init
+from a char-plus-const expression, requiring the
+char-widen-to-int sequence), `1084` (`struct S { int x;
+int y; }; int a = 10; int b = 20; s.x = a + b; return
+s.x;` — struct field assignment with a binop on int
+locals as the RHS).
+
+1083 and 1084 already worked end-to-end. 1083 widens
+the char load with `mov al, <c>; cbw; add ax, 1` then
+stores AX to `n`'s int slot. 1084 evaluates `a + b`
+into AX via the int-binop arm, then stores to the
+struct field's `[bp+(s_off + 0)]` slot.
+
+1082 hit the char-init panic — the binop arm only
+covered `+/-/&/|/^` (byte-machinable ops). Shifts are
+different: C promotes char to int before shifting, so
+BCC emits `mov al, <a>; cbw; sar ax, K; mov <c>, al`
+(or `shr` for unsigned, `shl` for left-shift). The
+result still ends up in AL for the byte store.
+
+Added a shift arm to the char-init peephole. It handles
+constant K with the standard unroll: K ≤ 3 emits
+repeated `<mnem> ax, 1` (2 bytes each); K ≥ 4 emits
+`mov cl, K; <mnem> ax, cl` (4 bytes). Sign-pattern
+dispatch picks `sar` for signed-char `>>`, `shr` for
+unsigned-char `>>`, `shl` for `<<` regardless.
+
+
+
+Fixtures `1079` (`char c = a | b;` — char init from char
+OR), `1080` (`char c = a ^ b;` — char init from char
+XOR), `1081` (`return sizeof(char);` — bare-type sizeof
+of char in return position).
+
+All three already worked end-to-end. 1079 and 1080
+exercise the batch-243 byte-arith peephole's remaining
+`|` and `^` mnemonics (alongside `+/-/&` already
+covered by fixtures 1046/1051/1073). 1081 constant-
+folds `sizeof(char)` to 1 at parse time, then the
+return-int path emits `mov ax, 1`.
+
+## Static char init, char as cond, typedef long alias
+
+Fixtures `998` (`static char c = 'A'; return c;` — function-
+local static char with non-zero init), `999` (`char c = 1;
+if (c) return 7;` — char local as a boolean condition,
+no explicit compare), `1000` (`typedef long Big; Big g =
+100000L;` — typedef aliasing `long` and using the alias to
+declare a long global with a wide initializer).
+
+All three already work end-to-end:
+
+- 998: function-local static char with init lands in `_DATA`
+  (since the value is non-zero) as a `db 65` (`'A'`). Same
+  shape as fixture 161/162 for int statics; the char
+  variant uses the byte form. Codegen treats the static
+  as a private global (DGROUP-relative addressing).
+- 999: `if (c)` for a char local lowers as `cmp byte ptr
+  [bp-1], 0`. The existing `emit_zero_test` local-Ident arm
+  routes char-typed locals through the byte-form compare
+  (fixture 536 covered the global flavor).
+- 1000: `typedef long X;` registers `X` as an alias for
+  `Type::Long`. At the global decl site `Big g = 100000L;`
+  resolves `Big` via the typedef table and emits the long-
+  init shape (`dw lo; dw hi` in `_DATA`, two FIXUPPs).
+  Fixture 209 covered direct `long g = 100000L`; this
+  confirms the typedef-routed form is byte-equivalent.
+
+## String literal init, inferred array size, long init
+
+Fixtures `908` (`char a[] = "Hi";` — string literal in char
+array), `909` (`int a[] = {1, 2, 3};` — size-inferred array
+init), `910` (`long g = 0x12345678L;` — long global init).
+
+All three already work end-to-end. Coverage notes:
+
+- 908: parser handles the C90 abbreviation `char a[] =
+  "string"` — array size is `strlen("Hi") + 1 = 3`. Codegen
+  lands the bytes into `_DATA` as `db 'H','i',0`.
+- 909: same size-inference rule for `int a[] = {1, 2, 3};` —
+  the explicit list determines the array's element count, and
+  the (omitted) `[N]` in the declarator is filled in from the
+  list length.
+- 910: long initializer `0x12345678L` lands as a four-byte
+  data record split into two `dw` lines, low half first
+  (`dw 5678h; dw 1234h`) — same little-endian convention as
+  long stores.
+
+## Pointer subscript — long compound (OR, XOR, SHL)
+
+Fixtures `902` (`long *p; p[1] |= 0xFL`), `903` (`long *p; p[1]
+^= 0xFL`), `904` (`long *p; p[1] <<= 1`).
+
+902/903 reuse the long-pointer subscript arm from batch 194:
+the long-compound-to-mem helper already emits `or word ptr
+[bx+lo], <lo>; or word ptr [bx+hi], <hi>` (and XOR sibling),
+which TASM was already wired to encode via `OrBxDispImm16`/
+`XorBxDispImm16` (batch 186).
+
+904 exposed a new finding: BCC reloads BX between the inline
+register-arith and the store-back for the K=1 long-shift form:
+
+```
+mov bx, _p
+mov ax, [bx+6]
+mov dx, [bx+4]
+shl dx, 1
+rcl ax, 1
+mov bx, _p          ; reload — BCC doesn't keep BX live across shl/rcl
+mov [bx+6], ax
+mov [bx+4], dx
+```
+
+Same reload-after-arith pattern as `idiv` (batch 189 fixture 885)
+and the char-pointer-AL-arith path (batch 182 fixture 865).
+`emit_long_compound_to_mem` doesn't know the operand is BX-
+relative or what symbol to reload, so the new long-pointer arm
+in `emit_array_compound_assign` special-cases `Shl|Shr` with
+`K=1` and emits the full sequence inline (load high/low into
+AX/DX, inline shift, reload BX, store) rather than routing
+through the helper. One new IR variant: `MovDxBxDisp { disp: i8 }`
+(`8B 57 dd`) for the `mov dx, word ptr [bx+disp]` low-half load.
+
+(Other helper-call paths in the same arm — shift K>1, mul,
+div, mod — would also need BX reloads if exercised on this
+shape; deferred until a probe demands them.)
+
+## Pointer subscript — long compound (ADD, SUB, AND)
+
+Fixtures `899` (`long *p; p[1] -= 5L`), `900` (`long *p; p[1]
+&= 0xFL`), `901` (`long *p; p[1] += 5L`).
+
+BCC's shape for any long compound on a global-pointer subscript:
+
+```
+mov bx, word ptr DGROUP:_p
+<lo-op> word ptr [bx+off], <lo-imm>
+<hi-op> word ptr [bx+off+2], <hi-imm>
+```
+
+Where `<lo-op>`/`<hi-op>` is one of the long-arith op pairs
+(add/adc, sub/sbb, and/and, or/or, xor/xor) — same pairings as
+the long-global compound path (fixtures 251/253/339). For
+fixture 901's `+= 5L`: `add [bx+4], 5; adc [bx+6], 0`. For
+899's `-= 5L`: `sub [bx+4], 5; sbb [bx+6], 0`. For 900's `&=
+0xFL`: `and [bx+4], 0xF; and [bx+6], 0` (no carry — both halves
+just AND independently).
+
+Added a new arm in `emit_array_compound_assign` gated on
+`gty.pointee().is_long_like()` + const single index. Emits `mov
+bx, _p` once, then routes through the existing `emit_long_
+compound_to_mem` helper with `[bx+off]` / `[bx+off+2]` as the
+address pair. The helper already handles all long op families
+(add/sub/and/or/xor and the shift compounds) — the new arm
+just provides the BX-relative address pair to feed it.
+
+Two new IR variants needed at the TASM layer for the carry/
+borrow ops: `AdcBxDispImm8` (`83 57 dd ii` — Group-1 /2) and
+`SbbBxDispImm8` (`83 5F dd ii` — Group-1 /3). The bitwise high
+halves reuse `AndBxDispImm16` (etc., from batch 186). Other op
+families (Mul/Div/Mod, shifts) defer through the helper too;
+the helper's existing `N_LXLSH@` / `N_LDIV@` etc. helper-call
+paths work unchanged since they don't address through BX
+directly.
+
+**Deferred from this batch (parser-aside):** non-const long
+RHS for the assign form (`long *p; p[K] = x` where x is a
+long lvalue) and the rvalue subscript-load (`long y; y =
+p[K]`). Both need a `long_lvalue_addr_pair`-style helper that
+emits a `mov bx, _p` prefix and returns BX-relative addresses
+— the existing helper only returns plain memory addresses
+since it's `&self`, not `&mut self`. Punted with the existing
+"not yet supported" panic messages.
+
+## Pointer subscript — char call arg, long assign, lt compare
+
+Fixtures `896` (`char *p; f(p[1])` — char-pointer subscript as
+int call arg), `897` (`long *p; p[1] = 42L` — long-pointer
+subscript plain assign with const RHS), `898` (`int *p; if
+(p[1] < g)` — pointer-subscript less-than compare against a
+global).
+
+896 already worked end-to-end. `emit_arg_into_ax` widens the
+byte load to int via `cbw`/`mov ah,0` then pushes AX — same
+shape BCC uses. 898 also already worked: it lowers through
+the same `mov ax, [bx+disp]; cmp ax, word ptr DGROUP:_g`
+sequence the AX-through compare path produces, which happens
+to match BCC's actual OBJ bytes for this shape.
+
+897 needed a long-pointee arm in `emit_array_assign`'s global-
+pointer branch. BCC's shape:
+
+```
+mov bx, word ptr DGROUP:_p
+mov word ptr [bx+6], <hi>    ; high half at offset+2
+mov word ptr [bx+4], <lo>    ; low half at offset
+```
+
+Stride is 4 for long, so K=1 gives `[bx+4]` / `[bx+6]`. The
+high-first store ordering matches the existing long-global and
+long-array stores (batches around 302/322). Const RHS only —
+non-const long RHS still panics ("non-constant rhs in `long
+*p; p[K] = v` not yet supported"). New IR variant
+`MovBxDispImm { disp: i8, imm: u16 }` (`C7 47 dd lo hi`, 5
+bytes) — Group with `/0` (MOV r/m16,imm16), mod=01 r/m=111=BX.
+
+## char member/array compound; arrow long member ADD
+
+Fixtures `848` (`s.c += y` char member), `849` (`p->l += y`
+arrow long member), `850` (`a[1] &= y` char array bitwise).
+
+- `848` — char member compound with int RHS uses the AL-
+  through pattern (same as fixture 847 char-array
+  arith). Existing char-field path was gated on char-
+  typed RHS only (mem-direct, fixture 708). Split into
+  two paths now: char RHS keeps mem-direct, int RHS
+  uses AL-through.
+- `849` — long pointee compound `*p += int x` (here
+  `p->l` which lowers to `(*p).l` with the pointer in
+  SI). `emit_long_compound_to_mem` widens the int via
+  `cwd` and emits `add word ptr [si], ax / adc word
+  ptr [si+2], dx`. New IR variants `AdcSiDispDx` (`11
+  54 dd`) and `SbbSiDispDx` (`19 54 dd`) for the high-
+  half carry/borrow with DX (existing `AdcSiDispAx`
+  was AX-only, used by long-long add).
+- `850` — char array `&=` int var: BCC keeps the bitwise
+  ops memory-direct rather than going through AL (the
+  same asymmetry as char-global compound, batch
+  121/122). Split the char-array Add/Sub/Bit* path into
+  two: arith uses AL-through, bitwise uses mem-direct.
+
+Also extended `emit_long_compound_to_mem` (member/array
+long compound) to accept the int-RHS widening case —
+opens up long member/array `+=` int var across both
+dot and arrow forms.
+
+## long member/array += int var; char array += int var
+
+Fixtures `845` (`s.l += y` long member), `846` (`la[1] += y`
+long array), `847` (`a[1] += y` char array, int RHS).
+
+- `845` — long member compound with int var RHS:
+  added `Type::Int|Type::Char` and `Type::UInt|Type::UChar`
+  widening paths in `emit_long_compound_to_mem`. Same
+  cwd/zero-extend logic as the long-LHS arms for global
+  destinations (fixture 755, 767), but with the destination
+  addresses passed in as opaque `lo_addr`/`hi_addr` strings
+  (works for struct field, array element, etc.).
+- `846` — free pass via batch 175 long-array path (the
+  array element gets routed through `emit_long_compound_to_mem`
+  with the new int-widening path).
+- `847` — char array compound with int var RHS truncated
+  to byte: `mov al, byte ptr <dest>; add al, byte ptr
+  <rhs>; mov byte ptr <dest>, al`. Five new AL/byte-bp IR
+  variants (`AddAlBpRel`, `SubAlBpRel`, `AndAlBpRel`,
+  `OrAlBpRel`, `XorAlBpRel` — `02|2A|22|0A|32 46 dd`).
+  These are AL-specific forms of `<op> r8, r/m8` that BCC
+  uses when truncating an int local to a byte for char-
+  compound destinations.
+
+## `long` `*=` long-array; `s.x += y` int-member compound
+
+Fixtures `830` (`g += la[1]`), `831` (`g *= la[0]`),
+`832` (`s.x += y`).
+
+- `830` — free pass via batch 170's long-RHS Add arm
+  with non-zero stride offset (`_la+4` for index 1 of
+  a long array).
+- `831` — extended the new long-RHS arm to cover `Mul`
+  (and `Div`/`Mod` for completeness). Same call-helper
+  shape as `long_global *= long_global` (fixture 260):
+  `mov cx, <rhs_hi>; mov bx, <rhs_lo>; mov dx, <lhs_hi>;
+  mov ax, <lhs_lo>; call N_LXMUL@; store`. With array
+  RHS, only the address strings differ.
+- `832` — `s.x += y` (int field, non-const RHS): added
+  a new path in `emit_member_compound_assign` for non-
+  byte int fields with non-constant RHS. Pattern is
+  the same as int-global compound add (`emit_expr_to_ax;
+  <op> word ptr <dest>, ax`) — `dest` already includes
+  any field offset folded into the struct address.
+  Previously this case panicked (`non-constant rhs in
+  member compound assign not yet supported`).
+
+## `long` global compound `+=` with array / member / long-array RHS
+
+Fixtures `827` (`g += a[1]` int array), `828` (`g += s.x`
+int member), `829` (`g += la[0]` long array).
+
+- `827` / `828` — extending the long-LHS Int/Char and
+  UInt/UChar widening arms to use the broader
+  `rhs_int_compound_type` helper (which resolves
+  ArrayIndex and Member in addition to Ident). The
+  widening logic (`cwd` for signed, `<hi_op> 0` for
+  unsigned) is unchanged.
+- `829` — new long-RHS variant accepting non-Ident RHS.
+  `long_rhs_halves` returns (low, high) DGROUP addresses
+  for ArrayIndex (const index, long element) and Member
+  (long field). Same emission shape as `long_global +=
+  long_global` (fixture 734) but with the array/member
+  addresses substituted.
+
+Also: this batch revealed a publics-ordering rule gap.
+BCC reverts to reverse-alpha for the long bucket when
+**any** global is long-typed (or wraps a long), even if
+short and long globals coexist (which normally
+triggered forward-alpha). Added `Type::contains_long()`
+and `has_long_typed_global` check in `emit_s.rs`.
+Pinned by fixture 829 (`long g; long la[3]; int main`)
+which expects `_main, _la, _g`; the prior rule emitted
+`_la, _main, _g`. Verified no regression across all
+existing long-global fixtures.
+
+## `long` stack-LHS compound `+=` / `*=` with byte var
+
+Fixtures `818` (`a += char c`), `819` (`a += uchar c`),
+`820` (`a *= char c`) — three free passes confirming the
+long-LHS byte-RHS arms (fixtures 783, 784, 785) work
+identically with a stack-resident long.
+
+`long_halves_of` resolves to `[bp+off]` and `[bp+off+2]`
+for a stack long, so:
+
+- `818` / `819` — Add arm (signed/unsigned widening)
+  emits `cbw / mov ah, 0; cwd / -; add word ptr [bp+lo],
+  ax; adc word ptr [bp+hi], dx/0`. The widening logic
+  and op selection are unchanged from the global-LHS
+  version.
+- `820` — Mul arm (signed `cbw + cwd + push/pop dance`)
+  also writes back via `mov word ptr [bp+lo], ax; mov
+  word ptr [bp+hi], dx`.
+
+The "widening shape from RHS, addr form from LHS"
+split confirmed again across stack/global LHS.
+
+## `ulong` compound `*=` / `/=` with `char` / `uchar` RHS
+
+Fixtures `791` (`g *= char c`), `792` (`g /= char c`),
+`793` (`g /= uchar c`) — three free passes confirming
+the byte-RHS arms generalize across LHS signedness:
+
+- `791` — `Type::Char + Mul` arm picks `N_LXMUL@`, which
+  is sign-agnostic (the helper computes the low-32 of a
+  full 64-bit product, identical for both signednesses).
+  LHS being unsigned doesn't change the widening shape
+  (signed widening of the char via `cbw; cwd`).
+- `792` — `Type::Char + Div` arm picks the helper from
+  LHS signedness, so `ulong /= char` correctly emits
+  `N_LUDIV@`. The widening shape is still signed (`cbw;
+  cwd`) since the RHS is a signed char — the C90
+  conversion sequence is char → int → long (signed) →
+  ulong, and the bit-level result of the signed-to-
+  unsigned conversion is identity.
+- `793` — `Type::UChar + Div` arm (batch 157's new shape
+  with `xor dx, dx; push dx`) also picks helper from LHS
+  signedness, so `ulong /= uchar` emits `N_LUDIV@`.
+
+No code changes. The "widening shape from RHS type,
+helper from LHS signedness" split holds across all
+long-compound arms.
+
+## `long` compound `/=` uchar and `<<=` char / uchar
+
+Fixtures `788` (`g /= uchar c`), `789` (`g <<= char c`),
+`790` (`g <<= uchar c`).
+
+- `788` — `/= uchar` is a new shape distinct from `/= uint`
+  (fixture 773) for the same register-pressure reason as
+  `*= uchar` (fixture 786): the uchar materializes in AX
+  (`mov ah, 0`), so BCC can't use AX as the source of the
+  pushed `0` for the widened RHS high half. It zeros DX
+  instead:
+
+  ```
+  mov al, byte ptr <c>
+  mov ah, 0                    ; AX = uchar (zero-ext)
+  xor dx, dx                   ; DX = 0 (rhs hi)
+  push dx
+  push ax
+  push word ptr <lhs_hi>
+  push word ptr <lhs_lo>
+  call near ptr <helper>
+  ```
+
+  Added a new arm in `emit_compound_assign` gated on
+  `long LHS + Type::UChar RHS + BinOp::Div|Mod`. Helper
+  picked from LHS signedness (`N_LDIV@`/`N_LMOD@` for
+  signed, `N_LUDIV@`/`N_LUMOD@` for unsigned).
+- `789` / `790` — free passes after extending the long-
+  LHS-shift arm's RHS-type gate from `Type::Int |
+  Type::UInt` to `Type::Int | Type::UInt | Type::Char |
+  Type::UChar`. The arm reads `CL` directly as `byte ptr
+  <addr>`, which works for any RHS width — CL only needs
+  the low byte and the C90 shift-count value space
+  (0..31 for long) fits in a byte regardless of RHS
+  signedness.
+
+## `long` compound `*=` / `/=` with `char` / `uchar` RHS
+
+Fixtures `785` (`g *= char c`), `786` (`g *= uchar c`),
+`787` (`g /= char c`).
+
+- `785` — signed `*= char`: same push/pop dance as the
+  long `*= int` arm (fixture 762), prefixed by the `cbw`
+  step `emit_expr_to_ax` emits for a char-typed local.
+  Extended that arm's gate from `Type::Int` to
+  `Type::Int | Type::Char`.
+- `786` — unsigned `*= uchar`: a new shape distinct from
+  the `*= uint` arm (fixture 772) because the uchar lives
+  in AX (zero-extended via `mov ah, 0`), which collides
+  with the LHS-low load. BCC inserts a `push ax;
+  ...; pop bx` shuffle:
+
+  ```
+  mov al, byte ptr <c>
+  mov ah, 0                    ; AX = uchar (zero-ext)
+  xor cx, cx                   ; CX = 0 (rhs hi)
+  mov dx, word ptr <lhs_hi>
+  push ax                      ; save widened RHS lo
+  mov ax, word ptr <lhs_lo>    ; LHS lo
+  pop bx                       ; restore as RHS lo (BX)
+  call near ptr N_LXMUL@
+  ```
+
+  `*= uint` can skip this dance because the uint is loaded
+  directly from memory into BX. `*= uchar` cannot —
+  the byte→int widening forces AX. Added a new arm in
+  `emit_compound_assign` gated on `long LHS + Type::UChar
+  RHS + BinOp::Mul`.
+- `787` — signed `/= char`: same as `*= char`, just
+  extending the existing `/= int` arm's gate to also
+  accept `Type::Char`. The push order (high DX, then low
+  AX, then LHS halves) is unchanged.
+
+## `long` compound with `int` / `char` / `uchar` RHS
+
+Fixtures `782` (`ulong g += int x`), `783` (`long g += char c`),
+`784` (`long g += uchar c`).
+
+- `782` — free pass: the existing `Type::Int` signed-widening
+  arm (fixture 755) is not gated on LHS signedness, so
+  `unsigned long g += int x` uses the same `cwd` sign-
+  extension. The result reinterprets the bit pattern as
+  unsigned long, which is correct under C90 conversion
+  rules (signed long can represent all signed int values,
+  so the int converts to long first; the long-to-ulong
+  step is a no-op at the bit level).
+- `783` — signed `char` widens to long via **two** stage
+  extensions: `cbw` widens AL→AX, `cwd` widens AX→DX:AX.
+  `emit_expr_to_ax` already emits the `cbw` step for a
+  char-typed local, so extending the signed-widening
+  arm's gate from `Type::Int` to `Type::Int | Type::Char`
+  lets it pick up char too — the `cwd` already there
+  finishes the long-widening:
+
+  ```
+  mov al, byte ptr <c>
+  cbw                          ; AL → AX (sign-extend)
+  cwd                          ; AX → DX:AX (sign-extend)
+  add word ptr <lhs_lo>, ax
+  adc word ptr <lhs_hi>, dx
+  ```
+- `784` — unsigned `char` uses the **zero-extension** path
+  (no `cwd`): `mov al, <c>; mov ah, 0` zero-extends to int,
+  then the same `<hi_op> 0` immediate-form trick from the
+  `Type::UInt` arm finishes the long-widening. Extended
+  that arm's gate from `Type::UInt` to `Type::UInt |
+  Type::UChar`:
+
+  ```
+  mov al, byte ptr <c>
+  mov ah, 0                    ; AL → AX (zero-extend)
+  add word ptr <lhs_lo>, ax
+  adc word ptr <lhs_hi>, 0     ; high-half via carry only
+  ```
+
+Reuse of `emit_expr_to_ax` for the byte-to-int widening
+means no new IR or encoding is needed — the byte-width
+step happens before the long compound path even begins.
+
+## `ulong` stack `/= uint`, signed `long` `+= / *= uint`
+
+Fixtures `779` (`a /= x` stack ulong LHS), `780` (`g += x`
+signed long LHS), `781` (`g *= x` signed long LHS) — three
+more free passes confirming the unsigned-widening arms
+don't care about LHS signedness or location:
+
+- `779` — batch 152's `/= uint` arm uses `long_halves_of`
+  for the LHS push, which already produces `[bp+off]`
+  addresses for a stack-resident long. Helper picked from
+  LHS signedness as `N_LUDIV@`.
+- `780` — batch 150's `Type::UInt` Add/Sub/Bit* arm is
+  not gated on LHS signedness. Signed `long += uint x`
+  emits the same zero-extension shape (`add ax; adc 0`).
+  The result is a signed long but the bit pattern is
+  identical to the unsigned case for these ops.
+- `781` — batch 151's `*= uint` arm uses `N_LXMUL@`
+  regardless of signedness (the helper is sign-agnostic
+  for the low-32 result). LHS signedness is irrelevant
+  for the widening; the zero-extension `xor cx, cx` is
+  driven only by RHS being `Type::UInt`.
+
+No code changes needed. These complete the
+unsigned-widening matrix for compound long operators
+against a `uint` RHS variable.
+
+## `ulong` `>>=` uint and stack-LHS `ulong` `+=` / `*=` uint
+
+Fixtures `776` (`g >>= x`), `777` (`a += x` stack LHS),
+`778` (`a *= x` stack LHS) — three free passes confirming
+the unsigned-widening arms generalize:
+
+- `776` — same shift-by-int arm (fixture 760) that accepts
+  both `Type::Int` and `Type::UInt`; LHS signedness picks
+  `N_LXURSH@` over `N_LXRSH@`.
+- `777` — batch 150's `Type::UInt` Add/Sub/Bit* arm uses
+  `long_halves_of`, which already resolves to `[bp+off]`
+  addresses for a stack-resident long LHS. The memory-
+  direct shape (`add word ptr [bp-N], ax; adc word ptr
+  [bp-N+2], 0`) is location-agnostic.
+- `778` — batch 151's `*= uint` arm: `bx`/`cx` load and
+  call sequence is identical whether the LHS halves live
+  in DGROUP or on the stack, since the path materializes
+  DX:AX from the LHS regardless.
+
+No code changes needed — these confirm that the unsigned
+widening arms didn't accidentally bake in a global-only
+assumption.
+
+## `ulong` compound `/=` / `%=` / `<<=` with `uint` RHS
+
+Fixtures `773` (`g /= x`), `774` (`g %= x`), `775` (`g <<= x`).
+LHS is `unsigned long` global, RHS is `unsigned int` local.
+
+- `773` — long `/= uint`: zero-extension lets BCC push a
+  literal `0` for the widened RHS high half via `xor ax,
+  ax; push ax`, then push the uint directly via `push word
+  ptr <rhs>` without going through AX (the signed path
+  needs AX for the `cwd`). Rest of the call shape matches
+  fixture 763's signed `/= int`:
+
+  ```
+  xor ax, ax
+  push ax                    ; widened RHS high (zero)
+  push word ptr <rhs>        ; widened RHS low (uint)
+  push word ptr <lhs_hi>
+  push word ptr <lhs_lo>
+  call near ptr N_LUDIV@
+  mov word ptr <lhs_hi>, dx
+  mov word ptr <lhs_lo>, ax
+  ```
+
+  Added a new arm in `emit_compound_assign` gated on
+  `long LHS + Type::UInt RHS + BinOp::Div|Mod`. Helper
+  picked from LHS signedness — `N_LUDIV@`/`N_LUMOD@` for
+  unsigned LHS, `N_LDIV@`/`N_LMOD@` otherwise.
+- `774` — free pass; same arm handles `Mod`.
+- `775` — free pass off batch 147's shift-by-int arm,
+  which already accepted both `Type::Int` and `Type::UInt`
+  for the shift count (only the LHS signedness picks
+  `N_LXLSH@` vs `N_LXURSH@`).
+
+## `ulong` compound `|=` / `^=` / `*=` with `uint` RHS
+
+Fixtures `770` (`g |= x`), `771` (`g ^= x`), `772` (`g *= x`).
+LHS is `unsigned long` global, RHS is `unsigned int` local.
+
+- `770` / `771` — free passes off batch 150's `Type::UInt` arm
+  (bitwise `or`/`xor` against memory with high-half `or 0` /
+  `xor 0` is a no-op preserving the zero-extended widening).
+- `772` — long `*= uint`: BCC widens the uint by **zero**-
+  extension into CX (`xor cx, cx`) — no `cwd`, no push/pop
+  dance the signed `*= int` path (fixture 762) needs. Since
+  zero-extension doesn't touch DX, BX is free to load from
+  the uint directly and the LHS halves slot into DX:AX
+  without contention:
+
+  ```
+  mov bx, word ptr <rhs>      ; load uint → BX
+  xor cx, cx                  ; zero-extend → CX
+  mov dx, word ptr <lhs_hi>
+  mov ax, word ptr <lhs_lo>
+  call near ptr N_LXMUL@
+  mov word ptr <lhs_hi>, dx
+  mov word ptr <lhs_lo>, ax
+  ```
+
+  Added a new arm in `emit_compound_assign` gated on
+  `long LHS + Type::UInt RHS + BinOp::Mul`, parallel to the
+  signed `*= int` arm at fixture 762. The helper `N_LXMUL@`
+  itself is sign-agnostic — only the widening shape changes.
+
+## `long` compound with `unsigned int` RHS (zero-widening)
+
+Fixtures `767` (`g += x` unsigned), `768` (`g -= x`),
+`769` (`g &= x`). LHS is `unsigned long`, RHS is `unsigned
+int`.
+
+BCC handles unsigned widening with **no widening register**
+at all — just an immediate `0` for the high-half operand:
+
+```
+mov ax, word ptr [bp-N]    ; load uint RHS
+add word ptr DGROUP:_g, ax  ; add to low half
+adc word ptr DGROUP:_g+2, 0 ; carry-only propagation into high
+```
+
+Same skeleton works for `-=`/`&=`/`|=`/`^=`:
+- `+=` / `-=`: high-half op is `adc 0` / `sbb 0` (rides on
+  the carry/borrow from the low half).
+- `&=`: `and <hi>, 0` zeros the high half — matches the
+  zero-extended RHS semantics.
+- `|=` / `^=`: `or <hi>, 0` / `xor <hi>, 0` is a no-op,
+  preserving the high half.
+
+Added a new arm in `emit_compound_assign` gated on
+`Type::UInt` RHS. Reuses the existing `<op>GroupSymImm8Sx`
+encoders so the high-half-with-imm-0 step assembles via the
+short 5-byte form (`81|83 <modrm> ... 00`).
+
+## `long` compound `%=` int + stack-LHS variants
+
+Fixtures `764` (global `g %= x`), `765` (`a += x` stack LHS),
+`766` (`a *= x` stack LHS).
+
+- `764` — free pass off batch 148's `/=`/`%=` arm.
+- `765` — needed four new `<op> word ptr [bp+N], <reg16>` IR
+  variants for the long-stack += int shape:
+  - `AddBpRelAx` (`01 46 dd`) — sibling of the existing
+    `AddBpRelDx` (which writes DX for long-long). For the
+    int-RHS widening case, AX holds the int low word.
+  - `AdcBpRelDx` (`11 56 dd`) — high-half carry partner.
+    DX holds the cwd sign-extension.
+  - `SubBpRelAx` (`29 46 dd`) and `SbbBpRelDx` (`19 56 dd`)
+    — `-=` siblings.
+- `766` — free pass; the long-stack-LHS Mul path already
+  routed through the same `emit_long_compound_to_mem`-style
+  helper with the cwd-widened RHS pushed onto the stack.
+
+The asymmetry between Add/Sub (needing the new
+`AddBpRelAx`/`AdcBpRelDx` pair) and Mul (using stack
+push/pop) reflects BCC's two strategies: Add/Sub can do the
+op directly against memory; Mul has to set up registers in
+a specific order before calling the helper.
+
+## `long` compound `>>=` / `*=` / `/=` with `int` RHS
+
+Fixtures `761` (`g >>= x`), `762` (`g *= x`), `763` (`g /= x`).
+
+- `761` — free pass off batch 147's shift-by-int arm.
+- `762` — long `*= int`: BCC routes the cwd-widened RHS
+  through the stack since `cwd` clobbers DX, which the LHS
+  load also needs. Sequence: `mov ax, <x>; cwd; push ax;
+  push dx; mov dx, <lhs_hi>; mov ax, <lhs_lo>; pop cx; pop
+  bx; call N_LXMUL@; store`. Push/pop ordering places
+  RHS-high in CX and RHS-low in BX — matching the helper.
+- `763` — long `/= int`: simpler since `N_LDIV@` takes all
+  four halves via push, not via registers. BCC pushes the
+  widened RHS (high `dx`, then low `ax`), then the LHS's
+  two halves, calls the helper. Modulo and unsigned-LHS
+  variants take their existing helper-dispatch table.
+
+Asymmetry note: `*=` swaps the push-pop dance to free DX
+for the LHS load, while `/=` doesn't need to because the
+helper consumes everything off the stack.
+
+## `long` compound `|=` / `^=` / `<<=` with `int` RHS
+
+Fixtures `758` (`g |= x`), `759` (`g ^= x`), `760` (`g <<= x`).
+
+- `758` / `759` — free passes off batch 146's int-RHS arm
+  (the bitwise `<op>` is mirrored to both halves with `dx`
+  carrying the sign-extension).
+- `760` — added a long-LHS-shift-by-int-RHS arm. Same
+  helper-call shape as `long <<= long h` (batch 140) but
+  the shift count is loaded from a `byte ptr` view of the
+  int storage. Note `cl` only needs the low byte regardless
+  of whether the RHS is int (16 bits) or long (32 bits), so
+  the two shapes converge once `mov cl, byte ptr <addr>`
+  fires. Accepts both `Type::Int` and `Type::UInt` for the
+  RHS — shift count signedness doesn't affect the result;
+  only the LHS signedness picks `N_LXRSH@` vs `N_LXURSH@`.
+
+## `long` compound with `int` RHS (signed widening)
+
+Fixtures `755` (`g += x`), `756` (`g -= x`), `757` (`g &= x`)
+— mixed-width compound where the LHS is a long global and
+the RHS is an int.
+
+BCC widens the int via `cwd` into DX:AX before applying the
+memory-direct compound. For `+=`/`-=`, DX carries the sign-
+extension into the high-word add/sub with `adc`/`sbb`. For
+bitwise (`&=`, `|=`, `^=`) it applies the **same** op to
+both halves with DX — confirming BCC promotes the int to a
+signed long even before bitwise ops:
+
+```
+mov ax, word ptr [bp-N]    ; load int RHS
+cwd                          ; sign-extend AX → DX:AX
+add word ptr DGROUP:_g, ax   ; (or sub / and / or / xor)
+adc word ptr DGROUP:_g+2, dx ; (or sbb / and / or / xor)
+```
+
+Added a new arm in `emit_compound_assign` gated on
+`long LHS + Type::Int RHS + Add|Sub|Bit*`, using a new
+`rhs_type_for_long_widening` helper for the RHS type
+lookup. Added two tasm IR variants:
+- `AdcGroupSymDx` (`11 16 lo hi`) — high-half carry partner
+  for `long += int`.
+- `SbbGroupSymDx` (`19 16 lo hi`) — sibling for `long -= int`.
+
+The bitwise siblings (`and`/`or`/`xor word ptr <g>+2, dx`)
+already had their IR variants from batch 139 (the long-long
+arm uses AX for the high half; here we use DX, but the
+`AndGroupSymReg16`/etc. variants accept any reg).
+
+Unsigned-int RHS (`UInt`) is not yet probed; would use
+`xor dx, dx` / `mov dx, 0` instead of `cwd` for the
+widening step.
+
+## `long` compound on deref, struct field, and array element
+
+Fixtures `752` (`*p += h` long pointer + long-var RHS),
+`753` (`s.x += h` stack struct long field + long-var RHS),
+`754` (`a[1] += h` long array + long-var RHS). All three
+free passes off pre-existing infrastructure:
+
+- `752` — the long-pointee `*p += y` path (slice 398) was
+  already in place; it accepts any non-constant RHS via the
+  shared `emit_long_compound_to_mem` helper.
+- `753` — the stack-resident struct long-field arm
+  (slice 389) routes through the same long-compound-to-mem
+  helper with a bp-relative destination.
+- `754` — the const-index long array path (slice 393)
+  similarly accepts variable RHS through that helper.
+
+The `emit_long_compound_to_mem` helper is unifying enough
+that these three target shapes (`[reg]`, `[bp+off]`,
+`DGROUP:_<sym>+off`) all reuse the same low/high addr-pair
+codepath without per-shape branching.
+
+## `long` mixed-location shift and stack-LHS heavy ops
+
+Fixtures `749` (`g <<= h` global LHS + stack RHS),
+`750` (`a *= g` stack LHS + global RHS),
+`751` (`a >>= g` stack LHS + global RHS).
+
+- `749` — extended the mixed-location arm to also cover
+  `Shl|Shr`. Same `mov cl, byte ptr <rhs_lo>; mov dx,
+  <lhs_hi>; mov ax, <lhs_lo>; call N_LXLSH@/...; mov
+  <lhs_hi>, dx; mov <lhs_lo>, ax` shape as the both-globals
+  path — the `rhs_lo` address string already drops the
+  `word ptr` prefix so reusing it as `byte ptr <rhs_lo>`
+  Just Works.
+- `750` / `751` — free passes off the existing mixed-
+  location Mul / Shl|Shr arms. Confirms the
+  `long_halves_of` helper symmetrically handles the stack-
+  LHS case (helper returns `bp_addr(off)` and
+  `bp_addr(off+2)` instead of `DGROUP:_<sym>` / `+2`).
+
+## `long` mixed-location `&=` / `*=` / `/=`
+
+Fixtures `746` (`g &= h` global LHS + stack RHS),
+`747` (`g *= h`), `748` (`g /= h`).
+
+- `746` — free pass off batch 142's new bit-arith arm.
+- `747` / `748` — needed extending. The new mixed-location
+  arm was previously Add/Sub/Bit-only; widened it to cover
+  Mul (CX:BX RHS + DX:AX LHS + `N_LXMUL@`) and Div/Mod
+  (push both pairs + `N_LDIV@`/`N_LMOD@`/`N_LUDIV@`/
+  `N_LUMOD@` by signedness). Both shapes reuse the same
+  `long_halves_of` helper to drive the address strings, so
+  the body of each arm is identical to the both-globals
+  branch with just the format args changed. Shifts not yet
+  probed in mixed-location form (helper path would need
+  the same generalization).
+
+## `long` compound with mixed global/stack location
+
+Fixtures `743` (`a += b` both stack), `744` (`g += h` global
+LHS + stack RHS), `745` (`a += g` stack LHS + global RHS).
+
+- `743` — free pass; pre-existing long-stack-local
+  compound path (slices 290/339) handles a stack-local LHS
+  with a stack-local RHS uniformly.
+- `744` / `745` — needed a new arm. The existing long-
+  global-compound branch only matched when *both* operands
+  were globals. Added a "long LHS + long RHS regardless of
+  location" arm with the same `mov ax,<hi>; mov dx,<lo>;
+  <op> <lhs_lo>,dx; <carry> <lhs_hi>,ax` shape, guarded
+  with `!(both globals)` so the existing both-globals
+  branch keeps firing for fixtures 734-738.
+- Introduced small `lhs_long_type` / `rhs_long_type_of_ident`
+  / `long_halves_of` helpers to keep the new arm shape-
+  uniform regardless of storage location.
+
+## `long` global compound `>>=` / `*=` / `%=` by variable
+
+Fixtures `740` (`g >>= h`), `741` (`g *= h`), `742` (`g %= h`).
+All three free passes off pre-existing handlers:
+
+- `740` — batch 140's `Shl|Shr` arm for long-global with
+  long-var RHS (signed picks `N_LXRSH@`, unsigned would pick
+  `N_LXURSH@`).
+- `741` — existing `BinOp::Mul` arm (line 3287) for long-
+  global compound: `N_LXMUL@` helper with both operands
+  loaded into the convention CX:BX (RHS) / DX:AX (LHS).
+- `742` — existing `BinOp::Div | BinOp::Mod` arm: `N_LMOD@`
+  helper (signed; unsigned uses `N_LUMOD@`).
+
+The long-global compound-with-long-var arc is now byte-exact
+across all five arith ops + the bitwise/shift set.
+
+## `long` global compound `|=` / `^=` / `<<=` by variable
+
+Fixtures `737` (`g |= h`), `738` (`g ^= h`), `739` (`g <<= h`).
+
+- `737` / `738` — free passes off batch 139's
+  `BinOp::Add|Sub|BitAnd|BitOr|BitXor` arm for long-global
+  with long-variable RHS.
+- `739` — long-global shift by long-variable RHS. BCC's
+  pattern reuses the K-constant K>1 helper-call shape but
+  loads CL from h's low byte: `mov cl, byte ptr DGROUP:_h;
+  mov dx, _g+2; mov ax, _g; call N_LXLSH@; mov _g+2, dx;
+  mov _g, ax`. Added the branch in the long-global var-RHS
+  match alongside the arith/bitwise handler. Helper picks
+  `N_LXLSH@` / `N_LXRSH@` / `N_LXURSH@` based on op and
+  signedness — same dispatch table as the K-constant path.
+- Added `MovReg8GroupSym` tasm IR variant (`8A (mod=00
+  reg=<r> r/m=110) lo hi` + FIXUPP) — generic byte-global
+  load for non-AL destinations. AL keeps the shorter
+  `MovAlGroupSym` (`A0` moffs8 form). Codegen needed this
+  for the `mov cl, byte ptr DGROUP:_h` shape.
+
+## `long` global compound with long variable RHS
+
+Fixtures `734` (`g += h`), `735` (`g -= h`), `736` (`g &= h`)
+— long-global compound with another long global as RHS.
+
+The existing `long g <op>= b` path (line 3279) only routed
+`Mul` and `Div/Mod` (helper calls); `Add/Sub/BitAnd/BitOr/
+BitXor` fell through to the local-lookup panic. BCC's
+pattern for these:
+
+```
+mov ax, word ptr DGROUP:_h+2     ; high of h
+mov dx, word ptr DGROUP:_h        ; low of h
+<lo_op> word ptr DGROUP:_g, dx    ; e.g. add / sub / and / or / xor
+<hi_op> word ptr DGROUP:_g+2, ax  ; matching carry/borrow op for arith
+```
+
+For arith, `hi_op` is `adc`/`sbb` (carry/borrow). For
+bitwise, `hi_op` is the same as `lo_op` (no carry across
+halves). Added the branch and these tasm IR variants:
+- `SbbGroupSymAx` — `19 06 lo hi` (high-half borrow partner
+  for long-global `-=`, sibling of the existing
+  `AdcGroupSymAx`).
+- `AndGroupSymReg16` / `OrGroupSymReg16` /
+  `XorGroupSymReg16` — `21|09|31 (mod=00 reg=<r> r/m=110)
+  lo hi` (long-word siblings of the byte variants from batch
+  121).
+

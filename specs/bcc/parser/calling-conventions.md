@@ -1,0 +1,874 @@
+# Calling conventions
+
+This file is part of the BCC parser/codegen behavior catalog. See [`../PARSER.md`](../PARSER.md) for the index.
+
+## Char return + caller-side widen
+
+Fixture `562` (`char get(void) { return 'Z'; } int main { int
+x = get(); }`):
+
+- **Callee**: `emit_return_value_load` now detects char return
+  type with a constant value and emits `mov al, K` (2 bytes)
+  instead of `mov ax, K` (3 bytes). AH is undefined per BCC's
+  char-return ABI.
+- **Caller**: `ExprKind::Call` in `emit_expr_to_ax` consults
+  `signatures.ret_ty_of(name)` and emits `cbw` (signed char) or
+  `mov ah, 0` (uchar) after the call, widening AL into AX
+  before downstream consumers (assignment, arithmetic) read
+  the full int.
+
+The two halves compose: the call site doesn't need to know how
+the callee left AL — `signatures` provides the return type and
+the widen step always fires.
+
+## Large frames use `81 ec NN NN` + bp+disp16 (`8d 86 disp16`); ptr+N scales at compile time; 8 args = `add sp, 16` cleanup
+
+Fixtures `2267` (large local frame), `2268` (8
+args fn), `2269` (ptr arithmetic) cover scaling
+mechanics for large offsets and pointer math.
+
+- `2267` (**large frame, disp16 form**): for
+  `int a[100]` (200 bytes), prologue uses imm16
+  sub form and ModR/M uses bp+disp16:
+  ```
+  ; Prologue:
+  push bp / mov bp, sp
+  81 ec c8 00              ; sub sp, 200 (imm16 form, 4B)
+  push si
+  
+  ; Access a[i]:
+  mov bx, si / shl bx, 1
+  8d 86 38 ff              ; lea ax, [bp + 0xFF38] (= bp - 200)
+                            ; ModR/M /86 disp16 = bp+disp16 form (4B vs 3B)
+  add bx, ax               ; &a[i]
+  mov [bx], si             ; a[i] = i
+  ```
+- `2268` (**8 args function**): arg offsets fit
+  in disp8 (max +18 for 8th arg):
+  ```
+  ; In sum8(a,b,c,d,e,f,g,h):
+  mov ax, [bp+4]            ; a
+  add ax, [bp+6]            ; + b
+  ...
+  add ax, [bp+18]           ; + h (max disp8 for typical fn)
+  
+  ; Caller after call:
+  add sp, 16                 ; cleanup 8 args × 2 bytes
+  ```
+  For a fn with > 60 args (~127B offsets), the
+  callee would start using disp16 form for the
+  later args.
+- `2269` (**ptr arithmetic `p + 2` / `p - 2`**):
+  scaled by sizeof at compile time:
+  ```
+  mov si, &a[5]
+  
+  ; q = p + 2 (= +4 bytes for int*):
+  mov ax, si / add ax, 4
+  
+  ; r = p - 2 (= -4 bytes):
+  mov ax, si / add ax, 0xFFFC   (= -4 signed)
+  
+  ; q - r (element diff):
+  sub ax, [r]
+  cwd / mov bx, 2 / idiv bx     ; / sizeof
+  ```
+
+**ModR/M displacement forms** (8086):
+| Form | Bytes | Range | Use |
+|------|-------|-------|-----|
+| `/06 disp16` | 3 | absolute | direct addressing |
+| `/06 disp8` | (N/A; no disp8 for direct) | - | - |
+| `/46 disp8` | 2 | -128 to +127 | small bp/bx offsets |
+| `/86 disp16` | 3 | full 16-bit | large bp/bx offsets |
+
+For BCC, threshold for switching disp8 → disp16
+is when the offset cannot fit in signed 8 bits.
+ARRAY bases inside large fns commonly trigger
+this (e.g., `bp + 0xFF38` for a frame > 128 bytes).
+
+**Pointer arithmetic encoding**:
+- `p + N` (N const): `add ax, N*sizeof` (one inst)
+- `p + var` (var dynamic): compute `var*sizeof`
+  via shifts, then `add`
+- `p - N` (N const): `add ax, -(N*sizeof)` (the
+  -N is sign-extended imm16)
+- `p++` / `++p`: `add ax, sizeof` (or `inc` × N
+  if size ≤ 2)
+- `p - q` (both ptr): `sub` byte diff, then
+  `cwd / idiv sizeof`
+
+For the Rust reimplementation:
+- Track frame size at fn entry; emit `81 ec`
+  imm16 form if > 127.
+- Use `bp+disp16` ModR/M when offset > 127.
+- Scale ptr arith by sizeof at compile time.
+
+## `int * double` = FILD m16 + FMUL m64; double == 0.0 = FLDZ + FCOMPP; printf varargs = R-to-L + caller cleanup
+
+Fixtures `2192` (int × double), `2193` (double ==
+0.0), `2194` (printf with 3 args) cover three
+mixed/varargs idioms.
+
+- `2192` (**`int * double` promotion**): int gets
+  loaded into FPU via **FILD m16** (the 16-bit
+  integer load), then FMUL m64 with the double:
+  ```
+  mov [tmp], i              ; spill int to memory
+  9b df 46 ec               ; FILD m16 (load 16-bit int → FPU as float)
+  9b dc 4e f6               ; FMUL m64 [d]
+  9b dd 5e ee               ; FSTP m64 [r]
+  ```
+  FILD opcodes by integer width:
+  - `df /0` = FILD m16 (16-bit)
+  - `db /0` = FILD m32 (32-bit)
+  - `df /5` = FILD m64 (64-bit)
+- `2193` (**`double == 0.0` via FLDZ + FCOMPP**):
+  same pattern as float-vs-zero (fixture 2151):
+  ```
+  9b dd 46 f8               ; FLD m64 [d]
+  9b d9 ee                  ; FLDZ (load 0.0 to FPU)
+  9b de d9                  ; FCOMPP (compare and pop both)
+  9b dd 7e f6               ; FSTSW m16
+  90 / 9b 8b 46 f6 / 9e     ; status → AX → flags
+  jne L_false               ; (for == test)
+  ```
+  Single FLDZ avoids needing a 0.0 constant in
+  `_DATA`. Works the same for both float and
+  double.
+- `2194` (**`printf(fmt, a, b, c)` varargs**):
+  ```
+  push 3 / push 2 / push 1  ; R-to-L per cdecl
+  mov ax, 0 / push ax        ; push fmt string addr (FIXUPP)
+  call _printf               ; e8 [disp] (FIXUPP)
+  add sp, 8                  ; caller cleanup 4 args × 2B
+  ```
+  
+  String "a=%d b=%d c=%d\n\0" stored in `_DATA`
+  (16 bytes).
+
+**Variadic call summary**:
+| Aspect | Detail |
+|--------|--------|
+| Arg push order | R-to-L (cdecl convention) |
+| Cleanup | Caller — `add sp, N*2` for N word args |
+| Varargs receiver | Reads via pointer math from `&first_named_arg` |
+| `va_list` access | (not yet probed — likely `&...` semantics) |
+
+For the Rust reimplementation:
+- Mixed int + double: spill int, emit FILD m16 +
+  FMUL m64.
+- Use FLDZ/FLD1 for float/double 0.0/1.0 consts.
+- Variadic calls: push R-to-L; caller cleanup.
+
+## `interrupt` = save all regs + load DS + IRET; `volatile`/`const` no codegen diff in trivial cases
+
+Fixtures `2066` (interrupt fn), `2067` (volatile),
+`2068` (const) explore three special qualifiers.
+
+- `2066` (**`interrupt` keyword**): emits the
+  canonical DOS ISR shape — full register save,
+  reload DS to DGROUP, IRET:
+  ```
+  ; _my_isr:
+  push ax / push bx / push cx / push dx    ; 50 53 51 52
+  push es / push ds                          ; 06 1e
+  push si / push di / push bp                ; 56 57 55
+  mov bp, segment_of_DGROUP                  ; bd [seg] [seg] (FIXUPP)
+  mov ds, bp                                  ; 8e dd (reload DS)
+  mov bp, sp                                  ; 8b ec (frame, AFTER ds load)
+  ; ...body...
+  pop bp / pop di / pop si                   ; 5d 5f 5e
+  pop ds / pop es                             ; 1f 07
+  pop dx / pop cx / pop bx / pop ax           ; 5a 59 5b 58
+  iret                                        ; cf
+  ```
+  Total prologue: 16 bytes; epilogue: 13 bytes.
+  Uses **`iret`** (`cf`, 1 byte) which pops
+  flags + cs + ip (vs `ret` / `retf`).
+- `2067` (**`volatile`**): in the trivial case
+  `v = 1; v = 2; return v;`, BCC emits both
+  stores then a load. **Byte-identical to
+  non-volatile** for this case — because BCC
+  already doesn't do DCE/CSE. Volatile only
+  shows up if BCC would otherwise optimise
+  (which it rarely does). Probably a no-op in
+  most cases.
+- `2068` (**`const`**): `return c;` for `const
+  int c = 42;` emits a runtime **load** (`a1 00
+  00` with FIXUPP), NOT inline-fold to `mov ax,
+  42`. **`const` is a type qualifier only** —
+  doesn't enable parse-time const propagation.
+  
+  Compare:
+  - `return 42` → `b8 2a 00` (mov ax, 42)
+  - `return c` (with const c=42) → `a1 00 00` (load from memory)
+
+**Type qualifier summary**:
+| Qualifier | Codegen effect | Note |
+|-----------|----------------|------|
+| `const` | None at OBJ level | Type-system only |
+| `volatile` | None (BCC doesn't DCE/CSE anyway) | Defensive |
+| `register` | Hint for enregistration (when possible) | Discretionary |
+| `static` | Local lifetime → `_DATA` placement | Storage class |
+| `extern` | Declares, doesn't define | Symbol-table |
+
+**Calling-convention keyword summary** (updated):
+| Keyword | Effect |
+|---------|--------|
+| `cdecl` | Default — R-to-L args, caller cleans, `_name` |
+| `pascal` | L-to-R args, callee cleans (`ret imm16`), `NAME` |
+| `near` | Force near call/ret (`c3`) |
+| `far` | Force far call/ret (`cb`, `[bp+6]`) |
+| `interrupt` | Full reg save + ds reload + IRET |
+
+For the Rust reimplementation:
+- `interrupt`: emit the full ISR prologue/epilogue;
+  no normal `push bp / mov bp, sp` (BP saved later).
+- `volatile`/`const`: type-system tracking only;
+  no codegen difference for current optimisation
+  level.
+
+## Pascal 4-args = `ret 8`; `cdecl` keyword = default; pascal→pascal call needs no cleanup
+
+Fixtures `2063` (pascal 4 args), `2064` (cdecl
+explicit), `2065` (pascal→pascal) complete the
+calling-convention picture.
+
+- `2063` (**pascal with 4 args = `ret 8`**):
+  callee body:
+  ```
+  ; SUM4:
+  mov ax, [bp+10]         ; a (first pushed, highest)
+  add ax, [bp+8]          ; b
+  add ax, [bp+6]          ; c
+  add ax, [bp+4]          ; d
+  pop bp / c2 08 00        ; ret 8 (= 4 args × 2)
+  ```
+  Caller pushes 1, 2, 3, 4 in L-to-R order; no
+  cleanup. **Callee always cleans regardless of
+  arg count**.
+- `2064` (**`cdecl` keyword = default**):
+  byte-identical output to omitting the keyword.
+  Symbol `_helper` (with underscore), `c3` near
+  ret, caller cleanup. Just an explicit
+  affirmation.
+- `2065` (**pascal calls pascal**): both fns use
+  pascal convention. The caller (OUTER) pushes
+  via `ff 76 04` (push word [bp+4]) — no
+  intermediate load. Then `e8` call near, no
+  cleanup. INNER returns with `ret 2`.
+  ```
+  ; OUTER (pascal):
+  push bp / mov bp, sp
+  push word [bp+4]         ; ff 76 04 — y arg
+  call INNER               ; e8 ea ff
+  ; (no cleanup — INNER did c2 02 00)
+  shl ax, 1                 ; y * 2
+  pop bp / c2 02 00         ; ret 2 (OUTER cleans for its caller)
+  ```
+  Main (default cdecl) calls OUTER same way (no
+  cleanup since OUTER cleans).
+
+**Calling-convention summary, complete**:
+| Convention | Args | Cleanup | Naming | Keyword |
+|-----------|------|---------|--------|---------|
+| cdecl (default) | R-to-L | Caller (post-call cleanup) | `_name` | `cdecl` (explicit) or omit |
+| pascal | L-to-R | Callee (`ret imm16`) | `NAME` (UPPER, no `_`) | `pascal` |
+| `near` modifier | (preserves convention) | (preserves) | (preserves) | `near` |
+| `far` modifier | (preserves convention) | (preserves) | (preserves) | `far` |
+
+For the Rust reimplementation:
+- `cdecl` keyword: same codegen as default.
+- pascal `ret imm16`: `c2 [imm16]`, total cleanup bytes = N_args × 2.
+- Pascal-to-pascal calls: omit caller cleanup.
+- Mixing conventions in same file is fine; each fn
+  follows its declared convention.
+
+## `far fn` in small / `near fn` in medium: per-fn override of model default; `pascal` = L-to-R + callee-clean + UPPER
+
+Fixtures `2060` (`int far helper` in small),
+`2061` (`int near helper` in medium), `2062`
+(`pascal` calling convention) explore per-function
+overrides and alternative calling conventions.
+
+- `2060` (**`int far helper(...)` in -ms**): the
+  function-level `far` keyword **promotes** one
+  function to far while leaving others as model
+  default:
+  ```
+  ; _helper:
+  push bp / mov bp, sp
+  mov ax, [bp+6]                 ; arg shifts to +6 (far ret = 4B)
+  inc ax
+  pop bp / cb                     ; retf
+  
+  ; _main calling _helper (intra-segment since same _TEXT):
+  push 41
+  0e                              ; push cs
+  e8 ea ff                        ; call near _helper
+  ```
+  Main itself stays NEAR (returns `c3`).
+- `2061` (**`int near helper(...)` in -mm**):
+  the `near` keyword **demotes** a function in
+  medium/large to near, saving the push cs:
+  ```
+  ; _helper:
+  push bp / mov bp, sp
+  mov ax, [bp+4]                  ; arg at +4 (near ret = 2B)
+  inc ax
+  pop bp / c3                     ; near ret
+  
+  ; _main calling _helper (no push cs needed):
+  push 41
+  e8 eb ff                        ; call near _helper
+  ```
+  Main itself stays FAR in medium model (returns `cb`).
+- `2062` (**`pascal` calling convention**): three
+  major differences from cdecl:
+  1. **Symbol name UPPERCASE, NO leading underscore**:
+     `HELPER` (not `_helper`).
+  2. **Args pushed LEFT-to-RIGHT**: in source
+     order `helper(50, 8)` → push 50 first, push 8
+     second. So 'a' is at [bp+6] (pushed first =
+     higher address), 'b' at [bp+4].
+  3. **Callee cleans the stack** via `ret imm16`:
+     `c2 04 00` = `ret 4` (pops 4 args bytes).
+     Caller does NO cleanup.
+  
+  ```
+  ; HELPER:
+  push bp / mov bp, sp
+  mov ax, [bp+6]                  ; a (first pushed)
+  sub ax, [bp+4]                  ; b
+  pop bp / c2 04 00               ; ret 4 (callee cleans)
+  
+  ; _main calling HELPER:
+  push 50                          ; a, L-to-R
+  push 8                           ; b
+  e8 e3 ff                         ; call HELPER
+  ; NO cleanup — callee did it
+  ```
+
+**Function-keyword/convention summary**:
+| Keyword/conv | Effect | Args | Cleanup | Naming |
+|--------------|--------|------|---------|--------|
+| (default cdecl) | per-model default | R-to-L | caller | `_name` |
+| `near` | force near (model overrides irrelevant in -ms/-mc) | R-to-L | caller | `_name` |
+| `far` | force far (use `cb` retf, shift offsets) | R-to-L | caller | `_name` |
+| `pascal` | force pascal convention | L-to-R | callee (`ret imm16`) | `NAME` (UPPER, no underscore) |
+
+For the Rust reimplementation:
+- Per-fn `near`/`far` keywords: track at parse time,
+  generate the correct call/ret pair.
+- `pascal` convention: emit args L-to-R, use `ret
+  imm16` in callee, use uppercase no-underscore
+  symbol names.
+
+## Cleanup is byte-based not arg-based: long-arg (4B) uses pops; int+long (6B) uses add sp
+
+Fixtures `2036` (3 int args = 6B), `2037` (long
+arg = 4B), `2038` (int+long = 6B) refine the
+cleanup encoding rule.
+
+- `2036` (**3 args = 6B = add sp, 6**): `add sp,
+  6` (3 bytes via imm8-sext). Confirms ≥6 bytes
+  triggers the add-sp form.
+- `2037` (**long arg = 4B = pop cx × 2**): a
+  single long arg pushes 4 bytes (high then low
+  half). Cleanup uses `pop cx × 2` (2 bytes) —
+  same as 2 int args. **Bytes, not args, determine
+  the cleanup form**.
+- `2038` (**int + long = 6B = add sp, 6**):
+  total bytes pushed = 2 + 4 = 6. Cleanup uses
+  add sp, 6. Confirms the byte-count rule.
+
+**Refined cleanup encoding rule** (by total bytes
+pushed):
+| Total bytes pushed | Cleanup | Bytes used |
+|---------------------|---------|------------|
+| 0 | (none) | 0 |
+| 2 | `pop cx` | 1 |
+| 4 | `pop cx × 2` | 2 |
+| ≥6 | `add sp, N` (imm8-sext or imm16) | 3-4 |
+
+So 0/2/4 bytes use the `pop cx` form (cheap for
+small cleanups); 6+ bytes uses `add sp, N` (constant
+3-byte form). The threshold is byte-count, not
+arg-count — making it work uniformly for mixed
+int/long args.
+
+For the Rust reimplementation:
+- Compute total push bytes for the call site.
+- Choose cleanup form per the table above.
+- Use `pop cx` (not `pop ax`) to preserve the
+  return value in AX.
+
+## Cleanup encoding: 0 args = no cleanup; 1-2 args = `pop cx` (preserves AX); 3+ = `add sp, N`
+
+Fixtures `2033` (0 args), `2034` (1 arg), `2035`
+(2 args) characterise the **post-call cleanup**
+encoding.
+
+- `2033` (**0 args = no cleanup**): just `call`
+  + `ret`. No `pop` or `add sp` emitted.
+- `2034` (**1 arg = `pop cx`**): 2-byte cleanup
+  via single `pop cx` (`59`, 1 byte).
+  - Critically uses **`pop cx`** (`59`), NOT
+    `pop ax` (`58`) — preserves AX which holds
+    the return value. CX is caller-saved so
+    clobbering is fine.
+- `2035` (**2 args = `pop cx` × 2**): 4-byte
+  cleanup via two `pop cx` instructions (2
+  bytes total). Cheaper than `add sp, 4` (3
+  bytes).
+
+**Cleanup encoding hierarchy**:
+| N args | Cleanup | Bytes |
+|--------|---------|-------|
+| 0 | (none) | 0 |
+| 1 | `pop cx` | 1 |
+| 2 | `pop cx / pop cx` | 2 |
+| 3 | `add sp, 6` (imm8-sext) | 3 |
+| 4+ | `add sp, N*2` (imm8-sext or imm16) | 3-4 |
+
+So the boundary is at N=3 args, where pops (3 bytes
+for 3 pops) and add-sp (3 bytes) are tied — BCC
+picks `add sp` for clarity/consistency.
+
+For the Rust reimplementation:
+- 0 args: omit cleanup
+- 1-2 args: emit `59` (pop cx) per arg
+- 3+ args: emit `83 c4 imm8` (add sp, N*2)
+
+## uchar arg passed as word (hi undef); 2D char arr flat row-major; caller promotes byte args
+
+Fixtures `1991` (uchar arg), `1992` (2D char
+array init), `1993` (uchar args promoted) cover
+char/uchar parameter passing semantics.
+
+- `1991` (**uchar arg passed as full word**):
+  even though the param is `unsigned char`, BCC
+  pushes a **16-bit word** (high byte
+  undefined). Callee uses byte ops on the low
+  half:
+  ```
+  ; in callee:
+  mov bl, [bp+4]            ; load byte from arg slot
+  ; ... operate on bl, zero-extend via b4 00 as needed
+  ```
+  Caller pushes via `mov al, [c] / push ax` —
+  high byte AH whatever-was-there.
+- `1992` (**2D char array init**): `char grid[2]
+  [3]` lays out **flat 6 bytes row-major** in
+  `_DATA` template ("ABCDEF"); N_SCOPY@ copies
+  to stack at fn entry. Constant indices resolve
+  to byte offsets via row*width + col.
+- `1993` (**uchar args promoted to int at call
+  site**): when passing `unsigned char` values
+  to a fn taking `int`:
+  ```
+  mov al, [x]               ; load byte
+  mov ah, 0                 ; zero-extend
+  push ax                   ; push as int
+  ```
+  Caller does the byte→int promotion **before
+  the push**. Consistent with C's integer-
+  promotion rules.
+
+**Char/uchar promotion summary**:
+| Source | Target | Where | Mechanism |
+|--------|--------|-------|-----------|
+| `char` value | `int` use | Site of use | `cbw` (1B, sign-ext) |
+| `unsigned char` value | `int` use | Site of use | `mov ah, 0` (2B, zero-ext) |
+| `char` arg | `int` arg | At call site | `cbw` then push |
+| `unsigned char` arg | `int` arg | At call site | `mov ah, 0` then push |
+| Byte return | Byte | In AL only | High half undef |
+
+So **callers handle the promotion**, not callees.
+This matches K&R C semantics where all char args
+are promoted to int by the caller.
+
+For the Rust reimplementation:
+- Track char/uchar/short types through expressions.
+- Emit sign/zero-extend at promotion points.
+- Caller emits the promotion before push; callee
+  reads only the low half (signed extension is
+  caller's responsibility for sub-int args).
+
+## 5 regs w/o mul; **fn calls restrict pool to callee-saved {SI, DI}**; empty fn keeps prologue
+
+Fixtures `1976` (7 locals, NO mul), `1977` (fn
+call restricts pool), `1978` (empty fn keeps
+prologue) clarify register-allocation context-
+sensitivity.
+
+- `1976` (**7 locals, no mul → DX used**):
+  without imul/idiv, BCC enregisters **5 vars**:
+  - a → DI
+  - b → DX
+  - c → BX
+  - d → CX
+  - r (sum) → SI
+  - e, f, g → stack
+  
+  All 5 pool registers used. Confirms: without
+  mul/div, the full 5-register pool {SI, DI, BX,
+  CX, DX} is available.
+- `1977` (**fn calls restrict pool to {SI, DI}**):
+  this is a **major refinement**. With fn calls
+  present, only **2 registers** (SI and DI)
+  enregister:
+  - a → DI
+  - r → SI
+  - b, c → stack
+  
+  Because cdecl callee-saved registers are SI/DI,
+  but BX/CX/DX are **caller-saved** (callee can
+  clobber them). BCC's register allocator
+  detects fn calls and restricts to **callee-
+  saved-only** to avoid the need for save/restore
+  around every call.
+- `1978` (**empty fn keeps prologue**): confirms
+  once more — `int empty(void) { return 0; }`
+  emits full `push bp / mov bp, sp / xor ax,ax /
+  pop bp / ret`. No bp-omission optimization
+  regardless of frame need.
+
+**Register-allocation context table (revised)**:
+| Function characteristics | Available pool | Notes |
+|--------------------------|----------------|-------|
+| No mul/div, no fn calls | {SI, DI, BX, CX, DX} = 5 slots | Full pool |
+| With imul/idiv, no fn calls | {SI, DI, BX, CX} = 4 slots | DX reserved as imul high |
+| With fn calls | {SI, DI} = 2 slots | Callee-saved only |
+| With both | {SI, DI} = 2 slots | Most restrictive |
+
+For the Rust reimplementation:
+- Analyze function body for: fn calls, mul/div
+  ops.
+- Choose pool accordingly:
+  - Fn calls present → restrict to {SI, DI}
+  - imul/idiv present → exclude DX
+  - Else → full pool
+- Locals ranked by use-count (or declaration
+  order); assign in pool order.
+
+This explains why functions with many fn calls
+often have most locals on the stack — BCC can't
+safely use the AX/BX/CX/DX registers across the
+calls.
+
+## `*long_p = K` = 2 word stores; printf cdecl R-to-L; long `<<1` inline `shl/rcl`
+
+Fixtures `1733` (long pointer deref-store), `1734`
+(printf variadic call), and `1735` (long shift-by-1
+inlined) close several remaining shapes.
+
+- `1733` (**writing a long through a pointer**):
+  emits **two word stores** through the pointer
+  with `[si]` and `[si+2]` addressing:
+  ```
+  mov word [si+2], 0x000f    ; high half — c7 44 02 0f 00
+  mov word [si],   0x4240    ; low half — c7 04 40 42
+  ```
+  The 32-bit constant is split into two 16-bit
+  imm16s at parse time; each half stored to its
+  word slot. No N_SCOPY@ needed — long is just two
+  word writes.
+- `1734` (**variadic printf**): a vararg call uses
+  **standard cdecl R-to-L push** with caller
+  cleanup:
+  ```
+  mov ax, 42
+  push ax            ; arg 2 first (rightmost)
+  mov ax, &"%d\n"    ; FIXUPP'd to data
+  push ax            ; arg 1 (fmt)
+  call _printf       ; FIXUPP'd external call
+  pop cx / pop cx    ; cleanup 4 bytes
+  ```
+  Caller-cleanup is essential for variadic — the
+  callee doesn't know the arg count, so it can't
+  do callee-cleanup. **All cdecl functions can be
+  variadic** because the protocol is the same.
+- `1735` (**long `<<1` inlined**): a long shift-by-
+  1 is **inlined** as `shl low / rcl high` — uses
+  the carry flag to propagate the shifted-out bit
+  from low half to low bit of high half:
+  ```
+  shl dx, 1          ; d1 e2 — low << 1, CF = top bit
+  rcl ax, 1          ; d1 d0 — high << 1 with CF in low bit
+  ```
+  Total 4 bytes for the shift core (vs ~8 bytes
+  for calling `N_LXLSH@`). Long shift-by-1 is the
+  **only inlined long shift**; shift-by-N (N>1)
+  still uses `N_LXLSH@` ([[batch-440-long-shifts]])
+  even for constant N.
+
+For the Rust reimplementation:
+- Long pointer-store splits constants at parse time
+  into low/high words.
+- Variadic call signatures are codegen-identical
+  to fixed-arity cdecl — no special protocol.
+- Long shift-by-1 should be inlined as `shl/rcl`;
+  shift-by-N for N≥2 emits the helper call.
+
+## Recursion via cdecl push+call; SI/DI callee-save; multi-return = one epilogue
+
+Fixtures `1697` (recursive factorial), `1698`
+(multi-return sign), and `1699` (3-arg function)
+confirm several call-related rules.
+
+- `1697` (**recursive function**): a recursive call
+  uses **standard cdecl push+call+pop** — each
+  recursion gets its own stack frame. The
+  enregistered parameter `n` lives in SI throughout
+  one frame. SI is **saved by the callee** via
+  `push si` in prologue and `pop si` in epilogue
+  (the `5e` byte before `5d c3`). This makes SI/DI
+  effectively **callee-preserved**: each function
+  that uses them saves and restores them, but the
+  caller doesn't need to.
+
+  Confirms SI/DI are callee-save by convention —
+  matches the use-count enregistration heuristic
+  ([[batch-411-register-allocation]]). Each
+  recursion level pushes its own copy.
+- `1698` (**multi-return single-epilogue**): a
+  function with multiple `return` statements has
+  **one epilogue** at the end. Each `return`
+  materializes the value in AX and jumps to the
+  shared epilogue (`5e 5d c3` or similar). No
+  per-return epilogue duplication. The body is:
+  ```
+  cmp / jcc → return-block-1 → jmp epilogue
+  cmp / jcc → return-block-2 → jmp epilogue
+  fallthrough return-block-3
+  epilogue: pop si / pop bp / ret
+  ```
+- `1699` (**3-arg cdecl**): args at `[bp+4]`,
+  `[bp+6]`, `[bp+8]` in **declaration order**
+  (right-to-left push leaves them in this order on
+  stack). Caller cleanup uses **`add sp, 6`**
+  (3-byte instruction) since 3 args = 6 bytes,
+  matching the ≥3-args boundary from
+  [[batch-435-arg-cleanup-boundary]]. Below 3
+  args, caller uses repeated `pop cx`.
+
+So the cdecl ABI summary is now complete:
+- **Args**: pushed right-to-left at 2-byte slots
+  starting at `[bp+4]`.
+- **Cleanup**: `pop cx` (1 byte each) for 1-2
+  args; `add sp, N` (3 bytes) for ≥3 args.
+- **Register saves**: SI/DI callee-saved when
+  used (push in prologue, pop in epilogue).
+- **Return register**: AX (int), DX:AX (long /
+  4B struct), ST0 (FP).
+- **Hidden args**: large struct return uses
+  hidden far-ptr-to-scratch as the
+  first push (caller pushes dest then scratch;
+  scratch is the callee's "where to write" hint).
+
+## `interrupt` saves all regs + sets DS; `cdecl` explicit; `x - K` via `add ax, -K`
+
+Fixtures `1655` (`interrupt void isr()`), `1656`
+(`int cdecl add`), and `1657` (3-deep call chain
+with subtract) all pass on the first capture.
+
+- `1655` (**interrupt function**): emits a massive
+  9-register save prologue: `push ax / push bx /
+  push cx / push dx / push es / push ds / push si
+  / push di / push bp`. Then **re-establishes DS to
+  DGROUP** via `mov bp, DGROUP / mov ds, bp` (the
+  `bd disp` is FIXUPP'd to DGROUP). Body runs.
+  Epilogue pops everything in reverse and ends with
+  **`iret`** (opcode `0xCF`, 1 byte) — interrupt-
+  return that pops both flags and CS:IP. Classic
+  8086 ISR pattern.
+- `1656` (**explicit `cdecl`**): produces byte-
+  identical code to the default convention —
+  underscore-prefixed symbol `_add`, args at
+  `[bp+4]+` in declaration order (right-to-left
+  push), caller cleans with `pop cx; pop cx`. So
+  `cdecl` is a no-op qualifier in BCC's default
+  small-model setup.
+- `1657` (**`g(x) - 3`** encoding): subtract of a
+  constant `g(x) - 3` lowers to **`add ax, -3`**
+  (`05 fd ff` — opcode `0x05` add-AX-imm16 with
+  imm16 = 0xFFFD = -3 two's complement). BCC
+  canonicalises `x - K` (positive K) as `x + (-K)`
+  using the AX-with-imm ADD opcode, NOT as `sub ax,
+  K`. So subtract-of-positive-imm-from-AX uses ADD
+  with negative imm.
+
+These complete the calling-convention picture for
+the small model. The `interrupt` lowering will look
+the same in larger memory models — just with `iret`
+unchanged (always 1 byte). Multi-memory-model
+divergence will mostly affect the `near` vs `far`
+call sequences and pointer sizes (already
+characterised in [[batch-444-far-pointers]] and
+[[batch-445-pascal-far-fn]]).
+
+## `huge` = far in deref; `pascal` callee-cleans+uppercase; `far` fn `push cs; call`
+
+Fixtures `1652` (`int huge *p`), `1653` (`pascal`
+calling convention), and `1654` (`far` function) all
+pass on the first capture and reveal three more
+Borland extension codegen patterns.
+
+- `1652`: **`huge` and `far` produce byte-identical
+  code for simple deref** — both store 4 bytes
+  (seg:off), use `les` + `26` ES override. The
+  difference only shows up in pointer arithmetic
+  across segment boundaries (huge would normalise,
+  far wouldn't). Simple `*p` cases are
+  indistinguishable.
+- `1653` (**pascal calling convention**):
+  - **PUBDEF symbol is `ADD`** (uppercase, no
+    underscore prefix) — pascal name mangling
+    strips the C `_` and uppercases.
+  - **Args pushed left-to-right** (instead of
+    cdecl's right-to-left). Callee accesses first
+    arg at `[bp+6]` (pushed first → higher offset),
+    second arg at `[bp+4]`.
+  - **Callee cleans args via `ret imm16`** (opcode
+    `c2 04 00` for 4-byte cleanup). No caller post-
+    call `pop cx` / `add sp, N`. Saves bytes per
+    call site at cost of 3 bytes per function.
+- `1654` (**far function**):
+  - Callee uses **`retf`** (opcode `0xCB`, 1 byte)
+    instead of near `ret`.
+  - Args accessed at **`[bp+6]+`** because the far
+    return address occupies 4 bytes (seg:off)
+    instead of 2.
+  - **Caller emits `push cs ; call near`** (4 bytes)
+    instead of `call far ptr16:16` (5 bytes) when
+    calling within the same segment. The `push cs`
+    (opcode `0x0E`) pushes the return segment so
+    the callee's `retf` pops both seg+off correctly.
+
+These Borland extensions complete the basic
+calling-convention picture: cdecl (caller-cleans,
+underscore prefix, right-to-left), pascal (callee-
+cleans, UPPERCASE, left-to-right), and far/near
+distinguish near `ret` vs `retf` based on the call
+distance. Mixing models would generate `call far`
+(`9A` opcode) explicitly.
+
+## `(int)(long+long)` skips high; long arg cdecl; long cmp folds int const
+
+Fixtures `1646` (`long a[2]; (int)(a[0]+a[1])`),
+`1647` (`long sqr(long x)` with long arg+return),
+and `1648` (`long < int_const`) all pass on the
+first capture.
+
+- `1646` (**narrow-cast on long add**): `(int)(long
+  + long)` discards the high-half computation just
+  like `(char)(int + int)` discards the high byte.
+  Code emits only `mov ax, [a_low] / add ax, [b_low]`
+  — **no `adc` on the high halves** since they would
+  be cast away. So BCC's narrow-cast propagation
+  pass works at the long-word level too, not just
+  the int-byte level.
+- `1647` (**long parameter passing**): a `long`
+  argument is passed as **two consecutive word
+  pushes**, with the **high half pushed first**
+  (lands at higher offset). Inside the callee:
+  - `[bp+4]` = low word
+  - `[bp+6]` = high word
+  Long return is via `DX:AX` register pair. After
+  the call site, **`pop cx; pop cx`** cleans 4 bytes
+  (matches the 2-arg cleanup rule from
+  [[batch-435-arg-cleanup-boundary]] — long counts
+  as 2 word-args worth of cleanup).
+- `1648` (**long cmp against int const**): the int
+  constant is **promoted to long at compile time**
+  — the cmp uses `cmp [bp+disp], 0` for the high
+  half (since int 10 has high=0) and `cmp [bp+disp],
+  10` for the low half. Both use the `83 /7` imm8-
+  sext encoding. So mixed long-vs-int-const cmp is
+  pre-folded at parse time, then the standard
+  inline two-step long compare runs.
+
+These three fixtures complete the long-type picture
+for codegen: aggregates, parameter passing, and
+type-promoted comparisons all work as expected.
+
+## Arg cleanup boundary: 3+ args → `add sp, N` (3 bytes)
+
+Fixtures `1622` (3 args), `1623` (4 args), and
+`1624` (5 args) probe the post-call arg-cleanup
+boundary. All pass on the first capture:
+- `1622` (3 args, 6 bytes): `add sp, 6` (`83 c4 06`,
+  3 bytes — same as 3× `pop cx` but BCC chose the
+  single instruction)
+- `1623` (4 args, 8 bytes): `add sp, 8` (`83 c4 08`,
+  3 bytes — saves 1 byte vs 4× pop)
+- `1624` (5 args, 10 bytes): `add sp, 10` (`83 c4
+  0a`, 3 bytes — saves 2 bytes vs 5× pop)
+
+**Final arg-cleanup table**:
+| Arg count | Bytes to clean | Encoding | Size |
+|-----------|----------------|----------|------|
+| 1 | 2 | `pop cx`           | 1 |
+| 2 | 4 | `pop cx; pop cx`   | 2 |
+| ≥ 3 | 2N | `add sp, 2N` (`83 c4 imm8`) | 3 |
+
+So the cutover is at exactly 3 args: BCC prefers
+pop chains for 1-2 args (1-2 bytes), and `add sp,
+imm8` for 3+ args (3 bytes flat). The 3-arg case is
+a tie in bytes (3× pop = `add sp, 6` = 3 bytes), and
+BCC chose `add sp` — likely because it's a single
+instruction with predictable timing on 8086. For
+4+ args, `add sp` strictly wins.
+
+The imm8 form `83 c4` (`add r/m16, imm8-sext`) is
+the same encoding family as the imm8-sext arithmetic
+ops ([[batch-400-imm8-policy]]). For args > 127
+bytes (very rare in practice), it would need to
+switch to imm16 form `81 c4 imm16` — not yet probed.
+
+## `a[i]=99; a[i]` no CSE; 2-arg cleanup uses `pop cx; pop cx`
+
+Fixtures `1619` (5-int array init), `1620` (`a[i]
+= 99; return a[i]`), and `1621` (function via
+out-param `compute(5, &x)`) all pass on the first
+capture.
+
+- `1619`: confirms `N_SCOPY@` for 5-int array,
+  cx=10. The 5-element template `01 00 02 00 03 00
+  04 00 05 00` is laid in `_DATA`.
+- `1620` (**confirmation**): writing then reading
+  the same `a[i]` with variable `i` emits the full
+  address computation **twice** — no CSE.
+  ```
+  mov bx, si / shl bx, 1 / lea ax, [bp-6] / add bx, ax
+  mov [bx], 99
+  mov bx, si / shl bx, 1 / lea ax, [bp-6] / add bx, ax  ; ← recomputed!
+  mov ax, [bx]
+  ```
+  Same "no CSE on indexed access" pattern seen in
+  [[batch-384-2d-int-arr]] / fixture `1469`. The
+  identical 8-byte address sequence is reemitted.
+- `1621` (**finding**): for a 2-argument cdecl
+  call, the post-call arg cleanup uses **`pop cx ;
+  pop cx`** (2 bytes total) rather than `add sp,
+  4` (3 bytes). So:
+  | Arg cleanup size | Form | Bytes |
+  |------------------|------|-------|
+  | 2 bytes (1 arg) | `pop cx` | 1 |
+  | 4 bytes (2 args) | `pop cx ; pop cx` | 2 |
+  | 6 bytes (3 args) | (not yet probed; likely 3× `pop cx` or `add sp, 6`) |
+  BCC prefers pop chains over `add sp, N` for small
+  cleanup counts since pops are 1 byte each and
+  `add sp, imm8` is 3 bytes.
+
+Also notable from `1621`: function with a
+**pointer-out-parameter** (`int *r`) enregisters
+both params (`n` → SI, `r` → DI), confirms `*r =
+...` lowering uses `mov [di], ax` (no extra mov
+through AX since the writeback target is the
+register itself). The body `*r = n*n + 1` lowers
+as `mov ax, si / imul si / inc ax / mov [di], ax`
+— clean four-instruction sequence.
+
