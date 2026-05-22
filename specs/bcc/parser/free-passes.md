@@ -522,3 +522,31 @@ Probe replaced with the char-compound-OR variant.
   `C x;` has byte-identical OBJ to `int x;`. Confirms typedef is
   purely a name alias — chained or not, it carries no codegen
   weight.
+
+## Free passes (batch 677)
+
+- `2411` — `r = (a=1, b=2, c=3, a+b+c);` (4-element comma chain
+  with side-effects + final value): each comma-separated expression
+  evaluated for side effect L-to-R; only the last (`a+b+c`)
+  produces the value. All three locals enregister (SI, DI, DX).
+  Re-confirms comma operator left-to-right with last-value-wins.
+- `2412` — `while (1) { if (i>5) break; sum+=i; i++; }`: `while
+  (1)` emits no condition test at the top — body runs
+  unconditionally with a backward `eb` at the tail. `break`
+  forwards to the loop-end label via `jmp end`. Standard
+  infinite-loop-with-break template (re-confirms earlier
+  `while(1)` finding).
+- `2413` — `x ? y ? 10 : 20 : z ? 30 : 40;` (triple-nested
+  ternary): each ternary expands recursively to its own
+  `cmp/jcc/mov/jmp/mov` skeleton — three independent expansions
+  here. All result paths converge on a common end label. No CSE
+  or tail-joining. Confirms ternary lowering is purely structural
+  recursive.
+- `2415` — `int i; char c; return i + c;` (mixed-width
+  arithmetic): char is sign-extended via `cbw` then pushed; int is
+  loaded; `pop / add ax, dx` produces the int result.
+  Re-confirms the standard `cbw` widening for char-in-int-context.
+- `2416` — `r = (a > 0) ? 100 : 200;` (ternary as initializer
+  RHS): byte-identical to using the ternary as a statement RHS —
+  the initializer context doesn't change the lowering. Standard
+  ternary materialization template (cmp/jcc/mov/jmp/mov/store).

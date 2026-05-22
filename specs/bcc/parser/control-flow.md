@@ -2624,3 +2624,32 @@ So the loop costs **5 bytes** for the while skeleton (`eb 00 / dec /
 jne disp8`) even when the body is empty. Confirms: control-flow
 templates are emitted structurally, not optimized away on empty
 content.
+
+## `(*pfn)(arg)` byte-identical to `pfn(arg)` (fixture `2414`)
+
+Both forms of indirect function call produce **identical OBJ**:
+
+```c
+pfn = square;
+return (*pfn)(7);    // explicit dereference
+// vs.
+return pfn(7);       // implicit (function-to-pointer + auto-deref)
+```
+
+```
+b8 07 00                ; ax = 7
+50                      ; push 7
+ff 56 fe                ; call near [bp-2]
+59                      ; pop cx
+```
+
+C90 defines `f` and `(*f)` as equivalent when `f` is a function or
+function pointer (functions decay to pointers; dereferencing a
+function-pointer produces a function value that immediately decays
+back to a pointer for the call). BCC implements this equivalence
+at parse time — the AST collapses both spellings to the same call
+node before codegen sees them.
+
+So the `(*pfn)(...)` idiom (common in K&R code) carries zero codegen
+cost — the leading `*` is purely syntactic noise from the compiler's
+perspective.
