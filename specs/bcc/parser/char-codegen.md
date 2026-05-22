@@ -1450,3 +1450,23 @@ Findings:
 - For unsigned char, BCC would emit `mov ah, 0` (zero-extend, 2B)
   instead of cbw, then `shr` (unsigned) instead of `sar`.
 
+
+## `char id(char c) { return c; }` — minimal char identity (3-byte body)
+
+Fixture `2824-char-arg-char-ret-obj`:
+
+```
+55 8b ec                       prologue
+8a 46 04                       mov al, c       ; byte load (3B)
+eb 00 5d c3                    epilogue
+```
+
+Findings:
+- Char→char identity = **just `mov al, [bp+4]`** (3B).
+- NO cbw (return is char, not int — AH is undefined per ABI).
+- The minimal-size body for a non-trivial function: 3 bytes for
+  the load, 5 bytes for prologue/epi.
+- Compare to int→int identity (`8b 46 04` = `mov ax, [bp+4]`, also
+  3B). Char and int identity are the same size — only the opcode
+  differs (8a for byte, 8b for word).
+

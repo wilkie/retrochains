@@ -1359,3 +1359,25 @@ Findings:
 - x86 lacks mem-mem move for general regs, so AX is the conduit.
 - Same shape as local-from-global (`2812`).
 
+
+## `static int counter = 5;` — initialized, internal linkage
+
+Fixture `2823-static-int-init-obj`:
+
+`_DATA` (2B): `05 00` (= 5)
+No PUBDEF for `_counter` — internal linkage only.
+
+Findings:
+- `static int counter = 5;` (file-scope, initialized) goes to
+  `_DATA` segment with the literal bytes.
+- **NO PUBDEF** — symbol is internal (static linkage).
+- Storage classes summary:
+
+| declaration              | segment | PUBDEF? |
+|--------------------------|---------|---------|
+| `int g;`                 | `_BSS`  | yes     |
+| `int g = K;`             | `_DATA` | yes     |
+| `static int g;`          | `_BSS`  | no      |
+| `static int g = K;`      | `_DATA` | no      |
+| `extern int g;`          | (EXTDEF) | (link-time) |
+

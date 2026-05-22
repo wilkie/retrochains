@@ -5459,3 +5459,35 @@ Findings:
   offset 0. Different offsets would change the disp on the final
   load.
 
+
+## Global `int **pp = &p;` — `mov bx, [_pp]; mov bx, [bx]; mov ax, [bx]`
+
+Fixture `2820-ptr-to-ptr-init-obj`:
+
+```c
+int v = 42;
+int *p = &v;
+int **pp = &p;
+return **pp;
+```
+
+`_DATA`:
+- `_v` (2B): `2a 00` (42)
+- `_p` (2B): `00 00` + FIXUPP to `_v`
+- `_pp` (2B): offset of `_p` + FIXUPP to `_p`
+
+```
+8b 1e 04 00                    mov bx, [_pp]    ; load pp value
+8b 1f                          mov bx, [bx]     ; deref: bx = p
+8b 07                          mov ax, [bx]     ; deref: ax = v
+```
+
+Findings:
+- `**pp` for a global ptr-to-ptr = **8 bytes** for the read.
+- Uses **BX reused** across two derefs: `mov bx, [_pp]` (4B disp16) +
+  `mov bx, [bx]` (2B no-disp) + `mov ax, [bx]` (2B no-disp).
+- Compare to **param `**pp`** (`2721`) which used si → bx → ax
+  (7B). Global is 1B more due to disp16 load instead of bp-disp8.
+- Reusing bx is a peephole: avoids `mov si, [_pp]; mov bx, [si]`
+  (5B) for the first two steps.
+

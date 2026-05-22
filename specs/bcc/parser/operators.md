@@ -1020,3 +1020,62 @@ Findings:
 - Same JOIN pattern as ternary in any other position; only the
   consumer of the result differs (push for call vs store/return).
 
+
+## `if (a && b)` — short-circuit AND with shared FALSE target
+
+Fixture `2821-short-circuit-and-obj`:
+
+```c
+if (a && b) return 1;
+return 0;
+```
+
+```
+83 7e 04 00                    cmp a, 0
+74 0b                          je → FALSE      ; short-circuit on a == 0
+83 7e 06 00                    cmp b, 0
+74 05                          je → FALSE      ; short-circuit on b == 0
+                               ; TRUE:
+b8 01 00 eb 04                 mov ax, 1; jmp epi
+                               ; FALSE:
+33 c0                          xor ax, ax
+```
+
+Findings:
+- `a && b`: test a — if zero, **jump to FALSE** (skip b's test).
+  Otherwise test b — if zero, jump to FALSE. Else fall through
+  to TRUE.
+- Both tests share **one FALSE target**; both use mem-imm cmp.
+- 19 bytes total for the && chain (4+2 per cmp+je × 2 + true/false
+  bodies).
+- Correctly short-circuits: b is not evaluated if a is false.
+
+## `if (a || b)` — short-circuit OR with shared TRUE target
+
+Fixture `2822-short-circuit-or-obj`:
+
+```c
+if (a || b) return 1;
+return 0;
+```
+
+```
+83 7e 04 00                    cmp a, 0
+75 06                          jne → TRUE      ; short-circuit on a != 0
+83 7e 06 00                    cmp b, 0
+74 05                          je → FALSE      ; if b == 0, false
+                               ; TRUE:
+b8 01 00 eb 04                 mov ax, 1; jmp epi
+                               ; FALSE:
+33 c0                          xor ax, ax
+```
+
+Findings:
+- `a || b`: test a — if NONZERO (truthy), **jump to TRUE** (skip
+  b). Otherwise test b — if zero, jump to FALSE. Else fall to TRUE.
+- **Asymmetric branches** vs `&&`: `||` jumps-to-true on the first
+  truthy operand; `&&` jumps-to-false on the first falsy operand.
+- The fall-through path for `||` reaches TRUE; for `&&` reaches TRUE
+  only after BOTH operands.
+- 20 bytes total for the || chain.
+

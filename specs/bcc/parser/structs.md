@@ -2917,3 +2917,29 @@ Findings:
 - Trailing chars stay at their natural offset; the next struct
   in an array would start at the next byte (odd offset OK).
 
+
+## `union U { int a; int b; }` — both members at offset 0 (overlapping)
+
+Fixture `2819-union-two-int-obj`:
+
+```c
+union U { int a; int b; };
+union U u;
+u.a = 100;
+return u.b;
+```
+
+```
+c7 06 00 00 64 00              [_u + 0] = 100    (u.a = 100)
+a1 00 00                       mov ax, [_u + 0]  (u.b — SAME offset as u.a)
+```
+
+Findings:
+- Union members share storage: both `u.a` and `u.b` map to
+  **offset 0**. Sizeof(union U) = max(member sizes) = 2 bytes.
+- Writing `u.a = 100` then reading `u.b` returns 100 — they
+  alias the same bytes.
+- BCC handles unions transparently at codegen: each member-access
+  uses its own field-offset which happens to be 0 for all in this
+  union.
+
