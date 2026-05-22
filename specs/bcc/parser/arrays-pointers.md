@@ -4753,3 +4753,35 @@ Findings:
 - Net result for this fixture: `(*row)[2]` = `matrix + 6 + 4` =
   `matrix + 10` = `matrix[1][2]`. Correct.
 
+
+## `*p == K` — `cmp word [si], imm8` direct memory compare
+
+Fixture `2693-deref-eq-const-obj`:
+
+```c
+int test(int *p) {
+  if (*p == 42) return 1;
+  return 0;
+}
+```
+
+```
+55 8b ec 56                    prologue + push si
+8b 76 04                       mov si, p
+83 3c 2a                       cmp word [si], 42      ; 3-byte direct cmp!
+75 05                          jne → false
+b8 01 00 eb 04 33 c0 eb 00     standard returns
+5e 5d c3                       epilogue
+```
+
+Findings:
+- `*p == K` for `int *p` (with K fitting in 8 bits sign-extended) uses
+  **`cmp word ptr [si], imm8`** = `83 /7 disp imm8` = **3 bytes total**.
+  ModR/M `3c` = mod 00, opcode-ext 111 (cmp), r/m 100 (`[si]` no disp).
+- This is the same peephole family as `cmp word [_g], imm8` (global,
+  `2594`) and `cmp word [bp+disp], 0` (local, `2666`). All forms
+  trigger the same compact mem-cmp shape.
+- Saves 2 bytes vs the naive `mov ax, [si]; cmp ax, K` (5 bytes).
+- For K > 127 or K < -128, BCC would switch to `81 /7 disp imm16`
+  (5 bytes) — still 1 byte shorter than the load-then-cmp form.
+

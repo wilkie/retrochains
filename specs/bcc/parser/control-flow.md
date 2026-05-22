@@ -3706,3 +3706,42 @@ Findings:
   this: emit each statement as written, do not skip unreachable
   ones.
 
+
+## `for (i = N; i--; )` — postdec-as-condition (loops N times)
+
+Fixture `2694-for-postdec-init-obj`:
+
+```c
+for (i = 5; i--; ) {
+  s = s + 1;
+}
+```
+
+```
+55 8b ec 56 57                 prologue + push si, di
+33 f6                          xor si, si       ; s = 0
+bf 05 00                       mov di, 5        ; i = 5
+eb 05                          jmp → COND
+                               ; BODY:
+8b c6 40 8b f0                 s = s + 1 (AX-acc, 5B)
+                               ; COND:
+8b c7                          mov ax, di       ; ax = i (OLD)
+4f                             dec di           ; --i
+0b c0                          or ax, ax        ; test OLD value
+75 f4                          jne → BODY
+8b c6                          return s
+```
+
+Findings:
+- `i--` in condition uses **postfix semantics**: load OLD value to
+  AX, decrement i, then test the OLD value. Loop continues while
+  the previous value was non-zero.
+- For `i = N`, this loops EXACTLY N times — i takes the values
+  N, N-1, ..., 1 as the OLD value tested. After the last loop, i
+  becomes 0 and we exit.
+- The COND emits 6 bytes: `mov ax, di` (2B) + `dec di` (1B) +
+  `or ax, ax` (2B) + `jne disp8` (2B) — 7B if you count the jne.
+- Compare to forward `for (i=0; i<N; ++i)`: same iteration count
+  but different test direction. The postdec form is sometimes
+  byte-shorter when N is a known constant.
+

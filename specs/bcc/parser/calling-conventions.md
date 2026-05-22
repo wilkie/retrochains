@@ -1273,3 +1273,60 @@ Findings:
 - Push order is unchanged: R-to-L per cdecl. Cleanup is
   `add sp, 6` for 3 args (3B).
 
+
+## Empty void function `void nop(void) { }` — minimal 5-byte body
+
+Fixture `2697-empty-void-fn-obj`:
+
+```c
+void nop(void) {
+}
+```
+
+```
+55                             push bp
+8b ec                          mov bp, sp
+5d                             pop bp
+c3                             ret
+```
+
+Findings:
+- **Absolute minimum function body: 5 bytes** (prologue 3B +
+  epilogue 2B).
+- Even an empty void function pays the BP setup. BCC always
+  emits push bp/mov bp,sp/pop bp/ret.
+- Void return → no `eb 00` placeholder before pop bp.
+- No `sub sp, N` (no locals), no register saves (nothing used).
+
+## Ternary as function arg — JOIN in AX, then push as arg
+
+Fixture `2698-ternary-as-arg-obj`:
+
+```c
+int twice(int x);
+return twice(a > b ? a : b);
+```
+
+```
+55 8b ec 56 57                 prologue + push si, di
+be 05 00 bf 07 00              a in si, b in di
+3b f7                          cmp si, di
+7e 04                          jle → ELSE
+8b c6                          THEN: ax = si    (a)
+eb 02                          jmp → JOIN
+8b c7                          ELSE: ax = di    (b)
+                               ; JOIN:
+50                             push ax           ; push as call arg
+e8 00 00                       call _twice (FIXUPP)
+59                             pop cx            ; cleanup 1 arg
+eb 00 5f 5e 5d c3              epilogue
+```
+
+Findings:
+- Ternary as fn arg: both arms put result in AX, JOIN merges them,
+  then `push ax` feeds the call.
+- No intermediate spill or copy: the ternary's AX result is the
+  arg for the call. Direct flow.
+- Confirms: ternary-as-expression always uses AX as the value
+  carrier; the post-JOIN code uses it for whatever next step needs.
+

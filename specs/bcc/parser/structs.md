@@ -2619,3 +2619,49 @@ Findings:
 - Byte stores use `c6 46 disp imm8` (4 bytes each).
 - Word loads at struct offsets 0 and 2 pull two bytes each.
 
+
+## `p->x + p->y` — minimal 4-instruction body
+
+Fixture `2695-struct-arrow-twice-obj`:
+
+```c
+struct P { int x; int y; };
+int sum(struct P *p) {
+  return p->x + p->y;
+}
+```
+
+```
+55 8b ec 56                    prologue + push si
+8b 76 04                       mov si, p
+8b 04                          mov ax, [si]        ; p->x (no disp, 2B)
+03 44 02                       add ax, [si + 2]    ; + p->y (disp8 + mem, 3B)
+eb 00 5e 5d c3                 epilogue
+```
+
+Findings:
+- `p->x + p->y` for a 2-field struct: 5-byte expression body
+  (load + add).
+- `p->x` (offset 0) uses 2-byte `mov ax, [si]` (no-disp form).
+- `p->y` (offset 2) uses 3-byte `add ax, [si + 2]` (disp8 +
+  mem-source add — AX-acc with memory operand).
+- Total body: 13 bytes including prologue/epilogue. This is the
+  near-minimum for "sum two fields via a struct pointer."
+
+## Global `struct B = { 10, 20, 30 }` — LIDATA with field bytes
+
+Fixture `2696-global-struct-init-obj`:
+
+`_DATA` (6 bytes): `0a 00 14 00 1e 00` (= 10, 20, 30 as little-endian
+ints in declaration order)
+
+Main body: `mov ax, [_b + 2]` to read `.h` (offset 2).
+
+Findings:
+- Global struct initializer = bytes laid out in declaration order
+  in `_DATA`, one slot per field.
+- `b.h` (second int field) at offset 2 — moffs16 load.
+- No padding (fields are int = naturally aligned).
+- Same shape as global array init (`2588`): consecutive bytes per
+  element.
+
