@@ -2154,3 +2154,62 @@ Findings:
 | `x * 2^N`       | shl strength reduction       |
 | `x * other`     | `mov dx, K; imul dx`         |
 
+
+## `x * 1` — IDENTITY fold (no multiply instruction)
+
+Fixture `2729-mul-1-obj`:
+
+```c
+return x * 1;
+```
+
+```
+8b 46 fe                       mov ax, x       ; just load x (no mul)
+eb 00 ...                      epilogue
+```
+
+Findings:
+- **`x * 1` is identity-folded** — BCC emits NO multiplication
+  instruction at all. The expression evaluates to just `x`.
+- Confirms the multiplication peephole hierarchy:
+
+| pattern         | bytes for the op |
+|-----------------|------------------|
+| `x * 0`         | 2B (`xor ax, ax`, no x load needed) |
+| `x * 1`         | 0B (identity)    |
+| `x * 2`         | 2B (`shl ax, 1`) |
+| `x * 2^N`       | varies (see `2723`-`2725`) |
+| `x * other`     | 5B (`mov dx, K; imul dx`) |
+
+## `x + 0` — IDENTITY fold (no add instruction)
+
+Fixture `2730-add-zero-obj`:
+
+```c
+return x + 0;
+```
+
+```
+8b 46 fe                       mov ax, x       ; just load x
+```
+
+Findings:
+- `x + 0` also folds to identity — no `add` emitted.
+- Additive identity peephole:
+  - `x + 0` → just x (0B)
+  - `x + 1` → `inc ax` (1B via the +1 peephole)
+  - `x + K` → `add ax, K`
+
+## `u % 16` — `and ax, 15` peephole (extends `u % 8` from `2590`)
+
+Fixture `2731-umod-16-obj`:
+
+```
+8b 46 fe                       mov ax, u
+25 0f 00                       and ax, 0x000F (3B AX-acc)
+```
+
+Findings:
+- Confirms `u % 2^N` → `and ax, (2^N - 1)` peephole works for any
+  power-of-2 modulus. Mask is `2^N - 1`.
+

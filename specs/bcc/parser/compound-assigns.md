@@ -2910,3 +2910,43 @@ Findings:
 - Confirms: BCC is NOT a strength-reducing compiler. The
   user's source structure dictates byte structure.
 
+
+## `p->x += K` (struct field via ptr) — direct `add word [si], imm8` (3B!)
+
+Fixture `2734-struct-arrow-plus-obj`:
+
+```c
+struct P { int x; };
+void inc(struct P *p) {
+  p->x += 10;
+}
+```
+
+```
+55 8b ec                       prologue
+56                             push si
+8b 76 04                       mov si, p
+83 04 0a                       add word [si], 10    ; DIRECT mem-add (3B!)
+5e 5d c3                       pop si; ret  (void)
+```
+
+Findings:
+- `p->x += K` (where K fits in imm8 and field at offset 0) uses
+  **`add word [si], imm8`** = `83 04 imm8` (3 bytes). DIRECT
+  memory-add via register-based addressing, NO AX-acc.
+- ModR/M `04` = mod 00, opcode-ext 000 (add), r/m 100 (`[si]`).
+- For non-zero field offset, would emit `83 44 disp8 imm8` (4B).
+- For imm > 127, would emit `81 04 imm16` (5B).
+- This is the same peephole as `g += K` (`2638`, 5B with moffs16
+  global form) — but via si-based addressing, saving 2 bytes.
+
+Per-form compound-add costs:
+
+| target           | form              | bytes |
+|------------------|-------------------|-------|
+| reg-promoted var | `add reg, imm8`   | 3B    |
+| `p->field@0`     | `add [si], imm8`  | 3B    |
+| `p->field@K`     | `add [si+disp8], imm8` | 4B |
+| global `g`       | `add [_g], imm8`  | 5B    |
+| local `[bp-D]`   | `add [bp-D], imm8`| 4B    |
+

@@ -2664,3 +2664,27 @@ Findings:
 - Same shape for positive and negative long literals (`2678`):
   10 bytes for the assignment (2 × 5-byte `mov word [bp+disp], imm16`).
 
+
+## `(int)long_var` for a long param — single `mov ax, [bp+4]` (load LOW only)
+
+Fixture `2732-int-from-long-obj`:
+
+```c
+int narrow(long v) {
+  return (int)v;
+}
+```
+
+```
+55 8b ec                       prologue
+8b 46 04                       mov ax, [bp+4]    ; LOW word only
+eb 00 5d c3                    epilogue
+```
+
+Findings:
+- `(int)long_var` truncates by loading ONLY the low word at the
+  long's base address. The HIGH word at `[bp+6]` is unread.
+- Single 3-byte `mov ax, [mem]` for the entire cast + return.
+- Same shape as `(int)long_local` (`2521`) and `(int)long_global`
+  (`2560`).
+

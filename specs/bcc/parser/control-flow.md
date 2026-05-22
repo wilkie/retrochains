@@ -3784,3 +3784,42 @@ Findings:
 - BCC does NOT replicate the epilogue (pop bp; ret) per return —
   always shares one.
 
+
+## `for (i = N; --i; )` — TIGHTEST count-down loop condition (3B per iter)
+
+Fixture `2733-for-predec-init-obj`:
+
+```c
+for (i = 5; --i; ) {
+  s = s + 1;
+}
+```
+
+```
+33 f6                          xor si, si       ; s = 0
+bf 05 00                       mov di, 5        ; i = 5
+eb 05                          jmp → COND
+                               ; BODY:
+8b c6 40 8b f0                 s = s + 1 (AX-acc 5B)
+                               ; COND (prefix --i):
+4f                             dec di           ; --i (modify)
+75 f8                          jne -8 → BODY    ; test flags from dec
+```
+
+Findings:
+- **`for (...; --i; )` is the BYTE-OPTIMAL count-down idiom**:
+  - `dec reg` (1B) — modifies AND sets flags
+  - `jne disp8` (2B) — branches on the dec's flags
+  - **Total 3 bytes per cond check**
+- Compare to other count-down forms:
+
+| source                          | cond bytes per iter | inc bytes |
+|---------------------------------|---------------------|-----------|
+| `for (i=N; --i; )` (prefix)     | 3B (`dec`+`jne`)   | 0B (in cond) |
+| `for (i=N; i--; )` (postfix)    | 7B (mov+dec+or+jne)| 0B (in cond) |
+| `for (i=N; i>0; --i)`           | 4B (or+jg) + 1B inc | 5B total |
+| `for (i=N; i>0; i = i - 1)`     | 4B + 5B AX-acc inc | 9B total |
+
+- The prefix-decrement form fuses test+modify into one instruction
+  pair, no separate `or` or `cmp` needed. Optimal.
+
