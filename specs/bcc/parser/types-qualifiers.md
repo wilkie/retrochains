@@ -892,3 +892,29 @@ Findings:
   type-system check (write attempts get errors, but the value can
   still change via aliasing).
 
+
+## Enum with negative explicit value — folded as `0xFFFF`
+
+Fixture `2716-enum-negative-obj`:
+
+```c
+enum Sign { NEG = -1, ZERO = 0, POS = 1 };
+int main(void) {
+  enum Sign s = NEG;
+  return s;
+}
+```
+
+```
+c7 46 fe ff ff                 s = -1 (stored as 0xFFFF)
+8b 46 fe                       return s
+```
+
+Findings:
+- Enum constants can be NEGATIVE via explicit `= -K`. Stored as
+  the int bit pattern (`0xFFFF` for `-1`).
+- Enums are **int-typed**, not unsigned. Negative values are valid.
+- The enum name `NEG` resolves at compile time to the literal `-1`,
+  which then folds to bytes `ff ff`.
+- Same as a regular `int s = -1;`.
+

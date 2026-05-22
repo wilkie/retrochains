@@ -1384,3 +1384,39 @@ Findings:
 - Stack frame slot for char arg is still 2 bytes (cdecl word
   alignment) — the wasted high byte is the cost of cdecl uniformity.
 
+
+## **CORRECTION: 2-arg cleanup is `pop cx; pop cx` (2B)**, NOT `add sp, 4` (3B)
+
+Fixture `2712-use-fn-result-obj`:
+
+```c
+int n = sum(3, 4);
+return n + 1;
+```
+
+```
+b8 04 00 50                    push 4
+b8 03 00 50                    push 3
+e8 00 00                       call _sum
+59 59                          pop cx; pop cx     ; CLEANUP! (2B)
+89 46 fe                       n = ax
+8b 46 fe 40                    return n + 1
+```
+
+Findings:
+- **2-arg cleanup uses TWO `pop cx` instructions** (2 bytes total),
+  NOT `add sp, 4` (3 bytes). 1 byte saved.
+- This **corrects the prior table** from `2522`/`2527`. Updated:
+
+| arg count   | cleanup form         | bytes |
+|-------------|----------------------|-------|
+| 1           | `pop cx`             | 1B    |
+| **2**       | **`pop cx; pop cx`** | **2B** |
+| 3+ (sign-ext) | `add sp, imm8`     | 3B    |
+| 64+         | `add sp, imm16`      | 4B    |
+
+  The crossover from "pop chain" to "add sp" happens at 3 args.
+  At 2 args, 2 × 1B pops still wins over the 3B add sp form.
+- This is a beautiful nano-optimization — most function calls have
+  1-2 args, and BCC saves 1B on the cleanup for 2-arg cases.
+

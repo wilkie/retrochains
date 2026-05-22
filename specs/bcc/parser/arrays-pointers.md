@@ -4931,3 +4931,35 @@ Findings:
 - For `long *`, the scale would be `shl shl` (= shl by 2 = ×4),
   doubling the shift but same spill pattern.
 
+
+## `char *p + n` — NO scaling needed (sizeof=1), 6-byte body
+
+Fixture `2711-char-ptr-plus-int-obj`:
+
+```c
+char *advance(char *p, int n) {
+  return p + n;
+}
+```
+
+```
+55 8b ec                       prologue
+8b 46 04                       mov ax, p
+03 46 06                       add ax, n     ; direct mem-source add (NO shl!)
+eb 00 5d c3                    epilogue
+```
+
+Findings:
+- For `char *` pointer arithmetic, `sizeof(char) = 1`, so the
+  byte-offset is just `n` itself — NO `shl` scaling step.
+- Result: **6-byte body** vs 11 bytes for `int *` (`2709`).
+- No push/pop spill needed either: `add ax, [bp+6]` uses
+  memory-source directly. Saves 5 bytes vs the int* case.
+- Pointer-arithmetic cost table:
+
+| pointer type | + var int | bytes (expression body) |
+|--------------|-----------|-------------------------|
+| `char *`     | no shift  | 6B (`mov ax + add ax, [mem]`) |
+| `int *`      | shl ×1    | 11B (`mov + shl + push + mov + pop + add`) |
+| `long *`     | shl ×2    | likely 13B (probe) |
+

@@ -2665,3 +2665,52 @@ Findings:
 - Same shape as global array init (`2588`): consecutive bytes per
   element.
 
+
+## `p->x = 0; p->y = 0;` — field-zero write saves 1B (no-disp form)
+
+Fixture `2714-struct-field-write-obj`:
+
+```c
+void zero(struct P *p) {
+  p->x = 0;
+  p->y = 0;
+}
+```
+
+```
+55 8b ec 56                    prologue + push si
+8b 76 04                       mov si, p
+c7 04 00 00                    [si] = 0          ; p->x at offset 0 (5B no-disp)
+c7 44 02 00 00                 [si + 2] = 0      ; p->y at offset 2 (6B disp8)
+5e 5d c3                       pop si; pop bp; ret  (void)
+```
+
+Findings:
+- `p->x = 0` (offset 0) uses **`c7 04 imm16`** — 5 bytes, no disp.
+  ModR/M `04` = mod 00, r/m 100 = `[si]`.
+- `p->y = 0` (offset 2) uses **`c7 44 disp8 imm16`** — 6 bytes,
+  disp8. ModR/M `44 02` = mod 01, r/m 100 = `[si + disp8]`.
+- **Field-zero store is 1B cheaper than non-zero-offset stores**
+  via the no-disp form.
+- Field-zero is also cheaper than disp16 (which would be 7B).
+
+## Global `struct E table[N] = {{...}}` — contiguous LIDATA
+
+Fixture `2715-global-struct-arr-obj`:
+
+`_DATA` for `_table` (12 bytes, 3 × sizeof(struct E)=4):
+```
+0a 00 64 00     ; table[0] = {10, 100}
+14 00 c8 00     ; table[1] = {20, 200}
+1e 00 2c 01     ; table[2] = {30, 300}
+```
+
+Main: `mov ax, [_table + 10]` to read `table[2].weight`:
+- struct stride 4, index 2 → offset 8
+- weight field at struct-offset 2 → total offset 10
+
+Findings:
+- Global struct array init = contiguous bytes, struct stride × N
+  bytes, field bytes in declaration order.
+- Const subscript folds to a single moffs16 load.
+

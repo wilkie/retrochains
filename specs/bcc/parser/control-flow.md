@@ -3745,3 +3745,42 @@ Findings:
   but different test direction. The postdec form is sometimes
   byte-shorter when N is a known constant.
 
+
+## Multiple return statements — single shared epilogue
+
+Fixture `2713-multi-return-obj`:
+
+```c
+int classify(int x) {
+  if (x > 100) return 2;
+  if (x > 10) return 1;
+  return 0;
+}
+```
+
+```
+8b 76 04                       mov si, x
+83 fe 64                       cmp si, 100
+7e 05                          jle → check-10
+b8 02 00                       ax = 2
+eb 0e                          jmp → epi
+                               ; check-10:
+83 fe 0a                       cmp si, 10
+7e 05                          jle → check-0
+b8 01 00                       ax = 1
+eb 04                          jmp → epi
+                               ; check-0:
+33 c0                          ax = 0
+eb 00 5e 5d c3                 epilogue (shared by all returns)
+```
+
+Findings:
+- Multiple `return` statements **converge on a SINGLE shared
+  epilogue**. Each early return emits `mov ax, K; jmp epi`.
+- The final implicit-fall-through return uses `eb 00` (the default-
+  position jmp) just like a single-return function.
+- This is the cleanest possible representation: N returns → N
+  `mov ax, K; jmp epi` blocks + 1 epilogue.
+- BCC does NOT replicate the epilogue (pop bp; ret) per return —
+  always shares one.
+
