@@ -4279,3 +4279,51 @@ Findings:
   `cmp byte [si], 0` in the while-sentinel (`2561`).
 - Result `1` vs `0` returns via standard mov-ax-K + xor-ax,ax patterns.
 
+
+## Global array-of-pointers with FIXUPP'd initializers
+
+Fixture `2608-arr-of-int-ptr-obj`:
+
+```c
+int a = 10;
+int b = 20;
+int c = 30;
+int *table[3] = { &a, &b, &c };
+int main(void) {
+  return *table[1];
+}
+```
+
+`_DATA` layout (12 bytes):
+```
+0a 00       ; a = 10 (offset 0)
+14 00       ; b = 20 (offset 2)
+1e 00       ; c = 30 (offset 4)
+00 00       ; table[0] = &a (FIXUPP to _a = offset 0)
+02 00       ; table[1] = &b (FIXUPP to _b = offset 2)
+04 00       ; table[2] = &c (FIXUPP to _c = offset 4)
+```
+
+So `_table` is at offset 6 in `_DATA`.
+
+Main body:
+```
+55 8b ec                       prologue
+8b 1e 08 00                    mov bx, [_table + 2]    ; table[1] (FIXUPP)
+8b 07                          mov ax, [bx]            ; *table[1]
+eb 00 5d c3                    epilogue
+```
+
+Findings:
+- Globals lay out in DECLARATION order. `a`, `b`, `c` come first
+  (in source order), then the pointer table.
+- Pointer initializers `&a`, `&b`, `&c` carry **per-entry FIXUPPs**
+  to the target globals' addresses. Three pointer entries → three
+  FIXUPP records.
+- `*table[K]` for const K = two-load chain:
+  1. `mov bx, [table + K×2]` — get the pointer (FIXUPP'd disp16)
+  2. `mov ax, [bx]` — dereference
+- Constant subscript on a global ptr array still requires the
+  indirect load (vs `arr[K]` for plain int arr which is just
+  `mov ax, [arr + K*2]`).
+

@@ -1816,3 +1816,68 @@ Findings:
 
   Signed gets NO fast path even for pow-2 divisors.
 
+
+## Unsigned `u % K` (non-pow-2) — `xor dx, dx; div bx; mov ax, dx`
+
+Fixture `2603-umod-10-obj`:
+
+```c
+unsigned int u = 1000;
+return (int)(u % 10);
+```
+
+```
+55 8b ec 4c 4c                 prologue + 2B local
+c7 46 fe e8 03                 u = 1000
+8b 46 fe                       mov ax, u
+bb 0a 00                       mov bx, 10
+33 d2                          xor dx, dx      ; ZERO-extend (unsigned!)
+f7 f3                          div bx          ; UNSIGNED divide
+8b c2                          mov ax, dx      ; remainder
+eb 00 8b e5 5d c3              epilogue
+```
+
+Findings:
+- Unsigned divide/mod by non-pow-2 uses `xor dx, dx; div bx`.
+  Contrast with signed: `cwd; idiv bx`.
+- Opcode-ext bit-3 distinguishes signed (ext 7, `f7 fb`) vs
+  unsigned (ext 6, `f7 f3`). **One bit difference.**
+- Complete arith table:
+
+| op type    | signed              | unsigned             |
+|------------|---------------------|----------------------|
+| ÷ pow-2    | cwd + idiv          | shr                  |
+| ÷ non-pow-2| cwd + idiv          | xor dx,dx + div      |
+| % pow-2    | cwd + idiv + mov ax,dx | and ax, (2^N-1)   |
+| % non-pow-2| cwd + idiv + mov ax,dx | xor dx,dx + div + mov ax,dx |
+| × any K    | mov dx,K + imul dx  | mov dx,K + mul dx (probe) |
+
+
+## `x * 7` for signed int — `mov dx, 7; imul dx` (no shl-add trick)
+
+Fixture `2604-smul-7-obj`:
+
+```c
+int x = 100;
+return x * 7;
+```
+
+```
+55 8b ec 4c 4c                 prologue + 2B local
+c7 46 fe 64 00                 x = 100
+8b 46 fe                       mov ax, x
+ba 07 00                       mov dx, 7
+f7 ea                          imul dx          ; signed multiply
+eb 00 8b e5 5d c3              epilogue
+```
+
+Findings:
+- `x * 7` uses the standard 2-step pattern from `2562`:
+  `mov dx, K; imul dx`. NO shl-and-add decomposition (which would
+  be `x*8 - x = (x<<3) - x`, requiring shl + sub for a multiply
+  by 7 — about the same byte count, but BCC just uses imul).
+- Confirms: **BCC's multiply codegen is always `mov dx, K; imul dx`**
+  for any constant K. No strength reduction.
+- The 8086 has no `imul reg, imm` (186/286 feature), so the
+  scratch-register load is mandatory.
+

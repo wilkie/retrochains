@@ -714,3 +714,38 @@ Findings:
   (5 bytes); `~x + 1` would be `not ax; inc ax` (3 bytes). BCC
   picks the most direct form via the dedicated `neg` instruction.
 
+
+## `a == b` between two int locals — `mov ax, a; cmp ax, b`
+
+Fixture `2606-eq-two-vars-obj`:
+
+```c
+int a = 5;
+int b = 5;
+if (a == b) return 1;
+return 0;
+```
+
+```
+55 8b ec 83 ec 04              prologue + 4B locals
+c7 46 fe 05 00                 a = 5
+c7 46 fc 05 00                 b = 5
+8b 46 fe                       mov ax, a       ; load LHS
+3b 46 fc                       cmp ax, b       ; cmp r16, [mem]
+75 05                          jne → false
+b8 01 00                       true
+eb 04                          jmp epi
+33 c0                          false
+eb 00 8b e5 5d c3              epilogue
+```
+
+Findings:
+- `a == b` between two memory locations uses
+  **`mov ax, [a]; cmp ax, [b]`** — the 8086 has no mem-mem cmp,
+  so the LHS goes to AX first.
+- ModR/M `3b` opcode = `cmp r16, r/m16` — reverse of `cmp r/m, r`
+  (which would be `39`). The choice doesn't matter for equality
+  but follows the lvalue/rvalue convention.
+- Branch is `75 05` (jne) — skip the true-path if not equal.
+- Total: 3 (load) + 3 (cmp) + 2 (jne) = 8 bytes for the test.
+

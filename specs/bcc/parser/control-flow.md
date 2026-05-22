@@ -3173,3 +3173,41 @@ Findings:
   produce nested branch blocks with predictable shape, which
   makes our reimpl's job easier — we just emit the same shape.
 
+
+## `while (*p)` is byte-identical to `while (*p != 0)`
+
+Fixture `2605-while-deref-incr-obj`:
+
+```c
+while (*p) {
+  p = p + 1;
+  n = n + 1;
+}
+```
+
+```
+55 8b ec 56 57 be 00 00         prologue + push si, di + load p
+33 ff                            xor di, di
+eb 0a                            jmp → COND
+                                 ; --- BODY ---
+8b c6 40 8b f0                   p = p + 1 (AX-acc via si)
+8b c7 40 8b f8                   n = n + 1 (AX-acc via di)
+                                 ; --- COND ---
+80 3c 00                         cmp byte [si], 0
+75 f1                            jnz → BODY
+8b c7                            mov ax, n
+eb 00 5f 5e 5d c3                epilogue
+```
+
+Findings:
+- `while (cond)` for any non-zero-test `cond` uses **byte-identical
+  shape** whether written as `while (*p)` or `while (*p != 0)`.
+- The implicit "is non-zero" test compiles to the SAME
+  `cmp byte [si], 0; jnz BODY` sequence as the explicit form.
+- So our parser can canonicalize `while (X)` → `while (X != 0)`
+  with no byte impact.
+- Same applies to `if (X)` vs `if (X != 0)`.
+- The "memory operand for byte compare" is `80 3c 00` (3 bytes):
+  opcode `80 /7` = cmp byte r/m with imm8, ModR/M `3c` = mod 00
+  r/m 100 = `[si]`, then imm8 = 0.
+

@@ -1145,3 +1145,43 @@ Findings:
 | 2-63      | `add sp, imm8`       | 3B    |
 | 64+       | `add sp, imm16`      | 4B    |
 
+
+## Global fn-pointer initialized + indirect call — `ff 16 disp16`
+
+Fixture `2607-global-fnptr-init-obj`:
+
+```c
+int dbl(int x) { return x + x; }
+int (*op)(int) = dbl;
+int main(void) {
+  return op(7);
+}
+```
+
+`_DATA` (2 bytes): `00 00` (FIXUPP for `_dbl`)
+
+main body:
+```
+55 8b ec                       prologue
+b8 07 00 50                    push 7
+ff 16 00 00                    call word ptr [_op]   ; INDIRECT via global
+59                             pop cx                ; cleanup 1 arg
+eb 00 5d c3                    epilogue
+```
+
+Findings:
+- Global fn-ptr indirect call uses **`ff 16 disp16`** (4 bytes):
+  `call word ptr [moffs16]` with FIXUPP target = the fn-ptr global.
+- ModR/M `16` = mod 00, opcode-ext 010 (call near indirect),
+  r/m 110 (disp16-only). Distinct from local fn-ptr indirect:
+
+| location of fn-ptr | call form           | bytes |
+|--------------------|---------------------|-------|
+| local (`[bp+disp8]`) | `ff 56 disp8`     | 3B    |
+| local (`[bp+disp16]`) | `ff 96 disp16`   | 4B    |
+| global             | `ff 16 disp16`      | 4B    |
+| direct call (known fn) | `e8 rel16`     | 3B    |
+
+- The global `_op` is initialized at link time via FIXUPP — the
+  data bytes `00 00` get relocated to `_dbl`'s offset.
+
