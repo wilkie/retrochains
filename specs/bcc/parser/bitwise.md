@@ -279,3 +279,48 @@ instruction.
 
 Applies analogously to other bitwise idioms in pure-branch contexts
 (probably `or`, but not exercised in this fixture).
+
+## `x &= ~(1 << K)` — bit-clear idiom fully folded (fixture `2426`)
+
+The `bit-clear` idiom `x &= ~(1 << K)` for a constant `K` is fully
+constant-folded at parse time to a single `and reg, imm16`:
+
+```c
+unsigned int x = 0xFF;
+x &= ~(1 << 3);
+```
+
+```
+be ff 00                ; x = 0xFF (si)
+81 e6 f7 ff             ; and si, 0xFFF7   ← ~(1 << 3) folded at parse
+```
+
+The fold pipeline:
+- `1 << 3` = 8 (parse-time shift fold)
+- `~8` = 0xFFF7 in 16-bit (parse-time bitwise NOT)
+- `x & 0xFFF7` = the compound assign
+
+Encoding `81 e6 f7 ff`:
+- `81` = `op r/m16, imm16` form for the bitwise family
+- `e6` = ModR/M `mod=11 reg=100 rm=110` = `/4 = and` on `si`
+- `f7 ff` = imm16 = 0xFFF7 little-endian
+
+The full idiom collapses to 4 bytes — minimal cost for bit clearing.
+Compares favorably to a runtime computation:
+
+```
+; Hypothetical non-folded:
+b8 01 00                ; mov ax, 1        (3 bytes)
+b1 03                   ; mov cl, 3        (2 bytes)
+d3 e0                   ; shl ax, cl       (2 bytes)
+f7 d0                   ; not ax           (2 bytes)
+21 c6                   ; and si, ax       (2 bytes)
+                        ; ≈ 11 bytes
+```
+
+So the constant fold saves ~7 bytes for this idiom.
+
+Confirms BCC's constant-fold pipeline handles `<<`, `~`, and `&` on
+literal operands transitively. Combined with the
+[[zero-test-on-and-result]] (which uses `test`), bit-twiddling
+idioms get good codegen even without an explicit optimizer pass.

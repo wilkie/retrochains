@@ -252,3 +252,29 @@ So `"STR"[K]` for a constant `K`:
 
 No `mov bx, offset str / mov al, [bx+K]` round-trip — BCC peepholes
 directly to the moffs8 form.
+
+## Octal escape sequences `\NNN` (fixture `2423`)
+
+`"\003\012\077"` — three octal escapes in a single string:
+
+```
+data section:
+  03 0a 3f 00   ; \003=3, \012=10, \077=63, terminator
+```
+
+So octal escapes work in BCC:
+- `\003` → 3 (octal 003 = decimal 3)
+- `\012` → 10 (octal 012 = decimal 10)
+- `\077` → 63 (octal 077 = decimal 63)
+
+Earlier docs noted "Octal escapes await fixtures" — this fixture
+demonstrates the feature is implemented. The lexer's `decode_escape`
+helper must recognize a backslash followed by 1-3 octal digits
+(0-7) and consume greedily, same as `\x` but with octal digits.
+
+A trailing non-octal character ends the escape; `\1234` would be
+parsed as `\123` (= octal 123 = 83) followed by `'4'`.
+
+Limit: 3 octal digits max per the C standard. `\0` is the special
+single-zero case (NUL terminator), since it's `\` followed by a
+single octal digit `0` followed by end-of-octal-digits.

@@ -567,3 +567,22 @@ Probe replaced with the char-compound-OR variant.
   pp), then outer write uses `mov [bx], 99`. Two levels of
   indirection = two memory accesses. Re-confirms pointer-to-pointer
   works through standard register-deref encoding.
+
+## Free passes (batch 679)
+
+- `2424` — `int m[2][3] = {{1,2,3},{4,5,6}};` (2D array with
+  nested initializer): row-major flat layout in `_DATA` (6 words).
+  Access `m[1][2]` folds to offset 10 (1*6+2*2). Nested
+  brace-grouping `{{...},{...}}` is parsed correctly but produces
+  the same flat data as `{1,2,3,4,5,6}`.
+- `2425` — `sum7(int a..g)` (7-argument function): args land at
+  `[bp+4]` through `[bp+10]` — all within disp8 range. Each `push
+  ax` from caller is preceded by `mov ax, K`; cleanup uses
+  `add sp, 14` (`83 c4 0e`) since 14 bytes > 4-byte pop-cx
+  threshold. Re-confirms args at disp8 offsets and add-sp cleanup
+  for many args.
+- `2428` — `for (;;) { if (i > 3) break; i = i + 1; }` (empty for
+  with break): standard infinite-loop template — no init/test/
+  update preamble, just body + backward `eb` at tail. `break`
+  becomes `jmp end`. Re-confirms [[for-loop-empty-cond]] from
+  earlier work (fixture `720`).

@@ -1621,3 +1621,31 @@ provably constant. Saves ~12 bytes here if it did.
 A similar non-fold likely applies to `x + x - x`, `x * 0 + x`,
 `(x|0)`, etc. — anywhere the constant-fold relies on
 variable-identity rather than literal-zero/one.
+
+## Compile-time integer overflow wraps silently (fixture `2427`)
+
+`x = 30000 + 30000;` — the sum 60000 doesn't fit in a signed
+16-bit int (max +32767). BCC's constant-fold pipeline computes the
+result modulo 65536 and emits the wrapped value:
+
+```
+c7 46 fe 60 ea          ; mov [bp-2], 0xEA60   (= 60000 mod 65536; signed = -5536)
+```
+
+No warning, no clamp, no error — just silent two's-complement
+wrap. Confirms:
+
+- Compile-time arithmetic uses **modular 16-bit semantics** for
+  int-typed expressions.
+- BCC matches what would happen at runtime if the same operation
+  ran on actual 8086 registers (no exception, just `add` produces
+  CF set + wrapped result).
+- The compile-time fold and runtime computation are byte-equivalent
+  for this case: `30000 + 30000` and `mov ax, 0xEA60` are
+  indistinguishable.
+
+Larger temporaries (`u32` internally) presumably handle wider folds
+during the parse-time evaluation, but the final result still narrows
+to the destination type at the store. So `0x12345678` as a 32-bit
+literal stored to int discards the high 16 bits (per long-to-int
+narrowing-cast rules documented elsewhere).
