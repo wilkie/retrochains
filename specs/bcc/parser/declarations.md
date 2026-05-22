@@ -1188,3 +1188,73 @@ Findings:
 - Access uses `a1 disp16` with FIXUPP, identical to a locally-
   defined struct global.
 
+
+## `static int counter;` (file-scope, no init) — `_BSS` storage, no PUBDEF
+
+Fixture `2773-static-no-init-obj`:
+
+```c
+static int counter;
+int tick(void) {
+  counter = counter + 1;
+  return counter;
+}
+```
+
+```
+a1 00 00                       mov ax, counter (FIXUPP, no PUBDEF)
+40                             inc ax
+a3 00 00                       counter = ax (FIXUPP)
+a1 00 00                       mov ax, counter (reload for return)
+```
+
+Findings:
+- `static` at file scope = same storage as global (in `_BSS` if
+  uninitialized, `_DATA` if initialized).
+- **NO PUBDEF** in symbol table — the symbol is INTERNAL only.
+  Linker can't resolve external references to `counter` (correct
+  behavior for C `static`).
+- Source-form matters again: `counter = counter + 1` uses **7-byte
+  load-inc-store** (`a1 + inc + a3`), NOT `inc word [counter]`
+  (4B) that `++counter` would emit. Same finding as `2638` for
+  `g + 1` vs `++g`.
+
+
+## 2-statement if-block + reg-direct global store peephole
+
+Fixture `2776-if-two-stmt-block-obj`:
+
+```c
+void set(int v) {
+  if (v > 0) {
+    g_a = v;
+    g_b = v + 1;
+  }
+}
+```
+
+```
+8b 76 04                       mov si, v        ; v in si
+0b f6                          or si, si
+7e 0a                          jle +10 → AFTER_IF
+89 36 00 00                    [_g_a] = si      ; DIRECT REG STORE (4B!)
+8b c6 40                       ax = v + 1
+a3 02 00                       [_g_b] = ax
+                               ; AFTER_IF:
+5e 5d c3                       epilogue
+```
+
+Findings:
+- **2-statement if-then-block (braces)** compiles identically to a
+  single statement; codegen sees a sequence.
+- **`v > 0` signed compare** uses `or si, si; jle` (4B), beating
+  the `cmp si, 0; jle` (5B) form. Peephole when comparing to zero.
+- **REG-DIRECT GLOBAL STORE**: since `v` is in si and we're storing
+  `v` unchanged to `g_a`, BCC emits **`mov [_g_a], si`** = `89 36
+  disp16` (4 bytes). Skips the AX-acc shuffle (`mov ax, si; mov
+  [g], ax` would be 5B).
+- This is a register-source-based memory store. Saves 1 byte when
+  the value is already in a non-AX register.
+- The second store goes through AX (`8b c6 40` for v+1, then a3)
+  because the value gets modified into AX first.
+

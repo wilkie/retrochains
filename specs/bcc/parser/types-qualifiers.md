@@ -943,3 +943,21 @@ Findings:
 - The cast only matters in the type system (signedness, type
   identity); the bit pattern is preserved.
 
+
+## `void *` return type — byte-identical to `int *`
+
+Fixture `2775-fn-ret-void-ptr-obj`:
+
+```c
+int g;
+void *get_g(void) { return &g; }
+```
+
+```
+b8 00 00                       mov ax, &g (FIXUPP)
+eb 00 5d c3                    epilogue
+```
+
+`void *` byte-identical to any other pointer return: 2-byte pointer
+in AX. Type erasure is purely at the C type system level.
+

@@ -5223,3 +5223,42 @@ Findings:
 - Confirms the sizeof-of-array rule from `2541`: array type is
   preserved at sizeof site (not decayed), size = elements × element-size.
 
+
+## `struct_ptr + n` with sizeof=5 (non-pow-2) — uses `imul` for scaling
+
+Fixture `2771-struct5-ptr-plus-obj`:
+
+```c
+struct Q { int a; int b; char c; };   /* sizeof = 5 */
+struct Q *next(struct Q *p, int n) {
+  return p + n;
+}
+```
+
+```
+8b 46 06                       mov ax, n
+ba 05 00                       mov dx, 5
+f7 ea                          imul dx              ; n * 5 (NO shl)
+50                             push ax (spill)
+8b 46 04                       mov ax, p
+5a                             pop dx
+03 c2                          add ax, dx
+```
+
+Findings:
+- For NON-POWER-OF-2 sizeof, struct-pointer arithmetic uses
+  **full imul** for scaling. NO shift strength reduction.
+- Pointer-scale by sizeof:
+
+| sizeof(*p) | scale instructions      | bytes |
+|------------|-------------------------|-------|
+| 1 (char*)  | (none)                  | 0B    |
+| 2 (int*)   | `shl ax, 1`             | 2B    |
+| 4          | `shl ax,1; shl ax,1`    | 4B    |
+| **5**      | **`mov dx,5; imul dx`** | **5B** |
+| 8          | `mov cl,3; shl ax,cl`   | 4B (probable) |
+
+- Note: at sizeof=8 the cl-form would take over (4B), beating
+  3-shift unroll (6B). Strength reduction follows the same
+  unroll/cl threshold as explicit shifts.
+

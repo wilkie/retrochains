@@ -3891,3 +3891,35 @@ Findings:
   (cmp 4B + jne 2B + jmp 2B = 8B for vs-imm cmp; here 6+5=11B
   including the `cmp [mem],0`).
 
+
+## Multiple breaks in same loop — independent `jmp` to shared post-loop target
+
+Fixture `2772-while-multi-break-obj`:
+
+```c
+while (1) {
+  if (i == 3) break;
+  i = i + 1;
+  if (i == 5) break;
+}
+```
+
+```
+                               ; LOOP_TOP:
+83 fe 03 75 02                 cmp si, 3; jne +2 → skip-break1
+eb 0e                          jmp +14 → AFTER_LOOP  (break1, disp 14)
+8b c6 40 8b f0                 i = i + 1
+83 fe 05 75 02                 cmp si, 5; jne +2 → skip-break2
+eb 02                          jmp +2 → AFTER_LOOP  (break2, disp 2)
+eb eb                          jmp -21 → LOOP_TOP
+                               ; AFTER_LOOP:
+8b c6                          return i
+```
+
+Findings:
+- Each `break` emits **its own independent `jmp`** to the post-
+  loop label. They do NOT chain — each computes its own disp8.
+- Same shape as single-break loops (`2516`); the count of breaks
+  doesn't change the per-break codegen.
+- Code-size cost: 2 bytes per break (disp8 form).
+

@@ -462,3 +462,21 @@ Findings:
 - Confirms: BCC's constant evaluator folds any expression to a
   bit pattern at parse time.
 
+
+## `unsigned long max = 0xFFFFFFFFUL;` — 4-byte init in `_DATA`
+
+Fixture `2774-ulong-all1s-obj`:
+
+`_DATA` (4 bytes): `ff ff ff ff`
+
+```
+a1 00 00                       mov ax, [_max]    ; LOW word only
+                               ; (HIGH word at +2 ignored due to (int) cast)
+```
+
+Findings:
+- `0xFFFFFFFFUL` literal stored as 4 bytes of `ff`.
+- `(int)max` truncates to LOW word → loads `mov ax, [_max]` only;
+  high word at `[_max + 2]` is unread. Same pattern as `2521`/
+  `2532` for long truncation.
+
