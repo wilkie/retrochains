@@ -3142,3 +3142,123 @@ Findings:
   operation is the same.
 - 12 bytes total for the expression.
 
+
+## Long bitwise INLINE family: OR/AND (per-word, no carry chain)
+
+Fixtures `2873-long-or-obj`, `2874-long-and-obj`:
+
+```c
+long lor(long a, long b)  { return a | b; }
+long land(long a, long b) { return a & b; }
+```
+
+```
+                               ; long OR:
+0b 46 08                       or ax, b.LOW
+0b 56 0a                       or dx, b.HIGH
+
+                               ; long AND:
+23 46 08                       and ax, b.LOW
+23 56 0a                       and dx, b.HIGH
+```
+
+Findings:
+- Long bitwise OR/AND are **INLINE per-word ops** (no helper, no
+  carry chain — bitwise ops don't have inter-word dependencies).
+- 12 bytes total for the expression body.
+- Same shape as long add/sub but using OR/AND opcodes (`0b /r`,
+  `23 /r`).
+
+## Long `<< 16` — BYTE-SWAP FOLD for left shift (5 bytes)
+
+Fixture `2875-long-shl-16-obj`:
+
+```c
+long swap(long v) {
+  return v << 16;
+}
+```
+
+```
+8b 56 04                       mov dx, v.LOW   ; new HIGH = old LOW
+33 c0                          xor ax, ax      ; new LOW = 0
+```
+
+Findings:
+- Long `<< 16` = **MIRROR of `>> 16`**: 5-byte byte-swap fold.
+  - New HIGH ← old LOW (the high word now holds what was in low)
+  - New LOW ← 0 (zero-filled from the right)
+- No helper call, no actual shifting — just word rearrangement.
+- Compare to unsigned `>> 16`: same 5-byte shape, opposite direction.
+
+## Long `a | 0x100L` — per-word OR with imm (no `|0` peephole)
+
+Fixture `2876-long-or-imm-obj`:
+
+```c
+long mask(long a) {
+  return a | 0x100L;
+}
+```
+
+```
+0d 00 01                       or ax, 0x0100  (LOW word, AX-acc form 3B)
+81 ca 00 00                    or dx, 0       (HIGH word, ModR/M 4B)
+```
+
+Findings:
+- Long OR-with-constant emits **per-word OR** for both halves.
+- HIGH word OR with 0 is emitted EXPLICITLY — BCC does NOT fold
+  `| 0` to identity for long constants (same as `& 0` (`2737`)).
+- LOW word uses 3B AX-acc form (`0d imm16`), HIGH uses 4B
+  ModR/M form (`81 /1 imm16`). 7 bytes total.
+
+## Long `-a` (negate) — `neg dx; neg ax; sbb dx, 0` (7 bytes)
+
+Fixture `2877-long-neg-obj`:
+
+```c
+long lneg(long a) {
+  return -a;
+}
+```
+
+```
+f7 da                          neg dx  (HIGH)
+f7 d8                          neg ax  (LOW; sets CF if LOW != 0)
+83 da 00                       sbb dx, 0  (propagate borrow)
+```
+
+Findings:
+- Long negate is **INLINE 7-byte sequence**:
+  1. `neg dx` — negate HIGH word (initial guess)
+  2. `neg ax` — negate LOW word; CF set if LOW != 0 (there was borrow)
+  3. `sbb dx, 0` — subtract the borrow from HIGH
+- This correctly computes `-N = ~N + 1` for multi-word values.
+- For N=0: no borrow, dx and ax both stay 0. For N!=0: borrow
+  propagates correctly.
+
+## Long `a << 1` — INLINE `shl ax, 1; rcl dx, 1` (4 bytes!)
+
+Fixture `2878-long-shl-1-obj`:
+
+```c
+long lshl(long a) {
+  return a << 1;
+}
+```
+
+```
+d1 e0                          shl ax, 1   (LOW, top bit → CF)
+d1 d2                          rcl dx, 1   (HIGH rotate left through carry)
+```
+
+Findings:
+- Long `<< 1` is **INLINE, 4 bytes!** Uses `shl + rcl` (rotate
+  through carry) to chain the carry from LOW to HIGH.
+- Compare to `>> 2` (`2789`) which used `N_LXRSH@` helper.
+- Compare to `<< 16` (`2875`) which uses byte-swap fold (5B).
+- Conjecture: `<< 1` is special-cased to inline; multi-bit
+  left-shifts (`<< 2`, `<< 3`, etc.) likely use the helper.
+- 8086 has `rcl r16, 1` opcode `d1 d2` (rotate left 1 through CF).
+
