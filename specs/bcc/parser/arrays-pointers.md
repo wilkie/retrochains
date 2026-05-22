@@ -3739,3 +3739,36 @@ AX. After the ternary join, the result is moved to BX and the
 subscript adds the constant `+2` for `[1]`. Confirms: array-typed
 expressions decay to pointers when not the operand of `sizeof` or
 `&`, including inside ternary operands.
+
+## Type punning via `*((char *)&i)` — accesses low byte (fixture `2430`)
+
+`*((char *)&i)` for an `int i` accesses the **low byte** of `i` —
+type punning through pointer cast works correctly:
+
+```c
+int i;
+char c;
+i = 0x12AB;
+c = *((char *)&i);   // c = 0xAB (low byte)
+```
+
+```
+c7 46 fe ab 12          ; i = 0x12AB at [bp-2]
+8a 46 fe                ; mov al, [bp-2]    ← read LOW byte
+88 46 fd                ; c = al at [bp-3]
+8a 46 fd                ; mov al, c
+98                      ; cbw (signed widen for return)
+```
+
+The cast `(char *)&i` carries no codegen — the `&i` produces a
+pointer value, and the cast retypes it without any conversion
+bytes. Then `*` derefs as byte via `mov al, [bp+disp]`.
+
+Confirms (once more) **little-endian byte ordering**: `i = 0x12AB`
+stores 0xAB at the low address (i's first byte) and 0x12 at the high
+address. The char-ptr cast access reads the low byte.
+
+This is the standard portable way to extract the low byte of a
+multi-byte value in C90 code — works thanks to BCC's permissive
+type-system handling at cast sites and the platform's little-endian
+storage.

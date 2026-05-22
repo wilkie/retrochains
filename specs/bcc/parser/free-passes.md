@@ -586,3 +586,24 @@ Probe replaced with the char-compound-OR variant.
   update preamble, just body + backward `eb` at tail. `break`
   becomes `jmp end`. Re-confirms [[for-loop-empty-cond]] from
   earlier work (fixture `720`).
+
+## Free passes (batch 680)
+
+- `2431` — `char strs[2][4] = {"AB", "CD"};` (2D char array init
+  from string literals): laid out flat in `_DATA` as
+  `41 42 00 00 43 44 00 00` (each string occupies its full 4-byte
+  row, zero-padded). `strs[K][J]` accesses fold to offset
+  `K*4 + J`. Re-confirms 2D char array layout = flat row-major with
+  per-row zero padding.
+- `2432` — `int sum_5(int a[5])` (sized array parameter): the size
+  `[5]` is informational only — the param is treated as `int *`.
+  Access `a[K]` for constant K folds to `[si + 2*K]`. Re-confirms
+  array-param-decays-to-pointer.
+- `2433` — `((((x + 1)))) * 2;` (deeply parenthesized expr): parens
+  carry zero codegen weight. `(x + 1)` normalizes to `inc ax`; `* 2`
+  normalizes to `shl ax, 1`. Total 5 bytes for the whole arithmetic.
+  Re-confirms paren grouping is purely parser-level.
+- `2434` — `if (p) ...` (pointer used directly as a boolean
+  condition): compiles to `cmp word ptr [p], 0 / jz else` —
+  standard null-pointer test. The pointer's full 16-bit value is
+  compared to 0; NULL is `0x0000`.

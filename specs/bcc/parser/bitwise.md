@@ -324,3 +324,44 @@ Confirms BCC's constant-fold pipeline handles `<<`, `~`, and `&` on
 literal operands transitively. Combined with the
 [[zero-test-on-and-result]] (which uses `test`), bit-twiddling
 idioms get good codegen even without an explicit optimizer pass.
+
+## `&` vs `&&` — bitwise (one `and`) vs short-circuit (test+branch) (fixture `2429`)
+
+The single `&` and double `&&` operators emit fundamentally
+different codegen:
+
+```c
+r1 = a & b;     // bitwise AND
+r2 = a && b;    // logical short-circuit AND
+```
+
+```
+; r1 = a & b:
+8b c6                   ; ax = a (si)
+23 c7                   ; and ax, di    ← single instruction
+89 46 fe                ; r1 = ax       (result: 3 & 5 = 1)
+
+; r2 = a && b:
+0b f6                   ; or si, si     ← test a
+74 09                   ; jz fail       ← short-circuit: if a == 0, result is 0
+0b ff                   ; or di, di     ← test b
+74 05                   ; jz fail
+b8 01 00                ; ax = 1        (both non-zero → 1)
+eb 02                   ; jmp end
+33 c0                   ; ax = 0        (fail)
+                        ; end:
+89 46 fc                ; r2 = ax       (result: 3 && 5 = 1)
+```
+
+| Operator | Result type | Codegen |
+|---|---|---|
+| `a & b` | bit-and of all bits | 2-byte `and r, r` |
+| `a && b` | 0 or 1 (boolean) | short-circuit: `or/jz/or/jz/mov 1/jmp/xor` |
+
+The bitwise form is ~2 bytes; the logical-AND template is ~12 bytes
+because it must produce the boolean 0-or-1 and short-circuit on the
+first false operand (per C90: `b` is not evaluated if `a` is false).
+
+This difference matters when one operand has side effects: `f() && g()`
+calls `g()` only if `f()` returned non-zero, while `f() & g()` always
+calls both.
