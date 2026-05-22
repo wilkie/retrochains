@@ -2437,3 +2437,82 @@ Findings:
 - Body total = 12 bytes (push si + load p + load y + inc + store x +
   pop si + pop bp + ret). Very compact.
 
+
+## 5-byte struct return — N_SCOPY@ + hidden ptr arg (confirms rule)
+
+Fixture `2671-struct-5b-ret-obj`:
+
+```c
+struct Five { int a; int b; char c; };
+struct Five make(void) { ... return f; }
+```
+
+```
+55 8b ec 83 ec 06              prologue + 6B local (5B struct padded)
+c7 46 fa 01 00                 f.a = 1     ; [bp-6]
+c7 46 fc 02 00                 f.b = 2     ; [bp-4]
+c6 46 fe 58                    f.c = 'X'   ; byte at [bp-2]
+ff 76 06                       push word [bp+6]   ; caller dst SEG
+ff 76 04                       push word [bp+4]   ; caller dst OFF
+8d 46 fa                       lea ax, [bp-6]     ; src OFF
+16                             push ss            ; src SEG
+50                             push ax
+b9 05 00                       mov cx, 5          ; count
+e8 00 00                       call N_SCOPY@      ; (EXTDEF)
+8b 46 04                       mov ax, [bp+4]     ; return dst OFF
+eb 00 8b e5 5d c3              epilogue
+```
+
+Findings:
+- 5-byte struct return uses **N_SCOPY@** + hidden ptr arg — same
+  shape as `2526` (3-byte). Confirms the size-to-strategy map:
+
+| sizeof | strategy |
+|--------|----------|
+| 1      | AL only |
+| 2      | AX only |
+| 3      | N_SCOPY@ + hidden ptr |
+| 4      | DX:AX |
+| ≥ 5    | N_SCOPY@ + hidden ptr |
+
+  Only sizes matching integer types (1, 2, 4) get register returns.
+- Local 5-byte struct rounds up to 6-byte stack reserve (even
+  padding).
+
+
+## `struct { long v; }` return — byte-identical to `long` return
+
+Fixture `2674-fn-ret-struct-long-obj`:
+
+```c
+struct Pkg { long v; };
+struct Pkg make(void);
+int main(void) {
+  struct Pkg p;
+  p = make();
+  return (int)p.v;
+}
+```
+
+```
+55 8b ec 83 ec 04              prologue + 4B local (= sizeof(struct Pkg))
+e8 00 00                       call _make (FIXUPP, EXTDEF)
+89 56 fe                       p.v.HIGH = dx     ; [bp-2]
+89 46 fc                       p.v.LOW = ax      ; [bp-4]
+8b 46 fc                       ax = p.v.LOW      ; (int) cast
+eb 00 8b e5 5d c3              epilogue
+```
+
+Findings:
+- `struct { long v; }` returned by value: 4 bytes, returned in
+  **DX:AX** (same as raw `long` and `struct {int, int}` from
+  `2532` and `2614`).
+- Caller stores DX → [+2], AX → [+0]:
+  - `p.v.LOW` at offset 0 of the long, same as offset 0 of struct
+  - `p.v.HIGH` at offset 2
+- Confirms the 4-byte register-return rule is **size-based, not
+  field-structure-based**. Any 4-byte struct (long, two ints,
+  4 chars, etc.) uses DX:AX.
+- `(int)p.v` truncates by loading only `p.v.LOW` (the low word
+  at offset 0).
+

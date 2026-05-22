@@ -851,3 +851,38 @@ Findings:
   2 + jmp 2 + arm2 2 + epi 5 = 28? let me recount). Actually
   prolog+epi take ~10B, leaving ~7B for the operation itself.
 
+
+## Ternary as assignment RHS — arms converge in AX, then store
+
+Fixture `2670-ternary-assign-obj`:
+
+```c
+int a = 5, b = 7, x;
+x = a > b ? a : b;
+```
+
+```
+55 8b ec 4c 4c 56 57           prologue + 2B local (x) + push si, di
+be 05 00 bf 07 00              a in si, b in di
+3b f7                          cmp si, di
+7e 04                          jle → ELSE
+8b c6                          THEN: mov ax, si    (a → AX)
+eb 02                          jmp → JOIN
+8b c7                          ELSE: mov ax, di   (b → AX)
+                               ; JOIN:
+89 46 fe                       [bp-2] = ax        (x = result)
+8b 46 fe                       mov ax, x          (reload for return)
+eb 00 5f 5e 8b e5 5d c3        epilogue
+```
+
+Findings:
+- Ternary as RHS-of-assignment: BOTH arms put their value in AX,
+  then converge at a JOIN label. The post-ternary code reads AX
+  as the expression's value.
+- This is the same structural pattern as the return-version
+  (`2636`), but the value flows to a store instead of the
+  epilogue.
+- Compare to `if-else { x = ...; } else { x = ...; }` where
+  each arm STORES to x independently. The ternary form
+  centralizes the store at the JOIN point — 1 store vs 2.
+

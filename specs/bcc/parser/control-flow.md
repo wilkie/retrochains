@@ -3571,3 +3571,73 @@ Findings:
   the operands are signed int.
 - This is the canonical range-check pattern; very compact.
 
+
+## 3-way `||` chain — `cmp+jnz→TRUE` for all but last, `cmp+jz→FALSE` for last
+
+Fixture `2669-or-three-way-obj`:
+
+```c
+if (a || b || c) return 7;
+return 0;
+```
+
+```
+83 7e fe 00 75 0c              cmp a, 0; jnz → TRUE   (1st: short-circuit T)
+83 7e fc 00 75 06              cmp b, 0; jnz → TRUE   (2nd: short-circuit T)
+83 7e fa 00 74 05              cmp c, 0; je → FALSE   (last: short-circuit F)
+                               ; TRUE-PATH falls through:
+b8 07 00 eb 04                 ax = 7; jmp epi
+33 c0                          FALSE: xor ax, ax
+```
+
+Findings:
+- Extends the 2-way `||` pattern (`2534`) to 3 operands.
+- All-but-last operand: `cmp ; jnz → TRUE` (non-zero short-circuits).
+- Last operand: `cmp ; je → FALSE` (zero short-circuits).
+- Falls through to TRUE if all earlier are zero and last is non-zero.
+- Both TRUE and FALSE labels at the end converge to the epilogue.
+- This pattern is uniform for any depth N — N-1 jnz forward jumps
+  to one TRUE label, plus 1 je to one FALSE label.
+
+
+## `for (i=0, j=10; ...; ...)` — comma init = sequence of assigns
+
+Fixture `2672-for-comma-init-obj`:
+
+```c
+for (i = 0, j = 10; i < 3; i = i + 1) {
+  s = s + i + j;
+}
+```
+
+```
+55 8b ec 4c 4c                 prologue + 2B local (j stays in mem!)
+56 57                          push si, di
+33 ff                          xor di, di          ; s = 0 (di)
+33 f6                          xor si, si          ; i = 0 (si)
+c7 46 fe 0a 00                 [bp-2] = 10         ; j = 10 (MEMORY)
+eb 0e                          jmp → COND
+                               ; BODY:
+8b c7                          mov ax, s
+03 c6                          add ax, i (reg)
+03 46 fe                       add ax, j (mem)
+8b f8                          mov di, ax          ; s = ax
+                               ; INC clause:
+8b c6 40 8b f0                 i = i + 1 (AX-acc)
+                               ; COND:
+83 fe 03 7c ed                 cmp si, 3; jl → BODY
+8b c7 eb 00 5f 5e 8b e5 5d c3  epilogue
+```
+
+Findings:
+- Comma operator in for-init compiles as **sequential
+  assignments**: `i=0` then `j=10`. Same as `i=0; j=10;`.
+- Register-promotion is selective: BCC promoted s (di) and i (si)
+  but kept j in MEMORY despite there being only 3 locals. The
+  choice appears to prefer hot vars (i is loop counter, s is
+  accumulator; j is read-only per iter).
+- The AX-acc sum `s = s + i + j` mixes register-source (`add ax,
+  si`) and memory-source (`add ax, [bp-2]`) adds. BCC handles
+  both source kinds in the same accumulator pattern.
+- Comma in for-INC clause would behave the same way.
+

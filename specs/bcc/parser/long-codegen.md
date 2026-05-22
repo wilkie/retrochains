@@ -2575,3 +2575,44 @@ Findings:
 - Load order matches the data-store order observed in `2521`,
   `2532`, etc.: HIGH first, LOW second.
 
+
+## Long unary minus `-x` — `neg dx; neg ax; sbb dx, 0` (3 instructions)
+
+Fixture `2673-long-neg-obj`:
+
+```c
+long negate(long x) {
+  return -x;
+}
+```
+
+```
+55 8b ec                       prologue
+8b 56 06                       mov dx, x.HIGH   ; [bp+6]
+8b 46 04                       mov ax, x.LOW    ; [bp+4]
+f7 da                          neg dx           ; complement HIGH
+f7 d8                          neg ax           ; complement LOW (sets borrow)
+83 da 00                       sbb dx, 0        ; subtract borrow
+eb 00 5d c3                    epilogue
+```
+
+Findings:
+- Long unary minus = **textbook 3-instruction two's-complement
+  negation**:
+  1. `neg dx` — flip the HIGH half
+  2. `neg ax` — flip the LOW half (sets carry-flag = borrow)
+  3. `sbb dx, 0` — propagate the borrow into HIGH
+- **NO helper call** — long-neg is inlined like long-add (`2597`)
+  and long-add-by-constant (`2592`).
+- Long ops summary:
+
+| op                     | inline or helper           |
+|------------------------|----------------------------|
+| add/sub (+/-, +=/-=)   | inline (add+adc / sub+sbb) |
+| neg (`-x`), not (`~x`) | inline (multi-instr)       |
+| mul (`*`)              | helper `N_LXMUL@`          |
+| div (`/`)              | helper `N_LDIV@`           |
+| shift (>> <<)          | helper `N_LXRSH@` / `N_LXURSH@` / `N_LXLSH@` |
+| shift by mult of 16    | inline (byte-swap fold, `2586`) |
+| compare                | inline (probe needed)      |
+
