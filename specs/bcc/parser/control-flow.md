@@ -4073,3 +4073,33 @@ Findings:
 - No condition check, no skip-init, no skip-post.
 - Same shape as `while (1)`. The two forms are byte-identical.
 
+
+## `init; while (cond) { body; post; }` == `for (init; cond; post) body`
+
+Fixture `2848-while-inner-init-obj`:
+
+```c
+i = 0; s = 0;
+while (i < n) {
+  s = s + i;
+  i = i + 1;
+}
+```
+
+Produces **byte-identical** code to:
+
+```c
+for (i = 0; i < n; i = i + 1) {
+  s = s + i;
+}
+```
+
+Both compile to: jmp-to-cond + body + post-step + cond-cmp + back-branch.
+
+Findings:
+- BCC treats while+inner-init the same as for-loop. Same control-
+  flow shape, same byte layout.
+- Useful equivalence: if `for` syntax is awkward, `while` with
+  preceding init and trailing inc compiles identically.
+- Confirms the "for is sugar for while" mental model at codegen.
+

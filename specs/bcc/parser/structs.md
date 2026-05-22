@@ -2988,3 +2988,30 @@ Findings:
   reg-pair return for sizes that EXACTLY match register pair
   widths (1=AL, 2=AX, 4=DX:AX).
 
+
+## 4-byte struct by value — byte-identical to two int params
+
+Fixture `2845-struct4-by-val-obj`:
+
+```c
+struct Pair { int a; int b; };
+int sum(struct Pair p) {
+  return p.a + p.b;
+}
+```
+
+```
+8b 46 04                       mov ax, p.a   ([bp+4])
+03 46 06                       add ax, p.b   ([bp+6])
+```
+
+Findings:
+- **4-byte struct-by-value is byte-identical to two int params**.
+  BCC pushes struct words individually; callee reads each field at
+  its bp-offset.
+- The struct's field offsets (0 and 2) become [bp+4] and [bp+6] in
+  the callee — exactly as if they were separate int args.
+- Same body as `sum(int a, int b)` from `2710`.
+- This generalizes: small structs ≤4B passed by value have zero
+  overhead vs separate args.
+

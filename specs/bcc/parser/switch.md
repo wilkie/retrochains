@@ -1983,3 +1983,33 @@ Findings:
 - Negative + zero + positive in mixed order works fine — order is
   source-order; no sorting.
 
+
+## Switch fall-through `case 1: case 2: ...` — TWO cmp-je with shared target
+
+Fixture `2844-switch-fall-thru-obj`:
+
+```c
+switch (x) {
+  case 1:
+  case 2:
+    return 10;
+  case 3:
+    return 20;
+}
+```
+
+```
+3d 01 00 74 0c                 cmp ax, 1; je → CASE_1_2
+3d 02 00 74 07                 cmp ax, 2; je → CASE_1_2     (same target!)
+3d 03 00 74 07                 cmp ax, 3; je → CASE_3
+eb 0a                          jmp → AFTER_SWITCH
+```
+
+Findings:
+- Fall-through case labels emit **separate compare-and-branch
+  instructions** for each case, both targeting the same body label.
+- 6 bytes per case-arm (3B cmp + 3B je) — fall-through adds NO
+  saving at codegen level.
+- BCC treats fall-through purely syntactically: `case 1: case 2:`
+  is just two cases at the same address.
+

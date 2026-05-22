@@ -5543,3 +5543,50 @@ Findings:
 - For non-zero field offsets, would emit `mov ax, [bx + _items +
   offset]` — same load, different disp.
 
+
+## `modify(&x)` for local int — `lea ax, [bp+disp8]; push ax`
+
+Fixture `2846-addr-local-arg-obj`:
+
+```c
+int x = 10;
+modify(&x);
+```
+
+```
+8d 46 fe                       lea ax, [bp-2]   ; &x
+50                             push ax
+e8 00 00                       call _modify
+59                             pop cx (1-arg cleanup)
+```
+
+Findings:
+- `&local` = **`lea ax, [bp+disp8]`** (3 bytes, `8d 46 disp8`).
+  Then push for the call.
+- ModR/M `46 fe` = mod 01, r/m 110 = `[bp + disp8]`. The disp8 is
+  the local's frame offset.
+- Same shape as array-decay (`2787`) but for a single var.
+- For locals at far offsets (>127 below bp), would use disp16 form
+  (4B). Probe needed.
+
+## Global `int *alias = &target;` — 2-load chain access
+
+Fixture `2847-global-addr-init-obj`:
+
+`_DATA`:
+- `_target` (2B): `2a 00` (42)
+- `_alias` (2B): FIXUPP target = `_target`
+
+```
+8b 1e 02 00                    mov bx, [_alias]   ; load alias
+8b 07                          mov ax, [bx]       ; deref
+```
+
+Findings:
+- Global ptr-to-global init = pointer slot holds the FIXUPP'd
+  offset of the target global.
+- Access via `*alias` = 2-load chain (load alias → bx, deref to ax)
+  = 6 bytes.
+- Same shape as `int *p = data;` (`2802`) but with a single int
+  target instead of an array.
+

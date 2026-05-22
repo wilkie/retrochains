@@ -1381,3 +1381,28 @@ Findings:
 | `static int g = K;`      | `_DATA` | no      |
 | `extern int g;`          | (EXTDEF) | (link-time) |
 
+
+## Function-scope `static int counter = 100;` — like file-scope static
+
+Fixture `2843-static-local-init-obj`:
+
+```c
+int next_id(void) {
+  static int counter = 100;
+  counter = counter + 1;
+  return counter;
+}
+```
+
+`_DATA` (2B for `_counter`): `64 00` (= 100). NO PUBDEF.
+
+Findings:
+- Function-scope `static int counter = 100` behaves like a
+  file-scope static: `_DATA` segment, internal linkage, init at
+  load time (NOT on each function call).
+- Access uses moffs16 with FIXUPP — same as any global.
+- The "init runs once" semantics works because the init is C
+  literal bytes in `_DATA`, not a runtime init expression.
+- BCC mangles the symbol internally to avoid clashes if multiple
+  functions have same-named statics.
+
