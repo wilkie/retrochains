@@ -1585,3 +1585,39 @@ emit `cmp [m], 5`).
 For ordered comparisons (`<`, `>`, `<=`, `>=`) the commute would
 flip the predicate (`5 < x` is `x > 5`); not exercised in this
 fixture but consistent with the rule.
+
+## `if (x == x)` — NOT folded (fixture `2419`)
+
+The comparison of a variable with itself is mathematically always
+true (for integer types — for FP with NaN, false), but **BCC does
+not fold it** at compile time:
+
+```c
+if (x == x) r = 1; else r = 0;
+```
+
+```
+be 07 00                ; x = 7 (SI)
+3b f6                   ; cmp si, si      ← compares register to itself
+75 05                   ; jne else_branch  ← never taken (ZF always set after cmp r,r)
+bf 01 00                ; r = 1
+eb 02                   ; jmp end
+33 ff                   ; r = 0  (dead code, never reached)
+```
+
+BCC emits the test, the conditional jump, AND the dead else-branch
+body. Confirms:
+
+- **No reflexive-comparison folding**: `x == x`, `x != x`, `x < x`,
+  etc. are all emitted literally.
+- **No dead-code elimination**: the else branch's `r = 0` is
+  unreachable but still in the OBJ.
+
+So the BCC optimizer's identity-fold catalog (documented elsewhere
+in this file) is limited to literal-RHS folds (`x + 0`, `x * 1`,
+etc.) — it doesn't recognize same-variable patterns even when
+provably constant. Saves ~12 bytes here if it did.
+
+A similar non-fold likely applies to `x + x - x`, `x * 0 + x`,
+`(x|0)`, etc. — anywhere the constant-fold relies on
+variable-identity rather than literal-zero/one.

@@ -550,3 +550,20 @@ Probe replaced with the char-compound-OR variant.
   RHS): byte-identical to using the ternary as a statement RHS —
   the initializer context doesn't change the lowering. Standard
   ternary materialization template (cmp/jcc/mov/jmp/mov/store).
+
+## Free passes (batch 678)
+
+- `2417` — implicit function declaration: calling `trio(1,2,3)`
+  before its definition in the same TU works under K&R C — `trio`
+  is implicitly declared with return type `int`. Both `_main` and
+  `_trio` appear in `PUBDEF`; the call uses the standard forward-
+  resolved offset. Re-confirms BCC accepts implicit declarations.
+- `2421` — `int arr[] = {10, 20, 30,};` (trailing comma in array
+  initializer): the trailing comma is accepted; produces the same
+  3-element array as without it. Re-confirms parser accepts C's
+  optional trailing comma in brace-enclosed initializers.
+- `2422` — `int **pp = &p; **pp = 99;` (double-pointer write):
+  inner deref loads via `mov bx, [si]` (the address-of-p stored in
+  pp), then outer write uses `mov [bx], 99`. Two levels of
+  indirection = two memory accesses. Re-confirms pointer-to-pointer
+  works through standard register-deref encoding.

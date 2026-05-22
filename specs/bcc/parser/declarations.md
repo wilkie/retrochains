@@ -646,3 +646,76 @@ all-or-nothing.
 ModR/M `/46` is `mod=01 reg=000 rm=110` (`[bp+disp8]`); `/86` is
 `mod=10 reg=000 rm=110` (`[bp+disp16]`). The 1-bit difference in
 `mod` selects the displacement width.
+
+## `extern` variable declaration — EXTDEF record (fixture `2418`)
+
+`extern int other_count;` at file scope (no definition in this TU)
+emits an **EXTDEF record** rather than allocating storage:
+
+```
+EXTDEF entry in OBJ symbol table:
+  0c 5f 6f 74 68 65 72 5f 63 6f 75 6e 74 00
+  (length 12, name "_other_count", type 0)
+```
+
+References to the extern variable use the standard FIXUPP'd
+memory-direct encodings — same forms as ordinary global access, but
+the FIXUPP record resolves against the EXTDEF symbol at link time
+instead of an internal `_DATA` offset:
+
+```c
+other_count = 5;
+return other_count;
+```
+
+```
+c7 06 00 00 05 00       ; mov word ptr [_other_count], 5  (FIXUPP'd)
+a1 00 00                ; mov ax, [_other_count]          (FIXUPP'd)
+```
+
+So `extern` is the variable analogue of forward function
+declarations — both emit symbol-table entries (`EXTDEF`) and rely on
+FIXUPP records to resolve at link time. The variable lives in
+another translation unit; this TU just references its symbol.
+
+Distinguishes from:
+- Plain `int other_count;` → `_DATA` storage, `PUBDEF` symbol
+- `static int other_count;` → `_DATA` storage, NO PUBDEF (private)
+- `extern int other_count;` → no storage, EXTDEF symbol (imported)
+
+## Struct fields are packed — no alignment padding (fixture `2420`)
+
+```c
+struct Mixed {
+  char tag;       // offset 0 (1 byte)
+  int count;      // offset 1 (2 bytes) — UNALIGNED!
+  long total;     // offset 3 (4 bytes) — UNALIGNED!
+  char *name;     // offset 7 (2 bytes)
+};                // total: 9 bytes
+```
+
+BCC's struct layout is **tightly packed** — fields are placed at
+consecutive offsets with no padding inserted for alignment, even
+when this creates word/long accesses at odd offsets.
+
+```
+83 ec 0a                ; sub sp, 10   ← 9-byte struct rounded UP to 10 (stack word align)
+c6 46 f6 58             ; tag = 'X' at [bp-10]      (byte)
+c7 46 f7 2a 00          ; count = 42 at [bp-9]      ← unaligned word at odd offset
+c7 46 f9 a0 86          ; total low = 0x86A0 at [bp-7]   ← unaligned long
+c7 46 fb 01 00          ; total high = 0x0001 at [bp-5]
+c7 46 fd 00 00          ; name ptr at [bp-3]
+```
+
+The 8086 supports unaligned word/long access (with a one-cycle
+penalty per misaligned word access). BCC trades alignment for
+density.
+
+The struct's **total size** rounds up to an even byte (stack
+alignment), but the **layout within the struct** is byte-tight.
+So `sizeof(struct Mixed)` = 9, but the stack reservation is 10 to
+keep the next slot word-aligned for BP-relative addressing.
+
+Confirms a notable difference from later-era compilers that
+default to aligned struct fields. Borland C++ 2.0's default is pack
+without padding (`#pragma pack(1)` equivalent).
