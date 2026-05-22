@@ -2728,3 +2728,91 @@ Findings:
   N cmp/je pairs targeting one common false label, then one true-
   path emit, then merge.
 
+
+## Nested ternary — cmp/jne cascade ending in else-of-else value
+
+Fixture `2508-nested-ternary-obj`:
+
+```c
+int x = 2;
+return x == 1 ? 10 : x == 2 ? 20 : 30;
+```
+
+```
+55 8b ec 56                prologue + push si
+be 02 00                   mov si, 2                ; x in si
+83 fe 01                   cmp si, 1
+75 05                      jne +5
+b8 0a 00                   mov ax, 10
+eb 0d                      jmp +13 (epi)
+83 fe 02                   cmp si, 2
+75 05                      jne +5
+b8 14 00                   mov ax, 20
+eb 03                      jmp +3 (epi)
+b8 1e 00                   mov ax, 30
+eb 00 5e 5d c3             epilogue
+```
+
+Findings:
+- Right-associative ternary `a ? b : c ? d : e` compiles as two
+  sequential `cmp/jne + mov ax, K; jmp end` blocks, with the final
+  else (`mov ax, 30`) falling through naturally.
+- Every "then" arm emits its result and `jmp` to the **same merge
+  point** (the epilogue). No per-branch return — single epilogue
+  serves all paths.
+- Source-order tests preserved: x==1 is tested before x==2.
+- All conditional jumps are disp8 (short forward). The jmp to
+  epi shrinks by 10 each iteration (0x0d → 0x03 → fallthrough).
+- This is structurally identical to an if/else-if/else cascade —
+  ternary and if-else are interchangeable at this codegen layer
+  when they produce the same value-flow.
+
+
+## `do { } while (i > 0)` — full register promotion, AX as accumulator
+
+Fixture `2510-do-while-real-cond-obj`:
+
+```c
+int i = 5, sum = 0;
+do {
+  sum = sum + i;
+  i = i - 1;
+} while (i > 0);
+return sum;
+```
+
+```
+55 8b ec 56 57             prologue + push si, di
+be 05 00                   mov si, 5            ; i in si
+33 ff                      xor di, di           ; sum in di
+                           ; ---- LOOP TOP ----
+8b c7                      mov ax, di           ; ax = sum
+03 c6                      add ax, si           ; ax += i
+8b f8                      mov di, ax           ; sum = ax
+8b c6                      mov ax, si           ; ax = i
+48                         dec ax               ; ax--
+8b f0                      mov si, ax           ; i = ax
+0b f6                      or si, si            ; flags from i
+7f f1                      jg -15               ; goto LOOP TOP
+8b c7                      mov ax, di           ; return sum
+eb 00 5f 5e 5d c3          epilogue
+```
+
+Findings:
+- **All locals promoted to registers**: i → si, sum → di. The
+  function uses zero stack slots beyond the saved bp/si/di.
+- **AX is the universal accumulator**: every expression result
+  passes through ax even when the more compact form would be
+  `add di, si` or `dec si`. So `sum += i` becomes 3 instructions
+  (load to ax, add, store back), and `i--` becomes 3 instructions
+  (load to ax, dec, store back). This is a consistent BCC quirk
+  worth catching in the codegen IR: it's the **"expressions always
+  flow through ax"** invariant.
+- The `i > 0` test uses **`or reg, reg` (1 byte)** to set flags
+  from si itself, then `jg` for signed-greater-than. No `cmp`.
+- Backward branch is `7f f1` = `jg -15` — disp8 reaches back to
+  the LOOP TOP. Loop body is well under 128 bytes.
+- The post-condition design of `do/while` means the LOOP TOP label
+  is *exactly* where the body starts — no entry-condition pre-check
+  like `while(){}` has.
+

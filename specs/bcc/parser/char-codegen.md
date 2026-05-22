@@ -822,3 +822,47 @@ Fixtures `701` (`--g`), `702` (`g++`), `703` (`g--`).
   FIXUPP, Grp4 r/m8 with mod=00 r/m=110) and the matching
   parser entries (`inc byte ptr ...` / `dec byte ptr ...`).
 
+
+## `char s[] = "hi"` auto-storage — uses N_SCOPY@ runtime copy
+
+Fixture `2509-char-arr-from-strlit-obj`:
+
+```c
+int main(void) {
+  char s[] = "hi";
+  return s[0];
+}
+```
+
+```
+55 8b ec                  prologue
+83 ec 04                  sub sp, 4              ; 4B frame (3B padded to even)
+16                        push ss
+8d 46 fc                  lea ax, [bp-4]          ; dst
+50                        push ax
+1e                        push ds
+b8 00 00                  mov ax, 0               ; src offset (FIXUPP _DATA)
+50                        push ax
+b9 03 00                  mov cx, 3               ; count incl NUL
+e8 00 00                  call N_SCOPY@           ; (EXTDEF)
+8a 46 fc                  mov al, [bp-4]
+98                        cbw
+eb 00 8b e5 5d c3         epilogue
+```
+
+Findings:
+- An auto-storage `char[]` initialized from a string literal is
+  NOT inlined as a sequence of byte stores — BCC emits a runtime
+  **`N_SCOPY@`** call with the four-arg signature
+  `(ss, dst-off, ds, src-off, count)`. The source `"hi\0"` lives
+  in `_DATA`.
+- **Stack-allocated char arrays are even-padded**: source is 3
+  bytes ("h", "i", "\0") but the local reserve is `sub sp, 4`.
+  Stack alignment is byte-pair (even) at minimum.
+- The string literal itself lands in `_DATA` (not `_TEXT` /
+  read-only segment) — confirmed by the FIXUPP target being the
+  `_DATA` symbol with disp 0.
+- This is the same `N_SCOPY@` helper used for struct-by-value
+  returns and for some larger struct copies. So small `char[]` and
+  large structs share the helper path.
+

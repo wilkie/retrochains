@@ -365,3 +365,34 @@ first false operand (per C90: `b` is not evaluated if `a` is false).
 This difference matters when one operand has side effects: `f() && g()`
 calls `g()` only if `f()` returned non-zero, while `f() & g()` always
 calls both.
+
+## `x ^= imm` with high-byte zero — still uses imm16 form
+
+Fixture `2507-xor-bit-toggle-obj`:
+
+```c
+int x;
+x = 0xF0F0;
+x ^= 0x00FF;
+return x;
+```
+
+```
+55 8b ec 56                prologue + push si
+be f0 f0                   mov si, 0xF0F0          ; x in si
+81 f6 ff 00                xor si, 0x00FF          ; imm16 (NOT sign-ext imm8)
+8b c6                      mov ax, si
+eb 00 5e 5d c3             epilogue
+```
+
+Findings:
+- `x` with no address-of and no shared use gets full **register
+  promotion** to si — zero stack slots.
+- `x ^= 0xFF` uses `81 /6 imm16` (4 bytes) rather than the
+  sign-extended `83 /6 imm8` (3 bytes). **This is correct**: the
+  `83` form sign-extends the imm8, so `0xFF → 0xFFFF`, which would
+  toggle the high byte — wrong semantics. BCC does the right thing
+  whenever the literal high bits aren't a sign-extension of the
+  low byte.
+- ModR/M `f6` = mod 11, opcode-ext 110 (xor), r/m 110 (si).
+

@@ -3924,3 +3924,34 @@ Findings:
   `c7 46 fe 0e 00` and `c7 46 fc 04 00` here, each fixupp'd to
   `_a` with the disp baked in.
 
+
+## 2D array with constant subscripts — fully folded byte offset
+
+Fixture `2512-2d-array-access-obj`:
+
+```c
+int m[3][4];
+int main(void) {
+  m[1][2] = 7;
+  return m[1][2];
+}
+```
+
+```
+55 8b ec                          prologue
+c7 06 0c 00 07 00                 mov word [_m + 12], 7   ; FIXUPP _m
+a1 0c 00                          mov ax, [_m + 12]       ; FIXUPP _m
+eb 00 5d c3                       epilogue
+```
+
+Findings:
+- `m[1][2]` with both indices constant folds **at compile time**
+  to byte offset = row × col-count × sizeof(int) + col × sizeof(int)
+  = 1 × 4 × 2 + 2 × 2 = 12.
+- Emitted as a single store/load to `[_m + 12]` with FIXUPP for
+  `_m` — same shape as `obj.i.v` flattening.
+- No runtime row-stride multiply, no shift. The 2D-ness is purely
+  a parser-side bookkeeping concern; codegen sees only an offset.
+- This generalizes to N-dimensional arrays with constant indices:
+  all collapse to a single `disp16 + FIXUPP` regardless of rank.
+

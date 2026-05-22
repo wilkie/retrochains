@@ -906,3 +906,39 @@ Distinct from:
 The `_DATA` section reserves 2 bytes for `_fp`, initialized via
 FIXUPP to point at `_adder`. Since `_fp` is `static`, no PUBDEF —
 only `_adder` is exported.
+
+## `void` function — body and epilogue merged, no `jmp $+2`
+
+Fixture `2511-void-fallthrough-ret-obj`:
+
+```c
+int g;
+void touch(int v) {
+  g = v;
+}
+```
+
+```
+55                         push bp
+8b ec                      mov bp, sp
+8b 46 04                   mov ax, [bp+4]       ; ax = v
+a3 00 00                   mov [_g], ax         ; FIXUPP _g
+5d                         pop bp
+c3                         ret
+```
+
+Findings:
+- Void fns still emit the **standard prologue (push bp; mov bp, sp)**
+  and epilogue (pop bp; ret) — the no-locals-no-return contract
+  doesn't elide BP setup.
+- **No `eb 00` "jump to epilogue" placeholder** is emitted at end of
+  body. The body's last instruction (the store to `_g`) is
+  immediately followed by `pop bp; ret`. So:
+  - int-returning fns: insert `eb 00` before epi (default-position).
+  - void fns: body falls THROUGH into epi without any jmp.
+  This is a distinguishing byte-level signature between void and
+  int-return.
+- AX is left holding the last computed value (v in this case) as a
+  side-effect of `8b 46 04` — but the void calling convention
+  promises nothing about AX, so callers don't observe.
+
