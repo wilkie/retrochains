@@ -1641,3 +1641,25 @@ Findings:
 - 4B+2B = 6B for the test — same size as int's optimized form.
 - This shows char comparison can skip the cbw step entirely.
 
+
+## `char c <= -1` — byte cmp with imm8 (0xFF as signed)
+
+Fixture `2911-char-le-neg1-obj`:
+
+```c
+if (c <= -1) return 1;
+return 0;
+```
+
+```
+80 7e 04 ff                    cmp byte [bp+4], 0xFF   (= -1 as i8)
+7f 05                          jg → ELSE               (signed > -1)
+```
+
+Findings:
+- Char comparison with negative imm = `cmp byte [mem], 0xFF` (4B).
+- Same byte-cmp form as char `>= 0` (`2904`); signed `<= -1` uses
+  `jg` for the inverse branch.
+- The 0xFF byte represents -1 in signed interpretation.
+- No int promotion needed; byte-direct compare.
+

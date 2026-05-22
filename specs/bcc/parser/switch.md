@@ -2120,3 +2120,59 @@ Findings:
 - ModR/M `a7 disp16` = mod 10, op-ext 100 (jmp), r/m 111 ([bx + disp16]).
 - Table format: N × 16-bit offsets (relative to start of table).
 
+
+## 5 contiguous cases — DENSE TABLE extends (same as 4)
+
+Fixture `2909-switch-5-contig-obj`:
+
+5 cases (0-4) use the same dense-table dispatch as 4 cases. Threshold:
+**N ≥ 4 contiguous cases → dense table**. The table just grows.
+
+## SPARSE switch (non-contiguous cases) — value-search + handler-jump tables
+
+Fixture `2910-switch-sparse-obj`:
+
+```c
+switch (x) {
+  case 1:    return 10;
+  case 10:   return 20;
+  case 100:  return 30;
+  case 1000: return 40;
+}
+```
+
+```
+4c 4c                          dec sp twice (local for x)
+8b 46 04 89 46 fe              x → [bp-2] (local copy)
+b9 04 00                       mov cx, 4         (case count)
+bb 3f 00                       mov bx, &value_table
+                               ; SEARCH LOOP:
+2e 8b 07                       mov ax, CS:[bx]   (load case value)
+3b 46 fe                       cmp ax, x
+74 06                          je → MATCH
+43 43                          inc bx, inc bx    (advance)
+e2 f4                          loop → SEARCH     (dec cx, jne)
+eb 18                          jmp → DEFAULT
+                               ; MATCH:
+2e ff 67 08                    jmp CS:[bx + 8]   (handler-table is +8 offset)
+```
+
+Tables:
+- Value table: `01 00 0a 00 64 00 e8 03` (1, 10, 100, 1000)
+- Handler table (+8 from value table): `23 00 28 00 2d 00 32 00`
+
+Findings:
+- **Sparse switch** (non-contiguous case values) uses **value-search
+  + parallel handler-jump tables**.
+- Search loop uses **`loop` instruction** (`e2 disp8`) which auto-
+  decrements CX and branches if non-zero.
+- Two parallel tables in CS:
+  - Value table: case values (4 × 2B = 8B for 4 cases)
+  - Handler table: jump-target offsets (4 × 2B = 8B)
+  - Handler table follows value table immediately; access uses
+    `[bx + 8]` (skip past value table size).
+- Setup cost: ~12 bytes; per-iteration: ~10 bytes; total ~25B+ for
+  dispatch.
+- BCC chooses this when case values aren't contiguous (otherwise
+  would use dense table from `2907`).
+

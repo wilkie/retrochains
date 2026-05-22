@@ -5762,3 +5762,34 @@ Findings:
 - Same shape as `g_a = g_b` for two globals (`2814`).
 - Subscripts fold to disp16 immediates in moffs16 form.
 
+
+## `arr[fn()] = v` — call + scale + load v + store
+
+Fixture `2914-arr-fn-idx-store-obj`:
+
+```c
+int arr[10];
+int getidx(void);
+void store(int v) {
+  arr[getidx()] = v;
+}
+```
+
+```
+e8 00 00                       call _getidx     (result in AX)
+d1 e0                          shl ax, 1        (scale)
+8b 56 04                       mov dx, v
+8b d8                          mov bx, ax       (copy index to BX)
+89 97 00 00                    mov [bx + _arr], dx   (store, FIXUPP)
+```
+
+Findings:
+- Function call as array subscript:
+  1. Call fn → result in AX (the index)
+  2. Scale by element size (`shl ax, 1` for int = 2)
+  3. Load value to be stored (into DX since AX has index)
+  4. Copy AX→BX (BX needed for `[bx + disp16]` addressing)
+  5. Store DX through `[bx + _arr]` with FIXUPP
+- ModR/M `97 disp16` = mod 10, reg 010 (dx), r/m 111 ([bx+disp16]).
+- Standard idiom for function-result-as-index assignment.
+

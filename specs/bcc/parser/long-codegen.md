@@ -3347,3 +3347,32 @@ Findings:
   sign distinction).
 - Same 4-byte cost for both.
 
+
+## Local `long b = a;` — 4-mov sequence (12 bytes)
+
+Fixture `2912-long-copy-obj`:
+
+```c
+long copy(long a) {
+  long b = a;
+  return b;
+}
+```
+
+```
+83 ec 04                       sub sp, 4 (local b)
+8b 46 06                       mov ax, a.HIGH
+8b 56 04                       mov dx, a.LOW
+89 46 fe                       b.HIGH = ax
+89 56 fc                       b.LOW = dx
+8b 56 fe                       mov dx, b.HIGH (return)
+8b 46 fc                       mov ax, b.LOW
+```
+
+Findings:
+- Long-to-long copy = **4 mov instructions** (12 bytes for the copy
+  portion).
+- AX carries HIGH, DX carries LOW during the copy. Return ABI is
+  DX:AX = HIGH:LOW.
+- Each word goes through its own register; no helper needed.
+
