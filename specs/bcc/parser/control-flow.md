@@ -3282,3 +3282,27 @@ Findings:
   per-position labels.
 - This generalizes to any depth of nested `&&`/`||`.
 
+
+## Long if-body — disp8 `jne` reaches up to +127 byte forward
+
+Fixture `2622-long-jmp-disp16-obj` — 24 successive `x = x + 1`
+statements inside an if-then. Each `x = x + 1` is 5 bytes (`8b c6
+40 8b f0` = mov ax,si; inc ax; mov si, ax — AX-acc form). Body
+total ≈ 120 bytes + trailing `eb 04` (skip-else).
+
+The `or si, si; jne ELSE` at the top of the if uses **`75 7c`** =
+`jne +124`, which is still within the disp8 range (-128..+127).
+
+Findings:
+- Forward `jne` with disp = 124 fits in the 2-byte `75 disp8`
+  form. BCC uses disp8 whenever possible.
+- To force the disp16 form (`0f 85 disp16`, 4 bytes — the long
+  conditional jump), the displacement would need to exceed +127.
+  Bodies under ~120 bytes generally stay in disp8.
+- Each `x = x + 1` is **5 bytes via AX-accumulator** (`mov ax, si;
+  inc ax; mov si, ax`) — confirmed once more that BCC routes
+  arith assignments through AX even for register-promoted locals.
+- The body of 24 increments shows the AX-acc pattern's verbosity:
+  the equivalent `for (...) x++;` would be far shorter, since
+  `x++` uses `inc reg` directly (1 byte per inc).
+

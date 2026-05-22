@@ -2204,3 +2204,32 @@ Findings:
   "values flow through memory" pattern.
 - No stack cleanup after the call — the helper consumes no args.
 
+
+## `const struct P *p` + `p->x` — `mov ax, [si]` (offset 0 no disp)
+
+Fixture `2624-const-struct-ptr-obj`:
+
+```c
+struct P { int x; int y; };
+int get_x(const struct P *p) {
+  return p->x;
+}
+```
+
+```
+55 8b ec 56                    prologue + push si
+8b 76 04                       mov si, p
+8b 04                          mov ax, [si]    ; p->x at offset 0
+eb 00 5e 5d c3                 epilogue
+```
+
+Findings:
+- `const struct P *` byte-identical to `struct P *`. The `const`
+  qualifier emits zero bytes.
+- **First field access (offset 0) uses no displacement byte**:
+  `8b 04` is `mov ax, [si]` (ModR/M `04` = mod 00, r/m 100 = `[si]`).
+  Total 2 bytes. Compare to non-zero-offset access (`8b 44 disp8`,
+  3 bytes).
+- This makes the FIRST field of a struct cheaper to access through
+  a pointer than later fields.
+

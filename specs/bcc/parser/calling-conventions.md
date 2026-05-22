@@ -1185,3 +1185,33 @@ Findings:
 - The global `_op` is initialized at link time via FIXUPP — the
   data bytes `00 00` get relocated to `_dbl`'s offset.
 
+
+## Calling a void function — caller side identical to int-return call
+
+Fixture `2623-void-fn-call-obj`:
+
+```c
+void noop(int x);
+int main(void) {
+  noop(5);
+  return 0;
+}
+```
+
+```
+55 8b ec                       prologue
+b8 05 00 50                    push 5
+e8 00 00                       call _noop      ; EXTDEF FIXUPP
+59                             pop cx          ; cleanup 1 arg
+33 c0                          xor ax, ax (return 0)
+eb 00 5d c3                    epilogue
+```
+
+Findings:
+- Caller-side: byte-identical to a value-returning call. Push args,
+  call, cleanup.
+- The caller doesn't care about return type — it just doesn't read
+  AX after the call. So void/non-void split is **purely on the
+  callee side** (`2511` showed void callees skip the `eb 00`
+  default-position jmp before pop bp).
+

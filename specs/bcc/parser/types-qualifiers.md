@@ -809,3 +809,40 @@ Findings:
   collapse to "int" at codegen: `enum E`, `short`, `short int` →
   all just int.
 
+
+## `void *` pointer + `(int *)vp` cast — zero-byte cast, ptr is just 2B
+
+Fixture `2626-void-ptr-obj`:
+
+```c
+int x = 42;
+void *vp = &x;
+int main(void) {
+  int *ip;
+  ip = (int *)vp;
+  return *ip;
+}
+```
+
+`_DATA`:
+- offset 0: x = 42
+- offset 2: vp = &x (FIXUPP _x)
+
+Main body:
+```
+55 8b ec 56                    prologue + push si
+8b 36 02 00                    mov si, [_vp]    ; load vp (FIXUPP)
+8b 04                          mov ax, [si]     ; *ip (= *(int*)vp)
+eb 00 5e 5d c3                 epilogue
+```
+
+Findings:
+- `void *` is byte-identical to any typed pointer: 2-byte near
+  pointer in small model. No distinct ABI.
+- `(int *)vp` cast emits zero bytes — like all same-size pointer
+  casts. The CAST is a parser-side type reinterpretation.
+- `ip` got register-promoted to si even though it was declared a
+  local: the assignment + dereference chain folds into 2 instr.
+- `void *vp = &x` global init: FIXUPP to `_x` makes the pointer
+  point to the int. Works in `_DATA` like any typed pointer init.
+

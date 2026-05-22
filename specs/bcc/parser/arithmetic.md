@@ -1946,3 +1946,74 @@ Findings:
 - Distinguishes from `%` which requires `mov ax, dx` after the
   divide.
 
+
+## Signed `s / K` (any K) — uniform `cwd + idiv bx` shape
+
+Fixture `2621-sdiv-by-7-obj`:
+
+```c
+int s = 100;
+return s / 7;
+```
+
+```
+55 8b ec 4c 4c                 prologue + 2B local
+c7 46 fe 64 00                 s = 100
+8b 46 fe                       mov ax, s
+bb 07 00                       mov bx, 7
+99                             cwd
+f7 fb                          idiv bx
+eb 00 8b e5 5d c3              epilogue
+```
+
+Findings:
+- Signed divide produces the **same instruction sequence regardless
+  of K**: only the `mov bx, K` immediate changes. No fast path for
+  any divisor value (including pow-2, which uses idiv too — see
+  `2520`).
+- Total cost: 3B (mov bx, K) + 1B (cwd) + 2B (idiv) = 6 bytes for
+  any constant divisor.
+- Combined with the unsigned variants, the full division table is:
+
+| op type | signed | unsigned |
+|---------|--------|----------|
+| pow-2   | mov bx,K; cwd; idiv bx | shr (1B unrolled or `mov cl,N; shr ax,cl`) |
+| any K   | mov bx,K; cwd; idiv bx | mov bx,K; xor dx,dx; div bx |
+
+
+## `a + b * c` precedence — multiply uses mem-operand `imul [mem]`
+
+Fixture `2625-precedence-add-mul-obj`:
+
+```c
+int a = 2, b = 3, c = 4;
+return a + b * c;
+```
+
+```
+55 8b ec 83 ec 06              prologue + 6B locals
+c7 46 fe 02 00                 a = 2  ; [bp-2]
+c7 46 fc 03 00                 b = 3  ; [bp-4]
+c7 46 fa 04 00                 c = 4  ; [bp-6]
+8b 46 fc                       mov ax, b
+f7 6e fa                       imul word [bp-6]    ; ax × c (mem-operand imul!)
+50                             push ax             ; spill (a*b)
+8b 46 fe                       mov ax, a
+5a                             pop dx              ; restore b*c
+03 c2                          add ax, dx          ; a + (b*c)
+eb 00 8b e5 5d c3              epilogue
+```
+
+Findings:
+- Precedence honored: `b * c` evaluates first (higher precedence
+  than `+`).
+- **`imul` can take a memory operand directly**: `f7 6e disp8` =
+  `imul word [bp + disp8]`, ModR/M `6e` = mod 01, opcode-ext 5
+  (imul), r/m 110 (bp+disp8). 3 bytes total.
+- Saves a byte vs `mov dx, [bp-6]; imul dx` (3 + 2 = 5 bytes).
+  So for variable second operand, BCC uses the direct mem-operand
+  form; for constant K, it uses `mov dx, K; imul dx`.
+- After the multiply, BCC spills the product to stack via push,
+  loads the first addend, and pops the product back into dx. Same
+  push/pop pattern we've seen for char+char arithmetic.
+
