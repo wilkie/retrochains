@@ -2683,3 +2683,48 @@ So `continue` is structurally a **`jmp` forward to the test**, which
 allows any pending increment work (in for loops) or test to run.
 The control-flow lowering treats `continue` exactly like
 `if (cond) ; else { rest }` plus an unconditional jmp.
+
+## `&&` chain of three — three serial cmp/je to one false target
+
+Fixture `2505-and-chain-three-obj`:
+
+```c
+if (a && b && c) return 7;
+return 0;
+```
+
+(with `a = b = c = 1` initializers above)
+
+```
+55 8b ec 83 ec 06     prologue + sub sp, 6 (3 locals)
+c7 46 fe 01 00        a = 1
+c7 46 fc 01 00        b = 1
+c7 46 fa 01 00        c = 1
+83 7e fe 00           cmp word [bp-2], 0    ; test a
+74 11                 je +17                ; → false path
+83 7e fc 00           cmp word [bp-4], 0    ; test b
+74 0b                 je +11                ; → false path
+83 7e fa 00           cmp word [bp-6], 0    ; test c
+74 05                 je +5                 ; → false path
+b8 07 00              mov ax, 7             ; TRUE: result
+eb 04                 jmp +4                ; → epilogue
+33 c0                 xor ax, ax            ; FALSE: result
+eb 00 8b e5 5d c3     epilogue
+```
+
+Findings:
+- Three-way `&&` compiles as **three serial `cmp word [mem], 0` +
+  `je false-path`**, sharing the same false-path target.
+- Each `je` uses **disp8 (short jump)** — disps shrink (0x11, 0x0b,
+  0x05) because each subsequent test is physically closer to the
+  false-target.
+- The TRUE path emits the result-into-ax + `jmp` to a common
+  epilogue point; the FALSE path emits `xor ax, ax` and falls
+  through. So the merge point is the single epilogue, NOT a per-
+  branch `return`.
+- 6-byte local reserve uses `sub sp, 6` (consistent with earlier
+  finding: ≥3B uses sub).
+- This is the canonical "short-circuit chain" shape: N operands →
+  N cmp/je pairs targeting one common false label, then one true-
+  path emit, then merge.
+

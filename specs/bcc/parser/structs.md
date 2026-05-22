@@ -1695,3 +1695,38 @@ Key observations:
 - ModR/M form `15` is mod 00, r/m 101 = `[di]` with no displacement;
   `44 02` is mod 01, r/m 100 = `[si+disp8]` with disp8=2.
 
+
+## Nested struct field access — single fixed offset, no chained loads
+
+Fixture `2503-nested-struct-field-obj`:
+
+```c
+struct Inner { int v; };
+struct Outer { struct Inner i; int z; };
+struct Outer obj;
+int main(void) {
+  obj.i.v = 7;
+  return obj.i.v;
+}
+```
+
+```
+55 8b ec                    prologue
+c7 06 00 00 07 00           mov word [_obj + 0], 7   ; FIXUPP _obj, disp16=0
+a1 00 00                    mov ax, [_obj + 0]       ; FIXUPP _obj, disp16=0
+eb 00 5d c3                 epilogue
+```
+
+Findings:
+- `obj.i.v` flattens to a single base+offset pair at compile time
+  (offset = 0, since both i and v sit at offset 0 in their parents).
+  No intermediate "load address of obj.i" step.
+- Nesting depth is essentially free — n-level field access compiles
+  to the same shape as 1-level, with the offset summed at parse time.
+- `c7 06 disp16 imm16` is the direct mem-to-imm16 store; ModR/M `06`
+  is mod 00, r/m 110 = `[disp16]` (the moffs16 form). The disp16 is
+  fixupp'd to `_obj+0`.
+- Pure offset folding means cross-cutting struct decisions
+  (alignment, packing, bitfields) only need to be computed ONCE per
+  type, at type-definition time — never at access-site time.
+

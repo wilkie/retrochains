@@ -3846,3 +3846,81 @@ Findings:
   index*. BCC always shifts a fresh copy rather than mutating the
   user variable.
 
+
+## Initialized array of struct — single contiguous LEDATA, no padding
+
+Fixture `2502-array-of-structs-init-obj`:
+
+```c
+struct Point { int x; int y; };
+struct Point pts[2] = { { 1, 2 }, { 3, 4 } };
+int main(void) {
+  return pts[1].y;
+}
+```
+
+Init bytes in `_DATA`:
+```
+01 00 02 00 03 00 04 00     ; pts[0].x, pts[0].y, pts[1].x, pts[1].y
+```
+
+Main body:
+```
+55 8b ec              prologue
+a1 06 00              mov ax, [_pts + 6]   ; pts[1].y (FIXUPP for _pts disp16=6)
+eb 00 5d c3           epilogue
+```
+
+Findings:
+- The initializer is a SINGLE contiguous LEDATA emission — `1, 2, 3, 4`
+  packed back-to-back as little-endian int16 with NO struct-boundary
+  padding (struct is 4 bytes = 2 ints exactly).
+- `pts[1].y` folds at compile time to the constant byte offset `6`:
+  pts[1] starts at +4, .y is the second int (+2), total +6.
+  Emitted as `mov ax, moffs16` (`a1` opcode), the disp16 carrying a
+  FIXUPP for `_pts + 6`. No subscript arithmetic at runtime — no LEA,
+  no shifts.
+- Constant-initialized data goes in `_DATA`, never `_BSS`.
+
+
+## Pointer subtraction — sub + idiv by element size (always signed)
+
+Fixture `2506-pointer-subtract-obj`:
+
+```c
+int a[10];
+int main(void) {
+  int *p, *q;
+  p = &a[7];  /* _a + 14 */
+  q = &a[2];  /* _a + 4 */
+  return p - q;
+}
+```
+
+```
+55 8b ec 83 ec 04     prologue + 4B locals (2 ptrs)
+c7 46 fe 0e 00        p = _a+14 (FIXUPP _a, disp16=14)
+c7 46 fc 04 00        q = _a+4  (FIXUPP _a, disp16=4)
+8b 46 fe              ax = p
+2b 46 fc              sub ax, q                ; byte difference
+bb 02 00              mov bx, 2                ; sizeof(int)
+99                    cwd                      ; sign-extend ax → dx:ax
+f7 fb                 idiv bx                  ; signed divide
+eb 00 8b e5 5d c3     epilogue
+```
+
+Findings:
+- Pointer subtraction `p - q` for `int *` compiles as
+  `sub ax, q; mov bx, 2; cwd; idiv bx`. **Always signed**: `cwd` +
+  `idiv`, never `sar` even though `sizeof(int) = 2` is a power of
+  two. This matches the C semantics that `ptrdiff_t` is signed.
+- The element size (2) is loaded into bx as an imm16 each time —
+  no register reuse from earlier code.
+- `&a[K]` for constant K is fully folded at compile time: the
+  byte offset (K * sizeof(*p)) goes directly into the immediate,
+  with a FIXUPP for the array's base symbol. No runtime `lea`.
+- `mov word [bp-disp], imm16` instructions CAN carry FIXUPPs on
+  their disp16 immediate field — confirmed via two consecutive
+  `c7 46 fe 0e 00` and `c7 46 fc 04 00` here, each fixupp'd to
+  `_a` with the disp baked in.
+

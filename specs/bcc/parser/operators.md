@@ -365,3 +365,47 @@ Findings:
   small-frame peephole threshold is at 1-2 bytes; ≥3 bytes uses
   `sub sp, imm8`. (Confirms 2-byte case in `2496` uses dec×2.)
 
+
+## Ternary with postfix side-effects in both arms
+
+Fixture `2501-cond-expr-side-effects-obj`:
+
+```c
+int y, z, r;
+y = 0; z = 0;
+r = y ? y++ : z--;
+return r + y + z;
+```
+
+```
+55 8b ec 4c 4c        prologue + 2B local for r
+56 57                 push si (= y), push di (= z)
+33 f6                 xor si, si      ; y = 0
+33 ff                 xor di, di      ; z = 0
+0b f6                 or si, si       ; test y (1-byte test for int reg)
+74 05                 jz +5
+8b c6                 mov ax, si      ; THEN: ax = y (old value)
+46                    inc si          ;        then y++
+eb 03                 jmp +3
+8b c7                 mov ax, di      ; ELSE: ax = z (old value)
+4f                    dec di          ;        then z--
+89 46 fe              mov [bp-2], ax  ; r = (...)
+8b 46 fe              mov ax, [bp-2]  ; RELOAD r (no CSE)
+03 c6                 add ax, si      ; + y
+03 c7                 add ax, di      ; + z
+eb 00 5f 5e 8b e5 5d c3
+```
+
+Findings:
+- Variables with **multiple uses get register slots**: y → si, z → di.
+  Only r (which is computed once and used once) stays in memory.
+- The condition test uses **`or reg, reg`** (1-byte test) not
+  `cmp reg, 0` — the standard "is this register zero?" peephole.
+- **Postfix in ternary**: each arm produces the OLD value into ax,
+  THEN performs the side effect (`mov ax, si; inc si` and
+  `mov ax, di; dec di`). Both arms converge on the same single store
+  `mov [bp-2], ax` — no per-branch store.
+- The result `r` is reloaded from memory for the sum — even though
+  the just-computed ax holds the value, BCC re-reads it. Sequence-
+  point boundary behaves like the earlier comma-expr finding.
+

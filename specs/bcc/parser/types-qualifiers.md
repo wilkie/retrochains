@@ -776,3 +776,36 @@ Findings:
   parameter — direct, via typedef, multi-level — collapses to
   `pointer-to-element`.
 
+
+## `short int` is identical to `int`
+
+Fixture `2504-short-int-explicit-obj`:
+
+```c
+int main(void) {
+  short int s;
+  s = 1000;
+  return s + 1;
+}
+```
+
+```
+55 8b ec 4c 4c        prologue + 2B local
+c7 46 fe e8 03        s = 1000 (0x03e8)
+8b 46 fe              ax = s
+40                    inc ax            ; s + 1 → inc peephole (1 byte)
+eb 00 8b e5 5d c3     epilogue
+```
+
+Findings:
+- `short int` (and bare `short`) are completely transparent to BCC:
+  same 2-byte stack slot as `int`, same `c7 46 disp imm16` store,
+  same `8b 46 disp` load, same `dec sp; dec sp` reserve.
+- **`x + 1` triggers the `inc reg` peephole** — single-byte `40`
+  instead of 3-byte `83 c0 01`. The peephole fires for any `+ 1` on
+  a 16-bit int reg, regardless of declared type (since short==int).
+- 1000 stored as imm16 = `e8 03` (little-endian).
+- This is the third confirmation that integer-family declared types
+  collapse to "int" at codegen: `enum E`, `short`, `short int` →
+  all just int.
+
