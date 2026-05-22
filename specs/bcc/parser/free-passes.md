@@ -318,3 +318,40 @@ Probe replaced with the char-compound-OR variant.
   `mov bx, 8 / cwd / idiv bx / mov ax, dx`. Confirms that the
   peephole gates on signedness (signed `%` of a negative value
   cannot be expressed as bitwise AND).
+
+## Free passes (batch 667)
+
+- `2351` — `do { sum += i; i++; } while (i < n);` (do-while with
+  variable-RHS condition): `i` enregistered (SI), `n` on stack at
+  `[bp-2]`. Loop tail uses `cmp si, [bp-2] / jl back-16` (reg-vs-mem
+  cmp + short backward jl). No preamble jump, since do-while always
+  runs the body first. Confirms tail-test loop template.
+- `2352` — `struct Big { int a,b,c,d; }; struct Big make(void); x =
+  make();` (function returning a large struct): re-confirms the
+  hidden-dest-pointer ABI for return-by-value of structs > 4 bytes.
+  EXTDEF table imports `N_SCOPY@`. Caller pushes the address of `x`
+  as a hidden last arg (visible as `ff 76 06` — `push [bp+6]` — in
+  the make body). Callee writes its local result through that
+  pointer via N_SCOPY@.
+- `2353` — `enum {N=10}; int arr[N]; while (i<N) { arr[i]=i+1;
+  sum+=arr[i]; i++; }` (enum constant in array size + loop bound):
+  the enum value folds to a literal `10` at parse time. The stack
+  reserve is `83 ec 14` (= 20 bytes for 10 ints). The compare
+  emits `cmp si, 10` (imm8-sext form `83 fe 0a`), not a symbol
+  reference. Confirms enum constants are compile-time literals
+  everywhere.
+- `2354` — 4-level nested `if (a>0) { if (b>0) { if (c>0) { if (d>0)
+  { return 100; } } } }` (deeply nested ifs with one common fail
+  path): each `cmp [bp-N], 0 / jle target` carries its own
+  forward-disp8 offset (`17, 11, 0b, 05`) and they all converge on
+  the same `xor ax,ax / jmp epilogue` block — no label coalescing,
+  pure structural lowering. Confirms nested-if lowering doesn't
+  merge tails.
+- `2355` — `~x` for int (`return ~x;`): single `f7 d0` (`not ax`).
+  Confirms BCC's `~` for int = direct one-instruction encoding, no
+  round-trip.
+- `2356` — `int x = -42; return x >> 15;` (signed shift by 15 = bit
+  width minus 1): emits `b1 0f / d3 f8` (`mov cl, 15 / sar ax, cl`)
+  — the cl-form is used since N=15 is ≥ 4. Signed shift right uses
+  `sar` (arithmetic), preserving sign. Confirms the
+  N≥4-tips-into-cl-form threshold and signed-shift = sar selection.
