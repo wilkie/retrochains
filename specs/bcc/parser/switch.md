@@ -1836,3 +1836,43 @@ Findings:
   needed at the codegen level — labels are scoped naturally by
   position in the byte stream.
 
+
+## `switch (c)` with char expression — `cbw` promote + int-compare dispatch
+
+Fixture `2655-switch-char-expr-obj`:
+
+```c
+int decode(char c) {
+  switch (c) {
+    case 'A': return 1;
+    case 'B': return 2;
+    case 'C': return 3;
+  }
+  return 0;
+}
+```
+
+```
+55 8b ec                       prologue
+8a 46 04                       mov al, c        (byte load)
+98                             cbw              (promote char → int)
+3d 41 00                       cmp ax, 'A'      (3-byte AX-form)
+74 0c                          je → case A
+3d 42 00 74 0c                 (similar for B)
+3d 43 00 74 0c                 (similar for C)
+eb 0f                          jmp → default
+...
+```
+
+Findings:
+- `switch (c)` with `char c` (signed by default) **promotes c to
+  int via `cbw`** before dispatch. Subsequent compares use the
+  16-bit `cmp ax, imm16` form (3 bytes per case).
+- BCC does NOT use a byte-aware optimization like `cmp al, K`
+  (2 bytes). The full integer-switch shape applies uniformly.
+- Each case dispatch costs 5 bytes (3 cmp + 2 je), same as int
+  switches.
+- The `cbw` is necessary because case labels are int-typed (`'A'`
+  is `int` per C90), so a byte compare wouldn't match if the high
+  byte of AX was non-zero.
+

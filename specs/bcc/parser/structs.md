@@ -2405,3 +2405,35 @@ Findings:
 - The next access `p.b` re-loads from `[bp+6]` (overwriting the
   AX value used in the previous expression).
 
+
+## `p->x = p->y + 1` — tight 6-instruction body
+
+Fixture `2656-struct-arrow-self-obj`:
+
+```c
+struct P { int x; int y; };
+void shift(struct P *p) {
+  p->x = p->y + 1;
+}
+```
+
+```
+55 8b ec                       prologue
+56                             push si
+8b 76 04                       mov si, p
+8b 44 02                       mov ax, [si+2]      ; p->y (offset 2)
+40                             inc ax              ; +1 peephole
+89 04                          [si] = ax           ; p->x at offset 0 (no disp)
+5e 5d c3                       pop si; pop bp; ret  (void!)
+```
+
+Findings:
+- Read `p->y` via `[si+2]` (offset 2 → disp8 form).
+- Write `p->x` via `[si]` (offset 0 → no-disp form `89 04`, 2 bytes).
+  ModR/M `04` = mod 00 r/m 100 = `[si]`.
+- The `+ 1` triggers the **`inc ax`** peephole (1 byte) regardless
+  of which side of the assignment.
+- Void function → no `eb 00` before pop sequence.
+- Body total = 12 bytes (push si + load p + load y + inc + store x +
+  pop si + pop bp + ret). Very compact.
+

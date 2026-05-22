@@ -2873,3 +2873,40 @@ Findings:
 | `g -= K` | 5B    | `sub word [mem], imm8`            |
 | `g |= K` | 5B    | `or word [mem], imm8` (sign-ext)  |
 
+
+## `counter = counter + 1` on global — 9 bytes AX-acc (LONGER than `++counter`)
+
+Fixture `2652-global-mut-fn-obj`:
+
+```c
+int counter = 0;
+void tick(void) {
+  counter = counter + 1;
+}
+```
+
+```
+55 8b ec                       prologue
+a1 00 00                       mov ax, [_counter]   (FIXUPP, 3B)
+40                             inc ax               (1B)
+a3 00 00                       [_counter] = ax      (FIXUPP, 3B)
+5d c3                          pop bp; ret
+```
+
+Findings:
+- `g = g + 1` (assignment-with-arithmetic form) compiles to:
+  load → inc → store = **9 bytes including the prologue+ret**.
+- For the SAME effect, the source-form choices have different sizes:
+
+| source            | bytes (excl. prologue/epi) |
+|-------------------|----------------------------|
+| `++g`             | 4B (`inc word [mem]`)      |
+| `g += 1`          | 5B (`add word [mem], 1`)   |
+| `g = g + 1`       | 7B (AX-acc: load+inc+store)|
+
+  ALL three are semantically equivalent — but BCC compiles them
+  literally as written. **Source form matters by 75% on this op.**
+- Void function → no `eb 00` placeholder before pop bp.
+- Confirms: BCC is NOT a strength-reducing compiler. The
+  user's source structure dictates byte structure.
+

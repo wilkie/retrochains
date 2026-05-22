@@ -3433,3 +3433,70 @@ Findings:
 - Void function = no `eb 00` placeholder before `pop si; pop bp; ret`.
   Confirms `2511` for void-fns with control-flow merging.
 
+
+## `while (1)` — bypasses entry-condition test (= `for(;;)`)
+
+Fixture `2651-while-1-break-obj`:
+
+```c
+while (1) {
+  if (i == 5) break;
+  i = i + 1;
+}
+```
+
+```
+55 8b ec 56                    prologue + push si
+33 f6                          xor si, si       ; i = 0
+                               ; --- LOOP TOP (no entry test) ---
+83 fe 05                       cmp si, 5
+75 02                          jne → SKIP-BREAK
+eb 07                          jmp → after-loop
+                               ; SKIP-BREAK:
+8b c6 40 8b f0                 i = i + 1 (AX-acc)
+eb f2                          jmp -14 → LOOP TOP
+                               ; after-loop:
+8b c6 eb 00 5e 5d c3           epilogue
+```
+
+Findings:
+- `while (1)` is **byte-identical to `for(;;)`** (`2516`). The
+  constant-true condition is elided at compile time — no
+  `jmp → COND` entry stub, and the LOOP TOP is the body's first
+  instruction.
+- Compare to `while (variable)` which uses the test-at-bottom
+  pattern with initial `jmp → COND`.
+- BCC recognizes `1` (any constant non-zero) as "unconditional"
+  at the condition site.
+
+
+## `for (...; ...; ++i)` — direct `inc reg` for the INC clause (1 byte)
+
+Fixture `2653-for-pre-inc-init-obj`:
+
+```c
+for (i = 0; i < 5; ++i) {
+  s = s + i;
+}
+```
+
+Body INC clause (after `s = s + i`):
+```
+46                             inc si         ; ++i — DIRECT (1 byte)
+```
+
+Findings:
+- `++i` in the for-loop INC clause uses **`inc reg`** directly when
+  `i` is register-promoted — 1 byte total.
+- Compare to `i = i + 1` in INC clause: would emit 5 bytes via
+  AX-accumulator (`8b c6 40 8b f0`).
+- The for-loop INC slot is just an expression statement; same
+  rules apply as any other expression site:
+  - `++i` → 1B (`inc reg`)
+  - `i += 1` → would emit `add reg, 1` or potentially the
+    operator-direct form
+  - `i = i + 1` → 5B (AX-acc)
+- Idiomatic C `for (i=0; i<N; ++i)` is byte-optimal for the inc
+  step. `for (i=0; i<N; i++)` would also produce `inc si` since
+  the result of `++` isn't used.
+
