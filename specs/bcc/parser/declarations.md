@@ -1163,3 +1163,28 @@ Findings:
 - Refined rule: **register promotion is BOTH count- AND usage-
   bounded**. Pure count-based modeling will miss real cases.
 
+
+## `extern struct P shared;` — EXTDEF for the struct, byte-identical access
+
+Fixture `2768-extern-struct-ref-obj`:
+
+```c
+struct P { int x; int y; };
+extern struct P shared;
+int get_x(void) { return shared.x; }
+```
+
+```
+55 8b ec                       prologue
+a1 00 00                       mov ax, [_shared] (FIXUPP for EXTDEF)
+eb 00 5d c3                    epilogue
+```
+
+Findings:
+- `extern struct P shared;` produces an EXTDEF for `_shared` —
+  same shape as `extern int g_count` (`2576`).
+- The struct's TYPE is known at parse time, so field offsets fold
+  correctly at compile (`.x` = offset 0 here = no disp).
+- Access uses `a1 disp16` with FIXUPP, identical to a locally-
+  defined struct global.
+

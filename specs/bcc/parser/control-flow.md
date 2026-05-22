@@ -3860,3 +3860,34 @@ Findings:
 - Both forms are byte-optimal for count-down; the choice depends
   on whether you want N or N-1 iterations.
 
+
+## `if (cond) goto label;` — double-jump pattern
+
+Fixture `2769-goto-skip-resume-obj`:
+
+```c
+if (flag == 0) goto skip;
+s = s + 10;
+skip:
+s = s + 1;
+```
+
+```
+83 7e 04 00                    cmp word [bp+4], 0
+75 02                          jne +2 → SKIP-GOTO
+eb 07                          jmp +7 → skip       ; the actual goto
+                               ; SKIP-GOTO:
+8b c6 05 0a 00 8b f0           s = s + 10
+                               ; skip:
+8b c6 40 8b f0                 s = s + 1
+```
+
+Findings:
+- `if (cond) goto label` uses the **same double-jump pattern** as
+  `if (cond) break;` / `continue;` (`2516`, `2578`, `2583`):
+  - `cmp + j<inv-cond> +2` — skip the goto if cond is false
+  - `jmp label` — the goto
+- Universal pattern: "conditional unconditional-jump" = 5 bytes
+  (cmp 4B + jne 2B + jmp 2B = 8B for vs-imm cmp; here 6+5=11B
+  including the `cmp [mem],0`).
+

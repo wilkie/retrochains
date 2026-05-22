@@ -5128,3 +5128,98 @@ Findings:
   shape as int inequality. Pointers are 2-byte ints in small model.
 - Skip-true branch for `!=` is `je` (jump if equal — opposite).
 
+
+## `struct_ptr + n` — scales by sizeof(struct) via shl strength reduction
+
+Fixture `2765-struct-ptr-plus-obj`:
+
+```c
+struct P { int x; int y; };   /* sizeof = 4 */
+struct P *next(struct P *p, int n) {
+  return p + n;
+}
+```
+
+```
+8b 46 06                       mov ax, n
+d1 e0 d1 e0                    shl ax, 1 × 2   ; n × 4 (= sizeof(struct))
+50                             push ax (spill)
+8b 46 04                       mov ax, p
+5a                             pop dx
+03 c2                          add ax, dx
+```
+
+Findings:
+- Struct-pointer arithmetic scales `n` by `sizeof(struct)`. For
+  `sizeof = 4`, that's 2 shifts (mult by 4 via strength reduction).
+- Same push/pop spill pattern as `int *p + n` (`2709`) since both
+  operands need AX during the multiply.
+- For non-power-of-2 sizeof (e.g. struct{int,int,char} = 5), BCC
+  would presumably use `mov dx, K; imul dx` instead. To probe.
+
+## `++p` for char* — single `inc reg` (1B)
+
+Fixture `2766-char-preinc-ptr-obj`:
+
+```c
+char *advance(char *p) {
+  ++p;
+  return p;
+}
+```
+
+```
+8b 76 04                       mov si, p
+46                             inc si             ; ++p (1B since sizeof=1)
+8b c6                          mov ax, si
+```
+
+Findings:
+- `++p` for `char *` uses single `inc reg` (1 byte) — no scaling
+  needed because sizeof(char) = 1.
+- Same shape as `*p++` for char* (`2557`).
+
+## `i = i + 2` uses TWO `inc reg` instructions (2B), NOT `add reg, 2` (3B)
+
+Fixture `2767-for-step-2-obj`:
+
+```c
+for (i = 0; i < 10; i = i + 2) {
+  s = s + i;
+}
+```
+
+INC clause:
+```
+8b c6                          mov ax, i
+40 40                          inc ax; inc ax    ; +2 via DOUBLE INC
+8b f0                          mov si, ax
+```
+
+Findings:
+- `i = i + 2` uses **two `inc reg`** instructions (`40 40`, 2 bytes)
+  via the AX accumulator, NOT `add ax, 2` (3 bytes).
+- Same peephole as `p += 2` for int* (`2518`) — `+= 2` always
+  prefers double-inc over add-imm.
+- The peephole threshold is at delta=2: 1 → inc, 2 → 2×inc, ≥3 →
+  add-imm.
+
+## `sizeof(arr)` for global char array — folded at compile time
+
+Fixture `2770-sizeof-char-arr-obj`:
+
+```c
+char buf[20];
+int size(void) { return sizeof(buf); }
+```
+
+```
+b8 14 00                       mov ax, 20
+```
+
+Findings:
+- `sizeof(char[20])` folds to the integer constant `20` at compile
+  time → single 3-byte `mov ax, imm16`.
+- Confirms the sizeof-of-array rule from `2541`: array type is
+  preserved at sizeof site (not decayed), size = elements × element-size.
+
