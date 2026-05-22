@@ -4476,3 +4476,62 @@ Findings:
 - `return -1` uses `mov ax, 0xFFFF` (3 bytes) — the same path as
   any int literal load. No sign-aware shortcut.
 
+
+## `*(p + K)` is byte-identical to `p[K]`
+
+Fixture `2646-ptr-add-deref-obj`:
+
+```c
+int a[5] = { 10, 20, 30, 40, 50 };
+int main(void) {
+  int *p = a;
+  return *(p + 2);
+}
+```
+
+```
+55 8b ec 56                    prologue + push si
+be 00 00                       mov si, _a (FIXUPP)
+8b 44 04                       mov ax, [si + 4]    ; *(p+2) = a[2]
+eb 00 5e 5d c3                 epilogue
+```
+
+Findings:
+- `*(p + 2)` for `int *p` compiles to `mov ax, [si + 4]` — same
+  byte sequence as `p[2]`. The two forms are CANONICALIZED to one
+  AST form at parse time.
+- Pointer arithmetic `p + K` for int* scales `K` by `sizeof(int) = 2`
+  → disp = 4.
+- Confirms three equivalent forms produce identical bytes:
+  - `p[K]`
+  - `*(p + K)`
+  - `*(K + p)` (commuted)
+
+## Pointer subtraction `p - q` with both args — `sub + cwd + idiv`
+
+Fixture `2647-ptr-diff-var-obj`:
+
+```c
+int diff(int *p, int *q) {
+  return p - q;
+}
+```
+
+```
+55 8b ec                       prologue
+8b 46 04                       mov ax, p
+2b 46 06                       sub ax, q       ; byte difference
+bb 02 00                       mov bx, 2       ; sizeof(int)
+99                             cwd
+f7 fb                          idiv bx         ; signed divide
+eb 00 5d c3                    epilogue
+```
+
+Findings:
+- Pointer subtraction always uses **signed idiv by sizeof(*p)**,
+  even when the pointers come from function args. Same shape as
+  `2506` (with `&arr[K]` initialized pointers).
+- Result is ptrdiff_t = signed int. Hence idiv (not div) and cwd
+  to sign-extend before divide.
+- 12 bytes for the full diff: 3B load + 3B sub + 3B mov bx + 1B cwd + 2B idiv.
+

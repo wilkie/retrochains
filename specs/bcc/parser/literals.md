@@ -396,3 +396,27 @@ Findings:
   remaining 3 bytes. The brace form has NO zero-fill if all slots
   are filled by the user.
 
+
+## Global init with unary-minus over arithmetic — fully folded
+
+Fixture `2650-global-init-neg-expr-obj`:
+
+```c
+int v = -(2 + 3 * 4);    /* = -14 */
+```
+
+`_DATA` bytes for `_v`: `f2 ff`  (= 0xFFF2 = -14)
+
+Findings:
+- BCC's constant evaluator handles **unary minus on a constant
+  expression** at compile time. The fold proceeds:
+  - `3 * 4` → 12
+  - `2 + 12` → 14
+  - `-(14)` → -14 → 0xFFF2 in two's complement
+- Stored as 2-byte little-endian: `f2 ff`.
+- Same pattern as `2547` (`int n = 2 + 3 * 4` = 14) but with the
+  outer unary minus also folded.
+- Confirms: any C90 constant expression in a static initializer is
+  fully evaluated by the parser; runtime never executes any init
+  code.
+

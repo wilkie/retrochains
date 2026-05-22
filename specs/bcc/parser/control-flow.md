@@ -3389,3 +3389,47 @@ Findings:
 - The implicit "else x == 0" falls through to the final `xor ax, ax`.
 - Returning `-1`: `mov ax, 0xFFFF` (3B, `b8 ff ff`).
 
+
+## `if-else` with no return in arms — `mov [moffs16], reg` direct store
+
+Fixture `2649-if-else-no-ret-obj`:
+
+```c
+int g;
+void set(int x) {
+  if (x > 0)
+    g = x;
+  else
+    g = -x;
+}
+```
+
+```
+55 8b ec 56                    prologue + push si
+8b 76 04                       mov si, x
+0b f6                          or si, si
+7e 06                          jle → ELSE (skip-then for >0)
+                               ; --- THEN: g = x ---
+89 36 00 00                    [_g] = si    ; mov [moffs16], si (4B)
+eb 07                          jmp → endif   (NOT dead — skips ELSE)
+                               ; --- ELSE: g = -x ---
+8b c6                          mov ax, si
+f7 d8                          neg ax
+a3 00 00                       [_g] = ax    (FIXUPP)
+5e 5d c3                       pop si; pop bp; ret    (void!)
+```
+
+Findings:
+- **`mov [moffs16], reg`** (where reg is si, di, etc.) uses opcode
+  `89 /r` with ModR/M `36` (mod 00, r/m 110) = `89 36 disp16` (4
+  bytes). Compare to `mov [moffs16], AX` which uses the special
+  `a3 disp16` (3 bytes) — AX is 1 byte shorter.
+- When the value is already in si (a register-promoted variable),
+  BCC stores it DIRECTLY without going through AX. Saves the
+  `mov ax, si` (2 bytes) step.
+- The `jmp endif` between THEN and ELSE is **NOT dead** here —
+  it must actually skip the ELSE body. (The "dead jmp" pattern
+  from `2587` was specifically when both arms `return`.)
+- Void function = no `eb 00` placeholder before `pop si; pop bp; ret`.
+  Confirms `2511` for void-fns with control-flow merging.
+

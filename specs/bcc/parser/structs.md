@@ -2336,3 +2336,72 @@ Findings:
 - Members of different sizes coexisting: the smaller member just
   doesn't use the high bytes.
 
+
+## Local array of struct on stack — contiguous layout, const-folded subscripts
+
+Fixture `2645-local-struct-arr-obj`:
+
+```c
+struct P { int x; int y; };
+int main(void) {
+  struct P arr[2];
+  arr[0].x = 1;
+  arr[1].y = 4;
+  return arr[0].x + arr[1].y;
+}
+```
+
+```
+55 8b ec 83 ec 08              prologue + 8B local (2 × 4 = 8)
+c7 46 f8 01 00                 [bp-8] = 1    ; arr[0].x
+c7 46 fe 04 00                 [bp-2] = 4    ; arr[1].y
+8b 46 f8                       mov ax, arr[0].x
+03 46 fe                       add ax, arr[1].y
+eb 00 8b e5 5d c3              epilogue
+```
+
+Findings:
+- Local array of struct allocates `count × sizeof(struct)` bytes on
+  the stack (here 2 × 4 = 8 bytes), placed at `[bp - 8]` (declaration
+  order from highest address).
+- Element-field offsets fold:
+  - arr[0].x → [bp-8] (struct base + 0)
+  - arr[0].y → [bp-6] (struct base + 2)
+  - arr[1].x → [bp-4] (next struct + 0)
+  - arr[1].y → [bp-2] (next struct + 2)
+- All accesses use `[bp + disp8]` directly — no runtime index math
+  for const subscripts.
+
+
+## Struct-by-val param + multiple field accesses — independent `[bp+disp]` loads
+
+Fixture `2648-struct-by-val-sideeff-obj`:
+
+```c
+struct P { int a; int b; };
+int g;
+int use(struct P p) {
+  g = p.a;
+  return p.b;
+}
+```
+
+```
+55 8b ec                       prologue
+8b 46 04                       mov ax, p.a    ; [bp+4]
+a3 00 00                       [_g] = ax (FIXUPP)
+8b 46 06                       mov ax, p.b    ; [bp+6]
+eb 00 5d c3                    epilogue
+```
+
+Findings:
+- Struct-by-val params live at `[bp+4 ..]` (after the return
+  address). Each field at its compile-time offset within the
+  struct.
+- Multiple field accesses are **independent loads** — no caching
+  in a register across the intervening operation.
+- `g = p.a` stores AX → global via `a3 disp16` (3 bytes) since
+  the value is already in AX.
+- The next access `p.b` re-loads from `[bp+6]` (overwriting the
+  AX value used in the previous expression).
+
