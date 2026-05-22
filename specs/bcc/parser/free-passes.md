@@ -737,3 +737,32 @@ Probe replaced with the char-compound-OR variant.
   as struct member): `v` is an 8-byte stack slot;
   `v.arr[K]` for constant K folds to `[bp+disp]` with the
   combined struct+element offset. No special handling needed.
+
+## Free passes (batch 686)
+
+- `2465` — `int sum(int, int);` (forward prototype without parameter
+  names): parser accepts; OBJ output byte-identical to a typed
+  forward declaration with names. Parameter names are
+  pure-syntactic in prototypes.
+- `2466` — `int m[3][2] = {{1,2},{3},{5,6}};` (2D array with
+  partial inner initializer): row 1 has only `{3}` provided; `m[1]
+  [1]` zero-fills via LIDATA. Standard partial-init applies at the
+  inner-level too.
+- `2467` — nested-block variable shadowing: `int x; { int x; }`
+  produces **separate stack slots** for outer and inner `x`. Stack
+  layout: outer_x at `[bp-2]`, r at `[bp-4]`, inner_x at `[bp-6]`.
+  Inner scope's `x` doesn't disturb the outer. Re-confirms
+  [[nested-scope-shadowing]] finding.
+- `2468` — `if (x > 30000)`: the constant 30000 exceeds disp8-sext
+  range (max +127), so BCC emits the `81 /7 imm16` cmp form
+  (`81 7e fe 30 75`) — 5 bytes vs the 4-byte `83 /7 imm8`. Confirms
+  imm16 form selection for cmp with large constants.
+- `2469` — `x * 100 + y * 1000` (two consecutive non-power-of-2
+  multiplications): each uses `mov dx, K / imul dx`; intermediate
+  result pushed on stack before the second mul; then `pop ax / add
+  ax, dx` combines. Standard chained-mul pattern.
+- `2470` — `int *arr[2]; arr[0] = &a; *arr[0] = 100;` (array of
+  pointers, writing through deref of indexed element):
+  `mov bx, [bp+arr0_offset] / mov [bx], 100` — load the pointer
+  from the array slot, then deref-write. Standard ptr-array
+  mechanics.
