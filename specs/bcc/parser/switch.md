@@ -1687,3 +1687,57 @@ Findings:
   The dispatch is JUST the chain of cmp/je; each `case label:`
   becomes a goto target, and `break` is a jmp to after-switch.
 
+
+## Switch with `default` in middle — dispatch unchanged, bodies stay in source order
+
+Fixture `2600-switch-default-middle-obj`:
+
+```c
+switch (x) {
+  case 1: return 10;
+  default: return 99;
+  case 2: return 20;
+}
+return 0;
+```
+
+```
+55 8b ec 4c 4c                 prologue + 2B local
+c7 46 fe 05 00                 x = 5
+8b 46 fe                       mov ax, x
+3d 01 00                       cmp ax, 1
+74 07                          je → case_1
+3d 02 00                       cmp ax, 2
+74 0c                          je → case_2
+eb 05                          jmp → default
+                               ; --- case 1 body (source order) ---
+b8 0a 00                       mov ax, 10
+eb 0e                          jmp → epi
+                               ; --- default body ---
+b8 63 00                       mov ax, 99
+eb 09                          jmp → epi
+                               ; --- case 2 body ---
+b8 14 00                       mov ax, 20
+eb 04                          jmp → epi
+                               ; --- after-switch ---
+33 c0                          xor ax, ax
+eb 00 8b e5 5d c3              epilogue
+```
+
+Findings:
+- **Default position is decoupled from dispatch logic**: the
+  dispatch tests only the labeled cases (1, 2), and falls through
+  to `jmp default` if none match — regardless of where the default
+  body sits in the source.
+- **Case bodies are emitted in SOURCE order** — case 1, default,
+  case 2. The default's body lives between the two case bodies.
+- This means: the `jmp default` instruction in dispatch can target
+  ANY position in the body region; BCC computes the displacement
+  to wherever the parser placed it.
+- Fallthrough behavior still applies: if default has no `break`,
+  it falls into case 2's body. Here all three have `return` so no
+  fallthrough is visible.
+- The post-switch `return 0` lives after the case bodies and is
+  reached only if all bodies fall through (none here, since each
+  returns).
+

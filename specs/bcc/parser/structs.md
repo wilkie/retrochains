@@ -2071,3 +2071,49 @@ Findings:
   them since both compete for AX.
 - This is the canonical pattern for type punning via union in C.
 
+
+## Array of struct with constant subscript — single byte offset
+
+Fixture `2598-arr-of-struct-access-obj`:
+
+```c
+struct P { int x; int y; };
+struct P arr[3];
+int main(void) {
+  arr[1].x = 7;
+  arr[1].y = 9;
+  return arr[1].x + arr[1].y;
+}
+```
+
+```
+55 8b ec                       prologue
+c7 06 04 00 07 00              [_arr+4] = 7       ; arr[1].x
+c7 06 06 00 09 00              [_arr+6] = 9       ; arr[1].y
+a1 04 00                       ax = [_arr+4]      ; arr[1].x
+03 06 06 00                    add ax, [_arr+6]   ; + arr[1].y
+eb 00 5d c3                    epilogue
+```
+
+Findings:
+- `arr[K].member` with **constant K** folds to a single byte offset:
+  `K × sizeof(struct) + offset_of(member)`. Here:
+  - `arr[1].x` = 1 × 4 + 0 = 4
+  - `arr[1].y` = 1 × 4 + 2 = 6
+- Both store and load use moffs16 form (`c7 06 disp16 imm16` for
+  store, `a1 disp16` for load) with FIXUPP to `_arr`.
+- `add ax, [moffs16]` for the second field uses ModR/M `06` (mod 00
+  r/m 110 = `[disp16]`), 4 bytes total.
+- `sizeof(struct P arr[3])` = 12 bytes in `_BSS`.
+- Generalizes the offset-folding rule:
+
+  | construct                    | offset       |
+  |------------------------------|--------------|
+  | `obj.f` (scalar struct)      | offset_of(f) |
+  | `arr[K]` (array)             | K × elsize   |
+  | `arr[K].f`                   | K × elsize + offset_of(f) |
+  | `obj.sub.f`                  | offset_of(sub) + offset_of(f) |
+  | `m[i][j]` (2D, const i,j)    | i × cols × elsize + j × elsize |
+
+  All collapse to a single disp16+FIXUPP load/store.
+

@@ -354,3 +354,18 @@ Findings:
 - The expression `n + s[0]` uses the **push/pop pattern** again to
   juggle int and char (cbw-promoted) results through AX.
 
+
+## Global `int v = -1` — two's complement in `_DATA`
+
+Fixture `2599-global-int-neg-obj`:
+
+`_DATA` bytes: `ff ff` (= -1 in 16-bit two's complement)
+
+Findings:
+- Negative integer literal initializers are stored as **two's
+  complement bytes** in `_DATA`. No special runtime negation.
+- The same shape as positive globals: 2 bytes, little-endian.
+  Only difference: bit pattern.
+- BCC's parser evaluates the `-1` literal at compile time and
+  emits the resulting word.
+

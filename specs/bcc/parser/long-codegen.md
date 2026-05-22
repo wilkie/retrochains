@@ -2515,3 +2515,35 @@ Findings:
   struct's fields are LAID OUT identically to the underlying scalar.
   So `struct{long}` and `long` are byte-identical for arg passing.
 
+
+## `(int)(a + b)` for long+long variable — confirms eager truncation
+
+Fixture `2597-long-add-long-obj`:
+
+```c
+long a = 100000L;
+long b = 200000L;
+return (int)(a + b);
+```
+
+```
+55 8b ec 83 ec 08              prologue + 8B locals (2 longs)
+c7 46 fe 01 00                 a HIGH = 1
+c7 46 fc a0 86                 a LOW  = 0x86a0
+c7 46 fa 03 00                 b HIGH = 3
+c7 46 f8 40 0d                 b LOW  = 0x0d40
+8b 46 fc                       mov ax, a.LOW
+03 46 f8                       add ax, b.LOW
+eb 00 8b e5 5d c3              epilogue
+```
+
+Findings:
+- Confirms the eager-truncation pattern from `2569`: when the
+  enclosing context is `(int)`, BCC emits ONLY the low-word add
+  (`add ax, [bp-disp]`), skipping the `adc dx, [bp-disp']` that
+  a full long-long add would need.
+- This applies to long+long where BOTH operands are variables
+  (not just constant + var). Type-directed elision is general.
+- Without the cast, the same expression would emit `mov ax, low(a);
+  mov dx, high(a); add ax, low(b); adc dx, high(b)`.
+

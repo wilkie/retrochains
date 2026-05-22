@@ -1776,3 +1776,43 @@ Findings:
 - Compare to unsigned `u / 2^N` which uses `shr` (`2519`) — both
   optimizations apply, and BCC takes both when applicable.
 
+
+## Signed `s % 2^N` — `cwd + idiv + mov ax, dx` (NOT and-mask)
+
+Fixture `2602-smod-pow2-obj`:
+
+```c
+int s;
+s = -1000;
+return s % 8;
+```
+
+```
+55 8b ec 4c 4c                 prologue + 2B local
+c7 46 fe 18 fc                 s = -1000 (0xFC18)
+8b 46 fe                       mov ax, s
+bb 08 00                       mov bx, 8
+99                             cwd                ; sign-extend
+f7 fb                          idiv bx            ; signed divide
+8b c2                          mov ax, dx         ; remainder is in DX
+eb 00 8b e5 5d c3              epilogue
+```
+
+Findings:
+- Signed `s % 2^N` uses **full `cwd + idiv` then `mov ax, dx`** to
+  grab the remainder. NO and-mask trick.
+- The and-mask `s & (2^N - 1)` would give the WRONG result for
+  negative s: e.g. `-1 & 7 = 7`, but C requires `-1 % 8 = -1`
+  (remainder follows dividend's sign).
+- After `idiv bx`: AX = quotient, DX = remainder. The `mov ax, dx`
+  retrieves remainder into return register.
+- Operator/divisor table for mod:
+
+| operand     | divisor     | code                              |
+|-------------|-------------|-----------------------------------|
+| unsigned    | any 2^N     | `and ax, (2^N - 1)`               |
+| unsigned    | non-pow2    | `mov bx, K; xor dx, dx; div bx; mov ax, dx` (probe) |
+| signed      | any         | `mov bx, K; cwd; idiv bx; mov ax, dx` |
+
+  Signed gets NO fast path even for pow-2 divisors.
+

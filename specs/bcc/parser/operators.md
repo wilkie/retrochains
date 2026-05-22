@@ -688,3 +688,29 @@ Findings:
   sub-expression's value (here `x + y` = 30), used as the value
   of the outer assignment.
 
+
+## Unary minus `-x` — single `neg ax`
+
+Fixture `2601-unary-neg-obj`:
+
+```c
+int x = 42;
+return -x;
+```
+
+```
+55 8b ec 4c 4c                 prologue + 2B local
+c7 46 fe 2a 00                 x = 42
+8b 46 fe                       mov ax, x
+f7 d8                          neg ax           ; UNARY NEGATE
+eb 00 8b e5 5d c3              epilogue
+```
+
+Findings:
+- Unary `-x` compiles to **single `neg ax`** (`f7 d8`, 2 bytes).
+- `f7 /3` opcode with r/m 000 = ax → two's-complement negation in
+  place. Sets flags.
+- Compare to alternatives: `0 - x` would be `mov ax, 0; sub ax, x`
+  (5 bytes); `~x + 1` would be `not ax; inc ax` (3 bytes). BCC
+  picks the most direct form via the dedicated `neg` instruction.
+
