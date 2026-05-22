@@ -1735,3 +1735,38 @@ Findings:
   at 4+ shifts (where unrolled = 8 bytes > 4 bytes via cl).
 - d1 /5 = `shr r/m16, 1` (single-bit form).
 
+
+## Unsigned divide by 16 — switches to `shr ax, cl` form
+
+Fixture `2519-unsigned-div-16-obj`:
+
+```c
+unsigned int u;
+u = 1000;
+return u / 16;
+```
+
+```
+55 8b ec 4c 4c                prologue + 2B local
+c7 46 fe e8 03                u = 1000
+8b 46 fe                      mov ax, u
+b1 04                         mov cl, 4
+d3 e8                         shr ax, cl
+eb 00 8b e5 5d c3             epilogue
+```
+
+Findings:
+- At **shift count 4**, BCC switches from unrolled single-bit `d1 e8`
+  to the **`mov cl, N; shr ax, cl`** form (`b1 04; d3 e8` = 4 bytes).
+- The unroll/cl-form threshold is **4 shifts**:
+  - Shift 1: 1 `d1 e8` (2B) — unrolled
+  - Shift 2: 2 `d1 e8` (4B) — unrolled (ties cl-form 4B, picks unroll)
+  - Shift 3: 3 `d1 e8` (6B) — unrolled (LOSES vs cl-form 4B! Yet
+    BCC still unrolls — so this is NOT pure byte-min.)
+  - Shift 4: cl-form (4B) — switches over.
+- Hypothesis: BCC unrolls when count ≤ 3 to avoid CL-clobber, and
+  spills to CL only when ≥4. So the rule is **"unroll if N ≤ 3, else
+  use CL form"** — a fixed count threshold, not a byte-length
+  threshold.
+- This is worth catching as a peephole rule in our IR.
+

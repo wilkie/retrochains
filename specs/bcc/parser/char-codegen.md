@@ -900,3 +900,36 @@ Findings:
   (a void function with empty body would be `55 8b ec 5d c3` = 5
   bytes; this is 9).
 
+
+## `char` parameter — caller pushes 16-bit slot, callee reads AL + `cbw`
+
+Fixture `2523-char-param-promote-obj`:
+
+```c
+int compute(char c) {
+  return c + 1;
+}
+```
+
+```
+55 8b ec                    prologue
+8a 46 04                    mov al, [bp+4]          ; LOW BYTE only
+98                          cbw                     ; sign-extend al → ax
+40                          inc ax                  ; c + 1 peephole
+eb 00 5d c3                 epilogue
+```
+
+Findings:
+- The `char` parameter occupies a **full 16-bit stack slot**
+  (cdecl pushes all args as words/larger). The callee reads only
+  the **low byte** via `mov al, [bp+4]` (opcode `8a`, byte form),
+  leaving AH stale.
+- BCC then emits `cbw` (1 byte) to **sign-extend AL into AX**
+  before any int-context arithmetic. This is the integer promotion
+  for plain `char` (signed). Compare to `unsigned char` which would
+  use `xor ah, ah` (2 bytes) to zero-extend.
+- `c + 1` collapses to `inc ax` (1 byte) — same peephole as int+1.
+- So char-param promotion shape is **`8a 46 disp; 98; ...`** (=4
+  bytes total to get a sign-extended int into AX). A reusable
+  template.
+

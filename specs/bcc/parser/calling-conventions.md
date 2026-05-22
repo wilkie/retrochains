@@ -942,3 +942,41 @@ Findings:
   side-effect of `8b 46 04` — but the void calling convention
   promises nothing about AX, so callers don't observe.
 
+
+## Extern call with one-arg → `pop cx` cleanup, NOT `add sp, 2`
+
+Fixture `2522-puts-string-lit-obj`:
+
+```c
+int puts(const char *s);
+int main(void) {
+  puts("hi");
+  return 0;
+}
+```
+
+```
+55 8b ec                    prologue
+b8 00 00                    mov ax, 0                ; offset of "hi" in _DATA (FIXUPP)
+50                          push ax                  ; arg1
+e8 00 00                    call _puts               ; EXTDEF FIXUPP
+59                          pop cx                   ; cleanup 1 arg (2B)
+33 c0                        xor ax, ax              ; return 0
+eb 00 5d c3                  epilogue
+```
+
+Findings:
+- **Single-word cdecl cleanup is `pop cx`** (1 byte) — not
+  `add sp, 2` (3 bytes). The popped value lands in CX (scratch).
+  This is a 2-byte savings whenever exactly one word needs popping.
+- For multi-word arg lists, BCC switches to `add sp, N` (more
+  efficient than N×pop). To probe the exact threshold.
+- `return 0` peephole: `xor ax, ax` (2B, opcode `33 c0`) instead of
+  `mov ax, 0` (3B, `b8 00 00`).
+- Extern function symbols are emitted via the EXTDEF record;
+  string literals live in `_DATA` and carry a FIXUPP to relocate.
+- The call uses near-call opcode `e8` (3B, disp16) — since we're
+  in the small memory model the puts symbol resolves to a near
+  intra-segment call. (Large/huge memory model would emit `9a` far
+  call with seg:off.)
+

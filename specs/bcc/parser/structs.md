@@ -1730,3 +1730,44 @@ Findings:
   (alignment, packing, bitfields) only need to be computed ONCE per
   type, at type-definition time — never at access-site time.
 
+
+## Struct ≤4B returned by value — packed into DX:AX (no N_SCOPY@)
+
+Fixture `2524-struct-ret-by-val-obj`:
+
+```c
+struct Small { int x; int y; };
+struct Small make(void) {
+  struct Small s;
+  s.x = 10;
+  s.y = 20;
+  return s;
+}
+```
+
+```
+55 8b ec                       prologue
+83 ec 04                       sub sp, 4             ; 4B local for s
+c7 46 fc 0a 00                 s.x = 10              ; at [bp-4]
+c7 46 fe 14 00                 s.y = 20              ; at [bp-2]
+8b 56 fe                       mov dx, [bp-2]        ; dx = s.y  (HIGH word)
+8b 46 fc                       mov ax, [bp-4]        ; ax = s.x  (LOW word)
+eb 00 8b e5 5d c3              epilogue
+```
+
+Findings:
+- Struct of exactly 4 bytes returned by value is **packed into
+  DX:AX** — `ax = first int (offset 0)`, `dx = second int
+  (offset 2)`. Byte-identical to returning a `long` with the
+  same bit layout.
+- **NO `N_SCOPY@` helper call**: at this size the value flows
+  through registers, not through a hidden return-pointer arg.
+- The load order is `dx ← high, ax ← low` — DX comes first in
+  source order despite being the "high half." Suggests the codegen
+  evaluates `return s` by walking fields in declaration order, with
+  the first field always going to AX and the next to DX.
+- To probe: a 3-byte struct (e.g. `{int; char;}`) — does it also
+  use DX:AX with the char in DX's low byte? A 5+ byte struct would
+  definitely switch to hidden-pointer-arg + N_SCOPY@ (already
+  observed in earlier fixtures).
+

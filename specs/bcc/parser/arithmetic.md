@@ -1703,3 +1703,39 @@ b8 01 00                ; mov ax, 1
 slightly larger but contains no branches — typical-case faster on
 8086 (no pipeline disruption on its 1-byte queue). Confirms BCC
 prefers branchless idioms even when slightly larger.
+
+## Signed `int / 8` — uses `cwd + idiv`, NOT `sar`
+
+Fixture `2520-signed-div-8-obj`:
+
+```c
+int s;
+s = -1000;
+return s / 8;
+```
+
+```
+55 8b ec 4c 4c                prologue + 2B local
+c7 46 fe 18 fc                s = -1000 (0xfc18)
+8b 46 fe                      mov ax, s
+bb 08 00                      mov bx, 8
+99                            cwd
+f7 fb                         idiv bx
+eb 00 8b e5 5d c3             epilogue
+```
+
+Findings:
+- **Signed divide by 8 uses `cwd; idiv bx`** — NOT `sar ax, cl`.
+  Even though sar would be 1-2 instructions vs the 4-byte `bx` setup
+  + `cwd` + `idiv`, BCC defers to idiv because **sar rounds toward
+  -infinity** for negative values while C requires round-toward-zero.
+  Example: `-7 sar 3 = -1` (C/idiv) vs `-7 sar 3 = -1` here happens
+  to match, but `-1 sar 1 = -1` (sar) vs `-1 / 2 = 0` (C) diverges.
+- The codegen is byte-identical to `s / 9` or any non-pow2 divisor —
+  signed divide gets no fast-path regardless of divisor.
+- This explains pointer-diff (`2506`) using idiv too: a `p - q` is
+  signed, so it can't shift even when sizeof is pow2.
+- Compare to unsigned/pow2 (`2513`, `2519`) which uses shifts —
+  unsigned shifts ARE safe because they round down which matches
+  unsigned divide.
+

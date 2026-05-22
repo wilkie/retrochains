@@ -2043,3 +2043,51 @@ halves). Added the branch and these tasm IR variants:
   lo hi` (long-word siblings of the byte variants from batch
   121).
 
+
+## `long *p++` — `add si, 4` (NOT four `inc si`)
+
+Fixture `2521-long-ptr-postinc-obj`:
+
+```c
+long a[3];
+int main(void) {
+  long *p;
+  long v;
+  p = a;
+  v = *p++;
+  return (int)v;
+}
+```
+
+```
+55 8b ec                    prologue
+83 ec 04                    sub sp, 4              ; 4B local for v (long)
+56                          push si                ; p in si
+be 00 00                    mov si, 0              ; p = _a (FIXUPP)
+8b 44 02                    mov ax, [si+2]         ; HIGH word of *p
+8b 14                       mov dx, [si]           ; LOW word of *p
+89 46 fe                    mov [bp-2], ax         ; v.HIGH at offset -2
+89 56 fc                    mov [bp-4], dx         ; v.LOW at offset -4
+83 c6 04                    add si, 4              ; p++ (sizeof(long) = 4)
+8b 46 fc                    mov ax, [bp-4]         ; return (int)v = LOW
+eb 00 5e 8b e5 5d c3        epilogue
+```
+
+Findings:
+- **`p++` for `long*` uses `add si, 4` (3 bytes)**, NOT four
+  `inc si` (4 bytes). So the inc-vs-add threshold is at +2: BCC
+  picks `inc; inc` when delta is exactly 2 (saves 1 byte vs add),
+  but uses `add reg, imm8` for +4 and beyond.
+- **Long value load through pointer**: BCC issues two independent
+  `mov reg, [si+disp]` instructions — high word at [si+2] into AX,
+  low word at [si] into DX. The order is **HIGH first into AX, LOW
+  second into DX** (suggests an evaluation pattern, not a DX:AX-as-
+  pair convention).
+- **Long value store to stack**: stores AX (which holds the HIGH
+  word) at [bp-2] and DX (LOW word) at [bp-4]. So in memory the
+  long at `[bp-4]` has low word at -4, high word at -2 — standard
+  little-endian.
+- **`(int)v` cast** truncates by loading only the low word of v:
+  `mov ax, [bp-4]`. The high half [bp-2] is discarded — no zero-
+  extension, no movzx. Cast = address selection.
+
