@@ -706,3 +706,34 @@ Probe replaced with the char-compound-OR variant.
 - `2458` — `int x = compute();` (local initialized from a function
   call): standard `call / mov [bp-N], ax` pattern. The initializer
   context lowers identically to `int x; x = compute();`.
+
+## Free passes (batch 685)
+
+- `2459` — `volatile int v; a = v; b = v;` (two reads of a
+  volatile local): each read emits `mov ax, [bp-2]`. Re-confirms
+  volatile's main effect is **blocking enregistration**, not
+  adding memory-barrier instructions. Since BCC doesn't CSE
+  non-volatile reads either, the byte output here would be
+  identical without `volatile` — but with volatile, the
+  enregistration pool refuses the variable.
+- `2460` — `(unsigned char)i` cast from int (i = 0x12FF, uc =
+  0xFF): writes low byte via `mov al,[i] / mov [uc], al`, then
+  reading back widens with `mov ah, 0` (zero-extend, NOT `cbw`
+  sign-extend). Re-confirms uchar widening = `b4 00`, contrasting
+  with signed char `98 (cbw)`.
+- `2461` — `if (check(5)) ...` (function-call result as if
+  condition): call result lands in AX, then `or ax, ax / jz else`
+  pattern for the branch. Re-confirms call-as-cond mechanics.
+- `2462` — `struct Big big = {10,20,30,40,50};` at file scope
+  (5-int struct, 10 bytes in `_DATA`): packed sequential layout
+  (offsets 0, 2, 4, 6, 8). LIDATA holds the 5 word values. Access
+  via `[_big+offset]` with FIXUPP. Confirms 5-int struct = 10
+  bytes (packed, no padding), same as smaller structs.
+- `2463` — `my_strlen(char *s) { while (*s) { n++; s++; }
+  return n; }` (manual strlen with deref-test + pointer-walk):
+  standard pattern. `cmp byte ptr [si], 0 / jne loop / inc si /
+  inc n`. Confirms manual strlen lowering.
+- `2464` — `struct Vec { int arr[4]; }; v.arr[K] = N;` (array
+  as struct member): `v` is an 8-byte stack slot;
+  `v.arr[K]` for constant K folds to `[bp+disp]` with the
+  combined struct+element offset. No special handling needed.
