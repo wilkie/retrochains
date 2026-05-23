@@ -4924,3 +4924,51 @@ Findings:
 - BCC reg-allocates locals into SI/DI when available, regardless of `register` keyword — `register` is at most an *additional* hint.
 - Loop body is 6 bytes: `add reg, reg / inc reg / cmp reg, mem / jl`.
 
+
+## Cascaded ternary `x > 0 ? 1 : (x < 0 ? -1 : 0)` — uses `or reg,reg` peephole
+
+Fixture `3317-sign-ternary-obj`:
+
+```
+56                             push si
+8b 76 04                       mov si, x
+0b f6                          or si, si       (cmp-with-zero peephole, 2B)
+7e 05                          jle ELSE1       (signed <= 0)
+b8 01 00                       mov ax, 1
+eb 0b                          jmp END
+ELSE1:
+0b f6                          or si, si       (re-tests — flags clobbered by `mov ax`!)
+7d 05                          jge ELSE2       (signed >= 0)
+b8 ff ff                       mov ax, -1
+eb 02                          jmp END
+ELSE2:
+33 c0                          xor ax, ax
+```
+
+Findings:
+- `or reg, reg` is BCC's canonical zero-test (2B vs 4B `cmp reg, 0`).
+- BCC re-tests `or si, si` instead of falling through with already-set flags — suboptimal 2B duplicate (flags get clobbered by `mov ax, imm`, so re-test is required).
+
+## Early-return `if (cond) return X;` — clean structure
+
+Fixture `3318-early-return-obj`:
+
+```c
+int clamp(int x) { if (x < 0) return -1; return x; }
+```
+
+```
+8b 76 04                       mov si, x
+0b f6                          or si, si
+7d 05                          jge SKIP        (x >= 0 → skip return -1)
+b8 ff ff                       mov ax, -1
+eb 04                          jmp END
+SKIP:
+8b c6                          mov ax, si
+END:
+```
+
+Findings:
+- Early return inverted to "if NOT cond skip the body". Clean.
+- 15B body. Reg-allocated parameter through SI.
+

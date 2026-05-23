@@ -3762,3 +3762,27 @@ Findings:
 - `&local.field` = `lea ax, [bp + field_offset_from_bp]` (3B).
 - Standard local-address-take pattern.
 
+
+## Bitfield write — 4-bit field at byte offset 0
+
+Fixture `3322-bitfield-write-obj`:
+
+```c
+struct Flags { unsigned a : 4; unsigned b : 4; } s;
+void set_a(unsigned v) { s.a = v; }
+```
+
+```
+8b 46 04                       mov ax, v
+25 0f 00                       and ax, 0x000F     (mask v to 4 bits)
+80 26 00 00 f0 [FIXUPP _s]     and byte [_s], 0xF0   (clear field in mem)
+08 06 00 00 [FIXUPP _s]        or byte [_s], al     (OR new value in)
+```
+
+Findings:
+- Byte-sized memory ops (since field fits in one byte).
+- 3-step pattern: mask value → mask out field → OR in.
+- Mask `0xF0` is compile-time computed as complement of field mask `0x0F`.
+- Uses `op r/m8, imm8` (3B opcode + 2B addr) and `or r/m8, r8` (2B opcode + 2B addr).
+- Total bitfield write = 12B beyond the value load (+3B mov ax, v = 15B body).
+

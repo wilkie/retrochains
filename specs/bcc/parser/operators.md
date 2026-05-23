@@ -1982,3 +1982,69 @@ Findings:
 - Optimal would be `b8 15 00` (mov ax, 21), but BCC emits 13 bytes instead of 3.
 - Confirms earlier observation: BCC does NOT propagate const through arithmetic.
 
+
+## char→int signed cast — single `cbw` instruction
+
+Fixture `3319-char-to-int-obj`:
+
+```c
+int widen(char c) { return (int)c; }
+```
+
+```
+8a 46 04                       mov al, c
+98                             cbw             (sign-extend AL → AX)
+```
+
+Findings:
+- 1-byte `cbw` (opcode 0x98) is the canonical char→int signed widening on 8086.
+- Total 4B for the function body.
+
+## unsigned char→int zero-extend — `mov ah, 0`
+
+Fixture `3320-uchar-to-int-obj`:
+
+```
+8a 46 04                       mov al, c
+b4 00                          mov ah, 0       (zero-extend)
+```
+
+Findings:
+- BCC uses literal `mov ah, 0` (2B) over `xor ah, ah` (2B, same size, but might affect flags) — preference is for literal.
+- No `movzx` (that's 386+).
+
+## while(n--) loop — post-decrement-test pattern
+
+Fixture `3321-ptr-walk-sum-obj`:
+
+```c
+int sum(int *p, int n) {
+  int s = 0;
+  while (n--) s += *p++;
+  return s;
+}
+```
+
+Body:
+```
+56 57                          push si; push di
+8b 76 04                       mov si, p       (SI = p)
+8b 56 06                       mov dx, n       (DX = n — third reg used!)
+33 ff                          xor di, di      (DI = s = 0)
+eb 04                          jmp TEST
+LOOP:
+03 3c                          add di, [si]    (s += *p)
+46 46                          inc si; inc si  (p++ on int* = +2; 2B vs add si,2 which is 3B)
+TEST:
+8b c2                          mov ax, dx      (copy n into ax — save pre-dec value)
+4a                             dec dx          (n--)
+0b c0                          or ax, ax       (test pre-dec value)
+75 f5                          jne LOOP
+8b c7                          mov ax, di      (return s)
+```
+
+Findings:
+- **3-register allocation**: with SI=p, DI=s, BCC uses DX for n (DX is normally scratch, but stays live since loop body has no calls).
+- **`inc reg; inc reg` saves 1B**: for int* p++ (advance by 2), 2× inc (2B) beats `add reg, 2` (3B with imm8).
+- **Post-decrement pattern**: `mov ax, dx; dec dx; or ax, ax; jne` — pre-dec value tested for the while condition.
+
