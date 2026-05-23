@@ -4862,6 +4862,56 @@ impl<'a> FunctionEmitter<'a> {
         // as the `g = g <op> rhs` form (slices 231–233). The byte
         // output is identical between `g = g op b` and `g op= b`
         // for these ops. Fixtures 260 (`*=`), 261 (`/=`), 262 (`%=`).
+        // `long g += K` / `-= K` / bitwise with constant RHS — use
+        // memory-direct two-half form. Saves the AX/DX load + cwd
+        // (5-7 bytes) for a 10-byte mem-direct shape. Fixture 251
+        // (`long g += 5`). Add/Sub use sign-extended low + adc/sbb
+        // with zero for positive K (or -1 for negative). Bitwise
+        // uses each half independently.
+        if let Some(ty_lhs) = self.lhs_long_type(name)
+            && ty_lhs.is_long_like()
+            && matches!(
+                op,
+                BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor
+            )
+            && let Some(k) = try_const_eval(value)
+        {
+            let (lhs_lo, lhs_hi) = self.long_halves_of(name);
+            let k_signed = k as i32;
+            let lo = (k & 0xFFFF) as u16;
+            let hi = ((k >> 16) & 0xFFFF) as u16;
+            match op {
+                BinOp::Add | BinOp::Sub => {
+                    let (lo_op, hi_op) = if matches!(op, BinOp::Add) {
+                        ("add", "adc")
+                    } else {
+                        ("sub", "sbb")
+                    };
+                    let _ = write!(self.out, "\t{lo_op}\tword ptr {lhs_lo},{lo}\r\n");
+                    // High-half carry/borrow: 0 for non-negative K
+                    // (no carry bits), -1 (0xFFFF) for negative K
+                    // sign-extension. Since K is typically small,
+                    // hi_k is usually 0 — the adc/sbb still has to
+                    // ride the carry/borrow from the low half.
+                    let hi_imm = if k_signed < 0 && hi == 0 { 0 } else { hi };
+                    let _ = write!(self.out, "\t{hi_op}\tword ptr {lhs_hi},{hi_imm}\r\n");
+                }
+                BinOp::BitAnd => {
+                    let _ = write!(self.out, "\tand\tword ptr {lhs_lo},{lo}\r\n");
+                    let _ = write!(self.out, "\tand\tword ptr {lhs_hi},{hi}\r\n");
+                }
+                BinOp::BitOr => {
+                    let _ = write!(self.out, "\tor\tword ptr {lhs_lo},{lo}\r\n");
+                    let _ = write!(self.out, "\tor\tword ptr {lhs_hi},{hi}\r\n");
+                }
+                BinOp::BitXor => {
+                    let _ = write!(self.out, "\txor\tword ptr {lhs_lo},{lo}\r\n");
+                    let _ = write!(self.out, "\txor\tword ptr {lhs_hi},{hi}\r\n");
+                }
+                _ => unreachable!(),
+            }
+            return;
+        }
         // Long LHS with int RHS (widening): `long g += int x`. BCC
         // widens the int via `cwd` (signed) into DX:AX, then
         // applies memory-direct add/adc (or sub/sbb, or
