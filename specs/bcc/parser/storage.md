@@ -199,3 +199,38 @@ Findings:
 - 24B body. Multi-decl seems to bypass reg-alloc (would have been ~10B with regs).
 - Behavior differs from single-var declarations where reg-alloc kicks in.
 
+
+## `global = var` — `mov ax, var; mov [global], ax` (6B)
+
+Fixture `3457-global-store-var-obj`:
+
+```c
+int g;
+void set(int v) { g = v; }
+```
+
+```
+8b 46 04                       mov ax, v
+a3 00 00 [FIXUPP _g]           mov [_g], ax        (3B AX-specific short form)
+```
+
+Findings:
+- Uses the 3B `a3 imm16` short form for `mov [mem], ax`.
+
+## `global = imm16` — single 6B `mov mem, imm16` (mem-direct)
+
+Fixture `3458-global-store-imm-obj`:
+
+```c
+int g;
+void five(void) { g = 5; }
+```
+
+```
+c7 06 00 00 05 00 [FIXUPP _g]  mov word [_g], 5
+```
+
+Findings:
+- Single `c7 /0 r/m, imm16` (6B with disp16 + FIXUPP).
+- No reg involved — direct memory-immediate store.
+

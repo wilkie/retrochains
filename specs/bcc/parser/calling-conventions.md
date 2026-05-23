@@ -2353,3 +2353,24 @@ Findings:
 - 3-byte body (the call).
 - No save/restore around the call needed.
 
+
+## Multi-expression args `op(a + b, c * d)` — RTL eval matches push order
+
+Fixture `3460-multi-expr-args-obj`:
+
+```
+8b 46 08                       mov ax, c
+f7 6e 0a                       imul word d        (c * d — second arg first)
+50                             push ax
+8b 46 04                       mov ax, a
+03 46 06                       add ax, b          (a + b)
+50                             push ax
+e8 ?? ?? [FIXUPP _op]          call _op
+59 59                          pop cx; pop cx     (4-byte cleanup)
+```
+
+Findings:
+- Right-to-left arg evaluation in BCC (matches push order).
+- Each computed arg uses AX as scratch, pushed to stack.
+- 19B body.
+

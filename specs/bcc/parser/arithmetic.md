@@ -3074,3 +3074,16 @@ Findings:
 - Signed compare uses jg/jge/jl/jle.
 - BCC tracks signedness through type propagation; branch opcode picked accordingly.
 
+
+## `return 0` — `xor ax, ax` (2B, smallest non-void return)
+
+Fixture `3459-return-zero-obj`:
+
+```
+33 c0                          xor ax, ax
+```
+
+Findings:
+- 2-byte `xor reg, reg` saves 1 byte vs `mov ax, 0` (3B = `b8 00 00`).
+- Standard zero-clear idiom.
+

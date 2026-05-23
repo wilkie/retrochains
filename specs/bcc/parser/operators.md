@@ -2488,3 +2488,34 @@ Findings:
 - imul reg-reg uses the DX as multiplicand.
 - 18B body.
 
+
+## Redundant parens `((a)) + ((b))` — zero codegen effect
+
+Fixture `3455-paren-redundant-obj`:
+
+```
+8b 46 04                       mov ax, a
+03 46 06                       add ax, b
+```
+
+Findings:
+- Parens are purely syntactic. OBJ identical to `a + b`.
+- 6B body.
+
+## `const - var` (const on LHS) — `mov ax, const; sub ax, var`
+
+Fixture `3456-const-lhs-sub-obj`:
+
+```c
+int from1000(int x) { return 1000 - x; }
+```
+
+```
+b8 e8 03                       mov ax, 1000
+2b 46 04                       sub ax, x
+```
+
+Findings:
+- 6B body. Constant materialized first, then subtracted.
+- No commutativity flip — BCC respects subtraction order.
+
