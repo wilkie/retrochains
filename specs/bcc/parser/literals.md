@@ -617,3 +617,21 @@ Findings:
 - Same applies to all constant expressions in global initializers:
   `10 + 5`, `sizeof(int) * 4`, `-1 << 2`, etc.
 
+
+## `sizeof("hello")` — string literal size = chars + 1 NUL = 6
+
+Fixture `3038-sizeof-string-obj`:
+
+```c
+return sizeof("hello");   /* = 6 */
+```
+
+```
+b8 06 00                       mov ax, 6
+```
+
+Findings:
+- `sizeof` of a string literal = `strlen + 1` (includes the NUL).
+- Compile-time constant; returned as literal.
+- For `sizeof("")` = 1 (just the NUL).
+

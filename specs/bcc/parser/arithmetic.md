@@ -2643,3 +2643,36 @@ Findings:
 - Compare to `(a+b)*c` (`2917`) and `a+b*c` (return position 2936)
   which had different shapes.
 
+
+## `a + b + c` for 3 chars — REPEATED promote/spill cycle (8B per char)
+
+Fixture `3037-char-3-sum-obj`:
+
+```c
+return a + b + c;   /* all chars */
+```
+
+```
+8a 46 04 98                    mov al, a; cbw         (promote a)
+50                             push ax                 (spill)
+8a 46 06 98                    mov al, b; cbw         (promote b)
+8b d0                          mov dx, ax              (b → dx)
+58                             pop ax                  (a back in ax)
+03 c2                          add ax, dx              (a + b)
+50                             push ax                 (spill a+b)
+8a 46 08 98                    mov al, c; cbw         (promote c)
+8b d0                          mov dx, ax              (c → dx)
+58                             pop ax                  (a+b back in ax)
+03 c2                          add ax, dx              (a + b + c)
+```
+
+Findings:
+- **WORST-CASE pattern**: each char operand needs its own
+  promote-spill-promote-pop-add cycle.
+- ~8 bytes per char added in this style.
+- 3-char sum = 24 bytes total.
+- **Lesson**: Better to convert chars to int locals once
+  (`int A = a; int B = b; ...`) then sum the ints.
+- Source-form lesson: char arithmetic in chained binary ops is
+  expensive in BCC.
+

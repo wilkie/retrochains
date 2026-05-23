@@ -1573,3 +1573,29 @@ Findings:
 - BSS reserved for purely uninitialized globals (`int g[3];`).
 - Tradeoff: explicit `{0}` adds bytes to OBJ but documents intent.
 
+
+## Modifying a parameter — promoted to register, original slot untouched
+
+Fixture `3036-modify-param-obj`:
+
+```c
+int bump(int x) {
+  x = x + 1;
+  return x;
+}
+```
+
+```
+8b 76 04                       mov si, x      (promote)
+8b c6 40 8b f0                 x = x + 1   (AX-acc on si)
+8b c6                          return x
+```
+
+Findings:
+- Modifying a parameter just modifies the **promoted register**
+  (here si).
+- The original `[bp+4]` stack slot is NEVER written back.
+- Per C value-passing semantics, caller's value is unaffected.
+- A param-modification is essentially the same as modifying a
+  local promoted to si.
+
