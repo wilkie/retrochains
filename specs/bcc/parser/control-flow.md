@@ -4608,3 +4608,28 @@ Findings:
 - No special bookkeeping — same as `break` (which is implicit goto).
 - Short forward jump (2B `eb disp8`) for nearby labels.
 
+
+## `for (...; i++)` post-inc step — `inc si` (1B!), saves 4B vs `i=i+1`
+
+Fixture `3099-for-post-inc-obj`:
+
+```c
+for (i = 0; i < n; i++) { ... }
+```
+
+```
+                               ; POST-step:
+46                             inc si    (1 byte!)
+                               ; COND:
+3b 76 04                       cmp si, n
+7c f4                          jl → BODY
+```
+
+Findings:
+- `i++` in post-step = single `inc si` (1B).
+- `i = i + 1` (`2975`) = 5B AX-acc.
+- `++i` ≡ `i++` here (post-inc result discarded in for post-step).
+- **4 bytes saved** per iteration prep.
+- **Strong source-form recommendation**: use `i++` (or `++i`) in
+  for-loop post-step over `i = i + 1`.
+

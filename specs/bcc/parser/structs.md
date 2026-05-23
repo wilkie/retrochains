@@ -3391,3 +3391,32 @@ Findings:
 - Followed by `cbw` for int promotion if returning int.
 - `sizeof(struct M)` = 3 (int 2 + char 1).
 
+
+## struct{int} 2B by-value arg — single push word [bp-disp]
+
+Fixture `3100-struct1-byval-obj`:
+
+```c
+struct W { int v; };
+int caller(int x) {
+  struct W w;
+  w.v = x;
+  return extract(w);   /* pass by VALUE */
+}
+```
+
+```
+4c 4c                          dec sp twice (allocate w)
+8b 46 04 89 46 fe              w.v = x
+ff 76 fe                       push word [bp-2]   (push w as single int)
+e8 00 00                       call _extract
+59                             pop cx
+```
+
+Findings:
+- 2-byte struct passed by value = single `push word [mem]` (3B).
+- The struct lives in the caller's frame; just its word value
+  gets pushed.
+- For larger structs by value, multiple pushes or N_SCOPY@-style
+  setup would be needed.
+

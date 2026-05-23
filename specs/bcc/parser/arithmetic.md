@@ -2813,3 +2813,41 @@ Findings:
   - Signed `x % (1<<n)`: idiv (not reducible for negatives)
   - Unsigned `x % (1<<n)`: `and ax, (1<<n)-1` (mask low bits)
 
+
+## Mod-by-power-of-2 unsigned — `and ax, mask`
+
+Fixture `3095-uint-mod-4-obj`:
+
+```c
+unsigned int x % 4;   /* and ax, 3 */
+unsigned int x % 8;   /* and ax, 7 */
+unsigned int x % 16;  /* and ax, 15 */
+```
+
+Findings:
+- General rule: `unsigned x % (1<<n)` = `and ax, ((1<<n)-1)`.
+- 5 bytes total (load + and ax, imm16).
+- Big win over div.
+
+## Unsigned mod by non-power-of-2 — `div` (UNSIGNED) with `xor dx, dx`
+
+Fixture `3096-uint-mod-7-obj`:
+
+```c
+return x % 7;
+```
+
+```
+8b 46 04                       mov ax, x
+bb 07 00                       mov bx, 7
+33 d2                          xor dx, dx    (ZERO-EXTEND for unsigned div)
+f7 f3                          div bx        (UNSIGNED div instr)
+8b c2                          mov ax, dx    (remainder → return AX)
+```
+
+Findings:
+- Unsigned non-pow2 div = `div` instr (vs signed `idiv`).
+- **Setup**: `xor dx, dx` (zero-extend dividend) vs signed `cwd`
+  (sign-extend dividend).
+- 12 bytes total.
+
