@@ -3741,3 +3741,24 @@ arr[i].x = v;
 89 87 00 00                     mov [bx + _arr + 0], ax   (field offset 0)
 ```
 
+
+## `&local_struct.field` — `lea ax, [bp+disp]`
+
+Fixture `3262-amp-local-field-obj`:
+
+```c
+struct P p;
+p.y = 99;
+return &p.y;   /* address of local struct field */
+```
+
+```
+83 ec 04                       sub sp, 4 (local p)
+c7 46 fe 63 00                 p.y = 99 (mem-imm)
+8d 46 fe                       lea ax, [bp-2]  (= &p.y)
+```
+
+Findings:
+- `&local.field` = `lea ax, [bp + field_offset_from_bp]` (3B).
+- Standard local-address-take pattern.
+

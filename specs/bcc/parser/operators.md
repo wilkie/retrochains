@@ -1772,3 +1772,25 @@ Findings:
 - Same peephole applies to other arithmetic ops that set flags
   (sub, add, and, or, xor, inc, dec).
 
+
+## `(a - b) == 0` and `(a + b) == 0` — flag-direct test
+
+Fixtures `3257-sub-eq-0-obj`, `3258-add-eq-0-obj`:
+
+```c
+if (a - b == 0) ...   /* sub + jne FALSE */
+if (a + b == 0) ...   /* add + jne FALSE */
+```
+
+```
+8b 46 04                       mov ax, a
+2b 46 06   (or 03 46 06)       sub ax, b   (or add ax, b)
+75 05                          jne → FALSE  (uses ZF from arithmetic)
+```
+
+Findings:
+- Both sub and add set ZF based on result.
+- BCC uses this flag directly — no extra cmp.
+- 8 bytes for the compare.
+- Same peephole as `if (a + b > 0)` (`3254`).
+

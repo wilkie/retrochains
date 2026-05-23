@@ -3962,3 +3962,24 @@ Findings:
 - For 100L and 200L (HIGH=0): `xor dx, dx` + `mov ax, K` (5B each arm).
 - For larger longs (HIGH != 0): would use `mov dx, HIGH` (3B) instead of xor (2B).
 
+
+## `long v == 0L` — OR of LOW and HIGH halves (8B)
+
+Fixture `3261-long-eq-0L-obj`:
+
+```c
+if (v == 0L) return 1;
+```
+
+```
+8b 46 04                       mov ax, v LOW
+0b 46 06                       or ax, v HIGH
+75 05                          jne → FALSE
+```
+
+Findings:
+- long `== 0L` test = OR both halves; if zero, ZF set.
+- 8 bytes total (vs 14B for separate cmp HIGH 0 + cmp LOW 0).
+- Smart peephole using OR's flag side-effect.
+- Works because (LOW | HIGH) == 0 iff both halves are 0.
+
