@@ -4084,3 +4084,125 @@ Findings:
 - 8 bytes total.
 - Loads HIGH first (into DX) then LOW (into AX) — matches return convention.
 
+
+## `*long_ptr = v` store — register roles swapped vs load
+
+Fixture `3287-long-ptr-write-obj`:
+
+```
+void put(long *p, long v) { *p = v; }
+```
+
+Body (14B):
+```
+8b 76 04                       mov si, [bp+4]    (p)
+8b 46 08                       mov ax, [bp+8]    (v HIGH)
+8b 56 06                       mov dx, [bp+6]    (v LOW)
+89 44 02                       mov [si+2], ax    (write HIGH)
+89 14                          mov [si], dx      (write LOW)
+```
+
+Finding:
+- For long *stores*, register roles are reversed from loads: HIGH→AX, LOW→DX.
+- Read order: HIGH then LOW. Write order: HIGH then LOW.
+- This differs from long load which uses HIGH→DX, LOW→AX (matching return convention).
+- Reason: AX:DX assignments are scratch — only return uses fixed DX:AX. The store doesn't need to leave a return value, so BCC picks whichever pairing matches the operand ordering it generated.
+
+## long[i] array index — `bx = i*4 + reloc(arr)`, 2 word loads
+
+Fixture `3288-long-arr-idx-obj`:
+
+```
+long arr[3];
+long pick(int i) { return arr[i]; }
+```
+
+Body (15B):
+```
+8b 5e 04                       mov bx, [bp+4]      (i)
+d1 e3                          shl bx, 1
+d1 e3                          shl bx, 1            (bx = i*4)
+8b 97 02 00 [+reloc _arr]      mov dx, [bx + _arr+2]   (HIGH)
+8b 87 00 00 [+reloc _arr]      mov ax, [bx + _arr]     (LOW)
+```
+
+Findings:
+- Uses 2× shl rather than `shl bx, 2` (since 8086 has no `shl imm8 > 1` without imm count) — actually 8086 supports `shl r/m, CL` or `shl r/m, 1` only; multi-bit shift goes through CL.
+- 2-bit shift = 2× `shl 1` (4B) is cheaper than `mov cl, 2; shl bx, cl` (5B).
+- Two FIXUPPs into `_arr` segment with displacement +2 (HIGH) and +0 (LOW).
+
+## long `-a` unary negation — `neg dx; neg ax; sbb dx, 0`
+
+Fixture `3289-long-neg-obj`:
+
+```
+8b 56 06                       mov dx, a HIGH
+8b 46 04                       mov ax, a LOW
+f7 da                          neg dx
+f7 d8                          neg ax
+83 da 00                       sbb dx, 0           (HIGH borrow correction)
+```
+
+Finding:
+- Standard 32-bit two's complement negation in DX:AX.
+- 7 bytes for the neg op itself.
+
+## long `~a` bitwise NOT — `not ax; not dx`
+
+Fixture `3290-long-not-obj`:
+
+```
+8b 56 06                       mov dx, a HIGH
+8b 46 04                       mov ax, a LOW
+f7 d0                          not ax
+f7 d2                          not dx
+```
+
+Finding:
+- Just two independent `not` ops, no carry chain.
+- 4 bytes for the NOT op itself.
+
+## long + int — sign-extend via `cwd`, roundtrip through stack
+
+Fixture `3291-long-plus-int-obj`:
+
+```
+long mix(long a, int b) { return a + b; }
+```
+
+Body (14B):
+```
+8b 46 08                       mov ax, [bp+8]     (b int)
+99                             cwd                 (sign-extend → DX:AX)
+50                             push ax             (push LOW of (long)b)
+52                             push dx             (push HIGH of (long)b)
+8b 56 06                       mov dx, [bp+6]     (a HIGH)
+8b 46 04                       mov ax, [bp+4]     (a LOW)
+5b                             pop bx              (bx = HIGH of (long)b)
+59                             pop cx              (cx = LOW of (long)b)
+03 c1                          add ax, cx
+13 d3                          adc dx, bx
+```
+
+Findings:
+- `int → long` widening uses `cwd` (CX:AX paired sign-extension into DX:AX).
+- BCC stacks the sign-extended long because the same DX:AX is needed for `a`. Avoids saving to BX:CX via mov.
+- 2 byte cwd is preferred over manual `mov dx, ax; sar dx, 15` (~4B).
+
+## long literal return — pure imm loads, no FIXUPP
+
+Fixture `3292-long-literal-ret-obj`:
+
+```
+long magic(void) { return 0x12345678L; }
+```
+
+Body:
+```
+ba 34 12                       mov dx, 0x1234     (HIGH)
+b8 78 56                       mov ax, 0x5678     (LOW)
+```
+
+Finding:
+- 6 bytes total. No memory access, no FIXUPP. Two 3-byte `mov reg, imm16` loads.
+
