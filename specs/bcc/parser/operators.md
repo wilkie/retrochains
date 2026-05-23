@@ -1917,3 +1917,68 @@ Findings:
 - The local array is never stack-allocated since it's never referenced.
 - `sizeof` is purely a type query — no runtime cost or memory usage.
 
+
+## enum constants — int literals folded as imm8/imm16 in cmp
+
+Fixture `3314-enum-obj`:
+
+```c
+enum Color { RED = 1, GREEN, BLUE };  /* 1, 2, 3 */
+```
+
+Body excerpt:
+```
+83 fe 01                       cmp si, 1     (RED)
+83 fe 02                       cmp si, 2     (GREEN)
+```
+
+Findings:
+- enum constants compile as `int` literals (no special type).
+- BCC uses `83 /7` (cmp r/m16, imm8 sign-extended) for small values.
+- Reg-allocated parameter (SI) — confirms BCC reg-alloc applies to enum params too.
+
+## typedef — transparent to codegen
+
+Fixture `3315-typedef-obj`:
+
+```c
+typedef int Word;
+Word twice(Word a) { return a + a; }
+```
+
+Body:
+```
+56                             push si
+8b 76 04                       mov si, a
+8b c6                          mov ax, si
+03 c6                          add ax, si
+```
+
+Findings:
+- typedef produces identical code to the underlying type.
+- `a + a` is `mov ax, si; add ax, si` (4B). NOT optimized to `shl ax, 1` or `add ax, ax` — but all three alternatives are 4B given current SI-allocation.
+
+## `const int k = N` local — NOT constant-folded
+
+Fixture `3316-const-local-obj`:
+
+```c
+const int k = 7;
+return k * 3;
+```
+
+Body:
+```
+83 ec 02                       sub sp, 2          (allocate k)
+c7 46 fe 07 00                 mov word [bp-2], 7  (k = 7)
+8b 46 fe                       mov ax, [bp-2]
+ba 03 00                       mov dx, 3
+f7 ea                          imul dx             (k * 3)
+```
+
+Findings:
+- `const int` qualifier doesn't trigger constant folding in BCC.
+- Treated as normal local int: stack alloc + store + load + imul at runtime.
+- Optimal would be `b8 15 00` (mov ax, 21), but BCC emits 13 bytes instead of 3.
+- Confirms earlier observation: BCC does NOT propagate const through arithmetic.
+

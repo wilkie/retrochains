@@ -2010,3 +2010,50 @@ Findings:
 - 4-byte cleanup via 2× `pop cx` (2B total).
 - vs `add sp, 4` (3B). 2-pops wins by 1 byte.
 
+
+## static function — no PUBDEF, near PC-relative call
+
+Fixture `3312-static-fn-obj`:
+
+```c
+static int helper(int x) { return x + 1; }
+int outer(int y) { return helper(y) * 2; }
+```
+
+PUBDEF contains only `_outer` (helper NOT exported).
+
+Outer body:
+```
+ff 76 04                       push y
+e8 ec ff                       call rel16=-0x14    (direct PC-relative call to helper)
+59                             pop cx               (1-arg cleanup)
+d1 e0                          shl ax, 1            (* 2)
+```
+
+Findings:
+- `static` linkage = no PUBDEF for the function symbol.
+- Same-TU calls use `e8 disp16` (near direct call) — no FIXUPP, no EXTDEF.
+- The call distance is hardcoded into the OBJ since both ends are in this TU's _TEXT.
+- Saves 2B vs the EXTDEF/FIXUPP pair an external call would emit.
+
+## extern declaration — EXTDEF emitted only when referenced
+
+Fixture `3313-extern-decl-obj`:
+
+```c
+extern int g;
+int get(void) { return g; }
+```
+
+Body:
+```
+a1 00 00 [FIXUPP _g]           mov ax, [_g]
+```
+
+EXTDEF: `_g`. No COMDEF (no tentative definition since it's pure `extern`).
+
+Findings:
+- `extern int g` without `g` referenced → no EXTDEF (BCC omits unused declarations).
+- When referenced → EXTDEF emitted as plain external symbol.
+- Loaded via standard `a1 imm16` (3B) with FIXUPP type=EXTDEF.
+
