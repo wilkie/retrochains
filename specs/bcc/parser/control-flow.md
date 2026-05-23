@@ -5836,3 +5836,32 @@ Findings:
 - 6B loop body: `inc di; dec si; or si,si; jg`.
 - Confirms BCC uses pre-test jmp + body-then-test layout.
 
+
+## `do { } while (--n)` — `dec + jne` (4B control)
+
+Fixture `3554-do-while-predec-obj`:
+
+```c
+do { g++; } while (--n);
+```
+
+```
+LOOP:
+ff 06 00 00 [FIXUPP _g]        inc word [_g]
+4e                             dec si
+75 f9                          jne LOOP        (uses ZF from dec)
+```
+
+Findings:
+- Uses dec's auto-flags — no separate cmp needed.
+- 4B control overhead (`dec reg; jne`).
+- One of the tightest count-down loops on 8086.
+
+## `for (i = 10; i > 0; --i)` vs `i--` — IDENTICAL OBJ
+
+Fixtures `3555-for-predec-obj`, `3461-for-decrement-obj`:
+
+Findings:
+- Pre-dec and post-dec in for-step position emit byte-identical code.
+- Result of `i--`/`--i` is unused, so semantics collapse.
+

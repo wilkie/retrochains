@@ -4252,3 +4252,30 @@ Findings:
 - No reg-alloc, no special handling — just sequential int slots.
 - Caller responsible for pushing struct values (4-byte struct = 2 pushes).
 
+
+## Struct-by-value call site — pushes members reverse-declaration-order
+
+Fixture `3553-struct-by-val-call-obj`:
+
+```c
+struct Pt q;
+q.x = 3; q.y = 4;
+return sum(q);
+```
+
+```
+83 ec 04                       sub sp, 4         (alloc q)
+c7 46 fc 03 00                 mov [bp-4], 3     (q.x at lower addr)
+c7 46 fe 04 00                 mov [bp-2], 4     (q.y at higher addr)
+ff 76 fe                       push [bp-2]       (q.y pushed FIRST)
+ff 76 fc                       push [bp-4]       (q.x pushed SECOND)
+e8 ?? ??                       call _sum
+59 59                          pop cx; pop cx    (cleanup 4B)
+```
+
+Findings:
+- Struct members pushed in **reverse declaration order** so they land in declaration order at `[bp+offset]` in the callee's frame.
+- Last-declared member (q.y) pushed first → ends up deeper on stack → at `[bp+6]` in callee.
+- First-declared member (q.x) pushed last → at `[bp+4]` in callee.
+- Equivalent to pushing the whole struct as if it were `(int, int)` in original order.
+

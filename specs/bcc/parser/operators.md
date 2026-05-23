@@ -3167,3 +3167,54 @@ Findings:
 - 5B mem-imm8 cmp (no reg-alloc for single-use).
 - Could equivalently use `mov ax, [g]; or ax, ax` (5B same size) but BCC chose direct cmp.
 
+
+## More compound-vs-plain divergences
+
+Fixtures `3551-g-self-sub-var-obj`, `3552-g-self-and-imm-obj`:
+
+**`g = g - v` (plain, 9B):**
+```
+a1 00 00                       mov ax, [_g]
+2b 46 04                       sub ax, v
+a3 00 00                       mov [_g], ax
+```
+
+**`g -= v` (compound, 7B — from 3493):**
+```
+8b 46 04                       mov ax, v
+29 06 00 00                    sub [_g], ax       (mem-direct)
+```
+
+**`g = g & K` (plain, 9B):**
+```
+a1 00 00                       mov ax, [_g]
+25 0f 00                       and ax, 0x0F       (AX-short form 3B)
+a3 00 00                       mov [_g], ax
+```
+
+**`g &= K` (compound, 6B — from 3534):**
+```
+81 26 00 00 f0 ff              and [_g], imm16    (mem-direct)
+```
+
+Findings:
+- Confirms divergence: compound usually emits mem-direct ops (fewer bytes for `-=`, `&=`).
+- Plain assign routes through AX register; uses AX-short forms when applicable.
+- Total picture:
+  - `+=` / `-=` const-K: compound mem-direct (better)
+  - `+=` / `-=` var: compound mem-direct (slightly better)
+  - `&=` / `|=` const-K: compound mem-direct imm16 (better, 6B vs 9B)
+  - `*=` const-K (power-of-2 reducible): compound NOT reduced (worse, imul), plain reduced (shl)
+  - `+= 1`: compound 4B inc; plain 7B load+inc+store
+
+## `x << 0` — fully constant-folded to identity (3B)
+
+Fixture `3556-shift-by-zero-obj`:
+
+```
+8b 46 04                       mov ax, x
+```
+
+Findings:
+- 3B body. `<< 0` is identity, fully eliminated at parse time (similar to `+ 0` and `* 1`).
+
