@@ -7626,3 +7626,21 @@ Findings:
 - 3B body. Address-of and arrow cancel at compile time.
 - Identical OBJ to direct `s.y`.
 
+
+## `arr[const] = v` — folded offset + AX-short store
+
+Fixture `3572-arr-const-write-obj`:
+
+```c
+int arr[5];
+void put(int v) { arr[3] = v; }
+```
+
+```
+8b 46 04                       mov ax, v
+a3 06 00 [FIXUPP _arr]         mov [_arr + 6], ax     (offset 6 = 3 * sizeof(int))
+```
+
+Findings:
+- 6B body. Const offset folded; uses AX-short store form (3B).
+

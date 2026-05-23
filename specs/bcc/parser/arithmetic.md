@@ -3230,3 +3230,29 @@ Findings:
 - 8B body. CL gets the low byte of the int shift count.
 - `sar` for signed; `shr` for unsigned would replace `d3 f8` with `d3 e8`.
 
+
+## `x >> 8` — CL form (`mov cl, 8; shr ax, cl`), no byte-swap peephole
+
+Fixture `3571-int-shr-8-obj`:
+
+```
+8b 46 04                       mov ax, x
+b1 08                          mov cl, 8
+d3 e8                          shr ax, cl
+```
+
+Findings:
+- 7B body. Standard CL-form shift (count ≥ 4 threshold).
+- **Misses** the byte-swap peephole `mov al, ah; xor ah, ah` (4B same size).
+
+## `x / 1` — identity, fully constant-folded (3B)
+
+Fixture `3574-div-by-1-obj`:
+
+```
+8b 46 04                       mov ax, x
+```
+
+Findings:
+- Identity fold, consistent with `* 1`, `+ 0`, `<< 0`.
+

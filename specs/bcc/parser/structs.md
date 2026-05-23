@@ -4330,3 +4330,23 @@ Findings:
   6. Clear+OR into mem
 - Misses identity `x & 0 = 0` elimination.
 
+
+## `p->c` (char member at offset 2) — byte load via disp8
+
+Fixture `3573-struct-char-member-obj`:
+
+```c
+struct S { int a; char c; };
+char get(struct S *p) { return p->c; }
+```
+
+```
+56                             push si
+8b 76 04                       mov si, p
+8a 44 02                       mov al, [si + 2]
+```
+
+Findings:
+- 7B body. Single byte load at struct offset.
+- AL holds return (no widening since return type is char).
+

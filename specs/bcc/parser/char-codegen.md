@@ -2226,3 +2226,31 @@ Findings:
 - Direct `cmp r8, r/m8` (3B). No widening since both are char.
 - 15B body.
 
+
+## `char - char` — direct byte sub `sub r8, r/m8` (3B)
+
+Fixture `3569-char-sub-char-obj`:
+
+```
+8a 46 04                       mov al, a
+2a 46 06                       sub al, b
+```
+
+Findings:
+- 6B body. Same shape as `char + char` (3517) with sub instead of add.
+- No widening; result returned in AL.
+
+## `char < -10` — direct byte cmp with sign-extended literal
+
+Fixture `3570-char-cmp-neg-obj`:
+
+```
+80 7e 04 f6                    cmp byte [bp+4], 0xF6    (-10 as signed byte)
+7d 05                          jge ELSE                  (signed ≥ -10)
+```
+
+Findings:
+- -10 stored as 0xF6 in the imm8 slot (signed byte interp).
+- Uses signed `jge` for the inverted comparison.
+- 4B byte cmp — same as positive char literals.
+
