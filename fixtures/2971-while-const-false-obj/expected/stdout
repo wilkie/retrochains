@@ -1,0 +1,6 @@
+Borland C++  Version 2.0 Copyright (c) 1991 Borland International
+hello.c:
+Warning hello.c 5: Unreachable code in function test
+Warning hello.c 8: Parameter 'a' is never used in function test
+
+	Available memory 424304
