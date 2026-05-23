@@ -12243,7 +12243,7 @@ fn emit_op_with_source(out: &mut Vec<u8>, op: BinOp, src: &OperandSource, unsign
                 // `imul dx`. Fixture 615 (`return x * 3` → `mov dx,
                 // 3; imul dx`).
                 let k = *v;
-                if k > 0 && (k & (k - 1)) == 0 && k <= 256 {
+                if k > 0 && k.is_power_of_two() && k.trailing_zeros() <= 15 {
                     let shifts = k.trailing_zeros();
                     if shifts <= 3 {
                         for _ in 0..shifts {
