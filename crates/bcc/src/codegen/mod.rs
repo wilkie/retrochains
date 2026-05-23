@@ -943,11 +943,34 @@ impl<'a> FunctionEmitter<'a> {
     }
 
     fn emit_while(&mut self, while_span_start: u32, cond: &Expr, body: &[Stmt]) {
-        assert!(
-            !matches!(cond.kind, ExprKind::Logical { .. }),
-            "logical condition (`&&`/`||`) in a `while` not yet supported (no fixture)"
-        );
         let plan = self.label_plan.loop_plan(while_span_start);
+        // `while (<a && b>) { ... }` / `while (<a || b>) { ... }` —
+        // short-circuit condition. Use the same recursive lowering as
+        // `if (a && b) ...`: the body label is the true target, the
+        // break-target label is the false target. The break-target
+        // label needs to be emitted unconditionally for this shape
+        // since the cond reaches it on the false path. Fixtures 1273,
+        // 1352, 2203.
+        if matches!(cond.kind, ExprKind::Logical { .. }) {
+            let _ = write!(self.out, "\tjmp\tshort {}\r\n", self.label_ref(plan.check_slot));
+            self.emit_label(plan.body_slot);
+            self.loop_stack.push(LoopTargets {
+                break_target_slot: plan.break_target_slot,
+                continue_target_slot: Some(plan.continue_target_slot),
+            });
+            for s in body {
+                self.emit_stmt(s);
+            }
+            self.loop_stack.pop();
+            self.emit_label(plan.check_slot);
+            self.emit_cond_branch(
+                cond,
+                Some(plan.body_slot),
+                Some(plan.break_target_slot),
+            );
+            self.emit_label(plan.break_target_slot);
+            return;
+        }
         // `while (0)` — BCC still emits the trampoline jump and the
         // body bytes, but elides the check label and the back-edge
         // jump (since the cond is always false, nothing would branch
@@ -2421,10 +2444,23 @@ impl<'a> FunctionEmitter<'a> {
                     self.label_ref(slot),
                 );
             }
-            (Some(_), Some(_)) => panic!(
-                "emit_cond_branch with both true and false targets not yet supported \
-                 (nested mixed && / || requires this case)"
-            ),
+            (Some(true_slot), Some(false_slot)) => {
+                // Both targets specified. Emit a conditional jump to
+                // `true_slot` on the true mnemonic, then an unconditional
+                // jump to `false_slot`. This case arises when a `while
+                // (<logical-cond>)` lowers the rightmost operand with
+                // both body (true) and break-target (false) targets.
+                let _ = write!(
+                    self.out,
+                    "\t{true_mnem}\tshort {}\r\n",
+                    self.label_ref(true_slot),
+                );
+                let _ = write!(
+                    self.out,
+                    "\tjmp\tshort {}\r\n",
+                    self.label_ref(false_slot),
+                );
+            }
             (None, None) => panic!(
                 "emit_cond_branch with both targets fall-through: no jump would be emitted"
             ),
