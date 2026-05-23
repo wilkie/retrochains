@@ -2704,6 +2704,27 @@ impl<'a> FunctionEmitter<'a> {
             self.out.extend_from_slice(b"\tor\tax,ax\r\n");
             return;
         }
+        // `while (--n)` / `while (++n)` — pre-inc/dec on a register-
+        // resident int local. The inc/dec instruction itself sets ZF
+        // based on the result, so we don't need a subsequent `or` or
+        // load to AX. Just emit `inc/dec <reg>` and let the caller's
+        // conditional jump read the flags. Fixtures 1844, 2361, 2749.
+        if let ExprKind::Update {
+            target,
+            op,
+            position: crate::ast::UpdatePosition::Pre,
+        } = &cond.kind
+            && self.locals.has(target)
+            && let LocalLocation::Reg(reg) = self.locals.location_of(target)
+            && self.locals.type_of(target).is_int_like()
+        {
+            let mnem = match op {
+                crate::ast::UpdateOp::Inc => "inc",
+                crate::ast::UpdateOp::Dec => "dec",
+            };
+            let _ = write!(self.out, "\t{mnem}\t{}\r\n", reg.name());
+            return;
+        }
         // `while (x--)` — postinc/postdec as a boolean: the
         // current value of `x` is the test, then the side
         // effect happens. BCC's shape: `mov ax, <x>; dec <x>;
