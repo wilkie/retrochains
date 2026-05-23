@@ -5447,6 +5447,37 @@ impl<'a> FunctionEmitter<'a> {
             let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name},ax\r\n");
             return;
         }
+        // Int/uint global compound `*=` / `/=` / `%=` with a
+        // constant RHS. BCC materializes the constant in DX, loads
+        // LHS into AX, then `imul dx` / `cwd; idiv dx`, and stores
+        // AX back to the global. Fixture 3494 (`g *= 3`).
+        if let Some(gty) = self.globals.type_of(name)
+            && matches!(gty, Type::Int | Type::UInt)
+            && matches!(op, BinOp::Mul | BinOp::Div | BinOp::Mod)
+            && let Some(k) = try_const_eval(value)
+        {
+            let k16 = k & 0xFFFF;
+            let _ = write!(self.out, "\tmov\tdx,{k16}\r\n");
+            let _ = write!(self.out, "\tmov\tax,word ptr DGROUP:_{name}\r\n");
+            if matches!(op, BinOp::Mul) {
+                self.out.extend_from_slice(b"\timul\tdx\r\n");
+                let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name},ax\r\n");
+            } else {
+                let (widen, mnem) = if gty.is_unsigned() {
+                    (&b"\txor\tdx,dx\r\n"[..], "div")
+                } else {
+                    (&b"\tcwd\t\r\n"[..], "idiv")
+                };
+                self.out.extend_from_slice(widen);
+                let _ = write!(self.out, "\t{mnem}\tdx\r\n");
+                let result_reg = if matches!(op, BinOp::Div) { "ax" } else { "dx" };
+                let _ = write!(
+                    self.out,
+                    "\tmov\tword ptr DGROUP:_{name},{result_reg}\r\n",
+                );
+            }
+            return;
+        }
         // Int/uint global compound `*=` / `/=` / `%=` with `*p`
         // where `p` is a register-resident pointer (typically SI
         // for int*). `imul`/`idiv word ptr [si]` uses the deref-
