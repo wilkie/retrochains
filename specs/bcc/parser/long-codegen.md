@@ -4019,3 +4019,68 @@ Findings:
 - 12 bytes total (6B load + 6B xor).
 - No carry chain — xor is independent per half.
 
+
+## Long bitwise ops `& | ^` — same 12B shape, different ModR/M op-ext
+
+Fixtures `3281-long-and-obj`, `3282-long-or-obj`, `3280-long-xor-obj`:
+
+```
+                               ; a & b: ModR/M 23 /r (AND)
+23 46 08                       and ax, b LOW
+23 56 0a                       and dx, b HIGH
+
+                               ; a | b: ModR/M 0b /r (OR)
+                               ; a ^ b: ModR/M 33 /r (XOR)
+```
+
+Findings:
+- All 3 long bitwise ops share the shape: load DX:AX + 2 mem-source bitwise ops.
+- 12 bytes total each.
+- Opcodes: `23` = and, `0b` = or, `33` = xor (all r16, r/m16 forms).
+- No carry chain — bitwise ops are independent per half.
+
+## Signed long compare `a < b` — 3-step lex (HIGH signed, LOW unsigned)
+
+Fixture `3283-long-cmp-signed-obj`:
+
+```
+8b 46 06 8b 56 04              load a HIGH→ax, a LOW→dx
+3b 46 0a                       cmp ax, b HIGH
+7f 0c                          jg → FALSE   (HIGH > b HIGH)
+7c 05                          jl → TRUE    (HIGH < b HIGH, signed)
+3b 56 08                       cmp dx, b LOW
+73 05                          jae → FALSE  (LOW >= b LOW, UNSIGNED)
+                               ; TRUE
+```
+
+## Unsigned long compare `a < b` — 3-step lex (BOTH halves unsigned)
+
+Fixture `3284-ulong-cmp-obj`:
+
+```
+3b 46 0a                       cmp ax, b HIGH
+77 0c                          ja → FALSE   (HIGH > b HIGH, UNSIGNED)
+72 05                          jb → TRUE    (HIGH < b HIGH, UNSIGNED)
+3b 56 08                       cmp dx, b LOW
+73 05                          jae → FALSE  (LOW >= b LOW, UNSIGNED)
+```
+
+Findings:
+- Both signed and unsigned long cmp use 3-step lexicographic.
+- LOW always uses unsigned comparison.
+- Only HIGH differs: signed uses signed jumps (jl/jg), unsigned uses unsigned (jb/ja).
+
+## `*long_ptr` deref — 2 word loads at [si] and [si+2]
+
+Fixture `3285-long-ptr-deref-obj`:
+
+```
+8b 76 04                       mov si, p
+8b 54 02                       mov dx, [si+2]   (HIGH)
+8b 04                          mov ax, [si]     (LOW)
+```
+
+Findings:
+- 8 bytes total.
+- Loads HIGH first (into DX) then LOW (into AX) — matches return convention.
+

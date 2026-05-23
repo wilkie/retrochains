@@ -6939,3 +6939,25 @@ Findings:
 - The -K × sizeof is computed at compile time, baked into imm16.
 - For char*: `add ax, -1` (or potentially `dec ax`).
 
+
+## `long *p = &v;` global init — FIXUPP'd ptr slot + 2 word loads on deref
+
+Fixture `3286-long-ptr-global-obj`:
+
+```
+long v;
+long *p = &v;
+long peek(void) { return *p; }
+```
+
+Findings:
+- `_p` occupies a 2-byte slot in _DATA, initialized to FAR offset of `_v` via FIXUPP record (segdef _DATA, offset of _v).
+- `peek` body:
+  ```
+  8b 1e 00 00            mov bx, [_p]      (FIXUPP'd to _p offset)
+  8b 57 02               mov dx, [bx+2]    (HIGH)
+  8b 07                  mov ax, [bx]      (LOW)
+  ```
+- Uses BX as ptr holder (not SI), since SI would require additional saves.
+- 9-byte body.
+
