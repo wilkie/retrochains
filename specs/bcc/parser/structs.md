@@ -4232,3 +4232,23 @@ Findings:
 - Identical OBJ to direct `struct Pt { ... } p;` (compare 3341).
 - typedef is purely syntactic — no codegen difference.
 
+
+## struct passed by value — members on stack like int args
+
+Fixture `3547-struct-by-val-arg-obj`:
+
+```c
+struct Pt { int x; int y; };
+int sum(struct Pt p) { return p.x + p.y; }
+```
+
+```
+8b 46 04                       mov ax, p.x      (at [bp+4])
+03 46 06                       add ax, p.y     (at [bp+6])
+```
+
+Findings:
+- Struct members live in the stack frame like int params.
+- No reg-alloc, no special handling — just sequential int slots.
+- Caller responsible for pushing struct values (4-byte struct = 2 pushes).
+

@@ -5814,3 +5814,25 @@ Findings:
 - 19B body. `inc si; mov ax, si; cmp ax, n` could be `inc si; cmp si, n` (saves 2B).
 - BCC routes through AX even when SI could be the comparand directly.
 
+
+## `while (n > 0) { c++; n--; }` — SI=n + DI=c + 6B loop body
+
+Fixture `3549-for-passed-n-obj`:
+
+```
+8b 76 04                       mov si, n
+33 ff                          xor di, di       (c = 0)
+eb 02                          jmp TEST
+LOOP_BODY:
+47                             inc di           (c++)
+4e                             dec si           (n--)
+TEST:
+0b f6                          or si, si
+7f fa                          jg LOOP_BODY     (signed > 0)
+```
+
+Findings:
+- 2-reg alloc: SI=n (mutated), DI=c (accumulator).
+- 6B loop body: `inc di; dec si; or si,si; jg`.
+- Confirms BCC uses pre-test jmp + body-then-test layout.
+

@@ -3096,3 +3096,74 @@ Findings:
 - Same `test [mem], imm16` peephole as `!= 0` (3536).
 - Branch polarity flipped: `jne` (skip true branch when set) vs `je` for `!= 0`.
 
+
+## `g = g + 1` vs `g += 1` vs `g++` — different peephole sets
+
+Fixtures `3545-g-self-add-obj`, `3497-pluseq-1-obj`, `3371-preinc-global-obj`:
+
+```
+                               ; g = g + 1 (3545):
+a1 00 00                       mov ax, [_g]
+40                             inc ax
+a3 00 00                       mov [_g], ax       (7B, no mem-direct inc)
+                               
+                               ; g += 1 (3497):
+ff 06 00 00                    inc word [_g]      (4B mem-direct inc)
+                               
+                               ; ++g (3371):
+ff 06 00 00                    inc word [_g]
+a1 00 00                       mov ax, [_g]       (7B; load is for return val)
+```
+
+Findings:
+- **`g += 1` gets mem-direct inc** (4B).
+- **`g = g + 1` does NOT** — emits load+inc+store (7B).
+- This is the inverse of `*=` behavior (where COMPOUND fails to get strength reduction, PLAIN gets it).
+- BCC's compound and plain assign paths have different peephole sets:
+  - Compound `+= 1` / `-= 1`: inc/dec mem-direct.
+  - Plain `= x + 1`: load + inc reg + store.
+  - Compound `*= K`: imul (no strength reduce).
+  - Plain `= x * K`: shl reduced.
+
+## `g = g * 2 + 1` — shl-reduced * AND `inc` peephole for `+ 1`
+
+Fixture `3546-g-complex-expr-obj`:
+
+```
+a1 00 00                       mov ax, [_g]
+d1 e0                          shl ax, 1          (* 2 reduced)
+40                             inc ax             (+ 1 peephole)
+a3 00 00                       mov [_g], ax
+```
+
+Findings:
+- 9B body. Both strength reduction (shl) and inc peephole apply in expression form.
+- `+1` becomes `inc reg` (1B) when value is in a register.
+
+## `if (!call())` — `or ax, ax` cmp-zero on call result + jne
+
+Fixture `3548-not-call-obj`:
+
+```
+e8 ?? ??                       call _check
+0b c0                          or ax, ax
+75 05                          jne ELSE         (inverted from `if (call())`)
+```
+
+Findings:
+- Inversion via branch polarity.
+- 14B body.
+
+## `if (g)` global — direct `cmp [mem], 0` (5B)
+
+Fixture `3550-pre-test-zero-obj`:
+
+```
+83 3e 00 00 00 [FIXUPP _g]     cmp word [_g], 0
+74 05                          je ELSE
+```
+
+Findings:
+- 5B mem-imm8 cmp (no reg-alloc for single-use).
+- Could equivalently use `mov ax, [g]; or ax, ax` (5B same size) but BCC chose direct cmp.
+
