@@ -3553,6 +3553,17 @@ impl<'a> FunctionEmitter<'a> {
         {
             return Some(format!("push\tword ptr {}", bp_addr(off)));
         }
+        // Bare register-resident int local: `push <reg>` directly
+        // (1 byte) instead of `mov ax,<reg>; push ax` (3 bytes).
+        // Fixtures 2753, 1506, 1580.
+        if let ExprKind::Ident(name) = &arg.kind
+            && self.locals.has(name)
+            && self.locals.type_of(name).is_int_like()
+            && let LocalLocation::Reg(reg) = self.locals.location_of(name)
+            && !reg.is_byte()
+        {
+            return Some(format!("push\t{}", reg.name()));
+        }
         // Bare global int/ptr: `push word ptr DGROUP:_<name>` directly.
         if let ExprKind::Ident(name) = &arg.kind
             && let Some(gty) = self.globals.type_of(name)
