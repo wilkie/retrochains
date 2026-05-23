@@ -2655,6 +2655,30 @@ impl<'a> FunctionEmitter<'a> {
                     op.jump_if_false(unsigned).expect("comparison op has false mnemonic"),
                 );
             }
+            // `++<reg>` / `--<reg>` <relop> 0 — the inc/dec
+            // instruction sets ZF/SF, which `<relop>` can read
+            // directly. Emit just the inc/dec on the register.
+            // Fixture 3644 (`while (--n > 0)`).
+            if try_const_eval(right) == Some(0)
+                && let ExprKind::Update {
+                    target,
+                    op: upd_op,
+                    position: crate::ast::UpdatePosition::Pre,
+                } = &left.kind
+                && self.locals.has(target)
+                && let LocalLocation::Reg(reg) = self.locals.location_of(target)
+                && self.locals.type_of(target).is_int_like()
+            {
+                let mnem = match upd_op {
+                    crate::ast::UpdateOp::Inc => "inc",
+                    crate::ast::UpdateOp::Dec => "dec",
+                };
+                let _ = write!(self.out, "\t{mnem}\t{}\r\n", reg.name());
+                return (
+                    op.jump_if_true(unsigned).expect("comparison op has true mnemonic"),
+                    op.jump_if_false(unsigned).expect("comparison op has false mnemonic"),
+                );
+            }
             if try_const_eval(left).is_some() && try_const_eval(right).is_none() {
                 let flipped_op = match op {
                     BinOp::Eq | BinOp::Ne => *op,
