@@ -4699,6 +4699,18 @@ impl<'a> FunctionEmitter<'a> {
                     );
                     return;
                 }
+                // `char c = f();` where f returns char — call returns
+                // the value in AL; we only need to store the low byte.
+                // Skip the cbw widen the call site normally appends.
+                // Fixture 2451.
+                if ty.is_char_like()
+                    && let ExprKind::Call { name, args } = &init.kind
+                    && self.signatures.ret_ty_of(name).map_or(false, |t| t.is_char_like())
+                {
+                    self.emit_call(name, args);
+                    let _ = write!(self.out, "\tmov\tbyte ptr {},al\r\n", bp_addr(off));
+                    return;
+                }
                 // Function-pointer init: `int (*p)(void) = f;` →
                 // `mov word ptr [bp-N],offset _f`. We detect this by
                 // the init being a bare ident that names a function
@@ -11086,6 +11098,17 @@ impl<'a> FunctionEmitter<'a> {
                         );
                         return;
                     }
+                }
+                // `c = f();` where c is char, f returns char — call
+                // returns value in AL; store the low byte directly,
+                // skip the cbw widen. Fixture 2451.
+                if ty.is_char_like()
+                    && let ExprKind::Call { name, args } = &value.kind
+                    && self.signatures.ret_ty_of(name).map_or(false, |t| t.is_char_like())
+                {
+                    self.emit_call(name, args);
+                    let _ = write!(self.out, "\tmov\tbyte ptr {},al\r\n", bp_addr(off));
+                    return;
                 }
                 // `<stack-local> = &<global>;` — store the symbol's
                 // offset directly into the stack slot. BCC emits this
