@@ -4670,3 +4670,22 @@ Findings:
 - Same unrolling pattern as `*p++` for int* (`3102`).
 - Likely unrolled for N ∈ {1, 2, 3}; N ≥ 4 uses `add`.
 
+
+## `i += N` for-step threshold — unroll only for N=2 (or N=1)
+
+Fixtures `3150-for-step-2-obj`, `3156-for-step-3-obj`, `3157-for-step-4-obj`:
+
+| N | Form              | Bytes | Notes                  |
+|---|-------------------|-------|------------------------|
+| 1 | `inc si`          | 1     | single inc             |
+| 2 | `inc si; inc si`  | 2     | unrolled (saves 1B)    |
+| 3 | `add si, 3`       | 3     | add (tied with 3× inc) |
+| 4 | `add si, 4`       | 3     | add (saves 1B)         |
+| N>4 | `add si, N`     | 3-4   | always add             |
+
+Findings:
+- **Inc unroll is only used for N=1, 2**.
+- At N=3, `add si, 3` matches 3× `inc si` in byte count, but BCC prefers
+  `add` (fewer instructions = faster).
+- At N≥4, `add si, N` wins on bytes.
+

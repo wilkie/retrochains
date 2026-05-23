@@ -3550,3 +3550,47 @@ Findings:
 - Note ModR/M ops: `83 /0` = add, `83 /2` = adc. Both use imm8
   sign-ext when constant fits.
 
+
+## Long negation `-v` — `neg dx; neg ax; sbb dx, 0`
+
+Fixture `3158-long-neg-obj`:
+
+```c
+long neg(long v) { return -v; }
+```
+
+```
+8b 56 06                       mov dx, HIGH
+8b 46 04                       mov ax, LOW
+f7 da                          neg dx
+f7 d8                          neg ax
+83 da 00                       sbb dx, 0
+```
+
+Findings:
+- 8086 32-bit negation algorithm:
+  1. `neg dx` (high half, sets CF if was non-zero)
+  2. `neg ax` (low half, sets CF if was non-zero)
+  3. `sbb dx, 0` (adjusts DX by subtracting CF from LOW negation)
+- The `sbb` corrects for the borrow that propagates from LOW.
+- 13 bytes total (with the DX:AX load).
+- ModR/M `da` = mod 11, op-ext 011 (neg /3), r/m 010 (DX).
+
+## `(unsigned long)unsigned_int` — `xor dx, dx` zero-extend
+
+Fixture `3155-uint-to-ulong-obj`:
+
+```c
+unsigned long widen(unsigned int x) { return (unsigned long)x; }
+```
+
+```
+8b 46 04                       mov ax, x
+33 d2                          xor dx, dx     (zero-extend)
+```
+
+Findings:
+- Unsigned widening = `xor dx, dx` (2B).
+- Signed widening (`3154`) = `cwd` (1B sign-extend).
+- **Unsigned is 1 byte LONGER** than signed for int→long.
+
