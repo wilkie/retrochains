@@ -404,10 +404,14 @@ impl Type {
     }
 
     /// Whether this type can sit in an int-pool register (SI/DI/DX/BX/CX).
-    /// True for `int` and any pointer. Arrays never enregister.
+    /// True for `int`/`unsigned int` and any pointer. UInt has the
+    /// same 2-byte width and register-pool eligibility as Int — the
+    /// signedness difference only shows up in arithmetic mnemonics
+    /// (jl vs. jb), which the using codegen sites pick separately.
+    /// Arrays never enregister.
     #[must_use]
     pub fn is_int_like(&self) -> bool {
-        matches!(self, Self::Int | Self::Pointer(_))
+        matches!(self, Self::Int | Self::UInt | Self::Pointer(_))
     }
 
     /// The element type of an array, or `None` if not an array. Used

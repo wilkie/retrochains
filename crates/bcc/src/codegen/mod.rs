@@ -3704,18 +3704,60 @@ impl<'a> FunctionEmitter<'a> {
             LocalLocation::Stack(off) => {
                 // Stack array (and struct) initializer with a constant
                 // image: BCC interns the flattened byte image into
-                // `_DATA:s@` and emits a single `N_SCOPY@` call to
-                // copy it onto the stack. Same far-far helper used by
-                // struct returns and >4B struct copies; the size is
-                // the array's full byte width and the source segment
-                // is DS. Covers fixtures like 1465 (`int a[3] =
-                // {1,2,3}`), 1475 (partial init), 1476 (`char s[6] =
-                // "hi"`), 1481, 1516 (all-zero), and many more.
-                if matches!(ty, Type::Array { .. })
+                // `_DATA:s@` and emits the copy. Two shape thresholds
+                // mirror the struct-return / struct-copy split:
+                //   - size ≤ 4: inline AX/DX moves from `s@[+off]`
+                //     into the local — the same path long-init takes
+                //     when the source is memory. Fixtures 1612 (2B),
+                //     1613 (4B).
+                //   - size > 4: `N_SCOPY@` with far-far ptrs. Same
+                //     helper used by struct returns and >4B struct
+                //     copies. Fixtures 1465, 1475-1476, 1481, 1516,
+                //     1616 (3-field struct, 6B), and many more.
+                if matches!(ty, Type::Array { .. } | Type::Struct { .. })
                     && let Some(bytes) = flatten_init_to_bytes(ty, init)
                 {
                     let size = bytes.len() as u32;
                     let pool_off = self.strings.intern_blob(&bytes);
+                    if size == 2 {
+                        let src = if pool_off == 0 {
+                            "DGROUP:s@".to_owned()
+                        } else {
+                            format!("DGROUP:s@+{pool_off}")
+                        };
+                        let _ = write!(self.out, "\tmov\tax,word ptr {src}\r\n");
+                        let _ = write!(
+                            self.out,
+                            "\tmov\tword ptr {},ax\r\n",
+                            bp_addr(off),
+                        );
+                        return;
+                    }
+                    if size == 4 {
+                        let src_hi = if pool_off + 2 == 0 {
+                            "DGROUP:s@".to_owned()
+                        } else {
+                            format!("DGROUP:s@+{}", pool_off + 2)
+                        };
+                        let src_lo = if pool_off == 0 {
+                            "DGROUP:s@".to_owned()
+                        } else {
+                            format!("DGROUP:s@+{pool_off}")
+                        };
+                        let _ = write!(self.out, "\tmov\tax,word ptr {src_hi}\r\n");
+                        let _ = write!(self.out, "\tmov\tdx,word ptr {src_lo}\r\n");
+                        let _ = write!(
+                            self.out,
+                            "\tmov\tword ptr {},ax\r\n",
+                            bp_addr(off + 2),
+                        );
+                        let _ = write!(
+                            self.out,
+                            "\tmov\tword ptr {},dx\r\n",
+                            bp_addr(off),
+                        );
+                        return;
+                    }
                     let src_addr = if pool_off == 0 {
                         "offset DGROUP:s@".to_owned()
                     } else {

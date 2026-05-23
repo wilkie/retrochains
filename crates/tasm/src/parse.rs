@@ -3044,9 +3044,15 @@ fn parse_group_symbol_with_width<'a>(s: &'a str, prefix: &str) -> Option<(&'a st
         return None;
     }
     // Discriminate against `cs:_TEXT` style addressing-prefix uses by
-    // requiring the symbol to start with `_` or `@` (BCC's user-symbol
-    // convention).
-    if !sym.starts_with('_') && !sym.starts_with('@') {
+    // requiring the symbol to look like a BCC-emitted symbol: start
+    // with `_`/`@`, or be one of BCC's reserved aggregate-pool labels
+    // (`s@` for the constant string/blob pool, `d@` for the data
+    // pool). Without the explicit allowlist, `mov ax, word ptr
+    // DGROUP:s@` would fail to parse and stack-init reads (1612,
+    // 1613) wouldn't assemble.
+    let leading = sym.chars().next();
+    let is_pool_label = sym == "s@" || sym == "d@" || sym.starts_with("s@") || sym.starts_with("d@");
+    if !matches!(leading, Some('_') | Some('@')) && !is_pool_label {
         return None;
     }
     Some((group, sym))
