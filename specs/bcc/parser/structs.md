@@ -3369,3 +3369,25 @@ Findings:
 - No padding.
 - Total = sum of field sizes.
 
+
+## Struct char field at non-zero offset — `mov al, [_m + 2]` + cbw
+
+Fixture `3079-struct-char-field-obj`:
+
+```c
+struct M { int tag; char flag; };  /* sizeof = 3 */
+struct M m;
+return m.flag;
+```
+
+```
+a0 02 00                       mov al, [_m + 2]   (byte load at offset 2)
+98                             cbw                (promote)
+```
+
+Findings:
+- Char field accessed via `mov al, [moffs + offset]`.
+- Offset = position of field in struct (here 2, after `int tag`).
+- Followed by `cbw` for int promotion if returning int.
+- `sizeof(struct M)` = 3 (int 2 + char 1).
+

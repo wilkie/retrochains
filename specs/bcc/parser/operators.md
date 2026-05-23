@@ -1515,3 +1515,42 @@ Findings:
 - `unsigned int >> N`: use `shr` (`d1 e8` or `d3 e8`).
 - `signed int >> N`: use `sar` (`d1 f8` or `d3 f8`).
 
+
+## `unsigned int v >= 0x8000` — UNSIGNED jumps `jb`/`jae`
+
+Fixture `3078-uint-ge-0x8000-obj`:
+
+```c
+if (v >= 0x8000) return 1;
+```
+
+```
+81 7e 04 00 80                 cmp word [bp+4], 0x8000  (imm16, 5B)
+72 05                          jb → FALSE   (UNSIGNED: below)
+```
+
+Findings:
+- Unsigned int compare uses unsigned jumps:
+  - `jb` (`72`) = unsigned below (<)
+  - `jae` (`73`) = unsigned above-or-equal (>=)
+  - `ja` (`77`) = unsigned above (>)
+  - `jbe` (`76`) = unsigned below-or-equal (<=)
+- 0x8000 (= 32768) > signed imm8 max, so `81 imm16` form (5B).
+
+## `x == -1` — `83 /7 imm8` sign-ext (FF = -1)
+
+Fixture `3081-cmp-neg-1-obj`:
+
+```c
+if (x == -1) return 1;
+```
+
+```
+83 7e 04 ff                    cmp word [bp+4], -1   (imm8 sign-ext, 4B)
+75 05                          jne → FALSE
+```
+
+Findings:
+- `-1` (0xFF byte sign-ext to 0xFFFF) fits signed imm8 → 4B short form.
+- Same pattern for all small negative comparisons in `[-128, -1]`.
+

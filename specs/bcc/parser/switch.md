@@ -2484,3 +2484,61 @@ Findings:
 - DENSE DISPATCH applies whether case range starts at 0, positive,
   or negative — only the normalization step differs.
 
+
+## Switch with fallthrough (no `break`) — case bodies emitted CONTIGUOUSLY
+
+Fixture `3077-switch-fallthru-obj`:
+
+```c
+switch (x) {
+  case 1: s = s + 10;   /* no break */
+  case 2: s = s + 20;   /* no break */
+  case 3: s = s + 30;
+}
+```
+
+Dispatch + bodies:
+```
+                               ; LINEAR dispatch (3 cases, N<4):
+3d 01 00 74 0c                 cmp ax, 1; je → CASE_1
+3d 02 00 74 0e                 cmp ax, 2; je → CASE_2
+3d 03 00 74 10                 cmp ax, 3; je → CASE_3
+eb 15                          jmp → END
+                               ; CASE_1: s += 10
+8b c6 05 0a 00 8b f0
+                               ; CASE_2: s += 20 (fall through!)
+8b c6 05 14 00 8b f0
+                               ; CASE_3: s += 30 (fall through!)
+8b c6 05 1e 00 8b f0
+                               ; END:
+```
+
+Findings:
+- **Fallthrough = NO inter-case jmp emitted**. Each case body runs
+  then continues to the next.
+- Dispatch jumps to the START of the matching case; execution
+  flows through subsequent cases naturally.
+- For x=1: runs all 3 → s=60. For x=2: runs 2+3 → s=50. For x=3: runs only 3 → s=30.
+
+## Switch with single case (N=1) — linear cmp+je+jmp
+
+Fixture `3082-switch-1-case-obj`:
+
+```c
+switch (x) {
+  case 5: return 100;
+}
+```
+
+```
+8b 46 04                       mov ax, x
+3d 05 00                       cmp ax, 5
+74 02                          je → CASE_5
+eb 05                          jmp → DEFAULT
+                               ; CASE_5: return 100
+```
+
+Findings:
+- Single-case switch = same shape as a 1-case if-else.
+- LINEAR dispatch (always for N<4).
+
