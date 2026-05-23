@@ -2048,3 +2048,43 @@ Findings:
 - **`inc reg; inc reg` saves 1B**: for int* p++ (advance by 2), 2× inc (2B) beats `add reg, 2` (3B with imm8).
 - **Post-decrement pattern**: `mov ax, dx; dec dx; or ax, ax; jne` — pre-dec value tested for the while condition.
 
+
+## Assignment expression `(*p = 5) + 1` — value reused via register
+
+Fixture `3333-assign-expr-obj`:
+
+```
+56                             push si
+8b 76 04                       mov si, p
+b8 05 00                       mov ax, 5
+89 04                          mov [si], ax    (*p = 5)
+40                             inc ax           (+1 — reused value)
+```
+
+Findings:
+- Assignment-expression value reused from the register holding the stored value.
+- No reload from `[si]` after the store — the +1 acts on the AX that was already 5.
+- Clean reuse. 10B body.
+
+## Chained assignment `a = b = c = 0` — 1 source register, N stores
+
+Fixture `3334-chained-assign-obj`:
+
+```c
+int a, b, c;
+void zero(void) { a = b = c = 0; }
+```
+
+```
+33 c0                          xor ax, ax       (zero in AX)
+a3 04 00 [FIXUPP _c]           mov [_c], ax     (c = 0 first)
+a3 02 00 [FIXUPP _b]           mov [_b], ax     (b = 0)
+a3 00 00 [FIXUPP _a]           mov [_a], ax     (a = 0 last)
+```
+
+Findings:
+- Right-to-left assignment order (c, then b, then a).
+- Value held in AX throughout — no per-store reload.
+- Uses 3-byte `a3 imm16` form (special `mov [mem], ax`) vs 4-byte `89 06 imm16` generic form.
+- 11B total for the 3-way zero-init.
+

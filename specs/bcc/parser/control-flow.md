@@ -5032,3 +5032,97 @@ Findings:
 - Each arm wastes 3B on the post-inc load.
 - Also: postfix `a++` in discard context appears to be treated as prefix (`++a`) — only the side effect matters.
 
+
+## Switch with 3 contiguous cases including negative — linear search (no dense table)
+
+Fixture `3329-switch-neg-obj`:
+
+```c
+switch (x) { case -1: ... case 0: ... case 1: ... }
+```
+
+```
+8b 46 04                       mov ax, x
+3d ff ff                       cmp ax, -1
+74 0b                          je CASE_NEG1
+0b c0                          or ax, ax      (cmp x, 0 — peephole)
+74 0c                          je CASE_0
+3d 01 00                       cmp ax, 1
+74 0c                          je CASE_1
+eb 0f                          jmp DEFAULT
+```
+
+Findings:
+- 3 cases use linear cmp+je chain (NOT dense table — confirms 4+ threshold previously documented).
+- `or ax, ax` (2B) substitutes for `cmp ax, 0` (3B) — 1B saving.
+- Negative case uses full `3d imm16` (3B) since -1 in 16-bit needs the full encoding.
+
+## Switch with one case + default — same as if-else
+
+Fixture `3330-switch-default-obj`:
+
+```
+0b c0                          or ax, ax
+74 02                          je CASE_0
+eb 05                          jmp DEFAULT
+```
+
+Findings:
+- Single-case switch with default = direct if-else.
+- No switch-table overhead. 16B body total.
+
+## for with `&&` condition and empty body — separate exits per subterm
+
+Fixture `3331-for-empty-body-obj`:
+
+```c
+for (i = 0; i < n && p[i] != 0; i++) ;
+```
+
+```
+xor si, si                              (i = 0)
+jmp TEST
+LOOP_TOP:
+inc si                                  (i++ — the step)
+TEST:
+cmp si, n
+jge END                                  (cond1 false → exit)
+; compute &p[i]
+cmp word [bx], 0
+jne LOOP_TOP                             (cond2 true → loop again)
+                                         ; else fall through
+END:
+mov ax, si
+```
+
+Findings:
+- `&&` short-circuit in loop condition: each subterm gets its own conditional exit/loop.
+- For empty body, the step (`inc si`) appears before TEST, no body code between.
+- Last subterm's truthy branch goes back to LOOP_TOP; falsy branch falls through to exit.
+
+## for with comma init/step — both loop vars reg-allocated
+
+Fixture `3332-for-comma-obj`:
+
+```c
+for (i = 0, j = n; i < j; i++, j--) ;
+```
+
+```
+33 f6                          xor si, si       (i = 0)
+8b 7e 04                       mov di, n        (j = n)
+eb 02                          jmp TEST
+LOOP:
+46                             inc si           (i++)
+4f                             dec di           (j--)
+TEST:
+3b f7                          cmp si, di
+7c fa                          jl LOOP
+8b c6                          mov ax, si       (return i)
+```
+
+Findings:
+- Both i and j reg-allocated (SI and DI).
+- Comma in init/step = sequenced sub-statements; no special codegen.
+- 2-byte loop body (`inc si; dec di`), 2-byte test (`cmp si, di; jl`).
+
