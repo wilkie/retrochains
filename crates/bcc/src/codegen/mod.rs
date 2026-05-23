@@ -3550,7 +3550,7 @@ impl<'a> FunctionEmitter<'a> {
             // store. Destination-driven, same logical operation.
             let widening_src = match &e.kind {
                 ExprKind::Ident(name) => Some(name.as_str()),
-                ExprKind::Cast { ty: Type::Long, operand } => {
+                ExprKind::Cast { ty, operand } if ty.is_long_like() => {
                     if let ExprKind::Ident(name) = &operand.kind { Some(name.as_str()) } else { None }
                 }
                 _ => None,
@@ -3671,6 +3671,61 @@ impl<'a> FunctionEmitter<'a> {
                 let _ = write!(self.out, "\tmov\tax,word ptr {lo_addr}\r\n");
                 let _ = write!(self.out, "\t{mnem}\tax,{lo_k}\r\n");
                 let _ = write!(self.out, "\t{mnem}\tdx,{hi_k}\r\n");
+                return;
+            }
+            // `return a * K;` for a long lvalue × power-of-two
+            // constant. Strength-reduce to a chain of `shl ax,1;
+            // rcl dx,1` (one pair per shift). Non-power-of-2 const
+            // would still need N_LXMUL@. Fixture 3170 (`v * 2L`).
+            if let ExprKind::BinOp { op: BinOp::Mul, left, right } = &e.kind
+                && let Some((hi_addr, lo_addr)) = self.long_lvalue_addr_pair(left)
+                && let Some(k) = try_const_eval(right)
+                && k > 0
+                && k.is_power_of_two()
+                && k.trailing_zeros() <= 31
+            {
+                let shifts = k.trailing_zeros();
+                let _ = write!(self.out, "\tmov\tdx,word ptr {hi_addr}\r\n");
+                let _ = write!(self.out, "\tmov\tax,word ptr {lo_addr}\r\n");
+                for _ in 0..shifts {
+                    self.out.extend_from_slice(b"\tshl\tax,1\r\n");
+                    self.out.extend_from_slice(b"\trcl\tdx,1\r\n");
+                }
+                return;
+            }
+            // `return v / K;` / `% K;` where K is a constant. Same
+            // helper-call shape as the lvalue-vs-lvalue path but the
+            // divisor is composed in registers from K's halves and
+            // pushed. `xor ax,ax` writes the high half when K fits in
+            // 16 bits (BCC's preferred encoding); `mov dx, lo_k` then
+            // `push ax / push dx`. Fixtures 2829 (unsigned div by 10).
+            if let ExprKind::BinOp { op, left, right } = &e.kind
+                && matches!(op, BinOp::Div | BinOp::Mod)
+                && let Some((a_hi, a_lo)) = self.long_lvalue_addr_pair(left)
+                && let Some(k) = try_const_eval(right)
+            {
+                let unsigned = self.function.ret_ty.is_unsigned();
+                let helper = match (op, unsigned) {
+                    (BinOp::Div, false) => "N_LDIV@",
+                    (BinOp::Mod, false) => "N_LMOD@",
+                    (BinOp::Div, true)  => "N_LUDIV@",
+                    (BinOp::Mod, true)  => "N_LUMOD@",
+                    _ => unreachable!(),
+                };
+                let lo_k = (k & 0xFFFF) as u16;
+                let hi_k = ((k >> 16) & 0xFFFF) as u16;
+                if hi_k == 0 {
+                    self.out.extend_from_slice(b"\txor\tax,ax\r\n");
+                } else {
+                    let _ = write!(self.out, "\tmov\tax,{hi_k}\r\n");
+                }
+                let _ = write!(self.out, "\tmov\tdx,{lo_k}\r\n");
+                self.out.extend_from_slice(b"\tpush\tax\r\n");
+                self.out.extend_from_slice(b"\tpush\tdx\r\n");
+                let _ = write!(self.out, "\tpush\tword ptr {a_hi}\r\n");
+                let _ = write!(self.out, "\tpush\tword ptr {a_lo}\r\n");
+                let _ = write!(self.out, "\tcall\tnear ptr {helper}\r\n");
+                self.helpers.insert(helper.to_string());
                 return;
             }
             // `return a / b;` / `return a % b;` for two long lvalues.
