@@ -2612,3 +2612,67 @@ Findings:
 - `!=` uses `je` to skip the "true" branch (jumps when equal = result false).
 - Identical structure to `==` (3379) but with je/jne swapped.
 
+
+## `int x = (a > b)` — materializes 0/1 via branching, stores, reloads
+
+Fixture `3475-bool-assign-obj`:
+
+```c
+int x = (a > b);
+return x;
+```
+
+```
+4c 4c                          dec sp; dec sp  (alloc x)
+8b 46 04                       mov ax, a
+3b 46 06                       cmp ax, b
+7e 05                          jle ELSE
+b8 01 00                       mov ax, 1
+eb 02                          jmp END_CMP
+ELSE:
+33 c0                          xor ax, ax
+END_CMP:
+89 46 fe                       mov [bp-2], ax
+8b 46 fe                       mov ax, [bp-2]
+```
+
+Findings:
+- Comparison materializes 0/1 in AX via branching (no setcc on 8086).
+- Stored to x, then reloaded for return — same statement-boundary issue (3428).
+
+## `return a > b` — same shape, no temp storage
+
+Fixture `3476-return-cmp-obj`:
+
+```
+8b 46 04                       mov ax, a
+3b 46 06                       cmp ax, b
+7e 05                          jle ELSE
+b8 01 00                       mov ax, 1
+eb 02                          jmp END
+ELSE:
+33 c0                          xor ax, ax
+```
+
+Findings:
+- 15B body. Result lives in AX, returned directly.
+- 8B savings vs the var-assignment form (3475).
+
+## `g ^= 1` — single 6B `xor [mem], imm16`
+
+Fixture `3477-xor-eq-1-obj`:
+
+```c
+int g;
+void toggle(void) { g ^= 1; }
+```
+
+```
+81 36 00 00 01 00 [FIXUPP _g]  xor word [_g], 1
+```
+
+Findings:
+- Single 6-byte memory-immediate XOR.
+- Uses `81 /6 r/m, imm16` form for memory destination.
+- Compound assign with const on global = direct mem-imm op (no temp register).
+

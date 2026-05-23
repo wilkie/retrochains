@@ -234,3 +234,47 @@ Findings:
 - Single `c7 /0 r/m, imm16` (6B with disp16 + FIXUPP).
 - No reg involved — direct memory-immediate store.
 
+
+## Local `int arr[N]` (no init) — `sub sp, 2*N` alloc, no zero-fill
+
+Fixture `3473-local-arr-noinit-obj`:
+
+```c
+int fill_get(int v) {
+  int arr[5];
+  arr[2] = v;
+  return arr[2];
+}
+```
+
+```
+83 ec 0a                       sub sp, 10     (alloc 5 ints = 10B)
+8b 46 04                       mov ax, v
+89 46 fa                       mov [bp-6], ax  (arr[2] at bp-6)
+8b 46 fa                       mov ax, [bp-6]
+```
+
+Findings:
+- Local array: `sub sp, 2*N` (for int). No automatic zero-fill.
+- arr[i] at `[bp - 2*N + 2*i]`.
+
+## Local int array via sequential assignment — N × `mov mem, imm16`
+
+Fixture `3474-local-arr-init-obj`:
+
+```c
+int arr[3];
+arr[0] = 10; arr[1] = 20; arr[2] = 30;
+```
+
+```
+83 ec 06                       sub sp, 6
+c7 46 fa 0a 00                 mov [bp-6], 10
+c7 46 fc 14 00                 mov [bp-4], 20
+c7 46 fe 1e 00                 mov [bp-2], 30
+```
+
+Findings:
+- 3× 5-byte `c7 /0 r/m, imm16` stores.
+- No condensed init for local arrays — equivalent to writing each element.
+

@@ -5491,3 +5491,33 @@ Findings:
 - `< n` test uses `cmp + jge` (signed ≥ n).
 - Both failure paths jump to common FALSE label.
 
+
+## for with multi-statement body — 3-reg loop allocation
+
+Fixture `3478-for-multi-body-obj`:
+
+```c
+for (i = 1; i <= n; i++) { s += i; p *= i; }
+```
+
+```
+33 ff                          xor di, di       (s = 0 → DI)
+bb 01 00                       mov bx, 1        (p = 1 → BX)
+be 01 00                       mov si, 1        (i = 1 → SI)
+eb 09                          jmp TEST
+LOOP_BODY:
+03 fe                          add di, si       (s += i)
+8b c3                          mov ax, bx
+f7 ee                          imul si          (p * i in AX)
+8b d8                          mov bx, ax       (p = AX)
+46                             inc si
+TEST:
+3b 76 04                       cmp si, n
+7e f2                          jle LOOP_BODY    (signed)
+```
+
+Findings:
+- 3 reg-alloc slots: SI (i), DI (s), BX (p).
+- `p *= i` (compound) uses `imul si` — no strength-reduce shortcut (consistent with 3467).
+- Tight loop body interleaves accumulator updates without going through memory.
+
