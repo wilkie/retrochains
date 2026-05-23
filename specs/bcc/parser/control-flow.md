@@ -4349,3 +4349,46 @@ Findings:
 - Cond uses `or si, si; jg` (4B with zero-cmp peephole) since `> 0`.
 - **Optimal countdown**: `for (i = n; i > 0; --i)` over `i = i - 1`.
 
+
+## `if (1)` vs `1 ? :` — STATEMENTS preserve dead branch, ternary doesn't
+
+Fixtures `2969-if-const-true-obj`, `2970-if-const-false-obj`,
+`2971-while-const-false-obj`:
+
+```c
+if (1) return a; return b;     /* dead branch EMITTED */
+if (0) return a; return b;     /* dead branch EMITTED */
+while (0) { ... }              /* dead body EMITTED */
+```
+
+```
+                               ; if (1) return a:
+8b 46 04                       mov ax, a
+eb 05                          jmp → epi
+8b 46 06                       mov ax, b    (UNREACHABLE but emitted)
+eb 00 ...                      epi
+
+                               ; if (0) return a:
+eb 05                          jmp → ELSE
+8b 46 04                       mov ax, a    (UNREACHABLE)
+eb 05                          jmp epi      (UNREACHABLE)
+8b 46 06                       mov ax, b    (ELSE)
+
+                               ; while (0):
+eb 05                          jmp → AFTER_LOOP
+8b c6 40 8b f0                 s = s + 1    (UNREACHABLE body)
+                               ; AFTER_LOOP:
+```
+
+Findings:
+- **Statement-level const-condition: NO dead-code elimination.**
+  Condition test is elided (just unconditional jmp), but the
+  dead branch BODY is still emitted (unreachable code).
+- **Expression-level const ternary (`2965`): DCE applied.**
+  Dead arm completely removed.
+- This shows BCC's two-tier optimization:
+  - Expressions: aggressive const-fold (drops dead sub-expressions)
+  - Statements: preserves source structure (just simplifies control flow)
+- The unreachable code is still loaded into the binary; it's just
+  never executed.
+

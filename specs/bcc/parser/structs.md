@@ -3168,3 +3168,28 @@ Findings:
 - Compare to `p->x = v` (offset 0) which uses `mov [si], ax`
   (`89 04`, 2B). Field-zero saves 1 byte.
 
+
+## `m.a + m.b + m.c` for global struct — sequential `add ax, [moffs16]`
+
+Fixture `2973-struct-all-fields-obj`:
+
+```c
+struct M { int a; int b; int c; };
+struct M m = { 10, 20, 30 };
+return m.a + m.b + m.c;
+```
+
+`_DATA` for `_m` (6 bytes): `0a 00 14 00 1e 00`
+
+```
+a1 00 00                       mov ax, [_m + 0]   (m.a)
+03 06 02 00                    add ax, [_m + 2]   (m.b, mem-source add)
+03 06 04 00                    add ax, [_m + 4]   (m.c, mem-source add)
+```
+
+Findings:
+- Each field added via `add ax, [moffs16]` (4B per field).
+- Total 11 bytes for the 3-field sum expression.
+- ModR/M `06 disp16` = direct moffs16 addressing (no register
+  needed for the address — disp16 is absolute).
+
