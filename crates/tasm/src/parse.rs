@@ -3154,21 +3154,46 @@ fn parse_group_symbol_bx_disp(s: &str) -> Option<(&str, &str, u16)> {
     let s = s.trim().strip_prefix("word ptr ")?;
     let (group, rest) = s.split_once(':')?;
     let group = group.trim();
-    // rest is `_sym[bx]` or `_sym[bx+K]`.
+    // rest is `_sym[bx]`, `_sym[bx+K]`, `_sym+K[bx]`, `_sym-K[bx]`, or
+    // combinations.
     let (sym_part, idx_part) = rest.split_once('[')?;
-    let sym = sym_part.trim();
+    let sym_part = sym_part.trim();
+    // Allow a `+K` or `-K` suffix on the symbol (the FIXUPP-disp
+    // contribution from a folded constant array offset like
+    // `arr[i+1]` → `_arr+2[bx]`).
+    let (sym, sym_disp): (&str, i32) = if let Some(idx) = sym_part.rfind('+') {
+        let (s, d) = sym_part.split_at(idx);
+        let d_val = d[1..].parse::<i32>().ok()?;
+        (s, d_val)
+    } else if let Some(idx) = sym_part.rfind('-') {
+        // `_sym-K` — guard against false-positive at position 0
+        // (e.g. `-` at start of a label, though none of our symbols
+        // start with `-`).
+        if idx == 0 {
+            (sym_part, 0)
+        } else {
+            let (s, d) = sym_part.split_at(idx);
+            let d_val = d.parse::<i32>().ok()?; // includes the minus sign
+            (s, d_val)
+        }
+    } else {
+        (sym_part, 0)
+    };
     if !sym.starts_with('_') && !sym.starts_with('@') {
         return None;
     }
     let idx = idx_part.strip_suffix(']')?.trim();
-    let disp = if idx == "bx" {
-        0u16
+    let bx_disp = if idx == "bx" {
+        0i32
     } else if let Some(k) = idx.strip_prefix("bx+") {
-        k.trim().parse::<u16>().ok()?
+        k.trim().parse::<i32>().ok()?
+    } else if let Some(k) = idx.strip_prefix("bx-") {
+        -k.trim().parse::<i32>().ok()?
     } else {
         return None;
     };
-    Some((group, sym, disp))
+    let total = (sym_disp + bx_disp) as i16 as u16;
+    Some((group, sym, total))
 }
 
 /// Strip a trailing `+<integer>` from a symbol, returning

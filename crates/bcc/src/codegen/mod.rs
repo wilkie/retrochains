@@ -7023,24 +7023,49 @@ impl<'a> FunctionEmitter<'a> {
             // (`shl bx, 1` for int, twice for long, skip for char),
             // then read through `[bx+_a]`. Fixture 1284 (int index),
             // 1493 (char-typed index, requires CBW widening).
+            //
+            // `_a[i ± K]`: fold the constant offset into the FIXUPP
+            // disp (`_a + K*stride[bx]`) so the index becomes just
+            // `i`. Fixture 3637 (`arr[i+1]`), 3033 (`arr[i-1]`).
             if indices.len() == 1
                 && let Some(elem_ty) = gty.array_elem()
             {
                 let elem_ty = elem_ty.clone();
-                let idx = indices[0];
-                self.emit_index_into_bx(idx, &elem_ty);
+                let stride = i32::from(elem_ty.size_bytes());
+                let (idx_expr, const_off) = match &indices[0].kind {
+                    ExprKind::BinOp { op: BinOp::Add, left, right }
+                        if let Some(k) = try_const_eval(right)
+                            && try_const_eval(left).is_none() =>
+                    {
+                        (left.as_ref(), (k as i32).wrapping_mul(stride))
+                    }
+                    ExprKind::BinOp { op: BinOp::Sub, left, right }
+                        if let Some(k) = try_const_eval(right)
+                            && try_const_eval(left).is_none() =>
+                    {
+                        (left.as_ref(), -(k as i32).wrapping_mul(stride))
+                    }
+                    _ => (indices[0], 0),
+                };
+                self.emit_index_into_bx(idx_expr, &elem_ty);
                 let width = ptr_width(&elem_ty);
+                let addr = if const_off == 0 {
+                    format!("DGROUP:_{array_name}[bx]")
+                } else if const_off > 0 {
+                    format!("DGROUP:_{array_name}+{const_off}[bx]")
+                } else {
+                    // Negative const offset: tasm syntax is sym-K.
+                    // The disp16 in the FIXUPP will be sign-extended;
+                    // the underflow wraps in the OBJ. BCC actually
+                    // emits this as `_a-K[bx]` (e.g. `_a-2[bx]` for
+                    // `arr[i-1]`).
+                    format!("DGROUP:_{array_name}-{}[bx]", -const_off)
+                };
                 if elem_ty.is_char_like() {
-                    let _ = write!(
-                        self.out,
-                        "\tmov\tal,byte ptr DGROUP:_{array_name}[bx]\r\n",
-                    );
+                    let _ = write!(self.out, "\tmov\tal,byte ptr {addr}\r\n");
                     self.emit_widen_al(&elem_ty);
                 } else {
-                    let _ = write!(
-                        self.out,
-                        "\tmov\tax,{width} ptr DGROUP:_{array_name}[bx]\r\n",
-                    );
+                    let _ = write!(self.out, "\tmov\tax,{width} ptr {addr}\r\n");
                 }
                 return;
             }
