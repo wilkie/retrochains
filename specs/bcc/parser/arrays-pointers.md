@@ -6297,3 +6297,30 @@ Findings:
 - Same as the reg-direct global store peephole (`2776`) but for
   bx-indexed memory.
 
+
+## `arr[i] = arr[j]` global both indexed — BX reused for both addresses
+
+Fixture `3011-arr-arr-copy-obj`:
+
+```c
+int arr[10];
+void shuffle(int i, int j) {
+  arr[i] = arr[j];
+}
+```
+
+```
+8b 5e 06                       mov bx, j
+d1 e3                          shl bx, 1
+8b 87 00 00                    mov ax, [bx + _arr]  (load arr[j])
+8b 5e 04                       mov bx, i (REUSE bx)
+d1 e3                          shl bx, 1
+89 87 00 00                    mov [bx + _arr], ax  (store to arr[i])
+```
+
+Findings:
+- Both indexed addresses use BX sequentially — load uses bx for j,
+  then BX OVERWRITTEN for i during the store.
+- AX is the conduit between load and store.
+- 14 bytes for the indexed copy.
+

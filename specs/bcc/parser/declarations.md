@@ -1526,3 +1526,31 @@ Findings:
   store ALWAYS uses imm16 form (`c7 /0 disp imm16`) for word stores.
   No sign-ext shorthand for memory-immediate.
 
+
+## Nested block local — added to function's stack frame (no separate scope)
+
+Fixture `3014-nested-block-obj`:
+
+```c
+int compute(int a) {
+  int s;
+  s = a;
+  {
+    int x;
+    x = a + 1;
+    s = s + x;
+  }
+  return s;
+}
+```
+
+The nested `x` gets a stack slot at `[bp-2]` allocated in the
+function prologue (`4c 4c` = 2 bytes).
+
+Findings:
+- Nested block locals are **NOT scope-limited at codegen** — they
+  get a stack slot allocated for the entire function lifetime.
+- No special scope tracking; the local just lives in the frame.
+- Compiler still respects C scoping rules (can't reference `x`
+  outside the block) at the syntax/semantic level.
+

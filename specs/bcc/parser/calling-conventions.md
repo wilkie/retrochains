@@ -1775,3 +1775,51 @@ Findings:
 - BCC has no special handling for recursion — just emits the call
   with the right relative offset.
 
+
+## `setup(); cleanup();` two zero-arg void calls — minimal back-to-back
+
+Fixture `3012-two-extern-calls-obj`:
+
+```c
+setup();
+cleanup();
+```
+
+```
+e8 00 00                       call _setup
+e8 00 00                       call _cleanup
+```
+
+Findings:
+- Two zero-arg `void` calls = just two `call rel16` (3B each).
+- NO push/pop, NO cleanup. Total 6 bytes for both.
+- Minimum-cost call sequence.
+
+## 3-arg fn-ptr call — `add sp, 6` cleanup (not 3× pop cx)
+
+Fixture `3016-fnptr-3args-obj`:
+
+```c
+int compute(int (*op)(int, int, int), int a, int b, int c) {
+  return op(a, b, c);
+}
+```
+
+```
+ff 76 0a                       push c
+ff 76 08                       push b
+ff 76 06                       push a
+ff 56 04                       call word ptr [bp+4]
+83 c4 06                       add sp, 6   (3-arg cleanup)
+```
+
+Findings:
+- At 3 args, BCC uses `add sp, imm8` (3B) cleanup rather than
+  3× `pop cx` (also 3B but 3 instructions).
+- Same byte count, but fewer instructions = faster.
+- Confirms threshold table:
+  - 1 arg: `pop cx` (1B, 1 instr)
+  - 2 args: 2× `pop cx` (2B, 2 instr)
+  - **3 args: `add sp, 6` (3B, 1 instr)** ← switch point
+  - 4+ args: `add sp, K` (3B, 1 instr)
+

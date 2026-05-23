@@ -3209,3 +3209,28 @@ Findings:
 - Unaligned long at odd offset works on 8086 (just slower per
   cycle).
 
+
+## Struct pass-by-address `sum(&v)` — `lea + push` (4B for arg)
+
+Fixture `3013-struct-byaddr-obj`:
+
+```c
+struct M v;
+... initialize v ...
+sum(&v);
+```
+
+```
+8d 46 fa                       lea ax, [bp-6]  (= &v)
+50                             push ax
+e8 00 00                       call _sum
+59                             pop cx
+```
+
+Findings:
+- Passing struct by address = `lea + push ax` (4B for the arg
+  setup).
+- Compare to pass-by-value of large struct which would require
+  pushing every word (multi-byte cost) or N_SCOPY@ helper.
+- Standard "efficient struct argument" idiom for large structs.
+
