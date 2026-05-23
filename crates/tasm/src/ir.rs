@@ -1440,6 +1440,12 @@ pub enum Instr {
     /// uses this for postfix `(*p)++` discarded (fixture 714);
     /// prefix `++*p` and explicit `*p += 1` take the AL detour.
     IncSiPtrByte,
+    /// `inc word ptr [si]` — `FF 04`. ModR/M 04 = mod=00 /0(INC)
+    /// r/m=100([SI]). Int sibling of `IncSiPtrByte` (fixture 1290:
+    /// `p->x++` with p in SI and x at offset 0).
+    IncSiPtrWord,
+    /// `dec word ptr [si]` — `FF 0C`. ModR/M 0C = mod=00 /1(DEC).
+    DecSiPtrWord,
     /// `dec byte ptr [si]` — `FE 0C`. Sibling for `(*p)--`.
     DecSiPtrByte,
     /// `sub byte ptr [si], <reg8>` — `28 04` sibling.

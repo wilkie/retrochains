@@ -8975,6 +8975,20 @@ impl<'a> FunctionEmitter<'a> {
             let _ = write!(self.out, "\tmov\tbyte ptr {dest},al\r\n");
             return;
         }
+        // Int-field `++` / `--` (discarded postfix or `+= 1` / `-= 1`):
+        // memory-direct `inc`/`dec word ptr <dest>` (2-3 bytes via the
+        // FF /0 or /1 form) instead of `add word ptr <dest>, 1` (5
+        // bytes for sym+disp or 4 for [si]). Mirrors the char-field
+        // K=1 peephole above. Fixture 1290 (`p->x++` with int x at
+        // offset 0 in struct, p in SI → `inc word ptr [si]`).
+        if !store_byte
+            && v_masked == 1
+            && matches!(op, BinOp::Add | BinOp::Sub)
+        {
+            let mnem = if matches!(op, BinOp::Add) { "inc" } else { "dec" };
+            let _ = write!(self.out, "\t{mnem}\tword ptr {dest}\r\n");
+            return;
+        }
         let mnemonic = match op {
             BinOp::Add => "add",
             BinOp::Sub => "sub",
@@ -9351,6 +9365,15 @@ impl<'a> FunctionEmitter<'a> {
                     let _ = write!(self.out, "\tadd\tal,{imm8}\r\n");
                 }
                 let _ = write!(self.out, "\tmov\tbyte ptr [{addr_reg}],al\r\n");
+                return;
+            }
+            // Int-pointee K=1 peephole: `inc word ptr [reg]` / `dec
+            // word ptr [reg]` (2 bytes) instead of `add word ptr
+            // [reg], 1` (3 bytes). Fixture 1302 (`++(*p)` with int p
+            // in SI).
+            if !store_byte && v_masked == 1 && matches!(op, BinOp::Add | BinOp::Sub) {
+                let mnem = if matches!(op, BinOp::Add) { "inc" } else { "dec" };
+                let _ = write!(self.out, "\t{mnem}\tword ptr [{addr_reg}]\r\n");
                 return;
             }
             let _ = write!(

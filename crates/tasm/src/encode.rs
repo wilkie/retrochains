@@ -445,6 +445,7 @@ fn instr_size(instr: &Instr) -> usize {
         | Instr::XorBpRelByteImm8 { .. } => 4,
         Instr::AddSiPtrReg8 { .. } | Instr::SubSiPtrReg8 { .. } => 2,
         Instr::IncSiPtrByte | Instr::DecSiPtrByte => 2,
+        Instr::IncSiPtrWord | Instr::DecSiPtrWord => 2,
         Instr::AdcSiDispImm8 { .. } | Instr::SbbSiDispImm8 { .. } => 4,
         Instr::AddSiPtrDx => 2,
         Instr::AddSiPtrAx
@@ -2477,6 +2478,16 @@ fn emit_instr(
         Instr::DecSiPtrByte => {
             // `dec byte ptr [si]` → FE 0C.
             out.push(0xFE);
+            out.push(0x0C);
+        }
+        Instr::IncSiPtrWord => {
+            // `inc word ptr [si]` → FF 04.
+            out.push(0xFF);
+            out.push(0x04);
+        }
+        Instr::DecSiPtrWord => {
+            // `dec word ptr [si]` → FF 0C.
+            out.push(0xFF);
             out.push(0x0C);
         }
         Instr::AndSiPtrByteImm8 { imm } => {

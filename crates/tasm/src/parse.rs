@@ -692,6 +692,10 @@ fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
             if rest == "byte ptr [si]" {
                 return Ok(Instr::IncSiPtrByte);
             }
+            // `inc word ptr [si]` — int sibling (fixture 1290).
+            if rest == "word ptr [si]" {
+                return Ok(Instr::IncSiPtrWord);
+            }
             // `inc byte ptr [bp+N]` — char-local-array postinc
             // (fixture 721).
             if let Some(offset) = parse_byte_bp_relative(rest) {
@@ -749,6 +753,10 @@ fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
             // `dec byte ptr [si]` — char postdec through pointer.
             if rest == "byte ptr [si]" {
                 return Ok(Instr::DecSiPtrByte);
+            }
+            // `dec word ptr [si]` — int sibling.
+            if rest == "word ptr [si]" {
+                return Ok(Instr::DecSiPtrWord);
             }
             // `dec byte ptr [bp+N]` — char-local-array postdec.
             if let Some(offset) = parse_byte_bp_relative(rest) {
