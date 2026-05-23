@@ -2227,3 +2227,41 @@ Findings:
 - No load/store sequence — uses mem-direct inc.
 - 6B body total (including SI setup).
 
+
+## `(char)x` for int x — truncate + sign-extend
+
+Fixture `3411-cast-int-to-char-obj`:
+
+```c
+int truncate(int x) { return (char)x; }
+```
+
+```
+8a 46 04                       mov al, x         (byte load — truncate)
+98                             cbw               (sign-extend back to int)
+```
+
+Findings:
+- Cast to char drops the high byte (byte load reads only [bp+disp]).
+- Sign-extension back to int via `cbw`. Result in AX has correct sign.
+- 4B body.
+
+## unsigned-to-int conversion — no-op (same bit pattern)
+
+Fixture `3412-uint-to-int-obj`:
+
+```c
+int convert(unsigned u) { int i = u; return i; }
+```
+
+```
+4c 4c                          dec sp; dec sp   (alloc i)
+8b 46 04                       mov ax, u
+89 46 fe                       mov [bp-2], ax    (i = u — copy bits)
+8b 46 fe                       mov ax, [bp-2]
+```
+
+Findings:
+- unsigned→int is a pure bit copy — no widening/narrowing.
+- Same byte pattern as int→int copy.
+

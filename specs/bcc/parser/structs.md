@@ -3877,3 +3877,79 @@ Findings:
 - Uses AX (short `a3` form, 3B) for one half; DX (long `89` form, 4B) for the other.
 - Threshold for `N_SCOPY@` is presumably >4 bytes.
 
+
+## struct return 2B (1 int member) — via AX, build local + load
+
+Fixture `3408-struct-ret-2b-obj`:
+
+```c
+struct One { int a; };
+struct One make(int v) { struct One r; r.a = v; return r; }
+```
+
+```
+4c 4c                          dec sp; dec sp   (alloc r)
+8b 46 04                       mov ax, v
+89 46 fe                       mov [bp-2], ax   (r.a = v)
+8b 46 fe                       mov ax, [bp-2]   (return r.a in AX)
+```
+
+Findings:
+- 2B struct: returned in AX.
+- BCC always builds the local, then loads — no "return value bypass" peephole.
+
+## struct return 4B (2 int members) — via DX:AX
+
+Fixture `3409-struct-ret-4b-obj`:
+
+```c
+struct Two { int a; int b; };
+```
+
+```
+83 ec 04                       sub sp, 4         (alloc r)
+8b 46 04                       mov ax, x
+89 46 fc                       mov [bp-4], ax    (r.a)
+8b 46 06                       mov ax, y
+89 46 fe                       mov [bp-2], ax    (r.b)
+8b 56 fe                       mov dx, [bp-2]    (r.b → DX)
+8b 46 fc                       mov ax, [bp-4]    (r.a → AX)
+```
+
+Findings:
+- 4B struct: returned in DX:AX. DX = second word (b), AX = first word (a).
+- 4B alloc uses `sub sp, 4` (3B) — switches from `dec sp` chain at >2B.
+
+## struct return 6B — via N_SCOPY@ with hidden FAR ret-ptr
+
+Fixture `3410-struct-ret-6b-obj`:
+
+```c
+struct Three { int a; int b; int c; };
+struct Three make(int x, int y, int z) { ... }
+```
+
+Frame layout:
+- [bp+4..7]: hidden ret-ptr (FAR ptr, 4B = offset + segment)
+- [bp+8]: x, [bp+10]: y, [bp+12]: z
+
+Body excerpt:
+```
+83 ec 06                       sub sp, 6         (alloc r)
+                               ; build r.a, r.b, r.c at [bp-6], [bp-4], [bp-2]
+ff 76 06                       push [bp+6]       (ret-ptr SEG)
+ff 76 04                       push [bp+4]       (ret-ptr OFFSET)
+8d 46 fa                       lea ax, [bp-6]    (offset of r)
+16                             push ss           (segment of r)
+50                             push ax
+b9 06 00                       mov cx, 6         (copy size)
+e8 ?? ?? [FIXUPP N_SCOPY@]     call N_SCOPY@
+8b 46 04                       mov ax, [bp+4]    (return ret-ptr offset in AX)
+```
+
+Findings:
+- Threshold for `N_SCOPY@`: struct size > 4B (i.e., ≥ 5B uses it).
+- Hidden first arg = FAR ret-ptr (4B on stack at [bp+4..7]).
+- N_SCOPY@ signature: dest FAR ptr, src FAR ptr, size in CX.
+- Result returned via the hidden ret-ptr (offset in AX, segment implicit via SS).
+

@@ -7160,3 +7160,23 @@ Findings:
 - 6B body. Uses `add ax, imm16` form with -2 = 0xFFFE.
 - No runtime multiply.
 
+
+## Array of pointers `char *table[N]` — indexed like int array
+
+Fixture `3407-arr-of-ptr-obj`:
+
+```c
+char *table[3];
+char *pick(int i) { return table[i]; }
+```
+
+```
+8b 5e 04                       mov bx, i
+d1 e3                          shl bx, 1                (bx = i*2)
+8b 87 00 00 [FIXUPP _table]    mov ax, [bx + _table]
+```
+
+Findings:
+- char* is 2B in small memory model, so `char *table[]` has 2B stride.
+- Indexing identical to `int table[]`.
+
