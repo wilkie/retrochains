@@ -4185,3 +4185,30 @@ Findings:
 - 8B body — identical to `o->p->v` (3441).
 - Non-zero offsets would add disp8/disp16 to the corresponding loads.
 
+
+## `if (bitfield_a & bitfield_b)` — test peephole for combined flags
+
+Fixture `3452-bitfield-combo-obj`:
+
+```c
+struct F { unsigned a:4; unsigned b:4; } f;
+if (f.a & f.b) ...
+```
+
+```
+a0 00 00 [FIXUPP _f]           mov al, [_f]
+25 0f 00                       and ax, 0x0F      (extract a)
+8a 16 00 00 [FIXUPP _f]        mov dl, [_f]      (reload byte)
+b1 04                          mov cl, 4
+d3 ea                          shr dx, cl
+81 e2 0f 00                    and dx, 0x0F      (extract b)
+85 c2                          test ax, dx       (a & b — sets flags non-destructively)
+74 05                          je FALSE
+```
+
+Findings:
+- Both bitfields extracted into AX and DX separately.
+- `test ax, dx` sets flags from `AX & DX` without storing — perfect for `if (...)`.
+- 29B body for the extract+combine+test sequence.
+- BCC reloads `[_f]` twice (could load once into a temp). Minor missed opt.
+

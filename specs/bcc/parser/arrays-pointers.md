@@ -7292,3 +7292,56 @@ Findings:
 - Two-level pointer chain uses two scratch reg holders (SI then BX).
 - 8B body. Each indirection is a 2B `mov reg, [reg]`.
 
+
+## `&char_arr[const]` — no scaling needed
+
+Fixture `3449-char-addr-of-elem-obj`:
+
+```c
+char arr[10];
+char *third(void) { return &arr[3]; }
+```
+
+```
+b8 03 00 [FIXUPP _arr]         mov ax, offset _arr + 3
+```
+
+Findings:
+- char stride = 1, so `&arr[3]` = `_arr + 3`.
+- Same shape as int `&arr[3]` (3309) but with const directly (no × 2 scaling).
+
+## `char arr[i] = v` — no shift on index, byte store via disp16
+
+Fixture `3450-char-arr-write-obj`:
+
+```c
+char arr[10];
+void put(int i, char v) { arr[i] = v; }
+```
+
+```
+8b 76 04                       mov si, i
+8a 46 06                       mov al, v
+88 84 00 00 [FIXUPP _arr]      mov [si + _arr], al
+```
+
+Findings:
+- No `shl si, 1` since char stride = 1.
+- Byte store via `88 r/m8, r8` form with mode=10 (disp16) r/m=100 ([si]+disp16).
+- 11B body.
+
+## ptr passthrough — 3B `mov ax, p`
+
+Fixture `3453-ptr-passthrough-obj`:
+
+```c
+int *identity(int *p) { return p; }
+```
+
+```
+8b 46 04                       mov ax, p
+```
+
+Findings:
+- Pointer return is just an int copy in small memory model.
+

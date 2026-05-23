@@ -2443,3 +2443,48 @@ Findings:
 - char promoted to int via `cbw` before int comparison.
 - No byte-cmp peephole — int compare semantics required.
 
+
+## `-x - 1` — NOT recognized as `~x` (misses 1B peephole)
+
+Fixture `3451-neg-expr-obj`:
+
+```c
+int bitnot(int x) { return -x - 1; }
+```
+
+```
+8b 46 04                       mov ax, x
+f7 d8                          neg ax
+48                             dec ax
+```
+
+Findings:
+- BCC computes `-x - 1` as `neg + dec` (3B) instead of recognizing the math identity `-x - 1 = ~x`.
+- Optimal `not ax` (2B) is 1 byte shorter.
+- No peephole for this specific arithmetic identity.
+
+## `(a + b) * (a - b)` — reg-allocates both, uses SI/DI/AX/DX
+
+Fixture `3454-paren-paren-obj`:
+
+```c
+int compute(int a, int b) { return ((a + b) * (a - b)); }
+```
+
+```
+56 57                          push si; push di
+8b 76 04                       mov si, a
+8b 7e 06                       mov di, b
+8b c6                          mov ax, si
+03 c7                          add ax, di       (a+b in AX)
+8b d6                          mov dx, si
+2b d7                          sub dx, di       (a-b in DX)
+f7 ea                          imul dx          (AX * DX)
+```
+
+Findings:
+- Both `a` and `b` reg-allocated to SI and DI.
+- Sub-expressions land in AX and DX respectively.
+- imul reg-reg uses the DX as multiplicand.
+- 18B body.
+
