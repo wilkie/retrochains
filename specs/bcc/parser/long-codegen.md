@@ -4509,3 +4509,22 @@ Findings:
 - Only LOW byte of n loaded — implicit truncation to 8-bit shift count.
 - 12B body.
 
+
+## long global return — 2 mem loads (HIGH → DX, LOW → AX)
+
+Fixture `3564-long-global-ret-obj`:
+
+```c
+long g = 0x12345678L;
+long get(void) { return g; }
+```
+
+```
+8b 16 02 00 [FIXUPP _g+2]      mov dx, [_g + 2]    (HIGH)
+a1 00 00    [FIXUPP _g]        mov ax, [_g]        (LOW)
+```
+
+Findings:
+- 7B body. Standard long return convention.
+- LEDATA: `78 56 34 12` = 0x12345678 little-endian (LOW first, then HIGH).
+

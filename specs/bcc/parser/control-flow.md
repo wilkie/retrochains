@@ -5865,3 +5865,24 @@ Findings:
 - Pre-dec and post-dec in for-step position emit byte-identical code.
 - Result of `i--`/`--i` is unused, so semantics collapse.
 
+
+## Sparse switch with negative case — values table stores raw 16-bit
+
+Fixture `3563-switch-sparse-neg-obj`:
+
+```c
+switch (x) {
+  case -100: return 1;
+  case 0:    return 2;
+  case 100:  return 3;
+  case 1000: return 4;
+}
+```
+
+Values table (in _TEXT): `9c ff 00 00 64 00 e8 03` = -100, 0, 100, 1000 (raw 16-bit).
+
+Findings:
+- Same SEARCH LOOP pattern as positive-only sparse (3490).
+- Negative values stored as their 16-bit two's complement (-100 = 0xFF9C).
+- `cmp ax, [bx]` works correctly regardless of sign.
+

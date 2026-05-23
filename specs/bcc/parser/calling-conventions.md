@@ -2398,3 +2398,57 @@ Findings:
 - Variadic functions follow same calling convention (caller cleanup).
 - String "%d\n" in _DATA, FIXUPP'd into the push.
 
+
+## Recursive fib(n) — 2 self-recursive calls with stack-held intermediate
+
+Fixture `3566-fib-obj`:
+
+```c
+int fib(int n) {
+  if (n < 2) return n;
+  return fib(n - 1) + fib(n - 2);
+}
+```
+
+Body:
+```
+                               ; if (n < 2) return n
+                               ; else:
+8b c6 48 50                    push (n - 1)
+e8 e9 ff                       call _fib          (self, PC-relative)
+59                             pop cx
+50                             push ax            (save fib(n-1))
+8b c6 05 fe ff                 ax = n - 2
+50                             push ax
+e8 de ff                       call _fib
+59                             pop cx
+8b d0                          mov dx, ax         (dx = fib(n-2))
+58                             pop ax             (ax = fib(n-1))
+03 c2                          add ax, dx
+```
+
+Findings:
+- First call's result saved on stack while second call runs.
+- Both recursive calls use direct PC-relative (no FIXUPP — same TU).
+- `n - 2` computed via `add ax, -2` (3B same as `sub ax, 2`).
+
+## extern fn-pointer call — `call [_handler]` indirect via memory
+
+Fixture `3567-fnptr-extern-obj`:
+
+```c
+extern int (*handler)(int);
+int run(int v) { return handler(v); }
+```
+
+```
+ff 76 04                       push v
+ff 16 00 00 [FIXUPP _handler]  call [_handler]    (4B indirect via mem)
+59                             pop cx
+```
+
+Findings:
+- 4B `ff /2 r/m16` with mode 00 r/m 110 (direct disp16) — `call [imm16]`.
+- EXTDEF for `_handler` (extern).
+- 8B body. No need to load ptr into reg first.
+

@@ -3218,3 +3218,16 @@ Fixture `3556-shift-by-zero-obj`:
 Findings:
 - 3B body. `<< 0` is identity, fully eliminated at parse time (similar to `+ 0` and `* 1`).
 
+
+## unsigned `g >>= 1` (global) — 4B mem-direct shr
+
+Fixture `3568-ushr-eq-1-obj`:
+
+```
+d1 2e 00 00 [FIXUPP _g]        shr word [_g], 1
+```
+
+Findings:
+- 4B body. Same size as signed `sar [_g], 1` (`d1 /7`).
+- Single-bit shift mem-direct.
+

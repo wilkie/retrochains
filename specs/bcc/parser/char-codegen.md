@@ -2211,3 +2211,18 @@ Findings:
 - Smallest non-void char return: 2B.
 - Could equivalently be `xor al, al` (2B) — BCC chose `mov`.
 
+
+## `char == char` — direct byte cmp, no widening
+
+Fixture `3565-char-char-cmp-obj`:
+
+```
+8a 46 04                       mov al, a
+3a 46 06                       cmp al, b
+75 05                          jne ELSE
+```
+
+Findings:
+- Direct `cmp r8, r/m8` (3B). No widening since both are char.
+- 15B body.
+
