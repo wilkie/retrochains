@@ -1491,3 +1491,27 @@ Findings:
 - The `or ax, ax` peephole is enabled because the value is already
   in AX from the assignment.
 
+
+## Shift opcode table — `d1 /op` for 1-bit, `d3 /op` for cl-form
+
+Fixture `3034-uint-shr-obj`:
+
+```c
+return x >> 1;   /* unsigned */
+```
+
+```
+d1 e8                          shr ax, 1     (UNSIGNED, op-ext /5)
+```
+
+Findings:
+- Shift opcode `d1 /op` (2B for AX, 1-bit shift):
+  - `/4` = shl (`d1 e0`)
+  - `/5` = shr (`d1 e8`) — UNSIGNED
+  - `/7` = sar (`d1 f8`) — SIGNED
+- CL-form `d3 /op` (2B for AX, count in CL).
+- For memory operands, ModR/M r/m field selects the address;
+  op-ext stays the same.
+- `unsigned int >> N`: use `shr` (`d1 e8` or `d3 e8`).
+- `signed int >> N`: use `sar` (`d1 f8` or `d3 f8`).
+

@@ -1554,3 +1554,22 @@ Findings:
 - Compiler still respects C scoping rules (can't reference `x`
   outside the block) at the syntax/semantic level.
 
+
+## Explicit zero-init goes to `_DATA` (not `_BSS`)
+
+Fixtures `3029-arr-zero-init-obj`, `3030-arr-partial-init-obj`:
+
+```c
+int g[3] = { 0, 0, 0 };     /* _DATA: 6 bytes 00 00 00 00 00 00 */
+char a[5] = { 1, 2 };       /* _DATA: 5 bytes 01 02 00 00 00 */
+```
+
+Findings:
+- **Any explicit initializer (even all-zero) places the variable
+  in `_DATA`**, not `_BSS`.
+- BCC does NOT optimize `int g[N] = {0}` to BSS placement.
+- Partial init (`{1, 2}` for `char a[5]`) pads remaining bytes
+  with zeros in `_DATA`. Full declared size occupied.
+- BSS reserved for purely uninitialized globals (`int g[3];`).
+- Tradeoff: explicit `{0}` adds bytes to OBJ but documents intent.
+

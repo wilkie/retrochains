@@ -6362,3 +6362,46 @@ Findings:
 - `data[i + K]` ≡ `data[i]` codegen but with disp16 = K × sizeof.
 - Works for any compile-time constant K in the index expression.
 
+
+## `arr[i]++` global indexed post-inc — load + mem-inc
+
+Fixture `3032-arr-elem-post-inc-obj`:
+
+```c
+int arr[5];
+return arr[i]++;
+```
+
+```
+8b 5e 04                       mov bx, i
+d1 e3                          shl bx, 1
+8b 87 00 00                    mov ax, [bx + _arr]    (load old value)
+ff 87 00 00                    inc word [bx + _arr]   (mem-inc)
+```
+
+Findings:
+- Load (4B) + mem-inc (4B) + scale = 10 bytes.
+- The old value (pre-increment) is preserved in AX for the return.
+- Same mem-inc pattern as `++arr[i]` (`2937`) but with extra
+  load FIRST.
+
+## `data[i - 1]` const negative offset — disp16 = 0xFFFE
+
+Fixture `3033-arr-i-minus-1-obj`:
+
+```c
+return data[i - 1];
+```
+
+```
+8b 5e 04                       mov bx, i
+d1 e3                          shl bx, 1
+8b 87 fe ff                    mov ax, [bx + _data + (-2)]
+```
+
+Findings:
+- Negative const offset folds into disp16 as signed 16-bit value.
+- `data[i - K]` = `data[i]` with disp16 = `-K × sizeof(elem)`.
+- 0xFFFE = -2 = `-1 × sizeof(int)`.
+- Same as `data[i + K]` (`3028`) but with negative offset.
+
