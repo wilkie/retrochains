@@ -3681,3 +3681,25 @@ Findings:
 - 4+4+8=16 bits → 2 bytes (1 word).
 - For 9-bit total (still 1+ extra bit), would extend to 2 bytes.
 
+
+## struct{uchar a; uchar b;} field sum — 2× byte load + zero-extend + add
+
+Fixture `3221-2-uchar-struct-obj`:
+
+```c
+struct P { unsigned char a; unsigned char b; };
+return g.a + g.b;
+```
+
+```
+a0 00 00 b4 00                 mov al, [_g+0]; mov ah, 0   (g.a as uint)
+8a 16 01 00 b6 00              mov dl, [_g+1]; mov dh, 0   (g.b as uint)
+03 c2                          add ax, dx
+```
+
+Findings:
+- Two uchar fields = 2 separate byte loads, each zero-extended
+  (`mov AH/DH, 0`) since uchar promotes to unsigned int.
+- 13 bytes for the sum (vs ~7B for two int fields).
+- DX as second-load register; AX gets the result.
+

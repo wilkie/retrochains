@@ -1981,3 +1981,26 @@ Findings:
 - 5 bytes total.
 - For `char + K` with K > 1, would use `add ax, K`.
 
+
+## `char c >>= 1` local — `sar dl, 1` (signed 8-bit shift)
+
+Fixture `3226-char-shr-eq-1-obj`:
+
+```c
+char c;
+c >>= 1;
+```
+
+```
+8a 56 04                       mov dl, c
+d0 fa                          sar dl, 1     (signed byte shift)
+8a c2                          mov al, dl
+98                             cbw
+```
+
+Findings:
+- ModR/M `fa` = mod 11, op-ext 111 (sar /7), r/m 010 (dl).
+- Signed char uses `sar`; for `unsigned char` would use `shr` (op-ext /5).
+- Uses DL register (same as `<<=` `3151`).
+- 8 bytes total: 3B load + 2B shift + 2B mov + 1B cbw.
+

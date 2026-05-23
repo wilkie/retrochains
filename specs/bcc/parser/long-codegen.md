@@ -3941,3 +3941,24 @@ Findings:
 - 11 bytes total.
 - For unsigned, would use `shr` instead of `sar` for HIGH word.
 
+
+## Ternary returning long `flag ? 100L : 200L` — both arms set DX:AX
+
+Fixture `3225-ternary-long-obj`:
+
+```c
+return flag ? 100L : 200L;
+```
+
+```
+83 7e 04 00 74 07              cmp flag, 0; je → ELSE
+33 d2 b8 64 00                 xor dx, dx; mov ax, 100   (HIGH=0, LOW=100)
+eb 05                          jmp epi
+33 d2 b8 c8 00                 xor dx, dx; mov ax, 200   (HIGH=0, LOW=200)
+```
+
+Findings:
+- Each ternary arm sets DX:AX to its long literal.
+- For 100L and 200L (HIGH=0): `xor dx, dx` + `mov ax, K` (5B each arm).
+- For larger longs (HIGH != 0): would use `mov dx, HIGH` (3B) instead of xor (2B).
+
