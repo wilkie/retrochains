@@ -2350,3 +2350,16 @@ Findings:
 - 6B body. Strength reduction (* 2 → shl 1) applies after the char→int promotion.
 - Combines char widening with multiply opt.
 
+
+## `char c--` (global, void context) — 4B mem-direct `dec byte [mem]`
+
+Fixture `3606-char-postdec-obj`:
+
+```
+fe 0e 00 00 [FIXUPP _c]        dec byte [_c]
+```
+
+Findings:
+- 4B body. `fe /1` mem-direct byte dec.
+- Same size as int `g--`. Optimal post-dec on global char.
+

@@ -3320,3 +3320,42 @@ Findings:
 - `+1` peephole is type-agnostic.
 - 4B body — minimum non-trivial arithmetic return.
 
+
+## `return -10000` — 3B `mov ax, 0xD8F0` (2's complement)
+
+Fixture `3608-return-neg-large-obj`:
+
+```
+b8 f0 d8                       mov ax, 0xD8F0    (= -10000)
+```
+
+Findings:
+- Negative large literal stored as 16-bit two's complement.
+- 3B body. Standard imm16 load.
+
+## `flags |= (1 << 3)` — compile-time fold + 6B mem-imm16 OR
+
+Fixture `3609-flag-shift-set-obj`:
+
+```
+81 0e 00 00 08 00 [FIXUPP _flags]   or word [_flags], 0x0008
+```
+
+Findings:
+- `1 << 3 = 8` folded at compile time.
+- 6B body. Compound bitwise still uses imm16 form even when imm8 would fit.
+
+## `g %= var` — `idiv mem + mov [g], dx` (11B)
+
+Fixture `3610-modeq-var-obj`:
+
+```
+a1 00 00 [FIXUPP _g]           mov ax, [_g]
+99                             cwd
+f7 7e 04                       idiv word [bp+4]
+89 16 00 00 [FIXUPP _g]        mov [_g], dx     (DX = remainder)
+```
+
+Findings:
+- 11B body. Direct idiv with mem operand; DX stored back as remainder.
+

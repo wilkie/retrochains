@@ -7728,3 +7728,37 @@ e8 ?? ??                       call _get
 Findings:
 - Tight 7B body. Returned ptr moved to BX for the deref.
 
+
+## `arr[const] += K` (small K) — single 5B mem-direct add
+
+Fixture `3605-arr-pluseq-const-obj`:
+
+```c
+int arr[10];
+void bump(void) { arr[2] += 5; }
+```
+
+```
+83 06 04 00 05 [FIXUPP _arr]   add word [_arr + 4], 5
+```
+
+Findings:
+- Const offset (2 * sizeof(int) = 4) folded into FIXUPP'd disp16.
+- 5B body — single `add r/m16, imm8` with sign-extended imm8.
+- Tightest possible: indexed const + small const = direct mem-imm add.
+
+## `*p + *q` — 2-reg ptr deref + add
+
+Fixture `3607-deref-add-obj`:
+
+```
+8b 76 04                       mov si, p
+8b 7e 06                       mov di, q
+8b 04                          mov ax, [si]
+03 05                          add ax, [di]
+```
+
+Findings:
+- SI and DI hold the two pointers; AX accumulates.
+- 12B body — clean.
+
