@@ -7216,3 +7216,79 @@ Findings:
 - Strcmp-style return uses the push/pop roundtrip (3291 pattern): evaluate first op, save; evaluate second, save in DX; restore first; subtract.
 - Char→int widening via `cbw` BEFORE the subtraction so the result fits int semantics (e.g., '\x01' - '\xFF' = -254 not garbage).
 
+
+## Array decay — `int *get(void) { return arr; }` = single 3B mov + FIXUPP
+
+Fixture `3437-arr-decay-obj`:
+
+```
+b8 00 00 [FIXUPP _arr]         mov ax, offset _arr
+```
+
+Findings:
+- Array name decays to pointer (offset within DGROUP).
+- Same shape as `&arr[0]`: 3B mov + FIXUPP.
+
+## `int arr[]` parameter — same as `int *arr`
+
+Fixture `3438-arr-param-obj`:
+
+```c
+int first(int arr[]) { return arr[0]; }
+```
+
+```
+8b 76 04                       mov si, arr     (pointer-sized param)
+8b 04                          mov ax, [si]    (arr[0])
+```
+
+Findings:
+- `int arr[]` param compiles identically to `int *arr`.
+- The function gets the array's first-element address — no copy of the array.
+
+## `arr + (c ? 1 : 2)` — ternary materialized + scaled + base-add
+
+Fixture `3439-ptr-ternary-off-obj`:
+
+```c
+int arr[10];
+int *pick(int c) { return arr + (c ? 1 : 2); }
+```
+
+```
+83 7e 04 00                    cmp c, 0
+74 05                          je ELSE
+b8 01 00                       mov ax, 1
+eb 03                          jmp END_TERN
+ELSE:
+b8 02 00                       mov ax, 2
+END_TERN:
+d1 e0                          shl ax, 1               (* sizeof(int))
+05 00 00 [FIXUPP _arr]         add ax, offset _arr
+```
+
+Findings:
+- Ternary result materializes as int, then scaled by sizeof(elem), then added to base.
+- `add ax, imm16` (3B) with FIXUPP folds the base offset.
+- 19B body.
+
+## Chained ptr access `o->p->v` — 2-level mov chain
+
+Fixture `3441-ptr-chain-obj`:
+
+```c
+struct Outer { struct Inner *p; };
+int deep(struct Outer *o) { return o->p->v; }
+```
+
+```
+56                             push si
+8b 76 04                       mov si, o
+8b 1c                          mov bx, [si]    (bx = o->p)
+8b 07                          mov ax, [bx]    (ax = (o->p)->v)
+```
+
+Findings:
+- Two-level pointer chain uses two scratch reg holders (SI then BX).
+- 8B body. Each indirection is a 2B `mov reg, [reg]`.
+

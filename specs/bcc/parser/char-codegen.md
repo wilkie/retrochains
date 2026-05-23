@@ -2102,3 +2102,18 @@ Findings:
 - This matches the natural little-endian byte order on 8086.
 - Differs from GCC's convention (which stores `'AB' = 0x4142`, MSB-first).
 
+
+## `char c == -1` — direct byte cmp with 0xff
+
+Fixture `3442-char-eq-neg1-obj`:
+
+```
+80 7e 04 ff                    cmp byte [bp+4], 0xff
+75 05                          jne ELSE
+```
+
+Findings:
+- `-1` fits in a signed byte (sign-extends to 0xff in byte representation).
+- Direct byte-cmp form (4B) — no widening needed.
+- Matches the pattern from 3345 (char == 65).
+

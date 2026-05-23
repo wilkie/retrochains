@@ -172,3 +172,30 @@ Findings:
 - Row-major (C standard): [i][j] = arr[i*cols + j].
 - Single LEDATA covers all elements; nested braces are syntactic only.
 
+
+## Multi-decl `int a=1, b=2, c=3;` — separate stack slots, no reg-alloc
+
+Fixture `3440-multi-decl-obj`:
+
+```c
+int sum3(void) {
+  int a = 1, b = 2, c = 3;
+  return a + b + c;
+}
+```
+
+```
+83 ec 06                       sub sp, 6
+c7 46 fe 01 00                 mov [bp-2], 1
+c7 46 fc 02 00                 mov [bp-4], 2
+c7 46 fa 03 00                 mov [bp-6], 3
+8b 46 fe                       mov ax, a
+03 46 fc                       add ax, b
+03 46 fa                       add ax, c
+```
+
+Findings:
+- All 3 ints get stack slots, NOT register allocation.
+- 24B body. Multi-decl seems to bypass reg-alloc (would have been ~10B with regs).
+- Behavior differs from single-var declarations where reg-alloc kicks in.
+
