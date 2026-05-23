@@ -5748,3 +5748,69 @@ Findings:
 - No syntactic distinction preserved in codegen.
 - Confirms that `i++` placement in for-body vs for-step is purely stylistic.
 
+
+## unsigned `x != 0` — standard cmp+je (no peephole)
+
+Fixture `3524-uint-ne-zero-obj`:
+
+```
+83 7e 04 00                    cmp x, 0
+74 05                          je ELSE
+```
+
+Findings:
+- 13B body. No `or si, si` cmp-zero peephole here since x is not reg-allocated.
+- Could use `or ax, ax` after a mov (2B vs 4B), but BCC chose direct mem-cmp.
+
+## Switch with `default` declared first — same linear dispatch + extra `eb 00`
+
+Fixture `3525-switch-default-first-obj`:
+
+```c
+switch (x) {
+  default: return 0;
+  case 1: return 100;
+  case 2: return 200;
+}
+```
+
+```
+3d 01 00                       cmp ax, 1
+74 0b                          je CASE1
+3d 02 00                       cmp ax, 2
+74 0b                          je CASE2
+eb 00                          jmp DEFAULT    (rel 0 — useless 2B jmp)
+DEFAULT:
+33 c0                          xor ax, ax
+```
+
+Findings:
+- Dispatch order is independent of source order — cases checked first, default falls through.
+- BCC emits an explicit `eb 00` (jmp to next instruction) when default is the immediate fall-through target.
+- 2B sub-optimal: could have just fallen through with no jmp.
+
+## `if (++i < n)` — preinc + cmp via AX (misses direct cmp peephole)
+
+Fixture `3526-preinc-cond-obj`:
+
+```c
+int next(int i, int n) {
+  if (++i < n) return i;
+  return -1;
+}
+```
+
+```
+56                             push si
+8b 76 04                       mov si, i
+46                             inc si
+8b c6                          mov ax, si       (could be cmp si, n directly)
+3b 46 06                       cmp ax, n
+7d 04                          jge ELSE
+8b c6                          mov ax, si
+```
+
+Findings:
+- 19B body. `inc si; mov ax, si; cmp ax, n` could be `inc si; cmp si, n` (saves 2B).
+- BCC routes through AX even when SI could be the comparand directly.
+

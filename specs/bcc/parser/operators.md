@@ -2924,3 +2924,45 @@ Findings:
 - This compound-vs-post-inc divergence parallels `x *= 2` (no shl) vs `x = x * 2` (shl reduced).
 - BCC's compound-assign path generally lacks small-const peepholes.
 
+
+## `s.x <<= 1` (member compound shift) — same as `g <<= 1` at offset 0
+
+Fixture `3521-member-shleq-obj`:
+
+```
+d1 26 00 00 [FIXUPP _s]        shl word [_s], 1
+```
+
+Findings:
+- 4B mem-direct shl. Identical to `g <<= 1` (3499) when member is at offset 0.
+
+## `char arr[i] += var` — mem-direct add (4B add op)
+
+Fixture `3522-char-arr-add-var-obj`:
+
+```
+56                             push si
+8b 76 04                       mov si, i
+8a 46 06                       mov al, v
+00 84 00 00 [FIXUPP _arr]      add [si + _arr], al   (mem-direct byte add)
+```
+
+Findings:
+- 11B body. Uses `add r/m8, r8` (opcode 0x00) mem-direct.
+- Contrast `char arr[i] += 1` (3515, 14B) which used load+inc+store.
+- When RHS is variable (reg), BCC uses mem-dest add; with const RHS, it routes through register and misses the peephole.
+
+## `char c -= 1` — load+dec+store (8B), MISSES mem-direct dec peephole
+
+Fixture `3523-char-subeq-1-obj`:
+
+```
+a0 00 00 [FIXUPP _c]           mov al, [_c]
+fe c8                          dec al
+a2 00 00 [FIXUPP _c]           mov [_c], al
+```
+
+Findings:
+- 8B body. Could be 4B `fe 0e disp16` (dec byte [mem] mem-direct).
+- Same compound-with-const issue: BCC misses the byte-mem-direct peephole.
+
