@@ -3368,3 +3368,44 @@ Findings:
 - 20B body. Each branch stores constant via 6B mem-imm16 mov.
 - BCC doesn't merge stores or use ternary trick.
 
+
+## max/min idioms `a > b ? a : b` and `a < b ? a : b` — reg-alloc both + branch
+
+Fixtures `3617-max-idiom-obj`, `3621-min-idiom-obj`:
+
+```
+8b 76 04                       mov si, a
+8b 7e 06                       mov di, b
+3b f7                          cmp si, di
+7e 04                          jle ELSE        (max) / jge for min
+8b c6                          mov ax, si
+eb 02                          jmp END
+ELSE:
+8b c7                          mov ax, di
+```
+
+Findings:
+- Both operands reg-allocated to SI/DI.
+- 18B body for either. min/max differ only in jcc opcode (`7e` vs `7d`).
+- No conditional-move on 8086, so branching is required.
+
+## `if (a > 0) return a+b; return b;` — or-zero peephole + cond add
+
+Fixture `3622-cmp-then-add-obj`:
+
+```
+8b 76 04                       mov si, a
+8b 7e 06                       mov di, b
+0b f6                          or si, si       (cmp a, 0)
+7e 06                          jle ELSE
+8b c6                          mov ax, si
+03 c7                          add ax, di
+eb 04                          jmp END
+ELSE:
+8b c7                          mov ax, di
+```
+
+Findings:
+- Uses `or si, si` cmp-zero peephole.
+- 20B body.
+

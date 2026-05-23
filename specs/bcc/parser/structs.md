@@ -4397,3 +4397,52 @@ Findings:
 - BOTH src and dest are FAR ptrs (DS:offset).
 - s1 and s2 placed adjacent in _DATA (s2 = s1 + 10).
 
+
+## Storing 4B struct return (DX:AX) into local — split-word stores
+
+Fixture `3618-struct-ret-call-obj`:
+
+```c
+struct Two { int a; int b; };
+struct Two t = make();
+return t.a + t.b;
+```
+
+```
+83 ec 04                       sub sp, 4
+e8 ?? ??                       call _make
+89 56 fe                       mov [bp-2], dx    (t.b at HIGH addr)
+89 46 fc                       mov [bp-4], ax    (t.a at LOW addr)
+8b 46 fc                       mov ax, t.a
+03 46 fe                       add ax, t.b
+```
+
+Findings:
+- 4B struct returned as DX:AX (DX = HIGH word = .b; AX = LOW word = .a).
+- Stored to local with .a at [bp-4] (lower) and .b at [bp-2] (higher).
+- Matches the calling convention: first member in AX, second in DX.
+
+## Passing `&local_struct` — build on stack + `lea` + push
+
+Fixture `3620-pass-addr-local-struct-obj`:
+
+```c
+struct S s;
+s.x = 5; s.y = 10;
+use(&s);
+```
+
+```
+83 ec 04                       sub sp, 4
+c7 46 fc 05 00                 mov [s.x], 5
+c7 46 fe 0a 00                 mov [s.y], 10
+8d 46 fc                       lea ax, [s]
+50                             push ax
+e8 ?? ?? [FIXUPP _use]         call _use
+59                             pop cx
+```
+
+Findings:
+- Standard pattern: alloc stack + init members + lea + push + call + cleanup.
+- 21B body.
+

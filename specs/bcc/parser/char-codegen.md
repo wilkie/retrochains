@@ -2363,3 +2363,20 @@ Findings:
 - 4B body. `fe /1` mem-direct byte dec.
 - Same size as int `g--`. Optimal post-dec on global char.
 
+
+## `char c < int x` — cbw widen + int cmp
+
+Fixture `3619-char-cmp-int-obj`:
+
+```
+8a 46 04                       mov al, c
+98                             cbw                   (widen char → int)
+3b 46 06                       cmp ax, x             (int cmp)
+7d 05                          jge ELSE              (signed)
+```
+
+Findings:
+- Char widened via `cbw` to match int operand for the comparison.
+- Signed throughout (BCC default char = signed).
+- 16B body.
+
