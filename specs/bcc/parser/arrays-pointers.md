@@ -6504,3 +6504,67 @@ Findings:
 - Note: could be `sar ax, 1` for int* (signed shift safe for /2),
   but BCC uses idiv. Missed peephole.
 
+
+## `(*p)++` vs `++(*p)` — load-then-inc vs inc-then-load
+
+Fixtures `3107-deref-then-postinc-obj`, `3110-preinc-deref-obj`:
+
+```c
+return (*p)++;   /* yield old value, then mem-inc */
+return ++(*p);   /* mem-inc, then yield new value */
+```
+
+```
+                               ; (*p)++ — POST:
+8b 04                          mov ax, [si]   (load OLD)
+ff 04                          inc word [si]  (then inc)
+
+                               ; ++(*p) — PRE:
+ff 04                          inc word [si]  (inc first)
+8b 04                          mov ax, [si]   (load NEW)
+```
+
+Findings:
+- Both 4 bytes for the inc+load pair.
+- Difference: ORDER of inc vs load.
+- ModR/M `04` = `[si]` (no-disp) for both `mov` and `inc word`.
+
+## char ptr difference `a - b` — NO division (sizeof=1)
+
+Fixture `3108-char-ptr-diff-obj`:
+
+```c
+int diff(char *a, char *b) { return a - b; }
+```
+
+```
+8b 46 04                       mov ax, a
+2b 46 06                       sub ax, b      (raw byte diff IS the element count)
+```
+
+Findings:
+- char ptr diff = just raw subtraction (6B).
+- No `idiv` step since `sizeof(char) = 1`.
+- Much cheaper than int ptr diff (`3103` = 12B with idiv).
+
+## `p += K` ptr arithmetic — scaled K folded to compile-time imm
+
+Fixture `3109-ptr-plus-eq-obj`:
+
+```c
+int *p;
+p += 5;   /* p advances by 5 ints = 10 bytes */
+```
+
+```
+8b 76 04                       mov si, p
+83 c6 0a                       add si, 10    (5 × sizeof(int) = 10)
+```
+
+Findings:
+- `p += K` scales K by `sizeof(*p)` **at compile time**.
+- 3B `add si, imm8` (sign-ext) if scaled value fits `[-128, 127]`.
+- 4B `add si, imm16` if larger.
+- For char*, `p += 5` would be `add si, 5` (sizeof=1).
+- For long*, `p += 5` would be `add si, 20` (sizeof=4).
+

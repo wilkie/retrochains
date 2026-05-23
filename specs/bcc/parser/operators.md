@@ -1554,3 +1554,28 @@ Findings:
 - `-1` (0xFF byte sign-ext to 0xFFFF) fits signed imm8 → 4B short form.
 - Same pattern for all small negative comparisons in `[-128, -1]`.
 
+
+## `x == 1 || x == 2` short-circuit OR — `je → TRUE; cmp; jne → FALSE`
+
+Fixture `3112-or-chain-obj`:
+
+```c
+if (x == 1 || x == 2) return 1;
+```
+
+```
+8b 76 04                       mov si, x
+83 fe 01                       cmp si, 1
+74 05                          je → TRUE       (first arm matches → skip eval)
+83 fe 02                       cmp si, 2
+75 05                          jne → FALSE     (second arm fails → false)
+                               ; TRUE: return 1
+```
+
+Findings:
+- OR short-circuit: first true → skip rest.
+- Each arm gets a `cmp + j*` pair.
+- **OR**: first `je → TRUE` (jump to TRUE on match).
+- **AND** (`3035`): first `jne → FALSE` (jump to FALSE on mismatch).
+- Different jump direction reflects the truth-table semantics.
+

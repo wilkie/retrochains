@@ -663,3 +663,18 @@ Findings:
   same `_DATA` slot (string-interning).
 - Access via `mov bx, [name]; mov al, [bx]` standard ptr-deref pattern.
 
+
+## `'\n'` char literal — value 10 (0x0A)
+
+Fixture `3111-newline-literal-obj`:
+
+```
+b8 0a 00                       mov ax, 10
+```
+
+Findings:
+- `'\n'` = 10 (ASCII LF).
+- Other escapes: `'\t'` = 9, `'\r'` = 13, `'\0'` = 0, `'\\'` = 92,
+  `'\''` = 39, `'\"'` = 34.
+- All compile-time constants; substituted as int literals in expressions.
+
