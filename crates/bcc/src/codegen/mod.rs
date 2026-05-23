@@ -8587,7 +8587,7 @@ impl<'a> FunctionEmitter<'a> {
             };
             if load_byte {
                 let _ = write!(self.out, "\tmov\tal,byte ptr {addr}\r\n");
-                self.out.extend_from_slice(b"\tcbw\t\r\n");
+                self.emit_widen_al(&field_ty);
             } else {
                 let _ = write!(self.out, "\tmov\tax,word ptr {addr}\r\n");
             }
