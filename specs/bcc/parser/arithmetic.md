@@ -3138,3 +3138,30 @@ Findings:
 - 15B body — significantly larger than the 5B optimal.
 - Compound-assign path bypasses BCC's small-constant optimization.
 
+
+## `x = x * 2` (NON-compound) — DOES get `shl 1` strength reduction
+
+Fixture `3483-write-then-return-obj`:
+
+```c
+int proc(int x) {
+  x = x * 2;
+  return x;
+}
+```
+
+```
+56                             push si
+8b 76 04                       mov si, x
+8b c6                          mov ax, si
+d1 e0                          shl ax, 1        (strength reduced!)
+8b f0                          mov si, ax
+8b c6                          mov ax, si
+```
+
+Findings:
+- **Non-compound** `x = x * 2` uses `shl 1` (strength reduction applied).
+- **Contrast 3467** `x *= 2` (compound) which uses `imul`.
+- Compound-assign path **does** bypass the optimization, but `=` does not.
+- The expression `x * 2` is processed via normal expr path → `shl` reduction.
+

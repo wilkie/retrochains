@@ -5521,3 +5521,45 @@ Findings:
 - `p *= i` (compound) uses `imul si` — no strength-reduce shortcut (consistent with 3467).
 - Tight loop body interleaves accumulator updates without going through memory.
 
+
+## 8-case dense switch — `cmp + ja DEFAULT + shl bx,1 + jmp [cs:bx + table]`
+
+Fixture `3480-switch-8case-obj`:
+
+```
+8b 5e 04                       mov bx, x
+83 fb 07                       cmp bx, 7        (max case)
+77 2f                          ja DEFAULT       (unsigned > 7)
+d1 e3                          shl bx, 1
+2e ff a7 41 00                 jmp [cs:bx + 0x41]
+```
+
+Findings:
+- Range check via UNSIGNED `ja` (negative x looks > 7 due to unsigned interp).
+- Same dense-table mechanism as 5-case (3350), just bigger table.
+- 8 case handlers each `mov ax, imm + jmp END`.
+
+## char switch — cbw widen + sub bias + ja + dense table
+
+Fixture `3482-char-switch-obj`:
+
+```c
+switch (c) { case 'a': ... case 'd': ... }
+```
+
+```
+8a 46 04                       mov al, c
+98                             cbw              (widen char to int)
+2d 61 00                       sub ax, 'a'      (bias to 0)
+8b d8                          mov bx, ax
+83 fb 03                       cmp bx, 3        (max bias)
+77 1b                          ja DEFAULT
+d1 e3                          shl bx, 1
+2e ff a7 32 00                 jmp [cs:bx + 0x32]
+```
+
+Findings:
+- char widened via cbw before switch.
+- Sub-bias by min case ('a' = 0x61) so case 'a' lands at index 0.
+- Same dense-table mechanism applies.
+

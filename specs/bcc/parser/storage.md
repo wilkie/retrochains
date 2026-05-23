@@ -278,3 +278,28 @@ Findings:
 - 3× 5-byte `c7 /0 r/m, imm16` stores.
 - No condensed init for local arrays — equivalent to writing each element.
 
+
+## Static local array — same as global, no PUBDEF
+
+Fixture `3484-static-array-obj`:
+
+```c
+int get(int i) {
+  static int table[] = {100, 200, 300};
+  return table[i];
+}
+```
+
+- LEDATA: `64 00 c8 00 2c 01` (100, 200, 300).
+- No PUBDEF for `_table` (static linkage).
+
+```
+8b 5e 04                       mov bx, i
+d1 e3                          shl bx, 1
+8b 87 00 00 [FIXUPP _table]    mov ax, [bx + _table]
+```
+
+Findings:
+- Static local arrays placed in _DATA, accessed identically to globals.
+- 6-byte LEDATA for the 3 ints.
+

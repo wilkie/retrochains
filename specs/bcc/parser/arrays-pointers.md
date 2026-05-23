@@ -7369,3 +7369,45 @@ Findings:
 - BCC scales each int offset separately (no `(i+j) * 2`-style fold).
 - 19B body. Could be smaller if BCC combined offsets before scaling.
 
+
+## `**pp = v` — chain SI then BX for two-level deref + write
+
+Fixture `3479-double-deref-write-obj`:
+
+```c
+void put(int **pp, int v) { **pp = v; }
+```
+
+```
+56                             push si
+8b 76 04                       mov si, pp
+8b 1c                          mov bx, [si]    (bx = *pp = inner ptr)
+8b 46 06                       mov ax, v
+89 07                          mov [bx], ax    (*inner = v)
+```
+
+Findings:
+- 2-level deref uses SI then BX as chain holders.
+- Write through final BX. 11B body.
+
+## Indexed fn-ptr call `handlers[i](x)` — `call [bx + arr]` indirect
+
+Fixture `3481-fnptr-array-obj`:
+
+```c
+int (*handlers[3])(int) = {h1, h2, h3};
+int dispatch(int i, int x) { return handlers[i](x); }
+```
+
+```
+ff 76 06                       push x
+8b 5e 04                       mov bx, i
+d1 e3                          shl bx, 1
+ff 97 00 00 [FIXUPP _handlers] call [bx + _handlers]   (4B indirect)
+59                             pop cx
+```
+
+Findings:
+- Single 4-byte `call [bx + disp16]` instruction (with FIXUPP).
+- 12B body. No need to load ptr into reg first — indirect call accepts mem operand.
+
