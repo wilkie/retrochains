@@ -714,3 +714,26 @@ Fixture `3146-global-neg-1-obj`:
 
 Same shape as `int g = 0;` (3125) or `int g = -42;` (2945), only bit pattern differs.
 
+
+## ⚠️ String literals are NOT interned across declarations
+
+Fixture `3191-2str-intern-obj`:
+
+```c
+char *a = "hello";
+char *b = "hello";
+return a == b;   /* FALSE at runtime — different addresses! */
+```
+
+`_DATA` layout (20 bytes):
+- 0..2: ptr `_a` (FIXUPP to "hello"#1 at offset 4)
+- 2..4: ptr `_b` (FIXUPP to "hello"#2 at offset 10)
+- 4..10: "hello\0" (FIRST copy)
+- 10..16: "hello\0" (SECOND copy)
+
+Findings:
+- **BCC does NOT intern duplicate string literals** — each
+  occurrence gets its own copy in `_DATA`.
+- `a == b` evaluates to FALSE since pointers differ.
+- For 2 occurrences of "hello", 12 bytes wasted (vs 6 if interned).
+

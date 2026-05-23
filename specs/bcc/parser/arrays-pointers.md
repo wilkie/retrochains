@@ -6706,3 +6706,28 @@ Findings:
 - `inc ax` (1B) optimal for +1 add.
 - Same pattern as `*dst = *src` (`2993`) plus the inc.
 
+
+## 2D int array `g[i][j]` global — i × row_stride (shl) + j × sizeof + load
+
+Fixture `3194-2d-int-arr-obj`:
+
+```c
+int g[3][2];   /* 3 rows, 2 cols, row stride = 2 × sizeof(int) = 4 bytes */
+return g[i][j];
+```
+
+```
+8b 5e 04                       mov bx, i
+d1 e3 d1 e3                    shl bx, 1 × 2     (i × 4 = row stride)
+8b 46 06                       mov ax, j
+d1 e0                          shl ax, 1         (j × 2 = sizeof int)
+03 d8                          add bx, ax        (combined offset)
+8b 87 00 00                    mov ax, [bx + _g]
+```
+
+Findings:
+- Row stride = COLS × sizeof(elem). For `int g[N][2]`: stride = 4.
+- Power-of-2 row stride → SHIFTS (not imul like the char[2][3]
+  case which had stride 3, see `2985`).
+- 13 bytes for the indexed access.
+

@@ -3497,3 +3497,30 @@ Confirms struct-return policy:
 - 4B → DX:AX
 - **3B and ≥5B → N_SCOPY@ + hidden ptr**
 
+
+## 4-byte struct return — DX:AX (same as long convention)
+
+Fixture `3192-ret-struct-4b-obj`:
+
+```c
+struct P { int x; int y; };
+struct P make(int a, int b) {
+  struct P p;
+  p.x = a; p.y = b;
+  return p;
+}
+```
+
+```
+83 ec 04                       sub sp, 4 (local p)
+8b 46 04 89 46 fc              p.x = a
+8b 46 06 89 46 fe              p.y = b
+8b 56 fe                       mov dx, p.y    (HIGH-equivalent)
+8b 46 fc                       mov ax, p.x    (LOW-equivalent)
+```
+
+Findings:
+- 4-byte struct return uses **DX:AX** (same as long).
+- Caller reads p.x from AX, p.y from DX.
+- No N_SCOPY@ helper needed (only for 3B and ≥5B).
+
