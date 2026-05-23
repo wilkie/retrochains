@@ -2067,3 +2067,38 @@ Findings:
 - 4-byte cmp instruction (1B opcode + 1B ModR/M+disp + 1B disp + 1B imm = 4B for [bp+disp8]).
 - Saves vs widening path: would be `mov al, [bp+4]; cbw; cmp ax, 65` (~6B).
 
+
+## Escape sequences resolved at lexer/parser stage
+
+Fixtures `3383-char-newline-obj`, `3384-char-hex-esc-obj`, `3385-char-octal-esc-obj`:
+
+```c
+c == '\n'      ; → cmp byte, 0x0a
+c == '\x41'    ; → cmp byte, 0x41 (= 'A')
+c == '\012'    ; → cmp byte, 0x0a (= '\n', octal 012 = decimal 10)
+```
+
+All three produce a 4-byte `cmp byte [bp+disp], imm8` form with the resolved literal.
+
+Findings:
+- `\n` → 0x0a, `\xNN` → hex byte, `\NNN` → octal byte.
+- All escapes resolved at lex/parse time — no runtime indirection.
+- Identical OBJ for `'\n'`, `'\012'`, and `(char)10`.
+
+## Multi-char literal `'AB'` — first char in LOW byte (LE)
+
+Fixture `3386-multichar-lit-obj`:
+
+```c
+int magic(void) { return 'AB'; }
+```
+
+```
+b8 41 42                       mov ax, 0x4241    ('A' = 0x41 in AL, 'B' = 0x42 in AH)
+```
+
+Findings:
+- BCC stores first char in the LOW byte (LSB-first ordering).
+- This matches the natural little-endian byte order on 8086.
+- Differs from GCC's convention (which stores `'AB' = 0x4142`, MSB-first).
+

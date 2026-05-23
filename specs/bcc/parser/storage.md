@@ -115,3 +115,33 @@ Findings:
 - `s.inner.b` is just `[_s + 2]` (same as if it were `s.b` in a flat struct).
 - Nested-brace init `{1, {2, 3}}` writes consecutive 16-bit values.
 
+
+## String literal with escapes — escapes resolved into bytes
+
+Fixture `3387-string-escape-obj`:
+
+```c
+char *msg(void) { return "ab\ncd"; }
+```
+
+- _DATA LEDATA: `61 62 0a 63 64 00` = `"ab" + 0x0a + "cd" + \0` (6 bytes).
+
+Findings:
+- Escape sequences (\n, \t, \\, \", etc.) resolved to single bytes at parse time.
+- Trailing \0 added implicitly.
+
+## Adjacent string literals `"abc" "def"` — concatenated at parse time
+
+Fixture `3388-adjacent-strlit-obj`:
+
+```c
+char *joined(void) { return "abc" "def"; }
+```
+
+- _DATA LEDATA: `61 62 63 64 65 66 00` = "abcdef\0" (7 bytes — single combined string).
+
+Findings:
+- C89 token-pasting: adjacent string literals concatenated into one literal.
+- Single \0 terminator (no \0 between segments).
+- One FIXUPP per concatenated string (not per segment).
+
