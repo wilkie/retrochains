@@ -5160,3 +5160,125 @@ Findings:
 - Indirect jump uses `cs:` segment override since table lives in _TEXT.
 - Dense table beats linear cmp+je chain when ≥4 effective cases (confirms earlier finding).
 
+
+## Assignment-in-condition `if ((x = f()) != 0)` — store + or-test + reload
+
+Fixture `3395-assign-in-cond-obj`:
+
+```c
+int x;
+if ((x = next()) != 0) { return x; }
+return -1;
+```
+
+```
+4c 4c                          dec sp; dec sp   (alloc x)
+e8 ?? ?? [FIXUPP _next]        call _next
+89 46 fe                       mov [bp-2], ax   (x = result)
+0b c0                          or ax, ax        (test result)
+74 05                          je ELSE
+8b 46 fe                       mov ax, [bp-2]   (reload x for return)
+eb 05                          jmp END
+ELSE:
+b8 ff ff                       mov ax, -1
+END:
+```
+
+Findings:
+- Result of `next()` stored into `x`, then tested via `or ax, ax`.
+- Body's `return x` reloads from memory — BCC's variable-read is a separate mem-access, not a value-tracking optimization.
+- Missed opt: could `return` the AX directly without reload (~3B saved).
+
+## `while (1)` and `for (;;)` — identical OBJ, no condition test
+
+Fixtures `3396-while1-obj`, `3397-forever-obj`:
+
+```
+LOOP:
+ff 06 00 00 [FIXUPP _g]        inc word [_g]
+eb fa                          jmp LOOP    (rel8 -6)
+```
+
+Findings:
+- Both forms compile to byte-identical OBJ.
+- Constant `1` condition is fully eliminated — no cmp/jmp out of loop.
+- 6B body for the inc+jmp.
+
+## `break` in loop — unconditional jmp to loop-end label
+
+Fixture `3398-break-loop-obj`:
+
+```c
+for (i = 0; i < n; i++) {
+  if (p[i] == target) break;
+}
+return i;
+```
+
+Body excerpt:
+```
+                               ; inside body, when p[i] == target:
+eb 06                          jmp END_LOOP
+SKIP:
+46                             inc si
+TEST:
+3b 76 06                       cmp si, n
+7c e8                          jl LOOP_BODY
+END_LOOP:
+```
+
+Findings:
+- `break` = `jmp` to post-loop label (rel8 forward when in range).
+- Bypasses the for-step (`inc si`) and condition test.
+- Loop exit lands at the same place natural exit lands.
+
+## 3-way `&&` short-circuit — each subterm tests to common FALSE
+
+Fixture `3399-3way-and-obj`:
+
+```c
+if (a && b && c) return 1; return 0;
+```
+
+```
+83 7e 04 00                    cmp a, 0
+74 11                          je FALSE         (a == 0 → done)
+83 7e 06 00                    cmp b, 0
+74 0b                          je FALSE
+83 7e 08 00                    cmp c, 0
+74 05                          je FALSE
+b8 01 00                       mov ax, 1
+eb 04                          jmp END
+FALSE:
+33 c0                          xor ax, ax
+```
+
+Findings:
+- Each subterm: 4B mem-imm8 cmp + 2B `je FALSE`.
+- Common FALSE label shared by all subterms.
+- N-way && grows linearly: N × 6B for the test chain.
+
+## `||` short-circuit — `jne TRUE` per term, last term inverted
+
+Fixture `3400-or-shortcir-obj`:
+
+```c
+if (a || b) return 1; return 0;
+```
+
+```
+83 7e 04 00                    cmp a, 0
+75 06                          jne TRUE
+83 7e 06 00                    cmp b, 0
+74 05                          je FALSE
+TRUE:
+b8 01 00                       mov ax, 1
+eb 04                          jmp END
+FALSE:
+33 c0                          xor ax, ax
+```
+
+Findings:
+- || semantics inverted vs &&: each *non-last* subterm uses `jne TRUE` (short-circuit success).
+- Last subterm uses `je FALSE` (failure exit) since failure means whole condition is false.
+
