@@ -3766,6 +3766,38 @@ impl<'a> FunctionEmitter<'a> {
                 }
                 return;
             }
+            // `(long)<char_local>` — widen byte → int → long: load AL,
+            // cbw / mov ah,0, then cwd / xor dx,dx. Fixture 3183.
+            if let Some(src_name) = widening_src
+                && self.locals.has(src_name)
+                && self.locals.type_of(src_name).is_char_like()
+                && let LocalLocation::Stack(off) = self.locals.location_of(src_name)
+            {
+                let unsigned = self.locals.type_of(src_name).is_unsigned();
+                let _ = write!(self.out, "\tmov\tal,byte ptr {}\r\n", bp_addr(off));
+                if unsigned {
+                    self.out.extend_from_slice(b"\tmov\tah,0\r\n");
+                    self.out.extend_from_slice(b"\txor\tdx,dx\r\n");
+                } else {
+                    self.out.extend_from_slice(b"\tcbw\t\r\n");
+                    self.out.extend_from_slice(b"\tcwd\t\r\n");
+                }
+                return;
+            }
+            // `return *p;` where p is a global long pointer. Load p
+            // into BX, then load DX:AX = *p via [bx+2]/[bx]. Fixture
+            // 3286.
+            if let ExprKind::Deref(operand) = &e.kind
+                && let ExprKind::Ident(ptr_name) = &operand.kind
+                && let Some(ptr_ty) = self.globals.type_of(ptr_name)
+                && let Some(pointee) = ptr_ty.pointee()
+                && pointee.is_long_like()
+            {
+                let _ = write!(self.out, "\tmov\tbx,word ptr DGROUP:_{ptr_name}\r\n");
+                self.out.extend_from_slice(b"\tmov\tdx,word ptr [bx+2]\r\n");
+                self.out.extend_from_slice(b"\tmov\tax,word ptr [bx]\r\n");
+                return;
+            }
             // `return g();` for a long-returning callee — direct
             // passthrough: the callee's DX:AX result IS the return
             // register pair, so the function emits `call near ptr
