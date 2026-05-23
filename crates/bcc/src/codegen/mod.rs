@@ -11351,44 +11351,48 @@ impl<'a> FunctionEmitter<'a> {
                         (left.as_ref(), right.as_ref())
                     };
                     // Associative const-fold for Add/Sub chains:
-                    // `(X + K1) + K2` → `X + (K1+K2)`. Handles
-                    // `(X +/− K1) +/− K2` with appropriate sign on K1.
-                    // Lets BCC's smaller `add ax, K_total` form fire
-                    // instead of two consecutive adds. Fixtures 2019
-                    // (`x + 5 + 3`), 2076 (`x + 5 - 2`).
+                    // `((X ± K1) ± K2) ± K3 ...` → `X + (K_total)`.
+                    // Walks down the left spine collecting constant
+                    // additions/subtractions, then emits the variable
+                    // base once with a single combined `add ax, K`.
+                    // Lets BCC's smaller form fire for arbitrarily
+                    // deep chains. Fixtures 2019, 2075 (`x + 1 + 1
+                    // + 1`), 2076.
                     if matches!(op, BinOp::Add | BinOp::Sub)
-                        && let Some(k2_u) = try_const_eval(right)
-                        && let ExprKind::BinOp { op: inner_op, left: inner_l, right: inner_r } = &left.kind
-                        && matches!(inner_op, BinOp::Add | BinOp::Sub)
-                        && let Some(k1_u) = try_const_eval(inner_r)
-                        && try_const_eval(inner_l).is_none()
+                        && let Some(k_outer) = try_const_eval(right)
                     {
-                        // Signs: inner contributes +K1 if Add, -K1 if Sub.
-                        // Outer contributes +K2 if Add, -K2 if Sub.
-                        let k1 = if matches!(inner_op, BinOp::Add) {
-                            k1_u as i32
-                        } else {
-                            -(k1_u as i32)
-                        };
-                        let k2 = if matches!(op, BinOp::Add) {
-                            k2_u as i32
-                        } else {
-                            -(k2_u as i32)
-                        };
-                        let total = (k1 + k2) & 0xFFFF;
-                        // Recurse into the inner LHS, then emit the
-                        // combined const. Emit as Add (with negated
-                        // const for negative totals — emit_op_with_
-                        // source picks the imm8sx form when applicable).
-                        let unsigned = self.expr_is_unsigned(inner_l);
-                        self.emit_expr_to_ax(inner_l);
-                        emit_op_with_source(
-                            self.out,
-                            BinOp::Add,
-                            &OperandSource::Immediate(total as u32),
-                            unsigned,
-                        );
-                        return;
+                        let outer_sign = if matches!(op, BinOp::Add) { 1i32 } else { -1 };
+                        let mut total: i32 = outer_sign * (k_outer as i32);
+                        let mut base: &Expr = left;
+                        loop {
+                            if let ExprKind::BinOp { op: bop, left: bl, right: br } = &base.kind
+                                && matches!(bop, BinOp::Add | BinOp::Sub)
+                                && let Some(k) = try_const_eval(br)
+                                && try_const_eval(bl).is_none()
+                            {
+                                let s = if matches!(bop, BinOp::Add) { 1i32 } else { -1 };
+                                total += s * (k as i32);
+                                base = bl;
+                                continue;
+                            }
+                            break;
+                        }
+                        // Only fold if we collapsed at least one nested
+                        // const (i.e. base != left).
+                        if !std::ptr::eq(base, left) {
+                            let unsigned = self.expr_is_unsigned(base);
+                            self.emit_expr_to_ax(base);
+                            let total_masked = (total as u32) & 0xFFFF;
+                            emit_op_with_source(
+                                self.out,
+                                BinOp::Add,
+                                &OperandSource::Immediate(total_masked),
+                                unsigned,
+                            );
+                            return;
+                        }
+                        // base == left: no inner const to fold; fall
+                        // through to the normal binop path.
                     }
                     // Shifts encode the left operand's signedness in
                     // the mnemonic (`shr` vs `sar`); everything else
