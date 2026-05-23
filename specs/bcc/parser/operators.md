@@ -2781,3 +2781,46 @@ Findings:
 - 13B body. 1 byte larger than /=4 because storing DX uses 4B `89 16 disp16` (vs 3B `a3 disp16` AX-only short form).
 - DX = remainder from idiv.
 
+
+## `g += 1` and `g -= 1` — `inc [mem]` / `dec [mem]` (4B)
+
+Fixtures `3497-pluseq-1-obj`, `3498-subeq-1-obj`:
+
+```
+ff 06 disp16                   inc word [mem]    (4B, /0)
+ff 0e disp16                   dec word [mem]    (4B, /1)
+```
+
+Findings:
+- `g += 1` and `g -= 1` get the inc/dec peephole.
+- 4B vs 5B for `add/sub imm8` — saves 1B at the K=1 boundary.
+- Compound +=/-= 1 produces identical OBJ to ++g and --g respectively (since BCC's IR doesn't distinguish "increment by 1" pre/post forms in this context).
+
+## `g <<= 1` — `shl [mem], 1` (4B mem-direct)
+
+Fixture `3499-shleq-1-obj`:
+
+```
+d1 26 00 00 [FIXUPP _g]        shl word [_g], 1
+```
+
+Findings:
+- 4B `d1 /4 r/m, 1` form (single-bit mem-direct shift).
+- No CL needed for count=1.
+- Differs from byte shift compounds (3373 `c <<= 2`) which used 2× shl mem,1 for N=2.
+
+## `g = -g` and `g = ~g` — load + reg op + store (NO mem-direct neg/not)
+
+Fixtures `3500-neg-self-obj`, `3501-not-self-obj`:
+
+```
+a1 00 00 [FIXUPP _g]           mov ax, [_g]
+f7 d8                          neg ax           (or `f7 d0` for not)
+a3 00 00 [FIXUPP _g]           mov [_g], ax
+```
+
+Findings:
+- 8B body for each. BCC routes through AX register.
+- Misses the 4B `f7 1e disp16` mem-direct `neg [mem]` and `f7 16 disp16` `not [mem]` peepholes.
+- Self-assignment from negation/complement should ideally recognize the special form.
+

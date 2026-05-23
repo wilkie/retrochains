@@ -5639,3 +5639,23 @@ Findings:
 - `jmp [cs:bx + 8]` jumps to the matching handler (8 = sizeof values table).
 - Differs from dense-case dispatch (which uses computed index).
 
+
+## `x <= 0` (param) — mem-cmp + jg inverted
+
+Fixture `3502-le-zero-obj`:
+
+```c
+if (x <= 0) return 1; return 0;
+```
+
+```
+83 7e 04 00                    cmp word [bp+4], 0
+7f 05                          jg ELSE          (x > 0 → take FALSE)
+b8 01 00                       mov ax, 1
+```
+
+Findings:
+- Uses 4B mem-imm8 cmp (no reg-alloc for single-use param).
+- `jg` for signed > 0 (inverted from `<= 0`).
+- 13B body.
+
