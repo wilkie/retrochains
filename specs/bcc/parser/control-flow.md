@@ -6116,3 +6116,44 @@ Findings:
 - 13B body. `dec si` sets flags for `jg`; no separate cmp.
 - Tight pre-dec loop pattern.
 
+
+## `switch (x - 1)` — dec on switch value before dispatch
+
+Fixture `3650-pre-switch-arith-obj`:
+
+```c
+switch (x - 1) {
+  case 0: return 10;
+  case 1: return 20;
+  case 2: return 30;
+  case 3: return 40;
+}
+```
+
+```
+8b 5e 04                       mov bx, x
+4b                             dec bx           (x - 1)
+83 fb 03                       cmp bx, 3
+77 1b                          ja DEFAULT
+d1 e3                          shl bx, 1
+2e ff a7 2e 00                 jmp [cs:bx + table]
+```
+
+Findings:
+- The `- 1` becomes a single `dec bx` (1B) before the dispatch.
+- Same dense-table mechanism, just biased by the pre-switch arithmetic.
+
+## unsigned `a <= b` — `cmp + ja ELSE` (unsigned inverted)
+
+Fixture `3651-uint-le-cmp-obj`:
+
+```
+8b 46 04                       mov ax, a
+3b 46 06                       cmp ax, b
+77 05                          ja ELSE         (unsigned > b → false)
+```
+
+Findings:
+- Same shape as signed `<=` (3502) but with `ja` (unsigned) instead of `jg`.
+- 15B body.
+

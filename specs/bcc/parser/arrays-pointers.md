@@ -7873,3 +7873,20 @@ Findings:
 - 9B body. Post-inc semantics: pre-inc value returned, then advance.
 - `add si, 4` (3B) beats 4× `inc si` (4B). Inc-vs-add threshold = 3 (per direction).
 
+
+## `f(&arr[var])` — compute address in AX + push + call
+
+Fixture `3649-arr-addr-in-arg-obj`:
+
+```
+8b 46 04                       mov ax, i
+d1 e0                          shl ax, 1
+05 00 00 [FIXUPP _arr]         add ax, offset _arr
+50                             push ax
+e8 ?? ?? [FIXUPP _recv]        call _recv
+59                             pop cx
+```
+
+Findings:
+- 13B body. Reuses 8B address calc + 2B push + 3B call + 1B cleanup.
+

@@ -4446,3 +4446,59 @@ Findings:
 - Standard pattern: alloc stack + init members + lea + push + call + cleanup.
 - 21B body.
 
+
+## struct ptr `*pp += 1` — mem-direct add sizeof(struct)
+
+Fixture `3647-struct-ptr-pluseq-obj`:
+
+```c
+struct Pt { int x, y; };   /* sizeof = 4 */
+void bump(struct Pt **pp) { *pp += 1; }
+```
+
+```
+56                             push si
+8b 76 04                       mov si, pp
+83 04 04                       add word [si], 4    (mem-direct add sizeof)
+```
+
+Findings:
+- 7B body. `*pp += 1` for struct ptr = add sizeof(struct) to memory.
+- Mem-direct `add r/m16, imm8` form. Compile-time-folded multiplier.
+
+## struct ptr `p - n` (var) — scaled var via push/pop
+
+Fixture `3648-struct-ptr-subeq-var-obj`:
+
+```c
+struct Pt *back(struct Pt *p, int n) { return p - n; }
+```
+
+```
+8b 46 06                       mov ax, n
+d1 e0                          shl ax, 1
+d1 e0                          shl ax, 1        (n * 4)
+50                             push ax
+8b 46 04                       mov ax, p
+5a                             pop dx
+2b c2                          sub ax, dx
+```
+
+Findings:
+- 14B body. 2× shl for sizeof(struct) = 4.
+- Standard push/pop roundtrip from 3380.
+
+## `p->v = v` (member at offset 0) — 9B
+
+Fixture `3652-struct-deref-write-obj`:
+
+```
+56                             push si
+8b 76 04                       mov si, p
+8b 46 06                       mov ax, v
+89 04                          mov [si], ax
+```
+
+Findings:
+- 9B body. Offset 0 means no disp in the store.
+
