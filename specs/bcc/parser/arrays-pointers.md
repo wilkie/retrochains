@@ -6018,3 +6018,26 @@ Findings:
 - Same code as `int *p = data` (`2802`) — only the FIXUPP offset
   differs (+0 vs +6).
 
+
+## `return arr` vs `return &arr[0]` — BYTE-IDENTICAL (array-decay)
+
+Fixture `2954-arr-name-vs-amp-obj`:
+
+```c
+int arr[5];
+int *p1(void) { return arr; }       /* array decay */
+int *p2(void) { return &arr[0]; }   /* explicit addr-of-first */
+```
+
+Both compile to:
+```
+b8 00 00                       mov ax, &_arr (FIXUPP)
+```
+
+Findings:
+- C array-decay rule: `arr` (array name) decays to `&arr[0]` in
+  most contexts.
+- BCC implements this faithfully: both source forms produce
+  byte-identical code.
+- 3 bytes for the pointer return (just `mov ax, imm16+FIXUPP`).
+

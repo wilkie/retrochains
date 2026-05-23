@@ -1663,3 +1663,26 @@ Findings:
 - The 0xFF byte represents -1 in signed interpretation.
 - No int promotion needed; byte-direct compare.
 
+
+## Signed `char c >> 1` — byte load + cbw + `sar ax, 1` (6B)
+
+Fixture `2955-schar-shr-obj`:
+
+```c
+int half(signed char c) {
+  return c >> 1;
+}
+```
+
+```
+8a 46 04                       mov al, c
+98                             cbw           (sign-extend char→int)
+d1 f8                          sar ax, 1     (signed shift right)
+```
+
+Findings:
+- Promote-then-shift: byte load + cbw + sar. 6 bytes total.
+- `signed char` byte-identical to plain `char` (BCC default).
+- For unsigned char `>> 1`, would be `mov al; mov ah, 0; shr ax, 1`
+  (5B without the `mov ah, 0` if already known zero).
+

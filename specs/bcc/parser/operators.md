@@ -1303,3 +1303,27 @@ Findings:
 - The two expressions are emitted sequentially in source order;
   expr1's result is discarded, expr2's value goes through AX.
 
+
+## `cmp reg, imm` opcode choice: `83 /7` (3B sign-ext) vs `81 /7` (4B imm16)
+
+Fixture `2952-and-cond-bounded-obj`:
+
+```c
+if (x > 100 && x < 200) return 1;
+```
+
+```
+83 fe 64                       cmp si, 100   (3B: imm8 sign-ext, 100 fits [-128,127])
+81 fe c8 00                    cmp si, 200   (4B: imm16, 200=0xC8 doesn't fit signed imm8)
+```
+
+Findings:
+- BCC chooses encoding based on whether the constant fits in a
+  signed imm8 (range `[-128, 127]`):
+  - **`83 /7 imm8`** (3B): when imm fits, sign-extends to 16 bits
+  - **`81 /7 imm16`** (4B): when imm > 127 or < -128
+- For 200 (= 0xC8), the imm8 form would sign-extend to 0xFFC8 (= -56),
+  which is wrong. So BCC uses the imm16 form.
+- Generalizable: all cmp/add/sub/and/or/xor with imm use this same
+  byte-vs-word choice rule.
+

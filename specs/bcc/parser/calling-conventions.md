@@ -1703,3 +1703,52 @@ Findings:
 - Conceptually similar to dense-table switch dispatch but for
   fn-pointer arrays. Common idiom for vtable / state-machine code.
 
+
+## 3rd int parameter — `[bp+8]`
+
+Fixture `2953-third-int-param-obj`:
+
+```c
+int third(int a, int b, int c) {
+  return c;
+}
+```
+
+```
+8b 46 08                       mov ax, [bp+8]   ; c
+```
+
+Findings:
+- cdecl arg stack layout (caller pushes right-to-left):
+  - 1st arg: `[bp+4]`
+  - 2nd arg: `[bp+6]`
+  - 3rd arg: `[bp+8]`
+  - Nth arg: `[bp + 2*(N+1)]`
+- Each arg occupies 2 bytes (word-aligned).
+- Long args (4 bytes) bump the offset accordingly.
+
+## 2 sequential calls with same arg — param promoted to si for reuse
+
+Fixture `2956-fn-2nd-call-obj`:
+
+```c
+int both(int v) {
+  f(v);
+  return g(v);
+}
+```
+
+```
+8b 76 04                       mov si, v       (promote)
+56                             push si
+e8 00 00 59                    call f + pop cx
+56                             push si         (REUSE si)
+e8 00 00 59                    call g + pop cx
+```
+
+Findings:
+- Param `v` is **promoted to si** so it can be reused across both
+  calls without re-loading from `[bp+4]`.
+- First call's result discarded (just `pop cx`); second's result
+  carries through AX.
+
