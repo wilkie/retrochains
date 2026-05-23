@@ -2571,3 +2571,44 @@ Findings:
 - Both globals share `_DATA` segment: g1 at offset 0, g2 at offset 2 (placed sequentially).
 - Each branch uses the 3B `a1 imm16` short load.
 
+
+## `*p = c ? v : 0` — ternary materializes in AX, single store
+
+Fixture `3470-cond-store-obj`:
+
+```c
+void set(int *p, int c, int v) { *p = c ? v : 0; }
+```
+
+```
+8b 76 04                       mov si, p
+83 7e 06 00                    cmp c, 0
+74 05                          je ELSE
+8b 46 08                       mov ax, v
+eb 02                          jmp END_TERN
+ELSE:
+33 c0                          xor ax, ax
+END_TERN:
+89 04                          mov [si], ax
+```
+
+Findings:
+- Ternary result lands in AX, which is also the source for the store.
+- Clean: no intermediate store/reload.
+- 19B body.
+
+## `a != b` — `cmp + je` inverted from `==`
+
+Fixture `3471-not-equal-obj`:
+
+```
+8b 46 04                       mov ax, a
+3b 46 06                       cmp ax, b
+74 05                          je ELSE          (== branch is FALSE for !=)
+b8 01 00                       mov ax, 1
+```
+
+Findings:
+- `!=` uses `je` to skip the "true" branch (jumps when equal = result false).
+- Identical structure to `==` (3379) but with je/jne swapped.
+

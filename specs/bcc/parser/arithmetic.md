@@ -3113,3 +3113,28 @@ Findings:
 - `* 1` is identity for multiplication; emit only the load.
 - Confirms BCC recognizes multiplication identities (similar to `+ 0`).
 
+
+## `x *= 2` (compound) — NOT strength-reduced to `shl` (differs from `x * 2`)
+
+Fixture `3467-comp-return-obj`:
+
+```c
+int doubled(int x) { x *= 2; return x; }
+```
+
+```
+56                             push si
+8b 76 04                       mov si, x
+ba 02 00                       mov dx, 2
+8b c6                          mov ax, si
+f7 ea                          imul dx
+8b f0                          mov si, ax       (x = result)
+8b c6                          mov ax, si       (return x)
+```
+
+Findings:
+- Compound `*= 2` uses generic `imul` — does NOT apply the `shl 1` strength reduction.
+- Contrast `x * 2` (fixture 3462) which compiles to 5B `shl ax, 1`.
+- 15B body — significantly larger than the 5B optimal.
+- Compound-assign path bypasses BCC's small-constant optimization.
+

@@ -5446,3 +5446,48 @@ Findings:
 - `i > 0` test uses `or si, si` cmp-zero peephole (2B) + `jg` (signed).
 - `dec` for step (1B). Tight loop.
 
+
+## Chained ternary `a ? (b ? 1 : 2) : 3` — nested branches
+
+Fixture `3469-chained-ternary-obj`:
+
+```
+83 7e 04 00                    cmp a, 0
+74 10                          je OUTER_FALSE
+83 7e 06 00                    cmp b, 0
+74 05                          je INNER_FALSE
+b8 01 00                       mov ax, 1
+eb 03                          jmp END
+INNER_FALSE:
+b8 02 00                       mov ax, 2
+eb 03                          jmp END
+OUTER_FALSE:
+b8 03 00                       mov ax, 3
+END:
+```
+
+Findings:
+- Naturally nested branches — outer ternary controls inner only when `a` is true.
+- 25B body. Clean structure.
+
+## Range check `x >= 0 && x < n` — 2-cmp short-circuit
+
+Fixture `3472-range-check-obj`:
+
+```
+8b 76 04                       mov si, x
+0b f6                          or si, si
+7c 0a                          jl FALSE         (x < 0)
+3b 76 06                       cmp si, n
+7d 05                          jge FALSE        (x >= n)
+b8 01 00                       mov ax, 1
+eb 04                          jmp END
+FALSE:
+33 c0                          xor ax, ax
+```
+
+Findings:
+- `>= 0` test uses `or si, si` cmp-zero peephole (2B) + `jl` (signed < 0).
+- `< n` test uses `cmp + jge` (signed ≥ n).
+- Both failure paths jump to common FALSE label.
+

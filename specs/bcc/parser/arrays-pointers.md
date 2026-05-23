@@ -7345,3 +7345,27 @@ int *identity(int *p) { return p; }
 Findings:
 - Pointer return is just an int copy in small memory model.
 
+
+## `*(p + i + j)` — each offset scaled separately (no expression-tree fold)
+
+Fixture `3468-multi-offset-obj`:
+
+```c
+int sum_offs(int *p, int i, int j) { return *(p + i + j); }
+```
+
+```
+8b 46 06                       mov ax, i
+d1 e0                          shl ax, 1        (i * 2)
+8b 5e 04                       mov bx, p
+03 d8                          add bx, ax       (bx = p + i*2)
+8b 46 08                       mov ax, j
+d1 e0                          shl ax, 1        (j * 2)
+03 d8                          add bx, ax       (bx += j*2)
+8b 07                          mov ax, [bx]
+```
+
+Findings:
+- BCC scales each int offset separately (no `(i+j) * 2`-style fold).
+- 19B body. Could be smaller if BCC combined offsets before scaling.
+
