@@ -2851,3 +2851,54 @@ Findings:
   (sign-extend dividend).
 - 12 bytes total.
 
+
+## Signed `x / 4` — `idiv`, NOT strength-reduced
+
+Fixture `3338-signed-div4-obj`:
+
+```
+8b 46 04                       mov ax, x
+bb 04 00                       mov bx, 4
+99                             cwd              (sign-extend AX → DX:AX)
+f7 fb                          idiv bx          (DX:AX / BX)
+```
+
+Findings:
+- Signed div by const power-of-2 is NOT reduced to `sar`.
+- Reason: `sar` rounds toward -∞ while C semantics for signed div round toward 0.
+  - Example: `-5 / 4 = -1` (idiv), but `-5 >> 2 = -2` (sar).
+- BCC's simpler approach: always use idiv. 9-byte body.
+
+## Unsigned `x / 4` — strength-reduced to `2x shr 1`
+
+Fixture `3339-unsigned-div4-obj`:
+
+```
+8b 46 04                       mov ax, x
+d1 e8                          shr ax, 1
+d1 e8                          shr ax, 1
+```
+
+Findings:
+- Unsigned div by const power-of-2 IS strength-reduced to back-to-back `shr r/m, 1`.
+- 2× `d1 e8` (2B each) beats `b1 02 d3 e8` (mov cl, 2; shr ax, cl — 4B) by 0B but avoids CL clobber.
+- 7-byte body.
+
+## Signed `x % 4` — `idiv` + `mov ax, dx`, NOT reduced to `and 3`
+
+Fixture `3340-signed-mod4-obj`:
+
+```
+8b 46 04                       mov ax, x
+bb 04 00                       mov bx, 4
+99                             cwd
+f7 fb                          idiv bx
+8b c2                          mov ax, dx       (remainder is in DX)
+```
+
+Findings:
+- Signed mod by power-of-2 is NOT reduced to `and ax, K-1`.
+- Reason: signed mod can produce negative results; `and` masks to non-negative.
+  - Example: `-1 % 4 = -1`, but `-1 & 3 = 3`.
+- 11-byte body. Remainder copied from DX to AX since DX is `idiv`'s output for remainder.
+
