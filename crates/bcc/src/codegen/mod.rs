@@ -4299,6 +4299,27 @@ impl<'a> FunctionEmitter<'a> {
                     );
                     return;
                 }
+                // String-literal init for a pointer local: `char *s =
+                // "lit";` lowers to `mov word ptr [bp-N], offset
+                // DGROUP:s@+K` directly, no AX roundtrip. Fixture
+                // 1931 (`char *s = "ABCD"`).
+                if let ExprKind::StringLit(bytes) = &init.kind
+                    && let Some(pointee) = ty.pointee()
+                    && pointee.is_char_like()
+                {
+                    let pool_off = self.strings.intern(bytes);
+                    let src = if pool_off == 0 {
+                        "offset DGROUP:s@".to_owned()
+                    } else {
+                        format!("offset DGROUP:s@+{pool_off}")
+                    };
+                    let _ = write!(
+                        self.out,
+                        "\tmov\tword ptr {},{src}\r\n",
+                        bp_addr(off),
+                    );
+                    return;
+                }
                 // Function-pointer init: `int (*p)(void) = f;` →
                 // `mov word ptr [bp-N],offset _f`. We detect this by
                 // the init being a bare ident that names a function
