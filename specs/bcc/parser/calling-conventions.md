@@ -1870,3 +1870,47 @@ Findings:
   pure 8086.
 - Arg order: right-to-left (cdecl).
 
+
+## `int main(int argc, char *argv[])` — auto-emits `__setargv__` EXTDEF
+
+Fixture `3117-main-sig-obj`:
+
+```c
+int main(int argc, char *argv[]) {
+  return argc;
+}
+```
+
+Symbol table emits **EXTDEF for `__setargv__`** automatically, in
+addition to PUBDEF for `_main`.
+
+Findings:
+- `main(int argc, char *argv[])` triggers BCC to emit an EXTDEF
+  for `__setargv__` (the C runtime's argv-parsing startup hook).
+- `int main(void)` (no args) does NOT emit this EXTDEF.
+- The runtime links in the argv-parser only when needed.
+- Same pattern likely for `main(int argc, char *argv[], char *envp[])`
+  triggering `__setenvp__` or similar.
+
+## Extern fn declaration + call — standard EXTDEF + `call rel16`
+
+Fixture `3116-extern-fn-call-obj`:
+
+```c
+extern int helper(int x);
+return helper(v) + 1;
+```
+
+```
+ff 76 04                       push v
+e8 00 00                       call _helper   (FIXUPP)
+59                             pop cx
+40                             inc ax           (+1)
+```
+
+Findings:
+- `extern` declaration produces EXTDEF for the symbol.
+- Call is standard `call rel16` with FIXUPP record (resolved by linker).
+- `extern` is the default linkage for fn declarations — explicit
+  `extern` keyword is documentation/clarity only.
+

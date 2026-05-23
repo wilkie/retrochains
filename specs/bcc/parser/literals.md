@@ -678,3 +678,18 @@ Findings:
   `'\''` = 39, `'\"'` = 34.
 - All compile-time constants; substituted as int literals in expressions.
 
+
+## `sizeof(int) * 4` in global init — const-folded to literal 8
+
+Fixture `3114-sizeof-init-obj`:
+
+```c
+int g = sizeof(int) * 4;
+```
+
+`_DATA` for `_g`: `08 00` (= 8 = 2 × 4)
+
+Findings:
+- `sizeof(T)` is compile-time constant: 2 for int, 4 for long, 1 for char.
+- Const arithmetic folded at parse → single literal in `_DATA`.
+

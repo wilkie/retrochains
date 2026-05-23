@@ -6568,3 +6568,26 @@ Findings:
 - For char*, `p += 5` would be `add si, 5` (sizeof=1).
 - For long*, `p += 5` would be `add si, 20` (sizeof=4).
 
+
+## `struct_ptr++` — scaled by `sizeof(struct)` (any size, not just pow2)
+
+Fixture `3113-struct-ptr-inc-obj`:
+
+```c
+struct S { int a; int b; int c; };   /* sizeof = 6 */
+struct S *p;
+p++;
+```
+
+```
+8b 76 04                       mov si, p
+83 c6 06                       add si, 6    (= sizeof(struct S))
+```
+
+Findings:
+- `p++` for any typed ptr advances by `sizeof(*p)`.
+- For non-power-of-2 struct sizes, BCC just emits `add si, N`
+  (not `inc si` series — that's only for sizeof = 1, 2 by single
+  inc, or 2 by double inc on int*).
+- For sizeof = 6, single 3B `add si, 6` (imm8 sign-ext).
+
