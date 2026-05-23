@@ -11110,6 +11110,34 @@ impl<'a> FunctionEmitter<'a> {
                     let _ = write!(self.out, "\tmov\tbyte ptr {},al\r\n", bp_addr(off));
                     return;
                 }
+                // `c = d;` char-to-char copy through bare ident.
+                // Load byte and store byte, no widening. Mirrors the
+                // init peephole. Fixture 2685.
+                if ty.is_char_like()
+                    && let ExprKind::Ident(src_name) = &value.kind
+                {
+                    let src_is_char = if self.locals.has(src_name) {
+                        self.locals.type_of(src_name).is_char_like()
+                    } else {
+                        self.globals.type_of(src_name).map_or(false, |t| t.is_char_like())
+                    };
+                    if src_is_char {
+                        let src_addr = if self.locals.has(src_name)
+                            && let LocalLocation::Stack(soff) = self.locals.location_of(src_name)
+                        {
+                            Some(bp_addr(soff))
+                        } else if self.globals.type_of(src_name).is_some() {
+                            Some(format!("DGROUP:_{src_name}"))
+                        } else {
+                            None
+                        };
+                        if let Some(addr) = src_addr {
+                            let _ = write!(self.out, "\tmov\tal,byte ptr {addr}\r\n");
+                            let _ = write!(self.out, "\tmov\tbyte ptr {},al\r\n", bp_addr(off));
+                            return;
+                        }
+                    }
+                }
                 // `<stack-local> = &<global>;` — store the symbol's
                 // offset directly into the stack slot. BCC emits this
                 // as `C7 46 dd lo hi` with a FIXUPP, saving the
