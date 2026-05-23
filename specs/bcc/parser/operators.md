@@ -2706,3 +2706,78 @@ Findings:
 - Same shape as `!!x` (3415) per `!`.
 - 8B body (with the param load).
 
+
+## `g += K` threshold — imm8 (5B) vs imm16 (6B)
+
+Fixtures `3491-pluseq-4-obj` (K=4), `3492-pluseq-256-obj` (K=256):
+
+```
+83 06 disp16 imm8              add [mem], imm8    (5B; K in [-128, 127])
+81 06 disp16 imm16             add [mem], imm16   (6B; K outside imm8 range)
+```
+
+Findings:
+- K fits in sign-extended imm8 (-128..127) → 5B `83 /0` form.
+- K = 256 (outside imm8 range) → 6B `81 /0` form.
+- 1-byte size jump at the imm8 boundary.
+
+## `g -= var` — `mov ax, var; sub [mem], ax` (7B, mem-dest sub)
+
+Fixture `3493-subeq-var-obj`:
+
+```
+8b 46 04                       mov ax, v
+29 06 00 00 [FIXUPP _g]        sub [_g], ax
+```
+
+Findings:
+- 7B body. Pattern symmetric to `g += var` (3443).
+- Uses `29 /r` (sub r/m16, r16) mem-dest form.
+
+## `g *= 3` (compound mul) — `mov dx,3; mov ax,[g]; imul dx; mov [g],ax`
+
+Fixture `3494-muleq-3-obj`:
+
+```
+ba 03 00                       mov dx, 3
+a1 00 00 [FIXUPP _g]           mov ax, [_g]
+f7 ea                          imul dx
+a3 00 00 [FIXUPP _g]           mov [_g], ax
+```
+
+Findings:
+- 11B body. Standard imul with const-in-reg.
+- Compound `*= const` doesn't get strength reduction (consistent with x *= 2 from 3467).
+
+## `g /= 4` (compound signed div) — full idiv, no `sar` reduction
+
+Fixture `3495-diveq-4-obj`:
+
+```
+bb 04 00                       mov bx, 4
+a1 00 00 [FIXUPP _g]           mov ax, [_g]
+99                             cwd
+f7 fb                          idiv bx
+a3 00 00 [FIXUPP _g]           mov [_g], ax
+```
+
+Findings:
+- 12B body. Signed div by power-of-2 doesn't reduce to `sar` (rounding semantics).
+- Consistent with non-compound `x / 4` in 3338.
+
+## `g %= 4` (compound signed mod) — full idiv, store DX (remainder)
+
+Fixture `3496-modeq-4-obj`:
+
+```
+bb 04 00                       mov bx, 4
+a1 00 00 [FIXUPP _g]           mov ax, [_g]
+99                             cwd
+f7 fb                          idiv bx
+89 16 00 00 [FIXUPP _g]        mov [_g], dx
+```
+
+Findings:
+- 13B body. 1 byte larger than /=4 because storing DX uses 4B `89 16 disp16` (vs 3B `a3 disp16` AX-only short form).
+- DX = remainder from idiv.
+
