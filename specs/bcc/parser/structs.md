@@ -3453,3 +3453,47 @@ Findings:
 - Struct fields accessed at `[bp + arg_base + field_offset]`.
 - For 1-field struct of int: arg_base = +4, field_offset = +0.
 
+
+## 3-byte struct return — `N_SCOPY@` + hidden FAR ret ptr
+
+Fixture `3178-ret-struct-3b-obj`:
+
+```c
+struct Tri { int x; char c; };   /* sizeof = 3 */
+struct Tri make(int a, char b) {
+  struct Tri t;
+  t.x = a; t.c = b;
+  return t;
+}
+```
+
+```
+83 ec 04                       sub sp, 4 (local t)
+8b 46 08 89 46 fc              t.x = a
+8a 46 0a 88 46 fe              t.c = b
+                               ; copy local t to hidden ret slot:
+ff 76 06                       push hidden_ret_HIGH (segment, at [bp+6])
+ff 76 04                       push hidden_ret_LOW  (offset,  at [bp+4])
+8d 46 fc                       lea ax, &t
+16 50                          push ss; push ax     (src FAR ptr)
+b9 03 00                       mov cx, 3            (sizeof(struct))
+e8 00 00                       call N_SCOPY@
+8b 46 04                       mov ax, hidden_ret offset (return ptr in AX)
+```
+
+Findings:
+- **3-byte struct return = N_SCOPY@ + hidden FAR ret ptr** (first arg).
+- Hidden ret ptr occupies `[bp+4..6]` (2 words = FAR ptr).
+- Explicit args shifted: `a` at [bp+8], `b` at [bp+10].
+- N_SCOPY@ calling convention:
+  - push dst FAR ptr (segment + offset)
+  - push src FAR ptr (segment + offset) — uses `push ss` for stack-local
+  - cx = byte count
+- After SCOPY, AX holds hidden ret ptr offset (caller-convention return).
+
+Confirms struct-return policy:
+- 1B → AL
+- 2B → AX
+- 4B → DX:AX
+- **3B and ≥5B → N_SCOPY@ + hidden ptr**
+

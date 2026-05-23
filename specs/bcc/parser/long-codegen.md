@@ -3723,3 +3723,72 @@ Findings:
 - Multiplication is always safe to reduce to shift (no rounding).
 - Saves vs N_LXMUL@ which would be 15B+ with helper-call overhead.
 
+
+## `long a / b` — `N_LDIV@` helper (stack args, self-cleanup)
+
+Fixture `3173-long-div-obj`:
+
+```c
+return a / b;
+```
+
+```
+ff 76 0a                       push b HIGH
+ff 76 08                       push b LOW
+ff 76 06                       push a HIGH
+ff 76 04                       push a LOW
+e8 00 00                       call N_LDIV@
+```
+
+Findings:
+- Signed long div uses **`N_LDIV@` helper** with **stack args**.
+- All 4 words pushed in order: b HIGH, b LOW, a HIGH, a LOW.
+- **NO `add sp` follows** — N_LDIV@ does self-cleanup (RET 8 internally).
+- 11 bytes setup + call.
+
+## `unsigned long a / b` — `N_LUDIV@` helper (same calling convention)
+
+Fixture `3174-ulong-div-obj`:
+
+Same 4-push pattern, just different helper name (`N_LUDIV@`).
+
+## `long * 4L` — `<< 2` → `N_LXLSH@` helper (strength-reduced to shift)
+
+Fixture `3175-long-mul-4L-obj`:
+
+```c
+return v * 4L;
+```
+
+```
+8b 56 06                       mov dx, HIGH
+8b 46 04                       mov ax, LOW
+b1 02                          mov cl, 2     (= log2(4))
+e8 00 00                       call N_LXLSH@
+```
+
+Findings:
+- `long * 4L` = strength-reduce to `<< 2` → N_LXLSH@ helper.
+- 11 bytes setup + call vs ~15+ for N_LXMUL@.
+- General rule: long `* (1<<N)` for N ≥ 2 strength-reduces to shift+helper.
+- `* 2L` (N=1) uses inline `shl + rcl` (`3170`).
+
+## `long / 2L` — NOT strength-reduced, uses `N_LDIV@`
+
+Fixture `3176-long-div-2L-obj`:
+
+```
+33 c0                          xor ax, ax    (divisor HIGH = 0)
+ba 02 00                       mov dx, 2     (divisor LOW = 2)
+50 52                          push ax; push dx   (b HIGH, b LOW)
+ff 76 06                       push a HIGH
+ff 76 04                       push a LOW
+e8 00 00                       call N_LDIV@
+```
+
+Findings:
+- Signed long `/ 2L` is **NOT strength-reduced**.
+- Same reason as `int / 2` (`3088`): signed shift rounds toward -∞,
+  C div rounds toward 0.
+- Constant divisor (2L) loaded into DX:AX and pushed.
+
