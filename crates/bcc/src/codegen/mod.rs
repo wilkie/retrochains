@@ -3481,6 +3481,34 @@ impl<'a> FunctionEmitter<'a> {
         if param_ty.is_char_like() || param_ty.is_long_like() {
             return None;
         }
+        // Bare stack-local int/ptr: `push word ptr [bp+N]` directly.
+        // Fixture 3116 (`printf(x)` for x at [bp+4]), 2688 (3-arg int
+        // call), 1656.
+        if let ExprKind::Ident(name) = &arg.kind
+            && self.locals.has(name)
+            && self.locals.type_of(name).is_int_like()
+            && let LocalLocation::Stack(off) = self.locals.location_of(name)
+        {
+            return Some(format!("push\tword ptr {}", bp_addr(off)));
+        }
+        // Bare global int/ptr: `push word ptr DGROUP:_<name>` directly.
+        if let ExprKind::Ident(name) = &arg.kind
+            && let Some(gty) = self.globals.type_of(name)
+            && gty.is_int_like()
+        {
+            return Some(format!("push\tword ptr DGROUP:_{name}"));
+        }
+        // `*p` for a register-resident int pointer: `push word ptr
+        // [<reg>]` directly. Fixture 1292 (`f(*p)` with p in SI).
+        if let ExprKind::Deref(operand) = &arg.kind
+            && let ExprKind::Ident(name) = &operand.kind
+            && self.locals.has(name)
+            && let LocalLocation::Reg(reg) = self.locals.location_of(name)
+            && let Some(pointee) = self.locals.type_of(name).pointee()
+            && pointee.is_int_like()
+        {
+            return Some(format!("push\tword ptr [{}]", reg.name()));
+        }
         if let ExprKind::ArrayIndex { array, index } = &arg.kind
             && let ExprKind::Ident(arr_name) = &array.kind
             && self.locals.has(arr_name)
