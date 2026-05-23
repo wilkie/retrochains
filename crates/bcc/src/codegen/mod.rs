@@ -4233,6 +4233,55 @@ impl<'a> FunctionEmitter<'a> {
             }
             return;
         }
+        // Char return of `<char_local> <op> <const>` for arithmetic
+        // ops: stay at byte width throughout — `mov al, <a>; <op>
+        // al, K`. No widening needed since the caller widens after
+        // the call. Fixture 3589 (`char inc5(char a) { return a +
+        // 5; }`).
+        if self.function.ret_ty.is_char_like()
+            && let ExprKind::BinOp { op, left, right } = &e.kind
+            && matches!(op, BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor)
+            && let ExprKind::Ident(name) = &left.kind
+            && self.ident_is_char(name)
+            && let Some(k) = try_const_eval(right)
+        {
+            let src_addr = if let Some(_gty) = self.globals.type_of(name) {
+                format!("DGROUP:_{name}")
+            } else if self.locals.has(name)
+                && let LocalLocation::Stack(off) = self.locals.location_of(name)
+            {
+                bp_addr(off)
+            } else {
+                // Char in register (DL/etc.): mov al, <reg>
+                let LocalLocation::Reg(reg) = self.locals.location_of(name) else {
+                    unreachable!()
+                };
+                let _ = write!(self.out, "\tmov\tal,{}\r\n", reg.name());
+                let v8 = k & 0xFF;
+                let mnem = match op {
+                    BinOp::Add => "add",
+                    BinOp::Sub => "sub",
+                    BinOp::BitAnd => "and",
+                    BinOp::BitOr => "or",
+                    BinOp::BitXor => "xor",
+                    _ => unreachable!(),
+                };
+                let _ = write!(self.out, "\t{mnem}\tal,{v8}\r\n");
+                return;
+            };
+            let _ = write!(self.out, "\tmov\tal,byte ptr {src_addr}\r\n");
+            let v8 = k & 0xFF;
+            let mnem = match op {
+                BinOp::Add => "add",
+                BinOp::Sub => "sub",
+                BinOp::BitAnd => "and",
+                BinOp::BitOr => "or",
+                BinOp::BitXor => "xor",
+                _ => unreachable!(),
+            };
+            let _ = write!(self.out, "\t{mnem}\tal,{v8}\r\n");
+            return;
+        }
         // Char return with `(<char-like>)<int-local>` cast: just
         // load the low byte of the int. The cast narrows; for a
         // char-return ABI we only need AL, no widening. Fixture 3019
