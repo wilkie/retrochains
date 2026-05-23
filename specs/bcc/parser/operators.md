@@ -1861,3 +1861,59 @@ Findings:
 - `if (g & K)` truthy = `test + je → FALSE`.
 - `if ((a & K) == 0)` zero test = same `test` op + opposite jump.
 
+
+## comma operator `(a++, a*2)` — left side for side effects, right side returned
+
+Fixture `3308-comma-op-obj`:
+
+```
+56                             push si           (callee-save)
+8b 76 04                       mov si, a
+46                             inc si             (a++ — left side discarded)
+8b c6                          mov ax, si         (right side: a)
+d1 e0                          shl ax, 1          (* 2)
+```
+
+Findings:
+- Standard comma semantics: evaluate left for side effects, drop value, evaluate right for the expression value.
+- The param-modification stays in the register copy since the parameter has no further use.
+- BCC also picked SI to hold `a` since it's a candidate for register allocation.
+
+## `&arr[const]` — folded into `mov ax, _arr + const*size`
+
+Fixture `3309-addr-of-elem-obj`:
+
+```c
+int arr[10];
+int *third(void) { return &arr[3]; }
+```
+
+```
+b8 06 00 [FIXUPP _arr]         mov ax, 0x0006   (resolved: _arr + 6)
+```
+
+Findings:
+- `3 * sizeof(int) = 6` folded at compile time.
+- Single 3B `mov ax, imm16` with a single FIXUPP into `_arr`.
+- No actual array indexing computation at runtime.
+
+## `sizeof(local_arr)` — no stack alloc, pure compile-time const
+
+Fixture `3310-sizeof-arr-obj`:
+
+```c
+int sz(void) {
+  int arr[10];
+  return sizeof(arr);
+}
+```
+
+```
+                               ; no sub sp instruction
+b8 14 00                       mov ax, 20    (10 * 2 = 20)
+```
+
+Findings:
+- The local array is never stack-allocated since it's never referenced.
+- `sizeof` is purely a type query — no runtime cost or memory usage.
+

@@ -4840,3 +4840,87 @@ Findings:
 - Strength reduction applies (`* 2` → `shl 1`).
 - Result stored to promoted register.
 
+
+## `goto label` — `cmp + jne_skip + jmp_unconditional` (suboptimal)
+
+Fixture `3306-goto-label-obj`:
+
+```c
+if (x == 0) goto fail;
+return 1;
+fail:
+return -1;
+```
+
+```
+83 7e 04 00                    cmp x, 0
+75 02                          jne L1            (skip the goto)
+eb 05                          jmp FAIL          (the goto itself)
+L1:
+b8 01 00                       mov ax, 1
+eb 05                          jmp END
+FAIL:
+b8 ff ff                       mov ax, -1
+END:
+```
+
+Findings:
+- BCC compiles `if (cond) goto X` as: invert-cond, jump past body, body = `jmp X`.
+- 7 bytes (`75 02 eb 05`) when the optimal would be 5 bytes (`74 03` — `je FAIL` directly).
+- No peephole to merge the inverted-jump with the `goto`.
+
+## K&R-style function declaration — same codegen as ANSI
+
+Fixture `3307-knr-style-obj`:
+
+```c
+int add(a, b)
+int a;
+int b;
+{ return a + b; }
+```
+
+Body identical to ANSI `int add(int a, int b) { ... }`:
+```
+8b 46 04                       mov ax, a
+03 46 06                       add ax, b
+```
+
+Findings:
+- K&R-style supported with zero penalty.
+- Same arg layout, same FIXUPP pattern, same EXTDEFs.
+
+## `register int i` — honored, gets SI; non-register int also gets DI
+
+Fixture `3305-register-loop-obj`:
+
+```c
+int sum(int n) {
+  register int i;
+  int s = 0;
+  for (i = 0; i < n; i++) s += i;
+  return s;
+}
+```
+
+```
+56                             push si           (callee-save)
+57                             push di
+33 ff                          xor di, di         (s = 0)
+33 f6                          xor si, si         (i = 0)
+eb 03                          jmp TEST
+LOOP:
+03 fe                          add di, si         (s += i)
+46                             inc si             (i++)
+TEST:
+3b 76 04                       cmp si, n
+7c f8                          jl LOOP
+8b c7                          mov ax, di         (return s)
+```
+
+Findings:
+- `register int i` → SI register allocation (callee-save'd).
+- Non-register `int s` also reg-allocated → DI (callee-save'd).
+- BCC reg-allocates locals into SI/DI when available, regardless of `register` keyword — `register` is at most an *additional* hint.
+- Loop body is 6 bytes: `add reg, reg / inc reg / cmp reg, mem / jl`.
+
