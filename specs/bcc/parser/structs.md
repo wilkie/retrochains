@@ -3234,3 +3234,38 @@ Findings:
   pushing every word (multi-byte cost) or N_SCOPY@ helper.
 - Standard "efficient struct argument" idiom for large structs.
 
+
+## Local struct = N separate `[bp-disp]` slots (byte-identical to N ints)
+
+Fixture `3021-local-struct-brace-obj`:
+
+```c
+struct P { int x; int y; };
+struct P p;
+p.x = 10;
+p.y = 20;
+return p.x + p.y;
+```
+
+```
+83 ec 04                       sub sp, 4 (struct P = 4 bytes)
+c7 46 fc 0a 00                 p.x at [bp-4] = 10
+c7 46 fe 14 00                 p.y at [bp-2] = 20
+8b 46 fc 03 46 fe              p.x + p.y
+```
+
+Findings:
+- Local struct fields = consecutive `[bp-disp8]` slots.
+- Byte-identical to declaring `int x; int y;` separately.
+- Field offset baked into the disp8.
+- No separate struct-as-aggregate handling.
+
+## `struct { char a, b, c; }` = 3 bytes (no padding)
+
+Fixture `3022-all-char-struct-obj`:
+
+`sizeof(struct C { char; char; char }) = 3` bytes.
+
+Confirms BCC packs adjacent chars with no padding. Total size is
+sum of field sizes regardless of alignment.
+

@@ -4445,3 +4445,34 @@ Findings:
   its own cmp+jne+jmp.
 - ~6 bytes per (cmp+jne+jmp) sequence.
 
+
+## `do { ... } while (0);` — FULLY FOLDED to single execution (no test, no back-edge!)
+
+Fixture `3020-do-while-zero-obj`:
+
+```c
+do {
+  s = s + 1;
+} while (0);
+```
+
+```
+33 f6                          s = 0 (init before loop)
+8b c6 40 8b f0                 s = s + 1   (body executed ONCE, inline)
+                               ; FALL THROUGH — no test, no jmp back!
+```
+
+Findings:
+- **`do { ... } while (0)` is fully optimized to a single body
+  execution** with NO loop infrastructure at all!
+- BCC recognizes `do-while(0)` as the classic C macro idiom and
+  compiles it to straight-line code.
+- This is **MORE AGGRESSIVE than `while (0)` (`2971`)** which
+  preserved the dead body but emitted a jmp around it. Here BCC
+  emits a clean once-only sequence.
+- The C semantics: `do-while` body runs once before condition test.
+  With const-false condition, no back-edge → execute once.
+- **Notable exception to the "statements preserve structure" rule**
+  (the two-tier optimization from `2969`). do-while(0) gets fully
+  folded.
+

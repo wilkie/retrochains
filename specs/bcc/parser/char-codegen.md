@@ -1713,3 +1713,45 @@ Findings:
 - For mixed char/int comparison, BCC would promote (per usual
   arith conversions).
 
+
+## `unsigned char + int` — `mov ah, 0` zero-extend (NOT cbw)
+
+Fixture `3018-uchar-plus-int-obj`:
+
+```c
+int mix(unsigned char c, int n) {
+  return c + n;
+}
+```
+
+```
+8a 46 04                       mov al, c
+b4 00                          mov ah, 0   (UNSIGNED zero-extend, 2B)
+03 46 06                       add ax, n
+```
+
+Findings:
+- Unsigned char to int = **`mov ah, 0`** (2 bytes) — zero-extend.
+- Signed char to int = **`cbw`** (1 byte) — sign-extend.
+- **Unsigned promotion is 1 BYTE LONGER** than signed.
+- Same value range for non-negative chars, but the codegen differs.
+
+## `(unsigned char)int` cast — single `mov al, [mem]` (no zero-ext for char return)
+
+Fixture `3019-uchar-cast-obj`:
+
+```c
+unsigned char low(int x) {
+  return (unsigned char)x;
+}
+```
+
+```
+8a 46 04                       mov al, x   (3B byte load only)
+```
+
+Findings:
+- Single byte load = the result. AH not cleared (don't care for
+  char return — caller treats AL as the uchar value).
+- For an `int` return of uchar value, would need `mov ah, 0`.
+
