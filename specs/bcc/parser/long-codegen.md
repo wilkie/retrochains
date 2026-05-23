@@ -4206,3 +4206,133 @@ b8 78 56                       mov ax, 0x5678     (LOW)
 Finding:
 - 6 bytes total. No memory access, no FIXUPP. Two 3-byte `mov reg, imm16` loads.
 
+
+## long `a << 1` inline — `shl ax, 1; rcl dx, 1`
+
+Fixture `3293-long-shl1-obj`:
+
+```
+8b 56 06                       mov dx, a HIGH
+8b 46 04                       mov ax, a LOW
+d1 e0                          shl ax, 1
+d1 d2                          rcl dx, 1     (rotate-through-carry propagates LOW MSB)
+```
+
+Findings:
+- Shift-by-1 is inlined as `shl ax,1; rcl dx,1` (4B). No call to N_LXLSH@.
+- Compare to `* 2L` carry chain `add ax,ax; adc dx,dx` (4B same size). Both encode the same operation but BCC prefers `shl/rcl` form for `<<` and `add/adc` for `*2L`.
+
+## long postinc on global `g++` — `add [_g], 1; adc [_g+2], 0`
+
+Fixture `3294-long-postinc-obj`:
+
+```
+long g;
+long bump(void) { return g++; }
+```
+
+Body (17B):
+```
+a1 00 00 [FIXUPP _g]           mov ax, [_g]      (LOW for return)
+8b 16 02 00 [FIXUPP _g+2]      mov dx, [_g+2]    (HIGH for return)
+83 06 00 00 01 [FIXUPP _g]     add word ptr [_g], 1
+83 16 02 00 00 [FIXUPP _g+2]   adc word ptr [_g+2], 0
+```
+
+Findings:
+- 4 FIXUPPs (one per instruction touching `_g`).
+- Postinc value (pre-increment) loaded into DX:AX **before** the inc, matching postfix semantics.
+- Uses `add r/m16, imm8` (0x83 /0) sign-extending imm8 → 4B per word.
+- HIGH inc uses `adc imm8 0` to propagate any carry from LOW.
+
+## long compound `a &= b` — load b into AX/DX, AND mem-dest with reg-src
+
+Fixture `3295-long-and-eq-obj`:
+
+```
+long mask(long a, long b) { a &= b; return a; }
+```
+
+Body (18B):
+```
+8b 46 0a                       mov ax, b HIGH
+8b 56 08                       mov dx, b LOW
+21 56 04                       and [bp+4], dx   (a LOW &= b LOW)
+21 46 06                       and [bp+6], ax   (a HIGH &= b HIGH)
+8b 56 06                       mov dx, a HIGH    (reload for return)
+8b 46 04                       mov ax, a LOW
+```
+
+Findings:
+- Register roles for long-as-source: AX=HIGH, DX=LOW (confirms pattern from 3287 `*p=v` store).
+- Confirms convention: AX:DX role swaps based on whether long is *destination of return* (HIGH=DX) or *source operand* (HIGH=AX).
+- Reload a for return adds 6B (would be wasteful if next instruction overwrites).
+
+## long compound `*p += v` — `add [si], dx; adc [si+2], ax`
+
+Fixture `3296-long-ptr-pluseq-obj`:
+
+```
+void bump(long *p, long v) { *p += v; }
+```
+
+Body (16B):
+```
+56                             push si      (callee-save)
+8b 76 04                       mov si, p
+8b 46 08                       mov ax, v HIGH
+8b 56 06                       mov dx, v LOW
+01 14                          add [si], dx     (LOW += LOW)
+11 44 02                       adc [si+2], ax   (HIGH += HIGH + carry)
+5e                             pop si
+```
+
+Findings:
+- Same source-operand register convention: HIGH→AX, LOW→DX.
+- Memory-dest carry chain: `01 r/m, r16` (add) + `11 r/m, r16` (adc).
+- SI saved/restored because it's used as long-pointer holder.
+
+## long array store `arr[i] = v` — shifted bx, 2 FIXUPP'd word stores
+
+Fixture `3297-long-arr-store-obj`:
+
+```
+long arr[4];
+void put(int i, long v) { arr[i] = v; }
+```
+
+Body (20B):
+```
+8b 5e 04                       mov bx, i
+d1 e3                          shl bx, 1
+d1 e3                          shl bx, 1         (bx = i*4)
+8b 46 08                       mov ax, v HIGH
+8b 56 06                       mov dx, v LOW
+89 87 02 00 [FIXUPP _arr]      mov [bx+_arr+2], ax   (HIGH slot)
+89 97 00 00 [FIXUPP _arr]      mov [bx+_arr], dx     (LOW slot)
+```
+
+Findings:
+- Mirrors array load (3288) symmetrically.
+- Source register convention again: HIGH=AX, LOW=DX.
+- HIGH stored first, then LOW (no real ordering effect — bytes don't alias).
+
+## long `a == 0L` — OR-peephole confirmed
+
+Fixture `3298-long-cmp-eq-zero-obj`:
+
+```
+8b 46 04                       mov ax, a LOW
+0b 46 06                       or ax, a HIGH    (OR LOW with HIGH; ZF=1 iff both zero)
+75 05                          jne ELSE
+b8 01 00                       mov ax, 1
+eb 04                          jmp END
+ELSE:
+33 c0                          xor ax, ax       (return 0)
+```
+
+Findings:
+- The OR-peephole for `== 0L` previously documented is still emitted.
+- 5 bytes for the comparison (vs 10B for naive `cmp HIGH/jne; cmp LOW/jne`).
+- Avoids any explicit `cmp` — exploits OR setting ZF.
+
