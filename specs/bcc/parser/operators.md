@@ -1730,3 +1730,22 @@ Findings:
 - All `int ↔ unsigned int` and `char ↔ unsigned char` casts are
   no-ops at codegen.
 
+
+## `(unsigned char)int` then promote — `mov al + mov ah, 0` (5B)
+
+Fixture `3236-uchar-from-int-obj`:
+
+```c
+return (unsigned char)x;   /* truncate to uchar, then promote to int */
+```
+
+```
+8a 46 04                       mov al, x
+b4 00                          mov ah, 0   (zero-extend)
+```
+
+Findings:
+- 5 bytes total (3B byte load + 2B `mov ah, 0`).
+- Compare to `(char)int → int` (signed): byte load + `cbw` = 4B.
+- Unsigned promotion is 1 byte longer.
+

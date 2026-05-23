@@ -6815,3 +6815,43 @@ Findings:
 - 8 bytes total (vs 10B for int arr with shl).
 - Contrast: int arr uses BX + shl, char arr uses SI directly.
 
+
+## `arr[i].x` array-of-struct — scale i by sizeof(struct) + field offset
+
+Fixture `3237-arr-of-struct-obj`:
+
+```c
+struct P { int x; int y; };   /* sizeof = 4 */
+struct P arr[3];
+return arr[i].x;
+```
+
+```
+8b 5e 04                       mov bx, i
+d1 e3 d1 e3                    shl bx, 1 × 2  (i × 4 = sizeof(P))
+8b 87 00 00                    mov ax, [bx + _arr + 0]   (.x at offset 0)
+```
+
+Findings:
+- Scale i by `sizeof(struct)` (power-of-2 here, so shifts).
+- For non-pow2 struct size, would use imul.
+- Field offset baked into FIXUPP disp16: `+0` for `.x`, `+2` for `.y`.
+
+## `&char_arr[K]` — `mov ax, &arr+K` (no scaling for char)
+
+Fixture `3238-char-arr-ptr-obj`:
+
+```c
+char arr[5];
+return &arr[2];
+```
+
+```
+b8 02 00                       mov ax, &arr+2   (FIXUPP offset = K)
+```
+
+Findings:
+- For char array, K is the literal byte offset (sizeof=1, no scaling).
+- 3 bytes with FIXUPP.
+- For int arr, would be FIXUPP'd with `K * 2`.
+
