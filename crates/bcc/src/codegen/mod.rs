@@ -2501,6 +2501,64 @@ impl<'a> FunctionEmitter<'a> {
             );
             return ("jne", "je");
         }
+        // `if (<int-local> & K)` — stack-local sibling. `test word
+        // ptr [bp+N], K` (5 bytes) vs the load + and + or sequence.
+        // Fixture 1853.
+        if let ExprKind::BinOp { op: BinOp::BitAnd, left, right } = &cond.kind
+            && let ExprKind::Ident(name) = &left.kind
+            && self.locals.has(name)
+            && self.locals.type_of(name).is_int_like()
+            && let LocalLocation::Stack(off) = self.locals.location_of(name)
+            && let Some(k) = try_const_eval(right)
+        {
+            let k16 = k & 0xFFFF;
+            let _ = write!(
+                self.out,
+                "\ttest\tword ptr {},{k16}\r\n",
+                bp_addr(off),
+            );
+            return ("jne", "je");
+        }
+        // `(<int-mem> & K) == 0` or `!= 0` — the `& K` already sets
+        // ZF via TEST, so the outer compare against 0 is implicit.
+        // Routes through the same TestBpRelImm16 / TestGroupSymImm16
+        // shape but inverts the true/false mnemonic based on Eq vs
+        // Ne. Fixtures 3540 (`(x & 0x10) == 0`), 3264 (`(x & 0xff)
+        // != 0`).
+        if let ExprKind::BinOp { op: outer_op, left: outer_l, right: outer_r } = &cond.kind
+            && matches!(outer_op, BinOp::Eq | BinOp::Ne)
+            && try_const_eval(outer_r) == Some(0)
+            && let ExprKind::BinOp { op: BinOp::BitAnd, left, right } = &outer_l.kind
+            && let ExprKind::Ident(name) = &left.kind
+            && let Some(k) = try_const_eval(right)
+        {
+            let k16 = k & 0xFFFF;
+            let mnem_pair = match outer_op {
+                BinOp::Eq => ("je", "jne"),
+                BinOp::Ne => ("jne", "je"),
+                _ => unreachable!(),
+            };
+            if let Some(gty) = self.globals.type_of(name)
+                && gty.is_int_like()
+            {
+                let _ = write!(
+                    self.out,
+                    "\ttest\tword ptr DGROUP:_{name},{k16}\r\n",
+                );
+                return mnem_pair;
+            }
+            if self.locals.has(name)
+                && self.locals.type_of(name).is_int_like()
+                && let LocalLocation::Stack(off) = self.locals.location_of(name)
+            {
+                let _ = write!(
+                    self.out,
+                    "\ttest\tword ptr {},{k16}\r\n",
+                    bp_addr(off),
+                );
+                return mnem_pair;
+            }
+        }
         // `<long_global> == 0` / `<long_global> != 0` — BCC folds the
         // 32-bit comparison into `mov ax,low / or ax,high`, which
         // sets ZF iff both halves are zero. Fixture 215.

@@ -1061,6 +1061,11 @@ pub enum Instr {
         offset: i16,
         imm: u16,
     },
+    /// `test word ptr [bp+<offset>], imm16` — TEST r/m16, imm16 via
+    /// Grp3 /0 against a stack-local. Encoding: `F7 46 dd lo hi`
+    /// (mod=01 /0(TEST) r/m=110(BP) disp8). Fixture 1853 (`if (x &
+    /// 0x40)` for int local x).
+    TestBpRelImm16 { offset: i16, imm: u16 },
     /// `test <reg16>, imm16` — TEST r/m16, imm16 via Grp3 /0 against
     /// a register. Encoding: `F7 (0xC0+reg.code()) imm_lo imm_hi`
     /// (ModR/M mod=11 reg=000(/0=TEST) r/m=reg). Sets flags from the

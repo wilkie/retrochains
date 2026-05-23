@@ -387,6 +387,7 @@ fn instr_size(instr: &Instr) -> usize {
         | Instr::SbbGroupSymImm8Sx { .. } => 5,
         Instr::IncGroupSym { .. } | Instr::DecGroupSym { .. } => 4,
         Instr::TestGroupSymImm16 { .. } => 6,
+        Instr::TestBpRelImm16 { .. } => 5,
         Instr::TestReg16Imm16 { .. } => 4,
         Instr::AddGroupSymReg16 { .. } | Instr::SubGroupSymReg16 { .. } => 4,
         Instr::AndGroupSymReg16 { .. }
@@ -1835,6 +1836,15 @@ fn emit_instr(
             // Grp3 /0=TEST with mod=11 r/m=reg. Fixture 1415.
             out.push(0xF7);
             out.push(0xC0 | reg.code());
+            out.extend_from_slice(&imm.to_le_bytes());
+        }
+        Instr::TestBpRelImm16 { offset, imm } => {
+            // `test word ptr [bp+disp8], imm16` → F7 46 dd lo hi.
+            // ModR/M 46 = mod=01 /0(TEST) r/m=110([BP]+disp8).
+            // Fixture 1853.
+            out.push(0xF7);
+            out.push(0x46);
+            out.push(*offset as i8 as u8);
             out.extend_from_slice(&imm.to_le_bytes());
         }
         Instr::IncGroupSym { group, symbol, offset } => {
