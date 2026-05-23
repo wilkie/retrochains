@@ -6503,11 +6503,25 @@ impl<'a> FunctionEmitter<'a> {
                 .clone();
             final_ty = next;
         }
+        // When `depth > 0` and the root pointer is in a non-BX
+        // register, combine the `mov bx,<reg>` + `mov bx,[bx]` pair
+        // into a single `mov bx,[<reg>]` (the first peel). Saves 2
+        // bytes per chain. Mirrors BCC's actual shape for fixture
+        // 1232 (`**pp` with pp in SI → `mov bx,[si]; mov ax,[bx]`).
+        let mut remaining_peels = depth;
         if is_global {
             let _ = write!(self.out, "\tmov\tbx,word ptr DGROUP:_{base_name}\r\n");
         } else {
             match self.locals.location_of(base_name) {
                 LocalLocation::Reg(reg) if reg.name() == "bx" => {}
+                LocalLocation::Reg(reg) if depth > 0 => {
+                    let _ = write!(
+                        self.out,
+                        "\tmov\tbx,word ptr [{}]\r\n",
+                        reg.name(),
+                    );
+                    remaining_peels -= 1;
+                }
                 LocalLocation::Reg(reg) => {
                     let _ = write!(self.out, "\tmov\tbx,{}\r\n", reg.name());
                 }
@@ -6516,7 +6530,7 @@ impl<'a> FunctionEmitter<'a> {
                 }
             }
         }
-        for _ in 0..depth {
+        for _ in 0..remaining_peels {
             self.out.extend_from_slice(b"\tmov\tbx,word ptr [bx]\r\n");
         }
         final_ty
