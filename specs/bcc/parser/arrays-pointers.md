@@ -6591,3 +6591,41 @@ Findings:
   inc, or 2 by double inc on int*).
 - For sizeof = 6, single 3B `add si, 6` (imm8 sign-ext).
 
+
+## `int *p = &data[N]` past-end ptr — valid C, FIXUPP'd to `_data + N*sizeof`
+
+Fixture `3122-ptr-past-end-obj`:
+
+```c
+int data[10];
+int *end_ptr = &data[10];   /* one past the end — VALID in C */
+```
+
+_DATA: `_end_ptr` FIXUPP'd to `_data + 20`.
+
+Findings:
+- C allows pointer to one-past-the-end of an array.
+- BCC computes `N × sizeof(elem)` for the offset and FIXUPPs to
+  array base — same as in-bounds element pointers (`2950`).
+- No bounds check.
+
+## `arr[i]--` global indexed post-dec — load + mem-dec
+
+Fixture `3123-arr-post-dec-obj`:
+
+```c
+return arr[i]--;
+```
+
+```
+8b 5e 04                       mov bx, i
+d1 e3                          shl bx, 1
+8b 87 00 00                    mov ax, [bx + _arr]   (load old)
+ff 8f 00 00                    dec word [bx + _arr]  (mem-dec, ModR/M 8f)
+```
+
+Findings:
+- Same shape as `arr[i]++` (`3032`) but with dec.
+- ModR/M `8f` = mod 10 (disp16), op-ext 001 (dec /1), r/m 111 ([bx+disp16]).
+- 10 bytes total (scale + load + mem-dec).
+

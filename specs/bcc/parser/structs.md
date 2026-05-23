@@ -3420,3 +3420,36 @@ Findings:
 - For larger structs by value, multiple pushes or N_SCOPY@-style
   setup would be needed.
 
+
+## `struct{int; long; char}` sizeof=7 (no padding)
+
+Fixture `3119-sizeof-struct-obj`:
+
+```c
+struct M { int a; long b; char c; };
+sizeof(struct M);   /* = 7 */
+```
+
+Findings:
+- 2 (int) + 4 (long) + 1 (char) = 7. No padding.
+- BCC never pads fields, regardless of alignment.
+
+## 1-field struct param byte-identical to plain int param
+
+Fixture `3124-struct-1field-param-obj`:
+
+```c
+struct W { int v; };
+int extract(struct W w) { return w.v; }
+```
+
+```
+8b 46 04                       mov ax, w     (= mov ax, [bp+4])
+```
+
+Findings:
+- A `struct{int}` parameter accessed as `w.v` produces same code
+  as a plain `int` param.
+- Struct fields accessed at `[bp + arg_base + field_offset]`.
+- For 1-field struct of int: arg_base = +4, field_offset = +0.
+

@@ -1689,3 +1689,34 @@ Findings:
 - No different mangling, no different codegen.
 - The typedef'd name is recognized in declarations only.
 
+
+## `static int counter;` (no init) — placed in `_DATA` with zero bytes (NOT BSS!)
+
+Fixture `3120-static-int-uninit-obj`:
+
+```c
+int get(void) {
+  static int counter;     /* no explicit init */
+  counter = counter + 1;
+  return counter;
+}
+```
+
+Segment sizes:
+- `_DATA`: 2 bytes (= one int, initialized to zero)
+- `_BSS`:  0 bytes
+
+Findings:
+- **Function-local `static` variables (with or without explicit
+  init) always go to `_DATA`** in BCC, NOT to `_BSS`.
+- BCC implicitly zero-initializes uninit fn-local statics.
+- Compare to file-scope uninit globals (`int g;`) which DO go to
+  `_BSS`.
+- Distinction: BSS is only for non-static uninit globals.
+
+## `signed char` qualifier — byte-identical to plain `char`
+
+Fixture `3121-signed-char-obj`:
+
+`signed char c` byte-identical to `char c` (BCC defaults to signed).
+
