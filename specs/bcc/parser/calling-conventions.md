@@ -1935,3 +1935,27 @@ Findings:
 - `mov ax, &string; push ax` (4B) for the arg.
 - FIXUPP record resolves to the string's offset in `_DATA`.
 
+
+## Global fn-ptr init + call — `call word ptr [moffs]` (4B indirect)
+
+Fixture `3212-global-fnptr-init-obj`:
+
+```c
+int (*ptr)(int) = target;
+return ptr(v);
+```
+
+`_DATA`: `_ptr` (2B) FIXUPP'd to `_target`.
+
+```
+ff 76 04                       push v
+ff 16 00 00                    call word ptr [_ptr]    (4B indirect via global)
+59                             pop cx
+```
+
+Findings:
+- Indirect call via global fn-ptr = `call word ptr [moffs16]`
+  (`ff 16 disp16`, 4B).
+- ModR/M `16` = mod 00, op-ext 010 (call /2 indirect), r/m 110 (disp16).
+- Compare to fn-ptr local (`3074`) which uses `[bp-disp8]` addressing.
+

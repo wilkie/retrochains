@@ -4739,3 +4739,33 @@ Findings:
 - For-loop continue (`2975`) jumps to POST-step.
 - Same jmp instruction; just different label semantics per loop type.
 
+
+## Multi-return fn `if(>0) ret; if(<0) ret; ret 0;` — duplicate tests
+
+Fixture `3213-multi-return-obj`:
+
+```c
+int sign(int x) {
+  if (x > 0) return 1;
+  if (x < 0) return -1;
+  return 0;
+}
+```
+
+```
+0b f6 7e 05                    or si, si; jle → ELSE1
+b8 01 00                       return 1
+eb 0d                          jmp epi
+                               ; ELSE1:
+0b f6 7d 05                    or si, si; jge → ELSE2   (DUPLICATE test!)
+b8 ff ff                       return -1
+eb 04                          jmp epi
+33 c0                          return 0
+```
+
+Findings:
+- BCC does NOT consolidate sequential ifs that test the same value.
+- Each `if (x ...) return` produces its own cmp+branch unit.
+- 2 bytes wasted on the duplicate `or si, si`.
+- For 3-way return (sign), could be 1 cmp + jg/jl/(zero fall-through).
+

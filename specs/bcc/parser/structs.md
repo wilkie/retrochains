@@ -3583,3 +3583,45 @@ Findings:
 - 6 bytes total for the read.
 - For `b.y : 5` (offset 3, width 5), would extract via shift + AND.
 
+
+## Bitfield write `b.x = 5` — read-modify-write via AND mask + OR value
+
+Fixture `3209-bitfield-write-obj`:
+
+```c
+struct B { unsigned int x : 3; unsigned int y : 5; };
+b.x = 5;
+```
+
+```
+80 26 00 00 f8                 and byte [_b], 0xF8   (clear low 3 bits, ~7)
+80 0e 00 00 05                 or byte [_b], 5       (set new value)
+```
+
+Findings:
+- Bitfield write = byte mem-imm AND + OR (10 bytes for the 2 ops).
+- ModR/M `26`/`0e` = byte mem r/m 110 (disp16), op-ext /4 (and) / /1 (or).
+- AND mask = `~field_mask` (clears the field).
+- OR value = new value (shifted to field position if needed).
+
+## Bitfield read at non-zero offset — `shr × offset_bits + and mask`
+
+Fixture `3210-bitfield-y5-obj`:
+
+```c
+struct B { unsigned int x : 3; unsigned int y : 5; };
+return b.y;   /* y at bit offset 3, width 5 */
+```
+
+```
+a0 00 00                       mov al, [_b]   (byte load)
+d1 e8 d1 e8 d1 e8              shr al, 1 × 3  (shift to align)
+25 1f 00                       and ax, 0x001F (mask width-5 = 0x1F)
+```
+
+Findings:
+- For bitfield at offset N: unroll N shifts (since unroll threshold is N≤3).
+- For wider offsets (≥4), would use `mov cl, N; shr al, cl` (CL form).
+- Then AND with `(1<<width)-1`.
+- 12 bytes for read of `y` at offset 3 width 5.
+
