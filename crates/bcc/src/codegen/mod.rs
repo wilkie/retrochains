@@ -12038,6 +12038,15 @@ impl OperandSource {
 /// selects `shr` over `sar` for `Shr` — the left operand's static type
 /// drives the choice (right is always the shift count).
 fn emit_op_with_source(out: &mut Vec<u8>, op: BinOp, src: &OperandSource, unsigned: bool) {
+    // Identity folds: `a + 0`, `a - 0`, `a | 0`, `a ^ 0`, `a << 0`,
+    // `a >> 0` are all just `a`. Skip the emission entirely. BCC
+    // collapses these at compile time (fixtures 3370 `x + 0`, 2735
+    // `x - 0`).
+    if let OperandSource::Immediate(0) = src {
+        if matches!(op, BinOp::Add | BinOp::Sub | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr) {
+            return;
+        }
+    }
     match op {
         BinOp::Add => {
             let _ = write!(out, "\tadd\tax,{}\r\n", src.word());
