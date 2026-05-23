@@ -5904,3 +5904,58 @@ Findings:
 - Standard `&&` short-circuit to common FALSE label.
 - 21B body.
 
+
+## for-loop with `<= n` — `jle` (signed) instead of `jl`
+
+Fixture `3595-le-bound-obj`:
+
+```
+03 fe                          add di, si
+46                             inc si
+TEST:
+3b 76 04                       cmp si, n
+7e f8                          jle LOOP_BODY     (signed ≤)
+```
+
+Findings:
+- Same body as `< n` variant (3461) but with `jle` (`7e`) instead of `jl` (`7c`).
+- 1-bit difference in opcode produces the inclusive-vs-exclusive boundary.
+
+## `while (n-- && *p != v)` — post-dec-test + nested deref-test
+
+Fixture `3598-for-cond-bool-obj`:
+
+```
+8b 7e 06                       mov di, n
+eb 02                          jmp TEST
+LOOP_BODY:
+46 46                          inc si; inc si    (p++ on int*)
+TEST:
+8b c7                          mov ax, di
+4f                             dec di
+0b c0                          or ax, ax         (test pre-dec value)
+74 07                          je END
+8b 04                          mov ax, [si]
+3b 46 08                       cmp ax, v
+75 f0                          jne LOOP_BODY
+```
+
+Findings:
+- Post-dec test pattern (`mov; dec; or; je`) for `n--`.
+- Then deref+cmp for `*p != v`.
+- Both fail-paths exit the loop; only `jne LOOP_BODY` continues.
+
+## `(a + b) == c` — expression cmp via AX
+
+Fixture `3596-expr-cmp-cond-obj`:
+
+```
+8b 46 04                       mov ax, a
+03 46 06                       add ax, b
+3b 46 08                       cmp ax, c
+75 05                          jne ELSE
+```
+
+Findings:
+- 18B body. Standard pattern: compute LHS, then cmp.
+

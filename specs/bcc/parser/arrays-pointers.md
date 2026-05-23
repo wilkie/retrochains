@@ -7696,3 +7696,35 @@ Findings:
 - LEDATA contains placeholder bytes patched by the FIXUPPs.
 - 11B body for `pick(i)` — shl + indexed chained ptr load.
 
+
+## `arr[i] += arr[j]` — load source, then mem-direct add to dest
+
+Fixture `3593-arr-elem-compound-obj`:
+
+```
+8b 5e 06                       mov bx, j
+d1 e3                          shl bx, 1
+8b 87 00 00 [FIXUPP _arr]      mov ax, [bx + _arr]     (load arr[j])
+8b 5e 04                       mov bx, i
+d1 e3                          shl bx, 1
+01 87 00 00 [FIXUPP _arr]      add [bx + _arr], ax     (mem-direct add)
+```
+
+Findings:
+- Source-element loaded into AX (BX = &arr[j]).
+- BX then overwritten with &arr[i]; mem-direct add of AX to dest.
+- 18B body. Two FIXUPPs.
+
+## `*get()` (call returning ptr, deref result) — 7B chain
+
+Fixture `3597-deref-call-result-obj`:
+
+```
+e8 ?? ??                       call _get
+8b d8                          mov bx, ax
+8b 07                          mov ax, [bx]
+```
+
+Findings:
+- Tight 7B body. Returned ptr moved to BX for the deref.
+

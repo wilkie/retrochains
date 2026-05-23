@@ -2335,3 +2335,18 @@ Findings:
 - `04 imm8` = AL-short add (2B) — saves vs generic `80 c0 imm8` (3B).
 - 5B body. Char return in AL.
 
+
+## `(char a) * 2 returning int` — cbw widen + shl strength-reduce
+
+Fixture `3594-char-times-2-int-obj`:
+
+```
+8a 46 04                       mov al, a
+98                             cbw
+d1 e0                          shl ax, 1
+```
+
+Findings:
+- 6B body. Strength reduction (* 2 → shl 1) applies after the char→int promotion.
+- Combines char widening with multiply opt.
+
