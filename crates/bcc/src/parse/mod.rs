@@ -251,14 +251,11 @@ impl Parser {
             // The token after the name disambiguates: `(` means
             // function, anything else means global decl.
             if matches!(self.peek_n(probe).kind, TokenKind::LParen) {
-                if is_extern {
-                    let t = self.peek();
-                    return Err(ParseError::Unexpected {
-                        expected: "global declarator after `extern`".to_owned(),
-                        found: "function definition".to_owned(),
-                        offset: t.span.start,
-                    });
-                }
+                // `extern T f(...);` is a function prototype, not a
+                // definition — the `extern` keyword is harmless for
+                // function decls (declarations are extern by default).
+                // parse_function already handles the body-less prototype
+                // shape, so just route through it. Fixtures 1741, 2153.
                 let idx = functions.len();
                 let mut f = self.parse_function()?;
                 f.is_static = is_static;
@@ -1007,6 +1004,20 @@ impl Parser {
         }
         let mut params = Vec::new();
         loop {
+            // Variadic marker `...`. The lexer doesn't have a dedicated
+            // ellipsis token, so this is three consecutive Dots. We
+            // record varargs as a flag on the function (currently just
+            // consumed to satisfy parsing — codegen doesn't materialize
+            // the variadic ABI yet). Fixtures 2153, 2194.
+            if matches!(self.peek().kind, TokenKind::Dot)
+                && matches!(self.peek_n(1).kind, TokenKind::Dot)
+                && matches!(self.peek_n(2).kind, TokenKind::Dot)
+            {
+                self.bump();
+                self.bump();
+                self.bump();
+                return Ok((params, true));
+            }
             let mut ty = self.parse_type()?;
             // Pointer stars wrap the base type, just like in a local
             // declaration (fixture 095: `int sum(int *p)`).
