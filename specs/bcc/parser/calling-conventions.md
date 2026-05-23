@@ -2320,3 +2320,36 @@ Findings:
 - Standard 2-byte `or ax, ax` cmp-zero peephole on return value.
 - Same pattern as testing any int value.
 
+
+## Empty function `void noop(void) {}` — 5B prologue+epilogue only
+
+Fixture `3431-empty-fn-obj`:
+
+```
+55                             push bp
+8b ec                          mov bp, sp
+5d                             pop bp
+c3                             ret
+```
+
+Findings:
+- Even empty functions emit standard frame setup.
+- 5 bytes — minimum function size in BCC.
+- No frame-pointer omission.
+
+## Void function calling another — 3B body
+
+Fixture `3432-void-call-only-obj`:
+
+```c
+void wrap(void) { inner(); }
+```
+
+```
+e8 ?? ?? [FIXUPP _inner]       call _inner
+```
+
+Findings:
+- 3-byte body (the call).
+- No save/restore around the call needed.
+

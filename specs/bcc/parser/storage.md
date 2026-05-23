@@ -145,3 +145,30 @@ Findings:
 - Single \0 terminator (no \0 between segments).
 - One FIXUPP per concatenated string (not per segment).
 
+
+## char init from out-of-range int literal — silent truncation
+
+Fixture `3433-char-overflow-init-obj`:
+
+```c
+char c = 257;
+```
+
+- _DATA size = 1 byte.
+- LEDATA: `01` (= 257 mod 256).
+
+Findings:
+- Silent low-byte truncation: `257 & 0xFF = 1`.
+- No diagnostic emitted (or doesn't reach the OBJ — would be visible in stderr if present).
+
+## 2D array init `int m[3][2] = {{1,2},{3,4},{5,6}}` — row-major LEDATA
+
+Fixture `3436-2d-array-init-obj`:
+
+- _DATA size = 12 bytes.
+- LEDATA: `01 00 02 00 03 00 04 00 05 00 06 00` (row-major).
+
+Findings:
+- Row-major (C standard): [i][j] = arr[i*cols + j].
+- Single LEDATA covers all elements; nested braces are syntactic only.
+

@@ -2398,3 +2398,48 @@ Findings:
 - Code identical to `p + n` for `char *p` without casts.
 - 6B body. Cast doesn't emit any instructions.
 
+
+## Return-after-store with reg-allocated value — no reload
+
+Fixture `3434-return-after-store-obj`:
+
+```c
+int set_get(int *p, int v) {
+  *p = v;
+  return v;
+}
+```
+
+```
+56 57                          push si; push di
+8b 76 04                       mov si, p
+8b 7e 06                       mov di, v        (DI = v, reg-alloc)
+89 3c                          mov [si], di     (*p = v via DI)
+8b c7                          mov ax, di       (return v from DI — no reload!)
+```
+
+Findings:
+- When `v` is reg-allocated to DI, the return uses DI directly.
+- No memory reload (unlike the 3395 assign-in-cond case where x was a stack local).
+- Reg allocation suppresses the missed-opt store/reload pattern.
+
+## int == char (global) — char widened via cbw before cmp
+
+Fixture `3435-int-cmp-char-obj`:
+
+```c
+char gc;
+if (x == gc) ...
+```
+
+```
+a0 00 00 [FIXUPP _gc]          mov al, [_gc]
+98                             cbw              (widen char → int)
+3b 46 04                       cmp ax, x
+75 05                          jne ELSE
+```
+
+Findings:
+- char promoted to int via `cbw` before int comparison.
+- No byte-cmp peephole — int compare semantics required.
+
