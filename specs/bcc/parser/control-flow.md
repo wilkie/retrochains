@@ -5659,3 +5659,92 @@ Findings:
 - `jg` for signed > 0 (inverted from `<= 0`).
 - 13B body.
 
+
+## `x >= 0` — `cmp mem, 0 + jl ELSE` (inverted, signed)
+
+Fixture `3503-ge-zero-obj`:
+
+```
+83 7e 04 00                    cmp x, 0
+7c 05                          jl ELSE          (signed < 0)
+```
+
+Findings:
+- Same shape as `x <= 0` (3502) with `jl`/`jg` swapped.
+
+## switch with non-zero starting case (5..9) — sub-bias to 0
+
+Fixture `3504-switch-offset-obj`:
+
+```
+8b 5e 04                       mov bx, x
+83 eb 05                       sub bx, 5        (bias to 0)
+83 fb 04                       cmp bx, 4        (max bias = 9-5)
+77 20                          ja DEFAULT
+d1 e3                          shl bx, 1
+2e ff a7 35 00                 jmp [cs:bx + 0x35]
+```
+
+Findings:
+- Switch with cases [5..9] uses `sub bias by min_case` to normalize to 0-based index.
+- Then standard dense table dispatch.
+- 5 cases at offset 5 → dense table with 5 entries.
+
+## `a == 1 || a == 2` — early-exit `je TRUE` per non-last + `jne FALSE` on last
+
+Fixture `3505-or-alt-obj`:
+
+```
+83 fe 01                       cmp si, 1
+74 05                          je TRUE
+83 fe 02                       cmp si, 2
+75 05                          jne FALSE
+TRUE:
+b8 01 00                       mov ax, 1
+```
+
+Findings:
+- `==` alternative pattern uses early-exit-to-TRUE on each non-last subterm.
+- Last subterm inverted: failure exits to FALSE.
+- Same shape as `||` (3400) with `==` cmps.
+
+## `if (p != 0) f(p)` — `or` cmp-zero + je skip + push + call
+
+Fixture `3506-ptr-null-call-obj`:
+
+```
+8b 76 04                       mov si, p
+0b f6                          or si, si        (cmp p, 0)
+74 05                          je END
+56                             push si          (push p as arg, 1B)
+e8 ?? ?? [FIXUPP _handle]      call _handle
+59                             pop cx
+END:
+```
+
+Findings:
+- `push si` (1B) used as the 1-arg push since p is already in SI.
+- 13B body.
+
+## for-loop with body-inc vs step-inc — IDENTICAL OBJ
+
+Fixture `3507-for-body-inc-obj`:
+
+```c
+for (i = 0; i < n; ) {
+  s += i;
+  i++;
+}
+```
+
+Identical to:
+
+```c
+for (i = 0; i < n; i++) s += i;
+```
+
+Findings:
+- BCC's IR merges body-inc and step-inc into the same loop structure.
+- No syntactic distinction preserved in codegen.
+- Confirms that `i++` placement in for-body vs for-step is purely stylistic.
+

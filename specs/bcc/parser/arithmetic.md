@@ -3165,3 +3165,26 @@ Findings:
 - Compound-assign path **does** bypass the optimization, but `=` does not.
 - The expression `x * 2` is processed via normal expr path → `shl` reduction.
 
+
+## `unsigned x % 4` — strength-reduced to `and ax, 3` (3B)
+
+Fixture `3508-umod4-eq-obj`:
+
+```c
+unsigned mod4(unsigned x) { return x % 4; }
+```
+
+```
+8b 46 04                       mov ax, x
+25 03 00                       and ax, 3        (AX-short imm16 form)
+```
+
+Findings:
+- Unsigned mod by power-of-2 K reduced to `and ax, K-1`.
+- 6B body — much shorter than signed mod (11B body with idiv).
+- Strength-reduction summary:
+  - signed `/K`: NO reduction (idiv)
+  - signed `%K`: NO reduction (idiv + mov from DX)
+  - unsigned `/K`: YES (chained shr)
+  - unsigned `%K`: YES (and mask)
+
