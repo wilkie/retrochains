@@ -4336,3 +4336,112 @@ Findings:
 - 5 bytes for the comparison (vs 10B for naive `cmp HIGH/jne; cmp LOW/jne`).
 - Avoids any explicit `cmp` — exploits OR setting ZF.
 
+
+## long shift-by-1 inline — `(s)?ar/shr dx, 1; rcr ax, 1`
+
+Fixtures `3299-ulong-shr1-obj` (unsigned), `3300-long-sar1-obj` (signed):
+
+```
+                               ; unsigned `a >> 1`:
+d1 ea                          shr dx, 1       (logical: 0 → MSB)
+d1 d8                          rcr ax, 1       (rotate carry into AX MSB)
+
+                               ; signed `a >> 1`:
+d1 fa                          sar dx, 1       (arithmetic: sign-bit preserved)
+d1 d8                          rcr ax, 1       (same low half — uses carry)
+```
+
+Findings:
+- Shift-by-1 always inlined (4B) — no call to N_LXRSH@/N_LXURSH@.
+- Only the HIGH instruction differs: signed `sar` vs unsigned `shr`.
+- LOW shift is always `rcr` because the carry holds the bit shifted out of HIGH (regardless of HIGH-shift signedness).
+
+## long mul by power-of-2 — strength reduces to `mov cl, N; call N_LXLSH@`
+
+Fixture `3302-long-mul8-obj`:
+
+```
+8b 56 06                       mov dx, a HIGH
+8b 46 04                       mov ax, a LOW
+b1 03                          mov cl, 3        (3 = log2 8)
+e8 ?? ?? [FIXUPP N_LXLSH@]     call N_LXLSH@
+```
+
+Findings:
+- `* 8L` reduced to `<< 3` via N_LXLSH@ (CL = shift count).
+- 11B total. Compared to `* 4L` (CL=2, ~same size), this is the same call pattern but CL value varies.
+- Strength reduction kicks in for any const power-of-2 > 2.
+- `* 2L` is the only one inlined (carry chain `add ax,ax; adc dx,dx`).
+
+## long mul by non-power-of-2 const — `N_LXMUL@` with const in DX:AX
+
+Fixture `3303-long-mul10-obj`:
+
+```
+8b 4e 06                       mov cx, a HIGH       (a → CX:BX, fast-call slot)
+8b 5e 04                       mov bx, a LOW
+33 d2                          xor dx, dx           (10L HIGH = 0)
+b8 0a 00                       mov ax, 10           (10L LOW = 10)
+e8 ?? ?? [FIXUPP N_LXMUL@]     call N_LXMUL@
+```
+
+Findings:
+- N_LXMUL@ convention: one operand in CX:BX (fast-call), other in DX:AX, result in DX:AX.
+- BCC puts the variable in CX:BX, the constant in DX:AX.
+- Loads constant 10L as imm16 (3B each half — `xor dx,dx` is 2B since 10 < 65536).
+
+## long ternary `c ? a : b` — branch, no joint computation
+
+Fixture `3304-long-ternary-obj`:
+
+```
+83 7e 04 00                    cmp c, 0
+74 08                          je ELSE
+8b 56 08                       mov dx, a HIGH
+8b 46 06                       mov ax, a LOW
+eb 06                          jmp END
+ELSE:
+8b 56 0c                       mov dx, b HIGH
+8b 46 0a                       mov ax, b LOW
+END:
+```
+
+Findings:
+- Plain branching. Each arm loads DX:AX from its operand.
+- 20B body. No conditional move (8086 doesn't have CMOV anyway).
+
+## long local array `long buf[3]` — 12B alloc, HIGH-then-LOW init, mem-source sum chain
+
+Fixture `3301-long-local-arr-obj`:
+
+```c
+long buf[3]; buf[0] = 1L; buf[1] = 2L; buf[2] = 3L;
+return buf[0] + buf[1] + buf[2];
+```
+
+Init (12B alloc, 6× `c7 46 disp imm16`):
+```
+83 ec 0c                       sub sp, 12          (3 longs × 4B)
+c7 46 f6 00 00                 mov word [bp-10], 0    buf[0] HIGH = 0
+c7 46 f4 01 00                 mov word [bp-12], 1    buf[0] LOW  = 1
+c7 46 fa 00 00                 mov word [bp-6], 0     buf[1] HIGH = 0
+c7 46 f8 02 00                 mov word [bp-8], 2     buf[1] LOW  = 2
+c7 46 fe 00 00                 mov word [bp-2], 0     buf[2] HIGH = 0
+c7 46 fc 03 00                 mov word [bp-4], 3     buf[2] LOW  = 3
+```
+
+Sum:
+```
+8b 56 f6                       mov dx, buf[0].HIGH
+8b 46 f4                       mov ax, buf[0].LOW
+03 46 f8                       add ax, buf[1].LOW
+13 56 fa                        adc dx, buf[1].HIGH
+03 46 fc                       add ax, buf[2].LOW
+13 56 fe                        adc dx, buf[2].HIGH
+```
+
+Findings:
+- HIGH-first then LOW-second init pattern (consistent with stores in 3287/3297).
+- 5B per `mov [mem], imm16` (cw-form, opcode `c7 /0`).
+- Chained sum with mem-source: no temporary saves — DX:AX accumulates directly.
+
