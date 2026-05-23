@@ -2604,12 +2604,25 @@ impl<'a> FunctionEmitter<'a> {
         if let ExprKind::BinOp { op, left, right } = &cond.kind
             && op.is_comparison()
         {
-            // `K op x` with K const and x non-const: BCC swaps to
-            // `x op K` so the memory-direct cmp path applies. For
-            // Eq/Ne the op is commutative; for Lt/Gt/Le/Ge the
-            // operand swap requires flipping the op (lt↔gt, le↔ge).
-            // Fixtures 2967 (`0 == x`), and similar.
+            // `<arith>(X, Y) <relop> 0` — the arith op already set
+            // the flags we want. Just evaluate the arith expression
+            // into AX and use the relop's mnemonic directly. Saves
+            // the `or ax,ax` (or `cmp ax,0`) instruction. Fixtures
+            // 3254 (`a + b > 0`), 3257 (`a - b == 0`).
             let unsigned = self.cmp_is_unsigned(left, right);
+            if try_const_eval(right) == Some(0)
+                && let ExprKind::BinOp { op: arith, .. } = &left.kind
+                && matches!(
+                    arith,
+                    BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor
+                )
+            {
+                self.emit_expr_to_ax(left);
+                return (
+                    op.jump_if_true(unsigned).expect("comparison op has true mnemonic"),
+                    op.jump_if_false(unsigned).expect("comparison op has false mnemonic"),
+                );
+            }
             if try_const_eval(left).is_some() && try_const_eval(right).is_none() {
                 let flipped_op = match op {
                     BinOp::Eq | BinOp::Ne => *op,
