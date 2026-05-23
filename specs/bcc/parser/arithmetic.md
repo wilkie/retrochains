@@ -2676,3 +2676,30 @@ Findings:
 - Source-form lesson: char arithmetic in chained binary ops is
   expensive in BCC.
 
+
+## ⚠️ Char→int-locals "optimization" is NOT a savings (36B > 24B direct)
+
+Fixture `3041-char-int-locals-sum-obj`:
+
+```c
+int ai, bi, ci;
+ai = a; bi = b; ci = c;
+return ai + bi + ci;  /* int adds */
+```
+
+**Total bytes: 36** (sub sp + 3×(load+cbw+store) + mov + 2×add).
+
+Compare to direct char chain (`3037`): 24 bytes.
+
+**CORRECTION** to earlier doc claim: converting chars to int locals
+**INCREASES** code size by 12 bytes vs the direct char chain. Each
+local store/reload adds 5-7 bytes. **The direct chained char+char+char
+form IS the shorter option in BCC.**
+
+Findings:
+- BCC's worst-case char-chain pattern (`3037`) is actually optimal
+  among non-trivial 3-char-sum forms.
+- Char→int via locals: 36B (3 promote-to-locals + sum-of-locals).
+- Direct char chain: 24B (3 inline promotes with push/pop spill).
+- The "promote to int local" advice does NOT help for char chains.
+

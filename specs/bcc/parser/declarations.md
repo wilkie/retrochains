@@ -1599,3 +1599,33 @@ Findings:
 - A param-modification is essentially the same as modifying a
   local promoted to si.
 
+
+## Multiple param modifications — all confined to promoted registers
+
+Fixture `3046-multi-param-mod-obj`:
+
+```c
+int swap_add(int a, int b) {
+  int t;
+  t = a;
+  a = b;
+  b = t;
+  return a + b;
+}
+```
+
+```
+8b 76 04                       mov si, a (promote)
+8b 7e 06                       mov di, b (promote)
+89 76 fe                       t = a (store si to [bp-2])
+8b f7                          mov si, di (a = b)
+8b 7e fe                       mov di, t (b = t)
+8b c6 03 c7                    return a + b
+```
+
+Findings:
+- Both params promoted to si and di — modifications stay in registers.
+- Original `[bp+4]` and `[bp+6]` slots NEVER written.
+- Per C value-passing: caller's args unaffected.
+- Temp `t` gets a single stack slot for the swap shuffle.
+

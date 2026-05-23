@@ -4512,3 +4512,51 @@ Findings:
   jmp remains.
 - BCC's "loop with no real condition" canonicalization.
 
+
+## `for (; cond; )` ≡ `while (cond)` — BYTE-IDENTICAL
+
+Fixture `3042-for-no-init-post-obj`:
+
+```c
+for (; n > 0; ) {
+  s = s + n;
+  n = n - 1;
+}
+```
+
+Byte-identical to:
+```c
+while (n > 0) {
+  s = s + n;
+  n = n - 1;
+}
+```
+
+Findings:
+- Missing init and missing post in `for` just elide those slots.
+- BCC normalizes `for (; cond; )` to the same shape as `while (cond)`.
+
+## `while (n--)` — load OLD value + decrement + test (post-dec semantics)
+
+Fixture `3043-while-post-dec-obj`:
+
+```c
+while (n--) {
+  s = s + 1;
+}
+```
+
+```
+                               ; COND:
+8b c7                          mov ax, di     (OLD value of n)
+4f                             dec di         (n--)
+0b c0                          or ax, ax      (test OLD value)
+75 f4                          jne → BODY     (loop while old != 0)
+```
+
+Findings:
+- C semantics: `n--` yields old value, then decrements.
+- BCC: `mov ax, n; dec n; or ax, ax; jne` (6B for cond+test).
+- The OLD value drives the test; decrement happens in place.
+- Loop runs `original_n` times (treating 0 as false).
+
