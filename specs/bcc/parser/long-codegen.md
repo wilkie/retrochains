@@ -4445,3 +4445,67 @@ Findings:
 - 5B per `mov [mem], imm16` (cw-form, opcode `c7 /0`).
 - Chained sum with mem-source: no temporary saves — DX:AX accumulates directly.
 
+
+## long compound `a += b` on stack params — same source-register convention
+
+Fixture `3425-long-pluseq-obj`:
+
+```c
+long acc(long a, long b) { a += b; return a; }
+```
+
+```
+8b 46 0a                       mov ax, b HIGH    (AX = HIGH per source-operand convention)
+8b 56 08                       mov dx, b LOW
+01 56 04                       add [bp+4], dx    (a LOW += b LOW)
+11 46 06                       adc [bp+6], ax    (a HIGH += b HIGH + carry)
+8b 56 06                       mov dx, a HIGH    (reload a for return)
+8b 46 04                       mov ax, a LOW
+```
+
+Findings:
+- Same register convention as `*p += v` (3296): HIGH→AX, LOW→DX when long is source.
+- Reloads `a` (now updated) for return — 6B of reload.
+
+## long argument passing — 2 word pushes (HIGH first, then LOW)
+
+Fixture `3426-long-arg-pass-obj`:
+
+```c
+return handle(0x12345678L);
+```
+
+```
+b8 34 12                       mov ax, 0x1234   (HIGH word)
+ba 78 56                       mov dx, 0x5678   (LOW word)
+50                             push ax           (HIGH pushed first)
+52                             push dx           (LOW pushed second)
+e8 ?? ?? [FIXUPP _handle]      call _handle
+59 59                          pop cx; pop cx   (4-byte cleanup)
+```
+
+Findings:
+- Push order: HIGH first, then LOW. On stack: LOW at lower address (callee-friendly: `[bp+4] = LOW, [bp+6] = HIGH`).
+- Cleanup of 4 bytes uses `pop cx; pop cx` (2B) — saves 1B vs `add sp, 4` (3B).
+- Cleanup threshold by byte-count: 1-2B → pop, 3-4B → pop pairs, 5+B → add sp.
+
+## long shift by variable — N_LXLSH@ with CL = low byte of count
+
+Fixture `3430-long-shift-by-var-obj`:
+
+```c
+long shift(long a, int n) { return a << n; }
+```
+
+```
+8b 56 06                       mov dx, a HIGH
+8b 46 04                       mov ax, a LOW
+8a 4e 08                       mov cl, [bp+8]   (LOW byte of n — int's LSB)
+e8 ?? ?? [FIXUPP N_LXLSH@]     call N_LXLSH@
+```
+
+Findings:
+- N_LXLSH@ used for variable-count long shifts (same helper as const power-of-2).
+- Only LOW byte of n loaded — implicit truncation to 8-bit shift count.
+- 12B body.
+

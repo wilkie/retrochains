@@ -2349,3 +2349,52 @@ Findings:
 - Negative constants in the range [-128, 127] use the imm8-sign-extended form.
 - Same shape as small positive constants — no special encoding for negatives.
 
+
+## Ternary in initialization `int x = c ? 10 : 20;` — store + later reload
+
+Fixture `3428-ternary-init-obj`:
+
+```c
+int pick(int c) {
+  int x = c ? 10 : 20;
+  return x + 1;
+}
+```
+
+```
+4c 4c                          dec sp; dec sp   (alloc x)
+83 7e 04 00                    cmp c, 0
+74 05                          je ELSE
+b8 0a 00                       mov ax, 10
+eb 03                          jmp END_TERN
+ELSE:
+b8 14 00                       mov ax, 20
+END_TERN:
+89 46 fe                       mov [bp-2], ax   (store to x)
+8b 46 fe                       mov ax, [bp-2]   (reload for `x + 1`)
+40                             inc ax           (+ 1)
+```
+
+Findings:
+- BCC stores to x then immediately reloads — no value tracking across statements.
+- Optimal: keep value in AX, skip the store/reload (3B savings).
+- Confirms statement-boundary IR design.
+
+## Pointer cast `(char*)((int)p + n)` — no-op casts in small memory model
+
+Fixture `3429-cast-pseudo-vp-obj`:
+
+```c
+char *bump(char *p, int n) { return (char *)((int)p + n); }
+```
+
+```
+8b 46 04                       mov ax, p
+03 46 06                       add ax, n
+```
+
+Findings:
+- Both casts (`(int)` and `(char*)`) are no-ops in small memory model (ptr = 2B word).
+- Code identical to `p + n` for `char *p` without casts.
+- 6B body. Cast doesn't emit any instructions.
+

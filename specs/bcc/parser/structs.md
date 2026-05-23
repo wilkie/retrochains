@@ -4048,3 +4048,24 @@ Findings:
 - Same shape as `&arr[const]` (3309): 3B + FIXUPP.
 - Member offset folded into the immediate at compile time.
 
+
+## 3-deep struct nesting `o.middle.inner.v` — single offset, 3B body
+
+Fixture `3427-3deep-struct-obj`:
+
+```c
+struct Inner { int v; };
+struct Middle { struct Inner inner; };
+struct Outer { struct Middle middle; } o;
+int deep(void) { return o.middle.inner.v; }
+```
+
+```
+a1 00 00 [FIXUPP _o]           mov ax, [_o]   (offset folded to 0)
+```
+
+Findings:
+- All nested member offsets are 0 (each struct has one field at offset 0).
+- BCC folds all `.member` accesses into a single byte offset in the FIXUPP.
+- Deeply nested access has no runtime cost beyond a flat field access.
+
