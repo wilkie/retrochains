@@ -3523,3 +3523,30 @@ Findings:
 - For larger constants where HIGH is non-zero, both halves would
   use add/adc with the respective constants.
 
+
+## Local `long += 1L` — `add word [mem]` + `adc word [mem]` (mem-imm)
+
+Fixture `3094-local-long-plus-eq-obj`:
+
+```c
+long bump(long n) {
+  n += 1L;
+  return n;
+}
+```
+
+```
+83 46 04 01                    add word [bp+4], 1   (LOW + 1, imm8 sign-ext)
+83 56 06 00                    adc word [bp+6], 0   (HIGH + carry)
+8b 56 06                       mov dx, [bp+6]       (load HIGH for return)
+8b 46 04                       mov ax, [bp+4]       (load LOW for return)
+```
+
+Findings:
+- Local long `+= K` uses **mem-imm add then adc** (4B each via
+  `83 /0` and `83 /2` with imm8 sign-ext).
+- 8 bytes for the compute (add + adc).
+- 6 bytes to load result into DX:AX return convention.
+- Note ModR/M ops: `83 /0` = add, `83 /2` = adc. Both use imm8
+  sign-ext when constant fits.
+

@@ -6425,3 +6425,32 @@ Findings:
 - NO need for separate AX load when storing an immediate.
 - For `*p = var`, would need a load + reg-source store.
 
+
+## `*dst = *src` for 4B struct ptrs — inline 2-word copy via di/si
+
+Fixture `3093-struct-ptr-copy-obj`:
+
+```c
+struct P { int x; int y; };
+void copy(struct P *dst, struct P *src) {
+  *dst = *src;
+}
+```
+
+```
+8b 76 04                       mov si, dst
+8b 7e 06                       mov di, src
+8b 45 02                       mov ax, [di + 2]   (src->y)
+8b 15                          mov dx, [di]       (src->x)
+89 44 02                       mov [si + 2], ax   (dst->y =)
+89 14                          mov [si], dx       (dst->x =)
+```
+
+Findings:
+- 4-byte struct copy via ptrs = 2 word loads + 2 word stores.
+- HIGH field copied first (offset 2), then LOW (offset 0).
+- AX and DX as transit registers.
+- Same pattern as global struct copy (`3056`) but using register
+  addressing through si/di.
+- 12 bytes for the data ops.
+

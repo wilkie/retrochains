@@ -2753,3 +2753,63 @@ Findings:
   (rounding is same for both directions on unsigned).
 - 9 bytes total for the div.
 
+
+## `unsigned int / 2` — STRENGTH-REDUCED to `shr ax, 1` (2B)
+
+Fixture `3089-uint-div-2-obj`:
+
+```c
+unsigned int half(unsigned int x) { return x / 2; }
+```
+
+```
+8b 46 04                       mov ax, x
+d1 e8                          shr ax, 1   (UNSIGNED shift)
+```
+
+Findings:
+- Unsigned div by power-of-2 IS strength-reduced (safe — no rounding issue).
+- 5 bytes total (vs signed `/2` = 9 bytes — 4B savings!).
+
+## `int / 4` — Signed div, no strength-reduction (uses idiv)
+
+Fixture `3090-int-div-4-obj`:
+
+```
+mov ax, x
+mov bx, 4
+cwd
+idiv bx
+```
+
+Findings:
+- Signed `/K` always uses `idiv`, regardless of K being power-of-2.
+- C semantics require round-toward-zero, but signed shift rounds toward
+  -∞ — they differ for negative odd values.
+
+## Mod-by-2 strength reduction (UNSIGNED only)
+
+Fixtures `3091-int-mod-2-obj`, `3092-uint-mod-2-obj`:
+
+```c
+int  parity(int x)            { return x % 2; }   /* 11 bytes: idiv + mov ax, dx */
+unsigned parity(unsigned int x) { return x % 2; } /*  6 bytes: and ax, 1 */
+```
+
+```
+                               ; SIGNED x % 2 (11 bytes):
+8b 46 04 bb 02 00 99 f7 fb 8b c2
+
+                               ; UNSIGNED x % 2 (6 bytes):
+8b 46 04 25 01 00              mov ax, x; and ax, 1
+```
+
+Findings:
+- **Signed mod-by-2**: full idiv + `mov ax, dx` (since idiv puts
+  quotient in AX and remainder in DX). NOT strength-reduced.
+- **Unsigned mod-by-2**: strength-reduced to `and ax, 1` (low bit
+  extraction). 5 bytes saved.
+- **General rule for power-of-2 mod**:
+  - Signed `x % (1<<n)`: idiv (not reducible for negatives)
+  - Unsigned `x % (1<<n)`: `and ax, (1<<n)-1` (mask low bits)
+
