@@ -2057,3 +2057,39 @@ Findings:
 - When referenced → EXTDEF emitted as plain external symbol.
 - Loaded via standard `a1 imm16` (3B) with FIXUPP type=EXTDEF.
 
+
+## Function pointer call `fp(x)` — `call r/m16` indirect
+
+Fixture `3323-fn-ptr-call-obj`:
+
+```c
+int call(int (*fp)(int), int x) { return fp(x); }
+```
+
+Body:
+```
+ff 76 06                       push x
+ff 56 04                       call [bp+4]      (call near indirect via mem)
+59                             pop cx           (1-arg cleanup)
+```
+
+Findings:
+- Indirect call: `ff /2 r/m16` (3B). Same size as direct `e8 disp16` but no FIXUPP needed.
+- Standard cdecl arg push + caller cleanup.
+
+## Function name as value — `mov ax, fn` with FIXUPP
+
+Fixture `3324-fn-ptr-arg-obj`:
+
+```c
+int (*get_add1(void))(int) { return add1; }
+```
+
+```
+b8 00 00 [FIXUPP _add1]        mov ax, 0       (resolves to _add1 offset)
+```
+
+Findings:
+- Function symbol used as value = 3B `mov reg, imm16` with FIXUPP.
+- Both `_add1` and `_get_add1` get PUBDEF entries (neither is static).
+

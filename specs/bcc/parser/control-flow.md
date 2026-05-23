@@ -4972,3 +4972,63 @@ Findings:
 - Early return inverted to "if NOT cond skip the body". Clean.
 - 15B body. Reg-allocated parameter through SI.
 
+
+## do-while `continue` — jumps directly to the while-test
+
+Fixture `3326-do-while-continue-obj`:
+
+```c
+do {
+  if (n & 1) { n >>= 1; continue; }
+  s++;
+  n >>= 1;
+} while (n);
+```
+
+Body:
+```
+LOOP:
+f7 c6 01 00                    test si, 1
+74 04                          je EVEN
+                               ; ODD path:
+d1 fe                          sar si, 1
+eb 03                          jmp LOOP_TEST    (continue → straight to test)
+EVEN:
+47                             inc di           (s++)
+d1 fe                          sar si, 1
+LOOP_TEST:
+0b f6                          or si, si
+75 ef                          jne LOOP
+```
+
+Findings:
+- `continue` in do-while jumps to the while-condition test (LOOP_TEST), not to LOOP top.
+- Saves the redundant re-execution of body code between continue and test.
+- `or si, si` cmp-zero peephole reused for the do-while exit test.
+
+## Ternary in void context — result still computed and loaded
+
+Fixture `3328-ternary-sideeffect-obj`:
+
+```c
+int a, b;
+void bump(int c) { c ? a++ : b++; }   /* result discarded */
+```
+
+```
+83 7e 04 00                    cmp c, 0
+74 09                          je ELSE
+ff 06 00 00 [FIXUPP _a]        inc [_a]
+a1 00 00    [FIXUPP _a]        mov ax, [_a]     ; loaded but discarded
+eb 07                          jmp END
+ELSE:
+ff 06 02 00 [FIXUPP _b]        inc [_b]
+a1 02 00    [FIXUPP _b]        mov ax, [_b]     ; loaded but discarded
+END:
+```
+
+Findings:
+- BCC computes the ternary's "result" (the post-inc value) and loads it into AX even though void context discards it.
+- Each arm wastes 3B on the post-inc load.
+- Also: postfix `a++` in discard context appears to be treated as prefix (`++a`) — only the side effect matters.
+

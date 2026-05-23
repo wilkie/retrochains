@@ -6961,3 +6961,49 @@ Findings:
 - Uses BX as ptr holder (not SI), since SI would require additional saves.
 - 9-byte body.
 
+
+## Local `char *p = "string-lit"` — string in _DATA, p reg-allocated to SI
+
+Fixture `3325-local-strptr-obj`:
+
+```c
+char second(void) { char *p = "hi"; return p[1]; }
+```
+
+Body:
+```
+56                             push si
+be 00 00 [FIXUPP _DATA "hi"]   mov si, offset "hi"
+8a 44 01                       mov al, [si+1]
+```
+
+Findings:
+- "hi\0" placed in _DATA via LIDATA at offset 0.
+- Local char* gets SI register allocation (no stack slot).
+- p[1] = `mov al, [si+disp8]` (3B byte load).
+
+## 2D array `m[i][j]` — row-shift + col-shift + add + indexed load
+
+Fixture `3327-2d-array-obj`:
+
+```c
+int m[3][2];
+int get(int i, int j) { return m[i][j]; }
+```
+
+Body:
+```
+8b 5e 04                       mov bx, i
+d1 e3 d1 e3                    shl bx, 1; shl bx, 1    (bx = i * 4, row stride)
+8b 46 06                       mov ax, j
+d1 e0                          shl ax, 1                (ax = j * 2)
+03 d8                          add bx, ax               (bx = i*row + j*col)
+8b 87 00 00 [FIXUPP _m]        mov ax, [bx + _m]
+```
+
+Findings:
+- Row stride = `cols * sizeof(elem)` computed by stacking shifts (i*4 = `shl 1; shl 1`).
+- Column index computed independently then added — no nested multiply.
+- 14B for indexing + 4B for the final load = 18B body.
+- Pure shift-based for power-of-2 dimensions; non-power-of-2 likely uses imul.
+
