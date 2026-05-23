@@ -2703,3 +2703,53 @@ Findings:
 - Direct char chain: 24B (3 inline promotes with push/pop spill).
 - The "promote to int local" advice does NOT help for char chains.
 
+
+## `a + b * c + d` 4-term complex — imul first, then linear adds
+
+Fixture `3087-complex-4-term-obj`:
+
+```c
+return a + b * c + d;
+```
+
+```
+8b 46 06                       mov ax, b
+f7 6e 08                       imul word [c]    (b * c)
+50                             push ax           (spill b*c)
+8b 46 04                       mov ax, a
+5a                             pop dx
+03 c2                          add ax, dx       (a + b*c)
+03 46 0a                       add ax, d        (+ d, mem-source)
+```
+
+Findings:
+- Multiplication evaluated FIRST (precedence).
+- Spill `b*c` to stack while loading `a`.
+- Add `a + b*c` via DX, then add `d` via mem-source.
+- 16 bytes total.
+
+## `int x / 2` — SIGNED DIV uses idiv, NOT strength-reduced to shift
+
+Fixture `3088-int-div-2-obj`:
+
+```c
+return x / 2;
+```
+
+```
+8b 46 04                       mov ax, x
+bb 02 00                       mov bx, 2
+99                             cwd               (sign-extend DX:AX)
+f7 fb                          idiv bx           (signed division)
+```
+
+Findings:
+- Signed `int / 2` is **NOT strength-reduced to `sar ax, 1`**.
+- Reason: signed shift rounds toward `-∞`, but C division rounds
+  toward 0. For negative odd values: `-3 / 2 = -1` (C semantics),
+  but `-3 >> 1 = -2` (shift semantics). Different results.
+- BCC uses `idiv` to get correct C rounding for negative values.
+- For `unsigned int / 2`, BCC could safely use `shr ax, 1`
+  (rounding is same for both directions on unsigned).
+- 9 bytes total for the div.
+

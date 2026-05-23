@@ -2542,3 +2542,48 @@ Findings:
 - Single-case switch = same shape as a 1-case if-else.
 - LINEAR dispatch (always for N<4).
 
+
+## 5 contig cases 0..4 — DENSE dispatch confirmed
+
+Fixture `3083-switch-5-dense-obj`:
+
+```c
+switch (x) { case 0..4: ... }
+```
+
+Standard dense pattern: `cmp bx, 4; ja → DEFAULT; shl bx, 1; jmp cs:[bx+TABLE]`.
+
+5-entry dispatch table. No normalization (cases start at 0).
+
+## Multiple case labels sharing body — table entries point to SAME address
+
+Fixture `3084-multi-case-labels-obj`:
+
+```c
+switch (x) {
+  case 1:
+  case 2:
+  case 3:
+    return 100;
+  case 4:
+    return 200;
+}
+```
+
+Dispatch (1..4 case range, dec normalize):
+```
+4b                             dec bx (normalize 1..4 → 0..3)
+83 fb 03                       cmp bx, 3
+77 11                          ja → DEFAULT
+d1 e3                          shl bx, 1
+2e ff a7 24 00                 jmp word ptr cs:[bx + TABLE]
+```
+
+Findings:
+- The 4-entry dispatch table has entries 0, 1, 2 all pointing to
+  the SAME body address (return 100), and entry 3 pointing to
+  return 200.
+- The shared body is **emitted once**; multiple table entries
+  share the address.
+- Total bytes saved vs writing 3 separate `return 100` blocks.
+

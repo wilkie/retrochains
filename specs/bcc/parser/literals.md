@@ -635,3 +635,31 @@ Findings:
 - Compile-time constant; returned as literal.
 - For `sizeof("")` = 1 (just the NUL).
 
+
+## `char *name = "hello";` — string in `_DATA` + ptr slot with FIXUPP
+
+Fixture `3086-string-literal-global-obj`:
+
+```c
+char *name = "hello";
+return name[0];
+```
+
+`_DATA` (8 bytes total):
+- offset 0..2: `_name` ptr slot (FIXUPP'd to offset 2 below)
+- offset 2..8: `"hello\0"` string literal (6 bytes)
+
+```
+8b 1e 00 00                    mov bx, [_name]   (load ptr)
+8a 07                          mov al, [bx]      (deref byte)
+98                             cbw
+```
+
+Findings:
+- String literal in `char *p = "..."` is **interned in `_DATA`**.
+- The pointer slot gets a FIXUPP record pointing to the string's
+  offset within `_DATA`.
+- Multiple references to the same string literal would share the
+  same `_DATA` slot (string-interning).
+- Access via `mov bx, [name]; mov al, [bx]` standard ptr-deref pattern.
+
