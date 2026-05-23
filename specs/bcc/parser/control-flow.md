@@ -4797,3 +4797,26 @@ Findings:
 - Second cond's FALSE falls through to AFTER_LOOP.
 - Short-circuit: if first FALSE, second is never evaluated.
 
+
+## `if (non-zero-const)` (e.g. `if (-1)`) — same as `if (1)` (always-true)
+
+Fixture `3250-if-neg-1-const-obj`:
+
+```c
+if (-1) return a;
+return b;
+```
+
+```
+8b 46 04                       mov ax, a   (THEN branch, condition folded to true)
+eb 05                          jmp epi
+8b 46 06                       mov ax, b   (UNREACHABLE but emitted)
+```
+
+Findings:
+- Any non-zero compile-time constant in `if` is treated as
+  always-true: condition elided.
+- Dead ELSE branch still emitted (no-DCE for statements per `2969`).
+- Same shape as `if (1)` (`2969`).
+- Negative constants `if (-1)` work because `-1 != 0` (non-zero).
+

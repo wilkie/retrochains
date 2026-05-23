@@ -6877,3 +6877,25 @@ Findings:
 - Unsigned variant is **1 byte longer** due to `mov ah, 0` (2B)
   vs `cbw` (1B).
 
+
+## `&g[i]` for global int arr — scale i + `add ax, &_g` (FIXUPP imm16)
+
+Fixture `3249-fn-ret-int-ptr-obj`:
+
+```c
+int g[5];
+return &g[i];
+```
+
+```
+8b 46 04                       mov ax, i
+d1 e0                          shl ax, 1     (i × sizeof(int))
+05 00 00                       add ax, &_g   (FIXUPP imm16, 5B AX-acc)
+```
+
+Findings:
+- Scale i + `add ax, &arr` (5B with FIXUPP, AX-acc form).
+- 8 bytes total for the &elem computation.
+- ModR/M-less: AX-acc `05 imm16` directly.
+- Returns ptr in AX (which is the addressed-of element).
+

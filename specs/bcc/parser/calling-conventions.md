@@ -1959,3 +1959,32 @@ Findings:
 - ModR/M `16` = mod 00, op-ext 010 (call /2 indirect), r/m 110 (disp16).
 - Compare to fn-ptr local (`3074`) which uses `[bp-disp8]` addressing.
 
+
+## Mixed-type fn call `f(int, long, char)` — args pushed right-to-left, sized per type
+
+Fixture `3246-mixed-arg-call-obj`:
+
+```c
+mixed(5, 100L, 'X');   /* int, long, char */
+```
+
+```
+b0 58 50                       mov al, 'X'; push ax        (char arg, 2B on stack)
+33 c0 ba 64 00 50 52           xor ax, ax; mov dx, 100;
+                               push ax; push dx            (long arg, 4B: HIGH then LOW)
+b8 05 00 50                    mov ax, 5; push ax          (int arg, 2B)
+e8 00 00                       call mixed
+83 c4 08                       add sp, 8                   (cleanup = 2+4+2)
+```
+
+Findings:
+- Args pushed **right-to-left** (rightmost first): c, then b, then a.
+- char promoted to word on stack (push ax). AH may have garbage.
+- long pushed as 2 words: HIGH first, LOW second (lower stack addr).
+- Cleanup = sum of arg sizes (here 2+4+2 = 8 bytes via `add sp, 8`).
+- Callee reads at:
+  - [bp+4] = a (int)
+  - [bp+6] = b LOW (long)
+  - [bp+8] = b HIGH
+  - [bp+10] = c (low byte of word)
+
