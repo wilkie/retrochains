@@ -3786,3 +3786,32 @@ Findings:
 - Uses `op r/m8, imm8` (3B opcode + 2B addr) and `or r/m8, r8` (2B opcode + 2B addr).
 - Total bitfield write = 12B beyond the value load (+3B mov ax, v = 15B body).
 
+
+## Linked-list traversal `p = p->next` — `mov si, [si]` (2B self-deref)
+
+Fixture `3343-linked-list-walk-obj`:
+
+```c
+struct Node { struct Node *next; int v; };
+int sum(struct Node *p) {
+  int s = 0;
+  while (p) { s += p->v; p = p->next; }
+  return s;
+}
+```
+
+Body (with p→SI, s→DI):
+```
+LOOP:
+03 7c 02                       add di, [si+2]    (s += p->v at offset 2)
+8b 34                          mov si, [si]      (p = p->next at offset 0) — 2B!
+TEST:
+0b f6                          or si, si         (p != 0)
+75 f7                          jne LOOP
+```
+
+Findings:
+- `p = p->next` compiles to a single 2-byte `mov si, [si]` when `next` is at offset 0.
+- Tight 5-byte loop body (`add di, [si+disp]; mov si, [si]`).
+- `or si, si` reused as null-pointer check (and as cmp-zero peephole).
+

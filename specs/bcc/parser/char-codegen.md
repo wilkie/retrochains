@@ -2029,3 +2029,41 @@ Findings:
 - Naive `mov al, c; inc al; cbw` would be 6B — BCC wastes 4 bytes here.
 - Suboptimal but consistent with BCC's register-allocation strategy.
 
+
+## char + int — char promoted via `cbw`
+
+Fixture `3344-char-plus-int-obj`:
+
+```c
+char c = 5;
+int add(int n) { return c + n; }
+```
+
+```
+a0 00 00 [FIXUPP _c]           mov al, [_c]
+98                             cbw              (sign-extend to int)
+03 46 04                       add ax, n
+```
+
+Findings:
+- Global `char` promoted to int via `cbw` (1B) before mixed arithmetic.
+- Note: BCC default char is signed (cbw, not zero-ext).
+
+## char param compared with int literal (fits in byte) — direct byte cmp
+
+Fixture `3345-char-cmp-lit-obj`:
+
+```c
+int is_a(char c) { if (c == 65) return 1; return 0; }
+```
+
+```
+80 7e 04 41                    cmp byte [bp+4], 65
+75 05                          jne ELSE
+```
+
+Findings:
+- `c == 65` compiles as direct byte cmp (`80 /7 r/m8, imm8`) — no widening.
+- 4-byte cmp instruction (1B opcode + 1B ModR/M+disp + 1B disp + 1B imm = 4B for [bp+disp8]).
+- Saves vs widening path: would be `mov al, [bp+4]; cbw; cmp ax, 65` (~6B).
+

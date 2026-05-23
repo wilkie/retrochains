@@ -2088,3 +2088,26 @@ Findings:
 - Uses 3-byte `a3 imm16` form (special `mov [mem], ax`) vs 4-byte `89 06 imm16` generic form.
 - 11B total for the 3-way zero-init.
 
+
+## abs via ternary `x < 0 ? -x : x` — branch + neg
+
+Fixture `3346-abs-ternary-obj`:
+
+```
+56                             push si
+8b 76 04                       mov si, x
+0b f6                          or si, si        (cmp x, 0)
+7d 06                          jge ELSE         (x >= 0)
+8b c6                          mov ax, si       (x for neg)
+f7 d8                          neg ax           (-x)
+eb 02                          jmp END
+ELSE:
+8b c6                          mov ax, si       (just x)
+END:
+```
+
+Findings:
+- Standard abs idiom = compare with 0 + branch + conditional neg.
+- BCC does NOT use the branchless trick (`sar x, 15; xor x, sar; sub x, sar`).
+- 15B body. Reg-allocates x into SI.
+

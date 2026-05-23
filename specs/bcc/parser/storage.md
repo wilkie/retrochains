@@ -70,3 +70,48 @@ Findings:
 - Initializer "hello" placed directly into _DATA at `_s` offset.
 - Includes the implicit \0 terminator (since N=6 matches string length+1).
 
+
+## struct init `{3, 4}` — flat LEDATA in declaration order
+
+Fixture `3341-struct-init-obj`:
+
+```c
+struct Pt { int x; int y; } p = {3, 4};
+```
+
+- _DATA size = 4 bytes.
+- LEDATA bytes: `03 00 04 00`.
+
+Body:
+```
+a1 00 00 [FIXUPP _p]           mov ax, [p.x]
+03 06 02 00 [FIXUPP _p]        add ax, [p.y]
+```
+
+Findings:
+- Members written in declaration order: x first at offset 0, y next at offset 2.
+- 4-byte LEDATA, no padding.
+
+## Nested struct init — flattens to single LEDATA
+
+Fixture `3342-struct-nested-init-obj`:
+
+```c
+struct { int a; struct { int b, c; } inner; } s = {1, {2, 3}};
+```
+
+- _DATA size = 6 bytes (3 ints).
+- LEDATA: `01 00 02 00 03 00` — flat layout, inner members inline.
+
+Body:
+```
+a1 00 00 [FIXUPP _s]           mov ax, [s+0]    (s.a)
+03 06 02 00 [FIXUPP _s]        add ax, [s+2]    (s.inner.b)
+03 06 04 00 [FIXUPP _s]        add ax, [s+4]    (s.inner.c)
+```
+
+Findings:
+- Nested struct member access uses absolute byte offsets — no per-level indirection.
+- `s.inner.b` is just `[_s + 2]` (same as if it were `s.b` in a flat struct).
+- Nested-brace init `{1, {2, 3}}` writes consecutive 16-bit values.
+
