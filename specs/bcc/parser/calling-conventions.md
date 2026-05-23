@@ -2093,3 +2093,123 @@ Findings:
 - Function symbol used as value = 3B `mov reg, imm16` with FIXUPP.
 - Both `_add1` and `_get_add1` get PUBDEF entries (neither is static).
 
+
+## 5-arg int call — mov-then-push per arg, `add sp, K` for cleanup ≥4
+
+Fixture `3353-5arg-call-obj`:
+
+```c
+sum5(1, 2, 3, 4, 5);
+```
+
+```
+b8 05 00 50                    mov ax, 5;  push ax    (arg e — last in source)
+b8 04 00 50                    mov ax, 4;  push ax    (arg d)
+b8 03 00 50                    mov ax, 3;  push ax    (arg c)
+b8 02 00 50                    mov ax, 2;  push ax    (arg b)
+b8 01 00 50                    mov ax, 1;  push ax    (arg a — first in source)
+e8 ?? ?? [FIXUPP _sum5]        call _sum5
+83 c4 0a                       add sp, 10                (cleanup 5 args × 2B)
+```
+
+Findings:
+- Right-to-left push order (a pushed last, on top of stack).
+- 8086 has no `push imm16` (that's 80186+), so per-arg push = `mov ax, imm16; push ax` (4B).
+- Cleanup of K ≥ 3 args uses `add sp, imm8` (3B). K=2 uses `pop cx; pop cx` (2B). K=1 uses `pop cx` (1B).
+
+## Mixed-type call `f('A', 100, 'B')` — char uses `mov al`+`push ax` (3B)
+
+Fixture `3354-mixed-arg-call-obj`:
+
+```
+b0 42 50                       mov al, 'B'; push ax    (3B — char arg)
+b8 64 00 50                    mov ax, 100; push ax    (4B — int arg)
+b0 41 50                       mov al, 'A'; push ax    (3B — char arg)
+e8 ?? ?? [FIXUPP _f]           call _f
+83 c4 06                       add sp, 6
+```
+
+Findings:
+- Char arg push: `mov al, imm8; push ax` (3B). 1B smaller than full-word load.
+- **AH is undefined** when pushing a char arg — callee should only read AL.
+- Cleanup is still 2 bytes per arg (chars widened to int on stack).
+- Each arg slot consumes 2B on the stack regardless of declared type.
+
+## Computed-expression arg `g(x + y)` — compute in AX, then push
+
+Fixture `3355-expr-arg-obj`:
+
+```
+8b 46 04                       mov ax, x
+03 46 06                       add ax, y
+50                             push ax            (single push)
+e8 ?? ??                       call _g
+59                             pop cx             (1-arg cleanup)
+```
+
+Findings:
+- Computation done in AX, then single `push ax` (1B).
+- No temporary stack slot for the intermediate value.
+
+## Passthrough call `return f(x)` — `push [bp+4]` directly (3B)
+
+Fixture `3356-passthrough-obj`:
+
+```
+ff 76 04                       push [bp+4]      (push x directly from frame)
+e8 ?? ?? [FIXUPP _inner]       call _inner
+59                             pop cx
+                               ; AX flows through as return value
+```
+
+Findings:
+- Param at [bp+4] pushed directly via `push r/m16` (3B) — no `mov ax,...; push ax`.
+- Return value in AX is "passed through" naturally to the outer function's return.
+- Smallest forwarding call possible on 8086: 7 bytes.
+
+## char return value — placed in AL only
+
+Fixture `3357-char-return-obj`:
+
+```c
+char first(char *s) { return *s; }
+```
+
+```
+56                             push si
+8b 76 04                       mov si, s
+8a 04                          mov al, [si]      (byte → AL for return)
+```
+
+Findings:
+- Char return goes in AL. AH is NOT set (caller responsibility if it wants widened int).
+- 6-byte body.
+
+## void function `return;` — `jmp END` to epilogue
+
+Fixture `3358-void-return-obj`:
+
+```c
+void early(int x) {
+  if (x == 0) { g = -1; return; }
+  g = x;
+}
+```
+
+```
+0b f6                          or si, si
+75 08                          jne ELSE
+c7 06 00 00 ff ff              mov word [_g], -1    (6B)
+eb 04                          jmp END              (early return)
+ELSE:
+89 36 00 00                    mov [_g], si         (4B — g = x)
+END:
+                               ; epilogue: pop bp; ret
+```
+
+Findings:
+- `return;` in void = `jmp END` (2B, short jmp).
+- Standard prologue/epilogue (`push bp; mov bp,sp` … `pop bp; ret`) emitted regardless.
+- No tail-merge optimization for early-return paths.
+- `mov [mem], imm16` of `-1`: 6B (`c7 06 disp16 imm16`).
+
