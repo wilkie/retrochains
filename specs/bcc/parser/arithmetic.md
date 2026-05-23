@@ -3359,3 +3359,33 @@ f7 7e 04                       idiv word [bp+4]
 Findings:
 - 11B body. Direct idiv with mem operand; DX stored back as remainder.
 
+
+## `h * 31` (hash mul) — generic imul (11B), no shl+sub optimization
+
+Fixture `3623-mul31-obj`:
+
+```
+8b 46 04                       mov ax, h
+ba 1f 00                       mov dx, 31
+f7 ea                          imul dx
+03 46 06                       add ax, c
+```
+
+Findings:
+- 11B body. Uses generic `imul reg` even though `* 31` could be `(h << 5) - h` (5B vs 5B for the multiply itself).
+- BCC's strength reduction doesn't recognize `2^N - 1` constants.
+
+## Unsigned `a % b` (var) — `xor dx, dx + div + mov ax, dx`
+
+Fixture `3627-uint-mod-var-obj`:
+
+```
+8b 46 04                       mov ax, a
+33 d2                          xor dx, dx
+f7 76 06                       div word [bp+6]
+8b c2                          mov ax, dx       (remainder)
+```
+
+Findings:
+- 10B body. 1B larger than signed mod (cwd is 1B vs xor dx,dx is 2B).
+

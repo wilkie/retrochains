@@ -6001,3 +6001,44 @@ Findings:
 - 13B body. Standard cmp-branch boolean materialize.
 - Same shape as other boolean-result returns (3475/3476).
 
+
+## Nested if-returns — sequential cmp + individual jmp-to-end per return
+
+Fixture `3624-nested-return-obj`:
+
+```
+0b f6                          or si, si
+7e 0f                          jle OUTER_FALSE
+83 fe 0a                       cmp si, 10
+7e 05                          jle INNER_FALSE
+b8 02 00                       mov ax, 2
+eb 09                          jmp END
+INNER_FALSE:
+b8 01 00                       mov ax, 1
+eb 04                          jmp END
+OUTER_FALSE:
+33 c0                          xor ax, ax
+END:
+```
+
+Findings:
+- 25B body. Each return path has its own `jmp END` — no tail-merging.
+- Standard branched if-return chain.
+
+## Range check `x >= lo && x <= hi` — 2 cmps with signed branches
+
+Fixture `3628-double-cmp-obj`:
+
+```
+8b 76 04                       mov si, x
+3b 76 06                       cmp si, lo
+7c 0a                          jl FALSE
+3b 76 08                       cmp si, hi
+7f 05                          jg FALSE
+b8 01 00                       mov ax, 1
+```
+
+Findings:
+- 21B body. x reg-allocated to SI, used for both comparisons.
+- Dual-exit to common FALSE.
+

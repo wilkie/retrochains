@@ -7762,3 +7762,40 @@ Findings:
 - SI and DI hold the two pointers; AX accumulates.
 - 12B body — clean.
 
+
+## `*p + *(p + 1)` — single SI + two disp8 loads
+
+Fixture `3625-deref-add-deref-obj`:
+
+```
+8b 76 04                       mov si, p
+8b 04                          mov ax, [si]
+03 44 02                       add ax, [si + 2]    (offset folded)
+```
+
+Findings:
+- 9B body. Both derefs through one base register, const offset folded into disp8.
+
+## `*s++` in arg context — save pre-inc to BX, then inc + load via BX
+
+Fixture `3626-print-each-char-obj`:
+
+```
+LOOP_BODY:
+8b de                          mov bx, si        (save current s)
+46                             inc si             (s++)
+8a 07                          mov al, [bx]       (load *original_s)
+98                             cbw                 (widen for arg)
+50                             push ax
+e8 ?? ?? [FIXUPP _putchar]     call _putchar
+59                             pop cx
+TEST:
+80 3c 00                       cmp byte [si], 0
+75 f0                          jne LOOP_BODY
+```
+
+Findings:
+- `*s++` semantics preserved: BX holds original ptr for the deref, SI gets incremented value.
+- Char widened via `cbw` before push (varargs/promotion).
+- 22B body.
+
