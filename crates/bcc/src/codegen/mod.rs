@@ -1740,6 +1740,43 @@ impl<'a> FunctionEmitter<'a> {
             }
             return;
         }
+        // Register-resident int local: `mov bx, <reg>` directly,
+        // skipping the AX round-trip.
+        if let ExprKind::Ident(name) = &idx.kind
+            && self.locals.has(name)
+            && self.locals.type_of(name).is_int_like()
+            && let LocalLocation::Reg(reg) = self.locals.location_of(name)
+            && !reg.is_byte()
+        {
+            let _ = write!(self.out, "\tmov\tbx,{}\r\n", reg.name());
+            for _ in 0..shifts {
+                self.out.extend_from_slice(b"\tshl\tbx,1\r\n");
+            }
+            return;
+        }
+        // `arr[++i]` / `arr[--i]` where i is a register-resident int
+        // local: emit the inc/dec on the register, then `mov bx,
+        // <reg>` reading the post-update value. Fixture 2837.
+        if let ExprKind::Update {
+            target,
+            op,
+            position: crate::ast::UpdatePosition::Pre,
+        } = &idx.kind
+            && self.locals.has(target)
+            && self.locals.type_of(target).is_int_like()
+            && let LocalLocation::Reg(reg) = self.locals.location_of(target)
+        {
+            let mnem = match op {
+                crate::ast::UpdateOp::Inc => "inc",
+                crate::ast::UpdateOp::Dec => "dec",
+            };
+            let _ = write!(self.out, "\t{mnem}\t{}\r\n", reg.name());
+            let _ = write!(self.out, "\tmov\tbx,{}\r\n", reg.name());
+            for _ in 0..shifts {
+                self.out.extend_from_slice(b"\tshl\tbx,1\r\n");
+            }
+            return;
+        }
         // Fallback: evaluate into AX, scale, then move to BX.
         self.emit_expr_to_ax(idx);
         for _ in 0..shifts {
