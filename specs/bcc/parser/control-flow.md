@@ -4584,3 +4584,27 @@ Findings:
   trivially empty.
 - 2 bytes wasted on the no-op branch.
 
+
+## `goto label` forward — just an unconditional `jmp`
+
+Fixture `3062-goto-forward-obj`:
+
+```c
+if (x < 0) goto done;
+x = x + 100;
+done:
+return x;
+```
+
+```
+0b f6 7d 02                    or si, si; jge → ELSE (skip the goto)
+eb 07                          jmp +7 → DONE
+                               ; ELSE body
+                               ; DONE: label
+```
+
+Findings:
+- `goto` is just an unconditional `jmp` to the label position.
+- No special bookkeeping — same as `break` (which is implicit goto).
+- Short forward jump (2B `eb disp8`) for nearby labels.
+

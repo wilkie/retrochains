@@ -3294,3 +3294,50 @@ Findings:
 - Same shape as long-to-long copy (`3031`).
 - For struct copies > 4 bytes, BCC switches to `N_SCOPY@` helper.
 
+
+## 6-byte struct copy — `N_SCOPY@` helper call
+
+Fixture `3059-struct-6b-copy-obj`:
+
+```c
+struct M { int a; int b; int c; };  /* 6 bytes */
+dst = src;
+```
+
+```
+b8 06 00                       mov ax, 6
+1e 50                          push ds; push ax       (src FAR ptr)
+b8 00 00                       mov ax, &_dst
+1e 50                          push ds; push ax       (dst FAR ptr)
+b9 06 00                       mov cx, 6              (byte count)
+e8 00 00                       call N_SCOPY@
+```
+
+Findings:
+- **Threshold confirmed**: struct copy ≥ 5 bytes uses `N_SCOPY@`
+  helper (here 6 bytes).
+- Helper call setup: push FAR src ptr + push FAR dst ptr + mov cx,N.
+- EXTDEF for `N_SCOPY@` emitted in symbol table.
+- N_SCOPY@ has its own (non-cdecl) calling convention — uses FAR
+  pointers even in small model.
+
+## Nested struct field access — single mov, offset folded
+
+Fixture `3060-nested-struct-obj`:
+
+```c
+struct In { int v; };
+struct Out { int tag; struct In inner; };
+struct Out g;
+return g.inner.v;   /* offset = 2 + 0 = 2 */
+```
+
+```
+a1 02 00                       mov ax, [_g + 2]
+```
+
+Findings:
+- Nested field offset is **compile-time folded** as outer + inner.
+- Single mov instruction with FIXUPP + disp16.
+- No intermediate pointer or computation needed.
+

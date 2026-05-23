@@ -1755,3 +1755,30 @@ Findings:
   char return — caller treats AL as the uchar value).
 - For an `int` return of uchar value, would need `mov ah, 0`.
 
+
+## `char_g += 1` global — load AL + inc al + store AL (8B, MISSES `inc byte [mem]`)
+
+Fixture `3063-char-global-plus-eq-obj`:
+
+```c
+char tick;
+tick += 1;
+```
+
+```
+a0 00 00                       mov al, [_tick]   (byte load, 3B)
+fe c0                          inc al            (8-bit inc, 2B)
+a2 00 00                       mov [_tick], al   (byte store, 3B)
+```
+
+**Total: 8 bytes**.
+
+Findings:
+- Char compound assign uses byte load + 8-bit inc + byte store.
+- **Missed peephole**: 8086 supports `inc byte [mem]`
+  (`fe 06 disp16`, 4B+FIXUPP). BCC does NOT use it.
+- Word global `g += 1` = 4B (`inc word [mem]`).
+- Char global `g += 1` = 8B — **4 bytes longer than int** due to
+  the missing mem-byte-inc peephole.
+- Same suboptimality for `++char_g` and `char_g -= 1`.
+

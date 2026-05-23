@@ -2348,3 +2348,40 @@ Findings:
   peephole if comparing to 0.
 - Enum constants are folded to int literals same as regular ints.
 
+
+## 4 contiguous cases (1..4) — DENSE DISPATCH with `dec bx` normalization
+
+Fixture `3064-switch-default-first-obj`:
+
+```c
+switch (x) {
+  default: return -1;
+  case 1: return 10;
+  case 2: return 20;
+  case 3: return 30;
+  case 4: return 40;
+}
+```
+
+```
+8b 5e 04                       mov bx, x
+4b                             dec bx           (normalize 1..4 → 0..3)
+83 fb 03                       cmp bx, 3
+77 07                          ja → DEFAULT    (UNSIGNED bounds check)
+d1 e3                          shl bx, 1
+2e ff a7 2e 00                 jmp word ptr cs:[bx + TABLE]
+                               ; jump table follows
+                               ; default body, then case bodies
+```
+
+Findings:
+- **N=4 contiguous cases → DENSE DISPATCH** (threshold confirmed).
+- `dec bx` peephole normalizes case range [1..4] → [0..3] for
+  zero-based table lookup.
+- `cmp bx, 3; ja → DEFAULT` = UNSIGNED bounds check (excludes
+  cases below 1 too, since they'd wrap to large unsigned values
+  after dec).
+- `shl bx, 1` scales by sizeof(word ptr).
+- `jmp word ptr cs:[bx + TABLE]` = indirect jump via dense table.
+- **Source order of `default:` doesn't matter** — BCC sorts cases.
+
