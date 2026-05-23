@@ -2414,3 +2414,73 @@ Findings:
   zero-based max.
 - Dispatch table indexed by raw `x` value (scaled).
 
+
+## Sparse switch — value-search LOOP + parallel handler table
+
+Fixture `3071-switch-sparse-obj`:
+
+```c
+switch (x) {
+  case 1:    return 10;
+  case 5:    return 50;
+  case 100:  return 100;
+  case 1000: return 1000;
+}
+```
+
+```
+8b 46 04 89 46 fe              save x to [bp-2]
+b9 04 00                       mov cx, 4   (count of cases)
+bb 40 00                       mov bx, &VAL_TABLE
+                               ; SEARCH_LOOP:
+2e 8b 07                       mov ax, cs:[bx]   (load case value)
+3b 46 fe                       cmp ax, x
+74 06                          je → MATCH
+43 43                          inc bx; inc bx   (advance to next value)
+e2 f4                          loop → SEARCH_LOOP   (8086 LOOP instr)
+eb 18                          jmp → DEFAULT
+                               ; MATCH:
+2e ff 67 08                    jmp word ptr cs:[bx + HANDLER_TABLE_OFFSET]
+```
+
+`VAL_TABLE` contains: `01 00 05 00 64 00 e8 03` (the case values).
+`HANDLER_TABLE` (at +8 from VAL_TABLE base) contains the case body
+addresses.
+
+Findings:
+- **Sparse dispatch** uses linear search through VAL_TABLE with
+  parallel HANDLER_TABLE at +N*2 offset.
+- `loop` instr (`e2 disp8`) decrements CX and branches if non-zero.
+- ~30 bytes for the dispatch logic + 2 tables of 2*N bytes each.
+- Triggers when cases aren't dense (large gaps between case values).
+
+## NEGATIVE-starting cases — `sub bx, min_value` normalization
+
+Fixture `3072-switch-neg-cases-obj`:
+
+```c
+switch (x) {
+  case -2: return 1;
+  case -1: return 2;
+  case 0:  return 3;
+  case 1:  return 4;
+}
+```
+
+```
+8b 5e 04                       mov bx, x
+83 eb fe                       sub bx, -2   (sign-ext: bx = x - (-2) = x + 2)
+83 fb 03                       cmp bx, 3
+77 1b                          ja → DEFAULT
+d1 e3                          shl bx, 1
+2e ff a7 TABLE                 jmp word ptr cs:[bx + TABLE]
+```
+
+Findings:
+- Normalization uses `sub bx, min_case_value` (with imm8 sign-ext
+  form when min fits `[-128, 127]`).
+- For min = -2: `83 eb fe` (3B) subtracts -2 from bx, effectively
+  adding 2 → normalizes -2..1 to 0..3.
+- DENSE DISPATCH applies whether case range starts at 0, positive,
+  or negative — only the normalization step differs.
+

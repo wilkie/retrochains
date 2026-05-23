@@ -3341,3 +3341,31 @@ Findings:
 - Single mov instruction with FIXUPP + disp16.
 - No intermediate pointer or computation needed.
 
+
+## `union { int i; char c; }` — all members at offset 0, size = max
+
+Fixture `3073-union-basic-obj`:
+
+```c
+union U { int i; char c; };
+union U g;
+return g.i;   /* mov ax, [_g] */
+```
+
+Findings:
+- Union allocates max(member sizes) — here 2 bytes (= sizeof int).
+- All members start at offset 0.
+- `g.i` access = single mov, byte-identical to a plain int.
+- Accessing `g.c` would be byte load from same address.
+
+## `struct { int xs[3]; int n; }` — array field counts in sizeof
+
+Fixture `3076-struct-arr-field-obj`:
+
+`sizeof(struct B) = 8` (= 3×2 for `xs[3]` + 2 for `n`).
+
+Findings:
+- Array fields contribute their full size to the struct.
+- No padding.
+- Total = sum of field sizes.
+

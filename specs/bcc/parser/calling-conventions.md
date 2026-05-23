@@ -1823,3 +1823,27 @@ Findings:
   - **3 args: `add sp, 6` (3B, 1 instr)** ← switch point
   - 4+ args: `add sp, K` (3B, 1 instr)
 
+
+## Fn-ptr local variable — assigned + called via `call word ptr [bp-disp]`
+
+Fixture `3074-fnptr-local-obj`:
+
+```c
+int (*op)(int);
+op = double_it;
+return op(n);
+```
+
+```
+c7 46 fe 00 00                 op = &double_it (mem-imm + FIXUPP, 5B)
+ff 76 04                       push n
+ff 56 fe                       call word ptr [bp-2]   (indirect via local)
+59                             pop cx
+```
+
+Findings:
+- Local fn-ptr assigned via mem-imm with FIXUPP (5B).
+- Indirect call via `call word ptr [bp-disp]` (3B).
+- Same call form as fn-ptr param (`2728`) but disp targets local.
+- 1-arg cleanup via `pop cx`.
+
