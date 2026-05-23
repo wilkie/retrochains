@@ -3056,3 +3056,23 @@ Findings:
   - N=1: `d1 /4 disp16` (4B, dedicated 1-bit form, `2999`)
   - N>=2: `mov cl, N; d3 /4 disp16` (6B)
 
+
+## `g >>= 1` for global int (signed) — `sar word [mem], 1` (4B)
+
+Fixture `3165-global-int-shr-1-obj`:
+
+```c
+int g;
+g >>= 1;   /* signed shift right */
+```
+
+```
+d1 3e 00 00                    sar word [_g], 1   (4B with FIXUPP)
+```
+
+Findings:
+- ModR/M `3e` = mod 00, op-ext 111 (sar /7), r/m 110 (disp16).
+- For SIGNED int, BCC uses `sar` (arithmetic shift right).
+- For UNSIGNED int, BCC would use `shr` (op-ext /5, ModR/M `2e`).
+- Same shape as `g <<= 1` (`2999`) but with sar instead of shl.
+

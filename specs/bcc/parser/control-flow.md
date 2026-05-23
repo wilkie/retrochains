@@ -4689,3 +4689,21 @@ Findings:
   `add` (fewer instructions = faster).
 - At N≥4, `add si, N` wins on bytes.
 
+
+## `i += 128` for-step — `add si, imm16` (4B; 128 doesn't fit signed imm8)
+
+Fixture `3161-for-step-128-obj`:
+
+```c
+for (i = 0; i < n; i += 128) ...
+```
+
+```
+81 c6 80 00                    add si, 128    (imm16 form, 4B)
+```
+
+Findings:
+- 128 doesn't fit signed imm8 range [-128, 127] (sign-ext would be -128).
+- Forces `81 c6 imm16` (4B) form.
+- Adds to the unroll-vs-add threshold table from `3150-3157`.
+

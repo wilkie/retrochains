@@ -3594,3 +3594,52 @@ Findings:
 - Signed widening (`3154`) = `cwd` (1B sign-extend).
 - **Unsigned is 1 byte LONGER** than signed for int→long.
 
+
+## Local `long v <<= 1` — `shl dx, 1; rcl ax, 1` (carry chain)
+
+Fixture `3162-local-long-shl-1-obj`:
+
+```c
+long v;
+v <<= 1;
+```
+
+```
+8b 46 06                       mov ax, HIGH
+8b 56 04                       mov dx, LOW
+d1 e2                          shl dx, 1    (LOW shift, sets CF)
+d1 d0                          rcl ax, 1    (HIGH rotate-with-carry from LOW)
+89 46 06                       store HIGH
+89 56 04                       store LOW
+8b 56 06                       reload HIGH for return DX:AX
+8b 46 04                       reload LOW
+```
+
+Findings:
+- Long `<<= 1` = `shl LOW; rcl HIGH` (carry-chain shift).
+- `rcl` pulls the bit shifted OUT of LOW INTO HIGH's low bit.
+- During compute, AX=HIGH, DX=LOW (reversed from return convention).
+- Store-back + reload restores return convention DX:AX.
+- 22 bytes total — could be shorter but BCC stores+reloads.
+
+## `long a + b` — load DX:AX = a, then mem-source add+adc for b
+
+Fixture `3164-long-add-obj`:
+
+```c
+return a + b;
+```
+
+```
+8b 56 06                       mov dx, a HIGH
+8b 46 04                       mov ax, a LOW
+03 46 08                       add ax, [bp+8]   (b LOW, mem-source)
+13 56 0a                       adc dx, [bp+10]  (b HIGH, with carry)
+```
+
+Findings:
+- 12 bytes total: 6B load + 6B add/adc.
+- Second long operand added DIRECTLY from memory (no separate load).
+- ModR/M ops: `03 /r` = add, `13 /r` = adc.
+- Carry chain: add for LOW, adc for HIGH.
+
