@@ -12050,6 +12050,30 @@ fn emit_op_with_source(out: &mut Vec<u8>, op: BinOp, src: &OperandSource, unsign
             // zeros the upper half rather than sign-extending via
             // `cwd`, and uses the unsigned `div` instruction. Fixture
             // 946 (`unsigned a, b; return a / b;`).
+            //
+            // Unsigned div by power-of-2 constant: strength-reduce to
+            // `shr ax, log2(K)` (signed div by pow2 is NOT reducible —
+            // signed shift rounds toward -∞ while signed div rounds
+            // toward 0). For K ≤ 8, unroll `shr ax, 1` (each 2 bytes);
+            // larger K uses `mov cl, log2(K); shr ax, cl`. Fixtures
+            // 3369, 2084, 1725.
+            if unsigned
+                && let OperandSource::Immediate(v) = src
+                && *v > 0
+                && v.is_power_of_two()
+                && v.trailing_zeros() <= 15
+            {
+                let shifts = v.trailing_zeros();
+                if shifts <= 3 {
+                    for _ in 0..shifts {
+                        out.extend_from_slice(b"\tshr\tax,1\r\n");
+                    }
+                } else {
+                    let _ = write!(out, "\tmov\tcl,{shifts}\r\n");
+                    out.extend_from_slice(b"\tshr\tax,cl\r\n");
+                }
+                return;
+            }
             let (widen, mnem) = if unsigned {
                 (&b"\txor\tdx,dx\r\n"[..], "div")
             } else {
@@ -12069,6 +12093,18 @@ fn emit_op_with_source(out: &mut Vec<u8>, op: BinOp, src: &OperandSource, unsign
             }
         }
         BinOp::Mod => {
+            // Unsigned mod by power-of-2 K: `x % K = x & (K-1)`. Single
+            // `and ax, K-1` (3 bytes) vs the full `mov bx; xor dx,dx;
+            // div bx; mov ax,dx` (9 bytes).
+            if unsigned
+                && let OperandSource::Immediate(v) = src
+                && *v > 0
+                && v.is_power_of_two()
+            {
+                let mask = (v - 1) & 0xFFFF;
+                let _ = write!(out, "\tand\tax,{mask}\r\n");
+                return;
+            }
             let (widen, mnem) = if unsigned {
                 (&b"\txor\tdx,dx\r\n"[..], "div")
             } else {
