@@ -2111,3 +2111,119 @@ Findings:
 - BCC does NOT use the branchless trick (`sar x, 15; xor x, sar; sub x, sar`).
 - 15B body. Reg-allocates x into SI.
 
+
+## `++g` pre-increment on global — inc mem, load new value
+
+Fixture `3371-preinc-global-obj`:
+
+```c
+int g;
+int next(void) { return ++g; }
+```
+
+```
+ff 06 00 00 [FIXUPP _g]        inc word [_g]    (4B)
+a1 00 00    [FIXUPP _g]        mov ax, [_g]     (3B — load new value)
+```
+
+Findings:
+- Pre-inc order: inc-then-load (post-inc loads first then incs).
+- 7B body. Contrast with post-inc (3294) which has the SAME byte sequence — they're indistinguishable for global writes when the return-value semantics happen to coincide (BCC just always emits inc-then-load).
+
+## `x--` post-decrement on parameter — emits dead `dec`
+
+Fixture `3372-postdec-param-obj`:
+
+```c
+int last(int x) { return x--; }
+```
+
+```
+56                             push si
+8b 76 04                       mov si, x
+8b c6                          mov ax, si        (return value = pre-dec x)
+4e                             dec si            (x-- — modifies local only)
+```
+
+Findings:
+- Modification to SI doesn't write back to the parameter slot.
+- The `dec si` is dead code (SI goes out of scope after `pop si`) but BCC still emits it.
+- 7B body. Missed dead-code optimization.
+
+## `c <<= 2` on char global — 2× mem-direct shl-by-1
+
+Fixture `3373-char-shl-eq-obj`:
+
+```c
+char c = 1;
+void shift2(void) { c <<= 2; }
+```
+
+```
+d0 26 00 00 [FIXUPP _c]        shl byte [_c], 1
+d0 26 00 00 [FIXUPP _c]        shl byte [_c], 1
+```
+
+Findings:
+- 2× `shl byte [mem], 1` (4B each = 8B).
+- Operates directly on memory — no register temp.
+- For N=2 on byte mem, this beats load-shift-store form (~10B).
+
+## `x >>= 4` on int global — `mov cl, 4; sar [mem], cl`
+
+Fixture `3374-int-shr-eq4-obj`:
+
+```c
+int x = 100;
+void shr4(void) { x >>= 4; }
+```
+
+```
+b1 04                          mov cl, 4
+d3 3e 00 00 [FIXUPP _x]        sar word [_x], cl
+```
+
+Findings:
+- Single mem-direct `sar word [mem], cl` (4B with FIXUPP).
+- N=4 ≥ threshold → uses CL form (vs inline N× shl/sar for N≤3).
+- 6B body. Signed type → `sar`.
+
+## `arr[i]++` in void context — `inc word [bx+_arr]` mem-direct
+
+Fixture `3375-arr-postinc-obj`:
+
+```c
+int arr[5];
+void bump(int i) { arr[i]++; }
+```
+
+```
+8b 5e 04                       mov bx, i
+d1 e3                          shl bx, 1                (bx = i*2)
+ff 87 00 00 [FIXUPP _arr]      inc word [bx + _arr]
+```
+
+Findings:
+- Inc happens directly on memory at [bx + _arr] — no temp register.
+- Void-context: no post-inc result-value computation/load.
+- 9B body.
+
+## `(*p)++` in void context — 2B `inc word [si]`
+
+Fixture `3376-deref-postinc-obj`:
+
+```c
+void bump(int *p) { (*p)++; }
+```
+
+```
+56                             push si
+8b 76 04                       mov si, p
+ff 04                          inc word [si]      (2B!)
+```
+
+Findings:
+- Tightest possible: 2-byte `inc word [si]`.
+- No load/store sequence — uses mem-direct inc.
+- 6B body total (including SI setup).
+
