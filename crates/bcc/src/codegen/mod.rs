@@ -4663,6 +4663,21 @@ impl<'a> FunctionEmitter<'a> {
                     );
                     return;
                 }
+                // Array-to-pointer decay init: `T *p = arr;` for
+                // `arr` a global array. Store the symbol's offset
+                // directly. Fixture 2541 (`p = arr` for global arr).
+                if ty.pointee().is_some()
+                    && let ExprKind::Ident(sym) = &init.kind
+                    && let Some(gty) = self.globals.type_of(sym)
+                    && gty.array_elem().is_some()
+                {
+                    let _ = write!(
+                        self.out,
+                        "\tmov\tword ptr {},offset DGROUP:_{sym}\r\n",
+                        bp_addr(off),
+                    );
+                    return;
+                }
                 // String-literal init for a pointer local: `char *s =
                 // "lit";` lowers to `mov word ptr [bp-N], offset
                 // DGROUP:s@+K` directly, no AX roundtrip. Fixture
@@ -11080,6 +11095,22 @@ impl<'a> FunctionEmitter<'a> {
                 if !ty.is_char_like()
                     && let ExprKind::AddressOf(sym) = &value.kind
                     && self.globals.contains(sym)
+                {
+                    let _ = write!(
+                        self.out,
+                        "\tmov\tword ptr {},offset DGROUP:_{sym}\r\n",
+                        bp_addr(off),
+                    );
+                    return;
+                }
+                // `<pointer-local> = <global-array>;` — array-to-
+                // pointer decay. Store the array's symbol offset
+                // directly. Same immediate-store shape as `= &g`.
+                // Fixtures 2328, 2541.
+                if ty.pointee().is_some()
+                    && let ExprKind::Ident(sym) = &value.kind
+                    && let Some(gty) = self.globals.type_of(sym)
+                    && gty.array_elem().is_some()
                 {
                     let _ = write!(
                         self.out,
