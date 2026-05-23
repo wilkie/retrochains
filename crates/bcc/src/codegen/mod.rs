@@ -2444,21 +2444,18 @@ impl<'a> FunctionEmitter<'a> {
                     self.label_ref(slot),
                 );
             }
-            (Some(true_slot), Some(false_slot)) => {
-                // Both targets specified. Emit a conditional jump to
-                // `true_slot` on the true mnemonic, then an unconditional
-                // jump to `false_slot`. This case arises when a `while
-                // (<logical-cond>)` lowers the rightmost operand with
-                // both body (true) and break-target (false) targets.
+            (Some(true_slot), Some(_)) => {
+                // Both targets specified. Today this only fires from
+                // `while (<a && b>)`'s rightmost-operand recursion,
+                // where the false target is the immediately-following
+                // break-target label (a natural fall-through). Emit
+                // just the conditional jump to `true_slot`; the caller
+                // is responsible for laying out false_slot as the
+                // next emitted label. Fixtures 1273, 1352, 2203.
                 let _ = write!(
                     self.out,
                     "\t{true_mnem}\tshort {}\r\n",
                     self.label_ref(true_slot),
-                );
-                let _ = write!(
-                    self.out,
-                    "\tjmp\tshort {}\r\n",
-                    self.label_ref(false_slot),
                 );
             }
             (None, None) => panic!(
