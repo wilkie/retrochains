@@ -2213,3 +2213,110 @@ Findings:
 - No tail-merge optimization for early-return paths.
 - `mov [mem], imm16` of `-1`: 6B (`c7 06 disp16 imm16`).
 
+
+## Recursive self-call — direct PC-relative `call` (no FIXUPP)
+
+Fixture `3359-recursion-obj`:
+
+```c
+int fact(int n) {
+  if (n <= 1) return 1;
+  return n * fact(n - 1);
+}
+```
+
+Recursive-call body:
+```
+8b c6                          mov ax, n
+48                             dec ax           (n - 1)
+50                             push ax
+e8 e8 ff                       call rel16 = -24   (PC-relative to self)
+59                             pop cx
+f7 ee                          imul si          (n * result)
+```
+
+Findings:
+- Self-recursion uses direct `e8 disp16` call to its own offset — no EXTDEF or FIXUPP.
+- BCC computes the relative offset (-24 = backward to function start) at codegen time.
+- 16-bit signed displacement supports ±32K range — sufficient for any single _TEXT segment.
+
+## Mutual recursion in same TU — both calls direct PC-relative
+
+Fixture `3360-mutual-rec-obj`:
+
+```c
+int a(int n) { ...; return b(n - 1); }
+int b(int n) { ...; return a(n - 1); }
+```
+
+- a→b call: `e8 06 00` = forward call rel16 +6.
+- b→a call: `e8 cc ff` = backward call rel16 -0x34.
+
+Findings:
+- Both calls direct PC-relative — no EXTDEF.
+- Forward-reference (`a` calls `b` before `b` is fully defined) resolved by BCC's 2-pass codegen.
+- Only externally-defined functions need EXTDEF/FIXUPP pairs.
+
+## Nested call `f(g(x))` — pipe AX result into next push
+
+Fixture `3361-nested-call-obj`:
+
+```
+ff 76 04                       push x
+e8 ?? ?? [FIXUPP _g]           call _g
+59                             pop cx
+50                             push ax          (g's return value)
+e8 ?? ?? [FIXUPP _f]           call _f
+59                             pop cx
+```
+
+Findings:
+- Inner call's result in AX → outer call's arg via single `push ax` (1B).
+- No temporary save. 12B body.
+
+## `f(&global)` — `mov ax, &g` + push (no shortcut)
+
+Fixture `3362-call-addr-global-obj`:
+
+```
+b8 00 00 [FIXUPP _g]           mov ax, offset _g
+50                             push ax
+```
+
+Findings:
+- 8086 has no `push imm16` (added in 80186). Must materialize the address in a reg first.
+- 4B sequence: `mov ax, imm16; push ax`.
+
+## `f(&local)` — `dec sp; dec sp` alloc + `lea ax, [bp-N]`
+
+Fixture `3363-call-addr-local-obj`:
+
+```
+4c 4c                          dec sp; dec sp    (2B alloc — saves 1B vs sub sp,2)
+c7 46 fe 07 00                 mov [bp-2], 7
+8d 46 fe                       lea ax, [bp-2]    (3B for frame address)
+50                             push ax
+e8 ?? ?? [FIXUPP _use]         call _use
+59                             pop cx
+```
+
+Findings:
+- **2-byte stack alloc via 2× `dec sp` (2B)** beats `sub sp, 2` (3B) by 1B.
+- `lea ax, [bp+disp]` (3B) is the canonical way to materialize a frame address.
+
+## Call result as conditional — `or ax, ax` test peephole
+
+Fixture `3364-call-as-cond-obj`:
+
+```
+ff 76 04                       push x
+e8 ?? ?? [FIXUPP _check]       call _check
+59                             pop cx
+0b c0                          or ax, ax        (test result)
+74 05                          je ELSE
+```
+
+Findings:
+- Standard 2-byte `or ax, ax` cmp-zero peephole on return value.
+- Same pattern as testing any int value.
+
