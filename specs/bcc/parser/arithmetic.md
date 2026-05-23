@@ -3256,3 +3256,38 @@ Fixture `3574-div-by-1-obj`:
 Findings:
 - Identity fold, consistent with `* 1`, `+ 0`, `<< 0`.
 
+
+## Unsigned `x / 1` — identity (3B, same as signed)
+
+Fixture `3576-uint-div1-obj`:
+
+```
+8b 46 04                       mov ax, x
+```
+
+## Unsigned `-x` — `neg ax` (same as signed)
+
+Fixture `3577-uint-neg-obj`:
+
+```
+8b 46 04                       mov ax, x
+f7 d8                          neg ax
+```
+
+Findings:
+- Unsigned negation defined as `0 - x` (wraparound).
+- Same `neg ax` instruction as signed.
+
+## `x - const` (any signedness) — 3B `sub ax, imm16` (AX-short)
+
+Fixture `3578-uint-sub-const-obj`:
+
+```
+8b 46 04                       mov ax, x
+2d 05 00                       sub ax, 5     (3B AX-short imm16 form)
+```
+
+Findings:
+- Opcode `2d` = `sub AX, imm16` AX-specific short form (3B).
+- Same size as the imm8 sign-extended form (`83 /5 imm8` = 3B), so no advantage either way.
+

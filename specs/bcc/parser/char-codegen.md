@@ -2254,3 +2254,37 @@ Findings:
 - Uses signed `jge` for the inverted comparison.
 - 4B byte cmp — same as positive char literals.
 
+
+## `arr[0] = 0x55` (char) — single 5B `mov byte [mem], imm8`
+
+Fixture `3575-char-write-imm-obj`:
+
+```
+c6 06 00 00 55 [FIXUPP _arr]   mov byte [_arr], 0x55
+```
+
+Findings:
+- 5B body. Direct mem-imm byte store via `c6 /0`.
+- No reg needed when both addr and value are const.
+
+## char-indexed array `arr[char_i]` — cbw widen + scale + load
+
+Fixture `3579-arr-char-idx-obj`:
+
+```c
+int arr[100];
+int pick(char i) { return arr[i]; }
+```
+
+```
+8a 46 04                       mov al, i
+98                             cbw                  (char → int)
+d1 e0                          shl ax, 1            (i * 2)
+8b d8                          mov bx, ax
+8b 87 00 00 [FIXUPP _arr]      mov ax, [bx + _arr]
+```
+
+Findings:
+- Char widened to int via `cbw` (signed extension) before scaling.
+- 12B body. Negative chars produce negative offsets (signed semantics).
+

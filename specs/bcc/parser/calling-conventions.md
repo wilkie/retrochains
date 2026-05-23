@@ -2452,3 +2452,20 @@ Findings:
 - EXTDEF for `_handler` (extern).
 - 8B body. No need to load ptr into reg first.
 
+
+## 0-arg call with int return — 3B body
+
+Fixture `3580-call-no-args-obj`:
+
+```c
+int driver(void) { return compute(); }
+```
+
+```
+e8 ?? ?? [FIXUPP _compute]     call _compute
+```
+
+Findings:
+- 3-byte body. Smallest possible "real" function call.
+- Return value in AX flows directly into the outer return.
+
