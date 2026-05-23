@@ -4205,6 +4205,29 @@ impl<'a> FunctionEmitter<'a> {
             }
             return;
         }
+        // Char return with a const-indexed char array element (global
+        // or stack): `mov al, byte ptr <addr>` and no widening. Same
+        // ABI as the bare-ident case. Fixture 3337 (`return s[0]`
+        // for global `char s[6]`).
+        if self.function.ret_ty.is_char_like()
+            && let Some((name, total_off, leaf_ty)) = self.try_lvalue_chain_addr(e)
+            && leaf_ty.is_char_like()
+        {
+            if self.globals.contains(&name) {
+                let addr = if total_off == 0 {
+                    format!("DGROUP:_{name}")
+                } else {
+                    format!("DGROUP:_{name}+{total_off}")
+                };
+                let _ = write!(self.out, "\tmov\tal,byte ptr {addr}\r\n");
+                return;
+            }
+            if let LocalLocation::Stack(base_off) = self.locals.location_of(&name) {
+                let off = base_off + i16::try_from(total_off).unwrap_or(i16::MAX);
+                let _ = write!(self.out, "\tmov\tal,byte ptr {}\r\n", bp_addr(off));
+                return;
+            }
+        }
         self.emit_expr_to_ax(e);
     }
 
