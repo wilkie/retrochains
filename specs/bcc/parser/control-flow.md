@@ -6061,3 +6061,39 @@ Findings:
 - enum constants are int literals. `ST_A == 0` produces standard mem-imm8 cmp.
 - 13B body. Identical to comparing with integer `0`.
 
+
+## Switch with default placed mid-list — cases preserved in source order
+
+Fixture `3635-switch-default-with-obj`:
+
+```c
+switch (x) {
+  case 0: return 100;
+  case 1: return 200;
+  default: return -1;   /* placed between case 1 and case 2 */
+  case 2: return 300;
+}
+```
+
+```
+                               ; dispatch:
+0b c0                          or ax, ax        (cmp x, 0)
+74 0c                          je CASE_0
+3d 01 00                       cmp ax, 1
+74 0c                          je CASE_1
+3d 02 00                       cmp ax, 2
+74 11                          je CASE_2
+eb 0a                          jmp DEFAULT
+                               ; case bodies in source order:
+CASE_0: mov ax, 100; jmp END
+CASE_1: mov ax, 200; jmp END
+DEFAULT: mov ax, -1; jmp END
+CASE_2: mov ax, 300
+END:
+```
+
+Findings:
+- Dispatch chain checks all cases (0, 1, 2) first; default at end of chain.
+- Case bodies emitted in source order — DEFAULT body lands between CASE_1 and CASE_2.
+- Source position of `default:` doesn't affect dispatch order, only physical layout.
+

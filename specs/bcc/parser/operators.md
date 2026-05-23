@@ -3450,3 +3450,44 @@ Findings:
 - 11B body. CL only needs the low 5 bits for shift count (8086 limit).
 - BCC uses 8-bit add (`02 /r`) directly on CL — saves vs full int add + truncate.
 
+
+## `g += a + b` — compute sum + mem-direct add (10B)
+
+Fixture `3636-compound-multi-obj`:
+
+```
+8b 46 04                       mov ax, a
+03 46 06                       add ax, b
+01 06 00 00 [FIXUPP _g]        add [_g], ax
+```
+
+Findings:
+- Sum computed in AX, then mem-direct add to g.
+- 10B body.
+
+## XOR swap via pointers — 3× mem-dest XOR through AX
+
+Fixture `3638-xor-swap-obj`:
+
+```c
+*a ^= *b;
+*b ^= *a;
+*a ^= *b;
+```
+
+```
+8b 76 04                       mov si, a
+8b 7e 06                       mov di, b
+8b 05                          mov ax, [di]
+31 04                          xor [si], ax
+8b 04                          mov ax, [si]
+31 05                          xor [di], ax
+8b 05                          mov ax, [di]
+31 04                          xor [si], ax
+```
+
+Findings:
+- 20B body — same length as temp-based swap (3464).
+- Each `^=` goes through AX as scratch with mem-dest XOR (`31 /r`).
+- BCC doesn't recognize the XOR-swap idiom for any special optimization.
+

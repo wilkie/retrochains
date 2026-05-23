@@ -2499,3 +2499,30 @@ Fixture `3616-char-id-obj`:
 Findings:
 - 3B body. Smallest char function — single byte load to AL.
 
+
+## `if (call() == 0)` — call + or-zero peephole
+
+Fixture `3639-call-eq-zero-obj`:
+
+```
+e8 ?? ??                       call _f
+0b c0                          or ax, ax
+75 05                          jne ELSE
+```
+
+Findings:
+- 14B body. Uses `or ax, ax` cmp-zero peephole on AX directly.
+
+## `return call()` (passthrough) — 3B body
+
+Fixture `3640-call-passthru-obj`:
+
+```
+e8 ?? ?? [FIXUPP _inner]       call _inner
+```
+
+Findings:
+- Smallest possible function — just the call.
+- AX from inner call flows directly into outer return.
+- Same as 3580 0-arg call but here the result is explicitly returned.
+

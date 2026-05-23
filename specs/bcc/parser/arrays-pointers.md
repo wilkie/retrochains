@@ -7818,3 +7818,23 @@ Findings:
 - 14B body. Scaled n via push/pop pattern (12B pattern from 3380).
 - `+1` for int* = +2 bytes, emitted as 2× inc ax (2B) beating `add ax, 2` (3B).
 
+
+## `arr[i + const]` — const offset folded into FIXUPP'd disp
+
+Fixture `3637-arr-offset-i-plus-1-obj`:
+
+```c
+int next(int i) { return arr[i + 1]; }
+```
+
+```
+8b 5e 04                       mov bx, i
+d1 e3                          shl bx, 1
+8b 87 02 00 [FIXUPP _arr]      mov ax, [bx + _arr + 2]
+```
+
+Findings:
+- `i + 1` folds to `(i*2) + 2` at compile time.
+- The +2 piggybacks on the FIXUPP'd disp16; no separate add needed.
+- Same byte count as `arr[i]`.
+
