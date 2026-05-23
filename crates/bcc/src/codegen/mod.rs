@@ -6034,6 +6034,33 @@ impl<'a> FunctionEmitter<'a> {
             !reg.is_byte(),
             "compound assignment on a char (byte-register) target not yet supported (no fixture)"
         );
+        // Complex RHS (a non-trivial BinOp that resolve_operand_source
+        // can't reduce to a single memory/register operand): evaluate
+        // it into AX first, then apply the op via `<mnem> <reg>, ax`.
+        // Covers `s += a * b` (fixture 1258 — RHS is Mul), `a |= (1
+        // << b)` (1255 — RHS is Shl), `a -= b - 1` (1315 — RHS is
+        // Sub), and similar. Restricted to ops where the AX-as-RHS
+        // shape is unambiguous (Add/Sub/BitAnd/BitOr/BitXor); Mul,
+        // Shl/Shr, Div/Mod use AX/CL/DX implicitly and route through
+        // their own arms below.
+        if matches!(
+            op,
+            BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor
+        ) && try_const_eval(value).is_none()
+            && matches!(value.kind, ExprKind::BinOp { .. })
+        {
+            self.emit_expr_to_ax(value);
+            let mnem = match op {
+                BinOp::Add => "add",
+                BinOp::Sub => "sub",
+                BinOp::BitAnd => "and",
+                BinOp::BitOr => "or",
+                BinOp::BitXor => "xor",
+                _ => unreachable!(),
+            };
+            let _ = write!(self.out, "\t{mnem}\t{},ax\r\n", reg.name());
+            return;
+        }
         match op {
             BinOp::Add | BinOp::Sub => {
                 // Pointer compound add/sub: scale the RHS by the
