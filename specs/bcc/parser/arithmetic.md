@@ -3188,3 +3188,45 @@ Findings:
   - unsigned `/K`: YES (chained shr)
   - unsigned `%K`: YES (and mask)
 
+
+## Signed `a / b` (var rhs) — `cwd + idiv mem`
+
+Fixture `3518-int-div-var-obj`:
+
+```
+8b 46 04                       mov ax, a
+99                             cwd
+f7 7e 06                       idiv word [bp+6]
+```
+
+Findings:
+- 7B body. Mem operand for idiv (3B with disp8).
+
+## Unsigned `a / b` (var rhs) — `xor dx, dx + div mem`
+
+Fixture `3519-uint-div-var-obj`:
+
+```
+8b 46 04                       mov ax, a
+33 d2                          xor dx, dx
+f7 76 06                       div word [bp+6]
+```
+
+Findings:
+- 8B body. Uses `xor dx, dx` (2B) to zero DX for unsigned div.
+- 1B more than signed because `cwd` is 1B but `xor dx, dx` is 2B.
+
+## Signed `x >> n` (var rhs) — `mov cl, n; sar ax, cl`
+
+Fixture `3520-int-shr-var-obj`:
+
+```
+8b 46 04                       mov ax, x
+8a 4e 06                       mov cl, n       (byte load — low 8 bits)
+d3 f8                          sar ax, cl
+```
+
+Findings:
+- 8B body. CL gets the low byte of the int shift count.
+- `sar` for signed; `shr` for unsigned would replace `d3 f8` with `d3 e8`.
+

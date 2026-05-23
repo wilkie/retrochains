@@ -2897,3 +2897,30 @@ Findings:
 - Result pushed, then left operand loaded, popped temp, then add.
 - 13B body.
 
+
+## `arr[i] += 1` vs `arr[i]++` (char) — DIFFERENT codegen (compound suboptimal)
+
+Fixtures `3515-char-arr-pluseq-obj`, `3516-char-arr-postinc-obj`:
+
+**`arr[i] += 1` (14B body):**
+```
+56                             push si
+8b 76 04                       mov si, i
+8a 84 00 00 [FIXUPP _arr]      mov al, [si + _arr]
+fe c0                          inc al
+88 84 00 00 [FIXUPP _arr]      mov [si + _arr], al
+```
+
+**`arr[i]++` (8B body):**
+```
+56                             push si
+8b 76 04                       mov si, i
+fe 84 00 00 [FIXUPP _arr]      inc byte [si + _arr]    (mem-direct)
+```
+
+Findings:
+- **`arr[i]++` gets the 4B `inc byte [mem]` peephole.**
+- **`arr[i] += 1` MISSES it** — emits 6B more via load+inc+store.
+- This compound-vs-post-inc divergence parallels `x *= 2` (no shl) vs `x = x * 2` (shl reduced).
+- BCC's compound-assign path generally lacks small-const peepholes.
+

@@ -2117,3 +2117,22 @@ Findings:
 - Direct byte-cmp form (4B) — no widening needed.
 - Matches the pattern from 3345 (char == 65).
 
+
+## `char + char` returning char — direct byte arithmetic, no widening
+
+Fixture `3517-char-add-char-obj`:
+
+```c
+char sum(char a, char b) { return a + b; }
+```
+
+```
+8a 46 04                       mov al, a
+02 46 06                       add al, b
+```
+
+Findings:
+- 6B body. Pure byte ops via `add r8, r/m8` (opcode 0x02).
+- No `cbw` widening since both operands and result are char.
+- Result in AL — char return convention.
+
