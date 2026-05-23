@@ -1686,3 +1686,30 @@ Findings:
 - For unsigned char `>> 1`, would be `mov al; mov ah, 0; shr ax, 1`
   (5B without the `mov ah, 0` if already known zero).
 
+
+## `char a < char b` — byte-level `cmp al, [mem]` (no promotion)
+
+Fixture `2984-char-lt-char-obj`:
+
+```c
+int lt(char a, char b) {
+  if (a < b) return 1;
+  return 0;
+}
+```
+
+```
+8a 46 04                       mov al, a
+3a 46 06                       cmp al, byte [bp+6]   (BYTE cmp, 3a /r form)
+7d 05                          jge → FALSE
+```
+
+Findings:
+- Char-to-char comparison uses **byte-level `cmp al, [mem]`**
+  (`3a 46 disp8`, 3B). NO cbw promotion needed!
+- ModR/M `46 disp8` for `[bp+disp8]`. Opcode `3a /r` = `cmp r8, r/m8`.
+- 3 bytes total for the cmp — same as int cmp `3b 46 disp` form
+  but without the cbw prep.
+- For mixed char/int comparison, BCC would promote (per usual
+  arith conversions).
+

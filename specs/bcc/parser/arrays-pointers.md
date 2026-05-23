@@ -6141,3 +6141,62 @@ Findings:
 - HIGH and LOW words each loaded via `[bx + disp16]` (4B each).
 - Total 12 bytes for the load including scale.
 
+
+## 2D char `data[i][j]` var-var indexing — imul for row stride + bx load
+
+Fixture `2985-char-arr-arr-obj`:
+
+```c
+char data[2][3] = { ... };
+return data[i][j];
+```
+
+```
+8b 46 04                       mov ax, i
+ba 03 00 f7 ea                 mov dx, 3; imul dx   (row stride = 3, non-pow-2)
+03 46 06                       add ax, j
+8b d8                          mov bx, ax
+8a 87 00 00                    mov al, [bx + _data]  (FIXUPP'd disp16)
+98                             cbw
+```
+
+Findings:
+- 2D char array `data[i][j]` with var-var indices:
+  1. `i × row_stride` (here 3 = non-pow-2 → imul)
+  2. + `j` (column offset)
+  3. Move total to bx for addressing
+  4. Byte load via `[bx + disp16]` + cbw
+- For 2D arrays with row stride = power of 2, would use shl instead
+  of imul.
+- Total ~13 bytes for the indexed access.
+
+## `if (!data)` for global array — condition folded, dead THEN preserved
+
+Fixture `2986-arr-name-bool-obj`:
+
+```c
+int data[10];
+if (!data) return 0;
+return 1;
+```
+
+```
+eb 04                          jmp → ELSE   (skip dead THEN)
+33 c0                          (DEAD) ax = 0
+eb 05                          (DEAD) jmp epi
+                               ; ELSE:
+b8 01 00                       ax = 1
+```
+
+Findings:
+- BCC **recognizes** that array-name `data` decays to a non-null
+  address, so `!data` is constant 0 (false).
+- Condition is folded → unconditional jmp to ELSE.
+- BUT dead THEN body STILL EMITTED (the `33 c0; eb 05`).
+- Confirms the **two-tier optimization** (`2969`): expressions
+  fold (here `!data` → 0), statements preserve source structure
+  (dead body emitted).
+- Compare to `if (data)` (`2800`) which emits the FULL test
+  with `or ax, ax; je` — apparently BCC's `!` folder works but
+  the plain `data` truthy test doesn't get the same recognition.
+

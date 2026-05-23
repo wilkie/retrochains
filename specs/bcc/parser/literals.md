@@ -602,3 +602,18 @@ Findings:
   (string length 5 + 1 NUL = 6 bytes).
 - For `char buf[10] = "hello"`, would zero-pad to 10 bytes.
 
+
+## `int g = 10 + 5;` — global init expression CONSTANT-FOLDED at parse
+
+Fixture `2982-global-init-expr-obj`:
+
+`_DATA` for `_g` (2 bytes): `0f 00` (= 15)
+
+Findings:
+- Constant arithmetic in global initializer is **folded at parse
+  time** to the resulting value. NO runtime arithmetic, NO startup
+  code.
+- `_DATA` holds the literal final value (15 = 0x0F).
+- Same applies to all constant expressions in global initializers:
+  `10 + 5`, `sizeof(int) * 4`, `-1 << 2`, etc.
+
