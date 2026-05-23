@@ -5869,3 +5869,31 @@ Findings:
 - Same rule as `unsigned int` comparison (`2867`).
 - Compare to signed int `<` which uses `jge` (signed) inverse.
 
+
+## `++arr[i]` (var index, global) — `inc word [bx + disp16]`
+
+Fixture `2937-preinc-arr-var-obj`:
+
+```c
+int arr[10];
+int bump(int i) {
+  return ++arr[i];
+}
+```
+
+```
+8b 5e 04                       mov bx, i
+d1 e3                          shl bx, 1
+ff 87 00 00                    inc word [bx + _arr]  (FIXUPP, 4B)
+8b 87 00 00                    mov ax, [bx + _arr]   (reload)
+```
+
+Findings:
+- `++arr[i]` with variable index = scale + **`inc word [bx + disp16]`**
+  (4B with FIXUPP).
+- ModR/M `87 disp16` = mod 10, op-ext 000 (inc), r/m 111 ([bx+disp16]).
+- Then reload (4B) for return.
+- 8 bytes for the inc+reload (excluding scale).
+- Compare to char arr same construct which would also use mem-inc
+  via bx-based addressing.
+

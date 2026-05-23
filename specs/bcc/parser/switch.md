@@ -2289,3 +2289,28 @@ Findings:
 - For larger constants would use `sub bx, imm16` (4B).
 - ±1 special-cased — saves 2B over the generic sub form.
 
+
+## Dense switch with explicit `default:` — default body after case bodies
+
+Fixture `2933-switch-default-dense-obj`:
+
+```c
+switch (x) {
+  case 0: return 100;
+  case 1: return 110;
+  case 2: return 120;
+  case 3: return 130;
+  default: return 999;
+}
+```
+
+Same dispatch as no-default dense (`2907`), but range-check `ja`
+jumps directly to the default body. Default body is appended after
+the case bodies, in source order.
+
+Findings:
+- `ja → DEFAULT` from the range check goes to actual default body.
+- Default body emitted after the last case body.
+- Same dispatch table size and shape; only the post-default
+  target changes.
+

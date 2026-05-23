@@ -2531,3 +2531,28 @@ Findings:
 - BCC uses mem-source imul when the multiplier is from memory (not
   a constant).
 
+
+## `a + b * c` precedence — multiply first, then add (push/pop spill)
+
+Fixture `2936-precedence-amb-obj`:
+
+```c
+return a + b * c;
+```
+
+```
+8b 46 06                       mov ax, b
+f7 6e 08                       imul word [c]    (mem-source, 3B)
+50                             push ax (spill)
+8b 46 04                       mov ax, a
+5a                             pop dx
+03 c2                          add ax, dx
+```
+
+Findings:
+- `b * c` evaluated first (higher precedence), result spilled to
+  stack.
+- Then `a` loaded, popped + added.
+- Standard push/pop spill pattern when both operands compete for AX.
+- 13 bytes for the 3-operand expression.
+

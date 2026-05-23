@@ -1647,3 +1647,30 @@ Findings:
 - Total ~30 bytes for the 3-call chain.
 - AX is the conduit between each inner call and its consumer.
 
+
+## `char_var → char_param` — NO cbw promotion (skips 1B)
+
+Fixture `2938-char-pass-char-obj`:
+
+```c
+void recv(char c);
+void send(char c) {
+  recv(c);
+}
+```
+
+```
+8a 46 04                       mov al, c       (byte load)
+50                             push ax         (NO cbw, AH garbage)
+e8 00 00                       call _recv
+59                             pop cx
+```
+
+Findings:
+- When callee declared `char` parameter, BCC **skips the cbw**
+  promotion that occurs for `char → int` param (`2836`).
+- 4 bytes for the arg setup (vs 5B with cbw).
+- Callee reads only AL anyway; AH garbage is harmless.
+- Source-form rule: declare char param when caller has char to
+  skip the promotion step.
+
