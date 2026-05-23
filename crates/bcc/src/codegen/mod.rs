@@ -2541,7 +2541,27 @@ impl<'a> FunctionEmitter<'a> {
         if let ExprKind::BinOp { op, left, right } = &cond.kind
             && op.is_comparison()
         {
+            // `K op x` with K const and x non-const: BCC swaps to
+            // `x op K` so the memory-direct cmp path applies. For
+            // Eq/Ne the op is commutative; for Lt/Gt/Le/Ge the
+            // operand swap requires flipping the op (lt↔gt, le↔ge).
+            // Fixtures 2967 (`0 == x`), and similar.
             let unsigned = self.cmp_is_unsigned(left, right);
+            if try_const_eval(left).is_some() && try_const_eval(right).is_none() {
+                let flipped_op = match op {
+                    BinOp::Eq | BinOp::Ne => *op,
+                    BinOp::Lt => BinOp::Gt,
+                    BinOp::Gt => BinOp::Lt,
+                    BinOp::Le => BinOp::Ge,
+                    BinOp::Ge => BinOp::Le,
+                    _ => unreachable!(),
+                };
+                self.emit_compare(right, left);
+                return (
+                    flipped_op.jump_if_true(unsigned).expect("comparison op has true mnemonic"),
+                    flipped_op.jump_if_false(unsigned).expect("comparison op has false mnemonic"),
+                );
+            }
             self.emit_compare(left, right);
             return (
                 op.jump_if_true(unsigned).expect("comparison op has true mnemonic"),
