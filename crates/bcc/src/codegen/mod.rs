@@ -11114,7 +11114,35 @@ impl<'a> FunctionEmitter<'a> {
                         || matches!(&right.kind, ExprKind::Ident(n) if self.ident_is_char(n))
                         || (matches!(right.kind, ExprKind::BinOp { .. })
                             && try_const_eval(right).is_none());
-                    if rhs_clobbers_ax {
+                    // Callee-preserved register peephole: when the
+                    // left operand is a bare ident that lives in
+                    // SI or DI (BCC's int register pool sites that
+                    // get saved across calls), we can skip the
+                    // push/pop dance and apply the op directly with
+                    // the register as the source. Fixtures 1697,
+                    // 2255 (`n * fact(n-1)` with n in SI → `imul
+                    // si` instead of `push ax; mov ax,si; pop dx;
+                    // imul dx`).
+                    let left_preserved_reg = if let ExprKind::Ident(name) = &left.kind
+                        && self.locals.has(name)
+                        && let LocalLocation::Reg(reg) = self.locals.location_of(name)
+                        && matches!(reg, Reg::Si | Reg::Di)
+                    {
+                        Some(reg)
+                    } else {
+                        None
+                    };
+                    if rhs_clobbers_ax
+                        && let Some(reg) = left_preserved_reg
+                    {
+                        self.emit_expr_to_ax(right);
+                        emit_op_with_source(
+                            self.out,
+                            *op,
+                            &OperandSource::Reg(reg),
+                            unsigned,
+                        );
+                    } else if rhs_clobbers_ax {
                         self.emit_expr_to_ax(right);
                         self.out.extend_from_slice(b"\tpush\tax\r\n");
                         self.emit_expr_to_ax(left);
