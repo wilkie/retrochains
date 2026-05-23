@@ -7644,3 +7644,19 @@ a3 06 00 [FIXUPP _arr]         mov [_arr + 6], ax     (offset 6 = 3 * sizeof(int
 Findings:
 - 6B body. Const offset folded; uses AX-short store form (3B).
 
+
+## `arr[*p]` — load index through ptr + scale + array load
+
+Fixture `3584-arr-deref-idx-obj`:
+
+```
+8b 76 04                       mov si, p
+8b 1c                          mov bx, [si]     (bx = *p)
+d1 e3                          shl bx, 1
+8b 87 00 00 [FIXUPP _arr]      mov ax, [bx + _arr]
+```
+
+Findings:
+- Index obtained via pointer-dereference into BX directly.
+- Then standard scale + mem-direct load.
+

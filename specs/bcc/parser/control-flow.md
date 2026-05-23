@@ -5886,3 +5886,21 @@ Findings:
 - Negative values stored as their 16-bit two's complement (-100 = 0xFF9C).
 - `cmp ax, [bx]` works correctly regardless of sign.
 
+
+## `if (s.x && s.y)` — mem-cmp per member + short-circuit
+
+Fixture `3586-struct-cond-and-obj`:
+
+```
+83 3e 00 00 00                 cmp word [_s], 0       (s.x)
+74 0c                          je FALSE
+83 3e 02 00 00                 cmp word [_s + 2], 0   (s.y)
+74 05                          je FALSE
+b8 01 00                       mov ax, 1
+```
+
+Findings:
+- Each member tested via 5B mem-imm8 cmp.
+- Standard `&&` short-circuit to common FALSE label.
+- 21B body.
+

@@ -2288,3 +2288,36 @@ Findings:
 - Char widened to int via `cbw` (signed extension) before scaling.
 - 12B body. Negative chars produce negative offsets (signed semantics).
 
+
+## `unsigned char c >> 2` — zero-extend + sar (not shr)
+
+Fixture `3583-uchar-shr-obj`:
+
+```c
+unsigned char shr2(unsigned char c) { return c >> 2; }
+```
+
+```
+8a 46 04                       mov al, c
+b4 00                          mov ah, 0          (zero-extend)
+d1 f8                          sar ax, 1
+d1 f8                          sar ax, 1
+```
+
+Findings:
+- BCC zero-extends via `mov ah, 0` (unsigned char promotion).
+- Then uses `sar` (signed shift) — but since high bit is 0 after zero-extension, `sar` and `shr` produce identical results.
+- 9B body. May be a quirk of BCC's IR using sar for "int" shifts after promotion.
+
+## `global_char == imm8_char` — direct byte mem-cmp
+
+Fixture `3582-global-eq-char-obj`:
+
+```
+80 3e 00 00 41                 cmp byte [_g], 'A'    (5B)
+```
+
+Findings:
+- 5B mem-imm8 byte cmp. No widening (since both are char).
+- Saves vs load+cbw+cmp (~7B).
+

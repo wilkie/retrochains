@@ -3231,3 +3231,33 @@ Findings:
 - 4B body. Same size as signed `sar [_g], 1` (`d1 /7`).
 - Single-bit shift mem-direct.
 
+
+## `call() & 0xFF` — call result + AX-short AND
+
+Fixture `3581-call-mask-obj`:
+
+```
+e8 ?? ??                       call _get
+25 ff 00                       and ax, 0xFF
+```
+
+Findings:
+- 6B body. Standard 3B AX-short AND on the AX result.
+- No `or al, al` or special byte-mask peephole; uses generic AND.
+
+## `f(g() + 1)` — `inc ax` peephole for +1 in arg context
+
+Fixture `3585-call-plus-1-arg-obj`:
+
+```
+e8 ?? ??                       call _g
+40                             inc ax           (+ 1 peephole)
+50                             push ax
+e8 ?? ??                       call _f
+59                             pop cx
+```
+
+Findings:
+- `+ 1` recognized and emitted as `inc ax` (1B).
+- 9B body — tight chain of call→inc→push→call.
+
