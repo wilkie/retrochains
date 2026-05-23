@@ -11535,15 +11535,14 @@ impl<'a> FunctionEmitter<'a> {
             return;
         }
         // Mem-to-reg copy: `<reg> = <stack-local>` where the RHS is
-        // a bare identifier for a stack-resident int local (not
-        // pointer/array — those have their own decay/address
-        // forms). BCC emits `mov <reg>, word ptr [bp-N]` directly,
-        // skipping the AX round-trip. Fixture 1145 (`b = t;` with t
-        // on stack, b in DI).
+        // a bare identifier for a stack-resident int/uint/pointer
+        // local. BCC emits `mov <reg>, word ptr [bp-N]` directly,
+        // skipping the AX round-trip. Fixture 1145 (`b = t;` int),
+        // 2852 (`q = p;` int pointer).
         if let ExprKind::Ident(name) = &expr.kind
             && self.locals.has(name)
             && let LocalLocation::Stack(src_off) = self.locals.location_of(name)
-            && matches!(self.locals.type_of(name), Type::Int)
+            && self.locals.type_of(name).is_int_like()
             && !reg.is_byte()
         {
             let _ = write!(
