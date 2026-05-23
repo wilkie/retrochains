@@ -6268,3 +6268,32 @@ Findings:
   as both index source and dest).
 - Standard pattern for "table of pointers" idiom.
 
+
+## Local int array fill via for loop — `mov [bx], si` register-source store
+
+Fixture `3003-local-arr-fill-obj`:
+
+```c
+int a[5];
+for (i = 0; i < n; i = i + 1) {
+  a[i] = i;
+}
+```
+
+Index store:
+```
+8b de                          mov bx, si
+d1 e3                          shl bx, 1
+8d 46 f6 03 d8                 lea ax, &a[0]; add bx, ax
+89 37                          mov [bx], si    (REGISTER-SOURCE store!)
+```
+
+Findings:
+- Store `i` into `a[i]` uses **`mov [bx], si`** (`89 37`, 2B) —
+  register-source store via no-disp form.
+- ModR/M `37` = mod 00, reg 110 (si), r/m 111 (bx).
+- Since `i` is promoted to si and stays in si throughout the loop,
+  no need to copy to AX first.
+- Same as the reg-direct global store peephole (`2776`) but for
+  bx-indexed memory.
+

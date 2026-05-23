@@ -2973,3 +2973,47 @@ Findings:
   imm8. The `83 /1 imm8` (5B) sign-ext form is NOT used here for
   globals. Possibly a missed peephole, or specific to mem-imm OR.
 
+
+## Global compound bitwise assigns — `81 /op disp16 imm16` (6B uniform)
+
+Fixtures `2999`, `3000`, `3001`:
+
+```c
+g <<= 1;     /* d1 26 disp16          (4B, shift-1 special) */
+g &= 0x0F;   /* 81 26 disp16 imm16    (6B, AND op-ext /4)   */
+g ^= 0xFF;   /* 81 36 disp16 imm16    (6B, XOR op-ext /6)   */
+flags |= K;  /* 81 0e disp16 imm16    (6B, OR  op-ext /1)   */
+```
+
+Findings:
+- **Global compound bitwise assigns use the same `81 /op disp16
+  imm16` (6B)** pattern: direct memory operation with imm.
+- ModR/M op-extension by operation:
+  - `/0` add (`06`), `/1` or (`0e`), `/4` and (`26`), `/5` sub
+    (`2e`), `/6` xor (`36`)
+- **`g <<= 1`** is special: uses single `d1 26 disp16` (4B)
+  because shift-by-1 has a dedicated opcode (no immediate).
+- For multi-bit shifts (`g <<= 2+`), BCC would need to load via
+  AX (no mem-shift with cl-form), making it longer.
+- **BCC misses imm8 sign-ext peephole** (`83 /op imm8` = 5B) for
+  small constants in mem-imm compound assigns. Always uses imm16
+  form regardless.
+
+## `g -= 1` for global — `dec word [mem]` (byte-identical to `--g`)
+
+Fixture `3004-minus-eq-global-obj`:
+
+```c
+counter -= 1;
+```
+
+```
+ff 0e 00 00                    dec word [_counter]    (4B with FIXUPP)
+```
+
+Findings:
+- Byte-identical to `--counter` (`2858`).
+- Source-form rule: `g -= 1` ≡ `--g` ≡ `dec word [mem]` (4B).
+- Compare to `g += 1` ≡ `++g` (`2638`) = `inc word [mem]` (4B).
+- Both inc/dec word-mem use the same 4B peephole.
+
