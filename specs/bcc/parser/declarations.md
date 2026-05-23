@@ -1720,3 +1720,17 @@ Fixture `3121-signed-char-obj`:
 
 `signed char c` byte-identical to `char c` (BCC defaults to signed).
 
+
+## `int g = 0;` explicit zero — also goes to `_DATA` (not BSS)
+
+Fixture `3125-int-g-eq-0-obj`:
+
+`_DATA` size = 2 (= one int, zero-initialized).
+`_BSS` size = 0.
+
+Findings:
+- Confirms `3029` rule: **any explicit initializer (even just `= 0`)
+  places the global in `_DATA`** with zero bytes.
+- BSS reserved for purely uninitialized globals (`int g;`).
+- Same observation for `int g[3] = {0,0,0}` (`3029`).
+

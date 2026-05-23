@@ -1579,3 +1579,42 @@ Findings:
 - **AND** (`3035`): first `jne → FALSE` (jump to FALSE on mismatch).
 - Different jump direction reflects the truth-table semantics.
 
+
+## `if (p)` ≡ `if (p != 0)` byte-identical (ptr-vs-zero cmp)
+
+Fixtures `3128-if-p-truthy-obj`, `3129-p-ne-null-obj`:
+
+Both:
+```
+83 7e 04 00                    cmp word [bp+4], 0
+74 05                          je → FALSE
+```
+
+Findings:
+- `if (p)` truthy test = `cmp [mem], 0; je → FALSE`.
+- `if (p != 0)` explicit = byte-identical code.
+- For ptr params (not register-promoted by default in 1-arg fn),
+  uses direct mem-cmp.
+
+## `char c == 'A'` (int const) — BYTE-LEVEL `cmp byte [mem], imm8` (NO promotion!)
+
+Fixture `3130-char-eq-A-obj`:
+
+```c
+if (c == 'A') return 1;
+```
+
+```
+80 7e 04 41                    cmp byte [bp+4], 0x41   (4B BYTE cmp)
+75 05                          jne → FALSE
+```
+
+Findings:
+- Char-to-constant-int compare uses **direct byte cmp** (4B).
+- ModR/M `80` opcode is `cmp r/m8, imm8`. ModR/M `7e` = mod 01
+  (disp8), op-ext 111 (cmp), r/m 110 ([bp+disp8]).
+- NO cbw promotion needed since the literal `'A'` fits in 8 bits.
+- **Saves ~3 bytes vs promote-then-int-cmp** (4B vs ~7B).
+- This peephole is char-cmp-imm8 — only applies for chars compared
+  with const that fits int8.
+
