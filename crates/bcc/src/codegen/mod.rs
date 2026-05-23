@@ -7909,6 +7909,23 @@ impl<'a> FunctionEmitter<'a> {
             // materialize RHS in AX, then store AX to the element.
             // Fixture 984 (`a[0] = x` with x a stack local).
             if !leaf_ty.is_char_like() {
+                // Reg-resident-ident RHS: store the register directly
+                // to the array slot. Fixture 2452 (`a[0] = x` with x
+                // in SI → `mov [bp-N], si`).
+                if let ExprKind::Ident(src_name) = &value.kind
+                    && self.locals.has(src_name)
+                    && self.locals.type_of(src_name).is_int_like()
+                    && let LocalLocation::Reg(reg) = self.locals.location_of(src_name)
+                    && !reg.is_byte()
+                {
+                    let _ = write!(
+                        self.out,
+                        "\tmov\tword ptr {},{}\r\n",
+                        bp_addr(off),
+                        reg.name(),
+                    );
+                    return;
+                }
                 self.emit_expr_to_ax(value);
                 let _ = write!(self.out, "\tmov\tword ptr {},ax\r\n", bp_addr(off));
                 return;
