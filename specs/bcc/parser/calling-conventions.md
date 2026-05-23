@@ -1674,3 +1674,32 @@ Findings:
 - Source-form rule: declare char param when caller has char to
   skip the promotion step.
 
+
+## `ops[i](x)` — array of fn-ptrs dispatch via `call [bx + disp16]`
+
+Fixture `2944-fn-ptr-arr-obj`:
+
+```c
+int (*ops[3])(int);
+int dispatch(int i, int x) {
+  return ops[i](x);
+}
+```
+
+```
+ff 76 06                       push x
+8b 5e 04                       mov bx, i
+d1 e3                          shl bx, 1
+ff 97 00 00                    call word ptr [bx + _ops]  (FIXUPP, 4B!)
+59                             pop cx (1-arg cleanup)
+```
+
+Findings:
+- Function-pointer array dispatch via single indirect call
+  through `[bx + disp16]`.
+- ModR/M `97 disp16` = mod 10, op-ext 010 (call near), r/m 111
+  ([bx + disp16]).
+- 4 bytes for the call instruction with FIXUPP'd array base.
+- Conceptually similar to dense-table switch dispatch but for
+  fn-pointer arrays. Common idiom for vtable / state-machine code.
+

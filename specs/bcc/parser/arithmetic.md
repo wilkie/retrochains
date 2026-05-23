@@ -2556,3 +2556,28 @@ Findings:
 - Standard push/pop spill pattern when both operands compete for AX.
 - 13 bytes for the 3-operand expression.
 
+
+## `x = a * b + c` — byte-shorter than `a + b * c` (mul order matches eval)
+
+Fixture `2941-complex-init-obj`:
+
+```c
+int x = a * b + c;
+```
+
+```
+8b 46 04                       mov ax, a
+f7 6e 06                       imul word [b]    (3B mem-source)
+03 46 08                       add ax, c        (3B mem-source)
+89 46 fe                       x = ax
+```
+
+Findings:
+- `a * b` evaluated first (precedence), result in AX.
+- `+ c` directly adds memory operand to AX — NO push/pop needed.
+- Total 9 bytes for computation.
+- **Compare to `a + b * c`** (`2936`) which needed push/pop spill
+  because the LHS of `+` (a) had to be loaded AFTER the multiply.
+- Lesson: **`(b * c) + a` style** (precedence puts mul first) is
+  4 bytes shorter than `a + (b * c)` style.
+

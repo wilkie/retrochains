@@ -5897,3 +5897,73 @@ Findings:
 - Compare to char arr same construct which would also use mem-inc
   via bx-based addressing.
 
+
+## Global ptr `int *p = data;` with `p[K]` access — `mov bx + mov ax, [bx+disp8]`
+
+Fixture `2939-ptr-to-arr-global-obj`:
+
+```c
+int *p = data;
+int peek(void) { return p[2]; }
+```
+
+```
+8b 1e 0a 00                    mov bx, [_p]      (4B with disp16)
+8b 47 04                       mov ax, [bx + 4]  (p[2] = bx + 4, disp8)
+```
+
+Findings:
+- Constant-subscript via global pointer: load p into bx, then
+  `mov ax, [bx + K×sizeof]` (3B disp8 when K×sizeof fits in 127).
+- 7 bytes total for the read.
+- Compare to direct array `data[2]`: single moffs16 `a1 disp16`
+  (3B) — pointer indirection adds 4B (the bx load).
+
+## Struct `{int data[N]}` global access — array+struct fold as one offset
+
+Fixture `2940-struct-with-arr-obj`:
+
+```c
+struct V { int data[3]; };
+struct V g;
+return g.data[i];
+```
+
+```
+8b 5e 04                       mov bx, i
+d1 e3                          shl bx, 1
+8b 87 00 00                    mov ax, [bx + (_g + 0)]
+```
+
+Findings:
+- Member array `g.data[i]` where `data` is at struct offset 0 =
+  byte-identical to `int_arr[i]` (direct array).
+- FIXUPP target = `_g + offset_of_data` (here 0).
+- For non-zero field offset, disp16 = field_offset; same code shape.
+
+## Local int arr with var index — lea + add (same as long arr)
+
+Fixture `2943-local-arr-brace-obj`:
+
+```c
+int a[3];
+a[0] = 10; a[1] = 20; a[2] = 30;
+return a[i];
+```
+
+Access pattern:
+```
+8b 5e 04                       mov bx, i
+d1 e3                          shl bx, 1
+8d 46 fa                       lea ax, &a[0]
+03 d8                          add bx, ax
+8b 07                          mov ax, [bx]
+```
+
+Findings:
+- Local array with var-index requires runtime address computation
+  via `lea + add` (locals don't have linkable FIXUPPs).
+- 10 bytes for index calc + load.
+- Same shape as local long array (`2798`) but with `shl × 1`
+  instead of `shl × 2`.
+

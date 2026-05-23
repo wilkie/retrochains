@@ -4305,3 +4305,19 @@ Findings:
 - NO body elision — the loop runs N times doing the post-step.
 - Useful as a "spin/delay" idiom.
 
+
+## Nested for with `break` in inner — breaks ONLY inner loop
+
+Fixture `2942-nested-for-break-obj`:
+
+```c
+for (i = 0; i < n; i = i + 1) {
+  for (j = 0; j < m; j = j + 1) {
+    if (i + j == 7) break;
+  }
+}
+```
+
+The break's `jmp` targets the post-inner-loop label, so outer loop
+continues normally. To break OUT of both loops, use a flag or goto.
+
