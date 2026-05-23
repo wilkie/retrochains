@@ -4350,3 +4350,23 @@ Findings:
 - 7B body. Single byte load at struct offset.
 - AL holds return (no widening since return type is char).
 
+
+## Nested member store at offset 0 — identical to global store
+
+Fixture `3601-nested-mem-assign-obj`:
+
+```c
+struct Inner { int v; };
+struct Outer { struct Inner inner; } o;
+void put(int v) { o.inner.v = v; }
+```
+
+```
+8b 46 04                       mov ax, v
+a3 00 00 [FIXUPP _o]           mov [_o], ax        (offset 0)
+```
+
+Findings:
+- All nested-member offsets are 0, so the chain collapses to direct global access.
+- Identical OBJ to `g = v` for a global int.
+

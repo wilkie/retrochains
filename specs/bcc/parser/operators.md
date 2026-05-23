@@ -3305,3 +3305,22 @@ Findings:
 - 7B body. AX from call flows directly into mem-direct add.
 - Same shape as `g += var` (3457) but with call result instead of stack var.
 
+
+## `if ((g = call()) != 0) g++` — store + or-test + mem-direct inc
+
+Fixture `3602-if-assign-call-obj`:
+
+```
+e8 ?? ?? [FIXUPP _get]         call _get
+a3 00 00 [FIXUPP _g]           mov [_g], ax     (g = result)
+0b c0                          or ax, ax        (test — AX still holds result)
+74 04                          je END
+ff 06 00 00 [FIXUPP _g]        inc word [_g]    (g++)
+END:
+```
+
+Findings:
+- AX value flows: call result → store to g → or-test (no reload).
+- 14B body.
+- For the `g++` inside: uses `inc word [_g]` mem-direct since result value isn't needed.
+

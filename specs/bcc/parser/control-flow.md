@@ -5959,3 +5959,45 @@ Fixture `3596-expr-cmp-cond-obj`:
 Findings:
 - 18B body. Standard pattern: compute LHS, then cmp.
 
+
+## if-then-else with multiple statements — direct sequence + jmp-out
+
+Fixture `3603-if-multi-stmt-obj`:
+
+```c
+if (x) { a = 1; b = 2; } else { c = 3; }
+```
+
+```
+83 7e 04 00                    cmp x, 0
+74 0e                          je ELSE
+c7 06 00 00 01 00              mov [_a], 1
+c7 06 02 00 02 00              mov [_b], 2
+eb 06                          jmp END
+ELSE:
+c7 06 04 00 03 00              mov [_c], 3
+END:
+```
+
+Findings:
+- 26B body. Each stmt = 6B `mov mem, imm16`.
+- Standard if-else: then-branch emitted first, single `jmp END` exit.
+
+## `return x < 0` — branching boolean materialize
+
+Fixture `3604-x-leq-zero-cond-obj`:
+
+```
+83 7e 04 00                    cmp x, 0
+7d 05                          jge ELSE         (signed ≥ 0)
+b8 01 00                       mov ax, 1
+eb 02                          jmp END
+ELSE:
+33 c0                          xor ax, ax
+END:
+```
+
+Findings:
+- 13B body. Standard cmp-branch boolean materialize.
+- Same shape as other boolean-result returns (3475/3476).
+

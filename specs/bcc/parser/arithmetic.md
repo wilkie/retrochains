@@ -3291,3 +3291,32 @@ Findings:
 - Opcode `2d` = `sub AX, imm16` AX-specific short form (3B).
 - Same size as the imm8 sign-extended form (`83 /5 imm8` = 3B), so no advantage either way.
 
+
+## Signed `x / 2` — full idiv (9B), no `sar` reduction
+
+Fixture `3599-int-div2-signed-obj`:
+
+```
+8b 46 04                       mov ax, x
+bb 02 00                       mov bx, 2
+99                             cwd
+f7 fb                          idiv bx
+```
+
+Findings:
+- Consistent with all signed div-by-power-of-2: never reduced (rounding semantics).
+- 9B body.
+
+## Unsigned `x + 1` — `inc ax` (same as signed)
+
+Fixture `3600-uint-add1-obj`:
+
+```
+8b 46 04                       mov ax, x
+40                             inc ax
+```
+
+Findings:
+- `+1` peephole is type-agnostic.
+- 4B body — minimum non-trivial arithmetic return.
+
