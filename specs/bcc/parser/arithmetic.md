@@ -3087,3 +3087,29 @@ Findings:
 - 2-byte `xor reg, reg` saves 1 byte vs `mov ax, 0` (3B = `b8 00 00`).
 - Standard zero-clear idiom.
 
+
+## `x * 2` — strength-reduced to `shl ax, 1` (2B)
+
+Fixture `3462-mul2-obj`:
+
+```
+8b 46 04                       mov ax, x
+d1 e0                          shl ax, 1
+```
+
+Findings:
+- `* 2` = `shl 1` strength reduction.
+- 5B body. Identical to `x << 1`.
+
+## `x * 1` — fully constant-folded to identity (3B)
+
+Fixture `3463-mul1-obj`:
+
+```
+8b 46 04                       mov ax, x
+```
+
+Findings:
+- `* 1` is identity for multiplication; emit only the load.
+- Confirms BCC recognizes multiplication identities (similar to `+ 0`).
+

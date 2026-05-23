@@ -2519,3 +2519,55 @@ Findings:
 - 6B body. Constant materialized first, then subtracted.
 - No commutativity flip — BCC respects subtraction order.
 
+
+## Swap via temp `t = *a; *a = *b; *b = t;` — 3-step through stack
+
+Fixture `3464-swap-obj`:
+
+```c
+void swap(int *a, int *b) {
+  int t = *a;
+  *a = *b;
+  *b = t;
+}
+```
+
+```
+4c 4c                          dec sp; dec sp   (alloc t)
+56 57                          push si; push di
+8b 76 04                       mov si, a
+8b 7e 06                       mov di, b
+8b 04                          mov ax, [si]     (read *a)
+89 46 fe                       mov [bp-2], ax   (t = ax)
+8b 05                          mov ax, [di]     (read *b)
+89 04                          mov [si], ax     (*a = ax)
+8b 46 fe                       mov ax, [bp-2]   (read t)
+89 05                          mov [di], ax     (*b = ax)
+```
+
+Findings:
+- t goes through the stack — no reg-alloc despite being temporary.
+- 21B body. Could be ~18B with register temp.
+
+## Ternary picking between globals — branch + two `a1 imm16` loads
+
+Fixture `3465-ternary-globals-obj`:
+
+```c
+int g1 = 100, g2 = 200;
+int pick(int c) { return c ? g1 : g2; }
+```
+
+```
+83 7e 04 00                    cmp c, 0
+74 05                          je ELSE
+a1 00 00 [FIXUPP _g1]          mov ax, [_g1]
+eb 03                          jmp END
+ELSE:
+a1 02 00 [FIXUPP _g2]          mov ax, [_g2]   (offset +2 in _DATA)
+```
+
+Findings:
+- Both globals share `_DATA` segment: g1 at offset 0, g2 at offset 2 (placed sequentially).
+- Each branch uses the 3B `a1 imm16` short load.
+

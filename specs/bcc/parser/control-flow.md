@@ -5424,3 +5424,25 @@ Findings:
 - Differs from do-while-continue (3326) which jumps directly to the condition test (no step).
 - Different from while-continue which jumps to the condition test (no step either).
 
+
+## for-decrement `for (i=10; i>0; i--)` — `or` + `jg` peephole
+
+Fixture `3461-for-decrement-obj`:
+
+```
+33 ff                          xor di, di       (s = 0)
+be 0a 00                       mov si, 10       (i = 10)
+eb 03                          jmp TEST
+LOOP_BODY:
+03 fe                          add di, si
+4e                             dec si           (i--)
+TEST:
+0b f6                          or si, si        (cmp i, 0)
+7f f9                          jg LOOP_BODY     (signed > 0)
+8b c7                          mov ax, di
+```
+
+Findings:
+- `i > 0` test uses `or si, si` cmp-zero peephole (2B) + `jg` (signed).
+- `dec` for step (1B). Tight loop.
+

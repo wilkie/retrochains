@@ -4212,3 +4212,23 @@ Findings:
 - 29B body for the extract+combine+test sequence.
 - BCC reloads `[_f]` twice (could load once into a temp). Minor missed opt.
 
+
+## `typedef struct` — fully transparent
+
+Fixture `3466-typedef-struct-obj`:
+
+```c
+typedef struct { int x; int y; } Pt;
+Pt p;
+int sum(void) { return p.x + p.y; }
+```
+
+```
+a1 00 00 [FIXUPP _p]           mov ax, [p.x]
+03 06 02 00 [FIXUPP _p]        add ax, [p.y]
+```
+
+Findings:
+- Identical OBJ to direct `struct Pt { ... } p;` (compare 3341).
+- typedef is purely syntactic — no codegen difference.
+
