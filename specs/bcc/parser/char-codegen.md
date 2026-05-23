@@ -1804,3 +1804,74 @@ Findings:
 - Multiplication is always safe to strength-reduce (no rounding).
 - Same general pow2-mul rule applies after char promotion.
 
+
+## `unsigned char c == 'A'` — BYTE-IDENTICAL to signed char compare
+
+Fixture `3131-uchar-eq-A-obj`:
+
+```c
+unsigned char c == 'A'    /* byte-identical to signed char */
+```
+
+```
+80 7e 04 41                    cmp byte [bp+4], 0x41
+75 05                          jne → FALSE
+```
+
+Findings:
+- Signedness doesn't matter for `==` — both halves are raw bytes.
+- Same byte-cmp peephole as `3130`.
+
+## `char c != '\0'` — `cmp byte [mem], 0; je → FALSE`
+
+Fixture `3132-char-ne-nul-obj`:
+
+```
+80 7e 04 00                    cmp byte [bp+4], 0
+74 05                          je → FALSE
+```
+
+Findings:
+- NUL test on char param = byte-cmp-vs-zero + je-to-FALSE (4B + 2B).
+
+## Char range check `c >= '0' && c <= '9'` — uses DL, not AL
+
+Fixture `3133-digit-range-obj`:
+
+```c
+if (c >= '0' && c <= '9') return 1;
+```
+
+```
+8a 56 04                       mov dl, c   (DL register!)
+80 fa 30                       cmp dl, '0' (0x30)
+7c 0a                          jl → FALSE
+80 fa 39                       cmp dl, '9' (0x39)
+7f 05                          jg → FALSE
+                               ; TRUE
+```
+
+Findings:
+- Char range test loads param into **DL** (not AL) to keep AX free
+  for return value or other operations.
+- ModR/M `fa` = mod 11 op-ext 111 (cmp /7) r/m 010 (DL).
+- 3B per byte-cmp, 2B per signed jump — 13 bytes for the test.
+- Signed `jl`/`jg` since char is signed by default.
+
+## `signed char c < 0` — byte cmp + `jge → FALSE` (no cbw)
+
+Fixture `3136-signed-char-neg-obj`:
+
+```c
+if (c < 0) return 1;
+```
+
+```
+80 7e 04 00                    cmp byte [bp+4], 0
+7d 05                          jge → FALSE
+```
+
+Findings:
+- Direct byte cmp + signed jge — no cbw promotion needed.
+- 6 bytes total for the test.
+

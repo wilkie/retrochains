@@ -1618,3 +1618,25 @@ Findings:
 - This peephole is char-cmp-imm8 — only applies for chars compared
   with const that fits int8.
 
+
+## `int x == 0xFF` and `int x == 256` — both use imm16 form
+
+Fixtures `3134-int-eq-FF-obj`, `3135-cmp-256-obj`:
+
+```c
+if (x == 0xFF)    /* 255 = doesn't fit signed imm8 (max 127) */
+if (x == 256)
+```
+
+Both:
+```
+81 7e 04 imm16                 cmp word [bp+4], imm16
+75 05                          jne → FALSE
+```
+
+Findings:
+- `0xFF` (= 255) would sign-extend from imm8 as `0xFFFF` (= -1),
+  WRONG value. Must use imm16 form (5B).
+- `256` exceeds signed imm8 max → imm16 form (5B).
+- Both cases: 5-byte cmp instruction.
+
