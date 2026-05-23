@@ -3376,3 +3376,29 @@ Findings:
   DX:AX = HIGH:LOW.
 - Each word goes through its own register; no helper needed.
 
+
+## Signed long compare `v < 0L` — HIGH signed cmp + LOW unsigned cmp
+
+Fixture `3026-signed-long-lt-obj`:
+
+```c
+if (v < 0L) return 1;
+```
+
+```
+83 7e 06 00                    cmp word [bp+6], 0   (HIGH)
+7f 0d                          jg → FALSE   (signed: HIGH > 0 means v > 0)
+7c 06                          jl → TRUE    (signed: HIGH < 0 means v < 0)
+                               ; HIGH == 0, check LOW:
+83 7e 04 00                    cmp word [bp+4], 0   (LOW)
+73 05                          jae → FALSE  (UNSIGNED: LOW >= 0 means v >= 0)
+                               ; TRUE:
+```
+
+Findings:
+- **HIGH word**: signed compare (`jg`/`jl`).
+- **LOW word**: UNSIGNED compare (`jae`/`jb`) — the low bits are
+  treated as magnitude when high is equal.
+- Confirms the 3-step lexicographic long comparison from
+  `long-codegen.md`.
+

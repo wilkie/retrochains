@@ -6324,3 +6324,41 @@ Findings:
 - AX is the conduit between load and store.
 - 14 bytes for the indexed copy.
 
+
+## `*(arr + i)` ≡ `arr[i]` — BYTE-IDENTICAL (C identity)
+
+Fixture `3025-arr-plus-deref-obj`:
+
+```c
+return *(data + i);   /* same code as data[i] */
+```
+
+```
+8b 5e 04 d1 e3 8b 87 00 00
+```
+
+Findings:
+- `*(arr + i)` and `arr[i]` produce **byte-identical code**.
+- C standard: `arr[i] ≡ *(arr + i)` — BCC honors this at codegen.
+
+## `data[i + K]` for const K — folded into FIXUPP disp16
+
+Fixture `3028-arr-i-plus-1-obj`:
+
+```c
+return data[i + 1];
+```
+
+```
+8b 5e 04                       mov bx, i
+d1 e3                          shl bx, 1
+8b 87 02 00                    mov ax, [bx + _data + 2]   (disp = +2)
+```
+
+Findings:
+- The constant offset `K * sizeof(elem)` is **folded into the
+  FIXUPP disp16**.
+- No separate `add ax` or `add bx` instructions.
+- `data[i + K]` ≡ `data[i]` codegen but with disp16 = K × sizeof.
+- Works for any compile-time constant K in the index expression.
+

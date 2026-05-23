@@ -4476,3 +4476,39 @@ Findings:
   (the two-tier optimization from `2969`). do-while(0) gets fully
   folded.
 
+
+## `do-while(1)` ≡ `while(1)` ≡ `for(;;)` — ALL BYTE-IDENTICAL
+
+Fixtures `3023-do-while-one-obj`, `3024-for-empty-obj`, `2972-while-1-break-obj`:
+
+All three loop forms with `break` exit:
+
+```c
+do { if (x > 0) return x; break; } while (1);   /* 3023 */
+while (1) { if (x > 0) return x; break; }      /* 2972 */
+for (;;) { if (x > 0) return x; break; }       /* 3024 */
+```
+
+Produce **byte-identical bodies**:
+
+```
+8b 76 04                       mov si, x
+0b f6                          or si, si
+7e 04                          jle → AFTER_IF
+8b c6                          return x
+eb 08                          jmp epi
+                               ; AFTER_IF:
+eb 02                          jmp → AFTER_LOOP (break)
+                               ; (where back-edge lands):
+eb f4                          jmp → LOOP_TOP (unconditional back-edge)
+                               ; AFTER_LOOP:
+33 c0                          return 0
+```
+
+Findings:
+- All three syntactic forms normalize to the **same loop shape**:
+  init + unconditional back-edge + break-jmp + after-loop.
+- For const-true conditions, the test is elided; only the back-edge
+  jmp remains.
+- BCC's "loop with no real condition" canonicalization.
+
