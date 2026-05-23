@@ -5967,3 +5967,54 @@ Findings:
 - Same shape as local long array (`2798`) but with `shl × 1`
   instead of `shl × 2`.
 
+
+## `arr[i] += 1` (var idx, global) = `++arr[i]` byte-identical
+
+Fixture `2949-arr-elem-plus-eq-obj`:
+
+```c
+int arr[5];
+void bump(int i) {
+  arr[i] += 1;
+}
+```
+
+```
+8b 5e 04                       mov bx, i
+d1 e3                          shl bx, 1
+ff 87 00 00                    inc word [bx + _arr]
+```
+
+Findings:
+- `arr[i] += 1` and `++arr[i]` (`2937`) produce **byte-identical
+  code**: scale + `inc word [bx + disp16]`.
+- 6 bytes for the indexed mem-inc (excluding scale of bx).
+- Note this contrasts with global scalar `g += 1` vs `++g`
+  (both also identical, both use `inc word [mem]`).
+- Char-global is the exception where source form doesn't help.
+
+## `int *mid = &data[K]` for K > 0 — pointer slot with FIXUPP offset
+
+Fixture `2950-ptr-mid-arr-3-obj`:
+
+```c
+int data[10];
+int *mid = &data[3];
+return *mid;
+```
+
+`_DATA`:
+- `_mid` (2B): FIXUPP target = `_data + 6` (= `&data[3]`)
+- offset 6 is baked into the pointer slot
+
+```
+8b 1e 00 00                    mov bx, [_mid]
+8b 07                          mov ax, [bx]
+```
+
+Findings:
+- Pointer slot holds `K × sizeof(*data)` as the FIXUPP-relocated
+  offset. Linker resolves to absolute address at link time.
+- Same code as `int *p = data` (`2802`) — only the FIXUPP offset
+  differs (+0 vs +6).
+

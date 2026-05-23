@@ -577,3 +577,28 @@ Findings:
 - String literal lives in `_DATA`; pointer-init globals get FIXUPP'd
   to the string's offset.
 
+
+## `int g = -42;` global negative init — two's complement in `_DATA`
+
+Fixture `2945-global-neg-init-obj`:
+
+`_DATA` for `_g` (2 bytes): `d6 ff` (= -42 = 0xFFD6 two's complement)
+
+Findings:
+- Negative int globals store two's complement bytes in `_DATA`.
+- Same shape as positive init; only the bit pattern differs.
+- Access via standard `a1 disp16` (3B + FIXUPP).
+
+## `char buf[] = "hello"` — size inferred from string (incl. `\0`)
+
+Fixture `2947-char-arr-str-init-obj`:
+
+`_DATA` for `_buf` (6 bytes): `68 65 6c 6c 6f 00` (= `"hello\0"`)
+
+Findings:
+- `char buf[] = "hello"` is byte-identical to `char buf[6] = {'h',
+  'e','l','l','o','\0'}`.
+- Size inferred from string length **including null terminator**
+  (string length 5 + 1 NUL = 6 bytes).
+- For `char buf[10] = "hello"`, would zero-pad to 10 bytes.
+

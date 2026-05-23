@@ -4321,3 +4321,31 @@ for (i = 0; i < n; i = i + 1) {
 The break's `jmp` targets the post-inner-loop label, so outer loop
 continues normally. To break OUT of both loops, use a flag or goto.
 
+
+## `for (i = n; i > 0; i = i - 1)` — countdown via AX-acc (5B post-step)
+
+Fixture `2946-for-down-to-1-obj`:
+
+```c
+for (i = n; i > 0; i = i - 1) {
+  s = s + i;
+}
+```
+
+Post-step is **5 bytes via AX-acc**:
+```
+8b c6 48 8b f0                 mov ax, si; dec ax; mov si, ax
+```
+
+vs `--i` which would be **1 byte**:
+```
+4e                             dec si
+```
+
+Findings:
+- `i = i - 1` uses **AX-acc bounce** (5B): `mov ax, si; dec ax; mov si, ax`.
+- `--i` would use direct `dec si` (1B) — 4B savings.
+- Same source-form sensitivity as `i = i + 1` vs `++i`.
+- Cond uses `or si, si; jg` (4B with zero-cmp peephole) since `> 0`.
+- **Optimal countdown**: `for (i = n; i > 0; --i)` over `i = i - 1`.
+
