@@ -6629,3 +6629,32 @@ Findings:
 - ModR/M `8f` = mod 10 (disp16), op-ext 001 (dec /1), r/m 111 ([bx+disp16]).
 - 10 bytes total (scale + load + mem-dec).
 
+
+## `*p = K` char-store via ptr — `mov byte [si], imm8` (3B)
+
+Fixture `3147-char-store-via-ptr-obj`:
+
+```c
+void put_nl(char *p) {
+  *p = '\n';
+}
+```
+
+```
+8b 76 04                       mov si, p
+c6 04 0a                       mov byte [si], 0x0A   (3B BYTE mem-imm)
+```
+
+Findings:
+- `*p = const` for `char*` = `mov byte [si], imm8` (`c6 04 imm8`, 3B).
+- ModR/M `04` = mod 00, op-ext 000, r/m 100 ([si]).
+- Saves 1B vs `mov word [si], imm16` (4B for int*).
+- NO load to AL — direct mem-imm.
+
+## `unsigned int *p; return *p` — BYTE-IDENTICAL to int* deref
+
+Fixture `3145-uint-ptr-deref-obj`:
+
+`mov si, p; mov ax, [si]` — same code as plain int* deref. Pointed-to
+type's signedness doesn't affect deref.
+

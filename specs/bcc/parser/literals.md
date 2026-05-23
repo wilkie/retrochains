@@ -693,3 +693,24 @@ Findings:
 - `sizeof(T)` is compile-time constant: 2 for int, 4 for long, 1 for char.
 - Const arithmetic folded at parse → single literal in `_DATA`.
 
+
+## `-32768` literal — `mov ax, 0x8000` (INT_MIN)
+
+Fixture `3148-int-neg-32768-obj`:
+
+```
+b8 00 80                       mov ax, 0x8000   (= -32768)
+```
+
+Findings:
+- `-32768` = `0x8000` (INT_MIN). 3-byte mov immediate.
+- No special handling — same shape as any 16-bit imm.
+
+## Global `int g = -1;` — `ff ff` in `_DATA`
+
+Fixture `3146-global-neg-1-obj`:
+
+`_DATA` for `_g` (2 bytes): `ff ff` (= -1 = 0xFFFF two's complement).
+
+Same shape as `int g = 0;` (3125) or `int g = -42;` (2945), only bit pattern differs.
+
