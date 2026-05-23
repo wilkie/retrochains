@@ -2902,3 +2902,80 @@ Findings:
   - Example: `-1 % 4 = -1`, but `-1 & 3 = 3`.
 - 11-byte body. Remainder copied from DX to AX since DX is `idiv`'s output for remainder.
 
+
+## `x * 3` and `x * 5` — `imul reg` (5B for non-power-of-2 ≤ small)
+
+Fixtures `3365-mul3-obj`, `3366-mul5-obj`:
+
+```
+                               ; x * 3:
+8b 46 04                       mov ax, x
+ba 03 00                       mov dx, 3
+f7 ea                          imul dx          (signed multiply)
+```
+
+Findings:
+- `imul reg` (`f7 /5`) — 2B instruction + 3B `mov dx, imm16`.
+- Total 5B for the multiply (8B with the param load).
+- 8086 lacks scaled-index lea, so no `lea ax, [ax + ax*2]` trick for ×3.
+- Even ×5 doesn't get a faster path: same imul shape.
+
+## `x * 256` — `mov cl, 8; shl ax, cl` (4B, not byte-swap peephole)
+
+Fixture `3367-mul256-obj`:
+
+```
+8b 46 04                       mov ax, x
+b1 08                          mov cl, 8
+d3 e0                          shl ax, cl
+```
+
+Findings:
+- BCC uses CL-form shift (4B) rather than byte-swap-like peephole.
+- `mov cl, N; shl/shr ax, cl` is the chosen form for shift counts ≥ 4.
+
+## `x * -1` — NOT reduced to `neg` (uses full imul)
+
+Fixture `3368-mul-neg1-obj`:
+
+```
+8b 46 04                       mov ax, x
+ba ff ff                       mov dx, -1
+f7 ea                          imul dx
+```
+
+Findings:
+- `x * -1` compiles as full imul (8B body) — 6B more than the optimal `neg ax` (2B).
+- BCC's strength reduction doesn't include `× -1 → neg`.
+
+## Unsigned `x / 8` — 3× `shr ax, 1` (inline 6B, beats CL form on speed)
+
+Fixture `3369-udiv8-obj`:
+
+```
+8b 46 04                       mov ax, x
+d1 e8                          shr ax, 1
+d1 e8                          shr ax, 1
+d1 e8                          shr ax, 1
+```
+
+Findings:
+- 3× `shr ax, 1` (2B each = 6B). Slower-than-CL on cycle count? Actually faster:
+  - 3 inline shr ax, 1: 3×2 = 6 cycles
+  - mov cl, 3; shr ax, cl: 4 + 4 + 4×3 = 20 cycles
+- BCC picks size-comparable inline for 8086-speed reasons.
+- Threshold for switching to CL form: N ≥ 4 (since 4× = 8B inline beats 4B CL).
+
+## `x + 0` — constant-folded to `mov ax, x` (3B)
+
+Fixture `3370-add-zero-obj`:
+
+```
+8b 46 04                       mov ax, x
+```
+
+Findings:
+- `x + 0` is fully optimized away — no add instruction.
+- Confirms BCC DOES have AST-level constant folding for `+ 0` (and similar identity ops).
+- This is different from value-tracking const propagation: `const int k = 7; k * 3` still emits imul (memory load + multiply).
+
