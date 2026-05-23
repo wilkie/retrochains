@@ -6774,3 +6774,44 @@ Findings:
 - ModR/M `44 02` = [si+disp8=2] (for offset 2).
 - 4B + 5B for two field writes via ptr.
 
+
+## `char *` ptr arith `*(p + i)` — NO scaling (sizeof=1)
+
+Fixture `3227-char-ptr-plus-i-obj`:
+
+```c
+return *(p + i);   /* char* */
+```
+
+```
+8b 5e 04                       mov bx, p
+03 5e 06                       add bx, i      (NO shift!)
+8a 07                          mov al, [bx]
+```
+
+Findings:
+- char ptr arith doesn't scale (sizeof=1).
+- Saves ~2B vs `int*` (`3189`) which has `shl ax, 1` for scaling.
+- 8 bytes total for the deref.
+
+## Global `char arr[10]; arr[i]` — `mov al, [si + _arr]` (no scale)
+
+Fixture `3231-char-arr-var-idx-obj`:
+
+```c
+char arr[10];
+return arr[i];
+```
+
+```
+8b 76 04                       mov si, i      (note: SI not BX!)
+8a 84 00 00                    mov al, [si + _arr]  (FIXUPP disp16)
+98                             cbw
+```
+
+Findings:
+- Char arr uses **SI as index register** (no scaling needed).
+- ModR/M `84 disp16` = mod 10, reg 000 (al), r/m 100 ([si+disp16]).
+- 8 bytes total (vs 10B for int arr with shl).
+- Contrast: int arr uses BX + shl, char arr uses SI directly.
+

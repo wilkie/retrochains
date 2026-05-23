@@ -4769,3 +4769,31 @@ Findings:
 - 2 bytes wasted on the duplicate `or si, si`.
 - For 3-way return (sign), could be 1 cmp + jg/jl/(zero fall-through).
 
+
+## `while (a && b)` compound cond — short-circuit with exit-on-first-FALSE
+
+Fixture `3232-while-compound-cond-obj`:
+
+```c
+while (i < n && data[i] != 0) {
+  i = i + 1;
+}
+```
+
+```
+                               ; COND:
+3b 76 04                       cmp si, n
+7d 0b                          jge → END_LOOP   (first cond FALSE → exit)
+                               ; second cond:
+8b de d1 e3                    bx = i*2
+83 bf 00 00 00                 cmp word [bx + _data], 0
+75 eb                          jne → BODY        (non-zero → continue)
+                               ; END_LOOP (both conds checked, neither passed)
+```
+
+Findings:
+- `while (a && b)` = first cond's FALSE jumps to AFTER_LOOP.
+- Second cond's TRUE jumps to BODY (continue).
+- Second cond's FALSE falls through to AFTER_LOOP.
+- Short-circuit: if first FALSE, second is never evaluated.
+
