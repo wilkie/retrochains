@@ -2004,3 +2004,28 @@ Findings:
 - Uses DL register (same as `<<=` `3151`).
 - 8 bytes total: 3B load + 2B shift + 2B mov + 1B cbw.
 
+
+## `++c` for char param (returned as int) — register round-trip suboptimal
+
+Fixture `3273-pre-inc-char-param-obj`:
+
+```c
+return ++c;
+```
+
+```
+8a 56 04                       mov dl, c      (load to DL per char-param convention)
+8a c2                          mov al, dl     (copy to AL)
+fe c0                          inc al         (byte inc)
+8a d0                          mov dl, al     (copy back to DL — REDUNDANT)
+98                             cbw            (promote to int)
+```
+
+Findings:
+- 10 bytes total.
+- BCC's char-param convention puts the value in DL.
+- For modification like `++c`, BCC does round-trip: DL → AL → inc → DL.
+- The `mov dl, al` post-inc is redundant (no further use of DL).
+- Naive `mov al, c; inc al; cbw` would be 6B — BCC wastes 4 bytes here.
+- Suboptimal but consistent with BCC's register-allocation strategy.
+

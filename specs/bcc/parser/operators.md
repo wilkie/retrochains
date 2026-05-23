@@ -1834,3 +1834,30 @@ Findings:
 - ModR/M `3c` = mod 00, op-ext 111 (cmp /7), r/m 100 ([si]).
 - For non-zero field offset: `cmp word [si + disp8], 0` (4B).
 
+
+## `(a & K) != 0` and `if (g & K)` global — `test mem, imm16`
+
+Fixtures `3269-and-then-ne-0-obj`, `3270-global-bit-test-obj`:
+
+```c
+if ((a & 0xFF) != 0) ...    /* test + je FALSE (inverse of == 0) */
+if (g & 0x80) ...           /* same: test + je FALSE */
+```
+
+```
+                               ; (a & 0xFF) != 0:
+f7 46 04 ff 00                 test word [bp+4], 0x00FF
+74 05                          je → FALSE
+
+                               ; if (g & 0x80) for global:
+f7 06 00 00 80 00              test word [_g], 0x0080
+74 05                          je → FALSE
+```
+
+Findings:
+- `test r/m16, imm16` is the universal bit-test peephole.
+- For local: `f7 46 disp imm16` (5B).
+- For global: `f7 06 disp16 imm16` (6B + FIXUPP).
+- `if (g & K)` truthy = `test + je → FALSE`.
+- `if ((a & K) == 0)` zero test = same `test` op + opposite jump.
+
