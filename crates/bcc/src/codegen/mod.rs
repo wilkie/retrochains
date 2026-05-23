@@ -4417,6 +4417,45 @@ impl<'a> FunctionEmitter<'a> {
                 return;
             }
         }
+        // Char return with `(<char-like>)(<int-local> <op> K)`: load
+        // the low byte of the int, then apply byte arith with K's low
+        // byte. Mirrors the bare-cast case but covers expressions
+        // like `(unsigned char)(x & 0xFF)` (fixture 2539).
+        if self.function.ret_ty.is_char_like()
+            && let ExprKind::Cast { ty: cast_ty, operand } = &e.kind
+            && cast_ty.is_char_like()
+            && let ExprKind::BinOp { op: arith_op, left, right } = &operand.kind
+            && matches!(
+                arith_op,
+                BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor
+            )
+            && let ExprKind::Ident(name) = &left.kind
+            && let Some(k) = try_const_eval(right)
+        {
+            let src_addr = if self.locals.has(name)
+                && let LocalLocation::Stack(off) = self.locals.location_of(name)
+            {
+                Some(bp_addr(off))
+            } else if self.globals.type_of(name).is_some() {
+                Some(format!("DGROUP:_{name}"))
+            } else {
+                None
+            };
+            if let Some(addr) = src_addr {
+                let _ = write!(self.out, "\tmov\tal,byte ptr {addr}\r\n");
+                let v8 = k & 0xFF;
+                let mnem = match arith_op {
+                    BinOp::Add => "add",
+                    BinOp::Sub => "sub",
+                    BinOp::BitAnd => "and",
+                    BinOp::BitOr => "or",
+                    BinOp::BitXor => "xor",
+                    _ => unreachable!(),
+                };
+                let _ = write!(self.out, "\t{mnem}\tal,{v8}\r\n");
+                return;
+            }
+        }
         // Char return with a const-indexed char array element (global
         // or stack): `mov al, byte ptr <addr>` and no widening. Same
         // ABI as the bare-ident case. Fixture 3337 (`return s[0]`
