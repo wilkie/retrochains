@@ -414,6 +414,10 @@ struct FunctionEmitter<'a> {
     /// value emission since the ABI leaves AH garbage — the caller
     /// widens with `cbw` after the call.
     skip_widen: bool,
+    /// When true, the int-Mod emission in `emit_op_with_source` skips
+    /// the trailing `mov ax, dx`. The caller then reads the remainder
+    /// directly from DX (e.g. to store via `mov [mem], dx`).
+    skip_mod_to_ax: bool,
 }
 
 /// Innermost enclosing construct that catches `break;` (and maybe
@@ -453,6 +457,7 @@ impl<'a> FunctionEmitter<'a> {
             post_function_data: Vec::new(),
             helpers,
             skip_widen: false,
+            skip_mod_to_ax: false,
         }
     }
 
@@ -4602,6 +4607,27 @@ impl<'a> FunctionEmitter<'a> {
                         "\tmov\tword ptr {},{}\r\n",
                         bp_addr(off),
                         reg.name(),
+                    );
+                    return;
+                }
+                // Int local init from a Mod expression: the idiv
+                // leaves the remainder in DX. emit_expr_to_ax would
+                // normally `mov ax, dx` to materialize the result in
+                // AX before our `mov [dest], ax`. Skip the move and
+                // store DX directly. Fixture 2089 (`int r = x % 7`),
+                // 2088, 1723.
+                if ty.is_int_like()
+                    && let ExprKind::BinOp { op: BinOp::Mod, .. } = &init.kind
+                {
+                    // Evaluate up to the idiv/div but inhibit the
+                    // final mov ax,dx by setting a one-shot flag.
+                    self.skip_mod_to_ax = true;
+                    self.emit_expr_to_ax(init);
+                    self.skip_mod_to_ax = false;
+                    let _ = write!(
+                        self.out,
+                        "\tmov\tword ptr {},dx\r\n",
+                        bp_addr(off),
                     );
                     return;
                 }
@@ -11770,11 +11796,17 @@ impl<'a> FunctionEmitter<'a> {
             self.emit_expr_to_ax(e);
             self.out.extend_from_slice(b"\tmov\tdx,ax\r\n");
             self.out.extend_from_slice(b"\tpop\tax\r\n");
-            emit_op_with_source(self.out, op, &OperandSource::Reg(Reg::Dx), unsigned);
+            emit_op_with_source_opts(
+                self.out,
+                op,
+                &OperandSource::Reg(Reg::Dx),
+                unsigned,
+                self.skip_mod_to_ax,
+            );
             return;
         }
         let src = self.resolve_operand_source(e);
-        emit_op_with_source(self.out, op, &src, unsigned);
+        emit_op_with_source_opts(self.out, op, &src, unsigned, self.skip_mod_to_ax);
     }
 
     /// True iff `name` refers to an identifier (global or local)
@@ -12503,6 +12535,17 @@ impl OperandSource {
 /// selects `shr` over `sar` for `Shr` — the left operand's static type
 /// drives the choice (right is always the shift count).
 fn emit_op_with_source(out: &mut Vec<u8>, op: BinOp, src: &OperandSource, unsigned: bool) {
+    emit_op_with_source_opts(out, op, src, unsigned, false);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_op_with_source_opts(
+    out: &mut Vec<u8>,
+    op: BinOp,
+    src: &OperandSource,
+    unsigned: bool,
+    skip_mod_to_ax: bool,
+) {
     // Identity folds: `a + 0`, `a - 0`, `a | 0`, `a ^ 0`, `a << 0`,
     // `a >> 0` are all just `a`. Skip the emission entirely. BCC
     // collapses these at compile time (fixtures 3370 `x + 0`, 2735
@@ -12658,7 +12701,13 @@ fn emit_op_with_source(out: &mut Vec<u8>, op: BinOp, src: &OperandSource, unsign
                 out.extend_from_slice(widen);
                 let _ = write!(out, "\t{mnem}\t{}\r\n", src.word());
             }
-            out.extend_from_slice(b"\tmov\tax,dx\r\n");
+            // `mov ax, dx` materializes the remainder in AX. Skipped
+            // when the caller has signaled it'll read the remainder
+            // from DX directly (e.g. an immediate `mov [mem], dx`
+            // store). Saves 2 bytes for `int r = x % K` shapes.
+            if !skip_mod_to_ax {
+                out.extend_from_slice(b"\tmov\tax,dx\r\n");
+            }
         }
         BinOp::Shl | BinOp::Shr => {
             let mnemonic = match op {
