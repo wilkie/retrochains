@@ -4205,6 +4205,26 @@ impl<'a> FunctionEmitter<'a> {
             }
             return;
         }
+        // Char return with `(<char-like>)<int-local>` cast: just
+        // load the low byte of the int. The cast narrows; for a
+        // char-return ABI we only need AL, no widening. Fixture 3019
+        // (`(unsigned char)x` from int param).
+        if self.function.ret_ty.is_char_like()
+            && let ExprKind::Cast { ty: cast_ty, operand } = &e.kind
+            && cast_ty.is_char_like()
+            && let ExprKind::Ident(name) = &operand.kind
+        {
+            if self.locals.has(name)
+                && let LocalLocation::Stack(off) = self.locals.location_of(name)
+            {
+                let _ = write!(self.out, "\tmov\tal,byte ptr {}\r\n", bp_addr(off));
+                return;
+            }
+            if self.globals.type_of(name).is_some() {
+                let _ = write!(self.out, "\tmov\tal,byte ptr DGROUP:_{name}\r\n");
+                return;
+            }
+        }
         // Char return with a const-indexed char array element (global
         // or stack): `mov al, byte ptr <addr>` and no widening. Same
         // ABI as the bare-ident case. Fixture 3337 (`return s[0]`
@@ -11181,6 +11201,46 @@ impl<'a> FunctionEmitter<'a> {
                     } else {
                         (left.as_ref(), right.as_ref())
                     };
+                    // Associative const-fold for Add/Sub chains:
+                    // `(X + K1) + K2` → `X + (K1+K2)`. Handles
+                    // `(X +/− K1) +/− K2` with appropriate sign on K1.
+                    // Lets BCC's smaller `add ax, K_total` form fire
+                    // instead of two consecutive adds. Fixtures 2019
+                    // (`x + 5 + 3`), 2076 (`x + 5 - 2`).
+                    if matches!(op, BinOp::Add | BinOp::Sub)
+                        && let Some(k2_u) = try_const_eval(right)
+                        && let ExprKind::BinOp { op: inner_op, left: inner_l, right: inner_r } = &left.kind
+                        && matches!(inner_op, BinOp::Add | BinOp::Sub)
+                        && let Some(k1_u) = try_const_eval(inner_r)
+                        && try_const_eval(inner_l).is_none()
+                    {
+                        // Signs: inner contributes +K1 if Add, -K1 if Sub.
+                        // Outer contributes +K2 if Add, -K2 if Sub.
+                        let k1 = if matches!(inner_op, BinOp::Add) {
+                            k1_u as i32
+                        } else {
+                            -(k1_u as i32)
+                        };
+                        let k2 = if matches!(op, BinOp::Add) {
+                            k2_u as i32
+                        } else {
+                            -(k2_u as i32)
+                        };
+                        let total = (k1 + k2) & 0xFFFF;
+                        // Recurse into the inner LHS, then emit the
+                        // combined const. Emit as Add (with negated
+                        // const for negative totals — emit_op_with_
+                        // source picks the imm8sx form when applicable).
+                        let unsigned = self.expr_is_unsigned(inner_l);
+                        self.emit_expr_to_ax(inner_l);
+                        emit_op_with_source(
+                            self.out,
+                            BinOp::Add,
+                            &OperandSource::Immediate(total as u32),
+                            unsigned,
+                        );
+                        return;
+                    }
                     // Shifts encode the left operand's signedness in
                     // the mnemonic (`shr` vs `sar`); everything else
                     // is signedness-agnostic at the instruction level.
