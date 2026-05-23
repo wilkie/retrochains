@@ -1711,3 +1711,22 @@ Findings:
 - For unsigned int → unsigned long: `xor dx, dx` (2B) zero-extend.
 - 4 bytes total for the signed cast.
 
+
+## `(unsigned int)int_var` cast — NO-OP (same bit pattern)
+
+Fixture `3200-signed-unsigned-cast-obj`:
+
+```c
+return (unsigned int)x;
+```
+
+```
+8b 46 04                       mov ax, x   (just a load, no conversion)
+```
+
+Findings:
+- Signed↔unsigned same-width cast = no-op.
+- The bit pattern is identical; only how it's interpreted differs.
+- All `int ↔ unsigned int` and `char ↔ unsigned char` casts are
+  no-ops at codegen.
+

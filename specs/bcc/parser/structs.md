@@ -3524,3 +3524,38 @@ Findings:
 - Caller reads p.x from AX, p.y from DX.
 - No N_SCOPY@ helper needed (only for 3B and ≥5B).
 
+
+## 4B struct by-value arg — `push HIGH; push LOW` (2 separate pushes)
+
+Fixture `3197-struct-4b-byval-arg-obj`:
+
+```c
+struct P { int x; int y; };   /* sizeof = 4 */
+sum(p);
+```
+
+```
+ff 76 fe                       push p.y   (HIGH-equivalent, at [bp-2])
+ff 76 fc                       push p.x   (LOW-equivalent, at [bp-4])
+e8 00 00                       call sum
+59 59                          pop cx; pop cx
+```
+
+Findings:
+- 4B struct passed as 2 separate pushes (same shape as long arg).
+- Caller pushes HIGH first, then LOW.
+- 2-arg cleanup (`pop cx; pop cx`).
+
+## `struct P q = p;` copy init — 2 word loads + 2 word stores (4B copy)
+
+Fixture `3198-struct-copy-init-obj`:
+
+```
+8b 46 06 8b 56 04              mov ax, p.y; mov dx, p.x
+89 46 fe 89 56 fc              q.y = ax; q.x = dx
+```
+
+Findings:
+- 4B struct copy = 2-word transit via AX/DX.
+- Same pattern as long-to-long copy or struct global copy (`3056`).
+

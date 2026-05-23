@@ -3897,3 +3897,24 @@ Findings:
 - Single byte load — all higher bits discarded.
 - 3 bytes for the cast.
 
+
+## `long & 0xFFL` — `and ax, LOW_mask + and dx, HIGH_mask`
+
+Fixture `3199-long-and-FF-obj`:
+
+```c
+return v & 0xFFL;
+```
+
+```
+8b 56 06 8b 46 04              load DX:AX = v
+25 ff 00                       and ax, 0x00FF   (LOW mask, 3B AX-acc)
+81 e2 00 00                    and dx, 0x0000   (HIGH mask, 4B)
+```
+
+Findings:
+- Long `& const` splits into AND of both halves.
+- 7 bytes for the AND part.
+- **Missed peephole**: `and dx, 0` could be `xor dx, dx` (2B vs 4B).
+- BCC doesn't recognize `& 0` → zero result for the HIGH half.
+
