@@ -1578,6 +1578,76 @@ impl<'a> FunctionEmitter<'a> {
     /// Returns `None` if the lvalue isn't a shape we know how to
     /// fold into a constant address pair (e.g. variable array index,
     /// stack-resident pointer).
+    /// Load an array-index expression into BX, pre-scaled by the
+    /// element type's stride. The common shape BCC uses when the
+    /// index is a non-constant expression and the result will be
+    /// used in a `[bx+<symbol>]` addressing form.
+    ///
+    /// Lowering rules:
+    ///   - int index: `mov bx, <idx>` then shl bx, 1 (× stride/2)
+    ///     repeatedly. For int stride=2 → one shl; long stride=4 →
+    ///     two shls; char stride=1 → no shifts.
+    ///   - char index: `mov al, <idx-byte>`, then `cbw` (or `mov
+    ///     ah,0` for unsigned), `shl ax, ...`, `mov bx, ax`.
+    fn emit_index_into_bx(&mut self, idx: &Expr, elem_ty: &Type) {
+        let stride = elem_ty.size_bytes();
+        let shifts = match stride {
+            1 => 0,
+            2 => 1,
+            4 => 2,
+            _ => panic!("unsupported element stride {stride} for variable-indexed array"),
+        };
+        // Char-typed index: widen AL → AX with CBW (signed) or
+        // mov ah,0 (unsigned), then scale, then move into BX. Fixture
+        // 1493.
+        let idx_is_char = matches!(&idx.kind, ExprKind::Ident(n)
+            if (self.locals.has(n) && self.locals.type_of(n).is_char_like())
+            || self.globals.type_of(n).map_or(false, |t| t.is_char_like()));
+        if idx_is_char
+            && let ExprKind::Ident(name) = &idx.kind
+        {
+            let unsigned = if self.locals.has(name) {
+                self.locals.type_of(name).is_unsigned()
+            } else {
+                self.globals.type_of(name).map_or(false, |t| t.is_unsigned())
+            };
+            let src_addr = if self.locals.has(name) {
+                let LocalLocation::Stack(off) = self.locals.location_of(name) else {
+                    panic!("char index `{name}` should be stack-resident");
+                };
+                bp_addr(off)
+            } else {
+                format!("DGROUP:_{name}")
+            };
+            let _ = write!(self.out, "\tmov\tal,byte ptr {src_addr}\r\n");
+            if unsigned {
+                self.out.extend_from_slice(b"\tmov\tah,0\r\n");
+            } else {
+                self.out.extend_from_slice(b"\tcbw\t\r\n");
+            }
+            for _ in 0..shifts {
+                self.out.extend_from_slice(b"\tshl\tax,1\r\n");
+            }
+            self.out.extend_from_slice(b"\tmov\tbx,ax\r\n");
+            return;
+        }
+        // Int-typed index path: prefer a direct `mov bx, <addr>` over
+        // a roundtrip through AX.
+        if let Some(addr) = self.int_lvalue_addr(idx) {
+            let _ = write!(self.out, "\tmov\tbx,word ptr {addr}\r\n");
+            for _ in 0..shifts {
+                self.out.extend_from_slice(b"\tshl\tbx,1\r\n");
+            }
+            return;
+        }
+        // Fallback: evaluate into AX, scale, then move to BX.
+        self.emit_expr_to_ax(idx);
+        for _ in 0..shifts {
+            self.out.extend_from_slice(b"\tshl\tax,1\r\n");
+        }
+        self.out.extend_from_slice(b"\tmov\tbx,ax\r\n");
+    }
+
     /// Resolve an int-like lvalue (global or stack-resident local) to
     /// its asm memory operand. Returns `None` for register-resident
     /// locals (caller can fall back to a register-source path) and
@@ -6143,6 +6213,33 @@ impl<'a> FunctionEmitter<'a> {
                     self.emit_widen_al(&leaf_ty);
                 } else {
                     let _ = write!(self.out, "\tmov\tax,{width} ptr {addr}\r\n");
+                }
+                return;
+            }
+            // Variable-indexed global array `_a[i]` at depth 1. BCC's
+            // shape: load the index into BX (going via AX+cbw if the
+            // index is char-typed), scale by the element stride
+            // (`shl bx, 1` for int, twice for long, skip for char),
+            // then read through `[bx+_a]`. Fixture 1284 (int index),
+            // 1493 (char-typed index, requires CBW widening).
+            if indices.len() == 1
+                && let Some(elem_ty) = gty.array_elem()
+            {
+                let elem_ty = elem_ty.clone();
+                let idx = indices[0];
+                self.emit_index_into_bx(idx, &elem_ty);
+                let width = ptr_width(&elem_ty);
+                if elem_ty.is_char_like() {
+                    let _ = write!(
+                        self.out,
+                        "\tmov\tal,byte ptr DGROUP:_{array_name}[bx]\r\n",
+                    );
+                    self.emit_widen_al(&elem_ty);
+                } else {
+                    let _ = write!(
+                        self.out,
+                        "\tmov\tax,{width} ptr DGROUP:_{array_name}[bx]\r\n",
+                    );
                 }
                 return;
             }
