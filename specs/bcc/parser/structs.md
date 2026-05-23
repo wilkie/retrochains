@@ -4069,3 +4069,119 @@ Findings:
 - BCC folds all `.member` accesses into a single byte offset in the FIXUPP.
 - Deeply nested access has no runtime cost beyond a flat field access.
 
+
+## struct member compound `s.x += v` — direct mem-dest add
+
+Fixture `3443-member-pluseq-obj`:
+
+```c
+struct S { int x; } s;
+void bump(int v) { s.x += v; }
+```
+
+```
+8b 46 04                       mov ax, v
+01 06 00 00 [FIXUPP _s]        add [_s], ax   (4B add mem, reg)
+```
+
+Findings:
+- 7B body. Direct `add r/m16, r16` (4B) on global with FIXUPP.
+- No intermediate load of s.x.
+
+## `++s.x` — same OBJ shape as `++global_int`
+
+Fixture `3444-member-preinc-obj`:
+
+```
+ff 06 00 00 [FIXUPP _s]        inc word [_s]
+a1 00 00    [FIXUPP _s]        mov ax, [_s]
+```
+
+Findings:
+- For struct member at offset 0, identical to `++global_int` (3371).
+- The FIXUPP target differs (`_s` vs `_g`), but byte sequence is identical.
+
+## bitfield post-increment `f.a++` (4-bit field at offset 0)
+
+Fixture `3445-bitfield-postinc-obj`:
+
+```c
+struct F { unsigned a:4; unsigned b:4; } f;
+void tick(void) { f.a++; }
+```
+
+```
+a0 00 00 [FIXUPP _f]           mov al, [_f]
+25 0f 00                       and ax, 0x0F     (extract field a)
+40                             inc ax
+25 0f 00                       and ax, 0x0F     (re-mask after inc — wrap on overflow)
+80 26 00 00 f0 [FIXUPP _f]     and byte [_f], 0xF0   (clear field in memory)
+08 06 00 00 [FIXUPP _f]        or [_f], al      (OR new value)
+```
+
+Findings:
+- 6-step pattern: load + mask + inc + re-mask + clear-mem + or-mem.
+- Re-mask after inc ensures wrap behavior (e.g., 15++ wraps to 0).
+- 19B body. Three FIXUPPs into `_f`.
+
+## 1-bit bitfield read `fl.b` (at bit offset 1)
+
+Fixture `3446-bitfield-1bit-obj`:
+
+```c
+struct Flag { unsigned a:1; unsigned b:1; unsigned c:1; } fl;
+unsigned get_b(void) { return fl.b; }
+```
+
+```
+a0 00 00 [FIXUPP _fl]          mov al, [_fl]
+d1 e8                          shr ax, 1        (count=1, no CL needed)
+25 01 00                       and ax, 1
+```
+
+Findings:
+- For shift count of 1, uses inline `shr ax, 1` (2B) — saves the `mov cl, N` (2B) of the CL form.
+- 8B body.
+
+## Bitfield via pointer `p->a` — byte load via reg + mask
+
+Fixture `3447-bitfield-via-ptr-obj`:
+
+```c
+unsigned get_a(struct F *p) { return p->a; }
+```
+
+```
+56                             push si
+8b 76 04                       mov si, p
+8a 04                          mov al, [si]    (byte load via ptr)
+25 0f 00                       and ax, 0x0F
+```
+
+Findings:
+- 9B body. Mem operand goes through [si] instead of disp16-direct.
+- Same shape as direct global bitfield, just different addressing mode.
+
+## Mixed struct/ptr chain `o->m.p->c` — same as flat ptr chain
+
+Fixture `3448-mixed-chain-obj`:
+
+```c
+struct Inner { int c; };
+struct Mid { struct Inner *p; };
+struct Outer { struct Mid m; };
+int grab(struct Outer *o) { return o->m.p->c; }
+```
+
+```
+56                             push si
+8b 76 04                       mov si, o
+8b 1c                          mov bx, [si]    (o->m.p — both offsets 0)
+8b 07                          mov ax, [bx]    (p->c at offset 0)
+```
+
+Findings:
+- All member offsets are 0, so the chain collapses to a 2-level pointer deref.
+- 8B body — identical to `o->p->v` (3441).
+- Non-zero offsets would add disp8/disp16 to the corresponding loads.
+
