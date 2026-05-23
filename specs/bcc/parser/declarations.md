@@ -1629,3 +1629,27 @@ Findings:
 - Per C value-passing: caller's args unaffected.
 - Temp `t` gets a single stack slot for the swap shuffle.
 
+
+## Enum members — parsed as int literals (no storage, no symbol)
+
+Fixture `3052-enum-basic-obj`:
+
+```c
+enum { RED, GREEN, BLUE };
+int red(void)  { return RED; }    /* return 0 */
+int blue(void) { return BLUE; }   /* return 2 */
+```
+
+```
+33 c0                          xor ax, ax    (return RED = 0)
+b8 02 00                       mov ax, 2     (return BLUE = 2)
+```
+
+Findings:
+- Enum members are **compile-time integer constants**, not runtime
+  symbols.
+- `RED` substituted as `0`, `BLUE` as `2`.
+- No PUBDEF, no `_DATA` allocation, no `EXTDEF` — purely textual
+  substitution into expressions.
+- Same as `#define RED 0; #define GREEN 1; #define BLUE 2;`.
+

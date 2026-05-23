@@ -4560,3 +4560,27 @@ Findings:
 - The OLD value drives the test; decrement happens in place.
 - Loop runs `original_n` times (treating 0 as false).
 
+
+## `if (cond) ;` empty body — full test + `jle +0` no-op branch (2B wasted)
+
+Fixture `3048-if-empty-body-obj`:
+
+```c
+if (x > 0) ;
+return x;
+```
+
+```
+8b 76 04                       mov si, x
+0b f6                          or si, si
+7e 00                          jle +0  ← NO-OP BRANCH (2B wasted)
+8b c6                          return x
+```
+
+Findings:
+- Empty `if` body still emits the full test PLUS a 0-byte forward
+  `jle +0` jump.
+- BCC doesn't dead-code-eliminate the test even when the body is
+  trivially empty.
+- 2 bytes wasted on the no-op branch.
+

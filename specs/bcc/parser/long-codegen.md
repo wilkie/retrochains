@@ -3402,3 +3402,53 @@ Findings:
 - Confirms the 3-step lexicographic long comparison from
   `long-codegen.md`.
 
+
+## `long > 100L` const compare — HIGH=0, LOW=imm8 sign-ext
+
+Fixture `3050-long-cmp-100-obj`:
+
+```c
+if (v > 100L) return 1;
+```
+
+```
+83 7e 06 00                    cmp word [bp+6], 0       (HIGH, signed)
+7c 0d                          jl → FALSE   (HIGH < 0)
+7f 06                          jg → TRUE    (HIGH > 0)
+                               ; HIGH == 0:
+83 7e 04 64                    cmp word [bp+4], 100     (LOW, unsigned imm8 sign-ext)
+76 05                          jbe → FALSE  (UNSIGNED: LOW <= 100)
+                               ; TRUE
+```
+
+Findings:
+- Const long `100L` = `0x00000064`: HIGH = 0, LOW = 100.
+- HIGH compared signed (`jl`/`jg`); LOW compared **unsigned**
+  (`jbe`/`ja`) since low half is positional.
+- Both halves use `83 /7 imm8` (4B each, fits signed imm8).
+- 3-step lexicographic, same as `2820` (`l > 0L`) but with non-zero LOW.
+
+## AX/DX register assignment for long ops — flexible (LOW or HIGH)
+
+Fixture `3051-static-long-init-obj`:
+
+```c
+static long counter = 0L;
+counter = counter + 1L;
+```
+
+During `+= 1L`:
+- AX = HIGH (loaded from `[mem + 2]`)
+- DX = LOW  (loaded from `[mem + 0]`)
+- `add dx, 1; adc ax, 0` (LOW first, then HIGH with carry)
+
+For function RETURN (long), convention is **DX:AX with DX=HIGH,
+AX=LOW**. Reload from mem before returning.
+
+Findings:
+- The AX/DX assignment during long arithmetic is FLEXIBLE — BCC
+  picks based on the operation's needs.
+- The long-return convention is fixed: `DX:AX` where DX=HIGH, AX=LOW.
+- If arithmetic results land in the "wrong" reg, BCC reloads from
+  memory to set up the right return convention.
+
