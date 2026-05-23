@@ -3815,3 +3815,65 @@ Findings:
 - Tight 5-byte loop body (`add di, [si+disp]; mov si, [si]`).
 - `or si, si` reused as null-pointer check (and as cmp-zero peephole).
 
+
+## Union access `u.c[0]` — same as struct member access at offset 0
+
+Fixture `3347-union-access-obj`:
+
+```c
+union U { int i; char c[2]; } u;
+int read_lo(void) { return u.c[0]; }
+```
+
+```
+a0 00 00 [FIXUPP _u]           mov al, [u]      (byte load at union base)
+98                             cbw              (sign-extend to int)
+```
+
+Findings:
+- Union member access = absolute memory access at base+member_offset.
+- Members share the same base offset; semantically identical to struct codegen.
+- char c[2] at offset 0 → byte load via `a0` direct form (3B).
+
+## Array of struct `arr[i].x` — bx = i × stride, single FIXUPP'd load
+
+Fixture `3348-array-of-struct-obj`:
+
+```c
+struct Pt arr[3] = {{1,2}, {3,4}, {5,6}};
+int pick_x(int i) { return arr[i].x; }
+```
+
+```
+8b 5e 04                       mov bx, i
+d1 e3 d1 e3                    shl bx, 1; shl bx, 1   (bx = i * 4)
+8b 87 00 00 [FIXUPP _arr]      mov ax, [bx + arr.x_off]
+```
+
+Findings:
+- Stride = `sizeof(struct Pt) = 4`, computed via 2× shl.
+- Field offset (.x = 0) folded into the disp16 of the load.
+- 11B for the access; 12B LEDATA for the init.
+
+## Small struct copy `b = a` — 2×load + 2×store, no N_SCOPY@
+
+Fixture `3349-struct-copy-obj`:
+
+```c
+struct Pt { int x; int y; } a, b;
+void copy(void) { b = a; }
+```
+
+```
+a1 02 00 [FIXUPP _a]           mov ax, [a.y]    (HIGH word, offset 2)
+8b 16 00 00 [FIXUPP _a]        mov dx, [a.x]    (LOW word, offset 0)
+a3 06 00 [FIXUPP _b]           mov [b.y], ax    (short form, 3B)
+89 16 04 00 [FIXUPP _b]        mov [b.x], dx    (long form, 4B)
+```
+
+Findings:
+- 4-byte struct copy is INLINED (no `N_SCOPY@` call).
+- 2× word loads + 2× word stores = 14B body.
+- Uses AX (short `a3` form, 3B) for one half; DX (long `89` form, 4B) for the other.
+- Threshold for `N_SCOPY@` is presumably >4 bytes.
+

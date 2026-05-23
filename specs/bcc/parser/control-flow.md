@@ -5126,3 +5126,37 @@ Findings:
 - Comma in init/step = sequenced sub-statements; no special codegen.
 - 2-byte loop body (`inc si; dec di`), 2-byte test (`cmp si, di; jl`).
 
+
+## Switch with shared-case fall-through — dense jump table with duplicate entries
+
+Fixture `3350-switch-fallthru-obj`:
+
+```c
+switch (x) {
+  case 1: case 2: case 3: return 100;
+  case 5: case 7: return 200;
+  default: return 0;
+}
+```
+
+Dispatch:
+```
+8b 5e 04                       mov bx, x
+4b                             dec bx           (bias to 0-based)
+83 fb 06                       cmp bx, 6        (range check 0..6, ie x in 1..7)
+77 11                          ja DEFAULT
+d1 e3                          shl bx, 1        (bx *= 2 for word indexing)
+2e ff a7 23 00                 jmp [cs:bx + 0x23]
+```
+
+Jump table (in _TEXT after handlers):
+```
+0013 0013 0013 001d 0018 001d 0018
+```
+
+Findings:
+- 7 entries cover x=1..7. Shared cases get the SAME handler offset (case 1, 2, 3 all → 0x0013).
+- Gaps (x=4, x=6) get the DEFAULT handler offset (0x001d).
+- Indirect jump uses `cs:` segment override since table lives in _TEXT.
+- Dense table beats linear cmp+je chain when ≥4 effective cases (confirms earlier finding).
+

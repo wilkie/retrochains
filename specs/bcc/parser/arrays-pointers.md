@@ -7007,3 +7007,46 @@ Findings:
 - 14B for indexing + 4B for the final load = 18B body.
 - Pure shift-based for power-of-2 dimensions; non-power-of-2 likely uses imul.
 
+
+## String-clear loop `while (*s) *s++ = 0` — tight 6B body
+
+Fixture `3351-string-clear-obj`:
+
+```
+56                             push si
+8b 76 04                       mov si, s
+eb 04                          jmp TEST
+LOOP:
+c6 04 00                       mov byte [si], 0    (*s = 0)
+46                             inc si              (s++)
+TEST:
+80 3c 00                       cmp byte [si], 0
+75 f7                          jne LOOP
+```
+
+Findings:
+- 6-byte loop body (`mov [si], 0; inc si`).
+- Mem-imm operations on [SI] — no scratch register needed.
+- Test happens BEFORE body (since `while` is pre-test).
+- `*s++ = 0` compiles cleanly: clear current, then advance, without temp.
+
+## Address-of static variable — 3B `mov reg, imm16` with FIXUPP
+
+Fixture `3352-static-addr-obj`:
+
+```c
+int *holder(void) {
+  static int x = 42;
+  return &x;
+}
+```
+
+```
+b8 00 00 [FIXUPP _x]           mov ax, offset _x
+```
+
+Findings:
+- 3-byte body. Static stored in _DATA via LEDATA = `2a 00`.
+- No PUBDEF for `x` (static = file-scope).
+- FIXUPP into _DATA segment relative offset.
+
