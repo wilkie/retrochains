@@ -1213,6 +1213,33 @@ impl<'a> FunctionEmitter<'a> {
         case_slots: &[u32],
         end_slot: u32,
     ) {
+        // If every case is `default:` (no value-bearing cases),
+        // there's no dispatch — BCC skips the scrutinee load and
+        // emits a trampoline `jmp default` followed by the default
+        // body. The jmp is `eb 00` (jump to the next instruction);
+        // it's a no-op but BCC keeps it for shape consistency.
+        // Fixtures 1608, 2720.
+        let has_value_case = cases.iter().any(|c| c.value.is_some());
+        if !has_value_case {
+            let default_slot = case_slots[0];
+            let _ = write!(
+                self.out,
+                "\tjmp\tshort {}\r\n",
+                self.label_ref(default_slot),
+            );
+            self.loop_stack.push(LoopTargets {
+                break_target_slot: end_slot,
+                continue_target_slot: None,
+            });
+            for (case, &slot) in cases.iter().zip(case_slots) {
+                self.emit_label(slot);
+                for stmt in &case.body {
+                    self.emit_stmt(stmt);
+                }
+            }
+            self.loop_stack.pop();
+            return;
+        }
         // Load scrutinee into AX. Most cases are bare idents (with
         // char-vs-int-vs-global routing), but non-trivial expressions
         // like `switch (x + 1)` fall through to the generic
