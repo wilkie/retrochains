@@ -4279,3 +4279,54 @@ Findings:
 - First-declared member (q.x) pushed last → at `[bp+4]` in callee.
 - Equivalent to pushing the whole struct as if it were `(int, int)` in original order.
 
+
+## 8B struct return — N_SCOPY@ with size=8, SI cached for stores
+
+Fixture `3560-struct-ret-8b-obj`:
+
+```c
+struct Four { int a,b,c,d; } make(int v) { r.a = v; ...; r.d = v; return r; }
+```
+
+```
+83 ec 08                       sub sp, 8
+56                             push si
+8b 76 08                       mov si, v       (v at [bp+8] past hidden ret-ptr)
+89 76 f8                       mov [r.a], si
+89 76 fa                       mov [r.b], si
+89 76 fc                       mov [r.c], si
+89 76 fe                       mov [r.d], si
+                               ; copy via N_SCOPY@:
+ff 76 06                       push [bp+6]      (ret-ptr SEG)
+ff 76 04                       push [bp+4]      (ret-ptr OFFSET)
+8d 46 f8                       lea ax, [r]
+16                             push ss
+50                             push ax
+b9 08 00                       mov cx, 8
+e8 ?? ?? [FIXUPP N_SCOPY@]     call N_SCOPY@
+8b 46 04                       mov ax, [bp+4]   (return ret-ptr offset)
+```
+
+Findings:
+- Same N_SCOPY@ pattern as 6B struct return (3410), now with size=8.
+- BCC caches `v` in SI to avoid 4 reloads (smart codegen).
+- Confirms hidden ret-ptr at `[bp+4..7]` for any struct return > 4B.
+
+## Bitfield update `(f.a & 0) | (v & 0x0F)` — not optimized
+
+Fixture `3562-bitfield-clearset-obj`:
+
+```c
+f.a = (f.a & 0) | (v & 0x0F);
+```
+
+Findings:
+- 30B body. BCC computes each step literally:
+  1. Extract f.a (load + mask)
+  2. AND with 0 (NOT eliminated — clears AX)
+  3. Compute v & 0x0F
+  4. OR with the (just cleared) extracted value
+  5. Re-mask to 0x0F
+  6. Clear+OR into mem
+- Misses identity `x & 0 = 0` elimination.
+

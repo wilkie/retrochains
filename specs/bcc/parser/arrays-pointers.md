@@ -7552,3 +7552,77 @@ d1 e0                          shl ax, 1            (j*2)
 Findings:
 - 21B body. Symmetric to 2D load. Indexed mem-direct store.
 
+
+## `int* p + const` — folded to single `add ax, imm16`
+
+Fixture `3557-ptr-const-off-obj`:
+
+```c
+int *adv(int *p) { return p + 3; }
+```
+
+```
+8b 46 04                       mov ax, p
+05 06 00                       add ax, 6    (3 * sizeof(int) folded)
+```
+
+Findings:
+- Const offset folded at compile time (3 * 2 = 6).
+- 6B body — same as char* + const (no extra runtime mul).
+
+## `(c ? &s1 : &s2)->x` — ternary ptr + deref
+
+Fixture `3558-cond-struct-mem-obj`:
+
+```
+83 7e 04 00                    cmp c, 0
+74 05                          je ELSE
+b8 00 00 [FIXUPP _s1]          mov ax, offset _s1
+eb 03                          jmp END_TERN
+ELSE:
+b8 02 00 [FIXUPP _s1]          mov ax, offset _s1 + 2    (= _s2)
+END_TERN:
+8b d8                          mov bx, ax
+8b 07                          mov ax, [bx]
+```
+
+Findings:
+- BCC places s1 and s2 sequentially in _DATA (s2 = s1 + sizeof(struct)).
+- Ternary materializes a ptr in AX, then copied to BX for deref.
+- 18B body.
+
+## char buffer fill — `[bx + si]` indexed addressing + reloaded base
+
+Fixture `3559-char-fill-loop-obj`:
+
+```c
+for (i = 0; i < n; i++) buf[i] = 0;
+```
+
+```
+LOOP_BODY:
+8b 5e 04                       mov bx, buf       (reloaded each iter!)
+c6 00 00                       mov byte [bx+si], 0
+46                             inc si
+TEST:
+3b 76 06                       cmp si, n
+7c f4                          jl LOOP_BODY
+```
+
+Findings:
+- **`[bx + si]` indexed addressing** — 16-bit register-based addressing mode.
+- 3B byte store with imm8 = 0.
+- BCC reloads `buf` into BX every iteration — no loop-invariant hoisting.
+
+## `(&s)->y` — collapses to `s.y` (single mem load)
+
+Fixture `3561-addrof-member-obj`:
+
+```
+a1 02 00 [FIXUPP _s]           mov ax, [_s + 2]
+```
+
+Findings:
+- 3B body. Address-of and arrow cancel at compile time.
+- Identical OBJ to direct `s.y`.
+
