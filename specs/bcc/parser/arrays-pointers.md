@@ -7411,3 +7411,47 @@ Findings:
 - Single 4-byte `call [bx + disp16]` instruction (with FIXUPP).
 - 12B body. No need to load ptr into reg first — indirect call accepts mem operand.
 
+
+## Local `int *p = arr; *p` — reg-alloc'd p with FIXUPP base
+
+Fixture `3511-arr-as-ptr-obj`:
+
+```c
+int *first(void) { int *p = arr; return *p; }
+```
+
+```
+56                             push si
+be 00 00 [FIXUPP _arr]         mov si, offset _arr   (p = arr)
+8b 04                          mov ax, [si]
+```
+
+Findings:
+- Local pointer `p` reg-allocated to SI.
+- Costs 3B (`be imm16` FIXUPP'd) + 1B push/pop pair vs direct `mov ax, [_arr]` (3B).
+- Net: +3B for the local-ptr indirection vs direct global array load.
+
+## `*p = c ? *a : *b` — eager reg-alloc for p, a; lazy load of b
+
+Fixture `3512-cond-load-store-obj`:
+
+```
+56 57                          push si; push di
+8b 76 04                       mov si, p
+8b 7e 06                       mov di, a
+83 7e 0a 00                    cmp c, 0
+74 04                          je ELSE
+8b 05                          mov ax, [di]     (*a via DI)
+eb 05                          jmp END_TERN
+ELSE:
+8b 5e 08                       mov bx, b        (b loaded lazily)
+8b 07                          mov ax, [bx]
+END_TERN:
+89 04                          mov [si], ax
+```
+
+Findings:
+- `p` and `a` (the "true" arm) get eager reg-alloc into SI and DI.
+- `b` is loaded into BX only inside the else branch — lazy.
+- 22B body. Store happens at end via [si].
+

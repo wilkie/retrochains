@@ -2824,3 +2824,76 @@ Findings:
 - Misses the 4B `f7 1e disp16` mem-direct `neg [mem]` and `f7 16 disp16` `not [mem]` peepholes.
 - Self-assignment from negation/complement should ideally recognize the special form.
 
+
+## comma in return `return (g = x, g + 1)` — left for side effects, right returns
+
+Fixture `3509-comma-return-obj`:
+
+```
+8b 46 04                       mov ax, x
+a3 00 00 [FIXUPP _g]           mov [_g], ax     (g = x — left side)
+a1 00 00 [FIXUPP _g]           mov ax, [_g]     (reload g)
+40                             inc ax           (g + 1)
+```
+
+Findings:
+- Comma left side: side effect executed and result discarded.
+- Right side: computed for the return value.
+- Reloads `g` from memory (could have reused AX from the store).
+
+## `(a || b) && c` — combined short-circuit
+
+Fixture `3510-combo-or-and-obj`:
+
+```
+83 7e 04 00                    cmp a, 0
+75 06                          jne CHECK_C      (a != 0 → skip b, go check c)
+83 7e 06 00                    cmp b, 0
+74 0b                          je FALSE         (a=0 AND b=0 → false)
+CHECK_C:
+83 7e 08 00                    cmp c, 0
+74 05                          je FALSE         (c=0 → false)
+b8 01 00                       mov ax, 1
+```
+
+Findings:
+- Combined `||`/`&&` short-circuits cascade naturally.
+- `a` truthy → skip `b` test, go to `c` test.
+- `b` falsy (with `a` falsy) → fall to FALSE directly.
+
+## chained assign `x = y = f()` — single result stored to both targets
+
+Fixture `3513-chained-multi-obj`:
+
+```
+83 ec 04                       sub sp, 4         (alloc x, y)
+e8 ?? ??                       call _f
+89 46 fc                       mov [bp-4], ax    (y first — right-to-left)
+89 46 fe                       mov [bp-2], ax    (x second)
+8b 46 fe                       mov ax, [bp-2]
+03 46 fc                       add ax, [bp-4]
+```
+
+Findings:
+- Right-to-left: `y` stored first, then `x`.
+- One AX value, two stores (no temp variable).
+- Both `x` and `y` are in stack slots (no reg-alloc for multi-decl).
+
+## Operator precedence `a + b * c` — `*` evaluated first
+
+Fixture `3514-precedence-obj`:
+
+```
+8b 46 06                       mov ax, b
+f7 6e 08                       imul word c
+50                             push ax           (save b*c)
+8b 46 04                       mov ax, a
+5a                             pop dx
+03 c2                          add ax, dx
+```
+
+Findings:
+- `*` binds tighter than `+`, so b*c computed first.
+- Result pushed, then left operand loaded, popped temp, then add.
+- 13B body.
+
