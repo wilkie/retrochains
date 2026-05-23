@@ -1849,6 +1849,108 @@ impl<'a> FunctionEmitter<'a> {
             let _ = write!(self.out, "\tmov\tword ptr {dest_lo},ax\r\n");
             return true;
         }
+        // `<dest> = (long)<int-lvalue>` — widen an int/uint source
+        // into DX:AX (cwd for signed, xor dx,dx for unsigned), then
+        // store. Same shape as the return-path widen (line 3551).
+        // Fixtures 1638 (signed int cast), 1639 (unsigned int cast).
+        let widening_src = match &value.kind {
+            ExprKind::Cast { ty, operand } if ty.is_long_like() => {
+                if let ExprKind::Ident(name) = &operand.kind { Some(name.as_str()) } else { None }
+            }
+            _ => None,
+        };
+        if let Some(src_name) = widening_src
+            && let Some(addr) = self.int_lvalue_addr(&Expr {
+                kind: ExprKind::Ident(src_name.to_owned()),
+                span: value.span,
+            })
+        {
+            let src_ty = if let Some(gty) = self.globals.type_of(src_name) {
+                gty.clone()
+            } else {
+                self.locals.type_of(src_name).clone()
+            };
+            let _ = write!(self.out, "\tmov\tax,word ptr {addr}\r\n");
+            if src_ty.is_unsigned() {
+                // Destination-driven: write 0 directly to the high-
+                // half memory slot instead of going through `xor dx,
+                // dx`. Saves the DX clobber and matches BCC's actual
+                // shape for fixture 1639.
+                let _ = write!(self.out, "\tmov\tword ptr {dest_hi},0\r\n");
+            } else {
+                self.out.extend_from_slice(b"\tcwd\t\r\n");
+                let _ = write!(self.out, "\tmov\tword ptr {dest_hi},dx\r\n");
+            }
+            let _ = write!(self.out, "\tmov\tword ptr {dest_lo},ax\r\n");
+            return true;
+        }
+        // `<dest> = <a> << K` / `<a> >> K` for long lvalue and a
+        // constant K in [1,255]. K=1 inlines `shl ax,1; rcl dx,1` or
+        // the rcr shape for shr; K>1 routes through the N_LX*SH@
+        // helpers. Mirrors the return-path shape (line 3599) with
+        // DX:AX stored into the dest pair. Fixture 1640.
+        if let ExprKind::BinOp { op, left, right } = &value.kind
+            && matches!(op, BinOp::Shl | BinOp::Shr)
+            && let Some((a_hi, a_lo)) = self.long_lvalue_addr_pair(left)
+            && let Some(k) = try_const_eval(right)
+            && k >= 1
+            && k <= 255
+        {
+            let unsigned = self.expr_is_unsigned(left);
+            let _ = write!(self.out, "\tmov\tdx,word ptr {a_hi}\r\n");
+            let _ = write!(self.out, "\tmov\tax,word ptr {a_lo}\r\n");
+            if k == 1 {
+                if matches!(op, BinOp::Shl) {
+                    self.out.extend_from_slice(b"\tshl\tax,1\r\n");
+                    self.out.extend_from_slice(b"\trcl\tdx,1\r\n");
+                } else {
+                    let hi_op = if unsigned { "shr" } else { "sar" };
+                    let _ = write!(self.out, "\t{hi_op}\tdx,1\r\n");
+                    self.out.extend_from_slice(b"\trcr\tax,1\r\n");
+                }
+            } else {
+                let k_u8 = (k & 0xFF) as u8;
+                let _ = write!(self.out, "\tmov\tcl,{k_u8}\r\n");
+                let helper = match (op, unsigned) {
+                    (BinOp::Shl, _)     => "N_LXLSH@",
+                    (BinOp::Shr, false) => "N_LXRSH@",
+                    (BinOp::Shr, true)  => "N_LXURSH@",
+                    _ => unreachable!(),
+                };
+                let _ = write!(self.out, "\tcall\tnear ptr {helper}\r\n");
+                self.helpers.insert(helper.to_string());
+            }
+            let _ = write!(self.out, "\tmov\tword ptr {dest_hi},dx\r\n");
+            let _ = write!(self.out, "\tmov\tword ptr {dest_lo},ax\r\n");
+            return true;
+        }
+        // `<dest> = <a> * K_pow2` — strength-reduce to shl. BCC uses
+        // inline `shl ax,1; rcl dx,1` only for K=2 (shift by 1); any
+        // larger pow2 routes through N_LXLSH@ with `mov cl, k`.
+        // Fixture 1641 (`a * 4L` → helper).
+        if let ExprKind::BinOp { op: BinOp::Mul, left, right } = &value.kind
+            && let Some((a_hi, a_lo)) = self.long_lvalue_addr_pair(left)
+            && let Some(k) = try_const_eval(right)
+            && k > 0
+            && k.is_power_of_two()
+            && k.trailing_zeros() <= 31
+        {
+            let shifts = k.trailing_zeros();
+            let _ = write!(self.out, "\tmov\tdx,word ptr {a_hi}\r\n");
+            let _ = write!(self.out, "\tmov\tax,word ptr {a_lo}\r\n");
+            if shifts == 1 {
+                self.out.extend_from_slice(b"\tshl\tax,1\r\n");
+                self.out.extend_from_slice(b"\trcl\tdx,1\r\n");
+            } else if shifts > 0 {
+                let k_u8 = shifts as u8;
+                let _ = write!(self.out, "\tmov\tcl,{k_u8}\r\n");
+                self.out.extend_from_slice(b"\tcall\tnear ptr N_LXLSH@\r\n");
+                self.helpers.insert("N_LXLSH@".to_string());
+            }
+            let _ = write!(self.out, "\tmov\tword ptr {dest_hi},dx\r\n");
+            let _ = write!(self.out, "\tmov\tword ptr {dest_lo},ax\r\n");
+            return true;
+        }
         // `<dest> = <a> <</>> <n>` for a long lvalue shifted by an
         // int-typed lvalue. BCC loads the operand into DX:AX and the
         // shift count's *low byte* into CL (the value is assumed to
@@ -3674,9 +3776,10 @@ impl<'a> FunctionEmitter<'a> {
                 return;
             }
             // `return a * K;` for a long lvalue × power-of-two
-            // constant. Strength-reduce to a chain of `shl ax,1;
-            // rcl dx,1` (one pair per shift). Non-power-of-2 const
-            // would still need N_LXMUL@. Fixture 3170 (`v * 2L`).
+            // constant. K=2 → inline `shl ax,1; rcl dx,1` (fixture
+            // 3170). K=2^n with n>1 → N_LXLSH@ helper (matches the
+            // long-init / `<dest> = a * K_pow2` shape). Non-power-of-
+            // 2 const would still need N_LXMUL@.
             if let ExprKind::BinOp { op: BinOp::Mul, left, right } = &e.kind
                 && let Some((hi_addr, lo_addr)) = self.long_lvalue_addr_pair(left)
                 && let Some(k) = try_const_eval(right)
@@ -3687,9 +3790,14 @@ impl<'a> FunctionEmitter<'a> {
                 let shifts = k.trailing_zeros();
                 let _ = write!(self.out, "\tmov\tdx,word ptr {hi_addr}\r\n");
                 let _ = write!(self.out, "\tmov\tax,word ptr {lo_addr}\r\n");
-                for _ in 0..shifts {
+                if shifts == 1 {
                     self.out.extend_from_slice(b"\tshl\tax,1\r\n");
                     self.out.extend_from_slice(b"\trcl\tdx,1\r\n");
+                } else if shifts > 0 {
+                    let k_u8 = shifts as u8;
+                    let _ = write!(self.out, "\tmov\tcl,{k_u8}\r\n");
+                    self.out.extend_from_slice(b"\tcall\tnear ptr N_LXLSH@\r\n");
+                    self.helpers.insert("N_LXLSH@".to_string());
                 }
                 return;
             }
