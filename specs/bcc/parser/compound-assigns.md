@@ -2950,3 +2950,26 @@ Per-form compound-add costs:
 | global `g`       | `add [_g], imm8`  | 5B    |
 | local `[bp-D]`   | `add [bp-D], imm8`| 4B    |
 
+
+## `flags |= 0x10` for global — `or word [mem], imm16` (6B)
+
+Fixture `2995-or-eq-global-obj`:
+
+```c
+int flags;
+flags |= 0x10;
+```
+
+```
+81 0e 00 00 10 00              or word [_flags], 0x0010   (6B with FIXUPP)
+```
+
+Findings:
+- Global `|= imm` uses `or word [mem], imm16` directly (no AX
+  needed).
+- 6 bytes: 2B opcode (`81 0e`) + 2B disp16 (FIXUPP) + 2B imm16.
+- ModR/M `0e` = mod 00, op-ext 001 (or), r/m 110 (disp16 absolute).
+- Note: BCC uses imm16 form (6B) even when the imm fits signed
+  imm8. The `83 /1 imm8` (5B) sign-ext form is NOT used here for
+  globals. Possibly a missed peephole, or specific to mem-imm OR.
+

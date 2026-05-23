@@ -1752,3 +1752,26 @@ Findings:
 - First call's result discarded (just `pop cx`); second's result
   carries through AX.
 
+
+## Recursion `countdown(n - 1)` — backward `call rel16` with negative disp
+
+Fixture `2994-recursion-obj`:
+
+```c
+int countdown(int n) {
+  if (n == 0) return 0;
+  return 1 + countdown(n - 1);
+}
+```
+
+```
+e8 ea ff                       call countdown   (disp16 = 0xFFEA = -22, backward)
+```
+
+Findings:
+- Self-recursion = standard `call rel16` with **NEGATIVE disp16**
+  (backward branch to function entry).
+- Each recursive call gets its own stack frame (push bp, locals).
+- BCC has no special handling for recursion — just emits the call
+  with the right relative offset.
+

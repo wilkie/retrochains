@@ -6223,3 +6223,48 @@ Findings:
   table record differs.
 - Same as extern globals (`2752`) for the linkage perspective.
 
+
+## `*dst = *src;` mem-to-mem ptr copy — load via di, store via si
+
+Fixture `2993-ptr-mem-copy-obj`:
+
+```c
+void copy(int *dst, int *src) {
+  *dst = *src;
+}
+```
+
+```
+8b 76 04                       mov si, dst
+8b 7e 06                       mov di, src
+8b 05                          mov ax, [di]    ; *src
+89 04                          mov [si], ax    ; *dst = ax
+```
+
+Findings:
+- Both pointers promoted to si and di.
+- 4-byte expression body: 2B load through di + 2B store through si.
+- AX is the conduit between the load and store.
+
+## `arr[i]->v` for global ptr-to-struct array — load ptr from arr + deref
+
+Fixture `2997-struct-ptr-arr-obj`:
+
+```c
+struct N *arr[2] = { &a, &b };
+return arr[i]->v;
+```
+
+```
+8b 5e 04                       mov bx, i
+d1 e3                          shl bx, 1
+8b 9f 00 00                    mov bx, [bx + _arr]   (load ptr via FIXUPP)
+8b 07                          mov ax, [bx]          (deref via no-disp)
+```
+
+Findings:
+- 9 bytes total: scale (4B) + load ptr-elem (4B disp16) + deref (2B).
+- ModR/M `9f disp16` for `[bx + disp16]` storing into bx (bx reused
+  as both index source and dest).
+- Standard pattern for "table of pointers" idiom.
+

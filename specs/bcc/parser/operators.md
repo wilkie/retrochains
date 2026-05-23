@@ -1467,3 +1467,27 @@ Findings:
 - Both arms converge at AX, then x = ax store.
 - Side effect (modifying a) is preserved per C semantics.
 
+
+## `if ((x = K) > 0)` — assignment in condition uses AX value directly
+
+Fixture `2996-assign-in-cond-obj`:
+
+```c
+if ((x = 5) > 0) return x;
+```
+
+```
+b8 05 00                       mov ax, 5
+89 46 fe                       x = ax (store)
+0b c0                          or ax, ax   (test AX > 0 — peephole, no reload!)
+7e 05                          jle → ZERO
+```
+
+Findings:
+- Assignment expression `x = 5` produces value 5 in AX.
+- Comparison uses AX directly (`or ax, ax` peephole for `> 0`)
+  without reloading from x.
+- Side effect (x = 5) preserved per C semantics.
+- The `or ax, ax` peephole is enabled because the value is already
+  in AX from the assignment.
+
