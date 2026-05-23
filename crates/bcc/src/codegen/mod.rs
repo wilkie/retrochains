@@ -8097,6 +8097,35 @@ impl<'a> FunctionEmitter<'a> {
                 return;
             }
         }
+        // `<global_struct_array>[<var>].<field>` — Dot access on a
+        // variable-indexed global struct array. Compute the scaled
+        // element offset into BX, then load through `[bx +
+        // <arr_sym> + field_off]`. Fixture 2841.
+        if matches!(kind, crate::ast::MemberKind::Dot)
+            && let ExprKind::ArrayIndex { array: arr_expr, index } = &base.kind
+            && let ExprKind::Ident(arr_name) = &arr_expr.kind
+            && let Some(arr_ty) = self.globals.type_of(arr_name)
+            && let Some(elem_ty) = arr_ty.array_elem()
+            && let Type::Struct { fields, .. } = elem_ty.clone()
+            && let Some(field_info) = fields.iter().find(|f| f.name == field)
+            && try_const_eval(index).is_none()
+        {
+            let field_off = field_info.offset;
+            let field_ty = field_info.ty.clone();
+            self.emit_index_into_bx(index, elem_ty);
+            let addr = if field_off == 0 {
+                format!("DGROUP:_{arr_name}[bx]")
+            } else {
+                format!("DGROUP:_{arr_name}+{field_off}[bx]")
+            };
+            if field_ty.is_char_like() {
+                let _ = write!(self.out, "\tmov\tal,byte ptr {addr}\r\n");
+                self.emit_widen_al(&field_ty);
+            } else {
+                let _ = write!(self.out, "\tmov\tax,word ptr {addr}\r\n");
+            }
+            return;
+        }
         // Arrow path (or Dot whose base isn't a const-chain lvalue):
         // base must be a bare Ident referring to a pointer.
         let ExprKind::Ident(name) = &base.kind else {
