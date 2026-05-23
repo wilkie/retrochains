@@ -6097,3 +6097,22 @@ Findings:
 - Case bodies emitted in source order — DEFAULT body lands between CASE_1 and CASE_2.
 - Source position of `default:` doesn't affect dispatch order, only physical layout.
 
+
+## `while (--n > 0)` — `dec + jg` (uses dec's flags directly)
+
+Fixture `3644-dec-while-obj`:
+
+```
+8b 76 04                       mov si, n
+eb 04                          jmp TEST
+LOOP_BODY:
+ff 06 00 00 [FIXUPP _g]        inc word [_g]
+TEST:
+4e                             dec si
+7f f9                          jg LOOP_BODY     (signed > 0, uses dec's flags)
+```
+
+Findings:
+- 13B body. `dec si` sets flags for `jg`; no separate cmp.
+- Tight pre-dec loop pattern.
+

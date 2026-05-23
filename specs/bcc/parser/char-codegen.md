@@ -2402,3 +2402,21 @@ Findings:
 - 13B body. Standard widening on assignment.
 - Subsequent use reloads from x's slot (statement-boundary IR).
 
+
+## `char ret = x != 0` — same boolean materialize as int
+
+Fixture `3642-char-bool-ret-obj`:
+
+```
+83 7e 04 00                    cmp x, 0
+74 05                          je ELSE
+b8 01 00                       mov ax, 1
+eb 02                          jmp END
+ELSE:
+33 c0                          xor ax, ax
+```
+
+Findings:
+- 13B body. AL (= low byte of AX) is the char return; AH=0 from xor or imm16 mov.
+- Identical to int boolean return (3476).
+

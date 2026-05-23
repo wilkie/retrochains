@@ -2526,3 +2526,36 @@ Findings:
 - AX from inner call flows directly into outer return.
 - Same as 3580 0-arg call but here the result is explicitly returned.
 
+
+## `return call() + 1` — inc ax peephole on call result
+
+Fixture `3641-call-plus-1-obj`:
+
+```
+ff 76 04                       push x
+e8 ?? ??                       call _g
+59                             pop cx
+40                             inc ax           (+1 peephole)
+```
+
+Findings:
+- 8B body. AX from call directly receives `inc` for the +1.
+- Confirms inc peephole works on call return values too.
+
+## Initialized extern fn-ptr `int (*fp)(int) = add1;`
+
+Fixture `3643-fnptr-init-obj`:
+
+- LEDATA in _DATA contains FIXUPP'd offset to `_add1`.
+
+Call site:
+```
+ff 76 04                       push v
+ff 16 00 00 [FIXUPP _fp]       call [_fp]    (4B indirect via mem)
+59                             pop cx
+```
+
+Findings:
+- Same call shape as 3567 (extern fn-ptr).
+- 8B call site.
+

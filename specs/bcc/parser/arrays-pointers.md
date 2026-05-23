@@ -7838,3 +7838,38 @@ Findings:
 - The +2 piggybacks on the FIXUPP'd disp16; no separate add needed.
 - Same byte count as `arr[i]`.
 
+
+## `&arr[var]` — `shl + add ax, &arr (FIXUPP'd)`
+
+Fixture `3645-addr-arr-elem-var-obj`:
+
+```
+8b 46 04                       mov ax, i
+d1 e0                          shl ax, 1
+05 00 00 [FIXUPP _arr]         add ax, offset _arr
+```
+
+Findings:
+- 8B body. Result computed directly in AX (no BX needed for return).
+- Scale + base-add. No extra mov.
+
+## struct ptr `p++` — `mov ax, si; add si, sizeof(struct)`
+
+Fixture `3646-struct-ptr-postinc-obj`:
+
+```c
+struct Pt { int x; int y; };   /* sizeof = 4 */
+struct Pt *advance(struct Pt *p) { return p++; }
+```
+
+```
+56                             push si
+8b 76 04                       mov si, p
+8b c6                          mov ax, si       (return pre-inc value)
+83 c6 04                       add si, 4         (p += sizeof(struct Pt))
+```
+
+Findings:
+- 9B body. Post-inc semantics: pre-inc value returned, then advance.
+- `add si, 4` (3B) beats 4× `inc si` (4B). Inc-vs-add threshold = 3 (per direction).
+
