@@ -5697,11 +5697,18 @@ impl<'a> FunctionEmitter<'a> {
             && matches!(op, BinOp::Add | BinOp::Sub)
             && let Some(v) = try_const_eval(value)
         {
+            // K=1 peephole: `inc/dec word ptr [_g]` (4 bytes) instead
+            // of `add/sub word ptr [_g], 1` (5 bytes). Fixture 3497.
+            let v_masked = v & 0xFFFF;
+            if v_masked == 1 {
+                let mnem = if matches!(op, BinOp::Add) { "inc" } else { "dec" };
+                let _ = write!(self.out, "\t{mnem}\tword ptr DGROUP:_{name}\r\n");
+                return;
+            }
             let mnem = if matches!(op, BinOp::Add) { "add" } else { "sub" };
-            let v16 = v & 0xFFFF;
             let _ = write!(
                 self.out,
-                "\t{mnem}\tword ptr DGROUP:_{name},{v16}\r\n",
+                "\t{mnem}\tword ptr DGROUP:_{name},{v_masked}\r\n",
             );
             return;
         }
