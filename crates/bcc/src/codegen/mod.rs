@@ -3501,6 +3501,18 @@ impl<'a> FunctionEmitter<'a> {
                 // word ptr <m>` directly. Fixture 589 (`f(a[1])`).
                 let _ = write!(self.out, "\t{push_form}\r\n");
                 total_bytes += 2;
+            } else if !arg_ty.is_char_like()
+                && let ExprKind::BinOp { op: BinOp::Mod, .. } = &arg.kind
+            {
+                // Mod-result arg: the idiv already leaves the
+                // remainder in DX. Skip the `mov ax, dx` and push
+                // DX directly. Saves 2 bytes per call. Fixture 1391
+                // (`gcd(b, a % b)`).
+                self.skip_mod_to_ax = true;
+                self.emit_arg_into_ax(arg, arg_ty);
+                self.skip_mod_to_ax = false;
+                self.out.extend_from_slice(b"\tpush\tdx\r\n");
+                total_bytes += 2;
             } else {
                 self.emit_arg_into_ax(arg, arg_ty);
                 self.out.extend_from_slice(b"\tpush\tax\r\n");
