@@ -12462,6 +12462,22 @@ fn emit_op_with_source(out: &mut Vec<u8>, op: BinOp, src: &OperandSource, unsign
             return;
         }
     }
+    // ±1/±2 peephole: `inc ax` (1 byte each) for ±1, two `inc/dec ax`
+    // for ±2. Saves vs `add ax, K` (3 bytes for the AX-accumulator
+    // form). Same peephole emit_binary_right uses; replicated here
+    // for callers that emit_op_with_source directly (chained const
+    // folds, comparison-rewrites, etc.). Fixture 2071 (`c * 10 + 0
+    // + 2` folds to `+ 2` → two `inc ax`).
+    if let OperandSource::Immediate(v) = src
+        && matches!(op, BinOp::Add | BinOp::Sub)
+        && (*v == 1 || *v == 2)
+    {
+        let mnem = if matches!(op, BinOp::Add) { "inc" } else { "dec" };
+        for _ in 0..*v {
+            let _ = write!(out, "\t{mnem}\tax\r\n");
+        }
+        return;
+    }
     match op {
         BinOp::Add => {
             let _ = write!(out, "\tadd\tax,{}\r\n", src.word());
