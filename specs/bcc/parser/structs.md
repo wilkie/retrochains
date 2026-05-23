@@ -3625,3 +3625,59 @@ Findings:
 - Then AND with `(1<<width)-1`.
 - 12 bytes for read of `y` at offset 3 width 5.
 
+
+## Bitfield at byte boundary (offset 8) — DIRECT BYTE ACCESS peephole
+
+Fixture `3216-bitfield-offset-8-obj`:
+
+```c
+struct B { unsigned int x : 4; unsigned int y : 4; unsigned int z : 8; };
+return b.z;   /* z at bit offset 8 = byte 1 */
+```
+
+```
+a0 01 00                       mov al, [_b + 1]   (HIGH byte direct load)
+25 ff 00                       and ax, 0x00FF     (mask 8-bit field)
+```
+
+Findings:
+- **When bitfield aligns at byte boundary**, BCC loads the right
+  byte directly (`mov al, [base + byte_offset]`).
+- 6 bytes total (vs ~14 if word-load + shift + mask).
+- Smart peephole that avoids unnecessary shifts.
+- Only applies when bit offset is a multiple of 8.
+
+## Bitfield WRITE at non-zero offset — `and + or` with shifted value
+
+Fixture `3217-bitfield-write-y-obj`:
+
+```c
+struct B { unsigned int x : 3; unsigned int y : 5; };
+b.y = 7;   /* y at offset 3 width 5 */
+```
+
+```
+80 26 disp16 07                and byte [_b], 0x07   (keep low 3 bits, clear y)
+80 0e disp16 38                or byte [_b], 0x38    (= 7 << 3, value at y's position)
+```
+
+Findings:
+- AND mask = `~field_mask` (keeps other fields' bits).
+- OR value = **compile-time shifted** new value at field position.
+- For `b.y = 7` (offset 3): `7 << 3 = 0x38`.
+- 10 bytes for write (uniform regardless of field offset).
+
+## Bitfield 16-bit total — packs into 1 word (sizeof = 2)
+
+Fixture `3215-bitfield-16bit-obj`:
+
+```c
+struct B { unsigned int x : 4; unsigned int y : 4; unsigned int z : 8; };
+sizeof(struct B) = 2;
+```
+
+Findings:
+- BCC packs bitfields into the smallest sufficient storage.
+- 4+4+8=16 bits → 2 bytes (1 word).
+- For 9-bit total (still 1+ extra bit), would extend to 2 bytes.
+

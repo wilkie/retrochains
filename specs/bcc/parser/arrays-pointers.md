@@ -6749,3 +6749,28 @@ Findings:
 - Const-index ptr-array access = `mov ax, [si + sizeof × idx]`.
 - For ptr array (sizeof = 2): `[si + 2]` for index 1.
 
+
+## `p->x = K; p->y = K;` via ptr param — mem-imm stores via [si]
+
+Fixture `3218-struct-param-mod-obj`:
+
+```c
+int test(struct P *p) {
+  p->x = 100;
+  p->y = 200;
+  ...
+}
+```
+
+```
+8b 76 04                       mov si, p
+c7 04 64 00                    mov word [si], 100      (p->x, 4B)
+c7 44 02 c8 00                 mov word [si+2], 200    (p->y, 5B)
+8b 04 03 44 02                 mov ax, [si]; add ax, [si+2]
+```
+
+Findings:
+- ModR/M `04` = [si] no-disp (for offset 0).
+- ModR/M `44 02` = [si+disp8=2] (for offset 2).
+- 4B + 5B for two field writes via ptr.
+
