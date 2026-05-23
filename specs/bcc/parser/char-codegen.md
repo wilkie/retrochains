@@ -1782,3 +1782,25 @@ Findings:
   the missing mem-byte-inc peephole.
 - Same suboptimality for `++char_g` and `char_g -= 1`.
 
+
+## `char c * 2` — STRENGTH-REDUCED after cbw promotion
+
+Fixture `3104-char-mul-2-obj`:
+
+```c
+int dbl(char c) {
+  return c * 2;
+}
+```
+
+```
+8a 46 04                       mov al, c
+98                             cbw
+d1 e0                          shl ax, 1     (strength-reduced!)
+```
+
+Findings:
+- `char * 2` = byte load + cbw + `shl ax, 1` (6 bytes total).
+- Multiplication is always safe to strength-reduce (no rounding).
+- Same general pow2-mul rule applies after char promotion.
+

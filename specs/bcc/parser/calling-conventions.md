@@ -1847,3 +1847,26 @@ Findings:
 - Same call form as fn-ptr param (`2728`) but disp targets local.
 - 1-arg cleanup via `pop cx`.
 
+
+## Calls with const args — `mov ax, K; push ax` (4B per const arg, 8086)
+
+Fixture `3106-2arg-const-call-obj`:
+
+```c
+return add(10, 20);
+```
+
+```
+b8 14 00 50                    mov ax, 20; push ax    (4B for 20)
+b8 0a 00 50                    mov ax, 10; push ax    (4B for 10)
+e8 00 00                       call _add
+59 59                          pop cx; pop cx
+```
+
+Findings:
+- 8086 has NO `push imm16` instruction; must use `mov + push`.
+- **4 bytes per const arg** (3B mov + 1B push).
+- 80186+ added `push imm16` (3B per const arg) but BCC -ms targets
+  pure 8086.
+- Arg order: right-to-left (cdecl).
+

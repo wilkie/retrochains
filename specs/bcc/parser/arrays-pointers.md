@@ -6454,3 +6454,53 @@ Findings:
   addressing through si/di.
 - 12 bytes for the data ops.
 
+
+## `*p++` post-inc deref — save current + inc + deref via saved bx
+
+Fixture `3102-star-p-post-inc-obj`:
+
+```c
+return *p++;   /* deref current p, then advance p */
+```
+
+```
+8b 76 04                       mov si, p (promote)
+8b de                          mov bx, si  (SAVE current p)
+46 46                          inc si; inc si  (p += 2, since int*)
+8b 07                          mov ax, [bx]    (deref OLD value)
+```
+
+Findings:
+- Classic `*p++` idiom: save current, increment, deref saved.
+- For int* (size 2): 2× `inc si` (2B for the increment).
+- For char*: 1× `inc si` (1B).
+- For long* (size 4): could be 4× inc (4B) or `add si, 4` (3B).
+- The saved value (in bx) holds the OLD pointer for deref.
+
+## `ptr_a - ptr_b` element difference — sub raw + idiv by sizeof
+
+Fixture `3103-ptr-diff-obj`:
+
+```c
+int diff(int *a, int *b) {
+  return a - b;
+}
+```
+
+```
+8b 46 04                       mov ax, a
+2b 46 06                       sub ax, b      (raw byte difference)
+bb 02 00                       mov bx, 2
+99                             cwd
+f7 fb                          idiv bx        (DIV BY SIZEOF for element count)
+```
+
+Findings:
+- C standard: ptr diff returns count in **elements**, not bytes.
+- BCC: subtract raw addresses, then **idiv by sizeof(elem)**.
+- 12 bytes total.
+- For `char*` ptr diff, no division (sizeof=1).
+- For `int*`: idiv by 2. For `long*`: idiv by 4.
+- Note: could be `sar ax, 1` for int* (signed shift safe for /2),
+  but BCC uses idiv. Missed peephole.
+

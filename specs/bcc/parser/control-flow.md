@@ -4633,3 +4633,20 @@ Findings:
 - **Strong source-form recommendation**: use `i++` (or `++i`) in
   for-loop post-step over `i = i + 1`.
 
+
+## `++i` vs `i++` in for post-step — BYTE-IDENTICAL
+
+Fixture `3101-for-pre-inc-obj`:
+
+```c
+for (i = 0; i < n; ++i) { ... }   /* same as i++ in post-step */
+```
+
+Both produce `inc si` (1B) in the post-step.
+
+Findings:
+- When the result of `++i` or `i++` is **discarded** (as in for
+  post-step), they're byte-identical.
+- The post-inc/pre-inc distinction only matters when the result
+  value is consumed by another expression.
+
