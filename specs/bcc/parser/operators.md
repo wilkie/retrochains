@@ -1640,3 +1640,35 @@ Findings:
 - `256` exceeds signed imm8 max → imm16 form (5B).
 - Both cases: 5-byte cmp instruction.
 
+
+## `!x` — `neg + sbb + inc` boolify trick (5 bytes)
+
+Fixture `3140-double-not-obj`:
+
+```c
+return !!x;   /* boolify */
+```
+
+```
+                               ; !x (5 bytes):
+f7 d8                          neg ax        (CF = 1 if ax was nonzero)
+1b c0                          sbb ax, ax    (ax = -CF)
+40                             inc ax        (0→1, -1→0)
+```
+
+Findings:
+- `!x` = 5-byte sequence: `neg + sbb + inc`.
+- Logic: `neg` sets CF based on ax != 0; `sbb ax,ax` produces -1 or 0; `inc` flips to 1 or 0.
+- `!!x` = apply the sequence twice (10 bytes).
+- This is the standard 8086 "boolify" idiom.
+
+## Nested ternary `a ? b : (c ? d : e)` — nested cmp+je structure
+
+Fixture `3139-nested-ternary-obj`:
+
+```c
+return a ? b : (c ? 10 : 20);
+```
+
+Compiles to nested if-then-else cmp+je structure (no special handling).
+

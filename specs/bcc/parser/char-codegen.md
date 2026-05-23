@@ -1875,3 +1875,44 @@ Findings:
 - Direct byte cmp + signed jge — no cbw promotion needed.
 - 6 bytes total for the test.
 
+
+## Unsigned char compare — uses unsigned jumps (`jb`/`jae`/`ja`/`jbe`)
+
+Fixture `3137-uchar-lt-FF-obj`:
+
+```c
+unsigned char c < 0xFF   /* jae → FALSE for >=, since signedness differs */
+```
+
+```
+80 7e 04 ff                    cmp byte [bp+4], 0xFF
+73 05                          jae → FALSE  (UNSIGNED ≥)
+```
+
+Findings:
+- Char compare jump table:
+  - signed char `<`: `jl` (`7c`)
+  - **unsigned char `<`: `jb` (`72`)**
+  - signed char `>=`: `jge` (`7d`)
+  - **unsigned char `>=`: `jae` (`73`)** ← here
+- BCC honors signedness even at byte-cmp level.
+
+## Global char `tag == 0` — direct `cmp byte [mem], 0` (5B + FIXUPP)
+
+Fixture `3138-char-global-eq-0-obj`:
+
+```c
+char tag;
+if (tag == 0) return 1;
+```
+
+```
+80 3e 00 00 00                 cmp byte [_tag], 0   (5B with FIXUPP)
+75 05                          jne → FALSE
+```
+
+Findings:
+- Global char compare uses **direct mem-byte cmp** (`80 /7 disp16 imm8`).
+- ModR/M `3e` = mod 00, cmp op-ext (/7), r/m 110 (disp16).
+- 5 bytes for the compare. NO load to AL first.
+
