@@ -1632,6 +1632,10 @@ fn parse_and(operands: &str, line_no: usize) -> AsmResult<Instr> {
             });
         }
     }
+    // `and <reg16>, imm16` — Grp1 /4=AND sibling of OrReg16Imm16.
+    if let (Some(reg), Some(imm)) = (Reg16::parse(lhs), parse_imm16(rhs)) {
+        return Ok(Instr::AndReg16Imm16 { reg, imm });
+    }
     parse_alu_ax_mem(operands, line_no, "and", |o| Instr::AndAxBpRel { offset: o })
 }
 
@@ -2584,6 +2588,12 @@ fn parse_or(operands: &str, line_no: usize) -> AsmResult<Instr> {
             return Ok(Instr::OrDxBpRel { offset });
         }
     }
+    // `or <reg16>, imm16` — Grp1 /1=OR. Used by the long-return
+    // bitwise-or-imm path (fixture 2876: `or dx, 0` as the high-half
+    // OR with 0x100L → hi=0).
+    if let (Some(reg), Some(imm)) = (Reg16::parse(lhs), parse_imm16(rhs)) {
+        return Ok(Instr::OrReg16Imm16 { reg, imm });
+    }
     // `or word ptr <group>:<sym>[+N], imm16` — long compound
     // `g |= K`. Same imm16-always rule as the `and` companion.
     if let Some((group, symbol)) = parse_group_symbol(lhs) {
@@ -2888,6 +2898,10 @@ fn parse_xor(operands: &str, line_no: usize) -> AsmResult<Instr> {
                 imm: imm as u8,
             });
         }
+    }
+    // `xor <reg16>, imm16` — Grp1 /6=XOR sibling.
+    if let (Some(reg), Some(imm)) = (Reg16::parse(lhs), parse_imm16(rhs)) {
+        return Ok(Instr::XorReg16Imm16 { reg, imm });
     }
     Err(AsmError::new(
         line_no,

@@ -3567,6 +3567,24 @@ impl<'a> FunctionEmitter<'a> {
                 }
                 return;
             }
+            // Same shape, but the int source is a stack-resident local
+            // or function param. `mov ax, word ptr [bp+N]` then cwd
+            // (signed) / xor dx,dx (unsigned). Fixtures 2548 (signed
+            // int → long), 2549 (unsigned int → long).
+            if let Some(src_name) = widening_src
+                && self.locals.has(src_name)
+                && matches!(self.locals.type_of(src_name), Type::Int | Type::UInt)
+                && let LocalLocation::Stack(off) = self.locals.location_of(src_name)
+            {
+                let src_ty = self.locals.type_of(src_name).clone();
+                let _ = write!(self.out, "\tmov\tax,word ptr {}\r\n", bp_addr(off));
+                match src_ty {
+                    Type::Int  => self.out.extend_from_slice(b"\tcwd\t\r\n"),
+                    Type::UInt => self.out.extend_from_slice(b"\txor\tdx,dx\r\n"),
+                    _ => unreachable!(),
+                }
+                return;
+            }
             // `return g();` for a long-returning callee — direct
             // passthrough: the callee's DX:AX result IS the return
             // register pair, so the function emits `call near ptr
@@ -3627,6 +3645,32 @@ impl<'a> FunctionEmitter<'a> {
                     let _ = write!(self.out, "\tcall\tnear ptr {helper}\r\n");
                     self.helpers.insert(helper.to_string());
                 }
+                return;
+            }
+            // `return a | K;` / `& K;` / `^ K;` for a long lvalue and a
+            // constant. Load DX:AX = a, then op each half with the
+            // matching K-half (high half folds to 0 when K fits in
+            // 16 bits but BCC still emits `<op> dx, 0`). Add/sub
+            // already have a dedicated carry-propagation path above;
+            // bitwise has no carry so each half is independent.
+            // Fixture 2876 (`a | 0x100L`).
+            if let ExprKind::BinOp { op, left, right } = &e.kind
+                && matches!(op, BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor)
+                && let Some((hi_addr, lo_addr)) = self.long_lvalue_addr_pair(left)
+                && let Some(k) = try_const_eval(right)
+            {
+                let mnem = match op {
+                    BinOp::BitAnd => "and",
+                    BinOp::BitOr  => "or",
+                    BinOp::BitXor => "xor",
+                    _ => unreachable!(),
+                };
+                let lo_k = (k & 0xFFFF) as u16;
+                let hi_k = ((k >> 16) & 0xFFFF) as u16;
+                let _ = write!(self.out, "\tmov\tdx,word ptr {hi_addr}\r\n");
+                let _ = write!(self.out, "\tmov\tax,word ptr {lo_addr}\r\n");
+                let _ = write!(self.out, "\t{mnem}\tax,{lo_k}\r\n");
+                let _ = write!(self.out, "\t{mnem}\tdx,{hi_k}\r\n");
                 return;
             }
             // `return a / b;` / `return a % b;` for two long lvalues.

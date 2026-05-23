@@ -346,6 +346,7 @@ fn instr_size(instr: &Instr) -> usize {
         | Instr::SbbReg16Imm8Sx { .. }
         | Instr::SubReg16Imm8Sx { .. } => 3,
         Instr::AddReg16Imm16 { .. } | Instr::SubReg16Imm16 { .. } => 4,
+        Instr::OrReg16Imm16 { .. } | Instr::AndReg16Imm16 { .. } | Instr::XorReg16Imm16 { .. } => 4,
         Instr::AddGroupSymImm16 { .. } => 6,
         Instr::AdcAxImm16 { .. }
         | Instr::SbbAxImm16 { .. }
@@ -1426,6 +1427,25 @@ fn emit_instr(
             // `sub <reg16>, imm16` → 81 E(reg) lo hi.
             out.push(0x81);
             out.push(0b11_101_000 | reg.code());
+            out.extend_from_slice(&imm.to_le_bytes());
+        }
+        Instr::OrReg16Imm16 { reg, imm } => {
+            // `or <reg16>, imm16` → 81 C(reg|8) lo hi. Grp1 /1=OR
+            // with ModR/M mod=11 r/m=<reg>.
+            out.push(0x81);
+            out.push(0b11_001_000 | reg.code());
+            out.extend_from_slice(&imm.to_le_bytes());
+        }
+        Instr::AndReg16Imm16 { reg, imm } => {
+            // `and <reg16>, imm16` → 81 E(reg) lo hi. Grp1 /4=AND.
+            out.push(0x81);
+            out.push(0b11_100_000 | reg.code());
+            out.extend_from_slice(&imm.to_le_bytes());
+        }
+        Instr::XorReg16Imm16 { reg, imm } => {
+            // `xor <reg16>, imm16` → 81 F(reg) lo hi. Grp1 /6=XOR.
+            out.push(0x81);
+            out.push(0b11_110_000 | reg.code());
             out.extend_from_slice(&imm.to_le_bytes());
         }
         Instr::AddGroupSymImm16 { group, symbol, offset, imm } => {

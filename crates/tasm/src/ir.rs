@@ -609,6 +609,17 @@ pub enum Instr {
     /// `sub <reg16>, imm16` — `81 E(reg) lo hi`. Wide-immediate
     /// sibling.
     SubReg16Imm16 { reg: Reg16, imm: u16 },
+    /// `or <reg16>, imm16` — `81 C(reg|8) lo hi`. Grp1 /1=OR with
+    /// ModR/M mod=11 r/m=<reg>. Used by long-return bitwise paths
+    /// where the high-half OR with a constant is emitted as a
+    /// dedicated `or dx, hi_k` (fixture 2876: `a | 0x100L`).
+    OrReg16Imm16 { reg: Reg16, imm: u16 },
+    /// `and <reg16>, imm16` — `81 E(reg) lo hi`. Grp1 /4=AND
+    /// sibling.
+    AndReg16Imm16 { reg: Reg16, imm: u16 },
+    /// `xor <reg16>, imm16` — `81 F(reg) lo hi`. Grp1 /6=XOR
+    /// sibling.
+    XorReg16Imm16 { reg: Reg16, imm: u16 },
     /// `add word ptr <group>:<symbol>[+<offset>], imm16` — Grp1
     /// r/m16,imm16 with /0=ADD (`81 06 lo hi imm_lo imm_hi`,
     /// 6 bytes). Wider sibling to `AddGroupSymImm8Sx` for
