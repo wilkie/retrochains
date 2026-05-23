@@ -1050,6 +1050,15 @@ pub enum Instr {
         offset: i16,
         imm: u16,
     },
+    /// `test <reg16>, imm16` — TEST r/m16, imm16 via Grp3 /0 against
+    /// a register. Encoding: `F7 (0xC0+reg.code()) imm_lo imm_hi`
+    /// (ModR/M mod=11 reg=000(/0=TEST) r/m=reg). Sets flags from the
+    /// AND result without storing it. Fixture 1415 (`if (x & 1)` with
+    /// x in SI — popcount inner loop).
+    TestReg16Imm16 {
+        reg: Reg16,
+        imm: u16,
+    },
     /// `inc word ptr <group>:<symbol>[+<offset>]` — INC r/m16 via
     /// Grp5 /0 against a data-segment global. Encoding: `FF 06 lo
     /// hi` (ModR/M 06 = mod=00 reg=000 r/m=110 → `[disp16]`).

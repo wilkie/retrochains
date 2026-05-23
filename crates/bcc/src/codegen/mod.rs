@@ -921,6 +921,28 @@ impl<'a> FunctionEmitter<'a> {
             "logical condition (`&&`/`||`) in a `while` not yet supported (no fixture)"
         );
         let plan = self.label_plan.loop_plan(while_span_start);
+        // `while (0)` — BCC still emits the trampoline jump and the
+        // body bytes, but elides the check label and the back-edge
+        // jump (since the cond is always false, nothing would branch
+        // there). Net shape: `jmp past-body / body...` and that's it.
+        // Fixture 1587.
+        if matches!(try_const_eval(cond), Some(0)) {
+            let _ = write!(self.out, "\tjmp\tshort {}\r\n", self.label_ref(plan.check_slot));
+            self.emit_label(plan.body_slot);
+            self.loop_stack.push(LoopTargets {
+                break_target_slot: plan.break_target_slot,
+                continue_target_slot: Some(plan.continue_target_slot),
+            });
+            for s in body {
+                self.emit_stmt(s);
+            }
+            self.loop_stack.pop();
+            self.emit_label(plan.check_slot);
+            if body_has_break(body) {
+                self.emit_label(plan.break_target_slot);
+            }
+            return;
+        }
         // `while (K)` with K constant non-zero — BCC elides both the
         // trampoline jump and the check label, leaving just `body /
         // jmp body`. Continue jumps to body_slot directly. Fixture
@@ -982,6 +1004,25 @@ impl<'a> FunctionEmitter<'a> {
         // label if the body actually uses it (fixture 186).
         if body_has_continue(body) {
             self.emit_label(plan.continue_target_slot);
+        }
+        // `do {} while (K)` — constant condition collapses the test:
+        // `K != 0` becomes an unconditional `jmp body` (fixture 1589);
+        // `K == 0` runs the body exactly once with no test/branch
+        // emitted at all (fixture 1588).
+        if let Some(v) = try_const_eval(cond) {
+            let cond_line = self.lines.line_of(cond.span.start);
+            self.advance_to_line(cond_line);
+            if v != 0 {
+                let _ = write!(
+                    self.out,
+                    "\tjmp\tshort {}\r\n",
+                    self.label_ref(plan.body_slot),
+                );
+            }
+            if body_has_break(body) {
+                self.emit_label(plan.break_target_slot);
+            }
+            return;
         }
         // Advance to the `while (cond);` line — it should appear as a
         // comment block before the cmp/jump (fixture 062).
@@ -2328,24 +2369,46 @@ impl<'a> FunctionEmitter<'a> {
             let _ = write!(self.out, "\tcmp\t{width} ptr {},0\r\n", bp_addr(elem_off));
             return;
         }
-        let ExprKind::Ident(name) = &cond.kind else {
-            panic!("non-ident boolean condition not yet supported (no fixture)");
-        };
-        if let Some(gty) = self.globals.type_of(name) {
-            let width = if gty.is_char_like() { "byte" } else { "word" };
-            let _ = write!(self.out, "\tcmp\t{width} ptr DGROUP:_{name},0\r\n");
+        // `if (<reg-local> & K)` — bit test against a constant mask
+        // when the LHS is a register-resident int local. BCC emits
+        // `test <reg>, K` (4 bytes, F7 C6 imm16 for SI; the `&` result
+        // is discarded but flags are set). Fixture 1415 (popcount's
+        // inner `if (x & 1)` with x in SI).
+        if let ExprKind::BinOp { op: BinOp::BitAnd, left, right } = &cond.kind
+            && let Some(reg) = self.ident_in_register(left)
+            && let Some(k) = try_const_eval(right)
+            && !reg.is_byte()
+        {
+            let k16 = k & 0xFFFF;
+            let _ = write!(self.out, "\ttest\t{},{k16}\r\n", reg.name());
             return;
         }
-        match self.locals.location_of(name) {
-            LocalLocation::Stack(off) => {
-                let ty = self.locals.type_of(name);
-                let width = if ty.is_char_like() { "byte" } else { "word" };
-                let _ = write!(self.out, "\tcmp\t{width} ptr {},0\r\n", bp_addr(off));
+        if let ExprKind::Ident(name) = &cond.kind {
+            if let Some(gty) = self.globals.type_of(name) {
+                let width = if gty.is_char_like() { "byte" } else { "word" };
+                let _ = write!(self.out, "\tcmp\t{width} ptr DGROUP:_{name},0\r\n");
+                return;
             }
-            LocalLocation::Reg(reg) => {
-                let _ = write!(self.out, "\tor\t{0},{0}\r\n", reg.name());
+            match self.locals.location_of(name) {
+                LocalLocation::Stack(off) => {
+                    let ty = self.locals.type_of(name);
+                    let width = if ty.is_char_like() { "byte" } else { "word" };
+                    let _ = write!(self.out, "\tcmp\t{width} ptr {},0\r\n", bp_addr(off));
+                }
+                LocalLocation::Reg(reg) => {
+                    let _ = write!(self.out, "\tor\t{0},{0}\r\n", reg.name());
+                }
             }
+            return;
         }
+        // Catch-all: evaluate the condition expression into AX and
+        // test with `or ax, ax`. Covers any shape we don't have a
+        // dedicated peephole for — `if ("X")` (StringLit address,
+        // fixture 1582), `while (*++p)`, `if ((a = f()))`, etc. Not
+        // always the tightest byte sequence BCC would pick, but it
+        // sets ZF correctly and avoids a crash.
+        self.emit_expr_to_ax(cond);
+        self.out.extend_from_slice(b"\tor\tax,ax\r\n");
     }
 
     /// Emit just the `cmp` instruction (no jump). Four shapes,

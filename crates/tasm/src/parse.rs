@@ -432,8 +432,11 @@ fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
         "xor" => parse_xor(rest, line.line_no),
         "cmp" => parse_cmp(rest, line.line_no),
         "test" => {
-            // `test word ptr <group>:<sym>[+N], imm16` — only shape
-            // fixture-pinned. Fixture 569 (`if (g & 1)`).
+            // Forms:
+            //   `test word ptr <group>:<sym>[+N], imm16` — global bit
+            //   test (fixture 569).
+            //   `test <reg16>, imm16` — register bit test (fixture
+            //   1415, popcount `if (x & 1)` with x in SI).
             let (lhs, rhs) = split_comma(rest).ok_or_else(|| {
                 AsmError::new(line.line_no, format!("test: expected `lhs,rhs`, got {rest:?}"))
             })?;
@@ -447,6 +450,11 @@ fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
                         imm,
                     });
                 }
+            }
+            if let Some(reg) = Reg16::parse(lhs)
+                && let Some(imm) = parse_imm16(rhs)
+            {
+                return Ok(Instr::TestReg16Imm16 { reg, imm });
             }
             Err(AsmError::new(
                 line.line_no,
