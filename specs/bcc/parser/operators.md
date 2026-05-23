@@ -2329,3 +2329,23 @@ Findings:
 - char promoted to int via `cbw` (1B), then `imul mem` (3B).
 - Total 7B body.
 
+
+## Negative enum constants — `cmp r/m16, imm8` sign-extended
+
+Fixture `3424-enum-neg-obj`:
+
+```c
+enum Err { OK = 0, FAIL = -1, BAD = -2 };
+if (code == FAIL) ...
+if (code == BAD) ...
+```
+
+```
+83 fe ff                       cmp si, -1       (4B with imm8 sign-ext)
+83 fe fe                       cmp si, -2
+```
+
+Findings:
+- Negative constants in the range [-128, 127] use the imm8-sign-extended form.
+- Same shape as small positive constants — no special encoding for negatives.
+

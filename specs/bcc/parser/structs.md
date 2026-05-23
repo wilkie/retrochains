@@ -3953,3 +3953,98 @@ Findings:
 - N_SCOPY@ signature: dest FAR ptr, src FAR ptr, size in CX.
 - Result returned via the hidden ret-ptr (offset in AX, segment implicit via SS).
 
+
+## Bitfield read at byte-offset 4 (unsigned 4-bit) — byte load + shr + mask
+
+Fixture `3419-bitfield-read-hi-obj`:
+
+```c
+struct Flags { unsigned a:4; unsigned b:4; } s;
+unsigned get_b(void) { return s.b; }
+```
+
+```
+a0 00 00 [FIXUPP _s]           mov al, [_s]      (byte load)
+b1 04                          mov cl, 4
+d3 e8                          shr ax, cl
+25 0f 00                       and ax, 0x0F
+```
+
+Findings:
+- `mov al, [mem]` leaves AH untouched (garbage). After `shr ax, cl` the garbage shifts but the trailing `and 0x0F` masks it away — net result is correct.
+- 10B for unsigned bitfield read.
+
+## Signed bitfield read — shl + sar trick for sign extension
+
+Fixture `3420-bitfield-signed-obj`:
+
+```c
+struct S { int x:4; int y:4; } s;
+int get_x(void) { return s.x; }
+```
+
+```
+a0 00 00 [FIXUPP _s]           mov al, [_s]
+b1 0c                          mov cl, 12
+d3 e0                          shl ax, cl       (move bit 3 → bit 15)
+b1 0c                          mov cl, 12       (reloaded — minor missed opt)
+d3 f8                          sar ax, cl       (arithmetic shift back — sign-extends)
+```
+
+Findings:
+- Signed bitfield uses shl(16-N) + sar(16-N) to sign-extend a N-bit field.
+- BCC reloads CL between the two shifts (it could reuse — shl/sar don't modify CL).
+- 11B body.
+
+## Byte-aligned bitfield (8-bit at offset 8) — direct byte load + mask
+
+Fixture `3421-bitfield-wide-obj`:
+
+```c
+struct W { unsigned lo:8; unsigned hi:8; } w;
+```
+
+```
+a0 01 00 [FIXUPP _w]           mov al, [_w + 1]
+25 ff 00                       and ax, 0xFF
+```
+
+Findings:
+- For byte-aligned fields, BCC just loads the offset byte directly.
+- `and ax, 0xFF` masks AH garbage. 6B body.
+
+## struct with embedded array `b.data[i]` — base offset folded into FIXUPP
+
+Fixture `3422-struct-with-arr-obj`:
+
+```c
+struct Box { int header; int data[3]; } b;
+int get(int i) { return b.data[i]; }
+```
+
+```
+8b 5e 04                       mov bx, i
+d1 e3                          shl bx, 1
+8b 87 02 00 [FIXUPP _b]        mov ax, [bx + _b + 2]
+```
+
+Findings:
+- `.data` offset (2 bytes — past `header`) folded into the FIXUPP-resolved disp16.
+- No separate add for the member offset.
+
+## `&struct.member` — single 3B `mov reg, imm16` with FIXUPP
+
+Fixture `3423-ptr-to-member-obj`:
+
+```c
+int *grab_b(void) { return &s.b; }
+```
+
+```
+b8 02 00 [FIXUPP _s]           mov ax, offset _s + 2
+```
+
+Findings:
+- Same shape as `&arr[const]` (3309): 3B + FIXUPP.
+- Member offset folded into the immediate at compile time.
+
