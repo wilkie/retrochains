@@ -4370,3 +4370,30 @@ Findings:
 - All nested-member offsets are 0, so the chain collapses to direct global access.
 - Identical OBJ to `g = v` for a global int.
 
+
+## 10-byte global struct copy `s1 = s2` — N_SCOPY@ with FAR ptrs
+
+Fixture `3612-struct-glob-copy-obj`:
+
+```c
+struct Big { int a, b, c, d, e; };   /* 10 bytes */
+struct Big s1, s2;
+void copy(void) { s1 = s2; }
+```
+
+```
+b8 00 00 [FIXUPP _s1]          mov ax, offset _s1
+1e                             push ds
+50                             push ax
+b8 0a 00 [FIXUPP _s1]          mov ax, offset _s1 + 10  (= _s2 since adjacent)
+1e                             push ds
+50                             push ax
+b9 0a 00                       mov cx, 10
+e8 ?? ?? [FIXUPP N_SCOPY@]     call N_SCOPY@
+```
+
+Findings:
+- 16B body. Uses N_SCOPY@ helper for structs >4B (same threshold as struct return).
+- BOTH src and dest are FAR ptrs (DS:offset).
+- s1 and s2 placed adjacent in _DATA (s2 = s1 + 10).
+

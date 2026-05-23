@@ -2469,3 +2469,33 @@ Findings:
 - 3-byte body. Smallest possible "real" function call.
 - Return value in AX flows directly into the outer return.
 
+
+## void call for side effect — 7B `push + call + pop cx`
+
+Fixture `3615-void-call-for-effect-obj`:
+
+```c
+void caller(int x) { side_effect(x); }
+```
+
+```
+ff 76 04                       push x
+e8 ?? ??                       call _side_effect
+59                             pop cx
+```
+
+Findings:
+- 7B body. AX result (if any) discarded.
+- Standard 1-arg call + cleanup.
+
+## char identity `char id(char c) { return c; }` — 3B `mov al`
+
+Fixture `3616-char-id-obj`:
+
+```
+8a 46 04                       mov al, c
+```
+
+Findings:
+- 3B body. Smallest char function — single byte load to AL.
+

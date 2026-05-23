@@ -3324,3 +3324,47 @@ Findings:
 - 14B body.
 - For the `g++` inside: uses `inc word [_g]` mem-direct since result value isn't needed.
 
+
+## `return 'A'` — 3B `mov ax, 0x41`
+
+Fixture `3611-return-char-lit-obj`:
+
+```
+b8 41 00                       mov ax, 'A'
+```
+
+Findings:
+- Char literal widens to int for the return.
+- 3B body. Identical to `return 65`.
+
+## `p1 = p2` (global ptr-to-ptr) — same as int-to-int copy
+
+Fixture `3613-ptr-id-obj`:
+
+```
+a1 02 00 [FIXUPP _p2]          mov ax, [_p2]
+a3 00 00 [FIXUPP _p1]          mov [_p1], ax
+```
+
+Findings:
+- 6B body. Two AX-short forms (load + store).
+- Pointers and ints are interchangeable at the byte level in small memory model.
+
+## `if (c) g = 1; else g = 2;` — two 6B mem-imm16 stores
+
+Fixture `3614-cond-store-elsestore-obj`:
+
+```
+83 7e 04 00                    cmp c, 0
+74 08                          je ELSE
+c7 06 00 00 01 00 [FIXUPP _g]  mov [_g], 1
+eb 06                          jmp END
+ELSE:
+c7 06 00 00 02 00 [FIXUPP _g]  mov [_g], 2
+END:
+```
+
+Findings:
+- 20B body. Each branch stores constant via 6B mem-imm16 mov.
+- BCC doesn't merge stores or use ternary trick.
+
