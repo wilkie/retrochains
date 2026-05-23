@@ -4585,6 +4585,26 @@ impl<'a> FunctionEmitter<'a> {
                     );
                     return;
                 }
+                // Int local init from a non-AX register-resident
+                // source: `mov word ptr [bp-N], <reg>` directly.
+                // Saves the round-trip through AX (`mov ax, <reg>;
+                // mov [bp-N], ax`). Fixture 1711 (`int b = x >> 0`
+                // folds to `int b = x` with x in SI).
+                if ty.is_int_like()
+                    && let ExprKind::Ident(name) = &init.kind
+                    && self.locals.has(name)
+                    && self.locals.type_of(name).is_int_like()
+                    && let LocalLocation::Reg(reg) = self.locals.location_of(name)
+                    && !reg.is_byte()
+                {
+                    let _ = write!(
+                        self.out,
+                        "\tmov\tword ptr {},{}\r\n",
+                        bp_addr(off),
+                        reg.name(),
+                    );
+                    return;
+                }
                 // Non-constant char init. Peephole for `(char)<int-
                 // local>` and the bare-ident `char b = a;` (a is
                 // either char or int local): load the low byte of
