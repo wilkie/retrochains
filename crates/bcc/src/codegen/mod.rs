@@ -1675,6 +1675,26 @@ impl<'a> FunctionEmitter<'a> {
         self.out.extend_from_slice(b"\tmov\tbx,ax\r\n");
     }
 
+    /// True when the given RHS expression can't be reduced to an
+    /// OperandSource by `resolve_operand_source` and instead needs to
+    /// be evaluated into AX first. Used by the int-reg compound-
+    /// assign fallback to decide between the direct `<op> <reg>,
+    /// <src>` shape and the AX-route shape.
+    fn value_needs_ax_route(&self, e: &Expr) -> bool {
+        match &e.kind {
+            // Nested binary expressions don't have a single-operand
+            // representation.
+            ExprKind::BinOp { .. } => true,
+            // Variable-indexed arrays / chained members: resolvable
+            // only when the chain folds to a constant offset. Use
+            // try_lvalue_chain_addr's success as the predicate.
+            ExprKind::ArrayIndex { .. } | ExprKind::Member { .. } => {
+                self.try_lvalue_chain_addr(e).is_none()
+            }
+            _ => false,
+        }
+    }
+
     /// Find a struct definition with the given tag by scanning both
     /// globals and locals. Globals' types come from `GlobalTable`;
     /// locals' types live in `Locals`. Returns the first complete
@@ -6034,20 +6054,22 @@ impl<'a> FunctionEmitter<'a> {
             !reg.is_byte(),
             "compound assignment on a char (byte-register) target not yet supported (no fixture)"
         );
-        // Complex RHS (a non-trivial BinOp that resolve_operand_source
-        // can't reduce to a single memory/register operand): evaluate
-        // it into AX first, then apply the op via `<mnem> <reg>, ax`.
-        // Covers `s += a * b` (fixture 1258 — RHS is Mul), `a |= (1
-        // << b)` (1255 — RHS is Shl), `a -= b - 1` (1315 — RHS is
-        // Sub), and similar. Restricted to ops where the AX-as-RHS
-        // shape is unambiguous (Add/Sub/BitAnd/BitOr/BitXor); Mul,
-        // Shl/Shr, Div/Mod use AX/CL/DX implicitly and route through
-        // their own arms below.
+        // Complex RHS that resolve_operand_source can't reduce to a
+        // single memory/register operand: evaluate it into AX first,
+        // then apply the op via `<mnem> <reg>, ax`. Covers:
+        //   - `s += a * b` / `a |= (1 << b)` / `a -= b - 1` — RHS is
+        //     a BinOp (fixtures 1255, 1258, 1315).
+        //   - `s += a[i]` where a is a global array and i is variable
+        //     — RHS is variable-indexed ArrayIndex (fixtures 1385,
+        //     1462, etc.).
+        // Restricted to ops where AX-as-RHS is unambiguous:
+        // Add/Sub/BitAnd/BitOr/BitXor. Mul/Shl/Shr/Div/Mod use AX/CL/
+        // DX implicitly and route through their own arms below.
         if matches!(
             op,
             BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor
         ) && try_const_eval(value).is_none()
-            && matches!(value.kind, ExprKind::BinOp { .. })
+            && self.value_needs_ax_route(value)
         {
             self.emit_expr_to_ax(value);
             let mnem = match op {
