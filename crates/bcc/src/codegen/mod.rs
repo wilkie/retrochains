@@ -1787,6 +1787,27 @@ impl<'a> FunctionEmitter<'a> {
         None
     }
 
+    /// True if `e` is a bare ident referring to an int-typed stack
+    /// local or global, returning an OperandSource that names the
+    /// memory operand. Used by the rhs-clobbers-AX commutative-op
+    /// fallback to skip the push/pop dance: evaluate RHS into AX,
+    /// then `<op> ax, <mem>` directly on the LHS memory.
+    fn try_memory_source(&self, e: &Expr) -> Option<OperandSource> {
+        let ExprKind::Ident(name) = &e.kind else { return None };
+        if let Some(gty) = self.globals.type_of(name)
+            && gty.is_int_like()
+        {
+            return Some(OperandSource::Global(name.clone()));
+        }
+        if self.locals.has(name)
+            && self.locals.type_of(name).is_int_like()
+            && let LocalLocation::Stack(off) = self.locals.location_of(name)
+        {
+            return Some(OperandSource::Local(off));
+        }
+        None
+    }
+
     /// Resolve an int-like lvalue (global or stack-resident local) to
     /// its asm memory operand. Returns `None` for register-resident
     /// locals (caller can fall back to a register-source path) and
@@ -11567,6 +11588,19 @@ impl<'a> FunctionEmitter<'a> {
                             &OperandSource::Reg(reg),
                             unsigned,
                         );
+                    } else if rhs_clobbers_ax
+                        && matches!(op, BinOp::Mul)
+                        && let Some(left_src) = self.try_memory_source(left)
+                    {
+                        // `<int_mem> * <char>` shape: BCC emits
+                        // `mov al,<char>; cbw; imul word ptr
+                        // <int_mem>` directly, avoiding the push/pop
+                        // dance. Other commutative ops (Add/Or/And/
+                        // Xor) keep the push/pop — BCC specifically
+                        // recognizes the mul-mem-direct shape.
+                        // Fixture 1228 (`a * c`).
+                        self.emit_expr_to_ax(right);
+                        emit_op_with_source(self.out, *op, &left_src, unsigned);
                     } else if rhs_clobbers_ax {
                         self.emit_expr_to_ax(right);
                         self.out.extend_from_slice(b"\tpush\tax\r\n");
