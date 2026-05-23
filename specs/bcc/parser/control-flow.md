@@ -5282,3 +5282,145 @@ Findings:
 - || semantics inverted vs &&: each *non-last* subterm uses `jne TRUE` (short-circuit success).
 - Last subterm uses `je FALSE` (failure exit) since failure means whole condition is false.
 
+
+## Nested for — promotes scratch regs to live use under register pressure
+
+Fixture `3401-nested-for-obj`:
+
+```c
+for (i = 0; i < n; i++)
+  for (j = 0; j < n; j++)
+    s += i * j;
+```
+
+Reg allocation: BX = s, SI = i, DI = j, **CX = n** (CX is normally scratch).
+
+```
+56 57                          push si; push di
+8b 4e 04                       mov cx, n
+33 db                          xor bx, bx       (s = 0)
+33 f6                          xor si, si       (i)
+33 ff                          xor di, di       (j inside outer)
+                               ; ...
+3b f9                          cmp di, cx       (j < n)
+3b f1                          cmp si, cx       (i < n)
+```
+
+Findings:
+- 4-way reg allocation: SI, DI for inner loop vars; BX for accumulator; CX for invariant `n`.
+- CX is normally a scratch reg but stays live because the loop body has no calls that would clobber it.
+- BCC's reg-allocator picks the next free reg when SI/DI are exhausted.
+
+## Switch in for-loop — break = jmp to switch-end (= for-step)
+
+Fixture `3402-switch-in-loop-obj`:
+
+```c
+for (i = 0; i < n; i++) {
+  switch (p[i]) {
+    case 1: c++; break;
+    case 2: c += 2; break;
+  }
+}
+```
+
+Findings:
+- Switch with 2 cases uses linear cmp+je (below 4-case dense-table threshold).
+- `break` in switch jumps to END_SWITCH, which is the for-step (`inc di`).
+- `c += 2` compiled as 2× `inc si` (2B) — confirms inc-pair beats `add reg, 2`.
+
+## `goto label` (backward) — inverted jcc + jmp back
+
+Fixture `3403-goto-back-obj`:
+
+```c
+start:
+  g++; n--;
+  if (n > 0) goto start;
+  return g;
+```
+
+```
+LOOP:
+ff 06 00 00                    inc word [_g]
+4e                             dec si           (n--)
+0b f6                          or si, si
+7e 02                          jle PAST_GOTO    (n <= 0 → skip goto)
+eb f5                          jmp LOOP         (the goto)
+PAST_GOTO:
+a1 00 00                       mov ax, [_g]
+```
+
+Findings:
+- Backward goto = inverted jcc-skip + unconditional jmp back (suboptimal vs direct `jg LOOP`).
+- Same suboptimal pattern as `if (cond) goto X` documented in 3306.
+
+## Multi-return with cascaded conditions — no tail-merge
+
+Fixture `3404-multi-return-obj`:
+
+```c
+if (x > 0) { if (x > 100) return 3; return 2; }
+if (x < 0) return 1;
+return 0;
+```
+
+Findings:
+- Each return path has its own `mov ax, imm` + `jmp END`.
+- No tail-merging — common epilogue would save several bytes.
+- Confirmed: BCC always emits dedicated return paths.
+
+## `p ? p->v : 0` — null-check + deref
+
+Fixture `3405-ptr-cond-deref-obj`:
+
+```c
+struct S { int v; };
+int safe(struct S *p) { return p ? p->v : 0; }
+```
+
+```
+8b 76 04                       mov si, p
+0b f6                          or si, si        (null check)
+74 04                          je ELSE
+8b 04                          mov ax, [si]     (p->v at offset 0)
+eb 02                          jmp END
+ELSE:
+33 c0                          xor ax, ax
+```
+
+Findings:
+- 2B `or si, si` cmp-zero peephole used for ptr-null check.
+- 2B `mov ax, [si]` byte-load when member is at offset 0.
+- 14B body — extremely tight.
+
+## for-loop `continue` — jmp to step (NOT to test)
+
+Fixture `3406-for-continue-obj`:
+
+```c
+for (i = 0; i < n; i++) {
+  if (i & 1) continue;
+  s += i;
+}
+```
+
+```
+LOOP_BODY:
+f7 c6 01 00                    test si, 1
+74 02                          je EVEN
+eb 02                          jmp LOOP_STEP   (continue → step)
+EVEN:
+03 fe                          add di, si
+LOOP_STEP:
+46                             inc si           (i++)
+TEST:
+3b 76 04                       cmp si, n
+7c f0                          jl LOOP_BODY
+```
+
+Findings:
+- `continue` in for-loop jumps to LOOP_STEP (the increment), then falls through to TEST.
+- Differs from do-while-continue (3326) which jumps directly to the condition test (no step).
+- Different from while-continue which jumps to the condition test (no step either).
+
