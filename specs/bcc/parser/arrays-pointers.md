@@ -7660,3 +7660,39 @@ Findings:
 - Index obtained via pointer-dereference into BX directly.
 - Then standard scale + mem-direct load.
 
+
+## `*(p + 1) = v` (int*) — const offset folded to disp8
+
+Fixture `3591-ptr-arith-store-obj`:
+
+```
+56                             push si
+8b 76 04                       mov si, p
+8b 46 06                       mov ax, v
+89 44 02                       mov [si + 2], ax    (disp8 = +2)
+```
+
+Findings:
+- `p + 1` for int* folds to +2 bytes at compile time.
+- Indexed store via `[si + disp8]`. 10B body.
+
+## Array of pointers init `int *table[] = {&a, &b, &c}` — FIXUPP per slot
+
+Fixture `3592-arr-of-ptr-init-obj`:
+
+- `_table` lives in _DATA, 6 bytes (3 ptrs).
+- Each slot has a FIXUPP to its target symbol (_a, _b, _c).
+
+Body of `pick(i)`:
+```
+8b 5e 04                       mov bx, i
+d1 e3                          shl bx, 1
+8b 9f 00 00 [FIXUPP _table]    mov bx, [bx + _table]    (chained: bx = table[i])
+8b 07                          mov ax, [bx]              (deref → return value)
+```
+
+Findings:
+- Each pointer in `table` stored as a 2-byte FIXUPP'd offset.
+- LEDATA contains placeholder bytes patched by the FIXUPPs.
+- 11B body for `pick(i)` — shl + indexed chained ptr load.
+

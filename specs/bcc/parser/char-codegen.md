@@ -2321,3 +2321,17 @@ Findings:
 - 5B mem-imm8 byte cmp. No widening (since both are char).
 - Saves vs load+cbw+cmp (~7B).
 
+
+## `char a + 5` returning char — `add AL, imm8` (AL-short)
+
+Fixture `3589-char-add-const-ret-obj`:
+
+```
+8a 46 04                       mov al, a
+04 05                          add al, 5         (AL-short: 2B)
+```
+
+Findings:
+- `04 imm8` = AL-short add (2B) — saves vs generic `80 c0 imm8` (3B).
+- 5B body. Char return in AL.
+

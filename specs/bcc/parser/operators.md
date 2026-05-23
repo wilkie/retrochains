@@ -3261,3 +3261,47 @@ Findings:
 - `+ 1` recognized and emitted as `inc ax` (1B).
 - 9B body — tight chain of call→inc→push→call.
 
+
+## `g ^= g` — NOT recognized as zero-store
+
+Fixture `3587-xor-self-obj`:
+
+```
+a1 00 00 [FIXUPP _g]           mov ax, [_g]
+31 06 00 00 [FIXUPP _g]        xor [_g], ax     (writes 0 back)
+```
+
+Findings:
+- 7B body. BCC computes the XOR for real to produce 0.
+- Misses 6B `mov word [_g], 0` (c7 /0) zero-store optimization.
+
+## `a > b && b > c` — reg-alloc shared operand (b → SI)
+
+Fixture `3588-chained-cmp-obj`:
+
+```
+8b 76 06                       mov si, b
+39 76 04                       cmp a, si        (cmp r/m, r — sets a-b flags)
+7e 0a                          jle FALSE
+3b 76 08                       cmp si, c        (cmp r, r/m — sets si-c flags)
+7e 05                          jle FALSE
+```
+
+Findings:
+- Shared operand `b` reg-allocated to SI (saves repeated loads).
+- Both cmp directions used: `39 /r` (cmp r/m, r) for first; `3b /r` (cmp r, r/m) for second.
+- 21B body.
+
+## `g += call()` — call + mem-direct add of result
+
+Fixture `3590-g-pluseq-call-obj`:
+
+```
+e8 ?? ?? [FIXUPP _get]         call _get
+01 06 00 00 [FIXUPP _g]        add [_g], ax
+```
+
+Findings:
+- 7B body. AX from call flows directly into mem-direct add.
+- Same shape as `g += var` (3457) but with call result instead of stack var.
+
