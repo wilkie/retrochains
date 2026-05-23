@@ -1327,3 +1327,55 @@ Findings:
 - Generalizable: all cmp/add/sub/and/or/xor with imm use this same
   byte-vs-word choice rule.
 
+
+## `cmp word [mem], imm` boundary at 127/128
+
+Fixtures `2957-cmp-127-obj` and `2958-cmp-128-obj`:
+
+```c
+if (x > 127) ...   /* fits signed imm8 */
+if (x > 128) ...   /* doesn't fit (would be sign-ext to -128) */
+```
+
+```
+                               ; cmp 127:
+83 7e 04 7f                    cmp word [bp+4], 127      (4B, imm8 sign-ext)
+
+                               ; cmp 128:
+81 7e 04 80 00                 cmp word [bp+4], 128      (5B, imm16)
+```
+
+Findings:
+- **127 fits** signed imm8 `[-128, 127]` → 3B opcode form (`83 /op imm8`).
+- **128 doesn't fit** (would sign-extend to -128) → 4B opcode form
+  (`81 /op imm16`).
+- For cmp-with-mem, total instruction is 1B opcode + 1B ModR/M +
+  disp + imm: 4B (imm8) vs 5B (imm16) for `[bp+disp8]` targets.
+- Boundary confirmed at exactly 127/128.
+
+## `x + 128` — `add ax, imm16` AX-acc form (3B)
+
+Fixture `2959-add-128-obj`:
+
+```c
+return x + 128;
+```
+
+```
+8b 46 04                       mov ax, x
+05 80 00                       add ax, 128   (AX-acc, 3B)
+```
+
+Findings:
+- `add ax, imm16` uses the **AX-accumulator form** `05 imm16` (3B).
+- Beats the generic `81 c0 imm16` (4B) by 1 byte.
+- For non-AX registers, would use `81 /0 imm16` (4B).
+- 128 doesn't fit signed imm8 so the `83 c0 imm8` form (3B) can't be used.
+
+## `(*p).x` byte-identical to `p->x`
+
+Fixture `2960-deref-dot-obj`:
+
+`(*p).x` and `p->x` both compile to `mov si, p; mov ax, [si]` (5B).
+BCC normalizes both syntactic forms to the same AST.
+

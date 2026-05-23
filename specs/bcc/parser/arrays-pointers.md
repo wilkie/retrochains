@@ -6041,3 +6041,49 @@ Findings:
   byte-identical code.
 - 3 bytes for the pointer return (just `mov ax, imm16+FIXUPP`).
 
+
+## Global `struct P *ptr = &data;` — load ptr + field access via `[bx+disp8]`
+
+Fixture `2961-ptr-struct-global-obj`:
+
+```c
+struct P { int x; int y; };
+struct P data = { 10, 20 };
+struct P *ptr = &data;
+return ptr->y;
+```
+
+```
+8b 1e 04 00                    mov bx, [_ptr]    (load FIXUPP'd ptr value)
+8b 47 02                       mov ax, [bx + 2]  (ptr->y at field offset 2)
+```
+
+Findings:
+- Same shape as global `int *p = data; return p[1]` (`2939`).
+- 4B load + 3B field-access via `[bx + disp8]`.
+- The pointer slot's FIXUPP carries the offset to `_data` base.
+
+## `argv[0][0]` for `char **argv` — 2-level indirection + cbw
+
+Fixture `2962-char-pp-param-obj`:
+
+```c
+int first(char **argv) {
+  return argv[0][0];
+}
+```
+
+```
+8b 76 04                       mov si, argv
+8b 1c                          mov bx, [si]    (argv[0] = first char*)
+8a 07                          mov al, [bx]    (argv[0][0])
+98                             cbw
+```
+
+Findings:
+- 2-level indirection: si → bx → al.
+- ModR/M `1c` = `[si]`, ModR/M `07` = `[bx]` (no-disp forms).
+- Standard C main-args access pattern (8 bytes total).
+- Compare to `**pp` for int (`2721`) which is a similar 3-load
+  chain ending in word load instead of byte load + cbw.
+
