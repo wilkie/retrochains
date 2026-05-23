@@ -765,3 +765,15 @@ Findings:
 - Compare to enum constants which substitute at compile time.
 - `const` is type-system only; no codegen benefit.
 
+
+## `int *ptrs[3] = {&v, 0};` partial ptr-arr init
+
+Fixture `3279-ptr-arr-partial-obj`:
+
+`_DATA` for ptrs (6 bytes): {FIXUPP→_v, 0, 0}.
+
+Findings:
+- First element gets FIXUPP record to `&v`.
+- Remaining elements (`0` and unspecified) become 2 zero bytes (no FIXUPP).
+- NULL pointer literals don't need relocation — just zero bytes.
+

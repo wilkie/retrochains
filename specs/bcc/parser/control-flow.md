@@ -4820,3 +4820,23 @@ Findings:
 - Same shape as `if (1)` (`2969`).
 - Negative constants `if (-1)` work because `-1 != 0` (non-zero).
 
+
+## `for (i = n * 2; ...)` — init expression strength-reduces
+
+Fixture `3276-for-expr-init-obj`:
+
+```c
+for (i = n * 2; i > 0; ...)
+```
+
+```
+8b 46 04                       mov ax, n
+d1 e0                          shl ax, 1     (× 2 strength-reduced)
+8b f0                          mov si, ax    (i = n*2)
+```
+
+Findings:
+- Init expression evaluated as normal expression.
+- Strength reduction applies (`* 2` → `shl 1`).
+- Result stored to promoted register.
+

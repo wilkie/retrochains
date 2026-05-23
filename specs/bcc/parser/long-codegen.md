@@ -4002,3 +4002,20 @@ Findings:
 - Same OR peephole as `long == 0L` (`3261`).
 - Inverse jump: `je → FALSE` (vs `jne → FALSE` for `==0L`).
 
+
+## `long a ^ b` — `xor ax, mem; xor dx, mem` (mem-source, 12B)
+
+Fixture `3280-long-xor-obj`:
+
+```
+8b 56 06                       mov dx, a HIGH
+8b 46 04                       mov ax, a LOW
+33 46 08                       xor ax, b LOW   (mem-source)
+33 56 0a                       xor dx, b HIGH
+```
+
+Findings:
+- Same shape as long add/sub but with `xor` opcode (33 /r).
+- 12 bytes total (6B load + 6B xor).
+- No carry chain — xor is independent per half.
+
