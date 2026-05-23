@@ -3017,3 +3017,42 @@ Findings:
 - Compare to `g += 1` ≡ `++g` (`2638`) = `inc word [mem]` (4B).
 - Both inc/dec word-mem use the same 4B peephole.
 
+
+## Local `x <<= K` — direct shift on promoted register
+
+Fixtures `3005-local-shl-eq-1-obj`, `3006-local-shl-eq-2-obj`:
+
+```c
+x <<= 1;     /* shl si, 1 (d1 e6, 2B) */
+x <<= 2;     /* shl si, 1; shl si, 1 (4B unrolled) */
+```
+
+Findings:
+- Local x promoted to si; shift directly on si.
+- N=1: `shl si, 1` (2B).
+- N=2: 2 unrolled shifts (4B).
+- N=3: 3 unrolled shifts (6B).
+- N>=4: would use `mov cl, N; shl si, cl` (4B).
+- Same threshold as standalone shifts.
+
+## Global `g <<= 8` — `mov cl, N + shl word [mem], cl`
+
+Fixture `3007-global-shl-eq-8-obj`:
+
+```c
+g <<= 8;
+```
+
+```
+b1 08                          mov cl, 8
+d3 26 00 00                    shl word [mem], cl   (CL-form mem shift, 4B with FIXUPP)
+```
+
+Findings:
+- Multi-bit global shift = `mov cl, N` (2B) + `shl word [mem], cl`
+  (`d3 /4 disp16`, 4B) = 6 bytes total.
+- ModR/M `26` for shl op-ext 100, r/m 110 (disp16).
+- Threshold for global mem-shift:
+  - N=1: `d1 /4 disp16` (4B, dedicated 1-bit form, `2999`)
+  - N>=2: `mov cl, N; d3 /4 disp16` (6B)
+

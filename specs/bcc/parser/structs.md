@@ -3193,3 +3193,19 @@ Findings:
 - ModR/M `06 disp16` = direct moffs16 addressing (no register
   needed for the address — disp16 is absolute).
 
+
+## `struct { int; long }` — 6 bytes (2 + 4)
+
+Fixture `3008-struct-with-long-obj`:
+
+```c
+struct H { int tag; long value; };
+sizeof(struct H);   /* = 6 */
+```
+
+Findings:
+- 6 bytes total: 2B int + 4B long. No padding.
+- BCC packs all fields back-to-back regardless of type.
+- Unaligned long at odd offset works on 8086 (just slower per
+  cycle).
+
