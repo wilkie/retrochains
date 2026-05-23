@@ -410,6 +410,10 @@ struct FunctionEmitter<'a> {
     /// in the TU so the tail-emitter can declare each one once and
     /// merge them into the publics ordering. Fixture 228.
     helpers: &'a mut std::collections::HashSet<String>,
+    /// When true, `emit_widen_al` is a no-op. Set during char-return
+    /// value emission since the ABI leaves AH garbage — the caller
+    /// widens with `cbw` after the call.
+    skip_widen: bool,
 }
 
 /// Innermost enclosing construct that catches `break;` (and maybe
@@ -448,6 +452,7 @@ impl<'a> FunctionEmitter<'a> {
             loop_stack: Vec::new(),
             post_function_data: Vec::new(),
             helpers,
+            skip_widen: false,
         }
     }
 
@@ -2736,6 +2741,13 @@ impl<'a> FunctionEmitter<'a> {
     /// Unsigned char promotes via `mov ah, 0` (2 bytes, `B4 00`)
     /// to preserve zero in the upper bits.
     fn emit_widen_al(&mut self, ty: &Type) {
+        // Char return ABI: callees only need to populate AL; AH is
+        // the caller's job to widen. Skip the widen step entirely
+        // when emitting the return-value loader. Fixtures 3019,
+        // 3325, 3227, 2881 (all char-return functions).
+        if self.skip_widen {
+            return;
+        }
         if ty.is_unsigned() {
             self.out.extend_from_slice(b"\tmov\tah,0\r\n");
         } else {
@@ -3726,6 +3738,22 @@ impl<'a> FunctionEmitter<'a> {
 
     fn emit_return_value_load(&mut self, value: Option<&Expr>) {
         let Some(e) = value else { return };
+        // Set `skip_widen` while emitting the char-return value so
+        // any byte-load deep in the expression doesn't tack on a
+        // useless `cbw` / `mov ah, 0`. Restored after emission.
+        // Covers the universal char-return ABI: callee leaves AL,
+        // caller widens via `cbw` after the call. Fixtures 3019,
+        // 3325, 3227, 2881.
+        let skip_widen_prev = self.skip_widen;
+        if self.function.ret_ty.is_char_like() {
+            self.skip_widen = true;
+        }
+        let result = self.emit_return_value_load_inner(e);
+        self.skip_widen = skip_widen_prev;
+        result
+    }
+
+    fn emit_return_value_load_inner(&mut self, e: &Expr) {
         // Char-returning function with a constant `return K;` —
         // `mov al, K` (2 bytes) leaves AH undefined per the ABI for
         // char return values, which is exactly what BCC emits for
@@ -6989,7 +7017,7 @@ impl<'a> FunctionEmitter<'a> {
             let width = ptr_width(&leaf_ty);
             if leaf_ty.is_char_like() {
                 let _ = write!(self.out, "\tmov\tal,byte ptr {}\r\n", bp_addr(off));
-                self.out.extend_from_slice(b"\tcbw\t\r\n");
+                self.emit_widen_al(&leaf_ty);
             } else {
                 let _ = write!(self.out, "\tmov\tax,{width} ptr {}\r\n", bp_addr(off));
             }
@@ -7092,7 +7120,7 @@ impl<'a> FunctionEmitter<'a> {
         };
         if pointee.is_char_like() {
             let _ = write!(self.out, "\tmov\tal,byte ptr {addr}\r\n");
-            self.out.extend_from_slice(b"\tcbw\t\r\n");
+            self.emit_widen_al(&pointee);
         } else {
             let _ = write!(self.out, "\tmov\tax,word ptr {addr}\r\n");
         }
