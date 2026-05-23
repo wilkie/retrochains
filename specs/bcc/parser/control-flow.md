@@ -4425,3 +4425,23 @@ Findings:
 - For `while (cond) { ... continue; ... }`, continue would jmp to
   COND directly (no separate post-step).
 
+
+## `for (...) { ... break; ... continue; ... }` — both jmps emit independently
+
+Fixture `2988-for-break-cont-obj`:
+
+```c
+for (i = 0; i < n; i = i + 1) {
+  if (i == 3) continue;
+  if (i == 7) break;
+  s = s + i;
+}
+```
+
+Findings:
+- Both `break` and `continue` emit their own independent jmp.
+- `break` targets AFTER_LOOP; `continue` targets POST-step.
+- They don't interact — each is its own double-jump pattern with
+  its own cmp+jne+jmp.
+- ~6 bytes per (cmp+jne+jmp) sequence.
+

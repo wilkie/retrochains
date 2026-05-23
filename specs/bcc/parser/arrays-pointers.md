@@ -6200,3 +6200,26 @@ Findings:
   with `or ax, ax; je` — apparently BCC's `!` folder works but
   the plain `data` truthy test doesn't get the same recognition.
 
+
+## `extern int data[]` — same code as local-defined array, EXTDEF symbol
+
+Fixture `2990-extern-arr-obj`:
+
+```c
+extern int data[];
+int peek(int i) { return data[i]; }
+```
+
+```
+8b 5e 04                       mov bx, i
+d1 e3                          shl bx, 1
+8b 87 00 00                    mov ax, [bx + _data]  (FIXUPP)
+```
+
+Findings:
+- `extern int data[]` produces an EXTDEF for `_data` in the symbol
+  table; linker resolves at link time.
+- Code is **identical** to locally-defined array — only the symbol
+  table record differs.
+- Same as extern globals (`2752`) for the linkage perspective.
+

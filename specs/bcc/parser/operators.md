@@ -1442,3 +1442,28 @@ Findings:
   `x == 0` — BCC normalizes the commutative comparison.
 - The constant 0 is always placed on the RHS of the cmp instruction.
 
+
+## `x = flag ? (a = a + 1) : b;` — ternary with assignment in arm
+
+Fixture `2992-ternary-asgn-arm-obj`:
+
+```c
+x = flag ? (a = a + 1) : b;
+```
+
+```
+                               ; THEN arm: a = a + 1, AX = new a
+8b c6 40 8b f0                 mov ax, si; inc ax; mov si, ax
+eb 03                          jmp → JOIN
+                               ; ELSE arm: just load b
+8b 46 06                       mov ax, b
+                               ; JOIN:
+89 46 fe                       x = ax
+```
+
+Findings:
+- Assignment expression `(a = a + 1)` produces the new value of `a`
+  as its result. The ternary uses that AX value at JOIN.
+- Both arms converge at AX, then x = ax store.
+- Side effect (modifying a) is preserved per C semantics.
+

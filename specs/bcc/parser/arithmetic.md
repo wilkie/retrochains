@@ -2616,3 +2616,30 @@ Findings:
   over `int + char`. Same observation generalizes to other char-int
   binary ops.
 
+
+## `x = a + b * c` local with mul-first — `add dx, ax` reverse-direction peephole
+
+Fixture `2987-local-complex-init-obj`:
+
+```c
+int x = a + b * c;
+```
+
+```
+8b 46 06                       mov ax, b
+f7 6e 08                       imul word [c]    (b * c → ax)
+8b 56 04                       mov dx, a        (load a into DX)
+03 d0                          add dx, ax       (dx = a + b*c)
+89 56 fe                       x = dx
+```
+
+Findings:
+- When multiplication produces result in AX, BCC loads the other
+  operand into **DX** (not pushing AX to stack).
+- `add dx, ax` (reverse direction: DX is dest, AX is source) puts
+  the final result in DX, ready for storage.
+- 8 bytes for the compute (3B mov + 3B imul + 3B mov + 2B add).
+- No push/pop spill needed — saves vs the push/pop spill pattern.
+- Compare to `(a+b)*c` (`2917`) and `a+b*c` (return position 2936)
+  which had different shapes.
+
