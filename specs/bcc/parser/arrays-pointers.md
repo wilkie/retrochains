@@ -6899,3 +6899,43 @@ Findings:
 - ModR/M-less: AX-acc `05 imm16` directly.
 - Returns ptr in AX (which is the addressed-of element).
 
+
+## `(p - 1)->x` — negative disp8 in addressing
+
+Fixture `3251-struct-prev-obj`:
+
+```c
+struct P { int x; int y; };   /* sizeof = 4 */
+return (p - 1)->x;
+```
+
+```
+8b 76 04                       mov si, p
+8b 44 fc                       mov ax, [si - 4]   (disp8 = 0xFC = -4)
+```
+
+Findings:
+- BCC folds `(p - K)` ptr arith + field offset into a single
+  signed disp8 (or disp16 for large offsets).
+- ModR/M `44 fc` = mod 01 (disp8), r/m 100 ([si+disp8]).
+- disp8 = -K × sizeof(*p) + field_offset.
+- NO separate `sub` instruction needed.
+
+## `int *p - 1` — `add ax, -sizeof` (single instruction)
+
+Fixture `3256-ptr-minus-1-obj`:
+
+```c
+return p - 1;   /* int* */
+```
+
+```
+8b 46 04                       mov ax, p
+05 fe ff                       add ax, 0xFFFE  (= -2 = -1 × sizeof(int))
+```
+
+Findings:
+- `p - 1` for typed ptr = `add ax, -sizeof(*p)` (5B AX-acc imm16 form).
+- The -K × sizeof is computed at compile time, baked into imm16.
+- For char*: `add ax, -1` (or potentially `dec ax`).
+

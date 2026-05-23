@@ -1749,3 +1749,26 @@ Findings:
 - Compare to `(char)int → int` (signed): byte load + `cbw` = 4B.
 - Unsigned promotion is 1 byte longer.
 
+
+## `if (a + b > 0)` — ADD flags used directly (NO `or ax, ax` after add!)
+
+Fixture `3254-expr-cond-obj`:
+
+```c
+if (a + b > 0) return 1;
+```
+
+```
+8b 46 04                       mov ax, a
+03 46 06                       add ax, b
+7e 05                          jle → FALSE   (uses ADD's flags!)
+```
+
+Findings:
+- BCC uses **ADD's flag side-effect** for the >= 0 test.
+- `jle` checks `ZF | (SF != OF)` — i.e., signed `<= 0`.
+- NO separate `or ax, ax` or `cmp ax, 0` after add.
+- **Saves 2 bytes** vs naive (sum then test).
+- Same peephole applies to other arithmetic ops that set flags
+  (sub, add, and, or, xor, inc, dec).
+

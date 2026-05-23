@@ -1988,3 +1988,25 @@ Findings:
   - [bp+8] = b HIGH
   - [bp+10] = c (low byte of word)
 
+
+## Long arg push from param — `push HIGH; push LOW; cleanup pop cx × 2`
+
+Fixture `3252-long-arg-push-obj`:
+
+```c
+int take_long(long v);
+return take_long(x);   /* x is long */
+```
+
+```
+ff 76 06                       push x HIGH (at [bp+6])
+ff 76 04                       push x LOW (at [bp+4])
+e8 00 00                       call _take_long
+59 59                          pop cx; pop cx   (4B cleanup = 2× pop)
+```
+
+Findings:
+- Long arg pushed HIGH-first then LOW.
+- 4-byte cleanup via 2× `pop cx` (2B total).
+- vs `add sp, 4` (3B). 2-pops wins by 1 byte.
+
