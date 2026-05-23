@@ -1127,6 +1127,14 @@ fn parse_mov(operands: &str, line_no: usize) -> AsmResult<Instr> {
         if let Some(imm) = parse_imm16(rhs) {
             return Ok(Instr::MovBxPtrImm { imm });
         }
+        if rhs == "ax" {
+            return Ok(Instr::MovBxPtrAx);
+        }
+    }
+    // LHS `byte ptr [bx]` with AL — char-element store after a
+    // BX-indexed address compute (fixture 1219).
+    if lhs == "byte ptr [bx]" && rhs == "al" {
+        return Ok(Instr::MovBxPtrAl);
     }
     // LHS `byte ptr [bx+disp8]` — byte-store through BX pointer at
     // a small offset, used by `char *p; p[K] op= …` (fixture 865).

@@ -7268,7 +7268,15 @@ impl<'a> FunctionEmitter<'a> {
             let _ = write!(self.out, "\tmov\t{width} ptr [bx],{v_masked}\r\n");
             return;
         }
-        panic!("non-constant rhs in variable-indexed array assign not yet supported (no fixture)");
+        // Non-constant RHS: evaluate to AX (or AL for byte storage),
+        // then store through [bx]. Fixtures 1219 (`a[i] = i` with char
+        // array), 1468 (int array), 1276 (`s[i] = 'a' + i`).
+        self.emit_expr_to_ax(value);
+        if elem.is_char_like() {
+            let _ = write!(self.out, "\tmov\tbyte ptr [bx],al\r\n");
+        } else {
+            let _ = write!(self.out, "\tmov\tword ptr [bx],ax\r\n");
+        }
     }
 
     /// `a[<i1>][<i2>]... <op>= <value>;` — read-modify-write on an

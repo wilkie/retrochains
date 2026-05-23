@@ -427,6 +427,7 @@ fn instr_size(instr: &Instr) -> usize {
         Instr::Cbw => 1,
         Instr::LeaReg16BpRel { .. } => 3,
         Instr::MovSiPtrImm { .. } | Instr::MovBxPtrImm { .. } => 4,
+        Instr::MovBxPtrAl | Instr::MovBxPtrAx => 2,
         Instr::MovSiPtrImm8 { .. } => 3,
         Instr::MovSiPtrReg16 { .. } | Instr::MovDiPtrReg16 { .. } => 2,
         Instr::MovSiPtrReg8 { .. } => 2,
@@ -2594,6 +2595,17 @@ fn emit_instr(
             // reg=AX r/m=100 ([si]).
             out.push(0x8B);
             out.push(0x04);
+        }
+        Instr::MovBxPtrAl => {
+            // `mov byte ptr [bx],al` → 88 07. ModR/M 07 = mod=00
+            // reg=AL r/m=BX.
+            out.push(0x88);
+            out.push(0x07);
+        }
+        Instr::MovBxPtrAx => {
+            // `mov word ptr [bx],ax` → 89 07. Same ModR/M, word opcode.
+            out.push(0x89);
+            out.push(0x07);
         }
         Instr::MovBxPtrImm { imm } => {
             // `mov word ptr [bx],imm16` → C7 07 lo hi. ModR/M 07 =
