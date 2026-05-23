@@ -2167,3 +2167,20 @@ Findings:
 - char t stored at [bp-1] (only 1 byte used; [bp-2] wasted).
 - 19B body.
 
+
+## `(unsigned char)c` — no-op (3B byte load only)
+
+Fixture `3537-char-to-uchar-obj`:
+
+```c
+unsigned char to_unsigned(char c) { return (unsigned char)c; }
+```
+
+```
+8a 46 04                       mov al, c
+```
+
+Findings:
+- Bit-identical reinterpretation. No widening or extension.
+- 3B body. Cast is purely a type annotation; no codegen.
+

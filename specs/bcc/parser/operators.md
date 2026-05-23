@@ -3000,3 +3000,71 @@ Findings:
 - BCC does NOT recognize this idiom as `rol ax, 1` (which would be 2B!).
 - 8086 has `ROL/ROR/RCL/RCR` instructions, but BCC's IR doesn't fold the pattern.
 
+
+## `(x << 2) | (x >> 14)` (rotate-by-2) — NOT recognized as rotate
+
+Fixture `3533-rotate-2-obj`:
+
+```
+8b c6                          mov ax, si
+d1 e0                          shl ax, 1
+d1 e0                          shl ax, 1        (x << 2)
+8b d6                          mov dx, si
+b1 0e                          mov cl, 14
+d3 ea                          shr dx, cl
+0b c2                          or ax, dx
+```
+
+Findings:
+- 18B body. Same non-recognition pattern as rotate-1 (3532).
+- BCC doesn't detect any rotate pattern; emits independent shifts + OR.
+
+## `g &= ~mask` — single 6B `and [mem], imm16` (always imm16, not imm8)
+
+Fixture `3534-bit-clear-obj`:
+
+```c
+int g; void clear_low4(void) { g &= ~0x0F; }
+```
+
+```
+81 26 00 00 f0 ff [FIXUPP _g]  and word [_g], 0xFFF0    (6B)
+```
+
+Findings:
+- `~0x0F = 0xFFF0` computed at compile time.
+- Uses `81 /4` (imm16 form, 6B) even though 0xFFF0 = -16 fits in imm8 sign-extended.
+- **MISSES the imm8 sign-extended form** (would be 5B `83 /4 imm8`).
+
+## `g |= 0x20` — same imm16 form (also misses imm8 opt)
+
+Fixture `3535-bit-set-obj`:
+
+```
+81 0e 00 00 20 00 [FIXUPP _g]  or word [_g], 0x0020    (6B)
+```
+
+Findings:
+- 0x20 fits in imm8 (positive), but BCC uses imm16 form (6B).
+- Misses 1-byte opt: `83 /1 r/m, imm8` would be 5B.
+- Pattern: compound bitwise `&=`/`|=` always emit imm16, unlike `+=`/`-=` which use imm8 when possible.
+
+## `(x & K) != 0` — `test [mem], K` (single non-destructive instruction)
+
+Fixture `3536-bit-test-obj`:
+
+```c
+if ((x & 0x10) != 0) return 1; return 0;
+```
+
+```
+f7 46 04 10 00                 test word [bp+4], 0x10     (5B)
+74 05                          je ELSE
+```
+
+Findings:
+- Single `test r/m, imm16` instruction (5B with disp8).
+- Non-destructive AND — flags set without modifying memory.
+- 14B body — same as `(a == b)` for the wrap.
+- **Excellent peephole.** Confirms BCC's test-peephole detector.
+

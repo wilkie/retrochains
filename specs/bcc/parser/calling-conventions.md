@@ -2374,3 +2374,27 @@ Findings:
 - Each computed arg uses AX as scratch, pushed to stack.
 - 19B body.
 
+
+## `printf("%d\n", 42)` — varargs call shape
+
+Fixture `3538-printf-style-obj`:
+
+```c
+int printf(char *fmt, ...);
+void hello(void) { printf("%d\n", 42); }
+```
+
+```
+b8 2a 00                       mov ax, 42
+50                             push ax            (42, pushed first)
+b8 00 00 [FIXUPP _DATA "%d\n"] mov ax, offset "%d\n"
+50                             push ax            (fmt, pushed last)
+e8 ?? ?? [FIXUPP _printf]      call _printf
+59 59                          pop cx; pop cx     (4-byte cleanup)
+```
+
+Findings:
+- Standard right-to-left push (42 pushed first → at higher stack addr after fmt).
+- Variadic functions follow same calling convention (caller cleanup).
+- String "%d\n" in _DATA, FIXUPP'd into the push.
+
