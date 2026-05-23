@@ -6405,3 +6405,23 @@ Findings:
 - 0xFFFE = -2 = `-1 × sizeof(int)`.
 - Same as `data[i + K]` (`3028`) but with negative offset.
 
+
+## `*p = K` for int ptr — `mov word [si], imm16` (4B mem-imm)
+
+Fixture `3055-ptr-deref-store-obj`:
+
+```c
+*p = 42;
+```
+
+```
+8b 76 04                       mov si, p
+c7 04 2a 00                    mov word [si], 42   (mem-imm direct, 4B)
+```
+
+Findings:
+- `*p = imm` for int ptr = direct `mov [si], imm16` (`c7 04 imm16`, 4B).
+- ModR/M `04` = mod 00, reg 000 (mov word /0), r/m 100 ([si]).
+- NO need for separate AX load when storing an immediate.
+- For `*p = var`, would need a load + reg-source store.
+

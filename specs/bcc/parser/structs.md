@@ -3269,3 +3269,28 @@ Fixture `3022-all-char-struct-obj`:
 Confirms BCC packs adjacent chars with no padding. Total size is
 sum of field sizes regardless of alignment.
 
+
+## `a = b` struct-to-struct assignment (4B struct) — inline 2-word copy
+
+Fixture `3056-struct-assign-obj`:
+
+```c
+struct P { int x; int y; };
+struct P a, b;
+a = b;
+```
+
+```
+a1 06 00                       mov ax, [_b + 2]   (load y)
+8b 16 04 00                    mov dx, [_b + 0]   (load x)
+a3 02 00                       mov [_a + 2], ax   (store y)
+89 16 00 00                    mov [_a + 0], dx   (store x)
+```
+
+Findings:
+- 4-byte struct copy = 2 word loads + 2 word stores (14 bytes).
+- AX and DX as transit registers.
+- Word-pair copying, **reverse order** (high field first).
+- Same shape as long-to-long copy (`3031`).
+- For struct copies > 4 bytes, BCC switches to `N_SCOPY@` helper.
+

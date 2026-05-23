@@ -1653,3 +1653,22 @@ Findings:
   substitution into expressions.
 - Same as `#define RED 0; #define GREEN 1; #define BLUE 2;`.
 
+
+## Enum with explicit values + sum — const-folded at parse
+
+Fixture `3053-enum-explicit-obj`:
+
+```c
+enum { A = 5, B = 10, C = 100 };
+return A + B + C;   /* = 115 */
+```
+
+```
+b8 73 00                       mov ax, 115   (= 5+10+100)
+```
+
+Findings:
+- Explicit enum values work like `#define`.
+- `A + B + C` const-folded to literal `115`.
+- No runtime arithmetic, no symbols.
+

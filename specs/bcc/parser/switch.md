@@ -2314,3 +2314,37 @@ Findings:
 - Same dispatch table size and shape; only the post-default
   target changes.
 
+
+## 3 contiguous cases — LINEAR dispatch (not dense, threshold is N≥4)
+
+Fixture `3054-enum-switch-obj`:
+
+```c
+enum { ZERO, ONE, TWO };
+switch (x) {
+  case ZERO: return 100;
+  case ONE: return 200;
+  case TWO: return 300;
+}
+```
+
+```
+8b 46 04                       mov ax, x
+0b c0                          or ax, ax         (== 0 peephole)
+74 0c                          je → CASE_0
+3d 01 00                       cmp ax, 1
+74 0c                          je → CASE_1
+3d 02 00                       cmp ax, 2
+74 0c                          je → CASE_2
+eb 0f                          jmp → DEFAULT
+                               ; CASE bodies follow
+```
+
+Findings:
+- **Even with 3 contiguous case values (0, 1, 2), BCC uses LINEAR
+  dispatch** — not dense table.
+- Threshold confirmed: dense dispatch ONLY at N ≥ 4 cases.
+- Each case = one cmp + je sequence; first case uses `or ax, ax`
+  peephole if comparing to 0.
+- Enum constants are folded to int literals same as regular ints.
+

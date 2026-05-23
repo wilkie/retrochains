@@ -3452,3 +3452,29 @@ Findings:
 - If arithmetic results land in the "wrong" reg, BCC reloads from
   memory to set up the right return convention.
 
+
+## Unsigned long compare — BOTH halves use UNSIGNED jumps
+
+Fixture `3058-ulong-cmp-const-obj`:
+
+```c
+unsigned long v;
+if (v > 1000UL) return 1;
+```
+
+```
+83 7e 06 00                    cmp word [bp+6], 0      (HIGH)
+72 0e                          jb → FALSE   (UNSIGNED: HIGH < 0 impossible)
+77 07                          ja → TRUE    (UNSIGNED: HIGH > 0)
+                               ; HIGH == 0:
+81 7e 04 e8 03                 cmp word [bp+4], 1000   (LOW, imm16)
+76 05                          jbe → FALSE  (UNSIGNED: LOW <= 1000)
+                               ; TRUE
+```
+
+Findings:
+- **Unsigned long**: BOTH HIGH and LOW use UNSIGNED jumps (`jb`/`ja`/`jbe`).
+- **Signed long** (`3026`): HIGH signed (`jl`/`jg`), LOW unsigned.
+- Difference is in the HIGH word's jump kind.
+- Const 1000 > signed imm8 max (127) so LOW cmp uses `81 imm16` form (5B).
+
