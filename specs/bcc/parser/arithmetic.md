@@ -2979,3 +2979,64 @@ Findings:
 - Confirms BCC DOES have AST-level constant folding for `+ 0` (and similar identity ops).
 - This is different from value-tracking const propagation: `const int k = 7; k * 3` still emits imul (memory load + multiply).
 
+
+## Edge-case constants: `INT_MAX`, `INT_MIN`, large unsigned
+
+Fixtures `3389-max-int-obj`, `3390-min-int-obj`, `3391-uint-bigval-obj`:
+
+```
+b8 ff 7f                       mov ax, 0x7FFF    (32767, INT_MAX)
+b8 00 80                       mov ax, 0x8000    (-32768, INT_MIN)
+b8 50 c3                       mov ax, 0xC350    (50000, unsigned > 32767)
+```
+
+Findings:
+- All use plain 3B `mov ax, imm16` — no special handling for sign-bit boundary.
+- Bit pattern in imm16 is identical whether the constant is signed-int or unsigned-int.
+
+## `x & 0xABCD` — uses 3B short `25 imm16` form (AX-specific)
+
+Fixture `3392-hex-const-obj`:
+
+```
+8b 46 04                       mov ax, x
+25 cd ab                       and ax, 0xABCD   (3B AX-specific)
+```
+
+Findings:
+- BCC uses the 3-byte `25 imm16` short form when LHS is AX (vs 4-byte `81 /4 imm16`).
+- Hex/decimal constants are equivalent at the byte level.
+
+## `1 << 4` — fully constant-folded to `16`
+
+Fixture `3393-cfold-init-obj`:
+
+```
+b8 10 00                       mov ax, 16
+```
+
+Findings:
+- Shift of literal by literal = 1 imm16 emit.
+- Confirms BCC has compile-time evaluation of constant expressions (not just operator folds like `+0`).
+
+## `if (0) { ... }` — body NOT eliminated, just jumped over
+
+Fixture `3394-if-zero-deadcode-obj`:
+
+```c
+if (0) { return 999; }
+return x;
+```
+
+```
+eb 05                          jmp +5         (always skips the dead-then)
+b8 e7 03                       mov ax, 999    (dead code, still emitted)
+eb 05                          jmp END
+8b 46 04                       mov ax, x      (the actual return)
+```
+
+Findings:
+- BCC compiles `if (constant)` as a literal `jmp` over the false-arm.
+- Dead-code body is STILL emitted into _TEXT — no DCE optimization.
+- 5 bytes of dead bytes occupy the OBJ but are never executed.
+
