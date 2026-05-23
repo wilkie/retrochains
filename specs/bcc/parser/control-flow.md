@@ -4707,3 +4707,35 @@ Findings:
 - Forces `81 c6 imm16` (4B) form.
 - Adds to the unroll-vs-add threshold table from `3150-3157`.
 
+
+## `while (cond) { continue; }` — continue jumps to COND (no POST-step)
+
+Fixture `3187-while-continue-obj`:
+
+```c
+while (i < n) {
+  i = i + 1;
+  if (i == 3) continue;
+  s = s + i;
+}
+```
+
+```
+                               ; BODY:
+... i = i + 1 ...
+83 fe 03                       cmp si, 3
+75 02                          jne → AFTER_IF
+eb 06                          jmp → COND     (continue: back to cond)
+                               ; AFTER_IF:
+... s = s + i ...
+                               ; COND:
+3b 76 04                       cmp si, n
+7c e9                          jl → BODY
+```
+
+Findings:
+- `while` has no POST-step (unlike `for`), so `continue` jumps
+  **directly to the COND**.
+- For-loop continue (`2975`) jumps to POST-step.
+- Same jmp instruction; just different label semantics per loop type.
+

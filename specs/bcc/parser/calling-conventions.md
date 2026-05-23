@@ -1914,3 +1914,24 @@ Findings:
 - `extern` is the default linkage for fn declarations — explicit
   `extern` keyword is documentation/clarity only.
 
+
+## Fn call with string literal arg — `mov ax, &string; push ax`
+
+Fixture `3188-fn-str-arg-obj`:
+
+```c
+return puts_one("hello");
+```
+
+```
+b8 00 00                       mov ax, &"hello"   (FIXUPP, 3B)
+50                             push ax            (1B)
+e8 00 00                       call _puts_one
+59                             pop cx
+```
+
+Findings:
+- String literal interned in `_DATA`.
+- `mov ax, &string; push ax` (4B) for the arg.
+- FIXUPP record resolves to the string's offset in `_DATA`.
+

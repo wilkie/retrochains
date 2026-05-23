@@ -3864,3 +3864,36 @@ Findings:
 - 5 bytes total.
 - For `(long)unsigned char`: `mov ah, 0; xor dx, dx` zero-extend variants.
 
+
+## Unsigned long mod `a % b` — `N_LUMOD@` helper
+
+Fixture `3185-ulong-mod-obj`:
+
+```c
+return a % b;   /* unsigned long */
+```
+
+Same 4-push pattern; helper name `N_LUMOD@`.
+
+**Complete long div/mod family**:
+- `N_LDIV@` — signed div
+- `N_LUDIV@` — unsigned div
+- `N_LMOD@` — signed mod
+- `N_LUMOD@` — unsigned mod
+
+## `(char)long` truncate — single `mov al, byte [mem]` (3B)
+
+Fixture `3186-long-to-char-obj`:
+
+```c
+char low(long v) { return (char)v; }
+```
+
+```
+8a 46 04                       mov al, byte [bp+4]   (low byte of LOW word)
+```
+
+Findings:
+- Single byte load — all higher bits discarded.
+- 3 bytes for the cast.
+
