@@ -926,6 +926,14 @@ fn parse_mov(operands: &str, line_no: usize) -> AsmResult<Instr> {
                 offset,
             });
         }
+        // `mov <reg16>, word ptr [si]` and `[si+disp8]` — chained-
+        // pointer indirection (fixture 2816's `mov bx, [si]`).
+        if rhs == "word ptr [si]" {
+            return Ok(Instr::MovReg16FromSiPtr { reg });
+        }
+        if let Some(disp) = parse_word_si_disp(rhs) {
+            return Ok(Instr::MovReg16SiDisp { reg, disp });
+        }
     }
     // Generic 16-bit `mov <reg>,offset <group>:<sym>` (fixtures 108
     // for AX, 157 for SI). Tried before reg-imm so it doesn't get

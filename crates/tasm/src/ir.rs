@@ -1200,6 +1200,15 @@ pub enum Instr {
     /// `MovAxSiDisp` with disp=0 because BCC picks the shorter
     /// encoding when no displacement is needed.
     MovDxFromSiPtr,
+    /// `mov <reg16>,word ptr [si]` — generic 16-bit load through SI
+    /// for the chained-pointer indirection paths (e.g. fixture 2816's
+    /// `mov bx,[si]` in `o->p->v`). Encoding: `8B (reg<<3 | 0x04)`
+    /// (mod=00 r/m=100 → [SI]). Existing AX-/DX-specific variants stay
+    /// for symmetry with their imm8/disp8 siblings.
+    MovReg16FromSiPtr { reg: Reg16 },
+    /// `mov <reg16>,word ptr [si+disp8]` — sibling with an 8-bit
+    /// displacement. Encoding: `8B (mod=01 reg=<dst> r/m=100) dd`.
+    MovReg16SiDisp { reg: Reg16, disp: i8 },
     /// `mov dx,word ptr [si+disp8]` — `8B 54 dd`. ModR/M 54 = mod=01
     /// reg=DX(010) r/m=100 ([si+disp8]). High-half read for `*p`
     /// where `p: long *` in the ABI return convention (DX=high).

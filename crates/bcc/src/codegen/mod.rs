@@ -7967,6 +7967,73 @@ impl<'a> FunctionEmitter<'a> {
             }
             return;
         }
+        // `<reg_ptr>-><field>-><inner>` — chained arrow access. Load
+        // the base pointer's field (another pointer) into BX, then
+        // read the inner field through BX. Two-step indirection;
+        // works whether the base is a stack-local pointer or a
+        // function parameter. Fixture 2816 (`o->p->v`).
+        if matches!(kind, crate::ast::MemberKind::Arrow)
+            && let ExprKind::Member { base: inner_base, field: inner_field, kind: crate::ast::MemberKind::Arrow } = &base.kind
+            && let ExprKind::Ident(root_name) = &inner_base.kind
+            && (self.locals.has(root_name) || self.globals.contains(root_name))
+        {
+            let root_ty = if self.locals.has(root_name) {
+                self.locals.type_of(root_name).clone()
+            } else {
+                self.globals.type_of(root_name).unwrap().clone()
+            };
+            if let Some(pointee_struct) = root_ty.pointee()
+                && let Some((mid_off, mid_ty)) = (if let Type::Struct { name: Some(tag), .. } = pointee_struct {
+                    self.lookup_struct_by_tag(tag).and_then(|t| t.field(inner_field))
+                } else {
+                    pointee_struct.field(inner_field)
+                })
+                && let Some(final_pointee) = mid_ty.pointee()
+                && let Some((field_off, field_ty)) = (if let Type::Struct { name: Some(tag), .. } = final_pointee {
+                    self.lookup_struct_by_tag(tag).and_then(|t| t.field(field))
+                } else {
+                    final_pointee.field(field)
+                })
+            {
+                // First indirection: load the intermediate pointer
+                // (the field at mid_off through root). For register-
+                // resident root pointers BCC uses the root's reg
+                // directly as the base (e.g. `mov bx, [si]` when o is
+                // in SI), skipping a `mov bx, si` copy.
+                if self.locals.has(root_name)
+                    && let LocalLocation::Reg(reg) = self.locals.location_of(root_name)
+                {
+                    let bx_src = if mid_off == 0 {
+                        format!("[{}]", reg.name())
+                    } else {
+                        format!("[{}+{mid_off}]", reg.name())
+                    };
+                    let _ = write!(self.out, "\tmov\tbx,word ptr {bx_src}\r\n");
+                } else {
+                    // Stack-resident root, or global pointer. Load
+                    // root into BX first, then perform the +mid_off
+                    // indirection.
+                    if self.locals.has(root_name)
+                        && let LocalLocation::Stack(off) = self.locals.location_of(root_name)
+                    {
+                        let _ = write!(self.out, "\tmov\tbx,word ptr {}\r\n", bp_addr(off));
+                    } else {
+                        let _ = write!(self.out, "\tmov\tbx,word ptr DGROUP:_{root_name}\r\n");
+                    }
+                    let bx1 = if mid_off == 0 { "[bx]".to_owned() } else { format!("[bx+{mid_off}]") };
+                    let _ = write!(self.out, "\tmov\tbx,word ptr {bx1}\r\n");
+                }
+                // Final read at [bx+field_off].
+                let bx2 = if field_off == 0 { "[bx]".to_owned() } else { format!("[bx+{field_off}]") };
+                if field_ty.is_char_like() {
+                    let _ = write!(self.out, "\tmov\tal,byte ptr {bx2}\r\n");
+                    self.emit_widen_al(&field_ty);
+                } else {
+                    let _ = write!(self.out, "\tmov\tax,word ptr {bx2}\r\n");
+                }
+                return;
+            }
+        }
         // Arrow path (or Dot whose base isn't a const-chain lvalue):
         // base must be a bare Ident referring to a pointer.
         let ExprKind::Ident(name) = &base.kind else {

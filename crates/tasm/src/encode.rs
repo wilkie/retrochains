@@ -433,6 +433,8 @@ fn instr_size(instr: &Instr) -> usize {
         Instr::MovSiDispImm { .. } => 5,
         Instr::MovAxSiDisp { .. } | Instr::MovDxSiDisp { .. } => 3,
         Instr::MovDxFromSiPtr => 2,
+        Instr::MovReg16FromSiPtr { .. } => 2,
+        Instr::MovReg16SiDisp { .. } => 3,
         Instr::AddSiPtrImm8 { .. } | Instr::AddBxPtrImm8 { .. } | Instr::SubSiPtrImm8 { .. } => 3,
         Instr::AndSiPtrByteImm8 { .. }
         | Instr::OrSiPtrByteImm8 { .. }
@@ -2036,6 +2038,19 @@ fn emit_instr(
             // reg=DX r/m=100 ([si]).
             out.push(0x8B);
             out.push(0x14);
+        }
+        Instr::MovReg16FromSiPtr { reg } => {
+            // `mov <reg16>, word ptr [si]` → 8B (mod=00 reg=<dst>
+            // r/m=100). E.g. `mov bx, [si]` = 8B 1C.
+            out.push(0x8B);
+            out.push((reg.code() << 3) | 0x04);
+        }
+        Instr::MovReg16SiDisp { reg, disp } => {
+            // `mov <reg16>, word ptr [si+disp8]` → 8B (mod=01
+            // reg=<dst> r/m=100) dd.
+            out.push(0x8B);
+            out.push(0x40 | (reg.code() << 3) | 0x04);
+            out.push(*disp as u8);
         }
         Instr::MovDxSiDisp { disp } => {
             // `mov dx,word ptr [si+disp8]` → 8B 54 dd.
