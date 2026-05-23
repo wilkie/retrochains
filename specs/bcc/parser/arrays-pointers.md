@@ -7050,3 +7050,113 @@ Findings:
 - No PUBDEF for `x` (static = file-scope).
 - FIXUPP into _DATA segment relative offset.
 
+
+## Pointer difference `a - b` (int*) — byte sub + idiv by sizeof
+
+Fixture `3377-ptr-diff-obj`:
+
+```c
+int diff(int *a, int *b) { return a - b; }
+```
+
+```
+8b 46 04                       mov ax, a
+2b 46 06                       sub ax, b         (raw byte diff)
+bb 02 00                       mov bx, 2         (sizeof(int))
+99                             cwd
+f7 fb                          idiv bx           (divide by 2)
+```
+
+Findings:
+- Standard ptr-diff: byte difference / sizeof(elem).
+- Uses `idiv` even though sizeof(int) is power-of-2 — no `sar` shortcut.
+- Generic 12B body. Doesn't exploit alignment assumption.
+
+## Pointer == NULL — `cmp word [bp+disp], 0` direct mem-cmp
+
+Fixture `3378-ptr-null-cmp-obj`:
+
+```c
+int is_null(int *p) { return p == 0; }
+```
+
+```
+83 7e 04 00                    cmp word [bp+4], 0    (4B mem-imm8 sign-ext)
+75 05                          jne ELSE
+```
+
+Findings:
+- No reg-alloc: ptr compared directly in stack frame.
+- Uses `83 /7` (cmp r/m16, imm8) — only 4B since 0 fits in imm8.
+
+## Pointer == Pointer — standard cmp via AX
+
+Fixture `3379-ptr-eq-obj`:
+
+```
+8b 46 04                       mov ax, a
+3b 46 06                       cmp ax, b
+75 05                          jne ELSE
+```
+
+Findings:
+- Identical to int-equality codegen.
+- Pointers are word-sized values in small memory model — no segment compare needed.
+
+## int* + n — scaled via shl, stack roundtrip
+
+Fixture `3380-ptr-plus-n-obj`:
+
+```c
+int *adv(int *p, int n) { return p + n; }
+```
+
+```
+8b 46 06                       mov ax, n
+d1 e0                          shl ax, 1         (n * 2)
+50                             push ax           (save scaled n)
+8b 46 04                       mov ax, p
+5a                             pop dx
+03 c2                          add ax, dx        (p + n*2)
+```
+
+Findings:
+- Scaled add: n shifted by sizeof(int)/2 = 1.
+- BCC uses stack roundtrip for the temp — 12B vs optimal 10B (`mov dx, n; shl dx, 1; mov ax, p; add ax, dx`).
+- Pattern: evaluate scaled-right-operand, save, evaluate left, restore right, add.
+
+## char* + n — direct add, no scaling
+
+Fixture `3381-cptr-plus-n-obj`:
+
+```c
+char *adv(char *p, int n) { return p + n; }
+```
+
+```
+8b 46 04                       mov ax, p
+03 46 06                       add ax, n
+```
+
+Findings:
+- 6B body. sizeof(char) = 1, no scaling needed.
+- Identical to int + int codegen.
+
+## int* - const — compile-time scaled, single `add ax, imm`
+
+Fixture `3382-ptr-minus-const-obj`:
+
+```c
+int *prev(int *p) { return p - 1; }
+```
+
+```
+8b 46 04                       mov ax, p
+05 fe ff                       add ax, -2        (-1 * sizeof(int))
+```
+
+Findings:
+- `p - 1` folds at compile time to `+ (-1 * 2) = + -2`.
+- 6B body. Uses `add ax, imm16` form with -2 = 0xFFFE.
+- No runtime multiply.
+
