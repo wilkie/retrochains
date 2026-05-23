@@ -7180,3 +7180,39 @@ Findings:
 - char* is 2B in small memory model, so `char *table[]` has 2B stride.
 - Indexing identical to `int table[]`.
 
+
+## strcmp-like byte loop — dual-test + push/pop for sub
+
+Fixture `3418-strncmp-loop-obj`:
+
+```c
+int eqstr(char *a, char *b) {
+  while (*a && *a == *b) { a++; b++; }
+  return *a - *b;
+}
+```
+
+Body:
+```
+                               ; loop:
+80 3c 00                       cmp byte [si], 0
+74 06                          je END_LOOP
+8a 04                          mov al, [si]
+3a 05                          cmp al, [di]
+74 f3                          je LOOP_STEP
+                               ; return *a - *b:
+8a 04                          mov al, [si]
+98                             cbw
+50                             push ax       (save *a as int)
+8a 05                          mov al, [di]
+98                             cbw
+8b d0                          mov dx, ax    (DX = *b)
+58                             pop ax        (AX = *a)
+2b c2                          sub ax, dx    (ax = *a - *b)
+```
+
+Findings:
+- Tight 5B-test loop body (`cmp [si], 0; je; mov al,[si]; cmp al,[di]; je`).
+- Strcmp-style return uses the push/pop roundtrip (3291 pattern): evaluate first op, save; evaluate second, save in DX; restore first; subtract.
+- Char→int widening via `cbw` BEFORE the subtraction so the result fits int semantics (e.g., '\x01' - '\xFF' = -254 not garbage).
+

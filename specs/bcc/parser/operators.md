@@ -2265,3 +2265,67 @@ Findings:
 - unsigned→int is a pure bit copy — no widening/narrowing.
 - Same byte pattern as int→int copy.
 
+
+## `!x` — `neg; sbb; inc` (branchless boolean coercion)
+
+Fixture `3415-double-not-obj`:
+
+```c
+int as_bool(int x) { return !!x; }
+```
+
+```
+8b 46 04                       mov ax, x
+f7 d8                          neg ax        (CF = (ax != 0))
+1b c0                          sbb ax, ax    (ax = -CF)
+40                             inc ax        (-CF + 1 → 0 or 1)
+                               ; second ! repeats:
+f7 d8                          neg ax
+1b c0                          sbb ax, ax
+40                             inc ax
+```
+
+Findings:
+- `!x` = 6-byte branchless idiom: `neg / sbb ax,ax / inc ax`.
+- Maps to {0, 1} via the carry-flag-after-neg trick.
+- `!!x` is implemented as `!` applied twice — 12B (no peephole that "the second !" is redundant given the first already gave 0/1).
+
+## `if (!x)` — inverted comparison, no `neg/sbb/inc`
+
+Fixture `3416-not-cond-obj`:
+
+```c
+if (!x) return 99; return x;
+```
+
+```
+0b f6                          or si, si
+75 05                          jne ELSE       (x != 0 → !x is false)
+b8 63 00                       mov ax, 99
+eb 04                          jmp END
+ELSE:
+8b c6                          mov ax, si
+```
+
+Findings:
+- `if (!cond)` flips the branch condition (`jne` instead of `je`).
+- No materialization of `!x` as a value — branch directly handles the inversion.
+
+## char × int — promote char via `cbw` then `imul mem`
+
+Fixture `3417-char-times-int-obj`:
+
+```c
+int mix(char c, int n) { return c * n; }
+```
+
+```
+8a 46 04                       mov al, c
+98                             cbw                  (char → int)
+f7 6e 06                       imul word [bp+6]    (× n)
+```
+
+Findings:
+- char promoted to int via `cbw` (1B), then `imul mem` (3B).
+- Total 7B body.
+

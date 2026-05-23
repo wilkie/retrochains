@@ -3040,3 +3040,37 @@ Findings:
 - Dead-code body is STILL emitted into _TEXT — no DCE optimization.
 - 5 bytes of dead bytes occupy the OBJ but are never executed.
 
+
+## unsigned × unsigned — uses `imul mem` (same low-16 as `mul`)
+
+Fixture `3413-uint-mul-obj`:
+
+```c
+unsigned mul(unsigned a, unsigned b) { return a * b; }
+```
+
+```
+8b 46 04                       mov ax, a
+f7 6e 06                       imul word [bp+6]
+```
+
+Findings:
+- BCC uses `imul` (signed multiply) even for unsigned ops.
+- The LOW 16-bit result is identical for signed/unsigned multiplication; only DX (high half) and OF flag differ.
+- Since BCC only uses AX for the int-sized result, `imul` works for both types.
+
+## unsigned `a > b` — `jbe` for the inverted branch
+
+Fixture `3414-uint-gt-obj`:
+
+```
+8b 46 04                       mov ax, a
+3b 46 06                       cmp ax, b
+76 05                          jbe ELSE       (unsigned ≤, inverted from >)
+```
+
+Findings:
+- Unsigned compare uses unsigned branches: ja/jae/jb/jbe.
+- Signed compare uses jg/jge/jl/jle.
+- BCC tracks signedness through type propagation; branch opcode picked accordingly.
+
