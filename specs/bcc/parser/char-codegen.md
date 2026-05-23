@@ -2136,3 +2136,34 @@ Findings:
 - No `cbw` widening since both operands and result are char.
 - Result in AL — char return convention.
 
+
+## char swap — 1-byte t but 2-byte stack alloc
+
+Fixture `3529-char-swap-obj`:
+
+```c
+void cswap(char *a, char *b) {
+  char t = *a;
+  *a = *b;
+  *b = t;
+}
+```
+
+```
+4c 4c                          dec sp; dec sp   (2B alloc even though t is 1B)
+56 57                          push si; push di
+8b 76 04                       mov si, a
+8b 7e 06                       mov di, b
+8a 04                          mov al, [si]     (t = *a)
+88 46 ff                       mov [bp-1], al   (store t as byte)
+8a 05                          mov al, [di]     (*b)
+88 04                          mov [si], al     (*a = *b)
+8a 46 ff                       mov al, [bp-1]   (load t)
+88 05                          mov [di], al     (*b = t)
+```
+
+Findings:
+- BCC's stack alloc unit is 2B even for char locals.
+- char t stored at [bp-1] (only 1 byte used; [bp-2] wasted).
+- 19B body.
+

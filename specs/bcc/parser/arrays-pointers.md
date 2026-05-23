@@ -7455,3 +7455,56 @@ Findings:
 - `b` is loaded into BX only inside the else branch — lazy.
 - 22B body. Store happens at end via [si].
 
+
+## `*dst++ = *src++` in while(n--) — tight memcpy pattern
+
+Fixture `3528-deref-postinc-write-obj`:
+
+```
+LOOP_BODY:
+8b 05                          mov ax, [di]     (read *src)
+89 04                          mov [si], ax     (write *dst)
+47 47                          inc di; inc di   (src++ on int*)
+46 46                          inc si; inc si   (dst++ on int*)
+TEST:
+8b c2                          mov ax, dx
+4a                             dec dx
+0b c0                          or ax, ax
+75 f1                          jne LOOP_BODY
+```
+
+Findings:
+- 3 reg-alloc: SI=dst, DI=src, DX=n.
+- 9B loop body. Tight memcpy pattern.
+- Each `inc reg` × 2 for int* advance.
+
+## `p[-1]` — negative index folds to disp8 with sign-extension
+
+Fixture `3530-arr-neg-idx-obj`:
+
+```
+8b 76 04                       mov si, p
+8b 44 fe                       mov ax, [si + 0xFE]    (disp8 = -2 sign-extended)
+```
+
+Findings:
+- `p[-1]` = `[si + (-1 * sizeof(int))]` = `[si - 2]`.
+- 8086 `mov r16, [r/m + disp8]` uses sign-extended disp8 — naturally supports negative offsets.
+- 7B body.
+
+## `*p = call()` — SI = p first, then call, then store
+
+Fixture `3531-return-deref-call-obj`:
+
+```
+56                             push si
+8b 76 04                       mov si, p
+e8 ?? ??                       call _get
+89 04                          mov [si], ax
+```
+
+Findings:
+- Loads p first (so SI is live across the call).
+- AX from call flows directly into the store.
+- 9B body. Clean.
+

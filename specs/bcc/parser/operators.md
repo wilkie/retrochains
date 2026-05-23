@@ -2966,3 +2966,37 @@ Findings:
 - 8B body. Could be 4B `fe 0e disp16` (dec byte [mem] mem-direct).
 - Same compound-with-const issue: BCC misses the byte-mem-direct peephole.
 
+
+## `i++ < n` (post-inc in cond) — `mov ax, si; inc si; cmp ax, n`
+
+Fixture `3527-postinc-cond-obj`:
+
+```
+8b c6                          mov ax, si       (pre-inc value for cmp)
+46                             inc si
+3b 46 06                       cmp ax, n
+```
+
+Findings:
+- Pre-inc value saved into AX before the inc.
+- Then inc + cmp using saved AX.
+- Same total size as `++i < n` (3526) — 19B.
+
+## `(x << 1) | (x >> 15)` — NOT recognized as rotate
+
+Fixture `3532-bit-rotate-obj`:
+
+```
+8b c6                          mov ax, si
+d1 e0                          shl ax, 1
+8b d6                          mov dx, si
+b1 0f                          mov cl, 15
+d3 ea                          shr dx, cl
+0b c2                          or ax, dx
+```
+
+Findings:
+- 16B body. Each shift computed independently, then OR'd.
+- BCC does NOT recognize this idiom as `rol ax, 1` (which would be 2B!).
+- 8086 has `ROL/ROR/RCL/RCR` instructions, but BCC's IR doesn't fold the pattern.
+
