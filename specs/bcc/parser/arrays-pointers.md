@@ -6731,3 +6731,21 @@ Findings:
   case which had stride 3, see `2985`).
 - 13 bytes for the indexed access.
 
+
+## `argv[1]` for `char **` — `mov ax, [si + 2]` (5B)
+
+Fixture `3203-argv-1-obj`:
+
+```c
+char *get_arg1(char **argv) { return argv[1]; }
+```
+
+```
+8b 76 04                       mov si, argv
+8b 44 02                       mov ax, [si + 2]   (argv elements are 2-byte ptrs)
+```
+
+Findings:
+- Const-index ptr-array access = `mov ax, [si + sizeof × idx]`.
+- For ptr array (sizeof = 2): `[si + 2]` for index 1.
+

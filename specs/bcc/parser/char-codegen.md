@@ -1941,3 +1941,43 @@ Findings:
   pre-shift.
 - 8 bytes total: 3B mov + 2B shl + 2B mov + 1B cbw.
 
+
+## `if (!c)` for char — promote to int first, then test
+
+Fixture `3204-not-char-obj`:
+
+```c
+if (!c) return 1;
+```
+
+```
+8a 46 04                       mov al, c
+98                             cbw                  (promote)
+0b c0                          or ax, ax            (test == 0 peephole)
+75 05                          jne → FALSE
+```
+
+Findings:
+- The `!` operator triggers int promotion before testing.
+- 8 bytes total (vs 6B for byte-direct `c != '\0'` cmp).
+- Compare to `char == 0` (`3132`) which uses direct `cmp byte [mem], 0`
+  (4B + 2B jump). Source form `if (!c)` is 2 bytes longer.
+
+## `char c + 1` — `mov al + cbw + inc ax` (5B, uses inc not add)
+
+Fixture `3206-char-plus-const-obj`:
+
+```c
+return c + 1;
+```
+
+```
+8a 46 04 98                    mov al, c; cbw
+40                             inc ax        (1B!)
+```
+
+Findings:
+- `char + 1` uses `inc ax` (1B) — saves over `add ax, 1` (3B).
+- 5 bytes total.
+- For `char + K` with K > 1, would use `add ax, K`.
+

@@ -3918,3 +3918,26 @@ Findings:
 - **Missed peephole**: `and dx, 0` could be `xor dx, dx` (2B vs 4B).
 - BCC doesn't recognize `& 0` → zero result for the HIGH half.
 
+
+## Global signed `long >> 1` — `sar HIGH; rcr LOW` (mirror of <<1)
+
+Fixture `3208-global-long-shr-obj`:
+
+```c
+long g;
+return g >> 1;
+```
+
+```
+8b 16 02 00                    mov dx, HIGH
+a1 00 00                       mov ax, LOW
+d1 fa                          sar dx, 1     (HIGH signed shift, carry from LSB)
+d1 d8                          rcr ax, 1     (LOW rotate-with-carry from HIGH)
+```
+
+Findings:
+- `>> 1` for long = `sar HIGH; rcr LOW` (carry chain in reverse).
+- `<< 1` (`3162`) = `shl LOW; rcl HIGH` (carry chain forward).
+- 11 bytes total.
+- For unsigned, would use `shr` instead of `sar` for HIGH word.
+

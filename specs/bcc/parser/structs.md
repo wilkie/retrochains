@@ -3559,3 +3559,27 @@ Findings:
 - 4B struct copy = 2-word transit via AX/DX.
 - Same pattern as long-to-long copy or struct global copy (`3056`).
 
+
+## Bitfields `unsigned int x : 3` — BYTE-PACKED, extracted via AND mask
+
+Fixture `3207-bitfield-3-obj`:
+
+```c
+struct B { unsigned int x : 3; unsigned int y : 5; };  /* sizeof = 1 byte */
+struct B b;
+return b.x;
+```
+
+```
+a0 00 00                       mov al, [_b]      (byte load)
+25 07 00                       and ax, 0x0007    (mask low 3 bits)
+```
+
+Findings:
+- **BCC supports K&R bitfields**.
+- Total bits 3+5=8 fits in 1 byte; `sizeof(struct B) = 1`.
+- `b.x : 3` allocated in **low 3 bits** (LSB-first order).
+- Extract: byte load + `and ax, (1<<width)-1`.
+- 6 bytes total for the read.
+- For `b.y : 5` (offset 3, width 5), would extract via shift + AND.
+
