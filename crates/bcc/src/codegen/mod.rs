@@ -119,35 +119,55 @@ impl GlobalTable {
     }
 }
 
-/// Accumulator for string literals encountered during codegen of a
-/// translation unit. Each unique literal gets a stable byte offset
-/// within the `s@` block; identical literals deduplicate. Emission
-/// of the actual `db 'string' / db 0` block happens in the tail of
-/// the file (`emit_s.rs::write_tail`).
+/// Accumulator for constant data encountered during codegen of a
+/// translation unit: string literals **and** stack-array initializer
+/// blobs. Each unique entry gets a stable byte offset within the
+/// `s@` block; identical entries deduplicate. Emission of the actual
+/// `db` block happens in the tail of the file (`emit_s.rs::write_tail`).
 #[derive(Debug, Default)]
 pub struct StringPool {
-    /// Source bytes of each unique literal, in insertion order. The
-    /// running total of `bytes.len() + 1` (NUL terminator) is the
-    /// next available offset.
-    entries: Vec<Vec<u8>>,
+    /// Each entry: (raw bytes, whether to append a NUL terminator).
+    /// Strings always set `nul = true`; array-init blobs set `nul =
+    /// false` because the array's declared size already includes any
+    /// trailing zeros. The running total of `bytes.len() + nul as
+    /// usize` is the next available offset.
+    entries: Vec<PoolEntry>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PoolEntry {
+    pub bytes: Vec<u8>,
+    pub nul: bool,
 }
 
 impl StringPool {
-    /// Intern a literal and return its byte offset within `s@`.
-    /// Identical literals return the same offset.
+    /// Intern a NUL-terminated string literal. Returns the offset of
+    /// the first byte within `s@`. Identical literals dedupe.
     pub fn intern(&mut self, bytes: &[u8]) -> u32 {
+        self.intern_inner(bytes, true)
+    }
+
+    /// Intern a raw byte blob (e.g. a stack-array initializer image).
+    /// No NUL terminator is appended — the blob's declared size is
+    /// already baked into the bytes the caller supplies.
+    pub fn intern_blob(&mut self, bytes: &[u8]) -> u32 {
+        self.intern_inner(bytes, false)
+    }
+
+    fn intern_inner(&mut self, bytes: &[u8], nul: bool) -> u32 {
         let mut offset: u32 = 0;
         for existing in &self.entries {
-            if existing.as_slice() == bytes {
+            if existing.bytes.as_slice() == bytes && existing.nul == nul {
                 return offset;
             }
-            offset += u32::try_from(existing.len() + 1).expect("string offset fits in u32");
+            offset += u32::try_from(existing.bytes.len() + usize::from(existing.nul))
+                .expect("pool offset fits in u32");
         }
-        self.entries.push(bytes.to_vec());
+        self.entries.push(PoolEntry { bytes: bytes.to_vec(), nul });
         offset
     }
 
-    /// True when no literals have been interned. Tail emission can
+    /// True when no entries have been interned. Tail emission can
     /// skip the `db` lines entirely in that case (matching the
     /// "empty s@ block" we used to always emit).
     #[must_use]
@@ -155,10 +175,11 @@ impl StringPool {
         self.entries.is_empty()
     }
 
-    /// The interned literals in insertion order. Tail emission writes
-    /// each as `db '<contents>'` (and an explicit terminating `db 0`).
+    /// The interned entries in insertion order. Tail emission writes
+    /// each as `db '<chars>'` (strings, plus an explicit `db 0`) or as
+    /// a raw `db <byte>` sequence (blobs).
     #[must_use]
-    pub fn entries(&self) -> &[Vec<u8>] {
+    pub fn entries(&self) -> &[PoolEntry] {
         &self.entries
     }
 }
@@ -172,6 +193,90 @@ fn bp_addr(off: i16) -> String {
     } else {
         format!("[bp+{off}]")
     }
+}
+
+/// Flatten an aggregate initializer to its little-endian byte image,
+/// matching what BCC would place in the `s@` block / `_DATA` segment
+/// for a stack array init.
+///
+/// Returns `None` if any element isn't constant-evaluatable (the
+/// caller falls back to a more general lowering path or panics).
+///
+/// Handles:
+///   - `InitList { items }` against an array — recurses element-wise
+///     and zero-fills any trailing un-specified slots.
+///   - `InitList { items }` against a struct — pairs items with fields
+///     in declaration order; zero-fills missing fields and any trailing
+///     end-padding the struct carries.
+///   - `StringLit(bytes)` against a char array — writes bytes plus a
+///     NUL, then zero-fills to the declared length (fixture 1476: `char
+///     s[6] = "hi"` → `'h' 'i' 0 0 0 0`).
+///   - Any scalar that `try_const_eval` accepts — written little-endian
+///     as `ty.size_bytes()` bytes.
+fn flatten_init_to_bytes(ty: &Type, init: &Expr) -> Option<Vec<u8>> {
+    let total = usize::from(ty.size_bytes());
+    let mut buf = vec![0u8; total];
+    if write_init_bytes(&mut buf[..], ty, init)? {
+        Some(buf)
+    } else {
+        None
+    }
+}
+
+/// Write a single initializer into `dst` (already pre-zeroed). The
+/// returned `bool` is always `true` on success; the `Option` shape
+/// is reserved for "this initializer shape isn't constant" failures.
+fn write_init_bytes(dst: &mut [u8], ty: &Type, init: &Expr) -> Option<bool> {
+    debug_assert_eq!(dst.len(), usize::from(ty.size_bytes()));
+    // String literal initializing a char array: copy bytes, append a
+    // NUL, leave the rest zero (the pre-zeroed buffer already covers
+    // any padding).
+    if let (ExprKind::StringLit(bytes), Type::Array { elem, .. }) = (&init.kind, ty)
+        && elem.is_char_like()
+    {
+        let take = bytes.len().min(dst.len());
+        dst[..take].copy_from_slice(&bytes[..take]);
+        // The NUL terminator slots in at `bytes.len()` if there's room.
+        // For exactly-sized arrays where `bytes.len() == dst.len()` the
+        // parser would have already widened the array; if we're called
+        // with a too-tight array we just truncate the NUL away (mirrors
+        // BCC behavior).
+        return Some(true);
+    }
+    // Aggregate initializer list — recurse element-wise (arrays) or
+    // field-wise (structs).
+    if let ExprKind::InitList { items } = &init.kind {
+        match ty {
+            Type::Array { elem, len } => {
+                let elem_size = usize::from(elem.size_bytes());
+                for (i, item) in items.iter().enumerate() {
+                    if i >= *len as usize {
+                        break;
+                    }
+                    let start = i * elem_size;
+                    let end = start + elem_size;
+                    write_init_bytes(&mut dst[start..end], elem, item)?;
+                }
+                return Some(true);
+            }
+            Type::Struct { fields, .. } => {
+                for (item, field) in items.iter().zip(fields.iter()) {
+                    let start = usize::from(field.offset);
+                    let end = start + usize::from(field.ty.size_bytes());
+                    write_init_bytes(&mut dst[start..end], &field.ty, item)?;
+                }
+                return Some(true);
+            }
+            _ => return None,
+        }
+    }
+    // Scalar: must fold to a constant. Long-like types get all 4 bytes;
+    // ints/pointers get 2; chars get 1.
+    let v = try_const_eval(init)?;
+    for (i, slot) in dst.iter_mut().enumerate() {
+        *slot = ((v >> (i * 8)) & 0xFF) as u8;
+    }
+    Some(true)
 }
 
 /// `DGROUP:_<sym>` or `DGROUP:_<sym>+<off>` — the asm-text form BCC
@@ -3369,6 +3474,36 @@ impl<'a> FunctionEmitter<'a> {
     fn emit_init_local(&mut self, loc: LocalLocation, ty: &Type, init: &Expr) {
         match loc {
             LocalLocation::Stack(off) => {
+                // Stack array (and struct) initializer with a constant
+                // image: BCC interns the flattened byte image into
+                // `_DATA:s@` and emits a single `N_SCOPY@` call to
+                // copy it onto the stack. Same far-far helper used by
+                // struct returns and >4B struct copies; the size is
+                // the array's full byte width and the source segment
+                // is DS. Covers fixtures like 1465 (`int a[3] =
+                // {1,2,3}`), 1475 (partial init), 1476 (`char s[6] =
+                // "hi"`), 1481, 1516 (all-zero), and many more.
+                if matches!(ty, Type::Array { .. })
+                    && let Some(bytes) = flatten_init_to_bytes(ty, init)
+                {
+                    let size = bytes.len() as u32;
+                    let pool_off = self.strings.intern_blob(&bytes);
+                    let src_addr = if pool_off == 0 {
+                        "offset DGROUP:s@".to_owned()
+                    } else {
+                        format!("offset DGROUP:s@+{pool_off}")
+                    };
+                    self.out.extend_from_slice(b"\tpush\tss\r\n");
+                    let _ = write!(self.out, "\tlea\tax,{}\r\n", bp_addr(off));
+                    self.out.extend_from_slice(b"\tpush\tax\r\n");
+                    self.out.extend_from_slice(b"\tpush\tds\r\n");
+                    let _ = write!(self.out, "\tmov\tax,{src_addr}\r\n");
+                    self.out.extend_from_slice(b"\tpush\tax\r\n");
+                    let _ = write!(self.out, "\tmov\tcx,{size}\r\n");
+                    self.out.extend_from_slice(b"\tcall\tnear ptr N_SCOPY@\r\n");
+                    self.helpers.insert("N_SCOPY@".to_string());
+                    return;
+                }
                 // `long x = K;` stack local — two word stores, high
                 // word at the upper slot offset then low word at the
                 // lower slot. Mirrors fixture 205's global-long shape.

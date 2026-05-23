@@ -424,13 +424,15 @@ fn write_tail(
 
     out.extend_from_slice(b"_DATA\tsegment word public 'DATA'\r\n");
     out.extend_from_slice(b"s@\tlabel\tbyte\r\n");
-    // String literals materialize here. Each entry becomes a
-    // `db '<chars>' / db 0` pair, with the NUL terminator written
-    // explicitly so escapes inside the literal don't have to be
-    // re-quoted. Fixtures 088, 089.
+    // String literals and array-init blobs both materialize here in
+    // the order they were interned. Strings get a `db '<chars>' / db
+    // 0` pair (fixtures 088, 089); blobs get the raw byte image
+    // (fixture 1481's `int a[3] = {10,20,30}` → 6 bytes of payload).
     for entry in strings.entries() {
-        emit_string_literal_db(out, entry);
-        out.extend_from_slice(b"\tdb\t0\r\n");
+        emit_string_literal_db(out, &entry.bytes);
+        if entry.nul {
+            out.extend_from_slice(b"\tdb\t0\r\n");
+        }
     }
     out.extend_from_slice(b"_DATA\tends\r\n");
     out.extend_from_slice(b"_TEXT\tsegment byte public 'CODE'\r\n");
