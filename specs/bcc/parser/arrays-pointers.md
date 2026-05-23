@@ -6682,3 +6682,27 @@ Findings:
 - Standard C array decay rule applied.
 - Same shape as local int arr passed to fn.
 
+
+## `*dst = *src + 1` — via di/si with inc
+
+Fixture `3184-ptr-deref-add-store-obj`:
+
+```c
+void incr(int *dst, int *src) {
+  *dst = *src + 1;
+}
+```
+
+```
+8b 76 04                       mov si, dst
+8b 7e 06                       mov di, src
+8b 05                          mov ax, [di]    (*src)
+40                             inc ax          (+1, 1B)
+89 04                          mov [si], ax    (*dst = ...)
+```
+
+Findings:
+- Load via di + inc + store via si. 7B expression body.
+- `inc ax` (1B) optimal for +1 add.
+- Same pattern as `*dst = *src` (`2993`) plus the inc.
+

@@ -3792,3 +3792,75 @@ Findings:
   C div rounds toward 0.
 - Constant divisor (2L) loaded into DX:AX and pushed.
 
+
+## Long shift right helpers — signed `N_LXRSH@` vs unsigned `N_LXURSH@`
+
+Fixtures `3179-long-sar-4-obj`, `3180-ulong-shr-4-obj`:
+
+```c
+long v >> 4;          /* signed:   N_LXRSH@  */
+unsigned long v >> 4; /* unsigned: N_LXURSH@ */
+```
+
+Both use same fast-call convention: DX:AX value, CL count.
+
+Findings:
+- **Signed long `>> N`**: `N_LXRSH@` (8 chars).
+- **Unsigned long `>> N`**: `N_LXURSH@` (9 chars).
+- Different helpers because signed uses sar semantics (sign-fill),
+  unsigned uses shr semantics (zero-fill).
+
+## Long mod `a % b` — `N_LMOD@` helper
+
+Fixture `3181-long-mod-obj`:
+
+```c
+return a % b;
+```
+
+Same 4-push pattern as `N_LDIV@`, with helper name `N_LMOD@`.
+
+Long helper table now complete:
+- `N_LXMUL@` — multiply (fast-call CX:BX × DX:AX)
+- `N_LDIV@` — signed div (stack args)
+- `N_LUDIV@` — unsigned div (stack args)
+- `N_LMOD@` — signed mod (stack args)
+- `N_LXLSH@` — left shift
+- `N_LXRSH@` — signed right shift (sar)
+- `N_LXURSH@` — unsigned right shift (shr)
+
+## `(int)long_var` truncate cast — single LOW word load (3B)
+
+Fixture `3182-long-to-int-cast-obj`:
+
+```c
+int trunc(long v) { return (int)v; }
+```
+
+```
+8b 46 04                       mov ax, [bp+4]    (LOW word, HIGH discarded)
+```
+
+Findings:
+- Long-to-int truncate = single word load (3B).
+- HIGH word silently discarded.
+
+## `(long)signed_char` widening — `cbw + cwd` two-step sign-extend
+
+Fixture `3183-char-to-long-cast-obj`:
+
+```c
+long widen(char c) { return (long)c; }
+```
+
+```
+8a 46 04                       mov al, c
+98                             cbw   (char → int, sign-ext AL→AX)
+99                             cwd   (int → long, sign-ext AX→DX:AX)
+```
+
+Findings:
+- Two-step sign-extension: `cbw` then `cwd`.
+- 5 bytes total.
+- For `(long)unsigned char`: `mov ah, 0; xor dx, dx` zero-extend variants.
+
