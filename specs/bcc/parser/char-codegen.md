@@ -2380,3 +2380,25 @@ Findings:
 - Signed throughout (BCC default char = signed).
 - 16B body.
 
+
+## `int x = char_param;` then use — cbw widen + store + reload
+
+Fixture `3633-char-to-int-assign-obj`:
+
+```c
+int widen(char c) { int x = c; return x + 1; }
+```
+
+```
+4c 4c                          dec sp; dec sp   (alloc x)
+8a 46 04                       mov al, c
+98                             cbw
+89 46 fe                       mov [bp-2], ax   (x = int(c))
+8b 46 fe                       mov ax, [bp-2]
+40                             inc ax
+```
+
+Findings:
+- 13B body. Standard widening on assignment.
+- Subsequent use reloads from x's slot (statement-boundary IR).
+

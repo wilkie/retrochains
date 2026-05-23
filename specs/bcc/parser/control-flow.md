@@ -6042,3 +6042,22 @@ Findings:
 - 21B body. x reg-allocated to SI, used for both comparisons.
 - Dual-exit to common FALSE.
 
+
+## `enum {A,...} x; x == A` — int compare with 0
+
+Fixture `3631-enum-eq-zero-obj`:
+
+```c
+enum St { ST_A, ST_B, ST_C };
+int is_a(enum St x) { if (x == ST_A) return 1; return 0; }
+```
+
+```
+83 7e 04 00                    cmp x, 0
+75 05                          jne ELSE
+```
+
+Findings:
+- enum constants are int literals. `ST_A == 0` produces standard mem-imm8 cmp.
+- 13B body. Identical to comparing with integer `0`.
+

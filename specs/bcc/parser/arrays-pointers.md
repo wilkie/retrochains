@@ -7799,3 +7799,22 @@ Findings:
 - Char widened via `cbw` before push (varargs/promotion).
 - 22B body.
 
+
+## `p + n + 1` (int*) — scaled n + push/pop + inc-pair for +1
+
+Fixture `3632-ptr-double-add-obj`:
+
+```
+8b 46 06                       mov ax, n
+d1 e0                          shl ax, 1
+50                             push ax
+8b 46 04                       mov ax, p
+5a                             pop dx
+03 c2                          add ax, dx       (p + n*2)
+40 40                          inc ax; inc ax   (+ 2 = +1 for int*)
+```
+
+Findings:
+- 14B body. Scaled n via push/pop pattern (12B pattern from 3380).
+- `+1` for int* = +2 bytes, emitted as 2× inc ax (2B) beating `add ax, 2` (3B).
+

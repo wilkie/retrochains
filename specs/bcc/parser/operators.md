@@ -3409,3 +3409,44 @@ Findings:
 - Uses `or si, si` cmp-zero peephole.
 - 20B body.
 
+
+## `g = arr[const]` — 2 AX-short ops with FIXUPP'd offsets
+
+Fixture `3629-g-from-arr-obj`:
+
+```
+a1 ?? ?? [FIXUPP _arr + 6]     mov ax, [_arr + 6]
+a3 ?? ?? [FIXUPP _g]           mov [_g], ax
+```
+
+Findings:
+- 6B body. Two `a1 imm16` / `a3 imm16` AX-short forms.
+- Const offset folded into FIXUPP-target disp16.
+
+## `sizeof(int)` — 3B `mov ax, 2`
+
+Fixture `3630-sizeof-int-obj`:
+
+```
+b8 02 00                       mov ax, 2
+```
+
+Findings:
+- BCC 2.0 has 16-bit `int` (sizeof(int) = 2).
+- Pure compile-time constant.
+
+## `x << (a + b)` — byte-only arithmetic for CL (shift count)
+
+Fixture `3634-shift-by-shift-obj`:
+
+```
+8a 4e 06                       mov cl, a       (byte of int's LSB)
+02 4e 08                       add cl, b       (byte add — only LSB matters for shift)
+8b 46 04                       mov ax, x
+d3 e0                          shl ax, cl
+```
+
+Findings:
+- 11B body. CL only needs the low 5 bits for shift count (8086 limit).
+- BCC uses 8-bit add (`02 /r`) directly on CL — saves vs full int add + truncate.
+
