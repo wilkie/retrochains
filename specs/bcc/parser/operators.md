@@ -1794,3 +1794,43 @@ Findings:
 - 8 bytes for the compare.
 - Same peephole as `if (a + b > 0)` (`3254`).
 
+
+## `(a & K) == 0` — `test mem, imm16` (smart peephole, no AND result)
+
+Fixture `3264-and-then-eq-0-obj`:
+
+```c
+if ((a & 0xFF) == 0) return 1;
+```
+
+```
+f7 46 04 ff 00                 test word [bp+4], 0x00FF
+75 05                          jne → FALSE
+```
+
+Findings:
+- `(a & K) == 0` compiles to `test mem, imm16` (5B).
+- `test` is non-destructive AND that only sets flags.
+- No need to load `a`, AND, then compare — single instruction does both.
+- Saves bytes vs naive sequence.
+- ModR/M `46 disp8` = [bp+disp8]; opcode `f7 /0` = test imm16.
+
+## `p->x == 0` (first field) — `cmp word [si], 0` (3B sign-ext)
+
+Fixture `3267-ptr-field-eq-0-obj`:
+
+```c
+if (p->x == 0) return 1;
+```
+
+```
+8b 76 04                       mov si, p
+83 3c 00                       cmp word [si], 0      (3B, no-disp form)
+75 05                          jne → FALSE
+```
+
+Findings:
+- `[si]` no-disp form with imm8 sign-ext = 3B cmp.
+- ModR/M `3c` = mod 00, op-ext 111 (cmp /7), r/m 100 ([si]).
+- For non-zero field offset: `cmp word [si + disp8], 0` (4B).
+

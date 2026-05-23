@@ -3983,3 +3983,22 @@ Findings:
 - Smart peephole using OR's flag side-effect.
 - Works because (LOW | HIGH) == 0 iff both halves are 0.
 
+
+## `long v != 0L` — OR + je-to-FALSE (mirror of `== 0L`)
+
+Fixture `3263-long-ne-0L-obj`:
+
+```c
+if (v != 0L) return 1;
+```
+
+```
+8b 46 04                       mov ax, LOW
+0b 46 06                       or ax, HIGH
+74 05                          je → FALSE     (BOTH zero means !=0 is FALSE)
+```
+
+Findings:
+- Same OR peephole as `long == 0L` (`3261`).
+- Inverse jump: `je → FALSE` (vs `jne → FALSE` for `==0L`).
+
