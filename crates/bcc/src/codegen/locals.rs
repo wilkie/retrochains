@@ -449,6 +449,14 @@ impl Locals {
         &self.entry(name).ty
     }
 
+    /// Iterator over `(name, type)` of every recorded local — params
+    /// and stack locals. Used by struct-tag lookups that need to find
+    /// a full struct definition that lives only in a local's
+    /// declared type.
+    pub fn iter_types(&self) -> impl Iterator<Item = (&str, &Type)> {
+        self.by_name.iter().map(|(n, e)| (n.as_str(), &e.ty))
+    }
+
     /// Signed bp-offset of the scrutinee-spill stack slot for a
     /// linear-search switch (keyed by its statement span_start).
     /// Panics for switches that aren't linear-search — only that

@@ -113,6 +113,33 @@ impl GlobalTable {
         self.map.get(name)
     }
 
+    /// Find a struct definition by its tag name. Some AST nodes
+    /// (notably `Type::Pointer(Struct{name, fields:[], …})`) carry a
+    /// name-only placeholder where the recursive struct definition
+    /// would otherwise create a cycle. To resolve fields off such a
+    /// pointer we look up a full instance of the same tag among the
+    /// globals' types. Returns the first struct found whose tag
+    /// matches; the struct definition is unique by tag at file scope.
+    #[must_use]
+    pub fn lookup_struct_by_tag(&self, tag: &str) -> Option<&crate::ast::Type> {
+        fn find<'a>(ty: &'a crate::ast::Type, tag: &str) -> Option<&'a crate::ast::Type> {
+            match ty {
+                crate::ast::Type::Struct { name: Some(t), fields, .. }
+                    if t == tag && !fields.is_empty() =>
+                {
+                    Some(ty)
+                }
+                crate::ast::Type::Struct { fields, .. } => {
+                    fields.iter().find_map(|f| find(&f.ty, tag))
+                }
+                crate::ast::Type::Array { elem, .. } => find(elem, tag),
+                crate::ast::Type::Pointer(inner) => find(inner, tag),
+                _ => None,
+            }
+        }
+        self.map.values().find_map(|t| find(t, tag))
+    }
+
     #[must_use]
     pub fn contains(&self, name: &str) -> bool {
         self.map.contains_key(name)
@@ -1646,6 +1673,38 @@ impl<'a> FunctionEmitter<'a> {
             self.out.extend_from_slice(b"\tshl\tax,1\r\n");
         }
         self.out.extend_from_slice(b"\tmov\tbx,ax\r\n");
+    }
+
+    /// Find a struct definition with the given tag by scanning both
+    /// globals and locals. Globals' types come from `GlobalTable`;
+    /// locals' types live in `Locals`. Returns the first complete
+    /// (non-placeholder) struct match. Used to resolve fields off a
+    /// `Type::Pointer(Struct{name-only, fields:[]})` placeholder that
+    /// the AST stores when a recursive struct type would otherwise
+    /// require a cycle.
+    fn lookup_struct_by_tag(&self, tag: &str) -> Option<Type> {
+        fn find<'a>(ty: &'a Type, tag: &str) -> Option<&'a Type> {
+            match ty {
+                Type::Struct { name: Some(t), fields, .. }
+                    if t == tag && !fields.is_empty() =>
+                {
+                    Some(ty)
+                }
+                Type::Struct { fields, .. } => fields.iter().find_map(|f| find(&f.ty, tag)),
+                Type::Array { elem, .. } => find(elem, tag),
+                Type::Pointer(inner) => find(inner, tag),
+                _ => None,
+            }
+        }
+        if let Some(g) = self.globals.lookup_struct_by_tag(tag) {
+            return Some(g.clone());
+        }
+        for (_, ty) in self.locals.iter_types() {
+            if let Some(found) = find(ty, tag) {
+                return Some(found.clone());
+            }
+        }
+        None
     }
 
     /// Resolve an int-like lvalue (global or stack-resident local) to
@@ -6160,10 +6219,37 @@ impl<'a> FunctionEmitter<'a> {
     ///   and index can be either register- or stack-resident; only
     ///   the all-stack form is captured today.
     fn emit_deref_to_ax(&mut self, ptr: &Expr) {
+        // `*(a + i)` where `a` is a global array (or char array): the
+        // `a + i` is array-decay + variable offset. Same byte shape
+        // as the array-index path: scale i into BX, then read
+        // through `[bx + _a]`. Fixture 1379.
+        if let ExprKind::BinOp { op: BinOp::Add, left, right } = &ptr.kind
+            && let ExprKind::Ident(name) = &left.kind
+            && let Some(gty) = self.globals.type_of(name)
+            && let Some(elem_ty) = gty.array_elem()
+        {
+            let elem_ty = elem_ty.clone();
+            let width = ptr_width(&elem_ty);
+            self.emit_index_into_bx(right, &elem_ty);
+            if elem_ty.is_char_like() {
+                let _ = write!(
+                    self.out,
+                    "\tmov\tal,byte ptr DGROUP:_{name}[bx]\r\n",
+                );
+                self.emit_widen_al(&elem_ty);
+            } else {
+                let _ = write!(
+                    self.out,
+                    "\tmov\tax,{width} ptr DGROUP:_{name}[bx]\r\n",
+                );
+            }
+            return;
+        }
         // `*(p + offset)` shapes go through a shared helper that
         // builds the addressing mode.
         if let ExprKind::BinOp { op: BinOp::Add, left, right } = &ptr.kind
             && let ExprKind::Ident(name) = &left.kind
+            && self.locals.has(name)
         {
             let ty = self.locals.type_of(name).clone();
             if let Some(pointee) = ty.pointee() {
@@ -7768,11 +7854,96 @@ impl<'a> FunctionEmitter<'a> {
                 return;
             }
         }
+        // `(<dot-chain>)-><field>` — base is a Dot-chain whose leaf
+        // is a pointer-to-struct. Load that pointer into BX, then
+        // read through `[bx+field_off]`. Fixture 1419 (`a.next->v`
+        // with a global struct having a struct-pointer field).
+        //
+        // The pointed-to struct's fields aren't carried in the AST
+        // type (Pointer holds a name-only placeholder), so we look up
+        // the full struct definition via `lookup_struct_by_tag`.
+        if matches!(kind, crate::ast::MemberKind::Arrow)
+            && let ExprKind::Member { base: inner_base, field: inner_field, kind: crate::ast::MemberKind::Dot } = &base.kind
+            && let Some((root_name, total_off, leaf_ty)) = self.try_member_dot_chain(inner_base, inner_field)
+            && let Some(pointee) = leaf_ty.pointee()
+            && let Type::Struct { name: Some(tag), .. } = pointee
+            && let Some(full_ty) = self.lookup_struct_by_tag(tag)
+            && let Some((field_off, field_ty)) = full_ty.field(field)
+        {
+            let load_addr = if self.globals.contains(&root_name) {
+                if total_off == 0 {
+                    format!("DGROUP:_{root_name}")
+                } else {
+                    format!("DGROUP:_{root_name}+{total_off}")
+                }
+            } else {
+                let LocalLocation::Stack(base_bp) = self.locals.location_of(&root_name) else {
+                    panic!("struct local `{root_name}` not stack-resident");
+                };
+                let off = base_bp + i16::try_from(total_off).unwrap_or(i16::MAX);
+                bp_addr(off)
+            };
+            let _ = write!(self.out, "\tmov\tbx,word ptr {load_addr}\r\n");
+            let bx_disp = if field_off == 0 {
+                "[bx]".to_owned()
+            } else {
+                format!("[bx+{field_off}]")
+            };
+            if field_ty.is_char_like() {
+                let _ = write!(self.out, "\tmov\tal,byte ptr {bx_disp}\r\n");
+                self.emit_widen_al(&field_ty);
+            } else {
+                let _ = write!(self.out, "\tmov\tax,word ptr {bx_disp}\r\n");
+            }
+            return;
+        }
+        // `make().a` — Member access on a function-call result. For a
+        // struct that fits in 4 bytes, the callee returns it in DX:AX
+        // (AX = low half = first field, DX = high half = second
+        // field). After the call, the requested field is already in
+        // AX or DX. Fixtures 2629, 2634.
+        if matches!(kind, crate::ast::MemberKind::Dot)
+            && let ExprKind::Call { name: fname, args } = &base.kind
+            && args.is_empty()
+            && let Some(ret_ty) = self.signatures.ret_ty_of(fname)
+            && let Type::Struct { fields, size, .. } = ret_ty
+            && *size <= 4
+            && let Some(field_info) = fields.iter().find(|f| f.name == field)
+        {
+            let _ = write!(self.out, "\tcall\tnear ptr _{fname}\r\n");
+            // 2B struct: field at offset 0 already in AX. 4B struct:
+            // offset 0 in AX, offset 2 in DX.
+            if field_info.offset == 2 {
+                self.out.extend_from_slice(b"\tmov\tax,dx\r\n");
+            }
+            return;
+        }
         // Arrow path (or Dot whose base isn't a const-chain lvalue):
         // base must be a bare Ident referring to a pointer.
         let ExprKind::Ident(name) = &base.kind else {
             panic!("non-ident base in member access not yet supported (no fixture)");
         };
+        // `<global_ptr>-><field>` rvalue: load the pointer into BX,
+        // then read through `[bx+field_off]`. Fixture 1429.
+        if matches!(kind, crate::ast::MemberKind::Arrow)
+            && let Some(gty) = self.globals.type_of(name)
+            && let Some(pointee) = gty.pointee()
+            && let Some((field_off, field_ty)) = pointee.field(field)
+        {
+            let _ = write!(self.out, "\tmov\tbx,word ptr DGROUP:_{name}\r\n");
+            let bx_disp = if field_off == 0 {
+                "[bx]".to_owned()
+            } else {
+                format!("[bx+{field_off}]")
+            };
+            if field_ty.is_char_like() {
+                let _ = write!(self.out, "\tmov\tal,byte ptr {bx_disp}\r\n");
+                self.emit_widen_al(&field_ty);
+            } else {
+                let _ = write!(self.out, "\tmov\tax,word ptr {bx_disp}\r\n");
+            }
+            return;
+        }
         let base_ty = self.locals.type_of(name).clone();
         let (field_off, field_ty) = match kind {
             crate::ast::MemberKind::Dot => base_ty.field(field).unwrap_or_else(|| {
@@ -7845,6 +8016,38 @@ impl<'a> FunctionEmitter<'a> {
             let ExprKind::Ident(name) = &base.kind else {
                 panic!("non-ident base in member assign not yet supported (no fixture)");
             };
+            // `<global_ptr>-><field> = …`: load the global pointer
+            // into BX, then write through `[bx+field_off]`. Fixture
+            // 1429.
+            if matches!(kind, crate::ast::MemberKind::Arrow)
+                && let Some(gty) = self.globals.type_of(name)
+                && let Some(pointee) = gty.pointee()
+                && let Some((field_off, field_ty)) = pointee.field(field)
+            {
+                let _ = write!(self.out, "\tmov\tbx,word ptr DGROUP:_{name}\r\n");
+                let bx_disp = if field_off == 0 {
+                    "[bx]".to_owned()
+                } else {
+                    format!("[bx+{field_off}]")
+                };
+                if let Some(v) = try_const_eval(value) {
+                    if field_ty.is_char_like() {
+                        let v8 = v & 0xFF;
+                        let _ = write!(self.out, "\tmov\tbyte ptr {bx_disp},{v8}\r\n");
+                    } else {
+                        let v16 = v & 0xFFFF;
+                        let _ = write!(self.out, "\tmov\tword ptr {bx_disp},{v16}\r\n");
+                    }
+                    return;
+                }
+                self.emit_expr_to_ax(value);
+                if field_ty.is_char_like() {
+                    let _ = write!(self.out, "\tmov\tbyte ptr {bx_disp},al\r\n");
+                } else {
+                    let _ = write!(self.out, "\tmov\tword ptr {bx_disp},ax\r\n");
+                }
+                return;
+            }
             let base_ty = self.locals.type_of(name).clone();
             let (field_off, field_ty) = match kind {
                 crate::ast::MemberKind::Dot => base_ty.field(field).unwrap_or_else(|| {
