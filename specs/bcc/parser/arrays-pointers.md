@@ -6855,3 +6855,25 @@ Findings:
 - 3 bytes with FIXUPP.
 - For int arr, would be FIXUPP'd with `K * 2`.
 
+
+## Unsigned char arr `uchar arr[10]; arr[i]` — byte load + zero-extend
+
+Fixture `3243-uchar-arr-var-idx-obj`:
+
+```c
+unsigned char arr[10];
+return arr[i];
+```
+
+```
+8b 76 04                       mov si, i
+8a 84 00 00                    mov al, [si + _arr]   (FIXUPP, no scale)
+b4 00                          mov ah, 0              (ZERO-extend)
+```
+
+Findings:
+- 9 bytes total.
+- For signed char arr (`3231`): 8 bytes (uses cbw instead).
+- Unsigned variant is **1 byte longer** due to `mov ah, 0` (2B)
+  vs `cbw` (1B).
+

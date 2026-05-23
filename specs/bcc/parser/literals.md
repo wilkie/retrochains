@@ -737,3 +737,31 @@ Findings:
 - `a == b` evaluates to FALSE since pointers differ.
 - For 2 occurrences of "hello", 12 bytes wasted (vs 6 if interned).
 
+
+## `char *strs[] = {"abc", "def", "ghi"}` — ptr arr + interned-once strings
+
+Fixture `3239-str-ptr-arr-obj`:
+
+`_DATA` layout (18 bytes):
+- offset 0..6: 3 ptrs (FIXUPP'd to string offsets within _DATA)
+- offset 6..10: "abc\0"
+- offset 10..14: "def\0"
+- offset 14..18: "ghi\0"
+
+Findings:
+- Each ptr-arr element gets a FIXUPP to its respective string.
+- 6 bytes for the ptr arr + 12 bytes for 3 4-byte strings.
+
+## `const int g = 42` — same as `int g = 42` (no const-folding)
+
+Fixture `3241-const-int-obj`:
+
+`_DATA` for `_g`: `2a 00` (= 42)
+Body for `peek()`: `mov ax, [_g]` (3B with FIXUPP).
+
+Findings:
+- BCC does NOT const-fold global `const int` reads. Still emits
+  the memory load.
+- Compare to enum constants which substitute at compile time.
+- `const` is type-system only; no codegen benefit.
+

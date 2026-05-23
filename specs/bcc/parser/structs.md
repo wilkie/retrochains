@@ -3703,3 +3703,41 @@ Findings:
 - 13 bytes for the sum (vs ~7B for two int fields).
 - DX as second-load register; AX gets the result.
 
+
+## Triple-nested struct field `c.b.a.x` — offset folded at compile time
+
+Fixture `3244-nested-2-struct-obj`:
+
+```c
+struct A { int x; };
+struct B { struct A a; int y; };
+struct C { struct B b; int z; };
+struct C c;
+return c.b.a.x;
+```
+
+```
+a1 00 00                       mov ax, [_c + 0]
+```
+
+Findings:
+- All 3 levels of nested struct access are folded into a single
+  offset at parse time.
+- `c.b.a.x` = `_c + offset(b) + offset(a) + offset(x) = 0 + 0 + 0`.
+- 3 bytes for the full nested access.
+
+## `arr[i].x = v` (struct array write) — scale + indexed store with FIXUPP
+
+Fixture `3240-arr-struct-write-obj`:
+
+```c
+struct P arr[3];
+arr[i].x = v;
+```
+
+```
+8b 5e 04 d1 e3 d1 e3            mov bx, i; shl bx, 1 × 2  (i × sizeof(P)=4)
+8b 46 06                        mov ax, v
+89 87 00 00                     mov [bx + _arr + 0], ax   (field offset 0)
+```
+
