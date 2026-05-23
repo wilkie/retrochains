@@ -2802,6 +2802,27 @@ impl<'a> FunctionEmitter<'a> {
     /// 3. LHS is a stack local and RHS is a constant: `cmp word ptr [bp-N], K`
     /// 4. Otherwise: `mov ax, <lhs>` then `cmp ax, <rhs>`
     fn emit_compare(&mut self, left: &Expr, right: &Expr) {
+        // `*p <relop> K` for register-resident pointer p: emit
+        // memory-direct `cmp <width> ptr [<reg>], K` instead of
+        // loading to AX first. Matches BCC's actual shape for
+        // `while (*s != 0)` (fixture 1408) and `if (*r == 0)`
+        // (fixture 1566).
+        if let ExprKind::Deref(operand) = &left.kind
+            && let ExprKind::Ident(name) = &operand.kind
+            && self.locals.has(name)
+            && let LocalLocation::Reg(reg) = self.locals.location_of(name)
+            && let Some(pointee) = self.locals.type_of(name).pointee()
+            && let Some(rhs) = try_const_eval(right)
+        {
+            let width = if pointee.is_char_like() { "byte" } else { "word" };
+            let rhs_masked = if pointee.is_char_like() { rhs & 0xFF } else { rhs & 0xFFFF };
+            let _ = write!(
+                self.out,
+                "\tcmp\t{width} ptr [{}],{rhs_masked}\r\n",
+                reg.name(),
+            );
+            return;
+        }
         if let Some(reg) = self.ident_in_register(left) {
             // Char in a byte register: 8-bit cmp with byte-truncated
             // immediate (fixture 054). Non-constant RHS is unobserved.
