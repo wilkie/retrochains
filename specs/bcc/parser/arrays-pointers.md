@@ -6087,3 +6087,18 @@ Findings:
 - Compare to `**pp` for int (`2721`) which is a similar 3-load
   chain ending in word load instead of byte load + cbw.
 
+
+## `int *p = (int *)0;` — NULL ptr init (no FIXUPP, just zero bytes)
+
+Fixture `2968-null-explicit-obj`:
+
+`_DATA` for `_p` (2 bytes): `00 00` (no FIXUPP needed!)
+
+Findings:
+- Explicit NULL pointer init = just `00 00` in `_DATA`. NO FIXUPP
+  record (no symbol to relocate).
+- Same byte layout as `int g = 0`.
+- Compare to `int *p = &target` which DOES have a FIXUPP record.
+- BCC treats `(int *)0` as a constant pointer value 0, distinct from
+  taking the address of any symbol.
+

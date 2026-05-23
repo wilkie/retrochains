@@ -1379,3 +1379,66 @@ Fixture `2960-deref-dot-obj`:
 `(*p).x` and `p->x` both compile to `mov si, p; mov ax, [si]` (5B).
 BCC normalizes both syntactic forms to the same AST.
 
+
+## `cmp r, -128` vs `cmp r, -129` — negative-side boundary at -128
+
+Fixtures `2963-cmp-neg128-obj`, `2964-cmp-neg129-obj`:
+
+```
+                               ; cmp -128:
+83 7e 04 80                    cmp word [bp+4], 0x80 (= -128 sign-ext)  (4B)
+
+                               ; cmp -129:
+81 7e 04 7f ff                 cmp word [bp+4], 0xFF7F (= -129)         (5B)
+```
+
+Findings:
+- **-128 (`0x80`) FITS signed imm8** → 3B opcode form. The byte `0x80`
+  sign-extends to `0xFF80` (= -128 as int16).
+- **-129 (`0xFF7F`) doesn't fit** → 4B opcode form (imm16).
+- Full signed imm8 range confirmed: exactly `[-128, 127]`.
+
+## Constant-condition ternary — DEAD-BRANCH ELIMINATION
+
+Fixtures `2965-ternary-const-true-obj`, `2966-ternary-const-false-obj`:
+
+```c
+return 1 ? a : b;   /* compiles to: return a */
+return 0 ? a : b;   /* compiles to: return b */
+```
+
+```
+                               ; 1 ? a : b:
+8b 46 04                       mov ax, a    (just return a)
+
+                               ; 0 ? a : b:
+8b 46 06                       mov ax, b    (just return b)
+```
+
+Findings:
+- **BCC constant-folds ternaries with literal conditions** —
+  dead branch entirely eliminated.
+- `1 ? a : b` collapses to `a`; `0 ? a : b` collapses to `b`.
+- This is DCE for **expression-level constant evaluation**,
+  distinct from the no-DCE pattern for statements-after-return.
+- BCC's const-fold pass is smarter than just identity-folding —
+  it also handles selector-based branch elimination.
+
+## `0 == x` — commutative, byte-identical to `x == 0`
+
+Fixture `2967-zero-eq-x-obj`:
+
+```c
+if (0 == x) return 1;
+```
+
+```
+83 7e 04 00                    cmp word [bp+4], 0
+75 05                          jne → ZERO
+```
+
+Findings:
+- `0 == x` (Yoda condition) compiles to identical bytes as
+  `x == 0` — BCC normalizes the commutative comparison.
+- The constant 0 is always placed on the RHS of the cmp instruction.
+
