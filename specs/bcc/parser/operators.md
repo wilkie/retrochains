@@ -1672,3 +1672,42 @@ return a ? b : (c ? 10 : 20);
 
 Compiles to nested if-then-else cmp+je structure (no special handling).
 
+
+## `~x` and `-x` — single F7 opcode forms
+
+Fixtures `3152-bitwise-not-obj`, `3153-unary-neg-obj`:
+
+```c
+return ~x;   /* f7 d0 = not ax (2B) */
+return -x;   /* f7 d8 = neg ax (2B) */
+```
+
+Findings:
+- F7-group unary ops on AX:
+  - `f7 d0` = `not ax` (op-ext /2)
+  - `f7 d8` = `neg ax` (op-ext /3)
+- Each 2 bytes.
+- For memory operands: `f7 16 disp16` (not [mem]) or `f7 1e disp16` (neg [mem]).
+
+## `(long)int_var` widening cast — `cwd` (sign-extend to DX:AX)
+
+Fixture `3154-int-to-long-cast-obj`:
+
+```c
+long widen(int x) {
+  return (long)x;
+}
+```
+
+```
+8b 46 04                       mov ax, x       (LOW word)
+99                             cwd             (sign-extend AX → DX:AX)
+```
+
+Findings:
+- Int-to-long widening = load AX + `cwd` (1B).
+- `cwd` sign-extends AX into DX (DX = 0x0000 if positive, 0xFFFF if negative).
+- DX:AX is the long return convention.
+- For unsigned int → unsigned long: `xor dx, dx` (2B) zero-extend.
+- 4 bytes total for the signed cast.
+

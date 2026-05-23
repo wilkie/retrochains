@@ -1916,3 +1916,28 @@ Findings:
 - ModR/M `3e` = mod 00, cmp op-ext (/7), r/m 110 (disp16).
 - 5 bytes for the compare. NO load to AL first.
 
+
+## `char c <<= 1` local — `shl dl, 1` (byte shift, uses DL not AL)
+
+Fixture `3151-char-shl-eq-1-obj`:
+
+```c
+char c;
+c <<= 1;
+return c;
+```
+
+```
+8a 56 04                       mov dl, c       (loaded into DL!)
+d0 e2                          shl dl, 1       (8-bit shift, 2B)
+8a c2                          mov al, dl      (transfer to AL)
+98                             cbw             (promote for int return)
+```
+
+Findings:
+- Byte shift uses `d0 /op` opcode form for 8-bit shifts.
+- ModR/M `e2` = op-ext 100 (shl), r/m 010 (DL).
+- Loaded into DL not AL — likely so cbw doesn't clobber the value
+  pre-shift.
+- 8 bytes total: 3B mov + 2B shl + 2B mov + 1B cbw.
+

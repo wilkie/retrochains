@@ -4650,3 +4650,23 @@ Findings:
 - The post-inc/pre-inc distinction only matters when the result
   value is consumed by another expression.
 
+
+## `for(...; i += 2)` step-2 — 2× `inc si` (saves 1B over `add si, 2`)
+
+Fixture `3150-for-step-2-obj`:
+
+```c
+for (i = 0; i < n; i += 2) ...
+```
+
+```
+                               ; POST-step (2B):
+46 46                          inc si; inc si    (i += 2)
+```
+
+Findings:
+- `i += 2` post-step = **2× `inc si`** (2 bytes, 1 byte each).
+- `add si, 2` (3B imm8) would be 1 byte longer.
+- Same unrolling pattern as `*p++` for int* (`3102`).
+- Likely unrolled for N ∈ {1, 2, 3}; N ≥ 4 uses `add`.
+
