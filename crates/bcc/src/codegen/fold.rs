@@ -36,8 +36,16 @@ pub fn try_const_eval(e: &Expr) -> Option<u32> {
         | ExprKind::StringLit(_)
         | ExprKind::Member { .. }
         | ExprKind::Ternary { .. }
-        | ExprKind::InitList { .. }
-        | ExprKind::Comma { .. } => None,
+        | ExprKind::InitList { .. } => None,
+        // `(a, b)` const-folds to `b`'s value when BOTH sides fold —
+        // the left side has no observable effect when it's a pure
+        // constant, and the comma's value is always the right. Lets
+        // `int x = (5, 7);` (fixture 1662) collapse to `int x = 7`
+        // and use the immediate-store init shape.
+        ExprKind::Comma { left, right } => {
+            let _ = try_const_eval(left)?;
+            try_const_eval(right)
+        }
         ExprKind::Cast { ty, operand } => {
             let v = try_const_eval(operand)?;
             // Truncate to the target type's width, then sign-extend
