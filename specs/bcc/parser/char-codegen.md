@@ -2184,3 +2184,30 @@ Findings:
 - Bit-identical reinterpretation. No widening or extension.
 - 3B body. Cast is purely a type annotation; no codegen.
 
+
+## `unsigned char > unsigned char` — byte cmp + `jbe` (unsigned)
+
+Fixture `3542-uchar-cmp-obj`:
+
+```
+8a 46 04                       mov al, a
+3a 46 06                       cmp al, b
+76 05                          jbe ELSE         (unsigned ≤)
+```
+
+Findings:
+- `cmp r8, r/m8` (3B). No widening since both are unsigned char.
+- Unsigned branch (`jbe`) used since types are unsigned.
+
+## char `return 0` — 2B `mov al, 0`
+
+Fixture `3543-char-ret-zero-obj`:
+
+```
+b0 00                          mov al, 0
+```
+
+Findings:
+- Smallest non-void char return: 2B.
+- Could equivalently be `xor al, al` (2B) — BCC chose `mov`.
+

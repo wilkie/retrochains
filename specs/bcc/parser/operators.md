@@ -3068,3 +3068,31 @@ Findings:
 - 14B body — same as `(a == b)` for the wrap.
 - **Excellent peephole.** Confirms BCC's test-peephole detector.
 
+
+## `(x & mask) != 0` (var mask) — `test [mem], reg` (3B instruction)
+
+Fixture `3539-bit-test-var-obj`:
+
+```
+8b 46 06                       mov ax, mask
+85 46 04                       test [bp+4], ax    (test r/m, r16)
+74 05                          je ELSE
+```
+
+Findings:
+- `test r/m, reg` (3B) — non-destructive AND on mem and reg.
+- 15B body. Cleaner than load + and + cmp.
+
+## `(x & K) == 0` — same `test [mem], K`, but `jne` for inversion
+
+Fixture `3540-bit-test-zero-obj`:
+
+```
+f7 46 04 10 00                 test word [bp+4], 0x10    (5B)
+75 05                          jne ELSE
+```
+
+Findings:
+- Same `test [mem], imm16` peephole as `!= 0` (3536).
+- Branch polarity flipped: `jne` (skip true branch when set) vs `je` for `!= 0`.
+

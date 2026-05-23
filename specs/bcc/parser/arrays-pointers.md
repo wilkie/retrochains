@@ -7508,3 +7508,47 @@ Findings:
 - AX from call flows directly into the store.
 - 9B body. Clean.
 
+
+## `arr[i]->v` for `struct S *arr[]` — chained indexing + deref
+
+Fixture `3541-arr-of-sptr-obj`:
+
+```c
+struct S { int v; };
+struct S *arr[3];
+int pick(int i) { return arr[i]->v; }
+```
+
+```
+8b 5e 04                       mov bx, i
+d1 e3                          shl bx, 1
+8b 9f 00 00 [FIXUPP _arr]      mov bx, [bx + _arr]    (bx = arr[i] = ptr)
+8b 07                          mov ax, [bx]            (->v at offset 0)
+```
+
+Findings:
+- BX self-overwritten in the chained load (no extra reg needed).
+- 11B body for 2-level access.
+
+## 2D array store `m[i][j] = v` — symmetric to load (3327)
+
+Fixture `3544-2d-array-store-obj`:
+
+```c
+int m[3][2];
+void put(int i, int j, int v) { m[i][j] = v; }
+```
+
+```
+8b 5e 04                       mov bx, i
+d1 e3 d1 e3                    shl bx,1; shl bx,1  (i*4)
+8b 46 06                       mov ax, j
+d1 e0                          shl ax, 1            (j*2)
+03 d8                          add bx, ax           (combined offset)
+8b 46 08                       mov ax, v
+89 87 00 00 [FIXUPP _m]        mov [bx + _m], ax    (store)
+```
+
+Findings:
+- 21B body. Symmetric to 2D load. Indexed mem-direct store.
+
