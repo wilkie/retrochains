@@ -1718,6 +1718,19 @@ impl<'a> FunctionEmitter<'a> {
             self.out.extend_from_slice(b"\tmov\tbx,ax\r\n");
             return;
         }
+        // `<int-lvalue> << K` index: load lvalue into BX, then apply
+        // K extra shifts followed by the stride shifts. Avoids the
+        // AX route. Fixture 2530 (`a[i << 1]`).
+        if let ExprKind::BinOp { op: BinOp::Shl, left, right } = &idx.kind
+            && let Some(k) = try_const_eval(right)
+            && let Some(addr) = self.int_lvalue_addr(left)
+        {
+            let _ = write!(self.out, "\tmov\tbx,word ptr {addr}\r\n");
+            for _ in 0..(k + shifts as u32) {
+                self.out.extend_from_slice(b"\tshl\tbx,1\r\n");
+            }
+            return;
+        }
         // Int-typed index path: prefer a direct `mov bx, <addr>` over
         // a roundtrip through AX.
         if let Some(addr) = self.int_lvalue_addr(idx) {
