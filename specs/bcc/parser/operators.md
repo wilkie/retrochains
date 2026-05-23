@@ -2676,3 +2676,33 @@ Findings:
 - Uses `81 /6 r/m, imm16` form for memory destination.
 - Compound assign with const on global = direct mem-imm op (no temp register).
 
+
+## `g += 2` and `g += 3` — single 5B `add [mem], imm8`
+
+Fixtures `3485-pluseq-2-obj`, `3486-pluseq-3-obj`:
+
+```
+83 06 00 00 02 [FIXUPP _g]     add word [_g], 2
+83 06 00 00 03 [FIXUPP _g]     add word [_g], 3
+```
+
+Findings:
+- Single 5B `add r/m16, imm8` (sign-extended).
+- `+= 2` chooses `add imm8` (5B) over `inc; inc` (8B for mem-inc pair).
+- Threshold for inc-vs-add on memory: only +=1 might use `inc [mem]` (4B). Confirmed previously in 3371.
+
+## `!x` standalone return — same 6B `neg/sbb/inc` idiom
+
+Fixture `3487-not-x-return-obj`:
+
+```
+8b 46 04                       mov ax, x
+f7 d8                          neg ax
+1b c0                          sbb ax, ax
+40                             inc ax
+```
+
+Findings:
+- Same shape as `!!x` (3415) per `!`.
+- 8B body (with the param load).
+

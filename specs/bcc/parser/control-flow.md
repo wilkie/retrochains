@@ -5563,3 +5563,79 @@ Findings:
 - Sub-bias by min case ('a' = 0x61) so case 'a' lands at index 0.
 - Same dense-table mechanism applies.
 
+
+## `if (cond) stmt;` with no else — saves the post-stmt jmp
+
+Fixture `3488-if-no-else-obj`:
+
+```c
+if (x) g = 1;
+```
+
+```
+83 7e 04 00                    cmp x, 0
+74 06                          je END
+c7 06 00 00 01 00 [FIXUPP _g]  mov [_g], 1
+END:
+```
+
+Findings:
+- 12B body. No `jmp END` after the body since there's no else branch.
+- `cmp + je END + stmt + END` layout — tight.
+
+## 3-case switch — linear cmp+je (confirmed threshold)
+
+Fixture `3489-switch-3case-obj`:
+
+```
+8b 46 04                       mov ax, x
+0b c0                          or ax, ax     (cmp 0)
+74 0c                          je CASE0
+3d 01 00                       cmp ax, 1
+74 0c                          je CASE1
+3d 02 00                       cmp ax, 2
+74 0c                          je CASE2
+eb 0f                          jmp DEFAULT
+```
+
+Findings:
+- 3 cases use linear cmp+je chain.
+- **Threshold confirmed: 4+ cases needed for dense jump table**.
+- `or ax, ax` peephole used for case 0.
+
+## Sparse switch (non-contiguous values) — value-loop dispatch
+
+Fixture `3490-switch-sparse-obj`:
+
+```c
+switch (x) { case 1: ... case 100: ... case 1000: ... case 10000: ... }
+```
+
+Dispatch:
+```
+4c 4c                          dec sp; dec sp   (save x)
+8b 46 04                       mov ax, x
+89 46 fe                       mov [bp-2], ax
+b9 04 00                       mov cx, 4         (case count)
+bb 40 00                       mov bx, 0x40      (values table offset)
+SEARCH:
+2e 8b 07                       mov ax, cs:[bx]
+3b 46 fe                       cmp ax, [bp-2]
+74 06                          je FOUND
+43 43                          inc bx; inc bx
+e2 f4                          loop SEARCH       (cx-- ; jump if not 0)
+eb 18                          jmp DEFAULT
+FOUND:
+2e ff 67 08                    jmp [cs:bx + 8]   (handler at +8 from values cell)
+```
+
+Layout in _TEXT after handlers:
+- Values: `01 00 64 00 e8 03 10 27` (1, 100, 1000, 10000 — 4 × 2B).
+- Handlers: `23 00 28 00 2d 00 32 00` (4 × 2B handler offsets, +8 from values start).
+
+Findings:
+- Sparse switch uses parallel arrays (values + handlers) with a search loop.
+- Uses the `loop` instruction (`e2 disp8`) to drive the search (CX decrement loop).
+- `jmp [cs:bx + 8]` jumps to the matching handler (8 = sizeof values table).
+- Differs from dense-case dispatch (which uses computed index).
+
