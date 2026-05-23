@@ -1578,6 +1578,26 @@ impl<'a> FunctionEmitter<'a> {
     /// Returns `None` if the lvalue isn't a shape we know how to
     /// fold into a constant address pair (e.g. variable array index,
     /// stack-resident pointer).
+    /// Resolve an int-like lvalue (global or stack-resident local) to
+    /// its asm memory operand. Returns `None` for register-resident
+    /// locals (caller can fall back to a register-source path) and
+    /// for non-lvalue expressions.
+    fn int_lvalue_addr(&self, e: &Expr) -> Option<String> {
+        let ExprKind::Ident(name) = &e.kind else { return None };
+        if let Some(gty) = self.globals.type_of(name)
+            && gty.is_int_like()
+        {
+            return Some(format!("DGROUP:_{name}"));
+        }
+        if self.locals.has(name)
+            && self.locals.type_of(name).is_int_like()
+            && let LocalLocation::Stack(off) = self.locals.location_of(name)
+        {
+            return Some(bp_addr(off));
+        }
+        None
+    }
+
     fn long_lvalue_addr_pair(&self, e: &Expr) -> Option<(String, String)> {
         // Bare ident.
         if let ExprKind::Ident(name) = &e.kind
@@ -1710,6 +1730,81 @@ impl<'a> FunctionEmitter<'a> {
             let _ = write!(self.out, "\t{hi_op}\tax,word ptr {b_hi}\r\n");
             let _ = write!(self.out, "\tmov\tword ptr {dest_hi},ax\r\n");
             let _ = write!(self.out, "\tmov\tword ptr {dest_lo},dx\r\n");
+            return true;
+        }
+        // `<dest> = <a> * <b>` for two long lvalues. Helper convention
+        // is CX:BX (LHS) and DX:AX (RHS) → DX:AX. After the call, store
+        // DX→dest_hi and AX→dest_lo. Mirrors the return-path shape (line
+        // 3365) with the result captured into memory rather than left
+        // as a return value. Fixture 1628.
+        if let ExprKind::BinOp { op: BinOp::Mul, left, right } = &value.kind
+            && let Some((a_hi, a_lo)) = self.long_lvalue_addr_pair(left)
+            && let Some((b_hi, b_lo)) = self.long_lvalue_addr_pair(right)
+        {
+            let _ = write!(self.out, "\tmov\tcx,word ptr {a_hi}\r\n");
+            let _ = write!(self.out, "\tmov\tbx,word ptr {a_lo}\r\n");
+            let _ = write!(self.out, "\tmov\tdx,word ptr {b_hi}\r\n");
+            let _ = write!(self.out, "\tmov\tax,word ptr {b_lo}\r\n");
+            self.out.extend_from_slice(b"\tcall\tnear ptr N_LXMUL@\r\n");
+            self.helpers.insert("N_LXMUL@".to_string());
+            let _ = write!(self.out, "\tmov\tword ptr {dest_hi},dx\r\n");
+            let _ = write!(self.out, "\tmov\tword ptr {dest_lo},ax\r\n");
+            return true;
+        }
+        // `<dest> = <a> / <b>` / `<a> % <b>` for two long lvalues. Helpers
+        // (N_LDIV@/N_LMOD@/N_LUDIV@/N_LUMOD@) take 4 stack words: divisor
+        // pushed first, then dividend — each high-first (= push lo, hi
+        // in source order, since stack grows down). Result in DX:AX,
+        // store to dest. Fixtures 1629 (signed div), 1633 (unsigned div).
+        if let ExprKind::BinOp { op, left, right } = &value.kind
+            && matches!(op, BinOp::Div | BinOp::Mod)
+            && let Some((a_hi, a_lo)) = self.long_lvalue_addr_pair(left)
+            && let Some((b_hi, b_lo)) = self.long_lvalue_addr_pair(right)
+        {
+            let unsigned = self.expr_is_unsigned(left) || self.expr_is_unsigned(right);
+            let helper = match (op, unsigned) {
+                (BinOp::Div, false) => "N_LDIV@",
+                (BinOp::Mod, false) => "N_LMOD@",
+                (BinOp::Div, true)  => "N_LUDIV@",
+                (BinOp::Mod, true)  => "N_LUMOD@",
+                _ => unreachable!(),
+            };
+            let _ = write!(self.out, "\tpush\tword ptr {b_hi}\r\n");
+            let _ = write!(self.out, "\tpush\tword ptr {b_lo}\r\n");
+            let _ = write!(self.out, "\tpush\tword ptr {a_hi}\r\n");
+            let _ = write!(self.out, "\tpush\tword ptr {a_lo}\r\n");
+            let _ = write!(self.out, "\tcall\tnear ptr {helper}\r\n");
+            self.helpers.insert(helper.to_string());
+            let _ = write!(self.out, "\tmov\tword ptr {dest_hi},dx\r\n");
+            let _ = write!(self.out, "\tmov\tword ptr {dest_lo},ax\r\n");
+            return true;
+        }
+        // `<dest> = <a> <</>> <n>` for a long lvalue shifted by an
+        // int-typed lvalue. BCC loads the operand into DX:AX and the
+        // shift count's *low byte* into CL (the value is assumed to
+        // fit in a byte, valid for any C shift count ≤ 31), then
+        // calls N_LXLSH@ (left) / N_LXRSH@ (signed right) / N_LXURSH@
+        // (unsigned right). Result in DX:AX. Fixtures 1630 (signed
+        // shr), 1631 (shl), 1634 (unsigned shr).
+        if let ExprKind::BinOp { op, left, right } = &value.kind
+            && matches!(op, BinOp::Shl | BinOp::Shr)
+            && let Some((a_hi, a_lo)) = self.long_lvalue_addr_pair(left)
+            && let Some(n_addr) = self.int_lvalue_addr(right)
+        {
+            let unsigned = self.expr_is_unsigned(left);
+            let helper = match (op, unsigned) {
+                (BinOp::Shl, _)     => "N_LXLSH@",
+                (BinOp::Shr, false) => "N_LXRSH@",
+                (BinOp::Shr, true)  => "N_LXURSH@",
+                _ => unreachable!(),
+            };
+            let _ = write!(self.out, "\tmov\tdx,word ptr {a_hi}\r\n");
+            let _ = write!(self.out, "\tmov\tax,word ptr {a_lo}\r\n");
+            let _ = write!(self.out, "\tmov\tcl,byte ptr {n_addr}\r\n");
+            let _ = write!(self.out, "\tcall\tnear ptr {helper}\r\n");
+            self.helpers.insert(helper.to_string());
+            let _ = write!(self.out, "\tmov\tword ptr {dest_hi},dx\r\n");
+            let _ = write!(self.out, "\tmov\tword ptr {dest_lo},ax\r\n");
             return true;
         }
         false
