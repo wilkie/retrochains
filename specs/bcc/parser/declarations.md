@@ -1499,3 +1499,30 @@ Findings:
   before the epilogue).
 - The truly-minimal function in BCC.
 
+
+## `g_a = 1; g_b = 2;` — sequential mem-imm stores (6B each)
+
+Fixture `2979-multi-global-store-obj`:
+
+```c
+int g_a, g_b;
+void init(void) {
+  g_a = 1;
+  g_b = 2;
+}
+```
+
+```
+c7 06 00 00 01 00              [_g_a] = 1     (6B mem-imm + FIXUPP)
+c7 06 02 00 02 00              [_g_b] = 2     (6B mem-imm + FIXUPP)
+```
+
+Findings:
+- Each global = `c7 06 disp16 imm16` (6B with FIXUPP) for small imm.
+- 12 bytes for the two sequential stores.
+- No AX needed — direct mem-imm store.
+- For larger immediates outside imm8 range, same 6B form. For imm
+  that fits sign-ext imm8, would be `c7 06 disp 80` — wait, mem-imm
+  store ALWAYS uses imm16 form (`c7 /0 disp imm16`) for word stores.
+  No sign-ext shorthand for memory-immediate.
+

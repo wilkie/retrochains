@@ -2581,3 +2581,38 @@ Findings:
 - Lesson: **`(b * c) + a` style** (precedence puts mul first) is
   4 bytes shorter than `a + (b * c)` style.
 
+
+## `char + int` is 4 BYTES SHORTER than `int + char` (source order matters!)
+
+Fixture `2980-char-plus-int-obj`:
+
+```c
+int mix(char a, int b) {
+  return a + b;
+}
+```
+
+```
+8a 46 04                       mov al, a (char param)
+98                             cbw       (promote to int)
+03 46 06                       add ax, b (mem-source add, 3B)
+```
+
+**Total: 7 bytes** for the expression.
+
+Compare to `int + char` (`2817`):
+
+```
+8a 46 06 98 50 8b 46 04 5a 03 c2    11 bytes (push/pop spill needed)
+```
+
+Findings:
+- When the char operand is LEFTMOST, the promotion + add can chain
+  without spilling (4 bytes saved!).
+- When the char operand is RIGHTMOST, BCC evaluates it first
+  (because it needs cbw promotion), then pushes/pops to add with
+  the int.
+- **Lesson**: write `char + int` (char first) for 4-byte savings
+  over `int + char`. Same observation generalizes to other char-int
+  binary ops.
+

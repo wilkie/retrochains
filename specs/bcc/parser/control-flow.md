@@ -4392,3 +4392,36 @@ Findings:
 - The unreachable code is still loaded into the binary; it's just
   never executed.
 
+
+## `continue` in for-loop — jmp to POST-step (not COND)
+
+Fixture `2975-for-continue-obj`:
+
+```c
+for (i = 0; i < n; i = i + 1) {
+  if (i == 3) continue;
+  s = s + i;
+}
+```
+
+```
+                               ; BODY:
+83 fe 03                       cmp si, 3
+75 02                          jne +2 → DO_BODY
+eb 06                          jmp → POST   (continue: skip to post-step)
+                               ; DO_BODY:
+8b c7 03 c6 8b f8              s = s + i
+                               ; POST:
+8b c6 40 8b f0                 i = i + 1
+                               ; COND:
+3b 76 04 7c e9                 cmp si, n; jl → BODY
+```
+
+Findings:
+- `continue` = jmp to the **POST-step**, not the COND check.
+- Post-step still runs before next iteration's cond check.
+- Same double-jump pattern as `break` (`2516`) but targeting POST
+  instead of AFTER_LOOP.
+- For `while (cond) { ... continue; ... }`, continue would jmp to
+  COND directly (no separate post-step).
+

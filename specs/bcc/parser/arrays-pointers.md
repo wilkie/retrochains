@@ -6102,3 +6102,42 @@ Findings:
 - BCC treats `(int *)0` as a constant pointer value 0, distinct from
   taking the address of any symbol.
 
+
+## `&p[n]` byte-identical to `p + n` — C identity at codegen
+
+Fixture `2978-amp-arr-var-idx-obj`:
+
+```c
+int *advance(int *p, int n) {
+  return &p[n];
+}
+```
+
+Body byte-identical to `2709` (`p + n`): `mov n; shl; push; mov p; pop; add`.
+
+Findings:
+- `&p[n] ≡ p + n` (C standard).
+- BCC implements this identity faithfully — both produce identical
+  code at the codegen level.
+
+## `long arr[i]` global var-index — `shl × 2 + 2 loads via [bx+disp16]`
+
+Fixture `2977-long-arr-global-obj`:
+
+```c
+long data[10];
+return data[i];
+```
+
+```
+8b 5e 04                       mov bx, i
+d1 e3 d1 e3                    shl bx, 1 × 2  (× 4 for sizeof(long))
+8b 97 02 00                    mov dx, [bx + _data + 2]   (HIGH)
+8b 87 00 00                    mov ax, [bx + _data + 0]   (LOW)
+```
+
+Findings:
+- Scale by 4 = 2 shifts (4 bytes).
+- HIGH and LOW words each loaded via `[bx + disp16]` (4B each).
+- Total 12 bytes for the load including scale.
+
