@@ -6658,3 +6658,27 @@ Fixture `3145-uint-ptr-deref-obj`:
 `mov si, p; mov ax, [si]` — same code as plain int* deref. Pointed-to
 type's signedness doesn't affect deref.
 
+
+## Local `char buf[4]` decay to ptr arg — `lea + push` (4B for arg)
+
+Fixture `3172-local-char-arr-decay-obj`:
+
+```c
+char buf[4];
+buf[0] = 'A'; buf[1] = 'B'; buf[2] = 'C'; buf[3] = 0;
+strlen_one(buf);
+```
+
+Fill: 4× `mov byte [bp+disp], imm8` (4B each, `c6 46 disp imm`).
+
+Pass:
+```
+8d 46 fc                       lea ax, &buf[0]
+50                             push ax
+```
+
+Findings:
+- Local char arr decay to ptr arg: `lea + push` (4B).
+- Standard C array decay rule applied.
+- Same shape as local int arr passed to fn.
+

@@ -3643,3 +3643,83 @@ Findings:
 - ModR/M ops: `03 /r` = add, `13 /r` = adc.
 - Carry chain: add for LOW, adc for HIGH.
 
+
+## `long a - b` — `sub + sbb` mem-source (mirror of add)
+
+Fixture `3167-long-sub-obj`:
+
+```
+8b 56 06                       mov dx, a HIGH
+8b 46 04                       mov ax, a LOW
+2b 46 08                       sub ax, [bp+8]   (LOW - b LOW)
+1b 56 0a                       sbb dx, [bp+10]  (HIGH - b HIGH - borrow)
+```
+
+Findings:
+- 12 bytes (6B load + 6B sub/sbb).
+- `2b /r` = sub, `1b /r` = sbb (with borrow).
+- Mirror of long add (`3164`).
+
+## `unsigned long a * b` — `N_LXMUL@` helper, fast-call CX:BX × DX:AX
+
+Fixture `3168-ulong-mul-obj`:
+
+```c
+return a * b;
+```
+
+```
+8b 4e 06                       mov cx, a HIGH    (→ CX)
+8b 5e 04                       mov bx, a LOW     (→ BX)
+8b 56 0a                       mov dx, b HIGH    (→ DX)
+8b 46 08                       mov ax, b LOW     (→ AX)
+e8 00 00                       call N_LXMUL@
+```
+
+Findings:
+- Long multiply uses **`N_LXMUL@` helper**.
+- Fast-call: `CX:BX` × `DX:AX` → `DX:AX` (result).
+- 15 bytes for the setup + call.
+
+## `long << N` for N ≥ 2 — `N_LXLSH@` helper
+
+Fixture `3169-long-shl-4-obj`:
+
+```c
+return v << 4;
+```
+
+```
+8b 56 06                       mov dx, HIGH
+8b 46 04                       mov ax, LOW
+b1 04                          mov cl, 4
+e8 00 00                       call N_LXLSH@
+```
+
+Findings:
+- Long shift by N ≥ 2 uses **`N_LXLSH@` helper**.
+- DX:AX = value, CL = count.
+- 11 bytes setup + call.
+- **Threshold**: `<< 1` inline (per `3162`), `<< N≥2` helper.
+
+## `long * 2L` — STRENGTH-REDUCED to `shl + rcl` (NOT helper!)
+
+Fixture `3170-long-mul-2-obj`:
+
+```c
+return v * 2L;
+```
+
+```
+8b 56 06                       mov dx, HIGH
+8b 46 04                       mov ax, LOW
+d1 e0                          shl ax, 1
+d1 d2                          rcl dx, 1
+```
+
+Findings:
+- `long * 2L` IS strength-reduced to `shl LOW; rcl HIGH` (10B).
+- **NOT** N_LXMUL@ helper.
+- Multiplication is always safe to reduce to shift (no rounding).
+- Saves vs N_LXMUL@ which would be 15B+ with helper-call overhead.
+
