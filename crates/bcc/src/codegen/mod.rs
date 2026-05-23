@@ -6240,6 +6240,13 @@ impl<'a> FunctionEmitter<'a> {
                         | OperandSource::GlobalOffset { .. } => {
                             let _ = write!(self.out, "\timul\t{}\r\n", src.word());
                         }
+                        OperandSource::Reg(rhs_reg) => {
+                            // `imul <reg16>` directly, no DX roundtrip
+                            // (matches BCC's shape for `r *= i` with
+                            // both r and i in registers — fixture
+                            // 1411).
+                            let _ = write!(self.out, "\timul\t{}\r\n", rhs_reg.name());
+                        }
                         _ => {
                             let _ = write!(self.out, "\tmov\tdx,{}\r\n", src.word());
                             self.out.extend_from_slice(b"\timul\tdx\r\n");
