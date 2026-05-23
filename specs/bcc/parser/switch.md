@@ -2385,3 +2385,32 @@ Findings:
 - `jmp word ptr cs:[bx + TABLE]` = indirect jump via dense table.
 - **Source order of `default:` doesn't matter** — BCC sorts cases.
 
+
+## Switch with cases 0..3 — DENSE DISPATCH without `dec bx` (no normalization)
+
+Fixture `3068-switch-from-0-obj`:
+
+```c
+switch (x) {
+  case 0: return 10;
+  case 1: return 20;
+  case 2: return 30;
+  case 3: return 40;
+}
+```
+
+```
+8b 5e 04                       mov bx, x
+83 fb 03                       cmp bx, 3            (NO dec — cases start at 0)
+77 1b                          ja → DEFAULT
+d1 e3                          shl bx, 1
+2e ff a7 2d 00                 jmp word ptr cs:[bx + TABLE]
+```
+
+Findings:
+- Cases starting at 0 = NO normalization (`dec bx`) needed.
+- 1 byte saved vs the 1..N case form (`3064` which had `dec bx`).
+- Bounds check `cmp bx, 3; ja → DEFAULT` checks directly against
+  zero-based max.
+- Dispatch table indexed by raw `x` value (scaled).
+

@@ -1672,3 +1672,20 @@ Findings:
 - `A + B + C` const-folded to literal `115`.
 - No runtime arithmetic, no symbols.
 
+
+## `typedef int word;` — type-level aliasing only (no codegen impact)
+
+Fixture `3065-typedef-int-obj`:
+
+```c
+typedef int word;
+word add(word a, word b) { return a + b; }
+```
+
+Byte-identical to using `int` directly.
+
+Findings:
+- `typedef` is pure type-level aliasing in BCC.
+- No different mangling, no different codegen.
+- The typedef'd name is recognized in declarations only.
+

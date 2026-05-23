@@ -3478,3 +3478,48 @@ Findings:
 - Difference is in the HIGH word's jump kind.
 - Const 1000 > signed imm8 max (127) so LOW cmp uses `81 imm16` form (5B).
 
+
+## Long return convention CONFIRMED — DX:AX with DX=HIGH, AX=LOW
+
+Fixture `3066-long-return-obj`:
+
+```c
+return 0x12345678L;
+```
+
+```
+ba 34 12                       mov dx, 0x1234   (HIGH word)
+b8 78 56                       mov ax, 0x5678   (LOW word)
+```
+
+Findings:
+- Long return value is in **DX:AX** with DX holding HIGH and AX
+  holding LOW.
+- 6 bytes for a long literal return (2 `mov reg, imm16`).
+- Caller reads result as `(DX << 16) | AX`.
+
+## `long + 1L` — `add ax, 1; adc dx, 0` (5-step long add)
+
+Fixture `3067-long-plus-1L-obj`:
+
+```c
+long inc(long v) { return v + 1L; }
+```
+
+```
+8b 56 06                       mov dx, [bp+6]   (load HIGH)
+8b 46 04                       mov ax, [bp+4]   (load LOW)
+05 01 00                       add ax, 1        (LOW + 1, AX-acc imm16)
+83 d2 00                       adc dx, 0        (HIGH + carry)
+```
+
+Findings:
+- 32-bit add of long + small const:
+  1. Load DX:AX from operands
+  2. `add ax, imm16` for LOW
+  3. `adc dx, 0` for HIGH (absorbs carry from LOW)
+- 6 bytes for the compute (load excluded).
+- Const 1L = HIGH=0, LOW=1 split. Only LOW gets the actual add value.
+- For larger constants where HIGH is non-zero, both halves would
+  use add/adc with the respective constants.
+
