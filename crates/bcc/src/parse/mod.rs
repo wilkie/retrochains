@@ -212,6 +212,32 @@ impl Parser {
                     if matches!(self.peek_n(probe).kind, TokenKind::Ident(_)) {
                         probe += 1;
                     }
+                    // Combined `struct <tag> { ... } <decl>;` shape: the
+                    // brace-enclosed body sits between the tag and the
+                    // declarator. Skip-balance over it so the probe lands
+                    // on the actual declarator name. Fixtures 3420 (bit
+                    // fields, body is filtered later) and 3443 (`struct
+                    // S { int x; } s;`).
+                    if matches!(self.peek_n(probe).kind, TokenKind::LBrace) {
+                        let mut depth = 0i32;
+                        loop {
+                            match self.peek_n(probe).kind {
+                                TokenKind::LBrace => {
+                                    depth += 1;
+                                    probe += 1;
+                                }
+                                TokenKind::RBrace => {
+                                    depth -= 1;
+                                    probe += 1;
+                                    if depth == 0 {
+                                        break;
+                                    }
+                                }
+                                TokenKind::Eof => break,
+                                _ => probe += 1,
+                            }
+                        }
+                    }
                 }
                 TokenKind::KwEnum => {
                     // `enum <tag> <decl>` — enum tag as a type. The
