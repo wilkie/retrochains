@@ -12237,7 +12237,7 @@ impl<'a> FunctionEmitter<'a> {
                     // -1)`), 616 (`a + b` with b a char param), 645
                     // (`x + y * 2`).
                     let rhs_clobbers_ax = matches!(right.kind, ExprKind::Call { .. })
-                        || matches!(&right.kind, ExprKind::Ident(n) if self.ident_is_char(n))
+                        || self.expr_is_char_load(right)
                         || (matches!(right.kind, ExprKind::BinOp { .. })
                             && try_const_eval(right).is_none());
                     // Callee-preserved register peephole: when the
@@ -12282,19 +12282,22 @@ impl<'a> FunctionEmitter<'a> {
                         self.emit_expr_to_ax(right);
                         emit_op_with_source(self.out, *op, &left_src, unsigned);
                     } else if rhs_clobbers_ax
-                        && matches!(op, BinOp::Div | BinOp::Mod | BinOp::Mul)
+                        && (matches!(op, BinOp::Div | BinOp::Mod | BinOp::Mul)
+                            || self.expr_is_char_load(right))
                     {
                         // Div/Mod need DX free for cwd / xor dx,dx,
                         // so the divisor goes into BX. Mul uses DX
                         // (imul writes DX:AX, so DX as src is fine).
-                        // BCC's order for both: LHS first (push),
-                        // then RHS (mov scratch, ax), then pop LHS
-                        // back into AX. Fixtures 1357 (`a / b`),
-                        // 1625 (`a * b`), 1223.
-                        let scratch = if matches!(op, BinOp::Mul) {
-                            Reg::Dx
-                        } else {
+                        // Char-load RHS (Add/Sub/etc): DX is fine
+                        // since no DX-clobbering setup happens. BCC's
+                        // order: LHS first (push), then RHS (mov
+                        // scratch, ax), then pop LHS back into AX.
+                        // Fixtures 1357, 1625, 1223, 2006 (`a[0] +
+                        // a[126]`).
+                        let scratch = if matches!(op, BinOp::Div | BinOp::Mod) {
                             Reg::Bx
+                        } else {
+                            Reg::Dx
                         };
                         self.emit_expr_to_ax(left);
                         self.out.extend_from_slice(b"\tpush\tax\r\n");
@@ -12587,6 +12590,22 @@ impl<'a> FunctionEmitter<'a> {
         // The locals analyzer panics on unknown names, so only ask
         // if there's no global match.
         matches!(self.locals.type_of(name), Type::Char)
+    }
+
+    /// True when `e` evaluates to a char-typed value via a memory
+    /// load that would clobber AX (`mov al, ...; cbw`). Covers bare
+    /// char idents, char array elements, and char struct fields.
+    /// Used by the binop RHS path to decide whether to push the LHS
+    /// before evaluating the RHS — otherwise the load would
+    /// overwrite AX. Fixture 2006 (`a[0] + a[126]` for char a[]).
+    fn expr_is_char_load(&self, e: &Expr) -> bool {
+        if let ExprKind::Ident(name) = &e.kind {
+            return self.ident_is_char(name);
+        }
+        if let Some((_, _, ty)) = self.try_lvalue_chain_addr(e) {
+            return ty.is_char_like();
+        }
+        false
     }
 
     /// Pointee type of `name` if it's a pointer-typed identifier;
