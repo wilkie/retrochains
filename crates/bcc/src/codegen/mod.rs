@@ -11164,6 +11164,30 @@ impl<'a> FunctionEmitter<'a> {
                     let _ = write!(self.out, "\tmov\tbyte ptr {},al\r\n", bp_addr(off));
                     return;
                 }
+                // `c = (char)<int_local>;` — load the low byte of
+                // the int directly into AL and store. The cast
+                // narrows; for char dest we don't need to widen.
+                // Fixture 2455 (`c = (char)i` for int i, char c).
+                if ty.is_char_like()
+                    && let ExprKind::Cast { ty: cast_ty, operand } = &value.kind
+                    && cast_ty.is_char_like()
+                    && let ExprKind::Ident(src_name) = &operand.kind
+                {
+                    let src_addr = if self.locals.has(src_name)
+                        && let LocalLocation::Stack(soff) = self.locals.location_of(src_name)
+                    {
+                        Some(bp_addr(soff))
+                    } else if self.globals.type_of(src_name).is_some() {
+                        Some(format!("DGROUP:_{src_name}"))
+                    } else {
+                        None
+                    };
+                    if let Some(addr) = src_addr {
+                        let _ = write!(self.out, "\tmov\tal,byte ptr {addr}\r\n");
+                        let _ = write!(self.out, "\tmov\tbyte ptr {},al\r\n", bp_addr(off));
+                        return;
+                    }
+                }
                 // `c = d;` char-to-char copy through bare ident.
                 // Load byte and store byte, no widening. Mirrors the
                 // init peephole. Fixture 2685.
