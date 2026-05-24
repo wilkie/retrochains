@@ -2107,18 +2107,28 @@ impl<'a> FunctionEmitter<'a> {
             && k <= 255
         {
             let unsigned = self.expr_is_unsigned(left);
-            let _ = write!(self.out, "\tmov\tdx,word ptr {a_hi}\r\n");
-            let _ = write!(self.out, "\tmov\tax,word ptr {a_lo}\r\n");
+            // K=1 single-step inline: BCC's shift convention here puts
+            // AX=high, DX=low (opposite of the helper-call path) so
+            // the carry chain matches: `shl dx, 1; rcl ax, 1` (low
+            // first into high). Fixtures 1735, 1736, 1782, 1783.
+            // The >1 helper path keeps DX=high, AX=low (helper's
+            // calling convention).
             if k == 1 {
+                let _ = write!(self.out, "\tmov\tax,word ptr {a_hi}\r\n");
+                let _ = write!(self.out, "\tmov\tdx,word ptr {a_lo}\r\n");
                 if matches!(op, BinOp::Shl) {
-                    self.out.extend_from_slice(b"\tshl\tax,1\r\n");
-                    self.out.extend_from_slice(b"\trcl\tdx,1\r\n");
+                    self.out.extend_from_slice(b"\tshl\tdx,1\r\n");
+                    self.out.extend_from_slice(b"\trcl\tax,1\r\n");
                 } else {
                     let hi_op = if unsigned { "shr" } else { "sar" };
-                    let _ = write!(self.out, "\t{hi_op}\tdx,1\r\n");
-                    self.out.extend_from_slice(b"\trcr\tax,1\r\n");
+                    let _ = write!(self.out, "\t{hi_op}\tax,1\r\n");
+                    self.out.extend_from_slice(b"\trcr\tdx,1\r\n");
                 }
+                let _ = write!(self.out, "\tmov\tword ptr {dest_hi},ax\r\n");
+                let _ = write!(self.out, "\tmov\tword ptr {dest_lo},dx\r\n");
             } else {
+                let _ = write!(self.out, "\tmov\tdx,word ptr {a_hi}\r\n");
+                let _ = write!(self.out, "\tmov\tax,word ptr {a_lo}\r\n");
                 let k_u8 = (k & 0xFF) as u8;
                 let _ = write!(self.out, "\tmov\tcl,{k_u8}\r\n");
                 let helper = match (op, unsigned) {
@@ -2129,9 +2139,9 @@ impl<'a> FunctionEmitter<'a> {
                 };
                 let _ = write!(self.out, "\tcall\tnear ptr {helper}\r\n");
                 self.helpers.insert(helper.to_string());
+                let _ = write!(self.out, "\tmov\tword ptr {dest_hi},dx\r\n");
+                let _ = write!(self.out, "\tmov\tword ptr {dest_lo},ax\r\n");
             }
-            let _ = write!(self.out, "\tmov\tword ptr {dest_hi},dx\r\n");
-            let _ = write!(self.out, "\tmov\tword ptr {dest_lo},ax\r\n");
             return true;
         }
         // `<dest> = <a> * K_pow2` — strength-reduce to shl. BCC uses
