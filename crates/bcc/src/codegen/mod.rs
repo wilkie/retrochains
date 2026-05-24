@@ -7086,6 +7086,45 @@ impl<'a> FunctionEmitter<'a> {
             let _ = write!(self.out, "\t{mnem}\t{},ax\r\n", reg.name());
             return;
         }
+        // Mul / Div / Mod with nested-binop (or Cast/Ternary/Call)
+        // RHS: evaluate RHS to AX (which clobbers AX), then perform
+        // the op with the dst register as the source operand
+        // (imul/idiv/div take a single r/m argument and use AX as
+        // the implicit accumulator). For Mul we want `dst * ax →
+        // dst`; BCC's shape is `mov dx, ax; mov ax, dst; imul dx;
+        // mov dst, ax`. For Div the accumulator must be the dividend
+        // (dst), so we move RHS into BX first, then load dst into
+        // AX, cwd, idiv bx. Fixtures 1390 (`a *= (b+c)`), 1393
+        // (`a %= b*c`).
+        if matches!(op, BinOp::Mul | BinOp::Div | BinOp::Mod)
+            && try_const_eval(value).is_none()
+            && self.value_needs_ax_route(value)
+        {
+            self.emit_expr_to_ax(value);
+            match op {
+                BinOp::Mul => {
+                    self.out.extend_from_slice(b"\tmov\tdx,ax\r\n");
+                    let _ = write!(self.out, "\tmov\tax,{}\r\n", reg.name());
+                    self.out.extend_from_slice(b"\timul\tdx\r\n");
+                }
+                BinOp::Div | BinOp::Mod => {
+                    let unsigned = self.locals.type_of(name).is_unsigned();
+                    self.out.extend_from_slice(b"\tmov\tbx,ax\r\n");
+                    let _ = write!(self.out, "\tmov\tax,{}\r\n", reg.name());
+                    if unsigned {
+                        self.out.extend_from_slice(b"\txor\tdx,dx\r\n");
+                        self.out.extend_from_slice(b"\tdiv\tbx\r\n");
+                    } else {
+                        self.out.extend_from_slice(b"\tcwd\t\r\n");
+                        self.out.extend_from_slice(b"\tidiv\tbx\r\n");
+                    }
+                }
+                _ => unreachable!(),
+            }
+            let result = if matches!(op, BinOp::Mod) { "dx" } else { "ax" };
+            let _ = write!(self.out, "\tmov\t{},{result}\r\n", reg.name());
+            return;
+        }
         match op {
             BinOp::Add | BinOp::Sub => {
                 // Pointer compound add/sub: scale the RHS by the
