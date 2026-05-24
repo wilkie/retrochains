@@ -2145,9 +2145,11 @@ impl<'a> FunctionEmitter<'a> {
             return true;
         }
         // `<dest> = <a> * K_pow2` — strength-reduce to shl. BCC uses
-        // inline `shl ax,1; rcl dx,1` only for K=2 (shift by 1); any
-        // larger pow2 routes through N_LXLSH@ with `mov cl, k`.
-        // Fixture 1641 (`a * 4L` → helper).
+        // inline `shl dx,1; rcl ax,1` (AX=high, DX=low) only for K=2
+        // (shift by 1) and for K=1 (just a copy with the same load
+        // shape); any larger pow2 routes through N_LXLSH@ with
+        // `mov cl, k` and the helper's DX=high, AX=low ABI.
+        // Fixtures 1641 (`a * 4L` → helper), 1783 (`a * 1L` → copy).
         if let ExprKind::BinOp { op: BinOp::Mul, left, right } = &value.kind
             && let Some((a_hi, a_lo)) = self.long_lvalue_addr_pair(left)
             && let Some(k) = try_const_eval(right)
@@ -2156,19 +2158,25 @@ impl<'a> FunctionEmitter<'a> {
             && k.trailing_zeros() <= 31
         {
             let shifts = k.trailing_zeros();
-            let _ = write!(self.out, "\tmov\tdx,word ptr {a_hi}\r\n");
-            let _ = write!(self.out, "\tmov\tax,word ptr {a_lo}\r\n");
-            if shifts == 1 {
-                self.out.extend_from_slice(b"\tshl\tax,1\r\n");
-                self.out.extend_from_slice(b"\trcl\tdx,1\r\n");
-            } else if shifts > 0 {
+            if shifts <= 1 {
+                let _ = write!(self.out, "\tmov\tax,word ptr {a_hi}\r\n");
+                let _ = write!(self.out, "\tmov\tdx,word ptr {a_lo}\r\n");
+                if shifts == 1 {
+                    self.out.extend_from_slice(b"\tshl\tdx,1\r\n");
+                    self.out.extend_from_slice(b"\trcl\tax,1\r\n");
+                }
+                let _ = write!(self.out, "\tmov\tword ptr {dest_hi},ax\r\n");
+                let _ = write!(self.out, "\tmov\tword ptr {dest_lo},dx\r\n");
+            } else {
+                let _ = write!(self.out, "\tmov\tdx,word ptr {a_hi}\r\n");
+                let _ = write!(self.out, "\tmov\tax,word ptr {a_lo}\r\n");
                 let k_u8 = shifts as u8;
                 let _ = write!(self.out, "\tmov\tcl,{k_u8}\r\n");
                 self.out.extend_from_slice(b"\tcall\tnear ptr N_LXLSH@\r\n");
                 self.helpers.insert("N_LXLSH@".to_string());
+                let _ = write!(self.out, "\tmov\tword ptr {dest_hi},dx\r\n");
+                let _ = write!(self.out, "\tmov\tword ptr {dest_lo},ax\r\n");
             }
-            let _ = write!(self.out, "\tmov\tword ptr {dest_hi},dx\r\n");
-            let _ = write!(self.out, "\tmov\tword ptr {dest_lo},ax\r\n");
             return true;
         }
         // `<dest> = <a> <</>> <n>` for a long lvalue shifted by an
