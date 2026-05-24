@@ -12243,6 +12243,7 @@ impl<'a> FunctionEmitter<'a> {
                     // (`x + y * 2`).
                     let rhs_clobbers_ax = matches!(right.kind, ExprKind::Call { .. })
                         || self.expr_is_char_load(right)
+                        || matches!(right.kind, ExprKind::Cast { .. } | ExprKind::Ternary { .. })
                         || (matches!(right.kind, ExprKind::BinOp { .. })
                             && try_const_eval(right).is_none());
                     // Callee-preserved register peephole: when the
