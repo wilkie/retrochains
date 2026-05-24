@@ -11815,6 +11815,17 @@ impl<'a> FunctionEmitter<'a> {
                 if !self.locals.has(name)
                     && let Some(gty) = self.globals.type_of(name)
                 {
+                    if matches!(gty, Type::Array { .. }) {
+                        // Global array decay: the value of `arr` is
+                        // its address (element 0). Direct
+                        // `mov ax, offset DGROUP:_arr` (linker-
+                        // resolved). Fixture 3437.
+                        let _ = write!(
+                            self.out,
+                            "\tmov\tax,offset DGROUP:_{name}\r\n",
+                        );
+                        return;
+                    }
                     if gty.is_char_like() {
                         let _ = write!(
                             self.out,
