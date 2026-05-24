@@ -13199,10 +13199,23 @@ impl<'a> FunctionEmitter<'a> {
                 let off = base_bp + i16::try_from(total_off).unwrap_or(i16::MAX);
                 OperandSource::Local(off)
             }
-            ExprKind::Member { kind: crate::ast::MemberKind::Arrow, .. } => {
-                // `p->x` as a right operand would need a register-
-                // indirect operand source. No fixture yet.
-                panic!("`p->x` as right operand not yet supported (no fixture)")
+            ExprKind::Member { base, field, kind: crate::ast::MemberKind::Arrow } => {
+                // `<reg_ptr>-><field>` as RHS: fold to `<width> ptr
+                // [<reg>+field_off]`. Mirrors the `p[K]` case above.
+                // Fixture 2313 (`pp->y` for register-resident
+                // struct ptr).
+                if let ExprKind::Ident(p_name) = &base.kind
+                    && self.locals.has(p_name)
+                    && let Some(pointee) = self.locals.type_of(p_name).pointee()
+                    && let LocalLocation::Reg(reg) = self.locals.location_of(p_name)
+                    && let Some((field_off, _field_ty)) = pointee.field(field)
+                {
+                    return OperandSource::DerefRegOffset {
+                        reg,
+                        offset: field_off as i16,
+                    };
+                }
+                panic!("`p->x` as right operand not yet supported for non-register pointers (no fixture for {:?})", base.kind)
             }
             ExprKind::Ternary { .. } => {
                 panic!("ternary as right operand of a binary op not yet supported (no fixture)")
