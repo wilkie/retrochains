@@ -12130,11 +12130,13 @@ impl<'a> FunctionEmitter<'a> {
                         }
                     }
                     // `<ptr-typed lvalue> + K` / `- K` — C scales the
-                    // constant by the pointee size. BCC emits the
-                    // canonical AX-accumulator add form: `add ax,
-                    // <signed K*stride>` (always Add, never Sub or
-                    // inc/dec, even at ±1/±2). Fixtures 3557 (`p +
-                    // 3`), 3256 (`p - 1`), 3382 (`p - K`).
+                    // constant by the pointee size. Always route as
+                    // Add with the (possibly negative) scaled byte
+                    // count so the ±1/±2 inc/dec peephole fires for
+                    // small steps (fixture 2922: `p = p + 1` →
+                    // `inc ax; inc ax`) and the AX-accumulator add
+                    // form fires for larger ones (fixture 3557).
+                    // Fixtures 3557, 3256, 3382, 2922.
                     if matches!(op, BinOp::Add | BinOp::Sub)
                         && let ExprKind::Ident(pname) = &left.kind
                         && let Some(pointee) = self.ident_pointee(pname)
@@ -12144,12 +12146,17 @@ impl<'a> FunctionEmitter<'a> {
                         let stride = i32::from(pointee.size_bytes());
                         let sign = if matches!(op, BinOp::Add) { 1i32 } else { -1 };
                         let bytes = sign.wrapping_mul(k as i32).wrapping_mul(stride);
-                        let imm16 = (bytes as i16) as u16;
+                        let scaled = (bytes as u32) & 0xFFFF;
                         self.emit_expr_to_ax(left);
-                        if imm16 == 0 {
-                            return;
-                        }
-                        let _ = write!(self.out, "\tadd\tax,{}\r\n", imm16 as i16);
+                        // Pointers compare as unsigned but for the
+                        // add-or-inc emission we want the Add form
+                        // chosen regardless (no `sub` canonicalization).
+                        emit_op_with_source(
+                            self.out,
+                            BinOp::Add,
+                            &OperandSource::Immediate(scaled),
+                            true,
+                        );
                         return;
                     }
                     // Commutative-op operand swap: BCC prefers the
