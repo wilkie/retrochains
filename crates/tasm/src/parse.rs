@@ -1329,6 +1329,14 @@ fn parse_sub(operands: &str, line_no: usize) -> AsmResult<Instr> {
     if lhs == "ax" && rhs == "word ptr [si]" {
         return Ok(Instr::SubAxFromSiPtr);
     }
+    if lhs == "ax" {
+        if let Some(disp) = parse_word_si_disp(rhs) {
+            return Ok(Instr::SubAxSiDisp { disp });
+        }
+        if let Some(disp) = parse_word_di_disp(rhs) {
+            return Ok(Instr::SubAxDiDisp { disp });
+        }
+    }
     // `sub al,imm8` — AL-specific 2-byte encoding (companion to
     // `AddAlImm8`).
     if lhs == "al" {
@@ -1986,6 +1994,12 @@ fn parse_add(operands: &str, line_no: usize) -> AsmResult<Instr> {
         }
         if rhs == "word ptr [di]" {
             return Ok(Instr::AddAxFromDiPtr);
+        }
+        if let Some(disp) = parse_word_si_disp(rhs) {
+            return Ok(Instr::AddAxSiDisp { disp });
+        }
+        if let Some(disp) = parse_word_di_disp(rhs) {
+            return Ok(Instr::AddAxDiDisp { disp });
         }
         if let Some(offset) = parse_bp_relative(rhs) {
             return Ok(Instr::AddAxBpRel { offset });

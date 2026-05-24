@@ -12667,7 +12667,7 @@ impl<'a> FunctionEmitter<'a> {
                 }
                 panic!("`*p` as right operand of a binary op only supported for register-resident local pointers (no fixture for {:?})", inner.kind)
             }
-            ExprKind::ArrayIndex { .. } => {
+            ExprKind::ArrayIndex { array, index } => {
                 // `g[K]` where `g` is a file-scope array — fold to
                 // `word ptr DGROUP:_g+(K*stride)`. Fixture 189 emits
                 // `add ax, word ptr DGROUP:_a+2` for `a[1]`.
@@ -12679,6 +12679,21 @@ impl<'a> FunctionEmitter<'a> {
                 // For stack-resident local arrays the same offset
                 // arithmetic applies but the operand is a bp-relative
                 // `[bp+(base_off+K*stride)]`. Fixture 977.
+                //
+                // `p[K]` where `p` is a register-resident pointer —
+                // fold to `<width> ptr [<reg>+(K*stride)]`. Fixture
+                // 1472 (`p[1]` in `sum`: `add ax, [si+2]`).
+                if let ExprKind::Ident(pname) = &array.kind
+                    && self.locals.has(pname)
+                    && let Some(pointee) = self.locals.type_of(pname).pointee()
+                    && let LocalLocation::Reg(reg) = self.locals.location_of(pname)
+                    && let Some(k) = try_const_eval(index)
+                {
+                    let stride = i32::from(pointee.size_bytes());
+                    let off = (k as i32).wrapping_mul(stride);
+                    let off16 = i16::try_from(off).unwrap_or(i16::MAX);
+                    return OperandSource::DerefRegOffset { reg, offset: off16 };
+                }
                 let (name, total_off, _leaf_ty) = self
                     .try_lvalue_chain_addr(e)
                     .unwrap_or_else(|| {
@@ -12915,6 +12930,10 @@ enum OperandSource {
     /// addressed as `<width> ptr [<reg>]`. Fixture 201:
     /// `sub ax,word ptr [si]` for `10 - *p` with `p` in SI.
     DerefReg(Reg),
+    /// `p[K]` where `p` is a register-resident local pointer and
+    /// `K` is constant — addressed as `<width> ptr [<reg>+<off>]`.
+    /// Fixture 1472 (`sum`: `add ax, [si+2]` for `p[1]`).
+    DerefRegOffset { reg: Reg, offset: i16 },
 }
 
 impl OperandSource {
@@ -12933,6 +12952,15 @@ impl OperandSource {
                 }
             }
             Self::DerefReg(r) => format!("word ptr [{}]", r.name()),
+            Self::DerefRegOffset { reg, offset } => {
+                if *offset == 0 {
+                    format!("word ptr [{}]", reg.name())
+                } else if *offset > 0 {
+                    format!("word ptr [{}+{}]", reg.name(), offset)
+                } else {
+                    format!("word ptr [{}-{}]", reg.name(), -offset)
+                }
+            }
         }
     }
 
@@ -12954,6 +12982,15 @@ impl OperandSource {
             // BCC's exact shape. Panic until we see one.
             Self::Reg(_) => panic!("shift count from a register local not yet supported"),
             Self::DerefReg(r) => format!("byte ptr [{}]", r.name()),
+            Self::DerefRegOffset { reg, offset } => {
+                if *offset == 0 {
+                    format!("byte ptr [{}]", reg.name())
+                } else if *offset > 0 {
+                    format!("byte ptr [{}+{}]", reg.name(), offset)
+                } else {
+                    format!("byte ptr [{}-{}]", reg.name(), -offset)
+                }
+            }
         }
     }
 }

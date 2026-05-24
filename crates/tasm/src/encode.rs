@@ -522,6 +522,10 @@ fn instr_size(instr: &Instr) -> usize {
         | Instr::SubAxFromSiPtr
         | Instr::AddAxFromSiPtr
         | Instr::AddAxFromDiPtr => 2,
+        Instr::AddAxSiDisp { .. }
+        | Instr::AddAxDiDisp { .. }
+        | Instr::SubAxSiDisp { .. }
+        | Instr::SubAxDiDisp { .. } => 3,
         Instr::ShlReg16One { .. }
         | Instr::RclReg16One { .. }
         | Instr::SarReg16One { .. }
@@ -896,6 +900,28 @@ fn emit_instr(
             // reg=AX r/m=101 ([DI]).
             out.push(0x03);
             out.push(0x05);
+        }
+        Instr::AddAxSiDisp { disp } => {
+            // `add ax,word ptr [si+disp8]` → 03 44 dd.
+            out.push(0x03);
+            out.push(0x44);
+            out.push(*disp as u8);
+        }
+        Instr::AddAxDiDisp { disp } => {
+            out.push(0x03);
+            out.push(0x45);
+            out.push(*disp as u8);
+        }
+        Instr::SubAxSiDisp { disp } => {
+            // `sub ax,word ptr [si+disp8]` → 2B 44 dd.
+            out.push(0x2B);
+            out.push(0x44);
+            out.push(*disp as u8);
+        }
+        Instr::SubAxDiDisp { disp } => {
+            out.push(0x2B);
+            out.push(0x45);
+            out.push(*disp as u8);
         }
         Instr::AndAxBpRel { offset } => emit_alu_ax_bp_rel(0x23, *offset, out),
         Instr::AndReg16BpRel { reg, offset } => {

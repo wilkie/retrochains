@@ -324,6 +324,19 @@ pub enum Instr {
     /// for the second pointer-local when BCC enregisters two ptrs
     /// (fixture 625's `*p + *q` with p in SI and q in DI).
     AddAxFromDiPtr,
+    /// `add ax,word ptr [si+disp8]` — `03 44 dd`. ModR/M 44 =
+    /// mod=01 reg=AX r/m=100 ([si]+disp8). Used when the right
+    /// operand is `p[K]` for register-resident pointer `p` in SI
+    /// with a non-zero K (fixture 1472: `p[0] + p[1]`).
+    AddAxSiDisp { disp: i8 },
+    /// `add ax,word ptr [di+disp8]` — `03 45 dd`. DI sibling of
+    /// `AddAxSiDisp`.
+    AddAxDiDisp { disp: i8 },
+    /// `sub ax,word ptr [si+disp8]` — `2B 44 dd`. Sibling of
+    /// `SubAxFromSiPtr` with displacement.
+    SubAxSiDisp { disp: i8 },
+    /// `sub ax,word ptr [di+disp8]` — `2B 45 dd`.
+    SubAxDiDisp { disp: i8 },
     /// `and ax,word ptr [bp+<offset>]` — 23 46 dd
     AndAxBpRel { offset: i16 },
     /// `or ax,word ptr [bp+<offset>]` — 0B 46 dd
