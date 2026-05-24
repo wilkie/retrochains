@@ -923,8 +923,13 @@ impl<'a> FunctionEmitter<'a> {
         let then_entry_slot = if needs_then_entry { Some(base) } else { None };
 
         if let Some(else_stmts) = else_branch {
-            // if/else reserves 3 slots; the else label lives at +2.
+            // if/else reserves 3 slots; the else label lives at +2,
+            // the merge label at +1. The then-branch's trailing jump
+            // targets the merge so any post-if-else code (e.g. a
+            // following `return r;` that loads AX) executes for both
+            // branches. Fixtures 2393, 2419, 2434, 2461.
             let else_slot = base + 2;
+            let merge_slot = base + 1;
             self.emit_cond_branch(cond, then_entry_slot, Some(else_slot));
             if let Some(slot) = then_entry_slot {
                 self.emit_label(slot);
@@ -932,12 +937,12 @@ impl<'a> FunctionEmitter<'a> {
             for s in then_branch {
                 self.emit_stmt(s);
             }
-            let exit_n = self.exit_label_num();
-            let _ = write!(self.out, "\tjmp\tshort @{}@{exit_n}\r\n", self.func_idx);
+            let _ = write!(self.out, "\tjmp\tshort {}\r\n", self.label_ref(merge_slot));
             self.emit_label(else_slot);
             for s in else_stmts {
                 self.emit_stmt(s);
             }
+            self.emit_label(merge_slot);
         } else {
             // if (no else) reserves 2 slots; skip label at +1.
             let skip_slot = base + 1;
