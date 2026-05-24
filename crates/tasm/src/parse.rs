@@ -1352,6 +1352,14 @@ fn parse_sub(operands: &str, line_no: usize) -> AsmResult<Instr> {
     if let (Some(dst), Some(src)) = (Reg8::parse(lhs), Reg8::parse(rhs)) {
         return Ok(Instr::SubReg8Reg8 { dst, src });
     }
+    // `sub ax, imm16` — AX-accumulator form (2D lo hi, 3 bytes).
+    // Same length as the imm8sx form but BCC picks this shape for
+    // AX (fixture 3578).
+    if lhs == "ax" {
+        if let Some(imm) = parse_imm16(rhs) {
+            return Ok(Instr::SubAxImm { imm: imm as u16 });
+        }
+    }
     // `sub <reg16>, imm` — imm8sx form first (3 bytes), then imm16
     // (4 bytes). Mirrors the AddReg16Imm8Sx / AddReg16Imm16 split.
     // Fixture 564 (`p -= 2;` on int-pointer in SI → `sub si, 4`).

@@ -13131,13 +13131,16 @@ fn emit_op_with_source_opts(
             let _ = write!(out, "\tadd\tax,{}\r\n", src.word());
         }
         BinOp::Sub => {
-            // BCC canonicalizes `ax - K` (immediate RHS, K != ±1, ±2 —
-            // those go through the inc/dec peephole upstream) as
-            // `add ax, -K` (the AX-accumulator imm16 form `05 lo hi`)
-            // rather than `sub ax, K`. Same 3 bytes when K fits in
-            // imm8sx and shorter than the imm16 sub form when K
-            // exceeds i8 range. Fixture 630 (`x - 5` → `05 FB FF`).
-            if let OperandSource::Immediate(k) = src {
+            // BCC canonicalizes signed `ax - K` (immediate RHS, K !=
+            // ±1, ±2 — those go through the inc/dec peephole
+            // upstream) as `add ax, -K` (the AX-accumulator imm16
+            // form `05 lo hi`) rather than `sub ax, K`. For unsigned
+            // operands BCC keeps `sub` (fixture 3578: `unsigned x -
+            // 5` → `2d 05 00`). Fixture 630 (signed `x - 5` → `05
+            // fb ff`).
+            if let OperandSource::Immediate(k) = src
+                && !unsigned
+            {
                 let neg = (0u32.wrapping_sub(*k)) & 0xFFFF;
                 let neg_i16 = neg as i16;
                 let _ = write!(out, "\tadd\tax,{neg_i16}\r\n");

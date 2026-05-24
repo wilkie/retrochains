@@ -244,7 +244,7 @@ fn instr_size(instr: &Instr) -> usize {
         | Instr::AndReg16Reg16 { .. }
         | Instr::OrReg16Reg16 { .. }
         | Instr::CmpReg16Reg16 { .. } => 2,
-        Instr::CmpReg16Imm8 { .. } | Instr::CmpAxImm { .. } | Instr::AddAxImm { .. } => 3,
+        Instr::CmpReg16Imm8 { .. } | Instr::CmpAxImm { .. } | Instr::AddAxImm { .. } | Instr::SubAxImm { .. } => 3,
         Instr::CmpBpRelImm8 { .. } => 4,
         Instr::CmpBpRelImm16 { .. } => 5,
         Instr::JmpShort(_) | Instr::ShlAxCl | Instr::SarAxCl | Instr::ShrAxCl => 2,
@@ -622,6 +622,11 @@ fn emit_instr(
         Instr::AddAxImm { imm } => {
             // `add ax,imm16` → 05 lo hi.
             out.push(0x05);
+            out.extend_from_slice(&imm.to_le_bytes());
+        }
+        Instr::SubAxImm { imm } => {
+            // `sub ax,imm16` → 2D lo hi.
+            out.push(0x2D);
             out.extend_from_slice(&imm.to_le_bytes());
         }
         Instr::CmpBpRelImm8 { offset, imm } => {

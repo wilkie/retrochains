@@ -298,6 +298,11 @@ pub enum Instr {
     /// `add ax,<imm16>` — 05 lo hi (AX-accumulator special form).
     /// Sibling of `CmpAxImm`. Used by BCC for `r = r + K` patterns.
     AddAxImm { imm: u16 },
+    /// `sub ax,imm16` — `2D lo hi`. AX-accumulator subtract; same
+    /// length (3 bytes) as the imm8sx form but BCC picks this
+    /// shape unconditionally for AX (fixture 3578: `unsigned x -
+    /// 5` → `2D 05 00`).
+    SubAxImm { imm: u16 },
     /// `cmp word ptr [bp+<offset>],<imm8>` — 83 7E dd ii. Compare a
     /// stack local directly against a small sign-extended immediate.
     /// BCC uses this for short-circuit logical lowering of patterns
