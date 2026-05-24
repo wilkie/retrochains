@@ -7550,7 +7550,42 @@ impl<'a> FunctionEmitter<'a> {
 
     fn emit_pointer_index_to_ax(&mut self, ptr_name: &str, pointee: Type, index: &Expr) {
         let Some(k) = try_const_eval(index) else {
-            panic!("variable-indexed pointer access not yet supported (no fixture)");
+            // Variable index. BCC's shape (fixture 1339):
+            //   mov ax, <index>
+            //   shl ax, 1     ; scale by stride (int = 2)
+            //   mov bx, <ptr> ; load pointer
+            //   add bx, ax    ; pointer arithmetic
+            //   mov ax, [bx]  ; deref
+            // Char stride is 1 → no shl; long would need shl ax, 2.
+            let stride = u32::from(pointee.size_bytes());
+            self.emit_expr_to_ax(index);
+            for _ in 0..stride.trailing_zeros() {
+                self.out.extend_from_slice(b"\tshl\tax,1\r\n");
+            }
+            match self.locals.location_of(ptr_name) {
+                LocalLocation::Reg(reg) => {
+                    let _ = write!(self.out, "\tmov\tbx,{}\r\n", reg.name());
+                }
+                LocalLocation::Stack(off) => {
+                    let _ = write!(
+                        self.out,
+                        "\tmov\tbx,word ptr {}\r\n",
+                        bp_addr(off),
+                    );
+                }
+            }
+            self.out.extend_from_slice(b"\tadd\tbx,ax\r\n");
+            if pointee.is_char_like() {
+                self.out.extend_from_slice(b"\tmov\tal,byte ptr [bx]\r\n");
+                if pointee.is_unsigned() {
+                    self.out.extend_from_slice(b"\tmov\tah,0\r\n");
+                } else {
+                    self.out.extend_from_slice(b"\tcbw\t\r\n");
+                }
+            } else {
+                self.out.extend_from_slice(b"\tmov\tax,word ptr [bx]\r\n");
+            }
+            return;
         };
         let addr_reg = match self.locals.location_of(ptr_name) {
             LocalLocation::Reg(reg) => reg.name(),
