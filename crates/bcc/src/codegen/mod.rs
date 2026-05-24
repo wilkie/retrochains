@@ -12130,26 +12130,26 @@ impl<'a> FunctionEmitter<'a> {
                         }
                     }
                     // `<ptr-typed lvalue> + K` / `- K` — C scales the
-                    // constant by the pointee size. Emit `mov ax, p;
-                    // add ax, K*stride` for pointee size > 1.
-                    // Fixture 3557 (`return p + 3;` for int*p →
-                    // `mov ax, [bp+4]; add ax, 6`).
+                    // constant by the pointee size. BCC emits the
+                    // canonical AX-accumulator add form: `add ax,
+                    // <signed K*stride>` (always Add, never Sub or
+                    // inc/dec, even at ±1/±2). Fixtures 3557 (`p +
+                    // 3`), 3256 (`p - 1`), 3382 (`p - K`).
                     if matches!(op, BinOp::Add | BinOp::Sub)
                         && let ExprKind::Ident(pname) = &left.kind
                         && let Some(pointee) = self.ident_pointee(pname)
                         && let Some(k) = try_const_eval(right)
                         && pointee.size_bytes() > 1
                     {
-                        let stride = u32::from(pointee.size_bytes());
-                        let scaled = (k as u32).wrapping_mul(stride) & 0xFFFF;
-                        let unsigned = self.expr_is_unsigned(left);
+                        let stride = i32::from(pointee.size_bytes());
+                        let sign = if matches!(op, BinOp::Add) { 1i32 } else { -1 };
+                        let bytes = sign.wrapping_mul(k as i32).wrapping_mul(stride);
+                        let imm16 = (bytes as i16) as u16;
                         self.emit_expr_to_ax(left);
-                        emit_op_with_source(
-                            self.out,
-                            *op,
-                            &OperandSource::Immediate(scaled),
-                            unsigned,
-                        );
+                        if imm16 == 0 {
+                            return;
+                        }
+                        let _ = write!(self.out, "\tadd\tax,{}\r\n", imm16 as i16);
                         return;
                     }
                     // Commutative-op operand swap: BCC prefers the
