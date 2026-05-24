@@ -3114,6 +3114,23 @@ impl<'a> FunctionEmitter<'a> {
             }
             return;
         }
+        // `if (<global-chain>)` — any lvalue chain rooted at a global
+        // (e.g. `s.x`, `a[2]`, `s.a[1]`). BCC emits memory-direct
+        // `cmp <width> ptr DGROUP:_<sym>[+K], 0`, avoiding the AX
+        // round-trip. Fixture 3586 (`if (s.x && s.y)`).
+        if let Some((name, off, ty)) = self.try_lvalue_chain_addr(cond)
+            && self.globals.contains(&name)
+            && !matches!(ty, Type::Array { .. } | Type::Struct { .. })
+        {
+            let width = if ty.is_char_like() { "byte" } else { "word" };
+            let addr = if off == 0 {
+                format!("DGROUP:_{name}")
+            } else {
+                format!("DGROUP:_{name}+{off}")
+            };
+            let _ = write!(self.out, "\tcmp\t{width} ptr {addr},0\r\n");
+            return;
+        }
         // Catch-all: evaluate the condition expression into AX and
         // test with `or ax, ax`. Covers any shape we don't have a
         // dedicated peephole for — `if ("X")` (StringLit address,
