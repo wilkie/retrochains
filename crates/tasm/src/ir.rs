@@ -1097,6 +1097,10 @@ pub enum Instr {
     /// (mod=01 /0(TEST) r/m=110(BP) disp8). Fixture 1853 (`if (x &
     /// 0x40)` for int local x).
     TestBpRelImm16 { offset: i16, imm: u16 },
+    /// `test word ptr [bp+<offset>], ax` — TEST r/m16, r16. Encoding:
+    /// `85 46 dd` (mod=01 reg=AX r/m=110(BP) disp8). Used for `(x &
+    /// y) != 0` where both x and y are int lvalues (fixture 3539).
+    TestBpRelAx { offset: i16 },
     /// `test <reg16>, imm16` — TEST r/m16, imm16 via Grp3 /0 against
     /// a register. Encoding: `F7 (0xC0+reg.code()) imm_lo imm_hi`
     /// (ModR/M mod=11 reg=000(/0=TEST) r/m=reg). Sets flags from the

@@ -2650,6 +2650,32 @@ impl<'a> FunctionEmitter<'a> {
             );
             return ("jne", "je");
         }
+        // `(<int-mem> & <int-mem>) == 0` / `!= 0` — both operands
+        // are int lvalues. BCC loads one into AX, then `test [other],
+        // ax` (sets ZF without storing). Fixture 3539.
+        if let ExprKind::BinOp { op: outer_op, left: outer_l, right: outer_r } = &cond.kind
+            && matches!(outer_op, BinOp::Eq | BinOp::Ne)
+            && try_const_eval(outer_r) == Some(0)
+            && let ExprKind::BinOp { op: BinOp::BitAnd, left, right } = &outer_l.kind
+            && let ExprKind::Ident(lname) = &left.kind
+            && let ExprKind::Ident(rname) = &right.kind
+            && self.locals.has(lname)
+            && self.locals.has(rname)
+            && self.locals.type_of(lname).is_int_like()
+            && self.locals.type_of(rname).is_int_like()
+            && let LocalLocation::Stack(l_off) = self.locals.location_of(lname)
+            && let LocalLocation::Stack(r_off) = self.locals.location_of(rname)
+        {
+            // BCC loads the RHS-ident into AX, then `test [l], ax`.
+            let _ = write!(self.out, "\tmov\tax,word ptr {}\r\n", bp_addr(r_off));
+            let _ = write!(self.out, "\ttest\tword ptr {},ax\r\n", bp_addr(l_off));
+            let mnem_pair = match outer_op {
+                BinOp::Eq => ("je", "jne"),
+                BinOp::Ne => ("jne", "je"),
+                _ => unreachable!(),
+            };
+            return mnem_pair;
+        }
         // `(<int-mem> & K) == 0` or `!= 0` — the `& K` already sets
         // ZF via TEST, so the outer compare against 0 is implicit.
         // Routes through the same TestBpRelImm16 / TestGroupSymImm16

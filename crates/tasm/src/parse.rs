@@ -463,6 +463,13 @@ fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
             {
                 return Ok(Instr::TestBpRelImm16 { offset, imm: imm as u16 });
             }
+            // `test word ptr [bp+disp8], ax` — local mem vs reg
+            // (fixture 3539, `(x & mask) != 0`).
+            if let Some(offset) = parse_word_bp_relative(lhs)
+                && rhs == "ax"
+            {
+                return Ok(Instr::TestBpRelAx { offset });
+            }
             Err(AsmError::new(
                 line.line_no,
                 format!("test: unsupported operand form `{rest}`"),

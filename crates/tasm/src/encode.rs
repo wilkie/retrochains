@@ -393,6 +393,7 @@ fn instr_size(instr: &Instr) -> usize {
         Instr::IncGroupSym { .. } | Instr::DecGroupSym { .. } => 4,
         Instr::TestGroupSymImm16 { .. } => 6,
         Instr::TestBpRelImm16 { .. } => 5,
+        Instr::TestBpRelAx { .. } => 3,
         Instr::TestReg16Imm16 { .. } => 4,
         Instr::AddGroupSymReg16 { .. } | Instr::SubGroupSymReg16 { .. } => 4,
         Instr::AndGroupSymReg16 { .. }
@@ -1914,6 +1915,12 @@ fn emit_instr(
             out.push(0x46);
             out.push(*offset as i8 as u8);
             out.extend_from_slice(&imm.to_le_bytes());
+        }
+        Instr::TestBpRelAx { offset } => {
+            // `test word ptr [bp+disp8], ax` → 85 46 dd.
+            out.push(0x85);
+            out.push(0x46);
+            out.push(*offset as i8 as u8);
         }
         Instr::IncGroupSym { group, symbol, offset } => {
             // `inc word ptr <group>:<sym>[+N]` → FF 06 lo hi.
