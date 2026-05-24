@@ -2834,6 +2834,26 @@ impl<'a> FunctionEmitter<'a> {
     /// outside this lvalue shape. Used by the member/array codegen
     /// to fold `pts[1].x` and friends into a single `[bp-N]` operand
     /// (fixture 185).
+    /// Build the textual ModR/M address for a name + byte offset
+    /// returned by [`Self::try_lvalue_chain_addr`]. Returns `None`
+    /// when the name resolves to a non-stack local (register-resident
+    /// or non-existent), since those can't be addressed by memory
+    /// operand directly.
+    fn resolve_chain_addr(&self, name: &str, off: i32) -> Option<String> {
+        if self.globals.contains(name) {
+            return Some(if off == 0 {
+                format!("DGROUP:_{name}")
+            } else {
+                format!("DGROUP:_{name}+{off}")
+            });
+        }
+        if let LocalLocation::Stack(base) = self.locals.location_of(name) {
+            let final_off = base + i16::try_from(off).unwrap_or(i16::MAX);
+            return Some(bp_addr(final_off));
+        }
+        None
+    }
+
     fn try_lvalue_chain_addr(&self, e: &Expr) -> Option<(String, i32, Type)> {
         match &e.kind {
             ExprKind::Ident(name) => {
@@ -11740,6 +11760,36 @@ impl<'a> FunctionEmitter<'a> {
                 if op.is_comparison() {
                     self.emit_comparison_as_value(e.span.start, *op, left, right);
                 } else {
+                    // `<char_lvalue> <bitop> <char_lvalue>` — byte op
+                    // in AL, single cbw at the end. BCC emits
+                    // `mov al, [l]; or al, [r]; cbw` for the
+                    // char-or-char case (fixture 1375). Pre-peephole
+                    // we widened first and used the word form. Limit
+                    // to bitops where C's per-bit semantics are the
+                    // same at byte and word width once widened.
+                    if matches!(op, BinOp::BitOr | BinOp::BitAnd | BinOp::BitXor)
+                        && let Some((l_name, l_off, l_ty)) =
+                            self.try_lvalue_chain_addr(left)
+                        && let Some((r_name, r_off, r_ty)) =
+                            self.try_lvalue_chain_addr(right)
+                        && l_ty.is_char_like()
+                        && r_ty.is_char_like()
+                    {
+                        let l_addr = self.resolve_chain_addr(&l_name, l_off);
+                        let r_addr = self.resolve_chain_addr(&r_name, r_off);
+                        if let (Some(la), Some(ra)) = (l_addr, r_addr) {
+                            let mnem = match op {
+                                BinOp::BitOr => "or",
+                                BinOp::BitAnd => "and",
+                                BinOp::BitXor => "xor",
+                                _ => unreachable!(),
+                            };
+                            let _ = write!(self.out, "\tmov\tal,byte ptr {la}\r\n");
+                            let _ = write!(self.out, "\t{mnem}\tal,byte ptr {ra}\r\n");
+                            self.out.extend_from_slice(b"\tcbw\t\r\n");
+                            return;
+                        }
+                    }
                     // Commutative-op operand swap: BCC prefers the
                     // non-constant operand in AX so the immediate or
                     // simpler operand can be the binop's RHS. Fixture
