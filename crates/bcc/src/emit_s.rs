@@ -622,6 +622,26 @@ fn write_tail(
     let long_has_bss_array_global = long_array_kind.is_some();
     let long_has_bss_struct_array = long_array_kind == Some(true);
     let long_has_bss_nonstruct_array = long_array_kind == Some(false);
+    // Initialized (_DATA) array globals where the global's symbol
+    // name is LONGER than every function's symbol name: segment-
+    // group too (DATA publics first, then TEXT functions reverse-
+    // alpha). Empirically pins fixtures 1924 (`_table` > `_main`),
+    // 2715 (`_table` > `_main`), 3057 (`_single` > `_peek`).
+    // Shorter or equal-length names (498 `_msg`, 2431 `_strs`,
+    // 2436 `_pts`, 2637 `_msg`) keep the forward-alpha path.
+    let max_long_function_len = long_functions
+        .iter()
+        .map(|(name, _)| name.len())
+        .max()
+        .unwrap_or(0);
+    let long_has_data_array_with_long_name = unit
+        .globals
+        .iter()
+        .filter(|g| !g.is_static && !g.is_extern)
+        .filter(|g| g.name.len() + 1 >= 3)
+        .filter(|g| g.init.is_some())
+        .any(|g| matches!(g.ty, crate::ast::Type::Array { .. })
+            && (g.name.len() + 1) > max_long_function_len);
     let mut long_globals = long_globals;
     let mut long_functions = long_functions;
     let mut long_helpers = long_helpers;
@@ -639,11 +659,11 @@ fn write_tail(
     // actually emits `_main, _pts, _g` (forward-alpha across the
     // whole long bucket).
     let mut long_bucket: Vec<(String, String)> = Vec::new();
-    if !has_long_typed_global
-        && long_has_bss_nonstruct_array
+    let segment_group = !has_long_typed_global
         && !short_has_global
-        && !long_has_data_global
-    {
+        && ((long_has_bss_nonstruct_array && !long_has_data_global)
+            || long_has_data_array_with_long_name);
+    if segment_group {
         long_bucket.extend(long_globals.iter().cloned());
         long_bucket.extend(long_functions.iter().rev().cloned());
         long_bucket.extend(long_helpers.iter().rev().cloned());
