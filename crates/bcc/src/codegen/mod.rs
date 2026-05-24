@@ -4865,8 +4865,21 @@ impl<'a> FunctionEmitter<'a> {
                 // AX before our `mov [dest], ax`. Skip the move and
                 // store DX directly. Fixture 2089 (`int r = x % 7`),
                 // 2088, 1723.
+                //
+                // Skip this peephole when the RHS is an
+                // unsigned-by-pow2 strength reduction (`x % K` with
+                // K=pow2 for unsigned x): that path emits `and ax,
+                // K-1` and leaves the result in AX, not DX (fixtures
+                // 1935, 2087).
+                let mod_strength_reduced = matches!(&init.kind,
+                    ExprKind::BinOp { op: BinOp::Mod, left, right }
+                    if self.expr_is_unsigned(left)
+                        && matches!(try_const_eval(right),
+                            Some(v) if v > 0 && v.is_power_of_two())
+                );
                 if ty.is_int_like()
                     && let ExprKind::BinOp { op: BinOp::Mod, .. } = &init.kind
+                    && !mod_strength_reduced
                 {
                     // Evaluate up to the idiv/div but inhibit the
                     // final mov ax,dx by setting a one-shot flag.
