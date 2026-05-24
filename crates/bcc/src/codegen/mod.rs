@@ -12281,36 +12281,43 @@ impl<'a> FunctionEmitter<'a> {
                         // Fixture 1228 (`a * c`).
                         self.emit_expr_to_ax(right);
                         emit_op_with_source(self.out, *op, &left_src, unsigned);
-                    } else if rhs_clobbers_ax {
+                    } else if rhs_clobbers_ax
+                        && matches!(op, BinOp::Div | BinOp::Mod | BinOp::Mul)
+                    {
                         // Div/Mod need DX free for cwd / xor dx,dx,
-                        // so the divisor goes into BX. BCC's
-                        // ordering for this shape is LHS-first
-                        // (push), then RHS (mov bx, ax), then pop
-                        // LHS back into AX. Fixture 1357.
-                        if matches!(op, BinOp::Div | BinOp::Mod) {
-                            self.emit_expr_to_ax(left);
-                            self.out.extend_from_slice(b"\tpush\tax\r\n");
-                            self.emit_expr_to_ax(right);
-                            self.out.extend_from_slice(b"\tmov\tbx,ax\r\n");
-                            self.out.extend_from_slice(b"\tpop\tax\r\n");
-                            emit_op_with_source(
-                                self.out,
-                                *op,
-                                &OperandSource::Reg(Reg::Bx),
-                                unsigned,
-                            );
+                        // so the divisor goes into BX. Mul uses DX
+                        // (imul writes DX:AX, so DX as src is fine).
+                        // BCC's order for both: LHS first (push),
+                        // then RHS (mov scratch, ax), then pop LHS
+                        // back into AX. Fixtures 1357 (`a / b`),
+                        // 1625 (`a * b`), 1223.
+                        let scratch = if matches!(op, BinOp::Mul) {
+                            Reg::Dx
                         } else {
-                            self.emit_expr_to_ax(right);
-                            self.out.extend_from_slice(b"\tpush\tax\r\n");
-                            self.emit_expr_to_ax(left);
-                            self.out.extend_from_slice(b"\tpop\tdx\r\n");
-                            emit_op_with_source(
-                                self.out,
-                                *op,
-                                &OperandSource::Reg(Reg::Dx),
-                                unsigned,
-                            );
-                        }
+                            Reg::Bx
+                        };
+                        self.emit_expr_to_ax(left);
+                        self.out.extend_from_slice(b"\tpush\tax\r\n");
+                        self.emit_expr_to_ax(right);
+                        let _ = write!(self.out, "\tmov\t{},ax\r\n", scratch.name());
+                        self.out.extend_from_slice(b"\tpop\tax\r\n");
+                        emit_op_with_source(
+                            self.out,
+                            *op,
+                            &OperandSource::Reg(scratch),
+                            unsigned,
+                        );
+                    } else if rhs_clobbers_ax {
+                        self.emit_expr_to_ax(right);
+                        self.out.extend_from_slice(b"\tpush\tax\r\n");
+                        self.emit_expr_to_ax(left);
+                        self.out.extend_from_slice(b"\tpop\tdx\r\n");
+                        emit_op_with_source(
+                            self.out,
+                            *op,
+                            &OperandSource::Reg(Reg::Dx),
+                            unsigned,
+                        );
                     } else {
                         self.emit_expr_to_ax(left);
                         self.emit_binary_right(*op, right, unsigned);
