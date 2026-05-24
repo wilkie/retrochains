@@ -1328,9 +1328,7 @@ fn parse_sub(operands: &str, line_no: usize) -> AsmResult<Instr> {
     if lhs == "sp" {
         let imm = parse_imm16(rhs)
             .ok_or_else(|| AsmError::new(line_no, format!("sub sp,?: bad imm `{rhs}`")))?;
-        let imm_u8 = u8::try_from(imm)
-            .map_err(|_| AsmError::new(line_no, format!("sub sp,{imm}: doesn't fit in u8")))?;
-        return Ok(Instr::SubSpImm(imm_u8));
+        return Ok(Instr::SubSpImm(imm as u16));
     }
     // `sub ax,word ptr [si]` — deref through SI as RHS (fixture 201).
     if lhs == "ax" && rhs == "word ptr [si]" {
@@ -1999,9 +1997,7 @@ fn parse_add(operands: &str, line_no: usize) -> AsmResult<Instr> {
     if lhs == "sp" {
         let imm = parse_imm16(rhs)
             .ok_or_else(|| AsmError::new(line_no, format!("add sp,?: bad imm `{rhs}`")))?;
-        let imm_u8 = u8::try_from(imm)
-            .map_err(|_| AsmError::new(line_no, format!("add sp,{imm}: doesn't fit in u8")))?;
-        return Ok(Instr::AddSpImm(imm_u8));
+        return Ok(Instr::AddSpImm(imm as u16));
     }
     if lhs == "ax" {
         if rhs == "word ptr [si]" {

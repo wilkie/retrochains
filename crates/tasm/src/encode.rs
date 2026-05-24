@@ -245,8 +245,8 @@ fn instr_size(instr: &Instr) -> usize {
         | Instr::OrReg16Reg16 { .. }
         | Instr::CmpReg16Reg16 { .. } => 2,
         Instr::CmpReg16Imm8 { .. } | Instr::CmpAxImm { .. } | Instr::AddAxImm { .. } | Instr::SubAxImm { .. } => 3,
-        Instr::CmpBpRelImm8 { .. } => 4,
-        Instr::CmpBpRelImm16 { .. } => 5,
+        Instr::CmpBpRelImm8 { offset, .. } => 1 + bp_rel_modrm_size(*offset) + 1,
+        Instr::CmpBpRelImm16 { offset, .. } => 1 + bp_rel_modrm_size(*offset) + 2,
         Instr::JmpShort(_) | Instr::ShlAxCl | Instr::SarAxCl | Instr::ShrAxCl => 2,
         Instr::ShlReg16Cl { .. } | Instr::SarReg16Cl { .. } | Instr::ShrReg16Cl { .. } => 2,
         Instr::ShlReg8Cl { .. } | Instr::SarReg8Cl { .. } | Instr::ShrReg8Cl { .. } => 2,
@@ -255,71 +255,76 @@ fn instr_size(instr: &Instr) -> usize {
         Instr::JmpIndirectCsTableBx { .. } => 5,
         Instr::JmpIndirectCsBxDisp { .. } => 4,
         Instr::LoopShort { .. } => 2,
-        Instr::MovBpRelAx { .. } | Instr::MovBpRelReg16 { .. } => 3,
+        Instr::MovBpRelAx { offset } | Instr::MovBpRelReg16 { offset, .. } => {
+            1 + bp_rel_modrm_size(*offset)
+        }
         Instr::MovAxFromCsBx => 3,
         Instr::MovReg16OffsetSym { .. } => 3,
         Instr::MovReg16GroupSymBxDisp { .. } => 4,
         Instr::MovGroupSymBxDispImm { .. } => 6,
         Instr::MovGroupSymBxDispReg16 { .. } => 4,
-        Instr::MovReg16Imm { .. } | Instr::SubSpImm(_) | Instr::AddSpImm(_) => 3,
-        Instr::MovReg16BpRel { .. }
-        | Instr::AddAxBpRel { .. }
-        | Instr::AdcDxBpRel { .. }
-        | Instr::SbbDxBpRel { .. }
-        | Instr::AddDxBpRel { .. }
-        | Instr::AdcAxBpRel { .. }
-        | Instr::SubDxBpRel { .. }
-        | Instr::SbbAxBpRel { .. }
-        | Instr::AndDxBpRel { .. }
-        | Instr::OrDxBpRel { .. }
-        | Instr::XorDxBpRel { .. }
-        | Instr::AddBpRelDx { .. }
-        | Instr::AdcBpRelAx { .. }
-        | Instr::SubBpRelDx { .. }
-        | Instr::SbbBpRelAx { .. }
-        | Instr::AndBpRelDx { .. }
-        | Instr::AndBpRelAx { .. }
-        | Instr::OrBpRelDx { .. }
-        | Instr::OrBpRelAx { .. }
-        | Instr::XorBpRelDx { .. }
-        | Instr::XorBpRelAx { .. }
-        | Instr::AddBpRelAx { .. }
-        | Instr::AdcBpRelDx { .. }
-        | Instr::SubBpRelAx { .. }
-        | Instr::SbbBpRelDx { .. }
-        | Instr::AddBpRelByteAl { .. }
-        | Instr::SubBpRelByteAl { .. }
-        | Instr::AndBpRelByteAl { .. }
-        | Instr::OrBpRelByteAl { .. }
-        | Instr::XorBpRelByteAl { .. }
-        | Instr::SubAxBpRel { .. }
-        | Instr::AndAxBpRel { .. }
-        | Instr::AndReg16BpRel { .. }
-        | Instr::OrAxBpRel { .. }
-        | Instr::OrReg16BpRel { .. }
-        | Instr::XorAxBpRel { .. }
-        | Instr::XorReg16BpRel { .. }
-        | Instr::AddReg16BpRel { .. }
-        | Instr::SubReg16BpRel { .. }
-        | Instr::CmpAxBpRel { .. }
-        | Instr::CmpDxBpRel { .. }
-        | Instr::CmpReg16BpRel { .. }
-        | Instr::ImulBpRel { .. }
-        | Instr::IdivBpRel { .. }
-        | Instr::DivBpRel { .. }
-        | Instr::ImulByteBpRel { .. }
-        | Instr::IdivByteBpRel { .. }
-        | Instr::DivByteBpRel { .. }
-        | Instr::MovReg8BpRel { .. }
-        | Instr::MovBpRelReg8 { .. } => 3,
+        Instr::MovReg16Imm { .. } => 3,
+        Instr::SubSpImm(imm) | Instr::AddSpImm(imm) => {
+            if i8::try_from(*imm as i16).is_ok() { 3 } else { 4 }
+        }
+        Instr::MovReg16BpRel { offset, .. }
+        | Instr::AddAxBpRel { offset }
+        | Instr::AdcDxBpRel { offset }
+        | Instr::SbbDxBpRel { offset }
+        | Instr::AddDxBpRel { offset }
+        | Instr::AdcAxBpRel { offset }
+        | Instr::SubDxBpRel { offset }
+        | Instr::SbbAxBpRel { offset }
+        | Instr::AndDxBpRel { offset }
+        | Instr::OrDxBpRel { offset }
+        | Instr::XorDxBpRel { offset }
+        | Instr::AddBpRelDx { offset }
+        | Instr::AdcBpRelAx { offset }
+        | Instr::SubBpRelDx { offset }
+        | Instr::SbbBpRelAx { offset }
+        | Instr::AndBpRelDx { offset }
+        | Instr::AndBpRelAx { offset }
+        | Instr::OrBpRelDx { offset }
+        | Instr::OrBpRelAx { offset }
+        | Instr::XorBpRelDx { offset }
+        | Instr::XorBpRelAx { offset }
+        | Instr::AddBpRelAx { offset }
+        | Instr::AdcBpRelDx { offset }
+        | Instr::SubBpRelAx { offset }
+        | Instr::SbbBpRelDx { offset }
+        | Instr::AddBpRelByteAl { offset }
+        | Instr::SubBpRelByteAl { offset }
+        | Instr::AndBpRelByteAl { offset }
+        | Instr::OrBpRelByteAl { offset }
+        | Instr::XorBpRelByteAl { offset }
+        | Instr::SubAxBpRel { offset }
+        | Instr::AndAxBpRel { offset }
+        | Instr::AndReg16BpRel { offset, .. }
+        | Instr::OrAxBpRel { offset }
+        | Instr::OrReg16BpRel { offset, .. }
+        | Instr::XorAxBpRel { offset }
+        | Instr::XorReg16BpRel { offset, .. }
+        | Instr::AddReg16BpRel { offset, .. }
+        | Instr::SubReg16BpRel { offset, .. }
+        | Instr::CmpAxBpRel { offset }
+        | Instr::CmpDxBpRel { offset }
+        | Instr::CmpReg16BpRel { offset, .. }
+        | Instr::ImulBpRel { offset }
+        | Instr::IdivBpRel { offset }
+        | Instr::DivBpRel { offset }
+        | Instr::ImulByteBpRel { offset }
+        | Instr::IdivByteBpRel { offset }
+        | Instr::DivByteBpRel { offset }
+        | Instr::MovReg8BpRel { offset, .. }
+        | Instr::MovBpRelReg8 { offset, .. } => 1 + bp_rel_modrm_size(*offset),
         Instr::MovReg8Imm8 { .. } => 2,
         Instr::MovReg8Reg8 { .. } => 2,
-        Instr::MovBpRelImm8 { .. } => 4,
+        Instr::MovBpRelImm8 { offset, .. } => 1 + bp_rel_modrm_size(*offset) + 1,
         Instr::MovByteSiDispImm8 { disp, .. } => if *disp == 0 { 3 } else { 4 },
         Instr::MovReg8ByteSiDisp { disp, .. } => if *disp == 0 { 2 } else { 3 },
         Instr::IncReg8 { .. } | Instr::DecReg8 { .. } => 2,
         Instr::CmpReg8Imm8 { .. } => 3,
-        Instr::CmpAlBpRel { .. } => 3,
+        Instr::CmpAlBpRel { offset } => 1 + bp_rel_modrm_size(*offset),
         Instr::AddAlImm8 { .. }
         | Instr::SubAlImm8 { .. }
         | Instr::AndAlImm8 { .. }
@@ -379,7 +384,8 @@ fn instr_size(instr: &Instr) -> usize {
         | Instr::XorAxGroupSym { .. } => 4,
         Instr::CmpAxGroupSym { .. } | Instr::CmpDxGroupSym { .. } => 4,
         Instr::PushGroupSym { .. } => 4,
-        Instr::PushBpRel { .. } | Instr::PushSiDisp { .. } => 3,
+        Instr::PushBpRel { offset } => 1 + bp_rel_modrm_size(*offset),
+        Instr::PushSiDisp { .. } => 3,
         Instr::PushSiPtr => 2,
         Instr::PushDs => 1,
         Instr::PushSs => 1,
@@ -392,8 +398,8 @@ fn instr_size(instr: &Instr) -> usize {
         | Instr::SbbGroupSymImm8Sx { .. } => 5,
         Instr::IncGroupSym { .. } | Instr::DecGroupSym { .. } => 4,
         Instr::TestGroupSymImm16 { .. } => 6,
-        Instr::TestBpRelImm16 { .. } => 5,
-        Instr::TestBpRelAx { .. } => 3,
+        Instr::TestBpRelImm16 { offset, .. } => 1 + bp_rel_modrm_size(*offset) + 2,
+        Instr::TestBpRelAx { offset } => 1 + bp_rel_modrm_size(*offset),
         Instr::TestReg16Imm16 { .. } => 4,
         Instr::AddGroupSymReg16 { .. } | Instr::SubGroupSymReg16 { .. } => 4,
         Instr::AndGroupSymReg16 { .. }
@@ -423,7 +429,9 @@ fn instr_size(instr: &Instr) -> usize {
         Instr::ImulGroupSym { .. } | Instr::IdivGroupSym { .. } => 4,
         Instr::ImulSiPtr | Instr::IdivSiPtr => 2,
         Instr::IncGroupSymByte { .. } | Instr::DecGroupSymByte { .. } => 4,
-        Instr::IncBpRelByte { .. } | Instr::DecBpRelByte { .. } => 3,
+        Instr::IncBpRelByte { offset } | Instr::DecBpRelByte { offset } => {
+            1 + bp_rel_modrm_size(*offset)
+        }
         Instr::CmpByteBpRelImm8 { .. } => 4,
         Instr::CmpByteSiPtrImm8 { .. } => 3,
         Instr::CmpWordSiDispImm8Sx { disp, .. } => if *disp == 0 { 3 } else { 4 },
@@ -432,7 +440,7 @@ fn instr_size(instr: &Instr) -> usize {
         | Instr::XorGroupSymImm16 { .. }
         | Instr::CmpGroupSymImm16 { .. } => 6,
         Instr::Cbw => 1,
-        Instr::LeaReg16BpRel { .. } => 3,
+        Instr::LeaReg16BpRel { offset, .. } => 1 + bp_rel_modrm_size(*offset),
         Instr::MovSiPtrImm { .. } | Instr::MovBxPtrImm { .. } => 4,
         Instr::MovBxPtrAl | Instr::MovBxPtrAx => 2,
         Instr::MovSiPtrImm8 { .. } => 3,
@@ -449,9 +457,9 @@ fn instr_size(instr: &Instr) -> usize {
         Instr::AndSiPtrByteImm8 { .. }
         | Instr::OrSiPtrByteImm8 { .. }
         | Instr::XorSiPtrByteImm8 { .. } => 3,
-        Instr::AndBpRelByteImm8 { .. }
-        | Instr::OrBpRelByteImm8 { .. }
-        | Instr::XorBpRelByteImm8 { .. } => 4,
+        Instr::AndBpRelByteImm8 { offset, .. }
+        | Instr::OrBpRelByteImm8 { offset, .. }
+        | Instr::XorBpRelByteImm8 { offset, .. } => 1 + bp_rel_modrm_size(*offset) + 1,
         Instr::AddSiPtrReg8 { .. } | Instr::SubSiPtrReg8 { .. } => 2,
         Instr::IncSiPtrByte | Instr::DecSiPtrByte => 2,
         Instr::IncSiPtrWord | Instr::DecSiPtrWord => 2,
@@ -503,20 +511,20 @@ fn instr_size(instr: &Instr) -> usize {
         Instr::MovBxDispImm { .. } => 5,
         Instr::AdcBxDispImm8 { .. } | Instr::SbbBxDispImm8 { .. } => 4,
         Instr::PushBxDisp { .. } => 3,
-        Instr::AddAlBpRel { .. }
-        | Instr::SubAlBpRel { .. }
-        | Instr::AndAlBpRel { .. }
-        | Instr::OrAlBpRel { .. }
-        | Instr::XorAlBpRel { .. } => 3,
+        Instr::AddAlBpRel { offset }
+        | Instr::SubAlBpRel { offset }
+        | Instr::AndAlBpRel { offset }
+        | Instr::OrAlBpRel { offset }
+        | Instr::XorAlBpRel { offset } => 1 + bp_rel_modrm_size(*offset),
         Instr::AdcSiDispAx { .. } => 3,
         Instr::AdcSiDispDx { .. } | Instr::SbbSiDispDx { .. } => 3,
-        Instr::AddBpRelImm8 { .. }
-        | Instr::AdcBpRelImm8 { .. }
-        | Instr::SubBpRelImm8 { .. }
-        | Instr::SbbBpRelImm8 { .. } => 4,
-        Instr::AndBpRelImm16 { .. }
-        | Instr::OrBpRelImm16 { .. }
-        | Instr::XorBpRelImm16 { .. } => 5,
+        Instr::AddBpRelImm8 { offset, .. }
+        | Instr::AdcBpRelImm8 { offset, .. }
+        | Instr::SubBpRelImm8 { offset, .. }
+        | Instr::SbbBpRelImm8 { offset, .. } => 1 + bp_rel_modrm_size(*offset) + 1,
+        Instr::AndBpRelImm16 { offset, .. }
+        | Instr::OrBpRelImm16 { offset, .. }
+        | Instr::XorBpRelImm16 { offset, .. } => 1 + bp_rel_modrm_size(*offset) + 2,
         Instr::MovAxFromSiPtr
         | Instr::MovAxFromBxPtr
         | Instr::MovBxFromBxPtr
@@ -537,10 +545,10 @@ fn instr_size(instr: &Instr) -> usize {
         | Instr::ShlReg8One { .. }
         | Instr::SarReg8One { .. }
         | Instr::ShrReg8One { .. } => 2,
-        Instr::MovBpRelImm { .. }
-        | Instr::MovBpRelOffsetSym { .. }
-        | Instr::MovBpRelOffsetGroupSym { .. } => 5,
-        Instr::CallIndirectBpRel { .. } => 3,
+        Instr::MovBpRelImm { offset, .. }
+        | Instr::MovBpRelOffsetSym { offset, .. }
+        | Instr::MovBpRelOffsetGroupSym { offset, .. } => 1 + bp_rel_modrm_size(*offset) + 2,
+        Instr::CallIndirectBpRel { offset } => 1 + bp_rel_modrm_size(*offset),
     }
 }
 
@@ -631,22 +639,17 @@ fn emit_instr(
             out.extend_from_slice(&imm.to_le_bytes());
         }
         Instr::CmpBpRelImm8 { offset, imm } => {
-            // `cmp word ptr [bp+disp8],imm8 (sign-extended)` → 83 7E dd ii.
-            // ModR/M 7E = mod=01 /7(CMP) r/m=110([bp+disp8]).
-            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
+            // `cmp word ptr [bp+disp],imm8sx` → 83 /7 [bp+disp] ii.
+            // ModR/M reg field 7 = CMP in Grp1.
             out.push(0x83);
-            out.push(0x7E);
-            out.push(disp as u8);
+            emit_bp_rel_modrm(7, *offset, out);
             out.push(*imm as u8);
         }
         Instr::CmpBpRelImm16 { offset, imm } => {
-            // `cmp word ptr [bp+disp8],imm16` → 81 7E dd lo hi.
-            // Same ModR/M as the imm8sx form; Grp1 r/m16,imm16 with
-            // /7=CMP. Fixture 563.
-            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
+            // `cmp word ptr [bp+disp],imm16` → 81 /7 [bp+disp] lo hi.
+            // Fixture 563.
             out.push(0x81);
-            out.push(0x7E);
-            out.push(disp as u8);
+            emit_bp_rel_modrm(7, *offset, out);
             out.extend_from_slice(&imm.to_le_bytes());
         }
         Instr::MovReg16Imm { reg, imm } => {
@@ -655,239 +658,171 @@ fn emit_instr(
             out.extend_from_slice(&imm.to_le_bytes());
         }
         Instr::SubSpImm(imm) => {
-            // `sub sp,imm8` → 83 EC ii (Grp1 r/m16,imm8 sign-extended;
-            // ModR/M EC = mod=11 /5(SUB) r/m=SP).
-            out.push(0x83);
-            out.push(0xEC);
-            out.push(*imm);
+            // imm8sx form when it fits (83 EC ii), imm16 otherwise
+            // (81 EC lo hi). Fixture 1739 (200-byte frame uses
+            // imm16).
+            if let Ok(imm8) = i8::try_from(*imm as i16) {
+                out.push(0x83);
+                out.push(0xEC);
+                out.push(imm8 as u8);
+            } else {
+                out.push(0x81);
+                out.push(0xEC);
+                out.extend_from_slice(&imm.to_le_bytes());
+            }
         }
         Instr::AddSpImm(imm) => {
-            // `add sp,imm8` → 83 C4 ii (ModR/M C4 = mod=11 /0(ADD)
-            // r/m=SP). Used for cdecl stack cleanup after multi-arg
-            // calls (fixture 138's `add sp,6`).
-            out.push(0x83);
-            out.push(0xC4);
-            out.push(*imm);
+            // Sibling of SubSpImm. Used for cdecl stack cleanup
+            // (fixture 138's `add sp,6`).
+            if let Ok(imm8) = i8::try_from(*imm as i16) {
+                out.push(0x83);
+                out.push(0xC4);
+                out.push(imm8 as u8);
+            } else {
+                out.push(0x81);
+                out.push(0xC4);
+                out.extend_from_slice(&imm.to_le_bytes());
+            }
         }
         Instr::MovBpRelImm { offset, imm } => {
-            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
+            // `mov word ptr [bp+disp], imm16` → C7 /0 [bp+disp] lo hi.
             out.push(0xC7);
-            out.push(0x46);
-            out.push(disp as u8);
+            emit_bp_rel_modrm(0, *offset, out);
             out.extend_from_slice(&imm.to_le_bytes());
         }
         Instr::MovBpRelOffsetGroupSym { offset, group, symbol, sym_offset } => {
-            // `mov word ptr [bp+disp8], offset <group>:<symbol>` →
-            // C7 46 dd lo hi. ModR/M 46 = mod=01 /0 r/m=110 ([bp+
-            // disp8]). The lo/hi imm is the symbol's offset, FIXUPP-
-            // relocated like `MovReg16OffsetGroupSym`.
-            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
+            // `mov word ptr [bp+disp], offset <group>:<symbol>` →
+            // C7 /0 [bp+disp] lo hi. The lo/hi imm is the symbol's
+            // offset, FIXUPP-relocated like
+            // `MovReg16OffsetGroupSym`.
             out.push(0xC7);
-            out.push(0x46);
-            out.push(disp as u8);
+            emit_bp_rel_modrm(0, *offset, out);
             emit_group_sym_imm16(
                 group, symbol, *sym_offset,
                 symbols, group_idx, extern_idx, out, fixups,
             )?;
         }
         Instr::MovReg16BpRel { reg, offset } => {
-            // `mov r16,word ptr [bp+disp8]` → 8B xx dd. ModR/M xx =
-            // mod=01 reg=<reg-code> r/m=110 ([bp+disp8]).
-            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
+            // `mov r16, word ptr [bp+disp]` → 8B /<reg> [bp+disp].
             out.push(0x8B);
-            out.push(0b01_000_110 | (reg.code() << 3));
-            out.push(disp as u8);
+            emit_bp_rel_modrm(reg.code(), *offset, out);
         }
         Instr::AddAxBpRel { offset } => emit_alu_ax_bp_rel(0x03, *offset, out),
         Instr::SubAxBpRel { offset } => emit_alu_ax_bp_rel(0x2B, *offset, out),
         Instr::AdcDxBpRel { offset } => {
-            // `adc dx,word ptr [bp+disp8]` → 13 56 dd. ModR/M 56 =
-            // mod=01 reg=DX(010) rm=110.
-            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
+            // `adc dx, word ptr [bp+disp]` → 13 /DX [bp+disp].
             out.push(0x13);
-            out.push(0x56);
-            out.push(disp as u8);
+            emit_bp_rel_modrm(2, *offset, out);
         }
         Instr::SbbDxBpRel { offset } => {
-            // `sbb dx,word ptr [bp+disp8]` → 1B 56 dd. Same ModR/M
-            // as AdcDxBpRel; opcode 1B is SBB r16,r/m16.
-            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
             out.push(0x1B);
-            out.push(0x56);
-            out.push(disp as u8);
+            emit_bp_rel_modrm(2, *offset, out);
         }
         Instr::AddDxBpRel { offset } => {
-            // `add dx,word ptr [bp+disp8]` → 03 56 dd.
-            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
             out.push(0x03);
-            out.push(0x56);
-            out.push(disp as u8);
+            emit_bp_rel_modrm(2, *offset, out);
         }
         Instr::AdcAxBpRel { offset } => {
-            // `adc ax,word ptr [bp+disp8]` → 13 46 dd.
-            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
             out.push(0x13);
-            out.push(0x46);
-            out.push(disp as u8);
+            emit_bp_rel_modrm(0, *offset, out);
         }
         Instr::SubDxBpRel { offset } => {
-            // `sub dx,word ptr [bp+disp8]` → 2B 56 dd.
-            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
             out.push(0x2B);
-            out.push(0x56);
-            out.push(disp as u8);
+            emit_bp_rel_modrm(2, *offset, out);
         }
         Instr::SbbAxBpRel { offset } => {
-            // `sbb ax,word ptr [bp+disp8]` → 1B 46 dd.
-            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
             out.push(0x1B);
-            out.push(0x46);
-            out.push(disp as u8);
+            emit_bp_rel_modrm(0, *offset, out);
         }
         Instr::AndDxBpRel { offset } => {
-            // `and dx,word ptr [bp+disp8]` → 23 56 dd.
-            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
             out.push(0x23);
-            out.push(0x56);
-            out.push(disp as u8);
+            emit_bp_rel_modrm(2, *offset, out);
         }
         Instr::OrDxBpRel { offset } => {
-            // `or dx,word ptr [bp+disp8]` → 0B 56 dd.
-            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
             out.push(0x0B);
-            out.push(0x56);
-            out.push(disp as u8);
+            emit_bp_rel_modrm(2, *offset, out);
         }
         Instr::XorDxBpRel { offset } => {
-            // `xor dx,word ptr [bp+disp8]` → 33 56 dd.
-            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
             out.push(0x33);
-            out.push(0x56);
-            out.push(disp as u8);
+            emit_bp_rel_modrm(2, *offset, out);
         }
         Instr::AddBpRelDx { offset } => {
-            // `add word ptr [bp+disp8],dx` → 01 56 dd. Opcode 01 =
-            // ADD r/m16,r16. ModR/M 56 = mod=01 reg=DX(010) r/m=110.
-            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
+            // `add word ptr [bp+disp], dx` → 01 /DX [bp+disp]. ADD
+            // r/m16, r16.
             out.push(0x01);
-            out.push(0x56);
-            out.push(disp as u8);
+            emit_bp_rel_modrm(2, *offset, out);
         }
         Instr::AdcBpRelAx { offset } => {
-            // `adc word ptr [bp+disp8],ax` → 11 46 dd. Opcode 11 =
-            // ADC r/m16,r16. ModR/M 46 = mod=01 reg=AX(000) r/m=110.
-            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
             out.push(0x11);
-            out.push(0x46);
-            out.push(disp as u8);
+            emit_bp_rel_modrm(0, *offset, out);
         }
         Instr::SubBpRelDx { offset } => {
-            // `sub word ptr [bp+disp8],dx` → 29 56 dd.
-            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
             out.push(0x29);
-            out.push(0x56);
-            out.push(disp as u8);
+            emit_bp_rel_modrm(2, *offset, out);
         }
         Instr::SbbBpRelAx { offset } => {
-            // `sbb word ptr [bp+disp8],ax` → 19 46 dd.
-            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
             out.push(0x19);
-            out.push(0x46);
-            out.push(disp as u8);
+            emit_bp_rel_modrm(0, *offset, out);
         }
         Instr::AndBpRelDx { offset } => {
-            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
             out.push(0x21);
-            out.push(0x56);
-            out.push(disp as u8);
+            emit_bp_rel_modrm(2, *offset, out);
         }
         Instr::AndBpRelAx { offset } => {
-            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
             out.push(0x21);
-            out.push(0x46);
-            out.push(disp as u8);
+            emit_bp_rel_modrm(0, *offset, out);
         }
         Instr::OrBpRelDx { offset } => {
-            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
             out.push(0x09);
-            out.push(0x56);
-            out.push(disp as u8);
+            emit_bp_rel_modrm(2, *offset, out);
         }
         Instr::OrBpRelAx { offset } => {
-            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
             out.push(0x09);
-            out.push(0x46);
-            out.push(disp as u8);
+            emit_bp_rel_modrm(0, *offset, out);
         }
         Instr::XorBpRelDx { offset } => {
-            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
             out.push(0x31);
-            out.push(0x56);
-            out.push(disp as u8);
+            emit_bp_rel_modrm(2, *offset, out);
         }
         Instr::XorBpRelAx { offset } => {
-            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
             out.push(0x31);
-            out.push(0x46);
-            out.push(disp as u8);
+            emit_bp_rel_modrm(0, *offset, out);
         }
         Instr::AddBpRelAx { offset } => {
-            // `add word ptr [bp+disp8],ax` → 01 46 dd.
-            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
             out.push(0x01);
-            out.push(0x46);
-            out.push(disp as u8);
+            emit_bp_rel_modrm(0, *offset, out);
         }
         Instr::AdcBpRelDx { offset } => {
-            // `adc word ptr [bp+disp8],dx` → 11 56 dd.
-            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
             out.push(0x11);
-            out.push(0x56);
-            out.push(disp as u8);
+            emit_bp_rel_modrm(2, *offset, out);
         }
         Instr::SubBpRelAx { offset } => {
-            // `sub word ptr [bp+disp8],ax` → 29 46 dd.
-            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
             out.push(0x29);
-            out.push(0x46);
-            out.push(disp as u8);
+            emit_bp_rel_modrm(0, *offset, out);
         }
         Instr::SbbBpRelDx { offset } => {
-            // `sbb word ptr [bp+disp8],dx` → 19 56 dd.
-            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
             out.push(0x19);
-            out.push(0x56);
-            out.push(disp as u8);
+            emit_bp_rel_modrm(2, *offset, out);
         }
         Instr::AddBpRelByteAl { offset } => {
-            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
             out.push(0x00);
-            out.push(0x46);
-            out.push(disp as u8);
+            emit_bp_rel_modrm(0, *offset, out);
         }
         Instr::SubBpRelByteAl { offset } => {
-            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
             out.push(0x28);
-            out.push(0x46);
-            out.push(disp as u8);
+            emit_bp_rel_modrm(0, *offset, out);
         }
         Instr::AndBpRelByteAl { offset } => {
-            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
             out.push(0x20);
-            out.push(0x46);
-            out.push(disp as u8);
+            emit_bp_rel_modrm(0, *offset, out);
         }
         Instr::OrBpRelByteAl { offset } => {
-            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
             out.push(0x08);
-            out.push(0x46);
-            out.push(disp as u8);
+            emit_bp_rel_modrm(0, *offset, out);
         }
         Instr::XorBpRelByteAl { offset } => {
-            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
             out.push(0x30);
-            out.push(0x46);
-            out.push(disp as u8);
+            emit_bp_rel_modrm(0, *offset, out);
         }
         Instr::SubAxFromSiPtr => {
             // `sub ax,word ptr [si]` → 2B 04. 2B is `sub r16,r/m16`;
@@ -931,87 +866,51 @@ fn emit_instr(
         }
         Instr::AndAxBpRel { offset } => emit_alu_ax_bp_rel(0x23, *offset, out),
         Instr::AndReg16BpRel { reg, offset } => {
-            // `and <reg16>,word ptr [bp+disp8]` → 23 (mod=01 reg=<r>
-            // r/m=110) dd. Fixture 655 (`and si, word ptr [bp-2]`).
-            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
             out.push(0x23);
-            out.push(0b01_000_110 | (reg.code() << 3));
-            out.push(disp as u8);
+            emit_bp_rel_modrm(reg.code(), *offset, out);
         }
         Instr::OrReg16BpRel { reg, offset } => {
-            // `or <reg16>,word ptr [bp+disp8]` → 0B (mod=01 reg=<r>
-            // r/m=110) dd. Fixture 656.
-            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
             out.push(0x0B);
-            out.push(0b01_000_110 | (reg.code() << 3));
-            out.push(disp as u8);
+            emit_bp_rel_modrm(reg.code(), *offset, out);
         }
         Instr::XorReg16BpRel { reg, offset } => {
-            // `xor <reg16>,word ptr [bp+disp8]` → 33 (mod=01 reg=<r>
-            // r/m=110) dd. Fixture 657.
-            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
             out.push(0x33);
-            out.push(0b01_000_110 | (reg.code() << 3));
-            out.push(disp as u8);
+            emit_bp_rel_modrm(reg.code(), *offset, out);
         }
         Instr::AddReg16BpRel { reg, offset } => {
-            // `add <reg16>,word ptr [bp+disp8]` → 03 (mod=01 reg=<r>
-            // r/m=110) dd. Fixture 661 (`add si, word ptr [bp-2]`
-            // = 03 76 dd).
-            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
             out.push(0x03);
-            out.push(0b01_000_110 | (reg.code() << 3));
-            out.push(disp as u8);
+            emit_bp_rel_modrm(reg.code(), *offset, out);
         }
         Instr::SubReg16BpRel { reg, offset } => {
-            // `sub <reg16>,word ptr [bp+disp8]` → 2B (mod=01 reg=<r>
-            // r/m=110) dd. Fixture 660.
-            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
             out.push(0x2B);
-            out.push(0b01_000_110 | (reg.code() << 3));
-            out.push(disp as u8);
+            emit_bp_rel_modrm(reg.code(), *offset, out);
         }
         Instr::OrAxBpRel { offset } => emit_alu_ax_bp_rel(0x0B, *offset, out),
         Instr::XorAxBpRel { offset } => emit_alu_ax_bp_rel(0x33, *offset, out),
         Instr::CmpAxBpRel { offset } => emit_alu_ax_bp_rel(0x3B, *offset, out),
         Instr::CmpDxBpRel { offset } => {
-            // `cmp dx,word ptr [bp+disp8]` → 3B 56 dd. ModR/M 56 =
-            // mod=01 reg=DX(010) r/m=110([bp+disp8]).
-            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
             out.push(0x3B);
-            out.push(0x56);
-            out.push(disp as u8);
+            emit_bp_rel_modrm(2, *offset, out);
         }
         Instr::CmpReg16BpRel { reg, offset } => {
-            // `cmp <reg16>,word ptr [bp+disp8]` → 3B (mod=01
-            // reg=<r> r/m=110) dd. Fixture 648 uses this for
-            // `cmp si, word ptr [bp-2]` (`3B 76 dd`).
-            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
             out.push(0x3B);
-            out.push(0b01_000_110 | (reg.code() << 3));
-            out.push(disp as u8);
+            emit_bp_rel_modrm(reg.code(), *offset, out);
         }
         Instr::ImulBpRel { offset } => {
-            // `imul word ptr [bp+disp8]` → F7 6E dd. F7 is the Grp3
-            // r/m16 escape; ModR/M 6E = mod=01 /5(IMUL) r/m=110.
-            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
+            // `imul word ptr [bp+disp]` → F7 /5 [bp+disp]. Grp3
+            // /5=IMUL.
             out.push(0xF7);
-            out.push(0x6E);
-            out.push(disp as u8);
+            emit_bp_rel_modrm(5, *offset, out);
         }
         Instr::IdivBpRel { offset } => {
-            // `idiv word ptr [bp+disp8]` → F7 7E dd. ModR/M 7E = /7(IDIV).
-            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
+            // `idiv word ptr [bp+disp]` → F7 /7 [bp+disp].
             out.push(0xF7);
-            out.push(0x7E);
-            out.push(disp as u8);
+            emit_bp_rel_modrm(7, *offset, out);
         }
         Instr::DivBpRel { offset } => {
-            // `div word ptr [bp+disp8]` → F7 76 dd. ModR/M 76 = /6(DIV).
-            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
+            // `div word ptr [bp+disp]` → F7 /6 [bp+disp].
             out.push(0xF7);
-            out.push(0x76);
-            out.push(disp as u8);
+            emit_bp_rel_modrm(6, *offset, out);
         }
         Instr::ImulGroupSym { group, symbol, offset } => {
             // `imul word ptr <group>:<sym>[+N]` → F7 2E lo hi. Grp3
@@ -1036,46 +935,31 @@ fn emit_instr(
             out.push(0x3C);
         }
         Instr::ImulByteBpRel { offset } => {
-            // `imul byte ptr [bp+disp8]` → F6 6E dd. F6 = Grp3 r/m8
-            // escape; ModR/M 6E = mod=01 /5(IMUL) r/m=110. Fixture 672.
-            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
+            // `imul byte ptr [bp+disp]` → F6 /5 [bp+disp]. Grp3 r/m8
+            // /5=IMUL. Fixture 672.
             out.push(0xF6);
-            out.push(0x6E);
-            out.push(disp as u8);
+            emit_bp_rel_modrm(5, *offset, out);
         }
         Instr::IdivByteBpRel { offset } => {
-            // `idiv byte ptr [bp+disp8]` → F6 7E dd. ModR/M 7E = /7(IDIV).
-            // Fixture 673.
-            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
+            // `idiv byte ptr [bp+disp]` → F6 /7 [bp+disp]. Fixture 673.
             out.push(0xF6);
-            out.push(0x7E);
-            out.push(disp as u8);
+            emit_bp_rel_modrm(7, *offset, out);
         }
         Instr::DivByteBpRel { offset } => {
-            // `div al,byte ptr [bp+disp8]` → F6 76 dd. ModR/M 76 = /6(DIV).
-            // Fixture 677.
-            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
+            // `div al, byte ptr [bp+disp]` → F6 /6 [bp+disp]. Fixture 677.
             out.push(0xF6);
-            out.push(0x76);
-            out.push(disp as u8);
+            emit_bp_rel_modrm(6, *offset, out);
         }
         Instr::Cwd => out.push(0x99),
         Instr::MovReg8BpRel { reg, offset } => {
-            // `mov <reg8>,byte ptr [bp+disp8]` → 8A xx dd. 8A = mov
-            // r8,r/m8. ModR/M = mod=01 reg=<reg-code> r/m=110.
-            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
+            // `mov <reg8>, byte ptr [bp+disp]` → 8A /<reg> [bp+disp].
             out.push(0x8A);
-            out.push(0b01_000_110 | (reg.code() << 3));
-            out.push(disp as u8);
+            emit_bp_rel_modrm(reg.code(), *offset, out);
         }
         Instr::MovBpRelReg8 { offset, reg } => {
-            // `mov byte ptr [bp+disp8],<reg8>` → 88 xx dd. 88 = mov
-            // r/m8,r8 (note source/dest swap vs 8A). ModR/M = mod=01
-            // reg=<reg-code> r/m=110.
-            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
+            // `mov byte ptr [bp+disp], <reg8>` → 88 /<reg> [bp+disp].
             out.push(0x88);
-            out.push(0b01_000_110 | (reg.code() << 3));
-            out.push(disp as u8);
+            emit_bp_rel_modrm(reg.code(), *offset, out);
         }
         Instr::MovReg8Imm8 { reg, imm } => {
             // `mov <reg8>,imm8` → B0+rc ii.
@@ -1089,12 +973,9 @@ fn emit_instr(
             out.push(0b11_000_000 | (dst.code() << 3) | src.code());
         }
         Instr::MovBpRelImm8 { offset, imm } => {
-            // `mov byte ptr [bp+disp8],imm8` → C6 46 dd ii.
-            // C6 = mov r/m8,imm8. ModR/M 46 = mod=01 /0 r/m=110.
-            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
+            // `mov byte ptr [bp+disp], imm8` → C6 /0 [bp+disp] ii.
             out.push(0xC6);
-            out.push(0x46);
-            out.push(disp as u8);
+            emit_bp_rel_modrm(0, *offset, out);
             out.push(*imm);
         }
         Instr::MovReg8ByteSiDisp { reg, disp } => {
@@ -1143,12 +1024,10 @@ fn emit_instr(
             out.push(*imm);
         }
         Instr::CmpAlBpRel { offset } => {
-            // `cmp al,byte ptr [bp+disp8]` → 3A 46 dd. 3A = CMP r8,
-            // r/m8. ModR/M 46 = mod=01 reg=000(AL) r/m=110(BP).
-            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
+            // `cmp al, byte ptr [bp+disp]` → 3A /AL [bp+disp]. CMP
+            // r8, r/m8.
             out.push(0x3A);
-            out.push(0x46);
-            out.push(disp as u8);
+            emit_bp_rel_modrm(0, *offset, out);
         }
         Instr::AddAlImm8 { imm } => {
             // `add al,imm8` → 04 ii. AL-specific accumulator form
@@ -1291,22 +1170,15 @@ fn emit_instr(
             out.push(rel8 as u8);
         }
         Instr::MovBpRelAx { offset } => {
-            // `mov word ptr [bp+disp8],ax` → 89 46 dd. 89 is mov
-            // r/m16,r16 (source/dest swap vs 8B); ModR/M 46 = mod=01
-            // reg=AX r/m=110.
-            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
+            // `mov word ptr [bp+disp], ax` → 89 /AX [bp+disp]. MOV
+            // r/m16, r16 (source/dest swap vs 8B).
             out.push(0x89);
-            out.push(0x46);
-            out.push(disp as u8);
+            emit_bp_rel_modrm(0, *offset, out);
         }
         Instr::MovBpRelReg16 { offset, reg } => {
-            // `mov word ptr [bp+disp8], r16` → 89 (mod=01 reg rm=110) dd.
-            // Same opcode as `MovBpRelAx`; only the ModR/M reg field
-            // changes.
-            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
+            // `mov word ptr [bp+disp], r16` → 89 /<reg> [bp+disp].
             out.push(0x89);
-            out.push(0b01_000_110 | (reg.code() << 3));
-            out.push(disp as u8);
+            emit_bp_rel_modrm(reg.code(), *offset, out);
         }
         Instr::MovAxFromCsBx => {
             // `mov ax,word ptr cs:[bx]` → 2E 8B 07. ModR/M 07 =
@@ -1749,11 +1621,9 @@ fn emit_instr(
             emit_group_sym_lea(&[0xFF, 0x36], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
         }
         Instr::PushBpRel { offset } => {
-            // `push word ptr [bp+disp8]` → FF 76 dd.
-            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
+            // `push word ptr [bp+disp]` → FF /6 [bp+disp].
             out.push(0xFF);
-            out.push(0x76);
-            out.push(disp as u8);
+            emit_bp_rel_modrm(6, *offset, out);
         }
         Instr::PushSiPtr => {
             // `push word ptr [si]` → FF 34.
@@ -2003,19 +1873,15 @@ fn emit_instr(
             emit_group_sym_lea(&[0xFE, 0x0E], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
         }
         Instr::IncBpRelByte { offset } => {
-            // `inc byte ptr [bp+disp8]` → FE 46 dd. Grp4 /0 r/m8
-            // with mod=01 r/m=110. Fixture 721.
-            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
+            // `inc byte ptr [bp+disp]` → FE /0 [bp+disp]. Grp4 /0
+            // r/m8. Fixture 721.
             out.push(0xFE);
-            out.push(0x46);
-            out.push(disp as u8);
+            emit_bp_rel_modrm(0, *offset, out);
         }
         Instr::DecBpRelByte { offset } => {
-            // `dec byte ptr [bp+disp8]` → FE 4E dd.
-            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
+            // `dec byte ptr [bp+disp]` → FE /1 [bp+disp].
             out.push(0xFE);
-            out.push(0x4E);
-            out.push(disp as u8);
+            emit_bp_rel_modrm(1, *offset, out);
         }
         Instr::DecGroupSym { group, symbol, offset } => {
             // `dec word ptr <group>:<sym>[+N]` → FF 0E lo hi.
@@ -2065,12 +1931,9 @@ fn emit_instr(
         }
         Instr::Cbw => out.push(0x98),
         Instr::LeaReg16BpRel { dst, offset } => {
-            // `lea r16,word ptr [bp+disp8]` → 8D xx dd. ModR/M xx =
-            // mod=01 reg=<dst-code> r/m=110 ([bp+disp8]).
-            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
+            // `lea r16, word ptr [bp+disp]` → 8D /<dst> [bp+disp].
             out.push(0x8D);
-            out.push(0b01_000_110 | (dst.code() << 3));
-            out.push(disp as u8);
+            emit_bp_rel_modrm(dst.code(), *offset, out);
         }
         Instr::MovSiPtrImm { imm } => {
             // `mov word ptr [si],imm16` → C7 04 lo hi. ModR/M 04 =
@@ -2477,40 +2340,26 @@ fn emit_instr(
             out.push(*disp as u8);
         }
         Instr::AddAlBpRel { offset } => {
-            // `add al,byte ptr [bp+disp8]` → 02 46 dd. ADD r8,r/m8
-            // with mod=01 reg=AL(000) r/m=110. Fixture 847.
-            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
+            // `add al, byte ptr [bp+disp]` → 02 /AL [bp+disp]. ADD
+            // r8, r/m8. Fixture 847.
             out.push(0x02);
-            out.push(0x46);
-            out.push(disp as u8);
+            emit_bp_rel_modrm(0, *offset, out);
         }
         Instr::SubAlBpRel { offset } => {
-            // `sub al,byte ptr [bp+disp8]` → 2A 46 dd.
-            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
             out.push(0x2A);
-            out.push(0x46);
-            out.push(disp as u8);
+            emit_bp_rel_modrm(0, *offset, out);
         }
         Instr::AndAlBpRel { offset } => {
-            // `and al,byte ptr [bp+disp8]` → 22 46 dd.
-            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
             out.push(0x22);
-            out.push(0x46);
-            out.push(disp as u8);
+            emit_bp_rel_modrm(0, *offset, out);
         }
         Instr::OrAlBpRel { offset } => {
-            // `or al,byte ptr [bp+disp8]` → 0A 46 dd.
-            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
             out.push(0x0A);
-            out.push(0x46);
-            out.push(disp as u8);
+            emit_bp_rel_modrm(0, *offset, out);
         }
         Instr::XorAlBpRel { offset } => {
-            // `xor al,byte ptr [bp+disp8]` → 32 46 dd.
-            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
             out.push(0x32);
-            out.push(0x46);
-            out.push(disp as u8);
+            emit_bp_rel_modrm(0, *offset, out);
         }
         Instr::ShlSiPtrCl => {
             // `shl word ptr [si],cl` → D3 24. Grp2 /4(SHL) r/m=100. Fixture 840.
@@ -2608,28 +2457,20 @@ fn emit_instr(
             out.push(*imm);
         }
         Instr::AndBpRelByteImm8 { offset, imm } => {
-            // `and byte ptr [bp+disp8],imm8` → 80 66 dd ii.
-            // Grp1 /4=AND r/m8 imm8 with mod=01 r/m=110. Fixture 720.
-            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
+            // `and byte ptr [bp+disp], imm8` → 80 /4 [bp+disp] ii.
+            // Grp1 r/m8 imm8. Fixture 720.
             out.push(0x80);
-            out.push(0x66);
-            out.push(disp as u8);
+            emit_bp_rel_modrm(4, *offset, out);
             out.push(*imm);
         }
         Instr::OrBpRelByteImm8 { offset, imm } => {
-            // `or byte ptr [bp+disp8],imm8` → 80 4E dd ii.
-            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
             out.push(0x80);
-            out.push(0x4E);
-            out.push(disp as u8);
+            emit_bp_rel_modrm(1, *offset, out);
             out.push(*imm);
         }
         Instr::XorBpRelByteImm8 { offset, imm } => {
-            // `xor byte ptr [bp+disp8],imm8` → 80 76 dd ii.
-            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
             out.push(0x80);
-            out.push(0x76);
-            out.push(disp as u8);
+            emit_bp_rel_modrm(6, *offset, out);
             out.push(*imm);
         }
         Instr::SbbSiDispImm8 { disp, imm } => {
@@ -2649,54 +2490,39 @@ fn emit_instr(
             out.push(*imm as u8);
         }
         Instr::AddBpRelImm8 { offset, imm } => {
-            // `add word ptr [bp+disp8],imm8 (sign-extended)` → 83 46 dd ii.
-            // ModR/M 46 = mod=01 /0(ADD) r/m=110 ([bp+disp8]).
-            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
+            // `add word ptr [bp+disp], imm8sx` → 83 /0 [bp+disp] ii.
             out.push(0x83);
-            out.push(0x46);
-            out.push(disp as u8);
+            emit_bp_rel_modrm(0, *offset, out);
             out.push(*imm as u8);
         }
         Instr::AdcBpRelImm8 { offset, imm } => {
-            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
             out.push(0x83);
-            out.push(0x56);
-            out.push(disp as u8);
+            emit_bp_rel_modrm(2, *offset, out);
             out.push(*imm as u8);
         }
         Instr::SubBpRelImm8 { offset, imm } => {
-            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
             out.push(0x83);
-            out.push(0x6E);
-            out.push(disp as u8);
+            emit_bp_rel_modrm(5, *offset, out);
             out.push(*imm as u8);
         }
         Instr::SbbBpRelImm8 { offset, imm } => {
-            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
             out.push(0x83);
-            out.push(0x5E);
-            out.push(disp as u8);
+            emit_bp_rel_modrm(3, *offset, out);
             out.push(*imm as u8);
         }
         Instr::AndBpRelImm16 { offset, imm } => {
-            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
             out.push(0x81);
-            out.push(0x66);
-            out.push(disp as u8);
+            emit_bp_rel_modrm(4, *offset, out);
             out.extend_from_slice(&imm.to_le_bytes());
         }
         Instr::OrBpRelImm16 { offset, imm } => {
-            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
             out.push(0x81);
-            out.push(0x4E);
-            out.push(disp as u8);
+            emit_bp_rel_modrm(1, *offset, out);
             out.extend_from_slice(&imm.to_le_bytes());
         }
         Instr::XorBpRelImm16 { offset, imm } => {
-            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
             out.push(0x81);
-            out.push(0x76);
-            out.push(disp as u8);
+            emit_bp_rel_modrm(6, *offset, out);
             out.extend_from_slice(&imm.to_le_bytes());
         }
         Instr::MovAxFromSiPtr => {
@@ -2793,20 +2619,18 @@ fn emit_instr(
             out.push(0b11_010_000 | reg.code());
         }
         Instr::MovBpRelOffsetSym { offset, symbol } => {
-            // `mov word ptr [bp+disp8],offset _f` → C7 46 dd lo hi.
-            // The imm bytes carry the symbol's segment-relative
-            // offset (which TLINK will patch via the FIXUPP). The
-            // FIXUPP frame is F5 (target's own segment) because the
-            // target is in _TEXT, which is not in any group.
+            // `mov word ptr [bp+disp], offset _f` → C7 /0 [bp+disp]
+            // lo hi. The imm bytes carry the symbol's segment-
+            // relative offset (TLINK patches via the FIXUPP). FIXUPP
+            // frame is F5 (target's own segment) because the target
+            // is in _TEXT, which is not in any group.
             let sym_loc = symbols.get(symbol).ok_or_else(|| {
                 AsmError::new(0, format!("symbol `{symbol}` not defined in any segment"))
             })?;
             let target_seg_idx =
                 u8::try_from(sym_loc.segment + 1).expect("target seg idx fits");
-            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
             out.push(0xC7);
-            out.push(0x46);
-            out.push(disp as u8);
+            emit_bp_rel_modrm(0, *offset, out);
             let imm_start = out.len();
             out.extend_from_slice(&sym_loc.offset.to_le_bytes());
             fixups.push(FixupReq {
@@ -2817,12 +2641,10 @@ fn emit_instr(
             });
         }
         Instr::CallIndirectBpRel { offset } => {
-            // `call word ptr [bp+disp8]` → FF 56 dd. ModR/M 56 =
-            // mod=01 /2(call near r/m16) r/m=110 ([bp+disp8]).
-            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
+            // `call word ptr [bp+disp]` → FF /2 [bp+disp]. Grp5 /2 =
+            // CALL near r/m16.
             out.push(0xFF);
-            out.push(0x56);
-            out.push(disp as u8);
+            emit_bp_rel_modrm(2, *offset, out);
         }
         Instr::JmpShort(target) => {
             let target_off = symbols.get(target).map(|l| l.offset).ok_or_else(|| {
@@ -2848,10 +2670,34 @@ fn emit_instr(
 /// byte varies (03=add, 2B=sub, 23=and, 0B=or, 33=xor, 3B=cmp); the
 /// ModR/M byte is always 0x46 (mod=01, reg=000=AX, r/m=110=[bp+disp8]).
 fn emit_alu_ax_bp_rel(opcode: u8, offset: i16, out: &mut Vec<u8>) {
-    let disp = i8::try_from(offset).expect("bp-relative offset fits in i8");
     out.push(opcode);
-    out.push(0x46);
-    out.push(disp as u8);
+    emit_bp_rel_modrm(0, offset, out);
+}
+
+/// Emit a `[bp+disp]` ModR/M byte and its displacement bytes,
+/// picking the disp8 form (`mod=01`) when the offset fits in i8 and
+/// the disp16 form (`mod=10`) otherwise. The `reg_field` is the
+/// 3-bit `reg`/opcode-extension value placed at bits 3..5 of the
+/// ModR/M; `r/m` is always 110 (BP). Used by every bp-relative op
+/// (load/store/alu against a stack local) so frames > 128 bytes
+/// just promote each ref to disp16 instead of crashing.
+fn emit_bp_rel_modrm(reg_field: u8, offset: i16, out: &mut Vec<u8>) {
+    debug_assert!(reg_field < 8, "reg_field is 3 bits");
+    if let Ok(disp) = i8::try_from(offset) {
+        out.push(0b01_000_110 | (reg_field << 3));
+        out.push(disp as u8);
+    } else {
+        out.push(0b10_000_110 | (reg_field << 3));
+        out.extend_from_slice(&(offset as u16).to_le_bytes());
+    }
+}
+
+/// Size (in bytes) of the ModR/M + displacement for a `[bp+disp]`
+/// reference at this offset — 2 for disp8, 3 for disp16. Used by
+/// `instr_size` to compute total instruction length when the disp
+/// is offset-dependent.
+fn bp_rel_modrm_size(offset: i16) -> usize {
+    if i8::try_from(offset).is_ok() { 2 } else { 3 }
 }
 
 /// Shared helper for `<op> {ax|al},<form>:<sym>` instructions where

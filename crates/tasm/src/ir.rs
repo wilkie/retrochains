@@ -109,13 +109,14 @@ pub enum Instr {
     /// `mov <reg16>,<imm16>` — B8+rc lo hi. Generic 16-bit register
     /// immediate load (formerly MovAxImm).
     MovReg16Imm { reg: Reg16, imm: u16 },
-    /// `sub sp,<imm8>` — encoded as 83 EC ii (sign-extended imm8 form).
-    /// Larger immediates would require the 81 EC encoding; BCC uses
-    /// 83 EC for the small frame sizes we've seen (≤ 127 bytes).
-    SubSpImm(u8),
-    /// `add sp,<imm8>` — encoded as 83 C4 ii. BCC uses this to clean
-    /// up the stack after a multi-arg call (fixture 138: `add sp,6`).
-    AddSpImm(u8),
+    /// `sub sp,<imm>` — picks the smallest encoding: `83 EC ii` when
+    /// the value fits in i8sx (≤ 127), else `81 EC lo hi` for larger
+    /// frames (fixture 1739: 200-byte int[100] local). The carrier
+    /// type is u16 since BCC frames can exceed 127 bytes.
+    SubSpImm(u16),
+    /// `add sp,<imm>` — sibling of [`Self::SubSpImm`]. `83 C4 ii` for
+    /// small values, `81 C4 lo hi` for larger.
+    AddSpImm(u16),
     /// `mov word ptr [bp+<offset>],<imm16>` — BCC uses signed
     /// offsets (negative for locals, positive for params).
     MovBpRelImm { offset: i16, imm: u16 },
