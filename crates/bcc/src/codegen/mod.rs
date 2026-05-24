@@ -3063,6 +3063,15 @@ impl<'a> FunctionEmitter<'a> {
         }
         if let ExprKind::Ident(name) = &cond.kind {
             if let Some(gty) = self.globals.type_of(name) {
+                // Global array name decays to its address, which is
+                // always non-zero — test the address, not the first
+                // element. BCC: `mov ax, offset DGROUP:_arr; or ax,
+                // ax`. Fixture 2800.
+                if matches!(gty, Type::Array { .. }) {
+                    let _ = write!(self.out, "\tmov\tax,offset DGROUP:_{name}\r\n");
+                    self.out.extend_from_slice(b"\tor\tax,ax\r\n");
+                    return;
+                }
                 let width = if gty.is_char_like() { "byte" } else { "word" };
                 let _ = write!(self.out, "\tcmp\t{width} ptr DGROUP:_{name},0\r\n");
                 return;
