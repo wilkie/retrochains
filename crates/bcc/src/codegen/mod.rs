@@ -4087,6 +4087,55 @@ impl<'a> FunctionEmitter<'a> {
             }
             return;
         }
+        // `return (char)(<int_lvalue> << K);` — byte load + byte
+        // shifts + cbw. K in 1..=3 unrolls; K >= 4 uses CL form.
+        // Byte form is correct because Shl pushes bits OUT of the
+        // low byte (upper bits don't affect the surviving low byte).
+        // For Shr, the upper bits shift INTO the low byte — we
+        // can't use byte form, so leave Shr to the general word
+        // path below. Fixtures 1543 (shl 2), 1546 (shl by 8).
+        if !self.function.ret_ty.is_long_like()
+            && let ExprKind::Cast { ty: cast_ty, operand } = &e.kind
+            && cast_ty.is_char_like()
+            && let ExprKind::BinOp { op: BinOp::Shl, left, right } = &operand.kind
+            && let Some((src_name, src_off, _)) = self.try_lvalue_chain_addr(left)
+            && let Some(src_addr) = self.resolve_chain_addr(&src_name, src_off)
+            && let Some(k) = try_const_eval(right)
+            && k >= 1
+            && k <= 255
+        {
+            let _ = write!(self.out, "\tmov\tal,byte ptr {src_addr}\r\n");
+            if k <= 3 {
+                for _ in 0..k {
+                    self.out.extend_from_slice(b"\tshl\tal,1\r\n");
+                }
+            } else {
+                let _ = write!(self.out, "\tmov\tcl,{k}\r\n");
+                self.out.extend_from_slice(b"\tshl\tal,cl\r\n");
+            }
+            if !self.skip_widen && !self.function.ret_ty.is_char_like() {
+                self.out.extend_from_slice(b"\tcbw\t\r\n");
+            }
+            return;
+        }
+        // `return (char)(<expr>);` for the general case: emit the
+        // operand at word width (it would have been the same byte
+        // sequence either way for mul/div — the AL truncation
+        // happens via cbw on the low byte). Save the word load +
+        // word op + cbw vs narrowing via a separate store. Fixtures
+        // 1540 (mul), 1545 (div).
+        if !self.function.ret_ty.is_long_like()
+            && !self.function.ret_ty.is_char_like()
+            && let ExprKind::Cast { ty: cast_ty, operand } = &e.kind
+            && cast_ty.is_char_like()
+            && !matches!(&operand.kind, ExprKind::IntLit(_))
+        {
+            self.emit_expr_to_ax(operand);
+            if !self.skip_widen {
+                self.out.extend_from_slice(b"\tcbw\t\r\n");
+            }
+            return;
+        }
         // Struct return. Two shapes by size, paralleling the
         // struct-copy and struct-by-value-arg cases:
         //   - 4 bytes: load high to DX, low to AX — *byte-identical*
