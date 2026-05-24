@@ -6539,7 +6539,17 @@ impl<'a> FunctionEmitter<'a> {
             if matches!(op, BinOp::Add | BinOp::Sub) {
                 let imm = if matches!(op, BinOp::Add) { v8 } else { v8.wrapping_neg() };
                 let _ = write!(self.out, "\tmov\tal,byte ptr DGROUP:_{name}\r\n");
-                let _ = write!(self.out, "\tadd\tal,{imm}\r\n");
+                // K=±1: BCC uses inc/dec al (2 bytes) instead of
+                // add al, K (2 bytes too, but BCC's preference).
+                // Fixture 2891 (`char g; g += 1;` → `mov al, [g];
+                // inc al; mov [g], al`).
+                if imm == 1 {
+                    self.out.extend_from_slice(b"\tinc\tal\r\n");
+                } else if imm == 0xFF {
+                    self.out.extend_from_slice(b"\tdec\tal\r\n");
+                } else {
+                    let _ = write!(self.out, "\tadd\tal,{imm}\r\n");
+                }
                 let _ = write!(self.out, "\tmov\tbyte ptr DGROUP:_{name},al\r\n");
             } else {
                 let mnem = match op {
