@@ -4118,6 +4118,27 @@ impl<'a> FunctionEmitter<'a> {
             }
             return;
         }
+        // `return (uchar)<int_lvalue>;` / `return (char)<int_lvalue>;`
+        // — narrow then widen back. BCC byte-loads from the source
+        // (`mov al, byte ptr <src>`) and widens. Signed cast: cbw;
+        // unsigned cast: `mov ah, 0`. Fixtures 1524, 1533, 3236.
+        if !self.function.ret_ty.is_long_like()
+            && !self.function.ret_ty.is_char_like()
+            && let ExprKind::Cast { ty: cast_ty, operand } = &e.kind
+            && cast_ty.is_char_like()
+            && let Some((src_name, src_off, _)) = self.try_lvalue_chain_addr(operand)
+            && let Some(src_addr) = self.resolve_chain_addr(&src_name, src_off)
+        {
+            let _ = write!(self.out, "\tmov\tal,byte ptr {src_addr}\r\n");
+            if !self.skip_widen {
+                if cast_ty.is_unsigned() {
+                    self.out.extend_from_slice(b"\tmov\tah,0\r\n");
+                } else {
+                    self.out.extend_from_slice(b"\tcbw\t\r\n");
+                }
+            }
+            return;
+        }
         // `return (char)(<expr>);` for the general case: emit the
         // operand at word width (it would have been the same byte
         // sequence either way for mul/div — the AL truncation
@@ -4132,7 +4153,11 @@ impl<'a> FunctionEmitter<'a> {
         {
             self.emit_expr_to_ax(operand);
             if !self.skip_widen {
-                self.out.extend_from_slice(b"\tcbw\t\r\n");
+                if cast_ty.is_unsigned() {
+                    self.out.extend_from_slice(b"\tmov\tah,0\r\n");
+                } else {
+                    self.out.extend_from_slice(b"\tcbw\t\r\n");
+                }
             }
             return;
         }
@@ -12385,18 +12410,22 @@ impl<'a> FunctionEmitter<'a> {
     /// evaluate the operand into AX.
     fn emit_cast_to_ax(&mut self, ty: &Type, operand: &Expr) {
         if ty.is_char_like() {
-            if let ExprKind::Ident(name) = &operand.kind
-                && !self.globals.contains(name)
+            // `(char|uchar) <lvalue>` — byte-load the low byte of
+            // the source, then widen per the cast type's signedness.
+            // Signed → cbw; unsigned → mov ah, 0. Source can be any
+            // int/char lvalue (including char-to-uchar narrowing,
+            // fixture 1524). Width-resolving comes from
+            // try_lvalue_chain_addr/resolve_chain_addr.
+            if let Some((src_name, src_off, _)) = self.try_lvalue_chain_addr(operand)
+                && let Some(src_addr) = self.resolve_chain_addr(&src_name, src_off)
             {
-                let op_ty = self.locals.type_of(name).clone();
-                if matches!(op_ty, Type::Int)
-                    && let LocalLocation::Stack(off) = self.locals.location_of(name)
-                {
-                    let _ =
-                        write!(self.out, "\tmov\tal,byte ptr {}\r\n", bp_addr(off));
+                let _ = write!(self.out, "\tmov\tal,byte ptr {src_addr}\r\n");
+                if ty.is_unsigned() {
+                    self.out.extend_from_slice(b"\tmov\tah,0\r\n");
+                } else {
                     self.out.extend_from_slice(b"\tcbw\t\r\n");
-                    return;
                 }
+                return;
             }
         }
         self.emit_expr_to_ax(operand);
