@@ -164,6 +164,60 @@ pub enum Instr {
         disp: u16,
         reg: Reg16,
     },
+    /// `mov byte ptr <group>:<sym>[si+disp], imm8` — SI-indexed
+    /// byte store to a data-segment global. Encoding: `C6 84 lo hi
+    /// ii` where ModR/M 84 = mod=10 /0(MOV) r/m=100([SI]+disp16),
+    /// and the disp16 is FIXUPP-patched to the symbol's offset.
+    /// Fixture 1366 (`char buf[5]; for (i=0..4) buf[i] = 'X';` →
+    /// `mov byte ptr [si + _buf], 'X'` in the loop body).
+    MovGroupSymSiDispByteImm8 {
+        group: String,
+        symbol: String,
+        disp: u16,
+        imm: u8,
+    },
+    /// `mov byte ptr <group>:<sym>[si+disp], <reg8>` — sibling
+    /// where the source is an 8-bit register. Encoding: `88 mod=10
+    /// reg=<reg> r/m=100 lo hi`.
+    MovGroupSymSiDispReg8 {
+        group: String,
+        symbol: String,
+        disp: u16,
+        reg: Reg8,
+    },
+    /// `mov <reg8>, byte ptr <group>:<sym>[si+disp]` — SI-indexed
+    /// byte load. Encoding: `8A mod=10 reg=<reg> r/m=100 lo hi`.
+    MovReg8GroupSymSiDisp {
+        reg: Reg8,
+        group: String,
+        symbol: String,
+        disp: u16,
+    },
+    /// `mov <reg16>, word ptr <group>:<sym>[si+disp]` — SI-indexed
+    /// word load. Encoding: `8B mod=10 reg=<reg> r/m=100 lo hi`.
+    /// Used by variable-indexed int-array reads (`return a[i];`).
+    MovReg16GroupSymSiDisp {
+        reg: Reg16,
+        group: String,
+        symbol: String,
+        disp: u16,
+    },
+    /// `mov word ptr <group>:<sym>[si+disp], <reg16>` — SI-indexed
+    /// word store. Encoding: `89 mod=10 reg=<reg> r/m=100 lo hi`.
+    MovGroupSymSiDispReg16 {
+        group: String,
+        symbol: String,
+        disp: u16,
+        reg: Reg16,
+    },
+    /// `mov word ptr <group>:<sym>[si+disp], <imm16>` — SI-indexed
+    /// word-immediate store. Encoding: `C7 84 lo hi imm_lo imm_hi`.
+    MovGroupSymSiDispImm16 {
+        group: String,
+        symbol: String,
+        disp: u16,
+        imm: u16,
+    },
     /// `add ax,word ptr [bp+<offset>]` — 03 46 dd
     AddAxBpRel { offset: i16 },
     /// `adc dx, word ptr [bp+disp8]` — `13 56 dd`. ADC r16,r/m16

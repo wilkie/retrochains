@@ -7654,6 +7654,28 @@ impl<'a> FunctionEmitter<'a> {
                     }
                     _ => (indices[0], 0),
                 };
+                // Char-array read with index in SI: BCC keeps the
+                // index in SI and uses SI-indexed addressing
+                // directly (`mov al, byte ptr _a[si]`) with no
+                // intermediate `mov bx, si`. Fixture 1426 (`for
+                // (i=0..) dst[i] = src[i];`).
+                if elem_ty.is_char_like()
+                    && let ExprKind::Ident(i_name) = &idx_expr.kind
+                    && self.locals.has(i_name)
+                    && let LocalLocation::Reg(reg) = self.locals.location_of(i_name)
+                    && reg.name() == "si"
+                {
+                    let addr = if const_off == 0 {
+                        format!("DGROUP:_{array_name}[si]")
+                    } else if const_off > 0 {
+                        format!("DGROUP:_{array_name}+{const_off}[si]")
+                    } else {
+                        format!("DGROUP:_{array_name}-{}[si]", -const_off)
+                    };
+                    let _ = write!(self.out, "\tmov\tal,byte ptr {addr}\r\n");
+                    self.emit_widen_al(&elem_ty);
+                    return;
+                }
                 self.emit_index_into_bx(idx_expr, &elem_ty);
                 let width = ptr_width(&elem_ty);
                 let addr = if const_off == 0 {
@@ -8072,7 +8094,16 @@ impl<'a> FunctionEmitter<'a> {
                     let _ = write!(self.out, "\tmov\t{width} ptr {addr},{v_masked}\r\n");
                     return;
                 }
-                panic!("non-constant rhs in constant-indexed global array assign not yet supported (no fixture)");
+                // Non-constant RHS to a fixed-offset global array
+                // element: evaluate to AX, then store. Fixture 1458
+                // (`int g[3]; g[1] = v;`).
+                self.emit_expr_to_ax(value);
+                if leaf_ty.is_char_like() {
+                    let _ = write!(self.out, "\tmov\tbyte ptr {addr},al\r\n");
+                } else {
+                    let _ = write!(self.out, "\tmov\tword ptr {addr},ax\r\n");
+                }
+                return;
             }
             // Global-pointer subscript assignment: `int *p; p[K] = v`.
             // Load the pointer into BX, then `mov word ptr [bx+off],
@@ -8140,6 +8171,36 @@ impl<'a> FunctionEmitter<'a> {
                 let _ = write!(self.out, "\tmov\tbx,word ptr DGROUP:_{array}\r\n");
                 let _ = write!(self.out, "\tmov\tword ptr {hi_addr},{hi}\r\n");
                 let _ = write!(self.out, "\tmov\tword ptr {lo_addr},{lo}\r\n");
+                return;
+            }
+            // Variable-indexed global char-array write. BCC uses SI
+            // (the loop var's register) with no stride scaling
+            // (stride=1 for char). For const RHS K: `mov byte ptr
+            // _arr[si], K`. Fixture 1366 (`for (i=0..) buf[i] =
+            // 'X';` for global char buf[]).
+            if indices.len() == 1
+                && let Some(elem) = gty.array_elem()
+                && elem.is_char_like()
+                && let ExprKind::Ident(i_name) = &indices[0].kind
+                && self.locals.has(i_name)
+                && let LocalLocation::Reg(reg) = self.locals.location_of(i_name)
+                && reg.name() == "si"
+            {
+                if let Some(v) = try_const_eval(value) {
+                    let v8 = (v & 0xFF) as u8;
+                    let _ = write!(
+                        self.out,
+                        "\tmov\tbyte ptr DGROUP:_{array}[si],{v8}\r\n",
+                    );
+                    return;
+                }
+                // Non-const RHS: load value to AL, then store
+                // through SI-indexed addressing.
+                self.emit_expr_to_ax(value);
+                let _ = write!(
+                    self.out,
+                    "\tmov\tbyte ptr DGROUP:_{array}[si],al\r\n",
+                );
                 return;
             }
             // Variable-indexed global int-array write. Load `i` into

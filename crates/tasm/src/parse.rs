@@ -939,6 +939,15 @@ fn parse_mov(operands: &str, line_no: usize) -> AsmResult<Instr> {
                 disp,
             });
         }
+        // SI-indexed form for variable-indexed int-array reads.
+        if let Some((group, symbol, disp)) = parse_group_symbol_base_disp(rhs, "si", "word") {
+            return Ok(Instr::MovReg16GroupSymSiDisp {
+                reg,
+                group: group.to_string(),
+                symbol: symbol.to_string(),
+                disp,
+            });
+        }
         if let Some((group, symbol)) = parse_group_symbol(rhs) {
             let (sym, offset) = split_sym_offset(symbol);
             return Ok(Instr::MovReg16WordGroupSym {
@@ -1047,6 +1056,15 @@ fn parse_mov(operands: &str, line_no: usize) -> AsmResult<Instr> {
                 group: group.to_string(),
                 symbol: sym.to_string(),
                 offset,
+            });
+        }
+        // SI-indexed byte load (variable-indexed char-array read).
+        if let Some((group, symbol, disp)) = parse_group_symbol_base_disp(rhs, "si", "byte") {
+            return Ok(Instr::MovReg8GroupSymSiDisp {
+                reg,
+                group: group.to_string(),
+                symbol: symbol.to_string(),
+                disp,
             });
         }
     }
@@ -1217,6 +1235,47 @@ fn parse_mov(operands: &str, line_no: usize) -> AsmResult<Instr> {
         // store of a register. Fixture 510 (`a[i] = i` with `i` in SI).
         if let Some(reg) = Reg16::parse(rhs) {
             return Ok(Instr::MovGroupSymBxDispReg16 {
+                group: group.to_string(),
+                symbol: symbol.to_string(),
+                disp,
+                reg,
+            });
+        }
+    }
+    // LHS `byte ptr <group>:<sym>[si+disp]` — SI-indexed byte store
+    // for variable-indexed char-array writes (fixture 1366: `buf[i]
+    // = 'X'`).
+    if let Some((group, symbol, disp)) = parse_group_symbol_base_disp(lhs, "si", "byte") {
+        if let Some(imm) = parse_imm8(rhs) {
+            return Ok(Instr::MovGroupSymSiDispByteImm8 {
+                group: group.to_string(),
+                symbol: symbol.to_string(),
+                disp,
+                imm: imm as u8,
+            });
+        }
+        if let Some(reg) = Reg8::parse(rhs) {
+            return Ok(Instr::MovGroupSymSiDispReg8 {
+                group: group.to_string(),
+                symbol: symbol.to_string(),
+                disp,
+                reg,
+            });
+        }
+    }
+    // LHS `word ptr <group>:<sym>[si+disp]` — SI-indexed word
+    // store for variable-indexed int-array writes.
+    if let Some((group, symbol, disp)) = parse_group_symbol_base_disp(lhs, "si", "word") {
+        if let Some(imm) = parse_imm16(rhs) {
+            return Ok(Instr::MovGroupSymSiDispImm16 {
+                group: group.to_string(),
+                symbol: symbol.to_string(),
+                disp,
+                imm: imm as u16,
+            });
+        }
+        if let Some(reg) = Reg16::parse(rhs) {
+            return Ok(Instr::MovGroupSymSiDispReg16 {
                 group: group.to_string(),
                 symbol: symbol.to_string(),
                 disp,
@@ -3220,6 +3279,52 @@ fn parse_byte_bx_disp(s: &str) -> Option<i8> {
     let rest = inside.strip_prefix("bx")?;
     let signed: i32 = rest.parse().ok()?;
     i8::try_from(signed).ok()
+}
+
+/// Parse `<width> ptr <group>:<sym>[<base>+K]` shapes for a specific
+/// base register (`bx` or `si`) and width (`byte` or `word`).
+/// Returns `(group, sym, disp)` where `disp` is the symbol's offset
+/// plus any literal `+K` / `-K` on the symbol or the base expression.
+fn parse_group_symbol_base_disp<'a>(
+    s: &'a str,
+    base: &str,
+    width: &str,
+) -> Option<(&'a str, &'a str, u16)> {
+    let s = s.trim().strip_prefix(width)?.trim_start().strip_prefix("ptr ")?;
+    let (group, rest) = s.split_once(':')?;
+    let group = group.trim();
+    let (sym_part, idx_part) = rest.split_once('[')?;
+    let sym_part = sym_part.trim();
+    let (sym, sym_disp): (&str, i32) = if let Some(idx) = sym_part.rfind('+') {
+        let (s, d) = sym_part.split_at(idx);
+        let d_val = d[1..].parse::<i32>().ok()?;
+        (s, d_val)
+    } else if let Some(idx) = sym_part.rfind('-') {
+        if idx == 0 {
+            (sym_part, 0)
+        } else {
+            let (s, d) = sym_part.split_at(idx);
+            let d_val = d.parse::<i32>().ok()?;
+            (s, d_val)
+        }
+    } else {
+        (sym_part, 0)
+    };
+    if !sym.starts_with('_') && !sym.starts_with('@') {
+        return None;
+    }
+    let idx = idx_part.strip_suffix(']')?.trim();
+    let base_disp = if idx == base {
+        0i32
+    } else if let Some(k) = idx.strip_prefix(&format!("{base}+")) {
+        k.trim().parse::<i32>().ok()?
+    } else if let Some(k) = idx.strip_prefix(&format!("{base}-")) {
+        -k.trim().parse::<i32>().ok()?
+    } else {
+        return None;
+    };
+    let total = (sym_disp + base_disp) as i16 as u16;
+    Some((group, sym, total))
 }
 
 /// Parse `word ptr <group>:<sym>[bx]` or `word ptr <group>:<sym>[bx+K]`,

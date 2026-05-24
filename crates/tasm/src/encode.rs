@@ -263,6 +263,12 @@ fn instr_size(instr: &Instr) -> usize {
         Instr::MovReg16GroupSymBxDisp { .. } => 4,
         Instr::MovGroupSymBxDispImm { .. } => 6,
         Instr::MovGroupSymBxDispReg16 { .. } => 4,
+        Instr::MovGroupSymSiDispByteImm8 { .. } => 5,
+        Instr::MovGroupSymSiDispReg8 { .. } => 4,
+        Instr::MovReg8GroupSymSiDisp { .. } => 4,
+        Instr::MovReg16GroupSymSiDisp { .. } => 4,
+        Instr::MovGroupSymSiDispReg16 { .. } => 4,
+        Instr::MovGroupSymSiDispImm16 { .. } => 6,
         Instr::MovReg16Imm { .. } => 3,
         Instr::SubSpImm(imm) | Instr::AddSpImm(imm) => {
             if i8::try_from(*imm as i16).is_ok() { 3 } else { 4 }
@@ -1455,6 +1461,42 @@ fn emit_instr(
             // 89 (mod=10 reg=rrr r/m=111) lo hi. Fixture 510.
             let modrm = 0b10_000_111 | (reg.code() << 3);
             emit_group_sym_lea(&[0x89, modrm], group, symbol, *disp as i16, symbols, group_idx, extern_idx, out, fixups)?;
+        }
+        Instr::MovGroupSymSiDispByteImm8 { group, symbol, disp, imm } => {
+            // `mov byte ptr <group>:<sym>[si+disp], imm8` → C6 84
+            // lo hi ii. ModR/M 84 = mod=10 /0 r/m=100 ([SI]+disp16).
+            emit_group_sym_lea(&[0xC6, 0x84], group, symbol, *disp as i16, symbols, group_idx, extern_idx, out, fixups)?;
+            out.push(*imm);
+        }
+        Instr::MovGroupSymSiDispReg8 { group, symbol, disp, reg } => {
+            // `mov byte ptr <group>:<sym>[si+disp], <reg8>` → 88
+            // (mod=10 reg=<r> r/m=100) lo hi.
+            let modrm = 0b10_000_100 | (reg.code() << 3);
+            emit_group_sym_lea(&[0x88, modrm], group, symbol, *disp as i16, symbols, group_idx, extern_idx, out, fixups)?;
+        }
+        Instr::MovReg8GroupSymSiDisp { reg, group, symbol, disp } => {
+            // `mov <reg8>, byte ptr <group>:<sym>[si+disp]` → 8A
+            // (mod=10 reg=<r> r/m=100) lo hi.
+            let modrm = 0b10_000_100 | (reg.code() << 3);
+            emit_group_sym_lea(&[0x8A, modrm], group, symbol, *disp as i16, symbols, group_idx, extern_idx, out, fixups)?;
+        }
+        Instr::MovReg16GroupSymSiDisp { reg, group, symbol, disp } => {
+            // `mov <reg16>, word ptr <group>:<sym>[si+disp]` → 8B
+            // (mod=10 reg=<r> r/m=100) lo hi.
+            let modrm = 0b10_000_100 | (reg.code() << 3);
+            emit_group_sym_lea(&[0x8B, modrm], group, symbol, *disp as i16, symbols, group_idx, extern_idx, out, fixups)?;
+        }
+        Instr::MovGroupSymSiDispReg16 { group, symbol, disp, reg } => {
+            // `mov word ptr <group>:<sym>[si+disp], <reg16>` → 89
+            // (mod=10 reg=<r> r/m=100) lo hi.
+            let modrm = 0b10_000_100 | (reg.code() << 3);
+            emit_group_sym_lea(&[0x89, modrm], group, symbol, *disp as i16, symbols, group_idx, extern_idx, out, fixups)?;
+        }
+        Instr::MovGroupSymSiDispImm16 { group, symbol, disp, imm } => {
+            // `mov word ptr <group>:<sym>[si+disp], imm16` → C7 84
+            // lo hi imm_lo imm_hi.
+            emit_group_sym_lea(&[0xC7, 0x84], group, symbol, *disp as i16, symbols, group_idx, extern_idx, out, fixups)?;
+            out.extend_from_slice(&imm.to_le_bytes());
         }
         Instr::MovAlGroupSym { group, symbol, offset } => {
             // `mov al,byte ptr <group>:<symbol>` → A0 lo hi.
