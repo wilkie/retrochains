@@ -2821,10 +2821,15 @@ impl<'a> FunctionEmitter<'a> {
 
     fn expr_is_unsigned(&self, e: &Expr) -> bool {
         let ExprKind::Ident(name) = &e.kind else { return false };
-        if let Some(gt) = self.globals.type_of(name) {
-            return gt.is_unsigned();
-        }
-        self.locals.type_of(name).is_unsigned()
+        let ty = if let Some(gt) = self.globals.type_of(name) {
+            gt
+        } else {
+            self.locals.type_of(name)
+        };
+        // Pointer compares are unsigned (addresses can exceed 0x7FFF
+        // in real mode). Fixtures 2929, 2934 (`a < b` / `a >= b` for
+        // pointer args).
+        ty.is_unsigned() || ty.pointee().is_some()
     }
 
     /// Like `expr_is_unsigned`, but applies C's integer-promotion
