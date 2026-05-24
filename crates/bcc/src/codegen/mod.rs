@@ -11939,6 +11939,29 @@ impl<'a> FunctionEmitter<'a> {
                             return;
                         }
                     }
+                    // `<ptr-typed lvalue> + K` / `- K` — C scales the
+                    // constant by the pointee size. Emit `mov ax, p;
+                    // add ax, K*stride` for pointee size > 1.
+                    // Fixture 3557 (`return p + 3;` for int*p →
+                    // `mov ax, [bp+4]; add ax, 6`).
+                    if matches!(op, BinOp::Add | BinOp::Sub)
+                        && let ExprKind::Ident(pname) = &left.kind
+                        && let Some(pointee) = self.ident_pointee(pname)
+                        && let Some(k) = try_const_eval(right)
+                        && pointee.size_bytes() > 1
+                    {
+                        let stride = u32::from(pointee.size_bytes());
+                        let scaled = (k as u32).wrapping_mul(stride) & 0xFFFF;
+                        let unsigned = self.expr_is_unsigned(left);
+                        self.emit_expr_to_ax(left);
+                        emit_op_with_source(
+                            self.out,
+                            *op,
+                            &OperandSource::Immediate(scaled),
+                            unsigned,
+                        );
+                        return;
+                    }
                     // Commutative-op operand swap: BCC prefers the
                     // non-constant operand in AX so the immediate or
                     // simpler operand can be the binop's RHS. Fixture
@@ -12337,6 +12360,19 @@ impl<'a> FunctionEmitter<'a> {
         // The locals analyzer panics on unknown names, so only ask
         // if there's no global match.
         matches!(self.locals.type_of(name), Type::Char)
+    }
+
+    /// Pointee type of `name` if it's a pointer-typed identifier;
+    /// `None` for non-pointers and unknown names. Used by the
+    /// pointer-arithmetic stride scaling (fixture 3557).
+    fn ident_pointee(&self, name: &str) -> Option<Type> {
+        if let Some(ty) = self.globals.type_of(name) {
+            return ty.pointee().cloned();
+        }
+        if self.locals.has(name) {
+            return self.locals.type_of(name).pointee().cloned();
+        }
+        None
     }
 
     /// Resolve the right operand to a textual asm source operand. Today
