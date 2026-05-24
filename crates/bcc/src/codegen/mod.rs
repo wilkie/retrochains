@@ -9322,6 +9322,20 @@ impl<'a> FunctionEmitter<'a> {
             }
             return;
         }
+        // `(*<ptr>).<field>` — semantically identical to
+        // `<ptr>-><field>`. Rewrite by unwrapping the Deref so the
+        // Ident arms below pick it up. Fixture 2960
+        // (`int extract(struct P *p) { return (*p).x; }`).
+        if matches!(kind, crate::ast::MemberKind::Dot)
+            && let ExprKind::Deref(inner) = &base.kind
+            && matches!(inner.kind, ExprKind::Ident(_))
+        {
+            return self.emit_member_to_ax(
+                inner,
+                field,
+                crate::ast::MemberKind::Arrow,
+            );
+        }
         // Arrow path (or Dot whose base isn't a const-chain lvalue):
         // base must be a bare Ident referring to a pointer.
         let ExprKind::Ident(name) = &base.kind else {
