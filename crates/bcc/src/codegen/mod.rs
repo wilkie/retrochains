@@ -1806,6 +1806,11 @@ impl<'a> FunctionEmitter<'a> {
             ExprKind::ArrayIndex { .. } | ExprKind::Member { .. } => {
                 self.try_lvalue_chain_addr(e).is_none()
             }
+            // Casts (e.g. `(char)b`), ternaries, and calls all need
+            // evaluation that produces a value in AX. They don't have
+            // a single memory/register operand representation.
+            // Fixture 1288 (`a += (char)b`).
+            ExprKind::Cast { .. } | ExprKind::Ternary { .. } | ExprKind::Call { .. } => true,
             _ => false,
         }
     }
