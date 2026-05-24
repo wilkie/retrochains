@@ -4055,6 +4055,38 @@ impl<'a> FunctionEmitter<'a> {
             let _ = write!(self.out, "\tmov\tal,{v8}\r\n");
             return;
         }
+        // `return (char)(<int_lvalue> <op> <int_lvalue>);` — BCC
+        // operates at byte width: `mov al, [a]; <op> al, [b]; cbw`.
+        // Saves the word load + word op vs narrowing later. Only
+        // for additive/bitwise ops where the low byte is independent
+        // of the high half. Fixtures 1535, 1538, 1539, 1541, 1542.
+        if !self.function.ret_ty.is_long_like()
+            && let ExprKind::Cast { ty: cast_ty, operand } = &e.kind
+            && cast_ty.is_char_like()
+            && let ExprKind::BinOp { op: binop, left, right } = &operand.kind
+            && matches!(binop,
+                BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor
+            )
+            && let Some((l_name, l_off, _)) = self.try_lvalue_chain_addr(left)
+            && let Some((r_name, r_off, _)) = self.try_lvalue_chain_addr(right)
+            && let Some(l_addr) = self.resolve_chain_addr(&l_name, l_off)
+            && let Some(r_addr) = self.resolve_chain_addr(&r_name, r_off)
+        {
+            let mnem = match binop {
+                BinOp::Add => "add",
+                BinOp::Sub => "sub",
+                BinOp::BitAnd => "and",
+                BinOp::BitOr => "or",
+                BinOp::BitXor => "xor",
+                _ => unreachable!(),
+            };
+            let _ = write!(self.out, "\tmov\tal,byte ptr {l_addr}\r\n");
+            let _ = write!(self.out, "\t{mnem}\tal,byte ptr {r_addr}\r\n");
+            if !self.skip_widen {
+                self.out.extend_from_slice(b"\tcbw\t\r\n");
+            }
+            return;
+        }
         // Struct return. Two shapes by size, paralleling the
         // struct-copy and struct-by-value-arg cases:
         //   - 4 bytes: load high to DX, low to AX — *byte-identical*
@@ -11423,6 +11455,47 @@ impl<'a> FunctionEmitter<'a> {
                     };
                     if let Some(addr) = src_addr {
                         let _ = write!(self.out, "\tmov\tal,byte ptr {addr}\r\n");
+                        let _ = write!(self.out, "\tmov\tbyte ptr {},al\r\n", bp_addr(off));
+                        return;
+                    }
+                }
+                // `c = (char)(<int_local> <op> K);` — byte arithmetic.
+                // BCC emits `mov al, [int]; <op> al, K & 0xFF; mov
+                // [c], al`. Saves the word load + word op + cbw vs.
+                // narrowing at store time. Fixtures 1384, 1535, 1538,
+                // 1539, 1540, 1541, 1542, 1543, 1544, 1545, 1546,
+                // 1627, 2074.
+                if ty.is_char_like()
+                    && let ExprKind::Cast { ty: cast_ty, operand } = &value.kind
+                    && cast_ty.is_char_like()
+                    && let ExprKind::BinOp { op: binop, left, right } = &operand.kind
+                    && matches!(binop,
+                        BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor
+                    )
+                    && let ExprKind::Ident(src_name) = &left.kind
+                    && let Some(k) = try_const_eval(right)
+                {
+                    let src_addr = if self.locals.has(src_name)
+                        && let LocalLocation::Stack(soff) = self.locals.location_of(src_name)
+                    {
+                        Some(bp_addr(soff))
+                    } else if self.globals.type_of(src_name).is_some() {
+                        Some(format!("DGROUP:_{src_name}"))
+                    } else {
+                        None
+                    };
+                    if let Some(addr) = src_addr {
+                        let k8 = (k & 0xFF) as u8;
+                        let mnem = match binop {
+                            BinOp::Add => "add",
+                            BinOp::Sub => "sub",
+                            BinOp::BitAnd => "and",
+                            BinOp::BitOr => "or",
+                            BinOp::BitXor => "xor",
+                            _ => unreachable!(),
+                        };
+                        let _ = write!(self.out, "\tmov\tal,byte ptr {addr}\r\n");
+                        let _ = write!(self.out, "\t{mnem}\tal,{k8}\r\n");
                         let _ = write!(self.out, "\tmov\tbyte ptr {},al\r\n", bp_addr(off));
                         return;
                     }
