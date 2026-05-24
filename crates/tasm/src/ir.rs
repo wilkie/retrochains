@@ -1227,6 +1227,15 @@ pub enum Instr {
     /// `mov <reg16>,word ptr [si+disp8]` — sibling with an 8-bit
     /// displacement. Encoding: `8B (mod=01 reg=<dst> r/m=100) dd`.
     MovReg16SiDisp { reg: Reg16, disp: i8 },
+    /// `mov <reg16>,word ptr [di]` — DI sibling of
+    /// [`Self::MovReg16FromSiPtr`]. Encoding: `8B (reg<<3 | 0x05)`
+    /// (mod=00 r/m=101 → [DI]). Used when BCC enregisters two
+    /// pointers and the source is the DI-bound one (fixture 2495:
+    /// `*dst = *src` with src in DI → `mov ax, [di]`).
+    MovReg16FromDiPtr { reg: Reg16 },
+    /// `mov <reg16>,word ptr [di+disp8]` — sibling with disp8.
+    /// Encoding: `8B (mod=01 reg=<dst> r/m=101) dd`.
+    MovReg16DiDisp { reg: Reg16, disp: i8 },
     /// `mov dx,word ptr [si+disp8]` — `8B 54 dd`. ModR/M 54 = mod=01
     /// reg=DX(010) r/m=100 ([si+disp8]). High-half read for `*p`
     /// where `p: long *` in the ABI return convention (DX=high).

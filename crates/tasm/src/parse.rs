@@ -949,6 +949,14 @@ fn parse_mov(operands: &str, line_no: usize) -> AsmResult<Instr> {
         if let Some(disp) = parse_word_si_disp(rhs) {
             return Ok(Instr::MovReg16SiDisp { reg, disp });
         }
+        // `mov <reg16>, word ptr [di]` and `[di+disp8]` — sibling
+        // for the DI-bound pointer (fixture 2495).
+        if rhs == "word ptr [di]" {
+            return Ok(Instr::MovReg16FromDiPtr { reg });
+        }
+        if let Some(disp) = parse_word_di_disp(rhs) {
+            return Ok(Instr::MovReg16DiDisp { reg, disp });
+        }
     }
     // Generic 16-bit `mov <reg>,offset <group>:<sym>` (fixtures 108
     // for AX, 157 for SI). Tried before reg-imm so it doesn't get
@@ -3144,6 +3152,17 @@ fn parse_word_si_disp(s: &str) -> Option<i8> {
         return Some(0);
     }
     let rest = inside.strip_prefix("si")?;
+    let signed: i32 = rest.parse().ok()?;
+    i8::try_from(signed).ok()
+}
+
+fn parse_word_di_disp(s: &str) -> Option<i8> {
+    let s = s.trim().strip_prefix("word ptr ")?;
+    let inside = s.strip_prefix('[')?.strip_suffix(']')?;
+    if inside == "di" {
+        return Some(0);
+    }
+    let rest = inside.strip_prefix("di")?;
     let signed: i32 = rest.parse().ok()?;
     i8::try_from(signed).ok()
 }
