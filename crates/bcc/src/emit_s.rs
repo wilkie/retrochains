@@ -596,37 +596,79 @@ fn write_tail(
         .iter()
         .filter(|g| !g.is_static && !g.is_extern)
         .any(|g| g.ty.contains_long());
-    // Long-bucket array-typed globals (uninitialized, length ≥ 3 →
-    // `_buf`-shape names) also flip to forward-alpha. Pinned by
-    // fixture 1366 (`char buf[5]; int main` → `_buf, _main`).
-    // Distinct from fixture 494 (`struct node head`) which stays on
-    // reverse-alpha because the global isn't an array.
-    let long_has_array_global = unit
+    // Long-bucket array-typed UNINITIALIZED (BSS) globals — split
+    // by element type:
+    //  - Non-struct array (char/int/ptr): segment-group the PUBDEFs.
+    //    BSS publics first, then TEXT functions in reverse-alpha.
+    //    Pinned by 1366, 1284, 2954, 3407.
+    //  - Struct array: forward-alpha across BSS+TEXT. Pinned by
+    //    2841 (`struct Item items[5]; int fetch` → `_fetch,
+    //    _items`).
+    // Initialized array globals (498) keep the older `long_has_
+    // data_global → forward-alpha` path.
+    let long_array_kind: Option<bool> = unit
         .globals
         .iter()
         .filter(|g| !g.is_static && !g.is_extern)
         .filter(|g| g.name.len() + 1 >= 3)
-        .any(|g| matches!(g.ty, crate::ast::Type::Array { .. }));
-    let mut long_bucket: Vec<(String, String)> = long_globals
-        .into_iter()
-        .chain(long_functions.into_iter())
-        .chain(long_helpers.into_iter())
-        .collect();
-    long_bucket.sort_by(|a, b| a.0.cmp(&b.0));
+        .filter(|g| g.init.is_none())
+        .find_map(|g| match &g.ty {
+            crate::ast::Type::Array { elem, .. } => Some(matches!(
+                **elem,
+                crate::ast::Type::Struct { .. }
+            )),
+            _ => None,
+        });
+    let long_has_bss_array_global = long_array_kind.is_some();
+    let long_has_bss_struct_array = long_array_kind == Some(true);
+    let long_has_bss_nonstruct_array = long_array_kind == Some(false);
+    let mut long_globals = long_globals;
+    let mut long_functions = long_functions;
+    let mut long_helpers = long_helpers;
+    long_globals.sort_by(|a, b| a.0.cmp(&b.0));
+    long_functions.sort_by(|a, b| a.0.cmp(&b.0));
+    long_helpers.sort_by(|a, b| a.0.cmp(&b.0));
     short_bucket.sort_by(|a, b| a.0.cmp(&b.0));
-    let long_iter: Box<dyn Iterator<Item = &(String, String)>> =
-        if !has_long_typed_global
-            && ((long_has_global && short_has_global)
-                || long_has_data_global
-                || long_has_array_global
-                || has_function_prototype)
-        {
-            Box::new(long_bucket.iter())
-        } else {
-            Box::new(long_bucket.iter().rev())
-        };
-    for (_, line) in long_iter.chain(short_bucket.iter().rev()) {
-        out.extend_from_slice(line.as_bytes());
+    // Array-typed globals with NO short global (fixtures 1366,
+    // 1284): emit BSS publics first (globals forward-alpha) then
+    // TEXT publics (functions reverse-alpha, helpers reverse-alpha).
+    // BCC writes PUBDEFs in segment-grouped order in this case.
+    // 491 (which has both an array global AND a short global) is
+    // covered by the regular forward-alpha trigger below — keeping
+    // it segment-grouped would put `_pts` before `_main`, but BCC
+    // actually emits `_main, _pts, _g` (forward-alpha across the
+    // whole long bucket).
+    let mut long_bucket: Vec<(String, String)> = Vec::new();
+    if !has_long_typed_global
+        && long_has_bss_nonstruct_array
+        && !short_has_global
+        && !long_has_data_global
+    {
+        long_bucket.extend(long_globals.iter().cloned());
+        long_bucket.extend(long_functions.iter().rev().cloned());
+        long_bucket.extend(long_helpers.iter().rev().cloned());
+        for (_, line) in long_bucket.iter().chain(short_bucket.iter().rev()) {
+            out.extend_from_slice(line.as_bytes());
+        }
+    } else {
+        long_bucket.extend(long_globals.iter().cloned());
+        long_bucket.extend(long_functions.iter().cloned());
+        long_bucket.extend(long_helpers.iter().cloned());
+        long_bucket.sort_by(|a, b| a.0.cmp(&b.0));
+        let long_iter: Box<dyn Iterator<Item = &(String, String)>> =
+            if !has_long_typed_global
+                && ((long_has_global && short_has_global)
+                    || long_has_data_global
+                    || long_has_bss_struct_array
+                    || has_function_prototype)
+            {
+                Box::new(long_bucket.iter())
+            } else {
+                Box::new(long_bucket.iter().rev())
+            };
+        for (_, line) in long_iter.chain(short_bucket.iter().rev()) {
+            out.extend_from_slice(line.as_bytes());
+        }
     }
     // Data externs come after the public list (function externs come
     // before it, in `collect_extern_calls` order). Emitted in
