@@ -3053,6 +3053,44 @@ impl<'a> FunctionEmitter<'a> {
     /// 3. LHS is a stack local and RHS is a constant: `cmp word ptr [bp-N], K`
     /// 4. Otherwise: `mov ax, <lhs>` then `cmp ax, <rhs>`
     fn emit_compare(&mut self, left: &Expr, right: &Expr) {
+        // `<char_lvalue> <relop> <char_lvalue>` — both sides are
+        // char-typed memory operands. BCC emits a byte compare:
+        // `mov al, byte ptr <left>; cmp al, byte ptr <right>`. We
+        // were widening left to AX first, which is unnecessary at
+        // byte width. Fixture 1457 (`a[0] == a[2]` for char arr).
+        if let Some((l_name, l_off, l_ty)) = self.try_lvalue_chain_addr(left)
+            && let Some((r_name, r_off, r_ty)) = self.try_lvalue_chain_addr(right)
+            && l_ty.is_char_like()
+            && r_ty.is_char_like()
+        {
+            let l_addr = if self.globals.contains(&l_name) {
+                if l_off == 0 {
+                    format!("DGROUP:_{l_name}")
+                } else {
+                    format!("DGROUP:_{l_name}+{l_off}")
+                }
+            } else if let LocalLocation::Stack(base) = self.locals.location_of(&l_name) {
+                let off = base + i16::try_from(l_off).unwrap_or(i16::MAX);
+                bp_addr(off)
+            } else {
+                return;
+            };
+            let r_addr = if self.globals.contains(&r_name) {
+                if r_off == 0 {
+                    format!("DGROUP:_{r_name}")
+                } else {
+                    format!("DGROUP:_{r_name}+{r_off}")
+                }
+            } else if let LocalLocation::Stack(base) = self.locals.location_of(&r_name) {
+                let off = base + i16::try_from(r_off).unwrap_or(i16::MAX);
+                bp_addr(off)
+            } else {
+                return;
+            };
+            let _ = write!(self.out, "\tmov\tal,byte ptr {l_addr}\r\n");
+            let _ = write!(self.out, "\tcmp\tal,byte ptr {r_addr}\r\n");
+            return;
+        }
         // `*p <relop> K` for register-resident pointer p: emit
         // memory-direct `cmp <width> ptr [<reg>], K` instead of
         // loading to AX first. Matches BCC's actual shape for
