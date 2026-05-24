@@ -239,6 +239,19 @@ pub enum Instr {
     /// `sbb word ptr [bp+disp8],dx` — `19 56 dd`. High-half borrow
     /// partner to `SubBpRelAx`.
     SbbBpRelDx { offset: i16 },
+    /// `add byte ptr [bp+disp8],al` — `00 46 dd`. Memory-destination
+    /// byte add of AL into a stack char. Char compound `+=` with a
+    /// char-lvalue RHS.
+    AddBpRelByteAl { offset: i16 },
+    /// `sub byte ptr [bp+disp8],al` — `28 46 dd`. Sibling.
+    SubBpRelByteAl { offset: i16 },
+    /// `and byte ptr [bp+disp8],al` — `20 46 dd`. Sibling.
+    AndBpRelByteAl { offset: i16 },
+    /// `or  byte ptr [bp+disp8],al` — `08 46 dd`. Sibling.
+    OrBpRelByteAl { offset: i16 },
+    /// `xor byte ptr [bp+disp8],al` — `30 46 dd`. Char element
+    /// compound `^=` with a char lvalue RHS (fixture 1447).
+    XorBpRelByteAl { offset: i16 },
     /// `add <dst>,<src>` between 16-bit registers — 03 xx with
     /// ModR/M mod=11 reg=dst r/m=src. Used to fold a register-resident
     /// operand into AX (fixture 127: `add ax,si`).

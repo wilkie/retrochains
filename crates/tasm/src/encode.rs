@@ -287,6 +287,11 @@ fn instr_size(instr: &Instr) -> usize {
         | Instr::AdcBpRelDx { .. }
         | Instr::SubBpRelAx { .. }
         | Instr::SbbBpRelDx { .. }
+        | Instr::AddBpRelByteAl { .. }
+        | Instr::SubBpRelByteAl { .. }
+        | Instr::AndBpRelByteAl { .. }
+        | Instr::OrBpRelByteAl { .. }
+        | Instr::XorBpRelByteAl { .. }
         | Instr::SubAxBpRel { .. }
         | Instr::AndAxBpRel { .. }
         | Instr::AndReg16BpRel { .. }
@@ -840,6 +845,36 @@ fn emit_instr(
             let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
             out.push(0x19);
             out.push(0x56);
+            out.push(disp as u8);
+        }
+        Instr::AddBpRelByteAl { offset } => {
+            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
+            out.push(0x00);
+            out.push(0x46);
+            out.push(disp as u8);
+        }
+        Instr::SubBpRelByteAl { offset } => {
+            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
+            out.push(0x28);
+            out.push(0x46);
+            out.push(disp as u8);
+        }
+        Instr::AndBpRelByteAl { offset } => {
+            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
+            out.push(0x20);
+            out.push(0x46);
+            out.push(disp as u8);
+        }
+        Instr::OrBpRelByteAl { offset } => {
+            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
+            out.push(0x08);
+            out.push(0x46);
+            out.push(disp as u8);
+        }
+        Instr::XorBpRelByteAl { offset } => {
+            let disp = i8::try_from(*offset).expect("bp-relative offset fits in i8");
+            out.push(0x30);
+            out.push(0x46);
             out.push(disp as u8);
         }
         Instr::SubAxFromSiPtr => {

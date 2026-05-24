@@ -1432,6 +1432,12 @@ fn parse_sub(operands: &str, line_no: usize) -> AsmResult<Instr> {
             return Ok(Instr::SubBpRelAx { offset });
         }
     }
+    // `sub byte ptr [bp+N], al` — char compound `-=`.
+    if let Some(offset) = parse_byte_bp_relative(lhs) {
+        if rhs == "al" {
+            return Ok(Instr::SubBpRelByteAl { offset });
+        }
+    }
     // `sub word ptr [si], imm8sx` — long-pointer `*p -= K` low half.
     if lhs == "word ptr [si]" {
         if let Some(imm) = parse_imm8_signed(rhs) {
@@ -1559,6 +1565,12 @@ fn parse_and(operands: &str, line_no: usize) -> AsmResult<Instr> {
         }
         if rhs == "ax" {
             return Ok(Instr::AndBpRelAx { offset });
+        }
+    }
+    // `and byte ptr [bp+N], al` — char compound `&=`.
+    if let Some(offset) = parse_byte_bp_relative(lhs) {
+        if rhs == "al" {
+            return Ok(Instr::AndBpRelByteAl { offset });
         }
     }
     // `and <reg16>, word ptr [bp+N]` — generic register-vs-stack
@@ -2101,6 +2113,13 @@ fn parse_add(operands: &str, line_no: usize) -> AsmResult<Instr> {
         // (fixture 765, AX holds int RHS).
         if rhs == "ax" {
             return Ok(Instr::AddBpRelAx { offset });
+        }
+    }
+    // `add byte ptr [bp+N], al` — char compound `+=` with char-lvalue
+    // RHS (sibling of XorBpRelByteAl).
+    if let Some(offset) = parse_byte_bp_relative(lhs) {
+        if rhs == "al" {
+            return Ok(Instr::AddBpRelByteAl { offset });
         }
     }
     // `add word ptr <group>:<sym>[+N], imm` — read-modify-write
@@ -2650,6 +2669,12 @@ fn parse_or(operands: &str, line_no: usize) -> AsmResult<Instr> {
             return Ok(Instr::OrBpRelAx { offset });
         }
     }
+    // `or byte ptr [bp+N], al` — char compound `|=`.
+    if let Some(offset) = parse_byte_bp_relative(lhs) {
+        if rhs == "al" {
+            return Ok(Instr::OrBpRelByteAl { offset });
+        }
+    }
     // `or <reg16>, word ptr [bp+N]` — generic register-vs-stack
     // bitwise OR for compound `|=` on a non-AX reg local
     // (fixture 656). AX uses the bp-rel variant via parse_alu_ax
@@ -2835,6 +2860,13 @@ fn parse_xor(operands: &str, line_no: usize) -> AsmResult<Instr> {
         }
         if rhs == "ax" {
             return Ok(Instr::XorBpRelAx { offset });
+        }
+    }
+    // `xor byte ptr [bp+N], al` — char compound `^=` with a
+    // char-typed lvalue RHS (fixture 1447).
+    if let Some(offset) = parse_byte_bp_relative(lhs) {
+        if rhs == "al" {
+            return Ok(Instr::XorBpRelByteAl { offset });
         }
     }
     // `xor <reg16>, word ptr [bp+N]` — generic register-vs-stack

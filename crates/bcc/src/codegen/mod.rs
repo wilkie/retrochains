@@ -8629,6 +8629,30 @@ impl<'a> FunctionEmitter<'a> {
                 );
                 return;
             }
+            // Char-typed dest + char-typed lvalue RHS: load RHS to
+            // AL then `<op> byte ptr [bp+dst], al`. Mirrors the int
+            // path above. Fixture 1447 (`a[0] ^= a[1];`).
+            if store_byte
+                && matches!(
+                    op,
+                    BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor
+                )
+                && let Some((r_name, r_off, r_ty)) = self.try_lvalue_chain_addr(value)
+                && r_ty.is_char_like()
+                && let Some(r_addr) = self.resolve_chain_addr(&r_name, r_off)
+            {
+                let _ = write!(self.out, "\tmov\tal,byte ptr {r_addr}\r\n");
+                let mnem = match op {
+                    BinOp::Add => "add",
+                    BinOp::Sub => "sub",
+                    BinOp::BitAnd => "and",
+                    BinOp::BitOr => "or",
+                    BinOp::BitXor => "xor",
+                    _ => unreachable!(),
+                };
+                let _ = write!(self.out, "\t{mnem}\tbyte ptr {},al\r\n", bp_addr(off));
+                return;
+            }
             panic!("non-constant rhs in array compound assign not yet supported (no fixture)");
         };
         let v_masked = if store_byte { v & 0xFF } else { v & 0xFFFF };
