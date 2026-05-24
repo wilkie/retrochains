@@ -9257,6 +9257,32 @@ impl<'a> FunctionEmitter<'a> {
             }
             return;
         }
+        // `(*<ptr_to_ptr>)-><field>` rvalue: deref the outer ptr
+        // through BX, then load the field through that BX. Fixture
+        // 2815 (`int extract(struct P **pp) { return (*pp)->x; }`).
+        if matches!(kind, crate::ast::MemberKind::Arrow)
+            && let ExprKind::Deref(inner) = &base.kind
+            && let ExprKind::Ident(pp_name) = &inner.kind
+            && self.locals.has(pp_name)
+            && let LocalLocation::Reg(reg) = self.locals.location_of(pp_name)
+            && let Some(p_ty) = self.locals.type_of(pp_name).pointee()
+            && let Some(struct_ty) = p_ty.pointee()
+            && let Some((field_off, field_ty)) = struct_ty.field(field)
+        {
+            let _ = write!(self.out, "\tmov\tbx,word ptr [{}]\r\n", reg.name());
+            let bx_disp = if field_off == 0 {
+                "[bx]".to_owned()
+            } else {
+                format!("[bx+{field_off}]")
+            };
+            if field_ty.is_char_like() {
+                let _ = write!(self.out, "\tmov\tal,byte ptr {bx_disp}\r\n");
+                self.emit_widen_al(&field_ty);
+            } else {
+                let _ = write!(self.out, "\tmov\tax,word ptr {bx_disp}\r\n");
+            }
+            return;
+        }
         // Arrow path (or Dot whose base isn't a const-chain lvalue):
         // base must be a bare Ident referring to a pointer.
         let ExprKind::Ident(name) = &base.kind else {
