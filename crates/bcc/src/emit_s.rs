@@ -596,6 +596,17 @@ fn write_tail(
         .iter()
         .filter(|g| !g.is_static && !g.is_extern)
         .any(|g| g.ty.contains_long());
+    // Long-bucket array-typed globals (uninitialized, length ≥ 3 →
+    // `_buf`-shape names) also flip to forward-alpha. Pinned by
+    // fixture 1366 (`char buf[5]; int main` → `_buf, _main`).
+    // Distinct from fixture 494 (`struct node head`) which stays on
+    // reverse-alpha because the global isn't an array.
+    let long_has_array_global = unit
+        .globals
+        .iter()
+        .filter(|g| !g.is_static && !g.is_extern)
+        .filter(|g| g.name.len() + 1 >= 3)
+        .any(|g| matches!(g.ty, crate::ast::Type::Array { .. }));
     let mut long_bucket: Vec<(String, String)> = long_globals
         .into_iter()
         .chain(long_functions.into_iter())
@@ -607,6 +618,7 @@ fn write_tail(
         if !has_long_typed_global
             && ((long_has_global && short_has_global)
                 || long_has_data_global
+                || long_has_array_global
                 || has_function_prototype)
         {
             Box::new(long_bucket.iter())
