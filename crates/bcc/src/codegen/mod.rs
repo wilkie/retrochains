@@ -4660,12 +4660,28 @@ impl<'a> FunctionEmitter<'a> {
                     } else {
                         format!("offset DGROUP:s@+{pool_off}")
                     };
-                    self.out.extend_from_slice(b"\tpush\tss\r\n");
-                    let _ = write!(self.out, "\tlea\tax,{}\r\n", bp_addr(off));
-                    self.out.extend_from_slice(b"\tpush\tax\r\n");
-                    self.out.extend_from_slice(b"\tpush\tds\r\n");
-                    let _ = write!(self.out, "\tmov\tax,{src_addr}\r\n");
-                    self.out.extend_from_slice(b"\tpush\tax\r\n");
+                    // For structs (fixture 1616) BCC computes the
+                    // dst address first, then pushes ss before the
+                    // addr; same for src (mov ax, src; push ds; push
+                    // ax). For arrays (fixture 1475) BCC keeps the
+                    // pushes outside: push ss, lea ax, push ax,
+                    // push ds, mov ax, push ax.
+                    let is_struct = matches!(ty, Type::Struct { .. });
+                    if is_struct {
+                        let _ = write!(self.out, "\tlea\tax,{}\r\n", bp_addr(off));
+                        self.out.extend_from_slice(b"\tpush\tss\r\n");
+                        self.out.extend_from_slice(b"\tpush\tax\r\n");
+                        let _ = write!(self.out, "\tmov\tax,{src_addr}\r\n");
+                        self.out.extend_from_slice(b"\tpush\tds\r\n");
+                        self.out.extend_from_slice(b"\tpush\tax\r\n");
+                    } else {
+                        self.out.extend_from_slice(b"\tpush\tss\r\n");
+                        let _ = write!(self.out, "\tlea\tax,{}\r\n", bp_addr(off));
+                        self.out.extend_from_slice(b"\tpush\tax\r\n");
+                        self.out.extend_from_slice(b"\tpush\tds\r\n");
+                        let _ = write!(self.out, "\tmov\tax,{src_addr}\r\n");
+                        self.out.extend_from_slice(b"\tpush\tax\r\n");
+                    }
                     let _ = write!(self.out, "\tmov\tcx,{size}\r\n");
                     self.out.extend_from_slice(b"\tcall\tnear ptr N_SCOPY@\r\n");
                     self.helpers.insert("N_SCOPY@".to_string());
