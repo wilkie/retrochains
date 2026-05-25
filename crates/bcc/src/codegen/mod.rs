@@ -11635,6 +11635,43 @@ impl<'a> FunctionEmitter<'a> {
                     let _ = write!(self.out, "\tmov\tbyte ptr {},{v8}\r\n", bp_addr(off));
                     return;
                 }
+                // Char dest + ternary with both arms constant:
+                // `c = cond ? K1 : K2;` — emit `mov al, K1` /
+                // `mov al, K2` byte loads instead of `mov ax, K`
+                // word loads (saves 1 byte per arm). Fixture 1287
+                // (`c = x > 0 ? 'P' : 'N';`).
+                if ty.is_char_like()
+                    && let ExprKind::Ternary { cond, then_value, else_value } = &value.kind
+                    && let Some(t_v) = try_const_eval(then_value)
+                    && let Some(e_v) = try_const_eval(else_value)
+                {
+                    let span_start = value.span.start;
+                    let base = self.label_plan.base(span_start);
+                    let false_slot = base + 1;
+                    let merge_slot = base + 2;
+                    let cond_has_top_or = matches!(
+                        cond.kind,
+                        ExprKind::Logical { op: LogicalOp::Or, .. }
+                    );
+                    let true_slot = if cond_has_top_or { Some(base) } else { None };
+                    self.emit_cond_branch(cond, true_slot, Some(false_slot));
+                    if let Some(t) = true_slot {
+                        self.emit_label(t);
+                    }
+                    let t8 = t_v & 0xFF;
+                    let _ = write!(self.out, "\tmov\tal,{t8}\r\n");
+                    let _ = write!(
+                        self.out,
+                        "\tjmp\tshort {}\r\n",
+                        self.label_ref(merge_slot),
+                    );
+                    self.emit_label(false_slot);
+                    let e8 = e_v & 0xFF;
+                    let _ = write!(self.out, "\tmov\tal,{e8}\r\n");
+                    self.emit_label(merge_slot);
+                    let _ = write!(self.out, "\tmov\tbyte ptr {},al\r\n", bp_addr(off));
+                    return;
+                }
                 // Mirror the init form: immediate-store when possible.
                 if let Some(v) = try_const_eval(value) {
                     let v16 = v & 0xFFFF;
