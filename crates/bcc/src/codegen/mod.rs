@@ -8595,6 +8595,20 @@ impl<'a> FunctionEmitter<'a> {
             let _ = write!(self.out, "\tmov\t{width} ptr [bx],{v_masked}\r\n");
             return;
         }
+        // Word-sized store from a register-resident int local —
+        // emit `mov word ptr [bx], <reg>` directly (89 mod=00 reg=<r>
+        // r/m=111 → tasm parses the `mov [bx], <reg>` form already
+        // since 89 with mod=00 r/m=111 is generic). Skip the AX
+        // round-trip. Fixture 2244 (`arr[i] = i` with i in SI).
+        if !elem.is_char_like()
+            && let ExprKind::Ident(name) = &value.kind
+            && self.locals.has(name)
+            && let LocalLocation::Reg(reg) = self.locals.location_of(name)
+            && !reg.is_byte()
+        {
+            let _ = write!(self.out, "\tmov\tword ptr [bx],{}\r\n", reg.name());
+            return;
+        }
         // Non-constant RHS: evaluate to AX (or AL for byte storage),
         // then store through [bx]. Fixtures 1219 (`a[i] = i` with char
         // array), 1468 (int array), 1276 (`s[i] = 'a' + i`).

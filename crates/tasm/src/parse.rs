@@ -1178,6 +1178,11 @@ fn parse_mov(operands: &str, line_no: usize) -> AsmResult<Instr> {
         if rhs == "ax" {
             return Ok(Instr::MovBxPtrAx);
         }
+        // Non-AX register store. Fixture 2244 (`arr[i] = i` with i
+        // in SI → `mov [bx], si`).
+        if let Some(reg) = Reg16::parse(rhs) {
+            return Ok(Instr::MovBxPtrReg16 { reg });
+        }
     }
     // LHS `byte ptr [bx]` with AL — char-element store after a
     // BX-indexed address compute (fixture 1219).

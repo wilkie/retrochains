@@ -1630,6 +1630,11 @@ pub enum Instr {
     /// `mov word ptr [bx],ax` — 89 07. Same ModR/M as the byte form
     /// but the word opcode. Int-element store sibling. Fixture 1468.
     MovBxPtrAx,
+    /// `mov word ptr [bx],<reg16>` — generic register store through
+    /// BX. `89 (mod=00 reg=<r> r/m=111)`. AX uses the same opcode
+    /// but kept as `MovBxPtrAx` for legacy callers; this variant
+    /// covers SI/DI/CX/DX. Fixture 2244 (`arr[i] = i` with i in SI).
+    MovBxPtrReg16 { reg: Reg16 },
     /// `mov ax,word ptr [bx]` — 8B 07. Load through BX.
     MovAxFromBxPtr,
     /// `mov bx,word ptr [bx]` — 8B 1F. Chain step in `**p` style
