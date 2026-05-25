@@ -3538,6 +3538,45 @@ impl<'a> FunctionEmitter<'a> {
                     op.jump_if_false(unsigned).expect("comparison op has false mnemonic"),
                 );
             }
+            // `p[idx] <eq/ne> 0` where p is a stack-resident pointer
+            // local. After the address calc lands in BX, BCC emits
+            // `cmp <w> ptr [bx], 0` directly instead of `mov ax, [bx]
+            // / or ax, ax`. Fixture 3331 (`for (...; p[i] != 0;...)`).
+            if matches!(op, BinOp::Eq | BinOp::Ne)
+                && try_const_eval(right) == Some(0)
+                && let ExprKind::ArrayIndex { array, index } = &left.kind
+                && let ExprKind::Ident(name) = &array.kind
+                && self.locals.has(name)
+                && let Some(pointee) = self.locals.type_of(name).pointee()
+            {
+                let pointee = pointee.clone();
+                let stride = u32::from(pointee.size_bytes());
+                self.emit_expr_to_ax(index);
+                for _ in 0..stride.trailing_zeros() {
+                    self.out.extend_from_slice(b"\tshl\tax,1\r\n");
+                }
+                match self.locals.location_of(name) {
+                    LocalLocation::Reg(reg) => {
+                        let _ = write!(self.out, "\tadd\tax,{}\r\n", reg.name());
+                        self.out.extend_from_slice(b"\tmov\tbx,ax\r\n");
+                    }
+                    LocalLocation::Stack(off) => {
+                        let _ = write!(
+                            self.out,
+                            "\tmov\tbx,word ptr {}\r\n",
+                            bp_addr(off),
+                        );
+                        self.out.extend_from_slice(b"\tadd\tbx,ax\r\n");
+                    }
+                }
+                let width = if pointee.is_char_like() { "byte" } else { "word" };
+                let _ = write!(self.out, "\tcmp\t{width} ptr [bx],0\r\n");
+                return match op {
+                    BinOp::Eq => ("je", "jne"),
+                    BinOp::Ne => ("jne", "je"),
+                    _ => unreachable!(),
+                };
+            }
             self.emit_compare(left, right);
             return (
                 op.jump_if_true(unsigned).expect("comparison op has true mnemonic"),
