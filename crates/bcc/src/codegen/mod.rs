@@ -3667,14 +3667,41 @@ impl<'a> FunctionEmitter<'a> {
             }
             return;
         }
+        // Pointer ++/-- in expression context: C scales the step by
+        // sizeof(*p). For stride 1 (char*), keep the single-byte
+        // `inc/dec reg`. For larger strides, emit `add/sub reg,
+        // stride` instead — fixture 3646 (struct Pt* p++ with
+        // sizeof(Pt) = 4).
+        let stride = self
+            .locals
+            .type_of(target)
+            .pointee()
+            .map_or(1u32, |p| u32::from(p.size_bytes()));
+        let scaled_op = if stride > 1 {
+            let add_or_sub = match op {
+                UpdateOp::Inc => "add",
+                UpdateOp::Dec => "sub",
+            };
+            Some((add_or_sub, stride))
+        } else {
+            None
+        };
         match position {
             UpdatePosition::Pre => {
-                let _ = write!(self.out, "\t{mnemonic}\t{}\r\n", reg.name());
+                if let Some((mn, s)) = scaled_op {
+                    let _ = write!(self.out, "\t{mn}\t{},{s}\r\n", reg.name());
+                } else {
+                    let _ = write!(self.out, "\t{mnemonic}\t{}\r\n", reg.name());
+                }
                 let _ = write!(self.out, "\tmov\tax,{}\r\n", reg.name());
             }
             UpdatePosition::Post => {
                 let _ = write!(self.out, "\tmov\tax,{}\r\n", reg.name());
-                let _ = write!(self.out, "\t{mnemonic}\t{}\r\n", reg.name());
+                if let Some((mn, s)) = scaled_op {
+                    let _ = write!(self.out, "\t{mn}\t{},{s}\r\n", reg.name());
+                } else {
+                    let _ = write!(self.out, "\t{mnemonic}\t{}\r\n", reg.name());
+                }
             }
         }
     }
