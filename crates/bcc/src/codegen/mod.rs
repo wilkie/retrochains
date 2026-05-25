@@ -4516,9 +4516,15 @@ impl<'a> FunctionEmitter<'a> {
             // before the inc/dec so the captured value is the pre-
             // update one. Fixture 649 (`r = c++` with c in DL).
             match position {
+                // Pre: BCC routes the inc through AL — `mov al,
+                // <reg>; inc al; mov <reg>, al; cbw`. The AL
+                // detour mirrors the stack-char and global-char
+                // pre paths. Fixture 3273 (`return ++c` with c
+                // in DL).
                 UpdatePosition::Pre => {
-                    let _ = write!(self.out, "\t{mnemonic}\t{}\r\n", reg.name());
                     let _ = write!(self.out, "\tmov\tal,{}\r\n", reg.name());
+                    let _ = write!(self.out, "\t{mnemonic}\tal\r\n");
+                    let _ = write!(self.out, "\tmov\t{},al\r\n", reg.name());
                     self.out.extend_from_slice(b"\tcbw\t\r\n");
                 }
                 UpdatePosition::Post => {
