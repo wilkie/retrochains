@@ -263,6 +263,9 @@ fn instr_size(instr: &Instr) -> usize {
         Instr::MovReg16OffsetSym { .. } => 3,
         Instr::MovReg16GroupSymBxDisp { .. } => 4,
         Instr::AddReg16GroupSymBxDisp { .. } => 4,
+        Instr::MovReg8GroupSymBxDisp { .. } => 4,
+        Instr::MovGroupSymBxDispReg8 { .. } => 4,
+        Instr::MovGroupSymBxDispImm8 { .. } => 5,
         Instr::AddReg16GroupSym { .. } => 4,
         Instr::OrReg16GroupSym { .. } => 4,
         Instr::MovGroupSymBxDispImm { .. } => 6,
@@ -1500,6 +1503,24 @@ fn emit_instr(
             // MovReg16GroupSymBxDisp; opcode 03 (ADD r16,r/m16).
             let modrm = 0b10_000_111 | (reg.code() << 3);
             emit_group_sym_lea(&[0x03, modrm], group, symbol, *disp as i16, symbols, group_idx, extern_idx, out, fixups)?;
+        }
+        Instr::MovReg8GroupSymBxDisp { reg, group, symbol, disp } => {
+            // `mov <reg8>, byte ptr <group>:<sym>[bx+disp]` → 8A
+            // (mod=10 reg=<r> r/m=111) lo hi.
+            let modrm = 0b10_000_111 | (reg.code() << 3);
+            emit_group_sym_lea(&[0x8A, modrm], group, symbol, *disp as i16, symbols, group_idx, extern_idx, out, fixups)?;
+        }
+        Instr::MovGroupSymBxDispReg8 { reg, group, symbol, disp } => {
+            // `mov byte ptr <group>:<sym>[bx+disp], <reg8>` → 88
+            // (mod=10 reg=<r> r/m=111) lo hi.
+            let modrm = 0b10_000_111 | (reg.code() << 3);
+            emit_group_sym_lea(&[0x88, modrm], group, symbol, *disp as i16, symbols, group_idx, extern_idx, out, fixups)?;
+        }
+        Instr::MovGroupSymBxDispImm8 { group, symbol, disp, imm } => {
+            // `mov byte ptr <group>:<sym>[bx+disp], imm8` → C6 87
+            // lo hi ii.
+            emit_group_sym_lea(&[0xC6, 0x87], group, symbol, *disp as i16, symbols, group_idx, extern_idx, out, fixups)?;
+            out.push(*imm);
         }
         Instr::AddReg16GroupSym { reg, group, symbol, offset } => {
             // `add <reg16>,word ptr <group>:<sym>[+offset]` → 03

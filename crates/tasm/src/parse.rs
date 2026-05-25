@@ -1026,6 +1026,16 @@ fn parse_mov(operands: &str, line_no: usize) -> AsmResult<Instr> {
         {
             return Ok(Instr::MovAlBxDisp { disp });
         }
+        // `mov al, byte ptr <group>:<sym>[bx]` — bx-indexed load.
+        // Tried before the plain group-symbol form. Fixture 2613.
+        if let Some((group, symbol, disp)) = parse_byte_group_symbol_bx_disp(rhs) {
+            return Ok(Instr::MovReg8GroupSymBxDisp {
+                reg: Reg8::Al,
+                group: group.to_string(),
+                symbol: symbol.to_string(),
+                disp,
+            });
+        }
         // `mov al,byte ptr DGROUP:_g` — 8-bit moffs8 load.
         if let Some((group, symbol)) = parse_byte_group_symbol(rhs) {
             let (sym, offset) = split_sym_offset(symbol);
@@ -1046,6 +1056,16 @@ fn parse_mov(operands: &str, line_no: usize) -> AsmResult<Instr> {
         }
         if let Some(imm) = parse_imm8(rhs) {
             return Ok(Instr::MovReg8Imm8 { reg, imm });
+        }
+        // BX-indexed byte load: `mov <reg8>, byte ptr <group>:<sym>[bx]`
+        // — variable-indexed char-array read (fixture 2613).
+        if let Some((group, symbol, disp)) = parse_byte_group_symbol_bx_disp(rhs) {
+            return Ok(Instr::MovReg8GroupSymBxDisp {
+                reg,
+                group: group.to_string(),
+                symbol: symbol.to_string(),
+                disp,
+            });
         }
         // `mov <reg8>, byte ptr <group>:<sym>` for non-AL dst
         // (fixture 739: `mov cl, byte ptr DGROUP:_h`).
@@ -1249,6 +1269,26 @@ fn parse_mov(operands: &str, line_no: usize) -> AsmResult<Instr> {
                 symbol: symbol.to_string(),
                 disp,
                 reg,
+            });
+        }
+    }
+    // Byte sibling: `mov byte ptr <group>:<sym>[bx+disp], ...` for
+    // var-indexed char-array writes (fixture 2613).
+    if let Some((group, symbol, disp)) = parse_byte_group_symbol_bx_disp(lhs) {
+        if let Some(imm) = parse_imm8(rhs) {
+            return Ok(Instr::MovGroupSymBxDispImm8 {
+                group: group.to_string(),
+                symbol: symbol.to_string(),
+                disp,
+                imm: imm as u8,
+            });
+        }
+        if let Some(reg) = Reg8::parse(rhs) {
+            return Ok(Instr::MovGroupSymBxDispReg8 {
+                reg,
+                group: group.to_string(),
+                symbol: symbol.to_string(),
+                disp,
             });
         }
     }
@@ -3438,7 +3478,17 @@ fn parse_group_symbol_base_disp<'a>(
 /// `[bx]` has no `+K`. Used by variable-indexed long-array reads
 /// (fixture 303: `mov ax, word ptr DGROUP:_a[bx+2]`).
 fn parse_group_symbol_bx_disp(s: &str) -> Option<(&str, &str, u16)> {
-    let s = s.trim().strip_prefix("word ptr ")?;
+    parse_group_symbol_bx_disp_width(s, "word")
+}
+
+/// Byte-width sibling of `parse_group_symbol_bx_disp`.
+fn parse_byte_group_symbol_bx_disp(s: &str) -> Option<(&str, &str, u16)> {
+    parse_group_symbol_bx_disp_width(s, "byte")
+}
+
+fn parse_group_symbol_bx_disp_width<'a>(s: &'a str, width: &str) -> Option<(&'a str, &'a str, u16)> {
+    let prefix = format!("{width} ptr ");
+    let s = s.trim().strip_prefix(prefix.as_str())?;
     let (group, rest) = s.split_once(':')?;
     let group = group.trim();
     // rest is `_sym[bx]`, `_sym[bx+K]`, `_sym+K[bx]`, `_sym-K[bx]`, or

@@ -812,6 +812,33 @@ pub enum Instr {
         symbol: String,
         offset: i16,
     },
+    /// `mov <reg8>, byte ptr <group>:<sym>[bx+disp]` — bx-indexed
+    /// byte load. Encoding `8A (mod=10 reg=<r> r/m=111) lo hi` +
+    /// FIXUPP. Fixture 2613 (`arr[i]` for char global array, var
+    /// index in BX → `mov al, byte ptr DGROUP:_arr[bx]`).
+    MovReg8GroupSymBxDisp {
+        reg: Reg8,
+        group: String,
+        symbol: String,
+        disp: u16,
+    },
+    /// `mov byte ptr <group>:<sym>[bx+disp], <reg8>` — bx-indexed
+    /// byte store. Encoding `88 (mod=10 reg=<r> r/m=111) lo hi` +
+    /// FIXUPP. Sibling of the above for write-back.
+    MovGroupSymBxDispReg8 {
+        reg: Reg8,
+        group: String,
+        symbol: String,
+        disp: u16,
+    },
+    /// `mov byte ptr <group>:<sym>[bx+disp], imm8` — bx-indexed
+    /// byte store with immediate. Encoding `C6 87 lo hi ii`.
+    MovGroupSymBxDispImm8 {
+        group: String,
+        symbol: String,
+        disp: u16,
+        imm: u8,
+    },
     /// `mov byte ptr <group>:<symbol>[+<offset>], al` — 8-bit moffs8
     /// store (`A2 lo hi`) + FIXUPP. AL-specific short form for
     /// writing back to a data-segment byte global; used by the
