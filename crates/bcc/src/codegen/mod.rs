@@ -7772,6 +7772,39 @@ impl<'a> FunctionEmitter<'a> {
                     let _ = write!(self.out, "\tmov\tax,{}\r\n", reg.name());
                     self.out.extend_from_slice(b"\timul\tdx\r\n");
                 } else {
+                    // Char-typed RHS needs widening: BCC's pattern is
+                    // `mov al, [c]; cbw; push ax; mov ax, <reg>; pop
+                    // dx; imul dx; mov <reg>, ax`. The word-form
+                    // `imul word ptr <c>` would read garbage from
+                    // the byte past c. Fixture 1388 (`a *= c` for
+                    // int a in SI, char c at [bp-1]).
+                    let rhs_is_char_lvalue = match &value.kind {
+                        ExprKind::Ident(rhs_name) => {
+                            self.locals.has(rhs_name)
+                                && self.locals.type_of(rhs_name).is_char_like()
+                        }
+                        ExprKind::Deref(inner) => match &inner.kind {
+                            ExprKind::Ident(p_name) => {
+                                self.locals.has(p_name)
+                                    && self
+                                        .locals
+                                        .type_of(p_name)
+                                        .pointee()
+                                        .is_some_and(|p| p.is_char_like())
+                            }
+                            _ => false,
+                        },
+                        _ => false,
+                    };
+                    if rhs_is_char_lvalue {
+                        self.emit_expr_to_ax(value);
+                        self.out.extend_from_slice(b"\tpush\tax\r\n");
+                        let _ = write!(self.out, "\tmov\tax,{}\r\n", reg.name());
+                        self.out.extend_from_slice(b"\tpop\tdx\r\n");
+                        self.out.extend_from_slice(b"\timul\tdx\r\n");
+                        let _ = write!(self.out, "\tmov\t{},ax\r\n", reg.name());
+                        return;
+                    }
                     let src = self.resolve_operand_source(value);
                     let _ = write!(self.out, "\tmov\tax,{}\r\n", reg.name());
                     match &src {
