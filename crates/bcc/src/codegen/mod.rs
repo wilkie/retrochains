@@ -14492,6 +14492,33 @@ impl<'a> FunctionEmitter<'a> {
                     }
                     return;
                 }
+                // `c = *p++` / `c = *p--` for char dest, char *p in a
+                // register: read via the reg directly (no BX
+                // snapshot), store the byte, then advance the
+                // register. No cbw — the dest is char. Fixture 2557
+                // (`c = *p++` with `char *p` in SI).
+                if ty.is_char_like()
+                    && let ExprKind::Deref(inner) = &value.kind
+                    && let ExprKind::Update {
+                        target,
+                        op,
+                        position: crate::ast::UpdatePosition::Post,
+                    } = &inner.kind
+                    && self.locals.has(target)
+                    && let LocalLocation::Reg(reg) = self.locals.location_of(target)
+                    && let Some(pointee) = self.locals.type_of(target).pointee()
+                    && pointee.is_char_like()
+                {
+                    let reg_name = reg.name();
+                    let mnem = match op {
+                        crate::ast::UpdateOp::Inc => "inc",
+                        crate::ast::UpdateOp::Dec => "dec",
+                    };
+                    let _ = write!(self.out, "\tmov\tal,byte ptr [{reg_name}]\r\n");
+                    let _ = write!(self.out, "\tmov\tbyte ptr {},al\r\n", bp_addr(off));
+                    let _ = write!(self.out, "\t{mnem}\t{reg_name}\r\n");
+                    return;
+                }
                 // `y = ++x;` where x is register-resident — update
                 // in place, then store the register direct to the
                 // stack slot (skip the AX round-trip). Fixture 530.
