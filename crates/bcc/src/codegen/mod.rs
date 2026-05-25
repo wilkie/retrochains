@@ -14706,6 +14706,99 @@ impl<'a> FunctionEmitter<'a> {
             );
             return;
         }
+        // Variable-indexed int array element as RHS: compute &arr[i]
+        // into BX, then `<op> ax, word ptr [bx]`. Stack-array case
+        // uses `mov bx, idx; shl bx, 1; lea ax, [bp+base]; add bx,
+        // ax`. Global-array case uses `<sym>[bx]` indexed memory.
+        // Fixture 3003 (`s = s + a[i]` for stack int array), 2849
+        // (`s = s + a[i]` for int* parameter).
+        if let ExprKind::ArrayIndex { array, index } = &e.kind
+            && let ExprKind::Ident(arr_name) = &array.kind
+        {
+            // `p[<var-idx>]` for int*: compute &p[i] into BX via
+            // index-scale + add(ptr), then `<op> ax, [bx]`.
+            if self.locals.has(arr_name)
+                && let Some(pointee) = self.locals.type_of(arr_name).pointee()
+                && pointee.is_int_like()
+                && try_const_eval(index).is_none()
+            {
+                let stride = u32::from(pointee.size_bytes());
+                self.emit_expr_to_ax(index);
+                for _ in 0..stride.trailing_zeros() {
+                    self.out.extend_from_slice(b"\tshl\tax,1\r\n");
+                }
+                match self.locals.location_of(arr_name) {
+                    LocalLocation::Reg(reg) => {
+                        let _ = write!(self.out, "\tadd\tax,{}\r\n", reg.name());
+                        self.out.extend_from_slice(b"\tmov\tbx,ax\r\n");
+                    }
+                    LocalLocation::Stack(off) => {
+                        let _ = write!(self.out, "\tmov\tbx,word ptr {}\r\n", bp_addr(off));
+                        self.out.extend_from_slice(b"\tadd\tbx,ax\r\n");
+                    }
+                }
+                emit_op_with_source_opts(
+                    self.out,
+                    op,
+                    &OperandSource::DerefReg(Reg::Bx),
+                    unsigned,
+                    self.skip_mod_to_ax,
+                );
+                return;
+            }
+            if self.locals.has(arr_name)
+                && let arr_ty = self.locals.type_of(arr_name).clone()
+                && let Some(elem_ty) = arr_ty.array_elem()
+                && elem_ty.is_int_like()
+                && let LocalLocation::Stack(base_off) = self.locals.location_of(arr_name)
+                && try_const_eval(index).is_none()
+            {
+                let elem_size = elem_ty.size_bytes();
+                self.emit_array_addr_to_bx(arr_name, index, base_off, elem_size);
+                emit_op_with_source_opts(
+                    self.out,
+                    op,
+                    &OperandSource::DerefReg(Reg::Bx),
+                    unsigned,
+                    self.skip_mod_to_ax,
+                );
+                return;
+            }
+            if let Some(gty) = self.globals.type_of(arr_name)
+                && let Some(elem_ty) = gty.array_elem()
+                && elem_ty.is_int_like()
+                && try_const_eval(index).is_none()
+            {
+                let elem_ty = elem_ty.clone();
+                self.emit_index_into_bx(index, &elem_ty);
+                let mnem = match op {
+                    BinOp::Add => "add",
+                    BinOp::Sub => "sub",
+                    BinOp::BitAnd => "and",
+                    BinOp::BitOr => "or",
+                    BinOp::BitXor => "xor",
+                    BinOp::Mul => {
+                        let _ = write!(
+                            self.out,
+                            "\timul\tword ptr DGROUP:_{arr_name}[bx]\r\n",
+                        );
+                        return;
+                    }
+                    _ => {
+                        // Fall through to generic — this peephole only
+                        // handles binary ops with a single mem operand.
+                        let src = self.resolve_operand_source(e);
+                        emit_op_with_source_opts(self.out, op, &src, unsigned, self.skip_mod_to_ax);
+                        return;
+                    }
+                };
+                let _ = write!(
+                    self.out,
+                    "\t{mnem}\tax,word ptr DGROUP:_{arr_name}[bx]\r\n",
+                );
+                return;
+            }
+        }
         let src = self.resolve_operand_source(e);
         emit_op_with_source_opts(self.out, op, &src, unsigned, self.skip_mod_to_ax);
     }

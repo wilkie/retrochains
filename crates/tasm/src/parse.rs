@@ -2265,11 +2265,15 @@ fn parse_add(operands: &str, line_no: usize) -> AsmResult<Instr> {
         }
         // `add <reg16>, word ptr [bx]` — memory-direct add through
         // BX (fixture 1822: `sum += a[i]` for stack int array after
-        // address resolves into BX).
-        if !matches!(reg, Reg16::Ax) && rhs == "word ptr [bx]" {
+        // address resolves into BX). Also covers `add ax, word ptr
+        // [bx]` (fixture 3003); the encoding `03 07` is the same.
+        if rhs == "word ptr [bx]" {
             return Ok(Instr::AddReg16FromBxPtr { reg });
         }
-        // DI/SI siblings (fixture 1325).
+        // DI/SI siblings (fixture 1325). DI/SI variants of the AX
+        // case have dedicated AddAxFromSiPtr/AddAxFromDiPtr
+        // shapes — keep the AX exclusion here so the AX form takes
+        // its own encoding above.
         if !matches!(reg, Reg16::Ax) && rhs == "word ptr [di]" {
             return Ok(Instr::AddReg16FromDiPtr { reg });
         }
