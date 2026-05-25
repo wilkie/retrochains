@@ -9493,6 +9493,56 @@ impl<'a> FunctionEmitter<'a> {
                 );
                 return;
             }
+            // Variable-indexed global int- or char-array assignment.
+            // Compute scaled index into BX (no scale for char; shl
+            // for int), then write `mov <width> ptr _a[bx], <src>`.
+            // Source can be a constant, AX, or a reg-resident local.
+            // Fixture 3450 (`arr[i] = v` for char global array, v
+            // char-param in AL).
+            if indices.len() == 1
+                && let Some(elem) = gty.array_elem()
+                && (elem.is_char_like() || elem.is_int_like())
+            {
+                let elem_ty = elem.clone();
+                let elem_is_char = elem_ty.is_char_like();
+                self.emit_index_into_bx(&indices[0], &elem_ty);
+                if let Some(v) = try_const_eval(value) {
+                    let width = if elem_is_char { "byte" } else { "word" };
+                    let v_masked = if elem_is_char { v & 0xFF } else { v & 0xFFFF };
+                    let _ = write!(
+                        self.out,
+                        "\tmov\t{width} ptr DGROUP:_{array}[bx],{v_masked}\r\n",
+                    );
+                    return;
+                }
+                // Non-constant value. Evaluate into AX (or AL), then
+                // store. For char: try a direct byte load if the
+                // source is a char-typed lvalue, else go through AL
+                // (truncating). For int: full AX.
+                if elem_is_char {
+                    // Char param/local lvalue: byte load directly.
+                    if let Some((src_name, src_off, src_ty)) =
+                        self.try_lvalue_chain_addr(value)
+                        && src_ty.is_char_like()
+                        && let Some(src_addr) = self.resolve_chain_addr(&src_name, src_off)
+                    {
+                        let _ = write!(self.out, "\tmov\tal,byte ptr {src_addr}\r\n");
+                    } else {
+                        self.emit_expr_to_ax(value);
+                    }
+                    let _ = write!(
+                        self.out,
+                        "\tmov\tbyte ptr DGROUP:_{array}[bx],al\r\n",
+                    );
+                } else {
+                    self.emit_expr_to_ax(value);
+                    let _ = write!(
+                        self.out,
+                        "\tmov\tword ptr DGROUP:_{array}[bx],ax\r\n",
+                    );
+                }
+                return;
+            }
             panic!("variable-indexed global array assign not yet supported (no fixture)");
         }
         // `p[i] = v` where `p` is a pointer local (not an array).
