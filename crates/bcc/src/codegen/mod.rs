@@ -10620,6 +10620,31 @@ impl<'a> FunctionEmitter<'a> {
     /// ```
     /// where SI holds the pointer.
     fn emit_deref_assign(&mut self, target: &Expr, value: &Expr) {
+        // `*<call>() = v;` — assigning through a call-returned
+        // pointer. Call the function (result in AX = pointer), move
+        // to BX, then store through `[bx]`. Fixture 1322
+        // (`*getp() = 7` where getp returns `int *`).
+        if let ExprKind::Call { name: fname, args } = &target.kind
+            && let Some(ret_ty) = self.signatures.ret_ty_of(fname)
+            && let Some(pointee) = ret_ty.pointee()
+        {
+            let pointee = pointee.clone();
+            self.emit_call(fname, args);
+            self.out.extend_from_slice(b"\tmov\tbx,ax\r\n");
+            let width = ptr_width(&pointee);
+            if let Some(v) = try_const_eval(value) {
+                let v_masked = if pointee.is_char_like() { v & 0xFF } else { v & 0xFFFF };
+                let _ = write!(self.out, "\tmov\t{width} ptr [bx],{v_masked}\r\n");
+            } else {
+                self.emit_expr_to_ax(value);
+                if pointee.is_char_like() {
+                    self.out.extend_from_slice(b"\tmov\tbyte ptr [bx],al\r\n");
+                } else {
+                    self.out.extend_from_slice(b"\tmov\tword ptr [bx],ax\r\n");
+                }
+            }
+            return;
+        }
         // `*p++ = v;` — postfix increment of a register-resident pointer
         // in lvalue position. BCC stores first (using the pre-increment
         // address) then advances the pointer by sizeof(*p). Fixture 501.
