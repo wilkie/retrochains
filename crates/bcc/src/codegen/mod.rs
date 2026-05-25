@@ -1996,6 +1996,68 @@ impl<'a> FunctionEmitter<'a> {
     /// memory operand. Used by the rhs-clobbers-AX commutative-op
     /// fallback to skip the push/pop dance: evaluate RHS into AX,
     /// then `<op> ax, <mem>` directly on the LHS memory.
+    /// Return an asm source for `mov dx, <src>` if `e` can be loaded
+    /// into DX in a single instruction without clobbering AX. Covers
+    /// int-typed reg locals, int memory lvalues, and int constants.
+    /// Used by the RHS-direct-to-DX peephole (fixture 1499).
+    fn try_dx_load_source(&self, e: &Expr) -> Option<String> {
+        if let Some(k) = try_const_eval(e) {
+            return Some(format!("{}", k & 0xFFFF));
+        }
+        if let ExprKind::Ident(name) = &e.kind {
+            if self.locals.has(name)
+                && self.locals.type_of(name).is_int_like()
+                && let LocalLocation::Reg(reg) = self.locals.location_of(name)
+                && !reg.is_byte()
+            {
+                return Some(reg.name().to_owned());
+            }
+            if let Some(gty) = self.globals.type_of(name)
+                && gty.is_int_like()
+            {
+                return Some(format!("word ptr DGROUP:_{name}"));
+            }
+            if self.locals.has(name)
+                && self.locals.type_of(name).is_int_like()
+                && let LocalLocation::Stack(off) = self.locals.location_of(name)
+            {
+                return Some(format!("word ptr {}", bp_addr(off)));
+            }
+        }
+        None
+    }
+
+    /// Return an asm source for a binary-op second operand
+    /// (`<op> dx, <src>`) when `e` can serve as an in-place source
+    /// (reg-resident int local, int memory lvalue, or int constant).
+    /// Used by the RHS-direct-to-DX peephole (fixture 1499).
+    fn try_op_source(&self, e: &Expr) -> Option<String> {
+        if let Some(k) = try_const_eval(e) {
+            return Some(format!("{}", k & 0xFFFF));
+        }
+        if let ExprKind::Ident(name) = &e.kind {
+            if self.locals.has(name)
+                && self.locals.type_of(name).is_int_like()
+                && let LocalLocation::Reg(reg) = self.locals.location_of(name)
+                && !reg.is_byte()
+            {
+                return Some(reg.name().to_owned());
+            }
+            if let Some(gty) = self.globals.type_of(name)
+                && gty.is_int_like()
+            {
+                return Some(format!("word ptr DGROUP:_{name}"));
+            }
+            if self.locals.has(name)
+                && self.locals.type_of(name).is_int_like()
+                && let LocalLocation::Stack(off) = self.locals.location_of(name)
+            {
+                return Some(format!("word ptr {}", bp_addr(off)));
+            }
+        }
+        None
+    }
+
     fn try_memory_source(&self, e: &Expr) -> Option<OperandSource> {
         let ExprKind::Ident(name) = &e.kind else { return None };
         if let Some(gty) = self.globals.type_of(name)
@@ -13860,6 +13922,37 @@ impl<'a> FunctionEmitter<'a> {
                         } else {
                             Reg::Dx
                         };
+                        // RHS is a binop of two AX-safe operands
+                        // (reg-ident or mem-lvalue): emit it directly
+                        // into DX, skipping the push/pop dance.
+                        // Fixture 1499 (`(a + b) + (a - c)` with a in
+                        // SI, b and c on stack — RHS `a - c` computes
+                        // as `mov dx, si; sub dx, [c]`).
+                        if !matches!(op, BinOp::Div | BinOp::Mod | BinOp::Mul)
+                            && let ExprKind::BinOp { op: rop, left: rl, right: rr } = &right.kind
+                            && matches!(rop, BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor)
+                            && let Some(rl_src) = self.try_dx_load_source(rl)
+                            && let Some(rr_src) = self.try_op_source(rr)
+                        {
+                            self.emit_expr_to_ax(left);
+                            let _ = write!(self.out, "\tmov\tdx,{rl_src}\r\n");
+                            let mnem = match rop {
+                                BinOp::Add => "add",
+                                BinOp::Sub => "sub",
+                                BinOp::BitAnd => "and",
+                                BinOp::BitOr => "or",
+                                BinOp::BitXor => "xor",
+                                _ => unreachable!(),
+                            };
+                            let _ = write!(self.out, "\t{mnem}\tdx,{rr_src}\r\n");
+                            emit_op_with_source(
+                                self.out,
+                                *op,
+                                &OperandSource::Reg(Reg::Dx),
+                                unsigned,
+                            );
+                            return;
+                        }
                         self.emit_expr_to_ax(left);
                         self.out.extend_from_slice(b"\tpush\tax\r\n");
                         self.emit_expr_to_ax(right);
