@@ -1379,6 +1379,18 @@ impl<'a> FunctionEmitter<'a> {
         case_slots: &[u32],
         end_slot: u32,
     ) {
+        // Empty switch `switch (x) {}` — BCC emits a trampoline jmp
+        // to the end-of-switch label (`eb 00`-equivalent) and the
+        // end label, nothing else. The scrutinee load is skipped
+        // entirely. Fixture 2893.
+        if cases.is_empty() {
+            let _ = write!(
+                self.out,
+                "\tjmp\tshort {}\r\n",
+                self.label_ref(end_slot),
+            );
+            return;
+        }
         // If every case is `default:` (no value-bearing cases),
         // there's no dispatch — BCC skips the scrutinee load and
         // emits a trampoline `jmp default` followed by the default
