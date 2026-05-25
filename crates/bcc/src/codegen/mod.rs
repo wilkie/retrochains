@@ -12845,15 +12845,15 @@ impl<'a> FunctionEmitter<'a> {
 
     /// Emit the right-hand side of a binary op, applying it to AX.
     fn emit_binary_right(&mut self, op: BinOp, e: &Expr, unsigned: bool) {
-        // ±1 / ±2 peephole: BCC emits `inc ax` / `dec ax` for ±1 (1
-        // byte each vs. 3 for `add ax, 1` / `sub ax, 1`), and a *pair*
-        // of `inc` / `dec` for ±2 (2 bytes vs. 3). At ±3 the cost of
-        // three inc/dec ties with `add/sub ax, K`, and BCC switches
-        // to the `add` / `sub` form. Confirmed on fixtures 027–031
-        // (±1) and 076 case 1 (`r = r + 2` → `inc ax / inc ax`).
-        if matches!(op, BinOp::Add | BinOp::Sub)
-            && let Some(v) = try_const_eval(e)
-            && (v == 1 || v == 2)
+        // ±1 / +2 peephole: BCC emits `inc ax` / `dec ax` for ±1 (1
+        // byte each vs. 3 for `add ax, 1` / `sub ax, 1`), and a pair
+        // of `inc ax` for +2 (2 bytes vs. 3). Notably -2 does NOT
+        // collapse to `dec ax; dec ax` — BCC keeps `add ax, -2`
+        // (3 bytes, AX-accum imm16). Fixtures 027–031 (±1), 076 case 1
+        // (+2 → inc/inc), 2074/1277 (-2 → `add ax, -2`).
+        if let Some(v) = try_const_eval(e)
+            && ((matches!(op, BinOp::Add) && (v == 1 || v == 2))
+                || (matches!(op, BinOp::Sub) && v == 1))
         {
             let mnemonic = if matches!(op, BinOp::Add) { "inc" } else { "dec" };
             for _ in 0..v {
@@ -13712,15 +13712,13 @@ fn emit_op_with_source_opts(
             return;
         }
     }
-    // ±1/±2 peephole: `inc ax` (1 byte each) for ±1, two `inc/dec ax`
-    // for ±2. Saves vs `add ax, K` (3 bytes for the AX-accumulator
-    // form). Same peephole emit_binary_right uses; replicated here
-    // for callers that emit_op_with_source directly (chained const
-    // folds, comparison-rewrites, etc.). Fixture 2071 (`c * 10 + 0
-    // + 2` folds to `+ 2` → two `inc ax`).
+    // ±1 / +2 peephole: `inc ax` for +1 (1 byte vs 3), `dec ax` for -1,
+    // and two `inc ax` for +2 (2 bytes vs 3). Notably -2 is NOT folded
+    // to `dec ax; dec ax` — BCC keeps `add ax, -2` (3 bytes, AX-accum
+    // imm16 form). Fixture 2074 (`x - 2`), 1277 (`fib(n - 2)`).
     if let OperandSource::Immediate(v) = src
-        && matches!(op, BinOp::Add | BinOp::Sub)
-        && (*v == 1 || *v == 2)
+        && ((matches!(op, BinOp::Add) && (*v == 1 || *v == 2))
+            || (matches!(op, BinOp::Sub) && *v == 1))
     {
         let mnem = if matches!(op, BinOp::Add) { "inc" } else { "dec" };
         for _ in 0..*v {
