@@ -11973,6 +11973,46 @@ impl<'a> FunctionEmitter<'a> {
                     let _ = write!(self.out, "\tmov\tword ptr {},{rname}\r\n", bp_addr(off));
                     return;
                 }
+                // `y = x++;` (possibly after a leading comma chain) —
+                // store the pre-update register direct to the stack
+                // slot, then apply the post-update. Skips the AX
+                // snapshot. Stride-1 only (int/uint locals). For
+                // `y = (a, b, c++)` BCC evaluates a, b for side
+                // effect, then assigns c (pre-inc), then increments
+                // c. Fixture 1861.
+                let final_peek = {
+                    let mut cur = value;
+                    while let ExprKind::Comma { right, .. } = &cur.kind {
+                        cur = right;
+                    }
+                    cur
+                };
+                if !ty.is_char_like()
+                    && !ty.is_long_like()
+                    && let ExprKind::Update {
+                        target,
+                        op,
+                        position: crate::ast::UpdatePosition::Post,
+                    } = &final_peek.kind
+                    && self.locals.has(target)
+                    && let LocalLocation::Reg(reg) = self.locals.location_of(target)
+                    && !reg.is_byte()
+                    && self.locals.type_of(target).is_int_like()
+                {
+                    let mut cur = value;
+                    while let ExprKind::Comma { left, right } = &cur.kind {
+                        self.emit_expr_discard(left);
+                        cur = right;
+                    }
+                    let mnem = match op {
+                        crate::ast::UpdateOp::Inc => "inc",
+                        crate::ast::UpdateOp::Dec => "dec",
+                    };
+                    let rname = reg.name();
+                    let _ = write!(self.out, "\tmov\tword ptr {},{rname}\r\n", bp_addr(off));
+                    let _ = write!(self.out, "\t{mnem}\t{rname}\r\n");
+                    return;
+                }
                 // `c = a % b;` on int stack-locals — fold the
                 // post-idiv `mov ax, dx` away by storing DX directly
                 // into the destination. Fixture 546.
