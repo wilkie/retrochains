@@ -1053,6 +1053,20 @@ pub enum Instr {
     /// (`80 7E disp8 ii`, 4 bytes). Used by char-local compare
     /// against constants (fixture 524: `if (c == 'B')`).
     CmpByteBpRelImm8 { offset: i16, imm: u8 },
+    /// `cmp word ptr [si], imm8sx` — `83 3C ii` (3 bytes).
+    /// `cmp word ptr [di], imm8sx` — `83 3D ii` (3 bytes).
+    /// `cmp word ptr [bx], imm8sx` — `83 3F ii` (3 bytes).
+    /// Memory-direct word compare through a register-resident
+    /// pointer with a small sign-extended immediate. Fixture 2925
+    /// (`if (*p && *q)` — short-circuit eval needs `cmp word ptr
+    /// [<reg>], 0`).
+    CmpWordSiPtrImm8Sx { imm: i8 },
+    CmpWordDiPtrImm8Sx { imm: i8 },
+    CmpWordBxPtrImm8Sx { imm: i8 },
+    /// Wide-immediate sibling for constants outside [-128, 127].
+    CmpWordSiPtrImm16 { imm: u16 },
+    CmpWordDiPtrImm16 { imm: u16 },
+    CmpWordBxPtrImm16 { imm: u16 },
     /// `cmp byte ptr [si], imm8` — `80 3C ii` (3 bytes). Grp1 /7=CMP
     /// with ModR/M `3C` = mod=00 r/m=100 ([si]). Used by `while
     /// (*p)` on a char pointer enregistered in SI (fixture 636).

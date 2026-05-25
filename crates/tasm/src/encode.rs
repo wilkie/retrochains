@@ -451,6 +451,8 @@ fn instr_size(instr: &Instr) -> usize {
         }
         Instr::CmpByteBpRelImm8 { .. } => 4,
         Instr::CmpByteSiPtrImm8 { .. } | Instr::CmpByteBxPtrImm8 { .. } | Instr::CmpByteDiPtrImm8 { .. } => 3,
+        Instr::CmpWordSiPtrImm8Sx { .. } | Instr::CmpWordDiPtrImm8Sx { .. } | Instr::CmpWordBxPtrImm8Sx { .. } => 3,
+        Instr::CmpWordSiPtrImm16 { .. } | Instr::CmpWordDiPtrImm16 { .. } | Instr::CmpWordBxPtrImm16 { .. } => 4,
         Instr::CmpAxFromDiPtr
         | Instr::CmpAxFromSiPtr
         | Instr::CmpAxFromBxPtr
@@ -1845,6 +1847,28 @@ fn emit_instr(
             out.push(0x80);
             out.push(0x3C);
             out.push(*imm);
+        }
+        Instr::CmpWordSiPtrImm8Sx { imm } => {
+            // `cmp word ptr [si], imm8sx` → 83 3C ii.
+            out.push(0x83); out.push(0x3C); out.push(*imm as u8);
+        }
+        Instr::CmpWordDiPtrImm8Sx { imm } => {
+            out.push(0x83); out.push(0x3D); out.push(*imm as u8);
+        }
+        Instr::CmpWordBxPtrImm8Sx { imm } => {
+            out.push(0x83); out.push(0x3F); out.push(*imm as u8);
+        }
+        Instr::CmpWordSiPtrImm16 { imm } => {
+            out.push(0x81); out.push(0x3C);
+            out.push((*imm & 0xFF) as u8); out.push((*imm >> 8) as u8);
+        }
+        Instr::CmpWordDiPtrImm16 { imm } => {
+            out.push(0x81); out.push(0x3D);
+            out.push((*imm & 0xFF) as u8); out.push((*imm >> 8) as u8);
+        }
+        Instr::CmpWordBxPtrImm16 { imm } => {
+            out.push(0x81); out.push(0x3F);
+            out.push((*imm & 0xFF) as u8); out.push((*imm >> 8) as u8);
         }
         Instr::CmpByteBxPtrImm8 { imm } => {
             // `cmp byte ptr [bx], imm8` → 80 3F ii.

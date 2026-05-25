@@ -2560,6 +2560,32 @@ fn parse_cmp(operands: &str, line_no: usize) -> AsmResult<Instr> {
             return Ok(Instr::CmpByteSiPtrImm8 { imm: imm as u8 });
         }
     }
+    // `cmp word ptr [si|di|bx], imm` — word-form sibling. Prefer
+    // imm8sx (saves 1 byte), fall back to imm16.
+    if lhs == "word ptr [si]" {
+        if let Some(imm) = parse_imm8_signed(rhs) {
+            return Ok(Instr::CmpWordSiPtrImm8Sx { imm });
+        }
+        if let Some(imm) = parse_imm16(rhs) {
+            return Ok(Instr::CmpWordSiPtrImm16 { imm: imm as u16 });
+        }
+    }
+    if lhs == "word ptr [di]" {
+        if let Some(imm) = parse_imm8_signed(rhs) {
+            return Ok(Instr::CmpWordDiPtrImm8Sx { imm });
+        }
+        if let Some(imm) = parse_imm16(rhs) {
+            return Ok(Instr::CmpWordDiPtrImm16 { imm: imm as u16 });
+        }
+    }
+    if lhs == "word ptr [bx]" {
+        if let Some(imm) = parse_imm8_signed(rhs) {
+            return Ok(Instr::CmpWordBxPtrImm8Sx { imm });
+        }
+        if let Some(imm) = parse_imm16(rhs) {
+            return Ok(Instr::CmpWordBxPtrImm16 { imm: imm as u16 });
+        }
+    }
     // `cmp byte ptr [bx], imm8` — `80 3F ii` (fixture 2027's
     // `while (*s++)` with the pre-update pointer parked in BX).
     if lhs == "byte ptr [bx]" {
