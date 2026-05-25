@@ -2688,6 +2688,28 @@ impl<'a> FunctionEmitter<'a> {
         // <skip-then>`). Nested `!!x` falls back into this case so
         // the swap composes correctly.
         if let ExprKind::Unary { op: crate::ast::UnaryOp::Not, operand } = &cond.kind {
+            // `!<char-ident>` — BCC widens the char to int before
+            // testing the value (integer-promotion of the bare char
+            // operand of `!`). The bare-ident path emits the shorter
+            // `cmp byte ptr [bp+off], 0` only when the char appears
+            // *unwrapped* in conditional position (fixture 999); when
+            // wrapped in `!`, the widen-then-or shape is canonical.
+            // Fixture 3204 (`if (!c)` for a char param).
+            if let ExprKind::Ident(name) = &operand.kind
+                && self.locals.has(name)
+                && self.locals.type_of(name).is_char_like()
+                && let LocalLocation::Stack(off) = self.locals.location_of(name)
+            {
+                let unsigned = self.locals.type_of(name).is_unsigned();
+                let _ = write!(self.out, "\tmov\tal,byte ptr {}\r\n", bp_addr(off));
+                if unsigned {
+                    self.out.extend_from_slice(b"\tmov\tah,0\r\n");
+                } else {
+                    self.out.extend_from_slice(b"\tcbw\t\r\n");
+                }
+                self.out.extend_from_slice(b"\tor\tax,ax\r\n");
+                return ("je", "jne");
+            }
             let (t, f) = self.emit_cond_test(operand);
             return (f, t);
         }
