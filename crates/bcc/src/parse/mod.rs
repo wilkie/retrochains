@@ -723,8 +723,7 @@ impl Parser {
         // would otherwise produce a 1-byte slot that mis-aligns the
         // next int local (no fixture pins this yet — keep the round
         // for unions to preserve fixture-103 behavior).
-        let raw_size = if is_union { union_max } else { struct_offset };
-        let size = if is_union && raw_size % 2 == 1 { raw_size + 1 } else { raw_size };
+        let size = if is_union { union_max } else { struct_offset };
         let ty = Type::Struct { name: tag.clone(), fields, size };
         if let Some(name) = tag {
             self.structs.insert(name, ty.clone());
