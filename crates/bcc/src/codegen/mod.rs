@@ -7719,6 +7719,39 @@ impl<'a> FunctionEmitter<'a> {
             );
             return;
         }
+        // `<reg> += <int-ptr-stack>[<var>]` — pointer param on the
+        // stack ([bp+N]), variable index. Compute &p[i] into BX:
+        // scale index in AX, then `mov bx, [bp+N]; add bx, ax`, then
+        // `add <reg>, word ptr [bx]` directly. Same memory-direct
+        // shape as the global-array and stack-array variants above;
+        // only the BX load source differs. Fixture 1385 (`s += a[i]`
+        // for `int sum(int *a, int n)`).
+        if matches!(op, BinOp::Add)
+            && let ExprKind::ArrayIndex { array, index } = &value.kind
+            && let ExprKind::Ident(p_name) = &array.kind
+            && self.locals.has(p_name)
+            && let Some(pointee) = self.locals.type_of(p_name).pointee()
+            && pointee.is_int_like()
+            && let LocalLocation::Stack(p_off) = self.locals.location_of(p_name)
+            && !reg.is_byte()
+        {
+            let stride = u16::from(pointee.size_bytes());
+            self.emit_expr_to_ax(index);
+            if stride == 2 {
+                self.out.extend_from_slice(b"\tshl\tax,1\r\n");
+            } else if stride != 1 {
+                let _ = write!(self.out, "\tmov\tdx,{stride}\r\n");
+                self.out.extend_from_slice(b"\timul\tdx\r\n");
+            }
+            let _ = write!(self.out, "\tmov\tbx,word ptr {}\r\n", bp_addr(p_off));
+            self.out.extend_from_slice(b"\tadd\tbx,ax\r\n");
+            let _ = write!(
+                self.out,
+                "\tadd\t{},word ptr [bx]\r\n",
+                reg.name(),
+            );
+            return;
+        }
         // `<reg> += <stack-arr>[<var>]` — same shape but the array
         // base is bp-relative. Compute &arr[i] into BX (matches the
         // stack-array assign helper), then `add <reg>, word ptr [bx]`
