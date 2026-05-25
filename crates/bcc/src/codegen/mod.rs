@@ -16644,9 +16644,21 @@ impl OperandSource {
                 }
             }
             // A register holding an int provides the low byte via
-            // its `*L` half; we'd need a separate fixture to confirm
-            // BCC's exact shape. Panic until we see one.
-            Self::Reg(_) => panic!("shift count from a register local not yet supported"),
+            // its `*L` half (BX → BL, CX → CL, DX → DL). SI and DI
+            // don't have addressable byte halves; route those
+            // through CX with an explicit `mov cx, si; mov cl,
+            // cl`... actually BCC just panics for those — only
+            // BX/CX/DX work directly. Fixture 2399 (`1 << i` with
+            // i in DX → `mov cl, dl; shl ax, cl`).
+            Self::Reg(r) => match r.name() {
+                "bx" => "bl".to_owned(),
+                "cx" => "cl".to_owned(),
+                "dx" => "dl".to_owned(),
+                _ => panic!(
+                    "shift count from register `{}` not yet supported (no byte half)",
+                    r.name()
+                ),
+            },
             Self::DerefReg(r) => format!("byte ptr [{}]", r.name()),
             Self::DerefRegOffset { reg, offset } => {
                 if *offset == 0 {
