@@ -2134,6 +2134,20 @@ fn parse_add(operands: &str, line_no: usize) -> AsmResult<Instr> {
         if !matches!(reg, Reg16::Ax) && rhs == "word ptr [bx]" {
             return Ok(Instr::AddReg16FromBxPtr { reg });
         }
+        // `add <reg16>, word ptr <group>:<sym>[+N]` — memory-direct
+        // add from a global to a non-AX register. AX uses
+        // `AddAxGroupSym`. Fixture 1303 (`a += g`).
+        if !matches!(reg, Reg16::Ax)
+            && let Some((group, symbol)) = parse_group_symbol(rhs)
+        {
+            let (sym, offset) = split_sym_offset(symbol);
+            return Ok(Instr::AddReg16GroupSym {
+                reg,
+                group: group.to_string(),
+                symbol: sym.to_string(),
+                offset,
+            });
+        }
         // `add <reg16>, word ptr [bp+N]` — generic register-vs-stack
         // compound `+=` on a non-AX reg local (fixture 661). AX uses
         // its dedicated `AddAxBpRel` variant above.

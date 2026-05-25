@@ -441,6 +441,16 @@ pub enum Instr {
         symbol: String,
         disp: u16,
     },
+    /// `add <reg16>, word ptr <group>:<sym>[+<offset>]` — `03 (mod=00
+    /// reg=<r> r/m=110) lo hi`. Memory-direct add from a data-segment
+    /// global to a non-AX register destination (AX uses the dedicated
+    /// `AddAxGroupSym`). Fixture 1303 (`a += g` with a in SI).
+    AddReg16GroupSym {
+        reg: Reg16,
+        group: String,
+        symbol: String,
+        offset: i16,
+    },
     /// `cmp ax,word ptr [bp+<offset>]` — 3B 46 dd
     CmpAxBpRel { offset: i16 },
     /// `cmp dx,word ptr [bp+disp8]` — 3B 56 dd. Low-half companion to
