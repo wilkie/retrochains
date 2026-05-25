@@ -1074,10 +1074,20 @@ fn stmt_has_name_as_char_array_index(
     char_arrays: &HashSet<String>,
 ) -> bool {
     match &stmt.kind {
-        StmtKind::ArrayAssign { array, indices, .. }
-        | StmtKind::ArrayCompoundAssign { array, indices, .. } => {
+        StmtKind::ArrayAssign { array, indices, value } => {
+            // The DX preference fires only when the *value* expression
+            // also references the index — that's the pattern where
+            // BCC's `mov al, dl` byte-load shape gives an immediate
+            // win. For a constant-value fill (`buf[i] = 'X'`), BCC
+            // stays with SI. Fixtures 1257 (DX), 1366 (SI).
             char_arrays.contains(array.as_str())
                 && indices.iter().any(|i| expr_mentions(name, i))
+                && expr_mentions(name, value)
+        }
+        StmtKind::ArrayCompoundAssign { array, indices, value, .. } => {
+            char_arrays.contains(array.as_str())
+                && indices.iter().any(|i| expr_mentions(name, i))
+                && expr_mentions(name, value)
         }
         StmtKind::If { then_branch, else_branch, .. } => {
             name_in_char_array_index_body(name, then_branch, char_arrays)
