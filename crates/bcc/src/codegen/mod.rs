@@ -2837,6 +2837,21 @@ impl<'a> FunctionEmitter<'a> {
             let _ = write!(self.out, "\tor\tax,word ptr DGROUP:_{name}+2\r\n");
             return ("jne", "je");
         }
+        // Bare long-stack-local ident in condition position — sibling
+        // to the long-global case. Both halves must be zero for the
+        // long to be falsy: `mov ax, [lo]; or ax, [hi]` sets ZF iff
+        // both are zero. Fixture 2188 (`long a = 5L; if (a)`).
+        if let ExprKind::Ident(name) = &cond.kind
+            && self.locals.has(name)
+            && self.locals.type_of(name).is_long_like()
+        {
+            let LocalLocation::Stack(off) = self.locals.location_of(name) else {
+                unreachable!("long is never register-resident");
+            };
+            let _ = write!(self.out, "\tmov\tax,word ptr {}\r\n", bp_addr(off));
+            let _ = write!(self.out, "\tor\tax,word ptr {}\r\n", bp_addr(off + 2));
+            return ("jne", "je");
+        }
         self.emit_zero_test(cond);
         ("jne", "je")
     }
