@@ -1356,6 +1356,11 @@ pub enum Instr {
     /// to `MovSiPtrImm` for the high-half store of a long-pointer
     /// write (`*p = K` where `p: long *`). Fixture 308.
     MovSiDispImm { disp: i8, imm: u16 },
+    /// `mov word ptr [si+disp8], <reg16>` — `89 (mod=01 reg=<r>
+    /// r/m=100) dd`. Used for struct-field write through a
+    /// register pointer in SI. Fixture 1955 (`p->y = z` where p in
+    /// SI).
+    MovSiDispReg16 { disp: i8, reg: Reg16 },
     /// `mov ax,word ptr [si+disp8]` — `8B 44 dd`. ModR/M 44 = mod=01
     /// reg=AX r/m=100 ([si+disp8]). High-half read for `*p` where
     /// `p: long *` (fixture 309).

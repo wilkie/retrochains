@@ -1169,6 +1169,11 @@ fn parse_mov(operands: &str, line_no: usize) -> AsmResult<Instr> {
         if let Some(imm) = parse_imm16(rhs) {
             return Ok(Instr::MovSiDispImm { disp, imm });
         }
+        // Reg-source variant: `p->y = z` writes a register through
+        // SI at a field offset. Fixture 1955.
+        if let Some(reg) = Reg16::parse(rhs) {
+            return Ok(Instr::MovSiDispReg16 { disp, reg });
+        }
     }
     // LHS `word ptr [bx]` — store through BX pointer (fixture 144).
     if lhs == "word ptr [bx]" {
