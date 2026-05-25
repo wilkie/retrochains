@@ -1802,6 +1802,29 @@ impl<'a> FunctionEmitter<'a> {
         self.locals.has(name) && self.locals.type_of(name).is_long_like()
     }
 
+    /// Build the asm text that loads a long-typed arm into DX:AX,
+    /// in the order BCC emits per-arm of a long-returning ternary.
+    /// Returns `None` for arms we don't know how to load. Const-zero
+    /// hi prefers `xor dx, dx` (1 byte saved vs `mov dx, 0`).
+    fn long_arm_load(&self, e: &Expr) -> Option<String> {
+        if let Some(k) = try_const_eval(e) {
+            let hi = (k >> 16) & 0xFFFF;
+            let lo = k & 0xFFFF;
+            let hi_text = if hi == 0 {
+                "\txor\tdx,dx\r\n".to_owned()
+            } else {
+                format!("\tmov\tdx,{hi}\r\n")
+            };
+            return Some(format!("{hi_text}\tmov\tax,{lo}\r\n"));
+        }
+        if let Some((hi, lo)) = self.long_lvalue_addr_pair(e) {
+            return Some(format!(
+                "\tmov\tdx,word ptr {hi}\r\n\tmov\tax,word ptr {lo}\r\n"
+            ));
+        }
+        None
+    }
+
     /// True iff `e` is a long-typed expression (long/ulong lvalue,
     /// long binop, or long cast). Best-effort — covers the shapes
     /// the long-widening paths need to distinguish.
@@ -5445,6 +5468,32 @@ impl<'a> FunctionEmitter<'a> {
             }
             // Fallback: an int-typed return expression in a long-
             // returning function — widen via cwd / xor dx,dx.
+            // `return <cond> ? <long-arm-a> : <long-arm-b>;` Each
+            // arm can be a long lvalue (load DX:AX from memory) or
+            // a constant (emit DX/AX immediates, preferring `xor
+            // dx, dx` for zero hi). Plan reserves 3 slots for the
+            // ternary; base+1 is the false-arm label, base+2 is
+            // the merge. Fixtures 3304 (`c ? a : b` for long
+            // lvalues), 3225 (`flag ? 100L : 200L` for long
+            // consts). Check before the int-widening fallback so
+            // we get per-arm widening (BCC's actual shape) rather
+            // than a single trailing cwd.
+            if let ExprKind::Ternary { cond, then_value, else_value } = &e.kind
+                && let Some(then_load) = self.long_arm_load(then_value)
+                && let Some(else_load) = self.long_arm_load(else_value)
+            {
+                let base = self.label_plan.base(e.span.start, e.span.end);
+                let false_slot = base + 1;
+                let merge_slot = base + 2;
+                let (_t, inv) = self.emit_cond_test(cond);
+                let _ = write!(self.out, "\t{inv}\tshort {}\r\n", self.label_ref(false_slot));
+                self.out.extend_from_slice(then_load.as_bytes());
+                let _ = write!(self.out, "\tjmp\tshort {}\r\n", self.label_ref(merge_slot));
+                self.emit_label(false_slot);
+                self.out.extend_from_slice(else_load.as_bytes());
+                self.emit_label(merge_slot);
+                return;
+            }
             if !self.expr_is_long_like(e) {
                 let unsigned = self.expr_int_is_unsigned(e);
                 self.emit_expr_to_ax(e);
