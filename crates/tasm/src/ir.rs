@@ -958,6 +958,11 @@ pub enum Instr {
     /// with ModR/M `3C` = mod=00 r/m=100 ([si]). Used by `while
     /// (*p)` on a char pointer enregistered in SI (fixture 636).
     CmpByteSiPtrImm8 { imm: u8 },
+    /// `cmp byte ptr [bx], imm8` — `80 3F ii` (3 bytes). BX sibling
+    /// of `CmpByteSiPtrImm8`. Used after a postinc/postdec saves the
+    /// pre-update pointer in BX (fixture 2027: `while (*s++)` for
+    /// `char *s` enregistered in DI).
+    CmpByteBxPtrImm8 { imm: u8 },
     /// `cmp word ptr [si+disp], imm8sx` — Grp1 r/m16,imm8sx with
     /// /7=CMP and SI-indirect addressing. disp=0 encodes as
     /// `83 3C ii` (mod=00, 3 bytes); disp!=0 fitting i8 encodes as

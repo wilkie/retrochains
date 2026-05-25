@@ -3054,6 +3054,37 @@ impl<'a> FunctionEmitter<'a> {
             let _ = write!(self.out, "\tcmp\t{width} ptr [{}],0\r\n", reg.name());
             return;
         }
+        // `while (*p++)` — deref of a postinc/postdec on a register
+        // pointer local. Save the pre-update pointer in BX, advance
+        // the register-resident pointer, then `cmp <w> ptr [bx], 0`
+        // directly. Same shape as `emit_deref_to_ax`'s postinc-
+        // through-deref path but with a memory-direct compare
+        // instead of a load + widen + or-test. Fixture 2027
+        // (`while (*s++)` for `char *s`).
+        if let ExprKind::Deref(operand) = &cond.kind
+            && let ExprKind::Update {
+                target,
+                op,
+                position: UpdatePosition::Post,
+            } = &operand.kind
+            && self.locals.has(target)
+            && let LocalLocation::Reg(reg) = self.locals.location_of(target)
+            && let Some(pointee) = self.locals.type_of(target).pointee()
+        {
+            let reg_name = reg.name();
+            let stride = i32::from(pointee.size_bytes());
+            let mnem = match op {
+                crate::ast::UpdateOp::Inc => "inc",
+                crate::ast::UpdateOp::Dec => "dec",
+            };
+            let _ = write!(self.out, "\tmov\tbx,{reg_name}\r\n");
+            for _ in 0..stride {
+                let _ = write!(self.out, "\t{mnem}\t{reg_name}\r\n");
+            }
+            let width = if pointee.is_char_like() { "byte" } else { "word" };
+            let _ = write!(self.out, "\tcmp\t{width} ptr [bx],0\r\n");
+            return;
+        }
         // `if (p[K])` — global-pointer subscript in boolean context.
         // BCC loads the pointer into BX and emits `cmp word ptr
         // [bx+K*stride], 0` directly. Fixture 889.
