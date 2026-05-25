@@ -4256,6 +4256,39 @@ impl<'a> FunctionEmitter<'a> {
                 self.out.extend_from_slice(b"\tmov\tax,word ptr [bp+4]\r\n");
                 return;
             }
+            // 2-byte struct (e.g. `struct { char a, b; }`): just
+            // load the word. Caller picks it up in AX. Fixture 2531.
+            if size == 2
+                && let ExprKind::Ident(src_name) = &e.kind
+                && self.locals.has(src_name)
+                && let LocalLocation::Stack(off) = self.locals.location_of(src_name)
+            {
+                let _ = write!(self.out, "\tmov\tax,word ptr {}\r\n", bp_addr(off));
+                return;
+            }
+            // Stack-local struct of size 3, 5, 6, 7, 8+ (not 1, 2,
+            // or 4): hidden buffer copy via N_SCOPY@. Far-ptr to
+            // caller's buffer is at [bp+4..7]; far-ptr to our local
+            // is SS:[bp-N]. Caller cleans up. Fixture 2526 (3-byte),
+            // 2671 (5-byte), 2755 (8-byte), 1877/2352 (large).
+            if size != 1
+                && size != 2
+                && size != 4
+                && let ExprKind::Ident(src_name) = &e.kind
+                && self.locals.has(src_name)
+                && let LocalLocation::Stack(off) = self.locals.location_of(src_name)
+            {
+                self.out.extend_from_slice(b"\tpush\tword ptr [bp+6]\r\n");
+                self.out.extend_from_slice(b"\tpush\tword ptr [bp+4]\r\n");
+                let _ = write!(self.out, "\tlea\tax,word ptr {}\r\n", bp_addr(off));
+                self.out.extend_from_slice(b"\tpush\tss\r\n");
+                self.out.extend_from_slice(b"\tpush\tax\r\n");
+                let _ = write!(self.out, "\tmov\tcx,{size}\r\n");
+                self.out.extend_from_slice(b"\tcall\tnear ptr N_SCOPY@\r\n");
+                self.helpers.insert("N_SCOPY@".to_string());
+                self.out.extend_from_slice(b"\tmov\tax,word ptr [bp+4]\r\n");
+                return;
+            }
         }
         // Long return: standard 8086 32-bit return-value convention
         // puts the high word in DX and the low word in AX. (Note
