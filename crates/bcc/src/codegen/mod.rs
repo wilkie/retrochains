@@ -12320,14 +12320,25 @@ impl<'a> FunctionEmitter<'a> {
             return;
         }
         // Mem-to-reg copy: `<reg> = <stack-local>` where the RHS is
-        // a bare identifier for a stack-resident int/uint/pointer
-        // local. BCC emits `mov <reg>, word ptr [bp-N]` directly,
-        // skipping the AX round-trip. Fixture 1145 (`b = t;` int),
-        // 2852 (`q = p;` int pointer).
-        if let ExprKind::Ident(name) = &expr.kind
+        // a bare identifier (possibly wrapped in a numeric/pointer
+        // cast that doesn't change the bit-width) for a stack-
+        // resident int/uint/pointer local. BCC emits `mov <reg>,
+        // word ptr [bp-N]` directly, skipping the AX round-trip.
+        // Fixture 1145 (`b = t;` int), 2852 (`q = p;` int pointer),
+        // 1779 (`int v = (int)p;` cast of pointer-local to int).
+        if let Some(name) = match &expr.kind {
+            ExprKind::Ident(n) => Some(n.as_str()),
+            ExprKind::Cast { operand, ty } if ty.is_int_like() || ty.pointee().is_some() => {
+                match &operand.kind {
+                    ExprKind::Ident(n) => Some(n.as_str()),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
             && self.locals.has(name)
             && let LocalLocation::Stack(src_off) = self.locals.location_of(name)
-            && self.locals.type_of(name).is_int_like()
+            && (self.locals.type_of(name).is_int_like() || self.locals.type_of(name).pointee().is_some())
             && !reg.is_byte()
         {
             let _ = write!(
