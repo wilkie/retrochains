@@ -9321,6 +9321,41 @@ impl<'a> FunctionEmitter<'a> {
         //   add bx, ax
         //   mov ax, word ptr [bx]
         // Reg-resident variants are inferred but unobserved.
+        //
+        // Char-stride (1) memory-direct add: when the offset is a
+        // simple int lvalue, BCC skips the AX route and adds the
+        // index memory directly to BX. Fixture 3227 (`*(p + i)` for
+        // `char *p, int i`).
+        if stride == 1
+            && let Some(idx_addr) = self.int_lvalue_addr(offset)
+        {
+            match self.locals.location_of(ptr_name) {
+                LocalLocation::Stack(off) => {
+                    let _ = write!(
+                        self.out,
+                        "\tmov\tbx,word ptr {}\r\n",
+                        bp_addr(off),
+                    );
+                }
+                LocalLocation::Reg(reg) => {
+                    let _ = write!(self.out, "\tmov\tbx,{}\r\n", reg.name());
+                }
+            }
+            let _ = write!(self.out, "\tadd\tbx,word ptr {idx_addr}\r\n");
+            if load_byte {
+                self.out.extend_from_slice(b"\tmov\tal,byte ptr [bx]\r\n");
+                if !self.skip_widen {
+                    if pointee.is_unsigned() {
+                        self.out.extend_from_slice(b"\tmov\tah,0\r\n");
+                    } else {
+                        self.out.extend_from_slice(b"\tcbw\t\r\n");
+                    }
+                }
+            } else {
+                self.out.extend_from_slice(b"\tmov\tax,word ptr [bx]\r\n");
+            }
+            return;
+        }
         self.emit_expr_to_ax(offset);
         if stride == 2 {
             self.out.extend_from_slice(b"\tshl\tax,1\r\n");
