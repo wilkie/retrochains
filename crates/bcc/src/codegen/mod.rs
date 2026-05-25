@@ -7469,6 +7469,19 @@ impl<'a> FunctionEmitter<'a> {
                     let _ = write!(self.out, "\t{mnem}\t{},{scaled}\r\n", reg.name());
                     return;
                 }
+                // Char-typed RHS needs widening: read the byte into
+                // AL, sign-extend to AX, then `add <reg>, ax`. The
+                // memory-direct add would otherwise read garbage
+                // from the high byte. Fixture 1234 (`a += c` for
+                // int local a in SI and char local c at [bp-1]).
+                if let ExprKind::Ident(rhs_name) = &value.kind
+                    && (self.locals.has(rhs_name) && self.locals.type_of(rhs_name).is_char_like())
+                {
+                    self.emit_expr_to_ax(value);
+                    let mnem = if matches!(op, BinOp::Add) { "add" } else { "sub" };
+                    let _ = write!(self.out, "\t{mnem}\t{},ax\r\n", reg.name());
+                    return;
+                }
                 let src = self.resolve_operand_source(value);
                 let mnem = if matches!(op, BinOp::Add) { "add" } else { "sub" };
                 let _ = write!(self.out, "\t{mnem}\t{},{}\r\n", reg.name(), src.word());
@@ -7480,6 +7493,15 @@ impl<'a> FunctionEmitter<'a> {
                     BinOp::BitXor => "xor",
                     _ => unreachable!(),
                 };
+                // Char-typed RHS: widen via AL/cbw before the bitwise
+                // op (same correctness rationale as the Add/Sub arm).
+                if let ExprKind::Ident(rhs_name) = &value.kind
+                    && (self.locals.has(rhs_name) && self.locals.type_of(rhs_name).is_char_like())
+                {
+                    self.emit_expr_to_ax(value);
+                    let _ = write!(self.out, "\t{mnem}\t{},ax\r\n", reg.name());
+                    return;
+                }
                 let src = self.resolve_operand_source(value);
                 let _ = write!(self.out, "\t{mnem}\t{},{}\r\n", reg.name(), src.word());
             }
