@@ -8698,6 +8698,50 @@ impl<'a> FunctionEmitter<'a> {
                 }
                 return;
             }
+            // 2D global array variable-indexed: `g[i][j]` for
+            // `T g[M][N]`. BCC computes outer-scaled-then-add into
+            // BX, then indexed-load via DGROUP:_g[bx]. Outer stride
+            // is the inner array's size in bytes (N * sizeof(T));
+            // inner stride is sizeof(T). Fixture 3194 (`int g[3][2];
+            // return g[i][j];` → `shl bx,1; shl bx,1` (outer×4),
+            // `shl ax,1` (inner×2), `add bx, ax`, indexed load).
+            if indices.len() == 2
+                && let Type::Array { elem: inner_arr, .. } = &gty
+                && let Type::Array { elem: leaf_elem, .. } = &**inner_arr
+            {
+                let outer_stride = inner_arr.size_bytes();
+                let inner_stride = leaf_elem.size_bytes();
+                let leaf_ty = (**leaf_elem).clone();
+                let outer_addr = self.int_lvalue_addr(indices[0]);
+                let inner_addr = self.int_lvalue_addr(indices[1]);
+                if let (Some(outer), Some(inner)) = (outer_addr, inner_addr) {
+                    let _ = write!(self.out, "\tmov\tbx,word ptr {outer}\r\n");
+                    let outer_shifts = (outer_stride as u32).trailing_zeros();
+                    for _ in 0..outer_shifts {
+                        self.out.extend_from_slice(b"\tshl\tbx,1\r\n");
+                    }
+                    let _ = write!(self.out, "\tmov\tax,word ptr {inner}\r\n");
+                    let inner_shifts = (inner_stride as u32).trailing_zeros();
+                    for _ in 0..inner_shifts {
+                        self.out.extend_from_slice(b"\tshl\tax,1\r\n");
+                    }
+                    self.out.extend_from_slice(b"\tadd\tbx,ax\r\n");
+                    let width = ptr_width(&leaf_ty);
+                    if leaf_ty.is_char_like() {
+                        let _ = write!(
+                            self.out,
+                            "\tmov\tal,byte ptr DGROUP:_{array_name}[bx]\r\n",
+                        );
+                        self.emit_widen_al(&leaf_ty);
+                    } else {
+                        let _ = write!(
+                            self.out,
+                            "\tmov\tax,{width} ptr DGROUP:_{array_name}[bx]\r\n",
+                        );
+                    }
+                    return;
+                }
+            }
             panic!("variable-indexed global array not yet supported (no fixture)");
         }
         let ty = self.locals.type_of(array_name).clone();
