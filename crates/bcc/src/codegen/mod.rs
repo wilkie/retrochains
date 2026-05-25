@@ -15772,12 +15772,37 @@ impl<'a> FunctionEmitter<'a> {
                         // BX to keep DX free for cwd/xor. Fixtures
                         // 1400 (`a + b` uchar+uchar), 1626 (`a * b`).
                         if !matches!(op, BinOp::Div | BinOp::Mod) {
-                            let l_uchar = self.try_lvalue_chain_addr(left)
+                            let l_chain = self.try_lvalue_chain_addr(left);
+                            let r_chain = self.try_lvalue_chain_addr(right);
+                            let l_uchar = l_chain.as_ref()
                                 .filter(|(_, _, ty)| ty.is_char_like() && ty.is_unsigned())
-                                .and_then(|(n, o, _)| self.resolve_chain_addr(&n, o));
-                            let r_uchar = self.try_lvalue_chain_addr(right)
+                                .and_then(|(n, o, _)| self.resolve_chain_addr(n, *o));
+                            let r_uchar = r_chain.as_ref()
                                 .filter(|(_, _, ty)| ty.is_char_like() && ty.is_unsigned())
-                                .and_then(|(n, o, _)| self.resolve_chain_addr(&n, o));
+                                .and_then(|(n, o, _)| self.resolve_chain_addr(n, *o));
+                            // sc + uc — LHS is signed char so it
+                            // widens via `mov al; cbw`; RHS still
+                            // takes the uchar DX-direct path.
+                            // Fixture 2690 (`s + u` for sc + uc).
+                            if l_uchar.is_none()
+                                && let Some(r_addr) = r_uchar.as_ref()
+                                && let Some((l_name, l_off, l_ty)) = l_chain.as_ref()
+                                && l_ty.is_char_like()
+                                && !l_ty.is_unsigned()
+                                && let Some(l_addr) = self.resolve_chain_addr(l_name, *l_off)
+                            {
+                                let _ = write!(self.out, "\tmov\tal,byte ptr {l_addr}\r\n");
+                                self.out.extend_from_slice(b"\tcbw\t\r\n");
+                                let _ = write!(self.out, "\tmov\tdl,byte ptr {r_addr}\r\n");
+                                self.out.extend_from_slice(b"\tmov\tdh,0\r\n");
+                                emit_op_with_source(
+                                    self.out,
+                                    *op,
+                                    &OperandSource::Reg(Reg::Dx),
+                                    unsigned,
+                                );
+                                return;
+                            }
                             if let (Some(l_addr), Some(r_addr)) = (l_uchar, r_uchar) {
                                 let _ = write!(self.out, "\tmov\tal,byte ptr {l_addr}\r\n");
                                 self.out.extend_from_slice(b"\tmov\tah,0\r\n");
