@@ -1802,6 +1802,54 @@ impl<'a> FunctionEmitter<'a> {
         self.locals.has(name) && self.locals.type_of(name).is_long_like()
     }
 
+    /// True iff `e` is a long-typed expression (long/ulong lvalue,
+    /// long binop, or long cast). Best-effort — covers the shapes
+    /// the long-widening paths need to distinguish.
+    fn expr_is_long_like(&self, e: &Expr) -> bool {
+        match &e.kind {
+            ExprKind::Ident(name) => self.ident_is_long_like(name),
+            ExprKind::Cast { ty, .. } => ty.is_long_like(),
+            ExprKind::BinOp { left, right, .. } => {
+                self.expr_is_long_like(left) || self.expr_is_long_like(right)
+            }
+            ExprKind::Unary { operand, .. } => self.expr_is_long_like(operand),
+            ExprKind::Ternary { then_value, else_value, .. } => {
+                self.expr_is_long_like(then_value) || self.expr_is_long_like(else_value)
+            }
+            ExprKind::Member { base, field, .. } => {
+                if let Some((_, _, ty)) = self.try_lvalue_chain_addr(e) {
+                    return ty.is_long_like();
+                }
+                let _ = (base, field);
+                false
+            }
+            ExprKind::ArrayIndex { .. } => {
+                self.try_lvalue_chain_addr(e)
+                    .is_some_and(|(_, _, ty)| ty.is_long_like())
+            }
+            ExprKind::Call { name, .. } => {
+                self.signatures.ret_ty_of(name).is_some_and(|t| t.is_long_like())
+            }
+            _ => false,
+        }
+    }
+
+    /// True iff `e` is an unsigned int-typed expression. Used to
+    /// pick zero-extend (`xor dx,dx`) vs sign-extend (`cwd`) when
+    /// widening to long. Best-effort: bare ulong/uint idents, casts.
+    fn expr_int_is_unsigned(&self, e: &Expr) -> bool {
+        match &e.kind {
+            ExprKind::Ident(name) => {
+                if let Some(gt) = self.globals.type_of(name) {
+                    return gt.is_unsigned();
+                }
+                self.locals.has(name) && self.locals.type_of(name).is_unsigned()
+            }
+            ExprKind::Cast { ty, .. } => ty.is_unsigned(),
+            _ => false,
+        }
+    }
+
     /// `(high-addr, low-addr)` text for a long-like ident, either as
     /// `DGROUP:_g+2` / `DGROUP:_g` (global) or `[bp+N+2]` / `[bp+N]`
     /// (stack). Panics on a register-resident or non-existent ident
@@ -2264,6 +2312,75 @@ impl<'a> FunctionEmitter<'a> {
         dest_hi: &str,
         dest_lo: &str,
     ) -> bool {
+        // `<dest> = -<long-lvalue>` — neg ax / neg dx / sbb ax, 0
+        // shape. Mirrors the assign path (fixture 331).
+        if let ExprKind::Unary { op: UnaryOp::Neg, operand } = &value.kind
+            && let Some((src_hi, src_lo)) = self.long_lvalue_addr_pair(operand)
+        {
+            let _ = write!(self.out, "\tmov\tax,word ptr {src_hi}\r\n");
+            let _ = write!(self.out, "\tmov\tdx,word ptr {src_lo}\r\n");
+            self.out.extend_from_slice(b"\tneg\tax\r\n");
+            self.out.extend_from_slice(b"\tneg\tdx\r\n");
+            self.out.extend_from_slice(b"\tsbb\tax,0\r\n");
+            let _ = write!(self.out, "\tmov\tword ptr {dest_hi},ax\r\n");
+            let _ = write!(self.out, "\tmov\tword ptr {dest_lo},dx\r\n");
+            return true;
+        }
+        // `<dest> = ~<long-lvalue>` — not dx / not ax. BCC's
+        // observed order does NOT precede with neg-style propagation.
+        // Fixture 2186 (`long r = ~a`).
+        if let ExprKind::Unary { op: UnaryOp::BitNot, operand } = &value.kind
+            && let Some((src_hi, src_lo)) = self.long_lvalue_addr_pair(operand)
+        {
+            let _ = write!(self.out, "\tmov\tax,word ptr {src_hi}\r\n");
+            let _ = write!(self.out, "\tmov\tdx,word ptr {src_lo}\r\n");
+            self.out.extend_from_slice(b"\tnot\tdx\r\n");
+            self.out.extend_from_slice(b"\tnot\tax\r\n");
+            let _ = write!(self.out, "\tmov\tword ptr {dest_hi},ax\r\n");
+            let _ = write!(self.out, "\tmov\tword ptr {dest_lo},dx\r\n");
+            return true;
+        }
+        // `<dest> = <int-expr> + <long-lvalue>` (or sibling for
+        // sub/and/or/xor): widen the int to DX:AX via `cwd` (or
+        // `xor dx,dx` for unsigned), then `<lo_op> ax, [b_lo]; <hi_op>
+        // dx, [b_hi]`. AX/DX order is swapped from the value path
+        // because cwd places the high half in DX. Fixture 1643
+        // (`i + b` for int i + long b).
+        if let ExprKind::BinOp { op, left, right } = &value.kind
+            && let Some((lo_op, hi_op)) = long_pair_op(*op)
+        {
+            // Try both orderings: int-on-left or int-on-right.
+            let (int_expr, long_addr): (&Expr, Option<(String, String)>) =
+                if let Some(pair) = self.long_lvalue_addr_pair(right)
+                    && !self.expr_is_long_like(left)
+                {
+                    (left, Some(pair))
+                } else if let Some(pair) = self.long_lvalue_addr_pair(left)
+                    && !self.expr_is_long_like(right)
+                    && matches!(op, BinOp::Add | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor)
+                {
+                    // Commutative ops: long-on-left, int-on-right.
+                    // For Sub the result depends on order, so only
+                    // commutative ops can swap.
+                    (right, Some(pair))
+                } else {
+                    (left, None)
+                };
+            if let Some((b_hi, b_lo)) = long_addr {
+                let unsigned = self.expr_int_is_unsigned(int_expr);
+                self.emit_expr_to_ax(int_expr);
+                if unsigned {
+                    self.out.extend_from_slice(b"\txor\tdx,dx\r\n");
+                } else {
+                    self.out.extend_from_slice(b"\tcwd\t\r\n");
+                }
+                let _ = write!(self.out, "\t{lo_op}\tax,word ptr {b_lo}\r\n");
+                let _ = write!(self.out, "\t{hi_op}\tdx,word ptr {b_hi}\r\n");
+                let _ = write!(self.out, "\tmov\tword ptr {dest_hi},dx\r\n");
+                let _ = write!(self.out, "\tmov\tword ptr {dest_lo},ax\r\n");
+                return true;
+            }
+        }
         // Plain copy: `<dest> = <long-lvalue>`.
         if let Some((src_hi, src_lo)) = self.long_lvalue_addr_pair(value) {
             // Only treat as a copy when value itself is the lvalue
@@ -5214,6 +5331,29 @@ impl<'a> FunctionEmitter<'a> {
                 self.helpers.insert(helper.to_string());
                 return;
             }
+            // `return <long-lvalue>;` — load DX:AX from the source's
+            // (high, low) word pair. Same shape regardless of where
+            // the source lives (global / stack local / member /
+            // const-indexed array). Fixture 3294 (`return g++;`
+            // sequenced — covered when value is a side-effecting
+            // long expression). For a bare long lvalue:
+            if let Some((hi, lo)) = self.long_lvalue_addr_pair(e) {
+                let _ = write!(self.out, "\tmov\tdx,word ptr {hi}\r\n");
+                let _ = write!(self.out, "\tmov\tax,word ptr {lo}\r\n");
+                return;
+            }
+            // Fallback: an int-typed return expression in a long-
+            // returning function — widen via cwd / xor dx,dx.
+            if !self.expr_is_long_like(e) {
+                let unsigned = self.expr_int_is_unsigned(e);
+                self.emit_expr_to_ax(e);
+                if unsigned {
+                    self.out.extend_from_slice(b"\txor\tdx,dx\r\n");
+                } else {
+                    self.out.extend_from_slice(b"\tcwd\t\r\n");
+                }
+                return;
+            }
             panic!("non-constant long return value not yet supported (no fixture)");
         }
         // Unsigned-char return: BCC doesn't bother widening — the
@@ -5563,6 +5703,21 @@ impl<'a> FunctionEmitter<'a> {
                     let dest_hi = bp_addr(off + 2);
                     let dest_lo = bp_addr(off);
                     if self.try_emit_long_value_to_dest(init, &dest_hi, &dest_lo) {
+                        return;
+                    }
+                    // Fallback: int-typed initializer widened to
+                    // long via cwd (or xor for unsigned). Fixture
+                    // 1642 (`long r = i + 1` for int i).
+                    if !self.expr_is_long_like(init) {
+                        let unsigned = self.expr_int_is_unsigned(init);
+                        self.emit_expr_to_ax(init);
+                        if unsigned {
+                            self.out.extend_from_slice(b"\txor\tdx,dx\r\n");
+                        } else {
+                            self.out.extend_from_slice(b"\tcwd\t\r\n");
+                        }
+                        let _ = write!(self.out, "\tmov\tword ptr {dest_hi},dx\r\n");
+                        let _ = write!(self.out, "\tmov\tword ptr {dest_lo},ax\r\n");
                         return;
                     }
                     panic!("non-constant long local init not yet supported (no fixture)");
@@ -13186,6 +13341,24 @@ impl<'a> FunctionEmitter<'a> {
                         self.out.extend_from_slice(b"\tnot\tax\r\n");
                         let _ = write!(self.out, "\tmov\tword ptr {},ax\r\n", bp_addr(off + 2));
                         let _ = write!(self.out, "\tmov\tword ptr {},dx\r\n", bp_addr(off));
+                        return;
+                    }
+                    // Fallback: value is an int-typed expression
+                    // assigned to a long-typed local — widen via
+                    // `cwd` (sign-extend AX to DX:AX) and store both
+                    // halves. Unsigned-source uses `xor dx, dx`
+                    // instead of cwd. Fixture 3230 (`long n; n = x +
+                    // 1;` for int param x).
+                    if !self.expr_is_long_like(value) {
+                        let unsigned = self.expr_int_is_unsigned(value);
+                        self.emit_expr_to_ax(value);
+                        if unsigned {
+                            self.out.extend_from_slice(b"\txor\tdx,dx\r\n");
+                        } else {
+                            self.out.extend_from_slice(b"\tcwd\t\r\n");
+                        }
+                        let _ = write!(self.out, "\tmov\tword ptr {},dx\r\n", bp_addr(off + 2));
+                        let _ = write!(self.out, "\tmov\tword ptr {},ax\r\n", bp_addr(off));
                         return;
                     }
                     panic!("non-constant long local assign not yet supported (no fixture)");
