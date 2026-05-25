@@ -9421,6 +9421,19 @@ impl<'a> FunctionEmitter<'a> {
             if indices.len() == 1
                 && let Some(elem) = gty.array_elem()
                 && matches!(elem, Type::Int | Type::UInt)
+                // Value must be resolve_operand_source-able: a
+                // constant, ident lvalue, deref, or member chain.
+                // For BinOp / Call / Ternary value, fall through to
+                // the more general path below.
+                && {
+                    try_const_eval(value).is_some()
+                        || matches!(value.kind,
+                            ExprKind::Ident(_)
+                            | ExprKind::IntLit(_)
+                            | ExprKind::Deref(_)
+                            | ExprKind::Member { .. }
+                            | ExprKind::ArrayIndex { .. })
+                }
             {
                 let index = &indices[0];
                 // Track whether to emit a post-update after the store.
@@ -9494,19 +9507,20 @@ impl<'a> FunctionEmitter<'a> {
                 return;
             }
             // Variable-indexed global int- or char-array assignment.
-            // Compute scaled index into BX (no scale for char; shl
-            // for int), then write `mov <width> ptr _a[bx], <src>`.
-            // Source can be a constant, AX, or a reg-resident local.
-            // Fixture 3450 (`arr[i] = v` for char global array, v
-            // char-param in AL).
+            // For constant value: compute scaled index into BX, then
+            // immediate-store via `<sym>[bx]`. For non-constant value:
+            // BCC computes the RHS into AX FIRST, then sets up BX for
+            // the indexed store — this order is observed in fixture
+            // 1444 (`a[i] = i*10`). The reverse order is
+            // functionally equivalent but byte-different.
             if indices.len() == 1
                 && let Some(elem) = gty.array_elem()
                 && (elem.is_char_like() || elem.is_int_like())
             {
                 let elem_ty = elem.clone();
                 let elem_is_char = elem_ty.is_char_like();
-                self.emit_index_into_bx(&indices[0], &elem_ty);
                 if let Some(v) = try_const_eval(value) {
+                    self.emit_index_into_bx(&indices[0], &elem_ty);
                     let width = if elem_is_char { "byte" } else { "word" };
                     let v_masked = if elem_is_char { v & 0xFF } else { v & 0xFFFF };
                     let _ = write!(
@@ -9515,12 +9529,11 @@ impl<'a> FunctionEmitter<'a> {
                     );
                     return;
                 }
-                // Non-constant value. Evaluate into AX (or AL), then
-                // store. For char: try a direct byte load if the
+                // Non-constant value: RHS first into AX (or AL), then
+                // BX setup. For char: try a direct byte load if the
                 // source is a char-typed lvalue, else go through AL
                 // (truncating). For int: full AX.
                 if elem_is_char {
-                    // Char param/local lvalue: byte load directly.
                     if let Some((src_name, src_off, src_ty)) =
                         self.try_lvalue_chain_addr(value)
                         && src_ty.is_char_like()
@@ -9530,12 +9543,14 @@ impl<'a> FunctionEmitter<'a> {
                     } else {
                         self.emit_expr_to_ax(value);
                     }
+                    self.emit_index_into_bx(&indices[0], &elem_ty);
                     let _ = write!(
                         self.out,
                         "\tmov\tbyte ptr DGROUP:_{array}[bx],al\r\n",
                     );
                 } else {
                     self.emit_expr_to_ax(value);
+                    self.emit_index_into_bx(&indices[0], &elem_ty);
                     let _ = write!(
                         self.out,
                         "\tmov\tword ptr DGROUP:_{array}[bx],ax\r\n",
