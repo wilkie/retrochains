@@ -13687,6 +13687,53 @@ impl<'a> FunctionEmitter<'a> {
                         matches!(op, BinOp::Div | BinOp::Mod | BinOp::Mul)
                             || lhs_clobbers_ax
                     } {
+                        // `<uchar-lvalue> <op> <uchar-lvalue>` for
+                        // non-Mul/Div/Mod: BCC widens both via
+                        // `mov al, [a]; mov ah, 0` then `mov dl,
+                        // [b]; mov dh, 0; <op> ax, dx`. The byte-
+                        // local DH=0 zero-extension avoids the
+                        // push/pop dance. Fixture 1400 (`a + b`
+                        // for two uchar locals).
+                        if !matches!(op, BinOp::Div | BinOp::Mod | BinOp::Mul)
+                            && let (ExprKind::Ident(l_name), ExprKind::Ident(r_name)) =
+                                (&left.kind, &right.kind)
+                            && self.ident_is_uchar(l_name)
+                            && self.ident_is_uchar(r_name)
+                        {
+                            let l_addr =
+                                if let Some(_g) = self.globals.type_of(l_name) {
+                                    format!("DGROUP:_{l_name}")
+                                } else if let LocalLocation::Stack(off) =
+                                    self.locals.location_of(l_name)
+                                {
+                                    bp_addr(off)
+                                } else {
+                                    String::new()
+                                };
+                            let r_addr =
+                                if let Some(_g) = self.globals.type_of(r_name) {
+                                    format!("DGROUP:_{r_name}")
+                                } else if let LocalLocation::Stack(off) =
+                                    self.locals.location_of(r_name)
+                                {
+                                    bp_addr(off)
+                                } else {
+                                    String::new()
+                                };
+                            if !l_addr.is_empty() && !r_addr.is_empty() {
+                                let _ = write!(self.out, "\tmov\tal,byte ptr {l_addr}\r\n");
+                                self.out.extend_from_slice(b"\tmov\tah,0\r\n");
+                                let _ = write!(self.out, "\tmov\tdl,byte ptr {r_addr}\r\n");
+                                self.out.extend_from_slice(b"\tmov\tdh,0\r\n");
+                                emit_op_with_source(
+                                    self.out,
+                                    *op,
+                                    &OperandSource::Reg(Reg::Dx),
+                                    unsigned,
+                                );
+                                return;
+                            }
+                        }
                         // Div/Mod scratch is BX (DX is clobbered by
                         // cwd / xor dx,dx). Mul scratch is DX (imul
                         // writes DX:AX, no other reg-clobbering setup).
@@ -13957,6 +14004,37 @@ impl<'a> FunctionEmitter<'a> {
             }
             return;
         }
+        // uchar-on-right widening shortcut (no AX disturb): BCC
+        // loads DL from the uchar lvalue, zero-extends to DX via
+        // `mov dh, 0`, then `<op> ax, dx`. Saves the push/pop pair
+        // because uchar zero-extension is local to DX. Fixture
+        // 1400 (`a + b` for two uchar stack locals).
+        if let ExprKind::Ident(name) = &e.kind
+            && self.ident_is_char(name)
+            && self.ident_is_uchar(name)
+        {
+            let src_addr = if let Some(_gty) = self.globals.type_of(name) {
+                format!("DGROUP:_{name}")
+            } else if let LocalLocation::Stack(off) = self.locals.location_of(name) {
+                bp_addr(off)
+            } else {
+                // Char in a byte register — fall through to the
+                // generic path below.
+                String::new()
+            };
+            if !src_addr.is_empty() {
+                let _ = write!(self.out, "\tmov\tdl,byte ptr {src_addr}\r\n");
+                self.out.extend_from_slice(b"\tmov\tdh,0\r\n");
+                emit_op_with_source_opts(
+                    self.out,
+                    op,
+                    &OperandSource::Reg(Reg::Dx),
+                    unsigned,
+                    self.skip_mod_to_ax,
+                );
+                return;
+            }
+        }
         // Char-on-right widening dance (fixture 087: `a + b + c` with
         // `c` a char global). Loading a char clobbers AX, so the
         // running sum gets pushed, the char loaded + widened to AX,
@@ -13984,6 +14062,20 @@ impl<'a> FunctionEmitter<'a> {
     }
 
     /// True iff `name` refers to an identifier (global or local)
+    /// whose static type is `unsigned char`. Used to decide
+    /// between the zero-extend (mov dh, 0) and sign-extend (cbw)
+    /// widening shapes for the char-on-right peephole.
+    fn ident_is_uchar(&self, name: &str) -> bool {
+        if let Some(ty) = self.globals.type_of(name) {
+            return matches!(ty, Type::UChar);
+        }
+        if self.locals.has(name) {
+            return matches!(self.locals.type_of(name), Type::UChar);
+        }
+        false
+    }
+
+    /// True iff `name` refers to an identifier (global or local)
     /// whose static type is `char`. Used by `emit_binary_right` to
     /// detect when the right operand needs the widening dance.
     fn ident_is_char(&self, name: &str) -> bool {
@@ -13992,7 +14084,7 @@ impl<'a> FunctionEmitter<'a> {
         }
         // The locals analyzer panics on unknown names, so only ask
         // if there's no global match.
-        matches!(self.locals.type_of(name), Type::Char)
+        self.locals.type_of(name).is_char_like()
     }
 
     /// True when `e` evaluates to a char-typed value via a memory
