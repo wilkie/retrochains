@@ -193,7 +193,10 @@ fn write_bss_globals_with_debug(out: &mut Vec<u8>, unit: &crate::ast::Unit) {
         }
     }
     short_bss.sort_by(|a, b| a.name.cmp(&b.name));
-    long_bss.sort_by(|a, b| a.name.cmp(&b.name));
+    // Long bucket: source order. Fixture 3059 (`struct M src;
+    // struct M dst;` → src, dst, contradicting an alpha sort).
+    // 1401 (`struct S s1; struct S s2;`) passes alpha trivially
+    // because source order matches alpha there.
     let bss: Vec<&crate::ast::Global> =
         short_bss.into_iter().chain(long_bss.into_iter()).collect();
     let mut offset: u16 = 0;
