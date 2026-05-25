@@ -803,20 +803,36 @@ impl<'a> FunctionEmitter<'a> {
                     _ => panic!("unknown jcc {t_true}"),
                 };
                 let _ = write!(self.out, "\t{inv}\tshort {}\r\n", self.label_ref(false_slot));
-                // then arm: discard-emit (inc/dec first, then mov ax, reg)
-                if let ExprKind::Update { target, op, position } = &then_value.kind {
-                    self.emit_update_in_place(target, *op, *position);
-                    if let LocalLocation::Reg(reg) = self.locals.location_of(target) {
-                        let _ = write!(self.out, "\tmov\tax,{}\r\n", reg.name());
+                let emit_arm = |this: &mut Self, target: &str, op: UpdateOp, position: UpdatePosition| {
+                    this.emit_update_in_place(target, op, position);
+                    // After the in-place update, materialize the
+                    // (now-stale) value into AX. BCC emits this
+                    // load even though the ternary's value is
+                    // discarded — the ternary's value-producing
+                    // skeleton requires AX. Reg-resident local:
+                    // `mov ax, <reg>`. Int global: `mov ax, word
+                    // ptr DGROUP:_<g>`. Other shapes haven't been
+                    // pinned yet.
+                    if this.locals.has(target) {
+                        if let LocalLocation::Reg(reg) = this.locals.location_of(target) {
+                            let _ = write!(this.out, "\tmov\tax,{}\r\n", reg.name());
+                        }
+                    } else if let Some(gty) = this.globals.type_of(target)
+                        && matches!(gty, Type::Int | Type::UInt)
+                    {
+                        let _ = write!(
+                            this.out,
+                            "\tmov\tax,word ptr DGROUP:_{target}\r\n",
+                        );
                     }
+                };
+                if let ExprKind::Update { target, op, position } = &then_value.kind {
+                    emit_arm(self, target, *op, *position);
                 }
                 let _ = write!(self.out, "\tjmp\tshort {}\r\n", self.label_ref(merge_slot));
                 self.emit_label(false_slot);
                 if let ExprKind::Update { target, op, position } = &else_value.kind {
-                    self.emit_update_in_place(target, *op, *position);
-                    if let LocalLocation::Reg(reg) = self.locals.location_of(target) {
-                        let _ = write!(self.out, "\tmov\tax,{}\r\n", reg.name());
-                    }
+                    emit_arm(self, target, *op, *position);
                 }
                 self.emit_label(merge_slot);
             }
