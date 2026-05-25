@@ -244,12 +244,19 @@ fn emit_global_init(
     // remainder with `db 0` lines out to the full declared length.
     if let (ExprKind::StringLit(bytes), Type::Array { elem, len }) = (&init.kind, ty) {
         if (*elem).is_char_like() {
+            // `char s[3] = "abc"` (fixture 2096): declared length
+            // matches the string exactly — no room for NUL. C
+            // permits this; BCC emits just the 3 bytes with no
+            // trailing zero. `char s[] = "abc"` widens len to 4
+            // (3 + NUL) at parse time and falls in the room-for-
+            // NUL branch.
             for b in bytes {
                 let _ = write!(out, "\tdb\t{b}\r\n");
             }
-            let _ = write!(out, "\tdb\t0\r\n");
-            let written = (bytes.len() + 1) as u32;
-            if *len > written {
+            let written = bytes.len() as u32;
+            if (*len as u32) > written {
+                let _ = write!(out, "\tdb\t0\r\n");
+                let written = written + 1;
                 for _ in written..*len {
                     let _ = write!(out, "\tdb\t0\r\n");
                 }
