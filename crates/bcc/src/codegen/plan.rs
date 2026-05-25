@@ -41,9 +41,14 @@ fn stmt_has_continue(stmt: &Stmt) -> bool {
 /// Compiled label assignments for one function.
 #[derive(Debug)]
 pub struct LabelPlan {
-    /// `span.start` of a non-loop control construct → its base slot.
-    /// Used by `if`, `comparison-as-value`, and `&&`/`||`.
-    bases: HashMap<u32, u32>,
+    /// `(span.start, span.end)` of a non-loop control construct →
+    /// its base slot. Used by `if`, `comparison-as-value`, and
+    /// `&&`/`||`. Both endpoints are part of the key because the
+    /// parser sets a BinOp's `span.start` equal to its left
+    /// operand's start, so an outer `(a == b) == c` and the inner
+    /// `a == b` both start at `a` — only span.end distinguishes
+    /// them. Fixture 2479 (nested == used as value).
+    bases: HashMap<(u32, u32), u32>,
     /// `span.start` of a loop construct → its named slot assignments.
     loops: HashMap<u32, LoopPlan>,
     /// `span.start` of a `switch` → its slot assignments.
@@ -133,9 +138,9 @@ impl LabelPlan {
     /// Base slot reserved for a non-loop control construct.
     /// Panics if the planner didn't reserve one.
     #[must_use]
-    pub fn base(&self, span_start: u32) -> u32 {
-        *self.bases.get(&span_start).unwrap_or_else(|| {
-            panic!("no label plan entry for span starting at byte {span_start}")
+    pub fn base(&self, span_start: u32, span_end: u32) -> u32 {
+        *self.bases.get(&(span_start, span_end)).unwrap_or_else(|| {
+            panic!("no label plan entry for span {span_start}..{span_end}")
         })
     }
 
@@ -161,7 +166,7 @@ impl LabelPlan {
 /// recursive call sites short.
 struct PlanCtx {
     counter: u32,
-    bases: HashMap<u32, u32>,
+    bases: HashMap<(u32, u32), u32>,
     loops: HashMap<u32, LoopPlan>,
     switches: HashMap<u32, SwitchPlan>,
 }
@@ -191,7 +196,7 @@ fn plan_stmt(stmt: &Stmt, ctx: &mut PlanCtx) {
         StmtKind::If { cond, then_branch, else_branch } => {
             plan_expr_condition(cond, ctx);
             let base = ctx.counter;
-            ctx.bases.insert(stmt.span.start, base);
+            ctx.bases.insert((stmt.span.start, stmt.span.end), base);
             ctx.counter += if else_branch.is_some() { 3 } else { 2 };
             plan_stmts(then_branch, ctx);
             if let Some(else_branch) = else_branch {
@@ -417,7 +422,7 @@ fn plan_expr_value(e: &Expr, ctx: &mut PlanCtx) {
             plan_expr_value(right, ctx);
             if op.is_comparison() {
                 let base = ctx.counter;
-                ctx.bases.insert(e.span.start, base);
+                ctx.bases.insert((e.span.start, e.span.end), base);
                 ctx.counter += 3;
             }
         }
@@ -426,7 +431,7 @@ fn plan_expr_value(e: &Expr, ctx: &mut PlanCtx) {
         }
         ExprKind::Logical { left, right, .. } => {
             let base = ctx.counter;
-            ctx.bases.insert(e.span.start, base);
+            ctx.bases.insert((e.span.start, e.span.end), base);
             ctx.counter += 4;
             plan_expr_condition(left, ctx);
             plan_expr_condition(right, ctx);
@@ -453,7 +458,7 @@ fn plan_expr_value(e: &Expr, ctx: &mut PlanCtx) {
             // arms have written AX).
             plan_expr_condition(cond, ctx);
             let base = ctx.counter;
-            ctx.bases.insert(e.span.start, base);
+            ctx.bases.insert((e.span.start, e.span.end), base);
             ctx.counter += 3;
             plan_expr_value(then_value, ctx);
             plan_expr_value(else_value, ctx);
@@ -485,7 +490,7 @@ fn plan_expr_condition(e: &Expr, ctx: &mut PlanCtx) {
         }
         ExprKind::Logical { left, right, .. } => {
             let base = ctx.counter;
-            ctx.bases.insert(e.span.start, base);
+            ctx.bases.insert((e.span.start, e.span.end), base);
             ctx.counter += 1;
             plan_expr_condition(left, ctx);
             plan_expr_condition(right, ctx);

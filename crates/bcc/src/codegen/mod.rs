@@ -687,7 +687,7 @@ impl<'a> FunctionEmitter<'a> {
             }
             StmtKind::If { cond, then_branch, else_branch } => {
                 self.advance_to_stmt_line(stmt);
-                self.emit_if(stmt.span.start, cond, then_branch, else_branch.as_deref());
+                self.emit_if(stmt.span.start, stmt.span.end, cond, then_branch, else_branch.as_deref());
             }
             StmtKind::While { cond, body } => {
                 // Don't emit a comment block for the `while` header
@@ -931,6 +931,7 @@ impl<'a> FunctionEmitter<'a> {
     fn emit_if(
         &mut self,
         if_span_start: u32,
+        if_span_end: u32,
         cond: &Expr,
         then_branch: &[Stmt],
         else_branch: Option<&[Stmt]>,
@@ -953,7 +954,7 @@ impl<'a> FunctionEmitter<'a> {
             }
             return;
         }
-        let base = self.label_plan.base(if_span_start);
+        let base = self.label_plan.base(if_span_start, if_span_end);
         // When the cond's outermost operator is `||`, the operands may
         // short-circuit-to-true; we need a label at the start of the
         // then-branch for them to land at. The if's base+0 slot —
@@ -3659,11 +3660,12 @@ impl<'a> FunctionEmitter<'a> {
     fn emit_logical_to_ax(
         &mut self,
         logical_span_start: u32,
+        logical_span_end: u32,
         op: LogicalOp,
         left: &Expr,
         right: &Expr,
     ) {
-        let base = self.label_plan.base(logical_span_start);
+        let base = self.label_plan.base(logical_span_start, logical_span_end);
         let true_mat_slot = base + 1;
         let false_mat_slot = base + 2;
         let end_slot = base + 3;
@@ -12645,7 +12647,8 @@ impl<'a> FunctionEmitter<'a> {
                     && let Some(e_v) = try_const_eval(else_value)
                 {
                     let span_start = value.span.start;
-                    let base = self.label_plan.base(span_start);
+                    let span_end = value.span.end;
+                    let base = self.label_plan.base(span_start, span_end);
                     let false_slot = base + 1;
                     let merge_slot = base + 2;
                     let cond_has_top_or = matches!(
@@ -13531,7 +13534,7 @@ impl<'a> FunctionEmitter<'a> {
             }
             ExprKind::BinOp { op, left, right } => {
                 if op.is_comparison() {
-                    self.emit_comparison_as_value(e.span.start, *op, left, right);
+                    self.emit_comparison_as_value(e.span.start, e.span.end, *op, left, right);
                 } else {
                     // `<char_lvalue> <bitop> <char_lvalue>` — byte op
                     // in AL, single cbw at the end. BCC emits
@@ -13822,7 +13825,7 @@ impl<'a> FunctionEmitter<'a> {
             }
             ExprKind::Unary { op, operand } => self.emit_unary(*op, operand),
             ExprKind::Logical { op, left, right } => {
-                self.emit_logical_to_ax(e.span.start, *op, left, right);
+                self.emit_logical_to_ax(e.span.start, e.span.end, *op, left, right);
             }
             ExprKind::Update { target, op, position } => {
                 self.emit_update_to_ax(target, *op, *position);
@@ -13916,7 +13919,7 @@ impl<'a> FunctionEmitter<'a> {
                 self.emit_member_to_ax(base, field, *kind);
             }
             ExprKind::Ternary { cond, then_value, else_value } => {
-                self.emit_ternary_to_ax(e.span.start, cond, then_value, else_value);
+                self.emit_ternary_to_ax(e.span.start, e.span.end, cond, then_value, else_value);
             }
             ExprKind::Cast { ty, operand } => {
                 self.emit_cast_to_ax(ty, operand);
@@ -13972,11 +13975,12 @@ impl<'a> FunctionEmitter<'a> {
     fn emit_ternary_to_ax(
         &mut self,
         span_start: u32,
+        span_end: u32,
         cond: &Expr,
         then_value: &Expr,
         else_value: &Expr,
     ) {
-        let base = self.label_plan.base(span_start);
+        let base = self.label_plan.base(span_start, span_end);
         // Some compare shapes need an explicit then-entry label so the
         // 3-jump long-vs-K cmp pattern (and `||` short-circuit-to-true)
         // can land at the start of the then-arm. Mirrors the same
@@ -14013,11 +14017,12 @@ impl<'a> FunctionEmitter<'a> {
     fn emit_comparison_as_value(
         &mut self,
         cmp_span_start: u32,
+        cmp_span_end: u32,
         op: BinOp,
         left: &Expr,
         right: &Expr,
     ) {
-        let base = self.label_plan.base(cmp_span_start);
+        let base = self.label_plan.base(cmp_span_start, cmp_span_end);
         let false_slot = base + 1;
         let end_slot = base + 2;
         let unsigned = self.cmp_is_unsigned(left, right);
