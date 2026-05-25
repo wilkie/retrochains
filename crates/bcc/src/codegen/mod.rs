@@ -9425,6 +9425,17 @@ impl<'a> FunctionEmitter<'a> {
             let _ = write!(self.out, "\tmov\tbyte ptr {dest},al\r\n");
             return;
         }
+        // Int-element `<word-arr>[K] *= C` — `imul` route through AX
+        // with the constant materialized in DX. Mirrors the global
+        // compound `*=` shape (line 6491). Fixture 1210
+        // (`a[0] *= 5`).
+        if !store_byte && matches!(op, BinOp::Mul) {
+            let _ = write!(self.out, "\tmov\tdx,{v_masked}\r\n");
+            let _ = write!(self.out, "\tmov\tax,{width} ptr {dest}\r\n");
+            self.out.extend_from_slice(b"\timul\tdx\r\n");
+            let _ = write!(self.out, "\tmov\t{width} ptr {dest},ax\r\n");
+            return;
+        }
         let mnemonic = match op {
             BinOp::Add => "add",
             BinOp::Sub => "sub",
