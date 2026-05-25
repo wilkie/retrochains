@@ -1048,8 +1048,22 @@ impl<'a> FunctionEmitter<'a> {
             // targets the merge so any post-if-else code (e.g. a
             // following `return r;` that loads AX) executes for both
             // branches. Fixtures 2393, 2419, 2434, 2461.
+            //
+            // Special case: when both branches end in `return`, the
+            // merge label is dead (both returns already jumped to
+            // exit). BCC still emits a trailing `jmp` after the
+            // then-branch but retargets it to the exit slot (a
+            // sensible always-valid jump target) and drops the
+            // merge label. Fixture 026.
             let else_slot = base + 2;
             let merge_slot = base + 1;
+            let then_ends_in_return = then_branch
+                .last()
+                .is_some_and(|s| matches!(s.kind, StmtKind::Return(_)));
+            let else_ends_in_return = else_stmts
+                .last()
+                .is_some_and(|s| matches!(s.kind, StmtKind::Return(_)));
+            let merge_dead = then_ends_in_return && else_ends_in_return;
             self.emit_cond_branch(cond, then_entry_slot, Some(else_slot));
             if let Some(slot) = then_entry_slot {
                 self.emit_label(slot);
@@ -1057,12 +1071,19 @@ impl<'a> FunctionEmitter<'a> {
             for s in then_branch {
                 self.emit_stmt(s);
             }
-            let _ = write!(self.out, "\tjmp\tshort {}\r\n", self.label_ref(merge_slot));
+            let trailing_jmp_target = if merge_dead {
+                self.label_plan.exit_slot()
+            } else {
+                merge_slot
+            };
+            let _ = write!(self.out, "\tjmp\tshort {}\r\n", self.label_ref(trailing_jmp_target));
             self.emit_label(else_slot);
             for s in else_stmts {
                 self.emit_stmt(s);
             }
-            self.emit_label(merge_slot);
+            if !merge_dead {
+                self.emit_label(merge_slot);
+            }
         } else {
             // if (no else) reserves 2 slots; skip label at +1.
             let skip_slot = base + 1;
