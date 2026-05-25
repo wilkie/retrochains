@@ -7343,21 +7343,29 @@ impl<'a> FunctionEmitter<'a> {
             return;
         }
         // Char compound `+=` / `-=` / `&=` / `|=` / `^=` with a
-        // non-constant RHS (another char local or global). BCC loads
-        // the RHS byte into AL via `mov al, byte ptr <src>` and then
-        // applies the op register-to-register (`add dl, al`, etc.).
-        // Fixtures 665 (`c += d`), 666 (`c -= d`), 667 (`c &= d`),
-        // 668 (`c |= d`), 669 (`c ^= d`).
+        // non-constant RHS. BCC's pattern depends on the RHS's type:
+        //  - Char RHS (`c += d` for two char locals): load the RHS
+        //    byte into AL, then `<op> <c>, al` directly. Fixtures
+        //    665 (`c += d`), 666–669.
+        //  - Int-lvalue RHS (`c += n` where n is int): load c into
+        //    AL, then `<op> al, byte ptr <n>` against the int's low
+        //    byte, then store AL back. Fixture 1213.
         if reg.is_byte()
             && matches!(
                 op,
                 BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor
             )
         {
-            let src = self.resolve_operand_source(value);
-            self.out.extend_from_slice(b"\tmov\tal,");
-            self.out.extend_from_slice(src.byte().as_bytes());
-            self.out.extend_from_slice(b"\r\n");
+            // BCC uses the "load c into AL then op against rhs-low-
+            // byte then store back" pattern ONLY for Add/Sub. Bitwise
+            // operations work byte-wise: BCC keeps the shorter
+            // `mov al, [rhs_low]; <op> <c>, al` shape. Fixture 1254
+            // (`c |= n`).
+            let rhs_is_int_lvalue = if let ExprKind::Ident(rhs_name) = &value.kind {
+                self.locals.has(rhs_name) && self.locals.type_of(rhs_name).is_int_like()
+            } else {
+                false
+            } && matches!(op, BinOp::Add | BinOp::Sub);
             let mnem = match op {
                 BinOp::Add => "add",
                 BinOp::Sub => "sub",
@@ -7366,7 +7374,24 @@ impl<'a> FunctionEmitter<'a> {
                 BinOp::BitXor => "xor",
                 _ => unreachable!(),
             };
-            let _ = write!(self.out, "\t{mnem}\t{},al\r\n", reg.name());
+            let src = self.resolve_operand_source(value);
+            if rhs_is_int_lvalue {
+                // Load c to AL, operate against RHS's byte form,
+                // store AL back.
+                let _ = write!(self.out, "\tmov\tal,{}\r\n", reg.name());
+                self.out.extend_from_slice(b"\t");
+                self.out.extend_from_slice(mnem.as_bytes());
+                self.out.extend_from_slice(b"\tal,");
+                self.out.extend_from_slice(src.byte().as_bytes());
+                self.out.extend_from_slice(b"\r\n");
+                let _ = write!(self.out, "\tmov\t{},al\r\n", reg.name());
+            } else {
+                // Char-char pattern: load RHS byte, op against c.
+                self.out.extend_from_slice(b"\tmov\tal,");
+                self.out.extend_from_slice(src.byte().as_bytes());
+                self.out.extend_from_slice(b"\r\n");
+                let _ = write!(self.out, "\t{mnem}\t{},al\r\n", reg.name());
+            }
             return;
         }
         assert!(

@@ -1298,16 +1298,22 @@ fn body_has_char_compound_int_rhs(body: &[Stmt], char_locals: &HashSet<&str>) ->
 fn stmt_has_char_compound_int_rhs(stmt: &Stmt, char_locals: &HashSet<&str>) -> bool {
     match &stmt.kind {
         StmtKind::CompoundAssign { name, op, value } => {
-            // Only Add/Sub/Mul widen the char to int via the `mov dl,
-            // <c>; <op> dl, al; mov <c>, dl` scratch dance. Bitwise
-            // ops (AND/OR/XOR) work byte-wise — `<op> dl, al` directly,
-            // no DL scratch. Fixture 1254 (`c |= n`) keeps c in DL.
+            // The DL-as-scratch dance only fires when the RHS
+            // computation actually OWNS AL. For a single int lvalue
+            // (`c += n` where n is int local/global), BCC emits
+            // `mov al, <c>; add al, [n]; mov <c>, al` — AL holds c,
+            // so c can stay in DL. Fixture 1213 (`c += n`).
+            // When the RHS is a binop/cast/ternary/call/etc. that
+            // computes into AL, c must move out of DL. Fixture
+            // 1430 (`c += a*2`).
+            // Bitwise ops (AND/OR/XOR) are also exempt — fixture
+            // 1254 (`c |= n`).
             char_locals.contains(name.as_str())
                 && matches!(
                     op,
                     crate::ast::BinOp::Add | crate::ast::BinOp::Sub | crate::ast::BinOp::Mul
                 )
-                && !is_char_typed_expr(value, char_locals)
+                && rhs_owns_al(value, char_locals)
         }
         StmtKind::If { then_branch, else_branch, .. } => {
             body_has_char_compound_int_rhs(then_branch, char_locals)
@@ -1329,6 +1335,45 @@ fn is_char_typed_expr(e: &Expr, char_locals: &HashSet<&str>) -> bool {
         ExprKind::Ident(name) => char_locals.contains(name.as_str()),
         ExprKind::IntLit(_) => true, // Small const fits in a byte and BCC keeps the byte form.
         ExprKind::Cast { ty, .. } => ty.is_char_like(),
+        _ => false,
+    }
+}
+
+/// True iff the RHS expression's codegen "owns" AL — i.e., AL
+/// holds the RHS result, leaving no room for the char target to
+/// also live in AL. When this fires for a char compound assign,
+/// BCC moves the char target out of DL (whose AL alias would
+/// be its working register).
+///
+/// Returns false for:
+/// - Char-typed expressions (constant, char ident, char cast) —
+///   the byte form passes through cleanly.
+/// - Plain int idents — BCC emits `mov al, <c>; add al, [n]`,
+///   so AL holds c, not the RHS.
+///
+/// Returns true for:
+/// - BinOp, Cast (to non-char), Ternary, Call, Comma, Update —
+///   anything that computes a value through AL/AX.
+fn rhs_owns_al(e: &Expr, char_locals: &HashSet<&str>) -> bool {
+    if is_char_typed_expr(e, char_locals) {
+        return false;
+    }
+    match &e.kind {
+        // Single int lvalue load: BCC uses `<op> al, [mem]` directly,
+        // AL still belongs to the char target.
+        ExprKind::Ident(_) => false,
+        // Anything more complex computes the RHS through AL.
+        ExprKind::BinOp { .. }
+        | ExprKind::Cast { .. }
+        | ExprKind::Ternary { .. }
+        | ExprKind::Call { .. }
+        | ExprKind::Comma { .. }
+        | ExprKind::Update { .. }
+        | ExprKind::Logical { .. }
+        | ExprKind::Unary { .. }
+        | ExprKind::Deref(_)
+        | ExprKind::ArrayIndex { .. }
+        | ExprKind::Member { .. } => true,
         _ => false,
     }
 }
