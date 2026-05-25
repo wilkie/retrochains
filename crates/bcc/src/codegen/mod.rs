@@ -12289,6 +12289,31 @@ impl<'a> FunctionEmitter<'a> {
             );
             return;
         }
+        // Mem-to-reg copy from a global: `<reg> = <global>` where the
+        // RHS is a bare identifier (possibly wrapped in a pointer
+        // cast) naming an int- or pointer-shaped global. BCC emits
+        // `mov <reg>, word ptr DGROUP:_<sym>` (4 bytes) directly,
+        // skipping the AX round-trip (a1 mem16 + mov reg, ax = 5
+        // bytes). Fixture 2626 (`ip = (int *)vp;` with vp global).
+        if let Some(name) = match &expr.kind {
+            ExprKind::Ident(n) => Some(n.as_str()),
+            ExprKind::Cast { operand, ty } if ty.pointee().is_some() => match &operand.kind {
+                ExprKind::Ident(n) => Some(n.as_str()),
+                _ => None,
+            },
+            _ => None,
+        }
+            && let Some(gty) = self.globals.type_of(name)
+            && (gty.is_int_like() || gty.pointee().is_some())
+            && !reg.is_byte()
+        {
+            let _ = write!(
+                self.out,
+                "\tmov\t{},word ptr DGROUP:_{name}\r\n",
+                reg.name(),
+            );
+            return;
+        }
         // Non-constant char init: untested. Best guess would be
         // `<compute to AL> / mov <reg>, al`, but until a fixture pins
         // the load-to-AL path, bail.
