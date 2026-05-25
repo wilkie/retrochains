@@ -2095,6 +2095,57 @@ impl<'a> FunctionEmitter<'a> {
         None
     }
 
+    /// Classify a name for the var-idx-array RHS peephole. Returns
+    /// `(elem_ty, kind)` if `name` is one of the supported shapes
+    /// (stack int array, int* local, global int array). The caller
+    /// uses `kind` to dispatch the appropriate address-into-BX
+    /// computation. Fixtures 2454, 2849, 3003.
+    fn classify_var_idx_array(&self, name: &str) -> Option<(Type, VarIdxKind)> {
+        if self.locals.has(name) {
+            let ty = self.locals.type_of(name).clone();
+            if let Some(elem_ty) = ty.array_elem() {
+                if let LocalLocation::Stack(base_off) = self.locals.location_of(name) {
+                    let elem_sz = elem_ty.size_bytes();
+                    return Some((
+                        elem_ty.clone(),
+                        VarIdxKind::StackArr(base_off, elem_sz),
+                    ));
+                }
+            }
+            if let Some(pointee) = ty.pointee() {
+                return Some((pointee.clone(), VarIdxKind::PtrInt));
+            }
+        }
+        if let Some(gty) = self.globals.type_of(name)
+            && let Some(elem_ty) = gty.array_elem()
+        {
+            return Some((elem_ty.clone(), VarIdxKind::GlobalArr));
+        }
+        None
+    }
+
+    /// True iff `e` is loadable into AX with at most a single
+    /// (mov ax, <src>) instruction that doesn't disturb BX. Used by
+    /// the var-idx-array RHS peephole to decide whether the LHS can
+    /// be loaded AFTER the BX-address setup without itself clobbering
+    /// the newly-prepared BX.
+    fn is_simple_lvalue(&self, e: &Expr) -> bool {
+        if try_const_eval(e).is_some() {
+            return true;
+        }
+        let ExprKind::Ident(name) = &e.kind else { return false };
+        if self.globals.contains(name) {
+            return true;
+        }
+        if self.locals.has(name) {
+            return matches!(
+                self.locals.location_of(name),
+                LocalLocation::Stack(_) | LocalLocation::Reg(_),
+            );
+        }
+        false
+    }
+
     fn try_memory_source(&self, e: &Expr) -> Option<OperandSource> {
         let ExprKind::Ident(name) = &e.kind else { return None };
         if let Some(gty) = self.globals.type_of(name)
@@ -14079,6 +14130,70 @@ impl<'a> FunctionEmitter<'a> {
             ExprKind::BinOp { op, left, right } => {
                 if op.is_comparison() {
                     self.emit_comparison_as_value(e.span.start, e.span.end, *op, left, right);
+                } else if matches!(op, BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Mul)
+                    && let ExprKind::ArrayIndex { array, index } = &right.kind
+                    && let ExprKind::Ident(arr_name) = &array.kind
+                    && try_const_eval(index).is_none()
+                    && let Some((elem_ty, addr_emit)) =
+                        self.classify_var_idx_array(arr_name)
+                    && elem_ty.is_int_like()
+                    && self.is_simple_lvalue(left)
+                {
+                    // Variable-indexed int-array RHS with simple LHS:
+                    // BCC computes &arr[i] into BX FIRST, then loads
+                    // LHS into AX, then `<op> ax, <addr>`. Avoids
+                    // clobbering AX with the index-scale step.
+                    // Fixtures 2454 (`total + a[i]`), 2849, 3003.
+                    let elem_ty = elem_ty.clone();
+                    let addr = match addr_emit {
+                        VarIdxKind::StackArr(base_off, elem_sz) => {
+                            self.emit_array_addr_to_bx(
+                                arr_name, index, base_off, elem_sz,
+                            );
+                            "word ptr [bx]".to_owned()
+                        }
+                        VarIdxKind::PtrInt => {
+                            let stride = u32::from(elem_ty.size_bytes());
+                            self.emit_expr_to_ax(index);
+                            for _ in 0..stride.trailing_zeros() {
+                                self.out.extend_from_slice(b"\tshl\tax,1\r\n");
+                            }
+                            match self.locals.location_of(arr_name) {
+                                LocalLocation::Reg(reg) => {
+                                    let _ = write!(self.out, "\tadd\tax,{}\r\n", reg.name());
+                                    self.out.extend_from_slice(b"\tmov\tbx,ax\r\n");
+                                }
+                                LocalLocation::Stack(off) => {
+                                    let _ = write!(
+                                        self.out,
+                                        "\tmov\tbx,word ptr {}\r\n",
+                                        bp_addr(off),
+                                    );
+                                    self.out.extend_from_slice(b"\tadd\tbx,ax\r\n");
+                                }
+                            }
+                            "word ptr [bx]".to_owned()
+                        }
+                        VarIdxKind::GlobalArr => {
+                            self.emit_index_into_bx(index, &elem_ty);
+                            format!("word ptr DGROUP:_{arr_name}[bx]")
+                        }
+                    };
+                    self.emit_expr_to_ax(left);
+                    let mnem = match op {
+                        BinOp::Add => "add",
+                        BinOp::Sub => "sub",
+                        BinOp::BitAnd => "and",
+                        BinOp::BitOr => "or",
+                        BinOp::BitXor => "xor",
+                        BinOp::Mul => {
+                            let _ = write!(self.out, "\timul\t{addr}\r\n");
+                            return;
+                        }
+                        _ => unreachable!(),
+                    };
+                    let _ = write!(self.out, "\t{mnem}\tax,{addr}\r\n");
+                    return;
                 } else {
                     // `<char_lvalue> <bitop> <char_lvalue>` — byte op
                     // in AL, single cbw at the end. BCC emits
@@ -14708,99 +14823,6 @@ impl<'a> FunctionEmitter<'a> {
                 self.skip_mod_to_ax,
             );
             return;
-        }
-        // Variable-indexed int array element as RHS: compute &arr[i]
-        // into BX, then `<op> ax, word ptr [bx]`. Stack-array case
-        // uses `mov bx, idx; shl bx, 1; lea ax, [bp+base]; add bx,
-        // ax`. Global-array case uses `<sym>[bx]` indexed memory.
-        // Fixture 3003 (`s = s + a[i]` for stack int array), 2849
-        // (`s = s + a[i]` for int* parameter).
-        if let ExprKind::ArrayIndex { array, index } = &e.kind
-            && let ExprKind::Ident(arr_name) = &array.kind
-        {
-            // `p[<var-idx>]` for int*: compute &p[i] into BX via
-            // index-scale + add(ptr), then `<op> ax, [bx]`.
-            if self.locals.has(arr_name)
-                && let Some(pointee) = self.locals.type_of(arr_name).pointee()
-                && pointee.is_int_like()
-                && try_const_eval(index).is_none()
-            {
-                let stride = u32::from(pointee.size_bytes());
-                self.emit_expr_to_ax(index);
-                for _ in 0..stride.trailing_zeros() {
-                    self.out.extend_from_slice(b"\tshl\tax,1\r\n");
-                }
-                match self.locals.location_of(arr_name) {
-                    LocalLocation::Reg(reg) => {
-                        let _ = write!(self.out, "\tadd\tax,{}\r\n", reg.name());
-                        self.out.extend_from_slice(b"\tmov\tbx,ax\r\n");
-                    }
-                    LocalLocation::Stack(off) => {
-                        let _ = write!(self.out, "\tmov\tbx,word ptr {}\r\n", bp_addr(off));
-                        self.out.extend_from_slice(b"\tadd\tbx,ax\r\n");
-                    }
-                }
-                emit_op_with_source_opts(
-                    self.out,
-                    op,
-                    &OperandSource::DerefReg(Reg::Bx),
-                    unsigned,
-                    self.skip_mod_to_ax,
-                );
-                return;
-            }
-            if self.locals.has(arr_name)
-                && let arr_ty = self.locals.type_of(arr_name).clone()
-                && let Some(elem_ty) = arr_ty.array_elem()
-                && elem_ty.is_int_like()
-                && let LocalLocation::Stack(base_off) = self.locals.location_of(arr_name)
-                && try_const_eval(index).is_none()
-            {
-                let elem_size = elem_ty.size_bytes();
-                self.emit_array_addr_to_bx(arr_name, index, base_off, elem_size);
-                emit_op_with_source_opts(
-                    self.out,
-                    op,
-                    &OperandSource::DerefReg(Reg::Bx),
-                    unsigned,
-                    self.skip_mod_to_ax,
-                );
-                return;
-            }
-            if let Some(gty) = self.globals.type_of(arr_name)
-                && let Some(elem_ty) = gty.array_elem()
-                && elem_ty.is_int_like()
-                && try_const_eval(index).is_none()
-            {
-                let elem_ty = elem_ty.clone();
-                self.emit_index_into_bx(index, &elem_ty);
-                let mnem = match op {
-                    BinOp::Add => "add",
-                    BinOp::Sub => "sub",
-                    BinOp::BitAnd => "and",
-                    BinOp::BitOr => "or",
-                    BinOp::BitXor => "xor",
-                    BinOp::Mul => {
-                        let _ = write!(
-                            self.out,
-                            "\timul\tword ptr DGROUP:_{arr_name}[bx]\r\n",
-                        );
-                        return;
-                    }
-                    _ => {
-                        // Fall through to generic — this peephole only
-                        // handles binary ops with a single mem operand.
-                        let src = self.resolve_operand_source(e);
-                        emit_op_with_source_opts(self.out, op, &src, unsigned, self.skip_mod_to_ax);
-                        return;
-                    }
-                };
-                let _ = write!(
-                    self.out,
-                    "\t{mnem}\tax,word ptr DGROUP:_{arr_name}[bx]\r\n",
-                );
-                return;
-            }
         }
         let src = self.resolve_operand_source(e);
         emit_op_with_source_opts(self.out, op, &src, unsigned, self.skip_mod_to_ax);
@@ -15676,6 +15698,19 @@ where
         ty = (**elem).clone();
     }
     Some((off, ty))
+}
+
+/// Classification of a variable-indexed array's base name, used by
+/// the var-idx-array RHS peephole to dispatch the address-into-BX
+/// computation.
+#[derive(Debug, Clone, Copy)]
+enum VarIdxKind {
+    /// Stack array at bp-offset `base_off`, element size `elem_sz`.
+    StackArr(i16, u16),
+    /// Int* local (reg or stack — codegen picks the variant).
+    PtrInt,
+    /// Global array — uses `<sym>[bx]` indexed memory.
+    GlobalArr,
 }
 
 /// A resolved right-hand operand.
