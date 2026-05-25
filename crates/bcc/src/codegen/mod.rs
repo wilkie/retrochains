@@ -8451,6 +8451,7 @@ impl<'a> FunctionEmitter<'a> {
             && self.value_needs_ax_route(value)
         {
             self.emit_expr_to_ax(value);
+            let src = if self.try_collapse_lhs_clobber_to_dx() { "dx" } else { "ax" };
             let mnem = match op {
                 BinOp::Add => "add",
                 BinOp::Sub => "sub",
@@ -8459,7 +8460,7 @@ impl<'a> FunctionEmitter<'a> {
                 BinOp::BitXor => "xor",
                 _ => unreachable!(),
             };
-            let _ = write!(self.out, "\t{mnem}\t{},ax\r\n", reg.name());
+            let _ = write!(self.out, "\t{mnem}\t{},{src}\r\n", reg.name());
             return;
         }
         // `<reg> *= <int_lv> <op> <int_lv>` where `<op>` is a
