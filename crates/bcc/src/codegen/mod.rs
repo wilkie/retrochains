@@ -5069,6 +5069,20 @@ impl<'a> FunctionEmitter<'a> {
                     );
                     return;
                 }
+                // Address-of-global init: `int *p = &x;` for `x` a
+                // non-array global. Store the symbol's offset
+                // directly. Fixture 1964 (`int *p = &x`).
+                if ty.pointee().is_some()
+                    && let ExprKind::AddressOf(sym) = &init.kind
+                    && self.globals.type_of(sym).is_some()
+                {
+                    let _ = write!(
+                        self.out,
+                        "\tmov\tword ptr {},offset DGROUP:_{sym}\r\n",
+                        bp_addr(off),
+                    );
+                    return;
+                }
                 // String-literal init for a pointer local: `char *s =
                 // "lit";` lowers to `mov word ptr [bp-N], offset
                 // DGROUP:s@+K` directly, no AX roundtrip. Fixture
