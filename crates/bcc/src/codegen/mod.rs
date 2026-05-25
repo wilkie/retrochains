@@ -7380,6 +7380,18 @@ impl<'a> FunctionEmitter<'a> {
                         let _ = write!(self.out, "\t{mnem}\t{}\r\n", reg.name());
                         return;
                     }
+                    // Stride-2 pointer +=1 / -=1 collapses to a pair
+                    // of inc/dec (2 bytes vs 3 for `add reg, 2`).
+                    // BCC's asymmetric ±2 rule applies here too: +2
+                    // uses double-inc, -2 uses `sub <reg>, 2` (3
+                    // bytes) — see emit_op_with_source. Fixture 1983
+                    // (`int *ip; ip += 1` for stride-2 → `inc di;
+                    // inc di`).
+                    if scaled == 2 && matches!(op, BinOp::Add) {
+                        let _ = write!(self.out, "\tinc\t{}\r\n", reg.name());
+                        let _ = write!(self.out, "\tinc\t{}\r\n", reg.name());
+                        return;
+                    }
                     let mnem = if matches!(op, BinOp::Add) { "add" } else { "sub" };
                     let _ = write!(self.out, "\t{mnem}\t{},{scaled}\r\n", reg.name());
                     return;
