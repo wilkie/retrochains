@@ -210,8 +210,16 @@ impl Locals {
         let mut declared: Vec<DeclItem> = Vec::new();
         let mut counts: HashMap<String, u32> = HashMap::new();
 
-        // Params: assign each its incoming bp+N slot.
-        let mut param_offset = FIRST_PARAM_BP_OFFSET;
+        // Params: assign each its incoming bp+N slot. When the
+        // function returns a struct > 4 bytes, BCC inserts a
+        // hidden far-pointer first param (the caller-supplied
+        // return-buffer address), bumping all real params by 4
+        // bytes. Fixture 3410 (`struct Three make(int, int, int)`
+        // returning a 6-byte struct).
+        let returns_big_struct = matches!(&function.ret_ty, Type::Struct { .. })
+            && function.ret_ty.size_bytes() > 4;
+        let mut param_offset = FIRST_PARAM_BP_OFFSET
+            + if returns_big_struct { 4 } else { 0 };
         for param in &function.params {
             declared.push(DeclItem {
                 name: param.name.clone(),
