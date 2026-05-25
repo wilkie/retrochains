@@ -13237,6 +13237,35 @@ impl<'a> FunctionEmitter<'a> {
             let _ = write!(self.out, "\tmov\t{},ax\r\n", reg.name());
             return;
         }
+        // Pointer init from `<stack-array> + <int_lvalue>`: scale
+        // the index by stride, then add the array's LEA. BCC's
+        // shape: `mov ax, <i>; shl ax (×log2 stride); lea dx, base;
+        // add ax, dx; mov <reg>, ax`. Fixture 1278 (`int *p = a +
+        // i;` with int array, var i).
+        if let ExprKind::BinOp { op: BinOp::Add, left, right } = &expr.kind
+            && let ExprKind::Ident(arr_name) = &left.kind
+            && self.locals.has(arr_name)
+            && let Some(elem_ty) = self.locals.type_of(arr_name).array_elem()
+            && let Some(idx_src) = self.int_lvalue_addr(right)
+            && let LocalLocation::Stack(base_off) = self.locals.location_of(arr_name)
+        {
+            assert!(!reg.is_byte(), "array+var into a byte register is impossible");
+            let stride = elem_ty.size_bytes();
+            let shifts = match stride {
+                1 => 0,
+                2 => 1,
+                4 => 2,
+                _ => panic!("unsupported stride {stride} for array+var ptr init"),
+            };
+            let _ = write!(self.out, "\tmov\tax,word ptr {idx_src}\r\n");
+            for _ in 0..shifts {
+                self.out.extend_from_slice(b"\tshl\tax,1\r\n");
+            }
+            let _ = write!(self.out, "\tlea\tdx,word ptr {}\r\n", bp_addr(base_off));
+            self.out.extend_from_slice(b"\tadd\tax,dx\r\n");
+            let _ = write!(self.out, "\tmov\t{},ax\r\n", reg.name());
+            return;
+        }
         // Reg-to-reg copy: `<reg> = <other-reg>` where the RHS is a
         // bare identifier naming another register-resident int
         // local. BCC emits `mov <dest>, <src>` directly, skipping
