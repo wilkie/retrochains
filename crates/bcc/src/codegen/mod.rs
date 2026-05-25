@@ -14074,7 +14074,10 @@ impl OperandSource {
     /// Format as a 16-bit source operand.
     fn word(&self) -> String {
         match self {
-            Self::Immediate(v) => v.to_string(),
+            // try_const_eval returns u32 with negative values
+            // sign-extended (e.g. -2 → 0xFFFFFFFE). Mask to 16 bits
+            // so the emitted immediate fits the instruction.
+            Self::Immediate(v) => (v & 0xFFFF).to_string(),
             Self::Local(off) => format!("word ptr {}", bp_addr(*off)),
             Self::Reg(r) => r.name().to_owned(),
             Self::Global(name) => format!("word ptr DGROUP:_{name}"),
