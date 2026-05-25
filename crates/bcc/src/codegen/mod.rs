@@ -8773,8 +8773,13 @@ impl<'a> FunctionEmitter<'a> {
                     return;
                 }
                 // Non-const RHS: load value to AL, then store
-                // through SI-indexed addressing.
+                // through SI-indexed addressing. Skip the cbw
+                // widening — the byte store only needs AL.
+                // Fixture 1426 (`dst[i] = src[i]`).
+                let skip_widen_prev = self.skip_widen;
+                self.skip_widen = true;
                 self.emit_expr_to_ax(value);
+                self.skip_widen = skip_widen_prev;
                 let _ = write!(
                     self.out,
                     "\tmov\tbyte ptr DGROUP:_{array}[si],al\r\n",
@@ -9151,12 +9156,18 @@ impl<'a> FunctionEmitter<'a> {
             return;
         }
         // Non-constant RHS: evaluate to AX (or AL for byte storage),
-        // then store through [bx]. Fixtures 1219 (`a[i] = i` with char
-        // array), 1468 (int array), 1276 (`s[i] = 'a' + i`).
-        self.emit_expr_to_ax(value);
+        // then store through [bx]. For char-element stores, skip
+        // the cbw widening that emit_expr_to_ax appends after a
+        // byte load — the store only reads AL anyway. Fixture 1426
+        // (`dst[i] = src[i]` with char arrays).
         if elem.is_char_like() {
+            let skip_widen_prev = self.skip_widen;
+            self.skip_widen = true;
+            self.emit_expr_to_ax(value);
+            self.skip_widen = skip_widen_prev;
             let _ = write!(self.out, "\tmov\tbyte ptr [bx],al\r\n");
         } else {
+            self.emit_expr_to_ax(value);
             let _ = write!(self.out, "\tmov\tword ptr [bx],ax\r\n");
         }
     }
