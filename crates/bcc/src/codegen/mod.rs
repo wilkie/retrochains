@@ -7189,6 +7189,32 @@ impl<'a> FunctionEmitter<'a> {
             let _ = write!(self.out, "\t{mnem}\t{},ax\r\n", reg.name());
             return;
         }
+        // `<reg> *= <int_lv> <op> <int_lv>` where `<op>` is a
+        // non-clobbering binop (Add/Sub/BitAnd/BitOr/BitXor): compute
+        // the RHS directly into DX, skipping the `mov dx, ax` shuffle.
+        // Both operands must be int-typed memory operands (stack or
+        // global). Fixture 1390 (`a *= (b+c)` with a in SI, b/c stack).
+        if matches!(op, BinOp::Mul)
+            && let ExprKind::BinOp { op: rop, left: rl, right: rr } = &value.kind
+            && matches!(rop, BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor)
+            && let Some(l_src) = self.int_lvalue_addr(rl)
+            && let Some(r_src) = self.int_lvalue_addr(rr)
+        {
+            let mnem = match rop {
+                BinOp::Add => "add",
+                BinOp::Sub => "sub",
+                BinOp::BitAnd => "and",
+                BinOp::BitOr => "or",
+                BinOp::BitXor => "xor",
+                _ => unreachable!(),
+            };
+            let _ = write!(self.out, "\tmov\tdx,word ptr {l_src}\r\n");
+            let _ = write!(self.out, "\t{mnem}\tdx,word ptr {r_src}\r\n");
+            let _ = write!(self.out, "\tmov\tax,{}\r\n", reg.name());
+            self.out.extend_from_slice(b"\timul\tdx\r\n");
+            let _ = write!(self.out, "\tmov\t{},ax\r\n", reg.name());
+            return;
+        }
         // Mul / Div / Mod with nested-binop (or Cast/Ternary/Call)
         // RHS: evaluate RHS to AX (which clobbers AX), then perform
         // the op with the dst register as the source operand
