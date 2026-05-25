@@ -15758,33 +15758,14 @@ impl<'a> FunctionEmitter<'a> {
                         // Div/Mod still excluded — divisor must be in
                         // BX to keep DX free for cwd/xor. Fixtures
                         // 1400 (`a + b` uchar+uchar), 1626 (`a * b`).
-                        if !matches!(op, BinOp::Div | BinOp::Mod)
-                            && let (ExprKind::Ident(l_name), ExprKind::Ident(r_name)) =
-                                (&left.kind, &right.kind)
-                            && self.ident_is_uchar(l_name)
-                            && self.ident_is_uchar(r_name)
-                        {
-                            let l_addr =
-                                if let Some(_g) = self.globals.type_of(l_name) {
-                                    format!("DGROUP:_{l_name}")
-                                } else if let LocalLocation::Stack(off) =
-                                    self.locals.location_of(l_name)
-                                {
-                                    bp_addr(off)
-                                } else {
-                                    String::new()
-                                };
-                            let r_addr =
-                                if let Some(_g) = self.globals.type_of(r_name) {
-                                    format!("DGROUP:_{r_name}")
-                                } else if let LocalLocation::Stack(off) =
-                                    self.locals.location_of(r_name)
-                                {
-                                    bp_addr(off)
-                                } else {
-                                    String::new()
-                                };
-                            if !l_addr.is_empty() && !r_addr.is_empty() {
+                        if !matches!(op, BinOp::Div | BinOp::Mod) {
+                            let l_uchar = self.try_lvalue_chain_addr(left)
+                                .filter(|(_, _, ty)| ty.is_char_like() && ty.is_unsigned())
+                                .and_then(|(n, o, _)| self.resolve_chain_addr(&n, o));
+                            let r_uchar = self.try_lvalue_chain_addr(right)
+                                .filter(|(_, _, ty)| ty.is_char_like() && ty.is_unsigned())
+                                .and_then(|(n, o, _)| self.resolve_chain_addr(&n, o));
+                            if let (Some(l_addr), Some(r_addr)) = (l_uchar, r_uchar) {
                                 let _ = write!(self.out, "\tmov\tal,byte ptr {l_addr}\r\n");
                                 self.out.extend_from_slice(b"\tmov\tah,0\r\n");
                                 let _ = write!(self.out, "\tmov\tdl,byte ptr {r_addr}\r\n");
@@ -16108,32 +16089,23 @@ impl<'a> FunctionEmitter<'a> {
         // loads DL from the uchar lvalue, zero-extends to DX via
         // `mov dh, 0`, then `<op> ax, dx`. Saves the push/pop pair
         // because uchar zero-extension is local to DX. Fixture
-        // 1400 (`a + b` for two uchar stack locals).
-        if let ExprKind::Ident(name) = &e.kind
-            && self.ident_is_char(name)
-            && self.ident_is_uchar(name)
+        // 1400 (`a + b` for two uchar stack locals); fixture 3221
+        // (uchar struct field via Member chain).
+        if let Some((name, off, ty)) = self.try_lvalue_chain_addr(e)
+            && ty.is_char_like()
+            && ty.is_unsigned()
+            && let Some(src_addr) = self.resolve_chain_addr(&name, off)
         {
-            let src_addr = if let Some(_gty) = self.globals.type_of(name) {
-                format!("DGROUP:_{name}")
-            } else if let LocalLocation::Stack(off) = self.locals.location_of(name) {
-                bp_addr(off)
-            } else {
-                // Char in a byte register — fall through to the
-                // generic path below.
-                String::new()
-            };
-            if !src_addr.is_empty() {
-                let _ = write!(self.out, "\tmov\tdl,byte ptr {src_addr}\r\n");
-                self.out.extend_from_slice(b"\tmov\tdh,0\r\n");
-                emit_op_with_source_opts(
-                    self.out,
-                    op,
-                    &OperandSource::Reg(Reg::Dx),
-                    unsigned,
-                    self.skip_mod_to_ax,
-                );
-                return;
-            }
+            let _ = write!(self.out, "\tmov\tdl,byte ptr {src_addr}\r\n");
+            self.out.extend_from_slice(b"\tmov\tdh,0\r\n");
+            emit_op_with_source_opts(
+                self.out,
+                op,
+                &OperandSource::Reg(Reg::Dx),
+                unsigned,
+                self.skip_mod_to_ax,
+            );
+            return;
         }
         // Char-on-right widening dance (fixture 087: `a + b + c` with
         // `c` a char global). Loading a char clobbers AX, so the
