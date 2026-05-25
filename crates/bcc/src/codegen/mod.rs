@@ -12245,6 +12245,29 @@ impl<'a> FunctionEmitter<'a> {
             );
             return;
         }
+        // RHS is a string literal — emit the direct immediate-store
+        // form `mov word ptr <dest>, offset DGROUP:s@[+offset]`.
+        // Fixture 2420 (`m.name = "hello"` for char* field).
+        if !store_byte
+            && let ExprKind::StringLit(bytes) = &value.kind
+        {
+            let offset = self
+                .strings
+                .offset_for_span(value.span.start)
+                .unwrap_or_else(|| self.strings.intern(bytes));
+            if offset == 0 {
+                let _ = write!(
+                    self.out,
+                    "\tmov\t{width} ptr {dest},offset DGROUP:s@\r\n",
+                );
+            } else {
+                let _ = write!(
+                    self.out,
+                    "\tmov\t{width} ptr {dest},offset DGROUP:s@+{offset}\r\n",
+                );
+            }
+            return;
+        }
         // Non-constant RHS for an int field: materialize into AX,
         // then store AX to the field. Fixture 990 (`s.x = v;` with
         // v a stack local).
