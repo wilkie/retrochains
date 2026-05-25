@@ -14055,10 +14055,13 @@ impl<'a> FunctionEmitter<'a> {
                         // RHS is a binop of two AX-safe operands
                         // (reg-ident or mem-lvalue): emit it directly
                         // into DX, skipping the push/pop dance.
-                        // Fixture 1499 (`(a + b) + (a - c)` with a in
-                        // SI, b and c on stack — RHS `a - c` computes
-                        // as `mov dx, si; sub dx, [c]`).
-                        if !matches!(op, BinOp::Div | BinOp::Mod | BinOp::Mul)
+                        // Outer op is the one that consumes DX as
+                        // source; for Mul this becomes `imul dx`
+                        // which uses AX as accumulator. Div/Mod
+                        // can't reuse this (the divisor must go
+                        // into BX, not DX). Fixture 1499 (`(a + b)
+                        // + (a - c)`), 1528 (`(a - b) * (a + b)`).
+                        if !matches!(op, BinOp::Div | BinOp::Mod)
                             && let ExprKind::BinOp { op: rop, left: rl, right: rr } = &right.kind
                             && matches!(rop, BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor)
                             && let Some(rl_src) = self.try_dx_load_source(rl)
