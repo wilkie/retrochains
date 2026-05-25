@@ -7742,6 +7742,24 @@ impl<'a> FunctionEmitter<'a> {
     ///   and index can be either register- or stack-resident; only
     ///   the all-stack form is captured today.
     fn emit_deref_to_ax(&mut self, ptr: &Expr) {
+        // `*<call>()` — deref of a function-call's pointer return.
+        // Call the function (result in AX = pointer), copy to BX,
+        // read `[bx]`. Fixture 1343 (`*nextp("ab")`).
+        if let ExprKind::Call { name: fname, args } = &ptr.kind
+            && let Some(ret_ty) = self.signatures.ret_ty_of(fname)
+            && let Some(pointee) = ret_ty.pointee()
+        {
+            let pointee = pointee.clone();
+            self.emit_call(fname, args);
+            self.out.extend_from_slice(b"\tmov\tbx,ax\r\n");
+            if pointee.is_char_like() {
+                self.out.extend_from_slice(b"\tmov\tal,byte ptr [bx]\r\n");
+                self.emit_widen_al(&pointee);
+            } else {
+                self.out.extend_from_slice(b"\tmov\tax,word ptr [bx]\r\n");
+            }
+            return;
+        }
         // `*(a + i)` where `a` is a global array (or char array): the
         // `a + i` is array-decay + variable offset. Same byte shape
         // as the array-index path: scale i into BX, then read
