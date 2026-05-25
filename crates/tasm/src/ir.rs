@@ -974,6 +974,12 @@ pub enum Instr {
     /// with disp16-only addressing (`03 06 lo hi`). Same FIXUPP
     /// shape; offset added to the symbol's location.
     AddAxGroupSym { group: String, symbol: String, offset: i16 },
+    /// `add ax,offset <group>:<symbol>[+<offset>]` — AX-accumulator
+    /// ADD with an immediate symbol offset (`05 lo hi`). Used for
+    /// pointer arithmetic `arr + <expr>`: scale the int into AX,
+    /// then add the array base symbol as a link-time-resolved
+    /// immediate. Fixture 3439 (`arr + (c ? 1 : 2)`).
+    AddAxOffsetGroupSym { group: String, symbol: String, offset: i16 },
     /// `or ax,word ptr <group>:<symbol>[+<offset>]` — OR r16,r/m16
     /// with disp16-only addressing (`0B 06 lo hi`). Used by long
     /// comparison against zero (fixture 215): `mov ax,low / or

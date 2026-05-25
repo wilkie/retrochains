@@ -388,6 +388,7 @@ fn instr_size(instr: &Instr) -> usize {
         Instr::MovAlFromBxSi | Instr::MovAlFromBxDi => 2,
         Instr::MovBxSiPtrImm8 { .. } | Instr::MovBxDiPtrImm8 { .. } => 3,
         Instr::ImulReg16 { .. } | Instr::IdivReg16 { .. } | Instr::DivReg16 { .. } => 2,
+        Instr::AddAxOffsetGroupSym { .. } => 3,
         Instr::AddAxGroupSym { .. }
         | Instr::OrAxGroupSym { .. }
         | Instr::AddDxGroupSym { .. }
@@ -1734,6 +1735,12 @@ fn emit_instr(
             // `add ax,word ptr <group>:<symbol>` → 03 06 lo hi.
             // ModR/M 06 = mod=00 reg=AX r/m=110 (disp16-only addressing).
             emit_group_sym_lea(&[0x03, 0x06], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
+        }
+        Instr::AddAxOffsetGroupSym { group, symbol, offset } => {
+            // `add ax,offset <group>:<symbol>` → 05 lo hi (AX-accumulator
+            // ADD-imm16). Same FIXUPP shape as `MovReg16OffsetGroupSym`:
+            // the imm16 word is a link-time-resolved symbol offset.
+            emit_group_sym_lea(&[0x05], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
         }
         Instr::OrAxGroupSym { group, symbol, offset } => {
             // `or ax,word ptr <group>:<symbol>` → 0B 06 lo hi.

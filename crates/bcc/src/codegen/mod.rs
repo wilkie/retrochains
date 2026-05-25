@@ -15440,6 +15440,34 @@ impl<'a> FunctionEmitter<'a> {
                         }
                         return;
                     }
+                    // `<global_arr> + <int_expr>` — pointer arithmetic
+                    // for an array-decay base. BCC evaluates the int
+                    // operand into AX, scales by `sizeof(elem)` via
+                    // `shl ax, 1` chains, then adds the symbol offset
+                    // as a link-time-resolved immediate. Saves the
+                    // push/pop dance the generic rhs_clobbers_ax path
+                    // would produce. Fixture 3439 (`arr + (c ? 1 : 2)`
+                    // for `int arr[10]`). Stride 1 (char[]) handled
+                    // by the generic path — no scale needed.
+                    if matches!(op, BinOp::Add)
+                        && let ExprKind::Ident(arr_name) = &left.kind
+                        && !self.locals.has(arr_name)
+                        && let Some(gty) = self.globals.type_of(arr_name)
+                        && let Some(elem_ty) = gty.array_elem()
+                        && elem_ty.size_bytes() > 1
+                        && try_const_eval(right).is_none()
+                    {
+                        let stride = u16::from(elem_ty.size_bytes());
+                        self.emit_expr_to_ax(right);
+                        for _ in 0..stride.trailing_zeros() {
+                            self.out.extend_from_slice(b"\tshl\tax,1\r\n");
+                        }
+                        let _ = write!(
+                            self.out,
+                            "\tadd\tax,offset DGROUP:_{arr_name}\r\n",
+                        );
+                        return;
+                    }
                     // `<ptr-typed lvalue> + K` / `- K` — C scales the
                     // constant by the pointee size. Always route as
                     // Add with the (possibly negative) scaled byte

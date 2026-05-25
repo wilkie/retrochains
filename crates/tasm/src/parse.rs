@@ -2222,6 +2222,14 @@ fn parse_add(operands: &str, line_no: usize) -> AsmResult<Instr> {
                 offset,
             });
         }
+        if let Some((group, symbol)) = parse_offset_group_symbol(rhs) {
+            let (sym, offset) = split_sym_offset(symbol);
+            return Ok(Instr::AddAxOffsetGroupSym {
+                group: group.to_string(),
+                symbol: sym.to_string(),
+                offset,
+            });
+        }
         if let Some(imm) = parse_imm16(rhs) {
             return Ok(Instr::AddAxImm { imm });
         }
