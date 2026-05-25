@@ -33,7 +33,7 @@ pub enum EmitError {
 ///
 /// # Errors
 /// Returns [`EmitError`] on I/O failures, lex errors, or parse errors.
-pub fn emit_dash_s(source_path: &Path) -> Result<PathBuf, EmitError> {
+pub fn emit_dash_s(source_path: &Path, merge_strings: bool) -> Result<PathBuf, EmitError> {
     let source = fs::read_to_string(source_path)
         .map_err(|e| EmitError::SourceRead(source_path.to_owned(), e))?;
     let mtime = fs::metadata(source_path)
@@ -51,7 +51,7 @@ pub fn emit_dash_s(source_path: &Path) -> Result<PathBuf, EmitError> {
         .map_or_else(|| "out.c".to_owned(), str::to_ascii_lowercase);
     let output_path = PathBuf::from(format!("{}.ASM", basename.to_ascii_uppercase()));
 
-    let bytes = build_asm(&source, &lowered, mtime)?;
+    let bytes = build_asm(&source, &lowered, mtime, merge_strings)?;
     fs::write(&output_path, bytes)?;
     Ok(output_path)
 }
@@ -65,6 +65,7 @@ pub fn build_asm(
     source: &str,
     source_filename_lower: &str,
     mtime: SystemTime,
+    merge_strings: bool,
 ) -> Result<Vec<u8>, EmitError> {
     let tokens = Lexer::new(source).tokenize()?;
     let unit = Parser::new(tokens).parse_unit()?;
@@ -78,6 +79,7 @@ pub fn build_asm(
     // (file scope `char *p = "lit"` — fixture 192) and per-function code
     // emission can intern into the same `s@`-relative table.
     let mut strings = codegen::StringPool::default();
+    strings.merge_strings = merge_strings;
 
     // Initialized globals live in a `_DATA` block at the top of the
     // file, between the empty segment scaffold and the function-code

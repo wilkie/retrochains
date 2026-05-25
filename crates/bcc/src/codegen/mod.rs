@@ -164,6 +164,18 @@ pub struct StringPool {
     /// trailing zeros. The running total of `bytes.len() + nul as
     /// usize` is the next available offset.
     entries: Vec<PoolEntry>,
+    /// When true, identical string literals share a slot. BCC's `-d`
+    /// flag enables this; default is off (each occurrence gets its
+    /// own slot). Array-init blobs always dedup regardless — the
+    /// flag only affects string-literal interning.
+    pub merge_strings: bool,
+    /// Per-occurrence offsets keyed by the StringLit AST span. With
+    /// `merge_strings = false`, multiple occurrences of the same
+    /// content each get their own pool slot — but the codegen emits
+    /// in a different order than the pre-intern walk, so we need to
+    /// look up offsets by AST identity rather than by content.
+    /// `intern_at` populates this map; `intern_for_span` reads it.
+    span_offsets: std::collections::HashMap<u32, u32>,
 }
 
 #[derive(Debug, Clone)]
@@ -174,9 +186,30 @@ pub struct PoolEntry {
 
 impl StringPool {
     /// Intern a NUL-terminated string literal. Returns the offset of
-    /// the first byte within `s@`. Identical literals dedupe.
+    /// the first byte within `s@`. With `merge_strings = true`,
+    /// identical literals dedupe; otherwise each call creates a
+    /// fresh entry.
     pub fn intern(&mut self, bytes: &[u8]) -> u32 {
         self.intern_inner(bytes, true)
+    }
+
+    /// Intern at a specific AST span — used by the pre-intern pass
+    /// (source-order traversal of call args) to reserve a pool slot
+    /// for a specific StringLit occurrence. Stores the resulting
+    /// offset under the span key so the later codegen pass can look
+    /// it up via `offset_for_span` without creating a duplicate.
+    pub fn intern_at(&mut self, span_start: u32, bytes: &[u8]) -> u32 {
+        let offset = self.intern_inner(bytes, true);
+        self.span_offsets.insert(span_start, offset);
+        offset
+    }
+
+    /// Look up the pool offset previously reserved at `span_start`
+    /// by `intern_at`. Returns `None` if this StringLit didn't go
+    /// through the pre-intern pass (e.g. it appears in a context
+    /// where pre-intern wasn't run).
+    pub fn offset_for_span(&self, span_start: u32) -> Option<u32> {
+        self.span_offsets.get(&span_start).copied()
     }
 
     /// Intern a raw byte blob (e.g. a stack-array initializer image).
@@ -187,9 +220,17 @@ impl StringPool {
     }
 
     fn intern_inner(&mut self, bytes: &[u8], nul: bool) -> u32 {
+        // String-literal entries (`nul = true`) only dedupe when
+        // `merge_strings` is set (BCC's `-d` flag). Blob entries
+        // (`nul = false`) always dedupe — they're typically large
+        // const initializers where duplication wastes space.
+        let allow_dedup = !nul || self.merge_strings;
         let mut offset: u32 = 0;
         for existing in &self.entries {
-            if existing.bytes.as_slice() == bytes && existing.nul == nul {
+            if allow_dedup
+                && existing.bytes.as_slice() == bytes
+                && existing.nul == nul
+            {
                 return offset;
             }
             offset += u32::try_from(existing.bytes.len() + usize::from(existing.nul))
@@ -3790,7 +3831,7 @@ impl<'a> FunctionEmitter<'a> {
         fn intern_strings_in_order(emitter: &mut FunctionEmitter<'_>, e: &Expr) {
             match &e.kind {
                 ExprKind::StringLit(bytes) => {
-                    emitter.strings.intern(bytes);
+                    emitter.strings.intern_at(e.span.start, bytes);
                 }
                 ExprKind::BinOp { left, right, .. }
                 | ExprKind::Logical { left, right, .. }
@@ -13656,10 +13697,13 @@ impl<'a> FunctionEmitter<'a> {
             }
             ExprKind::StringLit(bytes) => {
                 // A bare string literal in value position is its
-                // address (the C decay rule). We don't have a
-                // fixture, but `mov ax, offset DGROUP:s@<offset>`
-                // is the expected shape.
-                let offset = self.strings.intern(bytes);
+                // address (the C decay rule). Look up the pool
+                // offset via the pre-intern span map when available,
+                // else fall back to interning fresh.
+                let offset = self
+                    .strings
+                    .offset_for_span(e.span.start)
+                    .unwrap_or_else(|| self.strings.intern(bytes));
                 if offset == 0 {
                     let _ = write!(self.out, "\tmov\tax,offset DGROUP:s@\r\n");
                 } else {

@@ -11,6 +11,11 @@ use std::path::PathBuf;
 pub struct ParsedArgs {
     pub mode: CompileMode,
     pub memory_model: MemoryModel,
+    /// `-d`: merge identical string literals into a single pool
+    /// entry. Default off — each occurrence in source gets its own
+    /// slot. Fixtures 2282 (`-d` set, dedup'd), 2283 (no flag,
+    /// duplicated).
+    pub merge_strings: bool,
     /// Input source files, in the order given on the command line.
     pub sources: Vec<PathBuf>,
 }
@@ -53,12 +58,14 @@ pub enum CliError {
 pub fn parse_args(argv: &[String]) -> Result<ParsedArgs, CliError> {
     let mut mode: Option<CompileMode> = None;
     let mut memory_model: Option<MemoryModel> = None;
+    let mut merge_strings = false;
     let mut sources: Vec<PathBuf> = Vec::new();
     for arg in argv {
         match arg.as_str() {
             "-S" => mode = Some(CompileMode::Assembly),
             "-c" => mode = Some(CompileMode::Object),
             "-ms" => memory_model = Some(MemoryModel::Small),
+            "-d" => merge_strings = true,
             other if other.starts_with('-') => {
                 return Err(CliError::Unsupported(other.to_owned()));
             }
@@ -70,5 +77,5 @@ pub fn parse_args(argv: &[String]) -> Result<ParsedArgs, CliError> {
     if sources.is_empty() {
         return Err(CliError::NoSource);
     }
-    Ok(ParsedArgs { mode, memory_model, sources })
+    Ok(ParsedArgs { mode, memory_model, merge_strings, sources })
 }

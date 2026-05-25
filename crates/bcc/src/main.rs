@@ -18,13 +18,13 @@ fn try_main() -> Result<(), Box<dyn std::error::Error>> {
     match parsed.mode {
         CompileMode::Assembly => {
             for src in &parsed.sources {
-                emit_dash_s(src)?;
+                emit_dash_s(src, parsed.merge_strings)?;
             }
             Ok(())
         }
         CompileMode::Object => {
             for src in &parsed.sources {
-                emit_dash_c(src)?;
+                emit_dash_c(src, parsed.merge_strings)?;
             }
             Ok(())
         }
