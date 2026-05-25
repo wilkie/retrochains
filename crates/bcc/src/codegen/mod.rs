@@ -1560,15 +1560,13 @@ impl<'a> FunctionEmitter<'a> {
         let case_base = value_pairs.first()
             .map(|&(v, _)| v)
             .expect("jump-table needs at least one value case");
-        for (i, &(v, _)) in value_pairs.iter().enumerate() {
-            let expected = case_base.wrapping_add(u32::try_from(i).unwrap_or(0));
-            assert!(
-                v == expected,
-                "jump-table strategy expects dense from base {case_base}; got {v} at sorted-index {i}",
-            );
-        }
-        let case_count = u32::try_from(value_pairs.len()).unwrap_or(u32::MAX);
-        let max_value = case_count - 1;
+        // The table spans `base..=last`. Slots for missing values
+        // (gaps) are filled with default-or-end. Fixture 1904
+        // (cases 1, 2, 4, 5 — gap at 3 fills with end_slot).
+        let last = value_pairs.last().expect("non-empty").0;
+        let span = (last as i32).wrapping_sub(case_base as i32);
+        let table_len = u32::try_from(span).unwrap_or(0) + 1;
+        let max_value = table_len - 1;
 
         // Load scrutinee into BX.
         let ExprKind::Ident(name) = &scrutinee.kind else {
@@ -1613,7 +1611,7 @@ impl<'a> FunctionEmitter<'a> {
         let _ = write!(self.out, "\tcmp\tbx,{max_value}\r\n");
         let _ = write!(self.out, "\tja\tshort {}\r\n", self.label_ref(out_of_range));
         self.out.extend_from_slice(b"\tshl\tbx,1\r\n");
-        let c_num = switch_c_num(SwitchStrategy::JumpTable, case_count);
+        let c_num = switch_c_num(SwitchStrategy::JumpTable, table_len);
         let _ = write!(
             self.out,
             "\tjmp\tword ptr cs:@{}@C{c_num}[bx]\r\n",
@@ -1638,15 +1636,29 @@ impl<'a> FunctionEmitter<'a> {
         self.loop_stack.pop();
 
         // Stage the address table for emission after `_main endp`.
-        // The table is laid out in SORTED order of case value so the
-        // jump-by-index lands at the matching body. Default case
-        // doesn't participate (it's the ja-out-of-range target).
+        // The table is laid out by VALUE position (0..span) so the
+        // jump-by-index lands at the matching body. Missing values
+        // (gaps) fill with the out-of-range slot (default or end).
+        // Default case doesn't get its own table entry.
         let _ = write!(
             self.post_function_data,
             "@{}@C{c_num}\tlabel\tword\r\n",
             self.func_idx,
         );
-        for &(_, slot) in &value_pairs {
+        let gap_slot = out_of_range;
+        let mut value_iter = value_pairs.iter().peekable();
+        for i in 0..table_len {
+            let pos = case_base.wrapping_add(i);
+            let slot = if let Some(&&(v, s)) = value_iter.peek() {
+                if v == pos {
+                    value_iter.next();
+                    s
+                } else {
+                    gap_slot
+                }
+            } else {
+                gap_slot
+            };
             let _ = write!(
                 self.post_function_data,
                 "\tdw\t{}\r\n",

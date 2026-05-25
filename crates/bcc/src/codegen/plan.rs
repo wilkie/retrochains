@@ -403,21 +403,20 @@ pub fn pick_switch_strategy(cases: &[SwitchCase]) -> SwitchStrategy {
     if values.len() < 4 {
         return SwitchStrategy::Chained;
     }
-    // Dense from base K (any K): values form a consecutive run.
-    // Sort first so source order doesn't matter — `case 3; case 1;
-    // case 2; case 0;` still qualifies as dense-from-0. BCC builds
-    // the jump-table from the SORTED case ordering, so the table
-    // entries follow sorted order even though the bodies appear in
-    // source order in the asm. Fixtures 073/076 (K=0), 1605 (K=5),
-    // 1909 (K=-2), 1609 (out-of-source-order 0..3).
+    // Sort by signed value so negative bases work and source-order
+    // is irrelevant. The jump-table strategy fires when the
+    // values' span+1 is at most `2 * count`: tolerates small gaps
+    // (filled with default/end slots in the table) but doesn't
+    // pay 2 bytes per slot when sparsity gets large. Span =
+    // (last - first) as signed. Fixtures 1605 (K=5), 1909 (K=-2),
+    // 1609 (out-of-source-order), 1904 (one-gap dense).
     let mut sorted = values.clone();
     sorted.sort_by_key(|&v| v as i32 as i64);
-    let first = sorted[0];
-    let dense_from_base = sorted
-        .iter()
-        .enumerate()
-        .all(|(i, &v)| v == first.wrapping_add(u32::try_from(i).unwrap_or(0)));
-    if dense_from_base {
+    let first = sorted[0] as i32;
+    let last = (*sorted.last().expect("non-empty by len check")) as i32;
+    let span = (last as i64) - (first as i64);
+    let count = sorted.len() as i64;
+    if span >= 0 && span + 1 <= 2 * count {
         SwitchStrategy::JumpTable
     } else {
         SwitchStrategy::LinearSearch
