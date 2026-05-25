@@ -1710,12 +1710,17 @@ impl<'a> FunctionEmitter<'a> {
         case_slots: &[u32],
         end_slot: u32,
     ) {
-        // Linear search has no default-case support in our fixtures.
-        assert!(
-            cases.iter().all(|c| c.value.is_some()),
-            "default inside a linear-search switch not yet supported (no fixture)"
-        );
-        let case_count = u32::try_from(cases.len()).unwrap_or(u32::MAX);
+        let default_slot = cases
+            .iter()
+            .zip(case_slots)
+            .find_map(|(c, &s)| if c.value.is_none() { Some(s) } else { None });
+        let value_cases: Vec<&SwitchCase> = cases.iter().filter(|c| c.value.is_some()).collect();
+        let value_slots: Vec<u32> = cases
+            .iter()
+            .zip(case_slots)
+            .filter_map(|(c, &s)| if c.value.is_some() { Some(s) } else { None })
+            .collect();
+        let case_count = u32::try_from(value_cases.len()).unwrap_or(u32::MAX);
         // Locals analyzer reserved a stack slot for the spilled
         // scrutinee; look up its offset by this switch's span_start.
         let spill_off = self.locals.switch_spill_offset(switch_span_start);
@@ -1758,8 +1763,14 @@ impl<'a> FunctionEmitter<'a> {
         // 5 = dispatch. case bodies start at 6. That matches `#cases + 2 = 6`
         // pre-slots in total. The loop_top sits at slot 2 (= 0+2) and
         // the dispatch at slot 5 (= #cases + 1).
-        let loop_top_slot = case_slots[0] - 4;
-        let dispatch_slot = case_slots[0] - 1;
+        // Pre-slots are based on the FIRST value case (default
+        // doesn't shift them — slot reservation in plan.rs counts
+        // total cases including default for the pre-slot budget,
+        // but the loop_top/dispatch are computed off the first
+        // value case body's slot).
+        let first_value_slot = *value_slots.first().expect("at least one value case");
+        let loop_top_slot = first_value_slot - 4;
+        let dispatch_slot = first_value_slot - 1;
 
         self.emit_label(loop_top_slot);
         self.out.extend_from_slice(b"\tmov\tax,word ptr cs:[bx]\r\n");
@@ -1768,7 +1779,9 @@ impl<'a> FunctionEmitter<'a> {
         self.out.extend_from_slice(b"\tinc\tbx\r\n");
         self.out.extend_from_slice(b"\tinc\tbx\r\n");
         let _ = write!(self.out, "\tloop\tshort {}\r\n", self.label_ref(loop_top_slot));
-        let _ = write!(self.out, "\tjmp\tshort {}\r\n", self.label_ref(end_slot));
+        // No match: jump to default (if present) or end-of-switch.
+        let no_match_slot = default_slot.unwrap_or(end_slot);
+        let _ = write!(self.out, "\tjmp\tshort {}\r\n", self.label_ref(no_match_slot));
         self.emit_label(dispatch_slot);
         // The dispatch indirect-jmp: BX points to the matched value's
         // entry; the parallel address table sits at BX + 2*case_count.
@@ -1794,20 +1807,22 @@ impl<'a> FunctionEmitter<'a> {
         }
         self.loop_stack.pop();
 
-        // Stage value table + address table for post-function emission.
+        // Stage value table + address table for post-function
+        // emission. Only value cases participate; the default
+        // (if any) is the no-match `jmp` target, not in the table.
         let _ = write!(
             self.post_function_data,
             "@{}@C{c_num}\tlabel\tword\r\n",
             self.func_idx,
         );
-        for case in cases {
-            let v = case.value.expect("default handled by assert above") & 0xFFFF;
+        for case in &value_cases {
+            let v = case.value.expect("value-case has value") & 0xFFFF;
             let lo = v & 0xFF;
             let hi = (v >> 8) & 0xFF;
             let _ = write!(self.post_function_data, "\tdb\t{lo}\r\n");
             let _ = write!(self.post_function_data, "\tdb\t{hi}\r\n");
         }
-        for &slot in case_slots {
+        for &slot in &value_slots {
             let _ = write!(
                 self.post_function_data,
                 "\tdw\t{}\r\n",
