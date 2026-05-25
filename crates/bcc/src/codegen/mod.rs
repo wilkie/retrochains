@@ -9057,26 +9057,73 @@ impl<'a> FunctionEmitter<'a> {
         // or fall through emit_expr_to_ax that may widen). The
         // byte-form load matches BCC's exact shape. Fixture 1219
         // (`char a[5]; a[i] = i` with i in DX → `mov al, dl`).
-        if elem.is_char_like()
-            && let ExprKind::Ident(name) = &value.kind
-            && self.locals.has(name)
-            && let LocalLocation::Reg(reg) = self.locals.location_of(name)
-            && !reg.is_byte()
-            && self.locals.type_of(name).is_int_like()
-        {
-            // Reg's low byte: si/di have no byte alias; DX→DL,
-            // BX→BL, CX→CL.
-            let low = match reg.name() {
-                "dx" => Some("dl"),
-                "bx" => Some("bl"),
-                "cx" => Some("cl"),
-                _ => None,
-            };
-            if let Some(low_name) = low {
-                let _ = write!(self.out, "\tmov\tal,{low_name}\r\n");
-                self.out.extend_from_slice(b"\tmov\tbyte ptr [bx],al\r\n");
-                return;
+        // Also handles `<reg-int> + <const>` shape: the result is
+        // truncated to char on store, so byte arithmetic is
+        // equivalent and shorter (AL imm8 = 2 bytes vs AX imm16 =
+        // 3 bytes). Fixture 1276 (`s[i] = 'a' + i`).
+        let (byte_src_reg, byte_addend): (Option<&str>, Option<i32>) = match &value.kind {
+            ExprKind::Ident(name) => {
+                let n = self.locals.has(name)
+                    && self.locals.type_of(name).is_int_like()
+                    && matches!(self.locals.location_of(name), LocalLocation::Reg(r) if !r.is_byte());
+                if n {
+                    let LocalLocation::Reg(reg) = self.locals.location_of(name) else { unreachable!() };
+                    let low = match reg.name() {
+                        "dx" => Some("dl"),
+                        "bx" => Some("bl"),
+                        "cx" => Some("cl"),
+                        _ => None,
+                    };
+                    (low, None)
+                } else {
+                    (None, None)
+                }
             }
+            ExprKind::BinOp { op: BinOp::Add, left, right } => {
+                let ident = match (&left.kind, try_const_eval(right)) {
+                    (ExprKind::Ident(n), Some(k)) => Some((n.as_str(), k as i32)),
+                    _ => match (&right.kind, try_const_eval(left)) {
+                        (ExprKind::Ident(n), Some(k)) => Some((n.as_str(), k as i32)),
+                        _ => None,
+                    },
+                };
+                if let Some((name, k)) = ident {
+                    let ok = self.locals.has(name)
+                        && self.locals.type_of(name).is_int_like()
+                        && matches!(self.locals.location_of(name), LocalLocation::Reg(r) if !r.is_byte());
+                    if ok {
+                        let LocalLocation::Reg(reg) = self.locals.location_of(name) else { unreachable!() };
+                        let low = match reg.name() {
+                            "dx" => Some("dl"),
+                            "bx" => Some("bl"),
+                            "cx" => Some("cl"),
+                            _ => None,
+                        };
+                        (low, Some(k))
+                    } else {
+                        (None, None)
+                    }
+                } else {
+                    (None, None)
+                }
+            }
+            _ => (None, None),
+        };
+        if elem.is_char_like() && let Some(low_name) = byte_src_reg {
+            let _ = write!(self.out, "\tmov\tal,{low_name}\r\n");
+            if let Some(k) = byte_addend {
+                let k8 = (k & 0xFF) as u8;
+                let k_i8 = k8 as i8;
+                if k_i8 == 1 {
+                    self.out.extend_from_slice(b"\tinc\tal\r\n");
+                } else if k_i8 == -1 {
+                    self.out.extend_from_slice(b"\tdec\tal\r\n");
+                } else {
+                    let _ = write!(self.out, "\tadd\tal,{k_i8}\r\n");
+                }
+            }
+            self.out.extend_from_slice(b"\tmov\tbyte ptr [bx],al\r\n");
+            return;
         }
         // Non-constant RHS: evaluate to AX (or AL for byte storage),
         // then store through [bx]. Fixtures 1219 (`a[i] = i` with char
