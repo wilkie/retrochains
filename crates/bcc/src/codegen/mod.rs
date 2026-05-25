@@ -10615,6 +10615,23 @@ impl<'a> FunctionEmitter<'a> {
                 let _ = write!(self.out, "\tmov\tbyte ptr [{addr_reg}],al\r\n");
                 return;
             }
+            // `*pp <add|sub>= K` where *pp itself is a pointer:
+            // scale K by sizeof(pointee-of-pointee) for C pointer
+            // arithmetic. The inc/dec peephole below assumes
+            // stride=1; pointer-of-pointer with non-1 stride must
+            // emit `add word ptr [reg], K*stride`. Fixture 3647
+            // (`*pp += 1` where pp is `struct Pt**`, stride=4).
+            if let Some(inner) = pointee.pointee()
+                && matches!(op, BinOp::Add | BinOp::Sub)
+                && inner.size_bytes() > 1
+            {
+                let stride = i32::from(inner.size_bytes());
+                let sign = if matches!(op, BinOp::Add) { 1i32 } else { -1 };
+                let bytes = sign.wrapping_mul(v_masked as i32).wrapping_mul(stride);
+                let imm16 = bytes as i16;
+                let _ = write!(self.out, "\tadd\tword ptr [{addr_reg}],{imm16}\r\n");
+                return;
+            }
             // Int-pointee K=1 peephole: `inc word ptr [reg]` / `dec
             // word ptr [reg]` (2 bytes) instead of `add word ptr
             // [reg], 1` (3 bytes). Fixture 1302 (`++(*p)` with int p
