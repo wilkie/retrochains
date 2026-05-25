@@ -8748,6 +8748,66 @@ impl<'a> FunctionEmitter<'a> {
             }
             panic!("variable-indexed global array assign not yet supported (no fixture)");
         }
+        // `p[i] = v` where `p` is a pointer local (not an array).
+        // Load the pointer into BX, scale the index, add, store.
+        // Fixture 1285 (`p[i] = v` with `char *p` parameter).
+        if let Some(pointee) = self.locals.type_of(array).pointee()
+            && indices.len() == 1
+        {
+            let pointee = pointee.clone();
+            let stride = i32::from(pointee.size_bytes());
+            let elem_is_char = pointee.is_char_like();
+            match self.locals.location_of(array) {
+                LocalLocation::Reg(reg) => {
+                    let _ = write!(self.out, "\tmov\tbx,{}\r\n", reg.name());
+                }
+                LocalLocation::Stack(off) => {
+                    let _ = write!(self.out, "\tmov\tbx,word ptr {}\r\n", bp_addr(off));
+                }
+            }
+            if let Some(k) = try_const_eval(&indices[0]) {
+                let off = (k as i32).wrapping_mul(stride);
+                let bx_disp = if off == 0 {
+                    "[bx]".to_owned()
+                } else if off > 0 {
+                    format!("[bx+{off}]")
+                } else {
+                    format!("[bx-{}]", -off)
+                };
+                if let Some(v) = try_const_eval(value) {
+                    let v_masked = if elem_is_char { v & 0xFF } else { v & 0xFFFF };
+                    let width = if elem_is_char { "byte" } else { "word" };
+                    let _ = write!(self.out, "\tmov\t{width} ptr {bx_disp},{v_masked}\r\n");
+                } else {
+                    self.emit_expr_to_ax(value);
+                    if elem_is_char {
+                        let _ = write!(self.out, "\tmov\tbyte ptr {bx_disp},al\r\n");
+                    } else {
+                        let _ = write!(self.out, "\tmov\tword ptr {bx_disp},ax\r\n");
+                    }
+                }
+                return;
+            }
+            let idx_src = self.resolve_operand_source(&indices[0]);
+            let _ = write!(self.out, "\tmov\tax,{}\r\n", idx_src.word());
+            if stride == 2 {
+                self.out.extend_from_slice(b"\tshl\tax,1\r\n");
+            }
+            self.out.extend_from_slice(b"\tadd\tbx,ax\r\n");
+            if let Some(v) = try_const_eval(value) {
+                let v_masked = if elem_is_char { v & 0xFF } else { v & 0xFFFF };
+                let width = if elem_is_char { "byte" } else { "word" };
+                let _ = write!(self.out, "\tmov\t{width} ptr [bx],{v_masked}\r\n");
+            } else {
+                self.emit_expr_to_ax(value);
+                if elem_is_char {
+                    self.out.extend_from_slice(b"\tmov\tbyte ptr [bx],al\r\n");
+                } else {
+                    self.out.extend_from_slice(b"\tmov\tword ptr [bx],ax\r\n");
+                }
+            }
+            return;
+        }
         let array_ty = self.locals.type_of(array).clone();
         let LocalLocation::Stack(base_off) = self.locals.location_of(array) else {
             panic!("array `{array}` should be stack-resident");
