@@ -7197,16 +7197,23 @@ impl<'a> FunctionEmitter<'a> {
                     self.out.extend_from_slice(b"\timul\tdx\r\n");
                 }
                 BinOp::Div | BinOp::Mod => {
+                    // BCC's shape: `push ax` (save RHS divisor),
+                    // `mov ax, dst` (load dividend), `cwd`, `pop
+                    // bx` (recover divisor), `idiv bx`. Same
+                    // 2-byte total as `mov bx, ax` + `mov ax, dst`
+                    // but matches BCC's exact sequence.
+                    // Fixture 1393 (`a %= b * c`).
                     let unsigned = self.locals.type_of(name).is_unsigned();
-                    self.out.extend_from_slice(b"\tmov\tbx,ax\r\n");
+                    self.out.extend_from_slice(b"\tpush\tax\r\n");
                     let _ = write!(self.out, "\tmov\tax,{}\r\n", reg.name());
                     if unsigned {
                         self.out.extend_from_slice(b"\txor\tdx,dx\r\n");
-                        self.out.extend_from_slice(b"\tdiv\tbx\r\n");
                     } else {
                         self.out.extend_from_slice(b"\tcwd\t\r\n");
-                        self.out.extend_from_slice(b"\tidiv\tbx\r\n");
                     }
+                    self.out.extend_from_slice(b"\tpop\tbx\r\n");
+                    let mnem = if unsigned { "div" } else { "idiv" };
+                    let _ = write!(self.out, "\t{mnem}\tbx\r\n");
                 }
                 _ => unreachable!(),
             }
