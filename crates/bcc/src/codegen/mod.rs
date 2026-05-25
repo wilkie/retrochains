@@ -8805,6 +8805,40 @@ impl<'a> FunctionEmitter<'a> {
 
     fn emit_pointer_index_to_ax(&mut self, ptr_name: &str, pointee: Type, index: &Expr) {
         let Some(k) = try_const_eval(index) else {
+            // `p[<idx-in-SI-or-DI>]` for a char-pointer (stride=1):
+            // BCC uses [bx+si] / [bx+di] indexed addressing directly.
+            // Loads the pointer into BX, then byte-load via the
+            // indexed mode — no separate `mov ax, idx; add bx, ax`
+            // pair. Works only for stride=1 (char-pointers); int+
+            // strides need the index scaled first, which would
+            // clobber the index reg. Fixture 1420 (`t += s[i]`).
+            if pointee.is_char_like()
+                && let ExprKind::Ident(idx_name) = &index.kind
+                && self.locals.has(idx_name)
+                && self.locals.type_of(idx_name).is_int_like()
+                && let LocalLocation::Reg(idx_reg) = self.locals.location_of(idx_name)
+                && matches!(idx_reg, Reg::Si | Reg::Di)
+            {
+                match self.locals.location_of(ptr_name) {
+                    LocalLocation::Reg(reg) => {
+                        let _ = write!(self.out, "\tmov\tbx,{}\r\n", reg.name());
+                    }
+                    LocalLocation::Stack(off) => {
+                        let _ = write!(
+                            self.out,
+                            "\tmov\tbx,word ptr {}\r\n",
+                            bp_addr(off),
+                        );
+                    }
+                }
+                let _ = write!(
+                    self.out,
+                    "\tmov\tal,byte ptr [bx+{}]\r\n",
+                    idx_reg.name(),
+                );
+                self.emit_widen_al(&pointee);
+                return;
+            }
             // Variable index. BCC's shape (fixture 1339):
             //   mov ax, <index>
             //   shl ax, 1     ; scale by stride (int = 2)

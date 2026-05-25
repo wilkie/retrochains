@@ -1021,6 +1021,12 @@ fn parse_mov(operands: &str, line_no: usize) -> AsmResult<Instr> {
         if rhs == "byte ptr [di]" {
             return Ok(Instr::MovAlFromDiPtr);
         }
+        if rhs == "byte ptr [bx+si]" {
+            return Ok(Instr::MovAlFromBxSi);
+        }
+        if rhs == "byte ptr [bx+di]" {
+            return Ok(Instr::MovAlFromBxDi);
+        }
         // `mov al,byte ptr [bx+disp8]` — char-pointer subscript
         // load (fixture 865). disp=0 stays with `MovAlFromBxPtr`
         // (2-byte form).
@@ -1194,6 +1200,20 @@ fn parse_mov(operands: &str, line_no: usize) -> AsmResult<Instr> {
         && let Some(imm) = parse_imm8(rhs)
     {
         return Ok(Instr::MovBxPtrImm8 { imm: imm as u8 });
+    }
+    // LHS `byte ptr [bx+si]` / `[bx+di]` — indexed byte store
+    // (fixture 3559: BCC folds the array-base + index into a
+    // single memory operand instead of computing the address
+    // into BX upfront).
+    if lhs == "byte ptr [bx+si]"
+        && let Some(imm) = parse_imm8(rhs)
+    {
+        return Ok(Instr::MovBxSiPtrImm8 { imm: imm as u8 });
+    }
+    if lhs == "byte ptr [bx+di]"
+        && let Some(imm) = parse_imm8(rhs)
+    {
+        return Ok(Instr::MovBxDiPtrImm8 { imm: imm as u8 });
     }
     // LHS `byte ptr [si]` — byte-store through SI pointer (fixture 465).
     if lhs == "byte ptr [si]" {

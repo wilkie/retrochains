@@ -381,6 +381,8 @@ fn instr_size(instr: &Instr) -> usize {
         | Instr::OrAxImm16 { .. }
         | Instr::XorAxImm16 { .. } => 3,
         Instr::MovAlFromSiPtr | Instr::MovAlFromBxPtr | Instr::MovAlFromDiPtr => 2,
+        Instr::MovAlFromBxSi | Instr::MovAlFromBxDi => 2,
+        Instr::MovBxSiPtrImm8 { .. } | Instr::MovBxDiPtrImm8 { .. } => 3,
         Instr::ImulReg16 { .. } | Instr::IdivReg16 { .. } | Instr::DivReg16 { .. } => 2,
         Instr::AddAxGroupSym { .. }
         | Instr::OrAxGroupSym { .. }
@@ -1650,6 +1652,22 @@ fn emit_instr(
             // ModR/M 04 = mod=00 reg=AL r/m=100([si]).
             out.push(0x8A);
             out.push(0x04);
+        }
+        Instr::MovAlFromBxSi => {
+            // `mov al,byte ptr [bx+si]` → 8A 00.
+            out.push(0x8A); out.push(0x00);
+        }
+        Instr::MovAlFromBxDi => {
+            // `mov al,byte ptr [bx+di]` → 8A 01.
+            out.push(0x8A); out.push(0x01);
+        }
+        Instr::MovBxSiPtrImm8 { imm } => {
+            // `mov byte ptr [bx+si], imm8` → C6 00 ii.
+            out.push(0xC6); out.push(0x00); out.push(*imm);
+        }
+        Instr::MovBxDiPtrImm8 { imm } => {
+            // `mov byte ptr [bx+di], imm8` → C6 01 ii.
+            out.push(0xC6); out.push(0x01); out.push(*imm);
         }
         Instr::MovAlFromBxPtr => {
             // `mov al,byte ptr [bx]` → 8A 07. Same opcode as the

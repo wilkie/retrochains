@@ -884,6 +884,18 @@ pub enum Instr {
         offset: i16,
         reg: Reg8,
     },
+    /// `mov al,byte ptr [bx+si]` — 8A 00. ModR/M 00 = mod=00 reg=AL
+    /// r/m=000 ([bx+si]). Indexed byte load via BX base + SI index.
+    /// Fixture 1420 (`t += s[i]` for char* s, i in SI — BCC folds
+    /// the index-add into the memory operand).
+    MovAlFromBxSi,
+    /// `mov al,byte ptr [bx+di]` — 8A 01. Sibling for the DI index.
+    MovAlFromBxDi,
+    /// `mov byte ptr [bx+si], imm8` — C6 00 ii. Indexed byte store.
+    /// Fixture 3559 (`buf[i] = 0` for char* buf, i in SI).
+    MovBxSiPtrImm8 { imm: u8 },
+    /// `mov byte ptr [bx+di], imm8` — C6 01 ii. Sibling.
+    MovBxDiPtrImm8 { imm: u8 },
     /// `mov al,byte ptr [si]` — 8A 04. 8-bit load through SI pointer.
     MovAlFromSiPtr,
     /// `mov al,byte ptr [bx]` — 8A 07. 8-bit load through BX pointer.
