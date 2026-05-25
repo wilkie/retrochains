@@ -2348,6 +2348,17 @@ fn parse_cmp(operands: &str, line_no: usize) -> AsmResult<Instr> {
         if let Some(offset) = parse_bp_relative(rhs) {
             return Ok(Instr::CmpAxBpRel { offset });
         }
+        // `cmp ax, word ptr [si|di|bx]` — register-pointer deref
+        // sources. Fixtures 1352, 2203, 2362, 3418 (`*p` cmp via DI).
+        if rhs == "word ptr [di]" {
+            return Ok(Instr::CmpAxFromDiPtr);
+        }
+        if rhs == "word ptr [si]" {
+            return Ok(Instr::CmpAxFromSiPtr);
+        }
+        if rhs == "word ptr [bx]" {
+            return Ok(Instr::CmpAxFromBxPtr);
+        }
         // `cmp ax,K` — BCC uses the special AX-imm16 opcode (3D) for
         // every constant K, not the generic 83 F8 form.
         if let Some(imm) = parse_imm16(rhs) {

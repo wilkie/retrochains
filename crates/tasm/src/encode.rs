@@ -445,6 +445,7 @@ fn instr_size(instr: &Instr) -> usize {
         }
         Instr::CmpByteBpRelImm8 { .. } => 4,
         Instr::CmpByteSiPtrImm8 { .. } | Instr::CmpByteBxPtrImm8 { .. } | Instr::CmpByteDiPtrImm8 { .. } => 3,
+        Instr::CmpAxFromDiPtr | Instr::CmpAxFromSiPtr | Instr::CmpAxFromBxPtr => 2,
         Instr::CmpWordSiDispImm8Sx { disp, .. } => if *disp == 0 { 3 } else { 4 },
         Instr::AndGroupSymImm16 { .. }
         | Instr::OrGroupSymImm16 { .. }
@@ -1803,6 +1804,24 @@ fn emit_instr(
             out.push(0x80);
             out.push(0x3D);
             out.push(*imm);
+        }
+        Instr::CmpAxFromDiPtr => {
+            // `cmp ax, word ptr [di]` → 3B 05. ModR/M 05 = mod=00
+            // reg=AX r/m=101 ([di]).
+            out.push(0x3B);
+            out.push(0x05);
+        }
+        Instr::CmpAxFromSiPtr => {
+            // `cmp ax, word ptr [si]` → 3B 04. ModR/M 04 = mod=00
+            // reg=AX r/m=100 ([si]).
+            out.push(0x3B);
+            out.push(0x04);
+        }
+        Instr::CmpAxFromBxPtr => {
+            // `cmp ax, word ptr [bx]` → 3B 07. ModR/M 07 = mod=00
+            // reg=AX r/m=111 ([bx]).
+            out.push(0x3B);
+            out.push(0x07);
         }
         Instr::CmpWordSiDispImm8Sx { disp, imm } => {
             // `cmp word ptr [si+disp], imm8sx` → Grp1 /7 r/m16,imm8sx.

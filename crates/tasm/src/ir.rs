@@ -1009,6 +1009,15 @@ pub enum Instr {
     /// of `CmpByteSiPtrImm8`. Used by `while (*++p)` for char* p
     /// enregistered in DI (fixture 1311).
     CmpByteDiPtrImm8 { imm: u8 },
+    /// `cmp ax, word ptr [di]` — `3B 05` (2 bytes). Compare AX
+    /// against a word read through DI. Fixture 1352
+    /// (`*a - *b == 0` with b in DI: load *a to AX, then compare
+    /// against *b via this form).
+    CmpAxFromDiPtr,
+    /// `cmp ax, word ptr [si]` — `3B 04` (2 bytes). SI sibling.
+    CmpAxFromSiPtr,
+    /// `cmp ax, word ptr [bx]` — `3B 07` (2 bytes). BX sibling.
+    CmpAxFromBxPtr,
     /// `cmp word ptr [si+disp], imm8sx` — Grp1 r/m16,imm8sx with
     /// /7=CMP and SI-indirect addressing. disp=0 encodes as
     /// `83 3C ii` (mod=00, 3 bytes); disp!=0 fitting i8 encodes as
