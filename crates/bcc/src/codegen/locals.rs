@@ -126,6 +126,15 @@ impl Reg {
     /// the divisor). Probed via fixture 677.
     const CHAR_POOL_UDIV: [Self; 2] = [Self::Bl, Self::Cl];
 
+    /// Char pool variant when the function emits a true `imul`
+    /// (non-const or const-non-power-of-2 multiply) or a char
+    /// compound assign with non-byte RHS (the widening dance uses
+    /// DL as scratch). Both situations clobber DX, so DL drops.
+    /// Fixtures 1295 (`c *= 3`), 1314 (`c += a*b`), 1430
+    /// (`c += a*2` — shifts but the compound itself widens through
+    /// DL).
+    const CHAR_POOL_MUL: [Self; 2] = [Self::Bl, Self::Cl];
+
     /// Registers BCC treats as callee-saved, in canonical push order.
     /// Everything else (DX, BX, CX, DL, BL, CL) is used by BCC without
     /// push/pop at the function boundary.
@@ -301,11 +310,35 @@ impl Locals {
             function.body.as_deref().unwrap_or(&[]),
             &uchar_local_names,
         );
+        // Any multiplication that emits `imul` (i.e., not a const
+        // power-of-2 RHS that folds to shifts) clobbers DX, so DL
+        // becomes unsafe for char locals. Char compound assigns
+        // with a non-byte RHS also use DL as a scratch register
+        // in the widening dance (`mov dl, <c>; add dl, al; mov
+        // <c>, dl`). Fixtures 1295, 1314, 1430.
+        let function_has_imul = body_emits_imul(
+            function.body.as_deref().unwrap_or(&[]),
+            &char_local_names,
+        );
+        let function_has_char_compound_int_rhs = body_has_char_compound_int_rhs(
+            function.body.as_deref().unwrap_or(&[]),
+            &char_local_names,
+        );
+        let dx_clobbered = function_has_div
+            || function_has_uchar_byte_div
+            || function_has_imul
+            || function_has_char_compound_int_rhs;
         if !function_makes_call {
             let char_pool_slice: &[Reg] = if function_has_uchar_byte_div {
                 &Reg::CHAR_POOL_UDIV
             } else if function_has_div {
                 &Reg::CHAR_POOL_DIV
+            } else if dx_clobbered {
+                // MUL-only or compound-widening case: DL drops but
+                // BL/CL order stays. Differs from the DIV case
+                // (which prefers CL because BX is the typical
+                // divisor reg).
+                &Reg::CHAR_POOL_MUL
             } else {
                 &Reg::CHAR_POOL
             };
@@ -907,6 +940,196 @@ fn expr_has_div_or_mod(e: &Expr) -> bool {
         | ExprKind::AddressOf(_)
         | ExprKind::AddressOfArrayElem { .. }
         | ExprKind::StringLit(_) => false,
+    }
+}
+
+/// True iff the function emits any `imul` (clobbers DX). Detects
+/// Mul binops where the RHS isn't a const power of two ≤ 256 — those
+/// fold to a shift chain and leave DX alone. Char Mul/Div paths fold
+/// to `imul/idiv byte ptr <src>` when the RHS is a byte lvalue, but
+/// those still don't touch DX/DL on the 8-bit form. The pessimistic
+/// rule here: any Mul with non-pow2 const, or any non-const Mul,
+/// emits a `imul` that clobbers DX. Used by the char-pool decision.
+fn body_emits_imul(body: &[Stmt], char_locals: &HashSet<&str>) -> bool {
+    body.iter().any(|s| stmt_emits_imul(s, char_locals))
+}
+
+fn stmt_emits_imul(stmt: &Stmt, char_locals: &HashSet<&str>) -> bool {
+    match &stmt.kind {
+        StmtKind::Return(value) => value.as_ref().is_some_and(expr_emits_imul),
+        StmtKind::Declare { init, .. } => init.as_ref().is_some_and(expr_emits_imul),
+        StmtKind::Assign { value, .. } => expr_emits_imul(value),
+        StmtKind::CompoundAssign { op, value, name } => {
+            let target_is_8bit_mul = matches!(op, crate::ast::BinOp::Mul)
+                && char_locals.contains(name.as_str())
+                && try_const_eval(value).is_none();
+            if target_is_8bit_mul {
+                return false; // 8-bit imul byte form doesn't clobber DX.
+            }
+            // `*= K` (const RHS): only emits imul when K isn't a small power of 2.
+            if matches!(op, crate::ast::BinOp::Mul) {
+                if let Some(k) = try_const_eval(value) {
+                    let v = k & 0xFFFF;
+                    if v != 0 && (v & (v - 1)) == 0 && v <= 256 {
+                        return expr_emits_imul(value);
+                    }
+                    return true;
+                }
+                return true;
+            }
+            expr_emits_imul(value)
+        }
+        StmtKind::If { cond, then_branch, else_branch } => {
+            expr_emits_imul(cond)
+                || body_emits_imul(then_branch, char_locals)
+                || else_branch.as_ref().is_some_and(|b| body_emits_imul(b, char_locals))
+        }
+        StmtKind::While { cond, body } => {
+            expr_emits_imul(cond) || body_emits_imul(body, char_locals)
+        }
+        StmtKind::DoWhile { body, cond } => {
+            body_emits_imul(body, char_locals) || expr_emits_imul(cond)
+        }
+        StmtKind::For { init, cond, step, body } => {
+            init.as_ref().is_some_and(|es| es.iter().any(expr_emits_imul))
+                || cond.as_ref().is_some_and(expr_emits_imul)
+                || step.as_ref().is_some_and(|es| es.iter().any(expr_emits_imul))
+                || body_emits_imul(body, char_locals)
+        }
+        StmtKind::Switch { scrutinee, cases } => {
+            expr_emits_imul(scrutinee)
+                || cases.iter().any(|c| body_emits_imul(&c.body, char_locals))
+        }
+        StmtKind::ArrayAssign { indices, value, .. }
+        | StmtKind::MemberArrayAssign { indices, value, .. } => {
+            indices.iter().any(expr_emits_imul) || expr_emits_imul(value)
+        }
+        StmtKind::ArrayCompoundAssign { op, indices, value, .. } => {
+            let mul_emits = matches!(op, crate::ast::BinOp::Mul)
+                && try_const_eval(value).map_or(true, |k| {
+                    let v = k & 0xFFFF;
+                    !(v != 0 && (v & (v - 1)) == 0 && v <= 256)
+                });
+            mul_emits || indices.iter().any(expr_emits_imul) || expr_emits_imul(value)
+        }
+        StmtKind::DerefAssign { target, value } => {
+            expr_emits_imul(target) || expr_emits_imul(value)
+        }
+        StmtKind::DerefCompoundAssign { op, target, value, .. } => {
+            let mul_emits = matches!(op, crate::ast::BinOp::Mul)
+                && try_const_eval(value).map_or(true, |k| {
+                    let v = k & 0xFFFF;
+                    !(v != 0 && (v & (v - 1)) == 0 && v <= 256)
+                });
+            mul_emits || expr_emits_imul(target) || expr_emits_imul(value)
+        }
+        StmtKind::MemberAssign { base, value, .. } => {
+            expr_emits_imul(base) || expr_emits_imul(value)
+        }
+        StmtKind::MemberCompoundAssign { op, base, value, .. } => {
+            let mul_emits = matches!(op, crate::ast::BinOp::Mul)
+                && try_const_eval(value).map_or(true, |k| {
+                    let v = k & 0xFFFF;
+                    !(v != 0 && (v & (v - 1)) == 0 && v <= 256)
+                });
+            mul_emits || expr_emits_imul(base) || expr_emits_imul(value)
+        }
+        StmtKind::ExprStmt(e) => expr_emits_imul(e),
+        StmtKind::Break
+        | StmtKind::Continue
+        | StmtKind::Goto { .. }
+        | StmtKind::Label { .. }
+        | StmtKind::Empty => false,
+    }
+}
+
+fn expr_emits_imul(e: &Expr) -> bool {
+    match &e.kind {
+        ExprKind::BinOp { op, left, right } => {
+            let this_emits = matches!(op, crate::ast::BinOp::Mul)
+                && {
+                    // For const RHS power-of-2 ≤ 256: shift, no imul.
+                    if let Some(k) = try_const_eval(right) {
+                        let v = k & 0xFFFF;
+                        !(v != 0 && (v & (v - 1)) == 0 && v <= 256)
+                    } else {
+                        true
+                    }
+                };
+            this_emits || expr_emits_imul(left) || expr_emits_imul(right)
+        }
+        ExprKind::Logical { left, right, .. } => {
+            expr_emits_imul(left) || expr_emits_imul(right)
+        }
+        ExprKind::Unary { operand, .. } => expr_emits_imul(operand),
+        ExprKind::Call { args, .. } => args.iter().any(expr_emits_imul),
+        ExprKind::AssignExpr { value, .. } => expr_emits_imul(value),
+        ExprKind::Deref(operand) => expr_emits_imul(operand),
+        ExprKind::ArrayIndex { array, index } => {
+            expr_emits_imul(array) || expr_emits_imul(index)
+        }
+        ExprKind::Member { base, .. } => expr_emits_imul(base),
+        ExprKind::Ternary { cond, then_value, else_value } => {
+            expr_emits_imul(cond)
+                || expr_emits_imul(then_value)
+                || expr_emits_imul(else_value)
+        }
+        ExprKind::Cast { operand, .. } => expr_emits_imul(operand),
+        ExprKind::InitList { items } => items.iter().any(expr_emits_imul),
+        ExprKind::Comma { left, right } => {
+            expr_emits_imul(left) || expr_emits_imul(right)
+        }
+        ExprKind::Update { .. }
+        | ExprKind::Ident(_)
+        | ExprKind::IntLit(_)
+        | ExprKind::AddressOf(_)
+        | ExprKind::AddressOfArrayElem { .. }
+        | ExprKind::StringLit(_) => false,
+    }
+}
+
+/// True iff any char compound assign has a non-byte RHS, which
+/// triggers the widening dance that uses DL as a scratch reg
+/// (`mov dl, <c>; add dl, al; mov <c>, dl`). Fixture 1430.
+fn body_has_char_compound_int_rhs(body: &[Stmt], char_locals: &HashSet<&str>) -> bool {
+    body.iter().any(|s| stmt_has_char_compound_int_rhs(s, char_locals))
+}
+
+fn stmt_has_char_compound_int_rhs(stmt: &Stmt, char_locals: &HashSet<&str>) -> bool {
+    match &stmt.kind {
+        StmtKind::CompoundAssign { name, op, value } => {
+            // Only Add/Sub/Mul widen the char to int via the `mov dl,
+            // <c>; <op> dl, al; mov <c>, dl` scratch dance. Bitwise
+            // ops (AND/OR/XOR) work byte-wise — `<op> dl, al` directly,
+            // no DL scratch. Fixture 1254 (`c |= n`) keeps c in DL.
+            char_locals.contains(name.as_str())
+                && matches!(
+                    op,
+                    crate::ast::BinOp::Add | crate::ast::BinOp::Sub | crate::ast::BinOp::Mul
+                )
+                && !is_char_typed_expr(value, char_locals)
+        }
+        StmtKind::If { then_branch, else_branch, .. } => {
+            body_has_char_compound_int_rhs(then_branch, char_locals)
+                || else_branch.as_ref().is_some_and(|b| body_has_char_compound_int_rhs(b, char_locals))
+        }
+        StmtKind::While { body, .. } | StmtKind::DoWhile { body, .. } => {
+            body_has_char_compound_int_rhs(body, char_locals)
+        }
+        StmtKind::For { body, .. } => body_has_char_compound_int_rhs(body, char_locals),
+        StmtKind::Switch { cases, .. } => {
+            cases.iter().any(|c| body_has_char_compound_int_rhs(&c.body, char_locals))
+        }
+        _ => false,
+    }
+}
+
+fn is_char_typed_expr(e: &Expr, char_locals: &HashSet<&str>) -> bool {
+    match &e.kind {
+        ExprKind::Ident(name) => char_locals.contains(name.as_str()),
+        ExprKind::IntLit(_) => true, // Small const fits in a byte and BCC keeps the byte form.
+        ExprKind::Cast { ty, .. } => ty.is_char_like(),
+        _ => false,
     }
 }
 
