@@ -1286,7 +1286,22 @@ impl<'a> FunctionEmitter<'a> {
         }
         self.emit_label(plan.check_slot);
         if let Some(c) = cond {
-            self.emit_cond_branch(c, Some(plan.body_slot), None);
+            // Logical cond (`&&`/`||`): pass both targets so the
+            // short-circuit recursion has a false-fall-through label.
+            // The break_target_slot is emitted unconditionally for
+            // this shape. Fixture 3331 (`for (i = 0; i < n && p[i] !=
+            // 0; i++) ;`).
+            let cond_is_logical = matches!(c.kind, ExprKind::Logical { .. });
+            let false_slot = if cond_is_logical {
+                Some(plan.break_target_slot)
+            } else {
+                None
+            };
+            self.emit_cond_branch(c, Some(plan.body_slot), false_slot);
+            if cond_is_logical {
+                self.emit_label(plan.break_target_slot);
+                return;
+            }
         } else {
             // Missing cond means infinite loop — unconditional back-jump.
             let _ = write!(self.out, "\tjmp\tshort {}\r\n", self.label_ref(plan.body_slot));
@@ -2776,8 +2791,25 @@ impl<'a> FunctionEmitter<'a> {
                 LogicalOp::And => {
                     // a false → false_slot; a true → fall through to b.
                     // b carries the outer true/false targets.
-                    self.emit_cond_branch(left, None, false_slot);
+                    // When `&&` is the LHS of an outer `||`
+                    // (false_slot is None but true_slot is set), `a`
+                    // false needs a local "after-b" label to fall
+                    // into the outer `||`'s right operand. Use this
+                    // `&&`'s own plan slot (base+0) for that.
+                    // Fixture 1358 (`a && b || c`).
+                    let local_false = if false_slot.is_none() && true_slot.is_some() {
+                        Some(self.label_plan.base(cond.span.start, cond.span.end))
+                    } else {
+                        false_slot
+                    };
+                    self.emit_cond_branch(left, None, local_false);
                     self.emit_cond_branch(right, true_slot, false_slot);
+                    if false_slot.is_none()
+                        && true_slot.is_some()
+                        && let Some(slot) = local_false
+                    {
+                        self.emit_label(slot);
+                    }
                 }
                 LogicalOp::Or => {
                     // a true → true_slot (jump); a false → fall through to b.
