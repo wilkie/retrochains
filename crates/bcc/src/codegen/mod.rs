@@ -11694,6 +11694,51 @@ impl<'a> FunctionEmitter<'a> {
                 let _ = write!(self.out, "\tmov\tword ptr {addr},ax\r\n");
             }
             return;
+        } else if matches!(kind, crate::ast::MemberKind::Dot)
+            && let ExprKind::ArrayIndex { array, index } = &base.kind
+            && let ExprKind::Ident(arr_name) = &array.kind
+            && self.locals.has(arr_name)
+            && let arr_ty = self.locals.type_of(arr_name).clone()
+            && let Some(elem_ty) = arr_ty.array_elem()
+            && let Some((field_off, field_ty)) = elem_ty.field(field)
+            && let LocalLocation::Stack(base_off) = self.locals.location_of(arr_name)
+        {
+            // `<stack-struct-arr>[<var-idx>].<field> = <value>` —
+            // compute &arr[i] via emit_array_addr_to_bx, then write
+            // at `[bx+field_off]`. Fixture 1914 (struct R arr[3]
+            // with 3-int struct, 6-byte stride).
+            let elem_size = elem_ty.size_bytes();
+            let field_ty_clone = field_ty.clone();
+            // Emit value into AX first (the BX-setup may clobber AX).
+            if let Some(v) = try_const_eval(value) {
+                self.emit_array_addr_to_bx(arr_name, index, base_off, elem_size);
+                let bx_disp = if field_off == 0 {
+                    "[bx]".to_owned()
+                } else {
+                    format!("[bx+{field_off}]")
+                };
+                let width = if field_ty_clone.is_char_like() { "byte" } else { "word" };
+                let v_masked = if field_ty_clone.is_char_like() {
+                    v & 0xFF
+                } else {
+                    v & 0xFFFF
+                };
+                let _ = write!(self.out, "\tmov\t{width} ptr {bx_disp},{v_masked}\r\n");
+                return;
+            }
+            self.emit_expr_to_ax(value);
+            self.emit_array_addr_to_bx(arr_name, index, base_off, elem_size);
+            let bx_disp = if field_off == 0 {
+                "[bx]".to_owned()
+            } else {
+                format!("[bx+{field_off}]")
+            };
+            if field_ty_clone.is_char_like() {
+                let _ = write!(self.out, "\tmov\tbyte ptr {bx_disp},al\r\n");
+            } else {
+                let _ = write!(self.out, "\tmov\tword ptr {bx_disp},ax\r\n");
+            }
+            return;
         } else {
             // Arrow (or a Dot whose base isn't a const-chain lvalue).
             let ExprKind::Ident(name) = &base.kind else {
