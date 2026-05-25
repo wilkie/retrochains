@@ -681,6 +681,15 @@ fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
             if let Some(offset) = parse_word_bp_relative(rest) {
                 return Ok(Instr::IncBpRel { offset });
             }
+            // `inc word ptr <group>:<sym>[bx]` — indexed-element
+            // increment. Fixture 2949 (`arr[i] += 1`).
+            if let Some((group, symbol, disp)) = parse_group_symbol_bx_disp(rest) {
+                return Ok(Instr::IncGroupSymBxDisp {
+                    group: group.to_string(),
+                    symbol: symbol.to_string(),
+                    disp,
+                });
+            }
             // `inc word ptr <group>:<sym>[+N]` — memory-direct
             // increment of a data-segment global. Fixture 512.
             if let Some((group, symbol)) = parse_group_symbol(rest) {
@@ -745,6 +754,15 @@ fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
             // decrement.
             if let Some(offset) = parse_word_bp_relative(rest) {
                 return Ok(Instr::DecBpRel { offset });
+            }
+            // `dec word ptr <group>:<sym>[bx]` — indexed-element
+            // decrement.
+            if let Some((group, symbol, disp)) = parse_group_symbol_bx_disp(rest) {
+                return Ok(Instr::DecGroupSymBxDisp {
+                    group: group.to_string(),
+                    symbol: symbol.to_string(),
+                    disp,
+                });
             }
             // `dec word ptr <group>:<sym>[+N]` — symmetric with inc.
             if let Some((group, symbol)) = parse_group_symbol(rest) {
@@ -1656,6 +1674,34 @@ fn parse_sub(operands: &str, line_no: usize) -> AsmResult<Instr> {
     {
         return Ok(Instr::SubBxDispImm8 { disp, imm });
     }
+    // `sub word ptr <group>:<sym>[bx], imm/reg` — indexed-element
+    // compound sub. Mirror of `AddGroupSymBxDispImm*/Reg16`.
+    if let Some((group, symbol, disp)) = parse_group_symbol_bx_disp(lhs) {
+        if let Some(imm) = parse_imm8_signed(rhs) {
+            return Ok(Instr::SubGroupSymBxDispImm8Sx {
+                group: group.to_string(),
+                symbol: symbol.to_string(),
+                disp,
+                imm,
+            });
+        }
+        if let Some(imm) = parse_imm16(rhs) {
+            return Ok(Instr::SubGroupSymBxDispImm16 {
+                group: group.to_string(),
+                symbol: symbol.to_string(),
+                disp,
+                imm: imm as u16,
+            });
+        }
+        if let Some(reg) = Reg16::parse(rhs) {
+            return Ok(Instr::SubGroupSymBxDispReg16 {
+                reg,
+                group: group.to_string(),
+                symbol: symbol.to_string(),
+                disp,
+            });
+        }
+    }
     // Otherwise: try the AX/mem form.
     parse_alu_ax_mem(operands, line_no, "sub", |o| Instr::SubAxBpRel { offset: o })
 }
@@ -2290,6 +2336,35 @@ fn parse_add(operands: &str, line_no: usize) -> AsmResult<Instr> {
         // (fixture 838).
         if rhs == "ax" {
             return Ok(Instr::AddSiPtrAx);
+        }
+    }
+    // `add word ptr <group>:<sym>[bx], imm/reg` — indexed-element
+    // compound add. Fixture 2949 (`arr[i] += K`), 3593 (`arr[i] +=
+    // arr[j]`).
+    if let Some((group, symbol, disp)) = parse_group_symbol_bx_disp(lhs) {
+        if let Some(imm) = parse_imm8_signed(rhs) {
+            return Ok(Instr::AddGroupSymBxDispImm8Sx {
+                group: group.to_string(),
+                symbol: symbol.to_string(),
+                disp,
+                imm,
+            });
+        }
+        if let Some(imm) = parse_imm16(rhs) {
+            return Ok(Instr::AddGroupSymBxDispImm16 {
+                group: group.to_string(),
+                symbol: symbol.to_string(),
+                disp,
+                imm: imm as u16,
+            });
+        }
+        if let Some(reg) = Reg16::parse(rhs) {
+            return Ok(Instr::AddGroupSymBxDispReg16 {
+                reg,
+                group: group.to_string(),
+                symbol: symbol.to_string(),
+                disp,
+            });
         }
     }
     // `add word ptr [bx+disp8], ax` — global-pointer subscript

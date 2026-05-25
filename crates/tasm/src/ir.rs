@@ -452,6 +452,59 @@ pub enum Instr {
         symbol: String,
         disp: u16,
     },
+    /// `inc word ptr <group>:<sym>[bx]` — `FF 87 lo hi`. Grp5 /0
+    /// against an indexed global element. Fixture 2949
+    /// (`arr[i] += 1`).
+    IncGroupSymBxDisp { group: String, symbol: String, disp: u16 },
+    /// `dec word ptr <group>:<sym>[bx]` — `FF 8F lo hi`. Grp5 /1.
+    DecGroupSymBxDisp { group: String, symbol: String, disp: u16 },
+    /// `add word ptr <group>:<sym>[bx], imm8sx` — `83 87 lo hi ii`.
+    /// Grp1 /0 with an indexed global memory operand and a
+    /// sign-extended byte immediate.
+    AddGroupSymBxDispImm8Sx {
+        group: String,
+        symbol: String,
+        disp: u16,
+        imm: i8,
+    },
+    /// `add word ptr <group>:<sym>[bx], imm16` — `81 87 lo hi LL HH`.
+    AddGroupSymBxDispImm16 {
+        group: String,
+        symbol: String,
+        disp: u16,
+        imm: u16,
+    },
+    /// `sub word ptr <group>:<sym>[bx], imm8sx` — `83 AF lo hi ii`.
+    SubGroupSymBxDispImm8Sx {
+        group: String,
+        symbol: String,
+        disp: u16,
+        imm: i8,
+    },
+    /// `sub word ptr <group>:<sym>[bx], imm16` — `81 AF lo hi LL HH`.
+    SubGroupSymBxDispImm16 {
+        group: String,
+        symbol: String,
+        disp: u16,
+        imm: u16,
+    },
+    /// `add word ptr <group>:<sym>[bx], <reg16>` — `01 (mod=10
+    /// reg=<r> r/m=111) lo hi`. Indexed memory += register.
+    /// Fixture 3593 (`arr[i] += arr[j]`).
+    AddGroupSymBxDispReg16 {
+        reg: Reg16,
+        group: String,
+        symbol: String,
+        disp: u16,
+    },
+    /// `sub word ptr <group>:<sym>[bx], <reg16>` — `29 (mod=10
+    /// reg=<r> r/m=111) lo hi`. Sibling.
+    SubGroupSymBxDispReg16 {
+        reg: Reg16,
+        group: String,
+        symbol: String,
+        disp: u16,
+    },
     /// `cmp word ptr <group>:<sym>[bx], imm8sx` — `83 BF lo hi ii`.
     /// Memory-direct word compare against a sign-extended byte
     /// immediate, indexed via BX. The 16-bit displacement is the

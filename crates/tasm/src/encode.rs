@@ -264,6 +264,10 @@ fn instr_size(instr: &Instr) -> usize {
         Instr::MovReg16GroupSymBxDisp { .. } => 4,
         Instr::AddReg16GroupSymBxDisp { .. } => 4,
         Instr::CmpGroupSymBxDispImm8 { .. } => 5,
+        Instr::IncGroupSymBxDisp { .. } | Instr::DecGroupSymBxDisp { .. } => 4,
+        Instr::AddGroupSymBxDispImm8Sx { .. } | Instr::SubGroupSymBxDispImm8Sx { .. } => 5,
+        Instr::AddGroupSymBxDispImm16 { .. } | Instr::SubGroupSymBxDispImm16 { .. } => 6,
+        Instr::AddGroupSymBxDispReg16 { .. } | Instr::SubGroupSymBxDispReg16 { .. } => 4,
         Instr::CmpGroupSymBxDispImm16 { .. } => 6,
         Instr::CmpByteGroupSymBxDispImm8 { .. } => 5,
         Instr::MovReg8GroupSymBxDisp { .. } => 4,
@@ -1518,6 +1522,36 @@ fn emit_instr(
             // MovReg16GroupSymBxDisp; opcode 03 (ADD r16,r/m16).
             let modrm = 0b10_000_111 | (reg.code() << 3);
             emit_group_sym_lea(&[0x03, modrm], group, symbol, *disp as i16, symbols, group_idx, extern_idx, out, fixups)?;
+        }
+        Instr::IncGroupSymBxDisp { group, symbol, disp } => {
+            emit_group_sym_lea(&[0xFF, 0x87], group, symbol, *disp as i16, symbols, group_idx, extern_idx, out, fixups)?;
+        }
+        Instr::DecGroupSymBxDisp { group, symbol, disp } => {
+            emit_group_sym_lea(&[0xFF, 0x8F], group, symbol, *disp as i16, symbols, group_idx, extern_idx, out, fixups)?;
+        }
+        Instr::AddGroupSymBxDispImm8Sx { group, symbol, disp, imm } => {
+            emit_group_sym_lea(&[0x83, 0x87], group, symbol, *disp as i16, symbols, group_idx, extern_idx, out, fixups)?;
+            out.push(*imm as u8);
+        }
+        Instr::AddGroupSymBxDispImm16 { group, symbol, disp, imm } => {
+            emit_group_sym_lea(&[0x81, 0x87], group, symbol, *disp as i16, symbols, group_idx, extern_idx, out, fixups)?;
+            out.push((*imm & 0xFF) as u8); out.push((*imm >> 8) as u8);
+        }
+        Instr::SubGroupSymBxDispImm8Sx { group, symbol, disp, imm } => {
+            emit_group_sym_lea(&[0x83, 0xAF], group, symbol, *disp as i16, symbols, group_idx, extern_idx, out, fixups)?;
+            out.push(*imm as u8);
+        }
+        Instr::SubGroupSymBxDispImm16 { group, symbol, disp, imm } => {
+            emit_group_sym_lea(&[0x81, 0xAF], group, symbol, *disp as i16, symbols, group_idx, extern_idx, out, fixups)?;
+            out.push((*imm & 0xFF) as u8); out.push((*imm >> 8) as u8);
+        }
+        Instr::AddGroupSymBxDispReg16 { reg, group, symbol, disp } => {
+            let modrm = 0b10_000_111 | (reg.code() << 3);
+            emit_group_sym_lea(&[0x01, modrm], group, symbol, *disp as i16, symbols, group_idx, extern_idx, out, fixups)?;
+        }
+        Instr::SubGroupSymBxDispReg16 { reg, group, symbol, disp } => {
+            let modrm = 0b10_000_111 | (reg.code() << 3);
+            emit_group_sym_lea(&[0x29, modrm], group, symbol, *disp as i16, symbols, group_idx, extern_idx, out, fixups)?;
         }
         Instr::CmpGroupSymBxDispImm8 { group, symbol, disp, imm } => {
             // `cmp word ptr <group>:<sym>[bx], imm8sx` → 83 BF lo

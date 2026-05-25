@@ -10274,6 +10274,69 @@ impl<'a> FunctionEmitter<'a> {
             let _ = write!(self.out, "\t{mnem}\tword ptr {disp},ax\r\n");
             return;
         }
+        // `<global-int-arr>[<var-idx>] <op>= <rhs>` — compute index
+        // into BX (with scale), then memory-direct compound op on
+        // `<sym>[bx]`. Fixture 2949 (`arr[i] += 1` → `inc word ptr
+        // _arr[bx]`), 3593 (`arr[i] += arr[j]`).
+        if let Some(gty) = self.globals.type_of(array)
+            && let Some(elem_ty) = gty.array_elem()
+            && elem_ty.is_int_like()
+            && indices.len() == 1
+            && matches!(
+                op,
+                BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor
+            )
+        {
+            let elem_ty = elem_ty.clone();
+            // ±1 peephole: emit `inc|dec word ptr _arr[bx]` directly.
+            if let Some(v) = try_const_eval(value)
+                && (v & 0xFFFF) == 1
+                && matches!(op, BinOp::Add | BinOp::Sub)
+            {
+                let m = if matches!(op, BinOp::Add) { "inc" } else { "dec" };
+                self.emit_index_into_bx(&indices[0], &elem_ty);
+                let _ = write!(
+                    self.out,
+                    "\t{m}\tword ptr DGROUP:_{array}[bx]\r\n",
+                );
+                return;
+            }
+            // Const RHS (non-±1): `<op> word ptr _arr[bx], K`.
+            if let Some(v) = try_const_eval(value) {
+                let mnem = match op {
+                    BinOp::Add => "add",
+                    BinOp::Sub => "sub",
+                    BinOp::BitAnd => "and",
+                    BinOp::BitOr => "or",
+                    BinOp::BitXor => "xor",
+                    _ => unreachable!(),
+                };
+                self.emit_index_into_bx(&indices[0], &elem_ty);
+                let v16 = (v & 0xFFFF) as u16;
+                let _ = write!(
+                    self.out,
+                    "\t{mnem}\tword ptr DGROUP:_{array}[bx],{v16}\r\n",
+                );
+                return;
+            }
+            // Non-const RHS: evaluate to AX, then `<op> word ptr
+            // _arr[bx], ax`. Fixture 3593 (`arr[i] += arr[j]`).
+            self.emit_expr_to_ax(value);
+            self.emit_index_into_bx(&indices[0], &elem_ty);
+            let mnem = match op {
+                BinOp::Add => "add",
+                BinOp::Sub => "sub",
+                BinOp::BitAnd => "and",
+                BinOp::BitOr => "or",
+                BinOp::BitXor => "xor",
+                _ => unreachable!(),
+            };
+            let _ = write!(
+                self.out,
+                "\t{mnem}\tword ptr DGROUP:_{array}[bx],ax\r\n",
+            );
+            return;
+        }
         let array_ty = self.locals.type_of(array).clone();
         let LocalLocation::Stack(base_off) = self.locals.location_of(array) else {
             panic!("array `{array}` should be stack-resident");
