@@ -2398,6 +2398,16 @@ fn parse_cmp(operands: &str, line_no: usize) -> AsmResult<Instr> {
         if let Some(offset) = parse_byte_bp_relative(rhs) {
             return Ok(Instr::CmpAlBpRel { offset });
         }
+        // Char-ptr-deref compares (fixture 1352).
+        if rhs == "byte ptr [si]" {
+            return Ok(Instr::CmpAlFromSiPtr);
+        }
+        if rhs == "byte ptr [di]" {
+            return Ok(Instr::CmpAlFromDiPtr);
+        }
+        if rhs == "byte ptr [bx]" {
+            return Ok(Instr::CmpAlFromBxPtr);
+        }
     }
     if lhs == "ax" {
         if let Some(offset) = parse_bp_relative(rhs) {

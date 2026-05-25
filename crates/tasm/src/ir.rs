@@ -1045,6 +1045,12 @@ pub enum Instr {
     CmpAxFromSiPtr,
     /// `cmp ax, word ptr [bx]` — `3B 07` (2 bytes). BX sibling.
     CmpAxFromBxPtr,
+    /// `cmp al, byte ptr [si|di|bx]` — `3A 04|05|07` (2 bytes).
+    /// Byte-form sibling for char-pointer deref compares.
+    /// Fixture 1352 (`*a == *b` with both char* in SI/DI).
+    CmpAlFromSiPtr,
+    CmpAlFromDiPtr,
+    CmpAlFromBxPtr,
     /// `cmp word ptr [si+disp], imm8sx` — Grp1 r/m16,imm8sx with
     /// /7=CMP and SI-indirect addressing. disp=0 encodes as
     /// `83 3C ii` (mod=00, 3 bytes); disp!=0 fitting i8 encodes as

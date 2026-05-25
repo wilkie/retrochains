@@ -3302,6 +3302,35 @@ impl<'a> FunctionEmitter<'a> {
     /// 3. LHS is a stack local and RHS is a constant: `cmp word ptr [bp-N], K`
     /// 4. Otherwise: `mov ax, <lhs>` then `cmp ax, <rhs>`
     fn emit_compare(&mut self, left: &Expr, right: &Expr) {
+        // `*<char-ptr-reg> <relop> *<char-ptr-reg>` — both sides
+        // are deref of a register-resident char pointer. Emit byte
+        // compare `mov al, [reg_l]; cmp al, [reg_r]` directly.
+        // Fixture 1352 (`*a == *b` for `char *a, *b` in SI/DI).
+        if let (ExprKind::Deref(l_inner), ExprKind::Deref(r_inner)) =
+            (&left.kind, &right.kind)
+            && let (ExprKind::Ident(l_name), ExprKind::Ident(r_name)) =
+                (&l_inner.kind, &r_inner.kind)
+            && self.locals.has(l_name)
+            && self.locals.has(r_name)
+            && let LocalLocation::Reg(l_reg) = self.locals.location_of(l_name)
+            && let LocalLocation::Reg(r_reg) = self.locals.location_of(r_name)
+            && !l_reg.is_byte()
+            && !r_reg.is_byte()
+            && self
+                .locals
+                .type_of(l_name)
+                .pointee()
+                .is_some_and(|p| p.is_char_like())
+            && self
+                .locals
+                .type_of(r_name)
+                .pointee()
+                .is_some_and(|p| p.is_char_like())
+        {
+            let _ = write!(self.out, "\tmov\tal,byte ptr [{}]\r\n", l_reg.name());
+            let _ = write!(self.out, "\tcmp\tal,byte ptr [{}]\r\n", r_reg.name());
+            return;
+        }
         // `<char_lvalue> <relop> <char_lvalue>` — both sides are
         // char-typed memory operands. BCC emits a byte compare:
         // `mov al, byte ptr <left>; cmp al, byte ptr <right>`. We
