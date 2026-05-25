@@ -8899,12 +8899,29 @@ impl<'a> FunctionEmitter<'a> {
             // Variable-indexed global int-array write. Load `i` into
             // BX, shl once for stride 2, then `mov word ptr
             // _a[bx], <src>`. Fixture 510 (`a[i] = i`).
+            //
+            // When the index is `i++` (or `i--`), BCC snapshots i to
+            // BX directly and defers the post-update to AFTER the
+            // store. Fixture 2499 (`a[i++] = 7`).
             if indices.len() == 1
                 && let Some(elem) = gty.array_elem()
                 && matches!(elem, Type::Int | Type::UInt)
             {
                 let index = &indices[0];
-                if let ExprKind::Ident(i_name) = &index.kind
+                // Track whether to emit a post-update after the store.
+                let mut deferred_post: Option<(&str, crate::ast::UpdateOp)> = None;
+                if let ExprKind::Update {
+                    target: upd_name,
+                    op: upd_op,
+                    position: crate::ast::UpdatePosition::Post,
+                } = &index.kind
+                    && self.locals.has(upd_name)
+                    && let LocalLocation::Reg(upd_reg) = self.locals.location_of(upd_name)
+                    && !upd_reg.is_byte()
+                {
+                    let _ = write!(self.out, "\tmov\tbx,{}\r\n", upd_reg.name());
+                    deferred_post = Some((upd_reg.name(), *upd_op));
+                } else if let ExprKind::Ident(i_name) = &index.kind
                     && self.locals.has(i_name)
                 {
                     match self.locals.location_of(i_name) {
@@ -8926,6 +8943,13 @@ impl<'a> FunctionEmitter<'a> {
                     "\tmov\tword ptr DGROUP:_{array}[bx],{}\r\n",
                     src.word(),
                 );
+                if let Some((upd_reg_name, upd_op)) = deferred_post {
+                    let upd_mnem = match upd_op {
+                        crate::ast::UpdateOp::Inc => "inc",
+                        crate::ast::UpdateOp::Dec => "dec",
+                    };
+                    let _ = write!(self.out, "\t{upd_mnem}\t{upd_reg_name}\r\n");
+                }
                 return;
             }
             // Variable-indexed global long-array write. Load `i` into
