@@ -7984,6 +7984,35 @@ impl<'a> FunctionEmitter<'a> {
                 }
             }
         }
+        // `<call>[K]` — function returning a pointer, indexed at a
+        // constant subscript. Call the function (result in AX),
+        // copy to BX, then read `[bx+K*stride]`. Fixture 1227
+        // (`return greet()[0]` where greet returns `char *`).
+        if let ExprKind::Call { name: fname, args } = &array.kind
+            && let Some(k) = try_const_eval(index)
+            && let Some(ret_ty) = self.signatures.ret_ty_of(fname)
+            && let Some(pointee) = ret_ty.pointee()
+        {
+            let pointee = pointee.clone();
+            let stride = i32::from(pointee.size_bytes());
+            let off = (k as i32).wrapping_mul(stride);
+            self.emit_call(fname, args);
+            self.out.extend_from_slice(b"\tmov\tbx,ax\r\n");
+            let bx_disp = if off == 0 {
+                "[bx]".to_owned()
+            } else if off > 0 {
+                format!("[bx+{off}]")
+            } else {
+                format!("[bx-{}]", -off)
+            };
+            if pointee.is_char_like() {
+                let _ = write!(self.out, "\tmov\tal,byte ptr {bx_disp}\r\n");
+                self.emit_widen_al(&pointee);
+            } else {
+                let _ = write!(self.out, "\tmov\tax,word ptr {bx_disp}\r\n");
+            }
+            return;
+        }
         // Walk a nested chain `a[i1][i2]...` down to the base ident,
         // collecting indices from innermost to outermost. A bare
         // `a[i]` lands here with `indices = [i]` after the reversal.
