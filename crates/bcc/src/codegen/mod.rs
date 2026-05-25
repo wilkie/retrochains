@@ -1828,6 +1828,14 @@ impl<'a> FunctionEmitter<'a> {
             // a single memory/register operand representation.
             // Fixture 1288 (`a += (char)b`).
             ExprKind::Cast { .. } | ExprKind::Ternary { .. } | ExprKind::Call { .. } => true,
+            // Comma expressions need their side effects emitted in
+            // order, then the final expr's value lands in AX.
+            // Fixture 1345 (`a += (b = 3, b + 1)`).
+            ExprKind::Comma { .. } => true,
+            // Pre/post-update in an rvalue position: the value goes
+            // through AX, not through a single operand. Fixture
+            // 1347 (`a += b++`), 1348 (`a += ++b`).
+            ExprKind::Update { .. } => true,
             _ => false,
         }
     }
