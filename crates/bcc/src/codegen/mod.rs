@@ -2456,6 +2456,41 @@ impl<'a> FunctionEmitter<'a> {
             let _ = write!(self.out, "\tmov\tword ptr {dest_lo},dx\r\n");
             return true;
         }
+        // `<dest> = <a> / <K>` / `<a> % <K>` for long lvalue / long
+        // const. Same helper as the lvalue-lvalue path but the
+        // divisor's words are pushed as composed registers. Fixture
+        // 1781 (`r = a % 4L`).
+        if let ExprKind::BinOp { op, left, right } = &value.kind
+            && matches!(op, BinOp::Div | BinOp::Mod)
+            && let Some((a_hi, a_lo)) = self.long_lvalue_addr_pair(left)
+            && let Some(k) = try_const_eval(right)
+        {
+            let unsigned = self.expr_is_unsigned(left);
+            let helper = match (op, unsigned) {
+                (BinOp::Div, false) => "N_LDIV@",
+                (BinOp::Mod, false) => "N_LMOD@",
+                (BinOp::Div, true)  => "N_LUDIV@",
+                (BinOp::Mod, true)  => "N_LUMOD@",
+                _ => unreachable!(),
+            };
+            let lo_k = (k & 0xFFFF) as u16;
+            let hi_k = ((k >> 16) & 0xFFFF) as u16;
+            if hi_k == 0 {
+                self.out.extend_from_slice(b"\txor\tax,ax\r\n");
+            } else {
+                let _ = write!(self.out, "\tmov\tax,{hi_k}\r\n");
+            }
+            let _ = write!(self.out, "\tmov\tdx,{lo_k}\r\n");
+            self.out.extend_from_slice(b"\tpush\tax\r\n");
+            self.out.extend_from_slice(b"\tpush\tdx\r\n");
+            let _ = write!(self.out, "\tpush\tword ptr {a_hi}\r\n");
+            let _ = write!(self.out, "\tpush\tword ptr {a_lo}\r\n");
+            let _ = write!(self.out, "\tcall\tnear ptr {helper}\r\n");
+            self.helpers.insert(helper.to_string());
+            let _ = write!(self.out, "\tmov\tword ptr {dest_hi},dx\r\n");
+            let _ = write!(self.out, "\tmov\tword ptr {dest_lo},ax\r\n");
+            return true;
+        }
         // `<dest> = <a> * <b>` for two long lvalues. Helper convention
         // is CX:BX (LHS) and DX:AX (RHS) → DX:AX. After the call, store
         // DX→dest_hi and AX→dest_lo. Mirrors the return-path shape (line
