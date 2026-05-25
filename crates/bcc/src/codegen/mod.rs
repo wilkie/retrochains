@@ -15685,9 +15685,22 @@ impl<'a> FunctionEmitter<'a> {
                     // before applying the op. Fixture 593 (`n + sum(n
                     // -1)`), 616 (`a + b` with b a char param), 645
                     // (`x + y * 2`).
+                    // `(int)<long_lvalue>` is just a low-half memory
+                    // load — doesn't clobber AX in the sense the
+                    // push/pop dance was designed to prevent. Let it
+                    // route through the normal `add ax, mem` path.
+                    // Fixture 1947 (`a + (int)b + c`).
+                    let rhs_is_int_cast_of_long = if let ExprKind::Cast { ty: cast_ty, operand } = &right.kind {
+                        matches!(cast_ty, Type::Int | Type::UInt)
+                            && self.long_lvalue_addr_pair(operand).is_some()
+                    } else {
+                        false
+                    };
                     let rhs_clobbers_ax = matches!(right.kind, ExprKind::Call { .. })
                         || self.expr_is_char_load(right)
-                        || matches!(right.kind, ExprKind::Cast { .. } | ExprKind::Ternary { .. })
+                        || (matches!(right.kind, ExprKind::Cast { .. })
+                            && !rhs_is_int_cast_of_long)
+                        || matches!(right.kind, ExprKind::Ternary { .. })
                         || (matches!(right.kind, ExprKind::BinOp { .. })
                             && try_const_eval(right).is_none());
                     // Callee-preserved register peephole: when the
@@ -15995,6 +16008,16 @@ impl<'a> FunctionEmitter<'a> {
             } else {
                 self.out.extend_from_slice(b"\tcwd\t\r\n");
             }
+            return;
+        }
+        // `(int)<long_lvalue>` — the cast keeps the low half. Load
+        // just `[lo]` into AX, skipping the full long load that
+        // emit_expr_to_ax would do. Fixture 1947 (`a + (int)b + c`
+        // with long b → BCC chains `add ax, word ptr [b_lo]`).
+        if matches!(ty, Type::Int | Type::UInt)
+            && let Some((_hi, lo)) = self.long_lvalue_addr_pair(operand)
+        {
+            let _ = write!(self.out, "\tmov\tax,word ptr {lo}\r\n");
             return;
         }
         if ty.is_char_like() {
@@ -16882,7 +16905,35 @@ impl<'a> FunctionEmitter<'a> {
             ExprKind::Ternary { .. } => {
                 panic!("ternary as right operand of a binary op not yet supported (no fixture)")
             }
-            ExprKind::Cast { .. } => {
+            ExprKind::Cast { ty: cast_ty, operand } => {
+                // `(int)<long_lvalue>` — fold to the low-half memory
+                // address as a word-sized source operand. The cast is
+                // a no-op at the byte level (low half of a long IS
+                // an int). Fixture 1947 (`a + (int)b + c`).
+                if matches!(cast_ty, Type::Int | Type::UInt)
+                    && let Some((_hi, lo)) = self.long_lvalue_addr_pair(operand)
+                {
+                    // `[bp-N]` / `DGROUP:_<sym>` / `DGROUP:_<sym>+K`.
+                    // Use Local for bp-relative, Global for DGROUP.
+                    if let Some(off_str) = lo.strip_prefix("[bp+").and_then(|s| s.strip_suffix(']')) {
+                        let off: i16 = off_str.parse().unwrap_or(0);
+                        return OperandSource::Local(off);
+                    }
+                    if let Some(off_str) = lo.strip_prefix("[bp-").and_then(|s| s.strip_suffix(']')) {
+                        let off: i16 = off_str.parse().unwrap_or(0);
+                        return OperandSource::Local(-off);
+                    }
+                    if let Some(sym_off) = lo.strip_prefix("DGROUP:_") {
+                        if let Some((sym, off)) = sym_off.split_once('+') {
+                            let offset: i32 = off.parse().unwrap_or(0);
+                            return OperandSource::GlobalOffset {
+                                name: sym.to_string(),
+                                offset,
+                            };
+                        }
+                        return OperandSource::Global(sym_off.to_string());
+                    }
+                }
                 panic!("cast as right operand of a binary op not yet supported (no fixture)")
             }
             ExprKind::InitList { .. } => {
