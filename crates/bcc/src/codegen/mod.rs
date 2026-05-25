@@ -13493,6 +13493,45 @@ impl<'a> FunctionEmitter<'a> {
                         let _ = write!(self.out, "\tmov\tword ptr {},dx\r\n", bp_addr(off));
                         return;
                     }
+                    // `z = x << 16;` long left-shift by 16 — special
+                    // case: move low half into high, zero the low.
+                    // Fixture 2586 (`s = s << 16`).
+                    if let ExprKind::BinOp { op: BinOp::Shl, left, right } = &value.kind
+                        && let Some((_src_hi, src_lo)) = self.long_lvalue_addr_pair(left)
+                        && let Some(k) = try_const_eval(right)
+                        && k == 16
+                    {
+                        let _ = write!(self.out, "\tmov\tax,word ptr {src_lo}\r\n");
+                        let _ = write!(self.out, "\tmov\tword ptr {},ax\r\n", bp_addr(off + 2));
+                        let _ = write!(self.out, "\tmov\tword ptr {},0\r\n", bp_addr(off));
+                        return;
+                    }
+                    // `z = x << K` / `z = x >> K` long shift by a
+                    // constant count — same helper as the variable-
+                    // count path, but `mov cl, K` instead of loading
+                    // from a local. Fixtures 2575, 2579.
+                    if let ExprKind::BinOp { op, left, right } = &value.kind
+                        && matches!(op, BinOp::Shl | BinOp::Shr)
+                        && let Some((src_hi, src_lo)) = self.long_lvalue_addr_pair(left)
+                        && let Some(k) = try_const_eval(right)
+                    {
+                        let unsigned = self.expr_is_unsigned(left);
+                        let helper = match (op, unsigned) {
+                            (BinOp::Shl, _)     => "N_LXLSH@",
+                            (BinOp::Shr, false) => "N_LXRSH@",
+                            (BinOp::Shr, true)  => "N_LXURSH@",
+                            _ => unreachable!(),
+                        };
+                        let k8 = (k & 0xFF) as u8;
+                        let _ = write!(self.out, "\tmov\tdx,word ptr {src_hi}\r\n");
+                        let _ = write!(self.out, "\tmov\tax,word ptr {src_lo}\r\n");
+                        let _ = write!(self.out, "\tmov\tcl,{k8}\r\n");
+                        let _ = write!(self.out, "\tcall\tnear ptr {helper}\r\n");
+                        self.helpers.insert(helper.to_string());
+                        let _ = write!(self.out, "\tmov\tword ptr {},dx\r\n", bp_addr(off + 2));
+                        let _ = write!(self.out, "\tmov\tword ptr {},ax\r\n", bp_addr(off));
+                        return;
+                    }
                     // Fallback: value is an int-typed expression
                     // assigned to a long-typed local — widen via
                     // `cwd` (sign-extend AX to DX:AX) and store both
