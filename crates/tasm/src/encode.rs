@@ -442,7 +442,7 @@ fn instr_size(instr: &Instr) -> usize {
             1 + bp_rel_modrm_size(*offset)
         }
         Instr::CmpByteBpRelImm8 { .. } => 4,
-        Instr::CmpByteSiPtrImm8 { .. } | Instr::CmpByteBxPtrImm8 { .. } => 3,
+        Instr::CmpByteSiPtrImm8 { .. } | Instr::CmpByteBxPtrImm8 { .. } | Instr::CmpByteDiPtrImm8 { .. } => 3,
         Instr::CmpWordSiDispImm8Sx { disp, .. } => if *disp == 0 { 3 } else { 4 },
         Instr::AndGroupSymImm16 { .. }
         | Instr::OrGroupSymImm16 { .. }
@@ -1766,6 +1766,13 @@ fn emit_instr(
             // ModR/M 3F = mod=00 reg=111(/7=CMP) r/m=111 ([bx]).
             out.push(0x80);
             out.push(0x3F);
+            out.push(*imm);
+        }
+        Instr::CmpByteDiPtrImm8 { imm } => {
+            // `cmp byte ptr [di], imm8` → 80 3D ii.
+            // ModR/M 3D = mod=00 reg=111(/7=CMP) r/m=101 ([di]).
+            out.push(0x80);
+            out.push(0x3D);
             out.push(*imm);
         }
         Instr::CmpWordSiDispImm8Sx { disp, imm } => {

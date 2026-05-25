@@ -985,6 +985,10 @@ pub enum Instr {
     /// pre-update pointer in BX (fixture 2027: `while (*s++)` for
     /// `char *s` enregistered in DI).
     CmpByteBxPtrImm8 { imm: u8 },
+    /// `cmp byte ptr [di], imm8` — `80 3D ii` (3 bytes). DI sibling
+    /// of `CmpByteSiPtrImm8`. Used by `while (*++p)` for char* p
+    /// enregistered in DI (fixture 1311).
+    CmpByteDiPtrImm8 { imm: u8 },
     /// `cmp word ptr [si+disp], imm8sx` — Grp1 r/m16,imm8sx with
     /// /7=CMP and SI-indirect addressing. disp=0 encodes as
     /// `83 3C ii` (mod=00, 3 bytes); disp!=0 fitting i8 encodes as

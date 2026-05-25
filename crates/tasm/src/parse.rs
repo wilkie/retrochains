@@ -2448,6 +2448,13 @@ fn parse_cmp(operands: &str, line_no: usize) -> AsmResult<Instr> {
             return Ok(Instr::CmpByteBxPtrImm8 { imm: imm as u8 });
         }
     }
+    // `cmp byte ptr [di], imm8` — `80 3D ii` (fixture 1311's
+    // `while (*++p)` with char* p enregistered in DI).
+    if lhs == "byte ptr [di]" {
+        if let Some(imm) = parse_imm8(rhs) {
+            return Ok(Instr::CmpByteDiPtrImm8 { imm: imm as u8 });
+        }
+    }
     // `cmp word ptr [si+disp], imm8sx` — Grp1 r/m16,imm8sx with
     // SI-indirect addressing. Used by the arrow-field memory-direct
     // compare peephole (`p->x == K` with p in SI). Fixture 1007.

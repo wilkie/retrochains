@@ -3102,6 +3102,33 @@ impl<'a> FunctionEmitter<'a> {
             let _ = write!(self.out, "\tcmp\t{width} ptr [bx],0\r\n");
             return;
         }
+        // `while (*++p)` — deref of a pre-update on a register
+        // pointer local. Advance the register, then compare `*p`
+        // through the pointer directly. Fixture 1311 (`*++p` for
+        // char *p in SI).
+        if let ExprKind::Deref(operand) = &cond.kind
+            && let ExprKind::Update {
+                target,
+                op,
+                position: UpdatePosition::Pre,
+            } = &operand.kind
+            && self.locals.has(target)
+            && let LocalLocation::Reg(reg) = self.locals.location_of(target)
+            && let Some(pointee) = self.locals.type_of(target).pointee()
+        {
+            let reg_name = reg.name();
+            let stride = i32::from(pointee.size_bytes());
+            let mnem = match op {
+                crate::ast::UpdateOp::Inc => "inc",
+                crate::ast::UpdateOp::Dec => "dec",
+            };
+            for _ in 0..stride {
+                let _ = write!(self.out, "\t{mnem}\t{reg_name}\r\n");
+            }
+            let width = if pointee.is_char_like() { "byte" } else { "word" };
+            let _ = write!(self.out, "\tcmp\t{width} ptr [{reg_name}],0\r\n");
+            return;
+        }
         // `if (p[K])` — global-pointer subscript in boolean context.
         // BCC loads the pointer into BX and emits `cmp word ptr
         // [bx+K*stride], 0` directly. Fixture 889.
