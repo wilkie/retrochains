@@ -1759,6 +1759,23 @@ impl<'a> FunctionEmitter<'a> {
             }
             return;
         }
+        // `*<reg-ptr>` index: load through the register-resident
+        // pointer directly into BX (`mov bx, [<reg>]`), skipping the
+        // AX round-trip. Fixture 3584 (`arr[*p]` for int* p in SI).
+        if let ExprKind::Deref(inner) = &idx.kind
+            && let ExprKind::Ident(p_name) = &inner.kind
+            && self.locals.has(p_name)
+            && let LocalLocation::Reg(reg) = self.locals.location_of(p_name)
+            && !reg.is_byte()
+            && let Some(pointee) = self.locals.type_of(p_name).pointee()
+            && pointee.is_int_like()
+        {
+            let _ = write!(self.out, "\tmov\tbx,word ptr [{}]\r\n", reg.name());
+            for _ in 0..shifts {
+                self.out.extend_from_slice(b"\tshl\tbx,1\r\n");
+            }
+            return;
+        }
         // `arr[++i]` / `arr[--i]` where i is a register-resident int
         // local: emit the inc/dec on the register, then `mov bx,
         // <reg>` reading the post-update value. Fixture 2837.
