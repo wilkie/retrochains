@@ -102,6 +102,12 @@ impl Reg {
     /// SI is handed out separately to the most-used eligible (see
     /// `Locals::analyze`).
     const NON_SI_POOL: [Self; 4] = [Self::Di, Self::Dx, Self::Bx, Self::Cx];
+    /// Variant when the function emits `imul` (clobbers DX) but no
+    /// call (so DX/BX/CX still survive across the function — just
+    /// not across the `imul`). Drop DX from the pool so accumulators
+    /// don't land in a reg the multiplier writes. Fixture 1369
+    /// (`s += i * j` — s should go to BX, not DX).
+    const NON_SI_POOL_NO_DX: [Self; 3] = [Self::Di, Self::Bx, Self::Cx];
 
     /// Reduced int pool when the function makes a call: DX, BX, CX
     /// are all caller-clobbered, so only DI is safe alongside SI.
@@ -323,8 +329,20 @@ impl Locals {
         }
         // With a function call in the body, DX/BX/CX are caller-
         // clobbered — only SI/DI survive. Restrict the non-SI pool.
+        // Without a call but with `imul` in the body, just DX is
+        // clobbered (by the imul's high half). Drop DX in that case.
+        let function_has_imul_now = body_emits_imul(
+            function.body.as_deref().unwrap_or(&[]),
+            &declared
+                .iter()
+                .filter(|item| matches!(item.ty, Type::Char | Type::UChar))
+                .map(|item| item.name.as_str())
+                .collect::<HashSet<_>>(),
+        );
         let non_si_pool: &[Reg] = if function_makes_call {
             &Reg::NON_SI_POOL_WITH_CALL
+        } else if function_has_imul_now {
+            &Reg::NON_SI_POOL_NO_DX
         } else {
             &Reg::NON_SI_POOL
         };
