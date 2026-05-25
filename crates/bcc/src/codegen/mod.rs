@@ -15745,6 +15745,7 @@ impl<'a> FunctionEmitter<'a> {
                         None
                     };
                     if rhs_clobbers_ax
+                        && matches!(op, BinOp::Mul)
                         && let Some(reg) = left_preserved_reg
                     {
                         self.emit_expr_to_ax(right);
