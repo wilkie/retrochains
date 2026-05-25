@@ -7076,6 +7076,36 @@ impl<'a> FunctionEmitter<'a> {
             );
             return;
         }
+        // Int/uint stack-local compound `+=` / `-=` / `&=` / `|=` /
+        // `^=` with a constant RHS — same memory-direct shape as
+        // the global path. Uses imm8sx (`83 /op disp8 ii`) when K
+        // fits a signed byte; tasm picks the encoding. Fixture 1216
+        // (`unsigned a -= 3`).
+        let local_ty = self.locals.type_of(name).clone();
+        if local_ty.is_int_like()
+            && matches!(
+                op,
+                BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor
+            )
+            && let Some(v) = try_const_eval(value)
+            && let LocalLocation::Stack(off) = self.locals.location_of(name)
+        {
+            let v16 = v & 0xFFFF;
+            let mnem = match op {
+                BinOp::Add => "add",
+                BinOp::Sub => "sub",
+                BinOp::BitAnd => "and",
+                BinOp::BitOr => "or",
+                BinOp::BitXor => "xor",
+                _ => unreachable!(),
+            };
+            let _ = write!(
+                self.out,
+                "\t{mnem}\tword ptr {},{v16}\r\n",
+                bp_addr(off),
+            );
+            return;
+        }
         let LocalLocation::Reg(reg) = self.locals.location_of(name) else {
             panic!(
                 "compound assignment on stack-resident `{name}` not yet supported (no fixture)"
