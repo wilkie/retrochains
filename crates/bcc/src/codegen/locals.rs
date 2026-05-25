@@ -247,7 +247,9 @@ impl Locals {
         }
 
         // Int-pool eligibles: ints with ≥ 3 uses, pointers with ≥ 2,
-        // and never anything whose address was taken.
+        // and never anything whose address was taken. `unsigned`
+        // shares the int pool — same byte layout, same load/store
+        // shapes (fixture 1216).
         let eligible_int: Vec<usize> = (0..declared.len())
             .filter(|&i| {
                 if address_taken.contains(&declared[i].name) {
@@ -255,7 +257,9 @@ impl Locals {
                 }
                 let uses = counts.get(&declared[i].name).copied().unwrap_or(0);
                 match &declared[i].ty {
-                    Type::Int | Type::Pointer(_) => uses >= ENREGISTER_THRESHOLD,
+                    Type::Int | Type::UInt | Type::Pointer(_) => {
+                        uses >= ENREGISTER_THRESHOLD
+                    }
                     _ => false,
                 }
             })
