@@ -11425,6 +11425,39 @@ impl<'a> FunctionEmitter<'a> {
                 }
                 return;
             }
+            // `*dst++ = *src++` for char* / char* — same paired
+            // postinc shape, but byte width: read AL directly via
+            // [src-reg], store via [dst-reg], no cbw/widen, then
+            // advance both. Fixture 1346 (`*d++ = *s++` for char*).
+            if pointee.is_char_like()
+                && let ExprKind::Deref(rhs_inner) = &value.kind
+                && let ExprKind::Update {
+                    target: src_name,
+                    op: src_op,
+                    position: src_pos,
+                } = &rhs_inner.kind
+                && self.locals.has(src_name)
+                && let LocalLocation::Reg(src_reg) = self.locals.location_of(src_name)
+                && !src_reg.is_byte()
+                && let Some(src_pointee) = self.locals.type_of(src_name).pointee()
+                && src_pointee.is_char_like()
+            {
+                let src_reg_name = src_reg.name();
+                let src_mnem = match src_op {
+                    crate::ast::UpdateOp::Inc => "inc",
+                    crate::ast::UpdateOp::Dec => "dec",
+                };
+                if matches!(src_pos, crate::ast::UpdatePosition::Pre) {
+                    let _ = write!(self.out, "\t{src_mnem}\t{src_reg_name}\r\n");
+                }
+                let _ = write!(self.out, "\tmov\tal,byte ptr [{src_reg_name}]\r\n");
+                let _ = write!(self.out, "\tmov\tbyte ptr [{reg}],al\r\n");
+                if matches!(src_pos, crate::ast::UpdatePosition::Post) {
+                    let _ = write!(self.out, "\t{src_mnem}\t{src_reg_name}\r\n");
+                }
+                let _ = write!(self.out, "\tinc\t{reg}\r\n");
+                return;
+            }
             // Non-constant RHS: evaluate to AX (or AL for char dst),
             // then `mov <width> ptr [<reg>], al/ax`, then advance the
             // dest pointer. Fixture 1346 (`*d++ = *s++`).

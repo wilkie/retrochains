@@ -377,7 +377,7 @@ fn instr_size(instr: &Instr) -> usize {
         | Instr::AndAxImm16 { .. }
         | Instr::OrAxImm16 { .. }
         | Instr::XorAxImm16 { .. } => 3,
-        Instr::MovAlFromSiPtr | Instr::MovAlFromBxPtr => 2,
+        Instr::MovAlFromSiPtr | Instr::MovAlFromBxPtr | Instr::MovAlFromDiPtr => 2,
         Instr::ImulReg16 { .. } | Instr::IdivReg16 { .. } | Instr::DivReg16 { .. } => 2,
         Instr::AddAxGroupSym { .. }
         | Instr::OrAxGroupSym { .. }
@@ -1629,6 +1629,12 @@ fn emit_instr(
             // SI form; ModR/M 07 = mod=00 reg=AL r/m=111([bx]).
             out.push(0x8A);
             out.push(0x07);
+        }
+        Instr::MovAlFromDiPtr => {
+            // `mov al,byte ptr [di]` → 8A 05. ModR/M 05 = mod=00
+            // reg=AL r/m=101([di]).
+            out.push(0x8A);
+            out.push(0x05);
         }
         Instr::ImulReg16 { reg } => {
             // `imul r16` → F7 (mod=11 /5 r/m=<reg>).

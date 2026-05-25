@@ -862,6 +862,9 @@ pub enum Instr {
     /// `mov al,byte ptr [bx]` — 8A 07. 8-bit load through BX pointer.
     /// Fixture 192 dereferences a global char pointer via BX.
     MovAlFromBxPtr,
+    /// `mov al,byte ptr [di]` — 8A 05. 8-bit load through DI pointer.
+    /// Fixture 1346 paired char-copy with src in DI.
+    MovAlFromDiPtr,
     /// `imul <reg16>` — F7 (mod=11 /5 r/m=reg). Single-operand signed
     /// multiply with a register operand. Used when the operand is
     /// register-resident, e.g. `x *= 3` after BCC enregisters x.

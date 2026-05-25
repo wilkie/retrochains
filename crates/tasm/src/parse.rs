@@ -1018,6 +1018,9 @@ fn parse_mov(operands: &str, line_no: usize) -> AsmResult<Instr> {
         if rhs == "byte ptr [bx]" {
             return Ok(Instr::MovAlFromBxPtr);
         }
+        if rhs == "byte ptr [di]" {
+            return Ok(Instr::MovAlFromDiPtr);
+        }
         // `mov al,byte ptr [bx+disp8]` — char-pointer subscript
         // load (fixture 865). disp=0 stays with `MovAlFromBxPtr`
         // (2-byte form).
