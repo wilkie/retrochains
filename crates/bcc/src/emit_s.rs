@@ -333,6 +333,16 @@ fn emit_global_init(
                 for (item, field) in items.iter().zip(fields.iter()) {
                     emit_global_init(out, &field.ty, item, strings);
                 }
+                // Partial struct initializer: pad uninitialized
+                // trailing fields with zero bytes — BCC emits `db 0`
+                // for each missing byte rather than truncating the
+                // record. Fixture 2098 (`static struct S s = {10,
+                // 20}` with 3 int fields → 2 trailing zero bytes).
+                for field in fields.iter().skip(items.len()) {
+                    for _ in 0..field.ty.size_bytes() {
+                        let _ = write!(out, "\tdb\t0\r\n");
+                    }
+                }
             }
             _ => panic!("initializer list against {:?} not yet supported", ty),
         }
