@@ -14949,6 +14949,29 @@ impl<'a> FunctionEmitter<'a> {
             let _ = write!(self.out, "\tmov\t{},offset DGROUP:_{sym}\r\n", reg.name());
             return;
         }
+        // `&<arr>[K]` direct-to-register: linker resolves
+        // `offset DGROUP:_<arr>+(K*stride)` to an immediate. Same
+        // `mov <reg>, offset ...` shape as `&<global>` above; no
+        // AX round-trip. Fixture 2584 (`p = &a[2]` with p in SI).
+        if let ExprKind::AddressOfArrayElem { array, byte_offset } = &expr.kind
+            && self.globals.contains(array)
+        {
+            assert!(!reg.is_byte(), "array-element address into a byte register is impossible");
+            if *byte_offset == 0 {
+                let _ = write!(
+                    self.out,
+                    "\tmov\t{},offset DGROUP:_{array}\r\n",
+                    reg.name(),
+                );
+            } else {
+                let _ = write!(
+                    self.out,
+                    "\tmov\t{},offset DGROUP:_{array}+{byte_offset}\r\n",
+                    reg.name(),
+                );
+            }
+            return;
+        }
         // Array decay to a register-resident pointer: `<reg> = <arr>`
         // where `arr` is a global array. Equivalent to `&arr[0]` —
         // and like `&<global>` above, takes the direct `mov <reg>,
