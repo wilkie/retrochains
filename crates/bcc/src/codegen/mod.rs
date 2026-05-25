@@ -3577,6 +3577,29 @@ impl<'a> FunctionEmitter<'a> {
                     _ => unreachable!(),
                 };
             }
+            // `<global_arr>[<var_idx>] <eq/ne> 0` — scale index into
+            // BX, then `cmp <w> ptr DGROUP:_<arr>[bx], 0` directly.
+            // Fixture 3232 (`while (... && data[i] != 0)`).
+            if matches!(op, BinOp::Eq | BinOp::Ne)
+                && try_const_eval(right) == Some(0)
+                && let ExprKind::ArrayIndex { array, index } = &left.kind
+                && let ExprKind::Ident(arr_name) = &array.kind
+                && let Some(gty) = self.globals.type_of(arr_name)
+                && let Some(elem_ty) = gty.array_elem()
+            {
+                let elem_ty = elem_ty.clone();
+                self.emit_index_into_bx(index, &elem_ty);
+                let width = if elem_ty.is_char_like() { "byte" } else { "word" };
+                let _ = write!(
+                    self.out,
+                    "\tcmp\t{width} ptr DGROUP:_{arr_name}[bx],0\r\n",
+                );
+                return match op {
+                    BinOp::Eq => ("je", "jne"),
+                    BinOp::Ne => ("jne", "je"),
+                    _ => unreachable!(),
+                };
+            }
             self.emit_compare(left, right);
             return (
                 op.jump_if_true(unsigned).expect("comparison op has true mnemonic"),
