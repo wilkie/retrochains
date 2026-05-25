@@ -11469,6 +11469,49 @@ impl<'a> FunctionEmitter<'a> {
             }
             return;
         }
+        // `(<ptr> +/- K)-><field>` — fold the constant offset and
+        // field offset together into the pointer's reg displacement.
+        // Pointer in SI/DI: emit `mov ax, [reg + byte_off]` directly.
+        // Pointer on stack: `mov bx, [bp+N]; mov ax, [bx + byte_off]`.
+        // Fixture 3251 (`(p - 1)->x`).
+        if matches!(kind, crate::ast::MemberKind::Arrow)
+            && let ExprKind::BinOp { op: bop, left, right } = &base.kind
+            && (matches!(bop, BinOp::Add) || matches!(bop, BinOp::Sub))
+            && let ExprKind::Ident(p_name) = &left.kind
+            && let Some(pointee) = self.ident_pointee(p_name)
+            && let Some((field_off, field_ty)) = pointee.field(field)
+            && let Some(k) = try_const_eval(right)
+        {
+            let stride = i32::from(pointee.size_bytes());
+            let sign = if matches!(bop, BinOp::Add) { 1i32 } else { -1 };
+            let byte_off = sign.wrapping_mul(k as i32).wrapping_mul(stride)
+                .wrapping_add(i32::from(field_off));
+            let field_ty_clone = field_ty.clone();
+            let reg_name = match self.locals.location_of(p_name) {
+                LocalLocation::Reg(reg) if !reg.is_byte() => reg.name().to_owned(),
+                LocalLocation::Stack(off) => {
+                    let _ = write!(self.out, "\tmov\tbx,word ptr {}\r\n", bp_addr(off));
+                    "bx".to_owned()
+                }
+                _ => {
+                    panic!("byte-reg pointer in `(p±K)->field` not supported");
+                }
+            };
+            let addr = if byte_off == 0 {
+                format!("[{reg_name}]")
+            } else if byte_off > 0 {
+                format!("[{reg_name}+{byte_off}]")
+            } else {
+                format!("[{reg_name}{byte_off}]")
+            };
+            if field_ty_clone.is_char_like() {
+                let _ = write!(self.out, "\tmov\tal,byte ptr {addr}\r\n");
+                self.emit_widen_al(&field_ty_clone);
+            } else {
+                let _ = write!(self.out, "\tmov\tax,word ptr {addr}\r\n");
+            }
+            return;
+        }
         // `<global-ptr-arr>[<var-idx>]-><field>` read — arr is an
         // array of pointers, arr[i] is a pointer, arrow loads field
         // through that pointer. Compute scaled index → BX, load
