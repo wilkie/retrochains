@@ -7250,6 +7250,22 @@ impl<'a> FunctionEmitter<'a> {
             let _ = write!(self.out, "\tmov\t{},{result_reg}\r\n", reg.name());
             return;
         }
+        // Char compound `*= K` (constant RHS): load the byte to AL,
+        // widen via `cbw`, materialize K in DX, signed `imul dx`,
+        // then store AL back. Fixture 1295 (`c *= 3` for char c in
+        // DL).
+        if reg.is_byte()
+            && matches!(op, BinOp::Mul)
+            && let Some(k) = try_const_eval(value)
+        {
+            let k16 = k & 0xFFFF;
+            let _ = write!(self.out, "\tmov\tal,{}\r\n", reg.name());
+            self.out.extend_from_slice(b"\tcbw\t\r\n");
+            let _ = write!(self.out, "\tmov\tdx,{k16}\r\n");
+            self.out.extend_from_slice(b"\timul\tdx\r\n");
+            let _ = write!(self.out, "\tmov\t{},al\r\n", reg.name());
+            return;
+        }
         // Char compound `*=` with a non-constant byte RHS: load the
         // dst into AL, then 8-bit `imul byte ptr <src>` (AX = AL *
         // src), then store AL back to the byte register. Fixture
