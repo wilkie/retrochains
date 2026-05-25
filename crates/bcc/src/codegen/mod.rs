@@ -2912,6 +2912,20 @@ impl<'a> FunctionEmitter<'a> {
                     flipped_op.jump_if_false(unsigned).expect("comparison op has false mnemonic"),
                 );
             }
+            // For Eq/Ne, char-vs-int lvalue compare loads the char
+            // operand first (widened to int) then `cmp ax, word ptr
+            // <int>`. Safe for commutative ops only — emit_compare
+            // doesn't see the op and can't flip jump mnemonics.
+            // Fixture 3435 (`if (x == gc)` for int param x, char
+            // global gc).
+            if matches!(op, BinOp::Eq | BinOp::Ne)
+                && self.try_emit_int_vs_char_cmp(left, right)
+            {
+                return (
+                    op.jump_if_true(unsigned).expect("comparison op has true mnemonic"),
+                    op.jump_if_false(unsigned).expect("comparison op has false mnemonic"),
+                );
+            }
             self.emit_compare(left, right);
             return (
                 op.jump_if_true(unsigned).expect("comparison op has true mnemonic"),
@@ -14084,6 +14098,54 @@ impl<'a> FunctionEmitter<'a> {
         }
         let src = self.resolve_operand_source(e);
         emit_op_with_source_opts(self.out, op, &src, unsigned, self.skip_mod_to_ax);
+    }
+
+    /// Try to emit a char-vs-int memory compare for `Eq` / `Ne`
+    /// only: when exactly one of `left` / `right` is a char-typed
+    /// lvalue and the other an int-typed lvalue, BCC loads the
+    /// char operand first (widened via `cbw` or `mov ah, 0`) and
+    /// then compares AX against the int memory. Returns `true` if
+    /// the compare was emitted (caller skips its own
+    /// `emit_compare`). Restricted to commutative ops — the
+    /// implicit operand swap (loading char first regardless of
+    /// which side it was on) would invalidate the relop semantics
+    /// for `<`, `<=`, `>`, `>=`.
+    fn try_emit_int_vs_char_cmp(&mut self, left: &Expr, right: &Expr) -> bool {
+        let Some((l_name, l_off, l_ty)) = self.try_lvalue_chain_addr(left) else {
+            return false;
+        };
+        let Some((r_name, r_off, r_ty)) = self.try_lvalue_chain_addr(right) else {
+            return false;
+        };
+        if l_ty.is_char_like() == r_ty.is_char_like() {
+            return false;
+        }
+        if !matches!(l_ty, Type::Int | Type::UInt | Type::Char | Type::UChar)
+            || !matches!(r_ty, Type::Int | Type::UInt | Type::Char | Type::UChar)
+        {
+            return false;
+        }
+        let (char_name, char_off, char_ty, int_name, int_off) =
+            if l_ty.is_char_like() {
+                (l_name, l_off, l_ty, r_name, r_off)
+            } else {
+                (r_name, r_off, r_ty, l_name, l_off)
+            };
+        let Some(char_addr) = self.resolve_chain_addr(&char_name, char_off) else {
+            return false;
+        };
+        let Some(int_addr) = self.resolve_chain_addr(&int_name, int_off) else {
+            return false;
+        };
+        let unsigned = char_ty.is_unsigned();
+        let _ = write!(self.out, "\tmov\tal,byte ptr {char_addr}\r\n");
+        if unsigned {
+            self.out.extend_from_slice(b"\tmov\tah,0\r\n");
+        } else {
+            self.out.extend_from_slice(b"\tcbw\t\r\n");
+        }
+        let _ = write!(self.out, "\tcmp\tax,word ptr {int_addr}\r\n");
+        true
     }
 
     /// Post-pass peephole: if `self.out` ends with the 3-instruction
