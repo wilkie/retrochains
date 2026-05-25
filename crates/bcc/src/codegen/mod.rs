@@ -11413,6 +11413,92 @@ impl<'a> FunctionEmitter<'a> {
                 crate::ast::MemberKind::Dot,
             );
         }
+        // `<global-struct-arr>[<var-idx>].<field>` read — symmetric
+        // to the member-assign path. Compute scaled index into BX,
+        // then read through `<sym>+field_off[bx]`. Fixtures 1821,
+        // 2438 (`a[i].x` for array of struct).
+        if matches!(kind, crate::ast::MemberKind::Dot)
+            && let ExprKind::ArrayIndex { array, index } = &base.kind
+            && let ExprKind::Ident(arr_name) = &array.kind
+            && let Some(gty) = self.globals.type_of(arr_name)
+            && let Some(elem_ty) = gty.array_elem()
+            && let Some((field_off, field_ty)) = elem_ty.field(field)
+        {
+            let elem_ty_clone = elem_ty.clone();
+            let field_ty_clone = field_ty.clone();
+            self.emit_index_into_bx(index, &elem_ty_clone);
+            let addr = if field_off == 0 {
+                format!("DGROUP:_{arr_name}[bx]")
+            } else {
+                format!("DGROUP:_{arr_name}+{field_off}[bx]")
+            };
+            if field_ty_clone.is_char_like() {
+                let _ = write!(self.out, "\tmov\tal,byte ptr {addr}\r\n");
+                self.emit_widen_al(&field_ty_clone);
+            } else {
+                let _ = write!(self.out, "\tmov\tax,word ptr {addr}\r\n");
+            }
+            return;
+        }
+        // `<stack-struct-arr>[<var-idx>].<field>` read — same shape
+        // but the array base is bp-relative. Compute &arr[i] into
+        // BX via `emit_array_addr_to_bx`, then read at
+        // `[bx+field_off]`. Fixture 2438 (stack array of struct).
+        if matches!(kind, crate::ast::MemberKind::Dot)
+            && let ExprKind::ArrayIndex { array, index } = &base.kind
+            && let ExprKind::Ident(arr_name) = &array.kind
+            && self.locals.has(arr_name)
+            && let arr_ty = self.locals.type_of(arr_name).clone()
+            && let Some(elem_ty) = arr_ty.array_elem()
+            && let Some((field_off, field_ty)) = elem_ty.field(field)
+            && let LocalLocation::Stack(base_off) = self.locals.location_of(arr_name)
+        {
+            let elem_size = elem_ty.size_bytes();
+            let field_ty_clone = field_ty.clone();
+            self.emit_array_addr_to_bx(arr_name, index, base_off, elem_size);
+            let bx_disp = if field_off == 0 {
+                "[bx]".to_owned()
+            } else {
+                format!("[bx+{field_off}]")
+            };
+            if field_ty_clone.is_char_like() {
+                let _ = write!(self.out, "\tmov\tal,byte ptr {bx_disp}\r\n");
+                self.emit_widen_al(&field_ty_clone);
+            } else {
+                let _ = write!(self.out, "\tmov\tax,word ptr {bx_disp}\r\n");
+            }
+            return;
+        }
+        // `<global-ptr-arr>[<var-idx>]-><field>` read — arr is an
+        // array of pointers, arr[i] is a pointer, arrow loads field
+        // through that pointer. Compute scaled index → BX, load
+        // pointer through `[<sym>+bx]`, then load field through
+        // [bx+field_off]. Fixture 3541 (`arr[i]->v`).
+        if matches!(kind, crate::ast::MemberKind::Arrow)
+            && let ExprKind::ArrayIndex { array, index } = &base.kind
+            && let ExprKind::Ident(arr_name) = &array.kind
+            && let Some(gty) = self.globals.type_of(arr_name)
+            && let Some(elem_ty) = gty.array_elem()
+            && let Some(pointee) = elem_ty.pointee()
+            && let Some((field_off, field_ty)) = pointee.field(field)
+        {
+            let elem_ty_clone = elem_ty.clone();
+            let field_ty_clone = field_ty.clone();
+            self.emit_index_into_bx(index, &elem_ty_clone);
+            let _ = write!(self.out, "\tmov\tbx,word ptr DGROUP:_{arr_name}[bx]\r\n");
+            let bx_disp = if field_off == 0 {
+                "[bx]".to_owned()
+            } else {
+                format!("[bx+{field_off}]")
+            };
+            if field_ty_clone.is_char_like() {
+                let _ = write!(self.out, "\tmov\tal,byte ptr {bx_disp}\r\n");
+                self.emit_widen_al(&field_ty_clone);
+            } else {
+                let _ = write!(self.out, "\tmov\tax,word ptr {bx_disp}\r\n");
+            }
+            return;
+        }
         // Arrow path (or Dot whose base isn't a const-chain lvalue):
         // base must be a bare Ident referring to a pointer.
         let ExprKind::Ident(name) = &base.kind else {
