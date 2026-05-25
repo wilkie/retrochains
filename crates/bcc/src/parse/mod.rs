@@ -1865,12 +1865,27 @@ impl Parser {
                         self.bump();
                     }
                     let int_tok = self.bump();
-                    let TokenKind::IntLit(v) = int_tok.kind else {
-                        return Err(ParseError::Unexpected {
-                            expected: "integer literal in `case`".to_owned(),
-                            found: int_tok.kind.describe().to_owned(),
-                            offset: int_tok.span.start,
-                        });
+                    let v = match &int_tok.kind {
+                        TokenKind::IntLit(v) => *v,
+                        TokenKind::Ident(name) => {
+                            // Enum constants resolve to their integer
+                            // value here, just like at expression
+                            // position. Fixtures 2384, 2684, 3054.
+                            *self.enum_constants.get(name).ok_or_else(|| {
+                                ParseError::Unexpected {
+                                    expected: "integer literal or enum constant in `case`".to_owned(),
+                                    found: format!("identifier `{name}`"),
+                                    offset: int_tok.span.start,
+                                }
+                            })?
+                        }
+                        _ => {
+                            return Err(ParseError::Unexpected {
+                                expected: "integer literal in `case`".to_owned(),
+                                found: int_tok.kind.describe().to_owned(),
+                                offset: int_tok.span.start,
+                            });
+                        }
                     };
                     let v = if negate { v.wrapping_neg() } else { v };
                     (Some(v), kw.span.start)
