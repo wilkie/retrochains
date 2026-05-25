@@ -1066,6 +1066,19 @@ impl Parser {
                 };
                 name
             };
+            // `int a[]` / `int a[N]` parameter syntax — equivalent to
+            // `int *a`. Convert the type to a pointer and discard any
+            // size (it's not a real array for parameter passing).
+            // Fixtures 1236 (`int sum(int a[])`), 1239 (char arr).
+            if matches!(self.peek().kind, TokenKind::LBracket) {
+                self.bump();
+                // Skip an optional size expression; we don't need it.
+                while !matches!(self.peek().kind, TokenKind::RBracket | TokenKind::Eof) {
+                    self.bump();
+                }
+                self.expect(&TokenKind::RBracket)?;
+                ty = Type::Pointer(Box::new(ty));
+            }
             params.push(Param { name, ty });
             if matches!(self.peek().kind, TokenKind::Comma) {
                 self.bump();
