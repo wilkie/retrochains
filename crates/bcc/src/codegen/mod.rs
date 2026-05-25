@@ -364,6 +364,62 @@ fn global_offset_addr(sym: &str, off: i32) -> String {
     }
 }
 
+/// Look at the end of `buf` for the 4-instruction LHS-mem-clobber tail
+/// emitted by the rhs_clobbers_ax binop path when the LHS is a simple
+/// memory lvalue:
+///   push ax
+///   mov ax, word ptr <src>
+///   pop dx
+///   <op> ax, dx
+/// Returns `(truncate_at, src_start, src_end, op_mnem)` where:
+///   - `truncate_at` is the byte offset of `push ax` (caller truncates here)
+///   - `src_start..src_end` slices the `<src>` operand text
+///   - `op_mnem` is one of `add|sub|and|or|xor`
+fn split_lhs_mem_clobber_tail(buf: &[u8]) -> Option<(usize, usize, usize, &'static [u8])> {
+    const OPS: &[(&[u8], &[u8])] = &[
+        (b"\tadd\tax,dx\r\n", b"add"),
+        (b"\tsub\tax,dx\r\n", b"sub"),
+        (b"\tand\tax,dx\r\n", b"and"),
+        (b"\tor\tax,dx\r\n",  b"or"),
+        (b"\txor\tax,dx\r\n", b"xor"),
+    ];
+    for (op_tail, op_mnem) in OPS {
+        if !buf.ends_with(op_tail) {
+            continue;
+        }
+        let after_pop = buf.len() - op_tail.len();
+        const POP: &[u8] = b"\tpop\tdx\r\n";
+        if after_pop < POP.len() || &buf[after_pop - POP.len()..after_pop] != POP {
+            continue;
+        }
+        let mov_line_end_with_crlf = after_pop - POP.len();
+        const MOV_PREFIX: &[u8] = b"\tmov\tax,word ptr ";
+        // mov_line_end_with_crlf is the byte index right after the
+        // mov line's trailing `\n`. Walk back to find the previous
+        // line break to anchor the start of the mov line.
+        let content_end = mov_line_end_with_crlf.checked_sub(2)?; // before \r\n
+        let line_start = buf[..content_end]
+            .iter()
+            .rposition(|&b| b == b'\n')
+            .map(|p| p + 1)
+            .unwrap_or(0);
+        if !buf[line_start..].starts_with(MOV_PREFIX) {
+            continue;
+        }
+        let src_start = line_start + MOV_PREFIX.len();
+        let src_end = content_end;
+        const PUSH: &[u8] = b"\tpush\tax\r\n";
+        if line_start < PUSH.len()
+            || &buf[line_start - PUSH.len()..line_start] != PUSH
+        {
+            continue;
+        }
+        let truncate_at = line_start - PUSH.len();
+        return Some((truncate_at, src_start, src_end, op_mnem));
+    }
+    None
+}
+
 /// Given an asm address operand (one of: `DGROUP:_<sym>`,
 /// `DGROUP:_<sym>+N`, `[bp-N]`, `[bp+N]`, `[<reg>]`, `[<reg>+N]`),
 /// return the same operand shifted by +2 bytes. Used by the long-
@@ -16081,6 +16137,33 @@ impl<'a> FunctionEmitter<'a> {
                 self.out.extend_from_slice(new);
                 return true;
             }
+        }
+        // Memory-lvalue LHS variant: when the LHS is a simple
+        // memory lvalue (single `mov ax, word ptr <src>`), the
+        // rhs_clobbers_ax path leaves us with the 4-instruction
+        // tail
+        //   push ax
+        //   mov ax, word ptr <src>
+        //   pop dx
+        //   <op> ax, dx
+        // BCC's shape skips the push/pop pair and loads the LHS
+        // straight into DX:
+        //   mov dx, word ptr <src>
+        //   <op> dx, ax
+        // Saves 2 bytes per occurrence; result lives in DX, so the
+        // caller's store uses DX as the source. Fixture 2987 (`x =
+        // a + b * c` for stack-int params).
+        if let Some((truncate_at, src_start, src_end, op_mnem)) =
+            split_lhs_mem_clobber_tail(&self.out)
+        {
+            let src: Vec<u8> = self.out[src_start..src_end].to_vec();
+            self.out.truncate(truncate_at);
+            self.out.extend_from_slice(b"\tmov\tdx,word ptr ");
+            self.out.extend_from_slice(&src);
+            self.out.extend_from_slice(b"\r\n\t");
+            self.out.extend_from_slice(op_mnem);
+            self.out.extend_from_slice(b"\tdx,ax\r\n");
+            return true;
         }
         false
     }
