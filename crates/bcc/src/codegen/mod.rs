@@ -5255,6 +5255,21 @@ impl<'a> FunctionEmitter<'a> {
                 let _ = write!(self.out, "\tmov\tax,word ptr DGROUP:_{src_name}\r\n");
                 return;
             }
+            // 4-byte struct returned from a stack-local: load DX:AX
+            // directly from the local's two words (high half at +2,
+            // low half at +0). Caller picks DX:AX. Fixture 1875
+            // (`struct P make_p(void) { ...; return r; }` with
+            // `struct P { int x; int y; }`).
+            if size == 4
+                && let ExprKind::Ident(src_name) = &e.kind
+                && self.locals.has(src_name)
+                && self.locals.type_of(src_name) == &self.function.ret_ty
+                && let LocalLocation::Stack(off) = self.locals.location_of(src_name)
+            {
+                let _ = write!(self.out, "\tmov\tdx,word ptr {}\r\n", bp_addr(off + 2));
+                let _ = write!(self.out, "\tmov\tax,word ptr {}\r\n", bp_addr(off));
+                return;
+            }
             if size > 4
                 && let ExprKind::Ident(src_name) = &e.kind
                 && self.globals.type_of(src_name).map_or(false, |t| t == &self.function.ret_ty)
