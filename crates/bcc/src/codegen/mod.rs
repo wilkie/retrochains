@@ -11052,6 +11052,52 @@ impl<'a> FunctionEmitter<'a> {
             };
             let reg = reg.name();
             let width = ptr_width(pointee);
+            // `*dst++ = *src++` (or *--src etc.) — when both sides
+            // have register-resident pointers, BCC reads source
+            // directly through [src-reg], writes through [dst-reg],
+            // then advances BOTH pointers. No BX snapshot needed
+            // for the source. Fixture 3528 (`while(n--) *dst++ =
+            // *src++`).
+            if let ExprKind::Deref(rhs_inner) = &value.kind
+                && let ExprKind::Update {
+                    target: src_name,
+                    op: src_op,
+                    position: src_pos,
+                } = &rhs_inner.kind
+                && self.locals.has(src_name)
+                && let LocalLocation::Reg(src_reg) = self.locals.location_of(src_name)
+                && !src_reg.is_byte()
+                && let Some(src_pointee) = self.locals.type_of(src_name).pointee()
+                && src_pointee.is_int_like()
+                && pointee.is_int_like()
+            {
+                let src_reg_name = src_reg.name();
+                let src_stride = src_pointee.size_bytes();
+                let src_mnem = match src_op {
+                    crate::ast::UpdateOp::Inc => "inc",
+                    crate::ast::UpdateOp::Dec => "dec",
+                };
+                // Pre-inc src: advance first, then read.
+                // Post-inc src: read first, then advance.
+                if matches!(src_pos, crate::ast::UpdatePosition::Pre) {
+                    for _ in 0..src_stride {
+                        let _ = write!(self.out, "\t{src_mnem}\t{src_reg_name}\r\n");
+                    }
+                }
+                let _ = write!(self.out, "\tmov\tax,word ptr [{src_reg_name}]\r\n");
+                let _ = write!(self.out, "\tmov\tword ptr [{reg}],ax\r\n");
+                if matches!(src_pos, crate::ast::UpdatePosition::Post) {
+                    for _ in 0..src_stride {
+                        let _ = write!(self.out, "\t{src_mnem}\t{src_reg_name}\r\n");
+                    }
+                }
+                // Now the dst post-update.
+                let stride = pointee.size_bytes();
+                for _ in 0..stride {
+                    let _ = write!(self.out, "\tinc\t{reg}\r\n");
+                }
+                return;
+            }
             // Non-constant RHS: evaluate to AX (or AL for char dst),
             // then `mov <width> ptr [<reg>], al/ax`, then advance the
             // dest pointer. Fixture 1346 (`*d++ = *s++`).
