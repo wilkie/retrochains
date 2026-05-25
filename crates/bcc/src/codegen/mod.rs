@@ -9506,13 +9506,18 @@ impl<'a> FunctionEmitter<'a> {
                 panic!("stack-resident pointer in `p[K]` not yet supported (no fixture)");
             }
         };
-        // The address operand: `[reg]` for k=0, else `[reg+K*stride]`.
-        let stride = u32::from(pointee.size_bytes());
-        let byte_off = k * stride;
+        // The address operand: `[reg]` for k=0, else `[reg±K*stride]`.
+        // Handle negative K (e.g. `p[-1]`) via signed wrapping
+        // multiplication. Fixture 2377 (`p[-1]`).
+        let stride = i32::from(pointee.size_bytes());
+        let k_signed = k as i32;
+        let byte_off = k_signed.wrapping_mul(stride);
         let addr = if byte_off == 0 {
             format!("[{addr_reg}]")
-        } else {
+        } else if byte_off > 0 {
             format!("[{addr_reg}+{byte_off}]")
+        } else {
+            format!("[{addr_reg}{byte_off}]")
         };
         if pointee.is_char_like() {
             let _ = write!(self.out, "\tmov\tal,byte ptr {addr}\r\n");
