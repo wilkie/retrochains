@@ -5642,7 +5642,8 @@ impl<'a> FunctionEmitter<'a> {
                     return;
                 }
                 self.emit_expr_to_ax(init);
-                let _ = write!(self.out, "\tmov\tword ptr {},ax\r\n", bp_addr(off));
+                let src = if self.try_collapse_lhs_clobber_to_dx() { "dx" } else { "ax" };
+                let _ = write!(self.out, "\tmov\tword ptr {},{src}\r\n", bp_addr(off));
             }
             LocalLocation::Reg(reg) => self.emit_store_reg(reg, init),
         }
@@ -12264,7 +12265,8 @@ impl<'a> FunctionEmitter<'a> {
         if ty.is_char_like() {
             let _ = write!(self.out, "\tmov\tbyte ptr DGROUP:_{name},al\r\n");
         } else {
-            let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name},ax\r\n");
+            let src = if self.try_collapse_lhs_clobber_to_dx() { "dx" } else { "ax" };
+            let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{name},{src}\r\n");
         }
     }
 
@@ -13170,7 +13172,8 @@ impl<'a> FunctionEmitter<'a> {
                 if ty.is_char_like() {
                     let _ = write!(self.out, "\tmov\tbyte ptr {},al\r\n", bp_addr(off));
                 } else {
-                    let _ = write!(self.out, "\tmov\tword ptr {},ax\r\n", bp_addr(off));
+                    let src = if self.try_collapse_lhs_clobber_to_dx() { "dx" } else { "ax" };
+                    let _ = write!(self.out, "\tmov\tword ptr {},{src}\r\n", bp_addr(off));
                 }
             }
             LocalLocation::Reg(reg) => self.emit_store_reg(reg, value),
@@ -14059,6 +14062,56 @@ impl<'a> FunctionEmitter<'a> {
         }
         let src = self.resolve_operand_source(e);
         emit_op_with_source_opts(self.out, op, &src, unsigned, self.skip_mod_to_ax);
+    }
+
+    /// Post-pass peephole: if `self.out` ends with the 3-instruction
+    /// LHS-clobbering binop tail
+    /// `mov dx, ax; pop ax; <op> ax, dx` (emitted by the
+    /// emit_expr_to_ax path when both operands clobber AX), rewrite
+    /// it in place to the 2-instruction form
+    /// `pop dx; <op> dx, ax` and return `true`. The result then lives
+    /// in DX instead of AX — the caller is responsible for using DX
+    /// in the immediately-following store.
+    ///
+    /// Safe for `add`, `sub`, `and`, `or`, `xor`: the swap of source
+    /// and destination preserves the operation (commutative ops
+    /// trivially; `sub dx, ax` still reads "dx - ax" which equals the
+    /// original "ax - dx" with ax==LHS, dx==RHS after the rewrite).
+    /// Saves one byte (`mov dx, ax` is 2 bytes, removed entirely; the
+    /// store becomes `mov word ptr [X], dx` same size as `, ax`).
+    /// Fixture 1989 (`r = (a==b) + (a==c)`).
+    fn try_collapse_lhs_clobber_to_dx(&mut self) -> bool {
+        const PATTERNS: &[(&[u8], &[u8])] = &[
+            (
+                b"\tmov\tdx,ax\r\n\tpop\tax\r\n\tadd\tax,dx\r\n",
+                b"\tpop\tdx\r\n\tadd\tdx,ax\r\n",
+            ),
+            (
+                b"\tmov\tdx,ax\r\n\tpop\tax\r\n\tsub\tax,dx\r\n",
+                b"\tpop\tdx\r\n\tsub\tdx,ax\r\n",
+            ),
+            (
+                b"\tmov\tdx,ax\r\n\tpop\tax\r\n\tand\tax,dx\r\n",
+                b"\tpop\tdx\r\n\tand\tdx,ax\r\n",
+            ),
+            (
+                b"\tmov\tdx,ax\r\n\tpop\tax\r\n\tor\tax,dx\r\n",
+                b"\tpop\tdx\r\n\tor\tdx,ax\r\n",
+            ),
+            (
+                b"\tmov\tdx,ax\r\n\tpop\tax\r\n\txor\tax,dx\r\n",
+                b"\tpop\tdx\r\n\txor\tdx,ax\r\n",
+            ),
+        ];
+        for (orig, new) in PATTERNS {
+            if self.out.ends_with(orig) {
+                let new_len = self.out.len() - orig.len();
+                self.out.truncate(new_len);
+                self.out.extend_from_slice(new);
+                return true;
+            }
+        }
+        false
     }
 
     /// True iff `name` refers to an identifier (global or local)
