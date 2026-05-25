@@ -15974,6 +15974,29 @@ impl<'a> FunctionEmitter<'a> {
     /// char-typed local from that offset. Widening / no-op casts just
     /// evaluate the operand into AX.
     fn emit_cast_to_ax(&mut self, ty: &Type, operand: &Expr) {
+        // `(int)(<long_lvalue> >> 16)` — fast-path for the long
+        // right-shift-by-16 pattern. The high half of the long is
+        // exactly what `(int)(x >> 16)` yields, so BCC loads the
+        // high half directly and follows with `cwd` (signed) or
+        // `xor dx, dx` (unsigned) to widen for the surrounding
+        // long-result context. Saves 3 bytes vs the generic
+        // `mov ax, lo; mov cl, 16; sar ax, cl` path. Fixtures
+        // 2173, 2170, 2324.
+        if matches!(ty, Type::Int | Type::UInt)
+            && let ExprKind::BinOp { op: BinOp::Shr, left, right } = &operand.kind
+            && let Some(k) = try_const_eval(right)
+            && k == 16
+            && let Some((hi, _lo)) = self.long_lvalue_addr_pair(left)
+        {
+            let unsigned = self.expr_is_unsigned(left);
+            let _ = write!(self.out, "\tmov\tax,word ptr {hi}\r\n");
+            if unsigned {
+                self.out.extend_from_slice(b"\txor\tdx,dx\r\n");
+            } else {
+                self.out.extend_from_slice(b"\tcwd\t\r\n");
+            }
+            return;
+        }
         if ty.is_char_like() {
             // `(char|uchar) <lvalue>` — byte-load the low byte of
             // the source, then widen per the cast type's signedness.
