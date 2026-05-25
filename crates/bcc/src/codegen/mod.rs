@@ -1583,10 +1583,30 @@ impl<'a> FunctionEmitter<'a> {
         // Load scrutinee into BX. Bare int-typed Ident takes the
         // direct path (mov bx, <addr>/<reg>). `<ident> +/- <const>`
         // folds the constant into a `inc bx`/`dec bx`/`add bx, K`/
-        // `sub bx, K` after the load. Anything else evaluates to AX
-        // and then `mov bx, ax`. Fixture 3650 (`switch (x - 1)`).
+        // `sub bx, K` after the load. Char-typed Ident widens via
+        // byte-load + cbw to AX, normalizes in AX, then mov bx,
+        // ax. Anything else evaluates to AX, then mov bx, ax with
+        // normalization on BX. Fixture 3650 (`switch (x - 1)`),
+        // 3482 (`switch (c)` for char c).
         let mut effective_base = case_base;
+        let mut normalize_in_ax = false;
         let loaded_via_ident = match &scrutinee.kind {
+            ExprKind::Ident(name)
+                if self.locals.type_of(name).is_char_like() =>
+            {
+                let unsigned = self.locals.type_of(name).is_unsigned();
+                let LocalLocation::Stack(off) = self.locals.location_of(name) else {
+                    panic!("char-typed switch scrutinee not in stack — no fixture");
+                };
+                let _ = write!(self.out, "\tmov\tal,byte ptr {}\r\n", bp_addr(off));
+                if unsigned {
+                    self.out.extend_from_slice(b"\tmov\tah,0\r\n");
+                } else {
+                    self.out.extend_from_slice(b"\tcbw\t\r\n");
+                }
+                normalize_in_ax = true;
+                true
+            }
             ExprKind::Ident(name)
                 if matches!(self.locals.type_of(name), Type::Int) =>
             {
@@ -1637,10 +1657,25 @@ impl<'a> FunctionEmitter<'a> {
         };
         let _ = loaded_via_ident;
 
-        // Normalize scrutinee to 0..N-1 when effective_base != 0. K=1
-        // uses `dec bx` (1 byte); K=-1 uses `inc bx`; other K uses
-        // `sub bx, K` (3 bytes for imm16, or `add bx, -K`).
-        if effective_base != 0 {
+        // Normalize scrutinee to 0..N-1 when effective_base != 0.
+        // For char scrutinee (loaded into AX), do the sub in AX first
+        // (uses the shorter `2D imm16` accumulator form), then
+        // `mov bx, ax`. For other paths, BX is already loaded so the
+        // sub goes on BX directly. K=±1 collapses to dec/inc.
+        if normalize_in_ax {
+            if effective_base != 0 {
+                let k_signed = effective_base as i32;
+                if k_signed == 1 {
+                    self.out.extend_from_slice(b"\tdec\tax\r\n");
+                } else if k_signed == -1 || (k_signed & 0xFFFF) == 0xFFFF {
+                    self.out.extend_from_slice(b"\tinc\tax\r\n");
+                } else {
+                    let k16 = effective_base & 0xFFFF;
+                    let _ = write!(self.out, "\tsub\tax,{k16}\r\n");
+                }
+            }
+            self.out.extend_from_slice(b"\tmov\tbx,ax\r\n");
+        } else if effective_base != 0 {
             let k_signed = effective_base as i32;
             if k_signed == 1 {
                 self.out.extend_from_slice(b"\tdec\tbx\r\n");
