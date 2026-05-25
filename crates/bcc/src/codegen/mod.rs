@@ -1580,38 +1580,74 @@ impl<'a> FunctionEmitter<'a> {
         let table_len = u32::try_from(span).unwrap_or(0) + 1;
         let max_value = table_len - 1;
 
-        // Load scrutinee into BX.
-        let ExprKind::Ident(name) = &scrutinee.kind else {
-            panic!("non-ident switch scrutinee not yet supported (no fixture)");
+        // Load scrutinee into BX. Bare int-typed Ident takes the
+        // direct path (mov bx, <addr>/<reg>). `<ident> +/- <const>`
+        // folds the constant into a `inc bx`/`dec bx`/`add bx, K`/
+        // `sub bx, K` after the load. Anything else evaluates to AX
+        // and then `mov bx, ax`. Fixture 3650 (`switch (x - 1)`).
+        let mut effective_base = case_base;
+        let loaded_via_ident = match &scrutinee.kind {
+            ExprKind::Ident(name)
+                if matches!(self.locals.type_of(name), Type::Int) =>
+            {
+                match self.locals.location_of(name) {
+                    LocalLocation::Stack(off) => {
+                        let _ = write!(self.out, "\tmov\tbx,word ptr {}\r\n", bp_addr(off));
+                    }
+                    LocalLocation::Reg(reg) => {
+                        assert!(
+                            reg.name() != "bx",
+                            "scrutinee already in BX — no fixture for BX-resident switch scrutinee yet",
+                        );
+                        let _ = write!(self.out, "\tmov\tbx,{}\r\n", reg.name());
+                    }
+                }
+                true
+            }
+            ExprKind::BinOp { op, left, right }
+                if (matches!(op, BinOp::Add) || matches!(op, BinOp::Sub))
+                    && let ExprKind::Ident(name) = &left.kind
+                    && matches!(self.locals.type_of(name), Type::Int)
+                    && let Some(k) = try_const_eval(right) =>
+            {
+                // Fold `<ident> +/- K` into an adjustment on the
+                // case_base: subtract from base instead of adding to
+                // BX. The load is the same as the bare-ident path.
+                match self.locals.location_of(name) {
+                    LocalLocation::Stack(off) => {
+                        let _ = write!(self.out, "\tmov\tbx,word ptr {}\r\n", bp_addr(off));
+                    }
+                    LocalLocation::Reg(reg) => {
+                        let _ = write!(self.out, "\tmov\tbx,{}\r\n", reg.name());
+                    }
+                }
+                let sign = if matches!(op, BinOp::Add) { 1i32 } else { -1 };
+                let delta = sign.wrapping_mul(k as i32);
+                // switch on `x + K` means scrutinee = x + K; case_base
+                // is what `value` matches against. Adjust:
+                // shifted_base = case_base - K.
+                effective_base = (case_base as i32).wrapping_sub(delta) as u32;
+                true
+            }
+            _ => {
+                self.emit_expr_to_ax(scrutinee);
+                self.out.extend_from_slice(b"\tmov\tbx,ax\r\n");
+                true
+            }
         };
-        assert!(
-            matches!(self.locals.type_of(name), Type::Int),
-            "char-typed switch scrutinee not yet supported (no fixture)"
-        );
-        match self.locals.location_of(name) {
-            LocalLocation::Stack(off) => {
-                let _ = write!(self.out, "\tmov\tbx,word ptr {}\r\n", bp_addr(off));
-            }
-            LocalLocation::Reg(reg) => {
-                assert!(
-                    reg.name() != "bx",
-                    "scrutinee already in BX — no fixture for BX-resident switch scrutinee yet",
-                );
-                let _ = write!(self.out, "\tmov\tbx,{}\r\n", reg.name());
-            }
-        }
+        let _ = loaded_via_ident;
 
-        // Normalize scrutinee to 0..N-1 when case_base != 0. K=1
+        // Normalize scrutinee to 0..N-1 when effective_base != 0. K=1
         // uses `dec bx` (1 byte); K=-1 uses `inc bx`; other K uses
         // `sub bx, K` (3 bytes for imm16, or `add bx, -K`).
-        if case_base != 0 {
-            let k_signed = case_base as i32;
+        if effective_base != 0 {
+            let k_signed = effective_base as i32;
             if k_signed == 1 {
                 self.out.extend_from_slice(b"\tdec\tbx\r\n");
             } else if k_signed == -1 || (k_signed & 0xFFFF) == 0xFFFF {
                 self.out.extend_from_slice(b"\tinc\tbx\r\n");
             } else {
-                let k16 = case_base & 0xFFFF;
+                let k16 = effective_base & 0xFFFF;
                 let _ = write!(self.out, "\tsub\tbx,{k16}\r\n");
             }
         }
