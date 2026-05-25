@@ -4177,6 +4177,18 @@ impl<'a> FunctionEmitter<'a> {
         //     returns the buffer's offset in AX. Fixture 423.
         if let Type::Struct { .. } = &self.function.ret_ty {
             let size = self.function.ret_ty.size_bytes() as u32;
+            // 1-byte struct (just `char c;`) — byte-load from the
+            // struct's first (only) field into AL. Caller picks up
+            // the result in AL. Fixture 2537 (`struct Tiny { char c;
+            // } make(void) { ... return t; }`).
+            if size == 1
+                && let ExprKind::Ident(src_name) = &e.kind
+                && self.locals.has(src_name)
+                && let LocalLocation::Stack(off) = self.locals.location_of(src_name)
+            {
+                let _ = write!(self.out, "\tmov\tal,byte ptr {}\r\n", bp_addr(off));
+                return;
+            }
             if size == 4
                 && let ExprKind::Ident(src_name) = &e.kind
                 && self.globals.type_of(src_name).map_or(false, |t| t == &self.function.ret_ty)
