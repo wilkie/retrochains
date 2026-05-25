@@ -7678,11 +7678,29 @@ impl<'a> FunctionEmitter<'a> {
                 // Char-typed RHS needs widening: read the byte into
                 // AL, sign-extend to AX, then `add <reg>, ax`. The
                 // memory-direct add would otherwise read garbage
-                // from the high byte. Fixture 1234 (`a += c` for
-                // int local a in SI and char local c at [bp-1]).
-                if let ExprKind::Ident(rhs_name) = &value.kind
-                    && (self.locals.has(rhs_name) && self.locals.type_of(rhs_name).is_char_like())
-                {
+                // from the high byte. Covers:
+                //   - Char local ident (fixture 1234: `a += c`).
+                //   - Deref of a char pointer (fixture 1690: `n +=
+                //     *s` where `s: char *`).
+                let rhs_is_char_lvalue = match &value.kind {
+                    ExprKind::Ident(rhs_name) => {
+                        self.locals.has(rhs_name)
+                            && self.locals.type_of(rhs_name).is_char_like()
+                    }
+                    ExprKind::Deref(inner) => match &inner.kind {
+                        ExprKind::Ident(p_name) => {
+                            self.locals.has(p_name)
+                                && self
+                                    .locals
+                                    .type_of(p_name)
+                                    .pointee()
+                                    .is_some_and(|p| p.is_char_like())
+                        }
+                        _ => false,
+                    },
+                    _ => false,
+                };
+                if rhs_is_char_lvalue {
                     self.emit_expr_to_ax(value);
                     let mnem = if matches!(op, BinOp::Add) { "add" } else { "sub" };
                     let _ = write!(self.out, "\t{mnem}\t{},ax\r\n", reg.name());
