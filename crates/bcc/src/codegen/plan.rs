@@ -400,16 +400,23 @@ fn plan_switch(span_start: u32, scrutinee: &Expr, cases: &[SwitchCase], ctx: &mu
 #[must_use]
 pub fn pick_switch_strategy(cases: &[SwitchCase]) -> SwitchStrategy {
     let values: Vec<u32> = cases.iter().filter_map(|c| c.value).collect();
-    let dense_from_zero = values
+    if values.len() < 4 {
+        return SwitchStrategy::Chained;
+    }
+    // Dense from base K (any K): values form a consecutive run
+    // values[i] == K + i (mod 2^16). When this holds, BCC uses
+    // jump-table with a `sub bx, K` (or `dec bx` for K=1)
+    // before the bounds check. Fixtures 073/076 (K=0), 1605 (K=5),
+    // 1909 (K=-2), 1912 (large K).
+    let first = values[0];
+    let dense_from_base = values
         .iter()
         .enumerate()
-        .all(|(i, &v)| u32::try_from(i).is_ok_and(|j| v == j));
-    if dense_from_zero && values.len() >= 4 {
+        .all(|(i, &v)| v == first.wrapping_add(u32::try_from(i).unwrap_or(0)));
+    if dense_from_base {
         SwitchStrategy::JumpTable
-    } else if values.len() >= 4 {
-        SwitchStrategy::LinearSearch
     } else {
-        SwitchStrategy::Chained
+        SwitchStrategy::LinearSearch
     }
 }
 

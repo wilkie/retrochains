@@ -1538,17 +1538,31 @@ impl<'a> FunctionEmitter<'a> {
         case_slots: &[u32],
         end_slot: u32,
     ) {
-        // Sanity: planner picked this strategy only for dense 0..N-1.
-        let n = cases.len();
-        for (i, c) in cases.iter().enumerate() {
-            let expected = u32::try_from(i).unwrap_or(u32::MAX);
-            assert!(
-                c.value == Some(expected),
-                "jump-table strategy expects dense 0..N-1 cases; got {:?} at index {i}",
-                c.value,
-            );
+        // Planner picked this strategy only for dense-from-K runs.
+        // The default case (if any) is the only None-value case; it
+        // becomes the bounds-check failure target. The remaining
+        // value cases must form a dense run from cases[0].value.
+        let case_base = cases.iter()
+            .find_map(|c| c.value)
+            .expect("jump-table needs at least one value case");
+        let value_cases_count = cases.iter().filter(|c| c.value.is_some()).count();
+        let default_slot = cases
+            .iter()
+            .zip(case_slots)
+            .find_map(|(c, s)| if c.value.is_none() { Some(*s) } else { None });
+        // Verify the value cases form a dense run.
+        let mut value_idx: u32 = 0;
+        for c in cases.iter() {
+            if let Some(v) = c.value {
+                let expected = case_base.wrapping_add(value_idx);
+                assert!(
+                    v == expected,
+                    "jump-table strategy expects dense from base {case_base}; got {v} at value-index {value_idx}",
+                );
+                value_idx += 1;
+            }
         }
-        let case_count = u32::try_from(n).unwrap_or(u32::MAX);
+        let case_count = u32::try_from(value_cases_count).unwrap_or(u32::MAX);
         let max_value = case_count - 1;
 
         // Load scrutinee into BX.
@@ -1572,11 +1586,27 @@ impl<'a> FunctionEmitter<'a> {
             }
         }
 
+        // Normalize scrutinee to 0..N-1 when case_base != 0. K=1
+        // uses `dec bx` (1 byte); K=-1 uses `inc bx`; other K uses
+        // `sub bx, K` (3 bytes for imm16, or `add bx, -K`).
+        if case_base != 0 {
+            let k_signed = case_base as i32;
+            if k_signed == 1 {
+                self.out.extend_from_slice(b"\tdec\tbx\r\n");
+            } else if k_signed == -1 || (k_signed & 0xFFFF) == 0xFFFF {
+                self.out.extend_from_slice(b"\tinc\tbx\r\n");
+            } else {
+                let k16 = case_base & 0xFFFF;
+                let _ = write!(self.out, "\tsub\tbx,{k16}\r\n");
+            }
+        }
+
         // Bounds check: anything > max_value (unsigned, since out-of-
         // range negatives also overflow into > max when treated as
-        // unsigned) jumps to the end-of-switch.
+        // unsigned) jumps to default (if present) or end-of-switch.
+        let out_of_range = default_slot.unwrap_or(end_slot);
         let _ = write!(self.out, "\tcmp\tbx,{max_value}\r\n");
-        let _ = write!(self.out, "\tja\tshort {}\r\n", self.label_ref(end_slot));
+        let _ = write!(self.out, "\tja\tshort {}\r\n", self.label_ref(out_of_range));
         self.out.extend_from_slice(b"\tshl\tbx,1\r\n");
         let c_num = switch_c_num(SwitchStrategy::JumpTable, case_count);
         let _ = write!(
@@ -1603,12 +1633,17 @@ impl<'a> FunctionEmitter<'a> {
         self.loop_stack.pop();
 
         // Stage the address table for emission after `_main endp`.
+        // Only value cases participate — the default case isn't in
+        // the table (it's the ja-out-of-range target).
         let _ = write!(
             self.post_function_data,
             "@{}@C{c_num}\tlabel\tword\r\n",
             self.func_idx,
         );
-        for &slot in case_slots {
+        for (case, &slot) in cases.iter().zip(case_slots) {
+            if case.value.is_none() {
+                continue;
+            }
             let _ = write!(
                 self.post_function_data,
                 "\tdw\t{}\r\n",
