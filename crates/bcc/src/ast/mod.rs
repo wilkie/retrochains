@@ -109,7 +109,16 @@ pub enum StmtKind {
     /// the parser hoisted a synthetic `Global` for this name; codegen
     /// must skip slot allocation, register use-counting, and initialization
     /// code — references resolve through `GlobalTable` instead.
-    Declare { ty: Type, name: String, init: Option<Expr>, is_static: bool },
+    /// `is_register = true` mirrors the C `register` storage class — the
+    /// locals allocator lowers its enregister threshold so even a 1-use
+    /// local gets a register slot.
+    Declare {
+        ty: Type,
+        name: String,
+        init: Option<Expr>,
+        is_static: bool,
+        is_register: bool,
+    },
     /// `if (cond) then-body [else else-body]`.
     If { cond: Expr, then_branch: Vec<Stmt>, else_branch: Option<Vec<Stmt>> },
     /// `<name> = <value>;`. The bare-ident assignment form. Pointer-

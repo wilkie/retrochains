@@ -563,7 +563,7 @@ impl<'a> FunctionEmitter<'a> {
                 let exit = self.exit_label_num();
                 let _ = write!(self.out, "\tjmp\tshort @{}@{exit}\r\n", self.func_idx);
             }
-            StmtKind::Declare { name, init, ty, is_static } => {
+            StmtKind::Declare { name, init, ty, is_static, is_register: _ } => {
                 // Static locals are hoisted by the parser into the
                 // unit's globals list, so the initializer is emitted
                 // once at file scope (load-time) rather than on every

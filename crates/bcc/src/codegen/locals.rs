@@ -214,6 +214,7 @@ impl Locals {
                 name: param.name.clone(),
                 ty: param.ty.clone(),
                 kind: DeclKind::Param { incoming_offset: param_offset },
+                is_register: false,
             });
             // Every param takes a 2-byte slot on the stack regardless
             // of declared type — `char` gets promoted at the push site
@@ -263,7 +264,8 @@ impl Locals {
         // Int-pool eligibles: ints with ≥ 3 uses, pointers with ≥ 2,
         // and never anything whose address was taken. `unsigned`
         // shares the int pool — same byte layout, same load/store
-        // shapes (fixture 1216).
+        // shapes (fixture 1216). The `register` keyword overrides
+        // the use-count threshold (fixture 1550 / 1560).
         let eligible_int: Vec<usize> = (0..declared.len())
             .filter(|&i| {
                 if address_taken.contains(&declared[i].name) {
@@ -272,7 +274,7 @@ impl Locals {
                 let uses = counts.get(&declared[i].name).copied().unwrap_or(0);
                 match &declared[i].ty {
                     Type::Int | Type::UInt | Type::Pointer(_) => {
-                        uses >= ENREGISTER_THRESHOLD
+                        declared[i].is_register || uses >= ENREGISTER_THRESHOLD
                     }
                     _ => false,
                 }
@@ -363,7 +365,7 @@ impl Locals {
                     continue;
                 }
                 let uses = counts.get(&item.name).copied().unwrap_or(0);
-                if uses < ENREGISTER_THRESHOLD {
+                if !item.is_register && uses < ENREGISTER_THRESHOLD {
                     continue;
                 }
                 let Some(reg) = char_pool.next() else { break };
@@ -1167,6 +1169,13 @@ struct DeclItem {
     name: String,
     ty: Type,
     kind: DeclKind,
+    /// True if the C source marked this local with the `register`
+    /// storage class. The eligibility threshold drops to 1 use for
+    /// these — BCC honors the hint even for variables that wouldn't
+    /// otherwise qualify. Fixtures 1550, 1560. Always false for
+    /// params (the storage class isn't passed in the calling
+    /// convention) and statics.
+    is_register: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -1177,9 +1186,14 @@ enum DeclKind {
 
 fn collect_decls(stmt: &Stmt, out: &mut Vec<DeclItem>) {
     match &stmt.kind {
-        StmtKind::Declare { ty, name, is_static, .. } => {
+        StmtKind::Declare { ty, name, is_static, is_register, .. } => {
             if !*is_static {
-                out.push(DeclItem { name: name.clone(), ty: ty.clone(), kind: DeclKind::Local });
+                out.push(DeclItem {
+                    name: name.clone(),
+                    ty: ty.clone(),
+                    kind: DeclKind::Local,
+                    is_register: *is_register,
+                });
             }
         }
         StmtKind::If { then_branch, else_branch, .. } => {

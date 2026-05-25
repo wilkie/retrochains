@@ -1509,6 +1509,17 @@ impl Parser {
         } else {
             false
         };
+        // Optional `register` prefix — recorded so the locals
+        // allocator can lower its enregister threshold. C allows
+        // `register` anywhere in the type-qualifier soup, but BCC
+        // only honors it at the start of the declarator; we accept
+        // it here and also let `parse_type` drop a second one
+        // silently. Fixtures 1550, 1560.
+        let mut is_register = false;
+        while matches!(self.peek().kind, TokenKind::KwRegister) {
+            self.bump();
+            is_register = true;
+        }
         let base_ty = self.parse_type()?;
         // Pointer stars wrap the base type: `int **pp` is `Pointer(Pointer(Int))`.
         // Stars are per-declarator — `int *a, b;` makes `a` an `int*`
@@ -1528,7 +1539,7 @@ impl Parser {
         // int-pool-eligible) and skip the param list.
         if matches!(self.peek().kind, TokenKind::LParen) {
             let (name, fp_ty) = self.parse_func_ptr_declarator(ty.clone())?;
-            return self.finish_declare(start, base_ty, fp_ty, name, is_static);
+            return self.finish_declare(start, base_ty, fp_ty, name, is_static, is_register);
         }
         let name_tok = self.bump();
         let TokenKind::Ident(name) = &name_tok.kind else {
@@ -1556,7 +1567,7 @@ impl Parser {
         for len in array_lens.into_iter().rev() {
             ty = Type::Array { elem: Box::new(ty), len };
         }
-        self.finish_declare(start, base_ty, ty, name, is_static)
+        self.finish_declare(start, base_ty, ty, name, is_static, is_register)
     }
 
     /// Common tail of `parse_declare` after the declarator (name +
@@ -1572,6 +1583,7 @@ impl Parser {
         ty: Type,
         name: String,
         is_static: bool,
+        is_register: bool,
     ) -> Result<Stmt, ParseError> {
         let init = if matches!(self.peek().kind, TokenKind::Equals) {
             self.bump();
@@ -1635,6 +1647,7 @@ impl Parser {
                         name: tail_name,
                         init: None,
                         is_static: true,
+                        is_register: false,
                     },
                     span: tail_span,
                 });
@@ -1646,6 +1659,7 @@ impl Parser {
                         name: tail_name,
                         init: tail_init,
                         is_static: false,
+                        is_register,
                     },
                     span: tail_span,
                 });
@@ -1667,13 +1681,19 @@ impl Parser {
                 span,
             });
             return Ok(Stmt {
-                kind: StmtKind::Declare { ty, name, init: None, is_static: true },
+                kind: StmtKind::Declare {
+                    ty,
+                    name,
+                    init: None,
+                    is_static: true,
+                    is_register: false,
+                },
                 span,
             });
         }
         self.function_locals.insert(name.clone(), ty.clone());
         Ok(Stmt {
-            kind: StmtKind::Declare { ty, name, init, is_static },
+            kind: StmtKind::Declare { ty, name, init, is_static, is_register },
             span,
         })
     }
