@@ -2111,6 +2111,18 @@ fn parse_add(operands: &str, line_no: usize) -> AsmResult<Instr> {
         if let Some(imm) = parse_imm16(rhs) {
             return Ok(Instr::AddReg16Imm16 { reg, imm });
         }
+        // `add <reg16>, word ptr <group>:<sym>[bx+disp]` — bx-indexed
+        // load + add for `<reg> += <global-arr>[<var>]` (fixture
+        // 1462). Tried before the plain group-symbol path so `[bx]`
+        // in the symbol part isn't swallowed.
+        if let Some((group, symbol, disp)) = parse_group_symbol_bx_disp(rhs) {
+            return Ok(Instr::AddReg16GroupSymBxDisp {
+                reg,
+                group: group.to_string(),
+                symbol: symbol.to_string(),
+                disp,
+            });
+        }
         // `add <reg16>, word ptr [bp+N]` — generic register-vs-stack
         // compound `+=` on a non-AX reg local (fixture 661). AX uses
         // its dedicated `AddAxBpRel` variant above.

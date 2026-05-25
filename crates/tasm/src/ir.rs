@@ -425,6 +425,17 @@ pub enum Instr {
     /// `sub <reg16>,word ptr [bp+<offset>]` — `2B (mod=01 reg=<r>
     /// r/m=110) dd`. Sibling for compound `-=` (fixture 660).
     SubReg16BpRel { reg: Reg16, offset: i16 },
+    /// `add <reg16>, word ptr <group>:<sym>[bx+disp]` — bx-indexed
+    /// load + add for `<reg> += <global-arr>[<var>]`. ADD r16,r/m16
+    /// (opcode 03) with mod=10 r/m=111 ([bx]+disp16). FIXUPP-patched
+    /// disp16 = sym-offset + literal disp. Fixture 1462 (`s += a[i]`
+    /// for int global array, var index, reg-resident s).
+    AddReg16GroupSymBxDisp {
+        reg: Reg16,
+        group: String,
+        symbol: String,
+        disp: u16,
+    },
     /// `cmp ax,word ptr [bp+<offset>]` — 3B 46 dd
     CmpAxBpRel { offset: i16 },
     /// `cmp dx,word ptr [bp+disp8]` — 3B 56 dd. Low-half companion to

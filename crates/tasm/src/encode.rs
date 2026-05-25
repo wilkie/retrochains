@@ -261,6 +261,7 @@ fn instr_size(instr: &Instr) -> usize {
         Instr::MovAxFromCsBx => 3,
         Instr::MovReg16OffsetSym { .. } => 3,
         Instr::MovReg16GroupSymBxDisp { .. } => 4,
+        Instr::AddReg16GroupSymBxDisp { .. } => 4,
         Instr::MovGroupSymBxDispImm { .. } => 6,
         Instr::MovGroupSymBxDispReg16 { .. } => 4,
         Instr::MovGroupSymSiDispByteImm8 { .. } => 5,
@@ -1449,6 +1450,13 @@ fn emit_instr(
             // symbol's segment-relative location.
             let modrm = 0b10_000_111 | (reg.code() << 3);
             emit_group_sym_lea(&[0x8B, modrm], group, symbol, *disp as i16, symbols, group_idx, extern_idx, out, fixups)?;
+        }
+        Instr::AddReg16GroupSymBxDisp { reg, group, symbol, disp } => {
+            // `add <reg16>,word ptr <group>:<sym>[bx+disp]` → 03
+            // (mod=10 reg=<r> r/m=111) lo hi. Same FIXUPP shape as
+            // MovReg16GroupSymBxDisp; opcode 03 (ADD r16,r/m16).
+            let modrm = 0b10_000_111 | (reg.code() << 3);
+            emit_group_sym_lea(&[0x03, modrm], group, symbol, *disp as i16, symbols, group_idx, extern_idx, out, fixups)?;
         }
         Instr::MovGroupSymBxDispImm { group, symbol, disp, imm } => {
             // `mov word ptr <group>:<sym>[bx+disp],imm16` → C7 87

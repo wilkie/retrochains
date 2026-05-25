@@ -7171,6 +7171,29 @@ impl<'a> FunctionEmitter<'a> {
         // Restricted to ops where AX-as-RHS is unambiguous:
         // Add/Sub/BitAnd/BitOr/BitXor. Mul/Shl/Shr/Div/Mod use AX/CL/
         // DX implicitly and route through their own arms below.
+        // `<reg> += <global-arr>[<var>]` — variable-indexed global
+        // array element as the RHS of a compound add. Emit the
+        // bx-indexed memory load + add directly (`03 (mod=10 reg=<r>
+        // r/m=111) lo hi`, 4 bytes) instead of the load-to-ax + add
+        // pair (6 bytes). Fixture 1462 (`s += a[i]` for int global
+        // array, var index, reg-resident s).
+        if matches!(op, BinOp::Add)
+            && let ExprKind::ArrayIndex { array, index } = &value.kind
+            && let ExprKind::Ident(arr_name) = &array.kind
+            && let Some(gty) = self.globals.type_of(arr_name)
+            && let Some(elem_ty) = gty.array_elem()
+            && elem_ty.is_int_like()
+            && !reg.is_byte()
+        {
+            let elem_ty = elem_ty.clone();
+            self.emit_index_into_bx(index, &elem_ty);
+            let _ = write!(
+                self.out,
+                "\tadd\t{},word ptr DGROUP:_{arr_name}[bx]\r\n",
+                reg.name(),
+            );
+            return;
+        }
         if matches!(
             op,
             BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor
