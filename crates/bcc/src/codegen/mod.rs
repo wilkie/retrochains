@@ -14957,6 +14957,30 @@ impl<'a> FunctionEmitter<'a> {
                     );
                     return;
                 }
+                // `<stack-ptr-local> = &<global-arr>[K]` — emit a
+                // single immediate-store using the linker-resolved
+                // address. Saves the AX round-trip vs `mov ax,
+                // offset ...; mov [bp-N], ax`. Fixture 2506
+                // (`p = &a[7]; q = &a[2]`).
+                if ty.pointee().is_some()
+                    && let ExprKind::AddressOfArrayElem { array, byte_offset } = &value.kind
+                    && self.globals.contains(array)
+                {
+                    if *byte_offset == 0 {
+                        let _ = write!(
+                            self.out,
+                            "\tmov\tword ptr {},offset DGROUP:_{array}\r\n",
+                            bp_addr(off),
+                        );
+                    } else {
+                        let _ = write!(
+                            self.out,
+                            "\tmov\tword ptr {},offset DGROUP:_{array}+{byte_offset}\r\n",
+                            bp_addr(off),
+                        );
+                    }
+                    return;
+                }
                 // Stack pointer-typed local assigned to `<global-
                 // array> + K_const`: scale by element size and
                 // emit a single immediate store
