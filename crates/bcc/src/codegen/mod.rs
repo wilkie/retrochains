@@ -771,6 +771,55 @@ impl<'a> FunctionEmitter<'a> {
                 self.emit_expr_discard(left);
                 self.emit_expr_discard(right);
             }
+            ExprKind::Ternary { cond, then_value, else_value }
+                if matches!(then_value.kind, ExprKind::Update { .. })
+                    && matches!(else_value.kind, ExprKind::Update { .. }) =>
+            {
+                // `cond ? <update> : <update>` as a statement: the
+                // ternary's value is discarded, so each arm's Update
+                // can fire in-place (no load-then-update for postinc)
+                // and BCC still emits the wasted `mov ax, <reg>` that
+                // the ternary materialization wants. Inversion of
+                // emit order vs the value-producing path: update
+                // first, then the dead AX load. Fixture 1202
+                // (`a > 0 ? a++ : a--;`).
+                let base = self.label_plan.base(expr.span.start, expr.span.end);
+                let false_slot = base + 1;
+                let merge_slot = base + 2;
+                let (t_true, _) = self.emit_cond_test(cond);
+                // Invert the true mnemonic to its false form to fall
+                // into the else arm via `jcc` to the false slot.
+                let inv = match t_true {
+                    "je" => "jne",
+                    "jne" => "je",
+                    "jl" => "jge",
+                    "jge" => "jl",
+                    "jg" => "jle",
+                    "jle" => "jg",
+                    "jb" => "jae",
+                    "jae" => "jb",
+                    "ja" => "jbe",
+                    "jbe" => "ja",
+                    _ => panic!("unknown jcc {t_true}"),
+                };
+                let _ = write!(self.out, "\t{inv}\tshort {}\r\n", self.label_ref(false_slot));
+                // then arm: discard-emit (inc/dec first, then mov ax, reg)
+                if let ExprKind::Update { target, op, position } = &then_value.kind {
+                    self.emit_update_in_place(target, *op, *position);
+                    if let LocalLocation::Reg(reg) = self.locals.location_of(target) {
+                        let _ = write!(self.out, "\tmov\tax,{}\r\n", reg.name());
+                    }
+                }
+                let _ = write!(self.out, "\tjmp\tshort {}\r\n", self.label_ref(merge_slot));
+                self.emit_label(false_slot);
+                if let ExprKind::Update { target, op, position } = &else_value.kind {
+                    self.emit_update_in_place(target, *op, *position);
+                    if let LocalLocation::Reg(reg) = self.locals.location_of(target) {
+                        let _ = write!(self.out, "\tmov\tax,{}\r\n", reg.name());
+                    }
+                }
+                self.emit_label(merge_slot);
+            }
             _ => {
                 self.emit_expr_to_ax(expr);
             }
