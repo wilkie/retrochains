@@ -1802,6 +1802,44 @@ impl<'a> FunctionEmitter<'a> {
         self.locals.has(name) && self.locals.type_of(name).is_long_like()
     }
 
+    /// Decompose a long-typed expression into a left-associative
+    /// chain of long-pair-op operands: first the deepest LHS (which
+    /// must be a long lvalue — it loads DX:AX), then a sequence of
+    /// (lo_op, hi_op, hi_addr, lo_addr) steps. Returns None if the
+    /// chain bottoms out at something that isn't a long lvalue or
+    /// uses ops other than long-pair ops. Used by chained-long-add
+    /// return shapes. Fixture 3301.
+    fn collect_long_lvalue_chain(&self, e: &Expr) -> Option<Vec<LongChainStep>> {
+        // Walk down `(((a op b) op c) op d)` collecting RHS operands
+        // into `steps` (innermost first), then reverse.
+        let mut steps: Vec<LongChainStep> = Vec::new();
+        let mut cur = e;
+        loop {
+            if let ExprKind::BinOp { op, left, right } = &cur.kind
+                && let Some((lo_op, hi_op)) = long_pair_op(*op)
+                && let Some((b_hi, b_lo)) = self.long_lvalue_addr_pair(right)
+            {
+                steps.push(LongChainStep { lo_op, hi_op, hi: b_hi, lo: b_lo });
+                cur = left;
+            } else {
+                break;
+            }
+        }
+        let (root_hi, root_lo) = self.long_lvalue_addr_pair(cur)?;
+        steps.reverse();
+        let mut chain = vec![LongChainStep {
+            lo_op: "",
+            hi_op: "",
+            hi: root_hi,
+            lo: root_lo,
+        }];
+        chain.extend(steps);
+        if chain.len() < 2 {
+            return None;
+        }
+        Some(chain)
+    }
+
     /// Build the asm text that loads a long-typed arm into DX:AX,
     /// in the order BCC emits per-arm of a long-returning ternary.
     /// Returns `None` for arms we don't know how to load. Const-zero
@@ -5478,16 +5516,21 @@ impl<'a> FunctionEmitter<'a> {
             // `return <long-lvalue> +/-/&/|/^ <long-lvalue>;` — long
             // pair op, both operands from memory. Load a into DX:AX,
             // apply <op> with b's halves. Sibling of the long-init
-            // path's lvalue-lvalue case.
-            if let ExprKind::BinOp { op, left, right } = &e.kind
-                && let Some((lo_op, hi_op)) = long_pair_op(*op)
-                && let Some((a_hi, a_lo)) = self.long_lvalue_addr_pair(left)
-                && let Some((b_hi, b_lo)) = self.long_lvalue_addr_pair(right)
+            // path's lvalue-lvalue case. Also handles chained
+            // `<long-lvalue> + <long-lvalue> + <long-lvalue>` — the
+            // outermost `+`'s LHS is itself a long-pair-op binop
+            // chain rooted at a long lvalue. Fixtures 3301 (chained
+            // long add on stack array).
+            if let ExprKind::BinOp { op: _, .. } = &e.kind
+                && let Some(addrs) = self.collect_long_lvalue_chain(e)
             {
-                let _ = write!(self.out, "\tmov\tax,word ptr {a_lo}\r\n");
-                let _ = write!(self.out, "\tmov\tdx,word ptr {a_hi}\r\n");
-                let _ = write!(self.out, "\t{lo_op}\tax,word ptr {b_lo}\r\n");
-                let _ = write!(self.out, "\t{hi_op}\tdx,word ptr {b_hi}\r\n");
+                let first = &addrs[0];
+                let _ = write!(self.out, "\tmov\tdx,word ptr {}\r\n", first.hi);
+                let _ = write!(self.out, "\tmov\tax,word ptr {}\r\n", first.lo);
+                for step in &addrs[1..] {
+                    let _ = write!(self.out, "\t{}\tax,word ptr {}\r\n", step.lo_op, step.lo);
+                    let _ = write!(self.out, "\t{}\tdx,word ptr {}\r\n", step.hi_op, step.hi);
+                }
                 return;
             }
             // `return <long-lvalue> +/-/&/|/^ <int-expr>;` — widen
@@ -16204,6 +16247,16 @@ where
         ty = (**elem).clone();
     }
     Some((off, ty))
+}
+
+/// One step in a long-pair-op chain. The first entry holds the
+/// root operand (with empty ops); subsequent entries hold each
+/// RHS to op-against. Used by `collect_long_lvalue_chain`.
+struct LongChainStep {
+    lo_op: &'static str,
+    hi_op: &'static str,
+    hi: String,
+    lo: String,
 }
 
 /// Classification of a variable-indexed array's base name, used by
