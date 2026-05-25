@@ -200,7 +200,10 @@ struct LocalEntry {
 
 impl Locals {
     #[must_use]
-    pub fn analyze(function: &Function) -> Self {
+    pub fn analyze(
+        function: &Function,
+        globals: &crate::codegen::GlobalTable,
+    ) -> Self {
         // Pass 1: collect all "declarable" names (params first, then
         // locals in source order). Each gets an `init`-style use plus
         // a textual count.
@@ -282,9 +285,33 @@ impl Locals {
             .collect();
         let si_pick = pick_si(&eligible_int, &declared, &counts);
 
+        // SI-vs-DX heuristic for the single-eligible case: when only
+        // ONE int is eligible AND it's used as the subscript of a
+        // CHAR-element array AND it doesn't appear in the return
+        // expr, BCC picks DX instead of SI. The reason: char-element
+        // stores naturally touch DL (`mov al, dl; mov [bx], al`),
+        // and using DX for the counter avoids push si/pop si.
+        // Word-element arrays don't benefit and keep SI (fixture
+        // 510). Doesn't fire when the function makes a call (DX
+        // would be clobbered). Fixtures 1219, 1257.
+        let prefer_dx_over_si = !function_makes_call
+            && eligible_int.len() == 1
+            && si_pick.is_some()
+            && name_is_char_array_index(
+                &declared[si_pick.unwrap()].name,
+                function.body.as_deref().unwrap_or(&[]),
+                &declared,
+                globals,
+            )
+            && !name_in_returns(
+                &declared[si_pick.unwrap()].name,
+                function.body.as_deref().unwrap_or(&[]),
+            );
+
         let mut reg_of: HashMap<usize, Reg> = HashMap::new();
         if let Some(idx) = si_pick {
-            reg_of.insert(idx, Reg::Si);
+            let chosen = if prefer_dx_over_si { Reg::Dx } else { Reg::Si };
+            reg_of.insert(idx, chosen);
         }
         // With a function call in the body, DX/BX/CX are caller-
         // clobbered — only SI/DI survive. Restrict the non-SI pool.
@@ -954,6 +981,165 @@ fn expr_has_div_or_mod(e: &Expr) -> bool {
         | ExprKind::AddressOf(_)
         | ExprKind::AddressOfArrayElem { .. }
         | ExprKind::StringLit(_) => false,
+    }
+}
+
+/// True iff `name` appears as an identifier in any `return <expr>;`
+/// statement in `body`. Used by the SI-vs-DX heuristic to detect
+/// whether a candidate "escapes" into the function's return value.
+fn name_in_returns(name: &str, body: &[Stmt]) -> bool {
+    body.iter().any(|s| stmt_return_mentions(name, s))
+}
+
+fn stmt_return_mentions(name: &str, stmt: &Stmt) -> bool {
+    match &stmt.kind {
+        StmtKind::Return(Some(e)) => expr_mentions(name, e),
+        StmtKind::If { then_branch, else_branch, .. } => {
+            name_in_returns(name, then_branch)
+                || else_branch.as_ref().is_some_and(|b| name_in_returns(name, b))
+        }
+        StmtKind::While { body, .. } | StmtKind::DoWhile { body, .. } => {
+            name_in_returns(name, body)
+        }
+        StmtKind::For { body, .. } => name_in_returns(name, body),
+        StmtKind::Switch { cases, .. } => {
+            cases.iter().any(|c| name_in_returns(name, &c.body))
+        }
+        _ => false,
+    }
+}
+
+fn expr_mentions(name: &str, e: &Expr) -> bool {
+    match &e.kind {
+        ExprKind::Ident(n) => n == name,
+        ExprKind::BinOp { left, right, .. }
+        | ExprKind::Logical { left, right, .. }
+        | ExprKind::Comma { left, right } => {
+            expr_mentions(name, left) || expr_mentions(name, right)
+        }
+        ExprKind::Unary { operand, .. } => expr_mentions(name, operand),
+        ExprKind::Cast { operand, .. } => expr_mentions(name, operand),
+        ExprKind::Deref(operand) => expr_mentions(name, operand),
+        ExprKind::AssignExpr { value, .. } => expr_mentions(name, value),
+        ExprKind::Call { args, .. } => args.iter().any(|a| expr_mentions(name, a)),
+        ExprKind::ArrayIndex { array, index } => {
+            expr_mentions(name, array) || expr_mentions(name, index)
+        }
+        ExprKind::Member { base, .. } => expr_mentions(name, base),
+        ExprKind::Ternary { cond, then_value, else_value } => {
+            expr_mentions(name, cond)
+                || expr_mentions(name, then_value)
+                || expr_mentions(name, else_value)
+        }
+        ExprKind::InitList { items } => items.iter().any(|i| expr_mentions(name, i)),
+        ExprKind::Update { target, .. } => target == name,
+        ExprKind::AddressOf(n) => n == name,
+        ExprKind::AddressOfArrayElem { array, .. } => array == name,
+        ExprKind::IntLit(_) | ExprKind::StringLit(_) => false,
+    }
+}
+
+/// True iff `name` appears as a non-constant index for a CHAR-element
+/// array (local or global) anywhere in `body`. Char-element stores
+/// touch DL naturally, so BCC prefers DX for the counter to avoid
+/// push si.
+fn name_is_char_array_index(
+    name: &str,
+    body: &[Stmt],
+    declared: &[DeclItem],
+    globals: &crate::codegen::GlobalTable,
+) -> bool {
+    let mut char_arrays: HashSet<String> = HashSet::new();
+    for item in declared {
+        if let Type::Array { elem, .. } = &item.ty {
+            if matches!(&**elem, Type::Char | Type::UChar) {
+                char_arrays.insert(item.name.clone());
+            }
+        }
+    }
+    for gname in globals.names() {
+        if let Some(Type::Array { elem, .. }) = globals.type_of(gname) {
+            if matches!(&**elem, Type::Char | Type::UChar) {
+                char_arrays.insert(gname.to_string());
+            }
+        }
+    }
+    body.iter()
+        .any(|s| stmt_has_name_as_char_array_index(name, s, &char_arrays))
+}
+
+fn stmt_has_name_as_char_array_index(
+    name: &str,
+    stmt: &Stmt,
+    char_arrays: &HashSet<String>,
+) -> bool {
+    match &stmt.kind {
+        StmtKind::ArrayAssign { array, indices, .. }
+        | StmtKind::ArrayCompoundAssign { array, indices, .. } => {
+            char_arrays.contains(array.as_str())
+                && indices.iter().any(|i| expr_mentions(name, i))
+        }
+        StmtKind::If { then_branch, else_branch, .. } => {
+            name_in_char_array_index_body(name, then_branch, char_arrays)
+                || else_branch
+                    .as_ref()
+                    .is_some_and(|b| name_in_char_array_index_body(name, b, char_arrays))
+        }
+        StmtKind::While { body, .. } | StmtKind::DoWhile { body, .. } => {
+            name_in_char_array_index_body(name, body, char_arrays)
+        }
+        StmtKind::For { body, .. } => name_in_char_array_index_body(name, body, char_arrays),
+        StmtKind::Switch { cases, .. } => cases
+            .iter()
+            .any(|c| name_in_char_array_index_body(name, &c.body, char_arrays)),
+        StmtKind::Return(Some(e))
+        | StmtKind::Declare { init: Some(e), .. }
+        | StmtKind::Assign { value: e, .. }
+        | StmtKind::ExprStmt(e) => expr_has_char_array_index(name, e, char_arrays),
+        _ => false,
+    }
+}
+
+fn name_in_char_array_index_body(
+    name: &str,
+    body: &[Stmt],
+    char_arrays: &HashSet<String>,
+) -> bool {
+    body.iter()
+        .any(|s| stmt_has_name_as_char_array_index(name, s, char_arrays))
+}
+
+fn expr_has_char_array_index(name: &str, e: &Expr, char_arrays: &HashSet<String>) -> bool {
+    match &e.kind {
+        ExprKind::ArrayIndex { array, index } => {
+            (matches!(&array.kind, ExprKind::Ident(n) if char_arrays.contains(n.as_str()))
+                && expr_mentions(name, index))
+                || expr_has_char_array_index(name, array, char_arrays)
+                || expr_has_char_array_index(name, index, char_arrays)
+        }
+        ExprKind::BinOp { left, right, .. }
+        | ExprKind::Logical { left, right, .. }
+        | ExprKind::Comma { left, right } => {
+            expr_has_char_array_index(name, left, char_arrays)
+                || expr_has_char_array_index(name, right, char_arrays)
+        }
+        ExprKind::Unary { operand, .. }
+        | ExprKind::Cast { operand, .. }
+        | ExprKind::Deref(operand) => expr_has_char_array_index(name, operand, char_arrays),
+        ExprKind::AssignExpr { value, .. } => expr_has_char_array_index(name, value, char_arrays),
+        ExprKind::Call { args, .. } => args
+            .iter()
+            .any(|a| expr_has_char_array_index(name, a, char_arrays)),
+        ExprKind::Member { base, .. } => expr_has_char_array_index(name, base, char_arrays),
+        ExprKind::Ternary { cond, then_value, else_value } => {
+            expr_has_char_array_index(name, cond, char_arrays)
+                || expr_has_char_array_index(name, then_value, char_arrays)
+                || expr_has_char_array_index(name, else_value, char_arrays)
+        }
+        ExprKind::InitList { items } => items
+            .iter()
+            .any(|i| expr_has_char_array_index(name, i, char_arrays)),
+        _ => false,
     }
 }
 

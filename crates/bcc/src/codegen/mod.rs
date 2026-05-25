@@ -113,6 +113,11 @@ impl GlobalTable {
         self.map.get(name)
     }
 
+    /// Iterate over all declared global names.
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        self.map.keys().map(|k| k.as_str())
+    }
+
     /// Find a struct definition by its tag name. Some AST nodes
     /// (notably `Type::Pointer(Struct{name, fields:[], …})`) carry a
     /// name-only placeholder where the recursive struct definition
@@ -448,7 +453,7 @@ impl<'a> FunctionEmitter<'a> {
             func_idx,
             lines: LineMap::new(source),
             current_line: 0,
-            locals: Locals::analyze(function),
+            locals: Locals::analyze(function, globals),
             label_plan: LabelPlan::build(function),
             signatures,
             globals,
@@ -8441,11 +8446,32 @@ impl<'a> FunctionEmitter<'a> {
         base_off: i16,
         elem_size: u16,
     ) {
-        // Load index into BX. If it's a register-local, that's a
-        // direct `mov bx, <reg>`; if a stack local, `mov bx, [bp+N]`;
-        // for `<int-lv> + <int-lv>` BCC writes the sum directly into
-        // BX (`mov bx, lv1; add bx, lv2`) — fixture 1275 (`a[i+j]`).
-        // Otherwise fall back to evaluating into AX and copying.
+        // BCC's order depends on whether the index path includes a
+        // stride shift:
+        //  - Simple ident index + stride 1 (no shl): emit `lea ax,
+        //    base` FIRST, then `mov bx, idx`, then add. The two
+        //    loads are independent so order is free; BCC's choice
+        //    is observable in the byte output. Fixture 1219.
+        //  - Otherwise (stride ≥ 2 or BinOp/compound index): emit
+        //    the index compute first (it leaves BX hot for the shl),
+        //    then `lea ax, base`, then add. Fixtures 1468, 1275.
+        let simple_idx = matches!(&index.kind, ExprKind::Ident(_));
+        if simple_idx && elem_size == 1 {
+            let _ = write!(self.out, "\tlea\tax,word ptr {}\r\n", bp_addr(base_off));
+            let ExprKind::Ident(idx_name) = &index.kind else { unreachable!() };
+            match self.locals.location_of(idx_name) {
+                LocalLocation::Reg(reg) => {
+                    let _ = write!(self.out, "\tmov\tbx,{}\r\n", reg.name());
+                }
+                LocalLocation::Stack(off) => {
+                    let _ = write!(self.out, "\tmov\tbx,word ptr {}\r\n", bp_addr(off));
+                }
+            }
+            self.out.extend_from_slice(b"\tadd\tbx,ax\r\n");
+            return;
+        }
+        // Compound-index or stride-≥-2 path: compute index into BX
+        // first (the shl chains on, leaving BX hot), then lea, add.
         match &index.kind {
             ExprKind::Ident(idx_name) => match self.locals.location_of(idx_name) {
                 LocalLocation::Reg(reg) => {
@@ -8730,6 +8756,62 @@ impl<'a> FunctionEmitter<'a> {
                 );
                 return;
             }
+            // Variable-indexed global char-array write with i in DX
+            // (not SI) — fires when the SI→DX heuristic picks DX for
+            // the loop counter. 8086 has no DX-indexed addressing,
+            // so copy DX→BX and use bx-indexed `mov byte ptr _arr
+            // [bx], <al>`. Fixture 1257 (`char arr[5]; for (i=0..)
+            // arr[i] = i` with i in DX).
+            if indices.len() == 1
+                && let Some(elem) = gty.array_elem()
+                && elem.is_char_like()
+                && let ExprKind::Ident(i_name) = &indices[0].kind
+                && self.locals.has(i_name)
+                && let LocalLocation::Reg(reg) = self.locals.location_of(i_name)
+                && !reg.is_byte()
+            {
+                let reg_name = reg.name();
+                let low = match reg_name {
+                    "dx" => Some("dl"),
+                    "bx" => Some("bl"),
+                    "cx" => Some("cl"),
+                    _ => None,
+                };
+                // BCC's exact shape for `_arr[i] = i` (i in DX):
+                //   mov bx, dx        ; set up index reg first
+                //   mov al, dl        ; byte-form load of value
+                //   mov byte ptr _arr[bx], al
+                if let ExprKind::Ident(v_name) = &value.kind
+                    && v_name == i_name
+                    && let Some(low_name) = low
+                {
+                    let _ = write!(self.out, "\tmov\tbx,{reg_name}\r\n");
+                    let _ = write!(self.out, "\tmov\tal,{low_name}\r\n");
+                    let _ = write!(
+                        self.out,
+                        "\tmov\tbyte ptr DGROUP:_{array}[bx],al\r\n",
+                    );
+                    return;
+                }
+                // Const RHS: just set up BX and store.
+                if let Some(v) = try_const_eval(value) {
+                    let v8 = (v & 0xFF) as u8;
+                    let _ = write!(self.out, "\tmov\tbx,{reg_name}\r\n");
+                    let _ = write!(
+                        self.out,
+                        "\tmov\tbyte ptr DGROUP:_{array}[bx],{v8}\r\n",
+                    );
+                    return;
+                }
+                // Generic: evaluate value to AL, copy DX→BX, store.
+                self.emit_expr_to_ax(value);
+                let _ = write!(self.out, "\tmov\tbx,{reg_name}\r\n");
+                let _ = write!(
+                    self.out,
+                    "\tmov\tbyte ptr DGROUP:_{array}[bx],al\r\n",
+                );
+                return;
+            }
             // Variable-indexed global int-array write. Load `i` into
             // BX, shl once for stride 2, then `mov word ptr
             // _a[bx], <src>`. Fixture 510 (`a[i] = i`).
@@ -8967,6 +9049,34 @@ impl<'a> FunctionEmitter<'a> {
         {
             let _ = write!(self.out, "\tmov\tword ptr [bx],{}\r\n", reg.name());
             return;
+        }
+        // Char-array store from a register-resident int local: load
+        // just the low byte of the source reg into AL (`mov al,
+        // <reg-low>` = 2 bytes) instead of the full int via AX
+        // (`mov ax, <reg>` = 2 bytes, but then we'd waste the cbw
+        // or fall through emit_expr_to_ax that may widen). The
+        // byte-form load matches BCC's exact shape. Fixture 1219
+        // (`char a[5]; a[i] = i` with i in DX → `mov al, dl`).
+        if elem.is_char_like()
+            && let ExprKind::Ident(name) = &value.kind
+            && self.locals.has(name)
+            && let LocalLocation::Reg(reg) = self.locals.location_of(name)
+            && !reg.is_byte()
+            && self.locals.type_of(name).is_int_like()
+        {
+            // Reg's low byte: si/di have no byte alias; DX→DL,
+            // BX→BL, CX→CL.
+            let low = match reg.name() {
+                "dx" => Some("dl"),
+                "bx" => Some("bl"),
+                "cx" => Some("cl"),
+                _ => None,
+            };
+            if let Some(low_name) = low {
+                let _ = write!(self.out, "\tmov\tal,{low_name}\r\n");
+                self.out.extend_from_slice(b"\tmov\tbyte ptr [bx],al\r\n");
+                return;
+            }
         }
         // Non-constant RHS: evaluate to AX (or AL for byte storage),
         // then store through [bx]. Fixtures 1219 (`a[i] = i` with char
