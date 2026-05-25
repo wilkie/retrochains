@@ -5363,6 +5363,48 @@ impl<'a> FunctionEmitter<'a> {
                 let _ = write!(self.out, "\tmov\tax,word ptr {lo}\r\n");
                 return;
             }
+            // `return <long-lvalue> << K`/`>> K` (or by variable n).
+            // Load DX:AX from source, set CL to count, call shift
+            // helper. Result remains in DX:AX. Fixture 3430
+            // (`a << n` for long a, int n).
+            if let ExprKind::BinOp { op, left, right } = &e.kind
+                && matches!(op, BinOp::Shl | BinOp::Shr)
+                && let Some((a_hi, a_lo)) = self.long_lvalue_addr_pair(left)
+            {
+                let unsigned = self.expr_is_unsigned(left);
+                let helper = match (op, unsigned) {
+                    (BinOp::Shl, _)     => "N_LXLSH@",
+                    (BinOp::Shr, false) => "N_LXRSH@",
+                    (BinOp::Shr, true)  => "N_LXURSH@",
+                    _ => unreachable!(),
+                };
+                let _ = write!(self.out, "\tmov\tdx,word ptr {a_hi}\r\n");
+                let _ = write!(self.out, "\tmov\tax,word ptr {a_lo}\r\n");
+                if let Some(k) = try_const_eval(right) {
+                    let k8 = (k & 0xFF) as u8;
+                    let _ = write!(self.out, "\tmov\tcl,{k8}\r\n");
+                } else if let ExprKind::Ident(n_name) = &right.kind
+                    && self.locals.has(n_name)
+                    && let LocalLocation::Stack(n_off) = self.locals.location_of(n_name)
+                {
+                    let _ = write!(self.out, "\tmov\tcl,byte ptr {}\r\n", bp_addr(n_off));
+                } else {
+                    // Fall through to panic — RHS shape not supported.
+                    panic!("long return shift count from non-stack-local not yet supported");
+                }
+                let _ = write!(self.out, "\tcall\tnear ptr {helper}\r\n");
+                self.helpers.insert(helper.to_string());
+                return;
+            }
+            // `return <long-fn-call>(args);` — the call already
+            // returns DX:AX; just emit the call. Args are pushed in
+            // the standard way. Fixture 3426 (`return handle(K)`).
+            if let ExprKind::Call { name, args } = &e.kind
+                && self.signatures.ret_ty_of(name).is_some_and(|t| t.is_long_like())
+            {
+                self.emit_call(name, args);
+                return;
+            }
             // `return <long-lvalue> * <long-const>;` — long * long
             // helper. CX:BX = long lvalue, DX:AX = const RHS, call
             // N_LXMUL@ (returns DX:AX). Fixture 3303 (`a * 10L`).
