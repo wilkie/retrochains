@@ -103,6 +103,11 @@ impl Reg {
     /// `Locals::analyze`).
     const NON_SI_POOL: [Self; 4] = [Self::Di, Self::Dx, Self::Bx, Self::Cx];
 
+    /// Reduced int pool when the function makes a call: DX, BX, CX
+    /// are all caller-clobbered, so only DI is safe alongside SI.
+    /// Fixture 1508 (3 ints + dbl() call → 2 in SI/DI, 1 spills).
+    const NON_SI_POOL_WITH_CALL: [Self; 1] = [Self::Di];
+
     /// Pool used for char eligibles, in source-order assignment.
     /// Fixtures 047/050: a char declared first lands in DL, the next
     /// in BL, the third in CL.
@@ -279,7 +284,14 @@ impl Locals {
         if let Some(idx) = si_pick {
             reg_of.insert(idx, Reg::Si);
         }
-        let mut non_si_iter = Reg::NON_SI_POOL.iter().copied();
+        // With a function call in the body, DX/BX/CX are caller-
+        // clobbered — only SI/DI survive. Restrict the non-SI pool.
+        let non_si_pool: &[Reg] = if function_makes_call {
+            &Reg::NON_SI_POOL_WITH_CALL
+        } else {
+            &Reg::NON_SI_POOL
+        };
+        let mut non_si_iter = non_si_pool.iter().copied();
         for &i in &eligible_int {
             if Some(i) == si_pick {
                 continue;
