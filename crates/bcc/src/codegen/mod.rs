@@ -7467,6 +7467,49 @@ impl<'a> FunctionEmitter<'a> {
             );
             return;
         }
+        // `<reg> += <other-reg>++` / `--<other-reg>`: emit the op
+        // using the current register value (memory-direct add), then
+        // apply the post/pre update separately. Skips the AX
+        // snapshot. Fixtures 1347 (`a += b++`), 1348 (`a += ++b`).
+        if matches!(op, BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor)
+            && let ExprKind::Update {
+                target: upd_name,
+                op: upd_op,
+                position,
+            } = &value.kind
+            && self.locals.has(upd_name)
+            && let LocalLocation::Reg(upd_reg) = self.locals.location_of(upd_name)
+            && !upd_reg.is_byte()
+            && self.locals.type_of(upd_name).is_int_like()
+        {
+            let mnem = match op {
+                BinOp::Add => "add",
+                BinOp::Sub => "sub",
+                BinOp::BitAnd => "and",
+                BinOp::BitOr => "or",
+                BinOp::BitXor => "xor",
+                _ => unreachable!(),
+            };
+            let upd_mnem = match upd_op {
+                crate::ast::UpdateOp::Inc => "inc",
+                crate::ast::UpdateOp::Dec => "dec",
+            };
+            let upd_reg_name = upd_reg.name();
+            let dst_reg_name = reg.name();
+            // Pre-inc: increment first, then op.
+            // Post-inc: op with current value, then increment.
+            match position {
+                crate::ast::UpdatePosition::Pre => {
+                    let _ = write!(self.out, "\t{upd_mnem}\t{upd_reg_name}\r\n");
+                    let _ = write!(self.out, "\t{mnem}\t{dst_reg_name},{upd_reg_name}\r\n");
+                }
+                crate::ast::UpdatePosition::Post => {
+                    let _ = write!(self.out, "\t{mnem}\t{dst_reg_name},{upd_reg_name}\r\n");
+                    let _ = write!(self.out, "\t{upd_mnem}\t{upd_reg_name}\r\n");
+                }
+            }
+            return;
+        }
         if matches!(
             op,
             BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor
