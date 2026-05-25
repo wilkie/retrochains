@@ -13407,6 +13407,37 @@ impl<'a> FunctionEmitter<'a> {
                     );
                     return;
                 }
+                // Stack pointer-typed local assigned to `<global-
+                // array> + K_const`: scale by element size and
+                // emit a single immediate store
+                // `mov word ptr [bp-N], offset DGROUP:_<arr>+K*stride`.
+                // Same fold as the stack-array init shape one level
+                // up, but for global arrays. Fixture 1361 (`int *end;
+                // end = a + 3;` with int a[3]; stride 2 → +6).
+                if ty.pointee().is_some()
+                    && let ExprKind::BinOp { op: BinOp::Add, left, right } = &value.kind
+                    && let ExprKind::Ident(arr_name) = &left.kind
+                    && let Some(gty) = self.globals.type_of(arr_name)
+                    && let Some(elem_ty) = gty.array_elem()
+                    && let Some(k) = try_const_eval(right)
+                {
+                    let stride = u32::from(elem_ty.size_bytes());
+                    let scaled = (k as u32).wrapping_mul(stride) & 0xFFFF;
+                    if scaled == 0 {
+                        let _ = write!(
+                            self.out,
+                            "\tmov\tword ptr {},offset DGROUP:_{arr_name}\r\n",
+                            bp_addr(off),
+                        );
+                    } else {
+                        let _ = write!(
+                            self.out,
+                            "\tmov\tword ptr {},offset DGROUP:_{arr_name}+{scaled}\r\n",
+                            bp_addr(off),
+                        );
+                    }
+                    return;
+                }
                 self.emit_expr_to_ax(value);
                 if ty.is_char_like() {
                     let _ = write!(self.out, "\tmov\tbyte ptr {},al\r\n", bp_addr(off));
