@@ -10763,9 +10763,23 @@ impl<'a> FunctionEmitter<'a> {
             };
             let reg = reg.name();
             let width = ptr_width(pointee);
-            let Some(v) = try_const_eval(value) else {
-                panic!("non-constant rhs in `*p++ = v` not yet supported (no fixture)");
-            };
+            // Non-constant RHS: evaluate to AX (or AL for char dst),
+            // then `mov <width> ptr [<reg>], al/ax`, then advance the
+            // dest pointer. Fixture 1346 (`*d++ = *s++`).
+            if try_const_eval(value).is_none() {
+                self.emit_expr_to_ax(value);
+                if pointee.is_char_like() {
+                    let _ = write!(self.out, "\tmov\tbyte ptr [{reg}],al\r\n");
+                } else {
+                    let _ = write!(self.out, "\tmov\tword ptr [{reg}],ax\r\n");
+                }
+                let stride = pointee.size_bytes();
+                for _ in 0..stride {
+                    let _ = write!(self.out, "\tinc\t{reg}\r\n");
+                }
+                return;
+            }
+            let v = try_const_eval(value).unwrap();
             let v_masked = if pointee.is_char_like() { v & 0xFF } else { v & 0xFFFF };
             let _ = write!(self.out, "\tmov\t{width} ptr [{reg}],{v_masked}\r\n");
             let stride = pointee.size_bytes();
