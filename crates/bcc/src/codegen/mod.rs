@@ -11816,6 +11816,40 @@ impl<'a> FunctionEmitter<'a> {
                     let _ = write!(self.out, "\tmov\tword ptr {},{v16}\r\n", bp_addr(off));
                     return;
                 }
+                // `v = *p++;` where p is a register-resident pointer
+                // local: read through the pointer directly, store the
+                // loaded value to v, then advance the pointer. Saves
+                // the `mov bx, <reg>` snapshot that `emit_deref_to_ax`'s
+                // postinc path emits (since here the read happens
+                // before the advance — no need to snapshot). Fixture
+                // 2518 (`v = *p++` for `int *p` in SI). Also fires
+                // for postdec.
+                if !ty.is_char_like()
+                    && !ty.is_long_like()
+                    && let ExprKind::Deref(inner) = &value.kind
+                    && let ExprKind::Update {
+                        target,
+                        op,
+                        position: crate::ast::UpdatePosition::Post,
+                    } = &inner.kind
+                    && self.locals.has(target)
+                    && let LocalLocation::Reg(reg) = self.locals.location_of(target)
+                    && let Some(pointee) = self.locals.type_of(target).pointee()
+                    && pointee.is_int_like()
+                {
+                    let reg_name = reg.name();
+                    let stride = i32::from(pointee.size_bytes());
+                    let mnem = match op {
+                        crate::ast::UpdateOp::Inc => "inc",
+                        crate::ast::UpdateOp::Dec => "dec",
+                    };
+                    let _ = write!(self.out, "\tmov\tax,word ptr [{reg_name}]\r\n");
+                    let _ = write!(self.out, "\tmov\tword ptr {},ax\r\n", bp_addr(off));
+                    for _ in 0..stride {
+                        let _ = write!(self.out, "\t{mnem}\t{reg_name}\r\n");
+                    }
+                    return;
+                }
                 // `y = ++x;` where x is register-resident — update
                 // in place, then store the register direct to the
                 // stack slot (skip the AX round-trip). Fixture 530.
