@@ -1036,6 +1036,16 @@ fn parse_mov(operands: &str, line_no: usize) -> AsmResult<Instr> {
                 disp,
             });
         }
+        // `mov al, byte ptr <group>:<sym>[si]` — si-indexed load.
+        // Fixture 1426 (`dst[i] = src[i]` with i in SI).
+        if let Some((group, symbol, disp)) = parse_group_symbol_base_disp(rhs, "si", "byte") {
+            return Ok(Instr::MovReg8GroupSymSiDisp {
+                reg: Reg8::Al,
+                group: group.to_string(),
+                symbol: symbol.to_string(),
+                disp,
+            });
+        }
         // `mov al,byte ptr DGROUP:_g` — 8-bit moffs8 load.
         if let Some((group, symbol)) = parse_byte_group_symbol(rhs) {
             let (sym, offset) = split_sym_offset(symbol);
