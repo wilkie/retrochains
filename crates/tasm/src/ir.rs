@@ -340,6 +340,11 @@ pub enum Instr {
     /// sign-extended). Used when the immediate fits in a signed byte
     /// and the register isn't AX (AX gets a different encoding).
     CmpReg16Imm8 { reg: Reg16, imm: i8 },
+    /// `cmp <reg16>,<imm16>` — 81 (F8+rc) lo hi (Grp1 r/m16,imm16).
+    /// Used when the immediate doesn't fit in a signed byte for a
+    /// non-AX register. AX uses `CmpAxImm` (3-byte 3D form).
+    /// Fixture 2001 (`cmp si, 500`), 2952 (`cmp si, 200`).
+    CmpReg16Imm16 { reg: Reg16, imm: u16 },
     /// `cmp <lhs:reg16>,<rhs:reg16>` — 3B (mod=11 lhs<<3 rhs). The
     /// `r16,r/m16` family with the LHS in the reg field. BCC emits
     /// this for `cmp si,di` when both compared values are in

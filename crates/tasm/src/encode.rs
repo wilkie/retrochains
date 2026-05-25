@@ -245,6 +245,7 @@ fn instr_size(instr: &Instr) -> usize {
         | Instr::OrReg16Reg16 { .. }
         | Instr::CmpReg16Reg16 { .. } => 2,
         Instr::CmpReg16Imm8 { .. } | Instr::CmpAxImm { .. } | Instr::AddAxImm { .. } | Instr::SubAxImm { .. } => 3,
+        Instr::CmpReg16Imm16 { .. } => 4,
         Instr::CmpBpRelImm8 { offset, .. } => 1 + bp_rel_modrm_size(*offset) + 1,
         Instr::CmpBpRelImm16 { offset, .. } => 1 + bp_rel_modrm_size(*offset) + 2,
         Instr::JmpShort(_) | Instr::ShlAxCl | Instr::SarAxCl | Instr::ShrAxCl => 2,
@@ -629,6 +630,13 @@ fn emit_instr(
             out.push(0x83);
             out.push(0b11_111_000 | reg.code());
             out.push(*imm as u8);
+        }
+        Instr::CmpReg16Imm16 { reg, imm } => {
+            // `cmp r16,imm16` → 81 (mod=11 /7 r/m=reg) lo hi.
+            // 81 is Grp1 r/m16,imm16; /7 selects CMP.
+            out.push(0x81);
+            out.push(0b11_111_000 | reg.code());
+            out.extend_from_slice(&imm.to_le_bytes());
         }
         Instr::CmpReg16Reg16 { lhs, rhs } => {
             // `cmp r16,r/m16` → 3B (mod=11 lhs<<3 rhs). LHS goes in

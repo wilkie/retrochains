@@ -2500,6 +2500,13 @@ fn parse_cmp(operands: &str, line_no: usize) -> AsmResult<Instr> {
         if let Some(rhs_reg) = Reg16::parse(rhs) {
             return Ok(Instr::CmpReg16Reg16 { lhs: reg, rhs: rhs_reg });
         }
+        // Wider-immediate sibling for K not in imm8sx range.
+        // AX gets `CmpAxImm` (3-byte 3D form) above; non-AX uses 81.
+        if !matches!(reg, Reg16::Ax)
+            && let Some(imm) = parse_imm16(rhs)
+        {
+            return Ok(Instr::CmpReg16Imm16 { reg, imm: imm as u16 });
+        }
     }
     if let Some(reg) = Reg8::parse(lhs) {
         if let Some(imm) = parse_imm8(rhs) {
