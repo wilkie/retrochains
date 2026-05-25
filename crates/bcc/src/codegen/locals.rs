@@ -108,6 +108,10 @@ impl Reg {
     /// don't land in a reg the multiplier writes. Fixture 1369
     /// (`s += i * j` — s should go to BX, not DX).
     const NON_SI_POOL_NO_DX: [Self; 3] = [Self::Di, Self::Bx, Self::Cx];
+    /// Variant when exactly 5 ints are eligible (perfect fit in
+    /// 5 registers, no spill). Empirical from fixtures 1850, 1979.
+    /// The 6+ "spill" case keeps the standard NON_SI_POOL order.
+    const NON_SI_POOL_FIVE_INT: [Self; 4] = [Self::Bx, Self::Di, Self::Cx, Self::Dx];
 
     /// Reduced int pool when the function makes a call: DX, BX, CX
     /// are all caller-clobbered, so only DI is safe alongside SI.
@@ -339,10 +343,37 @@ impl Locals {
                 .map(|item| item.name.as_str())
                 .collect::<HashSet<_>>(),
         );
+        // Exactly-5-eligible case with VARIED use counts: BCC swaps
+        // the secondary order from `[DI, DX, BX, CX]` to `[BX, DI,
+        // CX, DX]`. Fixtures 1850, 1979 (use counts vary, swap
+        // pool). 1505, 046 (5 ints with all-equal use counts) keep
+        // the default order. 4-or-fewer and 6+ keep default
+        // regardless of use-count distribution.
+        // BCC's "swap pool" empirical condition (fixtures 1850,
+        // 1979): exactly 5 eligible ints, all locals (no params
+        // mixed in), and use counts vary. When use counts are
+        // all equal (1505) or there are any params in the
+        // eligible set (046), keep the default pool order.
+        let no_eligible_params = eligible_int.iter().all(|&i| {
+            matches!(declared[i].kind, DeclKind::Local)
+        });
+        let eligible_uses_vary = eligible_int.len() == 5
+            && no_eligible_params
+            && {
+                let first_count = counts
+                    .get(&declared[eligible_int[0]].name)
+                    .copied()
+                    .unwrap_or(0);
+                eligible_int.iter().any(|&i| {
+                    counts.get(&declared[i].name).copied().unwrap_or(0) != first_count
+                })
+            };
         let non_si_pool: &[Reg] = if function_makes_call {
             &Reg::NON_SI_POOL_WITH_CALL
         } else if function_has_imul_now {
             &Reg::NON_SI_POOL_NO_DX
+        } else if eligible_uses_vary {
+            &Reg::NON_SI_POOL_FIVE_INT
         } else {
             &Reg::NON_SI_POOL
         };
