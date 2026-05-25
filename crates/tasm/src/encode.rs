@@ -316,6 +316,7 @@ fn instr_size(instr: &Instr) -> usize {
         | Instr::CmpAxBpRel { offset }
         | Instr::CmpDxBpRel { offset }
         | Instr::CmpReg16BpRel { offset, .. }
+        | Instr::CmpBpRelReg16 { offset, .. }
         | Instr::ImulBpRel { offset }
         | Instr::IdivBpRel { offset }
         | Instr::DivBpRel { offset }
@@ -902,6 +903,13 @@ fn emit_instr(
         }
         Instr::CmpReg16BpRel { reg, offset } => {
             out.push(0x3B);
+            emit_bp_rel_modrm(reg.code(), *offset, out);
+        }
+        Instr::CmpBpRelReg16 { reg, offset } => {
+            // `cmp word ptr [bp+disp], <reg16>` → 39 (mod=xx
+            // reg=<r> r/m=110) disp. Opcode 39 = CMP r/m16, r16
+            // (memory-left direction).
+            out.push(0x39);
             emit_bp_rel_modrm(reg.code(), *offset, out);
         }
         Instr::ImulBpRel { offset } => {

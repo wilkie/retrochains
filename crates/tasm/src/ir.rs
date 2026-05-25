@@ -450,6 +450,13 @@ pub enum Instr {
     /// their dedicated variants since they predate this one and the
     /// long-compare paths reference them by name.
     CmpReg16BpRel { reg: Reg16, offset: i16 },
+    /// `cmp word ptr [bp+<offset>], <reg16>` — `39 (mod=01 reg=<r>
+    /// r/m=110) dd`. Memory-on-left sibling of `CmpReg16BpRel`,
+    /// preserves the operand order of `<stack-mem> <relop> <reg>`
+    /// so the caller can emit the natural relop mnemonic instead of
+    /// the swapped one. Fixture 3588 (`a > b` with a stack, b in
+    /// SI → `cmp word ptr [bp+4], si` = `39 76 04`).
+    CmpBpRelReg16 { reg: Reg16, offset: i16 },
     /// `imul word ptr [bp+<offset>]` — F7 6E dd. Single-operand signed
     /// multiply: AX = AX * src; high half goes to DX (discarded for
     /// `int * int` returning `int`).

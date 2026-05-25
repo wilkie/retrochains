@@ -2348,6 +2348,15 @@ fn parse_cmp(operands: &str, line_no: usize) -> AsmResult<Instr> {
             }
         }
     }
+    // `cmp word ptr [bp+N], <reg16>` — memory-on-left compare.
+    // Fixture 3588 (`a > b` with a stack, b in SI → `cmp word ptr
+    // [bp+4], si`). Tried before bp-relative immediate forms below
+    // so the `, <reg>` rhs catches.
+    if let Some(offset) = parse_bp_relative(lhs)
+        && let Some(reg) = Reg16::parse(rhs)
+    {
+        return Ok(Instr::CmpBpRelReg16 { reg, offset });
+    }
     // `cmp dx, word ptr <group>:<sym>[+N]` — low-half companion for
     // the signed long-compare 3-jump pattern (fixture 234).
     if lhs == "dx" {

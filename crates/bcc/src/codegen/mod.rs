@@ -3443,6 +3443,28 @@ impl<'a> FunctionEmitter<'a> {
             // Fall through to generic AX-based compare for non-local,
             // non-global roots (shouldn't normally happen).
         }
+        // `<stack-int> <relop> <reg-int>` — memory-on-left compare
+        // (`cmp word ptr [bp+N], <reg>`) skips loading the LHS into
+        // AX. Operand order is preserved so the caller's relop
+        // mnemonic doesn't need swapping. Fixture 3588 (`a > b` with
+        // a in stack, b in SI → `cmp word ptr [bp+4], si`).
+        if let (ExprKind::Ident(lname), ExprKind::Ident(rname)) = (&left.kind, &right.kind)
+            && self.locals.has(lname)
+            && self.locals.has(rname)
+            && let LocalLocation::Stack(loff) = self.locals.location_of(lname)
+            && let LocalLocation::Reg(rreg) = self.locals.location_of(rname)
+            && self.locals.type_of(lname).is_int_like()
+            && self.locals.type_of(rname).is_int_like()
+            && !rreg.is_byte()
+        {
+            let _ = write!(
+                self.out,
+                "\tcmp\tword ptr {},{}\r\n",
+                bp_addr(loff),
+                rreg.name(),
+            );
+            return;
+        }
         self.emit_expr_to_ax(left);
         // `<expr-in-ax> <relop> 0` — use `or ax, ax` (2 bytes) instead
         // of `cmp ax, 0` (3 bytes) since both set ZF/SF the same way.
