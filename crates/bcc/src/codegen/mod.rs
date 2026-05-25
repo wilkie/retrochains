@@ -5478,6 +5478,39 @@ impl<'a> FunctionEmitter<'a> {
                 self.emit_call(name, args);
                 return;
             }
+            // `return <(long)int-expr> * <long-const>;` — widen the
+            // int via cwd, save it as CX:BX (push then pop the
+            // halves), load const RHS as DX:AX, call N_LXMUL@.
+            // Fixture 1683 (`return (long)x * 1000L`).
+            if let ExprKind::BinOp { op: BinOp::Mul, left, right } = &e.kind
+                && let ExprKind::Cast { ty, operand } = &left.kind
+                && ty.is_long_like()
+                && !self.expr_is_long_like(operand)
+                && let Some(k) = try_const_eval(right)
+            {
+                let unsigned = self.expr_int_is_unsigned(operand) || ty.is_unsigned();
+                self.emit_expr_to_ax(operand);
+                if unsigned {
+                    self.out.extend_from_slice(b"\txor\tdx,dx\r\n");
+                } else {
+                    self.out.extend_from_slice(b"\tcwd\t\r\n");
+                }
+                self.out.extend_from_slice(b"\tpush\tax\r\n");
+                self.out.extend_from_slice(b"\tpush\tdx\r\n");
+                let lo_k = (k & 0xFFFF) as u16;
+                let hi_k = ((k >> 16) & 0xFFFF) as u16;
+                if hi_k == 0 {
+                    self.out.extend_from_slice(b"\txor\tdx,dx\r\n");
+                } else {
+                    let _ = write!(self.out, "\tmov\tdx,{hi_k}\r\n");
+                }
+                let _ = write!(self.out, "\tmov\tax,{lo_k}\r\n");
+                self.out.extend_from_slice(b"\tpop\tcx\r\n");
+                self.out.extend_from_slice(b"\tpop\tbx\r\n");
+                self.out.extend_from_slice(b"\tcall\tnear ptr N_LXMUL@\r\n");
+                self.helpers.insert("N_LXMUL@".to_string());
+                return;
+            }
             // `return <long-lvalue> * <long-const>;` — long * long
             // helper. CX:BX = long lvalue, DX:AX = const RHS, call
             // N_LXMUL@ (returns DX:AX). Fixture 3303 (`a * 10L`).
