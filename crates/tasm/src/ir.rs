@@ -384,6 +384,11 @@ pub enum Instr {
     /// for the second pointer-local when BCC enregisters two ptrs
     /// (fixture 625's `*p + *q` with p in SI and q in DI).
     AddAxFromDiPtr,
+    /// `add <reg16>, word ptr [bx]` — `03 (mod=00 reg=<r> r/m=111)`.
+    /// Memory-direct add through BX to any non-AX register dest.
+    /// Used for `sum += a[i]` after the address compute lands in BX
+    /// (fixture 1822: `sum` in DI, `a[i]` reached via BX).
+    AddReg16FromBxPtr { reg: Reg16 },
     /// `add ax,word ptr [si+disp8]` — `03 44 dd`. ModR/M 44 =
     /// mod=01 reg=AX r/m=100 ([si]+disp8). Used when the right
     /// operand is `p[K]` for register-resident pointer `p` in SI

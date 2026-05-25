@@ -7321,6 +7321,30 @@ impl<'a> FunctionEmitter<'a> {
             );
             return;
         }
+        // `<reg> += <stack-arr>[<var>]` — same shape but the array
+        // base is bp-relative. Compute &arr[i] into BX (matches the
+        // stack-array assign helper), then `add <reg>, word ptr [bx]`
+        // directly. Fixtures 1807, 1822, 1933 (`sum += a[i]` for
+        // stack int array, var index, reg-resident sum).
+        if matches!(op, BinOp::Add)
+            && let ExprKind::ArrayIndex { array, index } = &value.kind
+            && let ExprKind::Ident(arr_name) = &array.kind
+            && self.locals.has(arr_name)
+            && let arr_ty = self.locals.type_of(arr_name).clone()
+            && let Some(elem_ty) = arr_ty.array_elem()
+            && elem_ty.is_int_like()
+            && let LocalLocation::Stack(base_off) = self.locals.location_of(arr_name)
+            && !reg.is_byte()
+        {
+            let elem_size = elem_ty.size_bytes();
+            self.emit_array_addr_to_bx(arr_name, index, base_off, elem_size);
+            let _ = write!(
+                self.out,
+                "\tadd\t{},word ptr [bx]\r\n",
+                reg.name(),
+            );
+            return;
+        }
         if matches!(
             op,
             BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor

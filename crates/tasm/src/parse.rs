@@ -2128,6 +2128,12 @@ fn parse_add(operands: &str, line_no: usize) -> AsmResult<Instr> {
                 disp,
             });
         }
+        // `add <reg16>, word ptr [bx]` — memory-direct add through
+        // BX (fixture 1822: `sum += a[i]` for stack int array after
+        // address resolves into BX).
+        if !matches!(reg, Reg16::Ax) && rhs == "word ptr [bx]" {
+            return Ok(Instr::AddReg16FromBxPtr { reg });
+        }
         // `add <reg16>, word ptr [bp+N]` — generic register-vs-stack
         // compound `+=` on a non-AX reg local (fixture 661). AX uses
         // its dedicated `AddAxBpRel` variant above.
