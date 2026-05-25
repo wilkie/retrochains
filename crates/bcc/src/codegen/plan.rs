@@ -403,13 +403,17 @@ pub fn pick_switch_strategy(cases: &[SwitchCase]) -> SwitchStrategy {
     if values.len() < 4 {
         return SwitchStrategy::Chained;
     }
-    // Dense from base K (any K): values form a consecutive run
-    // values[i] == K + i (mod 2^16). When this holds, BCC uses
-    // jump-table with a `sub bx, K` (or `dec bx` for K=1)
-    // before the bounds check. Fixtures 073/076 (K=0), 1605 (K=5),
-    // 1909 (K=-2), 1912 (large K).
-    let first = values[0];
-    let dense_from_base = values
+    // Dense from base K (any K): values form a consecutive run.
+    // Sort first so source order doesn't matter — `case 3; case 1;
+    // case 2; case 0;` still qualifies as dense-from-0. BCC builds
+    // the jump-table from the SORTED case ordering, so the table
+    // entries follow sorted order even though the bodies appear in
+    // source order in the asm. Fixtures 073/076 (K=0), 1605 (K=5),
+    // 1909 (K=-2), 1609 (out-of-source-order 0..3).
+    let mut sorted = values.clone();
+    sorted.sort_by_key(|&v| v as i32 as i64);
+    let first = sorted[0];
+    let dense_from_base = sorted
         .iter()
         .enumerate()
         .all(|(i, &v)| v == first.wrapping_add(u32::try_from(i).unwrap_or(0)));

@@ -1540,29 +1540,34 @@ impl<'a> FunctionEmitter<'a> {
     ) {
         // Planner picked this strategy only for dense-from-K runs.
         // The default case (if any) is the only None-value case; it
-        // becomes the bounds-check failure target. The remaining
-        // value cases must form a dense run from cases[0].value.
-        let case_base = cases.iter()
-            .find_map(|c| c.value)
-            .expect("jump-table needs at least one value case");
-        let value_cases_count = cases.iter().filter(|c| c.value.is_some()).count();
+        // becomes the bounds-check failure target. The value cases
+        // must form a dense run when sorted — source order doesn't
+        // matter, but the address table is laid out in sorted order
+        // (so the indexed jump lands at the right body).
         let default_slot = cases
             .iter()
             .zip(case_slots)
             .find_map(|(c, s)| if c.value.is_none() { Some(*s) } else { None });
-        // Verify the value cases form a dense run.
-        let mut value_idx: u32 = 0;
-        for c in cases.iter() {
-            if let Some(v) = c.value {
-                let expected = case_base.wrapping_add(value_idx);
-                assert!(
-                    v == expected,
-                    "jump-table strategy expects dense from base {case_base}; got {v} at value-index {value_idx}",
-                );
-                value_idx += 1;
-            }
+        let mut value_pairs: Vec<(u32, u32)> = cases
+            .iter()
+            .zip(case_slots)
+            .filter_map(|(c, &slot)| c.value.map(|v| (v, slot)))
+            .collect();
+        // Sort by SIGNED value so negative cases (e.g. -2, -1, 0, 1)
+        // come out in source-numeric order, not unsigned-wraparound
+        // order. Fixture 1909 (cases -2..1).
+        value_pairs.sort_by_key(|&(v, _)| v as i32 as i64);
+        let case_base = value_pairs.first()
+            .map(|&(v, _)| v)
+            .expect("jump-table needs at least one value case");
+        for (i, &(v, _)) in value_pairs.iter().enumerate() {
+            let expected = case_base.wrapping_add(u32::try_from(i).unwrap_or(0));
+            assert!(
+                v == expected,
+                "jump-table strategy expects dense from base {case_base}; got {v} at sorted-index {i}",
+            );
         }
-        let case_count = u32::try_from(value_cases_count).unwrap_or(u32::MAX);
+        let case_count = u32::try_from(value_pairs.len()).unwrap_or(u32::MAX);
         let max_value = case_count - 1;
 
         // Load scrutinee into BX.
@@ -1633,17 +1638,15 @@ impl<'a> FunctionEmitter<'a> {
         self.loop_stack.pop();
 
         // Stage the address table for emission after `_main endp`.
-        // Only value cases participate — the default case isn't in
-        // the table (it's the ja-out-of-range target).
+        // The table is laid out in SORTED order of case value so the
+        // jump-by-index lands at the matching body. Default case
+        // doesn't participate (it's the ja-out-of-range target).
         let _ = write!(
             self.post_function_data,
             "@{}@C{c_num}\tlabel\tword\r\n",
             self.func_idx,
         );
-        for (case, &slot) in cases.iter().zip(case_slots) {
-            if case.value.is_none() {
-                continue;
-            }
+        for &(_, slot) in &value_pairs {
             let _ = write!(
                 self.post_function_data,
                 "\tdw\t{}\r\n",
