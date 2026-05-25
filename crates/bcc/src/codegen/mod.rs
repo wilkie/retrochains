@@ -15543,12 +15543,21 @@ impl<'a> FunctionEmitter<'a> {
                             let unsigned = self.expr_is_unsigned(base);
                             self.emit_expr_to_ax(base);
                             let total_masked = (total as u32) & 0xFFFF;
-                            emit_op_with_source(
-                                self.out,
-                                BinOp::Add,
-                                &OperandSource::Immediate(total_masked),
-                                unsigned,
-                            );
+                            if total == 0 {
+                                // Net-zero fold: BCC emits `add ax, 0`
+                                // explicitly rather than eliding (the
+                                // `x + 0` source-level identity fold is
+                                // a separate path that fully elides).
+                                // Fixture 2077 (`x + 5 - 5`).
+                                let _ = write!(self.out, "\tadd\tax,0\r\n");
+                            } else {
+                                emit_op_with_source(
+                                    self.out,
+                                    BinOp::Add,
+                                    &OperandSource::Immediate(total_masked),
+                                    unsigned,
+                                );
+                            }
                             return;
                         }
                         // base == left: no inner const to fold; fall
