@@ -14225,6 +14225,34 @@ impl<'a> FunctionEmitter<'a> {
                             return;
                         }
                     }
+                    // `<ptr> - <ptr>` for same-typed pointers — C
+                    // gives an `int` count of elements (byte diff /
+                    // sizeof(pointee)). After the byte subtract,
+                    // divide AX by stride. Char* needs no divide;
+                    // int*/long* use `idiv bx` (signed) since
+                    // ptrdiff is signed. Fixture 1208 (`q - p` for
+                    // int* pair).
+                    if matches!(op, BinOp::Sub)
+                        && let ExprKind::Ident(l_name) = &left.kind
+                        && let ExprKind::Ident(r_name) = &right.kind
+                        && let Some(l_pointee) = self.ident_pointee(l_name)
+                        && let Some(r_pointee) = self.ident_pointee(r_name)
+                        && l_pointee.size_bytes() == r_pointee.size_bytes()
+                    {
+                        let stride = l_pointee.size_bytes();
+                        // Emit the standard sub via the generic path
+                        // below; just remember to divide afterward.
+                        // Inline the sub here since the loop's
+                        // structure makes it awkward to recurse.
+                        self.emit_expr_to_ax(left);
+                        self.emit_binary_right(BinOp::Sub, right, false);
+                        if stride > 1 {
+                            let _ = write!(self.out, "\tmov\tbx,{stride}\r\n");
+                            self.out.extend_from_slice(b"\tcwd\t\r\n");
+                            self.out.extend_from_slice(b"\tidiv\tbx\r\n");
+                        }
+                        return;
+                    }
                     // `<ptr-typed lvalue> + K` / `- K` — C scales the
                     // constant by the pointee size. Always route as
                     // Add with the (possibly negative) scaled byte
