@@ -466,7 +466,10 @@ fn instr_size(instr: &Instr) -> usize {
         | Instr::CmpGroupSymImm16 { .. } => 6,
         Instr::Cbw => 1,
         Instr::LeaReg16BpRel { offset, .. } => 1 + bp_rel_modrm_size(*offset),
-        Instr::MovSiPtrImm { .. } | Instr::MovBxPtrImm { .. } => 4,
+        Instr::MovSiPtrImm { .. } | Instr::MovBxPtrImm { .. } | Instr::MovDiPtrImm { .. } => 4,
+        Instr::MovBxPtrImm8 { .. } => 3,
+        Instr::AddSiPtrImm16 { .. } => 4,
+        Instr::XorDiPtrReg16 { .. } => 2,
         Instr::MovBxPtrAl | Instr::MovBxPtrAx => 2,
         Instr::MovBxPtrReg16 { .. } => 2,
         Instr::MovSiPtrImm8 { .. } => 3,
@@ -2791,6 +2794,27 @@ fn emit_instr(
             out.push(0xC7);
             out.push(0x07);
             out.extend_from_slice(&imm.to_le_bytes());
+        }
+        Instr::MovBxPtrImm8 { imm } => {
+            // `mov byte ptr [bx],imm8` → C6 07 ii.
+            out.push(0xC6); out.push(0x07); out.push(*imm);
+        }
+        Instr::MovDiPtrImm { imm } => {
+            // `mov word ptr [di],imm16` → C7 05 lo hi. ModR/M 05 =
+            // mod=00 /0 r/m=101 ([di]).
+            out.push(0xC7); out.push(0x05);
+            out.extend_from_slice(&imm.to_le_bytes());
+        }
+        Instr::AddSiPtrImm16 { imm } => {
+            // `add word ptr [si],imm16` → 81 04 lo hi. Grp1 /0=ADD,
+            // ModR/M 04 = mod=00 r/m=100 ([si]).
+            out.push(0x81); out.push(0x04);
+            out.extend_from_slice(&imm.to_le_bytes());
+        }
+        Instr::XorDiPtrReg16 { reg } => {
+            // `xor word ptr [di],<reg16>` → 31 (mod=00 reg=<r> r/m=101).
+            out.push(0x31);
+            out.push(0b00_000_101 | (reg.code() << 3));
         }
         Instr::MovAxFromBxPtr => {
             // `mov ax,word ptr [bx]` → 8B 07. ModR/M 07 = mod=00

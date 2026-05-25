@@ -1183,6 +1183,17 @@ fn parse_mov(operands: &str, line_no: usize) -> AsmResult<Instr> {
         if let Some(src) = Reg16::parse(rhs) {
             return Ok(Instr::MovDiPtrReg16 { src });
         }
+        if let Some(imm) = parse_imm16(rhs) {
+            return Ok(Instr::MovDiPtrImm { imm });
+        }
+    }
+    // LHS `byte ptr [bx]` — byte-store through BX pointer
+    // (fixture 3559: `buf[i] = 0` for char* — bx is the
+    // post-scaling indexed address).
+    if lhs == "byte ptr [bx]"
+        && let Some(imm) = parse_imm8(rhs)
+    {
+        return Ok(Instr::MovBxPtrImm8 { imm: imm as u8 });
     }
     // LHS `byte ptr [si]` — byte-store through SI pointer (fixture 465).
     if lhs == "byte ptr [si]" {
@@ -2245,6 +2256,11 @@ fn parse_add(operands: &str, line_no: usize) -> AsmResult<Instr> {
         if let Some(imm) = parse_imm8_signed(rhs) {
             return Ok(Instr::AddSiPtrImm8 { imm });
         }
+        // Wide-immediate sibling for constants outside [-128, 127].
+        // Fixture 1492 (`*p += 1000`).
+        if let Some(imm) = parse_imm16(rhs) {
+            return Ok(Instr::AddSiPtrImm16 { imm: imm as u16 });
+        }
         // `add word ptr [si], dx` — long `*p += y` low half through
         // a register-resident long pointer in SI (fixture 398).
         if rhs == "dx" {
@@ -3156,6 +3172,13 @@ fn parse_xor(operands: &str, line_no: usize) -> AsmResult<Instr> {
         if let Some(offset) = parse_bp_relative(rhs) {
             return Ok(Instr::XorDxBpRel { offset });
         }
+    }
+    // `xor word ptr [di], <reg16>` — memory-direct xor into [di].
+    // Fixture 3638 (xor-swap idiom — `*p ^= *q` with q in DI).
+    if lhs == "word ptr [di]"
+        && let Some(reg) = Reg16::parse(rhs)
+    {
+        return Ok(Instr::XorDiPtrReg16 { reg });
     }
     // `xor word ptr <group>:<sym>[+N], imm16` — long compound
     // `g ^= K`. Same imm16-always rule as the `and` companion.

@@ -1765,6 +1765,20 @@ pub enum Instr {
     /// `mov word ptr [bx],<imm16>` — C7 07 lo hi. Store through BX
     /// (used by indexed array writes after `lea bx,base + scale*i`).
     MovBxPtrImm { imm: u16 },
+    /// `mov byte ptr [bx],<imm8>` — C6 07 ii. Byte-store immediate
+    /// through BX. Fixture 3559 (`buf[i] = 0` for char* — bx is
+    /// the post-scaling indexed address).
+    MovBxPtrImm8 { imm: u8 },
+    /// `mov word ptr [di],<imm16>` — C7 05 lo hi.
+    MovDiPtrImm { imm: u16 },
+    /// `add word ptr [si],<imm16>` — 81 04 lo hi (Grp1 /0=ADD,
+    /// mod=00 r/m=100). Memory-direct add of a wide immediate
+    /// through SI pointer. Fixture 1492 (`*p += 1000`).
+    AddSiPtrImm16 { imm: u16 },
+    /// `xor word ptr [di],<reg16>` — `31 (mod=00 reg=<r> r/m=101)`.
+    /// Memory-direct xor of a register into [di]. Fixture 3638
+    /// (xor-swap idiom — `*p ^= *q` shape).
+    XorDiPtrReg16 { reg: Reg16 },
     /// `mov byte ptr [bx],al` — 88 07. ModR/M 07 = mod=00 reg=000(AL)
     /// r/m=111(BX). Char-element store after variable-index BX
     /// computation. Fixture 1219.
