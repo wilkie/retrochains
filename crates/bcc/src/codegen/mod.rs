@@ -570,8 +570,15 @@ impl<'a> FunctionEmitter<'a> {
             self.emit_stmt(stmt);
         }
 
-        // Single exit label.
-        self.emit_label(self.label_plan.exit_slot());
+        // Single exit label — only emit when the body actually
+        // jumps to it (i.e. has at least one explicit return).
+        // Void functions that fall off the end have no return
+        // statement, so the label would be dead. BCC omits it.
+        // Fixture 3575 (`void init() { arr[0] = 0x55; }`).
+        let body = self.function.body.as_deref().unwrap_or(&[]);
+        if body_has_return(body) {
+            self.emit_label(self.label_plan.exit_slot());
+        }
 
         // Closing-brace line gets its own comment block. Span end is the
         // byte just past `}`, so back up by one to get the brace itself.
@@ -14802,6 +14809,28 @@ impl<'a> FunctionEmitter<'a> {
 /// Does `body` contain a `break;` that targets the enclosing loop?
 /// Stops at nested loops — a `break;` inside an inner `while`/`for`
 /// targets the inner loop, not the outer one.
+fn body_has_return(body: &[Stmt]) -> bool {
+    body.iter().any(stmt_has_return)
+}
+
+fn stmt_has_return(stmt: &Stmt) -> bool {
+    match &stmt.kind {
+        StmtKind::Return(_) => true,
+        StmtKind::If { then_branch, else_branch, .. } => {
+            body_has_return(then_branch)
+                || else_branch.as_ref().is_some_and(|b| body_has_return(b))
+        }
+        StmtKind::While { body, .. } | StmtKind::DoWhile { body, .. } => {
+            body_has_return(body)
+        }
+        StmtKind::For { body, .. } => body_has_return(body),
+        StmtKind::Switch { cases, .. } => {
+            cases.iter().any(|c| body_has_return(&c.body))
+        }
+        _ => false,
+    }
+}
+
 fn body_has_break(body: &[Stmt]) -> bool {
     body.iter().any(stmt_has_break)
 }
