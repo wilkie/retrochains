@@ -10008,12 +10008,33 @@ impl<'a> FunctionEmitter<'a> {
                 && let Some(elem) = gty.array_elem()
                 && elem.is_long_like()
             {
+                let index = &indices[0];
+                // Non-const long lvalue RHS: load DX:AX from source
+                // (AX=hi, DX=lo — BCC's observed order for this
+                // store), then index into BX and store both halves.
+                // Fixture 3297 (`arr[i] = v` for long global, long
+                // param v).
+                if try_const_eval(value).is_none()
+                    && let Some((v_hi, v_lo)) = self.long_lvalue_addr_pair(value)
+                {
+                    self.emit_index_into_bx_long_stride(index);
+                    let _ = write!(self.out, "\tmov\tax,word ptr {v_hi}\r\n");
+                    let _ = write!(self.out, "\tmov\tdx,word ptr {v_lo}\r\n");
+                    let _ = write!(
+                        self.out,
+                        "\tmov\tword ptr DGROUP:_{array}[bx+2],ax\r\n",
+                    );
+                    let _ = write!(
+                        self.out,
+                        "\tmov\tword ptr DGROUP:_{array}[bx],dx\r\n",
+                    );
+                    return;
+                }
                 let Some(v) = try_const_eval(value) else {
                     panic!("non-constant rhs in variable-indexed global long-array assign not yet supported (no fixture)");
                 };
                 let lo = (v & 0xFFFF) as u16;
                 let hi = ((v >> 16) & 0xFFFF) as u16;
-                let index = &indices[0];
                 self.emit_index_into_bx_long_stride(index);
                 let _ = write!(
                     self.out,
