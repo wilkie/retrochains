@@ -5596,6 +5596,17 @@ impl<'a> FunctionEmitter<'a> {
     /// Stack-resident targets are unobserved — every fixture so far
     /// puts the target in a register. Panic until pinned.
     fn emit_compound_assign(&mut self, name: &str, op: BinOp, value: &Expr) {
+        // Comma chain on the RHS: emit each leading sub-expression
+        // for side effect, then recurse on the final value. Without
+        // this unwrap, the compound assign goes through emit_expr_to
+        // _ax for the whole comma, materializing the final value in
+        // AX even when it's a small constant that would benefit from
+        // the ±K inc/dec peephole. Fixture 1378 (`a += (a+1, 2)` —
+        // the trailing 2 should fold to `inc si; inc si`).
+        if let ExprKind::Comma { left, right } = &value.kind {
+            self.emit_expr_discard(left);
+            return self.emit_compound_assign(name, op, right);
+        }
         // Long-like global `g <op>= K` with K fitting i8sx (per
         // half): memory-direct read-modify-write on each half. The
         // high-half partner depends on the op family — add/sub need
