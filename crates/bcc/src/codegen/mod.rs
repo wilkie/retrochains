@@ -11506,6 +11506,46 @@ impl<'a> FunctionEmitter<'a> {
                 bp_addr(off)
             };
             (dest, leaf_ty)
+        } else if matches!(kind, crate::ast::MemberKind::Dot)
+            && let ExprKind::ArrayIndex { array, index } = &base.kind
+            && let ExprKind::Ident(arr_name) = &array.kind
+            && let Some(gty) = self.globals.type_of(arr_name)
+            && let Some(elem_ty) = gty.array_elem()
+            && let Some((field_off, field_ty)) = elem_ty.field(field)
+        {
+            // `<global-struct-arr>[<var-idx>].<field> = <value>` —
+            // compute scaled index into BX, then store at
+            // `<sym> + field_off [bx]`. Fixture 3240
+            // (`arr[i].x = v` for `struct P arr[N]`).
+            let elem_ty_clone = elem_ty.clone();
+            let field_ty_clone = field_ty.clone();
+            // BCC emits the index-into-BX first, then loads value
+            // into AX. emit_index_into_bx for an int-typed lvalue
+            // index uses `mov bx, <addr>; shl bx, ...` (no AX),
+            // so the value load that follows isn't clobbered.
+            self.emit_index_into_bx(index, &elem_ty_clone);
+            let addr = if field_off == 0 {
+                format!("DGROUP:_{arr_name}[bx]")
+            } else {
+                format!("DGROUP:_{arr_name}+{field_off}[bx]")
+            };
+            if let Some(v) = try_const_eval(value) {
+                let width = if field_ty_clone.is_char_like() { "byte" } else { "word" };
+                let v_masked = if field_ty_clone.is_char_like() {
+                    v & 0xFF
+                } else {
+                    v & 0xFFFF
+                };
+                let _ = write!(self.out, "\tmov\t{width} ptr {addr},{v_masked}\r\n");
+                return;
+            }
+            self.emit_expr_to_ax(value);
+            if field_ty_clone.is_char_like() {
+                let _ = write!(self.out, "\tmov\tbyte ptr {addr},al\r\n");
+            } else {
+                let _ = write!(self.out, "\tmov\tword ptr {addr},ax\r\n");
+            }
+            return;
         } else {
             // Arrow (or a Dot whose base isn't a const-chain lvalue).
             let ExprKind::Ident(name) = &base.kind else {
