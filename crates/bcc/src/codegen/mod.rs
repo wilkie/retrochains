@@ -14363,6 +14363,26 @@ impl<'a> FunctionEmitter<'a> {
             );
             return;
         }
+        // Char-array-element on right (`a[K]` where a is a char
+        // pointer/array): same push/widen/pop pattern. The byte
+        // load goes through `emit_expr_to_ax` which handles all
+        // char-load shapes (register-pointer subscript, stack-array
+        // subscript, member-chain). Fixture 1239 (`a[0] + a[1]`
+        // for `int sum(char a[])`).
+        if self.expr_is_char_load(e) {
+            self.out.extend_from_slice(b"\tpush\tax\r\n");
+            self.emit_expr_to_ax(e);
+            self.out.extend_from_slice(b"\tmov\tdx,ax\r\n");
+            self.out.extend_from_slice(b"\tpop\tax\r\n");
+            emit_op_with_source_opts(
+                self.out,
+                op,
+                &OperandSource::Reg(Reg::Dx),
+                unsigned,
+                self.skip_mod_to_ax,
+            );
+            return;
+        }
         let src = self.resolve_operand_source(e);
         emit_op_with_source_opts(self.out, op, &src, unsigned, self.skip_mod_to_ax);
     }
@@ -14503,6 +14523,26 @@ impl<'a> FunctionEmitter<'a> {
         }
         if let Some((_, _, ty)) = self.try_lvalue_chain_addr(e) {
             return ty.is_char_like();
+        }
+        // `p[K]` for `p` a char-pointer ident — chain-addr fails
+        // because chain walking expects Type::Array, but the subscript
+        // through a char pointer still produces a byte load. Fixture
+        // 1239 (`a[0] + a[1]` for `int sum(char a[])` — `a` decays
+        // to char*).
+        if let ExprKind::ArrayIndex { array, .. } = &e.kind
+            && let ExprKind::Ident(pname) = &array.kind
+            && let Some(pointee) = self.ident_pointee(pname)
+            && pointee.is_char_like()
+        {
+            return true;
+        }
+        // `*p` for `p` a char-pointer ident — same reasoning.
+        if let ExprKind::Deref(inner) = &e.kind
+            && let ExprKind::Ident(pname) = &inner.kind
+            && let Some(pointee) = self.ident_pointee(pname)
+            && pointee.is_char_like()
+        {
+            return true;
         }
         false
     }
