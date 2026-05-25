@@ -541,7 +541,9 @@ fn instr_size(instr: &Instr) -> usize {
         | Instr::SubAxFromSiPtr
         | Instr::AddAxFromSiPtr
         | Instr::AddAxFromDiPtr
-        | Instr::AddReg16FromBxPtr { .. } => 2,
+        | Instr::AddReg16FromBxPtr { .. }
+        | Instr::AddReg16FromDiPtr { .. }
+        | Instr::AddReg16FromSiPtr { .. } => 2,
         Instr::AddAxSiDisp { .. }
         | Instr::AddAxDiDisp { .. }
         | Instr::SubAxSiDisp { .. }
@@ -859,6 +861,18 @@ fn emit_instr(
             // (non-AX) register destination.
             out.push(0x03);
             out.push(0b00_000_111 | (reg.code() << 3));
+        }
+        Instr::AddReg16FromDiPtr { reg } => {
+            // `add <reg16>, word ptr [di]` → 03 (mod=00 reg=<r>
+            // r/m=101).
+            out.push(0x03);
+            out.push(0b00_000_101 | (reg.code() << 3));
+        }
+        Instr::AddReg16FromSiPtr { reg } => {
+            // `add <reg16>, word ptr [si]` → 03 (mod=00 reg=<r>
+            // r/m=100).
+            out.push(0x03);
+            out.push(0b00_000_100 | (reg.code() << 3));
         }
         Instr::AddAxSiDisp { disp } => {
             // `add ax,word ptr [si+disp8]` → 03 44 dd.

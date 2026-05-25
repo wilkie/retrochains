@@ -389,6 +389,12 @@ pub enum Instr {
     /// Used for `sum += a[i]` after the address compute lands in BX
     /// (fixture 1822: `sum` in DI, `a[i]` reached via BX).
     AddReg16FromBxPtr { reg: Reg16 },
+    /// `add <reg16>, word ptr [di]` — `03 (mod=00 reg=<r> r/m=101)`.
+    /// DI sibling. Fixture 1325 (`a += *p` for `int *p` in DI).
+    AddReg16FromDiPtr { reg: Reg16 },
+    /// `add <reg16>, word ptr [si]` — `03 (mod=00 reg=<r> r/m=100)`.
+    /// SI sibling for non-AX destinations.
+    AddReg16FromSiPtr { reg: Reg16 },
     /// `add ax,word ptr [si+disp8]` — `03 44 dd`. ModR/M 44 =
     /// mod=01 reg=AX r/m=100 ([si]+disp8). Used when the right
     /// operand is `p[K]` for register-resident pointer `p` in SI

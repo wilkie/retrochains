@@ -2134,6 +2134,13 @@ fn parse_add(operands: &str, line_no: usize) -> AsmResult<Instr> {
         if !matches!(reg, Reg16::Ax) && rhs == "word ptr [bx]" {
             return Ok(Instr::AddReg16FromBxPtr { reg });
         }
+        // DI/SI siblings (fixture 1325).
+        if !matches!(reg, Reg16::Ax) && rhs == "word ptr [di]" {
+            return Ok(Instr::AddReg16FromDiPtr { reg });
+        }
+        if !matches!(reg, Reg16::Ax) && rhs == "word ptr [si]" {
+            return Ok(Instr::AddReg16FromSiPtr { reg });
+        }
         // `add <reg16>, word ptr <group>:<sym>[+N]` — memory-direct
         // add from a global to a non-AX register. AX uses
         // `AddAxGroupSym`. Fixture 1303 (`a += g`).
