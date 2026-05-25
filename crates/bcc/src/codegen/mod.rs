@@ -14281,13 +14281,16 @@ impl<'a> FunctionEmitter<'a> {
                             || lhs_clobbers_ax
                     } {
                         // `<uchar-lvalue> <op> <uchar-lvalue>` for
-                        // non-Mul/Div/Mod: BCC widens both via
-                        // `mov al, [a]; mov ah, 0` then `mov dl,
-                        // [b]; mov dh, 0; <op> ax, dx`. The byte-
+                        // Add/Sub/BitAnd/BitOr/BitXor/Mul: BCC widens
+                        // both via `mov al, [a]; mov ah, 0` then `mov
+                        // dl, [b]; mov dh, 0; <op> ax, dx`. The byte-
                         // local DH=0 zero-extension avoids the
-                        // push/pop dance. Fixture 1400 (`a + b`
-                        // for two uchar locals).
-                        if !matches!(op, BinOp::Div | BinOp::Mod | BinOp::Mul)
+                        // push/pop dance. Mul piggybacks: `imul dx`
+                        // produces DX:AX but we only consume AX.
+                        // Div/Mod still excluded — divisor must be in
+                        // BX to keep DX free for cwd/xor. Fixtures
+                        // 1400 (`a + b` uchar+uchar), 1626 (`a * b`).
+                        if !matches!(op, BinOp::Div | BinOp::Mod)
                             && let (ExprKind::Ident(l_name), ExprKind::Ident(r_name)) =
                                 (&left.kind, &right.kind)
                             && self.ident_is_uchar(l_name)
