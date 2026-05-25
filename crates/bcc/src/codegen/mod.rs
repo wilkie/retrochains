@@ -3630,6 +3630,50 @@ impl<'a> FunctionEmitter<'a> {
     /// 034 (2), 049 (3), 046/048 (4).
     fn emit_call(&mut self, name: &str, args: &[Expr]) {
         let param_tys = self.signatures.params_of(name);
+        // Pre-intern string literal args in SOURCE (left-to-right)
+        // order before the right-to-left push loop. BCC pools
+        // strings in source order regardless of push order.
+        // Fixture 2196 (`printf("%s\n", "Hello")` — pool layout
+        // `"%s\n\0Hello\0"`, not `"Hello\0%s\n\0"`).
+        fn intern_strings_in_order(emitter: &mut FunctionEmitter<'_>, e: &Expr) {
+            match &e.kind {
+                ExprKind::StringLit(bytes) => {
+                    emitter.strings.intern(bytes);
+                }
+                ExprKind::BinOp { left, right, .. }
+                | ExprKind::Logical { left, right, .. }
+                | ExprKind::Comma { left, right } => {
+                    intern_strings_in_order(emitter, left);
+                    intern_strings_in_order(emitter, right);
+                }
+                ExprKind::Unary { operand, .. }
+                | ExprKind::Cast { operand, .. }
+                | ExprKind::Deref(operand) => {
+                    intern_strings_in_order(emitter, operand);
+                }
+                ExprKind::Ternary { cond, then_value, else_value } => {
+                    intern_strings_in_order(emitter, cond);
+                    intern_strings_in_order(emitter, then_value);
+                    intern_strings_in_order(emitter, else_value);
+                }
+                ExprKind::Call { args, .. } => {
+                    for a in args {
+                        intern_strings_in_order(emitter, a);
+                    }
+                }
+                ExprKind::ArrayIndex { array, index } => {
+                    intern_strings_in_order(emitter, array);
+                    intern_strings_in_order(emitter, index);
+                }
+                ExprKind::Member { base, .. } => {
+                    intern_strings_in_order(emitter, base);
+                }
+                _ => {}
+            }
+        }
+        for arg in args {
+            intern_strings_in_order(self, arg);
+        }
         let mut total_bytes: u32 = 0;
         for (i, arg) in args.iter().enumerate().rev() {
             // Param type for the i-th arg, defaulting to int when the
