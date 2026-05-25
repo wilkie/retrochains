@@ -9876,24 +9876,38 @@ impl<'a> FunctionEmitter<'a> {
         self.out.extend_from_slice(b"\tadd\tbx,ax\r\n");
     }
 
-    /// Two-dim variable-index address: lands `&a[i][j]` in BX. BCC's
-    /// pattern (fixture 198):
+    /// Two-dim variable-index address: lands `&a[i][j]` in BX.
+    ///
+    /// Two shape variants depending on whether outer stride is a
+    /// power of two:
+    ///
+    /// **Power-of-2 outer stride** (e.g. `int m[3][4]`, stride 8) —
+    /// accumulator is BX from the start, chained `shl bx, 1` for the
+    /// outer scale. Fixture 2346.
     /// ```text
-    ///   mov ax, <outer-reg>       ; outer index into AX
+    ///   mov bx, <outer-reg>
+    ///   shl bx, 1 ... (log2 of outer stride times)
+    ///   mov ax, <inner-reg>
+    ///   shl ax, 1                 ; only when inner-stride == 2
+    ///   add bx, ax
+    ///   lea ax, word ptr [bp-base]
+    ///   add bx, ax
+    /// ```
+    ///
+    /// **Non-power-of-2 outer stride** (e.g. `int a[2][3]`, stride 6) —
+    /// `imul` requires AX, so the accumulator is AX with a trailing
+    /// `mov bx, ax`. Fixture 198.
+    /// ```text
+    ///   mov ax, <outer-reg>
     ///   mov dx, <outer-stride>
-    ///   imul dx                   ; AX = outer * outer-stride (signed)
-    ///   mov dx, <inner-reg>       ; inner index into DX
+    ///   imul dx
+    ///   mov dx, <inner-reg>
     ///   shl dx, 1                 ; only when inner-stride == 2
-    ///   add ax, dx                ; AX = outer*os + inner*is
+    ///   add ax, dx
     ///   lea dx, word ptr [bp-base]
-    ///   add ax, dx                ; AX = base + total
+    ///   add ax, dx
     ///   mov bx, ax
     /// ```
-    /// Currently restricted to stride 2 on the inner axis (the only
-    /// fixtured case). Outer stride uses `imul` regardless of whether
-    /// it's a power of two — BCC seems to never `shl` the outer
-    /// multiplier in observed output, possibly because outer strides
-    /// aren't typically powers of two in C2.0-era code.
     fn emit_array_addr_2d_to_bx(
         &mut self,
         outer_idx: &Expr,
@@ -9903,10 +9917,27 @@ impl<'a> FunctionEmitter<'a> {
         base_off: i16,
     ) {
         let outer_reg = self.idx_reg_name(outer_idx);
+        let inner_reg = self.idx_reg_name(inner_idx);
+        let outer_pow2 = outer_stride > 1 && outer_stride.is_power_of_two();
+        if outer_pow2 {
+            let _ = write!(self.out, "\tmov\tbx,{outer_reg}\r\n");
+            for _ in 0..outer_stride.trailing_zeros() {
+                self.out.extend_from_slice(b"\tshl\tbx,1\r\n");
+            }
+            let _ = write!(self.out, "\tmov\tax,{inner_reg}\r\n");
+            if inner_stride == 2 {
+                self.out.extend_from_slice(b"\tshl\tax,1\r\n");
+            } else if inner_stride != 1 {
+                panic!("2D inner-stride != {{1,2}} not yet supported (no fixture)");
+            }
+            self.out.extend_from_slice(b"\tadd\tbx,ax\r\n");
+            let _ = write!(self.out, "\tlea\tax,word ptr {}\r\n", bp_addr(base_off));
+            self.out.extend_from_slice(b"\tadd\tbx,ax\r\n");
+            return;
+        }
         let _ = write!(self.out, "\tmov\tax,{outer_reg}\r\n");
         let _ = write!(self.out, "\tmov\tdx,{outer_stride}\r\n");
         self.out.extend_from_slice(b"\timul\tdx\r\n");
-        let inner_reg = self.idx_reg_name(inner_idx);
         let _ = write!(self.out, "\tmov\tdx,{inner_reg}\r\n");
         if inner_stride == 2 {
             self.out.extend_from_slice(b"\tshl\tdx,1\r\n");
