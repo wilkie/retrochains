@@ -5334,12 +5334,113 @@ impl<'a> FunctionEmitter<'a> {
             // `return <long-lvalue>;` — load DX:AX from the source's
             // (high, low) word pair. Same shape regardless of where
             // the source lives (global / stack local / member /
-            // const-indexed array). Fixture 3294 (`return g++;`
-            // sequenced — covered when value is a side-effecting
-            // long expression). For a bare long lvalue:
+            // const-indexed array). For a bare long lvalue:
             if let Some((hi, lo)) = self.long_lvalue_addr_pair(e) {
                 let _ = write!(self.out, "\tmov\tdx,word ptr {hi}\r\n");
                 let _ = write!(self.out, "\tmov\tax,word ptr {lo}\r\n");
+                return;
+            }
+            // `return <long-lvalue> * <long-const>;` — long * long
+            // helper. CX:BX = long lvalue, DX:AX = const RHS, call
+            // N_LXMUL@ (returns DX:AX). Fixture 3303 (`a * 10L`).
+            if let ExprKind::BinOp { op: BinOp::Mul, left, right } = &e.kind
+                && let Some((a_hi, a_lo)) = self.long_lvalue_addr_pair(left)
+                && let Some(k) = try_const_eval(right)
+            {
+                let lo_k = (k & 0xFFFF) as u16;
+                let hi_k = ((k >> 16) & 0xFFFF) as u16;
+                let _ = write!(self.out, "\tmov\tcx,word ptr {a_hi}\r\n");
+                let _ = write!(self.out, "\tmov\tbx,word ptr {a_lo}\r\n");
+                if hi_k == 0 {
+                    self.out.extend_from_slice(b"\txor\tdx,dx\r\n");
+                } else {
+                    let _ = write!(self.out, "\tmov\tdx,{hi_k}\r\n");
+                }
+                let _ = write!(self.out, "\tmov\tax,{lo_k}\r\n");
+                self.out.extend_from_slice(b"\tcall\tnear ptr N_LXMUL@\r\n");
+                self.helpers.insert("N_LXMUL@".to_string());
+                return;
+            }
+            // `return <long-lvalue> * <long-lvalue>;` — long * long
+            // helper, both operands from memory.
+            if let ExprKind::BinOp { op: BinOp::Mul, left, right } = &e.kind
+                && let Some((a_hi, a_lo)) = self.long_lvalue_addr_pair(left)
+                && let Some((b_hi, b_lo)) = self.long_lvalue_addr_pair(right)
+            {
+                let _ = write!(self.out, "\tmov\tcx,word ptr {a_hi}\r\n");
+                let _ = write!(self.out, "\tmov\tbx,word ptr {a_lo}\r\n");
+                let _ = write!(self.out, "\tmov\tdx,word ptr {b_hi}\r\n");
+                let _ = write!(self.out, "\tmov\tax,word ptr {b_lo}\r\n");
+                self.out.extend_from_slice(b"\tcall\tnear ptr N_LXMUL@\r\n");
+                self.helpers.insert("N_LXMUL@".to_string());
+                return;
+            }
+            // `return <long-lvalue> +/-/&/|/^ <long-lvalue>;` — long
+            // pair op, both operands from memory. Load a into DX:AX,
+            // apply <op> with b's halves. Sibling of the long-init
+            // path's lvalue-lvalue case.
+            if let ExprKind::BinOp { op, left, right } = &e.kind
+                && let Some((lo_op, hi_op)) = long_pair_op(*op)
+                && let Some((a_hi, a_lo)) = self.long_lvalue_addr_pair(left)
+                && let Some((b_hi, b_lo)) = self.long_lvalue_addr_pair(right)
+            {
+                let _ = write!(self.out, "\tmov\tax,word ptr {a_lo}\r\n");
+                let _ = write!(self.out, "\tmov\tdx,word ptr {a_hi}\r\n");
+                let _ = write!(self.out, "\t{lo_op}\tax,word ptr {b_lo}\r\n");
+                let _ = write!(self.out, "\t{hi_op}\tdx,word ptr {b_hi}\r\n");
+                return;
+            }
+            // `return <long-lvalue> +/-/&/|/^ <long-const>;`
+            if let ExprKind::BinOp { op, left, right } = &e.kind
+                && (matches!(op, BinOp::Add) || matches!(op, BinOp::Sub))
+                && let Some((a_hi, a_lo)) = self.long_lvalue_addr_pair(left)
+                && let Some(k) = try_const_eval(right)
+            {
+                let signed = k as i32;
+                let (delta, carry) = if matches!(op, BinOp::Add) {
+                    (signed, 0i16)
+                } else {
+                    (-signed, -1i16)
+                };
+                let _ = write!(self.out, "\tmov\tax,word ptr {a_hi}\r\n");
+                let _ = write!(self.out, "\tmov\tdx,word ptr {a_lo}\r\n");
+                if let Ok(delta_i8) = i8::try_from(delta) {
+                    let _ = write!(self.out, "\tadd\tdx,{delta_i8}\r\n");
+                } else {
+                    let delta_u16 = (delta as i32) as u16;
+                    let _ = write!(self.out, "\tadd\tdx,{delta_u16}\r\n");
+                }
+                let _ = write!(self.out, "\tadc\tax,{carry}\r\n");
+                // Pattern produces (hi=AX, lo=DX); swap to return
+                // convention (DX=hi, AX=lo).
+                self.out.extend_from_slice(b"\txchg\tax,dx\r\n");
+                return;
+            }
+            // `return <long-global>++ / --;` — load current DX:AX
+            // from g, then memory-direct inc/dec the long. Fixture
+            // 3294 (`return g++` for long global).
+            if let ExprKind::Update { target, op, position } = &e.kind
+                && let Some(gty) = self.globals.type_of(target)
+                && gty.is_long_like()
+            {
+                let (lo_op, hi_op) = match op {
+                    crate::ast::UpdateOp::Inc => ("add", "adc"),
+                    crate::ast::UpdateOp::Dec => ("sub", "sbb"),
+                };
+                match position {
+                    crate::ast::UpdatePosition::Pre => {
+                        let _ = write!(self.out, "\t{lo_op}\tword ptr DGROUP:_{target},1\r\n");
+                        let _ = write!(self.out, "\t{hi_op}\tword ptr DGROUP:_{target}+2,0\r\n");
+                        let _ = write!(self.out, "\tmov\tax,word ptr DGROUP:_{target}\r\n");
+                        let _ = write!(self.out, "\tmov\tdx,word ptr DGROUP:_{target}+2\r\n");
+                    }
+                    crate::ast::UpdatePosition::Post => {
+                        let _ = write!(self.out, "\tmov\tax,word ptr DGROUP:_{target}\r\n");
+                        let _ = write!(self.out, "\tmov\tdx,word ptr DGROUP:_{target}+2\r\n");
+                        let _ = write!(self.out, "\t{lo_op}\tword ptr DGROUP:_{target},1\r\n");
+                        let _ = write!(self.out, "\t{hi_op}\tword ptr DGROUP:_{target}+2,0\r\n");
+                    }
+                }
                 return;
             }
             // Fallback: an int-typed return expression in a long-
