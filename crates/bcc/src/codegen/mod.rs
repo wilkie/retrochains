@@ -9619,6 +9619,20 @@ impl<'a> FunctionEmitter<'a> {
         }
         // Compound-index or stride-≥-2 path: compute index into BX
         // first (the shl chains on, leaving BX hot), then lea, add.
+        // When the index is a Call (or other expression that
+        // naturally leaves the result in AX), BCC keeps AX hot:
+        // scale AX, lea base into DX, add ax+dx, then mov bx, ax.
+        // Fixture 1372 (`a[idx()]` for stack array).
+        if matches!(index.kind, ExprKind::Call { .. }) {
+            self.emit_expr_to_ax(index);
+            if elem_size == 2 {
+                self.out.extend_from_slice(b"\tshl\tax,1\r\n");
+            }
+            let _ = write!(self.out, "\tlea\tdx,word ptr {}\r\n", bp_addr(base_off));
+            self.out.extend_from_slice(b"\tadd\tax,dx\r\n");
+            self.out.extend_from_slice(b"\tmov\tbx,ax\r\n");
+            return;
+        }
         match &index.kind {
             ExprKind::Ident(idx_name) => match self.locals.location_of(idx_name) {
                 LocalLocation::Reg(reg) => {
