@@ -12533,19 +12533,30 @@ impl<'a> FunctionEmitter<'a> {
                         // Fixture 1228 (`a * c`).
                         self.emit_expr_to_ax(right);
                         emit_op_with_source(self.out, *op, &left_src, unsigned);
-                    } else if rhs_clobbers_ax
-                        && (matches!(op, BinOp::Div | BinOp::Mod | BinOp::Mul)
-                            || self.expr_is_char_load(right))
-                    {
-                        // Div/Mod need DX free for cwd / xor dx,dx,
-                        // so the divisor goes into BX. Mul uses DX
-                        // (imul writes DX:AX, so DX as src is fine).
-                        // Char-load RHS (Add/Sub/etc): DX is fine
-                        // since no DX-clobbering setup happens. BCC's
-                        // order: LHS first (push), then RHS (mov
-                        // scratch, ax), then pop LHS back into AX.
-                        // Fixtures 1357, 1625, 1223, 2006 (`a[0] +
-                        // a[126]`).
+                    } else if rhs_clobbers_ax && {
+                        // LHS-first when LHS itself clobbers AX
+                        // (nested binop / char-load / call / cast /
+                        // ternary). RHS-first when LHS is simple
+                        // (it can be loaded last for free).
+                        // Div/Mod/Mul: always LHS-first (need AX as
+                        // accumulator for the implicit operand).
+                        let lhs_clobbers_ax =
+                            matches!(left.kind, ExprKind::Call { .. })
+                            || self.expr_is_char_load(left)
+                            || matches!(left.kind,
+                                ExprKind::Cast { .. } | ExprKind::Ternary { .. })
+                            || (matches!(left.kind, ExprKind::BinOp { .. })
+                                && try_const_eval(left).is_none());
+                        matches!(op, BinOp::Div | BinOp::Mod | BinOp::Mul)
+                            || lhs_clobbers_ax
+                    } {
+                        // Div/Mod scratch is BX (DX is clobbered by
+                        // cwd / xor dx,dx). Mul scratch is DX (imul
+                        // writes DX:AX, no other reg-clobbering setup).
+                        // Add/Sub/etc with LHS-clobbering RHS-also-
+                        // clobbering: DX as scratch is fine. Fixtures
+                        // 087 (`a + b + c` w/ char c), 1357, 1625,
+                        // 1223, 2006.
                         let scratch = if matches!(op, BinOp::Div | BinOp::Mod) {
                             Reg::Bx
                         } else {
