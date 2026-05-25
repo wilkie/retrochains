@@ -8400,17 +8400,33 @@ impl<'a> FunctionEmitter<'a> {
         elem_size: u16,
     ) {
         // Load index into BX. If it's a register-local, that's a
-        // direct `mov bx, <reg>`; otherwise we'd need a stack load —
-        // no fixture for that yet.
-        let ExprKind::Ident(idx_name) = &index.kind else {
-            panic!("non-ident array index not yet supported (no fixture)");
-        };
-        match self.locals.location_of(idx_name) {
-            LocalLocation::Reg(reg) => {
-                let _ = write!(self.out, "\tmov\tbx,{}\r\n", reg.name());
+        // direct `mov bx, <reg>`; if a stack local, `mov bx, [bp+N]`;
+        // for `<int-lv> + <int-lv>` BCC writes the sum directly into
+        // BX (`mov bx, lv1; add bx, lv2`) — fixture 1275 (`a[i+j]`).
+        // Otherwise fall back to evaluating into AX and copying.
+        match &index.kind {
+            ExprKind::Ident(idx_name) => match self.locals.location_of(idx_name) {
+                LocalLocation::Reg(reg) => {
+                    let _ = write!(self.out, "\tmov\tbx,{}\r\n", reg.name());
+                }
+                LocalLocation::Stack(off) => {
+                    let _ = write!(self.out, "\tmov\tbx,word ptr {}\r\n", bp_addr(off));
+                }
+            },
+            ExprKind::BinOp { op: BinOp::Add, left, right } => {
+                if let (Some(l_src), Some(r_src)) =
+                    (self.int_lvalue_addr(left), self.int_lvalue_addr(right))
+                {
+                    let _ = write!(self.out, "\tmov\tbx,word ptr {l_src}\r\n");
+                    let _ = write!(self.out, "\tadd\tbx,word ptr {r_src}\r\n");
+                } else {
+                    self.emit_expr_to_ax(index);
+                    self.out.extend_from_slice(b"\tmov\tbx,ax\r\n");
+                }
             }
-            LocalLocation::Stack(off) => {
-                let _ = write!(self.out, "\tmov\tbx,word ptr {}\r\n", bp_addr(off));
+            _ => {
+                self.emit_expr_to_ax(index);
+                self.out.extend_from_slice(b"\tmov\tbx,ax\r\n");
             }
         }
         if elem_size == 2 {
