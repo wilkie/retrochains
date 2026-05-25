@@ -1075,19 +1075,23 @@ fn stmt_has_name_as_char_array_index(
 ) -> bool {
     match &stmt.kind {
         StmtKind::ArrayAssign { array, indices, value } => {
-            // The DX preference fires only when the *value* expression
-            // also references the index — that's the pattern where
-            // BCC's `mov al, dl` byte-load shape gives an immediate
-            // win. For a constant-value fill (`buf[i] = 'X'`), BCC
-            // stays with SI. Fixtures 1257 (DX), 1366 (SI).
+            // The DX preference fires only when the value is EXACTLY
+            // the index identifier (`arr[i] = i`) — that's the
+            // pattern where BCC's `mov al, dl` byte-load shape gives
+            // the byte-exact byte sequence. Constant value, indexed
+            // value (`src[i]`), or arithmetic on i all push BCC to
+            // a different register choice. Fixtures 1257 (DX),
+            // 1366 (const → SI), 1426 (src[i] → SI), 1276 (a+i → CX).
             char_arrays.contains(array.as_str())
                 && indices.iter().any(|i| expr_mentions(name, i))
-                && expr_mentions(name, value)
+                && matches!(&value.kind, ExprKind::Ident(n) if n == name)
         }
-        StmtKind::ArrayCompoundAssign { array, indices, value, .. } => {
+        StmtKind::ArrayCompoundAssign { array, indices, .. } => {
+            // For compound assigns (`+=`), keep the conservative
+            // check: any reference to the index in the value side
+            // counts.
             char_arrays.contains(array.as_str())
                 && indices.iter().any(|i| expr_mentions(name, i))
-                && expr_mentions(name, value)
         }
         StmtKind::If { then_branch, else_branch, .. } => {
             name_in_char_array_index_body(name, then_branch, char_arrays)
