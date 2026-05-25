@@ -5490,6 +5490,45 @@ impl<'a> FunctionEmitter<'a> {
                 let _ = write!(self.out, "\t{hi_op}\tdx,word ptr {b_hi}\r\n");
                 return;
             }
+            // `return <long-lvalue> +/-/&/|/^ <int-expr>;` — widen
+            // the int via cwd, push, load long lvalue into DX:AX,
+            // pop the widened-int into CX:BX, then long pair-op.
+            // Fixture 3291 (`a + b` for long a, int b).
+            if let ExprKind::BinOp { op, left, right } = &e.kind
+                && let Some((lo_op, hi_op)) = long_pair_op(*op)
+            {
+                let (int_expr, long_addr): (&Expr, Option<(String, String)>) =
+                    if let Some(pair) = self.long_lvalue_addr_pair(left)
+                        && !self.expr_is_long_like(right)
+                    {
+                        (right, Some(pair))
+                    } else if let Some(pair) = self.long_lvalue_addr_pair(right)
+                        && !self.expr_is_long_like(left)
+                        && matches!(op, BinOp::Add | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor)
+                    {
+                        (left, Some(pair))
+                    } else {
+                        (left, None)
+                    };
+                if let Some((a_hi, a_lo)) = long_addr {
+                    let unsigned = self.expr_int_is_unsigned(int_expr);
+                    self.emit_expr_to_ax(int_expr);
+                    if unsigned {
+                        self.out.extend_from_slice(b"\txor\tdx,dx\r\n");
+                    } else {
+                        self.out.extend_from_slice(b"\tcwd\t\r\n");
+                    }
+                    self.out.extend_from_slice(b"\tpush\tax\r\n");
+                    self.out.extend_from_slice(b"\tpush\tdx\r\n");
+                    let _ = write!(self.out, "\tmov\tdx,word ptr {a_hi}\r\n");
+                    let _ = write!(self.out, "\tmov\tax,word ptr {a_lo}\r\n");
+                    self.out.extend_from_slice(b"\tpop\tbx\r\n");
+                    self.out.extend_from_slice(b"\tpop\tcx\r\n");
+                    let _ = write!(self.out, "\t{lo_op}\tax,cx\r\n");
+                    let _ = write!(self.out, "\t{hi_op}\tdx,bx\r\n");
+                    return;
+                }
+            }
             // `return <long-lvalue> +/-/&/|/^ <long-const>;`
             if let ExprKind::BinOp { op, left, right } = &e.kind
                 && (matches!(op, BinOp::Add) || matches!(op, BinOp::Sub))
