@@ -264,6 +264,7 @@ fn instr_size(instr: &Instr) -> usize {
         Instr::MovReg16GroupSymBxDisp { .. } => 4,
         Instr::AddReg16GroupSymBxDisp { .. } => 4,
         Instr::AddReg16GroupSym { .. } => 4,
+        Instr::OrReg16GroupSym { .. } => 4,
         Instr::MovGroupSymBxDispImm { .. } => 6,
         Instr::MovGroupSymBxDispReg16 { .. } => 4,
         Instr::MovGroupSymSiDispByteImm8 { .. } => 5,
@@ -1503,6 +1504,12 @@ fn emit_instr(
             // (mod=00 reg=<r> r/m=110) lo hi.
             let modrm = 0b00_000_110 | (reg.code() << 3);
             emit_group_sym_lea(&[0x03, modrm], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
+        }
+        Instr::OrReg16GroupSym { reg, group, symbol, offset } => {
+            // `or <reg16>,word ptr <group>:<sym>[+offset]` → 0B
+            // (mod=00 reg=<r> r/m=110) lo hi.
+            let modrm = 0b00_000_110 | (reg.code() << 3);
+            emit_group_sym_lea(&[0x0B, modrm], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
         }
         Instr::MovGroupSymBxDispImm { group, symbol, disp, imm } => {
             // `mov word ptr <group>:<sym>[bx+disp],imm16` → C7 87

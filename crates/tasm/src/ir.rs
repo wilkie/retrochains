@@ -462,6 +462,15 @@ pub enum Instr {
         symbol: String,
         offset: i16,
     },
+    /// `or <reg16>, word ptr <group>:<sym>[+<offset>]` — `0B (mod=00
+    /// reg=<r> r/m=110) lo hi`. OR sibling of `AddReg16GroupSym`.
+    /// Fixture 1383 (`a |= s.x` with a in SI).
+    OrReg16GroupSym {
+        reg: Reg16,
+        group: String,
+        symbol: String,
+        offset: i16,
+    },
     /// `cmp ax,word ptr [bp+<offset>]` — 3B 46 dd
     CmpAxBpRel { offset: i16 },
     /// `cmp dx,word ptr [bp+disp8]` — 3B 56 dd. Low-half companion to

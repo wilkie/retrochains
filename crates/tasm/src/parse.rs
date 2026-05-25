@@ -2804,6 +2804,22 @@ fn parse_or(operands: &str, line_no: usize) -> AsmResult<Instr> {
             return Ok(Instr::OrDxBpRel { offset });
         }
     }
+    // `or <reg16>, word ptr <group>:<sym>[+N]` — memory-direct OR
+    // from a global to a non-AX register. Fixture 1383 (`a |= s.x`
+    // with a in SI). Tried BEFORE the imm16 form so the parse of
+    // `word ptr DGROUP:...` doesn't get mis-handled.
+    if let Some(reg) = Reg16::parse(lhs)
+        && !matches!(reg, Reg16::Ax | Reg16::Dx)
+        && let Some((group, symbol)) = parse_group_symbol(rhs)
+    {
+        let (sym, offset) = split_sym_offset(symbol);
+        return Ok(Instr::OrReg16GroupSym {
+            reg,
+            group: group.to_string(),
+            symbol: sym.to_string(),
+            offset,
+        });
+    }
     // `or <reg16>, imm16` — Grp1 /1=OR. Used by the long-return
     // bitwise-or-imm path (fixture 2876: `or dx, 0` as the high-half
     // OR with 0x100L → hi=0).
