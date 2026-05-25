@@ -9681,7 +9681,42 @@ impl<'a> FunctionEmitter<'a> {
             //   add bx, ax    ; pointer arithmetic
             //   mov ax, [bx]  ; deref
             // Char stride is 1 → no shl; long would need shl ax, 2.
+            //
+            // Char-stride memory-direct add: when stride is 1 (no
+            // scaling needed) and the index is a simple int lvalue,
+            // BCC skips the AX round-trip and adds the index memory
+            // directly to BX. Saves the `mov ax, idx` (`add bx, ax`
+            // → `add bx, word ptr <idx>`). Fixture 2851 (`return
+            // s[i]` for `char *s, int i`).
             let stride = u32::from(pointee.size_bytes());
+            if stride == 1
+                && let Some(idx_addr) = self.int_lvalue_addr(index)
+            {
+                match self.locals.location_of(ptr_name) {
+                    LocalLocation::Reg(reg) => {
+                        let _ = write!(self.out, "\tmov\tbx,{}\r\n", reg.name());
+                    }
+                    LocalLocation::Stack(off) => {
+                        let _ = write!(
+                            self.out,
+                            "\tmov\tbx,word ptr {}\r\n",
+                            bp_addr(off),
+                        );
+                    }
+                }
+                let _ = write!(self.out, "\tadd\tbx,word ptr {idx_addr}\r\n");
+                if pointee.is_char_like() {
+                    self.out.extend_from_slice(b"\tmov\tal,byte ptr [bx]\r\n");
+                    if pointee.is_unsigned() {
+                        self.out.extend_from_slice(b"\tmov\tah,0\r\n");
+                    } else {
+                        self.out.extend_from_slice(b"\tcbw\t\r\n");
+                    }
+                } else {
+                    self.out.extend_from_slice(b"\tmov\tax,word ptr [bx]\r\n");
+                }
+                return;
+            }
             self.emit_expr_to_ax(index);
             for _ in 0..stride.trailing_zeros() {
                 self.out.extend_from_slice(b"\tshl\tax,1\r\n");
