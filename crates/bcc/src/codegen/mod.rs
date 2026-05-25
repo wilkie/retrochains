@@ -5134,10 +5134,25 @@ impl<'a> FunctionEmitter<'a> {
                 // Int local init from a non-AX register-resident
                 // source: `mov word ptr [bp-N], <reg>` directly.
                 // Saves the round-trip through AX (`mov ax, <reg>;
-                // mov [bp-N], ax`). Fixture 1711 (`int b = x >> 0`
-                // folds to `int b = x` with x in SI).
+                // mov [bp-N], ax`). Also accepts `x | 0` / `x ^ 0`
+                // identity wrappers — BCC's frontend folds these at
+                // the AST level (but does NOT fold `x << 0` /
+                // `x >> 0`, which keep their AX-round-trip shape).
+                // Fixture 1711 (`int c = x | 0` with x in SI).
+                let init_ident = match &init.kind {
+                    ExprKind::Ident(n) => Some(n.as_str()),
+                    ExprKind::BinOp { op: BinOp::BitOr | BinOp::BitXor, left, right }
+                        if try_const_eval(right) == Some(0) =>
+                    {
+                        match &left.kind {
+                            ExprKind::Ident(n) => Some(n.as_str()),
+                            _ => None,
+                        }
+                    }
+                    _ => None,
+                };
                 if ty.is_int_like()
-                    && let ExprKind::Ident(name) = &init.kind
+                    && let Some(name) = init_ident
                     && self.locals.has(name)
                     && self.locals.type_of(name).is_int_like()
                     && let LocalLocation::Reg(reg) = self.locals.location_of(name)
