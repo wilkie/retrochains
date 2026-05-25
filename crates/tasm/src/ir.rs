@@ -452,6 +452,33 @@ pub enum Instr {
         symbol: String,
         disp: u16,
     },
+    /// `cmp word ptr <group>:<sym>[bx], imm8sx` — `83 BF lo hi ii`.
+    /// Memory-direct word compare against a sign-extended byte
+    /// immediate, indexed via BX. The 16-bit displacement is the
+    /// symbol's segment-relative offset (FIXUPP-patched). Fixture
+    /// 1309 (`while (a[i])` for int global array a).
+    CmpGroupSymBxDispImm8 {
+        group: String,
+        symbol: String,
+        disp: u16,
+        imm: i8,
+    },
+    /// `cmp word ptr <group>:<sym>[bx], imm16` — `81 BF lo hi LL HH`.
+    /// Wide-immediate sibling for constants outside [-128, 127].
+    CmpGroupSymBxDispImm16 {
+        group: String,
+        symbol: String,
+        disp: u16,
+        imm: u16,
+    },
+    /// `cmp byte ptr <group>:<sym>[bx], imm8` — `80 BF lo hi ii`.
+    /// Byte-form sibling for char-array boolean tests.
+    CmpByteGroupSymBxDispImm8 {
+        group: String,
+        symbol: String,
+        disp: u16,
+        imm: u8,
+    },
     /// `add <reg16>, word ptr <group>:<sym>[+<offset>]` — `03 (mod=00
     /// reg=<r> r/m=110) lo hi`. Memory-direct add from a data-segment
     /// global to a non-AX register destination (AX uses the dedicated

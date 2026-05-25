@@ -2499,6 +2499,39 @@ fn parse_cmp(operands: &str, line_no: usize) -> AsmResult<Instr> {
     {
         return Ok(Instr::CmpBxDispImm8 { disp, imm });
     }
+    // `cmp word ptr <group>:<sym>[bx], imm` — indexed-array zero-test
+    // (fixture 1309: `while (a[i])` for int global array). Try
+    // imm8sx form first (1 byte saved), fall back to imm16.
+    if let Some((group, symbol, disp)) = parse_group_symbol_bx_disp(lhs) {
+        if let Some(imm) = parse_imm8_signed(rhs) {
+            return Ok(Instr::CmpGroupSymBxDispImm8 {
+                group: group.to_string(),
+                symbol: symbol.to_string(),
+                disp,
+                imm,
+            });
+        }
+        if let Some(imm) = parse_imm16(rhs) {
+            return Ok(Instr::CmpGroupSymBxDispImm16 {
+                group: group.to_string(),
+                symbol: symbol.to_string(),
+                disp,
+                imm: imm as u16,
+            });
+        }
+    }
+    // `cmp byte ptr <group>:<sym>[bx], imm8` — byte-form sibling
+    // for char-array boolean tests.
+    if let Some((group, symbol, disp)) = parse_byte_group_symbol_bx_disp(lhs)
+        && let Some(imm) = parse_imm8(rhs)
+    {
+        return Ok(Instr::CmpByteGroupSymBxDispImm8 {
+            group: group.to_string(),
+            symbol: symbol.to_string(),
+            disp,
+            imm: imm as u8,
+        });
+    }
     // `cmp byte ptr <group>:<sym>[+N], imm8` — char-global compare
     // (`80 3E lo hi ii`, 5 bytes). Used by `if (c == 'A')` for
     // char globals (fixture 452).

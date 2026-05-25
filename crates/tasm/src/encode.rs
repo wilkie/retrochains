@@ -263,6 +263,9 @@ fn instr_size(instr: &Instr) -> usize {
         Instr::MovReg16OffsetSym { .. } => 3,
         Instr::MovReg16GroupSymBxDisp { .. } => 4,
         Instr::AddReg16GroupSymBxDisp { .. } => 4,
+        Instr::CmpGroupSymBxDispImm8 { .. } => 5,
+        Instr::CmpGroupSymBxDispImm16 { .. } => 6,
+        Instr::CmpByteGroupSymBxDispImm8 { .. } => 5,
         Instr::MovReg8GroupSymBxDisp { .. } => 4,
         Instr::MovGroupSymBxDispReg8 { .. } => 4,
         Instr::MovGroupSymBxDispImm8 { .. } => 5,
@@ -1508,6 +1511,25 @@ fn emit_instr(
             // MovReg16GroupSymBxDisp; opcode 03 (ADD r16,r/m16).
             let modrm = 0b10_000_111 | (reg.code() << 3);
             emit_group_sym_lea(&[0x03, modrm], group, symbol, *disp as i16, symbols, group_idx, extern_idx, out, fixups)?;
+        }
+        Instr::CmpGroupSymBxDispImm8 { group, symbol, disp, imm } => {
+            // `cmp word ptr <group>:<sym>[bx], imm8sx` → 83 BF lo
+            // hi ii. ModR/M 0xBF = mod=10 reg=/7(cmp) r/m=111(bx+
+            // disp16). disp16 is FIXUPP-patched.
+            emit_group_sym_lea(&[0x83, 0xBF], group, symbol, *disp as i16, symbols, group_idx, extern_idx, out, fixups)?;
+            out.push(*imm as u8);
+        }
+        Instr::CmpGroupSymBxDispImm16 { group, symbol, disp, imm } => {
+            // `cmp word ptr <group>:<sym>[bx], imm16` → 81 BF lo
+            // hi LL HH.
+            emit_group_sym_lea(&[0x81, 0xBF], group, symbol, *disp as i16, symbols, group_idx, extern_idx, out, fixups)?;
+            out.push((*imm & 0xFF) as u8);
+            out.push((*imm >> 8) as u8);
+        }
+        Instr::CmpByteGroupSymBxDispImm8 { group, symbol, disp, imm } => {
+            // `cmp byte ptr <group>:<sym>[bx], imm8` → 80 BF lo hi ii.
+            emit_group_sym_lea(&[0x80, 0xBF], group, symbol, *disp as i16, symbols, group_idx, extern_idx, out, fixups)?;
+            out.push(*imm);
         }
         Instr::MovReg8GroupSymBxDisp { reg, group, symbol, disp } => {
             // `mov <reg8>, byte ptr <group>:<sym>[bx+disp]` → 8A

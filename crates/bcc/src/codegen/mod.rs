@@ -3426,6 +3426,25 @@ impl<'a> FunctionEmitter<'a> {
             let _ = write!(self.out, "\tcmp\t{width} ptr {},0\r\n", bp_addr(elem_off));
             return;
         }
+        // `if (<global-arr>[<var-idx>])` — global array, variable
+        // index. Scale index into BX, then memory-direct
+        // `cmp <width> ptr DGROUP:_<arr>[bx], 0`. Width follows
+        // element type. Fixture 1309 (`while (a[i])` for int
+        // global array a, var index i).
+        if let ExprKind::ArrayIndex { array, index } = &cond.kind
+            && let ExprKind::Ident(arr_name) = &array.kind
+            && let Some(gty) = self.globals.type_of(arr_name)
+            && let Some(elem_ty) = gty.array_elem()
+        {
+            let elem_ty = elem_ty.clone();
+            self.emit_index_into_bx(index, &elem_ty);
+            let width = if elem_ty.is_char_like() { "byte" } else { "word" };
+            let _ = write!(
+                self.out,
+                "\tcmp\t{width} ptr DGROUP:_{arr_name}[bx],0\r\n",
+            );
+            return;
+        }
         // `if (<reg-local> & K)` — bit test against a constant mask
         // when the LHS is a register-resident int local. BCC emits
         // `test <reg>, K` (4 bytes, F7 C6 imm16 for SI; the `&` result
