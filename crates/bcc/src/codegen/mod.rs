@@ -7719,6 +7719,32 @@ impl<'a> FunctionEmitter<'a> {
             );
             return;
         }
+        // `<reg> += <stack-arr>[K_const]` — constant-indexed stack
+        // array element folds to a single bp-relative add.
+        // `add <reg>, word ptr [bp+(base+K*stride)]`. Fixture 1336
+        // (`b += a[1]` for stack int array a, b in SI).
+        if matches!(op, BinOp::Add)
+            && let ExprKind::ArrayIndex { array, index } = &value.kind
+            && let ExprKind::Ident(arr_name) = &array.kind
+            && self.locals.has(arr_name)
+            && let arr_ty = self.locals.type_of(arr_name).clone()
+            && let Some(elem_ty) = arr_ty.array_elem()
+            && elem_ty.is_int_like()
+            && let LocalLocation::Stack(base_off) = self.locals.location_of(arr_name)
+            && let Some(k) = try_const_eval(index)
+            && !reg.is_byte()
+        {
+            let stride = i32::from(elem_ty.size_bytes());
+            let elem_off = i32::from(base_off) + (k as i32) * stride;
+            let elem_off_i16 = i16::try_from(elem_off).expect("elem offset fits in i16");
+            let _ = write!(
+                self.out,
+                "\tadd\t{},word ptr {}\r\n",
+                reg.name(),
+                bp_addr(elem_off_i16),
+            );
+            return;
+        }
         // `<reg> += <int-ptr-stack>[<var>]` — pointer param on the
         // stack ([bp+N]), variable index. Compute &p[i] into BX:
         // scale index in AX, then `mov bx, [bp+N]; add bx, ax`, then
