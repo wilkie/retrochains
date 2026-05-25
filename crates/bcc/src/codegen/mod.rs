@@ -1001,21 +1001,22 @@ impl<'a> FunctionEmitter<'a> {
         then_branch: &[Stmt],
         else_branch: Option<&[Stmt]>,
     ) {
-        // `if (K)` with K a constant — BCC elides the compare/branch
-        // entirely. Non-zero K: emit the then-branch inline (the else,
-        // if any, is unreachable and BCC drops it too). Zero K: emit
-        // only the else-branch. No labels are reserved by the if at
-        // all; statements after the if continue sequentially.
-        // Fixture 931.
-        if let Some(v) = try_const_eval(cond) {
-            if v != 0 {
-                for s in then_branch {
-                    self.emit_stmt(s);
-                }
-            } else if let Some(else_stmts) = else_branch {
-                for s in else_stmts {
-                    self.emit_stmt(s);
-                }
+        // `if (K)` with K a constant non-zero — BCC elides the
+        // compare/branch entirely and inlines the then-branch (the
+        // else, if any, is unreachable and BCC drops it). Fixture
+        // 931 (`if (1) { return 7; } return 0;`).
+        //
+        // `if (0)`: BCC does NOT elide. It still allocates the
+        // skip-target label and emits an unconditional `jmp short
+        // <skip>` over the dead then-block; the then-block code is
+        // emitted verbatim (unreachable). Same shape for `if (0)
+        // ... else ...`: jmp over then to the else. Fixture 1585
+        // (`if (0) return 5; return 10;`).
+        if let Some(v) = try_const_eval(cond)
+            && v != 0
+        {
+            for s in then_branch {
+                self.emit_stmt(s);
             }
             return;
         }
@@ -2510,6 +2511,17 @@ impl<'a> FunctionEmitter<'a> {
         true_slot: Option<u32>,
         false_slot: Option<u32>,
     ) {
+        // Constant-false cond: emit an unconditional `jmp short
+        // <false_slot>` (no cmp/test/jcc). BCC's shape for
+        // `if (0) ...`. Constant-true is handled by the caller
+        // (emit_if elides the whole if). Fixture 1585.
+        if let Some(v) = try_const_eval(cond)
+            && v == 0
+            && let Some(fslot) = false_slot
+        {
+            let _ = write!(self.out, "\tjmp\tshort {}\r\n", self.label_ref(fslot));
+            return;
+        }
         // `<long_global> <relop> <int_global>` mixed compare. BCC
         // widens the int (mov ax, _i / cwd to DX:AX), then compares
         // against g. The operand-order in the cmp is widened-int-LHS
