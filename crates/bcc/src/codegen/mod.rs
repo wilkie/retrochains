@@ -11396,6 +11396,23 @@ impl<'a> FunctionEmitter<'a> {
                 crate::ast::MemberKind::Arrow,
             );
         }
+        // `(&<ident>)-><field>` — `&ident` is just the address of
+        // the ident; combined with `->` it's `<ident>.<field>`.
+        // Rewrite as a Dot access. Fixture 3561 (`(&s)->y` for
+        // global struct s).
+        if matches!(kind, crate::ast::MemberKind::Arrow)
+            && let ExprKind::AddressOf(name) = &base.kind
+        {
+            let synth_ident = Expr {
+                kind: ExprKind::Ident(name.clone()),
+                span: base.span,
+            };
+            return self.emit_member_to_ax(
+                &synth_ident,
+                field,
+                crate::ast::MemberKind::Dot,
+            );
+        }
         // Arrow path (or Dot whose base isn't a const-chain lvalue):
         // base must be a bare Ident referring to a pointer.
         let ExprKind::Ident(name) = &base.kind else {
