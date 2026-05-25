@@ -9423,16 +9423,20 @@ impl<'a> FunctionEmitter<'a> {
                 && matches!(elem, Type::Int | Type::UInt)
                 // Value must be resolve_operand_source-able: a
                 // constant, ident lvalue, deref, or member chain.
-                // For BinOp / Call / Ternary value, fall through to
-                // the more general path below.
+                // ArrayIndex is OK only when its inner index is a
+                // constant (resolve_operand_source's chain-addr
+                // walker requires const index). For BinOp / Call /
+                // Ternary value, fall through to the more general
+                // path below.
                 && {
                     try_const_eval(value).is_some()
                         || matches!(value.kind,
                             ExprKind::Ident(_)
                             | ExprKind::IntLit(_)
                             | ExprKind::Deref(_)
-                            | ExprKind::Member { .. }
-                            | ExprKind::ArrayIndex { .. })
+                            | ExprKind::Member { .. })
+                        || (matches!(value.kind, ExprKind::ArrayIndex { .. })
+                            && self.try_lvalue_chain_addr(value).is_some())
                 }
             {
                 let index = &indices[0];
