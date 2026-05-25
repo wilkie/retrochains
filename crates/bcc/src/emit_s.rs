@@ -457,8 +457,19 @@ fn write_tail(
     out.extend_from_slice(b"_TEXT\tsegment byte public 'CODE'\r\n");
     out.extend_from_slice(b"_TEXT\tends\r\n");
     // Extern declarations come between the final `_TEXT ends` and
-    // the `public` list. Source order, one per called external.
-    for name in &externs {
+    // the `public` list. BCC orders by NAME LENGTH ASCENDING, then
+    // reverse-alphabetical within each length bucket. Empirical from
+    // 2894 (`_no,_yes` len 3/4 → no first); 2956, 3361, 3585
+    // (`_f,_g` same len → g, f reverse-alpha); 3012 (`_setup,
+    // _cleanup` len 6/8 → setup first). Source-order works only
+    // when it happens to coincide (3012).
+    let mut ordered_externs: Vec<String> = externs.clone();
+    ordered_externs.sort_by(|a, b| {
+        a.len()
+            .cmp(&b.len())
+            .then_with(|| b.cmp(a))
+    });
+    for name in &ordered_externs {
         let _ = write!(out, "\textrn\t_{name}:near\r\n");
     }
     // Public symbols are bucketed by **home segment** (_TEXT, _DATA,
