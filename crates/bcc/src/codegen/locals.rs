@@ -1679,12 +1679,17 @@ fn count_uses_expr(e: &Expr, counts: &mut HashMap<String, u32>) {
             }
         }
         ExprKind::ArrayIndex { array, index } => {
-            // `a[i]` (or `p[i]` for a pointer) gives the base name
-            // the same direct-deref bonus as `*p`. Fixture 088: `s`
-            // enregisters when used as `s[0]`. For non-Ident bases
+            // `a[K]` / `p[K]` with a constant index gives the base
+            // name the direct-deref bonus (folds to a single load
+            // with a baked-in offset). With a variable index, the
+            // access needs BX setup regardless of where the base
+            // lives, so the bonus doesn't apply — fixture 1339
+            // (`p[i]` keeps p on the stack). For non-Ident bases
             // (e.g. string literals), no use-count contribution.
+            let const_idx = try_const_eval(index).is_some();
             if let ExprKind::Ident(name) = &array.kind {
-                *counts.entry(name.clone()).or_insert(0) += 2;
+                let bonus = if const_idx { 2 } else { 1 };
+                *counts.entry(name.clone()).or_insert(0) += bonus;
             } else {
                 count_uses_expr(array, counts);
             }
