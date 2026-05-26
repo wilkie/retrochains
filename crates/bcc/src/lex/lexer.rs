@@ -347,12 +347,26 @@ impl<'a> Lexer<'a> {
             }
             return Ok((value & 0xFF) as u8);
         }
+        // Octal escapes: `\<o1>` / `\<o1><o2>` / `\<o1><o2><o3>` where
+        // o[123] are digits 0..=7. Up to three octal digits, stopping at
+        // the first non-octal char. Fixture 2423 (`"\003\012\077"`).
+        if matches!(esc, b'0'..=b'7') {
+            let mut value: u32 = 0;
+            for _ in 0..3 {
+                let Some(&d) = self.src.get(self.pos) else { break };
+                if !(b'0'..=b'7').contains(&d) {
+                    break;
+                }
+                value = value.wrapping_mul(8).wrapping_add(u32::from(d - b'0'));
+                self.pos += 1;
+            }
+            return Ok((value & 0xFF) as u8);
+        }
         self.pos += 1;
         Ok(match esc {
             b'n' => b'\n',
             b't' => b'\t',
             b'r' => b'\r',
-            b'0' => 0u8,
             b'\\' => b'\\',
             b'\'' => b'\'',
             b'"' => b'"',
