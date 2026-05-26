@@ -17065,11 +17065,11 @@ impl<'a> FunctionEmitter<'a> {
         // deref into three instructions: cache `*pp` in BX, advance
         // `*pp` in place by the pointee's stride, then load through
         // BX. Fixture 3662 (`int **pp; return *(*pp)++;`).
-        // `(*p)++` / `(*p)--` in value position — load the
-        // pre-update value into AX, then increment/decrement in
-        // place. Fixtures 2857 (`(*p)++`), 3107 (same as fn return).
+        // `(*p)++` / `(*p)--` / `++(*p)` / `--(*p)` in value
+        // position. Post: load pre-update value into AX, then
+        // increment/decrement in place. Pre: increment first, then
+        // load. Fixtures 2857, 3107, 2449 (post), 2762, 3110 (pre).
         if let ExprKind::UpdateLvalue { target, op, position } = &e.kind
-            && matches!(position, UpdatePosition::Post)
             && let ExprKind::Deref(inner) = &target.kind
             && let ExprKind::Ident(p_name) = &inner.kind
             && self.locals.has(p_name)
@@ -17082,13 +17082,26 @@ impl<'a> FunctionEmitter<'a> {
                 UpdateOp::Inc => "inc",
                 UpdateOp::Dec => "dec",
             };
-            if pointee.is_char_like() {
-                let _ = write!(self.out, "\tmov\tal,byte ptr [{r}]\r\n");
-                self.emit_widen_al(&pointee);
-                let _ = write!(self.out, "\t{mnem}\tbyte ptr [{r}]\r\n");
-            } else {
-                let _ = write!(self.out, "\tmov\tax,word ptr [{r}]\r\n");
-                let _ = write!(self.out, "\t{mnem}\tword ptr [{r}]\r\n");
+            let width = if pointee.is_char_like() { "byte" } else { "word" };
+            match position {
+                UpdatePosition::Post => {
+                    if pointee.is_char_like() {
+                        let _ = write!(self.out, "\tmov\tal,byte ptr [{r}]\r\n");
+                        self.emit_widen_al(&pointee);
+                    } else {
+                        let _ = write!(self.out, "\tmov\tax,word ptr [{r}]\r\n");
+                    }
+                    let _ = write!(self.out, "\t{mnem}\t{width} ptr [{r}]\r\n");
+                }
+                UpdatePosition::Pre => {
+                    let _ = write!(self.out, "\t{mnem}\t{width} ptr [{r}]\r\n");
+                    if pointee.is_char_like() {
+                        let _ = write!(self.out, "\tmov\tal,byte ptr [{r}]\r\n");
+                        self.emit_widen_al(&pointee);
+                    } else {
+                        let _ = write!(self.out, "\tmov\tax,word ptr [{r}]\r\n");
+                    }
+                }
             }
             return;
         }

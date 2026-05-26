@@ -2537,6 +2537,27 @@ impl Parser {
         }
         if let Some(update_op) = match_update_op(&self.peek().kind) {
             let op_tok = self.bump();
+            // `++(*p)` / `--(*p)` — prefix update on a paren-deref.
+            // Parse the parenthesized operand via parse_unary so the
+            // result is the inner Deref expression, then wrap in
+            // UpdateLvalue with Position::Pre. Fixtures 2762, 3110.
+            if matches!(self.peek().kind, TokenKind::LParen) {
+                let operand = self.parse_unary()?;
+                if matches!(operand.kind, ExprKind::Deref(_)) {
+                    let span = Span::new(op_tok.span.start, operand.span.end);
+                    return Ok(Expr {
+                        kind: ExprKind::UpdateLvalue {
+                            target: Box::new(operand),
+                            op: update_op,
+                            position: UpdatePosition::Pre,
+                        },
+                        span,
+                    });
+                }
+                // Fallback: not a deref — defer to the original
+                // bare-ident path which will error.
+                return Err(ParseError::Unsupported { offset: operand.span.start });
+            }
             let name_tok = self.bump();
             let TokenKind::Ident(name) = name_tok.kind else {
                 return Err(ParseError::NotAnIdent { offset: name_tok.span.start });
