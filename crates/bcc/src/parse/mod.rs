@@ -361,6 +361,16 @@ impl Parser {
             };
             let value = if matches!(self.peek().kind, TokenKind::Equals) {
                 self.bump();
+                // Accept an optional leading `-` for negative enum
+                // values (`NEG = -1`). Fixtures 2716, 3424. Positive
+                // literals come through directly. Wider const-expression
+                // initializers aren't fixture-tested yet.
+                let negate = if matches!(self.peek().kind, TokenKind::Minus) {
+                    self.bump();
+                    true
+                } else {
+                    false
+                };
                 let lit_tok = self.bump();
                 let TokenKind::IntLit(v) = lit_tok.kind else {
                     return Err(ParseError::Unexpected {
@@ -369,7 +379,7 @@ impl Parser {
                         offset: lit_tok.span.start,
                     });
                 };
-                v
+                if negate { 0u32.wrapping_sub(v) } else { v }
             } else {
                 next
             };
@@ -1168,7 +1178,12 @@ impl Parser {
     /// K&R bare-ident lists both report `false`, since neither pins
     /// a prototype signature at the call site.
     fn parse_param_list(&mut self) -> Result<(Vec<Param>, bool), ParseError> {
-        if matches!(self.peek().kind, TokenKind::KwVoid) {
+        // `(void)` — empty param list. Distinguished from `(void *p)`
+        // by 1-token lookahead: the latter has a `*` or other type
+        // suffix after the keyword.
+        if matches!(self.peek().kind, TokenKind::KwVoid)
+            && matches!(self.peek_n(1).kind, TokenKind::RParen)
+        {
             self.bump();
             return Ok((Vec::new(), false));
         }
