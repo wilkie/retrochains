@@ -169,6 +169,23 @@ impl Parser {
                 }
                 _ => {}
             }
+            // K&R implicit-int function definition `name(args) {body}`.
+            // No explicit type → default to int. Only fire when the
+            // ident is followed by `(`, which is the unambiguous
+            // function-decl shape; otherwise fall through to the
+            // typed-decl probe so typedef-named globals still work.
+            // Fixture 2163.
+            if let TokenKind::Ident(name) = &self.peek().kind
+                && !self.typedefs.contains_key(name)
+                && matches!(self.peek_n(1).kind, TokenKind::LParen)
+            {
+                let idx = functions.len();
+                let mut f = self.parse_function()?;
+                f.is_static = is_static;
+                functions.push(f);
+                decl_order.push(TopLevelRef::Function(idx));
+                continue;
+            }
             // Otherwise this top-level item is either a function or
             // a global. Probe past the type to find the declarator
             // name and decide.
@@ -1054,10 +1071,21 @@ impl Parser {
 
     fn parse_function(&mut self) -> Result<Function, ParseError> {
         let start = self.peek().span.start;
+        // K&R implicit-int return type: the first token is an
+        // identifier that *isn't* a typedef name (typedefs go through
+        // the regular parse_type path). The C89 default is `int`.
+        // Fixture 2163 (`helper(int x) { return x + 1; }`).
+        let implicit_int = matches!(&self.peek().kind, TokenKind::Ident(n)
+            if !self.typedefs.contains_key(n))
+            && matches!(self.peek_n(1).kind, TokenKind::LParen);
         // Parse the return type via the standard `parse_type` path.
         // `int`, `long`, etc. all flow through here; fixture 212
         // introduced the first non-int return type (`long get()`).
-        let mut ret_ty = self.parse_type()?;
+        let mut ret_ty = if implicit_int {
+            Type::Int
+        } else {
+            self.parse_type()?
+        };
         // Pointer stars between the return type and the function
         // name — `int *f(void) { ... }`. Fixture 496.
         while matches!(self.peek().kind, TokenKind::Star) {
