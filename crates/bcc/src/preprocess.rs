@@ -429,11 +429,9 @@ fn expand_inner(
                         if !cur.is_empty() || !args.is_empty() {
                             args.push(cur.trim().to_string());
                         }
-                        // Substitute params into body.
-                        let mut body = mac.body.clone();
-                        for (param, arg_val) in params.iter().zip(args.iter()) {
-                            body = replace_whole_ident(&body, param, arg_val);
-                        }
+                        // Substitute params into body, honoring `#x`
+                        // (stringize) and `##` (token paste).
+                        let body = substitute_fn_macro_body(&mac.body, params, &args);
                         // Re-expand recursively, preventing infinite
                         // re-expansion of this macro.
                         seen.push(name.to_string());
@@ -466,8 +464,148 @@ fn expand_inner(
     out
 }
 
+/// Substitute parameters into a function-like macro body, honoring
+/// `#x` (stringize) and `##` (token paste). Walks the body
+/// identifier-by-identifier; for each ident matching a param name,
+/// substitutes the corresponding argument. `#<param>` becomes a
+/// C string literal containing the (trimmed) argument text. `##`
+/// concatenates the lexeme immediately before and after, dropping
+/// any whitespace on either side. Fixtures 2291 (`#x`), 2292 (`##`).
+fn substitute_fn_macro_body(body: &str, params: &[String], args: &[String]) -> String {
+    // First pass: stringize and parameter substitution. We output
+    // a parallel structure where each piece is either literal text
+    // or a substituted-arg marker; the second pass handles `##`.
+    let bytes = body.as_bytes();
+    let mut out = String::with_capacity(body.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        // String/char literal: pass through unchanged.
+        if c == b'"' || c == b'\'' {
+            let quote = c;
+            let start = i;
+            i += 1;
+            while i < bytes.len() && bytes[i] != quote {
+                if bytes[i] == b'\\' && i + 1 < bytes.len() {
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            if i < bytes.len() {
+                i += 1;
+            }
+            out.push_str(&body[start..i]);
+            continue;
+        }
+        // `##` (paste) marker: emit verbatim, leave for the second
+        // pass. Without this, the second `#` would be misread as the
+        // start of a stringize.
+        if c == b'#' && i + 1 < bytes.len() && bytes[i + 1] == b'#' {
+            out.push_str("##");
+            i += 2;
+            continue;
+        }
+        // `#<param>` stringize: only when followed by an identifier
+        // matching a param name.
+        if c == b'#' && i + 1 < bytes.len() {
+            let mut j = i + 1;
+            while j < bytes.len() && (bytes[j] as char).is_whitespace() {
+                j += 1;
+            }
+            let name_start = j;
+            while j < bytes.len() && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_') {
+                j += 1;
+            }
+            let name = &body[name_start..j];
+            if let Some(idx) = params.iter().position(|p| p == name) {
+                let arg = args.get(idx).map(String::as_str).unwrap_or("");
+                out.push('"');
+                // Escape `"` and `\` per C stringization rules.
+                for ch in arg.chars() {
+                    match ch {
+                        '\\' => out.push_str("\\\\"),
+                        '"' => out.push_str("\\\""),
+                        _ => out.push(ch),
+                    }
+                }
+                out.push('"');
+                i = j;
+                continue;
+            }
+            // `#` not followed by a param — fall through and emit
+            // it literally.
+        }
+        // Identifier — if it matches a param, substitute.
+        if c.is_ascii_alphabetic() || c == b'_' {
+            let start = i;
+            while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+                i += 1;
+            }
+            let ident = &body[start..i];
+            if let Some(idx) = params.iter().position(|p| p == ident) {
+                let arg = args.get(idx).map(String::as_str).unwrap_or("");
+                out.push_str(arg);
+            } else {
+                out.push_str(ident);
+            }
+            continue;
+        }
+        out.push(c as char);
+        i += 1;
+    }
+    // Second pass: collapse `##` token paste.
+    collapse_token_paste(&out)
+}
+
+/// Apply `##` token paste in `src`. For each occurrence of
+/// `<lhs> ## <rhs>`, drop any whitespace on either side of `##`
+/// and join the two lexemes. Operates on the textual form — good
+/// enough for the simple `a##b → ab` cases the fixtures exercise.
+fn collapse_token_paste(src: &str) -> String {
+    let bytes = src.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(src.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if c == b'"' || c == b'\'' {
+            let quote = c;
+            let start = i;
+            i += 1;
+            while i < bytes.len() && bytes[i] != quote {
+                if bytes[i] == b'\\' && i + 1 < bytes.len() {
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            if i < bytes.len() {
+                i += 1;
+            }
+            out.extend_from_slice(&bytes[start..i]);
+            continue;
+        }
+        if c == b'#' && i + 1 < bytes.len() && bytes[i + 1] == b'#' {
+            // Drop trailing whitespace already in `out`.
+            while out.last().is_some_and(|b| (*b as char).is_whitespace()) {
+                out.pop();
+            }
+            i += 2;
+            // Drop leading whitespace from src.
+            while i < bytes.len() && (bytes[i] as char).is_whitespace() {
+                i += 1;
+            }
+            continue;
+        }
+        out.push(c);
+        i += 1;
+    }
+    String::from_utf8(out).unwrap_or_default()
+}
+
 /// Replace whole-identifier occurrences of `name` in `src` with
 /// `repl`. Skips occurrences inside string/char literals.
+#[allow(dead_code)]
 fn replace_whole_ident(src: &str, name: &str, repl: &str) -> String {
     let bytes = src.as_bytes();
     let mut out = String::with_capacity(src.len());
