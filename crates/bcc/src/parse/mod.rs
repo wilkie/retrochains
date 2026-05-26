@@ -780,10 +780,12 @@ impl Parser {
         loop {
             // Per-declarator pointer stars: `int *a, b;` makes `a`
             // an `int*` and `b` a plain `int`.
+            self.consume_cc_modifiers();
             let mut ty = base_ty.clone();
             while matches!(self.peek().kind, TokenKind::Star) {
                 self.bump();
                 ty = Type::Pointer(Box::new(ty));
+                self.consume_cc_modifiers();
             }
             let name_tok = self.bump();
             let TokenKind::Ident(name) = &name_tok.kind else {
@@ -1082,11 +1084,13 @@ impl Parser {
                 return Ok((params, true));
             }
             let mut ty = self.parse_type()?;
+            self.consume_cc_modifiers();
             // Pointer stars wrap the base type, just like in a local
             // declaration (fixture 095: `int sum(int *p)`).
             while matches!(self.peek().kind, TokenKind::Star) {
                 self.bump();
                 ty = Type::Pointer(Box::new(ty));
+                self.consume_cc_modifiers();
             }
             // Anonymous parameter — common in prototypes
             // (`int helper(int);`, fixture 506). Synthesize a unique
