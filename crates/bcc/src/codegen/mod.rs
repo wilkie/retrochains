@@ -308,6 +308,17 @@ fn struct_field_info<'a>(ty: &'a Type, name: &str) -> Option<&'a crate::ast::Str
     }
 }
 
+/// Information needed to read or write a bitfield: the byte
+/// address of the storage container as a string, plus the bit-level
+/// placement. Returned by [`FunctionEmitter::resolve_bitfield`] when
+/// the expression matches a supported lvalue shape (currently:
+/// dotted member of a stack-resident struct local).
+struct BitfieldRef {
+    addr: String,
+    bit_offset: u8,
+    bit_width: u8,
+}
+
 /// True iff `e` is a float/double literal whose value is exactly
 /// 1.0. BCC uses the FPU built-in `fld1` for these instead of
 /// pooling the IEEE bytes.
@@ -16545,6 +16556,125 @@ impl<'a> FunctionEmitter<'a> {
         let _ = write!(self.out, "\tmov\t{},ax\r\n", reg.name());
     }
 
+    /// Resolve a `<stack-local-struct>.<bitfield>` expression into
+    /// the byte address + bit placement codegen needs to emit a
+    /// read or write. Only the within-byte case is supported today
+    /// (`bit_offset + bit_width <= 8`); cross-byte bitfields return
+    /// `None` and fall through to a panic-or-wrong path. Fixture
+    /// 1691.
+    fn resolve_bitfield(&self, e: &Expr) -> Option<BitfieldRef> {
+        let ExprKind::Member { base, field, kind: crate::ast::MemberKind::Dot } =
+            &e.kind
+        else {
+            return None;
+        };
+        let ExprKind::Ident(struct_name) = &base.kind else {
+            return None;
+        };
+        if !self.locals.has(struct_name) {
+            return None;
+        }
+        let base_ty = self.locals.type_of(struct_name).clone();
+        let field_info = struct_field_info(&base_ty, field)?;
+        let bf = field_info.bitfield?;
+        if bf.bit_offset + bf.bit_width > 8 {
+            return None;
+        }
+        let LocalLocation::Stack(struct_off) = self.locals.location_of(struct_name)
+        else {
+            return None;
+        };
+        let byte_off =
+            struct_off + i16::try_from(field_info.offset).expect("field offset fits");
+        Some(BitfieldRef {
+            addr: bp_addr(byte_off),
+            bit_offset: bf.bit_offset,
+            bit_width: bf.bit_width,
+        })
+    }
+
+    /// Emit `mov <low>, byte ptr <addr>; [shift]; and <full>, mask`
+    /// to materialize a within-byte bitfield value into the
+    /// destination register. The shift is omitted when the field
+    /// sits at the LSB; uses single-bit `shr <full>, 1` for shifts
+    /// of 1–2 (each is 2 bytes), or `mov cl, K; shr <full>, cl`
+    /// (5 bytes) for K ≥ 3 — the byte-count crossover.
+    fn emit_bitfield_read_to_reg(
+        &mut self,
+        bf: &BitfieldRef,
+        full_reg: &str,
+        low_reg: &str,
+    ) {
+        let _ = write!(
+            self.out,
+            "\tmov\t{low_reg},byte ptr {}\r\n",
+            bf.addr,
+        );
+        if bf.bit_offset >= 3 {
+            let _ = write!(self.out, "\tmov\tcl,{}\r\n", bf.bit_offset);
+            let _ = write!(self.out, "\tshr\t{full_reg},cl\r\n");
+        } else {
+            for _ in 0..bf.bit_offset {
+                let _ = write!(self.out, "\tshr\t{full_reg},1\r\n");
+            }
+        }
+        let mask: u16 = (1u16 << bf.bit_width).wrapping_sub(1);
+        let _ = write!(self.out, "\tand\t{full_reg},{mask}\r\n");
+    }
+
+    /// When `e` is a left-associative chain of `BinOp(Add|Sub|…)`
+    /// over within-byte bitfield reads, emit the canonical BCC
+    /// sequence — first operand materialized into AX, each
+    /// subsequent operand into DX, with `<op> ax, dx` folding it
+    /// into the accumulator. Returns `Some(())` if the chain was
+    /// emitted; `None` if any operand fails the bitfield-read
+    /// check, in which case the caller falls back to its normal
+    /// path. Fixture 1691.
+    fn try_emit_bitfield_chain_to_ax(&mut self, e: &Expr) -> Option<()> {
+        // Walk the BinOp tree leftward, collecting (op, leaf) pairs.
+        // The deepest leaf is the first operand (loaded into AX);
+        // each subsequent (op, leaf) folds into AX via DX.
+        let mut chain: Vec<(BinOp, BitfieldRef)> = Vec::new();
+        let mut cur = e;
+        let head_bf = loop {
+            match &cur.kind {
+                ExprKind::BinOp { op, left, right } => {
+                    if !matches!(
+                        op,
+                        BinOp::Add | BinOp::Sub | BinOp::BitAnd
+                        | BinOp::BitOr | BinOp::BitXor
+                    ) {
+                        return None;
+                    }
+                    let right_bf = self.resolve_bitfield(right)?;
+                    chain.push((*op, right_bf));
+                    cur = left;
+                }
+                _ => {
+                    let head = self.resolve_bitfield(cur)?;
+                    break head;
+                }
+            }
+        };
+        if chain.is_empty() {
+            return None;
+        }
+        self.emit_bitfield_read_to_reg(&head_bf, "ax", "al");
+        for (op, bf) in chain.into_iter().rev() {
+            self.emit_bitfield_read_to_reg(&bf, "dx", "dl");
+            let mnem = match op {
+                BinOp::Add => "add",
+                BinOp::Sub => "sub",
+                BinOp::BitAnd => "and",
+                BinOp::BitOr => "or",
+                BinOp::BitXor => "xor",
+                _ => unreachable!(),
+            };
+            let _ = write!(self.out, "\t{mnem}\tax,dx\r\n");
+        }
+        Some(())
+    }
+
     /// Emit code that leaves the value of `e` in AX.
     fn emit_expr_to_ax(&mut self, e: &Expr) {
         if let Some(v) = try_const_eval(e) {
@@ -16557,6 +16687,22 @@ impl<'a> FunctionEmitter<'a> {
             } else {
                 let _ = write!(self.out, "\tmov\tax,{v16}\r\n");
             }
+            return;
+        }
+        // Bitfield BinOp chain: when a left-associative chain of
+        // BinOp(Add|Sub|...) bottoms out at bitfield reads on both
+        // sides, emit the canonical BCC sequence — first operand
+        // materialized into AX via `mov al,…; shr;…; and ax,…`,
+        // each subsequent operand into DX the same way, with
+        // `<op> ax, dx` folding them in. Falls through if any
+        // operand isn't a within-byte bitfield read. Fixture 1691.
+        if let Some(()) = self.try_emit_bitfield_chain_to_ax(e) {
+            return;
+        }
+        // Single bitfield read into AX. Catches `return s.<bf>`
+        // and similar isolated rvalue contexts. Fixture 1691.
+        if let Some(bf) = self.resolve_bitfield(e) {
+            self.emit_bitfield_read_to_reg(&bf, "ax", "al");
             return;
         }
         // `*(*pp)++` peephole: a Deref of a postfix ++ of a Deref of
