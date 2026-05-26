@@ -4846,6 +4846,17 @@ impl<'a> FunctionEmitter<'a> {
                 // word ptr <m>` directly. Fixture 589 (`f(a[1])`).
                 let _ = write!(self.out, "\t{push_form}\r\n");
                 total_bytes += 2;
+            } else if let ExprKind::Comma { left, right } = &arg.kind
+                && let Some(push_form) = self.try_direct_arg_push(right, &arg_ty)
+            {
+                // Comma-arg: emit the LHS for side effects (typically
+                // an assignment), then push the simple RHS directly.
+                // Fixture 2315 (`sum2((x = 10, x), (x = 20, x))` for
+                // x in SI → `mov si, 10; push si; mov si, 20; push
+                // si`).
+                self.emit_expr_discard(left);
+                let _ = write!(self.out, "\t{push_form}\r\n");
+                total_bytes += 2;
             } else if !arg_ty.is_char_like()
                 && let ExprKind::BinOp { op: BinOp::Mod, .. } = &arg.kind
             {
