@@ -15063,15 +15063,47 @@ impl<'a> FunctionEmitter<'a> {
             return;
         }
         // Chain path: same prefix as the read side (fixtures 194 /
-        // 196), then a `mov <width> ptr [bx],<imm>` store. Only
-        // constant RHS is fixtured today.
-        let Some(v) = try_const_eval(value) else {
-            panic!("non-constant rhs in chained `*p = v` not yet supported (no fixture)");
-        };
+        // 196), then a `mov <width> ptr [bx], <imm|reg>` store.
+        // Constant-rhs is the original shape; the non-constant
+        // shape evaluates RHS into AX/AL first, then chains to BX,
+        // then stores AX through [bx]. Fixture 2680 (\`**pp = v\`).
+        let final_ty_known = self.peek_chain_leaf_ty(base_name, depth);
+        if let Some(v) = try_const_eval(value) {
+            let final_ty = self.emit_chain_to_bx(base_name, depth);
+            let width = ptr_width(&final_ty);
+            let v_masked = if final_ty.is_char_like() { v & 0xFF } else { v & 0xFFFF };
+            let _ = write!(self.out, "\tmov\t{width} ptr [bx],{v_masked}\r\n");
+            return;
+        }
+        let _ = final_ty_known;
+        // BCC emits the chain-to-BX sequence first, then loads
+        // value into AX, then stores AX through [bx]. The chain
+        // produces only BX so the value load doesn't clobber it.
+        // Fixture 2680.
         let final_ty = self.emit_chain_to_bx(base_name, depth);
+        self.emit_expr_to_ax(value);
         let width = ptr_width(&final_ty);
-        let v_masked = if final_ty.is_char_like() { v & 0xFF } else { v & 0xFFFF };
-        let _ = write!(self.out, "\tmov\t{width} ptr [bx],{v_masked}\r\n");
+        let reg_name = if final_ty.is_char_like() { "al" } else { "ax" };
+        let _ = write!(self.out, "\tmov\t{width} ptr [bx],{reg_name}\r\n");
+    }
+
+    /// Inspect the chain root's type without emitting anything. Used
+    /// to decide between constant-immediate vs AX-routed stores before
+    /// committing to the chain-to-BX emit sequence.
+    fn peek_chain_leaf_ty(&self, base_name: &str, depth: u32) -> Type {
+        let mut ty = if self.globals.type_of(base_name).is_some() {
+            self.globals.type_of(base_name).cloned().unwrap()
+        } else {
+            self.locals.type_of(base_name).clone()
+        };
+        for _ in 0..=depth {
+            if let Some(p) = ty.pointee() {
+                ty = p.clone();
+            } else {
+                break;
+            }
+        }
+        ty
     }
 
     /// `*<target> <op>= <value>;` — read-modify-write through a
