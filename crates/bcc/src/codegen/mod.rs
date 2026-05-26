@@ -6451,14 +6451,31 @@ impl<'a> FunctionEmitter<'a> {
                     false
                 }
             }
+            // Arithmetic between float-typed operands stays
+            // float-typed; classified by either side (C's "usual
+            // arithmetic conversions" promote int-with-float to
+            // float, so a single float side suffices). Comparison
+            // results (`<`, `==`, etc.) are int, so they fall
+            // through to `false`.
+            ExprKind::BinOp { op, left, right } if matches!(
+                op,
+                BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div
+            ) => {
+                self.operand_is_float_like(left) || self.operand_is_float_like(right)
+            }
             _ => false,
         }
     }
 
-    /// Push a float-typed expression onto the FPU stack. Mirrors
-    /// `emit_init_local`'s constant-pool path for literals; for a
-    /// named local or global, picks `dword`/`qword` width from the
-    /// static type.
+    /// Push a float-typed expression onto the FPU stack. Handles
+    /// literals (pooled in `s@`), named locals/globals (loaded via
+    /// `fld dword/qword ptr ...`), and left-associative binary
+    /// arithmetic (`a + b + c`, `a * b - c`). Each BinOp arm walks
+    /// the left subtree onto the stack and then applies the
+    /// arithmetic with the right operand as a memory operand —
+    /// matches BCC's pattern of using the memory-form FPU ops
+    /// rather than pushing both sides and using register-stack
+    /// forms.
     fn emit_float_load_to_fpu(&mut self, e: &Expr) {
         match &e.kind {
             ExprKind::FloatLit(bits) => {
@@ -6504,7 +6521,71 @@ impl<'a> FunctionEmitter<'a> {
                     );
                 }
             }
+            ExprKind::BinOp { op, left, right } => {
+                // Left subexpression first onto the FPU stack, then
+                // the arithmetic op with the right side as a memory
+                // operand. Left-associative chains (`a + b + c`) walk
+                // naturally: load a, fadd b (now top = a+b), fadd c.
+                self.emit_float_load_to_fpu(left);
+                let mnem = match op {
+                    BinOp::Add => "fadd",
+                    BinOp::Sub => "fsub",
+                    BinOp::Mul => "fmul",
+                    BinOp::Div => "fdiv",
+                    other => panic!("float BinOp {other:?} not supported yet"),
+                };
+                self.emit_float_arith_mem(mnem, right);
+            }
+            ExprKind::Cast { ty: cast_ty, operand } => {
+                // Float↔float casts (`(float)d`, `(double)f`) are
+                // no-ops at the FPU-stack level: the register stack
+                // carries 80-bit extended precision regardless of
+                // the operand-width prefix, so narrowing happens
+                // when the value is finally stored back to memory
+                // via `fstp dword/qword`. Just evaluate the operand.
+                if cast_ty.is_float_like() && self.operand_is_float_like(operand) {
+                    self.emit_float_load_to_fpu(operand);
+                    return;
+                }
+                panic!("FPU cast from {:?} to {:?} not supported yet", operand.kind, cast_ty);
+            }
             _ => panic!("FPU load not yet supported for {:?}", e.kind),
+        }
+    }
+
+    /// Emit `<mnem> <dword|qword> ptr <operand>` where `operand` is a
+    /// memory-resident float-typed expression — currently a named
+    /// local or global. The width prefix matches the operand's static
+    /// type; the family opcode tasm encodes (D8 for dword, DC for
+    /// qword) and the ModR/M reg field follow from the mnemonic.
+    fn emit_float_arith_mem(&mut self, mnem: &str, operand: &Expr) {
+        match &operand.kind {
+            ExprKind::Ident(name) => {
+                let ty = if self.locals.has(name) {
+                    self.locals.type_of(name).clone()
+                } else if let Some(gty) = self.globals.type_of(name) {
+                    gty.clone()
+                } else {
+                    panic!("unknown name in FPU arithmetic operand: {name}");
+                };
+                let width = if matches!(ty, Type::Float) { "dword" } else { "qword" };
+                if self.locals.has(name) {
+                    let LocalLocation::Stack(off) = self.locals.location_of(name) else {
+                        panic!("float local must live on the stack: {name}")
+                    };
+                    let _ = write!(
+                        self.out,
+                        "\t{mnem}\t{width} ptr {}\r\n",
+                        bp_addr(off),
+                    );
+                } else {
+                    let _ = write!(
+                        self.out,
+                        "\t{mnem}\t{width} ptr DGROUP:_{name}\r\n",
+                    );
+                }
+            }
+            _ => panic!("FPU memory-arith operand shape not supported: {:?}", operand.kind),
         }
     }
 
@@ -6520,42 +6601,45 @@ impl<'a> FunctionEmitter<'a> {
         if matches!(ty, Type::Float | Type::Double)
             && let LocalLocation::Stack(stack_off) = loc
         {
-            let (pool_off, load_width) = match (&init.kind, ty) {
+            // Literal initializers get a width-narrowing path: BCC
+            // pools a `double = <float-representable>` constant as
+            // a 32-bit float and relies on the FPU's 80-bit
+            // promotion + truncating `fstp qword` to reconstruct
+            // the original double bits (fixture 1672).
+            let pool_load = match (&init.kind, ty) {
                 (ExprKind::FloatLit(bits), _) => {
-                    (self.strings.intern_float(*bits), "dword")
+                    Some((self.strings.intern_float(*bits), "dword"))
                 }
                 (ExprKind::DoubleLit(bits), Type::Float) => {
-                    // `float f = 3.0;` — narrow double constant to
-                    // 32-bit float for the pool (matches BCC's
-                    // load-as-dword pattern for double-typed targets).
                     let f = f64::from_bits(*bits) as f32;
-                    (self.strings.intern_float(f.to_bits()), "dword")
+                    Some((self.strings.intern_float(f.to_bits()), "dword"))
                 }
                 (ExprKind::DoubleLit(bits), Type::Double) => {
-                    // Narrow to a 32-bit float when the value is
-                    // exactly representable; otherwise pool full 64
-                    // bits. BCC takes the narrowing path even for
-                    // double-typed locals (fixture 1672) when the
-                    // round-trip is lossless.
                     let d = f64::from_bits(*bits);
                     let f = d as f32;
                     if f64::from(f).to_bits() == *bits {
-                        (self.strings.intern_float(f.to_bits()), "dword")
+                        Some((self.strings.intern_float(f.to_bits()), "dword"))
                     } else {
-                        (self.strings.intern_double(*bits), "qword")
+                        Some((self.strings.intern_double(*bits), "qword"))
                     }
                 }
-                _ => {
-                    panic!("non-literal float/double initializer not supported yet")
-                }
+                _ => None,
             };
-            let store_width = if matches!(ty, Type::Float) { "dword" } else { "qword" };
-            let src = if pool_off == 0 {
-                "DGROUP:s@".to_owned()
+            if let Some((pool_off, load_width)) = pool_load {
+                let src = if pool_off == 0 {
+                    "DGROUP:s@".to_owned()
+                } else {
+                    format!("DGROUP:s@+{pool_off}")
+                };
+                let _ = write!(self.out, "\tfld\t{load_width} ptr {src}\r\n");
             } else {
-                format!("DGROUP:s@+{pool_off}")
-            };
-            let _ = write!(self.out, "\tfld\t{load_width} ptr {src}\r\n");
+                // Non-literal initializer (BinOp, Ident, etc.) —
+                // route through the FPU expression walker. The
+                // result lands on the FPU stack top; the trailing
+                // `fstp` writes it back to the local.
+                self.emit_float_load_to_fpu(init);
+            }
+            let store_width = if matches!(ty, Type::Float) { "dword" } else { "qword" };
             let _ = write!(
                 self.out,
                 "\tfstp\t{store_width} ptr {}\r\n",

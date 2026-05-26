@@ -3,8 +3,8 @@
 //! than a real grammar.
 
 use crate::ir::{
-    AsmError, AsmResult, Group, Instr, JmpCond, Module, Reg16, Reg8, SegAlign, SegCombine,
-    SegItem, Segment, SegReg,
+    AsmError, AsmResult, FpuArithOp, FpuWidth, Group, Instr, JmpCond, Module, Reg16, Reg8,
+    SegAlign, SegCombine, SegItem, Segment, SegReg,
 };
 use crate::lex::{tokenize, Line};
 
@@ -847,6 +847,10 @@ fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
         "ret" => Ok(Instr::Ret),
         "fld" => parse_fld(rest, line.line_no),
         "fstp" => parse_fstp(rest, line.line_no),
+        "fadd" => parse_fpu_arith(rest, FpuArithOp::Add, "fadd", line.line_no),
+        "fsub" => parse_fpu_arith(rest, FpuArithOp::Sub, "fsub", line.line_no),
+        "fmul" => parse_fpu_arith(rest, FpuArithOp::Mul, "fmul", line.line_no),
+        "fdiv" => parse_fpu_arith(rest, FpuArithOp::Div, "fdiv", line.line_no),
         _ => Err(AsmError::new(
             line.line_no,
             format!("instruction `{kw}` not yet supported (operands {rest:?})"),
@@ -3856,6 +3860,30 @@ fn parse_fstp(rest: &str, line_no: usize) -> AsmResult<Instr> {
     Err(AsmError::new(
         line_no,
         format!("fstp: unsupported operand form `{rest}`"),
+    ))
+}
+
+/// `<fadd|fsub|fmul|fdiv> <dword|qword> ptr [bp+disp]` — 8087
+/// arithmetic between the FPU top and a stack-resident operand.
+/// Width and op are picked by the caller (the dispatch in
+/// `parse_instr`); this helper just consumes the operand. The
+/// no-operand register forms (`fsub` alone = `fsubp st(1),st`)
+/// land somewhere else.
+fn parse_fpu_arith(
+    rest: &str,
+    op: FpuArithOp,
+    mnemonic: &str,
+    line_no: usize,
+) -> AsmResult<Instr> {
+    if let Some(offset) = parse_dword_bp_relative(rest) {
+        return Ok(Instr::FpuArithBpRel { op, width: FpuWidth::Dword, offset });
+    }
+    if let Some(offset) = parse_qword_bp_relative(rest) {
+        return Ok(Instr::FpuArithBpRel { op, width: FpuWidth::Qword, offset });
+    }
+    Err(AsmError::new(
+        line_no,
+        format!("{mnemonic}: unsupported operand form `{rest}`"),
     ))
 }
 

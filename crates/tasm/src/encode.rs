@@ -600,7 +600,8 @@ fn instr_size(instr: &Instr) -> usize {
         Instr::FldDwordBpRel { offset }
         | Instr::FstpDwordBpRel { offset }
         | Instr::FldQwordBpRel { offset }
-        | Instr::FstpQwordBpRel { offset } => 2 + bp_rel_modrm_size(*offset),
+        | Instr::FstpQwordBpRel { offset }
+        | Instr::FpuArithBpRel { offset, .. } => 2 + bp_rel_modrm_size(*offset),
         Instr::FldDwordGroupSym { .. } | Instr::FldQwordGroupSym { .. } => 5,
     }
 }
@@ -3053,6 +3054,12 @@ fn emit_instr(
                 &[0x9B, 0xDD, 0x06], group, symbol, *offset,
                 symbols, group_idx, extern_idx, out, fixups,
             )?;
+        }
+        Instr::FpuArithBpRel { op, width, offset } => {
+            push_fidrqq_fixup(out, extern_idx, fixups)?;
+            out.push(0x9B);
+            out.push(width.arith_family());
+            emit_bp_rel_modrm(op.reg_code(), *offset, out);
         }
     }
     Ok(())

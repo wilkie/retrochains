@@ -247,7 +247,21 @@ fn emit_global_decl(out: &mut Vec<u8>, name: &str, ty: &crate::ast::Type) {
             _ => t.size_bytes(),
         }
     }
-    let width = if leaf_size(ty) >= 2 { "word" } else { "byte" };
+    fn leaf_type(t: &Type) -> &Type {
+        match t {
+            Type::Array { elem, .. } => leaf_type(elem),
+            _ => t,
+        }
+    }
+    // Float/double leaves use width keywords matching their FPU
+    // operand prefix: `dword` for single, `qword` for double.
+    // Fixture 1680 (`double g = 3.14;` → `_g label qword`).
+    let width = match leaf_type(ty) {
+        Type::Float => "dword",
+        Type::Double => "qword",
+        _ if leaf_size(ty) >= 2 => "word",
+        _ => "byte",
+    };
     let _ = write!(out, "_{name}\tlabel\t{width}\r\n");
 }
 
@@ -380,6 +394,34 @@ fn emit_scalar_global_bytes(
     ty: &crate::ast::Type,
     init: &crate::ast::Expr,
 ) {
+    use crate::ast::{ExprKind, Type};
+    // Float/double globals use the IEEE 754 bits directly (the
+    // FPU has no notion of "integer immediate", so we don't go
+    // through `fold_const_global`). A `double = <float-representable>`
+    // constant still pools full 8 bytes here — global initializers
+    // are linker-resolved and don't get the FPU-promotion trick
+    // that on-stack inits use.
+    if let (ExprKind::FloatLit(bits), Type::Float) = (&init.kind, ty) {
+        for &b in bits.to_le_bytes().iter() {
+            let _ = write!(out, "\tdb\t{b}\r\n");
+        }
+        return;
+    }
+    if matches!(ty, Type::Double) {
+        let bits: u64 = match &init.kind {
+            ExprKind::DoubleLit(b) => *b,
+            ExprKind::FloatLit(b) => {
+                // `double g = 3.0f;` — widen single to double for
+                // the in-memory image.
+                (f32::from_bits(*b) as f64).to_bits()
+            }
+            _ => panic!("non-literal double global initializer"),
+        };
+        for &b in bits.to_le_bytes().iter() {
+            let _ = write!(out, "\tdb\t{b}\r\n");
+        }
+        return;
+    }
     let v = codegen::fold_const_global(init).unwrap_or_else(|| {
         panic!("non-constant initializer at file scope (no fixture yet supports this)")
     });

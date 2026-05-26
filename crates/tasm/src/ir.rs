@@ -1976,6 +1976,59 @@ pub enum Instr {
     /// from a data-segment address. Encoding: `DD 06 lo hi` + same
     /// FIXUPP shape as `FldDwordGroupSym`. Used by global doubles.
     FldQwordGroupSym { group: String, symbol: String, offset: i16 },
+    /// `<fadd|fsub|fmul|fdiv> <dword|qword> ptr [bp+<offset>]` — 8087
+    /// arithmetic between the FPU top and a stack-resident operand.
+    /// Family opcode picks the width (D8 for dword/single, DC for
+    /// qword/double); the ModR/M reg field selects the operation
+    /// (0 = add, 1 = mul, 4 = sub, 6 = div). The full encoding is
+    /// `9B [D8|DC] <modrm /op [bp+disp]>` — fwait prefix + family
+    /// byte + bp-relative ModR/M.
+    FpuArithBpRel { op: FpuArithOp, width: FpuWidth, offset: i16 },
+}
+
+/// Arithmetic operation in the 8087 ModR/M reg field. See the
+/// `FpuArithBpRel` variant in [`Instr`] for the encoding shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FpuArithOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+}
+
+impl FpuArithOp {
+    /// ModR/M reg-field code (the `/0`, `/1`, `/4`, `/6` selectors
+    /// in the 8087 opcode tables).
+    #[must_use]
+    pub fn reg_code(self) -> u8 {
+        match self {
+            Self::Add => 0,
+            Self::Mul => 1,
+            Self::Sub => 4,
+            Self::Div => 6,
+        }
+    }
+}
+
+/// Width of an FPU memory operand: `dword` (32-bit float) vs
+/// `qword` (64-bit double). Picks the family opcode for arithmetic
+/// and the operand-prefix string for parsing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FpuWidth {
+    Dword,
+    Qword,
+}
+
+impl FpuWidth {
+    /// Family opcode for arithmetic with this operand width — 0xD8
+    /// for dword (single), 0xDC for qword (double).
+    #[must_use]
+    pub fn arith_family(self) -> u8 {
+        match self {
+            Self::Dword => 0xD8,
+            Self::Qword => 0xDC,
+        }
+    }
 }
 
 /// 8086 16-bit general-purpose registers. The byte encoding is the
