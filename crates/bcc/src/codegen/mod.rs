@@ -16940,7 +16940,34 @@ impl<'a> FunctionEmitter<'a> {
         // the head is any other expression (fixture 2105's
         // `(int)f1 * 100` mul as the seed before the trailing
         // `+ (int)fl.val`).
-        if let Some(head_bf) = self.resolve_bitfield(cur) {
+        let head_bf = self.resolve_bitfield(cur);
+        // Order-reversal heuristic: when the head is a SIGNED
+        // bitfield and the chain's lone tail term is an UNSIGNED
+        // bitfield with a commutative op, BCC computes the
+        // UNSIGNED side first into AX, spills it via push, then
+        // the SIGNED side into AX, pops the saved value into DX
+        // and folds. The result is identical to the natural-order
+        // emission, but the byte sequence matches the captured
+        // fixture (2300). Today we only fire this for `Add` —
+        // other commutative ops haven't been fixture-tested.
+        if let (Some(head), 1) = (head_bf.as_ref(), chain.len())
+            && head.signed
+            && !chain[0].1.signed
+            && matches!(chain[0].0, BinOp::Add)
+        {
+            let (op, bf) = chain.into_iter().next().expect("len==1");
+            self.emit_bitfield_read_to_reg(&bf, "ax", "al");
+            self.out.extend_from_slice(b"\tpush\tax\r\n");
+            self.emit_bitfield_read_to_reg(head, "ax", "al");
+            self.out.extend_from_slice(b"\tpop\tdx\r\n");
+            let mnem = match op {
+                BinOp::Add => "add",
+                _ => unreachable!(),
+            };
+            let _ = write!(self.out, "\t{mnem}\tax,dx\r\n");
+            return Some(());
+        }
+        if let Some(head_bf) = head_bf {
             self.emit_bitfield_read_to_reg(&head_bf, "ax", "al");
         } else {
             self.emit_expr_to_ax(cur);
@@ -17514,13 +17541,24 @@ impl<'a> FunctionEmitter<'a> {
                         } else {
                             false
                         };
-                    let rhs_clobbers_ax = matches!(right.kind, ExprKind::Call { .. })
-                        || self.expr_is_char_load(right)
-                        || (matches!(right.kind, ExprKind::Cast { .. })
-                            && !rhs_is_int_cast_of_int_or_long)
-                        || matches!(right.kind, ExprKind::Ternary { .. })
-                        || (matches!(right.kind, ExprKind::BinOp { .. })
-                            && try_const_eval(right).is_none());
+                    // A right operand that folds to a constant
+                    // (literal, or any cast wrapping a literal —
+                    // e.g. `(int)sizeof(struct Z)` resolves to a
+                    // plain immediate) never clobbers AX. Without
+                    // this exemption the Cast-wraps-constant case
+                    // takes the push/pop route and misses the
+                    // `+1/+2` peephole. Fixture 2302
+                    // (`<expr> + (int)sizeof(struct Z)` → `inc ax;
+                    // inc ax` rather than push/mov/pop/add).
+                    let rhs_is_constant = try_const_eval(right).is_some();
+                    let rhs_clobbers_ax = !rhs_is_constant
+                        && (matches!(right.kind, ExprKind::Call { .. })
+                            || self.expr_is_char_load(right)
+                            || (matches!(right.kind, ExprKind::Cast { .. })
+                                && !rhs_is_int_cast_of_int_or_long)
+                            || matches!(right.kind, ExprKind::Ternary { .. })
+                            || (matches!(right.kind, ExprKind::BinOp { .. })
+                                && try_const_eval(right).is_none()));
                     // Callee-preserved register peephole: when the
                     // left operand is a bare ident that lives in
                     // SI or DI (BCC's int register pool sites that
