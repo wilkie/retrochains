@@ -7422,6 +7422,29 @@ impl<'a> FunctionEmitter<'a> {
                     );
                     return;
                 }
+                // `T *p = &arr[K];` where arr is a global array —
+                // direct immediate-to-memory store with the element
+                // offset folded into the symbol reference. Saves the
+                // AX round-trip from the generic path. Fixture 2269.
+                if ty.pointee().is_some()
+                    && let ExprKind::AddressOfArrayElem { array, byte_offset } = &init.kind
+                    && self.globals.contains(array)
+                {
+                    if *byte_offset == 0 {
+                        let _ = write!(
+                            self.out,
+                            "\tmov\tword ptr {},offset DGROUP:_{array}\r\n",
+                            bp_addr(off),
+                        );
+                    } else {
+                        let _ = write!(
+                            self.out,
+                            "\tmov\tword ptr {},offset DGROUP:_{array}+{byte_offset}\r\n",
+                            bp_addr(off),
+                        );
+                    }
+                    return;
+                }
                 // Address-of-global init: `int *p = &x;` for `x` a
                 // non-array global. Store the symbol's offset
                 // directly. Fixture 1964 (`int *p = &x`).

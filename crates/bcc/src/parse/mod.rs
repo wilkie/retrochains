@@ -2085,6 +2085,12 @@ impl Parser {
             };
             let tail_span = Span::new(tail_name_tok.span.start, tail_name_tok.span.end);
             if is_static {
+                // Static locals act like globals at the codegen level
+                // (file-scope storage, linker-resolved address), so
+                // register the name in global_types as well. This
+                // lets `&<static_arr>[K]` and other globals-table
+                // consumers find it. Fixtures 2241, 2269.
+                self.global_types.insert(tail_name.clone(), tail_ty.clone());
                 self.pending_static_locals.push(Global {
                     name: tail_name.clone(),
                     ty: tail_ty.clone(),
@@ -2122,6 +2128,11 @@ impl Parser {
         let semi = self.expect(&TokenKind::Semicolon)?;
         let span = Span::new(start, semi.span.end);
         if is_static {
+            // Static locals act like globals at the codegen level
+            // (file-scope storage, linker-resolved address), so
+            // register the name in global_types as well. Fixtures
+            // 2241, 2269.
+            self.global_types.insert(name.clone(), ty.clone());
             // The Global owns the initializer expression; the Stmt
             // keeps only the name/type/span so codegen can fold the
             // source line into the next comment block. Hoisting moves
