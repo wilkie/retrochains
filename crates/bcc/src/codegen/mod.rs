@@ -4869,7 +4869,19 @@ impl<'a> FunctionEmitter<'a> {
                     panic!("non-ident struct-by-value arg not yet supported (no fixture)");
                 };
                 let src_is_global = self.globals.type_of(src_name).is_some();
-                if size == 4 {
+                if size == 2 {
+                    // 2-byte struct (one int field) — just push the
+                    // word. Fixture 3100.
+                    if src_is_global {
+                        let _ = write!(self.out, "\tpush\tword ptr DGROUP:_{src_name}\r\n");
+                    } else {
+                        let LocalLocation::Stack(src_off) = self.locals.location_of(src_name)
+                        else {
+                            panic!("struct local `{src_name}` not stack-resident");
+                        };
+                        let _ = write!(self.out, "\tpush\tword ptr {}\r\n", bp_addr(src_off));
+                    }
+                } else if size == 4 {
                     if src_is_global {
                         let _ = write!(self.out, "\tpush\tword ptr DGROUP:_{src_name}+2\r\n");
                         let _ = write!(self.out, "\tpush\tword ptr DGROUP:_{src_name}\r\n");
