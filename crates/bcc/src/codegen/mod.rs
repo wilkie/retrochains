@@ -297,6 +297,17 @@ impl StringPool {
 /// Format a bp-relative address: negative offsets are written
 /// `[bp-N]`, positives `[bp+N]`. Used by every `word ptr` / `byte ptr`
 /// memory operand a local/param produces.
+/// Look up a struct field's full metadata (including bitfield
+/// info, which `Type::field` discards). Returns `None` if `ty`
+/// isn't a struct or the field name isn't present.
+fn struct_field_info<'a>(ty: &'a Type, name: &str) -> Option<&'a crate::ast::StructField> {
+    if let Type::Struct { fields, .. } = ty {
+        fields.iter().find(|f| f.name == name)
+    } else {
+        None
+    }
+}
+
 /// True iff `e` is a float/double literal whose value is exactly
 /// 1.0. BCC uses the FPU built-in `fld1` for these instead of
 /// pooling the IEEE bytes.
@@ -13084,6 +13095,48 @@ impl<'a> FunctionEmitter<'a> {
         kind: crate::ast::MemberKind,
         value: &Expr,
     ) {
+        // Bitfield write: detect via the struct's StructField metadata.
+        // For now only the `s.<bitfield> = K` shape (Dot, stack-local
+        // struct, constant value, field fits entirely within one byte)
+        // is supported. Emits `and byte ptr <addr>, <preserve>` +
+        // `or byte ptr <addr>, <shifted-value>`. Fixture 1691.
+        if matches!(kind, crate::ast::MemberKind::Dot)
+            && let ExprKind::Ident(struct_name) = &base.kind
+            && self.locals.has(struct_name)
+            && let base_ty = self.locals.type_of(struct_name).clone()
+            && let Some(field_info) = struct_field_info(&base_ty, field)
+            && let Some(bf) = field_info.bitfield
+            && bf.bit_offset + bf.bit_width <= 8
+        {
+            let LocalLocation::Stack(struct_off) = self.locals.location_of(struct_name)
+            else {
+                panic!("bitfield struct local `{struct_name}` not stack-resident");
+            };
+            let byte_off = struct_off
+                + i16::try_from(field_info.offset).expect("field offset fits");
+            let addr = bp_addr(byte_off);
+            let field_mask: u8 = ((1u16 << bf.bit_width) - 1) as u8;
+            let preserve_mask: u8 = !(field_mask << bf.bit_offset);
+            if let Some(v) = try_const_eval(value) {
+                let v_shifted = ((v as u8) & field_mask) << bf.bit_offset;
+                // BCC emits the AND first then the OR; skips the OR
+                // when shifted value is zero (writing 0 needs no
+                // bit-set step).
+                let _ = write!(
+                    self.out,
+                    "\tand\tbyte ptr {addr},{preserve_mask}\r\n",
+                );
+                if v_shifted != 0 {
+                    let _ = write!(
+                        self.out,
+                        "\tor\tbyte ptr {addr},{v_shifted}\r\n",
+                    );
+                }
+                return;
+            }
+            panic!("non-constant bitfield write not yet supported (no fixture)");
+        }
+
         // Dot path: try the lvalue-chain helper. Catches `a.x`,
         // `pts[1].x`, nested `a.b.c`, and global `g.x`.
         let (dest, leaf_ty) = if matches!(kind, crate::ast::MemberKind::Dot)

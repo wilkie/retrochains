@@ -7,8 +7,9 @@
 use std::collections::HashMap;
 
 use crate::ast::{
-    BinOp, Expr, ExprKind, Function, Global, LogicalOp, MemberKind, Param, Stmt, StmtKind,
-    StructField, SwitchCase, TopLevelRef, Type, UnaryOp, Unit, UpdateOp, UpdatePosition,
+    BinOp, BitfieldInfo, Expr, ExprKind, Function, Global, LogicalOp, MemberKind, Param,
+    Stmt, StmtKind, StructField, SwitchCase, TopLevelRef, Type, UnaryOp, Unit, UpdateOp,
+    UpdatePosition,
 };
 use crate::lex::{Span, Token, TokenKind};
 
@@ -719,9 +720,15 @@ impl Parser {
         let mut fields: Vec<StructField> = Vec::new();
         let mut struct_offset: u16 = 0;
         let mut union_max: u16 = 0;
+        // Bitfield packing state: the current 16-bit container's
+        // starting byte offset, and how many of its 16 bits are
+        // already claimed. Reset to None whenever a non-bitfield
+        // field lands or a `: 0` separator forces alignment.
+        let mut bit_container_offset: Option<u16> = None;
+        let mut bits_used_in_container: u8 = 0;
         while !matches!(self.peek().kind, TokenKind::RBrace | TokenKind::Eof) {
             // Each field declaration: <type> <pointer-stars> <name>
-            // ('[' <int> ']')* ;
+            // ('[' <int> ']')* ; — or bitfield: <type> <name> : <width> ;
             let mut ty = self.parse_type()?;
             while matches!(self.peek().kind, TokenKind::Star) {
                 self.bump();
@@ -731,6 +738,65 @@ impl Parser {
             let TokenKind::Ident(name) = name_tok.kind else {
                 return Err(ParseError::NotAnIdent { offset: name_tok.span.start });
             };
+            // Bitfield: `<int-type> <name> : <width>;`. Only ints
+            // (signed/unsigned) carry bitfields. Fixture 1691.
+            if matches!(self.peek().kind, TokenKind::Colon) {
+                self.bump();
+                let width_tok = self.bump();
+                let TokenKind::IntLit(width) = width_tok.kind else {
+                    return Err(ParseError::Unexpected {
+                        expected: "bitfield width (integer literal)".to_owned(),
+                        found: width_tok.kind.describe().to_owned(),
+                        offset: width_tok.span.start,
+                    });
+                };
+                self.expect(&TokenKind::Semicolon)?;
+                let width_u8 = u8::try_from(width).map_err(|_| {
+                    ParseError::Unsupported { offset: width_tok.span.start }
+                })?;
+                // If we have no open container, or the new field
+                // wouldn't fit, start a fresh 16-bit (2-byte)
+                // container at the current struct offset.
+                if bit_container_offset.is_none()
+                    || bits_used_in_container + width_u8 > 16
+                {
+                    bit_container_offset = Some(struct_offset);
+                    bits_used_in_container = 0;
+                    if !is_union {
+                        struct_offset += 2;
+                    }
+                }
+                let cont_off = bit_container_offset.expect("just set");
+                let bit_off_in_container = bits_used_in_container;
+                bits_used_in_container += width_u8;
+                let byte_off_within = bit_off_in_container / 8;
+                let bit_off_within = bit_off_in_container % 8;
+                fields.push(StructField {
+                    name,
+                    ty,
+                    offset: cont_off + u16::from(byte_off_within),
+                    bitfield: Some(BitfieldInfo {
+                        bit_offset: bit_off_within,
+                        bit_width: width_u8,
+                    }),
+                });
+                if is_union {
+                    // A bitfield in a union just claims its width
+                    // against the union's max footprint.
+                    let bytes = width_u8.div_ceil(8) as u16;
+                    if bytes > union_max {
+                        union_max = bytes;
+                    }
+                }
+                continue;
+            }
+            // Closing out any pending bitfield container before a
+            // regular field — the next field starts at the byte
+            // after the container.
+            if bit_container_offset.is_some() {
+                bit_container_offset = None;
+                bits_used_in_container = 0;
+            }
             // Array suffix on the field (`int data[4];` — fixture
             // 496). Multi-dim wraps innermost-first.
             let mut array_lens: Vec<u32> = Vec::new();
@@ -753,7 +819,7 @@ impl Parser {
             self.expect(&TokenKind::Semicolon)?;
             let field_size = ty.size_bytes();
             let offset = if is_union { 0 } else { struct_offset };
-            fields.push(StructField { name, ty, offset });
+            fields.push(StructField { name, ty, offset, bitfield: None });
             if is_union {
                 if field_size > union_max {
                     union_max = field_size;

@@ -323,9 +323,28 @@ pub enum Type {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StructField {
     pub name: String,
+    /// Bitfield metadata, present only for `<type> <name> : <width>;`
+    /// declarations. `None` for normal fields. The `offset` (above)
+    /// is the byte offset of the storage container; `bit_offset`
+    /// counts bits from the LSB of that byte. BCC packs first-
+    /// declared bitfields into the LOWEST bits and grows upward
+    /// (LSB-first / little-endian bit order).
+    pub bitfield: Option<BitfieldInfo>,
     pub ty: Type,
     /// Byte offset of this field within the containing struct.
     pub offset: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BitfieldInfo {
+    /// Bit offset within the storage byte at `offset` (0..=7).
+    /// A bitfield that crosses a byte boundary still records the
+    /// start position here; codegen detects the spill at access
+    /// time by comparing `bit_offset + bit_width` against 8.
+    pub bit_offset: u8,
+    /// Declared width in bits (1..=16 for unsigned int bitfields
+    /// under BCC's small model).
+    pub bit_width: u8,
 }
 
 impl Type {
