@@ -7906,17 +7906,17 @@ impl<'a> FunctionEmitter<'a> {
             let _ = write!(self.out, "\tmov\tword ptr {},ax\r\n", bp_addr(x_off));
             return;
         }
-        // Int/uint global compound shift with constant RHS — unroll
-        // into K `<shl|sar|shr> word ptr DGROUP:_g, 1` instructions
-        // directly on memory. Fixture 539 (`g >>= 2` for int global
-        // → two `sar word ptr [_g], 1`). Same unrolling principle as
-        // the char-register path (fixture 535).
+        // Int/uint global compound shift with constant RHS. K in
+        // 1..=3 unrolls into K `<shl|sar|shr> word ptr DGROUP:_g, 1`
+        // instructions (each 4 bytes); K >= 4 switches to the CL form
+        // `mov cl, K; <shl|sar|shr> word ptr DGROUP:_g, cl` (6 bytes
+        // total — wins at K=4 where unroll cost is 16 bytes). Fixtures
+        // 539 (K=2 unroll), 3374 (K=4 CL form).
         if let Some(gty) = self.globals.type_of(name)
             && matches!(gty, Type::Int | Type::UInt)
             && matches!(op, BinOp::Shl | BinOp::Shr)
             && let Some(k) = try_const_eval(value)
             && k >= 1
-            && k <= 8
         {
             let signed = !gty.is_unsigned();
             let mnem = match op {
@@ -7925,10 +7925,19 @@ impl<'a> FunctionEmitter<'a> {
                 BinOp::Shr => "shr",
                 _ => unreachable!(),
             };
-            for _ in 0..k {
+            if k <= 3 {
+                for _ in 0..k {
+                    let _ = write!(
+                        self.out,
+                        "\t{mnem}\tword ptr DGROUP:_{name},1\r\n",
+                    );
+                }
+            } else {
+                let k8 = (k & 0xFF) as u8;
+                let _ = write!(self.out, "\tmov\tcl,{k8}\r\n");
                 let _ = write!(
                     self.out,
-                    "\t{mnem}\tword ptr DGROUP:_{name},1\r\n",
+                    "\t{mnem}\tword ptr DGROUP:_{name},cl\r\n",
                 );
             }
             return;
