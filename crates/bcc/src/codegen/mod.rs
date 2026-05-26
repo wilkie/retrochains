@@ -4007,6 +4007,65 @@ impl<'a> FunctionEmitter<'a> {
         Some((n, new_off, field_ty))
     }
 
+    /// Resolve a `<ptr>-><f1>.<f2>[.<f3>...]` chain into the
+    /// (pointer-ident, accumulated-byte-offset, leaf-field-type)
+    /// triple. The outermost member is the trailing `Dot` (the
+    /// `field` argument); the chain underneath must eventually
+    /// bottom out at a `Member { kind: Arrow, base: Ident(...) }`
+    /// against a named pointer in scope (locals or globals). Any
+    /// intermediate `Dot` members add their field offsets to the
+    /// running total. Returns `None` if the shape doesn't match.
+    /// Used by `emit_member_assign` to handle nested struct writes
+    /// through a pointer (fixture 3693).
+    fn try_arrow_chain_addr(
+        &self,
+        base: &Expr,
+        field: &str,
+    ) -> Option<(String, i32, Type)> {
+        // Walk down: each Dot wrapper records its field, then we
+        // recurse into its own base. Stop when we hit an Arrow on
+        // an Ident — that's the runtime pointer load site.
+        let mut dot_fields: Vec<&str> = vec![field];
+        let mut cur = base;
+        loop {
+            match &cur.kind {
+                ExprKind::Member { base: inner, field: f, kind } => match kind {
+                    crate::ast::MemberKind::Dot => {
+                        dot_fields.push(f.as_str());
+                        cur = inner;
+                    }
+                    crate::ast::MemberKind::Arrow => {
+                        let ExprKind::Ident(ptr_name) = &inner.kind else {
+                            return None;
+                        };
+                        let ptr_ty = if self.locals.has(ptr_name) {
+                            self.locals.type_of(ptr_name).clone()
+                        } else if let Some(gty) = self.globals.type_of(ptr_name) {
+                            gty.clone()
+                        } else {
+                            return None;
+                        };
+                        let pointee = ptr_ty.pointee()?.clone();
+                        let (arrow_off, arrow_ty) = pointee.field(f)?;
+                        let mut total: i32 = i32::from(arrow_off);
+                        let mut ty = arrow_ty;
+                        // Apply each accumulated Dot (innermost first
+                        // — the chain we built has the outer-most
+                        // `field` at index 0 and the innermost Dot at
+                        // the end, so iterate in reverse).
+                        for df in dot_fields.iter().rev() {
+                            let (off, next_ty) = ty.field(df)?;
+                            total = total.checked_add(i32::from(off))?;
+                            ty = next_ty;
+                        }
+                        return Some((ptr_name.clone(), total, ty));
+                    }
+                },
+                _ => return None,
+            }
+        }
+    }
+
     /// Emit the post-byte-load widening step needed to promote
     /// AL → AX. Signed char promotes via `cbw` (1 byte, `98`).
     /// Unsigned char promotes via `mov ah, 0` (2 bytes, `B4 00`)
@@ -13127,6 +13186,40 @@ impl<'a> FunctionEmitter<'a> {
                 let _ = write!(self.out, "\tmov\tbyte ptr {bx_disp},al\r\n");
             } else {
                 let _ = write!(self.out, "\tmov\tword ptr {bx_disp},ax\r\n");
+            }
+            return;
+        } else if matches!(kind, crate::ast::MemberKind::Dot)
+            && let Some((ptr_name, total_off, leaf_ty)) =
+                self.try_arrow_chain_addr(base, field)
+        {
+            // `<ptr>-><arrow_field>.<dot_field>[.<more>...] = <value>`
+            // — a Dot chain rooted at a Member-Arrow through a named
+            // pointer. The arrow's runtime load happens once; the
+            // accumulated field offsets become a single ModR/M
+            // displacement off the pointer register. Fixture 3693
+            // (`o->i.x = v` for `struct Outer { struct Inner i; }`).
+            let LocalLocation::Reg(reg) = self.locals.location_of(&ptr_name) else {
+                panic!(
+                    "stack-resident pointer in `p->i.x = …` not yet supported (no fixture)"
+                );
+            };
+            let r = reg.name();
+            let addr = if total_off == 0 {
+                format!("[{r}]")
+            } else {
+                format!("[{r}+{total_off}]")
+            };
+            if let Some(v) = try_const_eval(value) {
+                let width = if leaf_ty.is_char_like() { "byte" } else { "word" };
+                let v_masked = if leaf_ty.is_char_like() { v & 0xFF } else { v & 0xFFFF };
+                let _ = write!(self.out, "\tmov\t{width} ptr {addr},{v_masked}\r\n");
+                return;
+            }
+            self.emit_expr_to_ax(value);
+            if leaf_ty.is_char_like() {
+                let _ = write!(self.out, "\tmov\tbyte ptr {addr},al\r\n");
+            } else {
+                let _ = write!(self.out, "\tmov\tword ptr {addr},ax\r\n");
             }
             return;
         } else {
