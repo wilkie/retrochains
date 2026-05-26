@@ -1104,6 +1104,20 @@ impl Parser {
                 ty = Type::Pointer(Box::new(ty));
                 self.consume_cc_modifiers();
             }
+            // Function-pointer parameter: `<ret> ( * <name> ) ( <params> )`.
+            // Mirrors the local-declaration path — we don't model the
+            // function signature, so the param's type collapses to a
+            // generic near pointer (2 bytes, int-pool-eligible).
+            // Fixture 3671 (`int apply(int (*op)(int, int), int a, int b)`).
+            if matches!(self.peek().kind, TokenKind::LParen) {
+                let (fp_name, fp_ty) = self.parse_func_ptr_declarator(ty.clone())?;
+                params.push(Param { name: fp_name, ty: fp_ty });
+                if matches!(self.peek().kind, TokenKind::Comma) {
+                    self.bump();
+                    continue;
+                }
+                break;
+            }
             // Anonymous parameter — common in prototypes
             // (`int helper(int);`, fixture 506). Synthesize a unique
             // placeholder name; codegen ignores prototype params.
