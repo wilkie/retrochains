@@ -9714,6 +9714,29 @@ impl<'a> FunctionEmitter<'a> {
             }
             return;
         }
+        // `<reg> += (int)<long-lvalue>` — the cast keeps the low half,
+        // which is just a word-sized memory operand at the low addr.
+        // Direct `<mnem> reg, word ptr <lo_addr>` instead of the
+        // load-to-AX + add. Fixture 1969 (`sum += (int)a` with sum
+        // in SI and a a long stack local).
+        if matches!(
+            op,
+            BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor
+        ) && let ExprKind::Cast { ty: cast_ty, operand } = &value.kind
+            && matches!(cast_ty, Type::Int | Type::UInt)
+            && let Some((_hi, lo)) = self.long_lvalue_addr_pair(operand)
+        {
+            let mnem = match op {
+                BinOp::Add => "add",
+                BinOp::Sub => "sub",
+                BinOp::BitAnd => "and",
+                BinOp::BitOr => "or",
+                BinOp::BitXor => "xor",
+                _ => unreachable!(),
+            };
+            let _ = write!(self.out, "\t{mnem}\t{},word ptr {lo}\r\n", reg.name());
+            return;
+        }
         if matches!(
             op,
             BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor
