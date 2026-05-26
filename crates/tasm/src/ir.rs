@@ -1984,6 +1984,15 @@ pub enum Instr {
     /// from a data-segment address. Encoding: `DD 06 lo hi` + same
     /// FIXUPP shape as `FldDwordGroupSym`. Used by global doubles.
     FldQwordGroupSym { group: String, symbol: String, offset: i16 },
+    /// `fstp dword ptr <group>:<sym>[+<offset>]` — 32-bit float store
+    /// to a data-segment address. Encoding: `D9 1E lo hi` + same
+    /// FIXUPP shape as `FldDwordGroupSym`. Used by global float
+    /// assignment.
+    FstpDwordGroupSym { group: String, symbol: String, offset: i16 },
+    /// `fstp qword ptr <group>:<sym>[+<offset>]` — 64-bit double
+    /// store. Encoding: `DD 1E lo hi` + same FIXUPP shape. Used by
+    /// global double assignment. Fixture 1757.
+    FstpQwordGroupSym { group: String, symbol: String, offset: i16 },
     /// `<fadd|fsub|fmul|fdiv> <dword|qword> ptr [bp+<offset>]` — 8087
     /// arithmetic between the FPU top and a stack-resident operand.
     /// Family opcode picks the width (D8 for dword/single, DC for

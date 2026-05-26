@@ -14969,6 +14969,20 @@ impl<'a> FunctionEmitter<'a> {
             .type_of(name)
             .cloned()
             .expect("caller already checked");
+        // Float / double global LHS: evaluate the RHS onto the FPU
+        // stack, then fstp directly into the global's DGROUP
+        // address. Mirrors the stack-local init path's fstp tail.
+        // Fixture 1757.
+        if ty.is_float_like() {
+            self.emit_float_load_to_fpu(value);
+            let width = if matches!(ty, Type::Float) { "dword" } else { "qword" };
+            let _ = write!(
+                self.out,
+                "\tfstp\t{width} ptr DGROUP:_{name}\r\n",
+            );
+            self.pending_fpu_store_fwait = true;
+            return;
+        }
         // `long g = K;` — two word stores, **high word first** then
         // low word (fixture 205). Both `long` and `unsigned long`
         // share the same byte-level emission for arithmetic and
