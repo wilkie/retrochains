@@ -668,9 +668,15 @@ impl Parser {
     /// plain int, which the declarator path handles per-name.
     fn parse_type_name(&mut self) -> Result<Type, ParseError> {
         let mut ty = self.parse_type()?;
+        // CC modifiers (`far`, `near`, `huge`, `pascal`, etc.) sit
+        // between the base type and pointer stars in cast/sizeof
+        // contexts. We don't model the modifier, so just skip.
+        // Fixture 1649 (`(int far *)&x`).
+        self.consume_cc_modifiers();
         while matches!(self.peek().kind, TokenKind::Star) {
             self.bump();
             ty = Type::Pointer(Box::new(ty));
+            self.consume_cc_modifiers();
         }
         Ok(ty)
     }
