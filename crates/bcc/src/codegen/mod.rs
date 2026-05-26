@@ -13806,6 +13806,70 @@ impl<'a> FunctionEmitter<'a> {
         value: &Expr,
         from_postfix: bool,
     ) {
+        // Bitfield compound-assign: read field into AX (masked),
+        // apply the binop with the RHS (typically `inc ax` for ++),
+        // re-mask to clear overflow above bit_width, then AND/OR
+        // the storage to write it back. Fixture 3445 (`f.a++` on
+        // a global struct bitfield).
+        if matches!(kind, crate::ast::MemberKind::Dot)
+            && let ExprKind::Ident(struct_name) = &base.kind
+            && let Some(bf) = self.resolve_bitfield_named(struct_name, field)
+        {
+            let field_mask: u32 = (1u32 << bf.bit_width).wrapping_sub(1);
+            // Load + mask into AX. Same shape as a read but the
+            // existing helper does the right thing — call it for
+            // the masked-but-not-yet-shifted-back value.
+            self.emit_bitfield_read_to_reg(&bf, "ax", "al");
+            // Apply the op. The ++ / -- postfix path always uses
+            // a IntLit(1) RHS; emit a single inc/dec to match
+            // BCC's shape. Other ops fall back to emit_expr_to_ax-
+            // style materialization through DX — no fixture today.
+            let _ = from_postfix; // future: signal pre-vs-post semantics
+            if matches!(op, BinOp::Add | BinOp::Sub) && try_const_eval(value) == Some(1) {
+                if matches!(op, BinOp::Add) {
+                    self.out.extend_from_slice(b"\tinc\tax\r\n");
+                } else {
+                    self.out.extend_from_slice(b"\tdec\tax\r\n");
+                }
+            } else {
+                panic!("bitfield compound-assign op {op:?} not yet supported");
+            }
+            // Re-mask to discard overflow past bit_width.
+            let _ = write!(self.out, "\tand\tax,{field_mask}\r\n");
+            // Shift to bit position.
+            if bf.bit_offset >= 4 {
+                let _ = write!(self.out, "\tmov\tcl,{}\r\n", bf.bit_offset);
+                let _ = write!(self.out, "\tshl\tax,cl\r\n");
+            } else {
+                for _ in 0..bf.bit_offset {
+                    self.out.extend_from_slice(b"\tshl\tax,1\r\n");
+                }
+            }
+            // Clear-and-OR write-back. Same shape as the
+            // non-constant write case in emit_member_assign.
+            let preserve_mask: u32 = match bf.access {
+                BitfieldAccess::Byte =>
+                    (!((field_mask as u8) << bf.bit_offset)) as u32,
+                BitfieldAccess::Word =>
+                    (!((field_mask as u16) << bf.bit_offset)) as u32,
+            };
+            let w = bf.access.ptr();
+            let src_reg = match bf.access {
+                BitfieldAccess::Byte => "al",
+                BitfieldAccess::Word => "ax",
+            };
+            let _ = write!(
+                self.out,
+                "\tand\t{w} ptr {},{preserve_mask}\r\n",
+                bf.addr,
+            );
+            let _ = write!(
+                self.out,
+                "\tor\t{w} ptr {},{src_reg}\r\n",
+                bf.addr,
+            );
+            return;
+        }
         // Long-field path. Resolve the dot/arrow chain to a (lo_addr,
         // hi_addr) pair (struct field at its in-struct offset), then
         // emit the long-compound shape — same skeleton as the long-
