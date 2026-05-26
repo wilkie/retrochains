@@ -97,12 +97,39 @@ impl<'a> Lexer<'a> {
     }
 
     fn skip_whitespace(&mut self) {
-        while let Some(&b) = self.src.get(self.pos) {
+        loop {
+            let Some(&b) = self.src.get(self.pos) else { return };
             if matches!(b, b' ' | b'\t' | b'\r' | b'\n') {
                 self.pos += 1;
-            } else {
-                break;
+                continue;
             }
+            // C comments. The preprocess pass preserves comment
+            // bytes in its output so column offsets stay aligned;
+            // the lexer skips them here. `//` runs to end-of-line;
+            // `/* … */` runs to the closing delimiter. Fixture
+            // 2114 (`// single-line comment`).
+            if b == b'/' && self.src.get(self.pos + 1) == Some(&b'/') {
+                self.pos += 2;
+                while let Some(&c) = self.src.get(self.pos) {
+                    if c == b'\n' {
+                        break;
+                    }
+                    self.pos += 1;
+                }
+                continue;
+            }
+            if b == b'/' && self.src.get(self.pos + 1) == Some(&b'*') {
+                self.pos += 2;
+                while let Some(&c) = self.src.get(self.pos) {
+                    if c == b'*' && self.src.get(self.pos + 1) == Some(&b'/') {
+                        self.pos += 2;
+                        break;
+                    }
+                    self.pos += 1;
+                }
+                continue;
+            }
+            return;
         }
     }
 
