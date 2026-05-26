@@ -18217,6 +18217,51 @@ impl<'a> FunctionEmitter<'a> {
             let _ = write!(self.out, "\tmov\tax,word ptr {lo}\r\n");
             return;
         }
+        // `(int)(<long_lvalue> * <long_lvalue>)` — BCC doesn't fold
+        // the cast through the multiply (`imul lo,lo` would give the
+        // same low 16, but BCC emits the full helper call anyway).
+        // Load both operands into the four-register helper ABI
+        // (CX:BX = a, DX:AX = b), call N_LXMUL@, then AX is the
+        // (int) result. Fixture 2580.
+        if matches!(ty, Type::Int | Type::UInt)
+            && let ExprKind::BinOp { op: BinOp::Mul, left, right } = &operand.kind
+            && let Some((a_hi, a_lo)) = self.long_lvalue_addr_pair(left)
+            && let Some((b_hi, b_lo)) = self.long_lvalue_addr_pair(right)
+        {
+            let _ = write!(self.out, "\tmov\tcx,word ptr {a_hi}\r\n");
+            let _ = write!(self.out, "\tmov\tbx,word ptr {a_lo}\r\n");
+            let _ = write!(self.out, "\tmov\tdx,word ptr {b_hi}\r\n");
+            let _ = write!(self.out, "\tmov\tax,word ptr {b_lo}\r\n");
+            self.out.extend_from_slice(b"\tcall\tnear ptr N_LXMUL@\r\n");
+            self.helpers.insert("N_LXMUL@".to_string());
+            return;
+        }
+        // `(int)(<long_lvalue> / <long_lvalue>)` / `(int)(... % ...)`
+        // — same shape but with the four-word stack-push ABI used by
+        // N_LDIV@ / N_LMOD@ / N_LUDIV@ / N_LUMOD@. AX holds the int
+        // result on return. Fixture 2585.
+        if matches!(ty, Type::Int | Type::UInt)
+            && let ExprKind::BinOp { op, left, right } = &operand.kind
+            && matches!(op, BinOp::Div | BinOp::Mod)
+            && let Some((a_hi, a_lo)) = self.long_lvalue_addr_pair(left)
+            && let Some((b_hi, b_lo)) = self.long_lvalue_addr_pair(right)
+        {
+            let unsigned = self.expr_is_unsigned(left) || self.expr_is_unsigned(right);
+            let helper = match (op, unsigned) {
+                (BinOp::Div, false) => "N_LDIV@",
+                (BinOp::Mod, false) => "N_LMOD@",
+                (BinOp::Div, true)  => "N_LUDIV@",
+                (BinOp::Mod, true)  => "N_LUMOD@",
+                _ => unreachable!(),
+            };
+            let _ = write!(self.out, "\tpush\tword ptr {b_hi}\r\n");
+            let _ = write!(self.out, "\tpush\tword ptr {b_lo}\r\n");
+            let _ = write!(self.out, "\tpush\tword ptr {a_hi}\r\n");
+            let _ = write!(self.out, "\tpush\tword ptr {a_lo}\r\n");
+            let _ = write!(self.out, "\tcall\tnear ptr {helper}\r\n");
+            self.helpers.insert(helper.to_string());
+            return;
+        }
         if ty.is_char_like() {
             // `(char|uchar) <lvalue>` — byte-load the low byte of
             // the source, then widen per the cast type's signedness.
