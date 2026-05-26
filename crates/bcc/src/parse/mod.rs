@@ -2160,8 +2160,12 @@ impl Parser {
                 span,
             });
         }
-        // Compound assigns in for clauses (`i += 2`, `i *= 3`, etc.)
-        // — desugar to `i = i <op> rhs`. Fixtures 1328, 3150, 3156.
+        // Compound assigns in for clauses (`i += 2`, `i *= 3`, etc.).
+        // Distinct AST shape from a plain `i = i + 2` so codegen
+        // can pick the direct register inc/dec peephole instead of
+        // the AX-route assign — BCC emits different bytes for the
+        // two forms even when they're semantically equivalent.
+        // Fixtures 1328, 3150, 3156, 3157, 3161.
         if matches!(self.peek().kind, TokenKind::Ident(_))
             && let Some(op) = match_compound_op(&self.peek_n(1).kind)
         {
@@ -2169,23 +2173,12 @@ impl Parser {
             let TokenKind::Ident(name) = ident_tok.kind else { unreachable!() };
             self.bump(); // compound-op token
             let rhs = self.parse_expr()?;
-            let lhs = Expr {
-                kind: ExprKind::Ident(name.clone()),
-                span: ident_tok.span,
-            };
             let span = Span::new(ident_tok.span.start, rhs.span.end);
-            let binop = Expr {
-                kind: ExprKind::BinOp {
-                    op,
-                    left: Box::new(lhs),
-                    right: Box::new(rhs),
-                },
-                span,
-            };
             return Ok(Expr {
-                kind: ExprKind::AssignExpr {
+                kind: ExprKind::CompoundAssignExpr {
                     target: name,
-                    value: Box::new(binop),
+                    op,
+                    value: Box::new(rhs),
                 },
                 span,
             });

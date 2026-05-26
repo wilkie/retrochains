@@ -926,6 +926,9 @@ impl<'a> FunctionEmitter<'a> {
                 let ty = self.locals.type_of(target).clone();
                 self.emit_assign_local(loc, &ty, value);
             }
+            ExprKind::CompoundAssignExpr { target, op, value } => {
+                self.emit_compound_assign(target, *op, value);
+            }
             ExprKind::Comma { left, right } => {
                 // Both halves of a comma in discard position are
                 // themselves discarded — neither contributes a value.
@@ -17830,6 +17833,34 @@ impl<'a> FunctionEmitter<'a> {
                     }
                 }
             }
+            ExprKind::CompoundAssignExpr { target, op, value } => {
+                // Value-position compound assign: emit the in-place
+                // update via emit_compound_assign, then load the
+                // (now-current) value into AX so the surrounding
+                // expression can consume it. Today only the bare
+                // ident-target case is supported.
+                self.emit_compound_assign(target, *op, value);
+                if self.locals.has(target) {
+                    let loc = self.locals.location_of(target);
+                    match loc {
+                        LocalLocation::Stack(off) => {
+                            let _ = write!(
+                                self.out,
+                                "\tmov\tax,word ptr {}\r\n",
+                                bp_addr(off),
+                            );
+                        }
+                        LocalLocation::Reg(reg) => {
+                            let _ = write!(self.out, "\tmov\tax,{}\r\n", reg.name());
+                        }
+                    }
+                } else {
+                    let _ = write!(
+                        self.out,
+                        "\tmov\tax,word ptr DGROUP:_{target}\r\n",
+                    );
+                }
+            }
             ExprKind::Call { name, args } => {
                 self.emit_call(name, args);
                 // Char-returning callee leaves only AL meaningful;
@@ -18792,7 +18823,7 @@ impl<'a> FunctionEmitter<'a> {
             ExprKind::Logical { .. } => {
                 panic!("`&&`/`||` as right operand of a binary op not yet supported (no fixture)")
             }
-            ExprKind::AssignExpr { .. } => {
+            ExprKind::AssignExpr { .. } | ExprKind::CompoundAssignExpr { .. } => {
                 panic!("assignment expression as right operand not yet supported (no fixture)")
             }
             ExprKind::AddressOf(_) | ExprKind::AddressOfArrayElem { .. } => {

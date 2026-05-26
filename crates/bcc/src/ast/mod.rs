@@ -536,6 +536,13 @@ pub enum ExprKind {
     /// expression form covers `for (i = 0; ...; ...)` init/step
     /// clauses where the assignment appears in expression position.
     AssignExpr { target: String, value: Box<Expr> },
+    /// `name <op>= value` as an expression — the for-clause /
+    /// argument-position compound assignment. Distinct from
+    /// AssignExpr because BCC emits different bytes for
+    /// `i = i + 2` (AX-route assign) vs `i += 2` (direct
+    /// register inc). Statement-level compound assigns go through
+    /// `StmtKind::CompoundAssign` instead. Fixtures 1328, 3150-3161.
+    CompoundAssignExpr { target: String, op: BinOp, value: Box<Expr> },
     /// Direct function call by name.
     Call { name: String, args: Vec<Expr> },
     /// `&<name>` — address-of a named local or parameter. Restricted

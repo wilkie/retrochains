@@ -883,7 +883,8 @@ fn walk_calls_expr(
         ExprKind::Unary { operand, .. } | ExprKind::Deref(operand) => {
             walk_calls_expr(operand, defined, locals, seen, ordered);
         }
-        ExprKind::AssignExpr { value, .. } => {
+        ExprKind::AssignExpr { value, .. }
+        | ExprKind::CompoundAssignExpr { value, .. } => {
             walk_calls_expr(value, defined, locals, seen, ordered)
         }
         ExprKind::ArrayIndex { array, index } => {

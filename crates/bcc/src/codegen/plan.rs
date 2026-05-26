@@ -448,7 +448,8 @@ fn plan_expr_value(e: &Expr, ctx: &mut PlanCtx) {
             plan_expr_condition(left, ctx);
             plan_expr_condition(right, ctx);
         }
-        ExprKind::AssignExpr { value, .. } => {
+        ExprKind::AssignExpr { value, .. }
+        | ExprKind::CompoundAssignExpr { value, .. } => {
             plan_expr_value(value, ctx);
         }
         ExprKind::Call { args, .. } => {

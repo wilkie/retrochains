@@ -910,6 +910,7 @@ fn expr_address_taken(e: &Expr, out: &mut HashSet<String>) {
             expr_address_taken(operand, out);
         }
         ExprKind::AssignExpr { value, .. } => expr_address_taken(value, out),
+        ExprKind::CompoundAssignExpr { value, .. } => expr_address_taken(value, out),
         ExprKind::ArrayIndex { array, index } => {
             expr_address_taken(array, out);
             expr_address_taken(index, out);
@@ -1029,6 +1030,7 @@ fn body_has_int_to_float_cast(function: &Function) -> bool {
             ExprKind::Unary { operand, .. } => expr(operand, float_names),
             ExprKind::Deref(inner) => expr(inner, float_names),
             ExprKind::AssignExpr { value, .. } => expr(value, float_names),
+            ExprKind::CompoundAssignExpr { value, .. } => expr(value, float_names),
             ExprKind::Call { args, .. } => args.iter().any(|a| expr(a, float_names)),
             ExprKind::ArrayIndex { array, index } => {
                 expr(array, float_names) || expr(index, float_names)
@@ -1179,6 +1181,7 @@ fn expr_has_call(e: &Expr) -> bool {
         }
         ExprKind::Unary { operand, .. } => expr_has_call(operand),
         ExprKind::AssignExpr { value, .. } => expr_has_call(value),
+        ExprKind::CompoundAssignExpr { value, .. } => expr_has_call(value),
         ExprKind::Deref(operand) => expr_has_call(operand),
         ExprKind::ArrayIndex { array, index } => {
             expr_has_call(array) || expr_has_call(index)
@@ -1332,6 +1335,7 @@ fn expr_has_div_or_mod(e: &Expr) -> bool {
         ExprKind::Unary { operand, .. } => expr_has_div_or_mod(operand),
         ExprKind::Call { args, .. } => args.iter().any(expr_has_div_or_mod),
         ExprKind::AssignExpr { value, .. } => expr_has_div_or_mod(value),
+        ExprKind::CompoundAssignExpr { value, .. } => expr_has_div_or_mod(value),
         ExprKind::Deref(operand) => expr_has_div_or_mod(operand),
         ExprKind::ArrayIndex { array, index } => {
             expr_has_div_or_mod(array) || expr_has_div_or_mod(index)
@@ -1396,6 +1400,7 @@ fn expr_mentions(name: &str, e: &Expr) -> bool {
         ExprKind::Cast { operand, .. } => expr_mentions(name, operand),
         ExprKind::Deref(operand) => expr_mentions(name, operand),
         ExprKind::AssignExpr { value, .. } => expr_mentions(name, value),
+        ExprKind::CompoundAssignExpr { value, .. } => expr_mentions(name, value),
         ExprKind::Call { args, .. } => args.iter().any(|a| expr_mentions(name, a)),
         ExprKind::ArrayIndex { array, index } => {
             expr_mentions(name, array) || expr_mentions(name, index)
@@ -1504,6 +1509,7 @@ fn expr_has_name_as_subscript(name: &str, e: &Expr) -> bool {
         | ExprKind::Cast { operand, .. }
         | ExprKind::Deref(operand) => expr_has_name_as_subscript(name, operand),
         ExprKind::AssignExpr { value, .. } => expr_has_name_as_subscript(name, value),
+        ExprKind::CompoundAssignExpr { value, .. } => expr_has_name_as_subscript(name, value),
         ExprKind::Call { args, .. } => args.iter().any(|a| expr_has_name_as_subscript(name, a)),
         ExprKind::Member { base, .. } => expr_has_name_as_subscript(name, base),
         ExprKind::Ternary { cond, then_value, else_value } => {
@@ -1639,6 +1645,7 @@ fn expr_indexes_char_array(name: &str, e: &Expr, ca: &HashSet<String>) -> bool {
         | ExprKind::Cast { operand, .. }
         | ExprKind::Deref(operand) => expr_indexes_char_array(name, operand, ca),
         ExprKind::AssignExpr { value, .. } => expr_indexes_char_array(name, value, ca),
+        ExprKind::CompoundAssignExpr { value, .. } => expr_indexes_char_array(name, value, ca),
         ExprKind::Call { args, .. } => args.iter().any(|a| expr_indexes_char_array(name, a, ca)),
         ExprKind::Member { base, .. } => expr_indexes_char_array(name, base, ca),
         ExprKind::Ternary { cond, then_value, else_value } => {
@@ -1753,6 +1760,7 @@ fn expr_has_char_array_index(name: &str, e: &Expr, char_arrays: &HashSet<String>
         | ExprKind::Cast { operand, .. }
         | ExprKind::Deref(operand) => expr_has_char_array_index(name, operand, char_arrays),
         ExprKind::AssignExpr { value, .. } => expr_has_char_array_index(name, value, char_arrays),
+        ExprKind::CompoundAssignExpr { value, .. } => expr_has_char_array_index(name, value, char_arrays),
         ExprKind::Call { args, .. } => args
             .iter()
             .any(|a| expr_has_char_array_index(name, a, char_arrays)),
@@ -1891,6 +1899,7 @@ fn expr_emits_imul(e: &Expr) -> bool {
         ExprKind::Unary { operand, .. } => expr_emits_imul(operand),
         ExprKind::Call { args, .. } => args.iter().any(expr_emits_imul),
         ExprKind::AssignExpr { value, .. } => expr_emits_imul(value),
+        ExprKind::CompoundAssignExpr { value, .. } => expr_emits_imul(value),
         ExprKind::Deref(operand) => expr_emits_imul(operand),
         ExprKind::ArrayIndex { array, index } => {
             expr_emits_imul(array) || expr_emits_imul(index)
@@ -2357,6 +2366,13 @@ fn count_uses_expr(e: &Expr, counts: &mut HashMap<String, u32>) {
         ExprKind::AssignExpr { target, value } => {
             // Like a statement-level Assign: LHS + RHS uses.
             *counts.entry(target.clone()).or_insert(0) += 1;
+            count_uses_expr(value, counts);
+        }
+        ExprKind::CompoundAssignExpr { target, value, .. } => {
+            // Compound assign expression: target is both read and
+            // written, like StmtKind::CompoundAssign — count it
+            // twice.
+            *counts.entry(target.clone()).or_insert(0) += 2;
             count_uses_expr(value, counts);
         }
         ExprKind::Call { args, .. } => {
