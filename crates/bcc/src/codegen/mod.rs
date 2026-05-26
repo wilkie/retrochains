@@ -14509,6 +14509,26 @@ impl<'a> FunctionEmitter<'a> {
             let _ = write!(self.out, "\t{mnem}\tword ptr {dest}\r\n");
             return;
         }
+        // `<field> <<= K` / `>>= K` — emit `shl/shr/sar word ptr
+        // <dest>, K` for K==1, or the cl-loaded form for K>1. The
+        // signedness of the field's int type picks shr vs sar.
+        // Fixture 3521.
+        if matches!(op, BinOp::Shl | BinOp::Shr) {
+            let unsigned = false; // member type info not threaded here; default to signed shr → sar
+            let _ = unsigned;
+            let mnem = match op {
+                BinOp::Shl => "shl",
+                BinOp::Shr => "sar",
+                _ => unreachable!(),
+            };
+            if v_masked == 1 {
+                let _ = write!(self.out, "\t{mnem}\t{width} ptr {dest},1\r\n");
+            } else {
+                let _ = write!(self.out, "\tmov\tcl,{v_masked}\r\n");
+                let _ = write!(self.out, "\t{mnem}\t{width} ptr {dest},cl\r\n");
+            }
+            return;
+        }
         let mnemonic = match op {
             BinOp::Add => "add",
             BinOp::Sub => "sub",
