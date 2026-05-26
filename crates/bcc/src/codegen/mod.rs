@@ -1247,10 +1247,6 @@ impl<'a> FunctionEmitter<'a> {
     }
 
     fn emit_do_while(&mut self, do_span_start: u32, body: &[Stmt], cond: &Expr) {
-        assert!(
-            !matches!(cond.kind, ExprKind::Logical { .. }),
-            "logical condition (`&&`/`||`) in a `do-while` not yet supported (no fixture)"
-        );
         let plan = self.label_plan.loop_plan(do_span_start);
         self.emit_label(plan.body_slot);
         self.loop_stack.push(LoopTargets {
