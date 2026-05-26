@@ -899,6 +899,15 @@ impl<'a> FunctionEmitter<'a> {
                 self.advance_to_stmt_line(stmt);
                 let _ = write!(self.out, "@{}@user_{name}:\r\n", self.func_idx);
             }
+            StmtKind::Block(body) => {
+                // Bare `{ ... }` block at statement position — emit
+                // the inner statements in order. Block-scope rules
+                // are enforced by the locals layout pass; codegen
+                // just walks. Fixtures 1743, 1966-1969, 3014.
+                for s in body {
+                    self.emit_stmt(s);
+                }
+            }
         }
     }
 

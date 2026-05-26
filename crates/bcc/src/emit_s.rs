@@ -843,6 +843,11 @@ fn walk_calls(
         StmtKind::Break | StmtKind::Continue => {}
         StmtKind::Goto { .. } | StmtKind::Label { .. } | StmtKind::Empty => {}
         StmtKind::ExprStmt(e) => walk_calls_expr(e, defined, locals, seen, ordered),
+        StmtKind::Block(body) => {
+            for s in body {
+                walk_calls(s, defined, locals, seen, ordered);
+            }
+        }
     }
 }
 

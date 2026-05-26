@@ -344,6 +344,7 @@ fn plan_stmt(stmt: &Stmt, ctx: &mut PlanCtx) {
             // `;` placeholder body — no slots, no expressions.
         }
         StmtKind::ExprStmt(e) => plan_expr_value(e, ctx),
+        StmtKind::Block(body) => plan_stmts(body, ctx),
     }
 }
 

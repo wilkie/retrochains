@@ -262,10 +262,20 @@ impl Locals {
             *counts.entry(param.name.clone()).or_insert(0) += 1;
         }
 
+        // Per-decl sibling-block id — populated in step with
+        // `declared`. Used by the offset-assignment loop below to
+        // recycle stack slots across sibling Block scopes (fixtures
+        // 1966-1969). Params don't get block-id entries; the loop
+        // skips that case.
+        let param_count = declared.len();
+        let mut block_collector = CollectCtx::new();
         for stmt in function.body.as_deref().unwrap_or(&[]) {
-            collect_decls(stmt, &mut declared);
+            collect_decls_ctx(stmt, &mut declared, &mut block_collector);
             count_uses_stmt(stmt, &mut counts);
         }
+        let block_ids = block_collector.block_ids;
+        debug_assert_eq!(declared.len() - param_count, block_ids.len(),
+            "one block id per non-param decl");
 
         // Pass 2: figure out the register assignment.
         //
@@ -551,15 +561,56 @@ impl Locals {
                 saved_regs.push(reg);
             }
         }
+        // Track the function-level stack-bytes baseline. When the
+        // current decl belongs to a different sibling-block from
+        // the previous one, reset stack_bytes back to this baseline
+        // so the new block reuses its sibling's slot range. The
+        // function-wide frame size is the max stack_bytes seen at
+        // any point. Fixtures 1966-1969.
+        let mut max_stack_bytes: u16 = 0;
+        let mut function_level_bytes: u16 = 0;
+        let mut prev_block_id: u32 = 0;
+        // Track local-decl index separately so we can index into
+        // block_ids (which only covers non-param decls).
+        let mut local_decl_idx: usize = 0;
         for (i, item) in declared.iter().enumerate() {
             let location = if let Some(&reg) = reg_of.get(&i) {
                 if let DeclKind::Param { incoming_offset } = item.kind {
                     param_loads.push(ParamLoad { reg, incoming_offset });
                 }
+                // Register-resident locals also consume a block-id
+                // slot in the parallel list (for the bookkeeping
+                // index). Advance the index when this decl is a
+                // non-param local.
+                if matches!(item.kind, DeclKind::Local) {
+                    local_decl_idx += 1;
+                }
                 LocalLocation::Reg(reg)
             } else {
                 match item.kind {
                     DeclKind::Local => {
+                        let block_id = block_ids
+                            .get(local_decl_idx)
+                            .copied()
+                            .unwrap_or(0);
+                        local_decl_idx += 1;
+                        // Sibling-block boundary: reset stack_bytes
+                        // back to the function-level baseline so
+                        // this block starts allocating from the
+                        // same offset as its previous sibling.
+                        // Function-level → block transitions also
+                        // pin the baseline before the first block.
+                        if block_id != prev_block_id {
+                            if prev_block_id == 0 {
+                                function_level_bytes = stack_bytes;
+                            }
+                            if block_id == 0 {
+                                stack_bytes = function_level_bytes;
+                            } else {
+                                stack_bytes = function_level_bytes;
+                            }
+                        }
+                        prev_block_id = block_id;
                         // Round the slot's size up to the type's
                         // alignment so that e.g. a 3-byte struct
                         // (`{char; int;}`) occupies a 4-byte slot
@@ -583,6 +634,9 @@ impl Locals {
                         }
                         stack_bytes = align_up(stack_bytes, item.ty.alignment())
                             + slot_size;
+                        if stack_bytes > max_stack_bytes {
+                            max_stack_bytes = stack_bytes;
+                        }
                         LocalLocation::Stack(
                             -i16::try_from(stack_bytes).expect("stack frame fits in i16"),
                         )
@@ -594,6 +648,11 @@ impl Locals {
             };
             by_name.insert(item.name.clone(), LocalEntry { location, ty: item.ty.clone() });
         }
+        // Use the max stack_bytes ever reached as the final frame
+        // size — accounts for sibling blocks restoring SP between
+        // each (their slot range is reused but the frame must be
+        // large enough for whichever block is tallest).
+        stack_bytes = max_stack_bytes;
 
         // Round the local frame up to an even byte count. BCC's stack
         // is word-aligned for everything that comes after the locals
@@ -827,6 +886,11 @@ fn collect_address_taken(stmt: &Stmt, out: &mut HashSet<String>) {
         StmtKind::Break | StmtKind::Continue => {}
         StmtKind::Goto { .. } | StmtKind::Label { .. } | StmtKind::Empty => {}
         StmtKind::ExprStmt(e) => expr_address_taken(e, out),
+        StmtKind::Block(body) => {
+            for s in body {
+                collect_address_taken(s, out);
+            }
+        }
     }
 }
 
@@ -1103,6 +1167,7 @@ fn stmt_has_call(stmt: &Stmt) -> bool {
         }
         StmtKind::Goto { .. } | StmtKind::Label { .. } | StmtKind::Empty => false,
         StmtKind::ExprStmt(e) => expr_has_call(e),
+        StmtKind::Block(body) => body.iter().any(stmt_has_call),
     }
 }
 
@@ -1213,6 +1278,7 @@ fn stmt_has_div_or_mod(stmt: &Stmt, char_locals: &HashSet<&str>) -> bool {
                 || expr_has_div_or_mod(value)
         }
         StmtKind::ExprStmt(e) => expr_has_div_or_mod(e),
+        StmtKind::Block(body) => body_has_div_or_mod(body, char_locals),
         StmtKind::Break
         | StmtKind::Continue
         | StmtKind::Goto { .. }
@@ -1413,6 +1479,7 @@ fn stmt_has_name_as_subscript(name: &str, stmt: &Stmt) -> bool {
                 || step.as_ref().is_some_and(|es| es.iter().any(|e| expr_has_name_as_subscript(name, e)))
                 || name_used_as_subscript(name, body)
         }
+        StmtKind::Block(body) => name_used_as_subscript(name, body),
         StmtKind::Return(_)
         | StmtKind::Empty
         | StmtKind::Break
@@ -1794,6 +1861,7 @@ fn stmt_emits_imul(stmt: &Stmt, char_locals: &HashSet<&str>) -> bool {
             mul_emits || expr_emits_imul(base) || expr_emits_imul(value)
         }
         StmtKind::ExprStmt(e) => expr_emits_imul(e),
+        StmtKind::Block(body) => body_emits_imul(body, char_locals),
         StmtKind::Break
         | StmtKind::Continue
         | StmtKind::Goto { .. }
@@ -1982,6 +2050,83 @@ enum DeclKind {
     Param { incoming_offset: u16 },
 }
 
+/// Walker state passed alongside the flat decl list. Tracks which
+/// sibling-block each upcoming decl belongs to so offset assignment
+/// can reuse slots across siblings. Today only flat sibling blocks
+/// (no nesting beyond depth 1) are modeled — that's what fixtures
+/// 1743, 1966-1969 exercise.
+struct CollectCtx {
+    /// Per-decl sibling-block id: 0 = function level, 1+ = the Nth
+    /// statement-position `{ ... }` block (in source order).
+    block_ids: Vec<u32>,
+    next_block_id: u32,
+    current_block_id: u32,
+}
+
+impl CollectCtx {
+    fn new() -> Self {
+        Self { block_ids: Vec::new(), next_block_id: 1, current_block_id: 0 }
+    }
+}
+
+fn collect_decls_ctx(stmt: &Stmt, out: &mut Vec<DeclItem>, ctx: &mut CollectCtx) {
+    match &stmt.kind {
+        StmtKind::Declare { ty, name, is_static, is_register, is_volatile, .. } => {
+            if !*is_static {
+                out.push(DeclItem {
+                    name: name.clone(),
+                    ty: ty.clone(),
+                    kind: DeclKind::Local,
+                    is_register: *is_register,
+                    is_volatile: *is_volatile,
+                });
+                ctx.block_ids.push(ctx.current_block_id);
+            }
+        }
+        StmtKind::Block(body) => {
+            // Bare `{ ... }` opens a fresh sibling block at this
+            // nesting depth. Save / restore the current_block_id so
+            // nested blocks don't accidentally share IDs with their
+            // outer level — though we don't yet handle nested-block
+            // shadowing properly (fixture 2467), the bookkeeping is
+            // right for the flat case.
+            let saved = ctx.current_block_id;
+            let id = ctx.next_block_id;
+            ctx.next_block_id += 1;
+            ctx.current_block_id = id;
+            for s in body {
+                collect_decls_ctx(s, out, ctx);
+            }
+            ctx.current_block_id = saved;
+        }
+        StmtKind::If { then_branch, else_branch, .. } => {
+            for s in then_branch {
+                collect_decls_ctx(s, out, ctx);
+            }
+            if let Some(else_branch) = else_branch {
+                for s in else_branch {
+                    collect_decls_ctx(s, out, ctx);
+                }
+            }
+        }
+        StmtKind::While { body, .. }
+        | StmtKind::DoWhile { body, .. }
+        | StmtKind::For { body, .. } => {
+            for s in body {
+                collect_decls_ctx(s, out, ctx);
+            }
+        }
+        StmtKind::Switch { cases, .. } => {
+            for c in cases {
+                for s in &c.body {
+                    collect_decls_ctx(s, out, ctx);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 fn collect_decls(stmt: &Stmt, out: &mut Vec<DeclItem>) {
     match &stmt.kind {
         StmtKind::Declare { ty, name, is_static, is_register, is_volatile, .. } => {
@@ -2015,6 +2160,11 @@ fn collect_decls(stmt: &Stmt, out: &mut Vec<DeclItem>) {
                 for s in &c.body {
                     collect_decls(s, out);
                 }
+            }
+        }
+        StmtKind::Block(body) => {
+            for s in body {
+                collect_decls(s, out);
             }
         }
         StmtKind::Return(_)
@@ -2177,6 +2327,11 @@ fn count_uses_stmt(stmt: &Stmt, counts: &mut HashMap<String, u32>) {
         }
         StmtKind::Goto { .. } | StmtKind::Label { .. } | StmtKind::Empty => {}
         StmtKind::ExprStmt(e) => count_uses_expr(e, counts),
+        StmtKind::Block(body) => {
+            for s in body {
+                count_uses_stmt(s, counts);
+            }
+        }
     }
 }
 

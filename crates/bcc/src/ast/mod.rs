@@ -257,6 +257,11 @@ pub enum StmtKind {
     /// — codegen still emits a (no-op) load to match BCC if a fixture
     /// ever pins it.
     ExprStmt(Expr),
+    /// Bare `{ ... }` block at statement position. Introduces a
+    /// new scope: locals declared inside don't leak out, and their
+    /// stack slots can be reused by following sibling blocks
+    /// (fixture 1966's two `int` blocks share `[bp-2]`).
+    Block(Vec<Stmt>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

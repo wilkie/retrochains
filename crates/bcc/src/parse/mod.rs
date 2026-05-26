@@ -1329,6 +1329,23 @@ impl Parser {
             TokenKind::Ident(ref name) if self.typedefs.contains_key(name) => {
                 self.parse_declare(start)
             }
+            TokenKind::LBrace => {
+                // Bare `{ ... }` block at statement position.
+                // Parses the inner statements like a function body
+                // but wraps them in a Block node so the locals
+                // layout can scope decls and reuse slots across
+                // sibling blocks. Fixtures 1743, 1966-1969, 3014.
+                let lbrace = self.bump();
+                let mut stmts = Vec::new();
+                while !matches!(self.peek().kind, TokenKind::RBrace | TokenKind::Eof) {
+                    stmts.push(self.parse_stmt()?);
+                }
+                let rbrace = self.expect(&TokenKind::RBrace)?;
+                Ok(Stmt {
+                    kind: StmtKind::Block(stmts),
+                    span: Span::new(lbrace.span.start, rbrace.span.end),
+                })
+            }
             TokenKind::KwIf => self.parse_if(),
             TokenKind::KwWhile => self.parse_while(),
             TokenKind::KwDo => self.parse_do_while(),
