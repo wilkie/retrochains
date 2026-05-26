@@ -10408,6 +10408,31 @@ impl<'a> FunctionEmitter<'a> {
                 // through SI-indexed addressing. Skip the cbw
                 // widening — the byte store only needs AL.
                 // Fixture 1426 (`dst[i] = src[i]`).
+                //
+                // Simple char-ident RHS: byte-load directly (no
+                // widen). Avoids the wasted cbw / mov ah, 0 that
+                // emit_expr_to_ax would emit for a char ident even
+                // with skip_widen set (which it doesn't honor in
+                // the Ident path — see notes there). Fixture 3450
+                // (`put(int i, char v) { arr[i] = v; }`).
+                if let ExprKind::Ident(v_name) = &value.kind
+                    && self.locals.has(v_name)
+                    && self.locals.type_of(v_name).is_char_like()
+                {
+                    let v_addr = match self.locals.location_of(v_name) {
+                        LocalLocation::Stack(off) => format!("byte ptr {}", bp_addr(off)),
+                        LocalLocation::Reg(reg) if reg.is_byte() => reg.name().to_owned(),
+                        _ => String::new(),
+                    };
+                    if !v_addr.is_empty() {
+                        let _ = write!(self.out, "\tmov\tal,{v_addr}\r\n");
+                        let _ = write!(
+                            self.out,
+                            "\tmov\tbyte ptr DGROUP:_{array}[si],al\r\n",
+                        );
+                        return;
+                    }
+                }
                 let skip_widen_prev = self.skip_widen;
                 self.skip_widen = true;
                 self.emit_expr_to_ax(value);

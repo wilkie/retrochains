@@ -290,6 +290,38 @@ impl Locals {
         // the use-count threshold (fixture 1550 / 1560). `volatile`
         // forces stack allocation regardless of use count
         // (fixtures 1548, 2243).
+        //
+        // Leaf-function param-as-char-array-subscript: BCC promotes
+        // the first int-like parameter to SI when it's used as a
+        // CHAR-element array subscript at least once, even with use
+        // count below threshold. SI-indexed addressing on a byte
+        // array (`byte ptr DGROUP:_arr[si]`) saves the `mov bx,
+        // [bp+N]` load before each indexed access — `push si / mov
+        // si / pop si` costs 4 bytes but eliminates the BX setup at
+        // each use. Int-element arrays don't benefit (the index
+        // still needs scaling), so BCC keeps int-array params on
+        // the stack. Fixtures 2796, 2900, 2926, 3231, 3243, 3450.
+        let leaf_param_subscript: HashSet<usize> = if !function_makes_call {
+            (0..declared.len())
+                .filter(|&i| matches!(declared[i].kind, DeclKind::Param { .. }))
+                .find(|&i| {
+                    matches!(
+                        declared[i].ty,
+                        Type::Int | Type::UInt | Type::Pointer(_),
+                    ) && !address_taken.contains(&declared[i].name)
+                        && !declared[i].is_volatile
+                        && name_indexes_char_array(
+                            &declared[i].name,
+                            function.body.as_deref().unwrap_or(&[]),
+                            &declared,
+                            globals,
+                        )
+                })
+                .into_iter()
+                .collect()
+        } else {
+            HashSet::new()
+        };
         let eligible_int: Vec<usize> = (0..declared.len())
             .filter(|&i| {
                 if address_taken.contains(&declared[i].name) {
@@ -301,7 +333,9 @@ impl Locals {
                 let uses = counts.get(&declared[i].name).copied().unwrap_or(0);
                 match &declared[i].ty {
                     Type::Int | Type::UInt | Type::Pointer(_) => {
-                        declared[i].is_register || uses >= ENREGISTER_THRESHOLD
+                        declared[i].is_register
+                            || uses >= ENREGISTER_THRESHOLD
+                            || leaf_param_subscript.contains(&i)
                     }
                     _ => false,
                 }
@@ -1102,6 +1136,220 @@ fn expr_mentions(name: &str, e: &Expr) -> bool {
         ExprKind::AddressOf(n) => n == name,
         ExprKind::AddressOfArrayElem { array, .. } => array == name,
         ExprKind::IntLit(_) | ExprKind::StringLit(_) => false,
+    }
+}
+
+/// True iff `name` appears anywhere as an array subscript (the
+/// index, not the array). Used to detect when a leaf-function
+/// parameter would benefit from being in a register (BCC promotes
+/// such params to SI even with use count below the int-pool
+/// threshold).
+fn name_used_as_subscript(name: &str, body: &[Stmt]) -> bool {
+    body.iter().any(|s| stmt_has_name_as_subscript(name, s))
+}
+
+fn stmt_has_name_as_subscript(name: &str, stmt: &Stmt) -> bool {
+    match &stmt.kind {
+        StmtKind::Return(value) => {
+            value.as_ref().is_some_and(|e| expr_has_name_as_subscript(name, e))
+        }
+        StmtKind::Declare { init, .. } => {
+            init.as_ref().is_some_and(|e| expr_has_name_as_subscript(name, e))
+        }
+        StmtKind::Assign { value, .. }
+        | StmtKind::CompoundAssign { value, .. } => {
+            expr_has_name_as_subscript(name, value)
+        }
+        StmtKind::ArrayAssign { indices, value, .. }
+        | StmtKind::ArrayCompoundAssign { indices, value, .. } => {
+            indices.iter().any(|i| expr_mentions(name, i))
+                || expr_has_name_as_subscript(name, value)
+        }
+        StmtKind::MemberArrayAssign { indices, value, .. } => {
+            indices.iter().any(|i| expr_mentions(name, i))
+                || expr_has_name_as_subscript(name, value)
+        }
+        StmtKind::DerefAssign { target, value }
+        | StmtKind::DerefCompoundAssign { target, value, .. } => {
+            expr_has_name_as_subscript(name, target)
+                || expr_has_name_as_subscript(name, value)
+        }
+        StmtKind::MemberAssign { base, value, .. }
+        | StmtKind::MemberCompoundAssign { base, value, .. } => {
+            expr_has_name_as_subscript(name, base)
+                || expr_has_name_as_subscript(name, value)
+        }
+        StmtKind::ExprStmt(e) => expr_has_name_as_subscript(name, e),
+        StmtKind::Switch { scrutinee, cases } => {
+            expr_has_name_as_subscript(name, scrutinee)
+                || cases.iter().any(|c| name_used_as_subscript(name, &c.body))
+        }
+        StmtKind::If { cond, then_branch, else_branch } => {
+            expr_has_name_as_subscript(name, cond)
+                || name_used_as_subscript(name, then_branch)
+                || else_branch.as_ref().is_some_and(|b| name_used_as_subscript(name, b))
+        }
+        StmtKind::While { cond, body }
+        | StmtKind::DoWhile { cond, body, .. } => {
+            expr_has_name_as_subscript(name, cond)
+                || name_used_as_subscript(name, body)
+        }
+        StmtKind::For { init, cond, step, body, .. } => {
+            init.as_ref().is_some_and(|es| es.iter().any(|e| expr_has_name_as_subscript(name, e)))
+                || cond.as_ref().is_some_and(|e| expr_has_name_as_subscript(name, e))
+                || step.as_ref().is_some_and(|es| es.iter().any(|e| expr_has_name_as_subscript(name, e)))
+                || name_used_as_subscript(name, body)
+        }
+        StmtKind::Return(_)
+        | StmtKind::Empty
+        | StmtKind::Break
+        | StmtKind::Continue
+        | StmtKind::Goto { .. }
+        | StmtKind::Label { .. } => false,
+    }
+}
+
+fn expr_has_name_as_subscript(name: &str, e: &Expr) -> bool {
+    match &e.kind {
+        ExprKind::ArrayIndex { array, index } => {
+            expr_mentions(name, index) || expr_has_name_as_subscript(name, array)
+        }
+        ExprKind::BinOp { left, right, .. }
+        | ExprKind::Logical { left, right, .. }
+        | ExprKind::Comma { left, right } => {
+            expr_has_name_as_subscript(name, left)
+                || expr_has_name_as_subscript(name, right)
+        }
+        ExprKind::Unary { operand, .. }
+        | ExprKind::Cast { operand, .. }
+        | ExprKind::Deref(operand) => expr_has_name_as_subscript(name, operand),
+        ExprKind::AssignExpr { value, .. } => expr_has_name_as_subscript(name, value),
+        ExprKind::Call { args, .. } => args.iter().any(|a| expr_has_name_as_subscript(name, a)),
+        ExprKind::Member { base, .. } => expr_has_name_as_subscript(name, base),
+        ExprKind::Ternary { cond, then_value, else_value } => {
+            expr_has_name_as_subscript(name, cond)
+                || expr_has_name_as_subscript(name, then_value)
+                || expr_has_name_as_subscript(name, else_value)
+        }
+        ExprKind::InitList { items } => items.iter().any(|i| expr_has_name_as_subscript(name, i)),
+        _ => false,
+    }
+}
+
+/// True iff `name` appears anywhere as the index of a CHAR-element
+/// array (local or global), in any context (read or write).
+/// Simpler counterpart of `name_is_char_array_index`, which adds
+/// stricter conditions for the DX-vs-SI single-counter heuristic.
+/// Used to decide whether a leaf-function int param should be
+/// promoted to SI for indexed addressing.
+fn name_indexes_char_array(
+    name: &str,
+    body: &[Stmt],
+    declared: &[DeclItem],
+    globals: &crate::codegen::GlobalTable,
+) -> bool {
+    let mut char_arrays: HashSet<String> = HashSet::new();
+    for item in declared {
+        if let Type::Array { elem, .. } = &item.ty {
+            if matches!(&**elem, Type::Char | Type::UChar) {
+                char_arrays.insert(item.name.clone());
+            }
+        }
+    }
+    for gname in globals.names() {
+        if let Some(Type::Array { elem, .. }) = globals.type_of(gname) {
+            if matches!(&**elem, Type::Char | Type::UChar) {
+                char_arrays.insert(gname.to_string());
+            }
+        }
+    }
+    body.iter().any(|s| stmt_indexes_char_array(name, s, &char_arrays))
+}
+
+fn stmt_indexes_char_array(name: &str, stmt: &Stmt, ca: &HashSet<String>) -> bool {
+    match &stmt.kind {
+        StmtKind::Return(Some(e))
+        | StmtKind::Assign { value: e, .. }
+        | StmtKind::CompoundAssign { value: e, .. }
+        | StmtKind::Declare { init: Some(e), .. }
+        | StmtKind::ExprStmt(e) => expr_indexes_char_array(name, e, ca),
+        StmtKind::ArrayAssign { array, indices, value }
+        | StmtKind::ArrayCompoundAssign { array, indices, value, .. } => {
+            (ca.contains(array.as_str()) && indices.iter().any(|i| expr_mentions(name, i)))
+                || expr_indexes_char_array(name, value, ca)
+                || indices.iter().any(|i| expr_indexes_char_array(name, i, ca))
+        }
+        StmtKind::MemberArrayAssign { indices, value, .. } => {
+            indices.iter().any(|i| expr_indexes_char_array(name, i, ca))
+                || expr_indexes_char_array(name, value, ca)
+        }
+        StmtKind::DerefAssign { target, value }
+        | StmtKind::DerefCompoundAssign { target, value, .. } => {
+            expr_indexes_char_array(name, target, ca)
+                || expr_indexes_char_array(name, value, ca)
+        }
+        StmtKind::MemberAssign { base, value, .. }
+        | StmtKind::MemberCompoundAssign { base, value, .. } => {
+            expr_indexes_char_array(name, base, ca)
+                || expr_indexes_char_array(name, value, ca)
+        }
+        StmtKind::If { cond, then_branch, else_branch } => {
+            expr_indexes_char_array(name, cond, ca)
+                || then_branch.iter().any(|s| stmt_indexes_char_array(name, s, ca))
+                || else_branch.as_ref().is_some_and(|b| {
+                    b.iter().any(|s| stmt_indexes_char_array(name, s, ca))
+                })
+        }
+        StmtKind::While { cond, body }
+        | StmtKind::DoWhile { cond, body, .. } => {
+            expr_indexes_char_array(name, cond, ca)
+                || body.iter().any(|s| stmt_indexes_char_array(name, s, ca))
+        }
+        StmtKind::For { init, cond, step, body, .. } => {
+            init.as_ref().is_some_and(|es| es.iter().any(|e| expr_indexes_char_array(name, e, ca)))
+                || cond.as_ref().is_some_and(|e| expr_indexes_char_array(name, e, ca))
+                || step.as_ref().is_some_and(|es| es.iter().any(|e| expr_indexes_char_array(name, e, ca)))
+                || body.iter().any(|s| stmt_indexes_char_array(name, s, ca))
+        }
+        StmtKind::Switch { scrutinee, cases } => {
+            expr_indexes_char_array(name, scrutinee, ca)
+                || cases.iter().any(|c| c.body.iter().any(|s| stmt_indexes_char_array(name, s, ca)))
+        }
+        _ => false,
+    }
+}
+
+fn expr_indexes_char_array(name: &str, e: &Expr, ca: &HashSet<String>) -> bool {
+    match &e.kind {
+        ExprKind::ArrayIndex { array, index } => {
+            let arr_is_char = if let ExprKind::Ident(n) = &array.kind {
+                ca.contains(n.as_str())
+            } else {
+                false
+            };
+            (arr_is_char && expr_mentions(name, index))
+                || expr_indexes_char_array(name, array, ca)
+                || expr_indexes_char_array(name, index, ca)
+        }
+        ExprKind::BinOp { left, right, .. }
+        | ExprKind::Logical { left, right, .. }
+        | ExprKind::Comma { left, right } => {
+            expr_indexes_char_array(name, left, ca)
+                || expr_indexes_char_array(name, right, ca)
+        }
+        ExprKind::Unary { operand, .. }
+        | ExprKind::Cast { operand, .. }
+        | ExprKind::Deref(operand) => expr_indexes_char_array(name, operand, ca),
+        ExprKind::AssignExpr { value, .. } => expr_indexes_char_array(name, value, ca),
+        ExprKind::Call { args, .. } => args.iter().any(|a| expr_indexes_char_array(name, a, ca)),
+        ExprKind::Member { base, .. } => expr_indexes_char_array(name, base, ca),
+        ExprKind::Ternary { cond, then_value, else_value } => {
+            expr_indexes_char_array(name, cond, ca)
+                || expr_indexes_char_array(name, then_value, ca)
+                || expr_indexes_char_array(name, else_value, ca)
+        }
+        ExprKind::InitList { items } => items.iter().any(|i| expr_indexes_char_array(name, i, ca)),
+        _ => false,
     }
 }
 
