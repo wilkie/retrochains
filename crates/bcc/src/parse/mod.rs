@@ -2766,6 +2766,28 @@ impl Parser {
                 // bare-ident path which will error.
                 return Err(ParseError::Unsupported { offset: operand.span.start });
             }
+            // Prefix `++arr[i]` / `--arr[i]` — parse the atom (an
+            // ArrayIndex) and wrap in UpdateLvalue::Pre. Falls
+            // through to bare-ident if not followed by `[`.
+            // Fixtures 2616, 2937.
+            if matches!(self.peek().kind, TokenKind::Ident(_))
+                && matches!(self.peek_n(1).kind, TokenKind::LBracket)
+            {
+                let operand = self.parse_atom()?;
+                if matches!(operand.kind, ExprKind::ArrayIndex { .. }) {
+                    let span = Span::new(op_tok.span.start, operand.span.end);
+                    return Ok(Expr {
+                        kind: ExprKind::UpdateLvalue {
+                            target: Box::new(operand),
+                            op: update_op,
+                            position: UpdatePosition::Pre,
+                        },
+                        span,
+                    });
+                }
+                // Not an array index — bail out.
+                return Err(ParseError::Unsupported { offset: operand.span.start });
+            }
             let name_tok = self.bump();
             let TokenKind::Ident(name) = name_tok.kind else {
                 return Err(ParseError::NotAnIdent { offset: name_tok.span.start });

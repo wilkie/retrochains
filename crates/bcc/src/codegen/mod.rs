@@ -17998,7 +17998,7 @@ impl<'a> FunctionEmitter<'a> {
                     return;
                 }
                 // Same shape but the array is a file-scope global.
-                // Fixture 2700 (`int a[3]; return a[1]++;`).
+                // Fixture 2700 (Post: `a[1]++`), 2616 (Pre: `++a[0]`).
                 if let ExprKind::ArrayIndex { array, index } = &target.kind
                     && let ExprKind::Ident(arr_name) = &array.kind
                     && !self.locals.has(arr_name)
@@ -18006,7 +18006,6 @@ impl<'a> FunctionEmitter<'a> {
                     && let Some(elem_ty) = arr_ty.array_elem()
                     && elem_ty.is_int_like()
                     && let Some(k) = try_const_eval(index)
-                    && matches!(position, UpdatePosition::Post)
                 {
                     let stride = u32::from(elem_ty.size_bytes());
                     let off = k.wrapping_mul(stride);
@@ -18019,21 +18018,31 @@ impl<'a> FunctionEmitter<'a> {
                         UpdateOp::Inc => "inc",
                         UpdateOp::Dec => "dec",
                     };
-                    let _ = write!(self.out, "\tmov\tax,word ptr {addr}\r\n");
-                    let _ = write!(self.out, "\t{mnem}\tword ptr {addr}\r\n");
+                    match position {
+                        UpdatePosition::Post => {
+                            let _ = write!(self.out, "\tmov\tax,word ptr {addr}\r\n");
+                            let _ = write!(self.out, "\t{mnem}\tword ptr {addr}\r\n");
+                        }
+                        UpdatePosition::Pre => {
+                            let _ = write!(self.out, "\t{mnem}\tword ptr {addr}\r\n");
+                            let _ = write!(self.out, "\tmov\tax,word ptr {addr}\r\n");
+                        }
+                    }
                     return;
                 }
-                // Variable index `arr[i]++` on a file-scope int
-                // array: scale i into BX, load the element, then
-                // increment it through the same `[arr+bx]` operand.
-                // Fixture 3032.
+                // Variable index `arr[i]++` / `++arr[i]` on a
+                // file-scope int array: scale i into BX, then for
+                // Post emit `mov ax, ..[bx]; <mnem> word ptr ..[bx]`
+                // (load pre-update value, then mutate); for Pre
+                // emit `<mnem> word ptr ..[bx]; mov ax, ..[bx]`
+                // (mutate first, load post-update value).
+                // Fixtures 3032 (Post), 2937 (Pre).
                 if let ExprKind::ArrayIndex { array, index } = &target.kind
                     && let ExprKind::Ident(arr_name) = &array.kind
                     && !self.locals.has(arr_name)
                     && let Some(arr_ty) = self.globals.type_of(arr_name)
                     && let Some(elem_ty) = arr_ty.array_elem()
                     && elem_ty.is_int_like()
-                    && matches!(position, UpdatePosition::Post)
                 {
                     let elem_ty = elem_ty.clone();
                     let mnem = match op {
@@ -18041,14 +18050,28 @@ impl<'a> FunctionEmitter<'a> {
                         UpdateOp::Dec => "dec",
                     };
                     self.emit_index_into_bx(index, &elem_ty);
-                    let _ = write!(
-                        self.out,
-                        "\tmov\tax,word ptr DGROUP:_{arr_name}[bx]\r\n",
-                    );
-                    let _ = write!(
-                        self.out,
-                        "\t{mnem}\tword ptr DGROUP:_{arr_name}[bx]\r\n",
-                    );
+                    match position {
+                        UpdatePosition::Post => {
+                            let _ = write!(
+                                self.out,
+                                "\tmov\tax,word ptr DGROUP:_{arr_name}[bx]\r\n",
+                            );
+                            let _ = write!(
+                                self.out,
+                                "\t{mnem}\tword ptr DGROUP:_{arr_name}[bx]\r\n",
+                            );
+                        }
+                        UpdatePosition::Pre => {
+                            let _ = write!(
+                                self.out,
+                                "\t{mnem}\tword ptr DGROUP:_{arr_name}[bx]\r\n",
+                            );
+                            let _ = write!(
+                                self.out,
+                                "\tmov\tax,word ptr DGROUP:_{arr_name}[bx]\r\n",
+                            );
+                        }
+                    }
                     return;
                 }
                 panic!(
