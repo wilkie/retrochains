@@ -7212,6 +7212,18 @@ impl<'a> FunctionEmitter<'a> {
                 //     helper used by struct returns and >4B struct
                 //     copies. Fixtures 1465, 1475-1476, 1481, 1516,
                 //     1616 (3-field struct, 6B), and many more.
+                // 4-byte struct returned by a call: same shape as the
+                // long-call init — DX:AX = high:low, store DX → off+2
+                // and AX → off. Fixture 3618.
+                if let Type::Struct { .. } = ty
+                    && ty.size_bytes() == 4
+                    && let ExprKind::Call { .. } = &init.kind
+                {
+                    self.emit_expr_to_ax(init);
+                    let _ = write!(self.out, "\tmov\tword ptr {},dx\r\n", bp_addr(off + 2));
+                    let _ = write!(self.out, "\tmov\tword ptr {},ax\r\n", bp_addr(off));
+                    return;
+                }
                 // Struct-copy init: `struct S q = p;` where p is
                 // another struct of the same type. Mirrors the
                 // assign-side struct copy (size==4 inline AX/DX
