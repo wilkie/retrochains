@@ -15890,6 +15890,48 @@ impl<'a> FunctionEmitter<'a> {
                         } else {
                             Reg::Dx
                         };
+                        // RHS is a shift `<src> << K` / `<src> >> K`
+                        // by a constant: compute into DX directly via
+                        // `mov dx, <src>; mov cl, K; <shift> dx, cl`.
+                        // The shift clobbers CL but not AX, so we can
+                        // keep the LHS in AX. Fixture 1957
+                        // (`(x << 4) | (x >> 12)` rotate emulation).
+                        if !matches!(op, BinOp::Div | BinOp::Mod | BinOp::Mul)
+                            && let ExprKind::BinOp { op: rop, left: rl, right: rr } = &right.kind
+                            && matches!(rop, BinOp::Shl | BinOp::Shr)
+                            && let Some(rl_src) = self.try_dx_load_source(rl)
+                            && let Some(k) = try_const_eval(rr)
+                            && (1..=15).contains(&k)
+                        {
+                            let signed = !self.expr_is_unsigned(rl);
+                            let shift_mnem = match (rop, signed) {
+                                (BinOp::Shl, _) => "shl",
+                                (BinOp::Shr, false) => "shr",
+                                (BinOp::Shr, true) => "sar",
+                                _ => unreachable!(),
+                            };
+                            self.emit_expr_to_ax(left);
+                            let _ = write!(self.out, "\tmov\tdx,{rl_src}\r\n");
+                            let k8 = (k & 0xFF) as u8;
+                            if (1..=3).contains(&k) {
+                                for _ in 0..k {
+                                    let _ = write!(
+                                        self.out,
+                                        "\t{shift_mnem}\tdx,1\r\n",
+                                    );
+                                }
+                            } else {
+                                let _ = write!(self.out, "\tmov\tcl,{k8}\r\n");
+                                let _ = write!(self.out, "\t{shift_mnem}\tdx,cl\r\n");
+                            }
+                            emit_op_with_source(
+                                self.out,
+                                *op,
+                                &OperandSource::Reg(Reg::Dx),
+                                unsigned,
+                            );
+                            return;
+                        }
                         // RHS is a binop of two AX-safe operands
                         // (reg-ident or mem-lvalue): emit it directly
                         // into DX, skipping the push/pop dance.
