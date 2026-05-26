@@ -7857,6 +7857,25 @@ impl<'a> FunctionEmitter<'a> {
                             return;
                         }
                     }
+                    // `char t = *p;` for a register-resident char
+                    // pointer p: byte load through [reg], then byte
+                    // store to the local. Fixture 3529.
+                    if let ExprKind::Deref(inner) = &init.kind
+                        && let ExprKind::Ident(p_name) = &inner.kind
+                        && self.locals.has(p_name)
+                        && let LocalLocation::Reg(p_reg) = self.locals.location_of(p_name)
+                        && let Some(pointee) = self.locals.type_of(p_name).pointee()
+                        && pointee.is_char_like()
+                    {
+                        let p_reg_name = p_reg.name();
+                        let _ = write!(self.out, "\tmov\tal,byte ptr [{p_reg_name}]\r\n");
+                        let _ = write!(
+                            self.out,
+                            "\tmov\tbyte ptr {},al\r\n",
+                            bp_addr(off)
+                        );
+                        return;
+                    }
                     panic!("non-constant char local init shape not yet supported");
                 }
                 // Pointers and ints share the int-like word-sized
