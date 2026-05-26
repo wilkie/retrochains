@@ -308,15 +308,38 @@ fn struct_field_info<'a>(ty: &'a Type, name: &str) -> Option<&'a crate::ast::Str
     }
 }
 
-/// Information needed to read or write a bitfield: the byte
-/// address of the storage container as a string, plus the bit-level
-/// placement. Returned by [`FunctionEmitter::resolve_bitfield`] when
-/// the expression matches a supported lvalue shape (currently:
-/// dotted member of a stack-resident struct local).
+/// Information needed to read or write a bitfield: the storage
+/// address (byte or word ptr operand), the access width, and the
+/// bit-level placement. Returned by
+/// [`FunctionEmitter::resolve_bitfield`] when the expression
+/// matches a supported lvalue shape (currently: dotted member of a
+/// stack-resident struct local).
 struct BitfieldRef {
     addr: String,
+    /// Width of the memory access — `byte` when the field fits in
+    /// one byte (`bit_offset + bit_width <= 8`), `word` otherwise.
+    /// BCC uses 16-bit memory ops for cross-byte bitfields rather
+    /// than two byte ops (fixture 1880).
+    access: BitfieldAccess,
+    /// Bit offset relative to the LSB of `addr` (in the byte for
+    /// `Byte` access, in the word for `Word` access).
     bit_offset: u8,
     bit_width: u8,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BitfieldAccess {
+    Byte,
+    Word,
+}
+
+impl BitfieldAccess {
+    fn ptr(self) -> &'static str {
+        match self {
+            Self::Byte => "byte",
+            Self::Word => "word",
+        }
+    }
 }
 
 /// True iff `e` is a float/double literal whose value is exactly
@@ -13106,41 +13129,56 @@ impl<'a> FunctionEmitter<'a> {
         kind: crate::ast::MemberKind,
         value: &Expr,
     ) {
-        // Bitfield write: detect via the struct's StructField metadata.
-        // For now only the `s.<bitfield> = K` shape (Dot, stack-local
-        // struct, constant value, field fits entirely within one byte)
-        // is supported. Emits `and byte ptr <addr>, <preserve>` +
-        // `or byte ptr <addr>, <shifted-value>`. Fixture 1691.
+        // Bitfield write: detect via the struct's StructField metadata
+        // (resolve_bitfield_named handles both within-byte and
+        // cross-byte shapes). Currently the `s.<bitfield> = K` shape
+        // (Dot, stack-local struct, constant value) is supported.
+        // Emits `and <width> ptr <addr>, <preserve>` + (optionally)
+        // `or <width> ptr <addr>, <shifted-value>` — width is byte
+        // for fields fitting in one byte (fixture 1691), word when
+        // the field crosses a byte boundary (fixture 1880).
         if matches!(kind, crate::ast::MemberKind::Dot)
             && let ExprKind::Ident(struct_name) = &base.kind
-            && self.locals.has(struct_name)
-            && let base_ty = self.locals.type_of(struct_name).clone()
-            && let Some(field_info) = struct_field_info(&base_ty, field)
-            && let Some(bf) = field_info.bitfield
-            && bf.bit_offset + bf.bit_width <= 8
+            && let Some(bf) = self.resolve_bitfield_named(struct_name, field)
         {
-            let LocalLocation::Stack(struct_off) = self.locals.location_of(struct_name)
-            else {
-                panic!("bitfield struct local `{struct_name}` not stack-resident");
-            };
-            let byte_off = struct_off
-                + i16::try_from(field_info.offset).expect("field offset fits");
-            let addr = bp_addr(byte_off);
-            let field_mask: u8 = ((1u16 << bf.bit_width) - 1) as u8;
-            let preserve_mask: u8 = !(field_mask << bf.bit_offset);
             if let Some(v) = try_const_eval(value) {
-                let v_shifted = ((v as u8) & field_mask) << bf.bit_offset;
-                // BCC emits the AND first then the OR; skips the OR
-                // when shifted value is zero (writing 0 needs no
-                // bit-set step).
-                let _ = write!(
-                    self.out,
-                    "\tand\tbyte ptr {addr},{preserve_mask}\r\n",
-                );
+                let field_mask: u32 = (1u32 << bf.bit_width).wrapping_sub(1);
+                let preserve_mask: u32 = match bf.access {
+                    BitfieldAccess::Byte =>
+                        (!((field_mask as u8) << bf.bit_offset)) as u32,
+                    BitfieldAccess::Word =>
+                        (!((field_mask as u16) << bf.bit_offset)) as u32,
+                };
+                let v_shifted: u32 = match bf.access {
+                    BitfieldAccess::Byte =>
+                        (((v as u8) & (field_mask as u8)) << bf.bit_offset) as u32,
+                    BitfieldAccess::Word =>
+                        (((v as u16) & (field_mask as u16)) << bf.bit_offset) as u32,
+                };
+                let w = bf.access.ptr();
+                // Skip the AND for a 1-bit field assigned to 1 — OR
+                // alone sets the bit and there's nothing else to
+                // clear (fixture 2105's `fl.f1 = 1`). Wider fields
+                // emit both AND + OR even when the value fills the
+                // field, matching BCC (fixture 2301's `x.lo = 0x3F`
+                // for a 6-bit field still emits the AND).
+                let v_masked = match bf.access {
+                    BitfieldAccess::Byte => ((v as u8) & (field_mask as u8)) as u32,
+                    BitfieldAccess::Word => ((v as u16) & (field_mask as u16)) as u32,
+                };
+                let one_bit_full = bf.bit_width == 1 && v_masked == 1;
+                if !one_bit_full {
+                    let _ = write!(
+                        self.out,
+                        "\tand\t{w} ptr {},{preserve_mask}\r\n",
+                        bf.addr,
+                    );
+                }
                 if v_shifted != 0 {
                     let _ = write!(
                         self.out,
-                        "\tor\tbyte ptr {addr},{v_shifted}\r\n",
+                        "\tor\t{w} ptr {},{v_shifted}\r\n",
+                        bf.addr,
                     );
                 }
                 return;
@@ -16563,31 +16601,49 @@ impl<'a> FunctionEmitter<'a> {
     /// `None` and fall through to a panic-or-wrong path. Fixture
     /// 1691.
     fn resolve_bitfield(&self, e: &Expr) -> Option<BitfieldRef> {
+        // See through `(int)<bitfield>` / `(unsigned)<bitfield>`
+        // casts — the cast is a no-op once the field is extracted
+        // into an int register (the post-AND result already lives
+        // in 16-bit width). Fixture 2105's `(int)fl.val`.
+        let mut inner = e;
+        while let ExprKind::Cast { ty, operand } = &inner.kind {
+            if !ty.is_int_like() {
+                break;
+            }
+            inner = operand;
+        }
         let ExprKind::Member { base, field, kind: crate::ast::MemberKind::Dot } =
-            &e.kind
+            &inner.kind
         else {
             return None;
         };
         let ExprKind::Ident(struct_name) = &base.kind else {
             return None;
         };
+        self.resolve_bitfield_named(struct_name, field)
+    }
+
+    fn resolve_bitfield_named(&self, struct_name: &str, field: &str) -> Option<BitfieldRef> {
         if !self.locals.has(struct_name) {
             return None;
         }
         let base_ty = self.locals.type_of(struct_name).clone();
         let field_info = struct_field_info(&base_ty, field)?;
         let bf = field_info.bitfield?;
-        if bf.bit_offset + bf.bit_width > 8 {
-            return None;
-        }
         let LocalLocation::Stack(struct_off) = self.locals.location_of(struct_name)
         else {
             return None;
         };
         let byte_off =
             struct_off + i16::try_from(field_info.offset).expect("field offset fits");
+        let access = if bf.bit_offset + bf.bit_width <= 8 {
+            BitfieldAccess::Byte
+        } else {
+            BitfieldAccess::Word
+        };
         Some(BitfieldRef {
             addr: bp_addr(byte_off),
+            access,
             bit_offset: bf.bit_offset,
             bit_width: bf.bit_width,
         })
@@ -16605,12 +16661,33 @@ impl<'a> FunctionEmitter<'a> {
         full_reg: &str,
         low_reg: &str,
     ) {
-        let _ = write!(
-            self.out,
-            "\tmov\t{low_reg},byte ptr {}\r\n",
-            bf.addr,
-        );
-        if bf.bit_offset >= 3 {
+        // Byte access loads the low byte and lets the trailing AND
+        // also clear the high half. Word access loads the full
+        // register directly — cross-byte bitfields need both bytes
+        // present before the shift.
+        match bf.access {
+            BitfieldAccess::Byte => {
+                let _ = write!(
+                    self.out,
+                    "\tmov\t{low_reg},byte ptr {}\r\n",
+                    bf.addr,
+                );
+            }
+            BitfieldAccess::Word => {
+                let _ = write!(
+                    self.out,
+                    "\tmov\t{full_reg},word ptr {}\r\n",
+                    bf.addr,
+                );
+            }
+        }
+        // Shift selection: single-bit `shr reg, 1` (2 bytes each)
+        // for offsets 1-3, `mov cl, K; shr reg, cl` (5 bytes) for
+        // offsets ≥ 4. Empirically matches BCC's choice — fixture
+        // 1691 uses CL-loaded at shift 4, fixture 2471 uses three
+        // single-bit shifts at shift 3 even though the byte count
+        // is 6 (one byte longer than the CL form).
+        if bf.bit_offset >= 4 {
             let _ = write!(self.out, "\tmov\tcl,{}\r\n", bf.bit_offset);
             let _ = write!(self.out, "\tshr\t{full_reg},cl\r\n");
         } else {
@@ -16618,7 +16695,7 @@ impl<'a> FunctionEmitter<'a> {
                 let _ = write!(self.out, "\tshr\t{full_reg},1\r\n");
             }
         }
-        let mask: u16 = (1u16 << bf.bit_width).wrapping_sub(1);
+        let mask: u32 = (1u32 << bf.bit_width).wrapping_sub(1);
         let _ = write!(self.out, "\tand\t{full_reg},{mask}\r\n");
     }
 
@@ -16631,12 +16708,15 @@ impl<'a> FunctionEmitter<'a> {
     /// check, in which case the caller falls back to its normal
     /// path. Fixture 1691.
     fn try_emit_bitfield_chain_to_ax(&mut self, e: &Expr) -> Option<()> {
-        // Walk the BinOp tree leftward, collecting (op, leaf) pairs.
-        // The deepest leaf is the first operand (loaded into AX);
-        // each subsequent (op, leaf) folds into AX via DX.
+        // Walk the BinOp tree leftward, collecting (op, right-bf)
+        // pairs while the right operand is a bitfield and the op
+        // is one of the AX-DX-foldable kinds (additive + bitwise).
+        // Stop as soon as the chain breaks; the remaining left
+        // subexpression seeds AX via either a head-bitfield read
+        // or a fallback to the normal emit_expr_to_ax path.
         let mut chain: Vec<(BinOp, BitfieldRef)> = Vec::new();
         let mut cur = e;
-        let head_bf = loop {
+        loop {
             match &cur.kind {
                 ExprKind::BinOp { op, left, right } => {
                     if !matches!(
@@ -16644,22 +16724,29 @@ impl<'a> FunctionEmitter<'a> {
                         BinOp::Add | BinOp::Sub | BinOp::BitAnd
                         | BinOp::BitOr | BinOp::BitXor
                     ) {
-                        return None;
+                        break;
                     }
-                    let right_bf = self.resolve_bitfield(right)?;
+                    let Some(right_bf) = self.resolve_bitfield(right) else { break };
                     chain.push((*op, right_bf));
                     cur = left;
                 }
-                _ => {
-                    let head = self.resolve_bitfield(cur)?;
-                    break head;
-                }
+                _ => break,
             }
-        };
+        }
         if chain.is_empty() {
             return None;
         }
-        self.emit_bitfield_read_to_reg(&head_bf, "ax", "al");
+        // Seed AX: prefer a head-bitfield read (matches BCC's
+        // shape when the chain's deepest term is also a bitfield —
+        // fixture 1691); fall back to the normal AX emitter when
+        // the head is any other expression (fixture 2105's
+        // `(int)f1 * 100` mul as the seed before the trailing
+        // `+ (int)fl.val`).
+        if let Some(head_bf) = self.resolve_bitfield(cur) {
+            self.emit_bitfield_read_to_reg(&head_bf, "ax", "al");
+        } else {
+            self.emit_expr_to_ax(cur);
+        }
         for (op, bf) in chain.into_iter().rev() {
             self.emit_bitfield_read_to_reg(&bf, "dx", "dl");
             let mnem = match op {
