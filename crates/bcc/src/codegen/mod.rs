@@ -13183,7 +13183,43 @@ impl<'a> FunctionEmitter<'a> {
                 }
                 return;
             }
-            panic!("non-constant bitfield write not yet supported (no fixture)");
+            // Non-constant RHS: materialize into AX, mask to field
+            // width, optionally shift to bit position, then AND the
+            // storage to clear and OR with AL/AX. Fixture 3322
+            // (`s.a = v` where v is a parameter).
+            let field_mask: u32 = (1u32 << bf.bit_width).wrapping_sub(1);
+            let preserve_mask: u32 = match bf.access {
+                BitfieldAccess::Byte =>
+                    (!((field_mask as u8) << bf.bit_offset)) as u32,
+                BitfieldAccess::Word =>
+                    (!((field_mask as u16) << bf.bit_offset)) as u32,
+            };
+            self.emit_expr_to_ax(value);
+            let _ = write!(self.out, "\tand\tax,{field_mask}\r\n");
+            if bf.bit_offset >= 4 {
+                let _ = write!(self.out, "\tmov\tcl,{}\r\n", bf.bit_offset);
+                let _ = write!(self.out, "\tshl\tax,cl\r\n");
+            } else {
+                for _ in 0..bf.bit_offset {
+                    self.out.extend_from_slice(b"\tshl\tax,1\r\n");
+                }
+            }
+            let w = bf.access.ptr();
+            let _ = write!(
+                self.out,
+                "\tand\t{w} ptr {},{preserve_mask}\r\n",
+                bf.addr,
+            );
+            let src_reg = match bf.access {
+                BitfieldAccess::Byte => "al",
+                BitfieldAccess::Word => "ax",
+            };
+            let _ = write!(
+                self.out,
+                "\tor\t{w} ptr {},{src_reg}\r\n",
+                bf.addr,
+            );
+            return;
         }
 
         // Dot path: try the lvalue-chain helper. Catches `a.x`,
