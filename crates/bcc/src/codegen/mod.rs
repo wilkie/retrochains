@@ -13208,6 +13208,25 @@ impl<'a> FunctionEmitter<'a> {
                 let _ = write!(self.out, "\tmov\tword ptr [{addr_reg}],{lo}\r\n");
                 return;
             }
+            // 4-byte struct pointee, RHS = `*<reg-ptr>`: copy both
+            // halves through AX (hi) and DX (lo). Same shape as
+            // 4-byte struct return / assign-from-stack. Fixtures
+            // 2495, 3093 (`*dst = *src` for `struct { int x; int y; }`).
+            if let Type::Struct { .. } = pointee
+                && pointee.size_bytes() == 4
+                && let ExprKind::Deref(src_inner) = &value.kind
+                && let ExprKind::Ident(src_name) = &src_inner.kind
+                && self.locals.has(src_name)
+                && let LocalLocation::Reg(src_reg) = self.locals.location_of(src_name)
+                && self.locals.type_of(src_name).pointee().is_some()
+            {
+                let src_reg_name = src_reg.name();
+                let _ = write!(self.out, "\tmov\tax,word ptr [{src_reg_name}+2]\r\n");
+                let _ = write!(self.out, "\tmov\tdx,word ptr [{src_reg_name}]\r\n");
+                let _ = write!(self.out, "\tmov\tword ptr [{addr_reg}+2],ax\r\n");
+                let _ = write!(self.out, "\tmov\tword ptr [{addr_reg}],dx\r\n");
+                return;
+            }
             let width = ptr_width(pointee);
             if let Some(v) = try_const_eval(value) {
                 let v_masked = if pointee.is_char_like() { v & 0xFF } else { v & 0xFFFF };
