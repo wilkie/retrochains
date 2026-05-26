@@ -19568,6 +19568,16 @@ fn deref_chain_root(ptr: &Expr) -> (&str, u32) {
                 depth += 1;
                 cur = inner;
             }
+            // Pointer cast `(T *)p` is a pure type-level operation
+            // — bytes are identical to p. Skip through to the
+            // underlying ident so `*(char *)p` resolves like `*p`.
+            // Fixture 3163.
+            ExprKind::Cast { ty, operand }
+                if matches!(ty, crate::ast::Type::Pointer(_)) =>
+            {
+                let _ = ty;
+                cur = operand;
+            }
             ExprKind::Ident(name) => break name.as_str(),
             _ => panic!(
                 "non-ident base in deref chain not yet supported (no fixture for {:?})",
