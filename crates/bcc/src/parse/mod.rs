@@ -2600,6 +2600,18 @@ impl Parser {
             ExprKind::Cast { ty, .. } => Some(ty.size_bytes()),
             // `sizeof(<intlit>)` — int.
             ExprKind::IntLit(_) => Some(2),
+            // `sizeof(<unary>)` — same width as the operand.
+            ExprKind::Unary { operand, .. } => self.expr_static_size(operand),
+            // `sizeof(++name)` / `sizeof(name--)` — the C standard
+            // says sizeof never evaluates its operand, so the
+            // increment is dead and the size is whatever the
+            // operand's type is. Fixture 2298.
+            ExprKind::Update { target, .. } => {
+                if let Some(ty) = self.function_locals.get(target) {
+                    return Some(ty.size_bytes());
+                }
+                self.global_types.get(target).map(|ty| ty.size_bytes())
+            }
             _ => None,
         }
     }
