@@ -15476,6 +15476,27 @@ impl<'a> FunctionEmitter<'a> {
                 }
             }
             ExprKind::BinOp { op, left, right } => {
+                // Identity / annihilator folds when the LHS is a pure
+                // ident (no side effects to preserve):
+                //   `<ident> * 0` → `xor ax, ax`
+                //   `<ident> * 1` → `<load ident>` (LHS unchanged)
+                //   `<ident> / 1` → `<load ident>` (LHS unchanged)
+                // BCC folds these to drop the multiply/divide entirely.
+                // Fixtures 2011 (`x * 0`), 2014 (`x / 1`).
+                if matches!(op, BinOp::Mul)
+                    && matches!(left.kind, ExprKind::Ident(_))
+                    && try_const_eval(right) == Some(0)
+                {
+                    self.out.extend_from_slice(b"\txor\tax,ax\r\n");
+                    return;
+                }
+                if matches!(op, BinOp::Mul | BinOp::Div)
+                    && matches!(left.kind, ExprKind::Ident(_))
+                    && try_const_eval(right) == Some(1)
+                {
+                    self.emit_expr_to_ax(left);
+                    return;
+                }
                 if op.is_comparison() {
                     self.emit_comparison_as_value(e.span.start, e.span.end, *op, left, right);
                 } else if matches!(op, BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Mul)
