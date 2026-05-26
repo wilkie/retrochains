@@ -6436,6 +6436,59 @@ impl<'a> FunctionEmitter<'a> {
 
     /// Initialize a freshly-declared local with `init`.
     fn emit_init_local(&mut self, loc: LocalLocation, ty: &Type, init: &Expr) {
+        // `float f = <const>;` / `double d = <const>;` — pool the IEEE
+        // bytes in `s@`, then `fld <ptr> DGROUP:s@[+off] / fstp <ptr>
+        // [bp-N]`. BCC narrows a `double = <float-representable>`
+        // initializer to a 32-bit float in the pool, relying on the
+        // FPU's 80-bit promotion + truncating `fstp qword` to recover
+        // the original double bits (fixture 1672: `double d = 3.0`
+        // stores 4 bytes of `3.0f` and reads as `dword`).
+        if matches!(ty, Type::Float | Type::Double)
+            && let LocalLocation::Stack(stack_off) = loc
+        {
+            let (pool_off, load_width) = match (&init.kind, ty) {
+                (ExprKind::FloatLit(bits), _) => {
+                    (self.strings.intern_float(*bits), "dword")
+                }
+                (ExprKind::DoubleLit(bits), Type::Float) => {
+                    // `float f = 3.0;` — narrow double constant to
+                    // 32-bit float for the pool (matches BCC's
+                    // load-as-dword pattern for double-typed targets).
+                    let f = f64::from_bits(*bits) as f32;
+                    (self.strings.intern_float(f.to_bits()), "dword")
+                }
+                (ExprKind::DoubleLit(bits), Type::Double) => {
+                    // Narrow to a 32-bit float when the value is
+                    // exactly representable; otherwise pool full 64
+                    // bits. BCC takes the narrowing path even for
+                    // double-typed locals (fixture 1672) when the
+                    // round-trip is lossless.
+                    let d = f64::from_bits(*bits);
+                    let f = d as f32;
+                    if f64::from(f).to_bits() == *bits {
+                        (self.strings.intern_float(f.to_bits()), "dword")
+                    } else {
+                        (self.strings.intern_double(*bits), "qword")
+                    }
+                }
+                _ => {
+                    panic!("non-literal float/double initializer not supported yet")
+                }
+            };
+            let store_width = if matches!(ty, Type::Float) { "dword" } else { "qword" };
+            let src = if pool_off == 0 {
+                "DGROUP:s@".to_owned()
+            } else {
+                format!("DGROUP:s@+{pool_off}")
+            };
+            let _ = write!(self.out, "\tfld\t{load_width} ptr {src}\r\n");
+            let _ = write!(
+                self.out,
+                "\tfstp\t{store_width} ptr {}\r\n",
+                bp_addr(stack_off),
+            );
+            return;
+        }
         match loc {
             LocalLocation::Stack(off) => {
                 // Stack array (and struct) initializer with a constant
