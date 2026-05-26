@@ -12596,6 +12596,66 @@ impl<'a> FunctionEmitter<'a> {
             self.emit_long_compound_to_mem(&lo_addr, &hi_addr, op, value, pointee.is_unsigned());
             return;
         }
+        // Global int/char array with VARIABLE index, postfix ±1 form
+        // (\`arr[i]++\` rewritten to compound \`+= 1\`): emit a single
+        // \`inc/dec <width> ptr DGROUP:_<arr>[bx]\` — saves the
+        // load+store+restore pair the const path uses. Fixture 3516.
+        if let Some(g_ty) = self.globals.type_of(array)
+            && let Some(elem_ty) = g_ty.array_elem()
+            && (elem_ty.is_int_like() || elem_ty.is_char_like())
+            && indices.len() == 1
+            && try_const_eval(&indices[0]).is_none()
+            && from_postfix
+            && matches!(op, BinOp::Add | BinOp::Sub)
+            && try_const_eval(value) == Some(1)
+        {
+            let elem_ty_clone = elem_ty.clone();
+            self.emit_index_into_bx(&indices[0], &elem_ty_clone);
+            let mnem = if matches!(op, BinOp::Add) { "inc" } else { "dec" };
+            let width = if elem_ty_clone.is_char_like() { "byte" } else { "word" };
+            let _ = write!(
+                self.out,
+                "\t{mnem}\t{width} ptr DGROUP:_{array}[bx]\r\n",
+            );
+            return;
+        }
+        // Global char array with VARIABLE index + constant value
+        // (non-postfix): char compound canonicalizes through AL.
+        // \`mov al, byte ptr DGROUP:_<arr>[bx]; <mnem> al, <k>;
+        // mov byte ptr DGROUP:_<arr>[bx], al\`. Fixture 3515.
+        if let Some(g_ty) = self.globals.type_of(array)
+            && let Some(elem_ty) = g_ty.array_elem()
+            && elem_ty.is_char_like()
+            && indices.len() == 1
+            && try_const_eval(&indices[0]).is_none()
+            && matches!(
+                op,
+                BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor
+            )
+            && let Some(v) = try_const_eval(value)
+        {
+            let elem_ty_clone = elem_ty.clone();
+            self.emit_index_into_bx(&indices[0], &elem_ty_clone);
+            let mnem = match op {
+                BinOp::Add => "add",
+                BinOp::Sub => "sub",
+                BinOp::BitAnd => "and",
+                BinOp::BitOr => "or",
+                BinOp::BitXor => "xor",
+                _ => unreachable!(),
+            };
+            let v_masked = v & 0xFF;
+            let _ = write!(
+                self.out,
+                "\tmov\tal,byte ptr DGROUP:_{array}[bx]\r\n",
+            );
+            let _ = write!(self.out, "\t{mnem}\tal,{v_masked}\r\n");
+            let _ = write!(
+                self.out,
+                "\tmov\tbyte ptr DGROUP:_{array}[bx],al\r\n",
+            );
+            return;
+        }
         // Char/int global-array element with a constant index — same
         // shapes as the corresponding char-global / int-global compound
         // patterns, just with a `DGROUP:_<a>+<K>` address. Fixture 706
