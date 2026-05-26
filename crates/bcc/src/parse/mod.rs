@@ -1078,6 +1078,16 @@ impl Parser {
                 self.expect(&TokenKind::RBracket)?;
                 ty = Type::Pointer(Box::new(ty));
             }
+            // Typedef-array param (`Vec v` where Vec is int[3]) —
+            // C decays array-typed parameters to pointer-to-element.
+            // The `int v[]` syntactic case is handled above; this
+            // covers the case where the array type comes through
+            // typedef expansion. Fixture 2497.
+            let ty = if let Type::Array { elem, .. } = ty {
+                Type::Pointer(elem)
+            } else {
+                ty
+            };
             params.push(Param { name, ty });
             if matches!(self.peek().kind, TokenKind::Comma) {
                 self.bump();
