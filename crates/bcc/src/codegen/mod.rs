@@ -7212,6 +7212,55 @@ impl<'a> FunctionEmitter<'a> {
                 //     helper used by struct returns and >4B struct
                 //     copies. Fixtures 1465, 1475-1476, 1481, 1516,
                 //     1616 (3-field struct, 6B), and many more.
+                // Struct-copy init: `struct S q = p;` where p is
+                // another struct of the same type. Mirrors the
+                // assign-side struct copy (size==4 inline AX/DX
+                // pair, size>4 N_SCOPY@). Fixture 3198.
+                if let Type::Struct { .. } = ty
+                    && let ExprKind::Ident(src_name) = &init.kind
+                {
+                    let size = ty.size_bytes();
+                    let src_is_global = self.globals.type_of(src_name).map_or(false, |t| t == ty);
+                    let src_is_stack = self.locals.has(src_name)
+                        && self.locals.type_of(src_name) == ty;
+                    if (src_is_global || src_is_stack) && size == 4 {
+                        if src_is_global {
+                            let _ = write!(self.out, "\tmov\tax,word ptr DGROUP:_{src_name}+2\r\n");
+                            let _ = write!(self.out, "\tmov\tdx,word ptr DGROUP:_{src_name}\r\n");
+                        } else {
+                            let LocalLocation::Stack(src_off) = self.locals.location_of(src_name)
+                            else {
+                                panic!("struct local `{src_name}` not stack-resident");
+                            };
+                            let _ = write!(self.out, "\tmov\tax,word ptr {}\r\n", bp_addr(src_off + 2));
+                            let _ = write!(self.out, "\tmov\tdx,word ptr {}\r\n", bp_addr(src_off));
+                        }
+                        let _ = write!(self.out, "\tmov\tword ptr {},ax\r\n", bp_addr(off + 2));
+                        let _ = write!(self.out, "\tmov\tword ptr {},dx\r\n", bp_addr(off));
+                        return;
+                    }
+                    if (src_is_global || src_is_stack) && size > 4 {
+                        let _ = write!(self.out, "\tlea\tax,word ptr {}\r\n", bp_addr(off));
+                        self.out.extend_from_slice(b"\tpush\tss\r\n");
+                        self.out.extend_from_slice(b"\tpush\tax\r\n");
+                        if src_is_global {
+                            let _ = write!(self.out, "\tmov\tax,offset DGROUP:_{src_name}\r\n");
+                            self.out.extend_from_slice(b"\tpush\tds\r\n");
+                        } else {
+                            let LocalLocation::Stack(src_off) = self.locals.location_of(src_name)
+                            else {
+                                panic!("struct local `{src_name}` not stack-resident");
+                            };
+                            let _ = write!(self.out, "\tlea\tax,word ptr {}\r\n", bp_addr(src_off));
+                            self.out.extend_from_slice(b"\tpush\tss\r\n");
+                        }
+                        self.out.extend_from_slice(b"\tpush\tax\r\n");
+                        let _ = write!(self.out, "\tmov\tcx,{size}\r\n");
+                        self.out.extend_from_slice(b"\tcall\tnear ptr N_SCOPY@\r\n");
+                        self.helpers.insert("N_SCOPY@".to_string());
+                        return;
+                    }
+                }
                 if matches!(ty, Type::Array { .. } | Type::Struct { .. })
                     && let Some(bytes) = flatten_init_to_bytes(ty, init)
                 {
