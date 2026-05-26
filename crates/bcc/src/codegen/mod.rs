@@ -10563,18 +10563,28 @@ impl<'a> FunctionEmitter<'a> {
                 panic!("`*{base_name}`: not a pointer type");
             };
             let width = ptr_width(pointee);
-            let addr_reg = match self.locals.location_of(base_name) {
-                LocalLocation::Reg(reg) => reg.name().to_owned(),
-                LocalLocation::Stack(_) => {
-                    panic!("stack-resident bare-`*p` dereference not yet supported (no fixture)");
+            match self.locals.location_of(base_name) {
+                LocalLocation::Reg(reg) => {
+                    let addr_reg = reg.name();
+                    if pointee.is_char_like() {
+                        let _ = write!(self.out, "\tmov\tal,byte ptr [{addr_reg}]\r\n");
+                        self.emit_widen_al(pointee);
+                    } else {
+                        let _ = write!(self.out, "\tmov\tax,{width} ptr [{addr_reg}]\r\n");
+                    }
+                }
+                LocalLocation::Stack(off) => {
+                    // Stack-resident pointer: load into BX, then
+                    // read through [bx]. Fixture 1932.
+                    let _ = write!(self.out, "\tmov\tbx,word ptr {}\r\n", bp_addr(off));
+                    if pointee.is_char_like() {
+                        self.out.extend_from_slice(b"\tmov\tal,byte ptr [bx]\r\n");
+                        self.emit_widen_al(pointee);
+                    } else {
+                        let _ = write!(self.out, "\tmov\tax,{width} ptr [bx]\r\n");
+                    }
                 }
             };
-            if pointee.is_char_like() {
-                let _ = write!(self.out, "\tmov\tal,byte ptr [{addr_reg}]\r\n");
-                self.emit_widen_al(pointee);
-            } else {
-                let _ = write!(self.out, "\tmov\tax,{width} ptr [{addr_reg}]\r\n");
-            }
             return;
         }
         // Chain path: land the address-to-be-deref'd-once-more in BX,
