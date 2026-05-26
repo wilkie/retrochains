@@ -10841,6 +10841,49 @@ impl<'a> FunctionEmitter<'a> {
         // <ptr> is a register-resident struct pointer: fold the
         // field offset + element offset and emit a single
         // \`mov ax, word ptr [reg + total_off]\`. Fixture 2676.
+        // `<global-struct>.<arr-field>[i]` / `[K]` — fold the field
+        // offset into the global symbol and index from there.
+        // Fixtures 2940, 3422.
+        if let ExprKind::Member { base, field, kind: crate::ast::MemberKind::Dot } = &array.kind
+            && let ExprKind::Ident(struct_name) = &base.kind
+            && let Some(g_ty) = self.globals.type_of(struct_name)
+            && let Some((field_off, field_ty)) = g_ty.field(field)
+            && let Some(elem_ty) = field_ty.array_elem()
+        {
+            let elem_ty_clone = elem_ty.clone();
+            let stride = u32::from(elem_ty_clone.size_bytes());
+            if let Some(k) = try_const_eval(index) {
+                let off = u32::from(field_off) + k.wrapping_mul(stride);
+                let addr = if off == 0 {
+                    format!("DGROUP:_{struct_name}")
+                } else {
+                    format!("DGROUP:_{struct_name}+{off}")
+                };
+                if elem_ty_clone.is_char_like() {
+                    let _ = write!(self.out, "\tmov\tal,byte ptr {addr}\r\n");
+                    self.emit_widen_al(&elem_ty_clone);
+                } else {
+                    let _ = write!(self.out, "\tmov\tax,word ptr {addr}\r\n");
+                }
+                return;
+            }
+            // Variable index: scale i into BX, then load through
+            // the indexed form. The field offset folds into the
+            // symbol reference; BX carries just the i*stride.
+            self.emit_index_into_bx(index, &elem_ty_clone);
+            let base_sym = if field_off == 0 {
+                format!("DGROUP:_{struct_name}")
+            } else {
+                format!("DGROUP:_{struct_name}+{field_off}")
+            };
+            if elem_ty_clone.is_char_like() {
+                let _ = write!(self.out, "\tmov\tal,byte ptr {base_sym}[bx]\r\n");
+                self.emit_widen_al(&elem_ty_clone);
+            } else {
+                let _ = write!(self.out, "\tmov\tax,word ptr {base_sym}[bx]\r\n");
+            }
+            return;
+        }
         if let ExprKind::Member { base, field, kind: crate::ast::MemberKind::Arrow } = &array.kind
             && let ExprKind::Ident(p_name) = &base.kind
             && self.locals.has(p_name)
