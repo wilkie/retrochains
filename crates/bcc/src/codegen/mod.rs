@@ -12528,6 +12528,22 @@ impl<'a> FunctionEmitter<'a> {
             }
             return;
         }
+        // Register-resident RHS for an int field: store the
+        // register direct, skipping the AX round-trip. Fixture 3560
+        // (`r.a = v` with v in SI → `mov [bp-N], si`).
+        if !store_byte
+            && let ExprKind::Ident(rhs_name) = &value.kind
+            && self.locals.has(rhs_name)
+            && let LocalLocation::Reg(rhs_reg) = self.locals.location_of(rhs_name)
+            && !rhs_reg.is_byte()
+        {
+            let _ = write!(
+                self.out,
+                "\tmov\tword ptr {dest},{}\r\n",
+                rhs_reg.name(),
+            );
+            return;
+        }
         // Non-constant RHS for an int field: materialize into AX,
         // then store AX to the field. Fixture 990 (`s.x = v;` with
         // v a stack local).
