@@ -16254,9 +16254,12 @@ impl<'a> FunctionEmitter<'a> {
         {
             let unsigned = self.expr_is_unsigned(left);
             let _ = write!(self.out, "\tmov\tax,word ptr {hi}\r\n");
-            if unsigned {
-                self.out.extend_from_slice(b"\txor\tdx,dx\r\n");
-            } else {
+            // BCC emits `cwd` for the signed case (the long-shr-by-16
+            // result lives in DX:AX so the sign-extended high half is
+            // written even though the int cast drops it). Unsigned
+            // skips the widen entirely. Fixtures 2173 (signed →
+            // cwd), 2180 (ulong → no widen).
+            if !unsigned {
                 self.out.extend_from_slice(b"\tcwd\t\r\n");
             }
             return;
