@@ -6202,6 +6202,22 @@ impl<'a> FunctionEmitter<'a> {
                 );
                 return;
             }
+            // Same shape for a stack-local long array: compute
+            // &arr[i] address (lea-then-add via BX), then load
+            // both halves through `[bx]` / `[bx+2]`. Fixture 2798.
+            if let ExprKind::ArrayIndex { array, index } = &e.kind
+                && let ExprKind::Ident(arr_name) = &array.kind
+                && self.locals.has(arr_name)
+                && let Some(elem) = self.locals.type_of(arr_name).array_elem()
+                && elem.is_long_like()
+                && let LocalLocation::Stack(base_off) = self.locals.location_of(arr_name)
+            {
+                let elem_size = elem.size_bytes();
+                self.emit_array_addr_to_bx(arr_name, index, base_off, elem_size);
+                self.out.extend_from_slice(b"\tmov\tdx,word ptr [bx+2]\r\n");
+                self.out.extend_from_slice(b"\tmov\tax,word ptr [bx]\r\n");
+                return;
+            }
             panic!("non-constant long return value not yet supported (no fixture)");
         }
         // Unsigned-char return: BCC doesn't bother widening — the
@@ -10289,6 +10305,9 @@ impl<'a> FunctionEmitter<'a> {
             }
         }
         if elem_size == 2 {
+            self.out.extend_from_slice(b"\tshl\tbx,1\r\n");
+        } else if elem_size == 4 {
+            self.out.extend_from_slice(b"\tshl\tbx,1\r\n");
             self.out.extend_from_slice(b"\tshl\tbx,1\r\n");
         }
         let _ = write!(self.out, "\tlea\tax,word ptr {}\r\n", bp_addr(base_off));
