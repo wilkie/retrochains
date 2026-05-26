@@ -7145,7 +7145,12 @@ impl<'a> FunctionEmitter<'a> {
                 {
                     let size = bytes.len() as u32;
                     let pool_off = self.strings.intern_blob(&bytes);
-                    if size == 2 {
+                    // Stack array aggregate init: BCC uses N_SCOPY@
+                    // regardless of size — even for size 2 / 4 where
+                    // the corresponding struct shape goes inline.
+                    // Fixtures 1617, 1618, 1712, 1799-1801, 1883.
+                    let is_array = matches!(ty, Type::Array { .. });
+                    if !is_array && size == 2 {
                         let src = if pool_off == 0 {
                             "DGROUP:s@".to_owned()
                         } else {
@@ -7159,7 +7164,7 @@ impl<'a> FunctionEmitter<'a> {
                         );
                         return;
                     }
-                    if size == 4 {
+                    if !is_array && size == 4 {
                         let src_hi = if pool_off + 2 == 0 {
                             "DGROUP:s@".to_owned()
                         } else {
