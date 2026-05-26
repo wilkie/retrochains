@@ -15782,20 +15782,26 @@ impl<'a> FunctionEmitter<'a> {
                     // -1)`), 616 (`a + b` with b a char param), 645
                     // (`x + y * 2`).
                     // `(int)<long_lvalue>` is just a low-half memory
-                    // load — doesn't clobber AX in the sense the
-                    // push/pop dance was designed to prevent. Let it
-                    // route through the normal `add ax, mem` path.
-                    // Fixture 1947 (`a + (int)b + c`).
-                    let rhs_is_int_cast_of_long = if let ExprKind::Cast { ty: cast_ty, operand } = &right.kind {
-                        matches!(cast_ty, Type::Int | Type::UInt)
-                            && self.long_lvalue_addr_pair(operand).is_some()
-                    } else {
-                        false
-                    };
+                    // load and `(int)<int_lvalue>` is a no-op — neither
+                    // clobbers AX in the sense the push/pop dance was
+                    // designed to prevent. Let them route through the
+                    // normal `add ax, mem` path. Fixtures 1947
+                    // (`a + (int)b + c` with long b), 1778
+                    // (`ca[1] + (int)ia[1]`).
+                    let rhs_is_int_cast_of_int_or_long =
+                        if let ExprKind::Cast { ty: cast_ty, operand } = &right.kind {
+                            matches!(cast_ty, Type::Int | Type::UInt)
+                                && (self.long_lvalue_addr_pair(operand).is_some()
+                                    || self.try_lvalue_chain_addr(operand)
+                                        .filter(|(_, _, ty)| ty.is_int_like())
+                                        .is_some())
+                        } else {
+                            false
+                        };
                     let rhs_clobbers_ax = matches!(right.kind, ExprKind::Call { .. })
                         || self.expr_is_char_load(right)
                         || (matches!(right.kind, ExprKind::Cast { .. })
-                            && !rhs_is_int_cast_of_long)
+                            && !rhs_is_int_cast_of_int_or_long)
                         || matches!(right.kind, ExprKind::Ternary { .. })
                         || (matches!(right.kind, ExprKind::BinOp { .. })
                             && try_const_eval(right).is_none());
@@ -17081,6 +17087,14 @@ impl<'a> FunctionEmitter<'a> {
                 panic!("ternary as right operand of a binary op not yet supported (no fixture)")
             }
             ExprKind::Cast { ty: cast_ty, operand } => {
+                // `(int)<int_lvalue>` — no-op cast; recurse into the
+                // operand. Fixture 1778 (`ca[1] + (int)ia[1]`).
+                if matches!(cast_ty, Type::Int | Type::UInt)
+                    && let Some((_name, _off, ty)) = self.try_lvalue_chain_addr(operand)
+                    && ty.is_int_like()
+                {
+                    return self.resolve_operand_source(operand);
+                }
                 // `(int)<long_lvalue>` — fold to the low-half memory
                 // address as a word-sized source operand. The cast is
                 // a no-op at the byte level (low half of a long IS
