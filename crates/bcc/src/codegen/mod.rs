@@ -16220,6 +16220,17 @@ impl<'a> FunctionEmitter<'a> {
         then_value: &Expr,
         else_value: &Expr,
     ) {
+        // Constant cond: BCC fully folds the ternary, emitting only
+        // the surviving arm with no labels or jumps. Fixture 2965
+        // (`1 ? a : b` → just `mov ax, [a]`).
+        if let Some(v) = try_const_eval(cond) {
+            if v != 0 {
+                self.emit_expr_to_ax(then_value);
+            } else {
+                self.emit_expr_to_ax(else_value);
+            }
+            return;
+        }
         let base = self.label_plan.base(span_start, span_end);
         // Some compare shapes need an explicit then-entry label so the
         // 3-jump long-vs-K cmp pattern (and `||` short-circuit-to-true)
