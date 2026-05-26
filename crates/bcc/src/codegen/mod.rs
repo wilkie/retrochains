@@ -7391,6 +7391,22 @@ impl<'a> FunctionEmitter<'a> {
                     );
                     return;
                 }
+                // `<ident> * 0` annihilator fold: with a pure ident
+                // on the left and 0 on the right, the result is
+                // always 0 and BCC emits the same direct mem-imm
+                // store. Fixture 2011 (`int r = x * 0`).
+                if let ExprKind::BinOp { op: BinOp::Mul, left, right } = &init.kind
+                    && matches!(left.kind, ExprKind::Ident(_))
+                    && try_const_eval(right) == Some(0)
+                {
+                    let width = ptr_width(ty);
+                    let _ = write!(
+                        self.out,
+                        "\tmov\t{width} ptr {},0\r\n",
+                        bp_addr(off),
+                    );
+                    return;
+                }
                 // Array-to-pointer decay init: `T *p = arr;` for
                 // `arr` a global array. Store the symbol's offset
                 // directly. Fixture 2541 (`p = arr` for global arr).
