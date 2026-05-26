@@ -11535,6 +11535,18 @@ impl<'a> FunctionEmitter<'a> {
             let _ = write!(self.out, "\tmov\t{width} ptr {dest},ax\r\n");
             return;
         }
+        // Char-element `<byte-arr>[K] *= C` — widen byte to int,
+        // multiply, narrow back. Same pattern as int-element Mul but
+        // with the AL load + cbw widening up front and a byte store
+        // at the end. Fixture 1211 (`a[0] *= 5` for char a[3]).
+        if store_byte && matches!(op, BinOp::Mul) {
+            let _ = write!(self.out, "\tmov\tal,byte ptr {dest}\r\n");
+            self.out.extend_from_slice(b"\tcbw\t\r\n");
+            let _ = write!(self.out, "\tmov\tdx,{v_masked}\r\n");
+            self.out.extend_from_slice(b"\timul\tdx\r\n");
+            let _ = write!(self.out, "\tmov\tbyte ptr {dest},al\r\n");
+            return;
+        }
         let mnemonic = match op {
             BinOp::Add => "add",
             BinOp::Sub => "sub",
@@ -15319,6 +15331,35 @@ impl<'a> FunctionEmitter<'a> {
             let _ = write!(
                 self.out,
                 "\tmov\t{},word ptr DGROUP:_{name}\r\n",
+                reg.name(),
+            );
+            return;
+        }
+        // `<reg> = <reg-ptr>-><field>` — load directly from
+        // `[<reg-ptr>+<field-off>]` into the destination register,
+        // skipping the AX round-trip. Fixture 3343 (`p = p->next`
+        // for `struct Node *p` in SI).
+        if let ExprKind::Member {
+            base,
+            field,
+            kind: crate::ast::MemberKind::Arrow,
+        } = &expr.kind
+            && let ExprKind::Ident(base_name) = &base.kind
+            && self.locals.has(base_name)
+            && let LocalLocation::Reg(base_reg) = self.locals.location_of(base_name)
+            && let Some(base_pointee) = self.locals.type_of(base_name).pointee()
+            && let Some((field_off, field_ty)) = base_pointee.field(field)
+            && (field_ty.is_int_like() || field_ty.pointee().is_some())
+            && !reg.is_byte()
+        {
+            let bx_disp = if field_off == 0 {
+                format!("[{}]", base_reg.name())
+            } else {
+                format!("[{}+{field_off}]", base_reg.name())
+            };
+            let _ = write!(
+                self.out,
+                "\tmov\t{},word ptr {bx_disp}\r\n",
                 reg.name(),
             );
             return;
