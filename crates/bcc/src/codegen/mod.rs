@@ -930,9 +930,18 @@ impl<'a> FunctionEmitter<'a> {
                 self.emit_update_in_place(target, *op, *position);
             }
             ExprKind::AssignExpr { target, value } => {
-                let loc = self.locals.location_of(target);
-                let ty = self.locals.type_of(target).clone();
-                self.emit_assign_local(loc, &ty, value);
+                // Global LHS shadowed by a local is handled at
+                // statement-level; here in discard context we
+                // dispatch to whichever table owns the name. A
+                // global without a corresponding local routes to
+                // emit_assign_global. Fixture 3509.
+                if !self.locals.has(target) && self.globals.contains(target) {
+                    self.emit_assign_global(target, value);
+                } else {
+                    let loc = self.locals.location_of(target);
+                    let ty = self.locals.type_of(target).clone();
+                    self.emit_assign_local(loc, &ty, value);
+                }
             }
             ExprKind::CompoundAssignExpr { target, op, value } => {
                 self.emit_compound_assign(target, *op, value);
