@@ -6434,6 +6434,80 @@ impl<'a> FunctionEmitter<'a> {
         self.emit_expr_to_ax(e);
     }
 
+    /// True iff `e`'s static type is `float` or `double`. Only the
+    /// shapes that currently reach the FPU codegen path are checked
+    /// (literals, ident locals/params, ident globals); others fall
+    /// through to `false` and the cast / arithmetic dispatch keeps
+    /// its integer-AX assumption.
+    fn operand_is_float_like(&self, e: &Expr) -> bool {
+        match &e.kind {
+            ExprKind::FloatLit(_) | ExprKind::DoubleLit(_) => true,
+            ExprKind::Ident(name) => {
+                if self.locals.has(name) {
+                    self.locals.type_of(name).is_float_like()
+                } else if let Some(ty) = self.globals.type_of(name) {
+                    ty.is_float_like()
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
+    }
+
+    /// Push a float-typed expression onto the FPU stack. Mirrors
+    /// `emit_init_local`'s constant-pool path for literals; for a
+    /// named local or global, picks `dword`/`qword` width from the
+    /// static type.
+    fn emit_float_load_to_fpu(&mut self, e: &Expr) {
+        match &e.kind {
+            ExprKind::FloatLit(bits) => {
+                let off = self.strings.intern_float(*bits);
+                let src = if off == 0 {
+                    "DGROUP:s@".to_owned()
+                } else {
+                    format!("DGROUP:s@+{off}")
+                };
+                let _ = write!(self.out, "\tfld\tdword ptr {src}\r\n");
+            }
+            ExprKind::DoubleLit(bits) => {
+                let off = self.strings.intern_double(*bits);
+                let src = if off == 0 {
+                    "DGROUP:s@".to_owned()
+                } else {
+                    format!("DGROUP:s@+{off}")
+                };
+                let _ = write!(self.out, "\tfld\tqword ptr {src}\r\n");
+            }
+            ExprKind::Ident(name) => {
+                let ty = if self.locals.has(name) {
+                    self.locals.type_of(name).clone()
+                } else if let Some(gty) = self.globals.type_of(name) {
+                    gty.clone()
+                } else {
+                    panic!("unknown name in FPU load: {name}");
+                };
+                let width = if matches!(ty, Type::Float) { "dword" } else { "qword" };
+                if self.locals.has(name) {
+                    let LocalLocation::Stack(off) = self.locals.location_of(name) else {
+                        panic!("float local must live on the stack: {name}")
+                    };
+                    let _ = write!(
+                        self.out,
+                        "\tfld\t{width} ptr {}\r\n",
+                        bp_addr(off),
+                    );
+                } else {
+                    let _ = write!(
+                        self.out,
+                        "\tfld\t{width} ptr DGROUP:_{name}\r\n",
+                    );
+                }
+            }
+            _ => panic!("FPU load not yet supported for {:?}", e.kind),
+        }
+    }
+
     /// Initialize a freshly-declared local with `init`.
     fn emit_init_local(&mut self, loc: LocalLocation, ty: &Type, init: &Expr) {
         // `float f = <const>;` / `double d = <const>;` — pool the IEEE
@@ -16794,6 +16868,20 @@ impl<'a> FunctionEmitter<'a> {
     /// char-typed local from that offset. Widening / no-op casts just
     /// evaluate the operand into AX.
     fn emit_cast_to_ax(&mut self, ty: &Type, operand: &Expr) {
+        // `(int)<float-or-double>` — BCC routes through the runtime
+        // helper `N_FTOL@`: load the FP operand to the FPU stack,
+        // call the helper, which pops the FPU stack and leaves the
+        // signed-int result in AX (with DX clobbered for the long
+        // form, but for int return the low word in AX is what we
+        // want). Fixture 1670 (float local → int).
+        if matches!(ty, Type::Int | Type::UInt)
+            && self.operand_is_float_like(operand)
+        {
+            self.emit_float_load_to_fpu(operand);
+            self.helpers.insert("N_FTOL@".to_string());
+            self.out.extend_from_slice(b"\tcall\tnear ptr N_FTOL@\r\n");
+            return;
+        }
         // `(int)(<long_lvalue> >> 16)` — fast-path for the long
         // right-shift-by-16 pattern. The high half of the long is
         // exactly what `(int)(x >> 16)` yields, so BCC loads the
