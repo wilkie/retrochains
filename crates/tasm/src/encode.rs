@@ -425,6 +425,7 @@ fn instr_size(instr: &Instr) -> usize {
         Instr::TestBpRelImm16 { offset, .. } => 1 + bp_rel_modrm_size(*offset) + 2,
         Instr::TestBpRelAx { offset } => 1 + bp_rel_modrm_size(*offset),
         Instr::TestReg16Imm16 { .. } => 4,
+        Instr::TestReg16Reg16 { .. } => 2,
         Instr::AddGroupSymReg16 { .. } | Instr::SubGroupSymReg16 { .. } => 4,
         Instr::AndGroupSymReg16 { .. }
         | Instr::OrGroupSymReg16 { .. }
@@ -2107,6 +2108,16 @@ fn emit_instr(
             out.push(0xF7);
             out.push(0xC0 | reg.code());
             out.extend_from_slice(&imm.to_le_bytes());
+        }
+        Instr::TestReg16Reg16 { dst, src } => {
+            // `test <dst>, <src>` → 85 (mod=11 reg=dst r/m=src).
+            // TASM puts the FIRST operand in the reg field and the
+            // SECOND in the r/m field (TEST is symmetric so either
+            // encoding sets identical flags, but the byte form
+            // matters for byte-exact match). Fixture 3452 expects
+            // `test ax, dx` → `85 C2` (reg=AX=000, r/m=DX=010).
+            out.push(0x85);
+            out.push(0b11_000_000 | (dst.code() << 3) | src.code());
         }
         Instr::TestBpRelImm16 { offset, imm } => {
             // `test word ptr [bp+disp8], imm16` → F7 46 dd lo hi.

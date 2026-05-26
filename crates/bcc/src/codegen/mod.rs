@@ -4138,6 +4138,25 @@ impl<'a> FunctionEmitter<'a> {
     /// expression — used in boolean contexts (`if (x)`, `x && y`).
     /// Today only `Ident`s are supported; other expressions panic.
     fn emit_zero_test(&mut self, cond: &Expr) {
+        // `if (<bf-chain> & <bf>)` — when the cond is a BitAnd
+        // chain whose right operand is a bitfield, BCC replaces
+        // the chain's final `and ax, dx` with `test ax, dx` (sets
+        // ZF without writing back). Saves the `or ax, ax` the
+        // generic path would emit. Fixture 3452.
+        if let ExprKind::BinOp { op: BinOp::BitAnd, left, right } = &cond.kind
+            && let Some(right_bf) = self.resolve_bitfield(right)
+        {
+            // Seed AX: prefer head-bitfield read; otherwise the
+            // standard emit_expr_to_ax path.
+            if let Some(head_bf) = self.resolve_bitfield(left) {
+                self.emit_bitfield_read_to_reg(&head_bf, "ax", "al");
+            } else {
+                self.emit_expr_to_ax(left);
+            }
+            self.emit_bitfield_read_to_reg(&right_bf, "dx", "dl");
+            self.out.extend_from_slice(b"\ttest\tax,dx\r\n");
+            return;
+        }
         // `if ((x = expr))` — evaluate the assignment expression
         // into AX (leaving the value behind), then `or ax, ax` to
         // set the flags. Fixture 513.

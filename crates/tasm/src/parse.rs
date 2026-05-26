@@ -456,6 +456,13 @@ fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
             {
                 return Ok(Instr::TestReg16Imm16 { reg, imm });
             }
+            // `test <dst-reg>, <src-reg>` — register-to-register
+            // bit test. Fixture 3452.
+            if let Some(dst) = Reg16::parse(lhs)
+                && let Some(src) = Reg16::parse(rhs)
+            {
+                return Ok(Instr::TestReg16Reg16 { dst, src });
+            }
             // `test word ptr [bp+disp8], imm16` — local bit test
             // (fixture 1853).
             if let Some(offset) = parse_word_bp_relative(lhs)

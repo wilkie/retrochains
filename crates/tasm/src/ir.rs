@@ -1392,6 +1392,14 @@ pub enum Instr {
         reg: Reg16,
         imm: u16,
     },
+    /// `test <dst-reg>, <src-reg>` — register-to-register bit test.
+    /// Encoding: `85 (modr/m mod=11 reg=src r/m=dst)` — 2 bytes.
+    /// Sets flags from `dst & src` without storing it. Fixture
+    /// 3452 (`if (bf & bf)` for two bitfield reads in AX and DX).
+    TestReg16Reg16 {
+        dst: Reg16,
+        src: Reg16,
+    },
     /// `inc word ptr <group>:<symbol>[+<offset>]` — INC r/m16 via
     /// Grp5 /0 against a data-segment global. Encoding: `FF 06 lo
     /// hi` (ModR/M 06 = mod=00 reg=000 r/m=110 → `[disp16]`).

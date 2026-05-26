@@ -253,12 +253,27 @@ fn emit_global_decl(out: &mut Vec<u8>, name: &str, ty: &crate::ast::Type) {
             _ => t,
         }
     }
+    /// True if the struct (or array-of-struct) contains any bitfield.
+    /// Bitfield-only structs that pack into 1 byte still emit `_b
+    /// label word` — the label tracks the declared int width, not
+    /// the actual byte count. Fixtures 3209, 3322.
+    fn has_bitfield(t: &Type) -> bool {
+        match t {
+            Type::Struct { fields, .. } => {
+                fields.iter().any(|f| f.bitfield.is_some())
+                    || fields.iter().any(|f| has_bitfield(&f.ty))
+            }
+            Type::Array { elem, .. } => has_bitfield(elem),
+            _ => false,
+        }
+    }
     // Float/double leaves use width keywords matching their FPU
     // operand prefix: `dword` for single, `qword` for double.
     // Fixture 1680 (`double g = 3.14;` → `_g label qword`).
     let width = match leaf_type(ty) {
         Type::Float => "dword",
         Type::Double => "qword",
+        _ if has_bitfield(ty) => "word",
         _ if leaf_size(ty) >= 2 => "word",
         _ => "byte",
     };
