@@ -437,6 +437,39 @@ fn emit_scalar_global_bytes(
         }
         return;
     }
+    // `T *p = <arr> + K;` — array-decay + constant offset. BCC
+    // emits `dw DGROUP:_<arr>+(K*stride)` with the linker resolving
+    // the symbol address. Fixture 3222.
+    if matches!(ty, Type::Pointer(_))
+        && let ExprKind::BinOp { op: crate::ast::BinOp::Add, left, right } = &init.kind
+        && let ExprKind::Ident(arr_name) = &left.kind
+        && let Some(k) = codegen::fold_const_global(right)
+    {
+        // We need the element size to compute the byte offset.
+        // Since emit_global_init doesn't have the globals table,
+        // pull the stride from the pointer's pointee type.
+        let stride = if let Type::Pointer(inner) = ty {
+            u32::from(inner.size_bytes())
+        } else {
+            unreachable!()
+        };
+        let offset = k.wrapping_mul(stride);
+        if offset == 0 {
+            let _ = write!(out, "\tdw\tDGROUP:_{arr_name}\r\n");
+        } else {
+            let _ = write!(out, "\tdw\tDGROUP:_{arr_name}+{offset}\r\n");
+        }
+        return;
+    }
+    // Bare-ident initializer of a near pointer — array decay
+    // `T *p = arr;`. Same shape as the constant-offset path but
+    // with offset 0. Fixtures 2607 etc.
+    if matches!(ty, Type::Pointer(_))
+        && let ExprKind::Ident(arr_name) = &init.kind
+    {
+        let _ = write!(out, "\tdw\tDGROUP:_{arr_name}\r\n");
+        return;
+    }
     let v = codegen::fold_const_global(init).unwrap_or_else(|| {
         panic!("non-constant initializer at file scope (no fixture yet supports this)")
     });
