@@ -19238,6 +19238,21 @@ impl<'a> FunctionEmitter<'a> {
                         }
                     }
                 }
+                // `*(p + K)` where p is a register-resident pointer
+                // with constant offset K — fold to `[reg + K*stride]`.
+                // Fixture 3625 (`*p + *(p + 1)` for `int *p`).
+                if let ExprKind::BinOp { op: BinOp::Add, left, right } = &inner.kind
+                    && let ExprKind::Ident(name) = &left.kind
+                    && self.locals.has(name)
+                    && let Some(pointee) = self.locals.type_of(name).pointee()
+                    && let LocalLocation::Reg(reg) = self.locals.location_of(name)
+                    && let Some(k) = try_const_eval(right)
+                {
+                    let stride = i32::from(pointee.size_bytes());
+                    let off = (k as i32).wrapping_mul(stride);
+                    let off16 = i16::try_from(off).unwrap_or(i16::MAX);
+                    return OperandSource::DerefRegOffset { reg, offset: off16 };
+                }
                 panic!("`*p` as right operand of a binary op only supported for register-resident local pointers (no fixture for {:?})", inner.kind)
             }
             ExprKind::ArrayIndex { array, index } => {
