@@ -15783,17 +15783,18 @@ impl<'a> FunctionEmitter<'a> {
                         self.out.extend_from_slice(b"\tadd\tax,dx\r\n");
                         return;
                     }
-                    // `<ptr-typed lvalue> + K` / `- K` — C scales the
-                    // constant by the pointee size. Always route as
-                    // Add with the (possibly negative) scaled byte
-                    // count so the ±1/±2 inc/dec peephole fires for
-                    // small steps (fixture 2922: `p = p + 1` →
-                    // `inc ax; inc ax`) and the AX-accumulator add
-                    // form fires for larger ones (fixture 3557).
-                    // Fixtures 3557, 3256, 3382, 2922.
+                    // `<ptr-typed-expr> + K` / `- K` — C scales the
+                    // constant by the pointee size. Walks into nested
+                    // adds (e.g. `(p + n) + 1` for int* p) so the
+                    // outer add still scales. Always route as Add
+                    // with the (possibly negative) scaled byte count
+                    // so the ±1/±2 inc/dec peephole fires for small
+                    // steps (fixture 2922: `p = p + 1` → `inc ax;
+                    // inc ax`) and the AX-accumulator add form fires
+                    // for larger ones (fixture 3557). Fixtures 3557,
+                    // 3256, 3382, 2922, 3632 (`p + n + 1`).
                     if matches!(op, BinOp::Add | BinOp::Sub)
-                        && let ExprKind::Ident(pname) = &left.kind
-                        && let Some(pointee) = self.ident_pointee(pname)
+                        && let Some(pointee) = self.expr_pointee(left)
                         && let Some(k) = try_const_eval(right)
                         && pointee.size_bytes() > 1
                     {
@@ -16691,6 +16692,34 @@ impl<'a> FunctionEmitter<'a> {
     /// Pointee type of `name` if it's a pointer-typed identifier;
     /// `None` for non-pointers and unknown names. Used by the
     /// pointer-arithmetic stride scaling (fixture 3557).
+    /// If `e` evaluates to a pointer (or decayed array), return the
+    /// pointee type. Walks through BinOp(Add/Sub) and Cast(ptr_ty)
+    /// to find a pointer-typed Ident at the root. Used to scale
+    /// nested `<ptr-expr> + K` properly when the outer add follows
+    /// another pointer add. Fixture 3632 (`p + n + 1`).
+    fn expr_pointee(&self, e: &Expr) -> Option<Type> {
+        match &e.kind {
+            ExprKind::Ident(name) => {
+                if let Some(p) = self.ident_pointee(name) {
+                    return Some(p);
+                }
+                if let Some(ty) = self.globals.type_of(name).cloned()
+                    .or_else(|| self.locals.has(name).then(|| self.locals.type_of(name).clone()))
+                {
+                    if let Some(elem) = ty.array_elem() {
+                        return Some(elem.clone());
+                    }
+                }
+                None
+            }
+            ExprKind::BinOp { op: BinOp::Add | BinOp::Sub, left, .. } => {
+                self.expr_pointee(left)
+            }
+            ExprKind::Cast { ty, .. } => ty.pointee().cloned(),
+            _ => None,
+        }
+    }
+
     fn ident_pointee(&self, name: &str) -> Option<Type> {
         if let Some(ty) = self.globals.type_of(name) {
             return ty.pointee().cloned();
