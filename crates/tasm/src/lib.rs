@@ -53,6 +53,8 @@ fn module_has_fpu(module: &ir::Module) -> bool {
                 | Instr::FldDwordGroupSym { .. }
                 | Instr::FldQwordGroupSym { .. }
                 | Instr::FpuArithBpRel { .. }
+                | Instr::Fld1
+                | Instr::FsubpStack
             ),
             _ => false,
         })

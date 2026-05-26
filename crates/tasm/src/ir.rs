@@ -1984,6 +1984,19 @@ pub enum Instr {
     /// `9B [D8|DC] <modrm /op [bp+disp]>` — fwait prefix + family
     /// byte + bp-relative ModR/M.
     FpuArithBpRel { op: FpuArithOp, width: FpuWidth, offset: i16 },
+    /// `fld1` — push the constant 1.0 onto the FPU stack.
+    /// Encoding: `9B D9 E8` (fwait prefix + D9 family +
+    /// register-mode ModR/M `0xE8` selecting the FLD1 special).
+    /// BCC uses this in place of pooling the bytes for any `1.0f`
+    /// operand (fixtures 1673, 1679).
+    Fld1,
+    /// `fsub` with no operand — equivalent to `fsubp st(1),st0`:
+    /// `st(1) := st(1) - st(0)`, then pop the stack. Encoding:
+    /// `9B DE E9`. BCC pairs this with `fld1` for the `<x> -
+    /// 1.0f` pattern when the literal is exactly 1.0 (fixture
+    /// 1673). Other constants flow through the memory-operand
+    /// `fsub` form instead.
+    FsubpStack,
 }
 
 /// Arithmetic operation in the 8087 ModR/M reg field. See the

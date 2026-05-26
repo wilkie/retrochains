@@ -847,7 +847,11 @@ fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
         "ret" => Ok(Instr::Ret),
         "fld" => parse_fld(rest, line.line_no),
         "fstp" => parse_fstp(rest, line.line_no),
+        "fld1" if rest.is_empty() => Ok(Instr::Fld1),
         "fadd" => parse_fpu_arith(rest, FpuArithOp::Add, "fadd", line.line_no),
+        // `fsub` with no operand is the register-stack
+        // `fsubp st(1),st0` shorthand BCC pairs with `fld1`.
+        "fsub" if rest.is_empty() => Ok(Instr::FsubpStack),
         "fsub" => parse_fpu_arith(rest, FpuArithOp::Sub, "fsub", line.line_no),
         "fmul" => parse_fpu_arith(rest, FpuArithOp::Mul, "fmul", line.line_no),
         "fdiv" => parse_fpu_arith(rest, FpuArithOp::Div, "fdiv", line.line_no),

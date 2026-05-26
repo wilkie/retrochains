@@ -297,6 +297,17 @@ impl StringPool {
 /// Format a bp-relative address: negative offsets are written
 /// `[bp-N]`, positives `[bp+N]`. Used by every `word ptr` / `byte ptr`
 /// memory operand a local/param produces.
+/// True iff `e` is a float/double literal whose value is exactly
+/// 1.0. BCC uses the FPU built-in `fld1` for these instead of
+/// pooling the IEEE bytes.
+fn expr_is_float_one(e: &Expr) -> bool {
+    match &e.kind {
+        ExprKind::FloatLit(bits) => f32::from_bits(*bits) == 1.0_f32,
+        ExprKind::DoubleLit(bits) => f64::from_bits(*bits) == 1.0_f64,
+        _ => false,
+    }
+}
+
 fn bp_addr(off: i16) -> String {
     if off < 0 {
         format!("[bp-{}]", -i32::from(off))
@@ -6527,6 +6538,17 @@ impl<'a> FunctionEmitter<'a> {
                 // operand. Left-associative chains (`a + b + c`) walk
                 // naturally: load a, fadd b (now top = a+b), fadd c.
                 self.emit_float_load_to_fpu(left);
+                // `<x> - 1.0f` peephole: BCC uses `fld1` + the
+                // no-operand register-stack `fsub` (= `fsubp st(1),
+                // st0`) instead of pooling 1.0 bytes for a memory
+                // operand. Catches both `FloatLit(1.0f)` and
+                // `DoubleLit(1.0)` since the FPU representation is
+                // identical. Fixture 1673.
+                if matches!(op, BinOp::Sub) && expr_is_float_one(right) {
+                    self.out.extend_from_slice(b"\tfld1\t\r\n");
+                    self.out.extend_from_slice(b"\tfsub\t\r\n");
+                    return;
+                }
                 let mnem = match op {
                     BinOp::Add => "fadd",
                     BinOp::Sub => "fsub",
