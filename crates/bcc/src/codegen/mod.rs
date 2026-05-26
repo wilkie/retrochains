@@ -5255,6 +5255,35 @@ impl<'a> FunctionEmitter<'a> {
             }
             return;
         }
+        // `char f() { return a + b; }` (no cast — both operands are
+        // already char). Same byte-width arithmetic as the Cast(char)
+        // path above; the cast is just elided in the source. Limit
+        // to Add/Sub/BitAnd/BitOr/BitXor where the low byte is
+        // independent of the high half. Fixture 3517.
+        if self.function.ret_ty.is_char_like()
+            && let ExprKind::BinOp { op: binop, left, right } = &e.kind
+            && matches!(binop,
+                BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor
+            )
+            && let Some((l_name, l_off, l_ty)) = self.try_lvalue_chain_addr(left)
+            && let Some((r_name, r_off, r_ty)) = self.try_lvalue_chain_addr(right)
+            && l_ty.is_char_like()
+            && r_ty.is_char_like()
+            && let Some(l_addr) = self.resolve_chain_addr(&l_name, l_off)
+            && let Some(r_addr) = self.resolve_chain_addr(&r_name, r_off)
+        {
+            let mnem = match binop {
+                BinOp::Add => "add",
+                BinOp::Sub => "sub",
+                BinOp::BitAnd => "and",
+                BinOp::BitOr => "or",
+                BinOp::BitXor => "xor",
+                _ => unreachable!(),
+            };
+            let _ = write!(self.out, "\tmov\tal,byte ptr {l_addr}\r\n");
+            let _ = write!(self.out, "\t{mnem}\tal,byte ptr {r_addr}\r\n");
+            return;
+        }
         // `return (char)(<int_lvalue> << K);` — byte load + byte
         // shifts + cbw. K in 1..=3 unrolls; K >= 4 uses CL form.
         // Byte form is correct because Shl pushes bits OUT of the
