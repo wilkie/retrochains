@@ -1582,6 +1582,9 @@ impl Parser {
             }
         }
         let base_ty = self.parse_type()?;
+        // BCC cc/memory-model modifiers between the type and the
+        // pointer-star/declarator (`int far *p`). Discarded.
+        self.consume_cc_modifiers();
         // Pointer stars wrap the base type: `int **pp` is `Pointer(Pointer(Int))`.
         // Stars are per-declarator — `int *a, b;` makes `a` an `int*`
         // and `b` a plain `int`, so we keep `base_ty` clean for the
@@ -1591,6 +1594,9 @@ impl Parser {
         while matches!(self.peek().kind, TokenKind::Star) {
             self.bump();
             ty = Type::Pointer(Box::new(ty));
+            // `T far *` / `T *far` — modifiers can also appear AFTER
+            // a pointer star. Consume them silently.
+            self.consume_cc_modifiers();
         }
         // Function-pointer declarator: `<type> ( * <name> ) ( <params> )`.
         // For fixture 110 (`int (*p)(void) = f;`) we don't need to model
