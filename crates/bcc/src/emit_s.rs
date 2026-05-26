@@ -622,6 +622,15 @@ fn write_tail(
         let width = extern_width(&g.ty);
         let _ = write!(out, "\textrn\t_{}:{width}\r\n", g.name);
     }
+    // `main(argc, argv)` pulls in BCC's startup-time argv setup —
+    // emit `extrn __setargv__:far` after publics so the linker
+    // includes it. `main(void)` or `main()` skip this. Fixture 3117.
+    let needs_setargv = unit.functions.iter().any(|f| {
+        f.name == "main" && f.body.is_some() && !f.params.is_empty()
+    });
+    if needs_setargv {
+        out.extend_from_slice(b"\textrn\t__setargv__:far\r\n");
+    }
     out.extend_from_slice(b"\tend\r\n");
 }
 
