@@ -7000,6 +7000,34 @@ impl<'a> FunctionEmitter<'a> {
                 };
                 let _ = write!(self.out, "\tfcomp\t{width_str} ptr {addr}\r\n");
             }
+            // Float / double literal RHS — pool the bytes (narrowing
+            // a double to single when exactly representable, same
+            // trick the init path uses) and fcomp against the pool
+            // address. Fixture 2139 (`d > 2.0`).
+            ExprKind::FloatLit(bits) => {
+                let off = self.strings.intern_float(*bits);
+                let src = if off == 0 {
+                    "DGROUP:s@".to_owned()
+                } else {
+                    format!("DGROUP:s@+{off}")
+                };
+                let _ = write!(self.out, "\tfcomp\tdword ptr {src}\r\n");
+            }
+            ExprKind::DoubleLit(bits) => {
+                let d = f64::from_bits(*bits);
+                let f = d as f32;
+                let (off, width) = if f64::from(f).to_bits() == *bits {
+                    (self.strings.intern_float(f.to_bits()), "dword")
+                } else {
+                    (self.strings.intern_double(*bits), "qword")
+                };
+                let src = if off == 0 {
+                    "DGROUP:s@".to_owned()
+                } else {
+                    format!("DGROUP:s@+{off}")
+                };
+                let _ = write!(self.out, "\tfcomp\t{width} ptr {src}\r\n");
+            }
             _ => panic!(
                 "float comparison right-operand shape not supported: {:?}",
                 right.kind

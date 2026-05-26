@@ -77,6 +77,7 @@ fn module_has_fpu(module: &ir::Module) -> bool {
                 | Instr::FsubpStack
                 | Instr::FildWordBpRel { .. }
                 | Instr::FcompBpRel { .. }
+                | Instr::FcompGroupSym { .. }
                 | Instr::FstswWordBpRel { .. }
                 | Instr::Fwait
             ),

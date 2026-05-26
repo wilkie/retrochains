@@ -2032,6 +2032,11 @@ pub enum Instr {
     /// `9B [D8|DC] /3 [bp+disp]` — width picks the family byte
     /// (D8 for single, DC for double); ModR/M reg field = 3.
     FcompBpRel { width: FpuWidth, offset: i16 },
+    /// `fcomp <dword|qword> ptr <group>:<sym>[+<offset>]` —
+    /// compare ST(0) against a data-segment memory operand.
+    /// Encoding: `9B [D8|DC] 1E lo hi` + SegRelGroupTarget FIXUPP
+    /// on the disp16. Fixture 2139 (`d > 2.0`, pooled literal).
+    FcompGroupSym { width: FpuWidth, group: String, symbol: String, offset: i16 },
     /// `fstsw word ptr [bp+<offset>]` — store the 16-bit FPU
     /// status word into a stack-resident slot. Encoding: `9B DD
     /// /7 [bp+disp]`. BCC uses this with the FPU compare→AX→sahf

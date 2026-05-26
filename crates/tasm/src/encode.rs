@@ -607,7 +607,8 @@ fn instr_size(instr: &Instr) -> usize {
         | Instr::FcompBpRel { offset, .. }
         | Instr::FstswWordBpRel { offset } => 2 + bp_rel_modrm_size(*offset),
         Instr::FldDwordGroupSym { .. } | Instr::FldQwordGroupSym { .. }
-        | Instr::FstpDwordGroupSym { .. } | Instr::FstpQwordGroupSym { .. } => 5,
+        | Instr::FstpDwordGroupSym { .. } | Instr::FstpQwordGroupSym { .. }
+        | Instr::FcompGroupSym { .. } => 5,
         // Register-form FPU instructions: 9B (fwait) + family +
         // register-mode ModR/M = 3 bytes flat. No memory displacement.
         Instr::Fld1 | Instr::FsubpStack | Instr::Fchs => 3,
@@ -3120,6 +3121,16 @@ fn emit_instr(
             out.push(0x9B);
             out.push(width.arith_family());
             emit_bp_rel_modrm(3, *offset, out);
+        }
+        Instr::FcompGroupSym { width, group, symbol, offset } => {
+            push_fidrqq_fixup(out, extern_idx, fixups)?;
+            // ModR/M `1E` = mod=00, reg=011 (/3 fcomp), r/m=110
+            // (disp16 direct memory).
+            let opcode_prefix = [0x9B, width.arith_family(), 0x1E];
+            emit_group_sym_lea(
+                &opcode_prefix, group, symbol, *offset,
+                symbols, group_idx, extern_idx, out, fixups,
+            )?;
         }
         Instr::FstswWordBpRel { offset } => {
             push_fidrqq_fixup(out, extern_idx, fixups)?;
