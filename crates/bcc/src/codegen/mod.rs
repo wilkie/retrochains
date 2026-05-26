@@ -10393,6 +10393,53 @@ impl<'a> FunctionEmitter<'a> {
             }
             return;
         }
+        // `*arr[K]` where arr is a pointer-array (global or local).
+        // Load arr[K] into BX, then read `[bx]`. Pointee width
+        // picks byte/word. Fixtures 2470, 2608.
+        if let ExprKind::ArrayIndex { array, index } = &ptr.kind
+            && let ExprKind::Ident(arr_name) = &array.kind
+        {
+            // Resolve the array's element type to know what pointee
+            // we're dereferencing. Both global and stack arrays of
+            // pointers route through the same shape.
+            let elem_ty = if let Some(g_ty) = self.globals.type_of(arr_name) {
+                g_ty.array_elem().cloned()
+            } else if self.locals.has(arr_name) {
+                self.locals.type_of(arr_name).array_elem().cloned()
+            } else {
+                None
+            };
+            if let Some(elem_ty) = elem_ty
+                && let Some(pointee) = elem_ty.pointee()
+            {
+                let pointee = pointee.clone();
+                let stride = u32::from(elem_ty.size_bytes());
+                if let Some(k) = try_const_eval(index) {
+                    let off = k.wrapping_mul(stride);
+                    let load = if self.globals.contains(arr_name) {
+                        if off == 0 {
+                            format!("DGROUP:_{arr_name}")
+                        } else {
+                            format!("DGROUP:_{arr_name}+{off}")
+                        }
+                    } else if let LocalLocation::Stack(base_off) = self.locals.location_of(arr_name) {
+                        let elem_off = i32::from(base_off) + off as i32;
+                        let off16 = i16::try_from(elem_off).unwrap_or(i16::MAX);
+                        bp_addr(off16)
+                    } else {
+                        unreachable!()
+                    };
+                    let _ = write!(self.out, "\tmov\tbx,word ptr {load}\r\n");
+                    if pointee.is_char_like() {
+                        self.out.extend_from_slice(b"\tmov\tal,byte ptr [bx]\r\n");
+                        self.emit_widen_al(&pointee);
+                    } else {
+                        self.out.extend_from_slice(b"\tmov\tax,word ptr [bx]\r\n");
+                    }
+                    return;
+                }
+            }
+        }
         // `*(a + i)` where `a` is a global array (or char array): the
         // `a + i` is array-decay + variable offset. Same byte shape
         // as the array-index path: scale i into BX, then read
@@ -14612,6 +14659,57 @@ impl<'a> FunctionEmitter<'a> {
     /// ```
     /// where SI holds the pointer.
     fn emit_deref_assign(&mut self, target: &Expr, value: &Expr) {
+        // `*arr[K] = v;` — assign through an element of a
+        // pointer-array (global or stack). Load arr[K] into BX,
+        // then store through `[bx]`. Constant-index form only.
+        // Fixture 2470.
+        if let ExprKind::ArrayIndex { array, index } = &target.kind
+            && let ExprKind::Ident(arr_name) = &array.kind
+        {
+            let elem_ty = if let Some(g_ty) = self.globals.type_of(arr_name) {
+                g_ty.array_elem().cloned()
+            } else if self.locals.has(arr_name) {
+                self.locals.type_of(arr_name).array_elem().cloned()
+            } else {
+                None
+            };
+            if let Some(elem_ty) = elem_ty
+                && let Some(pointee) = elem_ty.pointee()
+            {
+                let pointee = pointee.clone();
+                let stride = u32::from(elem_ty.size_bytes());
+                if let Some(k) = try_const_eval(index) {
+                    let off = k.wrapping_mul(stride);
+                    let load = if self.globals.contains(arr_name) {
+                        if off == 0 {
+                            format!("DGROUP:_{arr_name}")
+                        } else {
+                            format!("DGROUP:_{arr_name}+{off}")
+                        }
+                    } else if let LocalLocation::Stack(base_off) = self.locals.location_of(arr_name) {
+                        let elem_off = i32::from(base_off) + off as i32;
+                        let off16 = i16::try_from(elem_off).unwrap_or(i16::MAX);
+                        bp_addr(off16)
+                    } else {
+                        unreachable!()
+                    };
+                    let _ = write!(self.out, "\tmov\tbx,word ptr {load}\r\n");
+                    let width = ptr_width(&pointee);
+                    if let Some(v) = try_const_eval(value) {
+                        let v_masked = if pointee.is_char_like() { v & 0xFF } else { v & 0xFFFF };
+                        let _ = write!(self.out, "\tmov\t{width} ptr [bx],{v_masked}\r\n");
+                    } else {
+                        self.emit_expr_to_ax(value);
+                        if pointee.is_char_like() {
+                            self.out.extend_from_slice(b"\tmov\tbyte ptr [bx],al\r\n");
+                        } else {
+                            self.out.extend_from_slice(b"\tmov\tword ptr [bx],ax\r\n");
+                        }
+                    }
+                    return;
+                }
+            }
+        }
         // `*<call>() = v;` — assigning through a call-returned
         // pointer. Call the function (result in AX = pointer), move
         // to BX, then store through `[bx]`. Fixture 1322
