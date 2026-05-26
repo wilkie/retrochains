@@ -8025,6 +8025,36 @@ impl<'a> FunctionEmitter<'a> {
             self.emit_expr_discard(left);
             return self.emit_compound_assign(name, op, right);
         }
+        // Float / double local `<op>=`: evaluate RHS onto the FPU
+        // stack, fadd/fsub/fmul/fdiv against the memory operand
+        // (the local), then fstp back to the local. Fixture 2148.
+        if let Some(local_ty) = self.locals.has(name).then(|| self.locals.type_of(name).clone())
+            && local_ty.is_float_like()
+            && matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div)
+            && let LocalLocation::Stack(off) = self.locals.location_of(name)
+        {
+            let mnem = match op {
+                BinOp::Add => "fadd",
+                BinOp::Sub => "fsub",
+                BinOp::Mul => "fmul",
+                BinOp::Div => "fdiv",
+                _ => unreachable!(),
+            };
+            let store_width = if matches!(local_ty, Type::Float) { "dword" } else { "qword" };
+            self.emit_float_load_to_fpu(value);
+            let _ = write!(
+                self.out,
+                "\t{mnem}\t{store_width} ptr {}\r\n",
+                bp_addr(off),
+            );
+            let _ = write!(
+                self.out,
+                "\tfstp\t{store_width} ptr {}\r\n",
+                bp_addr(off),
+            );
+            self.pending_fpu_store_fwait = true;
+            return;
+        }
         // Long-like global `g <op>= K` with K fitting i8sx (per
         // half): memory-direct read-modify-write on each half. The
         // high-half partner depends on the op family — add/sub need
