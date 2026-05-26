@@ -9544,6 +9544,34 @@ impl<'a> FunctionEmitter<'a> {
             );
             return;
         }
+        // Stack-resident int local + simple lvalue rhs: load rhs
+        // into AX, then memory-op against the local. Mirrors what
+        // BCC emits when neither operand made it into a register.
+        // Fixture 1980 (`c += d` with both on stack).
+        if local_ty.is_int_like()
+            && matches!(
+                op,
+                BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor
+            )
+            && let LocalLocation::Stack(off) = self.locals.location_of(name)
+            && let Some(rhs_addr) = self.int_lvalue_addr(value)
+        {
+            let mnem = match op {
+                BinOp::Add => "add",
+                BinOp::Sub => "sub",
+                BinOp::BitAnd => "and",
+                BinOp::BitOr => "or",
+                BinOp::BitXor => "xor",
+                _ => unreachable!(),
+            };
+            let _ = write!(self.out, "\tmov\tax,word ptr {rhs_addr}\r\n");
+            let _ = write!(
+                self.out,
+                "\t{mnem}\tword ptr {},ax\r\n",
+                bp_addr(off),
+            );
+            return;
+        }
         let LocalLocation::Reg(reg) = self.locals.location_of(name) else {
             panic!(
                 "compound assignment on stack-resident `{name}` not yet supported (no fixture)"
