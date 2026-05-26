@@ -72,7 +72,7 @@ impl Signatures {
     }
 }
 
-mod fold;
+pub mod fold;
 mod line_map;
 mod locals;
 mod plan;

@@ -1812,14 +1812,18 @@ impl Parser {
                 array_lens.push(None);
                 continue;
             }
-            let size_tok = self.bump();
-            let TokenKind::IntLit(len) = size_tok.kind else {
-                return Err(ParseError::Unexpected {
-                    expected: "array size (integer literal)".to_owned(),
-                    found: size_tok.kind.describe().to_owned(),
-                    offset: size_tok.span.start,
-                });
-            };
+            // Accept a constant expression for the dimension (`a[3+2]`,
+            // `a[N*4]` for an enum/macro constant). The expression is
+            // const-folded at parse time; non-foldable forms still
+            // error. Fixture 1226 (`int a[3+2];`).
+            let size_start = self.peek().span.start;
+            let size_expr = self.parse_expr()?;
+            let len = crate::codegen::fold::try_const_eval(&size_expr)
+                .ok_or_else(|| ParseError::Unexpected {
+                    expected: "array size (constant expression)".to_owned(),
+                    found: "non-constant expression".to_owned(),
+                    offset: size_start,
+                })?;
             self.expect(&TokenKind::RBracket)?;
             array_lens.push(Some(len));
         }
