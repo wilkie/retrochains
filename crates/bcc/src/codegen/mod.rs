@@ -10460,6 +10460,24 @@ impl<'a> FunctionEmitter<'a> {
                     }
                     return;
                 }
+                // Variable index on a global pointer array: scale i
+                // into BX, load the element pointer via the indexed
+                // form, then read through [bx]. Fixture 3592.
+                if self.globals.contains(arr_name) {
+                    let elem_ty_clone = elem_ty.clone();
+                    self.emit_index_into_bx(index, &elem_ty_clone);
+                    let _ = write!(
+                        self.out,
+                        "\tmov\tbx,word ptr DGROUP:_{arr_name}[bx]\r\n",
+                    );
+                    if pointee.is_char_like() {
+                        self.out.extend_from_slice(b"\tmov\tal,byte ptr [bx]\r\n");
+                        self.emit_widen_al(&pointee);
+                    } else {
+                        self.out.extend_from_slice(b"\tmov\tax,word ptr [bx]\r\n");
+                    }
+                    return;
+                }
             }
         }
         // `*(a + i)` where `a` is a global array (or char array): the
