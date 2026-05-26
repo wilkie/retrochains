@@ -16,6 +16,11 @@ pub struct ParsedArgs {
     /// slot. Fixtures 2282 (`-d` set, dedup'd), 2283 (no flag,
     /// duplicated).
     pub merge_strings: bool,
+    /// `-D<NAME>` / `-D<NAME>=<body>`: preprocessor macros to
+    /// pre-define before processing the source. Each entry is
+    /// `(name, body)`; the body is empty for bare `-D<NAME>`.
+    /// Fixtures 2131, 2280.
+    pub defines: Vec<(String, String)>,
     /// Input source files, in the order given on the command line.
     pub sources: Vec<PathBuf>,
 }
@@ -59,6 +64,7 @@ pub fn parse_args(argv: &[String]) -> Result<ParsedArgs, CliError> {
     let mut mode: Option<CompileMode> = None;
     let mut memory_model: Option<MemoryModel> = None;
     let mut merge_strings = false;
+    let mut defines: Vec<(String, String)> = Vec::new();
     let mut sources: Vec<PathBuf> = Vec::new();
     for arg in argv {
         match arg.as_str() {
@@ -66,6 +72,16 @@ pub fn parse_args(argv: &[String]) -> Result<ParsedArgs, CliError> {
             "-c" => mode = Some(CompileMode::Object),
             "-ms" => memory_model = Some(MemoryModel::Small),
             "-d" => merge_strings = true,
+            other if other.starts_with("-D") => {
+                // `-D<NAME>` or `-D<NAME>=<body>`. Fixtures 2131
+                // (`-DFOO=42`), 2280 (`-DDEBUG=42`).
+                let body = &other[2..];
+                if let Some(eq) = body.find('=') {
+                    defines.push((body[..eq].to_string(), body[eq + 1..].to_string()));
+                } else {
+                    defines.push((body.to_string(), String::new()));
+                }
+            }
             other if other.starts_with('-') => {
                 return Err(CliError::Unsupported(other.to_owned()));
             }
@@ -77,5 +93,5 @@ pub fn parse_args(argv: &[String]) -> Result<ParsedArgs, CliError> {
     if sources.is_empty() {
         return Err(CliError::NoSource);
     }
-    Ok(ParsedArgs { mode, memory_model, merge_strings, sources })
+    Ok(ParsedArgs { mode, memory_model, merge_strings, defines, sources })
 }

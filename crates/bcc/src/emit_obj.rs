@@ -18,7 +18,11 @@ use crate::emit_s::{build_asm, EmitError};
 /// # Errors
 /// Returns [`EmitError`] on I/O failures, lex errors, parse errors, or
 /// assembler errors.
-pub fn emit_dash_c(source_path: &Path, merge_strings: bool) -> Result<PathBuf, EmitError> {
+pub fn emit_dash_c(
+    source_path: &Path,
+    merge_strings: bool,
+    defines: &[(String, String)],
+) -> Result<PathBuf, EmitError> {
     let source = fs::read_to_string(source_path)
         .map_err(|e| EmitError::SourceRead(source_path.to_owned(), e))?;
     let mtime = fs::metadata(source_path)
@@ -36,7 +40,7 @@ pub fn emit_dash_c(source_path: &Path, merge_strings: bool) -> Result<PathBuf, E
         .map_or_else(|| "out.c".to_owned(), str::to_ascii_lowercase);
     let output_path = PathBuf::from(format!("{}.OBJ", basename.to_ascii_uppercase()));
 
-    let bytes = build_obj(&source, &lowered, mtime, merge_strings)?;
+    let bytes = build_obj(&source, &lowered, mtime, merge_strings, defines)?;
     fs::write(&output_path, bytes)?;
     Ok(output_path)
 }
@@ -54,8 +58,9 @@ pub fn build_obj(
     source_filename_lower: &str,
     mtime: SystemTime,
     merge_strings: bool,
+    defines: &[(String, String)],
 ) -> Result<Vec<u8>, EmitError> {
-    let asm_bytes = build_asm(source, source_filename_lower, mtime, merge_strings)?;
+    let asm_bytes = build_asm(source, source_filename_lower, mtime, merge_strings, defines)?;
     // build_asm produces UTF-8 ASCII bytes (BCC's text is pure ASCII
     // plus the trailing 0x1A EOF byte). Convert to a &str for tasm.
     let asm_text =

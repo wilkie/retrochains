@@ -36,7 +36,11 @@ pub enum EmitError {
 ///
 /// # Errors
 /// Returns [`EmitError`] on I/O failures, lex errors, or parse errors.
-pub fn emit_dash_s(source_path: &Path, merge_strings: bool) -> Result<PathBuf, EmitError> {
+pub fn emit_dash_s(
+    source_path: &Path,
+    merge_strings: bool,
+    defines: &[(String, String)],
+) -> Result<PathBuf, EmitError> {
     let source = fs::read_to_string(source_path)
         .map_err(|e| EmitError::SourceRead(source_path.to_owned(), e))?;
     let mtime = fs::metadata(source_path)
@@ -54,7 +58,7 @@ pub fn emit_dash_s(source_path: &Path, merge_strings: bool) -> Result<PathBuf, E
         .map_or_else(|| "out.c".to_owned(), str::to_ascii_lowercase);
     let output_path = PathBuf::from(format!("{}.ASM", basename.to_ascii_uppercase()));
 
-    let bytes = build_asm(&source, &lowered, mtime, merge_strings)?;
+    let bytes = build_asm(&source, &lowered, mtime, merge_strings, defines)?;
     fs::write(&output_path, bytes)?;
     Ok(output_path)
 }
@@ -69,6 +73,7 @@ pub fn build_asm(
     source_filename_lower: &str,
     mtime: SystemTime,
     merge_strings: bool,
+    defines: &[(String, String)],
 ) -> Result<Vec<u8>, EmitError> {
     // C preprocessor pass: resolve `#define`/`#ifdef`/`#if` and
     // expand object/function-like macros. Stripped directive lines
@@ -77,7 +82,7 @@ pub fn build_asm(
     // the ORIGINAL source for `;`-comment line emission so macro
     // names show through in comments even though the code uses the
     // expanded form.
-    let preprocessed = preprocess::preprocess(source)?;
+    let preprocessed = preprocess::preprocess_with_defines(source, defines)?;
     let tokens = Lexer::new(&preprocessed).tokenize()?;
     let unit = Parser::new(tokens).parse_unit()?;
 

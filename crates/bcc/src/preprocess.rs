@@ -80,8 +80,26 @@ enum CondState {
 /// Returns a `PreprocessError` for unterminated `#if`s, stray
 /// `#else`/`#endif`, or unsupported syntax (`##`, `#`, `#include`).
 pub fn preprocess(source: &str) -> Result<String, PreprocessError> {
+    preprocess_with_defines(source, &[])
+}
+
+/// Like `preprocess` but seeds the macro table with command-line
+/// `-D<NAME>[=<body>]` entries. Fixtures 2131, 2280.
+///
+/// # Errors
+/// Same as `preprocess`.
+pub fn preprocess_with_defines(
+    source: &str,
+    defines: &[(String, String)],
+) -> Result<String, PreprocessError> {
     let lines: Vec<&str> = source.split_inclusive('\n').collect();
     let mut macros: HashMap<String, Macro> = HashMap::new();
+    for (name, body) in defines {
+        macros.insert(
+            name.clone(),
+            Macro { params: None, body: body.clone() },
+        );
+    }
     let mut cond_stack: Vec<CondState> = Vec::new();
     let mut out = String::with_capacity(source.len());
 
