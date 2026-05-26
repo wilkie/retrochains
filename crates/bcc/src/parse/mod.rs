@@ -264,6 +264,21 @@ impl Parser {
             while matches!(self.peek_n(probe).kind, TokenKind::Star) {
                 probe += 1;
             }
+            // Skip BCC cc-modifier keywords (`pascal`, `cdecl`, ...)
+            // — they sit between the type and the declarator name.
+            // Fixtures 1653, 1654, 1655, 1656.
+            while let TokenKind::Ident(name) = &self.peek_n(probe).kind {
+                if matches!(
+                    name.as_str(),
+                    "pascal" | "cdecl" | "far" | "near" | "huge" | "interrupt"
+                    | "_pascal" | "_cdecl" | "_far" | "_near" | "_huge" | "_interrupt"
+                    | "__pascal" | "__cdecl" | "__far" | "__near" | "__huge" | "__interrupt"
+                ) {
+                    probe += 1;
+                } else {
+                    break;
+                }
+            }
             // Name.
             if !matches!(self.peek_n(probe).kind, TokenKind::Ident(_)) {
                 let t = self.peek_n(probe);
@@ -463,6 +478,27 @@ impl Parser {
     /// <tag> { ... }`, `struct <tag>`, and typedef'd names. Pointer
     /// `*` modifiers are handled by the *caller* — this returns the
     /// base type only.
+    /// Discard BCC-specific calling-convention / memory-model
+    /// modifier keywords (`pascal`, `cdecl`, `far`, `near`, `huge`,
+    /// `interrupt`, plus `_`-prefixed variants). We don't implement
+    /// these but accept them as no-ops so fixtures that use them
+    /// can parse. Fixtures 1653 (pascal), 1654 (far), 1655
+    /// (interrupt), 1656 (cdecl).
+    fn consume_cc_modifiers(&mut self) {
+        while let TokenKind::Ident(name) = &self.peek().kind {
+            if matches!(
+                name.as_str(),
+                "pascal" | "cdecl" | "far" | "near" | "huge" | "interrupt"
+                | "_pascal" | "_cdecl" | "_far" | "_near" | "_huge" | "_interrupt"
+                | "__pascal" | "__cdecl" | "__far" | "__near" | "__huge" | "__interrupt"
+            ) {
+                self.bump();
+            } else {
+                break;
+            }
+        }
+    }
+
     fn parse_type(&mut self) -> Result<Type, ParseError> {
         // `const`, `volatile`, `register` are purely front-end
         // qualifiers — BCC accepts and discards them. Fixtures 475
@@ -473,6 +509,7 @@ impl Parser {
         ) {
             self.bump();
         }
+        self.consume_cc_modifiers();
         match self.peek().kind {
             TokenKind::KwInt => {
                 self.bump();
@@ -864,6 +901,7 @@ impl Parser {
             self.bump();
             ret_ty = Type::Pointer(Box::new(ret_ty));
         }
+        self.consume_cc_modifiers();
         let name_tok = self.bump();
         let TokenKind::Ident(name) = &name_tok.kind else {
             return Err(ParseError::NotAnIdent { offset: name_tok.span.start });
