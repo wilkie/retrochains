@@ -6778,6 +6778,18 @@ impl<'a> FunctionEmitter<'a> {
             ) => {
                 self.operand_is_float_like(left) || self.operand_is_float_like(right)
             }
+            // Function call returning a float / double: the return
+            // type is known from signatures. Fixture 2144 (`(int)
+            // half(10.0)`).
+            ExprKind::Call { name, .. } => {
+                self.signatures.ret_ty_of(name).is_some_and(|t| t.is_float_like())
+            }
+            ExprKind::Unary { op: UnaryOp::Neg, operand } => {
+                self.operand_is_float_like(operand)
+            }
+            ExprKind::Cast { ty, operand } => {
+                ty.is_float_like() || self.operand_is_float_like(operand)
+            }
             _ => false,
         }
     }
@@ -7131,6 +7143,34 @@ impl<'a> FunctionEmitter<'a> {
                 let width =
                     if matches!(leaf_ty, Type::Float) { "dword" } else { "qword" };
                 let _ = write!(self.out, "\t{mnem}\t{width} ptr {addr}\r\n");
+            }
+            // Float / double literal — pool the bytes in `s@` and
+            // arithmetic against the pooled address. Narrows doubles
+            // to single precision when exactly representable (same
+            // trick the init / compare paths use). Fixture 2144.
+            ExprKind::FloatLit(bits) => {
+                let off = self.strings.intern_float(*bits);
+                let src = if off == 0 {
+                    "DGROUP:s@".to_owned()
+                } else {
+                    format!("DGROUP:s@+{off}")
+                };
+                let _ = write!(self.out, "\t{mnem}\tdword ptr {src}\r\n");
+            }
+            ExprKind::DoubleLit(bits) => {
+                let d = f64::from_bits(*bits);
+                let f = d as f32;
+                let (off, width) = if f64::from(f).to_bits() == *bits {
+                    (self.strings.intern_float(f.to_bits()), "dword")
+                } else {
+                    (self.strings.intern_double(*bits), "qword")
+                };
+                let src = if off == 0 {
+                    "DGROUP:s@".to_owned()
+                } else {
+                    format!("DGROUP:s@+{off}")
+                };
+                let _ = write!(self.out, "\t{mnem}\t{width} ptr {src}\r\n");
             }
             _ => panic!("FPU memory-arith operand shape not supported: {:?}", operand.kind),
         }

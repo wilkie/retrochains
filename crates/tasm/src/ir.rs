@@ -2001,6 +2001,17 @@ pub enum Instr {
     /// `9B [D8|DC] <modrm /op [bp+disp]>` — fwait prefix + family
     /// byte + bp-relative ModR/M.
     FpuArithBpRel { op: FpuArithOp, width: FpuWidth, offset: i16 },
+    /// `<fadd|fsub|fmul|fdiv> <dword|qword> ptr <group>:<sym>[+<offset>]`
+    /// — 8087 arithmetic against a data-segment memory operand.
+    /// Encoding: `9B [D8|DC] [/0,/4,/1,/6 → 06|26|0E|36] lo hi`
+    /// (mod=00 reg=op r/m=110 direct disp16). Fixture 2144.
+    FpuArithGroupSym {
+        op: FpuArithOp,
+        width: FpuWidth,
+        group: String,
+        symbol: String,
+        offset: i16,
+    },
     /// `fld1` — push the constant 1.0 onto the FPU stack.
     /// Encoding: `9B D9 E8` (fwait prefix + D9 family +
     /// register-mode ModR/M `0xE8` selecting the FLD1 special).

@@ -3953,6 +3953,26 @@ fn parse_fpu_arith(
     if let Some(offset) = parse_qword_bp_relative(rest) {
         return Ok(Instr::FpuArithBpRel { op, width: FpuWidth::Qword, offset });
     }
+    if let Some((group, symbol)) = parse_group_symbol_with_width(rest, "dword ptr ") {
+        let (sym, offset) = split_sym_offset(symbol);
+        return Ok(Instr::FpuArithGroupSym {
+            op,
+            width: FpuWidth::Dword,
+            group: group.to_string(),
+            symbol: sym.to_string(),
+            offset,
+        });
+    }
+    if let Some((group, symbol)) = parse_group_symbol_with_width(rest, "qword ptr ") {
+        let (sym, offset) = split_sym_offset(symbol);
+        return Ok(Instr::FpuArithGroupSym {
+            op,
+            width: FpuWidth::Qword,
+            group: group.to_string(),
+            symbol: sym.to_string(),
+            offset,
+        });
+    }
     Err(AsmError::new(
         line_no,
         format!("{mnemonic}: unsupported operand form `{rest}`"),
