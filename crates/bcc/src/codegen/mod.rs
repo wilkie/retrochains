@@ -6475,6 +6475,23 @@ impl<'a> FunctionEmitter<'a> {
                     false
                 }
             }
+            // `a[K]` where `a` is a float array: the element type
+            // is float-like. Same lookup pattern as Ident but
+            // through the array's element type.
+            ExprKind::ArrayIndex { array, .. } => {
+                if let ExprKind::Ident(name) = &array.kind {
+                    let ty = if self.locals.has(name) {
+                        Some(self.locals.type_of(name).clone())
+                    } else {
+                        self.globals.type_of(name).cloned()
+                    };
+                    ty.as_ref()
+                        .and_then(|t| t.array_elem())
+                        .is_some_and(|elem| elem.is_float_like())
+                } else {
+                    false
+                }
+            }
             // Arithmetic between float-typed operands stays
             // float-typed; classified by either side (C's "usual
             // arithmetic conversions" promote int-with-float to
@@ -6544,6 +6561,14 @@ impl<'a> FunctionEmitter<'a> {
                         "\tfld\t{width} ptr DGROUP:_{name}\r\n",
                     );
                 }
+            }
+            ExprKind::ArrayIndex { .. } => {
+                let (addr, leaf_ty) = self
+                    .resolve_float_array_addr(e)
+                    .expect("float ArrayIndex resolution failed");
+                let width =
+                    if matches!(leaf_ty, Type::Float) { "dword" } else { "qword" };
+                let _ = write!(self.out, "\tfld\t{width} ptr {addr}\r\n");
             }
             ExprKind::BinOp { op, left, right } => {
                 // Left subexpression first onto the FPU stack, then
@@ -6745,7 +6770,59 @@ impl<'a> FunctionEmitter<'a> {
                     );
                 }
             }
+            ExprKind::ArrayIndex { .. } => {
+                let (addr, leaf_ty) = self
+                    .resolve_float_array_addr(operand)
+                    .expect("float ArrayIndex resolution failed");
+                let width =
+                    if matches!(leaf_ty, Type::Float) { "dword" } else { "qword" };
+                let _ = write!(self.out, "\t{mnem}\t{width} ptr {addr}\r\n");
+            }
             _ => panic!("FPU memory-arith operand shape not supported: {:?}", operand.kind),
+        }
+    }
+
+    /// Resolve an `ArrayIndex` expression with a constant index to
+    /// the (address-string, element-type) pair codegen needs to
+    /// emit an FPU memory operand. Returns `None` if the index is
+    /// non-constant, the base isn't an Ident, or the element type
+    /// isn't float-like. Local arrays produce `[bp+disp]`; globals
+    /// produce `DGROUP:_<sym>[+const]`.
+    fn resolve_float_array_addr(&self, e: &Expr) -> Option<(String, Type)> {
+        let ExprKind::ArrayIndex { array, index } = &e.kind else {
+            return None;
+        };
+        let ExprKind::Ident(name) = &array.kind else {
+            return None;
+        };
+        let k = try_const_eval(index)?;
+        if self.locals.has(name) {
+            let ty = self.locals.type_of(name).clone();
+            let elem = ty.array_elem()?.clone();
+            if !elem.is_float_like() {
+                return None;
+            }
+            let LocalLocation::Stack(base_off) = self.locals.location_of(name) else {
+                return None;
+            };
+            let stride = i32::from(elem.size_bytes());
+            let off = base_off + i16::try_from(k as i32 * stride).ok()?;
+            Some((bp_addr(off), elem))
+        } else if let Some(gty) = self.globals.type_of(name) {
+            let elem = gty.array_elem()?.clone();
+            if !elem.is_float_like() {
+                return None;
+            }
+            let stride = i32::from(elem.size_bytes());
+            let byte_off = (k as i32) * stride;
+            let addr = if byte_off == 0 {
+                format!("DGROUP:_{name}")
+            } else {
+                format!("DGROUP:_{name}+{byte_off}")
+            };
+            Some((addr, elem))
+        } else {
+            None
         }
     }
 
@@ -11457,6 +11534,25 @@ impl<'a> FunctionEmitter<'a> {
         };
         if let Some((const_off, leaf_ty)) = try_const_array_offset(&array_ty, indices.iter()) {
             let off = base_off + i16::try_from(const_off).unwrap_or(i16::MAX);
+            // Float/double element on stack: walk the value through
+            // the FPU pipeline (handles fld1 for 1.0, literal pools,
+            // expressions, casts) and `fstp` it to the element slot.
+            // Fixture 1679 (`float a[3]; a[0] = 1.0f;`).
+            if leaf_ty.is_float_like() {
+                if expr_is_float_one(value) {
+                    self.out.extend_from_slice(b"\tfld1\t\r\n");
+                } else {
+                    self.emit_float_load_to_fpu(value);
+                }
+                let store_width =
+                    if matches!(leaf_ty, Type::Float) { "dword" } else { "qword" };
+                let _ = write!(
+                    self.out,
+                    "\tfstp\t{store_width} ptr {}\r\n",
+                    bp_addr(off),
+                );
+                return;
+            }
             // Long element on stack: store both halves, high then low.
             // Fixture 304 (`long a[2]; a[0] = 5;`).
             if leaf_ty.is_long_like() {
