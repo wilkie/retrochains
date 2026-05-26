@@ -557,6 +557,13 @@ impl Parser {
         match self.peek().kind {
             TokenKind::KwInt => {
                 self.bump();
+                // \`short int\` — the lexer already aliases \`short\`
+                // to KwInt, so this consumes the trailing \`int\` in
+                // the C standard's full \`short int\` spelling.
+                // Fixture 2504.
+                if matches!(self.peek().kind, TokenKind::KwInt) {
+                    self.bump();
+                }
                 Ok(Type::Int)
             }
             TokenKind::KwVoid => {
