@@ -10918,17 +10918,46 @@ impl<'a> FunctionEmitter<'a> {
                 }
                 return;
             }
-            let idx_src = self.resolve_operand_source(&indices[0]);
-            let _ = write!(self.out, "\tmov\tax,{}\r\n", idx_src.word());
-            if stride == 2 {
-                self.out.extend_from_slice(b"\tshl\tax,1\r\n");
+            // Char-stride (1) memory-direct add: when stride is 1
+            // and the index is a simple int lvalue, skip the AX
+            // route and add memory directly to BX. Fixture 1285
+            // (`p[i] = v` for char*).
+            if stride == 1
+                && let Some(idx_addr) = self.int_lvalue_addr(&indices[0])
+            {
+                let _ = write!(self.out, "\tadd\tbx,word ptr {idx_addr}\r\n");
+            } else {
+                let idx_src = self.resolve_operand_source(&indices[0]);
+                let _ = write!(self.out, "\tmov\tax,{}\r\n", idx_src.word());
+                if stride == 2 {
+                    self.out.extend_from_slice(b"\tshl\tax,1\r\n");
+                }
+                self.out.extend_from_slice(b"\tadd\tbx,ax\r\n");
             }
-            self.out.extend_from_slice(b"\tadd\tbx,ax\r\n");
             if let Some(v) = try_const_eval(value) {
                 let v_masked = if elem_is_char { v & 0xFF } else { v & 0xFFFF };
                 let width = if elem_is_char { "byte" } else { "word" };
                 let _ = write!(self.out, "\tmov\t{width} ptr [bx],{v_masked}\r\n");
             } else {
+                // For char element store with char-ident value,
+                // byte-load directly (skip the wasted widen).
+                // Mirrors the global-arr write peephole.
+                if elem_is_char
+                    && let ExprKind::Ident(v_name) = &value.kind
+                    && self.locals.has(v_name)
+                    && self.locals.type_of(v_name).is_char_like()
+                {
+                    let v_src = match self.locals.location_of(v_name) {
+                        LocalLocation::Stack(off) => format!("byte ptr {}", bp_addr(off)),
+                        LocalLocation::Reg(reg) if reg.is_byte() => reg.name().to_owned(),
+                        _ => String::new(),
+                    };
+                    if !v_src.is_empty() {
+                        let _ = write!(self.out, "\tmov\tal,{v_src}\r\n");
+                        self.out.extend_from_slice(b"\tmov\tbyte ptr [bx],al\r\n");
+                        return;
+                    }
+                }
                 self.emit_expr_to_ax(value);
                 if elem_is_char {
                     self.out.extend_from_slice(b"\tmov\tbyte ptr [bx],al\r\n");

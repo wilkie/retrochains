@@ -1921,12 +1921,17 @@ fn count_uses_stmt(stmt: &Stmt, counts: &mut HashMap<String, u32>) {
         }
         StmtKind::ArrayAssign { array, indices, value }
         | StmtKind::ArrayCompoundAssign { array, indices, value, .. } => {
-            // `a[i] = v;` mirrors `a[i]` as an rvalue: direct deref
-            // counts the base name as 2 uses (read of address + use
-            // of memory). Arrays never enregister anyway, but the
-            // same statement could be a pointer-target indexed
-            // assign (`p[i] = v`) in a future fixture.
-            *counts.entry(array.clone()).or_insert(0) += 2;
+            // `a[i] = v;` mirrors `a[i]` as an rvalue: const index
+            // gives the +2 direct-deref bonus, variable index gives
+            // +1. Matches the read-side ArrayIndex rule. Arrays
+            // never enregister anyway, but the same statement could
+            // be a pointer-target indexed assign (`p[i] = v`); for
+            // those, variable index keeps the pointer below the
+            // enregister threshold (fixtures 1285, 3559).
+            let const_idx = indices.len() == 1
+                && try_const_eval(&indices[0]).is_some();
+            let bonus = if const_idx { 2 } else { 1 };
+            *counts.entry(array.clone()).or_insert(0) += bonus;
             for ix in indices {
                 count_uses_expr(ix, counts);
             }
