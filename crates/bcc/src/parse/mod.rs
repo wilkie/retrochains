@@ -1073,27 +1073,37 @@ impl Parser {
             self.peek().kind,
             TokenKind::LBrace | TokenKind::Semicolon | TokenKind::Eof,
         ) {
-            let mut ty = self.parse_type()?;
-            while matches!(self.peek().kind, TokenKind::Star) {
-                self.bump();
-                ty = Type::Pointer(Box::new(ty));
+            let base_ty = self.parse_type()?;
+            // Comma-separated declarators share the base type:
+            // `int a, b;` declares both as int. Fixture 2164.
+            loop {
+                let mut ty = base_ty.clone();
+                while matches!(self.peek().kind, TokenKind::Star) {
+                    self.bump();
+                    ty = Type::Pointer(Box::new(ty));
+                }
+                let name_tok = self.bump();
+                let TokenKind::Ident(pname) = &name_tok.kind else {
+                    return Err(ParseError::NotAnIdent { offset: name_tok.span.start });
+                };
+                let pname = pname.clone();
+                if let Some(p) = params.iter_mut().find(|p| p.name == pname) {
+                    p.ty = ty.clone();
+                } else {
+                    return Err(ParseError::Unexpected {
+                        expected: "K&R type for a declared parameter".to_owned(),
+                        found: format!("declaration of `{pname}` which isn't in the param list"),
+                        offset: name_tok.span.start,
+                    });
+                }
+                self.function_locals.insert(pname, ty);
+                if matches!(self.peek().kind, TokenKind::Comma) {
+                    self.bump();
+                } else {
+                    break;
+                }
             }
-            let name_tok = self.bump();
-            let TokenKind::Ident(pname) = &name_tok.kind else {
-                return Err(ParseError::NotAnIdent { offset: name_tok.span.start });
-            };
-            let pname = pname.clone();
             self.expect(&TokenKind::Semicolon)?;
-            if let Some(p) = params.iter_mut().find(|p| p.name == pname) {
-                p.ty = ty.clone();
-            } else {
-                return Err(ParseError::Unexpected {
-                    expected: "K&R type for a declared parameter".to_owned(),
-                    found: format!("declaration of `{pname}` which isn't in the param list"),
-                    offset: name_tok.span.start,
-                });
-            }
-            self.function_locals.insert(pname, ty);
         }
 
         // Prototype (just `;` after the param list) vs definition
