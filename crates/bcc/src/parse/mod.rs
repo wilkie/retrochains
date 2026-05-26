@@ -1906,8 +1906,15 @@ impl Parser {
             self.bump();
             ty = Type::Pointer(Box::new(ty));
             // `T far *` / `T *far` — modifiers can also appear AFTER
-            // a pointer star. Consume them silently.
+            // a pointer star. Consume them silently. Also accept
+            // `T * const p` (const-qualified pointer). Fixture 2380.
             self.consume_cc_modifiers();
+            while matches!(
+                self.peek().kind,
+                TokenKind::KwConst | TokenKind::KwVolatile
+            ) {
+                self.bump();
+            }
         }
         // Function-pointer declarator: `<type> ( * <name> ) ( <params> )`.
         // For fixture 110 (`int (*p)(void) = f;`) we don't need to model
