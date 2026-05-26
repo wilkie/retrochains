@@ -10393,6 +10393,28 @@ impl<'a> FunctionEmitter<'a> {
             }
             return;
         }
+        // `*(<struct>.<field>)` / `*<struct>-><field>` where the
+        // field is a pointer: walk the lvalue chain to a constant
+        // address, load that into BX, then read `[bx]`. Fixture 2981.
+        if let ExprKind::Member { base, field, kind } = &ptr.kind {
+            let _ = kind;
+            let _ = base;
+            let _ = field;
+            if let Some((name, total_off, leaf_ty)) = self.try_lvalue_chain_addr(ptr)
+                && let Some(addr) = self.resolve_chain_addr(&name, total_off)
+                && let Some(pointee) = leaf_ty.pointee()
+            {
+                let pointee = pointee.clone();
+                let _ = write!(self.out, "\tmov\tbx,word ptr {addr}\r\n");
+                if pointee.is_char_like() {
+                    self.out.extend_from_slice(b"\tmov\tal,byte ptr [bx]\r\n");
+                    self.emit_widen_al(&pointee);
+                } else {
+                    self.out.extend_from_slice(b"\tmov\tax,word ptr [bx]\r\n");
+                }
+                return;
+            }
+        }
         // `*arr[K]` where arr is a pointer-array (global or local).
         // Load arr[K] into BX, then read `[bx]`. Pointee width
         // picks byte/word. Fixtures 2470, 2608.
