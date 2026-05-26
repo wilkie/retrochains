@@ -95,6 +95,7 @@ use locals::{LocalLocation, Locals, ParamLoad, Reg};
 #[derive(Debug, Default)]
 pub struct GlobalTable {
     map: HashMap<String, crate::ast::Type>,
+    statics: std::collections::HashSet<String>,
 }
 
 impl GlobalTable {
@@ -105,7 +106,13 @@ impl GlobalTable {
             .iter()
             .map(|g| (g.name.clone(), g.ty.clone()))
             .collect();
-        Self { map }
+        let statics = unit
+            .globals
+            .iter()
+            .filter(|g| g.is_static)
+            .map(|g| g.name.clone())
+            .collect();
+        Self { map, statics }
     }
 
     #[must_use]
@@ -116,6 +123,14 @@ impl GlobalTable {
     /// Iterate over all declared global names.
     pub fn names(&self) -> impl Iterator<Item = &str> {
         self.map.keys().map(|k| k.as_str())
+    }
+
+    /// True if this global was declared with `static`. BCC emits
+    /// its storage label without the `_` prefix and writes a
+    /// `_<name> equ <name>` alias in the publics tail.
+    #[must_use]
+    pub fn is_static(&self, name: &str) -> bool {
+        self.statics.contains(name)
     }
 
     /// Find a struct definition by its tag name. Some AST nodes
@@ -9627,11 +9642,17 @@ impl<'a> FunctionEmitter<'a> {
             }
             // 2D global array variable-indexed: `g[i][j]` for
             // `T g[M][N]`. BCC computes outer-scaled-then-add into
-            // BX, then indexed-load via DGROUP:_g[bx]. Outer stride
-            // is the inner array's size in bytes (N * sizeof(T));
-            // inner stride is sizeof(T). Fixture 3194 (`int g[3][2];
-            // return g[i][j];` → `shl bx,1; shl bx,1` (outer×4),
-            // `shl ax,1` (inner×2), `add bx, ax`, indexed load).
+            // BX, then indexed-load via DGROUP:_g[bx]. Two shapes:
+            //
+            // **Power-of-2 outer stride** (e.g. `int g[3][2]` →
+            // stride 4): start with BX = outer, chained `shl bx,1`
+            // for the outer scale, AX = inner, `shl ax,1` if inner
+            // stride 2, then `add bx, ax`. Fixture 3194.
+            //
+            // **Non-power-of-2 outer stride** (e.g. `char d[2][3]`
+            // → stride 3): imul requires AX, so AX = outer,
+            // `mov dx, <stride>; imul dx`, then add inner directly,
+            // `mov bx, ax`. Fixture 2985.
             if indices.len() == 2
                 && let Type::Array { elem: inner_arr, .. } = &gty
                 && let Type::Array { elem: leaf_elem, .. } = &**inner_arr
@@ -9642,17 +9663,34 @@ impl<'a> FunctionEmitter<'a> {
                 let outer_addr = self.int_lvalue_addr(indices[0]);
                 let inner_addr = self.int_lvalue_addr(indices[1]);
                 if let (Some(outer), Some(inner)) = (outer_addr, inner_addr) {
-                    let _ = write!(self.out, "\tmov\tbx,word ptr {outer}\r\n");
-                    let outer_shifts = (outer_stride as u32).trailing_zeros();
-                    for _ in 0..outer_shifts {
-                        self.out.extend_from_slice(b"\tshl\tbx,1\r\n");
+                    let outer_pow2 = outer_stride > 1 && outer_stride.is_power_of_two();
+                    let outer_one = outer_stride == 1;
+                    if outer_pow2 || outer_one {
+                        let _ = write!(self.out, "\tmov\tbx,word ptr {outer}\r\n");
+                        let outer_shifts = (outer_stride as u32).trailing_zeros();
+                        for _ in 0..outer_shifts {
+                            self.out.extend_from_slice(b"\tshl\tbx,1\r\n");
+                        }
+                        let _ = write!(self.out, "\tmov\tax,word ptr {inner}\r\n");
+                        let inner_shifts = (inner_stride as u32).trailing_zeros();
+                        for _ in 0..inner_shifts {
+                            self.out.extend_from_slice(b"\tshl\tax,1\r\n");
+                        }
+                        self.out.extend_from_slice(b"\tadd\tbx,ax\r\n");
+                    } else {
+                        // Non-power-of-2 outer stride — imul into AX.
+                        let _ = write!(self.out, "\tmov\tax,word ptr {outer}\r\n");
+                        let _ = write!(self.out, "\tmov\tdx,{outer_stride}\r\n");
+                        self.out.extend_from_slice(b"\timul\tdx\r\n");
+                        if inner_stride == 2 {
+                            let _ = write!(self.out, "\tmov\tdx,word ptr {inner}\r\n");
+                            self.out.extend_from_slice(b"\tshl\tdx,1\r\n");
+                            self.out.extend_from_slice(b"\tadd\tax,dx\r\n");
+                        } else {
+                            let _ = write!(self.out, "\tadd\tax,word ptr {inner}\r\n");
+                        }
+                        self.out.extend_from_slice(b"\tmov\tbx,ax\r\n");
                     }
-                    let _ = write!(self.out, "\tmov\tax,word ptr {inner}\r\n");
-                    let inner_shifts = (inner_stride as u32).trailing_zeros();
-                    for _ in 0..inner_shifts {
-                        self.out.extend_from_slice(b"\tshl\tax,1\r\n");
-                    }
-                    self.out.extend_from_slice(b"\tadd\tbx,ax\r\n");
                     let width = ptr_width(&leaf_ty);
                     if leaf_ty.is_char_like() {
                         let _ = write!(

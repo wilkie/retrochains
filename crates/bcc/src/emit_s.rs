@@ -221,14 +221,17 @@ fn write_bss_globals_with_debug(out: &mut Vec<u8>, unit: &crate::ast::Unit) {
 /// of total size, fixture 191).
 fn emit_global_decl(out: &mut Vec<u8>, name: &str, ty: &crate::ast::Type) {
     use crate::ast::Type;
-    let width = match ty {
-        Type::Array { elem, .. } => {
-            if elem.size_bytes() >= 2 { "word" } else { "byte" }
+    // For an array type, walk to the innermost leaf to pick the
+    // width — `char data[2][3]` (Array(Array(Char,3),2)) has leaf
+    // `char` (1 byte) so width is `byte`, even though the outer
+    // element is an array of size 3. Fixture 2985.
+    fn leaf_size(t: &Type) -> u16 {
+        match t {
+            Type::Array { elem, .. } => leaf_size(elem),
+            _ => t.size_bytes(),
         }
-        _ => {
-            if ty.size_bytes() >= 2 { "word" } else { "byte" }
-        }
-    };
+    }
+    let width = if leaf_size(ty) >= 2 { "word" } else { "byte" };
     let _ = write!(out, "_{name}\tlabel\t{width}\r\n");
 }
 
