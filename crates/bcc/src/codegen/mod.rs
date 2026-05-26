@@ -4911,6 +4911,36 @@ impl<'a> FunctionEmitter<'a> {
                 // high then low. 4 bytes per arg. Fixture 216.
                 self.emit_long_arg_push(arg);
                 total_bytes += 4;
+            } else if arg_ty.is_float_like() {
+                // Float/double arg: the FPU can't `push` directly,
+                // so BCC allocates stack space first (`add sp,
+                // -size`, encoded with the longer 81 C4 form),
+                // then `fstp <width> ptr [bp-<slot>]` writes the
+                // FPU top into the slot. A trailing `fwait` (one
+                // per FP arg) syncs before the call. Fixture 1678.
+                let size = u32::from(arg_ty.size_bytes());
+                let store_width =
+                    if matches!(arg_ty, Type::Float) { "dword" } else { "qword" };
+                self.emit_float_load_to_fpu(arg);
+                // BCC emits `add sp, <unsigned-of-negative>` to
+                // make the imm16 form (81 C4 lo hi) rather than the
+                // sign-extended-i8 form (83 C4 ii). The semantics
+                // are identical (SP -= size); the byte encoding
+                // matters for byte-exact match.
+                let neg = (-(size as i32)) as u16;
+                let _ = write!(self.out, "\tadd\tsp,{neg}\r\n");
+                let slot_off = -(i32::from(self.locals.stack_bytes())
+                    + total_bytes as i32
+                    + size as i32);
+                let slot_off_i16 =
+                    i16::try_from(slot_off).expect("FP arg slot fits in i16");
+                let _ = write!(
+                    self.out,
+                    "\tfstp\t{store_width} ptr {}\r\n",
+                    bp_addr(slot_off_i16),
+                );
+                self.out.extend_from_slice(b"\tfwait\t\r\n");
+                total_bytes += size;
             } else if let Type::Struct { .. } = &arg_ty {
                 // Struct-by-value arg. Two shapes by size:
                 //   - 4 bytes: push two words high-first, identical
@@ -6529,13 +6559,26 @@ impl<'a> FunctionEmitter<'a> {
                 let _ = write!(self.out, "\tfld\tdword ptr {src}\r\n");
             }
             ExprKind::DoubleLit(bits) => {
-                let off = self.strings.intern_double(*bits);
+                // BCC narrows a double literal to a 32-bit float in
+                // the pool whenever the value is exactly representable
+                // as float — the FPU's 80-bit internal width fully
+                // recovers it on `fld dword`. Same trick used by the
+                // double-local initializer path; here it also covers
+                // double *arguments* (fixture 1678 passes `3.5` →
+                // pool 4 bytes, `fld dword`).
+                let d = f64::from_bits(*bits);
+                let f = d as f32;
+                let (off, width) = if f64::from(f).to_bits() == *bits {
+                    (self.strings.intern_float(f.to_bits()), "dword")
+                } else {
+                    (self.strings.intern_double(*bits), "qword")
+                };
                 let src = if off == 0 {
                     "DGROUP:s@".to_owned()
                 } else {
                     format!("DGROUP:s@+{off}")
                 };
-                let _ = write!(self.out, "\tfld\tqword ptr {src}\r\n");
+                let _ = write!(self.out, "\tfld\t{width} ptr {src}\r\n");
             }
             ExprKind::Ident(name) => {
                 let ty = if self.locals.has(name) {

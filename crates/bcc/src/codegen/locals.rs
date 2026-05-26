@@ -249,8 +249,16 @@ impl Locals {
             // by the caller. (We haven't pinned this with a `char`-
             // param fixture; revisit when we have one.) Long params
             // take a 4-byte slot since they don't fit in a single
-            // word (fixture 285).
-            param_offset += if param.ty.is_long_like() { 4 } else { 2 };
+            // word (fixture 285). Float params get 4 bytes; double
+            // params get 8 bytes — the caller `fstp dword|qword`s
+            // into the slot rather than pushing word-by-word
+            // (fixture 1678).
+            param_offset += match &param.ty {
+                Type::Long | Type::ULong => 4,
+                Type::Float => 4,
+                Type::Double => 8,
+                _ => 2,
+            };
             *counts.entry(param.name.clone()).or_insert(0) += 1;
         }
 
