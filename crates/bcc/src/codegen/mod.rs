@@ -2100,9 +2100,33 @@ impl<'a> FunctionEmitter<'a> {
                 let _ = (base, field);
                 false
             }
-            ExprKind::ArrayIndex { .. } => {
-                self.try_lvalue_chain_addr(e)
-                    .is_some_and(|(_, _, ty)| ty.is_long_like())
+            ExprKind::ArrayIndex { array, .. } => {
+                if let Some((_, _, ty)) = self.try_lvalue_chain_addr(e) {
+                    return ty.is_long_like();
+                }
+                // Variable index — try_lvalue_chain_addr only handles
+                // constant indices. Look at the array's element type
+                // directly. Fixture 3288 (`arr[i]` with arr a long
+                // global array, i variable).
+                if let ExprKind::Ident(name) = &array.kind {
+                    let elem = self.globals.type_of(name)
+                        .and_then(|t| t.array_elem())
+                        .or_else(|| {
+                            if self.locals.has(name) {
+                                self.locals.type_of(name).array_elem()
+                            } else {
+                                None
+                            }
+                        });
+                    if let Some(e_ty) = elem {
+                        return e_ty.is_long_like();
+                    }
+                    // Pointer to long: `p[i]` where p is `long *`.
+                    if let Some(pointee) = self.ident_pointee(name) {
+                        return pointee.is_long_like();
+                    }
+                }
+                false
             }
             ExprKind::Call { name, .. } => {
                 self.signatures.ret_ty_of(name).is_some_and(|t| t.is_long_like())
@@ -6151,6 +6175,31 @@ impl<'a> FunctionEmitter<'a> {
                 } else {
                     self.out.extend_from_slice(b"\tcwd\t\r\n");
                 }
+                return;
+            }
+            // `return <global-long-array>[<var-idx>]` — scale the
+            // index into BX (×4 for long stride), then load both
+            // halves through `[_arr[bx]]` / `[_arr[bx+2]]`. Fixture
+            // 3288.
+            if let ExprKind::ArrayIndex { array, index } = &e.kind
+                && let ExprKind::Ident(arr_name) = &array.kind
+                && let Some(gty) = self.globals.type_of(arr_name)
+                && let Some(elem) = gty.array_elem()
+                && elem.is_long_like()
+            {
+                let elem_ty = elem.clone();
+                self.emit_index_into_bx(index, &elem_ty);
+                // High half first, then low — matches BCC's long-
+                // return load order (DX=hi, AX=lo with DX written
+                // before AX). Fixture 3288.
+                let _ = write!(
+                    self.out,
+                    "\tmov\tdx,word ptr DGROUP:_{arr_name}[bx+2]\r\n",
+                );
+                let _ = write!(
+                    self.out,
+                    "\tmov\tax,word ptr DGROUP:_{arr_name}[bx]\r\n",
+                );
                 return;
             }
             panic!("non-constant long return value not yet supported (no fixture)");
