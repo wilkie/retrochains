@@ -591,6 +591,17 @@ fn instr_size(instr: &Instr) -> usize {
         | Instr::MovBpRelOffsetSym { offset, .. }
         | Instr::MovBpRelOffsetGroupSym { offset, .. } => 1 + bp_rel_modrm_size(*offset) + 2,
         Instr::CallIndirectBpRel { offset } => 1 + bp_rel_modrm_size(*offset),
+        // 8087 FPU memory ops: TASM auto-prepends a `9B` (FWAIT)
+        // prefix before each memory-form FPU instruction (matches
+        // real TASM's 8087 compatibility behavior). The family
+        // opcode (D9/DD) + ModR/M (+ disp) follow. Total = 1
+        // (fwait) + 1 (family) + ModR/M + disp; group-symbol forms
+        // are always disp16 (5 bytes total with the fwait).
+        Instr::FldDwordBpRel { offset }
+        | Instr::FstpDwordBpRel { offset }
+        | Instr::FldQwordBpRel { offset }
+        | Instr::FstpQwordBpRel { offset } => 2 + bp_rel_modrm_size(*offset),
+        Instr::FldDwordGroupSym { .. } | Instr::FldQwordGroupSym { .. } => 5,
     }
 }
 
@@ -3005,7 +3016,72 @@ fn emit_instr(
             out.push(rel8 as u8);
         }
         Instr::Ret => out.push(0xC3),
+        Instr::FldDwordBpRel { offset } => {
+            push_fidrqq_fixup(out, extern_idx, fixups)?;
+            out.push(0x9B);
+            out.push(0xD9);
+            emit_bp_rel_modrm(0, *offset, out);
+        }
+        Instr::FstpDwordBpRel { offset } => {
+            push_fidrqq_fixup(out, extern_idx, fixups)?;
+            out.push(0x9B);
+            out.push(0xD9);
+            emit_bp_rel_modrm(3, *offset, out);
+        }
+        Instr::FldQwordBpRel { offset } => {
+            push_fidrqq_fixup(out, extern_idx, fixups)?;
+            out.push(0x9B);
+            out.push(0xDD);
+            emit_bp_rel_modrm(0, *offset, out);
+        }
+        Instr::FstpQwordBpRel { offset } => {
+            push_fidrqq_fixup(out, extern_idx, fixups)?;
+            out.push(0x9B);
+            out.push(0xDD);
+            emit_bp_rel_modrm(3, *offset, out);
+        }
+        Instr::FldDwordGroupSym { group, symbol, offset } => {
+            push_fidrqq_fixup(out, extern_idx, fixups)?;
+            emit_group_sym_lea(
+                &[0x9B, 0xD9, 0x06], group, symbol, *offset,
+                symbols, group_idx, extern_idx, out, fixups,
+            )?;
+        }
+        Instr::FldQwordGroupSym { group, symbol, offset } => {
+            push_fidrqq_fixup(out, extern_idx, fixups)?;
+            emit_group_sym_lea(
+                &[0x9B, 0xDD, 0x06], group, symbol, *offset,
+                symbols, group_idx, extern_idx, out, fixups,
+            )?;
+        }
     }
+    Ok(())
+}
+
+/// Push a `SegRelExternFrameTarget` FIXUPP pointing at the *next*
+/// byte we're about to emit, targeting the `FIDRQQ` EXTDEF entry.
+/// Real TASM emits one of these per 8087 instruction so the linker
+/// can rewrite the site for emulation. Errors out if `FIDRQQ` isn't
+/// in the EXTDEF table — the top-level `assemble()` injects it
+/// whenever any FPU instruction is present.
+fn push_fidrqq_fixup(
+    out: &Vec<u8>,
+    extern_idx: &HashMap<String, u8>,
+    fixups: &mut Vec<FixupReq>,
+) -> AsmResult<()> {
+    let idx = *extern_idx.get("FIDRQQ").ok_or_else(|| {
+        AsmError::new(
+            0,
+            "FPU instruction emitted but FIDRQQ marker missing from EXTDEFs",
+        )
+    })?;
+    let off = u16::try_from(out.len()).map_err(|_| {
+        AsmError::new(0, "LEDATA offset exceeds u16 at FPU instruction")
+    })?;
+    fixups.push(FixupReq {
+        data_offset: off,
+        kind: FixupKind::SegRelExternFrameTarget { extdef_idx: idx },
+    });
     Ok(())
 }
 

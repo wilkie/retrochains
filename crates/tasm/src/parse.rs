@@ -845,6 +845,8 @@ fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
             ))
         }
         "ret" => Ok(Instr::Ret),
+        "fld" => parse_fld(rest, line.line_no),
+        "fstp" => parse_fstp(rest, line.line_no),
         _ => Err(AsmError::new(
             line.line_no,
             format!("instruction `{kw}` not yet supported (operands {rest:?})"),
@@ -3802,10 +3804,67 @@ fn parse_word_bp_relative(s: &str) -> Option<i16> {
     parse_bp_relative_with_width(s, BpWidth::Word)
 }
 
+fn parse_dword_bp_relative(s: &str) -> Option<i16> {
+    parse_bp_relative_with_width(s, BpWidth::Dword)
+}
+
+fn parse_qword_bp_relative(s: &str) -> Option<i16> {
+    parse_bp_relative_with_width(s, BpWidth::Qword)
+}
+
+/// `fld <dword|qword> ptr <operand>` — dispatch based on the width
+/// prefix and operand form (`[bp+disp]` or `<group>:<sym>[+disp]`).
+fn parse_fld(rest: &str, line_no: usize) -> AsmResult<Instr> {
+    if let Some(offset) = parse_dword_bp_relative(rest) {
+        return Ok(Instr::FldDwordBpRel { offset });
+    }
+    if let Some(offset) = parse_qword_bp_relative(rest) {
+        return Ok(Instr::FldQwordBpRel { offset });
+    }
+    if let Some((group, symbol)) = parse_group_symbol_with_width(rest, "dword ptr ") {
+        let (sym, offset) = split_sym_offset(symbol);
+        return Ok(Instr::FldDwordGroupSym {
+            group: group.to_string(),
+            symbol: sym.to_string(),
+            offset,
+        });
+    }
+    if let Some((group, symbol)) = parse_group_symbol_with_width(rest, "qword ptr ") {
+        let (sym, offset) = split_sym_offset(symbol);
+        return Ok(Instr::FldQwordGroupSym {
+            group: group.to_string(),
+            symbol: sym.to_string(),
+            offset,
+        });
+    }
+    Err(AsmError::new(
+        line_no,
+        format!("fld: unsupported operand form `{rest}`"),
+    ))
+}
+
+/// `fstp <dword|qword> ptr [bp+disp]` — only bp-relative store
+/// forms are emitted by BCC for float/double locals; group-symbol
+/// stores would land in `fst` territory.
+fn parse_fstp(rest: &str, line_no: usize) -> AsmResult<Instr> {
+    if let Some(offset) = parse_dword_bp_relative(rest) {
+        return Ok(Instr::FstpDwordBpRel { offset });
+    }
+    if let Some(offset) = parse_qword_bp_relative(rest) {
+        return Ok(Instr::FstpQwordBpRel { offset });
+    }
+    Err(AsmError::new(
+        line_no,
+        format!("fstp: unsupported operand form `{rest}`"),
+    ))
+}
+
 enum BpWidth {
     Any,
     Byte,
     Word,
+    Dword,
+    Qword,
 }
 
 fn parse_bp_relative_with_width(s: &str, width: BpWidth) -> Option<i16> {
@@ -3817,6 +3876,8 @@ fn parse_bp_relative_with_width(s: &str, width: BpWidth) -> Option<i16> {
             .unwrap_or(s),
         BpWidth::Byte => s.strip_prefix("byte ptr ")?,
         BpWidth::Word => s.strip_prefix("word ptr ")?,
+        BpWidth::Dword => s.strip_prefix("dword ptr ")?,
+        BpWidth::Qword => s.strip_prefix("qword ptr ")?,
     };
     let inside = inside.strip_prefix('[')?.strip_suffix(']')?;
     let inside = inside.strip_prefix("bp")?;

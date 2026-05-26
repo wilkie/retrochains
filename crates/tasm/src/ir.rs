@@ -1949,6 +1949,33 @@ pub enum Instr {
     CallIndirectBpRel { offset: i16 },
     /// `ret`
     Ret,
+    // 8087 FPU instructions. The opcode family selects the operand
+    // width (`D9` for 32-bit `dword`/single, `DD` for 64-bit `qword`/
+    // double); the ModR/M reg field selects the operation (0 = `fld`,
+    // 3 = `fstp`). Memory addressing reuses the same `[bp+disp]`
+    // and `<group>:<sym>` shapes as the integer instructions.
+    /// `fld dword ptr [bp+<offset>]` — push a 32-bit float from a
+    /// bp-relative slot onto the FPU stack. Encoding: `D9 /0 [bp+disp]`
+    /// — `D9 46 dd` (disp8) or `D9 86 lo hi` (disp16).
+    FldDwordBpRel { offset: i16 },
+    /// `fstp dword ptr [bp+<offset>]` — pop the FPU top into a 32-bit
+    /// float slot. Encoding: `D9 /3 [bp+disp]`.
+    FstpDwordBpRel { offset: i16 },
+    /// `fld qword ptr [bp+<offset>]` — 64-bit double load. Encoding:
+    /// `DD /0 [bp+disp]`.
+    FldQwordBpRel { offset: i16 },
+    /// `fstp qword ptr [bp+<offset>]` — 64-bit double store. Encoding:
+    /// `DD /3 [bp+disp]`.
+    FstpQwordBpRel { offset: i16 },
+    /// `fld dword ptr <group>:<sym>[+<offset>]` — push a 32-bit float
+    /// from a data-segment address. Encoding: `D9 06 lo hi` plus a
+    /// SegRelGroupTarget FIXUPP on the disp16. Used by float
+    /// constants pooled in `s@` and by global float reads.
+    FldDwordGroupSym { group: String, symbol: String, offset: i16 },
+    /// `fld qword ptr <group>:<sym>[+<offset>]` — 64-bit double load
+    /// from a data-segment address. Encoding: `DD 06 lo hi` + same
+    /// FIXUPP shape as `FldDwordGroupSym`. Used by global doubles.
+    FldQwordGroupSym { group: String, symbol: String, offset: i16 },
 }
 
 /// 8086 16-bit general-purpose registers. The byte encoding is the
@@ -2147,6 +2174,15 @@ pub enum FixupKind {
     /// `extrn _g:word` (fixture 163). Same shape as SegRelGroupTarget
     /// except the target is an external symbol instead of a segment.
     SegRelGroupExtern { group_idx: u8, extdef_idx: u8 },
+    /// Segment-relative 16-bit offset (M=1, location=1), frame method
+    /// F4 (frame is the target's own segment, no frame datum), target
+    /// method T6 (EXTDEF, no displacement). Real TASM emits one of
+    /// these for every 8087 memory instruction, targeting `FIDRQQ`
+    /// (the floating-point library's marker symbol). The linker uses
+    /// these fixups to rewrite the site if emulation is enabled;
+    /// with the hardware FPU present they're a no-op marker. Fix
+    /// Data byte: 0x46.
+    SegRelExternFrameTarget { extdef_idx: u8 },
 }
 
 /// A position-bound parse error. The line number is 1-based and refers
