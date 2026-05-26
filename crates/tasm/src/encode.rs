@@ -609,7 +609,7 @@ fn instr_size(instr: &Instr) -> usize {
         Instr::FldDwordGroupSym { .. } | Instr::FldQwordGroupSym { .. } => 5,
         // Register-form FPU instructions: 9B (fwait) + family +
         // register-mode ModR/M = 3 bytes flat. No memory displacement.
-        Instr::Fld1 | Instr::FsubpStack => 3,
+        Instr::Fld1 | Instr::FsubpStack | Instr::Fchs => 3,
         // Standalone fwait emits `90 9B` (NOP + FWAIT) — TASM tags
         // the NOP byte with the FIWRQQ marker. 2 bytes total.
         Instr::Fwait => 2,
@@ -3085,6 +3085,10 @@ fn emit_instr(
         Instr::Fld1 => {
             push_fidrqq_fixup(out, extern_idx, fixups)?;
             out.extend_from_slice(&[0x9B, 0xD9, 0xE8]);
+        }
+        Instr::Fchs => {
+            push_fidrqq_fixup(out, extern_idx, fixups)?;
+            out.extend_from_slice(&[0x9B, 0xD9, 0xE0]);
         }
         Instr::FsubpStack => {
             push_fidrqq_fixup(out, extern_idx, fixups)?;

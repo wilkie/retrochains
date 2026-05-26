@@ -1998,6 +1998,10 @@ pub enum Instr {
     /// BCC uses this in place of pooling the bytes for any `1.0f`
     /// operand (fixtures 1673, 1679).
     Fld1,
+    /// `fchs` — change sign of the top of the FPU stack.
+    /// Encoding: `9B D9 E0`. Used to materialize unary negation
+    /// on a float/double operand. Fixture 1753.
+    Fchs,
     /// `fsub` with no operand — equivalent to `fsubp st(1),st0`:
     /// `st(1) := st(1) - st(0)`, then pop the stack. Encoding:
     /// `9B DE E9`. BCC pairs this with `fld1` for the `<x> -

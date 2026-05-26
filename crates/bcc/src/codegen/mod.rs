@@ -6887,6 +6887,12 @@ impl<'a> FunctionEmitter<'a> {
                 };
                 self.emit_float_arith_mem(mnem, right);
             }
+            ExprKind::Unary { op: UnaryOp::Neg, operand } => {
+                // `-<float>` on the FPU: evaluate the operand, then
+                // change sign with `fchs`. Fixture 1753.
+                self.emit_float_load_to_fpu(operand);
+                self.out.extend_from_slice(b"\tfchs\t\r\n");
+            }
             ExprKind::Cast { ty: cast_ty, operand } => {
                 // Float↔float casts (`(float)d`, `(double)f`) are
                 // no-ops at the FPU-stack level: the register stack

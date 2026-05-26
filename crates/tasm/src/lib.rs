@@ -71,6 +71,7 @@ fn module_has_fpu(module: &ir::Module) -> bool {
                 | Instr::FldQwordGroupSym { .. }
                 | Instr::FpuArithBpRel { .. }
                 | Instr::Fld1
+                | Instr::Fchs
                 | Instr::FsubpStack
                 | Instr::FildWordBpRel { .. }
                 | Instr::FcompBpRel { .. }
