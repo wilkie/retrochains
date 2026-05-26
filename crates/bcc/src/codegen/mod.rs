@@ -10894,6 +10894,42 @@ impl<'a> FunctionEmitter<'a> {
             }
             return;
         }
+        // `<ptr>-><ptr-field>[K]` — load the pointer field into BX,
+        // then read `[bx + K*stride]`. Fixture 2703.
+        if let ExprKind::Member { base, field, kind: crate::ast::MemberKind::Arrow } = &array.kind
+            && let ExprKind::Ident(p_name) = &base.kind
+            && self.locals.has(p_name)
+            && let LocalLocation::Reg(p_reg) = self.locals.location_of(p_name)
+            && let Some(pointee) = self.locals.type_of(p_name).pointee()
+            && let Some((field_off, field_ty)) = pointee.field(field)
+            && let Some(elem_ty) = field_ty.pointee()
+            && let Some(k) = try_const_eval(index)
+        {
+            let elem_ty = elem_ty.clone();
+            let stride = i32::from(elem_ty.size_bytes());
+            let elem_off = (k as i32).wrapping_mul(stride);
+            let p_reg_name = p_reg.name();
+            let load_src = if field_off == 0 {
+                format!("[{p_reg_name}]")
+            } else {
+                format!("[{p_reg_name}+{field_off}]")
+            };
+            let _ = write!(self.out, "\tmov\tbx,word ptr {load_src}\r\n");
+            let bx_disp = if elem_off == 0 {
+                "[bx]".to_owned()
+            } else if elem_off > 0 {
+                format!("[bx+{elem_off}]")
+            } else {
+                format!("[bx-{}]", -elem_off)
+            };
+            if elem_ty.is_char_like() {
+                let _ = write!(self.out, "\tmov\tal,byte ptr {bx_disp}\r\n");
+                self.emit_widen_al(&elem_ty);
+            } else {
+                let _ = write!(self.out, "\tmov\tax,word ptr {bx_disp}\r\n");
+            }
+            return;
+        }
         if let ExprKind::Member { base, field, kind: crate::ast::MemberKind::Arrow } = &array.kind
             && let ExprKind::Ident(p_name) = &base.kind
             && self.locals.has(p_name)
