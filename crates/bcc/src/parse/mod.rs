@@ -720,12 +720,14 @@ impl Parser {
         let mut fields: Vec<StructField> = Vec::new();
         let mut struct_offset: u16 = 0;
         let mut union_max: u16 = 0;
-        // Bitfield packing state: the current 16-bit container's
-        // starting byte offset, and how many of its 16 bits are
-        // already claimed. Reset to None whenever a non-bitfield
-        // field lands or a `: 0` separator forces alignment.
+        // Bitfield packing state: the current container's starting
+        // byte offset, how many of its 16 bits are claimed, and
+        // whether the container has already been expanded to 2
+        // bytes. Reset to None whenever a non-bitfield field lands
+        // or a `: 0` separator forces alignment.
         let mut bit_container_offset: Option<u16> = None;
         let mut bits_used_in_container: u8 = 0;
+        let mut container_is_word: bool = false;
         while !matches!(self.peek().kind, TokenKind::RBrace | TokenKind::Eof) {
             // Each field declaration: <type> <pointer-stars> <name>
             // ('[' <int> ']')* ; — or bitfield: <type> <name> : <width> ;
@@ -754,21 +756,29 @@ impl Parser {
                 let width_u8 = u8::try_from(width).map_err(|_| {
                     ParseError::Unsupported { offset: width_tok.span.start }
                 })?;
-                // If we have no open container, or the new field
-                // wouldn't fit, start a fresh 16-bit (2-byte)
-                // container at the current struct offset.
+                // Open the container lazily — first bitfield in a
+                // run gets 1 byte; we grow to 2 bytes only when the
+                // accumulated bits cross the 8-bit boundary. A new
+                // bitfield that wouldn't fit in 16 bits closes the
+                // current container and starts a fresh one.
                 if bit_container_offset.is_none()
                     || bits_used_in_container + width_u8 > 16
                 {
                     bit_container_offset = Some(struct_offset);
                     bits_used_in_container = 0;
+                    container_is_word = false;
                     if !is_union {
-                        struct_offset += 2;
+                        struct_offset += 1;
                     }
                 }
                 let cont_off = bit_container_offset.expect("just set");
                 let bit_off_in_container = bits_used_in_container;
                 bits_used_in_container += width_u8;
+                if !is_union && !container_is_word && bits_used_in_container > 8 {
+                    // Container grows from 1 byte to 2 bytes.
+                    container_is_word = true;
+                    struct_offset += 1;
+                }
                 let byte_off_within = bit_off_in_container / 8;
                 let bit_off_within = bit_off_in_container % 8;
                 fields.push(StructField {
@@ -796,6 +806,7 @@ impl Parser {
             if bit_container_offset.is_some() {
                 bit_container_offset = None;
                 bits_used_in_container = 0;
+                container_is_word = false;
             }
             // Array suffix on the field (`int data[4];` — fixture
             // 496). Multi-dim wraps innermost-first.

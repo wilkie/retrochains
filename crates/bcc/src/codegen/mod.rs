@@ -16624,25 +16624,41 @@ impl<'a> FunctionEmitter<'a> {
     }
 
     fn resolve_bitfield_named(&self, struct_name: &str, field: &str) -> Option<BitfieldRef> {
-        if !self.locals.has(struct_name) {
-            return None;
-        }
-        let base_ty = self.locals.type_of(struct_name).clone();
-        let field_info = struct_field_info(&base_ty, field)?;
-        let bf = field_info.bitfield?;
-        let LocalLocation::Stack(struct_off) = self.locals.location_of(struct_name)
-        else {
+        // Stack-resident local: `[bp+disp]`. File-scope global:
+        // `DGROUP:_<name>[+off]`. Either way the bitfield info
+        // comes from the struct type. Fixture 3209 (global bitfield
+        // write to DGROUP:_b).
+        let (base_ty, addr) = if self.locals.has(struct_name) {
+            let ty = self.locals.type_of(struct_name).clone();
+            let field_info = struct_field_info(&ty, field)?;
+            let LocalLocation::Stack(struct_off) = self.locals.location_of(struct_name)
+            else {
+                return None;
+            };
+            let byte_off =
+                struct_off + i16::try_from(field_info.offset).expect("field offset fits");
+            (ty, bp_addr(byte_off))
+        } else if let Some(gty) = self.globals.type_of(struct_name) {
+            let ty = gty.clone();
+            let field_info = struct_field_info(&ty, field)?;
+            let addr = if field_info.offset == 0 {
+                format!("DGROUP:_{struct_name}")
+            } else {
+                format!("DGROUP:_{struct_name}+{}", field_info.offset)
+            };
+            (ty, addr)
+        } else {
             return None;
         };
-        let byte_off =
-            struct_off + i16::try_from(field_info.offset).expect("field offset fits");
+        let field_info = struct_field_info(&base_ty, field)?;
+        let bf = field_info.bitfield?;
         let access = if bf.bit_offset + bf.bit_width <= 8 {
             BitfieldAccess::Byte
         } else {
             BitfieldAccess::Word
         };
         Some(BitfieldRef {
-            addr: bp_addr(byte_off),
+            addr,
             access,
             bit_offset: bf.bit_offset,
             bit_width: bf.bit_width,
