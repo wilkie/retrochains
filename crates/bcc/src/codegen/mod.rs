@@ -15927,15 +15927,15 @@ impl<'a> FunctionEmitter<'a> {
                         );
                         return;
                     }
-                    // `<ptr-lvalue> + <int-expr>` — pointer arithmetic
-                    // when the LHS is a pointer ident (not array
-                    // decay). Scale the int by sizeof(pointee), push,
-                    // load pointer, pop, add. Stride scaling uses shl
-                    // for powers of two; imul for arbitrary strides
-                    // (e.g. struct of 5 bytes). Fixture 3380 (`p + n`
-                    // for `int *p, int n`), 2771 (`p + n` for
-                    // 5-byte struct).
-                    if matches!(op, BinOp::Add)
+                    // `<ptr-lvalue> + <int-expr>` / `- <int-expr>` —
+                    // pointer arithmetic when the LHS is a pointer
+                    // ident (not array decay). Scale the int by
+                    // sizeof(pointee), push, load pointer, pop, then
+                    // add/sub. Stride scaling uses shl for powers of
+                    // two; imul for arbitrary strides. Fixtures
+                    // 3380 (`p + n` int*), 2771 (struct 5b), 3648
+                    // (`p - n` for struct 4b).
+                    if matches!(op, BinOp::Add | BinOp::Sub)
                         && let ExprKind::Ident(pname) = &left.kind
                         && let Some(pointee) = self.ident_pointee(pname)
                         && pointee.size_bytes() > 1
@@ -15954,7 +15954,8 @@ impl<'a> FunctionEmitter<'a> {
                         self.out.extend_from_slice(b"\tpush\tax\r\n");
                         self.emit_expr_to_ax(left);
                         self.out.extend_from_slice(b"\tpop\tdx\r\n");
-                        self.out.extend_from_slice(b"\tadd\tax,dx\r\n");
+                        let mnem = if matches!(op, BinOp::Add) { "add" } else { "sub" };
+                        let _ = write!(self.out, "\t{mnem}\tax,dx\r\n");
                         return;
                     }
                     // `<ptr-typed-expr> + K` / `- K` — C scales the
