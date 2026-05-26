@@ -2487,6 +2487,13 @@ impl<'a> FunctionEmitter<'a> {
             // through AX, not through a single operand. Fixture
             // 1347 (`a += b++`), 1348 (`a += ++b`).
             ExprKind::Update { .. } => true,
+            // `*p++` / `*--p` — the inner update needs the post/pre
+            // sequencing that emit_deref_to_ax materializes through
+            // AX, so route the whole thing through the AX path
+            // rather than panicking in resolve_operand_source.
+            // Fixture 2000.
+            ExprKind::Deref(inner)
+                if matches!(inner.kind, ExprKind::Update { .. }) => true,
             _ => false,
         }
     }
