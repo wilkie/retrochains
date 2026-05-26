@@ -12,6 +12,7 @@ use crate::codegen;
 use crate::dos_time;
 use crate::lex::Lexer;
 use crate::parse::Parser;
+use crate::preprocess;
 
 #[derive(Debug, thiserror::Error)]
 pub enum EmitError {
@@ -19,6 +20,8 @@ pub enum EmitError {
     Io(#[from] std::io::Error),
     #[error("source {0}: {1}")]
     SourceRead(PathBuf, std::io::Error),
+    #[error("preprocess: {0}")]
+    Preprocess(#[from] preprocess::PreprocessError),
     #[error("lex: {0}")]
     Lex(#[from] crate::lex::LexError),
     #[error("parse: {0}")]
@@ -67,7 +70,15 @@ pub fn build_asm(
     mtime: SystemTime,
     merge_strings: bool,
 ) -> Result<Vec<u8>, EmitError> {
-    let tokens = Lexer::new(source).tokenize()?;
+    // C preprocessor pass: resolve `#define`/`#ifdef`/`#if` and
+    // expand object/function-like macros. Stripped directive lines
+    // are replaced with blank lines so byte/line numbering in the
+    // output matches the original source — the codegen still uses
+    // the ORIGINAL source for `;`-comment line emission so macro
+    // names show through in comments even though the code uses the
+    // expanded form.
+    let preprocessed = preprocess::preprocess(source)?;
+    let tokens = Lexer::new(&preprocessed).tokenize()?;
     let unit = Parser::new(tokens).parse_unit()?;
 
     let mut out = Vec::with_capacity(1024);

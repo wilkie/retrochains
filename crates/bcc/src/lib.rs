@@ -12,6 +12,7 @@ mod emit_obj;
 mod emit_s;
 pub mod lex;
 pub mod parse;
+mod preprocess;
 
 pub use cli::{CliError, CompileMode, MemoryModel, ParsedArgs, parse_args};
 pub use emit_obj::{build_obj, emit_dash_c};
