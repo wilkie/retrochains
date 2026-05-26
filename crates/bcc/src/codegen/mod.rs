@@ -234,6 +234,28 @@ impl StringPool {
         self.intern_inner(bytes, false)
     }
 
+    /// Intern a 32-bit `float` constant. The IEEE 754 bit pattern is
+    /// written little-endian (low byte first). BCC stores float
+    /// constants in the same `s@` pool as strings and struct-init
+    /// blobs, so the only thing distinguishing them at emission time
+    /// is the byte image itself — `s@` becomes a heterogeneous mix
+    /// of strings and raw numeric bytes, all rendered through the
+    /// same `db` emitter. Returns the offset within `s@`.
+    pub fn intern_float(&mut self, bits: u32) -> u32 {
+        self.intern_inner(&bits.to_le_bytes(), false)
+    }
+
+    /// Intern a 64-bit `double` constant. Same pool, 8 little-endian
+    /// bytes. Note BCC sometimes stores a double-typed initializer as
+    /// a 32-bit float in the pool when the value is exactly
+    /// representable in single precision (`fld dword` → 80-bit FPU
+    /// promotion → `fstp qword` truncation gives the same bits), but
+    /// that lossless-narrowing decision lives in the codegen caller,
+    /// not the pool: this method always stores the full 8 bytes.
+    pub fn intern_double(&mut self, bits: u64) -> u32 {
+        self.intern_inner(&bits.to_le_bytes(), false)
+    }
+
     fn intern_inner(&mut self, bytes: &[u8], nul: bool) -> u32 {
         // String-literal entries (`nul = true`) only dedupe when
         // `merge_strings` is set (BCC's `-d` flag). Blob entries
