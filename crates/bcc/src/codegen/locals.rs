@@ -594,6 +594,23 @@ impl Locals {
                             .copied()
                             .unwrap_or(0);
                         local_decl_idx += 1;
+                        // Local referenced only by sizeof (which the
+                        // parser folds to an int literal) leaves it
+                        // unreferenced everywhere else. With a zero
+                        // use count and no address taken, BCC skips
+                        // the stack allocation entirely — and so do
+                        // we. Fixtures 1885, 2498, 3310.
+                        let uses = counts.get(&item.name).copied().unwrap_or(0);
+                        if uses == 0 && !address_taken.contains(&item.name) {
+                            // Synthetic, never-read location — the
+                            // local has zero uses so location_of is
+                            // never queried.
+                            by_name.insert(
+                                item.name.clone(),
+                                LocalEntry { location: LocalLocation::Stack(0), ty: item.ty.clone() },
+                            );
+                            continue;
+                        }
                         // Sibling-block boundary: reset stack_bytes
                         // back to the function-level baseline so
                         // this block starts allocating from the
