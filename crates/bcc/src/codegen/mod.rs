@@ -15716,14 +15716,17 @@ impl<'a> FunctionEmitter<'a> {
                 //   `<ident> * 0` → `xor ax, ax`
                 //   `<ident> * 1` → `<load ident>` (LHS unchanged)
                 //   `<ident> / 1` → `<load ident>` (LHS unchanged)
+                //   `<ident> % 1` → `xor ax, ax` (result is always 0)
                 // BCC folds these to drop the multiply/divide entirely.
-                // Fixtures 2011 (`x * 0`), 2014 (`x / 1`).
-                if matches!(op, BinOp::Mul)
-                    && matches!(left.kind, ExprKind::Ident(_))
-                    && try_const_eval(right) == Some(0)
+                // Fixtures 2011 (`x * 0`), 2014 (`x / 1`), 2391
+                // (`x % 1`).
+                if (matches!(op, BinOp::Mul) && try_const_eval(right) == Some(0))
+                    || (matches!(op, BinOp::Mod) && try_const_eval(right) == Some(1))
                 {
-                    self.out.extend_from_slice(b"\txor\tax,ax\r\n");
-                    return;
+                    if matches!(left.kind, ExprKind::Ident(_)) {
+                        self.out.extend_from_slice(b"\txor\tax,ax\r\n");
+                        return;
+                    }
                 }
                 if matches!(op, BinOp::Mul | BinOp::Div)
                     && matches!(left.kind, ExprKind::Ident(_))
