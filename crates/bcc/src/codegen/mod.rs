@@ -3136,6 +3136,46 @@ impl<'a> FunctionEmitter<'a> {
         // tie-breaker. Caller must supply BOTH slots so the
         // intermediate signed-direction jump can land at the body
         // (true target). Fixture 234.
+        // `<long_lvalue> <eq/ne> <long_lvalue>` — both stack or
+        // global, equality only (no strict-cmp signedness issue).
+        // Load a's halves into AX/DX, cmp against b's halves with
+        // jne short-circuits. Fixture 1644
+        // (`if (a == b)` for two long stack locals).
+        if let ExprKind::BinOp { op, left, right } = &cond.kind
+            && matches!(op, BinOp::Eq | BinOp::Ne)
+            && let Some((a_hi, a_lo)) = self.long_lvalue_addr_pair(left)
+            && let Some((b_hi, b_lo)) = self.long_lvalue_addr_pair(right)
+            && let Some(fslot) = false_slot
+        {
+            let _ = write!(self.out, "\tmov\tax,word ptr {a_hi}\r\n");
+            let _ = write!(self.out, "\tmov\tdx,word ptr {a_lo}\r\n");
+            let _ = write!(self.out, "\tcmp\tax,word ptr {b_hi}\r\n");
+            match op {
+                BinOp::Eq => {
+                    let _ = write!(self.out, "\tjne\tshort {}\r\n", self.label_ref(fslot));
+                    let _ = write!(self.out, "\tcmp\tdx,word ptr {b_lo}\r\n");
+                    let _ = write!(self.out, "\tjne\tshort {}\r\n", self.label_ref(fslot));
+                }
+                BinOp::Ne => {
+                    let Some(tslot) = true_slot else {
+                        // Ne without true_slot: caller wants
+                        // fall-through-on-true. Need both jumps to
+                        // false_slot when EQUAL.
+                        let local_true = self.label_plan.base(cond.span.start, cond.span.end);
+                        let _ = write!(self.out, "\tjne\tshort {}\r\n", self.label_ref(local_true));
+                        let _ = write!(self.out, "\tcmp\tdx,word ptr {b_lo}\r\n");
+                        let _ = write!(self.out, "\tje\tshort {}\r\n", self.label_ref(fslot));
+                        self.emit_label(local_true);
+                        return;
+                    };
+                    let _ = write!(self.out, "\tjne\tshort {}\r\n", self.label_ref(tslot));
+                    let _ = write!(self.out, "\tcmp\tdx,word ptr {b_lo}\r\n");
+                    let _ = write!(self.out, "\tje\tshort {}\r\n", self.label_ref(fslot));
+                }
+                _ => unreachable!(),
+            }
+            return;
+        }
         if self.is_long_signed_globals_cmp(cond)
             && let ExprKind::BinOp { op, left, right } = &cond.kind
             && let ExprKind::Ident(a) = &left.kind
