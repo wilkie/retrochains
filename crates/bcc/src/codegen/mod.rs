@@ -10837,6 +10837,37 @@ impl<'a> FunctionEmitter<'a> {
             }
             return;
         }
+        // `<ptr>-><field>[K]` where the field is an array type and
+        // <ptr> is a register-resident struct pointer: fold the
+        // field offset + element offset and emit a single
+        // \`mov ax, word ptr [reg + total_off]\`. Fixture 2676.
+        if let ExprKind::Member { base, field, kind: crate::ast::MemberKind::Arrow } = &array.kind
+            && let ExprKind::Ident(p_name) = &base.kind
+            && self.locals.has(p_name)
+            && let LocalLocation::Reg(p_reg) = self.locals.location_of(p_name)
+            && let Some(pointee) = self.locals.type_of(p_name).pointee()
+            && let Some((field_off, field_ty)) = pointee.field(field)
+            && let Some(elem_ty) = field_ty.array_elem()
+            && let Some(k) = try_const_eval(index)
+        {
+            let stride = u32::from(elem_ty.size_bytes());
+            let off = u32::from(field_off) + k.wrapping_mul(stride);
+            let p_reg_name = p_reg.name();
+            let off_i = off as i32;
+            let bx_disp = if off_i == 0 {
+                format!("[{p_reg_name}]")
+            } else {
+                format!("[{p_reg_name}+{off_i}]")
+            };
+            let elem_ty = elem_ty.clone();
+            if elem_ty.is_char_like() {
+                let _ = write!(self.out, "\tmov\tal,byte ptr {bx_disp}\r\n");
+                self.emit_widen_al(&elem_ty);
+            } else {
+                let _ = write!(self.out, "\tmov\tax,word ptr {bx_disp}\r\n");
+            }
+            return;
+        }
         // Walk a nested chain `a[i1][i2]...` down to the base ident,
         // collecting indices from innermost to outermost. A bare
         // `a[i]` lands here with `indices = [i]` after the reversal.
