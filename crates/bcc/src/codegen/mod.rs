@@ -6028,6 +6028,35 @@ impl<'a> FunctionEmitter<'a> {
             //        register pair — no boundary move. `mov cl, K`
             //        lands AFTER the operand load, matching the
             //        non-compound (`=`-form) shape. Fixture 379.
+            // `return <a> << 16;` / `>> 16;` for a long lvalue — BCC
+            // collapses the helper call to a single half-load. For
+            // `<< 16` the result's high half is the source low half
+            // and the low half is zero (`mov dx, [lo]; xor ax, ax`).
+            // For `>> 16` the result's low half is the source high
+            // half (`mov ax, [hi]`) and the high half is the sign
+            // extension (`cwd` for signed) or zero (`xor dx, dx` for
+            // unsigned). Fixtures 2795 (signed >>), 2801 (unsigned
+            // >>), 2875 (<<).
+            if let ExprKind::BinOp { op, left, right } = &e.kind
+                && matches!(op, BinOp::Shl | BinOp::Shr)
+                && let Some((hi_addr, lo_addr)) = self.long_lvalue_addr_pair(left)
+                && let Some(k) = try_const_eval(right)
+                && k == 16
+            {
+                let unsigned = self.function.ret_ty.is_unsigned();
+                if matches!(op, BinOp::Shl) {
+                    let _ = write!(self.out, "\tmov\tdx,word ptr {lo_addr}\r\n");
+                    self.out.extend_from_slice(b"\txor\tax,ax\r\n");
+                } else {
+                    let _ = write!(self.out, "\tmov\tax,word ptr {hi_addr}\r\n");
+                    if unsigned {
+                        self.out.extend_from_slice(b"\txor\tdx,dx\r\n");
+                    } else {
+                        self.out.extend_from_slice(b"\tcwd\t\r\n");
+                    }
+                }
+                return;
+            }
             if let ExprKind::BinOp { op, left, right } = &e.kind
                 && matches!(op, BinOp::Shl | BinOp::Shr)
                 && let Some((hi_addr, lo_addr)) = self.long_lvalue_addr_pair(left)
