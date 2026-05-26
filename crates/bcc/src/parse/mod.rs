@@ -1994,6 +1994,36 @@ impl Parser {
                 span,
             });
         }
+        // Compound assigns in for clauses (`i += 2`, `i *= 3`, etc.)
+        // — desugar to `i = i <op> rhs`. Fixtures 1328, 3150, 3156.
+        if matches!(self.peek().kind, TokenKind::Ident(_))
+            && let Some(op) = match_compound_op(&self.peek_n(1).kind)
+        {
+            let ident_tok = self.bump();
+            let TokenKind::Ident(name) = ident_tok.kind else { unreachable!() };
+            self.bump(); // compound-op token
+            let rhs = self.parse_expr()?;
+            let lhs = Expr {
+                kind: ExprKind::Ident(name.clone()),
+                span: ident_tok.span,
+            };
+            let span = Span::new(ident_tok.span.start, rhs.span.end);
+            let binop = Expr {
+                kind: ExprKind::BinOp {
+                    op,
+                    left: Box::new(lhs),
+                    right: Box::new(rhs),
+                },
+                span,
+            };
+            return Ok(Expr {
+                kind: ExprKind::AssignExpr {
+                    target: name,
+                    value: Box::new(binop),
+                },
+                span,
+            });
+        }
         self.parse_expr()
     }
 
