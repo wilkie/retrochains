@@ -1614,6 +1614,63 @@ impl Parser {
         if !matches!(self.peek().kind, TokenKind::Equals)
             && match_compound_op(&self.peek().kind).is_none()
         {
+            // Plain expression statement. If parse_atom already
+            // consumed a postfix `++`/`--` on an ArrayIndex (because
+            // an expression-position rule fired), rewrite the
+            // statement to the matching ArrayCompoundAssign so it
+            // hits the existing stmt-level codegen path. The value
+            // is discarded, so `a[i]++;` is byte-identical to
+            // `a[i] += 1;`. Fixtures 3375, 2700.
+            if let ExprKind::UpdateLvalue { target, op, position: _ } = expr.kind {
+                if let ExprKind::ArrayIndex { .. } = &target.kind {
+                    let semi = self.expect(&TokenKind::Semicolon)?;
+                    let span = Span::new(start, semi.span.end);
+                    let bin_op = match op {
+                        UpdateOp::Inc => BinOp::Add,
+                        UpdateOp::Dec => BinOp::Sub,
+                    };
+                    let value = Expr {
+                        kind: ExprKind::IntLit(1),
+                        span: Span::new(target.span.end, target.span.end),
+                    };
+                    let mut indices: Vec<Expr> = Vec::new();
+                    let mut cur = *target;
+                    let array = loop {
+                        match cur.kind {
+                            ExprKind::ArrayIndex { array, index } => {
+                                indices.push(*index);
+                                cur = *array;
+                            }
+                            ExprKind::Ident(name) => break name,
+                            _ => {
+                                return Err(ParseError::Unsupported {
+                                    offset: cur.span.start,
+                                });
+                            }
+                        }
+                    };
+                    indices.reverse();
+                    return Ok(Stmt {
+                        kind: StmtKind::ArrayCompoundAssign {
+                            array, indices, op: bin_op, value,
+                            from_postfix: true,
+                        },
+                        span,
+                    });
+                }
+                // Deref target: leave the UpdateLvalue ExprStmt to
+                // the existing codegen path that handles `(*p)++;`.
+                let semi = self.expect(&TokenKind::Semicolon)?;
+                return Ok(Stmt {
+                    kind: StmtKind::ExprStmt(Expr {
+                        kind: ExprKind::UpdateLvalue {
+                            target, op, position: UpdatePosition::Post,
+                        },
+                        span: expr.span,
+                    }),
+                    span: Span::new(start, semi.span.end),
+                });
+            }
             // Plain expression statement.
             let semi = self.expect(&TokenKind::Semicolon)?;
             return Ok(Stmt {
@@ -2859,7 +2916,10 @@ impl Parser {
                 // in ExprStmt context falls through the same way an
                 // Update would. Fixtures 2857, 3107, 2449.
                 TokenKind::PlusPlus | TokenKind::MinusMinus
-                    if matches!(e.kind, ExprKind::Deref(_)) =>
+                    if matches!(
+                        e.kind,
+                        ExprKind::Deref(_) | ExprKind::ArrayIndex { .. }
+                    ) =>
                 {
                     let op_tok = self.bump();
                     let op = match op_tok.kind {

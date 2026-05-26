@@ -17293,7 +17293,68 @@ impl<'a> FunctionEmitter<'a> {
                 // here means we didn't route an FP context correctly.
                 panic!("float literal in integer-AX context not supported yet");
             }
-            ExprKind::UpdateLvalue { .. } => {
+            ExprKind::UpdateLvalue { target, op, position } => {
+                // `<arr>[K]++` / `--` on a stack int array with a
+                // constant index: load the pre-update value into AX,
+                // then `inc`/`dec` the memory in place. Post-form
+                // returns the pre-update value (already in AX). Pre-
+                // form would mutate first then load — not exercised
+                // by any fixture today. Fixture 1418.
+                if let ExprKind::ArrayIndex { array, index } = &target.kind
+                    && let ExprKind::Ident(arr_name) = &array.kind
+                    && self.locals.has(arr_name)
+                    && let arr_ty = self.locals.type_of(arr_name).clone()
+                    && let Some(elem_ty) = arr_ty.array_elem()
+                    && elem_ty.is_int_like()
+                    && let LocalLocation::Stack(base_off) = self.locals.location_of(arr_name)
+                    && let Some(k) = try_const_eval(index)
+                    && matches!(position, UpdatePosition::Post)
+                {
+                    let stride = i32::from(elem_ty.size_bytes());
+                    let elem_off = i32::from(base_off) + (k as i32) * stride;
+                    let elem_off_i16 = i16::try_from(elem_off).expect("elem offset fits in i16");
+                    let mnem = match op {
+                        UpdateOp::Inc => "inc",
+                        UpdateOp::Dec => "dec",
+                    };
+                    let _ = write!(
+                        self.out,
+                        "\tmov\tax,word ptr {}\r\n",
+                        bp_addr(elem_off_i16),
+                    );
+                    let _ = write!(
+                        self.out,
+                        "\t{mnem}\tword ptr {}\r\n",
+                        bp_addr(elem_off_i16),
+                    );
+                    return;
+                }
+                // Same shape but the array is a file-scope global.
+                // Fixture 2700 (`int a[3]; return a[1]++;`).
+                if let ExprKind::ArrayIndex { array, index } = &target.kind
+                    && let ExprKind::Ident(arr_name) = &array.kind
+                    && !self.locals.has(arr_name)
+                    && let Some(arr_ty) = self.globals.type_of(arr_name)
+                    && let Some(elem_ty) = arr_ty.array_elem()
+                    && elem_ty.is_int_like()
+                    && let Some(k) = try_const_eval(index)
+                    && matches!(position, UpdatePosition::Post)
+                {
+                    let stride = u32::from(elem_ty.size_bytes());
+                    let off = k.wrapping_mul(stride);
+                    let addr = if off == 0 {
+                        format!("DGROUP:_{arr_name}")
+                    } else {
+                        format!("DGROUP:_{arr_name}+{off}")
+                    };
+                    let mnem = match op {
+                        UpdateOp::Inc => "inc",
+                        UpdateOp::Dec => "dec",
+                    };
+                    let _ = write!(self.out, "\tmov\tax,word ptr {addr}\r\n");
+                    let _ = write!(self.out, "\t{mnem}\tword ptr {addr}\r\n");
+                    return;
+                }
                 panic!(
                     "UpdateLvalue in integer-AX context only supported via the \
                      `*(*pp)++` outer-deref peephole today; the operand was {:?}",
