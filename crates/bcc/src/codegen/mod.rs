@@ -15829,27 +15829,66 @@ impl<'a> FunctionEmitter<'a> {
                             return;
                         }
                     }
-                    // `<ptr> - <ptr>` for same-typed pointers — C
-                    // gives an `int` count of elements (byte diff /
-                    // sizeof(pointee)). After the byte subtract,
-                    // divide AX by stride. Char* needs no divide;
-                    // int*/long* use `idiv bx` (signed) since
-                    // ptrdiff is signed. Fixture 1208 (`q - p` for
-                    // int* pair).
+                    // `<ptr-or-array> - <ptr-or-array>` for same-typed
+                    // elements — C gives an `int` count of elements
+                    // (byte diff / sizeof(elem)). After the byte
+                    // subtract, divide AX by stride. Char-typed
+                    // elements need no divide; int/long use `idiv bx`
+                    // (signed) since ptrdiff is signed. Either side
+                    // may be a pointer or array-decay. Fixtures
+                    // 1208 (`q - p` for int* pair), 2347 (`p - s`
+                    // for `char *p, char s[6]`).
+                    let elem_of = |this: &Self, name: &str| -> Option<Type> {
+                        this.ident_pointee(name).or_else(|| {
+                            let ty = this.globals.type_of(name).cloned()
+                                .or_else(|| this.locals.has(name)
+                                    .then(|| this.locals.type_of(name).clone()))?;
+                            ty.array_elem().cloned()
+                        })
+                    };
                     if matches!(op, BinOp::Sub)
                         && let ExprKind::Ident(l_name) = &left.kind
                         && let ExprKind::Ident(r_name) = &right.kind
-                        && let Some(l_pointee) = self.ident_pointee(l_name)
-                        && let Some(r_pointee) = self.ident_pointee(r_name)
-                        && l_pointee.size_bytes() == r_pointee.size_bytes()
+                        && let Some(l_elem) = elem_of(self, l_name)
+                        && let Some(r_elem) = elem_of(self, r_name)
+                        && l_elem.size_bytes() == r_elem.size_bytes()
                     {
-                        let stride = l_pointee.size_bytes();
-                        // Emit the standard sub via the generic path
-                        // below; just remember to divide afterward.
-                        // Inline the sub here since the loop's
-                        // structure makes it awkward to recurse.
-                        self.emit_expr_to_ax(left);
-                        self.emit_binary_right(BinOp::Sub, right, false);
+                        let stride = l_elem.size_bytes();
+                        let rhs_is_array_lvalue = self.globals
+                            .type_of(r_name)
+                            .map_or(false, |t| matches!(t, Type::Array { .. }))
+                            || (self.locals.has(r_name)
+                                && matches!(self.locals.type_of(r_name), Type::Array { .. }));
+                        if rhs_is_array_lvalue {
+                            // RHS is an array — we need its ADDRESS,
+                            // not its content. BCC's shape:
+                            //   lea ax, &r ; push ax
+                            //   <lhs into ax>
+                            //   pop dx ; sub ax, dx
+                            // Fixture 2347 (`p - s` for `char *p,
+                            // char s[6]`).
+                            if let Some(_g) = self.globals.type_of(r_name) {
+                                let _ = write!(
+                                    self.out,
+                                    "\tmov\tax,offset DGROUP:_{r_name}\r\n",
+                                );
+                            } else if let LocalLocation::Stack(off) =
+                                self.locals.location_of(r_name)
+                            {
+                                let _ = write!(
+                                    self.out,
+                                    "\tlea\tax,word ptr {}\r\n",
+                                    bp_addr(off),
+                                );
+                            }
+                            self.out.extend_from_slice(b"\tpush\tax\r\n");
+                            self.emit_expr_to_ax(left);
+                            self.out.extend_from_slice(b"\tpop\tdx\r\n");
+                            self.out.extend_from_slice(b"\tsub\tax,dx\r\n");
+                        } else {
+                            self.emit_expr_to_ax(left);
+                            self.emit_binary_right(BinOp::Sub, right, false);
+                        }
                         if stride > 1 {
                             let _ = write!(self.out, "\tmov\tbx,{stride}\r\n");
                             self.out.extend_from_slice(b"\tcwd\t\r\n");
