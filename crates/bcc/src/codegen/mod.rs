@@ -3097,6 +3097,19 @@ impl<'a> FunctionEmitter<'a> {
         true_slot: Option<u32>,
         false_slot: Option<u32>,
     ) {
+        // Float comparison: `<float-expr> <relop> <float-expr>`
+        // routes through the 8087 fcomp / fstsw / sahf dance. The
+        // condition codes (C0/C2/C3) map onto CF/PF/ZF after
+        // sahf, so we use the UNSIGNED conditional-jump family
+        // even for signed-looking C operators. Fixture 1674.
+        if let ExprKind::BinOp { op, left, right } = &cond.kind
+            && op.is_comparison()
+            && (self.operand_is_float_like(left)
+                || self.operand_is_float_like(right))
+        {
+            self.emit_float_compare_branch(*op, left, right, true_slot, false_slot);
+            return;
+        }
         // Constant-false cond: emit an unconditional `jmp short
         // <false_slot>` (no cmp/test/jcc). BCC's shape for
         // `if (0) ...`. Fixture 1585.
@@ -6595,6 +6608,108 @@ impl<'a> FunctionEmitter<'a> {
                 panic!("FPU cast from {:?} to {:?} not supported yet", operand.kind, cast_ty);
             }
             _ => panic!("FPU load not yet supported for {:?}", e.kind),
+        }
+    }
+
+    /// Emit a float-comparison conditional branch. The sequence:
+    /// `fld <left> / fcomp <right> / fstsw [scratch] / fwait /
+    /// mov ax,[scratch] / sahf / j<cc> <slot>`. The j<cc>
+    /// mnemonic is picked from the UNSIGNED family because the
+    /// post-`sahf` flag positions (CF=C0=ST<op, ZF=C3=ST==op,
+    /// PF=C2=unordered) align with the unsigned jcc encodings:
+    /// `<` → jae (jump if !less), `<=` → ja (jump if !leq), etc.
+    /// The fstsw scratch slot reuses the same fpu-scratch offset
+    /// that fild allocates. Fixture 1674.
+    fn emit_float_compare_branch(
+        &mut self,
+        op: BinOp,
+        left: &Expr,
+        right: &Expr,
+        true_slot: Option<u32>,
+        false_slot: Option<u32>,
+    ) {
+        let scratch = self.locals.fild_int_scratch_offset().expect(
+            "float comparison without reserved fpu scratch slot",
+        );
+        self.emit_float_load_to_fpu(left);
+        // Pick fcomp width from the right operand's static type
+        // (matches what BCC emits — the operand width prefix on
+        // fcomp reflects the operand we're comparing against).
+        let width_str = self.float_operand_width(right);
+        match &right.kind {
+            ExprKind::Ident(name) => {
+                let addr = if self.locals.has(name) {
+                    let LocalLocation::Stack(off) = self.locals.location_of(name)
+                    else {
+                        panic!("float local must live on the stack: {name}")
+                    };
+                    bp_addr(off)
+                } else {
+                    format!("DGROUP:_{name}")
+                };
+                let _ = write!(self.out, "\tfcomp\t{width_str} ptr {addr}\r\n");
+            }
+            _ => panic!(
+                "float comparison right-operand shape not supported: {:?}",
+                right.kind
+            ),
+        }
+        let _ = write!(
+            self.out,
+            "\tfstsw\tword ptr {}\r\n",
+            bp_addr(scratch),
+        );
+        self.out.extend_from_slice(b"\tfwait\t\r\n");
+        let _ = write!(
+            self.out,
+            "\tmov\tax,word ptr {}\r\n",
+            bp_addr(scratch),
+        );
+        self.out.extend_from_slice(b"\tsahf\t\r\n");
+        // Post-sahf flags: CF=C0 (set if ST<op), ZF=C3 (set if
+        // ST==op), PF=C2 (set if unordered).
+        let (true_mnem, false_mnem) = match op {
+            BinOp::Lt => ("jb", "jae"),
+            BinOp::Le => ("jbe", "ja"),
+            BinOp::Gt => ("ja", "jbe"),
+            BinOp::Ge => ("jae", "jb"),
+            BinOp::Eq => ("je", "jne"),
+            BinOp::Ne => ("jne", "je"),
+            other => panic!("not a comparison op: {other:?}"),
+        };
+        if let Some(fslot) = false_slot {
+            let _ = write!(
+                self.out,
+                "\t{false_mnem}\tshort {}\r\n",
+                self.label_ref(fslot),
+            );
+        } else if let Some(tslot) = true_slot {
+            let _ = write!(
+                self.out,
+                "\t{true_mnem}\tshort {}\r\n",
+                self.label_ref(tslot),
+            );
+        }
+    }
+
+    /// Width keyword (`dword` or `qword`) for an operand-position
+    /// float expression. Used when picking the fcomp/fadd/etc.
+    /// memory-operand prefix.
+    fn float_operand_width(&self, e: &Expr) -> &'static str {
+        match &e.kind {
+            ExprKind::FloatLit(_) => "dword",
+            ExprKind::DoubleLit(_) => "qword",
+            ExprKind::Ident(name) => {
+                let ty = if self.locals.has(name) {
+                    self.locals.type_of(name)
+                } else if let Some(gty) = self.globals.type_of(name) {
+                    gty
+                } else {
+                    panic!("unknown name in float operand width lookup: {name}")
+                };
+                if matches!(ty, Type::Float) { "dword" } else { "qword" }
+            }
+            _ => "dword",
         }
     }
 

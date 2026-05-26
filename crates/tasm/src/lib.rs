@@ -37,7 +37,24 @@ pub fn assemble(source: &str) -> AsmResult<Vec<u8>> {
     {
         module.externs.insert(0, "FIDRQQ".to_string());
     }
+    // Standalone `fwait` gets a distinct marker — `FIWRQQ` —
+    // sitting at the front of the EXTDEF list (before any
+    // already-inserted FIDRQQ). Only fixtures with a sahf-readback
+    // float-compare path emit standalone fwait; the per-FPU `9B`
+    // prefix serves as an inline wait everywhere else.
+    if module_has_fwait(&module)
+        && !module.externs.iter().any(|n| n == "FIWRQQ")
+    {
+        module.externs.insert(0, "FIWRQQ".to_string());
+    }
     emit::emit(&module)
+}
+
+fn module_has_fwait(module: &ir::Module) -> bool {
+    use ir::{Instr, SegItem};
+    module.segments.iter().any(|seg| {
+        seg.items.iter().any(|it| matches!(it, SegItem::Instr(Instr::Fwait)))
+    })
 }
 
 fn module_has_fpu(module: &ir::Module) -> bool {
@@ -56,6 +73,9 @@ fn module_has_fpu(module: &ir::Module) -> bool {
                 | Instr::Fld1
                 | Instr::FsubpStack
                 | Instr::FildWordBpRel { .. }
+                | Instr::FcompBpRel { .. }
+                | Instr::FstswWordBpRel { .. }
+                | Instr::Fwait
             ),
             _ => false,
         })

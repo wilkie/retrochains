@@ -602,11 +602,17 @@ fn instr_size(instr: &Instr) -> usize {
         | Instr::FldQwordBpRel { offset }
         | Instr::FstpQwordBpRel { offset }
         | Instr::FpuArithBpRel { offset, .. }
-        | Instr::FildWordBpRel { offset } => 2 + bp_rel_modrm_size(*offset),
+        | Instr::FildWordBpRel { offset }
+        | Instr::FcompBpRel { offset, .. }
+        | Instr::FstswWordBpRel { offset } => 2 + bp_rel_modrm_size(*offset),
         Instr::FldDwordGroupSym { .. } | Instr::FldQwordGroupSym { .. } => 5,
         // Register-form FPU instructions: 9B (fwait) + family +
         // register-mode ModR/M = 3 bytes flat. No memory displacement.
         Instr::Fld1 | Instr::FsubpStack => 3,
+        // Standalone fwait emits `90 9B` (NOP + FWAIT) — TASM tags
+        // the NOP byte with the FIWRQQ marker. 2 bytes total.
+        Instr::Fwait => 2,
+        Instr::Sahf => 1,
     }
 }
 
@@ -3079,6 +3085,27 @@ fn emit_instr(
             out.push(0xDF);
             emit_bp_rel_modrm(0, *offset, out);
         }
+        Instr::FcompBpRel { width, offset } => {
+            push_fidrqq_fixup(out, extern_idx, fixups)?;
+            out.push(0x9B);
+            out.push(width.arith_family());
+            emit_bp_rel_modrm(3, *offset, out);
+        }
+        Instr::FstswWordBpRel { offset } => {
+            push_fidrqq_fixup(out, extern_idx, fixups)?;
+            out.push(0x9B);
+            out.push(0xDD);
+            emit_bp_rel_modrm(7, *offset, out);
+        }
+        Instr::Fwait => {
+            // Marker fixup targets the NOP byte (the byte we're
+            // about to emit), then `90 9B`. Real TASM tags fwait
+            // with `FIWRQQ` rather than `FIDRQQ`.
+            push_fiwrqq_fixup(out, extern_idx, fixups)?;
+            out.push(0x90);
+            out.push(0x9B);
+        }
+        Instr::Sahf => out.push(0x9E),
     }
     Ok(())
 }
@@ -3094,10 +3121,31 @@ fn push_fidrqq_fixup(
     extern_idx: &HashMap<String, u8>,
     fixups: &mut Vec<FixupReq>,
 ) -> AsmResult<()> {
-    let idx = *extern_idx.get("FIDRQQ").ok_or_else(|| {
+    push_marker_fixup(out, extern_idx, fixups, "FIDRQQ")
+}
+
+/// Like `push_fidrqq_fixup` but targets the `FIWRQQ` marker —
+/// used for the standalone `fwait` mnemonic. Real TASM treats
+/// fwait as a distinct synchronization request worthy of its own
+/// EXTDEF entry; the linker uses it the same way as FIDRQQ.
+fn push_fiwrqq_fixup(
+    out: &Vec<u8>,
+    extern_idx: &HashMap<String, u8>,
+    fixups: &mut Vec<FixupReq>,
+) -> AsmResult<()> {
+    push_marker_fixup(out, extern_idx, fixups, "FIWRQQ")
+}
+
+fn push_marker_fixup(
+    out: &Vec<u8>,
+    extern_idx: &HashMap<String, u8>,
+    fixups: &mut Vec<FixupReq>,
+    marker: &'static str,
+) -> AsmResult<()> {
+    let idx = *extern_idx.get(marker).ok_or_else(|| {
         AsmError::new(
             0,
-            "FPU instruction emitted but FIDRQQ marker missing from EXTDEFs",
+            format!("FPU instruction emitted but `{marker}` marker missing from EXTDEFs"),
         )
     })?;
     let off = u16::try_from(out.len()).map_err(|_| {

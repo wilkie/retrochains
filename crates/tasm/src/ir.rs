@@ -2005,6 +2005,29 @@ pub enum Instr {
     /// materializing the int into a 2-byte scratch slot. The 8087
     /// `fild` doesn't accept an immediate or register source.
     FildWordBpRel { offset: i16 },
+    /// `fcomp <dword|qword> ptr [bp+<offset>]` — compare ST(0)
+    /// with a memory operand, pop ST(0). The result lands in the
+    /// FPU status word's condition-code bits (C3/C2/C0). Encoding:
+    /// `9B [D8|DC] /3 [bp+disp]` — width picks the family byte
+    /// (D8 for single, DC for double); ModR/M reg field = 3.
+    FcompBpRel { width: FpuWidth, offset: i16 },
+    /// `fstsw word ptr [bp+<offset>]` — store the 16-bit FPU
+    /// status word into a stack-resident slot. Encoding: `9B DD
+    /// /7 [bp+disp]`. BCC uses this with the FPU compare→AX→sahf
+    /// dance to drive integer flags from a float comparison
+    /// (fixture 1674).
+    FstswWordBpRel { offset: i16 },
+    /// Standalone `fwait` mnemonic — synchronize the FPU before
+    /// the CPU reads memory that an FPU instruction wrote. Real
+    /// TASM emits `90 9B` (NOP + FWAIT) for this and tags the
+    /// NOP byte with a `FIWRQQ` marker fixup (separate from the
+    /// per-FPU `FIDRQQ` marker). 2 bytes total.
+    Fwait,
+    /// `sahf` — copy AH into the low byte of the flags register
+    /// (CF/PF/AF/ZF/SF). 1-byte opcode `9E`. BCC uses this after
+    /// loading the FPU status word into AX to drive integer
+    /// conditional jumps from a float comparison.
+    Sahf,
 }
 
 /// Arithmetic operation in the 8087 ModR/M reg field. See the

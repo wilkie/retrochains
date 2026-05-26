@@ -872,13 +872,17 @@ fn expr_address_taken(e: &Expr, out: &mut HashSet<String>) {
     }
 }
 
-/// True iff `function` contains any `(float)<expr>` / `(double)
-/// <expr>` cast whose source expression is integer-typed. Used to
-/// decide whether to reserve the `fild` scratch slot. Walks all
-/// statements / sub-expressions; conservative on operand-type
-/// inference (we look at literal kinds and Ident-name-against-
-/// declared-locals to weed out the `(float)<float-ident>` case
-/// which is a no-op at the FPU level).
+/// True iff `function` needs the 2-byte FPU scratch slot. Two
+/// constructs trigger reservation:
+///   1. `(float)<int>` / `(double)<int>` casts — int operand
+///      materialized into the scratch slot, then `fild` from there
+///      (fixture 1675).
+///   2. Float comparisons — `fcomp` result written through `fstsw`
+///      to the scratch slot, then read back into AX for `sahf`
+///      (fixture 1674).
+/// Conservative on operand-type inference (we look at literal kinds
+/// and Ident-name-against-declared-locals to weed out the
+/// `(float)<float-ident>` no-op case).
 fn body_has_int_to_float_cast(function: &Function) -> bool {
     let mut float_names: HashSet<String> = HashSet::new();
     for p in &function.params {
@@ -926,12 +930,24 @@ fn body_has_int_to_float_cast(function: &Function) -> bool {
         }
     }
 
+    fn ident_is_float(e: &Expr, float_names: &HashSet<String>) -> bool {
+        match &e.kind {
+            ExprKind::FloatLit(_) | ExprKind::DoubleLit(_) => true,
+            ExprKind::Ident(n) => float_names.contains(n),
+            _ => false,
+        }
+    }
+
     fn expr(e: &Expr, float_names: &HashSet<String>) -> bool {
         match &e.kind {
             ExprKind::Cast { ty, operand } => {
                 (ty.is_float_like() && expr_is_integer(operand, float_names))
                     || expr(operand, float_names)
             }
+            // Float comparison needs the scratch for `fstsw`.
+            ExprKind::BinOp { op, left, right } if op.is_comparison()
+                && (ident_is_float(left, float_names)
+                    || ident_is_float(right, float_names)) => true,
             ExprKind::BinOp { left, right, .. }
             | ExprKind::Logical { left, right, .. }
             | ExprKind::Comma { left, right } => {

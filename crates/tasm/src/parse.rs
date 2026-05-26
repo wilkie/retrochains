@@ -864,6 +864,23 @@ fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
         "fsub" => parse_fpu_arith(rest, FpuArithOp::Sub, "fsub", line.line_no),
         "fmul" => parse_fpu_arith(rest, FpuArithOp::Mul, "fmul", line.line_no),
         "fdiv" => parse_fpu_arith(rest, FpuArithOp::Div, "fdiv", line.line_no),
+        "fcomp" => {
+            if let Some(offset) = parse_dword_bp_relative(rest) {
+                return Ok(Instr::FcompBpRel { width: FpuWidth::Dword, offset });
+            }
+            if let Some(offset) = parse_qword_bp_relative(rest) {
+                return Ok(Instr::FcompBpRel { width: FpuWidth::Qword, offset });
+            }
+            Err(AsmError::new(line.line_no, format!("fcomp: unsupported operand form `{rest}`")))
+        }
+        "fstsw" => {
+            if let Some(offset) = parse_word_bp_relative(rest) {
+                return Ok(Instr::FstswWordBpRel { offset });
+            }
+            Err(AsmError::new(line.line_no, format!("fstsw: unsupported operand form `{rest}`")))
+        }
+        "fwait" if rest.is_empty() => Ok(Instr::Fwait),
+        "sahf" if rest.is_empty() => Ok(Instr::Sahf),
         _ => Err(AsmError::new(
             line.line_no,
             format!("instruction `{kw}` not yet supported (operands {rest:?})"),
