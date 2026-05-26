@@ -2482,6 +2482,26 @@ impl Parser {
             // `sizeof("hi")` — string literal sizes include the NUL
             // terminator. Fixture 511.
             ExprKind::StringLit(bytes) => Some(u16::try_from(bytes.len() + 1).ok()?),
+            // `sizeof(a[K])` — array element size. The index value
+            // doesn't matter; only the element type does. Fixture
+            // 1327.
+            ExprKind::ArrayIndex { array, .. } => {
+                let ExprKind::Ident(name) = &array.kind else { return None };
+                let ty = self
+                    .function_locals
+                    .get(name)
+                    .or_else(|| self.global_types.get(name))?;
+                ty.array_elem().map(Type::size_bytes)
+            }
+            // `sizeof(*p)` — pointee size.
+            ExprKind::Deref(inner) => {
+                let ExprKind::Ident(name) = &inner.kind else { return None };
+                let ty = self
+                    .function_locals
+                    .get(name)
+                    .or_else(|| self.global_types.get(name))?;
+                ty.pointee().map(Type::size_bytes)
+            }
             _ => None,
         }
     }
