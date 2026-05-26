@@ -408,6 +408,18 @@ impl Parser {
             self.bump();
             ty = Type::Pointer(Box::new(ty));
         }
+        // Function-pointer typedef `typedef <ret> (*name)(<args>);` —
+        // reuse the parameter-side declarator helper. The recorded
+        // type is a generic near pointer (we don't model function
+        // signatures). Fixture 1744.
+        if matches!(self.peek().kind, TokenKind::LParen)
+            && matches!(self.peek_n(1).kind, TokenKind::Star)
+        {
+            let (name, fp_ty) = self.parse_func_ptr_declarator(ty)?;
+            self.expect(&TokenKind::Semicolon)?;
+            self.typedefs.insert(name, fp_ty);
+            return Ok(());
+        }
         let name_tok = self.bump();
         let TokenKind::Ident(name) = name_tok.kind else {
             return Err(ParseError::NotAnIdent { offset: name_tok.span.start });

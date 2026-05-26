@@ -15564,6 +15564,24 @@ impl<'a> FunctionEmitter<'a> {
     }
 
     fn emit_assign_local(&mut self, loc: LocalLocation, ty: &Type, value: &Expr) {
+        // `<fn-ptr-local> = <function-name>` — fold to a direct
+        // immediate-to-memory store `mov word ptr [bp-N], offset _f`.
+        // The init-form already has this peephole; the assignment
+        // form needs the same to match BCC's single-instruction
+        // sequence. Fixture 2442.
+        if let LocalLocation::Stack(off) = loc
+            && let ExprKind::Ident(src_name) = &value.kind
+            && !self.locals.has(src_name)
+            && self.globals.type_of(src_name).is_none()
+            && self.signatures.ret_ty_of(src_name).is_some()
+        {
+            let _ = write!(
+                self.out,
+                "\tmov\tword ptr {},offset _{src_name}\r\n",
+                bp_addr(off),
+            );
+            return;
+        }
         match loc {
             LocalLocation::Stack(off) => {
                 // Struct-to-stack copy assign. Three shape branches
@@ -17273,6 +17291,21 @@ impl<'a> FunctionEmitter<'a> {
                 // Globals first: if this name is file-scope, lower
                 // to a `<width> ptr DGROUP:_<name>` reference rather
                 // than a stack/register access (fixtures 083–087).
+                // Bare function name in a value context — decay to
+                // its offset (a near-pointer to code in the small
+                // model). Used when a function is passed as an
+                // argument or assigned to a function-pointer variable.
+                // Fixtures 2252, 2442.
+                if !self.locals.has(name)
+                    && self.globals.type_of(name).is_none()
+                    && self.signatures.ret_ty_of(name).is_some()
+                {
+                    let _ = write!(
+                        self.out,
+                        "\tmov\tax,offset _{name}\r\n",
+                    );
+                    return;
+                }
                 if !self.locals.has(name)
                     && let Some(gty) = self.globals.type_of(name)
                 {
