@@ -1036,6 +1036,12 @@ impl Parser {
                     Some(ExprKind::InitList { items }) => {
                         u32::try_from(items.len()).expect("init count fits in u32")
                     }
+                    // \`extern T arr[];\` — incomplete-array declared
+                    // somewhere else. We can't know the length, but
+                    // codegen only needs a placeholder type — the
+                    // size never goes into the OBJ since the storage
+                    // lives in another TU. Fixture 2312.
+                    None if is_extern => 0,
                     _ => {
                         let t = self.peek();
                         return Err(ParseError::Unexpected {
