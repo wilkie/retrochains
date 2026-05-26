@@ -3674,7 +3674,9 @@ impl<'a> FunctionEmitter<'a> {
             }
             // `<global_arr>[<var_idx>] <eq/ne> 0` — scale index into
             // BX, then `cmp <w> ptr DGROUP:_<arr>[bx], 0` directly.
-            // Fixture 3232 (`while (... && data[i] != 0)`).
+            // Fixture 3232 (`while (... && data[i] != 0)`). Constant
+            // index folds to a direct `cmp DGROUP:_<arr>+<off>, 0`
+            // (no [bx]). Fixture 3233 (`data[0] != 0`).
             if matches!(op, BinOp::Eq | BinOp::Ne)
                 && try_const_eval(right) == Some(0)
                 && let ExprKind::ArrayIndex { array, index } = &left.kind
@@ -3683,12 +3685,25 @@ impl<'a> FunctionEmitter<'a> {
                 && let Some(elem_ty) = gty.array_elem()
             {
                 let elem_ty = elem_ty.clone();
-                self.emit_index_into_bx(index, &elem_ty);
                 let width = if elem_ty.is_char_like() { "byte" } else { "word" };
-                let _ = write!(
-                    self.out,
-                    "\tcmp\t{width} ptr DGROUP:_{arr_name}[bx],0\r\n",
-                );
+                if let Some(k) = try_const_eval(index) {
+                    let stride = i32::from(elem_ty.size_bytes());
+                    let off = (k as i32).wrapping_mul(stride);
+                    let addr = if off == 0 {
+                        format!("DGROUP:_{arr_name}")
+                    } else if off > 0 {
+                        format!("DGROUP:_{arr_name}+{off}")
+                    } else {
+                        format!("DGROUP:_{arr_name}{off}")
+                    };
+                    let _ = write!(self.out, "\tcmp\t{width} ptr {addr},0\r\n");
+                } else {
+                    self.emit_index_into_bx(index, &elem_ty);
+                    let _ = write!(
+                        self.out,
+                        "\tcmp\t{width} ptr DGROUP:_{arr_name}[bx],0\r\n",
+                    );
+                }
                 return match op {
                     BinOp::Eq => ("je", "jne"),
                     BinOp::Ne => ("jne", "je"),
@@ -15744,6 +15759,28 @@ impl<'a> FunctionEmitter<'a> {
                             self.out,
                             "\tadd\tax,offset DGROUP:_{arr_name}\r\n",
                         );
+                        return;
+                    }
+                    // `<ptr-lvalue> + <int-expr>` — pointer arithmetic
+                    // when the LHS is a pointer ident (not array
+                    // decay). Scale the int by sizeof(pointee), push,
+                    // load pointer, pop, add. Fixture 3380 (`p + n`
+                    // for `int *p, int n`).
+                    if matches!(op, BinOp::Add)
+                        && let ExprKind::Ident(pname) = &left.kind
+                        && let Some(pointee) = self.ident_pointee(pname)
+                        && pointee.size_bytes() > 1
+                        && try_const_eval(right).is_none()
+                    {
+                        let stride = u16::from(pointee.size_bytes());
+                        self.emit_expr_to_ax(right);
+                        for _ in 0..stride.trailing_zeros() {
+                            self.out.extend_from_slice(b"\tshl\tax,1\r\n");
+                        }
+                        self.out.extend_from_slice(b"\tpush\tax\r\n");
+                        self.emit_expr_to_ax(left);
+                        self.out.extend_from_slice(b"\tpop\tdx\r\n");
+                        self.out.extend_from_slice(b"\tadd\tax,dx\r\n");
                         return;
                     }
                     // `<ptr-typed lvalue> + K` / `- K` — C scales the
