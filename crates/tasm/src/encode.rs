@@ -574,7 +574,9 @@ fn instr_size(instr: &Instr) -> usize {
         Instr::AddAxSiDisp { .. }
         | Instr::AddAxDiDisp { .. }
         | Instr::SubAxSiDisp { .. }
-        | Instr::SubAxDiDisp { .. } => 3,
+        | Instr::SubAxDiDisp { .. }
+        | Instr::AddReg16SiDisp { .. }
+        | Instr::AddReg16DiDisp { .. } => 3,
         Instr::ShlReg16One { .. }
         | Instr::RclReg16One { .. }
         | Instr::SarReg16One { .. }
@@ -917,6 +919,21 @@ fn emit_instr(
         Instr::AddAxDiDisp { disp } => {
             out.push(0x03);
             out.push(0x45);
+            out.push(*disp as u8);
+        }
+        Instr::AddReg16SiDisp { reg, disp } => {
+            // `add <reg16>, word ptr [si+disp8]` → 03 (mod=01
+            // reg=<r> r/m=100) dd. Generic dst-reg sibling of
+            // AddAxSiDisp.
+            out.push(0x03);
+            out.push(0b01_000_100 | (reg.code() << 3));
+            out.push(*disp as u8);
+        }
+        Instr::AddReg16DiDisp { reg, disp } => {
+            // `add <reg16>, word ptr [di+disp8]` → 03 (mod=01
+            // reg=<r> r/m=101) dd.
+            out.push(0x03);
+            out.push(0b01_000_101 | (reg.code() << 3));
             out.push(*disp as u8);
         }
         Instr::SubAxSiDisp { disp } => {

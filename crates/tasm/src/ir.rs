@@ -408,6 +408,14 @@ pub enum Instr {
     /// `add ax,word ptr [di+disp8]` — `03 45 dd`. DI sibling of
     /// `AddAxSiDisp`.
     AddAxDiDisp { disp: i8 },
+    /// `add <reg16>,word ptr [si+disp8]` — `03 (mod=01 reg=<r>
+    /// r/m=100) dd`. Generic dst-reg sibling of `AddAxSiDisp`,
+    /// used by compound `<reg> += <ptr>-><field>` for register-
+    /// resident pointers. Fixture 3343 (`s += p->v` with p in SI).
+    AddReg16SiDisp { reg: Reg16, disp: i8 },
+    /// `add <reg16>,word ptr [di+disp8]` — `03 (mod=01 reg=<r>
+    /// r/m=101) dd`. DI sibling of `AddReg16SiDisp`.
+    AddReg16DiDisp { reg: Reg16, disp: i8 },
     /// `sub ax,word ptr [si+disp8]` — `2B 44 dd`. Sibling of
     /// `SubAxFromSiPtr` with displacement.
     SubAxSiDisp { disp: i8 },

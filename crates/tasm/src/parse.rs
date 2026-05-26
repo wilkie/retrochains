@@ -2310,6 +2310,17 @@ fn parse_add(operands: &str, line_no: usize) -> AsmResult<Instr> {
                 return Ok(Instr::AddReg16BpRel { reg, offset });
             }
         }
+        // `add <reg16>, word ptr [si+N]` / `[di+N]` — generic dst-reg
+        // sibling. Fixture 3343 (`s += p->v` with both s and p in
+        // registers).
+        if !matches!(reg, Reg16::Ax) {
+            if let Some(disp) = parse_word_si_disp(rhs) {
+                return Ok(Instr::AddReg16SiDisp { reg, disp });
+            }
+            if let Some(disp) = parse_word_di_disp(rhs) {
+                return Ok(Instr::AddReg16DiDisp { reg, disp });
+            }
+        }
     }
     // `add dx, word ptr <group>:<sym>[+N]` — long-arithmetic low-
     // half add against a memory operand (fixture 219).

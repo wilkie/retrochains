@@ -2283,6 +2283,19 @@ impl<'a> FunctionEmitter<'a> {
             // Nested binary expressions don't have a single-operand
             // representation.
             ExprKind::BinOp { .. } => true,
+            // `<reg-ptr>-><field>` resolves to `[<reg>+disp]` — a
+            // single memory operand, no AX route needed. Tasm now
+            // supports `<op> <reg16>, [<si|di>+disp]`. Fixture 3343
+            // (`s += p->v` with p in SI).
+            ExprKind::Member {
+                base,
+                kind: crate::ast::MemberKind::Arrow,
+                ..
+            } if matches!(&base.kind, ExprKind::Ident(n)
+                if self.locals.has(n)
+                    && matches!(
+                        self.locals.location_of(n),
+                        LocalLocation::Reg(r) if matches!(r, Reg::Si | Reg::Di))) => false,
             // Variable-indexed arrays / chained members: resolvable
             // only when the chain folds to a constant offset. Use
             // try_lvalue_chain_addr's success as the predicate.
