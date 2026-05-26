@@ -325,6 +325,10 @@ struct BitfieldRef {
     /// `Byte` access, in the word for `Word` access).
     bit_offset: u8,
     bit_width: u8,
+    /// True when the declared field type is signed (`int b : 4`).
+    /// Signed bitfields sign-extend on read — SHL/SAR rather than
+    /// SHR/AND. Writes are width-equivalent to unsigned.
+    signed: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -16648,15 +16652,57 @@ impl<'a> FunctionEmitter<'a> {
             }
             inner = operand;
         }
-        let ExprKind::Member { base, field, kind: crate::ast::MemberKind::Dot } =
-            &inner.kind
-        else {
+        let ExprKind::Member { base, field, kind } = &inner.kind else {
             return None;
         };
-        let ExprKind::Ident(struct_name) = &base.kind else {
+        let ExprKind::Ident(name) = &base.kind else {
             return None;
         };
-        self.resolve_bitfield_named(struct_name, field)
+        match kind {
+            crate::ast::MemberKind::Dot => self.resolve_bitfield_named(name, field),
+            crate::ast::MemberKind::Arrow => self.resolve_bitfield_through_ptr(name, field),
+        }
+    }
+
+    /// Resolve `<ptr>-><bitfield>` where `ptr` is a stack/register-
+    /// resident pointer to a struct with bitfield `field`. The
+    /// address becomes `[reg+byte_off]` or `[bp+disp]` depending on
+    /// where `ptr` lives. Fixture 3447 (\`unsigned get_a(struct F
+    /// *p) { return p->a; }\`).
+    fn resolve_bitfield_through_ptr(
+        &self,
+        ptr_name: &str,
+        field: &str,
+    ) -> Option<BitfieldRef> {
+        if !self.locals.has(ptr_name) {
+            return None;
+        }
+        let ptr_ty = self.locals.type_of(ptr_name).clone();
+        let pointee = ptr_ty.pointee()?.clone();
+        let field_info = struct_field_info(&pointee, field)?;
+        let bf = field_info.bitfield?;
+        let addr = match self.locals.location_of(ptr_name) {
+            LocalLocation::Reg(reg) => {
+                if field_info.offset == 0 {
+                    format!("[{}]", reg.name())
+                } else {
+                    format!("[{}+{}]", reg.name(), field_info.offset)
+                }
+            }
+            LocalLocation::Stack(_) => return None,
+        };
+        let access = if bf.bit_offset + bf.bit_width <= 8 {
+            BitfieldAccess::Byte
+        } else {
+            BitfieldAccess::Word
+        };
+        Some(BitfieldRef {
+            addr,
+            access,
+            bit_offset: bf.bit_offset,
+            bit_width: bf.bit_width,
+            signed: !field_info.ty.is_unsigned(),
+        })
     }
 
     fn resolve_bitfield_named(&self, struct_name: &str, field: &str) -> Option<BitfieldRef> {
@@ -16698,6 +16744,7 @@ impl<'a> FunctionEmitter<'a> {
             access,
             bit_offset: bf.bit_offset,
             bit_width: bf.bit_width,
+            signed: !field_info.ty.is_unsigned(),
         })
     }
 
@@ -16733,6 +16780,22 @@ impl<'a> FunctionEmitter<'a> {
                 );
             }
         }
+        if bf.signed {
+            // Signed bitfield: sign-extend by shifting the field
+            // up to the MSB then arithmetically right-shifting back.
+            // SHL/SAR both use the CL-loaded form regardless of
+            // shift count (fixture 2107 emits `mov cl, 12; shl ax,
+            // cl; mov cl, 12; sar ax, cl` for a 4-bit field at
+            // bit_offset 0).
+            let left_shift: u8 = 16 - bf.bit_offset - bf.bit_width;
+            let right_shift: u8 = 16 - bf.bit_width;
+            let _ = write!(self.out, "\tmov\tcl,{left_shift}\r\n");
+            let _ = write!(self.out, "\tshl\t{full_reg},cl\r\n");
+            let _ = write!(self.out, "\tmov\tcl,{right_shift}\r\n");
+            let _ = write!(self.out, "\tsar\t{full_reg},cl\r\n");
+            return;
+        }
+        // Unsigned bitfield: shift right then mask.
         // Shift selection: single-bit `shr reg, 1` (2 bytes each)
         // for offsets 1-3, `mov cl, K; shr reg, cl` (5 bytes) for
         // offsets ≥ 4. Empirically matches BCC's choice — fixture
