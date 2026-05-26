@@ -301,15 +301,22 @@ impl Locals {
         // each use. Int-element arrays don't benefit (the index
         // still needs scaling), so BCC keeps int-array params on
         // the stack. Fixtures 2796, 2900, 2926, 3231, 3243, 3450.
+        let body_has_loop = body_contains_loop(function.body.as_deref().unwrap_or(&[]));
         let leaf_param_subscript: HashSet<usize> = if !function_makes_call {
+            // First int-like declaration (param OR local in
+            // straight-line code) used as a char-array subscript.
+            // We exclude loops because BCC's reg pick for loop
+            // counters has its own heuristic (DX/CX in some
+            // shapes) — see prefer_dx_over_si below.
             (0..declared.len())
-                .filter(|&i| matches!(declared[i].kind, DeclKind::Param { .. }))
                 .find(|&i| {
                     matches!(
                         declared[i].ty,
                         Type::Int | Type::UInt | Type::Pointer(_),
                     ) && !address_taken.contains(&declared[i].name)
                         && !declared[i].is_volatile
+                        && (matches!(declared[i].kind, DeclKind::Param { .. })
+                            || !body_has_loop)
                         && name_indexes_char_array(
                             &declared[i].name,
                             function.body.as_deref().unwrap_or(&[]),
@@ -1232,6 +1239,24 @@ fn expr_has_name_as_subscript(name: &str, e: &Expr) -> bool {
                 || expr_has_name_as_subscript(name, else_value)
         }
         ExprKind::InitList { items } => items.iter().any(|i| expr_has_name_as_subscript(name, i)),
+        _ => false,
+    }
+}
+
+fn body_contains_loop(body: &[Stmt]) -> bool {
+    body.iter().any(stmt_contains_loop)
+}
+
+fn stmt_contains_loop(stmt: &Stmt) -> bool {
+    match &stmt.kind {
+        StmtKind::While { .. }
+        | StmtKind::DoWhile { .. }
+        | StmtKind::For { .. } => true,
+        StmtKind::If { then_branch, else_branch, .. } => {
+            body_contains_loop(then_branch)
+                || else_branch.as_ref().is_some_and(|b| body_contains_loop(b))
+        }
+        StmtKind::Switch { cases, .. } => cases.iter().any(|c| body_contains_loop(&c.body)),
         _ => false,
     }
 }
