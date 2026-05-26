@@ -200,6 +200,12 @@ pub struct Locals {
     /// Empty when the function has no linear-search switch — fixture
     /// 074 is the only one today.
     switch_spill_offsets: HashMap<u32, i16>,
+    /// Signed bp-offset of the 2-byte scratch slot used to materialize
+    /// integer operands of `(float)<int>` / `(double)<int>` casts
+    /// before `fild`. Allocated once per function whose body contains
+    /// any such cast, sized for a 16-bit int. `None` otherwise.
+    /// Fixture 1675.
+    fild_int_scratch_offset: Option<i16>,
 }
 
 #[derive(Debug, Clone)]
@@ -601,18 +607,40 @@ impl Locals {
             switch_spill_offsets.insert(span_start, off);
         });
 
+        // `(float)<int>` / `(double)<int>` casts: BCC materializes
+        // the int operand into a 2-byte scratch slot at the bottom
+        // of the frame and then `fild`s from there (the 8087 has
+        // no register/immediate-source variant). One slot suffices
+        // for the entire function — each cast site overwrites the
+        // slot fresh before the fild. Fixture 1675.
+        let fild_int_scratch_offset =
+            body_has_int_to_float_cast(function)
+                .then(|| {
+                    stack_bytes += 2;
+                    -i16::try_from(stack_bytes).expect("stack frame fits in i16")
+                });
+
         Self {
             stack_bytes,
             by_name,
             saved_regs,
             param_loads,
             switch_spill_offsets,
+            fild_int_scratch_offset,
         }
     }
 
     #[must_use]
     pub fn stack_bytes(&self) -> u16 {
         self.stack_bytes
+    }
+
+    /// Signed bp-offset of the 2-byte scratch slot reserved for
+    /// `fild`-based int→float conversions, or `None` if no such
+    /// cast is used in this function.
+    #[must_use]
+    pub fn fild_int_scratch_offset(&self) -> Option<i16> {
+        self.fild_int_scratch_offset
     }
 
     #[must_use]
@@ -842,6 +870,137 @@ fn expr_address_taken(e: &Expr, out: &mut HashSet<String>) {
         | ExprKind::Update { .. }
         | ExprKind::StringLit(_) => {}
     }
+}
+
+/// True iff `function` contains any `(float)<expr>` / `(double)
+/// <expr>` cast whose source expression is integer-typed. Used to
+/// decide whether to reserve the `fild` scratch slot. Walks all
+/// statements / sub-expressions; conservative on operand-type
+/// inference (we look at literal kinds and Ident-name-against-
+/// declared-locals to weed out the `(float)<float-ident>` case
+/// which is a no-op at the FPU level).
+fn body_has_int_to_float_cast(function: &Function) -> bool {
+    let mut float_names: HashSet<String> = HashSet::new();
+    for p in &function.params {
+        if p.ty.is_float_like() {
+            float_names.insert(p.name.clone());
+        }
+    }
+    fn collect_decls(stmts: &[Stmt], set: &mut HashSet<String>) {
+        for s in stmts {
+            match &s.kind {
+                StmtKind::Declare { name, ty, .. } if ty.is_float_like() => {
+                    set.insert(name.clone());
+                }
+                StmtKind::If { then_branch, else_branch, .. } => {
+                    collect_decls(then_branch, set);
+                    if let Some(b) = else_branch { collect_decls(b, set); }
+                }
+                StmtKind::While { body, .. }
+                | StmtKind::DoWhile { body, .. } => collect_decls(body, set),
+                StmtKind::For { body, .. } => collect_decls(body, set),
+                StmtKind::Switch { cases, .. } => {
+                    for c in cases { collect_decls(&c.body, set); }
+                }
+                _ => {}
+            }
+        }
+    }
+    collect_decls(function.body.as_deref().unwrap_or(&[]), &mut float_names);
+
+    fn expr_is_integer(e: &Expr, float_names: &HashSet<String>) -> bool {
+        match &e.kind {
+            ExprKind::IntLit(_) => true,
+            ExprKind::Ident(n) => !float_names.contains(n),
+            // BinOp / Unary / Update over non-floats stays integer.
+            // We err toward "integer" since the codegen branch only
+            // emits fild when the operand actually is int, so an
+            // over-allocated scratch slot would just sit unused.
+            ExprKind::BinOp { .. }
+            | ExprKind::Unary { .. }
+            | ExprKind::Update { .. }
+            | ExprKind::Deref(_)
+            | ExprKind::ArrayIndex { .. }
+            | ExprKind::Member { .. } => true,
+            _ => false,
+        }
+    }
+
+    fn expr(e: &Expr, float_names: &HashSet<String>) -> bool {
+        match &e.kind {
+            ExprKind::Cast { ty, operand } => {
+                (ty.is_float_like() && expr_is_integer(operand, float_names))
+                    || expr(operand, float_names)
+            }
+            ExprKind::BinOp { left, right, .. }
+            | ExprKind::Logical { left, right, .. }
+            | ExprKind::Comma { left, right } => {
+                expr(left, float_names) || expr(right, float_names)
+            }
+            ExprKind::Unary { operand, .. } => expr(operand, float_names),
+            ExprKind::Deref(inner) => expr(inner, float_names),
+            ExprKind::AssignExpr { value, .. } => expr(value, float_names),
+            ExprKind::Call { args, .. } => args.iter().any(|a| expr(a, float_names)),
+            ExprKind::ArrayIndex { array, index } => {
+                expr(array, float_names) || expr(index, float_names)
+            }
+            ExprKind::Member { base, .. } => expr(base, float_names),
+            ExprKind::Ternary { cond, then_value, else_value } => {
+                expr(cond, float_names)
+                    || expr(then_value, float_names)
+                    || expr(else_value, float_names)
+            }
+            ExprKind::InitList { items } => items.iter().any(|i| expr(i, float_names)),
+            _ => false,
+        }
+    }
+
+    fn stmt(s: &Stmt, float_names: &HashSet<String>) -> bool {
+        match &s.kind {
+            StmtKind::Return(v) => v.as_ref().is_some_and(|e| expr(e, float_names)),
+            StmtKind::Declare { init, .. } => {
+                init.as_ref().is_some_and(|e| expr(e, float_names))
+            }
+            StmtKind::Assign { value, .. }
+            | StmtKind::CompoundAssign { value, .. }
+            | StmtKind::DerefAssign { value, .. }
+            | StmtKind::DerefCompoundAssign { value, .. }
+            | StmtKind::MemberAssign { value, .. }
+            | StmtKind::MemberCompoundAssign { value, .. } => expr(value, float_names),
+            StmtKind::ArrayAssign { indices, value, .. }
+            | StmtKind::ArrayCompoundAssign { indices, value, .. }
+            | StmtKind::MemberArrayAssign { indices, value, .. } => {
+                indices.iter().any(|i| expr(i, float_names))
+                    || expr(value, float_names)
+            }
+            StmtKind::If { cond, then_branch, else_branch } => {
+                expr(cond, float_names)
+                    || then_branch.iter().any(|s| stmt(s, float_names))
+                    || else_branch.as_ref().is_some_and(|b|
+                        b.iter().any(|s| stmt(s, float_names)))
+            }
+            StmtKind::While { cond, body } | StmtKind::DoWhile { cond, body } => {
+                expr(cond, float_names) || body.iter().any(|s| stmt(s, float_names))
+            }
+            StmtKind::For { init, cond, step, body } => {
+                init.as_ref().is_some_and(|es|
+                        es.iter().any(|e| expr(e, float_names)))
+                    || cond.as_ref().is_some_and(|e| expr(e, float_names))
+                    || step.as_ref().is_some_and(|es|
+                        es.iter().any(|e| expr(e, float_names)))
+                    || body.iter().any(|s| stmt(s, float_names))
+            }
+            StmtKind::Switch { scrutinee, cases } => {
+                expr(scrutinee, float_names)
+                    || cases.iter().any(|c|
+                        c.body.iter().any(|s| stmt(s, float_names)))
+            }
+            StmtKind::ExprStmt(e) => expr(e, float_names),
+            _ => false,
+        }
+    }
+
+    function.body.as_deref().unwrap_or(&[]).iter().any(|s| stmt(s, &float_names))
 }
 
 /// Walk `stmts` and call `f(stmt.span.start)` for each `switch`

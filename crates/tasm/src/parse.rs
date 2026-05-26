@@ -848,6 +848,15 @@ fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
         "fld" => parse_fld(rest, line.line_no),
         "fstp" => parse_fstp(rest, line.line_no),
         "fld1" if rest.is_empty() => Ok(Instr::Fld1),
+        "fild" => {
+            if let Some(offset) = parse_word_bp_relative(rest) {
+                return Ok(Instr::FildWordBpRel { offset });
+            }
+            Err(AsmError::new(
+                line.line_no,
+                format!("fild: unsupported operand form `{rest}`"),
+            ))
+        }
         "fadd" => parse_fpu_arith(rest, FpuArithOp::Add, "fadd", line.line_no),
         // `fsub` with no operand is the register-stack
         // `fsubp st(1),st0` shorthand BCC pairs with `fld1`.

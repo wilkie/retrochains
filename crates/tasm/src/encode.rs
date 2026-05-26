@@ -601,7 +601,8 @@ fn instr_size(instr: &Instr) -> usize {
         | Instr::FstpDwordBpRel { offset }
         | Instr::FldQwordBpRel { offset }
         | Instr::FstpQwordBpRel { offset }
-        | Instr::FpuArithBpRel { offset, .. } => 2 + bp_rel_modrm_size(*offset),
+        | Instr::FpuArithBpRel { offset, .. }
+        | Instr::FildWordBpRel { offset } => 2 + bp_rel_modrm_size(*offset),
         Instr::FldDwordGroupSym { .. } | Instr::FldQwordGroupSym { .. } => 5,
         // Register-form FPU instructions: 9B (fwait) + family +
         // register-mode ModR/M = 3 bytes flat. No memory displacement.
@@ -3071,6 +3072,12 @@ fn emit_instr(
         Instr::FsubpStack => {
             push_fidrqq_fixup(out, extern_idx, fixups)?;
             out.extend_from_slice(&[0x9B, 0xDE, 0xE9]);
+        }
+        Instr::FildWordBpRel { offset } => {
+            push_fidrqq_fixup(out, extern_idx, fixups)?;
+            out.push(0x9B);
+            out.push(0xDF);
+            emit_bp_rel_modrm(0, *offset, out);
         }
     }
     Ok(())

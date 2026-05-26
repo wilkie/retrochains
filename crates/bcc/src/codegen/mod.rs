@@ -6569,6 +6569,29 @@ impl<'a> FunctionEmitter<'a> {
                     self.emit_float_load_to_fpu(operand);
                     return;
                 }
+                // `(float)<int>` / `(double)<int>` — BCC
+                // materializes the int operand into a 2-byte scratch
+                // slot at the bottom of the frame and then `fild`s
+                // from there. The slot was reserved up-front by
+                // `Locals::analyze` when it saw the cast. Fixture
+                // 1675.
+                if cast_ty.is_float_like() {
+                    let scratch = self.locals.fild_int_scratch_offset().expect(
+                        "(float)<int> cast without reserved fild scratch slot",
+                    );
+                    self.emit_expr_to_ax(operand);
+                    let _ = write!(
+                        self.out,
+                        "\tmov\tword ptr {},ax\r\n",
+                        bp_addr(scratch),
+                    );
+                    let _ = write!(
+                        self.out,
+                        "\tfild\tword ptr {}\r\n",
+                        bp_addr(scratch),
+                    );
+                    return;
+                }
                 panic!("FPU cast from {:?} to {:?} not supported yet", operand.kind, cast_ty);
             }
             _ => panic!("FPU load not yet supported for {:?}", e.kind),

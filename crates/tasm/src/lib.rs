@@ -55,6 +55,7 @@ fn module_has_fpu(module: &ir::Module) -> bool {
                 | Instr::FpuArithBpRel { .. }
                 | Instr::Fld1
                 | Instr::FsubpStack
+                | Instr::FildWordBpRel { .. }
             ),
             _ => false,
         })

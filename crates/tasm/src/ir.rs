@@ -1997,6 +1997,14 @@ pub enum Instr {
     /// 1673). Other constants flow through the memory-operand
     /// `fsub` form instead.
     FsubpStack,
+    /// `fild word ptr [bp+<offset>]` — load a 16-bit signed
+    /// integer from a stack-resident slot, convert to FPU
+    /// representation, and push onto the stack. Encoding: `9B DF
+    /// /0 [bp+disp]` — fwait + DF family + ModR/M reg=000.
+    /// BCC uses this for `(float)<int-expr>` casts after first
+    /// materializing the int into a 2-byte scratch slot. The 8087
+    /// `fild` doesn't accept an immediate or register source.
+    FildWordBpRel { offset: i16 },
 }
 
 /// Arithmetic operation in the 8087 ModR/M reg field. See the
