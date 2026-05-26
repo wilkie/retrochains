@@ -2955,7 +2955,13 @@ impl Parser {
                     let mut args = Vec::new();
                     if !matches!(self.peek().kind, TokenKind::RParen) {
                         loop {
-                            args.push(self.parse_expr()?);
+                            // parse_for_clause_expr accepts the
+                            // bare-ident assignment-expression
+                            // shape (`n = 7`) on top of the regular
+                            // expression grammar, so an arg like
+                            // `sqr(n = 7)` parses correctly. Fixture
+                            // 1816.
+                            args.push(self.parse_for_clause_expr()?);
                             if matches!(self.peek().kind, TokenKind::Comma) {
                                 self.bump();
                             } else {
