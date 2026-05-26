@@ -15808,8 +15808,11 @@ impl<'a> FunctionEmitter<'a> {
                     // `<ptr-lvalue> + <int-expr>` — pointer arithmetic
                     // when the LHS is a pointer ident (not array
                     // decay). Scale the int by sizeof(pointee), push,
-                    // load pointer, pop, add. Fixture 3380 (`p + n`
-                    // for `int *p, int n`).
+                    // load pointer, pop, add. Stride scaling uses shl
+                    // for powers of two; imul for arbitrary strides
+                    // (e.g. struct of 5 bytes). Fixture 3380 (`p + n`
+                    // for `int *p, int n`), 2771 (`p + n` for
+                    // 5-byte struct).
                     if matches!(op, BinOp::Add)
                         && let ExprKind::Ident(pname) = &left.kind
                         && let Some(pointee) = self.ident_pointee(pname)
@@ -15818,8 +15821,13 @@ impl<'a> FunctionEmitter<'a> {
                     {
                         let stride = u16::from(pointee.size_bytes());
                         self.emit_expr_to_ax(right);
-                        for _ in 0..stride.trailing_zeros() {
-                            self.out.extend_from_slice(b"\tshl\tax,1\r\n");
+                        if stride.is_power_of_two() {
+                            for _ in 0..stride.trailing_zeros() {
+                                self.out.extend_from_slice(b"\tshl\tax,1\r\n");
+                            }
+                        } else {
+                            let _ = write!(self.out, "\tmov\tdx,{stride}\r\n");
+                            self.out.extend_from_slice(b"\timul\tdx\r\n");
                         }
                         self.out.extend_from_slice(b"\tpush\tax\r\n");
                         self.emit_expr_to_ax(left);
