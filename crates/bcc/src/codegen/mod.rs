@@ -929,6 +929,37 @@ impl<'a> FunctionEmitter<'a> {
             ExprKind::CompoundAssignExpr { target, op, value } => {
                 self.emit_compound_assign(target, *op, value);
             }
+            ExprKind::UpdateLvalue { target, op, position: _ } => {
+                // Discard-position UpdateLvalue: just emit the
+                // increment/decrement, no value load. BCC's exact
+                // pre-vs-post distinction collapses here because
+                // the value is unused. Today only the deref-of-
+                // ident target shape is supported (the only one
+                // parse_atom produces). Fixtures 714 / 715 / 1344
+                // / 2331 / 3376 (`(*p)++;` at stmt level).
+                let ExprKind::Deref(inner) = &target.kind else {
+                    panic!("UpdateLvalue target shape not supported in discard");
+                };
+                let ExprKind::Ident(p_name) = &inner.kind else {
+                    panic!("UpdateLvalue deref-target must be an ident");
+                };
+                let LocalLocation::Reg(reg) = self.locals.location_of(p_name) else {
+                    panic!("stack-resident pointer in `(*p)++;` not yet supported");
+                };
+                let r = reg.name();
+                let mnem = match op {
+                    UpdateOp::Inc => "inc",
+                    UpdateOp::Dec => "dec",
+                };
+                let pointee = self
+                    .locals
+                    .type_of(p_name)
+                    .pointee()
+                    .expect("p must be a pointer")
+                    .clone();
+                let width = if pointee.is_char_like() { "byte" } else { "word" };
+                let _ = write!(self.out, "\t{mnem}\t{width} ptr [{r}]\r\n");
+            }
             ExprKind::Comma { left, right } => {
                 // Both halves of a comma in discard position are
                 // themselves discarded — neither contributes a value.
@@ -17027,6 +17058,38 @@ impl<'a> FunctionEmitter<'a> {
         // and similar isolated rvalue contexts. Fixture 1691.
         if let Some(bf) = self.resolve_bitfield(e) {
             self.emit_bitfield_read_to_reg(&bf, "ax", "al");
+            return;
+        }
+        // `*(*pp)++` peephole: a Deref of a postfix ++ of a Deref of
+        // a named pointer. BCC fuses the load + increment + outer-
+        // deref into three instructions: cache `*pp` in BX, advance
+        // `*pp` in place by the pointee's stride, then load through
+        // BX. Fixture 3662 (`int **pp; return *(*pp)++;`).
+        // `(*p)++` / `(*p)--` in value position — load the
+        // pre-update value into AX, then increment/decrement in
+        // place. Fixtures 2857 (`(*p)++`), 3107 (same as fn return).
+        if let ExprKind::UpdateLvalue { target, op, position } = &e.kind
+            && matches!(position, UpdatePosition::Post)
+            && let ExprKind::Deref(inner) = &target.kind
+            && let ExprKind::Ident(p_name) = &inner.kind
+            && self.locals.has(p_name)
+            && let LocalLocation::Reg(reg) = self.locals.location_of(p_name)
+        {
+            let r = reg.name();
+            let ptr_ty = self.locals.type_of(p_name).clone();
+            let pointee = ptr_ty.pointee().expect("p must be a pointer").clone();
+            let mnem = match op {
+                UpdateOp::Inc => "inc",
+                UpdateOp::Dec => "dec",
+            };
+            if pointee.is_char_like() {
+                let _ = write!(self.out, "\tmov\tal,byte ptr [{r}]\r\n");
+                self.emit_widen_al(&pointee);
+                let _ = write!(self.out, "\t{mnem}\tbyte ptr [{r}]\r\n");
+            } else {
+                let _ = write!(self.out, "\tmov\tax,word ptr [{r}]\r\n");
+                let _ = write!(self.out, "\t{mnem}\tword ptr [{r}]\r\n");
+            }
             return;
         }
         // `*(*pp)++` peephole: a Deref of a postfix ++ of a Deref of

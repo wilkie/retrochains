@@ -2752,6 +2752,36 @@ impl Parser {
                         span,
                     };
                 }
+                // Postfix ++/-- on a `(*p)` primary in expression
+                // position. The bare-ident form is consumed inside
+                // parse_primary; the *(*pp)++ outer-deref shape is
+                // caught in parse_unary's `*` arm. Here we cover
+                // expression-position uses where the primary is
+                // already a `Deref(...)` and we're NOT inside an
+                // outer `*` (e.g. `return (*p)++;`, `r = (*p)--;`).
+                // Stmt-level `(*p)++;` is still caught by
+                // parse_stmt's postfix handler because UpdateLvalue
+                // in ExprStmt context falls through the same way an
+                // Update would. Fixtures 2857, 3107, 2449.
+                TokenKind::PlusPlus | TokenKind::MinusMinus
+                    if matches!(e.kind, ExprKind::Deref(_)) =>
+                {
+                    let op_tok = self.bump();
+                    let op = match op_tok.kind {
+                        TokenKind::PlusPlus => UpdateOp::Inc,
+                        TokenKind::MinusMinus => UpdateOp::Dec,
+                        _ => unreachable!(),
+                    };
+                    let span = Span::new(e.span.start, op_tok.span.end);
+                    e = Expr {
+                        kind: ExprKind::UpdateLvalue {
+                            target: Box::new(e),
+                            op,
+                            position: UpdatePosition::Post,
+                        },
+                        span,
+                    };
+                }
                 _ => break,
             }
         }
