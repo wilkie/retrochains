@@ -4846,10 +4846,20 @@ impl<'a> FunctionEmitter<'a> {
         for (i, arg) in args.iter().enumerate().rev() {
             // Param type for the i-th arg, defaulting to int when the
             // signature isn't known (extern function — no fixture yet).
-            let arg_ty = param_tys
+            // For variadic args past the named prototype list, infer
+            // from the expression's own type so longs/structs get
+            // pushed as the full byte count. Fixture 2197
+            // (`printf("...%ld...", long_var)`).
+            let declared_ty = param_tys
                 .and_then(|tys| tys.get(i))
-                .cloned()
-                .unwrap_or(Type::Int);
+                .cloned();
+            let arg_ty = declared_ty.unwrap_or_else(|| {
+                if self.expr_is_long_like(arg) {
+                    Type::Long
+                } else {
+                    Type::Int
+                }
+            });
             if arg_ty.is_long_like() {
                 // Long arg: materialize (AX=high, DX=low), push
                 // high then low. 4 bytes per arg. Fixture 216.
