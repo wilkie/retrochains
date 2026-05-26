@@ -9972,7 +9972,12 @@ impl<'a> FunctionEmitter<'a> {
         //    the index compute first (it leaves BX hot for the shl),
         //    then `lea ax, base`, then add. Fixtures 1468, 1275.
         let simple_idx = matches!(&index.kind, ExprKind::Ident(_));
-        if simple_idx && elem_size == 1 {
+        let idx_is_char_ident = if let ExprKind::Ident(n) = &index.kind {
+            self.locals.has(n) && self.locals.type_of(n).is_char_like()
+        } else {
+            false
+        };
+        if simple_idx && elem_size == 1 && !idx_is_char_ident {
             let _ = write!(self.out, "\tlea\tax,word ptr {}\r\n", bp_addr(base_off));
             let ExprKind::Ident(idx_name) = &index.kind else { unreachable!() };
             match self.locals.location_of(idx_name) {
@@ -9984,6 +9989,31 @@ impl<'a> FunctionEmitter<'a> {
                 }
             }
             self.out.extend_from_slice(b"\tadd\tbx,ax\r\n");
+            return;
+        }
+        // Char-typed index for stride 1: BCC widens via `mov al,
+        // byte ptr <i>; cbw` (sign-extend), then computes
+        // `lea dx, base; add ax, dx; mov bx, ax`. Mirror that
+        // shape rather than the word-read above (which would
+        // load garbage from the high byte). Fixture 1428
+        // (`a[i]` for char a[5], char i).
+        if idx_is_char_ident && elem_size == 1 {
+            let ExprKind::Ident(idx_name) = &index.kind else { unreachable!() };
+            let unsigned = self.locals.type_of(idx_name).is_unsigned();
+            let src = match self.locals.location_of(idx_name) {
+                LocalLocation::Reg(reg) if reg.is_byte() => format!("{}", reg.name()),
+                LocalLocation::Stack(off) => format!("byte ptr {}", bp_addr(off)),
+                _ => panic!("char index in unexpected location"),
+            };
+            let _ = write!(self.out, "\tmov\tal,{src}\r\n");
+            if unsigned {
+                self.out.extend_from_slice(b"\tmov\tah,0\r\n");
+            } else {
+                self.out.extend_from_slice(b"\tcbw\t\r\n");
+            }
+            let _ = write!(self.out, "\tlea\tdx,word ptr {}\r\n", bp_addr(base_off));
+            self.out.extend_from_slice(b"\tadd\tax,dx\r\n");
+            self.out.extend_from_slice(b"\tmov\tbx,ax\r\n");
             return;
         }
         // Compound-index or stride-≥-2 path: compute index into BX
