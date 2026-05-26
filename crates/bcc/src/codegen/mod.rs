@@ -2788,26 +2788,40 @@ impl<'a> FunctionEmitter<'a> {
         if let ExprKind::BinOp { op, left, right } = &value.kind
             && let Some((lo_op, hi_op)) = long_pair_op(*op)
         {
-            // Try both orderings: int-on-left or int-on-right.
-            let (int_expr, long_addr): (&Expr, Option<(String, String)>) =
-                if let Some(pair) = self.long_lvalue_addr_pair(right)
-                    && !self.expr_is_long_like(left)
-                {
-                    (left, Some(pair))
-                } else if let Some(pair) = self.long_lvalue_addr_pair(left)
-                    && !self.expr_is_long_like(right)
-                    && matches!(op, BinOp::Add | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor)
-                {
-                    // Commutative ops: long-on-left, int-on-right.
-                    // For Sub the result depends on order, so only
-                    // commutative ops can swap.
-                    (right, Some(pair))
+            // long-on-LEFT, int-on-RIGHT, commutative op: BCC loads
+            // the long into BX:CX, widens the int into DX:AX, then
+            // `<lo_op> cx, ax; <hi_op> bx, dx` (memory dest gets the
+            // BX:CX result). Distinct shape from the int-on-left
+            // path which adds memory-direct against AX/DX. Fixture
+            // 2191 (`l + i` long-left + int-right, stack dest).
+            if let Some((b_hi, b_lo)) = self.long_lvalue_addr_pair(left)
+                && !self.expr_is_long_like(right)
+                && matches!(op, BinOp::Add | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor)
+            {
+                let unsigned = self.expr_int_is_unsigned(right);
+                self.emit_expr_to_ax(right);
+                if unsigned {
+                    self.out.extend_from_slice(b"\txor\tdx,dx\r\n");
                 } else {
-                    (left, None)
-                };
-            if let Some((b_hi, b_lo)) = long_addr {
-                let unsigned = self.expr_int_is_unsigned(int_expr);
-                self.emit_expr_to_ax(int_expr);
+                    self.out.extend_from_slice(b"\tcwd\t\r\n");
+                }
+                let _ = write!(self.out, "\tmov\tbx,word ptr {b_hi}\r\n");
+                let _ = write!(self.out, "\tmov\tcx,word ptr {b_lo}\r\n");
+                let _ = write!(self.out, "\t{lo_op}\tcx,ax\r\n");
+                let _ = write!(self.out, "\t{hi_op}\tbx,dx\r\n");
+                let _ = write!(self.out, "\tmov\tword ptr {dest_hi},bx\r\n");
+                let _ = write!(self.out, "\tmov\tword ptr {dest_lo},cx\r\n");
+                return true;
+            }
+            // int-on-LEFT, long-on-RIGHT: widen the int via cwd /
+            // xor dx,dx, then `<lo_op> ax, [b_lo]; <hi_op> dx, [b_hi]`
+            // memory-direct. AX/DX order swapped from the value path
+            // because cwd places the high half in DX. Fixture 1643.
+            if let Some((b_hi, b_lo)) = self.long_lvalue_addr_pair(right)
+                && !self.expr_is_long_like(left)
+            {
+                let unsigned = self.expr_int_is_unsigned(left);
+                self.emit_expr_to_ax(left);
                 if unsigned {
                     self.out.extend_from_slice(b"\txor\tdx,dx\r\n");
                 } else {
