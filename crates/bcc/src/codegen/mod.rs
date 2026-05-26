@@ -14662,14 +14662,24 @@ impl<'a> FunctionEmitter<'a> {
             // `[reg+2]`. High first, then low (matches all other
             // long memory-direct stores). Fixture 308.
             if pointee.is_long_like() {
-                let Some(v) = try_const_eval(value) else {
-                    panic!("non-constant rhs in long `*p = v` not yet supported (no fixture)");
-                };
-                let lo = (v & 0xFFFF) as u16;
-                let hi = ((v >> 16) & 0xFFFF) as u16;
-                let _ = write!(self.out, "\tmov\tword ptr [{addr_reg}+2],{hi}\r\n");
-                let _ = write!(self.out, "\tmov\tword ptr [{addr_reg}],{lo}\r\n");
-                return;
+                if let Some(v) = try_const_eval(value) {
+                    let lo = (v & 0xFFFF) as u16;
+                    let hi = ((v >> 16) & 0xFFFF) as u16;
+                    let _ = write!(self.out, "\tmov\tword ptr [{addr_reg}+2],{hi}\r\n");
+                    let _ = write!(self.out, "\tmov\tword ptr [{addr_reg}],{lo}\r\n");
+                    return;
+                }
+                // Non-constant long rhs from an int / long lvalue
+                // (stack or global): load high to AX, low to DX, then
+                // store hi → [reg+2] and lo → [reg]. Fixture 3287.
+                if let Some((src_hi, src_lo)) = self.long_lvalue_addr_pair(value) {
+                    let _ = write!(self.out, "\tmov\tax,word ptr {src_hi}\r\n");
+                    let _ = write!(self.out, "\tmov\tdx,word ptr {src_lo}\r\n");
+                    let _ = write!(self.out, "\tmov\tword ptr [{addr_reg}+2],ax\r\n");
+                    let _ = write!(self.out, "\tmov\tword ptr [{addr_reg}],dx\r\n");
+                    return;
+                }
+                panic!("non-constant rhs in long `*p = v` not yet supported (no fixture)");
             }
             // 4-byte struct pointee, RHS = `*<reg-ptr>`: copy both
             // halves through AX (hi) and DX (lo). Same shape as
