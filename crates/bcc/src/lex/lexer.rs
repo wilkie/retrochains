@@ -149,6 +149,8 @@ impl<'a> Lexer<'a> {
             b"const" => TokenKind::KwConst,
             b"volatile" => TokenKind::KwVolatile,
             b"register" => TokenKind::KwRegister,
+            b"float" => TokenKind::KwFloat,
+            b"double" => TokenKind::KwDouble,
             other => TokenKind::Ident(String::from_utf8_lossy(other).into_owned()),
         }
     }
@@ -414,6 +416,16 @@ impl<'a> Lexer<'a> {
                 break;
             }
         }
+        // Float promotion: a `.`, `e`/`E`, or `f`/`F` after the integer
+        // part means we're actually lexing a floating-point literal.
+        // Only decimal sources can promote — `0x1.fp0` (C99 hex float)
+        // isn't in scope.
+        if radix == 10 {
+            let b = self.src.get(self.pos).copied();
+            if matches!(b, Some(b'.' | b'e' | b'E' | b'f' | b'F')) {
+                return self.lex_float_tail(start);
+            }
+        }
         // Optional integer-type suffix. C90 has `L`/`l` for long,
         // `U`/`u` for unsigned, and combinations (`UL`, `LU`, etc.).
         // We accept and discard them — `IntLit(u32)` already holds
@@ -428,6 +440,62 @@ impl<'a> Lexer<'a> {
         }
         let v32 = u32::try_from(value).map_err(|_| LexError::IntOverflow { offset: off(start) })?;
         Ok(TokenKind::IntLit(v32))
+    }
+
+    /// Tail of a floating-point literal — called after the integer part
+    /// (possibly empty for `.5`) has been scanned. Picks up the optional
+    /// `.<digits>`, optional `[eE][+-]?<digits>` exponent, and optional
+    /// `f`/`F`/`l`/`L` suffix, then converts the lexeme to IEEE 754.
+    /// Returns a `FloatLit` if the suffix is `f`/`F`, else `DoubleLit`.
+    fn lex_float_tail(&mut self, start: usize) -> Result<TokenKind, LexError> {
+        // Fractional part (optional `.<digits>`).
+        if matches!(self.src.get(self.pos), Some(b'.')) {
+            self.pos += 1;
+            while let Some(&b) = self.src.get(self.pos) {
+                if b.is_ascii_digit() {
+                    self.pos += 1;
+                } else {
+                    break;
+                }
+            }
+        }
+        // Exponent (`[eE][+-]?<digits>`).
+        if matches!(self.src.get(self.pos), Some(b'e' | b'E')) {
+            self.pos += 1;
+            if matches!(self.src.get(self.pos), Some(b'+' | b'-')) {
+                self.pos += 1;
+            }
+            while let Some(&b) = self.src.get(self.pos) {
+                if b.is_ascii_digit() {
+                    self.pos += 1;
+                } else {
+                    break;
+                }
+            }
+        }
+        // Suffix: `f`/`F` forces single-precision; `l`/`L` is `long
+        // double` (BCC treats it as double); no suffix is double.
+        let is_float = match self.src.get(self.pos) {
+            Some(b'f' | b'F') => { self.pos += 1; true }
+            Some(b'l' | b'L') => { self.pos += 1; false }
+            _ => false,
+        };
+        let lexeme = std::str::from_utf8(&self.src[start..self.pos])
+            .map_err(|_| LexError::UnexpectedChar { ch: '?', offset: off(start) })?;
+        // Strip the suffix so Rust's parser accepts the digits.
+        let stripped = match lexeme.as_bytes().last() {
+            Some(b'f' | b'F' | b'l' | b'L') => &lexeme[..lexeme.len() - 1],
+            _ => lexeme,
+        };
+        if is_float {
+            let v: f32 = stripped.parse()
+                .map_err(|_| LexError::IntOverflow { offset: off(start) })?;
+            Ok(TokenKind::FloatLit(v.to_bits()))
+        } else {
+            let v: f64 = stripped.parse()
+                .map_err(|_| LexError::IntOverflow { offset: off(start) })?;
+            Ok(TokenKind::DoubleLit(v.to_bits()))
+        }
     }
 }
 

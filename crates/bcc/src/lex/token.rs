@@ -38,9 +38,15 @@ pub enum TokenKind {
     KwConst,
     KwVolatile,
     KwRegister,
+    KwFloat,
+    KwDouble,
     // Atoms
     Ident(String),
     IntLit(u32),
+    /// 32-bit float literal, stored as raw IEEE 754 bits.
+    FloatLit(u32),
+    /// 64-bit double literal, stored as raw IEEE 754 bits.
+    DoubleLit(u64),
     /// `"...."` — string literal. Decoded byte contents, escapes
     /// resolved at lex time. The trailing NUL is implicit (added by
     /// codegen when materializing the literal); the lexer doesn't
@@ -130,8 +136,12 @@ impl TokenKind {
             Self::KwConst => "`const`",
             Self::KwVolatile => "`volatile`",
             Self::KwRegister => "`register`",
+            Self::KwFloat => "`float`",
+            Self::KwDouble => "`double`",
             Self::Ident(_) => "identifier",
             Self::IntLit(_) => "integer literal",
+            Self::FloatLit(_) => "float literal",
+            Self::DoubleLit(_) => "double literal",
             Self::StringLit(_) => "string literal",
             Self::LParen => "`(`",
             Self::RParen => "`)`",

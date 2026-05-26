@@ -282,6 +282,15 @@ pub enum Type {
     /// only comparisons, shifts, and division care about the
     /// signedness.
     ULong,
+    /// `float` — 32-bit IEEE 754 single-precision. Locals are 4 bytes,
+    /// 2-byte aligned. Codegen routes arithmetic through 8087 FPU
+    /// instructions (`fld`/`fstp`/`fadd`/etc.) and float→int conversions
+    /// through the `N_FTOL@` runtime helper.
+    Float,
+    /// `double` — 64-bit IEEE 754 double-precision. 8 bytes, 2-byte
+    /// aligned. Shares the same FPU codegen path as `Float`; the
+    /// operand size on `fld`/`fstp` is `qword` instead of `dword`.
+    Double,
     /// `T a[N]` — contiguous run of `N` `T`-typed elements on the stack.
     /// Arrays never enregister; the name in expression contexts refers
     /// to a stack address. Today only constant `N` is supported (we
@@ -328,6 +337,8 @@ impl Type {
             Self::Int | Self::UInt => 2,
             Self::Char | Self::UChar => 1,
             Self::Long | Self::ULong => 4,
+            Self::Float => 4,
+            Self::Double => 8,
             Self::Array { elem, len } => {
                 let elem = elem.size_bytes();
                 elem * u16::try_from(*len).expect("array byte size fits in u16")
@@ -347,6 +358,7 @@ impl Type {
             Self::Int | Self::UInt => 2,
             Self::Char | Self::UChar => 1,
             Self::Long | Self::ULong => 2,
+            Self::Float | Self::Double => 2,
             Self::Array { elem, .. } => elem.alignment(),
             Self::Pointer(_) => 2,
             // Struct alignment: 2 (word). The size rounding to even
@@ -424,6 +436,13 @@ impl Type {
         matches!(self, Self::Int | Self::UInt | Self::Pointer(_))
     }
 
+    /// True for floating-point types (`float`, `double`). They never
+    /// enregister; arithmetic routes through the 8087 FPU.
+    #[must_use]
+    pub fn is_float_like(&self) -> bool {
+        matches!(self, Self::Float | Self::Double)
+    }
+
     /// The element type of an array, or `None` if not an array. Used
     /// by codegen to pick the right stride / width when indexing.
     #[must_use]
@@ -456,6 +475,16 @@ pub struct Expr {
 #[derive(Debug)]
 pub enum ExprKind {
     IntLit(u32),
+    /// 32-bit float literal as raw IEEE 754 bits. Codegen pools the
+    /// bytes in the `s@` constant area and emits a `fld dword ptr
+    /// DGROUP:s@+<offset>` to load the value onto the FPU stack.
+    FloatLit(u32),
+    /// 64-bit double literal as raw IEEE 754 bits. Pooled the same way
+    /// as `FloatLit`; loaded via `fld qword ptr` in expression context,
+    /// though a constant assigned to a float local is loaded as `dword
+    /// ptr` (BCC promotes via the FPU's 80-bit internal width before
+    /// the `fstp` truncates back to 64).
+    DoubleLit(u64),
     Ident(String),
     BinOp { op: BinOp, left: Box<Expr>, right: Box<Expr> },
     /// Prefix unary operator: `-e`, `!e`, `~e`.

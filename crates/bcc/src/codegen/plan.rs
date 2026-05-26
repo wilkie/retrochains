@@ -495,6 +495,8 @@ fn plan_expr_value(e: &Expr, ctx: &mut PlanCtx) {
             plan_expr_value(right, ctx);
         }
         ExprKind::IntLit(_)
+        | ExprKind::FloatLit(_)
+        | ExprKind::DoubleLit(_)
         | ExprKind::Ident(_)
         | ExprKind::Update { .. }
         | ExprKind::AddressOf(_)

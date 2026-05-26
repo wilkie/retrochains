@@ -36,7 +36,11 @@ pub fn try_const_eval(e: &Expr) -> Option<u32> {
         | ExprKind::StringLit(_)
         | ExprKind::Member { .. }
         | ExprKind::Ternary { .. }
-        | ExprKind::InitList { .. } => None,
+        | ExprKind::InitList { .. }
+        // Float literals don't const-fold to a u32 — they live in the
+        // FPU world, not the integer-immediate world.
+        | ExprKind::FloatLit(_)
+        | ExprKind::DoubleLit(_) => None,
         // `(a, b)` const-folds to `b`'s value when BOTH sides fold —
         // the left side has no observable effect when it's a pure
         // constant, and the comma's value is always the right. Lets

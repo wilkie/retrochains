@@ -187,7 +187,11 @@ impl Parser {
             // any, but those would have been consumed by the
             // bare-struct path above).
             match self.peek_n(probe).kind {
-                TokenKind::KwInt | TokenKind::KwChar | TokenKind::KwVoid => probe += 1,
+                TokenKind::KwInt
+                | TokenKind::KwChar
+                | TokenKind::KwVoid
+                | TokenKind::KwFloat
+                | TokenKind::KwDouble => probe += 1,
                 TokenKind::KwUnsigned | TokenKind::KwLong | TokenKind::KwSigned => {
                     probe += 1;
                     // `unsigned long`, `long unsigned`, `signed long`,
@@ -590,6 +594,14 @@ impl Parser {
                     self.bump();
                 }
                 Ok(Type::Long)
+            }
+            TokenKind::KwFloat => {
+                self.bump();
+                Ok(Type::Float)
+            }
+            TokenKind::KwDouble => {
+                self.bump();
+                Ok(Type::Double)
             }
             TokenKind::KwStruct => self.parse_struct_type(),
             TokenKind::KwUnion => self.parse_union_type(),
@@ -1172,6 +1184,8 @@ impl Parser {
             | TokenKind::KwUnsigned
             | TokenKind::KwLong
             | TokenKind::KwSigned
+            | TokenKind::KwFloat
+            | TokenKind::KwDouble
             | TokenKind::KwConst
             | TokenKind::KwVolatile
             | TokenKind::KwRegister
@@ -2318,6 +2332,8 @@ impl Parser {
             | TokenKind::KwVoid
             | TokenKind::KwUnsigned
             | TokenKind::KwLong
+            | TokenKind::KwFloat
+            | TokenKind::KwDouble
             | TokenKind::KwStruct
             | TokenKind::KwUnion => true,
             TokenKind::Ident(ref name) if self.typedefs.contains_key(name) => true,
@@ -2599,6 +2615,12 @@ impl Parser {
                 })
             }
             TokenKind::IntLit(v) => Ok(Expr { kind: ExprKind::IntLit(v), span: tok.span }),
+            TokenKind::FloatLit(bits) => {
+                Ok(Expr { kind: ExprKind::FloatLit(bits), span: tok.span })
+            }
+            TokenKind::DoubleLit(bits) => {
+                Ok(Expr { kind: ExprKind::DoubleLit(bits), span: tok.span })
+            }
             TokenKind::StringLit(bytes) => {
                 // Adjacent string literals concatenate at parse time
                 // (`"hello, " "world"` → `"hello, world"`). Fixture 508.

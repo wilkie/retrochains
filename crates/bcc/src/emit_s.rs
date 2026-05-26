@@ -848,6 +848,8 @@ fn walk_calls_expr(
         }
         ExprKind::Ident(_)
         | ExprKind::IntLit(_)
+        | ExprKind::FloatLit(_)
+        | ExprKind::DoubleLit(_)
         | ExprKind::StringLit(_)
         | ExprKind::Update { .. }
         | ExprKind::AddressOf(_)

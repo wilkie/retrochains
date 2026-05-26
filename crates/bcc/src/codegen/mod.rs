@@ -15883,6 +15883,13 @@ impl<'a> FunctionEmitter<'a> {
         }
         match &e.kind {
             ExprKind::IntLit(_) => unreachable!("literals fold via try_const_eval"),
+            ExprKind::FloatLit(_) | ExprKind::DoubleLit(_) => {
+                // Float/double rvalue at this site means the constant
+                // is being consumed as an integer-AX value, which the
+                // FPU codegen handles via a different path. Hitting
+                // here means we didn't route an FP context correctly.
+                panic!("float literal in integer-AX context not supported yet");
+            }
             ExprKind::Ident(name) => {
                 // A local shadows a global of the same name (fixture
                 // 532), so only take the global path when no local
@@ -17549,6 +17556,9 @@ impl<'a> FunctionEmitter<'a> {
                 }
             }
             ExprKind::IntLit(_) => unreachable!("literals fold via try_const_eval"),
+            ExprKind::FloatLit(_) | ExprKind::DoubleLit(_) => {
+                panic!("float literal in operand context not yet supported (no FPU path)")
+            }
             ExprKind::Call { .. } => {
                 panic!("call as right operand not yet supported (need to preserve AX)")
             }

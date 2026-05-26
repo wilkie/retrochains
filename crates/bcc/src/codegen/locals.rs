@@ -836,6 +836,8 @@ fn expr_address_taken(e: &Expr, out: &mut HashSet<String>) {
             expr_address_taken(right, out);
         }
         ExprKind::IntLit(_)
+        | ExprKind::FloatLit(_)
+        | ExprKind::DoubleLit(_)
         | ExprKind::Ident(_)
         | ExprKind::Update { .. }
         | ExprKind::StringLit(_) => {}
@@ -942,6 +944,8 @@ fn expr_has_call(e: &Expr) -> bool {
         ExprKind::Update { .. }
         | ExprKind::Ident(_)
         | ExprKind::IntLit(_)
+        | ExprKind::FloatLit(_)
+        | ExprKind::DoubleLit(_)
         | ExprKind::AddressOf(_)
         | ExprKind::AddressOfArrayElem { .. }
         | ExprKind::StringLit(_) => false,
@@ -1095,6 +1099,8 @@ fn expr_has_div_or_mod(e: &Expr) -> bool {
         ExprKind::Update { .. }
         | ExprKind::Ident(_)
         | ExprKind::IntLit(_)
+        | ExprKind::FloatLit(_)
+        | ExprKind::DoubleLit(_)
         | ExprKind::AddressOf(_)
         | ExprKind::AddressOfArrayElem { .. }
         | ExprKind::StringLit(_) => false,
@@ -1152,7 +1158,10 @@ fn expr_mentions(name: &str, e: &Expr) -> bool {
         ExprKind::Update { target, .. } => target == name,
         ExprKind::AddressOf(n) => n == name,
         ExprKind::AddressOfArrayElem { array, .. } => array == name,
-        ExprKind::IntLit(_) | ExprKind::StringLit(_) => false,
+        ExprKind::IntLit(_)
+        | ExprKind::FloatLit(_)
+        | ExprKind::DoubleLit(_)
+        | ExprKind::StringLit(_) => false,
     }
 }
 
@@ -1645,6 +1654,8 @@ fn expr_emits_imul(e: &Expr) -> bool {
         ExprKind::Update { .. }
         | ExprKind::Ident(_)
         | ExprKind::IntLit(_)
+        | ExprKind::FloatLit(_)
+        | ExprKind::DoubleLit(_)
         | ExprKind::AddressOf(_)
         | ExprKind::AddressOfArrayElem { .. }
         | ExprKind::StringLit(_) => false,
@@ -2056,7 +2067,7 @@ fn count_uses_expr(e: &Expr, counts: &mut HashMap<String, u32>) {
             count_uses_expr(index, counts);
         }
         ExprKind::StringLit(_) => {}
-        ExprKind::IntLit(_) => {}
+        ExprKind::IntLit(_) | ExprKind::FloatLit(_) | ExprKind::DoubleLit(_) => {}
         ExprKind::Member { base, kind, .. } => {
             // `p->x` direct-derefs the pointer; `a.x` is just an
             // access to a struct lvalue. `(p ± K)->x` for a constant
