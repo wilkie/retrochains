@@ -7253,6 +7253,16 @@ impl<'a> FunctionEmitter<'a> {
                 //     helper used by struct returns and >4B struct
                 //     copies. Fixtures 1465, 1475-1476, 1481, 1516,
                 //     1616 (3-field struct, 6B), and many more.
+                // 2-byte struct returned by a call: just the single
+                // word in AX, store to the local. Fixture 1956.
+                if let Type::Struct { .. } = ty
+                    && ty.size_bytes() == 2
+                    && let ExprKind::Call { .. } = &init.kind
+                {
+                    self.emit_expr_to_ax(init);
+                    let _ = write!(self.out, "\tmov\tword ptr {},ax\r\n", bp_addr(off));
+                    return;
+                }
                 // 4-byte struct returned by a call: same shape as the
                 // long-call init — DX:AX = high:low, store DX → off+2
                 // and AX → off. Fixture 3618.
