@@ -17414,6 +17414,34 @@ impl<'a> FunctionEmitter<'a> {
                     let _ = write!(self.out, "\t{mnem}\tword ptr {addr}\r\n");
                     return;
                 }
+                // Variable index `arr[i]++` on a file-scope int
+                // array: scale i into BX, load the element, then
+                // increment it through the same `[arr+bx]` operand.
+                // Fixture 3032.
+                if let ExprKind::ArrayIndex { array, index } = &target.kind
+                    && let ExprKind::Ident(arr_name) = &array.kind
+                    && !self.locals.has(arr_name)
+                    && let Some(arr_ty) = self.globals.type_of(arr_name)
+                    && let Some(elem_ty) = arr_ty.array_elem()
+                    && elem_ty.is_int_like()
+                    && matches!(position, UpdatePosition::Post)
+                {
+                    let elem_ty = elem_ty.clone();
+                    let mnem = match op {
+                        UpdateOp::Inc => "inc",
+                        UpdateOp::Dec => "dec",
+                    };
+                    self.emit_index_into_bx(index, &elem_ty);
+                    let _ = write!(
+                        self.out,
+                        "\tmov\tax,word ptr DGROUP:_{arr_name}[bx]\r\n",
+                    );
+                    let _ = write!(
+                        self.out,
+                        "\t{mnem}\tword ptr DGROUP:_{arr_name}[bx]\r\n",
+                    );
+                    return;
+                }
                 panic!(
                     "UpdateLvalue in integer-AX context only supported via the \
                      `*(*pp)++` outer-deref peephole today; the operand was {:?}",
