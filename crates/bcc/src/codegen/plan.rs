@@ -15,6 +15,7 @@
 use std::collections::HashMap;
 
 use crate::ast::{Expr, ExprKind, Function, Stmt, StmtKind, SwitchCase};
+use crate::codegen::fold::try_const_eval;
 
 /// True iff `body` contains a `continue;` that targets the
 /// enclosing loop (walks into nested `if`/`switch` since they
@@ -462,6 +463,17 @@ fn plan_expr_value(e: &Expr, ctx: &mut PlanCtx) {
         ExprKind::Member { base, .. } => plan_expr_value(base, ctx),
         ExprKind::Cast { operand, .. } => plan_expr_value(operand, ctx),
         ExprKind::Ternary { cond, then_value, else_value } => {
+            // Constant cond: codegen folds to the surviving arm only,
+            // so no slots are needed. Match the codegen by walking
+            // only that arm here too. Fixture 2965 / 2318.
+            if let Some(v) = try_const_eval(cond) {
+                if v != 0 {
+                    plan_expr_value(then_value, ctx);
+                } else {
+                    plan_expr_value(else_value, ctx);
+                }
+                return;
+            }
             // Same skeleton as `if`-`else`: reserve 3 slots (base+0
             // stays unused to match BCC's numbering, base+1 is the
             // false-arm label, base+2 is the merge label after both
