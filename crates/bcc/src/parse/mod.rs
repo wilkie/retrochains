@@ -2511,7 +2511,37 @@ impl Parser {
         // tighter than multiplicative, so prefix `*` is unambiguous.
         if matches!(self.peek().kind, TokenKind::Star) {
             let star = self.bump();
-            let operand = self.parse_unary()?;
+            let mut operand = self.parse_unary()?;
+            // `*(<lv>)++` — postfix `++`/`--` on a paren-wrapped
+            // lvalue. C precedence binds postfix tighter than prefix
+            // `*`, so the `++` applies to the inner expression and
+            // the outer `*` dereferences the post-update value. The
+            // *stmt-level* postfix handler (parse_stmt) catches the
+            // top-level `lv++;` shape, but when the `++` sits
+            // mid-expression (here, between an inner paren and an
+            // outer prefix-`*`) we wrap the operand in UpdateLvalue
+            // ourselves. Fixture 3662 (`*(*pp)++` for an
+            // `int **pp` parameter).
+            if matches!(
+                self.peek().kind,
+                TokenKind::PlusPlus | TokenKind::MinusMinus,
+            ) {
+                let op_tok = self.bump();
+                let op = match op_tok.kind {
+                    TokenKind::PlusPlus => UpdateOp::Inc,
+                    TokenKind::MinusMinus => UpdateOp::Dec,
+                    _ => unreachable!(),
+                };
+                let span = Span::new(operand.span.start, op_tok.span.end);
+                operand = Expr {
+                    kind: ExprKind::UpdateLvalue {
+                        target: Box::new(operand),
+                        op,
+                        position: UpdatePosition::Post,
+                    },
+                    span,
+                };
+            }
             let span = Span::new(star.span.start, operand.span.end);
             return Ok(Expr {
                 kind: ExprKind::Deref(Box::new(operand)),

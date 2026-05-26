@@ -16506,6 +16506,44 @@ impl<'a> FunctionEmitter<'a> {
             }
             return;
         }
+        // `*(*pp)++` peephole: a Deref of a postfix ++ of a Deref of
+        // a named pointer. BCC fuses the load + increment + outer-
+        // deref into three instructions: cache `*pp` in BX, advance
+        // `*pp` in place by the pointee's stride, then load through
+        // BX. Fixture 3662 (`int **pp; return *(*pp)++;`).
+        if let ExprKind::Deref(outer_inner) = &e.kind
+            && let ExprKind::UpdateLvalue { target, op, position } = &outer_inner.kind
+            && let ExprKind::Deref(target_inner) = &target.kind
+            && let ExprKind::Ident(pp_name) = &target_inner.kind
+            && matches!(position, UpdatePosition::Post)
+            && self.locals.has(pp_name)
+            && let LocalLocation::Reg(reg) = self.locals.location_of(pp_name)
+        {
+            // `*pp` is an `int *` (or similar) — the pointee of
+            // that is what the OUTER deref reads, so the stride is
+            // the pointee-of-pointee's size.
+            let pp_ty = self.locals.type_of(pp_name).clone();
+            let inner_ptr = pp_ty.pointee().expect("pp must be a pointer").clone();
+            let leaf = inner_ptr.pointee().expect("*pp must be a pointer").clone();
+            let stride = i32::from(inner_ptr.pointee().expect("*pp must be a pointer").size_bytes());
+            let r = reg.name();
+            let _ = write!(self.out, "\tmov\tbx,word ptr [{r}]\r\n");
+            let signed_stride = match op {
+                UpdateOp::Inc => stride,
+                UpdateOp::Dec => -stride,
+            };
+            let _ = write!(
+                self.out,
+                "\tadd\tword ptr [{r}],{signed_stride}\r\n",
+            );
+            if leaf.is_char_like() {
+                self.out.extend_from_slice(b"\tmov\tal,byte ptr [bx]\r\n");
+                self.emit_widen_al(&leaf);
+            } else {
+                self.out.extend_from_slice(b"\tmov\tax,word ptr [bx]\r\n");
+            }
+            return;
+        }
         match &e.kind {
             ExprKind::IntLit(_) => unreachable!("literals fold via try_const_eval"),
             ExprKind::FloatLit(_) | ExprKind::DoubleLit(_) => {
@@ -16514,6 +16552,13 @@ impl<'a> FunctionEmitter<'a> {
                 // FPU codegen handles via a different path. Hitting
                 // here means we didn't route an FP context correctly.
                 panic!("float literal in integer-AX context not supported yet");
+            }
+            ExprKind::UpdateLvalue { .. } => {
+                panic!(
+                    "UpdateLvalue in integer-AX context only supported via the \
+                     `*(*pp)++` outer-deref peephole today; the operand was {:?}",
+                    e.kind
+                );
             }
             ExprKind::Ident(name) => {
                 // A local shadows a global of the same name (fixture
@@ -18195,6 +18240,9 @@ impl<'a> FunctionEmitter<'a> {
                 }
             }
             ExprKind::IntLit(_) => unreachable!("literals fold via try_const_eval"),
+            ExprKind::UpdateLvalue { .. } => {
+                panic!("UpdateLvalue as operand of a binary op not yet supported")
+            }
             ExprKind::FloatLit(_) | ExprKind::DoubleLit(_) => {
                 panic!("float literal in operand context not yet supported (no FPU path)")
             }

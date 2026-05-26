@@ -871,6 +871,7 @@ fn expr_address_taken(e: &Expr, out: &mut HashSet<String>) {
             expr_address_taken(left, out);
             expr_address_taken(right, out);
         }
+        ExprKind::UpdateLvalue { target, .. } => expr_address_taken(target, out),
         ExprKind::IntLit(_)
         | ExprKind::FloatLit(_)
         | ExprKind::DoubleLit(_)
@@ -1124,6 +1125,7 @@ fn expr_has_call(e: &Expr) -> bool {
         ExprKind::Cast { operand, .. } => expr_has_call(operand),
         ExprKind::InitList { items } => items.iter().any(expr_has_call),
         ExprKind::Comma { left, right } => expr_has_call(left) || expr_has_call(right),
+        ExprKind::UpdateLvalue { target, .. } => expr_has_call(target),
         ExprKind::Update { .. }
         | ExprKind::Ident(_)
         | ExprKind::IntLit(_)
@@ -1279,6 +1281,7 @@ fn expr_has_div_or_mod(e: &Expr) -> bool {
         ExprKind::Comma { left, right } => {
             expr_has_div_or_mod(left) || expr_has_div_or_mod(right)
         }
+        ExprKind::UpdateLvalue { target, .. } => expr_has_div_or_mod(target),
         ExprKind::Update { .. }
         | ExprKind::Ident(_)
         | ExprKind::IntLit(_)
@@ -1339,6 +1342,7 @@ fn expr_mentions(name: &str, e: &Expr) -> bool {
         }
         ExprKind::InitList { items } => items.iter().any(|i| expr_mentions(name, i)),
         ExprKind::Update { target, .. } => target == name,
+        ExprKind::UpdateLvalue { target, .. } => expr_mentions(name, target),
         ExprKind::AddressOf(n) => n == name,
         ExprKind::AddressOfArrayElem { array, .. } => array == name,
         ExprKind::IntLit(_)
@@ -1834,6 +1838,7 @@ fn expr_emits_imul(e: &Expr) -> bool {
         ExprKind::Comma { left, right } => {
             expr_emits_imul(left) || expr_emits_imul(right)
         }
+        ExprKind::UpdateLvalue { target, .. } => expr_emits_imul(target),
         ExprKind::Update { .. }
         | ExprKind::Ident(_)
         | ExprKind::IntLit(_)
@@ -2282,6 +2287,14 @@ fn count_uses_expr(e: &Expr, counts: &mut HashMap<String, u32>) {
         ExprKind::Comma { left, right } => {
             count_uses_expr(left, counts);
             count_uses_expr(right, counts);
+        }
+        ExprKind::UpdateLvalue { target, .. } => {
+            // Same shape as `Update`'s read-then-write — the
+            // generalized lvalue target contributes two uses to
+            // any name it mentions. Walk it via the existing
+            // expr-walk so chains like `(*pp)++` reach the
+            // pointer ident.
+            count_uses_expr(target, counts);
         }
     }
 }

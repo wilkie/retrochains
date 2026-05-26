@@ -888,6 +888,9 @@ fn walk_calls_expr(
             walk_calls_expr(left, defined, locals, seen, ordered);
             walk_calls_expr(right, defined, locals, seen, ordered);
         }
+        ExprKind::UpdateLvalue { target, .. } => {
+            walk_calls_expr(target, defined, locals, seen, ordered)
+        }
         ExprKind::Ident(_)
         | ExprKind::IntLit(_)
         | ExprKind::FloatLit(_)

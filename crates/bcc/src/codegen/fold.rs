@@ -27,6 +27,7 @@ pub fn try_const_eval(e: &Expr) -> Option<u32> {
         ExprKind::Ident(_)
         | ExprKind::Call { .. }
         | ExprKind::Update { .. }
+        | ExprKind::UpdateLvalue { .. }
         | ExprKind::Logical { .. }
         | ExprKind::AssignExpr { .. }
         | ExprKind::AddressOf(_)

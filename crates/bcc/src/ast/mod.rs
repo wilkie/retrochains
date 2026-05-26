@@ -494,9 +494,18 @@ pub enum ExprKind {
     /// evaluated, and the codegen patterns are completely different
     /// from the regular binary ops.
     Logical { op: LogicalOp, left: Box<Expr>, right: Box<Expr> },
-    /// `++name` / `--name` / `name++` / `name--`. Today the target
-    /// must be a bare identifier referring to a local or parameter.
+    /// `++name` / `--name` / `name++` / `name--`. The target must
+    /// be a bare identifier referring to a local or parameter. This
+    /// is the common shape; for ++/-- on a more general lvalue
+    /// (`(*pp)++`, `(arr[i])++`), the parser uses `UpdateLvalue`.
     Update { target: String, op: UpdateOp, position: UpdatePosition },
+    /// Postfix or prefix ++/-- on an arbitrary lvalue expression.
+    /// Today this is parser-emitted only for paren-wrapped targets
+    /// (`(*pp)++`, `(p->f)++`); bare-identifier targets continue to
+    /// use `Update` so the existing codegen sites that pattern-match
+    /// on `target: String` stay untouched. Fixture 3662
+    /// (`*(*pp)++` for an `int **pp`).
+    UpdateLvalue { target: Box<Expr>, op: UpdateOp, position: UpdatePosition },
     /// `name = value` as an expression. In C, assignment is an
     /// expression that yields the assigned value; we have it as a
     /// statement (`StmtKind::Assign`) for the common case, and this
