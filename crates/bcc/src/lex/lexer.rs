@@ -333,26 +333,40 @@ impl<'a> Lexer<'a> {
     fn lex_char_literal(&mut self) -> Result<TokenKind, LexError> {
         let start = self.pos;
         self.pos += 1; // opening `'`
-        let Some(&b) = self.src.get(self.pos) else {
-            return Err(LexError::UnterminatedString { offset: off(start) });
-        };
-        let value = if b == b'\\' {
-            self.decode_escape(start)?
-        } else {
-            self.pos += 1;
-            b
-        };
-        let Some(&close) = self.src.get(self.pos) else {
-            return Err(LexError::UnterminatedString { offset: off(start) });
-        };
-        if close != b'\'' {
-            return Err(LexError::UnexpectedChar {
-                ch: close as char,
-                offset: off(self.pos),
-            });
+        // Multi-byte character literals (`'AB'`). BCC packs the
+        // first char into the LOW byte and the second into the
+        // HIGH byte — so `'AB'` is 0x4241 = 16961 (little-endian
+        // byte order). Single-char literals are just the byte
+        // value. Fixture 3386.
+        let mut value: u32 = 0;
+        let mut count: u32 = 0;
+        loop {
+            let Some(&b) = self.src.get(self.pos) else {
+                return Err(LexError::UnterminatedString { offset: off(start) });
+            };
+            if b == b'\'' {
+                break;
+            }
+            let byte = if b == b'\\' {
+                self.decode_escape(start)?
+            } else {
+                self.pos += 1;
+                b
+            };
+            value |= u32::from(byte) << (count * 8);
+            count += 1;
+            if count > 4 {
+                return Err(LexError::UnexpectedChar {
+                    ch: byte as char,
+                    offset: off(self.pos),
+                });
+            }
         }
-        self.pos += 1;
-        Ok(TokenKind::IntLit(u32::from(value)))
+        self.pos += 1; // closing `'`
+        if count == 0 {
+            return Err(LexError::UnterminatedString { offset: off(start) });
+        }
+        Ok(TokenKind::IntLit(value))
     }
 
     /// Decode one C escape sequence starting at the backslash. The

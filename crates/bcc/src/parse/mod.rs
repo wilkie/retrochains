@@ -2502,6 +2502,19 @@ impl Parser {
                     .or_else(|| self.global_types.get(name))?;
                 ty.pointee().map(Type::size_bytes)
             }
+            // `sizeof(<binop>)` — result type follows C's usual
+            // arithmetic conversions; for our int/char/long mix the
+            // result is the wider of the two operand sizes (long
+            // beats int beats char). Fixture 2498.
+            ExprKind::BinOp { left, right, .. } => {
+                let l = self.expr_static_size(left).unwrap_or(2);
+                let r = self.expr_static_size(right).unwrap_or(2);
+                Some(l.max(r))
+            }
+            // `sizeof(<cast>)` — cast determines the result type.
+            ExprKind::Cast { ty, .. } => Some(ty.size_bytes()),
+            // `sizeof(<intlit>)` — int.
+            ExprKind::IntLit(_) => Some(2),
             _ => None,
         }
     }
