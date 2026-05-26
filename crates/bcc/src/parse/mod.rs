@@ -1572,10 +1572,17 @@ impl Parser {
         // Array suffix: `[<int-literal>]`, repeated for multi-dim.
         // Lengths are collected left-to-right, then wrapped innermost-
         // first so `int a[2][3]` becomes `Array{2, Array{3, Int}}` —
-        // i.e. `a[i]` yields an `int[3]`.
-        let mut array_lens: Vec<u32> = Vec::new();
+        // i.e. `a[i]` yields an `int[3]`. `[]` (empty) is permitted
+        // on the outermost dimension only, marking the size as
+        // "infer from initializer". Fixtures 1712, 1883, 2094.
+        let mut array_lens: Vec<Option<u32>> = Vec::new();
         while matches!(self.peek().kind, TokenKind::LBracket) {
             self.bump();
+            if matches!(self.peek().kind, TokenKind::RBracket) {
+                self.bump();
+                array_lens.push(None);
+                continue;
+            }
             let size_tok = self.bump();
             let TokenKind::IntLit(len) = size_tok.kind else {
                 return Err(ParseError::Unexpected {
@@ -1585,10 +1592,85 @@ impl Parser {
                 });
             };
             self.expect(&TokenKind::RBracket)?;
-            array_lens.push(len);
+            array_lens.push(Some(len));
         }
-        for len in array_lens.into_iter().rev() {
+        // Reverse to innermost-first wrapping. Only the OUTERMOST
+        // dimension may be `None` (`[]`); inner `[]` is illegal C.
+        // The outermost is the last in the iter-reversed walk.
+        let mut deferred_outer_unsized = false;
+        let mut wrapped_lens: Vec<u32> = Vec::with_capacity(array_lens.len());
+        let mut iter = array_lens.into_iter().peekable();
+        while let Some(len_opt) = iter.next() {
+            match len_opt {
+                Some(len) => wrapped_lens.push(len),
+                None => {
+                    if iter.peek().is_some() {
+                        // `int a[][3]` etc. — inner dim unspecified.
+                        return Err(ParseError::Unexpected {
+                            expected: "array size (integer literal)".to_owned(),
+                            found: "`]` (empty brackets are only allowed on the outermost array dimension)".to_owned(),
+                            offset: self.peek().span.start,
+                        });
+                    }
+                    deferred_outer_unsized = true;
+                    // Use 0 as placeholder; finish_declare fills it
+                    // from the initializer.
+                    wrapped_lens.push(0);
+                }
+            }
+        }
+        for len in wrapped_lens.into_iter().rev() {
             ty = Type::Array { elem: Box::new(ty), len };
+        }
+        self.finish_declare_unsized(start, base_ty, ty, name, is_static, is_register, is_volatile, deferred_outer_unsized)
+    }
+
+    fn finish_declare_unsized(
+        &mut self,
+        start: u32,
+        base_ty: Type,
+        mut ty: Type,
+        name: String,
+        is_static: bool,
+        is_register: bool,
+        is_volatile: bool,
+        deferred_outer_unsized: bool,
+    ) -> Result<Stmt, ParseError> {
+        if !deferred_outer_unsized {
+            return self.finish_declare(start, base_ty, ty, name, is_static, is_register, is_volatile);
+        }
+        // Need to peek at the initializer to determine the array
+        // size. Require `= <init>`.
+        if !matches!(self.peek().kind, TokenKind::Equals) {
+            return Err(ParseError::Unexpected {
+                expected: "`=` (\"[]\" requires an initializer to determine size)".to_owned(),
+                found: self.peek().kind.describe().to_owned(),
+                offset: self.peek().span.start,
+            });
+        }
+        // Look ahead at the initializer to figure out the size.
+        // Save parser state, parse the init, restore.
+        let saved_pos = self.pos;
+        self.bump(); // consume `=`
+        let init_peek = self.parse_initializer()?;
+        // Restore position so finish_declare re-parses the same init.
+        self.pos = saved_pos;
+        // Compute the outer-dim size from the initializer shape.
+        // `Array { elem: <inner>, len: 0 }` — fill len.
+        let len = match &init_peek.kind {
+            ExprKind::StringLit(bytes) => (bytes.len() as u32) + 1,
+            ExprKind::InitList { items } => items.len() as u32,
+            _ => {
+                return Err(ParseError::Unexpected {
+                    expected: "initializer list or string literal for unsized array".to_owned(),
+                    found: "scalar expression".to_owned(),
+                    offset: init_peek.span.start,
+                });
+            }
+        };
+        if let Type::Array { elem, len: l } = &mut ty {
+            *l = len;
+            let _ = elem;
         }
         self.finish_declare(start, base_ty, ty, name, is_static, is_register, is_volatile)
     }
