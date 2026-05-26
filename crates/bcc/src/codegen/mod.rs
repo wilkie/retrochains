@@ -1070,6 +1070,7 @@ impl<'a> FunctionEmitter<'a> {
         // (`if (0) return 5; return 10;`).
         if let Some(v) = try_const_eval(cond)
             && v != 0
+            && else_branch.is_none()
         {
             for s in then_branch {
                 self.emit_stmt(s);
@@ -3013,13 +3014,27 @@ impl<'a> FunctionEmitter<'a> {
     ) {
         // Constant-false cond: emit an unconditional `jmp short
         // <false_slot>` (no cmp/test/jcc). BCC's shape for
-        // `if (0) ...`. Constant-true is handled by the caller
-        // (emit_if elides the whole if). Fixture 1585.
+        // `if (0) ...`. Fixture 1585.
         if let Some(v) = try_const_eval(cond)
             && v == 0
             && let Some(fslot) = false_slot
         {
             let _ = write!(self.out, "\tjmp\tshort {}\r\n", self.label_ref(fslot));
+            return;
+        }
+        // Constant-true cond: no test, no jump — fall through into
+        // the then-branch. Used by `if (1) {...} else {...}` shape
+        // where the caller still wants the else branch emitted (as
+        // dead code with the trailing `jmp` over it). Fixture 2022.
+        if let Some(v) = try_const_eval(cond)
+            && v != 0
+        {
+            // If there's a true_slot, fall through reaches the then
+            // entry naturally — but the slot label still needs to
+            // be emitted later. Caller handles that.
+            if let Some(tslot) = true_slot {
+                let _ = write!(self.out, "\tjmp\tshort {}\r\n", self.label_ref(tslot));
+            }
             return;
         }
         // `<long_global> <relop> <int_global>` mixed compare. BCC
