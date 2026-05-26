@@ -2044,11 +2044,14 @@ fn count_uses_expr(e: &Expr, counts: &mut HashMap<String, u32>) {
         ExprKind::IntLit(_) => {}
         ExprKind::Member { base, kind, .. } => {
             // `p->x` direct-derefs the pointer; `a.x` is just an
-            // access to a struct lvalue.
+            // access to a struct lvalue. `(p ± K)->x` for a constant
+            // K is also a direct-deref form — BCC bakes the offset
+            // into the indexed addressing (`mov ax, [si-4]` for
+            // `(p - 1)->x` with sizeof(P) = 4). Fixture 3251.
             match kind {
                 crate::ast::MemberKind::Arrow => {
-                    if let ExprKind::Ident(name) = &base.kind {
-                        *counts.entry(name.clone()).or_insert(0) += 2;
+                    if let Some(name) = direct_deref_target(base) {
+                        *counts.entry(name).or_insert(0) += 2;
                     } else {
                         count_uses_expr(base, counts);
                     }
