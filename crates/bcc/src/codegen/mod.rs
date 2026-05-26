@@ -5578,6 +5578,13 @@ impl<'a> FunctionEmitter<'a> {
     }
 
     fn emit_return_value_load_inner(&mut self, e: &Expr) {
+        // Float / double-returning function: evaluate the value onto
+        // the FPU stack. BCC leaves the result on st(0) for the
+        // caller; no register transfer needed. Fixture 1684.
+        if self.function.ret_ty.is_float_like() {
+            self.emit_float_load_to_fpu(e);
+            return;
+        }
         // Char-returning function with a constant `return K;` —
         // `mov al, K` (2 bytes) leaves AH undefined per the ABI for
         // char return values, which is exactly what BCC emits for
@@ -6908,6 +6915,12 @@ impl<'a> FunctionEmitter<'a> {
                 // change sign with `fchs`. Fixture 1753.
                 self.emit_float_load_to_fpu(operand);
                 self.out.extend_from_slice(b"\tfchs\t\r\n");
+            }
+            ExprKind::Call { name, args } => {
+                // Float / double-returning call: the result lands on
+                // the FPU stack-top per BCC's ABI. Just emit the
+                // call. Fixture 1684.
+                self.emit_call(name, args);
             }
             ExprKind::Cast { ty: cast_ty, operand } => {
                 // Float↔float casts (`(float)d`, `(double)f`) are
