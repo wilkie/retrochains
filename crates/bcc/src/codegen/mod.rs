@@ -3065,6 +3065,42 @@ impl<'a> FunctionEmitter<'a> {
             }
             return;
         }
+        // `!<array_name>` — array address is link-time non-zero,
+        // so `!arr` is constant-falsy. Emit unconditional jmp to
+        // false_slot. The unwrapped `arr` truthy case is NOT folded
+        // (BCC still emits the `mov ax, offset _arr; or ax, ax`
+        // test — matches the const-cond asymmetry where `if (1)`
+        // elides only when there's no else). Fixture 2986
+        // (`if (!data)` — falsy → jump); fixture 2800 (`if (data)`
+        // keeps the cmp).
+        if let ExprKind::Unary { op: crate::ast::UnaryOp::Not, operand } = &cond.kind {
+            let mut polarity = false;
+            let mut cur = operand.as_ref();
+            loop {
+                if let ExprKind::Unary { op: crate::ast::UnaryOp::Not, operand } = &cur.kind {
+                    polarity = !polarity;
+                    cur = operand;
+                    continue;
+                }
+                break;
+            }
+            let is_array_name = if let ExprKind::Ident(name) = &cur.kind {
+                self.globals.type_of(name)
+                    .map_or(false, |t| matches!(t, Type::Array { .. }))
+                    || (self.locals.has(name)
+                        && matches!(self.locals.type_of(name), Type::Array { .. }))
+            } else {
+                false
+            };
+            if is_array_name && !polarity {
+                // The outermost expr is `!arr` (odd number of `!`s
+                // wrapping an array name) — always falsy.
+                if let Some(fslot) = false_slot {
+                    let _ = write!(self.out, "\tjmp\tshort {}\r\n", self.label_ref(fslot));
+                    return;
+                }
+            }
+        }
         // `<long_global> <relop> <int_global>` mixed compare. BCC
         // widens the int (mov ax, _i / cwd to DX:AX), then compares
         // against g. The operand-order in the cmp is widened-int-LHS
