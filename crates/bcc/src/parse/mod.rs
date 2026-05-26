@@ -736,6 +736,50 @@ impl Parser {
                 self.bump();
                 ty = Type::Pointer(Box::new(ty));
             }
+            // Anonymous bitfield: `<type> : <width>;`. Width 0 is
+            // the alignment-separator form (`unsigned : 0;`) — it
+            // forces the next bitfield into a fresh container.
+            // Non-zero anonymous widths just consume bits without
+            // emitting a named field. Fixture 2302.
+            if matches!(self.peek().kind, TokenKind::Colon) {
+                self.bump();
+                let width_tok = self.bump();
+                let TokenKind::IntLit(width) = width_tok.kind else {
+                    return Err(ParseError::Unexpected {
+                        expected: "anonymous bitfield width".to_owned(),
+                        found: width_tok.kind.describe().to_owned(),
+                        offset: width_tok.span.start,
+                    });
+                };
+                self.expect(&TokenKind::Semicolon)?;
+                if width == 0 {
+                    if bit_container_offset.is_some() {
+                        bit_container_offset = None;
+                        bits_used_in_container = 0;
+                        container_is_word = false;
+                    }
+                } else {
+                    let width_u8 = u8::try_from(width).map_err(|_| {
+                        ParseError::Unsupported { offset: width_tok.span.start }
+                    })?;
+                    if bit_container_offset.is_none()
+                        || bits_used_in_container + width_u8 > 16
+                    {
+                        bit_container_offset = Some(struct_offset);
+                        bits_used_in_container = 0;
+                        container_is_word = false;
+                        if !is_union {
+                            struct_offset += 1;
+                        }
+                    }
+                    bits_used_in_container += width_u8;
+                    if !is_union && !container_is_word && bits_used_in_container > 8 {
+                        container_is_word = true;
+                        struct_offset += 1;
+                    }
+                }
+                continue;
+            }
             let name_tok = self.bump();
             let TokenKind::Ident(name) = name_tok.kind else {
                 return Err(ParseError::NotAnIdent { offset: name_tok.span.start });
