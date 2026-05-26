@@ -1514,10 +1514,24 @@ impl Parser {
         // only honors it at the start of the declarator; we accept
         // it here and also let `parse_type` drop a second one
         // silently. Fixtures 1550, 1560.
+        //
+        // Optional `volatile` prefix — recorded so the locals
+        // allocator forces a stack slot regardless of use count.
+        // Each read/write touches memory. Fixtures 1548, 2243.
         let mut is_register = false;
-        while matches!(self.peek().kind, TokenKind::KwRegister) {
-            self.bump();
-            is_register = true;
+        let mut is_volatile = false;
+        loop {
+            match self.peek().kind {
+                TokenKind::KwRegister => {
+                    self.bump();
+                    is_register = true;
+                }
+                TokenKind::KwVolatile => {
+                    self.bump();
+                    is_volatile = true;
+                }
+                _ => break,
+            }
         }
         let base_ty = self.parse_type()?;
         // Pointer stars wrap the base type: `int **pp` is `Pointer(Pointer(Int))`.
@@ -1538,7 +1552,7 @@ impl Parser {
         // int-pool-eligible) and skip the param list.
         if matches!(self.peek().kind, TokenKind::LParen) {
             let (name, fp_ty) = self.parse_func_ptr_declarator(ty.clone())?;
-            return self.finish_declare(start, base_ty, fp_ty, name, is_static, is_register);
+            return self.finish_declare(start, base_ty, fp_ty, name, is_static, is_register, is_volatile);
         }
         let name_tok = self.bump();
         let TokenKind::Ident(name) = &name_tok.kind else {
@@ -1566,7 +1580,7 @@ impl Parser {
         for len in array_lens.into_iter().rev() {
             ty = Type::Array { elem: Box::new(ty), len };
         }
-        self.finish_declare(start, base_ty, ty, name, is_static, is_register)
+        self.finish_declare(start, base_ty, ty, name, is_static, is_register, is_volatile)
     }
 
     /// Common tail of `parse_declare` after the declarator (name +
@@ -1583,6 +1597,7 @@ impl Parser {
         name: String,
         is_static: bool,
         is_register: bool,
+        is_volatile: bool,
     ) -> Result<Stmt, ParseError> {
         let init = if matches!(self.peek().kind, TokenKind::Equals) {
             self.bump();
@@ -1647,6 +1662,7 @@ impl Parser {
                         init: None,
                         is_static: true,
                         is_register: false,
+                        is_volatile: false,
                     },
                     span: tail_span,
                 });
@@ -1659,6 +1675,7 @@ impl Parser {
                         init: tail_init,
                         is_static: false,
                         is_register,
+                        is_volatile,
                     },
                     span: tail_span,
                 });
@@ -1686,13 +1703,14 @@ impl Parser {
                     init: None,
                     is_static: true,
                     is_register: false,
+                    is_volatile: false,
                 },
                 span,
             });
         }
         self.function_locals.insert(name.clone(), ty.clone());
         Ok(Stmt {
-            kind: StmtKind::Declare { ty, name, init, is_static, is_register },
+            kind: StmtKind::Declare { ty, name, init, is_static, is_register, is_volatile },
             span,
         })
     }

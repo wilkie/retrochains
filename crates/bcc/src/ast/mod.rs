@@ -118,6 +118,7 @@ pub enum StmtKind {
         init: Option<Expr>,
         is_static: bool,
         is_register: bool,
+        is_volatile: bool,
     },
     /// `if (cond) then-body [else else-body]`.
     If { cond: Expr, then_branch: Vec<Stmt>, else_branch: Option<Vec<Stmt>> },

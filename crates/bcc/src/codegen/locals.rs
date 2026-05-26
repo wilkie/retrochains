@@ -236,6 +236,7 @@ impl Locals {
                 ty: param.ty.clone(),
                 kind: DeclKind::Param { incoming_offset: param_offset },
                 is_register: false,
+                is_volatile: false,
             });
             // Every param takes a 2-byte slot on the stack regardless
             // of declared type — `char` gets promoted at the push site
@@ -286,10 +287,15 @@ impl Locals {
         // and never anything whose address was taken. `unsigned`
         // shares the int pool — same byte layout, same load/store
         // shapes (fixture 1216). The `register` keyword overrides
-        // the use-count threshold (fixture 1550 / 1560).
+        // the use-count threshold (fixture 1550 / 1560). `volatile`
+        // forces stack allocation regardless of use count
+        // (fixtures 1548, 2243).
         let eligible_int: Vec<usize> = (0..declared.len())
             .filter(|&i| {
                 if address_taken.contains(&declared[i].name) {
+                    return false;
+                }
+                if declared[i].is_volatile {
                     return false;
                 }
                 let uses = counts.get(&declared[i].name).copied().unwrap_or(0);
@@ -446,6 +452,9 @@ impl Locals {
                     continue;
                 }
                 if address_taken.contains(&item.name) {
+                    continue;
+                }
+                if item.is_volatile {
                     continue;
                 }
                 let uses = counts.get(&item.name).copied().unwrap_or(0);
@@ -1478,6 +1487,11 @@ struct DeclItem {
     /// params (the storage class isn't passed in the calling
     /// convention) and statics.
     is_register: bool,
+    /// True if the C source marked this local `volatile`. Forces
+    /// stack allocation regardless of use count — each access must
+    /// read/write memory, so the value cannot live in a register.
+    /// Fixtures 1548, 2243.
+    is_volatile: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -1488,13 +1502,14 @@ enum DeclKind {
 
 fn collect_decls(stmt: &Stmt, out: &mut Vec<DeclItem>) {
     match &stmt.kind {
-        StmtKind::Declare { ty, name, is_static, is_register, .. } => {
+        StmtKind::Declare { ty, name, is_static, is_register, is_volatile, .. } => {
             if !*is_static {
                 out.push(DeclItem {
                     name: name.clone(),
                     ty: ty.clone(),
                     kind: DeclKind::Local,
                     is_register: *is_register,
+                    is_volatile: *is_volatile,
                 });
             }
         }
