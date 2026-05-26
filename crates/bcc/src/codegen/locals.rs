@@ -337,6 +337,16 @@ impl Locals {
                 if declared[i].is_volatile {
                     return false;
                 }
+                // When the leaf-param-char-subscript rule fires,
+                // BCC limits the int pool to just the subscript
+                // identifier — other int-likes (e.g. the char-array
+                // pointer itself) stay on the stack regardless of
+                // direct-deref bonus. Fixtures 1285, 3559.
+                if !leaf_param_subscript.is_empty()
+                    && !leaf_param_subscript.contains(&i)
+                {
+                    return false;
+                }
                 let uses = counts.get(&declared[i].name).copied().unwrap_or(0);
                 match &declared[i].ty {
                     Type::Int | Type::UInt | Type::Pointer(_) => {
