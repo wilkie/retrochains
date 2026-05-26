@@ -9870,6 +9870,39 @@ impl<'a> FunctionEmitter<'a> {
             // → stride 3): imul requires AX, so AX = outer,
             // `mov dx, <stride>; imul dx`, then add inner directly,
             // `mov bx, ax`. Fixture 2985.
+            // Array of pointers indexed twice (`names[0][1]` for
+            // `char *names[3]`): inner type is Pointer, not Array.
+            // Load the pointer with the outer offset, then deref
+            // with the inner offset. Fixture 1394.
+            if indices.len() == 2
+                && let Type::Array { elem: arr_elem, .. } = &gty
+                && let Type::Pointer(pointee) = &**arr_elem
+                && let Some(outer_k) = try_const_eval(indices[0])
+                && let Some(inner_k) = try_const_eval(indices[1])
+            {
+                let pointee = (**pointee).clone();
+                let outer_byte_off = (outer_k as u32).wrapping_mul(2);
+                let inner_byte_off = (inner_k as u32)
+                    .wrapping_mul(u32::from(pointee.size_bytes()));
+                let outer_addr = if outer_byte_off == 0 {
+                    format!("DGROUP:_{array_name}")
+                } else {
+                    format!("DGROUP:_{array_name}+{outer_byte_off}")
+                };
+                let _ = write!(self.out, "\tmov\tbx,word ptr {outer_addr}\r\n");
+                let inner_addr = if inner_byte_off == 0 {
+                    "[bx]".to_owned()
+                } else {
+                    format!("[bx+{inner_byte_off}]")
+                };
+                if pointee.is_char_like() {
+                    let _ = write!(self.out, "\tmov\tal,byte ptr {inner_addr}\r\n");
+                    self.emit_widen_al(&pointee);
+                } else {
+                    let _ = write!(self.out, "\tmov\tax,word ptr {inner_addr}\r\n");
+                }
+                return;
+            }
             if indices.len() == 2
                 && let Type::Array { elem: inner_arr, .. } = &gty
                 && let Type::Array { elem: leaf_elem, .. } = &**inner_arr
