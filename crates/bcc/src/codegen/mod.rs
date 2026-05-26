@@ -617,6 +617,13 @@ struct FunctionEmitter<'a> {
     /// the trailing `mov ax, dx`. The caller then reads the remainder
     /// directly from DX (e.g. to store via `mov [mem], dx`).
     skip_mod_to_ax: bool,
+    /// True when an `fstp` to memory has been emitted earlier in the
+    /// function and we haven't yet emitted the matching synchronizing
+    /// `fwait` before a CPU memory access. The int→FPU widening path
+    /// in `emit_float_load_to_fpu` (mov ax / mov scratch / fild)
+    /// prepends a bare `fwait` when this is set so the prior fstp's
+    /// memory write completes before the CPU mov runs. Fixture 1752.
+    pending_fpu_store_fwait: bool,
 }
 
 /// Innermost enclosing construct that catches `break;` (and maybe
@@ -657,6 +664,7 @@ impl<'a> FunctionEmitter<'a> {
             helpers,
             skip_widen: false,
             skip_mod_to_ax: false,
+            pending_fpu_store_fwait: false,
         }
     }
 
@@ -6801,6 +6809,33 @@ impl<'a> FunctionEmitter<'a> {
                 } else {
                     panic!("unknown name in FPU load: {name}");
                 };
+                // Int / char operand in an FPU context (e.g. `i + d`
+                // where i is int) — widen via fild + scratch slot,
+                // mirroring the (float)<int> cast path. BCC stores
+                // the int to the reserved scratch even when it
+                // already lives on the stack — the scratch keeps
+                // fild's source predictable. Fixture 1752.
+                if ty.is_int_like() {
+                    let scratch = self.locals.fild_int_scratch_offset().expect(
+                        "int operand in FPU context without reserved fild scratch slot",
+                    );
+                    if self.pending_fpu_store_fwait {
+                        self.out.extend_from_slice(b"\tfwait\t\r\n");
+                        self.pending_fpu_store_fwait = false;
+                    }
+                    self.emit_expr_to_ax(e);
+                    let _ = write!(
+                        self.out,
+                        "\tmov\tword ptr {},ax\r\n",
+                        bp_addr(scratch),
+                    );
+                    let _ = write!(
+                        self.out,
+                        "\tfild\tword ptr {}\r\n",
+                        bp_addr(scratch),
+                    );
+                    return;
+                }
                 let width = if matches!(ty, Type::Float) { "dword" } else { "qword" };
                 if self.locals.has(name) {
                     let LocalLocation::Stack(off) = self.locals.location_of(name) else {
@@ -7138,6 +7173,7 @@ impl<'a> FunctionEmitter<'a> {
                 "\tfstp\t{store_width} ptr {}\r\n",
                 bp_addr(stack_off),
             );
+            self.pending_fpu_store_fwait = true;
             return;
         }
         match loc {

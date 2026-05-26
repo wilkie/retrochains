@@ -1022,6 +1022,14 @@ fn body_has_int_to_float_cast(function: &Function) -> bool {
             ExprKind::BinOp { op, left, right } if op.is_comparison()
                 && (ident_is_float(left, float_names)
                     || ident_is_float(right, float_names)) => true,
+            // Arithmetic on a mixed int+float pair needs the scratch
+            // for the implicit fild widening of the int operand.
+            // Fixture 1752 (`i + d`).
+            ExprKind::BinOp { left, right, .. }
+                if (ident_is_float(left, float_names)
+                    && expr_is_integer(right, float_names))
+                    || (ident_is_float(right, float_names)
+                        && expr_is_integer(left, float_names)) => true,
             ExprKind::BinOp { left, right, .. }
             | ExprKind::Logical { left, right, .. }
             | ExprKind::Comma { left, right } => {
