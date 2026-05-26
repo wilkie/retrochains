@@ -1020,6 +1020,45 @@ fn body_has_int_to_float_cast(function: &Function) -> bool {
             _ => false,
         }
     }
+    // Stricter form: returns true only if `e` reaches *no* float
+    // idents anywhere in its tree. Used by the mixed-int+float
+    // scratch detector so a sub-expression like `a * b` (with both
+    // operands floats) doesn't get classified as integer through
+    // the BinOp catch-all above.
+    fn expr_no_float_anywhere(e: &Expr, float_names: &HashSet<String>) -> bool {
+        match &e.kind {
+            ExprKind::FloatLit(_) | ExprKind::DoubleLit(_) => false,
+            ExprKind::Ident(n) => !float_names.contains(n),
+            ExprKind::BinOp { left, right, .. }
+            | ExprKind::Logical { left, right, .. }
+            | ExprKind::Comma { left, right } => {
+                expr_no_float_anywhere(left, float_names)
+                    && expr_no_float_anywhere(right, float_names)
+            }
+            ExprKind::Unary { operand, .. } => {
+                expr_no_float_anywhere(operand, float_names)
+            }
+            ExprKind::Cast { ty, operand } => {
+                !ty.is_float_like()
+                    && expr_no_float_anywhere(operand, float_names)
+            }
+            ExprKind::Deref(inner) => expr_no_float_anywhere(inner, float_names),
+            ExprKind::ArrayIndex { array, index } => {
+                expr_no_float_anywhere(array, float_names)
+                    && expr_no_float_anywhere(index, float_names)
+            }
+            ExprKind::Member { base, .. } => expr_no_float_anywhere(base, float_names),
+            ExprKind::Call { args, .. } => {
+                args.iter().all(|a| expr_no_float_anywhere(a, float_names))
+            }
+            ExprKind::Ternary { cond, then_value, else_value } => {
+                expr_no_float_anywhere(cond, float_names)
+                    && expr_no_float_anywhere(then_value, float_names)
+                    && expr_no_float_anywhere(else_value, float_names)
+            }
+            _ => true,
+        }
+    }
 
     fn ident_is_float(e: &Expr, float_names: &HashSet<String>) -> bool {
         match &e.kind {
@@ -1040,13 +1079,21 @@ fn body_has_int_to_float_cast(function: &Function) -> bool {
                 && (ident_is_float(left, float_names)
                     || ident_is_float(right, float_names)) => true,
             // Arithmetic on a mixed int+float pair needs the scratch
-            // for the implicit fild widening of the int operand.
-            // Fixture 1752 (`i + d`).
+            // for the implicit fild widening of the int operand. The
+            // detector requires one side to be a definite float
+            // operand AND the other to be a no-float-anywhere
+            // integer expression — using the looser expr_is_integer
+            // here would over-fire on `a * b - 1.0f` (the (a*b)
+            // sub-expression is a BinOp and the catch-all calls it
+            // integer). Fixture 1752 (`i + d`); fixture 1673
+            // (`a * b - 1.0f`) verifies the stricter check.
             ExprKind::BinOp { left, right, .. }
                 if (ident_is_float(left, float_names)
-                    && expr_is_integer(right, float_names))
+                    && expr_no_float_anywhere(right, float_names)
+                    && !matches!(right.kind, ExprKind::IntLit(_)))
                     || (ident_is_float(right, float_names)
-                        && expr_is_integer(left, float_names)) => true,
+                        && expr_no_float_anywhere(left, float_names)
+                        && !matches!(left.kind, ExprKind::IntLit(_))) => true,
             ExprKind::BinOp { left, right, .. }
             | ExprKind::Logical { left, right, .. }
             | ExprKind::Comma { left, right } => {
