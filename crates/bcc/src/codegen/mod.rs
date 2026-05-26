@@ -10918,6 +10918,54 @@ impl<'a> FunctionEmitter<'a> {
                 }
                 return;
             }
+            // Char-stride (1) with index in SI: BCC uses indexed
+            // addressing `[bx+si]` directly — no separate add at
+            // all. Fixture 3559 (`for (i ... in SI) buf[i] = 0;`).
+            if stride == 1
+                && let ExprKind::Ident(idx_name) = &indices[0].kind
+                && self.locals.has(idx_name)
+                && let LocalLocation::Reg(idx_reg) = self.locals.location_of(idx_name)
+                && matches!(idx_reg, Reg::Si | Reg::Di)
+            {
+                let idx_reg_name = idx_reg.name();
+                if let Some(v) = try_const_eval(value) {
+                    let v_masked = (v & 0xFF) as u8;
+                    let _ = write!(
+                        self.out,
+                        "\tmov\tbyte ptr [bx+{idx_reg_name}],{v_masked}\r\n",
+                    );
+                } else if let ExprKind::Ident(v_name) = &value.kind
+                    && self.locals.has(v_name)
+                    && self.locals.type_of(v_name).is_char_like()
+                {
+                    let v_src = match self.locals.location_of(v_name) {
+                        LocalLocation::Stack(off) => format!("byte ptr {}", bp_addr(off)),
+                        LocalLocation::Reg(reg) if reg.is_byte() => reg.name().to_owned(),
+                        _ => String::new(),
+                    };
+                    if !v_src.is_empty() {
+                        let _ = write!(self.out, "\tmov\tal,{v_src}\r\n");
+                        let _ = write!(
+                            self.out,
+                            "\tmov\tbyte ptr [bx+{idx_reg_name}],al\r\n",
+                        );
+                    } else {
+                        // Fallback through AX.
+                        self.emit_expr_to_ax(value);
+                        let _ = write!(
+                            self.out,
+                            "\tmov\tbyte ptr [bx+{idx_reg_name}],al\r\n",
+                        );
+                    }
+                } else {
+                    self.emit_expr_to_ax(value);
+                    let _ = write!(
+                        self.out,
+                        "\tmov\tbyte ptr [bx+{idx_reg_name}],al\r\n",
+                    );
+                }
+                return;
+            }
             // Char-stride (1) memory-direct add: when stride is 1
             // and the index is a simple int lvalue, skip the AX
             // route and add memory directly to BX. Fixture 1285
