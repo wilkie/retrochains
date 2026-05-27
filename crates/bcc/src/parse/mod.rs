@@ -920,13 +920,13 @@ impl Parser {
                 self.expect(&TokenKind::RBracket)?;
                 array_lens.push(len);
             }
+            let mut full_ty = ty.clone();
             for len in array_lens.into_iter().rev() {
-                ty = Type::Array { elem: Box::new(ty), len };
+                full_ty = Type::Array { elem: Box::new(full_ty), len };
             }
-            self.expect(&TokenKind::Semicolon)?;
-            let field_size = ty.size_bytes();
+            let field_size = full_ty.size_bytes();
             let offset = if is_union { 0 } else { struct_offset };
-            fields.push(StructField { name, ty, offset, bitfield: None });
+            fields.push(StructField { name, ty: full_ty, offset, bitfield: None });
             if is_union {
                 if field_size > union_max {
                     union_max = field_size;
@@ -934,6 +934,46 @@ impl Parser {
             } else {
                 struct_offset += field_size;
             }
+            // Comma-list of additional names with the same base type:
+            // `int a, b, c;`. Each tail name parses its own array
+            // suffixes and contributes its own field entry. Fixture
+            // 3612.
+            while matches!(self.peek().kind, TokenKind::Comma) {
+                self.bump();
+                let tail_name_tok = self.bump();
+                let TokenKind::Ident(tail_name) = tail_name_tok.kind else {
+                    return Err(ParseError::NotAnIdent { offset: tail_name_tok.span.start });
+                };
+                let mut tail_array_lens: Vec<u32> = Vec::new();
+                while matches!(self.peek().kind, TokenKind::LBracket) {
+                    self.bump();
+                    let size_tok = self.bump();
+                    let TokenKind::IntLit(len) = size_tok.kind else {
+                        return Err(ParseError::Unexpected {
+                            expected: "array size (integer literal)".to_owned(),
+                            found: size_tok.kind.describe().to_owned(),
+                            offset: size_tok.span.start,
+                        });
+                    };
+                    self.expect(&TokenKind::RBracket)?;
+                    tail_array_lens.push(len);
+                }
+                let mut tail_ty = ty.clone();
+                for len in tail_array_lens.into_iter().rev() {
+                    tail_ty = Type::Array { elem: Box::new(tail_ty), len };
+                }
+                let tail_size = tail_ty.size_bytes();
+                let tail_offset = if is_union { 0 } else { struct_offset };
+                fields.push(StructField {
+                    name: tail_name, ty: tail_ty, offset: tail_offset, bitfield: None,
+                });
+                if is_union {
+                    if tail_size > union_max { union_max = tail_size; }
+                } else {
+                    struct_offset += tail_size;
+                }
+            }
+            self.expect(&TokenKind::Semicolon)?;
         }
         self.expect(&TokenKind::RBrace)?;
         // Struct size is the raw sum of field sizes (no inter-field
