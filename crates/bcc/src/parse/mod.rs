@@ -2457,18 +2457,31 @@ impl Parser {
         }
         self.expect(&TokenKind::RParen)?;
         // Pointer-to-array shape: `( * name ) [ N ] [ M ] ...`.
-        // For codegen purposes we treat this as a flat pointer to the
-        // base element type — `(*p)[K]` then resolves the same way as
-        // `p[K]`. Fixture 2329.
+        // Capture the inner dims as a chained `Array{N, ...}` inside
+        // the resulting `Pointer(...)`, so codegen sees the true
+        // element stride for `(*p)[K]`. Fixtures 2329, 2493.
         if matches!(self.peek().kind, TokenKind::LBracket) {
+            let mut dims: Vec<u32> = Vec::new();
             while matches!(self.peek().kind, TokenKind::LBracket) {
                 self.bump();
+                // Capture a leading integer literal as the dim size;
+                // fall back to 1 if absent. Skip remaining tokens up
+                // to `]`.
+                let mut dim: u32 = 1;
+                if let TokenKind::IntLit(n) = self.peek().kind {
+                    dim = u32::try_from(n).unwrap_or(1);
+                }
                 while !matches!(self.peek().kind, TokenKind::RBracket | TokenKind::Eof) {
                     self.bump();
                 }
                 self.expect(&TokenKind::RBracket)?;
+                dims.push(dim);
             }
-            return Ok((name, Type::Pointer(Box::new(Type::Int))));
+            let mut ty = Type::Int;
+            for dim in dims.into_iter().rev() {
+                ty = Type::Array { len: dim, elem: Box::new(ty) };
+            }
+            return Ok((name, Type::Pointer(Box::new(ty))));
         }
         self.expect(&TokenKind::LParen)?;
         // Skip the parameter list. We don't record the signature, so

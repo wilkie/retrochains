@@ -11855,6 +11855,7 @@ impl<'a> FunctionEmitter<'a> {
         // pointer-to-array type to a flat pointer. Fixture 2329.
         let mut indices: Vec<&Expr> = vec![index];
         let mut cur = array;
+        let mut was_dereffed = false;
         let array_name = loop {
             match &cur.kind {
                 ExprKind::ArrayIndex { array: inner, index: inner_ix } => {
@@ -11864,6 +11865,7 @@ impl<'a> FunctionEmitter<'a> {
                 ExprKind::Ident(name) => break name.as_str(),
                 ExprKind::Deref(inner) if matches!(&inner.kind, ExprKind::Ident(_)) => {
                     let ExprKind::Ident(name) = &inner.kind else { unreachable!() };
+                    was_dereffed = true;
                     break name.as_str();
                 }
                 _ => panic!(
@@ -12099,7 +12101,22 @@ impl<'a> FunctionEmitter<'a> {
         // → `mov al, byte ptr [si] / cbw`. Only handled at depth 1.
         if let Some(pointee) = ty.pointee() {
             if indices.len() == 1 {
-                return self.emit_pointer_index_to_ax(array_name, pointee.clone(), indices[0]);
+                // `(*p)[K]` for `T (*p)[N]`: pointee is `Array{N, T}`,
+                // but the deref decays the array to a pointer, so the
+                // stride should be `sizeof(T)`, not `sizeof(Array)`.
+                // Fixtures 2493, 2686.
+                let effective_pointee = if was_dereffed
+                    && let Some(elem) = pointee.array_elem()
+                {
+                    elem.clone()
+                } else {
+                    pointee.clone()
+                };
+                return self.emit_pointer_index_to_ax(
+                    array_name,
+                    effective_pointee,
+                    indices[0],
+                );
             }
             // `pp[i][j]` for char ** / int ** etc. with constant
             // indices: load `*pp[i]` into BX (the first-level ptr),
@@ -21401,6 +21418,25 @@ impl<'a> FunctionEmitter<'a> {
                     let stride = i32::from(pointee.size_bytes());
                     let off = (k as i32).wrapping_mul(stride);
                     let off16 = i16::try_from(off).unwrap_or(i16::MAX);
+                    return OperandSource::DerefRegOffset { reg, offset: off16 };
+                }
+                // `(*<reg-ptr>)[K]` — single-level access via an
+                // explicit-deref pointer-to-array. The Deref folds
+                // to array-to-pointer-decay (no actual memory
+                // read), so the result is `[<reg>+K*elem_stride]`.
+                // Fixture 2493 (`(*row)[i]` for `int (*row)[3]`).
+                if let ExprKind::Deref(inner) = &array.kind
+                    && let ExprKind::Ident(ptr_name) = &inner.kind
+                    && self.locals.has(ptr_name)
+                    && let Some(pointee) = self.locals.type_of(ptr_name).pointee()
+                    && let Some(elem) = pointee.array_elem()
+                    && let LocalLocation::Reg(reg) =
+                        self.locals.location_of(ptr_name)
+                    && let Some(k) = try_const_eval(index)
+                {
+                    let stride = i32::from(elem.size_bytes());
+                    let byte_off = (k as i32).wrapping_mul(stride);
+                    let off16 = i16::try_from(byte_off).unwrap_or(i16::MAX);
                     return OperandSource::DerefRegOffset { reg, offset: off16 };
                 }
                 // `<reg-or-stack-ptr-to-arr>[K_outer][K_inner]` —
