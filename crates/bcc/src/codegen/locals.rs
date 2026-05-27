@@ -1009,6 +1009,11 @@ fn direct_deref_target(e: &Expr) -> Option<String> {
             }
             None
         }
+        // `*(T *) p` — a pointer cast doesn't change the access
+        // shape, so see through it for the +2 direct-deref bonus.
+        // Fixture 3163 (`return *(char *)p` enregisters `p` into SI
+        // because the cast preserves the direct-deref shape).
+        ExprKind::Cast { operand, .. } => direct_deref_target(operand),
         _ => None,
     }
 }
