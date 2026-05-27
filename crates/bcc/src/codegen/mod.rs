@@ -10955,6 +10955,80 @@ impl<'a> FunctionEmitter<'a> {
             }
             return;
         }
+        // `*((<ptr-cast>)&<lvalue>)` — pure-type cast of an address.
+        // Equivalent to reading the underlying lvalue but typed as
+        // the cast's pointee. We honor the cast's WIDTH (byte for
+        // char* casts, word otherwise) and skip the address load
+        // entirely. Fixture 2430 (`*(char *)&i`). No `cbw` for
+        // char-cast: BCC stores AL straight into a char target,
+        // matching the observed shape.
+        if let ExprKind::Cast { ty: cast_ty, operand: inner } = &ptr.kind
+            && let crate::ast::Type::Pointer(cast_pointee) = cast_ty
+            && let ExprKind::AddressOf(sym) = &inner.kind
+        {
+            let cast_pointee = (**cast_pointee).clone();
+            if self.locals.has(sym)
+                && let LocalLocation::Stack(off) = self.locals.location_of(sym)
+            {
+                if cast_pointee.is_char_like() {
+                    let _ = write!(
+                        self.out,
+                        "\tmov\tal,byte ptr {}\r\n",
+                        bp_addr(off),
+                    );
+                } else {
+                    let _ = write!(
+                        self.out,
+                        "\tmov\tax,word ptr {}\r\n",
+                        bp_addr(off),
+                    );
+                }
+                return;
+            }
+        }
+        // `*(p + i + j)` for a pointer p and two var offsets: load i,
+        // scale, add to p in BX, then add j*stride to BX in place,
+        // then read through BX. Mirrors BCC's actual sequence (no
+        // intermediate AX save). Fixture 3468.
+        if let ExprKind::BinOp { op: BinOp::Add, left: outer_l, right: outer_r } = &ptr.kind
+            && let ExprKind::BinOp { op: BinOp::Add, left: inner_l, right: inner_r } = &outer_l.kind
+            && let ExprKind::Ident(name) = &inner_l.kind
+            && self.locals.has(name)
+            && let Some(pointee) = self.locals.type_of(name).pointee()
+        {
+            let pointee = pointee.clone();
+            let stride = u32::from(pointee.size_bytes());
+            if stride == 1 || stride == 2 {
+                // First half: emit i scaled into AX, then load p into
+                // BX and add AX.
+                self.emit_expr_to_ax(inner_r);
+                if stride == 2 {
+                    self.out.extend_from_slice(b"\tshl\tax,1\r\n");
+                }
+                match self.locals.location_of(name) {
+                    LocalLocation::Stack(off) => {
+                        let _ = write!(self.out, "\tmov\tbx,word ptr {}\r\n", bp_addr(off));
+                    }
+                    LocalLocation::Reg(reg) => {
+                        let _ = write!(self.out, "\tmov\tbx,{}\r\n", reg.name());
+                    }
+                }
+                self.out.extend_from_slice(b"\tadd\tbx,ax\r\n");
+                // Second half: j scaled into AX, then add to BX.
+                self.emit_expr_to_ax(outer_r);
+                if stride == 2 {
+                    self.out.extend_from_slice(b"\tshl\tax,1\r\n");
+                }
+                self.out.extend_from_slice(b"\tadd\tbx,ax\r\n");
+                if pointee.is_char_like() {
+                    self.out.extend_from_slice(b"\tmov\tal,byte ptr [bx]\r\n");
+                    self.emit_widen_al(&pointee);
+                } else {
+                    self.out.extend_from_slice(b"\tmov\tax,word ptr [bx]\r\n");
+                }
+                return;
+            }
+        }
         // `*(p + offset)` shapes go through a shared helper that
         // builds the addressing mode.
         if let ExprKind::BinOp { op: BinOp::Add, left, right } = &ptr.kind
