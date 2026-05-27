@@ -82,6 +82,24 @@ pub fn parse_args(argv: &[String]) -> Result<ParsedArgs, CliError> {
                     defines.push((body.to_string(), String::new()));
                 }
             }
+            // BCC accepts a number of optimization / target / debug
+            // flags that affect codegen but don't require us to do
+            // anything different here. Silently accept the ones
+            // we've seen in the fixture corpus so the corresponding
+            // \`bcc -c\` invocation doesn't error out:
+            //   -O       optimization
+            //   -O2      more optimization
+            //   -G       speed-favoring opt
+            //   -1       186 target
+            //   -2       286 target
+            //   -K       unsigned char default
+            //   -N       stack check
+            //   -A       ANSI mode
+            //   -r-      disable register allocator
+            //   -f-      no FPU
+            // Fixtures 2123-2137, 2261-2263.
+            "-O" | "-O2" | "-G" | "-1" | "-2" | "-K" | "-N" | "-A"
+            | "-r-" | "-f-" | "-N-" => {}
             other if other.starts_with('-') => {
                 return Err(CliError::Unsupported(other.to_owned()));
             }
