@@ -582,12 +582,15 @@ impl Locals {
         }
         // 8086 only allows BX/BP/SI/DI as base registers in indirect
         // memory operands — DX and CX can't carry a pointer that the
-        // body will dereference. Skip those slots when the eligible
-        // is a pointer type that will be dereffed; the pointer stays
-        // on the stack instead. Other eligibles consume the
-        // skipped slot normally. Fixture 3512 (`int *p, *a, *b, c`
-        // with all three pointers dereffed — b can't take DX).
-        let pointer_safe_regs: [Reg; 3] = [Reg::Si, Reg::Di, Reg::Bx];
+        // body will dereference. BCC further caps pointer
+        // enregistration at SI+DI in practice; BX is reserved as a
+        // scratch for indexed addressing and isn't claimed for
+        // pointer-resident storage. The pool walker skips DX/CX/BX
+        // for pointer-typed eligibles; they fall to stack-resident
+        // instead. Other eligibles consume those slots normally.
+        // Fixtures 3512 (3 pointer params + 1 int param — `b` stays
+        // on stack rather than landing in BX).
+        let pointer_safe_regs: [Reg; 2] = [Reg::Si, Reg::Di];
         let mut non_si_iter = non_si_pool.iter().copied().peekable();
         for &i in &ordered_eligibles {
             if Some(i) == si_pick {
