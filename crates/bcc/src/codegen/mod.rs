@@ -14216,6 +14216,88 @@ impl<'a> FunctionEmitter<'a> {
             }
             return;
         }
+        // `<ptr>->...-><field>` rvalue — chain of Arrows with optional
+        // Dot offsets between. Each Arrow corresponds to a deref step.
+        // Walk down to the Ident root, accumulating per-step offsets,
+        // then emit `mov bx, <root>; mov bx, [bx+...]; ...; mov ax,
+        // [bx+leaf]`. Fixture 3448 (`o->m.p->c`).
+        if matches!(kind, crate::ast::MemberKind::Arrow)
+            && let Some((root_name, mut steps, leaf_off, field_ty)) =
+                multi_arrow_chain(base, field, |n| self.ident_pointee(n))
+        {
+            let field_ty_clone = field_ty.clone();
+            // The first deref step can read straight through the
+            // root's register-resident pointer (e.g. `mov bx,
+            // [si+off]`), saving an explicit `mov bx, <reg>`. For a
+            // stack-resident pointer we still need to land the
+            // pointer in BX first since there's no `[<bp+disp>+off]`
+            // double-disp form usable here.
+            let mut first_step = true;
+            for step_off in steps.drain(..) {
+                if first_step {
+                    first_step = false;
+                    let addr_reg = match self.locals.location_of(&root_name) {
+                        LocalLocation::Reg(reg) => reg.name().to_owned(),
+                        LocalLocation::Stack(off) => {
+                            let _ = write!(
+                                self.out,
+                                "\tmov\tbx,word ptr {}\r\n",
+                                bp_addr(off),
+                            );
+                            "bx".to_owned()
+                        }
+                    };
+                    let addr = if step_off == 0 {
+                        format!("[{addr_reg}]")
+                    } else if step_off > 0 {
+                        format!("[{addr_reg}+{step_off}]")
+                    } else {
+                        format!("[{addr_reg}{step_off}]")
+                    };
+                    let _ = write!(self.out, "\tmov\tbx,word ptr {addr}\r\n");
+                    continue;
+                }
+                let addr = if step_off == 0 {
+                    "[bx]".to_owned()
+                } else if step_off > 0 {
+                    format!("[bx+{step_off}]")
+                } else {
+                    format!("[bx{step_off}]")
+                };
+                let _ = write!(self.out, "\tmov\tbx,word ptr {addr}\r\n");
+            }
+            // If no steps were emitted (root is a direct-deref
+            // shape — shouldn't happen for a multi-arrow chain but
+            // guard anyway), land the root in BX first.
+            if first_step {
+                match self.locals.location_of(&root_name) {
+                    LocalLocation::Reg(reg) => {
+                        let _ = write!(self.out, "\tmov\tbx,{}\r\n", reg.name());
+                    }
+                    LocalLocation::Stack(off) => {
+                        let _ = write!(
+                            self.out,
+                            "\tmov\tbx,word ptr {}\r\n",
+                            bp_addr(off),
+                        );
+                    }
+                };
+            }
+            let bx_disp = if leaf_off == 0 {
+                "[bx]".to_owned()
+            } else if leaf_off > 0 {
+                format!("[bx+{leaf_off}]")
+            } else {
+                format!("[bx{leaf_off}]")
+            };
+            if field_ty_clone.is_char_like() {
+                let _ = write!(self.out, "\tmov\tal,byte ptr {bx_disp}\r\n");
+                self.emit_widen_al(&field_ty_clone);
+            } else {
+                let _ = write!(self.out, "\tmov\tax,word ptr {bx_disp}\r\n");
+            }
+            return;
+        }
         // Arrow path (or Dot whose base isn't a const-chain lvalue):
         // base must be a bare Ident referring to a pointer.
         let ExprKind::Ident(name) = &base.kind else {
@@ -20811,6 +20893,93 @@ fn ptr_width(ty: &Type) -> &'static str {
 
 fn is_reg16_name(s: &str) -> bool {
     matches!(s, "ax" | "bx" | "cx" | "dx" | "si" | "di" | "bp" | "sp")
+}
+
+/// Walk a Member chain rooted at an Ident pointer (multiple arrow
+/// derefs allowed), producing the sequence of intermediate deref
+/// offsets (each one becomes a `mov bx, [bx+disp]`) and the final
+/// field offset + leaf type for the trailing read. Returns `None`
+/// if the chain doesn't bottom out at an Ident-rooted Arrow.
+/// Fixture 3448 (`o->m.p->c`).
+fn multi_arrow_chain(
+    base: &Expr,
+    field: &str,
+    ident_pointee: impl Fn(&str) -> Option<Type>,
+) -> Option<(String, Vec<i32>, i32, Type)> {
+    // Group the path into "deref groups". The outer Arrow's field
+    // (and any Dots that follow the same arrow's deref) belongs to
+    // the leaf read. Every Dot encountered before the next inner
+    // Arrow accumulates into THAT arrow's step (because those Dots
+    // apply to the inner Arrow's deref result before the outer
+    // Arrow's deref happens).
+    //
+    // Example: `o->m.p->c`
+    //   Outer Arrow field = "c" → leaf group = ["c"]
+    //   Walk inward through Dot.p → push "p" into the NEXT (deeper)
+    //   group. Walk into Arrow{o, "m"}: that arrow's own field "m"
+    //   joins the current pending group → [["p","m"]] (root step).
+    //
+    // groups_outer_first = [["c"], ["p","m"]], root = o.
+    let mut groups_outer_first: Vec<Vec<&str>> = vec![vec![field]];
+    let mut pending: Vec<&str> = Vec::new();
+    let mut cur = base;
+    let root_name: String;
+    loop {
+        match &cur.kind {
+            ExprKind::Member { base: inner, field: f, kind } => match kind {
+                crate::ast::MemberKind::Dot => {
+                    // Dot fields encountered between arrows belong
+                    // to the NEXT (inner) arrow's deref-step.
+                    pending.push(f.as_str());
+                    cur = inner;
+                }
+                crate::ast::MemberKind::Arrow => {
+                    // This arrow closes off a deref step. Its own
+                    // field joins the pending dots.
+                    let mut step = std::mem::take(&mut pending);
+                    step.push(f.as_str());
+                    groups_outer_first.push(step);
+                    if let ExprKind::Ident(name) = &inner.kind {
+                        root_name = name.clone();
+                        break;
+                    }
+                    cur = inner;
+                }
+            },
+            _ => return None,
+        }
+    }
+    let root_pointee = ident_pointee(&root_name)?;
+    // Process groups in reverse (innermost first → that's the one
+    // closest to the root).
+    let mut step_offsets: Vec<i32> = Vec::new();
+    let mut ty: Type = root_pointee;
+    let mut leaf_off: i32 = 0;
+    let mut leaf_ty: Type = Type::Int;
+    for (idx, group) in groups_outer_first.iter().enumerate().rev() {
+        // Within a group, the inner Dot/Arrow field is at the end
+        // of the vec (we pushed outer-first). Walk in reverse (inner
+        // first) to apply the field accesses to `ty`.
+        let mut off: i32 = 0;
+        for df in group.iter().rev() {
+            let (f_off, f_ty) = ty.field(df)?;
+            off = off.checked_add(i32::from(f_off))?;
+            ty = f_ty;
+        }
+        if idx == 0 {
+            // Outermost group — the trailing field read.
+            leaf_off = off;
+            leaf_ty = ty.clone();
+        } else {
+            // Inner group — its accumulated offset becomes the
+            // deref step. The pointer-typed result is the base of
+            // the next outer group.
+            step_offsets.push(off);
+            let pointee = ty.pointee()?.clone();
+            ty = pointee;
+        }
+    }
+    Some((root_name, step_offsets, leaf_off, leaf_ty))
 }
 
 /// Walk a deref expression chain (`*p` → `(p, 0)`, `**p` → `(p, 1)`,
