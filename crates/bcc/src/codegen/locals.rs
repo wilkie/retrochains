@@ -108,6 +108,12 @@ impl Reg {
     /// don't land in a reg the multiplier writes. Fixture 1369
     /// (`s += i * j` — s should go to BX, not DX).
     const NON_SI_POOL_NO_DX: [Self; 3] = [Self::Di, Self::Bx, Self::Cx];
+    /// Variant when the function emits both `imul` AND uses BX as
+    /// the indexed-address scratch (multi-dim array indexing,
+    /// pointer-arithmetic store, etc.). Both DX and BX are
+    /// clobbered across the body; only DI/CX remain. Fixture 1700
+    /// (`a[i][j]` with stride 6 → imul + BX scratch).
+    const NON_SI_POOL_NO_DX_NO_BX: [Self; 2] = [Self::Di, Self::Cx];
     /// Variant when exactly 5 ints are eligible (perfect fit in
     /// 5 registers, no spill). Empirical from fixtures 1850, 1979.
     /// The 6+ "spill" case keeps the standard NON_SI_POOL order.
@@ -554,8 +560,18 @@ impl Locals {
                     counts.get(&declared[i].name).copied().unwrap_or(0) != first_count
                 })
             };
+        // 2D array indexing (or any access that needs an `imul` to
+        // scale the outer stride) uses BX as scratch for the address
+        // computation. When that happens, ints in BX have to be
+        // pushed/popped around each access — BCC just avoids the
+        // pool slot. Fixture 1700 (`a[i][j]` with stride 6).
+        let function_has_2d_array_index = body_has_2d_array_index(
+            function.body.as_deref().unwrap_or(&[]),
+        );
         let non_si_pool: &[Reg] = if function_makes_call {
             &Reg::NON_SI_POOL_WITH_CALL
+        } else if function_has_2d_array_index {
+            &Reg::NON_SI_POOL_NO_DX_NO_BX
         } else if function_has_imul_now {
             &Reg::NON_SI_POOL_NO_DX
         } else if eligible_uses_vary {
@@ -571,9 +587,11 @@ impl Locals {
         // Fixtures 1980 (call → DI), 1700 (imul → CX/DI/BX choose
         // by count).
         let mut ordered_eligibles: Vec<usize> = eligible_int.to_vec();
-        if function_makes_call || function_has_imul_now {
+        if function_makes_call || function_has_imul_now || function_has_2d_array_index {
             // Stable sort by use count descending (ties keep source
-            // order).
+            // order). Extending the sort to 2D-array-index functions
+            // matches BCC's behaviour in fixture 1700 (`sum += a[i]
+            // [j]`): j (5 uses) takes DI ahead of sum (4 uses).
             ordered_eligibles.sort_by(|&a, &b| {
                 let ca = counts.get(&declared[a].name).copied().unwrap_or(0);
                 let cb = counts.get(&declared[b].name).copied().unwrap_or(0);
@@ -2200,6 +2218,116 @@ fn expr_has_char_array_index(name: &str, e: &Expr, char_arrays: &HashSet<String>
 /// emits a `imul` that clobbers DX. Used by the char-pool decision.
 fn body_emits_imul(body: &[Stmt], char_locals: &HashSet<&str>) -> bool {
     body.iter().any(|s| stmt_emits_imul(s, char_locals))
+}
+
+/// True iff the function body contains a 2D ArrayIndex expression
+/// (`a[i][j]` where the outer `a[i]` itself yields an array element).
+/// Used by the int-pool selector to drop BX when 2D indexing will
+/// clobber BX as its address scratch. The check is a structural
+/// "ArrayIndex of ArrayIndex" — the actual stride doesn't matter
+/// because BCC always uses BX as the indexed-address register.
+fn body_has_2d_array_index(body: &[Stmt]) -> bool {
+    body.iter().any(stmt_has_2d_array_index)
+}
+
+fn stmt_has_2d_array_index(stmt: &Stmt) -> bool {
+    match &stmt.kind {
+        StmtKind::Return(value) => value.as_ref().is_some_and(expr_has_2d_array_index),
+        StmtKind::Declare { init, .. } => init.as_ref().is_some_and(expr_has_2d_array_index),
+        StmtKind::Assign { value, .. }
+        | StmtKind::CompoundAssign { value, .. } => expr_has_2d_array_index(value),
+        StmtKind::If { cond, then_branch, else_branch } => {
+            expr_has_2d_array_index(cond)
+                || then_branch.iter().any(stmt_has_2d_array_index)
+                || else_branch
+                    .as_ref()
+                    .is_some_and(|e| e.iter().any(stmt_has_2d_array_index))
+        }
+        StmtKind::While { cond, body } | StmtKind::DoWhile { body, cond } => {
+            expr_has_2d_array_index(cond) || body.iter().any(stmt_has_2d_array_index)
+        }
+        StmtKind::For { init, cond, step, body } => {
+            init.as_ref()
+                .is_some_and(|e| e.iter().any(expr_has_2d_array_index))
+                || cond.as_ref().is_some_and(expr_has_2d_array_index)
+                || step
+                    .as_ref()
+                    .is_some_and(|e| e.iter().any(expr_has_2d_array_index))
+                || body.iter().any(stmt_has_2d_array_index)
+        }
+        StmtKind::Switch { scrutinee, cases } => {
+            expr_has_2d_array_index(scrutinee)
+                || cases
+                    .iter()
+                    .any(|c| c.body.iter().any(stmt_has_2d_array_index))
+        }
+        StmtKind::ArrayAssign { indices, value, .. }
+        | StmtKind::ArrayCompoundAssign { indices, value, .. } => {
+            indices.len() >= 2
+                || indices.iter().any(expr_has_2d_array_index)
+                || expr_has_2d_array_index(value)
+        }
+        StmtKind::MemberArrayAssign { indices, value, .. } => {
+            indices.len() >= 2
+                || indices.iter().any(expr_has_2d_array_index)
+                || expr_has_2d_array_index(value)
+        }
+        StmtKind::DerefAssign { target, value }
+        | StmtKind::DerefCompoundAssign { target, value, .. } => {
+            expr_has_2d_array_index(target) || expr_has_2d_array_index(value)
+        }
+        StmtKind::MemberAssign { base, value, .. }
+        | StmtKind::MemberCompoundAssign { base, value, .. } => {
+            expr_has_2d_array_index(base) || expr_has_2d_array_index(value)
+        }
+        StmtKind::ExprStmt(e) => expr_has_2d_array_index(e),
+        StmtKind::Block(body) => body.iter().any(stmt_has_2d_array_index),
+        StmtKind::Break
+        | StmtKind::Continue
+        | StmtKind::Goto { .. }
+        | StmtKind::Label { .. }
+        | StmtKind::Empty => false,
+    }
+}
+
+fn expr_has_2d_array_index(e: &Expr) -> bool {
+    match &e.kind {
+        ExprKind::ArrayIndex { array, index } => {
+            matches!(array.kind, ExprKind::ArrayIndex { .. })
+                || expr_has_2d_array_index(array)
+                || expr_has_2d_array_index(index)
+        }
+        ExprKind::BinOp { left, right, .. } | ExprKind::Logical { left, right, .. } => {
+            expr_has_2d_array_index(left) || expr_has_2d_array_index(right)
+        }
+        ExprKind::Unary { operand, .. } | ExprKind::Deref(operand) => {
+            expr_has_2d_array_index(operand)
+        }
+        ExprKind::Update { .. } => false,
+        ExprKind::AssignExpr { value, .. } => expr_has_2d_array_index(value),
+        ExprKind::CompoundAssignExpr { value, .. } => expr_has_2d_array_index(value),
+        ExprKind::Call { args, .. } => args.iter().any(expr_has_2d_array_index),
+        ExprKind::Member { base, .. } => expr_has_2d_array_index(base),
+        ExprKind::Ternary { cond, then_value, else_value } => {
+            expr_has_2d_array_index(cond)
+                || expr_has_2d_array_index(then_value)
+                || expr_has_2d_array_index(else_value)
+        }
+        ExprKind::Cast { operand, .. } => expr_has_2d_array_index(operand),
+        ExprKind::InitList { items } => items.iter().any(expr_has_2d_array_index),
+        ExprKind::Comma { left, right } => {
+            expr_has_2d_array_index(left) || expr_has_2d_array_index(right)
+        }
+        ExprKind::UpdateLvalue { target, .. } => expr_has_2d_array_index(target),
+        ExprKind::Ident(_)
+        | ExprKind::IntLit(_)
+        | ExprKind::FloatLit(_)
+        | ExprKind::DoubleLit(_)
+        | ExprKind::AddressOf(_)
+        | ExprKind::AddressOfArrayElem { .. }
+        | ExprKind::AddressOfArrayElemVar { .. }
+        | ExprKind::StringLit(_) => false,
+    }
 }
 
 fn stmt_emits_imul(stmt: &Stmt, char_locals: &HashSet<&str>) -> bool {
