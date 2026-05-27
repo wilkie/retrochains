@@ -2449,6 +2449,12 @@ fn parse_add(operands: &str, line_no: usize) -> AsmResult<Instr> {
         if let Some(disp) = parse_word_di_disp(rhs) {
             return Ok(Instr::AddAxDiDisp { disp });
         }
+        if let Some(disp) = parse_word_bx_disp(rhs)
+            && let Ok(disp8) = i8::try_from(disp)
+            && disp8 != 0
+        {
+            return Ok(Instr::AddAxBxDisp { disp: disp8 });
+        }
         if let Some(offset) = parse_bp_relative(rhs) {
             return Ok(Instr::AddAxBpRel { offset });
         }

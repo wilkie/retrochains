@@ -647,6 +647,7 @@ fn instr_size(instr: &Instr) -> usize {
         | Instr::AddReg16FromSiPtr { .. } => 2,
         Instr::AddAxSiDisp { .. }
         | Instr::AddAxDiDisp { .. }
+        | Instr::AddAxBxDisp { .. }
         | Instr::SubAxSiDisp { .. }
         | Instr::SubAxDiDisp { .. }
         | Instr::AddReg16SiDisp { .. }
@@ -1061,6 +1062,13 @@ fn emit_instr(
         Instr::AddAxDiDisp { disp } => {
             out.push(0x03);
             out.push(0x45);
+            out.push(*disp as u8);
+        }
+        Instr::AddAxBxDisp { disp } => {
+            // `add ax,word ptr [bx+disp8]` → 03 47 dd. ModR/M 47 =
+            // mod=01 reg=AX r/m=111 ([bx]+disp8). Fixture 2208.
+            out.push(0x03);
+            out.push(0x47);
             out.push(*disp as u8);
         }
         Instr::AddReg16SiDisp { reg, disp } => {

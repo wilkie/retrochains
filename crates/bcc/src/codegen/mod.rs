@@ -21424,6 +21424,63 @@ impl<'a> FunctionEmitter<'a> {
                 panic!("string literal as right operand of a binary op not yet supported (no fixture)")
             }
             ExprKind::Member { base, field, kind: crate::ast::MemberKind::Dot } => {
+                // `<reg-ptr>[var_idx].<field>` as RHS: scale the
+                // index into DX (preserving AX), then `bx = ptr +
+                // dx` and return `[bx + field_off]`. BCC's pattern
+                // for fixture 2208 (`pts[i].x + pts[i].y` for
+                // `struct P *pts`).
+                if let ExprKind::ArrayIndex {
+                    array: outer_arr, index: outer_idx,
+                } = &base.kind
+                    && let ExprKind::Ident(arr_name) = &outer_arr.kind
+                    && self.locals.has(arr_name)
+                    && let Some(pointee) = self.locals.type_of(arr_name).pointee()
+                    && let Some((field_off, _ft)) = pointee.field(field)
+                    && let LocalLocation::Reg(ptr_reg) =
+                        self.locals.location_of(arr_name)
+                    && !ptr_reg.is_byte()
+                    && try_const_eval(outer_idx).is_none()
+                {
+                    let elem_stride = pointee.size_bytes();
+                    let log2 = match elem_stride {
+                        2 => 1,
+                        4 => 2,
+                        8 => 3,
+                        16 => 4,
+                        _ => 0,
+                    };
+                    let pow2_stride = (1u16 << log2) == elem_stride;
+                    if pow2_stride && log2 > 0 {
+                        let loaded = if let ExprKind::Ident(idx_name) = &outer_idx.kind
+                            && self.locals.has(idx_name)
+                            && let LocalLocation::Reg(reg) =
+                                self.locals.location_of(idx_name)
+                            && !reg.is_byte()
+                        {
+                            let _ = write!(self.out, "\tmov\tdx,{}\r\n", reg.name());
+                            true
+                        } else if let Some(idx_addr) = self.int_lvalue_addr(outer_idx) {
+                            let _ = write!(
+                                self.out,
+                                "\tmov\tdx,word ptr {idx_addr}\r\n",
+                            );
+                            true
+                        } else {
+                            false
+                        };
+                        if loaded {
+                            for _ in 0..log2 {
+                                self.out.extend_from_slice(b"\tshl\tdx,1\r\n");
+                            }
+                            let _ = write!(self.out, "\tmov\tbx,{}\r\n", ptr_reg.name());
+                            self.out.extend_from_slice(b"\tadd\tbx,dx\r\n");
+                            return OperandSource::DerefRegOffset {
+                                reg: crate::codegen::locals::Reg::Bx,
+                                offset: field_off as i16,
+                            };
+                        }
+                    }
+                }
                 // `<stack-arr-of-struct>[var_idx].<field>` as RHS:
                 // emit a per-use BX setup (scale index, add base
                 // address with field offset, deref BX). The cost is

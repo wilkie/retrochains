@@ -432,6 +432,11 @@ pub enum Instr {
     /// `add ax,word ptr [di+disp8]` — `03 45 dd`. DI sibling of
     /// `AddAxSiDisp`.
     AddAxDiDisp { disp: i8 },
+    /// `add ax,word ptr [bx+disp8]` — `03 47 dd`. ModR/M 47 =
+    /// mod=01 reg=AX r/m=111 ([bx]+disp8). BX sibling of
+    /// `AddAxSiDisp`, used for `<reg-ptr>[i].<field>` RHS where the
+    /// pointer was loaded into BX. Fixture 2208.
+    AddAxBxDisp { disp: i8 },
     /// `add <reg16>,word ptr [si+disp8]` — `03 (mod=01 reg=<r>
     /// r/m=100) dd`. Generic dst-reg sibling of `AddAxSiDisp`,
     /// used by compound `<reg> += <ptr>-><field>` for register-
