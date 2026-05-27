@@ -19015,11 +19015,15 @@ impl<'a> FunctionEmitter<'a> {
             }
             ExprKind::AddressOfArrayElemVar { array, index, elem_size } => {
                 // `&<arr>[<var>]` — evaluate the index into AX,
-                // scale by elem_size, then add the array's offset.
-                // For a global array: `add ax, offset DGROUP:_arr`.
-                // For a stack array: `lea bx, [bp-N]; add ax, bx`
-                // (lea uses BX so AX-with-index survives).
-                // Fixture 3249, 3645.
+                // scale by elem_size, then add the array's base.
+                // Three sub-shapes:
+                //   - global array: `add ax, offset DGROUP:_arr`.
+                //   - stack array:  `lea bx, [bp-N]; add ax, bx`.
+                //   - stack pointer (param): push the scaled
+                //     index, load the pointer, pop the index into
+                //     DX, then add. Matches BCC's push/pop dance
+                //     in fixture 2978.
+                // Fixtures 3249, 3645, 2884, 2978.
                 self.emit_expr_to_ax(index);
                 let stride = u32::from(*elem_size);
                 for _ in 0..stride.trailing_zeros() {
@@ -19031,8 +19035,16 @@ impl<'a> FunctionEmitter<'a> {
                         "\tadd\tax,offset DGROUP:_{array}\r\n",
                     );
                 } else if let LocalLocation::Stack(off) = self.locals.location_of(array) {
-                    let _ = write!(self.out, "\tlea\tbx,word ptr {}\r\n", bp_addr(off));
-                    self.out.extend_from_slice(b"\tadd\tax,bx\r\n");
+                    let arr_ty = self.locals.type_of(array);
+                    if matches!(arr_ty, Type::Pointer(_)) {
+                        self.out.extend_from_slice(b"\tpush\tax\r\n");
+                        let _ = write!(self.out, "\tmov\tax,word ptr {}\r\n", bp_addr(off));
+                        self.out.extend_from_slice(b"\tpop\tdx\r\n");
+                        self.out.extend_from_slice(b"\tadd\tax,dx\r\n");
+                    } else {
+                        let _ = write!(self.out, "\tlea\tbx,word ptr {}\r\n", bp_addr(off));
+                        self.out.extend_from_slice(b"\tadd\tax,bx\r\n");
+                    }
                 } else {
                     unreachable!("array `{array}` should be stack-resident");
                 }
