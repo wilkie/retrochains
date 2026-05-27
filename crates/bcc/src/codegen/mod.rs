@@ -13056,6 +13056,26 @@ impl<'a> FunctionEmitter<'a> {
                     );
                     return;
                 }
+                // String-literal RHS: fold to `mov word ptr [bp-N],
+                // offset DGROUP:s@+K` (single immediate-to-mem store
+                // with relocation). Fixture 1710 (`strs[0] = "AB"`).
+                if let ExprKind::StringLit(bytes) = &value.kind {
+                    let str_off = self
+                        .strings
+                        .offset_for_span(value.span.start)
+                        .unwrap_or_else(|| self.strings.intern(bytes));
+                    let s_suffix = if str_off == 0 {
+                        String::new()
+                    } else {
+                        format!("+{str_off}")
+                    };
+                    let _ = write!(
+                        self.out,
+                        "\tmov\tword ptr {},offset DGROUP:s@{s_suffix}\r\n",
+                        bp_addr(off),
+                    );
+                    return;
+                }
                 self.emit_expr_to_ax(value);
                 let _ = write!(self.out, "\tmov\tword ptr {},ax\r\n", bp_addr(off));
                 return;
