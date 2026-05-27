@@ -3238,6 +3238,39 @@ impl Parser {
                         span,
                     };
                 }
+                // `(*pfn)(args)` — explicit-deref call through a
+                // function pointer. `*pfn` and `pfn` are equivalent
+                // when `pfn` is a function pointer, so collapse the
+                // Deref and emit a regular Call on the underlying
+                // ident. Fixture 2414.
+                TokenKind::LParen
+                    if matches!(
+                        &e.kind,
+                        ExprKind::Deref(inner)
+                            if matches!(inner.kind, ExprKind::Ident(_))
+                    ) =>
+                {
+                    let ExprKind::Deref(inner) = e.kind else { unreachable!() };
+                    let ExprKind::Ident(name) = inner.kind else { unreachable!() };
+                    self.bump();
+                    let mut args: Vec<Expr> = Vec::new();
+                    if !matches!(self.peek().kind, TokenKind::RParen) {
+                        loop {
+                            args.push(self.parse_for_clause_expr()?);
+                            if matches!(self.peek().kind, TokenKind::Comma) {
+                                self.bump();
+                            } else {
+                                break;
+                            }
+                        }
+                    }
+                    let close = self.expect(&TokenKind::RParen)?;
+                    let span = Span::new(inner.span.start, close.span.end);
+                    e = Expr {
+                        kind: ExprKind::Call { name, args },
+                        span,
+                    };
+                }
                 _ => break,
             }
         }
