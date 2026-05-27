@@ -1210,6 +1210,10 @@ fn expr_address_taken(e: &Expr, out: &mut HashSet<String>) {
             expr_address_taken(operand, out);
         }
         ExprKind::AssignExpr { value, .. } => expr_address_taken(value, out),
+        ExprKind::AssignLvalueExpr { target, value } => {
+            expr_address_taken(target, out);
+            expr_address_taken(value, out);
+        }
         ExprKind::CompoundAssignExpr { value, .. } => expr_address_taken(value, out),
         ExprKind::ArrayIndex { array, index } => {
             expr_address_taken(array, out);
@@ -1402,6 +1406,9 @@ fn body_has_int_to_float_cast(function: &Function) -> bool {
             ExprKind::Unary { operand, .. } => expr(operand, float_names),
             ExprKind::Deref(inner) => expr(inner, float_names),
             ExprKind::AssignExpr { value, .. } => expr(value, float_names),
+            ExprKind::AssignLvalueExpr { target, value } => {
+                expr(target, float_names) || expr(value, float_names)
+            }
             ExprKind::CompoundAssignExpr { value, .. } => expr(value, float_names),
             ExprKind::Call { args, .. } => args.iter().any(|a| expr(a, float_names)),
             ExprKind::ArrayIndex { array, index } => {
@@ -1553,6 +1560,9 @@ fn expr_has_call(e: &Expr) -> bool {
         }
         ExprKind::Unary { operand, .. } => expr_has_call(operand),
         ExprKind::AssignExpr { value, .. } => expr_has_call(value),
+        ExprKind::AssignLvalueExpr { target, value } => {
+            expr_has_call(target) || expr_has_call(value)
+        }
         ExprKind::CompoundAssignExpr { value, .. } => expr_has_call(value),
         ExprKind::Deref(operand) => expr_has_call(operand),
         ExprKind::ArrayIndex { array, index } => {
@@ -1710,6 +1720,9 @@ fn expr_has_div_or_mod(e: &Expr) -> bool {
             expr_has_div_or_mod(addr) || args.iter().any(expr_has_div_or_mod)
         }
         ExprKind::AssignExpr { value, .. } => expr_has_div_or_mod(value),
+        ExprKind::AssignLvalueExpr { target, value } => {
+            expr_has_div_or_mod(target) || expr_has_div_or_mod(value)
+        }
         ExprKind::CompoundAssignExpr { value, .. } => expr_has_div_or_mod(value),
         ExprKind::Deref(operand) => expr_has_div_or_mod(operand),
         ExprKind::ArrayIndex { array, index } => {
@@ -1775,6 +1788,9 @@ fn expr_mentions(name: &str, e: &Expr) -> bool {
         ExprKind::Cast { operand, .. } => expr_mentions(name, operand),
         ExprKind::Deref(operand) => expr_mentions(name, operand),
         ExprKind::AssignExpr { value, .. } => expr_mentions(name, value),
+        ExprKind::AssignLvalueExpr { target, value } => {
+            expr_mentions(name, target) || expr_mentions(name, value)
+        }
         ExprKind::CompoundAssignExpr { value, .. } => expr_mentions(name, value),
         ExprKind::Call { args, .. } => args.iter().any(|a| expr_mentions(name, a)),
         ExprKind::CallVia { addr, args } => {
@@ -1887,6 +1903,10 @@ fn expr_has_name_as_subscript(name: &str, e: &Expr) -> bool {
         | ExprKind::Cast { operand, .. }
         | ExprKind::Deref(operand) => expr_has_name_as_subscript(name, operand),
         ExprKind::AssignExpr { value, .. } => expr_has_name_as_subscript(name, value),
+        ExprKind::AssignLvalueExpr { target, value } => {
+            expr_has_name_as_subscript(name, target)
+                || expr_has_name_as_subscript(name, value)
+        }
         ExprKind::CompoundAssignExpr { value, .. } => expr_has_name_as_subscript(name, value),
         ExprKind::Call { args, .. } => args.iter().any(|a| expr_has_name_as_subscript(name, a)),
         ExprKind::CallVia { addr, args } => {
@@ -2027,6 +2047,10 @@ fn expr_indexes_char_array(name: &str, e: &Expr, ca: &HashSet<String>) -> bool {
         | ExprKind::Cast { operand, .. }
         | ExprKind::Deref(operand) => expr_indexes_char_array(name, operand, ca),
         ExprKind::AssignExpr { value, .. } => expr_indexes_char_array(name, value, ca),
+        ExprKind::AssignLvalueExpr { target, value } => {
+            expr_indexes_char_array(name, target, ca)
+                || expr_indexes_char_array(name, value, ca)
+        }
         ExprKind::CompoundAssignExpr { value, .. } => expr_indexes_char_array(name, value, ca),
         ExprKind::Call { args, .. } => args.iter().any(|a| expr_indexes_char_array(name, a, ca)),
         ExprKind::CallVia { addr, args } => {
@@ -2231,6 +2255,10 @@ fn expr_has_char_array_index(name: &str, e: &Expr, char_arrays: &HashSet<String>
         | ExprKind::Cast { operand, .. }
         | ExprKind::Deref(operand) => expr_has_char_array_index(name, operand, char_arrays),
         ExprKind::AssignExpr { value, .. } => expr_has_char_array_index(name, value, char_arrays),
+        ExprKind::AssignLvalueExpr { target, value } => {
+            expr_has_char_array_index(name, target, char_arrays)
+                || expr_has_char_array_index(name, value, char_arrays)
+        }
         ExprKind::CompoundAssignExpr { value, .. } => expr_has_char_array_index(name, value, char_arrays),
         ExprKind::Call { args, .. } => args
             .iter()
@@ -2335,6 +2363,9 @@ fn expr_has_array_index(e: &Expr) -> bool {
         }
         ExprKind::Update { .. } => false,
         ExprKind::AssignExpr { value, .. } => expr_has_array_index(value),
+        ExprKind::AssignLvalueExpr { target, value } => {
+            expr_has_array_index(target) || expr_has_array_index(value)
+        }
         ExprKind::CompoundAssignExpr { value, .. } => expr_has_array_index(value),
         ExprKind::Call { args, .. } => args.iter().any(expr_has_array_index),
         ExprKind::CallVia { addr, args } => {
@@ -2431,6 +2462,9 @@ fn expr_has_2d_array_index(e: &Expr) -> bool {
         }
         ExprKind::Update { .. } => false,
         ExprKind::AssignExpr { value, .. } => expr_has_2d_array_index(value),
+        ExprKind::AssignLvalueExpr { target, value } => {
+            expr_has_2d_array_index(target) || expr_has_2d_array_index(value)
+        }
         ExprKind::CompoundAssignExpr { value, .. } => expr_has_2d_array_index(value),
         ExprKind::Call { args, .. } => args.iter().any(expr_has_2d_array_index),
         ExprKind::CallVia { addr, args } => {
@@ -2573,6 +2607,9 @@ fn expr_emits_imul(e: &Expr) -> bool {
             expr_emits_imul(addr) || args.iter().any(expr_emits_imul)
         }
         ExprKind::AssignExpr { value, .. } => expr_emits_imul(value),
+        ExprKind::AssignLvalueExpr { target, value } => {
+            expr_emits_imul(target) || expr_emits_imul(value)
+        }
         ExprKind::CompoundAssignExpr { value, .. } => expr_emits_imul(value),
         ExprKind::Deref(operand) => expr_emits_imul(operand),
         ExprKind::ArrayIndex { array, index } => {
@@ -2937,6 +2974,10 @@ fn expr_has_direct_pointer_deref(name: &str, e: &Expr) -> bool {
         ExprKind::Unary { operand, .. } => expr_has_direct_pointer_deref(name, operand),
         ExprKind::Deref(operand) => expr_has_direct_pointer_deref(name, operand),
         ExprKind::AssignExpr { value, .. } => expr_has_direct_pointer_deref(name, value),
+        ExprKind::AssignLvalueExpr { target, value } => {
+            expr_has_direct_pointer_deref(name, target)
+                || expr_has_direct_pointer_deref(name, value)
+        }
         ExprKind::CompoundAssignExpr { value, .. } => {
             expr_has_direct_pointer_deref(name, value)
         }
@@ -3310,6 +3351,13 @@ fn count_uses_expr(e: &Expr, counts: &mut HashMap<String, u32>) {
         ExprKind::AssignExpr { target, value } => {
             // Like a statement-level Assign: LHS + RHS uses.
             *counts.entry(target.clone()).or_insert(0) += 1;
+            count_uses_expr(value, counts);
+        }
+        ExprKind::AssignLvalueExpr { target, value } => {
+            // The LHS is an arbitrary lvalue expression (e.g. `*p`,
+            // `a[i]`, `*d++`) — recurse into it the same way the
+            // matching statement-level assign would.
+            count_uses_expr(target, counts);
             count_uses_expr(value, counts);
         }
         ExprKind::CompoundAssignExpr { target, value, .. } => {

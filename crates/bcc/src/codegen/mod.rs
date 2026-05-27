@@ -16894,6 +16894,46 @@ impl<'a> FunctionEmitter<'a> {
         let _ = write!(self.out, "\t{mnemonic}\t{width} ptr {dest},{v_masked}\r\n");
     }
 
+    /// Store AX through an arbitrary lvalue, leaving AX intact for
+    /// the surrounding expression to consume. Used by the
+    /// `<lvalue> = <value>` expression form (the statement form
+    /// goes through `emit_deref_assign` / `emit_array_assign`,
+    /// which assume AX is scratch). Today only `*<reg-ptr>` /
+    /// `*<stack-ptr>` are supported — enough for the fixtures that
+    /// exercise lvalue-assign in a value context. Fixture 3333.
+    fn emit_store_ax_to_lvalue(&mut self, target: &Expr) {
+        if let ExprKind::Deref(inner) = &target.kind
+            && let ExprKind::Ident(name) = &inner.kind
+            && self.locals.has(name)
+        {
+            let ty = self.locals.type_of(name).clone();
+            let pointee = ty.pointee().expect("`*p =` needs pointer type").clone();
+            let width = if pointee.is_char_like() { "byte" } else { "word" };
+            let src = if pointee.is_char_like() { "al" } else { "ax" };
+            match self.locals.location_of(name) {
+                LocalLocation::Reg(reg) => {
+                    let _ = write!(
+                        self.out,
+                        "\tmov\t{width} ptr [{}],{src}\r\n",
+                        reg.name(),
+                    );
+                }
+                LocalLocation::Stack(off) => {
+                    let _ = write!(
+                        self.out,
+                        "\tmov\tbx,word ptr {}\r\n",
+                        bp_addr(off),
+                    );
+                    let _ = write!(self.out, "\tmov\t{width} ptr [bx],{src}\r\n");
+                }
+            }
+            return;
+        }
+        panic!(
+            "emit_store_ax_to_lvalue: target shape not supported yet (no fixture): {target:?}"
+        );
+    }
+
     /// `*<target> = <value>;` — indirect store. Pattern (fixture 081):
     /// ```text
     ///   mov word ptr [si], <value>
@@ -21031,6 +21071,20 @@ impl<'a> FunctionEmitter<'a> {
                     }
                 }
             }
+            ExprKind::AssignLvalueExpr { target, value } => {
+                // Value-position assign to an arbitrary lvalue
+                // (`*p = v`, `a[i] = v`, `p->x = v`). Evaluate the
+                // RHS into AX, then store through the lvalue's
+                // address. AX still holds the assigned value, so
+                // the surrounding expression (`(*p = 5) + 1`)
+                // consumes it directly. Only the cases needed by
+                // fixtures 3333 (`*<reg-ptr> = v`) are wired up
+                // today — others fall through to a panic when
+                // emit_deref_assign / emit_array_assign can't
+                // satisfy "leave value in AX". Fixture 3333.
+                self.emit_expr_to_ax(value);
+                self.emit_store_ax_to_lvalue(target);
+            }
             ExprKind::CompoundAssignExpr { target, op, value } => {
                 // Value-position compound assign: emit the in-place
                 // update via emit_compound_assign, then load the
@@ -22190,7 +22244,9 @@ impl<'a> FunctionEmitter<'a> {
             ExprKind::Logical { .. } => {
                 panic!("`&&`/`||` as right operand of a binary op not yet supported (no fixture)")
             }
-            ExprKind::AssignExpr { .. } | ExprKind::CompoundAssignExpr { .. } => {
+            ExprKind::AssignExpr { .. }
+            | ExprKind::AssignLvalueExpr { .. }
+            | ExprKind::CompoundAssignExpr { .. } => {
                 panic!("assignment expression as right operand not yet supported (no fixture)")
             }
             ExprKind::AddressOf(_) | ExprKind::AddressOfArrayElem { .. } | ExprKind::AddressOfArrayElemVar { .. } => {

@@ -1291,6 +1291,10 @@ fn walk_calls_expr(
         | ExprKind::CompoundAssignExpr { value, .. } => {
             walk_calls_expr(value, defined, locals, seen, ordered)
         }
+        ExprKind::AssignLvalueExpr { target, value } => {
+            walk_calls_expr(target, defined, locals, seen, ordered);
+            walk_calls_expr(value, defined, locals, seen, ordered);
+        }
         ExprKind::ArrayIndex { array, index } => {
             walk_calls_expr(array, defined, locals, seen, ordered);
             walk_calls_expr(index, defined, locals, seen, ordered);

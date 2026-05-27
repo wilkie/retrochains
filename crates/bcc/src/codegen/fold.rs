@@ -31,6 +31,7 @@ pub fn try_const_eval(e: &Expr) -> Option<u32> {
         | ExprKind::UpdateLvalue { .. }
         | ExprKind::Logical { .. }
         | ExprKind::AssignExpr { .. }
+        | ExprKind::AssignLvalueExpr { .. }
         | ExprKind::CompoundAssignExpr { .. }
         | ExprKind::AddressOf(_)
         | ExprKind::AddressOfArrayElem { .. } | ExprKind::AddressOfArrayElemVar { .. }

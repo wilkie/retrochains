@@ -500,6 +500,10 @@ fn plan_expr_value(e: &Expr, ctx: &mut PlanCtx) {
         | ExprKind::CompoundAssignExpr { value, .. } => {
             plan_expr_value(value, ctx);
         }
+        ExprKind::AssignLvalueExpr { target, value } => {
+            plan_expr_value(target, ctx);
+            plan_expr_value(value, ctx);
+        }
         ExprKind::Call { args, .. } => {
             for a in args {
                 plan_expr_value(a, ctx);

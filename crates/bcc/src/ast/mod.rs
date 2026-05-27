@@ -553,6 +553,16 @@ pub enum ExprKind {
     /// expression form covers `for (i = 0; ...; ...)` init/step
     /// clauses where the assignment appears in expression position.
     AssignExpr { target: String, value: Box<Expr> },
+    /// Lvalue-assign expression: `<lvalue> = <value>` where the
+    /// lvalue is something other than a bare identifier (e.g.
+    /// `*p`, `a[i]`, `p->x`). Distinct from `AssignExpr` because
+    /// the codegen path is "evaluate value into AX, then store to
+    /// the lvalue's address" — the same store path as
+    /// `StmtKind::DerefAssign`/`ArrayAssign` but the expression
+    /// continues to use the value in AX. Fixtures 3333
+    /// (`(*p = 5) + 1`), 1986 (`v = (a[i] = 42)`), 1808
+    /// (`while (*d++ = *s++) ...`).
+    AssignLvalueExpr { target: Box<Expr>, value: Box<Expr> },
     /// `name <op>= value` as an expression — the for-clause /
     /// argument-position compound assignment. Distinct from
     /// AssignExpr because BCC emits different bytes for

@@ -2577,7 +2577,10 @@ impl Parser {
     fn parse_while(&mut self) -> Result<Stmt, ParseError> {
         let while_tok = self.expect(&TokenKind::KwWhile)?;
         self.expect(&TokenKind::LParen)?;
-        let cond = self.parse_expr()?;
+        // While-condition accepts the full assignment-expression
+        // grammar so shapes like `while (*d++ = *s++)` parse.
+        // Fixture 1808.
+        let cond = self.parse_for_clause_expr()?;
         self.expect(&TokenKind::RParen)?;
         let body = self.parse_branch()?;
         let end = body.last().map_or(while_tok.span.end, |s| s.span.end);
@@ -2698,7 +2701,28 @@ impl Parser {
                 span,
             });
         }
-        self.parse_expr()
+        let lhs = self.parse_expr()?;
+        // Lvalue-assignment expression: `<lvalue> = <value>` where
+        // the lvalue isn't a bare identifier (`*p = 5`, `a[i] = 42`,
+        // `*d++ = *s++`). Parses as a single right-associative
+        // expression so it can appear in parens, args, or condition
+        // position. Bare-ident `name = value` already hit the
+        // dedicated branch above. Fixtures 3333, 1986, 1808.
+        if matches!(self.peek().kind, TokenKind::Equals)
+            && is_assignable_lvalue(&lhs.kind)
+        {
+            self.bump(); // `=`
+            let rhs = self.parse_for_clause_expr()?;
+            let span = Span::new(lhs.span.start, rhs.span.end);
+            return Ok(Expr {
+                kind: ExprKind::AssignLvalueExpr {
+                    target: Box::new(lhs),
+                    value: Box::new(rhs),
+                },
+                span,
+            });
+        }
+        Ok(lhs)
     }
 
     /// `switch ( <expr> ) { (case <int>: <stmts> | default: <stmts>)* }`.
@@ -3698,6 +3722,22 @@ fn match_update_op(t: &TokenKind) -> Option<UpdateOp> {
         TokenKind::MinusMinus => Some(UpdateOp::Dec),
         _ => None,
     }
+}
+
+/// Is `kind` a parsed expression that can sit on the LHS of an
+/// `<expr> = <value>` assignment? Bare identifiers are handled by
+/// the dedicated `AssignExpr` branch — this is for the other
+/// lvalue shapes that pair with `AssignLvalueExpr`: `*p`, `a[i]`,
+/// `p->x`, and the postfix-update wrappers (`*d++` lhs of a
+/// strcpy-style copy). Fixtures 3333, 1986, 1808.
+fn is_assignable_lvalue(kind: &ExprKind) -> bool {
+    matches!(
+        kind,
+        ExprKind::Deref(_)
+            | ExprKind::ArrayIndex { .. }
+            | ExprKind::Member { .. }
+            | ExprKind::UpdateLvalue { .. }
+    )
 }
 
 fn match_compound_op(t: &TokenKind) -> Option<BinOp> {
