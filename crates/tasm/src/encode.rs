@@ -3308,11 +3308,11 @@ fn emit_instr(
             out.push(0xFF);
             emit_bp_rel_modrm(2, *offset, out);
         }
-        Instr::CallIndirectGroupSym { group, symbol } => {
-            // `call word ptr <group>:<sym>` → FF /2 [disp16].
+        Instr::CallIndirectGroupSym { group, symbol, disp } => {
+            // `call word ptr <group>:<sym>+disp` → FF /2 [disp16].
             // ModR/M=0x16 = mod=00 reg=2 r/m=110 ([disp16] form).
             emit_group_sym_lea(
-                &[0xFF, 0x16], group, symbol, 0,
+                &[0xFF, 0x16], group, symbol, *disp as i16,
                 symbols, group_idx, extern_idx, out, fixups,
             )?;
         }

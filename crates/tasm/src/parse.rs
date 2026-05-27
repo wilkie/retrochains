@@ -925,15 +925,17 @@ fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
                     }
                 }
             }
-            // `call word ptr <group>:<sym>` — indirect through a
-            // global function-pointer (fixture 2607).
+            // `call word ptr <group>:<sym>[+disp]` — indirect through
+            // a global function-pointer, optionally at a non-zero
+            // offset within an array. Fixtures 2607, 2209.
             if let Some((group, symbol)) =
                 parse_group_symbol_with_width(rest, "word ptr ")
             {
-                let (sym, _off) = split_sym_offset(symbol);
+                let (sym, off) = split_sym_offset(symbol);
                 return Ok(Instr::CallIndirectGroupSym {
                     group: group.to_string(),
                     symbol: sym.to_string(),
+                    disp: off as u16,
                 });
             }
             // `call word ptr [bp+<offset>]` — indirect through stack.

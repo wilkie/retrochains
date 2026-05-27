@@ -2094,11 +2094,13 @@ pub enum Instr {
     /// stack-resident function pointer. Emits `FF 56 dd`. No FIXUPP
     /// (the address is loaded from the local at runtime).
     CallIndirectBpRel { offset: i16 },
-    /// `call word ptr <group>:<sym>` — indirect near call through a
-    /// global function-pointer. Emits `FF 16 lo hi` + SegRel FIXUPP
-    /// on the disp16. Fixtures 2607, 3212, 3567 (`int (*op)(int);
-    /// op(x);`).
-    CallIndirectGroupSym { group: String, symbol: String },
+    /// `call word ptr <group>:<sym>[+disp]` — indirect near call
+    /// through a global function-pointer (optionally at an offset
+    /// within an array). Emits `FF 16 lo hi` + SegRel FIXUPP, with
+    /// the in-image disp16 carrying the relocation addend.
+    /// Fixtures 2607, 3212, 3567, 2209 (`ops[K].fn()` for an array
+    /// of structs with a fn-pointer first field).
+    CallIndirectGroupSym { group: String, symbol: String, disp: u16 },
     /// `call word ptr <group>:<sym>[bx]` — indirect near call
     /// through a function-pointer array indexed by BX. Emits
     /// `FF 9F lo hi` + SegRel FIXUPP. Fixtures 2944, 3481, 3696.
