@@ -563,15 +563,15 @@ impl Locals {
         } else {
             &Reg::NON_SI_POOL
         };
-        // When the pool is the call-restricted [DI] (only one slot
-        // beyond SI), BCC picks the second-highest-use eligible.
-        // Source-order tiebreak preserved (stable sort). Without a
-        // call there are 4+ pool slots and the source-order
-        // assignment already matches. Fixture 1980 (`int a,b,c,d,e`
-        // with one call: DI lands on `c` (count 4) ahead of `b`
-        // (count 3) even though `b` is earlier in source order).
+        // When the pool is restricted (function makes a call, or
+        // has an imul that clobbers DX), BCC picks remaining
+        // eligibles by use count descending — not source order.
+        // Stable sort preserves source order on ties. Without a
+        // restriction the source-order assignment already matches.
+        // Fixtures 1980 (call → DI), 1700 (imul → CX/DI/BX choose
+        // by count).
         let mut ordered_eligibles: Vec<usize> = eligible_int.to_vec();
-        if function_makes_call {
+        if function_makes_call || function_has_imul_now {
             // Stable sort by use count descending (ties keep source
             // order).
             ordered_eligibles.sort_by(|&a, &b| {
