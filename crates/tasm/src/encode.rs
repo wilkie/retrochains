@@ -264,7 +264,8 @@ fn instr_size(instr: &Instr) -> usize {
         Instr::MovReg16GroupSymBxDisp { .. } => 4,
         Instr::AddReg16GroupSymBxDisp { .. } => 4,
         Instr::CmpGroupSymBxDispImm8 { .. } => 5,
-        Instr::IncGroupSymBxDisp { .. } | Instr::DecGroupSymBxDisp { .. } => 4,
+        Instr::IncGroupSymBxDisp { .. } | Instr::DecGroupSymBxDisp { .. }
+        | Instr::IncGroupSymBxDispByte { .. } | Instr::DecGroupSymBxDispByte { .. } => 4,
         Instr::AddGroupSymBxDispImm8Sx { .. } | Instr::SubGroupSymBxDispImm8Sx { .. } => 5,
         Instr::AddGroupSymBxDispImm16 { .. } | Instr::SubGroupSymBxDispImm16 { .. } => 6,
         Instr::AddGroupSymBxDispReg16 { .. } | Instr::SubGroupSymBxDispReg16 { .. } => 4,
@@ -1571,6 +1572,12 @@ fn emit_instr(
         }
         Instr::DecGroupSymBxDisp { group, symbol, disp } => {
             emit_group_sym_lea(&[0xFF, 0x8F], group, symbol, *disp as i16, symbols, group_idx, extern_idx, out, fixups)?;
+        }
+        Instr::IncGroupSymBxDispByte { group, symbol, disp } => {
+            emit_group_sym_lea(&[0xFE, 0x87], group, symbol, *disp as i16, symbols, group_idx, extern_idx, out, fixups)?;
+        }
+        Instr::DecGroupSymBxDispByte { group, symbol, disp } => {
+            emit_group_sym_lea(&[0xFE, 0x8F], group, symbol, *disp as i16, symbols, group_idx, extern_idx, out, fixups)?;
         }
         Instr::AddGroupSymBxDispImm8Sx { group, symbol, disp, imm } => {
             emit_group_sym_lea(&[0x83, 0x87], group, symbol, *disp as i16, symbols, group_idx, extern_idx, out, fixups)?;

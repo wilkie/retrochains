@@ -466,6 +466,11 @@ pub enum Instr {
     IncGroupSymBxDisp { group: String, symbol: String, disp: u16 },
     /// `dec word ptr <group>:<sym>[bx]` — `FF 8F lo hi`. Grp5 /1.
     DecGroupSymBxDisp { group: String, symbol: String, disp: u16 },
+    /// `inc byte ptr <group>:<sym>[bx]` — `FE 87 lo hi`. Grp4 /0
+    /// (byte sibling of IncGroupSymBxDisp). Fixture 3516.
+    IncGroupSymBxDispByte { group: String, symbol: String, disp: u16 },
+    /// `dec byte ptr <group>:<sym>[bx]` — `FE 8F lo hi`. Grp4 /1.
+    DecGroupSymBxDispByte { group: String, symbol: String, disp: u16 },
     /// `add word ptr <group>:<sym>[bx], imm8sx` — `83 87 lo hi ii`.
     /// Grp1 /0 with an indexed global memory operand and a
     /// sign-extended byte immediate.

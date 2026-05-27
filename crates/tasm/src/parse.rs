@@ -697,6 +697,15 @@ fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
                     disp,
                 });
             }
+            // `inc byte ptr <group>:<sym>[bx]` — byte sibling.
+            // Fixture 3516 (`arr[i]++` for char global).
+            if let Some((group, symbol, disp)) = parse_byte_group_symbol_bx_disp(rest) {
+                return Ok(Instr::IncGroupSymBxDispByte {
+                    group: group.to_string(),
+                    symbol: symbol.to_string(),
+                    disp,
+                });
+            }
             // `inc word ptr <group>:<sym>[+N]` — memory-direct
             // increment of a data-segment global. Fixture 512.
             if let Some((group, symbol)) = parse_group_symbol(rest) {
@@ -766,6 +775,14 @@ fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
             // decrement.
             if let Some((group, symbol, disp)) = parse_group_symbol_bx_disp(rest) {
                 return Ok(Instr::DecGroupSymBxDisp {
+                    group: group.to_string(),
+                    symbol: symbol.to_string(),
+                    disp,
+                });
+            }
+            // `dec byte ptr <group>:<sym>[bx]` — byte sibling.
+            if let Some((group, symbol, disp)) = parse_byte_group_symbol_bx_disp(rest) {
+                return Ok(Instr::DecGroupSymBxDispByte {
                     group: group.to_string(),
                     symbol: symbol.to_string(),
                     disp,
