@@ -879,9 +879,20 @@ impl Parser {
                 }
                 continue;
             }
-            let name_tok = self.bump();
-            let TokenKind::Ident(name) = name_tok.kind else {
-                return Err(ParseError::NotAnIdent { offset: name_tok.span.start });
+            // Function-pointer struct field: `<ret> (*<name>)(args);`.
+            // Mirrors the local/param/global declarator path — the
+            // signature is collapsed to a generic near pointer so the
+            // field is 2 bytes. Fixture 2378.
+            let name = if matches!(self.peek().kind, TokenKind::LParen) {
+                let (fp_name, fp_ty) = self.parse_func_ptr_declarator(ty.clone())?;
+                ty = fp_ty;
+                fp_name
+            } else {
+                let name_tok = self.bump();
+                let TokenKind::Ident(name) = name_tok.kind else {
+                    return Err(ParseError::NotAnIdent { offset: name_tok.span.start });
+                };
+                name
             };
             // Bitfield: `<int-type> <name> : <width>;`. Only ints
             // (signed/unsigned) carry bitfields. Fixture 1691.
