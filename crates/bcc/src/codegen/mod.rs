@@ -21794,6 +21794,39 @@ impl<'a> FunctionEmitter<'a> {
                         offset: inner_byte_off as i16,
                     };
                 }
+                // `(*(<reg-ptr> + K_outer))[K_inner]` — pointer
+                // arithmetic on a pointer-to-array, then explicit
+                // deref + inner index. Same effective address as
+                // `<ptr>[K_outer*<outer-size> + K_inner*<elem-size>]`.
+                // Fixture 2329 (`(*(p+1))[2]` for `int (*p)[3]`).
+                if let ExprKind::Deref(inner) = &array.kind
+                    && let ExprKind::BinOp { op, left, right } = &inner.kind
+                    && matches!(op, BinOp::Add | BinOp::Sub)
+                    && let ExprKind::Ident(ptr_name) = &left.kind
+                    && self.locals.has(ptr_name)
+                    && let Some(pointee) = self.locals.type_of(ptr_name).pointee()
+                    && let Some(elem) = pointee.array_elem()
+                    && let Some(k_outer) = try_const_eval(right)
+                    && let Some(k_inner) = try_const_eval(index)
+                    && let LocalLocation::Reg(reg) =
+                        self.locals.location_of(ptr_name)
+                {
+                    let outer_stride = i32::from(pointee.size_bytes());
+                    let inner_stride = i32::from(elem.size_bytes());
+                    let k_outer_signed = if matches!(op, BinOp::Sub) {
+                        -(k_outer as i32)
+                    } else {
+                        k_outer as i32
+                    };
+                    let outer_off = k_outer_signed.wrapping_mul(outer_stride);
+                    let inner_off = (k_inner as i32).wrapping_mul(inner_stride);
+                    let total = outer_off + inner_off;
+                    let total16 = i16::try_from(total).unwrap_or(i16::MAX);
+                    return OperandSource::DerefRegOffset {
+                        reg,
+                        offset: total16,
+                    };
+                }
                 let (name, total_off, _leaf_ty) = self
                     .try_lvalue_chain_addr(e)
                     .unwrap_or_else(|| {
