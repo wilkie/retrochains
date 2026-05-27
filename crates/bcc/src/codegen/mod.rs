@@ -13171,6 +13171,53 @@ impl<'a> FunctionEmitter<'a> {
     /// [bp-N], K`. Otherwise (single-dim variable index, fixtures
     /// 078/142) we compute `&a[i]` into BX and store through it.
     fn emit_array_assign(&mut self, array: &str, indices: &[Expr], value: &Expr) {
+        // `<arr>[K] = <func-name>` — function-pointer array slot
+        // assignment with a known function symbol. Emits the direct
+        // immediate-to-memory store with the SegRel FIXUPP, no AX
+        // round-trip. Fixture 1658 (`ops[0] = add5;`).
+        if indices.len() == 1
+            && let Some(k) = try_const_eval(&indices[0])
+            && let ExprKind::Ident(src_name) = &value.kind
+            && !self.locals.has(src_name)
+            && self.globals.type_of(src_name).is_none()
+            && self.signatures.ret_ty_of(src_name).is_some()
+        {
+            // Local array of pointers — stack-resident.
+            if self.locals.has(array)
+                && let arr_ty = self.locals.type_of(array).clone()
+                && let Some(elem_ty) = arr_ty.array_elem()
+                && elem_ty.pointee().is_some()
+                && let LocalLocation::Stack(base_off) = self.locals.location_of(array)
+            {
+                let stride = i32::from(elem_ty.size_bytes());
+                let byte_off = (k as i32).wrapping_mul(stride);
+                let final_off = base_off + i16::try_from(byte_off).unwrap_or(i16::MAX);
+                let _ = write!(
+                    self.out,
+                    "\tmov\tword ptr {},offset _{src_name}\r\n",
+                    bp_addr(final_off),
+                );
+                return;
+            }
+            // Global array of pointers.
+            if let Some(gty) = self.globals.type_of(array)
+                && let Some(elem_ty) = gty.array_elem()
+                && elem_ty.pointee().is_some()
+            {
+                let stride = u32::from(elem_ty.size_bytes());
+                let byte_off = k.wrapping_mul(stride);
+                let label = if byte_off == 0 {
+                    format!("DGROUP:_{array}")
+                } else {
+                    format!("DGROUP:_{array}+{byte_off}")
+                };
+                let _ = write!(
+                    self.out,
+                    "\tmov\tword ptr {label},offset _{src_name}\r\n",
+                );
+                return;
+            }
+        }
         // Pointer-base: `p[K] = v` is sugar for `*(p + K) = v`. For a
         // long-pointee constant index of 0, this is identical to
         // `*p = v` — same memory-direct pair through `[reg]`/`[reg+2]`.
