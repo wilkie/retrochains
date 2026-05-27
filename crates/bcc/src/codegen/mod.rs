@@ -20982,6 +20982,38 @@ impl<'a> FunctionEmitter<'a> {
                     let off16 = i16::try_from(off).unwrap_or(i16::MAX);
                     return OperandSource::DerefRegOffset { reg, offset: off16 };
                 }
+                // `<global-or-static-int-ptr-arr>[K_outer][K_inner]`
+                // as RHS: load the pointer slot into BX, then read
+                // a word at [bx + K_inner*stride]. Only int-pointee
+                // because the operand-source resolution doesn't
+                // track byte vs word width — char pointees need a
+                // separate `mov al, [bx]; cbw` path which can't
+                // ride through resolve_operand_source.
+                if let ExprKind::ArrayIndex { array: outer_arr, index: outer_idx } =
+                    &array.kind
+                    && let ExprKind::Ident(arr_name) = &outer_arr.kind
+                    && let Some(gty) = self.globals.type_of(arr_name)
+                    && let Some(elem_ty) = gty.array_elem()
+                    && let Some(pointee) = elem_ty.pointee()
+                    && pointee.is_int_like()
+                    && let Some(k_outer) = try_const_eval(outer_idx)
+                    && let Some(k_inner) = try_const_eval(index)
+                {
+                    let elem_stride = u32::from(elem_ty.size_bytes());
+                    let outer_byte_off = k_outer.wrapping_mul(elem_stride);
+                    let inner_stride = i32::from(pointee.size_bytes());
+                    let inner_byte_off = (k_inner as i32).wrapping_mul(inner_stride);
+                    let arr_addr = if outer_byte_off == 0 {
+                        format!("DGROUP:_{arr_name}")
+                    } else {
+                        format!("DGROUP:_{arr_name}+{outer_byte_off}")
+                    };
+                    let _ = write!(self.out, "\tmov\tbx,word ptr {arr_addr}\r\n");
+                    return OperandSource::DerefRegOffset {
+                        reg: crate::codegen::locals::Reg::Bx,
+                        offset: inner_byte_off as i16,
+                    };
+                }
                 let (name, total_off, _leaf_ty) = self
                     .try_lvalue_chain_addr(e)
                     .unwrap_or_else(|| {
