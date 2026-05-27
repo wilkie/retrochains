@@ -11365,10 +11365,54 @@ impl<'a> FunctionEmitter<'a> {
         // to `*(p + i)`. Fixture 088: `s[0]` with `s: char *` in SI
         // → `mov al, byte ptr [si] / cbw`. Only handled at depth 1.
         if let Some(pointee) = ty.pointee() {
-            if indices.len() != 1 {
-                panic!("multi-level index through a pointer not yet supported (no fixture)");
+            if indices.len() == 1 {
+                return self.emit_pointer_index_to_ax(array_name, pointee.clone(), indices[0]);
             }
-            return self.emit_pointer_index_to_ax(array_name, pointee.clone(), indices[0]);
+            // `pp[i][j]` for char ** / int ** etc. with constant
+            // indices: load `*pp[i]` into BX (the first-level ptr),
+            // then read through `[bx + j*stride]`. Fixture 2962.
+            if indices.len() == 2
+                && let Some(i_k) = try_const_eval(indices[0])
+                && let Some(j_k) = try_const_eval(indices[1])
+                && let Some(inner_pointee) = pointee.pointee()
+            {
+                let inner_pointee = inner_pointee.clone();
+                let i_stride = u32::from(pointee.size_bytes());
+                let i_off = i_k.wrapping_mul(i_stride) as i32;
+                let j_stride = i32::from(inner_pointee.size_bytes());
+                let j_off = (j_k as i32).wrapping_mul(j_stride);
+                let p_addr = if let LocalLocation::Reg(reg) = self.locals.location_of(array_name) {
+                    if i_off == 0 {
+                        format!("[{}]", reg.name())
+                    } else {
+                        format!("[{}+{}]", reg.name(), i_off)
+                    }
+                } else if let LocalLocation::Stack(off) = self.locals.location_of(array_name) {
+                    // For stack-resident pp, load pp into bx first
+                    // then index — but for argv[0][0] BCC has pp in
+                    // a register typically. Skip for now.
+                    let _ = off;
+                    panic!("stack-resident pp in multi-level index not yet supported (no fixture)");
+                } else {
+                    unreachable!()
+                };
+                let _ = write!(self.out, "\tmov\tbx,word ptr {p_addr}\r\n");
+                let bx_disp = if j_off == 0 {
+                    "[bx]".to_owned()
+                } else if j_off > 0 {
+                    format!("[bx+{j_off}]")
+                } else {
+                    format!("[bx-{}]", -j_off)
+                };
+                if inner_pointee.is_char_like() {
+                    let _ = write!(self.out, "\tmov\tal,byte ptr {bx_disp}\r\n");
+                    self.emit_widen_al(&inner_pointee);
+                } else {
+                    let _ = write!(self.out, "\tmov\tax,word ptr {bx_disp}\r\n");
+                }
+                return;
+            }
+            panic!("multi-level index through a pointer not yet supported (no fixture)");
         }
         let LocalLocation::Stack(base_off) = self.locals.location_of(array_name) else {
             panic!("array `{array_name}` should be stack-resident");
