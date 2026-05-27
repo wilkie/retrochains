@@ -12157,6 +12157,28 @@ impl<'a> FunctionEmitter<'a> {
                         }
                     }
                 } else {
+                    // Call-indexed shape: BCC emits the call (AX =
+                    // index), scales AX, loads the value into DX
+                    // (to free up AX), then copies AX→BX and
+                    // stores DX. Fixture 2914.
+                    if matches!(index.kind, ExprKind::Call { .. })
+                        && let src = self.resolve_operand_source(value)
+                        && !matches!(src, OperandSource::Immediate(_) | OperandSource::Reg(_))
+                    {
+                        self.emit_expr_to_ax(index);
+                        self.out.extend_from_slice(b"\tshl\tax,1\r\n");
+                        let _ = write!(
+                            self.out,
+                            "\tmov\tdx,{}\r\n",
+                            src.word(),
+                        );
+                        self.out.extend_from_slice(b"\tmov\tbx,ax\r\n");
+                        let _ = write!(
+                            self.out,
+                            "\tmov\tword ptr DGROUP:_{array}[bx],dx\r\n",
+                        );
+                        return;
+                    }
                     self.emit_expr_to_ax(index);
                     self.out.extend_from_slice(b"\tmov\tbx,ax\r\n");
                 }
