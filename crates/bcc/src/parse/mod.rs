@@ -52,6 +52,15 @@ pub struct Parser {
     /// `parse_stmt` returns the first declarator; the parse-stmt
     /// callers drain this queue and append to the enclosing block.
     pending_extra_stmts: Vec<Stmt>,
+    /// Per-function rename map for hoisted static locals. A static
+    /// in one function shouldn't collide with the same-named static
+    /// in another, so the parser appends a unique suffix to the
+    /// global name; this map translates body-level idents.
+    /// Reset at the start of every `parse_function`.
+    current_static_renames: HashMap<String, String>,
+    /// Monotonic counter to derive unique suffixes for hoisted
+    /// statics.
+    static_local_counter: u32,
     /// Symbol → type for file-scope variables seen so far in the
     /// source. `parse_global` inserts here; `sizeof <ident>` consults
     /// this (plus `function_locals` for the current function) to fold
@@ -77,6 +86,8 @@ impl Parser {
             pending_static_locals: Vec::new(),
             enum_constants: HashMap::new(),
             pending_extra_stmts: Vec::new(),
+            current_static_renames: HashMap::new(),
+            static_local_counter: 0,
             global_types: HashMap::new(),
             function_locals: HashMap::new(),
         }
@@ -1150,6 +1161,10 @@ impl Parser {
 
     fn parse_function(&mut self) -> Result<Function, ParseError> {
         let start = self.peek().span.start;
+        // Each function has its own static-local namespace. Reset
+        // the rename map so a `static int counter` here doesn't see
+        // the previous function's `counter@N` redirect.
+        self.current_static_renames.clear();
         // K&R implicit-int return type: the first token is an
         // identifier that *isn't* a typedef name (typedefs go through
         // the regular parse_type path). The C89 default is `int`.
@@ -2182,9 +2197,24 @@ impl Parser {
                 // register the name in global_types as well. This
                 // lets `&<static_arr>[K]` and other globals-table
                 // consumers find it. Fixtures 2241, 2269.
-                self.global_types.insert(tail_name.clone(), tail_ty.clone());
+                //
+                // To avoid name collisions across functions that
+                // share a static identifier (e.g., two functions
+                // each with `static int counter`), append a unique
+                // suffix and record the rename so body Idents in
+                // *this* function resolve to the unique global.
+                // Fixture 2264.
+                let unique = if self.global_types.contains_key(&tail_name) {
+                    self.static_local_counter += 1;
+                    let renamed = format!("{}@{}", tail_name, self.static_local_counter);
+                    self.current_static_renames.insert(tail_name.clone(), renamed.clone());
+                    renamed
+                } else {
+                    tail_name.clone()
+                };
+                self.global_types.insert(unique.clone(), tail_ty.clone());
                 self.pending_static_locals.push(Global {
-                    name: tail_name.clone(),
+                    name: unique.clone(),
                     ty: tail_ty.clone(),
                     init: tail_init,
                     is_static: true,
@@ -2194,7 +2224,7 @@ impl Parser {
                 self.pending_extra_stmts.push(Stmt {
                     kind: StmtKind::Declare {
                         ty: tail_ty,
-                        name: tail_name,
+                        name: unique,
                         init: None,
                         is_static: true,
                         is_register: false,
@@ -2223,14 +2253,24 @@ impl Parser {
             // Static locals act like globals at the codegen level
             // (file-scope storage, linker-resolved address), so
             // register the name in global_types as well. Fixtures
-            // 2241, 2269.
-            self.global_types.insert(name.clone(), ty.clone());
+            // 2241, 2269. Unique-suffix the name when it collides
+            // with an already-seen global (cross-function static
+            // sharing — fixture 2264).
+            let unique = if self.global_types.contains_key(&name) {
+                self.static_local_counter += 1;
+                let renamed = format!("{}@{}", name, self.static_local_counter);
+                self.current_static_renames.insert(name.clone(), renamed.clone());
+                renamed
+            } else {
+                name.clone()
+            };
+            self.global_types.insert(unique.clone(), ty.clone());
             // The Global owns the initializer expression; the Stmt
             // keeps only the name/type/span so codegen can fold the
             // source line into the next comment block. Hoisting moves
             // the init out so we don't need `Expr: Clone`.
             self.pending_static_locals.push(Global {
-                name: name.clone(),
+                name: unique.clone(),
                 ty: ty.clone(),
                 init,
                 is_static: true,
@@ -2240,7 +2280,7 @@ impl Parser {
             return Ok(Stmt {
                 kind: StmtKind::Declare {
                     ty,
-                    name,
+                    name: unique,
                     init: None,
                     is_static: true,
                     is_register: false,
@@ -2886,6 +2926,11 @@ impl Parser {
             let TokenKind::Ident(name) = name_tok.kind else {
                 return Err(ParseError::NotAnIdent { offset: name_tok.span.start });
             };
+            let name = self
+                .current_static_renames
+                .get(&name)
+                .cloned()
+                .unwrap_or(name);
             let span = Span::new(op_tok.span.start, name_tok.span.end);
             return Ok(Expr {
                 kind: ExprKind::Update {
@@ -3212,16 +3257,27 @@ impl Parser {
                 }
                 Ok(lit)
             }
-            TokenKind::Ident(ref name) => {
+            TokenKind::Ident(ref raw_name) => {
                 // Enum constants fold to `IntLit` here — BCC's `-S`
                 // output never mentions the enum name (verified
                 // against fixture 164: `return B;` → `mov ax,1`).
-                if let Some(&value) = self.enum_constants.get(name) {
+                if let Some(&value) = self.enum_constants.get(raw_name) {
                     return Ok(Expr {
                         kind: ExprKind::IntLit(value),
                         span: tok.span,
                     });
                 }
+                // Per-function static-local rename: `static int counter`
+                // in `next_a` hoists to a uniquely-named global so two
+                // sibling functions don't share storage. The body's
+                // bare ident references the renamed global. Fixture
+                // 2264 (`next_a()` and `next_b()` both with `static
+                // int counter`).
+                let renamed = self.current_static_renames
+                    .get(raw_name)
+                    .cloned();
+                let name = renamed.as_deref().unwrap_or(raw_name).to_string();
+                let name = &name;
                 // Postfix `()` makes it a function call.
                 if matches!(self.peek().kind, TokenKind::LParen) {
                     self.bump();
