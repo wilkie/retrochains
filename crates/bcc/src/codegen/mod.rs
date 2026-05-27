@@ -10238,7 +10238,43 @@ impl<'a> FunctionEmitter<'a> {
                 BinOp::BitXor => "xor",
                 _ => unreachable!(),
             };
-            self.emit_expr_to_ax(value);
+            // Byte-narrow peephole: when the RHS is `<int-lvalue>
+            // <Mul-by-pow2 or Shl> K`, BCC computes the multiply in
+            // byte form (`mov al, byte ptr <src>; shl al, 1...`)
+            // rather than word form. Multiplication / left-shift mod
+            // 256 commute with the eventual byte-truncation at the
+            // char store, so the byte path is correctness-preserving
+            // and the same total bytes. Fixture 1430 (`c += a * 2`).
+            let byte_narrow_done = if let ExprKind::BinOp { op: inner_op, left, right } = &value.kind
+                && let Some((src_name, src_off, _)) = self.try_lvalue_chain_addr(left)
+                && let Some(src_addr) = self.resolve_chain_addr(&src_name, src_off)
+                && let Some(k) = try_const_eval(right)
+                && k >= 1
+                && k <= 7
+            {
+                let shifts: Option<u32> = match inner_op {
+                    BinOp::Shl => Some(k as u32),
+                    BinOp::Mul if k.is_power_of_two() => Some(k.trailing_zeros()),
+                    _ => None,
+                };
+                if let Some(s) = shifts
+                    && s >= 1
+                    && s <= 3
+                {
+                    let _ = write!(self.out, "\tmov\tal,byte ptr {src_addr}\r\n");
+                    for _ in 0..s {
+                        self.out.extend_from_slice(b"\tshl\tal,1\r\n");
+                    }
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+            if !byte_narrow_done {
+                self.emit_expr_to_ax(value);
+            }
             let _ = write!(self.out, "\tmov\tdl,{}\r\n", reg.name());
             let _ = write!(self.out, "\t{mnem}\tdl,al\r\n");
             let _ = write!(self.out, "\tmov\t{},dl\r\n", reg.name());
