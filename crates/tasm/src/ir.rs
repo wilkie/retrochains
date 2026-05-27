@@ -2006,6 +2006,12 @@ pub enum Instr {
     /// `shl <reg16>,1` — D1 (mod=11 /4 r/m=reg). The 1-bit shift form
     /// (BCC uses this to compute `i*2` for word-array indexing).
     ShlReg16One { reg: Reg16 },
+    /// `shl <reg16>,<imm8>` — 80186+ multi-bit shift form, encoding
+    /// `C1 /4 ib` (3 bytes). With `-1`/`-2`, BCC prefers this over
+    /// unrolling for shift counts ≥ 3 (saves bytes vs repeated
+    /// `shl r16,1` or the 8086 `mov cl,K; shl r16,cl` pair).
+    /// Fixtures 2133 (`x * 8`), 2134 (`x * 16`), 2276 (`x << 4`).
+    ShlReg16Imm8 { reg: Reg16, imm: u8 },
     /// `shl <reg8>,1` — D0 (mod=11 /4=SHL r/m=reg-code). 8-bit
     /// sibling of `ShlReg16One`. Fixture 535 (`char c <<= 2`
     /// unrolls to two `shl dl, 1`).
@@ -2074,6 +2080,17 @@ pub enum Instr {
     /// stack-resident function pointer. Emits `FF 56 dd`. No FIXUPP
     /// (the address is loaded from the local at runtime).
     CallIndirectBpRel { offset: i16 },
+    /// `push <imm8sx>` — 80186+ push of a sign-extended byte
+    /// immediate. Encoding: `6A ii`. Saves 2 bytes per call when
+    /// the argument constant fits in a signed byte. Fixture 2277.
+    PushImm8Sx { imm: i8 },
+    /// `enter <stack>, <level>` — 80186+ prologue. Encoding:
+    /// `C8 lo hi level`. We always emit level=0 (no nested
+    /// stack frames). Fixture 2134.
+    Enter { stack: u16, level: u8 },
+    /// `leave` — 80186+ epilogue. Encoding: `C9`. Equivalent
+    /// to `mov sp, bp; pop bp`. Fixture 2134.
+    Leave,
     /// `ret`
     Ret,
     /// `ret imm16` — near return with caller-stack adjustment.

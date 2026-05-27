@@ -31,6 +31,12 @@ pub struct ParsedArgs {
     /// fold (drop `jmp short @X` when it's immediately followed
     /// by `@X:`). Fixtures 2125, 2126, 2281.
     pub optimize: bool,
+    /// `-1` / `-2`: target the 80186 (or 80286) instruction set.
+    /// Enables `enter`, `leave`, and the immediate-multi-bit
+    /// shift form. We treat both flags the same since the 286
+    /// extensions we care about (these three) were already in
+    /// the 186. Fixtures 2134, 2276.
+    pub target_186: bool,
     /// Input source files, in the order given on the command line.
     pub sources: Vec<PathBuf>,
 }
@@ -76,6 +82,7 @@ pub fn parse_args(argv: &[String]) -> Result<ParsedArgs, CliError> {
     let mut merge_strings = false;
     let mut unsigned_chars = false;
     let mut optimize = false;
+    let mut target_186 = false;
     let mut defines: Vec<(String, String)> = Vec::new();
     let mut sources: Vec<PathBuf> = Vec::new();
     for arg in argv {
@@ -86,6 +93,7 @@ pub fn parse_args(argv: &[String]) -> Result<ParsedArgs, CliError> {
             "-d" => merge_strings = true,
             "-K" => unsigned_chars = true,
             "-O" | "-O2" => optimize = true,
+            "-1" | "-2" => target_186 = true,
             other if other.starts_with("-D") => {
                 // `-D<NAME>` or `-D<NAME>=<body>`. Fixtures 2131
                 // (`-DFOO=42`), 2280 (`-DDEBUG=42`).
@@ -112,7 +120,7 @@ pub fn parse_args(argv: &[String]) -> Result<ParsedArgs, CliError> {
             //   -r-      disable register allocator
             //   -f-      no FPU
             // Fixtures 2123-2137, 2261-2263.
-            "-G" | "-1" | "-2" | "-N" | "-A"
+            "-G" | "-N" | "-A"
             | "-r-" | "-f-" | "-N-" => {}
             other if other.starts_with('-') => {
                 return Err(CliError::Unsupported(other.to_owned()));
@@ -132,6 +140,7 @@ pub fn parse_args(argv: &[String]) -> Result<ParsedArgs, CliError> {
         defines,
         unsigned_chars,
         optimize,
+        target_186,
         sources,
     })
 }

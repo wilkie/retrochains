@@ -43,6 +43,7 @@ pub fn emit_dash_s(
     defines: &[(String, String)],
     unsigned_chars: bool,
     optimize: bool,
+    target_186: bool,
 ) -> Result<PathBuf, EmitError> {
     let source = fs::read_to_string(source_path)
         .map_err(|e| EmitError::SourceRead(source_path.to_owned(), e))?;
@@ -61,7 +62,7 @@ pub fn emit_dash_s(
         .map_or_else(|| "out.c".to_owned(), str::to_ascii_lowercase);
     let output_path = PathBuf::from(format!("{}.ASM", basename.to_ascii_uppercase()));
 
-    let bytes = build_asm(&source, &lowered, mtime, merge_strings, defines, unsigned_chars, optimize)?;
+    let bytes = build_asm(&source, &lowered, mtime, merge_strings, defines, unsigned_chars, optimize, target_186)?;
     fs::write(&output_path, bytes)?;
     Ok(output_path)
 }
@@ -79,6 +80,7 @@ pub fn build_asm(
     defines: &[(String, String)],
     unsigned_chars: bool,
     optimize: bool,
+    target_186: bool,
 ) -> Result<Vec<u8>, EmitError> {
     // C preprocessor pass: resolve `#define`/`#ifdef`/`#if` and
     // expand object/function-like macros. Stripped directive lines
@@ -144,6 +146,7 @@ pub fn build_asm(
             &globals,
             &mut strings,
             &mut helpers,
+            target_186,
         );
     }
 
@@ -169,8 +172,97 @@ pub fn build_asm(
     if optimize {
         fold_trampoline_jmps(&mut out);
     }
+    if target_186 {
+        fold_shl_to_multibit(&mut out);
+    }
     out.push(0x1A); // DOS EOF marker
     Ok(out)
+}
+
+/// `-1`/`-2` peephole: collapse runs of `\tshl\t<reg16>,1\r\n` of
+/// length ≥ 3 into a single `\tshl\t<reg16>,N\r\n` (the 80186+ multi-
+/// bit shift form, encoding `C1 /4 ib` — 3 bytes total). Also rewrite
+/// the 8086 `mov cl, K; shl r16, cl` pair (4 bytes) into the same
+/// form. Saves bytes per shift on 186/286 targets without changing
+/// the result. Fixtures 2133 (`x*8`), 2134 (`x*16`), 2276 (`x<<4`).
+fn fold_shl_to_multibit(out: &mut Vec<u8>) {
+    let text = std::mem::take(out);
+    let s = match String::from_utf8(text) {
+        Ok(s) => s,
+        Err(e) => {
+            *out = e.into_bytes();
+            return;
+        }
+    };
+    let mut lines: Vec<String> = s.split_inclusive('\n').map(String::from).collect();
+    let mut keep: Vec<bool> = vec![true; lines.len()];
+    let mut i = 0;
+    while i < lines.len() {
+        // Pass 1: detect `\tmov\tcl,K\r\n\tshl\t<reg16>,cl\r\n` pair.
+        let pair_match: Option<(u8, String)> = {
+            let cur_k = lines[i].strip_prefix("\tmov\tcl,").and_then(|rest| {
+                rest.trim_end_matches(['\r', '\n']).parse::<u8>().ok()
+            });
+            if let Some(k) = cur_k
+                && k >= 2
+                && k <= 31
+                && i + 1 < lines.len()
+            {
+                lines[i + 1].strip_prefix("\tshl\t").and_then(|shl_rest| {
+                    let reg = shl_rest.trim_end_matches(['\r', '\n']).strip_suffix(",cl")?;
+                    if is_reg16_name(reg) { Some((k, reg.to_string())) } else { None }
+                })
+            } else {
+                None
+            }
+        };
+        if let Some((k, reg)) = pair_match {
+            lines[i].clear();
+            keep[i] = false;
+            lines[i + 1] = format!("\tshl\t{reg},{k}\r\n");
+            i += 2;
+            continue;
+        }
+        // Pass 2: detect a run of `\tshl\t<reg16>,1\r\n`.
+        let run_reg: Option<String> = lines[i].strip_prefix("\tshl\t").and_then(|sr| {
+            let reg = sr.trim_end_matches(['\r', '\n']).strip_suffix(",1")?;
+            if is_reg16_name(reg) { Some(reg.to_string()) } else { None }
+        });
+        if let Some(reg) = run_reg {
+            let mut run = 1usize;
+            while i + run < lines.len() {
+                let m = lines[i + run].strip_prefix("\tshl\t").and_then(|sr| {
+                    let r2 = sr.trim_end_matches(['\r', '\n']).strip_suffix(",1")?;
+                    if r2 == reg { Some(()) } else { None }
+                });
+                if m.is_some() {
+                    run += 1;
+                } else {
+                    break;
+                }
+            }
+            if run >= 3 {
+                lines[i] = format!("\tshl\t{reg},{run}\r\n");
+                for k in 1..run {
+                    keep[i + k] = false;
+                }
+                i += run;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    for (j, k) in keep.iter().enumerate() {
+        if !k {
+            lines[j].clear();
+        }
+    }
+    let joined: String = lines.concat();
+    *out = joined.into_bytes();
+}
+
+fn is_reg16_name(s: &str) -> bool {
+    matches!(s, "ax" | "bx" | "cx" | "dx" | "si" | "di" | "bp" | "sp")
 }
 
 /// `-O` peephole: drop `\tjmp\tshort @X\r\n` lines that are

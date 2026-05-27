@@ -587,10 +587,12 @@ pub fn emit_function(
     globals: &GlobalTable,
     strings: &mut StringPool,
     helpers: &mut std::collections::HashSet<String>,
+    target_186: bool,
 ) {
     let mut emitter = FunctionEmitter::new(
         out, source, function, func_idx, signatures, globals, strings, helpers,
     );
+    emitter.target_186 = target_186;
     emitter.run();
 }
 
@@ -650,6 +652,11 @@ struct FunctionEmitter<'a> {
     /// prepends a bare `fwait` when this is set so the prior fstp's
     /// memory write completes before the CPU mov runs. Fixture 1752.
     pending_fpu_store_fwait: bool,
+    /// `-1` / `-2` flag: target the 80186 (or 80286) instruction set.
+    /// Enables `enter`/`leave` for the prologue/epilogue and the
+    /// `shl r16, imm8` form for multi-bit shifts. Fixtures 2134,
+    /// 2276, 2277.
+    target_186: bool,
 }
 
 /// Innermost enclosing construct that catches `break;` (and maybe
@@ -691,6 +698,7 @@ impl<'a> FunctionEmitter<'a> {
             skip_widen: false,
             skip_mod_to_ax: false,
             pending_fpu_store_fwait: false,
+            target_186: false,
         }
     }
 
@@ -768,17 +776,26 @@ impl<'a> FunctionEmitter<'a> {
         // Prologue. Order: push bp / mov bp,sp / allocate stack /
         // push callee-saved registers (in order). See
         // specs/bcc/ASM_OUTPUT.md "Prologue and epilogue shape".
-        self.out.extend_from_slice(b"\tpush\tbp\r\n");
-        self.out.extend_from_slice(b"\tmov\tbp,sp\r\n");
-        match self.locals.stack_bytes() {
-            0 => {}
-            n @ 1..=2 => {
-                for _ in 0..n {
-                    self.out.extend_from_slice(b"\tdec\tsp\r\n");
+        //
+        // With -1/-2 (186+ target), the prologue collapses into a
+        // single `enter N, 0` instruction (C8 lo hi 00). Fixture
+        // 2134/2277.
+        let stack_n = self.locals.stack_bytes();
+        if self.target_186 && stack_n > 0 {
+            let _ = write!(self.out, "\tenter\t{stack_n},0\r\n");
+        } else {
+            self.out.extend_from_slice(b"\tpush\tbp\r\n");
+            self.out.extend_from_slice(b"\tmov\tbp,sp\r\n");
+            match stack_n {
+                0 => {}
+                n @ 1..=2 => {
+                    for _ in 0..n {
+                        self.out.extend_from_slice(b"\tdec\tsp\r\n");
+                    }
                 }
-            }
-            n => {
-                let _ = write!(self.out, "\tsub\tsp,{n}\r\n");
+                n => {
+                    let _ = write!(self.out, "\tsub\tsp,{n}\r\n");
+                }
             }
         }
         for reg in self.locals.saved_regs() {
@@ -826,10 +843,17 @@ impl<'a> FunctionEmitter<'a> {
         for reg in saved.iter().rev() {
             let _ = write!(self.out, "\tpop\t{}\r\n", reg.name());
         }
-        if self.locals.stack_bytes() > 0 {
-            self.out.extend_from_slice(b"\tmov\tsp,bp\r\n");
+        // 186+ target: `leave` (C9) collapses `mov sp, bp; pop bp`
+        // into one byte. Used whenever the prologue used `enter`.
+        // Fixture 2134/2277.
+        if self.target_186 && self.locals.stack_bytes() > 0 {
+            self.out.extend_from_slice(b"\tleave\t\r\n");
+        } else {
+            if self.locals.stack_bytes() > 0 {
+                self.out.extend_from_slice(b"\tmov\tsp,bp\r\n");
+            }
+            self.out.extend_from_slice(b"\tpop\tbp\r\n");
         }
-        self.out.extend_from_slice(b"\tpop\tbp\r\n");
         // Pascal-convention callee cleans up the args off the stack
         // via `ret N` where N = total bytes of parameter storage.
         // Fixture 1653. Far functions use `retf` (`cb`) instead of
@@ -5465,6 +5489,19 @@ impl<'a> FunctionEmitter<'a> {
                 self.emit_arg_into_ax(arg, arg_ty);
                 self.skip_mod_to_ax = false;
                 self.out.extend_from_slice(b"\tpush\tdx\r\n");
+                total_bytes += 2;
+            } else if self.target_186
+                && let Some(k) = try_const_eval(arg)
+                && (k as i32) >= -128
+                && (k as i32) <= 127
+                && !arg_ty.is_char_like()
+            {
+                // 186+ `push imm8` (sign-extended to imm16): 2-byte
+                // `6a ii` form for small integer constants. Saves
+                // 2 bytes per arg vs `mov ax, K; push ax`. Fixture
+                // 2277 (`fn(10)`).
+                let k_i8 = k as i8;
+                let _ = write!(self.out, "\tpush\t{k_i8}\r\n");
                 total_bytes += 2;
             } else {
                 self.emit_arg_into_ax(arg, arg_ty);

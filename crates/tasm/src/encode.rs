@@ -230,6 +230,9 @@ fn encode_segment(
 
 fn instr_size(instr: &Instr) -> usize {
     match instr {
+        Instr::PushImm8Sx { .. } => 2,
+        Instr::Enter { .. } => 4,
+        Instr::Leave => 1,
         Instr::Ret => 1,
         Instr::RetImm16 { .. } => 3,
         Instr::Retf => 1,
@@ -614,6 +617,7 @@ fn instr_size(instr: &Instr) -> usize {
         | Instr::ShlReg8One { .. }
         | Instr::SarReg8One { .. }
         | Instr::ShrReg8One { .. } => 2,
+        Instr::ShlReg16Imm8 { .. } => 3,
         Instr::MovBpRelImm { offset, .. }
         | Instr::MovBpRelOffsetSym { offset, .. }
         | Instr::MovBpRelOffsetGroupSym { offset, .. } => 1 + bp_rel_modrm_size(*offset) + 2,
@@ -3138,6 +3142,13 @@ fn emit_instr(
             out.push(0xD1);
             out.push(0b11_100_000 | reg.code());
         }
+        Instr::ShlReg16Imm8 { reg, imm } => {
+            // `shl r16,imm8` → C1 (mod=11 /4 r/m=<reg>) imm8. 80186+
+            // multi-bit shift form, 3 bytes total.
+            out.push(0xC1);
+            out.push(0b11_100_000 | reg.code());
+            out.push(*imm);
+        }
         Instr::ShlReg8One { reg } => {
             // `shl r8,1` → D0 (mod=11 /4 r/m=<reg-code>). 8-bit
             // sibling of `ShlReg16One`. Fixture 535.
@@ -3231,6 +3242,16 @@ fn emit_instr(
             out.push(0xEB);
             out.push(rel8 as u8);
         }
+        Instr::PushImm8Sx { imm } => {
+            out.push(0x6A);
+            out.push(*imm as u8);
+        }
+        Instr::Enter { stack, level } => {
+            out.push(0xC8);
+            out.extend_from_slice(&stack.to_le_bytes());
+            out.push(*level);
+        }
+        Instr::Leave => out.push(0xC9),
         Instr::Ret => out.push(0xC3),
         Instr::RetImm16 { imm } => {
             out.push(0xC2);

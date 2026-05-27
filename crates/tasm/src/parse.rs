@@ -382,6 +382,11 @@ fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
             if rest == "es" {
                 return Ok(Instr::PushEs);
             }
+            // `push <imm8sx>` — 186+ sign-extended-byte push. The
+            // operand is a decimal/signed literal that fits in i8.
+            if let Some(imm) = parse_imm8_signed(rest) {
+                return Ok(Instr::PushImm8Sx { imm });
+            }
             if let Some(reg) = Reg16::parse(rest) {
                 return Ok(Instr::PushReg16 { reg });
             }
@@ -923,6 +928,20 @@ fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
             } else {
                 Err(AsmError::new(line.line_no, format!("ret: bad operand `{rest}`")))
             }
+        }
+        "leave" if rest.is_empty() => Ok(Instr::Leave),
+        "enter" => {
+            // `enter <stack>, <level>` — 186 prologue.
+            let (s, l) = split_comma(rest).ok_or_else(|| {
+                AsmError::new(line.line_no, format!("enter: expected `stack, level`, got {rest:?}"))
+            })?;
+            let stack = parse_imm16(s).ok_or_else(|| {
+                AsmError::new(line.line_no, format!("enter: bad stack `{s}`"))
+            })?;
+            let level = parse_imm8(l).ok_or_else(|| {
+                AsmError::new(line.line_no, format!("enter: bad level `{l}`"))
+            })?;
+            Ok(Instr::Enter { stack: stack as u16, level: level as u8 })
         }
         "retf" => {
             if rest.is_empty() {
@@ -3084,9 +3103,19 @@ fn parse_shl_one(operands: &str, line_no: usize) -> AsmResult<Instr> {
         AsmError::new(line_no, format!("shl: expected `lhs,rhs`, got {operands:?}"))
     })?;
     if rhs != "1" {
+        // 80186+ multi-bit shift form: `shl <reg16>, <imm8>` with
+        // imm in [2, 31] (a C shift count can validly be 0..=31 for
+        // i16). Encoded `C1 /4 ib`, 3 bytes.
+        if let Some(reg) = Reg16::parse(lhs)
+            && let Ok(imm) = rhs.parse::<u8>()
+            && imm >= 2
+            && imm <= 31
+        {
+            return Ok(Instr::ShlReg16Imm8 { reg, imm });
+        }
         return Err(AsmError::new(
             line_no,
-            format!("shl: only `<reg>,1` and `ax,cl` forms supported (got `{rhs}`)"),
+            format!("shl: only `<reg>,1`, `<reg16>,<imm8>`, and `ax,cl` forms supported (got `{rhs}`)"),
         ));
     }
     // 8-bit form first (fixture 535: `shl dl,1`).
