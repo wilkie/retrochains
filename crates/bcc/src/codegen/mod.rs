@@ -13364,6 +13364,39 @@ impl<'a> FunctionEmitter<'a> {
             );
             return;
         }
+        // Global char array variable-index compound add/sub/bitwise:
+        // route through AL then `<mnem> byte ptr [arr+bx], al`.
+        // Fixture 3522 (`arr[i] += v` for char arr, char v).
+        if let Some(gty) = self.globals.type_of(array)
+            && let Some(elem_ty) = gty.array_elem()
+            && elem_ty.is_char_like()
+            && indices.len() == 1
+            && matches!(
+                op,
+                BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor
+            )
+        {
+            let elem_ty = elem_ty.clone();
+            let mnem = match op {
+                BinOp::Add => "add",
+                BinOp::Sub => "sub",
+                BinOp::BitAnd => "and",
+                BinOp::BitOr => "or",
+                BinOp::BitXor => "xor",
+                _ => unreachable!(),
+            };
+            if try_const_eval(value).is_none()
+                && let Some(rhs_byte) = self.rhs_byte_addr(&value.kind)
+            {
+                let _ = write!(self.out, "\tmov\tal,{rhs_byte}\r\n");
+                self.emit_index_into_bx(&indices[0], &elem_ty);
+                let _ = write!(
+                    self.out,
+                    "\t{mnem}\tbyte ptr DGROUP:_{array}[bx],al\r\n",
+                );
+                return;
+            }
+        }
         let array_ty = self.locals.type_of(array).clone();
         let LocalLocation::Stack(base_off) = self.locals.location_of(array) else {
             panic!("array `{array}` should be stack-resident");

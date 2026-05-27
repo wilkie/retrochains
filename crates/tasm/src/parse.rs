@@ -2476,6 +2476,18 @@ fn parse_add(operands: &str, line_no: usize) -> AsmResult<Instr> {
             });
         }
     }
+    // `add byte ptr <group>:<sym>[bx], <reg8>` — byte sibling
+    // (fixture 3522: char arr += char v).
+    if let Some((group, symbol, disp)) = parse_byte_group_symbol_bx_disp(lhs)
+        && let Some(reg) = Reg8::parse(rhs)
+    {
+        return Ok(Instr::AddGroupSymBxDispReg8 {
+            reg,
+            group: group.to_string(),
+            symbol: symbol.to_string(),
+            disp,
+        });
+    }
     // `add word ptr [bx+disp8], ax` — global-pointer subscript
     // compound `int *p; p[K] += y` where BCC loaded the pointer
     // into BX (fixture 862, 879).

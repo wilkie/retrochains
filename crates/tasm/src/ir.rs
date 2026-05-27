@@ -510,6 +510,44 @@ pub enum Instr {
         symbol: String,
         disp: u16,
     },
+    /// `add byte ptr <group>:<sym>[bx], <reg8>` — `00 (mod=10
+    /// reg=<r> r/m=111) lo hi`. Byte sibling of AddGroupSymBxDispReg16.
+    /// Fixture 3522.
+    AddGroupSymBxDispReg8 {
+        reg: Reg8,
+        group: String,
+        symbol: String,
+        disp: u16,
+    },
+    /// `sub byte ptr <group>:<sym>[bx], <reg8>` — `28 (mod=10
+    /// reg=<r> r/m=111) lo hi`.
+    SubGroupSymBxDispReg8 {
+        reg: Reg8,
+        group: String,
+        symbol: String,
+        disp: u16,
+    },
+    /// `and byte ptr <group>:<sym>[bx], <reg8>` — `20 ...`.
+    AndGroupSymBxDispReg8 {
+        reg: Reg8,
+        group: String,
+        symbol: String,
+        disp: u16,
+    },
+    /// `or byte ptr <group>:<sym>[bx], <reg8>` — `08 ...`.
+    OrGroupSymBxDispReg8 {
+        reg: Reg8,
+        group: String,
+        symbol: String,
+        disp: u16,
+    },
+    /// `xor byte ptr <group>:<sym>[bx], <reg8>` — `30 ...`.
+    XorGroupSymBxDispReg8 {
+        reg: Reg8,
+        group: String,
+        symbol: String,
+        disp: u16,
+    },
     /// `sub word ptr <group>:<sym>[bx], <reg16>` — `29 (mod=10
     /// reg=<r> r/m=111) lo hi`. Sibling.
     SubGroupSymBxDispReg16 {
