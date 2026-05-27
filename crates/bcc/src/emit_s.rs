@@ -962,13 +962,20 @@ fn write_tail(
             }
         }
     }
-    for helper in helpers {
+    // Helpers (runtime-library externs like `N_LXLSH@`,
+    // `N_OVERFLOW@`, `___brklvl`) are emitted BEFORE the publics-
+    // bucket walk in ASCII-sorted order. BCC's EXTDEF order is not
+    // covered by the publics-bucket hash; sorting alphabetically
+    // matches both single-helper and multi-helper fixtures (228,
+    // 2129). Fixture 2129 (`-N` stack check) pinned this rule.
+    let mut helper_sorted: Vec<&String> = helpers.iter().collect();
+    helper_sorted.sort();
+    for helper in helper_sorted {
         // `___brklvl` is a word-sized data extern (the runtime's
         // stack-break sentinel); everything else in the helper bag
         // is a far-call target like `N_LXLSH@`, `N_OVERFLOW@`, etc.
         let width = if helper == "___brklvl" { "word" } else { "far" };
-        let line = format!("\textrn\t{helper}:{width}\r\n");
-        insert(helper.clone(), line, &mut chain, &mut by_sym);
+        let _ = write!(out, "\textrn\t{helper}:{width}\r\n");
     }
     // Emit: buckets in REVERSE order, chain in REVERSE order.
     for i in (0..PUBS_TABLE_SIZE).rev() {
