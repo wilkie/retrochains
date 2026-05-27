@@ -13134,9 +13134,28 @@ impl<'a> FunctionEmitter<'a> {
             && try_const_eval(value) == Some(1)
         {
             let elem_ty_clone = elem_ty.clone();
-            self.emit_index_into_bx(&indices[0], &elem_ty_clone);
             let mnem = if matches!(op, BinOp::Add) { "inc" } else { "dec" };
             let width = if elem_ty_clone.is_char_like() { "byte" } else { "word" };
+            // Index is a register-resident int local AND the stride
+            // is 1 (char element): use the direct `[<reg>+<sym>]`
+            // addressing mode — no BX bounce needed. Fixture 3516
+            // (`char arr[5]; arr[i]++` with i in SI).
+            if elem_ty_clone.is_char_like()
+                && let ExprKind::Ident(idx_name) = &indices[0].kind
+                && self.locals.has(idx_name)
+                && self.locals.type_of(idx_name).is_int_like()
+                && let LocalLocation::Reg(idx_reg) = self.locals.location_of(idx_name)
+                && !idx_reg.is_byte()
+                && matches!(idx_reg, crate::codegen::locals::Reg::Si | crate::codegen::locals::Reg::Di)
+            {
+                let _ = write!(
+                    self.out,
+                    "\t{mnem}\t{width} ptr DGROUP:_{array}[{}]\r\n",
+                    idx_reg.name(),
+                );
+                return;
+            }
+            self.emit_index_into_bx(&indices[0], &elem_ty_clone);
             let _ = write!(
                 self.out,
                 "\t{mnem}\t{width} ptr DGROUP:_{array}[bx]\r\n",

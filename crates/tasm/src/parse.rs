@@ -706,6 +706,23 @@ fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
                     disp,
                 });
             }
+            // `inc byte ptr <group>:<sym>[si]` / `[di]` — SI/DI
+            // sibling. Used when the index local lives in SI or DI
+            // directly. Fixture 3516.
+            if let Some((group, symbol, disp)) = parse_byte_group_symbol_reg_disp(rest, "si") {
+                return Ok(Instr::IncGroupSymSiDispByte {
+                    group: group.to_string(),
+                    symbol: symbol.to_string(),
+                    disp,
+                });
+            }
+            if let Some((group, symbol, disp)) = parse_byte_group_symbol_reg_disp(rest, "di") {
+                return Ok(Instr::IncGroupSymDiDispByte {
+                    group: group.to_string(),
+                    symbol: symbol.to_string(),
+                    disp,
+                });
+            }
             // `inc word ptr <group>:<sym>[+N]` — memory-direct
             // increment of a data-segment global. Fixture 512.
             if let Some((group, symbol)) = parse_group_symbol(rest) {
@@ -775,6 +792,21 @@ fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
             // decrement.
             if let Some((group, symbol, disp)) = parse_group_symbol_bx_disp(rest) {
                 return Ok(Instr::DecGroupSymBxDisp {
+                    group: group.to_string(),
+                    symbol: symbol.to_string(),
+                    disp,
+                });
+            }
+            // `dec byte ptr <group>:<sym>[si]` / `[di]` siblings.
+            if let Some((group, symbol, disp)) = parse_byte_group_symbol_reg_disp(rest, "si") {
+                return Ok(Instr::DecGroupSymSiDispByte {
+                    group: group.to_string(),
+                    symbol: symbol.to_string(),
+                    disp,
+                });
+            }
+            if let Some((group, symbol, disp)) = parse_byte_group_symbol_reg_disp(rest, "di") {
+                return Ok(Instr::DecGroupSymDiDispByte {
                     group: group.to_string(),
                     symbol: symbol.to_string(),
                     disp,
@@ -3858,6 +3890,48 @@ fn parse_group_symbol_bx_disp(s: &str) -> Option<(&str, &str, u16)> {
 /// Byte-width sibling of `parse_group_symbol_bx_disp`.
 fn parse_byte_group_symbol_bx_disp(s: &str) -> Option<(&str, &str, u16)> {
     parse_group_symbol_bx_disp_width(s, "byte")
+}
+
+/// `byte ptr <group>:<sym>[<reg>]` for an arbitrary index register
+/// (used for SI/DI alongside the BX shape).
+fn parse_byte_group_symbol_reg_disp<'a>(s: &'a str, reg: &str) -> Option<(&'a str, &'a str, u16)> {
+    let prefix = "byte ptr ";
+    let s = s.trim().strip_prefix(prefix)?;
+    let (group, rest) = s.split_once(':')?;
+    let group = group.trim();
+    let (sym_part, idx_part) = rest.split_once('[')?;
+    let sym_part = sym_part.trim();
+    let (sym, sym_disp): (&str, i32) = if let Some(idx) = sym_part.rfind('+') {
+        let (s, d) = sym_part.split_at(idx);
+        let d_val = d[1..].parse::<i32>().ok()?;
+        (s, d_val)
+    } else if let Some(idx) = sym_part.rfind('-') {
+        if idx == 0 {
+            (sym_part, 0)
+        } else {
+            let (s, d) = sym_part.split_at(idx);
+            let d_val = d.parse::<i32>().ok()?;
+            (s, d_val)
+        }
+    } else {
+        (sym_part, 0)
+    };
+    if !sym.starts_with('_') && !sym.starts_with('@') {
+        return None;
+    }
+    let idx = idx_part.strip_suffix(']')?.trim();
+    let reg_disp = if idx == reg {
+        0i32
+    } else if let Some(k) = idx.strip_prefix(&format!("{reg}+")) {
+        k.trim().parse::<i32>().ok()?
+    } else if let Some(k) = idx.strip_prefix(&format!("{reg}-")) {
+        -k.trim().parse::<i32>().ok()?
+    } else {
+        return None;
+    };
+    let total = sym_disp.checked_add(reg_disp)?;
+    let disp = u16::try_from(total & 0xFFFF).ok()?;
+    Some((group, sym, disp))
 }
 
 fn parse_group_symbol_bx_disp_width<'a>(s: &'a str, width: &str) -> Option<(&'a str, &'a str, u16)> {

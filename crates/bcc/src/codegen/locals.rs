@@ -1804,12 +1804,16 @@ fn stmt_has_name_as_char_array_index(
                 && indices.iter().any(|i| expr_mentions(name, i))
                 && matches!(&value.kind, ExprKind::Ident(n) if n == name)
         }
-        StmtKind::ArrayCompoundAssign { array, indices, .. } => {
-            // For compound assigns (`+=`), keep the conservative
-            // check: any reference to the index in the value side
-            // counts.
+        StmtKind::ArrayCompoundAssign { array, indices, value, .. } => {
+            // `arr[i] <op>= <value>`: DX preference only when the
+            // value side also mentions the index identifier (so the
+            // same `mov al, dl` shape that justifies the DX pick on
+            // plain `arr[i] = i` actually fires). `arr[i] += K` for
+            // a constant K (and the `arr[i]++` lowering to `arr[i]
+            // += 1`) keeps SI. Fixture 3516 (`arr[i]++`).
             char_arrays.contains(array.as_str())
                 && indices.iter().any(|i| expr_mentions(name, i))
+                && expr_mentions(name, value)
         }
         StmtKind::If { then_branch, else_branch, .. } => {
             name_in_char_array_index_body(name, then_branch, char_arrays)

@@ -682,25 +682,32 @@ fn write_tail(
         by_sym.insert(sym, line);
     };
     // Insertion order matches BCC's parser/sema encounter order:
-    // walk the source-order list of (functions, globals, helpers).
-    // BCC sees declarations in source order; functions and globals
-    // are interleaved per-declaration in real BCC, but our AST
-    // groups them — luckily collisions are rare enough that
-    // grouping doesn't matter for our corpus.
-    for f in &unit.functions {
-        if f.body.is_some() && !f.is_static {
-            let sym = codegen::function_symbol(&f.name);
-            let line = format!("\tpublic\t{sym}\r\n");
-            insert(sym, line, &mut chain, &mut by_sym);
+    // walk in TRUE source-declaration order (functions and globals
+    // interleaved as they appear in the source) so that hash-bucket
+    // collisions resolve LIFO the same way BCC's symbol table does.
+    // Fixture 3575 (`char arr[5]; void init(...)`): both hash to
+    // the same bucket; source order arr-then-init means the LIFO
+    // chain emits init first.
+    for entry in &unit.decl_order {
+        match entry {
+            crate::ast::TopLevelRef::Function(idx) => {
+                let f = &unit.functions[*idx];
+                if f.body.is_some() && !f.is_static {
+                    let sym = codegen::function_symbol(&f.name);
+                    let line = format!("\tpublic\t{sym}\r\n");
+                    insert(sym, line, &mut chain, &mut by_sym);
+                }
+            }
+            crate::ast::TopLevelRef::Global(idx) => {
+                let g = &unit.globals[*idx];
+                if g.is_static || g.is_extern {
+                    continue;
+                }
+                let sym = format!("_{}", g.name);
+                let line = format!("\tpublic\t{sym}\r\n");
+                insert(sym, line, &mut chain, &mut by_sym);
+            }
         }
-    }
-    for g in &unit.globals {
-        if g.is_static || g.is_extern {
-            continue;
-        }
-        let sym = format!("_{}", g.name);
-        let line = format!("\tpublic\t{sym}\r\n");
-        insert(sym, line, &mut chain, &mut by_sym);
     }
     for helper in helpers {
         let line = format!("\textrn\t{helper}:far\r\n");

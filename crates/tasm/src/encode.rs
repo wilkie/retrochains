@@ -265,7 +265,9 @@ fn instr_size(instr: &Instr) -> usize {
         Instr::AddReg16GroupSymBxDisp { .. } => 4,
         Instr::CmpGroupSymBxDispImm8 { .. } => 5,
         Instr::IncGroupSymBxDisp { .. } | Instr::DecGroupSymBxDisp { .. }
-        | Instr::IncGroupSymBxDispByte { .. } | Instr::DecGroupSymBxDispByte { .. } => 4,
+        | Instr::IncGroupSymBxDispByte { .. } | Instr::DecGroupSymBxDispByte { .. }
+        | Instr::IncGroupSymSiDispByte { .. } | Instr::DecGroupSymSiDispByte { .. }
+        | Instr::IncGroupSymDiDispByte { .. } | Instr::DecGroupSymDiDispByte { .. } => 4,
         Instr::AddGroupSymBxDispImm8Sx { .. } | Instr::SubGroupSymBxDispImm8Sx { .. } => 5,
         Instr::AddGroupSymBxDispImm16 { .. } | Instr::SubGroupSymBxDispImm16 { .. } => 6,
         Instr::AddGroupSymBxDispReg16 { .. } | Instr::SubGroupSymBxDispReg16 { .. }
@@ -1627,6 +1629,18 @@ fn emit_instr(
         }
         Instr::DecGroupSymBxDispByte { group, symbol, disp } => {
             emit_group_sym_lea(&[0xFE, 0x8F], group, symbol, *disp as i16, symbols, group_idx, extern_idx, out, fixups)?;
+        }
+        Instr::IncGroupSymSiDispByte { group, symbol, disp } => {
+            emit_group_sym_lea(&[0xFE, 0x84], group, symbol, *disp as i16, symbols, group_idx, extern_idx, out, fixups)?;
+        }
+        Instr::IncGroupSymDiDispByte { group, symbol, disp } => {
+            emit_group_sym_lea(&[0xFE, 0x85], group, symbol, *disp as i16, symbols, group_idx, extern_idx, out, fixups)?;
+        }
+        Instr::DecGroupSymSiDispByte { group, symbol, disp } => {
+            emit_group_sym_lea(&[0xFE, 0x8C], group, symbol, *disp as i16, symbols, group_idx, extern_idx, out, fixups)?;
+        }
+        Instr::DecGroupSymDiDispByte { group, symbol, disp } => {
+            emit_group_sym_lea(&[0xFE, 0x8D], group, symbol, *disp as i16, symbols, group_idx, extern_idx, out, fixups)?;
         }
         Instr::AddGroupSymBxDispImm8Sx { group, symbol, disp, imm } => {
             emit_group_sym_lea(&[0x83, 0x87], group, symbol, *disp as i16, symbols, group_idx, extern_idx, out, fixups)?;

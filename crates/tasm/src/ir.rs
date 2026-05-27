@@ -495,6 +495,17 @@ pub enum Instr {
     IncGroupSymBxDispByte { group: String, symbol: String, disp: u16 },
     /// `dec byte ptr <group>:<sym>[bx]` — `FE 8F lo hi`. Grp4 /1.
     DecGroupSymBxDispByte { group: String, symbol: String, disp: u16 },
+    /// `inc byte ptr <group>:<sym>[si]` — `FE 84 lo hi`. Grp4 /0
+    /// with mod=10 r/m=100 (SI + disp16). Used when the index local
+    /// already lives in SI/DI; saves the `mov bx, si` bounce.
+    /// Fixture 3516 (`char arr[N]; arr[i]++` with i in SI).
+    IncGroupSymSiDispByte { group: String, symbol: String, disp: u16 },
+    /// `inc byte ptr <group>:<sym>[di]` — `FE 85 lo hi`.
+    IncGroupSymDiDispByte { group: String, symbol: String, disp: u16 },
+    /// `dec byte ptr <group>:<sym>[si]` — `FE 8C lo hi`. Grp4 /1.
+    DecGroupSymSiDispByte { group: String, symbol: String, disp: u16 },
+    /// `dec byte ptr <group>:<sym>[di]` — `FE 8D lo hi`.
+    DecGroupSymDiDispByte { group: String, symbol: String, disp: u16 },
     /// `add word ptr <group>:<sym>[bx], imm8sx` — `83 87 lo hi ii`.
     /// Grp1 /0 with an indexed global memory operand and a
     /// sign-extended byte immediate.
