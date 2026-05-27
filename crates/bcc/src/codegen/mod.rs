@@ -20884,7 +20884,7 @@ impl<'a> FunctionEmitter<'a> {
         }
     }
 
-    fn resolve_operand_source(&self, e: &Expr) -> OperandSource {
+    fn resolve_operand_source(&mut self, e: &Expr) -> OperandSource {
         if let Some(v) = try_const_eval(e) {
             return OperandSource::Immediate(v);
         }
@@ -21035,6 +21035,50 @@ impl<'a> FunctionEmitter<'a> {
                 {
                     return OperandSource::DerefRegOffset {
                         reg,
+                        offset: field_off as i16,
+                    };
+                }
+                // `<lvalue-chain>-><field>` as RHS where the base
+                // chain folds to a const-offset lvalue (stack or
+                // global): load the pointer-typed lvalue into BX,
+                // then deref with `[bx+field_off]`. Fixtures 1928
+                // (stack struct `a.next->v`), 2310 (static struct).
+                if let Some((src_name, total_off, src_ty)) =
+                    self.try_lvalue_chain_addr(base)
+                    && let Some(pointee) = src_ty.pointee()
+                    && let Some((field_off, _ft)) = {
+                        // Self-referential structs carry a name-only
+                        // placeholder for the pointee; resolve via the
+                        // globals tag table when fields are empty.
+                        let resolved = match pointee {
+                            Type::Struct { name: Some(tag), fields, .. }
+                                if fields.is_empty() =>
+                            {
+                                self.globals.lookup_struct_by_tag(tag).cloned()
+                                    .unwrap_or_else(|| pointee.clone())
+                            }
+                            _ => pointee.clone(),
+                        };
+                        resolved.field(field).map(|(o, t)| (o, t))
+                    }
+                {
+                    let src_addr = if self.globals.contains(&src_name) {
+                        if total_off == 0 {
+                            format!("DGROUP:_{src_name}")
+                        } else {
+                            format!("DGROUP:_{src_name}+{total_off}")
+                        }
+                    } else if let LocalLocation::Stack(base_bp) =
+                        self.locals.location_of(&src_name)
+                    {
+                        let off = i32::from(base_bp) + total_off as i32;
+                        bp_addr(i16::try_from(off).unwrap_or(i16::MAX))
+                    } else {
+                        panic!("`p->x` base lvalue `{src_name}` not stack/global");
+                    };
+                    let _ = write!(self.out, "\tmov\tbx,word ptr {src_addr}\r\n");
+                    return OperandSource::DerefRegOffset {
+                        reg: crate::codegen::locals::Reg::Bx,
                         offset: field_off as i16,
                     };
                 }

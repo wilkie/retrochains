@@ -1047,15 +1047,18 @@ impl Parser {
             // initializer. Subsequent dimensions must be explicit.
             // Multi-dim wraps innermost-first like `parse_declare`
             // so `int a[2][3]` becomes `Array{2, Array{3, Int}}`.
-            // Fixture 492.
-            let mut inferred_len_marker: Option<Box<Type>> = None;
+            // Fixture 492. Multi-dim flex (`int m[][3]`): only the
+            // outermost dim can be `[]`; the rest carry explicit
+            // sizes. We remember the marker and fill it after the
+            // trailing dims wrap into ty. Fixture 2763.
+            let mut inferred_len_marker: bool = false;
             let mut array_lens: Vec<u32> = Vec::new();
             let mut first_suffix = true;
             while matches!(self.peek().kind, TokenKind::LBracket) {
                 self.bump();
                 if first_suffix && matches!(self.peek().kind, TokenKind::RBracket) {
                     self.bump();
-                    inferred_len_marker = Some(Box::new(ty.clone()));
+                    inferred_len_marker = true;
                     first_suffix = false;
                     continue;
                 }
@@ -1096,7 +1099,7 @@ impl Parser {
             } else {
                 None
             };
-            if let Some(elem) = inferred_len_marker {
+            if inferred_len_marker {
                 let len = match init.as_ref().map(|i| &i.kind) {
                     Some(ExprKind::StringLit(bytes)) => {
                         u32::try_from(bytes.len() + 1).expect("string length fits in u32")
@@ -1119,7 +1122,9 @@ impl Parser {
                         });
                     }
                 };
-                ty = Type::Array { elem, len };
+                // Wrap the already-built inner type (with trailing
+                // explicit dims) in the outermost inferred dim.
+                ty = Type::Array { elem: Box::new(ty), len };
             }
             self.global_types.insert(name.clone(), ty.clone());
             globals.push(Global {
