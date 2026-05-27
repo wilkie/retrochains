@@ -44,6 +44,7 @@ pub fn emit_dash_s(
     unsigned_chars: bool,
     optimize: bool,
     target_186: bool,
+    stack_check: bool,
 ) -> Result<PathBuf, EmitError> {
     let source = fs::read_to_string(source_path)
         .map_err(|e| EmitError::SourceRead(source_path.to_owned(), e))?;
@@ -62,7 +63,7 @@ pub fn emit_dash_s(
         .map_or_else(|| "out.c".to_owned(), str::to_ascii_lowercase);
     let output_path = PathBuf::from(format!("{}.ASM", basename.to_ascii_uppercase()));
 
-    let bytes = build_asm(&source, &lowered, mtime, merge_strings, defines, unsigned_chars, optimize, target_186)?;
+    let bytes = build_asm(&source, &lowered, mtime, merge_strings, defines, unsigned_chars, optimize, target_186, stack_check)?;
     fs::write(&output_path, bytes)?;
     Ok(output_path)
 }
@@ -81,6 +82,7 @@ pub fn build_asm(
     unsigned_chars: bool,
     optimize: bool,
     target_186: bool,
+    stack_check: bool,
 ) -> Result<Vec<u8>, EmitError> {
     // C preprocessor pass: resolve `#define`/`#ifdef`/`#if` and
     // expand object/function-like macros. Stripped directive lines
@@ -147,6 +149,7 @@ pub fn build_asm(
             &mut strings,
             &mut helpers,
             target_186,
+            stack_check,
         );
     }
 
@@ -960,7 +963,11 @@ fn write_tail(
         }
     }
     for helper in helpers {
-        let line = format!("\textrn\t{helper}:far\r\n");
+        // `___brklvl` is a word-sized data extern (the runtime's
+        // stack-break sentinel); everything else in the helper bag
+        // is a far-call target like `N_LXLSH@`, `N_OVERFLOW@`, etc.
+        let width = if helper == "___brklvl" { "word" } else { "far" };
+        let line = format!("\textrn\t{helper}:{width}\r\n");
         insert(helper.clone(), line, &mut chain, &mut by_sym);
     }
     // Emit: buckets in REVERSE order, chain in REVERSE order.

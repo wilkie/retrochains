@@ -501,6 +501,7 @@ fn instr_size(instr: &Instr) -> usize {
         | Instr::OrGroupSymImm16 { .. }
         | Instr::XorGroupSymImm16 { .. }
         | Instr::CmpGroupSymImm16 { .. } => 6,
+        Instr::CmpGroupSymReg16 { .. } => 4,
         Instr::Cbw => 1,
         Instr::LeaReg16BpRel { offset, .. } => 1 + bp_rel_modrm_size(*offset),
         Instr::MovSiPtrImm { .. } | Instr::MovBxPtrImm { .. } | Instr::MovDiPtrImm { .. } => 4,
@@ -2119,6 +2120,13 @@ fn emit_instr(
             // Wider sibling for K outside i8sx range (fixture 282).
             emit_group_sym_lea(&[0x81, 0x3E], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
             out.extend_from_slice(&imm.to_le_bytes());
+        }
+        Instr::CmpGroupSymReg16 { group, symbol, reg } => {
+            // `cmp word ptr <group>:<sym>, <r16>` → 39 (mod=00
+            // reg=<r> r/m=110([disp16])) lo hi. Used by the `-N`
+            // stack-overflow prologue. Fixture 2129.
+            let modrm = 0b00_000_110 | (reg.code() << 3);
+            emit_group_sym_lea(&[0x39, modrm], group, symbol, 0, symbols, group_idx, extern_idx, out, fixups)?;
         }
         Instr::CmpByteGroupSymImm8 { group, symbol, offset, imm } => {
             // `cmp byte ptr <group>:<sym>[+N], imm8` → 80 3E lo hi ii.

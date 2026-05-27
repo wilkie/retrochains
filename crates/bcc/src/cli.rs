@@ -37,6 +37,11 @@ pub struct ParsedArgs {
     /// extensions we care about (these three) were already in
     /// the 186. Fixtures 2134, 2276.
     pub target_186: bool,
+    /// `-N`: insert a stack-overflow check at every function
+    /// entry. BCC emits `cmp word ptr ___brklvl, sp; jb @skip;
+    /// call near ptr N_OVERFLOW@; @skip:` right after the
+    /// prologue. Fixture 2129.
+    pub stack_check: bool,
     /// Input source files, in the order given on the command line.
     pub sources: Vec<PathBuf>,
 }
@@ -83,6 +88,7 @@ pub fn parse_args(argv: &[String]) -> Result<ParsedArgs, CliError> {
     let mut unsigned_chars = false;
     let mut optimize = false;
     let mut target_186 = false;
+    let mut stack_check = false;
     let mut defines: Vec<(String, String)> = Vec::new();
     let mut sources: Vec<PathBuf> = Vec::new();
     for arg in argv {
@@ -94,6 +100,7 @@ pub fn parse_args(argv: &[String]) -> Result<ParsedArgs, CliError> {
             "-K" => unsigned_chars = true,
             "-O" | "-O2" => optimize = true,
             "-1" | "-2" => target_186 = true,
+            "-N" => stack_check = true,
             other if other.starts_with("-D") => {
                 // `-D<NAME>` or `-D<NAME>=<body>`. Fixtures 2131
                 // (`-DFOO=42`), 2280 (`-DDEBUG=42`).
@@ -120,7 +127,7 @@ pub fn parse_args(argv: &[String]) -> Result<ParsedArgs, CliError> {
             //   -r-      disable register allocator
             //   -f-      no FPU
             // Fixtures 2123-2137, 2261-2263.
-            "-G" | "-N" | "-A"
+            "-G" | "-A"
             | "-r-" | "-f-" | "-N-" => {}
             other if other.starts_with('-') => {
                 return Err(CliError::Unsupported(other.to_owned()));
@@ -141,6 +148,7 @@ pub fn parse_args(argv: &[String]) -> Result<ParsedArgs, CliError> {
         unsigned_chars,
         optimize,
         target_186,
+        stack_check,
         sources,
     })
 }

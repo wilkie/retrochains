@@ -588,11 +588,13 @@ pub fn emit_function(
     strings: &mut StringPool,
     helpers: &mut std::collections::HashSet<String>,
     target_186: bool,
+    stack_check: bool,
 ) {
     let mut emitter = FunctionEmitter::new(
         out, source, function, func_idx, signatures, globals, strings, helpers,
     );
     emitter.target_186 = target_186;
+    emitter.stack_check = stack_check;
     emitter.run();
 }
 
@@ -669,6 +671,10 @@ struct FunctionEmitter<'a> {
     /// `shl r16, imm8` form for multi-bit shifts. Fixtures 2134,
     /// 2276, 2277.
     target_186: bool,
+    /// `-N` flag: emit stack-overflow check after the prologue.
+    /// Compares `___brklvl` against `sp`; calls `N_OVERFLOW@` if
+    /// sp has dropped at or below the break level. Fixture 2129.
+    stack_check: bool,
 }
 
 /// Innermost enclosing construct that catches `break;` (and maybe
@@ -713,6 +719,7 @@ impl<'a> FunctionEmitter<'a> {
             pending_post_update: None,
             in_arg_expr: false,
             target_186: false,
+            stack_check: false,
         }
     }
 
@@ -811,6 +818,21 @@ impl<'a> FunctionEmitter<'a> {
                     let _ = write!(self.out, "\tsub\tsp,{n}\r\n");
                 }
             }
+        }
+        // `-N` stack-overflow check, emitted between the stack-frame
+        // allocation and the callee-saved register pushes. Compares
+        // the current `sp` against the global `___brklvl` (the
+        // runtime's stack-break sentinel). If brklvl < sp (we still
+        // have headroom), skip the helper; otherwise call
+        // `N_OVERFLOW@`. Fixture 2129.
+        if self.stack_check {
+            let skip_label = format!("@{}@brk", self.func_idx);
+            self.out.extend_from_slice(b"\tcmp\tword ptr DGROUP:___brklvl,sp\r\n");
+            let _ = write!(self.out, "\tjb\tshort {skip_label}\r\n");
+            self.out.extend_from_slice(b"\tcall\tnear ptr N_OVERFLOW@\r\n");
+            let _ = write!(self.out, "{skip_label}:\r\n");
+            self.helpers.insert("N_OVERFLOW@".to_string());
+            self.helpers.insert("___brklvl".to_string());
         }
         for reg in self.locals.saved_regs() {
             let _ = write!(self.out, "\tpush\t{}\r\n", reg.name());

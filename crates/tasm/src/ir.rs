@@ -1222,6 +1222,15 @@ pub enum Instr {
         offset: i16,
         imm: u16,
     },
+    /// `cmp word ptr <group>:<sym>, <reg16>` — compare a data-segment
+    /// word memory operand against a register. Encoding: `39 /r`
+    /// with ModR/M [disp16] form. Used by the `-N` stack-check
+    /// prologue (`cmp ___brklvl, sp`). Fixture 2129.
+    CmpGroupSymReg16 {
+        group: String,
+        symbol: String,
+        reg: Reg16,
+    },
     /// `cmp word ptr <group>:<symbol>[+<offset>], imm8 (sx)` — Grp1
     /// r/m16,imm8sx with /7=CMP and disp16-only addressing
     /// (`83 3E lo hi ii`, 5 bytes). Used by long const-compare

@@ -3061,6 +3061,19 @@ fn parse_cmp(operands: &str, line_no: usize) -> AsmResult<Instr> {
             return Ok(Instr::CmpReg8Imm8 { reg, imm });
         }
     }
+    // `cmp word ptr <group>:<sym>, <reg16>` — used by the `-N`
+    // stack-overflow check (fixture 2129). Match `word ptr` LHS +
+    // bare register RHS.
+    if let Some((group, symbol)) = parse_group_symbol_with_width(lhs, "word ptr ")
+        && let Some(reg) = Reg16::parse(rhs)
+    {
+        let (sym, _off) = split_sym_offset(symbol);
+        return Ok(Instr::CmpGroupSymReg16 {
+            group: group.to_string(),
+            symbol: sym.to_string(),
+            reg,
+        });
+    }
     Err(AsmError::new(
         line_no,
         format!("cmp: unsupported operand form `{operands}`"),
