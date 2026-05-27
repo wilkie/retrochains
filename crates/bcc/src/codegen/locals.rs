@@ -586,12 +586,20 @@ impl Locals {
         // restriction the source-order assignment already matches.
         // Fixtures 1980 (call → DI), 1700 (imul → CX/DI/BX choose
         // by count).
+        let function_has_array_index_any = body_has_array_index(
+            function.body.as_deref().unwrap_or(&[]),
+        );
         let mut ordered_eligibles: Vec<usize> = eligible_int.to_vec();
-        if function_makes_call || function_has_imul_now || function_has_2d_array_index {
+        if function_makes_call
+            || function_has_imul_now
+            || function_has_2d_array_index
+            || function_has_array_index_any
+        {
             // Stable sort by use count descending (ties keep source
-            // order). Extending the sort to 2D-array-index functions
-            // matches BCC's behaviour in fixture 1700 (`sum += a[i]
-            // [j]`): j (5 uses) takes DI ahead of sum (4 uses).
+            // order). Extending the sort to any-array-index
+            // functions matches BCC's behaviour in fixture 3003
+            // (`s = s + a[i]`: `s` (4 uses) takes DI ahead of `n`
+            // (2 uses, param) even though `n` is declared earlier).
             ordered_eligibles.sort_by(|&a, &b| {
                 let ca = counts.get(&declared[a].name).copied().unwrap_or(0);
                 let cb = counts.get(&declared[b].name).copied().unwrap_or(0);
@@ -2248,6 +2256,93 @@ fn body_emits_imul(body: &[Stmt], char_locals: &HashSet<&str>) -> bool {
 /// because BCC always uses BX as the indexed-address register.
 fn body_has_2d_array_index(body: &[Stmt]) -> bool {
     body.iter().any(stmt_has_2d_array_index)
+}
+
+/// True iff the function body contains any ArrayIndex expression
+/// (or array assign / compound-assign). Used to widen the
+/// use-count sort to functions that touch arrays — BCC's
+/// allocator reshuffles the non-SI pool by use count when the
+/// body has array indexing, even at 1D. Fixture 3003.
+fn body_has_array_index(body: &[Stmt]) -> bool {
+    body.iter().any(stmt_has_array_index)
+}
+
+fn stmt_has_array_index(stmt: &Stmt) -> bool {
+    match &stmt.kind {
+        StmtKind::Return(value) => value.as_ref().is_some_and(expr_has_array_index),
+        StmtKind::Declare { init, .. } => init.as_ref().is_some_and(expr_has_array_index),
+        StmtKind::Assign { value, .. }
+        | StmtKind::CompoundAssign { value, .. } => expr_has_array_index(value),
+        StmtKind::If { cond, then_branch, else_branch } => {
+            expr_has_array_index(cond)
+                || then_branch.iter().any(stmt_has_array_index)
+                || else_branch
+                    .as_ref()
+                    .is_some_and(|e| e.iter().any(stmt_has_array_index))
+        }
+        StmtKind::While { cond, body } | StmtKind::DoWhile { body, cond } => {
+            expr_has_array_index(cond) || body.iter().any(stmt_has_array_index)
+        }
+        StmtKind::For { init, cond, step, body } => {
+            init.as_ref()
+                .is_some_and(|e| e.iter().any(expr_has_array_index))
+                || cond.as_ref().is_some_and(expr_has_array_index)
+                || step
+                    .as_ref()
+                    .is_some_and(|e| e.iter().any(expr_has_array_index))
+                || body.iter().any(stmt_has_array_index)
+        }
+        StmtKind::Switch { scrutinee, cases } => {
+            expr_has_array_index(scrutinee)
+                || cases.iter().any(|c| c.body.iter().any(stmt_has_array_index))
+        }
+        StmtKind::ArrayAssign { .. }
+        | StmtKind::ArrayCompoundAssign { .. }
+        | StmtKind::MemberArrayAssign { .. } => true,
+        StmtKind::DerefAssign { target, value }
+        | StmtKind::DerefCompoundAssign { target, value, .. } => {
+            expr_has_array_index(target) || expr_has_array_index(value)
+        }
+        StmtKind::MemberAssign { base, value, .. }
+        | StmtKind::MemberCompoundAssign { base, value, .. } => {
+            expr_has_array_index(base) || expr_has_array_index(value)
+        }
+        StmtKind::ExprStmt(e) => expr_has_array_index(e),
+        StmtKind::Block(body) => body.iter().any(stmt_has_array_index),
+        _ => false,
+    }
+}
+
+fn expr_has_array_index(e: &Expr) -> bool {
+    match &e.kind {
+        ExprKind::ArrayIndex { .. } => true,
+        ExprKind::BinOp { left, right, .. } | ExprKind::Logical { left, right, .. } => {
+            expr_has_array_index(left) || expr_has_array_index(right)
+        }
+        ExprKind::Unary { operand, .. } | ExprKind::Deref(operand) => {
+            expr_has_array_index(operand)
+        }
+        ExprKind::Update { .. } => false,
+        ExprKind::AssignExpr { value, .. } => expr_has_array_index(value),
+        ExprKind::CompoundAssignExpr { value, .. } => expr_has_array_index(value),
+        ExprKind::Call { args, .. } => args.iter().any(expr_has_array_index),
+        ExprKind::CallVia { addr, args } => {
+            expr_has_array_index(addr) || args.iter().any(expr_has_array_index)
+        }
+        ExprKind::Member { base, .. } => expr_has_array_index(base),
+        ExprKind::Ternary { cond, then_value, else_value } => {
+            expr_has_array_index(cond)
+                || expr_has_array_index(then_value)
+                || expr_has_array_index(else_value)
+        }
+        ExprKind::Cast { operand, .. } => expr_has_array_index(operand),
+        ExprKind::InitList { items } => items.iter().any(expr_has_array_index),
+        ExprKind::Comma { left, right } => {
+            expr_has_array_index(left) || expr_has_array_index(right)
+        }
+        ExprKind::UpdateLvalue { target, .. } => expr_has_array_index(target),
+        _ => false,
+    }
 }
 
 fn stmt_has_2d_array_index(stmt: &Stmt) -> bool {
