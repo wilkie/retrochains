@@ -20364,16 +20364,35 @@ impl<'a> FunctionEmitter<'a> {
                 // the outer statement's RHS. Recursively evaluate the
                 // inner value into AX, then store AX into `target`.
                 // AX still holds the assigned value so the outer
-                // store reuses it. Fixture 500.
+                // store reuses it. Fixture 500. Char target: store
+                // just AL (byte ptr), matching BCC's byte-width
+                // store. Fixture 3653 (`(c = arr[i++])` for `char c`).
                 self.emit_expr_to_ax(value);
+                let target_is_char = if self.globals.contains(target) {
+                    self.globals
+                        .type_of(target)
+                        .map_or(false, |t| t.is_char_like())
+                } else if self.locals.has(target) {
+                    self.locals.type_of(target).is_char_like()
+                } else {
+                    false
+                };
+                let (width, src) = if target_is_char {
+                    ("byte", "al")
+                } else {
+                    ("word", "ax")
+                };
                 if self.globals.contains(target) {
-                    let _ = write!(self.out, "\tmov\tword ptr DGROUP:_{target},ax\r\n");
+                    let _ = write!(
+                        self.out,
+                        "\tmov\t{width} ptr DGROUP:_{target},{src}\r\n",
+                    );
                 } else {
                     match self.locals.location_of(target) {
                         LocalLocation::Stack(off) => {
                             let _ = write!(
                                 self.out,
-                                "\tmov\tword ptr {},ax\r\n",
+                                "\tmov\t{width} ptr {},{src}\r\n",
                                 bp_addr(off)
                             );
                         }
