@@ -900,7 +900,15 @@ fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
                 format!("call: unsupported operand form `{rest}`"),
             ))
         }
-        "ret" => Ok(Instr::Ret),
+        "ret" => {
+            if rest.is_empty() {
+                Ok(Instr::Ret)
+            } else if let Some(imm) = parse_imm16(rest) {
+                Ok(Instr::RetImm16 { imm: imm as u16 })
+            } else {
+                Err(AsmError::new(line.line_no, format!("ret: bad operand `{rest}`")))
+            }
+        }
         "fld" => parse_fld(rest, line.line_no),
         "fstp" => parse_fstp(rest, line.line_no),
         "fld1" if rest.is_empty() => Ok(Instr::Fld1),

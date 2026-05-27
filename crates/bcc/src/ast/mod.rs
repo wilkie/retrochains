@@ -73,6 +73,11 @@ pub struct Function {
     /// emitted in `_TEXT` like any other function but don't get a
     /// `public` declaration (fixture 499).
     pub is_static: bool,
+    /// `pascal` calling convention: caller pushes args left-to-right
+    /// (vs C's right-to-left), callee cleans the stack with `ret N`,
+    /// and the symbol name is emitted UPPERCASE without the leading
+    /// underscore. Fixture 1653.
+    pub is_pascal: bool,
 }
 
 #[derive(Debug)]

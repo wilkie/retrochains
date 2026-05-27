@@ -236,6 +236,61 @@ impl Locals {
             && function.ret_ty.size_bytes() > 4;
         let mut param_offset = FIRST_PARAM_BP_OFFSET
             + if returns_big_struct { 4 } else { 0 };
+        // Pascal-convention callees see args pushed LTR, so the FIRST
+        // param has the HIGHEST bp offset. Pre-compute each param's
+        // offset by walking the param list and noting where each
+        // *should* live, then we apply during the push loop below.
+        let param_offsets: Vec<u16> = if function.is_pascal {
+            let total: u16 = function
+                .params
+                .iter()
+                .map(|p| u16::from(p.ty.size_bytes()).max(2))
+                .sum();
+            // For pascal: each param's offset = base + (total - bytes-
+            // already-consumed-by-LATER-params). Walk in source order;
+            // running offset starts high and decreases.
+            let mut cursor = param_offset + total;
+            function
+                .params
+                .iter()
+                .map(|p| {
+                    let sz = u16::from(p.ty.size_bytes()).max(2);
+                    cursor -= sz;
+                    cursor
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        for (i, param) in function.params.iter().enumerate() {
+            let this_offset = if function.is_pascal {
+                param_offsets[i]
+            } else {
+                param_offset
+            };
+            declared.push(DeclItem {
+                name: param.name.clone(),
+                ty: param.ty.clone(),
+                kind: DeclKind::Param { incoming_offset: this_offset },
+                is_register: false,
+                is_volatile: false,
+            });
+            let _ = param;
+            if !function.is_pascal {
+                param_offset += match &param.ty {
+                    Type::Long | Type::ULong => 4,
+                    Type::Float => 4,
+                    Type::Double => 8,
+                    Type::Struct { .. } => {
+                        u16::try_from(param.ty.size_bytes()).expect("struct param < 64K")
+                    }
+                    _ => 2,
+                };
+            }
+        }
+        // Skip the original per-param loop below for both
+        // conventions (we already populated `declared`).
+        if false {
         for param in &function.params {
             declared.push(DeclItem {
                 name: param.name.clone(),
@@ -259,6 +314,10 @@ impl Locals {
                 Type::Double => 8,
                 _ => 2,
             };
+            *counts.entry(param.name.clone()).or_insert(0) += 1;
+        }
+        } // end of if false (legacy loop disabled — see new param logic above)
+        for param in &function.params {
             *counts.entry(param.name.clone()).or_insert(0) += 1;
         }
 

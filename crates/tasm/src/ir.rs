@@ -2053,6 +2053,10 @@ pub enum Instr {
     CallIndirectBpRel { offset: i16 },
     /// `ret`
     Ret,
+    /// `ret imm16` — near return with caller-stack adjustment.
+    /// Encoding: `C2 lo hi`. Used by pascal-convention callees to
+    /// pop their own argument bytes after returning. Fixture 1653.
+    RetImm16 { imm: u16 },
     // 8087 FPU instructions. The opcode family selects the operand
     // width (`D9` for 32-bit `dword`/single, `DD` for 64-bit `qword`/
     // double); the ModR/M reg field selects the operation (0 = `fld`,

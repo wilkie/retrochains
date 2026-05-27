@@ -681,6 +681,13 @@ fn write_tail(
         chain[h].get_or_insert_with(Vec::new).push(sym.clone());
         by_sym.insert(sym, line);
     };
+    let mut insert_with_hash_key = |hash_key: String, sym: String, line: String,
+                                    chain: &mut Vec<Option<Vec<String>>>,
+                                    by_sym: &mut std::collections::HashMap<String, String>| {
+        let h = pubs_hash(&hash_key);
+        chain[h].get_or_insert_with(Vec::new).push(sym.clone());
+        by_sym.insert(sym, line);
+    };
     // Insertion order matches BCC's parser/sema encounter order:
     // walk in TRUE source-declaration order (functions and globals
     // interleaved as they appear in the source) so that hash-bucket
@@ -693,9 +700,23 @@ fn write_tail(
             crate::ast::TopLevelRef::Function(idx) => {
                 let f = &unit.functions[*idx];
                 if f.body.is_some() && !f.is_static {
-                    let sym = codegen::function_symbol(&f.name);
+                    let sym = if f.is_pascal {
+                        codegen::function_symbol_pascal(&f.name)
+                    } else {
+                        codegen::function_symbol(&f.name)
+                    };
                     let line = format!("\tpublic\t{sym}\r\n");
-                    insert(sym, line, &mut chain, &mut by_sym);
+                    // BCC hashes on the original C identifier (lowercase,
+                    // no underscore) regardless of the calling convention,
+                    // so the pascal symbol "ADD" shares a bucket order
+                    // with the C-named "add".
+                    insert_with_hash_key(
+                        f.name.clone(),
+                        sym,
+                        line,
+                        &mut chain,
+                        &mut by_sym,
+                    );
                 }
             }
             crate::ast::TopLevelRef::Global(idx) => {

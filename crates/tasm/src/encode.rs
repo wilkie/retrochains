@@ -231,6 +231,7 @@ fn encode_segment(
 fn instr_size(instr: &Instr) -> usize {
     match instr {
         Instr::Ret => 1,
+        Instr::RetImm16 { .. } => 3,
         Instr::PushReg16 { .. }
         | Instr::PopReg16 { .. }
         | Instr::IncReg16 { .. }
@@ -3181,6 +3182,10 @@ fn emit_instr(
             out.push(rel8 as u8);
         }
         Instr::Ret => out.push(0xC3),
+        Instr::RetImm16 { imm } => {
+            out.push(0xC2);
+            out.extend_from_slice(&imm.to_le_bytes());
+        }
         Instr::FldDwordBpRel { offset } => {
             push_fidrqq_fixup(out, extern_idx, fixups)?;
             out.push(0x9B);

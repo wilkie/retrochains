@@ -32,6 +32,7 @@ pub struct Signatures {
 struct FunctionSig {
     params: Vec<Type>,
     ret_ty: Type,
+    is_pascal: bool,
 }
 
 impl Signatures {
@@ -46,6 +47,7 @@ impl Signatures {
                     FunctionSig {
                         params: f.params.iter().map(|p| p.ty.clone()).collect(),
                         ret_ty: f.ret_ty.clone(),
+                        is_pascal: f.is_pascal,
                     },
                 )
             })
@@ -69,6 +71,15 @@ impl Signatures {
     #[must_use]
     pub fn ret_ty_of(&self, name: &str) -> Option<&Type> {
         self.map.get(name).map(|s| &s.ret_ty)
+    }
+
+    /// Is this function declared with the `pascal` calling convention?
+    /// Determines the call-site argument push order (LTR vs RTL),
+    /// whether the caller cleans the stack (no for pascal), and the
+    /// symbol name (uppercase / no underscore).
+    #[must_use]
+    pub fn is_pascal(&self, name: &str) -> bool {
+        self.map.get(name).is_some_and(|s| s.is_pascal)
     }
 }
 
@@ -580,6 +591,12 @@ pub fn function_symbol(name: &str) -> String {
     format!("_{name}")
 }
 
+/// Pascal-convention function symbol: uppercase, no leading
+/// underscore. Fixture 1653 (`int pascal add(...)` → public `ADD`).
+pub fn function_symbol_pascal(name: &str) -> String {
+    name.to_uppercase()
+}
+
 struct FunctionEmitter<'a> {
     out: &'a mut Vec<u8>,
     source: &'a str,
@@ -688,7 +705,11 @@ impl<'a> FunctionEmitter<'a> {
         self.advance_to_line(head_line);
 
         self.out.extend_from_slice(b"\tassume\tcs:_TEXT\r\n");
-        let sym = function_symbol(&self.function.name);
+        let sym = if self.function.is_pascal {
+            function_symbol_pascal(&self.function.name)
+        } else {
+            function_symbol(&self.function.name)
+        };
         let _ = write!(self.out, "{sym}\tproc\tnear\r\n");
 
         // Prologue. Order: push bp / mov bp,sp / allocate stack /
@@ -756,7 +777,20 @@ impl<'a> FunctionEmitter<'a> {
             self.out.extend_from_slice(b"\tmov\tsp,bp\r\n");
         }
         self.out.extend_from_slice(b"\tpop\tbp\r\n");
-        self.out.extend_from_slice(b"\tret\t\r\n");
+        // Pascal-convention callee cleans up the args off the stack
+        // via `ret N` where N = total bytes of parameter storage.
+        // Fixture 1653.
+        if self.function.is_pascal {
+            let n: u32 = self
+                .function
+                .params
+                .iter()
+                .map(|p| u32::from(p.ty.size_bytes().max(2)))
+                .sum();
+            let _ = write!(self.out, "\tret\t{n}\r\n");
+        } else {
+            self.out.extend_from_slice(b"\tret\t\r\n");
+        }
 
         let _ = write!(self.out, "{sym}\tendp\r\n");
         // Switch jump-tables and linear-search address tables live
@@ -5202,8 +5236,16 @@ impl<'a> FunctionEmitter<'a> {
         for arg in args {
             intern_strings_in_order(self, arg);
         }
+        let is_pascal_callee = self.signatures.is_pascal(name);
         let mut total_bytes: u32 = 0;
-        for (i, arg) in args.iter().enumerate().rev() {
+        // Pascal convention pushes args LEFT-TO-RIGHT; C pushes
+        // RIGHT-TO-LEFT. Walk the iteration in the matching order.
+        let arg_order: Box<dyn Iterator<Item = (usize, &Expr)>> = if is_pascal_callee {
+            Box::new(args.iter().enumerate())
+        } else {
+            Box::new(args.iter().enumerate().rev())
+        };
+        for (i, arg) in arg_order {
             // Param type for the i-th arg, defaulting to int when the
             // signature isn't known (extern function — no fixture yet).
             // For variadic args past the named prototype list, infer
@@ -5358,6 +5400,9 @@ impl<'a> FunctionEmitter<'a> {
                 );
             };
             let _ = write!(self.out, "\tcall\tword ptr {}\r\n", bp_addr(off));
+        } else if is_pascal_callee {
+            let target = function_symbol_pascal(name);
+            let _ = write!(self.out, "\tcall\tnear ptr {target}\r\n");
         } else {
             let _ = write!(self.out, "\tcall\tnear ptr _{name}\r\n");
         }
@@ -5365,8 +5410,9 @@ impl<'a> FunctionEmitter<'a> {
         // `add sp, N` for 6 bytes or more. The threshold is shared
         // across int and long args — fixture 216's single long arg
         // pushes 4 bytes and gets 2 pops, mirroring the 2-int-args
-        // shape.
-        if total_bytes == 0 {
+        // shape. Pascal callees clean their own stack via `ret N`,
+        // so the caller emits no cleanup.
+        if is_pascal_callee || total_bytes == 0 {
             // nothing
         } else if total_bytes <= 4 {
             for _ in 0..(total_bytes / 2) {
