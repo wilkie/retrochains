@@ -466,12 +466,13 @@ impl Locals {
                 }
             })
             .collect();
-        let si_pick = pick_si_loop_pointer(
+        let loop_pointer_si = pick_si_loop_pointer(
             function.body.as_deref().unwrap_or(&[]),
             &eligible_int,
             &declared,
-        )
-        .or_else(|| pick_si(&eligible_int, &declared, &counts));
+        );
+        let si_pick = loop_pointer_si
+            .or_else(|| pick_si(&eligible_int, &declared, &counts));
 
         // SI-vs-DX heuristic for the single-eligible case: when only
         // ONE int is eligible AND it's used as the subscript of a
@@ -585,12 +586,16 @@ impl Locals {
             &Reg::NON_SI_POOL
         };
         // When the pool is restricted (function makes a call, or
-        // has an imul that clobbers DX), BCC picks remaining
-        // eligibles by use count descending — not source order.
-        // Stable sort preserves source order on ties. Without a
-        // restriction the source-order assignment already matches.
-        // Fixtures 1980 (call → DI), 1700 (imul → CX/DI/BX choose
-        // by count).
+        // has an imul that clobbers DX), or when SI was claimed by
+        // a loop-deref pointer (overriding the default highest-use
+        // pick), BCC fills the remaining eligibles by use count
+        // descending — not source order. Stable sort preserves
+        // source order on ties. Without one of these triggers the
+        // source-order assignment already matches.
+        // Fixtures 1980 (call → DI), 1700 (imul → CX/DI/BX by
+        // count), 1551 / 3321 (loop-deref pointer wins SI; the
+        // remaining int locals pick DI / DX by use count rather
+        // than declaration order).
         let function_has_array_index_any = body_has_array_index(
             function.body.as_deref().unwrap_or(&[]),
         );
@@ -599,6 +604,7 @@ impl Locals {
             || function_has_imul_now
             || function_has_2d_array_index
             || function_has_array_index_any
+            || loop_pointer_si.is_some()
         {
             // Stable sort by use count descending (ties keep source
             // order). Extending the sort to any-array-index
