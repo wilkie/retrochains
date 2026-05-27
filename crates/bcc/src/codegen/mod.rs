@@ -13281,12 +13281,30 @@ impl<'a> FunctionEmitter<'a> {
             let pointee = pointee.clone();
             let stride = i32::from(pointee.size_bytes());
             let elem_is_char = pointee.is_char_like();
-            match self.locals.location_of(array) {
-                LocalLocation::Reg(reg) => {
-                    let _ = write!(self.out, "\tmov\tbx,{}\r\n", reg.name());
-                }
-                LocalLocation::Stack(off) => {
-                    let _ = write!(self.out, "\tmov\tbx,word ptr {}\r\n", bp_addr(off));
+            // For a stack-resident pointer with a variable index
+            // (no constant), BCC sequences the index scaling FIRST
+            // and only then loads the base pointer into BX — saves
+            // the spill round-trip a constant-store would force.
+            // We mirror that by deferring the BX-load to after the
+            // index computation in this var-index path. The const
+            // path keeps the original "load BX first" shape since
+            // there's no AX dance to interleave. Fixture 1439.
+            let is_var_index = try_const_eval(&indices[0]).is_none();
+            let stack_ptr_off =
+                if let LocalLocation::Stack(off) = self.locals.location_of(array) {
+                    Some(off)
+                } else {
+                    None
+                };
+            let defer_bx_load = is_var_index && stack_ptr_off.is_some() && stride == 2;
+            if !defer_bx_load {
+                match self.locals.location_of(array) {
+                    LocalLocation::Reg(reg) => {
+                        let _ = write!(self.out, "\tmov\tbx,{}\r\n", reg.name());
+                    }
+                    LocalLocation::Stack(off) => {
+                        let _ = write!(self.out, "\tmov\tbx,word ptr {}\r\n", bp_addr(off));
+                    }
                 }
             }
             if let Some(k) = try_const_eval(&indices[0]) {
@@ -13373,6 +13391,11 @@ impl<'a> FunctionEmitter<'a> {
                 let _ = write!(self.out, "\tmov\tax,{}\r\n", idx_src.word());
                 if stride == 2 {
                     self.out.extend_from_slice(b"\tshl\tax,1\r\n");
+                }
+                if defer_bx_load
+                    && let Some(off) = stack_ptr_off
+                {
+                    let _ = write!(self.out, "\tmov\tbx,word ptr {}\r\n", bp_addr(off));
                 }
                 self.out.extend_from_slice(b"\tadd\tbx,ax\r\n");
             }
