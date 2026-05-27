@@ -15075,6 +15075,47 @@ impl<'a> FunctionEmitter<'a> {
     /// ```
     /// where SI holds the pointer.
     fn emit_deref_assign(&mut self, target: &Expr, value: &Expr) {
+        // `*(<ptr> + K) = v;` — write through a pointer with a
+        // constant offset. Folds to `mov <width> ptr [<reg>+K*stride],
+        // <value>` (reg-resident) or loads p into BX first (stack-
+        // resident). Fixture 3591.
+        if let ExprKind::BinOp { op: BinOp::Add, left, right } = &target.kind
+            && let ExprKind::Ident(p_name) = &left.kind
+            && self.locals.has(p_name)
+            && let Some(pointee) = self.locals.type_of(p_name).pointee()
+            && let Some(k) = try_const_eval(right)
+        {
+            let pointee = pointee.clone();
+            let stride = i32::from(pointee.size_bytes());
+            let off = (k as i32).wrapping_mul(stride);
+            let addr_reg = match self.locals.location_of(p_name) {
+                LocalLocation::Reg(reg) => reg.name().to_owned(),
+                LocalLocation::Stack(p_off) => {
+                    let _ = write!(self.out, "\tmov\tbx,word ptr {}\r\n", bp_addr(p_off));
+                    "bx".to_owned()
+                }
+            };
+            let bx_disp = if off == 0 {
+                format!("[{addr_reg}]")
+            } else if off > 0 {
+                format!("[{addr_reg}+{off}]")
+            } else {
+                format!("[{addr_reg}-{}]", -off)
+            };
+            let width = ptr_width(&pointee);
+            if let Some(v) = try_const_eval(value) {
+                let v_masked = if pointee.is_char_like() { v & 0xFF } else { v & 0xFFFF };
+                let _ = write!(self.out, "\tmov\t{width} ptr {bx_disp},{v_masked}\r\n");
+                return;
+            }
+            self.emit_expr_to_ax(value);
+            if pointee.is_char_like() {
+                let _ = write!(self.out, "\tmov\tbyte ptr {bx_disp},al\r\n");
+            } else {
+                let _ = write!(self.out, "\tmov\tword ptr {bx_disp},ax\r\n");
+            }
+            return;
+        }
         // `*arr[K] = v;` — assign through an element of a
         // pointer-array (global or stack). Load arr[K] into BX,
         // then store through `[bx]`. Constant-index form only.
