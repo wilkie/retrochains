@@ -21485,8 +21485,18 @@ fn emit_op_with_source_opts(
                     let _ = write!(out, "\t{mnemonic}\tax,1\r\n");
                 }
             } else {
-                let _ = write!(out, "\tmov\tcl,{}\r\n", src.byte());
-                let _ = write!(out, "\t{mnemonic}\tax,cl\r\n");
+                // SI/DI don't have addressable low bytes. Bridge by
+                // copying the full 16-bit register to CX first, then
+                // shift with CL. Fixture 2399 (`1 << i` with i in SI).
+                if let OperandSource::Reg(r) = src
+                    && matches!(r.name(), "si" | "di")
+                {
+                    let _ = write!(out, "\tmov\tcx,{}\r\n", r.name());
+                    let _ = write!(out, "\t{mnemonic}\tax,cl\r\n");
+                } else {
+                    let _ = write!(out, "\tmov\tcl,{}\r\n", src.byte());
+                    let _ = write!(out, "\t{mnemonic}\tax,cl\r\n");
+                }
             }
         }
         BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
