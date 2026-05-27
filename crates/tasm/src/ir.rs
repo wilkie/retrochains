@@ -2499,6 +2499,14 @@ pub enum FixupKind {
     /// with the hardware FPU present they're a no-op marker. Fix
     /// Data byte: 0x46.
     SegRelExternFrameTarget { extdef_idx: u8 },
+    /// Segment-relative 16-bit offset (M=1, location=1), frame method
+    /// F5 (TARGET — frame is the segment of the target, no frame
+    /// datum), target method T6 (EXTDEF, no displacement). Fix Data
+    /// byte: 0x56. Used by BCC for references to runtime helpers /
+    /// data externs (`___brklvl`, `_add1` initializer) where the
+    /// target's segment isn't known at compile time. Fixtures 2129,
+    /// 3643.
+    SegRelExternFrameTargetF5 { extdef_idx: u8 },
     /// Base 16-bit (M=1, location=2 — paragraph/segment value),
     /// frame method F1 (GRPDEF, frame=group), target method T4
     /// (SEGDEF, no disp; target=segment, typically _DATA so the

@@ -209,6 +209,17 @@ fn serialize_fixup(fx: &FixupReq, out: &mut Vec<u8>) {
             out.push(0x46);
             out.push(extdef_idx);
         }
+        FixupKind::SegRelExternFrameTargetF5 { extdef_idx } => {
+            // Same as SegRelExternFrameTarget but with Frame=5 (F5
+            // TARGET) instead of F4. Used for runtime-helper data
+            // refs where the target's segment isn't known at compile
+            // time. Fix Data byte: 0101 0110 = 0x56. Fixtures 2129,
+            // 3643.
+            out.push(0xC4 | hi2 as u8);
+            out.push(lo8);
+            out.push(0x56);
+            out.push(extdef_idx);
+        }
         FixupKind::SegBaseGroupTarget { group_idx, segment_idx } => {
             // M=1, Location=2 (16-bit base / paragraph value)
             //   Locat byte 0 = 1 1 0010 dd = 0xC8 | hi2
