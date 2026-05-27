@@ -10445,6 +10445,48 @@ impl<'a> FunctionEmitter<'a> {
     ///   and index can be either register- or stack-resident; only
     ///   the all-stack form is captured today.
     fn emit_deref_to_ax(&mut self, ptr: &Expr) {
+        // `*(T *)<inner>` — pointer cast around the dereferenced
+        // pointer. The cast determines the effective pointee width
+        // (e.g. `*(char *)p` reads a byte even if `p` is `int *`).
+        // Recurse with the inner, but if the cast narrows the
+        // pointee to a different type, emit through BX with the
+        // cast-derived width. Fixture 3163.
+        if let ExprKind::Cast { ty: cast_ty, operand } = &ptr.kind
+            && let Type::Pointer(cast_pointee) = cast_ty
+            && let ExprKind::Ident(p_name) = &operand.kind
+            && self.locals.has(p_name)
+        {
+            let cast_pointee = (**cast_pointee).clone();
+            let p_ty = self.locals.type_of(p_name).clone();
+            // Only kick in when the cast actually changes the pointee
+            // size (char vs int); same-size casts produce identical
+            // bytes regardless.
+            if let Some(orig_pointee) = p_ty.pointee()
+                && orig_pointee.size_bytes() != cast_pointee.size_bytes()
+            {
+                match self.locals.location_of(p_name) {
+                    LocalLocation::Reg(reg) => {
+                        let addr_reg = reg.name();
+                        if cast_pointee.is_char_like() {
+                            let _ = write!(self.out, "\tmov\tal,byte ptr [{addr_reg}]\r\n");
+                            self.emit_widen_al(&cast_pointee);
+                        } else {
+                            let _ = write!(self.out, "\tmov\tax,word ptr [{addr_reg}]\r\n");
+                        }
+                    }
+                    LocalLocation::Stack(off) => {
+                        let _ = write!(self.out, "\tmov\tbx,word ptr {}\r\n", bp_addr(off));
+                        if cast_pointee.is_char_like() {
+                            self.out.extend_from_slice(b"\tmov\tal,byte ptr [bx]\r\n");
+                            self.emit_widen_al(&cast_pointee);
+                        } else {
+                            self.out.extend_from_slice(b"\tmov\tax,word ptr [bx]\r\n");
+                        }
+                    }
+                }
+                return;
+            }
+        }
         // `*<call>()` — deref of a function-call's pointer return.
         // Call the function (result in AX = pointer), copy to BX,
         // read `[bx]`. Fixture 1343 (`*nextp("ab")`).
