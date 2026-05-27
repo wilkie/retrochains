@@ -466,7 +466,12 @@ impl Locals {
                 }
             })
             .collect();
-        let si_pick = pick_si(&eligible_int, &declared, &counts);
+        let si_pick = pick_si_loop_pointer(
+            function.body.as_deref().unwrap_or(&[]),
+            &eligible_int,
+            &declared,
+        )
+        .or_else(|| pick_si(&eligible_int, &declared, &counts));
 
         // SI-vs-DX heuristic for the single-eligible case: when only
         // ONE int is eligible AND it's used as the subscript of a
@@ -2696,6 +2701,271 @@ fn pick_si(
         }
     }
     best.map(|(i, _)| i)
+}
+
+/// Override `pick_si` when an eligible pointer is used with a
+/// direct deref *inside a loop body* (i.e. `*p`, `*p++`, `*++p`,
+/// `*(p ± K)` reachable from any `while`/`for`/`do-while` body
+/// in the function). BCC's allocator favors such pointers for SI
+/// even when an int eligible has a higher use count — the
+/// pointer ends up live across the hot path and benefits from
+/// the base-register home. Among multiple qualifying pointers,
+/// declaration order tiebreaks. Returns `None` if no pointer
+/// qualifies. Fixtures 1311, 1551, 3321 (loop-deref pointer wins
+/// SI ahead of higher-use int).
+fn pick_si_loop_pointer(
+    body: &[Stmt],
+    eligible: &[usize],
+    declared: &[DeclItem],
+) -> Option<usize> {
+    let mut qualifying: Vec<usize> = Vec::new();
+    let mut pre_update: Vec<usize> = Vec::new();
+    for &i in eligible {
+        if !matches!(declared[i].ty, Type::Pointer(_)) {
+            continue;
+        }
+        let name = declared[i].name.as_str();
+        if body.iter().any(|s| stmt_pointer_deref_in_loop(name, s, false)) {
+            qualifying.push(i);
+        }
+        if body.iter().any(|s| stmt_pointer_pre_update_in_loop(name, s, false)) {
+            pre_update.push(i);
+        }
+    }
+    // Pre-update form (`*++p`) always wins SI — fixture 1311.
+    if let Some(&i) = pre_update.first() {
+        return Some(i);
+    }
+    // Plain loop-deref form only wins SI when there are 3+
+    // eligibles (so the pointer is competing against more than one
+    // int — fixture 1551 / 3321). With 2 eligibles, BCC keeps the
+    // higher-use int in SI (fixture 2027).
+    if eligible.len() >= 3
+        && let Some(&i) = qualifying.first()
+    {
+        return Some(i);
+    }
+    None
+}
+
+/// Variant of `stmt_pointer_deref_in_loop` that requires a
+/// pre-increment / pre-decrement on the pointer inside the loop.
+fn stmt_pointer_pre_update_in_loop(name: &str, stmt: &Stmt, in_loop: bool) -> bool {
+    match &stmt.kind {
+        StmtKind::While { cond, body } | StmtKind::DoWhile { body, cond } => {
+            expr_has_pre_update_deref(name, cond)
+                || body
+                    .iter()
+                    .any(|s| stmt_pointer_pre_update_in_loop(name, s, true))
+        }
+        StmtKind::For { init, cond, step, body } => {
+            if let Some(e) = cond
+                && expr_has_pre_update_deref(name, e)
+            {
+                return true;
+            }
+            if let Some(es) = init
+                && es.iter().any(|e| expr_has_pre_update_deref(name, e))
+            {
+                return true;
+            }
+            if let Some(es) = step
+                && es.iter().any(|e| expr_has_pre_update_deref(name, e))
+            {
+                return true;
+            }
+            body.iter()
+                .any(|s| stmt_pointer_pre_update_in_loop(name, s, true))
+        }
+        StmtKind::If { then_branch, else_branch, .. } => {
+            then_branch
+                .iter()
+                .any(|s| stmt_pointer_pre_update_in_loop(name, s, in_loop))
+                || else_branch.as_ref().is_some_and(|b| {
+                    b.iter()
+                        .any(|s| stmt_pointer_pre_update_in_loop(name, s, in_loop))
+                })
+        }
+        StmtKind::Block(body) => body
+            .iter()
+            .any(|s| stmt_pointer_pre_update_in_loop(name, s, in_loop)),
+        StmtKind::ExprStmt(e) if in_loop => expr_has_pre_update_deref(name, e),
+        StmtKind::Assign { value, .. } | StmtKind::CompoundAssign { value, .. }
+            if in_loop =>
+        {
+            expr_has_pre_update_deref(name, value)
+        }
+        _ => false,
+    }
+}
+
+fn expr_has_pre_update_deref(name: &str, e: &Expr) -> bool {
+    if let ExprKind::Deref(operand) = &e.kind
+        && let ExprKind::Update {
+            target,
+            position: crate::ast::UpdatePosition::Pre,
+            ..
+        } = &operand.kind
+        && target == name
+    {
+        return true;
+    }
+    match &e.kind {
+        ExprKind::BinOp { left, right, .. } | ExprKind::Logical { left, right, .. } => {
+            expr_has_pre_update_deref(name, left) || expr_has_pre_update_deref(name, right)
+        }
+        ExprKind::Unary { operand, .. } | ExprKind::Deref(operand) => {
+            expr_has_pre_update_deref(name, operand)
+        }
+        ExprKind::Comma { left, right } => {
+            expr_has_pre_update_deref(name, left) || expr_has_pre_update_deref(name, right)
+        }
+        ExprKind::Cast { operand, .. } => expr_has_pre_update_deref(name, operand),
+        ExprKind::Member { base, .. } => expr_has_pre_update_deref(name, base),
+        ExprKind::ArrayIndex { array, index } => {
+            expr_has_pre_update_deref(name, array)
+                || expr_has_pre_update_deref(name, index)
+        }
+        _ => false,
+    }
+}
+
+fn stmt_pointer_deref_in_loop(name: &str, stmt: &Stmt, in_loop: bool) -> bool {
+    match &stmt.kind {
+        StmtKind::While { cond, body } | StmtKind::DoWhile { body, cond } => {
+            expr_has_direct_pointer_deref(name, cond)
+                || body.iter().any(|s| stmt_pointer_deref_in_loop(name, s, true))
+        }
+        StmtKind::For { init, cond, step, body } => {
+            if let Some(e) = cond
+                && expr_has_direct_pointer_deref(name, e)
+            {
+                return true;
+            }
+            if let Some(es) = init
+                && es.iter().any(|e| expr_has_direct_pointer_deref(name, e))
+            {
+                return true;
+            }
+            if let Some(es) = step
+                && es.iter().any(|e| expr_has_direct_pointer_deref(name, e))
+            {
+                return true;
+            }
+            body.iter().any(|s| stmt_pointer_deref_in_loop(name, s, true))
+        }
+        StmtKind::If { cond: _, then_branch, else_branch } => {
+            then_branch.iter().any(|s| stmt_pointer_deref_in_loop(name, s, in_loop))
+                || else_branch
+                    .as_ref()
+                    .is_some_and(|b| b.iter().any(|s| stmt_pointer_deref_in_loop(name, s, in_loop)))
+        }
+        StmtKind::Block(body) => body.iter().any(|s| stmt_pointer_deref_in_loop(name, s, in_loop)),
+        StmtKind::Switch { cases, .. } => cases
+            .iter()
+            .any(|c| c.body.iter().any(|s| stmt_pointer_deref_in_loop(name, s, in_loop))),
+        StmtKind::Return(value)
+        | StmtKind::Declare { init: value, .. } => {
+            in_loop
+                && value
+                    .as_ref()
+                    .is_some_and(|e| expr_has_direct_pointer_deref(name, e))
+        }
+        StmtKind::Assign { value, .. } | StmtKind::CompoundAssign { value, .. } => {
+            in_loop && expr_has_direct_pointer_deref(name, value)
+        }
+        StmtKind::DerefAssign { target, value }
+        | StmtKind::DerefCompoundAssign { target, value, .. } => {
+            if !in_loop {
+                return false;
+            }
+            // `*<expr> = ...` — if <expr> resolves to a direct ref
+            // to `name` (Ident, Update on name, or `name ± const`),
+            // count it as a direct deref. Mirrors the rvalue-side
+            // expr_has_direct_pointer_deref but at statement level.
+            let target_matches = match &target.kind {
+                ExprKind::Ident(n) => n == name,
+                ExprKind::Update { target: upd, .. } => upd == name,
+                ExprKind::BinOp { op, left, right, .. } => {
+                    matches!(op, crate::ast::BinOp::Add | crate::ast::BinOp::Sub)
+                        && matches!(&left.kind, ExprKind::Ident(n) if n == name)
+                        && try_const_eval(right).is_some()
+                }
+                _ => false,
+            };
+            target_matches
+                || expr_has_direct_pointer_deref(name, value)
+        }
+        StmtKind::ExprStmt(e) => in_loop && expr_has_direct_pointer_deref(name, e),
+        _ => false,
+    }
+}
+
+fn expr_has_direct_pointer_deref(name: &str, e: &Expr) -> bool {
+    use crate::ast::BinOp;
+    if let ExprKind::Deref(operand) = &e.kind {
+        // `*p`, `*p++`, `*++p`, `*(p ± const)`.
+        if let ExprKind::Ident(n) = &operand.kind {
+            return n == name;
+        }
+        if let ExprKind::Update { target, .. } = &operand.kind {
+            if target == name {
+                return true;
+            }
+        }
+        if let ExprKind::BinOp { op, left, right, .. } = &operand.kind {
+            if matches!(op, BinOp::Add | BinOp::Sub)
+                && let ExprKind::Ident(n) = &left.kind
+                && n == name
+                && try_const_eval(right).is_some()
+            {
+                return true;
+            }
+        }
+    }
+    match &e.kind {
+        ExprKind::BinOp { left, right, .. } | ExprKind::Logical { left, right, .. } => {
+            expr_has_direct_pointer_deref(name, left)
+                || expr_has_direct_pointer_deref(name, right)
+        }
+        ExprKind::Unary { operand, .. } => expr_has_direct_pointer_deref(name, operand),
+        ExprKind::Deref(operand) => expr_has_direct_pointer_deref(name, operand),
+        ExprKind::AssignExpr { value, .. } => expr_has_direct_pointer_deref(name, value),
+        ExprKind::CompoundAssignExpr { value, .. } => {
+            expr_has_direct_pointer_deref(name, value)
+        }
+        ExprKind::Call { args, .. } => args.iter().any(|a| expr_has_direct_pointer_deref(name, a)),
+        ExprKind::CallVia { addr, args } => {
+            expr_has_direct_pointer_deref(name, addr)
+                || args.iter().any(|a| expr_has_direct_pointer_deref(name, a))
+        }
+        ExprKind::Member { base, .. } => expr_has_direct_pointer_deref(name, base),
+        ExprKind::Ternary { cond, then_value, else_value } => {
+            expr_has_direct_pointer_deref(name, cond)
+                || expr_has_direct_pointer_deref(name, then_value)
+                || expr_has_direct_pointer_deref(name, else_value)
+        }
+        ExprKind::Cast { operand, .. } => expr_has_direct_pointer_deref(name, operand),
+        ExprKind::ArrayIndex { array, index } => {
+            // `p[K]` is also a direct deref. `p[var]` is var-index
+            // — BCC distinguishes these elsewhere; for the
+            // loop-pointer heuristic we accept both (the pointer
+            // is still being dereffed inside a loop).
+            if let ExprKind::Ident(n) = &array.kind
+                && n == name
+            {
+                return true;
+            }
+            expr_has_direct_pointer_deref(name, array)
+                || expr_has_direct_pointer_deref(name, index)
+        }
+        ExprKind::Comma { left, right } => {
+            expr_has_direct_pointer_deref(name, left)
+                || expr_has_direct_pointer_deref(name, right)
+        }
+        ExprKind::UpdateLvalue { target, .. } => expr_has_direct_pointer_deref(name, target),
+        _ => false,
+    }
 }
 
 struct DeclItem {
