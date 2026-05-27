@@ -1668,18 +1668,15 @@ impl<'a> FunctionEmitter<'a> {
         }
         self.emit_label(plan.check_slot);
         if let Some(c) = cond {
-            // Logical cond (`&&`/`||`): pass both targets so the
-            // short-circuit recursion has a false-fall-through label.
-            // The break_target_slot is emitted unconditionally for
-            // this shape. Fixture 3331 (`for (i = 0; i < n && p[i] !=
-            // 0; i++) ;`).
+            // Logical cond (`&&`/`||`): mirror while/do-while by
+            // passing `None` for the false slot. The cond's false
+            // path falls through to `break_target_slot`, emitted
+            // right after, so the OR/AND lowering can treat fall-
+            // through as the FALSE direction (matching the natural
+            // layout of a loop's check-then-exit shape). Fixture
+            // 3331 (`for (i = 0; i < n && p[i] != 0; i++) ;`).
             let cond_is_logical = matches!(c.kind, ExprKind::Logical { .. });
-            let false_slot = if cond_is_logical {
-                Some(plan.break_target_slot)
-            } else {
-                None
-            };
-            self.emit_cond_branch(c, Some(plan.body_slot), false_slot);
+            self.emit_cond_branch(c, Some(plan.body_slot), None);
             if cond_is_logical {
                 self.emit_label(plan.break_target_slot);
                 return;
@@ -3864,18 +3861,19 @@ impl<'a> FunctionEmitter<'a> {
                     self.label_ref(slot),
                 );
             }
-            (Some(true_slot), Some(_)) => {
-                // Both targets specified. Today this only fires from
-                // `while (<a && b>)`'s rightmost-operand recursion,
-                // where the false target is the immediately-following
-                // break-target label (a natural fall-through). Emit
-                // just the conditional jump to `true_slot`; the caller
-                // is responsible for laying out false_slot as the
-                // next emitted label. Fixtures 1273, 1352, 2203.
+            (Some(_), Some(false_slot)) => {
+                // Both targets specified. This fires for the right-
+                // most operand of an `&&` chain inside an `if` cond
+                // that has a `then_entry` label allocated (see
+                // `needs_then_entry` in emit_if). The convention is
+                // that `then_entry` (= true_slot) is the *next*
+                // emitted label, so fall-through-on-true is correct.
+                // Emit `<false_mnem> false_slot` and let the true
+                // path fall through. Fixture 3510 (`(a||b) && c`).
                 let _ = write!(
                     self.out,
-                    "\t{true_mnem}\tshort {}\r\n",
-                    self.label_ref(true_slot),
+                    "\t{false_mnem}\tshort {}\r\n",
+                    self.label_ref(false_slot),
                 );
             }
             (None, None) => panic!(
