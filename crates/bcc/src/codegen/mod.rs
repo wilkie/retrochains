@@ -819,12 +819,15 @@ impl<'a> FunctionEmitter<'a> {
                 }
             }
         }
-        // `-N` stack-overflow check, emitted between the stack-frame
-        // allocation and the callee-saved register pushes. Compares
-        // the current `sp` against the global `___brklvl` (the
-        // runtime's stack-break sentinel). If brklvl < sp (we still
-        // have headroom), skip the helper; otherwise call
-        // `N_OVERFLOW@`. Fixture 2129.
+        for reg in self.locals.saved_regs() {
+            let _ = write!(self.out, "\tpush\t{}\r\n", reg.name());
+        }
+        // `-N` stack-overflow check, emitted AFTER the callee-saved
+        // pushes but BEFORE the param register loads. Compares the
+        // current `sp` against the global `___brklvl` (the runtime's
+        // stack-break sentinel). If brklvl < sp (still have
+        // headroom), skip the helper; otherwise call `N_OVERFLOW@`.
+        // Fixtures 2129, 2261.
         if self.stack_check {
             let skip_label = format!("@{}@brk", self.func_idx);
             self.out.extend_from_slice(b"\tcmp\tword ptr DGROUP:___brklvl,sp\r\n");
@@ -833,9 +836,6 @@ impl<'a> FunctionEmitter<'a> {
             let _ = write!(self.out, "{skip_label}:\r\n");
             self.helpers.insert("N_OVERFLOW@".to_string());
             self.helpers.insert("___brklvl".to_string());
-        }
-        for reg in self.locals.saved_regs() {
-            let _ = write!(self.out, "\tpush\t{}\r\n", reg.name());
         }
         // Register-promoted incoming parameters: copy each from its
         // caller-built stack slot into its assigned register. Byte
