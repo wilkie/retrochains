@@ -5700,6 +5700,31 @@ impl<'a> FunctionEmitter<'a> {
                     "\tcall\tword ptr DGROUP:_{arr_name}[bx]\r\n",
                 );
             }
+        } else if let ExprKind::Member { base, field, kind: crate::ast::MemberKind::Dot } =
+            &addr.kind
+            && let Some((name, total_off, _leaf_ty)) =
+                self.try_member_dot_chain(base, field)
+        {
+            // `o.f(args)` — member-field function pointer call.
+            // The address is `[bp-N + field_off]` for stack, or
+            // `DGROUP:_<sym>+field_off` for globals.
+            if self.globals.contains(&name) {
+                let label = if total_off == 0 {
+                    format!("DGROUP:_{name}")
+                } else {
+                    format!("DGROUP:_{name}+{total_off}")
+                };
+                let _ = write!(self.out, "\tcall\tword ptr {label}\r\n");
+            } else if let LocalLocation::Stack(base_bp) =
+                self.locals.location_of(&name)
+            {
+                let off = base_bp + i16::try_from(total_off).unwrap_or(i16::MAX);
+                let _ = write!(self.out, "\tcall\tword ptr {}\r\n", bp_addr(off));
+            } else {
+                panic!(
+                    "CallVia: member chain rooted at non-stack local `{name}` not yet supported"
+                );
+            }
         } else {
             panic!("CallVia: unsupported address expression shape (no fixture yet)");
         }
@@ -6237,6 +6262,29 @@ impl<'a> FunctionEmitter<'a> {
         {
             let src_off = base_off + i16::try_from(const_off).unwrap_or(i16::MAX);
             return Some(format!("push\tword ptr {}", bp_addr(src_off)));
+        }
+        // `<member-dot-chain>` resolving to a 2-byte int/ptr field
+        // — emit `push word ptr <bp/dgroup-addr>`. Stack struct
+        // chain: `[bp-N+K]`. Global: `DGROUP:_<sym>+K`. Fixture
+        // 1812 (`o.f(o.arg)` — push `o.arg` directly).
+        if let ExprKind::Member { base, field, kind: crate::ast::MemberKind::Dot } =
+            &arg.kind
+            && let Some((name, total_off, leaf_ty)) =
+                self.try_member_dot_chain(base, field)
+            && leaf_ty.size_bytes() == 2
+        {
+            if self.globals.contains(&name) {
+                let label = if total_off == 0 {
+                    format!("DGROUP:_{name}")
+                } else {
+                    format!("DGROUP:_{name}+{total_off}")
+                };
+                return Some(format!("push\tword ptr {label}"));
+            }
+            if let LocalLocation::Stack(base_off) = self.locals.location_of(&name) {
+                let src_off = base_off + i16::try_from(total_off).unwrap_or(i16::MAX);
+                return Some(format!("push\tword ptr {}", bp_addr(src_off)));
+            }
         }
         None
     }
@@ -15615,6 +15663,40 @@ impl<'a> FunctionEmitter<'a> {
         kind: crate::ast::MemberKind,
         value: &Expr,
     ) {
+        // `<member-dot-chain> = <func-name>` — function-pointer
+        // field initializer. Same direct-immediate-to-memory form
+        // we use for `<fn-ptr-local> = <func>` (line 18074-ish).
+        // Saves the AX round-trip. Fixture 1812 (`o.f = dbl`).
+        if matches!(kind, crate::ast::MemberKind::Dot)
+            && let ExprKind::Ident(src_name) = &value.kind
+            && !self.locals.has(src_name)
+            && self.globals.type_of(src_name).is_none()
+            && self.signatures.ret_ty_of(src_name).is_some()
+            && let Some((name, total_off, _leaf_ty)) =
+                self.try_member_dot_chain(base, field)
+        {
+            if self.globals.contains(&name) {
+                let label = if total_off == 0 {
+                    format!("DGROUP:_{name}")
+                } else {
+                    format!("DGROUP:_{name}+{total_off}")
+                };
+                let _ = write!(
+                    self.out,
+                    "\tmov\tword ptr {label},offset _{src_name}\r\n",
+                );
+                return;
+            }
+            if let LocalLocation::Stack(base_bp) = self.locals.location_of(&name) {
+                let off = base_bp + i16::try_from(total_off).unwrap_or(i16::MAX);
+                let _ = write!(
+                    self.out,
+                    "\tmov\tword ptr {},offset _{src_name}\r\n",
+                    bp_addr(off),
+                );
+                return;
+            }
+        }
         // Bitfield write: detect via the struct's StructField metadata
         // (resolve_bitfield_named handles both within-byte and
         // cross-byte shapes). Currently the `s.<bitfield> = K` shape
