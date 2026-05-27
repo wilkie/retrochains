@@ -1498,10 +1498,17 @@ impl<'a> FunctionEmitter<'a> {
             }
             self.loop_stack.pop();
             self.emit_label(plan.check_slot);
+            // Pass `None` as the false slot: the cond's false-path
+            // falls through to `break_target_slot` (emitted right
+            // after). This mirrors do-while's shape and makes the
+            // OR/AND lowering treat fall-through as the FALSE
+            // direction (not the TRUE direction it would assume from
+            // an `if` cond). Fixture 3233 (`while (i < n || data[0]
+            // != 0)`).
             self.emit_cond_branch(
                 cond,
                 Some(plan.body_slot),
-                Some(plan.break_target_slot),
+                None,
             );
             self.emit_label(plan.break_target_slot);
             return;
