@@ -15191,6 +15191,46 @@ impl<'a> FunctionEmitter<'a> {
             }
             return;
         }
+        // `<local-ptr-to-struct>[<var-idx>].<field>` rvalue —
+        // `pts[i].x` where `pts` is a stack/reg local pointing at
+        // a struct. Scale the index by sizeof(struct), add to the
+        // pointer (load via BX), then `[bx+field_off]`. Fixture
+        // 2208 (`pts[i].x + pts[i].y` for `struct P *pts` param).
+        if matches!(kind, crate::ast::MemberKind::Dot)
+            && let ExprKind::ArrayIndex { array, index } = &base.kind
+            && let ExprKind::Ident(arr_name) = &array.kind
+            && self.locals.has(arr_name)
+            && let Some(pointee) = self.locals.type_of(arr_name).pointee().cloned()
+            && let Some((field_off, field_ty)) = pointee.field(field)
+            && try_const_eval(index).is_none()
+        {
+            let elem_stride = pointee.size_bytes();
+            self.emit_index_into_bx(index, &pointee);
+            // BX now holds the scaled index. Add pts (the pointer
+            // base) to it.
+            match self.locals.location_of(arr_name) {
+                LocalLocation::Reg(reg) => {
+                    let _ = write!(self.out, "\tadd\tbx,{}\r\n", reg.name());
+                }
+                LocalLocation::Stack(off) => {
+                    let _ = write!(self.out, "\tadd\tbx,word ptr {}\r\n", bp_addr(off));
+                }
+            }
+            let _ = elem_stride;
+            let bx_disp = if field_off == 0 {
+                "[bx]".to_owned()
+            } else {
+                format!("[bx+{field_off}]")
+            };
+            let field_ty_clone = field_ty.clone();
+            if field_ty_clone.is_char_like() {
+                let _ = write!(self.out, "\tmov\tal,byte ptr {bx_disp}\r\n");
+                self.emit_widen_al(&field_ty_clone);
+            } else {
+                let _ = write!(self.out, "\tmov\tax,word ptr {bx_disp}\r\n");
+            }
+            return;
+        }
         // `(*<ptr>).<field>` — semantically identical to
         // `<ptr>-><field>`. Rewrite by unwrapping the Deref so the
         // Ident arms below pick it up. Fixture 2960
