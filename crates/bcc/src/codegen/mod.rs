@@ -21040,6 +21040,7 @@ impl<'a> FunctionEmitter<'a> {
                 // Fixture 103 (`return p.x + p.y;`),
                 // fixture 185 (`pts[1].x + pts[1].y`),
                 // fixture 190 (global `g.x + g.y`).
+                //
                 let (name, total_off, _leaf_ty) = self
                     .try_member_dot_chain(base, field)
                     .unwrap_or_else(|| {
@@ -21080,13 +21081,14 @@ impl<'a> FunctionEmitter<'a> {
                     && let Some(pointee) = src_ty.pointee()
                     && let Some((field_off, _ft)) = {
                         // Self-referential structs carry a name-only
-                        // placeholder for the pointee; resolve via the
-                        // globals tag table when fields are empty.
+                        // placeholder for the pointee; resolve via
+                        // the globals/locals tag tables when fields
+                        // are empty.
                         let resolved = match pointee {
                             Type::Struct { name: Some(tag), fields, .. }
                                 if fields.is_empty() =>
                             {
-                                self.globals.lookup_struct_by_tag(tag).cloned()
+                                self.lookup_struct_by_tag(tag)
                                     .unwrap_or_else(|| pointee.clone())
                             }
                             _ => pointee.clone(),
