@@ -677,6 +677,36 @@ impl Locals {
         let mut prev_block_id: u32 = 0;
         // Track local-decl index separately so we can index into
         // block_ids (which only covers non-param decls).
+        // BCC's mixed-frame layout: when a function has both small
+        // (< 16-byte) and *very* large (≥ 16-byte) stack-resident
+        // locals at function scope, the small ones land at the top
+        // of the frame in source order, then the large ones below
+        // them. Fixture 092 keeps a 6-byte array in source order,
+        // so the cutoff is above 6 bytes; fixture 2480 (4 + 100 + 2)
+        // demonstrates the split. Picking 16 stays above 6/8/12 (no
+        // observed split there) and below 100. May need adjustment
+        // when a fixture between 16 and 100 forces a refinement.
+        let function_has_large_local = declared
+            .iter()
+            .enumerate()
+            .any(|(i, item)| {
+                matches!(item.kind, DeclKind::Local)
+                    && !reg_of.contains_key(&i)
+                    && item.ty.size_bytes() >= 16
+                    && {
+                        // Function-level only: the bucketed layout
+                        // is observed at function scope; inner-block
+                        // (block_id != 0) locals still allocate in
+                        // declaration order so sibling-block slot
+                        // reuse isn't disturbed.
+                        let local_idx = declared
+                            .iter()
+                            .take(i)
+                            .filter(|d| matches!(d.kind, DeclKind::Local))
+                            .count();
+                        block_ids.get(local_idx).copied().unwrap_or(0) == 0
+                    }
+            });
         let mut local_decl_idx: usize = 0;
         for (i, item) in declared.iter().enumerate() {
             let location = if let Some(&reg) = reg_of.get(&i) {
@@ -699,6 +729,28 @@ impl Locals {
                             .copied()
                             .unwrap_or(0);
                         local_decl_idx += 1;
+                        // Bucketed pass: when the function mixes
+                        // small/large locals, defer large
+                        // function-scope locals. They get assigned
+                        // a stack slot in a second pass that runs
+                        // after every small local has claimed its
+                        // offset. The bookkeeping is the same;
+                        // only the order changes.
+                        if function_has_large_local
+                            && block_id == 0
+                            && item.ty.size_bytes() >= 16
+                        {
+                            // Placeholder; replaced in the
+                            // post-loop fixup below.
+                            by_name.insert(
+                                item.name.clone(),
+                                LocalEntry {
+                                    location: LocalLocation::Stack(0),
+                                    ty: item.ty.clone(),
+                                },
+                            );
+                            continue;
+                        }
                         // Local referenced only by sizeof (which the
                         // parser folds to an int literal) leaves it
                         // unreferenced everywhere else. With a zero
@@ -769,6 +821,48 @@ impl Locals {
                 }
             };
             by_name.insert(item.name.clone(), LocalEntry { location, ty: item.ty.clone() });
+        }
+        // Second pass for the bucketed layout: assign stack offsets
+        // to the deferred large function-scope locals, in source
+        // order, starting from the current `stack_bytes` (i.e. just
+        // below the small bucket).
+        if function_has_large_local {
+            let mut large_decl_idx: usize = 0;
+            for (i, item) in declared.iter().enumerate() {
+                if !matches!(item.kind, DeclKind::Local) {
+                    continue;
+                }
+                let block_id = block_ids.get(large_decl_idx).copied().unwrap_or(0);
+                large_decl_idx += 1;
+                if block_id != 0 {
+                    continue;
+                }
+                if reg_of.contains_key(&i) {
+                    continue;
+                }
+                if item.ty.size_bytes() < 16 {
+                    continue;
+                }
+                let uses = counts.get(&item.name).copied().unwrap_or(0);
+                if uses == 0 && !address_taken.contains(&item.name) {
+                    continue;
+                }
+                let mut slot_size =
+                    align_up(item.ty.size_bytes(), item.ty.alignment());
+                if matches!(item.ty, Type::Array { .. })
+                    && slot_size % 2 == 1
+                {
+                    slot_size += 1;
+                }
+                stack_bytes = align_up(stack_bytes, item.ty.alignment()) + slot_size;
+                if stack_bytes > max_stack_bytes {
+                    max_stack_bytes = stack_bytes;
+                }
+                let off = -i16::try_from(stack_bytes).expect("stack frame fits in i16");
+                if let Some(entry) = by_name.get_mut(&item.name) {
+                    entry.location = LocalLocation::Stack(off);
+                }
+            }
         }
         // Use the max stack_bytes ever reached as the final frame
         // size — accounts for sibling blocks restoring SP between
