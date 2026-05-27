@@ -21424,6 +21424,80 @@ impl<'a> FunctionEmitter<'a> {
                 panic!("string literal as right operand of a binary op not yet supported (no fixture)")
             }
             ExprKind::Member { base, field, kind: crate::ast::MemberKind::Dot } => {
+                // `<stack-arr-of-struct>[var_idx].<field>` as RHS:
+                // emit a per-use BX setup (scale index, add base
+                // address with field offset, deref BX). The cost is
+                // higher than the const-fold path but the operand
+                // ends up in a uniform `[bx]` slot. Fixture 2438.
+                if let ExprKind::ArrayIndex {
+                    array: outer_arr, index: outer_idx,
+                } = &base.kind
+                    && let ExprKind::Ident(arr_name) = &outer_arr.kind
+                    && self.locals.has(arr_name)
+                    && let Some(elem_ty) = self.locals.type_of(arr_name).array_elem()
+                    && let Some((field_off, _field_ty)) = elem_ty.field(field)
+                    && let LocalLocation::Stack(base_bp) =
+                        self.locals.location_of(arr_name)
+                    && try_const_eval(outer_idx).is_none()
+                {
+                    let elem_stride = elem_ty.size_bytes();
+                    let log2 = match elem_stride {
+                        2 => 1,
+                        4 => 2,
+                        8 => 3,
+                        16 => 4,
+                        _ => 0,
+                    };
+                    let pow2_stride = (1u16 << log2) == elem_stride;
+                    if pow2_stride && log2 > 0 {
+                        // Load index without clobbering AX. Reg-
+                        // resident index: `mov bx, <reg>`. Stack
+                        // index: `mov bx, word ptr [bp+N]`. Bail
+                        // if neither applies (would need to emit
+                        // through AX, which we can't do here).
+                        let loaded = if let ExprKind::Ident(idx_name) = &outer_idx.kind
+                            && self.locals.has(idx_name)
+                            && let LocalLocation::Reg(reg) =
+                                self.locals.location_of(idx_name)
+                            && !reg.is_byte()
+                        {
+                            let _ = write!(self.out, "\tmov\tbx,{}\r\n", reg.name());
+                            true
+                        } else if let Some(idx_addr) = self.int_lvalue_addr(outer_idx) {
+                            let _ = write!(
+                                self.out,
+                                "\tmov\tbx,word ptr {idx_addr}\r\n",
+                            );
+                            true
+                        } else {
+                            false
+                        };
+                        if !loaded {
+                            // Fall through to the const-fold panic
+                            // path below so the diagnostic is clean.
+                        } else {
+                            for _ in 0..log2 {
+                                self.out.extend_from_slice(b"\tshl\tbx,1\r\n");
+                            }
+                            let off = base_bp
+                                + i16::try_from(field_off as i32).unwrap_or(i16::MAX);
+                            // Use DX as the scratch for the lea so
+                            // the LHS in AX isn't clobbered. BCC's
+                            // exact pattern for fixture 2438's
+                            // second operand (`a[i].y` after AX
+                            // already holds `a[i].x`).
+                            let _ = write!(
+                                self.out,
+                                "\tlea\tdx,word ptr {}\r\n",
+                                bp_addr(off),
+                            );
+                            self.out.extend_from_slice(b"\tadd\tbx,dx\r\n");
+                            return OperandSource::DerefReg(
+                                crate::codegen::locals::Reg::Bx,
+                            );
+                        }
+                    }
+                }
                 // `a.x` / `pts[1].x` / `a.b.c` / global `g.x` as a
                 // right operand: walk the lvalue chain. Local chain
                 // → `[bp-N]`; global chain → `DGROUP:_<name>+K`.
