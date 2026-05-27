@@ -2333,9 +2333,11 @@ impl Parser {
         })
     }
 
-    /// Parse `( * <name> ) ( <params> )`. The leading `(` is the
-    /// current token. Returns `(name, type)`; the type is a generic
-    /// near pointer (we don't model function signatures yet).
+    /// Parse `( * <name> ) ( <params> )` (function pointer) or
+    /// `( * <name> ) [ N ]...` (pointer-to-array). Returns
+    /// `(name, type)`; the type collapses to a generic near pointer
+    /// since we don't model function signatures or nested array
+    /// types here.
     fn parse_func_ptr_declarator(
         &mut self,
         _base_return_type: Type,
@@ -2348,6 +2350,20 @@ impl Parser {
         };
         let name = name.clone();
         self.expect(&TokenKind::RParen)?;
+        // Pointer-to-array shape: `( * name ) [ N ] [ M ] ...`.
+        // For codegen purposes we treat this as a flat pointer to the
+        // base element type — `(*p)[K]` then resolves the same way as
+        // `p[K]`. Fixture 2329.
+        if matches!(self.peek().kind, TokenKind::LBracket) {
+            while matches!(self.peek().kind, TokenKind::LBracket) {
+                self.bump();
+                while !matches!(self.peek().kind, TokenKind::RBracket | TokenKind::Eof) {
+                    self.bump();
+                }
+                self.expect(&TokenKind::RBracket)?;
+            }
+            return Ok((name, Type::Pointer(Box::new(Type::Int))));
+        }
         self.expect(&TokenKind::LParen)?;
         // Skip the parameter list. We don't record the signature, so
         // we just step past tokens until the matching `)`.

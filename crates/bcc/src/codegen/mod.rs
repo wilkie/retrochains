@@ -11757,6 +11757,9 @@ impl<'a> FunctionEmitter<'a> {
         // Walk a nested chain `a[i1][i2]...` down to the base ident,
         // collecting indices from innermost to outermost. A bare
         // `a[i]` lands here with `indices = [i]` after the reversal.
+        // `(*<ident>)[K]` (pointer-to-array indexed) is treated the
+        // same as `<ident>[K]` since the parser already collapses the
+        // pointer-to-array type to a flat pointer. Fixture 2329.
         let mut indices: Vec<&Expr> = vec![index];
         let mut cur = array;
         let array_name = loop {
@@ -11766,6 +11769,10 @@ impl<'a> FunctionEmitter<'a> {
                     cur = inner;
                 }
                 ExprKind::Ident(name) => break name.as_str(),
+                ExprKind::Deref(inner) if matches!(&inner.kind, ExprKind::Ident(_)) => {
+                    let ExprKind::Ident(name) = &inner.kind else { unreachable!() };
+                    break name.as_str();
+                }
                 _ => panic!(
                     "array base in `a[i]` must be an ident, nested array-index, or string literal (no fixture for {:?})",
                     cur.kind,
