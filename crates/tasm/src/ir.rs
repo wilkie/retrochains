@@ -1516,6 +1516,10 @@ pub enum Instr {
     /// 710: `p->c += 5` with p in SI → `mov al, [si]; add al, 5;
     /// mov [si], al`).
     MovSiPtrReg8 { src: Reg8 },
+    /// `mov byte ptr [di], <reg8>` — 88 (mod=00 reg=<src>
+    /// r/m=101). r/m=101 = [DI]. Sibling of MovSiPtrReg8.
+    /// Fixture 3529.
+    MovDiPtrReg8 { src: Reg8 },
     /// `mov word ptr [si+disp8],imm16` — `C7 44 dd lo hi`. Companion
     /// to `MovSiPtrImm` for the high-half store of a long-pointer
     /// write (`*p = K` where `p: long *`). Fixture 308.

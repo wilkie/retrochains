@@ -1306,6 +1306,13 @@ fn parse_mov(operands: &str, line_no: usize) -> AsmResult<Instr> {
             return Ok(Instr::MovSiPtrReg8 { src });
         }
     }
+    // LHS `byte ptr [di]` — char-store through DI pointer.
+    // Fixture 3529.
+    if lhs == "byte ptr [di]"
+        && let Some(src) = Reg8::parse(rhs)
+    {
+        return Ok(Instr::MovDiPtrReg8 { src });
+    }
     // LHS `word ptr [si+disp]` — store-imm to long pointer's high
     // half (fixture 308: `*p = K` where `p: long *` in SI emits
     // `mov word ptr [si+2], <high>` after the low-half partner).

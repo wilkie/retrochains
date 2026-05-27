@@ -482,7 +482,7 @@ fn instr_size(instr: &Instr) -> usize {
         Instr::MovBxPtrReg16 { .. } => 2,
         Instr::MovSiPtrImm8 { .. } => 3,
         Instr::MovSiPtrReg16 { .. } | Instr::MovDiPtrReg16 { .. } => 2,
-        Instr::MovSiPtrReg8 { .. } => 2,
+        Instr::MovSiPtrReg8 { .. } | Instr::MovDiPtrReg8 { .. } => 2,
         Instr::MovSiDispImm { .. } => 5,
         Instr::MovSiDispReg16 { .. } => 3,
         Instr::MovAxSiDisp { .. } | Instr::MovDxSiDisp { .. } => 3,
@@ -2305,6 +2305,12 @@ fn emit_instr(
             // r/m=100). Byte sibling of MovSiPtrReg16. Fixture 710.
             out.push(0x88);
             out.push(0b00_000_100 | (src.code() << 3));
+        }
+        Instr::MovDiPtrReg8 { src } => {
+            // `mov byte ptr [di],<reg8>` → 88 (mod=00 reg=<src>
+            // r/m=101). Byte sibling of MovDiPtrReg16. Fixture 3529.
+            out.push(0x88);
+            out.push(0b00_000_101 | (src.code() << 3));
         }
         Instr::MovDiPtrReg16 { src } => {
             // `mov word ptr [di],<reg16>` → 89 (mod=00 reg=<src>
