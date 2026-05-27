@@ -312,6 +312,21 @@ impl Parser {
                     break;
                 }
             }
+            // Function-pointer global declarator: `T (*name)(...)`.
+            // Route to parse_global, which already knows how to parse
+            // the `(*name)(...)` shape (fixtures 2607, 3212, 3567,
+            // 3643).
+            if matches!(self.peek_n(probe).kind, TokenKind::LParen)
+                && matches!(self.peek_n(probe + 1).kind, TokenKind::Star)
+            {
+                let new_globals = self.parse_global(is_static, is_extern)?;
+                for g in new_globals {
+                    let idx = globals.len();
+                    globals.push(g);
+                    decl_order.push(TopLevelRef::Global(idx));
+                }
+                continue;
+            }
             // Name.
             if !matches!(self.peek_n(probe).kind, TokenKind::Ident(_)) {
                 let t = self.peek_n(probe);
@@ -1044,12 +1059,23 @@ impl Parser {
                 ty = Type::Pointer(Box::new(ty));
                 self.consume_cc_modifiers();
             }
-            let name_tok = self.bump();
-            let TokenKind::Ident(name) = &name_tok.kind else {
-                return Err(ParseError::NotAnIdent { offset: name_tok.span.start });
+            // Function-pointer global declarator: `int (*name)(...)`.
+            // Mirrors the param / local paths — the signature isn't
+            // modeled, so the variable's type collapses to a generic
+            // near pointer (2 bytes). Fixtures 2607, 3212, 3567,
+            // 3643.
+            let (name, name_end) = if matches!(self.peek().kind, TokenKind::LParen) {
+                let (fp_name, fp_ty) = self.parse_func_ptr_declarator(ty.clone())?;
+                ty = fp_ty;
+                let end = self.peek().span.start;
+                (fp_name, end)
+            } else {
+                let name_tok = self.bump();
+                let TokenKind::Ident(name) = &name_tok.kind else {
+                    return Err(ParseError::NotAnIdent { offset: name_tok.span.start });
+                };
+                (name.clone(), name_tok.span.end)
             };
-            let name = name.clone();
-            let name_end = name_tok.span.end;
             // Array suffix. `[N]` gives an explicit count; `[]`
             // defers the count until an initializer is seen
             // (fixture 191's `char s[] = "hi";` → len 3).

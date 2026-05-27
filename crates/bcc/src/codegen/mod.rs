@@ -5563,6 +5563,17 @@ impl<'a> FunctionEmitter<'a> {
                 );
             };
             let _ = write!(self.out, "\tcall\tword ptr {}\r\n", bp_addr(off));
+        } else if let Some(gty) = self.globals.type_of(name)
+            && gty.pointee().is_some()
+            && self.signatures.params_of(name).is_none()
+        {
+            // Global function pointer: `int (*op)(int);` then `op(7)`.
+            // BCC emits an indirect-memory call. Fixtures 2607, 3212,
+            // 3567.
+            let _ = write!(
+                self.out,
+                "\tcall\tword ptr DGROUP:_{name}\r\n",
+            );
         } else {
             // Far callee: emit `push cs` before the near call so the
             // stack looks like a real far call from the callee's

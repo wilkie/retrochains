@@ -623,6 +623,7 @@ fn instr_size(instr: &Instr) -> usize {
         | Instr::MovBpRelOffsetGroupSym { offset, .. } => 1 + bp_rel_modrm_size(*offset) + 2,
         Instr::MovDerefRegOffsetGroupSym { .. } => 4,
         Instr::CallIndirectBpRel { offset } => 1 + bp_rel_modrm_size(*offset),
+        Instr::CallIndirectGroupSym { .. } => 4,
         // 8087 FPU memory ops: TASM auto-prepends a `9B` (FWAIT)
         // prefix before each memory-form FPU instruction (matches
         // real TASM's 8087 compatibility behavior). The family
@@ -3227,6 +3228,14 @@ fn emit_instr(
             // CALL near r/m16.
             out.push(0xFF);
             emit_bp_rel_modrm(2, *offset, out);
+        }
+        Instr::CallIndirectGroupSym { group, symbol } => {
+            // `call word ptr <group>:<sym>` → FF /2 [disp16].
+            // ModR/M=0x16 = mod=00 reg=2 r/m=110 ([disp16] form).
+            emit_group_sym_lea(
+                &[0xFF, 0x16], group, symbol, 0,
+                symbols, group_idx, extern_idx, out, fixups,
+            )?;
         }
         Instr::JmpShort(target) => {
             let target_off = symbols.get(target).map(|l| l.offset).ok_or_else(|| {

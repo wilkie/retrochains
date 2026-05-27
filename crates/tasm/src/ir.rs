@@ -2080,6 +2080,11 @@ pub enum Instr {
     /// stack-resident function pointer. Emits `FF 56 dd`. No FIXUPP
     /// (the address is loaded from the local at runtime).
     CallIndirectBpRel { offset: i16 },
+    /// `call word ptr <group>:<sym>` — indirect near call through a
+    /// global function-pointer. Emits `FF 16 lo hi` + SegRel FIXUPP
+    /// on the disp16. Fixtures 2607, 3212, 3567 (`int (*op)(int);
+    /// op(x);`).
+    CallIndirectGroupSym { group: String, symbol: String },
     /// `push <imm8sx>` — 80186+ push of a sign-extended byte
     /// immediate. Encoding: `6A ii`. Saves 2 bytes per call when
     /// the argument constant fits in a signed byte. Fixture 2277.
