@@ -11430,6 +11430,40 @@ impl<'a> FunctionEmitter<'a> {
             }
             return;
         }
+        // `<arr-of-pointers>[i][j]` — array of pointers indexed
+        // twice. Same shape as `pp[i][j]` but the first level
+        // lives in the stack-resident array's bp-relative slot.
+        // With constant indices, fold each level's offset.
+        // Fixture 1710 (`char *strs[3]; strs[1][0]`).
+        if indices.len() == 2
+            && let Type::Array { elem, .. } = &ty
+            && let Some(inner_pointee) = elem.pointee()
+            && let Some(i_k) = try_const_eval(indices[0])
+            && let Some(j_k) = try_const_eval(indices[1])
+        {
+            let inner_pointee = inner_pointee.clone();
+            let outer_stride = u32::from(elem.size_bytes());
+            let i_off = i_k.wrapping_mul(outer_stride) as i32;
+            let elem_off = i32::from(base_off) + i_off;
+            let elem_off_i16 = i16::try_from(elem_off).unwrap_or(i16::MAX);
+            let _ = write!(self.out, "\tmov\tbx,word ptr {}\r\n", bp_addr(elem_off_i16));
+            let j_stride = i32::from(inner_pointee.size_bytes());
+            let j_off = (j_k as i32).wrapping_mul(j_stride);
+            let bx_disp = if j_off == 0 {
+                "[bx]".to_owned()
+            } else if j_off > 0 {
+                format!("[bx+{j_off}]")
+            } else {
+                format!("[bx-{}]", -j_off)
+            };
+            if inner_pointee.is_char_like() {
+                let _ = write!(self.out, "\tmov\tal,byte ptr {bx_disp}\r\n");
+                self.emit_widen_al(&inner_pointee);
+            } else {
+                let _ = write!(self.out, "\tmov\tax,word ptr {bx_disp}\r\n");
+            }
+            return;
+        }
         // 2D variable-index read: `a[i][j]` for `int a[M][N]`.
         // Fixture 198. Other multi-dim depths aren't fixtured yet.
         if indices.len() == 2 {
