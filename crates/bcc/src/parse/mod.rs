@@ -1462,13 +1462,15 @@ impl Parser {
                 };
                 name
             };
-            // `int a[]` / `int a[N]` parameter syntax — equivalent to
-            // `int *a`. Convert the type to a pointer and discard any
-            // size (it's not a real array for parameter passing).
-            // Fixtures 1236 (`int sum(int a[])`), 1239 (char arr).
-            if matches!(self.peek().kind, TokenKind::LBracket) {
+            // `int a[]` / `int a[N]` / `int a[N][M]...` parameter
+            // syntax — equivalent to `int *a` (outermost dim decays
+            // to a pointer; subsequent dims are folded into the
+            // pointer's "stride" but we collapse to a flat pointer
+            // since codegen doesn't yet model nested-array element
+            // strides on params). Fixtures 1236 (`int sum(int a[])`),
+            // 1239 (char arr), 2236 (`int sum(int m[3][3])`).
+            while matches!(self.peek().kind, TokenKind::LBracket) {
                 self.bump();
-                // Skip an optional size expression; we don't need it.
                 while !matches!(self.peek().kind, TokenKind::RBracket | TokenKind::Eof) {
                     self.bump();
                 }
