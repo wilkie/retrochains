@@ -2579,9 +2579,14 @@ fn count_uses_stmt(stmt: &Stmt, counts: &mut HashMap<String, u32>) {
         }
         StmtKind::DerefAssign { target, value }
         | StmtKind::DerefCompoundAssign { target, value, .. } => {
-            if let ExprKind::Ident(name) = &target.kind {
-                // Same direct-deref bonus as `*p` in rvalue position.
-                *counts.entry(name.clone()).or_insert(0) += 2;
+            // `*p = v` and `*(p + K) = v` both give the pointer-name
+            // the same +2 direct-deref bonus as the rvalue form
+            // (`v = *p` / `v = *(p+K)`). Fixture 3591
+            // (`void put(int *p, int v) { *(p + 1) = v; }` enregisters
+            // p into SI even with only one textual occurrence in the
+            // body — the constant-offset deref counts as 2).
+            if let Some(name) = direct_deref_target(target) {
+                *counts.entry(name).or_insert(0) += 2;
             } else {
                 count_uses_expr(target, counts);
             }
