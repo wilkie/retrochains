@@ -42,6 +42,9 @@ pub struct ParsedArgs {
     /// call near ptr N_OVERFLOW@; @skip:` right after the
     /// prologue. Fixture 2129.
     pub stack_check: bool,
+    /// `-r-`: disable register variables. All locals/params stay
+    /// on the stack regardless of use count. Fixture 2263.
+    pub no_reg_vars: bool,
     /// Input source files, in the order given on the command line.
     pub sources: Vec<PathBuf>,
 }
@@ -89,6 +92,7 @@ pub fn parse_args(argv: &[String]) -> Result<ParsedArgs, CliError> {
     let mut optimize = false;
     let mut target_186 = false;
     let mut stack_check = false;
+    let mut no_reg_vars = false;
     let mut defines: Vec<(String, String)> = Vec::new();
     let mut sources: Vec<PathBuf> = Vec::new();
     for arg in argv {
@@ -101,6 +105,7 @@ pub fn parse_args(argv: &[String]) -> Result<ParsedArgs, CliError> {
             "-O" | "-O2" => optimize = true,
             "-1" | "-2" => target_186 = true,
             "-N" => stack_check = true,
+            "-r-" => no_reg_vars = true,
             other if other.starts_with("-D") => {
                 // `-D<NAME>` or `-D<NAME>=<body>`. Fixtures 2131
                 // (`-DFOO=42`), 2280 (`-DDEBUG=42`).
@@ -128,7 +133,7 @@ pub fn parse_args(argv: &[String]) -> Result<ParsedArgs, CliError> {
             //   -f-      no FPU
             // Fixtures 2123-2137, 2261-2263.
             "-G" | "-A"
-            | "-r-" | "-f-" | "-N-" => {}
+            | "-f-" | "-N-" => {}
             other if other.starts_with('-') => {
                 return Err(CliError::Unsupported(other.to_owned()));
             }
@@ -149,6 +154,7 @@ pub fn parse_args(argv: &[String]) -> Result<ParsedArgs, CliError> {
         optimize,
         target_186,
         stack_check,
+        no_reg_vars,
         sources,
     })
 }

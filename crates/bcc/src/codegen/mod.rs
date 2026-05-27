@@ -589,9 +589,11 @@ pub fn emit_function(
     helpers: &mut std::collections::HashSet<String>,
     target_186: bool,
     stack_check: bool,
+    no_reg_vars: bool,
 ) {
-    let mut emitter = FunctionEmitter::new(
+    let mut emitter = FunctionEmitter::new_with_opts(
         out, source, function, func_idx, signatures, globals, strings, helpers,
+        no_reg_vars,
     );
     emitter.target_186 = target_186;
     emitter.stack_check = stack_check;
@@ -698,6 +700,23 @@ impl<'a> FunctionEmitter<'a> {
         strings: &'a mut StringPool,
         helpers: &'a mut std::collections::HashSet<String>,
     ) -> Self {
+        Self::new_with_opts(
+            out, source, function, func_idx, signatures, globals, strings, helpers,
+            false,
+        )
+    }
+
+    fn new_with_opts(
+        out: &'a mut Vec<u8>,
+        source: &'a str,
+        function: &'a Function,
+        func_idx: u32,
+        signatures: &'a Signatures,
+        globals: &'a GlobalTable,
+        strings: &'a mut StringPool,
+        helpers: &'a mut std::collections::HashSet<String>,
+        no_reg_vars: bool,
+    ) -> Self {
         Self {
             out,
             source,
@@ -705,7 +724,7 @@ impl<'a> FunctionEmitter<'a> {
             func_idx,
             lines: LineMap::new(source),
             current_line: 0,
-            locals: Locals::analyze(function, globals),
+            locals: Locals::analyze_with_opts(function, globals, no_reg_vars),
             label_plan: LabelPlan::build(function),
             signatures,
             globals,
@@ -1365,12 +1384,23 @@ impl<'a> FunctionEmitter<'a> {
                     let _ = write!(self.out, "\t{hi_op}\tword ptr {},0\r\n", bp_addr(off + 2));
                     return;
                 }
+                // Stack-resident ++/-- on an int: memory-direct
+                // inc/dec word. Fixture 2263 (`-r-` keeps every int
+                // on the stack, including loop counters that would
+                // otherwise enregister).
+                if ty.is_int_like() {
+                    let _ = write!(
+                        self.out,
+                        "\t{mnemonic}\tword ptr {}\r\n",
+                        bp_addr(off),
+                    );
+                    return;
+                }
                 // Stack-resident ++/-- on a char uses the AL round-trip
-                // (fixture 055). Stack ints are still unobserved — keep
-                // the panic until a fixture forces us there.
+                // (fixture 055).
                 assert!(
                     ty.is_char_like(),
-                    "++/-- on a stack-resident int not yet supported (no fixture)"
+                    "++/-- on a stack-resident {:?} not yet supported", ty,
                 );
                 let _ = write!(self.out, "\tmov\tal,byte ptr {}\r\n", bp_addr(off));
                 let _ = write!(self.out, "\t{mnemonic}\tal\r\n");

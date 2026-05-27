@@ -45,6 +45,7 @@ pub fn emit_dash_s(
     optimize: bool,
     target_186: bool,
     stack_check: bool,
+    no_reg_vars: bool,
 ) -> Result<PathBuf, EmitError> {
     let source = fs::read_to_string(source_path)
         .map_err(|e| EmitError::SourceRead(source_path.to_owned(), e))?;
@@ -63,7 +64,7 @@ pub fn emit_dash_s(
         .map_or_else(|| "out.c".to_owned(), str::to_ascii_lowercase);
     let output_path = PathBuf::from(format!("{}.ASM", basename.to_ascii_uppercase()));
 
-    let bytes = build_asm(&source, &lowered, mtime, merge_strings, defines, unsigned_chars, optimize, target_186, stack_check)?;
+    let bytes = build_asm(&source, &lowered, mtime, merge_strings, defines, unsigned_chars, optimize, target_186, stack_check, no_reg_vars)?;
     fs::write(&output_path, bytes)?;
     Ok(output_path)
 }
@@ -83,6 +84,7 @@ pub fn build_asm(
     optimize: bool,
     target_186: bool,
     stack_check: bool,
+    no_reg_vars: bool,
 ) -> Result<Vec<u8>, EmitError> {
     // C preprocessor pass: resolve `#define`/`#ifdef`/`#if` and
     // expand object/function-like macros. Stripped directive lines
@@ -150,6 +152,7 @@ pub fn build_asm(
             &mut helpers,
             target_186,
             stack_check,
+            no_reg_vars,
         );
     }
 

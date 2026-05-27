@@ -220,6 +220,14 @@ impl Locals {
         function: &Function,
         globals: &crate::codegen::GlobalTable,
     ) -> Self {
+        Self::analyze_with_opts(function, globals, false)
+    }
+
+    pub fn analyze_with_opts(
+        function: &Function,
+        globals: &crate::codegen::GlobalTable,
+        no_reg_vars: bool,
+    ) -> Self {
         // Pass 1: collect all "declarable" names (params first, then
         // locals in source order). Each gets an `init`-style use plus
         // a textual count.
@@ -436,6 +444,12 @@ impl Locals {
                     return false;
                 }
                 let uses = counts.get(&declared[i].name).copied().unwrap_or(0);
+                // `-r-` (BCC's no-register-vars flag) keeps every
+                // local/param on the stack, ignoring use counts and
+                // the `register` keyword. Fixture 2263.
+                if no_reg_vars {
+                    return false;
+                }
                 match &declared[i].ty {
                     Type::Int | Type::UInt | Type::Pointer(_) => {
                         declared[i].is_register
