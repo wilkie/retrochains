@@ -589,6 +589,46 @@ fn hoist_first_setup_above_push(buf: &mut Vec<u8>, push_pos: usize) {
     }
 }
 
+/// Try to rewind the `emit_array_addr_to_bx` AX-route 3-instruction
+/// shape (`lea ax, word ptr [bp-N]\r\nmov bx, <reg-word>\r\nadd bx,
+/// ax\r\n`) at the end of `buf`. Returns the truncate offset if the
+/// pattern matches AND the BX source register matches the low-byte
+/// register the caller is about to use for the byte value (so the
+/// caller can swap to a DX-routed emission). Conservative: bails on
+/// any other shape.
+fn try_rewind_array_addr_ax_to_dx(
+    buf: &[u8],
+    base_off: i16,
+    low_name: &str,
+) -> Option<usize> {
+    let word_reg = match low_name {
+        "dl" => "dx",
+        "bl" => "bx",
+        "cl" => "cx",
+        _ => return None,
+    };
+    let lea_line = format!("\tlea\tax,word ptr {}\r\n", bp_addr(base_off));
+    let mov_line = format!("\tmov\tbx,{}\r\n", word_reg);
+    let add_line = "\tadd\tbx,ax\r\n";
+    let total_len = lea_line.len() + mov_line.len() + add_line.len();
+    if buf.len() < total_len {
+        return None;
+    }
+    let start = buf.len() - total_len;
+    if &buf[start..start + lea_line.len()] != lea_line.as_bytes() {
+        return None;
+    }
+    let mid = start + lea_line.len();
+    if &buf[mid..mid + mov_line.len()] != mov_line.as_bytes() {
+        return None;
+    }
+    let tail = mid + mov_line.len();
+    if &buf[tail..tail + add_line.len()] != add_line.as_bytes() {
+        return None;
+    }
+    Some(start)
+}
+
 /// Same shape as `split_lhs_mem_clobber_tail` but with a register
 /// (reg-resident LHS) instead of a memory operand. Detects the
 /// 4-instruction tail
@@ -13923,6 +13963,40 @@ impl<'a> FunctionEmitter<'a> {
             _ => (None, None),
         };
         if elem.is_char_like() && let Some(low_name) = byte_src_reg {
+            // BCC's order: emit the byte value into AL FIRST, then
+            // compute the address (using DX rather than AX so AL
+            // isn't clobbered), then store. The
+            // `emit_array_addr_to_bx` call above already wrote the
+            // AX-routed address; rewind and re-emit. Fixture 1276
+            // (`s[i] = 'a' + i` with i in CX).
+            if byte_addend.is_some()
+                && let Some(rewound) =
+                    try_rewind_array_addr_ax_to_dx(self.out, base_off, low_name)
+            {
+                self.out.truncate(rewound);
+                let _ = write!(self.out, "\tmov\tal,{low_name}\r\n");
+                let k = byte_addend.unwrap();
+                let k8 = (k & 0xFF) as u8;
+                let k_i8 = k8 as i8;
+                if k_i8 == 1 {
+                    self.out.extend_from_slice(b"\tinc\tal\r\n");
+                } else if k_i8 == -1 {
+                    self.out.extend_from_slice(b"\tdec\tal\r\n");
+                } else {
+                    let _ = write!(self.out, "\tadd\tal,{k_i8}\r\n");
+                }
+                let _ = write!(self.out, "\tlea\tdx,word ptr {}\r\n", bp_addr(base_off));
+                let _ = write!(self.out, "\tmov\tbx,{low_name_word}\r\n",
+                    low_name_word = match low_name {
+                        "dl" => "dx",
+                        "bl" => "bx",
+                        "cl" => "cx",
+                        _ => low_name,
+                    });
+                self.out.extend_from_slice(b"\tadd\tbx,dx\r\n");
+                self.out.extend_from_slice(b"\tmov\tbyte ptr [bx],al\r\n");
+                return;
+            }
             let _ = write!(self.out, "\tmov\tal,{low_name}\r\n");
             if let Some(k) = byte_addend {
                 let k8 = (k & 0xFF) as u8;
@@ -15062,10 +15136,13 @@ impl<'a> FunctionEmitter<'a> {
         // `<global_struct_array>[<var>].<field>` — Dot access on a
         // variable-indexed global struct array. Compute the scaled
         // element offset into BX, then load through `[bx +
-        // <arr_sym> + field_off]`. Fixture 2841.
+        // <arr_sym> + field_off]`. Fixture 2841. Skip when the
+        // name is also a local in scope (another function's static
+        // local shadowed by a parameter — fixture 2208's `pts`).
         if matches!(kind, crate::ast::MemberKind::Dot)
             && let ExprKind::ArrayIndex { array: arr_expr, index } = &base.kind
             && let ExprKind::Ident(arr_name) = &arr_expr.kind
+            && !self.locals.has(arr_name)
             && let Some(arr_ty) = self.globals.type_of(arr_name)
             && let Some(elem_ty) = arr_ty.array_elem()
             && let Type::Struct { fields, .. } = elem_ty.clone()
