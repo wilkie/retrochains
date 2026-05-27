@@ -2351,6 +2351,18 @@ impl Parser {
             return Err(ParseError::NotAnIdent { offset: name_tok.span.start });
         };
         let name = name.clone();
+        // Array-of-function-pointers declarator shape:
+        // `<ret> ( * <name> [ N ]... ) ( args )`. Skip the inner
+        // `[N]` dimensions — the codegen treats the whole thing as
+        // a flat array (just like a function-pointer array). Fixtures
+        // 2305, 2308, 2343, etc.
+        while matches!(self.peek().kind, TokenKind::LBracket) {
+            self.bump();
+            while !matches!(self.peek().kind, TokenKind::RBracket | TokenKind::Eof) {
+                self.bump();
+            }
+            self.expect(&TokenKind::RBracket)?;
+        }
         self.expect(&TokenKind::RParen)?;
         // Pointer-to-array shape: `( * name ) [ N ] [ M ] ...`.
         // For codegen purposes we treat this as a flat pointer to the
