@@ -4142,6 +4142,20 @@ fn parse_fld(rest: &str, line_no: usize) -> AsmResult<Instr> {
     if let Some(offset) = parse_qword_bp_relative(rest) {
         return Ok(Instr::FldQwordBpRel { offset });
     }
+    if let Some((group, symbol, disp)) = parse_group_symbol_bx_disp_width(rest, "dword") {
+        return Ok(Instr::FldDwordGroupSymBx {
+            group: group.to_string(),
+            symbol: symbol.to_string(),
+            disp: disp as i16,
+        });
+    }
+    if let Some((group, symbol, disp)) = parse_group_symbol_bx_disp_width(rest, "qword") {
+        return Ok(Instr::FldQwordGroupSymBx {
+            group: group.to_string(),
+            symbol: symbol.to_string(),
+            disp: disp as i16,
+        });
+    }
     if let Some((group, symbol)) = parse_group_symbol_with_width(rest, "dword ptr ") {
         let (sym, offset) = split_sym_offset(symbol);
         return Ok(Instr::FldDwordGroupSym {

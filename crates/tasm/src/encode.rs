@@ -640,6 +640,7 @@ fn instr_size(instr: &Instr) -> usize {
         Instr::FldDwordGroupSym { .. } | Instr::FldQwordGroupSym { .. }
         | Instr::FstpDwordGroupSym { .. } | Instr::FstpQwordGroupSym { .. }
         | Instr::FcompGroupSym { .. } | Instr::FpuArithGroupSym { .. } => 5,
+        Instr::FldDwordGroupSymBx { .. } | Instr::FldQwordGroupSymBx { .. } => 5,
         // Register-form FPU instructions: 9B (fwait) + family +
         // register-mode ModR/M = 3 bytes flat. No memory displacement.
         Instr::Fld1 | Instr::FsubpStack | Instr::Fchs | Instr::Fldz | Instr::Fcompp => 3,
@@ -3297,6 +3298,20 @@ fn emit_instr(
             push_fidrqq_fixup(out, extern_idx, fixups)?;
             emit_group_sym_lea(
                 &[0x9B, 0xDD, 0x06], group, symbol, *offset,
+                symbols, group_idx, extern_idx, out, fixups,
+            )?;
+        }
+        Instr::FldDwordGroupSymBx { group, symbol, disp } => {
+            push_fidrqq_fixup(out, extern_idx, fixups)?;
+            emit_group_sym_lea(
+                &[0x9B, 0xD9, 0x87], group, symbol, *disp,
+                symbols, group_idx, extern_idx, out, fixups,
+            )?;
+        }
+        Instr::FldQwordGroupSymBx { group, symbol, disp } => {
+            push_fidrqq_fixup(out, extern_idx, fixups)?;
+            emit_group_sym_lea(
+                &[0x9B, 0xDD, 0x87], group, symbol, *disp,
                 symbols, group_idx, extern_idx, out, fixups,
             )?;
         }

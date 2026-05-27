@@ -2131,6 +2131,16 @@ pub enum Instr {
     /// from a data-segment address. Encoding: `DD 06 lo hi` + same
     /// FIXUPP shape as `FldDwordGroupSym`. Used by global doubles.
     FldQwordGroupSym { group: String, symbol: String, offset: i16 },
+    /// `fld dword ptr <group>:<sym>[bx]` — 32-bit float load via
+    /// BX-indexed data-segment address. Encoding: `D9 87 lo hi` plus
+    /// a SegRelGroupTarget FIXUPP on the disp16. Used for variable-
+    /// indexed float-array reads.
+    FldDwordGroupSymBx { group: String, symbol: String, disp: i16 },
+    /// `fld qword ptr <group>:<sym>[bx]` — 64-bit double load via
+    /// BX-indexed data-segment address. Encoding: `DD 87 lo hi` +
+    /// same FIXUPP shape as `FldDwordGroupSymBx`. Fixture 2150
+    /// (`arr[i]` for `static double arr[3]`).
+    FldQwordGroupSymBx { group: String, symbol: String, disp: i16 },
     /// `fstp dword ptr <group>:<sym>[+<offset>]` — 32-bit float store
     /// to a data-segment address. Encoding: `D9 1E lo hi` + same
     /// FIXUPP shape as `FldDwordGroupSym`. Used by global float

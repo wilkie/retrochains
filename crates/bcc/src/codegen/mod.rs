@@ -7119,6 +7119,19 @@ impl<'a> FunctionEmitter<'a> {
     fn emit_float_load_to_fpu(&mut self, e: &Expr) {
         match &e.kind {
             ExprKind::FloatLit(bits) => {
+                // 1.0 / 0.0 use the FPU's built-in constants instead
+                // of pooling — `fld1` / `fldz` save 4 bytes of code
+                // plus 4 bytes of pooled data each. Fixture 2151
+                // (`float f = 1.0f`).
+                let f = f32::from_bits(*bits);
+                if f == 1.0 {
+                    self.out.extend_from_slice(b"\tfld1\t\r\n");
+                    return;
+                }
+                if f == 0.0 && bits >> 31 == 0 {
+                    self.out.extend_from_slice(b"\tfldz\t\r\n");
+                    return;
+                }
                 let off = self.strings.intern_float(*bits);
                 let src = if off == 0 {
                     "DGROUP:s@".to_owned()
@@ -7201,13 +7214,41 @@ impl<'a> FunctionEmitter<'a> {
                     );
                 }
             }
-            ExprKind::ArrayIndex { .. } => {
-                let (addr, leaf_ty) = self
-                    .resolve_float_array_addr(e)
-                    .expect("float ArrayIndex resolution failed");
-                let width =
-                    if matches!(leaf_ty, Type::Float) { "dword" } else { "qword" };
-                let _ = write!(self.out, "\tfld\t{width} ptr {addr}\r\n");
+            ExprKind::ArrayIndex { array, index } => {
+                if let Some((addr, leaf_ty)) = self.resolve_float_array_addr(e) {
+                    let width =
+                        if matches!(leaf_ty, Type::Float) { "dword" } else { "qword" };
+                    let _ = write!(self.out, "\tfld\t{width} ptr {addr}\r\n");
+                } else if let ExprKind::Ident(name) = &array.kind
+                    && let Some(gty) = self.globals.type_of(name)
+                    && let Some(elem) = gty.array_elem()
+                    && elem.is_float_like()
+                {
+                    // Variable-index float/double global array: load
+                    // the index into BX, shift by log2(stride), then
+                    // `fld <width> ptr DGROUP:_<name>[bx]`. Fixture
+                    // 2150 (`arr[i]` for `static double arr[3]`).
+                    let elem = elem.clone();
+                    let stride = elem.size_bytes() as u32;
+                    let shifts = stride.trailing_zeros();
+                    if let Some(idx_addr) = self.int_lvalue_addr(index) {
+                        let _ = write!(self.out, "\tmov\tbx,word ptr {idx_addr}\r\n");
+                    } else {
+                        self.emit_expr_to_ax(index);
+                        self.out.extend_from_slice(b"\tmov\tbx,ax\r\n");
+                    }
+                    for _ in 0..shifts {
+                        self.out.extend_from_slice(b"\tshl\tbx,1\r\n");
+                    }
+                    let width =
+                        if matches!(elem, Type::Float) { "dword" } else { "qword" };
+                    let _ = write!(
+                        self.out,
+                        "\tfld\t{width} ptr DGROUP:_{name}[bx]\r\n",
+                    );
+                } else {
+                    panic!("float ArrayIndex resolution failed");
+                }
             }
             ExprKind::BinOp { op, left, right } => {
                 // Left subexpression first onto the FPU stack, then
@@ -7563,38 +7604,61 @@ impl<'a> FunctionEmitter<'a> {
             // a 32-bit float and relies on the FPU's 80-bit
             // promotion + truncating `fstp qword` to reconstruct
             // the original double bits (fixture 1672).
-            let pool_load = match (&init.kind, ty) {
-                (ExprKind::FloatLit(bits), _) => {
-                    Some((self.strings.intern_float(*bits), "dword"))
-                }
-                (ExprKind::DoubleLit(bits), Type::Float) => {
-                    let f = f64::from_bits(*bits) as f32;
-                    Some((self.strings.intern_float(f.to_bits()), "dword"))
-                }
-                (ExprKind::DoubleLit(bits), Type::Double) => {
-                    let d = f64::from_bits(*bits);
-                    let f = d as f32;
-                    if f64::from(f).to_bits() == *bits {
-                        Some((self.strings.intern_float(f.to_bits()), "dword"))
-                    } else {
-                        Some((self.strings.intern_double(*bits), "qword"))
-                    }
-                }
+            // The 1.0 / 0.0 specials use the FPU built-ins (`fld1`
+            // / `fldz`) instead of pooling — saves 4 bytes of code +
+            // 4 bytes of pool data per use. Fixture 2151.
+            let lit_bits = match (&init.kind, ty) {
+                (ExprKind::FloatLit(bits), _) => Some(f64::from(f32::from_bits(*bits))),
+                (ExprKind::DoubleLit(bits), _) => Some(f64::from_bits(*bits)),
                 _ => None,
             };
-            if let Some((pool_off, load_width)) = pool_load {
-                let src = if pool_off == 0 {
-                    "DGROUP:s@".to_owned()
+            let used_builtin = if let Some(v) = lit_bits {
+                if v == 1.0 {
+                    self.out.extend_from_slice(b"\tfld1\t\r\n");
+                    true
+                } else if v == 0.0 && v.is_sign_positive() {
+                    self.out.extend_from_slice(b"\tfldz\t\r\n");
+                    true
                 } else {
-                    format!("DGROUP:s@+{pool_off}")
-                };
-                let _ = write!(self.out, "\tfld\t{load_width} ptr {src}\r\n");
+                    false
+                }
             } else {
-                // Non-literal initializer (BinOp, Ident, etc.) —
-                // route through the FPU expression walker. The
-                // result lands on the FPU stack top; the trailing
-                // `fstp` writes it back to the local.
-                self.emit_float_load_to_fpu(init);
+                false
+            };
+            if !used_builtin {
+                let pool_load = match (&init.kind, ty) {
+                    (ExprKind::FloatLit(bits), _) => {
+                        Some((self.strings.intern_float(*bits), "dword"))
+                    }
+                    (ExprKind::DoubleLit(bits), Type::Float) => {
+                        let f = f64::from_bits(*bits) as f32;
+                        Some((self.strings.intern_float(f.to_bits()), "dword"))
+                    }
+                    (ExprKind::DoubleLit(bits), Type::Double) => {
+                        let d = f64::from_bits(*bits);
+                        let f = d as f32;
+                        if f64::from(f).to_bits() == *bits {
+                            Some((self.strings.intern_float(f.to_bits()), "dword"))
+                        } else {
+                            Some((self.strings.intern_double(*bits), "qword"))
+                        }
+                    }
+                    _ => None,
+                };
+                if let Some((pool_off, load_width)) = pool_load {
+                    let src = if pool_off == 0 {
+                        "DGROUP:s@".to_owned()
+                    } else {
+                        format!("DGROUP:s@+{pool_off}")
+                    };
+                    let _ = write!(self.out, "\tfld\t{load_width} ptr {src}\r\n");
+                } else {
+                    // Non-literal initializer (BinOp, Ident, etc.) —
+                    // route through the FPU expression walker. The
+                    // result lands on the FPU stack top; the trailing
+                    // `fstp` writes it back to the local.
+                    self.emit_float_load_to_fpu(init);
+                }
             }
             let store_width = if matches!(ty, Type::Float) { "dword" } else { "qword" };
             let _ = write!(
