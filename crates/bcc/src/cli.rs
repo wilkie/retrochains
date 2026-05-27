@@ -26,6 +26,11 @@ pub struct ParsedArgs {
     /// `mov ah, 0` instead of sign-extend via `cbw`). Fixtures
     /// 2130, 2284.
     pub unsigned_chars: bool,
+    /// `-O` / `-O2`: enable BCC's small set of peephole
+    /// optimizations. Today we honor it for the trampoline-jmp
+    /// fold (drop `jmp short @X` when it's immediately followed
+    /// by `@X:`). Fixtures 2125, 2126, 2281.
+    pub optimize: bool,
     /// Input source files, in the order given on the command line.
     pub sources: Vec<PathBuf>,
 }
@@ -70,6 +75,7 @@ pub fn parse_args(argv: &[String]) -> Result<ParsedArgs, CliError> {
     let mut memory_model: Option<MemoryModel> = None;
     let mut merge_strings = false;
     let mut unsigned_chars = false;
+    let mut optimize = false;
     let mut defines: Vec<(String, String)> = Vec::new();
     let mut sources: Vec<PathBuf> = Vec::new();
     for arg in argv {
@@ -79,6 +85,7 @@ pub fn parse_args(argv: &[String]) -> Result<ParsedArgs, CliError> {
             "-ms" => memory_model = Some(MemoryModel::Small),
             "-d" => merge_strings = true,
             "-K" => unsigned_chars = true,
+            "-O" | "-O2" => optimize = true,
             other if other.starts_with("-D") => {
                 // `-D<NAME>` or `-D<NAME>=<body>`. Fixtures 2131
                 // (`-DFOO=42`), 2280 (`-DDEBUG=42`).
@@ -105,7 +112,7 @@ pub fn parse_args(argv: &[String]) -> Result<ParsedArgs, CliError> {
             //   -r-      disable register allocator
             //   -f-      no FPU
             // Fixtures 2123-2137, 2261-2263.
-            "-O" | "-O2" | "-G" | "-1" | "-2" | "-N" | "-A"
+            "-G" | "-1" | "-2" | "-N" | "-A"
             | "-r-" | "-f-" | "-N-" => {}
             other if other.starts_with('-') => {
                 return Err(CliError::Unsupported(other.to_owned()));
@@ -118,5 +125,13 @@ pub fn parse_args(argv: &[String]) -> Result<ParsedArgs, CliError> {
     if sources.is_empty() {
         return Err(CliError::NoSource);
     }
-    Ok(ParsedArgs { mode, memory_model, merge_strings, defines, unsigned_chars, sources })
+    Ok(ParsedArgs {
+        mode,
+        memory_model,
+        merge_strings,
+        defines,
+        unsigned_chars,
+        optimize,
+        sources,
+    })
 }

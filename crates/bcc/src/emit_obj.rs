@@ -23,6 +23,7 @@ pub fn emit_dash_c(
     merge_strings: bool,
     defines: &[(String, String)],
     unsigned_chars: bool,
+    optimize: bool,
 ) -> Result<PathBuf, EmitError> {
     let source = fs::read_to_string(source_path)
         .map_err(|e| EmitError::SourceRead(source_path.to_owned(), e))?;
@@ -41,7 +42,7 @@ pub fn emit_dash_c(
         .map_or_else(|| "out.c".to_owned(), str::to_ascii_lowercase);
     let output_path = PathBuf::from(format!("{}.OBJ", basename.to_ascii_uppercase()));
 
-    let bytes = build_obj(&source, &lowered, mtime, merge_strings, defines, unsigned_chars)?;
+    let bytes = build_obj(&source, &lowered, mtime, merge_strings, defines, unsigned_chars, optimize)?;
     fs::write(&output_path, bytes)?;
     Ok(output_path)
 }
@@ -61,8 +62,9 @@ pub fn build_obj(
     merge_strings: bool,
     defines: &[(String, String)],
     unsigned_chars: bool,
+    optimize: bool,
 ) -> Result<Vec<u8>, EmitError> {
-    let asm_bytes = build_asm(source, source_filename_lower, mtime, merge_strings, defines, unsigned_chars)?;
+    let asm_bytes = build_asm(source, source_filename_lower, mtime, merge_strings, defines, unsigned_chars, optimize)?;
     // build_asm produces UTF-8 ASCII bytes (BCC's text is pure ASCII
     // plus the trailing 0x1A EOF byte). Convert to a &str for tasm.
     let asm_text =

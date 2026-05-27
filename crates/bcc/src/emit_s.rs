@@ -42,6 +42,7 @@ pub fn emit_dash_s(
     merge_strings: bool,
     defines: &[(String, String)],
     unsigned_chars: bool,
+    optimize: bool,
 ) -> Result<PathBuf, EmitError> {
     let source = fs::read_to_string(source_path)
         .map_err(|e| EmitError::SourceRead(source_path.to_owned(), e))?;
@@ -60,7 +61,7 @@ pub fn emit_dash_s(
         .map_or_else(|| "out.c".to_owned(), str::to_ascii_lowercase);
     let output_path = PathBuf::from(format!("{}.ASM", basename.to_ascii_uppercase()));
 
-    let bytes = build_asm(&source, &lowered, mtime, merge_strings, defines, unsigned_chars)?;
+    let bytes = build_asm(&source, &lowered, mtime, merge_strings, defines, unsigned_chars, optimize)?;
     fs::write(&output_path, bytes)?;
     Ok(output_path)
 }
@@ -77,6 +78,7 @@ pub fn build_asm(
     merge_strings: bool,
     defines: &[(String, String)],
     unsigned_chars: bool,
+    optimize: bool,
 ) -> Result<Vec<u8>, EmitError> {
     // C preprocessor pass: resolve `#define`/`#ifdef`/`#if` and
     // expand object/function-like macros. Stripped directive lines
@@ -164,8 +166,62 @@ pub fn build_asm(
     }
 
     write_tail(&mut out, &unit, &strings, &helpers);
+    if optimize {
+        fold_trampoline_jmps(&mut out);
+    }
     out.push(0x1A); // DOS EOF marker
     Ok(out)
+}
+
+/// `-O` peephole: drop `\tjmp\tshort @X\r\n` lines that are
+/// immediately followed by `@X:\r\n` (with at most blank or
+/// `;`-comment lines between). The jmp would land at the next
+/// instruction anyway, so removing it saves 2 bytes per occurrence
+/// without changing semantics. Fixtures 2125, 2126, 2281.
+fn fold_trampoline_jmps(out: &mut Vec<u8>) {
+    // Work line-by-line through the buffer. We mutate in place by
+    // copying lines we keep into a new buffer.
+    let text = std::mem::take(out);
+    let s = match std::str::from_utf8(&text) {
+        Ok(s) => s,
+        Err(_) => {
+            *out = text;
+            return;
+        }
+    };
+    let mut lines: Vec<&str> = s.split_inclusive('\n').collect();
+    // Walk in reverse so we can match `jmp short @X` against the
+    // first non-blank-non-comment label line that follows.
+    let mut keep: Vec<bool> = vec![true; lines.len()];
+    for i in 0..lines.len() {
+        let line = lines[i];
+        // Match `\tjmp\tshort @<label>\r\n`.
+        let trimmed = line.trim_end_matches(['\r', '\n']);
+        let Some(rest) = trimmed.strip_prefix("\tjmp\tshort ") else { continue };
+        // Look forward for the first non-blank, non-comment line.
+        for j in (i + 1)..lines.len() {
+            let next = lines[j].trim_end_matches(['\r', '\n']);
+            // Skip blank lines (whole-line whitespace) and `;`
+            // comment-only lines that codegen emits between stmts.
+            let trimmed_next = next.trim_start();
+            if trimmed_next.is_empty() || trimmed_next.starts_with(';') {
+                continue;
+            }
+            // Does this line declare exactly the label we jump to?
+            // Labels are written as `<label>:`.
+            if next == format!("{rest}:") {
+                keep[i] = false;
+            }
+            break;
+        }
+    }
+    for (i, keep) in keep.iter().enumerate() {
+        if !keep {
+            lines[i] = "";
+        }
+    }
+    let joined: String = lines.concat();
+    *out = joined.into_bytes();
 }
 
 /// Emit initialized globals in `_DATA` at the top of the file.
