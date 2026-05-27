@@ -532,25 +532,30 @@ impl Parser {
         let _ = self.consume_cc_modifiers_collect();
     }
 
-    /// Like `consume_cc_modifiers` but also records whether the run
-    /// included a `pascal` keyword. Returns true if it did.
-    fn consume_cc_modifiers_collect(&mut self) -> bool {
+    /// Like `consume_cc_modifiers` but also records which cc-modifier
+    /// keywords (if any) appeared. Returns `(is_pascal, is_far)`.
+    fn consume_cc_modifiers_collect(&mut self) -> (bool, bool) {
         let mut is_pascal = false;
+        let mut is_far = false;
         while let TokenKind::Ident(name) = &self.peek().kind {
             match name.as_str() {
                 "pascal" | "_pascal" | "__pascal" => {
                     is_pascal = true;
                     self.bump();
                 }
-                "cdecl" | "far" | "near" | "huge" | "interrupt"
-                | "_cdecl" | "_far" | "_near" | "_huge" | "_interrupt"
-                | "__cdecl" | "__far" | "__near" | "__huge" | "__interrupt" => {
+                "far" | "_far" | "__far" => {
+                    is_far = true;
+                    self.bump();
+                }
+                "cdecl" | "near" | "huge" | "interrupt"
+                | "_cdecl" | "_near" | "_huge" | "_interrupt"
+                | "__cdecl" | "__near" | "__huge" | "__interrupt" => {
                     self.bump();
                 }
                 _ => break,
             }
         }
-        is_pascal
+        (is_pascal, is_far)
     }
 
     fn parse_type(&mut self) -> Result<Type, ParseError> {
@@ -1155,7 +1160,7 @@ impl Parser {
             self.bump();
             ret_ty = Type::Pointer(Box::new(ret_ty));
         }
-        let is_pascal = self.consume_cc_modifiers_collect();
+        let (is_pascal, is_far) = self.consume_cc_modifiers_collect();
         let name_tok = self.bump();
         let TokenKind::Ident(name) = &name_tok.kind else {
             return Err(ParseError::NotAnIdent { offset: name_tok.span.start });
@@ -1227,6 +1232,7 @@ impl Parser {
                 body: None,
                 is_static: false,
                 is_pascal,
+                is_far,
             });
         }
 
@@ -1246,6 +1252,7 @@ impl Parser {
             body: Some(body),
             is_static: false,
             is_pascal,
+            is_far,
         })
     }
 

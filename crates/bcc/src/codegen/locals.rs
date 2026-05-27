@@ -234,8 +234,13 @@ impl Locals {
         // returning a 6-byte struct).
         let returns_big_struct = matches!(&function.ret_ty, Type::Struct { .. })
             && function.ret_ty.size_bytes() > 4;
+        // Far functions push CS:IP (4 bytes) instead of just IP (2),
+        // so the first param sits 2 bytes higher in the frame.
+        // Fixture 1654.
+        let far_bump = if function.is_far { 2 } else { 0 };
         let mut param_offset = FIRST_PARAM_BP_OFFSET
-            + if returns_big_struct { 4 } else { 0 };
+            + if returns_big_struct { 4 } else { 0 }
+            + far_bump;
         // Pascal-convention callees see args pushed LTR, so the FIRST
         // param has the HIGHEST bp offset. Pre-compute each param's
         // offset by walking the param list and noting where each

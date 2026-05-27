@@ -33,6 +33,7 @@ struct FunctionSig {
     params: Vec<Type>,
     ret_ty: Type,
     is_pascal: bool,
+    is_far: bool,
 }
 
 impl Signatures {
@@ -48,6 +49,7 @@ impl Signatures {
                         params: f.params.iter().map(|p| p.ty.clone()).collect(),
                         ret_ty: f.ret_ty.clone(),
                         is_pascal: f.is_pascal,
+                        is_far: f.is_far,
                     },
                 )
             })
@@ -80,6 +82,13 @@ impl Signatures {
     #[must_use]
     pub fn is_pascal(&self, name: &str) -> bool {
         self.map.get(name).is_some_and(|s| s.is_pascal)
+    }
+
+    /// Is this function declared `far`? Call sites push CS before
+    /// the near call (simulating a far call).
+    #[must_use]
+    pub fn is_far(&self, name: &str) -> bool {
+        self.map.get(name).is_some_and(|s| s.is_far)
     }
 }
 
@@ -779,7 +788,8 @@ impl<'a> FunctionEmitter<'a> {
         self.out.extend_from_slice(b"\tpop\tbp\r\n");
         // Pascal-convention callee cleans up the args off the stack
         // via `ret N` where N = total bytes of parameter storage.
-        // Fixture 1653.
+        // Fixture 1653. Far functions use `retf` (`cb`) instead of
+        // `ret`; fixture 1654.
         if self.function.is_pascal {
             let n: u32 = self
                 .function
@@ -787,7 +797,13 @@ impl<'a> FunctionEmitter<'a> {
                 .iter()
                 .map(|p| u32::from(p.ty.size_bytes().max(2)))
                 .sum();
-            let _ = write!(self.out, "\tret\t{n}\r\n");
+            if self.function.is_far {
+                let _ = write!(self.out, "\tretf\t{n}\r\n");
+            } else {
+                let _ = write!(self.out, "\tret\t{n}\r\n");
+            }
+        } else if self.function.is_far {
+            self.out.extend_from_slice(b"\tretf\t\r\n");
         } else {
             self.out.extend_from_slice(b"\tret\t\r\n");
         }
@@ -5400,11 +5416,19 @@ impl<'a> FunctionEmitter<'a> {
                 );
             };
             let _ = write!(self.out, "\tcall\tword ptr {}\r\n", bp_addr(off));
-        } else if is_pascal_callee {
-            let target = function_symbol_pascal(name);
-            let _ = write!(self.out, "\tcall\tnear ptr {target}\r\n");
         } else {
-            let _ = write!(self.out, "\tcall\tnear ptr _{name}\r\n");
+            // Far callee: emit `push cs` before the near call so the
+            // stack looks like a real far call from the callee's
+            // perspective (`retf` pops CS:IP). Fixture 1654.
+            if self.signatures.is_far(name) {
+                self.out.extend_from_slice(b"\tpush\tcs\r\n");
+            }
+            if is_pascal_callee {
+                let target = function_symbol_pascal(name);
+                let _ = write!(self.out, "\tcall\tnear ptr {target}\r\n");
+            } else {
+                let _ = write!(self.out, "\tcall\tnear ptr _{name}\r\n");
+            }
         }
         // Cleanup: BCC uses `pop cx` per word when total ≤ 4 bytes,
         // `add sp, N` for 6 bytes or more. The threshold is shared

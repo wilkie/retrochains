@@ -1181,6 +1181,10 @@ pub enum Instr {
     /// than DS. Fixture 416 (stack-destination struct copy via
     /// `N_SCOPY@`).
     PushSs,
+    /// `push cs` — `0E` (single byte). BCC emits this before a near
+    /// call to a far function so the callee's `retf` finds CS:IP on
+    /// the stack. Fixture 1654.
+    PushCs,
     /// `mov <reg16>,<segreg>` — `8C` + ModR/M `mod=11 reg=<sreg>
     /// r/m=<reg16>`. Copies a segment register's value into a
     /// general-purpose register. BCC uses this to form the segment
@@ -2057,6 +2061,13 @@ pub enum Instr {
     /// Encoding: `C2 lo hi`. Used by pascal-convention callees to
     /// pop their own argument bytes after returning. Fixture 1653.
     RetImm16 { imm: u16 },
+    /// `retf` — far return. Encoding: `CB`. Pops both IP and CS
+    /// (vs near `ret` which pops only IP). Used by `far` functions.
+    /// Fixture 1654.
+    Retf,
+    /// `retf imm16` — far return with caller-stack adjustment.
+    /// Encoding: `CA lo hi`. Pascal-and-far functions use this.
+    RetfImm16 { imm: u16 },
     // 8087 FPU instructions. The opcode family selects the operand
     // width (`D9` for 32-bit `dword`/single, `DD` for 64-bit `qword`/
     // double); the ModR/M reg field selects the operation (0 = `fld`,

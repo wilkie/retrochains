@@ -376,6 +376,9 @@ fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
             if rest == "ss" {
                 return Ok(Instr::PushSs);
             }
+            if rest == "cs" {
+                return Ok(Instr::PushCs);
+            }
             if let Some(reg) = Reg16::parse(rest) {
                 return Ok(Instr::PushReg16 { reg });
             }
@@ -907,6 +910,15 @@ fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
                 Ok(Instr::RetImm16 { imm: imm as u16 })
             } else {
                 Err(AsmError::new(line.line_no, format!("ret: bad operand `{rest}`")))
+            }
+        }
+        "retf" => {
+            if rest.is_empty() {
+                Ok(Instr::Retf)
+            } else if let Some(imm) = parse_imm16(rest) {
+                Ok(Instr::RetfImm16 { imm: imm as u16 })
+            } else {
+                Err(AsmError::new(line.line_no, format!("retf: bad operand `{rest}`")))
             }
         }
         "fld" => parse_fld(rest, line.line_no),

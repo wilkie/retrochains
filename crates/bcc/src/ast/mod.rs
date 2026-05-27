@@ -78,6 +78,12 @@ pub struct Function {
     /// and the symbol name is emitted UPPERCASE without the leading
     /// underscore. Fixture 1653.
     pub is_pascal: bool,
+    /// `far` calling convention: caller pushes CS before the IP
+    /// (simulates a far call), callee returns with `retf` (`cb`)
+    /// instead of `ret` (`c3`), and the first param sits at
+    /// [bp+6] (vs [bp+4] for near) because of the extra CS slot.
+    /// Fixture 1654.
+    pub is_far: bool,
 }
 
 #[derive(Debug)]

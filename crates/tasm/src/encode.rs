@@ -232,6 +232,8 @@ fn instr_size(instr: &Instr) -> usize {
     match instr {
         Instr::Ret => 1,
         Instr::RetImm16 { .. } => 3,
+        Instr::Retf => 1,
+        Instr::RetfImm16 { .. } => 3,
         Instr::PushReg16 { .. }
         | Instr::PopReg16 { .. }
         | Instr::IncReg16 { .. }
@@ -430,6 +432,7 @@ fn instr_size(instr: &Instr) -> usize {
         Instr::PushSiPtr => 2,
         Instr::PushDs => 1,
         Instr::PushSs => 1,
+        Instr::PushCs => 1,
         Instr::MovReg16SegReg { .. } => 2,
         Instr::CmpGroupSymImm8Sx { .. }
         | Instr::CmpByteGroupSymImm8 { .. }
@@ -2045,6 +2048,10 @@ fn emit_instr(
             // `push ss` → 16 (single-byte segreg-push form).
             out.push(0x16);
         }
+        Instr::PushCs => {
+            // `push cs` → 0E (single-byte segreg-push form).
+            out.push(0x0E);
+        }
         Instr::MovReg16SegReg { dst, src } => {
             // `mov <reg16>, <segreg>` → 8C + ModR/M
             // (mod=11 reg=<sreg> r/m=<reg16>).
@@ -3184,6 +3191,11 @@ fn emit_instr(
         Instr::Ret => out.push(0xC3),
         Instr::RetImm16 { imm } => {
             out.push(0xC2);
+            out.extend_from_slice(&imm.to_le_bytes());
+        }
+        Instr::Retf => out.push(0xCB),
+        Instr::RetfImm16 { imm } => {
+            out.push(0xCA);
             out.extend_from_slice(&imm.to_le_bytes());
         }
         Instr::FldDwordBpRel { offset } => {
