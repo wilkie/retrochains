@@ -580,12 +580,34 @@ impl Locals {
                 cb.cmp(&ca)
             });
         }
-        let mut non_si_iter = non_si_pool.iter().copied();
+        // 8086 only allows BX/BP/SI/DI as base registers in indirect
+        // memory operands — DX and CX can't carry a pointer that the
+        // body will dereference. Skip those slots when the eligible
+        // is a pointer type that will be dereffed; the pointer stays
+        // on the stack instead. Other eligibles consume the
+        // skipped slot normally. Fixture 3512 (`int *p, *a, *b, c`
+        // with all three pointers dereffed — b can't take DX).
+        let pointer_safe_regs: [Reg; 3] = [Reg::Si, Reg::Di, Reg::Bx];
+        let mut non_si_iter = non_si_pool.iter().copied().peekable();
         for &i in &ordered_eligibles {
             if Some(i) == si_pick {
                 continue;
             }
-            let Some(reg) = non_si_iter.next() else { break };
+            let is_pointer = matches!(declared[i].ty, Type::Pointer(_));
+            let reg = if is_pointer {
+                let mut chosen = None;
+                while let Some(next) = non_si_iter.peek().copied() {
+                    if pointer_safe_regs.contains(&next) {
+                        chosen = non_si_iter.next();
+                        break;
+                    }
+                    non_si_iter.next();
+                }
+                chosen
+            } else {
+                non_si_iter.next()
+            };
+            let Some(reg) = reg else { break };
             reg_of.insert(i, reg);
         }
 
