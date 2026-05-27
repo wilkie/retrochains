@@ -36,10 +36,12 @@ pub enum EmitError {
 ///
 /// # Errors
 /// Returns [`EmitError`] on I/O failures, lex errors, or parse errors.
+#[allow(clippy::needless_pass_by_value)]
 pub fn emit_dash_s(
     source_path: &Path,
     merge_strings: bool,
     defines: &[(String, String)],
+    unsigned_chars: bool,
 ) -> Result<PathBuf, EmitError> {
     let source = fs::read_to_string(source_path)
         .map_err(|e| EmitError::SourceRead(source_path.to_owned(), e))?;
@@ -58,7 +60,7 @@ pub fn emit_dash_s(
         .map_or_else(|| "out.c".to_owned(), str::to_ascii_lowercase);
     let output_path = PathBuf::from(format!("{}.ASM", basename.to_ascii_uppercase()));
 
-    let bytes = build_asm(&source, &lowered, mtime, merge_strings, defines)?;
+    let bytes = build_asm(&source, &lowered, mtime, merge_strings, defines, unsigned_chars)?;
     fs::write(&output_path, bytes)?;
     Ok(output_path)
 }
@@ -74,6 +76,7 @@ pub fn build_asm(
     mtime: SystemTime,
     merge_strings: bool,
     defines: &[(String, String)],
+    unsigned_chars: bool,
 ) -> Result<Vec<u8>, EmitError> {
     // C preprocessor pass: resolve `#define`/`#ifdef`/`#if` and
     // expand object/function-like macros. Stripped directive lines
@@ -84,7 +87,10 @@ pub fn build_asm(
     // expanded form.
     let preprocessed = preprocess::preprocess_with_defines(source, defines)?;
     let tokens = Lexer::new(&preprocessed).tokenize()?;
-    let unit = Parser::new(tokens).parse_unit()?;
+    let mut unit = Parser::new(tokens).parse_unit()?;
+    if unsigned_chars {
+        promote_chars_to_uchar(&mut unit);
+    }
 
     let mut out = Vec::with_capacity(1024);
     write_macro_preamble(&mut out);
@@ -480,6 +486,81 @@ fn emit_scalar_global_bytes(
     for i in 0..size {
         let byte = (v >> (i * 8)) & 0xFF;
         let _ = write!(out, "\tdb\t{byte}\r\n");
+    }
+}
+
+/// Rewrite plain `char` to `unsigned char` everywhere in the AST.
+/// Implements BCC's `-K` flag: with the flag set, every `char`
+/// declaration that wasn't explicitly `signed char` becomes
+/// `unsigned char`. Affects widening (`mov ah, 0` vs `cbw`) and
+/// signed-vs-unsigned compares. Fixtures 2130, 2284.
+fn promote_chars_to_uchar(unit: &mut crate::ast::Unit) {
+    use crate::ast::Type;
+    fn walk_ty(t: &mut Type) {
+        match t {
+            Type::Char => *t = Type::UChar,
+            Type::Array { elem, .. } => walk_ty(elem),
+            Type::Pointer(p) => walk_ty(p),
+            Type::Struct { fields, .. } => {
+                for f in fields {
+                    walk_ty(&mut f.ty);
+                }
+            }
+            _ => {}
+        }
+    }
+    for g in &mut unit.globals {
+        walk_ty(&mut g.ty);
+    }
+    for f in &mut unit.functions {
+        walk_ty(&mut f.ret_ty);
+        for p in &mut f.params {
+            walk_ty(&mut p.ty);
+        }
+        if let Some(body) = &mut f.body {
+            for s in body {
+                walk_stmt(s);
+            }
+        }
+    }
+    fn walk_stmt(s: &mut crate::ast::Stmt) {
+        use crate::ast::StmtKind;
+        match &mut s.kind {
+            StmtKind::Declare { ty, .. } => walk_ty(ty),
+            StmtKind::Block(b) => {
+                for inner in b {
+                    walk_stmt(inner);
+                }
+            }
+            StmtKind::If { then_branch, else_branch, .. } => {
+                for s in then_branch {
+                    walk_stmt(s);
+                }
+                if let Some(else_b) = else_branch {
+                    for s in else_b {
+                        walk_stmt(s);
+                    }
+                }
+            }
+            StmtKind::While { body, .. } | StmtKind::DoWhile { body, .. } => {
+                for s in body {
+                    walk_stmt(s);
+                }
+            }
+            StmtKind::For { body, .. } => {
+                for s in body {
+                    walk_stmt(s);
+                }
+            }
+            StmtKind::Switch { cases, .. } => {
+                for c in cases {
+                    for s in &mut c.body {
+                        walk_stmt(s);
+                    }
+                }
+            }
+            _ => {}
+        }
     }
 }
 

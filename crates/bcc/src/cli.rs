@@ -21,6 +21,11 @@ pub struct ParsedArgs {
     /// `(name, body)`; the body is empty for bare `-D<NAME>`.
     /// Fixtures 2131, 2280.
     pub defines: Vec<(String, String)>,
+    /// `-K`: plain `char` defaults to unsigned char. Affects the
+    /// widening step at char→int promotion (zero-extend via
+    /// `mov ah, 0` instead of sign-extend via `cbw`). Fixtures
+    /// 2130, 2284.
+    pub unsigned_chars: bool,
     /// Input source files, in the order given on the command line.
     pub sources: Vec<PathBuf>,
 }
@@ -64,6 +69,7 @@ pub fn parse_args(argv: &[String]) -> Result<ParsedArgs, CliError> {
     let mut mode: Option<CompileMode> = None;
     let mut memory_model: Option<MemoryModel> = None;
     let mut merge_strings = false;
+    let mut unsigned_chars = false;
     let mut defines: Vec<(String, String)> = Vec::new();
     let mut sources: Vec<PathBuf> = Vec::new();
     for arg in argv {
@@ -72,6 +78,7 @@ pub fn parse_args(argv: &[String]) -> Result<ParsedArgs, CliError> {
             "-c" => mode = Some(CompileMode::Object),
             "-ms" => memory_model = Some(MemoryModel::Small),
             "-d" => merge_strings = true,
+            "-K" => unsigned_chars = true,
             other if other.starts_with("-D") => {
                 // `-D<NAME>` or `-D<NAME>=<body>`. Fixtures 2131
                 // (`-DFOO=42`), 2280 (`-DDEBUG=42`).
@@ -98,7 +105,7 @@ pub fn parse_args(argv: &[String]) -> Result<ParsedArgs, CliError> {
             //   -r-      disable register allocator
             //   -f-      no FPU
             // Fixtures 2123-2137, 2261-2263.
-            "-O" | "-O2" | "-G" | "-1" | "-2" | "-K" | "-N" | "-A"
+            "-O" | "-O2" | "-G" | "-1" | "-2" | "-N" | "-A"
             | "-r-" | "-f-" | "-N-" => {}
             other if other.starts_with('-') => {
                 return Err(CliError::Unsupported(other.to_owned()));
@@ -111,5 +118,5 @@ pub fn parse_args(argv: &[String]) -> Result<ParsedArgs, CliError> {
     if sources.is_empty() {
         return Err(CliError::NoSource);
     }
-    Ok(ParsedArgs { mode, memory_model, merge_strings, defines, sources })
+    Ok(ParsedArgs { mode, memory_model, merge_strings, defines, unsigned_chars, sources })
 }
