@@ -18020,6 +18020,32 @@ impl<'a> FunctionEmitter<'a> {
             }
             return;
         }
+        // `(++i) * (++i)` (macro-arg side effect form): both
+        // operands are Pre-Update on the same reg-resident int
+        // local. Emit `inc reg; mov ax, reg; inc reg; mov dx, reg;
+        // imul dx`. Fixture 2293.
+        if let ExprKind::BinOp { op: BinOp::Mul, left, right } = &e.kind
+            && let ExprKind::Update { target: lt, op: lo, position: UpdatePosition::Pre } = &left.kind
+            && let ExprKind::Update { target: rt, op: ro, position: UpdatePosition::Pre } = &right.kind
+            && lt == rt
+            && lo == ro
+            && self.locals.has(lt)
+            && let LocalLocation::Reg(reg) = self.locals.location_of(lt)
+            && self.locals.type_of(lt).is_int_like()
+            && !reg.is_byte()
+        {
+            let reg_name = reg.name();
+            let mnem = match lo {
+                UpdateOp::Inc => "inc",
+                UpdateOp::Dec => "dec",
+            };
+            let _ = write!(self.out, "\t{mnem}\t{reg_name}\r\n");
+            let _ = write!(self.out, "\tmov\tax,{reg_name}\r\n");
+            let _ = write!(self.out, "\t{mnem}\t{reg_name}\r\n");
+            let _ = write!(self.out, "\tmov\tdx,{reg_name}\r\n");
+            self.out.extend_from_slice(b"\timul\tdx\r\n");
+            return;
+        }
         // Bitfield BinOp chain: when a left-associative chain of
         // BinOp(Add|Sub|...) bottoms out at bitfield reads on both
         // sides, emit the canonical BCC sequence — first operand
