@@ -14802,7 +14802,12 @@ impl<'a> FunctionEmitter<'a> {
             if let Some((name, total_off, leaf_ty)) =
                 self.try_member_dot_chain(base, field)
             {
-                if self.globals.contains(&name) {
+                // Locals shadow same-named globals — fall through to
+                // the local path even if a global of the same name
+                // exists (e.g. a static-local in another function).
+                // Fixture 2208 (sum_pts's `pts` param vs. main's
+                // `static struct P pts[3]`).
+                if !self.locals.has(&name) && self.globals.contains(&name) {
                     let load_byte = leaf_ty.is_char_like();
                     let width = if load_byte { "byte" } else { "word" };
                     let addr = if total_off == 0 {
