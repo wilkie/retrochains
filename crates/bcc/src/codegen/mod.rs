@@ -5404,6 +5404,10 @@ impl<'a> FunctionEmitter<'a> {
         }
         let is_pascal_callee = self.signatures.is_pascal(name);
         let mut total_bytes: u32 = 0;
+        // Track whether any FP-typed arg was pushed via fstp so a
+        // single trailing `fwait` lands just before the call (BCC's
+        // shape). Fixtures 1678, 2195.
+        let mut fp_arg_pushed = false;
         // Pascal convention pushes args LEFT-TO-RIGHT; C pushes
         // RIGHT-TO-LEFT. Walk the iteration in the matching order.
         let arg_order: Box<dyn Iterator<Item = (usize, &Expr)>> = if is_pascal_callee {
@@ -5467,7 +5471,12 @@ impl<'a> FunctionEmitter<'a> {
                     "\tfstp\t{store_width} ptr {}\r\n",
                     bp_addr(slot_off_i16),
                 );
-                self.out.extend_from_slice(b"\tfwait\t\r\n");
+                // Defer the fwait sync until just before the call —
+                // BCC emits it after pushing the remaining args, not
+                // between fstp and the next arg push. Fixtures 1678
+                // (one fwait, FP arg only), 2195/2201 (fwait after
+                // the format-string push).
+                fp_arg_pushed = true;
                 total_bytes += size;
             } else if let Type::Struct { .. } = &arg_ty {
                 // Struct-by-value arg. Two shapes by size:
@@ -5573,6 +5582,13 @@ impl<'a> FunctionEmitter<'a> {
                 self.out.extend_from_slice(b"\tpush\tax\r\n");
                 total_bytes += 2;
             }
+        }
+        // Flush a pending FP-arg fwait right before the call. BCC's
+        // shape: when any arg was pushed via fstp, the fwait sync
+        // sits immediately before the call (not between fstp and
+        // subsequent arg pushes). Fixtures 1678, 2195.
+        if fp_arg_pushed {
+            self.out.extend_from_slice(b"\tfwait\t\r\n");
         }
         // Direct call to a function symbol vs. indirect call through
         // a function-pointer local. The disambiguator is whether

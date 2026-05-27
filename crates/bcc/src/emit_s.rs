@@ -816,6 +816,33 @@ fn write_tail(
     for name in &ordered_externs {
         let _ = write!(out, "\textrn\t_{name}:near\r\n");
     }
+    // Floating-point runtime markers (`FIWRQQ`, `FIDRQQ`) go BETWEEN
+    // user-function externs and runtime helpers in BCC's EXTDEF
+    // order. Scan the already-emitted asm bytes for the relevant
+    // instruction mnemonics so we can decide whether to emit them.
+    // Fixtures 1670/1678/2195 pinned this placement.
+    let asm_text = std::str::from_utf8(out).unwrap_or("");
+    let uses_fwait = asm_text.contains("\tfwait\t");
+    let uses_fpu = uses_fwait
+        || asm_text.contains("\tfld\t")
+        || asm_text.contains("\tfstp\t")
+        || asm_text.contains("\tfadd\t")
+        || asm_text.contains("\tfsub\t")
+        || asm_text.contains("\tfmul\t")
+        || asm_text.contains("\tfdiv\t")
+        || asm_text.contains("\tfcomp\t")
+        || asm_text.contains("\tfcompp\t")
+        || asm_text.contains("\tfldz\t")
+        || asm_text.contains("\tfld1\t")
+        || asm_text.contains("\tfchs\t")
+        || asm_text.contains("\tfstsw\t")
+        || asm_text.contains("\tfild\t");
+    if uses_fwait {
+        out.extend_from_slice(b"\textrn\tFIWRQQ:far\r\n");
+    }
+    if uses_fpu {
+        out.extend_from_slice(b"\textrn\tFIDRQQ:far\r\n");
+    }
     // Public symbols are bucketed by **home segment** (_TEXT, _DATA,
     // _BSS in that fixed order), then **reverse-alphabetically sorted
     // within each bucket**. This rule matches every fixture in the

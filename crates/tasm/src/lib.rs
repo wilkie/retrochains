@@ -25,27 +25,25 @@ pub use ir::{AsmError, AsmResult};
 /// Returns [`AsmError`] on any lex/parse/encode failure.
 pub fn assemble(source: &str) -> AsmResult<Vec<u8>> {
     let mut module = parse::parse(source)?;
-    // TASM auto-injects `FIDRQQ` (Borland's 8087 emulator entry
-    // marker) into the EXTDEF list whenever the module contains any
-    // 8087 instruction, even when emulation is off. The symbol is
-    // declared but never referenced by a FIXUPP — the linker uses
-    // its presence to pull in the floating-point runtime. Injected
-    // at the FRONT so it becomes EXTDEF index 1 and the
-    // already-declared extrns shift to indices 2..N.
-    if module_has_fpu(&module)
-        && !module.externs.iter().any(|n| n == "FIDRQQ")
-    {
-        module.externs.insert(0, "FIDRQQ".to_string());
-    }
-    // Standalone `fwait` gets a distinct marker — `FIWRQQ` —
-    // sitting at the front of the EXTDEF list (before any
-    // already-inserted FIDRQQ). Only fixtures with a sahf-readback
-    // float-compare path emit standalone fwait; the per-FPU `9B`
-    // prefix serves as an inline wait everywhere else.
+    // TASM auto-injects `FIWRQQ` and `FIDRQQ` (Borland's 8087
+    // floating-point markers) when the module uses standalone
+    // fwait / 8087 instructions. BCC's EXTDEF ordering placement
+    // depends on what other externs are in the module: user-
+    // function externs (e.g. `_printf`) come BEFORE the markers,
+    // while runtime helpers (e.g. `N_FTOL@`) come AFTER. Tasm
+    // can't distinguish these from the asm source alone, so the
+    // BCC codegen now positions the markers explicitly in the asm
+    // (between user externs and helpers); we just append at the
+    // end here as a safety net for modules that didn't pre-emit.
     if module_has_fwait(&module)
         && !module.externs.iter().any(|n| n == "FIWRQQ")
     {
-        module.externs.insert(0, "FIWRQQ".to_string());
+        module.externs.push("FIWRQQ".to_string());
+    }
+    if module_has_fpu(&module)
+        && !module.externs.iter().any(|n| n == "FIDRQQ")
+    {
+        module.externs.push("FIDRQQ".to_string());
     }
     emit::emit(&module)
 }
