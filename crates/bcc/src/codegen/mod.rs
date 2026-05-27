@@ -20391,12 +20391,20 @@ impl<'a> FunctionEmitter<'a> {
                     // (`<expr> + (int)sizeof(struct Z)` → `inc ax;
                     // inc ax` rather than push/mov/pop/add).
                     let rhs_is_constant = try_const_eval(right).is_some();
+                    // `<call>.<field>` (member access on a call-
+                    // returning struct) also clobbers AX — the call
+                    // itself writes AX:DX. Fixture 2682
+                    // (`make().a + make().b`).
+                    let rhs_member_call = matches!(&right.kind,
+                        ExprKind::Member { base, .. }
+                            if matches!(base.kind, ExprKind::Call { .. }));
                     let rhs_clobbers_ax = !rhs_is_constant
                         && (matches!(right.kind, ExprKind::Call { .. })
                             || self.expr_is_char_load(right)
                             || (matches!(right.kind, ExprKind::Cast { .. })
                                 && !rhs_is_int_cast_of_int_or_long)
                             || matches!(right.kind, ExprKind::Ternary { .. })
+                            || rhs_member_call
                             || (matches!(right.kind, ExprKind::BinOp { .. })
                                 && try_const_eval(right).is_none()));
                     // Callee-preserved register peephole: when the
