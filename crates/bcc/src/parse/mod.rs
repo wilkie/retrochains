@@ -323,10 +323,28 @@ impl Parser {
             // Function-pointer global declarator: `T (*name)(...)`.
             // Route to parse_global, which already knows how to parse
             // the `(*name)(...)` shape (fixtures 2607, 3212, 3567,
-            // 3643).
+            // 3643). Function-returning-function-pointer declarator
+            // `T (*name(args))(more)` looks the same in the prefix
+            // but has `(` (not `)`) after `name` — that case routes
+            // to parse_function. Fixtures 2336, 3255, 3324.
             if matches!(self.peek_n(probe).kind, TokenKind::LParen)
                 && matches!(self.peek_n(probe + 1).kind, TokenKind::Star)
             {
+                let after_name_is_lparen = matches!(
+                    self.peek_n(probe + 2).kind,
+                    TokenKind::Ident(_),
+                ) && matches!(
+                    self.peek_n(probe + 3).kind,
+                    TokenKind::LParen,
+                );
+                if after_name_is_lparen {
+                    let idx = functions.len();
+                    let mut f = self.parse_function()?;
+                    f.is_static = is_static;
+                    functions.push(f);
+                    decl_order.push(TopLevelRef::Function(idx));
+                    continue;
+                }
                 let new_globals = self.parse_global(is_static, is_extern)?;
                 for g in new_globals {
                     let idx = globals.len();
@@ -1234,6 +1252,22 @@ impl Parser {
             ret_ty = Type::Pointer(Box::new(ret_ty));
         }
         let (is_pascal, is_far, is_interrupt) = self.consume_cc_modifiers_collect();
+        // Function-returning-function-pointer declarator:
+        // `<ret> (* <name> ( <params> )) ( <fp-params> )`. We don't
+        // model function signatures — collapse the return type to a
+        // generic near pointer (2 bytes) and skip the trailing
+        // `(<fp-params>)` after the body's `)`. The function's own
+        // parameter list (the inner `()`) is parsed normally below.
+        // Fixtures 2336, 3255, 3324.
+        let returns_fn_ptr =
+            matches!(self.peek().kind, TokenKind::LParen)
+                && matches!(self.peek_n(1).kind, TokenKind::Star)
+                && matches!(self.peek_n(2).kind, TokenKind::Ident(_));
+        if returns_fn_ptr {
+            self.bump(); // (
+            self.bump(); // *
+            ret_ty = Type::Pointer(Box::new(Type::Int));
+        }
         let name_tok = self.bump();
         let TokenKind::Ident(name) = &name_tok.kind else {
             return Err(ParseError::NotAnIdent { offset: name_tok.span.start });
@@ -1242,6 +1276,23 @@ impl Parser {
         self.expect(&TokenKind::LParen)?;
         let (mut params, _is_ansi_proto) = self.parse_param_list()?;
         self.expect(&TokenKind::RParen)?;
+        // If this declaration is a function returning a function
+        // pointer, we already consumed the wrapping `(* name(...))`.
+        // Now skip the trailing `)( <fp-params> )` that follows.
+        if returns_fn_ptr {
+            self.expect(&TokenKind::RParen)?;
+            self.expect(&TokenKind::LParen)?;
+            let mut depth: u32 = 1;
+            while depth > 0 {
+                let t = self.bump();
+                match t.kind {
+                    TokenKind::LParen => depth += 1,
+                    TokenKind::RParen => depth -= 1,
+                    TokenKind::Eof => break,
+                    _ => {}
+                }
+            }
+        }
         // Reset the per-function local-type map and seed it with the
         // params so `sizeof <param>` resolves inside the body.
         self.function_locals.clear();
