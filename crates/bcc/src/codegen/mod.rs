@@ -5318,6 +5318,12 @@ impl<'a> FunctionEmitter<'a> {
             let arg_ty = declared_ty.unwrap_or_else(|| {
                 if self.expr_is_long_like(arg) {
                     Type::Long
+                } else if matches!(arg.kind, ExprKind::DoubleLit(_)) {
+                    Type::Double
+                } else if matches!(arg.kind, ExprKind::FloatLit(_)) {
+                    // C's default argument promotion widens float to
+                    // double in variadic calls — pushed as 8 bytes.
+                    Type::Double
                 } else {
                     Type::Int
                 }
