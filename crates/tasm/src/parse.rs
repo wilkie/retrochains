@@ -872,7 +872,9 @@ fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
         "fld" => parse_fld(rest, line.line_no),
         "fstp" => parse_fstp(rest, line.line_no),
         "fld1" if rest.is_empty() => Ok(Instr::Fld1),
+        "fldz" if rest.is_empty() => Ok(Instr::Fldz),
         "fchs" if rest.is_empty() => Ok(Instr::Fchs),
+        "fcompp" if rest.is_empty() => Ok(Instr::Fcompp),
         "fild" => {
             if let Some(offset) = parse_word_bp_relative(rest) {
                 return Ok(Instr::FildWordBpRel { offset });

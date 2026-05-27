@@ -2089,6 +2089,17 @@ pub enum Instr {
     /// BCC uses this in place of pooling the bytes for any `1.0f`
     /// operand (fixtures 1673, 1679).
     Fld1,
+    /// `fldz` — push the constant 0.0 onto the FPU stack.
+    /// Encoding: `9B D9 EE` (fwait prefix + D9 family + register-
+    /// mode ModR/M `0xEE` selecting the FLDZ special). BCC pairs
+    /// this with `fcompp` to avoid pooling 0.0 for `<x> == 0.0`
+    /// (fixture 2193).
+    Fldz,
+    /// `fcompp` — compare ST(0) with ST(1), pop both. Encoding:
+    /// `9B DE D9`. The two-operand pop is what we want after
+    /// `fld <x>; fldz`, since the result of the comparison only
+    /// lives in the FPU status word.
+    Fcompp,
     /// `fchs` — change sign of the top of the FPU stack.
     /// Encoding: `9B D9 E0`. Used to materialize unary negation
     /// on a float/double operand. Fixture 1753.

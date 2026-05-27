@@ -7121,30 +7121,43 @@ impl<'a> FunctionEmitter<'a> {
             // Float / double literal RHS — pool the bytes (narrowing
             // a double to single when exactly representable, same
             // trick the init path uses) and fcomp against the pool
-            // address. Fixture 2139 (`d > 2.0`).
+            // address. Fixture 2139 (`d > 2.0`). The `0.0` literal
+            // gets the `fldz` + `fcompp` (no-operand) shape so no
+            // pool entry is needed — saves 4 bytes. Fixture 2193
+            // (`d == 0.0`).
             ExprKind::FloatLit(bits) => {
-                let off = self.strings.intern_float(*bits);
-                let src = if off == 0 {
-                    "DGROUP:s@".to_owned()
+                if *bits == 0u32 || *bits == 0x8000_0000u32 {
+                    self.out.extend_from_slice(b"\tfldz\t\r\n");
+                    self.out.extend_from_slice(b"\tfcompp\t\r\n");
                 } else {
-                    format!("DGROUP:s@+{off}")
-                };
-                let _ = write!(self.out, "\tfcomp\tdword ptr {src}\r\n");
+                    let off = self.strings.intern_float(*bits);
+                    let src = if off == 0 {
+                        "DGROUP:s@".to_owned()
+                    } else {
+                        format!("DGROUP:s@+{off}")
+                    };
+                    let _ = write!(self.out, "\tfcomp\tdword ptr {src}\r\n");
+                }
             }
             ExprKind::DoubleLit(bits) => {
-                let d = f64::from_bits(*bits);
-                let f = d as f32;
-                let (off, width) = if f64::from(f).to_bits() == *bits {
-                    (self.strings.intern_float(f.to_bits()), "dword")
+                if *bits == 0u64 || *bits == 0x8000_0000_0000_0000u64 {
+                    self.out.extend_from_slice(b"\tfldz\t\r\n");
+                    self.out.extend_from_slice(b"\tfcompp\t\r\n");
                 } else {
-                    (self.strings.intern_double(*bits), "qword")
-                };
-                let src = if off == 0 {
-                    "DGROUP:s@".to_owned()
-                } else {
-                    format!("DGROUP:s@+{off}")
-                };
-                let _ = write!(self.out, "\tfcomp\t{width} ptr {src}\r\n");
+                    let d = f64::from_bits(*bits);
+                    let f = d as f32;
+                    let (off, width) = if f64::from(f).to_bits() == *bits {
+                        (self.strings.intern_float(f.to_bits()), "dword")
+                    } else {
+                        (self.strings.intern_double(*bits), "qword")
+                    };
+                    let src = if off == 0 {
+                        "DGROUP:s@".to_owned()
+                    } else {
+                        format!("DGROUP:s@+{off}")
+                    };
+                    let _ = write!(self.out, "\tfcomp\t{width} ptr {src}\r\n");
+                }
             }
             _ => panic!(
                 "float comparison right-operand shape not supported: {:?}",
@@ -10176,6 +10189,49 @@ impl<'a> FunctionEmitter<'a> {
                 "\tadd\t{},word ptr [bx]\r\n",
                 reg.name(),
             );
+            return;
+        }
+        // `<reg> += *<reg-ptr>++` / etc.: read directly through the
+        // pointer's reg (`add <dst>, word ptr [<ptr>]`), then advance
+        // the pointer by stride. The natural-postinc shape avoids the
+        // `mov bx, <ptr>; inc <ptr>; mov ax, [bx]; add <dst>, ax`
+        // bounce. Fixture 1551 (`s += *a++` in `sum_n`).
+        if matches!(op, BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor)
+            && !reg.is_byte()
+            && let ExprKind::Deref(inner) = &value.kind
+            && let ExprKind::Update {
+                target: ptr_name,
+                op: upd_op,
+                position: crate::ast::UpdatePosition::Post,
+            } = &inner.kind
+            && self.locals.has(ptr_name)
+            && let LocalLocation::Reg(ptr_reg) = self.locals.location_of(ptr_name)
+            && !ptr_reg.is_byte()
+            && let Some(pointee) = self.locals.type_of(ptr_name).pointee()
+            && pointee.is_int_like()
+        {
+            let mnem = match op {
+                BinOp::Add => "add",
+                BinOp::Sub => "sub",
+                BinOp::BitAnd => "and",
+                BinOp::BitOr => "or",
+                BinOp::BitXor => "xor",
+                _ => unreachable!(),
+            };
+            let upd_mnem = match upd_op {
+                crate::ast::UpdateOp::Inc => "inc",
+                crate::ast::UpdateOp::Dec => "dec",
+            };
+            let ptr_reg_name = ptr_reg.name();
+            let _ = write!(
+                self.out,
+                "\t{mnem}\t{},word ptr [{ptr_reg_name}]\r\n",
+                reg.name(),
+            );
+            let stride = i32::from(pointee.size_bytes());
+            for _ in 0..stride {
+                let _ = write!(self.out, "\t{upd_mnem}\t{ptr_reg_name}\r\n");
+            }
             return;
         }
         // `<reg> += <other-reg>++` / `--<other-reg>`: emit the op
