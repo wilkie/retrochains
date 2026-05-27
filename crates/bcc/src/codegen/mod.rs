@@ -1212,10 +1212,17 @@ impl<'a> FunctionEmitter<'a> {
     /// inc/dec al / mov <reg>, al` (fixture 047). BCC does not use
     /// `inc/dec <byte-reg>` directly.
     fn emit_update_in_place(&mut self, name: &str, op: UpdateOp, position: UpdatePosition) {
+        // Local-shadowing-global: if there's a local of this name,
+        // the global path doesn't fire — a static-local hoisted from
+        // a sibling function may share the same identifier with a
+        // regular local here. Fixture 2330 (`au()`'s `counter` local
+        // shadows `sm()`'s hoisted static `counter`).
+        let has_local = self.locals.has(name);
         // Long globals (`g++` / `g--`) use a memory-direct
         // add/adc pair (or sub/sbb for `--`). Acts on memory
         // without loading into registers. Fixture 249 (`g++`).
-        if let Some(ty) = self.globals.type_of(name)
+        if !has_local
+            && let Some(ty) = self.globals.type_of(name)
             && ty.is_long_like()
         {
             let (lo_op, hi_op) = match op {
@@ -1235,7 +1242,8 @@ impl<'a> FunctionEmitter<'a> {
         // Global pointers scale by sizeof(pointee) — `++p` on `int
         // *p` adds 2, lowering to `add word ptr [_p], 2` rather
         // than `inc`. Fixture 561.
-        if let Some(gty) = self.globals.type_of(name) {
+        if !has_local
+            && let Some(gty) = self.globals.type_of(name) {
             if let Some(pointee) = gty.pointee() {
                 let stride = u32::from(pointee.size_bytes());
                 if stride != 1 {
