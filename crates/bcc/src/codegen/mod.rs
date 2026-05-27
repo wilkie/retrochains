@@ -482,6 +482,56 @@ fn global_offset_addr(sym: &str, off: i32) -> String {
 }
 
 /// Look at the end of `buf` for the 4-instruction LHS-mem-clobber tail
+/// Post-emission peephole: when the LHS materialized as a single
+/// `\tmov\tax,word ptr <X>\r\n` and the RHS begins with
+/// `\tmov\tbx,word ptr <Y>\r\n` followed by an `<op> ax, word ptr
+/// [bx]` line, swap the AX and BX load lines so BX is staged first.
+/// BCC's order delays the AX load until immediately before the op,
+/// matching how the architecture wants AX live across the smallest
+/// window. Conservatively bails on any other shape.
+fn hoist_bx_load_above_ax_load(buf: &mut Vec<u8>, pre_pos: usize, mid_pos: usize) {
+    // LHS line: `\tmov\tax,word ptr <...>\r\n`.
+    let lhs_line = &buf[pre_pos..mid_pos];
+    if !lhs_line.starts_with(b"\tmov\tax,word ptr ") || !lhs_line.ends_with(b"\r\n") {
+        return;
+    }
+    // RHS must start with `\tmov\tbx,word ptr <...>\r\n`.
+    let rhs = &buf[mid_pos..];
+    if !rhs.starts_with(b"\tmov\tbx,word ptr ") {
+        return;
+    }
+    let Some(bx_end_rel) = rhs.windows(2).position(|w| w == b"\r\n") else {
+        return;
+    };
+    let bx_end = mid_pos + bx_end_rel + 2;
+    // Next line must be the `<op>\tax,word ptr [bx]\r\n` consumption,
+    // for one of the commutative-or-RHS-on-bx-safe ops.
+    let after_bx = &buf[bx_end..];
+    const OPS: &[&[u8]] = &[
+        b"\tadd\tax,word ptr [bx]\r\n",
+        b"\tsub\tax,word ptr [bx]\r\n",
+        b"\tand\tax,word ptr [bx]\r\n",
+        b"\tor\tax,word ptr [bx]\r\n",
+        b"\txor\tax,word ptr [bx]\r\n",
+    ];
+    if !OPS.iter().any(|op| after_bx.starts_with(op)) {
+        return;
+    }
+    // Swap the two lines: pull the BX line and reinsert it before AX.
+    let lhs_bytes: Vec<u8> = buf[pre_pos..mid_pos].to_vec();
+    let bx_bytes: Vec<u8> = buf[mid_pos..bx_end].to_vec();
+    buf.drain(pre_pos..bx_end);
+    let mut insert_at = pre_pos;
+    for &b in &bx_bytes {
+        buf.insert(insert_at, b);
+        insert_at += 1;
+    }
+    for &b in &lhs_bytes {
+        buf.insert(insert_at, b);
+        insert_at += 1;
+    }
+}
+
 /// Post-emission peephole used by the LHS-first push/pop binop path.
 /// If the first line after `\tpush\tax\r\n` is a single
 /// `\tmov\tbx,<src>\r\n` (a pointer load that doesn't touch AX),
@@ -20373,8 +20423,20 @@ impl<'a> FunctionEmitter<'a> {
                             unsigned,
                         );
                     } else {
+                        let pre_pos = self.out.len();
                         self.emit_expr_to_ax(left);
+                        let mid_pos = self.out.len();
                         self.emit_binary_right(*op, right, unsigned);
+                        // Peephole: when LHS emitted a single
+                        // `mov ax, word ptr <X>\r\n` and RHS begins
+                        // with `mov bx, word ptr <Y>\r\n` (a pointer
+                        // load) followed by `<op> ax, word ptr [bx]
+                        // \r\n`, swap the AX and BX loads so BX is
+                        // set up first. BCC's order delays the AX
+                        // load until just before the op. Fixture
+                        // 2310 (`n1.v + n1.next->v` reads BX before
+                        // AX).
+                        hoist_bx_load_above_ax_load(self.out, pre_pos, mid_pos);
                     }
                 }
             }
