@@ -1201,6 +1201,12 @@ fn expr_address_taken(e: &Expr, out: &mut HashSet<String>) {
                 expr_address_taken(a, out);
             }
         }
+        ExprKind::CallVia { addr, args } => {
+            expr_address_taken(addr, out);
+            for a in args {
+                expr_address_taken(a, out);
+            }
+        }
         ExprKind::Member { base, .. } => expr_address_taken(base, out),
         ExprKind::Ternary { cond, then_value, else_value } => {
             expr_address_taken(cond, out);
@@ -1522,7 +1528,7 @@ fn stmt_has_call(stmt: &Stmt) -> bool {
 
 fn expr_has_call(e: &Expr) -> bool {
     match &e.kind {
-        ExprKind::Call { .. } => true,
+        ExprKind::Call { .. } | ExprKind::CallVia { .. } => true,
         ExprKind::BinOp { left, right, .. } | ExprKind::Logical { left, right, .. } => {
             expr_has_call(left) || expr_has_call(right)
         }
@@ -1681,6 +1687,9 @@ fn expr_has_div_or_mod(e: &Expr) -> bool {
         }
         ExprKind::Unary { operand, .. } => expr_has_div_or_mod(operand),
         ExprKind::Call { args, .. } => args.iter().any(expr_has_div_or_mod),
+        ExprKind::CallVia { addr, args } => {
+            expr_has_div_or_mod(addr) || args.iter().any(expr_has_div_or_mod)
+        }
         ExprKind::AssignExpr { value, .. } => expr_has_div_or_mod(value),
         ExprKind::CompoundAssignExpr { value, .. } => expr_has_div_or_mod(value),
         ExprKind::Deref(operand) => expr_has_div_or_mod(operand),
@@ -1749,6 +1758,9 @@ fn expr_mentions(name: &str, e: &Expr) -> bool {
         ExprKind::AssignExpr { value, .. } => expr_mentions(name, value),
         ExprKind::CompoundAssignExpr { value, .. } => expr_mentions(name, value),
         ExprKind::Call { args, .. } => args.iter().any(|a| expr_mentions(name, a)),
+        ExprKind::CallVia { addr, args } => {
+            expr_mentions(name, addr) || args.iter().any(|a| expr_mentions(name, a))
+        }
         ExprKind::ArrayIndex { array, index } => {
             expr_mentions(name, array) || expr_mentions(name, index)
         }
@@ -1858,6 +1870,10 @@ fn expr_has_name_as_subscript(name: &str, e: &Expr) -> bool {
         ExprKind::AssignExpr { value, .. } => expr_has_name_as_subscript(name, value),
         ExprKind::CompoundAssignExpr { value, .. } => expr_has_name_as_subscript(name, value),
         ExprKind::Call { args, .. } => args.iter().any(|a| expr_has_name_as_subscript(name, a)),
+        ExprKind::CallVia { addr, args } => {
+            expr_has_name_as_subscript(name, addr)
+                || args.iter().any(|a| expr_has_name_as_subscript(name, a))
+        }
         ExprKind::Member { base, .. } => expr_has_name_as_subscript(name, base),
         ExprKind::Ternary { cond, then_value, else_value } => {
             expr_has_name_as_subscript(name, cond)
@@ -1994,6 +2010,10 @@ fn expr_indexes_char_array(name: &str, e: &Expr, ca: &HashSet<String>) -> bool {
         ExprKind::AssignExpr { value, .. } => expr_indexes_char_array(name, value, ca),
         ExprKind::CompoundAssignExpr { value, .. } => expr_indexes_char_array(name, value, ca),
         ExprKind::Call { args, .. } => args.iter().any(|a| expr_indexes_char_array(name, a, ca)),
+        ExprKind::CallVia { addr, args } => {
+            expr_indexes_char_array(name, addr, ca)
+                || args.iter().any(|a| expr_indexes_char_array(name, a, ca))
+        }
         ExprKind::Member { base, .. } => expr_indexes_char_array(name, base, ca),
         ExprKind::Ternary { cond, then_value, else_value } => {
             expr_indexes_char_array(name, cond, ca)
@@ -2307,6 +2327,9 @@ fn expr_has_2d_array_index(e: &Expr) -> bool {
         ExprKind::AssignExpr { value, .. } => expr_has_2d_array_index(value),
         ExprKind::CompoundAssignExpr { value, .. } => expr_has_2d_array_index(value),
         ExprKind::Call { args, .. } => args.iter().any(expr_has_2d_array_index),
+        ExprKind::CallVia { addr, args } => {
+            expr_has_2d_array_index(addr) || args.iter().any(expr_has_2d_array_index)
+        }
         ExprKind::Member { base, .. } => expr_has_2d_array_index(base),
         ExprKind::Ternary { cond, then_value, else_value } => {
             expr_has_2d_array_index(cond)
@@ -2440,6 +2463,9 @@ fn expr_emits_imul(e: &Expr) -> bool {
         }
         ExprKind::Unary { operand, .. } => expr_emits_imul(operand),
         ExprKind::Call { args, .. } => args.iter().any(expr_emits_imul),
+        ExprKind::CallVia { addr, args } => {
+            expr_emits_imul(addr) || args.iter().any(expr_emits_imul)
+        }
         ExprKind::AssignExpr { value, .. } => expr_emits_imul(value),
         ExprKind::CompoundAssignExpr { value, .. } => expr_emits_imul(value),
         ExprKind::Deref(operand) => expr_emits_imul(operand),
@@ -2923,6 +2949,12 @@ fn count_uses_expr(e: &Expr, counts: &mut HashMap<String, u32>) {
             count_uses_expr(value, counts);
         }
         ExprKind::Call { args, .. } => {
+            for a in args {
+                count_uses_expr(a, counts);
+            }
+        }
+        ExprKind::CallVia { addr, args } => {
+            count_uses_expr(addr, counts);
             for a in args {
                 count_uses_expr(a, counts);
             }

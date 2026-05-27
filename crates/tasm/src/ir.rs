@@ -2099,6 +2099,10 @@ pub enum Instr {
     /// on the disp16. Fixtures 2607, 3212, 3567 (`int (*op)(int);
     /// op(x);`).
     CallIndirectGroupSym { group: String, symbol: String },
+    /// `call word ptr <group>:<sym>[bx]` — indirect near call
+    /// through a function-pointer array indexed by BX. Emits
+    /// `FF 9F lo hi` + SegRel FIXUPP. Fixtures 2944, 3481, 3696.
+    CallIndirectGroupSymBx { group: String, symbol: String },
     /// `push <imm8sx>` — 80186+ push of a sign-extended byte
     /// immediate. Encoding: `6A ii`. Saves 2 bytes per call when
     /// the argument constant fits in a signed byte. Fixture 2277.

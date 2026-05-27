@@ -2495,12 +2495,20 @@ impl Parser {
         };
         let name = name.clone();
         // Array-of-function-pointers declarator shape:
-        // `<ret> ( * <name> [ N ]... ) ( args )`. Skip the inner
-        // `[N]` dimensions — the codegen treats the whole thing as
-        // a flat array (just like a function-pointer array). Fixtures
-        // 2305, 2308, 2343, etc.
+        // `<ret> ( * <name> [ N ]... ) ( args )`. Capture the
+        // outer-most `[N]` dim so the type becomes `Array{N,
+        // Pointer<Int>}` — earlier slices collapsed this to a
+        // flat pointer, but the indirect-call path (`arr[i](x)`)
+        // needs the array's element-stride to scale the index.
+        // Fixtures 2305, 2308, 2343, 2944, 3481, 3696.
+        let mut fn_ptr_arr_dim: Option<u32> = None;
         while matches!(self.peek().kind, TokenKind::LBracket) {
             self.bump();
+            if fn_ptr_arr_dim.is_none() {
+                if let TokenKind::IntLit(n) = self.peek().kind {
+                    fn_ptr_arr_dim = Some(u32::try_from(n).unwrap_or(1));
+                }
+            }
             while !matches!(self.peek().kind, TokenKind::RBracket | TokenKind::Eof) {
                 self.bump();
             }
@@ -2553,7 +2561,16 @@ impl Parser {
                 _ => {}
             }
         }
-        Ok((name, Type::Pointer(Box::new(Type::Int))))
+        // If a `[N]` followed the `*name`, wrap the pointer type
+        // in an `Array{N, Pointer<Int>}`. The element-stride is
+        // sizeof(Pointer<Int>) = 2, matching the array semantics
+        // BCC emits for `arr[i](x)`.
+        let inner = Type::Pointer(Box::new(Type::Int));
+        let ty = match fn_ptr_arr_dim {
+            Some(n) => Type::Array { len: n, elem: Box::new(inner) },
+            None => inner,
+        };
+        Ok((name, ty))
     }
 
     /// `while ( <cond> ) <branch>`. Same branch shape as `if`.
@@ -3402,6 +3419,37 @@ impl Parser {
                             op,
                             position: UpdatePosition::Post,
                         },
+                        span,
+                    };
+                }
+                // `<arr-index-or-member>(args)` — indirect call
+                // through a function pointer obtained from an
+                // ArrayIndex or Member expression. Fixtures 2308
+                // (static fn-ptr array), 2944 / 3481 / 3696 (extern
+                // fn-ptr array), 1812 / 2378 / 2209 (struct field
+                // fn-ptr).
+                TokenKind::LParen
+                    if matches!(
+                        &e.kind,
+                        ExprKind::ArrayIndex { .. } | ExprKind::Member { .. }
+                    ) =>
+                {
+                    self.bump();
+                    let mut args: Vec<Expr> = Vec::new();
+                    if !matches!(self.peek().kind, TokenKind::RParen) {
+                        loop {
+                            args.push(self.parse_for_clause_expr()?);
+                            if matches!(self.peek().kind, TokenKind::Comma) {
+                                self.bump();
+                            } else {
+                                break;
+                            }
+                        }
+                    }
+                    let close = self.expect(&TokenKind::RParen)?;
+                    let span = Span::new(e.span.start, close.span.end);
+                    e = Expr {
+                        kind: ExprKind::CallVia { addr: Box::new(e), args },
                         span,
                     };
                 }

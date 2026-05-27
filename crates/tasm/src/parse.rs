@@ -911,6 +911,20 @@ fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
             {
                 return Ok(Instr::CallNear(target.trim().to_string()));
             }
+            // `call word ptr <group>:<sym>[bx]` — indirect through
+            // an array of function pointers indexed by BX. Fixture
+            // 2944.
+            if let Some(inner) = rest.strip_prefix("word ptr ") {
+                if let Some((before_bracket, _)) = inner.rsplit_once("[bx]") {
+                    if let Some((group, symbol)) = before_bracket.split_once(':') {
+                        let (sym, _off) = split_sym_offset(symbol);
+                        return Ok(Instr::CallIndirectGroupSymBx {
+                            group: group.to_string(),
+                            symbol: sym.to_string(),
+                        });
+                    }
+                }
+            }
             // `call word ptr <group>:<sym>` — indirect through a
             // global function-pointer (fixture 2607).
             if let Some((group, symbol)) =

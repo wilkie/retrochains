@@ -26,6 +26,7 @@ pub fn try_const_eval(e: &Expr) -> Option<u32> {
         // immediate, but there's no fixture for it yet.)
         ExprKind::Ident(_)
         | ExprKind::Call { .. }
+        | ExprKind::CallVia { .. }
         | ExprKind::Update { .. }
         | ExprKind::UpdateLvalue { .. }
         | ExprKind::Logical { .. }

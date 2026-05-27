@@ -562,6 +562,12 @@ pub enum ExprKind {
     CompoundAssignExpr { target: String, op: BinOp, value: Box<Expr> },
     /// Direct function call by name.
     Call { name: String, args: Vec<Expr> },
+    /// Indirect function call through a function pointer obtained
+    /// from an arbitrary expression (currently `<arr>[<idx>](args)`
+    /// for function-pointer arrays). The callee address comes from
+    /// evaluating `addr` and treating it as a function pointer.
+    /// Fixtures 2308, 2435, 2944, 3481, 3696.
+    CallVia { addr: Box<Expr>, args: Vec<Expr> },
     /// `&<name>` — address-of a named local or parameter. Restricted
     /// to a bare ident today; the more general `&<lvalue>` (e.g.
     /// `&a[i]`) doesn't appear in fixtures yet.

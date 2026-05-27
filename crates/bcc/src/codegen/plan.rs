@@ -505,6 +505,12 @@ fn plan_expr_value(e: &Expr, ctx: &mut PlanCtx) {
                 plan_expr_value(a, ctx);
             }
         }
+        ExprKind::CallVia { addr, args } => {
+            plan_expr_value(addr, ctx);
+            for a in args {
+                plan_expr_value(a, ctx);
+            }
+        }
         ExprKind::Deref(operand) => plan_expr_value(operand, ctx),
         ExprKind::ArrayIndex { array, index } => {
             plan_expr_value(array, ctx);

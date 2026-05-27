@@ -5647,6 +5647,74 @@ impl<'a> FunctionEmitter<'a> {
     /// args BCC switches to `add sp, N*2` (one 3-byte instruction
     /// beats three or more `pop cx`s). Fixtures 010 (0), 033 (1),
     /// 034 (2), 049 (3), 046/048 (4).
+    /// `<arr>[<idx>](args)` — indirect call via a function-pointer
+    /// fetched from a memory location. Pushes args (right-to-left,
+    /// same as the direct path), computes the callee address into
+    /// BX, then emits `call word ptr [bx]`. The arg-cleanup mirrors
+    /// the direct-call path. Fixtures 2308, 2944, 3481, 3696.
+    fn emit_call_via(&mut self, addr: &Expr, args: &[Expr]) {
+        // Push args right-to-left without a known signature. Use the
+        // direct-memory push shape (`push word ptr <src>`) when the
+        // arg is a simple lvalue — same optimization the direct-call
+        // path uses. Falls back to `mov ax; push ax` otherwise.
+        let mut total_bytes: u16 = 0;
+        for arg in args.iter().rev() {
+            if let Some(push_form) = self.try_direct_arg_push(arg, &Type::Int) {
+                let _ = write!(self.out, "\t{push_form}\r\n");
+                total_bytes += 2;
+                continue;
+            }
+            self.emit_expr_to_ax(arg);
+            self.out.extend_from_slice(b"\tpush\tax\r\n");
+            total_bytes += 2;
+        }
+        // Compute the function pointer into BX from the address
+        // expression. For `arr[idx]`, this is the address of the
+        // array element. We currently handle the global-fn-ptr-
+        // array shape with variable index; other shapes will need
+        // additional dispatch.
+        if let ExprKind::ArrayIndex { array, index } = &addr.kind
+            && let ExprKind::Ident(arr_name) = &array.kind
+            && let Some(gty) = self.globals.type_of(arr_name)
+            && let Some(elem_ty) = gty.array_elem()
+            && elem_ty.pointee().is_some()
+        {
+            let elem_ty_clone = elem_ty.clone();
+            // Scale the index, load the pointer slot into BX.
+            if let Some(k) = try_const_eval(index) {
+                let stride = u32::from(elem_ty_clone.size_bytes());
+                let off = k.wrapping_mul(stride);
+                let addr_label = if off == 0 {
+                    format!("DGROUP:_{arr_name}")
+                } else {
+                    format!("DGROUP:_{arr_name}+{off}")
+                };
+                let _ = write!(
+                    self.out,
+                    "\tcall\tword ptr {addr_label}\r\n",
+                );
+            } else {
+                self.emit_index_into_bx(index, &elem_ty_clone);
+                let _ = write!(
+                    self.out,
+                    "\tcall\tword ptr DGROUP:_{arr_name}[bx]\r\n",
+                );
+            }
+        } else {
+            panic!("CallVia: unsupported address expression shape (no fixture yet)");
+        }
+        // Caller-cleanup: pop cx per word ≤ 4 bytes, add sp,N for ≥ 6.
+        if total_bytes == 0 {
+            // nothing
+        } else if total_bytes <= 4 {
+            for _ in 0..(total_bytes / 2) {
+                self.out.extend_from_slice(b"\tpop\tcx\r\n");
+            }
+        } else {
+            let _ = write!(self.out, "\tadd\tsp,{total_bytes}\r\n");
+        }
+    }
+
     fn emit_call(&mut self, name: &str, args: &[Expr]) {
         let param_tys = self.signatures.params_of(name);
         // Pre-intern string literal args in SOURCE (left-to-right)
@@ -20787,6 +20855,9 @@ impl<'a> FunctionEmitter<'a> {
                     );
                 }
             }
+            ExprKind::CallVia { addr, args } => {
+                self.emit_call_via(addr, args);
+            }
             ExprKind::Call { name, args } => {
                 self.emit_call(name, args);
                 // Char-returning callee leaves only AL meaningful;
@@ -21862,7 +21933,7 @@ impl<'a> FunctionEmitter<'a> {
             ExprKind::FloatLit(_) | ExprKind::DoubleLit(_) => {
                 panic!("float literal in operand context not yet supported (no FPU path)")
             }
-            ExprKind::Call { .. } => {
+            ExprKind::Call { .. } | ExprKind::CallVia { .. } => {
                 panic!("call as right operand not yet supported (need to preserve AX)")
             }
             ExprKind::BinOp { op: BinOp::Add, left, right }

@@ -669,6 +669,7 @@ fn instr_size(instr: &Instr) -> usize {
         Instr::MovDerefRegOffsetGroupSym { .. } => 4,
         Instr::CallIndirectBpRel { offset } => 1 + bp_rel_modrm_size(*offset),
         Instr::CallIndirectGroupSym { .. } => 4,
+        Instr::CallIndirectGroupSymBx { .. } => 4,
         // 8087 FPU memory ops: TASM auto-prepends a `9B` (FWAIT)
         // prefix before each memory-form FPU instruction (matches
         // real TASM's 8087 compatibility behavior). The family
@@ -3312,6 +3313,14 @@ fn emit_instr(
             // ModR/M=0x16 = mod=00 reg=2 r/m=110 ([disp16] form).
             emit_group_sym_lea(
                 &[0xFF, 0x16], group, symbol, 0,
+                symbols, group_idx, extern_idx, out, fixups,
+            )?;
+        }
+        Instr::CallIndirectGroupSymBx { group, symbol } => {
+            // `call word ptr <group>:<sym>[bx]` → FF /2 [bx+disp16].
+            // ModR/M=0x97 = mod=10 reg=2 r/m=111 ([bx+disp16]).
+            emit_group_sym_lea(
+                &[0xFF, 0x97], group, symbol, 0,
                 symbols, group_idx, extern_idx, out, fixups,
             )?;
         }

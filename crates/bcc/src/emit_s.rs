@@ -1270,6 +1270,16 @@ fn walk_calls_expr(
                 walk_calls_expr(a, defined, locals, seen, ordered);
             }
         }
+        ExprKind::CallVia { addr, args } => {
+            // Indirect call through an array/member expression —
+            // the callee identity comes from runtime memory, so no
+            // EXTRN is added. Just walk into the address and args
+            // to pick up any nested direct calls.
+            walk_calls_expr(addr, defined, locals, seen, ordered);
+            for a in args {
+                walk_calls_expr(a, defined, locals, seen, ordered);
+            }
+        }
         ExprKind::BinOp { left, right, .. } | ExprKind::Logical { left, right, .. } => {
             walk_calls_expr(left, defined, locals, seen, ordered);
             walk_calls_expr(right, defined, locals, seen, ordered);
