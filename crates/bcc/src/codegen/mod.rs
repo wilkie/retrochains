@@ -5673,7 +5673,27 @@ impl<'a> FunctionEmitter<'a> {
         // array element. We currently handle the global-fn-ptr-
         // array shape with variable index; other shapes will need
         // additional dispatch.
+        // `<stack-arr>[<const>](args)` — local fn-pointer array
+        // with constant index. Emits `call word ptr [bp-N+K*2]`.
+        // Variable-index stack arrays aren't fixtured yet.
+        // Fixture 1658.
         if let ExprKind::ArrayIndex { array, index } = &addr.kind
+            && let ExprKind::Ident(arr_name) = &array.kind
+            && self.locals.has(arr_name)
+            && let Some(elem_ty) = self.locals.type_of(arr_name).array_elem()
+            && elem_ty.pointee().is_some()
+            && let LocalLocation::Stack(base_off) = self.locals.location_of(arr_name)
+            && let Some(k) = try_const_eval(index)
+        {
+            let stride = i32::from(elem_ty.size_bytes());
+            let off = (k as i32).wrapping_mul(stride);
+            let final_off = base_off + i16::try_from(off).unwrap_or(i16::MAX);
+            let _ = write!(
+                self.out,
+                "\tcall\tword ptr {}\r\n",
+                bp_addr(final_off),
+            );
+        } else if let ExprKind::ArrayIndex { array, index } = &addr.kind
             && let ExprKind::Ident(arr_name) = &array.kind
             && let Some(gty) = self.globals.type_of(arr_name)
             && let Some(elem_ty) = gty.array_elem()
@@ -20590,6 +20610,7 @@ impl<'a> FunctionEmitter<'a> {
                             if matches!(base.kind, ExprKind::Call { .. }));
                     let rhs_clobbers_ax = !rhs_is_constant
                         && (matches!(right.kind, ExprKind::Call { .. })
+                            || matches!(right.kind, ExprKind::CallVia { .. })
                             || self.expr_is_char_load(right)
                             || (matches!(right.kind, ExprKind::Cast { .. })
                                 && !rhs_is_int_cast_of_int_or_long)
@@ -20648,6 +20669,7 @@ impl<'a> FunctionEmitter<'a> {
                         // accumulator for the implicit operand).
                         let lhs_clobbers_ax =
                             matches!(left.kind, ExprKind::Call { .. })
+                            || matches!(left.kind, ExprKind::CallVia { .. })
                             || self.expr_is_char_load(left)
                             || matches!(left.kind,
                                 ExprKind::Cast { .. } | ExprKind::Ternary { .. })
