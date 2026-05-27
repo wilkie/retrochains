@@ -1248,7 +1248,24 @@ impl<'a> FunctionEmitter<'a> {
             cond.kind,
             ExprKind::Logical { op: LogicalOp::Or, .. }
         );
+        // `a && (b || c)` — the inner `||` short-circuits to the
+        // then-branch entry, which needs an explicit label.
+        // Fixture 2615.
+        fn has_reachable_or(e: &Expr) -> bool {
+            match &e.kind {
+                ExprKind::Logical { op: LogicalOp::Or, .. } => true,
+                ExprKind::Logical { op: LogicalOp::And, left, right } => {
+                    has_reachable_or(left) || has_reachable_or(right)
+                }
+                _ => false,
+            }
+        }
+        let cond_has_nested_or = matches!(
+            cond.kind,
+            ExprKind::Logical { op: LogicalOp::And, .. },
+        ) && has_reachable_or(cond);
         let needs_then_entry = cond_has_top_or
+            || cond_has_nested_or
             || self.is_long_signed_globals_cmp(cond)
             || self.is_long_signed_const_cmp(cond)
             || self.is_long_vs_int_cmp(cond)
@@ -3606,13 +3623,31 @@ impl<'a> FunctionEmitter<'a> {
                     // jump explicitly, since the caller emits more
                     // code (the outer Or's right operand) before the
                     // true label.
-                    self.emit_cond_branch(left, true_slot, None);
+                    //
+                    // `(a || b) && c` — the Or is on the LHS of an
+                    // outer And, so true_slot is None (And's left
+                    // call doesn't pass a true target). `a` true
+                    // needs a local label to jump past the Or to the
+                    // next operand. Allocate one from the Or's plan
+                    // slot. Fixture 3510.
+                    let local_true = if true_slot.is_none() && false_slot.is_some() {
+                        Some(self.label_plan.base(cond.span.start, cond.span.end))
+                    } else {
+                        true_slot
+                    };
+                    self.emit_cond_branch(left, local_true, None);
                     let (right_true, right_false) = if false_slot.is_some() {
                         (None, false_slot)
                     } else {
                         (true_slot, None)
                     };
                     self.emit_cond_branch(right, right_true, right_false);
+                    if true_slot.is_none()
+                        && false_slot.is_some()
+                        && let Some(slot) = local_true
+                    {
+                        self.emit_label(slot);
+                    }
                 }
             }
             return;
