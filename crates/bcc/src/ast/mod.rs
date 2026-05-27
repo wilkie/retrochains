@@ -555,6 +555,12 @@ pub enum ExprKind {
     /// label-plus-offset form (e.g. `DGROUP:_arr+2`). Currently only
     /// fixture 198's file-scope `int *p = &arr[1];` exercises this.
     AddressOfArrayElem { array: String, byte_offset: i32 },
+    /// `&<array>[<var>]` — address of an array element with a
+    /// non-constant index. Carries the index expression and the
+    /// element stride so codegen can scale at runtime. Distinct
+    /// from the constant-index variant because we can't fold the
+    /// offset into the symbol reference. Fixtures 3249, 3645.
+    AddressOfArrayElemVar { array: String, index: Box<Expr>, elem_size: u16 },
     /// `*<ptr>` — pointer dereference in an rvalue context. The
     /// pointee width comes from the static type of `ptr`.
     Deref(Box<Expr>),

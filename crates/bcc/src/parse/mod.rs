@@ -2837,17 +2837,13 @@ impl Parser {
             };
             if matches!(self.peek().kind, TokenKind::LBracket) {
                 self.bump();
-                let idx_tok = self.bump();
-                let TokenKind::IntLit(idx) = idx_tok.kind else {
-                    return Err(ParseError::Unexpected {
-                        offset: idx_tok.span.start,
-                        expected: "integer literal index in `&arr[K]`".to_owned(),
-                        found: format!("{:?}", idx_tok.kind),
-                    });
-                };
-                let rb = self.expect(&TokenKind::RBracket)?;
+                // Variable-index path: parse the index as a general
+                // expression and produce AddressOfArrayElemVar.
+                // Constant index continues to fold at parse time.
+                // Fixtures 3249, 3645.
                 let elem_size = match self.global_types.get(&name).or_else(|| self.function_locals.get(&name)) {
-                    Some(Type::Array { elem, .. }) => i32::from(elem.size_bytes()),
+                    Some(Type::Array { elem, .. }) => elem.size_bytes(),
+                    Some(Type::Pointer(elem)) => elem.size_bytes(),
                     _ => {
                         return Err(ParseError::Unexpected {
                             offset: name_tok.span.start,
@@ -2856,10 +2852,22 @@ impl Parser {
                         });
                     }
                 };
-                let byte_offset = i32::try_from(idx).unwrap_or(i32::MAX) * elem_size;
+                let idx_expr = self.parse_expr()?;
+                let rb = self.expect(&TokenKind::RBracket)?;
                 let span = Span::new(amp.span.start, rb.span.end);
+                if let Some(idx) = crate::codegen::fold::try_const_eval(&idx_expr) {
+                    let byte_offset = (idx as i32).wrapping_mul(i32::from(elem_size));
+                    return Ok(Expr {
+                        kind: ExprKind::AddressOfArrayElem { array: name, byte_offset },
+                        span,
+                    });
+                }
                 return Ok(Expr {
-                    kind: ExprKind::AddressOfArrayElem { array: name, byte_offset },
+                    kind: ExprKind::AddressOfArrayElemVar {
+                        array: name,
+                        index: Box::new(idx_expr),
+                        elem_size,
+                    },
                     span,
                 });
             }

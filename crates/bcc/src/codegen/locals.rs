@@ -916,7 +916,7 @@ fn expr_address_taken(e: &Expr, out: &mut HashSet<String>) {
         ExprKind::AddressOf(name) => {
             out.insert(name.clone());
         }
-        ExprKind::AddressOfArrayElem { array, .. } => {
+        ExprKind::AddressOfArrayElem { array, .. } | ExprKind::AddressOfArrayElemVar { array, .. } => {
             out.insert(array.clone());
         }
         ExprKind::BinOp { left, right, .. } | ExprKind::Logical { left, right, .. } => {
@@ -1272,7 +1272,7 @@ fn expr_has_call(e: &Expr) -> bool {
         | ExprKind::FloatLit(_)
         | ExprKind::DoubleLit(_)
         | ExprKind::AddressOf(_)
-        | ExprKind::AddressOfArrayElem { .. }
+        | ExprKind::AddressOfArrayElem { .. } | ExprKind::AddressOfArrayElemVar { .. }
         | ExprKind::StringLit(_) => false,
     }
 }
@@ -1430,7 +1430,7 @@ fn expr_has_div_or_mod(e: &Expr) -> bool {
         | ExprKind::FloatLit(_)
         | ExprKind::DoubleLit(_)
         | ExprKind::AddressOf(_)
-        | ExprKind::AddressOfArrayElem { .. }
+        | ExprKind::AddressOfArrayElem { .. } | ExprKind::AddressOfArrayElemVar { .. }
         | ExprKind::StringLit(_) => false,
     }
 }
@@ -1487,7 +1487,7 @@ fn expr_mentions(name: &str, e: &Expr) -> bool {
         ExprKind::Update { target, .. } => target == name,
         ExprKind::UpdateLvalue { target, .. } => expr_mentions(name, target),
         ExprKind::AddressOf(n) => n == name,
-        ExprKind::AddressOfArrayElem { array, .. } => array == name,
+        ExprKind::AddressOfArrayElem { array, .. } | ExprKind::AddressOfArrayElemVar { array, .. } => array == name,
         ExprKind::IntLit(_)
         | ExprKind::FloatLit(_)
         | ExprKind::DoubleLit(_)
@@ -1994,7 +1994,7 @@ fn expr_emits_imul(e: &Expr) -> bool {
         | ExprKind::FloatLit(_)
         | ExprKind::DoubleLit(_)
         | ExprKind::AddressOf(_)
-        | ExprKind::AddressOfArrayElem { .. }
+        | ExprKind::AddressOfArrayElem { .. } | ExprKind::AddressOfArrayElemVar { .. }
         | ExprKind::StringLit(_) => false,
     }
 }
@@ -2460,7 +2460,7 @@ fn count_uses_expr(e: &Expr, counts: &mut HashMap<String, u32>) {
             // is the use itself.
             *counts.entry(name.clone()).or_insert(0) += 1;
         }
-        ExprKind::AddressOfArrayElem { array, .. } => {
+        ExprKind::AddressOfArrayElem { array, .. } | ExprKind::AddressOfArrayElemVar { array, .. } => {
             *counts.entry(array.clone()).or_insert(0) += 1;
         }
         ExprKind::Deref(operand) => {

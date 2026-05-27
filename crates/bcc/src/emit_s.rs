@@ -952,7 +952,7 @@ fn walk_calls_expr(
         | ExprKind::StringLit(_)
         | ExprKind::Update { .. }
         | ExprKind::AddressOf(_)
-        | ExprKind::AddressOfArrayElem { .. } => {}
+        | ExprKind::AddressOfArrayElem { .. } | ExprKind::AddressOfArrayElemVar { .. } => {}
     }
 }
 

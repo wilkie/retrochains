@@ -19013,6 +19013,30 @@ impl<'a> FunctionEmitter<'a> {
                     );
                 }
             }
+            ExprKind::AddressOfArrayElemVar { array, index, elem_size } => {
+                // `&<arr>[<var>]` — evaluate the index into AX,
+                // scale by elem_size, then add the array's offset.
+                // For a global array: `add ax, offset DGROUP:_arr`.
+                // For a stack array: `lea bx, [bp-N]; add ax, bx`
+                // (lea uses BX so AX-with-index survives).
+                // Fixture 3249, 3645.
+                self.emit_expr_to_ax(index);
+                let stride = u32::from(*elem_size);
+                for _ in 0..stride.trailing_zeros() {
+                    self.out.extend_from_slice(b"\tshl\tax,1\r\n");
+                }
+                if self.globals.contains(array) {
+                    let _ = write!(
+                        self.out,
+                        "\tadd\tax,offset DGROUP:_{array}\r\n",
+                    );
+                } else if let LocalLocation::Stack(off) = self.locals.location_of(array) {
+                    let _ = write!(self.out, "\tlea\tbx,word ptr {}\r\n", bp_addr(off));
+                    self.out.extend_from_slice(b"\tadd\tax,bx\r\n");
+                } else {
+                    unreachable!("array `{array}` should be stack-resident");
+                }
+            }
             ExprKind::Deref(operand) => self.emit_deref_to_ax(operand),
             ExprKind::ArrayIndex { array, index } => {
                 self.emit_array_index_to_ax(array, index);
@@ -19981,7 +20005,7 @@ impl<'a> FunctionEmitter<'a> {
             ExprKind::AssignExpr { .. } | ExprKind::CompoundAssignExpr { .. } => {
                 panic!("assignment expression as right operand not yet supported (no fixture)")
             }
-            ExprKind::AddressOf(_) | ExprKind::AddressOfArrayElem { .. } => {
+            ExprKind::AddressOf(_) | ExprKind::AddressOfArrayElem { .. } | ExprKind::AddressOfArrayElemVar { .. } => {
                 panic!("`&x` as right operand of a binary op not yet supported (no fixture)")
             }
             ExprKind::Deref(inner) => {
