@@ -1649,13 +1649,25 @@ impl<'a> FunctionEmitter<'a> {
         // char-vs-int-vs-global routing), but non-trivial expressions
         // like `switch (x + 1)` fall through to the generic
         // expression evaluator. Fixture 544.
+        //
+        // `switch (n % K)` special-cases: idiv already leaves the
+        // remainder in DX, so BCC skips the trailing `mov ax, dx`
+        // and dispatches against DX. Fixture 1448 (`switch (n % 3)`).
+        let scrut_in_dx = matches!(&scrutinee.kind, ExprKind::BinOp { op: BinOp::Mod, .. });
         let scrut_loaded = match &scrutinee.kind {
             ExprKind::Ident(_) => false,
             _ => {
-                self.emit_expr_to_ax(scrutinee);
+                if scrut_in_dx {
+                    self.skip_mod_to_ax = true;
+                    self.emit_expr_to_ax(scrutinee);
+                    self.skip_mod_to_ax = false;
+                } else {
+                    self.emit_expr_to_ax(scrutinee);
+                }
                 true
             }
         };
+        let scrut_reg = if scrut_in_dx { "dx" } else { "ax" };
         if !scrut_loaded {
         let ExprKind::Ident(name) = &scrutinee.kind else {
             unreachable!();
@@ -1707,9 +1719,14 @@ impl<'a> FunctionEmitter<'a> {
             let Some(v) = case.value else { continue };
             let v16 = v & 0xFFFF;
             if v16 == 0 {
-                self.out.extend_from_slice(b"\tor\tax,ax\r\n");
+                let _ = write!(self.out, "\tor\t{scrut_reg},{scrut_reg}\r\n");
+            } else if v16 < 256 && scrut_in_dx {
+                // Small immediate against DX uses the
+                // sign-extended `83 fa ii` form (3 bytes vs
+                // 4 for `cmp dx, imm16`). Fixture 1448.
+                let _ = write!(self.out, "\tcmp\t{scrut_reg},{v16}\r\n");
             } else {
-                let _ = write!(self.out, "\tcmp\tax,{v16}\r\n");
+                let _ = write!(self.out, "\tcmp\t{scrut_reg},{v16}\r\n");
             }
             let _ = write!(self.out, "\tje\tshort {}\r\n", self.label_ref(slot));
         }
@@ -4416,9 +4433,12 @@ impl<'a> FunctionEmitter<'a> {
             return;
         }
         // `while (*++p)` — deref of a pre-update on a register
-        // pointer local. Advance the register, then compare `*p`
-        // through the pointer directly. Fixture 1311 (`*++p` for
-        // char *p in SI).
+        // pointer local. Advance the register, snapshot to BX, then
+        // compare `*p` through BX. The BX bounce mirrors the postinc
+        // shape (fixture 2027) and is what BCC emits even though
+        // `cmp <w> ptr [<reg>], 0` would be shorter — BCC's codegen
+        // template always routes the compare through BX. Fixture
+        // 1311 (`*++p` for char *p).
         if let ExprKind::Deref(operand) = &cond.kind
             && let ExprKind::Update {
                 target,
@@ -4439,7 +4459,8 @@ impl<'a> FunctionEmitter<'a> {
                 let _ = write!(self.out, "\t{mnem}\t{reg_name}\r\n");
             }
             let width = if pointee.is_char_like() { "byte" } else { "word" };
-            let _ = write!(self.out, "\tcmp\t{width} ptr [{reg_name}],0\r\n");
+            let _ = write!(self.out, "\tmov\tbx,{reg_name}\r\n");
+            let _ = write!(self.out, "\tcmp\t{width} ptr [bx],0\r\n");
             return;
         }
         // `if (p[K])` — global-pointer subscript in boolean context.
@@ -15705,6 +15726,41 @@ impl<'a> FunctionEmitter<'a> {
                     self.out,
                     "\tmov\tword ptr [{addr_reg}],offset DGROUP:_{sym_name}\r\n",
                 );
+                return;
+            }
+            // Char-to-char direct copy peephole: `*p = *q` where both
+            // are register-resident char pointers. BCC skips the
+            // `cbw` widening since AL flows directly into the byte
+            // store. Fixture 3529 (`cswap` body: `*a = *b`).
+            if pointee.is_char_like()
+                && let ExprKind::Deref(src_inner) = &value.kind
+                && let ExprKind::Ident(src_name) = &src_inner.kind
+                && self.locals.has(src_name)
+                && let Some(src_pointee) = self.locals.type_of(src_name).pointee()
+                && src_pointee.is_char_like()
+                && let LocalLocation::Reg(src_reg) = self.locals.location_of(src_name)
+                && !src_reg.is_byte()
+            {
+                let src_reg_name = src_reg.name();
+                let _ = write!(self.out, "\tmov\tal,byte ptr [{src_reg_name}]\r\n");
+                let _ = write!(self.out, "\tmov\tbyte ptr [{addr_reg}],al\r\n");
+                return;
+            }
+            // Char direct-from-stack peephole: `*p = c` where `c` is
+            // a stack-resident char local. Skip cbw — AL is enough.
+            // Fixture 3529 (`*b = t` where t is on the stack).
+            if pointee.is_char_like()
+                && let ExprKind::Ident(src_name) = &value.kind
+                && self.locals.has(src_name)
+                && self.locals.type_of(src_name).is_char_like()
+                && let LocalLocation::Stack(src_off) = self.locals.location_of(src_name)
+            {
+                let _ = write!(
+                    self.out,
+                    "\tmov\tal,byte ptr {}\r\n",
+                    bp_addr(src_off),
+                );
+                let _ = write!(self.out, "\tmov\tbyte ptr [{addr_reg}],al\r\n");
                 return;
             }
             // Non-constant RHS: materialize the value in AX/AL,
