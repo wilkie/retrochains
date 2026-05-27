@@ -5678,7 +5678,6 @@ impl<'a> FunctionEmitter<'a> {
         // additional dispatch.
         // `<stack-arr>[<const>](args)` — local fn-pointer array
         // with constant index. Emits `call word ptr [bp-N+K*2]`.
-        // Variable-index stack arrays aren't fixtured yet.
         // Fixture 1658.
         if let ExprKind::ArrayIndex { array, index } = &addr.kind
             && let ExprKind::Ident(arr_name) = &array.kind
@@ -5696,6 +5695,20 @@ impl<'a> FunctionEmitter<'a> {
                 "\tcall\tword ptr {}\r\n",
                 bp_addr(final_off),
             );
+        } else if let ExprKind::ArrayIndex { array, index } = &addr.kind
+            && let ExprKind::Ident(arr_name) = &array.kind
+            && self.locals.has(arr_name)
+            && let arr_ty = self.locals.type_of(arr_name).clone()
+            && let Some(elem_ty) = arr_ty.array_elem()
+            && elem_ty.pointee().is_some()
+            && let LocalLocation::Stack(base_off) = self.locals.location_of(arr_name)
+        {
+            // Variable-index stack fn-pointer array. Scale index
+            // into BX, then `call word ptr <bp-base>[bx]`. Fixture
+            // 2435 (`for (...) sum += ops[i](10)`).
+            let elem_size = elem_ty.size_bytes();
+            self.emit_array_addr_to_bx(arr_name, index, base_off, elem_size);
+            self.out.extend_from_slice(b"\tcall\tword ptr [bx]\r\n");
         } else if let ExprKind::ArrayIndex { array, index } = &addr.kind
             && let ExprKind::Ident(arr_name) = &array.kind
             && let Some(gty) = self.globals.type_of(arr_name)

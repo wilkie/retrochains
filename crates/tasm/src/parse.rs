@@ -942,6 +942,10 @@ fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
             if let Some(offset) = parse_bp_relative(rest) {
                 return Ok(Instr::CallIndirectBpRel { offset });
             }
+            // `call word ptr [bx]` — indirect through BX.
+            if rest.trim() == "word ptr [bx]" {
+                return Ok(Instr::CallIndirectBx);
+            }
             Err(AsmError::new(
                 line.line_no,
                 format!("call: unsupported operand form `{rest}`"),
