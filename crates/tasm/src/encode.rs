@@ -2,11 +2,17 @@
 //! encoded independently after a module-wide pre-pass has resolved
 //! every label to `(segment-index, offset-within-segment)`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::ir::{
     AsmError, AsmResult, FixupKind, FixupReq, Instr, Module, SegItem, Segment,
 };
+
+/// Sites where a `Jcc` (originally emitted as the 2-byte short form)
+/// must be widened to the 5-byte inverted-Jcc + near-jmp pattern
+/// because the short displacement is out of i8 range. Keyed by
+/// `(segment-index, item-index-within-segment.items)`.
+type ExpandedJccs = HashSet<(usize, usize)>;
 
 /// One segment's encoded output. The notional `size` (used for the
 /// SEGDEF length field) can exceed `bytes.len()` when the segment
@@ -35,7 +41,62 @@ pub struct EncodedModule {
 }
 
 pub fn encode_module(module: &Module) -> AsmResult<EncodedModule> {
-    let symbols = build_symbols(module)?;
+    // Iterative Jcc relaxation: a `JmpCondShort` whose target is
+    // beyond ±127 bytes can't fit in the 2-byte short form. Mark
+    // those sites for expansion to the 5-byte inverted-Jcc + near-
+    // jmp pattern; expanding shifts later code so labels need to
+    // be rebuilt, and that may push other Jccs out of range. Loop
+    // until the set is stable. The set only grows, so this
+    // terminates in at most `#JmpCondShort` iterations and in
+    // practice converges in 1–2. Fixture 2627 (`if (x == 0) {
+    // 32×x=x+1; }` — the `jne else` is 164 bytes ahead).
+    let mut expanded: ExpandedJccs = HashSet::new();
+    loop {
+        let symbols = build_symbols(module, &expanded)?;
+        let mut changed = false;
+        for (seg_idx, seg) in module.segments.iter().enumerate() {
+            let mut pc: u32 = 0;
+            for (item_idx, item) in seg.items.iter().enumerate() {
+                match item {
+                    SegItem::Label(_) | SegItem::Proc(_) | SegItem::EndProc => {}
+                    SegItem::Db(b) => pc += b.len() as u32,
+                    SegItem::DwSym(_) | SegItem::DwGroupSym { .. } => pc += 2,
+                    SegItem::Pad(n) => pc += *n,
+                    SegItem::Instr(instr) => {
+                        if let Instr::JmpCondShort { target, .. } = instr {
+                            let already_expanded =
+                                expanded.contains(&(seg_idx, item_idx));
+                            if !already_expanded
+                                && let Some(loc) = symbols.get(target)
+                                && loc.segment == seg_idx
+                            {
+                                let here = pc as i32 + 2;
+                                let disp = i32::from(loc.offset) - here;
+                                if i8::try_from(disp).is_err() {
+                                    expanded.insert((seg_idx, item_idx));
+                                    changed = true;
+                                }
+                            }
+                            pc += if already_expanded
+                                || expanded.contains(&(seg_idx, item_idx))
+                            {
+                                5
+                            } else {
+                                2
+                            };
+                        } else {
+                            pc += instr_size(instr) as u32;
+                        }
+                    }
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    let symbols = build_symbols(module, &expanded)?;
     let group_idx = build_group_idx(module);
     let segment_idx = build_segment_idx(module);
     let extern_idx = build_extern_idx(module);
@@ -49,6 +110,7 @@ pub fn encode_module(module: &Module) -> AsmResult<EncodedModule> {
             &group_idx,
             &segment_idx,
             &extern_idx,
+            &expanded,
         )?);
     }
     let _ = (segment_idx, group_idx, extern_idx); // consumed by encode_segment
@@ -64,11 +126,11 @@ fn build_extern_idx(module: &Module) -> HashMap<String, u8> {
         .collect()
 }
 
-fn build_symbols(module: &Module) -> AsmResult<Symbols> {
+fn build_symbols(module: &Module, expanded: &ExpandedJccs) -> AsmResult<Symbols> {
     let mut out: Symbols = HashMap::new();
     for (seg_idx, seg) in module.segments.iter().enumerate() {
         let mut pc: u32 = 0;
-        for item in &seg.items {
+        for (item_idx, item) in seg.items.iter().enumerate() {
             match item {
                 SegItem::Label(name) => {
                     let offset = u16::try_from(pc).map_err(|_| {
@@ -86,7 +148,16 @@ fn build_symbols(module: &Module) -> AsmResult<Symbols> {
                 SegItem::Db(b) => pc += b.len() as u32,
                 SegItem::DwSym(_) | SegItem::DwGroupSym { .. } => pc += 2,
                 SegItem::Pad(n) => pc += *n,
-                SegItem::Instr(instr) => pc += instr_size(instr) as u32,
+                SegItem::Instr(instr) => {
+                    let sz = if matches!(instr, Instr::JmpCondShort { .. })
+                        && expanded.contains(&(seg_idx, item_idx))
+                    {
+                        5
+                    } else {
+                        instr_size(instr)
+                    };
+                    pc += sz as u32;
+                }
             }
         }
     }
@@ -118,6 +189,7 @@ fn encode_segment(
     group_idx: &HashMap<String, u8>,
     _segment_idx: &HashMap<String, u8>,
     extern_idx: &HashMap<String, u8>,
+    expanded: &ExpandedJccs,
 ) -> AsmResult<EncodedSeg> {
     // Walk items, but distinguish between "in the LEDATA byte stream"
     // and "still part of this segment, just padding". Items can't
@@ -131,7 +203,7 @@ fn encode_segment(
     let mut sealed_bytes = false; // once we've started padding, no more bytes
     let mut sealed_pad = false; // once we've emitted bytes, no more padding
 
-    for item in &seg.items {
+    for (item_idx, item) in seg.items.iter().enumerate() {
         match item {
             SegItem::Label(_) | SegItem::Proc(_) | SegItem::EndProc => {}
             SegItem::Db(b) => {
@@ -254,6 +326,8 @@ fn encode_segment(
                     ));
                 }
                 sealed_pad = true;
+                let jcc_expanded = matches!(instr, Instr::JmpCondShort { .. })
+                    && expanded.contains(&(seg_idx, item_idx));
                 emit_instr(
                     seg_idx,
                     instr,
@@ -262,6 +336,7 @@ fn encode_segment(
                     extern_idx,
                     &mut bytes,
                     &mut fixups,
+                    jcc_expanded,
                 )?;
             }
         }
@@ -707,6 +782,7 @@ fn emit_instr(
     extern_idx: &HashMap<String, u8>,
     out: &mut Vec<u8>,
     fixups: &mut Vec<FixupReq>,
+    jcc_expanded: bool,
 ) -> AsmResult<()> {
     match instr {
         Instr::PushReg16 { reg } => out.push(0x50 | reg.code()),
@@ -1475,16 +1551,37 @@ fn emit_instr(
             let target_off = symbols.get(target).map(|l| l.offset).ok_or_else(|| {
                 AsmError::new(0, format!("Jcc: unresolved label `{target}`"))
             })?;
-            let here = out.len() + 2;
-            let disp = i32::from(target_off) - here as i32;
-            let rel8 = i8::try_from(disp).map_err(|_| {
-                AsmError::new(
-                    0,
-                    format!("Jcc displacement {disp} out of i8 range to `{target}`"),
-                )
-            })?;
-            out.push(cond.opcode_byte());
-            out.push(rel8 as u8);
+            if jcc_expanded {
+                // Out-of-range short Jcc → invert and follow with a
+                // near jmp: `<inv-cond> short +3; jmp near <target>`.
+                // The short hop skips the 3-byte E9 disp16 when the
+                // (logically negated) condition fails. Fixture 2627.
+                out.push(cond.invert().opcode_byte());
+                out.push(0x03);
+                out.push(0xE9);
+                let here = out.len() + 2;
+                let disp = i32::from(target_off) - here as i32;
+                let rel16 = i16::try_from(disp).map_err(|_| {
+                    AsmError::new(
+                        0,
+                        format!(
+                            "Jcc near displacement {disp} out of i16 range to `{target}`"
+                        ),
+                    )
+                })?;
+                out.extend_from_slice(&rel16.to_le_bytes());
+            } else {
+                let here = out.len() + 2;
+                let disp = i32::from(target_off) - here as i32;
+                let rel8 = i8::try_from(disp).map_err(|_| {
+                    AsmError::new(
+                        0,
+                        format!("Jcc displacement {disp} out of i8 range to `{target}`"),
+                    )
+                })?;
+                out.push(cond.opcode_byte());
+                out.push(rel8 as u8);
+            }
         }
         Instr::CallNear(target) => {
             // E8 lo hi. Resolve target's segment-relative offset.

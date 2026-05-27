@@ -2469,6 +2469,25 @@ impl JmpCond {
             Self::G => 0x7F,
         }
     }
+
+    /// Logical negation: `je` ↔ `jne`, `jl` ↔ `jge`, etc. Used by the
+    /// encoder's Jcc relaxation pass — when a short Jcc can't reach
+    /// its target, BCC inverts the condition and follows it with a
+    /// near `jmp` (`<inv-jcc> short +3; jmp near <target>`).
+    pub fn invert(self) -> Self {
+        match self {
+            Self::E => Self::Ne,
+            Self::Ne => Self::E,
+            Self::B => Self::Ae,
+            Self::Ae => Self::B,
+            Self::Be => Self::A,
+            Self::A => Self::Be,
+            Self::L => Self::Ge,
+            Self::Ge => Self::L,
+            Self::Le => Self::G,
+            Self::G => Self::Le,
+        }
+    }
 }
 
 /// A relocation request emitted by the encoder. The assembler turns
