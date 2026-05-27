@@ -2788,6 +2788,28 @@ impl Parser {
                 // Not an array index — bail out.
                 return Err(ParseError::Unsupported { offset: operand.span.start });
             }
+            // Prefix `++s.x` / `--p->x` — parse the atom (a Member)
+            // and wrap in UpdateLvalue::Pre. Fixture 3444.
+            if matches!(self.peek().kind, TokenKind::Ident(_))
+                && matches!(
+                    self.peek_n(1).kind,
+                    TokenKind::Dot | TokenKind::Arrow,
+                )
+            {
+                let operand = self.parse_atom()?;
+                if matches!(operand.kind, ExprKind::Member { .. }) {
+                    let span = Span::new(op_tok.span.start, operand.span.end);
+                    return Ok(Expr {
+                        kind: ExprKind::UpdateLvalue {
+                            target: Box::new(operand),
+                            op: update_op,
+                            position: UpdatePosition::Pre,
+                        },
+                        span,
+                    });
+                }
+                return Err(ParseError::Unsupported { offset: operand.span.start });
+            }
             let name_tok = self.bump();
             let TokenKind::Ident(name) = name_tok.kind else {
                 return Err(ParseError::NotAnIdent { offset: name_tok.span.start });

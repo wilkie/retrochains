@@ -18143,6 +18143,35 @@ impl<'a> FunctionEmitter<'a> {
                     }
                     return;
                 }
+                // Member access `s.x` or `p->x` resolving to a
+                // constant address: inc/dec word/byte ptr at the
+                // address, then load it. Post order swaps the
+                // two halves. Fixture 3444 (`++s.x`).
+                if let Some((name, total_off, leaf_ty)) = self.try_lvalue_chain_addr(target)
+                    && let Some(addr) = self.resolve_chain_addr(&name, total_off)
+                    && leaf_ty.is_int_like()
+                {
+                    let mnem = match op {
+                        UpdateOp::Inc => "inc",
+                        UpdateOp::Dec => "dec",
+                    };
+                    let width = if leaf_ty.is_char_like() { "byte" } else { "word" };
+                    let load_reg = if leaf_ty.is_char_like() { "al" } else { "ax" };
+                    match position {
+                        UpdatePosition::Post => {
+                            let _ = write!(self.out, "\tmov\t{load_reg},{width} ptr {addr}\r\n");
+                            let _ = write!(self.out, "\t{mnem}\t{width} ptr {addr}\r\n");
+                        }
+                        UpdatePosition::Pre => {
+                            let _ = write!(self.out, "\t{mnem}\t{width} ptr {addr}\r\n");
+                            let _ = write!(self.out, "\tmov\t{load_reg},{width} ptr {addr}\r\n");
+                        }
+                    }
+                    if leaf_ty.is_char_like() {
+                        self.emit_widen_al(&leaf_ty);
+                    }
+                    return;
+                }
                 panic!(
                     "UpdateLvalue in integer-AX context only supported via the \
                      `*(*pp)++` outer-deref peephole today; the operand was {:?}",
