@@ -1473,18 +1473,46 @@ impl Parser {
                 name
             };
             // `int a[]` / `int a[N]` / `int a[N][M]...` parameter
-            // syntax — equivalent to `int *a` (outermost dim decays
-            // to a pointer; subsequent dims are folded into the
-            // pointer's "stride" but we collapse to a flat pointer
-            // since codegen doesn't yet model nested-array element
-            // strides on params). Fixtures 1236 (`int sum(int a[])`),
-            // 1239 (char arr), 2236 (`int sum(int m[3][3])`).
-            while matches!(self.peek().kind, TokenKind::LBracket) {
-                self.bump();
-                while !matches!(self.peek().kind, TokenKind::RBracket | TokenKind::Eof) {
+            // syntax. C decays the OUTERMOST dimension to a pointer
+            // and preserves the inner dims as part of the pointer's
+            // pointee type. We mirror that: collect explicit inner
+            // sizes into an Array chain, then wrap in Pointer.
+            // Fixtures 1236 (`int sum(int a[])`), 1239 (char arr),
+            // 2236 (`int sum(int m[3][3])` — pointee = Array{3,
+            // Int}), 2487, 2493.
+            if matches!(self.peek().kind, TokenKind::LBracket) {
+                let mut dims: Vec<Option<u32>> = Vec::new();
+                while matches!(self.peek().kind, TokenKind::LBracket) {
                     self.bump();
+                    let size = if matches!(self.peek().kind, TokenKind::RBracket) {
+                        None
+                    } else {
+                        let size_tok = self.bump();
+                        let n = match &size_tok.kind {
+                            TokenKind::IntLit(v) => Some(*v),
+                            _ => None,
+                        };
+                        // Skip any extra tokens until ']'.
+                        while !matches!(
+                            self.peek().kind,
+                            TokenKind::RBracket | TokenKind::Eof
+                        ) {
+                            self.bump();
+                        }
+                        n
+                    };
+                    self.expect(&TokenKind::RBracket)?;
+                    dims.push(size);
                 }
-                self.expect(&TokenKind::RBracket)?;
+                // Inner dims (everything except the outermost) wrap
+                // the element type from innermost-out. The outermost
+                // dim then decays to a pointer to that chain.
+                if dims.len() > 1 {
+                    for d in dims.iter().skip(1).rev() {
+                        let len = d.unwrap_or(0);
+                        ty = Type::Array { elem: Box::new(ty), len };
+                    }
+                }
                 ty = Type::Pointer(Box::new(ty));
             }
             // Typedef-array param (`Vec v` where Vec is int[3]) —

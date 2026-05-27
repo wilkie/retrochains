@@ -12104,16 +12104,47 @@ impl<'a> FunctionEmitter<'a> {
             // `pp[i][j]` for char ** / int ** etc. with constant
             // indices: load `*pp[i]` into BX (the first-level ptr),
             // then read through `[bx + j*stride]`. Fixture 2962.
+            // Also handles `int (*g)[N]` shape (pointee is an array
+            // type rather than another pointer) — fixture 2487.
             if indices.len() == 2
                 && let Some(i_k) = try_const_eval(indices[0])
                 && let Some(j_k) = try_const_eval(indices[1])
-                && let Some(inner_pointee) = pointee.pointee()
+                && let Some(inner_pointee) = pointee
+                    .pointee()
+                    .or_else(|| pointee.array_elem())
             {
                 let inner_pointee = inner_pointee.clone();
                 let i_stride = u32::from(pointee.size_bytes());
                 let i_off = i_k.wrapping_mul(i_stride) as i32;
                 let j_stride = i32::from(inner_pointee.size_bytes());
                 let j_off = (j_k as i32).wrapping_mul(j_stride);
+                // Pointee-is-Array shape (e.g. `int (*g)[3]` for
+                // a `int g[N][M]` parameter): `g[i][j]` is a single
+                // memory access at `*g + i*outer + j*inner` because
+                // the outer deref is just array-to-pointer decay,
+                // not an actual load. Emit `mov ax, [reg + total]`.
+                // Fixture 2487.
+                if pointee.array_elem().is_some() {
+                    let total = i_off + j_off;
+                    let total16 = i16::try_from(total).unwrap_or(i16::MAX);
+                    if let LocalLocation::Reg(reg) = self.locals.location_of(array_name) {
+                        let addr = if total == 0 {
+                            format!("[{}]", reg.name())
+                        } else if total > 0 {
+                            format!("[{}+{total}]", reg.name())
+                        } else {
+                            format!("[{}-{}]", reg.name(), -total)
+                        };
+                        let _ = total16;
+                        if inner_pointee.is_char_like() {
+                            let _ = write!(self.out, "\tmov\tal,byte ptr {addr}\r\n");
+                            self.emit_widen_al(&inner_pointee);
+                        } else {
+                            let _ = write!(self.out, "\tmov\tax,word ptr {addr}\r\n");
+                        }
+                        return;
+                    }
+                }
                 let p_addr = if let LocalLocation::Reg(reg) = self.locals.location_of(array_name) {
                     if i_off == 0 {
                         format!("[{}]", reg.name())
@@ -21371,6 +21402,46 @@ impl<'a> FunctionEmitter<'a> {
                     let off = (k as i32).wrapping_mul(stride);
                     let off16 = i16::try_from(off).unwrap_or(i16::MAX);
                     return OperandSource::DerefRegOffset { reg, offset: off16 };
+                }
+                // `<reg-or-stack-ptr-to-arr>[K_outer][K_inner]` —
+                // for parameter shape `int g[N][M]` (decays to
+                // `int (*g)[M]`), fold both constant indices into a
+                // single `[<reg>+offset]` operand. Inner-array elem
+                // stride drives the byte offset. Fixture 2487.
+                if let ExprKind::ArrayIndex { array: outer_arr, index: outer_idx } =
+                    &array.kind
+                    && let ExprKind::Ident(ptr_name) = &outer_arr.kind
+                    && self.locals.has(ptr_name)
+                    && let Some(pointee) = self.locals.type_of(ptr_name).pointee()
+                    && let Some(inner_elem) = pointee.array_elem()
+                    && let Some(k_outer) = try_const_eval(outer_idx)
+                    && let Some(k_inner) = try_const_eval(index)
+                {
+                    let outer_stride = u32::from(pointee.size_bytes());
+                    let inner_stride = i32::from(inner_elem.size_bytes());
+                    let outer_off = k_outer.wrapping_mul(outer_stride) as i32;
+                    let inner_off = (k_inner as i32).wrapping_mul(inner_stride);
+                    let total = outer_off + inner_off;
+                    let total16 = i16::try_from(total).unwrap_or(i16::MAX);
+                    if let LocalLocation::Reg(reg) = self.locals.location_of(ptr_name) {
+                        return OperandSource::DerefRegOffset {
+                            reg,
+                            offset: total16,
+                        };
+                    }
+                    if let LocalLocation::Stack(base_off) =
+                        self.locals.location_of(ptr_name)
+                    {
+                        let _ = write!(
+                            self.out,
+                            "\tmov\tbx,word ptr {}\r\n",
+                            bp_addr(base_off),
+                        );
+                        return OperandSource::DerefRegOffset {
+                            reg: crate::codegen::locals::Reg::Bx,
+                            offset: total16,
+                        };
+                    }
                 }
                 // `<global-or-static-int-ptr-arr>[K_outer][K_inner]`
                 // as RHS: load the pointer slot into BX, then read
