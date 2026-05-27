@@ -58,6 +58,13 @@ pub struct Parser {
     /// global name; this map translates body-level idents.
     /// Reset at the start of every `parse_function`.
     current_static_renames: HashMap<String, String>,
+    /// Per-block-scope rename map stack for shadowed locals. When a
+    /// nested block declares `int x` that shadows an outer `x`, the
+    /// parser appends a unique `@N` suffix and records the rewrite
+    /// here; lookups walk the stack innermost-first. Reset at the
+    /// start of every `parse_function` to a single empty scope.
+    /// Fixtures 2316, 2467, 2258.
+    block_scopes: Vec<HashMap<String, String>>,
     /// Monotonic counter to derive unique suffixes for hoisted
     /// statics.
     static_local_counter: u32,
@@ -87,6 +94,7 @@ impl Parser {
             enum_constants: HashMap::new(),
             pending_extra_stmts: Vec::new(),
             current_static_renames: HashMap::new(),
+            block_scopes: vec![HashMap::new()],
             static_local_counter: 0,
             global_types: HashMap::new(),
             function_locals: HashMap::new(),
@@ -1202,6 +1210,8 @@ impl Parser {
         // the rename map so a `static int counter` here doesn't see
         // the previous function's `counter@N` redirect.
         self.current_static_renames.clear();
+        self.block_scopes.clear();
+        self.block_scopes.push(HashMap::new());
         // K&R implicit-int return type: the first token is an
         // identifier that *isn't* a typedef name (typedefs go through
         // the regular parse_type path). The C89 default is `int`.
@@ -1546,10 +1556,15 @@ impl Parser {
                 // layout can scope decls and reuse slots across
                 // sibling blocks. Fixtures 1743, 1966-1969, 3014.
                 let lbrace = self.bump();
+                // Push a new lexical scope so inner declarations
+                // can shadow outer names via parse-time renaming.
+                // Fixtures 2467, 2258, 2316.
+                self.block_scopes.push(HashMap::new());
                 let mut stmts = Vec::new();
                 while !matches!(self.peek().kind, TokenKind::RBrace | TokenKind::Eof) {
                     stmts.push(self.parse_stmt()?);
                 }
+                self.block_scopes.pop();
                 let rbrace = self.expect(&TokenKind::RBrace)?;
                 Ok(Stmt {
                     kind: StmtKind::Block(stmts),
@@ -1613,6 +1628,10 @@ impl Parser {
             {
                 let ident_tok = self.bump();
                 let TokenKind::Ident(name) = ident_tok.kind else { unreachable!() };
+                let name = self
+                    .lookup_block_rename(&name)
+                    .or_else(|| self.current_static_renames.get(&name).cloned())
+                    .unwrap_or(name);
                 if let Some(op) = match_compound_op(&self.peek().kind) {
                     self.bump();
                     let value = self.parse_expr()?;
@@ -2272,11 +2291,12 @@ impl Parser {
                     span: tail_span,
                 });
             } else {
-                self.function_locals.insert(tail_name.clone(), tail_ty.clone());
+                let unique = self.rename_shadowed_local(&tail_name);
+                self.function_locals.insert(unique.clone(), tail_ty.clone());
                 self.pending_extra_stmts.push(Stmt {
                     kind: StmtKind::Declare {
                         ty: tail_ty,
-                        name: tail_name,
+                        name: unique,
                         init: tail_init,
                         is_static: false,
                         is_register,
@@ -2328,11 +2348,55 @@ impl Parser {
                 span,
             });
         }
-        self.function_locals.insert(name.clone(), ty.clone());
+        let unique = self.rename_shadowed_local(&name);
+        self.function_locals.insert(unique.clone(), ty.clone());
         Ok(Stmt {
-            kind: StmtKind::Declare { ty, name, init, is_static, is_register, is_volatile },
+            kind: StmtKind::Declare {
+                ty,
+                name: unique,
+                init,
+                is_static,
+                is_register,
+                is_volatile,
+            },
             span,
         })
+    }
+
+    /// Generate a unique name for a non-static local that shadows
+    /// either a name in an active outer block scope (registered via
+    /// `block_scopes`) or another current-function local. Returns
+    /// the original name if no collision, or a `<name>@<N>` form
+    /// otherwise (and records the rename in the current scope so
+    /// subsequent ident lookups inside this block resolve correctly).
+    fn rename_shadowed_local(&mut self, name: &str) -> String {
+        let shadows_outer = self
+            .block_scopes
+            .iter()
+            .any(|sc| sc.contains_key(name))
+            || self.function_locals.contains_key(name);
+        let unique = if shadows_outer {
+            self.static_local_counter += 1;
+            format!("{}@{}", name, self.static_local_counter)
+        } else {
+            name.to_string()
+        };
+        if let Some(top) = self.block_scopes.last_mut() {
+            top.insert(name.to_string(), unique.clone());
+        }
+        unique
+    }
+
+    /// Look up an identifier through the active block scopes
+    /// (innermost first), returning the renamed name if it matches a
+    /// shadowed local, or `None` if no rename applies.
+    fn lookup_block_rename(&self, name: &str) -> Option<String> {
+        for scope in self.block_scopes.iter().rev() {
+            if let Some(renamed) = scope.get(name) {
+                return Some(renamed.clone());
+            }
+        }
+        None
     }
 
     /// Parse `( * <name> ) ( <params> )` (function pointer) or
@@ -2994,9 +3058,8 @@ impl Parser {
                 return Err(ParseError::NotAnIdent { offset: name_tok.span.start });
             };
             let name = self
-                .current_static_renames
-                .get(&name)
-                .cloned()
+                .lookup_block_rename(&name)
+                .or_else(|| self.current_static_renames.get(&name).cloned())
                 .unwrap_or(name);
             let span = Span::new(op_tok.span.start, name_tok.span.end);
             return Ok(Expr {
@@ -3373,9 +3436,9 @@ impl Parser {
                 // bare ident references the renamed global. Fixture
                 // 2264 (`next_a()` and `next_b()` both with `static
                 // int counter`).
-                let renamed = self.current_static_renames
-                    .get(raw_name)
-                    .cloned();
+                let renamed = self
+                    .lookup_block_rename(raw_name)
+                    .or_else(|| self.current_static_renames.get(raw_name).cloned());
                 let name = renamed.as_deref().unwrap_or(raw_name).to_string();
                 let name = &name;
                 // Postfix `()` makes it a function call.
