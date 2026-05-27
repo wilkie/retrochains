@@ -20730,12 +20730,16 @@ impl<'a> FunctionEmitter<'a> {
                         // (it can be loaded last for free).
                         // Div/Mod/Mul: always LHS-first (need AX as
                         // accumulator for the implicit operand).
+                        let lhs_member_call = matches!(&left.kind,
+                            ExprKind::Member { base, .. }
+                                if matches!(base.kind, ExprKind::Call { .. }));
                         let lhs_clobbers_ax =
                             matches!(left.kind, ExprKind::Call { .. })
                             || matches!(left.kind, ExprKind::CallVia { .. })
                             || self.expr_is_char_load(left)
                             || matches!(left.kind,
                                 ExprKind::Cast { .. } | ExprKind::Ternary { .. })
+                            || lhs_member_call
                             || (matches!(left.kind, ExprKind::BinOp { .. })
                                 && try_const_eval(left).is_none());
                         matches!(op, BinOp::Div | BinOp::Mod | BinOp::Mul)
@@ -20896,7 +20900,21 @@ impl<'a> FunctionEmitter<'a> {
                         // the push until just before AL is written"
                         // shape. Fixtures 2231, 2237, 2291, 2345.
                         hoist_first_setup_above_push(self.out, push_pos);
-                        let _ = write!(self.out, "\tmov\t{},ax\r\n", scratch.name());
+                        // Peephole: collapse `mov ax, <reg>\r\nmov
+                        // <reg>, ax\r\n` into nothing — the second
+                        // is the inverse of the first and AX/<reg>
+                        // both end with their pre-pair values. This
+                        // fires when emit_member_to_ax extracts .b
+                        // via `mov ax, dx` and the scratch is also
+                        // DX. Fixture 2682.
+                        let scratch_name = scratch.name();
+                        let collapse = format!("\tmov\tax,{scratch_name}\r\n");
+                        if self.out.ends_with(collapse.as_bytes()) {
+                            let new_len = self.out.len() - collapse.len();
+                            self.out.truncate(new_len);
+                        } else {
+                            let _ = write!(self.out, "\tmov\t{scratch_name},ax\r\n");
+                        }
                         self.out.extend_from_slice(b"\tpop\tax\r\n");
                         emit_op_with_source(
                             self.out,
