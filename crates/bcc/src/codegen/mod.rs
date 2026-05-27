@@ -3895,6 +3895,33 @@ impl<'a> FunctionEmitter<'a> {
                     flipped_op.jump_if_false(unsigned).expect("comparison op has false mnemonic"),
                 );
             }
+            // `<int-lvalue> <relop> <call>` — the call returns in
+            // AX, so emit it first, then `cmp ax, <lvalue>` with
+            // the comparison's operands implicitly swapped. The
+            // jump mnemonic uses the flipped op (cmp ax, x for
+            // `x > result` reads flags from result-x, so the
+            // original Gt becomes Lt for the jump mnemonic).
+            // Fixture 2044 (`if (x > get_threshold())`).
+            if let ExprKind::Call { name: fname, args } = &right.kind
+                && let Some(ret_ty) = self.signatures.ret_ty_of(fname)
+                && ret_ty.is_int_like()
+                && let Some(lhs_addr) = self.int_lvalue_addr(left)
+            {
+                let flipped_op = match op {
+                    BinOp::Eq | BinOp::Ne => *op,
+                    BinOp::Lt => BinOp::Gt,
+                    BinOp::Gt => BinOp::Lt,
+                    BinOp::Le => BinOp::Ge,
+                    BinOp::Ge => BinOp::Le,
+                    _ => unreachable!(),
+                };
+                self.emit_call(fname, args);
+                let _ = write!(self.out, "\tcmp\tax,word ptr {lhs_addr}\r\n");
+                return (
+                    flipped_op.jump_if_true(unsigned).expect("comparison op has true mnemonic"),
+                    flipped_op.jump_if_false(unsigned).expect("comparison op has false mnemonic"),
+                );
+            }
             // For Eq/Ne, char-vs-int lvalue compare loads the char
             // operand first (widened to int) then `cmp ax, word ptr
             // <int>`. Safe for commutative ops only — emit_compare
