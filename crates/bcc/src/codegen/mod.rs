@@ -482,6 +482,45 @@ fn global_offset_addr(sym: &str, off: i32) -> String {
 }
 
 /// Look at the end of `buf` for the 4-instruction LHS-mem-clobber tail
+/// Post-emission peephole used by the LHS-first push/pop binop path.
+/// If the first line after `\tpush\tax\r\n` is a single
+/// `\tmov\tbx,<src>\r\n` (a pointer load that doesn't touch AX),
+/// swap it with the push so BCC's "delay the push" emission shape
+/// is matched. Walks one line; conservatively bails on anything
+/// else.
+fn hoist_first_setup_above_push(buf: &mut Vec<u8>, push_pos: usize) {
+    const PUSH_LINE: &[u8] = b"\tpush\tax\r\n";
+    if buf.len() < push_pos + PUSH_LINE.len() {
+        return;
+    }
+    if &buf[push_pos..push_pos + PUSH_LINE.len()] != PUSH_LINE {
+        return;
+    }
+    let after_push = push_pos + PUSH_LINE.len();
+    // Look for the next `\r\n` terminator. The line content is
+    // `buf[after_push..line_end]` and ends just before `\r\n`.
+    let Some(rel) = buf[after_push..].windows(2).position(|w| w == b"\r\n") else {
+        return;
+    };
+    let line_end = after_push + rel + 2; // include `\r\n`
+    let line = &buf[after_push..line_end];
+    // Recognize a single `\tmov\tbx,<...>\r\n` line. Anything else
+    // (string-literal AX setup, ALU op, byte-load) bails — the
+    // line could touch AX or could be content the caller depends
+    // on being adjacent to the push.
+    if !line.starts_with(b"\tmov\tbx,") {
+        return;
+    }
+    // Swap by moving the line to before the push.
+    let line_bytes: Vec<u8> = line.to_vec();
+    buf.drain(after_push..line_end);
+    // The line has been removed; insert it at push_pos. The push
+    // line shifts down by line_bytes.len().
+    for (i, &b) in line_bytes.iter().enumerate() {
+        buf.insert(push_pos + i, b);
+    }
+}
+
 /// emitted by the rhs_clobbers_ax binop path when the LHS is a simple
 /// memory lvalue:
 ///   push ax
@@ -11892,6 +11931,44 @@ impl<'a> FunctionEmitter<'a> {
                     );
                 }
             }
+            // `<global-arr-of-ptr>[K_outer][K_inner]` — array of
+            // pointers indexed twice with constants. Load the
+            // pointer at index K_outer into BX, then read through
+            // `[bx + K_inner*stride]`. Mirrors the stack-resident
+            // path at line 12219. Fixtures 2231 (`char *names[3];
+            // names[i][0]`), 2345 (extern array variant).
+            if indices.len() == 2
+                && let Some(outer_elem) = gty.array_elem()
+                && let Some(inner_pointee) = outer_elem.pointee()
+                && let Some(k_outer) = try_const_eval(indices[0])
+                && let Some(k_inner) = try_const_eval(indices[1])
+            {
+                let inner_pointee = inner_pointee.clone();
+                let outer_stride = u32::from(outer_elem.size_bytes());
+                let outer_off = k_outer.wrapping_mul(outer_stride);
+                let inner_stride = i32::from(inner_pointee.size_bytes());
+                let inner_off = (k_inner as i32).wrapping_mul(inner_stride);
+                let arr_addr = if outer_off == 0 {
+                    format!("DGROUP:_{array_name}")
+                } else {
+                    format!("DGROUP:_{array_name}+{outer_off}")
+                };
+                let _ = write!(self.out, "\tmov\tbx,word ptr {arr_addr}\r\n");
+                let bx_disp = if inner_off == 0 {
+                    "[bx]".to_owned()
+                } else if inner_off > 0 {
+                    format!("[bx+{inner_off}]")
+                } else {
+                    format!("[bx-{}]", -inner_off)
+                };
+                if inner_pointee.is_char_like() {
+                    let _ = write!(self.out, "\tmov\tal,byte ptr {bx_disp}\r\n");
+                    self.emit_widen_al(&inner_pointee);
+                } else {
+                    let _ = write!(self.out, "\tmov\tax,word ptr {bx_disp}\r\n");
+                }
+                return;
+            }
             if let Some((const_off, leaf_ty)) =
                 try_const_array_offset(&gty, indices.iter().copied())
             {
@@ -20236,8 +20313,16 @@ impl<'a> FunctionEmitter<'a> {
                             return;
                         }
                         self.emit_expr_to_ax(left);
+                        let push_pos = self.out.len();
                         self.out.extend_from_slice(b"\tpush\tax\r\n");
                         self.emit_expr_to_ax(right);
+                        // Peephole: hoist a leading non-AX-touching
+                        // setup line (typically `mov bx, ...` for a
+                        // pointer load) from the start of RHS to
+                        // before `push ax`. Mirrors BCC's "delay
+                        // the push until just before AL is written"
+                        // shape. Fixtures 2231, 2237, 2291, 2345.
+                        hoist_first_setup_above_push(self.out, push_pos);
                         let _ = write!(self.out, "\tmov\t{},ax\r\n", scratch.name());
                         self.out.extend_from_slice(b"\tpop\tax\r\n");
                         emit_op_with_source(
@@ -20916,6 +21001,29 @@ impl<'a> FunctionEmitter<'a> {
             && pointee.is_char_like()
         {
             return true;
+        }
+        // `arr[i][j]` for `arr` an array of char-pointers (or a
+        // pointer-to-char-pointer). The outer subscript yields a
+        // `char *`, the inner one a byte. try_lvalue_chain_addr
+        // stops at the outer pointer level so doesn't see the
+        // final byte; we recognize the shape directly. Fixtures
+        // 2231, 2345.
+        if let ExprKind::ArrayIndex { array: outer, .. } = &e.kind
+            && let ExprKind::ArrayIndex { array: inner, .. } = &outer.kind
+            && let ExprKind::Ident(base) = &inner.kind
+        {
+            let outer_ty = self
+                .globals
+                .type_of(base)
+                .cloned()
+                .or_else(|| self.locals.has(base).then(|| self.locals.type_of(base).clone()));
+            if let Some(ty) = outer_ty
+                && let Some(level1) = ty.array_elem().or_else(|| ty.pointee())
+                && let Some(level2) = level1.pointee()
+                && level2.is_char_like()
+            {
+                return true;
+            }
         }
         false
     }
