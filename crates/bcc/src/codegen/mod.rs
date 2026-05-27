@@ -2698,6 +2698,32 @@ impl<'a> FunctionEmitter<'a> {
             }
             return;
         }
+        // Register-resident int local in `arr[i++]` / `arr[i--]`:
+        // emit `mov bx, <reg>; <inc|dec> <reg>` directly. The old
+        // value lands in BX, the update fires immediately. Skips
+        // the canonical AX round-trip (`mov ax, <reg>; <upd>;
+        // mov bx, ax`). Char-stride only (no `shl bx` needed) —
+        // shifted post-inc forms aren't observed yet. Fixture 3653
+        // (`arr[i++]` with `i` in DI).
+        if shifts == 0
+            && let ExprKind::Update {
+                target,
+                op,
+                position: UpdatePosition::Post,
+            } = &idx.kind
+            && self.locals.has(target)
+            && self.locals.type_of(target).is_int_like()
+            && let LocalLocation::Reg(reg) = self.locals.location_of(target)
+            && !reg.is_byte()
+        {
+            let mnem = match op {
+                UpdateOp::Inc => "inc",
+                UpdateOp::Dec => "dec",
+            };
+            let _ = write!(self.out, "\tmov\tbx,{}\r\n", reg.name());
+            let _ = write!(self.out, "\t{mnem}\t{}\r\n", reg.name());
+            return;
+        }
         // `*<reg-ptr>` index: load through the register-resident
         // pointer directly into BX (`mov bx, [<reg>]`), skipping the
         // AX round-trip. Fixture 3584 (`arr[*p]` for int* p in SI).
