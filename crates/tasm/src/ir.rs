@@ -126,6 +126,17 @@ pub enum Instr {
     /// peephole (fixture 601 stores `&g` into a stack pointer local
     /// directly: `mov word ptr [bp-2], offset DGROUP:_g`).
     MovBpRelOffsetGroupSym { offset: i16, group: String, symbol: String, sym_offset: i16 },
+    /// `mov word ptr [<reg>], offset <group>:<symbol>` — store a
+    /// segment-relative symbol address through a register-resident
+    /// pointer. Emits `C7 (mod=00 /0 r/m=<reg>) lo hi` plus a
+    /// SegRelGroupTarget FIXUPP. Used when `*pp = &storage` lands
+    /// with `pp` in [SI/DI/BX]. Fixture 1932.
+    MovDerefRegOffsetGroupSym {
+        reg: Reg16,
+        group: String,
+        symbol: String,
+        sym_offset: i16,
+    },
     /// `mov <reg16>,word ptr [bp+<offset>]` — generic 16-bit load
     /// from a stack local into any 16-bit register. Encoding:
     /// `8B xx dd` where ModR/M xx = mod=01 reg=<dst> r/m=110.
@@ -254,6 +265,19 @@ pub enum Instr {
     /// Long stack-local compound `+=` with non-constant RHS
     /// (fixture 339).
     AddBpRelDx { offset: i16 },
+    /// `add word ptr [bp+disp8],<reg16>` — `01 (mod r/m) disp`.
+    /// Memory-destination compound add of any 16-bit reg into a
+    /// stack local. Generalizes AddBpRelDx/AddBpRelAx to BX/CX/SI/
+    /// DI as well. Fixture 1980 (`e += a` with e stack, a in SI).
+    AddBpRelReg16 { reg: Reg16, offset: i16 },
+    /// `sub word ptr [bp+disp8],<reg16>` — `29 ...`.
+    SubBpRelReg16 { reg: Reg16, offset: i16 },
+    /// `and word ptr [bp+disp8],<reg16>` — `21 ...`.
+    AndBpRelReg16 { reg: Reg16, offset: i16 },
+    /// `or word ptr [bp+disp8],<reg16>` — `09 ...`.
+    OrBpRelReg16 { reg: Reg16, offset: i16 },
+    /// `xor word ptr [bp+disp8],<reg16>` — `31 ...`.
+    XorBpRelReg16 { reg: Reg16, offset: i16 },
     /// `adc word ptr [bp+disp8],ax` — `11 46 dd`. Carry-propagation
     /// partner to `AddBpRelDx`. High half of `x += y` where `y` was
     /// loaded with AX=high, DX=low.

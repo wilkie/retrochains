@@ -406,10 +406,37 @@ impl Locals {
                 &declared[si_pick.unwrap()].name,
                 function.body.as_deref().unwrap_or(&[]),
             );
+        // Variant of the same idea: when the char-array store's
+        // value is `const + i` (or any arithmetic on i that
+        // produces a byte), BCC prefers CX. It uses DX as the
+        // LEA destination and CX as the index, so CL is available
+        // for the `mov al, cl; add al, imm8` byte-add shape
+        // (the 8-bit `04 ii` immediate add saves one byte vs the
+        // 16-bit `05 ii ii` form). Fixture 1276 (`s[i] = 'a' + i`).
+        let prefer_cx_over_si = !function_makes_call
+            && !prefer_dx_over_si
+            && eligible_int.len() == 1
+            && si_pick.is_some()
+            && name_is_char_array_arith_index(
+                &declared[si_pick.unwrap()].name,
+                function.body.as_deref().unwrap_or(&[]),
+                &declared,
+                globals,
+            )
+            && !name_in_returns(
+                &declared[si_pick.unwrap()].name,
+                function.body.as_deref().unwrap_or(&[]),
+            );
 
         let mut reg_of: HashMap<usize, Reg> = HashMap::new();
         if let Some(idx) = si_pick {
-            let chosen = if prefer_dx_over_si { Reg::Dx } else { Reg::Si };
+            let chosen = if prefer_dx_over_si {
+                Reg::Dx
+            } else if prefer_cx_over_si {
+                Reg::Cx
+            } else {
+                Reg::Si
+            };
             reg_of.insert(idx, chosen);
         }
         // With a function call in the body, DX/BX/CX are caller-
@@ -1812,6 +1839,87 @@ fn name_in_char_array_index_body(
 ) -> bool {
     body.iter()
         .any(|s| stmt_has_name_as_char_array_index(name, s, char_arrays))
+}
+
+/// Variant: char-array indexed assignment where the value side is
+/// arithmetic on the index (e.g. `arr[i] = 'a' + i`). Fixture 1276
+/// shows BCC prefers CX for this shape so it can use the 8-bit
+/// `add al, imm8` (2-byte) form instead of the 16-bit `add ax,
+/// imm16` (3-byte) form.
+fn name_is_char_array_arith_index(
+    name: &str,
+    body: &[Stmt],
+    declared: &[DeclItem],
+    globals: &crate::codegen::GlobalTable,
+) -> bool {
+    let mut char_arrays: HashSet<String> = HashSet::new();
+    for item in declared {
+        if let Type::Array { elem, .. } = &item.ty {
+            if matches!(&**elem, Type::Char | Type::UChar) {
+                char_arrays.insert(item.name.clone());
+            }
+        }
+    }
+    for gname in globals.names() {
+        if let Some(Type::Array { elem, .. }) = globals.type_of(gname) {
+            if matches!(&**elem, Type::Char | Type::UChar) {
+                char_arrays.insert(gname.to_string());
+            }
+        }
+    }
+    body.iter()
+        .any(|s| stmt_has_name_as_char_array_arith_index(name, s, &char_arrays))
+}
+
+fn stmt_has_name_as_char_array_arith_index(
+    name: &str,
+    stmt: &Stmt,
+    char_arrays: &HashSet<String>,
+) -> bool {
+    match &stmt.kind {
+        StmtKind::ArrayAssign { array, indices, value } => {
+            char_arrays.contains(array.as_str())
+                && indices.iter().any(|i| expr_mentions(name, i))
+                && expr_is_const_plus_name(name, value)
+        }
+        StmtKind::If { then_branch, else_branch, .. } => {
+            then_branch.iter().any(|s| {
+                stmt_has_name_as_char_array_arith_index(name, s, char_arrays)
+            }) || else_branch.as_ref().is_some_and(|b| {
+                b.iter().any(|s| {
+                    stmt_has_name_as_char_array_arith_index(name, s, char_arrays)
+                })
+            })
+        }
+        StmtKind::While { body, .. } | StmtKind::DoWhile { body, .. } => body
+            .iter()
+            .any(|s| stmt_has_name_as_char_array_arith_index(name, s, char_arrays)),
+        StmtKind::For { body, .. } => body
+            .iter()
+            .any(|s| stmt_has_name_as_char_array_arith_index(name, s, char_arrays)),
+        StmtKind::Switch { cases, .. } => cases.iter().any(|c| {
+            c.body
+                .iter()
+                .any(|s| stmt_has_name_as_char_array_arith_index(name, s, char_arrays))
+        }),
+        _ => false,
+    }
+}
+
+/// Match `<const> + <name>`, `<name> + <const>`, `<const> - <name>`,
+/// `<name> - <const>` — the small arithmetic shapes BCC compiles
+/// using the 8-bit immediate add/sub on AL.
+fn expr_is_const_plus_name(name: &str, e: &Expr) -> bool {
+    use crate::ast::BinOp;
+    let ExprKind::BinOp { op, left, right } = &e.kind else {
+        return false;
+    };
+    if !matches!(op, BinOp::Add | BinOp::Sub) {
+        return false;
+    }
+    let is_name = |e: &Expr| matches!(&e.kind, ExprKind::Ident(n) if n == name);
+    let is_const = |e: &Expr| matches!(&e.kind, ExprKind::IntLit(_));
+    (is_name(left) && is_const(right)) || (is_const(left) && is_name(right))
 }
 
 fn expr_has_char_array_index(name: &str, e: &Expr, char_arrays: &HashSet<String>) -> bool {

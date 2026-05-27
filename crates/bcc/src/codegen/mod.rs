@@ -2710,6 +2710,29 @@ impl<'a> FunctionEmitter<'a> {
         None
     }
 
+    /// Variant of [`int_lvalue_addr`] that returns either a memory
+    /// address string (for stack/global lvalues) or a bare register
+    /// name (for register-resident locals). Callers that need to
+    /// handle both shapes can disambiguate via [`is_reg16_name`].
+    fn int_lvalue_src(&self, e: &Expr) -> Option<String> {
+        let ExprKind::Ident(name) = &e.kind else { return None };
+        if let Some(gty) = self.globals.type_of(name)
+            && gty.is_int_like()
+        {
+            return Some(format!("DGROUP:_{name}"));
+        }
+        if self.locals.has(name) && self.locals.type_of(name).is_int_like() {
+            match self.locals.location_of(name) {
+                LocalLocation::Stack(off) => return Some(bp_addr(off)),
+                LocalLocation::Reg(reg) if !reg.is_byte() => {
+                    return Some(reg.name().to_owned());
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
     fn long_lvalue_addr_pair(&self, e: &Expr) -> Option<(String, String)> {
         // Bare ident.
         if let ExprKind::Ident(name) = &e.kind
@@ -9704,6 +9727,39 @@ impl<'a> FunctionEmitter<'a> {
             );
             return;
         }
+        // Stack-resident int local += reg-resident int local: emit
+        // `<mnem> word ptr [bp-N], <reg>` directly — BCC collapses
+        // the round-trip through AX when the rhs is already in a
+        // 16-bit register. Fixture 1980 (`e += a` with e stack, a
+        // in SI).
+        if local_ty.is_int_like()
+            && matches!(
+                op,
+                BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor
+            )
+            && let LocalLocation::Stack(off) = self.locals.location_of(name)
+            && let ExprKind::Ident(rhs_name) = &value.kind
+            && self.locals.has(rhs_name)
+            && self.locals.type_of(rhs_name).is_int_like()
+            && let LocalLocation::Reg(rhs_reg) = self.locals.location_of(rhs_name)
+            && !rhs_reg.is_byte()
+        {
+            let mnem = match op {
+                BinOp::Add => "add",
+                BinOp::Sub => "sub",
+                BinOp::BitAnd => "and",
+                BinOp::BitOr => "or",
+                BinOp::BitXor => "xor",
+                _ => unreachable!(),
+            };
+            let _ = write!(
+                self.out,
+                "\t{mnem}\tword ptr {},{}\r\n",
+                bp_addr(off),
+                rhs_reg.name(),
+            );
+            return;
+        }
         let LocalLocation::Reg(reg) = self.locals.location_of(name) else {
             panic!(
                 "compound assignment on stack-resident `{name}` not yet supported (no fixture)"
@@ -9913,6 +9969,7 @@ impl<'a> FunctionEmitter<'a> {
                 op,
                 BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor
             )
+            && !matches!(&value.kind, ExprKind::BinOp { .. })
         {
             // BCC uses the "load c into AL then op against rhs-low-
             // byte then store back" pattern ONLY for Add/Sub. Bitwise
@@ -9950,6 +10007,33 @@ impl<'a> FunctionEmitter<'a> {
                 self.out.extend_from_slice(b"\r\n");
                 let _ = write!(self.out, "\t{mnem}\t{},al\r\n", reg.name());
             }
+            return;
+        }
+        // Char compound `+=` / `-=` / `&=` / `|=` / `^=` with a
+        // non-char RHS expression (typically a BinOp like `a * b`).
+        // BCC routes the int result through AX (via the usual
+        // expr-to-AX paths) and then computes the byte result via
+        // `mov dl, <c_reg>; <op> dl, al; mov <c_reg>, dl`. Fixture
+        // 1314 (`c += a * b`, `c` char in BL).
+        if reg.is_byte()
+            && matches!(
+                op,
+                BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor
+            )
+            && matches!(&value.kind, ExprKind::BinOp { .. })
+        {
+            let mnem = match op {
+                BinOp::Add => "add",
+                BinOp::Sub => "sub",
+                BinOp::BitAnd => "and",
+                BinOp::BitOr => "or",
+                BinOp::BitXor => "xor",
+                _ => unreachable!(),
+            };
+            self.emit_expr_to_ax(value);
+            let _ = write!(self.out, "\tmov\tdl,{}\r\n", reg.name());
+            let _ = write!(self.out, "\t{mnem}\tdl,al\r\n");
+            let _ = write!(self.out, "\tmov\t{},dl\r\n", reg.name());
             return;
         }
         assert!(
@@ -11311,18 +11395,28 @@ impl<'a> FunctionEmitter<'a> {
                 let outer_stride = inner_arr.size_bytes();
                 let inner_stride = leaf_elem.size_bytes();
                 let leaf_ty = (**leaf_elem).clone();
-                let outer_addr = self.int_lvalue_addr(indices[0]);
-                let inner_addr = self.int_lvalue_addr(indices[1]);
+                let outer_addr = self.int_lvalue_src(indices[0]);
+                let inner_addr = self.int_lvalue_src(indices[1]);
                 if let (Some(outer), Some(inner)) = (outer_addr, inner_addr) {
+                    let outer_src = if is_reg16_name(&outer) {
+                        outer.clone()
+                    } else {
+                        format!("word ptr {outer}")
+                    };
+                    let inner_src = if is_reg16_name(&inner) {
+                        inner.clone()
+                    } else {
+                        format!("word ptr {inner}")
+                    };
                     let outer_pow2 = outer_stride > 1 && outer_stride.is_power_of_two();
                     let outer_one = outer_stride == 1;
                     if outer_pow2 || outer_one {
-                        let _ = write!(self.out, "\tmov\tbx,word ptr {outer}\r\n");
+                        let _ = write!(self.out, "\tmov\tbx,{outer_src}\r\n");
                         let outer_shifts = (outer_stride as u32).trailing_zeros();
                         for _ in 0..outer_shifts {
                             self.out.extend_from_slice(b"\tshl\tbx,1\r\n");
                         }
-                        let _ = write!(self.out, "\tmov\tax,word ptr {inner}\r\n");
+                        let _ = write!(self.out, "\tmov\tax,{inner_src}\r\n");
                         let inner_shifts = (inner_stride as u32).trailing_zeros();
                         for _ in 0..inner_shifts {
                             self.out.extend_from_slice(b"\tshl\tax,1\r\n");
@@ -11330,15 +11424,15 @@ impl<'a> FunctionEmitter<'a> {
                         self.out.extend_from_slice(b"\tadd\tbx,ax\r\n");
                     } else {
                         // Non-power-of-2 outer stride — imul into AX.
-                        let _ = write!(self.out, "\tmov\tax,word ptr {outer}\r\n");
+                        let _ = write!(self.out, "\tmov\tax,{outer_src}\r\n");
                         let _ = write!(self.out, "\tmov\tdx,{outer_stride}\r\n");
                         self.out.extend_from_slice(b"\timul\tdx\r\n");
                         if inner_stride == 2 {
-                            let _ = write!(self.out, "\tmov\tdx,word ptr {inner}\r\n");
+                            let _ = write!(self.out, "\tmov\tdx,{inner_src}\r\n");
                             self.out.extend_from_slice(b"\tshl\tdx,1\r\n");
                             self.out.extend_from_slice(b"\tadd\tax,dx\r\n");
                         } else {
-                            let _ = write!(self.out, "\tadd\tax,word ptr {inner}\r\n");
+                            let _ = write!(self.out, "\tadd\tax,{inner_src}\r\n");
                         }
                         self.out.extend_from_slice(b"\tmov\tbx,ax\r\n");
                     }
@@ -12409,6 +12503,85 @@ impl<'a> FunctionEmitter<'a> {
                     );
                 }
                 return;
+            }
+            // 2D global array variable-indexed write: `a[i][j] = v`
+            // for `T a[M][N]`. Symmetric to the 2D read path above
+            // (fixtures 198, 1469). Computes the linearized byte
+            // offset into BX, then stores via `DGROUP:_a[bx]`.
+            if indices.len() == 2
+                && let Type::Array { elem: inner_arr, .. } = &gty
+                && let Type::Array { elem: leaf_elem, .. } = &**inner_arr
+            {
+                let outer_stride = inner_arr.size_bytes();
+                let inner_stride = leaf_elem.size_bytes();
+                let leaf_ty = (**leaf_elem).clone();
+                let outer_addr = self.int_lvalue_src(&indices[0]);
+                let inner_addr = self.int_lvalue_src(&indices[1]);
+                if let (Some(outer), Some(inner)) = (outer_addr, inner_addr) {
+                    let outer_is_reg = is_reg16_name(&outer);
+                    let inner_is_reg = is_reg16_name(&inner);
+                    let outer_src = if outer_is_reg {
+                        outer.clone()
+                    } else {
+                        format!("word ptr {outer}")
+                    };
+                    let inner_src = if inner_is_reg {
+                        inner.clone()
+                    } else {
+                        format!("word ptr {inner}")
+                    };
+                    let const_value = try_const_eval(value);
+                    let outer_pow2 = outer_stride > 1 && outer_stride.is_power_of_two();
+                    let outer_one = outer_stride == 1;
+                    if outer_pow2 || outer_one {
+                        let _ = write!(self.out, "\tmov\tbx,{outer_src}\r\n");
+                        let outer_shifts = (outer_stride as u32).trailing_zeros();
+                        for _ in 0..outer_shifts {
+                            self.out.extend_from_slice(b"\tshl\tbx,1\r\n");
+                        }
+                        let _ = write!(self.out, "\tmov\tax,{inner_src}\r\n");
+                        let inner_shifts = (inner_stride as u32).trailing_zeros();
+                        for _ in 0..inner_shifts {
+                            self.out.extend_from_slice(b"\tshl\tax,1\r\n");
+                        }
+                        self.out.extend_from_slice(b"\tadd\tbx,ax\r\n");
+                    } else {
+                        let _ = write!(self.out, "\tmov\tax,{outer_src}\r\n");
+                        let _ = write!(self.out, "\tmov\tdx,{outer_stride}\r\n");
+                        self.out.extend_from_slice(b"\timul\tdx\r\n");
+                        if inner_stride == 2 {
+                            let _ = write!(self.out, "\tmov\tdx,{inner_src}\r\n");
+                            self.out.extend_from_slice(b"\tshl\tdx,1\r\n");
+                            self.out.extend_from_slice(b"\tadd\tax,dx\r\n");
+                        } else {
+                            let _ = write!(self.out, "\tadd\tax,{inner_src}\r\n");
+                        }
+                        self.out.extend_from_slice(b"\tmov\tbx,ax\r\n");
+                    }
+                    let width = ptr_width(&leaf_ty);
+                    if let Some(v) = const_value {
+                        let v_masked =
+                            if leaf_ty.is_char_like() { v & 0xFF } else { v & 0xFFFF };
+                        let _ = write!(
+                            self.out,
+                            "\tmov\t{width} ptr DGROUP:_{array}[bx],{v_masked}\r\n",
+                        );
+                    } else {
+                        self.emit_expr_to_ax(value);
+                        if leaf_ty.is_char_like() {
+                            let _ = write!(
+                                self.out,
+                                "\tmov\tbyte ptr DGROUP:_{array}[bx],al\r\n",
+                            );
+                        } else {
+                            let _ = write!(
+                                self.out,
+                                "\tmov\tword ptr DGROUP:_{array}[bx],ax\r\n",
+                            );
+                        }
+                    }
+                    return;
+                }
             }
             panic!("variable-indexed global array assign not yet supported (no fixture)");
         }
@@ -15516,6 +15689,21 @@ impl<'a> FunctionEmitter<'a> {
                     self.out,
                     "\tmov\t{width} ptr [{addr_reg}],{}\r\n",
                     src_reg.name(),
+                );
+                return;
+            }
+            // `*p = &<symbol>` — the symbol address is a 16-bit
+            // immediate (with a SegRelGroupTarget relocation), so
+            // BCC emits the single `c7 04 ...` immediate-to-memory
+            // store rather than a load-to-AX + store pair. Fixture
+            // 1932 (`*pp = &storage`).
+            if !pointee.is_char_like()
+                && let ExprKind::AddressOf(sym_name) = &value.kind
+                && self.globals.contains(sym_name)
+            {
+                let _ = write!(
+                    self.out,
+                    "\tmov\tword ptr [{addr_reg}],offset DGROUP:_{sym_name}\r\n",
                 );
                 return;
             }
@@ -20563,6 +20751,10 @@ fn long_pair_op(op: BinOp) -> Option<(&'static str, &'static str)> {
 
 fn ptr_width(ty: &Type) -> &'static str {
     if ty.size_bytes() == 1 { "byte" } else { "word" }
+}
+
+fn is_reg16_name(s: &str) -> bool {
+    matches!(s, "ax" | "bx" | "cx" | "dx" | "si" | "di" | "bp" | "sp")
 }
 
 /// Walk a deref expression chain (`*p` → `(p, 0)`, `**p` → `(p, 1)`,

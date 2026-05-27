@@ -1266,6 +1266,39 @@ fn parse_mov(operands: &str, line_no: usize) -> AsmResult<Instr> {
         if let Some(src) = Reg16::parse(rhs) {
             return Ok(Instr::MovSiPtrReg16 { src });
         }
+        if let Some((group, symbol)) = parse_offset_group_symbol(rhs) {
+            let (sym, sym_offset) = split_sym_offset(symbol);
+            return Ok(Instr::MovDerefRegOffsetGroupSym {
+                reg: Reg16::Si,
+                group: group.to_string(),
+                symbol: sym.to_string(),
+                sym_offset,
+            });
+        }
+    }
+    // LHS `word ptr [di]` — store-through-DI variant of the above.
+    if lhs == "word ptr [di]" {
+        if let Some((group, symbol)) = parse_offset_group_symbol(rhs) {
+            let (sym, sym_offset) = split_sym_offset(symbol);
+            return Ok(Instr::MovDerefRegOffsetGroupSym {
+                reg: Reg16::Di,
+                group: group.to_string(),
+                symbol: sym.to_string(),
+                sym_offset,
+            });
+        }
+    }
+    // LHS `word ptr [bx]` — store-through-BX variant.
+    if lhs == "word ptr [bx]" {
+        if let Some((group, symbol)) = parse_offset_group_symbol(rhs) {
+            let (sym, sym_offset) = split_sym_offset(symbol);
+            return Ok(Instr::MovDerefRegOffsetGroupSym {
+                reg: Reg16::Bx,
+                group: group.to_string(),
+                symbol: sym.to_string(),
+                sym_offset,
+            });
+        }
     }
     // LHS `byte ptr [si+disp]` — byte store through SI pointer
     // (fixture 1016: char-pointer subscript write).
@@ -1717,6 +1750,10 @@ fn parse_sub(operands: &str, line_no: usize) -> AsmResult<Instr> {
         if rhs == "ax" {
             return Ok(Instr::SubBpRelAx { offset });
         }
+        // `sub word ptr [bp+N], <reg16>` — generalized form.
+        if let Some(reg) = Reg16::parse(rhs) {
+            return Ok(Instr::SubBpRelReg16 { reg, offset });
+        }
     }
     // `sub byte ptr [bp+N], al` — char compound `-=`.
     if let Some(offset) = parse_byte_bp_relative(lhs) {
@@ -1879,6 +1916,9 @@ fn parse_and(operands: &str, line_no: usize) -> AsmResult<Instr> {
         }
         if rhs == "ax" {
             return Ok(Instr::AndBpRelAx { offset });
+        }
+        if let Some(reg) = Reg16::parse(rhs) {
+            return Ok(Instr::AndBpRelReg16 { reg, offset });
         }
     }
     // `and byte ptr [bp+N], al` — char compound `&=`.
@@ -2539,6 +2579,11 @@ fn parse_add(operands: &str, line_no: usize) -> AsmResult<Instr> {
         // (fixture 765, AX holds int RHS).
         if rhs == "ax" {
             return Ok(Instr::AddBpRelAx { offset });
+        }
+        // `add word ptr [bp+N], <reg16>` — generalized form. Fixture
+        // 1980 (`e += a` with e stack, a in SI).
+        if let Some(reg) = Reg16::parse(rhs) {
+            return Ok(Instr::AddBpRelReg16 { reg, offset });
         }
     }
     // `add byte ptr [bp+N], al` — char compound `+=` with char-lvalue
@@ -3220,6 +3265,9 @@ fn parse_or(operands: &str, line_no: usize) -> AsmResult<Instr> {
         if rhs == "ax" {
             return Ok(Instr::OrBpRelAx { offset });
         }
+        if let Some(reg) = Reg16::parse(rhs) {
+            return Ok(Instr::OrBpRelReg16 { reg, offset });
+        }
     }
     // `or byte ptr [bp+N], al` — char compound `|=`.
     if let Some(offset) = parse_byte_bp_relative(lhs) {
@@ -3419,6 +3467,9 @@ fn parse_xor(operands: &str, line_no: usize) -> AsmResult<Instr> {
         }
         if rhs == "ax" {
             return Ok(Instr::XorBpRelAx { offset });
+        }
+        if let Some(reg) = Reg16::parse(rhs) {
+            return Ok(Instr::XorBpRelReg16 { reg, offset });
         }
     }
     // `xor byte ptr [bp+N], al` — char compound `^=` with a

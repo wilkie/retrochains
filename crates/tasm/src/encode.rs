@@ -303,6 +303,11 @@ fn instr_size(instr: &Instr) -> usize {
         | Instr::OrDxBpRel { offset }
         | Instr::XorDxBpRel { offset }
         | Instr::AddBpRelDx { offset }
+        | Instr::AddBpRelReg16 { offset, .. }
+        | Instr::SubBpRelReg16 { offset, .. }
+        | Instr::AndBpRelReg16 { offset, .. }
+        | Instr::OrBpRelReg16 { offset, .. }
+        | Instr::XorBpRelReg16 { offset, .. }
         | Instr::AdcBpRelAx { offset }
         | Instr::SubBpRelDx { offset }
         | Instr::SbbBpRelAx { offset }
@@ -595,6 +600,7 @@ fn instr_size(instr: &Instr) -> usize {
         Instr::MovBpRelImm { offset, .. }
         | Instr::MovBpRelOffsetSym { offset, .. }
         | Instr::MovBpRelOffsetGroupSym { offset, .. } => 1 + bp_rel_modrm_size(*offset) + 2,
+        Instr::MovDerefRegOffsetGroupSym { .. } => 4,
         Instr::CallIndirectBpRel { offset } => 1 + bp_rel_modrm_size(*offset),
         // 8087 FPU memory ops: TASM auto-prepends a `9B` (FWAIT)
         // prefix before each memory-form FPU instruction (matches
@@ -780,6 +786,26 @@ fn emit_instr(
                 symbols, group_idx, extern_idx, out, fixups,
             )?;
         }
+        Instr::MovDerefRegOffsetGroupSym { reg, group, symbol, sym_offset } => {
+            // `mov word ptr [<reg>], offset <group>:<symbol>` →
+            // C7 (mod=00 /0 r/m=<reg>) lo hi. Same FIXUPP shape as
+            // `MovBpRelOffsetGroupSym`. Fixture 1932.
+            let rm: u8 = match reg {
+                crate::ir::Reg16::Bx => 0b111,
+                crate::ir::Reg16::Si => 0b100,
+                crate::ir::Reg16::Di => 0b101,
+                _ => return Err(AsmError::new(
+                    0,
+                    format!("mov [<reg>], offset <sym>: unsupported reg code {}", reg.code()),
+                )),
+            };
+            out.push(0xC7);
+            out.push(rm);
+            emit_group_sym_imm16(
+                group, symbol, *sym_offset,
+                symbols, group_idx, extern_idx, out, fixups,
+            )?;
+        }
         Instr::MovReg16BpRel { reg, offset } => {
             // `mov r16, word ptr [bp+disp]` → 8B /<reg> [bp+disp].
             out.push(0x8B);
@@ -829,6 +855,26 @@ fn emit_instr(
             // r/m16, r16.
             out.push(0x01);
             emit_bp_rel_modrm(2, *offset, out);
+        }
+        Instr::AddBpRelReg16 { reg, offset } => {
+            out.push(0x01);
+            emit_bp_rel_modrm(reg.code(), *offset, out);
+        }
+        Instr::SubBpRelReg16 { reg, offset } => {
+            out.push(0x29);
+            emit_bp_rel_modrm(reg.code(), *offset, out);
+        }
+        Instr::AndBpRelReg16 { reg, offset } => {
+            out.push(0x21);
+            emit_bp_rel_modrm(reg.code(), *offset, out);
+        }
+        Instr::OrBpRelReg16 { reg, offset } => {
+            out.push(0x09);
+            emit_bp_rel_modrm(reg.code(), *offset, out);
+        }
+        Instr::XorBpRelReg16 { reg, offset } => {
+            out.push(0x31);
+            emit_bp_rel_modrm(reg.code(), *offset, out);
         }
         Instr::AdcBpRelAx { offset } => {
             out.push(0x11);
