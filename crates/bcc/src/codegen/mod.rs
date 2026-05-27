@@ -677,6 +677,12 @@ struct FunctionEmitter<'a> {
     /// Compares `___brklvl` against `sp`; calls `N_OVERFLOW@` if
     /// sp has dropped at or below the break level. Fixture 2129.
     stack_check: bool,
+    /// Set by `emit_compare` when it emits an operand-swapped cmp
+    /// (e.g. `cmp ax, <reg>` when BCC wants `cmp <reg>, <ax-side>`
+    /// reordered). The outer Jcc selector inverts the mnemonic
+    /// pair (`jb`/`jae` → `ja`/`jbe`, etc.) so the branch
+    /// semantics match. Fixture 1814.
+    cmp_swapped: bool,
 }
 
 /// Innermost enclosing construct that catches `break;` (and maybe
@@ -739,6 +745,7 @@ impl<'a> FunctionEmitter<'a> {
             in_arg_expr: false,
             target_186: false,
             stack_check: false,
+            cmp_swapped: false,
         }
     }
 
@@ -4301,11 +4308,15 @@ impl<'a> FunctionEmitter<'a> {
                     _ => unreachable!(),
                 };
             }
+            self.cmp_swapped = false;
             self.emit_compare(left, right);
-            return (
-                op.jump_if_true(unsigned).expect("comparison op has true mnemonic"),
-                op.jump_if_false(unsigned).expect("comparison op has false mnemonic"),
-            );
+            let true_mnem = op.jump_if_true(unsigned).expect("comparison op has true mnemonic");
+            let false_mnem = op.jump_if_false(unsigned).expect("comparison op has false mnemonic");
+            if self.cmp_swapped {
+                self.cmp_swapped = false;
+                return (swap_jcc(true_mnem), swap_jcc(false_mnem));
+            }
+            return (true_mnem, false_mnem);
         }
         // Bare long-global ident in condition position — equivalent
         // to `<long> != 0`. Use the OR-then-test idiom (fixture 284:
@@ -4935,7 +4946,18 @@ impl<'a> FunctionEmitter<'a> {
                 return;
             }
             let src = self.resolve_operand_source(right);
-            let _ = write!(self.out, "\tcmp\t{},{}\r\n", reg.name(), src.word());
+            // If the resolved RHS materialized into AX (via a lea
+            // for `<local_arr> + <const>`), BCC's pattern is to
+            // swap the operand order in the cmp and invert the
+            // resulting Jcc mnemonic. Detect via `OperandSource::Ax`
+            // and signal the inversion via `self.cmp_swapped`. The
+            // outer caller picks the swapped Jcc pair. Fixture 1814.
+            if matches!(src, OperandSource::Ax) {
+                let _ = write!(self.out, "\tcmp\tax,{}\r\n", reg.name());
+                self.cmp_swapped = true;
+            } else {
+                let _ = write!(self.out, "\tcmp\t{},{}\r\n", reg.name(), src.word());
+            }
             return;
         }
         if let (ExprKind::Ident(name), Some(rhs)) = (&left.kind, try_const_eval(right))
@@ -21951,6 +21973,25 @@ impl OperandSource {
 /// drives the choice (right is always the shift count).
 fn emit_op_with_source(out: &mut Vec<u8>, op: BinOp, src: &OperandSource, unsigned: bool) {
     emit_op_with_source_opts(out, op, src, unsigned, false);
+}
+
+/// Swap a Jcc mnemonic to the equivalent for an operand-reversed
+/// cmp: `cmp a, b; jl` ↔ `cmp b, a; jg`, etc. Used when emit_compare
+/// chooses to emit `cmp ax, <reg>` instead of `cmp <reg>, ax`.
+fn swap_jcc(m: &'static str) -> &'static str {
+    match m {
+        "je" => "je",
+        "jne" => "jne",
+        "jl" => "jg",
+        "jg" => "jl",
+        "jle" => "jge",
+        "jge" => "jle",
+        "jb" => "ja",
+        "ja" => "jb",
+        "jbe" => "jae",
+        "jae" => "jbe",
+        other => other,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
