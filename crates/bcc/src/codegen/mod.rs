@@ -589,6 +589,61 @@ fn hoist_first_setup_above_push(buf: &mut Vec<u8>, push_pos: usize) {
     }
 }
 
+/// Same shape as `split_lhs_mem_clobber_tail` but with a register
+/// (reg-resident LHS) instead of a memory operand. Detects the
+/// 4-instruction tail
+///   push ax
+///   mov ax, <reg>
+///   pop dx
+///   <op> ax, dx
+/// where `<reg>` is a 16-bit GP register name (si, di, bx, cx,
+/// dx, ax, bp). Returns the truncate offset, the reg-name slice
+/// bounds, and the op mnemonic. Used by `try_collapse_lhs_clobber
+/// _to_dx` to rewrite as `mov dx, <reg>; <op> dx, ax`.
+fn split_lhs_reg_clobber_tail(buf: &[u8]) -> Option<(usize, usize, usize, &'static [u8])> {
+    const OPS: &[(&[u8], &[u8])] = &[
+        (b"\tadd\tax,dx\r\n", b"add"),
+        (b"\tsub\tax,dx\r\n", b"sub"),
+        (b"\tand\tax,dx\r\n", b"and"),
+        (b"\tor\tax,dx\r\n", b"or"),
+        (b"\txor\tax,dx\r\n", b"xor"),
+    ];
+    let (op_mnem, tail_len) = OPS
+        .iter()
+        .find_map(|(tail, mn)| buf.ends_with(tail).then_some((*mn, tail.len())))?;
+    let pop_tail = b"\tpop\tdx\r\n";
+    let tail_end = buf.len() - tail_len;
+    if !buf[..tail_end].ends_with(pop_tail) {
+        return None;
+    }
+    let mov_end = tail_end - pop_tail.len();
+    // Look back for `\tmov\tax,<reg>\r\n` — the reg is some short
+    // name of letters (e.g. `si`, `di`, `bx`, `cx`). Locate the
+    // `\r\n` preceding the move line.
+    let line_search_end = mov_end - 2; // exclude trailing \r\n
+    let prev_nl = buf[..line_search_end].iter().rposition(|&b| b == b'\n')?;
+    let mov_line_start = prev_nl + 1;
+    let mov_line = &buf[mov_line_start..mov_end];
+    let prefix = b"\tmov\tax,";
+    if !mov_line.starts_with(prefix) || !mov_line.ends_with(b"\r\n") {
+        return None;
+    }
+    let reg_start = mov_line_start + prefix.len();
+    let reg_end = mov_end - 2; // before \r\n
+    // Reject if the source is a memory operand or immediate — only
+    // a bare register identifier (lowercase letters) qualifies.
+    if !buf[reg_start..reg_end].iter().all(|&b| b.is_ascii_lowercase()) {
+        return None;
+    }
+    // Verify the prior line is `push ax`.
+    let push_line = b"\tpush\tax\r\n";
+    if !buf[..mov_line_start].ends_with(push_line) {
+        return None;
+    }
+    let truncate_at = mov_line_start - push_line.len();
+    Some((truncate_at, reg_start, reg_end, op_mnem))
+}
+
 /// emitted by the rhs_clobbers_ax binop path when the LHS is a simple
 /// memory lvalue:
 ///   push ax
@@ -12182,6 +12237,43 @@ impl<'a> FunctionEmitter<'a> {
             // `char *names[3]`): inner type is Pointer, not Array.
             // Load the pointer with the outer offset, then deref
             // with the inner offset. Fixture 1394.
+            // `<global-arr-of-ptr>[<var>][K_inner]` — outer is a
+            // variable-indexed array of pointers, inner is a
+            // compile-time constant. Load `<arr>[var]` into BX
+            // (via a scaled index), then read at `[bx+K_inner*
+            // stride]`. Char-pointee uses byte load + widen.
+            // Fixture 2397 (`words[i][0]` for `char *words[]`).
+            if indices.len() == 2
+                && let Type::Array { elem: arr_elem, .. } = &gty
+                && let Type::Pointer(pointee) = &**arr_elem
+                && let Some(inner_k) = try_const_eval(indices[1])
+                && try_const_eval(indices[0]).is_none()
+            {
+                let pointee = (**pointee).clone();
+                let inner_byte_off =
+                    (inner_k as i32).wrapping_mul(i32::from(pointee.size_bytes()));
+                // Scale the index by sizeof(ptr) = 2 and load
+                // `_<arr>[bx]` into BX (the pointer slot).
+                self.emit_index_into_bx(indices[0], &Type::Int);
+                let _ = write!(
+                    self.out,
+                    "\tmov\tbx,word ptr DGROUP:_{array_name}[bx]\r\n",
+                );
+                let bx_disp = if inner_byte_off == 0 {
+                    "[bx]".to_owned()
+                } else if inner_byte_off > 0 {
+                    format!("[bx+{inner_byte_off}]")
+                } else {
+                    format!("[bx-{}]", -inner_byte_off)
+                };
+                if pointee.is_char_like() {
+                    let _ = write!(self.out, "\tmov\tal,byte ptr {bx_disp}\r\n");
+                    self.emit_widen_al(&pointee);
+                } else {
+                    let _ = write!(self.out, "\tmov\tax,word ptr {bx_disp}\r\n");
+                }
+                return;
+            }
             if indices.len() == 2
                 && let Type::Array { elem: arr_elem, .. } = &gty
                 && let Type::Pointer(pointee) = &**arr_elem
@@ -19147,7 +19239,18 @@ impl<'a> FunctionEmitter<'a> {
             "non-constant char init/assign not yet supported (no fixture)"
         );
         self.emit_expr_to_ax(expr);
-        let _ = write!(self.out, "\tmov\t{},ax\r\n", reg.name());
+        // Peephole: if `expr` is `<this-reg> <op> <ax-clobbering-rhs>`,
+        // emit_expr_to_ax produces `push ax; mov ax, <reg>; pop dx;
+        // <op> ax, dx`. Collapse to `mov dx, <reg>; <op> dx, ax` —
+        // result lives in DX, store from DX. Skips the push/pop
+        // pair and matches BCC's compound-assign-like shape.
+        // Fixture 2397 (`sum = sum + words[i][0]` with sum in DI).
+        let src = if !reg.is_byte() && self.try_collapse_lhs_clobber_to_dx() {
+            "dx"
+        } else {
+            "ax"
+        };
+        let _ = write!(self.out, "\tmov\t{},{src}\r\n", reg.name());
     }
 
     /// Resolve a `<stack-local-struct>.<bitfield>` expression into
@@ -21064,6 +21167,30 @@ impl<'a> FunctionEmitter<'a> {
                 self.out.extend_from_slice(new);
                 return true;
             }
+        }
+        // Reg-source LHS variant: when the LHS is a register
+        // ident, the rhs_clobbers_ax tail looks like
+        //   push ax
+        //   mov ax, <reg>
+        //   pop dx
+        //   <op> ax, dx
+        // Rewrite as the 3-instruction form
+        //   mov dx, <reg>
+        //   <op> dx, ax
+        // matching BCC's pattern when both LHS and RHS are
+        // present and RHS computed AX. Fixture 2397
+        // (`sum = sum + words[i][0]` with sum in DI).
+        if let Some((truncate_at, reg_start, reg_end, op_mnem)) =
+            split_lhs_reg_clobber_tail(&self.out)
+        {
+            let reg_name: Vec<u8> = self.out[reg_start..reg_end].to_vec();
+            self.out.truncate(truncate_at);
+            self.out.extend_from_slice(b"\tmov\tdx,");
+            self.out.extend_from_slice(&reg_name);
+            self.out.extend_from_slice(b"\r\n\t");
+            self.out.extend_from_slice(op_mnem);
+            self.out.extend_from_slice(b"\tdx,ax\r\n");
+            return true;
         }
         // Memory-lvalue LHS variant: when the LHS is a simple
         // memory lvalue (single `mov ax, word ptr <src>`), the
