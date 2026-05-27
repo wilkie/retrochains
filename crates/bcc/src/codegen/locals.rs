@@ -1078,6 +1078,17 @@ fn body_has_int_to_float_cast(function: &Function) -> bool {
                 StmtKind::Declare { name, ty, .. } if ty.is_float_like() => {
                     set.insert(name.clone());
                 }
+                // Float-element arrays: their element type matters
+                // for the mixed-int+float detector. We add the array
+                // name so `arr[i]` is treated as a float operand
+                // (fixture 2150: `static double arr[3]; arr[i] *
+                // 4.0;` should NOT allocate an int→float scratch
+                // slot because both operands are double).
+                StmtKind::Declare { name, ty, .. }
+                    if ty.array_elem().is_some_and(|e| e.is_float_like()) =>
+                {
+                    set.insert(name.clone());
+                }
                 StmtKind::If { then_branch, else_branch, .. } => {
                     collect_decls(then_branch, set);
                     if let Some(b) = else_branch { collect_decls(b, set); }

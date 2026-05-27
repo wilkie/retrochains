@@ -7342,6 +7342,12 @@ impl<'a> FunctionEmitter<'a> {
                         self.out,
                         "\tfld\t{width} ptr DGROUP:_{name}[bx]\r\n",
                     );
+                    // BCC pulls in `__turboFloat` as an EXTDEF marker
+                    // when a float-array element is accessed through
+                    // BX-indexed addressing. Empirically observed on
+                    // fixture 2150 only; constant-indexed accesses
+                    // (1755, 2140) do not produce this symbol.
+                    self.helpers.insert("__turboFloat".to_string());
                 } else {
                     panic!("float ArrayIndex resolution failed");
                 }
