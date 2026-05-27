@@ -4875,8 +4875,10 @@ impl<'a> FunctionEmitter<'a> {
             && rop.is_comparison()
         {
             self.emit_comparison_as_value(left.span.start, left.span.end, *lop, ll, lr);
+            let push_pos = self.out.len();
             self.out.extend_from_slice(b"\tpush\tax\r\n");
             self.emit_comparison_as_value(right.span.start, right.span.end, *rop, rl, rr);
+            hoist_first_setup_above_push(self.out, push_pos);
             self.out.extend_from_slice(b"\tpop\tdx\r\n");
             self.out.extend_from_slice(b"\tcmp\tdx,ax\r\n");
             return;
@@ -20333,8 +20335,10 @@ impl<'a> FunctionEmitter<'a> {
                         );
                     } else if rhs_clobbers_ax {
                         self.emit_expr_to_ax(right);
+                        let push_pos = self.out.len();
                         self.out.extend_from_slice(b"\tpush\tax\r\n");
                         self.emit_expr_to_ax(left);
+                        hoist_first_setup_above_push(self.out, push_pos);
                         self.out.extend_from_slice(b"\tpop\tdx\r\n");
                         emit_op_with_source(
                             self.out,
