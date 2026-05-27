@@ -5434,6 +5434,12 @@ impl<'a> FunctionEmitter<'a> {
                     // C's default argument promotion widens float to
                     // double in variadic calls — pushed as 8 bytes.
                     Type::Double
+                } else if self.operand_is_float_like(arg) {
+                    // Variadic FP arg via an Ident or BinOp — float
+                    // is promoted to double per default arg promotion.
+                    // Fixtures 2198, 2201 (printf with `float f` /
+                    // `double d` locals).
+                    Type::Double
                 } else {
                     Type::Int
                 }
@@ -5471,12 +5477,25 @@ impl<'a> FunctionEmitter<'a> {
                     "\tfstp\t{store_width} ptr {}\r\n",
                     bp_addr(slot_off_i16),
                 );
-                // Defer the fwait sync until just before the call —
-                // BCC emits it after pushing the remaining args, not
-                // between fstp and the next arg push. Fixtures 1678
-                // (one fwait, FP arg only), 2195/2201 (fwait after
-                // the format-string push).
-                fp_arg_pushed = true;
+                // Where to emit the fwait sync depends on how many
+                // args remain to push after this one:
+                //   - 0 or 1 (just the format string in a printf):
+                //     defer until immediately before the call so it
+                //     lands AFTER the remaining push.
+                //   - 2+: emit it now, before the other arg pushes.
+                // Pushes happen right-to-left so after processing the
+                // arg at source index `i`, args at indices 0..i still
+                // remain to push.
+                let remaining_after = if is_pascal_callee {
+                    args.len().saturating_sub(i + 1)
+                } else {
+                    i
+                };
+                if remaining_after >= 2 {
+                    self.out.extend_from_slice(b"\tfwait\t\r\n");
+                } else {
+                    fp_arg_pushed = true;
+                }
                 total_bytes += size;
             } else if let Type::Struct { .. } = &arg_ty {
                 // Struct-by-value arg. Two shapes by size:
