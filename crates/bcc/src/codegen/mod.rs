@@ -721,6 +721,50 @@ impl<'a> FunctionEmitter<'a> {
         };
         let _ = write!(self.out, "{sym}\tproc\tnear\r\n");
 
+        // Interrupt prologue: save all GP regs + ES/DS + SI/DI + BP
+        // BEFORE the standard frame setup, then load DS = DGROUP so
+        // data references inside the body resolve correctly. Fixture
+        // 1655.
+        if self.function.is_interrupt {
+            self.out.extend_from_slice(b"\tpush\tax\r\n");
+            self.out.extend_from_slice(b"\tpush\tbx\r\n");
+            self.out.extend_from_slice(b"\tpush\tcx\r\n");
+            self.out.extend_from_slice(b"\tpush\tdx\r\n");
+            self.out.extend_from_slice(b"\tpush\tes\r\n");
+            self.out.extend_from_slice(b"\tpush\tds\r\n");
+            self.out.extend_from_slice(b"\tpush\tsi\r\n");
+            self.out.extend_from_slice(b"\tpush\tdi\r\n");
+            self.out.extend_from_slice(b"\tpush\tbp\r\n");
+            self.out.extend_from_slice(b"\tmov\tbp,DGROUP\r\n");
+            self.out.extend_from_slice(b"\tmov\tds,bp\r\n");
+            self.out.extend_from_slice(b"\tmov\tbp,sp\r\n");
+            // Body.
+            for stmt in self.function.body.as_deref().unwrap_or(&[]) {
+                self.emit_stmt(stmt);
+            }
+            let body = self.function.body.as_deref().unwrap_or(&[]);
+            if body_has_return(body) {
+                self.emit_label(self.label_plan.exit_slot());
+            }
+            let close_offset = self.function.span.end.saturating_sub(1);
+            let close_line = self.lines.line_of(close_offset);
+            self.advance_to_line(close_line);
+            // Epilogue: reverse the saves and `iret`.
+            self.out.extend_from_slice(b"\tpop\tbp\r\n");
+            self.out.extend_from_slice(b"\tpop\tdi\r\n");
+            self.out.extend_from_slice(b"\tpop\tsi\r\n");
+            self.out.extend_from_slice(b"\tpop\tds\r\n");
+            self.out.extend_from_slice(b"\tpop\tes\r\n");
+            self.out.extend_from_slice(b"\tpop\tdx\r\n");
+            self.out.extend_from_slice(b"\tpop\tcx\r\n");
+            self.out.extend_from_slice(b"\tpop\tbx\r\n");
+            self.out.extend_from_slice(b"\tpop\tax\r\n");
+            self.out.extend_from_slice(b"\tiret\t\r\n");
+            let _ = write!(self.out, "{sym}\tendp\r\n");
+            self.out.extend_from_slice(&self.post_function_data);
+            return;
+        }
+
         // Prologue. Order: push bp / mov bp,sp / allocate stack /
         // push callee-saved registers (in order). See
         // specs/bcc/ASM_OUTPUT.md "Prologue and epilogue shape".

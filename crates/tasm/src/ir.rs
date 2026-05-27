@@ -1185,6 +1185,25 @@ pub enum Instr {
     /// call to a far function so the callee's `retf` finds CS:IP on
     /// the stack. Fixture 1654.
     PushCs,
+    /// `push es` — `06`. Interrupt-function prologue saves ES with
+    /// the rest of the segment regs. Fixture 1655.
+    PushEs,
+    /// `pop es` — `07`. Interrupt-function epilogue.
+    PopEs,
+    /// `pop ds` — `1F`. Interrupt-function epilogue.
+    PopDs,
+    /// `iret` — `CF`. Interrupt-function return: pops IP, CS, FLAGS.
+    /// Fixture 1655.
+    Iret,
+    /// `mov <reg16>, DGROUP` — load the DGROUP segment value into a
+    /// 16-bit register. Encoding: `B8+r lo hi` with a SegRelTarget
+    /// relocation on the imm16 (TargetThread=GroupRel). Interrupt
+    /// prologue uses this to seed DS = DGROUP. Fixture 1655.
+    MovReg16Dgroup { reg: Reg16 },
+    /// `mov ds, <reg16>` — copy a GP reg into DS. Encoding: `8E DD`
+    /// (mod=11 reg=011=DS r/m=101=BP for `mov ds, bp`). Used in
+    /// interrupt prologues after seeding the value into a GP reg.
+    MovDsReg16 { reg: Reg16 },
     /// `mov <reg16>,<segreg>` — `8C` + ModR/M `mod=11 reg=<sreg>
     /// r/m=<reg16>`. Copies a segment register's value into a
     /// general-purpose register. BCC uses this to form the segment
@@ -2439,6 +2458,12 @@ pub enum FixupKind {
     /// with the hardware FPU present they're a no-op marker. Fix
     /// Data byte: 0x46.
     SegRelExternFrameTarget { extdef_idx: u8 },
+    /// Base 16-bit (M=1, location=2 — paragraph/segment value),
+    /// frame method F1 (GRPDEF, frame=group), target method T4
+    /// (SEGDEF, no disp; target=segment, typically _DATA so the
+    /// linker resolves the same paragraph as DGROUP's base).
+    /// Locat byte: 0xC8 | hi2. Fix Data byte: 0x14. Fixture 1655.
+    SegBaseGroupTarget { group_idx: u8, segment_idx: u8 },
 }
 
 /// A position-bound parse error. The line number is 1-based and refers

@@ -84,6 +84,12 @@ pub struct Function {
     /// [bp+6] (vs [bp+4] for near) because of the extra CS slot.
     /// Fixture 1654.
     pub is_far: bool,
+    /// `interrupt` function: BCC emits a hardware-IRQ-safe wrapper
+    /// — save all GP regs (AX/BX/CX/DX), segment regs (ES/DS),
+    /// SI/DI, then BP; load DS = DGROUP so subsequent data accesses
+    /// resolve correctly; epilogue restores in reverse and exits
+    /// with `iret` (CF) instead of `ret`. Fixture 1655.
+    pub is_interrupt: bool,
 }
 
 #[derive(Debug)]

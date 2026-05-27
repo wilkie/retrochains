@@ -433,6 +433,12 @@ fn instr_size(instr: &Instr) -> usize {
         Instr::PushDs => 1,
         Instr::PushSs => 1,
         Instr::PushCs => 1,
+        Instr::PushEs => 1,
+        Instr::PopEs => 1,
+        Instr::PopDs => 1,
+        Instr::Iret => 1,
+        Instr::MovReg16Dgroup { .. } => 3,
+        Instr::MovDsReg16 { .. } => 2,
         Instr::MovReg16SegReg { .. } => 2,
         Instr::CmpGroupSymImm8Sx { .. }
         | Instr::CmpByteGroupSymImm8 { .. }
@@ -2051,6 +2057,43 @@ fn emit_instr(
         Instr::PushCs => {
             // `push cs` → 0E (single-byte segreg-push form).
             out.push(0x0E);
+        }
+        Instr::PushEs => out.push(0x06),
+        Instr::PopEs => out.push(0x07),
+        Instr::PopDs => out.push(0x1F),
+        Instr::Iret => out.push(0xCF),
+        Instr::MovReg16Dgroup { reg } => {
+            // `mov <reg16>, DGROUP` — opcode B8+r lo hi. The lo/hi
+            // imm16 gets a SegBase fixup against the DGROUP group
+            // so the linker patches in DGROUP's paragraph value.
+            // Fixture 1655.
+            out.push(0xB8 | reg.code());
+            let fixup_offset = u16::try_from(out.len())
+                .map_err(|_| AsmError::new(0, "MovReg16Dgroup offset overflow".to_owned()))?;
+            out.push(0);
+            out.push(0);
+            let group_index = group_idx.get("DGROUP").copied().ok_or_else(|| {
+                AsmError::new(0, "DGROUP not defined in module".to_owned())
+            })?;
+            // Target the _DATA segment (typically index 2 — i.e.
+            // _TEXT=1, _DATA=2, _BSS=3 in BCC's standard layout).
+            // Since DGROUP merges _DATA + _BSS at the same paragraph,
+            // the linker patches the same value either way; BCC picks
+            // _DATA. Fixture 1655.
+            let data_segment_idx = 2u8;
+            fixups.push(crate::ir::FixupReq {
+                data_offset: fixup_offset,
+                kind: crate::ir::FixupKind::SegBaseGroupTarget {
+                    group_idx: group_index,
+                    segment_idx: data_segment_idx,
+                },
+            });
+        }
+        Instr::MovDsReg16 { reg } => {
+            // `mov ds, <reg16>` → 8E /3 (segreg=DS=011) r/m=<reg>.
+            // ModR/M = mod=11 reg=011 (DS) r/m=<reg.code()>.
+            out.push(0x8E);
+            out.push(0b11_011_000 | reg.code());
         }
         Instr::MovReg16SegReg { dst, src } => {
             // `mov <reg16>, <segreg>` → 8C + ModR/M

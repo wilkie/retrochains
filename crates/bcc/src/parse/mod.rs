@@ -533,10 +533,12 @@ impl Parser {
     }
 
     /// Like `consume_cc_modifiers` but also records which cc-modifier
-    /// keywords (if any) appeared. Returns `(is_pascal, is_far)`.
-    fn consume_cc_modifiers_collect(&mut self) -> (bool, bool) {
+    /// keywords (if any) appeared. Returns `(is_pascal, is_far,
+    /// is_interrupt)`.
+    fn consume_cc_modifiers_collect(&mut self) -> (bool, bool, bool) {
         let mut is_pascal = false;
         let mut is_far = false;
+        let mut is_interrupt = false;
         while let TokenKind::Ident(name) = &self.peek().kind {
             match name.as_str() {
                 "pascal" | "_pascal" | "__pascal" => {
@@ -547,15 +549,19 @@ impl Parser {
                     is_far = true;
                     self.bump();
                 }
-                "cdecl" | "near" | "huge" | "interrupt"
-                | "_cdecl" | "_near" | "_huge" | "_interrupt"
-                | "__cdecl" | "__near" | "__huge" | "__interrupt" => {
+                "interrupt" | "_interrupt" | "__interrupt" => {
+                    is_interrupt = true;
+                    self.bump();
+                }
+                "cdecl" | "near" | "huge"
+                | "_cdecl" | "_near" | "_huge"
+                | "__cdecl" | "__near" | "__huge" => {
                     self.bump();
                 }
                 _ => break,
             }
         }
-        (is_pascal, is_far)
+        (is_pascal, is_far, is_interrupt)
     }
 
     fn parse_type(&mut self) -> Result<Type, ParseError> {
@@ -1160,7 +1166,7 @@ impl Parser {
             self.bump();
             ret_ty = Type::Pointer(Box::new(ret_ty));
         }
-        let (is_pascal, is_far) = self.consume_cc_modifiers_collect();
+        let (is_pascal, is_far, is_interrupt) = self.consume_cc_modifiers_collect();
         let name_tok = self.bump();
         let TokenKind::Ident(name) = &name_tok.kind else {
             return Err(ParseError::NotAnIdent { offset: name_tok.span.start });
@@ -1233,6 +1239,7 @@ impl Parser {
                 is_static: false,
                 is_pascal,
                 is_far,
+                is_interrupt,
             });
         }
 
@@ -1253,6 +1260,7 @@ impl Parser {
             is_static: false,
             is_pascal,
             is_far,
+            is_interrupt,
         })
     }
 

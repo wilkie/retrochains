@@ -379,6 +379,9 @@ fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
             if rest == "cs" {
                 return Ok(Instr::PushCs);
             }
+            if rest == "es" {
+                return Ok(Instr::PushEs);
+            }
             if let Some(reg) = Reg16::parse(rest) {
                 return Ok(Instr::PushReg16 { reg });
             }
@@ -419,9 +422,18 @@ fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
             }
             Err(AsmError::new(line.line_no, format!("push: unsupported operand `{rest}`")))
         }
-        "pop" => Reg16::parse(rest)
-            .map(|reg| Instr::PopReg16 { reg })
-            .ok_or_else(|| AsmError::new(line.line_no, format!("pop: unsupported operand `{rest}`"))),
+        "pop" => {
+            if rest == "es" {
+                return Ok(Instr::PopEs);
+            }
+            if rest == "ds" {
+                return Ok(Instr::PopDs);
+            }
+            Reg16::parse(rest)
+                .map(|reg| Instr::PopReg16 { reg })
+                .ok_or_else(|| AsmError::new(line.line_no, format!("pop: unsupported operand `{rest}`")))
+        }
+        "iret" if rest.is_empty() => Ok(Instr::Iret),
         "mov" => parse_mov(rest, line.line_no),
         // Generic ALU forms `<op> ax,word ptr [bp+N]`. Some opcodes
         // also have special operand forms (`sub sp,imm`, `xor ax,ax`)
@@ -1000,6 +1012,22 @@ fn parse_mov(operands: &str, line_no: usize) -> AsmResult<Instr> {
     // dispatch so it catches every reg-to-reg pair uniformly.
     if let (Some(dst), Some(src)) = (Reg16::parse(lhs), Reg16::parse(rhs)) {
         return Ok(Instr::MovReg16Reg16 { dst, src });
+    }
+    // `mov ds, <reg16>` — copy a GP reg into DS. Used in interrupt
+    // prologues (fixture 1655) to set DS = DGROUP after seeding the
+    // value into BP via `mov bp, DGROUP`.
+    if lhs == "ds"
+        && let Some(src) = Reg16::parse(rhs)
+    {
+        return Ok(Instr::MovDsReg16 { reg: src });
+    }
+    // `mov <reg16>, DGROUP` — load the DGROUP group's segment value
+    // as a 16-bit immediate with a SegRelGroupTarget fixup. Fixture
+    // 1655.
+    if let Some(dst) = Reg16::parse(lhs)
+        && rhs == "DGROUP"
+    {
+        return Ok(Instr::MovReg16Dgroup { reg: dst });
     }
     // `mov <reg16>, <segreg>` — segment-register to general-purpose
     // register copy (`mov dx, ds`, `mov dx, ss`). Used to form the

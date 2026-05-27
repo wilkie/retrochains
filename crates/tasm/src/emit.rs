@@ -209,6 +209,17 @@ fn serialize_fixup(fx: &FixupReq, out: &mut Vec<u8>) {
             out.push(0x46);
             out.push(extdef_idx);
         }
+        FixupKind::SegBaseGroupTarget { group_idx, segment_idx } => {
+            // M=1, Location=2 (16-bit base / paragraph value)
+            //   Locat byte 0 = 1 1 0010 dd = 0xC8 | hi2
+            out.push(0xC8 | hi2 as u8);
+            out.push(lo8);
+            // Fix Data: F=0 frame=001 (GRPDEF), T=0 P=1, tgt_low=00
+            // → target method T4 (SEGDEF no disp). Byte: 0001 0100 = 0x14.
+            out.push(0x14);
+            out.push(group_idx);
+            out.push(segment_idx);
+        }
     }
 }
 
