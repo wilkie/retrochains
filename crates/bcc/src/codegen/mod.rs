@@ -14491,7 +14491,18 @@ impl<'a> FunctionEmitter<'a> {
             let _ = write!(self.out, "\tmov\tword ptr {dest},ax\r\n");
             return;
         }
-        panic!("non-constant rhs in struct field assign not yet supported (no fixture)");
+        // Non-constant RHS for a char field. Two shapes:
+        //  - rhs is a char lvalue: `mov al, byte ptr <rhs>;
+        //    mov byte ptr <dest>, al` (no widen).
+        //  - rhs is anything else (int expr → AX): take AL low byte.
+        // Fixture 3178 (`t.c = b` for char b).
+        if let Some(rhs_byte) = self.rhs_byte_addr(&value.kind) {
+            let _ = write!(self.out, "\tmov\tal,{rhs_byte}\r\n");
+            let _ = write!(self.out, "\tmov\tbyte ptr {dest},al\r\n");
+            return;
+        }
+        self.emit_expr_to_ax(value);
+        let _ = write!(self.out, "\tmov\tbyte ptr {dest},al\r\n");
     }
 
     /// `<base>.<field> <op>= <value>;` — compound assignment through a
