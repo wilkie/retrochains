@@ -187,12 +187,27 @@ fn encode_segment(
                     let value = sym_loc.offset.wrapping_add(*extra_offset as u16);
                     let imm_start = bytes.len();
                     bytes.extend_from_slice(&value.to_le_bytes());
-                    fixups.push(FixupReq {
-                        data_offset: u16::try_from(imm_start).expect("offset fits"),
-                        kind: FixupKind::SegRelGroupTarget {
+                    // BCC's frame method depends on whether the target
+                    // segment is in the same group (DGROUP) as the dw
+                    // site. `_TEXT` (segment 0) is a separate group,
+                    // so a dw in _DATA referencing _TEXT uses Frame=
+                    // TARGET (0x54, no frame datum). Otherwise GROUP
+                    // (0x14). Fixture 192 (`char *p = "hi"`, _DATA
+                    // target → GROUP), fixture 3212 (`int (*ptr)(int)
+                    // = target`, _TEXT target → TARGET).
+                    let kind = if sym_loc.segment == 0 {
+                        FixupKind::SegRelTargetFrameSegment {
+                            segment_idx: target_seg_idx,
+                        }
+                    } else {
+                        FixupKind::SegRelGroupTarget {
                             group_idx: g_idx,
                             segment_idx: target_seg_idx,
-                        },
+                        }
+                    };
+                    fixups.push(FixupReq {
+                        data_offset: u16::try_from(imm_start).expect("offset fits"),
+                        kind,
                     });
                 } else if let Some(&ext_idx) = extern_idx.get(symbol) {
                     if *extra_offset != 0 {
