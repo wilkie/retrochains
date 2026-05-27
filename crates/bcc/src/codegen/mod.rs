@@ -4695,6 +4695,23 @@ impl<'a> FunctionEmitter<'a> {
     /// 3. LHS is a stack local and RHS is a constant: `cmp word ptr [bp-N], K`
     /// 4. Otherwise: `mov ax, <lhs>` then `cmp ax, <rhs>`
     fn emit_compare(&mut self, left: &Expr, right: &Expr) {
+        // Both sides are comparison BinOps: materialize each into AX
+        // as 0/1, push the first, eval second, pop into DX, compare
+        // DX with AX. Fixture 1395 (`(a==b) == (b<c)`).
+        if let (
+            ExprKind::BinOp { op: lop, left: ll, right: lr },
+            ExprKind::BinOp { op: rop, left: rl, right: rr },
+        ) = (&left.kind, &right.kind)
+            && lop.is_comparison()
+            && rop.is_comparison()
+        {
+            self.emit_comparison_as_value(left.span.start, left.span.end, *lop, ll, lr);
+            self.out.extend_from_slice(b"\tpush\tax\r\n");
+            self.emit_comparison_as_value(right.span.start, right.span.end, *rop, rl, rr);
+            self.out.extend_from_slice(b"\tpop\tdx\r\n");
+            self.out.extend_from_slice(b"\tcmp\tdx,ax\r\n");
+            return;
+        }
         // `*<char-ptr-reg> <relop> *<char-ptr-reg>` — both sides
         // are deref of a register-resident char pointer. Emit byte
         // compare `mov al, [reg_l]; cmp al, [reg_r]` directly.
