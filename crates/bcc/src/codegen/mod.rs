@@ -21260,6 +21260,22 @@ impl<'a> FunctionEmitter<'a> {
             ExprKind::Call { .. } => {
                 panic!("call as right operand not yet supported (need to preserve AX)")
             }
+            ExprKind::BinOp { op: BinOp::Add, left, right }
+                if let ExprKind::Ident(arr_name) = &left.kind
+                    && self.locals.has(arr_name)
+                    && let Some(elem) = self.locals.type_of(arr_name).array_elem()
+                    && let LocalLocation::Stack(base_off) = self.locals.location_of(arr_name)
+                    && let Some(k) = try_const_eval(right) =>
+            {
+                // `<local_arr_ident> + <const>` — address of element
+                // K. Emit `lea ax, [bp+base+K*stride]` and route
+                // through AX. Fixture 1814 (`p < a + 5`).
+                let stride = i32::from(elem.size_bytes());
+                let byte_off = (k as i32).wrapping_mul(stride);
+                let total = base_off + i16::try_from(byte_off).unwrap_or(i16::MAX);
+                let _ = write!(self.out, "\tlea\tax,word ptr {}\r\n", bp_addr(total));
+                OperandSource::Ax
+            }
             ExprKind::BinOp { .. } => {
                 panic!("nested non-constant right operand not yet supported")
             }
@@ -21847,6 +21863,10 @@ enum OperandSource {
     /// `K` is constant — addressed as `<width> ptr [<reg>+<off>]`.
     /// Fixture 1472 (`sum`: `add ax, [si+2]` for `p[1]`).
     DerefRegOffset { reg: Reg, offset: i16 },
+    /// Operand value has already been emitted into AX. Used when the
+    /// resolver had to compute a non-trivial address (e.g. `lea ax,
+    /// [bp+N]` for `<local_arr> + <const>`). Fixture 1814.
+    Ax,
 }
 
 impl OperandSource {
@@ -21877,6 +21897,7 @@ impl OperandSource {
                     format!("word ptr [{}-{}]", reg.name(), -offset)
                 }
             }
+            Self::Ax => "ax".to_owned(),
         }
     }
 
@@ -21919,6 +21940,7 @@ impl OperandSource {
                     format!("byte ptr [{}-{}]", reg.name(), -offset)
                 }
             }
+            Self::Ax => "al".to_owned(),
         }
     }
 }
