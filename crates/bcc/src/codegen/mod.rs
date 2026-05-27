@@ -5359,6 +5359,25 @@ impl<'a> FunctionEmitter<'a> {
             );
             return;
         }
+        // `<lhs> <relop> <var-indexed-arr-or-char-load-rhs>` — RHS
+        // can't reduce to a single memory operand, so route LHS →
+        // AX → push, RHS → AX, pop DX, then `cmp dx, ax`. The Jcc
+        // family that follows reads the same flags the unswapped
+        // form would, so emit the `cmp_swapped` flag to let the
+        // caller pick the mirrored mnemonic. Fixture 2488
+        // (`a[i] != b[i]` for char arrays with var index).
+        let rhs_needs_emit = matches!(&right.kind, ExprKind::ArrayIndex { index, .. }
+            if try_const_eval(index).is_none())
+            && self.expr_is_char_load(right);
+        if rhs_needs_emit {
+            self.emit_expr_to_ax(left);
+            self.out.extend_from_slice(b"\tpush\tax\r\n");
+            self.emit_expr_to_ax(right);
+            self.out.extend_from_slice(b"\tpop\tdx\r\n");
+            self.out.extend_from_slice(b"\tcmp\tdx,ax\r\n");
+            self.cmp_swapped = true;
+            return;
+        }
         self.emit_expr_to_ax(left);
         // `<expr-in-ax> <relop> 0` — use `or ax, ax` (2 bytes) instead
         // of `cmp ax, 0` (3 bytes) since both set ZF/SF the same way.
@@ -21653,6 +21672,28 @@ impl<'a> FunctionEmitter<'a> {
             && pointee.is_char_like()
         {
             return true;
+        }
+        // `<char-array>[<idx>]` — var-indexed char array (local or
+        // global) is still a byte load. try_lvalue_chain_addr
+        // declines variable indices, so detect this shape directly.
+        if let ExprKind::ArrayIndex { array, .. } = &e.kind
+            && let ExprKind::Ident(arr_name) = &array.kind
+        {
+            let arr_ty = self
+                .globals
+                .type_of(arr_name)
+                .cloned()
+                .or_else(|| {
+                    self.locals
+                        .has(arr_name)
+                        .then(|| self.locals.type_of(arr_name).clone())
+                });
+            if let Some(ty) = arr_ty
+                && let Some(elem) = ty.array_elem()
+                && elem.is_char_like()
+            {
+                return true;
+            }
         }
         // `*p` for `p` a char-pointer ident — same reasoning.
         if let ExprKind::Deref(inner) = &e.kind
