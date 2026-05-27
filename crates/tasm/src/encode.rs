@@ -174,24 +174,48 @@ fn encode_segment(
                     ));
                 }
                 sealed_pad = true;
-                let sym_loc = symbols.get(symbol).ok_or_else(|| {
-                    AsmError::new(0, format!("dw: symbol `{symbol}` not defined"))
-                })?;
                 let g_idx = *group_idx.get(group).ok_or_else(|| {
                     AsmError::new(0, format!("dw: group `{group}` not defined"))
                 })?;
-                let target_seg_idx =
-                    u8::try_from(sym_loc.segment + 1).expect("target seg idx fits");
-                let value = sym_loc.offset.wrapping_add(*extra_offset as u16);
-                let imm_start = bytes.len();
-                bytes.extend_from_slice(&value.to_le_bytes());
-                fixups.push(FixupReq {
-                    data_offset: u16::try_from(imm_start).expect("offset fits"),
-                    kind: FixupKind::SegRelGroupTarget {
-                        group_idx: g_idx,
-                        segment_idx: target_seg_idx,
-                    },
-                });
+                // Symbol either lives in this module (PUBDEF/local) or
+                // is declared via `extrn` — emit different FIXUPP for
+                // each. Fixture 3643 (`int (*fp)(int) = add1;` where
+                // `add1` is a prototype-only).
+                if let Some(sym_loc) = symbols.get(symbol) {
+                    let target_seg_idx =
+                        u8::try_from(sym_loc.segment + 1).expect("target seg idx fits");
+                    let value = sym_loc.offset.wrapping_add(*extra_offset as u16);
+                    let imm_start = bytes.len();
+                    bytes.extend_from_slice(&value.to_le_bytes());
+                    fixups.push(FixupReq {
+                        data_offset: u16::try_from(imm_start).expect("offset fits"),
+                        kind: FixupKind::SegRelGroupTarget {
+                            group_idx: g_idx,
+                            segment_idx: target_seg_idx,
+                        },
+                    });
+                } else if let Some(&ext_idx) = extern_idx.get(symbol) {
+                    if *extra_offset != 0 {
+                        return Err(AsmError::new(
+                            0,
+                            format!("dw: extern `{symbol}` with `+{extra_offset}` offset not supported"),
+                        ));
+                    }
+                    let imm_start = bytes.len();
+                    bytes.extend_from_slice(&0u16.to_le_bytes());
+                    fixups.push(FixupReq {
+                        data_offset: u16::try_from(imm_start).expect("offset fits"),
+                        kind: FixupKind::SegRelGroupExtern {
+                            group_idx: g_idx,
+                            extdef_idx: ext_idx,
+                        },
+                    });
+                } else {
+                    return Err(AsmError::new(
+                        0,
+                        format!("dw: symbol `{symbol}` not defined"),
+                    ));
+                }
             }
             SegItem::Pad(n) => {
                 if sealed_pad {

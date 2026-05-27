@@ -1048,8 +1048,28 @@ fn collect_extern_calls(unit: &crate::ast::Unit) -> Vec<String> {
         .filter(|g| g.ty.pointee().is_some())
         .map(|g| g.name.as_str())
         .collect();
+    // Function prototypes declared but not defined here. References
+    // to these (in initializers like `int (*fp)(int) = add1;`) also
+    // need an `extrn` declaration. Fixture 3643.
+    let prototypes: HashSet<&str> = unit
+        .functions
+        .iter()
+        .filter(|f| f.body.is_none())
+        .map(|f| f.name.as_str())
+        .collect();
     let mut seen: HashSet<String> = HashSet::new();
     let mut ordered: Vec<String> = Vec::new();
+    // Walk global initializers for Ident references to prototype
+    // names — those need `extrn _<name>:near` so the linker can
+    // resolve the address word.
+    for g in &unit.globals {
+        if g.is_static || g.is_extern {
+            continue;
+        }
+        let Some(init) = &g.init else { continue };
+        let empty_locals: HashSet<String> = HashSet::new();
+        walk_idents_for_proto_refs(init, &prototypes, &mut seen, &mut ordered, &empty_locals);
+    }
     for f in &unit.functions {
         let Some(body) = &f.body else { continue };
         // Per-function set of locals (params + declared variables).
@@ -1066,6 +1086,32 @@ fn collect_extern_calls(unit: &crate::ast::Unit) -> Vec<String> {
         }
     }
     ordered
+}
+
+/// Walk an init expression for `Ident(name)` references where `name`
+/// is a known prototype-only function. Adds to `ordered` in source-
+/// encounter order.
+fn walk_idents_for_proto_refs(
+    e: &crate::ast::Expr,
+    prototypes: &std::collections::HashSet<&str>,
+    seen: &mut std::collections::HashSet<String>,
+    ordered: &mut Vec<String>,
+    _locals: &std::collections::HashSet<String>,
+) {
+    use crate::ast::ExprKind;
+    match &e.kind {
+        ExprKind::Ident(name) => {
+            if prototypes.contains(name.as_str()) && seen.insert(name.clone()) {
+                ordered.push(name.clone());
+            }
+        }
+        ExprKind::InitList { items } => {
+            for it in items {
+                walk_idents_for_proto_refs(it, prototypes, seen, ordered, _locals);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn walk_calls(
