@@ -1032,6 +1032,15 @@ fn collect_extern_calls(unit: &crate::ast::Unit) -> Vec<String> {
         .filter(|f| f.body.is_some())
         .map(|f| f.name.as_str())
         .collect();
+    // Globals that are pointer-typed act as function pointers when
+    // called — `op()` for `int (*op)(int);` is an indirect call, not
+    // an extern reference (fixtures 2607, 2913).
+    let global_fnptrs: HashSet<&str> = unit
+        .globals
+        .iter()
+        .filter(|g| g.ty.pointee().is_some())
+        .map(|g| g.name.as_str())
+        .collect();
     let mut seen: HashSet<String> = HashSet::new();
     let mut ordered: Vec<String> = Vec::new();
     for f in &unit.functions {
@@ -1040,6 +1049,11 @@ fn collect_extern_calls(unit: &crate::ast::Unit) -> Vec<String> {
         // A Call whose name is a local is an indirect call through
         // a function pointer, not an extern reference (fixture 110).
         let mut locals: HashSet<String> = f.params.iter().map(|p| p.name.clone()).collect();
+        // Pre-populate with global function-pointer names so the walk
+        // skips them the same way it skips locals.
+        for g in &global_fnptrs {
+            locals.insert((*g).to_string());
+        }
         for stmt in body {
             walk_calls(stmt, &defined, &mut locals, &mut seen, &mut ordered);
         }

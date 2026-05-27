@@ -5591,7 +5591,7 @@ impl<'a> FunctionEmitter<'a> {
         {
             // Global function pointer: `int (*op)(int);` then `op(7)`.
             // BCC emits an indirect-memory call. Fixtures 2607, 3212,
-            // 3567.
+            // 3567, 2913.
             let _ = write!(
                 self.out,
                 "\tcall\tword ptr DGROUP:_{name}\r\n",
@@ -6410,10 +6410,25 @@ impl<'a> FunctionEmitter<'a> {
             // stores. Same passthrough shape as the helper-call
             // return (mul/div/shift); the only difference is the
             // call target. Fixture 382.
+            //
+            // Indirect variant: if the callee name is a global
+            // function-pointer, emit `call word ptr DGROUP:_<name>`
+            // instead. Fixture 2913 (`long (*op)(void); long call()
+            // { return op(); }`).
             if let ExprKind::Call { name: fname, args } = &e.kind
                 && args.is_empty()
             {
-                let _ = write!(self.out, "\tcall\tnear ptr _{fname}\r\n");
+                if let Some(gty) = self.globals.type_of(fname)
+                    && gty.pointee().is_some()
+                    && self.signatures.params_of(fname).is_none()
+                {
+                    let _ = write!(
+                        self.out,
+                        "\tcall\tword ptr DGROUP:_{fname}\r\n",
+                    );
+                } else {
+                    let _ = write!(self.out, "\tcall\tnear ptr _{fname}\r\n");
+                }
                 return;
             }
             // `return <a> << K;` / `return <a> >> K;` for a long lvalue
