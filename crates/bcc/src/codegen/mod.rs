@@ -652,6 +652,18 @@ struct FunctionEmitter<'a> {
     /// prepends a bare `fwait` when this is set so the prior fstp's
     /// memory write completes before the CPU mov runs. Fixture 1752.
     pending_fpu_store_fwait: bool,
+    /// True while evaluating a function-call argument expression.
+    /// BCC's char `*p++` deferred-inc peephole fires only in non-arg
+    /// contexts; in arg eval, the save-to-BX pattern is kept (the
+    /// consumer is a `push`/`call`, not a reg-to-reg move).
+    in_arg_expr: bool,
+    /// Deferred post-update from a `*p++` / `*p--` of a char pointer.
+    /// BCC emits the read first, then the consumer of the loaded
+    /// byte, and finally the inc/dec. We capture the register name,
+    /// stride, and mnemonic here; the next statement boundary flushes
+    /// the pending update (so the inc lands AFTER the consumer
+    /// instruction). Fixture 2000.
+    pending_post_update: Option<(String, u8, &'static str)>,
     /// `-1` / `-2` flag: target the 80186 (or 80286) instruction set.
     /// Enables `enter`/`leave` for the prologue/epilogue and the
     /// `shl r16, imm8` form for multi-bit shifts. Fixtures 2134,
@@ -698,6 +710,8 @@ impl<'a> FunctionEmitter<'a> {
             skip_widen: false,
             skip_mod_to_ax: false,
             pending_fpu_store_fwait: false,
+            pending_post_update: None,
+            in_arg_expr: false,
             target_186: false,
         }
     }
@@ -885,6 +899,22 @@ impl<'a> FunctionEmitter<'a> {
     }
 
     fn emit_stmt(&mut self, stmt: &Stmt) {
+        self.emit_stmt_inner(stmt);
+        // Statement boundary: flush any deferred postinc/postdec that
+        // BCC emits after the consumer of the loaded value. Fixture
+        // 2000 (`sum = *p++` chain).
+        self.flush_pending_post_update();
+    }
+
+    fn flush_pending_post_update(&mut self) {
+        if let Some((reg, stride, mnem)) = self.pending_post_update.take() {
+            for _ in 0..stride {
+                let _ = write!(self.out, "\t{mnem}\t{reg}\r\n");
+            }
+        }
+    }
+
+    fn emit_stmt_inner(&mut self, stmt: &Stmt) {
         match &stmt.kind {
             StmtKind::Empty => {
                 // `;` produces no asm. Fixture 522.
@@ -5798,7 +5828,10 @@ impl<'a> FunctionEmitter<'a> {
                     return;
                 }
             }
+            let prev = self.in_arg_expr;
+            self.in_arg_expr = true;
             self.emit_expr_to_ax(arg);
+            self.in_arg_expr = prev;
             return;
         }
         // Char arg path.
@@ -11154,20 +11187,40 @@ impl<'a> FunctionEmitter<'a> {
                 UpdateOp::Inc => "inc",
                 UpdateOp::Dec => "dec",
             };
-            let _ = write!(self.out, "\tmov\tbx,{reg_name}\r\n");
-            if stride == 1 || stride == 2 {
-                for _ in 0..stride {
-                    let _ = write!(self.out, "\t{mnemonic}\t{reg_name}\r\n");
+            if pointee.is_char_like() && !self.in_arg_expr {
+                // Char dereference (non-arg context): BCC reads
+                // through the pointer first, then defers the
+                // increment until after the consumer of AL/AX. We
+                // emit the read here and stash the pending inc so
+                // the next statement boundary flushes it. Fixture
+                // 2000 (`sum = *p++` chain with char pointer).
+                let _ = write!(self.out, "\tmov\tal,byte ptr [{reg_name}]\r\n");
+                self.out.extend_from_slice(b"\tcbw\t\r\n");
+                if stride == 1 || stride == 2 {
+                    self.pending_post_update = Some((
+                        reg_name.to_string(),
+                        stride as u8,
+                        mnemonic,
+                    ));
+                } else {
+                    panic!("`*p++` (char) with pointee stride > 2 not yet supported");
                 }
             } else {
-                panic!("`*p++` with pointee stride > 2 not yet supported (no fixture)");
-            }
-            if pointee.is_char_like() {
-                self.out.extend_from_slice(b"\tmov\tal,byte ptr [bx]\r\n");
-                self.out.extend_from_slice(b"\tcbw\t\r\n");
-            } else {
-                let width = ptr_width(pointee);
-                let _ = write!(self.out, "\tmov\tax,{width} ptr [bx]\r\n");
+                let _ = write!(self.out, "\tmov\tbx,{reg_name}\r\n");
+                if stride == 1 || stride == 2 {
+                    for _ in 0..stride {
+                        let _ = write!(self.out, "\t{mnemonic}\t{reg_name}\r\n");
+                    }
+                } else {
+                    panic!("`*p++` with pointee stride > 2 not yet supported (no fixture)");
+                }
+                if pointee.is_char_like() {
+                    self.out.extend_from_slice(b"\tmov\tal,byte ptr [bx]\r\n");
+                    self.out.extend_from_slice(b"\tcbw\t\r\n");
+                } else {
+                    let width = ptr_width(pointee);
+                    let _ = write!(self.out, "\tmov\tax,{width} ptr [bx]\r\n");
+                }
             }
             return;
         }
