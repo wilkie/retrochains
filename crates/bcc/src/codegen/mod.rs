@@ -13178,7 +13178,6 @@ impl<'a> FunctionEmitter<'a> {
             && let Some(v) = try_const_eval(value)
         {
             let elem_ty_clone = elem_ty.clone();
-            self.emit_index_into_bx(&indices[0], &elem_ty_clone);
             let mnem = match op {
                 BinOp::Add => "add",
                 BinOp::Sub => "sub",
@@ -13188,6 +13187,40 @@ impl<'a> FunctionEmitter<'a> {
                 _ => unreachable!(),
             };
             let v_masked = v & 0xFF;
+            // Index lives in SI/DI: addr through `[<reg>+sym]` and
+            // skip the `mov bx, <reg>` bounce. Fixture 3515.
+            if let ExprKind::Ident(idx_name) = &indices[0].kind
+                && self.locals.has(idx_name)
+                && self.locals.type_of(idx_name).is_int_like()
+                && let LocalLocation::Reg(idx_reg) = self.locals.location_of(idx_name)
+                && matches!(
+                    idx_reg,
+                    crate::codegen::locals::Reg::Si | crate::codegen::locals::Reg::Di
+                )
+            {
+                let idx_name_str = idx_reg.name();
+                let _ = write!(
+                    self.out,
+                    "\tmov\tal,byte ptr DGROUP:_{array}[{idx_name_str}]\r\n",
+                );
+                // `±1` peephole: BCC uses `inc al` / `dec al`
+                // (FE C0 / FE C8) instead of `add al, 1` / `sub al,
+                // 1` (04 01 / 2C 01) — same byte length but a
+                // different opcode. Fixture 3515.
+                if v_masked == 1 && matches!(op, BinOp::Add) {
+                    self.out.extend_from_slice(b"\tinc\tal\r\n");
+                } else if v_masked == 1 && matches!(op, BinOp::Sub) {
+                    self.out.extend_from_slice(b"\tdec\tal\r\n");
+                } else {
+                    let _ = write!(self.out, "\t{mnem}\tal,{v_masked}\r\n");
+                }
+                let _ = write!(
+                    self.out,
+                    "\tmov\tbyte ptr DGROUP:_{array}[{idx_name_str}],al\r\n",
+                );
+                return;
+            }
+            self.emit_index_into_bx(&indices[0], &elem_ty_clone);
             let _ = write!(
                 self.out,
                 "\tmov\tal,byte ptr DGROUP:_{array}[bx]\r\n",
@@ -13736,6 +13769,24 @@ impl<'a> FunctionEmitter<'a> {
                 && let Some(rhs_byte) = self.rhs_byte_addr(&value.kind)
             {
                 let _ = write!(self.out, "\tmov\tal,{rhs_byte}\r\n");
+                // Index in SI/DI → `<op> byte ptr [<reg>+sym], al`
+                // directly. Fixture 3522 (`arr[i] += v`).
+                if let ExprKind::Ident(idx_name) = &indices[0].kind
+                    && self.locals.has(idx_name)
+                    && self.locals.type_of(idx_name).is_int_like()
+                    && let LocalLocation::Reg(idx_reg) = self.locals.location_of(idx_name)
+                    && matches!(
+                        idx_reg,
+                        crate::codegen::locals::Reg::Si | crate::codegen::locals::Reg::Di
+                    )
+                {
+                    let _ = write!(
+                        self.out,
+                        "\t{mnem}\tbyte ptr DGROUP:_{array}[{}],al\r\n",
+                        idx_reg.name(),
+                    );
+                    return;
+                }
                 self.emit_index_into_bx(&indices[0], &elem_ty);
                 let _ = write!(
                     self.out,

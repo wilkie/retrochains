@@ -583,6 +583,20 @@ pub enum Instr {
         symbol: String,
         disp: u16,
     },
+    /// `add byte ptr <group>:<sym>[si], <reg8>` — `00 (mod=10
+    /// reg=<r> r/m=100) lo hi`. SI-indexed variant. Fixture 3522.
+    AddGroupSymSiDispReg8 { reg: Reg8, group: String, symbol: String, disp: u16 },
+    /// `add byte ptr <group>:<sym>[di], <reg8>` — same, r/m=101.
+    AddGroupSymDiDispReg8 { reg: Reg8, group: String, symbol: String, disp: u16 },
+    /// `sub byte ptr <group>:<sym>[si], <reg8>` — `28 ...`.
+    SubGroupSymSiDispReg8 { reg: Reg8, group: String, symbol: String, disp: u16 },
+    SubGroupSymDiDispReg8 { reg: Reg8, group: String, symbol: String, disp: u16 },
+    AndGroupSymSiDispReg8 { reg: Reg8, group: String, symbol: String, disp: u16 },
+    AndGroupSymDiDispReg8 { reg: Reg8, group: String, symbol: String, disp: u16 },
+    OrGroupSymSiDispReg8 { reg: Reg8, group: String, symbol: String, disp: u16 },
+    OrGroupSymDiDispReg8 { reg: Reg8, group: String, symbol: String, disp: u16 },
+    XorGroupSymSiDispReg8 { reg: Reg8, group: String, symbol: String, disp: u16 },
+    XorGroupSymDiDispReg8 { reg: Reg8, group: String, symbol: String, disp: u16 },
     /// `sub word ptr <group>:<sym>[bx], <reg16>` — `29 (mod=10
     /// reg=<r> r/m=111) lo hi`. Sibling.
     SubGroupSymBxDispReg16 {
