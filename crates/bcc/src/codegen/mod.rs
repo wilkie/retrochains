@@ -482,6 +482,24 @@ fn global_offset_addr(sym: &str, off: i32) -> String {
 }
 
 /// Look at the end of `buf` for the 4-instruction LHS-mem-clobber tail
+/// Returns true if the emitted buffer ends with a byte-store form
+/// `\tmov\tbyte ptr <X>,al\r\n` — the last meaningful write was AL,
+/// so a subsequent zero test should use `or al, al` (matches BCC).
+fn last_emit_ends_with_byte_store_al(buf: &[u8]) -> bool {
+    // Find the last `\r\n` (end of last line) and the one before
+    // that (start of last line).
+    if !buf.ends_with(b"\r\n") {
+        return false;
+    }
+    let end = buf.len() - 2;
+    let line_start = buf[..end]
+        .iter()
+        .rposition(|&b| b == b'\n')
+        .map_or(0, |p| p + 1);
+    let line = &buf[line_start..end];
+    line.starts_with(b"\tmov\tbyte ptr ") && line.ends_with(b",al")
+}
+
 /// Post-emission peephole: when the LHS materialized as a single
 /// `\tmov\tax,word ptr <X>\r\n` and the RHS begins with
 /// `\tmov\tbx,word ptr <Y>\r\n` followed by an `<op> ax, word ptr
@@ -5249,7 +5267,16 @@ impl<'a> FunctionEmitter<'a> {
         // Fixture 555 (`while ((c = g) > 0)` lowers the post-load
         // zero test through this peephole).
         if let Some(0) = try_const_eval(right) {
-            self.out.extend_from_slice(b"\tor\tax,ax\r\n");
+            // If the last emitted instruction wrote AL into a char
+            // slot (`mov byte ptr <X>, al`), then only AL carries
+            // meaningful bits — test it byte-wise. Same encoded
+            // length (2 bytes) but matches BCC's exact opcode.
+            // Fixture 3653 (`while ((c = arr[i++]) != 0)`).
+            if last_emit_ends_with_byte_store_al(self.out) {
+                self.out.extend_from_slice(b"\tor\tal,al\r\n");
+            } else {
+                self.out.extend_from_slice(b"\tor\tax,ax\r\n");
+            }
             return;
         }
         let src = self.resolve_operand_source(right);
@@ -20465,6 +20492,15 @@ impl<'a> FunctionEmitter<'a> {
                 } else {
                     false
                 };
+                // Char-target peephole: the value path commonly ends
+                // with `\tcbw\t\r\n` (e.g. char-array load → widen
+                // to int). When we're about to store just AL anyway,
+                // the cbw is dead — strip it. BCC matches this
+                // shape. Fixture 3653.
+                if target_is_char && self.out.ends_with(b"\tcbw\t\r\n") {
+                    let new_len = self.out.len() - b"\tcbw\t\r\n".len();
+                    self.out.truncate(new_len);
+                }
                 let (width, src) = if target_is_char {
                     ("byte", "al")
                 } else {
