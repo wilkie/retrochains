@@ -563,8 +563,25 @@ impl Locals {
         } else {
             &Reg::NON_SI_POOL
         };
+        // When the pool is the call-restricted [DI] (only one slot
+        // beyond SI), BCC picks the second-highest-use eligible.
+        // Source-order tiebreak preserved (stable sort). Without a
+        // call there are 4+ pool slots and the source-order
+        // assignment already matches. Fixture 1980 (`int a,b,c,d,e`
+        // with one call: DI lands on `c` (count 4) ahead of `b`
+        // (count 3) even though `b` is earlier in source order).
+        let mut ordered_eligibles: Vec<usize> = eligible_int.to_vec();
+        if function_makes_call {
+            // Stable sort by use count descending (ties keep source
+            // order).
+            ordered_eligibles.sort_by(|&a, &b| {
+                let ca = counts.get(&declared[a].name).copied().unwrap_or(0);
+                let cb = counts.get(&declared[b].name).copied().unwrap_or(0);
+                cb.cmp(&ca)
+            });
+        }
         let mut non_si_iter = non_si_pool.iter().copied();
-        for &i in &eligible_int {
+        for &i in &ordered_eligibles {
             if Some(i) == si_pick {
                 continue;
             }
