@@ -14,7 +14,7 @@
 
 use std::collections::HashMap;
 
-use crate::ast::{Expr, ExprKind, Function, Stmt, StmtKind, SwitchCase};
+use crate::ast::{BinOp, Expr, ExprKind, Function, Stmt, StmtKind, SwitchCase};
 use crate::codegen::fold::try_const_eval;
 
 /// True iff `body` contains a `continue;` that targets the
@@ -109,11 +109,27 @@ pub struct LoopPlan {
 impl LabelPlan {
     #[must_use]
     pub fn build(function: &Function) -> Self {
+        // Collect names of long-typed params + local declares so the
+        // condition-planner can recognize the `<long-lvalue> !=
+        // <long-lvalue>` shape that needs an extra label slot
+        // reserved. Fixture 2869.
+        let mut long_names: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        for p in &function.params {
+            if p.ty.is_long_like() {
+                long_names.insert(p.name.clone());
+            }
+        }
+        collect_long_decl_names(
+            function.body.as_deref().unwrap_or(&[]),
+            &mut long_names,
+        );
         let mut ctx = PlanCtx {
             counter: 0,
             bases: HashMap::new(),
             loops: HashMap::new(),
             switches: HashMap::new(),
+            long_names,
         };
         plan_stmts(function.body.as_deref().unwrap_or(&[]), &mut ctx);
         Self {
@@ -170,6 +186,38 @@ struct PlanCtx {
     bases: HashMap<(u32, u32), u32>,
     loops: HashMap<u32, LoopPlan>,
     switches: HashMap<u32, SwitchPlan>,
+    long_names: std::collections::HashSet<String>,
+}
+
+fn collect_long_decl_names(stmts: &[Stmt], set: &mut std::collections::HashSet<String>) {
+    for s in stmts {
+        match &s.kind {
+            StmtKind::Declare { name, ty, .. } if ty.is_long_like() => {
+                set.insert(name.clone());
+            }
+            StmtKind::If { then_branch, else_branch, .. } => {
+                collect_long_decl_names(then_branch, set);
+                if let Some(b) = else_branch {
+                    collect_long_decl_names(b, set);
+                }
+            }
+            StmtKind::While { body, .. } | StmtKind::DoWhile { body, .. } => {
+                collect_long_decl_names(body, set);
+            }
+            StmtKind::For { body, .. } => collect_long_decl_names(body, set),
+            StmtKind::Switch { cases, .. } => {
+                for c in cases {
+                    collect_long_decl_names(&c.body, set);
+                }
+            }
+            StmtKind::Block(stmts) => collect_long_decl_names(stmts, set),
+            _ => {}
+        }
+    }
+}
+
+fn is_long_lvalue_expr_in(expr: &Expr, long_names: &std::collections::HashSet<String>) -> bool {
+    matches!(&expr.kind, ExprKind::Ident(n) if long_names.contains(n))
 }
 
 fn plan_stmts(stmts: &[Stmt], ctx: &mut PlanCtx) {
@@ -511,6 +559,19 @@ fn plan_expr_value(e: &Expr, ctx: &mut PlanCtx) {
 /// Walk an expression in condition position.
 fn plan_expr_condition(e: &Expr, ctx: &mut PlanCtx) {
     match &e.kind {
+        // `<long-lvalue> != <long-lvalue>` needs a fresh label for
+        // the codegen's fall-through-on-true case (the EQ-cmp skips
+        // it via short-circuit jne). Reserve one slot keyed to the
+        // BinOp's span. Fixture 2869.
+        ExprKind::BinOp { op: BinOp::Ne, left, right }
+            if is_long_lvalue_expr_in(left, &ctx.long_names)
+                && is_long_lvalue_expr_in(right, &ctx.long_names) =>
+        {
+            ctx.bases.insert((e.span.start, e.span.end), ctx.counter);
+            ctx.counter += 1;
+            plan_expr_value(left, ctx);
+            plan_expr_value(right, ctx);
+        }
         ExprKind::BinOp { op, left, right } if op.is_comparison() => {
             plan_expr_value(left, ctx);
             plan_expr_value(right, ctx);
