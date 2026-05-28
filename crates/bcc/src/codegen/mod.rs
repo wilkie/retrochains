@@ -12171,6 +12171,37 @@ impl<'a> FunctionEmitter<'a> {
         if let ExprKind::StringLit(bytes) = &array.kind {
             return self.emit_string_lit_index_to_ax(bytes, index);
         }
+        // `(c ? a : b)[K]` — ternary returns the chosen array
+        // pointer; index it with a constant K. Emit the ternary
+        // into AX (which materializes `lea ax, &arr` in each arm),
+        // copy to BX, and read `[bx+K*stride]`. The pointee /
+        // element type comes from the then-branch (both branches
+        // must produce the same array shape by C semantics).
+        // Fixture 2379 (`(c ? a : b)[1]` for two `int[3]` locals).
+        if let ExprKind::Ternary { then_value, .. } = &array.kind
+            && let Some(k) = try_const_eval(index)
+            && let ExprKind::Ident(then_name) = &then_value.kind
+            && self.locals.has(then_name)
+            && let Some(elem_ty) = self.locals.type_of(then_name).array_elem()
+        {
+            let elem_ty = elem_ty.clone();
+            let stride = i32::from(elem_ty.size_bytes());
+            let byte_off = (k as i32).wrapping_mul(stride);
+            self.emit_expr_to_ax(array);
+            self.out.extend_from_slice(b"\tmov\tbx,ax\r\n");
+            let bx_disp = if byte_off == 0 {
+                "[bx]".to_owned()
+            } else {
+                format!("[bx+{byte_off}]")
+            };
+            if elem_ty.is_char_like() {
+                let _ = write!(self.out, "\tmov\tal,byte ptr {bx_disp}\r\n");
+                self.emit_widen_al(&elem_ty);
+            } else {
+                let _ = write!(self.out, "\tmov\tax,word ptr {bx_disp}\r\n");
+            }
+            return;
+        }
         // `b.data[K]` — read an array element inside a struct field.
         // With a constant index we can fold field offset + K*stride
         // into a single byte displacement. Fixture 497.
