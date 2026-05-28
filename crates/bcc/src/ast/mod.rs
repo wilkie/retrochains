@@ -84,6 +84,12 @@ pub struct Function {
     /// [bp+6] (vs [bp+4] for near) because of the extra CS slot.
     /// Fixture 1654.
     pub is_far: bool,
+    /// `near` calling convention explicitly requested. Only
+    /// load-bearing under far-code memory models (medium / large /
+    /// huge), where it overrides the default-far behavior so the
+    /// function returns with `ret` and the caller stays at
+    /// `[bp+4]`. Fixture 2061.
+    pub is_near: bool,
     /// `interrupt` function: BCC emits a hardware-IRQ-safe wrapper
     /// — save all GP regs (AX/BX/CX/DX), segment regs (ES/DS),
     /// SI/DI, then BP; load DS = DGROUP so subsequent data accesses

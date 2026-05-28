@@ -586,11 +586,14 @@ impl Parser {
 
     /// Like `consume_cc_modifiers` but also records which cc-modifier
     /// keywords (if any) appeared. Returns `(is_pascal, is_far,
-    /// is_interrupt)`.
-    fn consume_cc_modifiers_collect(&mut self) -> (bool, bool, bool) {
+    /// is_interrupt, is_near)`. `near` is tracked separately so
+    /// far-code models can spot the explicit override and skip the
+    /// implicit-far promotion. Fixture 2061.
+    fn consume_cc_modifiers_collect(&mut self) -> (bool, bool, bool, bool) {
         let mut is_pascal = false;
         let mut is_far = false;
         let mut is_interrupt = false;
+        let mut is_near = false;
         while let TokenKind::Ident(name) = &self.peek().kind {
             match name.as_str() {
                 "pascal" | "_pascal" | "__pascal" => {
@@ -605,15 +608,19 @@ impl Parser {
                     is_interrupt = true;
                     self.bump();
                 }
-                "cdecl" | "near" | "huge"
-                | "_cdecl" | "_near" | "_huge"
-                | "__cdecl" | "__near" | "__huge" => {
+                "near" | "_near" | "__near" => {
+                    is_near = true;
+                    self.bump();
+                }
+                "cdecl" | "huge"
+                | "_cdecl" | "_huge"
+                | "__cdecl" | "__huge" => {
                     self.bump();
                 }
                 _ => break,
             }
         }
-        (is_pascal, is_far, is_interrupt)
+        (is_pascal, is_far, is_interrupt, is_near)
     }
 
     fn parse_type(&mut self) -> Result<Type, ParseError> {
@@ -1251,7 +1258,7 @@ impl Parser {
             self.bump();
             ret_ty = Type::Pointer(Box::new(ret_ty));
         }
-        let (is_pascal, is_far, is_interrupt) = self.consume_cc_modifiers_collect();
+        let (is_pascal, is_far, is_interrupt, is_near) = self.consume_cc_modifiers_collect();
         // Function-returning-function-pointer declarator:
         // `<ret> (* <name> ( <params> )) ( <fp-params> )`. We don't
         // model function signatures — collapse the return type to a
@@ -1358,6 +1365,7 @@ impl Parser {
                 is_pascal,
                 is_far,
                 is_interrupt,
+                is_near,
             });
         }
 
@@ -1379,6 +1387,7 @@ impl Parser {
             is_pascal,
             is_far,
             is_interrupt,
+            is_near,
         })
     }
 

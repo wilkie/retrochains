@@ -107,11 +107,14 @@ pub fn build_asm(
         // offset return address, the prologue+epilogue lays out
         // the frame accordingly (`[bp+6]` is the first param, not
         // `[bp+4]`), and the function returns via `retf`. The
-        // `far` keyword in source only matters for overriding the
-        // default the other way (e.g. `near foo()` inside a large
-        // model). Fixtures 1665, 1667, 1685, etc.
+        // explicit `near` keyword in source overrides the
+        // implicit-far promotion (fixture 2061: `int near
+        // helper(...)` in medium model stays a near function with
+        // `[bp+4]` params and `ret`). Fixtures 1665, 1667, 1685.
         for f in &mut unit.functions {
-            f.is_far = true;
+            if !f.is_near {
+                f.is_far = true;
+            }
         }
     }
 
@@ -207,18 +210,14 @@ pub fn build_asm(
 
 /// For medium / large / huge memory models, BCC names the code
 /// segment `<MODULE>_TEXT` (uppercased source basename) rather than
-/// the canonical `_TEXT`, and every function returns via `retf`
-/// rather than `ret` because the caller pushed a far return
-/// address. Apply both rewrites in-place at the end of asm
-/// generation.
+/// the canonical `_TEXT`. The far-return choice is now made by
+/// per-function codegen (`is_far` is set on every TU function),
+/// so this post-pass only renames the segment.
 ///
 /// `source_filename_lower` is the lowercased source basename (e.g.
 /// `hello.c`); the segment prefix uppercases the stem
-/// (`HELLO_TEXT`). Fixtures 1664, 1666, 2052, 2053, 2057 (trivial
-/// medium/large/huge programs that need only these two rewrites).
+/// (`HELLO_TEXT`). Fixtures 1664, 1666, 2052, 2053, 2061.
 fn rename_text_segment_and_retn_to_retf(out: &mut Vec<u8>, source_filename_lower: &str) {
-    // Extract `hello` from `hello.c` (any extension stripped at the
-    // first `.`); fall back to `OUT` if the input has no name.
     let stem = source_filename_lower
         .split('.')
         .next()
@@ -226,20 +225,14 @@ fn rename_text_segment_and_retn_to_retf(out: &mut Vec<u8>, source_filename_lower
         .unwrap_or("out");
     let module_upper = stem.to_ascii_uppercase();
     let new_seg = format!("{module_upper}_TEXT");
-    // Walk lines, rewriting the `_TEXT` segment name and `\tret\t`
-    // returns to `\tretf\t`. Use a fresh buffer so we don't
-    // accidentally rewrite our own substitutions.
     let original = std::mem::take(out);
     let text = String::from_utf8(original).expect("asm output is ASCII");
     let mut rewritten = String::with_capacity(text.len() + 64);
     for line in text.split_inclusive('\n') {
         let trimmed = line.trim_start_matches('\t');
         let leading_tabs = line.len() - trimmed.len();
-        // Match `_TEXT\tsegment`, `_TEXT\tends`, `\tassume\tcs:_TEXT`,
-        // any literal `_TEXT` followed by tab/comma/end. Use a
-        // string replace targeting the canonical patterns BCC emits.
         let replaced = if trimmed.starts_with("_TEXT\tsegment") || trimmed.starts_with("_TEXT\tends") {
-            let body = &trimmed[5..]; // skip "_TEXT"
+            let body = &trimmed[5..];
             let mut s = String::with_capacity(leading_tabs + new_seg.len() + body.len());
             for _ in 0..leading_tabs {
                 s.push('\t');
@@ -249,18 +242,9 @@ fn rename_text_segment_and_retn_to_retf(out: &mut Vec<u8>, source_filename_lower
             s
         } else if let Some(idx) = line.find("cs:_TEXT") {
             let mut s = String::with_capacity(line.len() + new_seg.len());
-            s.push_str(&line[..idx + 3]); // include `cs:`
+            s.push_str(&line[..idx + 3]);
             s.push_str(&new_seg);
-            s.push_str(&line[idx + 3 + 5..]); // skip "_TEXT"
-            s
-        } else if line == "\tret\t\r\n" {
-            "\tretf\t\r\n".to_owned()
-        } else if let Some(rest) = line.strip_prefix("\tret\t") {
-            // `ret N` form (pascal calling convention with stack
-            // cleanup) — also rewrites to `retf N`.
-            let mut s = String::with_capacity(line.len() + 1);
-            s.push_str("\tretf\t");
-            s.push_str(rest);
+            s.push_str(&line[idx + 3 + 5..]);
             s
         } else {
             line.to_owned()
