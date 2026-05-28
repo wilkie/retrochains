@@ -949,6 +949,22 @@ struct FunctionEmitter<'a> {
     /// pair (`jb`/`jae` → `ja`/`jbe`, etc.) so the branch
     /// semantics match. Fixture 1814.
     cmp_swapped: bool,
+    /// Bytes reserved below the regular locals frame for the hidden
+    /// temporary buffer that an N_SCOPY@-routed struct-returning call
+    /// (size ∉ {1, 2, 4}) needs as its caller-supplied result slot.
+    /// One slot per function sized to the largest such return type;
+    /// the slot's bp-relative top sits at
+    /// `-(locals.stack_bytes() + struct_call_tmp_bytes)`. Zero when
+    /// the function makes no qualifying calls. Fixtures 1685, 1877,
+    /// 2207, 2352.
+    struct_call_tmp_bytes: u16,
+    /// When `Some(off)`, the next `emit_call` pushes the hidden far
+    /// pointer to `[bp + off]` as the final pre-call push (so the
+    /// callee sees it at `[bp+4..7]` after its own `push bp; mov bp,
+    /// sp`), and the cleanup includes the extra 4 bytes. Used to
+    /// route struct-returning calls (size ∉ {1, 2, 4}) through the
+    /// SCOPY@ pattern.
+    pending_hidden_ret_ptr_tmp_off: Option<i16>,
 }
 
 /// Innermost enclosing construct that catches `break;` (and maybe
@@ -989,6 +1005,7 @@ impl<'a> FunctionEmitter<'a> {
         helpers: &'a mut std::collections::HashSet<String>,
         no_reg_vars: bool,
     ) -> Self {
+        let tmp_bytes = compute_struct_call_tmp_bytes(function, signatures);
         Self {
             out,
             source,
@@ -1013,7 +1030,17 @@ impl<'a> FunctionEmitter<'a> {
             stack_check: false,
             model_has_far_code: false,
             cmp_swapped: false,
+            struct_call_tmp_bytes: tmp_bytes,
+            pending_hidden_ret_ptr_tmp_off: None,
         }
+    }
+
+    /// `[bp+off]` for the top of the struct-call tmp slot (the slot's
+    /// lowest address — analogous to a stack local's offset). Pre-
+    /// supposes `struct_call_tmp_bytes > 0`.
+    fn struct_call_tmp_offset(&self) -> i16 {
+        -(i16::try_from(self.locals.stack_bytes() + self.struct_call_tmp_bytes)
+            .expect("frame fits in i16"))
     }
 
     fn exit_label_num(&self) -> u32 {
@@ -1094,7 +1121,7 @@ impl<'a> FunctionEmitter<'a> {
         // With -1/-2 (186+ target), the prologue collapses into a
         // single `enter N, 0` instruction (C8 lo hi 00). Fixture
         // 2134/2277.
-        let stack_n = self.locals.stack_bytes();
+        let stack_n = self.locals.stack_bytes() + self.struct_call_tmp_bytes;
         if self.target_186 && stack_n > 0 {
             let _ = write!(self.out, "\tenter\t{stack_n},0\r\n");
         } else {
@@ -1175,10 +1202,11 @@ impl<'a> FunctionEmitter<'a> {
         // 186+ target: `leave` (C9) collapses `mov sp, bp; pop bp`
         // into one byte. Used whenever the prologue used `enter`.
         // Fixture 2134/2277.
-        if self.target_186 && self.locals.stack_bytes() > 0 {
+        let frame_bytes = self.locals.stack_bytes() + self.struct_call_tmp_bytes;
+        if self.target_186 && frame_bytes > 0 {
             self.out.extend_from_slice(b"\tleave\t\r\n");
         } else {
-            if self.locals.stack_bytes() > 0 {
+            if frame_bytes > 0 {
                 self.out.extend_from_slice(b"\tmov\tsp,bp\r\n");
             }
             self.out.extend_from_slice(b"\tpop\tbp\r\n");
@@ -6153,6 +6181,22 @@ impl<'a> FunctionEmitter<'a> {
         if fp_arg_pushed {
             self.out.extend_from_slice(b"\tfwait\t\r\n");
         }
+        // Struct-returning callee (size ∉ {1, 2, 4}): caller passes
+        // a hidden far pointer to the tmp buffer as the *last* push
+        // before the call, so the callee reads it from [bp+4..7].
+        // BCC's emission order is `push ss; lea ax, ...; push ax` —
+        // the segment goes down before the offset is computed (vs
+        // the regular dest/src far-ptr pushes which compute the
+        // offset first, then push segment, then push offset). Adds 4
+        // to the post-call cleanup byte count. Fixtures 1685, 1877,
+        // 2207, 2352.
+        let hidden_ret_ptr_off = self.pending_hidden_ret_ptr_tmp_off.take();
+        if let Some(tmp_off) = hidden_ret_ptr_off {
+            self.out.extend_from_slice(b"\tpush\tss\r\n");
+            let _ = write!(self.out, "\tlea\tax,word ptr {}\r\n", bp_addr(tmp_off));
+            self.out.extend_from_slice(b"\tpush\tax\r\n");
+            total_bytes += 4;
+        }
         // Direct call to a function symbol vs. indirect call through
         // a function-pointer local. The disambiguator is whether
         // `name` names a local in this frame (fixture 110): if so,
@@ -8384,6 +8428,32 @@ impl<'a> FunctionEmitter<'a> {
                     self.emit_expr_to_ax(init);
                     let _ = write!(self.out, "\tmov\tword ptr {},dx\r\n", bp_addr(off + 2));
                     let _ = write!(self.out, "\tmov\tword ptr {},ax\r\n", bp_addr(off));
+                    return;
+                }
+                // `struct S x = f();` init from a struct-returning
+                // call whose size is ∉ {1, 2, 4} — same hidden-tmp +
+                // SCOPY pattern as the assignment form. Fixture 1685.
+                if let Type::Struct { .. } = ty
+                    && let ExprKind::Call { name: fname, args } = &init.kind
+                    && let Some(ret_ty) = self.signatures.ret_ty_of(fname)
+                    && ret_ty == ty
+                    && let size = ty.size_bytes()
+                    && size != 1 && size != 2 && size != 4
+                {
+                    let tmp_off = self.struct_call_tmp_offset();
+                    let _ = write!(self.out, "\tlea\tax,word ptr {}\r\n", bp_addr(off));
+                    self.out.extend_from_slice(b"\tpush\tss\r\n");
+                    self.out.extend_from_slice(b"\tpush\tax\r\n");
+                    self.pending_hidden_ret_ptr_tmp_off = Some(tmp_off);
+                    let fname_owned = fname.clone();
+                    let args_owned = args.clone();
+                    self.emit_call(&fname_owned, &args_owned);
+                    let _ = write!(self.out, "\tlea\tax,word ptr {}\r\n", bp_addr(tmp_off));
+                    self.out.extend_from_slice(b"\tpush\tss\r\n");
+                    self.out.extend_from_slice(b"\tpush\tax\r\n");
+                    let _ = write!(self.out, "\tmov\tcx,{size}\r\n");
+                    self.out.extend_from_slice(b"\tcall\tnear ptr N_SCOPY@\r\n");
+                    self.helpers.insert("N_SCOPY@".to_string());
                     return;
                 }
                 // Struct-copy init: `struct S q = p;` where p is
@@ -18767,6 +18837,47 @@ impl<'a> FunctionEmitter<'a> {
                     let _ = write!(self.out, "\tmov\tword ptr {},ax\r\n", bp_addr(off));
                     return;
                 }
+                // `struct S a; a = f();` for a struct return whose size
+                // is ∉ {1, 2, 4} — routes through the hidden-tmp +
+                // N_SCOPY@ pattern. The pre-scan reserved a frame slot
+                // big enough at `[bp - (stack + tmp)]`; the caller
+                // sequence is:
+                //   1. lea ax, &a; push ss; push ax  (dest for SCOPY,
+                //      kept on stack across the call)
+                //   2. push args (normal cdecl/pascal order)
+                //   3. push ss; lea ax, &tmp; push ax (hidden ret
+                //      ptr — note BCC's ss-then-offset order here)
+                //   4. call f
+                //   5. cleanup (`pop cx;pop cx` for 4 bytes,
+                //      `add sp,N` otherwise) — drops hidden ret ptr
+                //      and args, leaves dest on stack
+                //   6. lea ax, &tmp; push ss; push ax (src for SCOPY)
+                //   7. mov cx, size; call N_SCOPY@ (cleans dest+src)
+                // Fixtures 1685 / 1877 (3-int struct), 2207 (4-int +
+                // 1 int arg), 2352 (4-int).
+                if let Type::Struct { .. } = ty
+                    && let ExprKind::Call { name: fname, args } = &value.kind
+                    && let Some(ret_ty) = self.signatures.ret_ty_of(fname)
+                    && ret_ty == ty
+                    && let size = ty.size_bytes()
+                    && size != 1 && size != 2 && size != 4
+                {
+                    let tmp_off = self.struct_call_tmp_offset();
+                    let _ = write!(self.out, "\tlea\tax,word ptr {}\r\n", bp_addr(off));
+                    self.out.extend_from_slice(b"\tpush\tss\r\n");
+                    self.out.extend_from_slice(b"\tpush\tax\r\n");
+                    self.pending_hidden_ret_ptr_tmp_off = Some(tmp_off);
+                    let fname_owned = fname.clone();
+                    let args_owned = args.clone();
+                    self.emit_call(&fname_owned, &args_owned);
+                    let _ = write!(self.out, "\tlea\tax,word ptr {}\r\n", bp_addr(tmp_off));
+                    self.out.extend_from_slice(b"\tpush\tss\r\n");
+                    self.out.extend_from_slice(b"\tpush\tax\r\n");
+                    let _ = write!(self.out, "\tmov\tcx,{size}\r\n");
+                    self.out.extend_from_slice(b"\tcall\tnear ptr N_SCOPY@\r\n");
+                    self.helpers.insert("N_SCOPY@".to_string());
+                    return;
+                }
                 // `long x; x = K;` — two word stores, high then low.
                 // Same shape as the init form (fixture 210/287).
                 if ty.is_long_like() {
@@ -23391,6 +23502,133 @@ impl<'a> FunctionEmitter<'a> {
 /// Does `body` contain a `break;` that targets the enclosing loop?
 /// Stops at nested loops — a `break;` inside an inner `while`/`for`
 /// targets the inner loop, not the outer one.
+/// Largest hidden-tmp size needed for any N_SCOPY@-routed struct-
+/// returning call (size ∉ {1, 2, 4}) reachable from `function`'s
+/// body. One slot per function covers all such calls. Rounded up to
+/// an even byte count so the tmp's top stays word-aligned.
+fn compute_struct_call_tmp_bytes(
+    function: &Function,
+    signatures: &Signatures,
+) -> u16 {
+    fn visit_expr(e: &Expr, sigs: &Signatures, max: &mut u16) {
+        if let ExprKind::Call { name, args } = &e.kind {
+            if let Some(ret_ty) = sigs.ret_ty_of(name)
+                && matches!(ret_ty, Type::Struct { .. })
+            {
+                let sz = ret_ty.size_bytes();
+                if sz != 1 && sz != 2 && sz != 4 {
+                    let aligned = (sz + 1) & !1;
+                    if aligned > *max {
+                        *max = aligned;
+                    }
+                }
+            }
+            for arg in args {
+                visit_expr(arg, sigs, max);
+            }
+            return;
+        }
+        match &e.kind {
+            ExprKind::BinOp { left, right, .. }
+            | ExprKind::Logical { left, right, .. }
+            | ExprKind::Comma { left, right } => {
+                visit_expr(left, sigs, max);
+                visit_expr(right, sigs, max);
+            }
+            ExprKind::Unary { operand, .. }
+            | ExprKind::Deref(operand)
+            | ExprKind::Cast { operand, .. } => visit_expr(operand, sigs, max),
+            ExprKind::Member { base, .. } => visit_expr(base, sigs, max),
+            ExprKind::ArrayIndex { array, index } => {
+                visit_expr(array, sigs, max);
+                visit_expr(index, sigs, max);
+            }
+            ExprKind::Ternary { cond, then_value, else_value } => {
+                visit_expr(cond, sigs, max);
+                visit_expr(then_value, sigs, max);
+                visit_expr(else_value, sigs, max);
+            }
+            ExprKind::AssignExpr { value, .. }
+            | ExprKind::CompoundAssignExpr { value, .. } => {
+                visit_expr(value, sigs, max);
+            }
+            ExprKind::AssignLvalueExpr { target, value } => {
+                visit_expr(target, sigs, max);
+                visit_expr(value, sigs, max);
+            }
+            ExprKind::UpdateLvalue { target, .. } => visit_expr(target, sigs, max),
+            ExprKind::InitList { items } => {
+                for it in items {
+                    visit_expr(it, sigs, max);
+                }
+            }
+            ExprKind::CallVia { addr, args } => {
+                visit_expr(addr, sigs, max);
+                for arg in args {
+                    visit_expr(arg, sigs, max);
+                }
+            }
+            _ => {}
+        }
+    }
+    fn visit_stmt(s: &Stmt, sigs: &Signatures, max: &mut u16) {
+        match &s.kind {
+            StmtKind::Return(Some(e))
+            | StmtKind::ExprStmt(e)
+            | StmtKind::Assign { value: e, .. }
+            | StmtKind::CompoundAssign { value: e, .. }
+            | StmtKind::DerefAssign { value: e, .. }
+            | StmtKind::DerefCompoundAssign { value: e, .. }
+            | StmtKind::MemberAssign { value: e, .. }
+            | StmtKind::MemberCompoundAssign { value: e, .. } => visit_expr(e, sigs, max),
+            StmtKind::Return(None) | StmtKind::Empty | StmtKind::Break
+            | StmtKind::Continue | StmtKind::Goto { .. } | StmtKind::Label { .. } => {}
+            StmtKind::Declare { init, .. } => {
+                if let Some(i) = init {
+                    visit_expr(i, sigs, max);
+                }
+            }
+            StmtKind::If { cond, then_branch, else_branch } => {
+                visit_expr(cond, sigs, max);
+                for s in then_branch { visit_stmt(s, sigs, max); }
+                if let Some(eb) = else_branch {
+                    for s in eb { visit_stmt(s, sigs, max); }
+                }
+            }
+            StmtKind::While { cond, body } | StmtKind::DoWhile { body, cond } => {
+                visit_expr(cond, sigs, max);
+                for s in body { visit_stmt(s, sigs, max); }
+            }
+            StmtKind::For { init, cond, step, body } => {
+                if let Some(es) = init { for e in es { visit_expr(e, sigs, max); } }
+                if let Some(c) = cond { visit_expr(c, sigs, max); }
+                if let Some(es) = step { for e in es { visit_expr(e, sigs, max); } }
+                for s in body { visit_stmt(s, sigs, max); }
+            }
+            StmtKind::Switch { scrutinee, cases } => {
+                visit_expr(scrutinee, sigs, max);
+                for c in cases {
+                    for s in &c.body { visit_stmt(s, sigs, max); }
+                }
+            }
+            StmtKind::ArrayAssign { indices, value, .. }
+            | StmtKind::ArrayCompoundAssign { indices, value, .. }
+            | StmtKind::MemberArrayAssign { indices, value, .. } => {
+                for i in indices { visit_expr(i, sigs, max); }
+                visit_expr(value, sigs, max);
+            }
+            StmtKind::Block(body) => {
+                for s in body { visit_stmt(s, sigs, max); }
+            }
+        }
+    }
+    let mut max: u16 = 0;
+    for s in function.body.as_deref().unwrap_or(&[]) {
+        visit_stmt(s, signatures, &mut max);
+    }
+    max
+}
+
 fn body_has_return(body: &[Stmt]) -> bool {
     body.iter().any(stmt_has_return)
 }
