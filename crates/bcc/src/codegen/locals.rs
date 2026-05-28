@@ -705,7 +705,49 @@ impl Locals {
             } else {
                 &Reg::CHAR_POOL
             };
-            let mut char_pool = char_pool_slice.iter().copied();
+            // When the first eligible char is a function parameter
+            // that the body uses on BOTH sides of the same binary
+            // operator (`x + x`, `c * c`, etc.), BCC starts the
+            // char pool at BL instead of DL. The reason is the
+            // emit shape: materializing both operands needs the
+            // value live in *two* registers (AL and DL) at the
+            // same time, so keeping the storage in BL — which is
+            // preserved through `mov al,bl; mov ah,0; mov dl,bl;
+            // mov dh,0` — beats putting it in DL and having to
+            // shuffle. Single-use / update-only / compound-with-
+            // const-RHS char params stay on the default DL-first
+            // order (fixtures 047, 050, 051, 052, 125, 722-724,
+            // 3273, 2677, 3133, 3151, 3226). Fixture 1991
+            // (`uchar x; return x + x`).
+            let first_char_param_name = declared.iter().find(|item| {
+                matches!(item.ty, Type::Char | Type::UChar)
+                    && matches!(item.kind, DeclKind::Param { .. })
+                    && !address_taken.contains(&item.name)
+                    && !item.is_volatile
+                    && (item.is_register
+                        || counts.get(&item.name).copied().unwrap_or(0)
+                            >= ENREGISTER_THRESHOLD)
+            });
+            let promote_to_bl = if let Some(param) = first_char_param_name {
+                body_has_self_binop_on(
+                    &param.name,
+                    function.body.as_deref().unwrap_or(&[]),
+                )
+            } else {
+                false
+            };
+            let pool_owned: Vec<Reg>;
+            let pool: &[Reg] = if promote_to_bl
+                && char_pool_slice.starts_with(&[Reg::Dl])
+            {
+                pool_owned = std::iter::once(Reg::Bl)
+                    .chain(char_pool_slice.iter().copied().filter(|r| *r != Reg::Bl))
+                    .collect();
+                &pool_owned
+            } else {
+                char_pool_slice
+            };
+            let mut char_pool = pool.iter().copied();
             for (i, item) in declared.iter().enumerate() {
                 if !matches!(item.ty, Type::Char | Type::UChar) {
                     continue;
@@ -1920,6 +1962,106 @@ fn expr_has_name_as_subscript(name: &str, e: &Expr) -> bool {
                 || expr_has_name_as_subscript(name, else_value)
         }
         ExprKind::InitList { items } => items.iter().any(|i| expr_has_name_as_subscript(name, i)),
+        _ => false,
+    }
+}
+
+/// True when `body` contains any binary operator with `name` on
+/// both sides (`name + name`, `name * name`, etc.). Used by the
+/// char-pool allocator to pick BL over DL when a char param will
+/// be materialized in both AX and DX during a single binop.
+/// Fixture 1991 (`return x + x`).
+fn body_has_self_binop_on(name: &str, body: &[Stmt]) -> bool {
+    body.iter().any(|s| stmt_has_self_binop(name, s))
+}
+
+fn stmt_has_self_binop(name: &str, stmt: &Stmt) -> bool {
+    match &stmt.kind {
+        StmtKind::Return(value) => value.as_ref().is_some_and(|e| expr_has_self_binop(name, e)),
+        StmtKind::Declare { init, .. } => init.as_ref().is_some_and(|e| expr_has_self_binop(name, e)),
+        StmtKind::Assign { value, .. }
+        | StmtKind::CompoundAssign { value, .. } => expr_has_self_binop(name, value),
+        StmtKind::If { cond, then_branch, else_branch } => {
+            expr_has_self_binop(name, cond)
+                || then_branch.iter().any(|s| stmt_has_self_binop(name, s))
+                || else_branch.as_ref().is_some_and(|b| b.iter().any(|s| stmt_has_self_binop(name, s)))
+        }
+        StmtKind::While { cond, body } | StmtKind::DoWhile { body, cond } => {
+            expr_has_self_binop(name, cond) || body.iter().any(|s| stmt_has_self_binop(name, s))
+        }
+        StmtKind::For { init, cond, step, body } => {
+            init.as_ref().is_some_and(|es| es.iter().any(|e| expr_has_self_binop(name, e)))
+                || cond.as_ref().is_some_and(|e| expr_has_self_binop(name, e))
+                || step.as_ref().is_some_and(|es| es.iter().any(|e| expr_has_self_binop(name, e)))
+                || body.iter().any(|s| stmt_has_self_binop(name, s))
+        }
+        StmtKind::Switch { scrutinee, cases } => {
+            expr_has_self_binop(name, scrutinee)
+                || cases.iter().any(|c| c.body.iter().any(|s| stmt_has_self_binop(name, s)))
+        }
+        StmtKind::ArrayAssign { indices, value, .. }
+        | StmtKind::ArrayCompoundAssign { indices, value, .. } => {
+            indices.iter().any(|e| expr_has_self_binop(name, e))
+                || expr_has_self_binop(name, value)
+        }
+        StmtKind::MemberArrayAssign { indices, value, .. } => {
+            indices.iter().any(|e| expr_has_self_binop(name, e))
+                || expr_has_self_binop(name, value)
+        }
+        StmtKind::DerefAssign { target, value }
+        | StmtKind::DerefCompoundAssign { target, value, .. } => {
+            expr_has_self_binop(name, target) || expr_has_self_binop(name, value)
+        }
+        StmtKind::MemberAssign { base, value, .. }
+        | StmtKind::MemberCompoundAssign { base, value, .. } => {
+            expr_has_self_binop(name, base) || expr_has_self_binop(name, value)
+        }
+        StmtKind::ExprStmt(e) => expr_has_self_binop(name, e),
+        StmtKind::Block(body) => body.iter().any(|s| stmt_has_self_binop(name, s)),
+        StmtKind::Break
+        | StmtKind::Continue
+        | StmtKind::Goto { .. }
+        | StmtKind::Label { .. }
+        | StmtKind::Empty => false,
+    }
+}
+
+fn expr_has_self_binop(name: &str, e: &Expr) -> bool {
+    match &e.kind {
+        ExprKind::BinOp { left, right, .. } | ExprKind::Logical { left, right, .. } => {
+            (matches!(&left.kind, ExprKind::Ident(n) if n == name)
+                && matches!(&right.kind, ExprKind::Ident(n) if n == name))
+                || expr_has_self_binop(name, left)
+                || expr_has_self_binop(name, right)
+        }
+        ExprKind::Unary { operand, .. } | ExprKind::Deref(operand) => {
+            expr_has_self_binop(name, operand)
+        }
+        ExprKind::Update { .. } => false,
+        ExprKind::UpdateLvalue { target, .. } => expr_has_self_binop(name, target),
+        ExprKind::AssignExpr { value, .. } => expr_has_self_binop(name, value),
+        ExprKind::AssignLvalueExpr { target, value } => {
+            expr_has_self_binop(name, target) || expr_has_self_binop(name, value)
+        }
+        ExprKind::CompoundAssignExpr { value, .. } => expr_has_self_binop(name, value),
+        ExprKind::Call { args, .. } => args.iter().any(|a| expr_has_self_binop(name, a)),
+        ExprKind::CallVia { addr, args } => {
+            expr_has_self_binop(name, addr) || args.iter().any(|a| expr_has_self_binop(name, a))
+        }
+        ExprKind::Member { base, .. } => expr_has_self_binop(name, base),
+        ExprKind::Ternary { cond, then_value, else_value } => {
+            expr_has_self_binop(name, cond)
+                || expr_has_self_binop(name, then_value)
+                || expr_has_self_binop(name, else_value)
+        }
+        ExprKind::Cast { operand, .. } => expr_has_self_binop(name, operand),
+        ExprKind::InitList { items } => items.iter().any(|e| expr_has_self_binop(name, e)),
+        ExprKind::Comma { left, right } => {
+            expr_has_self_binop(name, left) || expr_has_self_binop(name, right)
+        }
+        ExprKind::ArrayIndex { array, index } => {
+            expr_has_self_binop(name, array) || expr_has_self_binop(name, index)
+        }
         _ => false,
     }
 }

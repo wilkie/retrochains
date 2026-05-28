@@ -20938,6 +20938,36 @@ impl<'a> FunctionEmitter<'a> {
                                 );
                                 return;
                             }
+                            // Reg-resident uchar held in BL (typical
+                            // when the eligible char is a function
+                            // param — see locals.rs's "first char
+                            // is param → BL first" rule). Both
+                            // operands resolve to the same low byte,
+                            // and BL is preserved across the AX/DX
+                            // widening dance, so no push/pop is
+                            // needed: just copy BL into AL and DL
+                            // and zero-extend each. Fixture 1991
+                            // (`return x + x` for uchar param x).
+                            if let ExprKind::Ident(l_name) = &left.kind
+                                && let ExprKind::Ident(r_name) = &right.kind
+                                && l_name == r_name
+                                && self.locals.has(l_name)
+                                && let LocalLocation::Reg(reg) = self.locals.location_of(l_name)
+                                && matches!(reg, Reg::Bl)
+                            {
+                                let reg_name = reg.name();
+                                let _ = write!(self.out, "\tmov\tal,{reg_name}\r\n");
+                                self.out.extend_from_slice(b"\tmov\tah,0\r\n");
+                                let _ = write!(self.out, "\tmov\tdl,{reg_name}\r\n");
+                                self.out.extend_from_slice(b"\tmov\tdh,0\r\n");
+                                emit_op_with_source(
+                                    self.out,
+                                    *op,
+                                    &OperandSource::Reg(Reg::Dx),
+                                    unsigned,
+                                );
+                                return;
+                            }
                         }
                         // Div/Mod scratch is BX (DX is clobbered by
                         // cwd / xor dx,dx). Mul scratch is DX (imul
