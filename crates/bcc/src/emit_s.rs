@@ -101,6 +101,19 @@ pub fn build_asm(
     if unsigned_chars {
         promote_chars_to_uchar(&mut unit);
     }
+    if memory_model.has_far_code() {
+        // Medium / large / huge models compile every function as
+        // far by default: the caller pushes a 4-byte segment:
+        // offset return address, the prologue+epilogue lays out
+        // the frame accordingly (`[bp+6]` is the first param, not
+        // `[bp+4]`), and the function returns via `retf`. The
+        // `far` keyword in source only matters for overriding the
+        // default the other way (e.g. `near foo()` inside a large
+        // model). Fixtures 1665, 1667, 1685, etc.
+        for f in &mut unit.functions {
+            f.is_far = true;
+        }
+    }
 
     let mut out = Vec::with_capacity(1024);
     write_macro_preamble(&mut out);
