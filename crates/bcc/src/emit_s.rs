@@ -168,6 +168,7 @@ pub fn build_asm(
             target_186,
             stack_check,
             no_reg_vars,
+            memory_model.has_far_code(),
         );
     }
 
@@ -189,7 +190,8 @@ pub fn build_asm(
         out.extend_from_slice(b"_TEXT\tends\r\n");
     }
 
-    write_tail(&mut out, &unit, &strings, &helpers);
+    let extern_dist = if memory_model.has_far_code() { "far" } else { "near" };
+    write_tail(&mut out, &unit, &strings, &helpers, extern_dist);
     if optimize {
         fold_trampoline_jmps(&mut out);
     }
@@ -863,6 +865,7 @@ fn write_tail(
     unit: &crate::ast::Unit,
     strings: &codegen::StringPool,
     helpers: &std::collections::HashSet<String>,
+    extern_dist: &str,
 ) {
     // Collect external function references: any name called from
     // somewhere in the TU that isn't defined here. Each becomes an
@@ -900,7 +903,7 @@ fn write_tail(
             .then_with(|| b.cmp(a))
     });
     for name in &ordered_externs {
-        let _ = write!(out, "\textrn\t_{name}:near\r\n");
+        let _ = write!(out, "\textrn\t_{name}:{extern_dist}\r\n");
     }
     // Floating-point runtime markers (`FIWRQQ`, `FIDRQQ`) go BETWEEN
     // user-function externs and runtime helpers in BCC's EXTDEF

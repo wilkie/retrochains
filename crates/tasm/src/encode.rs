@@ -500,6 +500,7 @@ fn instr_size(instr: &Instr) -> usize {
         | Instr::OrReg8Reg8 { .. }
         | Instr::XorReg8Reg8 { .. } => 2,
         Instr::CallNear(_) => 3,
+        Instr::CallFar(_) => 5,
         Instr::MovAxGroupSym { .. }
         | Instr::MovAlGroupSym { .. }
         | Instr::MovGroupSymAl { .. }
@@ -1584,6 +1585,23 @@ fn emit_instr(
                 out.push(cond.opcode_byte());
                 out.push(rel8 as u8);
             }
+        }
+        Instr::CallFar(target) => {
+            // 9A lo hi seg-lo seg-hi. Externs only — emit zeros and
+            // queue a 16:16 pointer FIXUPP. Fixture 2210.
+            let idx = *extern_idx.get(target).ok_or_else(|| {
+                AsmError::new(
+                    0,
+                    format!("call far: `{target}` not declared extern"),
+                )
+            })?;
+            out.push(0x9A);
+            let imm_start = out.len();
+            out.extend_from_slice(&[0u8; 4]);
+            fixups.push(FixupReq {
+                data_offset: u16::try_from(imm_start).expect("offset fits"),
+                kind: FixupKind::FarCallExtern { extdef_idx: idx },
+            });
         }
         Instr::CallNear(target) => {
             // E8 lo hi. Resolve target's segment-relative offset.

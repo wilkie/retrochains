@@ -847,6 +847,12 @@ pub enum Instr {
     JmpShort(String),
     /// `call near ptr <label>` — E8 rel16. Intra-segment near call.
     CallNear(String),
+    /// `call far ptr <label>` — 9A lo hi seg-lo seg-hi. Inter-
+    /// segment far call to an external function (the 4-byte
+    /// segment:offset target is fixed up at link time). Used by
+    /// medium / large / huge models for any call to a name not
+    /// defined in this TU. Fixture 2210 (`printf("hi\n");`).
+    CallFar(String),
     /// `mov ax,word ptr <group>:<symbol>[+<offset>]` — segment-
     /// relative load against a group-anchored data symbol, optionally
     /// at a constant byte offset (e.g. `_a+2` for `a[1]`). Emits
@@ -2558,6 +2564,14 @@ pub enum FixupKind {
     /// linker resolves the same paragraph as DGROUP's base).
     /// Locat byte: 0xC8 | hi2. Fix Data byte: 0x14. Fixture 1655.
     SegBaseGroupTarget { group_idx: u8, segment_idx: u8 },
+    /// 16:16-bit pointer (M=1, location=3), frame method F5
+    /// (TARGET — frame is the target's own segment, no frame
+    /// datum), target method T6 (EXTDEF, no disp). The fixup
+    /// rewrites the 4-byte segment:offset slot following a
+    /// `9A` far-call opcode. Used by medium / large / huge
+    /// model far calls to external functions like `printf`.
+    /// Fixture 2210. Locat byte: 0xCC | hi2. Fix Data: 0x56.
+    FarCallExtern { extdef_idx: u8 },
 }
 
 /// A position-bound parse error. The line number is 1-based and refers

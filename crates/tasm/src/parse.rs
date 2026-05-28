@@ -911,6 +911,14 @@ fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
             {
                 return Ok(Instr::CallNear(target.trim().to_string()));
             }
+            // `call far ptr <label>` — direct far call to an
+            // external function. Fixture 2210.
+            if let Some(target) = rest
+                .strip_prefix("far ptr ")
+                .or_else(|| rest.strip_prefix("far\tptr "))
+            {
+                return Ok(Instr::CallFar(target.trim().to_string()));
+            }
             // `call word ptr <group>:<sym>[bx]` — indirect through
             // an array of function pointers indexed by BX. Fixture
             // 2944.

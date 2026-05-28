@@ -34,6 +34,11 @@ struct FunctionSig {
     ret_ty: Type,
     is_pascal: bool,
     is_far: bool,
+    /// True when this entry came from a prototype-only declaration
+    /// (no `body` in the AST). Used by the call-site emitter to
+    /// distinguish defined-in-TU functions from externs even when
+    /// the prototype contributes a known parameter signature.
+    is_prototype: bool,
 }
 
 impl Signatures {
@@ -50,6 +55,7 @@ impl Signatures {
                         ret_ty: f.ret_ty.clone(),
                         is_pascal: f.is_pascal,
                         is_far: f.is_far,
+                        is_prototype: f.body.is_none(),
                     },
                 )
             })
@@ -89,6 +95,17 @@ impl Signatures {
     #[must_use]
     pub fn is_far(&self, name: &str) -> bool {
         self.map.get(name).is_some_and(|s| s.is_far)
+    }
+
+    /// True when `name` is declared via a prototype but has no body
+    /// in this TU — i.e. it's an extern function whose definition
+    /// lives in another module. Distinct from "not in signatures
+    /// at all" which means no declaration was seen either.
+    #[must_use]
+    pub fn is_extern_function(&self, name: &str) -> bool {
+        self.map
+            .get(name)
+            .map_or(true, |s| s.is_prototype)
     }
 }
 
@@ -830,6 +847,7 @@ pub fn emit_function(
     target_186: bool,
     stack_check: bool,
     no_reg_vars: bool,
+    model_has_far_code: bool,
 ) {
     let mut emitter = FunctionEmitter::new_with_opts(
         out, source, function, func_idx, signatures, globals, strings, helpers,
@@ -837,6 +855,7 @@ pub fn emit_function(
     );
     emitter.target_186 = target_186;
     emitter.stack_check = stack_check;
+    emitter.model_has_far_code = model_has_far_code;
     emitter.run();
 }
 
@@ -917,6 +936,13 @@ struct FunctionEmitter<'a> {
     /// Compares `___brklvl` against `sp`; calls `N_OVERFLOW@` if
     /// sp has dropped at or below the break level. Fixture 2129.
     stack_check: bool,
+    /// True under medium / large / huge memory models — code is
+    /// far, so calls to *unknown* names (externs) must use the
+    /// far-call form (`call far ptr` → `9A` opcode + 4-byte
+    /// segment:offset). Same-TU calls already pick up the
+    /// `push cs; call near` shape via per-function `is_far`.
+    /// Fixture 2210.
+    model_has_far_code: bool,
     /// Set by `emit_compare` when it emits an operand-swapped cmp
     /// (e.g. `cmp ax, <reg>` when BCC wants `cmp <reg>, <ax-side>`
     /// reordered). The outer Jcc selector inverts the mnemonic
@@ -985,6 +1011,7 @@ impl<'a> FunctionEmitter<'a> {
             in_arg_expr: false,
             target_186: false,
             stack_check: false,
+            model_has_far_code: false,
             cmp_swapped: false,
         }
     }
@@ -6109,13 +6136,25 @@ impl<'a> FunctionEmitter<'a> {
                 "\tcall\tword ptr DGROUP:_{name}\r\n",
             );
         } else {
-            // Far callee: emit `push cs` before the near call so the
-            // stack looks like a real far call from the callee's
-            // perspective (`retf` pops CS:IP). Fixture 1654.
-            if self.signatures.is_far(name) {
+            // Three forms:
+            //   1. Calls to a function defined in this TU that is
+            //      marked far (per-function `is_far`): push CS,
+            //      call near — same segment, but the callee's
+            //      retf needs CS:IP. Fixture 1654.
+            //   2. Calls to externs under medium / large / huge
+            //      models: true far call (`9a` opcode + 4-byte
+            //      seg:off, fixed up at link time). Fixture 2210
+            //      (`printf("hi\n")` from medium-model main).
+            //   3. Everything else: plain `call near`.
+            let callee_in_tu_far = self.signatures.is_far(name);
+            let callee_is_extern = self.signatures.is_extern_function(name);
+            let use_call_far = self.model_has_far_code && callee_is_extern;
+            if callee_in_tu_far && !use_call_far {
                 self.out.extend_from_slice(b"\tpush\tcs\r\n");
             }
-            if is_pascal_callee {
+            if use_call_far {
+                let _ = write!(self.out, "\tcall\tfar ptr _{name}\r\n");
+            } else if is_pascal_callee {
                 let target = function_symbol_pascal(name);
                 let _ = write!(self.out, "\tcall\tnear ptr {target}\r\n");
             } else {
