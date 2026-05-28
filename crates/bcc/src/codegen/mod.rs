@@ -5099,6 +5099,22 @@ impl<'a> FunctionEmitter<'a> {
             let _ = write!(self.out, "\tcmp\t{width} ptr {addr},0\r\n");
             return;
         }
+        // `if ((<lvalue> = <value>))` — when the value path ends
+        // with `mov byte ptr [...], al` (char store), only AL
+        // carries meaningful bits, so a byte-wise `or al, al`
+        // matches what BCC emits. Fixture 1808
+        // (`while (*d++ = *s++)` strcpy loop).
+        if let ExprKind::AssignLvalueExpr { target, .. } = &cond.kind
+            && self.target_is_char_lvalue(target)
+        {
+            self.emit_expr_to_ax(cond);
+            if last_emit_ends_with_byte_store_al(self.out) {
+                self.out.extend_from_slice(b"\tor\tal,al\r\n");
+            } else {
+                self.out.extend_from_slice(b"\tor\tax,ax\r\n");
+            }
+            return;
+        }
         // Catch-all: evaluate the condition expression into AX and
         // test with `or ax, ax`. Covers any shape we don't have a
         // dedicated peephole for — `if ("X")` (StringLit address,
@@ -5107,6 +5123,30 @@ impl<'a> FunctionEmitter<'a> {
         // sets ZF correctly and avoids a crash.
         self.emit_expr_to_ax(cond);
         self.out.extend_from_slice(b"\tor\tax,ax\r\n");
+    }
+
+    /// True when the target lvalue ultimately writes a byte
+    /// (char/uchar pointee or char field). Used by the cond emitter
+    /// to decide between `or ax, ax` and `or al, al`.
+    fn target_is_char_lvalue(&self, target: &Expr) -> bool {
+        match &target.kind {
+            ExprKind::Deref(inner) => {
+                if let ExprKind::Ident(name) = &inner.kind
+                    && self.locals.has(name)
+                    && let Some(pointee) = self.locals.type_of(name).pointee()
+                {
+                    return pointee.is_char_like();
+                }
+                if let ExprKind::Update { target: name, .. } = &inner.kind
+                    && self.locals.has(name)
+                    && let Some(pointee) = self.locals.type_of(name).pointee()
+                {
+                    return pointee.is_char_like();
+                }
+                false
+            }
+            _ => false,
+        }
     }
 
     /// Emit just the `cmp` instruction (no jump). Four shapes,
@@ -11922,7 +11962,12 @@ impl<'a> FunctionEmitter<'a> {
                 UpdateOp::Inc => "inc",
                 UpdateOp::Dec => "dec",
             };
-            if pointee.is_char_like() && !self.in_arg_expr {
+            // BX / SI / DI are the only 8086 base registers usable
+            // in r/m=`[reg]`. Pointers parked in DX or CX (the
+            // extended-pool slots) need a `mov bx, <reg>` before
+            // the `[bx]` load. Fixture 1808 (`*s++` with s in DX).
+            let needs_bx_indirect = !matches!(reg, Reg::Bx | Reg::Si | Reg::Di);
+            if pointee.is_char_like() && !self.in_arg_expr && !needs_bx_indirect {
                 // Char dereference (non-arg context): BCC reads
                 // through the pointer first, then defers the
                 // increment until after the consumer of AL/AX. We
@@ -17193,6 +17238,39 @@ impl<'a> FunctionEmitter<'a> {
             }
             return;
         }
+        // `*d++ = AX` — post-increment deref-assign through a
+        // reg-resident pointer. Mirror the read-side `*p++` shape:
+        // copy the pre-update pointer into BX, then store through
+        // `[bx]`, then increment the pointer by stride. For DX/CX
+        // pointers the BX indirection is mandatory because those
+        // regs aren't 8086 base registers. Fixture 1808
+        // (`*d++ = *s++` in the strcpy loop).
+        if let ExprKind::Deref(inner) = &target.kind
+            && let ExprKind::Update {
+                target: p_name,
+                op: UpdateOp::Inc,
+                position: UpdatePosition::Post,
+            } = &inner.kind
+            && self.locals.has(p_name)
+            && let LocalLocation::Reg(p_reg) = self.locals.location_of(p_name)
+            && let Some(pointee) = self.locals.type_of(p_name).pointee()
+        {
+            let stride = pointee.size_bytes();
+            let r = p_reg.name();
+            let width = if pointee.is_char_like() { "byte" } else { "word" };
+            let src = if pointee.is_char_like() { "al" } else { "ax" };
+            // BCC emits `mov bx, <reg>; inc <reg>; mov [bx],
+            // <src>` — increment lands BEFORE the store. The
+            // semantic is the same either way (BX holds the
+            // pre-update pointer), but byte-matching needs the
+            // BCC order.
+            let _ = write!(self.out, "\tmov\tbx,{r}\r\n");
+            for _ in 0..stride {
+                let _ = write!(self.out, "\tinc\t{r}\r\n");
+            }
+            let _ = write!(self.out, "\tmov\t{width} ptr [bx],{src}\r\n");
+            return;
+        }
         panic!(
             "emit_store_ax_to_lvalue: target shape not supported yet (no fixture): {target:?}"
         );
@@ -21480,6 +21558,18 @@ impl<'a> FunctionEmitter<'a> {
                     return;
                 }
                 self.emit_expr_to_ax(value);
+                // For a char-lvalue target the store writes AL only.
+                // emit_expr_to_ax may have widened the byte value
+                // via `cbw` to keep AX consistent — strip that
+                // trailing `cbw` since the byte store doesn't need
+                // it. Matches BCC's exact emission for fixture 1808
+                // (`while (*d++ = *s++)`).
+                if self.target_is_char_lvalue(target)
+                    && self.out.ends_with(b"\tcbw\t\r\n")
+                {
+                    let new_len = self.out.len() - b"\tcbw\t\r\n".len();
+                    self.out.truncate(new_len);
+                }
                 self.emit_store_ax_to_lvalue(target);
             }
             ExprKind::CompoundAssignExpr { target, op, value } => {

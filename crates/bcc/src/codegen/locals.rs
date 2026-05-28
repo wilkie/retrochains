@@ -639,8 +639,19 @@ impl Locals {
             .iter()
             .filter(|&&i| matches!(declared[i].ty, Type::Pointer(_)))
             .count();
+        let non_pointer_count = eligible_int.len() - pointer_count;
         let pointer_safe_regs: &[Reg] = if !function_makes_call && pointer_count == 1 {
+            // Single pointer: spillover goes to CX (after SI/DI
+            // taken by other eligibles). Fixture 2208 (1 ptr + 2
+            // ints, pts → CX).
             &[Reg::Si, Reg::Di, Reg::Cx]
+        } else if !function_makes_call && pointer_count >= 2 && non_pointer_count >= 1 {
+            // 2+ pointers mixed with at least one non-pointer
+            // eligible: BCC extends the pointer-safe pool to
+            // include DX (the second pointer lands in DX with
+            // `mov bx, dx` before each deref). Fixture 1808 (`*d++
+            // = *s++` with n in SI, d in DI, s in DX).
+            &[Reg::Si, Reg::Di, Reg::Dx, Reg::Cx]
         } else {
             &[Reg::Si, Reg::Di]
         };
@@ -2938,10 +2949,19 @@ fn pick_si_loop_pointer(
         return Some(i);
     }
     // Plain loop-deref form only wins SI when there are 3+
-    // eligibles (so the pointer is competing against more than one
-    // int — fixture 1551 / 3321). With 2 eligibles, BCC keeps the
-    // higher-use int in SI (fixture 2027).
+    // eligibles AND exactly one pointer is in the eligible set
+    // (so the pointer is competing against ints, not against
+    // other pointers — fixture 1551 / 3321). Multiple competing
+    // pointers fall back to the highest-use SI pick — fixture
+    // 1808 (`*d++ = *s++` has two loop-deref pointers but BCC
+    // puts the high-use int `n` in SI). With 2 eligibles, BCC
+    // keeps the higher-use int in SI (fixture 2027).
+    let pointer_count = eligible
+        .iter()
+        .filter(|&&i| matches!(declared[i].ty, Type::Pointer(_)))
+        .count();
     if eligible.len() >= 3
+        && pointer_count == 1
         && let Some(&i) = qualifying.first()
     {
         return Some(i);
