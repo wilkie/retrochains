@@ -387,6 +387,8 @@ fn instr_size(instr: &Instr) -> usize {
         Instr::MovAxFromCsBx => 3,
         Instr::MovAxFromCsBxDisp { .. } => 4,
         Instr::XchgReg8Reg8 { .. } => 2,
+        Instr::MovAlBpSiDisp { .. } | Instr::CmpAlBpSiDisp { .. } => 3,
+        Instr::CmpBpSiDispImm8 { .. } => 4,
         Instr::MovReg16OffsetSym { .. } => 3,
         Instr::MovReg16GroupSymBxDisp { .. } => 4,
         Instr::AddReg16GroupSymBxDisp { .. } => 4,
@@ -1543,6 +1545,30 @@ fn emit_instr(
             // r/m=dst). Fixture 2122 (`asm xchg ah, al`).
             out.push(0x86);
             out.push(0b11_000_000 | (src.code() << 3) | dst.code());
+        }
+        Instr::MovAlBpSiDisp { disp } => {
+            // `mov al, byte ptr [bp+si+disp8]` → 8A 42 dd. ModR/M
+            // 42 = mod=01 reg=AL (000) r/m=010 ([BP+SI+disp8]).
+            // Fixture 2488.
+            out.push(0x8A);
+            out.push(0x42);
+            out.push(*disp as u8);
+        }
+        Instr::CmpAlBpSiDisp { disp } => {
+            // `cmp al, byte ptr [bp+si+disp8]` → 3A 42 dd. Same
+            // ModR/M as `MovAlBpSiDisp` — only the opcode differs.
+            out.push(0x3A);
+            out.push(0x42);
+            out.push(*disp as u8);
+        }
+        Instr::CmpBpSiDispImm8 { disp, imm } => {
+            // `cmp byte ptr [bp+si+disp8], imm8` → 80 7A dd ii.
+            // Grp1 r/m8, imm8 with /7 = CMP, r/m=010 ([BP+SI+
+            // disp8]), mod=01. Fixture 2488.
+            out.push(0x80);
+            out.push(0x7A);
+            out.push(*disp as u8);
+            out.push(*imm);
         }
         Instr::MovReg16OffsetSym { reg, symbol } => {
             // `mov r16,offset <code-symbol>` → (B8+rc) lo hi.

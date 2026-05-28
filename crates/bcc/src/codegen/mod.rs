@@ -4160,6 +4160,34 @@ impl<'a> FunctionEmitter<'a> {
         true_slot: Option<u32>,
         false_slot: Option<u32>,
     ) {
+        // `<stack-char-arr>[<si-int>] != 0` / `== 0` — direct
+        // memory compare via the BP+SI addressing mode. Saves the
+        // `mov al; cbw; or ax, ax` chain the generic path would
+        // emit. Fixture 2488 (for-loop cond `a[i] != 0`).
+        if let ExprKind::BinOp { op, left, right } = &cond.kind
+            && matches!(op, BinOp::Eq | BinOp::Ne)
+            && matches!(&right.kind, ExprKind::IntLit(0))
+            && let ExprKind::ArrayIndex { array, index } = &left.kind
+            && let Some((disp, _)) = self.bp_idx_disp_for_char_array(array, index)
+        {
+            let _ = write!(
+                self.out,
+                "\tcmp\tbyte ptr [bp+si{}],0\r\n",
+                signed_disp_suffix(disp),
+            );
+            let (jmp_true, jmp_false) = match op {
+                BinOp::Eq => ("je", "jne"),
+                BinOp::Ne => ("jne", "je"),
+                _ => unreachable!(),
+            };
+            if let Some(tslot) = true_slot {
+                let _ = write!(self.out, "\t{jmp_true}\tshort {}\r\n", self.label_ref(tslot));
+            }
+            if let Some(fslot) = false_slot {
+                let _ = write!(self.out, "\t{jmp_false}\tshort {}\r\n", self.label_ref(fslot));
+            }
+            return;
+        }
         // Float comparison: `<float-expr> <relop> <float-expr>`
         // routes through the 8087 fcomp / fstsw / sahf dance. The
         // condition codes (C0/C2/C3) map onto CF/PF/ZF after
@@ -5402,6 +5430,20 @@ impl<'a> FunctionEmitter<'a> {
             );
             return;
         }
+        // `if (<stack-char-arr>[<si-resident-int>])` — zero-test on
+        // a char-array element accessed via BP+SI. Fold to a single
+        // `cmp byte ptr [bp+si+disp], 0`. Fixture 2488
+        // (for-loop cond `a[i] != 0`).
+        if let ExprKind::ArrayIndex { array, index } = &cond.kind
+            && let Some((disp, _)) = self.bp_idx_disp_for_char_array(array, index)
+        {
+            let _ = write!(
+                self.out,
+                "\tcmp\tbyte ptr [bp+si{}],0\r\n",
+                signed_disp_suffix(disp),
+            );
+            return;
+        }
         // `if (<reg-local> & K)` — bit test against a constant mask
         // when the LHS is a register-resident int local. BCC emits
         // `test <reg>, K` (4 bytes, F7 C6 imm16 for SI; the `&` result
@@ -5536,6 +5578,33 @@ impl<'a> FunctionEmitter<'a> {
     /// 2. LHS in a register: `cmp <reg>, <rhs>`
     /// 3. LHS is a stack local and RHS is a constant: `cmp word ptr [bp-N], K`
     /// 4. Otherwise: `mov ax, <lhs>` then `cmp ax, <rhs>`
+    /// Recognize `<stack-char-array>[<ident-in-SI>]` (the index
+    /// must specifically be in SI today — DI would also be a valid
+    /// base register and we'd extend if a fixture exercises it).
+    /// Returns the array base's signed bp-offset together with the
+    /// chosen base register. Used by the BP+SI byte-load peephole.
+    /// Fixture 2488.
+    fn bp_idx_disp_for_char_array(
+        &self,
+        array: &Expr,
+        index: &Expr,
+    ) -> Option<(i8, crate::codegen::locals::Reg)> {
+        let ExprKind::Ident(arr_name) = &array.kind else { return None };
+        if !self.locals.has(arr_name) { return None; }
+        let arr_ty = self.locals.type_of(arr_name);
+        let Some(elem_ty) = arr_ty.array_elem() else { return None };
+        if !elem_ty.is_char_like() { return None; }
+        let LocalLocation::Stack(arr_off) = self.locals.location_of(arr_name) else { return None };
+        let disp = i8::try_from(arr_off).ok()?;
+        let ExprKind::Ident(idx_name) = &index.kind else { return None };
+        if !self.locals.has(idx_name) { return None; }
+        let idx_ty = self.locals.type_of(idx_name);
+        if !idx_ty.is_int_like() { return None; }
+        let LocalLocation::Reg(reg) = self.locals.location_of(idx_name) else { return None };
+        if !matches!(reg, crate::codegen::locals::Reg::Si) { return None; }
+        Some((disp, reg))
+    }
+
     /// Emit BCC's per-iteration address-into-BX prelude for a
     /// stack-array-of-struct field access with a non-power-of-2
     /// element stride:
@@ -5749,6 +5818,31 @@ impl<'a> FunctionEmitter<'a> {
         {
             let _ = write!(self.out, "\tmov\tal,byte ptr [{}]\r\n", l_reg.name());
             let _ = write!(self.out, "\tcmp\tal,byte ptr [{}]\r\n", r_reg.name());
+            return;
+        }
+        // `<stack-char-arr>[<reg-int>] <relop> <stack-char-arr>[<same-reg-int>]`
+        // — both sides indexed by the same SI-resident int local.
+        // Fold to `mov al, [bp+si+lhs_disp]; cmp al, [bp+si+rhs_disp]`.
+        // Fixture 2488 (`a[i] != b[i]`).
+        if let (Some((l_disp, l_reg)), Some((r_disp, r_reg))) = (
+            (if let ExprKind::ArrayIndex { array, index } = &left.kind {
+                self.bp_idx_disp_for_char_array(array, index)
+            } else { None }),
+            (if let ExprKind::ArrayIndex { array, index } = &right.kind {
+                self.bp_idx_disp_for_char_array(array, index)
+            } else { None }),
+        ) {
+            assert_eq!(l_reg, r_reg, "two char-arr BP+SI accesses must share base reg");
+            let _ = write!(
+                self.out,
+                "\tmov\tal,byte ptr [bp+si{}]\r\n",
+                signed_disp_suffix(l_disp),
+            );
+            let _ = write!(
+                self.out,
+                "\tcmp\tal,byte ptr [bp+si{}]\r\n",
+                signed_disp_suffix(r_disp),
+            );
             return;
         }
         // `<char_lvalue> <relop> <char_lvalue>` — both sides are
@@ -13031,6 +13125,30 @@ impl<'a> FunctionEmitter<'a> {
     ///   `DGROUP:s@<offset>` reference for constant indices. Variable
     ///   indexing of a string literal isn't observed yet.
     fn emit_array_index_to_ax(&mut self, array: &Expr, index: &Expr) {
+        // `<stack-char-arr>[<ident-in-SI-or-DI>]` — fold to the
+        // `[BP+SI+disp]` / `[BP+DI+disp]` addressing mode. Each
+        // access is `mov al, byte ptr [bp+si+disp]` + widen,
+        // saving the LEA / mov-bx / add-bx prelude. Fixture 2488
+        // (`char a[4]; ... a[i]` with `i` in SI).
+        if let Some((disp, idx_reg)) = self.bp_idx_disp_for_char_array(array, index) {
+            let _ = idx_reg;
+            let _ = write!(self.out, "\tmov\tal,byte ptr [bp+si{}]\r\n", signed_disp_suffix(disp));
+            // Re-resolve the elem type for the widen choice.
+            let unsigned = if let ExprKind::Ident(name) = &array.kind
+                && self.locals.has(name)
+                && let Some(elem) = self.locals.type_of(name).array_elem()
+            {
+                elem.is_unsigned()
+            } else {
+                false
+            };
+            if unsigned {
+                self.out.extend_from_slice(b"\tmov\tah,0\r\n");
+            } else {
+                self.out.extend_from_slice(b"\tcbw\t\r\n");
+            }
+            return;
+        }
         if let ExprKind::StringLit(bytes) = &array.kind {
             return self.emit_string_lit_index_to_ax(bytes, index);
         }
@@ -24797,6 +24915,17 @@ fn normalize_asm_line(s: &str) -> String {
         }
     }
     out
+}
+
+/// Format a disp8 as a signed string suffix — `+5` / `-3` / `+0`.
+/// Used for the `[bp+si{}]` addressing mode in the BP+SI char-
+/// array peephole. Fixture 2488.
+fn signed_disp_suffix(disp: i8) -> String {
+    if disp >= 0 {
+        format!("+{disp}")
+    } else {
+        format!("{disp}")
+    }
 }
 
 fn body_has_return(body: &[Stmt]) -> bool {

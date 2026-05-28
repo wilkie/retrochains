@@ -1407,6 +1407,11 @@ fn parse_mov(operands: &str, line_no: usize) -> AsmResult<Instr> {
         if rhs == "byte ptr [bx+di]" {
             return Ok(Instr::MovAlFromBxDi);
         }
+        // `mov al, byte ptr [bp+si+disp]` — char-array load via
+        // BP+SI indexed addressing. Fixture 2488.
+        if let Some(disp) = parse_byte_bp_si_disp(rhs) {
+            return Ok(Instr::MovAlBpSiDisp { disp });
+        }
         // `mov al,byte ptr [bx+disp8]` — char-pointer subscript
         // load (fixture 865). disp=0 stays with `MovAlFromBxPtr`
         // (2-byte form).
@@ -3014,6 +3019,20 @@ fn parse_cmp(operands: &str, line_no: usize) -> AsmResult<Instr> {
         if rhs == "byte ptr [bx]" {
             return Ok(Instr::CmpAlFromBxPtr);
         }
+        // `cmp al, byte ptr [bp+si+disp]` — char-array element
+        // compared against another such element while the index
+        // is in SI. Fixture 2488 (`a[i] != b[i]`).
+        if let Some(disp) = parse_byte_bp_si_disp(rhs) {
+            return Ok(Instr::CmpAlBpSiDisp { disp });
+        }
+    }
+    // `cmp byte ptr [bp+si+disp], imm8` — char-array element
+    // compared against a constant while the index is in SI. Used
+    // by `a[i] != 0` for-loop terminators. Fixture 2488.
+    if let Some(disp) = parse_byte_bp_si_disp(lhs)
+        && let Some(imm) = parse_imm8(rhs)
+    {
+        return Ok(Instr::CmpBpSiDispImm8 { disp, imm });
     }
     if lhs == "ax" {
         if let Some(offset) = parse_bp_relative(rhs) {
@@ -4123,6 +4142,20 @@ fn parse_word_di_disp(s: &str) -> Option<i8> {
 /// displacement (0 if absent). Used by the global-pointer compound
 /// path `p[K] += y` where BCC loads the pointer into BX and emits
 /// `<op> word ptr [bx+offset], ax` (fixture 862).
+/// Parse `byte ptr [bp+si+K]` / `byte ptr [bp+si-K]` /
+/// `byte ptr [bp+si]`, returning the signed disp8. Fixture 2488
+/// (char-array index via `[BP+SI+disp]`).
+fn parse_byte_bp_si_disp(s: &str) -> Option<i8> {
+    let s = s.trim().strip_prefix("byte ptr ")?;
+    let inside = s.strip_prefix('[')?.strip_suffix(']')?;
+    if inside == "bp+si" {
+        return Some(0);
+    }
+    let rest = inside.strip_prefix("bp+si")?;
+    let signed: i32 = rest.parse().ok()?;
+    i8::try_from(signed).ok()
+}
+
 /// Parse `<prefix>+<disp>]` returning the disp byte. Caller passes
 /// the leading `"word ptr es:[bx"` (or byte variant) so this just
 /// peels off the trailing `+K]` or accepts `]` as disp=0. Disp=0

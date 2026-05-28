@@ -2168,6 +2168,21 @@ pub enum Instr {
     /// (XCHG r8, r/m8). Used inline from asm bodies — fixture
     /// 2122's `asm xchg ah, al` swaps AX's two halves.
     XchgReg8Reg8 { dst: Reg8, src: Reg8 },
+    /// `mov al, byte ptr [bp+si+disp8]` — load a byte using the
+    /// `[BP+SI+disp]` addressing mode (ModR/M r/m=010, mod=01 +
+    /// disp8). Used by char-array subscript loads when the
+    /// index is in SI. Encoding: `8A 42 dd`. Fixture 2488.
+    MovAlBpSiDisp { disp: i8 },
+    /// `cmp al, byte ptr [bp+si+disp8]` — compare AL against a
+    /// byte at `[BP+SI+disp]`. Encoding: `3A 42 dd`. Used by
+    /// char-array element comparison (`a[i] != b[i]`).
+    /// Fixture 2488.
+    CmpAlBpSiDisp { disp: i8 },
+    /// `cmp byte ptr [bp+si+disp8], imm8` — Grp1 CMP r/m8, imm8
+    /// (opcode `80`, /7) at `[BP+SI+disp]`. Used by the for-loop
+    /// condition `a[i] != 0` when `a` is a stack char array and
+    /// `i` lives in SI. Encoding: `80 7A dd ii`. Fixture 2488.
+    CmpBpSiDispImm8 { disp: i8, imm: u8 },
     /// `jmp word ptr cs:[bx+<imm8>]` — indirect jump through
     /// CS:BX+disp8. Encoding: 2E FF 67 dd. Used by linear-search
     /// dispatch to dispatch to the matching label table entry
