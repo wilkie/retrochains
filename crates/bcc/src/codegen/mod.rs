@@ -4338,6 +4338,45 @@ impl<'a> FunctionEmitter<'a> {
         // tie-breaker. Caller must supply BOTH slots so the
         // intermediate signed-direction jump can land at the body
         // (true target). Fixture 234.
+        // `<far-ptr> <eq/ne> <far-ptr>` for non-huge FarPointer stack
+        // locals — BCC emits an inline two-half compare rather than
+        // calling N_PCMP@ (which is reserved for huge pointers).
+        // Shape: load LHS seg→AX and off→DX; cmp AX,RHS-seg; cmp
+        // DX,RHS-off; jumps wired so segs-differ-OR-offs-differ → !=
+        // and both-match → ==. Mirrors the long-eq/ne arm below.
+        if let ExprKind::BinOp { op, left, right } = &cond.kind
+            && matches!(op, BinOp::Eq | BinOp::Ne)
+            && let Some(l_off) = self.far_ptr_lvalue_addr(left)
+            && let Some(r_off) = self.far_ptr_lvalue_addr(right)
+            && let Some(fslot) = false_slot
+        {
+            let _ = write!(self.out, "\tmov\tax,word ptr {}\r\n", bp_addr(l_off + 2));
+            let _ = write!(self.out, "\tmov\tdx,word ptr {}\r\n", bp_addr(l_off));
+            let _ = write!(self.out, "\tcmp\tax,word ptr {}\r\n", bp_addr(r_off + 2));
+            match op {
+                BinOp::Eq => {
+                    let _ = write!(self.out, "\tjne\tshort {}\r\n", self.label_ref(fslot));
+                    let _ = write!(self.out, "\tcmp\tdx,word ptr {}\r\n", bp_addr(r_off));
+                    let _ = write!(self.out, "\tjne\tshort {}\r\n", self.label_ref(fslot));
+                }
+                BinOp::Ne => {
+                    let Some(tslot) = true_slot else {
+                        let local_true =
+                            self.label_plan.base(cond.span.start, cond.span.end);
+                        let _ = write!(self.out, "\tjne\tshort {}\r\n", self.label_ref(local_true));
+                        let _ = write!(self.out, "\tcmp\tdx,word ptr {}\r\n", bp_addr(r_off));
+                        let _ = write!(self.out, "\tje\tshort {}\r\n", self.label_ref(fslot));
+                        self.emit_label(local_true);
+                        return;
+                    };
+                    let _ = write!(self.out, "\tjne\tshort {}\r\n", self.label_ref(tslot));
+                    let _ = write!(self.out, "\tcmp\tdx,word ptr {}\r\n", bp_addr(r_off));
+                    let _ = write!(self.out, "\tje\tshort {}\r\n", self.label_ref(fslot));
+                }
+                _ => unreachable!(),
+            }
+            return;
+        }
         // `<long_lvalue> <eq/ne> <long_lvalue>` — both stack or
         // global, equality only (no strict-cmp signedness issue).
         // Load a's halves into AX/DX, cmp against b's halves with
@@ -5753,6 +5792,22 @@ impl<'a> FunctionEmitter<'a> {
         if !self.locals.has(name) { return None; }
         let ty = self.locals.type_of(name);
         if !matches!(ty, Type::FarPointer { is_huge: true, .. }) { return None; }
+        if let LocalLocation::Stack(off) = self.locals.location_of(name) {
+            Some(off)
+        } else {
+            None
+        }
+    }
+
+    /// Stack offset of a non-huge `FarPointer` lvalue, or `None`. Used
+    /// to route inline two-half equality / inequality comparisons.
+    /// The low half (offset) lives at `[bp+off]`; the high half
+    /// (segment) lives at `[bp+off+2]`.
+    fn far_ptr_lvalue_addr(&self, e: &Expr) -> Option<i16> {
+        let ExprKind::Ident(name) = &e.kind else { return None };
+        if !self.locals.has(name) { return None; }
+        let ty = self.locals.type_of(name);
+        if !matches!(ty, Type::FarPointer { is_huge: false, .. }) { return None; }
         if let LocalLocation::Stack(off) = self.locals.location_of(name) {
             Some(off)
         } else {

@@ -131,12 +131,27 @@ impl LabelPlan {
             function.body.as_deref().unwrap_or(&[]),
             &mut long_names,
         );
+        // Same idea for non-huge FarPointer locals — the inline
+        // two-half `!=` compare needs the same extra label slot.
+        // Fixture 3944.
+        let mut far_names: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        for p in &function.params {
+            if matches!(p.ty, crate::ast::Type::FarPointer { is_huge: false, .. }) {
+                far_names.insert(p.name.clone());
+            }
+        }
+        collect_far_decl_names(
+            function.body.as_deref().unwrap_or(&[]),
+            &mut far_names,
+        );
         let mut ctx = PlanCtx {
             counter: 0,
             bases: HashMap::new(),
             loops: HashMap::new(),
             switches: HashMap::new(),
             long_names,
+            far_names,
         };
         plan_stmts(function.body.as_deref().unwrap_or(&[]), &mut ctx);
         Self {
@@ -194,6 +209,11 @@ struct PlanCtx {
     loops: HashMap<u32, LoopPlan>,
     switches: HashMap<u32, SwitchPlan>,
     long_names: std::collections::HashSet<String>,
+    /// Locals whose type is a non-huge `FarPointer`. Used to
+    /// recognize `<far-ptr> != <far-ptr>` shapes that need an
+    /// extra label slot for the fall-through-on-true path of the
+    /// inline two-half compare. Fixture 3944.
+    far_names: std::collections::HashSet<String>,
 }
 
 fn collect_long_decl_names(stmts: &[Stmt], set: &mut std::collections::HashSet<String>) {
@@ -225,6 +245,39 @@ fn collect_long_decl_names(stmts: &[Stmt], set: &mut std::collections::HashSet<S
 
 fn is_long_lvalue_expr_in(expr: &Expr, long_names: &std::collections::HashSet<String>) -> bool {
     matches!(&expr.kind, ExprKind::Ident(n) if long_names.contains(n))
+}
+
+fn is_far_lvalue_expr_in(expr: &Expr, far_names: &std::collections::HashSet<String>) -> bool {
+    matches!(&expr.kind, ExprKind::Ident(n) if far_names.contains(n))
+}
+
+fn collect_far_decl_names(stmts: &[Stmt], set: &mut std::collections::HashSet<String>) {
+    for s in stmts {
+        match &s.kind {
+            StmtKind::Declare { name, ty, .. }
+                if matches!(ty, crate::ast::Type::FarPointer { is_huge: false, .. }) =>
+            {
+                set.insert(name.clone());
+            }
+            StmtKind::If { then_branch, else_branch, .. } => {
+                collect_far_decl_names(then_branch, set);
+                if let Some(b) = else_branch {
+                    collect_far_decl_names(b, set);
+                }
+            }
+            StmtKind::While { body, .. } | StmtKind::DoWhile { body, .. } => {
+                collect_far_decl_names(body, set);
+            }
+            StmtKind::For { body, .. } => collect_far_decl_names(body, set),
+            StmtKind::Switch { cases, .. } => {
+                for c in cases {
+                    collect_far_decl_names(&c.body, set);
+                }
+            }
+            StmtKind::Block(stmts) => collect_far_decl_names(stmts, set),
+            _ => {}
+        }
+    }
 }
 
 fn plan_stmts(stmts: &[Stmt], ctx: &mut PlanCtx) {
@@ -593,6 +646,18 @@ fn plan_expr_condition(e: &Expr, ctx: &mut PlanCtx) {
         ExprKind::BinOp { op: BinOp::Ne, left, right }
             if is_long_lvalue_expr_in(left, &ctx.long_names)
                 && is_long_lvalue_expr_in(right, &ctx.long_names) =>
+        {
+            ctx.bases.insert((e.span.start, e.span.end), ctx.counter);
+            ctx.counter += 1;
+            plan_expr_value(left, ctx);
+            plan_expr_value(right, ctx);
+        }
+        // Same idea for non-huge FarPointer locals — the inline
+        // two-half `!=` compare needs a fall-through-on-true label.
+        // Fixture 3944.
+        ExprKind::BinOp { op: BinOp::Ne, left, right }
+            if is_far_lvalue_expr_in(left, &ctx.far_names)
+                && is_far_lvalue_expr_in(right, &ctx.far_names) =>
         {
             ctx.bases.insert((e.span.start, e.span.end), ctx.counter);
             ctx.counter += 1;
