@@ -11,6 +11,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+use crate::cli::MemoryModel;
 use crate::emit_s::{build_asm, EmitError};
 
 /// Compile one `.C` source to `.OBJ` next to it in the current directory.
@@ -20,6 +21,7 @@ use crate::emit_s::{build_asm, EmitError};
 /// assembler errors.
 pub fn emit_dash_c(
     source_path: &Path,
+    memory_model: MemoryModel,
     merge_strings: bool,
     defines: &[(String, String)],
     unsigned_chars: bool,
@@ -45,7 +47,7 @@ pub fn emit_dash_c(
         .map_or_else(|| "out.c".to_owned(), str::to_ascii_lowercase);
     let output_path = PathBuf::from(format!("{}.OBJ", basename.to_ascii_uppercase()));
 
-    let bytes = build_obj(&source, &lowered, mtime, merge_strings, defines, unsigned_chars, optimize, target_186, stack_check, no_reg_vars)?;
+    let bytes = build_obj(&source, &lowered, mtime, memory_model, merge_strings, defines, unsigned_chars, optimize, target_186, stack_check, no_reg_vars)?;
     fs::write(&output_path, bytes)?;
     Ok(output_path)
 }
@@ -62,6 +64,7 @@ pub fn build_obj(
     source: &str,
     source_filename_lower: &str,
     mtime: SystemTime,
+    memory_model: MemoryModel,
     merge_strings: bool,
     defines: &[(String, String)],
     unsigned_chars: bool,
@@ -75,5 +78,9 @@ pub fn build_obj(
     // plus the trailing 0x1A EOF byte). Convert to a &str for tasm.
     let asm_text =
         std::str::from_utf8(&asm_bytes).map_err(|e| EmitError::AsmNotUtf8(e.to_string()))?;
-    tasm::assemble(asm_text).map_err(EmitError::Assemble)
+    let model_marker = match memory_model {
+        MemoryModel::Tiny => 0x08,
+        MemoryModel::Small => 0x09,
+    };
+    tasm::assemble_with_model(asm_text, model_marker).map_err(EmitError::Assemble)
 }

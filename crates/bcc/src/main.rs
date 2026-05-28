@@ -24,7 +24,7 @@ fn try_main() -> Result<(), Box<dyn std::error::Error>> {
         }
         CompileMode::Object => {
             for src in &parsed.sources {
-                emit_dash_c(src, parsed.merge_strings, &parsed.defines, parsed.unsigned_chars, parsed.optimize, parsed.target_186, parsed.stack_check, parsed.no_reg_vars)?;
+                emit_dash_c(src, parsed.memory_model, parsed.merge_strings, &parsed.defines, parsed.unsigned_chars, parsed.optimize, parsed.target_186, parsed.stack_check, parsed.no_reg_vars)?;
             }
             Ok(())
         }

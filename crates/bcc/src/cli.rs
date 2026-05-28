@@ -61,10 +61,15 @@ pub enum CompileMode {
     Object,
 }
 
-/// `-m<x>`: which memory model to compile for. Only `-ms` (small) is
-/// recognized for now.
+/// `-m<x>`: which memory model to compile for. The OBJ-level
+/// difference between Tiny and Small for trivial code is just a
+/// 1-byte change in the COMENT class-0xEA model marker (`08` vs
+/// `09`); other models additionally change segment names and
+/// near/far call/return conventions, which the rest of the
+/// codegen pipeline hasn't been wired up for yet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MemoryModel {
+    Tiny,
     Small,
 }
 
@@ -100,6 +105,7 @@ pub fn parse_args(argv: &[String]) -> Result<ParsedArgs, CliError> {
             "-S" => mode = Some(CompileMode::Assembly),
             "-c" => mode = Some(CompileMode::Object),
             "-ms" => memory_model = Some(MemoryModel::Small),
+            "-mt" => memory_model = Some(MemoryModel::Tiny),
             "-d" => merge_strings = true,
             "-K" => unsigned_chars = true,
             "-O" | "-O2" => optimize = true,

@@ -24,6 +24,19 @@ pub use ir::{AsmError, AsmResult};
 /// # Errors
 /// Returns [`AsmError`] on any lex/parse/encode failure.
 pub fn assemble(source: &str) -> AsmResult<Vec<u8>> {
+    assemble_with_model(source, 0x09)
+}
+
+/// Like [`assemble`], but lets the caller override the BCC memory-
+/// model marker byte that goes into the COMENT class-0xEA record.
+/// `0x09` is small (BCC's default), `0x08` is tiny. Other models
+/// would additionally need different segment names / call
+/// conventions, which the asm-level codegen pipeline hasn't been
+/// wired up for yet. Fixture 1769 (tiny-model trivial).
+///
+/// # Errors
+/// Returns [`AsmError`] on any lex/parse/encode failure.
+pub fn assemble_with_model(source: &str, model_marker: u8) -> AsmResult<Vec<u8>> {
     let mut module = parse::parse(source)?;
     // TASM auto-injects `FIWRQQ` and `FIDRQQ` (Borland's 8087
     // floating-point markers) when the module uses standalone
@@ -45,7 +58,7 @@ pub fn assemble(source: &str) -> AsmResult<Vec<u8>> {
     {
         module.externs.push("FIDRQQ".to_string());
     }
-    emit::emit(&module)
+    emit::emit(&module, model_marker)
 }
 
 fn module_has_fwait(module: &ir::Module) -> bool {

@@ -12,12 +12,7 @@ use crate::ir::{AsmResult, FixupKind, FixupReq, Module, SegAlign, SegCombine};
 /// OBJ — see `specs/formats/OMF.md` §COMENT.
 const TRANSLATOR_STRING: &[u8] = b"TC86 Borland Turbo C++ 2.0";
 
-/// The COMENT class 0xEA payload TASM emits for the small memory model.
-/// The 0x01 is plausibly a model-id (small); the 0x09 is unexplained.
-/// Will need broadening when we capture non-small-model fixtures.
-const MEMORY_MODEL_MARKER: &[u8] = &[0x01, 0x09];
-
-pub fn emit(module: &Module) -> AsmResult<Vec<u8>> {
+pub fn emit(module: &Module, model_marker: u8) -> AsmResult<Vec<u8>> {
     let encoded = encode_module(module)?;
 
     let mut b = ObjBuilder::new();
@@ -41,11 +36,13 @@ pub fn emit(module: &Module) -> AsmResult<Vec<u8>> {
         b.write_coment(&payload);
     }
 
-    // N+1. COMENT class 0xEA — memory-model marker.
-    let mut model_coment = Vec::with_capacity(2 + MEMORY_MODEL_MARKER.len());
-    model_coment.push(0x00);
-    model_coment.push(0xEA);
-    model_coment.extend_from_slice(MEMORY_MODEL_MARKER);
+    // N+1. COMENT class 0xEA — memory-model marker. The second
+    // payload byte encodes the BCC memory model (tiny=0x08,
+    // small=0x09, medium=0x0A, compact=0x0B, large=0x0C,
+    // huge=0x0D). Other emitted bytes between models can also
+    // differ (segment names, near vs far returns, etc.); only the
+    // marker is parameterized here.
+    let model_coment = [0x00, 0xEA, 0x01, model_marker];
     b.write_coment(&model_coment);
 
     // LNAMES.
@@ -303,7 +300,7 @@ mod tests {
     #[test]
     fn fixture_002_byte_exact() {
         let module = parse(FIXTURE_001_ASM).unwrap();
-        let bytes = emit(&module).unwrap();
+        let bytes = emit(&module, 0x09).unwrap();
         assert_eq!(bytes, FIXTURE_002_OBJ);
     }
 }
