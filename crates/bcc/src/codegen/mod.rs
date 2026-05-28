@@ -20660,6 +20660,45 @@ impl<'a> FunctionEmitter<'a> {
 
     /// Emit code that leaves the value of `e` in AX.
     fn emit_expr_to_ax(&mut self, e: &Expr) {
+        // Huge-pointer subtraction `p2 - p1` — produces a long
+        // element-difference value. BCC's emission:
+        //   xor ax, ax            ; high half of element-size long
+        //   mov dx, <stride>      ; low half
+        //   push ax / push dx     ; stride pushed first (becomes the
+        //                         ; divisor on the LDIV stack)
+        //   mov dx, [p2+2]        ; LHS seg
+        //   mov ax, [p2]          ; LHS off
+        //   mov cx, [p1+2]        ; RHS seg
+        //   mov bx, [p1]          ; RHS off
+        //   call N_PSBP@          ; returns byte-diff long in DX:AX
+        //   push dx / push ax     ; dividend pushed second
+        //   call N_LDIV@          ; result long element-diff in DX:AX
+        // The pre-call pushes get cleaned by the Pascal-style ret N
+        // tail of each helper, so no caller `add sp,N` is emitted.
+        // Fixture 1773 (`(int)(p2 - p1)`).
+        if let ExprKind::BinOp { op: BinOp::Sub, left, right } = &e.kind
+            && let (Some(l_off), Some(r_off)) =
+                (self.huge_ptr_lvalue_addr(left), self.huge_ptr_lvalue_addr(right))
+            && let ExprKind::Ident(l_name) = &left.kind
+            && let Some(pointee) = self.locals.type_of(l_name).pointee()
+        {
+            let stride = pointee.size_bytes();
+            self.out.extend_from_slice(b"\txor\tax,ax\r\n");
+            let _ = write!(self.out, "\tmov\tdx,{stride}\r\n");
+            self.out.extend_from_slice(b"\tpush\tax\r\n");
+            self.out.extend_from_slice(b"\tpush\tdx\r\n");
+            let _ = write!(self.out, "\tmov\tdx,word ptr {}\r\n", bp_addr(l_off + 2));
+            let _ = write!(self.out, "\tmov\tax,word ptr {}\r\n", bp_addr(l_off));
+            let _ = write!(self.out, "\tmov\tcx,word ptr {}\r\n", bp_addr(r_off + 2));
+            let _ = write!(self.out, "\tmov\tbx,word ptr {}\r\n", bp_addr(r_off));
+            self.out.extend_from_slice(b"\tcall\tnear ptr N_PSBP@\r\n");
+            self.helpers.insert("N_PSBP@".to_string());
+            self.out.extend_from_slice(b"\tpush\tdx\r\n");
+            self.out.extend_from_slice(b"\tpush\tax\r\n");
+            self.out.extend_from_slice(b"\tcall\tnear ptr N_LDIV@\r\n");
+            self.helpers.insert("N_LDIV@".to_string());
+            return;
+        }
         if let Some(v) = try_const_eval(e) {
             // Narrow to 16 bits — BCC writes signed-negative constants
             // as their unsigned-wrapped form (fixture 036: `-5` →
