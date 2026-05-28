@@ -1247,6 +1247,18 @@ pub enum Instr {
     /// same SegRelTargetFrameSegment FIXUPP shape. Used by huge-
     /// model char-global reads. Fixture 3698 (`char g = 'X'`).
     MovAlSym { symbol: String, offset: i16 },
+    /// `mov word ptr <symbol>, imm16` — bare-symbol immediate
+    /// store. Encoding: `C7 06 lo hi imm_lo imm_hi` (Grp1 r/m16,
+    /// imm16 with disp16-only addressing, ModR/M = 0x06 = mod=00
+    /// reg=000 r/m=110). FIXUP shape mirrors `MovAxSym`. Used by
+    /// huge-model immediate stores to globals. Fixture 3704
+    /// (`g = 42;` for `int g;`).
+    MovSymImm16 { symbol: String, offset: i16, imm: u16 },
+    /// `mov word ptr <symbol>, ax` — bare-symbol AX-source store.
+    /// Encoding: `A3 lo hi` (mov moffs16, AX). FIXUP shape
+    /// mirrors `MovAxSym`. Used by huge-model AX-route stores to
+    /// globals. Fixture 3705 (`g = g + 1;`).
+    MovSymAx { symbol: String, offset: i16 },
     /// `les bx, word ptr [bp+disp]` — `C4` + ModR/M `mod=mm reg=011
     /// (BX) r/m=110 (BP+disp)`. Loads the 4-byte far pointer at
     /// `[bp+disp..disp+3]` into ES:BX (offset → BX, segment → ES).

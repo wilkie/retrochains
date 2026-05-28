@@ -1304,6 +1304,37 @@ fn parse_mov(operands: &str, line_no: usize) -> AsmResult<Instr> {
             });
         }
     }
+    // Bare-symbol AX-source store `mov word ptr _g, ax` — huge-
+    // model write companion to `MovAxSym`. Fixture 3705.
+    if rhs == "ax"
+        && let Some(symbol) = lhs.strip_prefix("word ptr ")
+        && let Some(first) = symbol.chars().next()
+        && (first == '_' || first == '@')
+        && !symbol.contains(':')
+        && !symbol.contains('[')
+    {
+        let (sym, offset) = split_sym_offset(symbol);
+        return Ok(Instr::MovSymAx {
+            symbol: sym.to_string(),
+            offset,
+        });
+    }
+    // Bare-symbol immediate store `mov word ptr _g, imm16` —
+    // huge-model immediate write. Fixture 3704.
+    if let Some(symbol) = lhs.strip_prefix("word ptr ")
+        && let Some(first) = symbol.chars().next()
+        && (first == '_' || first == '@')
+        && !symbol.contains(':')
+        && !symbol.contains('[')
+        && let Some(imm) = parse_imm16(rhs)
+    {
+        let (sym, offset) = split_sym_offset(symbol);
+        return Ok(Instr::MovSymImm16 {
+            symbol: sym.to_string(),
+            offset,
+            imm: imm as u16,
+        });
+    }
     // `mov <reg16>,word ptr <group>:<sym>[+N]` — generic disp16 load
     // for non-AX destinations (AX has the shorter A1 path above).
     // Fixture 192: `mov bx,word ptr DGROUP:_p`.

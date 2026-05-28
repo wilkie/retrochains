@@ -509,12 +509,14 @@ fn instr_size(instr: &Instr) -> usize {
         Instr::MovAxGroupSym { .. }
         | Instr::MovAxSym { .. }
         | Instr::MovAlSym { .. }
+        | Instr::MovSymAx { .. }
         | Instr::MovAlGroupSym { .. }
         | Instr::MovGroupSymAl { .. }
         | Instr::MovReg16OffsetGroupSym { .. } => 3,
         Instr::MovReg8GroupSym { .. } => 4,
         Instr::MovReg16WordGroupSym { .. } => 4,
         Instr::MovGroupSymImm16 { .. } => 6,
+        Instr::MovSymImm16 { .. } => 6,
         Instr::MovGroupSymImm8 { .. } => 5,
         Instr::MovGroupSymOffsetGroupSym { .. } => 6,
         Instr::MovGroupSymAx { .. } => 3,
@@ -1745,6 +1747,49 @@ fn emit_instr(
             out.push(0xA0);
             let imm_start = out.len();
             out.extend_from_slice(&value.to_le_bytes());
+            fixups.push(FixupReq {
+                data_offset: u16::try_from(imm_start).expect("offset fits"),
+                kind: FixupKind::SegRelTargetFrameSegment {
+                    segment_idx: target_seg_idx,
+                },
+            });
+        }
+        Instr::MovSymAx { symbol, offset } => {
+            // `mov word ptr <sym>, ax` → A3 lo hi (mov moffs16, AX)
+            // with the same SegRelTargetFrameSegment FIXUPP shape
+            // as `MovAxSym`. Fixture 3705.
+            let sym_loc = symbols.get(symbol).ok_or_else(|| {
+                AsmError::new(0, format!("symbol `{symbol}` not defined"))
+            })?;
+            let target_seg_idx = u8::try_from(sym_loc.segment + 1)
+                .expect("target seg idx fits");
+            let value = sym_loc.offset.wrapping_add(*offset as u16);
+            out.push(0xA3);
+            let imm_start = out.len();
+            out.extend_from_slice(&value.to_le_bytes());
+            fixups.push(FixupReq {
+                data_offset: u16::try_from(imm_start).expect("offset fits"),
+                kind: FixupKind::SegRelTargetFrameSegment {
+                    segment_idx: target_seg_idx,
+                },
+            });
+        }
+        Instr::MovSymImm16 { symbol, offset, imm } => {
+            // `mov word ptr <sym>, imm16` → C7 06 lo hi imm_lo
+            // imm_hi (Grp1 r/m16, imm16 with ModR/M 0x06 = mod=00
+            // r/m=110 disp16-only). FIXUPP on the disp16 mirrors
+            // `MovAxSym`. Fixture 3704.
+            let sym_loc = symbols.get(symbol).ok_or_else(|| {
+                AsmError::new(0, format!("symbol `{symbol}` not defined"))
+            })?;
+            let target_seg_idx = u8::try_from(sym_loc.segment + 1)
+                .expect("target seg idx fits");
+            let value = sym_loc.offset.wrapping_add(*offset as u16);
+            out.push(0xC7);
+            out.push(0x06);
+            let imm_start = out.len();
+            out.extend_from_slice(&value.to_le_bytes());
+            out.extend_from_slice(&imm.to_le_bytes());
             fixups.push(FixupReq {
                 data_offset: u16::try_from(imm_start).expect("offset fits"),
                 kind: FixupKind::SegRelTargetFrameSegment {
