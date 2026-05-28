@@ -21598,6 +21598,32 @@ impl<'a> FunctionEmitter<'a> {
             let _ = write!(self.out, "\tmov\tax,word ptr {lo}\r\n");
             return;
         }
+        // `(int)(<long_lvalue> <shift> K)` where K is a constant
+        // shift count != 16 (K=16 took the fast path above): call
+        // the long-shift helper with DX:AX = operand, CL = K, then
+        // AX is the int-cast result. Fixture 1951 (`(int)(y >> 8)`
+        // for `long y = (long)x`).
+        if matches!(ty, Type::Int | Type::UInt)
+            && let ExprKind::BinOp { op: shift_op, left, right } = &operand.kind
+            && matches!(shift_op, BinOp::Shl | BinOp::Shr)
+            && let Some(k) = try_const_eval(right)
+            && let Some((hi, lo)) = self.long_lvalue_addr_pair(left)
+        {
+            let unsigned = self.expr_is_unsigned(left);
+            let helper = match (shift_op, unsigned) {
+                (BinOp::Shl, _) => "N_LXLSH@",
+                (BinOp::Shr, false) => "N_LXRSH@",
+                (BinOp::Shr, true) => "N_LXURSH@",
+                _ => unreachable!(),
+            };
+            let _ = write!(self.out, "\tmov\tdx,word ptr {hi}\r\n");
+            let _ = write!(self.out, "\tmov\tax,word ptr {lo}\r\n");
+            let k_u8 = (k & 0xFF) as u8;
+            let _ = write!(self.out, "\tmov\tcl,{k_u8}\r\n");
+            let _ = write!(self.out, "\tcall\tnear ptr {helper}\r\n");
+            self.helpers.insert(helper.to_string());
+            return;
+        }
         // `(int)(<long_lvalue> * <long_lvalue>)` — BCC doesn't fold
         // the cast through the multiply (`imul lo,lo` would give the
         // same low 16, but BCC emits the full helper call anyway).
