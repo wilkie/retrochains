@@ -630,6 +630,7 @@ fn instr_size(instr: &Instr) -> usize {
         | Instr::SubGroupSymImm8Sx { .. }
         | Instr::SbbGroupSymImm8Sx { .. } => 5,
         Instr::IncGroupSym { .. } | Instr::DecGroupSym { .. } => 4,
+        Instr::IncSym { .. } | Instr::DecSym { .. } => 4,
         Instr::TestGroupSymImm16 { .. } => 6,
         Instr::TestBpRelImm16 { offset, .. } => 1 + bp_rel_modrm_size(*offset) + 2,
         Instr::TestBpRelAx { offset } => 1 + bp_rel_modrm_size(*offset),
@@ -2852,6 +2853,47 @@ fn emit_instr(
             // Grp5 /0=INC r/m16 with mod=00 r/m=110 → `[disp16]`.
             // Fixture 512.
             emit_group_sym_lea(&[0xFF, 0x06], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
+        }
+        Instr::IncSym { symbol, offset } => {
+            // `inc word ptr <sym>[+N]` → FF 06 lo hi with a
+            // SegRelTargetFrameSegment FIXUPP. Bare-symbol form
+            // used by huge-model `g++`. Fixture 3864.
+            let sym_loc = symbols.get(symbol).ok_or_else(|| {
+                AsmError::new(0, format!("symbol `{symbol}` not defined"))
+            })?;
+            let target_seg_idx = u8::try_from(sym_loc.segment + 1)
+                .expect("target seg idx fits");
+            let value = sym_loc.offset.wrapping_add(*offset as u16);
+            out.push(0xFF);
+            out.push(0x06);
+            let imm_start = out.len();
+            out.extend_from_slice(&value.to_le_bytes());
+            fixups.push(FixupReq {
+                data_offset: u16::try_from(imm_start).expect("offset fits"),
+                kind: FixupKind::SegRelTargetFrameSegment {
+                    segment_idx: target_seg_idx,
+                },
+            });
+        }
+        Instr::DecSym { symbol, offset } => {
+            // `dec word ptr <sym>[+N]` → FF 0E lo hi (Grp5 /1 = DEC).
+            // FIXUP shape mirrors `IncSym`.
+            let sym_loc = symbols.get(symbol).ok_or_else(|| {
+                AsmError::new(0, format!("symbol `{symbol}` not defined"))
+            })?;
+            let target_seg_idx = u8::try_from(sym_loc.segment + 1)
+                .expect("target seg idx fits");
+            let value = sym_loc.offset.wrapping_add(*offset as u16);
+            out.push(0xFF);
+            out.push(0x0E);
+            let imm_start = out.len();
+            out.extend_from_slice(&value.to_le_bytes());
+            fixups.push(FixupReq {
+                data_offset: u16::try_from(imm_start).expect("offset fits"),
+                kind: FixupKind::SegRelTargetFrameSegment {
+                    segment_idx: target_seg_idx,
+                },
+            });
         }
         Instr::IncBpRel { offset } => {
             // `inc word ptr [bp+disp8]` → FF 46 dd.

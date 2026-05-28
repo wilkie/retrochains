@@ -829,6 +829,20 @@ fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
                     offset,
                 });
             }
+            // `inc word ptr <sym>[+N]` — bare-symbol form used by
+            // huge-model `g++` (no DGROUP prefix). Fixture 3864.
+            if let Some(symbol) = rest.strip_prefix("word ptr ")
+                && let Some(first) = symbol.chars().next()
+                && (first == '_' || first == '@')
+                && !symbol.contains(':')
+                && !symbol.contains('[')
+            {
+                let (sym, offset) = split_sym_offset(symbol);
+                return Ok(Instr::IncSym {
+                    symbol: sym.to_string(),
+                    offset,
+                });
+            }
             // `inc byte ptr <group>:<sym>[+N]` — byte sibling
             // (fixture 702: `g++;` discarded → memory-direct inc).
             if let Some((group, symbol)) = parse_byte_group_symbol(rest) {
@@ -921,6 +935,20 @@ fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
                 let (sym, offset) = split_sym_offset(symbol);
                 return Ok(Instr::DecGroupSym {
                     group: group.to_string(),
+                    symbol: sym.to_string(),
+                    offset,
+                });
+            }
+            // `dec word ptr <sym>[+N]` — bare-symbol form used by
+            // huge-model `g--`. Sibling of `IncSym`.
+            if let Some(symbol) = rest.strip_prefix("word ptr ")
+                && let Some(first) = symbol.chars().next()
+                && (first == '_' || first == '@')
+                && !symbol.contains(':')
+                && !symbol.contains('[')
+            {
+                let (sym, offset) = split_sym_offset(symbol);
+                return Ok(Instr::DecSym {
                     symbol: sym.to_string(),
                     offset,
                 });

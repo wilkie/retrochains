@@ -1278,6 +1278,17 @@ pub enum Instr {
     /// `return g.x + g.y;` where the second operand is a bare global
     /// reference. Fixture 3751.
     AddAxSym { symbol: String, offset: i16 },
+    /// `inc word ptr <symbol>[+N]` — bare-symbol memory-direct
+    /// increment. Encoding: `FF 06 lo hi` (Grp5 /0 = INC r/m16
+    /// with ModR/M 0x06 = mod=00 reg=000 r/m=110, disp16-only).
+    /// FIXUP shape mirrors `MovAxSym`. Used by huge-model `g++`
+    /// against an int global. Fixture 3864.
+    IncSym { symbol: String, offset: i16 },
+    /// `dec word ptr <symbol>[+N]` — bare-symbol memory-direct
+    /// decrement. Encoding: `FF 0E lo hi` (Grp5 /1 = DEC r/m16
+    /// with ModR/M 0x0E = mod=00 reg=001 r/m=110, disp16-only).
+    /// FIXUP shape mirrors `IncSym`. Used by huge-model `g--`.
+    DecSym { symbol: String, offset: i16 },
     /// `les bx, word ptr [bp+disp]` — `C4` + ModR/M `mod=mm reg=011
     /// (BX) r/m=110 (BP+disp)`. Loads the 4-byte far pointer at
     /// `[bp+disp..disp+3]` into ES:BX (offset → BX, segment → ES).
