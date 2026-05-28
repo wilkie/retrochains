@@ -16901,6 +16901,69 @@ impl<'a> FunctionEmitter<'a> {
     /// which assume AX is scratch). Today only `*<reg-ptr>` /
     /// `*<stack-ptr>` are supported — enough for the fixtures that
     /// exercise lvalue-assign in a value context. Fixture 3333.
+    /// Attempt the "address-first, value-second" emission shape for
+    /// `<lvalue> = <value>` in expression position. Returns true if
+    /// it handled the assign (caller skips the value-first path).
+    /// Used for lvalues whose address computation needs AX as
+    /// scratch — chiefly `<stack-arr>[<var>]` with a variable index
+    /// (`lea ax, [bp-N]; add bx, ax`). Fixture 1986.
+    fn try_emit_assign_lvalue_addr_first(
+        &mut self,
+        target: &Expr,
+        value: &Expr,
+    ) -> bool {
+        let ExprKind::ArrayIndex { array, index } = &target.kind else {
+            return false;
+        };
+        let ExprKind::Ident(arr_name) = &array.kind else {
+            return false;
+        };
+        if !self.locals.has(arr_name) {
+            return false;
+        }
+        let arr_ty = self.locals.type_of(arr_name).clone();
+        let Some(elem_ty) = arr_ty.array_elem() else {
+            return false;
+        };
+        if !matches!(elem_ty, Type::Int | Type::UInt) {
+            return false;
+        }
+        let LocalLocation::Stack(base_off) = self.locals.location_of(arr_name)
+        else {
+            return false;
+        };
+        if try_const_eval(index).is_some() {
+            // Const-index path is the regular `mov [bp-N+K*2], ax`
+            // store, handled by the value-first fallback (no AX
+            // pressure during address computation).
+            return false;
+        }
+        // Variable index: load i into BX, scale to byte offset,
+        // then add the array's `lea` base.
+        let ExprKind::Ident(idx_name) = &index.kind else {
+            return false;
+        };
+        if !self.locals.has(idx_name) {
+            return false;
+        }
+        let LocalLocation::Reg(idx_reg) = self.locals.location_of(idx_name)
+        else {
+            return false;
+        };
+        let _ = write!(self.out, "\tmov\tbx,{}\r\n", idx_reg.name());
+        self.out.extend_from_slice(b"\tshl\tbx,1\r\n");
+        let _ = write!(
+            self.out,
+            "\tlea\tax,word ptr {}\r\n",
+            bp_addr(base_off),
+        );
+        self.out.extend_from_slice(b"\tadd\tbx,ax\r\n");
+        // Now BX = &arr[i]; load value into AX, then store.
+        self.emit_expr_to_ax(value);
+        self.out.extend_from_slice(b"\tmov\tword ptr [bx],ax\r\n");
+        true
+    }
+
     fn emit_store_ax_to_lvalue(&mut self, target: &Expr) {
         if let ExprKind::Deref(inner) = &target.kind
             && let ExprKind::Ident(name) = &inner.kind
@@ -21073,15 +21136,24 @@ impl<'a> FunctionEmitter<'a> {
             }
             ExprKind::AssignLvalueExpr { target, value } => {
                 // Value-position assign to an arbitrary lvalue
-                // (`*p = v`, `a[i] = v`, `p->x = v`). Evaluate the
-                // RHS into AX, then store through the lvalue's
-                // address. AX still holds the assigned value, so
-                // the surrounding expression (`(*p = 5) + 1`)
-                // consumes it directly. Only the cases needed by
-                // fixtures 3333 (`*<reg-ptr> = v`) are wired up
-                // today — others fall through to a panic when
-                // emit_deref_assign / emit_array_assign can't
-                // satisfy "leave value in AX". Fixture 3333.
+                // (`*p = v`, `a[i] = v`, `p->x = v`). The surrounding
+                // expression (`(*p = 5) + 1`, `v = (a[i] = 42)`)
+                // consumes the assigned value from AX after the
+                // store. Two emission shapes:
+                //
+                // 1. Address computation doesn't need AX as scratch
+                //    (`*<reg-ptr>`): evaluate value into AX, then
+                //    `mov [reg], ax`. Fixture 3333.
+                // 2. Address computation needs AX (`<stack-arr>[i]`
+                //    via `lea ax, [bp-N]`): compute the address into
+                //    BX first, then evaluate value into AX, then
+                //    `mov [bx], ax`. Fixture 1986.
+                //
+                // Stack-resident `*p++` etc. are still gaps and
+                // fall through to the helper's panic.
+                if self.try_emit_assign_lvalue_addr_first(target, value) {
+                    return;
+                }
                 self.emit_expr_to_ax(value);
                 self.emit_store_ax_to_lvalue(target);
             }
