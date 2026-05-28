@@ -1492,6 +1492,15 @@ fn parse_mov(operands: &str, line_no: usize) -> AsmResult<Instr> {
     if lhs == "ax" && rhs == "word ptr cs:[bx]" {
         return Ok(Instr::MovAxFromCsBx);
     }
+    // `mov ax,word ptr cs:[bx+disp8]` — long-linear-search reads
+    // the case-high half from the +2*N offset into the table while
+    // BX still points to the case-low. Fixture 1913.
+    if lhs == "ax"
+        && let Some(disp) = rhs.strip_prefix("word ptr cs:[bx+").and_then(|s| s.strip_suffix(']'))
+        && let Ok(d) = disp.parse::<u8>()
+    {
+        return Ok(Instr::MovAxFromCsBxDisp { disp: d });
+    }
     // LHS `byte ptr [bp+N]` — 8-bit stack store.
     if let Some(offset) = parse_byte_bp_relative(lhs) {
         if let Some(imm) = parse_imm8(rhs) {

@@ -2177,7 +2177,18 @@ impl<'a> FunctionEmitter<'a> {
     fn emit_switch(&mut self, switch_span_start: u32, scrutinee: &Expr, cases: &[SwitchCase]) {
         let plan = self.label_plan.switch_plan(switch_span_start).clone();
         self.advance_to_stmt_line_at(switch_span_start);
-        match plan.strategy {
+        // Override the plan-time strategy for long-scrutinee
+        // switches — the planner runs without type info, so it
+        // defaults to Chained for a 3-case fixture like 1913, but
+        // BCC always uses the linear-search-with-both-halves loop
+        // for longs because there's no shorter int-style dispatch
+        // that can compare a 4-byte value in two parts.
+        let strategy = if scrutinee_is_long_typed(scrutinee, &self.locals, self.globals) {
+            SwitchStrategy::LongLinearSearch
+        } else {
+            plan.strategy
+        };
+        match strategy {
             SwitchStrategy::Chained => {
                 self.emit_switch_chained(scrutinee, cases, &plan.case_slots, plan.end_slot);
             }
@@ -2186,6 +2197,15 @@ impl<'a> FunctionEmitter<'a> {
             }
             SwitchStrategy::LinearSearch => {
                 self.emit_switch_linear_search(
+                    switch_span_start,
+                    scrutinee,
+                    cases,
+                    &plan.case_slots,
+                    plan.end_slot,
+                );
+            }
+            SwitchStrategy::LongLinearSearch => {
+                self.emit_switch_long_linear_search(
                     switch_span_start,
                     scrutinee,
                     cases,
@@ -2748,6 +2768,136 @@ impl<'a> FunctionEmitter<'a> {
             let hi = (v >> 8) & 0xFF;
             let _ = write!(self.post_function_data, "\tdb\t{lo}\r\n");
             let _ = write!(self.post_function_data, "\tdb\t{hi}\r\n");
+        }
+        for &slot in &value_slots {
+            let _ = write!(
+                self.post_function_data,
+                "\tdw\t{}\r\n",
+                self.label_ref(slot),
+            );
+        }
+    }
+
+    /// Long-scrutinee linear-search dispatch. Spill the 4-byte
+    /// scrutinee, then walk a CS-relative table whose layout is
+    /// three N-word arrays: case lows, case highs, body offsets.
+    /// The loop body compares the low half first (per-iteration
+    /// `mov ax, cs:[bx]; cmp ax, spill_lo; jne skip`), then the
+    /// high half (`mov ax, cs:[bx+2N]; cmp ax, spill_hi; je
+    /// matched`); on no-match it bumps BX by 2, `loop`s, and falls
+    /// through to `jmp default`. The matched dispatch is a single
+    /// `jmp cs:[bx+4N]`. Fixture 1913.
+    fn emit_switch_long_linear_search(
+        &mut self,
+        switch_span_start: u32,
+        scrutinee: &Expr,
+        cases: &[SwitchCase],
+        case_slots: &[u32],
+        end_slot: u32,
+    ) {
+        let default_slot = cases
+            .iter()
+            .zip(case_slots)
+            .find_map(|(c, &s)| if c.value.is_none() { Some(s) } else { None });
+        let value_cases: Vec<&SwitchCase> = cases.iter().filter(|c| c.value.is_some()).collect();
+        let value_slots: Vec<u32> = cases
+            .iter()
+            .zip(case_slots)
+            .filter_map(|(c, &s)| if c.value.is_some() { Some(s) } else { None })
+            .collect();
+        let case_count = u32::try_from(value_cases.len()).unwrap_or(u32::MAX);
+        let spill_off = self.locals.switch_spill_offset(switch_span_start);
+
+        // Load the long scrutinee high half into AX then low half
+        // into DX (the standard ordering for long memory reads),
+        // and spill: low → [spill_off], high → [spill_off+2].
+        let ExprKind::Ident(name) = &scrutinee.kind else {
+            panic!("non-ident long-switch scrutinee not yet supported");
+        };
+        match self.locals.location_of(name) {
+            LocalLocation::Stack(off) => {
+                let _ = write!(self.out, "\tmov\tax,word ptr {}\r\n", bp_addr(off + 2));
+                let _ = write!(self.out, "\tmov\tdx,word ptr {}\r\n", bp_addr(off));
+            }
+            LocalLocation::Reg(_) => {
+                panic!("long-switch scrutinee in a register is impossible (longs never enregister)");
+            }
+        }
+        let _ = write!(self.out, "\tmov\tword ptr {},dx\r\n", bp_addr(spill_off));
+        let _ = write!(self.out, "\tmov\tword ptr {},ax\r\n", bp_addr(spill_off + 2));
+
+        // CX = case count, BX = pointer to the value table.
+        let _ = write!(self.out, "\tmov\tcx,{case_count}\r\n");
+        let c_num = switch_c_num(SwitchStrategy::LongLinearSearch, case_count);
+        let _ = write!(self.out, "\tmov\tbx,offset @{}@C{c_num}\r\n", self.func_idx);
+
+        // Three internal labels — loop_top, skip_high, matched —
+        // co-locate in the pre-slot range allocated by plan.rs (the
+        // Chained-style `non_default_count + 2` budget that the
+        // planner reserved before knowing this would become a long-
+        // linear-search). The first value case body is at
+        // `first_value_slot`; the three labels sit at -3, -2, -1
+        // from there, all within the pre-slot range.
+        let first_value_slot = *value_slots.first().expect("at least one value case");
+        let loop_top_slot = first_value_slot - 3;
+        let skip_high_slot = first_value_slot - 2;
+        let matched_slot = first_value_slot - 1;
+
+        self.emit_label(loop_top_slot);
+        self.out.extend_from_slice(b"\tmov\tax,word ptr cs:[bx]\r\n");
+        let _ = write!(self.out, "\tcmp\tax,word ptr {}\r\n", bp_addr(spill_off));
+        let _ = write!(self.out, "\tjne\tshort {}\r\n", self.label_ref(skip_high_slot));
+        let high_table_offset = case_count * 2;
+        let _ = write!(
+            self.out,
+            "\tmov\tax,word ptr cs:[bx+{high_table_offset}]\r\n",
+        );
+        let _ = write!(self.out, "\tcmp\tax,word ptr {}\r\n", bp_addr(spill_off + 2));
+        let _ = write!(self.out, "\tje\tshort {}\r\n", self.label_ref(matched_slot));
+        self.emit_label(skip_high_slot);
+        self.out.extend_from_slice(b"\tinc\tbx\r\n");
+        self.out.extend_from_slice(b"\tinc\tbx\r\n");
+        let _ = write!(self.out, "\tloop\tshort {}\r\n", self.label_ref(loop_top_slot));
+        let no_match_slot = default_slot.unwrap_or(end_slot);
+        let _ = write!(self.out, "\tjmp\tshort {}\r\n", self.label_ref(no_match_slot));
+        self.emit_label(matched_slot);
+        let addr_table_offset = case_count * 4;
+        let _ = write!(
+            self.out,
+            "\tjmp\tword ptr cs:[bx+{addr_table_offset}]\r\n",
+        );
+
+        // Case bodies in source order. Same break-target setup.
+        self.loop_stack.push(LoopTargets {
+            break_target_slot: end_slot,
+            continue_target_slot: None,
+        });
+        for (case, &slot) in cases.iter().zip(case_slots) {
+            self.emit_label(slot);
+            let case_line = self.lines.line_of(case.span.start);
+            self.advance_to_line(case_line);
+            for s in &case.body {
+                self.emit_stmt(s);
+            }
+        }
+        self.loop_stack.pop();
+
+        // Stage the three N-word data arrays in post-function data:
+        // case lows, case highs, body offsets.
+        let _ = write!(
+            self.post_function_data,
+            "@{}@C{c_num}\tlabel\tword\r\n",
+            self.func_idx,
+        );
+        for case in &value_cases {
+            let v = case.value.expect("value-case has value");
+            let lo = v & 0xFFFF;
+            let _ = write!(self.post_function_data, "\tdw\t{lo}\r\n");
+        }
+        for case in &value_cases {
+            let v = case.value.expect("value-case has value");
+            let hi = (v >> 16) & 0xFFFF;
+            let _ = write!(self.post_function_data, "\tdw\t{hi}\r\n");
         }
         for &slot in &value_slots {
             let _ = write!(
@@ -24182,6 +24332,24 @@ fn match_combine_long_idiom(e: &Expr) -> Option<(String, String, bool)> {
     try_shape(left, right).or_else(|| try_shape(right, left))
 }
 
+/// True when `scrutinee` is a bare Ident whose static type is
+/// long-like (signed or unsigned). Routes long-scrutinee switches
+/// through the dedicated `LongLinearSearch` dispatch. Fixture 1913.
+fn scrutinee_is_long_typed(
+    scrutinee: &Expr,
+    locals: &crate::codegen::locals::Locals,
+    globals: &GlobalTable,
+) -> bool {
+    let ExprKind::Ident(name) = &scrutinee.kind else { return false };
+    if locals.has(name) {
+        return locals.type_of(name).is_long_like();
+    }
+    if let Some(t) = globals.type_of(name) {
+        return t.is_long_like();
+    }
+    false
+}
+
 fn body_has_return(body: &[Stmt]) -> bool {
     body.iter().any(stmt_has_return)
 }
@@ -24256,6 +24424,13 @@ fn switch_c_num(strategy: SwitchStrategy, case_count: u32) -> u32 {
     match strategy {
         SwitchStrategy::JumpTable => 92 * case_count + 508,
         SwitchStrategy::LinearSearch => 74 * case_count + 442,
+        // Long-linear-search has a longer per-iteration loop body
+        // (compare-both-halves) and a 3-N-word data table; the
+        // exact constants are observation-pending — for now use a
+        // placeholder formula. The label name doesn't reach the
+        // OBJ (it's resolved at assembly time), so any unique
+        // value works for byte-exactness. Fixture 1913.
+        SwitchStrategy::LongLinearSearch => 100 * case_count + 500,
         SwitchStrategy::Chained => unreachable!(
             "chained-compare switch has no data label and no `C<num>` to compute"
         ),

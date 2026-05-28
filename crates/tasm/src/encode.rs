@@ -385,6 +385,7 @@ fn instr_size(instr: &Instr) -> usize {
             1 + bp_rel_modrm_size(*offset)
         }
         Instr::MovAxFromCsBx => 3,
+        Instr::MovAxFromCsBxDisp { .. } => 4,
         Instr::MovReg16OffsetSym { .. } => 3,
         Instr::MovReg16GroupSymBxDisp { .. } => 4,
         Instr::AddReg16GroupSymBxDisp { .. } => 4,
@@ -1525,6 +1526,15 @@ fn emit_instr(
             out.push(0x2E);
             out.push(0x8B);
             out.push(0x07);
+        }
+        Instr::MovAxFromCsBxDisp { disp } => {
+            // `mov ax, word ptr cs:[bx+disp8]` → 2E 8B 47 dd. ModR/M
+            // 47 = mod=01 reg=AX r/m=111(BX), disp8 follows.
+            // Fixture 1913.
+            out.push(0x2E);
+            out.push(0x8B);
+            out.push(0x47);
+            out.push(*disp);
         }
         Instr::MovReg16OffsetSym { reg, symbol } => {
             // `mov r16,offset <code-symbol>` → (B8+rc) lo hi.

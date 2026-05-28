@@ -2157,6 +2157,12 @@ pub enum Instr {
     /// displacement). Encoding: 2E 8B 07. Used by linear-search
     /// dispatch to read consecutive case values from a _TEXT table.
     MovAxFromCsBx,
+    /// `mov ax,word ptr cs:[bx+disp8]` — load AX from a fixed
+    /// offset into the table. Used by long-linear-search dispatch
+    /// to read the case-high half from `cs:[bx + 2*N]` while BX
+    /// still points to the case-low element. Encoding: 2E 8B 47 dd.
+    /// Fixture 1913.
+    MovAxFromCsBxDisp { disp: u8 },
     /// `jmp word ptr cs:[bx+<imm8>]` — indirect jump through
     /// CS:BX+disp8. Encoding: 2E FF 67 dd. Used by linear-search
     /// dispatch to dispatch to the matching label table entry

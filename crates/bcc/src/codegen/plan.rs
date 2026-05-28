@@ -76,11 +76,18 @@ pub struct LabelPlan {
 ///   `mov / cmp / je / inc / inc / loop`, indirect-jmp through a
 ///   parallel address table. Reserves `#cases + 2` pre-slots
 ///   (fixture 074). Not yet implemented.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SwitchStrategy {
     Chained,
     JumpTable,
     LinearSearch,
+    /// Long-scrutinee linear search — compare-both-halves loop, table
+    /// of (lows, highs, body-offsets). Distinct from the int variant
+    /// because the dispatch sequence has an extra `mov ax, cs:[bx+N*2]`
+    /// + `cmp ax, [spill_hi]` + `je matched` block in the middle of
+    /// the loop, and the post-function table has three N-word arrays
+    /// instead of one N-byte and one N-word array. Fixture 1913.
+    LongLinearSearch,
 }
 
 /// Slot assignments for one `switch` statement.
@@ -419,6 +426,12 @@ fn plan_switch(span_start: u32, scrutinee: &Expr, cases: &[SwitchCase], ctx: &mu
     let pre_slots = match strategy {
         SwitchStrategy::Chained | SwitchStrategy::LinearSearch => non_default_count + 2,
         SwitchStrategy::JumpTable => 3,
+        // LongLinearSearch is only chosen at emit time (post-plan),
+        // so the planner never picks it directly. Treat it like the
+        // Chained / LinearSearch budget in case a future planner
+        // does — the long emitter parks all three internal labels
+        // in the `non_default_count + 2` pre-slot range.
+        SwitchStrategy::LongLinearSearch => non_default_count + 2,
     };
     ctx.counter += pre_slots;
     let mut case_slots = Vec::with_capacity(cases.len());

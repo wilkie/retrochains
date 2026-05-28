@@ -1030,17 +1030,24 @@ impl Locals {
 
         // Linear-search switches need a 2-byte scrutinee spill slot
         // (fixture 074: scrutinee at `[bp-4]` after the `int x` at
-        // `[bp-2]`). Allocate one slot per linear-search switch in
-        // the function — sequential switches each get their own slot
+        // `[bp-2]`). Long-scrutinee switches need 4 bytes (low + high
+        // halves). Allocate one slot per linear-search switch in the
+        // function — sequential switches each get their own slot
         // even though the values can't outlast the switch; this
         // matches what fixture 074 demonstrates (only the one switch,
-        // exactly one extra slot).
+        // exactly one extra slot). Fixture 1913 exercises the long
+        // variant.
         let mut switch_spill_offsets = HashMap::new();
-        collect_linear_search_switches(function.body.as_deref().unwrap_or(&[]), |span_start| {
-            stack_bytes += 2;
-            let off = -i16::try_from(stack_bytes).expect("stack frame fits in i16");
-            switch_spill_offsets.insert(span_start, off);
-        });
+        collect_linear_search_switches(
+            function.body.as_deref().unwrap_or(&[]),
+            |span_start, scrutinee_is_long| {
+                let bytes = if scrutinee_is_long { 4 } else { 2 };
+                stack_bytes += bytes;
+                let off = -i16::try_from(stack_bytes).expect("stack frame fits in i16");
+                switch_spill_offsets.insert(span_start, off);
+            },
+            &by_name,
+        );
 
         // `(float)<int>` / `(double)<int>` casts: BCC materializes
         // the int operand into a 2-byte scratch slot at the bottom
@@ -1546,37 +1553,67 @@ fn body_has_int_to_float_cast(function: &Function) -> bool {
     function.body.as_deref().unwrap_or(&[]).iter().any(|s| stmt(s, &float_names))
 }
 
-/// Walk `stmts` and call `f(stmt.span.start)` for each `switch`
-/// statement whose strategy is `LinearSearch`. Recurses into nested
-/// constructs (loop bodies, if-branches, other switches' bodies).
-fn collect_linear_search_switches<F: FnMut(u32)>(stmts: &[Stmt], mut f: F) {
-    fn walk<F: FnMut(u32)>(stmts: &[Stmt], f: &mut F) {
+/// Walk `stmts` and call `f(stmt.span.start, scrutinee_is_long)`
+/// for each `switch` statement that needs a scrutinee-spill slot.
+/// Plain-int linear-search and long-scrutinee linear-search both
+/// qualify — the latter is forced regardless of case count because
+/// the compare-both-halves loop is the only available shape for a
+/// 32-bit scrutinee. Recurses into nested constructs (loop bodies,
+/// if-branches, other switches' bodies).
+fn collect_linear_search_switches<F: FnMut(u32, bool)>(
+    stmts: &[Stmt],
+    mut f: F,
+    by_name: &HashMap<String, LocalEntry>,
+) {
+    fn walk<F: FnMut(u32, bool)>(
+        stmts: &[Stmt],
+        f: &mut F,
+        by_name: &HashMap<String, LocalEntry>,
+    ) {
         for stmt in stmts {
             match &stmt.kind {
-                StmtKind::Switch { cases, .. } => {
-                    if matches!(pick_switch_strategy(cases), SwitchStrategy::LinearSearch) {
-                        f(stmt.span.start);
+                StmtKind::Switch { scrutinee, cases } => {
+                    let scrut_is_long = scrutinee_is_long(scrutinee, by_name);
+                    let int_picks_linear = matches!(
+                        pick_switch_strategy(cases),
+                        SwitchStrategy::LinearSearch,
+                    );
+                    if scrut_is_long || int_picks_linear {
+                        f(stmt.span.start, scrut_is_long);
                     }
                     for c in cases {
-                        walk(&c.body, f);
+                        walk(&c.body, f, by_name);
                     }
                 }
                 StmtKind::If { then_branch, else_branch, .. } => {
-                    walk(then_branch, f);
+                    walk(then_branch, f, by_name);
                     if let Some(b) = else_branch {
-                        walk(b, f);
+                        walk(b, f, by_name);
                     }
                 }
                 StmtKind::While { body, .. }
                 | StmtKind::DoWhile { body, .. }
                 | StmtKind::For { body, .. } => {
-                    walk(body, f);
+                    walk(body, f, by_name);
                 }
                 _ => {}
             }
         }
     }
-    walk(stmts, &mut f);
+    walk(stmts, &mut f, by_name);
+}
+
+/// True when the switch scrutinee's static type is long-like. Only
+/// handles the bare-`Ident` shape today — that's what every fixture
+/// has so far (1913 has `switch (x)` for `long x`). Other shapes
+/// fall back to `false`.
+fn scrutinee_is_long(scrutinee: &Expr, by_name: &HashMap<String, LocalEntry>) -> bool {
+    if let ExprKind::Ident(name) = &scrutinee.kind
+        && let Some(entry) = by_name.get(name)
+    {
+        return entry.ty.is_long_like();
+    }
+    false
 }
 
 fn stmt_has_call(stmt: &Stmt) -> bool {
