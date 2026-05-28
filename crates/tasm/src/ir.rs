@@ -1879,6 +1879,11 @@ pub enum Instr {
     /// compound with non-const int RHS truncated to byte (fixture
     /// 847: `char a[3]; a[1] += y` where y is int).
     AddAlBpRel { offset: i16 },
+    /// `add cl,byte ptr [bp+<offset>]` — `02 4E dd`. ADD r8,r/m8
+    /// with reg=CL(001). Byte-level sum of two int locals
+    /// computed directly into CL for a shift count
+    /// (`x << (a + b)`). Fixture 3634.
+    AddClBpRel { offset: i16 },
     /// `sub al,byte ptr [bp+<offset>]` — `2A 46 dd`. Sibling.
     SubAlBpRel { offset: i16 },
     /// `and al,byte ptr [bp+<offset>]` — `22 46 dd`. Sibling.

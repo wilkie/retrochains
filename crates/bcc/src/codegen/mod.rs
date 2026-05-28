@@ -20487,8 +20487,36 @@ impl<'a> FunctionEmitter<'a> {
                     self.emit_expr_to_ax(left);
                     return;
                 }
+                // `<x> << (<a> + <b>)` / `>>` where the shift count
+                // is the byte-level sum of two int memory lvalues.
+                // BCC computes the sum directly in CL using two
+                // byte-form `mov`/`add` (`mov cl, [a]; add cl, [b]`)
+                // and avoids the 16-bit AX-route and `mov cl, dl`
+                // shuffle. Fixture 3634 (`return x << (a + b)`).
+                let shift_by_byte_sum_src = if matches!(op, BinOp::Shl | BinOp::Shr)
+                    && let ExprKind::BinOp { op: BinOp::Add, left: rl, right: rr } = &right.kind
+                    && let Some(rl_addr) = self.int_lvalue_addr(rl)
+                    && let Some(rr_addr) = self.int_lvalue_addr(rr)
+                    && self.try_op_source(left).is_some()
+                {
+                    Some((rl_addr, rr_addr))
+                } else {
+                    None
+                };
                 if op.is_comparison() {
                     self.emit_comparison_as_value(e.span.start, e.span.end, *op, left, right);
+                } else if let Some((rl_addr, rr_addr)) = shift_by_byte_sum_src {
+                    let signed = !self.expr_is_unsigned(left);
+                    let mnem = match (op, signed) {
+                        (BinOp::Shl, _) => "shl",
+                        (BinOp::Shr, false) => "shr",
+                        (BinOp::Shr, true) => "sar",
+                        _ => unreachable!(),
+                    };
+                    let _ = write!(self.out, "\tmov\tcl,byte ptr {rl_addr}\r\n");
+                    let _ = write!(self.out, "\tadd\tcl,byte ptr {rr_addr}\r\n");
+                    self.emit_expr_to_ax(left);
+                    let _ = write!(self.out, "\t{mnem}\tax,cl\r\n");
                 } else if matches!(op, BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Mul)
                     && let ExprKind::ArrayIndex { array, index } = &right.kind
                     && let ExprKind::Ident(arr_name) = &array.kind

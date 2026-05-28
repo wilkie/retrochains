@@ -2515,6 +2515,13 @@ fn parse_add(operands: &str, line_no: usize) -> AsmResult<Instr> {
             return Ok(Instr::AddAlBpRel { offset });
         }
     }
+    // `add cl, byte ptr [bp+N]` — byte-direct shift-count
+    // accumulation (fixture 3634, `x << (a + b)`).
+    if lhs == "cl"
+        && let Some(offset) = parse_byte_bp_relative(rhs)
+    {
+        return Ok(Instr::AddClBpRel { offset });
+    }
     // `add <reg8>, <reg8>` — char compound `+=` between two byte
     // registers (fixture 665: `add dl, al` = `02 D0`).
     if let (Some(dst), Some(src)) = (Reg8::parse(lhs), Reg8::parse(rhs)) {

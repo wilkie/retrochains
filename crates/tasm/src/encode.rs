@@ -699,6 +699,7 @@ fn instr_size(instr: &Instr) -> usize {
         Instr::AdcBxDispImm8 { .. } | Instr::SbbBxDispImm8 { .. } => 4,
         Instr::PushBxDisp { .. } => 3,
         Instr::AddAlBpRel { offset }
+        | Instr::AddClBpRel { offset }
         | Instr::SubAlBpRel { offset }
         | Instr::AndAlBpRel { offset }
         | Instr::OrAlBpRel { offset }
@@ -3078,6 +3079,12 @@ fn emit_instr(
             // r8, r/m8. Fixture 847.
             out.push(0x02);
             emit_bp_rel_modrm(0, *offset, out);
+        }
+        Instr::AddClBpRel { offset } => {
+            // `add cl, byte ptr [bp+disp]` → 02 /CL [bp+disp].
+            // Same opcode as AddAlBpRel; reg field=1. Fixture 3634.
+            out.push(0x02);
+            emit_bp_rel_modrm(1, *offset, out);
         }
         Instr::SubAlBpRel { offset } => {
             out.push(0x2A);
