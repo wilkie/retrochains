@@ -18959,6 +18959,33 @@ impl<'a> FunctionEmitter<'a> {
                         let _ = write!(self.out, "\tmov\tword ptr {},ax\r\n", bp_addr(off));
                         return;
                     }
+                    // `v = *p++` for long pointee — load both halves
+                    // of `*p` through the reg-resident pointer, store
+                    // them into v's slot, then advance the pointer by
+                    // 4. BCC reads high half first (`mov ax, [reg+2]`)
+                    // and low half second (`mov dx, [reg]`); the
+                    // post-increment `add reg, 4` fires after both
+                    // loads so the result is the pre-update `*p`.
+                    // Fixture 2521 (`long *p; long v; v = *p++`).
+                    if let ExprKind::Deref(inner) = &value.kind
+                        && let ExprKind::Update {
+                            target: p_name,
+                            op: UpdateOp::Inc,
+                            position: UpdatePosition::Post,
+                        } = &inner.kind
+                        && self.locals.has(p_name)
+                        && let Some(pointee) = self.locals.type_of(p_name).pointee()
+                        && pointee.is_long_like()
+                        && let LocalLocation::Reg(p_reg) = self.locals.location_of(p_name)
+                    {
+                        let r = p_reg.name();
+                        let _ = write!(self.out, "\tmov\tax,word ptr [{r}+2]\r\n");
+                        let _ = write!(self.out, "\tmov\tdx,word ptr [{r}]\r\n");
+                        let _ = write!(self.out, "\tmov\tword ptr {},ax\r\n", bp_addr(off + 2));
+                        let _ = write!(self.out, "\tmov\tword ptr {},dx\r\n", bp_addr(off));
+                        let _ = write!(self.out, "\tadd\t{r},4\r\n");
+                        return;
+                    }
                     // Fallback: value is an int-typed expression
                     // assigned to a long-typed local — widen via
                     // `cwd` (sign-extend AX to DX:AX) and store both
