@@ -15529,16 +15529,46 @@ impl<'a> FunctionEmitter<'a> {
             && let Some((field_off, field_ty)) = pointee.field(field)
             && try_const_eval(index).is_none()
         {
+            // For a reg-resident pointer (typical when the
+            // 1-pointer CX extension fires — fixture 2208's `pts`
+            // in CX), BCC's pattern is `mov ax, idx; shl ax, log2;
+            // mov bx, ptr; add bx, ax; mov ax, [bx+off]`. The AX
+            // scratch then gets overwritten by the load. For a
+            // stack-resident pointer we keep the existing
+            // BX-direct shape (`mov bx, idx; shl bx; add bx,
+            // word ptr [bp+N]`) since the load-from-memory step
+            // can't be split into a register-add for free.
             let elem_stride = pointee.size_bytes();
-            self.emit_index_into_bx(index, &pointee);
-            // BX now holds the scaled index. Add pts (the pointer
-            // base) to it.
-            match self.locals.location_of(arr_name) {
-                LocalLocation::Reg(reg) => {
-                    let _ = write!(self.out, "\tadd\tbx,{}\r\n", reg.name());
+            let log2 = match elem_stride {
+                2 => 1, 4 => 2, 8 => 3, 16 => 4, _ => 0,
+            };
+            let pow2 = log2 > 0 && (1u16 << log2) == elem_stride;
+            let used_ax_scratch = if pow2
+                && let LocalLocation::Reg(ptr_reg) = self.locals.location_of(arr_name)
+                && let ExprKind::Ident(idx_name) = &index.kind
+                && self.locals.has(idx_name)
+                && let LocalLocation::Reg(idx_reg) = self.locals.location_of(idx_name)
+                && !idx_reg.is_byte()
+            {
+                let _ = write!(self.out, "\tmov\tax,{}\r\n", idx_reg.name());
+                for _ in 0..log2 {
+                    self.out.extend_from_slice(b"\tshl\tax,1\r\n");
                 }
-                LocalLocation::Stack(off) => {
-                    let _ = write!(self.out, "\tadd\tbx,word ptr {}\r\n", bp_addr(off));
+                let _ = write!(self.out, "\tmov\tbx,{}\r\n", ptr_reg.name());
+                self.out.extend_from_slice(b"\tadd\tbx,ax\r\n");
+                true
+            } else {
+                false
+            };
+            if !used_ax_scratch {
+                self.emit_index_into_bx(index, &pointee);
+                match self.locals.location_of(arr_name) {
+                    LocalLocation::Reg(reg) => {
+                        let _ = write!(self.out, "\tadd\tbx,{}\r\n", reg.name());
+                    }
+                    LocalLocation::Stack(off) => {
+                        let _ = write!(self.out, "\tadd\tbx,word ptr {}\r\n", bp_addr(off));
+                    }
                 }
             }
             let _ = elem_stride;

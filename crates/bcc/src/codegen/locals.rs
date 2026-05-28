@@ -627,7 +627,23 @@ impl Locals {
         // instead. Other eligibles consume those slots normally.
         // Fixtures 3512 (3 pointer params + 1 int param — `b` stays
         // on stack rather than landing in BX).
-        let pointer_safe_regs: [Reg; 2] = [Reg::Si, Reg::Di];
+        // Pointer-safe regs default to [SI, DI]. When the function
+        // has no call AND there's exactly ONE pointer eligible
+        // overall, BCC also lets that pointer live in CX with a
+        // `mov bx, cx` before each deref. Multiple competing
+        // pointers keep the original restriction — fixture 3512
+        // (3 pointer params + 1 int) parks the spillover pointer
+        // on stack rather than CX. Fixture 2208 (`pts` ends up in
+        // CX with `int total, int i, struct P *pts`).
+        let pointer_count = eligible_int
+            .iter()
+            .filter(|&&i| matches!(declared[i].ty, Type::Pointer(_)))
+            .count();
+        let pointer_safe_regs: &[Reg] = if !function_makes_call && pointer_count == 1 {
+            &[Reg::Si, Reg::Di, Reg::Cx]
+        } else {
+            &[Reg::Si, Reg::Di]
+        };
         let mut non_si_iter = non_si_pool.iter().copied().peekable();
         for &i in &ordered_eligibles {
             if Some(i) == si_pick {
@@ -3136,12 +3152,16 @@ fn expr_has_direct_pointer_deref(name: &str, e: &Expr) -> bool {
         }
         ExprKind::Cast { operand, .. } => expr_has_direct_pointer_deref(name, operand),
         ExprKind::ArrayIndex { array, index } => {
-            // `p[K]` is also a direct deref. `p[var]` is var-index
-            // — BCC distinguishes these elsewhere; for the
-            // loop-pointer heuristic we accept both (the pointer
-            // is still being dereffed inside a loop).
+            // `p[K]` (const index) is a direct deref — folds to
+            // `<width> ptr [<reg>+K*stride]`. `p[var]` needs a
+            // scale step (shift/imul) per use and BCC doesn't
+            // award the pointer SI for that shape — the loop
+            // counter takes SI and the pointer lives elsewhere.
+            // Fixture 2208 (`pts[i].x + pts[i].y` keeps `i` in SI;
+            // pts lands in CX via the 1-pointer-extension rule).
             if let ExprKind::Ident(n) = &array.kind
                 && n == name
+                && try_const_eval(index).is_some()
             {
                 return true;
             }
