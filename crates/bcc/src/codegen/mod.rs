@@ -12979,6 +12979,28 @@ impl<'a> FunctionEmitter<'a> {
             };
             return;
         }
+        // Far-pointer global deref `*p` (depth=0) — pointer promotion
+        // in compact / large turned `int *p` into `int far *p`, so
+        // the slot is 4 bytes and the read goes through `les bx +
+        // mov es:[bx]`. Fixtures 3900 / 3901.
+        if depth == 0
+            && let Some(gty) = self.globals.type_of(base_name)
+            && matches!(gty, Type::FarPointer { .. })
+            && let Some(pointee) = gty.pointee()
+        {
+            let pointee = pointee.clone();
+            let _ = write!(
+                self.out,
+                "\tles\tbx,dword ptr DGROUP:_{base_name}\r\n"
+            );
+            if pointee.is_char_like() {
+                self.out.extend_from_slice(b"\tmov\tal,byte ptr es:[bx]\r\n");
+                self.emit_widen_al(&pointee);
+            } else {
+                self.out.extend_from_slice(b"\tmov\tax,word ptr es:[bx]\r\n");
+            }
+            return;
+        }
         // Chain path: land the address-to-be-deref'd-once-more in BX,
         // then do the final load. Fixture 195 (`int **p` → `**p`)
         // hits depth=1; fixture 193 hits depth=0 on a global.

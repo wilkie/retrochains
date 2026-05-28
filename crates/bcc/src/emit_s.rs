@@ -688,6 +688,15 @@ fn emit_global_init(
         let _ = write!(out, "\tdw\tDGROUP:_{target_name}\r\n");
         return;
     }
+    // `T *p = &g;` for compact/large where the pointer was promoted
+    // to far. Emit `dd DGROUP:_<target>` so the linker writes the
+    // 4-byte far pointer (offset:segment). Fixtures 3900 / 3901.
+    if let (ExprKind::AddressOf(target_name), Type::FarPointer { .. }) =
+        (&init.kind, ty)
+    {
+        let _ = write!(out, "\tdd\tDGROUP:_{target_name}\r\n");
+        return;
+    }
     // `T *p = &arr[K];` (fixture 198) — same shape but with a
     // constant byte offset baked in: `dw DGROUP:_arr+<offset>`.
     if let (ExprKind::AddressOfArrayElem { array, byte_offset }, Type::Pointer(_)) =
