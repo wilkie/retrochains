@@ -119,6 +119,12 @@ impl Reg {
     /// The 6+ "spill" case keeps the standard NON_SI_POOL order.
     const NON_SI_POOL_FIVE_INT: [Self; 4] = [Self::Bx, Self::Di, Self::Cx, Self::Dx];
 
+    /// Variant fired by the shift-count SI swap (fixture 2399): the
+    /// shift-count int gets DX as its first choice so the body's
+    /// `mov cl, dl` is the natural source. Other eligibles fall to
+    /// the same `[DI, BX, CX]` tail the default pool uses.
+    const NON_SI_POOL_DX_FIRST: [Self; 4] = [Self::Dx, Self::Di, Self::Bx, Self::Cx];
+
     /// Reduced int pool when the function makes a call: DX, BX, CX
     /// are all caller-clobbered, so only DI is safe alongside SI.
     /// Fixture 1508 (3 ints + dbl() call → 2 in SI/DI, 1 spills).
@@ -475,7 +481,34 @@ impl Locals {
             &eligible_int,
             &declared,
         );
+        // When exactly two ints are eligible and one is used as a
+        // *variable shift count* (`<expr> << var` or `>> var`),
+        // BCC's allocator routes that shift-count int through DX
+        // — the `mov cl, dl` source is the natural fit. SI then
+        // goes to the *other* int even if the shift-count int has
+        // the higher use count. Restricted to the no-call shape so
+        // DX is still preserved across the body. Fixture 2399
+        // (`1 << i` with two int locals).
+        let shift_count_si_swap: Option<usize> = (!function_makes_call
+            && eligible_int.len() == 2
+            && eligible_int
+                .iter()
+                .all(|&i| matches!(declared[i].ty, Type::Int | Type::UInt)))
+        .then(|| {
+            let body = function.body.as_deref().unwrap_or(&[]);
+            let a = &declared[eligible_int[0]].name;
+            let b = &declared[eligible_int[1]].name;
+            let a_is = body_uses_name_as_shift_count(body, a);
+            let b_is = body_uses_name_as_shift_count(body, b);
+            match (a_is, b_is) {
+                (true, false) => Some(eligible_int[1]),
+                (false, true) => Some(eligible_int[0]),
+                _ => None,
+            }
+        })
+        .flatten();
         let si_pick = loop_pointer_si
+            .or(shift_count_si_swap)
             .or_else(|| pick_si(&eligible_int, &declared, &counts));
 
         // SI-vs-DX heuristic for the single-eligible case: when only
@@ -586,6 +619,12 @@ impl Locals {
             &Reg::NON_SI_POOL_NO_DX
         } else if eligible_uses_vary {
             &Reg::NON_SI_POOL_FIVE_INT
+        } else if shift_count_si_swap.is_some() {
+            // Companion to the shift-count SI swap: the shift-count
+            // int (which lost the SI fight) lands in DX so the
+            // body's `mov cl, dl` can source from its low byte
+            // directly. Fixture 2399.
+            &Reg::NON_SI_POOL_DX_FIRST
         } else {
             &Reg::NON_SI_POOL
         };
@@ -2510,6 +2549,93 @@ fn body_emits_imul(body: &[Stmt], char_locals: &HashSet<&str>) -> bool {
 /// because BCC always uses BX as the indexed-address register.
 fn body_has_2d_array_index(body: &[Stmt]) -> bool {
     body.iter().any(stmt_has_2d_array_index)
+}
+
+/// True iff `body` contains any expression of the form
+/// `<lhs> << <name>` or `<lhs> >> <name>` — i.e. `name` appears
+/// as a *variable shift count*. BCC's allocator rebalances
+/// register assignment when this fires so the shift-count int
+/// lands in DX (where DL is the low byte for `mov cl, dl`) and
+/// some other int gets SI even when its use count is lower than
+/// the shift count's. Fixture 2399 (`1 << i`).
+fn body_uses_name_as_shift_count(body: &[Stmt], name: &str) -> bool {
+    fn walk_stmt(s: &Stmt, name: &str) -> bool {
+        match &s.kind {
+            StmtKind::Return(Some(e))
+            | StmtKind::ExprStmt(e)
+            | StmtKind::Assign { value: e, .. }
+            | StmtKind::CompoundAssign { value: e, .. }
+            | StmtKind::DerefAssign { value: e, .. }
+            | StmtKind::DerefCompoundAssign { value: e, .. }
+            | StmtKind::MemberAssign { value: e, .. }
+            | StmtKind::MemberCompoundAssign { value: e, .. } => walk_expr(e, name),
+            StmtKind::Declare { init, .. } => init.as_ref().is_some_and(|e| walk_expr(e, name)),
+            StmtKind::If { cond, then_branch, else_branch } => {
+                walk_expr(cond, name)
+                    || then_branch.iter().any(|s| walk_stmt(s, name))
+                    || else_branch.as_ref().is_some_and(|b| b.iter().any(|s| walk_stmt(s, name)))
+            }
+            StmtKind::While { cond, body } | StmtKind::DoWhile { body, cond } => {
+                walk_expr(cond, name) || body.iter().any(|s| walk_stmt(s, name))
+            }
+            StmtKind::For { init, cond, step, body } => {
+                init.as_ref().is_some_and(|es| es.iter().any(|e| walk_expr(e, name)))
+                    || cond.as_ref().is_some_and(|e| walk_expr(e, name))
+                    || step.as_ref().is_some_and(|es| es.iter().any(|e| walk_expr(e, name)))
+                    || body.iter().any(|s| walk_stmt(s, name))
+            }
+            StmtKind::Switch { scrutinee, cases } => {
+                walk_expr(scrutinee, name)
+                    || cases.iter().any(|c| c.body.iter().any(|s| walk_stmt(s, name)))
+            }
+            StmtKind::ArrayAssign { indices, value, .. }
+            | StmtKind::ArrayCompoundAssign { indices, value, .. }
+            | StmtKind::MemberArrayAssign { indices, value, .. } => {
+                indices.iter().any(|e| walk_expr(e, name)) || walk_expr(value, name)
+            }
+            StmtKind::Block(body) => body.iter().any(|s| walk_stmt(s, name)),
+            _ => false,
+        }
+    }
+    fn walk_expr(e: &Expr, name: &str) -> bool {
+        if let ExprKind::BinOp { op, left, right } = &e.kind {
+            if matches!(op, crate::ast::BinOp::Shl | crate::ast::BinOp::Shr)
+                && let ExprKind::Ident(n) = &right.kind
+                && n == name
+            {
+                return true;
+            }
+            return walk_expr(left, name) || walk_expr(right, name);
+        }
+        match &e.kind {
+            ExprKind::Logical { left, right, .. } | ExprKind::Comma { left, right } => {
+                walk_expr(left, name) || walk_expr(right, name)
+            }
+            ExprKind::Unary { operand, .. }
+            | ExprKind::Deref(operand)
+            | ExprKind::Cast { operand, .. } => walk_expr(operand, name),
+            ExprKind::AssignExpr { value, .. }
+            | ExprKind::CompoundAssignExpr { value, .. } => walk_expr(value, name),
+            ExprKind::AssignLvalueExpr { target, value } => {
+                walk_expr(target, name) || walk_expr(value, name)
+            }
+            ExprKind::Ternary { cond, then_value, else_value } => {
+                walk_expr(cond, name) || walk_expr(then_value, name) || walk_expr(else_value, name)
+            }
+            ExprKind::Member { base, .. } => walk_expr(base, name),
+            ExprKind::ArrayIndex { array, index } => {
+                walk_expr(array, name) || walk_expr(index, name)
+            }
+            ExprKind::Call { args, .. } => args.iter().any(|a| walk_expr(a, name)),
+            ExprKind::CallVia { addr, args } => {
+                walk_expr(addr, name) || args.iter().any(|a| walk_expr(a, name))
+            }
+            ExprKind::InitList { items } => items.iter().any(|e| walk_expr(e, name)),
+            ExprKind::UpdateLvalue { target, .. } => walk_expr(target, name),
+            _ => false,
+        }
+    }
+    body.iter().any(|s| walk_stmt(s, name))
 }
 
 /// True iff the function body contains any ArrayIndex expression

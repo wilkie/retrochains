@@ -511,6 +511,17 @@ fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
             {
                 return Ok(Instr::TestBpRelAx { offset });
             }
+            // `test ax, word ptr [bp+disp]` — operand-swapped form
+            // of the above. TEST r16, r/m16 (85 ModR/M) is symmetric
+            // with TEST r/m16, r16, so the byte encoding is
+            // identical; the assembly spelling differs and we route
+            // it through the same instruction. Fixture 2399
+            // (`if (mask & (1 << i))` for stack-resident `mask`).
+            if lhs == "ax"
+                && let Some(offset) = parse_word_bp_relative(rhs)
+            {
+                return Ok(Instr::TestBpRelAx { offset });
+            }
             Err(AsmError::new(
                 line.line_no,
                 format!("test: unsupported operand form `{rest}`"),

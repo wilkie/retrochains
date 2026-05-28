@@ -5416,6 +5416,21 @@ impl<'a> FunctionEmitter<'a> {
             let _ = write!(self.out, "\ttest\t{},{k16}\r\n", reg.name());
             return;
         }
+        // `if (<int_lvalue> & <expr>)` — collapse the and+test pair
+        // to a single memory-form `test`. BCC's lowering: evaluate
+        // the RHS expression into AX, then `test ax, word ptr
+        // <lvalue_addr>` directly. Saves the push/pop+and+or
+        // sequence the generic path would emit. Fixture 2399
+        // (`if (mask & (1 << i))` with mask stack-resident).
+        if let ExprKind::BinOp { op: BinOp::BitAnd, left, right } = &cond.kind
+            && let Some(l_addr) = self.int_lvalue_addr(left)
+            && !matches!(&right.kind, ExprKind::IntLit(_))
+            && try_const_eval(right).is_none()
+        {
+            self.emit_expr_to_ax(right);
+            let _ = write!(self.out, "\ttest\tax,word ptr {l_addr}\r\n");
+            return;
+        }
         if let ExprKind::Ident(name) = &cond.kind {
             if let Some(gty) = self.globals.type_of(name) {
                 // Global array name decays to its address, which is
