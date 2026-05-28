@@ -1143,6 +1143,25 @@ fn parse_mov(operands: &str, line_no: usize) -> AsmResult<Instr> {
     {
         return Ok(Instr::MovEsBxImm8 { imm });
     }
+    // `mov {word|byte} ptr es:[bx+disp8], imm/ax/al` — far-pointer
+    // indexed store. Used by `a[K] = v` writes through a stack-
+    // resident far-pointer local. Fixture 1870.
+    if let Some(disp) = parse_es_bx_disp(lhs, "word ptr es:[bx") {
+        if let Some(imm) = parse_imm16(rhs) {
+            return Ok(Instr::MovEsBxDispImm16 { disp, imm: imm as u16 });
+        }
+        if rhs == "ax" {
+            return Ok(Instr::MovEsBxDispAx { disp });
+        }
+    }
+    if let Some(disp) = parse_es_bx_disp(lhs, "byte ptr es:[bx") {
+        if let Some(imm) = parse_imm8(rhs) {
+            return Ok(Instr::MovEsBxDispImm8 { disp, imm });
+        }
+        if rhs == "al" {
+            return Ok(Instr::MovEsBxDispAl { disp });
+        }
+    }
     // `mov bx,word ptr [bx]` — chain step for `**p` (fixture 195).
     if lhs == "bx" && rhs == "word ptr [bx]" {
         return Ok(Instr::MovBxFromBxPtr);
@@ -4028,6 +4047,21 @@ fn parse_word_di_disp(s: &str) -> Option<i8> {
 /// displacement (0 if absent). Used by the global-pointer compound
 /// path `p[K] += y` where BCC loads the pointer into BX and emits
 /// `<op> word ptr [bx+offset], ax` (fixture 862).
+/// Parse `<prefix>+<disp>]` returning the disp byte. Caller passes
+/// the leading `"word ptr es:[bx"` (or byte variant) so this just
+/// peels off the trailing `+K]` or accepts `]` as disp=0. Disp=0
+/// returns None because the no-disp encoding is a different opcode
+/// (`MovEsBxAx` / `MovEsBxImm16`) — the caller's other rules pick
+/// that up. Used for the indexed far-pointer store family
+/// (fixture 1870).
+fn parse_es_bx_disp(s: &str, prefix: &str) -> Option<u8> {
+    let s = s.strip_prefix(prefix)?;
+    let inside = s.strip_suffix(']')?;
+    let rest = inside.strip_prefix('+')?;
+    let signed: i32 = rest.parse().ok()?;
+    u8::try_from(signed).ok()
+}
+
 fn parse_word_bx_disp(s: &str) -> Option<i8> {
     let s = s.trim().strip_prefix("word ptr ")?;
     let inside = s.strip_prefix('[')?.strip_suffix(']')?;

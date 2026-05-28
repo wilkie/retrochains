@@ -6159,6 +6159,70 @@ impl<'a> FunctionEmitter<'a> {
                     fp_arg_pushed = true;
                 }
                 total_bytes += size;
+            } else if let Type::FarPointer { .. } = &arg_ty {
+                // Far-pointer arg — 4 bytes (segment + offset). The
+                // common cases:
+                //   * Stack array passed to a `T far *` param —
+                //     `push ss; lea ax,[bp+arr]; push ax`. BCC's
+                //     emission order: ss first, then the LEA, then
+                //     push ax. Fixture 1870 (`fill(x)` under -ml,
+                //     `void fill(int *a)`).
+                //   * A `T far *` local — push both halves of the
+                //     stored pair (high then low).
+                //   * `&<global>` or `&<stack_local>` — push the
+                //     matching segment then the LEA / offset.
+                let mut handled = false;
+                if let ExprKind::Ident(name) = &arg.kind
+                    && self.locals.has(name)
+                {
+                    let t = self.locals.type_of(name).clone();
+                    if let Type::Array { .. } = &t
+                        && let LocalLocation::Stack(arr_off) = self.locals.location_of(name)
+                    {
+                        self.out.extend_from_slice(b"\tpush\tss\r\n");
+                        let _ = write!(
+                            self.out,
+                            "\tlea\tax,word ptr {}\r\n",
+                            bp_addr(arr_off),
+                        );
+                        self.out.extend_from_slice(b"\tpush\tax\r\n");
+                        handled = true;
+                    } else if matches!(t, Type::FarPointer { .. })
+                        && let LocalLocation::Stack(p_off) = self.locals.location_of(name)
+                    {
+                        // Pass the stored seg:off pair through —
+                        // push high (segment) then low (offset).
+                        let _ = write!(
+                            self.out,
+                            "\tpush\tword ptr {}\r\n",
+                            bp_addr(p_off + 2),
+                        );
+                        let _ = write!(
+                            self.out,
+                            "\tpush\tword ptr {}\r\n",
+                            bp_addr(p_off),
+                        );
+                        handled = true;
+                    }
+                }
+                if !handled
+                    && let ExprKind::AddressOf(sym) = &arg.kind
+                    && self.globals.type_of(sym).is_some()
+                {
+                    self.out.extend_from_slice(b"\tpush\tds\r\n");
+                    let _ = write!(
+                        self.out,
+                        "\tmov\tax,offset DGROUP:_{sym}\r\n",
+                    );
+                    self.out.extend_from_slice(b"\tpush\tax\r\n");
+                    handled = true;
+                }
+                assert!(
+                    handled,
+                    "far-pointer arg shape not yet supported: {:?}",
+                    arg.kind,
+                );
+                total_bytes += 4;
             } else if let Type::Struct { .. } = &arg_ty {
                 // Struct-by-value arg. Two shapes by size:
                 //   - 4 bytes: push two words high-first, identical
@@ -13692,6 +13756,42 @@ impl<'a> FunctionEmitter<'a> {
             && let Some(k) = try_const_eval(&indices[0])
         {
             let pointee = pointee.clone();
+            // Stack-resident far-pointer parameter / local: each
+            // `a[K] = v` is a self-contained `les bx, [bp+a]; mov
+            // word es:[bx+K*stride], v`. BCC reloads `les bx` for
+            // every write — the prior write through ES:BX is
+            // assumed to clobber the pair, so the next access
+            // re-establishes it. Fixture 1870 (`a[0] = 10; a[1] =
+            // 20;` for `int *a` under -ml).
+            if matches!(self.locals.type_of(array), Type::FarPointer { .. })
+                && let LocalLocation::Stack(a_off) = self.locals.location_of(array)
+            {
+                let stride = u32::from(pointee.size_bytes());
+                let byte_off = (k * stride) as i32;
+                let _ = write!(self.out, "\tles\tbx,word ptr {}\r\n", bp_addr(a_off));
+                let addr = if byte_off == 0 {
+                    "es:[bx]".to_string()
+                } else {
+                    format!("es:[bx+{byte_off}]")
+                };
+                if let Some(v) = try_const_eval(value) {
+                    if pointee.is_char_like() {
+                        let v8 = v & 0xFF;
+                        let _ = write!(self.out, "\tmov\tbyte ptr {addr},{v8}\r\n");
+                    } else {
+                        let v16 = v & 0xFFFF;
+                        let _ = write!(self.out, "\tmov\tword ptr {addr},{v16}\r\n");
+                    }
+                } else {
+                    self.emit_expr_to_ax(value);
+                    if pointee.is_char_like() {
+                        let _ = write!(self.out, "\tmov\tbyte ptr {addr},al\r\n");
+                    } else {
+                        let _ = write!(self.out, "\tmov\tword ptr {addr},ax\r\n");
+                    }
+                }
+                return;
+            }
             let LocalLocation::Reg(reg) = self.locals.location_of(array) else {
                 panic!("stack-resident pointer indexed write not yet supported (no fixture)");
             };

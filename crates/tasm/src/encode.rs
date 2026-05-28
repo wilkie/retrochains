@@ -572,6 +572,10 @@ fn instr_size(instr: &Instr) -> usize {
         | Instr::MovEsBxAl => 3,
         Instr::MovEsBxImm16 { .. } => 5,
         Instr::MovEsBxImm8 { .. } => 4,
+        Instr::MovEsBxDispImm16 { .. } => 6,
+        Instr::MovEsBxDispImm8 { .. } => 5,
+        Instr::MovEsBxDispAx { .. } => 4,
+        Instr::MovEsBxDispAl { .. } => 4,
         Instr::CmpGroupSymImm8Sx { .. }
         | Instr::CmpByteGroupSymImm8 { .. }
         | Instr::AddGroupSymImm8Sx { .. }
@@ -2343,6 +2347,38 @@ fn emit_instr(
             out.push(0xC6);
             out.push(0x07);
             out.push(*imm);
+        }
+        Instr::MovEsBxDispImm16 { disp, imm } => {
+            // `mov word ptr es:[bx+disp8], imm16` → 26 + C7 47 dd
+            // lo hi. ModR/M 47 = mod=01 reg=000 r/m=111 (BX).
+            // Fixture 1870 (`a[1] = 20`).
+            out.push(0x26);
+            out.push(0xC7);
+            out.push(0x47);
+            out.push(*disp);
+            out.extend_from_slice(&imm.to_le_bytes());
+        }
+        Instr::MovEsBxDispImm8 { disp, imm } => {
+            // `mov byte ptr es:[bx+disp8], imm8` → 26 + C6 47 dd ii.
+            out.push(0x26);
+            out.push(0xC6);
+            out.push(0x47);
+            out.push(*disp);
+            out.push(*imm);
+        }
+        Instr::MovEsBxDispAx { disp } => {
+            // `mov word ptr es:[bx+disp8], ax` → 26 + 89 47 dd.
+            out.push(0x26);
+            out.push(0x89);
+            out.push(0x47);
+            out.push(*disp);
+        }
+        Instr::MovEsBxDispAl { disp } => {
+            // `mov byte ptr es:[bx+disp8], al` → 26 + 88 47 dd.
+            out.push(0x26);
+            out.push(0x88);
+            out.push(0x47);
+            out.push(*disp);
         }
         Instr::CmpGroupSymImm8Sx { group, symbol, offset, imm } => {
             // `cmp word ptr <group>:<sym>[+N], imm8sx` → 83 3E lo hi ii.

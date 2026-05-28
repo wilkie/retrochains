@@ -1257,6 +1257,21 @@ pub enum Instr {
     /// pointer store of an immediate byte. (No fixture yet; sibling
     /// of `MovEsBxImm16`.)
     MovEsBxImm8 { imm: u8 },
+    /// `mov word ptr es:[bx+disp8], imm16` — `26` + `C7 47 dd lo hi`.
+    /// Far-pointer indexed store; the disp8 form folds an in-range
+    /// element-offset into the addressing mode. Fixture 1870
+    /// (`a[1] = 20;` for `int *a` under -ml).
+    MovEsBxDispImm16 { disp: u8, imm: u16 },
+    /// `mov word ptr es:[bx+disp8], ax` — `26` + `89 47 dd`. The
+    /// AX-source companion to `MovEsBxDispImm16` for non-constant
+    /// RHS.
+    MovEsBxDispAx { disp: u8 },
+    /// `mov byte ptr es:[bx+disp8], al` — `26` + `88 47 dd`. Byte-
+    /// width companion.
+    MovEsBxDispAl { disp: u8 },
+    /// `mov byte ptr es:[bx+disp8], imm8` — `26` + `C6 47 dd ii`.
+    /// Far-pointer indexed byte store with immediate.
+    MovEsBxDispImm8 { disp: u8, imm: u8 },
     /// `cmp word ptr <group>:<symbol>[+<offset>], imm16` — Grp1
     /// r/m16,imm16 with /7=CMP and disp16-only addressing
     /// (`81 3E lo hi imm_lo imm_hi`, 6 bytes). Used when K is too
