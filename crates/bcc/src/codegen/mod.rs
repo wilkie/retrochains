@@ -848,6 +848,7 @@ pub fn emit_function(
     stack_check: bool,
     no_reg_vars: bool,
     model_has_far_code: bool,
+    model_is_huge: bool,
 ) {
     let mut emitter = FunctionEmitter::new_with_opts(
         out, source, function, func_idx, signatures, globals, strings, helpers,
@@ -856,6 +857,7 @@ pub fn emit_function(
     emitter.target_186 = target_186;
     emitter.stack_check = stack_check;
     emitter.model_has_far_code = model_has_far_code;
+    emitter.model_is_huge = model_is_huge;
     emitter.run();
 }
 
@@ -943,6 +945,12 @@ struct FunctionEmitter<'a> {
     /// `push cs; call near` shape via per-function `is_far`.
     /// Fixture 2210.
     model_has_far_code: bool,
+    /// True under the huge memory model. Each module has its own
+    /// data segment (no DGROUP group), so functions reload DS from
+    /// the segment of `HELLO_DATA` on entry and restore it on exit;
+    /// globals are referenced without the `DGROUP:` prefix.
+    /// Fixtures 1770, 2057.
+    model_is_huge: bool,
     /// Set by `emit_compare` when it emits an operand-swapped cmp
     /// (e.g. `cmp ax, <reg>` when BCC wants `cmp <reg>, <ax-side>`
     /// reordered). The outer Jcc selector inverts the mnemonic
@@ -1029,6 +1037,7 @@ impl<'a> FunctionEmitter<'a> {
             target_186: false,
             stack_check: false,
             model_has_far_code: false,
+            model_is_huge: false,
             cmp_swapped: false,
             struct_call_tmp_bytes: tmp_bytes,
             pending_hidden_ret_ptr_tmp_off: None,
@@ -1139,6 +1148,19 @@ impl<'a> FunctionEmitter<'a> {
                 }
             }
         }
+        // Huge model: each module has its own data segment, so the
+        // function reloads DS from `seg HELLO_DATA` on entry (the
+        // caller's DS is unknown — under huge, every callsite
+        // independently sets its own data frame). The pair
+        // `push ds; mov ax, seg HELLO_DATA; mov ds, ax` lives just
+        // after `mov bp, sp` (before any callee-saved pushes), so
+        // every body access through DS reads the right segment.
+        // Fixtures 1770, 2057.
+        if self.model_is_huge {
+            self.out.extend_from_slice(b"\tpush\tds\r\n");
+            self.out.extend_from_slice(b"\tmov\tax,seg HELLO_DATA\r\n");
+            self.out.extend_from_slice(b"\tmov\tds,ax\r\n");
+        }
         for reg in self.locals.saved_regs() {
             let _ = write!(self.out, "\tpush\t{}\r\n", reg.name());
         }
@@ -1198,6 +1220,11 @@ impl<'a> FunctionEmitter<'a> {
         let saved: Vec<Reg> = self.locals.saved_regs().to_vec();
         for reg in saved.iter().rev() {
             let _ = write!(self.out, "\tpop\t{}\r\n", reg.name());
+        }
+        // Huge model: restore the caller's DS before unwinding the
+        // frame. Mirrors the prologue's `push ds`. Fixtures 1770, 2057.
+        if self.model_is_huge {
+            self.out.extend_from_slice(b"\tpop\tds\r\n");
         }
         // 186+ target: `leave` (C9) collapses `mov sp, bp; pop bp`
         // into one byte. Used whenever the prologue used `enter`.

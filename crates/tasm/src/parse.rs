@@ -1102,6 +1102,18 @@ fn parse_mov(operands: &str, line_no: usize) -> AsmResult<Instr> {
     {
         return Ok(Instr::MovReg16Dgroup { reg: dst });
     }
+    // `mov <reg16>, seg <segment-name>` — huge-model DS reload
+    // prologue. The imm16 gets a SegBaseSegmentTarget FIXUPP so the
+    // linker patches in the segment's paragraph value. Fixtures
+    // 1770, 2057.
+    if let Some(dst) = Reg16::parse(lhs)
+        && let Some(seg_name) = rhs.strip_prefix("seg ")
+    {
+        return Ok(Instr::MovReg16SegBase {
+            reg: dst,
+            segment: seg_name.trim().to_string(),
+        });
+    }
     // `mov <reg16>, <segreg>` — segment-register to general-purpose
     // register copy (`mov dx, ds`, `mov dx, ss`). Used to form the
     // segment half of a far pointer before calling helpers that
@@ -1232,6 +1244,21 @@ fn parse_mov(operands: &str, line_no: usize) -> AsmResult<Instr> {
             let (sym, offset) = split_sym_offset(symbol);
             return Ok(Instr::MovAxGroupSym {
                 group: group.to_string(),
+                symbol: sym.to_string(),
+                offset,
+            });
+        }
+        // Bare-symbol moffs16 load `mov ax, word ptr _g[+N]` — used
+        // by huge-model code where DGROUP isn't in scope. Fixture
+        // 2057.
+        if let Some(symbol) = rhs.strip_prefix("word ptr ")
+            && let Some(first) = symbol.chars().next()
+            && (first == '_' || first == '@')
+            && !symbol.contains(':')
+            && !symbol.contains('[')
+        {
+            let (sym, offset) = split_sym_offset(symbol);
+            return Ok(Instr::MovAxSym {
                 symbol: sym.to_string(),
                 offset,
             });

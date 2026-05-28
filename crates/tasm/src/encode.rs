@@ -334,6 +334,7 @@ fn encode_segment(
                     symbols,
                     group_idx,
                     extern_idx,
+                    _segment_idx,
                     &mut bytes,
                     &mut fixups,
                     jcc_expanded,
@@ -502,6 +503,7 @@ fn instr_size(instr: &Instr) -> usize {
         Instr::CallNear(_) => 3,
         Instr::CallFar(_) => 5,
         Instr::MovAxGroupSym { .. }
+        | Instr::MovAxSym { .. }
         | Instr::MovAlGroupSym { .. }
         | Instr::MovGroupSymAl { .. }
         | Instr::MovReg16OffsetGroupSym { .. } => 3,
@@ -560,6 +562,7 @@ fn instr_size(instr: &Instr) -> usize {
         Instr::PopDs => 1,
         Instr::Iret => 1,
         Instr::MovReg16Dgroup { .. } => 3,
+        Instr::MovReg16SegBase { .. } => 3,
         Instr::MovDsReg16 { .. } => 2,
         Instr::MovReg16SegReg { .. } => 2,
         Instr::MovBpRelSegReg { offset, .. }
@@ -797,6 +800,7 @@ fn emit_instr(
     symbols: &Symbols,
     group_idx: &HashMap<String, u8>,
     extern_idx: &HashMap<String, u8>,
+    segment_idx: &HashMap<String, u8>,
     out: &mut Vec<u8>,
     fixups: &mut Vec<FixupReq>,
     jcc_expanded: bool,
@@ -1662,6 +1666,27 @@ fn emit_instr(
             // Encoding A1 is `mov AX, moffs16` — segment-relative load.
             emit_group_sym_lea(&[0xA1], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
         }
+        Instr::MovAxSym { symbol, offset } => {
+            // `mov ax, word ptr <sym>` → A1 lo hi with a
+            // SegRelTargetFrameSegment FIXUPP. No group prefix,
+            // so the linker uses the symbol's defining segment as
+            // both the frame and the target. Fixture 2057.
+            let sym_loc = symbols.get(symbol).ok_or_else(|| {
+                AsmError::new(0, format!("symbol `{symbol}` not defined"))
+            })?;
+            let target_seg_idx = u8::try_from(sym_loc.segment + 1)
+                .expect("target seg idx fits");
+            let value = sym_loc.offset.wrapping_add(*offset as u16);
+            out.push(0xA1);
+            let imm_start = out.len();
+            out.extend_from_slice(&value.to_le_bytes());
+            fixups.push(FixupReq {
+                data_offset: u16::try_from(imm_start).expect("offset fits"),
+                kind: FixupKind::SegRelTargetFrameSegment {
+                    segment_idx: target_seg_idx,
+                },
+            });
+        }
         Instr::MovGroupSymImm16 { group, symbol, offset, imm } => {
             // `mov word ptr <group>:<sym>[+N], imm16` → C7 06 [addr]
             // [imm16]. Same FIXUPP shape as the `MovAxGroupSym` load
@@ -2277,6 +2302,26 @@ fn emit_instr(
                 kind: crate::ir::FixupKind::SegBaseGroupTarget {
                     group_idx: group_index,
                     segment_idx: data_segment_idx,
+                },
+            });
+        }
+        Instr::MovReg16SegBase { reg, segment } => {
+            // `mov <reg16>, seg <segment-name>` → B8+r lo hi. The
+            // lo/hi imm16 gets a SegBaseSegmentTarget fixup so the
+            // linker patches in the named segment's paragraph
+            // value. Fixtures 1770, 2057.
+            out.push(0xB8 | reg.code());
+            let fixup_offset = u16::try_from(out.len())
+                .map_err(|_| AsmError::new(0, "MovReg16SegBase offset overflow".to_owned()))?;
+            out.push(0);
+            out.push(0);
+            let seg_idx_u8 = segment_idx.get(segment).copied().ok_or_else(|| {
+                AsmError::new(0, format!("segment `{segment}` not defined"))
+            })?;
+            fixups.push(crate::ir::FixupReq {
+                data_offset: fixup_offset,
+                kind: crate::ir::FixupKind::SegBaseSegmentTarget {
+                    segment_idx: seg_idx_u8,
                 },
             });
         }

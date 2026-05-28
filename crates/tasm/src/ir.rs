@@ -1229,6 +1229,19 @@ pub enum Instr {
     /// `01` for disp8 / `10` for disp16; r/m=110=BP+disp. Fixtures
     /// 1649 / 1650 / 2058 (`mov [bp-N], ss` / `mov [bp-N], ds`).
     MovBpRelSegReg { offset: i16, src: SegReg },
+    /// `mov <reg16>, seg <segment-name>` — load a segment's base
+    /// paragraph value as an imm16. Encoding: `B8+r lo hi` with a
+    /// SegBaseSegmentTarget FIXUPP referencing the named segment.
+    /// Used in huge-model function prologues to reload DS to the
+    /// module's data segment. Fixtures 1770, 2057.
+    MovReg16SegBase { reg: Reg16, segment: String },
+    /// `mov ax, word ptr <symbol>[+N]` — bare-symbol moffs16 load
+    /// (no group prefix). Encoding: `A1 lo hi` with a
+    /// SegRelTargetFrameSegment FIXUPP — the linker uses the
+    /// symbol's defining segment as the frame so no group is
+    /// needed. Used by huge-model global reads where DGROUP isn't
+    /// in scope. Fixture 2057 (`return g;` for `int g = 42`).
+    MovAxSym { symbol: String, offset: i16 },
     /// `les bx, word ptr [bp+disp]` — `C4` + ModR/M `mod=mm reg=011
     /// (BX) r/m=110 (BP+disp)`. Loads the 4-byte far pointer at
     /// `[bp+disp..disp+3]` into ES:BX (offset → BX, segment → ES).
@@ -2613,6 +2626,13 @@ pub enum FixupKind {
     /// linker resolves the same paragraph as DGROUP's base).
     /// Locat byte: 0xC8 | hi2. Fix Data byte: 0x14. Fixture 1655.
     SegBaseGroupTarget { group_idx: u8, segment_idx: u8 },
+    /// Base 16-bit (M=1, location=2), frame method F0 (SEGDEF,
+    /// frame=target segment), target method T4 (SEGDEF, no disp).
+    /// Used by huge-model `mov ax, seg HELLO_DATA` in the function
+    /// prologue — no group is involved, the linker just patches in
+    /// the segment's paragraph value. Locat byte: 0xC8 | hi2.
+    /// Fix Data byte: 0x04. Fixtures 1770, 2057.
+    SegBaseSegmentTarget { segment_idx: u8 },
     /// 16:16-bit pointer (M=1, location=3), frame method F5
     /// (TARGET — frame is the target's own segment, no frame
     /// datum), target method T6 (EXTDEF, no disp). The fixup

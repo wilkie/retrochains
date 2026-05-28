@@ -189,6 +189,7 @@ pub fn build_asm(
             stack_check,
             no_reg_vars,
             memory_model.has_far_code(),
+            matches!(memory_model, crate::cli::MemoryModel::Huge),
         );
     }
 
@@ -221,6 +222,9 @@ pub fn build_asm(
     if memory_model.has_far_code() {
         rename_text_segment_and_retn_to_retf(&mut out, source_filename_lower);
     }
+    if matches!(memory_model, crate::cli::MemoryModel::Huge) {
+        rewrite_for_huge_model(&mut out, source_filename_lower);
+    }
     out.push(0x1A); // DOS EOF marker
     Ok(out)
 }
@@ -234,6 +238,78 @@ pub fn build_asm(
 /// `source_filename_lower` is the lowercased source basename (e.g.
 /// `hello.c`); the segment prefix uppercases the stem
 /// (`HELLO_TEXT`). Fixtures 1664, 1666, 2052, 2053, 2061.
+/// Huge memory model: post-process the asm output to merge `_DATA`
+/// / `_BSS` into a single `<MODULE>_DATA` segment of class
+/// `'FAR_DATA'`, drop the `DGROUP` group entirely (huge has no
+/// shared data group across modules), and strip the `DGROUP:`
+/// frame prefix from every data symbol reference (the assembler
+/// then uses the symbol's own segment as its FIXUP frame). The
+/// `d@` / `d@w` / `b@` / `b@w` size labels disappear too — they
+/// were placeholders for the empty small-model scaffold and have
+/// no analog in huge. Each function's prologue / epilogue already
+/// learned the `push ds; mov ax, seg HELLO_DATA; mov ds, ax`
+/// / `pop ds` pair via the `model_is_huge` codegen flag, so this
+/// pass only handles the file-scope scaffolding. Fixtures 1770,
+/// 2057.
+fn rewrite_for_huge_model(out: &mut Vec<u8>, source_filename_lower: &str) {
+    let stem = source_filename_lower
+        .split('.')
+        .next()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("out");
+    let module_upper = stem.to_ascii_uppercase();
+    let data_seg = format!("{module_upper}_DATA");
+    let original = std::mem::take(out);
+    let text = String::from_utf8(original).expect("asm output is ASCII");
+    let mut rewritten = String::with_capacity(text.len());
+    for line in text.split_inclusive('\n') {
+        let trimmed = line.trim_start_matches('\t');
+        let leading_tabs = line.len() - trimmed.len();
+        // Drop the `DGROUP\tgroup\t...` directive entirely — huge
+        // does not group its data segments.
+        if trimmed.starts_with("DGROUP\tgroup\t") {
+            continue;
+        }
+        // Drop the `d@` / `d@w` / `b@` / `b@w` size labels — the
+        // huge scaffold doesn't emit them.
+        if trimmed == "d@\tlabel\tbyte\r\n"
+            || trimmed == "d@w\tlabel\tword\r\n"
+            || trimmed == "b@\tlabel\tbyte\r\n"
+            || trimmed == "b@w\tlabel\tword\r\n"
+        {
+            continue;
+        }
+        // `assume\tcs:HELLO_TEXT,ds:DGROUP` → drop the `,ds:DGROUP`
+        // tail; under huge the ds value is established per-function.
+        let mut s: String = if trimmed.starts_with("assume\tcs:") && trimmed.contains(",ds:DGROUP") {
+            line.replace(",ds:DGROUP", "")
+        } else {
+            line.to_string()
+        };
+        // Rename `_DATA` / `_BSS` segment lines (segment / ends /
+        // class). Small-model scaffold has both; huge folds them
+        // into a single `<MODULE>_DATA` of class `'FAR_DATA'`.
+        if s.contains("_DATA\tsegment") || s.contains("_DATA\tends") {
+            s = s.replace("_DATA\t", &format!("{data_seg}\t"));
+            s = s.replace("'DATA'", "'FAR_DATA'");
+        }
+        if s.contains("_BSS\tsegment") || s.contains("_BSS\tends") {
+            s = s.replace("_BSS\t", &format!("{data_seg}\t"));
+            s = s.replace("'BSS'", "'FAR_DATA'");
+        }
+        // Strip the `DGROUP:` frame prefix from symbol references —
+        // `DGROUP:_g` → `_g`, `offset DGROUP:_g` → `offset _g`. The
+        // assembler then uses the symbol's own segment for the
+        // FIXUP frame.
+        if s.contains("DGROUP:") {
+            s = s.replace("DGROUP:", "");
+        }
+        let _ = leading_tabs;
+        rewritten.push_str(&s);
+    }
+    *out = rewritten.into_bytes();
+}
+
 fn rename_text_segment_and_retn_to_retf(out: &mut Vec<u8>, source_filename_lower: &str) {
     let stem = source_filename_lower
         .split('.')
