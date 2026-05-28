@@ -5521,6 +5521,141 @@ impl<'a> FunctionEmitter<'a> {
     /// 2. LHS in a register: `cmp <reg>, <rhs>`
     /// 3. LHS is a stack local and RHS is a constant: `cmp word ptr [bp-N], K`
     /// 4. Otherwise: `mov ax, <lhs>` then `cmp ax, <rhs>`
+    /// Emit BCC's per-iteration address-into-BX prelude for a
+    /// stack-array-of-struct field access with a non-power-of-2
+    /// element stride:
+    ///   mov ax, <i>
+    ///   mov dx, <stride>
+    ///   imul dx                            (DX:AX = i*stride)
+    ///   lea dx, [bp+arr_base+field_off]    (DX = &arr[0].field)
+    ///   add ax, dx                         (AX = &arr[i].field)
+    ///   mov bx, ax
+    /// AX and DX are clobbered; BX ends up pointing at the
+    /// requested field of element `i`. Fixture 1914.
+    fn emit_arr_var_field_addr_to_bx(
+        &mut self,
+        idx_src: &str,
+        stride: u16,
+        arr_base: i16,
+        field_off: u16,
+    ) {
+        // `mov ax, <reg>` (no `word ptr`) for a register-resident
+        // index, `mov ax, word ptr <mem>` otherwise.
+        if is_reg16_name(idx_src) {
+            let _ = write!(self.out, "\tmov\tax,{idx_src}\r\n");
+        } else {
+            let _ = write!(self.out, "\tmov\tax,word ptr {idx_src}\r\n");
+        }
+        let _ = write!(self.out, "\tmov\tdx,{stride}\r\n");
+        self.out.extend_from_slice(b"\timul\tdx\r\n");
+        let lea_off = arr_base + i16::try_from(field_off as i32).unwrap_or(i16::MAX);
+        let _ = write!(self.out, "\tlea\tdx,word ptr {}\r\n", bp_addr(lea_off));
+        self.out.extend_from_slice(b"\tadd\tax,dx\r\n");
+        self.out.extend_from_slice(b"\tmov\tbx,ax\r\n");
+    }
+
+    /// Try to match `e` as a `BinOp::Add` chain whose every leaf is
+    /// `<arr>[<idx>].<field>` for a stack-local struct array `arr`
+    /// with the same `idx` lvalue and a non-power-of-2 element
+    /// stride. Returns `(arr_base_bp_off, idx_lvalue_addr,
+    /// elem_stride, field_offs_in_chain_order)`. The caller emits
+    /// each field's per-iteration address prelude. Fixture 1914.
+    fn match_arr_var_field_add_chain(
+        &self,
+        e: &Expr,
+    ) -> Option<(i16, String, u16, Vec<u16>)> {
+        let mut arr_name: Option<String> = None;
+        let mut idx_addr: Option<String> = None;
+        let mut stride: Option<u16> = None;
+        let mut field_offs: Vec<u16> = Vec::new();
+        fn walk(
+            e: &Expr,
+            self_ref: &FunctionEmitter<'_>,
+            arr_name: &mut Option<String>,
+            idx_addr: &mut Option<String>,
+            stride: &mut Option<u16>,
+            field_offs: &mut Vec<u16>,
+        ) -> bool {
+            if let ExprKind::BinOp { op: BinOp::Add, left, right } = &e.kind {
+                return walk(left, self_ref, arr_name, idx_addr, stride, field_offs)
+                    && walk(right, self_ref, arr_name, idx_addr, stride, field_offs);
+            }
+            let ExprKind::Member {
+                base,
+                field,
+                kind: crate::ast::MemberKind::Dot,
+            } = &e.kind else { return false };
+            let ExprKind::ArrayIndex { array, index } = &base.kind else { return false };
+            let ExprKind::Ident(name) = &array.kind else { return false };
+            if !self_ref.locals.has(name) { return false; }
+            let arr_ty = self_ref.locals.type_of(name);
+            let Some(elem_ty) = arr_ty.array_elem() else { return false };
+            let Some((f_off, _)) = elem_ty.field(field) else { return false };
+            let elem_stride = elem_ty.size_bytes();
+            // Power-of-2 strides are already handled by the
+            // shl-based fast path in `resolve_operand_source`. This
+            // peephole is for the imul case only.
+            if elem_stride < 2
+                || elem_stride.is_power_of_two()
+            {
+                return false;
+            }
+            let i_addr = match self_ref.named_int_lvalue_addr_or_reg(index) {
+                Some(s) => s,
+                None => return false,
+            };
+            match arr_name {
+                None => *arr_name = Some(name.clone()),
+                Some(a) if a == name => {}
+                _ => return false,
+            }
+            match idx_addr {
+                None => *idx_addr = Some(i_addr),
+                Some(a) if *a == i_addr => {}
+                _ => return false,
+            }
+            match stride {
+                None => *stride = Some(elem_stride),
+                Some(s) if *s == elem_stride => {}
+                _ => return false,
+            }
+            field_offs.push(f_off);
+            true
+        }
+        if !walk(e, self, &mut arr_name, &mut idx_addr, &mut stride, &mut field_offs) {
+            return None;
+        }
+        let name = arr_name?;
+        let LocalLocation::Stack(arr_base) = self.locals.location_of(&name) else {
+            return None;
+        };
+        Some((arr_base, idx_addr?, stride?, field_offs))
+    }
+
+    /// Like `int_lvalue_addr` but also accepts a register-resident
+    /// int as a bare register-name source (e.g. `si`). Used by the
+    /// arr[i] address prelude where the index might live in a
+    /// register or on the stack — either way it has to be a
+    /// memory- or register-direct word source.
+    fn named_int_lvalue_addr_or_reg(&self, e: &Expr) -> Option<String> {
+        let ExprKind::Ident(name) = &e.kind else { return None };
+        if let Some(gty) = self.globals.type_of(name)
+            && gty.is_int_like()
+        {
+            return Some(format!("DGROUP:_{name}"));
+        }
+        if self.locals.has(name) && self.locals.type_of(name).is_int_like() {
+            match self.locals.location_of(name) {
+                LocalLocation::Stack(off) => return Some(bp_addr(off)),
+                LocalLocation::Reg(reg) if !reg.is_byte() => {
+                    return Some(reg.name().to_owned());
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
     /// Type of a far-pointer lvalue, or `None` if `e` doesn't name a
     /// stack-resident FarPointer local. Used to decide whether to
     /// route a comparison through the huge-pointer runtime helper.
@@ -16909,6 +17044,93 @@ impl<'a> FunctionEmitter<'a> {
             && let Some(elem_ty) = arr_ty.array_elem()
             && let Some((field_off, field_ty)) = elem_ty.field(field)
             && let LocalLocation::Stack(base_off) = self.locals.location_of(arr_name)
+            && !elem_ty.size_bytes().is_power_of_two()
+            && try_const_eval(index).is_none()
+        {
+            // `<stack-struct-arr>[<var-idx>].<field> = <value>` for
+            // a struct with a non-power-of-2 element stride. BCC's
+            // lowering bakes the field offset into the LEA so the
+            // store goes through `[bx]` with no displacement:
+            //   mov ax, <i>; mov dx, stride; imul dx;
+            //   lea dx, [bp + arr_base + field_off]
+            //   add ax, dx                              ; AX = address
+            //   <compute value into DX or use src reg>
+            //   mov bx, ax
+            //   mov [bx], <src>
+            // When the value is a bare register-resident ident the
+            // source IS that register and the prelude can fold the
+            // final `mov bx, ax` in early (no DX clobber concern).
+            // Fixture 1914 (`struct R arr[3];` writes).
+            let idx_addr = match self.named_int_lvalue_addr_or_reg(index) {
+                Some(s) => s,
+                None => panic!("non-trivial index in struct-arr write not supported"),
+            };
+            let stride = elem_ty.size_bytes();
+            let field_ty_clone = field_ty.clone();
+            let is_word = !field_ty_clone.is_char_like();
+            // Simple-register-source value: emit the prelude with
+            // `mov bx, ax` at the end, then store via that
+            // register. `arr[i].a = i;` where `i` is in SI.
+            if let ExprKind::Ident(v_name) = &value.kind
+                && self.locals.has(v_name)
+                && let LocalLocation::Reg(v_reg) = self.locals.location_of(v_name)
+                && !v_reg.is_byte()
+                && is_word
+            {
+                self.emit_arr_var_field_addr_to_bx(&idx_addr, stride, base_off, field_off);
+                let _ = write!(self.out, "\tmov\tword ptr [bx],{}\r\n", v_reg.name());
+                return;
+            }
+            // `<ident_in_reg> + K_const` value: split the prelude
+            // so the trailing `mov bx, ax` lands *after* the value
+            // compute. `arr[i].b = i + 10;` style.
+            if let ExprKind::BinOp { op: BinOp::Add, left: vl, right: vr } = &value.kind
+                && let Some(k) = try_const_eval(vr)
+                && let ExprKind::Ident(v_name) = &vl.kind
+                && self.locals.has(v_name)
+                && let LocalLocation::Reg(v_reg) = self.locals.location_of(v_name)
+                && !v_reg.is_byte()
+                && is_word
+            {
+                // Prelude without the final mov bx, ax — AX has
+                // the address.
+                if is_reg16_name(&idx_addr) {
+                    let _ = write!(self.out, "\tmov\tax,{idx_addr}\r\n");
+                } else {
+                    let _ = write!(self.out, "\tmov\tax,word ptr {idx_addr}\r\n");
+                }
+                let _ = write!(self.out, "\tmov\tdx,{stride}\r\n");
+                self.out.extend_from_slice(b"\timul\tdx\r\n");
+                let lea_off = base_off + i16::try_from(field_off as i32).unwrap_or(i16::MAX);
+                let _ = write!(self.out, "\tlea\tdx,word ptr {}\r\n", bp_addr(lea_off));
+                self.out.extend_from_slice(b"\tadd\tax,dx\r\n");
+                // Value compute into DX.
+                let _ = write!(self.out, "\tmov\tdx,{}\r\n", v_reg.name());
+                let k_imm = k & 0xFFFF;
+                let _ = write!(self.out, "\tadd\tdx,{k_imm}\r\n");
+                self.out.extend_from_slice(b"\tmov\tbx,ax\r\n");
+                self.out.extend_from_slice(b"\tmov\tword ptr [bx],dx\r\n");
+                return;
+            }
+            // Constant value: prelude + `mov word ptr [bx], imm`.
+            if let Some(v) = try_const_eval(value) {
+                self.emit_arr_var_field_addr_to_bx(&idx_addr, stride, base_off, field_off);
+                let v_masked = if is_word { v & 0xFFFF } else { v & 0xFF };
+                let width = if is_word { "word" } else { "byte" };
+                let _ = write!(self.out, "\tmov\t{width} ptr [bx],{v_masked}\r\n");
+                return;
+            }
+            panic!(
+                "non-trivial value in non-pow2 struct-arr write not yet supported (no fixture)"
+            );
+        } else if matches!(kind, crate::ast::MemberKind::Dot)
+            && let ExprKind::ArrayIndex { array, index } = &base.kind
+            && let ExprKind::Ident(arr_name) = &array.kind
+            && self.locals.has(arr_name)
+            && let arr_ty = self.locals.type_of(arr_name).clone()
+            && let Some(elem_ty) = arr_ty.array_elem()
+            && let Some((field_off, field_ty)) = elem_ty.field(field)
+            && let LocalLocation::Stack(base_off) = self.locals.location_of(arr_name)
         {
             // `<stack-struct-arr>[<var-idx>].<field> = <value>` —
             // compute &arr[i] via emit_array_addr_to_bx, then write
@@ -21156,6 +21378,41 @@ impl<'a> FunctionEmitter<'a> {
 
     /// Emit code that leaves the value of `e` in AX.
     fn emit_expr_to_ax(&mut self, e: &Expr) {
+        // `arr[i].a + arr[i].b + arr[i].c` (or any +-chain of field
+        // accesses against the same stack-array-of-struct base with
+        // the same non-const index): BCC's lowering computes each
+        // field's address fresh via an imul-by-stride prelude that
+        // clobbers AX, so it stashes the accumulating sum on the
+        // stack between operands. The chain emit is:
+        //
+        //   <addr-of arr[i].field_0>; mov ax, [bx]; push ax
+        //   <addr-of arr[i].field_1>; pop ax; add ax, [bx]; push ax
+        //   ...
+        //   <addr-of arr[i].field_n>; pop ax; add ax, [bx]
+        //
+        // The `<addr-of>` prelude is:
+        //   mov ax, <i>; mov dx, <stride>; imul dx;
+        //   lea dx, [bp+arr_base+field_off]; add ax, dx; mov bx, ax
+        //
+        // Fixture 1914 (`struct R { int a,b,c; } arr[3];` chain).
+        if let Some((arr_base, idx_addr, stride, field_offs)) =
+            self.match_arr_var_field_add_chain(e)
+            && field_offs.len() >= 2
+        {
+            for (i, f_off) in field_offs.iter().enumerate() {
+                if i > 0 {
+                    self.out.extend_from_slice(b"\tpush\tax\r\n");
+                }
+                self.emit_arr_var_field_addr_to_bx(&idx_addr, stride, arr_base, *f_off);
+                if i == 0 {
+                    self.out.extend_from_slice(b"\tmov\tax,word ptr [bx]\r\n");
+                } else {
+                    self.out.extend_from_slice(b"\tpop\tax\r\n");
+                    self.out.extend_from_slice(b"\tadd\tax,word ptr [bx]\r\n");
+                }
+            }
+            return;
+        }
         // Huge-pointer subtraction `p2 - p1` — produces a long
         // element-difference value. BCC's emission:
         //   xor ax, ax            ; high half of element-size long
