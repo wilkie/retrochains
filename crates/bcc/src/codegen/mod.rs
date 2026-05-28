@@ -9586,22 +9586,45 @@ impl<'a> FunctionEmitter<'a> {
                 // String-literal init for a pointer local: `char *s =
                 // "lit";` lowers to `mov word ptr [bp-N], offset
                 // DGROUP:s@+K` directly, no AX roundtrip. Fixture
-                // 1931 (`char *s = "ABCD"`).
+                // 1931 (`char *s = "ABCD"`). Under huge-mode far-
+                // data promotion the slot is 4 bytes — the segment
+                // half stores DS (which the prologue just loaded
+                // with the module's data segment), and the offset
+                // half takes the symbol address. Fixture 3716
+                // (`char *s = "hi";` under -mh).
                 if let ExprKind::StringLit(bytes) = &init.kind
                     && let Some(pointee) = ty.pointee()
                     && pointee.is_char_like()
                 {
                     let pool_off = self.strings.intern(bytes);
-                    let src = if pool_off == 0 {
-                        "offset DGROUP:s@".to_owned()
+                    if matches!(ty, Type::FarPointer { .. }) {
+                        let src = if pool_off == 0 {
+                            "offset s@".to_owned()
+                        } else {
+                            format!("offset s@+{pool_off}")
+                        };
+                        let _ = write!(
+                            self.out,
+                            "\tmov\tword ptr {},ds\r\n",
+                            bp_addr(off + 2),
+                        );
+                        let _ = write!(
+                            self.out,
+                            "\tmov\tword ptr {},{src}\r\n",
+                            bp_addr(off),
+                        );
                     } else {
-                        format!("offset DGROUP:s@+{pool_off}")
-                    };
-                    let _ = write!(
-                        self.out,
-                        "\tmov\tword ptr {},{src}\r\n",
-                        bp_addr(off),
-                    );
+                        let src = if pool_off == 0 {
+                            "offset DGROUP:s@".to_owned()
+                        } else {
+                            format!("offset DGROUP:s@+{pool_off}")
+                        };
+                        let _ = write!(
+                            self.out,
+                            "\tmov\tword ptr {},{src}\r\n",
+                            bp_addr(off),
+                        );
+                    }
                     return;
                 }
                 // `char c = f();` where f returns char — call returns
@@ -14039,6 +14062,31 @@ impl<'a> FunctionEmitter<'a> {
             }
             return;
         };
+        // Stack-resident far pointer indexed read: `s[0]` (or
+        // any zero-index access) for a `T far *` local. BCC's
+        // shape: `les bx, [bp+s]; mov ax / al, es:[bx]` with the
+        // pointee-width widen. K != 0 isn't fixture-tested yet
+        // (it would need `mov al, es:[bx+K*stride]`). Fixture
+        // 3716 (`char *s = "hi"; return s[0];` under -mh — the
+        // huge-model promotion turns the pointer into a 4-byte
+        // far slot).
+        if k == 0
+            && matches!(self.locals.type_of(ptr_name), Type::FarPointer { .. })
+            && let LocalLocation::Stack(off) = self.locals.location_of(ptr_name)
+        {
+            let _ = write!(self.out, "\tles\tbx,word ptr {}\r\n", bp_addr(off));
+            if pointee.is_char_like() {
+                self.out.extend_from_slice(b"\tmov\tal,byte ptr es:[bx]\r\n");
+                if pointee.is_unsigned() {
+                    self.out.extend_from_slice(b"\tmov\tah,0\r\n");
+                } else {
+                    self.out.extend_from_slice(b"\tcbw\t\r\n");
+                }
+            } else {
+                self.out.extend_from_slice(b"\tmov\tax,word ptr es:[bx]\r\n");
+            }
+            return;
+        }
         let addr_reg = match self.locals.location_of(ptr_name) {
             LocalLocation::Reg(reg) => reg.name(),
             LocalLocation::Stack(_) => {
