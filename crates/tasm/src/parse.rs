@@ -1412,6 +1412,21 @@ fn parse_mov(operands: &str, line_no: usize) -> AsmResult<Instr> {
         if let Some(disp) = parse_byte_bp_si_disp(rhs) {
             return Ok(Instr::MovAlBpSiDisp { disp });
         }
+        // Bare-symbol moffs8 load `mov al, byte ptr _g[+N]` — the
+        // byte-width sibling of `MovAxSym`. Used by huge-model
+        // char-global reads. Fixture 3698.
+        if let Some(symbol) = rhs.strip_prefix("byte ptr ")
+            && let Some(first) = symbol.chars().next()
+            && (first == '_' || first == '@')
+            && !symbol.contains(':')
+            && !symbol.contains('[')
+        {
+            let (sym, offset) = split_sym_offset(symbol);
+            return Ok(Instr::MovAlSym {
+                symbol: sym.to_string(),
+                offset,
+            });
+        }
         // `mov al,byte ptr [bx+disp8]` — char-pointer subscript
         // load (fixture 865). disp=0 stays with `MovAlFromBxPtr`
         // (2-byte form).

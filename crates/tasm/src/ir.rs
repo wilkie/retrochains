@@ -1242,6 +1242,11 @@ pub enum Instr {
     /// needed. Used by huge-model global reads where DGROUP isn't
     /// in scope. Fixture 2057 (`return g;` for `int g = 42`).
     MovAxSym { symbol: String, offset: i16 },
+    /// `mov al, byte ptr <symbol>` — byte-sized sibling of
+    /// `MovAxSym`. Encoding: `A0 lo hi` (mov al, moffs8) with the
+    /// same SegRelTargetFrameSegment FIXUPP shape. Used by huge-
+    /// model char-global reads. Fixture 3698 (`char g = 'X'`).
+    MovAlSym { symbol: String, offset: i16 },
     /// `les bx, word ptr [bp+disp]` — `C4` + ModR/M `mod=mm reg=011
     /// (BX) r/m=110 (BP+disp)`. Loads the 4-byte far pointer at
     /// `[bp+disp..disp+3]` into ES:BX (offset → BX, segment → ES).

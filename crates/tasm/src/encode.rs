@@ -508,6 +508,7 @@ fn instr_size(instr: &Instr) -> usize {
         Instr::CallFar(_) => 5,
         Instr::MovAxGroupSym { .. }
         | Instr::MovAxSym { .. }
+        | Instr::MovAlSym { .. }
         | Instr::MovAlGroupSym { .. }
         | Instr::MovGroupSymAl { .. }
         | Instr::MovReg16OffsetGroupSym { .. } => 3,
@@ -1722,6 +1723,26 @@ fn emit_instr(
                 .expect("target seg idx fits");
             let value = sym_loc.offset.wrapping_add(*offset as u16);
             out.push(0xA1);
+            let imm_start = out.len();
+            out.extend_from_slice(&value.to_le_bytes());
+            fixups.push(FixupReq {
+                data_offset: u16::try_from(imm_start).expect("offset fits"),
+                kind: FixupKind::SegRelTargetFrameSegment {
+                    segment_idx: target_seg_idx,
+                },
+            });
+        }
+        Instr::MovAlSym { symbol, offset } => {
+            // `mov al, byte ptr <sym>` → A0 lo hi (mov al, moffs8)
+            // with the same SegRelTargetFrameSegment FIXUPP shape
+            // as `MovAxSym`. Fixture 3698.
+            let sym_loc = symbols.get(symbol).ok_or_else(|| {
+                AsmError::new(0, format!("symbol `{symbol}` not defined"))
+            })?;
+            let target_seg_idx = u8::try_from(sym_loc.segment + 1)
+                .expect("target seg idx fits");
+            let value = sym_loc.offset.wrapping_add(*offset as u16);
+            out.push(0xA0);
             let imm_start = out.len();
             out.extend_from_slice(&value.to_le_bytes());
             fixups.push(FixupReq {
