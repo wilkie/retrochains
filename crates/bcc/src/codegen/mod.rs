@@ -21040,10 +21040,33 @@ impl<'a> FunctionEmitter<'a> {
                             ExprKind::BinOp { op: BinOp::Mul, left: rl, right: rr }
                                 if matches!(rl.kind, ExprKind::Call { .. })
                                     && matches!(rr.kind, ExprKind::Call { .. }));
+                        // Exception: `(int)<long_lvalue> + (int)
+                        // (<long_lvalue> >> K)` — LHS is a single
+                        // `mov ax, <low>` and RHS finishes with
+                        // `mov ax, <high>; cwd`. BCC's bytes show
+                        // RHS-first so the saved AX can be popped
+                        // straight into DX without a `mov dx, ax`
+                        // bridge. Fixture 1949 (`(int)y + (int)(y
+                        // >> 16)` for long y).
+                        let lhs_is_int_cast_of_long_ident = matches!(&left.kind,
+                            ExprKind::Cast { ty, operand }
+                                if matches!(ty, Type::Int | Type::UInt)
+                                    && matches!(&operand.kind, ExprKind::Ident(n)
+                                        if self.locals.has(n)
+                                            && self.locals.type_of(n).is_long_like()));
+                        let rhs_is_int_cast_of_long_shift = matches!(&right.kind,
+                            ExprKind::Cast { ty, operand }
+                                if matches!(ty, Type::Int | Type::UInt)
+                                    && matches!(&operand.kind,
+                                        ExprKind::BinOp { op: BinOp::Shr | BinOp::Shl, left: shl, .. }
+                                            if matches!(&shl.kind, ExprKind::Ident(n)
+                                                if self.locals.has(n)
+                                                    && self.locals.type_of(n).is_long_like())));
                         let rhs_first_call_exception =
                             matches!(op, BinOp::Add | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor)
-                                && lhs_is_call
-                                && rhs_is_mul_of_calls;
+                                && ((lhs_is_call && rhs_is_mul_of_calls)
+                                    || (lhs_is_int_cast_of_long_ident
+                                        && rhs_is_int_cast_of_long_shift));
                         (matches!(op, BinOp::Div | BinOp::Mod | BinOp::Mul)
                             || lhs_clobbers_ax)
                             && !rhs_first_call_exception
