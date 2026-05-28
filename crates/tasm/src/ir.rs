@@ -1849,6 +1849,12 @@ pub enum Instr {
     /// <<= N` — DX gets the low half before the inline shift
     /// (fixture 904).
     MovDxBxDisp { disp: i8 },
+    /// `mov bx,word ptr [bx+disp8]` — `8B 5F dd`. MOV r16,r/m16
+    /// with reg=BX(011) r/m=111=BX+disp8. Chain step for nested
+    /// arrow access (`a.next->next->v`) — load the next pointer
+    /// value into BX while keeping it as the dereference base.
+    /// Fixture 1928.
+    MovBxBxDisp { disp: i8 },
     /// `mov word ptr [bx+disp8],<imm16>` — `C7 47 dd lo hi`. MOV
     /// r/m16,imm16 (Group with /0) at mod=01 r/m=111=BX+disp8.
     /// Used by `long *p; p[K] = v` — two memory-direct stores at

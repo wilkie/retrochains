@@ -22726,6 +22726,74 @@ impl<'a> FunctionEmitter<'a> {
                         offset: field_off as i16,
                     };
                 }
+                // Chained-arrow base: `<inner>-><f>-><field>`.
+                // Recursively load the inner arrow into BX, then
+                // step through one more `[bx+f_off]` to land BX on
+                // the struct whose field we want. Fixture 1928's
+                // `a.next->next->v` (and the deeper chain in main).
+                if let ExprKind::Member {
+                    base: inner_base,
+                    field: inner_field,
+                    kind: crate::ast::MemberKind::Arrow,
+                } = &base.kind
+                    && let Some((src_name, total_off, src_ty)) =
+                        self.try_lvalue_chain_addr(inner_base)
+                    && let Some(inner_ptr_ty) = src_ty.pointee()
+                    && let Some((inner_off, inner_field_ty)) = {
+                        let resolved = match inner_ptr_ty {
+                            Type::Struct { name: Some(tag), fields, .. }
+                                if fields.is_empty() =>
+                            {
+                                self.lookup_struct_by_tag(tag)
+                                    .unwrap_or_else(|| inner_ptr_ty.clone())
+                            }
+                            _ => inner_ptr_ty.clone(),
+                        };
+                        resolved.field(inner_field).map(|(o, t)| (o, t))
+                    }
+                    && let Some(next_ptr_ty) = inner_field_ty.pointee()
+                    && let Some((field_off, _ft)) = {
+                        let resolved = match next_ptr_ty {
+                            Type::Struct { name: Some(tag), fields, .. }
+                                if fields.is_empty() =>
+                            {
+                                self.lookup_struct_by_tag(tag)
+                                    .unwrap_or_else(|| next_ptr_ty.clone())
+                            }
+                            _ => next_ptr_ty.clone(),
+                        };
+                        resolved.field(field).map(|(o, t)| (o, t))
+                    }
+                {
+                    let src_addr = if self.globals.contains(&src_name) {
+                        if total_off == 0 {
+                            format!("DGROUP:_{src_name}")
+                        } else {
+                            format!("DGROUP:_{src_name}+{total_off}")
+                        }
+                    } else if let LocalLocation::Stack(base_bp) =
+                        self.locals.location_of(&src_name)
+                    {
+                        let off = i32::from(base_bp) + total_off as i32;
+                        bp_addr(i16::try_from(off).unwrap_or(i16::MAX))
+                    } else {
+                        panic!("`p->q->x` chain lvalue `{src_name}` not stack/global");
+                    };
+                    // First arrow: load `inner_base`'s pointer field
+                    // into BX (the value of `<inner-base>->`).
+                    let _ = write!(self.out, "\tmov\tbx,word ptr {src_addr}\r\n");
+                    // Second arrow: dereference once more to land on
+                    // the struct that holds the final `field`.
+                    let _ = write!(
+                        self.out,
+                        "\tmov\tbx,word ptr [bx+{}]\r\n",
+                        inner_off,
+                    );
+                    return OperandSource::DerefRegOffset {
+                        reg: crate::codegen::locals::Reg::Bx,
+                        offset: field_off as i16,
+                    };
+                }
                 panic!("`p->x` as right operand not yet supported for non-register pointers (no fixture for {:?})", base.kind)
             }
             ExprKind::Ternary { .. } => {

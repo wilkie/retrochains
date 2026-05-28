@@ -1090,6 +1090,14 @@ fn parse_mov(operands: &str, line_no: usize) -> AsmResult<Instr> {
     if lhs == "bx" && rhs == "word ptr [bx]" {
         return Ok(Instr::MovBxFromBxPtr);
     }
+    // `mov bx,word ptr [bx+disp8]` — chain step for nested arrow
+    // access (fixture 1928).
+    if lhs == "bx"
+        && let Some(disp) = parse_word_bx_disp(rhs)
+        && disp != 0
+    {
+        return Ok(Instr::MovBxBxDisp { disp });
+    }
     // `mov dx,word ptr [si]` — low-half read of `*p` for `p: long *`
     // (fixture 309). Uses the shorter `8B 14` encoding (disp-less).
     if lhs == "dx" && rhs == "word ptr [si]" {
