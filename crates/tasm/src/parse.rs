@@ -2705,6 +2705,20 @@ fn parse_add(operands: &str, line_no: usize) -> AsmResult<Instr> {
                 offset,
             });
         }
+        // Bare-symbol `add ax, word ptr _g[+N]` — huge-model
+        // companion to `MovAxSym`. Fixture 3751.
+        if let Some(symbol) = rhs.strip_prefix("word ptr ")
+            && let Some(first) = symbol.chars().next()
+            && (first == '_' || first == '@')
+            && !symbol.contains(':')
+            && !symbol.contains('[')
+        {
+            let (sym, offset) = split_sym_offset(symbol);
+            return Ok(Instr::AddAxSym {
+                symbol: sym.to_string(),
+                offset,
+            });
+        }
         if let Some(imm) = parse_imm16(rhs) {
             return Ok(Instr::AddAxImm { imm });
         }

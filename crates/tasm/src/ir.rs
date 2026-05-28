@@ -1259,6 +1259,13 @@ pub enum Instr {
     /// mirrors `MovAxSym`. Used by huge-model AX-route stores to
     /// globals. Fixture 3705 (`g = g + 1;`).
     MovSymAx { symbol: String, offset: i16 },
+    /// `add ax, word ptr <symbol>[+N]` — bare-symbol register-with-
+    /// memory add. Encoding: `03 06 lo hi` (`add r16, r/m16` with
+    /// ModR/M 0x06 = mod=00 reg=000 r/m=110, disp16-only). FIXUP
+    /// shape mirrors `MovAxSym`. Used by huge-model expressions like
+    /// `return g.x + g.y;` where the second operand is a bare global
+    /// reference. Fixture 3751.
+    AddAxSym { symbol: String, offset: i16 },
     /// `les bx, word ptr [bp+disp]` — `C4` + ModR/M `mod=mm reg=011
     /// (BX) r/m=110 (BP+disp)`. Loads the 4-byte far pointer at
     /// `[bp+disp..disp+3]` into ES:BX (offset → BX, segment → ES).
