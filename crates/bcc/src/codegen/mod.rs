@@ -1148,21 +1148,25 @@ impl<'a> FunctionEmitter<'a> {
                 }
             }
         }
+        // Callee-saved register pushes come *before* the huge-model
+        // DS reload — BCC's frame shape is `push bp / mov bp, sp /
+        // push si / push di / push ds / mov ax, seg HELLO_DATA /
+        // mov ds, ax`. Under huge the pop order at the epilogue is
+        // the exact mirror (`pop ds; pop di; pop si; pop bp; retf`),
+        // so the SI / DI offsets relative to BP stay consistent
+        // with the rest of the frame. Fixtures 1770, 2057, 3711.
+        for reg in self.locals.saved_regs() {
+            let _ = write!(self.out, "\tpush\t{}\r\n", reg.name());
+        }
         // Huge model: each module has its own data segment, so the
         // function reloads DS from `seg HELLO_DATA` on entry (the
         // caller's DS is unknown — under huge, every callsite
-        // independently sets its own data frame). The pair
-        // `push ds; mov ax, seg HELLO_DATA; mov ds, ax` lives just
-        // after `mov bp, sp` (before any callee-saved pushes), so
-        // every body access through DS reads the right segment.
-        // Fixtures 1770, 2057.
+        // independently sets its own data frame). Fixtures 1770,
+        // 2057.
         if self.model_is_huge {
             self.out.extend_from_slice(b"\tpush\tds\r\n");
             self.out.extend_from_slice(b"\tmov\tax,seg HELLO_DATA\r\n");
             self.out.extend_from_slice(b"\tmov\tds,ax\r\n");
-        }
-        for reg in self.locals.saved_regs() {
-            let _ = write!(self.out, "\tpush\t{}\r\n", reg.name());
         }
         // `-N` stack-overflow check, emitted AFTER the callee-saved
         // pushes but BEFORE the param register loads. Compares the
@@ -1216,15 +1220,16 @@ impl<'a> FunctionEmitter<'a> {
         let close_line = self.lines.line_of(close_offset);
         self.advance_to_line(close_line);
 
-        // Epilogue: reverse of the prologue.
+        // Epilogue: reverse of the prologue. Under huge model the
+        // prologue pushed `si / di / ds`; mirroring gives `pop ds`
+        // first, then the callee-saved restores. Fixtures 1770,
+        // 2057, 3711.
+        if self.model_is_huge {
+            self.out.extend_from_slice(b"\tpop\tds\r\n");
+        }
         let saved: Vec<Reg> = self.locals.saved_regs().to_vec();
         for reg in saved.iter().rev() {
             let _ = write!(self.out, "\tpop\t{}\r\n", reg.name());
-        }
-        // Huge model: restore the caller's DS before unwinding the
-        // frame. Mirrors the prologue's `push ds`. Fixtures 1770, 2057.
-        if self.model_is_huge {
-            self.out.extend_from_slice(b"\tpop\tds\r\n");
         }
         // 186+ target: `leave` (C9) collapses `mov sp, bp; pop bp`
         // into one byte. Used whenever the prologue used `enter`.
