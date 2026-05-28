@@ -590,8 +590,22 @@ impl Parser {
     /// far-code models can spot the explicit override and skip the
     /// implicit-far promotion. Fixture 2061.
     fn consume_cc_modifiers_collect(&mut self) -> (bool, bool, bool, bool) {
+        let (p, f, _h, i, n) = self.consume_cc_modifiers_full();
+        (p, f, i, n)
+    }
+
+    /// Full variant that also separately tracks `huge` (true when
+    /// `huge` was seen). Used by the pointer-declarator path so an
+    /// `int huge *p` produces `Type::FarPointer { is_huge: true }`
+    /// while `int far *p` produces `is_huge: false`. Both share the
+    /// 4-byte slot and `les`-style deref shape; the distinction only
+    /// matters for pointer arithmetic (huge normalizes the seg:off
+    /// pair). Returns `(is_pascal, is_far, is_huge, is_interrupt,
+    /// is_near)`.
+    fn consume_cc_modifiers_full(&mut self) -> (bool, bool, bool, bool, bool) {
         let mut is_pascal = false;
         let mut is_far = false;
+        let mut is_huge = false;
         let mut is_interrupt = false;
         let mut is_near = false;
         while let TokenKind::Ident(name) = &self.peek().kind {
@@ -604,6 +618,10 @@ impl Parser {
                     is_far = true;
                     self.bump();
                 }
+                "huge" | "_huge" | "__huge" => {
+                    is_huge = true;
+                    self.bump();
+                }
                 "interrupt" | "_interrupt" | "__interrupt" => {
                     is_interrupt = true;
                     self.bump();
@@ -612,15 +630,25 @@ impl Parser {
                     is_near = true;
                     self.bump();
                 }
-                "cdecl" | "huge"
-                | "_cdecl" | "_huge"
-                | "__cdecl" | "__huge" => {
+                "cdecl" | "_cdecl" | "__cdecl" => {
                     self.bump();
                 }
                 _ => break,
             }
         }
-        (is_pascal, is_far, is_interrupt, is_near)
+        (is_pascal, is_far, is_huge, is_interrupt, is_near)
+    }
+
+    /// Helper: build the right pointer Type given an inner type and
+    /// the qualifier state. `far` or `huge` produces `FarPointer`
+    /// with `is_huge` set when `huge`; absence of both produces a
+    /// plain near `Pointer`.
+    fn make_ptr_ty(inner: Type, is_far: bool, is_huge: bool) -> Type {
+        if is_far || is_huge {
+            Type::FarPointer { pointee: Box::new(inner), is_huge }
+        } else {
+            Type::Pointer(Box::new(inner))
+        }
     }
 
     fn parse_type(&mut self) -> Result<Type, ParseError> {
@@ -774,13 +802,16 @@ impl Parser {
         let mut ty = self.parse_type()?;
         // CC modifiers (`far`, `near`, `huge`, `pascal`, etc.) sit
         // between the base type and pointer stars in cast/sizeof
-        // contexts. We don't model the modifier, so just skip.
-        // Fixture 1649 (`(int far *)&x`).
-        self.consume_cc_modifiers();
+        // contexts. Capture `far` / `huge` so the pointer level
+        // built from the next `*` becomes a `Type::FarPointer`.
+        // Fixture 1649 (`(int far *)&x`), 1652 (`(int huge *)&x`).
+        let (_, mut is_far, mut is_huge, _, _) = self.consume_cc_modifiers_full();
         while matches!(self.peek().kind, TokenKind::Star) {
             self.bump();
-            ty = Type::Pointer(Box::new(ty));
-            self.consume_cc_modifiers();
+            ty = Self::make_ptr_ty(ty, is_far, is_huge);
+            let (_, f, h, _, _) = self.consume_cc_modifiers_full();
+            is_far = f;
+            is_huge = h;
         }
         Ok(ty)
     }
@@ -1095,13 +1126,16 @@ impl Parser {
         let mut globals = Vec::new();
         loop {
             // Per-declarator pointer stars: `int *a, b;` makes `a`
-            // an `int*` and `b` a plain `int`.
-            self.consume_cc_modifiers();
+            // an `int*` and `b` a plain `int`. Capture `far` / `huge`
+            // so each level becomes FarPointer when qualified.
+            let (_, mut is_far, mut is_huge, _, _) = self.consume_cc_modifiers_full();
             let mut ty = base_ty.clone();
             while matches!(self.peek().kind, TokenKind::Star) {
                 self.bump();
-                ty = Type::Pointer(Box::new(ty));
-                self.consume_cc_modifiers();
+                ty = Self::make_ptr_ty(ty, is_far, is_huge);
+                let (_, f, h, _, _) = self.consume_cc_modifiers_full();
+                is_far = f;
+                is_huge = h;
             }
             // Function-pointer global declarator: `int (*name)(...)`.
             // Mirrors the param / local paths — the signature isn't
@@ -1495,13 +1529,15 @@ impl Parser {
                 return Ok((params, true));
             }
             let mut ty = self.parse_type()?;
-            self.consume_cc_modifiers();
+            let (_, mut is_far, mut is_huge, _, _) = self.consume_cc_modifiers_full();
             // Pointer stars wrap the base type, just like in a local
             // declaration (fixture 095: `int sum(int *p)`).
             while matches!(self.peek().kind, TokenKind::Star) {
                 self.bump();
-                ty = Type::Pointer(Box::new(ty));
-                self.consume_cc_modifiers();
+                ty = Self::make_ptr_ty(ty, is_far, is_huge);
+                let (_, f, h, _, _) = self.consume_cc_modifiers_full();
+                is_far = f;
+                is_huge = h;
             }
             // Function-pointer parameter: `<ret> ( * <name> ) ( <params> )`.
             // Mirrors the local-declaration path — we don't model the
@@ -2127,8 +2163,11 @@ impl Parser {
         }
         let base_ty = self.parse_type()?;
         // BCC cc/memory-model modifiers between the type and the
-        // pointer-star/declarator (`int far *p`). Discarded.
-        self.consume_cc_modifiers();
+        // pointer-star/declarator (`int far *p`, `int huge *p`).
+        // Capture `far` / `huge` so the pointer level becomes a
+        // FarPointer instead of a plain near Pointer. Fixtures 1649,
+        // 1650, 1651, 1652, 2058, 2250.
+        let (_, mut is_far, mut is_huge, _, _) = self.consume_cc_modifiers_full();
         // Pointer stars wrap the base type: `int **pp` is `Pointer(Pointer(Int))`.
         // Stars are per-declarator — `int *a, b;` makes `a` an `int*`
         // and `b` a plain `int`, so we keep `base_ty` clean for the
@@ -2137,11 +2176,14 @@ impl Parser {
         let mut ty = base_ty.clone();
         while matches!(self.peek().kind, TokenKind::Star) {
             self.bump();
-            ty = Type::Pointer(Box::new(ty));
+            ty = Self::make_ptr_ty(ty, is_far, is_huge);
             // `T far *` / `T *far` — modifiers can also appear AFTER
-            // a pointer star. Consume them silently. Also accept
-            // `T * const p` (const-qualified pointer). Fixture 2380.
-            self.consume_cc_modifiers();
+            // a pointer star. Consume them and let the next `*` (if
+            // any) pick them up. Also accept `T * const p`
+            // (const-qualified pointer). Fixture 2380.
+            let (_, f, h, _, _) = self.consume_cc_modifiers_full();
+            is_far = f;
+            is_huge = h;
             while matches!(
                 self.peek().kind,
                 TokenKind::KwConst | TokenKind::KwVolatile

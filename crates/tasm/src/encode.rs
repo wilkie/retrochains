@@ -562,6 +562,16 @@ fn instr_size(instr: &Instr) -> usize {
         Instr::MovReg16Dgroup { .. } => 3,
         Instr::MovDsReg16 { .. } => 2,
         Instr::MovReg16SegReg { .. } => 2,
+        Instr::MovBpRelSegReg { offset, .. }
+        | Instr::LesBxBpRel { offset } => {
+            1 + bp_rel_modrm_size(*offset)
+        }
+        Instr::MovAxEsBx
+        | Instr::MovAlEsBx
+        | Instr::MovEsBxAx
+        | Instr::MovEsBxAl => 3,
+        Instr::MovEsBxImm16 { .. } => 5,
+        Instr::MovEsBxImm8 { .. } => 4,
         Instr::CmpGroupSymImm8Sx { .. }
         | Instr::CmpByteGroupSymImm8 { .. }
         | Instr::AddGroupSymImm8Sx { .. }
@@ -2277,6 +2287,62 @@ fn emit_instr(
             // (mod=11 reg=<sreg> r/m=<reg16>).
             out.push(0x8C);
             out.push(0b11_000_000 | (src.code() << 3) | dst.code());
+        }
+        Instr::MovBpRelSegReg { offset, src } => {
+            // `mov word ptr [bp+disp], <segreg>` → 8C + ModR/M
+            // with reg=<sreg> r/m=110([bp+disp]). Stores the
+            // segment half of a far pointer local. Fixtures 1649,
+            // 1650, 2058.
+            out.push(0x8C);
+            emit_bp_rel_modrm(src.code(), *offset, out);
+        }
+        Instr::LesBxBpRel { offset } => {
+            // `les bx, word ptr [bp+disp]` → C4 + ModR/M
+            // reg=011(BX) r/m=110([bp+disp]). Loads the 4-byte far
+            // pointer at the slot into ES:BX. Fixtures 1649, 1650,
+            // 2058.
+            out.push(0xC4);
+            emit_bp_rel_modrm(0b011, *offset, out);
+        }
+        Instr::MovAxEsBx => {
+            // `mov ax, word ptr es:[bx]` → 26 (ES seg override) +
+            // 8B 07 (mov ax, [bx]). Far-pointer word read.
+            out.push(0x26);
+            out.push(0x8B);
+            out.push(0x07);
+        }
+        Instr::MovAlEsBx => {
+            // `mov al, byte ptr es:[bx]` → 26 + 8A 07.
+            out.push(0x26);
+            out.push(0x8A);
+            out.push(0x07);
+        }
+        Instr::MovEsBxAx => {
+            // `mov word ptr es:[bx], ax` → 26 + 89 07.
+            out.push(0x26);
+            out.push(0x89);
+            out.push(0x07);
+        }
+        Instr::MovEsBxAl => {
+            // `mov byte ptr es:[bx], al` → 26 + 88 07.
+            out.push(0x26);
+            out.push(0x88);
+            out.push(0x07);
+        }
+        Instr::MovEsBxImm16 { imm } => {
+            // `mov word ptr es:[bx], imm16` → 26 + C7 07 lo hi.
+            // Fixture 1650 (`*p = 99` for `int far *p`).
+            out.push(0x26);
+            out.push(0xC7);
+            out.push(0x07);
+            out.extend_from_slice(&imm.to_le_bytes());
+        }
+        Instr::MovEsBxImm8 { imm } => {
+            // `mov byte ptr es:[bx], imm8` → 26 + C6 07 ii.
+            out.push(0x26);
+            out.push(0xC6);
+            out.push(0x07);
+            out.push(*imm);
         }
         Instr::CmpGroupSymImm8Sx { group, symbol, offset, imm } => {
             // `cmp word ptr <group>:<sym>[+N], imm8sx` → 83 3E lo hi ii.

@@ -332,6 +332,20 @@ pub enum Type {
     /// enregister at a *lower* use threshold than ints (≥ 2 vs. ≥ 3),
     /// pinned by fixtures 080 and 081.
     Pointer(Box<Type>),
+    /// `T far *p` / `T huge *p` — a 32-bit far pointer (segment:offset)
+    /// to a `T`. 4 bytes, 2-byte aligned, never register-resident.
+    /// `is_huge` distinguishes `huge` (arithmetic normalizes the
+    /// seg:off pair via runtime helpers) from plain `far` (arithmetic
+    /// only modifies the offset half and may overflow at segment
+    /// boundaries). Also produced implicitly for `int *` under
+    /// compact / large / huge memory models — data pointers under
+    /// those models default to far. Fixtures 1649, 1652, 2058, 2250
+    /// (deref / write / postinc, far + huge equivalent shape),
+    /// 1768 / 1667 (compact / large implicit far).
+    FarPointer {
+        pointee: Box<Type>,
+        is_huge: bool,
+    },
     /// `struct <tag>? { <fields> }` — fields packed tightly with no
     /// inter-field padding (so a `char` at offset 0 followed by an
     /// `int` lands the int at offset 1, fixture 102). The total
@@ -391,6 +405,7 @@ impl Type {
                 elem * u16::try_from(*len).expect("array byte size fits in u16")
             }
             Self::Pointer(_) => 2,
+            Self::FarPointer { .. } => 4,
             Self::Struct { size, .. } => *size,
         }
     }
@@ -408,6 +423,7 @@ impl Type {
             Self::Float | Self::Double => 2,
             Self::Array { elem, .. } => elem.alignment(),
             Self::Pointer(_) => 2,
+            Self::FarPointer { .. } => 2,
             // Struct alignment: 2 (word). The size rounding to even
             // is part of the per-struct size computation, so this is
             // mostly a placement-alignment hint when a struct is
@@ -505,10 +521,10 @@ impl Type {
     /// Used by codegen to pick the deref width.
     #[must_use]
     pub fn pointee(&self) -> Option<&Type> {
-        if let Self::Pointer(inner) = self {
-            Some(inner)
-        } else {
-            None
+        match self {
+            Self::Pointer(inner) => Some(inner),
+            Self::FarPointer { pointee, .. } => Some(pointee),
+            _ => None,
         }
     }
 }

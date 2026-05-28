@@ -1223,6 +1223,40 @@ pub enum Instr {
     /// 011=DS, 010=SS, 000=ES, 001=CS. Fixture 420 (`mov dx,ds`),
     /// future stack-source variant (`mov dx,ss`).
     MovReg16SegReg { dst: Reg16, src: SegReg },
+    /// `mov word ptr [bp+disp], <segreg>` — `8C` + ModR/M with the
+    /// segreg in the reg slot and `[bp+disp]` as r/m. Stores the
+    /// segment half of a far pointer into its local slot. Mod is
+    /// `01` for disp8 / `10` for disp16; r/m=110=BP+disp. Fixtures
+    /// 1649 / 1650 / 2058 (`mov [bp-N], ss` / `mov [bp-N], ds`).
+    MovBpRelSegReg { offset: i16, src: SegReg },
+    /// `les bx, word ptr [bp+disp]` — `C4` + ModR/M `mod=mm reg=011
+    /// (BX) r/m=110 (BP+disp)`. Loads the 4-byte far pointer at
+    /// `[bp+disp..disp+3]` into ES:BX (offset → BX, segment → ES).
+    /// First instruction in any far-pointer deref / write sequence.
+    /// Fixtures 1649 / 1650 / 1651 / 2058.
+    LesBxBpRel { offset: i16 },
+    /// `mov ax, es:[bx]` — segment-override `26` prefix +
+    /// `8B 07` (mov ax, [bx]). Reads a word through ES:BX, the
+    /// canonical far-pointer deref following `les bx`. Fixtures
+    /// 1649 / 2058.
+    MovAxEsBx,
+    /// `mov al, byte ptr es:[bx]` — `26` + `8A 07`. Byte-width
+    /// far-pointer deref. Used by `char far *p` reads.
+    MovAlEsBx,
+    /// `mov es:[bx], ax` — `26` + `89 07`. Far-pointer store of an
+    /// AX-resident word.
+    MovEsBxAx,
+    /// `mov es:[bx], al` — `26` + `88 07`. Byte-width far-pointer
+    /// store of AL.
+    MovEsBxAl,
+    /// `mov word ptr es:[bx], imm16` — `26` + `C7 07 lo hi`. Far-
+    /// pointer store of an immediate word. Fixture 1650
+    /// (`*p = 99;` for `int far *p`).
+    MovEsBxImm16 { imm: u16 },
+    /// `mov byte ptr es:[bx], imm8` — `26` + `C6 07 ii`. Far-
+    /// pointer store of an immediate byte. (No fixture yet; sibling
+    /// of `MovEsBxImm16`.)
+    MovEsBxImm8 { imm: u8 },
     /// `cmp word ptr <group>:<symbol>[+<offset>], imm16` — Grp1
     /// r/m16,imm16 with /7=CMP and disp16-only addressing
     /// (`81 3E lo hi imm_lo imm_hi`, 6 bytes). Used when K is too

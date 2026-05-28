@@ -8764,12 +8764,73 @@ impl<'a> FunctionEmitter<'a> {
                 // non-array global. Store the symbol's offset
                 // directly. Fixture 1964 (`int *p = &x`).
                 if ty.pointee().is_some()
+                    && matches!(ty, Type::Pointer(_))
                     && let ExprKind::AddressOf(sym) = &init.kind
                     && self.globals.type_of(sym).is_some()
                 {
                     let _ = write!(
                         self.out,
                         "\tmov\tword ptr {},offset DGROUP:_{sym}\r\n",
+                        bp_addr(off),
+                    );
+                    return;
+                }
+                // Far-pointer init from `&<global>` (with or without
+                // an explicit `(T far *)` cast): the segment half is
+                // DS (small-model globals live in DGROUP, which is
+                // aliased to DS at runtime), the offset half takes
+                // the symbol address. Fixtures 2058
+                // (`int far *p = &g;`), 1768 / 1667 (compact / large
+                // models, implicit far).
+                if matches!(ty, Type::FarPointer { .. })
+                    && let ExprKind::AddressOf(sym) = &init.kind
+                    && self.globals.type_of(sym).is_some()
+                {
+                    let _ = write!(
+                        self.out,
+                        "\tmov\tword ptr {},ds\r\n",
+                        bp_addr(off + 2),
+                    );
+                    let _ = write!(
+                        self.out,
+                        "\tmov\tword ptr {},offset DGROUP:_{sym}\r\n",
+                        bp_addr(off),
+                    );
+                    return;
+                }
+                // Far-pointer init from `(T far *)&<local>` or
+                // `(T far *)<stack_array>`: segment half is SS (the
+                // local lives on the stack), offset half is the
+                // lea-computed bp-relative address. BCC's emission
+                // order is `lea ax,[bp+lo]; mov [bp+hi],ss; mov
+                // [bp+lo_of_p],ax`. Fixture 1649
+                // (`int far *p = (int far *)&x;`), 1650
+                // (write through), 2250 (same shape).
+                if matches!(ty, Type::FarPointer { .. })
+                    && let Some(addr_expr) = strip_cast(init)
+                    && let Some((local_name, _)) = match &addr_expr.kind {
+                        ExprKind::AddressOf(n) => Some((n.clone(), 0i32)),
+                        ExprKind::Ident(n) if self.locals.has(n)
+                            && matches!(self.locals.type_of(n), Type::Array { .. }) =>
+                            Some((n.clone(), 0i32)),
+                        _ => None,
+                    }
+                    && self.locals.has(&local_name)
+                    && let LocalLocation::Stack(local_off) = self.locals.location_of(&local_name)
+                {
+                    let _ = write!(
+                        self.out,
+                        "\tlea\tax,word ptr {}\r\n",
+                        bp_addr(local_off),
+                    );
+                    let _ = write!(
+                        self.out,
+                        "\tmov\tword ptr {},ss\r\n",
+                        bp_addr(off + 2),
+                    );
+                    let _ = write!(
+                        self.out,
+                        "\tmov\tword ptr {},ax\r\n",
                         bp_addr(off),
                     );
                     return;
@@ -12096,14 +12157,34 @@ impl<'a> FunctionEmitter<'a> {
                     }
                 }
                 LocalLocation::Stack(off) => {
-                    // Stack-resident pointer: load into BX, then
-                    // read through [bx]. Fixture 1932.
-                    let _ = write!(self.out, "\tmov\tbx,word ptr {}\r\n", bp_addr(off));
-                    if pointee.is_char_like() {
-                        self.out.extend_from_slice(b"\tmov\tal,byte ptr [bx]\r\n");
-                        self.emit_widen_al(pointee);
+                    if matches!(ty, Type::FarPointer { .. }) {
+                        // Far-pointer deref: `les bx, [bp+off]`
+                        // loads the 4-byte (offset, segment) pair
+                        // into BX (offset) and ES (segment) in one
+                        // step. The follow-up read uses the ES
+                        // override prefix. Fixtures 1649, 1652,
+                        // 2058, 2250 (int read);
+                        // future `char far *` slices add the AL
+                        // variant. Width is always the pointee's
+                        // natural size since `les` already
+                        // dispatched the segment.
+                        let _ = write!(self.out, "\tles\tbx,word ptr {}\r\n", bp_addr(off));
+                        if pointee.is_char_like() {
+                            self.out.extend_from_slice(b"\tmov\tal,byte ptr es:[bx]\r\n");
+                            self.emit_widen_al(pointee);
+                        } else {
+                            self.out.extend_from_slice(b"\tmov\tax,word ptr es:[bx]\r\n");
+                        }
                     } else {
-                        let _ = write!(self.out, "\tmov\tax,{width} ptr [bx]\r\n");
+                        // Stack-resident near pointer: load into BX,
+                        // then read through [bx]. Fixture 1932.
+                        let _ = write!(self.out, "\tmov\tbx,word ptr {}\r\n", bp_addr(off));
+                        if pointee.is_char_like() {
+                            self.out.extend_from_slice(b"\tmov\tal,byte ptr [bx]\r\n");
+                            self.emit_widen_al(pointee);
+                        } else {
+                            let _ = write!(self.out, "\tmov\tax,{width} ptr [bx]\r\n");
+                        }
                     }
                 }
             };
@@ -17602,6 +17683,34 @@ impl<'a> FunctionEmitter<'a> {
             let Some(pointee) = ty.pointee() else {
                 panic!("`*{base_name} = v`: not a pointer type");
             };
+            // Stack-resident far pointer write: `les bx, [bp+lo]`
+            // brings the 4-byte (offset, segment) pair into ES:BX in
+            // one shot, then the store uses the ES-override prefix.
+            // Constant RHS folds to `mov es:[bx], imm`; everything
+            // else evaluates the RHS to AX/AL first. Fixture 1650
+            // (`*p = 99` for `int far *p = (int far *)&x`).
+            if matches!(ty, Type::FarPointer { .. })
+                && let LocalLocation::Stack(p_off) = self.locals.location_of(base_name)
+            {
+                let _ = write!(self.out, "\tles\tbx,word ptr {}\r\n", bp_addr(p_off));
+                if let Some(v) = try_const_eval(value) {
+                    if pointee.is_char_like() {
+                        let v8 = v & 0xFF;
+                        let _ = write!(self.out, "\tmov\tbyte ptr es:[bx],{v8}\r\n");
+                    } else {
+                        let v16 = v & 0xFFFF;
+                        let _ = write!(self.out, "\tmov\tword ptr es:[bx],{v16}\r\n");
+                    }
+                } else {
+                    self.emit_expr_to_ax(value);
+                    if pointee.is_char_like() {
+                        self.out.extend_from_slice(b"\tmov\tbyte ptr es:[bx],al\r\n");
+                    } else {
+                        self.out.extend_from_slice(b"\tmov\tword ptr es:[bx],ax\r\n");
+                    }
+                }
+                return;
+            }
             let addr_reg = match self.locals.location_of(base_name) {
                 LocalLocation::Reg(reg) => reg.name(),
                 LocalLocation::Stack(_) => {
@@ -23627,6 +23736,21 @@ fn compute_struct_call_tmp_bytes(
         visit_stmt(s, signatures, &mut max);
     }
     max
+}
+
+/// Peel any number of explicit `(T) ...` casts off the outside of an
+/// expression. Returns the inner expression (or the original if no
+/// cast was present). Used by far-pointer init / assign codegen
+/// where `(int far *)&x` semantically *is* `&x` once the FarPointer
+/// route is selected.
+fn strip_cast(e: &Expr) -> Option<&Expr> {
+    let mut cur = e;
+    let mut stripped = false;
+    while let ExprKind::Cast { operand, .. } = &cur.kind {
+        cur = operand;
+        stripped = true;
+    }
+    if stripped { Some(cur) } else { Some(e) }
 }
 
 fn body_has_return(body: &[Stmt]) -> bool {

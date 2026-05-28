@@ -569,6 +569,21 @@ fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
         "cwd" => Ok(Instr::Cwd),
         "cbw" => Ok(Instr::Cbw),
         "lea" => parse_lea(rest, line.line_no),
+        "les" => {
+            // `les bx, word ptr [bp+disp]` — load far pointer (4 bytes
+            // at the bp-relative slot) into ES:BX. Used to bring a
+            // 4-byte far-pointer local into ES:BX before a deref or
+            // store. Fixtures 1649, 1650, 1651, 2058.
+            let (lhs, rhs) = split_comma(rest).ok_or_else(|| {
+                AsmError::new(line.line_no, format!("les: expected `lhs,rhs`, got {rest:?}"))
+            })?;
+            if lhs == "bx"
+                && let Some(offset) = parse_word_bp_relative(rhs)
+            {
+                return Ok(Instr::LesBxBpRel { offset });
+            }
+            Err(AsmError::new(line.line_no, format!("les: unsupported operand form `{rest}`")))
+        }
         "neg" => Reg16::parse(rest)
             .map(|reg| Instr::NegReg16 { reg })
             .ok_or_else(|| AsmError::new(line.line_no, format!("neg: bad register `{rest}`"))),
@@ -1093,6 +1108,40 @@ fn parse_mov(operands: &str, line_no: usize) -> AsmResult<Instr> {
     // take far pointers in DX:AX (e.g. `N_SPUSH@`). Fixture 420.
     if let (Some(dst), Some(src)) = (Reg16::parse(lhs), SegReg::parse(rhs)) {
         return Ok(Instr::MovReg16SegReg { dst, src });
+    }
+    // `mov word ptr [bp+disp], <segreg>` — store the segment half
+    // of a far-pointer local. `8C` + ModR/M reg=<sreg>
+    // r/m=110 (BP+disp). Fixtures 1649 / 1650 / 2058.
+    if let Some(offset) = parse_word_bp_relative(lhs)
+        && let Some(src) = SegReg::parse(rhs)
+    {
+        return Ok(Instr::MovBpRelSegReg { offset, src });
+    }
+    // `mov ax, es:[bx]` / `mov al, byte ptr es:[bx]` — far-pointer
+    // word / byte read after `les bx`. Fixtures 1649 / 2058.
+    if lhs == "ax" && (rhs == "es:[bx]" || rhs == "word ptr es:[bx]") {
+        return Ok(Instr::MovAxEsBx);
+    }
+    if lhs == "al" && (rhs == "es:[bx]" || rhs == "byte ptr es:[bx]") {
+        return Ok(Instr::MovAlEsBx);
+    }
+    // `mov es:[bx], ax/al/imm` — far-pointer write through the
+    // ES:BX pair set up by `les bx`. Fixture 1650 (`*p = 99`).
+    if (lhs == "es:[bx]" || lhs == "word ptr es:[bx]") && rhs == "ax" {
+        return Ok(Instr::MovEsBxAx);
+    }
+    if (lhs == "es:[bx]" || lhs == "byte ptr es:[bx]") && rhs == "al" {
+        return Ok(Instr::MovEsBxAl);
+    }
+    if lhs == "word ptr es:[bx]"
+        && let Some(imm) = parse_imm16(rhs)
+    {
+        return Ok(Instr::MovEsBxImm16 { imm: imm as u16 });
+    }
+    if lhs == "byte ptr es:[bx]"
+        && let Some(imm) = parse_imm8(rhs)
+    {
+        return Ok(Instr::MovEsBxImm8 { imm });
     }
     // `mov bx,word ptr [bx]` — chain step for `**p` (fixture 195).
     if lhs == "bx" && rhs == "word ptr [bx]" {
