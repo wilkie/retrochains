@@ -1553,7 +1553,8 @@ fn walk_calls(
             }
         }
         StmtKind::Break | StmtKind::Continue => {}
-        StmtKind::Goto { .. } | StmtKind::Label { .. } | StmtKind::Empty => {}
+        StmtKind::Goto { .. } | StmtKind::Label { .. } | StmtKind::Empty
+        | StmtKind::Asm { .. } => {}
         StmtKind::ExprStmt(e) => walk_calls_expr(e, defined, locals, seen, ordered),
         StmtKind::Block(body) => {
             for s in body {

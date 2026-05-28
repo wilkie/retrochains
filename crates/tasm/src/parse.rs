@@ -443,6 +443,20 @@ fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
         // Generic ALU forms `<op> ax,word ptr [bp+N]`. Some opcodes
         // also have special operand forms (`sub sp,imm`, `xor ax,ax`)
         // that take precedence — handled in the per-op parser below.
+        "xchg" => {
+            // `xchg <reg8>, <reg8>` — swap two byte registers,
+            // used by inline asm (`asm xchg ah, al`, fixture 2122).
+            let (lhs, rhs) = split_comma(rest).ok_or_else(|| {
+                AsmError::new(line.line_no, format!("xchg: expected `lhs,rhs`, got {rest:?}"))
+            })?;
+            if let (Some(dst), Some(src)) = (Reg8::parse(lhs), Reg8::parse(rhs)) {
+                return Ok(Instr::XchgReg8Reg8 { dst, src });
+            }
+            return Err(AsmError::new(
+                line.line_no,
+                format!("xchg: unsupported operand form `{rest}`"),
+            ));
+        }
         "add" => parse_add(rest, line.line_no),
         "adc" => parse_adc(rest, line.line_no),
         "sub" => parse_sub(rest, line.line_no),

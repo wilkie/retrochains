@@ -398,6 +398,10 @@ fn plan_stmt(stmt: &Stmt, ctx: &mut PlanCtx) {
         StmtKind::Empty => {
             // `;` placeholder body — no slots, no expressions.
         }
+        StmtKind::Asm { .. } => {
+            // Inline asm — opaque to the planner. Its body never
+            // generates labels or sub-expressions of its own.
+        }
         StmtKind::ExprStmt(e) => plan_expr_value(e, ctx),
         StmtKind::Block(body) => plan_stmts(body, ctx),
     }

@@ -386,6 +386,7 @@ fn instr_size(instr: &Instr) -> usize {
         }
         Instr::MovAxFromCsBx => 3,
         Instr::MovAxFromCsBxDisp { .. } => 4,
+        Instr::XchgReg8Reg8 { .. } => 2,
         Instr::MovReg16OffsetSym { .. } => 3,
         Instr::MovReg16GroupSymBxDisp { .. } => 4,
         Instr::AddReg16GroupSymBxDisp { .. } => 4,
@@ -1535,6 +1536,12 @@ fn emit_instr(
             out.push(0x8B);
             out.push(0x47);
             out.push(*disp);
+        }
+        Instr::XchgReg8Reg8 { dst, src } => {
+            // `xchg <r8>, <r8>` → 86 ModR/M (mod=11 reg=src
+            // r/m=dst). Fixture 2122 (`asm xchg ah, al`).
+            out.push(0x86);
+            out.push(0b11_000_000 | (src.code() << 3) | dst.code());
         }
         Instr::MovReg16OffsetSym { reg, symbol } => {
             // `mov r16,offset <code-symbol>` → (B8+rc) lo hi.

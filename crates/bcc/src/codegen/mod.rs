@@ -1425,6 +1425,10 @@ impl<'a> FunctionEmitter<'a> {
                 self.advance_to_stmt_line(stmt);
                 let _ = write!(self.out, "@{}@user_{name}:\r\n", self.func_idx);
             }
+            StmtKind::Asm { body } => {
+                self.advance_to_stmt_line(stmt);
+                self.emit_asm_block(body);
+            }
             StmtKind::Block(body) => {
                 // Bare `{ ... }` block at statement position — emit
                 // the inner statements in order. Block-scope rules
@@ -2776,6 +2780,88 @@ impl<'a> FunctionEmitter<'a> {
                 self.label_ref(slot),
             );
         }
+    }
+
+    /// Emit an inline-assembly statement. Splits `body` into
+    /// individual lines (by `;` and `\n`), trims whitespace,
+    /// substitutes any C-identifier reference against the
+    /// function's locals / params / globals (e.g. `x` → `word ptr
+    /// [bp-2]`), and emits each line as a tab-indented asm
+    /// instruction. The `_AX` / `_BX` / `_CX` / `_DX` pseudo-
+    /// registers are dropped on the floor — BCC treats a
+    /// `return _AX;` as "AX already holds the value", so no
+    /// reload is emitted. Fixtures 2303, 2304, 2120, 2119, 2122.
+    fn emit_asm_block(&mut self, body: &str) {
+        for raw_line in body.split(|c: char| c == ';' || c == '\n') {
+            let line = raw_line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let translated = self.translate_asm_line(line);
+            // Normalize the first whitespace run after the mnemonic
+            // to a tab — BCC's emitted asm uses `\tmov\tax,...`,
+            // not `\tmov ax, ...`. Also collapse spaces after `,`
+            // separators so operand lists become `ax,42` not
+            // `ax, 42`.
+            let normalized = normalize_asm_line(&translated);
+            let _ = write!(self.out, "\t{normalized}\r\n");
+        }
+    }
+
+    /// Walk `line` token-by-identifier, replacing each C-variable
+    /// reference (stack local → `word ptr [bp-N]`, global →
+    /// `word ptr DGROUP:_<name>`, register-resident local → the
+    /// register's mnemonic) with its asm-side equivalent.
+    /// Identifiers that don't name something in scope (including
+    /// asm mnemonics like `mov`, asm registers like `ax`, and the
+    /// `_AX` / `_BX` / `_CX` / `_DX` pseudo-registers) pass
+    /// through unchanged.
+    fn translate_asm_line(&self, line: &str) -> String {
+        let bytes = line.as_bytes();
+        let mut out = String::with_capacity(line.len());
+        let mut i = 0;
+        while i < bytes.len() {
+            let b = bytes[i];
+            let starts_ident = b.is_ascii_alphabetic() || b == b'_';
+            if starts_ident {
+                let start = i;
+                while i < bytes.len()
+                    && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_')
+                {
+                    i += 1;
+                }
+                let word = std::str::from_utf8(&bytes[start..i]).unwrap_or("");
+                if let Some(repl) = self.substitute_asm_ident(word) {
+                    out.push_str(&repl);
+                } else {
+                    out.push_str(word);
+                }
+            } else {
+                out.push(b as char);
+                i += 1;
+            }
+        }
+        out
+    }
+
+    /// Resolve one identifier seen inside an asm body. Returns the
+    /// substitution string (e.g. `word ptr [bp-2]`), or `None` if
+    /// the identifier should pass through unchanged.
+    fn substitute_asm_ident(&self, name: &str) -> Option<String> {
+        if self.locals.has(name) {
+            match self.locals.location_of(name) {
+                LocalLocation::Stack(off) => {
+                    return Some(format!("word ptr {}", bp_addr(off)));
+                }
+                LocalLocation::Reg(reg) => {
+                    return Some(reg.name().to_owned());
+                }
+            }
+        }
+        if self.globals.type_of(name).is_some() {
+            return Some(format!("word ptr DGROUP:_{name}"));
+        }
+        None
     }
 
     /// Long-scrutinee linear-search dispatch. Spill the 4-byte
@@ -6937,6 +7023,18 @@ impl<'a> FunctionEmitter<'a> {
     }
 
     fn emit_return_value_load_inner(&mut self, e: &Expr) {
+        // `return _AX;` / `return _BX;` / etc. — BCC's
+        // inline-asm contract: the underscore-prefixed register
+        // names refer to the live CPU register, not a C local.
+        // The asm body has already left the value there; the
+        // return-value loader is a no-op, control just falls
+        // through to the exit jmp. Fixture 2122
+        // (`asm mov ax,x; asm xchg ah,al; return _AX;`).
+        if let ExprKind::Ident(name) = &e.kind
+            && is_asm_pseudo_register(name)
+        {
+            return;
+        }
         // Float / double-returning function: evaluate the value onto
         // the FPU stack. BCC leaves the result on st(0) for the
         // caller; no register transfer needed. Fixture 1684.
@@ -24239,7 +24337,8 @@ fn compute_struct_call_tmp_bytes(
             | StmtKind::MemberAssign { value: e, .. }
             | StmtKind::MemberCompoundAssign { value: e, .. } => visit_expr(e, sigs, max),
             StmtKind::Return(None) | StmtKind::Empty | StmtKind::Break
-            | StmtKind::Continue | StmtKind::Goto { .. } | StmtKind::Label { .. } => {}
+            | StmtKind::Continue | StmtKind::Goto { .. } | StmtKind::Label { .. }
+            | StmtKind::Asm { .. } => {}
             StmtKind::Declare { init, .. } => {
                 if let Some(i) = init {
                     visit_expr(i, sigs, max);
@@ -24348,6 +24447,58 @@ fn scrutinee_is_long_typed(
         return t.is_long_like();
     }
     false
+}
+
+/// Tighten asm whitespace to BCC's tab-and-no-comma-space style.
+/// The first whitespace run after the mnemonic becomes a tab; a
+/// space immediately following a comma is dropped (so `mov ax, 42`
+/// becomes `mov\tax,42`). Spaces *within* an operand — e.g. between
+/// `word` and `ptr`, or `ptr` and `[` — are preserved verbatim.
+/// Recognize the asm-side pseudo-register names `_AX` / `_BX` /
+/// `_CX` / `_DX` / `_SI` / `_DI` / `_BP` / `_SP` (and their byte
+/// halves). These resolve to the live CPU register inside an
+/// inline-asm block; outside of asm they appear in `return _AX;`
+/// and similar patterns where the asm body left a value live in
+/// the named register. Fixture 2122.
+fn is_asm_pseudo_register(name: &str) -> bool {
+    matches!(
+        name,
+        "_AX" | "_BX" | "_CX" | "_DX"
+            | "_AL" | "_AH" | "_BL" | "_BH" | "_CL" | "_CH" | "_DL" | "_DH"
+            | "_SI" | "_DI" | "_BP" | "_SP"
+            | "_ES" | "_CS" | "_SS" | "_DS"
+    )
+}
+
+fn normalize_asm_line(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut saw_mnemonic_end = false;
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i] as char;
+        if (c == ' ' || c == '\t') && !saw_mnemonic_end {
+            // First whitespace run after the mnemonic — emit a
+            // single tab, then skip any trailing whitespace.
+            out.push('\t');
+            saw_mnemonic_end = true;
+            i += 1;
+            while i < bytes.len() && (bytes[i] == b' ' || bytes[i] == b'\t') {
+                i += 1;
+            }
+            continue;
+        }
+        out.push(c);
+        i += 1;
+        // After emitting a comma, drop any immediately-following
+        // whitespace.
+        if c == ',' {
+            while i < bytes.len() && (bytes[i] == b' ' || bytes[i] == b'\t') {
+                i += 1;
+            }
+        }
+    }
+    out
 }
 
 fn body_has_return(body: &[Stmt]) -> bool {

@@ -1264,7 +1264,8 @@ fn collect_address_taken(stmt: &Stmt, out: &mut HashSet<String>) {
             }
         }
         StmtKind::Break | StmtKind::Continue => {}
-        StmtKind::Goto { .. } | StmtKind::Label { .. } | StmtKind::Empty => {}
+        StmtKind::Goto { .. } | StmtKind::Label { .. } | StmtKind::Empty
+        | StmtKind::Asm { .. } => {}
         StmtKind::ExprStmt(e) => expr_address_taken(e, out),
         StmtKind::Block(body) => {
             for s in body {
@@ -1656,7 +1657,8 @@ fn stmt_has_call(stmt: &Stmt) -> bool {
         | StmtKind::MemberCompoundAssign { base, value, .. } => {
             expr_has_call(base) || expr_has_call(value)
         }
-        StmtKind::Goto { .. } | StmtKind::Label { .. } | StmtKind::Empty => false,
+        StmtKind::Goto { .. } | StmtKind::Label { .. } | StmtKind::Empty
+        | StmtKind::Asm { .. } => false,
         StmtKind::ExprStmt(e) => expr_has_call(e),
         StmtKind::Block(body) => body.iter().any(stmt_has_call),
     }
@@ -1778,7 +1780,8 @@ fn stmt_has_div_or_mod(stmt: &Stmt, char_locals: &HashSet<&str>) -> bool {
         | StmtKind::Continue
         | StmtKind::Goto { .. }
         | StmtKind::Label { .. }
-        | StmtKind::Empty => false,
+        | StmtKind::Empty
+        | StmtKind::Asm { .. } => false,
     }
 }
 
@@ -1994,7 +1997,8 @@ fn stmt_has_name_as_subscript(name: &str, stmt: &Stmt) -> bool {
         | StmtKind::Break
         | StmtKind::Continue
         | StmtKind::Goto { .. }
-        | StmtKind::Label { .. } => false,
+        | StmtKind::Label { .. }
+        | StmtKind::Asm { .. } => false,
     }
 }
 
@@ -2090,7 +2094,8 @@ fn stmt_has_self_binop(name: &str, stmt: &Stmt) -> bool {
         | StmtKind::Continue
         | StmtKind::Goto { .. }
         | StmtKind::Label { .. }
-        | StmtKind::Empty => false,
+        | StmtKind::Empty
+        | StmtKind::Asm { .. } => false,
     }
 }
 
@@ -2653,7 +2658,8 @@ fn stmt_has_2d_array_index(stmt: &Stmt) -> bool {
         | StmtKind::Continue
         | StmtKind::Goto { .. }
         | StmtKind::Label { .. }
-        | StmtKind::Empty => false,
+        | StmtKind::Empty
+        | StmtKind::Asm { .. } => false,
     }
 }
 
@@ -2789,7 +2795,8 @@ fn stmt_emits_imul(stmt: &Stmt, char_locals: &HashSet<&str>) -> bool {
         | StmtKind::Continue
         | StmtKind::Goto { .. }
         | StmtKind::Label { .. }
-        | StmtKind::Empty => false,
+        | StmtKind::Empty
+        | StmtKind::Asm { .. } => false,
     }
 }
 
@@ -3394,7 +3401,8 @@ fn collect_decls(stmt: &Stmt, out: &mut Vec<DeclItem>) {
         | StmtKind::Continue
         | StmtKind::Goto { .. }
         | StmtKind::Label { .. }
-        | StmtKind::Empty => {}
+        | StmtKind::Empty
+        | StmtKind::Asm { .. } => {}
     }
 }
 
@@ -3542,7 +3550,8 @@ fn count_uses_stmt(stmt: &Stmt, counts: &mut HashMap<String, u32>) {
             }
             count_uses_expr(value, counts);
         }
-        StmtKind::Goto { .. } | StmtKind::Label { .. } | StmtKind::Empty => {}
+        StmtKind::Goto { .. } | StmtKind::Label { .. } | StmtKind::Empty
+        | StmtKind::Asm { .. } => {}
         StmtKind::ExprStmt(e) => count_uses_expr(e, counts),
         StmtKind::Block(body) => {
             for s in body {

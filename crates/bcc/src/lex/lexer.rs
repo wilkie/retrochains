@@ -89,10 +89,99 @@ impl<'a> Lexer<'a> {
                 }
             };
             let end = self.pos;
+            let is_asm = matches!(kind, TokenKind::KwAsm);
             out.push(Token {
                 kind,
                 span: Span::new(off(start), off(end)),
             });
+            // After `asm`, the body is captured as raw source text
+            // — neither the lexer's keyword recognition nor the
+            // parser's expression grammar would handle the embedded
+            // assembly tokens correctly. Two forms:
+            //   `asm { ... }`  block — capture between matching
+            //                  braces; lexer also pushes the LBrace
+            //                  and RBrace as separate tokens so the
+            //                  parser sees the structural pair.
+            //   `asm <line>`   statement — capture up to the next
+            //                  `;` (consumed) or `\n` (left for the
+            //                  next token's whitespace skip).
+            // Fixtures 2303 / 2304 / 2120 (block forms) and 2119 /
+            // 2122 (statement forms).
+            if is_asm {
+                self.skip_whitespace_no_newline_consume();
+                let next_b = self.src.get(self.pos).copied();
+                if next_b == Some(b'{') {
+                    let lbrace_start = self.pos;
+                    self.pos += 1;
+                    let lbrace_end = self.pos;
+                    out.push(Token {
+                        kind: TokenKind::LBrace,
+                        span: Span::new(off(lbrace_start), off(lbrace_end)),
+                    });
+                    let body_start = self.pos;
+                    while let Some(&b) = self.src.get(self.pos) {
+                        if b == b'}' { break; }
+                        self.pos += 1;
+                    }
+                    let body_end = self.pos;
+                    let body = std::str::from_utf8(&self.src[body_start..body_end])
+                        .unwrap_or("")
+                        .to_string();
+                    out.push(Token {
+                        kind: TokenKind::AsmBody(body),
+                        span: Span::new(off(body_start), off(body_end)),
+                    });
+                    if self.src.get(self.pos) == Some(&b'}') {
+                        let rbrace_start = self.pos;
+                        self.pos += 1;
+                        let rbrace_end = self.pos;
+                        out.push(Token {
+                            kind: TokenKind::RBrace,
+                            span: Span::new(off(rbrace_start), off(rbrace_end)),
+                        });
+                    }
+                } else {
+                    // Statement form: capture until `;` or `\n`.
+                    let body_start = self.pos;
+                    while let Some(&b) = self.src.get(self.pos) {
+                        if b == b';' || b == b'\n' { break; }
+                        self.pos += 1;
+                    }
+                    let body_end = self.pos;
+                    let body = std::str::from_utf8(&self.src[body_start..body_end])
+                        .unwrap_or("")
+                        .to_string();
+                    out.push(Token {
+                        kind: TokenKind::AsmBody(body),
+                        span: Span::new(off(body_start), off(body_end)),
+                    });
+                    // Consume the `;` terminator so the parser sees
+                    // a clean statement boundary; leave `\n` for the
+                    // surrounding token loop to skip as whitespace.
+                    if self.src.get(self.pos) == Some(&b';') {
+                        let semi_start = self.pos;
+                        self.pos += 1;
+                        let semi_end = self.pos;
+                        out.push(Token {
+                            kind: TokenKind::Semicolon,
+                            span: Span::new(off(semi_start), off(semi_end)),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    /// Whitespace-skip variant that stops at newlines — used after
+    /// the `asm` keyword so the statement-form terminator detection
+    /// can still see the newline as the end-of-body marker.
+    fn skip_whitespace_no_newline_consume(&mut self) {
+        while let Some(&b) = self.src.get(self.pos) {
+            if matches!(b, b' ' | b'\t' | b'\r') {
+                self.pos += 1;
+            } else {
+                return;
+            }
         }
     }
 
@@ -178,6 +267,7 @@ impl<'a> Lexer<'a> {
             b"register" => TokenKind::KwRegister,
             b"float" => TokenKind::KwFloat,
             b"double" => TokenKind::KwDouble,
+            b"asm" => TokenKind::KwAsm,
             other => TokenKind::Ident(String::from_utf8_lossy(other).into_owned()),
         }
     }

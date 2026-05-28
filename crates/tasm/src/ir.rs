@@ -2163,6 +2163,11 @@ pub enum Instr {
     /// still points to the case-low element. Encoding: 2E 8B 47 dd.
     /// Fixture 1913.
     MovAxFromCsBxDisp { disp: u8 },
+    /// `xchg <reg8>, <reg8>` — swap the contents of two 8-bit
+    /// general-purpose registers. Encoding: `86 ModR/M`
+    /// (XCHG r8, r/m8). Used inline from asm bodies — fixture
+    /// 2122's `asm xchg ah, al` swaps AX's two halves.
+    XchgReg8Reg8 { dst: Reg8, src: Reg8 },
     /// `jmp word ptr cs:[bx+<imm8>]` — indirect jump through
     /// CS:BX+disp8. Encoding: 2E FF 67 dd. Used by linear-search
     /// dispatch to dispatch to the matching label table entry

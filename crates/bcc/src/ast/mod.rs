@@ -258,6 +258,13 @@ pub enum StmtKind {
     /// <label>` (fixture 434). The target must be a `Label` statement
     /// in the same function body.
     Goto { label: String },
+    /// `asm <body>` / `asm { <body> }` — inline assembly. `body`
+    /// is the raw source text the lexer captured; the codegen
+    /// splits it into individual asm lines (by `;` and `\n`) at
+    /// emit time and substitutes C identifier references against
+    /// the function's locals / params / globals. Fixtures 2303,
+    /// 2304, 2120, 2119, 2122.
+    Asm { body: String },
     /// `<name>:` — label that names a position in the function so
     /// `goto <name>;` can jump to it. The label itself emits no
     /// bytes; codegen attaches the asm-label to the *next* emitted

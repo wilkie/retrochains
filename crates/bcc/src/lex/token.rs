@@ -40,6 +40,19 @@ pub enum TokenKind {
     KwRegister,
     KwFloat,
     KwDouble,
+    /// `asm` — inline assembly. The following token is always
+    /// `AsmBody`, holding the raw source text the lexer captured
+    /// after the keyword. Block form (`asm { ... }`) and statement
+    /// form (`asm <line>;` / `asm <line>\n`) both reach the parser
+    /// as the same `KwAsm` + `AsmBody` pair.
+    KwAsm,
+    /// Raw inline-assembly body text. Lexer captures everything
+    /// inside `asm { ... }` (block form, between the braces) or
+    /// everything after `asm` up to the next `;` / `\n` (statement
+    /// form). Lines are split by `;` and / or `\n` at codegen
+    /// time, not at lex time, so the AST preserves the original
+    /// shape verbatim.
+    AsmBody(String),
     // Atoms
     Ident(String),
     IntLit(u32),
@@ -138,6 +151,8 @@ impl TokenKind {
             Self::KwRegister => "`register`",
             Self::KwFloat => "`float`",
             Self::KwDouble => "`double`",
+            Self::KwAsm => "`asm`",
+            Self::AsmBody(_) => "asm body",
             Self::Ident(_) => "identifier",
             Self::IntLit(_) => "integer literal",
             Self::FloatLit(_) => "float literal",

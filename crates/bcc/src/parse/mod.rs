@@ -1706,6 +1706,42 @@ impl Parser {
                     span: Span::new(lbrace.span.start, rbrace.span.end),
                 })
             }
+            TokenKind::KwAsm => {
+                // Inline assembly. Two shapes (the lexer normalizes
+                // both): `asm { <body> }` emits `KwAsm LBrace
+                // AsmBody RBrace`; `asm <line>;` emits
+                // `KwAsm AsmBody Semicolon`. Either way we eat the
+                // KwAsm, capture the AsmBody string, and consume
+                // whichever closing token the lexer emitted.
+                // Fixtures 2303 / 2304 / 2120 (block), 2119 /
+                // 2122 (statement).
+                let kw = self.bump();
+                let is_block = matches!(self.peek().kind, TokenKind::LBrace);
+                if is_block {
+                    self.bump();
+                }
+                let body_tok = self.bump();
+                let TokenKind::AsmBody(body) = body_tok.kind else {
+                    return Err(ParseError::Unexpected {
+                        expected: "asm body".to_owned(),
+                        found: body_tok.kind.describe().to_owned(),
+                        offset: body_tok.span.start,
+                    });
+                };
+                let end_off = if is_block {
+                    let rbrace = self.expect(&TokenKind::RBrace)?;
+                    rbrace.span.end
+                } else if matches!(self.peek().kind, TokenKind::Semicolon) {
+                    let semi = self.bump();
+                    semi.span.end
+                } else {
+                    body_tok.span.end
+                };
+                Ok(Stmt {
+                    kind: StmtKind::Asm { body },
+                    span: Span::new(kw.span.start, end_off),
+                })
+            }
             TokenKind::KwIf => self.parse_if(),
             TokenKind::KwWhile => self.parse_while(),
             TokenKind::KwDo => self.parse_do_while(),
