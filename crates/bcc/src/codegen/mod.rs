@@ -2685,13 +2685,28 @@ impl<'a> FunctionEmitter<'a> {
         let ExprKind::Ident(name) = &scrutinee.kind else {
             panic!("non-ident switch scrutinee not yet supported (no fixture)");
         };
-        assert!(
-            matches!(self.locals.type_of(name), Type::Int),
-            "char-typed switch scrutinee not yet supported (no fixture)"
-        );
+        let scrutinee_ty = self.locals.type_of(name).clone();
+        let is_char = scrutinee_ty.is_char_like();
+        let unsigned = scrutinee_ty.is_unsigned();
         match self.locals.location_of(name) {
             LocalLocation::Stack(off) => {
-                let _ = write!(self.out, "\tmov\tax,word ptr {}\r\n", bp_addr(off));
+                if is_char {
+                    // `mov al, byte ptr [bp+off]` + widen to AX.
+                    // Fixtures 3962 (signed default), 3965-style
+                    // multi-case fall-through on char.
+                    let _ = write!(
+                        self.out,
+                        "\tmov\tal,byte ptr {}\r\n",
+                        bp_addr(off),
+                    );
+                    if unsigned {
+                        self.out.extend_from_slice(b"\tmov\tah,0\r\n");
+                    } else {
+                        self.out.extend_from_slice(b"\tcbw\t\r\n");
+                    }
+                } else {
+                    let _ = write!(self.out, "\tmov\tax,word ptr {}\r\n", bp_addr(off));
+                }
             }
             LocalLocation::Reg(reg) => {
                 let _ = write!(self.out, "\tmov\tax,{}\r\n", reg.name());
