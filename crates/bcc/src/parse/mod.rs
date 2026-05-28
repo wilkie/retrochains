@@ -819,6 +819,37 @@ impl Parser {
             is_huge = h;
             is_near = n;
         }
+        // Abstract function-pointer declarator: `( * ) ( <args> )`
+        // — appears in casts like `(int (*)(void))vp`. Fn-ptr
+        // signatures aren't modeled, so the result is a generic
+        // near `Pointer(Int)` (2-byte, int-pool-eligible) and the
+        // arg list is skipped without parsing. Fixture 2332.
+        if matches!(self.peek().kind, TokenKind::LParen)
+            && matches!(self.peek_n(1).kind, TokenKind::Star)
+            && matches!(self.peek_n(2).kind, TokenKind::RParen)
+        {
+            self.bump(); // `(`
+            self.bump(); // `*`
+            self.bump(); // `)`
+            self.expect(&TokenKind::LParen)?;
+            let mut depth = 1;
+            while depth > 0 {
+                let tok = self.bump();
+                match tok.kind {
+                    TokenKind::LParen => depth += 1,
+                    TokenKind::RParen => depth -= 1,
+                    TokenKind::Eof => {
+                        return Err(ParseError::Unexpected {
+                            expected: "`)`".to_owned(),
+                            found: "end of input".to_owned(),
+                            offset: tok.span.start,
+                        });
+                    }
+                    _ => {}
+                }
+            }
+            ty = Type::Pointer(Box::new(Type::Int));
+        }
         Ok(ty)
     }
 
@@ -1669,6 +1700,7 @@ impl Parser {
             }
             TokenKind::KwInt
             | TokenKind::KwChar
+            | TokenKind::KwVoid
             | TokenKind::KwStruct
             | TokenKind::KwUnion
             | TokenKind::KwUnsigned
