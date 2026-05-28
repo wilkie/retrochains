@@ -83,6 +83,17 @@ pub enum SegItem {
         symbol: String,
         extra_offset: i16,
     },
+    /// `dd <symbol>[+N]` — bare-symbol sibling of `DdGroupSym` (no
+    /// group prefix). FIXUPP uses Frame=F5/F4 (target's own segment)
+    /// instead of GRPDEF, so the linker writes the symbol's
+    /// segment-relative offset into bytes 0-1 and the symbol's own
+    /// segment paragraph into bytes 2-3. Used by huge-model
+    /// file-scope `int *p = &g` / `char *p = "lit"` where DGROUP
+    /// isn't in scope. Fixture 3902.
+    DdSym {
+        symbol: String,
+        extra_offset: i16,
+    },
     /// `db N dup (?)` — reserve N bytes of uninitialized space. Grows
     /// the segment's notional size but emits nothing into LEDATA. BCC
     /// uses this in `_BSS` for globals.
@@ -1314,6 +1325,12 @@ pub enum Instr {
     /// 0x1E = mod=00 reg=011(BX) r/m=110 disp16) with a
     /// SegRelGroupTarget FIXUPP. Fixtures 3760 / 3761.
     LesBxGroupSym { group: String, symbol: String, offset: i16 },
+    /// `les bx, dword ptr <symbol>[+N]` — bare-symbol sibling of
+    /// `LesBxGroupSym` (no group prefix). Same `C4 1E lo hi`
+    /// encoding but with a SegRelTargetFrameSegment FIXUPP on the
+    /// disp16. Used by huge-model `*p` for a file-scope
+    /// `int far *p`. Fixture 3902.
+    LesBxSym { symbol: String, offset: i16 },
     /// `mov ax, es:[bx]` — segment-override `26` prefix +
     /// `8B 07` (mov ax, [bx]). Reads a word through ES:BX, the
     /// canonical far-pointer deref following `les bx`. Fixtures
@@ -2748,6 +2765,13 @@ pub enum FixupKind {
     /// in compact / large / huge models. Locat byte: 0xCC | hi2.
     /// Fix Data: 0x14. Fixtures 3760 / 3761.
     FarPtrGroupTarget { group_idx: u8, segment_idx: u8 },
+    /// 16:16-bit pointer (M=1, location=3), frame method F5
+    /// (TARGET — frame is the target's own segment, no frame
+    /// datum), target method T4 (SEGDEF, no disp). Used by
+    /// huge-model `dd <sym>` and `les bx, dword ptr <sym>` where
+    /// no group is in scope. Locat byte: 0xCC | hi2. Fix Data:
+    /// 0x54. Fixture 3902.
+    FarPtrSegmentTarget { segment_idx: u8 },
 }
 
 /// A position-bound parse error. The line number is 1-based and refers

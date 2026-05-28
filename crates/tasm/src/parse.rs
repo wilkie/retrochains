@@ -312,6 +312,18 @@ impl<'a> Parser<'a> {
             });
             return Ok(());
         }
+        // `dd <symbol>[+N]` — bare-symbol form used by huge-model
+        // file-scope far-pointer initializers. Fixture 3902.
+        if let Some(first) = rest.chars().next()
+            && (first == '_' || first == '@')
+        {
+            let (sym, extra_offset) = split_sym_offset(rest);
+            self.module.segments[seg].items.push(SegItem::DdSym {
+                symbol: sym.to_string(),
+                extra_offset,
+            });
+            return Ok(());
+        }
         Err(AsmError::new(
             line.line_no,
             format!("dd: unsupported form `{rest}`"),
@@ -639,6 +651,22 @@ fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
                 let (sym, offset) = split_sym_offset(sym_part.trim());
                 return Ok(Instr::LesBxGroupSym {
                     group: group.trim().to_string(),
+                    symbol: sym.to_string(),
+                    offset,
+                });
+            }
+            // `les bx, dword ptr <sym>[+N]` — bare-symbol form used
+            // by huge-model `*p` when `p` is a file-scope far
+            // pointer. Fixture 3902.
+            if lhs == "bx"
+                && let Some(symbol) = rhs.strip_prefix("dword ptr ")
+                && let Some(first) = symbol.chars().next()
+                && (first == '_' || first == '@')
+                && !symbol.contains(':')
+                && !symbol.contains('[')
+            {
+                let (sym, offset) = split_sym_offset(symbol);
+                return Ok(Instr::LesBxSym {
                     symbol: sym.to_string(),
                     offset,
                 });

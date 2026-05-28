@@ -217,6 +217,17 @@ fn serialize_fixup(fx: &FixupReq, out: &mut Vec<u8>) {
             out.push(0x56);
             out.push(extdef_idx);
         }
+        FixupKind::FarPtrSegmentTarget { segment_idx } => {
+            // M=1 segment-relative, Location=3 (16:16 pointer).
+            //   Locat byte 0 = 0xCC | hi2.
+            // Fix Data: F=0 frame=101 (TARGET, no datum), T=0 P=1,
+            // tgt_low=00 → target method T4 (SEGDEF no disp).
+            // Byte: 0101 0100 = 0x54. Fixture 3902.
+            out.push(0xCC | hi2 as u8);
+            out.push(lo8);
+            out.push(0x54);
+            out.push(segment_idx);
+        }
         FixupKind::FarPtrGroupTarget { group_idx, segment_idx } => {
             // M=1 segment-relative, Location=3 (16:16 pointer).
             //   Locat byte 0 = 1 1 0011 dd = 0xCC | hi2.

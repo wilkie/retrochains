@@ -61,7 +61,7 @@ pub fn encode_module(module: &Module) -> AsmResult<EncodedModule> {
                     SegItem::Label(_) | SegItem::Proc(_) | SegItem::EndProc => {}
                     SegItem::Db(b) => pc += b.len() as u32,
                     SegItem::DwSym(_) | SegItem::DwGroupSym { .. } => pc += 2,
-                    SegItem::DdGroupSym { .. } => pc += 4,
+                    SegItem::DdGroupSym { .. } | SegItem::DdSym { .. } => pc += 4,
                     SegItem::Pad(n) => pc += *n,
                     SegItem::Instr(instr) => {
                         if let Instr::JmpCondShort { target, .. } = instr {
@@ -148,7 +148,7 @@ fn build_symbols(module: &Module, expanded: &ExpandedJccs) -> AsmResult<Symbols>
                 SegItem::Proc(_) | SegItem::EndProc => {}
                 SegItem::Db(b) => pc += b.len() as u32,
                 SegItem::DwSym(_) | SegItem::DwGroupSym { .. } => pc += 2,
-                SegItem::DdGroupSym { .. } => pc += 4,
+                SegItem::DdGroupSym { .. } | SegItem::DdSym { .. } => pc += 4,
                 SegItem::Pad(n) => pc += *n,
                 SegItem::Instr(instr) => {
                     let sz = if matches!(instr, Instr::JmpCondShort { .. })
@@ -339,6 +339,30 @@ fn encode_segment(
                     data_offset: u16::try_from(imm_start).expect("offset fits"),
                     kind: FixupKind::FarPtrGroupTarget {
                         group_idx: g_idx,
+                        segment_idx: target_seg_idx,
+                    },
+                });
+            }
+            SegItem::DdSym { symbol, extra_offset } => {
+                if sealed_bytes {
+                    return Err(AsmError::new(
+                        0,
+                        format!("segment {}: `dd` after padding not supported", seg.name),
+                    ));
+                }
+                sealed_pad = true;
+                let sym_loc = symbols.get(symbol).ok_or_else(|| {
+                    AsmError::new(0, format!("dd: symbol `{symbol}` not defined"))
+                })?;
+                let target_seg_idx =
+                    u8::try_from(sym_loc.segment + 1).expect("target seg idx fits");
+                let value = sym_loc.offset.wrapping_add(*extra_offset as u16);
+                let imm_start = bytes.len();
+                bytes.extend_from_slice(&value.to_le_bytes());
+                bytes.extend_from_slice(&0u16.to_le_bytes());
+                fixups.push(FixupReq {
+                    data_offset: u16::try_from(imm_start).expect("offset fits"),
+                    kind: FixupKind::FarPtrSegmentTarget {
                         segment_idx: target_seg_idx,
                     },
                 });
@@ -612,7 +636,7 @@ fn instr_size(instr: &Instr) -> usize {
         | Instr::LesBxBpRel { offset } => {
             1 + bp_rel_modrm_size(*offset)
         }
-        Instr::LesBxGroupSym { .. } => 4,
+        Instr::LesBxGroupSym { .. } | Instr::LesBxSym { .. } => 4,
         Instr::MovAxEsBx
         | Instr::MovAlEsBx
         | Instr::MovEsBxAx
@@ -2529,6 +2553,27 @@ fn emit_instr(
             // a SegRelGroupTarget so the linker resolves the disp16
             // against the group frame. Fixtures 3760 / 3761.
             emit_group_sym_lea(&[0xC4, 0x1E], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
+        }
+        Instr::LesBxSym { symbol, offset } => {
+            // `les bx, dword ptr <sym>` → C4 1E lo hi with a
+            // SegRelTargetFrameSegment FIXUPP on the disp16.
+            // Fixture 3902.
+            let sym_loc = symbols.get(symbol).ok_or_else(|| {
+                AsmError::new(0, format!("symbol `{symbol}` not defined"))
+            })?;
+            let target_seg_idx = u8::try_from(sym_loc.segment + 1)
+                .expect("target seg idx fits");
+            let value = sym_loc.offset.wrapping_add(*offset as u16);
+            out.push(0xC4);
+            out.push(0x1E);
+            let imm_start = out.len();
+            out.extend_from_slice(&value.to_le_bytes());
+            fixups.push(FixupReq {
+                data_offset: u16::try_from(imm_start).expect("offset fits"),
+                kind: FixupKind::SegRelTargetFrameSegment {
+                    segment_idx: target_seg_idx,
+                },
+            });
         }
         Instr::MovAxEsBx => {
             // `mov ax, word ptr es:[bx]` → 26 (ES seg override) +
