@@ -81,6 +81,7 @@ pub fn build_obj(
     let model_marker = match memory_model {
         MemoryModel::Tiny => 0x08,
         MemoryModel::Small => 0x09,
+        MemoryModel::Compact => 0x0B,
     };
     tasm::assemble_with_model(asm_text, model_marker).map_err(EmitError::Assemble)
 }

@@ -71,6 +71,7 @@ pub enum CompileMode {
 pub enum MemoryModel {
     Tiny,
     Small,
+    Compact,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -106,6 +107,7 @@ pub fn parse_args(argv: &[String]) -> Result<ParsedArgs, CliError> {
             "-c" => mode = Some(CompileMode::Object),
             "-ms" => memory_model = Some(MemoryModel::Small),
             "-mt" => memory_model = Some(MemoryModel::Tiny),
+            "-mc" => memory_model = Some(MemoryModel::Compact),
             "-d" => merge_strings = true,
             "-K" => unsigned_chars = true,
             "-O" | "-O2" => optimize = true,
