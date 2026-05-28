@@ -1698,6 +1698,40 @@ impl<'a> FunctionEmitter<'a> {
                     );
                     return;
                 }
+                // Far-pointer ++/-- — the offset half (low word at
+                // [bp+off]) bumps by the pointee's stride; the
+                // segment half is untouched. BCC's plain-`far`
+                // arithmetic never normalizes, so even stride-bumps
+                // that would cross a segment boundary stay in the
+                // offset word. Fixture 1651 (`p++` for `int far *p`
+                // after `p = (int far *)a`). The `huge`-qualified
+                // sibling fixtures (1771, 1774) need a normalization
+                // helper and are handled in a later slice.
+                if let Type::FarPointer { pointee, is_huge: false } = &ty {
+                    let stride = pointee.size_bytes();
+                    if let Ok(stride_i8) = i8::try_from(stride) {
+                        let signed = match op {
+                            UpdateOp::Inc => stride_i8,
+                            UpdateOp::Dec => -stride_i8,
+                        };
+                        let _ = write!(
+                            self.out,
+                            "\tadd\tword ptr {},{signed}\r\n",
+                            bp_addr(off),
+                        );
+                    } else {
+                        let signed_full = match op {
+                            UpdateOp::Inc => i32::from(stride),
+                            UpdateOp::Dec => -i32::from(stride),
+                        };
+                        let _ = write!(
+                            self.out,
+                            "\tadd\tword ptr {},{signed_full}\r\n",
+                            bp_addr(off),
+                        );
+                    }
+                    return;
+                }
                 // Stack-resident ++/-- on a char uses the AL round-trip
                 // (fixture 055).
                 assert!(
@@ -18868,6 +18902,43 @@ impl<'a> FunctionEmitter<'a> {
                 bp_addr(off),
             );
             return;
+        }
+        // Far-pointer assignment: `p = &g;` / `p = (T far *)&local;` /
+        // `p = (T far *)<stack_array>;`. Mirrors the init-form arms
+        // — store segment to upper, offset to lower. Picks DS for
+        // globals, SS for stack sources. Fixture 1651
+        // (`p = (int far *)a;` for a stack array a + a far pointer
+        // p).
+        if matches!(ty, Type::FarPointer { .. })
+            && let LocalLocation::Stack(off) = loc
+        {
+            if let ExprKind::AddressOf(sym) = &value.kind
+                && self.globals.type_of(sym).is_some()
+            {
+                let _ = write!(self.out, "\tmov\tword ptr {},ds\r\n", bp_addr(off + 2));
+                let _ = write!(
+                    self.out,
+                    "\tmov\tword ptr {},offset DGROUP:_{sym}\r\n",
+                    bp_addr(off),
+                );
+                return;
+            }
+            if let Some(addr_expr) = strip_cast(value)
+                && let Some(local_name) = match &addr_expr.kind {
+                    ExprKind::AddressOf(n) => Some(n.clone()),
+                    ExprKind::Ident(n) if self.locals.has(n)
+                        && matches!(self.locals.type_of(n), Type::Array { .. }) =>
+                        Some(n.clone()),
+                    _ => None,
+                }
+                && self.locals.has(&local_name)
+                && let LocalLocation::Stack(local_off) = self.locals.location_of(&local_name)
+            {
+                let _ = write!(self.out, "\tlea\tax,word ptr {}\r\n", bp_addr(local_off));
+                let _ = write!(self.out, "\tmov\tword ptr {},ss\r\n", bp_addr(off + 2));
+                let _ = write!(self.out, "\tmov\tword ptr {},ax\r\n", bp_addr(off));
+                return;
+            }
         }
         match loc {
             LocalLocation::Stack(off) => {
