@@ -1732,6 +1732,31 @@ impl<'a> FunctionEmitter<'a> {
                     }
                     return;
                 }
+                // Huge-pointer ++ / -- needs runtime normalization so
+                // an offset overflow walks into the next segment.
+                // BCC calls one of two helpers in place:
+                //   `N_PADA@` for `++`, `N_PSBA@` for `--`. The ABI:
+                //     DX:AX = far pointer TO the local being updated
+                //             (DX = SS for a stack-resident huge*,
+                //              AX = lea of the local slot)
+                //     CX:BX = long delta (high:low) of the stride
+                //   The helper rewrites the 4-byte slot in place.
+                // Fixtures 1771 (`p++` for `int huge *p`) and 1774
+                // (`p--`).
+                if let Type::FarPointer { pointee, is_huge: true } = &ty {
+                    let stride = pointee.size_bytes();
+                    let helper = match op {
+                        UpdateOp::Inc => "N_PADA@",
+                        UpdateOp::Dec => "N_PSBA@",
+                    };
+                    self.out.extend_from_slice(b"\txor\tcx,cx\r\n");
+                    let _ = write!(self.out, "\tmov\tbx,{stride}\r\n");
+                    self.out.extend_from_slice(b"\tmov\tdx,ss\r\n");
+                    let _ = write!(self.out, "\tlea\tax,word ptr {}\r\n", bp_addr(off));
+                    let _ = write!(self.out, "\tcall\tnear ptr {helper}\r\n");
+                    self.helpers.insert(helper.to_string());
+                    return;
+                }
                 // Stack-resident ++/-- on a char uses the AL round-trip
                 // (fixture 055).
                 assert!(
@@ -5222,7 +5247,38 @@ impl<'a> FunctionEmitter<'a> {
     /// 2. LHS in a register: `cmp <reg>, <rhs>`
     /// 3. LHS is a stack local and RHS is a constant: `cmp word ptr [bp-N], K`
     /// 4. Otherwise: `mov ax, <lhs>` then `cmp ax, <rhs>`
+    /// Type of a far-pointer lvalue, or `None` if `e` doesn't name a
+    /// stack-resident FarPointer local. Used to decide whether to
+    /// route a comparison through the huge-pointer runtime helper.
+    fn huge_ptr_lvalue_addr(&self, e: &Expr) -> Option<i16> {
+        let ExprKind::Ident(name) = &e.kind else { return None };
+        if !self.locals.has(name) { return None; }
+        let ty = self.locals.type_of(name);
+        if !matches!(ty, Type::FarPointer { is_huge: true, .. }) { return None; }
+        if let LocalLocation::Stack(off) = self.locals.location_of(name) {
+            Some(off)
+        } else {
+            None
+        }
+    }
+
     fn emit_compare(&mut self, left: &Expr, right: &Expr) {
+        // Huge-pointer comparison: both operands are `int huge *`
+        // (or another huge-pointer) lvalues. BCC's normalization
+        // helper `N_PCMP@` takes LHS in DX:AX (high=seg, low=off)
+        // and RHS in CX:BX, sets flags for the surrounding Jcc.
+        // Fixture 1772 (`if (p1 == p2)`).
+        if let (Some(l_off), Some(r_off)) =
+            (self.huge_ptr_lvalue_addr(left), self.huge_ptr_lvalue_addr(right))
+        {
+            let _ = write!(self.out, "\tmov\tcx,word ptr {}\r\n", bp_addr(r_off + 2));
+            let _ = write!(self.out, "\tmov\tbx,word ptr {}\r\n", bp_addr(r_off));
+            let _ = write!(self.out, "\tmov\tdx,word ptr {}\r\n", bp_addr(l_off + 2));
+            let _ = write!(self.out, "\tmov\tax,word ptr {}\r\n", bp_addr(l_off));
+            self.out.extend_from_slice(b"\tcall\tnear ptr N_PCMP@\r\n");
+            self.helpers.insert("N_PCMP@".to_string());
+            return;
+        }
         // Both sides are comparison BinOps: materialize each into AX
         // as 0/1, push the first, eval second, pop into DX, compare
         // DX with AX. Fixture 1395 (`(a==b) == (b<c)`).
@@ -8842,20 +8898,25 @@ impl<'a> FunctionEmitter<'a> {
                 // (write through), 2250 (same shape).
                 if matches!(ty, Type::FarPointer { .. })
                     && let Some(addr_expr) = strip_cast(init)
-                    && let Some((local_name, _)) = match &addr_expr.kind {
+                    && let Some((local_name, elem_off)) = match &addr_expr.kind {
                         ExprKind::AddressOf(n) => Some((n.clone(), 0i32)),
                         ExprKind::Ident(n) if self.locals.has(n)
                             && matches!(self.locals.type_of(n), Type::Array { .. }) =>
                             Some((n.clone(), 0i32)),
+                        ExprKind::AddressOfArrayElem { array, byte_offset } if self.locals.has(array) =>
+                            Some((array.clone(), *byte_offset)),
                         _ => None,
                     }
                     && self.locals.has(&local_name)
                     && let LocalLocation::Stack(local_off) = self.locals.location_of(&local_name)
                 {
+                    let lea_off = i32::from(local_off) + elem_off;
+                    let lea_off_i16 = i16::try_from(lea_off)
+                        .expect("local + elem offset fits in i16");
                     let _ = write!(
                         self.out,
                         "\tlea\tax,word ptr {}\r\n",
-                        bp_addr(local_off),
+                        bp_addr(lea_off_i16),
                     );
                     let _ = write!(
                         self.out,
@@ -18924,17 +18985,22 @@ impl<'a> FunctionEmitter<'a> {
                 return;
             }
             if let Some(addr_expr) = strip_cast(value)
-                && let Some(local_name) = match &addr_expr.kind {
-                    ExprKind::AddressOf(n) => Some(n.clone()),
+                && let Some((local_name, elem_off)) = match &addr_expr.kind {
+                    ExprKind::AddressOf(n) => Some((n.clone(), 0i32)),
                     ExprKind::Ident(n) if self.locals.has(n)
                         && matches!(self.locals.type_of(n), Type::Array { .. }) =>
-                        Some(n.clone()),
+                        Some((n.clone(), 0i32)),
+                    ExprKind::AddressOfArrayElem { array, byte_offset } if self.locals.has(array) =>
+                        Some((array.clone(), *byte_offset)),
                     _ => None,
                 }
                 && self.locals.has(&local_name)
                 && let LocalLocation::Stack(local_off) = self.locals.location_of(&local_name)
             {
-                let _ = write!(self.out, "\tlea\tax,word ptr {}\r\n", bp_addr(local_off));
+                let lea_off = i32::from(local_off) + elem_off;
+                let lea_off_i16 = i16::try_from(lea_off)
+                    .expect("local + elem offset fits in i16");
+                let _ = write!(self.out, "\tlea\tax,word ptr {}\r\n", bp_addr(lea_off_i16));
                 let _ = write!(self.out, "\tmov\tword ptr {},ss\r\n", bp_addr(off + 2));
                 let _ = write!(self.out, "\tmov\tword ptr {},ax\r\n", bp_addr(off));
                 return;
