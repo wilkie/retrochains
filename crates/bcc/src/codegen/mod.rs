@@ -20864,8 +20864,24 @@ impl<'a> FunctionEmitter<'a> {
                             || lhs_member_call
                             || (matches!(left.kind, ExprKind::BinOp { .. })
                                 && try_const_eval(left).is_none());
-                        matches!(op, BinOp::Div | BinOp::Mod | BinOp::Mul)
-                            || lhs_clobbers_ax
+                        // Exception: `<call> + <call> * <call>` — RHS
+                        // ends with `imul <reg>` (no `mov ax, reg`),
+                        // so the LHS-first collapse peephole can't
+                        // fire and we'd waste a `mov dx, ax`. BCC's
+                        // bytes show RHS-first here. Fixture 2050
+                        // (`zero() + one() * neg_one()`).
+                        let lhs_is_call = matches!(left.kind, ExprKind::Call { .. });
+                        let rhs_is_mul_of_calls = matches!(&right.kind,
+                            ExprKind::BinOp { op: BinOp::Mul, left: rl, right: rr }
+                                if matches!(rl.kind, ExprKind::Call { .. })
+                                    && matches!(rr.kind, ExprKind::Call { .. }));
+                        let rhs_first_call_exception =
+                            matches!(op, BinOp::Add | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor)
+                                && lhs_is_call
+                                && rhs_is_mul_of_calls;
+                        (matches!(op, BinOp::Div | BinOp::Mod | BinOp::Mul)
+                            || lhs_clobbers_ax)
+                            && !rhs_first_call_exception
                     } {
                         // `<uchar-lvalue> <op> <uchar-lvalue>` for
                         // Add/Sub/BitAnd/BitOr/BitXor/Mul: BCC widens
