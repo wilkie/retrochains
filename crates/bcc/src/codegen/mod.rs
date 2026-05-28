@@ -15828,6 +15828,39 @@ impl<'a> FunctionEmitter<'a> {
             }
             return;
         }
+        // Ternary base for arrow access: `(c ? &s1 : &s2)->x`.
+        // Evaluate the ternary into AX (which yields the pointer),
+        // copy to BX, then read through `[bx+field_off]`. Fixture
+        // 3558.
+        if matches!(kind, crate::ast::MemberKind::Arrow)
+            && matches!(base.kind, ExprKind::Ternary { .. })
+        {
+            // The ternary's branches are address expressions whose
+            // pointee type is the struct that holds the field —
+            // pull the struct type from the global table by
+            // looking at the then-branch.
+            if let ExprKind::Ternary { then_value, .. } = &base.kind
+                && let ExprKind::AddressOf(then_name) = &then_value.kind
+                && let Some(struct_ty) = self.globals.type_of(then_name).cloned()
+                && let Some((field_off, field_ty)) = struct_ty.field(field)
+            {
+                self.emit_expr_to_ax(base);
+                self.out.extend_from_slice(b"\tmov\tbx,ax\r\n");
+                let bx_disp = if field_off == 0 {
+                    "[bx]".to_owned()
+                } else {
+                    format!("[bx+{field_off}]")
+                };
+                let field_ty = field_ty.clone();
+                if field_ty.is_char_like() {
+                    let _ = write!(self.out, "\tmov\tal,byte ptr {bx_disp}\r\n");
+                    self.emit_widen_al(&field_ty);
+                } else {
+                    let _ = write!(self.out, "\tmov\tax,word ptr {bx_disp}\r\n");
+                }
+                return;
+            }
+        }
         // Arrow path (or Dot whose base isn't a const-chain lvalue):
         // base must be a bare Ident referring to a pointer.
         let ExprKind::Ident(name) = &base.kind else {
