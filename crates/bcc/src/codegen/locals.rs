@@ -241,13 +241,17 @@ impl Locals {
         let mut counts: HashMap<String, u32> = HashMap::new();
 
         // Params: assign each its incoming bp+N slot. When the
-        // function returns a struct > 4 bytes, BCC inserts a
-        // hidden far-pointer first param (the caller-supplied
-        // return-buffer address), bumping all real params by 4
-        // bytes. Fixture 3410 (`struct Three make(int, int, int)`
-        // returning a 6-byte struct).
+        // function returns a struct of any size other than 1, 2,
+        // or 4 (the in-register sizes via AL / AX / DX:AX), BCC
+        // inserts a hidden far-pointer first param (the caller-
+        // supplied return-buffer address), bumping all real params
+        // by 4 bytes. Fixtures 3410 (6-byte) and 3178 (3-byte
+        // struct with int+char params).
+        let ret_size = function.ret_ty.size_bytes();
         let returns_big_struct = matches!(&function.ret_ty, Type::Struct { .. })
-            && function.ret_ty.size_bytes() > 4;
+            && ret_size != 1
+            && ret_size != 2
+            && ret_size != 4;
         // Far functions push CS:IP (4 bytes) instead of just IP (2),
         // so the first param sits 2 bytes higher in the frame.
         // Fixture 1654.
