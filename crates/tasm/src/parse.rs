@@ -2141,6 +2141,22 @@ fn parse_sub(operands: &str, line_no: usize) -> AsmResult<Instr> {
             });
         }
     }
+    // Bare-symbol `sub word ptr _g[+N], imm8sx` — huge-model
+    // `g -= K`. Fixture 3877.
+    if let Some(symbol) = lhs.strip_prefix("word ptr ")
+        && let Some(first) = symbol.chars().next()
+        && (first == '_' || first == '@')
+        && !symbol.contains(':')
+        && !symbol.contains('[')
+        && let Some(imm) = parse_imm8_signed(rhs)
+    {
+        let (sym, offset) = split_sym_offset(symbol);
+        return Ok(Instr::SubSymImm8Sx {
+            symbol: sym.to_string(),
+            offset,
+            imm,
+        });
+    }
     // `sub word ptr [bp+N], imm8sx` — long-local compound `-=` low
     // half (fixture analog of 288).
     if let Some(offset) = parse_word_bp_relative(lhs) {
@@ -2786,6 +2802,22 @@ fn parse_add(operands: &str, line_no: usize) -> AsmResult<Instr> {
         if let Some(imm) = parse_imm16(rhs) {
             return Ok(Instr::AddAxImm { imm });
         }
+    }
+    // Bare-symbol `add word ptr _g[+N], imm8sx` — huge-model
+    // `g += K`. Fixture 3874.
+    if let Some(symbol) = lhs.strip_prefix("word ptr ")
+        && let Some(first) = symbol.chars().next()
+        && (first == '_' || first == '@')
+        && !symbol.contains(':')
+        && !symbol.contains('[')
+        && let Some(imm) = parse_imm8_signed(rhs)
+    {
+        let (sym, offset) = split_sym_offset(symbol);
+        return Ok(Instr::AddSymImm8Sx {
+            symbol: sym.to_string(),
+            offset,
+            imm,
+        });
     }
     // `add al,imm8` — AL-specific 2-byte encoding (fixture 529).
     if lhs == "al" {

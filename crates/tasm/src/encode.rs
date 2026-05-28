@@ -631,6 +631,7 @@ fn instr_size(instr: &Instr) -> usize {
         | Instr::SbbGroupSymImm8Sx { .. } => 5,
         Instr::IncGroupSym { .. } | Instr::DecGroupSym { .. } => 4,
         Instr::IncSym { .. } | Instr::DecSym { .. } => 4,
+        Instr::AddSymImm8Sx { .. } | Instr::SubSymImm8Sx { .. } => 5,
         Instr::TestGroupSymImm16 { .. } => 6,
         Instr::TestBpRelImm16 { offset, .. } => 1 + bp_rel_modrm_size(*offset) + 2,
         Instr::TestBpRelAx { offset } => 1 + bp_rel_modrm_size(*offset),
@@ -2853,6 +2854,48 @@ fn emit_instr(
             // Grp5 /0=INC r/m16 with mod=00 r/m=110 → `[disp16]`.
             // Fixture 512.
             emit_group_sym_lea(&[0xFF, 0x06], group, symbol, *offset, symbols, group_idx, extern_idx, out, fixups)?;
+        }
+        Instr::AddSymImm8Sx { symbol, offset, imm } => {
+            // `add word ptr <sym>[+N], imm8sx` → 83 06 lo hi ii.
+            // FIXUP shape mirrors `IncSym`. Fixture 3874.
+            let sym_loc = symbols.get(symbol).ok_or_else(|| {
+                AsmError::new(0, format!("symbol `{symbol}` not defined"))
+            })?;
+            let target_seg_idx = u8::try_from(sym_loc.segment + 1)
+                .expect("target seg idx fits");
+            let value = sym_loc.offset.wrapping_add(*offset as u16);
+            out.push(0x83);
+            out.push(0x06);
+            let imm_start = out.len();
+            out.extend_from_slice(&value.to_le_bytes());
+            out.push(*imm as u8);
+            fixups.push(FixupReq {
+                data_offset: u16::try_from(imm_start).expect("offset fits"),
+                kind: FixupKind::SegRelTargetFrameSegment {
+                    segment_idx: target_seg_idx,
+                },
+            });
+        }
+        Instr::SubSymImm8Sx { symbol, offset, imm } => {
+            // `sub word ptr <sym>[+N], imm8sx` → 83 2E lo hi ii.
+            // FIXUP shape mirrors `AddSymImm8Sx`. Fixture 3877.
+            let sym_loc = symbols.get(symbol).ok_or_else(|| {
+                AsmError::new(0, format!("symbol `{symbol}` not defined"))
+            })?;
+            let target_seg_idx = u8::try_from(sym_loc.segment + 1)
+                .expect("target seg idx fits");
+            let value = sym_loc.offset.wrapping_add(*offset as u16);
+            out.push(0x83);
+            out.push(0x2E);
+            let imm_start = out.len();
+            out.extend_from_slice(&value.to_le_bytes());
+            out.push(*imm as u8);
+            fixups.push(FixupReq {
+                data_offset: u16::try_from(imm_start).expect("offset fits"),
+                kind: FixupKind::SegRelTargetFrameSegment {
+                    segment_idx: target_seg_idx,
+                },
+            });
         }
         Instr::IncSym { symbol, offset } => {
             // `inc word ptr <sym>[+N]` → FF 06 lo hi with a

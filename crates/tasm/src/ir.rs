@@ -1289,6 +1289,18 @@ pub enum Instr {
     /// with ModR/M 0x0E = mod=00 reg=001 r/m=110, disp16-only).
     /// FIXUP shape mirrors `IncSym`. Used by huge-model `g--`.
     DecSym { symbol: String, offset: i16 },
+    /// `add word ptr <symbol>[+N], imm8sx` — bare-symbol
+    /// memory-direct add with imm8 (sign-extended). Encoding:
+    /// `83 06 lo hi ii` (Grp1 r/m16, imm8sx with /0 = ADD,
+    /// ModR/M 0x06 = mod=00 r/m=110 disp16). FIXUP shape mirrors
+    /// `IncSym`. Used by huge-model `g += K` where K fits imm8.
+    /// Fixture 3874.
+    AddSymImm8Sx { symbol: String, offset: i16, imm: i8 },
+    /// `sub word ptr <symbol>[+N], imm8sx` — bare-symbol sibling
+    /// of `AddSymImm8Sx`. Encoding: `83 2E lo hi ii` (Grp1 /5 =
+    /// SUB). FIXUP shape mirrors `AddSymImm8Sx`. Used by huge-
+    /// model `g -= K` where K fits imm8. Fixture 3877.
+    SubSymImm8Sx { symbol: String, offset: i16, imm: i8 },
     /// `les bx, word ptr [bp+disp]` — `C4` + ModR/M `mod=mm reg=011
     /// (BX) r/m=110 (BP+disp)`. Loads the 4-byte far pointer at
     /// `[bp+disp..disp+3]` into ES:BX (offset → BX, segment → ES).
