@@ -1594,7 +1594,7 @@ fn stmt_has_call(stmt: &Stmt) -> bool {
     }
 }
 
-fn expr_has_call(e: &Expr) -> bool {
+pub(super) fn expr_has_call(e: &Expr) -> bool {
     match &e.kind {
         ExprKind::Call { .. } | ExprKind::CallVia { .. } => true,
         ExprKind::BinOp { left, right, .. } | ExprKind::Logical { left, right, .. } => {

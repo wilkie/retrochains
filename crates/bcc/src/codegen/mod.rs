@@ -106,7 +106,7 @@ pub fn fold_const_global(expr: &crate::ast::Expr) -> Option<u32> {
     try_const_eval(expr)
 }
 use line_map::LineMap;
-use locals::{LocalLocation, Locals, ParamLoad, Reg};
+use locals::{LocalLocation, Locals, ParamLoad, Reg, expr_has_call};
 
 /// File-scope variable lookup. Built once per translation unit from
 /// `Unit::globals` and consulted by codegen whenever an `Ident`
@@ -556,6 +556,44 @@ fn hoist_bx_load_above_ax_load(buf: &mut Vec<u8>, pre_pos: usize, mid_pos: usize
 /// swap it with the push so BCC's "delay the push" emission shape
 /// is matched. Walks one line; conservatively bails on anything
 /// else.
+/// True when the buffer's last emitted line is `<op> ax,<imm>` (a
+/// purely-immediate bitwise / additive op against AX). `<op> ax,
+/// word ptr [...]` and similar memory operands return false. Used
+/// by the compound-assign emitter to pick BCC's AX-route shape only
+/// for the `n += x & K` style where the RHS evaluation ends in a
+/// bare immediate op. Fixture 2271 (`n += x & 1`).
+fn tail_is_ax_imm_op(buf: &[u8]) -> bool {
+    if !buf.ends_with(b"\r\n") {
+        return false;
+    }
+    let stripped = &buf[..buf.len() - 2];
+    let line_start = stripped
+        .iter()
+        .rposition(|&b| b == b'\n')
+        .map_or(0, |i| i + 1);
+    let line = &stripped[line_start..];
+    const PREFIXES: &[&[u8]] = &[
+        b"\tand\tax,",
+        b"\tor\tax,",
+        b"\txor\tax,",
+        b"\tadd\tax,",
+        b"\tsub\tax,",
+    ];
+    let Some(prefix) = PREFIXES.iter().find(|p| line.starts_with(*p)) else {
+        return false;
+    };
+    let rhs = &line[prefix.len()..];
+    // Only accept a bare decimal/hex immediate (digits, optional
+    // leading `-`). Reject `word ptr [...]`, register names like
+    // `di`/`si`, etc. — those keep the direct-add shape because
+    // BCC does too.
+    if rhs.is_empty() {
+        return false;
+    }
+    let after_sign = if rhs[0] == b'-' { &rhs[1..] } else { rhs };
+    after_sign.first().is_some_and(|c| c.is_ascii_digit())
+}
+
 fn hoist_first_setup_above_push(buf: &mut Vec<u8>, push_pos: usize) {
     const PUSH_LINE: &[u8] = b"\tpush\tax\r\n";
     if buf.len() < push_pos + PUSH_LINE.len() {
@@ -11178,7 +11216,6 @@ impl<'a> FunctionEmitter<'a> {
             && self.value_needs_ax_route(value)
         {
             self.emit_expr_to_ax(value);
-            let src = if self.try_collapse_lhs_clobber_to_dx() { "dx" } else { "ax" };
             let mnem = match op {
                 BinOp::Add => "add",
                 BinOp::Sub => "sub",
@@ -11187,6 +11224,37 @@ impl<'a> FunctionEmitter<'a> {
                 BinOp::BitXor => "xor",
                 _ => unreachable!(),
             };
+            // `<reg> <op>= <binop>`: BCC's pattern is the AX-route
+            // shape `mov dx, <reg>; <op> dx, ax; mov <reg>, dx`
+            // rather than the shorter `<op> <reg>, ax` direct
+            // form. Adopt it when the value's last emitted line is
+            // a load (not a single-byte op like `and ax, imm` that
+            // already lives in AX with no scratch shuffle) so
+            // existing fixtures still match. Specifically: trigger
+            // when the value emission tail ends with an `and/or/
+            // xor/add/sub ax, imm` peephole — that's BCC's exact
+            // popcount shape (`n += x & 1`). Fixture 2271
+            // (`while (x) { n += x & 1; x >>= 1; }`).
+            let collapsed = self.try_collapse_lhs_clobber_to_dx();
+            let src = if collapsed { "dx" } else { "ax" };
+            // The AX-route widens the compound by 4 bytes vs the
+            // direct `add <reg>, ax` shape, so it has to match a
+            // BCC-specific trigger to be worth it. Trigger: tail is
+            // a bare immediate op (`and ax, 1`, `add ax, K`, …) AND
+            // the value didn't contain a call (BCC keeps the direct
+            // shape when RHS evaluation already passed through
+            // `call` — fixture 1441's `a += two() + 3`).
+            if !collapsed
+                && matches!(op, BinOp::Add)
+                && tail_is_ax_imm_op(self.out)
+                && !expr_has_call(value)
+            {
+                let reg_name = reg.name();
+                let _ = write!(self.out, "\tmov\tdx,{reg_name}\r\n");
+                self.out.extend_from_slice(b"\tadd\tdx,ax\r\n");
+                let _ = write!(self.out, "\tmov\t{reg_name},dx\r\n");
+                return;
+            }
             let _ = write!(self.out, "\t{mnem}\t{},{src}\r\n", reg.name());
             return;
         }
