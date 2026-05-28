@@ -3342,6 +3342,17 @@ impl<'a> FunctionEmitter<'a> {
     /// for non-lvalue expressions.
     fn int_lvalue_addr(&self, e: &Expr) -> Option<String> {
         let ExprKind::Ident(name) = &e.kind else { return None };
+        self.named_int_lvalue_addr(name)
+    }
+
+    /// Address of a named int lvalue (`<global>` → `DGROUP:_<name>`,
+    /// stack local → `[bp+off]`). Identical body to
+    /// [`int_lvalue_addr`] for the Ident case, but takes the name
+    /// directly so callers that already destructured the
+    /// `Ident(...)` don't have to re-wrap the operand in a synthetic
+    /// `Expr`. Returns `None` if `name` doesn't refer to an int-like
+    /// stack-local or global.
+    fn named_int_lvalue_addr(&self, name: &str) -> Option<String> {
         if let Some(gty) = self.globals.type_of(name)
             && gty.is_int_like()
         {
@@ -8865,6 +8876,52 @@ impl<'a> FunctionEmitter<'a> {
                         } else {
                             self.out.extend_from_slice(b"\tcwd\t\r\n");
                         }
+                        let _ = write!(self.out, "\tmov\tword ptr {dest_hi},dx\r\n");
+                        let _ = write!(self.out, "\tmov\tword ptr {dest_lo},ax\r\n");
+                        return;
+                    }
+                    // `long r = (long)<int> * <long> + K;` — promote
+                    // the int to long via cwd, save the result on
+                    // the stack, load the long into DX:AX, pop the
+                    // saved pair back into CX:BX, then run the
+                    // standard long-multiply helper. The trailing
+                    // `+ K` folds into `add ax, K_lo; adc dx, K_hi`.
+                    // Fixture 1777 (`(long)i * l + 7`).
+                    if let ExprKind::BinOp { op: BinOp::Add, left: add_l, right: add_r } = &init.kind
+                        && let Some(k) = try_const_eval(add_r)
+                        && let ExprKind::BinOp { op: BinOp::Mul, left: mul_l, right: mul_r } = &add_l.kind
+                        && let Some(int_inner) = strip_cast(mul_l)
+                        && let ExprKind::Ident(int_name) = &int_inner.kind
+                        && self.named_int_lvalue_addr(int_name).is_some()
+                        && let ExprKind::Ident(long_name) = &mul_r.kind
+                        && let Some((long_hi_addr, long_lo_addr)) =
+                            self.long_lvalue_addr_pair(mul_r).map(|p| p)
+                            .or_else(|| {
+                                if self.locals.has(long_name)
+                                    && self.locals.type_of(long_name).is_long_like()
+                                    && let LocalLocation::Stack(lo) = self.locals.location_of(long_name)
+                                {
+                                    Some((bp_addr(lo + 2), bp_addr(lo)))
+                                } else {
+                                    None
+                                }
+                            })
+                    {
+                        let int_addr = self.named_int_lvalue_addr(int_name).unwrap();
+                        let _ = write!(self.out, "\tmov\tax,word ptr {int_addr}\r\n");
+                        self.out.extend_from_slice(b"\tcwd\t\r\n");
+                        self.out.extend_from_slice(b"\tpush\tax\r\n");
+                        self.out.extend_from_slice(b"\tpush\tdx\r\n");
+                        let _ = write!(self.out, "\tmov\tdx,word ptr {long_hi_addr}\r\n");
+                        let _ = write!(self.out, "\tmov\tax,word ptr {long_lo_addr}\r\n");
+                        self.out.extend_from_slice(b"\tpop\tcx\r\n");
+                        self.out.extend_from_slice(b"\tpop\tbx\r\n");
+                        self.out.extend_from_slice(b"\tcall\tnear ptr N_LXMUL@\r\n");
+                        self.helpers.insert("N_LXMUL@".to_string());
+                        let k_lo = (k & 0xFFFF) as u16;
+                        let k_hi = ((k >> 16) & 0xFFFF) as u16;
+                        let _ = write!(self.out, "\tadd\tax,{k_lo}\r\n");
+                        let _ = write!(self.out, "\tadc\tdx,{k_hi}\r\n");
                         let _ = write!(self.out, "\tmov\tword ptr {dest_hi},dx\r\n");
                         let _ = write!(self.out, "\tmov\tword ptr {dest_lo},ax\r\n");
                         return;
@@ -19566,6 +19623,44 @@ impl<'a> FunctionEmitter<'a> {
                         let _ = write!(self.out, "\tmov\tword ptr {},ax\r\n", bp_addr(off));
                         return;
                     }
+                    // `x = ((long)<hi> << 16) | (long)(unsigned int)<lo>`
+                    // — the canonical "combine two ints into a long"
+                    // idiom. BCC's lowering keeps the hi value in AX
+                    // (the *high* half of the result lives in AX in
+                    // this peephole) and uses DX for lo (the low
+                    // half). After cwd (which would normally
+                    // sign-extend, but the value's high half is
+                    // about to be overwritten anyway), `xor dx,dx`
+                    // zeros DX, then `or dx, lo` puts lo in DX.
+                    // `or ax, 0` is a no-op marker for the OR
+                    // semantics of the high half. Finally store
+                    // AX → off+2 (high) and DX → off (low).
+                    // Fixture 1946.
+                    if let Some((hi_name, lo_name, lo_unsigned)) =
+                        match_combine_long_idiom(value)
+                    {
+                        let hi_addr = self.named_int_lvalue_addr(&hi_name);
+                        let lo_addr = self.named_int_lvalue_addr(&lo_name);
+                        if let (Some(hi_addr), Some(lo_addr)) = (hi_addr, lo_addr) {
+                            let _ = write!(self.out, "\tmov\tax,word ptr {hi_addr}\r\n");
+                            self.out.extend_from_slice(b"\tcwd\t\r\n");
+                            self.out.extend_from_slice(b"\txor\tdx,dx\r\n");
+                            let _ = write!(self.out, "\tor\tdx,word ptr {lo_addr}\r\n");
+                            self.out.extend_from_slice(b"\tor\tax,0\r\n");
+                            let _ = write!(
+                                self.out,
+                                "\tmov\tword ptr {},ax\r\n",
+                                bp_addr(off + 2),
+                            );
+                            let _ = write!(
+                                self.out,
+                                "\tmov\tword ptr {},dx\r\n",
+                                bp_addr(off),
+                            );
+                            let _ = lo_unsigned;
+                            return;
+                        }
+                    }
                     panic!("non-constant long local assign not yet supported (no fixture)");
                 }
                 // Char-local store: byte-width immediate. Same byte
@@ -24054,6 +24149,37 @@ fn strip_cast(e: &Expr) -> Option<&Expr> {
         stripped = true;
     }
     if stripped { Some(cur) } else { Some(e) }
+}
+
+/// Match the canonical "combine two int halves into a long" idiom:
+/// `((long)<hi> << 16) | (long)(unsigned int)<lo>`. Returns
+/// `(hi_name, lo_name, lo_was_unsigned_cast)` or `None`. The
+/// outer-OR's operands may appear in either order. Peels any
+/// chain of explicit Cast wrappers — `((long)hi << 16)` against
+/// `(long)(unsigned int)lo` (the typical signed-hi / unsigned-lo
+/// shape, fixture 1946) and the symmetric all-unsigned variant.
+fn match_combine_long_idiom(e: &Expr) -> Option<(String, String, bool)> {
+    let ExprKind::BinOp { op: BinOp::BitOr, left, right } = &e.kind else {
+        return None;
+    };
+    let try_shape = |hi_side: &Expr, lo_side: &Expr| -> Option<(String, String, bool)> {
+        let hi_inner = strip_cast(hi_side)?;
+        let ExprKind::BinOp { op: BinOp::Shl, left: shl_l, right: shl_r } = &hi_inner.kind
+            else { return None };
+        if !matches!(&shl_r.kind, ExprKind::IntLit(16)) { return None; }
+        let hi_operand = strip_cast(shl_l)?;
+        let ExprKind::Ident(hi_name) = &hi_operand.kind else { return None };
+        let lo_inner = strip_cast(lo_side)?;
+        // The lo side might be `(long)(unsigned int)<lo>` or just
+        // `(long)<lo>` — peel any remaining cast layers.
+        let (lo_operand, lo_unsigned) = match &lo_inner.kind {
+            ExprKind::Cast { ty: Type::UInt, operand } => (strip_cast(operand)?, true),
+            _ => (lo_inner, false),
+        };
+        let ExprKind::Ident(lo_name) = &lo_operand.kind else { return None };
+        Some((hi_name.clone(), lo_name.clone(), lo_unsigned))
+    };
+    try_shape(left, right).or_else(|| try_shape(right, left))
 }
 
 fn body_has_return(body: &[Stmt]) -> bool {
