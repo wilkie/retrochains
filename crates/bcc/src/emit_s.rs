@@ -662,6 +662,24 @@ fn emit_global_init(
             return;
         }
     }
+    // `char *p = "lit"` under compact / large models — the pointer
+    // promotion pass has rewritten `p` to a 4-byte far pointer. BCC
+    // emits a `dd DGROUP:s@[+N]` so the linker writes both the
+    // string's DGROUP-relative offset and DGROUP's paragraph value.
+    // Fixtures 3760 / 3761.
+    if let (ExprKind::StringLit(bytes), Type::FarPointer { pointee, .. }) =
+        (&init.kind, ty)
+    {
+        if (*pointee).is_char_like() {
+            let offset = strings.intern(bytes);
+            if offset == 0 {
+                out.extend_from_slice(b"\tdd\tDGROUP:s@\r\n");
+            } else {
+                let _ = write!(out, "\tdd\tDGROUP:s@+{offset}\r\n");
+            }
+            return;
+        }
+    }
     // `T *p = &g;` (fixture 193) — pointer slot initialized to the
     // DGROUP-relative address of another global. Same FIXUPP shape as
     // the string-pool path, but the target is `_<name>` rather than

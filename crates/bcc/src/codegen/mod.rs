@@ -13935,6 +13935,36 @@ impl<'a> FunctionEmitter<'a> {
         let Some(k) = try_const_eval(index) else {
             panic!("variable-indexed global pointer access not yet supported (no fixture)");
         };
+        // Far-pointer global (compact / large pointer-promotion):
+        // `les bx, dword ptr DGROUP:_p; mov al, byte ptr es:[bx]`.
+        // Fixtures 3760 / 3761.
+        if matches!(
+            self.globals.type_of(ptr_name),
+            Some(Type::FarPointer { .. })
+        ) {
+            let _ = write!(
+                self.out,
+                "\tles\tbx,dword ptr DGROUP:_{ptr_name}\r\n"
+            );
+            let stride = u32::from(pointee.size_bytes());
+            let byte_off = k * stride;
+            let addr = if byte_off == 0 {
+                "es:[bx]".to_owned()
+            } else {
+                format!("es:[bx+{byte_off}]")
+            };
+            if pointee.is_char_like() {
+                let _ = write!(self.out, "\tmov\tal,byte ptr {addr}\r\n");
+                if pointee.is_unsigned() {
+                    self.out.extend_from_slice(b"\tmov\tah,0\r\n");
+                } else {
+                    self.out.extend_from_slice(b"\tcbw\t\r\n");
+                }
+            } else {
+                let _ = write!(self.out, "\tmov\tax,word ptr {addr}\r\n");
+            }
+            return;
+        }
         let _ = write!(
             self.out,
             "\tmov\tbx,word ptr DGROUP:_{ptr_name}\r\n"

@@ -71,6 +71,18 @@ pub enum SegItem {
         symbol: String,
         extra_offset: i16,
     },
+    /// `dd <group>:<symbol>[+N]` — 4-byte slot resolving to a
+    /// 16:16 far pointer. The linker writes the target symbol's
+    /// frame-relative offset into bytes 0-1 (plus any pre-written
+    /// `extra_offset`) and the frame's paragraph address into bytes
+    /// 2-3. Used for file-scope `char *p = "lit"` in compact /
+    /// large / huge models where the pointer is far. Fixtures
+    /// 3760 / 3761.
+    DdGroupSym {
+        group: String,
+        symbol: String,
+        extra_offset: i16,
+    },
     /// `db N dup (?)` — reserve N bytes of uninitialized space. Grows
     /// the segment's notional size but emits nothing into LEDATA. BCC
     /// uses this in `_BSS` for globals.
@@ -1272,6 +1284,13 @@ pub enum Instr {
     /// First instruction in any far-pointer deref / write sequence.
     /// Fixtures 1649 / 1650 / 1651 / 2058.
     LesBxBpRel { offset: i16 },
+    /// `les bx, dword ptr <group>:<symbol>[+N]` — disp16-only form
+    /// of LES. Loads the 4-byte far pointer at the global slot
+    /// into ES:BX. Used to read a file-scope `char far *p` global
+    /// before dereferencing it. Encoding: `C4 1E lo hi` (ModR/M
+    /// 0x1E = mod=00 reg=011(BX) r/m=110 disp16) with a
+    /// SegRelGroupTarget FIXUPP. Fixtures 3760 / 3761.
+    LesBxGroupSym { group: String, symbol: String, offset: i16 },
     /// `mov ax, es:[bx]` — segment-override `26` prefix +
     /// `8B 07` (mov ax, [bx]). Reads a word through ES:BX, the
     /// canonical far-pointer deref following `les bx`. Fixtures
@@ -2697,6 +2716,15 @@ pub enum FixupKind {
     /// model far calls to external functions like `printf`.
     /// Fixture 2210. Locat byte: 0xCC | hi2. Fix Data: 0x56.
     FarCallExtern { extdef_idx: u8 },
+    /// 16:16-bit pointer (M=1, location=3), frame method F1
+    /// (GRPDEF), target method T4 (SEGDEF, no disp). The fixup
+    /// rewrites a 4-byte segment:offset slot whose offset is
+    /// resolved against the group frame and whose segment word
+    /// resolves to the group's paragraph address. Used by
+    /// `dd <group>:<sym>` file-scope far-pointer initializers
+    /// in compact / large / huge models. Locat byte: 0xCC | hi2.
+    /// Fix Data: 0x14. Fixtures 3760 / 3761.
+    FarPtrGroupTarget { group_idx: u8, segment_idx: u8 },
 }
 
 /// A position-bound parse error. The line number is 1-based and refers

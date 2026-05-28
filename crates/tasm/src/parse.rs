@@ -112,6 +112,7 @@ impl<'a> Parser<'a> {
             "extrn" => self.parse_extrn(&line)?,
             "db" => self.parse_db(&line)?,
             "dw" => self.parse_dw(&line)?,
+            "dd" => self.parse_dd(&line)?,
             // Empty keyword + label = lone `@1@50:` style label.
             "" => {
                 if let Some(label) = line.label {
@@ -293,6 +294,27 @@ impl<'a> Parser<'a> {
         Err(AsmError::new(
             line.line_no,
             format!("dw: unsupported form `{rest}`"),
+        ))
+    }
+
+    fn parse_dd(&mut self, line: &Line<'_>) -> AsmResult<()> {
+        let seg = self.require_open_segment(line)?;
+        let rest = line.rest.trim();
+        // `dd <group>:<symbol>[+N]` — 4-byte far-pointer slot for
+        // file-scope `char *p = "lit"` in compact / large / huge
+        // models. Fixtures 3760 / 3761.
+        if let Some((group, after)) = rest.split_once(':') {
+            let (sym, extra_offset) = split_sym_offset(after.trim());
+            self.module.segments[seg].items.push(SegItem::DdGroupSym {
+                group: group.trim().to_string(),
+                symbol: sym.to_string(),
+                extra_offset,
+            });
+            return Ok(());
+        }
+        Err(AsmError::new(
+            line.line_no,
+            format!("dd: unsupported form `{rest}`"),
         ))
     }
 
@@ -606,6 +628,20 @@ fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
                 && let Some(offset) = parse_word_bp_relative(rhs)
             {
                 return Ok(Instr::LesBxBpRel { offset });
+            }
+            // `les bx, dword ptr <group>:<sym>[+N]` — disp16 form
+            // used to load a file-scope far-pointer global into
+            // ES:BX. Fixtures 3760 / 3761.
+            if lhs == "bx"
+                && let Some(after) = rhs.strip_prefix("dword ptr ")
+                && let Some((group, sym_part)) = after.split_once(':')
+            {
+                let (sym, offset) = split_sym_offset(sym_part.trim());
+                return Ok(Instr::LesBxGroupSym {
+                    group: group.trim().to_string(),
+                    symbol: sym.to_string(),
+                    offset,
+                });
             }
             Err(AsmError::new(line.line_no, format!("les: unsupported operand form `{rest}`")))
         }
