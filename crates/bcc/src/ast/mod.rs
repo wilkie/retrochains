@@ -363,6 +363,15 @@ pub enum Type {
     /// unqualified pointers to promote, so codegen never sees this
     /// variant.
     NearPointer(Box<Type>),
+    /// Parser-side marker for a function-pointer declarator
+    /// (`int (*fp)(int)`). The post-parse promotion uses this to
+    /// decide whether the slot is a 4-byte far pointer
+    /// (medium / large / huge — code is far) or a 2-byte near
+    /// pointer (tiny / small / compact — code is near). Codegen
+    /// never sees this variant; the promotion collapses it to
+    /// `FarPointer` or `Pointer`. Fixture 2211 (`int (*fp)(int) =
+    /// dbl;` under -mm).
+    FnPointer,
     /// `struct <tag>? { <fields> }` — fields packed tightly with no
     /// inter-field padding (so a `char` at offset 0 followed by an
     /// `int` lands the int at offset 1, fixture 102). The total
@@ -424,6 +433,11 @@ impl Type {
             Self::Pointer(_) => 2,
             Self::NearPointer(_) => 2,
             Self::FarPointer { .. } => 4,
+            // FnPointer is parser-side only; it gets rewritten to
+            // Pointer or FarPointer before the locals layout pass
+            // ever calls `size_bytes`. 2 is the safe default for
+            // the small-model path that doesn't trigger promotion.
+            Self::FnPointer => 2,
             Self::Struct { size, .. } => *size,
         }
     }
@@ -443,6 +457,7 @@ impl Type {
             Self::Pointer(_) => 2,
             Self::NearPointer(_) => 2,
             Self::FarPointer { .. } => 2,
+            Self::FnPointer => 2,
             // Struct alignment: 2 (word). The size rounding to even
             // is part of the per-struct size computation, so this is
             // mostly a placement-alignment hint when a struct is
@@ -543,6 +558,10 @@ impl Type {
         match self {
             Self::Pointer(inner) | Self::NearPointer(inner) => Some(inner),
             Self::FarPointer { pointee, .. } => Some(pointee),
+            // FnPointer is opaque — codegen never asks for its
+            // pointee (the function signature isn't modeled), and
+            // by the time anyone could it's already been rewritten.
+            Self::FnPointer => None,
             _ => None,
         }
     }

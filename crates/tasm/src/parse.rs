@@ -940,6 +940,21 @@ fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
             {
                 return Ok(Instr::CallNear(target.trim().to_string()));
             }
+            // `call far ptr [bp+<offset>]` — indirect *far* call
+            // through a 4-byte stack-resident fn-pointer. The
+            // `far ptr` prefix is BCC's way of selecting the
+            // `ff /3` ModRM extension over the near-call `ff /2`.
+            // Must precede the `call far ptr <label>` direct-far
+            // arm below — otherwise the `[bp-4]` operand would be
+            // parsed as a label name and rejected as undeclared.
+            // Fixture 2211.
+            if let Some(inside) = rest
+                .strip_prefix("far ptr ")
+                .or_else(|| rest.strip_prefix("far\tptr "))
+                && let Some(offset) = parse_bp_relative(inside)
+            {
+                return Ok(Instr::CallFarIndirectBpRel { offset });
+            }
             // `call far ptr <label>` — direct far call to an
             // external function. Fixture 2210.
             if let Some(target) = rest

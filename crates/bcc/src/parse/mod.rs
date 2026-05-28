@@ -2694,14 +2694,19 @@ impl Parser {
                 _ => {}
             }
         }
-        // If a `[N]` followed the `*name`, wrap the pointer type
-        // in an `Array{N, Pointer<Int>}`. The element-stride is
-        // sizeof(Pointer<Int>) = 2, matching the array semantics
-        // BCC emits for `arr[i](x)`.
-        let inner = Type::Pointer(Box::new(Type::Int));
+        // Function-pointer declarators get tagged with the
+        // parser-side `FnPointer` marker. The post-parse pass in
+        // `emit_s.rs` rewrites it to either `Pointer` (near-code
+        // models: tiny / small / compact — the function lives in
+        // the same _TEXT segment as the caller) or `FarPointer`
+        // (medium / large / huge — the function pointer is
+        // segment:offset). Array-of-fn-pointers wraps the marker
+        // in `Array{N, FnPointer}`; the post-pass walks into
+        // arrays and rewrites the element type. Fixtures 110,
+        // 2211 (medium fn-ptr).
         let ty = match fn_ptr_arr_dim {
-            Some(n) => Type::Array { len: n, elem: Box::new(inner) },
-            None => inner,
+            Some(n) => Type::Array { len: n, elem: Box::new(Type::FnPointer) },
+            None => Type::FnPointer,
         };
         Ok((name, ty))
     }

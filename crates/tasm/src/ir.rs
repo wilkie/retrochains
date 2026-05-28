@@ -2184,6 +2184,12 @@ pub enum Instr {
     /// stack-resident function pointer. Emits `FF 56 dd`. No FIXUPP
     /// (the address is loaded from the local at runtime).
     CallIndirectBpRel { offset: i16 },
+    /// `call far ptr [bp+<offset>]` — indirect *far* call through a
+    /// stack-resident function pointer whose 4-byte slot holds a
+    /// segment:offset pair. Emits `FF 5E dd` (ModR/M reg field /3
+    /// = far indirect call). Used by medium / large / huge memory
+    /// models where every fn pointer is far. Fixture 2211.
+    CallFarIndirectBpRel { offset: i16 },
     /// `call word ptr <group>:<sym>[+disp]` — indirect near call
     /// through a global function-pointer (optionally at an offset
     /// within an array). Emits `FF 16 lo hi` + SegRel FIXUPP, with

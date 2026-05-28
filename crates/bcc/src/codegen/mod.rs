@@ -6635,7 +6635,15 @@ impl<'a> FunctionEmitter<'a> {
                     "indirect call through register-resident fn-ptr `{name}` not yet supported"
                 );
             };
-            let _ = write!(self.out, "\tcall\tword ptr {}\r\n", bp_addr(off));
+            // Far-code memory models store fn pointers as 4-byte
+            // segment:offset pairs; the indirect call uses
+            // `call far ptr [bp+off]` (`ff /3`) instead of the
+            // near-call `ff /2`. Fixture 2211.
+            if matches!(self.locals.type_of(name), Type::FarPointer { .. }) {
+                let _ = write!(self.out, "\tcall\tfar ptr {}\r\n", bp_addr(off));
+            } else {
+                let _ = write!(self.out, "\tcall\tword ptr {}\r\n", bp_addr(off));
+            }
         } else if let Some(gty) = self.globals.type_of(name)
             && gty.pointee().is_some()
             && self.signatures.params_of(name).is_none()
@@ -9362,16 +9370,34 @@ impl<'a> FunctionEmitter<'a> {
                 // Function-pointer init: `int (*p)(void) = f;` →
                 // `mov word ptr [bp-N],offset _f`. We detect this by
                 // the init being a bare ident that names a function
-                // defined in this TU (fixture 110).
+                // defined in this TU (fixture 110). In far-code
+                // memory models (medium / large / huge) the slot is
+                // 4 bytes (`FarPointer`) and the segment half takes
+                // CS — the callee lives in the caller's own code
+                // segment, so the runtime CS register supplies the
+                // right paragraph. Fixture 2211.
                 if let ExprKind::Ident(name) = &init.kind
                     && self.signatures.params_of(name).is_some()
                 {
                     let sym = function_symbol(name);
-                    let _ = write!(
-                        self.out,
-                        "\tmov\tword ptr {},offset {sym}\r\n",
-                        bp_addr(off)
-                    );
+                    if matches!(ty, Type::FarPointer { .. }) {
+                        let _ = write!(
+                            self.out,
+                            "\tmov\tword ptr {},cs\r\n",
+                            bp_addr(off + 2),
+                        );
+                        let _ = write!(
+                            self.out,
+                            "\tmov\tword ptr {},offset {sym}\r\n",
+                            bp_addr(off),
+                        );
+                    } else {
+                        let _ = write!(
+                            self.out,
+                            "\tmov\tword ptr {},offset {sym}\r\n",
+                            bp_addr(off),
+                        );
+                    }
                     return;
                 }
                 // Int local init from a non-AX register-resident

@@ -765,6 +765,7 @@ fn instr_size(instr: &Instr) -> usize {
         | Instr::MovBpRelOffsetGroupSym { offset, .. } => 1 + bp_rel_modrm_size(*offset) + 2,
         Instr::MovDerefRegOffsetGroupSym { .. } => 4,
         Instr::CallIndirectBpRel { offset } => 1 + bp_rel_modrm_size(*offset),
+        Instr::CallFarIndirectBpRel { offset } => 1 + bp_rel_modrm_size(*offset),
         Instr::CallIndirectGroupSym { .. } => 4,
         Instr::CallIndirectGroupSymBx { .. } => 4,
         Instr::CallIndirectBx => 2,
@@ -3602,6 +3603,12 @@ fn emit_instr(
             // CALL near r/m16.
             out.push(0xFF);
             emit_bp_rel_modrm(2, *offset, out);
+        }
+        Instr::CallFarIndirectBpRel { offset } => {
+            // `call far ptr [bp+disp]` → FF /3 [bp+disp]. Grp5 /3 =
+            // CALL far m16:16. Fixture 2211.
+            out.push(0xFF);
+            emit_bp_rel_modrm(3, *offset, out);
         }
         Instr::CallIndirectGroupSym { group, symbol, disp } => {
             // `call word ptr <group>:<sym>+disp` → FF /2 [disp16].

@@ -134,6 +134,14 @@ pub fn build_asm(
         // never sees it.
         collapse_explicit_near_to_pointer(&mut unit);
     }
+    // Function pointers track *code* segment, so the model split is
+    // `has_far_code()` (medium / large / huge) rather than the
+    // far-data check above. Every `FnPointer` marker gets rewritten
+    // to either `FarPointer { pointee: Int }` (far-code models —
+    // 4-byte segment:offset slot) or `Pointer(Int)` (near-code —
+    // 2-byte slot). After this pass codegen sees only the regular
+    // pointer variants. Fixture 2211.
+    rewrite_fn_pointers(&mut unit, memory_model.has_far_code());
 
     let mut out = Vec::with_capacity(1024);
     write_macro_preamble(&mut out);
@@ -820,6 +828,74 @@ fn emit_scalar_global_bytes(
 /// pointer also reads a far pointer back out of memory. Fixtures
 /// 1667 (large), 1768 (compact); future Huge-model fixtures follow
 /// the same shape.
+/// Rewrite every `FnPointer` marker the parser stamped onto a
+/// function-pointer declarator. In far-code memory models (medium,
+/// large, huge) the slot becomes a 4-byte `FarPointer` so the
+/// codegen emits the `mov [bp+hi], cs; mov [bp+lo], offset _fn`
+/// init pair and the `call far ptr [bp+off]` indirect-call. In
+/// near-code models the slot collapses to a regular 2-byte
+/// `Pointer(Int)` — the function lives in the same code segment as
+/// every other function in the module, so an indirect near call
+/// suffices. Fixture 2211 (medium fn-ptr), fixture 110 (small).
+fn rewrite_fn_pointers(unit: &mut crate::ast::Unit, far_code: bool) {
+    use crate::ast::Type;
+    fn walk_ty(t: &mut Type, far_code: bool) {
+        match t {
+            Type::FnPointer => {
+                *t = if far_code {
+                    Type::FarPointer { pointee: Box::new(Type::Int), is_huge: false }
+                } else {
+                    Type::Pointer(Box::new(Type::Int))
+                };
+            }
+            Type::Array { elem, .. } => walk_ty(elem, far_code),
+            Type::Pointer(inner) | Type::NearPointer(inner) => walk_ty(inner, far_code),
+            Type::FarPointer { pointee, .. } => walk_ty(pointee, far_code),
+            Type::Struct { fields, .. } => {
+                for f in fields {
+                    walk_ty(&mut f.ty, far_code);
+                }
+            }
+            _ => {}
+        }
+    }
+    for g in &mut unit.globals {
+        walk_ty(&mut g.ty, far_code);
+    }
+    for f in &mut unit.functions {
+        walk_ty(&mut f.ret_ty, far_code);
+        for p in &mut f.params {
+            walk_ty(&mut p.ty, far_code);
+        }
+        if let Some(body) = &mut f.body {
+            for s in body {
+                walk_stmt(s, far_code);
+            }
+        }
+    }
+    fn walk_stmt(s: &mut crate::ast::Stmt, far_code: bool) {
+        use crate::ast::StmtKind;
+        match &mut s.kind {
+            StmtKind::Declare { ty, .. } => walk_ty(ty, far_code),
+            StmtKind::Block(b) => for inner in b { walk_stmt(inner, far_code); }
+            StmtKind::If { then_branch, else_branch, .. } => {
+                for s in then_branch { walk_stmt(s, far_code); }
+                if let Some(eb) = else_branch { for s in eb { walk_stmt(s, far_code); } }
+            }
+            StmtKind::While { body, .. } | StmtKind::DoWhile { body, .. } => {
+                for s in body { walk_stmt(s, far_code); }
+            }
+            StmtKind::For { body, .. } => {
+                for s in body { walk_stmt(s, far_code); }
+            }
+            StmtKind::Switch { cases, .. } => {
+                for c in cases { for s in &mut c.body { walk_stmt(s, far_code); } }
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Near-data memory models (tiny / small / medium) don't promote
 /// pointers, but the parser still produces `NearPointer` for an
 /// explicit `near` qualifier. Collapse those back to plain
