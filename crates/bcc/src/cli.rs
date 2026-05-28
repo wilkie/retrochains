@@ -72,6 +72,34 @@ pub enum MemoryModel {
     Tiny,
     Small,
     Compact,
+    Medium,
+    Large,
+    Huge,
+}
+
+impl MemoryModel {
+    /// True for memory models that use far code: medium, large, huge.
+    /// These emit far returns (`retf`) by default and use a module-
+    /// prefixed code segment name (`HELLO_TEXT` rather than `_TEXT`).
+    #[must_use]
+    pub fn has_far_code(self) -> bool {
+        matches!(self, Self::Medium | Self::Large | Self::Huge)
+    }
+
+    /// The BCC OMF COMENT class-0xEA second-byte marker for this
+    /// model. Tiny=0x08, Small=0x09, Medium=0x0A, Compact=0x0B,
+    /// Large=0x0C, Huge=0x0D.
+    #[must_use]
+    pub fn marker_byte(self) -> u8 {
+        match self {
+            Self::Tiny => 0x08,
+            Self::Small => 0x09,
+            Self::Medium => 0x0A,
+            Self::Compact => 0x0B,
+            Self::Large => 0x0C,
+            Self::Huge => 0x0D,
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -108,6 +136,9 @@ pub fn parse_args(argv: &[String]) -> Result<ParsedArgs, CliError> {
             "-ms" => memory_model = Some(MemoryModel::Small),
             "-mt" => memory_model = Some(MemoryModel::Tiny),
             "-mc" => memory_model = Some(MemoryModel::Compact),
+            "-mm" => memory_model = Some(MemoryModel::Medium),
+            "-ml" => memory_model = Some(MemoryModel::Large),
+            "-mh" => memory_model = Some(MemoryModel::Huge),
             "-d" => merge_strings = true,
             "-K" => unsigned_chars = true,
             "-O" | "-O2" => optimize = true,

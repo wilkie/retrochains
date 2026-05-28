@@ -73,15 +73,10 @@ pub fn build_obj(
     stack_check: bool,
     no_reg_vars: bool,
 ) -> Result<Vec<u8>, EmitError> {
-    let asm_bytes = build_asm(source, source_filename_lower, mtime, merge_strings, defines, unsigned_chars, optimize, target_186, stack_check, no_reg_vars)?;
+    let asm_bytes = build_asm(source, source_filename_lower, mtime, memory_model, merge_strings, defines, unsigned_chars, optimize, target_186, stack_check, no_reg_vars)?;
     // build_asm produces UTF-8 ASCII bytes (BCC's text is pure ASCII
     // plus the trailing 0x1A EOF byte). Convert to a &str for tasm.
     let asm_text =
         std::str::from_utf8(&asm_bytes).map_err(|e| EmitError::AsmNotUtf8(e.to_string()))?;
-    let model_marker = match memory_model {
-        MemoryModel::Tiny => 0x08,
-        MemoryModel::Small => 0x09,
-        MemoryModel::Compact => 0x0B,
-    };
-    tasm::assemble_with_model(asm_text, model_marker).map_err(EmitError::Assemble)
+    tasm::assemble_with_model(asm_text, memory_model.marker_byte()).map_err(EmitError::Assemble)
 }

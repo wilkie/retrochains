@@ -39,6 +39,7 @@ pub enum EmitError {
 #[allow(clippy::needless_pass_by_value)]
 pub fn emit_dash_s(
     source_path: &Path,
+    memory_model: crate::cli::MemoryModel,
     merge_strings: bool,
     defines: &[(String, String)],
     unsigned_chars: bool,
@@ -64,7 +65,7 @@ pub fn emit_dash_s(
         .map_or_else(|| "out.c".to_owned(), str::to_ascii_lowercase);
     let output_path = PathBuf::from(format!("{}.ASM", basename.to_ascii_uppercase()));
 
-    let bytes = build_asm(&source, &lowered, mtime, merge_strings, defines, unsigned_chars, optimize, target_186, stack_check, no_reg_vars)?;
+    let bytes = build_asm(&source, &lowered, mtime, memory_model, merge_strings, defines, unsigned_chars, optimize, target_186, stack_check, no_reg_vars)?;
     fs::write(&output_path, bytes)?;
     Ok(output_path)
 }
@@ -78,6 +79,7 @@ pub fn build_asm(
     source: &str,
     source_filename_lower: &str,
     mtime: SystemTime,
+    memory_model: crate::cli::MemoryModel,
     merge_strings: bool,
     defines: &[(String, String)],
     unsigned_chars: bool,
@@ -181,8 +183,76 @@ pub fn build_asm(
     if target_186 {
         fold_shl_to_multibit(&mut out);
     }
+    if memory_model.has_far_code() {
+        rename_text_segment_and_retn_to_retf(&mut out, source_filename_lower);
+    }
     out.push(0x1A); // DOS EOF marker
     Ok(out)
+}
+
+/// For medium / large / huge memory models, BCC names the code
+/// segment `<MODULE>_TEXT` (uppercased source basename) rather than
+/// the canonical `_TEXT`, and every function returns via `retf`
+/// rather than `ret` because the caller pushed a far return
+/// address. Apply both rewrites in-place at the end of asm
+/// generation.
+///
+/// `source_filename_lower` is the lowercased source basename (e.g.
+/// `hello.c`); the segment prefix uppercases the stem
+/// (`HELLO_TEXT`). Fixtures 1664, 1666, 2052, 2053, 2057 (trivial
+/// medium/large/huge programs that need only these two rewrites).
+fn rename_text_segment_and_retn_to_retf(out: &mut Vec<u8>, source_filename_lower: &str) {
+    // Extract `hello` from `hello.c` (any extension stripped at the
+    // first `.`); fall back to `OUT` if the input has no name.
+    let stem = source_filename_lower
+        .split('.')
+        .next()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("out");
+    let module_upper = stem.to_ascii_uppercase();
+    let new_seg = format!("{module_upper}_TEXT");
+    // Walk lines, rewriting the `_TEXT` segment name and `\tret\t`
+    // returns to `\tretf\t`. Use a fresh buffer so we don't
+    // accidentally rewrite our own substitutions.
+    let original = std::mem::take(out);
+    let text = String::from_utf8(original).expect("asm output is ASCII");
+    let mut rewritten = String::with_capacity(text.len() + 64);
+    for line in text.split_inclusive('\n') {
+        let trimmed = line.trim_start_matches('\t');
+        let leading_tabs = line.len() - trimmed.len();
+        // Match `_TEXT\tsegment`, `_TEXT\tends`, `\tassume\tcs:_TEXT`,
+        // any literal `_TEXT` followed by tab/comma/end. Use a
+        // string replace targeting the canonical patterns BCC emits.
+        let replaced = if trimmed.starts_with("_TEXT\tsegment") || trimmed.starts_with("_TEXT\tends") {
+            let body = &trimmed[5..]; // skip "_TEXT"
+            let mut s = String::with_capacity(leading_tabs + new_seg.len() + body.len());
+            for _ in 0..leading_tabs {
+                s.push('\t');
+            }
+            s.push_str(&new_seg);
+            s.push_str(body);
+            s
+        } else if let Some(idx) = line.find("cs:_TEXT") {
+            let mut s = String::with_capacity(line.len() + new_seg.len());
+            s.push_str(&line[..idx + 3]); // include `cs:`
+            s.push_str(&new_seg);
+            s.push_str(&line[idx + 3 + 5..]); // skip "_TEXT"
+            s
+        } else if line == "\tret\t\r\n" {
+            "\tretf\t\r\n".to_owned()
+        } else if let Some(rest) = line.strip_prefix("\tret\t") {
+            // `ret N` form (pascal calling convention with stack
+            // cleanup) — also rewrites to `retf N`.
+            let mut s = String::with_capacity(line.len() + 1);
+            s.push_str("\tretf\t");
+            s.push_str(rest);
+            s
+        } else {
+            line.to_owned()
+        };
+        rewritten.push_str(&replaced);
+    }
+    *out = rewritten.into_bytes();
 }
 
 /// `-1`/`-2` peephole: collapse runs of `\tshl\t<reg16>,1\r\n` of
