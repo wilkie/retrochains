@@ -641,6 +641,14 @@ fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
             {
                 return Ok(Instr::LesBxBpRel { offset });
             }
+            // `les bx, dword ptr [bp+disp]` — same encoding as the
+            // word-ptr form (`les` always loads 4 bytes), accepted
+            // as a textual variant. Fixture 3958.
+            if lhs == "bx"
+                && let Some(offset) = parse_dword_bp_relative(rhs)
+            {
+                return Ok(Instr::LesBxBpRel { offset });
+            }
             // `les bx, dword ptr <group>:<sym>[+N]` — disp16 form
             // used to load a file-scope far-pointer global into
             // ES:BX. Fixtures 3760 / 3761.
@@ -1268,6 +1276,22 @@ fn parse_mov(operands: &str, line_no: usize) -> AsmResult<Instr> {
     }
     if lhs == "al" && (rhs == "es:[bx]" || rhs == "byte ptr es:[bx]") {
         return Ok(Instr::MovAlEsBx);
+    }
+    // `mov ax, word ptr es:[bx+disp8]` — far-pointer indexed read.
+    // Fixture 3958.
+    if lhs == "ax"
+        && let Some(inner) = rhs.strip_prefix("word ptr es:[bx+")
+        && let Some(num) = inner.strip_suffix(']')
+        && let Ok(disp) = num.parse::<u8>()
+    {
+        return Ok(Instr::MovAxEsBxDisp { disp });
+    }
+    if lhs == "al"
+        && let Some(inner) = rhs.strip_prefix("byte ptr es:[bx+")
+        && let Some(num) = inner.strip_suffix(']')
+        && let Ok(disp) = num.parse::<u8>()
+    {
+        return Ok(Instr::MovAlEsBxDisp { disp });
     }
     // `mov es:[bx], ax/al/imm` — far-pointer write through the
     // ES:BX pair set up by `les bx`. Fixture 1650 (`*p = 99`).

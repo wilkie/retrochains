@@ -641,6 +641,7 @@ fn instr_size(instr: &Instr) -> usize {
         | Instr::MovAlEsBx
         | Instr::MovEsBxAx
         | Instr::MovEsBxAl => 3,
+        Instr::MovAxEsBxDisp { .. } | Instr::MovAlEsBxDisp { .. } => 4,
         Instr::MovEsBxImm16 { .. } => 5,
         Instr::MovEsBxImm8 { .. } => 4,
         Instr::MovEsBxDispImm16 { .. } => 6,
@@ -2587,6 +2588,21 @@ fn emit_instr(
             out.push(0x26);
             out.push(0x8A);
             out.push(0x07);
+        }
+        Instr::MovAxEsBxDisp { disp } => {
+            // `mov ax, word ptr es:[bx+disp8]` → 26 + 8B 47 dd.
+            // Fixture 3958.
+            out.push(0x26);
+            out.push(0x8B);
+            out.push(0x47);
+            out.push(*disp);
+        }
+        Instr::MovAlEsBxDisp { disp } => {
+            // `mov al, byte ptr es:[bx+disp8]` → 26 + 8A 47 dd.
+            out.push(0x26);
+            out.push(0x8A);
+            out.push(0x47);
+            out.push(*disp);
         }
         Instr::MovEsBxAx => {
             // `mov word ptr es:[bx], ax` → 26 + 89 07.

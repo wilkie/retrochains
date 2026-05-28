@@ -1339,6 +1339,14 @@ pub enum Instr {
     /// `mov al, byte ptr es:[bx]` — `26` + `8A 07`. Byte-width
     /// far-pointer deref. Used by `char far *p` reads.
     MovAlEsBx,
+    /// `mov ax, word ptr es:[bx+disp8]` — `26` + `8B 47 dd`. Far-
+    /// pointer indexed word read. The disp8 form folds an in-range
+    /// element-offset into the addressing mode. Fixture 3958
+    /// (`p[2]` for an int far pointer).
+    MovAxEsBxDisp { disp: u8 },
+    /// `mov al, byte ptr es:[bx+disp8]` — `26` + `8A 47 dd`. Byte-
+    /// width sibling of `MovAxEsBxDisp`.
+    MovAlEsBxDisp { disp: u8 },
     /// `mov es:[bx], ax` — `26` + `89 07`. Far-pointer store of an
     /// AX-resident word.
     MovEsBxAx,

@@ -9543,6 +9543,15 @@ impl<'a> FunctionEmitter<'a> {
                     && let ExprKind::AddressOfArrayElem { array, byte_offset } = &init.kind
                     && self.globals.contains(array)
                 {
+                    // Far pointer (compact / large / huge) — also
+                    // store DS into the segment half. Fixture 3958.
+                    if matches!(ty, Type::FarPointer { .. }) {
+                        let _ = write!(
+                            self.out,
+                            "\tmov\tword ptr {},ds\r\n",
+                            bp_addr(off + 2),
+                        );
+                    }
                     if *byte_offset == 0 {
                         let _ = write!(
                             self.out,
@@ -14169,28 +14178,33 @@ impl<'a> FunctionEmitter<'a> {
             }
             return;
         };
-        // Stack-resident far pointer indexed read: `s[0]` (or
-        // any zero-index access) for a `T far *` local. BCC's
-        // shape: `les bx, [bp+s]; mov ax / al, es:[bx]` with the
-        // pointee-width widen. K != 0 isn't fixture-tested yet
-        // (it would need `mov al, es:[bx+K*stride]`). Fixture
-        // 3716 (`char *s = "hi"; return s[0];` under -mh — the
-        // huge-model promotion turns the pointer into a 4-byte
-        // far slot).
-        if k == 0
-            && matches!(self.locals.type_of(ptr_name), Type::FarPointer { .. })
+        // Stack-resident far pointer indexed read: `s[K]` for a
+        // `T far *` local. BCC's shape: `les bx, [bp+s]; mov ax
+        // / al, es:[bx + K*stride]` with the pointee-width widen.
+        // Fixtures 3716 (K=0 huge string lit), 3958 (K=2 large
+        // int-array decay).
+        if matches!(self.locals.type_of(ptr_name), Type::FarPointer { .. })
             && let LocalLocation::Stack(off) = self.locals.location_of(ptr_name)
         {
-            let _ = write!(self.out, "\tles\tbx,word ptr {}\r\n", bp_addr(off));
+            let stride = i32::from(pointee.size_bytes());
+            let byte_off = (k as i32).wrapping_mul(stride);
+            let addr = if byte_off == 0 {
+                "es:[bx]".to_owned()
+            } else if byte_off > 0 {
+                format!("es:[bx+{byte_off}]")
+            } else {
+                format!("es:[bx{byte_off}]")
+            };
+            let _ = write!(self.out, "\tles\tbx,dword ptr {}\r\n", bp_addr(off));
             if pointee.is_char_like() {
-                self.out.extend_from_slice(b"\tmov\tal,byte ptr es:[bx]\r\n");
+                let _ = write!(self.out, "\tmov\tal,byte ptr {addr}\r\n");
                 if pointee.is_unsigned() {
                     self.out.extend_from_slice(b"\tmov\tah,0\r\n");
                 } else {
                     self.out.extend_from_slice(b"\tcbw\t\r\n");
                 }
             } else {
-                self.out.extend_from_slice(b"\tmov\tax,word ptr es:[bx]\r\n");
+                let _ = write!(self.out, "\tmov\tax,word ptr {addr}\r\n");
             }
             return;
         }
