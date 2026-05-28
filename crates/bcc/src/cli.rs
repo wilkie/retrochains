@@ -86,6 +86,17 @@ impl MemoryModel {
         matches!(self, Self::Medium | Self::Large | Self::Huge)
     }
 
+    /// True for memory models that use far data pointers by default:
+    /// compact, large, huge. An unqualified `int *p` under these
+    /// models behaves like `int far *p` (4-byte slot, `les bx` /
+    /// `es:[bx]` deref). Tiny / small / medium keep data pointers
+    /// near because their data lives in a single DGROUP segment.
+    /// Fixtures 1667 (large), 1768 (compact).
+    #[must_use]
+    pub fn has_far_data(self) -> bool {
+        matches!(self, Self::Compact | Self::Large | Self::Huge)
+    }
+
     /// The BCC OMF COMENT class-0xEA second-byte marker for this
     /// model. Tiny=0x08, Small=0x09, Medium=0x0A, Compact=0x0B,
     /// Large=0x0C, Huge=0x0D.

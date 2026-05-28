@@ -117,6 +117,23 @@ pub fn build_asm(
             }
         }
     }
+    if memory_model.has_far_data() {
+        // Compact / large / huge models default *data* pointers to
+        // far: an unqualified `int *p` becomes `int far *p` (4-byte
+        // slot, `les` / `es:[bx]` deref). The parser doesn't know
+        // which model the codegen will run under, so it leaves every
+        // unqualified pointer as a near `Pointer` and we rewrite
+        // here. Function pointers (whose pointee is the
+        // top-of-function dummy struct typedef) and explicitly
+        // `near` pointers stay near. Fixtures 1667 (large) and
+        // 1768 (compact).
+        promote_data_pointers_to_far(&mut unit);
+    } else {
+        // Near-data models still need to collapse the parser's
+        // `NearPointer` marker variant to plain `Pointer` so codegen
+        // never sees it.
+        collapse_explicit_near_to_pointer(&mut unit);
+    }
 
     let mut out = Vec::with_capacity(1024);
     write_macro_preamble(&mut out);
@@ -717,6 +734,161 @@ fn emit_scalar_global_bytes(
 /// declaration that wasn't explicitly `signed char` becomes
 /// `unsigned char`. Affects widening (`mov ah, 0` vs `cbw`) and
 /// signed-vs-unsigned compares. Fixtures 2130, 2284.
+/// Compact / large / huge memory models default data pointers to
+/// far. Rewrite every `Type::Pointer(p)` reachable from the unit
+/// (globals, function returns, params, local declares) to
+/// `Type::FarPointer { pointee: p, is_huge: false }` (plain `far`;
+/// `huge` is still opt-in via explicit keyword in source, since its
+/// arithmetic semantics differ). Nested pointers (`int **pp`) get
+/// promoted on each level so a `*pp` deref through the outer
+/// pointer also reads a far pointer back out of memory. Fixtures
+/// 1667 (large), 1768 (compact); future Huge-model fixtures follow
+/// the same shape.
+/// Near-data memory models (tiny / small / medium) don't promote
+/// pointers, but the parser still produces `NearPointer` for an
+/// explicit `near` qualifier. Collapse those back to plain
+/// `Pointer` so codegen sees a single shape.
+fn collapse_explicit_near_to_pointer(unit: &mut crate::ast::Unit) {
+    use crate::ast::Type;
+    fn walk_ty(t: &mut Type) {
+        match t {
+            Type::NearPointer(inner) => {
+                walk_ty(inner);
+                let pointee = std::mem::replace(inner.as_mut(), Type::Int);
+                *t = Type::Pointer(Box::new(pointee));
+            }
+            Type::Pointer(inner) => walk_ty(inner),
+            Type::FarPointer { pointee, .. } => walk_ty(pointee),
+            Type::Array { elem, .. } => walk_ty(elem),
+            Type::Struct { fields, .. } => {
+                for f in fields {
+                    walk_ty(&mut f.ty);
+                }
+            }
+            _ => {}
+        }
+    }
+    for g in &mut unit.globals {
+        walk_ty(&mut g.ty);
+    }
+    for f in &mut unit.functions {
+        walk_ty(&mut f.ret_ty);
+        for p in &mut f.params {
+            walk_ty(&mut p.ty);
+        }
+        if let Some(body) = &mut f.body {
+            for s in body {
+                walk_stmt(s);
+            }
+        }
+    }
+    fn walk_stmt(s: &mut crate::ast::Stmt) {
+        use crate::ast::StmtKind;
+        match &mut s.kind {
+            StmtKind::Declare { ty, .. } => walk_ty(ty),
+            StmtKind::Block(b) => for inner in b { walk_stmt(inner); }
+            StmtKind::If { then_branch, else_branch, .. } => {
+                for s in then_branch { walk_stmt(s); }
+                if let Some(eb) = else_branch { for s in eb { walk_stmt(s); } }
+            }
+            StmtKind::While { body, .. } | StmtKind::DoWhile { body, .. } => {
+                for s in body { walk_stmt(s); }
+            }
+            StmtKind::For { body, .. } => {
+                for s in body { walk_stmt(s); }
+            }
+            StmtKind::Switch { cases, .. } => {
+                for c in cases { for s in &mut c.body { walk_stmt(s); } }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn promote_data_pointers_to_far(unit: &mut crate::ast::Unit) {
+    use crate::ast::Type;
+    fn walk_ty(t: &mut Type) {
+        match t {
+            Type::Pointer(inner) => {
+                walk_ty(inner);
+                let pointee = std::mem::replace(inner.as_mut(), Type::Int);
+                *t = Type::FarPointer {
+                    pointee: Box::new(pointee),
+                    is_huge: false,
+                };
+            }
+            Type::NearPointer(inner) => {
+                // Explicitly `near` — collapse back to a regular
+                // near Pointer without promoting. Fixture 1748.
+                walk_ty(inner);
+                let pointee = std::mem::replace(inner.as_mut(), Type::Int);
+                *t = Type::Pointer(Box::new(pointee));
+            }
+            Type::FarPointer { pointee, .. } => walk_ty(pointee),
+            Type::Array { elem, .. } => walk_ty(elem),
+            Type::Struct { fields, .. } => {
+                for f in fields {
+                    walk_ty(&mut f.ty);
+                }
+            }
+            _ => {}
+        }
+    }
+    for g in &mut unit.globals {
+        walk_ty(&mut g.ty);
+    }
+    for f in &mut unit.functions {
+        walk_ty(&mut f.ret_ty);
+        for p in &mut f.params {
+            walk_ty(&mut p.ty);
+        }
+        if let Some(body) = &mut f.body {
+            for s in body {
+                walk_stmt(s);
+            }
+        }
+    }
+    fn walk_stmt(s: &mut crate::ast::Stmt) {
+        use crate::ast::StmtKind;
+        match &mut s.kind {
+            StmtKind::Declare { ty, .. } => walk_ty(ty),
+            StmtKind::Block(b) => {
+                for inner in b {
+                    walk_stmt(inner);
+                }
+            }
+            StmtKind::If { then_branch, else_branch, .. } => {
+                for s in then_branch {
+                    walk_stmt(s);
+                }
+                if let Some(else_b) = else_branch {
+                    for s in else_b {
+                        walk_stmt(s);
+                    }
+                }
+            }
+            StmtKind::While { body, .. } | StmtKind::DoWhile { body, .. } => {
+                for s in body {
+                    walk_stmt(s);
+                }
+            }
+            StmtKind::For { body, .. } => {
+                for s in body {
+                    walk_stmt(s);
+                }
+            }
+            StmtKind::Switch { cases, .. } => {
+                for c in cases {
+                    for s in &mut c.body {
+                        walk_stmt(s);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 fn promote_chars_to_uchar(unit: &mut crate::ast::Unit) {
     use crate::ast::Type;
     fn walk_ty(t: &mut Type) {

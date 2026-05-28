@@ -640,12 +640,17 @@ impl Parser {
     }
 
     /// Helper: build the right pointer Type given an inner type and
-    /// the qualifier state. `far` or `huge` produces `FarPointer`
-    /// with `is_huge` set when `huge`; absence of both produces a
-    /// plain near `Pointer`.
-    fn make_ptr_ty(inner: Type, is_far: bool, is_huge: bool) -> Type {
+    /// the qualifier state. `far` / `huge` → `FarPointer` (with
+    /// `is_huge` propagated); explicit `near` → `NearPointer`
+    /// (parser-side marker; the promotion pass collapses it back to
+    /// `Pointer` and skips the implicit-far promotion for it);
+    /// otherwise plain `Pointer`. Fixture 1748 needs the explicit-
+    /// near tag so large model leaves it 2-byte.
+    fn make_ptr_ty(inner: Type, is_far: bool, is_huge: bool, is_near: bool) -> Type {
         if is_far || is_huge {
             Type::FarPointer { pointee: Box::new(inner), is_huge }
+        } else if is_near {
+            Type::NearPointer(Box::new(inner))
         } else {
             Type::Pointer(Box::new(inner))
         }
@@ -805,13 +810,14 @@ impl Parser {
         // contexts. Capture `far` / `huge` so the pointer level
         // built from the next `*` becomes a `Type::FarPointer`.
         // Fixture 1649 (`(int far *)&x`), 1652 (`(int huge *)&x`).
-        let (_, mut is_far, mut is_huge, _, _) = self.consume_cc_modifiers_full();
+        let (_, mut is_far, mut is_huge, _, mut is_near) = self.consume_cc_modifiers_full();
         while matches!(self.peek().kind, TokenKind::Star) {
             self.bump();
-            ty = Self::make_ptr_ty(ty, is_far, is_huge);
-            let (_, f, h, _, _) = self.consume_cc_modifiers_full();
+            ty = Self::make_ptr_ty(ty, is_far, is_huge, is_near);
+            let (_, f, h, _, n) = self.consume_cc_modifiers_full();
             is_far = f;
             is_huge = h;
+            is_near = n;
         }
         Ok(ty)
     }
@@ -1127,15 +1133,18 @@ impl Parser {
         loop {
             // Per-declarator pointer stars: `int *a, b;` makes `a`
             // an `int*` and `b` a plain `int`. Capture `far` / `huge`
-            // so each level becomes FarPointer when qualified.
-            let (_, mut is_far, mut is_huge, _, _) = self.consume_cc_modifiers_full();
+            // / `near` so each level becomes FarPointer / NearPointer
+            // when qualified.
+            let (_, mut is_far, mut is_huge, _, mut is_near) =
+                self.consume_cc_modifiers_full();
             let mut ty = base_ty.clone();
             while matches!(self.peek().kind, TokenKind::Star) {
                 self.bump();
-                ty = Self::make_ptr_ty(ty, is_far, is_huge);
-                let (_, f, h, _, _) = self.consume_cc_modifiers_full();
+                ty = Self::make_ptr_ty(ty, is_far, is_huge, is_near);
+                let (_, f, h, _, n) = self.consume_cc_modifiers_full();
                 is_far = f;
                 is_huge = h;
+                is_near = n;
             }
             // Function-pointer global declarator: `int (*name)(...)`.
             // Mirrors the param / local paths — the signature isn't
@@ -1529,15 +1538,17 @@ impl Parser {
                 return Ok((params, true));
             }
             let mut ty = self.parse_type()?;
-            let (_, mut is_far, mut is_huge, _, _) = self.consume_cc_modifiers_full();
+            let (_, mut is_far, mut is_huge, _, mut is_near) =
+                self.consume_cc_modifiers_full();
             // Pointer stars wrap the base type, just like in a local
             // declaration (fixture 095: `int sum(int *p)`).
             while matches!(self.peek().kind, TokenKind::Star) {
                 self.bump();
-                ty = Self::make_ptr_ty(ty, is_far, is_huge);
-                let (_, f, h, _, _) = self.consume_cc_modifiers_full();
+                ty = Self::make_ptr_ty(ty, is_far, is_huge, is_near);
+                let (_, f, h, _, n) = self.consume_cc_modifiers_full();
                 is_far = f;
                 is_huge = h;
+                is_near = n;
             }
             // Function-pointer parameter: `<ret> ( * <name> ) ( <params> )`.
             // Mirrors the local-declaration path — we don't model the
@@ -2163,11 +2174,13 @@ impl Parser {
         }
         let base_ty = self.parse_type()?;
         // BCC cc/memory-model modifiers between the type and the
-        // pointer-star/declarator (`int far *p`, `int huge *p`).
-        // Capture `far` / `huge` so the pointer level becomes a
-        // FarPointer instead of a plain near Pointer. Fixtures 1649,
-        // 1650, 1651, 1652, 2058, 2250.
-        let (_, mut is_far, mut is_huge, _, _) = self.consume_cc_modifiers_full();
+        // pointer-star/declarator (`int far *p`, `int huge *p`,
+        // `int near *p`). Capture all three qualifier flags so the
+        // pointer level picks the right variant. Fixtures 1649,
+        // 1650, 1651, 1652, 2058, 2250 (far / huge); 1748 (near in
+        // far-data model).
+        let (_, mut is_far, mut is_huge, _, mut is_near) =
+            self.consume_cc_modifiers_full();
         // Pointer stars wrap the base type: `int **pp` is `Pointer(Pointer(Int))`.
         // Stars are per-declarator — `int *a, b;` makes `a` an `int*`
         // and `b` a plain `int`, so we keep `base_ty` clean for the
@@ -2176,14 +2189,15 @@ impl Parser {
         let mut ty = base_ty.clone();
         while matches!(self.peek().kind, TokenKind::Star) {
             self.bump();
-            ty = Self::make_ptr_ty(ty, is_far, is_huge);
+            ty = Self::make_ptr_ty(ty, is_far, is_huge, is_near);
             // `T far *` / `T *far` — modifiers can also appear AFTER
             // a pointer star. Consume them and let the next `*` (if
             // any) pick them up. Also accept `T * const p`
             // (const-qualified pointer). Fixture 2380.
-            let (_, f, h, _, _) = self.consume_cc_modifiers_full();
+            let (_, f, h, _, n) = self.consume_cc_modifiers_full();
             is_far = f;
             is_huge = h;
+            is_near = n;
             while matches!(
                 self.peek().kind,
                 TokenKind::KwConst | TokenKind::KwVolatile

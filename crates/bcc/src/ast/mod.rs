@@ -346,6 +346,16 @@ pub enum Type {
         pointee: Box<Type>,
         is_huge: bool,
     },
+    /// `T near *p` — parser-side marker for a pointer the source
+    /// explicitly tagged `near`. Under far-data memory models
+    /// (compact, large, huge) the post-parse promotion pass needs
+    /// to *skip* these locals so the user's override is honored
+    /// (fixture 1748: `int near *p` in large model stays a 2-byte
+    /// near pointer). The promotion pass collapses every
+    /// `NearPointer` back to `Pointer` after deciding which
+    /// unqualified pointers to promote, so codegen never sees this
+    /// variant.
+    NearPointer(Box<Type>),
     /// `struct <tag>? { <fields> }` — fields packed tightly with no
     /// inter-field padding (so a `char` at offset 0 followed by an
     /// `int` lands the int at offset 1, fixture 102). The total
@@ -405,6 +415,7 @@ impl Type {
                 elem * u16::try_from(*len).expect("array byte size fits in u16")
             }
             Self::Pointer(_) => 2,
+            Self::NearPointer(_) => 2,
             Self::FarPointer { .. } => 4,
             Self::Struct { size, .. } => *size,
         }
@@ -423,6 +434,7 @@ impl Type {
             Self::Float | Self::Double => 2,
             Self::Array { elem, .. } => elem.alignment(),
             Self::Pointer(_) => 2,
+            Self::NearPointer(_) => 2,
             Self::FarPointer { .. } => 2,
             // Struct alignment: 2 (word). The size rounding to even
             // is part of the per-struct size computation, so this is
@@ -522,7 +534,7 @@ impl Type {
     #[must_use]
     pub fn pointee(&self) -> Option<&Type> {
         match self {
-            Self::Pointer(inner) => Some(inner),
+            Self::Pointer(inner) | Self::NearPointer(inner) => Some(inner),
             Self::FarPointer { pointee, .. } => Some(pointee),
             _ => None,
         }
