@@ -5965,6 +5965,19 @@ fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: 
                     out.extend_from_slice(&[0x8B, 0x5E, disp as u8]);
                     out.extend_from_slice(&[0x8B, 0x07]);
                 }
+                Expr::Param(i) => {
+                    // `mov bx, [bp+disp]; mov ax, [bx]`.
+                    let disp = param_disp(*i) as i8;
+                    out.extend_from_slice(&[0x8B, 0x5E, disp as u8]);
+                    out.extend_from_slice(&[0x8B, 0x07]);
+                }
+                Expr::DerefWord { ptr: inner_ptr } => {
+                    // Recursive deref. Evaluate inner_ptr into AX,
+                    // move to BX, then deref. Fixture 1232.
+                    emit_expr_to_ax(&Expr::DerefWord { ptr: inner_ptr.clone() }, locals, out, fixups);
+                    out.extend_from_slice(&[0x8B, 0xD8]); // mov bx, ax
+                    out.extend_from_slice(&[0x8B, 0x07]);
+                }
                 other => panic!("word deref of {other:?} not yet supported"),
             }
         }
