@@ -3594,10 +3594,10 @@ fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
             // don't have a peephole shape, so we substitute normally
             // (fixtures 1022, 1024).
             let self_assign_addsub = match (target.clone(), value.clone()) {
-                (AssignTarget::Local(t), Expr::BinOp { op: BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Shl | BinOp::Shr, left, .. }) => {
+                (AssignTarget::Local(t), Expr::BinOp { op: BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Shl | BinOp::Shr | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor, left, .. }) => {
                     matches!(left.as_ref(), Expr::Local(l) if *l == t)
                 }
-                (AssignTarget::Global(t), Expr::BinOp { op: BinOp::Add | BinOp::Sub, left, .. }) => {
+                (AssignTarget::Global(t), Expr::BinOp { op: BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor, left, .. }) => {
                     matches!(left.as_ref(), Expr::Global(g) if *g == t)
                 }
                 _ => false,
@@ -4389,6 +4389,41 @@ fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_>, out: &mu
             }
             return;
         }
+    }
+    // Bitwise mem-op peephole: `x |= K`, `x &= K`, `x ^= K` collapse
+    // to `op byte/word [bp-disp], imm`. MSC prefers the byte form
+    // when the imm fits — `80 /N disp imm8` — even for int slots.
+    if let Expr::BinOp { op, left, right } = value
+        && let Expr::Local(li) = left.as_ref()
+        && *li == local_idx
+        && matches!(op, BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor)
+        && let Some(k) = right.fold(locals.inits)
+    {
+        // ModR/M reg field /1=or, /4=and, /6=xor; r/m=110 (BP-rel disp8)
+        // for word: 0x4e (or), 0x66 (and), 0x76 (xor)
+        let reg = match op {
+            BinOp::BitAnd => 4u8,
+            BinOp::BitOr => 1u8,
+            BinOp::BitXor => 6u8,
+            _ => unreachable!(),
+        };
+        let modrm = 0x46 | (reg << 3);
+        let is_byte_slot = locals.size(local_idx) == 1;
+        if is_byte_slot || (i8::try_from(k).is_ok() && k >= 0 && k <= 0xFF) {
+            // Byte mem form when slot is char or imm fits in u8: `80 /N disp imm8`.
+            let imm = (k as u32 & 0xFF) as u8;
+            out.extend_from_slice(&[0x80, modrm, disp as u8, imm]);
+            return;
+        }
+        // Word mem form.
+        if let Ok(k8) = i8::try_from(k) {
+            out.extend_from_slice(&[0x83, modrm, disp as u8, k8 as u8]);
+        } else {
+            out.extend_from_slice(&[0x81, modrm, disp as u8]);
+            let imm = (k as u32 & 0xFFFF) as u16;
+            out.extend_from_slice(&imm.to_le_bytes());
+        }
+        return;
     }
     if let Expr::BinOp { op, left, right } = value
         && let Expr::Local(li) = left.as_ref()
