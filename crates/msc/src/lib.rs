@@ -1730,12 +1730,20 @@ fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> {
                         .collect();
                     if let Some(k) = init_expr.fold(&init_view) {
                         locals[local_idx].init = Some(k);
-                        // Pure literal init: folds without any local
-                        // references. Charac locals use this to decide
-                        // whether `return c;` re-reads through the slot
-                        // (fixture 1023 vs 1046).
-                        let pure = init_expr.fold(&[]).is_some();
-                        locals[local_idx].init_is_literal = pure;
+                        // Literal init: either fold(&[]) succeeds OR
+                        // the init expr is a direct ref to another
+                        // literal-init local of the same size. Folding
+                        // through same-size chains matches MSC's
+                        // behavior for `char b = a;` (1040), without
+                        // bleeding into `int n = c;` (1043).
+                        let pure_literal = init_expr.fold(&[]).is_some();
+                        let chained_literal = matches!(
+                            &init_expr,
+                            Expr::Local(li) if locals.get(*li)
+                                .map(|l| l.init_is_literal && l.size == size)
+                                .unwrap_or(false)
+                        );
+                        locals[local_idx].init_is_literal = pure_literal || chained_literal;
                     } else {
                         prelude.push(Stmt::Assign {
                             target: AssignTarget::Local(local_idx),
@@ -4287,7 +4295,9 @@ fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_>, out: &mu
     {
         let (kind, shift_k) = match (op, k) {
             (BinOp::Shl, k) if k > 0 && k < 16 => (Some(0x66u8), k as u8),
-            (BinOp::Shr, k) if k > 0 && k < 16 => (Some(0x6Eu8), k as u8),
+            // Default to SAR (/7) for signed `int >>= K`. Unsigned
+            // operands would use SHR (/5) but we don't track signedness.
+            (BinOp::Shr, k) if k > 0 && k < 16 => (Some(0x7Eu8), k as u8),
             // Mul by 2^k: emit as shl K bits.
             (BinOp::Mul, k) if k >= 2 && (k & (k - 1)) == 0 => {
                 let mut bits = 0u8;
