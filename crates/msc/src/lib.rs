@@ -3522,7 +3522,22 @@ fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
         Stmt::Return(e) => prop_expr(e, cp),
         Stmt::ExprStmt(e) => prop_expr(e, cp),
         Stmt::Assign { target, value } => {
-            prop_expr(value, cp);
+            // `x = x op RHS` preserves the `Local(x)` on the left so
+            // emit_assign can hit the in-place inc/dec/add/sub-mem
+            // peepholes (fixtures 1029, 1116). Substituting `x` to its
+            // known IntLit defeats those.
+            let self_assign_lhs = matches!(
+                (target.clone(), value.clone()),
+                (AssignTarget::Local(t), Expr::BinOp { left, .. })
+                    if matches!(left.as_ref(), Expr::Local(l) if *l == t)
+            );
+            if self_assign_lhs
+                && let Expr::BinOp { right, .. } = value
+            {
+                prop_expr(right, cp);
+            } else {
+                prop_expr(value, cp);
+            }
             match target {
                 AssignTarget::Global(g) => {
                     if let Expr::IntLit(k) = value {
@@ -4069,11 +4084,13 @@ fn emit_return(
             // emits `mov ax, [bp-disp_low]` even when the value is
             // known at compile time (fixture 1037).
             emit_expr_to_ax(expr, locals, out, fixups);
-        } else if matches!(expr, Expr::Local(i) if locals.size(*i) == 1 && !locals.init_is_literal(*i)) {
-            // Char locals with computed (non-literal) inits read
-            // through the slot+cbw, even when the value is known.
-            // Pure-literal char inits (`char c = 'A' + 1;`) fall
-            // through to the const fold path (fixture 1023 vs 1046).
+        } else if matches!(expr, Expr::Local(_)) {
+            // Const-prop replaces known `Local(i)` with `IntLit(K)`
+            // upstream — so anything still showing as `Local` at this
+            // point either wasn't tracked (long, computed-char) or has
+            // been mutated past its declaration value. Always load,
+            // never fold from the static `spec.init` view (would
+            // misread mutated scalars; fixture 1029).
             emit_expr_to_ax(expr, locals, out, fixups);
         } else if let Some(k) = expr.fold(locals.inits) {
             if k == 0 {
@@ -4242,28 +4259,41 @@ fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_>, out: &mu
         }
     };
     let disp = locals.disp(local_idx);
-    // Peephole: `x = x + 1;` and `x = x - 1;` become in-place
-    // `inc/dec word ptr [bp-disp]` (3-byte `FF /0 r/m` for inc,
-    // `FF /1 r/m` for dec).
-    if let Expr::BinOp { op, left, right } = value
+    // Peephole: `x = x ± K` for int locals collapses to an in-place
+    // memory op:
+    //   K == 1: `inc/dec word ptr [bp-disp]`     (3 bytes)
+    //   |K| ≤ 127, ±: `add/sub [bp-disp], imm8sx` (4 bytes)
+    //   larger K, ±: `add/sub [bp-disp], imm16`   (5 bytes)
+    // Pattern requires LHS = Local(this) on the BinOp.
+    if locals.size(local_idx) == 2
+        && let Expr::BinOp { op, left, right } = value
         && let Expr::Local(li) = left.as_ref()
         && *li == local_idx
-        && let Expr::IntLit(1) = right.as_ref()
+        && matches!(op, BinOp::Add | BinOp::Sub)
+        && let Some(k) = right.fold(locals.inits)
     {
-        match op {
-            BinOp::Add => {
-                out.push(0xFF);
-                out.push(0x46);              // ModR/M mod=01 reg=000 (/0=INC) r/m=110
-                out.push(disp as u8);
+        match (op, k) {
+            (BinOp::Add, 1) => {
+                out.extend_from_slice(&[0xFF, 0x46, disp as u8]);
                 return;
             }
-            BinOp::Sub => {
-                out.push(0xFF);
-                out.push(0x4E);              // ModR/M mod=01 reg=001 (/1=DEC) r/m=110
-                out.push(disp as u8);
+            (BinOp::Sub, 1) => {
+                out.extend_from_slice(&[0xFF, 0x4E, disp as u8]);
                 return;
             }
-            _ => {}
+            _ => {
+                // `83 /0 imm8sx` add or `83 /5 imm8sx` sub at [bp+disp8].
+                let modrm_base = if matches!(op, BinOp::Add) { 0x46 } else { 0x6E };
+                if let Ok(k8) = i8::try_from(k) {
+                    out.extend_from_slice(&[0x83, modrm_base, disp as u8, k8 as u8]);
+                } else {
+                    let modrm_big = if matches!(op, BinOp::Add) { 0x46 } else { 0x6E };
+                    out.extend_from_slice(&[0x81, modrm_big, disp as u8]);
+                    let imm = (k as u32 & 0xFFFF) as u16;
+                    out.extend_from_slice(&imm.to_le_bytes());
+                }
+                return;
+            }
         }
     }
     // General path: evaluate the RHS into AX, then store.
