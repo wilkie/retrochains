@@ -1472,6 +1472,10 @@ fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> {
             )));
         }
     };
+    // Pointer return types (`char *fn(...)`, `int *fn(...)`): consume
+    // the `*` markers. We model the return as int (a pointer fits in
+    // AX) — sufficient for `fn()[K]` shapes (fixture 1227).
+    while matches!(p.peek(), Some(Tok::Star)) { p.bump(); }
     let name = match p.bump().cloned() {
         Some(Tok::Kw("main")) => "main".to_owned(),
         Some(Tok::Ident(s)) => s,
@@ -4354,24 +4358,19 @@ fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_>, out: &mu
     //   |K| ≤ 127, ±: `add/sub [bp-disp], imm8sx` (4 bytes)
     //   larger K, ±: `add/sub [bp-disp], imm16`   (5 bytes)
     // Pattern requires LHS = Local(this) on the BinOp.
-    // Shift/mul peephole on int locals (size == 2):
-    //   `x <<= 1` / `x *= 2` → `d1 66 disp`              (3 bytes; shl mem, 1)
-    //   `x >>= 1`            → `d1 6e disp`              (3 bytes; shr mem, 1, logical)
-    //   `x <<= K` (K > 1)    → `b1 K d3 66 disp`          (5 bytes; mov cl, K; shl mem, cl)
-    //   `x >>= K`            → `b1 K d3 6e disp`
-    //   `x *= 2^k` (k ≥ 1)   → same as `x <<= k`
-    if locals.size(local_idx) == 2
-        && let Expr::BinOp { op, left, right } = value
+    // Shift/mul peephole on locals:
+    //   word (`int x`): `d1 modrm disp` for K=1, else `b1 K d3 modrm disp`.
+    //   byte (`char c`): `d0 modrm disp` for K=1, else `b1 K d2 modrm disp`.
+    //   modrm = 0x66 (shl, /4) or 0x7e (sar, /7).
+    //   `<<= K`, `*= 2^k` → shl.   `>>= K` → sar (signed).
+    if let Expr::BinOp { op, left, right } = value
         && let Expr::Local(li) = left.as_ref()
         && *li == local_idx
         && let Some(k) = right.fold(locals.inits)
     {
         let (kind, shift_k) = match (op, k) {
             (BinOp::Shl, k) if k > 0 && k < 16 => (Some(0x66u8), k as u8),
-            // Default to SAR (/7) for signed `int >>= K`. Unsigned
-            // operands would use SHR (/5) but we don't track signedness.
             (BinOp::Shr, k) if k > 0 && k < 16 => (Some(0x7Eu8), k as u8),
-            // Mul by 2^k: emit as shl K bits.
             (BinOp::Mul, k) if k >= 2 && (k & (k - 1)) == 0 => {
                 let mut bits = 0u8;
                 let mut v = k as u32;
@@ -4381,10 +4380,12 @@ fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_>, out: &mu
             _ => (None, 0),
         };
         if let Some(modrm) = kind {
+            let is_byte = locals.size(local_idx) == 1;
+            let (one_op, cl_op) = if is_byte { (0xD0u8, 0xD2u8) } else { (0xD1u8, 0xD3u8) };
             if shift_k == 1 {
-                out.extend_from_slice(&[0xD1, modrm, disp as u8]);
+                out.extend_from_slice(&[one_op, modrm, disp as u8]);
             } else {
-                out.extend_from_slice(&[0xB1, shift_k, 0xD3, modrm, disp as u8]);
+                out.extend_from_slice(&[0xB1, shift_k, cl_op, modrm, disp as u8]);
             }
             return;
         }
