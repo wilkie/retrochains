@@ -1,0 +1,4 @@
+description = "if (0) — probes whether MSC elides the dead body or keeps it (BCC keeps; we expect MSC to differ)."
+tool = "cl"
+args = ["/c", "/AS", "HELLO.C"]
+inputs = ["HELLO.C"]

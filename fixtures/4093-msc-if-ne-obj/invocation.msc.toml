@@ -1,0 +1,4 @@
+description = "if (x != 5) — probes != relation, the complement of 4091 (==). Confirms MSC uses cmp+je as the skip-then jump (inverting !=)."
+tool = "cl"
+args = ["/c", "/AS", "HELLO.C"]
+inputs = ["HELLO.C"]

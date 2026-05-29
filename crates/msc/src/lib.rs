@@ -44,11 +44,43 @@ pub struct MainAst {
     /// uninitialized declarations (`int x;`). Length is the local
     /// count; bytes-of-frame = `locals.len() * 2`.
     pub locals: Vec<Option<i32>>,
-    /// The `return <expr>;` expression. Codegen folds constant
-    /// sub-expressions at emit time and routes non-folded ones
-    /// through AX with a small per-operator helper. Slice 4
-    /// fixtures (4084-4089) cover the patterns currently supported.
-    pub return_expr: Expr,
+    /// Statements after the local declarations, in source order.
+    /// Always ends in a `Return` or an `If` whose every leaf is a
+    /// `Return` — Phase 1 functions don't have an implicit
+    /// fall-through return path.
+    pub body: Vec<Stmt>,
+}
+
+/// Statement AST. Phase 1 covers `return <expr>;`,
+/// `if (<cond>) <stmt>;`, and `if (<cond>) <stmt> else <stmt>;`.
+/// Block statements (`{ ... }`) come with the multi-line if-bodies
+/// in a later slice.
+#[derive(Debug, Clone)]
+pub enum Stmt {
+    Return(Expr),
+    If {
+        cond: Cond,
+        then_branch: Box<Stmt>,
+        else_branch: Option<Box<Stmt>>,
+    },
+}
+
+/// Condition for `if` (and later `while`/`for`). Slice 5 covers the
+/// truthiness test (`if (x)`) and equality compare (`if (x == K)`);
+/// other relational operators come with future fixtures.
+#[derive(Debug, Clone)]
+pub enum Cond {
+    /// `if (<expr>)` — non-zero is truthy. MSC lowers to
+    /// `cmp <expr>, 0; je skip-body`.
+    Truthy(Expr),
+    /// `if (<left> <op> <right>)` — comparison.
+    Cmp { op: RelOp, left: Expr, right: Expr },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelOp {
+    Eq,
+    Ne,
 }
 
 /// Expression AST. Phase 1 grows this incrementally as fixtures
@@ -96,102 +128,291 @@ impl Expr {
     }
 }
 
+/// A token used by the small recursive-descent parser. Phase 1's
+/// source is tight enough that we only need keywords + ident +
+/// integer + a handful of punctuation tokens.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Tok {
+    Kw(&'static str),
+    Ident(String),
+    Int(i32),
+    LParen,
+    RParen,
+    LBrace,
+    RBrace,
+    Semi,
+    Assign,
+    EqEq,
+    NotEq,
+    Plus,
+    Minus,
+    Star,
+}
+
+fn tokenize(source: &str) -> Result<Vec<Tok>, EmitError> {
+    let bytes = source.as_bytes();
+    let mut toks = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if c.is_ascii_whitespace() {
+            i += 1;
+            continue;
+        }
+        match c {
+            b'(' => { toks.push(Tok::LParen); i += 1; }
+            b')' => { toks.push(Tok::RParen); i += 1; }
+            b'{' => { toks.push(Tok::LBrace); i += 1; }
+            b'}' => { toks.push(Tok::RBrace); i += 1; }
+            b';' => { toks.push(Tok::Semi); i += 1; }
+            b'+' => { toks.push(Tok::Plus); i += 1; }
+            b'*' => { toks.push(Tok::Star); i += 1; }
+            b'=' => {
+                if bytes.get(i + 1) == Some(&b'=') {
+                    toks.push(Tok::EqEq);
+                    i += 2;
+                } else {
+                    toks.push(Tok::Assign);
+                    i += 1;
+                }
+            }
+            b'!' => {
+                if bytes.get(i + 1) == Some(&b'=') {
+                    toks.push(Tok::NotEq);
+                    i += 2;
+                } else {
+                    return Err(EmitError::Unsupported(
+                        "bare `!` (logical not) not yet supported".to_owned(),
+                    ));
+                }
+            }
+            b'-' => { toks.push(Tok::Minus); i += 1; }
+            b'0'..=b'9' => {
+                let start = i;
+                while i < bytes.len() && bytes[i].is_ascii_digit() {
+                    i += 1;
+                }
+                let text = std::str::from_utf8(&bytes[start..i])
+                    .map_err(|_| EmitError::Unsupported("non-ASCII in integer".to_owned()))?;
+                let n: i32 = text
+                    .parse()
+                    .map_err(|_| EmitError::Unsupported(format!("bad integer `{text}`")))?;
+                toks.push(Tok::Int(n));
+            }
+            b'a'..=b'z' | b'A'..=b'Z' | b'_' => {
+                let start = i;
+                while i < bytes.len()
+                    && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_')
+                {
+                    i += 1;
+                }
+                let text = std::str::from_utf8(&bytes[start..i])
+                    .map_err(|_| EmitError::Unsupported("non-ASCII in identifier".to_owned()))?;
+                let tok = match text {
+                    "int" => Tok::Kw("int"),
+                    "main" => Tok::Kw("main"),
+                    "void" => Tok::Kw("void"),
+                    "return" => Tok::Kw("return"),
+                    "if" => Tok::Kw("if"),
+                    "else" => Tok::Kw("else"),
+                    _ => Tok::Ident(text.to_owned()),
+                };
+                toks.push(tok);
+            }
+            _ => {
+                return Err(EmitError::Unsupported(format!(
+                    "unexpected character `{}` in source",
+                    c as char
+                )));
+            }
+        }
+    }
+    Ok(toks)
+}
+
+struct Parser<'a> {
+    toks: &'a [Tok],
+    pos: usize,
+    local_names: Vec<String>,
+}
+
+impl<'a> Parser<'a> {
+    fn peek(&self) -> Option<&Tok> {
+        self.toks.get(self.pos)
+    }
+    fn eat(&mut self, want: &Tok) -> Result<(), EmitError> {
+        if self.peek() == Some(want) {
+            self.pos += 1;
+            Ok(())
+        } else {
+            Err(EmitError::Unsupported(format!(
+                "expected {want:?}, got {:?}",
+                self.peek()
+            )))
+        }
+    }
+    fn bump(&mut self) -> Option<&Tok> {
+        let t = self.toks.get(self.pos);
+        if t.is_some() {
+            self.pos += 1;
+        }
+        t
+    }
+}
+
 /// Parse Phase 1's source-shape envelope:
 /// ```text
 /// int main(void) {
 ///   [int <name> [= <int>];]*
-///   return <expr>;
+///   <stmt>+
 /// }
 /// ```
-/// where `<expr>` is a literal, a local name, or a single binary
-/// operator (`+`, `-`, `*`) between two leaf operands. Nested
-/// binops and parens come with a later slice.
+/// Statements are `return <expr>;` or
+/// `if (<cond>) <stmt> [else <stmt>]`. Cond is `<expr>` or
+/// `<expr> == <expr>`. Expressions are the Slice-4 shapes (literal,
+/// local, single binop).
 fn parse_main(source: &str) -> Result<MainAst, EmitError> {
-    let body_open = source
-        .find('{')
-        .ok_or_else(|| EmitError::Unsupported("no `{` in source".to_owned()))?;
-    let body_close = source
-        .rfind('}')
-        .ok_or_else(|| EmitError::Unsupported("no `}` in source".to_owned()))?;
-    let body = source[body_open + 1..body_close].trim();
+    let toks = tokenize(source)?;
+    let mut p = Parser { toks: &toks, pos: 0, local_names: Vec::new() };
 
-    let mut local_names: Vec<String> = Vec::new();
+    // `int main(void) {`
+    p.eat(&Tok::Kw("int"))?;
+    p.eat(&Tok::Kw("main"))?;
+    p.eat(&Tok::LParen)?;
+    p.eat(&Tok::Kw("void"))?;
+    p.eat(&Tok::RParen)?;
+    p.eat(&Tok::LBrace)?;
+
+    // `int <name> [= <int>];` declarations.
     let mut local_inits: Vec<Option<i32>> = Vec::new();
-    let mut return_expr_text: Option<String> = None;
+    while matches!(p.peek(), Some(Tok::Kw("int"))) {
+        p.bump(); // int
+        let name = match p.bump() {
+            Some(Tok::Ident(s)) => s.clone(),
+            other => {
+                return Err(EmitError::Unsupported(format!(
+                    "expected identifier in declaration, got {other:?}"
+                )));
+            }
+        };
+        let init = if matches!(p.peek(), Some(Tok::Assign)) {
+            p.bump();
+            Some(parse_signed_int(&mut p)?)
+        } else {
+            None
+        };
+        p.eat(&Tok::Semi)?;
+        p.local_names.push(name);
+        local_inits.push(init);
+    }
 
-    for stmt in body.split(';') {
-        let stmt = stmt.trim();
-        if stmt.is_empty() {
-            continue;
+    // Body statements until the closing `}`.
+    let mut body = Vec::new();
+    while !matches!(p.peek(), Some(Tok::RBrace)) {
+        body.push(parse_stmt(&mut p)?);
+    }
+    p.eat(&Tok::RBrace)?;
+
+    Ok(MainAst { locals: local_inits, body })
+}
+
+fn parse_signed_int(p: &mut Parser<'_>) -> Result<i32, EmitError> {
+    let sign = if matches!(p.peek(), Some(Tok::Minus)) {
+        p.bump();
+        -1
+    } else {
+        1
+    };
+    match p.bump() {
+        Some(Tok::Int(n)) => Ok(sign * n),
+        other => Err(EmitError::Unsupported(format!(
+            "expected integer literal, got {other:?}"
+        ))),
+    }
+}
+
+fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
+    match p.peek() {
+        Some(Tok::Kw("return")) => {
+            p.bump();
+            let expr = parse_expr(p)?;
+            p.eat(&Tok::Semi)?;
+            Ok(Stmt::Return(expr))
         }
-        if let Some(rest) = stmt.strip_prefix("return") {
-            return_expr_text = Some(rest.trim().to_owned());
-            continue;
-        }
-        if let Some(rest) = stmt.strip_prefix("int") {
-            let decl = rest.trim();
-            if let Some((name, init_expr)) = decl.split_once('=') {
-                let init: i32 = init_expr.trim().parse().map_err(|_| {
-                    EmitError::Unsupported(format!("non-int initializer `{init_expr}`"))
-                })?;
-                local_names.push(name.trim().to_owned());
-                local_inits.push(Some(init));
+        Some(Tok::Kw("if")) => {
+            p.bump();
+            p.eat(&Tok::LParen)?;
+            let cond = parse_cond(p)?;
+            p.eat(&Tok::RParen)?;
+            let then_branch = Box::new(parse_stmt(p)?);
+            let else_branch = if matches!(p.peek(), Some(Tok::Kw("else"))) {
+                p.bump();
+                Some(Box::new(parse_stmt(p)?))
             } else {
-                local_names.push(decl.to_owned());
-                local_inits.push(None);
-            }
-            continue;
-        }
-        return Err(EmitError::Unsupported(format!("statement `{stmt}` not supported")));
-    }
-
-    let return_text = return_expr_text
-        .ok_or_else(|| EmitError::Unsupported("no `return` in body".to_owned()))?;
-    let return_expr = parse_expr(&return_text, &local_names)?;
-
-    Ok(MainAst { locals: local_inits, return_expr })
-}
-
-/// Parse one of the expression shapes Slice 4 supports:
-/// - `<int>`
-/// - `<local-name>`
-/// - `<atom> + <atom>`, `<atom> - <atom>`, `<atom> * <atom>`
-///   (single binop, atoms are themselves literals or locals)
-fn parse_expr(text: &str, local_names: &[String]) -> Result<Expr, EmitError> {
-    let text = text.trim();
-    // Look for a top-level operator. Phase 1's grammar is too
-    // restricted for precedence to matter — at most one operator.
-    for op_ch in ['+', '-', '*'] {
-        if let Some(i) = text.find(op_ch) {
-            // Exclude unary `-` at position 0 so `-1` stays a literal.
-            if op_ch == '-' && i == 0 {
-                continue;
-            }
-            let (left, right_with_op) = text.split_at(i);
-            let right = &right_with_op[1..];
-            let l = parse_atom(left.trim(), local_names)?;
-            let r = parse_atom(right.trim(), local_names)?;
-            let op = match op_ch {
-                '+' => BinOp::Add,
-                '-' => BinOp::Sub,
-                '*' => BinOp::Mul,
-                _ => unreachable!(),
+                None
             };
-            return Ok(Expr::BinOp { op, left: Box::new(l), right: Box::new(r) });
+            Ok(Stmt::If { cond, then_branch, else_branch })
         }
+        other => Err(EmitError::Unsupported(format!(
+            "statement starting with {other:?} not yet supported"
+        ))),
     }
-    parse_atom(text, local_names)
 }
 
-fn parse_atom(text: &str, local_names: &[String]) -> Result<Expr, EmitError> {
-    let text = text.trim();
-    if let Ok(n) = text.parse::<i32>() {
-        return Ok(Expr::IntLit(n));
+fn parse_cond(p: &mut Parser<'_>) -> Result<Cond, EmitError> {
+    let left = parse_expr(p)?;
+    let op = match p.peek() {
+        Some(Tok::EqEq) => Some(RelOp::Eq),
+        Some(Tok::NotEq) => Some(RelOp::Ne),
+        _ => None,
+    };
+    if let Some(op) = op {
+        p.bump();
+        let right = parse_expr(p)?;
+        return Ok(Cond::Cmp { op, left, right });
     }
-    if let Some(idx) = local_names.iter().position(|n| n == text) {
-        return Ok(Expr::Local(idx));
+    Ok(Cond::Truthy(left))
+}
+
+/// Expression parser — recognizes the Slice-4 shapes:
+/// `<atom>` or `<atom> <op> <atom>` where op is `+ - *`.
+fn parse_expr(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
+    let left = parse_atom(p)?;
+    let op = match p.peek() {
+        Some(Tok::Plus) => Some(BinOp::Add),
+        Some(Tok::Minus) => Some(BinOp::Sub),
+        Some(Tok::Star) => Some(BinOp::Mul),
+        _ => None,
+    };
+    if let Some(op) = op {
+        p.bump();
+        let right = parse_atom(p)?;
+        return Ok(Expr::BinOp { op, left: Box::new(left), right: Box::new(right) });
     }
-    Err(EmitError::Unsupported(format!("atom `{text}` not a literal or known local")))
+    Ok(left)
+}
+
+fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
+    let tok = p.bump().cloned();
+    match tok {
+        Some(Tok::Int(n)) => Ok(Expr::IntLit(n)),
+        Some(Tok::Minus) => match p.bump().cloned() {
+            Some(Tok::Int(n)) => Ok(Expr::IntLit(-n)),
+            other => Err(EmitError::Unsupported(format!(
+                "expected int after unary -, got {other:?}"
+            ))),
+        },
+        Some(Tok::Ident(name)) => {
+            if let Some(idx) = p.local_names.iter().position(|n| *n == name) {
+                Ok(Expr::Local(idx))
+            } else {
+                Err(EmitError::Unsupported(format!("unknown identifier `{name}`")))
+            }
+        }
+        other => Err(EmitError::Unsupported(format!(
+            "expected atom, got {other:?}"
+        ))),
+    }
 }
 
 /// Produce the OBJ bytes for `cl /c /AS <source>` compiling the
@@ -448,35 +669,192 @@ fn main_body_for(ast: &MainAst) -> Vec<u8> {
         }
     }
 
-    // Return-value load. Folded constants take the literal path
-    // (`sub ax, ax` for 0, `mov ax, imm16` otherwise); non-folded
-    // expressions route through `emit_expr_to_ax`.
-    if let Some(k) = ast.return_expr.fold(&ast.locals) {
-        if k == 0 {
-            body.extend_from_slice(&[0x2B, 0xC0]);
-        } else {
-            let imm = (k as u32 & 0xFFFF) as u16;
-            body.push(0xB8);
-            body.extend_from_slice(&imm.to_le_bytes());
+    // Emit each top-level statement. Every leaf is a `Return`, and
+    // each Return contributes its own full epilogue (`mov sp,bp;
+    // pop bp; ret` — or just `ret` for 0-byte frames) — MSC does
+    // not merge epilogues across branches. Fixture 4092 confirms.
+    //
+    // Track reachability so an unreachable trailing statement
+    // (after `if (1) return …;`, fixture 4095) is dropped — MSC
+    // does this aggressively, parallel to its constant-condition
+    // elision.
+    let has_frame = frame_bytes > 0;
+    let mut reachable = true;
+    for stmt in &ast.body {
+        if !reachable {
+            break;
         }
-    } else {
-        emit_expr_to_ax(&ast.return_expr, &ast.locals, &mut body);
+        emit_stmt(stmt, &ast.locals, has_frame, &mut body);
+        if stmt_always_returns(stmt, &ast.locals) {
+            reachable = false;
+        }
     }
-
-    // Epilogue + ret. Same conditional as the prologue.
-    if frame_bytes > 0 {
-        body.extend_from_slice(&[0x8B, 0xE5, 0x5D]);
-    }
-    body.push(0xC3);
 
     // Pad to an even byte count with a single NOP. MSC enforces this
-    // unconditionally — every `_main` body in fixtures 4075–4081
+    // unconditionally — every `_main` body in fixtures 4075–4083
     // ends on a word boundary, with the pad NOP appended when the
     // natural shape was odd.
     if body.len() % 2 != 0 {
         body.push(0x90);
     }
     body
+}
+
+/// Emit a single statement (recursive: if-statements contain
+/// nested statements). Returns no value — appends directly to `out`.
+fn emit_stmt(stmt: &Stmt, locals: &[Option<i32>], has_frame: bool, out: &mut Vec<u8>) {
+    match stmt {
+        Stmt::Return(expr) => emit_return(expr, locals, has_frame, out),
+        Stmt::If { cond, then_branch, else_branch } => {
+            // Constant-condition elision: when the cond folds to a
+            // compile-time integer, MSC keeps only the live branch
+            // and drops the comparison + jump entirely. Fixtures
+            // 4094 (if (0)) and 4095 (if (1)) confirm.
+            if let Some(k) = fold_cond(cond, locals) {
+                if k != 0 {
+                    emit_stmt(then_branch, locals, has_frame, out);
+                } else if let Some(else_branch) = else_branch {
+                    emit_stmt(else_branch, locals, has_frame, out);
+                }
+                return;
+            }
+            // Build the then-branch into a scratch buffer so we know
+            // its byte count for the conditional-jump displacement.
+            let mut then_buf = Vec::new();
+            emit_stmt(then_branch, locals, has_frame, &mut then_buf);
+            let then_len = then_buf.len();
+            // MSC's `if (<cond>) <body>` lowers to a skip-then jump:
+            // emit the inverted predicate as `cmp X, Y; <jcc> skip;`
+            // where the jcc displacement is the byte count of the
+            // then-body (+ any else-body skip-over).
+            let take_then_disp = i8::try_from(then_len)
+                .expect("then-body short enough for jcc rel8");
+            emit_cond_skip(cond, take_then_disp, out);
+            out.extend_from_slice(&then_buf);
+            if let Some(else_branch) = else_branch {
+                emit_stmt(else_branch, locals, has_frame, out);
+            }
+        }
+    }
+}
+
+/// True when `stmt` unconditionally returns — so a following
+/// statement at the same nesting level is unreachable. Used to
+/// drop trailing dead code (fixture 4095: `if (1) return 1; return
+/// 0;` keeps only the `return 1;` path).
+fn stmt_always_returns(stmt: &Stmt, locals: &[Option<i32>]) -> bool {
+    match stmt {
+        Stmt::Return(_) => true,
+        Stmt::If { cond, then_branch, else_branch } => {
+            if let Some(k) = fold_cond(cond, locals) {
+                if k != 0 {
+                    // Live branch is the then-branch.
+                    stmt_always_returns(then_branch, locals)
+                } else if let Some(eb) = else_branch {
+                    stmt_always_returns(eb, locals)
+                } else {
+                    false
+                }
+            } else {
+                // Runtime cond: every branch must always return.
+                stmt_always_returns(then_branch, locals)
+                    && else_branch
+                        .as_ref()
+                        .is_some_and(|eb| stmt_always_returns(eb, locals))
+            }
+        }
+    }
+}
+
+/// Try to fold the condition to a compile-time boolean (returned as
+/// an int: 0 = false, anything else = true). Mirrors MSC's
+/// const-condition elision. Fixtures 4094 / 4095.
+fn fold_cond(cond: &Cond, locals: &[Option<i32>]) -> Option<i32> {
+    match cond {
+        Cond::Truthy(e) => e.fold(locals),
+        Cond::Cmp { op, left, right } => {
+            let l = left.fold(locals)?;
+            let r = right.fold(locals)?;
+            Some(match op {
+                RelOp::Eq => i32::from(l == r),
+                RelOp::Ne => i32::from(l != r),
+            })
+        }
+    }
+}
+
+fn emit_return(expr: &Expr, locals: &[Option<i32>], has_frame: bool, out: &mut Vec<u8>) {
+    // Return-value load: foldable expressions take the literal path
+    // (`sub ax, ax` for 0, `mov ax, imm16` otherwise); non-folded
+    // expressions route through `emit_expr_to_ax`.
+    if let Some(k) = expr.fold(locals) {
+        if k == 0 {
+            out.extend_from_slice(&[0x2B, 0xC0]);
+        } else {
+            let imm = (k as u32 & 0xFFFF) as u16;
+            out.push(0xB8);
+            out.extend_from_slice(&imm.to_le_bytes());
+        }
+    } else {
+        emit_expr_to_ax(expr, locals, out);
+    }
+    // Per-return epilogue. 0-byte frames skip both the prologue and
+    // epilogue (fixture 4075); frame-using functions restore SP and
+    // pop BP before the ret (fixtures 4079+). Every Return statement
+    // contributes its own copy — no merge across branches.
+    if has_frame {
+        out.extend_from_slice(&[0x8B, 0xE5, 0x5D]);
+    }
+    out.push(0xC3);
+}
+
+/// Emit `cmp <X>, <Y>; <inverted-jcc> skip` where `skip` is a
+/// forward `rel8` displacement equal to `take_then_disp`. The
+/// caller has pre-computed the size of the then-body so we can use
+/// the 2-byte jcc form without a fixup. Fixtures 4090 / 4091 / 4092.
+fn emit_cond_skip(cond: &Cond, take_then_disp: i8, out: &mut Vec<u8>) {
+    match cond {
+        Cond::Truthy(Expr::Local(idx)) => {
+            // `if (<local>)` → `cmp word ptr [bp-disp], 0; je skip`.
+            emit_cmp_local_imm(*idx, 0, out);
+            out.push(0x74); // je rel8
+            out.push(take_then_disp as u8);
+        }
+        Cond::Cmp { op: RelOp::Eq, left: Expr::Local(idx), right: Expr::IntLit(k) }
+        | Cond::Cmp { op: RelOp::Eq, left: Expr::IntLit(k), right: Expr::Local(idx) } => {
+            // `if (<local> == K)` → `cmp <local>, K; jne skip`.
+            emit_cmp_local_imm(*idx, *k, out);
+            out.push(0x75); // jne rel8
+            out.push(take_then_disp as u8);
+        }
+        Cond::Cmp { op: RelOp::Ne, left: Expr::Local(idx), right: Expr::IntLit(k) }
+        | Cond::Cmp { op: RelOp::Ne, left: Expr::IntLit(k), right: Expr::Local(idx) } => {
+            emit_cmp_local_imm(*idx, *k, out);
+            out.push(0x74); // je rel8 — inverted from the != we want
+            out.push(take_then_disp as u8);
+        }
+        other => panic!("Slice 5 cond shape not yet supported: {other:?}"),
+    }
+}
+
+/// `cmp word ptr [bp-disp], imm` — MSC picks the `83 /7 r/m imm8sx`
+/// form when the immediate fits in a sign-extended byte (which is
+/// every fixture exercised by Slice 5 today). The 5-byte
+/// `81 7e disp imm16` form is reserved for larger constants.
+fn emit_cmp_local_imm(idx: usize, k: i32, out: &mut Vec<u8>) {
+    let disp = -(i16::try_from(idx + 1).expect("local index fits") * 2);
+    if let Ok(k_i8) = i8::try_from(k) {
+        out.push(0x83);
+        out.push(0x7E);          // ModR/M: mod=01 reg=111 (Grp1/7=CMP) r/m=110 (BP+disp8)
+        out.push(disp as u8);
+        out.push(k_i8 as u8);
+    } else {
+        let k16 = (k as u32 & 0xFFFF) as u16;
+        out.push(0x81);
+        out.push(0x7E);
+        out.push(disp as u8);
+        out.extend_from_slice(&k16.to_le_bytes());
+    }
 }
 
 /// Byte offset within `_main`'s body where the `e8 disp16` call to

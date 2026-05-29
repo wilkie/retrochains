@@ -1,0 +1,4 @@
+description = "if (1) — probes whether MSC elides the unreachable trailing return (BCC elides)."
+tool = "cl"
+args = ["/c", "/AS", "HELLO.C"]
+inputs = ["HELLO.C"]
