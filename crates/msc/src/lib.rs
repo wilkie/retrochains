@@ -5811,6 +5811,46 @@ fn emit_binop(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, out: &m
             emit_mem_op_at(op, disp, out);
             return;
         }
+        // Right as GlobalField (`s.x`) → `op ax, word ptr [g+off]`.
+        if let Expr::GlobalField { global, byte_off, size: 2 } = right {
+            let opcode = match op {
+                BinOp::Add => 0x03,
+                BinOp::Sub => 0x2B,
+                BinOp::BitAnd => 0x23,
+                BinOp::BitOr => 0x0B,
+                BinOp::BitXor => 0x33,
+                _ => panic!("{op:?} ax, [global+field] not yet supported"),
+            };
+            out.push(opcode);
+            out.push(0x06);
+            let body_offset = out.len();
+            out.extend_from_slice(&byte_off.to_le_bytes());
+            fixups.push(Fixup {
+                body_offset: body_offset - 1,
+                kind: FixupKind::GlobalAddr { global_idx: *global },
+            });
+            return;
+        }
+        // Right as plain Global → `op ax, word ptr [g]`.
+        if let Expr::Global(g) = right {
+            let opcode = match op {
+                BinOp::Add => 0x03,
+                BinOp::Sub => 0x2B,
+                BinOp::BitAnd => 0x23,
+                BinOp::BitOr => 0x0B,
+                BinOp::BitXor => 0x33,
+                _ => panic!("{op:?} ax, [global] not yet supported"),
+            };
+            out.push(opcode);
+            out.push(0x06);
+            let body_offset = out.len();
+            out.extend_from_slice(&[0x00, 0x00]);
+            fixups.push(Fixup {
+                body_offset: body_offset - 1,
+                kind: FixupKind::GlobalAddr { global_idx: *g },
+            });
+            return;
+        }
     }
     // Left as a global → `mov ax, [g]; <op> ax, ...`. The RHS can
     // be an int literal (fixture 4135), another global via memory
@@ -5847,12 +5887,18 @@ fn emit_binop(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, out: &m
         }
     }
     // Foldable side — recurse with the folded literal substituted.
-    // Lets `(2 + x)` collapse to `(<lit> + <local>)` etc.
-    if let Some(k) = left.fold(locals.inits) {
+    // Lets `(2 + x)` collapse to `(<lit> + <local>)` etc. Guard against
+    // recursing when the operand is already an IntLit (the fold returns
+    // its own value), which would spin forever.
+    if !matches!(left, Expr::IntLit(_))
+        && let Some(k) = left.fold(locals.inits)
+    {
         emit_binop(op, &Expr::IntLit(k), right, locals, out, fixups);
         return;
     }
-    if let Some(k) = right.fold(locals.inits) {
+    if !matches!(right, Expr::IntLit(_))
+        && let Some(k) = right.fold(locals.inits)
+    {
         emit_binop(op, left, &Expr::IntLit(k), locals, out, fixups);
         return;
     }
@@ -5903,6 +5949,17 @@ fn emit_binop(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, out: &m
     // compute the left subtree into AX, then fold the right side in.
     // Fixtures 4139 / 1100.
     if let Expr::BinOp { .. } = left {
+        emit_expr_to_ax(left, locals, out, fixups);
+        return emit_binop_right(op, right, locals, out, fixups);
+    }
+    // Generic fallback: evaluate the left subtree into AX, then fold
+    // the right side in. Covers DerefWord, DerefByte, Call, Ternary,
+    // and other compound left operands.
+    if matches!(left, Expr::DerefWord { .. } | Expr::DerefByte { .. }
+                    | Expr::Call { .. } | Expr::Ternary { .. }
+                    | Expr::GlobalField { .. } | Expr::LocalField { .. }
+                    | Expr::DerefLocalField { .. } | Expr::DerefParamField { .. })
+    {
         emit_expr_to_ax(left, locals, out, fixups);
         return emit_binop_right(op, right, locals, out, fixups);
     }
