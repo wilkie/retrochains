@@ -1763,18 +1763,13 @@ fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> {
 }
 
 fn parse_signed_int(p: &mut Parser<'_>) -> Result<i32, EmitError> {
-    let sign = if matches!(p.peek(), Some(Tok::Minus)) {
-        p.bump();
-        -1
-    } else {
-        1
-    };
-    match p.bump() {
-        Some(Tok::Int(n)) => Ok(sign * n),
-        other => Err(EmitError::Unsupported(format!(
-            "expected integer literal, got {other:?}"
-        ))),
-    }
+    // Accept any compile-time constant expression — integer literal,
+    // negated literal, or any binop chain that folds to a constant.
+    // Used for global inits, brace inits, case labels, array sizes.
+    let expr = parse_expr(p)?;
+    expr.fold(&[]).ok_or_else(|| EmitError::Unsupported(
+        format!("expected constant expression in init, got {expr:?}")
+    ))
 }
 
 fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
@@ -3526,12 +3521,18 @@ fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
             // emit_assign can hit the in-place inc/dec/add/sub-mem
             // peepholes (fixtures 1029, 1116). Substituting `x` to its
             // known IntLit defeats those.
-            let self_assign_lhs = matches!(
+            // For `x = x ± RHS`, leave the LHS unsubstituted so
+            // emit_assign sees `BinOp(Local(x), Add|Sub, ...)` and
+            // hits the in-place inc/dec/add/sub peephole. Other ops
+            // (Shl, Mul, etc.) don't have a peephole shape, so we
+            // substitute normally (lets the value const-fold via
+            // both operands; fixtures 1022, 1024).
+            let self_assign_addsub = matches!(
                 (target.clone(), value.clone()),
-                (AssignTarget::Local(t), Expr::BinOp { left, .. })
+                (AssignTarget::Local(t), Expr::BinOp { op: BinOp::Add | BinOp::Sub, left, .. })
                     if matches!(left.as_ref(), Expr::Local(l) if *l == t)
             );
-            if self_assign_lhs
+            if self_assign_addsub
                 && let Expr::BinOp { right, .. } = value
             {
                 prop_expr(right, cp);
@@ -5894,6 +5895,42 @@ fn emit_imm_op(op: BinOp, k: i32, out: &mut Vec<u8>) {
         (BinOp::Mul, _) => {
             panic!("Slice 4 multiplication by {k} not yet covered by a fixture");
         }
+        // Bitwise imm-AX: prefer 3-byte `83 /digit imm8sx` for small K,
+        // 3-byte `op_byte imm16` (form `25/0d/35`) otherwise.
+        (BinOp::BitAnd, _) => {
+            if let Ok(k8) = i8::try_from(k) {
+                out.extend_from_slice(&[0x83, 0xE0, k8 as u8]);
+            } else {
+                out.push(0x25);
+                out.extend_from_slice(&k16.to_le_bytes());
+            }
+        }
+        (BinOp::BitOr, _) => {
+            if let Ok(k8) = i8::try_from(k) {
+                out.extend_from_slice(&[0x83, 0xC8, k8 as u8]);
+            } else {
+                out.push(0x0D);
+                out.extend_from_slice(&k16.to_le_bytes());
+            }
+        }
+        (BinOp::BitXor, 0xFFFF) | (BinOp::BitXor, _) if k16 == 0xFFFF => {
+            // `xor ax, -1` → `not ax` (f7 d0). 2 bytes vs 3. Fixture 1120.
+            out.extend_from_slice(&[0xF7, 0xD0]);
+        }
+        (BinOp::BitXor, _) => {
+            if let Ok(k8) = i8::try_from(k) {
+                out.extend_from_slice(&[0x83, 0xF0, k8 as u8]);
+            } else {
+                out.push(0x35);
+                out.extend_from_slice(&k16.to_le_bytes());
+            }
+        }
+        // 8086 shifts by constant: 1 uses `d1 e0/e8`; larger picks
+        // `mov cl, K; shl/shr ax, cl` (4 bytes).
+        (BinOp::Shl, 1) => out.extend_from_slice(&[0xD1, 0xE0]),
+        (BinOp::Shr, 1) => out.extend_from_slice(&[0xD1, 0xE8]),
+        (BinOp::Shl, _) => out.extend_from_slice(&[0xB1, k as u8, 0xD3, 0xE0]),
+        (BinOp::Shr, _) => out.extend_from_slice(&[0xB1, k as u8, 0xD3, 0xE8]),
         (op, _) => {
             panic!("imm-op `{op:?}` not yet covered by a fixture (k={k})");
         }
