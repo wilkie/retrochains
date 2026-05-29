@@ -6022,8 +6022,16 @@ fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: 
             // arithmetic or assignment expression.
             emit_call(name, args, locals, out, fixups);
         }
-        Expr::StrLit(_) => {
-            panic!("string literal in non-arg context not yet supported");
+        Expr::StrLit(string_idx) => {
+            // `mov ax, <str_addr>` — for use as a pointer value.
+            // The address gets resolved to CONST-segment offset via
+            // StrLoad fixup. Fixture 1311.
+            let body_offset = out.len();
+            out.extend_from_slice(&[0xB8, 0x00, 0x00]);
+            fixups.push(Fixup {
+                body_offset,
+                kind: FixupKind::StrLoad { string_idx: *string_idx },
+            });
         }
         Expr::Global(idx) => {
             if locals.is_char_global(*idx) {
