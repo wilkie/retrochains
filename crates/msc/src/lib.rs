@@ -3952,8 +3952,11 @@ fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: 
         Expr::BinOp { op, left, right } => {
             emit_binop(*op, left, right, locals, out, fixups);
         }
-        Expr::Call { name, .. } => {
-            panic!("Call to `{name}` inside a non-return expression context not yet supported");
+        Expr::Call { name, args } => {
+            // Result lands in AX. Caller consumes from there.
+            // Fixture 1220 / 1283 / 1286 — call as part of an
+            // arithmetic or assignment expression.
+            emit_call(name, args, locals, out, fixups);
         }
         Expr::StrLit(_) => {
             panic!("string literal in non-arg context not yet supported");
