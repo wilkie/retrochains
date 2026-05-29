@@ -163,6 +163,11 @@ pub struct LocalSpec {
     /// True for `long x;` — storage is two word slots (low at the
     /// shallower disp, high at disp+2). Init writes both halves.
     pub is_long: bool,
+    /// True when the init came from a pure literal/constant expression
+    /// with no Local references. For char locals only this flag
+    /// distinguishes `char c = 'A' + 1;` (folds for read) from
+    /// `char c = a + b;` (stored, but read from slot).
+    pub init_is_literal: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -181,13 +186,13 @@ pub struct StructField {
 
 impl LocalSpec {
     pub fn int(init: Option<i32>) -> Self {
-        Self { size: 2, array_len: 1, init, struct_idx: None, is_long: false }
+        Self { size: 2, array_len: 1, init, struct_idx: None, is_long: false, init_is_literal: init.is_some() }
     }
     pub fn char_(init: Option<i32>) -> Self {
-        Self { size: 1, array_len: 1, init, struct_idx: None, is_long: false }
+        Self { size: 1, array_len: 1, init, struct_idx: None, is_long: false, init_is_literal: init.is_some() }
     }
     pub fn long_(init: Option<i32>) -> Self {
-        Self { size: 2, array_len: 2, init, struct_idx: None, is_long: true }
+        Self { size: 2, array_len: 2, init, struct_idx: None, is_long: true, init_is_literal: init.is_some() }
     }
     /// Bytes occupied in the frame, rounded up to an even count.
     /// MSC pads each local to a word boundary — scalar char gets 2
@@ -220,6 +225,10 @@ pub struct Locals<'a> {
     /// loads (return, assign) bypass the fold view so the slot is
     /// read at runtime even when its constant value is known.
     pub long_locals: &'a [bool],
+    /// Parallel-indexed: true iff the local's init came from a pure
+    /// literal expression. Char locals fold for bare reads only when
+    /// this is true (fixture 1023 vs 1046).
+    pub init_literals: &'a [bool],
 }
 
 impl Locals<'_> {
@@ -237,6 +246,9 @@ impl Locals<'_> {
     }
     pub fn is_long_local(&self, idx: usize) -> bool {
         self.long_locals.get(idx).copied().unwrap_or(false)
+    }
+    pub fn init_is_literal(&self, idx: usize) -> bool {
+        self.init_literals.get(idx).copied().unwrap_or(false)
     }
 }
 
@@ -1591,9 +1603,9 @@ fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> {
                     }
                 };
                 let spec = if is_ptr {
-                    LocalSpec { size: 2, array_len: 1, init: None, struct_idx: Some(sidx), is_long: false }
+                    LocalSpec { size: 2, array_len: 1, init: None, struct_idx: Some(sidx), is_long: false, init_is_literal: false }
                 } else {
-                    LocalSpec { size: 1, array_len: stotal, init: None, struct_idx: Some(sidx), is_long: false }
+                    LocalSpec { size: 1, array_len: stotal, init: None, struct_idx: Some(sidx), is_long: false, init_is_literal: false }
                 };
                 p.local_names.push(lname);
                 p.local_specs.push(spec.clone());
@@ -1663,7 +1675,7 @@ fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> {
             } else {
                 (size, array_len, false)
             };
-            let spec = LocalSpec { size: slot_size, array_len: slot_len, init: None, struct_idx: None, is_long: is_long_slot };
+            let spec = LocalSpec { size: slot_size, array_len: slot_len, init: None, struct_idx: None, is_long: is_long_slot, init_is_literal: false };
             p.local_specs.push(spec.clone());
             locals.push(spec);
             if matches!(p.peek(), Some(Tok::Assign)) {
@@ -1716,6 +1728,12 @@ fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> {
                         .collect();
                     if let Some(k) = init_expr.fold(&init_view) {
                         locals[local_idx].init = Some(k);
+                        // Pure literal init: folds without any local
+                        // references. Charac locals use this to decide
+                        // whether `return c;` re-reads through the slot
+                        // (fixture 1023 vs 1046).
+                        let pure = init_expr.fold(&[]).is_some();
+                        locals[local_idx].init_is_literal = pure;
                     } else {
                         prelude.push(Stmt::Assign {
                             target: AssignTarget::Local(local_idx),
@@ -3483,6 +3501,11 @@ fn const_prop_globals(stmts: &[Stmt], local_specs: &[LocalSpec], long_globals: &
         // slot read (fixture 1037). The emit-time fold_cond path still
         // sees the init via `locals.inits` for cond elision (1632).
         if spec.is_long { continue; }
+        // Char locals: only literal-init chars are substituted. A
+        // char initialized via local-var arithmetic (`char c = a+b;`)
+        // stays as `Local(c)` so bare reads go through slot+cbw
+        // (fixture 1046). Literal init (`char c = 'A'+1;`) folds (1023).
+        if spec.size == 1 && !spec.init_is_literal { continue; }
         if let Some(k) = spec.init {
             cp.l_known.insert(i, k);
         }
@@ -3727,6 +3750,7 @@ fn emit_function(func: &Function, long_globals: &[bool]) -> FunctionEmit {
     // saves rewriting every codegen helper to know about LocalSpec.
     let local_inits: Vec<Option<i32>> = func.locals.iter().map(|l| l.init).collect();
     let local_long: Vec<bool> = func.locals.iter().map(|l| l.is_long).collect();
+    let local_literals: Vec<bool> = func.locals.iter().map(|l| l.init_is_literal).collect();
     let mut bytes = Vec::with_capacity(32);
     let mut fixups: Vec<Fixup> = Vec::new();
     let frame = Frame::for_function(func);
@@ -3826,6 +3850,7 @@ fn emit_function(func: &Function, long_globals: &[bool]) -> FunctionEmit {
         sizes: &local_sizes,
         long_globals,
         long_locals: &local_long,
+        init_literals: &local_literals,
     };
 
     let mut reachable = true;
@@ -4044,6 +4069,12 @@ fn emit_return(
             // emits `mov ax, [bp-disp_low]` even when the value is
             // known at compile time (fixture 1037).
             emit_expr_to_ax(expr, locals, out, fixups);
+        } else if matches!(expr, Expr::Local(i) if locals.size(*i) == 1 && !locals.init_is_literal(*i)) {
+            // Char locals with computed (non-literal) inits read
+            // through the slot+cbw, even when the value is known.
+            // Pure-literal char inits (`char c = 'A' + 1;`) fall
+            // through to the const fold path (fixture 1023 vs 1046).
+            emit_expr_to_ax(expr, locals, out, fixups);
         } else if let Some(k) = expr.fold(locals.inits) {
             if k == 0 {
                 out.extend_from_slice(&[0x2B, 0xC0]);
@@ -4236,17 +4267,33 @@ fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_>, out: &mu
         }
     }
     // General path: evaluate the RHS into AX, then store.
+    let is_byte = locals.size(local_idx) == 1;
     if let Some(k) = value.fold(locals.inits) {
-        let imm = (k as u32 & 0xFFFF) as u16;
-        out.push(0xC7);
-        out.push(0x46);
-        out.push(disp as u8);
-        out.extend_from_slice(&imm.to_le_bytes());
+        if is_byte {
+            // `c6 46 disp imm8` — store low byte to char slot.
+            out.push(0xC6);
+            out.push(0x46);
+            out.push(disp as u8);
+            out.push((k as u32 & 0xFF) as u8);
+        } else {
+            let imm = (k as u32 & 0xFFFF) as u16;
+            out.push(0xC7);
+            out.push(0x46);
+            out.push(disp as u8);
+            out.extend_from_slice(&imm.to_le_bytes());
+        }
     } else {
         emit_expr_to_ax(value, locals, out, fixups);
-        out.push(0x89);                       // MOV r/m16, r16  (AX → mem)
-        out.push(0x46);
-        out.push(disp as u8);
+        if is_byte {
+            // `88 46 disp` — store AL to char slot.
+            out.push(0x88);
+            out.push(0x46);
+            out.push(disp as u8);
+        } else {
+            out.push(0x89);                       // MOV r/m16, r16
+            out.push(0x46);
+            out.push(disp as u8);
+        }
     }
 }
 
@@ -5545,9 +5592,17 @@ fn emit_load_param(idx: usize, out: &mut Vec<u8>) {
 /// displacement (via `Locals::disp`).
 fn emit_load_local(idx: usize, locals: &Locals<'_>, out: &mut Vec<u8>) {
     let disp = locals.disp(idx);
-    out.push(0x8B);
-    out.push(0x46);
-    out.push(disp as u8);
+    if locals.size(idx) == 1 {
+        // `mov al, [bp-disp]; cbw` — sign-extend char to int in AX.
+        out.push(0x8A);
+        out.push(0x46);
+        out.push(disp as u8);
+        out.push(0x98); // cbw
+    } else {
+        out.push(0x8B);
+        out.push(0x46);
+        out.push(disp as u8);
+    }
 }
 
 fn emit_binop(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
