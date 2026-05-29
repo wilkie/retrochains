@@ -4392,6 +4392,27 @@ fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_>, out: &mu
     //   |K| ≤ 127, ±: `add/sub [bp-disp], imm8sx` (4 bytes)
     //   larger K, ±: `add/sub [bp-disp], imm16`   (5 bytes)
     // Pattern requires LHS = Local(this) on the BinOp.
+    // `a *= K` (K not a power of 2) — MSC's idiom:
+    //   `mov ax, K`           (3 bytes; or shorter for ±1, but K=0/±1
+    //                          should fold elsewhere)
+    //   `imul word [bp-disp]` (3 bytes; F7 /5 r/m)
+    //   `mov [bp-disp], ax`   (3 bytes)
+    // Same total as `load; imul ax, ax, K; store` but different bytes;
+    // MSC consistently picks this shape. Fixture 1243.
+    if locals.size(local_idx) == 2
+        && let Expr::BinOp { op: BinOp::Mul, left, right } = value
+        && let Expr::Local(li) = left.as_ref()
+        && *li == local_idx
+        && let Some(k) = right.fold(locals.inits)
+        && k != 0 && k != 1 && (k & (k - 1)) != 0
+    {
+        let k16 = (k as u32 & 0xFFFF) as u16;
+        out.push(0xB8);
+        out.extend_from_slice(&k16.to_le_bytes());
+        out.extend_from_slice(&[0xF7, 0x6E, disp as u8]);
+        out.extend_from_slice(&[0x89, 0x46, disp as u8]);
+        return;
+    }
     // Shift/mul peephole on locals:
     //   word (`int x`): `d1 modrm disp` for K=1, else `b1 K d3 modrm disp`.
     //   byte (`char c`): `d0 modrm disp` for K=1, else `b1 K d2 modrm disp`.
@@ -6259,7 +6280,15 @@ fn emit_imm_op(op: BinOp, k: i32, out: &mut Vec<u8>) {
             out.extend_from_slice(&k16.to_le_bytes());
         }
         (BinOp::Mul, _) => {
-            panic!("Slice 4 multiplication by {k} not yet covered by a fixture");
+            // `imul ax, ax, imm8sx` (`6b c0 imm8`) or `imul ax, ax, imm16` (`69 c0 imm16`).
+            // Generic multiplication by any constant.
+            if let Ok(k8) = i8::try_from(k) {
+                out.extend_from_slice(&[0x6B, 0xC0, k8 as u8]);
+            } else {
+                out.push(0x69);
+                out.push(0xC0);
+                out.extend_from_slice(&k16.to_le_bytes());
+            }
         }
         // Bitwise imm-AX: prefer 3-byte `83 /digit imm8sx` for small K,
         // 3-byte `op_byte imm16` (form `25/0d/35`) otherwise.
