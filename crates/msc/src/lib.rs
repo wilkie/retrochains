@@ -321,6 +321,10 @@ pub enum AssignTarget {
     /// `<struct-global>.<field> = <expr>;` — store to a global
     /// struct's field.
     GlobalField { global: usize, byte_off: u16, size: u8 },
+    /// `<struct-ptr-param>-><field> = <expr>;` — store via a struct
+    /// pointer parameter. Codegen: `mov bx, [bp+pdisp];
+    /// c7 47 off imm16` (word) / `c6 47 off imm8` (byte).
+    DerefParamField { ptr_param: usize, byte_off: u16, size: u8 },
     /// `<local-int-array>[K] = <expr>;` — write a word at a constant
     /// index. `byte_off` is `K * 2`. Codegen uses BP-rel store at
     /// `locals.disp(local) + byte_off`.
@@ -422,6 +426,9 @@ pub enum Expr {
     /// `<struct-global>.<field>` — read a field of a struct global.
     /// Lowers to `a1 disp+off` (word) or `a0 disp+off; 98` (byte).
     GlobalField { global: usize, byte_off: u16, size: u8 },
+    /// `<struct-ptr-param>-><field>` — deref through a struct
+    /// pointer parameter. `mov bx, [bp+param_disp]; mov ax, [bx+off]`.
+    DerefParamField { ptr_param: usize, byte_off: u16, size: u8 },
     /// Pointer-indexed byte read — `p[<expr>]` where `p` is a
     /// `char *` global. Constant index lowers to
     /// `mov bx, [p]; mov al, [bx+disp]; cbw`. Fixture 4123.
@@ -516,6 +523,7 @@ impl Expr {
             Expr::LocalIndex { .. } | Expr::LocalIndexByte { .. } => None,
             Expr::ParamIndex { .. } => None,
             Expr::LocalField { .. } | Expr::DerefLocalField { .. } | Expr::GlobalField { .. } => None,
+            Expr::DerefParamField { .. } => None,
             Expr::DerefByte { .. } | Expr::DerefWord { .. } => None,
             Expr::AddrOfGlobal(_) | Expr::AddrOfLocal(_) => None,
             Expr::Ternary { cond, then_arm, else_arm } => {
@@ -926,6 +934,10 @@ struct Parser<'a> {
     /// without needing to thread `&[LocalSpec]` through every call.
     local_specs: Vec<LocalSpec>,
     param_names: Vec<String>,
+    /// For each param, `Some(struct_idx)` when its type is
+    /// `struct S *` (or `struct S` array-decayed). Used by parse_atom
+    /// to resolve `<param>-><field>` lookups.
+    param_struct_idxs: Vec<Option<usize>>,
     /// File-scope global names in source order; the index doubles
     /// as the `Expr::Global(idx)` value.
     global_names: Vec<String>,
@@ -978,6 +990,7 @@ fn parse_unit(source: &str) -> Result<Unit, EmitError> {
         local_names: Vec::new(),
         local_specs: Vec::new(),
         param_names: Vec::new(),
+        param_struct_idxs: Vec::new(),
         global_names: Vec::new(),
         globals: Vec::new(),
         structs: Vec::new(),
@@ -1394,19 +1407,33 @@ fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> {
     // parameters; other types come with later fixtures.
     let params = if matches!(p.peek(), Some(Tok::Kw("void"))) {
         p.bump();
-        Vec::new()
+        (Vec::new(), Vec::new())
     } else {
         let mut names = Vec::new();
+        let mut struct_idxs: Vec<Option<usize>> = Vec::new();
         loop {
-            // Optional sign/qualifier modifiers, then `int` / `char`.
-            // Pointers (`<type> *<name>`) consume one stack slot
-            // regardless of pointee type.
+            // Optional sign/qualifier modifiers, then `int` / `char` /
+            // `struct Name`. Pointers (`<type> *<name>`) consume one
+            // stack slot regardless of pointee type.
             skip_decl_modifiers(p);
+            let mut struct_idx: Option<usize> = None;
             match p.peek() {
                 Some(Tok::Kw("int")) | Some(Tok::Kw("char")) => { p.bump(); }
+                Some(Tok::Kw("struct")) => {
+                    p.bump();
+                    let sname = match p.bump().cloned() {
+                        Some(Tok::Ident(s)) => s,
+                        other => {
+                            return Err(EmitError::Unsupported(format!(
+                                "expected struct name in param, got {other:?}"
+                            )));
+                        }
+                    };
+                    struct_idx = p.structs.iter().position(|s| s.name == sname);
+                }
                 other => {
                     return Err(EmitError::Unsupported(format!(
-                        "expected `int` or `char` in parameter type, got {other:?}"
+                        "expected `int`, `char`, or `struct` in parameter type, got {other:?}"
                     )));
                 }
             }
@@ -1431,13 +1458,17 @@ fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> {
                 p.eat(&Tok::RBrack)?;
             }
             names.push(pname);
+            struct_idxs.push(struct_idx);
             if matches!(p.peek(), Some(Tok::Comma)) {
                 p.bump();
                 continue;
             }
             break;
         }
-        names
+        (names, struct_idxs)
+    };
+    let (params, param_struct_idxs) = match params {
+        x => x,
     };
     p.eat(&Tok::RParen)?;
     p.eat(&Tok::LBrace)?;
@@ -1447,6 +1478,7 @@ fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> {
     p.local_names.clear();
     p.local_specs.clear();
     p.param_names = params.clone();
+    p.param_struct_idxs = param_struct_idxs;
 
     // `[storage-class]+ int|char <name> [= <init>] (, <name> [= <init>])* ;`
     //
@@ -1844,6 +1876,29 @@ fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
                 p.eat(&Tok::Semi)?;
                 return Ok(Stmt::Assign {
                     target: AssignTarget::LocalField { local: local_idx, byte_off, size },
+                    value,
+                });
+            }
+            // `<struct-ptr-param>-><field> = <expr>;`
+            if matches!(p.peek(), Some(Tok::Arrow))
+                && let Some(param_idx) = p.param_names.iter().position(|n| *n == name)
+                && let Some(Some(sidx)) = p.param_struct_idxs.get(param_idx).cloned()
+            {
+                p.bump();
+                let (byte_off, size) = parse_field_lookup(p, sidx)?;
+                if let Some(value) = parse_compound_rhs_for_indexed(p, param_idx, byte_off, size == 1, false)? {
+                    // Compound assign — fall through using AssignTarget::DerefParamField with the rewritten RHS.
+                    p.eat(&Tok::Semi)?;
+                    return Ok(Stmt::Assign {
+                        target: AssignTarget::DerefParamField { ptr_param: param_idx, byte_off, size },
+                        value,
+                    });
+                }
+                p.eat(&Tok::Assign)?;
+                let value = parse_expr(p)?;
+                p.eat(&Tok::Semi)?;
+                return Ok(Stmt::Assign {
+                    target: AssignTarget::DerefParamField { ptr_param: param_idx, byte_off, size },
                     value,
                 });
             }
@@ -2499,6 +2554,14 @@ fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                     let index = parse_expr(p)?;
                     p.eat(&Tok::RBrack)?;
                     return Ok(Expr::ParamIndex { param: idx, index: Box::new(index) });
+                }
+                // `<struct-ptr-param>-><field>` member access.
+                if matches!(p.peek(), Some(Tok::Arrow))
+                    && let Some(Some(sidx)) = p.param_struct_idxs.get(idx).cloned()
+                {
+                    p.bump();
+                    let (byte_off, size) = parse_field_lookup(p, sidx)?;
+                    return Ok(Expr::DerefParamField { ptr_param: idx, byte_off, size });
                 }
                 Ok(Expr::Param(idx))
             } else if let Some(idx) = p.global_names.iter().position(|n| *n == name) {
@@ -3503,7 +3566,7 @@ fn prop_expr(e: &mut Expr, cp: &ConstProp) {
         Expr::GlobalField { .. } => {
             // No const-prop tracking for global struct fields yet.
         }
-        Expr::DerefLocalField { .. } => {
+        Expr::DerefLocalField { .. } | Expr::DerefParamField { .. } => {
             // Pointer-aliasing const-prop not yet implemented.
         }
         Expr::LocalIndex { .. } | Expr::LocalIndexByte { .. } => {
@@ -3993,6 +4056,9 @@ fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_>, out: &mu
         AssignTarget::GlobalField { global, byte_off, size } => {
             return emit_assign_global_field(global, byte_off, size, value, locals, out, fixups);
         }
+        AssignTarget::DerefParamField { ptr_param, byte_off, size } => {
+            return emit_assign_deref_param_field(ptr_param, byte_off, size, value, locals, out, fixups);
+        }
     };
     let disp = locals.disp(local_idx);
     // Peephole: `x = x + 1;` and `x = x - 1;` become in-place
@@ -4247,6 +4313,49 @@ fn emit_assign_local_field(local_idx: usize, byte_off: u16, size: u8, value: &Ex
         out.push(0x89);
         out.push(0x46);
         out.push(disp as u8);
+    }
+}
+
+/// `<struct-ptr-param>-><field> = <expr>;` — same shape as the
+/// local-pointer version but the BX-load disp is positive (param).
+fn emit_assign_deref_param_field(ptr_param: usize, byte_off: u16, size: u8, value: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    let p_disp = param_disp(ptr_param);
+    out.push(0x8B);
+    out.push(0x5E);
+    out.push(p_disp as u8);
+    if size == 1 {
+        let k = value.fold(locals.inits).unwrap_or_else(|| {
+            panic!("non-constant byte struct-field store via param ptr not yet supported")
+        });
+        let imm = (k as u32 & 0xFF) as u8;
+        if byte_off == 0 {
+            out.extend_from_slice(&[0xC6, 0x07, imm]);
+        } else {
+            out.push(0xC6);
+            out.push(0x47);
+            out.push(byte_off as u8);
+            out.push(imm);
+        }
+    } else if let Some(k) = value.fold(locals.inits) {
+        let imm = (k as u32 & 0xFFFF) as u16;
+        if byte_off == 0 {
+            out.push(0xC7);
+            out.push(0x07);
+        } else {
+            out.push(0xC7);
+            out.push(0x47);
+            out.push(byte_off as u8);
+        }
+        out.extend_from_slice(&imm.to_le_bytes());
+    } else {
+        emit_expr_to_ax(value, locals, out, fixups);
+        if byte_off == 0 {
+            out.extend_from_slice(&[0x89, 0x07]);
+        } else {
+            out.push(0x89);
+            out.push(0x47);
+            out.push(byte_off as u8);
+        }
     }
 }
 
@@ -4982,6 +5091,28 @@ fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: 
                 out.push(0x8B);
                 out.push(0x46);
                 out.push(disp as u8);
+            }
+        }
+        Expr::DerefParamField { ptr_param, byte_off, size } => {
+            let p_disp = param_disp(*ptr_param);
+            out.push(0x8B);
+            out.push(0x5E);
+            out.push(p_disp as u8);
+            if *size == 1 {
+                if *byte_off == 0 {
+                    out.extend_from_slice(&[0x8A, 0x07]);
+                } else {
+                    out.push(0x8A);
+                    out.push(0x47);
+                    out.push(*byte_off as u8);
+                }
+                out.push(0x98);
+            } else if *byte_off == 0 {
+                out.extend_from_slice(&[0x8B, 0x07]);
+            } else {
+                out.push(0x8B);
+                out.push(0x47);
+                out.push(*byte_off as u8);
             }
         }
         Expr::DerefLocalField { ptr_local, byte_off, size } => {
