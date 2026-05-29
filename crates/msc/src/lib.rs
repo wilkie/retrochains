@@ -6676,7 +6676,21 @@ fn emit_binop(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, out: &m
         });
         return emit_binop_right(op, right, locals, out, fixups);
     }
-    panic!("binop shape not yet supported: {op:?} of {left:?}, {right:?}");
+    // Generic fallback: evaluate RHS first into AX, save to BX, then
+    // evaluate LHS into AX and apply the reg-reg op. Works for any
+    // shape that survived the earlier specialized paths.
+    emit_expr_to_ax(right, locals, out, fixups);
+    out.extend_from_slice(&[0x8B, 0xD8]); // mov bx, ax (rhs → bx)
+    emit_expr_to_ax(left, locals, out, fixups);
+    let op_byte = match op {
+        BinOp::Add => 0x03,
+        BinOp::Sub => 0x2B,
+        BinOp::BitAnd => 0x23,
+        BinOp::BitOr => 0x0B,
+        BinOp::BitXor => 0x33,
+        _ => panic!("binop shape not yet supported: {op:?} of {left:?}, {right:?}"),
+    };
+    out.extend_from_slice(&[op_byte, 0xC3]); // op ax, bx
 }
 
 /// After the LHS is in AX, fold the RHS into the same register via
