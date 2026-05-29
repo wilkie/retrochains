@@ -122,6 +122,9 @@ pub enum Instr {
     PushReg16 { reg: Reg16 },
     /// `pop <reg16>` — 58+rc.
     PopReg16 { reg: Reg16 },
+    /// `pushf` — 9C. Pushes the FLAGS word onto the stack. Used by
+    /// BCC's `_FLAGS & K` value-context path (fixture 4062).
+    Pushf,
     /// `mov <dst>,<src>` between 16-bit registers — 8B xx with
     /// ModR/M mod=11 reg=dst-code r/m=src-code. Covers `mov bp,sp`,
     /// `mov sp,bp`, `mov ax,dx`, `mov ax,si`, etc.

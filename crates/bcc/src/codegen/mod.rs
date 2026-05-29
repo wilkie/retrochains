@@ -21962,7 +21962,13 @@ impl<'a> FunctionEmitter<'a> {
                     return;
                 }
                 if name == "_FLAGS" {
-                    panic!("`_FLAGS` value-context read not yet supported (pushf path)");
+                    // `_FLAGS` value-context: BCC materializes the
+                    // flags word via `pushf; pop ax`. The surrounding
+                    // expression (`_FLAGS & K`) continues normally
+                    // after that. Fixture 4062 (`return _FLAGS & 1;`).
+                    self.out.extend_from_slice(b"\tpushf\t\r\n");
+                    self.out.extend_from_slice(b"\tpop\tax\r\n");
+                    return;
                 }
                 if is_byte_pseudo_register(name) {
                     panic!("byte pseudo-register `{name}` read in int context not yet supported (only `_AL` covered)");

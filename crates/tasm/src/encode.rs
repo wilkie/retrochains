@@ -417,6 +417,7 @@ fn instr_size(instr: &Instr) -> usize {
         Instr::RetfImm16 { .. } => 3,
         Instr::PushReg16 { .. }
         | Instr::PopReg16 { .. }
+        | Instr::Pushf
         | Instr::IncReg16 { .. }
         | Instr::DecReg16 { .. } => 1,
         Instr::MovReg16Reg16 { .. }
@@ -880,6 +881,7 @@ fn emit_instr(
     match instr {
         Instr::PushReg16 { reg } => out.push(0x50 | reg.code()),
         Instr::PopReg16 { reg } => out.push(0x58 | reg.code()),
+        Instr::Pushf => out.push(0x9C),
         Instr::IncReg16 { reg } => out.push(0x40 | reg.code()),
         Instr::DecReg16 { reg } => out.push(0x48 | reg.code()),
         Instr::MovReg16Reg16 { dst, src } => {

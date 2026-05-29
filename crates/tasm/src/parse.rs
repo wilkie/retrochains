@@ -403,6 +403,7 @@ fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
     let kw = line.keyword;
     let rest = line.rest.trim_end();
     match kw {
+        "pushf" if rest.is_empty() => Ok(Instr::Pushf),
         "push" => {
             if rest == "ds" {
                 return Ok(Instr::PushDs);
