@@ -1915,11 +1915,39 @@ fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
             p.eat(&Tok::LParen)?;
             // Init is an assignment expression-statement without a
             // trailing semi (the semi is the for-syntax separator).
-            let init = Box::new(parse_assign_no_semi(p)?);
+            // Allow comma-separated assigns in for-init / for-step
+            // (`for (i = 0, s = 0; ...; i++, s += 1)`). Each gets
+            // collected into a Stmt::Block for emit. Fixtures 1240,
+            // 1827, 172, 1523.
+            let init = {
+                let first = parse_assign_no_semi(p)?;
+                if matches!(p.peek(), Some(Tok::Comma)) {
+                    let mut stmts = vec![first];
+                    while matches!(p.peek(), Some(Tok::Comma)) {
+                        p.bump();
+                        stmts.push(parse_assign_no_semi(p)?);
+                    }
+                    Box::new(Stmt::Block(stmts))
+                } else {
+                    Box::new(first)
+                }
+            };
             p.eat(&Tok::Semi)?;
             let cond = parse_cond(p)?;
             p.eat(&Tok::Semi)?;
-            let step = Box::new(parse_assign_no_semi(p)?);
+            let step = {
+                let first = parse_assign_no_semi(p)?;
+                if matches!(p.peek(), Some(Tok::Comma)) {
+                    let mut stmts = vec![first];
+                    while matches!(p.peek(), Some(Tok::Comma)) {
+                        p.bump();
+                        stmts.push(parse_assign_no_semi(p)?);
+                    }
+                    Box::new(Stmt::Block(stmts))
+                } else {
+                    Box::new(first)
+                }
+            };
             p.eat(&Tok::RParen)?;
             let body = Box::new(parse_stmt(p)?);
             Ok(Stmt::For { init, cond, step, body })
