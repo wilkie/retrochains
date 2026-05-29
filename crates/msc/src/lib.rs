@@ -367,6 +367,9 @@ pub enum Expr {
     /// `<local-char-array>[<expr>]` — read a byte + cbw. Constant K
     /// lowers to `mov al, [bp-disp+K]; cbw` (`8a 46 disp8; 98`).
     LocalIndexByte { local: usize, index: Box<Expr> },
+    /// `<param>[<expr>]` — `int *p` / `int p[]` parameter index.
+    /// Constant K lowers to `mov bx, [bp+param_disp]; mov ax, [bx+2K]`.
+    ParamIndex { param: usize, index: Box<Expr> },
     /// Pointer-indexed byte read — `p[<expr>]` where `p` is a
     /// `char *` global. Constant index lowers to
     /// `mov bx, [p]; mov al, [bx+disp]; cbw`. Fixture 4123.
@@ -459,6 +462,7 @@ impl Expr {
             Expr::Global(_) => None,
             Expr::Index { .. } | Expr::IndexByte { .. } | Expr::PtrIndexByte { .. } => None,
             Expr::LocalIndex { .. } | Expr::LocalIndexByte { .. } => None,
+            Expr::ParamIndex { .. } => None,
             Expr::DerefByte { .. } | Expr::DerefWord { .. } => None,
             Expr::AddrOfGlobal(_) | Expr::AddrOfLocal(_) => None,
             Expr::Ternary { cond, then_arm, else_arm } => {
@@ -1175,6 +1179,15 @@ fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> {
                     )));
                 }
             };
+            // `int a[]` and `int a[N]` decay to `int *a`. Eat the
+            // optional bracket pair.
+            if matches!(p.peek(), Some(Tok::LBrack)) {
+                p.bump();
+                while !matches!(p.peek(), Some(Tok::RBrack)) {
+                    p.bump();
+                }
+                p.eat(&Tok::RBrack)?;
+            }
             names.push(pname);
             if matches!(p.peek(), Some(Tok::Comma)) {
                 p.bump();
@@ -2051,6 +2064,15 @@ fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                 }
                 Ok(Expr::Local(idx))
             } else if let Some(idx) = p.param_names.iter().position(|n| *n == name) {
+                // `<param>[K]` for `int *p` / `int p[]` parameters →
+                // load ptr into BX, then word load `mov ax, [bx+K*2]`
+                // (`8b 47 disp`). Phase 1 keeps the disp in disp8.
+                if matches!(p.peek(), Some(Tok::LBrack)) {
+                    p.bump();
+                    let index = parse_expr(p)?;
+                    p.eat(&Tok::RBrack)?;
+                    return Ok(Expr::ParamIndex { param: idx, index: Box::new(index) });
+                }
                 Ok(Expr::Param(idx))
             } else if let Some(idx) = p.global_names.iter().position(|n| *n == name) {
                 // `<global>[<expr>]` — array index or pointer index.
@@ -3022,6 +3044,9 @@ fn prop_expr(e: &mut Expr, cp: &ConstProp) {
         Expr::Index { index, .. }
         | Expr::IndexByte { index, .. }
         | Expr::PtrIndexByte { index, .. } => {
+            prop_expr(index, cp);
+        }
+        Expr::ParamIndex { index, .. } => {
             prop_expr(index, cp);
         }
         Expr::LocalIndex { .. } | Expr::LocalIndexByte { .. } => {
@@ -4318,6 +4343,25 @@ fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: 
             // Should have folded already by the caller for runtime
             // ternary codegen we don't yet implement.
             panic!("non-constant ternary not yet supported");
+        }
+        Expr::ParamIndex { param, index } => {
+            // Constant K → `mov bx, [bp+param_disp]; mov ax, [bx+2K]`.
+            // Fixture 1236.
+            let k = index.fold(locals.inits).unwrap_or_else(|| {
+                panic!("non-constant param-index not yet supported")
+            });
+            let p_disp = param_disp(*param);
+            out.push(0x8B);
+            out.push(0x5E);
+            out.push(p_disp as u8);
+            let elem_disp = (k as i16) * 2;
+            if elem_disp == 0 {
+                out.extend_from_slice(&[0x8B, 0x07]);
+            } else {
+                out.push(0x8B);
+                out.push(0x47);
+                out.push(elem_disp as u8);
+            }
         }
         Expr::LocalIndex { local, index } => {
             // Constant K → `mov ax, [bp - disp + 2K]` (`8b 46 disp`).
