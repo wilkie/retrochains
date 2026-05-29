@@ -405,6 +405,43 @@ fn tokenize(source: &str) -> Result<Vec<Tok>, EmitError> {
                 }
                 toks.push(Tok::PreprocLine);
             }
+            b'\'' => {
+                // Char literal — single byte (with escape support)
+                // bracketed by `'`. Becomes a `Tok::Int(byte)`; the
+                // C semantics widen char to int for free.
+                i += 1;
+                if i >= bytes.len() {
+                    return Err(EmitError::Unsupported("unterminated char literal".to_owned()));
+                }
+                let value: i32 = if bytes[i] == b'\\' && i + 1 < bytes.len() {
+                    let esc = bytes[i + 1];
+                    let v = match esc {
+                        b'n' => 0x0A,
+                        b't' => 0x09,
+                        b'r' => 0x0D,
+                        b'0' => 0x00,
+                        b'\\' => b'\\',
+                        b'\'' => b'\'',
+                        _ => {
+                            return Err(EmitError::Unsupported(format!(
+                                "unknown escape `\\{}` in char literal",
+                                esc as char
+                            )));
+                        }
+                    };
+                    i += 2;
+                    v as i32
+                } else {
+                    let v = bytes[i] as i32;
+                    i += 1;
+                    v
+                };
+                if i >= bytes.len() || bytes[i] != b'\'' {
+                    return Err(EmitError::Unsupported("unterminated char literal".to_owned()));
+                }
+                i += 1;
+                toks.push(Tok::Int(value));
+            }
             b'"' => {
                 // String literal — collect bytes until the closing
                 // quote. Handles common C escapes (`\n`, `\t`, `\\`,
@@ -1033,9 +1070,36 @@ fn parse_expr(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
     Ok(left)
 }
 
+/// Best-effort pointee-size inference for `*<expr>` lowering.
+/// Returns the byte width of `*expr`. `char *` resolves to 1; `int *`
+/// (and unrecognized shapes) to 2. Used by parse_atom to pick between
+/// `DerefByte` and `DerefWord` variants. Parameters carry no type
+/// info in Phase 1 so they default to int-pointer (word).
+fn pointee_size_of(e: &Expr, globals: &[Global]) -> usize {
+    match e {
+        Expr::Global(idx) => globals[*idx].element_size,
+        Expr::BinOp { op: BinOp::Add, left, right } => {
+            // `<ptr> + K` and `K + <ptr>` both inherit the pointer's
+            // pointee size.
+            match (left.as_ref(), right.as_ref()) {
+                (Expr::Global(idx), _) | (_, Expr::Global(idx)) => {
+                    globals[*idx].element_size
+                }
+                _ => 2,
+            }
+        }
+        _ => 2,
+    }
+}
+
 fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
     let tok = p.bump().cloned();
     match tok {
+        Some(Tok::LParen) => {
+            let inner = parse_expr(p)?;
+            p.eat(&Tok::RParen)?;
+            Ok(inner)
+        }
         Some(Tok::Int(n)) => Ok(Expr::IntLit(n)),
         Some(Tok::StrLit(mut bytes)) => {
             // Intern the literal in the unit-level string pool with
@@ -1071,14 +1135,7 @@ fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
             // Unary deref `*<expr>`. Pick the byte- vs word-sized
             // variant from the inner expression's pointee type.
             let inner = parse_atom(p)?;
-            let pointee_size = match &inner {
-                Expr::Global(idx) => p.globals[*idx].element_size,
-                // Parameters carry no type info in Phase 1; treat
-                // every dereffable param as `int *` (word). When a
-                // `char *` parameter fixture lands, thread types in.
-                Expr::Param(_) => 2,
-                _ => 2,
-            };
+            let pointee_size = pointee_size_of(&inner, &p.globals);
             if pointee_size == 1 {
                 Ok(Expr::DerefByte { ptr: Box::new(inner) })
             } else {
@@ -2665,20 +2722,33 @@ fn emit_expr_to_ax(expr: &Expr, locals: &[Option<i32>], out: &mut Vec<u8>, fixup
             });
         }
         Expr::DerefByte { ptr } => {
-            // Phase 1: `*<char-ptr-global>` only. Pattern is
-            // `mov bx, [p]; mov al, [bx]; cbw`. The FIXUP sits at
-            // the `[p]` address inside the mov-bx encoding.
-            match ptr.as_ref() {
-                Expr::Global(idx) => {
-                    let body_offset = out.len();
-                    out.extend_from_slice(&[0x8B, 0x1E, 0x00, 0x00]);
-                    fixups.push(Fixup {
-                        body_offset: body_offset + 1,
-                        kind: FixupKind::GlobalAddr { global_idx: *idx },
-                    });
-                    out.extend_from_slice(&[0x8A, 0x07, 0x98]);
+            // Phase 1: `*<char-ptr-global>` and `*(<char-ptr> + K)`.
+            // Both lower to `mov bx, [p]; mov al, [bx+disp]; cbw`,
+            // with disp 0 for the bare deref and K for the
+            // constant-offset form (fixtures 4111, 4127).
+            let (ptr_idx, disp) = match ptr.as_ref() {
+                Expr::Global(idx) => (*idx, 0i8),
+                Expr::BinOp { op: BinOp::Add, left, right }
+                | Expr::BinOp { op: BinOp::Add, left: right, right: left }
+                    if matches!(left.as_ref(), Expr::Global(_))
+                    && matches!(right.as_ref(), Expr::IntLit(_)) =>
+                {
+                    let Expr::Global(idx) = **left else { unreachable!() };
+                    let Expr::IntLit(k) = **right else { unreachable!() };
+                    (idx, i8::try_from(k).expect("ptr-add offset fits in i8"))
                 }
                 other => panic!("byte deref of {other:?} not yet supported"),
+            };
+            let body_offset = out.len();
+            out.extend_from_slice(&[0x8B, 0x1E, 0x00, 0x00]);
+            fixups.push(Fixup {
+                body_offset: body_offset + 1,
+                kind: FixupKind::GlobalAddr { global_idx: ptr_idx },
+            });
+            if disp == 0 {
+                out.extend_from_slice(&[0x8A, 0x07, 0x98]);
+            } else {
+                out.extend_from_slice(&[0x8A, 0x47, disp as u8, 0x98]);
             }
         }
         Expr::DerefWord { ptr } => {
