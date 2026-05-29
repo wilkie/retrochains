@@ -666,15 +666,41 @@ fn tokenize(source: &str) -> Result<Vec<Tok>, EmitError> {
                 toks.push(Tok::StrLit(buf));
             }
             b'0'..=b'9' => {
-                let start = i;
-                while i < bytes.len() && bytes[i].is_ascii_digit() {
+                // Hex (`0x` / `0X`), octal (`0` followed by digits),
+                // and decimal forms. Trailing L/U/UL suffixes ignored.
+                let n: i32 = if bytes.get(i) == Some(&b'0')
+                    && matches!(bytes.get(i + 1), Some(&b'x') | Some(&b'X'))
+                {
+                    i += 2;
+                    let start = i;
+                    while i < bytes.len() && bytes[i].is_ascii_hexdigit() {
+                        i += 1;
+                    }
+                    let text = std::str::from_utf8(&bytes[start..i])
+                        .map_err(|_| EmitError::Unsupported("non-ASCII in hex int".to_owned()))?;
+                    i32::from_str_radix(text, 16)
+                        .or_else(|_| u32::from_str_radix(text, 16).map(|u| u as i32))
+                        .map_err(|_| EmitError::Unsupported(format!("bad hex `0x{text}`")))?
+                } else {
+                    let start = i;
+                    while i < bytes.len() && bytes[i].is_ascii_digit() {
+                        i += 1;
+                    }
+                    let text = std::str::from_utf8(&bytes[start..i])
+                        .map_err(|_| EmitError::Unsupported("non-ASCII in integer".to_owned()))?;
+                    if let Some(rest) = text.strip_prefix('0').filter(|s| !s.is_empty() && s.bytes().all(|b| (b'0'..=b'7').contains(&b))) {
+                        i32::from_str_radix(rest, 8)
+                            .map_err(|_| EmitError::Unsupported(format!("bad octal `0{rest}`")))?
+                    } else {
+                        text.parse()
+                            .map_err(|_| EmitError::Unsupported(format!("bad integer `{text}`")))?
+                    }
+                };
+                // Skip trailing L/U/l/u suffix bytes; we promote
+                // everything to int in Phase 1.
+                while matches!(bytes.get(i), Some(b'L') | Some(b'l') | Some(b'U') | Some(b'u')) {
                     i += 1;
                 }
-                let text = std::str::from_utf8(&bytes[start..i])
-                    .map_err(|_| EmitError::Unsupported("non-ASCII in integer".to_owned()))?;
-                let n: i32 = text
-                    .parse()
-                    .map_err(|_| EmitError::Unsupported(format!("bad integer `{text}`")))?;
                 toks.push(Tok::Int(n));
             }
             b'a'..=b'z' | b'A'..=b'Z' | b'_' => {
@@ -1306,6 +1332,43 @@ fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
             p.eat(&Tok::Semi)?;
             Ok(Stmt::Assign { target, value })
         }
+        Some(Tok::PlusPlus) | Some(Tok::MinusMinus) => {
+            // `++<ident>;` / `--<ident>;` statement — equivalent to
+            // `<ident>++;` / `<ident>--;` at the codegen level.
+            let inc = matches!(p.peek(), Some(Tok::PlusPlus));
+            p.bump();
+            let name = match p.bump().cloned() {
+                Some(Tok::Ident(s)) => s,
+                other => {
+                    return Err(EmitError::Unsupported(format!(
+                        "expected identifier after prefix `++/--`, got {other:?}"
+                    )));
+                }
+            };
+            let target = if let Some(idx) = p.local_names.iter().position(|n| *n == name) {
+                AssignTarget::Local(idx)
+            } else if let Some(idx) = p.global_names.iter().position(|n| *n == name) {
+                AssignTarget::Global(idx)
+            } else {
+                return Err(EmitError::Unsupported(format!(
+                    "prefix `++/--` of unknown identifier `{name}`"
+                )));
+            };
+            p.eat(&Tok::Semi)?;
+            let lvalue = match target {
+                AssignTarget::Local(i) => Expr::Local(i),
+                AssignTarget::Global(g) => Expr::Global(g),
+                _ => unreachable!(),
+            };
+            Ok(Stmt::Assign {
+                target,
+                value: Expr::BinOp {
+                    op: if inc { BinOp::Add } else { BinOp::Sub },
+                    left: Box::new(lvalue),
+                    right: Box::new(Expr::IntLit(1)),
+                },
+            })
+        }
         other => Err(EmitError::Unsupported(format!(
             "statement starting with {other:?} not yet supported"
         ))),
@@ -1509,11 +1572,58 @@ fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
     let tok = p.bump().cloned();
     match tok {
         Some(Tok::LParen) => {
+            // `(type) <expr>` cast — recognize a type-keyword right
+            // after `(` and treat the cast as identity (Phase 1
+            // doesn't model signedness or narrowing semantics).
+            skip_decl_modifiers(p);
+            if matches!(p.peek(), Some(Tok::Kw("int")) | Some(Tok::Kw("char"))) {
+                p.bump();
+                while matches!(p.peek(), Some(Tok::Star)) { p.bump(); }
+                p.eat(&Tok::RParen)?;
+                return parse_atom(p);
+            }
             let inner = parse_expr(p)?;
             p.eat(&Tok::RParen)?;
             Ok(inner)
         }
         Some(Tok::Int(n)) => Ok(Expr::IntLit(n)),
+        Some(Tok::PlusPlus) => {
+            // `++<ident>` — synthesize `<ident> + 1` at use site.
+            // For statement contexts, parse_stmt routes through
+            // parse_compound_rhs instead.
+            let inner = parse_atom(p)?;
+            Ok(Expr::BinOp {
+                op: BinOp::Add,
+                left: Box::new(inner),
+                right: Box::new(Expr::IntLit(1)),
+            })
+        }
+        Some(Tok::MinusMinus) => {
+            let inner = parse_atom(p)?;
+            Ok(Expr::BinOp {
+                op: BinOp::Sub,
+                left: Box::new(inner),
+                right: Box::new(Expr::IntLit(1)),
+            })
+        }
+        Some(Tok::Bang) => {
+            // `!<expr>` — equivalent to `<expr> == 0`.
+            let inner = parse_atom(p)?;
+            Ok(Expr::BinOp {
+                op: BinOp::Eq,
+                left: Box::new(inner),
+                right: Box::new(Expr::IntLit(0)),
+            })
+        }
+        Some(Tok::Tilde) => {
+            // `~<expr>` — bitwise complement via XOR with all-ones.
+            let inner = parse_atom(p)?;
+            Ok(Expr::BinOp {
+                op: BinOp::BitXor,
+                left: Box::new(inner),
+                right: Box::new(Expr::IntLit(-1)),
+            })
+        }
         Some(Tok::StrLit(mut bytes)) => {
             // Intern the literal in the unit-level string pool with
             // the terminating NUL appended. Fixture 4103.
