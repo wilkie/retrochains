@@ -1323,6 +1323,13 @@ impl<'a> FunctionEmitter<'a> {
             }
             StmtKind::Assign { name, value } => {
                 self.advance_to_stmt_line(stmt);
+                // Pseudo-register LHS: `_AX = K;` lowers to a direct
+                // `mov ax, K`, no locals/globals involvement. Fixtures
+                // 4051 (`_AX = 0xabcd;`), 4053 (`_AH = 0x80;`).
+                if is_asm_pseudo_register(name) {
+                    self.emit_assign_pseudo_register(name, value);
+                    return;
+                }
                 // A local shadows a global of the same name (fixture
                 // 532). Check locals first.
                 if self.locals.has(name) {
@@ -19288,6 +19295,20 @@ impl<'a> FunctionEmitter<'a> {
     /// Assign to a file-scope variable: `<width> ptr DGROUP:_<name>`
     /// is both the lvalue and the rvalue address. Fixture 085:
     /// `g = 7;` → `mov word ptr DGROUP:_g, 7`.
+    /// `_AX = K;` / `_AH = K;` / etc. — assignment to a pseudo-register
+    /// identifier. Bypasses locals/globals; emits a direct `mov <reg>,
+    /// <imm>` for constant RHS. Fixtures 4051 (`_AX = 0xabcd;`) and
+    /// 4053 (`_AH = 0x80;`).
+    fn emit_assign_pseudo_register(&mut self, name: &str, value: &Expr) {
+        let reg = pseudo_register_operand(name)
+            .expect("caller verified pseudo-register name");
+        let v = try_const_eval(value).unwrap_or_else(|| {
+            panic!("non-const RHS for pseudo-register `{name}` assignment not yet supported")
+        });
+        let v_masked = if is_byte_pseudo_register(name) { v & 0xFF } else { v & 0xFFFF };
+        let _ = write!(self.out, "\tmov\t{reg},{v_masked}\r\n");
+    }
+
     fn emit_assign_global(&mut self, name: &str, value: &Expr) {
         let ty = self
             .globals
@@ -25073,6 +25094,29 @@ fn is_asm_pseudo_register(name: &str) -> bool {
             | "_SI" | "_DI" | "_BP" | "_SP"
             | "_ES" | "_CS" | "_SS" | "_DS"
     )
+}
+
+/// Lowercase asm operand for a pseudo-register identifier. Returns
+/// `None` if `name` is not a pseudo-register, or if it's `_FLAGS`
+/// (which has no direct mov-target form — callers must route flag
+/// reads through `pushf`).
+fn pseudo_register_operand(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "_AX" => "ax", "_BX" => "bx", "_CX" => "cx", "_DX" => "dx",
+        "_AL" => "al", "_AH" => "ah",
+        "_BL" => "bl", "_BH" => "bh",
+        "_CL" => "cl", "_CH" => "ch",
+        "_DL" => "dl", "_DH" => "dh",
+        "_SI" => "si", "_DI" => "di", "_BP" => "bp", "_SP" => "sp",
+        "_ES" => "es", "_CS" => "cs", "_SS" => "ss", "_DS" => "ds",
+        _ => return None,
+    })
+}
+
+/// True for the 8-bit pseudo-registers (`_AL`, `_AH`, ..., `_DH`).
+/// Used when narrowing immediate values for byte-width stores.
+fn is_byte_pseudo_register(name: &str) -> bool {
+    matches!(name, "_AL" | "_AH" | "_BL" | "_BH" | "_CL" | "_CH" | "_DL" | "_DH")
 }
 
 fn normalize_asm_line(s: &str) -> String {
