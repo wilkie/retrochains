@@ -1386,6 +1386,14 @@ fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> {
         Some(Tok::Kw("int")) => true,
         Some(Tok::Kw("char")) => true,
         Some(Tok::Kw("void")) => false,
+        Some(Tok::Kw("struct")) => {
+            // Skip the struct's name. Phase 1 only models functions
+            // that return a struct *pointer* (`struct S *f()`) — full
+            // struct-by-value returns need a hidden-pointer ABI we
+            // don't support yet.
+            if matches!(p.peek(), Some(Tok::Ident(_))) { p.bump(); }
+            true
+        }
         other => {
             return Err(EmitError::Unsupported(format!(
                 "expected return type, got {other:?}"
@@ -5401,6 +5409,9 @@ fn const_index_global(e: &Expr, locals: &Locals<'_>) -> Option<(usize, u16)> {
             let k = index.fold(locals.inits)?;
             let off = u16::try_from(k as i64).ok()?;
             Some((*array, off))
+        }
+        Expr::GlobalField { global, byte_off, size: 2 } => {
+            Some((*global, *byte_off))
         }
         _ => None,
     }
