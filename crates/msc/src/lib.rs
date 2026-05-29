@@ -145,6 +145,9 @@ impl GlobalInit {
 pub struct Function {
     pub name: String,
     pub return_int: bool,
+    /// True when the function returns `char` — callers should cbw the
+    /// AL result into AX before using it as an int.
+    pub return_char: bool,
     pub params: Vec<String>,
     pub locals: Vec<LocalSpec>,
     pub body: Vec<Stmt>,
@@ -237,6 +240,9 @@ pub struct Locals<'a> {
     /// literal expression. Char locals fold for bare reads only when
     /// this is true (fixture 1023 vs 1046).
     pub init_literals: &'a [bool],
+    /// Map of function names that return `char`. The caller inserts
+    /// `cbw` after the call to widen AL to AX (fixture 1006).
+    pub char_returners: &'a std::collections::HashSet<String>,
 }
 
 impl Locals<'_> {
@@ -1655,9 +1661,10 @@ fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> {
     // then expect `int` / `char` / `void`. `char` returns are widened
     // to int via cbw at the consume site; treat as int here.
     skip_decl_modifiers(p);
+    let mut return_char = false;
     let return_int = match p.bump().cloned() {
         Some(Tok::Kw("int")) => true,
-        Some(Tok::Kw("char")) => true,
+        Some(Tok::Kw("char")) => { return_char = true; true }
         Some(Tok::Kw("void")) => false,
         Some(Tok::Kw("struct")) => {
             // Skip the struct's name. Phase 1 only models functions
@@ -2028,7 +2035,7 @@ fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> {
     }
     p.eat(&Tok::RBrace)?;
 
-    Ok(Function { name, return_int, params, locals, body })
+    Ok(Function { name, return_int, return_char, params, locals, body })
 }
 
 fn parse_signed_int(p: &mut Parser<'_>) -> Result<i32, EmitError> {
@@ -3324,10 +3331,14 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
     // offsets for call resolution + chkstk FIXUPs.
     let long_globals: Vec<bool> = unit.globals.iter().map(|g| g.is_long).collect();
     let char_globals: Vec<bool> = unit.globals.iter().map(|g| !g.is_pointer && g.element_size == 1 && g.array_len == 1).collect();
+    let char_returners: std::collections::HashSet<String> = unit.functions.iter()
+        .filter(|f| f.return_char)
+        .map(|f| symbol_name(&f.name))
+        .collect();
     let function_emits: Vec<FunctionEmit> = unit
         .functions
         .iter()
-        .map(|f| emit_function(f, &long_globals, &char_globals))
+        .map(|f| emit_function(f, &long_globals, &char_globals, &char_returners))
         .collect();
 
     // Per-function global offset within the _TEXT segment.
@@ -4239,7 +4250,12 @@ fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
     }
 }
 
-fn emit_function(func: &Function, long_globals: &[bool], char_globals: &[bool]) -> FunctionEmit {
+fn emit_function(
+    func: &Function,
+    long_globals: &[bool],
+    char_globals: &[bool],
+    char_returners: &std::collections::HashSet<String>,
+) -> FunctionEmit {
     let (body, mutated_locals, _mutated_globals) = const_prop_globals(&func.body, &func.locals, long_globals);
     // Extract a `Vec<Option<i32>>` view for the existing fold path —
     // saves rewriting every codegen helper to know about LocalSpec.
@@ -4353,6 +4369,7 @@ fn emit_function(func: &Function, long_globals: &[bool], char_globals: &[bool]) 
         char_globals,
         long_locals: &local_long,
         init_literals: &local_literals,
+        char_returners,
     };
 
     let mut reachable = true;
@@ -4627,6 +4644,11 @@ fn emit_call(
         out.push(0x83);
         out.push(0xC4);
         out.push(u8::try_from(cleanup_bytes).expect("cleanup fits in u8"));
+    }
+    // Char-returning callee leaves the byte in AL; widen to int via
+    // cbw before the caller treats the value as an int. Fixture 1006.
+    if locals.char_returners.contains(&symbol_name(name)) {
+        out.push(0x98);
     }
 }
 
