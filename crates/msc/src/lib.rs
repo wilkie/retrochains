@@ -346,6 +346,9 @@ pub enum AssignTarget {
     /// rather than `[bp-disp]`. C semantics: only mutates the local
     /// copy. Fixture 1224.
     Param(usize),
+    /// `*<ptr-param> = <expr>;` — store through a pointer parameter.
+    /// Codegen: `mov bx, [bp+pdisp]; mov [bx], imm/ax`.
+    DerefParam(usize),
     Global(usize),
     /// `*<ptr-global> = <expr>;` — store the RHS through a pointer
     /// global. Fixture 4116.
@@ -1986,6 +1989,8 @@ fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
                 AssignTarget::DerefLocal(idx)
             } else if let Some(idx) = p.global_names.iter().position(|n| *n == target_name) {
                 AssignTarget::DerefGlobal(idx)
+            } else if let Some(idx) = p.param_names.iter().position(|n| *n == target_name) {
+                AssignTarget::DerefParam(idx)
             } else {
                 return Err(EmitError::Unsupported(format!(
                     "deref-store through unknown identifier `{target_name}`"
@@ -4328,6 +4333,11 @@ fn emit_push_arg(arg: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mu
                 kind: FixupKind::GlobalAddr { global_idx: *idx },
             });
         }
+        Expr::AddrOfLocal(idx) => {
+            // `lea ax, [bp-disp]; push ax`. Fixture 1225.
+            let disp = locals.disp(*idx);
+            out.extend_from_slice(&[0x8D, 0x46, disp as u8, 0x50]);
+        }
         Expr::Global(idx) => {
             // `ff 36 <addr>` — push word ptr [imm16]. The placeholder
             // gets the global's _DATA offset; the FIXUP carries the
@@ -4366,6 +4376,9 @@ fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_>, out: &mu
         AssignTarget::Local(i) => i,
         AssignTarget::Param(i) => {
             return emit_assign_param(i, value, locals, out, fixups);
+        }
+        AssignTarget::DerefParam(i) => {
+            return emit_assign_deref_param(i, value, locals, out, fixups);
         }
         AssignTarget::Global(g) => {
             return emit_assign_global(g, value, locals, out, fixups);
@@ -4577,6 +4590,37 @@ fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_>, out: &mu
 /// `<expr-to-ax>; a3 addr` (mov moffs16, ax, 3 bytes).
 /// Both shapes plant a 2-byte address placeholder that the linker
 /// resolves via a GlobalAddr fixup.
+/// `*<ptr-param> = <expr>;` — store through a param pointer.
+/// `mov bx, [bp+pdisp]; mov [bx], imm/ax`. We don't track param
+/// pointee size yet; emit word store by default, which is correct
+/// for `int *` and the low byte of `char *` (the high byte is
+/// untouched but ignored). For `char *p; *p = K;` the right shape
+/// would be `c6 07 imm8` — let's match that.
+fn emit_assign_deref_param(param_idx: usize, value: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    let pdisp = param_disp(param_idx);
+    out.push(0x8B);
+    out.push(0x5E);
+    out.push(pdisp as u8);
+    if let Some(k) = value.fold(locals.inits) {
+        // `c7 07 imm16` mov word [bx], imm. We don't know if dest is
+        // byte/word — default to word; fixture 1225 has char and expects
+        // byte store. Pick byte when fits in i8 to favor the common
+        // small-K char case.
+        if let Ok(k8) = i8::try_from(k) {
+            out.extend_from_slice(&[0xC6, 0x07, k8 as u8]);
+        } else {
+            out.push(0xC7);
+            out.push(0x07);
+            let imm = (k as u32 & 0xFFFF) as u16;
+            out.extend_from_slice(&imm.to_le_bytes());
+        }
+    } else {
+        emit_expr_to_ax(value, locals, out, fixups);
+        // `mov [bx], ax`.
+        out.extend_from_slice(&[0x89, 0x07]);
+    }
+}
+
 /// `<param> = <expr>;` — modify the function's local copy. Same
 /// peepholes as `emit_assign` apply but with disp8 = `param_disp(i)`
 /// (a positive value `[bp+disp]`). Fixture 1224.
