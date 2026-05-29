@@ -2173,6 +2173,12 @@ fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
                     "deref-store through unknown identifier `{target_name}`"
                 )));
             };
+            // Compound `*p += K;` etc. — synthesize as `*p = *p op K;`.
+            // Detection via parse_compound_rhs with a synthetic lvalue.
+            if let Some(value) = parse_compound_rhs(p, &target)? {
+                p.eat(&Tok::Semi)?;
+                return Ok(Stmt::Assign { target, value });
+            }
             p.eat(&Tok::Assign)?;
             let value = parse_expr(p)?;
             p.eat(&Tok::Semi)?;
@@ -2514,6 +2520,11 @@ fn parse_compound_rhs(p: &mut Parser<'_>, target: &AssignTarget) -> Result<Optio
         AssignTarget::Local(i) => Expr::Local(*i),
         AssignTarget::Param(i) => Expr::Param(*i),
         AssignTarget::Global(g) => Expr::Global(*g),
+        // Deref targets read via DerefWord/Byte (the pointee size
+        // isn't tracked; default to word). Lets `*p += K` desugar.
+        AssignTarget::DerefLocal(i) => Expr::DerefWord { ptr: Box::new(Expr::Local(*i)) },
+        AssignTarget::DerefParam(i) => Expr::DerefWord { ptr: Box::new(Expr::Param(*i)) },
+        AssignTarget::DerefGlobal(g) => Expr::DerefWord { ptr: Box::new(Expr::Global(*g)) },
         _ => return Ok(None),
     };
     let op = match p.peek() {
