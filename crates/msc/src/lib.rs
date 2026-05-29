@@ -300,6 +300,12 @@ pub enum Cond {
     Truthy(Expr),
     /// `if (<left> <op> <right>)` — comparison.
     Cmp { op: RelOp, left: Expr, right: Expr },
+    /// `if (a && b)` — short-circuit conjunction. The skip target
+    /// from `a` jumps over `b` AND the body.
+    And(Box<Cond>, Box<Cond>),
+    /// `if (a || b)` — short-circuit disjunction. The take-then
+    /// target from `a` jumps into the body, skipping `b`.
+    Or(Box<Cond>, Box<Cond>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1782,11 +1788,26 @@ fn parse_assign_no_semi(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
 }
 
 fn parse_cond(p: &mut Parser<'_>) -> Result<Cond, EmitError> {
-    // Parse the cond as a normal expression; relops live in the same
-    // precedence table. Then unwrap the outermost relop into the
-    // dedicated Cond::Cmp shape so the cmp+jcc emit path matches MSC's
-    // direct addressing modes.
     let expr = parse_expr(p)?;
+    Ok(cond_from_expr(expr))
+}
+
+/// Convert a parsed expression into a Cond — recognizes `&&` / `||`
+/// at the top level so emit_cond_skip can emit short-circuit
+/// branches, and unwraps relational ops into `Cond::Cmp`.
+fn cond_from_expr(expr: Expr) -> Cond {
+    if let Expr::BinOp { op: BinOp::LogAnd, left, right } = expr {
+        return Cond::And(
+            Box::new(cond_from_expr(*left)),
+            Box::new(cond_from_expr(*right)),
+        );
+    }
+    if let Expr::BinOp { op: BinOp::LogOr, left, right } = expr {
+        return Cond::Or(
+            Box::new(cond_from_expr(*left)),
+            Box::new(cond_from_expr(*right)),
+        );
+    }
     if let Expr::BinOp { op, left, right } = &expr {
         let rel = match op {
             BinOp::Eq => Some(RelOp::Eq),
@@ -1798,14 +1819,14 @@ fn parse_cond(p: &mut Parser<'_>) -> Result<Cond, EmitError> {
             _ => None,
         };
         if let Some(op) = rel {
-            return Ok(Cond::Cmp {
+            return Cond::Cmp {
                 op,
                 left: left.as_ref().clone(),
                 right: right.as_ref().clone(),
-            });
+            };
         }
     }
-    Ok(Cond::Truthy(expr))
+    Cond::Truthy(expr)
 }
 
 /// Expression parser — recognizes the Slice-4 shapes:
@@ -2970,6 +2991,10 @@ fn prop_cond(cond: &mut Cond, cp: &ConstProp) {
             prop_expr(left, cp);
             prop_expr(right, cp);
         }
+        Cond::And(a, b) | Cond::Or(a, b) => {
+            prop_cond(a, cp);
+            prop_cond(b, cp);
+        }
     }
 }
 
@@ -3294,6 +3319,18 @@ fn fold_cond(cond: &Cond, locals: &Locals<'_>) -> Option<i32> {
                 RelOp::Le => i32::from(l <= r),
                 RelOp::Ge => i32::from(l >= r),
             })
+        }
+        Cond::And(a, b) => {
+            let av = fold_cond(a, locals)?;
+            if av == 0 { return Some(0); }
+            let bv = fold_cond(b, locals)?;
+            Some(i32::from(bv != 0))
+        }
+        Cond::Or(a, b) => {
+            let av = fold_cond(a, locals)?;
+            if av != 0 { return Some(1); }
+            let bv = fold_cond(b, locals)?;
+            Some(i32::from(bv != 0))
         }
     }
 }
@@ -3783,6 +3820,9 @@ fn emit_loop(
     let jcc_opcode = match cond {
         Cond::Truthy(_) => 0x75,             // jne (back when nonzero)
         Cond::Cmp { op, .. } => loop_back_jcc(*op),
+        Cond::And(_, _) | Cond::Or(_, _) => {
+            panic!("&&/|| in while/do-while not yet supported");
+        }
     };
 
     let body_len = body_buf.len();
@@ -3847,6 +3887,9 @@ fn emit_do_while(
     let jcc_opcode = match cond {
         Cond::Truthy(_) => 0x75,             // jne (back when nonzero)
         Cond::Cmp { op, .. } => loop_back_jcc(*op),
+        Cond::And(_, _) | Cond::Or(_, _) => {
+            panic!("&&/|| in while/do-while not yet supported");
+        }
     };
     let body_base = out.len();
     out.extend_from_slice(&body_buf);
@@ -3895,13 +3938,81 @@ fn emit_cond_cmp(cond: &Cond, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &m
 /// caller has pre-computed the size of the then-body so we can use
 /// the 2-byte jcc form without a fixup. Fixtures 4090 / 4091 / 4092.
 fn emit_cond_skip(cond: &Cond, take_then_disp: i8, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
-    let jcc = match cond {
-        Cond::Truthy(_) => 0x74, // je on zero
-        Cond::Cmp { op, .. } => inverted_jcc(*op),
-    };
-    emit_cond_cmp_inner(cond, locals, out, fixups);
-    out.push(jcc);
-    out.push(take_then_disp as u8);
+    match cond {
+        Cond::And(a, b) => {
+            // Pre-emit `b`'s cmp+jcc-to-skip into a scratch buffer
+            // so we know its size. `a`'s skip target jumps over `b`
+            // AND the body. `b`'s skip target jumps over just the
+            // body — the original `take_then_disp`.
+            let mut b_buf = Vec::new();
+            let mut b_fixups = Vec::new();
+            emit_cond_skip(b, take_then_disp, locals, &mut b_buf, &mut b_fixups);
+            let a_skip = i8::try_from(b_buf.len() as i32 + take_then_disp as i32)
+                .expect("&&-cond skip fits in rel8");
+            emit_cond_skip(a, a_skip, locals, out, fixups);
+            let b_base = out.len();
+            out.extend_from_slice(&b_buf);
+            for mut f in b_fixups {
+                f.body_offset += b_base;
+                fixups.push(f);
+            }
+        }
+        Cond::Or(a, b) => {
+            // `a` true → jump into the body (skipping `b`). `a`
+            // false → fall through to `b`. `b` evaluates as a
+            // normal skip-cond: true → fall into body, false → skip.
+            //
+            // For `a`'s "take then" direction we need to invert the
+            // jcc to a "take when true" form and target the start of
+            // the body. We use emit_cond_take helper which emits
+            // cmp + take-then-jcc instead of skip-jcc.
+            let mut b_buf = Vec::new();
+            let mut b_fixups = Vec::new();
+            emit_cond_skip(b, take_then_disp, locals, &mut b_buf, &mut b_fixups);
+            // a's "take" disp: jump past b's emission to the body.
+            let a_take = i8::try_from(b_buf.len() as i32)
+                .expect("||-cond take disp fits in rel8");
+            emit_cond_take(a, a_take, locals, out, fixups);
+            let b_base = out.len();
+            out.extend_from_slice(&b_buf);
+            for mut f in b_fixups {
+                f.body_offset += b_base;
+                fixups.push(f);
+            }
+        }
+        _ => {
+            let jcc = match cond {
+                Cond::Truthy(_) => 0x74, // je on zero
+                Cond::Cmp { op, .. } => inverted_jcc(*op),
+                _ => unreachable!(),
+            };
+            emit_cond_cmp_inner(cond, locals, out, fixups);
+            out.push(jcc);
+            out.push(take_then_disp as u8);
+        }
+    }
+}
+
+/// Counterpart of `emit_cond_skip` — emits cmp + a jcc that fires
+/// when the condition is *true*, skipping ahead by `take_disp`
+/// bytes. Used by Cond::Or short-circuit so `a` jumps into the body
+/// when satisfied.
+fn emit_cond_take(cond: &Cond, take_disp: i8, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    match cond {
+        Cond::And(_, _) | Cond::Or(_, _) => {
+            panic!("nested &&/|| in emit_cond_take not yet supported");
+        }
+        _ => {
+            let jcc = match cond {
+                Cond::Truthy(_) => 0x75, // jne (take when nonzero)
+                Cond::Cmp { op, .. } => loop_back_jcc(*op),
+                _ => unreachable!(),
+            };
+            emit_cond_cmp_inner(cond, locals, out, fixups);
+            out.push(jcc);
+            out.push(take_disp as u8);
+        }
+    }
 }
 
 /// Emit only the cmp half of a Cond. Used by both emit_cond_skip
