@@ -2413,6 +2413,36 @@ fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
             // All rewrite to `Stmt::Assign { target, value: <existing target> <op> <rhs> }`.
             // The existing local/global codegen + peephole take it from there.
             if let Some(value) = parse_compound_rhs(p, &target)? {
+                // `a += b++` — the compound RHS is itself a postfix
+                // expression. Wrap the assign + subsequent self-inc in
+                // a Block (fixture 1347).
+                if matches!(p.peek(), Some(Tok::PlusPlus) | Some(Tok::MinusMinus))
+                    && let Expr::BinOp { right, .. } = &value
+                    && matches!(right.as_ref(), Expr::Local(_) | Expr::Global(_) | Expr::Param(_))
+                {
+                    let inc = matches!(p.peek(), Some(Tok::PlusPlus));
+                    p.bump();
+                    p.eat(&Tok::Semi)?;
+                    let inner = (**right).clone();
+                    let post_target = match &inner {
+                        Expr::Local(i) => AssignTarget::Local(*i),
+                        Expr::Param(i) => AssignTarget::Param(*i),
+                        Expr::Global(g) => AssignTarget::Global(*g),
+                        _ => unreachable!(),
+                    };
+                    let post_stmt = Stmt::Assign {
+                        target: post_target,
+                        value: Expr::BinOp {
+                            op: if inc { BinOp::Add } else { BinOp::Sub },
+                            left: Box::new(inner),
+                            right: Box::new(Expr::IntLit(1)),
+                        },
+                    };
+                    return Ok(Stmt::Block(vec![
+                        Stmt::Assign { target, value },
+                        post_stmt,
+                    ]));
+                }
                 p.eat(&Tok::Semi)?;
                 return Ok(Stmt::Assign { target, value });
             }
