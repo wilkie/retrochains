@@ -1,0 +1,4 @@
+description = "Two char pointer globals each pointing to a different string literal. Probes multi-string CONST layout and confirms the second pointer's FIXUP carries a non-zero displacement (offset of `by\\0` past `hi\\0`)."
+tool = "cl"
+args = ["/c", "/AS", "HELLO.C"]
+inputs = ["HELLO.C"]
