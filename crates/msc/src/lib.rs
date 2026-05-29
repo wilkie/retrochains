@@ -1672,6 +1672,12 @@ fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> {
     let return_int = match p.bump().cloned() {
         Some(Tok::Kw("int")) => true,
         Some(Tok::Kw("char")) => { return_char = true; true }
+        Some(Tok::Kw("long")) => {
+            // `long int` accepted; treat long return as int (just
+            // takes the low word). No 32-bit return ABI yet.
+            if matches!(p.peek(), Some(Tok::Kw("int"))) { p.bump(); }
+            true
+        }
         Some(Tok::Kw("void")) => false,
         Some(Tok::Kw("struct")) => {
             // Skip the struct's name. Phase 1 only models functions
@@ -1718,6 +1724,13 @@ fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> {
             let mut struct_idx: Option<usize> = None;
             match p.peek() {
                 Some(Tok::Kw("int")) | Some(Tok::Kw("char")) => { p.bump(); }
+                Some(Tok::Kw("long")) => {
+                    // Long param — treated as a single 2-byte slot for
+                    // now (caller passes the low word). Real `long`
+                    // param ABI would need 4 bytes; deferred.
+                    p.bump();
+                    if matches!(p.peek(), Some(Tok::Kw("int"))) { p.bump(); }
+                }
                 Some(Tok::Kw("struct")) => {
                     p.bump();
                     let sname = match p.bump().cloned() {
