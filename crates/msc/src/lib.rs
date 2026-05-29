@@ -26,8 +26,8 @@ pub fn emit_dash_c(source_path: &Path) -> Result<std::path::PathBuf, EmitError> 
         .and_then(|s| s.to_str())
         .ok_or_else(|| EmitError::BadSourcePath(source_path.display().to_string()))?;
     let source = std::fs::read_to_string(source_path).map_err(EmitError::Io)?;
-    let ast = parse_main(&source)?;
-    let bytes = build_obj(source_filename, &ast);
+    let unit = parse_unit(&source)?;
+    let bytes = build_obj(source_filename, &unit);
     let basename = source_path
         .file_stem()
         .and_then(|s| s.to_str())
@@ -37,19 +37,26 @@ pub fn emit_dash_c(source_path: &Path) -> Result<std::path::PathBuf, EmitError> 
     Ok(std::path::PathBuf::from(out_name))
 }
 
-/// A minimal AST covering Phase 1's source-shape envelope.
+/// A translation unit: a sequence of function definitions in
+/// source order. Phase 1 only handles non-static cdecl functions —
+/// every entry contributes both a PUBDEF and (per MSC's habit) an
+/// EXTDEF declaration.
 #[derive(Debug, Clone)]
-pub struct MainAst {
-    /// Initializer per local in source-declaration order. `None` for
-    /// uninitialized declarations (`int x;`). Length is the local
-    /// count; bytes-of-frame = `locals.len() * 2`.
+pub struct Unit {
+    pub functions: Vec<Function>,
+}
+
+/// One function definition. `return_int` distinguishes `int f(void)`
+/// from `void f(void)` — void functions skip the return-value
+/// instruction in their tail.
+#[derive(Debug, Clone)]
+pub struct Function {
+    pub name: String,
+    pub return_int: bool,
     pub locals: Vec<Option<i32>>,
-    /// Statements after the local declarations, in source order.
-    /// Always ends in a `Return` or an `If` whose every leaf is a
-    /// `Return` — Phase 1 functions don't have an implicit
-    /// fall-through return path.
     pub body: Vec<Stmt>,
 }
+
 
 /// Statement AST. Phase 1 covers `return <expr>;`,
 /// `if (<cond>) <stmt>;`, `if (<cond>) <stmt> else <stmt>;`,
@@ -59,6 +66,9 @@ pub struct MainAst {
 #[derive(Debug, Clone)]
 pub enum Stmt {
     Return(Expr),
+    /// An expression statement — currently used only for
+    /// discarded call results (`f();`, fixture 4099).
+    ExprStmt(Expr),
     /// Empty statement (`;`). Carries no codegen. Used as the body
     /// of an empty for-loop, fixture 4097.
     Empty,
@@ -115,17 +125,23 @@ pub enum RelOp {
 }
 
 /// Expression AST. Phase 1 grows this incrementally as fixtures
-/// land — Slice 3 had `IntLit` and `Local`; Slice 4 adds `BinOp`.
+/// land — Slice 3 had `IntLit` and `Local`; Slice 4 adds `BinOp`;
+/// Slice 6 adds `Call`.
 #[derive(Debug, Clone)]
 pub enum Expr {
     /// A 16-bit-truncated int literal.
     IntLit(i32),
-    /// Reference to a local by index into `MainAst.locals`.
+    /// Reference to a local by index into the enclosing function's
+    /// `locals` array.
     Local(usize),
     /// A binary operation. `op` selects add/sub/mul/...; codegen
     /// picks the actual instruction (inc/dec/shl/shift-add/imul)
     /// based on the operands.
     BinOp { op: BinOp, left: Box<Expr>, right: Box<Expr> },
+    /// Call by name with no arguments. Slice 6 fixture 4099
+    /// exercises the void/zero-arg case; later fixtures will widen
+    /// this to carry arguments.
+    Call { name: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -155,6 +171,7 @@ impl Expr {
                     BinOp::Mul => l.wrapping_mul(r),
                 })
             }
+            Expr::Call { .. } => None,
         }
     }
 }
@@ -294,35 +311,60 @@ impl<'a> Parser<'a> {
     }
 }
 
-/// Parse Phase 1's source-shape envelope:
-/// ```text
-/// int main(void) {
-///   [int <name> [= <int>];]*
-///   <stmt>+
-/// }
-/// ```
-/// Statements are `return <expr>;` or
-/// `if (<cond>) <stmt> [else <stmt>]`. Cond is `<expr>` or
-/// `<expr> == <expr>`. Expressions are the Slice-4 shapes (literal,
-/// local, single binop).
-fn parse_main(source: &str) -> Result<MainAst, EmitError> {
+/// Parse Phase 1's source-shape envelope: a sequence of function
+/// definitions, each `<ret-type> <name>(void) { <body> }`. `ret-type`
+/// is `int` or `void`; bodies follow the existing per-statement
+/// grammar.
+fn parse_unit(source: &str) -> Result<Unit, EmitError> {
     let toks = tokenize(source)?;
     let mut p = Parser { toks: &toks, pos: 0, local_names: Vec::new() };
+    let mut functions = Vec::new();
+    while p.peek().is_some() {
+        functions.push(parse_function(&mut p)?);
+    }
+    if functions.is_empty() {
+        return Err(EmitError::Unsupported(
+            "translation unit has no functions".to_owned(),
+        ));
+    }
+    Ok(Unit { functions })
+}
 
-    // `int main(void) {`
-    p.eat(&Tok::Kw("int"))?;
-    p.eat(&Tok::Kw("main"))?;
+fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> {
+    // `<ret-type> <name>(void) {`. Phase 1 supports `int` and `void`
+    // as return types; no parameters yet.
+    let return_int = match p.bump().cloned() {
+        Some(Tok::Kw("int")) => true,
+        Some(Tok::Kw("void")) => false,
+        other => {
+            return Err(EmitError::Unsupported(format!(
+                "expected return type, got {other:?}"
+            )));
+        }
+    };
+    let name = match p.bump().cloned() {
+        Some(Tok::Kw("main")) => "main".to_owned(),
+        Some(Tok::Ident(s)) => s,
+        other => {
+            return Err(EmitError::Unsupported(format!(
+                "expected function name, got {other:?}"
+            )));
+        }
+    };
     p.eat(&Tok::LParen)?;
     p.eat(&Tok::Kw("void"))?;
     p.eat(&Tok::RParen)?;
     p.eat(&Tok::LBrace)?;
 
+    // Reset per-function local list before parsing the body.
+    p.local_names.clear();
+
     // `int <name> [= <int>];` declarations.
     let mut local_inits: Vec<Option<i32>> = Vec::new();
     while matches!(p.peek(), Some(Tok::Kw("int"))) {
         p.bump(); // int
-        let name = match p.bump() {
-            Some(Tok::Ident(s)) => s.clone(),
+        let lname = match p.bump().cloned() {
+            Some(Tok::Ident(s)) => s,
             other => {
                 return Err(EmitError::Unsupported(format!(
                     "expected identifier in declaration, got {other:?}"
@@ -331,23 +373,23 @@ fn parse_main(source: &str) -> Result<MainAst, EmitError> {
         };
         let init = if matches!(p.peek(), Some(Tok::Assign)) {
             p.bump();
-            Some(parse_signed_int(&mut p)?)
+            Some(parse_signed_int(p)?)
         } else {
             None
         };
         p.eat(&Tok::Semi)?;
-        p.local_names.push(name);
+        p.local_names.push(lname);
         local_inits.push(init);
     }
 
     // Body statements until the closing `}`.
     let mut body = Vec::new();
     while !matches!(p.peek(), Some(Tok::RBrace)) {
-        body.push(parse_stmt(&mut p)?);
+        body.push(parse_stmt(p)?);
     }
     p.eat(&Tok::RBrace)?;
 
-    Ok(MainAst { locals: local_inits, body })
+    Ok(Function { name, return_int, locals: local_inits, body })
 }
 
 fn parse_signed_int(p: &mut Parser<'_>) -> Result<i32, EmitError> {
@@ -424,11 +466,19 @@ fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
             Ok(Stmt::Empty)
         }
         Some(Tok::Ident(_)) => {
-            // Assignment statement `<local> = <expr>;`.
+            // Either `<local> = <expr>;` (assignment) or
+            // `<name>();` (call as an expression statement).
+            // Peek ahead one token to disambiguate.
             let name = match p.bump().cloned() {
                 Some(Tok::Ident(s)) => s,
                 _ => unreachable!(),
             };
+            if matches!(p.peek(), Some(Tok::LParen)) {
+                p.bump(); // (
+                p.eat(&Tok::RParen)?;
+                p.eat(&Tok::Semi)?;
+                return Ok(Stmt::ExprStmt(Expr::Call { name }));
+            }
             let local_idx = p.local_names
                 .iter()
                 .position(|n| *n == name)
@@ -524,11 +574,29 @@ fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
     }
 }
 
+/// Per-function emission output — the function's code bytes plus a
+/// list of (offset, target-name) call sites that need their `e8
+/// disp16` placeholders patched after we know each function's global
+/// position within the combined LEDATA.
+struct FunctionEmit {
+    bytes: Vec<u8>,
+    calls: Vec<CallSite>,
+    chkstk_offset_in_body: usize,
+}
+
+#[derive(Debug)]
+struct CallSite {
+    /// Offset of the `e8` opcode within `FunctionEmit::bytes`.
+    body_offset: usize,
+    /// Name of the function being called.
+    target: String,
+}
+
 /// Produce the OBJ bytes for `cl /c /AS <source>` compiling the
-/// `int main(void)` shape modeled by `ast`. `source_filename` goes
-/// into THEADR uppercased the same way CL does it on the command line.
+/// translation unit `unit`. `source_filename` goes into THEADR
+/// uppercased the same way CL does it on the command line.
 #[must_use]
-pub fn build_obj(source_filename: &str, ast: &MainAst) -> Vec<u8> {
+pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
     let mut b = ObjBuilder::new();
 
     // THEADR — module header. Source filename uppercased.
@@ -576,16 +644,26 @@ pub fn build_obj(source_filename: &str, ast: &MainAst) -> Vec<u8> {
         "_BSS", "BSS",
     ]);
 
-    // Build the `_main` body up front so we can stamp its length
-    // into the _TEXT SEGDEF. MSC pads odd-length function bodies
-    // with a trailing NOP so every function ends on a word boundary.
-    let main_body = main_body_for(ast);
-    let text_len = u16::try_from(main_body.len()).expect("_TEXT body fits in u16");
-    // The chkstk call's displacement bytes live at a fixed offset
-    // within the body — same byte position regardless of what comes
-    // after. Compute it once for the FIXUPP that patches the call.
-    let chkstk_patch_offset = u8::try_from(chkstk_disp_offset(ast))
-        .expect("chkstk patch offset fits in u8");
+    // Build each function's body up front so we can stamp the
+    // total length into the _TEXT SEGDEF and compute per-function
+    // offsets for call resolution + chkstk FIXUPs.
+    let function_emits: Vec<FunctionEmit> = unit
+        .functions
+        .iter()
+        .map(emit_function)
+        .collect();
+    // Per-function global offset within the _TEXT segment.
+    let mut function_offsets: Vec<usize> = Vec::with_capacity(unit.functions.len());
+    let mut cursor: usize = 0;
+    let mut offset_by_name: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    for (i, fe) in function_emits.iter().enumerate() {
+        function_offsets.push(cursor);
+        offset_by_name.insert(symbol_name(&unit.functions[i].name), cursor);
+        cursor += fe.bytes.len();
+    }
+    let total_code_bytes = cursor;
+    let text_len = u16::try_from(total_code_bytes).expect("_TEXT body fits in u16");
 
     // SEGDEF table. MSC uses acbp=0x48 (word-aligned, public, big=0,
     // proc=0) for every segment in the small model — distinct from
@@ -634,38 +712,46 @@ pub fn build_obj(source_filename: &str, ast: &MainAst) -> Vec<u8> {
         0x45, 0x01,   // F1: GRPDEF #1 (DGROUP) — method F1=GRPDEF
     ]);
 
-    // EXTDEF — external symbols. MSC emits three even for an
-    // empty-main:
-    //   __acrtused  — sentinel that forces LINK to pull in the C
-    //                 runtime startup. No FIXUP references it; its
-    //                 presence in the EXTDEF table alone does the
-    //                 job. Type-idx 0x01 (vs 0x00) marks it as
-    //                 special — see Phase 2 for what 0x01 means
-    //                 exactly.
-    //   __chkstk    — stack-overflow checker; called from every
-    //                 function's prologue under /AS.
-    //   _main       — declared here as well as defined via PUBDEF
-    //                 below. MSC emits the dual declaration for
-    //                 the COMDAT / module-level lookup path.
-    //
-    // EXTDEF entry shape: <name-length><name-bytes><type-idx>.
-    // `obj::ObjBuilder::write_extdef` hardcodes type-idx 0, which
-    // doesn't fit MSC's `__acrtused: 1` pattern — build the payload
-    // manually.
+    // EXTDEF — external symbols. MSC always includes:
+    //   __acrtused  — sentinel forcing LINK to pull the C runtime
+    //                 startup. Type-idx 0x01 marks it special.
+    //   __chkstk    — stack checker, called from every prologue.
+    // Then every PUBDEF in the OBJ also gets declared here, in
+    // source order. Fixture 4099 confirms (`_f` and `_main`).
     {
         let mut payload = Vec::new();
-        for (name, ty) in [("__acrtused", 0x01u8), ("__chkstk", 0x00), ("_main", 0x00)] {
+        for (name, ty) in [("__acrtused", 0x01u8), ("__chkstk", 0x00)] {
             payload.push(u8::try_from(name.len()).expect("EXTDEF name fits"));
             payload.extend_from_slice(name.as_bytes());
             payload.push(ty);
         }
+        for f in &unit.functions {
+            let sym = symbol_name(&f.name);
+            payload.push(u8::try_from(sym.len()).expect("EXTDEF name fits"));
+            payload.extend_from_slice(sym.as_bytes());
+            payload.push(0);
+        }
         b.write_record(obj::EXTDEF, &payload);
     }
 
-    // PUBDEF — _main at _TEXT offset 0. base_group_idx=0 means the
-    // public is relative to its base segment (SEGDEF #1, _TEXT)
-    // directly, no group adjustment.
-    b.write_pubdef16(0, 1, "_main", 0, 0);
+    // PUBDEF — every function in the unit, at its global offset.
+    // MSC packs all functions into one PUBDEF record (fixture
+    // 4099). `write_pubdef16` only handles a single name, so build
+    // the multi-entry payload manually.
+    {
+        let mut payload = Vec::new();
+        payload.push(0); // base group idx
+        payload.push(1); // base segment idx (_TEXT)
+        for (i, f) in unit.functions.iter().enumerate() {
+            let sym = symbol_name(&f.name);
+            let off = u16::try_from(function_offsets[i]).expect("offset fits");
+            payload.push(u8::try_from(sym.len()).expect("pubdef name fits"));
+            payload.extend_from_slice(sym.as_bytes());
+            payload.extend_from_slice(&off.to_le_bytes());
+            payload.push(0); // type idx
+        }
+        b.write_record(obj::PUBDEF_16, &payload);
+    }
 
     // COMENT class 0xA2 — link-pass marker. MSC sandwiches the
     // LEDATA records between EXTDEF/PUBDEF setup and the data
@@ -674,24 +760,56 @@ pub fn build_obj(source_filename: &str, ast: &MainAst) -> Vec<u8> {
     // because there's only one LEDATA pass.
     b.write_coment(&[0x00, 0xA2, 0x01]);
 
-    // LEDATA #1 — _TEXT segment, offset 0, `_main` body bytes.
-    // See `main_body_for_return` for the shape.
-    b.write_ledata16(1, 0, &main_body);
+    // Patch all intra-segment calls. For each call site, compute the
+    // self-relative 16-bit displacement = target_offset -
+    // (caller_function_offset + body_offset + 3). The 3 is the
+    // length of the `e8 disp16` call instruction; rel16 is computed
+    // from the byte AFTER the instruction.
+    let mut function_emits = function_emits;
+    for (i, fe) in function_emits.iter_mut().enumerate() {
+        let caller_off = function_offsets[i];
+        for call in &fe.calls {
+            let target_off = offset_by_name
+                .get(&call.target)
+                .copied()
+                .expect("forward refs / extern calls not yet supported");
+            let disp = (target_off as i32)
+                - (caller_off as i32 + call.body_offset as i32 + 3);
+            let disp16 = (disp as i32 & 0xFFFF) as u16;
+            fe.bytes[call.body_offset + 1] = (disp16 & 0xFF) as u8;
+            fe.bytes[call.body_offset + 2] = ((disp16 >> 8) & 0xFF) as u8;
+        }
+    }
 
-    // FIXUPP — patch the placeholder bytes of the `call __chkstk`.
-    //   Locat byte 1 (0x84): bit7=1 (FIXUP), M=0 (self-relative),
-    //                        location=0001 (16-bit offset), hi-off=00
-    //   Locat byte 2 (<off>): low 8 bits of data-record offset — the
-    //                        position of the call's displacement
-    //                        within the LEDATA's data bytes. Varies
-    //                        with frame size: 3 for 0-byte frames
-    //                        (empty-main), 7 with a prologue.
-    //   Fix Data  (0x56):    F=0 (frame explicit), frame-method=F5
-    //                        (target's segment), T=0 (target explicit),
-    //                        P=1 (no displacement), target-method=T2
-    //                        (EXTDEF)
-    //   Target datum (0x02): EXTDEF index 2 (__chkstk)
-    b.write_fixupp(&[0x84, chkstk_patch_offset, 0x56, 0x02]);
+    // Concatenate every function's body into the single LEDATA
+    // payload at _TEXT offset 0.
+    let mut all_code = Vec::with_capacity(total_code_bytes);
+    for fe in &function_emits {
+        all_code.extend_from_slice(&fe.bytes);
+    }
+    b.write_ledata16(1, 0, &all_code);
+
+    // FIXUPP — patch each function's `call __chkstk`. The patch
+    // offset is the LEDATA-relative position of the disp bytes of
+    // the call instruction, i.e. function_global_offset +
+    // chkstk_offset_in_body.
+    let mut fixup_payload = Vec::new();
+    // Emit FIXUPs in descending offset order — fixture 4099 shows
+    // MSC sorts later-offset patches first (the 4099 FIXUPP is
+    // `84 09 56 02  84 03 56 02`, with offset 9 before offset 3).
+    let mut chkstk_patch_offsets: Vec<u8> = function_emits
+        .iter()
+        .enumerate()
+        .map(|(i, fe)| {
+            u8::try_from(function_offsets[i] + fe.chkstk_offset_in_body)
+                .expect("chkstk patch offset fits in u8")
+        })
+        .collect();
+    chkstk_patch_offsets.sort_by(|a, b| b.cmp(a));
+    for off in &chkstk_patch_offsets {
+        fixup_payload.extend_from_slice(&[0x84, *off, 0x56, 0x02]);
+    }
+    b.write_fixupp(&fixup_payload);
 
     // MODEND — end of module. No-entry form (the executable's entry
     // point comes from the PUBDEF of `_main` resolved at link time,
@@ -737,89 +855,116 @@ pub fn build_obj(source_filename: &str, ast: &MainAst) -> Vec<u8> {
 /// re-use the existing 0 in AX from the chkstk arg even when it
 /// could; the codegen always emits the explicit return-value
 /// instruction.
-fn main_body_for(ast: &MainAst) -> Vec<u8> {
-    let mut body = Vec::with_capacity(32);
-    let frame_bytes = ast.locals.len() * 2;
+fn emit_function(func: &Function) -> FunctionEmit {
+    let mut bytes = Vec::with_capacity(32);
+    let mut calls: Vec<CallSite> = Vec::new();
+    let frame_bytes = func.locals.len() * 2;
+    let has_frame = frame_bytes > 0;
 
-    if frame_bytes > 0 {
-        // Prologue: standard 8086 frame setup. MSC doesn't use the
-        // 186-era ENTER instruction under /AS even when the model
-        // would allow it.
-        body.extend_from_slice(&[0x55, 0x8B, 0xEC]);
-        // Chkstk arg as `mov ax, <frame_bytes>`. The 16-bit immediate
-        // form is always picked here even for sizes that would fit
-        // in a `push imm8 / pop ax`.
-        body.push(0xB8);
-        body.extend_from_slice(&u16::try_from(frame_bytes)
-            .expect("frame fits in u16")
-            .to_le_bytes());
+    if has_frame {
+        bytes.extend_from_slice(&[0x55, 0x8B, 0xEC]);
+        bytes.push(0xB8);
+        bytes.extend_from_slice(
+            &u16::try_from(frame_bytes)
+                .expect("frame fits in u16")
+                .to_le_bytes(),
+        );
     } else {
-        // No prologue. `xor ax, ax` doubles as the chkstk arg of 0;
-        // the eventual return-0 path emits its own `sub ax, ax` to
-        // re-zero AX (chkstk clobbers it).
-        body.extend_from_slice(&[0x33, 0xC0]);
+        bytes.extend_from_slice(&[0x33, 0xC0]);
     }
-    // `call __chkstk` with the 2-byte displacement left as zeros for
-    // the FIXUP to patch.
-    body.extend_from_slice(&[0xE8, 0x00, 0x00]);
+    // Position the chkstk e8's displacement bytes — the FIXUPP
+    // patches them at link time. `bytes.len()` here is the offset
+    // of the e8 opcode; the disp16 sits at `+1`.
+    bytes.push(0xE8);
+    let chkstk_offset_in_body = bytes.len();
+    bytes.extend_from_slice(&[0x00, 0x00]);
 
-    // Initialized-local writes — each `int x = K;` becomes
-    // `mov word ptr [bp-disp], K` (`c7 46 <disp> <lo> <hi>`).
-    // Locals are laid out at `[bp-2]`, `[bp-4]`, … in source order
-    // (same as BCC). Uninitialized declarations get no write.
-    for (i, init) in ast.locals.iter().enumerate() {
+    // Initialized-local writes — `int x = K;` → `c7 46 disp lo hi`.
+    for (i, init) in func.locals.iter().enumerate() {
         if let Some(value) = init {
             let disp = -(i16::try_from(i + 1).expect("local index fits") * 2);
             let imm = (*value as u32 & 0xFFFF) as u16;
-            body.push(0xC7);
-            body.push(0x46);
-            body.push(disp as u8);
-            body.extend_from_slice(&imm.to_le_bytes());
+            bytes.push(0xC7);
+            bytes.push(0x46);
+            bytes.push(disp as u8);
+            bytes.extend_from_slice(&imm.to_le_bytes());
         }
     }
 
-    // Emit each top-level statement. Every leaf is a `Return`, and
-    // each Return contributes its own full epilogue (`mov sp,bp;
-    // pop bp; ret` — or just `ret` for 0-byte frames) — MSC does
-    // not merge epilogues across branches. Fixture 4092 confirms.
-    //
-    // Track reachability so an unreachable trailing statement
-    // (after `if (1) return …;`, fixture 4095) is dropped — MSC
-    // does this aggressively, parallel to its constant-condition
-    // elision.
-    let has_frame = frame_bytes > 0;
     let mut reachable = true;
-    for stmt in &ast.body {
+    for stmt in &func.body {
         if !reachable {
             break;
         }
-        emit_stmt(stmt, &ast.locals, has_frame, &mut body);
-        if stmt_always_returns(stmt, &ast.locals) {
+        emit_stmt(
+            stmt,
+            &func.locals,
+            has_frame,
+            func.return_int,
+            &mut bytes,
+            &mut calls,
+        );
+        if stmt_always_returns(stmt, &func.locals) {
             reachable = false;
         }
     }
 
-    // Pad to an even byte count with a single NOP. MSC enforces this
-    // unconditionally — every `_main` body in fixtures 4075–4083
-    // ends on a word boundary, with the pad NOP appended when the
-    // natural shape was odd.
-    if body.len() % 2 != 0 {
-        body.push(0x90);
+    // Implicit return at the end of void functions that don't have
+    // an explicit `return;`. MSC's `_f` body in fixture 4099 ends
+    // with `c3` after the chkstk call — there's no `return` in the
+    // source. The shape mirrors `emit_return` minus the AX load.
+    if reachable && !func.return_int {
+        if has_frame {
+            bytes.extend_from_slice(&[0x8B, 0xE5, 0x5D]);
+        }
+        bytes.push(0xC3);
     }
-    body
+
+    if bytes.len() % 2 != 0 {
+        bytes.push(0x90);
+    }
+
+    FunctionEmit { bytes, calls, chkstk_offset_in_body }
+}
+
+/// Mangle a C function name into the OBJ symbol it produces.
+/// MSC's small-model convention prefixes every function with `_`.
+fn symbol_name(c_name: &str) -> String {
+    format!("_{c_name}")
 }
 
 /// Emit a single statement (recursive: if-statements contain
 /// nested statements). Returns no value — appends directly to `out`.
-fn emit_stmt(stmt: &Stmt, locals: &[Option<i32>], has_frame: bool, out: &mut Vec<u8>) {
+fn emit_stmt(
+    stmt: &Stmt,
+    locals: &[Option<i32>],
+    has_frame: bool,
+    return_int: bool,
+    out: &mut Vec<u8>,
+    calls: &mut Vec<CallSite>,
+) {
     match stmt {
-        Stmt::Return(expr) => emit_return(expr, locals, has_frame, out),
+        Stmt::Return(expr) => emit_return(expr, locals, has_frame, return_int, out),
         Stmt::Empty => {}
+        Stmt::ExprStmt(Expr::Call { name }) => {
+            // `f();` — emit `e8 00 00` and record the call site for
+            // post-pass displacement patching.
+            let body_offset = out.len();
+            out.extend_from_slice(&[0xE8, 0x00, 0x00]);
+            calls.push(CallSite { body_offset, target: symbol_name(name) });
+        }
+        Stmt::ExprStmt(other) => {
+            panic!("ExprStmt with non-call expression not yet supported: {other:?}");
+        }
         Stmt::Assign { local_idx, value } => emit_assign(*local_idx, value, locals, out),
-        Stmt::While { cond, body } => emit_while(cond, body, locals, has_frame, out),
-        Stmt::DoWhile { body, cond } => emit_do_while(body, cond, locals, has_frame, out),
+        Stmt::While { cond, body } => {
+            emit_while(cond, body, locals, has_frame, return_int, out, calls);
+        }
+        Stmt::DoWhile { body, cond } => {
+            emit_do_while(body, cond, locals, has_frame, return_int, out, calls);
+        }
         Stmt::For { init, cond, step, body } => {
-            emit_for(init, cond, step, body, locals, has_frame, out);
+            emit_for(init, cond, step, body, locals, has_frame, return_int, out, calls);
         }
         Stmt::If { cond, then_branch, else_branch } => {
             // Constant-condition elision: when the cond folds to a
@@ -828,27 +973,32 @@ fn emit_stmt(stmt: &Stmt, locals: &[Option<i32>], has_frame: bool, out: &mut Vec
             // 4094 (if (0)) and 4095 (if (1)) confirm.
             if let Some(k) = fold_cond(cond, locals) {
                 if k != 0 {
-                    emit_stmt(then_branch, locals, has_frame, out);
+                    emit_stmt(then_branch, locals, has_frame, return_int, out, calls);
                 } else if let Some(else_branch) = else_branch {
-                    emit_stmt(else_branch, locals, has_frame, out);
+                    emit_stmt(else_branch, locals, has_frame, return_int, out, calls);
                 }
                 return;
             }
             // Build the then-branch into a scratch buffer so we know
             // its byte count for the conditional-jump displacement.
             let mut then_buf = Vec::new();
-            emit_stmt(then_branch, locals, has_frame, &mut then_buf);
+            let mut then_calls = Vec::new();
+            emit_stmt(then_branch, locals, has_frame, return_int, &mut then_buf, &mut then_calls);
             let then_len = then_buf.len();
-            // MSC's `if (<cond>) <body>` lowers to a skip-then jump:
-            // emit the inverted predicate as `cmp X, Y; <jcc> skip;`
-            // where the jcc displacement is the byte count of the
-            // then-body (+ any else-body skip-over).
             let take_then_disp = i8::try_from(then_len)
                 .expect("then-body short enough for jcc rel8");
             emit_cond_skip(cond, take_then_disp, out);
+            // Bring any then-branch call sites into the parent buffer,
+            // offsetting their body_offset by where the then bytes
+            // land in `out`.
+            let then_base = out.len();
             out.extend_from_slice(&then_buf);
+            for mut c in then_calls {
+                c.body_offset += then_base;
+                calls.push(c);
+            }
             if let Some(else_branch) = else_branch {
-                emit_stmt(else_branch, locals, has_frame, out);
+                emit_stmt(else_branch, locals, has_frame, return_int, out, calls);
             }
         }
     }
@@ -862,7 +1012,7 @@ fn stmt_always_returns(stmt: &Stmt, locals: &[Option<i32>]) -> bool {
     match stmt {
         Stmt::Return(_) => true,
         Stmt::Empty => false,
-        Stmt::Assign { .. } => false,
+        Stmt::ExprStmt(_) | Stmt::Assign { .. } => false,
         // Loops with a runtime cond can fall through; the
         // const-true infinite-loop case isn't exercised yet so we
         // conservatively answer false.
@@ -905,25 +1055,27 @@ fn fold_cond(cond: &Cond, locals: &[Option<i32>]) -> Option<i32> {
     }
 }
 
-fn emit_return(expr: &Expr, locals: &[Option<i32>], has_frame: bool, out: &mut Vec<u8>) {
-    // Return-value load: foldable expressions take the literal path
-    // (`sub ax, ax` for 0, `mov ax, imm16` otherwise); non-folded
-    // expressions route through `emit_expr_to_ax`.
-    if let Some(k) = expr.fold(locals) {
-        if k == 0 {
-            out.extend_from_slice(&[0x2B, 0xC0]);
+fn emit_return(expr: &Expr, locals: &[Option<i32>], has_frame: bool, return_int: bool, out: &mut Vec<u8>) {
+    // Void functions skip the return-value instruction entirely —
+    // fixture 4099's `_f` body is just `xor ax,ax; call __chkstk;
+    // ret` with no AX load. Treat IntLit(0) on a void function as
+    // a `return;` shape and skip the load.
+    if return_int {
+        if let Some(k) = expr.fold(locals) {
+            if k == 0 {
+                out.extend_from_slice(&[0x2B, 0xC0]);
+            } else {
+                let imm = (k as u32 & 0xFFFF) as u16;
+                out.push(0xB8);
+                out.extend_from_slice(&imm.to_le_bytes());
+            }
         } else {
-            let imm = (k as u32 & 0xFFFF) as u16;
-            out.push(0xB8);
-            out.extend_from_slice(&imm.to_le_bytes());
+            emit_expr_to_ax(expr, locals, out);
         }
-    } else {
-        emit_expr_to_ax(expr, locals, out);
     }
     // Per-return epilogue. 0-byte frames skip both the prologue and
     // epilogue (fixture 4075); frame-using functions restore SP and
-    // pop BP before the ret (fixtures 4079+). Every Return statement
-    // contributes its own copy — no merge across branches.
+    // pop BP before the ret. Every Return contributes its own copy.
     if has_frame {
         out.extend_from_slice(&[0x8B, 0xE5, 0x5D]);
     }
@@ -996,9 +1148,11 @@ fn emit_while(
     body_stmt: &Stmt,
     locals: &[Option<i32>],
     has_frame: bool,
+    return_int: bool,
     out: &mut Vec<u8>,
+    calls: &mut Vec<CallSite>,
 ) {
-    emit_loop(cond, &[body_stmt], locals, has_frame, out);
+    emit_loop(cond, &[body_stmt], locals, has_frame, return_int, out, calls);
 }
 
 /// `for (<init>; <cond>; <step>) <body>` — MSC's layout (fixture
@@ -1023,12 +1177,14 @@ fn emit_for(
     body_stmt: &Stmt,
     locals: &[Option<i32>],
     has_frame: bool,
+    return_int: bool,
     out: &mut Vec<u8>,
+    calls: &mut Vec<CallSite>,
 ) {
-    emit_stmt(init, locals, has_frame, out);
+    emit_stmt(init, locals, has_frame, return_int, out, calls);
     // The looped section is `step; body;` — treated as a single
     // "loop body" for the shared shape helper.
-    emit_loop(cond, &[step, body_stmt], locals, has_frame, out);
+    emit_loop(cond, &[step, body_stmt], locals, has_frame, return_int, out, calls);
 }
 
 /// Shared loop emitter — handles the alignment-pad, body
@@ -1040,11 +1196,14 @@ fn emit_loop(
     body_segments: &[&Stmt],
     locals: &[Option<i32>],
     has_frame: bool,
+    return_int: bool,
     out: &mut Vec<u8>,
+    calls: &mut Vec<CallSite>,
 ) {
     let mut body_buf = Vec::new();
+    let mut body_calls: Vec<CallSite> = Vec::new();
     for seg in body_segments {
-        emit_stmt(seg, locals, has_frame, &mut body_buf);
+        emit_stmt(seg, locals, has_frame, return_int, &mut body_buf, &mut body_calls);
     }
     let mut cmp_buf = Vec::new();
     emit_cond_cmp(cond, &mut cmp_buf);
@@ -1071,7 +1230,12 @@ fn emit_loop(
     if needs_pad {
         out.push(0x90);
     }
+    let body_base = out.len();
     out.extend_from_slice(&body_buf);
+    for mut c in body_calls {
+        c.body_offset += body_base;
+        calls.push(c);
+    }
     out.extend_from_slice(&cmp_buf);
     let back_disp = -(i8::try_from(cmp_len + 2 + body_len)
         .expect("loop body+cmp short enough for jcc rel8"));
@@ -1096,10 +1260,13 @@ fn emit_do_while(
     cond: &Cond,
     locals: &[Option<i32>],
     has_frame: bool,
+    return_int: bool,
     out: &mut Vec<u8>,
+    calls: &mut Vec<CallSite>,
 ) {
     let mut body_buf = Vec::new();
-    emit_stmt(body_stmt, locals, has_frame, &mut body_buf);
+    let mut body_calls: Vec<CallSite> = Vec::new();
+    emit_stmt(body_stmt, locals, has_frame, return_int, &mut body_buf, &mut body_calls);
     let body_len = body_buf.len();
     let elide_cmp = body_sets_flags_for_cond(body_stmt, cond);
     let mut cmp_buf = Vec::new();
@@ -1112,7 +1279,12 @@ fn emit_do_while(
         Cond::Truthy(_) | Cond::Cmp { op: RelOp::Ne, .. }
     );
     let jcc_opcode = if take_when_true { 0x75 } else { 0x74 };
+    let body_base = out.len();
     out.extend_from_slice(&body_buf);
+    for mut c in body_calls {
+        c.body_offset += body_base;
+        calls.push(c);
+    }
     out.extend_from_slice(&cmp_buf);
     let back_disp = -(i8::try_from(cmp_len + 2 + body_len)
         .expect("loop body+cmp short enough for jcc rel8"));
@@ -1200,21 +1372,12 @@ fn emit_cmp_local_imm(idx: usize, k: i32, out: &mut Vec<u8>) {
     }
 }
 
-/// Byte offset within `_main`'s body where the `e8 disp16` call to
-/// `__chkstk` keeps its displacement bytes — the location the
-/// FIXUPP patches at link time. With no prologue: bytes 3-4 (offset
-/// 3, after `33 c0 e8`). With a prologue: bytes 7-8 (offset 7, after
-/// `55 8b ec b8 <lo> <hi> e8`).
-fn chkstk_disp_offset(ast: &MainAst) -> usize {
-    if ast.locals.is_empty() { 3 } else { 7 }
-}
-
 /// Append the bytes that compute `expr` into AX. Caller has already
 /// emitted the prologue + chkstk call; what we emit here lives
 /// between the chkstk call and the return-path epilogue. Phase 1
-/// Slice 4 supports a tight set of patterns — every other shape
-/// panics with a clear message so the missing case is obvious when
-/// a future fixture hits it.
+/// supports a tight set of patterns — every other shape panics with
+/// a clear message so the missing case is obvious when a future
+/// fixture hits it.
 fn emit_expr_to_ax(expr: &Expr, locals: &[Option<i32>], out: &mut Vec<u8>) {
     match expr {
         Expr::IntLit(k) => {
@@ -1229,6 +1392,9 @@ fn emit_expr_to_ax(expr: &Expr, locals: &[Option<i32>], out: &mut Vec<u8>) {
         }
         Expr::BinOp { op, left, right } => {
             emit_binop(*op, left, right, locals, out);
+        }
+        Expr::Call { name } => {
+            panic!("Call to `{name}` inside an expression context not yet supported");
         }
     }
 }
