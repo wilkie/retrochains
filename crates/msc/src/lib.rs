@@ -2470,63 +2470,91 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
 /// Control flow drops the known-value table conservatively (a real
 /// pass would re-merge across branches; the only fixture so far is
 /// straight-line so we keep the implementation small).
-fn const_prop_globals(stmts: &[Stmt]) -> Vec<Stmt> {
-    use std::collections::HashMap;
-    let mut known: HashMap<usize, i32> = HashMap::new();
-    let mut out = Vec::with_capacity(stmts.len());
-    for stmt in stmts {
-        let mut new_stmt = stmt.clone();
-        match &mut new_stmt {
-            Stmt::Return(e) => fold_globals_expr(e, &known),
-            Stmt::ExprStmt(e) => fold_globals_expr(e, &known),
-            Stmt::Assign { target, value } => {
-                fold_globals_expr(value, &known);
-                if let AssignTarget::Global(g) = target {
-                    if let Expr::IntLit(k) = value {
-                        known.insert(*g, *k);
-                    } else {
-                        known.remove(g);
-                    }
-                }
-            }
-            Stmt::Empty => {}
-            _ => {
-                // Conservative: anything with branches/loops invalidates
-                // every global's known value.
-                known.clear();
-            }
-        }
-        out.push(new_stmt);
-    }
-    out
+/// Straight-line const-prop over locals + globals. Each assign of
+/// a literal to a Local/Global makes subsequent reads of that name
+/// fold to the literal; assigns of non-literal expressions remove
+/// the entry. Control-flow nodes (`if`, loops, blocks containing
+/// them) clear both tables conservatively. Fixture 4106 motivates
+/// the global side; fixture 1020 needs the local side.
+#[derive(Default)]
+struct ConstProp {
+    g_known: std::collections::HashMap<usize, i32>,
+    l_known: std::collections::HashMap<usize, i32>,
 }
 
-fn fold_globals_expr(e: &mut Expr, known: &std::collections::HashMap<usize, i32>) {
+fn const_prop_globals(stmts: &[Stmt]) -> Vec<Stmt> {
+    let mut cp = ConstProp::default();
+    stmts.iter().map(|s| {
+        let mut new_stmt = s.clone();
+        prop_stmt(&mut new_stmt, &mut cp);
+        new_stmt
+    }).collect()
+}
+
+fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
+    match stmt {
+        Stmt::Return(e) => prop_expr(e, cp),
+        Stmt::ExprStmt(e) => prop_expr(e, cp),
+        Stmt::Assign { target, value } => {
+            prop_expr(value, cp);
+            match target {
+                AssignTarget::Global(g) => {
+                    if let Expr::IntLit(k) = value {
+                        cp.g_known.insert(*g, *k);
+                    } else {
+                        cp.g_known.remove(g);
+                    }
+                }
+                AssignTarget::Local(l) => {
+                    if let Expr::IntLit(k) = value {
+                        cp.l_known.insert(*l, *k);
+                    } else {
+                        cp.l_known.remove(l);
+                    }
+                }
+                _ => {}
+            }
+        }
+        Stmt::Empty => {}
+        _ => {
+            // Branch/loop — drop everything we know.
+            cp.g_known.clear();
+            cp.l_known.clear();
+        }
+    }
+}
+
+fn prop_expr(e: &mut Expr, cp: &ConstProp) {
     match e {
         Expr::Global(idx) => {
-            if let Some(&k) = known.get(idx) {
+            if let Some(&k) = cp.g_known.get(idx) {
+                *e = Expr::IntLit(k);
+            }
+        }
+        Expr::Local(idx) => {
+            if let Some(&k) = cp.l_known.get(idx) {
                 *e = Expr::IntLit(k);
             }
         }
         Expr::BinOp { left, right, .. } => {
-            fold_globals_expr(left, known);
-            fold_globals_expr(right, known);
+            prop_expr(left, cp);
+            prop_expr(right, cp);
         }
         Expr::Call { args, .. } => {
             for a in args {
-                fold_globals_expr(a, known);
+                prop_expr(a, cp);
             }
         }
         Expr::Index { index, .. }
         | Expr::IndexByte { index, .. }
         | Expr::PtrIndexByte { index, .. } => {
-            fold_globals_expr(index, known);
+            prop_expr(index, cp);
         }
         Expr::DerefByte { ptr } | Expr::DerefWord { ptr } => {
-            fold_globals_expr(ptr, known);
+            prop_expr(ptr, cp);
         }
         Expr::AddrOfGlobal(_) => {}
-        Expr::IntLit(_) | Expr::Local(_) | Expr::Param(_) | Expr::StrLit(_) => {}
+        Expr::IntLit(_) | Expr::Param(_) | Expr::StrLit(_) => {}
     }
 }
 
