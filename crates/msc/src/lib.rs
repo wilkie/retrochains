@@ -671,6 +671,52 @@ enum Tok {
     PreprocLine,
 }
 
+/// One-pass scan for `typedef <type> <alias>;` declarations.
+/// Replaces subsequent `Ident(alias)` occurrences with the primitive
+/// type keyword (`Kw("int" | "char" | "long")`). The typedef
+/// declaration tokens themselves are kept; `parse_typedef` consumes
+/// them. Fixture 1000.
+fn apply_typedef_substitutions(toks: &mut Vec<Tok>) {
+    let mut aliases: std::collections::HashMap<String, &'static str> =
+        std::collections::HashMap::new();
+    let mut i = 0;
+    while i < toks.len() {
+        // Substitute first so any typedef sees prior aliases.
+        if let Tok::Ident(name) = &toks[i] {
+            if let Some(&kw) = aliases.get(name) {
+                toks[i] = Tok::Kw(kw);
+                i += 1;
+                continue;
+            }
+        }
+        if matches!(&toks[i], Tok::Kw("typedef")) {
+            // Walk to the matching `;`. Pick the last primitive type
+            // keyword seen as the base, and the last Ident as alias.
+            let mut j = i + 1;
+            let mut base: Option<&'static str> = None;
+            let mut last_ident: Option<usize> = None;
+            while j < toks.len() && !matches!(&toks[j], Tok::Semi) {
+                match &toks[j] {
+                    Tok::Kw("int") => base = Some("int"),
+                    Tok::Kw("char") => base = Some("char"),
+                    Tok::Kw("long") => base = Some("long"),
+                    Tok::Ident(_) => last_ident = Some(j),
+                    _ => {}
+                }
+                j += 1;
+            }
+            if let (Some(b), Some(name_idx)) = (base, last_ident) {
+                if let Tok::Ident(name) = &toks[name_idx] {
+                    aliases.insert(name.clone(), b);
+                }
+            }
+            i = j + 1;
+            continue;
+        }
+        i += 1;
+    }
+}
+
 fn tokenize(source: &str) -> Result<Vec<Tok>, EmitError> {
     let bytes = source.as_bytes();
     let mut toks = Vec::new();
@@ -1026,6 +1072,9 @@ struct Parser<'a> {
     /// Looked up at every Ident parse so `N` from `enum { N = 4 }`
     /// substitutes as `IntLit(4)`.
     enum_consts: std::collections::HashMap<String, i32>,
+    /// `typedef <type> <alias>;` aliases. Each alias maps to one of
+    /// the recognized primitive type names ("int", "char", "long").
+    typedefs: std::collections::HashMap<String, &'static str>,
 }
 
 impl<'a> Parser<'a> {
@@ -1057,7 +1106,8 @@ impl<'a> Parser<'a> {
 /// is `int` or `void`; bodies follow the existing per-statement
 /// grammar.
 fn parse_unit(source: &str) -> Result<Unit, EmitError> {
-    let toks = tokenize(source)?;
+    let mut toks = tokenize(source)?;
+    apply_typedef_substitutions(&mut toks);
     let mut p = Parser {
         toks: &toks,
         pos: 0,
@@ -1070,6 +1120,7 @@ fn parse_unit(source: &str) -> Result<Unit, EmitError> {
         structs: Vec::new(),
         strings: Vec::new(),
         enum_consts: std::collections::HashMap::new(),
+        typedefs: std::collections::HashMap::new(),
     };
     let mut functions = Vec::new();
     let mut decl_order: Vec<TopDecl> = Vec::new();
@@ -1296,8 +1347,31 @@ fn parse_enum_def(p: &mut Parser<'_>) -> Result<(), EmitError> {
 /// long` fixture which is unused beyond the declaration.
 fn parse_typedef(p: &mut Parser<'_>) -> Result<(), EmitError> {
     p.eat(&Tok::Kw("typedef"))?;
+    // Walk through the type tokens — accept primitive keywords +
+    // modifiers, ignore signedness — and remember the last primitive
+    // type name encountered. Skip pointer markers.
+    let mut base: Option<&'static str> = None;
     while !matches!(p.peek(), Some(Tok::Semi) | None) {
-        p.bump();
+        match p.peek().cloned() {
+            Some(Tok::Kw("int")) => { base = Some("int"); p.bump(); }
+            Some(Tok::Kw("char")) => { base = Some("char"); p.bump(); }
+            Some(Tok::Kw("long")) => { base = Some("long"); p.bump(); }
+            Some(Tok::Kw("unsigned"))
+            | Some(Tok::Kw("signed"))
+            | Some(Tok::Kw("short")) => { p.bump(); }
+            Some(Tok::Star) => { p.bump(); }
+            Some(Tok::Ident(name)) => {
+                p.bump();
+                // The last identifier is the alias name. Record it
+                // before potentially consuming more.
+                if matches!(p.peek(), Some(Tok::Semi) | None) {
+                    if let Some(b) = base {
+                        p.typedefs.insert(name, b);
+                    }
+                }
+            }
+            _ => { p.bump(); }
+        }
     }
     p.eat(&Tok::Semi)?;
     Ok(())
