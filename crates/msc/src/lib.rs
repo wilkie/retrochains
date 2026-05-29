@@ -97,6 +97,9 @@ pub struct Global {
     pub is_long: bool,
     /// `static` storage class — TU-private symbol, suppress PUBDEF.
     pub is_static: bool,
+    /// `extern` storage class — symbol is defined elsewhere. Skip
+    /// COMDEF + storage; register as an EXTDEF instead.
+    pub is_extern: bool,
 }
 
 impl Global {
@@ -1207,6 +1210,7 @@ fn parse_struct_global_decl(p: &mut Parser<'_>) -> Result<(), EmitError> {
         struct_idx: Some(sidx),
         is_long: false,
         is_static: false,
+        is_extern: false,
     });
     Ok(())
 }
@@ -1303,7 +1307,6 @@ fn parse_global_decl(p: &mut Parser<'_>) -> Result<(), EmitError> {
             _ => break,
         }
     }
-    let _ = is_extern;
     // Skip any leading storage/qualifier modifiers (unsigned, static,
     // ...) — we treat them all as no-ops at the codegen level.
     let mods_consumed = skip_decl_modifiers(p);
@@ -1465,7 +1468,7 @@ fn parse_global_decl(p: &mut Parser<'_>) -> Result<(), EmitError> {
         (array_len, element_size)
     };
     p.global_names.push(name.clone());
-    p.globals.push(Global { name, init, array_len, element_size, is_pointer, struct_idx: None, is_long, is_static });
+    p.globals.push(Global { name, init, array_len, element_size, is_pointer, struct_idx: None, is_long, is_static, is_extern });
     Ok(())
 }
 
@@ -3085,11 +3088,19 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
     // Tentative-def globals → COMDEF. Track their indices into
     // unit.globals; we'll emit a COMDEF record between two EXTDEF
     // records and slot the symbols into the same EXTDEF-index space.
+    // Tentative globals (no init, not extern) → COMDEF. Externs are
+    // handled separately as EXTDEFs (fixture 163).
     let comdef_globals: Vec<usize> = unit
         .globals
         .iter()
         .enumerate()
-        .filter_map(|(i, g)| if g.init.is_none() { Some(i) } else { None })
+        .filter_map(|(i, g)| if g.init.is_none() && !g.is_extern { Some(i) } else { None })
+        .collect();
+    let extern_globals: Vec<usize> = unit
+        .globals
+        .iter()
+        .enumerate()
+        .filter_map(|(i, g)| if g.is_extern { Some(i) } else { None })
         .collect();
 
     // EXTDEF + (optional) COMDEF layout, picked based on what
@@ -5168,13 +5179,14 @@ fn emit_loop(
 
     let body_len = body_buf.len();
     let cmp_len = cmp_buf.len();
-    // Entry-fold peephole: when the cond folds to a non-zero
-    // literal with the current `locals.inits` view, MSC elides the
-    // initial `jmp` over the body — the first iteration runs without
-    // a check (the cond is guaranteed true at entry). Fixtures 126,
-    // 1044. We can only safely take this when the result is `Some(k)`
-    // with k != 0; `Some(0)` would mean an empty loop (and we don't
-    // strip those yet).
+    // Entry-fold peephole: when the cond folds at entry,
+    //   `Some(k)`, k != 0 → first iteration runs unconditionally
+    //     (no initial jmp; do-while shape). Fixtures 126, 1044.
+    //   `Some(0)`        → loop body never runs; elide entirely
+    //     (no jmp/body/cmp). Fixture 1587.
+    if matches!(fold_cond(cond, locals), Some(0)) {
+        return;
+    }
     let skip_initial_jmp = matches!(fold_cond(cond, locals), Some(k) if k != 0);
     if !skip_initial_jmp {
         let forward_disp = i8::try_from(body_len + pad)
@@ -5228,6 +5240,14 @@ fn emit_do_while(
     let mut body_fixups: Vec<Fixup> = Vec::new();
     emit_stmt(body_stmt, locals, frame, return_int, &mut body_buf, &mut body_fixups);
     let body_len = body_buf.len();
+    // `do body while (0);` — body runs once, then the cond fails and
+    // we drop through. Emit just the body and return. Fixture 1588.
+    if matches!(fold_cond(cond, locals), Some(0)) {
+        let body_base = out.len();
+        for mut c in body_fixups { c.body_offset += body_base; fixups.push(c); }
+        out.extend_from_slice(&body_buf);
+        return;
+    }
     let elide_cmp = body_sets_flags_for_cond(body_stmt, cond);
     let mut cmp_buf = Vec::new();
     let mut cmp_fixups: Vec<Fixup> = Vec::new();
