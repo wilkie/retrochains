@@ -2180,6 +2180,8 @@ fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
                 AssignTarget::Local(idx)
             } else if let Some(idx) = p.global_names.iter().position(|n| *n == name) {
                 AssignTarget::Global(idx)
+            } else if let Some(idx) = p.param_names.iter().position(|n| *n == name) {
+                AssignTarget::Param(idx)
             } else {
                 return Err(EmitError::Unsupported(format!(
                     "prefix `++/--` of unknown identifier `{name}`"
@@ -2188,6 +2190,7 @@ fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
             p.eat(&Tok::Semi)?;
             let lvalue = match target {
                 AssignTarget::Local(i) => Expr::Local(i),
+                AssignTarget::Param(i) => Expr::Param(i),
                 AssignTarget::Global(g) => Expr::Global(g),
                 _ => unreachable!(),
             };
