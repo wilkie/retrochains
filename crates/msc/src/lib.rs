@@ -6118,6 +6118,25 @@ fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: 
                     out.extend_from_slice(&[0x8B, 0xD8]); // mov bx, ax
                     out.extend_from_slice(&[0x8B, 0x07]);
                 }
+                Expr::BinOp { op: BinOp::Add, left, right } => {
+                    // `*(p + K)` where p is a Local pointer and K is a
+                    // foldable constant. Word ptr arithmetic: K scales
+                    // by 2. Fixture 1152.
+                    if let (Expr::Local(li), Some(k)) =
+                        (left.as_ref(), right.fold(locals.inits))
+                    {
+                        let disp = locals.disp(*li) as i8;
+                        let off = (k * 2) as i8;
+                        out.extend_from_slice(&[0x8B, 0x5E, disp as u8]);
+                        if off == 0 {
+                            out.extend_from_slice(&[0x8B, 0x07]);
+                        } else {
+                            out.extend_from_slice(&[0x8B, 0x47, off as u8]);
+                        }
+                        return;
+                    }
+                    panic!("word deref of {:?} not yet supported", ptr);
+                }
                 other => panic!("word deref of {other:?} not yet supported"),
             }
         }
