@@ -1,0 +1,4 @@
+description = "char s[10]; — tentative char array. Probes COMDEF NEAR data with 1-byte slots: byte_len = array_len × 1, the type field unchanged from int arrays."
+tool = "cl"
+args = ["/c", "/AS", "HELLO.C"]
+inputs = ["HELLO.C"]

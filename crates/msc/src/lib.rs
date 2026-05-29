@@ -164,6 +164,9 @@ pub enum AssignTarget {
     /// `*<ptr-global> = <expr>;` — store the RHS through a pointer
     /// global. Fixture 4116.
     DerefGlobal(usize),
+    /// `<global>[K] = <expr>;` — write at a constant index into a
+    /// global array. `byte_off` is `K * element_size`. Fixture 4119.
+    IndexedGlobal { array: usize, byte_off: u16 },
 }
 
 /// Condition for `if` (and later `while`/`for`). Slice 5 covers the
@@ -854,6 +857,27 @@ fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
                 let args = parse_call_args(p)?;
                 p.eat(&Tok::Semi)?;
                 return Ok(Stmt::ExprStmt(Expr::Call { name, args }));
+            }
+            // `<global>[K] = <expr>;` — indexed array store.
+            if matches!(p.peek(), Some(Tok::LBrack))
+                && let Some(array_idx) = p.global_names.iter().position(|n| *n == name)
+            {
+                p.bump(); // [
+                let index_expr = parse_expr(p)?;
+                p.eat(&Tok::RBrack)?;
+                p.eat(&Tok::Assign)?;
+                let value = parse_expr(p)?;
+                p.eat(&Tok::Semi)?;
+                let k = index_expr.fold(&[]).ok_or_else(|| EmitError::Unsupported(
+                    "non-constant array index in store not yet supported".to_owned(),
+                ))?;
+                let elem_bytes = p.globals[array_idx].element_size;
+                let byte_off = u16::try_from((k as i64) * (elem_bytes as i64))
+                    .expect("indexed-store byte offset fits");
+                return Ok(Stmt::Assign {
+                    target: AssignTarget::IndexedGlobal { array: array_idx, byte_off },
+                    value,
+                });
             }
             let target = if let Some(idx) = p.local_names.iter().position(|n| *n == name) {
                 AssignTarget::Local(idx)
@@ -2055,6 +2079,9 @@ fn emit_assign(target: AssignTarget, value: &Expr, locals: &[Option<i32>], out: 
         AssignTarget::DerefGlobal(g) => {
             return emit_assign_deref_global(g, value, locals, out, fixups);
         }
+        AssignTarget::IndexedGlobal { array, byte_off } => {
+            return emit_assign_indexed_global(array, byte_off, value, locals, out, fixups);
+        }
     };
     let disp = -(i16::try_from(local_idx + 1).expect("local index fits") * 2);
     // Peephole: `x = x + 1;` and `x = x - 1;` become in-place
@@ -2118,6 +2145,34 @@ fn emit_assign_global(global_idx: usize, value: &Expr, locals: &[Option<i32>], o
         out.push(0xA3);                       // MOV moffs16, AX
         let addr_off = out.len();
         out.extend_from_slice(&[0x00, 0x00]);
+        fixups.push(Fixup {
+            body_offset: addr_off - 1,
+            kind: FixupKind::GlobalAddr { global_idx },
+        });
+    }
+}
+
+/// `<global>[K] = <expr>;` — write at a constant array index. The
+/// placeholder address is `byte_off`, which the linker adds to the
+/// global's base. Constant RHS → `c7 06 byte_off imm16`; general RHS
+/// → `<expr-to-ax>; a3 byte_off`. Fixture 4119.
+fn emit_assign_indexed_global(global_idx: usize, byte_off: u16, value: &Expr, locals: &[Option<i32>], out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    if let Some(k) = value.fold(locals) {
+        let imm = (k as u32 & 0xFFFF) as u16;
+        out.push(0xC7);
+        out.push(0x06);
+        let addr_off = out.len();
+        out.extend_from_slice(&byte_off.to_le_bytes());
+        out.extend_from_slice(&imm.to_le_bytes());
+        fixups.push(Fixup {
+            body_offset: addr_off - 1,
+            kind: FixupKind::GlobalAddr { global_idx },
+        });
+    } else {
+        emit_expr_to_ax(value, locals, out, fixups);
+        out.push(0xA3);
+        let addr_off = out.len();
+        out.extend_from_slice(&byte_off.to_le_bytes());
         fixups.push(Fixup {
             body_offset: addr_off - 1,
             kind: FixupKind::GlobalAddr { global_idx },
