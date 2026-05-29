@@ -52,9 +52,10 @@ pub struct MainAst {
 }
 
 /// Statement AST. Phase 1 covers `return <expr>;`,
-/// `if (<cond>) <stmt>;`, and `if (<cond>) <stmt> else <stmt>;`.
-/// Block statements (`{ ... }`) come with the multi-line if-bodies
-/// in a later slice.
+/// `if (<cond>) <stmt>;`, `if (<cond>) <stmt> else <stmt>;`,
+/// `while (<cond>) <stmt>;`, and `<local> = <expr>;`. Block
+/// statements (`{ ... }`) come with the multi-line bodies in a
+/// later slice.
 #[derive(Debug, Clone)]
 pub enum Stmt {
     Return(Expr),
@@ -62,6 +63,14 @@ pub enum Stmt {
         cond: Cond,
         then_branch: Box<Stmt>,
         else_branch: Option<Box<Stmt>>,
+    },
+    While {
+        cond: Cond,
+        body: Box<Stmt>,
+    },
+    Assign {
+        local_idx: usize,
+        value: Expr,
     },
 }
 
@@ -215,6 +224,7 @@ fn tokenize(source: &str) -> Result<Vec<Tok>, EmitError> {
                     "return" => Tok::Kw("return"),
                     "if" => Tok::Kw("if"),
                     "else" => Tok::Kw("else"),
+                    "while" => Tok::Kw("while"),
                     _ => Tok::Ident(text.to_owned()),
                 };
                 toks.push(tok);
@@ -352,6 +362,31 @@ fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
                 None
             };
             Ok(Stmt::If { cond, then_branch, else_branch })
+        }
+        Some(Tok::Kw("while")) => {
+            p.bump();
+            p.eat(&Tok::LParen)?;
+            let cond = parse_cond(p)?;
+            p.eat(&Tok::RParen)?;
+            let body = Box::new(parse_stmt(p)?);
+            Ok(Stmt::While { cond, body })
+        }
+        Some(Tok::Ident(_)) => {
+            // Assignment statement `<local> = <expr>;`.
+            let name = match p.bump().cloned() {
+                Some(Tok::Ident(s)) => s,
+                _ => unreachable!(),
+            };
+            let local_idx = p.local_names
+                .iter()
+                .position(|n| *n == name)
+                .ok_or_else(|| {
+                    EmitError::Unsupported(format!("assignment to unknown local `{name}`"))
+                })?;
+            p.eat(&Tok::Assign)?;
+            let value = parse_expr(p)?;
+            p.eat(&Tok::Semi)?;
+            Ok(Stmt::Assign { local_idx, value })
         }
         other => Err(EmitError::Unsupported(format!(
             "statement starting with {other:?} not yet supported"
@@ -705,6 +740,8 @@ fn main_body_for(ast: &MainAst) -> Vec<u8> {
 fn emit_stmt(stmt: &Stmt, locals: &[Option<i32>], has_frame: bool, out: &mut Vec<u8>) {
     match stmt {
         Stmt::Return(expr) => emit_return(expr, locals, has_frame, out),
+        Stmt::Assign { local_idx, value } => emit_assign(*local_idx, value, locals, out),
+        Stmt::While { cond, body } => emit_while(cond, body, locals, has_frame, out),
         Stmt::If { cond, then_branch, else_branch } => {
             // Constant-condition elision: when the cond folds to a
             // compile-time integer, MSC keeps only the live branch
@@ -745,6 +782,13 @@ fn emit_stmt(stmt: &Stmt, locals: &[Option<i32>], has_frame: bool, out: &mut Vec
 fn stmt_always_returns(stmt: &Stmt, locals: &[Option<i32>]) -> bool {
     match stmt {
         Stmt::Return(_) => true,
+        // Assignment falls through to the next statement.
+        Stmt::Assign { .. } => false,
+        // A `while` loop with a runtime cond can fall through;
+        // const-true `while (1)` with no break never returns but
+        // also never falls through. Phase 1 fixtures don't exercise
+        // the infinite-loop case so we conservatively answer false.
+        Stmt::While { .. } => false,
         Stmt::If { cond, then_branch, else_branch } => {
             if let Some(k) = fold_cond(cond, locals) {
                 if k != 0 {
@@ -806,6 +850,120 @@ fn emit_return(expr: &Expr, locals: &[Option<i32>], has_frame: bool, out: &mut V
         out.extend_from_slice(&[0x8B, 0xE5, 0x5D]);
     }
     out.push(0xC3);
+}
+
+/// `<local> = <expr>;`. Phase 1 supports the peephole
+/// `<local> = <same-local> ± 1;` → `inc/dec word ptr [bp-disp]`
+/// (fixture 4096: `x = x - 1;` in a while body). The general path
+/// — `mov ax, <expr>; mov [bp-disp], ax` — is reserved for a
+/// future fixture that exercises a non-peephole shape.
+fn emit_assign(local_idx: usize, value: &Expr, locals: &[Option<i32>], out: &mut Vec<u8>) {
+    let disp = -(i16::try_from(local_idx + 1).expect("local index fits") * 2);
+    // Peephole: `x = x + 1;` and `x = x - 1;` become in-place
+    // `inc/dec word ptr [bp-disp]` (3-byte `FF /0 r/m` for inc,
+    // `FF /1 r/m` for dec).
+    if let Expr::BinOp { op, left, right } = value
+        && let Expr::Local(li) = left.as_ref()
+        && *li == local_idx
+        && let Expr::IntLit(1) = right.as_ref()
+    {
+        match op {
+            BinOp::Add => {
+                out.push(0xFF);
+                out.push(0x46);              // ModR/M mod=01 reg=000 (/0=INC) r/m=110
+                out.push(disp as u8);
+                return;
+            }
+            BinOp::Sub => {
+                out.push(0xFF);
+                out.push(0x4E);              // ModR/M mod=01 reg=001 (/1=DEC) r/m=110
+                out.push(disp as u8);
+                return;
+            }
+            _ => {}
+        }
+    }
+    // General path: evaluate the RHS into AX, then store.
+    if let Some(k) = value.fold(locals) {
+        let imm = (k as u32 & 0xFFFF) as u16;
+        out.push(0xC7);
+        out.push(0x46);
+        out.push(disp as u8);
+        out.extend_from_slice(&imm.to_le_bytes());
+    } else {
+        emit_expr_to_ax(value, locals, out);
+        out.push(0x89);                       // MOV r/m16, r16  (AX → mem)
+        out.push(0x46);
+        out.push(disp as u8);
+    }
+}
+
+/// `while (<cond>) <body>` lowers to a test-first shape: jump to
+/// the cond, run the body, fall into the cond, jcc back to the
+/// body. MSC pads with a NOP after the initial forward jmp —
+/// fixture 4096 shows the byte sequence:
+/// ```text
+/// eb <body+nop>       jmp short to cond
+/// 90                  nop
+/// <body>              loop body
+/// <cond>              cmp + setup
+/// <jcc> <-back>       jne / je back to body
+/// ```
+/// Only `cmp <local>, <imm-fits-in-i8sx>` cond shapes are exercised;
+/// other cond shapes will need their own fixture before landing.
+fn emit_while(cond: &Cond, body_stmt: &Stmt, locals: &[Option<i32>], has_frame: bool, out: &mut Vec<u8>) {
+    // Build the body and cond bytes into scratch buffers first so we
+    // know their lengths for the two displacement-bearing jumps.
+    let mut body_buf = Vec::new();
+    emit_stmt(body_stmt, locals, has_frame, &mut body_buf);
+    // The "cond" emit is the compare half of the cond shape, leaving
+    // flags set for a paired jcc. We emit the cmp manually here
+    // because `emit_cond_skip` couples the cmp with the skip jump.
+    let mut cmp_buf = Vec::new();
+    emit_cond_cmp(cond, &mut cmp_buf);
+    let take_when_true = matches!(
+        cond,
+        Cond::Truthy(_)
+            | Cond::Cmp { op: RelOp::Ne, .. }
+    );
+    let jcc_opcode = if take_when_true {
+        // jne (75) → "continue when not zero / not equal"
+        0x75
+    } else {
+        // je (74) → "continue when equal" (cond was ==)
+        0x74
+    };
+    // Layout sizes:
+    //   jmp_forward (2) + nop (1) + body + cmp + jcc_back (2)
+    let body_len = body_buf.len();
+    let cmp_len = cmp_buf.len();
+    let forward_disp = i8::try_from(body_len + 1)
+        .expect("body+pad short enough for jmp rel8");
+    out.push(0xEB);
+    out.push(forward_disp as u8);
+    out.push(0x90);                           // nop pad
+    out.extend_from_slice(&body_buf);
+    out.extend_from_slice(&cmp_buf);
+    // Backward jcc displacement: distance from the byte after this
+    // jcc back to the first body byte. The jcc rel8 instruction is
+    // 2 bytes; "back to body start" = -(cmp_len + 2 + body_len).
+    let back_disp = -(i8::try_from(cmp_len + 2 + body_len)
+        .expect("loop body+cmp short enough for jcc rel8"));
+    out.push(jcc_opcode);
+    out.push(back_disp as u8);
+}
+
+/// Just the cmp half of a cond — used by `emit_while` which pairs
+/// the comparison with a backward jcc rather than a forward skip.
+fn emit_cond_cmp(cond: &Cond, out: &mut Vec<u8>) {
+    match cond {
+        Cond::Truthy(Expr::Local(idx)) => emit_cmp_local_imm(*idx, 0, out),
+        Cond::Cmp { op: _, left: Expr::Local(idx), right: Expr::IntLit(k) }
+        | Cond::Cmp { op: _, left: Expr::IntLit(k), right: Expr::Local(idx) } => {
+            emit_cmp_local_imm(*idx, *k, out);
+        }
+        other => panic!("Slice 5 cond cmp not yet supported: {other:?}"),
+    }
 }
 
 /// Emit `cmp <X>, <Y>; <inverted-jcc> skip` where `skip` is a
