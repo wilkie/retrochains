@@ -3530,7 +3530,7 @@ fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
             // don't have a peephole shape, so we substitute normally
             // (fixtures 1022, 1024).
             let self_assign_addsub = match (target.clone(), value.clone()) {
-                (AssignTarget::Local(t), Expr::BinOp { op: BinOp::Add | BinOp::Sub, left, .. }) => {
+                (AssignTarget::Local(t), Expr::BinOp { op: BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Shl | BinOp::Shr, left, .. }) => {
                     matches!(left.as_ref(), Expr::Local(l) if *l == t)
                 }
                 (AssignTarget::Global(t), Expr::BinOp { op: BinOp::Add | BinOp::Sub, left, .. }) => {
@@ -4272,6 +4272,22 @@ fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_>, out: &mu
     //   |K| ≤ 127, ±: `add/sub [bp-disp], imm8sx` (4 bytes)
     //   larger K, ±: `add/sub [bp-disp], imm16`   (5 bytes)
     // Pattern requires LHS = Local(this) on the BinOp.
+    // Shift/mul peephole: `x = x << 1` and `x = x * 2` (int) → `d1 66 disp` (shl mem, 1).
+    // Same shape: `x = x >> 1` → `d1 6e disp` (shr mem, 1).
+    if locals.size(local_idx) == 2
+        && let Expr::BinOp { op, left, right } = value
+        && let Expr::Local(li) = left.as_ref()
+        && *li == local_idx
+        && let Some(k) = right.fold(locals.inits)
+        && let Some(modrm) = match (op, k) {
+            (BinOp::Mul, 2) | (BinOp::Shl, 1) => Some(0x66u8),  // /4=shl
+            (BinOp::Shr, 1) => Some(0x6Eu8),  // /5=shr  (logical shift; signed uses /7=sar)
+            _ => None,
+        }
+    {
+        out.extend_from_slice(&[0xD1, modrm, disp as u8]);
+        return;
+    }
     if let Expr::BinOp { op, left, right } = value
         && let Expr::Local(li) = left.as_ref()
         && *li == local_idx
