@@ -1,0 +1,4 @@
+description = "return *p; — pointer dereference loads through the pointer global into AL/AX. Probes the load-pointer-then-deref shape MSC picks for a single char read."
+tool = "cl"
+args = ["/c", "/AS", "HELLO.C"]
+inputs = ["HELLO.C"]

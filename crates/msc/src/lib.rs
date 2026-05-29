@@ -52,14 +52,30 @@ pub struct Unit {
     pub strings: Vec<Vec<u8>>,
 }
 
-/// A file-scope global variable. Phase 1 covers `int g [= K];`;
-/// other types come later.
+/// A file-scope global variable. Phase 1 covers scalar `int g [= K];`
+/// and array `int a[N];` (uninit only so far — fixture 4107).
 #[derive(Debug, Clone)]
 pub struct Global {
     pub name: String,
-    /// `Some(K)` for `int g = K;`, `None` for the tentative form
-    /// `int g;` (which gets emitted as a COMDEF — fixture 4105).
-    pub init: Option<i32>,
+    /// `Some(vec)` for an explicit initializer. Each slot is one
+    /// 2-byte word in `_DATA`; mixed lists carry int literals or
+    /// CONST-segment string addresses. `None` is the tentative form
+    /// (`int g;` / `int a[N];`) which lowers to a COMDEF (fixtures
+    /// 4105, 4107).
+    pub init: Option<Vec<GlobalInit>>,
+    /// Array element count. `1` for scalar `int g;`. The COMDEF or
+    /// _DATA byte-length is `2 * array_len`.
+    pub array_len: usize,
+}
+
+#[derive(Debug, Clone)]
+pub enum GlobalInit {
+    /// Plain int literal — stored as 16-bit LE in `_DATA`.
+    Int(i32),
+    /// CONST-segment string address — stored as a 2-byte placeholder
+    /// with a FIXUP that the linker resolves to DGROUP:CONST+offset.
+    /// `usize` indexes into `Unit::strings`. Fixture 4110.
+    StrAddr(usize),
 }
 
 /// One function definition. `return_int` distinguishes `int f(void)`
@@ -180,6 +196,14 @@ pub enum Expr {
     /// describing the global's address; writes lower to
     /// `c7 06 addr imm16`. Fixtures 4104, 4106.
     Global(usize),
+    /// Array element access — `a[<expr>]`. Constant index folds to
+    /// an `a1 imm16` load whose immediate is `2 * index` (linker adds
+    /// the array base via the FIXUP). Variable index defers to a
+    /// later sub-slice. Fixture 4109.
+    Index { array: usize, index: Box<Expr> },
+    /// `*<ptr>` — pointer dereference. Phase 1 supports only the
+    /// `*<char-ptr-global>` form (fixture 4111).
+    Deref { ptr: Box<Expr> },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -214,6 +238,8 @@ impl Expr {
             Expr::Call { .. } => None,
             Expr::StrLit(_) => None,
             Expr::Global(_) => None,
+            Expr::Index { .. } => None,
+            Expr::Deref { .. } => None,
         }
     }
 }
@@ -230,6 +256,8 @@ enum Tok {
     RParen,
     LBrace,
     RBrace,
+    LBrack,
+    RBrack,
     Semi,
     Assign,
     EqEq,
@@ -266,6 +294,8 @@ fn tokenize(source: &str) -> Result<Vec<Tok>, EmitError> {
             b')' => { toks.push(Tok::RParen); i += 1; }
             b'{' => { toks.push(Tok::LBrace); i += 1; }
             b'}' => { toks.push(Tok::RBrace); i += 1; }
+            b'[' => { toks.push(Tok::LBrack); i += 1; }
+            b']' => { toks.push(Tok::RBrack); i += 1; }
             b';' => { toks.push(Tok::Semi); i += 1; }
             b',' => { toks.push(Tok::Comma); i += 1; }
             b'+' => { toks.push(Tok::Plus); i += 1; }
@@ -359,6 +389,7 @@ fn tokenize(source: &str) -> Result<Vec<Tok>, EmitError> {
                     .map_err(|_| EmitError::Unsupported("non-ASCII in identifier".to_owned()))?;
                 let tok = match text {
                     "int" => Tok::Kw("int"),
+                    "char" => Tok::Kw("char"),
                     "main" => Tok::Kw("main"),
                     "void" => Tok::Kw("void"),
                     "return" => Tok::Kw("return"),
@@ -447,10 +478,13 @@ fn parse_unit(source: &str) -> Result<Unit, EmitError> {
         }
         // Disambiguate file-scope `int <name>...;` (global) from
         // `int <name>(...) { ... }` (function) by looking ahead.
-        if matches!(p.peek(), Some(Tok::Kw("int")))
+        // `char *<name>` is unambiguously a global pointer.
+        let is_int_global = matches!(p.peek(), Some(Tok::Kw("int")))
             && matches!(p.toks.get(p.pos + 1), Some(Tok::Ident(_)))
-            && !matches!(p.toks.get(p.pos + 2), Some(Tok::LParen))
-        {
+            && !matches!(p.toks.get(p.pos + 2), Some(Tok::LParen));
+        let is_char_ptr_global = matches!(p.peek(), Some(Tok::Kw("char")))
+            && matches!(p.toks.get(p.pos + 1), Some(Tok::Star));
+        if is_int_global || is_char_ptr_global {
             parse_global_decl(&mut p)?;
             continue;
         }
@@ -464,11 +498,30 @@ fn parse_unit(source: &str) -> Result<Unit, EmitError> {
     Ok(Unit { globals: p.globals, functions, strings: p.strings })
 }
 
-/// Parse one file-scope `int <name> [= <int>];` declaration and
-/// register it in the parser's globals list. Caller has confirmed
-/// the next tokens start with `int <ident>` and aren't a function.
+/// Parse one file-scope `<type> <name> [= <init>];` declaration and
+/// register it in the parser's globals list. Phase 1 covers
+/// `int <name>`, `int <name>[N]`, and `char *<name>` with optional
+/// initializer. Caller has confirmed the next tokens form a
+/// declaration, not a function.
 fn parse_global_decl(p: &mut Parser<'_>) -> Result<(), EmitError> {
-    p.eat(&Tok::Kw("int"))?;
+    // Type prefix. `int` is the only non-pointer type in Phase 1;
+    // `char *` is the only pointer form so far.
+    let is_pointer = match p.peek() {
+        Some(Tok::Kw("int")) => {
+            p.bump();
+            false
+        }
+        Some(Tok::Kw("char")) => {
+            p.bump();
+            p.eat(&Tok::Star)?;
+            true
+        }
+        other => {
+            return Err(EmitError::Unsupported(format!(
+                "expected `int` or `char *` for global, got {other:?}"
+            )));
+        }
+    };
     let name = match p.bump().cloned() {
         Some(Tok::Ident(s)) => s,
         other => {
@@ -477,15 +530,60 @@ fn parse_global_decl(p: &mut Parser<'_>) -> Result<(), EmitError> {
             )));
         }
     };
+    // Optional `[N]` for an array declaration. The element count
+    // determines the COMDEF or _DATA byte length.
+    let array_len = if matches!(p.peek(), Some(Tok::LBrack)) {
+        p.bump();
+        let n = match p.bump().cloned() {
+            Some(Tok::Int(k)) if k > 0 => k as usize,
+            other => {
+                return Err(EmitError::Unsupported(format!(
+                    "expected positive array length, got {other:?}"
+                )));
+            }
+        };
+        p.eat(&Tok::RBrack)?;
+        n
+    } else {
+        1
+    };
     let init = if matches!(p.peek(), Some(Tok::Assign)) {
         p.bump();
-        Some(parse_signed_int(p)?)
+        if matches!(p.peek(), Some(Tok::LBrace)) {
+            p.bump();
+            let mut values = Vec::new();
+            loop {
+                values.push(GlobalInit::Int(parse_signed_int(p)?));
+                match p.peek() {
+                    Some(Tok::Comma) => { p.bump(); }
+                    Some(Tok::RBrace) => { p.bump(); break; }
+                    other => {
+                        return Err(EmitError::Unsupported(format!(
+                            "expected `,` or `}}` in initializer, got {other:?}"
+                        )));
+                    }
+                }
+            }
+            Some(values)
+        } else if is_pointer && matches!(p.peek(), Some(Tok::StrLit(_))) {
+            let bytes = match p.bump().cloned() {
+                Some(Tok::StrLit(b)) => b,
+                _ => unreachable!(),
+            };
+            let mut with_nul = bytes.clone();
+            with_nul.push(0);
+            let str_idx = p.strings.len();
+            p.strings.push(with_nul);
+            Some(vec![GlobalInit::StrAddr(str_idx)])
+        } else {
+            Some(vec![GlobalInit::Int(parse_signed_int(p)?)])
+        }
     } else {
         None
     };
     p.eat(&Tok::Semi)?;
     p.global_names.push(name.clone());
-    p.globals.push(Global { name, init });
+    p.globals.push(Global { name, init, array_len });
     Ok(())
 }
 
@@ -763,6 +861,11 @@ fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                 "expected int after unary -, got {other:?}"
             ))),
         },
+        Some(Tok::Star) => {
+            // Unary deref `*<expr>`.
+            let inner = parse_atom(p)?;
+            Ok(Expr::Deref { ptr: Box::new(inner) })
+        }
         Some(Tok::Ident(name)) => {
             // Identifier may be a call site (`f(args)`), a local
             // reference, or a parameter reference. Disambiguate by
@@ -777,7 +880,17 @@ fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
             } else if let Some(idx) = p.param_names.iter().position(|n| *n == name) {
                 Ok(Expr::Param(idx))
             } else if let Some(idx) = p.global_names.iter().position(|n| *n == name) {
-                Ok(Expr::Global(idx))
+                // `<global>[<expr>]` is an array index. The result is
+                // an lvalue of the element type (always int in
+                // Phase 1).
+                if matches!(p.peek(), Some(Tok::LBrack)) {
+                    p.bump();
+                    let index = parse_expr(p)?;
+                    p.eat(&Tok::RBrack)?;
+                    Ok(Expr::Index { array: idx, index: Box::new(index) })
+                } else {
+                    Ok(Expr::Global(idx))
+                }
             } else {
                 Err(EmitError::Unsupported(format!("unknown identifier `{name}`")))
             }
@@ -1001,7 +1114,7 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
     for g in &unit.globals {
         if g.init.is_some() {
             data_offsets.push(Some(data_cursor));
-            data_cursor += 2;
+            data_cursor += g.array_len * 2;
         } else {
             data_offsets.push(None);
         }
@@ -1129,12 +1242,23 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
             emit_group(&mut b, &pre, &mut extdef_idx_of, &mut next_idx);
             let mut payload = Vec::new();
             for &gi in &comdef_globals {
-                let sym = symbol_name(&unit.globals[gi].name);
+                let g = &unit.globals[gi];
+                let sym = symbol_name(&g.name);
+                let byte_len = g.array_len * 2;
                 payload.push(u8::try_from(sym.len()).expect("COMDEF name fits"));
                 payload.extend_from_slice(sym.as_bytes());
                 payload.push(0x00); // type index
                 payload.push(0x62); // NEAR data
-                payload.push(0x02); // length encoded: single byte for ≤0x80
+                // Length encoded: single byte for ≤0x80, otherwise
+                // 0x81 + LE u16. Fixture 4107 sits in the small bucket.
+                if byte_len <= 0x80 {
+                    payload.push(byte_len as u8);
+                } else {
+                    payload.push(0x81);
+                    payload.extend_from_slice(&u16::try_from(byte_len)
+                        .expect("COMDEF u16 length fits")
+                        .to_le_bytes());
+                }
                 extdef_idx_of.insert(sym, next_idx);
                 next_idx += 1;
             }
@@ -1257,26 +1381,57 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
         }
     }
 
-    // LEDATA — _DATA segment, initialized global values. MSC packs
-    // them sequentially in source order, little-endian.
-    if data_cursor > 0 {
-        let mut data_bytes: Vec<u8> = Vec::with_capacity(data_cursor);
-        for g in &unit.globals {
-            if let Some(v) = g.init {
-                let v16 = (v as u32 & 0xFFFF) as u16;
-                data_bytes.extend_from_slice(&v16.to_le_bytes());
-            }
-        }
-        b.write_ledata16(2, 0, &data_bytes);
-    }
-
-    // LEDATA — CONST segment data, the string pool.
+    // LEDATA — CONST segment first (its bytes are referenced by any
+    // FIXUPs inside _DATA, so MSC orders it ahead).
     if const_len > 0 {
         let mut const_bytes: Vec<u8> = Vec::with_capacity(const_cursor);
         for s in &unit.strings {
             const_bytes.extend_from_slice(s);
         }
         b.write_ledata16(3, 0, &const_bytes);
+    }
+
+    // LEDATA — _DATA segment, initialized global values. MSC packs
+    // them sequentially in source order, little-endian. StrAddr
+    // slots emit a 2-byte placeholder and pick up a FIXUPP record
+    // emitted immediately after the LEDATA.
+    if data_cursor > 0 {
+        let mut data_bytes: Vec<u8> = Vec::with_capacity(data_cursor);
+        for g in &unit.globals {
+            if let Some(values) = &g.init {
+                for v in values {
+                    match v {
+                        GlobalInit::Int(k) => {
+                            let v16 = (*k as u32 & 0xFFFF) as u16;
+                            data_bytes.extend_from_slice(&v16.to_le_bytes());
+                        }
+                        GlobalInit::StrAddr(_) => {
+                            data_bytes.extend_from_slice(&[0, 0]);
+                        }
+                    }
+                }
+            }
+        }
+        b.write_ledata16(2, 0, &data_bytes);
+        let mut data_fixups: Vec<u8> = Vec::new();
+        let mut off: usize = 0;
+        for g in &unit.globals {
+            if let Some(values) = &g.init {
+                for v in values {
+                    if let GlobalInit::StrAddr(_) = v {
+                        // `c4 off 9c` — frame thread 1 (DGROUP),
+                        // target thread 0 (CONST), no displacement.
+                        data_fixups.extend_from_slice(&[0xC4,
+                            u8::try_from(off).expect("data fixup offset fits"),
+                            0x9C]);
+                    }
+                    off += 2;
+                }
+            }
+        }
+        if !data_fixups.is_empty() {
+            b.write_fixupp(&data_fixups);
+        }
     }
 
     // LEDATA — _TEXT segment, the concatenated function bodies.
@@ -1425,6 +1580,12 @@ fn fold_globals_expr(e: &mut Expr, known: &std::collections::HashMap<usize, i32>
             for a in args {
                 fold_globals_expr(a, known);
             }
+        }
+        Expr::Index { index, .. } => {
+            fold_globals_expr(index, known);
+        }
+        Expr::Deref { ptr } => {
+            fold_globals_expr(ptr, known);
         }
         Expr::IntLit(_) | Expr::Local(_) | Expr::Param(_) | Expr::StrLit(_) => {}
     }
@@ -2101,6 +2262,64 @@ fn emit_expr_to_ax(expr: &Expr, locals: &[Option<i32>], out: &mut Vec<u8>, fixup
                 body_offset,
                 kind: FixupKind::GlobalAddr { global_idx: *idx },
             });
+        }
+        Expr::Deref { ptr } => {
+            // Phase 1: only `*<char-ptr-global>` is supported. The
+            // pattern is `mov bx, [p]; mov al, [bx]; cbw`. The FIXUP
+            // sits at the `[p]` address inside the mov-bx encoding.
+            match ptr.as_ref() {
+                Expr::Global(idx) => {
+                    let body_offset = out.len();
+                    out.extend_from_slice(&[0x8B, 0x1E, 0x00, 0x00]);
+                    fixups.push(Fixup {
+                        body_offset: body_offset + 1,
+                        kind: FixupKind::GlobalAddr { global_idx: *idx },
+                    });
+                    out.extend_from_slice(&[0x8A, 0x07, 0x98]);
+                }
+                other => panic!("deref of {other:?} not yet supported"),
+            }
+        }
+        Expr::Index { array, index } => {
+            if let Some(k) = index.fold(locals) {
+                // Constant index → `a1 <byte_off>` with FIXUP. The
+                // placeholder is `byte_off` (not zero); the linker
+                // adds the array's base address. Fixture 4109.
+                let byte_off = (k as u32).wrapping_mul(2) as u16;
+                let body_offset = out.len();
+                out.push(0xA1);
+                out.extend_from_slice(&byte_off.to_le_bytes());
+                fixups.push(Fixup {
+                    body_offset,
+                    kind: FixupKind::GlobalAddr { global_idx: *array },
+                });
+            } else {
+                // Variable index → load it into BX, scale ×2 with
+                // `shl bx, 1`, then `mov ax, [bx+addr]` with FIXUP.
+                // Fixture 4112.
+                match index.as_ref() {
+                    Expr::Param(i) => {
+                        let disp = i8::try_from(4 + (*i * 2))
+                            .expect("param disp fits");
+                        out.extend_from_slice(&[0x8B, 0x5E, disp as u8]);
+                    }
+                    Expr::Local(i) => {
+                        let disp = -(i16::try_from(*i + 1)
+                            .expect("local idx") * 2);
+                        out.extend_from_slice(&[0x8B, 0x5E, disp as u8]);
+                    }
+                    other => panic!(
+                        "non-const, non-param/local array index not supported: {other:?}"
+                    ),
+                }
+                out.extend_from_slice(&[0xD1, 0xE3]);
+                let body_offset = out.len();
+                out.extend_from_slice(&[0x8B, 0x87, 0x00, 0x00]);
+                fixups.push(Fixup {
+                    body_offset: body_offset + 1,
+                    kind: FixupKind::GlobalAddr { global_idx: *array },
+                });
+            }
         }
     }
 }
