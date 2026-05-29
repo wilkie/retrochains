@@ -1334,14 +1334,13 @@ fn parse_global_decl(p: &mut Parser<'_>) -> Result<(), EmitError> {
     // determines the COMDEF or _DATA byte length.
     let array_len = if matches!(p.peek(), Some(Tok::LBrack)) {
         p.bump();
-        let n = match p.bump().cloned() {
-            Some(Tok::Int(k)) if k > 0 => k as usize,
-            other => {
-                return Err(EmitError::Unsupported(format!(
-                    "expected positive array length, got {other:?}"
-                )));
-            }
-        };
+        let k = parse_signed_int(p)?;
+        if k <= 0 {
+            return Err(EmitError::Unsupported(format!(
+                "array length must be positive, got {k}"
+            )));
+        }
+        let n = k as usize;
         p.eat(&Tok::RBrack)?;
         n
     } else {
@@ -1353,6 +1352,11 @@ fn parse_global_decl(p: &mut Parser<'_>) -> Result<(), EmitError> {
             p.bump();
             let mut values = Vec::new();
             loop {
+                if matches!(p.peek(), Some(Tok::RBrace)) {
+                    // Trailing comma in init: `{1, 2, 3,}`.
+                    p.bump();
+                    break;
+                }
                 values.push(GlobalInit::Int(parse_signed_int(p)?));
                 match p.peek() {
                     Some(Tok::Comma) => { p.bump(); }
@@ -1653,16 +1657,14 @@ fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> {
             // Optional `[N]` for an array decl.
             let array_len = if matches!(p.peek(), Some(Tok::LBrack)) {
                 p.bump();
-                let n = match p.bump().cloned() {
-                    Some(Tok::Int(k)) if k > 0 => k as usize,
-                    other => {
-                        return Err(EmitError::Unsupported(format!(
-                            "expected positive array length for local, got {other:?}"
-                        )));
-                    }
-                };
+                let k = parse_signed_int(p)?;
+                if k <= 0 {
+                    return Err(EmitError::Unsupported(format!(
+                        "local array length must be positive, got {k}"
+                    )));
+                }
                 p.eat(&Tok::RBrack)?;
-                n
+                k as usize
             } else {
                 1
             };
@@ -5391,6 +5393,14 @@ fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: 
                         body_offset: body_offset + 1,
                         kind: FixupKind::GlobalAddr { global_idx: *idx },
                     });
+                    out.extend_from_slice(&[0x8B, 0x07]);
+                }
+                Expr::Local(i) => {
+                    // `mov bx, [bp-disp]; mov ax, [bx]` — load pointer
+                    // from a local slot, then read through it. Fixture
+                    // 1126: `int *p = &g; return *p;`.
+                    let disp = locals.disp(*i) as i8;
+                    out.extend_from_slice(&[0x8B, 0x5E, disp as u8]);
                     out.extend_from_slice(&[0x8B, 0x07]);
                 }
                 other => panic!("word deref of {other:?} not yet supported"),
