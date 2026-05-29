@@ -134,17 +134,54 @@ pub struct Function {
 }
 
 /// A function-local variable's storage descriptor. `size` is bytes
-/// (1 for `char`, 2 for `int` / pointer). `init` is the optional
-/// compile-time-constant initializer (used by const-prop).
+/// per element (1 for `char`, 2 for `int` / pointer). `array_len`
+/// is 1 for scalars and N for `T name[N]`. `init` is the optional
+/// scalar initializer used by const-prop and the prologue-store path
+/// — array inits live in a separate prelude of synthesized stores.
 #[derive(Debug, Clone)]
 pub struct LocalSpec {
     pub size: usize,
+    pub array_len: usize,
     pub init: Option<i32>,
 }
 
 impl LocalSpec {
-    pub fn int(init: Option<i32>) -> Self { Self { size: 2, init } }
-    pub fn char_(init: Option<i32>) -> Self { Self { size: 1, init } }
+    pub fn int(init: Option<i32>) -> Self { Self { size: 2, array_len: 1, init } }
+    pub fn char_(init: Option<i32>) -> Self { Self { size: 1, array_len: 1, init } }
+    /// Bytes occupied in the frame, rounded up to an even count.
+    /// MSC pads each local to a word boundary — scalar char gets 2
+    /// bytes, char[3] gets 4 bytes, int[3] gets 6 bytes. Fixture 1134.
+    pub fn storage_bytes(&self) -> usize {
+        let raw = self.size * self.array_len;
+        (raw + 1) & !1
+    }
+}
+
+/// View of the function's locals shared across emit_* helpers. Carries
+/// both the const-prop init values and per-local frame-displacement +
+/// element-size data. Compute once in emit_function and pass by ref
+/// everywhere the old `&[Option<i32>]` lived.
+pub struct Locals<'a> {
+    /// Const-prop view: `Some(K)` for locals known to hold a literal.
+    pub inits: &'a [Option<i32>],
+    /// `disps[i]` is the BP-relative displacement of local `i`'s
+    /// first byte (element 0 for arrays). Always negative; -2 for
+    /// the first declared scalar.
+    pub disps: &'a [i16],
+    /// Per-element size in bytes (1 for char, 2 otherwise).
+    pub sizes: &'a [usize],
+}
+
+impl Locals<'_> {
+    pub fn get_init(&self, idx: usize) -> Option<i32> {
+        self.inits.get(idx).copied().flatten()
+    }
+    pub fn disp(&self, idx: usize) -> i16 {
+        self.disps[idx]
+    }
+    pub fn size(&self, idx: usize) -> usize {
+        self.sizes[idx]
+    }
 }
 
 
@@ -221,6 +258,13 @@ pub enum AssignTarget {
     /// char-pointer global. `disp` is the constant index (fits in
     /// disp8 in Phase 1). Fixture 4124.
     PtrIndexByte { ptr: usize, disp: i8 },
+    /// `<local-int-array>[K] = <expr>;` — write a word at a constant
+    /// index. `byte_off` is `K * 2`. Codegen uses BP-rel store at
+    /// `locals.disp(local) + byte_off`.
+    IndexedLocal { local: usize, byte_off: u16 },
+    /// `<local-char-array>[K] = <byte>;` — write a byte at a constant
+    /// index. `byte_off` is `K`. Codegen uses `c6 46 disp imm8`.
+    IndexedLocalByte { local: usize, byte_off: u16 },
 }
 
 /// Condition for `if` (and later `while`/`for`). Slice 5 covers the
@@ -287,6 +331,13 @@ pub enum Expr {
     /// arrays. Constant index folds to `a0 imm16` (mov al, moffs8)
     /// + `98` (cbw) to widen into AX. Fixture 4121.
     IndexByte { array: usize, index: Box<Expr> },
+    /// `<local-int-array>[<expr>]` — read a word at a runtime or
+    /// constant index. Constant K lowers to `mov ax, [bp-disp+2K]`
+    /// (`8b 46 disp8`). Variable index isn't lowered yet.
+    LocalIndex { local: usize, index: Box<Expr> },
+    /// `<local-char-array>[<expr>]` — read a byte + cbw. Constant K
+    /// lowers to `mov al, [bp-disp+K]; cbw` (`8a 46 disp8; 98`).
+    LocalIndexByte { local: usize, index: Box<Expr> },
     /// Pointer-indexed byte read — `p[<expr>]` where `p` is a
     /// `char *` global. Constant index lowers to
     /// `mov bx, [p]; mov al, [bx+disp]; cbw`. Fixture 4123.
@@ -378,6 +429,7 @@ impl Expr {
             Expr::StrLit(_) => None,
             Expr::Global(_) => None,
             Expr::Index { .. } | Expr::IndexByte { .. } | Expr::PtrIndexByte { .. } => None,
+            Expr::LocalIndex { .. } | Expr::LocalIndexByte { .. } => None,
             Expr::DerefByte { .. } | Expr::DerefWord { .. } => None,
             Expr::AddrOfGlobal(_) | Expr::AddrOfLocal(_) => None,
             Expr::Ternary { cond, then_arm, else_arm } => {
@@ -775,6 +827,11 @@ struct Parser<'a> {
     toks: &'a [Tok],
     pos: usize,
     local_names: Vec<String>,
+    /// Mirror of `local_names`, populated as locals are pushed in
+    /// `parse_function`. Lets parse_atom / parse_stmt look up a
+    /// local's array_len + size to pick the right Index variant
+    /// without needing to thread `&[LocalSpec]` through every call.
+    local_specs: Vec<LocalSpec>,
     param_names: Vec<String>,
     /// File-scope global names in source order; the index doubles
     /// as the `Expr::Global(idx)` value.
@@ -822,6 +879,7 @@ fn parse_unit(source: &str) -> Result<Unit, EmitError> {
         toks: &toks,
         pos: 0,
         local_names: Vec::new(),
+        local_specs: Vec::new(),
         param_names: Vec::new(),
         global_names: Vec::new(),
         globals: Vec::new(),
@@ -1098,6 +1156,7 @@ fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> {
     // Reset per-function name lists, then populate with this
     // function's params before parsing the body.
     p.local_names.clear();
+    p.local_specs.clear();
     p.param_names = params.clone();
 
     // `[storage-class]+ int|char <name> [= <init>] (, <name> [= <init>])* ;`
@@ -1148,30 +1207,83 @@ fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> {
                     )));
                 }
             };
+            // Optional `[N]` for an array decl.
+            let array_len = if matches!(p.peek(), Some(Tok::LBrack)) {
+                p.bump();
+                let n = match p.bump().cloned() {
+                    Some(Tok::Int(k)) if k > 0 => k as usize,
+                    other => {
+                        return Err(EmitError::Unsupported(format!(
+                            "expected positive array length for local, got {other:?}"
+                        )));
+                    }
+                };
+                p.eat(&Tok::RBrack)?;
+                n
+            } else {
+                1
+            };
             let local_idx = locals.len();
-            // Push the local first so an init expression can refer
-            // to *previous* declarators in this same statement
-            // (`int a = 1, b = a;`).
             p.local_names.push(lname);
-            locals.push(LocalSpec { size, init: None });
+            let spec = LocalSpec { size, array_len, init: None };
+            p.local_specs.push(spec.clone());
+            locals.push(spec);
             if matches!(p.peek(), Some(Tok::Assign)) {
                 p.bump();
-                let init_expr = parse_expr(p)?;
-                // Build a fold-input view of the locals declared so
-                // far (with their constant inits). The new local's
-                // own init isn't visible to itself.
-                let init_view: Vec<Option<i32>> = locals
-                    .iter()
-                    .take(local_idx)
-                    .map(|l| l.init)
-                    .collect();
-                if let Some(k) = init_expr.fold(&init_view) {
-                    locals[local_idx].init = Some(k);
+                if array_len > 1 && matches!(p.peek(), Some(Tok::LBrace)) {
+                    // `int a[N] = { v0, v1, ... };` — synthesize an
+                    // a[i] = vi store for each element.
+                    p.bump();
+                    let mut i = 0usize;
+                    while !matches!(p.peek(), Some(Tok::RBrace)) {
+                        let value = parse_expr(p)?;
+                        let byte_off = u16::try_from(i * size)
+                            .expect("brace-init byte_off fits");
+                        prelude.push(Stmt::Assign {
+                            target: if size == 1 {
+                                AssignTarget::IndexedLocalByte { local: local_idx, byte_off }
+                            } else {
+                                AssignTarget::IndexedLocal { local: local_idx, byte_off }
+                            },
+                            value,
+                        });
+                        i += 1;
+                        if matches!(p.peek(), Some(Tok::Comma)) { p.bump(); }
+                    }
+                    p.eat(&Tok::RBrace)?;
+                } else if array_len > 1 && size == 1 && matches!(p.peek(), Some(Tok::StrLit(_))) {
+                    // `char s[N] = "literal";` — break into per-byte
+                    // stores so const-prop can see each element.
+                    let bytes = match p.bump().cloned() {
+                        Some(Tok::StrLit(b)) => b,
+                        _ => unreachable!(),
+                    };
+                    let mut with_nul = bytes.clone();
+                    with_nul.push(0);
+                    for (i, b) in with_nul.iter().enumerate().take(array_len) {
+                        prelude.push(Stmt::Assign {
+                            target: AssignTarget::IndexedLocalByte {
+                                local: local_idx,
+                                byte_off: u16::try_from(i).expect("byte_off fits"),
+                            },
+                            value: Expr::IntLit(*b as i32),
+                        });
+                    }
                 } else {
-                    prelude.push(Stmt::Assign {
-                        target: AssignTarget::Local(local_idx),
-                        value: init_expr,
-                    });
+                    let init_expr = parse_expr(p)?;
+                    let init_view: Vec<Option<i32>> = locals
+                        .iter()
+                        .take(local_idx)
+                        .map(|l| l.init)
+                        .collect();
+                    if let Some(k) = init_expr.fold(&init_view) {
+                        locals[local_idx].init = Some(k);
+                    } else {
+                        prelude.push(Stmt::Assign {
+                            target: AssignTarget::Local(local_idx),
+                            value: init_expr,
+                        });
+                    }
                 }
             }
             if matches!(p.peek(), Some(Tok::Comma)) {
@@ -1318,6 +1430,29 @@ fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
                 let args = parse_call_args(p)?;
                 p.eat(&Tok::Semi)?;
                 return Ok(Stmt::ExprStmt(Expr::Call { name, args }));
+            }
+            // `<local-array>[K] = <expr>;` — indexed local array store.
+            if matches!(p.peek(), Some(Tok::LBrack))
+                && let Some(local_idx) = p.local_names.iter().position(|n| *n == name)
+            {
+                p.bump(); // [
+                let index_expr = parse_expr(p)?;
+                p.eat(&Tok::RBrack)?;
+                p.eat(&Tok::Assign)?;
+                let value = parse_expr(p)?;
+                p.eat(&Tok::Semi)?;
+                let k = index_expr.fold(&[]).ok_or_else(|| EmitError::Unsupported(
+                    "non-constant local-array index in store not yet supported".to_owned(),
+                ))?;
+                let elem_bytes = p.local_specs[local_idx].size;
+                let byte_off = u16::try_from((k as i64) * (elem_bytes as i64))
+                    .expect("indexed-store byte offset fits");
+                let target = if elem_bytes == 1 {
+                    AssignTarget::IndexedLocalByte { local: local_idx, byte_off }
+                } else {
+                    AssignTarget::IndexedLocal { local: local_idx, byte_off }
+                };
+                return Ok(Stmt::Assign { target, value });
             }
             // `<global>[K] = <expr>;` — indexed array store.
             if matches!(p.peek(), Some(Tok::LBrack))
@@ -1746,6 +1881,19 @@ fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                 return Ok(Expr::Call { name, args });
             }
             if let Some(idx) = p.local_names.iter().position(|n| *n == name) {
+                // `<local>[<expr>]` — element access on a local
+                // array. Picks the byte-load + cbw variant for char
+                // arrays, word load otherwise.
+                if matches!(p.peek(), Some(Tok::LBrack)) {
+                    p.bump();
+                    let index = parse_expr(p)?;
+                    p.eat(&Tok::RBrack)?;
+                    return if p.local_specs[idx].size == 1 {
+                        Ok(Expr::LocalIndexByte { local: idx, index: Box::new(index) })
+                    } else {
+                        Ok(Expr::LocalIndex { local: idx, index: Box::new(index) })
+                    };
+                }
                 Ok(Expr::Local(idx))
             } else if let Some(idx) = p.param_names.iter().position(|n| *n == name) {
                 Ok(Expr::Param(idx))
@@ -2532,6 +2680,10 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
 struct ConstProp {
     g_known: std::collections::HashMap<usize, i32>,
     l_known: std::collections::HashMap<usize, i32>,
+    /// Local array element values keyed by (local_idx, byte_off).
+    /// Matches the IndexedLocal/IndexedLocalByte byte_off so a
+    /// `<local>[K] = V; return <local>[K];` round-trip folds.
+    la_known: std::collections::HashMap<(usize, u16), i32>,
 }
 
 fn const_prop_globals(stmts: &[Stmt]) -> Vec<Stmt> {
@@ -2562,6 +2714,14 @@ fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
                         cp.l_known.insert(*l, *k);
                     } else {
                         cp.l_known.remove(l);
+                    }
+                }
+                AssignTarget::IndexedLocal { local, byte_off }
+                | AssignTarget::IndexedLocalByte { local, byte_off } => {
+                    if let Expr::IntLit(k) = value {
+                        cp.la_known.insert((*local, *byte_off), *k);
+                    } else {
+                        cp.la_known.remove(&(*local, *byte_off));
                     }
                 }
                 _ => {}
@@ -2601,6 +2761,7 @@ fn cp_clone(cp: &ConstProp) -> ConstProp {
     ConstProp {
         g_known: cp.g_known.clone(),
         l_known: cp.l_known.clone(),
+        la_known: cp.la_known.clone(),
     }
 }
 
@@ -2640,6 +2801,29 @@ fn prop_expr(e: &mut Expr, cp: &ConstProp) {
         | Expr::PtrIndexByte { index, .. } => {
             prop_expr(index, cp);
         }
+        Expr::LocalIndex { .. } | Expr::LocalIndexByte { .. } => {
+            // Borrow index and substitute *e with the known element
+            // value when the index folds and we've tracked it.
+            let (local, elem_size, known_k) = match e {
+                Expr::LocalIndex { local, index } => {
+                    prop_expr(index, cp);
+                    let k = if let Expr::IntLit(k) = index.as_ref() { Some(*k) } else { None };
+                    (*local, 2u16, k)
+                }
+                Expr::LocalIndexByte { local, index } => {
+                    prop_expr(index, cp);
+                    let k = if let Expr::IntLit(k) = index.as_ref() { Some(*k) } else { None };
+                    (*local, 1u16, k)
+                }
+                _ => unreachable!(),
+            };
+            if let Some(k) = known_k
+                && let Ok(byte_off) = u16::try_from(k as i64 * elem_size as i64)
+                && let Some(&v) = cp.la_known.get(&(local, byte_off))
+            {
+                *e = Expr::IntLit(v);
+            }
+        }
         Expr::DerefByte { ptr } | Expr::DerefWord { ptr } => {
             prop_expr(ptr, cp);
         }
@@ -2664,7 +2848,19 @@ fn emit_function(func: &Function) -> FunctionEmit {
     // Each local — int or char — occupies one 2-byte slot in MSC's
     // frame (confirmed by fixtures 4080, 1010, 1305). Char slots use
     // byte instructions for load/store but still consume a word.
-    let frame_bytes = func.locals.len() * 2;
+    //
+    // Layout: source order. First-declared local gets the shallowest
+    // slots (closest to BP); arrays occupy `array_len` contiguous
+    // word/byte slots with element 0 at the deepest disp.
+    let mut local_disps: Vec<i16> = Vec::with_capacity(func.locals.len());
+    let mut cumulative: i32 = 0;
+    for spec in &func.locals {
+        let own = i32::try_from(spec.storage_bytes()).expect("local fits");
+        cumulative += own;
+        local_disps.push(-i16::try_from(cumulative).expect("local disp fits"));
+    }
+    let local_sizes: Vec<usize> = func.locals.iter().map(|l| l.size).collect();
+    let frame_bytes: usize = cumulative as usize;
 
     match frame {
         Frame::None => bytes.extend_from_slice(&[0x33, 0xC0]),
@@ -2691,11 +2887,12 @@ fn emit_function(func: &Function) -> FunctionEmit {
     });
 
     // Initialized-local writes — `int x = K;` → `c7 46 disp lo hi`;
-    // `char x = K;` → `c6 46 disp imm8`. Each local owns a 2-byte
-    // slot regardless of type.
+    // `char x = K;` → `c6 46 disp imm8`. Arrays don't get a constant
+    // init here; their element stores live in the prelude body the
+    // parser synthesized.
     for (i, spec) in func.locals.iter().enumerate() {
         if let Some(value) = spec.init {
-            let disp = -(i16::try_from(i + 1).expect("local index fits") * 2);
+            let disp = local_disps[i];
             if spec.size == 1 {
                 let imm = (value as u32 & 0xFF) as u8;
                 bytes.push(0xC6);
@@ -2712,6 +2909,12 @@ fn emit_function(func: &Function) -> FunctionEmit {
         }
     }
 
+    let locals_view = Locals {
+        inits: &local_inits,
+        disps: &local_disps,
+        sizes: &local_sizes,
+    };
+
     let mut reachable = true;
     for stmt in &body {
         if !reachable {
@@ -2719,13 +2922,13 @@ fn emit_function(func: &Function) -> FunctionEmit {
         }
         emit_stmt(
             stmt,
-            &local_inits,
+            &locals_view,
             frame,
             func.return_int,
             &mut bytes,
             &mut fixups,
         );
-        if stmt_always_returns(stmt, &local_inits) {
+        if stmt_always_returns(stmt, &locals_view) {
             reachable = false;
         }
     }
@@ -2755,7 +2958,7 @@ fn symbol_name(c_name: &str) -> String {
 /// nested statements). Returns no value — appends directly to `out`.
 fn emit_stmt(
     stmt: &Stmt,
-    locals: &[Option<i32>],
+    locals: &Locals<'_>,
     frame: Frame,
     return_int: bool,
     out: &mut Vec<u8>,
@@ -2814,7 +3017,7 @@ fn emit_stmt(
             let then_len = then_buf.len();
             let take_then_disp = i8::try_from(then_len)
                 .expect("then-body short enough for jcc rel8");
-            emit_cond_skip(cond, take_then_disp, out, fixups);
+            emit_cond_skip(cond, take_then_disp, locals, out, fixups);
             // Bring any then-branch call sites into the parent buffer,
             // offsetting their body_offset by where the then bytes
             // land in `out`.
@@ -2835,7 +3038,7 @@ fn emit_stmt(
 /// statement at the same nesting level is unreachable. Used to
 /// drop trailing dead code (fixture 4095: `if (1) return 1; return
 /// 0;` keeps only the `return 1;` path).
-fn stmt_always_returns(stmt: &Stmt, locals: &[Option<i32>]) -> bool {
+fn stmt_always_returns(stmt: &Stmt, locals: &Locals<'_>) -> bool {
     match stmt {
         Stmt::Return(_) => true,
         Stmt::Empty => false,
@@ -2869,12 +3072,12 @@ fn stmt_always_returns(stmt: &Stmt, locals: &[Option<i32>]) -> bool {
 /// Try to fold the condition to a compile-time boolean (returned as
 /// an int: 0 = false, anything else = true). Mirrors MSC's
 /// const-condition elision. Fixtures 4094 / 4095.
-fn fold_cond(cond: &Cond, locals: &[Option<i32>]) -> Option<i32> {
+fn fold_cond(cond: &Cond, locals: &Locals<'_>) -> Option<i32> {
     match cond {
-        Cond::Truthy(e) => e.fold(locals),
+        Cond::Truthy(e) => e.fold(locals.inits),
         Cond::Cmp { op, left, right } => {
-            let l = left.fold(locals)?;
-            let r = right.fold(locals)?;
+            let l = left.fold(locals.inits)?;
+            let r = right.fold(locals.inits)?;
             Some(match op {
                 RelOp::Eq => i32::from(l == r),
                 RelOp::Ne => i32::from(l != r),
@@ -2889,7 +3092,7 @@ fn fold_cond(cond: &Cond, locals: &[Option<i32>]) -> Option<i32> {
 
 fn emit_return(
     expr: &Expr,
-    locals: &[Option<i32>],
+    locals: &Locals<'_>,
     frame: Frame,
     return_int: bool,
     out: &mut Vec<u8>,
@@ -2901,7 +3104,7 @@ fn emit_return(
         // load before ret. Fixture 4102 confirms.
         if let Expr::Call { name, args } = expr {
             emit_call(name, args, locals, out, fixups);
-        } else if let Some(k) = expr.fold(locals) {
+        } else if let Some(k) = expr.fold(locals.inits) {
             if k == 0 {
                 out.extend_from_slice(&[0x2B, 0xC0]);
             } else {
@@ -2926,7 +3129,7 @@ fn emit_return(
 fn emit_call(
     name: &str,
     args: &[Expr],
-    locals: &[Option<i32>],
+    locals: &Locals<'_>,
     out: &mut Vec<u8>,
     fixups: &mut Vec<Fixup>,
 ) {
@@ -2956,7 +3159,7 @@ fn emit_call(
 /// via `mov ax, K; push ax`; locals/params via direct memory push;
 /// string literals via `mov ax, <pool offset>; push ax` with a
 /// FIXUP for the linker to fill in the actual offset.
-fn emit_push_arg(arg: &Expr, _locals: &[Option<i32>], out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+fn emit_push_arg(arg: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
     match arg {
         Expr::IntLit(k) => {
             let imm = (*k as u32 & 0xFFFF) as u16;
@@ -2965,8 +3168,8 @@ fn emit_push_arg(arg: &Expr, _locals: &[Option<i32>], out: &mut Vec<u8>, fixups:
             out.push(0x50); // push ax
         }
         Expr::Local(idx) => {
-            // `push word ptr [bp - 2*(idx+1)]` — `FF /6 r/m`.
-            let disp = -(i16::try_from(idx + 1).expect("local index fits") * 2);
+            // `push word ptr [bp-disp]` — `FF /6 r/m`.
+            let disp = locals.disp(*idx);
             out.push(0xFF);
             out.push(0x76);
             out.push(disp as u8);
@@ -3015,7 +3218,7 @@ fn emit_push_arg(arg: &Expr, _locals: &[Option<i32>], out: &mut Vec<u8>, fixups:
         Expr::BinOp { .. } => {
             // Computed value: build the result in AX then push.
             // Fixture 4144.
-            emit_expr_to_ax(arg, _locals, out, fixups);
+            emit_expr_to_ax(arg, locals, out, fixups);
             out.push(0x50);
         }
         other => panic!("argument shape not yet supported: {other:?}"),
@@ -3027,7 +3230,7 @@ fn emit_push_arg(arg: &Expr, _locals: &[Option<i32>], out: &mut Vec<u8>, fixups:
 /// (fixture 4096: `x = x - 1;` in a while body). The general path
 /// — `mov ax, <expr>; mov [bp-disp], ax` — is reserved for a
 /// future fixture that exercises a non-peephole shape.
-fn emit_assign(target: AssignTarget, value: &Expr, locals: &[Option<i32>], out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
     let local_idx = match target {
         AssignTarget::Local(i) => i,
         AssignTarget::Global(g) => {
@@ -3048,8 +3251,14 @@ fn emit_assign(target: AssignTarget, value: &Expr, locals: &[Option<i32>], out: 
         AssignTarget::PtrIndexByte { ptr, disp } => {
             return emit_assign_ptr_index_byte(ptr, disp, value, locals, out, fixups);
         }
+        AssignTarget::IndexedLocal { local, byte_off } => {
+            return emit_assign_indexed_local(local, byte_off, value, locals, out, fixups);
+        }
+        AssignTarget::IndexedLocalByte { local, byte_off } => {
+            return emit_assign_indexed_local_byte(local, byte_off, value, locals, out, fixups);
+        }
     };
-    let disp = -(i16::try_from(local_idx + 1).expect("local index fits") * 2);
+    let disp = locals.disp(local_idx);
     // Peephole: `x = x + 1;` and `x = x - 1;` become in-place
     // `inc/dec word ptr [bp-disp]` (3-byte `FF /0 r/m` for inc,
     // `FF /1 r/m` for dec).
@@ -3075,7 +3284,7 @@ fn emit_assign(target: AssignTarget, value: &Expr, locals: &[Option<i32>], out: 
         }
     }
     // General path: evaluate the RHS into AX, then store.
-    if let Some(k) = value.fold(locals) {
+    if let Some(k) = value.fold(locals.inits) {
         let imm = (k as u32 & 0xFFFF) as u16;
         out.push(0xC7);
         out.push(0x46);
@@ -3094,7 +3303,7 @@ fn emit_assign(target: AssignTarget, value: &Expr, locals: &[Option<i32>], out: 
 /// `<expr-to-ax>; a3 addr` (mov moffs16, ax, 3 bytes).
 /// Both shapes plant a 2-byte address placeholder that the linker
 /// resolves via a GlobalAddr fixup.
-fn emit_assign_global(global_idx: usize, value: &Expr, locals: &[Option<i32>], out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+fn emit_assign_global(global_idx: usize, value: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
     // Peephole: `g = g ± 1;` → `inc/dec word ptr [g]` (4 bytes:
     // `ff /0 mem` for inc, `ff /1 mem` for dec). Fixture 4141.
     if let Expr::BinOp { op, left, right } = value
@@ -3114,7 +3323,7 @@ fn emit_assign_global(global_idx: usize, value: &Expr, locals: &[Option<i32>], o
         });
         return;
     }
-    if let Some(k) = value.fold(locals) {
+    if let Some(k) = value.fold(locals.inits) {
         let imm = (k as u32 & 0xFFFF) as u16;
         out.push(0xC7);
         out.push(0x06);
@@ -3141,8 +3350,8 @@ fn emit_assign_global(global_idx: usize, value: &Expr, locals: &[Option<i32>], o
 /// placeholder address is `byte_off`, which the linker adds to the
 /// global's base. Constant RHS → `c7 06 byte_off imm16`; general RHS
 /// → `<expr-to-ax>; a3 byte_off`. Fixture 4119.
-fn emit_assign_indexed_global(global_idx: usize, byte_off: u16, value: &Expr, locals: &[Option<i32>], out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
-    if let Some(k) = value.fold(locals) {
+fn emit_assign_indexed_global(global_idx: usize, byte_off: u16, value: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    if let Some(k) = value.fold(locals.inits) {
         let imm = (k as u32 & 0xFFFF) as u16;
         out.push(0xC7);
         out.push(0x06);
@@ -3167,8 +3376,8 @@ fn emit_assign_indexed_global(global_idx: usize, byte_off: u16, value: &Expr, lo
 
 /// `<char-global>[K] = <byte>;` — store one byte at a constant
 /// index. `c6 06 byte_off imm8`. Fixture 4122.
-fn emit_assign_indexed_global_byte(global_idx: usize, byte_off: u16, value: &Expr, locals: &[Option<i32>], out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
-    let k = value.fold(locals).unwrap_or_else(|| {
+fn emit_assign_indexed_global_byte(global_idx: usize, byte_off: u16, value: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    let k = value.fold(locals.inits).unwrap_or_else(|| {
         panic!("non-constant char-array store value not yet supported")
     });
     let imm = (k as u32 & 0xFF) as u8;
@@ -3185,8 +3394,8 @@ fn emit_assign_indexed_global_byte(global_idx: usize, byte_off: u16, value: &Exp
 
 /// `<char-ptr-global>[K] = <byte>;` — load pointer into BX, then
 /// `c6 47 disp imm8` (mov byte ptr [bx+disp], imm8). Fixture 4124.
-fn emit_assign_ptr_index_byte(ptr_idx: usize, disp: i8, value: &Expr, locals: &[Option<i32>], out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
-    let k = value.fold(locals).unwrap_or_else(|| {
+fn emit_assign_ptr_index_byte(ptr_idx: usize, disp: i8, value: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    let k = value.fold(locals.inits).unwrap_or_else(|| {
         panic!("non-constant ptr-byte-store value not yet supported")
     });
     let imm = (k as u32 & 0xFF) as u8;
@@ -3203,14 +3412,49 @@ fn emit_assign_ptr_index_byte(ptr_idx: usize, disp: i8, value: &Expr, locals: &[
 /// Pattern: `mov bx, [p]` (load pointer) then store via `[bx]`.
 /// Constant RHS uses `c7 07 imm16`; general RHS uses
 /// `<expr-to-ax>; mov [bx], ax` (89 07). Fixture 4116.
+/// `<local-int-array>[K] = <expr>;` — word store at element K.
+/// Constant RHS → `c7 46 disp imm16` at `disp = locals.disp(local) +
+/// byte_off`. Non-constant RHS → `<expr-to-ax>; 89 46 disp`.
+fn emit_assign_indexed_local(local_idx: usize, byte_off: u16, value: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    let disp = locals.disp(local_idx) + byte_off as i16;
+    if let Some(k) = value.fold(locals.inits) {
+        let imm = (k as u32 & 0xFFFF) as u16;
+        out.push(0xC7);
+        out.push(0x46);
+        out.push(disp as u8);
+        out.extend_from_slice(&imm.to_le_bytes());
+    } else {
+        emit_expr_to_ax(value, locals, out, fixups);
+        out.push(0x89);
+        out.push(0x46);
+        out.push(disp as u8);
+    }
+}
+
+/// `<local-char-array>[K] = <byte>;` — byte store at element K.
+/// Constant RHS → `c6 46 disp imm8`; non-constant RHS evaluated
+/// into AL via cbw-suppression. Fixture 1134.
+fn emit_assign_indexed_local_byte(local_idx: usize, byte_off: u16, value: &Expr, locals: &Locals<'_>, _out: &mut Vec<u8>, _fixups: &mut Vec<Fixup>) {
+    let _ = locals.disp(local_idx) + byte_off as i16;
+    let k = value.fold(locals.inits).unwrap_or_else(|| {
+        panic!("non-constant char-local-array store value not yet supported")
+    });
+    let imm = (k as u32 & 0xFF) as u8;
+    let disp = locals.disp(local_idx) + byte_off as i16;
+    _out.push(0xC6);
+    _out.push(0x46);
+    _out.push(disp as u8);
+    _out.push(imm);
+}
+
 /// `*<ptr-local> = <expr>;` — load the pointer local into BX, then
 /// store the RHS through `[bx]`. Constant RHS → `c7 07 imm16`;
 /// general RHS → `<expr-to-ax>; 89 07`.
-fn emit_assign_deref_local(local_idx: usize, value: &Expr, locals: &[Option<i32>], out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
-    let disp = -(i16::try_from(local_idx + 1).expect("local idx") * 2);
+fn emit_assign_deref_local(local_idx: usize, value: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    let disp = locals.disp(local_idx);
     // `mov bx, [bp-disp]` — 8b 5e disp8.
     out.extend_from_slice(&[0x8B, 0x5E, disp as u8]);
-    if let Some(k) = value.fold(locals) {
+    if let Some(k) = value.fold(locals.inits) {
         let imm = (k as u32 & 0xFFFF) as u16;
         out.extend_from_slice(&[0xC7, 0x07]);
         out.extend_from_slice(&imm.to_le_bytes());
@@ -3220,7 +3464,7 @@ fn emit_assign_deref_local(local_idx: usize, value: &Expr, locals: &[Option<i32>
     }
 }
 
-fn emit_assign_deref_global(global_idx: usize, value: &Expr, locals: &[Option<i32>], out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+fn emit_assign_deref_global(global_idx: usize, value: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
     // `mov bx, [p]` — load pointer global into BX.
     let body_offset = out.len();
     out.extend_from_slice(&[0x8B, 0x1E, 0x00, 0x00]);
@@ -3228,7 +3472,7 @@ fn emit_assign_deref_global(global_idx: usize, value: &Expr, locals: &[Option<i3
         body_offset: body_offset + 1,
         kind: FixupKind::GlobalAddr { global_idx },
     });
-    if let Some(k) = value.fold(locals) {
+    if let Some(k) = value.fold(locals.inits) {
         let imm = (k as u32 & 0xFFFF) as u16;
         // `c7 07 imm16` — mov word ptr [bx], imm16.
         out.extend_from_slice(&[0xC7, 0x07]);
@@ -3258,7 +3502,7 @@ fn emit_assign_deref_global(global_idx: usize, value: &Expr, locals: &[Option<i3
 fn emit_while(
     cond: &Cond,
     body_stmt: &Stmt,
-    locals: &[Option<i32>],
+    locals: &Locals<'_>,
     frame: Frame,
     return_int: bool,
     out: &mut Vec<u8>,
@@ -3287,7 +3531,7 @@ fn emit_for(
     cond: &Cond,
     step: &Stmt,
     body_stmt: &Stmt,
-    locals: &[Option<i32>],
+    locals: &Locals<'_>,
     frame: Frame,
     return_int: bool,
     out: &mut Vec<u8>,
@@ -3306,7 +3550,7 @@ fn emit_for(
 fn emit_loop(
     cond: &Cond,
     body_segments: &[&Stmt],
-    locals: &[Option<i32>],
+    locals: &Locals<'_>,
     frame: Frame,
     return_int: bool,
     out: &mut Vec<u8>,
@@ -3319,7 +3563,7 @@ fn emit_loop(
     }
     let mut cmp_buf = Vec::new();
     let mut cmp_fixups: Vec<Fixup> = Vec::new();
-    emit_cond_cmp(cond, &mut cmp_buf, &mut cmp_fixups);
+    emit_cond_cmp(cond, locals, &mut cmp_buf, &mut cmp_fixups);
 
     // Alignment: position right after the 2-byte `eb XX` should be
     // even. If it would be odd, insert a NOP pad and bump the
@@ -3375,7 +3619,7 @@ fn emit_loop(
 fn emit_do_while(
     body_stmt: &Stmt,
     cond: &Cond,
-    locals: &[Option<i32>],
+    locals: &Locals<'_>,
     frame: Frame,
     return_int: bool,
     out: &mut Vec<u8>,
@@ -3389,7 +3633,7 @@ fn emit_do_while(
     let mut cmp_buf = Vec::new();
     let mut cmp_fixups: Vec<Fixup> = Vec::new();
     if !elide_cmp {
-        emit_cond_cmp(cond, &mut cmp_buf, &mut cmp_fixups);
+        emit_cond_cmp(cond, locals, &mut cmp_buf, &mut cmp_fixups);
     }
     let cmp_len = cmp_buf.len();
     let jcc_opcode = match cond {
@@ -3434,34 +3678,34 @@ fn body_sets_flags_for_cond(body: &Stmt, cond: &Cond) -> bool {
 
 /// Just the cmp half of a cond — used by `emit_while` which pairs
 /// the comparison with a backward jcc rather than a forward skip.
-fn emit_cond_cmp(cond: &Cond, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
-    emit_cond_cmp_inner(cond, out, fixups);
+fn emit_cond_cmp(cond: &Cond, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    emit_cond_cmp_inner(cond, locals, out, fixups);
 }
 
 /// Emit `cmp <X>, <Y>; <inverted-jcc> skip` where `skip` is a
 /// forward `rel8` displacement equal to `take_then_disp`. The
 /// caller has pre-computed the size of the then-body so we can use
 /// the 2-byte jcc form without a fixup. Fixtures 4090 / 4091 / 4092.
-fn emit_cond_skip(cond: &Cond, take_then_disp: i8, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+fn emit_cond_skip(cond: &Cond, take_then_disp: i8, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
     let jcc = match cond {
         Cond::Truthy(_) => 0x74, // je on zero
         Cond::Cmp { op, .. } => inverted_jcc(*op),
     };
-    emit_cond_cmp_inner(cond, out, fixups);
+    emit_cond_cmp_inner(cond, locals, out, fixups);
     out.push(jcc);
     out.push(take_then_disp as u8);
 }
 
 /// Emit only the cmp half of a Cond. Used by both emit_cond_skip
 /// (forward jcc for `if`) and emit_cond_cmp (backward jcc for loops).
-fn emit_cond_cmp_inner(cond: &Cond, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+fn emit_cond_cmp_inner(cond: &Cond, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
     match cond {
-        Cond::Truthy(Expr::Local(idx)) => emit_cmp_local_imm(*idx, 0, out),
+        Cond::Truthy(Expr::Local(idx)) => emit_cmp_local_imm(*idx, locals, 0, out),
         Cond::Truthy(Expr::Param(idx)) => emit_cmp_bp_imm(param_disp(*idx), 0, out),
         Cond::Truthy(Expr::Global(idx)) => emit_cmp_global_imm(*idx, 0, out, fixups),
         Cond::Cmp { op: _, left: Expr::Local(idx), right: Expr::IntLit(k) }
         | Cond::Cmp { op: _, left: Expr::IntLit(k), right: Expr::Local(idx) } => {
-            emit_cmp_local_imm(*idx, *k, out);
+            emit_cmp_local_imm(*idx, locals, *k, out);
         }
         Cond::Cmp { op: _, left: Expr::Param(idx), right: Expr::IntLit(k) }
         | Cond::Cmp { op: _, left: Expr::IntLit(k), right: Expr::Param(idx) } => {
@@ -3528,9 +3772,8 @@ fn emit_cmp_global_imm(global_idx: usize, k: i32, out: &mut Vec<u8>, fixups: &mu
 /// form when the immediate fits in a sign-extended byte (which is
 /// every fixture exercised by Slice 5 today). The 5-byte
 /// `81 7e disp imm16` form is reserved for larger constants.
-fn emit_cmp_local_imm(idx: usize, k: i32, out: &mut Vec<u8>) {
-    let disp = -(i16::try_from(idx + 1).expect("local index fits") * 2);
-    emit_cmp_bp_imm(disp, k, out);
+fn emit_cmp_local_imm(idx: usize, locals: &Locals<'_>, k: i32, out: &mut Vec<u8>) {
+    emit_cmp_bp_imm(locals.disp(idx), k, out);
 }
 
 /// `cmp word ptr [bp+disp], imm` — covers both local (negative disp)
@@ -3557,7 +3800,7 @@ fn emit_cmp_bp_imm(disp: i16, k: i32, out: &mut Vec<u8>) {
 /// supports a tight set of patterns — every other shape panics with
 /// a clear message so the missing case is obvious when a future
 /// fixture hits it.
-fn emit_expr_to_ax(expr: &Expr, locals: &[Option<i32>], out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
     match expr {
         Expr::IntLit(k) => {
             // Foldable path is handled by the caller; this arm only
@@ -3567,7 +3810,7 @@ fn emit_expr_to_ax(expr: &Expr, locals: &[Option<i32>], out: &mut Vec<u8>, fixup
             out.extend_from_slice(&imm.to_le_bytes());
         }
         Expr::Local(i) => {
-            emit_load_local(*i, out);
+            emit_load_local(*i, locals, out);
         }
         Expr::Param(i) => {
             emit_load_param(*i, out);
@@ -3650,7 +3893,7 @@ fn emit_expr_to_ax(expr: &Expr, locals: &[Option<i32>], out: &mut Vec<u8>, fixup
             // Constant index: load pointer global into BX, then
             // `mov al, [bx + disp]` and `cbw`. `disp` is the byte
             // index. Fixture 4123. Phase 1 keeps it disp8.
-            let k = index.fold(locals).unwrap_or_else(|| {
+            let k = index.fold(locals.inits).unwrap_or_else(|| {
                 panic!("non-constant char-ptr index not yet supported")
             });
             let disp = i8::try_from(k).expect("ptr index fits in i8");
@@ -3666,7 +3909,7 @@ fn emit_expr_to_ax(expr: &Expr, locals: &[Option<i32>], out: &mut Vec<u8>, fixup
             // Phase 1: constant index only — `a0 <byte_off> 98`.
             // The placeholder is the index itself (size 1 per slot);
             // the linker adds the array's base address.
-            let k = index.fold(locals).unwrap_or_else(|| {
+            let k = index.fold(locals.inits).unwrap_or_else(|| {
                 panic!("non-constant char-array index not yet supported")
             });
             let byte_off = (k as u32 & 0xFFFF) as u16;
@@ -3680,7 +3923,7 @@ fn emit_expr_to_ax(expr: &Expr, locals: &[Option<i32>], out: &mut Vec<u8>, fixup
             out.push(0x98);
         }
         Expr::Index { array, index } => {
-            if let Some(k) = index.fold(locals) {
+            if let Some(k) = index.fold(locals.inits) {
                 // Constant index → `a1 <byte_off>` with FIXUP. The
                 // placeholder is `byte_off` (not zero); the linker
                 // adds the array's base address. Fixture 4109.
@@ -3729,14 +3972,35 @@ fn emit_expr_to_ax(expr: &Expr, locals: &[Option<i32>], out: &mut Vec<u8>, fixup
             });
         }
         Expr::AddrOfLocal(idx) => {
-            // `lea ax, [bp - 2*(idx+1)]` = `8d 46 disp`.
-            let disp = -(i16::try_from(idx + 1).expect("local idx") * 2);
+            // `lea ax, [bp-disp]` = `8d 46 disp`.
+            let disp = locals.disp(*idx);
             out.extend_from_slice(&[0x8D, 0x46, disp as u8]);
         }
         Expr::Ternary { .. } => {
             // Should have folded already by the caller for runtime
             // ternary codegen we don't yet implement.
             panic!("non-constant ternary not yet supported");
+        }
+        Expr::LocalIndex { local, index } => {
+            // Constant K → `mov ax, [bp - disp + 2K]` (`8b 46 disp`).
+            let k = index.fold(locals.inits).unwrap_or_else(|| {
+                panic!("non-constant local-int-array index not yet supported")
+            });
+            let disp = locals.disp(*local) + (k as i16) * 2;
+            out.push(0x8B);
+            out.push(0x46);
+            out.push(disp as u8);
+        }
+        Expr::LocalIndexByte { local, index } => {
+            // Constant K → `mov al, [bp - disp + K]; cbw` (`8a 46 disp; 98`).
+            let k = index.fold(locals.inits).unwrap_or_else(|| {
+                panic!("non-constant local-char-array index not yet supported")
+            });
+            let disp = locals.disp(*local) + (k as i16);
+            out.push(0x8A);
+            out.push(0x46);
+            out.push(disp as u8);
+            out.push(0x98);
         }
     }
 }
@@ -3751,17 +4015,17 @@ fn emit_load_param(idx: usize, out: &mut Vec<u8>) {
     out.push(disp as u8);
 }
 
-/// `mov ax, word ptr [bp-disp]` — 3-byte form `8B 46 disp8`. Used
-/// for all local loads in Phase 1; only -2, -4, -6 displacements
-/// are exercised today.
-fn emit_load_local(idx: usize, out: &mut Vec<u8>) {
-    let disp = -(i16::try_from(idx + 1).expect("local index fits") * 2);
+/// `mov ax, word ptr [bp-disp]` — 3-byte form `8B 46 disp8`. The
+/// caller has already converted the local index into a BP-relative
+/// displacement (via `Locals::disp`).
+fn emit_load_local(idx: usize, locals: &Locals<'_>, out: &mut Vec<u8>) {
+    let disp = locals.disp(idx);
     out.push(0x8B);
     out.push(0x46);
     out.push(disp as u8);
 }
 
-fn emit_binop(op: BinOp, left: &Expr, right: &Expr, locals: &[Option<i32>], out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+fn emit_binop(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
     // Commutative-op swap: when the RHS is a value that needs AX
     // (call, complex expression) and the LHS is a BP-rel operand,
     // MSC emits the RHS first and then uses the BP-rel as a memory
@@ -3770,14 +4034,14 @@ fn emit_binop(op: BinOp, left: &Expr, right: &Expr, locals: &[Option<i32>], out:
     let commutative = matches!(op, BinOp::Add | BinOp::Mul | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor);
     if commutative
         && matches!(right, Expr::Call { .. })
-        && let Some(disp) = bp_disp(left)
+        && let Some(disp) = bp_disp(left, locals)
     {
         emit_expr_to_ax(right, locals, out, fixups);
         emit_mem_op_at(op, disp, out);
         return;
     }
     // Left as a BP-rel operand we can load into AX.
-    if let Some(load) = bp_load(left) {
+    if let Some(load) = bp_load(left, locals) {
         load(out);
         // Right as IntLit → imm form.
         if let Expr::IntLit(k) = right {
@@ -3785,7 +4049,7 @@ fn emit_binop(op: BinOp, left: &Expr, right: &Expr, locals: &[Option<i32>], out:
             return;
         }
         // Right as BP-rel → `op ax, [bp+disp]` mem form.
-        if let Some(disp) = bp_disp(right) {
+        if let Some(disp) = bp_disp(right, locals) {
             emit_mem_op_at(op, disp, out);
             return;
         }
@@ -3826,11 +4090,11 @@ fn emit_binop(op: BinOp, left: &Expr, right: &Expr, locals: &[Option<i32>], out:
     }
     // Foldable side — recurse with the folded literal substituted.
     // Lets `(2 + x)` collapse to `(<lit> + <local>)` etc.
-    if let Some(k) = left.fold(locals) {
+    if let Some(k) = left.fold(locals.inits) {
         emit_binop(op, &Expr::IntLit(k), right, locals, out, fixups);
         return;
     }
-    if let Some(k) = right.fold(locals) {
+    if let Some(k) = right.fold(locals.inits) {
         emit_binop(op, left, &Expr::IntLit(k), locals, out, fixups);
         return;
     }
@@ -3859,7 +4123,7 @@ fn emit_binop(op: BinOp, left: &Expr, right: &Expr, locals: &[Option<i32>], out:
             });
             return;
         }
-        if let Some(disp) = bp_disp(right) {
+        if let Some(disp) = bp_disp(right, locals) {
             emit_mem_op_at(op, disp, out);
             return;
         }
@@ -3870,9 +4134,9 @@ fn emit_binop(op: BinOp, left: &Expr, right: &Expr, locals: &[Option<i32>], out:
 /// If `e` is a Local or Param, return a closure that emits the
 /// `mov ax, [bp+disp]` load. Otherwise return None. Used by
 /// `emit_binop` to handle either operand kind on the left-hand side.
-fn bp_load(e: &Expr) -> Option<Box<dyn FnOnce(&mut Vec<u8>) + '_>> {
+fn bp_load<'a>(e: &'a Expr, locals: &'a Locals<'_>) -> Option<Box<dyn FnOnce(&mut Vec<u8>) + 'a>> {
     match e {
-        Expr::Local(i) => Some(Box::new(move |out: &mut Vec<u8>| emit_load_local(*i, out))),
+        Expr::Local(i) => Some(Box::new(move |out: &mut Vec<u8>| emit_load_local(*i, locals, out))),
         Expr::Param(i) => Some(Box::new(move |out: &mut Vec<u8>| emit_load_param(*i, out))),
         _ => None,
     }
@@ -3880,9 +4144,9 @@ fn bp_load(e: &Expr) -> Option<Box<dyn FnOnce(&mut Vec<u8>) + '_>> {
 
 /// If `e` is a Local or Param, return its bp-relative byte
 /// displacement (negative for locals, positive for params).
-fn bp_disp(e: &Expr) -> Option<i16> {
+fn bp_disp(e: &Expr, locals: &Locals<'_>) -> Option<i16> {
     match e {
-        Expr::Local(i) => Some(-(*i as i16 + 1) * 2),
+        Expr::Local(i) => Some(locals.disp(*i)),
         Expr::Param(i) => Some(4 + (*i as i16) * 2),
         _ => None,
     }
