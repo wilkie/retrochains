@@ -4262,6 +4262,15 @@ fn parse_imm8_signed(s: &str) -> Option<i8> {
 /// operands — no hex `42h` or octal forms.)
 fn parse_imm16(s: &str) -> Option<u16> {
     let s = s.trim();
+    // Accept C-style `0x<hex>` literals in addition to decimal. BCC's
+    // inline-asm translates source hex to TASM's `<digits>H` form,
+    // but our codegen leaves hex literals verbatim. Fixture 4056.
+    if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X"))
+        && let Ok(v) = u32::from_str_radix(hex, 16)
+        && v <= 0xFFFF
+    {
+        return Some(v as u16);
+    }
     if let Ok(v) = s.parse::<i32>() {
         if (-32_768..=65_535).contains(&v) {
             return Some(v as u16);
