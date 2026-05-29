@@ -4098,37 +4098,92 @@ fn emit_binop(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, out: &m
         emit_binop(op, left, &Expr::IntLit(k), locals, out, fixups);
         return;
     }
-    // Nested binop on the left (`(a + b) + c`): compute the left
-    // subtree into AX, then fold the right side in. Fixture 4139.
+    // Nested binop on the left (`(a + b) + c`, `g[0] + g[1] + g[2]`):
+    // compute the left subtree into AX, then fold the right side in.
+    // Fixtures 4139 / 1100.
     if let Expr::BinOp { .. } = left {
         emit_expr_to_ax(left, locals, out, fixups);
-        if let Expr::IntLit(k) = right {
-            emit_imm_op(op, *k, out);
-            return;
-        }
-        if let Expr::Global(idx) = right {
-            let opcode = match op {
-                BinOp::Add => 0x03,
-                BinOp::Sub => 0x2B,
-                BinOp::Mul => panic!("mul with global rhs not yet supported"),
-                _ => panic!("{op:?} with global rhs not yet supported"),
-            };
-            out.push(opcode);
-            out.push(0x06);
-            let body_offset = out.len();
-            out.extend_from_slice(&[0x00, 0x00]);
-            fixups.push(Fixup {
-                body_offset: body_offset - 1,
-                kind: FixupKind::GlobalAddr { global_idx: *idx },
-            });
-            return;
-        }
-        if let Some(disp) = bp_disp(right, locals) {
-            emit_mem_op_at(op, disp, out);
-            return;
-        }
+        return emit_binop_right(op, right, locals, out, fixups);
+    }
+    // Left as a global-array Index with constant K: synthesize a
+    // global-load (`a1 byte_off`) and let the right side fold.
+    if let Some((array_idx, byte_off)) = const_index_global(left, locals) {
+        let body_offset = out.len();
+        out.push(0xA1);
+        out.extend_from_slice(&byte_off.to_le_bytes());
+        fixups.push(Fixup {
+            body_offset,
+            kind: FixupKind::GlobalAddr { global_idx: array_idx },
+        });
+        return emit_binop_right(op, right, locals, out, fixups);
     }
     panic!("binop shape not yet supported: {op:?} of {left:?}, {right:?}");
+}
+
+/// After the LHS is in AX, fold the RHS into the same register via
+/// the appropriate `op ax, <operand>` form. Used by `emit_binop`
+/// once it's resolved the LHS into AX.
+fn emit_binop_right(op: BinOp, right: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    if let Expr::IntLit(k) = right {
+        emit_imm_op(op, *k, out);
+        return;
+    }
+    if let Expr::Global(idx) = right {
+        let opcode = match op {
+            BinOp::Add => 0x03,
+            BinOp::Sub => 0x2B,
+            _ => panic!("{op:?} with global rhs not yet supported"),
+        };
+        out.push(opcode);
+        out.push(0x06);
+        let body_offset = out.len();
+        out.extend_from_slice(&[0x00, 0x00]);
+        fixups.push(Fixup {
+            body_offset: body_offset - 1,
+            kind: FixupKind::GlobalAddr { global_idx: *idx },
+        });
+        return;
+    }
+    if let Some((array_idx, byte_off)) = const_index_global(right, locals) {
+        let opcode = match op {
+            BinOp::Add => 0x03,
+            BinOp::Sub => 0x2B,
+            _ => panic!("{op:?} with indexed-global rhs not yet supported"),
+        };
+        out.push(opcode);
+        out.push(0x06);
+        let body_offset = out.len();
+        out.extend_from_slice(&byte_off.to_le_bytes());
+        fixups.push(Fixup {
+            body_offset: body_offset - 1,
+            kind: FixupKind::GlobalAddr { global_idx: array_idx },
+        });
+        return;
+    }
+    if let Some(disp) = bp_disp(right, locals) {
+        emit_mem_op_at(op, disp, out);
+        return;
+    }
+    panic!("binop_right shape not yet supported: {op:?} of {right:?}");
+}
+
+/// If `e` is an `Index { array, IntLit(K) }` (or the IndexByte
+/// variant), return (array_idx, byte_off). Used by emit_binop to
+/// promote `g[K]` to an `[addr]` operand directly.
+fn const_index_global(e: &Expr, locals: &Locals<'_>) -> Option<(usize, u16)> {
+    match e {
+        Expr::Index { array, index } => {
+            let k = index.fold(locals.inits)?;
+            let off = u16::try_from((k as i64) * 2).ok()?;
+            Some((*array, off))
+        }
+        Expr::IndexByte { array, index } => {
+            let k = index.fold(locals.inits)?;
+            let off = u16::try_from(k as i64).ok()?;
+            Some((*array, off))
+        }
+        _ => None,
+    }
 }
 
 /// If `e` is a Local or Param, return a closure that emits the
