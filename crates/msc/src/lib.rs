@@ -221,6 +221,9 @@ pub struct Locals<'a> {
     /// Parallel-indexed flags marking globals that hold a 4-byte
     /// long. Used by global-assign codegen to emit both halves.
     pub long_globals: &'a [bool],
+    /// Parallel-indexed flags marking globals whose element size is
+    /// 1 (char). Used to pick byte-load (`a0`) + cbw over word-load.
+    pub char_globals: &'a [bool],
     /// Parallel-indexed flags marking locals that are `long`. Direct
     /// loads (return, assign) bypass the fold view so the slot is
     /// read at runtime even when its constant value is known.
@@ -243,6 +246,9 @@ impl Locals<'_> {
     }
     pub fn is_long_global(&self, idx: usize) -> bool {
         self.long_globals.get(idx).copied().unwrap_or(false)
+    }
+    pub fn is_char_global(&self, idx: usize) -> bool {
+        self.char_globals.get(idx).copied().unwrap_or(false)
     }
     pub fn is_long_local(&self, idx: usize) -> bool {
         self.long_locals.get(idx).copied().unwrap_or(false)
@@ -1414,6 +1420,10 @@ fn parse_global_decl(p: &mut Parser<'_>) -> Result<(), EmitError> {
             let low = (k as u32 & 0xFFFF) as i32;
             let high = (((k as u32) >> 16) & 0xFFFF) as i32;
             Some(vec![GlobalInit::Int(low), GlobalInit::Int(high)])
+        } else if is_char && !is_pointer && array_len == 1 {
+            // `char g = K;` — single byte in _DATA.
+            let k = parse_signed_int(p)?;
+            Some(vec![GlobalInit::Byte((k as u32 & 0xFF) as u8)])
         } else {
             Some(vec![GlobalInit::Int(parse_signed_int(p)?)])
         }
@@ -2899,10 +2909,11 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
     // total length into the _TEXT SEGDEF and compute per-function
     // offsets for call resolution + chkstk FIXUPs.
     let long_globals: Vec<bool> = unit.globals.iter().map(|g| g.is_long).collect();
+    let char_globals: Vec<bool> = unit.globals.iter().map(|g| !g.is_pointer && g.element_size == 1 && g.array_len == 1).collect();
     let function_emits: Vec<FunctionEmit> = unit
         .functions
         .iter()
-        .map(|f| emit_function(f, &long_globals))
+        .map(|f| emit_function(f, &long_globals, &char_globals))
         .collect();
 
     // Per-function global offset within the _TEXT segment.
@@ -3775,7 +3786,7 @@ fn prop_expr(e: &mut Expr, cp: &ConstProp) {
     }
 }
 
-fn emit_function(func: &Function, long_globals: &[bool]) -> FunctionEmit {
+fn emit_function(func: &Function, long_globals: &[bool], char_globals: &[bool]) -> FunctionEmit {
     let body = const_prop_globals(&func.body, &func.locals, long_globals);
     // Extract a `Vec<Option<i32>>` view for the existing fold path —
     // saves rewriting every codegen helper to know about LocalSpec.
@@ -3880,6 +3891,7 @@ fn emit_function(func: &Function, long_globals: &[bool]) -> FunctionEmit {
         disps: &local_disps,
         sizes: &local_sizes,
         long_globals,
+        char_globals,
         long_locals: &local_long,
         init_literals: &local_literals,
     };
@@ -5449,15 +5461,25 @@ fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: 
             panic!("string literal in non-arg context not yet supported");
         }
         Expr::Global(idx) => {
-            // `a1 00 00` — mov ax, moffs16. The placeholder address
-            // gets FIXUP'd to the global's _DATA-relative offset.
-            // Fixtures 4104, 4106.
-            let body_offset = out.len();
-            out.extend_from_slice(&[0xA1, 0x00, 0x00]);
-            fixups.push(Fixup {
-                body_offset,
-                kind: FixupKind::GlobalAddr { global_idx: *idx },
-            });
+            if locals.is_char_global(*idx) {
+                // `a0 00 00` mov al, moffs8 + `98` cbw — read a char
+                // global with sign extension. Fixture 1092.
+                let body_offset = out.len();
+                out.extend_from_slice(&[0xA0, 0x00, 0x00]);
+                fixups.push(Fixup {
+                    body_offset,
+                    kind: FixupKind::GlobalAddr { global_idx: *idx },
+                });
+                out.push(0x98);
+            } else {
+                // `a1 00 00` — mov ax, moffs16.
+                let body_offset = out.len();
+                out.extend_from_slice(&[0xA1, 0x00, 0x00]);
+                fixups.push(Fixup {
+                    body_offset,
+                    kind: FixupKind::GlobalAddr { global_idx: *idx },
+                });
+            }
         }
         Expr::DerefByte { ptr } => {
             // Phase 1: `*<char-ptr-global>` and `*(<char-ptr> + K)`.
