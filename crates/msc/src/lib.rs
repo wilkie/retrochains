@@ -1404,22 +1404,30 @@ fn parse_assign_no_semi(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
 }
 
 fn parse_cond(p: &mut Parser<'_>) -> Result<Cond, EmitError> {
-    let left = parse_expr(p)?;
-    let op = match p.peek() {
-        Some(Tok::EqEq) => Some(RelOp::Eq),
-        Some(Tok::NotEq) => Some(RelOp::Ne),
-        Some(Tok::Lt) => Some(RelOp::Lt),
-        Some(Tok::Gt) => Some(RelOp::Gt),
-        Some(Tok::Le) => Some(RelOp::Le),
-        Some(Tok::Ge) => Some(RelOp::Ge),
-        _ => None,
-    };
-    if let Some(op) = op {
-        p.bump();
-        let right = parse_expr(p)?;
-        return Ok(Cond::Cmp { op, left, right });
+    // Parse the cond as a normal expression; relops live in the same
+    // precedence table. Then unwrap the outermost relop into the
+    // dedicated Cond::Cmp shape so the cmp+jcc emit path matches MSC's
+    // direct addressing modes.
+    let expr = parse_expr(p)?;
+    if let Expr::BinOp { op, left, right } = &expr {
+        let rel = match op {
+            BinOp::Eq => Some(RelOp::Eq),
+            BinOp::Ne => Some(RelOp::Ne),
+            BinOp::Lt => Some(RelOp::Lt),
+            BinOp::Gt => Some(RelOp::Gt),
+            BinOp::Le => Some(RelOp::Le),
+            BinOp::Ge => Some(RelOp::Ge),
+            _ => None,
+        };
+        if let Some(op) = rel {
+            return Ok(Cond::Cmp {
+                op,
+                left: left.as_ref().clone(),
+                right: right.as_ref().clone(),
+            });
+        }
     }
-    Ok(Cond::Truthy(left))
+    Ok(Cond::Truthy(expr))
 }
 
 /// Expression parser — recognizes the Slice-4 shapes:
