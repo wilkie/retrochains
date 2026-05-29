@@ -18,10 +18,22 @@ use crate::fixture::{Fixture, ToolName};
 use crate::manifest::{Manifest, OracleSummary, OutputEntry, RunSummary};
 use crate::timefmt;
 
-/// The pinned instant. Must match `oracle::FakeTime::default().instant` so
-/// inputs materialized for our toolchain see the same mtime as the oracle
-/// pinned them to. 672_408_000 == 1991-04-23 12:00:00 UTC.
-const PIN_EPOCH_SECS: u64 = 672_408_000;
+/// Per-compiler clock anchors. Each value must match the corresponding
+/// `oracle::FakeTime::*().instant` so inputs materialized for our
+/// toolchain see the same mtime the oracle pinned them to.
+///   - bcc:  1991-04-23 12:00:00 UTC = BC2 release date
+///   - msc:  1987-10-15 12:00:00 UTC = MSC 5.0 release date
+const PIN_EPOCH_SECS_BCC: u64 = 672_408_000;
+const PIN_EPOCH_SECS_MSC: u64 = 561_297_600;
+
+fn pin_epoch_secs_for(compiler: &str) -> u64 {
+    match compiler {
+        "msc" => PIN_EPOCH_SECS_MSC,
+        // Default to bcc for any unrecognized compiler so existing
+        // bcc fixtures continue to anchor at the BC2 instant.
+        _ => PIN_EPOCH_SECS_BCC,
+    }
+}
 
 /// Capture a fixture: run the oracle and write a fresh `expected/`.
 ///
@@ -147,10 +159,14 @@ pub struct ToolPaths {
     pub bcc: Option<PathBuf>,
     pub tasm: Option<PathBuf>,
     pub tlink: Option<PathBuf>,
+    /// Our future MSC reimplementation (`crates/msc`). `None` today —
+    /// `--toolchain ours` against an MSC fixture currently has no
+    /// path to spawn.
+    pub msc: Option<PathBuf>,
 }
 
 impl ToolPaths {
-    /// Look for `target/debug/{bcc,tasm,tlink}` under the workspace root.
+    /// Look for `target/debug/{bcc,tasm,tlink,msc}` under the workspace root.
     /// Whichever binaries exist are bound; the rest stay `None`.
     #[must_use]
     pub fn from_workspace_debug(workspace_root: &Path) -> Self {
@@ -158,7 +174,12 @@ impl ToolPaths {
             let candidate = workspace_root.join("target").join("debug").join(name);
             candidate.is_file().then_some(candidate)
         };
-        Self { bcc: pick("bcc"), tasm: pick("tasm"), tlink: pick("tlink") }
+        Self {
+            bcc: pick("bcc"),
+            tasm: pick("tasm"),
+            tlink: pick("tlink"),
+            msc: pick("msc"),
+        }
     }
 
     fn resolve(&self, tool: ToolName) -> Result<&Path, HarnessError> {
@@ -166,6 +187,11 @@ impl ToolPaths {
             ToolName::Bcc => &self.bcc,
             ToolName::Tasm => &self.tasm,
             ToolName::Tlink => &self.tlink,
+            ToolName::Cl => &self.msc,
+            // MSC ships MASM and LINK with a separate driver; we'll
+            // grow these slots when `crates/msc` lands proper
+            // reimplementations.
+            ToolName::Masm | ToolName::Link => &None,
         };
         opt.as_deref().ok_or(HarnessError::ToolNotImplemented(tool.as_str().to_owned()))
     }
@@ -180,7 +206,7 @@ fn run_ours(fixture: &Fixture, tool_paths: &ToolPaths) -> Result<OracleRun, Harn
     // Materialize inputs with the pinned mtime — mirrors what
     // `oracle::dosbox::materialize_inputs` does so our compiler sees the
     // same source mtime as the oracle's BCC.
-    let pin = UNIX_EPOCH + Duration::from_secs(PIN_EPOCH_SECS);
+    let pin = UNIX_EPOCH + Duration::from_secs(pin_epoch_secs_for(&fixture.compiler));
     let mut input_names: BTreeSet<String> = BTreeSet::new();
     for (name, bytes) in &inputs {
         let path = work.join(name);
@@ -246,12 +272,12 @@ fn our_summary(fixture: &Fixture) -> OracleSummary {
         tool: fixture.invocation.tool.as_str().to_owned(),
         args: fixture.invocation.args.clone(),
         dosbox_version: None,
-        fake_time: Some("1991-04-23T12:00:00Z".to_owned()),
+        fake_time: Some(faketime_iso_for(&fixture.compiler).to_owned()),
     }
 }
 
 fn run_oracle(workspace_root: &Path, fixture: &Fixture) -> Result<OracleRun, HarnessError> {
-    let cfg = OracleConfig::for_workspace(workspace_root);
+    let cfg = oracle_config_for(workspace_root, &fixture.compiler)?;
     let inputs = fixture.load_inputs()?;
     let oracle = Oracle::open(cfg).map_err(|e| HarnessError::Oracle(e.to_string()))?;
     let mut inv = OracleInvocation::new(fixture.invocation.tool.as_oracle())
@@ -260,6 +286,23 @@ fn run_oracle(workspace_root: &Path, fixture: &Fixture) -> Result<OracleRun, Har
         inv = inv.input(name.clone(), bytes.as_slice());
     }
     oracle.run(&inv).map_err(|e| HarnessError::Oracle(e.to_string()))
+}
+
+/// Map a fixture's `compiler` field to the right [`OracleConfig`].
+/// Today we recognize "bcc" (BC2.zip) and "msc" (MSC500.zip); future
+/// vendors are a one-line addition. Anything else is a harness-time
+/// error rather than a silent fall-through to BC2.
+fn oracle_config_for(
+    workspace_root: &Path,
+    compiler: &str,
+) -> Result<OracleConfig, HarnessError> {
+    match compiler {
+        "bcc" => Ok(OracleConfig::for_workspace(workspace_root)),
+        "msc" => Ok(OracleConfig::for_msc500_workspace(workspace_root)),
+        other => Err(HarnessError::Oracle(format!(
+            "no oracle profile registered for compiler {other:?}"
+        ))),
+    }
 }
 
 fn build_manifest(fixture: &Fixture, run: &OracleRun, oracle: OracleSummary) -> Manifest {
@@ -291,7 +334,20 @@ fn oracle_summary(fixture: &Fixture) -> OracleSummary {
         tool: fixture.invocation.tool.as_str().to_owned(),
         args: fixture.invocation.args.clone(),
         dosbox_version: None,
-        fake_time: Some("1991-04-23T12:00:00Z".to_owned()),
+        fake_time: Some(faketime_iso_for(&fixture.compiler).to_owned()),
+    }
+}
+
+fn faketime_iso_for(compiler: &str) -> &'static str {
+    match compiler {
+        // BC2 release date.
+        "bcc" => "1991-04-23T12:00:00Z",
+        // MSC 5.0 release date.
+        "msc" => "1987-10-15T12:00:00Z",
+        // Fall back to BC2 — pre-existing manifests for `bcc` fixtures
+        // expect this exact string and we don't want a future
+        // unrecognized compiler to silently change captured goldens.
+        _ => "1991-04-23T12:00:00Z",
     }
 }
 

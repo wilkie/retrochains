@@ -1,0 +1,4 @@
+description = "Empty main(), compile to OBJ with MSC 5.0. First MSC oracle smoke test — confirms the microsoft-msc5 profile drives CL.EXE end-to-end."
+tool = "cl"
+args = ["/c", "/AS", "HELLO.C"]
+inputs = ["HELLO.C"]

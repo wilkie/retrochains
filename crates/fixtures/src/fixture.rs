@@ -23,6 +23,12 @@ pub enum ToolName {
     Bcc,
     Tasm,
     Tlink,
+    /// Microsoft C 5.0 driver (`CL.EXE`). MSC oracle only.
+    Cl,
+    /// MASM 5.x (`MASM.EXE`). MSC oracle.
+    Masm,
+    /// Microsoft's LINK.EXE. Distinct from BCC's TLINK.
+    Link,
 }
 
 impl ToolName {
@@ -32,6 +38,9 @@ impl ToolName {
             Self::Bcc => Tool::Bcc,
             Self::Tasm => Tool::Tasm,
             Self::Tlink => Tool::Tlink,
+            Self::Cl => Tool::Cl,
+            Self::Masm => Tool::Masm,
+            Self::Link => Tool::Link,
         }
     }
 
@@ -41,6 +50,9 @@ impl ToolName {
             Self::Bcc => "bcc",
             Self::Tasm => "tasm",
             Self::Tlink => "tlink",
+            Self::Cl => "cl",
+            Self::Masm => "masm",
+            Self::Link => "link",
         }
     }
 }

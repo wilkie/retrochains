@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::SystemTime;
 
-use crate::bc2::Bc2Layout;
+use crate::distro::DistroLayout;
 use crate::{FakeTime, OracleOutput, OracleRun, Tool};
 
 /// Files written by our batch wrapper (not by the tool itself). They are
@@ -44,7 +44,7 @@ pub enum DosboxError {
 pub(crate) fn run(
     dosbox: &Path,
     fake_time: Option<&FakeTime>,
-    layout: &Bc2Layout,
+    layout: &DistroLayout,
     tool: Tool,
     args: &[String],
     inputs: &BTreeMap<String, &[u8]>,
@@ -53,7 +53,7 @@ pub(crate) fn run(
     materialize_inputs(work.path(), inputs, fake_time.map(|ft| ft.instant))?;
     write_run_bat(work.path(), tool, args)?;
 
-    let bc2_dir = layout.bc2_dir.canonicalize()?;
+    let dos_c_root = layout.root_dir.canonicalize()?;
     let work_dir = work.path().canonicalize()?;
 
     let mut cmd = build_command(dosbox, fake_time);
@@ -62,7 +62,7 @@ pub(crate) fn run(
     cmd.env("TZ", "UTC")
         .env("SDL_VIDEODRIVER", "dummy")
         .arg("-exit")
-        .arg("-c").arg(format!("mount c \"{}\"", bc2_dir.display()))
+        .arg("-c").arg(format!("mount c \"{}\"", dos_c_root.display()))
         .arg("-c").arg(format!("mount d \"{}\"", work_dir.display()))
         .arg("-c").arg("set INCLUDE=C:\\INCLUDE")
         .arg("-c").arg("set LIB=C:\\LIB")

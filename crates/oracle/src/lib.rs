@@ -1,27 +1,36 @@
-//! Oracle: runs the original Borland C++ 2.0 toolchain (`BCC.EXE`, `TASM.EXE`,
-//! `TLINK.EXE`) under DOSBox so the rest of this workspace can diff its output
-//! byte-for-byte against the reference compiler.
+//! Oracle: runs an original 16-bit DOS toolchain under DOSBox so the
+//! rest of this workspace can diff its output byte-for-byte against
+//! the reference compiler.
 //!
-//! The Borland install tree lives in `BC2.zip` at the repository root. On first
-//! use the oracle extracts it (lazily, idempotently) to a gitignored `.bc2/`
-//! directory and reuses that extraction afterwards.
+//! Supported distributions: Borland C++ 2.0 (`BC2.zip`, lazy-extracted
+//! to `.bc2/`) and Microsoft C 5.0 (`MSC500.zip`, lazy-extracted to
+//! `.msc500/`). Pick one via [`OracleConfig::for_workspace`] (BC2 by
+//! default) or [`OracleConfig::for_msc500_workspace`].
 
-mod bc2;
+mod distro;
 mod dosbox;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-pub use bc2::Bc2Layout;
+pub use distro::{DistroLayout, DistroSpec};
 pub use dosbox::DosboxError;
 
-/// One of the original Borland tools.
+/// One of the original DOS tools we can drive. Each oracle distribution
+/// supports a subset — BC2 ships BCC/TASM/TLINK; MSC500 ships CL/MASM/LINK.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tool {
     Bcc,
     Tasm,
     Tlink,
+    /// Microsoft C 5.0 driver. Shells out to C1/C2/C3 internally,
+    /// then to MASM and LINK as needed.
+    Cl,
+    /// MASM 5.x (ships in MSC500.zip's BIN/).
+    Masm,
+    /// MSC's LINK.EXE — distinct from BCC's TLINK.EXE.
+    Link,
 }
 
 impl Tool {
@@ -32,6 +41,9 @@ impl Tool {
             Self::Bcc => "BCC",
             Self::Tasm => "TASM",
             Self::Tlink => "TLINK",
+            Self::Cl => "CL",
+            Self::Masm => "MASM",
+            Self::Link => "LINK",
         }
     }
 }
@@ -107,12 +119,14 @@ pub struct OracleRun {
 
 #[derive(Debug, thiserror::Error)]
 pub enum OracleError {
-    #[error("BC2.zip not found at {0}")]
-    Bc2ZipMissing(PathBuf),
-    #[error("could not unpack BC2.zip: {0}")]
+    #[error("oracle archive not found at {0}")]
+    ArchiveMissing(PathBuf),
+    #[error("could not unpack oracle archive: {0}")]
     Unpack(#[from] zip::result::ZipError),
     #[error("oracle invocation requires a tool")]
     MissingTool,
+    #[error("tool {tool:?} is not part of the {distro:?} distribution")]
+    ToolNotInDistribution { tool: Tool, distro: &'static str },
     #[error("DOSBox: {0}")]
     Dosbox(#[from] DosboxError),
     #[error("io: {0}")]
@@ -142,75 +156,115 @@ pub struct FakeTime {
 
 impl Default for FakeTime {
     fn default() -> Self {
-        // BC2's own release date, interpreted as UTC. The numeric constant
-        // matches the timestamp string (`date -u -d "1991-04-23 12:00:00 UTC"
-        // +%s` == 672408000).
+        Self::bc2()
+    }
+}
+
+impl FakeTime {
+    /// Anchor for the BC2 oracle — Borland C++ 2.0's release date,
+    /// interpreted as UTC.
+    #[must_use]
+    pub fn bc2() -> Self {
         Self {
             binary: PathBuf::from("faketime"),
             timestamp: "1991-04-23 12:00:00".to_owned(),
-            // 1991-04-23 12:00:00 UTC as Unix epoch seconds. Clippy would
-            // rather we wrote `from_hours(186_780)`, but the constructor is
-            // unstable and "epoch seconds" reads more obviously as a date.
+            // 1991-04-23 12:00:00 UTC as Unix epoch seconds.
             #[allow(clippy::duration_suboptimal_units)]
             instant: SystemTime::UNIX_EPOCH + Duration::from_secs(672_408_000),
         }
     }
-}
 
-/// Configuration for the oracle. Defaults are correct for in-repo use.
-#[derive(Debug, Clone)]
-pub struct OracleConfig {
-    /// Where the BC2.zip archive lives.
-    pub bc2_zip: PathBuf,
-    /// Where to extract it on first use (and reuse thereafter).
-    pub bc2_root: PathBuf,
-    /// Path to the dosbox binary.
-    pub dosbox: PathBuf,
-    /// If set, DOSBox runs under `faketime` so the emulated DOS clock is
-    /// pinned and BCC's timestamp-embedding produces reproducible output.
-    /// Default is `Some(FakeTime::default())` because byte-exact
-    /// reproducibility is the whole point of the oracle. Set to `None` only
-    /// when you specifically want the real clock (you almost never do).
-    pub fake_time: Option<FakeTime>,
-}
-
-impl OracleConfig {
-    /// Defaults based on the workspace root containing `BC2.zip`.
+    /// Anchor for the MSC500 oracle — Microsoft C 5.0's release date
+    /// (1987-10-15 05:00 — the timestamp every binary in the
+    /// distribution carries). We use noon UTC of the same day so the
+    /// pin is unambiguous regardless of host timezone.
     #[must_use]
-    pub fn for_workspace(workspace_root: &Path) -> Self {
+    pub fn msc500() -> Self {
         Self {
-            bc2_zip: workspace_root.join("BC2.zip"),
-            bc2_root: workspace_root.join(".bc2"),
-            dosbox: PathBuf::from("dosbox"),
-            fake_time: Some(FakeTime::default()),
+            binary: PathBuf::from("faketime"),
+            timestamp: "1987-10-15 12:00:00".to_owned(),
+            // 1987-10-15 12:00:00 UTC as Unix epoch seconds.
+            #[allow(clippy::duration_suboptimal_units)]
+            instant: SystemTime::UNIX_EPOCH + Duration::from_secs(561_297_600),
         }
     }
 }
 
-/// The oracle. Owns the lazily-extracted BC2 install tree and drives DOSBox.
+/// Configuration for the oracle. Pick a distribution-aware constructor
+/// (`for_workspace` for BC2, `for_msc500_workspace` for Microsoft C 5.0).
+#[derive(Debug, Clone)]
+pub struct OracleConfig {
+    /// Which distribution this oracle drives (BC2 / MSC500 / ...).
+    pub distro: DistroSpec,
+    /// Path to the dosbox binary.
+    pub dosbox: PathBuf,
+    /// If set, DOSBox runs under `faketime` so the emulated DOS clock is
+    /// pinned and the compiler's timestamp-embedding produces reproducible
+    /// output. Per-distribution: BC2 uses its own release date,
+    /// MSC500 uses MSC 5.0's. Set to `None` only when you specifically
+    /// want the real clock (you almost never do).
+    pub fake_time: Option<FakeTime>,
+}
+
+impl OracleConfig {
+    /// Defaults for the Borland C++ 2.0 oracle (BC2.zip at the workspace
+    /// root). The historical default — kept under this name so existing
+    /// callers don't break.
+    #[must_use]
+    pub fn for_workspace(workspace_root: &Path) -> Self {
+        Self {
+            distro: DistroSpec::bc2(workspace_root),
+            dosbox: PathBuf::from("dosbox"),
+            fake_time: Some(FakeTime::bc2()),
+        }
+    }
+
+    /// Defaults for the Microsoft C 5.0 oracle (MSC500.zip at the
+    /// workspace root). See `MSC500.md` for the manifest and acquisition
+    /// path; the zip itself is gitignored.
+    #[must_use]
+    pub fn for_msc500_workspace(workspace_root: &Path) -> Self {
+        Self {
+            distro: DistroSpec::msc500(workspace_root),
+            dosbox: PathBuf::from("dosbox"),
+            fake_time: Some(FakeTime::msc500()),
+        }
+    }
+}
+
+/// The oracle. Owns the lazily-extracted distribution tree and drives
+/// DOSBox. Each `Oracle` instance is scoped to one distribution; to
+/// drive both BC2 and MSC500 in the same process, open two oracles.
 #[derive(Debug)]
 pub struct Oracle {
     cfg: OracleConfig,
-    layout: Bc2Layout,
+    layout: DistroLayout,
 }
 
 impl Oracle {
-    /// Ensure BC2.zip is extracted and ready, then return a handle.
+    /// Ensure the distribution archive is extracted, then return a
+    /// handle ready to drive DOSBox.
     ///
     /// # Errors
-    /// Returns [`OracleError::Bc2ZipMissing`] if the archive isn't where the
-    /// config says it is, [`OracleError::Unpack`] if extraction fails, or
-    /// [`OracleError::Io`] for unrelated filesystem issues.
+    /// Returns [`OracleError::ArchiveMissing`] if the archive isn't
+    /// where the config says it is, [`OracleError::Unpack`] if
+    /// extraction fails, or [`OracleError::Io`] for unrelated
+    /// filesystem issues.
     pub fn open(cfg: OracleConfig) -> Result<Self, OracleError> {
-        let layout = bc2::ensure_extracted(&cfg.bc2_zip, &cfg.bc2_root)?;
+        let layout = distro::ensure_extracted(&cfg.distro)?;
         Ok(Self { cfg, layout })
     }
 
-    /// Path to the extracted BC2 root (the directory that contains BIN/,
-    /// INCLUDE/, LIB/).
+    /// Resolved on-disk paths for the extracted distribution.
     #[must_use]
-    pub fn layout(&self) -> &Bc2Layout {
+    pub fn layout(&self) -> &DistroLayout {
         &self.layout
+    }
+
+    /// Which distribution this oracle drives.
+    #[must_use]
+    pub fn distro(&self) -> &DistroSpec {
+        &self.cfg.distro
     }
 
     /// Run one oracle invocation.
