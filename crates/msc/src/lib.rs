@@ -1116,6 +1116,8 @@ fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> {
             p.bump(); // type kw
         }
         loop {
+            // Per-declarator `*` prefix for pointer locals.
+            while matches!(p.peek(), Some(Tok::Star)) { p.bump(); }
             let lname = match p.bump().cloned() {
                 Some(Tok::Ident(s)) => s,
                 other => {
@@ -1651,12 +1653,21 @@ fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
             p.strings.push(bytes);
             Ok(Expr::StrLit(idx))
         }
-        Some(Tok::Minus) => match p.bump().cloned() {
-            Some(Tok::Int(n)) => Ok(Expr::IntLit(-n)),
-            other => Err(EmitError::Unsupported(format!(
-                "expected int after unary -, got {other:?}"
-            ))),
-        },
+        Some(Tok::Minus) => {
+            // Unary minus: `- <atom>`. For literals, fold immediately;
+            // otherwise lower to `0 - <atom>` for the existing
+            // arithmetic codegen to handle.
+            let inner = parse_atom(p)?;
+            if let Expr::IntLit(n) = inner {
+                Ok(Expr::IntLit(n.wrapping_neg()))
+            } else {
+                Ok(Expr::BinOp {
+                    op: BinOp::Sub,
+                    left: Box::new(Expr::IntLit(0)),
+                    right: Box::new(inner),
+                })
+            }
+        }
         Some(Tok::Amp) => {
             // Address-of `&<ident>`. Phase 1 supports `&<global>`.
             let name = match p.bump().cloned() {
