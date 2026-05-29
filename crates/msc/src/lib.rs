@@ -4330,9 +4330,15 @@ fn emit_push_arg(arg: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mu
                 kind: FixupKind::GlobalAddr { global_idx: *idx },
             });
         }
-        Expr::BinOp { .. } => {
+        Expr::BinOp { .. } | Expr::Call { .. } | Expr::Ternary { .. }
+            | Expr::DerefWord { .. } | Expr::DerefByte { .. }
+            | Expr::GlobalField { .. } | Expr::LocalField { .. }
+            | Expr::DerefLocalField { .. } | Expr::DerefParamField { .. }
+            | Expr::Index { .. } | Expr::IndexByte { .. }
+            | Expr::LocalIndex { .. } | Expr::LocalIndexByte { .. }
+            | Expr::ParamIndex { .. } | Expr::PtrIndexByte { .. } => {
             // Computed value: build the result in AX then push.
-            // Fixture 4144.
+            // Fixture 4144 (BinOp), 1270 (Call).
             emit_expr_to_ax(arg, locals, out, fixups);
             out.push(0x50);
         }
