@@ -342,6 +342,10 @@ pub struct SwitchArm {
 #[derive(Debug, Clone, Copy)]
 pub enum AssignTarget {
     Local(usize),
+    /// Assigning to a function parameter — addressed via `[bp+pdisp]`
+    /// rather than `[bp-disp]`. C semantics: only mutates the local
+    /// copy. Fixture 1224.
+    Param(usize),
     Global(usize),
     /// `*<ptr-global> = <expr>;` — store the RHS through a pointer
     /// global. Fixture 4116.
@@ -2140,6 +2144,8 @@ fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
                 AssignTarget::Local(idx)
             } else if let Some(idx) = p.global_names.iter().position(|n| *n == name) {
                 AssignTarget::Global(idx)
+            } else if let Some(idx) = p.param_names.iter().position(|n| *n == name) {
+                AssignTarget::Param(idx)
             } else {
                 return Err(EmitError::Unsupported(format!(
                     "assignment to unknown identifier `{name}`"
@@ -2287,6 +2293,7 @@ fn parse_compound_rhs_for_indexed(
 fn parse_compound_rhs(p: &mut Parser<'_>, target: &AssignTarget) -> Result<Option<Expr>, EmitError> {
     let lvalue_expr = match target {
         AssignTarget::Local(i) => Expr::Local(*i),
+        AssignTarget::Param(i) => Expr::Param(*i),
         AssignTarget::Global(g) => Expr::Global(*g),
         _ => return Ok(None),
     };
@@ -4354,6 +4361,9 @@ fn emit_push_arg(arg: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mu
 fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
     let local_idx = match target {
         AssignTarget::Local(i) => i,
+        AssignTarget::Param(i) => {
+            return emit_assign_param(i, value, locals, out, fixups);
+        }
         AssignTarget::Global(g) => {
             return emit_assign_global(g, value, locals, out, fixups);
         }
@@ -4564,6 +4574,52 @@ fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_>, out: &mu
 /// `<expr-to-ax>; a3 addr` (mov moffs16, ax, 3 bytes).
 /// Both shapes plant a 2-byte address placeholder that the linker
 /// resolves via a GlobalAddr fixup.
+/// `<param> = <expr>;` — modify the function's local copy. Same
+/// peepholes as `emit_assign` apply but with disp8 = `param_disp(i)`
+/// (a positive value `[bp+disp]`). Fixture 1224.
+fn emit_assign_param(param_idx: usize, value: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    let disp = param_disp(param_idx);
+    // `x++` / `x--` → `inc/dec word [bp+disp]`.
+    if let Expr::BinOp { op, left, right } = value
+        && matches!(left.as_ref(), Expr::Param(i) if *i == param_idx)
+        && matches!(right.as_ref(), Expr::IntLit(1))
+        && matches!(op, BinOp::Add | BinOp::Sub)
+    {
+        let modrm = if matches!(op, BinOp::Add) { 0x46 } else { 0x4E };
+        out.extend_from_slice(&[0xFF, modrm, disp as u8]);
+        return;
+    }
+    // `x ± K` peephole on param.
+    if let Expr::BinOp { op, left, right } = value
+        && matches!(left.as_ref(), Expr::Param(i) if *i == param_idx)
+        && matches!(op, BinOp::Add | BinOp::Sub)
+        && let Some(k) = right.fold(locals.inits)
+    {
+        let modrm = if matches!(op, BinOp::Add) { 0x46 } else { 0x6E };
+        if let Ok(k8) = i8::try_from(k) {
+            out.extend_from_slice(&[0x83, modrm, disp as u8, k8 as u8]);
+        } else {
+            out.extend_from_slice(&[0x81, modrm, disp as u8]);
+            let imm = (k as u32 & 0xFFFF) as u16;
+            out.extend_from_slice(&imm.to_le_bytes());
+        }
+        return;
+    }
+    // Generic: const RHS → `c7 46 disp imm16`, else `<expr>; 89 46 disp`.
+    if let Some(k) = value.fold(locals.inits) {
+        let imm = (k as u32 & 0xFFFF) as u16;
+        out.push(0xC7);
+        out.push(0x46);
+        out.push(disp as u8);
+        out.extend_from_slice(&imm.to_le_bytes());
+    } else {
+        emit_expr_to_ax(value, locals, out, fixups);
+        out.push(0x89);
+        out.push(0x46);
+        out.push(disp as u8);
+    }
+}
+
 fn emit_assign_global(global_idx: usize, value: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
     // Long-global = long-global. Plain copy through DX:AX.
     //   `b = a` → `mov ax, [a]; mov dx, [a+2];
