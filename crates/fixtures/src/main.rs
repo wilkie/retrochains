@@ -1,7 +1,8 @@
-//! `xfix` — drive the fixture corpus from the shell. Two subcommands:
+//! `xfix` — drive the fixture corpus from the shell. Three subcommands:
 //!
-//!     xfix capture <fixture>                  # run the oracle, write expected/
-//!     xfix verify [--toolchain T] <fixture>   # diff a fresh run against expected/
+//!     xfix capture <fixture>                       # run the oracle, write expected/
+//!     xfix verify [--toolchain T] <fixture>        # diff a fresh run against expected/
+//!     xfix verify-all [--toolchain T] [--jobs N]   # verify every fixture in parallel
 //!
 //! `--toolchain oracle` (default) re-runs the oracle (a determinism check
 //! on the capture itself). `--toolchain ours` runs our host-side
@@ -10,6 +11,8 @@
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use fixtures::{Diff, FileDiffKind, Fixture, ManifestDiff, ToolPaths, capture, verify_oracle, verify_ours};
 
@@ -34,10 +37,11 @@ fn try_main() -> Result<ExitCode, Box<dyn std::error::Error>> {
     let mut it = argv.iter();
     let sub = it
         .next()
-        .ok_or("usage: xfix <capture|verify> [--toolchain T] <fixture>")?;
+        .ok_or("usage: xfix <capture|verify|verify-all> [flags] [<fixture>]")?;
 
     let mut toolchain = Toolchain::Oracle;
     let mut fixture_path: Option<PathBuf> = None;
+    let mut jobs: Option<usize> = None;
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "--toolchain" => {
@@ -48,24 +52,30 @@ fn try_main() -> Result<ExitCode, Box<dyn std::error::Error>> {
                     other => return Err(format!("unknown toolchain: {other}").into()),
                 };
             }
+            "--jobs" => {
+                let v = it.next().ok_or("--jobs needs a positive integer")?;
+                jobs = Some(v.parse().map_err(|_| format!("--jobs: not a number: {v}"))?);
+            }
             path if !path.starts_with("--") => {
                 fixture_path = Some(PathBuf::from(path));
             }
             other => return Err(format!("unknown flag: {other}").into()),
         }
     }
-    let fixture_path = fixture_path.ok_or("missing <fixture> path")?;
 
     let workspace_root = find_workspace_root()?;
-    let fixture = Fixture::load(&fixture_path)?;
 
     match sub.as_str() {
         "capture" => {
+            let fixture_path = fixture_path.ok_or("missing <fixture> path")?;
+            let fixture = Fixture::load(&fixture_path)?;
             capture(&workspace_root, &fixture)?;
             eprintln!("[xfix] captured {}", fixture.name);
             Ok(ExitCode::from(0))
         }
         "verify" => {
+            let fixture_path = fixture_path.ok_or("missing <fixture> path")?;
+            let fixture = Fixture::load(&fixture_path)?;
             let diff = match toolchain {
                 Toolchain::Oracle => verify_oracle(&workspace_root, &fixture)?,
                 Toolchain::Ours => {
@@ -80,8 +90,141 @@ fn try_main() -> Result<ExitCode, Box<dyn std::error::Error>> {
                 Ok(ExitCode::from(1))
             }
         }
+        "verify-all" => verify_all(&workspace_root, toolchain, jobs),
         other => Err(format!("unknown subcommand: {other}").into()),
     }
+}
+
+/// Walk every fixture directory under `<workspace>/fixtures/` and run
+/// the verify path in parallel. Reports pass/fail counts and lists
+/// failing fixtures. Exit 0 only when every fixture matches.
+fn verify_all(
+    workspace_root: &Path,
+    toolchain: Toolchain,
+    jobs: Option<usize>,
+) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    let mut paths: Vec<PathBuf> = std::fs::read_dir(workspace_root.join("fixtures"))?
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+        .map(|e| e.path())
+        .filter(|p| p.join("invocation.toml").is_file())
+        .collect();
+    paths.sort();
+    let total = paths.len();
+
+    let num_threads = jobs
+        .or_else(|| std::thread::available_parallelism().ok().map(|n| n.get()))
+        .unwrap_or(8)
+        .max(1);
+
+    let tool_paths = ToolPaths::from_workspace_debug(workspace_root);
+    let pass = AtomicUsize::new(0);
+    let fail = AtomicUsize::new(0);
+    let failures: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
+
+    let start = std::time::Instant::now();
+    let chunk_size = total.div_ceil(num_threads).max(1);
+
+    std::thread::scope(|s| {
+        for chunk in paths.chunks(chunk_size) {
+            let tool_paths = &tool_paths;
+            let pass = &pass;
+            let fail = &fail;
+            let failures = &failures;
+            s.spawn(move || {
+                for path in chunk {
+                    let result = run_one(path, toolchain, workspace_root, tool_paths);
+                    match result {
+                        Ok((name, diff)) => {
+                            if diff.is_empty() {
+                                pass.fetch_add(1, Ordering::Relaxed);
+                            } else {
+                                fail.fetch_add(1, Ordering::Relaxed);
+                                failures
+                                    .lock()
+                                    .expect("failures mutex poisoned")
+                                    .push((name, summarize_diff(&diff)));
+                            }
+                        }
+                        Err((name, e)) => {
+                            fail.fetch_add(1, Ordering::Relaxed);
+                            failures
+                                .lock()
+                                .expect("failures mutex poisoned")
+                                .push((name, format!("error: {e}")));
+                        }
+                    }
+                }
+            });
+        }
+    });
+
+    let elapsed = start.elapsed();
+    let pass = pass.load(Ordering::Relaxed);
+    let fail = fail.load(Ordering::Relaxed);
+    let mut failures = failures.into_inner().expect("failures mutex poisoned");
+    failures.sort_by(|a, b| a.0.cmp(&b.0));
+
+    eprintln!(
+        "[xfix] verified {total} fixtures in {:.1}s ({num_threads} threads): {pass} pass, {fail} fail",
+        elapsed.as_secs_f64(),
+    );
+    for (name, msg) in &failures {
+        eprintln!("  FAIL {name}: {msg}");
+    }
+    if fail == 0 { Ok(ExitCode::from(0)) } else { Ok(ExitCode::from(1)) }
+}
+
+fn run_one(
+    path: &Path,
+    toolchain: Toolchain,
+    workspace_root: &Path,
+    tool_paths: &ToolPaths,
+) -> Result<(String, Diff), (String, String)> {
+    let name_fallback = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("<unknown>")
+        .to_owned();
+    let fixture =
+        Fixture::load(path).map_err(|e| (name_fallback.clone(), e.to_string()))?;
+    let name = fixture.name.clone();
+    let diff = match toolchain {
+        Toolchain::Oracle => verify_oracle(workspace_root, &fixture),
+        Toolchain::Ours => verify_ours(&fixture, tool_paths),
+    }
+    .map_err(|e| (name.clone(), e.to_string()))?;
+    Ok((name, diff))
+}
+
+/// One-line summary of a mismatch — picks the first concrete failure
+/// so the parallel summary stays readable when many fixtures fail.
+fn summarize_diff(diff: &Diff) -> String {
+    if let Some(m) = diff.manifest.first() {
+        return match m {
+            ManifestDiff::ExitCode { expected, actual } => {
+                format!("exit_code {expected}→{actual}")
+            }
+            ManifestDiff::StdoutSha { .. } => "stdout sha differs".to_owned(),
+            ManifestDiff::StderrSha { .. } => "stderr sha differs".to_owned(),
+            ManifestDiff::OutputMissing { name } => format!("missing output {name}"),
+            ManifestDiff::OutputUnexpected { name } => format!("unexpected output {name}"),
+            ManifestDiff::OutputMetadata { name, field, expected, actual } => {
+                format!("{name}.{field} {expected}→{actual}")
+            }
+        };
+    }
+    if let Some(f) = diff.files.first() {
+        return match &f.kind {
+            FileDiffKind::Length { expected, actual } => {
+                format!("{} length {expected}→{actual}", f.name)
+            }
+            FileDiffKind::Bytes { first_diff_offset, .. } => {
+                format!("{} differs at offset {first_diff_offset}", f.name)
+            }
+        };
+    }
+    "mismatch (no detail)".to_owned()
 }
 
 fn print_diff(fixture_name: &str, diff: &Diff) {
