@@ -1020,8 +1020,12 @@ fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> {
     p.local_names.clear();
     p.param_names = params.clone();
 
-    // `[storage-class]+ int|char <name> [= <int>];` declarations.
+    // `[storage-class]+ int|char <name> [= <init>] (, <name> [= <init>])* ;`
+    //
+    // A non-constant init becomes a synthetic assignment statement
+    // prepended to the body.
     let mut locals: Vec<LocalSpec> = Vec::new();
+    let mut prelude: Vec<Stmt> = Vec::new();
     loop {
         // Peek across leading modifier keywords to find the base type.
         let mut peek_pos = p.pos;
@@ -1042,27 +1046,53 @@ fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> {
         };
         skip_decl_modifiers(p);
         p.bump(); // type kw
-        let lname = match p.bump().cloned() {
-            Some(Tok::Ident(s)) => s,
-            other => {
-                return Err(EmitError::Unsupported(format!(
-                    "expected identifier in declaration, got {other:?}"
-                )));
+        loop {
+            let lname = match p.bump().cloned() {
+                Some(Tok::Ident(s)) => s,
+                other => {
+                    return Err(EmitError::Unsupported(format!(
+                        "expected identifier in declaration, got {other:?}"
+                    )));
+                }
+            };
+            let local_idx = locals.len();
+            // Push the local first so an init expression can refer
+            // to *previous* declarators in this same statement
+            // (`int a = 1, b = a;`).
+            p.local_names.push(lname);
+            locals.push(LocalSpec { size, init: None });
+            if matches!(p.peek(), Some(Tok::Assign)) {
+                p.bump();
+                let init_expr = parse_expr(p)?;
+                // Build a fold-input view of the locals declared so
+                // far (with their constant inits). The new local's
+                // own init isn't visible to itself.
+                let init_view: Vec<Option<i32>> = locals
+                    .iter()
+                    .take(local_idx)
+                    .map(|l| l.init)
+                    .collect();
+                if let Some(k) = init_expr.fold(&init_view) {
+                    locals[local_idx].init = Some(k);
+                } else {
+                    prelude.push(Stmt::Assign {
+                        target: AssignTarget::Local(local_idx),
+                        value: init_expr,
+                    });
+                }
             }
-        };
-        let init = if matches!(p.peek(), Some(Tok::Assign)) {
-            p.bump();
-            Some(parse_signed_int(p)?)
-        } else {
-            None
-        };
+            if matches!(p.peek(), Some(Tok::Comma)) {
+                p.bump();
+                continue;
+            }
+            break;
+        }
         p.eat(&Tok::Semi)?;
-        p.local_names.push(lname);
-        locals.push(LocalSpec { size, init });
     }
 
-    // Body statements until the closing `}`.
-    let mut body = Vec::new();
+    // Body statements until the closing `}`. Any synthetic assigns
+    // from non-constant local inits run first.
+    let mut body = prelude;
     while !matches!(p.peek(), Some(Tok::RBrace)) {
         body.push(parse_stmt(p)?);
     }
