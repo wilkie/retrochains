@@ -87,6 +87,9 @@ pub struct Global {
     /// storage is still 2 bytes (near pointer), but indexing a
     /// pointer requires a load+offset, not a direct addressing mode.
     pub is_pointer: bool,
+    /// `Some(idx)` when the global is `struct S` (not pointer). The
+    /// field metadata for member access lives in Unit::structs.
+    pub struct_idx: Option<usize>,
 }
 
 impl Global {
@@ -315,6 +318,9 @@ pub enum AssignTarget {
     /// `<struct-ptr-local>-><field> = <expr>;` — store through a
     /// struct pointer local.
     DerefLocalField { ptr_local: usize, byte_off: u16, size: u8 },
+    /// `<struct-global>.<field> = <expr>;` — store to a global
+    /// struct's field.
+    GlobalField { global: usize, byte_off: u16, size: u8 },
     /// `<local-int-array>[K] = <expr>;` — write a word at a constant
     /// index. `byte_off` is `K * 2`. Codegen uses BP-rel store at
     /// `locals.disp(local) + byte_off`.
@@ -413,6 +419,9 @@ pub enum Expr {
     /// pointer local. Lowers to `mov bx, [bp+local_disp];
     /// mov ax, [bx+byte_off]` for word fields.
     DerefLocalField { ptr_local: usize, byte_off: u16, size: u8 },
+    /// `<struct-global>.<field>` — read a field of a struct global.
+    /// Lowers to `a1 disp+off` (word) or `a0 disp+off; 98` (byte).
+    GlobalField { global: usize, byte_off: u16, size: u8 },
     /// Pointer-indexed byte read — `p[<expr>]` where `p` is a
     /// `char *` global. Constant index lowers to
     /// `mov bx, [p]; mov al, [bx+disp]; cbw`. Fixture 4123.
@@ -506,7 +515,7 @@ impl Expr {
             Expr::Index { .. } | Expr::IndexByte { .. } | Expr::PtrIndexByte { .. } => None,
             Expr::LocalIndex { .. } | Expr::LocalIndexByte { .. } => None,
             Expr::ParamIndex { .. } => None,
-            Expr::LocalField { .. } | Expr::DerefLocalField { .. } => None,
+            Expr::LocalField { .. } | Expr::DerefLocalField { .. } | Expr::GlobalField { .. } => None,
             Expr::DerefByte { .. } | Expr::DerefWord { .. } => None,
             Expr::AddrOfGlobal(_) | Expr::AddrOfLocal(_) => None,
             Expr::Ternary { cond, then_arm, else_arm } => {
@@ -1010,11 +1019,16 @@ fn parse_unit(source: &str) -> Result<Unit, EmitError> {
         let is_type_prefix = matches!(
             p.toks.get(k),
             Some(Tok::Kw("int")) | Some(Tok::Kw("char"))
-        ) || (k > p.pos && matches!(p.toks.get(k), Some(Tok::Ident(_))));
+        ) || (k > p.pos && matches!(p.toks.get(k), Some(Tok::Ident(_))))
+            || matches!(p.toks.get(k), Some(Tok::Kw("struct")));
         if is_type_prefix {
-            // Walk past the type kw + optional `*` to look at the
-            // declarator's first token after the name.
+            // Walk past the type kw (plus the struct's name token if
+            // it's a `struct <Name>` prefix) + optional `*` to look
+            // at the declarator's first token after the name.
             let mut after = k + 1;
+            if matches!(p.toks.get(k), Some(Tok::Kw("struct"))) {
+                after += 1; // consume the struct's name
+            }
             if matches!(p.toks.get(after), Some(Tok::Star)) { after += 1; }
             // Now expect an ident or the `main` keyword. The token
             // after the name decides function (`(`) vs global decl.
@@ -1043,6 +1057,98 @@ fn parse_unit(source: &str) -> Result<Unit, EmitError> {
         ));
     }
     Ok(Unit { globals: p.globals, structs: p.structs, functions, decl_order, strings: p.strings })
+}
+
+/// Parse a file-scope `struct <Name> <var> [= { ... }];` declaration.
+/// Stores the struct global as if it were a `char` array sized to
+/// the struct's total_bytes — that gives correct storage layout
+/// without needing a separate Global::struct_idx field. Initializer
+/// values are mapped to per-field byte slots.
+fn parse_struct_global_decl(p: &mut Parser<'_>) -> Result<(), EmitError> {
+    p.eat(&Tok::Kw("struct"))?;
+    let sname = match p.bump().cloned() {
+        Some(Tok::Ident(s)) => s,
+        other => {
+            return Err(EmitError::Unsupported(format!(
+                "expected struct name in global decl, got {other:?}"
+            )));
+        }
+    };
+    let sidx = p.structs.iter().position(|s| s.name == sname).ok_or_else(|| {
+        EmitError::Unsupported(format!("unknown struct `{sname}` in global decl"))
+    })?;
+    let stotal = p.structs[sidx].total_bytes;
+    let is_pointer = matches!(p.peek(), Some(Tok::Star));
+    if is_pointer { p.bump(); }
+    let name = match p.bump().cloned() {
+        Some(Tok::Ident(s)) => s,
+        other => {
+            return Err(EmitError::Unsupported(format!(
+                "expected global name, got {other:?}"
+            )));
+        }
+    };
+    let init = if matches!(p.peek(), Some(Tok::Assign)) {
+        p.bump();
+        if !is_pointer && matches!(p.peek(), Some(Tok::LBrace)) {
+            p.bump();
+            let mut slots: Vec<GlobalInit> = Vec::new();
+            let mut field_idx = 0usize;
+            while !matches!(p.peek(), Some(Tok::RBrace)) {
+                let v = parse_signed_int(p)?;
+                let field = &p.structs[sidx].fields[field_idx];
+                while slots.len() < field.byte_off as usize {
+                    slots.push(GlobalInit::Byte(0));
+                }
+                if field.size == 1 {
+                    slots.push(GlobalInit::Byte((v as u32 & 0xFF) as u8));
+                } else {
+                    slots.push(GlobalInit::Int(v));
+                }
+                field_idx += 1;
+                if matches!(p.peek(), Some(Tok::Comma)) { p.bump(); }
+            }
+            p.eat(&Tok::RBrace)?;
+            while slots.iter().map(GlobalInit::size_bytes).sum::<usize>() < stotal {
+                slots.push(GlobalInit::Byte(0));
+            }
+            Some(slots)
+        } else if is_pointer && matches!(p.peek(), Some(Tok::Amp)) {
+            p.bump();
+            let target_name = match p.bump().cloned() {
+                Some(Tok::Ident(s)) => s,
+                other => {
+                    return Err(EmitError::Unsupported(format!(
+                        "expected identifier after `&` in init, got {other:?}"
+                    )));
+                }
+            };
+            let target_idx = p.global_names.iter().position(|n| *n == target_name)
+                .ok_or_else(|| EmitError::Unsupported(format!(
+                    "address-of unknown global `{target_name}`"
+                )))?;
+            Some(vec![GlobalInit::GlobalAddr(target_idx)])
+        } else {
+            return Err(EmitError::Unsupported(format!(
+                "unsupported struct global init: {:?}", p.peek()
+            )));
+        }
+    } else {
+        None
+    };
+    p.eat(&Tok::Semi)?;
+    let array_len = if is_pointer { 1 } else { stotal };
+    let element_size = 1; // byte-oriented storage; fields by offset
+    p.global_names.push(name.clone());
+    p.globals.push(Global {
+        name,
+        init,
+        array_len,
+        element_size,
+        is_pointer,
+        struct_idx: Some(sidx),
+    });
+    Ok(())
 }
 
 /// Parse `struct Name { <field-decl>; ... };` — record the struct's
@@ -1123,6 +1229,12 @@ fn parse_global_decl(p: &mut Parser<'_>) -> Result<(), EmitError> {
     // Skip any leading storage/qualifier modifiers (unsigned, static,
     // ...) — we treat them all as no-ops at the codegen level.
     let mods_consumed = skip_decl_modifiers(p);
+    // `struct <Name> name [= {...}] ;` and `struct <Name> *name [= ...] ;`
+    // routed through a separate parse path because the size + element
+    // model differ from primitive types.
+    if matches!(p.peek(), Some(Tok::Kw("struct"))) {
+        return parse_struct_global_decl(p);
+    }
     // Type prefix. Phase 1 globals: `int [*]`, `char *`, `char [N]`.
     // Bare `unsigned x;` (no following int/char) implies int.
     let mut is_pointer = false;
@@ -1247,7 +1359,7 @@ fn parse_global_decl(p: &mut Parser<'_>) -> Result<(), EmitError> {
     // pointers are always 2 bytes; arrays scale by `array_len`.
     let element_size = if is_char { 1 } else { 2 };
     p.global_names.push(name.clone());
-    p.globals.push(Global { name, init, array_len, element_size, is_pointer });
+    p.globals.push(Global { name, init, array_len, element_size, is_pointer, struct_idx: None });
     Ok(())
 }
 
@@ -1704,6 +1816,21 @@ fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
                 let args = parse_call_args(p)?;
                 p.eat(&Tok::Semi)?;
                 return Ok(Stmt::ExprStmt(Expr::Call { name, args }));
+            }
+            // `<struct-global>.<field> = <expr>;`
+            if matches!(p.peek(), Some(Tok::Dot))
+                && let Some(global_idx) = p.global_names.iter().position(|n| *n == name)
+                && let Some(sidx) = p.globals[global_idx].struct_idx
+            {
+                p.bump();
+                let (byte_off, size) = parse_field_lookup(p, sidx)?;
+                p.eat(&Tok::Assign)?;
+                let value = parse_expr(p)?;
+                p.eat(&Tok::Semi)?;
+                return Ok(Stmt::Assign {
+                    target: AssignTarget::GlobalField { global: global_idx, byte_off, size },
+                    value,
+                });
             }
             // `<struct-local>.<field> = <expr>;`
             if matches!(p.peek(), Some(Tok::Dot))
@@ -2392,12 +2519,18 @@ fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                     } else {
                         Ok(Expr::Index { array: idx, index: Box::new(index) })
                     }
+                } else if matches!(p.peek(), Some(Tok::Dot))
+                    && let Some(sidx) = p.globals[idx].struct_idx
+                {
+                    p.bump();
+                    let (byte_off, size) = parse_field_lookup(p, sidx)?;
+                    Ok(Expr::GlobalField { global: idx, byte_off, size })
                 } else {
                     // Array name in non-subscript position decays to
                     // a pointer (the array's base address). Scalar
                     // globals stay as values.
                     let g = &p.globals[idx];
-                    if !g.is_pointer && g.array_len > 1 {
+                    if !g.is_pointer && g.array_len > 1 && g.struct_idx.is_none() {
                         Ok(Expr::AddrOfGlobal(idx))
                     } else {
                         Ok(Expr::Global(idx))
@@ -3367,6 +3500,9 @@ fn prop_expr(e: &mut Expr, cp: &ConstProp) {
                 *e = Expr::IntLit(v);
             }
         }
+        Expr::GlobalField { .. } => {
+            // No const-prop tracking for global struct fields yet.
+        }
         Expr::DerefLocalField { .. } => {
             // Pointer-aliasing const-prop not yet implemented.
         }
@@ -3854,6 +3990,9 @@ fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_>, out: &mu
         AssignTarget::DerefLocalField { ptr_local, byte_off, size } => {
             return emit_assign_deref_local_field(ptr_local, byte_off, size, value, locals, out, fixups);
         }
+        AssignTarget::GlobalField { global, byte_off, size } => {
+            return emit_assign_global_field(global, byte_off, size, value, locals, out, fixups);
+        }
     };
     let disp = locals.disp(local_idx);
     // Peephole: `x = x + 1;` and `x = x - 1;` become in-place
@@ -4042,6 +4181,46 @@ fn emit_assign_indexed_local_byte(local_idx: usize, byte_off: u16, value: &Expr,
     _out.push(0x46);
     _out.push(disp as u8);
     _out.push(imm);
+}
+
+/// `<struct-global>.<field> = <expr>;` — store at the global's
+/// address + byte_off. Word: `c7 06 disp imm16`; byte: `c6 06 disp imm8`.
+fn emit_assign_global_field(global_idx: usize, byte_off: u16, size: u8, value: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    if size == 1 {
+        let k = value.fold(locals.inits).unwrap_or_else(|| {
+            panic!("non-constant byte global-struct-field store not yet supported")
+        });
+        let imm = (k as u32 & 0xFF) as u8;
+        out.push(0xC6);
+        out.push(0x06);
+        let body_offset = out.len();
+        out.extend_from_slice(&byte_off.to_le_bytes());
+        out.push(imm);
+        fixups.push(Fixup {
+            body_offset: body_offset - 1,
+            kind: FixupKind::GlobalAddr { global_idx },
+        });
+    } else if let Some(k) = value.fold(locals.inits) {
+        let imm = (k as u32 & 0xFFFF) as u16;
+        out.push(0xC7);
+        out.push(0x06);
+        let body_offset = out.len();
+        out.extend_from_slice(&byte_off.to_le_bytes());
+        out.extend_from_slice(&imm.to_le_bytes());
+        fixups.push(Fixup {
+            body_offset: body_offset - 1,
+            kind: FixupKind::GlobalAddr { global_idx },
+        });
+    } else {
+        emit_expr_to_ax(value, locals, out, fixups);
+        out.push(0xA3);
+        let body_offset = out.len();
+        out.extend_from_slice(&byte_off.to_le_bytes());
+        fixups.push(Fixup {
+            body_offset: body_offset - 1,
+            kind: FixupKind::GlobalAddr { global_idx },
+        });
+    }
 }
 
 /// `<struct-local>.<field> = <expr>;` — store at `disp + byte_off`,
@@ -4773,6 +4952,24 @@ fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: 
             // Should have folded already by the caller for runtime
             // ternary codegen we don't yet implement.
             panic!("non-constant ternary not yet supported");
+        }
+        Expr::GlobalField { global, byte_off, size } => {
+            // Word field: `a1 byte_off byte_off` + GlobalAddr FIXUP.
+            // Byte field: `a0 byte_off byte_off; 98` + FIXUP.
+            let body_offset = out.len();
+            if *size == 1 {
+                out.push(0xA0);
+            } else {
+                out.push(0xA1);
+            }
+            out.extend_from_slice(&byte_off.to_le_bytes());
+            fixups.push(Fixup {
+                body_offset,
+                kind: FixupKind::GlobalAddr { global_idx: *global },
+            });
+            if *size == 1 {
+                out.push(0x98);
+            }
         }
         Expr::LocalField { local, byte_off, size } => {
             let disp = locals.disp(*local) + *byte_off as i16;
