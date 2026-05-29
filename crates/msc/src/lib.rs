@@ -37,15 +37,29 @@ pub fn emit_dash_c(source_path: &Path) -> Result<std::path::PathBuf, EmitError> 
     Ok(std::path::PathBuf::from(out_name))
 }
 
-/// A translation unit: a sequence of function definitions plus a
-/// shared pool of interned string literals (in CONST segment order).
+/// A translation unit: file-scope globals + function definitions
+/// plus a shared pool of interned string literals.
 #[derive(Debug, Clone)]
 pub struct Unit {
+    /// File-scope `int <name> [= <int>];` declarations in source
+    /// order. Initialized globals contribute PUBDEFs + _DATA bytes;
+    /// uninitialized globals (tentative definitions) come with a
+    /// later fixture and use COMDEF instead.
+    pub globals: Vec<Global>,
     pub functions: Vec<Function>,
     /// Each string is the bytes between the source double-quotes
-    /// PLUS a terminating NUL byte appended by the parser. CONST
-    /// offsets are computed by accumulating lengths in source order.
+    /// PLUS a terminating NUL byte appended by the parser.
     pub strings: Vec<Vec<u8>>,
+}
+
+/// A file-scope global variable. Phase 1 covers `int g [= K];`;
+/// other types come later.
+#[derive(Debug, Clone)]
+pub struct Global {
+    pub name: String,
+    /// `Some(K)` for `int g = K;`, `None` for the tentative form
+    /// `int g;` (which gets emitted as a COMDEF — fixture 4105).
+    pub init: Option<i32>,
 }
 
 /// One function definition. `return_int` distinguishes `int f(void)`
@@ -105,9 +119,15 @@ pub enum Stmt {
         body: Box<Stmt>,
     },
     Assign {
-        local_idx: usize,
+        target: AssignTarget,
         value: Expr,
     },
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum AssignTarget {
+    Local(usize),
+    Global(usize),
 }
 
 /// Condition for `if` (and later `while`/`for`). Slice 5 covers the
@@ -155,6 +175,11 @@ pub enum Expr {
     /// `Unit::strings`. Loaded as `mov ax, offset DGROUP:<CONST+off>`
     /// with a segment-relative FIXUP. Fixture 4103.
     StrLit(usize),
+    /// Reference to a file-scope global — index into `Unit::globals`.
+    /// Reads lower to `a1 imm16` (mov ax, moffs16) with a FIXUP
+    /// describing the global's address; writes lower to
+    /// `c7 06 addr imm16`. Fixtures 4104, 4106.
+    Global(usize),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -188,6 +213,7 @@ impl Expr {
             }
             Expr::Call { .. } => None,
             Expr::StrLit(_) => None,
+            Expr::Global(_) => None,
         }
     }
 }
@@ -361,6 +387,11 @@ struct Parser<'a> {
     pos: usize,
     local_names: Vec<String>,
     param_names: Vec<String>,
+    /// File-scope global names in source order; the index doubles
+    /// as the `Expr::Global(idx)` value.
+    global_names: Vec<String>,
+    /// Same source order, used to materialize the `Unit::globals`.
+    globals: Vec<Global>,
     /// Strings interned across the whole translation unit. New
     /// string literals append; duplicates currently get distinct
     /// entries (no dedup yet — no fixture exercises a repeated
@@ -403,6 +434,8 @@ fn parse_unit(source: &str) -> Result<Unit, EmitError> {
         pos: 0,
         local_names: Vec::new(),
         param_names: Vec::new(),
+        global_names: Vec::new(),
+        globals: Vec::new(),
         strings: Vec::new(),
     };
     let mut functions = Vec::new();
@@ -412,6 +445,15 @@ fn parse_unit(source: &str) -> Result<Unit, EmitError> {
             p.bump();
             continue;
         }
+        // Disambiguate file-scope `int <name>...;` (global) from
+        // `int <name>(...) { ... }` (function) by looking ahead.
+        if matches!(p.peek(), Some(Tok::Kw("int")))
+            && matches!(p.toks.get(p.pos + 1), Some(Tok::Ident(_)))
+            && !matches!(p.toks.get(p.pos + 2), Some(Tok::LParen))
+        {
+            parse_global_decl(&mut p)?;
+            continue;
+        }
         functions.push(parse_function(&mut p)?);
     }
     if functions.is_empty() {
@@ -419,7 +461,32 @@ fn parse_unit(source: &str) -> Result<Unit, EmitError> {
             "translation unit has no functions".to_owned(),
         ));
     }
-    Ok(Unit { functions, strings: p.strings })
+    Ok(Unit { globals: p.globals, functions, strings: p.strings })
+}
+
+/// Parse one file-scope `int <name> [= <int>];` declaration and
+/// register it in the parser's globals list. Caller has confirmed
+/// the next tokens start with `int <ident>` and aren't a function.
+fn parse_global_decl(p: &mut Parser<'_>) -> Result<(), EmitError> {
+    p.eat(&Tok::Kw("int"))?;
+    let name = match p.bump().cloned() {
+        Some(Tok::Ident(s)) => s,
+        other => {
+            return Err(EmitError::Unsupported(format!(
+                "expected global name, got {other:?}"
+            )));
+        }
+    };
+    let init = if matches!(p.peek(), Some(Tok::Assign)) {
+        p.bump();
+        Some(parse_signed_int(p)?)
+    } else {
+        None
+    };
+    p.eat(&Tok::Semi)?;
+    p.global_names.push(name.clone());
+    p.globals.push(Global { name, init });
+    Ok(())
 }
 
 fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> {
@@ -599,16 +666,19 @@ fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
                 p.eat(&Tok::Semi)?;
                 return Ok(Stmt::ExprStmt(Expr::Call { name, args }));
             }
-            let local_idx = p.local_names
-                .iter()
-                .position(|n| *n == name)
-                .ok_or_else(|| {
-                    EmitError::Unsupported(format!("assignment to unknown local `{name}`"))
-                })?;
+            let target = if let Some(idx) = p.local_names.iter().position(|n| *n == name) {
+                AssignTarget::Local(idx)
+            } else if let Some(idx) = p.global_names.iter().position(|n| *n == name) {
+                AssignTarget::Global(idx)
+            } else {
+                return Err(EmitError::Unsupported(format!(
+                    "assignment to unknown identifier `{name}`"
+                )));
+            };
             p.eat(&Tok::Assign)?;
             let value = parse_expr(p)?;
             p.eat(&Tok::Semi)?;
-            Ok(Stmt::Assign { local_idx, value })
+            Ok(Stmt::Assign { target, value })
         }
         other => Err(EmitError::Unsupported(format!(
             "statement starting with {other:?} not yet supported"
@@ -628,14 +698,18 @@ fn parse_assign_no_semi(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
             )));
         }
     };
-    let local_idx = p
-        .local_names
-        .iter()
-        .position(|n| *n == name)
-        .ok_or_else(|| EmitError::Unsupported(format!("unknown local `{name}` in for-clause")))?;
+    let target = if let Some(idx) = p.local_names.iter().position(|n| *n == name) {
+        AssignTarget::Local(idx)
+    } else if let Some(idx) = p.global_names.iter().position(|n| *n == name) {
+        AssignTarget::Global(idx)
+    } else {
+        return Err(EmitError::Unsupported(format!(
+            "unknown identifier `{name}` in for-clause"
+        )));
+    };
     p.eat(&Tok::Assign)?;
     let value = parse_expr(p)?;
-    Ok(Stmt::Assign { local_idx, value })
+    Ok(Stmt::Assign { target, value })
 }
 
 fn parse_cond(p: &mut Parser<'_>) -> Result<Cond, EmitError> {
@@ -702,6 +776,8 @@ fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                 Ok(Expr::Local(idx))
             } else if let Some(idx) = p.param_names.iter().position(|n| *n == name) {
                 Ok(Expr::Param(idx))
+            } else if let Some(idx) = p.global_names.iter().position(|n| *n == name) {
+                Ok(Expr::Global(idx))
             } else {
                 Err(EmitError::Unsupported(format!("unknown identifier `{name}`")))
             }
@@ -775,6 +851,11 @@ enum FixupKind {
     /// to the CONST offset, with a segment-relative FIXUP using
     /// pre-emitted threads (`c4 off 9c`).
     StrLoad { string_idx: usize },
+    /// Reference to an initialized file-scope global at a known
+    /// offset within `_DATA`. The FIXUP uses DGROUP-as-frame and
+    /// _DATA-as-target via the pre-emitted threads (`c4 off 9d`).
+    /// Fixtures 4104, 4106.
+    GlobalAddr { global_idx: usize },
 }
 
 /// Same as `Fixup` but with the body_offset translated to the
@@ -909,6 +990,23 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
         const_cursor += s.len();
     }
     let const_len = u16::try_from(const_cursor).expect("CONST length fits in u16");
+    let _ = string_offsets; // not used directly yet; future fixtures with > 1 string will pick this up
+
+    // _DATA layout — every initialized global gets 2 bytes (int) in
+    // source order. Uninitialized globals (tentative definitions)
+    // don't contribute here; they'll go through COMDEF in a later
+    // sub-slice.
+    let mut data_offsets: Vec<Option<usize>> = Vec::with_capacity(unit.globals.len());
+    let mut data_cursor: usize = 0;
+    for g in &unit.globals {
+        if g.init.is_some() {
+            data_offsets.push(Some(data_cursor));
+            data_cursor += 2;
+        } else {
+            data_offsets.push(None);
+        }
+    }
+    let data_len = u16::try_from(data_cursor).expect("_DATA fits in u16");
 
     // Discover true externs: any TuLocalCall fixup whose target is
     // not defined in this unit. (chkstk is recorded as ExtCall and
@@ -932,8 +1030,9 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
     //
     // SEGDEF #1: _TEXT  — code, total padded function bytes
     b.write_segdef16(0x48, text_len, 3, 4, 1);
-    // SEGDEF #2: _DATA  — initialized data, 0 bytes (no globals)
-    b.write_segdef16(0x48, 0, 5, 6, 1);
+    // SEGDEF #2: _DATA  — initialized globals, 2 bytes each in
+    // source order
+    b.write_segdef16(0x48, data_len, 5, 6, 1);
     // SEGDEF #3: CONST  — read-only literals; length = string-pool
     // total (fixture 4103: `"hi\0"` = 3 bytes)
     b.write_segdef16(0x48, const_len, 7, 7, 1);
@@ -972,51 +1071,117 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
         0x45, 0x01,   // F1: GRPDEF #1 (DGROUP) — method F1=GRPDEF
     ]);
 
-    // EXTDEF — external symbols, with two distinct orderings
-    // depending on whether user externs are present:
-    //   * No user externs (fixture 4099): __acrtused, __chkstk,
-    //     then PUBDEFs in source order.
-    //   * Has user externs (fixture 4103): __acrtused, user externs
-    //     in source order, then PUBDEFs in source order, with
-    //     __chkstk moved to the end.
-    let extdef_entries: Vec<(String, u8)> = {
-        let mut entries: Vec<(String, u8)> = Vec::new();
-        entries.push(("__acrtused".to_owned(), 0x01));
-        if user_extern_order.is_empty() {
-            entries.push(("__chkstk".to_owned(), 0x00));
-            for f in &unit.functions {
-                entries.push((symbol_name(&f.name), 0x00));
-            }
-        } else {
-            for name in &user_extern_order {
-                entries.push((name.clone(), 0x00));
-            }
-            for f in &unit.functions {
-                entries.push((symbol_name(&f.name), 0x00));
-            }
-            entries.push(("__chkstk".to_owned(), 0x00));
-        }
-        entries
-    };
-    let extdef_idx_of: std::collections::HashMap<String, u8> = extdef_entries
+    // Tentative-def globals → COMDEF. Track their indices into
+    // unit.globals; we'll emit a COMDEF record between two EXTDEF
+    // records and slot the symbols into the same EXTDEF-index space.
+    let comdef_globals: Vec<usize> = unit
+        .globals
         .iter()
         .enumerate()
-        .map(|(i, (n, _))| (n.clone(), (i + 1) as u8))
+        .filter_map(|(i, g)| if g.init.is_none() { Some(i) } else { None })
         .collect();
-    {
+
+    // EXTDEF + (optional) COMDEF layout, picked based on what
+    // symbols this TU references:
+    //
+    //   No user externs, no COMDEFs (fixture 4099): single EXTDEF
+    //     with __acrtused, __chkstk, then function-name EXTDEFs.
+    //
+    //   No user externs, has COMDEFs (fixture 4105): EXTDEF1 with
+    //     __acrtused + __chkstk, then COMDEF for the tentative
+    //     globals, then EXTDEF2 with function names.
+    //
+    //   Has user externs (fixture 4103): __acrtused, user externs,
+    //     function names, __chkstk — all in one EXTDEF.
+    let mut extdef_idx_of: std::collections::HashMap<String, u8> =
+        std::collections::HashMap::new();
+    let mut next_idx: u8 = 1;
+    let emit_group = |b: &mut ObjBuilder,
+                          entries: &[(String, u8)],
+                          idx_map: &mut std::collections::HashMap<String, u8>,
+                          start: &mut u8| {
+        if entries.is_empty() {
+            return;
+        }
         let mut payload = Vec::new();
-        for (name, ty) in &extdef_entries {
+        for (name, ty) in entries {
             payload.push(u8::try_from(name.len()).expect("EXTDEF name fits"));
             payload.extend_from_slice(name.as_bytes());
             payload.push(*ty);
+            idx_map.insert(name.clone(), *start);
+            *start += 1;
         }
         b.write_record(obj::EXTDEF, &payload);
+    };
+    if user_extern_order.is_empty() {
+        if comdef_globals.is_empty() {
+            // No splits — single combined EXTDEF.
+            let mut entries: Vec<(String, u8)> = Vec::new();
+            entries.push(("__acrtused".to_owned(), 0x01));
+            entries.push(("__chkstk".to_owned(), 0x00));
+            for f in &unit.functions {
+                entries.push((symbol_name(&f.name), 0x00));
+            }
+            emit_group(&mut b, &entries, &mut extdef_idx_of, &mut next_idx);
+        } else {
+            let pre =
+                vec![("__acrtused".to_owned(), 0x01), ("__chkstk".to_owned(), 0x00)];
+            emit_group(&mut b, &pre, &mut extdef_idx_of, &mut next_idx);
+            let mut payload = Vec::new();
+            for &gi in &comdef_globals {
+                let sym = symbol_name(&unit.globals[gi].name);
+                payload.push(u8::try_from(sym.len()).expect("COMDEF name fits"));
+                payload.extend_from_slice(sym.as_bytes());
+                payload.push(0x00); // type index
+                payload.push(0x62); // NEAR data
+                payload.push(0x02); // length encoded: single byte for ≤0x80
+                extdef_idx_of.insert(sym, next_idx);
+                next_idx += 1;
+            }
+            b.write_record(0xB0, &payload);
+            let post: Vec<(String, u8)> = unit
+                .functions
+                .iter()
+                .map(|f| (symbol_name(&f.name), 0x00))
+                .collect();
+            emit_group(&mut b, &post, &mut extdef_idx_of, &mut next_idx);
+        }
+    } else {
+        let mut entries: Vec<(String, u8)> = Vec::new();
+        entries.push(("__acrtused".to_owned(), 0x01));
+        for name in &user_extern_order {
+            entries.push((name.clone(), 0x00));
+        }
+        for f in &unit.functions {
+            entries.push((symbol_name(&f.name), 0x00));
+        }
+        entries.push(("__chkstk".to_owned(), 0x00));
+        emit_group(&mut b, &entries, &mut extdef_idx_of, &mut next_idx);
     }
 
-    // PUBDEF — every function in the unit, at its global offset.
-    // MSC packs all functions into one PUBDEF record (fixture
-    // 4099). `write_pubdef16` only handles a single name, so build
-    // the multi-entry payload manually.
+    // PUBDEFs — one record per (base-group, base-seg) bucket.
+    // Globals live at DGROUP:_DATA = (group 1, seg 2). Functions
+    // live at 0:_TEXT = (group 0, seg 1). MSC emits the globals
+    // PUBDEF first when both exist (source order matches: globals
+    // are declared at file scope before functions). Fixtures 4104,
+    // 4106.
+    let has_init_globals = data_cursor > 0;
+    if has_init_globals {
+        let mut payload = Vec::new();
+        payload.push(1); // base group idx (DGROUP)
+        payload.push(2); // base segment idx (_DATA)
+        for (i, g) in unit.globals.iter().enumerate() {
+            if let Some(off) = data_offsets[i] {
+                let sym = symbol_name(&g.name);
+                let off = u16::try_from(off).expect("offset fits");
+                payload.push(u8::try_from(sym.len()).expect("pubdef name fits"));
+                payload.extend_from_slice(sym.as_bytes());
+                payload.extend_from_slice(&off.to_le_bytes());
+                payload.push(0); // type idx
+            }
+        }
+        b.write_record(obj::PUBDEF_16, &payload);
+    }
     {
         let mut payload = Vec::new();
         payload.push(0); // base group idx
@@ -1082,12 +1247,30 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
                         kind: FixupKind::StrLoad { string_idx: *string_idx },
                     });
                 }
+                FixupKind::GlobalAddr { global_idx } => {
+                    ledata_fixups.push(ResolvedFixup {
+                        ledata_offset: caller_off + fx.body_offset + 1,
+                        kind: FixupKind::GlobalAddr { global_idx: *global_idx },
+                    });
+                }
             }
         }
     }
 
-    // LEDATA #1 — CONST segment data, the string pool. Only emitted
-    // when the pool is non-empty (fixture 4103 has 3 bytes for "hi\0").
+    // LEDATA — _DATA segment, initialized global values. MSC packs
+    // them sequentially in source order, little-endian.
+    if data_cursor > 0 {
+        let mut data_bytes: Vec<u8> = Vec::with_capacity(data_cursor);
+        for g in &unit.globals {
+            if let Some(v) = g.init {
+                let v16 = (v as u32 & 0xFFFF) as u16;
+                data_bytes.extend_from_slice(&v16.to_le_bytes());
+            }
+        }
+        b.write_ledata16(2, 0, &data_bytes);
+    }
+
+    // LEDATA — CONST segment data, the string pool.
     if const_len > 0 {
         let mut const_bytes: Vec<u8> = Vec::with_capacity(const_cursor);
         for s in &unit.strings {
@@ -1096,7 +1279,7 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
         b.write_ledata16(3, 0, &const_bytes);
     }
 
-    // LEDATA #2 — _TEXT segment, the concatenated function bodies.
+    // LEDATA — _TEXT segment, the concatenated function bodies.
     let mut all_code = Vec::with_capacity(total_code_bytes);
     for fe in &function_emits {
         all_code.extend_from_slice(&fe.bytes);
@@ -1121,6 +1304,24 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
             }
             FixupKind::StrLoad { .. } => {
                 fixup_payload.extend_from_slice(&[0xC4, off, 0x9C]);
+            }
+            FixupKind::GlobalAddr { global_idx } => {
+                if unit.globals[*global_idx].init.is_some() {
+                    // Init global → PUBDEF in DGROUP:_DATA. Frame
+                    // thread 1 (DGROUP) + target thread 1 (_DATA),
+                    // no displacement; the linker substitutes the
+                    // global's _DATA-relative offset.
+                    fixup_payload.extend_from_slice(&[0xC4, off, 0x9D]);
+                } else {
+                    // Tentative def → COMDEF. Explicit frame method
+                    // 5 (target's frame), explicit target via EXTDEF
+                    // index, no displacement.
+                    let sym = symbol_name(&unit.globals[*global_idx].name);
+                    let idx = *extdef_idx_of
+                        .get(&sym)
+                        .unwrap_or_else(|| panic!("EXTDEF index missing for COMDEF `{sym}`"));
+                    fixup_payload.extend_from_slice(&[0xC4, off, 0x56, idx]);
+                }
             }
             FixupKind::TuLocalCall { .. } => unreachable!(),
         }
@@ -1171,7 +1372,66 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
 /// re-use the existing 0 in AX from the chkstk arg even when it
 /// could; the codegen always emits the explicit return-value
 /// instruction.
+/// Forward-substitute reads of file-scope globals with the
+/// constant most recently assigned to them. MSC performs this fold
+/// across straight-line statements within a function — fixture 4106
+/// (`g = 5; return g;` becomes `mov ax, 5` instead of `mov ax, [g]`).
+/// Control flow drops the known-value table conservatively (a real
+/// pass would re-merge across branches; the only fixture so far is
+/// straight-line so we keep the implementation small).
+fn const_prop_globals(stmts: &[Stmt]) -> Vec<Stmt> {
+    use std::collections::HashMap;
+    let mut known: HashMap<usize, i32> = HashMap::new();
+    let mut out = Vec::with_capacity(stmts.len());
+    for stmt in stmts {
+        let mut new_stmt = stmt.clone();
+        match &mut new_stmt {
+            Stmt::Return(e) => fold_globals_expr(e, &known),
+            Stmt::ExprStmt(e) => fold_globals_expr(e, &known),
+            Stmt::Assign { target, value } => {
+                fold_globals_expr(value, &known);
+                if let AssignTarget::Global(g) = target {
+                    if let Expr::IntLit(k) = value {
+                        known.insert(*g, *k);
+                    } else {
+                        known.remove(g);
+                    }
+                }
+            }
+            Stmt::Empty => {}
+            _ => {
+                // Conservative: anything with branches/loops invalidates
+                // every global's known value.
+                known.clear();
+            }
+        }
+        out.push(new_stmt);
+    }
+    out
+}
+
+fn fold_globals_expr(e: &mut Expr, known: &std::collections::HashMap<usize, i32>) {
+    match e {
+        Expr::Global(idx) => {
+            if let Some(&k) = known.get(idx) {
+                *e = Expr::IntLit(k);
+            }
+        }
+        Expr::BinOp { left, right, .. } => {
+            fold_globals_expr(left, known);
+            fold_globals_expr(right, known);
+        }
+        Expr::Call { args, .. } => {
+            for a in args {
+                fold_globals_expr(a, known);
+            }
+        }
+        Expr::IntLit(_) | Expr::Local(_) | Expr::Param(_) | Expr::StrLit(_) => {}
+    }
+}
+
 fn emit_function(func: &Function) -> FunctionEmit {
+    let body = const_prop_globals(&func.body);
     let mut bytes = Vec::with_capacity(32);
     let mut fixups: Vec<Fixup> = Vec::new();
     let frame = Frame::for_function(func);
@@ -1214,7 +1474,7 @@ fn emit_function(func: &Function) -> FunctionEmit {
     }
 
     let mut reachable = true;
-    for stmt in &func.body {
+    for stmt in &body {
         if !reachable {
             break;
         }
@@ -1271,7 +1531,7 @@ fn emit_stmt(
         Stmt::ExprStmt(other) => {
             panic!("ExprStmt with non-call expression not yet supported: {other:?}");
         }
-        Stmt::Assign { local_idx, value } => emit_assign(*local_idx, value, locals, out),
+        Stmt::Assign { target, value } => emit_assign(*target, value, locals, out, fixups),
         Stmt::While { cond, body } => {
             emit_while(cond, body, locals, frame, return_int, out, fixups);
         }
@@ -1393,7 +1653,7 @@ fn emit_return(
                 out.extend_from_slice(&imm.to_le_bytes());
             }
         } else {
-            emit_expr_to_ax(expr, locals, out);
+            emit_expr_to_ax(expr, locals, out, fixups);
         }
     }
     out.extend_from_slice(frame.epilogue_bytes());
@@ -1481,7 +1741,13 @@ fn emit_push_arg(arg: &Expr, _locals: &[Option<i32>], out: &mut Vec<u8>, fixups:
 /// (fixture 4096: `x = x - 1;` in a while body). The general path
 /// — `mov ax, <expr>; mov [bp-disp], ax` — is reserved for a
 /// future fixture that exercises a non-peephole shape.
-fn emit_assign(local_idx: usize, value: &Expr, locals: &[Option<i32>], out: &mut Vec<u8>) {
+fn emit_assign(target: AssignTarget, value: &Expr, locals: &[Option<i32>], out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    let local_idx = match target {
+        AssignTarget::Local(i) => i,
+        AssignTarget::Global(g) => {
+            return emit_assign_global(g, value, locals, out, fixups);
+        }
+    };
     let disp = -(i16::try_from(local_idx + 1).expect("local index fits") * 2);
     // Peephole: `x = x + 1;` and `x = x - 1;` become in-place
     // `inc/dec word ptr [bp-disp]` (3-byte `FF /0 r/m` for inc,
@@ -1515,10 +1781,39 @@ fn emit_assign(local_idx: usize, value: &Expr, locals: &[Option<i32>], out: &mut
         out.push(disp as u8);
         out.extend_from_slice(&imm.to_le_bytes());
     } else {
-        emit_expr_to_ax(value, locals, out);
+        emit_expr_to_ax(value, locals, out, fixups);
         out.push(0x89);                       // MOV r/m16, r16  (AX → mem)
         out.push(0x46);
         out.push(disp as u8);
+    }
+}
+
+/// `<global> = <expr>;`. Constant RHS → `c7 06 addr imm16`
+/// (mov word ptr [imm16], imm16, 6 bytes); general RHS →
+/// `<expr-to-ax>; a3 addr` (mov moffs16, ax, 3 bytes).
+/// Both shapes plant a 2-byte address placeholder that the linker
+/// resolves via a GlobalAddr fixup.
+fn emit_assign_global(global_idx: usize, value: &Expr, locals: &[Option<i32>], out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    if let Some(k) = value.fold(locals) {
+        let imm = (k as u32 & 0xFFFF) as u16;
+        out.push(0xC7);
+        out.push(0x06);
+        let addr_off = out.len();
+        out.extend_from_slice(&[0x00, 0x00]);
+        out.extend_from_slice(&imm.to_le_bytes());
+        fixups.push(Fixup {
+            body_offset: addr_off - 1,
+            kind: FixupKind::GlobalAddr { global_idx },
+        });
+    } else {
+        emit_expr_to_ax(value, locals, out, fixups);
+        out.push(0xA3);                       // MOV moffs16, AX
+        let addr_off = out.len();
+        out.extend_from_slice(&[0x00, 0x00]);
+        fixups.push(Fixup {
+            body_offset: addr_off - 1,
+            kind: FixupKind::GlobalAddr { global_idx },
+        });
     }
 }
 
@@ -1691,7 +1986,7 @@ fn emit_do_while(
 /// Current trigger: `<local> = <local> ± 1;` paired with
 /// `while (<same-local>);`. Fixture 4098.
 fn body_sets_flags_for_cond(body: &Stmt, cond: &Cond) -> bool {
-    let Stmt::Assign { local_idx, value } = body else { return false };
+    let Stmt::Assign { target: AssignTarget::Local(local_idx), value } = body else { return false };
     let Cond::Truthy(Expr::Local(cond_idx)) = cond else { return false };
     if local_idx != cond_idx {
         return false;
@@ -1772,7 +2067,7 @@ fn emit_cmp_local_imm(idx: usize, k: i32, out: &mut Vec<u8>) {
 /// supports a tight set of patterns — every other shape panics with
 /// a clear message so the missing case is obvious when a future
 /// fixture hits it.
-fn emit_expr_to_ax(expr: &Expr, locals: &[Option<i32>], out: &mut Vec<u8>) {
+fn emit_expr_to_ax(expr: &Expr, locals: &[Option<i32>], out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
     match expr {
         Expr::IntLit(k) => {
             // Foldable path is handled by the caller; this arm only
@@ -1795,6 +2090,17 @@ fn emit_expr_to_ax(expr: &Expr, locals: &[Option<i32>], out: &mut Vec<u8>) {
         }
         Expr::StrLit(_) => {
             panic!("string literal in non-arg context not yet supported");
+        }
+        Expr::Global(idx) => {
+            // `a1 00 00` — mov ax, moffs16. The placeholder address
+            // gets FIXUP'd to the global's _DATA-relative offset.
+            // Fixtures 4104, 4106.
+            let body_offset = out.len();
+            out.extend_from_slice(&[0xA1, 0x00, 0x00]);
+            fixups.push(Fixup {
+                body_offset,
+                kind: FixupKind::GlobalAddr { global_idx: *idx },
+            });
         }
     }
 }

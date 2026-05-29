@@ -1,0 +1,4 @@
+description = "Initialized int global, read in main. Probes _DATA emission, the global PUBDEF/EXTDEF, and how MSC loads a DGROUP-relative word."
+tool = "cl"
+args = ["/c", "/AS", "HELLO.C"]
+inputs = ["HELLO.C"]

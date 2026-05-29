@@ -1,0 +1,4 @@
+description = "Uninitialized int global. Probes _BSS / COMDEF emission for tentative definitions."
+tool = "cl"
+args = ["/c", "/AS", "HELLO.C"]
+inputs = ["HELLO.C"]

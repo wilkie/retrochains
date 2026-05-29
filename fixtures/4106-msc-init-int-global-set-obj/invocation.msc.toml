@@ -1,0 +1,4 @@
+description = "Initialized-to-zero global, written and read in main. Probes globals in _DATA when explicit zero (vs implicit-init in _BSS) and the write codegen."
+tool = "cl"
+args = ["/c", "/AS", "HELLO.C"]
+inputs = ["HELLO.C"]
