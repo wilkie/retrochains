@@ -502,6 +502,14 @@ pub enum Expr {
         then_arm: Box<Expr>,
         else_arm: Box<Expr>,
     },
+    /// `(<stmt>, <stmt>, ..., <expr>)` — comma operator. The
+    /// statements run for their side effects; the final expr's value
+    /// is the yielded value. Synthesized at parse-time when we see
+    /// `(<assign>, ...)`. Fixture 1057.
+    Seq {
+        sides: Vec<Stmt>,
+        value: Box<Expr>,
+    },
     /// `*<ptr>` — byte-sized pointer dereference (`char *`). Lowers
     /// to `mov bx, <ptr>; mov al, [bx]; cbw`. Fixture 4111.
     DerefByte { ptr: Box<Expr> },
@@ -580,6 +588,11 @@ impl Expr {
             Expr::DerefParamField { .. } => None,
             Expr::DerefByte { .. } | Expr::DerefWord { .. } => None,
             Expr::AddrOfGlobal(_) | Expr::AddrOfLocal(_) => None,
+            // Comma expression fold: side effects don't fold; only the
+            // tail's value matters. But sides may include assigns that
+            // mutate the fold view's locals — be conservative and
+            // never fold a Seq.
+            Expr::Seq { .. } => None,
             Expr::Ternary { cond, then_arm, else_arm } => {
                 let c = cond.fold(locals)?;
                 if c != 0 {
@@ -2545,6 +2558,27 @@ fn pointee_size_of(e: &Expr, globals: &[Global]) -> usize {
     }
 }
 
+/// After parsing the lvalue and confirming the next token is `=`,
+/// consume it and the RHS expression, returning a synthesized
+/// `Stmt::Assign`. Used by comma-operator parsing.
+fn parse_assign_tail(p: &mut Parser<'_>, lvalue: Expr) -> Result<Stmt, EmitError> {
+    p.eat(&Tok::Assign)?;
+    let value = parse_expr(p)?;
+    let target = match lvalue {
+        Expr::Local(i) => AssignTarget::Local(i),
+        Expr::Param(i) => AssignTarget::Param(i),
+        Expr::Global(g) => AssignTarget::Global(g),
+        other => return Err(EmitError::Unsupported(format!(
+            "assignment lvalue not supported: {other:?}"
+        ))),
+    };
+    Ok(Stmt::Assign { target, value })
+}
+
+/// Identity for the comma-operator value path; future widening for
+/// implicit type promotions can hook here.
+fn expr_from_stmt_value(e: Expr) -> Expr { e }
+
 fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
     let tok = p.bump().cloned();
     match tok {
@@ -2560,6 +2594,62 @@ fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                 return parse_atom(p);
             }
             let inner = parse_expr(p)?;
+            // Comma operator: `(<ident> = <expr>, <expr>, ...)` or
+            // `(<expr>, <expr>)`. Build a sequence of side-effect
+            // statements followed by the value expression. Fixtures
+            // 1057, 1114, 2234.
+            if matches!(p.peek(), Some(Tok::Assign))
+                && matches!(inner, Expr::Local(_) | Expr::Global(_) | Expr::Param(_))
+            {
+                let mut sides: Vec<Stmt> = Vec::new();
+                let mut last = parse_assign_tail(p, inner)?;
+                while matches!(p.peek(), Some(Tok::Comma)) {
+                    p.bump();
+                    sides.push(last);
+                    let next = parse_expr(p)?;
+                    if matches!(p.peek(), Some(Tok::Assign))
+                        && matches!(next, Expr::Local(_) | Expr::Global(_) | Expr::Param(_))
+                    {
+                        last = parse_assign_tail(p, next)?;
+                    } else {
+                        // Final value expression: terminate the loop.
+                        p.eat(&Tok::RParen)?;
+                        let value = next;
+                        return Ok(Expr::Seq { sides, value: Box::new(expr_from_stmt_value(value)) });
+                    }
+                }
+                // Trailing `,<expr>)` case handled above; otherwise the
+                // last assign IS the value.
+                p.eat(&Tok::RParen)?;
+                // Reduce: convert the last Assign Stmt to an Expr that
+                // returns the assigned value. For simplicity we re-read
+                // the target post-store. Common case: `(x = 5)` alone.
+                if let Stmt::Assign { target, .. } = &last {
+                    let val_expr = match target {
+                        AssignTarget::Local(i) => Expr::Local(*i),
+                        AssignTarget::Param(i) => Expr::Param(*i),
+                        AssignTarget::Global(g) => Expr::Global(*g),
+                        _ => return Err(EmitError::Unsupported(
+                            "assign-tail value with unsupported target".to_owned()
+                        )),
+                    };
+                    sides.push(last);
+                    return Ok(Expr::Seq { sides, value: Box::new(val_expr) });
+                }
+                return Err(EmitError::Unsupported("expected comma-tail value".to_owned()));
+            }
+            if matches!(p.peek(), Some(Tok::Comma)) {
+                let mut sides: Vec<Stmt> = Vec::new();
+                let mut acc_value = inner;
+                loop {
+                    if !matches!(p.peek(), Some(Tok::Comma)) { break; }
+                    p.bump();
+                    sides.push(Stmt::ExprStmt(acc_value));
+                    acc_value = parse_expr(p)?;
+                }
+                p.eat(&Tok::RParen)?;
+                return Ok(Expr::Seq { sides, value: Box::new(acc_value) });
+            }
             p.eat(&Tok::RParen)?;
             Ok(inner)
         }
@@ -3795,7 +3885,7 @@ fn cp_clone(cp: &ConstProp) -> ConstProp {
     }
 }
 
-fn prop_cond(cond: &mut Cond, cp: &ConstProp) {
+fn prop_cond(cond: &mut Cond, cp: &mut ConstProp) {
     match cond {
         Cond::Truthy(e) => prop_expr(e, cp),
         Cond::Cmp { left, right, .. } => {
@@ -3809,7 +3899,7 @@ fn prop_cond(cond: &mut Cond, cp: &ConstProp) {
     }
 }
 
-fn prop_expr(e: &mut Expr, cp: &ConstProp) {
+fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
     match e {
         Expr::Global(idx) => {
             // Long globals are never substituted — their compound
@@ -3889,6 +3979,10 @@ fn prop_expr(e: &mut Expr, cp: &ConstProp) {
             prop_expr(cond, cp);
             prop_expr(then_arm, cp);
             prop_expr(else_arm, cp);
+        }
+        Expr::Seq { sides, value } => {
+            for s in sides { prop_stmt(s, cp); }
+            prop_expr(value, cp);
         }
         Expr::IntLit(_) | Expr::Param(_) | Expr::StrLit(_) => {}
     }
@@ -5926,6 +6020,19 @@ fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: 
             let else_base = out.len();
             for mut f in else_fixups { f.body_offset += else_base; fixups.push(f); }
             out.extend_from_slice(&else_buf);
+        }
+        Expr::Seq { sides, value } => {
+            // Evaluate sides for side effects, discard their AX value
+            // (statements don't yield), then evaluate value into AX.
+            // Fixture 1057, 1114, etc.
+            // We need frame/return_int — punt to a wrapper that uses
+            // emit_stmt with no return_int (we're inside an expression).
+            // Use a noop frame since these stmts shouldn't include
+            // returns or `chkstk`.
+            for s in sides {
+                emit_stmt(s, locals, Frame::BpOnly, true, out, fixups);
+            }
+            emit_expr_to_ax(value, locals, out, fixups);
         }
         Expr::GlobalField { global, byte_off, size } => {
             // Word field: `a1 byte_off byte_off` + GlobalAddr FIXUP.
