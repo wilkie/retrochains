@@ -129,8 +129,22 @@ pub struct Function {
     pub name: String,
     pub return_int: bool,
     pub params: Vec<String>,
-    pub locals: Vec<Option<i32>>,
+    pub locals: Vec<LocalSpec>,
     pub body: Vec<Stmt>,
+}
+
+/// A function-local variable's storage descriptor. `size` is bytes
+/// (1 for `char`, 2 for `int` / pointer). `init` is the optional
+/// compile-time-constant initializer (used by const-prop).
+#[derive(Debug, Clone)]
+pub struct LocalSpec {
+    pub size: usize,
+    pub init: Option<i32>,
+}
+
+impl LocalSpec {
+    pub fn int(init: Option<i32>) -> Self { Self { size: 2, init } }
+    pub fn char_(init: Option<i32>) -> Self { Self { size: 1, init } }
 }
 
 
@@ -955,10 +969,15 @@ fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> {
     p.local_names.clear();
     p.param_names = params.clone();
 
-    // `int <name> [= <int>];` declarations.
-    let mut local_inits: Vec<Option<i32>> = Vec::new();
-    while matches!(p.peek(), Some(Tok::Kw("int"))) {
-        p.bump(); // int
+    // `int <name> [= <int>];` and `char <name> [= <int>];` declarations.
+    let mut locals: Vec<LocalSpec> = Vec::new();
+    loop {
+        let size = match p.peek() {
+            Some(Tok::Kw("int")) => 2usize,
+            Some(Tok::Kw("char")) => 1usize,
+            _ => break,
+        };
+        p.bump(); // type kw
         let lname = match p.bump().cloned() {
             Some(Tok::Ident(s)) => s,
             other => {
@@ -975,7 +994,7 @@ fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> {
         };
         p.eat(&Tok::Semi)?;
         p.local_names.push(lname);
-        local_inits.push(init);
+        locals.push(LocalSpec { size, init });
     }
 
     // Body statements until the closing `}`.
@@ -985,7 +1004,7 @@ fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> {
     }
     p.eat(&Tok::RBrace)?;
 
-    Ok(Function { name, return_int, params, locals: local_inits, body })
+    Ok(Function { name, return_int, params, locals, body })
 }
 
 fn parse_signed_int(p: &mut Parser<'_>) -> Result<i32, EmitError> {
@@ -2135,9 +2154,15 @@ fn fold_globals_expr(e: &mut Expr, known: &std::collections::HashMap<usize, i32>
 
 fn emit_function(func: &Function) -> FunctionEmit {
     let body = const_prop_globals(&func.body);
+    // Extract a `Vec<Option<i32>>` view for the existing fold path —
+    // saves rewriting every codegen helper to know about LocalSpec.
+    let local_inits: Vec<Option<i32>> = func.locals.iter().map(|l| l.init).collect();
     let mut bytes = Vec::with_capacity(32);
     let mut fixups: Vec<Fixup> = Vec::new();
     let frame = Frame::for_function(func);
+    // Each local — int or char — occupies one 2-byte slot in MSC's
+    // frame (confirmed by fixtures 4080, 1010, 1305). Char slots use
+    // byte instructions for load/store but still consume a word.
     let frame_bytes = func.locals.len() * 2;
 
     match frame {
@@ -2164,15 +2189,25 @@ fn emit_function(func: &Function) -> FunctionEmit {
         kind: FixupKind::ExtCall { target: "__chkstk".to_owned() },
     });
 
-    // Initialized-local writes — `int x = K;` → `c7 46 disp lo hi`.
-    for (i, init) in func.locals.iter().enumerate() {
-        if let Some(value) = init {
+    // Initialized-local writes — `int x = K;` → `c7 46 disp lo hi`;
+    // `char x = K;` → `c6 46 disp imm8`. Each local owns a 2-byte
+    // slot regardless of type.
+    for (i, spec) in func.locals.iter().enumerate() {
+        if let Some(value) = spec.init {
             let disp = -(i16::try_from(i + 1).expect("local index fits") * 2);
-            let imm = (*value as u32 & 0xFFFF) as u16;
-            bytes.push(0xC7);
-            bytes.push(0x46);
-            bytes.push(disp as u8);
-            bytes.extend_from_slice(&imm.to_le_bytes());
+            if spec.size == 1 {
+                let imm = (value as u32 & 0xFF) as u8;
+                bytes.push(0xC6);
+                bytes.push(0x46);
+                bytes.push(disp as u8);
+                bytes.push(imm);
+            } else {
+                let imm = (value as u32 & 0xFFFF) as u16;
+                bytes.push(0xC7);
+                bytes.push(0x46);
+                bytes.push(disp as u8);
+                bytes.extend_from_slice(&imm.to_le_bytes());
+            }
         }
     }
 
@@ -2183,13 +2218,13 @@ fn emit_function(func: &Function) -> FunctionEmit {
         }
         emit_stmt(
             stmt,
-            &func.locals,
+            &local_inits,
             frame,
             func.return_int,
             &mut bytes,
             &mut fixups,
         );
-        if stmt_always_returns(stmt, &func.locals) {
+        if stmt_always_returns(stmt, &local_inits) {
             reachable = false;
         }
     }
