@@ -25,6 +25,13 @@ fn try_main() -> Result<(), Box<dyn std::error::Error>> {
         match arg.as_str() {
             "/c" | "-c" => saw_c = true,
             "/AS" | "-AS" => saw_as = true,
+            // No-op flags. `/Fa` asks the oracle for an assembly
+            // listing; our binary doesn't produce one yet (the ASM
+            // tier is advisory in verify-all). The single-letter
+            // diagnostic / preprocessor flags are also harmless to
+            // skip — we don't honor them but never reject them.
+            "/Fa" | "-Fa" | "/Fc" | "-Fc" => { /* listing flags ignored */ }
+            "/Zg" | "-Zg" | "/Zl" | "-Zl" | "/Zp" | "-Zp" => { /* misc no-ops */ }
             other if other.starts_with('/') || other.starts_with('-') => {
                 return Err(format!("unrecognized flag {other:?}").into());
             }
