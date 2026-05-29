@@ -2234,6 +2234,26 @@ fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
             Ok(Stmt::Assign { target, value })
         }
         Some(Tok::Ident(_)) => {
+            // Detect an expression-statement (`<ident> <relop> ... ? : ;`
+            // discards its result for side effects). The lookahead at
+            // position+1 distinguishes ordinary statements (= ( [ . ->
+            // ++ -- += -= etc.) from full expressions.
+            let next = p.toks.get(p.pos + 1);
+            let is_stmt_form = matches!(next,
+                Some(Tok::Assign) | Some(Tok::LParen) | Some(Tok::LBrack)
+                | Some(Tok::Dot) | Some(Tok::Arrow)
+                | Some(Tok::PlusPlus) | Some(Tok::MinusMinus)
+                | Some(Tok::PlusEq) | Some(Tok::MinusEq) | Some(Tok::StarEq)
+                | Some(Tok::SlashEq) | Some(Tok::PercentEq)
+                | Some(Tok::AndEq) | Some(Tok::PipeEq) | Some(Tok::CaretEq)
+                | Some(Tok::ShlEq) | Some(Tok::ShrEq));
+            if !is_stmt_form {
+                // Treat the whole thing as an expression — typically a
+                // discarded ternary (fixture 1202) or a call-as-expr.
+                let expr = parse_expr(p)?;
+                p.eat(&Tok::Semi)?;
+                return Ok(Stmt::ExprStmt(expr));
+            }
             // Either `<local> = <expr>;` (assignment) or
             // `<name>();` (call as an expression statement).
             // Peek ahead one token to disambiguate.
