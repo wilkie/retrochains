@@ -1,0 +1,4 @@
+description = "while (g) g = g - 1; — loop driven by a global counter, decrement of a global. Probes the while-cond global compare (4129 backward jump form) and the global decrement shape."
+tool = "cl"
+args = ["/c", "/AS", "HELLO.C"]
+inputs = ["HELLO.C"]

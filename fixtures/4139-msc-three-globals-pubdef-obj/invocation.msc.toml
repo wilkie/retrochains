@@ -1,0 +1,4 @@
+description = "return a + b + c; — three-way add across globals. Probes left-associative chaining: first add lands in AX, second add brings in the third global from memory."
+tool = "cl"
+args = ["/c", "/AS", "HELLO.C"]
+inputs = ["HELLO.C"]

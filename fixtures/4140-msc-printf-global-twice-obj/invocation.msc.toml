@@ -1,0 +1,4 @@
+description = "printf with the same global passed twice. Confirms each push emits its own ff 36 addr (no CSE on memory loads) and both FIXUPs land at distinct LEDATA offsets."
+tool = "cl"
+args = ["/c", "/AS", "HELLO.C"]
+inputs = ["HELLO.C"]

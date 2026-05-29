@@ -1,0 +1,4 @@
+description = "return -1; — unary-minus on int literal. Probes the bare-mov path for a sign-extended u16 value (0xFFFF)."
+tool = "cl"
+args = ["/c", "/AS", "HELLO.C"]
+inputs = ["HELLO.C"]

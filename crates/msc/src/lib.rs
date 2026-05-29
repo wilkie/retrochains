@@ -1055,17 +1055,20 @@ fn parse_cond(p: &mut Parser<'_>) -> Result<Cond, EmitError> {
 /// Expression parser — recognizes the Slice-4 shapes:
 /// `<atom>` or `<atom> <op> <atom>` where op is `+ - *`.
 fn parse_expr(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
-    let left = parse_atom(p)?;
-    let op = match p.peek() {
-        Some(Tok::Plus) => Some(BinOp::Add),
-        Some(Tok::Minus) => Some(BinOp::Sub),
-        Some(Tok::Star) => Some(BinOp::Mul),
-        _ => None,
-    };
-    if let Some(op) = op {
+    // Left-associative chain of `+ - *` at one precedence level. C's
+    // real precedence isn't this flat but Phase 1 hasn't needed
+    // mixing.
+    let mut left = parse_atom(p)?;
+    loop {
+        let op = match p.peek() {
+            Some(Tok::Plus) => BinOp::Add,
+            Some(Tok::Minus) => BinOp::Sub,
+            Some(Tok::Star) => BinOp::Mul,
+            _ => break,
+        };
         p.bump();
         let right = parse_atom(p)?;
-        return Ok(Expr::BinOp { op, left: Box::new(left), right: Box::new(right) });
+        left = Expr::BinOp { op, left: Box::new(left), right: Box::new(right) };
     }
     Ok(left)
 }
@@ -1679,6 +1682,27 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
                     });
                 }
                 FixupKind::GlobalAddr { global_idx } => {
+                    // Patch placeholder bytes with the global's
+                    // in-_DATA offset for PUBDEF targets. COMDEF
+                    // targets keep their zero placeholder — the
+                    // linker substitutes via the EXTDEF FIXUP and
+                    // ignores the displacement. Fixture 4138 has
+                    // `b` at _DATA offset 2; without this patch
+                    // every PUBDEF-global access resolves to the
+                    // first global.
+                    if let Some(off) = data_offsets[*global_idx] {
+                        let off = u16::try_from(off).expect("global offset fits");
+                        let existing = u16::from_le_bytes([
+                            fe.bytes[fx.body_offset + 1],
+                            fe.bytes[fx.body_offset + 2],
+                        ]);
+                        // Combine with whatever the codegen wrote
+                        // (e.g. constant array index 4109 wrote
+                        // `2*K`). Patch ADD, not replace.
+                        let patched = existing.wrapping_add(off);
+                        fe.bytes[fx.body_offset + 1] = (patched & 0xFF) as u8;
+                        fe.bytes[fx.body_offset + 2] = ((patched >> 8) & 0xFF) as u8;
+                    }
                     ledata_fixups.push(ResolvedFixup {
                         ledata_offset: caller_off + fx.body_offset + 1,
                         kind: FixupKind::GlobalAddr { global_idx: *global_idx },
@@ -2292,6 +2316,12 @@ fn emit_push_arg(arg: &Expr, _locals: &[Option<i32>], out: &mut Vec<u8>, fixups:
                 kind: FixupKind::GlobalAddr { global_idx: *idx },
             });
         }
+        Expr::BinOp { .. } => {
+            // Computed value: build the result in AX then push.
+            // Fixture 4144.
+            emit_expr_to_ax(arg, _locals, out, fixups);
+            out.push(0x50);
+        }
         other => panic!("argument shape not yet supported: {other:?}"),
     }
 }
@@ -2366,6 +2396,25 @@ fn emit_assign(target: AssignTarget, value: &Expr, locals: &[Option<i32>], out: 
 /// Both shapes plant a 2-byte address placeholder that the linker
 /// resolves via a GlobalAddr fixup.
 fn emit_assign_global(global_idx: usize, value: &Expr, locals: &[Option<i32>], out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    // Peephole: `g = g ± 1;` → `inc/dec word ptr [g]` (4 bytes:
+    // `ff /0 mem` for inc, `ff /1 mem` for dec). Fixture 4141.
+    if let Expr::BinOp { op, left, right } = value
+        && let Expr::Global(li) = left.as_ref()
+        && *li == global_idx
+        && let Expr::IntLit(1) = right.as_ref()
+        && matches!(op, BinOp::Add | BinOp::Sub)
+    {
+        let modrm = if matches!(op, BinOp::Add) { 0x06 } else { 0x0E };
+        out.push(0xFF);
+        out.push(modrm);
+        let body_offset = out.len();
+        out.extend_from_slice(&[0x00, 0x00]);
+        fixups.push(Fixup {
+            body_offset: body_offset - 1,
+            kind: FixupKind::GlobalAddr { global_idx },
+        });
+        return;
+    }
     if let Some(k) = value.fold(locals) {
         let imm = (k as u32 & 0xFFFF) as u16;
         out.push(0xC7);
@@ -2553,7 +2602,8 @@ fn emit_loop(
         emit_stmt(seg, locals, frame, return_int, &mut body_buf, &mut body_fixups);
     }
     let mut cmp_buf = Vec::new();
-    emit_cond_cmp(cond, &mut cmp_buf);
+    let mut cmp_fixups: Vec<Fixup> = Vec::new();
+    emit_cond_cmp(cond, &mut cmp_buf, &mut cmp_fixups);
 
     // Alignment: position right after the 2-byte `eb XX` should be
     // even. If it would be odd, insert a NOP pad and bump the
@@ -2583,7 +2633,12 @@ fn emit_loop(
         c.body_offset += body_base;
         fixups.push(c);
     }
+    let cmp_base = out.len();
     out.extend_from_slice(&cmp_buf);
+    for mut c in cmp_fixups {
+        c.body_offset += cmp_base;
+        fixups.push(c);
+    }
     let back_disp = -(i8::try_from(cmp_len + 2 + body_len)
         .expect("loop body+cmp short enough for jcc rel8"));
     out.push(jcc_opcode);
@@ -2617,8 +2672,9 @@ fn emit_do_while(
     let body_len = body_buf.len();
     let elide_cmp = body_sets_flags_for_cond(body_stmt, cond);
     let mut cmp_buf = Vec::new();
+    let mut cmp_fixups: Vec<Fixup> = Vec::new();
     if !elide_cmp {
-        emit_cond_cmp(cond, &mut cmp_buf);
+        emit_cond_cmp(cond, &mut cmp_buf, &mut cmp_fixups);
     }
     let cmp_len = cmp_buf.len();
     let take_when_true = matches!(
@@ -2632,7 +2688,12 @@ fn emit_do_while(
         c.body_offset += body_base;
         fixups.push(c);
     }
+    let cmp_base = out.len();
     out.extend_from_slice(&cmp_buf);
+    for mut c in cmp_fixups {
+        c.body_offset += cmp_base;
+        fixups.push(c);
+    }
     let back_disp = -(i8::try_from(cmp_len + 2 + body_len)
         .expect("loop body+cmp short enough for jcc rel8"));
     out.push(jcc_opcode);
@@ -2659,12 +2720,17 @@ fn body_sets_flags_for_cond(body: &Stmt, cond: &Cond) -> bool {
 
 /// Just the cmp half of a cond — used by `emit_while` which pairs
 /// the comparison with a backward jcc rather than a forward skip.
-fn emit_cond_cmp(cond: &Cond, out: &mut Vec<u8>) {
+fn emit_cond_cmp(cond: &Cond, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
     match cond {
         Cond::Truthy(Expr::Local(idx)) => emit_cmp_local_imm(*idx, 0, out),
+        Cond::Truthy(Expr::Global(idx)) => emit_cmp_global_imm(*idx, 0, out, fixups),
         Cond::Cmp { op: _, left: Expr::Local(idx), right: Expr::IntLit(k) }
         | Cond::Cmp { op: _, left: Expr::IntLit(k), right: Expr::Local(idx) } => {
             emit_cmp_local_imm(*idx, *k, out);
+        }
+        Cond::Cmp { op: _, left: Expr::Global(idx), right: Expr::IntLit(k) }
+        | Cond::Cmp { op: _, left: Expr::IntLit(k), right: Expr::Global(idx) } => {
+            emit_cmp_global_imm(*idx, *k, out, fixups);
         }
         other => panic!("Slice 5 cond cmp not yet supported: {other:?}"),
     }
@@ -2968,7 +3034,10 @@ fn emit_binop(op: BinOp, left: &Expr, right: &Expr, locals: &[Option<i32>], out:
             return;
         }
     }
-    // Left as a global → `mov ax, [g]; op ax, imm`. Fixture 4135.
+    // Left as a global → `mov ax, [g]; <op> ax, ...`. The RHS can
+    // be an int literal (fixture 4135), another global via memory
+    // operand (`03 06 addr`, fixture 4138), or a local/param via the
+    // BP-rel path.
     if let Expr::Global(idx) = left {
         let body_offset = out.len();
         out.extend_from_slice(&[0xA1, 0x00, 0x00]);
@@ -2978,6 +3047,23 @@ fn emit_binop(op: BinOp, left: &Expr, right: &Expr, locals: &[Option<i32>], out:
         });
         if let Expr::IntLit(k) = right {
             emit_imm_op(op, *k, out);
+            return;
+        }
+        if let Expr::Global(idx2) = right {
+            // `op ax, word ptr [g2]` — Grp1 r/m16 with mod=00 r/m=110.
+            let opcode = match op {
+                BinOp::Add => 0x03,
+                BinOp::Sub => 0x2B,
+                BinOp::Mul => panic!("mul of two globals not yet supported"),
+            };
+            out.push(opcode);
+            out.push(0x06);
+            let body_offset = out.len();
+            out.extend_from_slice(&[0x00, 0x00]);
+            fixups.push(Fixup {
+                body_offset: body_offset - 1,
+                kind: FixupKind::GlobalAddr { global_idx: *idx2 },
+            });
             return;
         }
     }
@@ -2990,6 +3076,35 @@ fn emit_binop(op: BinOp, left: &Expr, right: &Expr, locals: &[Option<i32>], out:
     if let Some(k) = right.fold(locals) {
         emit_binop(op, left, &Expr::IntLit(k), locals, out, fixups);
         return;
+    }
+    // Nested binop on the left (`(a + b) + c`): compute the left
+    // subtree into AX, then fold the right side in. Fixture 4139.
+    if let Expr::BinOp { .. } = left {
+        emit_expr_to_ax(left, locals, out, fixups);
+        if let Expr::IntLit(k) = right {
+            emit_imm_op(op, *k, out);
+            return;
+        }
+        if let Expr::Global(idx) = right {
+            let opcode = match op {
+                BinOp::Add => 0x03,
+                BinOp::Sub => 0x2B,
+                BinOp::Mul => panic!("mul with global rhs not yet supported"),
+            };
+            out.push(opcode);
+            out.push(0x06);
+            let body_offset = out.len();
+            out.extend_from_slice(&[0x00, 0x00]);
+            fixups.push(Fixup {
+                body_offset: body_offset - 1,
+                kind: FixupKind::GlobalAddr { global_idx: *idx },
+            });
+            return;
+        }
+        if let Some(disp) = bp_disp(right) {
+            emit_mem_op_at(op, disp, out);
+            return;
+        }
     }
     panic!("binop shape not yet supported: {op:?} of {left:?}, {right:?}");
 }

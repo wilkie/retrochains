@@ -1,0 +1,4 @@
+description = "Mixed init / tentative globals interleaved with the function using only the init ones. Probes that COMDEFs split the EXTDEF correctly when in the middle of an init-PUBDEF sequence; pushes our `_DATA` offset bookkeeping (b is COMDEF so c lands at offset 2 = a's size, not 4)."
+tool = "cl"
+args = ["/c", "/AS", "HELLO.C"]
+inputs = ["HELLO.C"]
