@@ -883,22 +883,43 @@ fn tokenize(source: &str) -> Result<Vec<Tok>, EmitError> {
                 }
                 let value: i32 = if bytes[i] == b'\\' && i + 1 < bytes.len() {
                     let esc = bytes[i + 1];
-                    let v = match esc {
-                        b'n' => 0x0A,
-                        b't' => 0x09,
-                        b'r' => 0x0D,
-                        b'0' => 0x00,
-                        b'\\' => b'\\',
-                        b'\'' => b'\'',
-                        _ => {
-                            return Err(EmitError::Unsupported(format!(
-                                "unknown escape `\\{}` in char literal",
-                                esc as char
-                            )));
+                    // Octal escape `\NNN` (1–3 digits). C says `\0` is
+                    // NUL even when followed by another digit unless
+                    // that digit is also octal — we match the latter.
+                    if esc.is_ascii_digit() && esc <= b'7' {
+                        let mut v: i32 = 0;
+                        i += 1;
+                        let mut digits = 0;
+                        while digits < 3 && i < bytes.len()
+                            && bytes[i].is_ascii_digit() && bytes[i] <= b'7'
+                        {
+                            v = v * 8 + (bytes[i] - b'0') as i32;
+                            i += 1;
+                            digits += 1;
                         }
-                    };
-                    i += 2;
-                    v as i32
+                        v
+                    } else {
+                        let v = match esc {
+                            b'n' => 0x0A,
+                            b't' => 0x09,
+                            b'r' => 0x0D,
+                            b'\\' => b'\\' as i32,
+                            b'\'' => b'\'' as i32,
+                            b'"' => b'"' as i32,
+                            b'a' => 0x07,
+                            b'b' => 0x08,
+                            b'f' => 0x0C,
+                            b'v' => 0x0B,
+                            _ => {
+                                return Err(EmitError::Unsupported(format!(
+                                    "unknown escape `\\{}` in char literal",
+                                    esc as char
+                                )));
+                            }
+                        };
+                        i += 2;
+                        v as i32
+                    }
                 } else {
                     let v = bytes[i] as i32;
                     i += 1;
