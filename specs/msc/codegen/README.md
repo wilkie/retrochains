@@ -52,3 +52,45 @@ Each note links the fixtures that pin the behavior.
 | Push param arg                      | `ff 76 disp`                                     |
 | `add sp, N` cleanup                 | `83 c4 N`                                        |
 | Variable index into array `a[i]`    | `8b 5e disp d1 e3 8b 87 00 00` + FIXUP           |
+| `int a[N];` local array read `a[K]` | `8b 46 disp` (disp = local_disp + K*2)           |
+| `int a[N];` local array write `a[K] = V` | `c7 46 disp lo hi`                          |
+| `char s[N];` local array read `s[K]`| `8a 46 disp 98` (disp = local_disp + K)          |
+| `char s[N];` local array write `s[K] = V` | `c6 46 disp imm8`                          |
+| `g[K]` + `g[J]` chain (int globals) | `a1 K*2; 03 06 J*2 lo hi` + FIXUPs              |
+| `a + b` (both locals/params)        | `8b 46 a_disp; 03 46 b_disp`                     |
+| `n * fact(n-1)` (call-result swap)  | `8b 5e n_disp; 48; 50; e8 disp; 83 c4 02; f7 6e n_disp` |
+| `cmp <local>, <param>`              | `8b 46 l_disp; 3b 46 p_disp`                     |
+| `cmp <local>, <local>`              | `8b 46 l1_disp; 3b 46 l2_disp`                   |
+
+## Frame layout (local declarations)
+
+Each local pads up to an even byte count:
+
+| Decl                | Bytes consumed |
+|---------------------|----------------|
+| `char c;`           | 2              |
+| `int x;`            | 2              |
+| `int *p;` (any ptr) | 2              |
+| `int a[3];`         | 6              |
+| `char s[3];`        | 4 (3 + 1 pad)  |
+| `int a[10];`        | 20             |
+
+Source-order allocation: the first declarator gets the shallowest slot (closest to BP). Within an array, element 0 sits at the deepest disp.
+
+See [`msc-frame-layout`](../../../~/.claude/.../msc_frame_layout.md)
+for the disp-computation formula and the BP-relative emission rules.
+
+## Const-prop driven shapes
+
+MSC's optimizer is aggressive. Many fixtures pass because we match its
+const-fold output:
+
+- `int x = 5; return x + 1;` → `b8 06 00 c3` (full fold).
+- `int g = 5; g = 7; return g;` → `c7 06 addr 07 00; b8 07 00 c3`.
+- `int a[3]; a[1] = 10; return a[1];` → `c7 46 fc 0a 00; b8 0a 00 c3`.
+- `int x = 1; switch (x) { case 1: r = 20; break; ... }` → emits only the `r = 20` store.
+- `int r = x <= y;` with x, y both init → `c7 46 disp imm` with imm = 0 or 1.
+
+See [`msc-const-prop-scope`](../../../~/.claude/.../msc_const_prop_scope.md)
+for the propagation rules and [`msc-switch-lowering`](../../../~/.claude/.../msc_switch_lowering.md)
+for the foldable-switch rewrite.
