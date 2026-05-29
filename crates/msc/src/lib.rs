@@ -1954,12 +1954,12 @@ fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> {
                         .collect();
                     if let Some(k) = init_expr.fold(&init_view) {
                         locals[local_idx].init = Some(k);
-                        // Literal init: either fold(&[]) succeeds OR
-                        // the init expr is a direct ref to another
-                        // literal-init local of the same size. Folding
-                        // through same-size chains matches MSC's
-                        // behavior for `char b = a;` (1040), without
-                        // bleeding into `int n = c;` (1043).
+                        // Mirror into the parser's snapshot so later
+                        // stmt-level lookups (a[i] with i known) see
+                        // the init value.
+                        if let Some(spec) = p.local_specs.get_mut(local_idx) {
+                            spec.init = Some(k);
+                        }
                         let pure_literal = init_expr.fold(&[]).is_some();
                         let chained_literal = matches!(
                             &init_expr,
@@ -1968,6 +1968,9 @@ fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> {
                                 .unwrap_or(false)
                         );
                         locals[local_idx].init_is_literal = pure_literal || chained_literal;
+                        if let Some(spec) = p.local_specs.get_mut(local_idx) {
+                            spec.init_is_literal = pure_literal || chained_literal;
+                        }
                     } else {
                         prelude.push(Stmt::Assign {
                             target: AssignTarget::Local(local_idx),
@@ -2275,7 +2278,10 @@ fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
                 p.bump(); // [
                 let index_expr = parse_expr(p)?;
                 p.eat(&Tok::RBrack)?;
-                let k = index_expr.fold(&[]).ok_or_else(|| EmitError::Unsupported(
+                // Try folding against the local-init view so simple
+                // `a[i] = ...` with `i = K` known at decl folds.
+                let init_view: Vec<Option<i32>> = p.local_specs.iter().map(|l| l.init).collect();
+                let k = index_expr.fold(&init_view).ok_or_else(|| EmitError::Unsupported(
                     "non-constant local-array index in store not yet supported".to_owned(),
                 ))?;
                 let elem_bytes = p.local_specs[local_idx].size;
