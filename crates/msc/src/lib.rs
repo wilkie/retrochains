@@ -1805,9 +1805,20 @@ fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> {
                 } else {
                     LocalSpec { size: 1, array_len: stotal, init: None, struct_idx: Some(sidx), is_long: false, init_is_literal: false }
                 };
+                let local_idx = locals.len();
                 p.local_names.push(lname);
                 p.local_specs.push(spec.clone());
                 locals.push(spec);
+                // `struct s *p = &<global>;` — synthesize as runtime
+                // assign. Only handle the address-of-global init form.
+                if is_ptr && matches!(p.peek(), Some(Tok::Assign)) {
+                    p.bump();
+                    let init_expr = parse_expr(p)?;
+                    prelude.push(Stmt::Assign {
+                        target: AssignTarget::Local(local_idx),
+                        value: init_expr,
+                    });
+                }
                 if matches!(p.peek(), Some(Tok::Comma)) {
                     p.bump();
                     continue;
