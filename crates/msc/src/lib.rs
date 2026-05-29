@@ -235,6 +235,29 @@ pub enum Stmt {
     /// effects of its own. Used as the body of if / loops when the
     /// source uses braces.
     Block(Vec<Stmt>),
+    /// `switch (<expr>) { case K: ...; default: ...; }` — currently
+    /// only supported when the scrutinee folds to a known literal at
+    /// compile time. ConstProp picks the matching case and inlines
+    /// its body (up to the next break) before codegen sees the switch.
+    Switch {
+        scrutinee: Expr,
+        cases: Vec<SwitchArm>,
+    },
+    /// `break;` — short-circuit the enclosing switch / loop. Used
+    /// only as a flow-control marker inside the const-folded switch
+    /// case-walker; loop break isn't yet implemented.
+    Break,
+    /// `continue;` — Phase 1 placeholder; not yet implemented for
+    /// loops, but parses so source files compile.
+    Continue,
+}
+
+/// One arm of a `switch` statement. `value` is `Some(K)` for `case K:`
+/// and `None` for `default:`. `body` runs until the next `break`.
+#[derive(Debug, Clone)]
+pub struct SwitchArm {
+    pub value: Option<i32>,
+    pub body: Vec<Stmt>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -798,6 +821,11 @@ fn tokenize(source: &str) -> Result<Vec<Tok>, EmitError> {
                     "while" => Tok::Kw("while"),
                     "do" => Tok::Kw("do"),
                     "for" => Tok::Kw("for"),
+                    "switch" => Tok::Kw("switch"),
+                    "case" => Tok::Kw("case"),
+                    "default" => Tok::Kw("default"),
+                    "break" => Tok::Kw("break"),
+                    "continue" => Tok::Kw("continue"),
                     // Storage-class / qualifier modifiers we currently
                     // treat as no-ops in declarator parsing.
                     "unsigned" => Tok::Kw("unsigned"),
@@ -1374,6 +1402,52 @@ fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
             p.eat(&Tok::RParen)?;
             let body = Box::new(parse_stmt(p)?);
             Ok(Stmt::For { init, cond, step, body })
+        }
+        Some(Tok::Kw("switch")) => {
+            p.bump();
+            p.eat(&Tok::LParen)?;
+            let scrutinee = parse_expr(p)?;
+            p.eat(&Tok::RParen)?;
+            p.eat(&Tok::LBrace)?;
+            let mut cases: Vec<SwitchArm> = Vec::new();
+            while !matches!(p.peek(), Some(Tok::RBrace)) {
+                let value = match p.peek() {
+                    Some(Tok::Kw("case")) => {
+                        p.bump();
+                        Some(parse_signed_int(p)?)
+                    }
+                    Some(Tok::Kw("default")) => {
+                        p.bump();
+                        None
+                    }
+                    other => {
+                        return Err(EmitError::Unsupported(format!(
+                            "expected `case` or `default` in switch, got {other:?}"
+                        )));
+                    }
+                };
+                p.eat(&Tok::Colon)?;
+                let mut body = Vec::new();
+                while !matches!(
+                    p.peek(),
+                    Some(Tok::Kw("case")) | Some(Tok::Kw("default")) | Some(Tok::RBrace)
+                ) {
+                    body.push(parse_stmt(p)?);
+                }
+                cases.push(SwitchArm { value, body });
+            }
+            p.eat(&Tok::RBrace)?;
+            Ok(Stmt::Switch { scrutinee, cases })
+        }
+        Some(Tok::Kw("break")) => {
+            p.bump();
+            p.eat(&Tok::Semi)?;
+            Ok(Stmt::Break)
+        }
+        Some(Tok::Kw("continue")) => {
+            p.bump();
+            p.eat(&Tok::Semi)?;
+            Ok(Stmt::Continue)
         }
         Some(Tok::Semi) => {
             p.bump();
@@ -2748,11 +2822,61 @@ fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
                 prop_stmt(s, cp);
             }
         }
+        Stmt::Switch { scrutinee, cases } => {
+            prop_expr(scrutinee, cp);
+            // If the scrutinee folds, replace the switch with the
+            // matched case's body (up to the first Stmt::Break).
+            if let Expr::IntLit(k) = scrutinee {
+                let mut chosen: Option<usize> = None;
+                let mut default: Option<usize> = None;
+                for (i, arm) in cases.iter().enumerate() {
+                    match arm.value {
+                        Some(v) if v == *k => { chosen = Some(i); break; }
+                        Some(_) => {}
+                        None => { default = Some(i); }
+                    }
+                }
+                let pick = chosen.or(default);
+                let body: Vec<Stmt> = match pick {
+                    Some(i) => {
+                        // Take statements up to the first Break.
+                        let mut out = Vec::new();
+                        let mut j = i;
+                        'outer: while j < cases.len() {
+                            for s in &cases[j].body {
+                                if matches!(s, Stmt::Break) { break 'outer; }
+                                out.push(s.clone());
+                            }
+                            j += 1;
+                        }
+                        out
+                    }
+                    None => Vec::new(),
+                };
+                *stmt = Stmt::Block(body);
+                // Recurse into the rewritten Block.
+                if let Stmt::Block(stmts) = stmt {
+                    for s in stmts { prop_stmt(s, cp); }
+                }
+            } else {
+                // Runtime scrutinee — leave as Switch; codegen
+                // will panic until we add real lowering.
+                cp.g_known.clear();
+                cp.l_known.clear();
+                cp.la_known.clear();
+            }
+        }
+        Stmt::Break | Stmt::Continue => {
+            // These are flow-control markers; the const-folded
+            // switch walker handles Break. Outside that path they
+            // signal that subsequent statements may be unreachable.
+        }
         _ => {
             // While / for / do-while: fold any cond / step we can
             // reach via a shallow walk, then drop everything.
             cp.g_known.clear();
             cp.l_known.clear();
+            cp.la_known.clear();
         }
     }
 }
@@ -2974,6 +3098,15 @@ fn emit_stmt(
             panic!("ExprStmt with non-call expression not yet supported: {other:?}");
         }
         Stmt::Assign { target, value } => emit_assign(*target, value, locals, out, fixups),
+        Stmt::Switch { .. } => {
+            panic!("non-foldable switch not yet supported (const-prop should have rewritten)")
+        }
+        Stmt::Break => {
+            panic!("break outside const-folded switch not yet supported")
+        }
+        Stmt::Continue => {
+            panic!("continue not yet supported")
+        }
         Stmt::Block(stmts) => {
             // Block has no scoping at the codegen level. Sub-statements
             // emit inline. Const-prop's already been applied at the
@@ -3047,6 +3180,7 @@ fn stmt_always_returns(stmt: &Stmt, locals: &Locals<'_>) -> bool {
         // const-true infinite-loop case isn't exercised yet so we
         // conservatively answer false.
         Stmt::While { .. } | Stmt::DoWhile { .. } | Stmt::For { .. } => false,
+        Stmt::Switch { .. } | Stmt::Break | Stmt::Continue => false,
         Stmt::Block(stmts) => stmts.iter().any(|s| stmt_always_returns(s, locals)),
         Stmt::If { cond, then_branch, else_branch } => {
             if let Some(k) = fold_cond(cond, locals) {
