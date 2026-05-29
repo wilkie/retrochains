@@ -1157,6 +1157,13 @@ fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
                     "assignment to unknown identifier `{name}`"
                 )));
             };
+            // Compound forms: `x++`, `x--`, `x += K`, `x -= K`, ...
+            // All rewrite to `Stmt::Assign { target, value: <existing target> <op> <rhs> }`.
+            // The existing local/global codegen + peephole take it from there.
+            if let Some(value) = parse_compound_rhs(p, &target)? {
+                p.eat(&Tok::Semi)?;
+                return Ok(Stmt::Assign { target, value });
+            }
             p.eat(&Tok::Assign)?;
             let value = parse_expr(p)?;
             p.eat(&Tok::Semi)?;
@@ -1166,6 +1173,43 @@ fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
             "statement starting with {other:?} not yet supported"
         ))),
     }
+}
+
+/// Peek and parse a compound-assignment / post-(inc|dec) RHS for an
+/// already-extracted target. Returns `Some(value)` for any compound
+/// form, or `None` if the next token is just a plain `=` (the caller
+/// then handles the normal `target = expr;` path). Each compound
+/// form rewrites to an equivalent `Expr::BinOp(<lvalue>, <op>, rhs)`
+/// so the existing target-store codegen + `x = x ± 1 → inc/dec`
+/// peephole kick in for free.
+fn parse_compound_rhs(p: &mut Parser<'_>, target: &AssignTarget) -> Result<Option<Expr>, EmitError> {
+    let lvalue_expr = match target {
+        AssignTarget::Local(i) => Expr::Local(*i),
+        AssignTarget::Global(g) => Expr::Global(*g),
+        _ => return Ok(None),
+    };
+    let op = match p.peek() {
+        Some(Tok::PlusPlus) => { p.bump(); BinOp::Add }
+        Some(Tok::MinusMinus) => { p.bump(); BinOp::Sub }
+        Some(Tok::PlusEq) => { p.bump(); BinOp::Add }
+        Some(Tok::MinusEq) => { p.bump(); BinOp::Sub }
+        Some(Tok::StarEq) => { p.bump(); BinOp::Mul }
+        _ => return Ok(None),
+    };
+    let rhs = match op {
+        BinOp::Add | BinOp::Sub
+            if matches!(p.peek(), Some(Tok::Semi) | Some(Tok::Comma) | Some(Tok::RParen)) =>
+        {
+            // Post-(in|de)crement form: `x++;` / `x--;`. RHS is implicit 1.
+            Expr::IntLit(1)
+        }
+        _ => parse_expr(p)?,
+    };
+    Ok(Some(Expr::BinOp {
+        op,
+        left: Box::new(lvalue_expr),
+        right: Box::new(rhs),
+    }))
 }
 
 /// Parse `<local> = <expr>` (no trailing `;`) — used inside
@@ -1189,6 +1233,9 @@ fn parse_assign_no_semi(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
             "unknown identifier `{name}` in for-clause"
         )));
     };
+    if let Some(value) = parse_compound_rhs(p, &target)? {
+        return Ok(Stmt::Assign { target, value });
+    }
     p.eat(&Tok::Assign)?;
     let value = parse_expr(p)?;
     Ok(Stmt::Assign { target, value })
