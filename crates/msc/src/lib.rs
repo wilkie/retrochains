@@ -2093,7 +2093,15 @@ fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                         Ok(Expr::Index { array: idx, index: Box::new(index) })
                     }
                 } else {
-                    Ok(Expr::Global(idx))
+                    // Array name in non-subscript position decays to
+                    // a pointer (the array's base address). Scalar
+                    // globals stay as values.
+                    let g = &p.globals[idx];
+                    if !g.is_pointer && g.array_len > 1 {
+                        Ok(Expr::AddrOfGlobal(idx))
+                    } else {
+                        Ok(Expr::Global(idx))
+                    }
                 }
             } else {
                 Err(EmitError::Unsupported(format!("unknown identifier `{name}`")))
@@ -4478,6 +4486,49 @@ fn emit_binop(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, out: &m
     }
     if let Some(k) = right.fold(locals.inits) {
         emit_binop(op, left, &Expr::IntLit(k), locals, out, fixups);
+        return;
+    }
+    // `a[I] + a[J]` where both ParamIndex share the same param:
+    // load the pointer into BX once, then read RHS into AX and add
+    // LHS as a memory operand. Matches MSC's `mov bx, [bp+disp];
+    // mov ax, [bx+J*2]; add ax, [bx+I*2]` shape on fixture 1236.
+    if let Expr::ParamIndex { param: lp, index: li } = left
+        && let Expr::ParamIndex { param: rp, index: ri } = right
+        && *lp == *rp
+        && let Some(lk) = li.fold(locals.inits)
+        && let Some(rk) = ri.fold(locals.inits)
+        && matches!(op, BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor)
+    {
+        let p_disp = param_disp(*lp);
+        out.push(0x8B);
+        out.push(0x5E);
+        out.push(p_disp as u8);
+        // RHS first (matches MSC observation on 1236).
+        let r_disp = (rk as i16) * 2;
+        if r_disp == 0 {
+            out.extend_from_slice(&[0x8B, 0x07]);
+        } else {
+            out.push(0x8B);
+            out.push(0x47);
+            out.push(r_disp as u8);
+        }
+        let opcode = match op {
+            BinOp::Add => 0x03,
+            BinOp::Sub => 0x2B,
+            BinOp::BitAnd => 0x23,
+            BinOp::BitOr => 0x0B,
+            BinOp::BitXor => 0x33,
+            _ => unreachable!(),
+        };
+        let l_disp = (lk as i16) * 2;
+        if l_disp == 0 {
+            out.push(opcode);
+            out.push(0x07);
+        } else {
+            out.push(opcode);
+            out.push(0x47);
+            out.push(l_disp as u8);
+        }
         return;
     }
     // Nested binop on the left (`(a + b) + c`, `g[0] + g[1] + g[2]`):
