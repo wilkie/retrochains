@@ -658,6 +658,7 @@ fn tokenize(source: &str) -> Result<Vec<Tok>, EmitError> {
                 let tok = match text {
                     "int" => Tok::Kw("int"),
                     "char" => Tok::Kw("char"),
+                    "short" => Tok::Kw("short"),
                     "main" => Tok::Kw("main"),
                     "void" => Tok::Kw("void"),
                     "return" => Tok::Kw("return"),
@@ -666,6 +667,16 @@ fn tokenize(source: &str) -> Result<Vec<Tok>, EmitError> {
                     "while" => Tok::Kw("while"),
                     "do" => Tok::Kw("do"),
                     "for" => Tok::Kw("for"),
+                    // Storage-class / qualifier modifiers we currently
+                    // treat as no-ops in declarator parsing.
+                    "unsigned" => Tok::Kw("unsigned"),
+                    "signed" => Tok::Kw("signed"),
+                    "static" => Tok::Kw("static"),
+                    "extern" => Tok::Kw("extern"),
+                    "register" => Tok::Kw("register"),
+                    "auto" => Tok::Kw("auto"),
+                    "volatile" => Tok::Kw("volatile"),
+                    "const" => Tok::Kw("const"),
                     _ => Tok::Ident(text.to_owned()),
                 };
                 toks.push(tok);
@@ -746,25 +757,45 @@ fn parse_unit(source: &str) -> Result<Unit, EmitError> {
             continue;
         }
         // Disambiguate file-scope `int <name>...;` (global) from
-        // `int <name>(...) { ... }` (function) by looking ahead.
-        // `char *<name>` is unambiguously a global pointer.
-        let is_int_global = matches!(p.peek(), Some(Tok::Kw("int")))
-            && matches!(p.toks.get(p.pos + 1), Some(Tok::Ident(_)))
-            && !matches!(p.toks.get(p.pos + 2), Some(Tok::LParen));
-        let is_int_ptr_global = matches!(p.peek(), Some(Tok::Kw("int")))
-            && matches!(p.toks.get(p.pos + 1), Some(Tok::Star));
-        let is_char_ptr_global = matches!(p.peek(), Some(Tok::Kw("char")))
-            && matches!(p.toks.get(p.pos + 1), Some(Tok::Star));
-        let is_char_array_global = matches!(p.peek(), Some(Tok::Kw("char")))
-            && matches!(p.toks.get(p.pos + 1), Some(Tok::Ident(_)))
-            && matches!(p.toks.get(p.pos + 2), Some(Tok::LBrack));
-        if is_int_global || is_int_ptr_global || is_char_ptr_global || is_char_array_global {
-            let before = p.globals.len();
-            parse_global_decl(&mut p)?;
-            for i in before..p.globals.len() {
-                decl_order.push(TopDecl::Global(i));
+        // `int <name>(...) { ... }` (function) by looking ahead
+        // across any leading modifier keywords. A `(` after the
+        // identifier means function; everything else means decl.
+        let mut k = p.pos;
+        while matches!(
+            p.toks.get(k),
+            Some(Tok::Kw("unsigned")) | Some(Tok::Kw("signed"))
+                | Some(Tok::Kw("static")) | Some(Tok::Kw("extern"))
+                | Some(Tok::Kw("register")) | Some(Tok::Kw("auto"))
+                | Some(Tok::Kw("volatile")) | Some(Tok::Kw("const"))
+                | Some(Tok::Kw("short"))
+        ) {
+            k += 1;
+        }
+        let is_type_prefix = matches!(
+            p.toks.get(k),
+            Some(Tok::Kw("int")) | Some(Tok::Kw("char"))
+        );
+        if is_type_prefix {
+            // Walk past the type kw + optional `*` to look at the
+            // declarator's first token after the name.
+            let mut after = k + 1;
+            if matches!(p.toks.get(after), Some(Tok::Star)) { after += 1; }
+            // Now expect an ident or the `main` keyword. The token
+            // after the name decides function (`(`) vs global decl.
+            let name_ok = matches!(
+                p.toks.get(after),
+                Some(Tok::Ident(_)) | Some(Tok::Kw("main"))
+            );
+            let is_function = name_ok
+                && matches!(p.toks.get(after + 1), Some(Tok::LParen));
+            if !is_function {
+                let before = p.globals.len();
+                parse_global_decl(&mut p)?;
+                for i in before..p.globals.len() {
+                    decl_order.push(TopDecl::Global(i));
+                }
+                continue;
             }
-            continue;
         }
         let fn_idx = functions.len();
         functions.push(parse_function(&mut p)?);
@@ -784,6 +815,9 @@ fn parse_unit(source: &str) -> Result<Unit, EmitError> {
 /// initializer. Caller has confirmed the next tokens form a
 /// declaration, not a function.
 fn parse_global_decl(p: &mut Parser<'_>) -> Result<(), EmitError> {
+    // Skip any leading storage/qualifier modifiers (unsigned, static,
+    // ...) — we treat them all as no-ops at the codegen level.
+    skip_decl_modifiers(p);
     // Type prefix. Phase 1 globals: `int [*]`, `char *`, `char [N]`.
     // `is_pointer` is true for any 2-byte pointer form. `is_char` is
     // true for `char <name>[N]` (1-byte slots, fixture 4117).
@@ -912,10 +946,14 @@ fn parse_global_decl(p: &mut Parser<'_>) -> Result<(), EmitError> {
 }
 
 fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> {
-    // `<ret-type> <name>(void) {`. Phase 1 supports `int` and `void`
-    // as return types; no parameters yet.
+    // `<modifiers>* <ret-type> <name>(...)` — skip any leading
+    // storage-class / sign keywords (static, extern, unsigned, etc.),
+    // then expect `int` / `char` / `void`. `char` returns are widened
+    // to int via cbw at the consume site; treat as int here.
+    skip_decl_modifiers(p);
     let return_int = match p.bump().cloned() {
         Some(Tok::Kw("int")) => true,
+        Some(Tok::Kw("char")) => true,
         Some(Tok::Kw("void")) => false,
         other => {
             return Err(EmitError::Unsupported(format!(
@@ -942,9 +980,18 @@ fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> {
     } else {
         let mut names = Vec::new();
         loop {
-            // Type: `int` or `int *` (both occupy one 16-bit slot in
-            // the cdecl frame).
-            p.eat(&Tok::Kw("int"))?;
+            // Optional sign/qualifier modifiers, then `int` / `char`.
+            // Pointers (`<type> *<name>`) consume one stack slot
+            // regardless of pointee type.
+            skip_decl_modifiers(p);
+            match p.peek() {
+                Some(Tok::Kw("int")) | Some(Tok::Kw("char")) => { p.bump(); }
+                other => {
+                    return Err(EmitError::Unsupported(format!(
+                        "expected `int` or `char` in parameter type, got {other:?}"
+                    )));
+                }
+            }
             if matches!(p.peek(), Some(Tok::Star)) {
                 p.bump();
             }
@@ -973,14 +1020,27 @@ fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> {
     p.local_names.clear();
     p.param_names = params.clone();
 
-    // `int <name> [= <int>];` and `char <name> [= <int>];` declarations.
+    // `[storage-class]+ int|char <name> [= <int>];` declarations.
     let mut locals: Vec<LocalSpec> = Vec::new();
     loop {
-        let size = match p.peek() {
+        // Peek across leading modifier keywords to find the base type.
+        let mut peek_pos = p.pos;
+        while matches!(
+            p.toks.get(peek_pos),
+            Some(Tok::Kw("unsigned")) | Some(Tok::Kw("signed"))
+                | Some(Tok::Kw("static")) | Some(Tok::Kw("extern"))
+                | Some(Tok::Kw("register")) | Some(Tok::Kw("auto"))
+                | Some(Tok::Kw("volatile")) | Some(Tok::Kw("const"))
+                | Some(Tok::Kw("short"))
+        ) {
+            peek_pos += 1;
+        }
+        let size = match p.toks.get(peek_pos) {
             Some(Tok::Kw("int")) => 2usize,
             Some(Tok::Kw("char")) => 1usize,
             _ => break,
         };
+        skip_decl_modifiers(p);
         p.bump(); // type kw
         let lname = match p.bump().cloned() {
             Some(Tok::Ident(s)) => s,
@@ -1189,6 +1249,31 @@ fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
             "statement starting with {other:?} not yet supported"
         ))),
     }
+}
+
+/// Consume any leading type-qualifier / storage-class keywords that
+/// our front-end currently treats as no-ops (`unsigned`, `signed`,
+/// `static`, `extern`, `register`, `auto`, `volatile`, `const`,
+/// `short`). Returns the count consumed so the caller can decide
+/// whether a type prefix was present.
+fn skip_decl_modifiers(p: &mut Parser<'_>) -> usize {
+    let mut count = 0;
+    while matches!(
+        p.peek(),
+        Some(Tok::Kw("unsigned"))
+            | Some(Tok::Kw("signed"))
+            | Some(Tok::Kw("static"))
+            | Some(Tok::Kw("extern"))
+            | Some(Tok::Kw("register"))
+            | Some(Tok::Kw("auto"))
+            | Some(Tok::Kw("volatile"))
+            | Some(Tok::Kw("const"))
+            | Some(Tok::Kw("short"))
+    ) {
+        p.bump();
+        count += 1;
+    }
+    count
 }
 
 /// Peek and parse a compound-assignment / post-(inc|dec) RHS for an
