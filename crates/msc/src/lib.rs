@@ -6245,6 +6245,35 @@ fn emit_load_local(idx: usize, locals: &Locals<'_>, out: &mut Vec<u8>) {
 }
 
 fn emit_binop(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    // Comparison ops materialize as 0/1 in AX via cmp+jcc.
+    if matches!(op, BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge) {
+        let cond = Cond::Cmp {
+            op: match op {
+                BinOp::Eq => RelOp::Eq, BinOp::Ne => RelOp::Ne,
+                BinOp::Lt => RelOp::Lt, BinOp::Le => RelOp::Le,
+                BinOp::Gt => RelOp::Gt, BinOp::Ge => RelOp::Ge,
+                _ => unreachable!(),
+            },
+            left: left.clone(),
+            right: right.clone(),
+        };
+        // `<cmp>; mov ax, 1; jcc +3; sub ax, ax` shape — emit_cond_cmp
+        // sets ZF/CF/SF and the inverted_jcc decides which branch
+        // contains the "false → set 0" path.
+        emit_cond_cmp_inner(&cond, locals, out, fixups);
+        // Now emit `mov ax, 1; <inverted-jcc> +3; sub ax, ax`.
+        // 5 bytes total after cmp.
+        out.extend_from_slice(&[0xB8, 0x01, 0x00]);
+        out.push(inverted_jcc(match op {
+            BinOp::Eq => RelOp::Eq, BinOp::Ne => RelOp::Ne,
+            BinOp::Lt => RelOp::Lt, BinOp::Le => RelOp::Le,
+            BinOp::Gt => RelOp::Gt, BinOp::Ge => RelOp::Ge,
+            _ => unreachable!(),
+        }));
+        out.push(0x02); // disp8 = 2 (skip the `sub ax, ax`)
+        out.extend_from_slice(&[0x2B, 0xC0]); // sub ax, ax
+        return;
+    }
     // Commutative-op swap: when the RHS is a value that needs AX
     // (call, complex expression) and the LHS is a BP-rel operand,
     // MSC emits the RHS first and then uses the BP-rel as a memory
