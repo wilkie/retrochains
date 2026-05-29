@@ -2206,6 +2206,40 @@ fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
             }
             p.eat(&Tok::Assign)?;
             let value = parse_expr(p)?;
+            // `b = a++;` — post-inc/dec on the assigned value. The
+            // RHS captures a's pre-update value; then a is updated.
+            // We expand to `b = a; a = a ± 1;`. Fixtures 1244, 1154.
+            if matches!(p.peek(), Some(Tok::PlusPlus) | Some(Tok::MinusMinus))
+                && matches!(value, Expr::Local(_) | Expr::Global(_) | Expr::Param(_))
+            {
+                let inc = matches!(p.peek(), Some(Tok::PlusPlus));
+                p.bump();
+                p.eat(&Tok::Semi)?;
+                let post_target = match &value {
+                    Expr::Local(i) => AssignTarget::Local(*i),
+                    Expr::Param(i) => AssignTarget::Param(*i),
+                    Expr::Global(g) => AssignTarget::Global(*g),
+                    _ => unreachable!(),
+                };
+                let post_lvalue = match &post_target {
+                    AssignTarget::Local(i) => Expr::Local(*i),
+                    AssignTarget::Param(i) => Expr::Param(*i),
+                    AssignTarget::Global(g) => Expr::Global(*g),
+                    _ => unreachable!(),
+                };
+                let post_stmt = Stmt::Assign {
+                    target: post_target,
+                    value: Expr::BinOp {
+                        op: if inc { BinOp::Add } else { BinOp::Sub },
+                        left: Box::new(post_lvalue),
+                        right: Box::new(Expr::IntLit(1)),
+                    },
+                };
+                return Ok(Stmt::Block(vec![
+                    Stmt::Assign { target, value },
+                    post_stmt,
+                ]));
+            }
             p.eat(&Tok::Semi)?;
             Ok(Stmt::Assign { target, value })
         }
@@ -6338,6 +6372,26 @@ fn emit_binop(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, out: &m
         let k16 = (k as u32 & 0xFFFF) as u16;
         out.push(0xB8);
         out.extend_from_slice(&k16.to_le_bytes());
+        return;
+    }
+    // `IntLit(K) <op> Local/Param/Global`: for commutative ops, reorder
+    // to `<rhs> <op> IntLit(K)` so the BP-rel-on-left path can fire.
+    let commut = matches!(op, BinOp::Add | BinOp::Mul | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor);
+    if matches!(left, Expr::IntLit(_))
+        && commut
+        && !matches!(right, Expr::IntLit(_))
+    {
+        emit_binop(op, right, left, locals, out, fixups);
+        return;
+    }
+    // Non-commutative `K <op> BP-rel`: `mov ax, K; <op> ax, [bp-disp]`.
+    if let Expr::IntLit(k) = left
+        && bp_load(right, locals).is_some()
+    {
+        let k16 = (*k as u32 & 0xFFFF) as u16;
+        out.push(0xB8);
+        out.extend_from_slice(&k16.to_le_bytes());
+        emit_mem_op_at(op, bp_disp(right, locals).expect("bp_disp"), out);
         return;
     }
     // `a[I] + a[J]` where both ParamIndex share the same param:
