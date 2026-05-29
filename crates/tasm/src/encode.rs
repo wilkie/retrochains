@@ -408,6 +408,7 @@ fn encode_segment(
 
 fn instr_size(instr: &Instr) -> usize {
     match instr {
+        Instr::SegOverride { inner, .. } => 1 + instr_size(inner),
         Instr::PushImm8Sx { .. } => 2,
         Instr::Enter { .. } => 4,
         Instr::Leave => 1,
@@ -880,6 +881,13 @@ fn emit_instr(
     jcc_expanded: bool,
 ) -> AsmResult<()> {
     match instr {
+        Instr::SegOverride { seg, inner } => {
+            out.push(seg.override_prefix());
+            return emit_instr(
+                seg_idx, inner, symbols, group_idx, extern_idx, segment_idx,
+                out, fixups, jcc_expanded,
+            );
+        }
         Instr::PushReg16 { reg } => out.push(0x50 | reg.code()),
         Instr::PopReg16 { reg } => out.push(0x58 | reg.code()),
         Instr::Pushf => out.push(0x9C),

@@ -125,6 +125,12 @@ pub enum Instr {
     /// `pushf` — 9C. Pushes the FLAGS word onto the stack. Used by
     /// BCC's `_FLAGS & K` value-context path (fixture 4062).
     Pushf,
+    /// A segment-override prefix (one of 26/2E/36/3E) followed by
+    /// the wrapped instruction's normal encoding. Used by codegen
+    /// for `_ss/_es/_cs`-qualified pointer derefs (fixtures 4063–
+    /// 4068; the `_ds` case elides the prefix and skips this
+    /// wrapper since DS is the default).
+    SegOverride { seg: SegReg, inner: Box<Instr> },
     /// `mov <dst>,<src>` between 16-bit registers — 8B xx with
     /// ModR/M mod=11 reg=dst-code r/m=src-code. Covers `mov bp,sp`,
     /// `mov sp,bp`, `mov ax,dx`, `mov ax,si`, etc.
@@ -2588,6 +2594,17 @@ impl SegReg {
             "ss" => Some(Self::Ss),
             "ds" => Some(Self::Ds),
             _ => None,
+        }
+    }
+    /// Segment-override prefix byte (8086 single-byte legacy prefix):
+    /// ES=0x26, CS=0x2E, SS=0x36, DS=0x3E. Prepended before an
+    /// instruction that touches memory through a non-default segment.
+    pub fn override_prefix(self) -> u8 {
+        match self {
+            Self::Es => 0x26,
+            Self::Cs => 0x2E,
+            Self::Ss => 0x36,
+            Self::Ds => 0x3E,
         }
     }
 }

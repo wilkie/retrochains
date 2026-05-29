@@ -294,6 +294,31 @@ pub enum StmtKind {
     Block(Vec<Stmt>),
 }
 
+/// Segment-register selector for `_ss/_es/_cs/_ds`-qualified
+/// pointers. The qualifier becomes a TASM operand prefix at every
+/// dereference site. DS is the default for DGROUP-relative access
+/// and is elided in the generated listing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SegReg {
+    Ss,
+    Es,
+    Cs,
+    Ds,
+}
+
+impl SegReg {
+    /// Lowercase asm prefix (`ss`, `es`, `cs`, `ds`).
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Ss => "ss",
+            Self::Es => "es",
+            Self::Cs => "cs",
+            Self::Ds => "ds",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Type {
     /// `int` — 16-bit signed under the small memory model.
@@ -363,6 +388,17 @@ pub enum Type {
     /// unqualified pointers to promote, so codegen never sees this
     /// variant.
     NearPointer(Box<Type>),
+    /// `T _ss/_es/_cs/_ds *p` — a 16-bit near pointer whose target
+    /// segment is implicit in the qualifier. Always 2 bytes
+    /// regardless of memory model (the segment isn't stored;
+    /// fixture 4068 confirms large model preserves near-ness).
+    /// At every dereference, codegen emits a TASM `<seg>:` operand
+    /// prefix; `_ds` is the default segment for DGROUP-rel access
+    /// and is elided. Fixtures 4063–4068.
+    SegPointer {
+        pointee: Box<Type>,
+        seg: SegReg,
+    },
     /// Parser-side marker for a function-pointer declarator
     /// (`int (*fp)(int)`). The post-parse promotion uses this to
     /// decide whether the slot is a 4-byte far pointer
@@ -433,6 +469,9 @@ impl Type {
             Self::Pointer(_) => 2,
             Self::NearPointer(_) => 2,
             Self::FarPointer { .. } => 4,
+            // Segment-qualified pointers are always 2 bytes — segment
+            // lives in the qualifier, not the value. Fixture 4068.
+            Self::SegPointer { .. } => 2,
             // FnPointer is parser-side only; it gets rewritten to
             // Pointer or FarPointer before the locals layout pass
             // ever calls `size_bytes`. 2 is the safe default for
@@ -457,6 +496,7 @@ impl Type {
             Self::Pointer(_) => 2,
             Self::NearPointer(_) => 2,
             Self::FarPointer { .. } => 2,
+            Self::SegPointer { .. } => 2,
             Self::FnPointer => 2,
             // Struct alignment: 2 (word). The size rounding to even
             // is part of the per-struct size computation, so this is
@@ -530,7 +570,10 @@ impl Type {
     /// Arrays never enregister.
     #[must_use]
     pub fn is_int_like(&self) -> bool {
-        matches!(self, Self::Int | Self::UInt | Self::Pointer(_))
+        matches!(
+            self,
+            Self::Int | Self::UInt | Self::Pointer(_) | Self::SegPointer { .. }
+        )
     }
 
     /// True for floating-point types (`float`, `double`). They never
@@ -558,12 +601,22 @@ impl Type {
         match self {
             Self::Pointer(inner) | Self::NearPointer(inner) => Some(inner),
             Self::FarPointer { pointee, .. } => Some(pointee),
+            Self::SegPointer { pointee, .. } => Some(pointee),
             // FnPointer is opaque — codegen never asks for its
             // pointee (the function signature isn't modeled), and
             // by the time anyone could it's already been rewritten.
             Self::FnPointer => None,
             _ => None,
         }
+    }
+
+    /// Segment-register qualifier, if this pointer carries one
+    /// (`_ss/_es/_cs/_ds`). Returns `None` for plain near, far, or
+    /// non-pointer types. Codegen uses this to emit the operand
+    /// prefix at deref sites.
+    #[must_use]
+    pub fn seg_qualifier(&self) -> Option<SegReg> {
+        if let Self::SegPointer { seg, .. } = self { Some(*seg) } else { None }
     }
 }
 

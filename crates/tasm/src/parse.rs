@@ -1222,6 +1222,24 @@ fn parse_mov(operands: &str, line_no: usize) -> AsmResult<Instr> {
     let (lhs, rhs) = split_comma(operands).ok_or_else(|| {
         AsmError::new(line_no, format!("mov: expected `lhs,rhs`, got {operands:?}"))
     })?;
+    // Segment-override prefix on either operand (e.g.
+    // `mov word ptr ss:[si], 1234` or `mov ax, word ptr cs:[si]`).
+    // Strip the `<seg>:` qualifier, parse the rest as if there were
+    // no override, then wrap in `SegOverride`. The existing
+    // hardcoded `es:[bx]` shapes used by the far-pointer codegen
+    // stay on their own paths and don't hit this — we only fire
+    // when stripping the prefix produces a parse for the underlying
+    // shape. Fixtures 4063–4068.
+    if let Some((seg, stripped)) = strip_segment_override(lhs) {
+        let new_operands = format!("{stripped},{rhs}");
+        let inner = parse_mov(&new_operands, line_no)?;
+        return Ok(Instr::SegOverride { seg, inner: Box::new(inner) });
+    }
+    if let Some((seg, stripped)) = strip_segment_override(rhs) {
+        let new_operands = format!("{lhs},{stripped}");
+        let inner = parse_mov(&new_operands, line_no)?;
+        return Ok(Instr::SegOverride { seg, inner: Box::new(inner) });
+    }
     // Generic 16-bit reg-to-reg move (`mov bp,sp`, `mov sp,bp`,
     // `mov ax,dx`, `mov si,ax`, etc.). Tried before per-register
     // dispatch so it catches every reg-to-reg pair uniformly.
@@ -4224,6 +4242,37 @@ fn parse_jmp_cond(kw: &str, operands: &str, line_no: usize) -> AsmResult<Instr> 
 
 fn split_comma(s: &str) -> Option<(&str, &str)> {
     s.find(',').map(|i| (s[..i].trim(), s[i + 1..].trim()))
+}
+
+/// If `operand` contains a `<seg>:` segment-override prefix on its
+/// memory-operand part (e.g. `word ptr ss:[si]` or `byte ptr es:[bx]`),
+/// return the segment and the operand with the prefix removed. Used by
+/// `parse_mov` to wrap an otherwise-recognized instruction in
+/// `Instr::SegOverride`. The existing hardcoded `es:[bx]` shapes in
+/// the far-pointer codegen don't go through here — this fires only
+/// when removing the seg:`:` substring yields a parse the inner mov
+/// can handle. Fixtures 4063–4068.
+fn strip_segment_override(operand: &str) -> Option<(crate::ir::SegReg, String)> {
+    let operand = operand.trim();
+    for (kw, seg) in &[
+        ("ss:", crate::ir::SegReg::Ss),
+        ("es:", crate::ir::SegReg::Es),
+        ("cs:", crate::ir::SegReg::Cs),
+        ("ds:", crate::ir::SegReg::Ds),
+    ] {
+        if let Some(idx) = operand.find(kw) {
+            // Only strip when `<seg>:` is immediately followed by `[`
+            // (a memory operand). Avoids stripping `ss` that appears
+            // as a register name (e.g. `mov ds, ss`).
+            let after = &operand[idx + kw.len()..];
+            if !after.starts_with('[') {
+                continue;
+            }
+            let before = &operand[..idx];
+            return Some((*seg, format!("{before}{after}")));
+        }
+    }
+    None
 }
 
 /// Parse a decimal literal as an 8-bit value. None if the string

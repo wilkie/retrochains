@@ -424,7 +424,7 @@ impl Locals {
                 .find(|&i| {
                     matches!(
                         declared[i].ty,
-                        Type::Int | Type::UInt | Type::Pointer(_),
+                        Type::Int | Type::UInt | Type::Pointer(_) | Type::SegPointer { .. },
                     ) && !address_taken.contains(&declared[i].name)
                         && !declared[i].is_volatile
                         && (matches!(declared[i].kind, DeclKind::Param { .. })
@@ -467,7 +467,7 @@ impl Locals {
                     return false;
                 }
                 match &declared[i].ty {
-                    Type::Int | Type::UInt | Type::Pointer(_) => {
+                    Type::Int | Type::UInt | Type::Pointer(_) | Type::SegPointer { .. } => {
                         declared[i].is_register
                             || uses >= ENREGISTER_THRESHOLD
                             || leaf_param_subscript.contains(&i)
@@ -680,7 +680,7 @@ impl Locals {
         // CX with `int total, int i, struct P *pts`).
         let pointer_count = eligible_int
             .iter()
-            .filter(|&&i| matches!(declared[i].ty, Type::Pointer(_)))
+            .filter(|&&i| matches!(declared[i].ty, Type::Pointer(_) | Type::SegPointer { .. }))
             .count();
         let non_pointer_count = eligible_int.len() - pointer_count;
         let pointer_safe_regs: &[Reg] = if !function_makes_call && pointer_count == 1 {
@@ -703,7 +703,7 @@ impl Locals {
             if Some(i) == si_pick {
                 continue;
             }
-            let is_pointer = matches!(declared[i].ty, Type::Pointer(_));
+            let is_pointer = matches!(declared[i].ty, Type::Pointer(_) | Type::SegPointer { .. });
             let reg = if is_pointer {
                 let mut chosen = None;
                 while let Some(next) = non_si_iter.peek().copied() {
@@ -3113,7 +3113,7 @@ fn pick_si_loop_pointer(
     let mut qualifying: Vec<usize> = Vec::new();
     let mut pre_update: Vec<usize> = Vec::new();
     for &i in eligible {
-        if !matches!(declared[i].ty, Type::Pointer(_)) {
+        if !matches!(declared[i].ty, Type::Pointer(_) | Type::SegPointer { .. }) {
             continue;
         }
         let name = declared[i].name.as_str();
@@ -3138,7 +3138,7 @@ fn pick_si_loop_pointer(
     // keeps the higher-use int in SI (fixture 2027).
     let pointer_count = eligible
         .iter()
-        .filter(|&&i| matches!(declared[i].ty, Type::Pointer(_)))
+        .filter(|&&i| matches!(declared[i].ty, Type::Pointer(_) | Type::SegPointer { .. }))
         .count();
     if eligible.len() >= 3
         && pointer_count == 1

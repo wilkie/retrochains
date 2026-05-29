@@ -12728,6 +12728,37 @@ impl<'a> FunctionEmitter<'a> {
     ///   and index can be either register- or stack-resident; only
     ///   the all-stack form is captured today.
     fn emit_deref_to_ax(&mut self, ptr: &Expr) {
+        // `*p` where p is a seg-qualified pointer (`int _ss/_es/_cs/_ds *`).
+        // The qualifier becomes a TASM `<seg>:` operand prefix on the
+        // load. DS is the default segment and is elided. Fixtures
+        // 4064 (_ss), 4066 (_cs), 4067 (_ds, prefix elided).
+        if let ExprKind::Ident(p_name) = &ptr.kind
+            && self.locals.has(p_name)
+            && let p_ty = self.locals.type_of(p_name).clone()
+            && let Some(seg) = p_ty.seg_qualifier()
+            && let LocalLocation::Reg(reg) = self.locals.location_of(p_name)
+        {
+            let pointee = p_ty.pointee().expect("SegPointer has a pointee");
+            let reg_name = reg.name();
+            let seg_prefix = if matches!(seg, crate::ast::SegReg::Ds) {
+                String::new()
+            } else {
+                format!("{}:", seg.name())
+            };
+            if pointee.is_char_like() {
+                let _ = write!(
+                    self.out,
+                    "\tmov\tal,byte ptr {seg_prefix}[{reg_name}]\r\n",
+                );
+                self.emit_widen_al(pointee);
+            } else {
+                let _ = write!(
+                    self.out,
+                    "\tmov\tax,word ptr {seg_prefix}[{reg_name}]\r\n",
+                );
+            }
+            return;
+        }
         // `*(T *)<inner>` — pointer cast around the dereferenced
         // pointer. The cast determines the effective pointee width
         // (e.g. `*(char *)p` reads a byte even if `p` is `int *`).
@@ -18573,6 +18604,43 @@ impl<'a> FunctionEmitter<'a> {
     /// ```
     /// where SI holds the pointer.
     fn emit_deref_assign(&mut self, target: &Expr, value: &Expr) {
+        // `*<seg-qual-ptr> = v;` — write through a segment-qualified
+        // pointer. The qualifier becomes a TASM `<seg>:` operand
+        // prefix (DS elided as the default segment). Constant RHS
+        // folds to a single `mov <width> ptr <seg>:[<reg>], imm`;
+        // non-constant RHS evaluates to AX first then stores.
+        // Fixtures 4063 (_ss write), 4065 (_es write), 4068 (_ss
+        // write in large model — pointer stays near).
+        if let ExprKind::Ident(p_name) = &target.kind
+            && self.locals.has(p_name)
+            && let ty = self.locals.type_of(p_name).clone()
+            && let Some(seg) = ty.seg_qualifier()
+            && let LocalLocation::Reg(reg) = self.locals.location_of(p_name)
+        {
+            let pointee = ty.pointee().expect("SegPointer has a pointee");
+            let reg_name = reg.name();
+            let seg_prefix = if matches!(seg, crate::ast::SegReg::Ds) {
+                String::new()
+            } else {
+                format!("{}:", seg.name())
+            };
+            let width = ptr_width(pointee);
+            if let Some(v) = try_const_eval(value) {
+                let v_masked = if pointee.is_char_like() { v & 0xFF } else { v & 0xFFFF };
+                let _ = write!(
+                    self.out,
+                    "\tmov\t{width} ptr {seg_prefix}[{reg_name}],{v_masked}\r\n",
+                );
+                return;
+            }
+            self.emit_expr_to_ax(value);
+            let src = if pointee.is_char_like() { "al" } else { "ax" };
+            let _ = write!(
+                self.out,
+                "\tmov\t{width} ptr {seg_prefix}[{reg_name}],{src}\r\n",
+            );
+            return;
+        }
         // `*(<ptr> + K) = v;` — write through a pointer with a
         // constant offset. Folds to `mov <width> ptr [<reg>+K*stride],
         // <value>` (reg-resident) or loads p into BX first (stack-
