@@ -59,6 +59,9 @@ pub struct MainAst {
 #[derive(Debug, Clone)]
 pub enum Stmt {
     Return(Expr),
+    /// Empty statement (`;`). Carries no codegen. Used as the body
+    /// of an empty for-loop, fixture 4097.
+    Empty,
     If {
         cond: Cond,
         then_branch: Box<Stmt>,
@@ -66,6 +69,25 @@ pub enum Stmt {
     },
     While {
         cond: Cond,
+        body: Box<Stmt>,
+    },
+    /// `do <body> while (<cond>);` — body runs first, cond checked
+    /// after. MSC's peephole: when the body's last instruction
+    /// already sets ZF for the cond (e.g. body is `x = x - 1;` and
+    /// cond is `x`), MSC drops the explicit cmp and chains the jcc
+    /// off the body's flags. Fixture 4098.
+    DoWhile {
+        body: Box<Stmt>,
+        cond: Cond,
+    },
+    /// `for (<init>; <cond>; <step>) <body>;` — modeled as its own
+    /// variant rather than desugared to `init; while (cond) {
+    /// body; step; }` because MSC's emitted layout interleaves
+    /// step before body inside the loop section (fixture 4097).
+    For {
+        init: Box<Stmt>,
+        cond: Cond,
+        step: Box<Stmt>,
         body: Box<Stmt>,
     },
     Assign {
@@ -225,6 +247,8 @@ fn tokenize(source: &str) -> Result<Vec<Tok>, EmitError> {
                     "if" => Tok::Kw("if"),
                     "else" => Tok::Kw("else"),
                     "while" => Tok::Kw("while"),
+                    "do" => Tok::Kw("do"),
+                    "for" => Tok::Kw("for"),
                     _ => Tok::Ident(text.to_owned()),
                 };
                 toks.push(tok);
@@ -371,6 +395,34 @@ fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
             let body = Box::new(parse_stmt(p)?);
             Ok(Stmt::While { cond, body })
         }
+        Some(Tok::Kw("do")) => {
+            p.bump();
+            let body = Box::new(parse_stmt(p)?);
+            p.eat(&Tok::Kw("while"))?;
+            p.eat(&Tok::LParen)?;
+            let cond = parse_cond(p)?;
+            p.eat(&Tok::RParen)?;
+            p.eat(&Tok::Semi)?;
+            Ok(Stmt::DoWhile { body, cond })
+        }
+        Some(Tok::Kw("for")) => {
+            p.bump();
+            p.eat(&Tok::LParen)?;
+            // Init is an assignment expression-statement without a
+            // trailing semi (the semi is the for-syntax separator).
+            let init = Box::new(parse_assign_no_semi(p)?);
+            p.eat(&Tok::Semi)?;
+            let cond = parse_cond(p)?;
+            p.eat(&Tok::Semi)?;
+            let step = Box::new(parse_assign_no_semi(p)?);
+            p.eat(&Tok::RParen)?;
+            let body = Box::new(parse_stmt(p)?);
+            Ok(Stmt::For { init, cond, step, body })
+        }
+        Some(Tok::Semi) => {
+            p.bump();
+            Ok(Stmt::Empty)
+        }
         Some(Tok::Ident(_)) => {
             // Assignment statement `<local> = <expr>;`.
             let name = match p.bump().cloned() {
@@ -392,6 +444,28 @@ fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
             "statement starting with {other:?} not yet supported"
         ))),
     }
+}
+
+/// Parse `<local> = <expr>` (no trailing `;`) — used inside
+/// for-clauses where the semis are the for-syntax separators, not
+/// statement terminators.
+fn parse_assign_no_semi(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
+    let name = match p.bump().cloned() {
+        Some(Tok::Ident(s)) => s,
+        other => {
+            return Err(EmitError::Unsupported(format!(
+                "expected identifier in assignment, got {other:?}"
+            )));
+        }
+    };
+    let local_idx = p
+        .local_names
+        .iter()
+        .position(|n| *n == name)
+        .ok_or_else(|| EmitError::Unsupported(format!("unknown local `{name}` in for-clause")))?;
+    p.eat(&Tok::Assign)?;
+    let value = parse_expr(p)?;
+    Ok(Stmt::Assign { local_idx, value })
 }
 
 fn parse_cond(p: &mut Parser<'_>) -> Result<Cond, EmitError> {
@@ -740,8 +814,13 @@ fn main_body_for(ast: &MainAst) -> Vec<u8> {
 fn emit_stmt(stmt: &Stmt, locals: &[Option<i32>], has_frame: bool, out: &mut Vec<u8>) {
     match stmt {
         Stmt::Return(expr) => emit_return(expr, locals, has_frame, out),
+        Stmt::Empty => {}
         Stmt::Assign { local_idx, value } => emit_assign(*local_idx, value, locals, out),
         Stmt::While { cond, body } => emit_while(cond, body, locals, has_frame, out),
+        Stmt::DoWhile { body, cond } => emit_do_while(body, cond, locals, has_frame, out),
+        Stmt::For { init, cond, step, body } => {
+            emit_for(init, cond, step, body, locals, has_frame, out);
+        }
         Stmt::If { cond, then_branch, else_branch } => {
             // Constant-condition elision: when the cond folds to a
             // compile-time integer, MSC keeps only the live branch
@@ -782,13 +861,12 @@ fn emit_stmt(stmt: &Stmt, locals: &[Option<i32>], has_frame: bool, out: &mut Vec
 fn stmt_always_returns(stmt: &Stmt, locals: &[Option<i32>]) -> bool {
     match stmt {
         Stmt::Return(_) => true,
-        // Assignment falls through to the next statement.
+        Stmt::Empty => false,
         Stmt::Assign { .. } => false,
-        // A `while` loop with a runtime cond can fall through;
-        // const-true `while (1)` with no break never returns but
-        // also never falls through. Phase 1 fixtures don't exercise
-        // the infinite-loop case so we conservatively answer false.
-        Stmt::While { .. } => false,
+        // Loops with a runtime cond can fall through; the
+        // const-true infinite-loop case isn't exercised yet so we
+        // conservatively answer false.
+        Stmt::While { .. } | Stmt::DoWhile { .. } | Stmt::For { .. } => false,
         Stmt::If { cond, then_branch, else_branch } => {
             if let Some(k) = fold_cond(cond, locals) {
                 if k != 0 {
@@ -898,59 +976,166 @@ fn emit_assign(local_idx: usize, value: &Expr, locals: &[Option<i32>], out: &mut
     }
 }
 
-/// `while (<cond>) <body>` lowers to a test-first shape: jump to
-/// the cond, run the body, fall into the cond, jcc back to the
-/// body. MSC pads with a NOP after the initial forward jmp —
-/// fixture 4096 shows the byte sequence:
+/// `while (<cond>) <body>` lowers to a test-first shape with the
+/// initial jmp landing on the cond, the body and cmp run inline,
+/// and a backward jcc closing the loop. MSC aligns the loop-top
+/// to an even byte offset — if the position right after the
+/// 2-byte forward jmp would be odd, MSC inserts a single NOP pad
+/// (fixture 4096); when prior bytes already leave us even, the
+/// nop is dropped (fixture 4097's for-loop shows the same rule).
+///
 /// ```text
-/// eb <body+nop>       jmp short to cond
-/// 90                  nop
+/// eb <body[+pad]>     jmp short to cond
+/// [90]                nop pad iff next byte would be at odd offset
 /// <body>              loop body
-/// <cond>              cmp + setup
-/// <jcc> <-back>       jne / je back to body
+/// <cmp>               cond comparison
+/// <jcc> <-back>       jne/je back to body start
 /// ```
-/// Only `cmp <local>, <imm-fits-in-i8sx>` cond shapes are exercised;
-/// other cond shapes will need their own fixture before landing.
-fn emit_while(cond: &Cond, body_stmt: &Stmt, locals: &[Option<i32>], has_frame: bool, out: &mut Vec<u8>) {
-    // Build the body and cond bytes into scratch buffers first so we
-    // know their lengths for the two displacement-bearing jumps.
+fn emit_while(
+    cond: &Cond,
+    body_stmt: &Stmt,
+    locals: &[Option<i32>],
+    has_frame: bool,
+    out: &mut Vec<u8>,
+) {
+    emit_loop(cond, &[body_stmt], locals, has_frame, out);
+}
+
+/// `for (<init>; <cond>; <step>) <body>` — MSC's layout (fixture
+/// 4097):
+/// ```text
+/// <init>              init expression-statement
+/// eb <step+body[+pad]>  jmp short to cond
+/// [90]                nop pad iff alignment requires
+/// <step>              step expression (interleaved BEFORE body in loop)
+/// <body>              loop body
+/// <cmp>               cond comparison
+/// <jcc> <-back>       jne/je back to step start
+/// ```
+/// The "step before body" arrangement makes the initial jmp skip
+/// the step on the first iteration only; later iterations execute
+/// step, then fall into body, then cond. Same alignment rule as
+/// `while` for the post-jmp pad.
+fn emit_for(
+    init: &Stmt,
+    cond: &Cond,
+    step: &Stmt,
+    body_stmt: &Stmt,
+    locals: &[Option<i32>],
+    has_frame: bool,
+    out: &mut Vec<u8>,
+) {
+    emit_stmt(init, locals, has_frame, out);
+    // The looped section is `step; body;` — treated as a single
+    // "loop body" for the shared shape helper.
+    emit_loop(cond, &[step, body_stmt], locals, has_frame, out);
+}
+
+/// Shared loop emitter — handles the alignment-pad, body
+/// concatenation, cmp+jcc tail, and backward-jcc displacement.
+/// Both while-loops (single-body) and for-loops (step+body) route
+/// through here.
+fn emit_loop(
+    cond: &Cond,
+    body_segments: &[&Stmt],
+    locals: &[Option<i32>],
+    has_frame: bool,
+    out: &mut Vec<u8>,
+) {
     let mut body_buf = Vec::new();
-    emit_stmt(body_stmt, locals, has_frame, &mut body_buf);
-    // The "cond" emit is the compare half of the cond shape, leaving
-    // flags set for a paired jcc. We emit the cmp manually here
-    // because `emit_cond_skip` couples the cmp with the skip jump.
+    for seg in body_segments {
+        emit_stmt(seg, locals, has_frame, &mut body_buf);
+    }
     let mut cmp_buf = Vec::new();
     emit_cond_cmp(cond, &mut cmp_buf);
+
+    // Alignment: position right after the 2-byte `eb XX` should be
+    // even. If it would be odd, insert a NOP pad and bump the
+    // forward jmp displacement by 1.
+    let pos_after_jmp = out.len() + 2;
+    let needs_pad = pos_after_jmp % 2 != 0;
+    let pad = if needs_pad { 1 } else { 0 };
+
     let take_when_true = matches!(
         cond,
-        Cond::Truthy(_)
-            | Cond::Cmp { op: RelOp::Ne, .. }
+        Cond::Truthy(_) | Cond::Cmp { op: RelOp::Ne, .. }
     );
-    let jcc_opcode = if take_when_true {
-        // jne (75) → "continue when not zero / not equal"
-        0x75
-    } else {
-        // je (74) → "continue when equal" (cond was ==)
-        0x74
-    };
-    // Layout sizes:
-    //   jmp_forward (2) + nop (1) + body + cmp + jcc_back (2)
+    let jcc_opcode = if take_when_true { 0x75 } else { 0x74 };
+
     let body_len = body_buf.len();
     let cmp_len = cmp_buf.len();
-    let forward_disp = i8::try_from(body_len + 1)
+    let forward_disp = i8::try_from(body_len + pad)
         .expect("body+pad short enough for jmp rel8");
     out.push(0xEB);
     out.push(forward_disp as u8);
-    out.push(0x90);                           // nop pad
+    if needs_pad {
+        out.push(0x90);
+    }
     out.extend_from_slice(&body_buf);
     out.extend_from_slice(&cmp_buf);
-    // Backward jcc displacement: distance from the byte after this
-    // jcc back to the first body byte. The jcc rel8 instruction is
-    // 2 bytes; "back to body start" = -(cmp_len + 2 + body_len).
     let back_disp = -(i8::try_from(cmp_len + 2 + body_len)
         .expect("loop body+cmp short enough for jcc rel8"));
     out.push(jcc_opcode);
     out.push(back_disp as u8);
+}
+
+/// `do <body> while (<cond>);` (fixture 4098). When the body's last
+/// instruction already sets ZF for the cond, MSC drops the explicit
+/// cmp and chains the jcc directly off the body's flags. Today we
+/// detect this peephole specifically for the
+/// `do <local> = <local> ± 1; while (<same-local>);` shape — the
+/// only shape any fixture exercises.
+///
+/// ```text
+/// <body>              body (sets ZF if peephole applies)
+/// [<cmp>]             cmp only when peephole doesn't apply
+/// <jcc> <-back>       jne/je back to body
+/// ```
+fn emit_do_while(
+    body_stmt: &Stmt,
+    cond: &Cond,
+    locals: &[Option<i32>],
+    has_frame: bool,
+    out: &mut Vec<u8>,
+) {
+    let mut body_buf = Vec::new();
+    emit_stmt(body_stmt, locals, has_frame, &mut body_buf);
+    let body_len = body_buf.len();
+    let elide_cmp = body_sets_flags_for_cond(body_stmt, cond);
+    let mut cmp_buf = Vec::new();
+    if !elide_cmp {
+        emit_cond_cmp(cond, &mut cmp_buf);
+    }
+    let cmp_len = cmp_buf.len();
+    let take_when_true = matches!(
+        cond,
+        Cond::Truthy(_) | Cond::Cmp { op: RelOp::Ne, .. }
+    );
+    let jcc_opcode = if take_when_true { 0x75 } else { 0x74 };
+    out.extend_from_slice(&body_buf);
+    out.extend_from_slice(&cmp_buf);
+    let back_disp = -(i8::try_from(cmp_len + 2 + body_len)
+        .expect("loop body+cmp short enough for jcc rel8"));
+    out.push(jcc_opcode);
+    out.push(back_disp as u8);
+}
+
+/// True when the body's last operation sets ZF appropriately for
+/// the cond, so MSC can omit the explicit cmp in a `do-while` loop.
+/// Current trigger: `<local> = <local> ± 1;` paired with
+/// `while (<same-local>);`. Fixture 4098.
+fn body_sets_flags_for_cond(body: &Stmt, cond: &Cond) -> bool {
+    let Stmt::Assign { local_idx, value } = body else { return false };
+    let Cond::Truthy(Expr::Local(cond_idx)) = cond else { return false };
+    if local_idx != cond_idx {
+        return false;
+    }
+    let Expr::BinOp { op, left, right } = value else { return false };
+    if !matches!(op, BinOp::Add | BinOp::Sub) {
+        return false;
+    }
+    matches!(left.as_ref(), Expr::Local(li) if li == local_idx)
+        && matches!(right.as_ref(), Expr::IntLit(1))
 }
 
 /// Just the cmp half of a cond — used by `emit_while` which pairs
