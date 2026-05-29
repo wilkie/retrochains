@@ -2921,8 +2921,10 @@ fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
             // after `(` and treat the cast as identity (Phase 1
             // doesn't model signedness or narrowing semantics).
             skip_decl_modifiers(p);
-            if matches!(p.peek(), Some(Tok::Kw("int")) | Some(Tok::Kw("char"))) {
+            if matches!(p.peek(), Some(Tok::Kw("int")) | Some(Tok::Kw("char")) | Some(Tok::Kw("long"))) {
                 p.bump();
+                // Accept `long int` and skip trailing modifiers.
+                while matches!(p.peek(), Some(Tok::Kw("int"))) { p.bump(); }
                 while matches!(p.peek(), Some(Tok::Star)) { p.bump(); }
                 p.eat(&Tok::RParen)?;
                 return parse_atom(p);
