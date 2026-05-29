@@ -6448,7 +6448,7 @@ fn emit_binop(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, out: &m
     // the right side in. Covers DerefWord, DerefByte, Call, Ternary,
     // and other compound left operands.
     if matches!(left, Expr::DerefWord { .. } | Expr::DerefByte { .. }
-                    | Expr::Call { .. } | Expr::Ternary { .. }
+                    | Expr::Call { .. } | Expr::Ternary { .. } | Expr::Seq { .. }
                     | Expr::GlobalField { .. } | Expr::LocalField { .. }
                     | Expr::DerefLocalField { .. } | Expr::DerefParamField { .. })
     {
