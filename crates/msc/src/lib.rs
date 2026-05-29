@@ -194,6 +194,10 @@ pub enum Stmt {
         target: AssignTarget,
         value: Expr,
     },
+    /// `{ <stmt>* }` — sequence of statements with no scoping
+    /// effects of its own. Used as the body of if / loops when the
+    /// source uses braces.
+    Block(Vec<Stmt>),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1079,6 +1083,18 @@ fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
         Some(Tok::Semi) => {
             p.bump();
             Ok(Stmt::Empty)
+        }
+        Some(Tok::LBrace) => {
+            // Block statement: `{ <stmt>* }`. Lowered as a Block
+            // variant so caller (if/while/etc.) can treat it as one
+            // statement.
+            p.bump();
+            let mut stmts = Vec::new();
+            while !matches!(p.peek(), Some(Tok::RBrace)) {
+                stmts.push(parse_stmt(p)?);
+            }
+            p.eat(&Tok::RBrace)?;
+            Ok(Stmt::Block(stmts))
         }
         Some(Tok::Star) => {
             // `*<ident> = <expr>;` — store through a pointer.
@@ -2317,6 +2333,19 @@ fn emit_stmt(
             panic!("ExprStmt with non-call expression not yet supported: {other:?}");
         }
         Stmt::Assign { target, value } => emit_assign(*target, value, locals, out, fixups),
+        Stmt::Block(stmts) => {
+            // Block has no scoping at the codegen level. Sub-statements
+            // emit inline. Const-prop's already been applied at the
+            // function level before we got here.
+            let mut reachable = true;
+            for s in stmts {
+                if !reachable { break; }
+                emit_stmt(s, locals, frame, return_int, out, fixups);
+                if stmt_always_returns(s, locals) {
+                    reachable = false;
+                }
+            }
+        }
         Stmt::While { cond, body } => {
             emit_while(cond, body, locals, frame, return_int, out, fixups);
         }
@@ -2377,6 +2406,7 @@ fn stmt_always_returns(stmt: &Stmt, locals: &[Option<i32>]) -> bool {
         // const-true infinite-loop case isn't exercised yet so we
         // conservatively answer false.
         Stmt::While { .. } | Stmt::DoWhile { .. } | Stmt::For { .. } => false,
+        Stmt::Block(stmts) => stmts.iter().any(|s| stmt_always_returns(s, locals)),
         Stmt::If { cond, then_branch, else_branch } => {
             if let Some(k) = fold_cond(cond, locals) {
                 if k != 0 {
