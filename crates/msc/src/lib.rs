@@ -831,7 +831,7 @@ fn parse_unit(source: &str) -> Result<Unit, EmitError> {
         let is_type_prefix = matches!(
             p.toks.get(k),
             Some(Tok::Kw("int")) | Some(Tok::Kw("char"))
-        );
+        ) || (k > p.pos && matches!(p.toks.get(k), Some(Tok::Ident(_))));
         if is_type_prefix {
             // Walk past the type kw + optional `*` to look at the
             // declarator's first token after the name.
@@ -874,10 +874,9 @@ fn parse_unit(source: &str) -> Result<Unit, EmitError> {
 fn parse_global_decl(p: &mut Parser<'_>) -> Result<(), EmitError> {
     // Skip any leading storage/qualifier modifiers (unsigned, static,
     // ...) — we treat them all as no-ops at the codegen level.
-    skip_decl_modifiers(p);
+    let mods_consumed = skip_decl_modifiers(p);
     // Type prefix. Phase 1 globals: `int [*]`, `char *`, `char [N]`.
-    // `is_pointer` is true for any 2-byte pointer form. `is_char` is
-    // true for `char <name>[N]` (1-byte slots, fixture 4117).
+    // Bare `unsigned x;` (no following int/char) implies int.
     let mut is_pointer = false;
     let mut is_char = false;
     match p.peek() {
@@ -896,6 +895,8 @@ fn parse_global_decl(p: &mut Parser<'_>) -> Result<(), EmitError> {
                 is_pointer = true;
             }
         }
+        // Bare modifier (`unsigned x;`) → implicit int.
+        Some(Tok::Ident(_)) if mods_consumed > 0 => {}
         other => {
             return Err(EmitError::Unsupported(format!(
                 "expected `int`, `int *`, `char *`, or `char [...]` for global, got {other:?}"
@@ -1084,8 +1085,11 @@ fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> {
     let mut locals: Vec<LocalSpec> = Vec::new();
     let mut prelude: Vec<Stmt> = Vec::new();
     loop {
-        // Peek across leading modifier keywords to find the base type.
+        // Peek across leading modifier keywords. The decl is a local
+        // when the next token is int/char OR when *any* modifier was
+        // present (bare `unsigned x;` means `unsigned int x;`).
         let mut peek_pos = p.pos;
+        let start_pos = peek_pos;
         while matches!(
             p.toks.get(peek_pos),
             Some(Tok::Kw("unsigned")) | Some(Tok::Kw("signed"))
@@ -1096,13 +1100,21 @@ fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> {
         ) {
             peek_pos += 1;
         }
-        let size = match p.toks.get(peek_pos) {
-            Some(Tok::Kw("int")) => 2usize,
-            Some(Tok::Kw("char")) => 1usize,
+        let (size, has_explicit_type) = match p.toks.get(peek_pos) {
+            Some(Tok::Kw("int")) => (2usize, true),
+            Some(Tok::Kw("char")) => (1usize, true),
+            // `unsigned x;` / `signed x;` → implicit int.
+            _ if peek_pos > start_pos
+                && matches!(p.toks.get(peek_pos), Some(Tok::Ident(_))) =>
+            {
+                (2usize, false)
+            }
             _ => break,
         };
         skip_decl_modifiers(p);
-        p.bump(); // type kw
+        if has_explicit_type {
+            p.bump(); // type kw
+        }
         loop {
             let lname = match p.bump().cloned() {
                 Some(Tok::Ident(s)) => s,
@@ -1419,6 +1431,13 @@ fn parse_compound_rhs(p: &mut Parser<'_>, target: &AssignTarget) -> Result<Optio
         Some(Tok::PlusEq) => { p.bump(); BinOp::Add }
         Some(Tok::MinusEq) => { p.bump(); BinOp::Sub }
         Some(Tok::StarEq) => { p.bump(); BinOp::Mul }
+        Some(Tok::SlashEq) => { p.bump(); BinOp::Div }
+        Some(Tok::PercentEq) => { p.bump(); BinOp::Mod }
+        Some(Tok::AndEq) => { p.bump(); BinOp::BitAnd }
+        Some(Tok::PipeEq) => { p.bump(); BinOp::BitOr }
+        Some(Tok::CaretEq) => { p.bump(); BinOp::BitXor }
+        Some(Tok::ShlEq) => { p.bump(); BinOp::Shl }
+        Some(Tok::ShrEq) => { p.bump(); BinOp::Shr }
         _ => return Ok(None),
     };
     let rhs = match op {
