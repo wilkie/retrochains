@@ -292,6 +292,9 @@ pub enum Expr {
     /// expression. Lowers to `b8 imm16` with a FIXUP on the imm16
     /// targeting the global. Fixture 4125 (passed as an argument).
     AddrOfGlobal(usize),
+    /// `&<local>` — address-of a stack local. Lowers to
+    /// `lea ax, [bp-disp]` (`8d 46 disp`).
+    AddrOfLocal(usize),
     /// `*<ptr>` — byte-sized pointer dereference (`char *`). Lowers
     /// to `mov bx, <ptr>; mov al, [bx]; cbw`. Fixture 4111.
     DerefByte { ptr: Box<Expr> },
@@ -365,7 +368,7 @@ impl Expr {
             Expr::Global(_) => None,
             Expr::Index { .. } | Expr::IndexByte { .. } | Expr::PtrIndexByte { .. } => None,
             Expr::DerefByte { .. } | Expr::DerefWord { .. } => None,
-            Expr::AddrOfGlobal(_) => None,
+            Expr::AddrOfGlobal(_) | Expr::AddrOfLocal(_) => None,
         }
     }
 }
@@ -1669,7 +1672,8 @@ fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
             }
         }
         Some(Tok::Amp) => {
-            // Address-of `&<ident>`. Phase 1 supports `&<global>`.
+            // Address-of `&<ident>`. Phase 1 supports globals and
+            // locals; locals lower to `lea ax, [bp-disp]`.
             let name = match p.bump().cloned() {
                 Some(Tok::Ident(s)) => s,
                 other => {
@@ -1678,9 +1682,12 @@ fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                     )));
                 }
             };
+            if let Some(idx) = p.local_names.iter().position(|n| *n == name) {
+                return Ok(Expr::AddrOfLocal(idx));
+            }
             let idx = p.global_names.iter().position(|n| *n == name)
                 .ok_or_else(|| EmitError::Unsupported(format!(
-                    "address-of unknown global `{name}`"
+                    "address-of unknown identifier `{name}`"
                 )))?;
             Ok(Expr::AddrOfGlobal(idx))
         }
@@ -2602,7 +2609,7 @@ fn prop_expr(e: &mut Expr, cp: &ConstProp) {
         Expr::DerefByte { ptr } | Expr::DerefWord { ptr } => {
             prop_expr(ptr, cp);
         }
-        Expr::AddrOfGlobal(_) => {}
+        Expr::AddrOfGlobal(_) | Expr::AddrOfLocal(_) => {}
         Expr::IntLit(_) | Expr::Param(_) | Expr::StrLit(_) => {}
     }
 }
@@ -3671,6 +3678,11 @@ fn emit_expr_to_ax(expr: &Expr, locals: &[Option<i32>], out: &mut Vec<u8>, fixup
                 kind: FixupKind::GlobalAddr { global_idx: *idx },
             });
         }
+        Expr::AddrOfLocal(idx) => {
+            // `lea ax, [bp - 2*(idx+1)]` = `8d 46 disp`.
+            let disp = -(i16::try_from(idx + 1).expect("local idx") * 2);
+            out.extend_from_slice(&[0x8D, 0x46, disp as u8]);
+        }
     }
 }
 
@@ -3849,13 +3861,22 @@ fn emit_imm_op(op: BinOp, k: i32, out: &mut Vec<u8>) {
 /// Works for both negative disps (locals) and positive disps
 /// (params); fixture 4102 uses param shape.
 fn emit_mem_op_at(op: BinOp, disp: i16, out: &mut Vec<u8>) {
+    let disp8 = i8::try_from(disp).expect("disp fits in i8");
+    if matches!(op, BinOp::Mul) {
+        // `imul word ptr [bp+disp8]` — `F7 /5 r/m`.
+        out.push(0xF7);
+        out.push(0x6E);  // mod=01 reg=101 (/5=IMUL) r/m=110 (BP-rel)
+        out.push(disp8 as u8);
+        return;
+    }
     let opcode = match op {
         BinOp::Add => 0x03,
         BinOp::Sub => 0x2B,
-        BinOp::Mul => panic!("memory-source mul not yet covered by a fixture"),
+        BinOp::BitAnd => 0x23,
+        BinOp::BitOr => 0x0B,
+        BinOp::BitXor => 0x33,
         _ => panic!("memory-source {op:?} not yet covered by a fixture"),
     };
-    let disp8 = i8::try_from(disp).expect("disp fits in i8");
     out.push(opcode);
     out.push(0x46);  // ModR/M: mod=01 (disp8), reg=000 (AX), r/m=110 (BP-rel)
     out.push(disp8 as u8);
