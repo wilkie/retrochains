@@ -1,0 +1,4 @@
+description = "return g + 1; — arithmetic on a global. Probes whether MSC const-folds (g is init to 10) or emits a runtime load+add."
+tool = "cl"
+args = ["/c", "/AS", "HELLO.C"]
+inputs = ["HELLO.C"]

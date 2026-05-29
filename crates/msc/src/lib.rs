@@ -1688,13 +1688,30 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
         }
     }
 
-    // LEDATA — CONST segment. MSC emits one LEDATA per string at
-    // its 2-aligned offset (fixture 4113). The intervening pad byte
-    // gets zero-filled by the linker.
-    for (i, s) in unit.strings.iter().enumerate() {
-        let off = u16::try_from(string_offsets[i])
-            .expect("string offset fits in u16");
-        b.write_ledata16(3, off, s);
+    // LEDATA — CONST segment. MSC packs consecutive strings into
+    // one LEDATA when no padding is needed. When an odd-length
+    // string forces a 1-byte pad before the next string, MSC closes
+    // the current LEDATA and opens a new one at the aligned offset.
+    // Fixtures: 4110 (1 string), 4128 (2 even-length → 1 LEDATA),
+    // 4113 (2 odd-length → 2 LEDATAs with a gap), 4132 (mixed).
+    if !unit.strings.is_empty() {
+        let mut current_start = string_offsets[0];
+        let mut current_bytes: Vec<u8> = Vec::new();
+        for (i, s) in unit.strings.iter().enumerate() {
+            current_bytes.extend_from_slice(s);
+            let next_aligned = i + 1 < unit.strings.len()
+                && (string_offsets[i] + s.len()) != string_offsets[i + 1];
+            if next_aligned {
+                let off = u16::try_from(current_start).expect("CONST offset fits");
+                b.write_ledata16(3, off, &current_bytes);
+                current_bytes.clear();
+                current_start = string_offsets[i + 1];
+            }
+        }
+        if !current_bytes.is_empty() {
+            let off = u16::try_from(current_start).expect("CONST offset fits");
+            b.write_ledata16(3, off, &current_bytes);
+        }
     }
 
     // LEDATA — _DATA segment, initialized global values. MSC packs
@@ -2668,15 +2685,20 @@ fn emit_cond_skip(cond: &Cond, take_then_disp: i8, out: &mut Vec<u8>, fixups: &m
         Cond::Truthy(Expr::Global(idx)) => {
             // `if (<global>)` → `cmp word ptr [<addr>], 0; je skip`
             // with a GlobalAddr FIXUP on the addr. Fixture 4129.
-            out.push(0x83);
-            out.push(0x3E);  // ModR/M: mod=00 reg=111(/7=CMP) r/m=110(disp16)
-            let body_offset = out.len();
-            out.extend_from_slice(&[0x00, 0x00, 0x00]); // addr LO HI imm8
-            fixups.push(Fixup {
-                body_offset: body_offset - 1,
-                kind: FixupKind::GlobalAddr { global_idx: *idx },
-            });
+            emit_cmp_global_imm(*idx, 0, out, fixups);
             out.push(0x74);
+            out.push(take_then_disp as u8);
+        }
+        Cond::Cmp { op, left: Expr::Global(idx), right: Expr::IntLit(k) }
+        | Cond::Cmp { op, left: Expr::IntLit(k), right: Expr::Global(idx) } => {
+            // `if (<global> ==/!= K)` → cmp word ptr [<addr>], K;
+            // jne/je skip. Fixture 4133.
+            emit_cmp_global_imm(*idx, *k, out, fixups);
+            let opcode = match op {
+                RelOp::Eq => 0x75,  // jne skip on equality match → fall into then
+                RelOp::Ne => 0x74,  // je skip on inequality match → fall into then
+            };
+            out.push(opcode);
             out.push(take_then_disp as u8);
         }
         Cond::Cmp { op: RelOp::Eq, left: Expr::Local(idx), right: Expr::IntLit(k) }
@@ -2694,6 +2716,21 @@ fn emit_cond_skip(cond: &Cond, take_then_disp: i8, out: &mut Vec<u8>, fixups: &m
         }
         other => panic!("Slice 5 cond shape not yet supported: {other:?}"),
     }
+}
+
+/// `cmp word ptr [<global-addr>], imm8` — MSC picks the `83 3e disp imm8`
+/// form for global compares against a sign-extended byte (fixtures
+/// 4129, 4133). The placeholder address gets a GlobalAddr FIXUP.
+fn emit_cmp_global_imm(global_idx: usize, k: i32, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    let k_i8 = i8::try_from(k).expect("global cmp imm fits in i8");
+    out.push(0x83);
+    out.push(0x3E);
+    let body_offset = out.len();
+    out.extend_from_slice(&[0x00, 0x00, k_i8 as u8]);
+    fixups.push(Fixup {
+        body_offset: body_offset - 1,
+        kind: FixupKind::GlobalAddr { global_idx },
+    });
 }
 
 /// `cmp word ptr [bp-disp], imm` — MSC picks the `83 /7 r/m imm8sx`
@@ -2738,7 +2775,7 @@ fn emit_expr_to_ax(expr: &Expr, locals: &[Option<i32>], out: &mut Vec<u8>, fixup
             emit_load_param(*i, out);
         }
         Expr::BinOp { op, left, right } => {
-            emit_binop(*op, left, right, locals, out);
+            emit_binop(*op, left, right, locals, out, fixups);
         }
         Expr::Call { name, .. } => {
             panic!("Call to `{name}` inside a non-return expression context not yet supported");
@@ -2916,7 +2953,7 @@ fn emit_load_local(idx: usize, out: &mut Vec<u8>) {
     out.push(disp as u8);
 }
 
-fn emit_binop(op: BinOp, left: &Expr, right: &Expr, locals: &[Option<i32>], out: &mut Vec<u8>) {
+fn emit_binop(op: BinOp, left: &Expr, right: &Expr, locals: &[Option<i32>], out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
     // Left as a BP-rel operand we can load into AX.
     if let Some(load) = bp_load(left) {
         load(out);
@@ -2931,14 +2968,27 @@ fn emit_binop(op: BinOp, left: &Expr, right: &Expr, locals: &[Option<i32>], out:
             return;
         }
     }
+    // Left as a global → `mov ax, [g]; op ax, imm`. Fixture 4135.
+    if let Expr::Global(idx) = left {
+        let body_offset = out.len();
+        out.extend_from_slice(&[0xA1, 0x00, 0x00]);
+        fixups.push(Fixup {
+            body_offset,
+            kind: FixupKind::GlobalAddr { global_idx: *idx },
+        });
+        if let Expr::IntLit(k) = right {
+            emit_imm_op(op, *k, out);
+            return;
+        }
+    }
     // Foldable side — recurse with the folded literal substituted.
     // Lets `(2 + x)` collapse to `(<lit> + <local>)` etc.
     if let Some(k) = left.fold(locals) {
-        emit_binop(op, &Expr::IntLit(k), right, locals, out);
+        emit_binop(op, &Expr::IntLit(k), right, locals, out, fixups);
         return;
     }
     if let Some(k) = right.fold(locals) {
-        emit_binop(op, left, &Expr::IntLit(k), locals, out);
+        emit_binop(op, left, &Expr::IntLit(k), locals, out, fixups);
         return;
     }
     panic!("binop shape not yet supported: {op:?} of {left:?}, {right:?}");
