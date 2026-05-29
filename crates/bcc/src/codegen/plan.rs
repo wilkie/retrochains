@@ -629,6 +629,7 @@ fn plan_expr_value(e: &Expr, ctx: &mut PlanCtx) {
         | ExprKind::FloatLit(_)
         | ExprKind::DoubleLit(_)
         | ExprKind::Ident(_)
+        | ExprKind::PseudoReg(_)
         | ExprKind::Update { .. }
         | ExprKind::AddressOf(_)
         | ExprKind::AddressOfArrayElem { .. } | ExprKind::AddressOfArrayElemVar { .. }

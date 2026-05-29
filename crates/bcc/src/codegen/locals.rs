@@ -1371,6 +1371,7 @@ fn expr_address_taken(e: &Expr, out: &mut HashSet<String>) {
         | ExprKind::FloatLit(_)
         | ExprKind::DoubleLit(_)
         | ExprKind::Ident(_)
+        | ExprKind::PseudoReg(_)
         | ExprKind::Update { .. }
         | ExprKind::StringLit(_) => {}
     }
@@ -1729,6 +1730,7 @@ pub(super) fn expr_has_call(e: &Expr) -> bool {
         ExprKind::UpdateLvalue { target, .. } => expr_has_call(target),
         ExprKind::Update { .. }
         | ExprKind::Ident(_)
+        | ExprKind::PseudoReg(_)
         | ExprKind::IntLit(_)
         | ExprKind::FloatLit(_)
         | ExprKind::DoubleLit(_)
@@ -1894,6 +1896,7 @@ fn expr_has_div_or_mod(e: &Expr) -> bool {
         ExprKind::UpdateLvalue { target, .. } => expr_has_div_or_mod(target),
         ExprKind::Update { .. }
         | ExprKind::Ident(_)
+        | ExprKind::PseudoReg(_)
         | ExprKind::IntLit(_)
         | ExprKind::FloatLit(_)
         | ExprKind::DoubleLit(_)
@@ -1965,7 +1968,8 @@ fn expr_mentions(name: &str, e: &Expr) -> bool {
         ExprKind::IntLit(_)
         | ExprKind::FloatLit(_)
         | ExprKind::DoubleLit(_)
-        | ExprKind::StringLit(_) => false,
+        | ExprKind::StringLit(_)
+        | ExprKind::PseudoReg(_) => false,
     }
 }
 
@@ -2825,6 +2829,7 @@ fn expr_has_2d_array_index(e: &Expr) -> bool {
         }
         ExprKind::UpdateLvalue { target, .. } => expr_has_2d_array_index(target),
         ExprKind::Ident(_)
+        | ExprKind::PseudoReg(_)
         | ExprKind::IntLit(_)
         | ExprKind::FloatLit(_)
         | ExprKind::DoubleLit(_)
@@ -2972,6 +2977,7 @@ fn expr_emits_imul(e: &Expr) -> bool {
         ExprKind::UpdateLvalue { target, .. } => expr_emits_imul(target),
         ExprKind::Update { .. }
         | ExprKind::Ident(_)
+        | ExprKind::PseudoReg(_)
         | ExprKind::IntLit(_)
         | ExprKind::FloatLit(_)
         | ExprKind::DoubleLit(_)
@@ -3782,6 +3788,7 @@ fn count_uses_expr(e: &Expr, counts: &mut HashMap<String, u32>) {
             count_uses_expr(index, counts);
         }
         ExprKind::StringLit(_) => {}
+        ExprKind::PseudoReg(_) => {}
         ExprKind::IntLit(_) | ExprKind::FloatLit(_) | ExprKind::DoubleLit(_) => {}
         ExprKind::Member { base, kind, .. } => {
             // `p->x` direct-derefs the pointer; `a.x` is just an

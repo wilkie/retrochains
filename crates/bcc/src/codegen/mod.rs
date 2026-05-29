@@ -21934,6 +21934,21 @@ impl<'a> FunctionEmitter<'a> {
         }
         match &e.kind {
             ExprKind::IntLit(_) => unreachable!("literals fold via try_const_eval"),
+            ExprKind::PseudoReg(name) => {
+                // Pseudo-register read in expression position. `_AX`
+                // is the live AX (no-op load). Word pseudos copy via
+                // `mov ax, <reg>`. Byte pseudos and `_FLAGS` need
+                // width-widening / pushf paths — separate slices.
+                if name == "_AX" {
+                    return;
+                }
+                if is_byte_pseudo_register(name) {
+                    panic!("byte pseudo-register `{name}` read in int context not yet supported");
+                }
+                let reg = pseudo_register_operand(name)
+                    .expect("PseudoReg variant carries a valid pseudo name");
+                let _ = write!(self.out, "\tmov\tax,{reg}\r\n");
+            }
             ExprKind::FloatLit(_) | ExprKind::DoubleLit(_) => {
                 // Float/double rvalue at this site means the constant
                 // is being consumed as an integer-AX value, which the
@@ -24211,6 +24226,11 @@ impl<'a> FunctionEmitter<'a> {
                     LocalLocation::Reg(reg) => OperandSource::Reg(reg),
                 }
             }
+            ExprKind::PseudoReg(name) => {
+                panic!(
+                    "pseudo-register `{name}` as operand of a binary op not yet supported"
+                )
+            }
             ExprKind::IntLit(_) => unreachable!("literals fold via try_const_eval"),
             ExprKind::UpdateLvalue { .. } => {
                 panic!("UpdateLvalue as operand of a binary op not yet supported")
@@ -25086,7 +25106,7 @@ fn scrutinee_is_long_typed(
 /// inline-asm block; outside of asm they appear in `return _AX;`
 /// and similar patterns where the asm body left a value live in
 /// the named register. Fixture 2122.
-fn is_asm_pseudo_register(name: &str) -> bool {
+pub(crate) fn is_asm_pseudo_register(name: &str) -> bool {
     matches!(
         name,
         "_AX" | "_BX" | "_CX" | "_DX"

@@ -587,6 +587,13 @@ pub enum ExprKind {
     /// the `fstp` truncates back to 64).
     DoubleLit(u64),
     Ident(String),
+    /// Pseudo-register reference: `_AX`, `_BX`, ..., `_DH`, `_SI`,
+    /// ..., `_DS`. Parsed as a bare identifier and then rewritten
+    /// to this variant by `rewrite_pseudo_registers` so the existing
+    /// `Ident` peephole recognizers — which would query `Locals` and
+    /// panic — don't fire. Codegen for this variant lives in one
+    /// place per emit path. See `is_asm_pseudo_register` for the set.
+    PseudoReg(String),
     BinOp { op: BinOp, left: Box<Expr>, right: Box<Expr> },
     /// Prefix unary operator: `-e`, `!e`, `~e`.
     Unary { op: UnaryOp, operand: Box<Expr> },

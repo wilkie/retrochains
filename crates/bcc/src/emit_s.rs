@@ -143,6 +143,14 @@ pub fn build_asm(
     // pointer variants. Fixture 2211.
     rewrite_fn_pointers(&mut unit, memory_model.has_far_code());
 
+    // Pseudo-registers (`_AX`, `_BX`, ..., `_DH`, `_SI`, ..., `_DS`)
+    // are parsed as bare identifiers. Rewrite them to the dedicated
+    // `ExprKind::PseudoReg` variant so the many `Ident`-matching
+    // peephole recognizers (each of which would call `Locals::type_of`
+    // and panic) don't fire. Codegen for `PseudoReg` lives in one
+    // place per emit path. Fixtures 4051, 4053.
+    rewrite_pseudo_registers(&mut unit);
+
     let mut out = Vec::with_capacity(1024);
     write_macro_preamble(&mut out);
     write_debug_header(&mut out, source_filename_lower, mtime);
@@ -920,6 +928,181 @@ fn rewrite_fn_pointers(unit: &mut crate::ast::Unit, far_code: bool) {
             }
             _ => {}
         }
+    }
+}
+
+/// Rewrite every `Ident(name)` where `name` names a pseudo-register
+/// (`_AX`, `_BX`, ..., `_DS`) into the dedicated
+/// `ExprKind::PseudoReg(name)` variant. After this pass, no Ident
+/// node in the unit references a pseudo-register, so the many
+/// `Ident`-matching peephole recognizers stop firing on them
+/// (each would call `Locals::type_of` and panic).
+fn rewrite_pseudo_registers(unit: &mut crate::ast::Unit) {
+    for g in &mut unit.globals {
+        if let Some(init) = &mut g.init {
+            walk_expr_pseudo(init);
+        }
+    }
+    for f in &mut unit.functions {
+        if let Some(body) = &mut f.body {
+            for s in body {
+                walk_stmt_pseudo(s);
+            }
+        }
+    }
+}
+
+fn walk_stmt_pseudo(s: &mut crate::ast::Stmt) {
+    use crate::ast::StmtKind;
+    match &mut s.kind {
+        StmtKind::Return(Some(e)) => walk_expr_pseudo(e),
+        StmtKind::Declare { init: Some(e), .. } => walk_expr_pseudo(e),
+        StmtKind::Assign { value, .. } | StmtKind::CompoundAssign { value, .. } => {
+            walk_expr_pseudo(value);
+        }
+        StmtKind::ExprStmt(e) => walk_expr_pseudo(e),
+        StmtKind::ArrayAssign { indices, value, .. }
+        | StmtKind::ArrayCompoundAssign { indices, value, .. }
+        | StmtKind::MemberArrayAssign { indices, value, .. } => {
+            for i in indices {
+                walk_expr_pseudo(i);
+            }
+            walk_expr_pseudo(value);
+        }
+        StmtKind::DerefAssign { target, value }
+        | StmtKind::DerefCompoundAssign { target, value, .. } => {
+            walk_expr_pseudo(target);
+            walk_expr_pseudo(value);
+        }
+        StmtKind::MemberAssign { base, value, .. }
+        | StmtKind::MemberCompoundAssign { base, value, .. } => {
+            walk_expr_pseudo(base);
+            walk_expr_pseudo(value);
+        }
+        StmtKind::If { cond, then_branch, else_branch } => {
+            walk_expr_pseudo(cond);
+            for s in then_branch {
+                walk_stmt_pseudo(s);
+            }
+            if let Some(eb) = else_branch {
+                for s in eb {
+                    walk_stmt_pseudo(s);
+                }
+            }
+        }
+        StmtKind::While { cond, body } | StmtKind::DoWhile { cond, body } => {
+            walk_expr_pseudo(cond);
+            for s in body {
+                walk_stmt_pseudo(s);
+            }
+        }
+        StmtKind::For { init, cond, step, body } => {
+            if let Some(es) = init {
+                for e in es {
+                    walk_expr_pseudo(e);
+                }
+            }
+            if let Some(e) = cond {
+                walk_expr_pseudo(e);
+            }
+            if let Some(es) = step {
+                for e in es {
+                    walk_expr_pseudo(e);
+                }
+            }
+            for s in body {
+                walk_stmt_pseudo(s);
+            }
+        }
+        StmtKind::Switch { scrutinee, cases } => {
+            walk_expr_pseudo(scrutinee);
+            for c in cases {
+                for s in &mut c.body {
+                    walk_stmt_pseudo(s);
+                }
+            }
+        }
+        StmtKind::Block(body) => {
+            for s in body {
+                walk_stmt_pseudo(s);
+            }
+        }
+        StmtKind::Return(None)
+        | StmtKind::Declare { init: None, .. }
+        | StmtKind::Empty
+        | StmtKind::Break
+        | StmtKind::Continue
+        | StmtKind::Goto { .. }
+        | StmtKind::Label { .. }
+        | StmtKind::Asm { .. } => {}
+    }
+}
+
+fn walk_expr_pseudo(e: &mut crate::ast::Expr) {
+    use crate::ast::ExprKind;
+    if let ExprKind::Ident(name) = &e.kind
+        && codegen::is_asm_pseudo_register(name)
+    {
+        let ExprKind::Ident(taken) = std::mem::replace(&mut e.kind, ExprKind::IntLit(0)) else {
+            unreachable!()
+        };
+        e.kind = ExprKind::PseudoReg(taken);
+        return;
+    }
+    match &mut e.kind {
+        ExprKind::BinOp { left, right, .. }
+        | ExprKind::Logical { left, right, .. }
+        | ExprKind::Comma { left, right } => {
+            walk_expr_pseudo(left);
+            walk_expr_pseudo(right);
+        }
+        ExprKind::Unary { operand, .. } | ExprKind::Cast { operand, .. } => {
+            walk_expr_pseudo(operand);
+        }
+        ExprKind::Deref(inner) => walk_expr_pseudo(inner),
+        ExprKind::UpdateLvalue { target, .. } => walk_expr_pseudo(target),
+        ExprKind::AssignExpr { value, .. } => walk_expr_pseudo(value),
+        ExprKind::AssignLvalueExpr { target, value } => {
+            walk_expr_pseudo(target);
+            walk_expr_pseudo(value);
+        }
+        ExprKind::CompoundAssignExpr { value, .. } => walk_expr_pseudo(value),
+        ExprKind::Call { args, .. } => {
+            for a in args {
+                walk_expr_pseudo(a);
+            }
+        }
+        ExprKind::CallVia { addr, args } => {
+            walk_expr_pseudo(addr);
+            for a in args {
+                walk_expr_pseudo(a);
+            }
+        }
+        ExprKind::ArrayIndex { array, index } => {
+            walk_expr_pseudo(array);
+            walk_expr_pseudo(index);
+        }
+        ExprKind::Member { base, .. } => walk_expr_pseudo(base),
+        ExprKind::Ternary { cond, then_value, else_value } => {
+            walk_expr_pseudo(cond);
+            walk_expr_pseudo(then_value);
+            walk_expr_pseudo(else_value);
+        }
+        ExprKind::InitList { items } => {
+            for i in items {
+                walk_expr_pseudo(i);
+            }
+        }
+        ExprKind::Ident(_)
+        | ExprKind::PseudoReg(_)
+        | ExprKind::Update { .. }
+        | ExprKind::IntLit(_)
+        | ExprKind::FloatLit(_)
+        | ExprKind::DoubleLit(_)
+        | ExprKind::AddressOf(_)
+        | ExprKind::AddressOfArrayElem { .. }
+        | ExprKind::AddressOfArrayElemVar { .. }
+        | ExprKind::StringLit(_) => {}
     }
 }
 
@@ -1743,6 +1926,7 @@ fn walk_calls_expr(
             walk_calls_expr(target, defined, locals, seen, ordered)
         }
         ExprKind::Ident(_)
+        | ExprKind::PseudoReg(_)
         | ExprKind::IntLit(_)
         | ExprKind::FloatLit(_)
         | ExprKind::DoubleLit(_)

@@ -25,6 +25,7 @@ pub fn try_const_eval(e: &Expr) -> Option<u32> {
         // address, which a future codegen pass could fold to an
         // immediate, but there's no fixture for it yet.)
         ExprKind::Ident(_)
+        | ExprKind::PseudoReg(_)
         | ExprKind::Call { .. }
         | ExprKind::CallVia { .. }
         | ExprKind::Update { .. }
