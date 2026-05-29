@@ -4273,21 +4273,38 @@ fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_>, out: &mu
     //   |K| ≤ 127, ±: `add/sub [bp-disp], imm8sx` (4 bytes)
     //   larger K, ±: `add/sub [bp-disp], imm16`   (5 bytes)
     // Pattern requires LHS = Local(this) on the BinOp.
-    // Shift/mul peephole: `x = x << 1` and `x = x * 2` (int) → `d1 66 disp` (shl mem, 1).
-    // Same shape: `x = x >> 1` → `d1 6e disp` (shr mem, 1).
+    // Shift/mul peephole on int locals (size == 2):
+    //   `x <<= 1` / `x *= 2` → `d1 66 disp`              (3 bytes; shl mem, 1)
+    //   `x >>= 1`            → `d1 6e disp`              (3 bytes; shr mem, 1, logical)
+    //   `x <<= K` (K > 1)    → `b1 K d3 66 disp`          (5 bytes; mov cl, K; shl mem, cl)
+    //   `x >>= K`            → `b1 K d3 6e disp`
+    //   `x *= 2^k` (k ≥ 1)   → same as `x <<= k`
     if locals.size(local_idx) == 2
         && let Expr::BinOp { op, left, right } = value
         && let Expr::Local(li) = left.as_ref()
         && *li == local_idx
         && let Some(k) = right.fold(locals.inits)
-        && let Some(modrm) = match (op, k) {
-            (BinOp::Mul, 2) | (BinOp::Shl, 1) => Some(0x66u8),  // /4=shl
-            (BinOp::Shr, 1) => Some(0x6Eu8),  // /5=shr  (logical shift; signed uses /7=sar)
-            _ => None,
-        }
     {
-        out.extend_from_slice(&[0xD1, modrm, disp as u8]);
-        return;
+        let (kind, shift_k) = match (op, k) {
+            (BinOp::Shl, k) if k > 0 && k < 16 => (Some(0x66u8), k as u8),
+            (BinOp::Shr, k) if k > 0 && k < 16 => (Some(0x6Eu8), k as u8),
+            // Mul by 2^k: emit as shl K bits.
+            (BinOp::Mul, k) if k >= 2 && (k & (k - 1)) == 0 => {
+                let mut bits = 0u8;
+                let mut v = k as u32;
+                while v > 1 { bits += 1; v >>= 1; }
+                (Some(0x66u8), bits)
+            }
+            _ => (None, 0),
+        };
+        if let Some(modrm) = kind {
+            if shift_k == 1 {
+                out.extend_from_slice(&[0xD1, modrm, disp as u8]);
+            } else {
+                out.extend_from_slice(&[0xB1, shift_k, 0xD3, modrm, disp as u8]);
+            }
+            return;
+        }
     }
     if let Expr::BinOp { op, left, right } = value
         && let Expr::Local(li) = left.as_ref()
