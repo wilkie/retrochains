@@ -305,6 +305,21 @@ pub enum BinOp {
     Add,
     Sub,
     Mul,
+    Div,
+    Mod,
+    Eq,
+    Ne,
+    Lt,
+    Gt,
+    Le,
+    Ge,
+    Shl,
+    Shr,
+    BitAnd,
+    BitOr,
+    BitXor,
+    LogAnd,
+    LogOr,
 }
 
 impl Expr {
@@ -327,6 +342,22 @@ impl Expr {
                     BinOp::Add => l.wrapping_add(r),
                     BinOp::Sub => l.wrapping_sub(r),
                     BinOp::Mul => l.wrapping_mul(r),
+                    BinOp::Div if r != 0 => l.wrapping_div(r),
+                    BinOp::Mod if r != 0 => l.wrapping_rem(r),
+                    BinOp::Div | BinOp::Mod => return None,
+                    BinOp::Eq => i32::from(l == r),
+                    BinOp::Ne => i32::from(l != r),
+                    BinOp::Lt => i32::from(l < r),
+                    BinOp::Gt => i32::from(l > r),
+                    BinOp::Le => i32::from(l <= r),
+                    BinOp::Ge => i32::from(l >= r),
+                    BinOp::Shl => l.wrapping_shl((r & 0xFF) as u32),
+                    BinOp::Shr => l.wrapping_shr((r & 0xFF) as u32),
+                    BinOp::BitAnd => l & r,
+                    BinOp::BitOr => l | r,
+                    BinOp::BitXor => l ^ r,
+                    BinOp::LogAnd => i32::from((l != 0) && (r != 0)),
+                    BinOp::LogOr => i32::from((l != 0) || (r != 0)),
                 })
             }
             Expr::Call { .. } => None,
@@ -1394,19 +1425,51 @@ fn parse_cond(p: &mut Parser<'_>) -> Result<Cond, EmitError> {
 /// Expression parser — recognizes the Slice-4 shapes:
 /// `<atom>` or `<atom> <op> <atom>` where op is `+ - *`.
 fn parse_expr(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
-    // Left-associative chain of `+ - *` at one precedence level. C's
-    // real precedence isn't this flat but Phase 1 hasn't needed
-    // mixing.
+    parse_binop_prec(p, 0)
+}
+
+/// Operator-precedence climbing for the binary-operator chain. The
+/// precedence table matches C's:
+///
+/// ```text
+/// 12  *  /  %
+/// 11  +  -
+/// 10  << >>
+///  9  <  <=  >  >=
+///  8  == !=
+///  7  &
+///  6  ^
+///  5  |
+///  4  &&
+///  3  ||
+/// ```
+fn parse_binop_prec(p: &mut Parser<'_>, min_prec: u8) -> Result<Expr, EmitError> {
     let mut left = parse_atom(p)?;
     loop {
-        let op = match p.peek() {
-            Some(Tok::Plus) => BinOp::Add,
-            Some(Tok::Minus) => BinOp::Sub,
-            Some(Tok::Star) => BinOp::Mul,
+        let (op, prec) = match p.peek() {
+            Some(Tok::Star)    => (BinOp::Mul,    12),
+            Some(Tok::Slash)   => (BinOp::Div,    12),
+            Some(Tok::Percent) => (BinOp::Mod,    12),
+            Some(Tok::Plus)    => (BinOp::Add,    11),
+            Some(Tok::Minus)   => (BinOp::Sub,    11),
+            Some(Tok::Shl)     => (BinOp::Shl,    10),
+            Some(Tok::Shr)     => (BinOp::Shr,    10),
+            Some(Tok::Lt)      => (BinOp::Lt,      9),
+            Some(Tok::Le)      => (BinOp::Le,      9),
+            Some(Tok::Gt)      => (BinOp::Gt,      9),
+            Some(Tok::Ge)      => (BinOp::Ge,      9),
+            Some(Tok::EqEq)    => (BinOp::Eq,      8),
+            Some(Tok::NotEq)   => (BinOp::Ne,      8),
+            Some(Tok::Amp)     => (BinOp::BitAnd,  7),
+            Some(Tok::Caret)   => (BinOp::BitXor,  6),
+            Some(Tok::Pipe)    => (BinOp::BitOr,   5),
+            Some(Tok::AndAnd)  => (BinOp::LogAnd,  4),
+            Some(Tok::OrOr)    => (BinOp::LogOr,   3),
             _ => break,
         };
+        if prec < min_prec { break; }
         p.bump();
-        let right = parse_atom(p)?;
+        let right = parse_binop_prec(p, prec + 1)?;
         left = Expr::BinOp { op, left: Box::new(left), right: Box::new(right) };
     }
     Ok(left)
@@ -3453,6 +3516,7 @@ fn emit_binop(op: BinOp, left: &Expr, right: &Expr, locals: &[Option<i32>], out:
                 BinOp::Add => 0x03,
                 BinOp::Sub => 0x2B,
                 BinOp::Mul => panic!("mul of two globals not yet supported"),
+                _ => panic!("{op:?} between two globals not yet supported"),
             };
             out.push(opcode);
             out.push(0x06);
@@ -3488,6 +3552,7 @@ fn emit_binop(op: BinOp, left: &Expr, right: &Expr, locals: &[Option<i32>], out:
                 BinOp::Add => 0x03,
                 BinOp::Sub => 0x2B,
                 BinOp::Mul => panic!("mul with global rhs not yet supported"),
+                _ => panic!("{op:?} with global rhs not yet supported"),
             };
             out.push(opcode);
             out.push(0x06);
@@ -3559,6 +3624,9 @@ fn emit_imm_op(op: BinOp, k: i32, out: &mut Vec<u8>) {
         (BinOp::Mul, _) => {
             panic!("Slice 4 multiplication by {k} not yet covered by a fixture");
         }
+        (op, _) => {
+            panic!("imm-op `{op:?}` not yet covered by a fixture (k={k})");
+        }
     }
 }
 
@@ -3571,6 +3639,7 @@ fn emit_mem_op_at(op: BinOp, disp: i16, out: &mut Vec<u8>) {
         BinOp::Add => 0x03,
         BinOp::Sub => 0x2B,
         BinOp::Mul => panic!("memory-source mul not yet covered by a fixture"),
+        _ => panic!("memory-source {op:?} not yet covered by a fixture"),
     };
     let disp8 = i8::try_from(disp).expect("disp fits in i8");
     out.push(opcode);
