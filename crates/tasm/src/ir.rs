@@ -789,6 +789,10 @@ pub enum Instr {
     /// `cmp <reg8>,<imm8>` — 80 F8+rc ii. Compare an 8-bit register
     /// to a constant.
     CmpReg8Imm8 { reg: Reg8, imm: u8 },
+    /// `cmp al, imm8` — 3C ii (2-byte AL accumulator form, distinct
+    /// from the 3-byte generic Grp1). Used by BCC's byte-pseudo
+    /// compare recognizer: `if (_AL == K)` (fixture 4054).
+    CmpAlImm8 { imm: u8 },
     /// `cmp al,byte ptr [bp+<offset>]` — 3A 46 dd. CMP r8, r/m8 with
     /// AL as reg and `[bp+disp8]` as r/m. ModR/M 46 = mod=01 reg=000
     /// (AL) r/m=110 (BP). Used by the char-vs-char compare peephole

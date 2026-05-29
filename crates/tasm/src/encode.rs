@@ -550,6 +550,7 @@ fn instr_size(instr: &Instr) -> usize {
         Instr::MovReg8ByteSiDisp { disp, .. } => if *disp == 0 { 2 } else { 3 },
         Instr::IncReg8 { .. } | Instr::DecReg8 { .. } => 2,
         Instr::CmpReg8Imm8 { .. } => 3,
+        Instr::CmpAlImm8 { .. } => 2,
         Instr::CmpAlBpRel { offset } => 1 + bp_rel_modrm_size(*offset),
         Instr::AddAlImm8 { .. }
         | Instr::SubAlImm8 { .. }
@@ -1434,6 +1435,11 @@ fn emit_instr(
             // ModR/M mod=11 /7(CMP) r/m=<reg-code>.
             out.push(0x80);
             out.push(0xF8 | reg.code());
+            out.push(*imm);
+        }
+        Instr::CmpAlImm8 { imm } => {
+            // `cmp al, imm8` → 3C ii. AL-specific accumulator form.
+            out.push(0x3C);
             out.push(*imm);
         }
         Instr::CmpAlBpRel { offset } => {

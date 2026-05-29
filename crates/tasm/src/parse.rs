@@ -3480,6 +3480,12 @@ fn parse_cmp(operands: &str, line_no: usize) -> AsmResult<Instr> {
     }
     if let Some(reg) = Reg8::parse(lhs) {
         if let Some(imm) = parse_imm8(rhs) {
+            // `cmp al, imm8` has a dedicated 2-byte AL-accumulator
+            // form (3C ii), distinct from the 3-byte generic Grp1
+            // (80 F8 ii). Fixture 4054 (`if (_AL == 0x80)`).
+            if matches!(reg, Reg8::Al) {
+                return Ok(Instr::CmpAlImm8 { imm });
+            }
             return Ok(Instr::CmpReg8Imm8 { reg, imm });
         }
     }

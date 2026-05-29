@@ -4205,6 +4205,30 @@ impl<'a> FunctionEmitter<'a> {
             }
             return;
         }
+        // `if (<byte-pseudo> == imm8)` / `!=` — direct `cmp <reg>, imm8`
+        // with no widening. Fixture 4054 (`if (_AL == 0x80)` →
+        // `cmp al, 128; jne short ...`).
+        if let ExprKind::BinOp { op, left, right } = &cond.kind
+            && matches!(op, BinOp::Eq | BinOp::Ne)
+            && let ExprKind::PseudoReg(name) = &left.kind
+            && is_byte_pseudo_register(name)
+            && let Some(k) = try_const_eval(right)
+        {
+            let reg = pseudo_register_operand(name).expect("byte pseudo has operand");
+            let _ = write!(self.out, "\tcmp\t{reg},{}\r\n", k & 0xFF);
+            let (jmp_true, jmp_false) = match op {
+                BinOp::Eq => ("je", "jne"),
+                BinOp::Ne => ("jne", "je"),
+                _ => unreachable!(),
+            };
+            if let Some(tslot) = true_slot {
+                let _ = write!(self.out, "\t{jmp_true}\tshort {}\r\n", self.label_ref(tslot));
+            }
+            if let Some(fslot) = false_slot {
+                let _ = write!(self.out, "\t{jmp_false}\tshort {}\r\n", self.label_ref(fslot));
+            }
+            return;
+        }
         // `<stack-char-arr>[<si-int>] != 0` / `== 0` — direct
         // memory compare via the BP+SI addressing mode. Saves the
         // `mov al; cbw; or ax, ax` chain the generic path would
