@@ -54,6 +54,11 @@ impl Tool {
 pub struct OracleInvocation<'a> {
     pub tool: Option<Tool>,
     pub args: Vec<String>,
+    /// Optional second-pass args set, chained into the same DOSBox
+    /// session after `args`. Used by fixtures that need both an
+    /// OBJ and an ASM listing (BCC's `-c`/`-S` are mutually exclusive,
+    /// so the only way to capture both is two compile commands).
+    pub asm_args: Option<Vec<String>>,
     /// Files to materialize in the DOS working directory before running. Keyed
     /// by the DOS-visible filename (e.g. `"FOO.CPP"`).
     pub inputs: BTreeMap<String, &'a [u8]>,
@@ -62,7 +67,13 @@ pub struct OracleInvocation<'a> {
 impl<'a> OracleInvocation<'a> {
     #[must_use]
     pub fn new(tool: Tool) -> Self {
-        Self { tool: Some(tool), args: Vec::new(), inputs: BTreeMap::new() }
+        Self { tool: Some(tool), args: Vec::new(), asm_args: None, inputs: BTreeMap::new() }
+    }
+
+    #[must_use]
+    pub fn with_asm_args(mut self, args: Vec<String>) -> Self {
+        self.asm_args = Some(args);
+        self
     }
 
     #[must_use]
@@ -275,14 +286,27 @@ impl Oracle {
     /// invocation (spawn failure, missing exit-code sentinel, etc.).
     pub fn run(&self, invocation: &OracleInvocation<'_>) -> Result<OracleRun, OracleError> {
         let tool = invocation.tool.ok_or(OracleError::MissingTool)?;
-        dosbox::run(
-            &self.cfg.dosbox,
-            self.cfg.fake_time.as_ref(),
-            &self.layout,
-            tool,
-            &invocation.args,
-            &invocation.inputs,
-        )
-        .map_err(Into::into)
+        if let Some(asm_args) = &invocation.asm_args {
+            let arg_sets = vec![invocation.args.clone(), asm_args.clone()];
+            dosbox::run_chained(
+                &self.cfg.dosbox,
+                self.cfg.fake_time.as_ref(),
+                &self.layout,
+                tool,
+                &arg_sets,
+                &invocation.inputs,
+            )
+            .map_err(Into::into)
+        } else {
+            dosbox::run(
+                &self.cfg.dosbox,
+                self.cfg.fake_time.as_ref(),
+                &self.layout,
+                tool,
+                &invocation.args,
+                &invocation.inputs,
+            )
+            .map_err(Into::into)
+        }
     }
 }

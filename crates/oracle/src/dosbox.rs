@@ -49,9 +49,20 @@ pub(crate) fn run(
     args: &[String],
     inputs: &BTreeMap<String, &[u8]>,
 ) -> Result<OracleRun, DosboxError> {
+    run_chained(dosbox, fake_time, layout, tool, &[args.to_vec()], inputs)
+}
+
+pub(crate) fn run_chained(
+    dosbox: &Path,
+    fake_time: Option<&FakeTime>,
+    layout: &DistroLayout,
+    tool: Tool,
+    arg_sets: &[Vec<String>],
+    inputs: &BTreeMap<String, &[u8]>,
+) -> Result<OracleRun, DosboxError> {
     let work = TempWorkDir::new()?;
     materialize_inputs(work.path(), inputs, fake_time.map(|ft| ft.instant))?;
-    write_run_bat(work.path(), tool, args)?;
+    write_run_bat_chained(work.path(), tool, arg_sets)?;
 
     let dos_c_root = layout.root_dir.canonicalize()?;
     let work_dir = work.path().canonicalize()?;
@@ -124,26 +135,30 @@ fn spawn_error(dosbox: &Path, fake_time: Option<&FakeTime>, err: io::Error) -> D
     DosboxError::Spawn(path, err)
 }
 
-fn write_run_bat(work: &Path, tool: Tool, args: &[String]) -> io::Result<()> {
+fn write_run_bat_chained(work: &Path, tool: Tool, arg_sets: &[Vec<String>]) -> io::Result<()> {
     // CRLF line endings; the DOS shell handles either but CRLF avoids surprises
     // (and matches what a real DOS-built .BAT looks like, which is one less
     // thing to wonder about if a future bug points at line endings).
+    //
+    // When multiple arg sets are given, we chain the invocations in one
+    // DOSBox session. The first set's stdout overwrites `_OUT.TXT`;
+    // subsequent sets append. ERRORLEVEL from the LAST run wins —
+    // fixtures that need two phases of compilation only fail the
+    // capture if the final phase itself fails.
     let mut bat = String::new();
     bat.push_str("@echo off\r\n");
-    bat.push_str(tool.dos_name());
-    for arg in args {
+    for (i, args) in arg_sets.iter().enumerate() {
+        bat.push_str(tool.dos_name());
+        for arg in args {
+            bat.push(' ');
+            bat.push_str(arg);
+        }
         bat.push(' ');
-        bat.push_str(arg);
+        bat.push_str(if i == 0 { "> " } else { ">> " });
+        bat.push_str(STDOUT_FILE);
+        bat.push_str("\r\n");
+        bat.push_str("IF ERRORLEVEL 1 GOTO FAIL\r\n");
     }
-    bat.push_str(" > ");
-    bat.push_str(STDOUT_FILE);
-    // No `2>` here. DOSBox 0.74's shell honors the redirect but ALSO leaves
-    // the leading `2` in the command's args (BCC then tries to compile a
-    // phantom "2.CPP"), so we capture stdout-and-stderr-combined into
-    // `_OUT.TXT` and accept that `_ERR.TXT` stays empty. Borland tools
-    // write almost everything to stdout anyway.
-    bat.push_str("\r\n");
-    bat.push_str("IF ERRORLEVEL 1 GOTO FAIL\r\n");
     bat.push_str("ECHO 0 > ");
     bat.push_str(EXITCODE_FILE);
     bat.push_str("\r\n");

@@ -86,9 +86,12 @@ pub fn verify_ours(
     let manifest_diffs: Vec<_> = diff_manifests(&expected_manifest, &actual_manifest)
         .into_iter()
         .filter(|d| {
-            // Stream-related sha diffs are informational under
-            // verify_ours; everything else stays gating.
+            // Stream-related sha diffs and ASM-listing diffs are
+            // informational under verify_ours; everything else stays
+            // gating. ASM stays informational until our compilers
+            // learn to emit assembly listings.
             !matches!(d, ManifestDiff::StdoutSha { .. } | ManifestDiff::StderrSha { .. })
+                && !is_asm_diff(d)
         })
         .collect();
     let mut diff = Diff { manifest: manifest_diffs, ..Diff::default() };
@@ -108,10 +111,27 @@ pub fn verify_ours(
         if let Some(expected) = expected
             && let Some(file_diff) = diff_bytes(name, &expected, &output.bytes)
         {
-            diff.files.push(file_diff);
+            if is_asm_name(name) {
+                diff.advisory.push(file_diff);
+            } else {
+                diff.files.push(file_diff);
+            }
         }
     }
     Ok(diff)
+}
+
+fn is_asm_name(name: &str) -> bool {
+    name.to_ascii_uppercase().ends_with(".ASM")
+}
+
+fn is_asm_diff(d: &ManifestDiff) -> bool {
+    match d {
+        ManifestDiff::OutputMissing { name }
+        | ManifestDiff::OutputUnexpected { name }
+        | ManifestDiff::OutputMetadata { name, .. } => is_asm_name(name),
+        _ => false,
+    }
 }
 
 /// Verify by re-running the **oracle** against the fixture. Useful as a
@@ -282,6 +302,9 @@ fn run_oracle(workspace_root: &Path, fixture: &Fixture) -> Result<OracleRun, Har
     let oracle = Oracle::open(cfg).map_err(|e| HarnessError::Oracle(e.to_string()))?;
     let mut inv = OracleInvocation::new(fixture.invocation.tool.as_oracle())
         .args(fixture.invocation.args.clone());
+    if let Some(asm_args) = &fixture.invocation.asm_args {
+        inv = inv.with_asm_args(asm_args.clone());
+    }
     for (name, bytes) in &inputs {
         inv = inv.input(name.clone(), bytes.as_slice());
     }

@@ -66,6 +66,14 @@ pub struct Invocation {
     /// in the fixture directory (case-insensitive on DOS; we materialize
     /// them uppercased in the work directory).
     pub args: Vec<String>,
+    /// Optional second-pass invocation that produces a `.ASM` listing
+    /// alongside the primary `.OBJ`. When set, the oracle chains both
+    /// commands in one DOSBox session and the manifest captures
+    /// outputs from both. BCC needs this because `-c` and `-S` are
+    /// mutually exclusive; MSC fixtures usually fold `/Fa` into the
+    /// primary args instead.
+    #[serde(default)]
+    pub asm_args: Option<Vec<String>>,
     /// Which files at the fixture root to materialize into the DOS work
     /// directory. Defaults to every file at the fixture root that isn't
     /// an `invocation.*.toml` or the `expected/` directory.
