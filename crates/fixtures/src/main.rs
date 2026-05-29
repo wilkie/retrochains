@@ -42,6 +42,9 @@ fn try_main() -> Result<ExitCode, Box<dyn std::error::Error>> {
     let mut toolchain = Toolchain::Oracle;
     let mut fixture_path: Option<PathBuf> = None;
     let mut jobs: Option<usize> = None;
+    // Compiler defaults to "bcc" — today the only supported target.
+    // See `specs/plans/SECOND_COMPILER.md` for the fan-out plan.
+    let mut compiler = String::from("bcc");
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "--toolchain" => {
@@ -51,6 +54,10 @@ fn try_main() -> Result<ExitCode, Box<dyn std::error::Error>> {
                     "ours" => Toolchain::Ours,
                     other => return Err(format!("unknown toolchain: {other}").into()),
                 };
+            }
+            "--compiler" => {
+                let v = it.next().ok_or("--compiler needs a value (e.g. bcc)")?;
+                compiler = v.clone();
             }
             "--jobs" => {
                 let v = it.next().ok_or("--jobs needs a positive integer")?;
@@ -68,14 +75,14 @@ fn try_main() -> Result<ExitCode, Box<dyn std::error::Error>> {
     match sub.as_str() {
         "capture" => {
             let fixture_path = fixture_path.ok_or("missing <fixture> path")?;
-            let fixture = Fixture::load(&fixture_path)?;
+            let fixture = Fixture::load(&fixture_path, &compiler)?;
             capture(&workspace_root, &fixture)?;
             eprintln!("[xfix] captured {}", fixture.name);
             Ok(ExitCode::from(0))
         }
         "verify" => {
             let fixture_path = fixture_path.ok_or("missing <fixture> path")?;
-            let fixture = Fixture::load(&fixture_path)?;
+            let fixture = Fixture::load(&fixture_path, &compiler)?;
             let diff = match toolchain {
                 Toolchain::Oracle => verify_oracle(&workspace_root, &fixture)?,
                 Toolchain::Ours => {
@@ -90,7 +97,7 @@ fn try_main() -> Result<ExitCode, Box<dyn std::error::Error>> {
                 Ok(ExitCode::from(1))
             }
         }
-        "verify-all" => verify_all(&workspace_root, toolchain, jobs),
+        "verify-all" => verify_all(&workspace_root, toolchain, jobs, &compiler),
         other => Err(format!("unknown subcommand: {other}").into()),
     }
 }
@@ -102,12 +109,14 @@ fn verify_all(
     workspace_root: &Path,
     toolchain: Toolchain,
     jobs: Option<usize>,
+    compiler: &str,
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    let inv_name = format!("invocation.{compiler}.toml");
     let mut paths: Vec<PathBuf> = std::fs::read_dir(workspace_root.join("fixtures"))?
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
         .map(|e| e.path())
-        .filter(|p| p.join("invocation.toml").is_file())
+        .filter(|p| p.join(&inv_name).is_file())
         .collect();
     paths.sort();
     let total = paths.len();
@@ -133,7 +142,8 @@ fn verify_all(
             let failures = &failures;
             s.spawn(move || {
                 for path in chunk {
-                    let result = run_one(path, toolchain, workspace_root, tool_paths);
+                    let result =
+                        run_one(path, toolchain, workspace_root, tool_paths, compiler);
                     match result {
                         Ok((name, diff)) => {
                             if diff.is_empty() {
@@ -166,7 +176,7 @@ fn verify_all(
     failures.sort_by(|a, b| a.0.cmp(&b.0));
 
     eprintln!(
-        "[xfix] verified {total} fixtures in {:.1}s ({num_threads} threads): {pass} pass, {fail} fail",
+        "[xfix] verified {total} {compiler} fixtures in {:.1}s ({num_threads} threads): {pass} pass, {fail} fail",
         elapsed.as_secs_f64(),
     );
     for (name, msg) in &failures {
@@ -180,14 +190,15 @@ fn run_one(
     toolchain: Toolchain,
     workspace_root: &Path,
     tool_paths: &ToolPaths,
+    compiler: &str,
 ) -> Result<(String, Diff), (String, String)> {
     let name_fallback = path
         .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or("<unknown>")
         .to_owned();
-    let fixture =
-        Fixture::load(path).map_err(|e| (name_fallback.clone(), e.to_string()))?;
+    let fixture = Fixture::load(path, compiler)
+        .map_err(|e| (name_fallback.clone(), e.to_string()))?;
     let name = fixture.name.clone();
     let diff = match toolchain {
         Toolchain::Oracle => verify_oracle(workspace_root, &fixture),
