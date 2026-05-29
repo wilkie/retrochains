@@ -5389,6 +5389,11 @@ fn emit_cmp_global_imm(global_idx: usize, k: i32, out: &mut Vec<u8>, fixups: &mu
 /// every fixture exercised by Slice 5 today). The 5-byte
 /// `81 7e disp imm16` form is reserved for larger constants.
 fn emit_cmp_local_imm(idx: usize, locals: &Locals<'_>, k: i32, out: &mut Vec<u8>) {
+    if locals.size(idx) == 1 {
+        // `cmp byte [bp-disp], imm8` — `80 /7 r/m imm8`. Fixture 124.
+        out.extend_from_slice(&[0x80, 0x7E, locals.disp(idx) as u8, (k as u32 & 0xFF) as u8]);
+        return;
+    }
     emit_cmp_bp_imm(locals.disp(idx), k, out);
 }
 
