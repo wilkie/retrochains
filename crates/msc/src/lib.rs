@@ -385,6 +385,10 @@ pub enum AssignTarget {
     /// pointer parameter. Codegen: `mov bx, [bp+pdisp];
     /// c7 47 off imm16` (word) / `c6 47 off imm8` (byte).
     DerefParamField { ptr_param: usize, byte_off: u16, size: u8 },
+    /// `<struct-ptr-global>-><field> = <expr>;` — store via a
+    /// struct-pointer global. Loads `[global]` into BX, then
+    /// `c7 47 off imm16` / `c6 47 off imm8`.
+    DerefGlobalField { ptr_global: usize, byte_off: u16, size: u8 },
     /// `<local-int-array>[K] = <expr>;` — write a word at a constant
     /// index. `byte_off` is `K * 2`. Codegen uses BP-rel store at
     /// `locals.disp(local) + byte_off`.
@@ -489,6 +493,9 @@ pub enum Expr {
     /// `<struct-ptr-param>-><field>` — deref through a struct
     /// pointer parameter. `mov bx, [bp+param_disp]; mov ax, [bx+off]`.
     DerefParamField { ptr_param: usize, byte_off: u16, size: u8 },
+    /// `<struct-ptr-global>-><field>` — deref through a struct-ptr
+    /// global. `mov bx, [global]; mov ax, [bx+off]`.
+    DerefGlobalField { ptr_global: usize, byte_off: u16, size: u8 },
     /// Pointer-indexed byte read — `p[<expr>]` where `p` is a
     /// `char *` global. Constant index lowers to
     /// `mov bx, [p]; mov al, [bx+disp]; cbw`. Fixture 4123.
@@ -591,7 +598,7 @@ impl Expr {
             Expr::LocalIndex { .. } | Expr::LocalIndexByte { .. } => None,
             Expr::ParamIndex { .. } => None,
             Expr::LocalField { .. } | Expr::DerefLocalField { .. } | Expr::GlobalField { .. } => None,
-            Expr::DerefParamField { .. } => None,
+            Expr::DerefParamField { .. } | Expr::DerefGlobalField { .. } => None,
             Expr::DerefByte { .. } | Expr::DerefWord { .. } => None,
             Expr::AddrOfGlobal(_) | Expr::AddrOfLocal(_) => None,
             // Comma expression fold: side effects don't fold; only the
@@ -2255,6 +2262,24 @@ fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
                     value,
                 });
             }
+            // `<struct-ptr-global>-><field> = <expr>;`
+            if matches!(p.peek(), Some(Tok::Arrow))
+                && let Some(global_idx) = p.global_names.iter().position(|n| *n == name)
+                && let Some(sidx) = p.globals[global_idx].struct_idx
+                && p.globals[global_idx].is_pointer
+            {
+                p.bump();
+                let (byte_off, size) = parse_field_lookup(p, sidx)?;
+                let target = AssignTarget::DerefGlobalField { ptr_global: global_idx, byte_off, size };
+                if let Some(value) = parse_compound_rhs(p, &target)? {
+                    p.eat(&Tok::Semi)?;
+                    return Ok(Stmt::Assign { target, value });
+                }
+                p.eat(&Tok::Assign)?;
+                let value = parse_expr(p)?;
+                p.eat(&Tok::Semi)?;
+                return Ok(Stmt::Assign { target, value });
+            }
             // `<struct-local>.<field> = <expr>;`
             if matches!(p.peek(), Some(Tok::Dot))
                 && let Some(local_idx) = p.local_names.iter().position(|n| *n == name)
@@ -3143,6 +3168,13 @@ fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                     p.bump();
                     let (byte_off, size) = parse_field_lookup(p, sidx)?;
                     Ok(Expr::GlobalField { global: idx, byte_off, size })
+                } else if matches!(p.peek(), Some(Tok::Arrow))
+                    && let Some(sidx) = p.globals[idx].struct_idx
+                    && p.globals[idx].is_pointer
+                {
+                    p.bump();
+                    let (byte_off, size) = parse_field_lookup(p, sidx)?;
+                    Ok(Expr::DerefGlobalField { ptr_global: idx, byte_off, size })
                 } else {
                     // Array name in non-subscript position decays to
                     // a pointer (the array's base address). Scalar
@@ -4212,7 +4244,7 @@ fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
         Expr::GlobalField { .. } => {
             // No const-prop tracking for global struct fields yet.
         }
-        Expr::DerefLocalField { .. } | Expr::DerefParamField { .. } => {
+        Expr::DerefLocalField { .. } | Expr::DerefParamField { .. } | Expr::DerefGlobalField { .. } => {
             // Pointer-aliasing const-prop not yet implemented.
         }
         Expr::LocalIndex { .. } | Expr::LocalIndexByte { .. } => {
@@ -4787,6 +4819,9 @@ fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_>, out: &mu
         }
         AssignTarget::DerefParamField { ptr_param, byte_off, size } => {
             return emit_assign_deref_param_field(ptr_param, byte_off, size, value, locals, out, fixups);
+        }
+        AssignTarget::DerefGlobalField { ptr_global, byte_off, size } => {
+            return emit_assign_deref_global_field(ptr_global, byte_off, size, value, locals, out, fixups);
         }
     };
     let disp = locals.disp(local_idx);
@@ -5462,6 +5497,45 @@ fn emit_assign_local_field(local_idx: usize, byte_off: u16, size: u8, value: &Ex
 
 /// `<struct-ptr-param>-><field> = <expr>;` — same shape as the
 /// local-pointer version but the BX-load disp is positive (param).
+/// `<global-ptr>-><field> = <expr>;` — load the global into BX, then
+/// store at `[bx + byte_off]`.
+fn emit_assign_deref_global_field(ptr_global: usize, byte_off: u16, size: u8, value: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    out.push(0x8B);
+    out.push(0x1E);
+    let body_offset = out.len();
+    out.extend_from_slice(&[0x00, 0x00]);
+    fixups.push(Fixup {
+        body_offset: body_offset - 1,
+        kind: FixupKind::GlobalAddr { global_idx: ptr_global },
+    });
+    if size == 1 {
+        let k = value.fold(locals.inits).unwrap_or_else(|| {
+            panic!("non-constant byte struct-field store via global ptr not yet supported")
+        });
+        let imm = (k as u32 & 0xFF) as u8;
+        if byte_off == 0 {
+            out.extend_from_slice(&[0xC6, 0x07, imm]);
+        } else {
+            out.extend_from_slice(&[0xC6, 0x47, byte_off as u8, imm]);
+        }
+    } else if let Some(k) = value.fold(locals.inits) {
+        let imm = (k as u32 & 0xFFFF) as u16;
+        if byte_off == 0 {
+            out.extend_from_slice(&[0xC7, 0x07]);
+        } else {
+            out.extend_from_slice(&[0xC7, 0x47, byte_off as u8]);
+        }
+        out.extend_from_slice(&imm.to_le_bytes());
+    } else {
+        emit_expr_to_ax(value, locals, out, fixups);
+        if byte_off == 0 {
+            out.extend_from_slice(&[0x89, 0x07]);
+        } else {
+            out.extend_from_slice(&[0x89, 0x47, byte_off as u8]);
+        }
+    }
+}
+
 fn emit_assign_deref_param_field(ptr_param: usize, byte_off: u16, size: u8, value: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
     let p_disp = param_disp(ptr_param);
     out.push(0x8B);
@@ -6427,6 +6501,29 @@ fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: 
                 out.push(0x8B);
                 out.push(0x47);
                 out.push(*byte_off as u8);
+            }
+        }
+        Expr::DerefGlobalField { ptr_global, byte_off, size } => {
+            // `mov bx, [global]; mov ax/al, [bx+off]; cbw?`.
+            out.push(0x8B);
+            out.push(0x1E);
+            let body_offset = out.len();
+            out.extend_from_slice(&[0x00, 0x00]);
+            fixups.push(Fixup {
+                body_offset: body_offset - 1,
+                kind: FixupKind::GlobalAddr { global_idx: *ptr_global },
+            });
+            if *size == 1 {
+                if *byte_off == 0 {
+                    out.extend_from_slice(&[0x8A, 0x07]);
+                } else {
+                    out.extend_from_slice(&[0x8A, 0x47, *byte_off as u8]);
+                }
+                out.push(0x98);
+            } else if *byte_off == 0 {
+                out.extend_from_slice(&[0x8B, 0x07]);
+            } else {
+                out.extend_from_slice(&[0x8B, 0x47, *byte_off as u8]);
             }
         }
         Expr::ParamIndex { param, index } => {
