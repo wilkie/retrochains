@@ -2607,6 +2607,11 @@ fn parse_compound_rhs(p: &mut Parser<'_>, target: &AssignTarget) -> Result<Optio
 /// for-clauses where the semis are the for-syntax separators, not
 /// statement terminators.
 fn parse_assign_no_semi(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
+    // Empty init/step in a for-loop (`for (; ...; ...)` etc.) — just
+    // emit a no-op (Empty stmt).
+    if matches!(p.peek(), Some(Tok::Semi) | Some(Tok::RParen)) {
+        return Ok(Stmt::Empty);
+    }
     // Prefix `++<ident>` / `--<ident>` in the for-step position.
     if matches!(p.peek(), Some(Tok::PlusPlus) | Some(Tok::MinusMinus)) {
         let inc = matches!(p.peek(), Some(Tok::PlusPlus));
