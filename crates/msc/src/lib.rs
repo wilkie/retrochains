@@ -207,6 +207,9 @@ pub enum AssignTarget {
     /// `*<ptr-global> = <expr>;` — store the RHS through a pointer
     /// global. Fixture 4116.
     DerefGlobal(usize),
+    /// `*<ptr-local> = <expr>;` — store through a pointer local.
+    /// Codegen: `mov bx, [bp-disp]; mov [bx], imm/ax`.
+    DerefLocal(usize),
     /// `<global>[K] = <expr>;` — write a 2-byte word at a constant
     /// index into an int-array global. `byte_off` is `K * 2`.
     /// Fixture 4119.
@@ -1262,6 +1265,7 @@ fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
         }
         Some(Tok::Star) => {
             // `*<ident> = <expr>;` — store through a pointer.
+            // The pointer can be a global or a local.
             p.bump();
             let target_name = match p.bump().cloned() {
                 Some(Tok::Ident(s)) => s,
@@ -1271,17 +1275,19 @@ fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
                     )));
                 }
             };
-            let ptr_idx = p.global_names.iter().position(|n| *n == target_name)
-                .ok_or_else(|| EmitError::Unsupported(format!(
+            let target = if let Some(idx) = p.local_names.iter().position(|n| *n == target_name) {
+                AssignTarget::DerefLocal(idx)
+            } else if let Some(idx) = p.global_names.iter().position(|n| *n == target_name) {
+                AssignTarget::DerefGlobal(idx)
+            } else {
+                return Err(EmitError::Unsupported(format!(
                     "deref-store through unknown identifier `{target_name}`"
-                )))?;
+                )));
+            };
             p.eat(&Tok::Assign)?;
             let value = parse_expr(p)?;
             p.eat(&Tok::Semi)?;
-            Ok(Stmt::Assign {
-                target: AssignTarget::DerefGlobal(ptr_idx),
-                value,
-            })
+            Ok(Stmt::Assign { target, value })
         }
         Some(Tok::Ident(_)) => {
             // Either `<local> = <expr>;` (assignment) or
@@ -2997,6 +3003,9 @@ fn emit_assign(target: AssignTarget, value: &Expr, locals: &[Option<i32>], out: 
         AssignTarget::DerefGlobal(g) => {
             return emit_assign_deref_global(g, value, locals, out, fixups);
         }
+        AssignTarget::DerefLocal(li) => {
+            return emit_assign_deref_local(li, value, locals, out, fixups);
+        }
         AssignTarget::IndexedGlobal { array, byte_off } => {
             return emit_assign_indexed_global(array, byte_off, value, locals, out, fixups);
         }
@@ -3161,6 +3170,23 @@ fn emit_assign_ptr_index_byte(ptr_idx: usize, disp: i8, value: &Expr, locals: &[
 /// Pattern: `mov bx, [p]` (load pointer) then store via `[bx]`.
 /// Constant RHS uses `c7 07 imm16`; general RHS uses
 /// `<expr-to-ax>; mov [bx], ax` (89 07). Fixture 4116.
+/// `*<ptr-local> = <expr>;` — load the pointer local into BX, then
+/// store the RHS through `[bx]`. Constant RHS → `c7 07 imm16`;
+/// general RHS → `<expr-to-ax>; 89 07`.
+fn emit_assign_deref_local(local_idx: usize, value: &Expr, locals: &[Option<i32>], out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    let disp = -(i16::try_from(local_idx + 1).expect("local idx") * 2);
+    // `mov bx, [bp-disp]` — 8b 5e disp8.
+    out.extend_from_slice(&[0x8B, 0x5E, disp as u8]);
+    if let Some(k) = value.fold(locals) {
+        let imm = (k as u32 & 0xFFFF) as u16;
+        out.extend_from_slice(&[0xC7, 0x07]);
+        out.extend_from_slice(&imm.to_le_bytes());
+    } else {
+        emit_expr_to_ax(value, locals, out, fixups);
+        out.extend_from_slice(&[0x89, 0x07]);
+    }
+}
+
 fn emit_assign_deref_global(global_idx: usize, value: &Expr, locals: &[Option<i32>], out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
     // `mov bx, [p]` — load pointer global into BX.
     let body_offset = out.len();
