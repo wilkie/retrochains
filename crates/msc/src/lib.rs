@@ -1049,6 +1049,12 @@ fn tokenize(source: &str) -> Result<Vec<Tok>, EmitError> {
                     "long" => Tok::Kw("long"),
                     "enum" => Tok::Kw("enum"),
                     "typedef" => Tok::Kw("typedef"),
+                    "cdecl" => Tok::Kw("cdecl"),
+                    "pascal" => Tok::Kw("pascal"),
+                    "far" => Tok::Kw("far"),
+                    "near" => Tok::Kw("near"),
+                    "huge" => Tok::Kw("huge"),
+                    "interrupt" => Tok::Kw("interrupt"),
                     // Storage-class / qualifier modifiers we currently
                     // treat as no-ops in declarator parsing.
                     "unsigned" => Tok::Kw("unsigned"),
@@ -2582,6 +2588,12 @@ fn skip_decl_modifiers(p: &mut Parser<'_>) -> usize {
             | Some(Tok::Kw("volatile"))
             | Some(Tok::Kw("const"))
             | Some(Tok::Kw("short"))
+            | Some(Tok::Kw("cdecl"))
+            | Some(Tok::Kw("pascal"))
+            | Some(Tok::Kw("far"))
+            | Some(Tok::Kw("near"))
+            | Some(Tok::Kw("huge"))
+            | Some(Tok::Kw("interrupt"))
     ) {
         p.bump();
         count += 1;
