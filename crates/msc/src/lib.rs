@@ -3402,19 +3402,7 @@ fn body_sets_flags_for_cond(body: &Stmt, cond: &Cond) -> bool {
 /// Just the cmp half of a cond — used by `emit_while` which pairs
 /// the comparison with a backward jcc rather than a forward skip.
 fn emit_cond_cmp(cond: &Cond, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
-    match cond {
-        Cond::Truthy(Expr::Local(idx)) => emit_cmp_local_imm(*idx, 0, out),
-        Cond::Truthy(Expr::Global(idx)) => emit_cmp_global_imm(*idx, 0, out, fixups),
-        Cond::Cmp { op: _, left: Expr::Local(idx), right: Expr::IntLit(k) }
-        | Cond::Cmp { op: _, left: Expr::IntLit(k), right: Expr::Local(idx) } => {
-            emit_cmp_local_imm(*idx, *k, out);
-        }
-        Cond::Cmp { op: _, left: Expr::Global(idx), right: Expr::IntLit(k) }
-        | Cond::Cmp { op: _, left: Expr::IntLit(k), right: Expr::Global(idx) } => {
-            emit_cmp_global_imm(*idx, *k, out, fixups);
-        }
-        other => panic!("Slice 5 cond cmp not yet supported: {other:?}"),
-    }
+    emit_cond_cmp_inner(cond, out, fixups);
 }
 
 /// Emit `cmp <X>, <Y>; <inverted-jcc> skip` where `skip` is a
@@ -3422,44 +3410,40 @@ fn emit_cond_cmp(cond: &Cond, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
 /// caller has pre-computed the size of the then-body so we can use
 /// the 2-byte jcc form without a fixup. Fixtures 4090 / 4091 / 4092.
 fn emit_cond_skip(cond: &Cond, take_then_disp: i8, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    let jcc = match cond {
+        Cond::Truthy(_) => 0x74, // je on zero
+        Cond::Cmp { op, .. } => inverted_jcc(*op),
+    };
+    emit_cond_cmp_inner(cond, out, fixups);
+    out.push(jcc);
+    out.push(take_then_disp as u8);
+}
+
+/// Emit only the cmp half of a Cond. Used by both emit_cond_skip
+/// (forward jcc for `if`) and emit_cond_cmp (backward jcc for loops).
+fn emit_cond_cmp_inner(cond: &Cond, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
     match cond {
-        Cond::Truthy(Expr::Local(idx)) => {
-            // `if (<local>)` → `cmp word ptr [bp-disp], 0; je skip`.
-            emit_cmp_local_imm(*idx, 0, out);
-            out.push(0x74); // je rel8
-            out.push(take_then_disp as u8);
+        Cond::Truthy(Expr::Local(idx)) => emit_cmp_local_imm(*idx, 0, out),
+        Cond::Truthy(Expr::Param(idx)) => emit_cmp_bp_imm(param_disp(*idx), 0, out),
+        Cond::Truthy(Expr::Global(idx)) => emit_cmp_global_imm(*idx, 0, out, fixups),
+        Cond::Cmp { op: _, left: Expr::Local(idx), right: Expr::IntLit(k) }
+        | Cond::Cmp { op: _, left: Expr::IntLit(k), right: Expr::Local(idx) } => {
+            emit_cmp_local_imm(*idx, *k, out);
         }
-        Cond::Truthy(Expr::Global(idx)) => {
-            // `if (<global>)` → `cmp word ptr [<addr>], 0; je skip`
-            // with a GlobalAddr FIXUP on the addr. Fixture 4129.
-            emit_cmp_global_imm(*idx, 0, out, fixups);
-            out.push(0x74);
-            out.push(take_then_disp as u8);
+        Cond::Cmp { op: _, left: Expr::Param(idx), right: Expr::IntLit(k) }
+        | Cond::Cmp { op: _, left: Expr::IntLit(k), right: Expr::Param(idx) } => {
+            emit_cmp_bp_imm(param_disp(*idx), *k, out);
         }
-        Cond::Cmp { op, left: Expr::Global(idx), right: Expr::IntLit(k) }
-        | Cond::Cmp { op, left: Expr::IntLit(k), right: Expr::Global(idx) } => {
-            // `if (<global> ==/!= K)` → cmp word ptr [<addr>], K;
-            // jne/je skip. Fixture 4133.
+        Cond::Cmp { op: _, left: Expr::Global(idx), right: Expr::IntLit(k) }
+        | Cond::Cmp { op: _, left: Expr::IntLit(k), right: Expr::Global(idx) } => {
             emit_cmp_global_imm(*idx, *k, out, fixups);
-            let opcode = inverted_jcc(*op);
-            out.push(opcode);
-            out.push(take_then_disp as u8);
-        }
-        Cond::Cmp { op: RelOp::Eq, left: Expr::Local(idx), right: Expr::IntLit(k) }
-        | Cond::Cmp { op: RelOp::Eq, left: Expr::IntLit(k), right: Expr::Local(idx) } => {
-            // `if (<local> == K)` → `cmp <local>, K; jne skip`.
-            emit_cmp_local_imm(*idx, *k, out);
-            out.push(0x75); // jne rel8
-            out.push(take_then_disp as u8);
-        }
-        Cond::Cmp { op: RelOp::Ne, left: Expr::Local(idx), right: Expr::IntLit(k) }
-        | Cond::Cmp { op: RelOp::Ne, left: Expr::IntLit(k), right: Expr::Local(idx) } => {
-            emit_cmp_local_imm(*idx, *k, out);
-            out.push(0x74); // je rel8 — inverted from the != we want
-            out.push(take_then_disp as u8);
         }
         other => panic!("Slice 5 cond shape not yet supported: {other:?}"),
     }
+}
+
+fn param_disp(idx: usize) -> i16 {
+    i16::try_from(4 + (idx * 2)).expect("param disp fits in i16")
 }
 
 /// The signed conditional-jump opcode for **falling through to the
@@ -3513,9 +3497,16 @@ fn emit_cmp_global_imm(global_idx: usize, k: i32, out: &mut Vec<u8>, fixups: &mu
 /// `81 7e disp imm16` form is reserved for larger constants.
 fn emit_cmp_local_imm(idx: usize, k: i32, out: &mut Vec<u8>) {
     let disp = -(i16::try_from(idx + 1).expect("local index fits") * 2);
+    emit_cmp_bp_imm(disp, k, out);
+}
+
+/// `cmp word ptr [bp+disp], imm` — covers both local (negative disp)
+/// and param (positive disp) compares. Picks `83 /7 r/m imm8sx` for
+/// the small-immediate form, `81 /7 r/m imm16` for the wide form.
+fn emit_cmp_bp_imm(disp: i16, k: i32, out: &mut Vec<u8>) {
     if let Ok(k_i8) = i8::try_from(k) {
         out.push(0x83);
-        out.push(0x7E);          // ModR/M: mod=01 reg=111 (Grp1/7=CMP) r/m=110 (BP+disp8)
+        out.push(0x7E);          // ModR/M: mod=01 reg=111 (/7=CMP) r/m=110 (BP+disp8)
         out.push(disp as u8);
         out.push(k_i8 as u8);
     } else {
@@ -3733,6 +3724,20 @@ fn emit_load_local(idx: usize, out: &mut Vec<u8>) {
 }
 
 fn emit_binop(op: BinOp, left: &Expr, right: &Expr, locals: &[Option<i32>], out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    // Commutative-op swap: when the RHS is a value that needs AX
+    // (call, complex expression) and the LHS is a BP-rel operand,
+    // MSC emits the RHS first and then uses the BP-rel as a memory
+    // operand. Matches the factorial idiom `n * fact(n-1)` → call,
+    // then `imul [bp+n_disp]`. Fixtures 1220, 1264, 1277.
+    let commutative = matches!(op, BinOp::Add | BinOp::Mul | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor);
+    if commutative
+        && matches!(right, Expr::Call { .. })
+        && let Some(disp) = bp_disp(left)
+    {
+        emit_expr_to_ax(right, locals, out, fixups);
+        emit_mem_op_at(op, disp, out);
+        return;
+    }
     // Left as a BP-rel operand we can load into AX.
     if let Some(load) = bp_load(left) {
         load(out);
