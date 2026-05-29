@@ -6715,7 +6715,22 @@ fn emit_binop_right(op: BinOp, right: &Expr, locals: &Locals<'_>, out: &mut Vec<
         emit_mem_op_at(op, disp, out);
         return;
     }
-    panic!("binop_right shape not yet supported: {op:?} of {right:?}");
+    // Generic fallback for complex RHS (Call, Ternary, deref...):
+    // push lhs, evaluate rhs into AX, exchange via BX, `op ax, bx`.
+    out.push(0x50); // push ax
+    emit_expr_to_ax(right, locals, out, fixups);
+    out.extend_from_slice(&[0x8B, 0xD8]); // mov bx, ax (rhs in bx)
+    out.push(0x58); // pop ax (lhs back in ax)
+    // `op ax, bx` — reg-reg shape: 03 c3 (add), 2b c3 (sub), ...
+    let op_byte = match op {
+        BinOp::Add => 0x03,
+        BinOp::Sub => 0x2B,
+        BinOp::BitAnd => 0x23,
+        BinOp::BitOr => 0x0B,
+        BinOp::BitXor => 0x33,
+        _ => panic!("binop_right shape not yet supported: {op:?} of {right:?}"),
+    };
+    out.extend_from_slice(&[op_byte, 0xC3]);
 }
 
 /// If `e` is an `Index { array, IntLit(K) }` (or the IndexByte
