@@ -2176,6 +2176,36 @@ fn parse_compound_rhs(p: &mut Parser<'_>, target: &AssignTarget) -> Result<Optio
 /// for-clauses where the semis are the for-syntax separators, not
 /// statement terminators.
 fn parse_assign_no_semi(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
+    // Prefix `++<ident>` / `--<ident>` in the for-step position.
+    if matches!(p.peek(), Some(Tok::PlusPlus) | Some(Tok::MinusMinus)) {
+        let inc = matches!(p.peek(), Some(Tok::PlusPlus));
+        p.bump();
+        let name = match p.bump().cloned() {
+            Some(Tok::Ident(s)) => s,
+            other => {
+                return Err(EmitError::Unsupported(format!(
+                    "expected identifier after prefix `++/--` in for-step, got {other:?}"
+                )));
+            }
+        };
+        let (target, lvalue) = if let Some(idx) = p.local_names.iter().position(|n| *n == name) {
+            (AssignTarget::Local(idx), Expr::Local(idx))
+        } else if let Some(idx) = p.global_names.iter().position(|n| *n == name) {
+            (AssignTarget::Global(idx), Expr::Global(idx))
+        } else {
+            return Err(EmitError::Unsupported(format!(
+                "prefix `++/--` of unknown identifier `{name}` in for-clause"
+            )));
+        };
+        return Ok(Stmt::Assign {
+            target,
+            value: Expr::BinOp {
+                op: if inc { BinOp::Add } else { BinOp::Sub },
+                left: Box::new(lvalue),
+                right: Box::new(Expr::IntLit(1)),
+            },
+        });
+    }
     let name = match p.bump().cloned() {
         Some(Tok::Ident(s)) => s,
         other => {
