@@ -4272,33 +4272,45 @@ fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_>, out: &mu
     //   |K| ≤ 127, ±: `add/sub [bp-disp], imm8sx` (4 bytes)
     //   larger K, ±: `add/sub [bp-disp], imm16`   (5 bytes)
     // Pattern requires LHS = Local(this) on the BinOp.
-    if locals.size(local_idx) == 2
-        && let Expr::BinOp { op, left, right } = value
+    if let Expr::BinOp { op, left, right } = value
         && let Expr::Local(li) = left.as_ref()
         && *li == local_idx
         && matches!(op, BinOp::Add | BinOp::Sub)
         && let Some(k) = right.fold(locals.inits)
     {
-        match (op, k) {
-            (BinOp::Add, 1) => {
+        let is_byte = locals.size(local_idx) == 1;
+        match (op, k, is_byte) {
+            (BinOp::Add, 1, false) => {
                 out.extend_from_slice(&[0xFF, 0x46, disp as u8]);
                 return;
             }
-            (BinOp::Sub, 1) => {
+            (BinOp::Sub, 1, false) => {
                 out.extend_from_slice(&[0xFF, 0x4E, disp as u8]);
                 return;
             }
-            _ => {
-                // `83 /0 imm8sx` add or `83 /5 imm8sx` sub at [bp+disp8].
+            (BinOp::Add, 1, true) => {
+                out.extend_from_slice(&[0xFE, 0x46, disp as u8]);
+                return;
+            }
+            (BinOp::Sub, 1, true) => {
+                out.extend_from_slice(&[0xFE, 0x4E, disp as u8]);
+                return;
+            }
+            (op, _, false) => {
                 let modrm_base = if matches!(op, BinOp::Add) { 0x46 } else { 0x6E };
                 if let Ok(k8) = i8::try_from(k) {
                     out.extend_from_slice(&[0x83, modrm_base, disp as u8, k8 as u8]);
                 } else {
-                    let modrm_big = if matches!(op, BinOp::Add) { 0x46 } else { 0x6E };
-                    out.extend_from_slice(&[0x81, modrm_big, disp as u8]);
+                    out.extend_from_slice(&[0x81, modrm_base, disp as u8]);
                     let imm = (k as u32 & 0xFFFF) as u16;
                     out.extend_from_slice(&imm.to_le_bytes());
                 }
+                return;
+            }
+            (op, _, true) => {
+                // `80 /0 imm8` add byte mem / `80 /5 imm8` sub byte mem.
+                let modrm = if matches!(op, BinOp::Add) { 0x46 } else { 0x6E };
+                out.extend_from_slice(&[0x80, modrm, disp as u8, (k as u32 & 0xFF) as u8]);
                 return;
             }
         }
@@ -4981,12 +4993,22 @@ fn emit_loop(
 
     let body_len = body_buf.len();
     let cmp_len = cmp_buf.len();
-    let forward_disp = i8::try_from(body_len + pad)
-        .expect("body+pad short enough for jmp rel8");
-    out.push(0xEB);
-    out.push(forward_disp as u8);
-    if needs_pad {
-        out.push(0x90);
+    // Entry-fold peephole: when the cond folds to a non-zero
+    // literal with the current `locals.inits` view, MSC elides the
+    // initial `jmp` over the body — the first iteration runs without
+    // a check (the cond is guaranteed true at entry). Fixtures 126,
+    // 1044. We can only safely take this when the result is `Some(k)`
+    // with k != 0; `Some(0)` would mean an empty loop (and we don't
+    // strip those yet).
+    let skip_initial_jmp = matches!(fold_cond(cond, locals), Some(k) if k != 0);
+    if !skip_initial_jmp {
+        let forward_disp = i8::try_from(body_len + pad)
+            .expect("body+pad short enough for jmp rel8");
+        out.push(0xEB);
+        out.push(forward_disp as u8);
+        if needs_pad {
+            out.push(0x90);
+        }
     }
     let body_base = out.len();
     out.extend_from_slice(&body_buf);
