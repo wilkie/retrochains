@@ -37,35 +37,75 @@ pub fn emit_dash_c(source_path: &Path) -> Result<std::path::PathBuf, EmitError> 
     Ok(std::path::PathBuf::from(out_name))
 }
 
-/// A minimal AST covering Phase 1's source-shape envelope. Each
-/// local is an int at a unique bp-relative slot (`[bp-2]`, `[bp-4]`,
-/// …); the return expression is either an int literal or a reference
-/// to a local that has a known constant value (MSC folds the latter
-/// at parse time — see fixture 4081).
+/// A minimal AST covering Phase 1's source-shape envelope.
 #[derive(Debug, Clone)]
 pub struct MainAst {
     /// Initializer per local in source-declaration order. `None` for
     /// uninitialized declarations (`int x;`). Length is the local
     /// count; bytes-of-frame = `locals.len() * 2`.
     pub locals: Vec<Option<i32>>,
-    /// The constant-folded value of the `return <expr>;`. The folding
-    /// is the parser's responsibility — by the time we reach codegen,
-    /// the AST has already resolved `return x;` to its compile-time
-    /// constant. Future slices that handle non-constant returns will
-    /// widen this variant.
-    pub return_value: i32,
+    /// The `return <expr>;` expression. Codegen folds constant
+    /// sub-expressions at emit time and routes non-folded ones
+    /// through AX with a small per-operator helper. Slice 4
+    /// fixtures (4084-4089) cover the patterns currently supported.
+    pub return_expr: Expr,
+}
+
+/// Expression AST. Phase 1 grows this incrementally as fixtures
+/// land — Slice 3 had `IntLit` and `Local`; Slice 4 adds `BinOp`.
+#[derive(Debug, Clone)]
+pub enum Expr {
+    /// A 16-bit-truncated int literal.
+    IntLit(i32),
+    /// Reference to a local by index into `MainAst.locals`.
+    Local(usize),
+    /// A binary operation. `op` selects add/sub/mul/...; codegen
+    /// picks the actual instruction (inc/dec/shl/shift-add/imul)
+    /// based on the operands.
+    BinOp { op: BinOp, left: Box<Expr>, right: Box<Expr> },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BinOp {
+    Add,
+    Sub,
+    Mul,
+}
+
+impl Expr {
+    /// Try to fold the expression to a compile-time integer.
+    /// Returns `Some(K)` when every operand is itself foldable —
+    /// either a literal, or a local with a constant initializer
+    /// (fixture 4081 confirms MSC folds `return x;` for such
+    /// locals). Used by codegen to pick between `mov ax, K` and
+    /// the runtime arithmetic path.
+    fn fold(&self, locals: &[Option<i32>]) -> Option<i32> {
+        match self {
+            Expr::IntLit(k) => Some(*k),
+            Expr::Local(i) => locals.get(*i).copied().flatten(),
+            Expr::BinOp { op, left, right } => {
+                let l = left.fold(locals)?;
+                let r = right.fold(locals)?;
+                Some(match op {
+                    BinOp::Add => l.wrapping_add(r),
+                    BinOp::Sub => l.wrapping_sub(r),
+                    BinOp::Mul => l.wrapping_mul(r),
+                })
+            }
+        }
+    }
 }
 
 /// Parse Phase 1's source-shape envelope:
 /// ```text
 /// int main(void) {
 ///   [int <name> [= <int>];]*
-///   return <int_lit | local_name>;
+///   return <expr>;
 /// }
 /// ```
-/// Constant-folds `return x;` when `x` has a single compile-time
-/// initializer — matches MSC's own folding for this trivial shape
-/// (fixture 4081 confirms).
+/// where `<expr>` is a literal, a local name, or a single binary
+/// operator (`+`, `-`, `*`) between two leaf operands. Nested
+/// binops and parens come with a later slice.
 fn parse_main(source: &str) -> Result<MainAst, EmitError> {
     let body_open = source
         .find('{')
@@ -75,8 +115,9 @@ fn parse_main(source: &str) -> Result<MainAst, EmitError> {
         .ok_or_else(|| EmitError::Unsupported("no `}` in source".to_owned()))?;
     let body = source[body_open + 1..body_close].trim();
 
-    let mut locals: Vec<(String, Option<i32>)> = Vec::new();
-    let mut return_expr: Option<String> = None;
+    let mut local_names: Vec<String> = Vec::new();
+    let mut local_inits: Vec<Option<i32>> = Vec::new();
+    let mut return_expr_text: Option<String> = None;
 
     for stmt in body.split(';') {
         let stmt = stmt.trim();
@@ -84,7 +125,7 @@ fn parse_main(source: &str) -> Result<MainAst, EmitError> {
             continue;
         }
         if let Some(rest) = stmt.strip_prefix("return") {
-            return_expr = Some(rest.trim().to_owned());
+            return_expr_text = Some(rest.trim().to_owned());
             continue;
         }
         if let Some(rest) = stmt.strip_prefix("int") {
@@ -93,35 +134,64 @@ fn parse_main(source: &str) -> Result<MainAst, EmitError> {
                 let init: i32 = init_expr.trim().parse().map_err(|_| {
                     EmitError::Unsupported(format!("non-int initializer `{init_expr}`"))
                 })?;
-                locals.push((name.trim().to_owned(), Some(init)));
+                local_names.push(name.trim().to_owned());
+                local_inits.push(Some(init));
             } else {
-                locals.push((decl.to_owned(), None));
+                local_names.push(decl.to_owned());
+                local_inits.push(None);
             }
             continue;
         }
         return Err(EmitError::Unsupported(format!("statement `{stmt}` not supported")));
     }
 
-    let return_expr = return_expr
+    let return_text = return_expr_text
         .ok_or_else(|| EmitError::Unsupported("no `return` in body".to_owned()))?;
-    let return_value = if let Ok(n) = return_expr.parse::<i32>() {
-        n
-    } else if let Some((_, Some(init))) =
-        locals.iter().find(|(name, _)| *name == return_expr)
-    {
-        // `return <local>;` where the local has a constant
-        // initializer — MSC folds this to the constant. Fixture 4081.
-        *init
-    } else {
-        return Err(EmitError::Unsupported(format!(
-            "`return {return_expr};` is not a literal or constant-initialized local",
-        )));
-    };
+    let return_expr = parse_expr(&return_text, &local_names)?;
 
-    Ok(MainAst {
-        locals: locals.into_iter().map(|(_, init)| init).collect(),
-        return_value,
-    })
+    Ok(MainAst { locals: local_inits, return_expr })
+}
+
+/// Parse one of the expression shapes Slice 4 supports:
+/// - `<int>`
+/// - `<local-name>`
+/// - `<atom> + <atom>`, `<atom> - <atom>`, `<atom> * <atom>`
+///   (single binop, atoms are themselves literals or locals)
+fn parse_expr(text: &str, local_names: &[String]) -> Result<Expr, EmitError> {
+    let text = text.trim();
+    // Look for a top-level operator. Phase 1's grammar is too
+    // restricted for precedence to matter — at most one operator.
+    for op_ch in ['+', '-', '*'] {
+        if let Some(i) = text.find(op_ch) {
+            // Exclude unary `-` at position 0 so `-1` stays a literal.
+            if op_ch == '-' && i == 0 {
+                continue;
+            }
+            let (left, right_with_op) = text.split_at(i);
+            let right = &right_with_op[1..];
+            let l = parse_atom(left.trim(), local_names)?;
+            let r = parse_atom(right.trim(), local_names)?;
+            let op = match op_ch {
+                '+' => BinOp::Add,
+                '-' => BinOp::Sub,
+                '*' => BinOp::Mul,
+                _ => unreachable!(),
+            };
+            return Ok(Expr::BinOp { op, left: Box::new(l), right: Box::new(r) });
+        }
+    }
+    parse_atom(text, local_names)
+}
+
+fn parse_atom(text: &str, local_names: &[String]) -> Result<Expr, EmitError> {
+    let text = text.trim();
+    if let Ok(n) = text.parse::<i32>() {
+        return Ok(Expr::IntLit(n));
+    }
+    if let Some(idx) = local_names.iter().position(|n| n == text) {
+        return Ok(Expr::Local(idx));
+    }
+    Err(EmitError::Unsupported(format!("atom `{text}` not a literal or known local")))
 }
 
 /// Produce the OBJ bytes for `cl /c /AS <source>` compiling the
@@ -378,13 +448,19 @@ fn main_body_for(ast: &MainAst) -> Vec<u8> {
         }
     }
 
-    // Return-value load.
-    if ast.return_value == 0 {
-        body.extend_from_slice(&[0x2B, 0xC0]);
+    // Return-value load. Folded constants take the literal path
+    // (`sub ax, ax` for 0, `mov ax, imm16` otherwise); non-folded
+    // expressions route through `emit_expr_to_ax`.
+    if let Some(k) = ast.return_expr.fold(&ast.locals) {
+        if k == 0 {
+            body.extend_from_slice(&[0x2B, 0xC0]);
+        } else {
+            let imm = (k as u32 & 0xFFFF) as u16;
+            body.push(0xB8);
+            body.extend_from_slice(&imm.to_le_bytes());
+        }
     } else {
-        let imm = (ast.return_value as u32 & 0xFFFF) as u16;
-        body.push(0xB8);
-        body.extend_from_slice(&imm.to_le_bytes());
+        emit_expr_to_ax(&ast.return_expr, &ast.locals, &mut body);
     }
 
     // Epilogue + ret. Same conditional as the prologue.
@@ -410,6 +486,125 @@ fn main_body_for(ast: &MainAst) -> Vec<u8> {
 /// `55 8b ec b8 <lo> <hi> e8`).
 fn chkstk_disp_offset(ast: &MainAst) -> usize {
     if ast.locals.is_empty() { 3 } else { 7 }
+}
+
+/// Append the bytes that compute `expr` into AX. Caller has already
+/// emitted the prologue + chkstk call; what we emit here lives
+/// between the chkstk call and the return-path epilogue. Phase 1
+/// Slice 4 supports a tight set of patterns — every other shape
+/// panics with a clear message so the missing case is obvious when
+/// a future fixture hits it.
+fn emit_expr_to_ax(expr: &Expr, locals: &[Option<i32>], out: &mut Vec<u8>) {
+    match expr {
+        Expr::IntLit(k) => {
+            // Foldable path is handled by the caller; this arm only
+            // fires if the caller bypassed folding.
+            let imm = (*k as u32 & 0xFFFF) as u16;
+            out.push(0xB8);
+            out.extend_from_slice(&imm.to_le_bytes());
+        }
+        Expr::Local(i) => {
+            emit_load_local(*i, out);
+        }
+        Expr::BinOp { op, left, right } => {
+            emit_binop(*op, left, right, locals, out);
+        }
+    }
+}
+
+/// `mov ax, word ptr [bp-disp]` — 3-byte form `8B 46 disp8`. Used
+/// for all local loads in Phase 1; only -2, -4, -6 displacements
+/// are exercised today.
+fn emit_load_local(idx: usize, out: &mut Vec<u8>) {
+    let disp = -(i16::try_from(idx + 1).expect("local index fits") * 2);
+    out.push(0x8B);
+    out.push(0x46);
+    out.push(disp as u8);
+}
+
+fn emit_binop(op: BinOp, left: &Expr, right: &Expr, locals: &[Option<i32>], out: &mut Vec<u8>) {
+    // Pattern: <Local> <op> <IntLit>. The very small set of (op, K)
+    // shapes we recognize:
+    //   Add, K=1   → inc ax
+    //   Sub, K=1   → dec ax
+    //   Mul, K=2   → shl ax, 1
+    //   Mul, K=3   → mov cx, ax; shl ax, 1; add ax, cx  (shift+add)
+    //   Add, K=any → add ax, K   (other K's TBD by a future fixture)
+    //   Sub, K=any → sub ax, K
+    if let (Expr::Local(li), Expr::IntLit(k)) = (left, right) {
+        emit_load_local(*li, out);
+        emit_imm_op(op, *k, out);
+        return;
+    }
+    // Pattern: <Local> <op> <Local> — `add ax, [bp-disp]` family.
+    // Fixture 4086 confirms this shape for Add; the Sub mirror is
+    // expected from the symmetry but isn't fixtured yet.
+    if let (Expr::Local(li), Expr::Local(ri)) = (left, right) {
+        emit_load_local(*li, out);
+        emit_mem_op(op, *ri, out);
+        return;
+    }
+    // Pattern with a foldable side — recurse with the folded literal
+    // in place. Lets `(2+x)` collapse to `(<lit> + <local>)` etc.
+    if let Some(k) = left.fold(locals) {
+        emit_binop(op, &Expr::IntLit(k), right, locals, out);
+        return;
+    }
+    if let Some(k) = right.fold(locals) {
+        emit_binop(op, left, &Expr::IntLit(k), locals, out);
+        return;
+    }
+    panic!("Slice 4 binop shape not yet supported: {op:?} of {left:?}, {right:?}");
+}
+
+/// Per-operator emit for `<reg-AX> <op> <imm>`. Picks the smallest
+/// MSC-equivalent form (single-byte inc/dec, shl, shift-and-add)
+/// before falling back to the generic `add/sub ax, imm16`.
+fn emit_imm_op(op: BinOp, k: i32, out: &mut Vec<u8>) {
+    let k16 = (k as u32 & 0xFFFF) as u16;
+    match (op, k16) {
+        (BinOp::Add, 1) => out.push(0x40),                  // inc ax
+        (BinOp::Sub, 1) => out.push(0x48),                  // dec ax
+        (BinOp::Mul, 2) => out.extend_from_slice(&[0xD1, 0xE0]), // shl ax, 1
+        // `x * 3` → `mov cx, ax; shl ax, 1; add ax, cx`. Fixture 4088.
+        // MSC picks this 6-byte shift-and-add over `imul ax, 3` for
+        // single-use *3.
+        (BinOp::Mul, 3) => out.extend_from_slice(&[
+            0x8B, 0xC8,         // mov cx, ax
+            0xD1, 0xE0,         // shl ax, 1
+            0x03, 0xC1,         // add ax, cx
+        ]),
+        // Generic `add/sub ax, imm16` — Phase 2 fixtures will pin
+        // down whether MSC ever picks `inc / dec` for K = 2 (BCC
+        // does for some shapes; MSC unknown).
+        (BinOp::Add, _) => {
+            out.push(0x05);                                 // add ax, imm16
+            out.extend_from_slice(&k16.to_le_bytes());
+        }
+        (BinOp::Sub, _) => {
+            out.push(0x2D);                                 // sub ax, imm16
+            out.extend_from_slice(&k16.to_le_bytes());
+        }
+        (BinOp::Mul, _) => {
+            panic!("Slice 4 multiplication by {k} not yet covered by a fixture");
+        }
+    }
+}
+
+/// Per-operator emit for `<reg-AX> <op> word ptr [bp-disp]`. The
+/// opcode-prefix byte for memory-source forms: 03=ADD, 2B=SUB. Mul
+/// from memory isn't a single-instruction shape so it's not handled
+/// here.
+fn emit_mem_op(op: BinOp, local_idx: usize, out: &mut Vec<u8>) {
+    let disp = -(i16::try_from(local_idx + 1).expect("local index fits") * 2);
+    let opcode = match op {
+        BinOp::Add => 0x03,
+        BinOp::Sub => 0x2B,
+        BinOp::Mul => panic!("Slice 4 doesn't handle `<local> * <local>` (no fixture)"),
+    };
+    out.push(opcode);
+    out.push(0x46);  // ModR/M: mod=01 (disp8), reg=000 (AX), r/m=110 (BP-rel)
+    out.push(disp as u8);
 }
 
 #[derive(Debug, thiserror::Error)]

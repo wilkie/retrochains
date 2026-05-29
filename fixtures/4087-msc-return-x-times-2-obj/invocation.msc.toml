@@ -1,0 +1,4 @@
+description = "return x * 2; — pow-2 mul, probes whether MSC strength-reduces to shl (BCC does)."
+tool = "cl"
+args = ["/c", "/AS", "HELLO.C"]
+inputs = ["HELLO.C"]

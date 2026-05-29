@@ -1,0 +1,4 @@
+description = "return x * 3; — non-pow-2 mul, forces imul. The dual of 4087."
+tool = "cl"
+args = ["/c", "/AS", "HELLO.C"]
+inputs = ["HELLO.C"]
