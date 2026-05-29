@@ -1,7 +1,7 @@
-//! Microsoft C 5.0 compiler reimplementation. Phase 1 Slice 1: emit
-//! the byte-exact OBJ produced by `cl /c /AS HELLO.C` for
-//! `int main(void) { return 0; }`. No parser yet — the OMF record
-//! sequence is hardcoded. See `specs/plans/MSC_PHASE_1.md`.
+//! Microsoft C 5.0 compiler reimplementation. Phase 1 covers
+//! `int main(void) { return K; }` under `cl /c /AS` for any 16-bit
+//! integer literal K. See `specs/plans/MSC_PHASE_1.md` for the
+//! sliced roadmap; this file's Slice 1+2 emit the OBJ directly.
 //!
 //! The reimplementation produces OBJ bytes directly via `crates/obj`
 //! rather than going through an ASM-text round-trip (which is BCC's
@@ -19,13 +19,15 @@ use obj::ObjBuilder;
 /// with the `.OBJ` extension.
 ///
 /// # Errors
-/// Returns [`EmitError`] on I/O failures.
+/// Returns [`EmitError`] on I/O failures or unsupported source shapes.
 pub fn emit_dash_c(source_path: &Path) -> Result<std::path::PathBuf, EmitError> {
     let source_filename = source_path
         .file_name()
         .and_then(|s| s.to_str())
         .ok_or_else(|| EmitError::BadSourcePath(source_path.display().to_string()))?;
-    let bytes = build_obj(source_filename);
+    let source = std::fs::read_to_string(source_path).map_err(EmitError::Io)?;
+    let return_value = parse_return_int(&source)?;
+    let bytes = build_obj(source_filename, return_value);
     let basename = source_path
         .file_stem()
         .and_then(|s| s.to_str())
@@ -35,12 +37,30 @@ pub fn emit_dash_c(source_path: &Path) -> Result<std::path::PathBuf, EmitError> 
     Ok(std::path::PathBuf::from(out_name))
 }
 
-/// Produce the OBJ bytes for an MSC `/c /AS` empty-main compile.
-/// `source_filename` is materialized verbatim (uppercased by the
-/// caller) into the THEADR — MSC's convention is "the name as the
-/// driver saw it on the command line."
+/// Extract the `return K;` literal from an `int main(void) { return K; }`
+/// source. Phase 1's source-shape envelope is intentionally tiny —
+/// once Slice 3 lands we'll have a real parser. Returns the literal
+/// truncated to a 16-bit value (matching MSC's `int` width under /AS).
+fn parse_return_int(source: &str) -> Result<i32, EmitError> {
+    let after_return = source
+        .find("return")
+        .map(|i| &source[i + "return".len()..])
+        .ok_or_else(|| EmitError::Unsupported("no `return` keyword in source".to_owned()))?;
+    let trimmed = after_return.trim_start();
+    let end = trimmed
+        .find(';')
+        .ok_or_else(|| EmitError::Unsupported("no `;` after `return`".to_owned()))?;
+    let lit = trimmed[..end].trim();
+    lit.parse::<i32>()
+        .map_err(|_| EmitError::Unsupported(format!("`return {lit};` literal not parseable")))
+}
+
+/// Produce the OBJ bytes for `cl /c /AS <source>` compiling
+/// `int main(void) { return <return_value>; }`. `source_filename`
+/// goes into THEADR uppercased the same way CL does it on the
+/// command line.
 #[must_use]
-pub fn build_obj(source_filename: &str) -> Vec<u8> {
+pub fn build_obj(source_filename: &str, return_value: i32) -> Vec<u8> {
     let mut b = ObjBuilder::new();
 
     // THEADR — module header. Source filename uppercased.
@@ -88,14 +108,23 @@ pub fn build_obj(source_filename: &str) -> Vec<u8> {
         "_BSS", "BSS",
     ]);
 
+    // Build the `_main` body up front so we can stamp its length
+    // into the _TEXT SEGDEF. MSC pads odd-length function bodies
+    // with a trailing NOP so every function ends on a word boundary
+    // — the `return K != 0` shape lands at 9 bytes pre-pad and 10
+    // after; `return 0` is already 8 and gets no pad. Fixtures 4075
+    // (return 0), 4076 (return 1), 4077 (return 42), 4078 (return -1).
+    let main_body = main_body_for_return(return_value);
+    let text_len = u16::try_from(main_body.len()).expect("_TEXT body fits in u16");
+
     // SEGDEF table. MSC uses acbp=0x48 (word-aligned, public, big=0,
     // proc=0) for every segment in the small model — distinct from
     // BCC which uses 0x28 (byte-aligned) for _TEXT. The 0x48 value
     // forces TLINK/LINK to pad to a word boundary before each
     // segment, which matters when multiple OBJs combine.
     //
-    // SEGDEF #1: _TEXT  — code, 8 bytes of `_main` body
-    b.write_segdef16(0x48, 8, 3, 4, 1);
+    // SEGDEF #1: _TEXT  — code, sized to `_main`'s padded length
+    b.write_segdef16(0x48, text_len, 3, 4, 1);
     // SEGDEF #2: _DATA  — initialized data, 0 bytes (no globals)
     b.write_segdef16(0x48, 0, 5, 6, 1);
     // SEGDEF #3: CONST  — read-only literals, 0 bytes
@@ -175,25 +204,9 @@ pub fn build_obj(source_filename: &str) -> Vec<u8> {
     // because there's only one LEDATA pass.
     b.write_coment(&[0x00, 0xA2, 0x01]);
 
-    // LEDATA #1 — _TEXT segment, offset 0, 8 bytes of `_main` body.
-    //   33 c0          xor ax, ax       ; chkstk arg = 0 (frame size)
-    //   e8 00 00       call __chkstk   ; FIXUP'd to EXTDEF #2
-    //   2b c0          sub ax, ax       ; return value = 0
-    //   c3             ret
-    //
-    // The chkstk call zeros AX as a side effect of how MSC chains
-    // the `int main(void) { return 0; }` lowering — the prologue
-    // wants `mov ax, <frame-size>` and the codegen happens to fold
-    // a `return 0` to `xor ax,ax`. The xor is shared. After
-    // chkstk returns (AX clobbered), codegen re-zeros via
-    // `sub ax, ax` (a 2-byte form that's identical in size to
-    // `xor ax,ax` but lexically picked by MSC for the return path).
-    b.write_ledata16(1, 0, &[
-        0x33, 0xC0,             // xor ax, ax
-        0xE8, 0x00, 0x00,       // call rel16 -> __chkstk (placeholder)
-        0x2B, 0xC0,             // sub ax, ax
-        0xC3,                   // ret
-    ]);
+    // LEDATA #1 — _TEXT segment, offset 0, `_main` body bytes.
+    // See `main_body_for_return` for the shape.
+    b.write_ledata16(1, 0, &main_body);
 
     // FIXUPP — patch the placeholder bytes of the `call __chkstk`.
     //   Locat byte 1 (0x84): bit7=1 (FIXUP), M=0 (self-relative),
@@ -217,10 +230,66 @@ pub fn build_obj(source_filename: &str) -> Vec<u8> {
     b.into_bytes()
 }
 
+/// MSC's `_main` body for `int main(void) { return K; }`. Two
+/// shapes, picked by whether the literal is zero:
+///
+/// **`return 0;` (fixture 4075):**
+/// ```text
+/// 33 c0          xor ax, ax       ; chkstk arg = frame size (0)
+/// e8 00 00       call __chkstk   ; FIXUP'd to EXTDEF #2
+/// 2b c0          sub ax, ax       ; return value = 0
+/// c3             ret
+/// ```
+/// Total 8 bytes — already word-aligned, no NOP needed.
+///
+/// **`return K != 0;` (fixtures 4076 / 4077 / 4078):**
+/// ```text
+/// 33 c0          xor ax, ax       ; chkstk arg = 0
+/// e8 00 00       call __chkstk   ; FIXUP'd
+/// b8 <lo> <hi>   mov ax, K        ; return value
+/// c3             ret
+/// 90             nop              ; pad to even byte count
+/// ```
+/// Total 10 bytes after the pad.
+///
+/// The shared prefix `33 c0 e8 00 00` is the per-function prologue
+/// MSC always emits under /AS (zero AX as the chkstk arg, call
+/// chkstk, the call's displacement gets FIXUP'd at byte offset 3).
+/// After the call returns, codegen emits the return-value setup —
+/// `sub ax, ax` for zero (special-case, even byte count) or `mov ax,
+/// imm16` for everything else (with a trailing NOP to round up).
+fn main_body_for_return(return_value: i32) -> Vec<u8> {
+    let mut body = Vec::with_capacity(10);
+    // Per-function prologue: AX = chkstk arg (0 for empty frame),
+    // call __chkstk with the displacement bytes left as 00 00 for
+    // the FIXUP to patch.
+    body.extend_from_slice(&[0x33, 0xC0, 0xE8, 0x00, 0x00]);
+    if return_value == 0 {
+        // `sub ax, ax` — 2-byte form picked for the return-0 path
+        // even though `xor ax, ax` (2-byte) would be equivalent.
+        // MSC's codegen always uses `sub ax, ax` for `return 0;`
+        // — empirically pinned by fixture 4075.
+        body.extend_from_slice(&[0x2B, 0xC0, 0xC3]);
+    } else {
+        // `mov ax, imm16` — 3-byte form B8 lo hi. Negative literals
+        // wrap to 16-bit unsigned (`-1` → 0xFFFF), matching the
+        // standard 8086 convention BCC also follows. Then `ret`
+        // and a `nop` pad to even byte count.
+        let imm = (return_value as u32 & 0xFFFF) as u16;
+        body.push(0xB8);
+        body.extend_from_slice(&imm.to_le_bytes());
+        body.push(0xC3);
+        body.push(0x90);
+    }
+    body
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum EmitError {
     #[error("could not read source filename from path {0:?}")]
     BadSourcePath(String),
+    #[error("unsupported source shape: {0}")]
+    Unsupported(String),
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
 }
