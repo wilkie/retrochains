@@ -1,0 +1,4 @@
+description = "TU-local void function with a single int parameter, called with a constant. Probes cdecl push+caller-cleanup."
+tool = "cl"
+args = ["/c", "/AS", "HELLO.C"]
+inputs = ["HELLO.C"]

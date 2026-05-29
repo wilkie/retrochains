@@ -48,11 +48,13 @@ pub struct Unit {
 
 /// One function definition. `return_int` distinguishes `int f(void)`
 /// from `void f(void)` — void functions skip the return-value
-/// instruction in their tail.
+/// instruction in their tail. `params` carries each parameter name
+/// (all params are 16-bit int in Phase 1).
 #[derive(Debug, Clone)]
 pub struct Function {
     pub name: String,
     pub return_int: bool,
+    pub params: Vec<String>,
     pub locals: Vec<Option<i32>>,
     pub body: Vec<Stmt>,
 }
@@ -132,16 +134,21 @@ pub enum Expr {
     /// A 16-bit-truncated int literal.
     IntLit(i32),
     /// Reference to a local by index into the enclosing function's
-    /// `locals` array.
+    /// `locals` array. Loaded from `[bp - 2*(idx+1)]`.
     Local(usize),
+    /// Reference to a parameter by index into the enclosing
+    /// function's `params` array. Loaded from `[bp + 4 + 2*idx]`
+    /// (positive disp from BP since params live above the saved BP
+    /// and the return address).
+    Param(usize),
     /// A binary operation. `op` selects add/sub/mul/...; codegen
     /// picks the actual instruction (inc/dec/shl/shift-add/imul)
     /// based on the operands.
     BinOp { op: BinOp, left: Box<Expr>, right: Box<Expr> },
-    /// Call by name with no arguments. Slice 6 fixture 4099
-    /// exercises the void/zero-arg case; later fixtures will widen
-    /// this to carry arguments.
-    Call { name: String },
+    /// Call by name with arguments. cdecl: caller pushes args
+    /// right-to-left then cleans up the stack with `add sp, N`
+    /// after the call. Fixtures 4099 (zero-arg) through 4102.
+    Call { name: String, args: Vec<Expr> },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -162,6 +169,8 @@ impl Expr {
         match self {
             Expr::IntLit(k) => Some(*k),
             Expr::Local(i) => locals.get(*i).copied().flatten(),
+            // Parameters carry an unknown value at compile time.
+            Expr::Param(_) => None,
             Expr::BinOp { op, left, right } => {
                 let l = left.fold(locals)?;
                 let r = right.fold(locals)?;
@@ -195,6 +204,7 @@ enum Tok {
     Plus,
     Minus,
     Star,
+    Comma,
 }
 
 fn tokenize(source: &str) -> Result<Vec<Tok>, EmitError> {
@@ -213,6 +223,7 @@ fn tokenize(source: &str) -> Result<Vec<Tok>, EmitError> {
             b'{' => { toks.push(Tok::LBrace); i += 1; }
             b'}' => { toks.push(Tok::RBrace); i += 1; }
             b';' => { toks.push(Tok::Semi); i += 1; }
+            b',' => { toks.push(Tok::Comma); i += 1; }
             b'+' => { toks.push(Tok::Plus); i += 1; }
             b'*' => { toks.push(Tok::Star); i += 1; }
             b'=' => {
@@ -285,6 +296,7 @@ struct Parser<'a> {
     toks: &'a [Tok],
     pos: usize,
     local_names: Vec<String>,
+    param_names: Vec<String>,
 }
 
 impl<'a> Parser<'a> {
@@ -317,7 +329,12 @@ impl<'a> Parser<'a> {
 /// grammar.
 fn parse_unit(source: &str) -> Result<Unit, EmitError> {
     let toks = tokenize(source)?;
-    let mut p = Parser { toks: &toks, pos: 0, local_names: Vec::new() };
+    let mut p = Parser {
+        toks: &toks,
+        pos: 0,
+        local_names: Vec::new(),
+        param_names: Vec::new(),
+    };
     let mut functions = Vec::new();
     while p.peek().is_some() {
         functions.push(parse_function(&mut p)?);
@@ -352,12 +369,40 @@ fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> {
         }
     };
     p.eat(&Tok::LParen)?;
-    p.eat(&Tok::Kw("void"))?;
+    // Parameter list: either `void` (no params) or one or more
+    // `int <name>` separated by `,`. Phase 1 only handles int
+    // parameters; other types come with later fixtures.
+    let params = if matches!(p.peek(), Some(Tok::Kw("void"))) {
+        p.bump();
+        Vec::new()
+    } else {
+        let mut names = Vec::new();
+        loop {
+            p.eat(&Tok::Kw("int"))?;
+            let pname = match p.bump().cloned() {
+                Some(Tok::Ident(s)) => s,
+                other => {
+                    return Err(EmitError::Unsupported(format!(
+                        "expected parameter name, got {other:?}"
+                    )));
+                }
+            };
+            names.push(pname);
+            if matches!(p.peek(), Some(Tok::Comma)) {
+                p.bump();
+                continue;
+            }
+            break;
+        }
+        names
+    };
     p.eat(&Tok::RParen)?;
     p.eat(&Tok::LBrace)?;
 
-    // Reset per-function local list before parsing the body.
+    // Reset per-function name lists, then populate with this
+    // function's params before parsing the body.
     p.local_names.clear();
+    p.param_names = params.clone();
 
     // `int <name> [= <int>];` declarations.
     let mut local_inits: Vec<Option<i32>> = Vec::new();
@@ -389,7 +434,7 @@ fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> {
     }
     p.eat(&Tok::RBrace)?;
 
-    Ok(Function { name, return_int, locals: local_inits, body })
+    Ok(Function { name, return_int, params, locals: local_inits, body })
 }
 
 fn parse_signed_int(p: &mut Parser<'_>) -> Result<i32, EmitError> {
@@ -475,9 +520,9 @@ fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
             };
             if matches!(p.peek(), Some(Tok::LParen)) {
                 p.bump(); // (
-                p.eat(&Tok::RParen)?;
+                let args = parse_call_args(p)?;
                 p.eat(&Tok::Semi)?;
-                return Ok(Stmt::ExprStmt(Expr::Call { name }));
+                return Ok(Stmt::ExprStmt(Expr::Call { name, args }));
             }
             let local_idx = p.local_names
                 .iter()
@@ -562,8 +607,18 @@ fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
             ))),
         },
         Some(Tok::Ident(name)) => {
+            // Identifier may be a call site (`f(args)`), a local
+            // reference, or a parameter reference. Disambiguate by
+            // looking ahead for `(`.
+            if matches!(p.peek(), Some(Tok::LParen)) {
+                p.bump(); // (
+                let args = parse_call_args(p)?;
+                return Ok(Expr::Call { name, args });
+            }
             if let Some(idx) = p.local_names.iter().position(|n| *n == name) {
                 Ok(Expr::Local(idx))
+            } else if let Some(idx) = p.param_names.iter().position(|n| *n == name) {
+                Ok(Expr::Param(idx))
             } else {
                 Err(EmitError::Unsupported(format!("unknown identifier `{name}`")))
             }
@@ -571,6 +626,34 @@ fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
         other => Err(EmitError::Unsupported(format!(
             "expected atom, got {other:?}"
         ))),
+    }
+}
+
+/// Parse the contents of `(<expr>, <expr>, ...)` for a call site —
+/// caller has already consumed the opening `(`. Stops at and
+/// consumes the closing `)`.
+fn parse_call_args(p: &mut Parser<'_>) -> Result<Vec<Expr>, EmitError> {
+    let mut args = Vec::new();
+    if matches!(p.peek(), Some(Tok::RParen)) {
+        p.bump();
+        return Ok(args);
+    }
+    loop {
+        args.push(parse_expr(p)?);
+        match p.peek() {
+            Some(Tok::Comma) => {
+                p.bump();
+            }
+            Some(Tok::RParen) => {
+                p.bump();
+                return Ok(args);
+            }
+            other => {
+                return Err(EmitError::Unsupported(format!(
+                    "expected `,` or `)` in call args, got {other:?}"
+                )));
+            }
+        }
     }
 }
 
@@ -590,6 +673,43 @@ struct CallSite {
     body_offset: usize,
     /// Name of the function being called.
     target: String,
+}
+
+/// Frame shape, which drives both the prologue and the
+/// per-return epilogue. Picked once per function.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Frame {
+    /// No prologue, no epilogue. Used for functions with neither
+    /// locals nor parameters — e.g. fixtures 4075-4078 and 4099's
+    /// `main`. Tail is just `c3` (ret).
+    None,
+    /// `push bp; mov bp, sp` prologue and `pop bp; ret` tail. Used
+    /// for parameterized functions with no locals (fixtures 4100-
+    /// 4102's callees). SP doesn't slide so no `mov sp, bp`.
+    BpOnly,
+    /// Full prologue (`push bp; mov bp, sp`) plus the locals-frame
+    /// allocation via chkstk, and `mov sp, bp; pop bp; ret` tail.
+    /// Used whenever the function has locals (fixtures 4079+).
+    WithSlide,
+}
+
+impl Frame {
+    fn for_function(func: &Function) -> Self {
+        let has_locals = !func.locals.is_empty();
+        let has_params = !func.params.is_empty();
+        match (has_locals, has_params) {
+            (true, _) => Frame::WithSlide,
+            (false, true) => Frame::BpOnly,
+            (false, false) => Frame::None,
+        }
+    }
+    fn epilogue_bytes(self) -> &'static [u8] {
+        match self {
+            Frame::None => &[0xC3],
+            Frame::BpOnly => &[0x5D, 0xC3],
+            Frame::WithSlide => &[0x8B, 0xE5, 0x5D, 0xC3],
+        }
+    }
 }
 
 /// Produce the OBJ bytes for `cl /c /AS <source>` compiling the
@@ -858,19 +978,21 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
 fn emit_function(func: &Function) -> FunctionEmit {
     let mut bytes = Vec::with_capacity(32);
     let mut calls: Vec<CallSite> = Vec::new();
+    let frame = Frame::for_function(func);
     let frame_bytes = func.locals.len() * 2;
-    let has_frame = frame_bytes > 0;
 
-    if has_frame {
-        bytes.extend_from_slice(&[0x55, 0x8B, 0xEC]);
-        bytes.push(0xB8);
-        bytes.extend_from_slice(
-            &u16::try_from(frame_bytes)
-                .expect("frame fits in u16")
-                .to_le_bytes(),
-        );
-    } else {
-        bytes.extend_from_slice(&[0x33, 0xC0]);
+    match frame {
+        Frame::None => bytes.extend_from_slice(&[0x33, 0xC0]),
+        Frame::BpOnly => bytes.extend_from_slice(&[0x55, 0x8B, 0xEC, 0x33, 0xC0]),
+        Frame::WithSlide => {
+            bytes.extend_from_slice(&[0x55, 0x8B, 0xEC]);
+            bytes.push(0xB8);
+            bytes.extend_from_slice(
+                &u16::try_from(frame_bytes)
+                    .expect("frame fits in u16")
+                    .to_le_bytes(),
+            );
+        }
     }
     // Position the chkstk e8's displacement bytes — the FIXUPP
     // patches them at link time. `bytes.len()` here is the offset
@@ -899,7 +1021,7 @@ fn emit_function(func: &Function) -> FunctionEmit {
         emit_stmt(
             stmt,
             &func.locals,
-            has_frame,
+            frame,
             func.return_int,
             &mut bytes,
             &mut calls,
@@ -911,13 +1033,10 @@ fn emit_function(func: &Function) -> FunctionEmit {
 
     // Implicit return at the end of void functions that don't have
     // an explicit `return;`. MSC's `_f` body in fixture 4099 ends
-    // with `c3` after the chkstk call — there's no `return` in the
-    // source. The shape mirrors `emit_return` minus the AX load.
+    // with `c3` after the chkstk call. The epilogue shape follows
+    // the function's frame.
     if reachable && !func.return_int {
-        if has_frame {
-            bytes.extend_from_slice(&[0x8B, 0xE5, 0x5D]);
-        }
-        bytes.push(0xC3);
+        bytes.extend_from_slice(frame.epilogue_bytes());
     }
 
     if bytes.len() % 2 != 0 {
@@ -938,33 +1057,29 @@ fn symbol_name(c_name: &str) -> String {
 fn emit_stmt(
     stmt: &Stmt,
     locals: &[Option<i32>],
-    has_frame: bool,
+    frame: Frame,
     return_int: bool,
     out: &mut Vec<u8>,
     calls: &mut Vec<CallSite>,
 ) {
     match stmt {
-        Stmt::Return(expr) => emit_return(expr, locals, has_frame, return_int, out),
+        Stmt::Return(expr) => emit_return(expr, locals, frame, return_int, out, calls),
         Stmt::Empty => {}
-        Stmt::ExprStmt(Expr::Call { name }) => {
-            // `f();` — emit `e8 00 00` and record the call site for
-            // post-pass displacement patching.
-            let body_offset = out.len();
-            out.extend_from_slice(&[0xE8, 0x00, 0x00]);
-            calls.push(CallSite { body_offset, target: symbol_name(name) });
+        Stmt::ExprStmt(Expr::Call { name, args }) => {
+            emit_call(name, args, locals, out, calls);
         }
         Stmt::ExprStmt(other) => {
             panic!("ExprStmt with non-call expression not yet supported: {other:?}");
         }
         Stmt::Assign { local_idx, value } => emit_assign(*local_idx, value, locals, out),
         Stmt::While { cond, body } => {
-            emit_while(cond, body, locals, has_frame, return_int, out, calls);
+            emit_while(cond, body, locals, frame, return_int, out, calls);
         }
         Stmt::DoWhile { body, cond } => {
-            emit_do_while(body, cond, locals, has_frame, return_int, out, calls);
+            emit_do_while(body, cond, locals, frame, return_int, out, calls);
         }
         Stmt::For { init, cond, step, body } => {
-            emit_for(init, cond, step, body, locals, has_frame, return_int, out, calls);
+            emit_for(init, cond, step, body, locals, frame, return_int, out, calls);
         }
         Stmt::If { cond, then_branch, else_branch } => {
             // Constant-condition elision: when the cond folds to a
@@ -973,9 +1088,9 @@ fn emit_stmt(
             // 4094 (if (0)) and 4095 (if (1)) confirm.
             if let Some(k) = fold_cond(cond, locals) {
                 if k != 0 {
-                    emit_stmt(then_branch, locals, has_frame, return_int, out, calls);
+                    emit_stmt(then_branch, locals, frame, return_int, out, calls);
                 } else if let Some(else_branch) = else_branch {
-                    emit_stmt(else_branch, locals, has_frame, return_int, out, calls);
+                    emit_stmt(else_branch, locals, frame, return_int, out, calls);
                 }
                 return;
             }
@@ -983,7 +1098,7 @@ fn emit_stmt(
             // its byte count for the conditional-jump displacement.
             let mut then_buf = Vec::new();
             let mut then_calls = Vec::new();
-            emit_stmt(then_branch, locals, has_frame, return_int, &mut then_buf, &mut then_calls);
+            emit_stmt(then_branch, locals, frame, return_int, &mut then_buf, &mut then_calls);
             let then_len = then_buf.len();
             let take_then_disp = i8::try_from(then_len)
                 .expect("then-body short enough for jcc rel8");
@@ -998,7 +1113,7 @@ fn emit_stmt(
                 calls.push(c);
             }
             if let Some(else_branch) = else_branch {
-                emit_stmt(else_branch, locals, has_frame, return_int, out, calls);
+                emit_stmt(else_branch, locals, frame, return_int, out, calls);
             }
         }
     }
@@ -1055,13 +1170,21 @@ fn fold_cond(cond: &Cond, locals: &[Option<i32>]) -> Option<i32> {
     }
 }
 
-fn emit_return(expr: &Expr, locals: &[Option<i32>], has_frame: bool, return_int: bool, out: &mut Vec<u8>) {
-    // Void functions skip the return-value instruction entirely —
-    // fixture 4099's `_f` body is just `xor ax,ax; call __chkstk;
-    // ret` with no AX load. Treat IntLit(0) on a void function as
-    // a `return;` shape and skip the load.
+fn emit_return(
+    expr: &Expr,
+    locals: &[Option<i32>],
+    frame: Frame,
+    return_int: bool,
+    out: &mut Vec<u8>,
+    calls: &mut Vec<CallSite>,
+) {
     if return_int {
-        if let Some(k) = expr.fold(locals) {
+        // Return-of-call peephole: `return f(args);` leaves the
+        // result in AX from the call's return value — no extra
+        // load before ret. Fixture 4102 confirms.
+        if let Expr::Call { name, args } = expr {
+            emit_call(name, args, locals, out, calls);
+        } else if let Some(k) = expr.fold(locals) {
             if k == 0 {
                 out.extend_from_slice(&[0x2B, 0xC0]);
             } else {
@@ -1073,13 +1196,64 @@ fn emit_return(expr: &Expr, locals: &[Option<i32>], has_frame: bool, return_int:
             emit_expr_to_ax(expr, locals, out);
         }
     }
-    // Per-return epilogue. 0-byte frames skip both the prologue and
-    // epilogue (fixture 4075); frame-using functions restore SP and
-    // pop BP before the ret. Every Return contributes its own copy.
-    if has_frame {
-        out.extend_from_slice(&[0x8B, 0xE5, 0x5D]);
+    out.extend_from_slice(frame.epilogue_bytes());
+}
+
+/// `<name>(args)` — cdecl call. Args are evaluated in source order
+/// but PUSHed right-to-left, then the call lands, then the caller
+/// cleans up with `add sp, N`. Fixtures 4100, 4101, 4102.
+///
+/// 8086 has no `push imm16` opcode (added in 286+), so a constant
+/// arg becomes `mov ax, K; push ax` (4 bytes). Local/param args go
+/// through `push word ptr [bp+disp]` (3 bytes).
+fn emit_call(
+    name: &str,
+    args: &[Expr],
+    locals: &[Option<i32>],
+    out: &mut Vec<u8>,
+    calls: &mut Vec<CallSite>,
+) {
+    for arg in args.iter().rev() {
+        emit_push_arg(arg, locals, out);
     }
-    out.push(0xC3);
+    let body_offset = out.len();
+    out.extend_from_slice(&[0xE8, 0x00, 0x00]);
+    calls.push(CallSite { body_offset, target: symbol_name(name) });
+    let cleanup_bytes = args.len() * 2;
+    if cleanup_bytes > 0 {
+        // `add sp, imm8sx` — Grp1 r/m16,imm8sx with /0=ADD,
+        // ModR/M mod=11 r/m=100 (SP). 3 bytes for small N.
+        out.push(0x83);
+        out.push(0xC4);
+        out.push(u8::try_from(cleanup_bytes).expect("cleanup fits in u8"));
+    }
+}
+
+/// Push one call argument onto the stack. For Phase 1: constants
+/// via `mov ax, K; push ax`; locals/params via direct memory push.
+fn emit_push_arg(arg: &Expr, _locals: &[Option<i32>], out: &mut Vec<u8>) {
+    match arg {
+        Expr::IntLit(k) => {
+            let imm = (*k as u32 & 0xFFFF) as u16;
+            out.push(0xB8);
+            out.extend_from_slice(&imm.to_le_bytes());
+            out.push(0x50); // push ax
+        }
+        Expr::Local(idx) => {
+            // `push word ptr [bp - 2*(idx+1)]` — `FF /6 r/m`.
+            let disp = -(i16::try_from(idx + 1).expect("local index fits") * 2);
+            out.push(0xFF);
+            out.push(0x76);
+            out.push(disp as u8);
+        }
+        Expr::Param(idx) => {
+            let disp = i8::try_from(4 + (idx * 2)).expect("param disp fits");
+            out.push(0xFF);
+            out.push(0x76);
+            out.push(disp as u8);
+        }
+        other => panic!("argument shape not yet supported: {other:?}"),
+    }
 }
 
 /// `<local> = <expr>;`. Phase 1 supports the peephole
@@ -1147,12 +1321,12 @@ fn emit_while(
     cond: &Cond,
     body_stmt: &Stmt,
     locals: &[Option<i32>],
-    has_frame: bool,
+    frame: Frame,
     return_int: bool,
     out: &mut Vec<u8>,
     calls: &mut Vec<CallSite>,
 ) {
-    emit_loop(cond, &[body_stmt], locals, has_frame, return_int, out, calls);
+    emit_loop(cond, &[body_stmt], locals, frame, return_int, out, calls);
 }
 
 /// `for (<init>; <cond>; <step>) <body>` — MSC's layout (fixture
@@ -1176,15 +1350,15 @@ fn emit_for(
     step: &Stmt,
     body_stmt: &Stmt,
     locals: &[Option<i32>],
-    has_frame: bool,
+    frame: Frame,
     return_int: bool,
     out: &mut Vec<u8>,
     calls: &mut Vec<CallSite>,
 ) {
-    emit_stmt(init, locals, has_frame, return_int, out, calls);
+    emit_stmt(init, locals, frame, return_int, out, calls);
     // The looped section is `step; body;` — treated as a single
     // "loop body" for the shared shape helper.
-    emit_loop(cond, &[step, body_stmt], locals, has_frame, return_int, out, calls);
+    emit_loop(cond, &[step, body_stmt], locals, frame, return_int, out, calls);
 }
 
 /// Shared loop emitter — handles the alignment-pad, body
@@ -1195,7 +1369,7 @@ fn emit_loop(
     cond: &Cond,
     body_segments: &[&Stmt],
     locals: &[Option<i32>],
-    has_frame: bool,
+    frame: Frame,
     return_int: bool,
     out: &mut Vec<u8>,
     calls: &mut Vec<CallSite>,
@@ -1203,7 +1377,7 @@ fn emit_loop(
     let mut body_buf = Vec::new();
     let mut body_calls: Vec<CallSite> = Vec::new();
     for seg in body_segments {
-        emit_stmt(seg, locals, has_frame, return_int, &mut body_buf, &mut body_calls);
+        emit_stmt(seg, locals, frame, return_int, &mut body_buf, &mut body_calls);
     }
     let mut cmp_buf = Vec::new();
     emit_cond_cmp(cond, &mut cmp_buf);
@@ -1259,14 +1433,14 @@ fn emit_do_while(
     body_stmt: &Stmt,
     cond: &Cond,
     locals: &[Option<i32>],
-    has_frame: bool,
+    frame: Frame,
     return_int: bool,
     out: &mut Vec<u8>,
     calls: &mut Vec<CallSite>,
 ) {
     let mut body_buf = Vec::new();
     let mut body_calls: Vec<CallSite> = Vec::new();
-    emit_stmt(body_stmt, locals, has_frame, return_int, &mut body_buf, &mut body_calls);
+    emit_stmt(body_stmt, locals, frame, return_int, &mut body_buf, &mut body_calls);
     let body_len = body_buf.len();
     let elide_cmp = body_sets_flags_for_cond(body_stmt, cond);
     let mut cmp_buf = Vec::new();
@@ -1390,13 +1564,26 @@ fn emit_expr_to_ax(expr: &Expr, locals: &[Option<i32>], out: &mut Vec<u8>) {
         Expr::Local(i) => {
             emit_load_local(*i, out);
         }
+        Expr::Param(i) => {
+            emit_load_param(*i, out);
+        }
         Expr::BinOp { op, left, right } => {
             emit_binop(*op, left, right, locals, out);
         }
-        Expr::Call { name } => {
-            panic!("Call to `{name}` inside an expression context not yet supported");
+        Expr::Call { name, .. } => {
+            panic!("Call to `{name}` inside a non-return expression context not yet supported");
         }
     }
+}
+
+/// `mov ax, word ptr [bp + 4 + 2*idx]` — load a parameter into AX.
+/// Same `8B 46 disp8` form as locals, just with a positive
+/// displacement. Fixture 4102 (`return a + b;`) exercises this.
+fn emit_load_param(idx: usize, out: &mut Vec<u8>) {
+    let disp = i8::try_from(4 + (idx * 2)).expect("param disp fits in i8");
+    out.push(0x8B);
+    out.push(0x46);
+    out.push(disp as u8);
 }
 
 /// `mov ax, word ptr [bp-disp]` — 3-byte form `8B 46 disp8`. Used
@@ -1410,29 +1597,22 @@ fn emit_load_local(idx: usize, out: &mut Vec<u8>) {
 }
 
 fn emit_binop(op: BinOp, left: &Expr, right: &Expr, locals: &[Option<i32>], out: &mut Vec<u8>) {
-    // Pattern: <Local> <op> <IntLit>. The very small set of (op, K)
-    // shapes we recognize:
-    //   Add, K=1   → inc ax
-    //   Sub, K=1   → dec ax
-    //   Mul, K=2   → shl ax, 1
-    //   Mul, K=3   → mov cx, ax; shl ax, 1; add ax, cx  (shift+add)
-    //   Add, K=any → add ax, K   (other K's TBD by a future fixture)
-    //   Sub, K=any → sub ax, K
-    if let (Expr::Local(li), Expr::IntLit(k)) = (left, right) {
-        emit_load_local(*li, out);
-        emit_imm_op(op, *k, out);
-        return;
+    // Left as a BP-rel operand we can load into AX.
+    if let Some(load) = bp_load(left) {
+        load(out);
+        // Right as IntLit → imm form.
+        if let Expr::IntLit(k) = right {
+            emit_imm_op(op, *k, out);
+            return;
+        }
+        // Right as BP-rel → `op ax, [bp+disp]` mem form.
+        if let Some(disp) = bp_disp(right) {
+            emit_mem_op_at(op, disp, out);
+            return;
+        }
     }
-    // Pattern: <Local> <op> <Local> — `add ax, [bp-disp]` family.
-    // Fixture 4086 confirms this shape for Add; the Sub mirror is
-    // expected from the symmetry but isn't fixtured yet.
-    if let (Expr::Local(li), Expr::Local(ri)) = (left, right) {
-        emit_load_local(*li, out);
-        emit_mem_op(op, *ri, out);
-        return;
-    }
-    // Pattern with a foldable side — recurse with the folded literal
-    // in place. Lets `(2+x)` collapse to `(<lit> + <local>)` etc.
+    // Foldable side — recurse with the folded literal substituted.
+    // Lets `(2 + x)` collapse to `(<lit> + <local>)` etc.
     if let Some(k) = left.fold(locals) {
         emit_binop(op, &Expr::IntLit(k), right, locals, out);
         return;
@@ -1441,7 +1621,28 @@ fn emit_binop(op: BinOp, left: &Expr, right: &Expr, locals: &[Option<i32>], out:
         emit_binop(op, left, &Expr::IntLit(k), locals, out);
         return;
     }
-    panic!("Slice 4 binop shape not yet supported: {op:?} of {left:?}, {right:?}");
+    panic!("binop shape not yet supported: {op:?} of {left:?}, {right:?}");
+}
+
+/// If `e` is a Local or Param, return a closure that emits the
+/// `mov ax, [bp+disp]` load. Otherwise return None. Used by
+/// `emit_binop` to handle either operand kind on the left-hand side.
+fn bp_load(e: &Expr) -> Option<Box<dyn FnOnce(&mut Vec<u8>) + '_>> {
+    match e {
+        Expr::Local(i) => Some(Box::new(move |out: &mut Vec<u8>| emit_load_local(*i, out))),
+        Expr::Param(i) => Some(Box::new(move |out: &mut Vec<u8>| emit_load_param(*i, out))),
+        _ => None,
+    }
+}
+
+/// If `e` is a Local or Param, return its bp-relative byte
+/// displacement (negative for locals, positive for params).
+fn bp_disp(e: &Expr) -> Option<i16> {
+    match e {
+        Expr::Local(i) => Some(-(*i as i16 + 1) * 2),
+        Expr::Param(i) => Some(4 + (*i as i16) * 2),
+        _ => None,
+    }
 }
 
 /// Per-operator emit for `<reg-AX> <op> <imm>`. Picks the smallest
@@ -1478,20 +1679,20 @@ fn emit_imm_op(op: BinOp, k: i32, out: &mut Vec<u8>) {
     }
 }
 
-/// Per-operator emit for `<reg-AX> <op> word ptr [bp-disp]`. The
-/// opcode-prefix byte for memory-source forms: 03=ADD, 2B=SUB. Mul
-/// from memory isn't a single-instruction shape so it's not handled
-/// here.
-fn emit_mem_op(op: BinOp, local_idx: usize, out: &mut Vec<u8>) {
-    let disp = -(i16::try_from(local_idx + 1).expect("local index fits") * 2);
+/// Per-operator emit for `<reg-AX> <op> word ptr [bp+disp]`. The
+/// opcode-prefix byte for memory-source forms: 03=ADD, 2B=SUB.
+/// Works for both negative disps (locals) and positive disps
+/// (params); fixture 4102 uses param shape.
+fn emit_mem_op_at(op: BinOp, disp: i16, out: &mut Vec<u8>) {
     let opcode = match op {
         BinOp::Add => 0x03,
         BinOp::Sub => 0x2B,
-        BinOp::Mul => panic!("Slice 4 doesn't handle `<local> * <local>` (no fixture)"),
+        BinOp::Mul => panic!("memory-source mul not yet covered by a fixture"),
     };
+    let disp8 = i8::try_from(disp).expect("disp fits in i8");
     out.push(opcode);
     out.push(0x46);  // ModR/M: mod=01 (disp8), reg=000 (AX), r/m=110 (BP-rel)
-    out.push(disp as u8);
+    out.push(disp8 as u8);
 }
 
 #[derive(Debug, thiserror::Error)]
