@@ -218,6 +218,10 @@ pub enum Cond {
 pub enum RelOp {
     Eq,
     Ne,
+    Lt,
+    Gt,
+    Le,
+    Ge,
 }
 
 /// Expression AST. Phase 1 grows this incrementally as fixtures
@@ -336,6 +340,36 @@ enum Tok {
     Assign,
     EqEq,
     NotEq,
+    Lt,
+    Gt,
+    Le,
+    Ge,
+    Shl,
+    Shr,
+    Slash,
+    Percent,
+    Pipe,
+    Caret,
+    Tilde,
+    Bang,
+    Quest,
+    Colon,
+    Dot,
+    Arrow,
+    PlusPlus,
+    MinusMinus,
+    PlusEq,
+    MinusEq,
+    StarEq,
+    SlashEq,
+    PercentEq,
+    AndEq,
+    PipeEq,
+    CaretEq,
+    ShlEq,
+    ShrEq,
+    AndAnd,
+    OrOr,
     Plus,
     Minus,
     Star,
@@ -370,11 +404,106 @@ fn tokenize(source: &str) -> Result<Vec<Tok>, EmitError> {
             b'}' => { toks.push(Tok::RBrace); i += 1; }
             b'[' => { toks.push(Tok::LBrack); i += 1; }
             b']' => { toks.push(Tok::RBrack); i += 1; }
-            b'&' => { toks.push(Tok::Amp); i += 1; }
+            b'&' => {
+                if bytes.get(i + 1) == Some(&b'&') {
+                    toks.push(Tok::AndAnd); i += 2;
+                } else if bytes.get(i + 1) == Some(&b'=') {
+                    toks.push(Tok::AndEq); i += 2;
+                } else {
+                    toks.push(Tok::Amp); i += 1;
+                }
+            }
             b';' => { toks.push(Tok::Semi); i += 1; }
             b',' => { toks.push(Tok::Comma); i += 1; }
-            b'+' => { toks.push(Tok::Plus); i += 1; }
-            b'*' => { toks.push(Tok::Star); i += 1; }
+            b'+' => {
+                if bytes.get(i + 1) == Some(&b'+') {
+                    toks.push(Tok::PlusPlus); i += 2;
+                } else if bytes.get(i + 1) == Some(&b'=') {
+                    toks.push(Tok::PlusEq); i += 2;
+                } else {
+                    toks.push(Tok::Plus); i += 1;
+                }
+            }
+            b'*' => {
+                if bytes.get(i + 1) == Some(&b'=') {
+                    toks.push(Tok::StarEq); i += 2;
+                } else {
+                    toks.push(Tok::Star); i += 1;
+                }
+            }
+            b'<' => {
+                if bytes.get(i + 1) == Some(&b'=') {
+                    toks.push(Tok::Le); i += 2;
+                } else if bytes.get(i + 1) == Some(&b'<') {
+                    if bytes.get(i + 2) == Some(&b'=') {
+                        toks.push(Tok::ShlEq); i += 3;
+                    } else {
+                        toks.push(Tok::Shl); i += 2;
+                    }
+                } else {
+                    toks.push(Tok::Lt); i += 1;
+                }
+            }
+            b'>' => {
+                if bytes.get(i + 1) == Some(&b'=') {
+                    toks.push(Tok::Ge); i += 2;
+                } else if bytes.get(i + 1) == Some(&b'>') {
+                    if bytes.get(i + 2) == Some(&b'=') {
+                        toks.push(Tok::ShrEq); i += 3;
+                    } else {
+                        toks.push(Tok::Shr); i += 2;
+                    }
+                } else {
+                    toks.push(Tok::Gt); i += 1;
+                }
+            }
+            b'/' => {
+                if bytes.get(i + 1) == Some(&b'=') {
+                    toks.push(Tok::SlashEq); i += 2;
+                } else if bytes.get(i + 1) == Some(&b'/') {
+                    while i < bytes.len() && bytes[i] != b'\n' { i += 1; }
+                } else if bytes.get(i + 1) == Some(&b'*') {
+                    i += 2;
+                    while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                        i += 1;
+                    }
+                    if i + 1 >= bytes.len() {
+                        return Err(EmitError::Unsupported(
+                            "unterminated `/* ... */` comment".to_owned(),
+                        ));
+                    }
+                    i += 2;
+                } else {
+                    toks.push(Tok::Slash); i += 1;
+                }
+            }
+            b'%' => {
+                if bytes.get(i + 1) == Some(&b'=') {
+                    toks.push(Tok::PercentEq); i += 2;
+                } else {
+                    toks.push(Tok::Percent); i += 1;
+                }
+            }
+            b'|' => {
+                if bytes.get(i + 1) == Some(&b'|') {
+                    toks.push(Tok::OrOr); i += 2;
+                } else if bytes.get(i + 1) == Some(&b'=') {
+                    toks.push(Tok::PipeEq); i += 2;
+                } else {
+                    toks.push(Tok::Pipe); i += 1;
+                }
+            }
+            b'^' => {
+                if bytes.get(i + 1) == Some(&b'=') {
+                    toks.push(Tok::CaretEq); i += 2;
+                } else {
+                    toks.push(Tok::Caret); i += 1;
+                }
+            }
+            b'~' => { toks.push(Tok::Tilde); i += 1; }
+            b'?' => { toks.push(Tok::Quest); i += 1; }
+            b':' => { toks.push(Tok::Colon); i += 1; }
+            b'.' => { toks.push(Tok::Dot); i += 1; }
             b'=' => {
                 if bytes.get(i + 1) == Some(&b'=') {
                     toks.push(Tok::EqEq);
@@ -389,12 +518,21 @@ fn tokenize(source: &str) -> Result<Vec<Tok>, EmitError> {
                     toks.push(Tok::NotEq);
                     i += 2;
                 } else {
-                    return Err(EmitError::Unsupported(
-                        "bare `!` (logical not) not yet supported".to_owned(),
-                    ));
+                    toks.push(Tok::Bang);
+                    i += 1;
                 }
             }
-            b'-' => { toks.push(Tok::Minus); i += 1; }
+            b'-' => {
+                if bytes.get(i + 1) == Some(&b'-') {
+                    toks.push(Tok::MinusMinus); i += 2;
+                } else if bytes.get(i + 1) == Some(&b'=') {
+                    toks.push(Tok::MinusEq); i += 2;
+                } else if bytes.get(i + 1) == Some(&b'>') {
+                    toks.push(Tok::Arrow); i += 2;
+                } else {
+                    toks.push(Tok::Minus); i += 1;
+                }
+            }
             b'#' => {
                 // Treat the entire line as a preprocessor directive
                 // (consume up to but not including the newline).
@@ -1042,6 +1180,10 @@ fn parse_cond(p: &mut Parser<'_>) -> Result<Cond, EmitError> {
     let op = match p.peek() {
         Some(Tok::EqEq) => Some(RelOp::Eq),
         Some(Tok::NotEq) => Some(RelOp::Ne),
+        Some(Tok::Lt) => Some(RelOp::Lt),
+        Some(Tok::Gt) => Some(RelOp::Gt),
+        Some(Tok::Le) => Some(RelOp::Le),
+        Some(Tok::Ge) => Some(RelOp::Ge),
         _ => None,
     };
     if let Some(op) = op {
@@ -2186,6 +2328,10 @@ fn fold_cond(cond: &Cond, locals: &[Option<i32>]) -> Option<i32> {
             Some(match op {
                 RelOp::Eq => i32::from(l == r),
                 RelOp::Ne => i32::from(l != r),
+                RelOp::Lt => i32::from(l < r),
+                RelOp::Gt => i32::from(l > r),
+                RelOp::Le => i32::from(l <= r),
+                RelOp::Ge => i32::from(l >= r),
             })
         }
     }
@@ -2612,11 +2758,10 @@ fn emit_loop(
     let needs_pad = pos_after_jmp % 2 != 0;
     let pad = if needs_pad { 1 } else { 0 };
 
-    let take_when_true = matches!(
-        cond,
-        Cond::Truthy(_) | Cond::Cmp { op: RelOp::Ne, .. }
-    );
-    let jcc_opcode = if take_when_true { 0x75 } else { 0x74 };
+    let jcc_opcode = match cond {
+        Cond::Truthy(_) => 0x75,             // jne (back when nonzero)
+        Cond::Cmp { op, .. } => loop_back_jcc(*op),
+    };
 
     let body_len = body_buf.len();
     let cmp_len = cmp_buf.len();
@@ -2677,11 +2822,10 @@ fn emit_do_while(
         emit_cond_cmp(cond, &mut cmp_buf, &mut cmp_fixups);
     }
     let cmp_len = cmp_buf.len();
-    let take_when_true = matches!(
-        cond,
-        Cond::Truthy(_) | Cond::Cmp { op: RelOp::Ne, .. }
-    );
-    let jcc_opcode = if take_when_true { 0x75 } else { 0x74 };
+    let jcc_opcode = match cond {
+        Cond::Truthy(_) => 0x75,             // jne (back when nonzero)
+        Cond::Cmp { op, .. } => loop_back_jcc(*op),
+    };
     let body_base = out.len();
     out.extend_from_slice(&body_buf);
     for mut c in body_fixups {
@@ -2760,10 +2904,7 @@ fn emit_cond_skip(cond: &Cond, take_then_disp: i8, out: &mut Vec<u8>, fixups: &m
             // `if (<global> ==/!= K)` → cmp word ptr [<addr>], K;
             // jne/je skip. Fixture 4133.
             emit_cmp_global_imm(*idx, *k, out, fixups);
-            let opcode = match op {
-                RelOp::Eq => 0x75,  // jne skip on equality match → fall into then
-                RelOp::Ne => 0x74,  // je skip on inequality match → fall into then
-            };
+            let opcode = inverted_jcc(*op);
             out.push(opcode);
             out.push(take_then_disp as u8);
         }
@@ -2781,6 +2922,36 @@ fn emit_cond_skip(cond: &Cond, take_then_disp: i8, out: &mut Vec<u8>, fixups: &m
             out.push(take_then_disp as u8);
         }
         other => panic!("Slice 5 cond shape not yet supported: {other:?}"),
+    }
+}
+
+/// The signed conditional-jump opcode for **falling through to the
+/// then-block** when `op` is satisfied. Used by `emit_cond_skip`: the
+/// emitted `jcc skip` triggers when the cond is *false*, so this is
+/// the **inversion** of the source-level relop. MSC's signed-jcc
+/// mnemonic family is `7c..7f` for the disp8 forms.
+fn inverted_jcc(op: RelOp) -> u8 {
+    match op {
+        RelOp::Eq => 0x75, // jne — skip then-block when not-equal
+        RelOp::Ne => 0x74, // je
+        RelOp::Lt => 0x7D, // jge — signed
+        RelOp::Le => 0x7F, // jg
+        RelOp::Gt => 0x7E, // jle
+        RelOp::Ge => 0x7C, // jl
+    }
+}
+
+/// Loop-back jcc opcode — fires when cond is *true*, so it's NOT
+/// inverted. Used by `emit_while` / `emit_do_while` for the tail
+/// branch back to the loop top.
+fn loop_back_jcc(op: RelOp) -> u8 {
+    match op {
+        RelOp::Eq => 0x74, // je
+        RelOp::Ne => 0x75, // jne
+        RelOp::Lt => 0x7C, // jl
+        RelOp::Le => 0x7E, // jle
+        RelOp::Gt => 0x7F, // jg
+        RelOp::Ge => 0x7D, // jge
     }
 }
 
