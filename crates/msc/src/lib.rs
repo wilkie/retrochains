@@ -68,6 +68,10 @@ pub struct Global {
     /// Bytes per element (1 for char arrays, 2 for everything else
     /// in Phase 1).
     pub element_size: usize,
+    /// `true` for declared pointer types (`int *`, `char *`). The
+    /// storage is still 2 bytes (near pointer), but indexing a
+    /// pointer requires a load+offset, not a direct addressing mode.
+    pub is_pointer: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -164,9 +168,13 @@ pub enum AssignTarget {
     /// `*<ptr-global> = <expr>;` — store the RHS through a pointer
     /// global. Fixture 4116.
     DerefGlobal(usize),
-    /// `<global>[K] = <expr>;` — write at a constant index into a
-    /// global array. `byte_off` is `K * element_size`. Fixture 4119.
+    /// `<global>[K] = <expr>;` — write a 2-byte word at a constant
+    /// index into an int-array global. `byte_off` is `K * 2`.
+    /// Fixture 4119.
     IndexedGlobal { array: usize, byte_off: u16 },
+    /// `<char-global>[K] = <byte>;` — write one byte at a constant
+    /// index into a char-array global. `byte_off` is `K`. Fixture 4122.
+    IndexedGlobalByte { array: usize, byte_off: u16 },
 }
 
 /// Condition for `if` (and later `while`/`for`). Slice 5 covers the
@@ -219,11 +227,20 @@ pub enum Expr {
     /// describing the global's address; writes lower to
     /// `c7 06 addr imm16`. Fixtures 4104, 4106.
     Global(usize),
-    /// Array element access — `a[<expr>]`. Constant index folds to
-    /// an `a1 imm16` load whose immediate is `2 * index` (linker adds
-    /// the array base via the FIXUP). Variable index defers to a
-    /// later sub-slice. Fixture 4109.
+    /// Array element access — `a[<expr>]` for word-sized elements.
+    /// Constant index folds to an `a1 imm16` load whose immediate
+    /// is `2 * index` (linker adds the array base via the FIXUP).
+    /// Variable index uses `mov bx, ...; shl bx, 1; mov ax, [bx+addr]`.
+    /// Fixtures 4109, 4112.
     Index { array: usize, index: Box<Expr> },
+    /// Byte-sized array element access — `s[<expr>]` for `char`
+    /// arrays. Constant index folds to `a0 imm16` (mov al, moffs8)
+    /// + `98` (cbw) to widen into AX. Fixture 4121.
+    IndexByte { array: usize, index: Box<Expr> },
+    /// Pointer-indexed byte read — `p[<expr>]` where `p` is a
+    /// `char *` global. Constant index lowers to
+    /// `mov bx, [p]; mov al, [bx+disp]; cbw`. Fixture 4123.
+    PtrIndexByte { ptr: usize, index: Box<Expr> },
     /// `*<ptr>` — pointer dereference. Phase 1 supports only the
     /// `*<char-ptr-global>` form (fixture 4111).
     Deref { ptr: Box<Expr> },
@@ -261,7 +278,7 @@ impl Expr {
             Expr::Call { .. } => None,
             Expr::StrLit(_) => None,
             Expr::Global(_) => None,
-            Expr::Index { .. } => None,
+            Expr::Index { .. } | Expr::IndexByte { .. } | Expr::PtrIndexByte { .. } => None,
             Expr::Deref { .. } => None,
         }
     }
@@ -654,7 +671,7 @@ fn parse_global_decl(p: &mut Parser<'_>) -> Result<(), EmitError> {
     p.eat(&Tok::Semi)?;
     let element_size = if is_char && !is_pointer { 1 } else { 2 };
     p.global_names.push(name.clone());
-    p.globals.push(Global { name, init, array_len, element_size });
+    p.globals.push(Global { name, init, array_len, element_size, is_pointer });
     Ok(())
 }
 
@@ -874,10 +891,12 @@ fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
                 let elem_bytes = p.globals[array_idx].element_size;
                 let byte_off = u16::try_from((k as i64) * (elem_bytes as i64))
                     .expect("indexed-store byte offset fits");
-                return Ok(Stmt::Assign {
-                    target: AssignTarget::IndexedGlobal { array: array_idx, byte_off },
-                    value,
-                });
+                let target = if elem_bytes == 1 {
+                    AssignTarget::IndexedGlobalByte { array: array_idx, byte_off }
+                } else {
+                    AssignTarget::IndexedGlobal { array: array_idx, byte_off }
+                };
+                return Ok(Stmt::Assign { target, value });
             }
             let target = if let Some(idx) = p.local_names.iter().position(|n| *n == name) {
                 AssignTarget::Local(idx)
@@ -995,14 +1014,23 @@ fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
             } else if let Some(idx) = p.param_names.iter().position(|n| *n == name) {
                 Ok(Expr::Param(idx))
             } else if let Some(idx) = p.global_names.iter().position(|n| *n == name) {
-                // `<global>[<expr>]` is an array index. The result is
-                // an lvalue of the element type (always int in
-                // Phase 1).
+                // `<global>[<expr>]` — array index or pointer index.
+                // Array (`int a[N]`): direct addressing.
+                // Pointer (`char *p`): load pointer first, then offset.
                 if matches!(p.peek(), Some(Tok::LBrack)) {
                     p.bump();
                     let index = parse_expr(p)?;
                     p.eat(&Tok::RBrack)?;
-                    Ok(Expr::Index { array: idx, index: Box::new(index) })
+                    let g = &p.globals[idx];
+                    if g.is_pointer {
+                        // Pointer-indexed read. Phase 1 covers the
+                        // `char *p` byte form (fixture 4123).
+                        Ok(Expr::PtrIndexByte { ptr: idx, index: Box::new(index) })
+                    } else if g.element_size == 1 {
+                        Ok(Expr::IndexByte { array: idx, index: Box::new(index) })
+                    } else {
+                        Ok(Expr::Index { array: idx, index: Box::new(index) })
+                    }
                 } else {
                     Ok(Expr::Global(idx))
                 }
@@ -1749,7 +1777,9 @@ fn fold_globals_expr(e: &mut Expr, known: &std::collections::HashMap<usize, i32>
                 fold_globals_expr(a, known);
             }
         }
-        Expr::Index { index, .. } => {
+        Expr::Index { index, .. }
+        | Expr::IndexByte { index, .. }
+        | Expr::PtrIndexByte { index, .. } => {
             fold_globals_expr(index, known);
         }
         Expr::Deref { ptr } => {
@@ -2082,6 +2112,9 @@ fn emit_assign(target: AssignTarget, value: &Expr, locals: &[Option<i32>], out: 
         AssignTarget::IndexedGlobal { array, byte_off } => {
             return emit_assign_indexed_global(array, byte_off, value, locals, out, fixups);
         }
+        AssignTarget::IndexedGlobalByte { array, byte_off } => {
+            return emit_assign_indexed_global_byte(array, byte_off, value, locals, out, fixups);
+        }
     };
     let disp = -(i16::try_from(local_idx + 1).expect("local index fits") * 2);
     // Peephole: `x = x + 1;` and `x = x - 1;` become in-place
@@ -2178,6 +2211,24 @@ fn emit_assign_indexed_global(global_idx: usize, byte_off: u16, value: &Expr, lo
             kind: FixupKind::GlobalAddr { global_idx },
         });
     }
+}
+
+/// `<char-global>[K] = <byte>;` — store one byte at a constant
+/// index. `c6 06 byte_off imm8`. Fixture 4122.
+fn emit_assign_indexed_global_byte(global_idx: usize, byte_off: u16, value: &Expr, locals: &[Option<i32>], out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    let k = value.fold(locals).unwrap_or_else(|| {
+        panic!("non-constant char-array store value not yet supported")
+    });
+    let imm = (k as u32 & 0xFF) as u8;
+    out.push(0xC6);
+    out.push(0x06);
+    let addr_off = out.len();
+    out.extend_from_slice(&byte_off.to_le_bytes());
+    out.push(imm);
+    fixups.push(Fixup {
+        body_offset: addr_off - 1,
+        kind: FixupKind::GlobalAddr { global_idx },
+    });
 }
 
 /// `*<ptr-global> = <expr>;` — store through a pointer global.
@@ -2505,6 +2556,39 @@ fn emit_expr_to_ax(expr: &Expr, locals: &[Option<i32>], out: &mut Vec<u8>, fixup
                 }
                 other => panic!("deref of {other:?} not yet supported"),
             }
+        }
+        Expr::PtrIndexByte { ptr, index } => {
+            // Constant index: load pointer global into BX, then
+            // `mov al, [bx + disp]` and `cbw`. `disp` is the byte
+            // index. Fixture 4123. Phase 1 keeps it disp8.
+            let k = index.fold(locals).unwrap_or_else(|| {
+                panic!("non-constant char-ptr index not yet supported")
+            });
+            let disp = i8::try_from(k).expect("ptr index fits in i8");
+            let body_offset = out.len();
+            out.extend_from_slice(&[0x8B, 0x1E, 0x00, 0x00]);
+            fixups.push(Fixup {
+                body_offset: body_offset + 1,
+                kind: FixupKind::GlobalAddr { global_idx: *ptr },
+            });
+            out.extend_from_slice(&[0x8A, 0x47, disp as u8, 0x98]);
+        }
+        Expr::IndexByte { array, index } => {
+            // Phase 1: constant index only — `a0 <byte_off> 98`.
+            // The placeholder is the index itself (size 1 per slot);
+            // the linker adds the array's base address.
+            let k = index.fold(locals).unwrap_or_else(|| {
+                panic!("non-constant char-array index not yet supported")
+            });
+            let byte_off = (k as u32 & 0xFFFF) as u16;
+            let body_offset = out.len();
+            out.push(0xA0);
+            out.extend_from_slice(&byte_off.to_le_bytes());
+            fixups.push(Fixup {
+                body_offset,
+                kind: FixupKind::GlobalAddr { global_idx: *array },
+            });
+            out.push(0x98);
         }
         Expr::Index { array, index } => {
             if let Some(k) = index.fold(locals) {
