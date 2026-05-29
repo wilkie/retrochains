@@ -18,6 +18,16 @@ pkg/
 # oracle crate; BC2.zip itself is tracked, the unpacked contents are not).
 .bc2/
 
+# Oracle distributions for the second/third compiler targets. The binaries
+# aren't ours to redistribute, so we ship a SHA-256 manifest (`MSC500.sha256`,
+# `LATTICE*.sha256`) and a how-to-acquire doc (`MSC500.md`, `LATTICE*.md`)
+# instead of the zip itself. See specs/plans/SECOND_COMPILER.md.
+/MSC*.zip
+/LATTICE*.zip
+.msc500/
+.lattice2/
+.lattice3/
+
 # Stray Borland-built artifacts at the repo root (fixture outputs belong under
 # fixtures/ and ARE tracked, so we don't blanket-ignore these extensions).
 /*.OBJ
