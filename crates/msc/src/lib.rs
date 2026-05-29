@@ -5090,6 +5090,12 @@ fn emit_do_while(
 /// Current trigger: `<local> = <local> ± 1;` paired with
 /// `while (<same-local>);`. Fixture 4098.
 fn body_sets_flags_for_cond(body: &Stmt, cond: &Cond) -> bool {
+    // Peel a single-statement block so `do { i--; } while (i);` is
+    // recognized identically to `do i--; while (i);` (fixture 1218).
+    let body = match body {
+        Stmt::Block(stmts) if stmts.len() == 1 => &stmts[0],
+        other => other,
+    };
     let Stmt::Assign { target: AssignTarget::Local(local_idx), value } = body else { return false };
     let Cond::Truthy(Expr::Local(cond_idx)) = cond else { return false };
     if local_idx != cond_idx {
