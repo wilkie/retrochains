@@ -7357,18 +7357,12 @@ impl<'a> FunctionEmitter<'a> {
     }
 
     fn emit_return_value_load_inner(&mut self, e: &Expr) {
-        // `return _AX;` / `return _BX;` / etc. — BCC's
-        // inline-asm contract: the underscore-prefixed register
-        // names refer to the live CPU register, not a C local.
-        // The asm body has already left the value there; the
-        // return-value loader is a no-op, control just falls
-        // through to the exit jmp. Fixture 2122
-        // (`asm mov ax,x; asm xchg ah,al; return _AX;`).
-        if let ExprKind::Ident(name) = &e.kind
-            && is_asm_pseudo_register(name)
-        {
-            return;
-        }
+        // `return _AX;` and friends route through `emit_expr_to_ax`'s
+        // `ExprKind::PseudoReg` arm (the pre-codegen rewrite pass
+        // converts pseudo-register `Ident`s to that variant). `_AX`
+        // is a no-op there; other pseudos load AX explicitly.
+        // Fixtures 2122, 4051–4053.
+        //
         // Float / double-returning function: evaluate the value onto
         // the FPU stack. BCC leaves the result on st(0) for the
         // caller; no register transfer needed. Fixture 1684.
@@ -21937,13 +21931,18 @@ impl<'a> FunctionEmitter<'a> {
             ExprKind::PseudoReg(name) => {
                 // Pseudo-register read in expression position. `_AX`
                 // is the live AX (no-op load). Word pseudos copy via
-                // `mov ax, <reg>`. Byte pseudos and `_FLAGS` need
-                // width-widening / pushf paths — separate slices.
+                // `mov ax, <reg>`. Byte pseudos widen as unsigned
+                // char: `_AL` is already in AL, just clear AH. Fixture
+                // 4052 (`_AL = 0x80; return _AL;` → `mov ah, 0`).
                 if name == "_AX" {
                     return;
                 }
+                if name == "_AL" {
+                    self.out.extend_from_slice(b"\tmov\tah,0\r\n");
+                    return;
+                }
                 if is_byte_pseudo_register(name) {
-                    panic!("byte pseudo-register `{name}` read in int context not yet supported");
+                    panic!("byte pseudo-register `{name}` read in int context not yet supported (only `_AL` covered)");
                 }
                 let reg = pseudo_register_operand(name)
                     .expect("PseudoReg variant carries a valid pseudo name");
