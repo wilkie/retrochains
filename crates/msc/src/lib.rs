@@ -3523,17 +3523,21 @@ fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
             // emit_assign can hit the in-place inc/dec/add/sub-mem
             // peepholes (fixtures 1029, 1116). Substituting `x` to its
             // known IntLit defeats those.
-            // For `x = x ± RHS`, leave the LHS unsubstituted so
-            // emit_assign sees `BinOp(Local(x), Add|Sub, ...)` and
-            // hits the in-place inc/dec/add/sub peephole. Other ops
-            // (Shl, Mul, etc.) don't have a peephole shape, so we
-            // substitute normally (lets the value const-fold via
-            // both operands; fixtures 1022, 1024).
-            let self_assign_addsub = matches!(
-                (target.clone(), value.clone()),
-                (AssignTarget::Local(t), Expr::BinOp { op: BinOp::Add | BinOp::Sub, left, .. })
-                    if matches!(left.as_ref(), Expr::Local(l) if *l == t)
-            );
+            // For `x = x ± RHS` (Local or Global self-assign on the
+            // left), leave the LHS unsubstituted so emit_assign sees
+            // `BinOp(self, Add|Sub, ...)` and hits the in-place
+            // inc/dec/add/sub peephole. Other ops (Shl, Mul, etc.)
+            // don't have a peephole shape, so we substitute normally
+            // (fixtures 1022, 1024).
+            let self_assign_addsub = match (target.clone(), value.clone()) {
+                (AssignTarget::Local(t), Expr::BinOp { op: BinOp::Add | BinOp::Sub, left, .. }) => {
+                    matches!(left.as_ref(), Expr::Local(l) if *l == t)
+                }
+                (AssignTarget::Global(t), Expr::BinOp { op: BinOp::Add | BinOp::Sub, left, .. }) => {
+                    matches!(left.as_ref(), Expr::Global(g) if *g == t)
+                }
+                _ => false,
+            };
             if self_assign_addsub
                 && let Expr::BinOp { right, .. } = value
             {
@@ -4512,24 +4516,58 @@ fn emit_assign_global(global_idx: usize, value: &Expr, locals: &Locals<'_>, out:
         });
         return;
     }
-    // Peephole: `g = g ± 1;` → `inc/dec word ptr [g]` (4 bytes:
-    // `ff /0 mem` for inc, `ff /1 mem` for dec). Fixture 4141.
-    if let Expr::BinOp { op, left, right } = value
+    // Peephole: `g = g ± K` for int globals:
+    //   K == 1: `inc/dec word ptr [g]`               (4 bytes)
+    //   |K| ≤ 127: `add/sub word [g], imm8sx`         (5 bytes)
+    //   larger: `add/sub word [g], imm16`             (6 bytes)
+    // Long globals are handled by an earlier specialized arm.
+    if !locals.is_long_global(global_idx)
+        && let Expr::BinOp { op, left, right } = value
         && let Expr::Global(li) = left.as_ref()
         && *li == global_idx
-        && let Expr::IntLit(1) = right.as_ref()
         && matches!(op, BinOp::Add | BinOp::Sub)
+        && let Some(k) = right.fold(locals.inits)
     {
-        let modrm = if matches!(op, BinOp::Add) { 0x06 } else { 0x0E };
-        out.push(0xFF);
-        out.push(modrm);
-        let body_offset = out.len();
-        out.extend_from_slice(&[0x00, 0x00]);
-        fixups.push(Fixup {
-            body_offset: body_offset - 1,
-            kind: FixupKind::GlobalAddr { global_idx },
-        });
-        return;
+        match (op, k) {
+            (BinOp::Add, 1) | (BinOp::Sub, 1) => {
+                let modrm = if matches!(op, BinOp::Add) { 0x06 } else { 0x0E };
+                out.push(0xFF);
+                out.push(modrm);
+                let body_offset = out.len();
+                out.extend_from_slice(&[0x00, 0x00]);
+                fixups.push(Fixup {
+                    body_offset: body_offset - 1,
+                    kind: FixupKind::GlobalAddr { global_idx },
+                });
+                return;
+            }
+            _ => {
+                let modrm = if matches!(op, BinOp::Add) { 0x06 } else { 0x2E };
+                if let Ok(k8) = i8::try_from(k) {
+                    out.push(0x83);
+                    out.push(modrm);
+                    let body_offset = out.len();
+                    out.extend_from_slice(&[0x00, 0x00]);
+                    out.push(k8 as u8);
+                    fixups.push(Fixup {
+                        body_offset: body_offset - 1,
+                        kind: FixupKind::GlobalAddr { global_idx },
+                    });
+                } else {
+                    out.push(0x81);
+                    out.push(modrm);
+                    let body_offset = out.len();
+                    out.extend_from_slice(&[0x00, 0x00]);
+                    let imm = (k as u32 & 0xFFFF) as u16;
+                    out.extend_from_slice(&imm.to_le_bytes());
+                    fixups.push(Fixup {
+                        body_offset: body_offset - 1,
+                        kind: FixupKind::GlobalAddr { global_idx },
+                    });
+                }
+                return;
+            }
+        }
     }
     if let Some(k) = value.fold(locals.inits) {
         let imm = (k as u32 & 0xFFFF) as u16;
