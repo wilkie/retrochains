@@ -298,6 +298,14 @@ pub enum Expr {
     /// `&<local>` — address-of a stack local. Lowers to
     /// `lea ax, [bp-disp]` (`8d 46 disp`).
     AddrOfLocal(usize),
+    /// `<cond> ? <then> : <else>` — C ternary. Folds when cond is
+    /// a known literal; otherwise codegen would need branching
+    /// support (not yet implemented).
+    Ternary {
+        cond: Box<Expr>,
+        then_arm: Box<Expr>,
+        else_arm: Box<Expr>,
+    },
     /// `*<ptr>` — byte-sized pointer dereference (`char *`). Lowers
     /// to `mov bx, <ptr>; mov al, [bx]; cbw`. Fixture 4111.
     DerefByte { ptr: Box<Expr> },
@@ -372,6 +380,14 @@ impl Expr {
             Expr::Index { .. } | Expr::IndexByte { .. } | Expr::PtrIndexByte { .. } => None,
             Expr::DerefByte { .. } | Expr::DerefWord { .. } => None,
             Expr::AddrOfGlobal(_) | Expr::AddrOfLocal(_) => None,
+            Expr::Ternary { cond, then_arm, else_arm } => {
+                let c = cond.fold(locals)?;
+                if c != 0 {
+                    then_arm.fold(locals)
+                } else {
+                    else_arm.fold(locals)
+                }
+            }
         }
     }
 }
@@ -1526,7 +1542,19 @@ fn parse_cond(p: &mut Parser<'_>) -> Result<Cond, EmitError> {
 /// Expression parser — recognizes the Slice-4 shapes:
 /// `<atom>` or `<atom> <op> <atom>` where op is `+ - *`.
 fn parse_expr(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
-    parse_binop_prec(p, 0)
+    let cond = parse_binop_prec(p, 0)?;
+    if matches!(p.peek(), Some(Tok::Quest)) {
+        p.bump();
+        let then_arm = parse_expr(p)?;
+        p.eat(&Tok::Colon)?;
+        let else_arm = parse_expr(p)?;
+        return Ok(Expr::Ternary {
+            cond: Box::new(cond),
+            then_arm: Box::new(then_arm),
+            else_arm: Box::new(else_arm),
+        });
+    }
+    Ok(cond)
 }
 
 /// Operator-precedence climbing for the binary-operator chain. The
@@ -2616,6 +2644,11 @@ fn prop_expr(e: &mut Expr, cp: &ConstProp) {
             prop_expr(ptr, cp);
         }
         Expr::AddrOfGlobal(_) | Expr::AddrOfLocal(_) => {}
+        Expr::Ternary { cond, then_arm, else_arm } => {
+            prop_expr(cond, cp);
+            prop_expr(then_arm, cp);
+            prop_expr(else_arm, cp);
+        }
         Expr::IntLit(_) | Expr::Param(_) | Expr::StrLit(_) => {}
     }
 }
@@ -3699,6 +3732,11 @@ fn emit_expr_to_ax(expr: &Expr, locals: &[Option<i32>], out: &mut Vec<u8>, fixup
             // `lea ax, [bp - 2*(idx+1)]` = `8d 46 disp`.
             let disp = -(i16::try_from(idx + 1).expect("local idx") * 2);
             out.extend_from_slice(&[0x8D, 0x46, disp as u8]);
+        }
+        Expr::Ternary { .. } => {
+            // Should have folded already by the caller for runtime
+            // ternary codegen we don't yet implement.
+            panic!("non-constant ternary not yet supported");
         }
     }
 }
