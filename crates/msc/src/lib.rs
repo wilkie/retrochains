@@ -95,6 +95,8 @@ pub struct Global {
     /// access reads the low half; high half is reserved for runtime
     /// long arithmetic that isn't implemented yet.
     pub is_long: bool,
+    /// `static` storage class — TU-private symbol, suppress PUBDEF.
+    pub is_static: bool,
 }
 
 impl Global {
@@ -1204,6 +1206,7 @@ fn parse_struct_global_decl(p: &mut Parser<'_>) -> Result<(), EmitError> {
         is_pointer,
         struct_idx: Some(sidx),
         is_long: false,
+        is_static: false,
     });
     Ok(())
 }
@@ -1283,6 +1286,24 @@ fn parse_struct_def(p: &mut Parser<'_>) -> Result<(), EmitError> {
 /// initializer. Caller has confirmed the next tokens form a
 /// declaration, not a function.
 fn parse_global_decl(p: &mut Parser<'_>) -> Result<(), EmitError> {
+    // Walk forward to see if `static` or `extern` is part of the
+    // modifier prefix — affects symbol visibility (no PUBDEF for
+    // static; EXTDEF rather than COMDEF for extern).
+    let mut i = p.pos;
+    let mut is_static = false;
+    let mut is_extern = false;
+    while let Some(t) = p.toks.get(i) {
+        match t {
+            Tok::Kw("static") => { is_static = true; i += 1; }
+            Tok::Kw("extern") => { is_extern = true; i += 1; }
+            Tok::Kw("unsigned") | Tok::Kw("signed")
+                | Tok::Kw("register") | Tok::Kw("auto")
+                | Tok::Kw("volatile") | Tok::Kw("const")
+                | Tok::Kw("short") => { i += 1; }
+            _ => break,
+        }
+    }
+    let _ = is_extern;
     // Skip any leading storage/qualifier modifiers (unsigned, static,
     // ...) — we treat them all as no-ops at the codegen level.
     let mods_consumed = skip_decl_modifiers(p);
@@ -1444,7 +1465,7 @@ fn parse_global_decl(p: &mut Parser<'_>) -> Result<(), EmitError> {
         (array_len, element_size)
     };
     p.global_names.push(name.clone());
-    p.globals.push(Global { name, init, array_len, element_size, is_pointer, struct_idx: None, is_long });
+    p.globals.push(Global { name, init, array_len, element_size, is_pointer, struct_idx: None, is_long, is_static });
     Ok(())
 }
 
@@ -3183,6 +3204,8 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
         let (grp, seg, sym, off) = match entry {
             TopDecl::Global(i) => {
                 let Some(off) = data_offsets[*i] else { continue };
+                // `static` globals are TU-private — skip PUBDEF.
+                if unit.globals[*i].is_static { continue; }
                 let sym = symbol_name(&unit.globals[*i].name);
                 let off = u16::try_from(off).expect("offset fits");
                 (1u8, 2u8, sym, off)
