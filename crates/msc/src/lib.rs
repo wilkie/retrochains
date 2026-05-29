@@ -2527,10 +2527,48 @@ fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
             }
         }
         Stmt::Empty => {}
-        _ => {
-            // Branch/loop — drop everything we know.
+        Stmt::If { cond, then_branch, else_branch } => {
+            // Fold the cond using current knowledge, then propagate
+            // into each branch with an isolated copy so writes don't
+            // leak across paths. After the if, conservatively clear.
+            prop_cond(cond, cp);
+            let mut sub = cp_clone(cp);
+            prop_stmt(then_branch, &mut sub);
+            if let Some(eb) = else_branch {
+                let mut sub2 = cp_clone(cp);
+                prop_stmt(eb, &mut sub2);
+            }
+            // After a branch we don't know which path was taken.
             cp.g_known.clear();
             cp.l_known.clear();
+        }
+        Stmt::Block(stmts) => {
+            for s in stmts {
+                prop_stmt(s, cp);
+            }
+        }
+        _ => {
+            // While / for / do-while: fold any cond / step we can
+            // reach via a shallow walk, then drop everything.
+            cp.g_known.clear();
+            cp.l_known.clear();
+        }
+    }
+}
+
+fn cp_clone(cp: &ConstProp) -> ConstProp {
+    ConstProp {
+        g_known: cp.g_known.clone(),
+        l_known: cp.l_known.clone(),
+    }
+}
+
+fn prop_cond(cond: &mut Cond, cp: &ConstProp) {
+    match cond {
+        Cond::Truthy(e) => prop_expr(e, cp),
+        Cond::Cmp { left, right, .. } => {
+            prop_expr(left, cp);
+            prop_expr(right, cp);
         }
     }
 }
