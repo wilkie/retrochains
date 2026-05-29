@@ -2820,8 +2820,16 @@ struct ConstProp {
     la_known: std::collections::HashMap<(usize, u16), i32>,
 }
 
-fn const_prop_globals(stmts: &[Stmt]) -> Vec<Stmt> {
+fn const_prop_globals(stmts: &[Stmt], local_specs: &[LocalSpec]) -> Vec<Stmt> {
     let mut cp = ConstProp::default();
+    // Pre-seed l_known with the locals' constant inits so the
+    // const-fold pass sees `int x = 1; switch(x)` as having x=1
+    // without re-deriving it from prologue stores.
+    for (i, spec) in local_specs.iter().enumerate() {
+        if let Some(k) = spec.init {
+            cp.l_known.insert(i, k);
+        }
+    }
     stmts.iter().map(|s| {
         let mut new_stmt = s.clone();
         prop_stmt(&mut new_stmt, &mut cp);
@@ -3028,7 +3036,7 @@ fn prop_expr(e: &mut Expr, cp: &ConstProp) {
 }
 
 fn emit_function(func: &Function) -> FunctionEmit {
-    let body = const_prop_globals(&func.body);
+    let body = const_prop_globals(&func.body, &func.locals);
     // Extract a `Vec<Option<i32>>` view for the existing fold path —
     // saves rewriting every codegen helper to know about LocalSpec.
     let local_inits: Vec<Option<i32>> = func.locals.iter().map(|l| l.init).collect();
