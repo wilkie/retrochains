@@ -1505,16 +1505,15 @@ fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
                 p.eat(&Tok::Semi)?;
                 return Ok(Stmt::ExprStmt(Expr::Call { name, args }));
             }
-            // `<local-array>[K] = <expr>;` — indexed local array store.
+            // `<local-array>[K] = <expr>;` (and compound shapes:
+            // `+=`, `-=`, `*=`, `++`, `--`, etc.) — indexed local
+            // array store.
             if matches!(p.peek(), Some(Tok::LBrack))
                 && let Some(local_idx) = p.local_names.iter().position(|n| *n == name)
             {
                 p.bump(); // [
                 let index_expr = parse_expr(p)?;
                 p.eat(&Tok::RBrack)?;
-                p.eat(&Tok::Assign)?;
-                let value = parse_expr(p)?;
-                p.eat(&Tok::Semi)?;
                 let k = index_expr.fold(&[]).ok_or_else(|| EmitError::Unsupported(
                     "non-constant local-array index in store not yet supported".to_owned(),
                 ))?;
@@ -1526,6 +1525,15 @@ fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
                 } else {
                     AssignTarget::IndexedLocal { local: local_idx, byte_off }
                 };
+                let value = if let Some(v) = parse_compound_rhs_for_indexed(
+                    p, local_idx, byte_off, elem_bytes == 1, false,
+                )? {
+                    v
+                } else {
+                    p.eat(&Tok::Assign)?;
+                    parse_expr(p)?
+                };
+                p.eat(&Tok::Semi)?;
                 return Ok(Stmt::Assign { target, value });
             }
             // `<global>[K] = <expr>;` — indexed array store.
@@ -1646,6 +1654,58 @@ fn skip_decl_modifiers(p: &mut Parser<'_>) -> usize {
         count += 1;
     }
     count
+}
+
+/// Variant of `parse_compound_rhs` for indexed-array stores like
+/// `a[K] += V` and `a[K]++`. The lvalue is reconstructed as
+/// `Expr::Index{,Byte}` (global) or `Expr::LocalIndex{,Byte}` (local)
+/// so the rewritten expression `a[K] op V` lowers through the
+/// existing emit_binop path.
+fn parse_compound_rhs_for_indexed(
+    p: &mut Parser<'_>,
+    container_idx: usize,
+    byte_off: u16,
+    is_byte: bool,
+    is_global: bool,
+) -> Result<Option<Expr>, EmitError> {
+    let op = match p.peek() {
+        Some(Tok::PlusPlus) => { p.bump(); BinOp::Add }
+        Some(Tok::MinusMinus) => { p.bump(); BinOp::Sub }
+        Some(Tok::PlusEq) => { p.bump(); BinOp::Add }
+        Some(Tok::MinusEq) => { p.bump(); BinOp::Sub }
+        Some(Tok::StarEq) => { p.bump(); BinOp::Mul }
+        Some(Tok::SlashEq) => { p.bump(); BinOp::Div }
+        Some(Tok::PercentEq) => { p.bump(); BinOp::Mod }
+        Some(Tok::AndEq) => { p.bump(); BinOp::BitAnd }
+        Some(Tok::PipeEq) => { p.bump(); BinOp::BitOr }
+        Some(Tok::CaretEq) => { p.bump(); BinOp::BitXor }
+        Some(Tok::ShlEq) => { p.bump(); BinOp::Shl }
+        Some(Tok::ShrEq) => { p.bump(); BinOp::Shr }
+        _ => return Ok(None),
+    };
+    let rhs = match op {
+        BinOp::Add | BinOp::Sub
+            if matches!(p.peek(), Some(Tok::Semi) | Some(Tok::Comma) | Some(Tok::RParen)) =>
+        {
+            Expr::IntLit(1)
+        }
+        _ => parse_expr(p)?,
+    };
+    let elem_size = if is_byte { 1 } else { 2 };
+    let k = (byte_off as i64) / (elem_size as i64);
+    let index = Box::new(Expr::IntLit(k as i32));
+    let lvalue = if is_global {
+        if is_byte {
+            Expr::IndexByte { array: container_idx, index }
+        } else {
+            Expr::Index { array: container_idx, index }
+        }
+    } else if is_byte {
+        Expr::LocalIndexByte { local: container_idx, index }
+    } else {
+        Expr::LocalIndex { local: container_idx, index }
+    };
+    Ok(Some(Expr::BinOp { op, left: Box::new(lvalue), right: Box::new(rhs) }))
 }
 
 /// Peek and parse a compound-assignment / post-(inc|dec) RHS for an
@@ -2792,6 +2852,12 @@ fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
                 }
                 AssignTarget::IndexedLocal { local, byte_off }
                 | AssignTarget::IndexedLocalByte { local, byte_off } => {
+                    // Try to fold the value once more — after
+                    // prop_expr's leaf substitution the BinOp may
+                    // have two literal operands ready to collapse.
+                    if let Some(k) = value.fold(&[]) {
+                        *value = Expr::IntLit(k);
+                    }
                     if let Expr::IntLit(k) = value {
                         cp.la_known.insert((*local, *byte_off), *k);
                     } else {
