@@ -2,3 +2,4 @@ description = "Call a sibling function in the same TU, compiled to OBJ. Same sou
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
 inputs = ["HELLO.C"]
+asm_args = ["-S", "-ms", "HELLO.C"]

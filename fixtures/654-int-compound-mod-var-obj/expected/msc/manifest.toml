@@ -4,6 +4,12 @@ stdout_sha256 = "a26ad2a887acd8fa77d39982061ea96a4cdd0973265d0cf7eaeee6de4d24c54
 stderr_sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 
 [[outputs]]
+name = "HELLO.ASM"
+size = 783
+sha256 = "a0fd9d414308db1fb8e7d70da081663e3f4f72c47fd500173d0e000b692821c0"
+mtime = "1987-10-15T12:00:00Z"
+
+[[outputs]]
 name = "HELLO.OBJ"
 size = 281
 sha256 = "90b0d7271eb186a8b64574826ef7b22e4a1d0c49b0561e415477c58d3a577816"
@@ -13,6 +19,7 @@ mtime = "1987-10-15T12:00:00Z"
 tool = "cl"
 args = [
     "/c",
+    "/Fa",
     "/AS",
     "HELLO.C",
 ]

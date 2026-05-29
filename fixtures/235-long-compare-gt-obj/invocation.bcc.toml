@@ -2,3 +2,4 @@ description = "`if (a > b)` for long globals. Verifies slice 234's 3-jump mnemon
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
 inputs = ["HELLO.C"]
+asm_args = ["-S", "-ms", "HELLO.C"]

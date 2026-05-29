@@ -2,3 +2,4 @@ description = "Simple while loop incrementing to 10. -c parallel of 027. Exercis
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
 inputs = ["HELLO.C"]
+asm_args = ["-S", "-ms", "HELLO.C"]

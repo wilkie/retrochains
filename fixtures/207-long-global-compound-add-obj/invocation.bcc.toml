@@ -2,3 +2,4 @@ description = "Long arithmetic: `g = g + 10` on a long global. Tests the classic
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
 inputs = ["HELLO.C"]
+asm_args = ["-S", "-ms", "HELLO.C"]

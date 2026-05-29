@@ -1,4 +1,4 @@
 description = "s[1] = 65; — write one byte to a char array element. Pairs with 4121 (read) to confirm MSC's byte-store shape (`c6 06 addr imm8`)."
 tool = "cl"
-args = ["/c", "/AS", "HELLO.C"]
+args = ["/c", "/Fa", "/AS", "HELLO.C"]
 inputs = ["HELLO.C"]

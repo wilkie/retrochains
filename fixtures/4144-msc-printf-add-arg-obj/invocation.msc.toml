@@ -1,4 +1,4 @@
 description = "printf with a computed-arg (g + 1) — confirms binop result lands in AX then gets pushed (mov ax, [g]; inc ax; push ax) before the format-string push."
 tool = "cl"
-args = ["/c", "/AS", "HELLO.C"]
+args = ["/c", "/Fa", "/AS", "HELLO.C"]
 inputs = ["HELLO.C"]

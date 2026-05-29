@@ -1,4 +1,4 @@
 description = "for (i = 0; i != 10; i = i + 1) ; — probes for-loop shape against the while shape we already have."
 tool = "cl"
-args = ["/c", "/AS", "HELLO.C"]
+args = ["/c", "/Fa", "/AS", "HELLO.C"]
 inputs = ["HELLO.C"]

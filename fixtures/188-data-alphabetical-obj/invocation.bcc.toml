@@ -2,3 +2,4 @@ description = "_DATA layout with two initialized globals declared in NON-alphabe
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
 inputs = ["HELLO.C"]
+asm_args = ["-S", "-ms", "HELLO.C"]

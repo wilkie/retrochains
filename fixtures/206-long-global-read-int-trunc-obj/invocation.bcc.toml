@@ -2,3 +2,4 @@ description = "`return (int)g;` where g is `long` — narrowing cast from long t
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
 inputs = ["HELLO.C"]
+asm_args = ["-S", "-ms", "HELLO.C"]

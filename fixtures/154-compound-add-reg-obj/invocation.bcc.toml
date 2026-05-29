@@ -2,3 +2,4 @@ description = "x+=1 on enregistered local. -c parallel of 067. Should work as-is
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
 inputs = ["HELLO.C"]
+asm_args = ["-S", "-ms", "HELLO.C"]

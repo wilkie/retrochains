@@ -2,3 +2,4 @@ description = "`long x = g;` local long initialized from a global. Probes long-f
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
 inputs = ["HELLO.C"]
+asm_args = ["-S", "-ms", "HELLO.C"]

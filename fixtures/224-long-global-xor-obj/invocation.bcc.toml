@@ -2,3 +2,4 @@ description = "`g = a ^ b;` long bitwise XOR. Same shape as fixtures 221/222: tw
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
 inputs = ["HELLO.C"]
+asm_args = ["-S", "-ms", "HELLO.C"]

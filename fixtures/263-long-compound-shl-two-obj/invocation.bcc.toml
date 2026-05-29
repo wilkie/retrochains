@@ -2,3 +2,4 @@ description = "`a <<= 2;` for long. Probes compound shift via N_LXLSH@ helper."
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
 inputs = ["HELLO.C"]
+asm_args = ["-S", "-ms", "HELLO.C"]

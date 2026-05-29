@@ -2,3 +2,4 @@ description = "char local returned via cbw widening. -c parallel of 053."
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
 inputs = ["HELLO.C"]
+asm_args = ["-S", "-ms", "HELLO.C"]

@@ -2,3 +2,4 @@ description = "`unsigned long a, b; if (a < b)`. Introduces `unsigned long` and 
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
 inputs = ["HELLO.C"]
+asm_args = ["-S", "-ms", "HELLO.C"]

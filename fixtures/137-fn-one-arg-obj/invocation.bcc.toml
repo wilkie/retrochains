@@ -2,3 +2,4 @@ description = "One int arg by value. -c parallel of 033. Exercises positive-bp p
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
 inputs = ["HELLO.C"]
+asm_args = ["-S", "-ms", "HELLO.C"]

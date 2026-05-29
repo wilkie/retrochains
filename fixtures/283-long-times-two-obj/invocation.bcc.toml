@@ -2,3 +2,4 @@ description = "`g = g * 2;` long times constant. Probes whether BCC uses helper 
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
 inputs = ["HELLO.C"]
+asm_args = ["-S", "-ms", "HELLO.C"]

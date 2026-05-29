@@ -2,3 +2,4 @@ description = "`g &= 15;` for long. Probes whether BCC emits memory-direct `and`
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
 inputs = ["HELLO.C"]
+asm_args = ["-S", "-ms", "HELLO.C"]

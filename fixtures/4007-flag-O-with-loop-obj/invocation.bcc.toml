@@ -1,3 +1,4 @@
 tool = "bcc"
 args = ["-c", "-ms", "-O", "HELLO.C"]
 inputs = ["HELLO.C"]
+asm_args = ["-S", "-ms", "-O", "HELLO.C"]

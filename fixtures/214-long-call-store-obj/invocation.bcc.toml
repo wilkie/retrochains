@@ -2,3 +2,4 @@ description = "`g = get();` where `get()` returns long. Tests calling a long-ret
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
 inputs = ["HELLO.C"]
+asm_args = ["-S", "-ms", "HELLO.C"]

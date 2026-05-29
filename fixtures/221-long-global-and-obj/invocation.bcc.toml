@@ -2,3 +2,4 @@ description = "`g = a & b;` long bitwise AND between three long globals. Simpler
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
 inputs = ["HELLO.C"]
+asm_args = ["-S", "-ms", "HELLO.C"]

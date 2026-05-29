@@ -2,3 +2,4 @@ description = "char loop with c<5 condition. Same source as 054 but -c. Exercise
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
 inputs = ["HELLO.C"]
+asm_args = ["-S", "-ms", "HELLO.C"]

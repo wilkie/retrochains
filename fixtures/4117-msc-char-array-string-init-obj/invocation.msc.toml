@@ -1,4 +1,4 @@
 description = "char s[3] = \"hi\"; — char array initialized with a string literal. The bytes land directly in _DATA (no CONST routing, unlike `char *p = \"hi\";`)."
 tool = "cl"
-args = ["/c", "/AS", "HELLO.C"]
+args = ["/c", "/Fa", "/AS", "HELLO.C"]
 inputs = ["HELLO.C"]

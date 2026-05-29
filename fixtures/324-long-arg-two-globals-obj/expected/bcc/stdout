@@ -4,3 +4,9 @@ Warning hello.c 1: Parameter 'b' is never used in function f
 Warning hello.c 1: Parameter 'a' is never used in function f
 
 	Available memory 424304
+Borland C++  Version 2.0 Copyright (c) 1991 Borland International
+hello.c:
+Warning hello.c 1: Parameter 'b' is never used in function f
+Warning hello.c 1: Parameter 'a' is never used in function f
+
+	Available memory 425600

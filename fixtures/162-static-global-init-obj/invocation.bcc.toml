@@ -2,3 +2,4 @@ description = "File-scope `static int g = 42;`. Same source layout as 129 except
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
 inputs = ["HELLO.C"]
+asm_args = ["-S", "-ms", "HELLO.C"]

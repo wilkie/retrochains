@@ -2,3 +2,4 @@ description = "`(char)x` truncates an int (300 = 0x012C) to a signed 8-bit value
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
 inputs = ["HELLO.C"]
+asm_args = ["-S", "-ms", "HELLO.C"]

@@ -1,4 +1,4 @@
 description = "printf(\"...\", g) where g is an init global. Probes pushing a global value as an argument (mov ax, [g]; push ax) vs the existing constant-push path."
 tool = "cl"
-args = ["/c", "/AS", "HELLO.C"]
+args = ["/c", "/Fa", "/AS", "HELLO.C"]
 inputs = ["HELLO.C"]

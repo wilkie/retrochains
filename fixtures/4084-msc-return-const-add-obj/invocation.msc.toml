@@ -1,4 +1,4 @@
 description = "return 1 + 2; — probes whether MSC folds constant sub-expressions at parse time (BCC does)."
 tool = "cl"
-args = ["/c", "/AS", "HELLO.C"]
+args = ["/c", "/Fa", "/AS", "HELLO.C"]
 inputs = ["HELLO.C"]

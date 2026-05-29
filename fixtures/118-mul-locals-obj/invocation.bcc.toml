@@ -2,3 +2,4 @@ description = "Two int locals multiplied at return. Same source as 008 but -c. E
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
 inputs = ["HELLO.C"]
+asm_args = ["-S", "-ms", "HELLO.C"]

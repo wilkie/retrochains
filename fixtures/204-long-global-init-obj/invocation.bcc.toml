@@ -2,3 +2,4 @@ description = "`long g = 5;` — initialized long global. Tests `emit_global_ini
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
 inputs = ["HELLO.C"]
+asm_args = ["-S", "-ms", "HELLO.C"]

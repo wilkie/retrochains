@@ -2,3 +2,4 @@ description = "`g = a << 1;` long left-shift by one. Probe: does BCC inline (shl
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
 inputs = ["HELLO.C"]
+asm_args = ["-S", "-ms", "HELLO.C"]

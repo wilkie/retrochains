@@ -2,3 +2,4 @@ description = "Switch with case fallthrough (4 dense cases, jump-table dispatch)
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
 inputs = ["HELLO.C"]
+asm_args = ["-S", "-ms", "HELLO.C"]

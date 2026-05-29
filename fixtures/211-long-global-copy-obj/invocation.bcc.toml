@@ -2,3 +2,4 @@ description = "`b = a;` long-to-long copy between two long globals. Tests the lo
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
 inputs = ["HELLO.C"]
+asm_args = ["-S", "-ms", "HELLO.C"]

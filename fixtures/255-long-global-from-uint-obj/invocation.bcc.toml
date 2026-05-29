@@ -2,3 +2,4 @@ description = "`long g = u;` for `unsigned int u`. Probes: BCC should zero-exten
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
 inputs = ["HELLO.C"]
+asm_args = ["-S", "-ms", "HELLO.C"]

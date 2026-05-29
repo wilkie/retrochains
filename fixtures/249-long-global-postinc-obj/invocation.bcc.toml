@@ -2,3 +2,4 @@ description = "`g++;` for long global. Probes BCC's 32-bit increment pattern (li
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
 inputs = ["HELLO.C"]
+asm_args = ["-S", "-ms", "HELLO.C"]

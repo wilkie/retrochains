@@ -2,3 +2,4 @@ description = "char+int locals. Same source as 011 but -c. Exercises  (C6 46 dd 
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
 inputs = ["HELLO.C"]
+asm_args = ["-S", "-ms", "HELLO.C"]

@@ -1,4 +1,4 @@
 description = "int *q = &g; — pointer global initialized to address of another _DATA-resident global. Probes the FIXUP shape MSC picks when the in-_DATA initializer points back into _DATA (vs CONST in 4110)."
 tool = "cl"
-args = ["/c", "/AS", "HELLO.C"]
+args = ["/c", "/Fa", "/AS", "HELLO.C"]
 inputs = ["HELLO.C"]

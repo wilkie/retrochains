@@ -2,3 +2,4 @@ description = "`long g = 100000L;` — long global initialized to a value requir
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
 inputs = ["HELLO.C"]
+asm_args = ["-S", "-ms", "HELLO.C"]

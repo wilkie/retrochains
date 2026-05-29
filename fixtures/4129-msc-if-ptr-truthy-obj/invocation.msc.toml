@@ -1,4 +1,4 @@
 description = "if (p) — truthy test of a pointer global. Probes the cmp shape (cmp [p],0 or test ax,ax) MSC picks for null-pointer skipping."
 tool = "cl"
-args = ["/c", "/AS", "HELLO.C"]
+args = ["/c", "/Fa", "/AS", "HELLO.C"]
 inputs = ["HELLO.C"]

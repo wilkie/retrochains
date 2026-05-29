@@ -2,3 +2,4 @@ description = "char parameter passed by value. Same source as 052 but -c. Exerci
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
 inputs = ["HELLO.C"]
+asm_args = ["-S", "-ms", "HELLO.C"]

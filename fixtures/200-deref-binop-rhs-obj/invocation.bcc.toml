@@ -2,3 +2,4 @@ description = "`3 + *p` — dereference as the right operand of a binary op. AX 
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
 inputs = ["HELLO.C"]
+asm_args = ["-S", "-ms", "HELLO.C"]

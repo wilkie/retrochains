@@ -2,3 +2,4 @@ description = "Two int locals divided at return. Same source as 012 but -c. Exer
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
 inputs = ["HELLO.C"]
+asm_args = ["-S", "-ms", "HELLO.C"]

@@ -1,4 +1,4 @@
 description = "if (g == K) where g is a global int — equality compare against a constant. Pairs with 4129 (truthy) and 4091 (local eq) to triangulate cmp-form selection."
 tool = "cl"
-args = ["/c", "/AS", "HELLO.C"]
+args = ["/c", "/Fa", "/AS", "HELLO.C"]
 inputs = ["HELLO.C"]

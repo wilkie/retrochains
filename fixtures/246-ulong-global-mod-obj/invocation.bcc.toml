@@ -2,3 +2,4 @@ description = "`unsigned long g = a % b;`. Verifies the `N_LUMOD@` helper-name a
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
 inputs = ["HELLO.C"]
+asm_args = ["-S", "-ms", "HELLO.C"]

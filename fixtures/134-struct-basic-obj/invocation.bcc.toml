@@ -2,3 +2,4 @@ description = "Single-field struct local. -c parallel of 101. Treated as a 2-byt
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
 inputs = ["HELLO.C"]
+asm_args = ["-S", "-ms", "HELLO.C"]

@@ -2,3 +2,4 @@ description = "Multi-global _BSS ordering. Source declares `x, c, a` but BCC emi
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
 inputs = ["HELLO.C"]
+asm_args = ["-S", "-ms", "HELLO.C"]

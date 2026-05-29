@@ -1,4 +1,4 @@
 description = "if (x) return 1; return 0; — simplest if. Probes how MSC tests a local for zero and how it numbers the skip-label."
 tool = "cl"
-args = ["/c", "/AS", "HELLO.C"]
+args = ["/c", "/Fa", "/AS", "HELLO.C"]
 inputs = ["HELLO.C"]

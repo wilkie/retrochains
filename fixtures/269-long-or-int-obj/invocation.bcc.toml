@@ -2,3 +2,4 @@ description = "`g = g | i;` long-or-int. Verifies slice 259's analogy extends to
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
 inputs = ["HELLO.C"]
+asm_args = ["-S", "-ms", "HELLO.C"]

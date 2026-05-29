@@ -2,3 +2,4 @@ description = "Two int locals, modulo return. Same source as 013 but -c. IDIV re
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
 inputs = ["HELLO.C"]
+asm_args = ["-S", "-ms", "HELLO.C"]

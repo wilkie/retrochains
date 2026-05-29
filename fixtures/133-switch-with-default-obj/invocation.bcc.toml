@@ -2,3 +2,4 @@ description = "Switch with default. -c parallel of 075. Chained-compare with fal
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
 inputs = ["HELLO.C"]
+asm_args = ["-S", "-ms", "HELLO.C"]

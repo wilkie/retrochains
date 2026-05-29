@@ -1,4 +1,4 @@
 description = "return x - 1; — probes sub-immediate emission, paired with 4085 (add-1)."
 tool = "cl"
-args = ["/c", "/AS", "HELLO.C"]
+args = ["/c", "/Fa", "/AS", "HELLO.C"]
 inputs = ["HELLO.C"]

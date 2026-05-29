@@ -2,3 +2,4 @@ description = "Simplest ternary: literal-then/literal-else with a compare condit
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
 inputs = ["HELLO.C"]
+asm_args = ["-S", "-ms", "HELLO.C"]

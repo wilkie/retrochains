@@ -3,3 +3,8 @@ hello.c:
 Warning hello.c 3: Possibly incorrect assignment in function main
 
 	Available memory 424816
+Borland C++  Version 2.0 Copyright (c) 1991 Borland International
+hello.c:
+Warning hello.c 3: Possibly incorrect assignment in function main
+
+	Available memory 426112

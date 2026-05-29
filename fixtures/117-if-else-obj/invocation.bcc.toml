@@ -2,3 +2,4 @@ description = "if/else with two int locals. Same source as 026 but -c. Exercises
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
 inputs = ["HELLO.C"]
+asm_args = ["-S", "-ms", "HELLO.C"]

@@ -1,7 +1,13 @@
 [run]
 exit_code = 0
-stdout_sha256 = "6fa76c09941f35d86b7efc8261065d83f8a9886841f076c0b60663180fc14b52"
+stdout_sha256 = "9ce3095b74367deb36a8403f475877ec228af6062e208a4dbf17228fb7af9497"
 stderr_sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
+[[outputs]]
+name = "HELLO.ASM"
+size = 1064
+sha256 = "cfbb497568f4488071b5ce3eff9cca18679e7c78c98058df02bd47b8f5733d63"
+mtime = "1991-04-23T12:00:00Z"
 
 [[outputs]]
 name = "HELLO.OBJ"

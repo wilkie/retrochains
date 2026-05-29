@@ -2,3 +2,4 @@ description = "`g -= 5;` for long. Verifies slice 251's `-=` analogy emits the m
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
 inputs = ["HELLO.C"]
+asm_args = ["-S", "-ms", "HELLO.C"]

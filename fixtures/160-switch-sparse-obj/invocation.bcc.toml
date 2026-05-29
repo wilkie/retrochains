@@ -2,3 +2,4 @@ description = "4-case sparse switch (values 1/10/100/1000). -c parallel of 074. 
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
 inputs = ["HELLO.C"]
+asm_args = ["-S", "-ms", "HELLO.C"]

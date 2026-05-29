@@ -2,3 +2,4 @@ description = "`g = x;` where `x` is a long parameter and `g` is a long global. 
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
 inputs = ["HELLO.C"]
+asm_args = ["-S", "-ms", "HELLO.C"]

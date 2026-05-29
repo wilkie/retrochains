@@ -2,3 +2,4 @@ description = "`g = (long)i;` explicit cast. Should emit same as the implicit wi
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
 inputs = ["HELLO.C"]
+asm_args = ["-S", "-ms", "HELLO.C"]

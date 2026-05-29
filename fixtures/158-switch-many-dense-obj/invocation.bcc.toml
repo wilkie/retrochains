@@ -2,3 +2,4 @@ description = "8-case dense switch. -c parallel of 073. Probes BCC's jump-table 
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
 inputs = ["HELLO.C"]
+asm_args = ["-S", "-ms", "HELLO.C"]

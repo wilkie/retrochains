@@ -2,3 +2,4 @@ description = "`unsigned long g = a >> 2;`. Probe: BCC should call a logical-shi
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
 inputs = ["HELLO.C"]
+asm_args = ["-S", "-ms", "HELLO.C"]

@@ -1,4 +1,4 @@
 description = "Int local with initializer, otherwise unused. Probes the frame allocation + initializer-write codegen."
 tool = "cl"
-args = ["/c", "/AS", "HELLO.C"]
+args = ["/c", "/Fa", "/AS", "HELLO.C"]
 inputs = ["HELLO.C"]

@@ -2,3 +2,4 @@ description = "`g += 1000;` long compound add with K outside i8sx range. Probes 
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
 inputs = ["HELLO.C"]
+asm_args = ["-S", "-ms", "HELLO.C"]

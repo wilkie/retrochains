@@ -2,3 +2,4 @@ description = "`return a + b;` long arithmetic from params, then return. Probes 
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
 inputs = ["HELLO.C"]
+asm_args = ["-S", "-ms", "HELLO.C"]

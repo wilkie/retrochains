@@ -2,3 +2,4 @@ description = "Basic `union` with int+char fields. Total size = max field size =
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
 inputs = ["HELLO.C"]
+asm_args = ["-S", "-ms", "HELLO.C"]

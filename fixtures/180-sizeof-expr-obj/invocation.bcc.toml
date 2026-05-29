@@ -2,3 +2,4 @@ description = "`sizeof <expr>` without parens. Folds to a constant via parse-tim
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
 inputs = ["HELLO.C"]
+asm_args = ["-S", "-ms", "HELLO.C"]

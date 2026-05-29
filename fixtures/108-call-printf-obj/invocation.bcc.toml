@@ -2,3 +2,4 @@ description = "Call external printf with a string literal and int. Same source a
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
 inputs = ["HELLO.C"]
+asm_args = ["-S", "-ms", "HELLO.C"]

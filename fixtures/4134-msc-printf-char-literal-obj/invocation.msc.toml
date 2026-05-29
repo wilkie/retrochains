@@ -1,4 +1,4 @@
 description = "printf with a char literal arg. Confirms char-literal tokenization (4126) carries through the arg-push path: `'A'` lowers to int 65 just like `printf(\"...\", 65)`."
 tool = "cl"
-args = ["/c", "/AS", "HELLO.C"]
+args = ["/c", "/Fa", "/AS", "HELLO.C"]
 inputs = ["HELLO.C"]

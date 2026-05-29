@@ -2,3 +2,4 @@ description = "`++g;` for long. Probes whether pre-inc emits the same as post-in
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
 inputs = ["HELLO.C"]
+asm_args = ["-S", "-ms", "HELLO.C"]

@@ -2,3 +2,4 @@ description = "`int *p = &g;` — global pointer initialized to the address of a
 tool = "bcc"
 args = ["-c", "-ms", "HELLO.C"]
 inputs = ["HELLO.C"]
+asm_args = ["-S", "-ms", "HELLO.C"]
