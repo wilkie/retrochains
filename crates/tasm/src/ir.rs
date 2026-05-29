@@ -2650,10 +2650,23 @@ pub enum JmpCond {
     /// `jae` / `jnb` — CF=0 (unsigned above-or-equal). Used by BCC
     /// for `if (u_a < u_b)` skip-branches with unsigned operands.
     Ae,
-    /// `jb` / `jnae` — CF=1 (unsigned below).
+    /// `jb` / `jnae` / `jc` — CF=1 (unsigned below / carry set).
     B,
     /// `jbe` / `jna` — CF=1 or ZF=1 (unsigned below-or-equal).
     Be,
+    /// `js` — SF=1 (sign set). Used by BCC's `_FLAGS` recognizer for
+    /// `if (_FLAGS & 0x80)`.
+    S,
+    /// `jns` — SF=0 (sign clear). `if (_FLAGS & 0x80)` skip-then.
+    Ns,
+    /// `jp` / `jpe` — PF=1 (parity even). `if (_FLAGS & 0x4)` take-then.
+    P,
+    /// `jnp` / `jpo` — PF=0 (parity odd). `if (_FLAGS & 0x4)` skip-then.
+    Np,
+    /// `jo` — OF=1 (overflow set). `if (_FLAGS & 0x800)` take-then.
+    O,
+    /// `jno` — OF=0 (overflow clear). `if (_FLAGS & 0x800)` skip-then.
+    No,
 }
 
 impl JmpCond {
@@ -2669,6 +2682,12 @@ impl JmpCond {
             Self::Ge => 0x7D,
             Self::Le => 0x7E,
             Self::G => 0x7F,
+            Self::S => 0x78,
+            Self::Ns => 0x79,
+            Self::P => 0x7A,
+            Self::Np => 0x7B,
+            Self::O => 0x70,
+            Self::No => 0x71,
         }
     }
 
@@ -2688,6 +2707,12 @@ impl JmpCond {
             Self::Ge => Self::L,
             Self::Le => Self::G,
             Self::G => Self::Le,
+            Self::S => Self::Ns,
+            Self::Ns => Self::S,
+            Self::P => Self::Np,
+            Self::Np => Self::P,
+            Self::O => Self::No,
+            Self::No => Self::O,
         }
     }
 }

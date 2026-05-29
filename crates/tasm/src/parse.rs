@@ -1028,7 +1028,8 @@ fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
                 format!("dec: unsupported operand form `{rest}`"),
             ))
         }
-        "je" | "jne" | "jl" | "jle" | "jg" | "jge" | "ja" | "jae" | "jb" | "jbe" => {
+        "je" | "jne" | "jl" | "jle" | "jg" | "jge" | "ja" | "jae" | "jb" | "jbe"
+        | "jc" | "jnc" | "js" | "jns" | "jp" | "jnp" | "jo" | "jno" => {
             parse_jmp_cond(kw, rest, line.line_no)
         }
         "jmp" => parse_jmp(rest, line.line_no),
@@ -4190,9 +4191,15 @@ fn parse_jmp_cond(kw: &str, operands: &str, line_no: usize) -> AsmResult<Instr> 
         "jg" => JmpCond::G,
         "jge" => JmpCond::Ge,
         "ja" => JmpCond::A,
-        "jae" => JmpCond::Ae,
-        "jb" => JmpCond::B,
+        "jae" | "jnc" => JmpCond::Ae,
+        "jb" | "jc" => JmpCond::B,
         "jbe" => JmpCond::Be,
+        "js" => JmpCond::S,
+        "jns" => JmpCond::Ns,
+        "jp" => JmpCond::P,
+        "jnp" => JmpCond::Np,
+        "jo" => JmpCond::O,
+        "jno" => JmpCond::No,
         _ => unreachable!("caller restricted the keyword"),
     };
     // `short <label>` — strip the optional `short` prefix.

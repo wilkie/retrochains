@@ -4187,6 +4187,24 @@ impl<'a> FunctionEmitter<'a> {
         true_slot: Option<u32>,
         false_slot: Option<u32>,
     ) {
+        // `if (_FLAGS & <flag-bit>)` (and the negated form `!(... & K)`)
+        // — BCC special-cases this to a single conditional skip-then
+        // jump keyed to the bit. No `pushf`/`test`/`and` emitted. The
+        // recognized bits and their skip-then mnemonics:
+        //   0x1   (CF)  → jnc      0x4   (PF)  → jnp
+        //   0x40  (ZF)  → jne      0x80  (SF)  → jns
+        //   0x800 (OF)  → jno
+        // The negated form (one `!`) flips skip-then to take-then
+        // (jc / jp / je / js / jo). Fixtures 4055, 4057–4061.
+        if let Some((skip_mnemonic, take_mnemonic)) = flags_bit_test_mnemonics(cond) {
+            if let Some(fslot) = false_slot {
+                let _ = write!(self.out, "\t{skip_mnemonic}\tshort {}\r\n", self.label_ref(fslot));
+            }
+            if let Some(tslot) = true_slot {
+                let _ = write!(self.out, "\t{take_mnemonic}\tshort {}\r\n", self.label_ref(tslot));
+            }
+            return;
+        }
         // `<stack-char-arr>[<si-int>] != 0` / `== 0` — direct
         // memory compare via the BP+SI addressing mode. Saves the
         // `mov al; cbw; or ax, ax` chain the generic path would
@@ -21934,12 +21952,17 @@ impl<'a> FunctionEmitter<'a> {
                 // `mov ax, <reg>`. Byte pseudos widen as unsigned
                 // char: `_AL` is already in AL, just clear AH. Fixture
                 // 4052 (`_AL = 0x80; return _AL;` → `mov ah, 0`).
+                // `_FLAGS` value-context (`pushf; pop ax`) is handled
+                // by its own slice.
                 if name == "_AX" {
                     return;
                 }
                 if name == "_AL" {
                     self.out.extend_from_slice(b"\tmov\tah,0\r\n");
                     return;
+                }
+                if name == "_FLAGS" {
+                    panic!("`_FLAGS` value-context read not yet supported (pushf path)");
                 }
                 if is_byte_pseudo_register(name) {
                     panic!("byte pseudo-register `{name}` read in int context not yet supported (only `_AL` covered)");
@@ -25112,6 +25135,7 @@ pub(crate) fn is_asm_pseudo_register(name: &str) -> bool {
             | "_AL" | "_AH" | "_BL" | "_BH" | "_CL" | "_CH" | "_DL" | "_DH"
             | "_SI" | "_DI" | "_BP" | "_SP"
             | "_ES" | "_CS" | "_SS" | "_DS"
+            | "_FLAGS"
     )
 }
 
@@ -25136,6 +25160,36 @@ fn pseudo_register_operand(name: &str) -> Option<&'static str> {
 /// Used when narrowing immediate values for byte-width stores.
 fn is_byte_pseudo_register(name: &str) -> bool {
     matches!(name, "_AL" | "_AH" | "_BL" | "_BH" | "_CL" | "_CH" | "_DL" | "_DH")
+}
+
+/// Recognize `_FLAGS & <flag-bit>` (and the singly-negated form
+/// `!(_FLAGS & <flag-bit>)`) as the skip-then / take-then mnemonic
+/// pair for a direct conditional jump. Returns `None` if the shape
+/// doesn't match or the bit is one of the non-jumpable flags
+/// (AF / TF / IF / DF). Fixtures 4055, 4057–4061.
+fn flags_bit_test_mnemonics(cond: &Expr) -> Option<(&'static str, &'static str)> {
+    let (inner, negated) = match &cond.kind {
+        ExprKind::Unary { op: UnaryOp::Not, operand } => (operand.as_ref(), true),
+        _ => (cond, false),
+    };
+    let ExprKind::BinOp { op: BinOp::BitAnd, left, right } = &inner.kind else {
+        return None;
+    };
+    // Accept either operand order: `_FLAGS & K` or `K & _FLAGS`.
+    let bit = match (&left.kind, &right.kind) {
+        (ExprKind::PseudoReg(n), _) if n == "_FLAGS" => try_const_eval(right)?,
+        (_, ExprKind::PseudoReg(n)) if n == "_FLAGS" => try_const_eval(left)?,
+        _ => return None,
+    };
+    let (skip, take) = match bit & 0xFFFF {
+        0x0001 => ("jnc", "jc"),   // CF (carry)
+        0x0004 => ("jnp", "jp"),   // PF (parity)
+        0x0040 => ("jne", "je"),   // ZF (zero) — BCC's listing uses jne/je
+        0x0080 => ("jns", "js"),   // SF (sign)
+        0x0800 => ("jno", "jo"),   // OF (overflow)
+        _ => return None,
+    };
+    Some(if negated { (take, skip) } else { (skip, take) })
 }
 
 fn normalize_asm_line(s: &str) -> String {
