@@ -90,6 +90,11 @@ pub struct Global {
     /// `Some(idx)` when the global is `struct S` (not pointer). The
     /// field metadata for member access lives in Unit::structs.
     pub struct_idx: Option<usize>,
+    /// `true` for `long` globals. They occupy 4 bytes of storage and
+    /// init values split into low + high 16-bit halves. Plain int
+    /// access reads the low half; high half is reserved for runtime
+    /// long arithmetic that isn't implemented yet.
+    pub is_long: bool,
 }
 
 impl Global {
@@ -155,6 +160,9 @@ pub struct LocalSpec {
     /// overall storage_bytes is the struct's total size (not
     /// size * array_len).
     pub struct_idx: Option<usize>,
+    /// True for `long x;` — storage is two word slots (low at the
+    /// shallower disp, high at disp+2). Init writes both halves.
+    pub is_long: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -173,10 +181,13 @@ pub struct StructField {
 
 impl LocalSpec {
     pub fn int(init: Option<i32>) -> Self {
-        Self { size: 2, array_len: 1, init, struct_idx: None }
+        Self { size: 2, array_len: 1, init, struct_idx: None, is_long: false }
     }
     pub fn char_(init: Option<i32>) -> Self {
-        Self { size: 1, array_len: 1, init, struct_idx: None }
+        Self { size: 1, array_len: 1, init, struct_idx: None, is_long: false }
+    }
+    pub fn long_(init: Option<i32>) -> Self {
+        Self { size: 2, array_len: 2, init, struct_idx: None, is_long: true }
     }
     /// Bytes occupied in the frame, rounded up to an even count.
     /// MSC pads each local to a word boundary — scalar char gets 2
@@ -202,6 +213,13 @@ pub struct Locals<'a> {
     pub disps: &'a [i16],
     /// Per-element size in bytes (1 for char, 2 otherwise).
     pub sizes: &'a [usize],
+    /// Parallel-indexed flags marking globals that hold a 4-byte
+    /// long. Used by global-assign codegen to emit both halves.
+    pub long_globals: &'a [bool],
+    /// Parallel-indexed flags marking locals that are `long`. Direct
+    /// loads (return, assign) bypass the fold view so the slot is
+    /// read at runtime even when its constant value is known.
+    pub long_locals: &'a [bool],
 }
 
 impl Locals<'_> {
@@ -213,6 +231,12 @@ impl Locals<'_> {
     }
     pub fn size(&self, idx: usize) -> usize {
         self.sizes[idx]
+    }
+    pub fn is_long_global(&self, idx: usize) -> bool {
+        self.long_globals.get(idx).copied().unwrap_or(false)
+    }
+    pub fn is_long_local(&self, idx: usize) -> bool {
+        self.long_locals.get(idx).copied().unwrap_or(false)
     }
 }
 
@@ -899,6 +923,7 @@ fn tokenize(source: &str) -> Result<Vec<Tok>, EmitError> {
                     "continue" => Tok::Kw("continue"),
                     "struct" => Tok::Kw("struct"),
                     "sizeof" => Tok::Kw("sizeof"),
+                    "long" => Tok::Kw("long"),
                     // Storage-class / qualifier modifiers we currently
                     // treat as no-ops in declarator parsing.
                     "unsigned" => Tok::Kw("unsigned"),
@@ -1031,7 +1056,7 @@ fn parse_unit(source: &str) -> Result<Unit, EmitError> {
         }
         let is_type_prefix = matches!(
             p.toks.get(k),
-            Some(Tok::Kw("int")) | Some(Tok::Kw("char"))
+            Some(Tok::Kw("int")) | Some(Tok::Kw("char")) | Some(Tok::Kw("long"))
         ) || (k > p.pos && matches!(p.toks.get(k), Some(Tok::Ident(_))))
             || matches!(p.toks.get(k), Some(Tok::Kw("struct")));
         if is_type_prefix {
@@ -1160,6 +1185,7 @@ fn parse_struct_global_decl(p: &mut Parser<'_>) -> Result<(), EmitError> {
         element_size,
         is_pointer,
         struct_idx: Some(sidx),
+        is_long: false,
     });
     Ok(())
 }
@@ -1248,10 +1274,12 @@ fn parse_global_decl(p: &mut Parser<'_>) -> Result<(), EmitError> {
     if matches!(p.peek(), Some(Tok::Kw("struct"))) {
         return parse_struct_global_decl(p);
     }
-    // Type prefix. Phase 1 globals: `int [*]`, `char *`, `char [N]`.
+    // Type prefix. Phase 1 globals: `int [*]`, `char *`, `char [N]`,
+    // and minimal `long` support (storage only; arithmetic not yet).
     // Bare `unsigned x;` (no following int/char) implies int.
     let mut is_pointer = false;
     let mut is_char = false;
+    let mut is_long = false;
     match p.peek() {
         Some(Tok::Kw("int")) => {
             p.bump();
@@ -1268,11 +1296,17 @@ fn parse_global_decl(p: &mut Parser<'_>) -> Result<(), EmitError> {
                 is_pointer = true;
             }
         }
+        Some(Tok::Kw("long")) => {
+            p.bump();
+            // `long int` is just `long`.
+            if matches!(p.peek(), Some(Tok::Kw("int"))) { p.bump(); }
+            is_long = true;
+        }
         // Bare modifier (`unsigned x;`) → implicit int.
         Some(Tok::Ident(_)) if mods_consumed > 0 => {}
         other => {
             return Err(EmitError::Unsupported(format!(
-                "expected `int`, `int *`, `char *`, or `char [...]` for global, got {other:?}"
+                "expected `int`, `int *`, `long`, `char *`, or `char [...]` for global, got {other:?}"
             )));
         }
     };
@@ -1359,6 +1393,11 @@ fn parse_global_decl(p: &mut Parser<'_>) -> Result<(), EmitError> {
                     "address-of unknown global `{target_name}`"
                 )))?;
             Some(vec![GlobalInit::GlobalAddr(target_idx)])
+        } else if is_long {
+            let k = parse_signed_int(p)?;
+            let low = (k as u32 & 0xFFFF) as i32;
+            let high = (((k as u32) >> 16) & 0xFFFF) as i32;
+            Some(vec![GlobalInit::Int(low), GlobalInit::Int(high)])
         } else {
             Some(vec![GlobalInit::Int(parse_signed_int(p)?)])
         }
@@ -1371,8 +1410,15 @@ fn parse_global_decl(p: &mut Parser<'_>) -> Result<(), EmitError> {
     // the declarator carries a `*`. Storage size is independent:
     // pointers are always 2 bytes; arrays scale by `array_len`.
     let element_size = if is_char { 1 } else { 2 };
+    // Long storage is 4 bytes; modeled as a 2-slot word array. Reads of
+    // `(int)g` naturally pick up the low word at the base address.
+    let (array_len, element_size) = if is_long && !is_pointer {
+        (2usize, 2usize)
+    } else {
+        (array_len, element_size)
+    };
     p.global_names.push(name.clone());
-    p.globals.push(Global { name, init, array_len, element_size, is_pointer, struct_idx: None });
+    p.globals.push(Global { name, init, array_len, element_size, is_pointer, struct_idx: None, is_long });
     Ok(())
 }
 
@@ -1545,9 +1591,9 @@ fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> {
                     }
                 };
                 let spec = if is_ptr {
-                    LocalSpec { size: 2, array_len: 1, init: None, struct_idx: Some(sidx) }
+                    LocalSpec { size: 2, array_len: 1, init: None, struct_idx: Some(sidx), is_long: false }
                 } else {
-                    LocalSpec { size: 1, array_len: stotal, init: None, struct_idx: Some(sidx) }
+                    LocalSpec { size: 1, array_len: stotal, init: None, struct_idx: Some(sidx), is_long: false }
                 };
                 p.local_names.push(lname);
                 p.local_specs.push(spec.clone());
@@ -1561,20 +1607,25 @@ fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> {
             p.eat(&Tok::Semi)?;
             continue;
         }
-        let (size, has_explicit_type) = match p.toks.get(peek_pos) {
-            Some(Tok::Kw("int")) => (2usize, true),
-            Some(Tok::Kw("char")) => (1usize, true),
+        let (size, has_explicit_type, is_long_decl) = match p.toks.get(peek_pos) {
+            Some(Tok::Kw("int")) => (2usize, true, false),
+            Some(Tok::Kw("char")) => (1usize, true, false),
+            Some(Tok::Kw("long")) => (2usize, true, true),
             // `unsigned x;` / `signed x;` → implicit int.
             _ if peek_pos > start_pos
                 && matches!(p.toks.get(peek_pos), Some(Tok::Ident(_))) =>
             {
-                (2usize, false)
+                (2usize, false, false)
             }
             _ => break,
         };
         skip_decl_modifiers(p);
         if has_explicit_type {
             p.bump(); // type kw
+            // Consume optional `int` after `long` (i.e. `long int`).
+            if is_long_decl && matches!(p.peek(), Some(Tok::Kw("int"))) {
+                p.bump();
+            }
         }
         loop {
             // Per-declarator `*` prefix for pointer locals.
@@ -1605,7 +1656,14 @@ fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> {
             };
             let local_idx = locals.len();
             p.local_names.push(lname);
-            let spec = LocalSpec { size, array_len, init: None, struct_idx: None };
+            // Long: 4-byte slot modeled as a 2-word "array". Reads via
+            // `Expr::Local(idx)` pick up the low word at [bp-disp].
+            let (slot_size, slot_len, is_long_slot) = if is_long_decl && array_len == 1 {
+                (2usize, 2usize, true)
+            } else {
+                (size, array_len, false)
+            };
+            let spec = LocalSpec { size: slot_size, array_len: slot_len, init: None, struct_idx: None, is_long: is_long_slot };
             p.local_specs.push(spec.clone());
             locals.push(spec);
             if matches!(p.peek(), Some(Tok::Assign)) {
@@ -2631,7 +2689,7 @@ fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                     // a pointer (the array's base address). Scalar
                     // globals stay as values.
                     let g = &p.globals[idx];
-                    if !g.is_pointer && g.array_len > 1 && g.struct_idx.is_none() {
+                    if !g.is_pointer && g.array_len > 1 && g.struct_idx.is_none() && !g.is_long {
                         Ok(Expr::AddrOfGlobal(idx))
                     } else {
                         Ok(Expr::Global(idx))
@@ -2817,10 +2875,11 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
     // Build each function's body up front so we can stamp the
     // total length into the _TEXT SEGDEF and compute per-function
     // offsets for call resolution + chkstk FIXUPs.
+    let long_globals: Vec<bool> = unit.globals.iter().map(|g| g.is_long).collect();
     let function_emits: Vec<FunctionEmit> = unit
         .functions
         .iter()
-        .map(emit_function)
+        .map(|f| emit_function(f, &long_globals))
         .collect();
 
     // Per-function global offset within the _TEXT segment.
@@ -3403,14 +3462,27 @@ struct ConstProp {
     /// Matches the IndexedLocal/IndexedLocalByte byte_off so a
     /// `<local>[K] = V; return <local>[K];` round-trip folds.
     la_known: std::collections::HashMap<(usize, u16), i32>,
+    /// Globals that hold a 4-byte long. Skipped by the
+    /// `Global(g) → IntLit(K)` substitution pass so compound updates
+    /// like `g += K` and `g = g + K` keep `Global(g)` on the left for
+    /// the long-specific assign codegen to recognize.
+    long_globals: std::collections::HashSet<usize>,
 }
 
-fn const_prop_globals(stmts: &[Stmt], local_specs: &[LocalSpec]) -> Vec<Stmt> {
+fn const_prop_globals(stmts: &[Stmt], local_specs: &[LocalSpec], long_globals: &[bool]) -> Vec<Stmt> {
     let mut cp = ConstProp::default();
+    for (i, &is_long) in long_globals.iter().enumerate() {
+        if is_long { cp.long_globals.insert(i); }
+    }
     // Pre-seed l_known with the locals' constant inits so the
     // const-fold pass sees `int x = 1; switch(x)` as having x=1
     // without re-deriving it from prologue stores.
     for (i, spec) in local_specs.iter().enumerate() {
+        // Skip long locals here: substituting `Local(c)` → `IntLit(K)`
+        // would make `return (int)c;` emit a const load instead of a
+        // slot read (fixture 1037). The emit-time fold_cond path still
+        // sees the init via `locals.inits` for cond elision (1632).
+        if spec.is_long { continue; }
         if let Some(k) = spec.init {
             cp.l_known.insert(i, k);
         }
@@ -3546,6 +3618,7 @@ fn cp_clone(cp: &ConstProp) -> ConstProp {
         g_known: cp.g_known.clone(),
         l_known: cp.l_known.clone(),
         la_known: cp.la_known.clone(),
+        long_globals: cp.long_globals.clone(),
     }
 }
 
@@ -3566,7 +3639,12 @@ fn prop_cond(cond: &mut Cond, cp: &ConstProp) {
 fn prop_expr(e: &mut Expr, cp: &ConstProp) {
     match e {
         Expr::Global(idx) => {
-            if let Some(&k) = cp.g_known.get(idx) {
+            // Long globals are never substituted — their compound
+            // updates need `Global(g)` on the lhs for the long-specific
+            // assign-codegen path to fire (fixture 207).
+            if !cp.long_globals.contains(idx)
+                && let Some(&k) = cp.g_known.get(idx)
+            {
                 *e = Expr::IntLit(k);
             }
         }
@@ -3643,11 +3721,12 @@ fn prop_expr(e: &mut Expr, cp: &ConstProp) {
     }
 }
 
-fn emit_function(func: &Function) -> FunctionEmit {
-    let body = const_prop_globals(&func.body, &func.locals);
+fn emit_function(func: &Function, long_globals: &[bool]) -> FunctionEmit {
+    let body = const_prop_globals(&func.body, &func.locals, long_globals);
     // Extract a `Vec<Option<i32>>` view for the existing fold path —
     // saves rewriting every codegen helper to know about LocalSpec.
     let local_inits: Vec<Option<i32>> = func.locals.iter().map(|l| l.init).collect();
+    let local_long: Vec<bool> = func.locals.iter().map(|l| l.is_long).collect();
     let mut bytes = Vec::with_capacity(32);
     let mut fixups: Vec<Fixup> = Vec::new();
     let frame = Frame::for_function(func);
@@ -3699,7 +3778,33 @@ fn emit_function(func: &Function) -> FunctionEmit {
     for (i, spec) in func.locals.iter().enumerate() {
         if let Some(value) = spec.init {
             let disp = local_disps[i];
-            if spec.size == 1 {
+            if spec.is_long {
+                let low = (value as u32 & 0xFFFF) as u16;
+                let high = (((value as i32) >> 16) as u32 & 0xFFFF) as u16;
+                if low == 0 && high == 0 {
+                    // Zero-init peephole: `xor ax, ax; mov [bp-d_hi],
+                    // ax; mov [bp-d_lo], ax` — 8 bytes vs 10 for the
+                    // two `c7 46` stores. Fixture 1737.
+                    bytes.extend_from_slice(&[0x2B, 0xC0]);
+                    bytes.push(0x89);
+                    bytes.push(0x46);
+                    bytes.push((disp + 2) as u8);
+                    bytes.push(0x89);
+                    bytes.push(0x46);
+                    bytes.push(disp as u8);
+                } else {
+                    // Long: two word stores. `c7 46 disp_low <lo>`
+                    // then `c7 46 disp_high <hi>`.
+                    bytes.push(0xC7);
+                    bytes.push(0x46);
+                    bytes.push(disp as u8);
+                    bytes.extend_from_slice(&low.to_le_bytes());
+                    bytes.push(0xC7);
+                    bytes.push(0x46);
+                    bytes.push((disp + 2) as u8);
+                    bytes.extend_from_slice(&high.to_le_bytes());
+                }
+            } else if spec.size == 1 {
                 let imm = (value as u32 & 0xFF) as u8;
                 bytes.push(0xC6);
                 bytes.push(0x46);
@@ -3719,6 +3824,8 @@ fn emit_function(func: &Function) -> FunctionEmit {
         inits: &local_inits,
         disps: &local_disps,
         sizes: &local_sizes,
+        long_globals,
+        long_locals: &local_long,
     };
 
     let mut reachable = true;
@@ -3932,6 +4039,11 @@ fn emit_return(
         // load before ret. Fixture 4102 confirms.
         if let Expr::Call { name, args } = expr {
             emit_call(name, args, locals, out, fixups);
+        } else if matches!(expr, Expr::Local(i) if locals.is_long_local(*i)) {
+            // Long locals are read through the 4-byte slot — MSC
+            // emits `mov ax, [bp-disp_low]` even when the value is
+            // known at compile time (fixture 1037).
+            emit_expr_to_ax(expr, locals, out, fixups);
         } else if let Some(k) = expr.fold(locals.inits) {
             if k == 0 {
                 out.extend_from_slice(&[0x2B, 0xC0]);
@@ -4144,6 +4256,182 @@ fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_>, out: &mu
 /// Both shapes plant a 2-byte address placeholder that the linker
 /// resolves via a GlobalAddr fixup.
 fn emit_assign_global(global_idx: usize, value: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    // Long-global = long-global. Plain copy through DX:AX.
+    //   `b = a` → `mov ax, [a]; mov dx, [a+2];
+    //              mov [b], ax; mov [b+2], dx`
+    if locals.is_long_global(global_idx)
+        && let Expr::Global(src) = value
+        && locals.is_long_global(*src)
+    {
+        let off = out.len();
+        out.extend_from_slice(&[0xA1, 0x00, 0x00]);
+        fixups.push(Fixup { body_offset: off, kind: FixupKind::GlobalAddr { global_idx: *src } });
+        out.push(0x8B);
+        out.push(0x16);
+        let off = out.len();
+        out.extend_from_slice(&2u16.to_le_bytes());
+        fixups.push(Fixup { body_offset: off - 1, kind: FixupKind::GlobalAddr { global_idx: *src } });
+        out.push(0xA3);
+        let off = out.len();
+        out.extend_from_slice(&[0x00, 0x00]);
+        fixups.push(Fixup { body_offset: off - 1, kind: FixupKind::GlobalAddr { global_idx } });
+        out.push(0x89);
+        out.push(0x16);
+        let off = out.len();
+        out.extend_from_slice(&2u16.to_le_bytes());
+        fixups.push(Fixup { body_offset: off - 1, kind: FixupKind::GlobalAddr { global_idx } });
+        return;
+    }
+    // Long-global = long-global ± long-global. Loads lhs into DX:AX,
+    // applies a memory add/sub to both halves, stores to dest.
+    //   `g = a + b` → `mov ax, [a]; mov dx, [a+2];
+    //                  add ax, [b]; adc dx, [b+2];
+    //                  mov [g], ax; mov [g+2], dx`
+    if locals.is_long_global(global_idx)
+        && let Expr::BinOp { op, left, right } = value
+        && matches!(op, BinOp::Add | BinOp::Sub)
+        && let Expr::Global(a) = left.as_ref()
+        && let Expr::Global(b) = right.as_ref()
+        && locals.is_long_global(*a)
+        && locals.is_long_global(*b)
+    {
+        let (low_op, high_op): (u8, u8) = match op {
+            BinOp::Add => (0x03, 0x13), // add r16,m16 / adc r16,m16
+            BinOp::Sub => (0x2B, 0x1B), // sub r16,m16 / sbb r16,m16
+            _ => unreachable!(),
+        };
+        // mov ax, [a]
+        let off = out.len();
+        out.extend_from_slice(&[0xA1, 0x00, 0x00]);
+        fixups.push(Fixup { body_offset: off, kind: FixupKind::GlobalAddr { global_idx: *a } });
+        // mov dx, [a+2]
+        out.push(0x8B);
+        out.push(0x16);
+        let off = out.len();
+        out.extend_from_slice(&2u16.to_le_bytes());
+        fixups.push(Fixup { body_offset: off - 1, kind: FixupKind::GlobalAddr { global_idx: *a } });
+        // op ax, [b]
+        out.push(low_op);
+        out.push(0x06);
+        let off = out.len();
+        out.extend_from_slice(&[0x00, 0x00]);
+        fixups.push(Fixup { body_offset: off - 1, kind: FixupKind::GlobalAddr { global_idx: *b } });
+        // op dx, [b+2]
+        out.push(high_op);
+        out.push(0x16);
+        let off = out.len();
+        out.extend_from_slice(&2u16.to_le_bytes());
+        fixups.push(Fixup { body_offset: off - 1, kind: FixupKind::GlobalAddr { global_idx: *b } });
+        // mov [g], ax
+        out.push(0xA3);
+        let off = out.len();
+        out.extend_from_slice(&[0x00, 0x00]);
+        fixups.push(Fixup { body_offset: off - 1, kind: FixupKind::GlobalAddr { global_idx } });
+        // mov [g+2], dx
+        out.push(0x89);
+        out.push(0x16);
+        let off = out.len();
+        out.extend_from_slice(&2u16.to_le_bytes());
+        fixups.push(Fixup { body_offset: off - 1, kind: FixupKind::GlobalAddr { global_idx } });
+        return;
+    }
+    // Long-global compound add/sub by a foldable RHS:
+    //   `g += K` → `add [g], K_lo; adc [g+2], K_hi`
+    //   `g -= K` → `sub [g], K_lo; sbb [g+2], K_hi`
+    // Falls through to the const-store path if the RHS isn't a
+    // (Global(g) ± K) shape (fixture 1148).
+    if locals.is_long_global(global_idx)
+        && let Expr::BinOp { op, left, right } = value
+        && matches!(op, BinOp::Add | BinOp::Sub)
+        && matches!(left.as_ref(), Expr::Global(g) if *g == global_idx)
+        && let Some(k) = right.fold(locals.inits)
+    {
+        let low = (k as u32 & 0xFFFF) as i16;
+        let high = ((k as i32) >> 16) as i16;
+        let (sub_low_op, sub_high_op): (u8, u8) = match op {
+            BinOp::Add => (0x00, 0x02), // /0 = add, /2 = adc
+            BinOp::Sub => (0x05, 0x03), // /5 = sub, /3 = sbb
+            _ => unreachable!(),
+        };
+        // Low-half: 83 06|2E low_imm8 (sx) or 81 06|2E low_imm16
+        let low_fits_i8 = i8::try_from(low).is_ok();
+        if low_fits_i8 {
+            out.push(0x83);
+            out.push(0x06 | (sub_low_op << 3));
+            let addr_off = out.len();
+            out.extend_from_slice(&[0x00, 0x00]);
+            out.push(low as i8 as u8);
+            fixups.push(Fixup {
+                body_offset: addr_off - 1,
+                kind: FixupKind::GlobalAddr { global_idx },
+            });
+        } else {
+            out.push(0x81);
+            out.push(0x06 | (sub_low_op << 3));
+            let addr_off = out.len();
+            out.extend_from_slice(&[0x00, 0x00]);
+            out.extend_from_slice(&(low as u16).to_le_bytes());
+            fixups.push(Fixup {
+                body_offset: addr_off - 1,
+                kind: FixupKind::GlobalAddr { global_idx },
+            });
+        }
+        // High-half: 83 16 (or 1E) high_imm8 vs 81 16/1E ...
+        let high_fits_i8 = i8::try_from(high).is_ok();
+        if high_fits_i8 {
+            out.push(0x83);
+            out.push(0x06 | (sub_high_op << 3));
+            let addr_off = out.len();
+            out.extend_from_slice(&2u16.to_le_bytes());
+            out.push(high as i8 as u8);
+            fixups.push(Fixup {
+                body_offset: addr_off - 1,
+                kind: FixupKind::GlobalAddr { global_idx },
+            });
+        } else {
+            out.push(0x81);
+            out.push(0x06 | (sub_high_op << 3));
+            let addr_off = out.len();
+            out.extend_from_slice(&2u16.to_le_bytes());
+            out.extend_from_slice(&(high as u16).to_le_bytes());
+            fixups.push(Fixup {
+                body_offset: addr_off - 1,
+                kind: FixupKind::GlobalAddr { global_idx },
+            });
+        }
+        return;
+    }
+    // Long globals get a special 4-byte store: low word at [g],
+    // sign-extended high word at [g+2]. Only the constant-RHS shape
+    // is wired up (most-common `long g = K;` pattern); a runtime RHS
+    // would require DX:AX widening from the int RHS, deferred.
+    if locals.is_long_global(global_idx)
+        && let Some(k) = value.fold(locals.inits)
+    {
+        let low = (k as u32 & 0xFFFF) as u16;
+        let high = (((k as i32) >> 31) as u32 & 0xFFFF) as u16;
+        // c7 06 <addr> <low>
+        out.push(0xC7);
+        out.push(0x06);
+        let addr_off = out.len();
+        out.extend_from_slice(&[0x00, 0x00]);
+        out.extend_from_slice(&low.to_le_bytes());
+        fixups.push(Fixup {
+            body_offset: addr_off - 1,
+            kind: FixupKind::GlobalAddr { global_idx },
+        });
+        // c7 06 <addr+2> <high>
+        out.push(0xC7);
+        out.push(0x06);
+        let addr_off = out.len();
+        out.extend_from_slice(&2u16.to_le_bytes());
+        out.extend_from_slice(&high.to_le_bytes());
+        fixups.push(Fixup {
+            body_offset: addr_off - 1,
+            kind: FixupKind::GlobalAddr { global_idx },
+        });
+        return;
+    }
     // Peephole: `g = g ± 1;` → `inc/dec word ptr [g]` (4 bytes:
     // `ff /0 mem` for inc, `ff /1 mem` for dec). Fixture 4141.
     if let Expr::BinOp { op, left, right } = value
@@ -4766,6 +5054,28 @@ fn emit_cond_take(cond: &Cond, take_disp: i8, locals: &Locals<'_>, out: &mut Vec
 /// Emit only the cmp half of a Cond. Used by both emit_cond_skip
 /// (forward jcc for `if`) and emit_cond_cmp (backward jcc for loops).
 fn emit_cond_cmp_inner(cond: &Cond, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    // Long-global vs zero idiom: `mov ax, [g]; or ax, [g+2]` — ZF set
+    // iff both halves are zero. Covers `if (g == 0)`, `if (!g)`, and
+    // (with inverted jcc) `if (g != 0)`.
+    if let Some(idx) = match cond {
+        Cond::Truthy(Expr::Global(idx)) if locals.is_long_global(*idx) => Some(*idx),
+        Cond::Cmp { op: RelOp::Eq | RelOp::Ne, left: Expr::Global(idx), right: Expr::IntLit(0) }
+        | Cond::Cmp { op: RelOp::Eq | RelOp::Ne, left: Expr::IntLit(0), right: Expr::Global(idx) }
+            if locals.is_long_global(*idx) => Some(*idx),
+        _ => None,
+    } {
+        // mov ax, [g]
+        let off = out.len();
+        out.extend_from_slice(&[0xA1, 0x00, 0x00]);
+        fixups.push(Fixup { body_offset: off, kind: FixupKind::GlobalAddr { global_idx: idx } });
+        // or ax, [g+2]  →  0b 06 <off+2>
+        out.push(0x0B);
+        out.push(0x06);
+        let off = out.len();
+        out.extend_from_slice(&2u16.to_le_bytes());
+        fixups.push(Fixup { body_offset: off - 1, kind: FixupKind::GlobalAddr { global_idx: idx } });
+        return;
+    }
     match cond {
         Cond::Truthy(Expr::Local(idx)) => emit_cmp_local_imm(*idx, locals, 0, out),
         Cond::Truthy(Expr::Param(idx)) => emit_cmp_bp_imm(param_disp(*idx), 0, out),
