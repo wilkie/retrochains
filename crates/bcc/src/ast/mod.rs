@@ -399,6 +399,17 @@ pub enum Type {
         pointee: Box<Type>,
         seg: SegReg,
     },
+    /// `T _seg *p` — a 2-byte segment-only pointer (just a segment
+    /// selector, no offset). At every dereference, codegen emits
+    /// `mov es, <seg-ptr>` to bring the segment into ES, then
+    /// accesses `es:[<offset>]` where `<offset>` comes from the
+    /// `*(p + K)` / `*(p + <near-ptr>)` arithmetic in source.
+    /// Storage-wise behaves like a 2-byte word but stays on the
+    /// stack (the deref-via-ES pattern doesn't benefit from
+    /// register residency). Fixtures 4069–4074.
+    SegSelector {
+        pointee: Box<Type>,
+    },
     /// Parser-side marker for a function-pointer declarator
     /// (`int (*fp)(int)`). The post-parse promotion uses this to
     /// decide whether the slot is a 4-byte far pointer
@@ -472,6 +483,9 @@ impl Type {
             // Segment-qualified pointers are always 2 bytes — segment
             // lives in the qualifier, not the value. Fixture 4068.
             Self::SegPointer { .. } => 2,
+            // `_seg` segment-selector pointers are 2-byte segment
+            // values. Fixture 4069.
+            Self::SegSelector { .. } => 2,
             // FnPointer is parser-side only; it gets rewritten to
             // Pointer or FarPointer before the locals layout pass
             // ever calls `size_bytes`. 2 is the safe default for
@@ -497,6 +511,7 @@ impl Type {
             Self::NearPointer(_) => 2,
             Self::FarPointer { .. } => 2,
             Self::SegPointer { .. } => 2,
+            Self::SegSelector { .. } => 2,
             Self::FnPointer => 2,
             // Struct alignment: 2 (word). The size rounding to even
             // is part of the per-struct size computation, so this is
@@ -602,12 +617,21 @@ impl Type {
             Self::Pointer(inner) | Self::NearPointer(inner) => Some(inner),
             Self::FarPointer { pointee, .. } => Some(pointee),
             Self::SegPointer { pointee, .. } => Some(pointee),
+            Self::SegSelector { pointee } => Some(pointee),
             // FnPointer is opaque — codegen never asks for its
             // pointee (the function signature isn't modeled), and
             // by the time anyone could it's already been rewritten.
             Self::FnPointer => None,
             _ => None,
         }
+    }
+
+    /// True for the `_seg` segment-only pointer type. Used by codegen
+    /// to distinguish the load-ES-then-deref pattern from regular
+    /// or seg-qualified pointers.
+    #[must_use]
+    pub fn is_seg_selector(&self) -> bool {
+        matches!(self, Self::SegSelector { .. })
     }
 
     /// Segment-register qualifier, if this pointer carries one

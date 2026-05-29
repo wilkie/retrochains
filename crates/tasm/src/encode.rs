@@ -409,6 +409,9 @@ fn encode_segment(
 fn instr_size(instr: &Instr) -> usize {
     match instr {
         Instr::SegOverride { inner, .. } => 1 + instr_size(inner),
+        Instr::MovSregBpRel { offset, .. } => 1 + bp_rel_modrm_size(*offset),
+        Instr::MovAlAtAddr { .. } => 3,
+        Instr::MovByteAtAddrImm8 { .. } => 5,
         Instr::PushImm8Sx { .. } => 2,
         Instr::Enter { .. } => 4,
         Instr::Leave => 1,
@@ -887,6 +890,28 @@ fn emit_instr(
                 seg_idx, inner, symbols, group_idx, extern_idx, segment_idx,
                 out, fixups, jcc_expanded,
             );
+        }
+        Instr::MovSregBpRel { seg, offset } => {
+            // `mov <sreg>, word ptr [bp+disp]` → 8E /<sreg> [bp+disp].
+            // ES=0, CS=1, SS=2, DS=3 in the reg field. Fixture 4070
+            // (`*p` where p is `char _seg *` reads ES from p first).
+            out.push(0x8E);
+            emit_bp_rel_modrm(seg.code(), *offset, out);
+        }
+        Instr::MovAlAtAddr { addr } => {
+            // `mov al, byte ptr [<imm16>]` → A0 lo hi. Moffs8
+            // accumulator form. Fixtures 4070, 4071.
+            out.push(0xA0);
+            out.extend_from_slice(&addr.to_le_bytes());
+        }
+        Instr::MovByteAtAddrImm8 { addr, imm } => {
+            // `mov byte ptr [<imm16>], imm8` → C6 06 lo hi imm8.
+            // Direct address store with ModR/M mod=00 r/m=110
+            // (disp16-only). Fixture 4072.
+            out.push(0xC6);
+            out.push(0x06);
+            out.extend_from_slice(&addr.to_le_bytes());
+            out.push(*imm);
         }
         Instr::PushReg16 { reg } => out.push(0x50 | reg.code()),
         Instr::PopReg16 { reg } => out.push(0x58 | reg.code()),

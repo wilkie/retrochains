@@ -604,17 +604,19 @@ impl Parser {
     /// is_near)`. The segment-prefix qualifier (`_ss/_es/_cs/_ds`),
     /// when one is seen, is returned by the `_seg` variant below.
     fn consume_cc_modifiers_full(&mut self) -> (bool, bool, bool, bool, bool) {
-        let (p, f, h, i, n, _seg) = self.consume_cc_modifiers_seg();
+        let (p, f, h, i, n, _seg, _is_seg) = self.consume_cc_modifiers_seg();
         (p, f, h, i, n)
     }
 
     /// Like `consume_cc_modifiers_full` but also collects a
-    /// segment-prefix qualifier (`_ss/_es/_cs/_ds`). Only the
-    /// pointer-declarator paths care about this — function-modifier
-    /// sites can use the shorter form. Fixtures 4063–4068.
+    /// segment-prefix qualifier (`_ss/_es/_cs/_ds`) and the
+    /// `_seg`-pointer marker. Only the pointer-declarator paths
+    /// care about these — function-modifier sites can use the
+    /// shorter form. Fixtures 4063–4068 (seg qualifiers), 4069–4074
+    /// (_seg pointer type).
     fn consume_cc_modifiers_seg(
         &mut self,
-    ) -> (bool, bool, bool, bool, bool, Option<crate::ast::SegReg>) {
+    ) -> (bool, bool, bool, bool, bool, Option<crate::ast::SegReg>, bool) {
         use crate::ast::SegReg;
         let mut is_pascal = false;
         let mut is_far = false;
@@ -622,6 +624,7 @@ impl Parser {
         let mut is_interrupt = false;
         let mut is_near = false;
         let mut seg: Option<SegReg> = None;
+        let mut is_seg = false;
         while let TokenKind::Ident(name) = &self.peek().kind {
             match name.as_str() {
                 "pascal" | "_pascal" | "__pascal" => {
@@ -663,10 +666,14 @@ impl Parser {
                     seg = Some(SegReg::Ds);
                     self.bump();
                 }
+                "_seg" | "__seg" => {
+                    is_seg = true;
+                    self.bump();
+                }
                 _ => break,
             }
         }
-        (is_pascal, is_far, is_huge, is_interrupt, is_near, seg)
+        (is_pascal, is_far, is_huge, is_interrupt, is_near, seg, is_seg)
     }
 
     /// Helper: build the right pointer Type given an inner type and
@@ -677,23 +684,26 @@ impl Parser {
     /// otherwise plain `Pointer`. Fixture 1748 needs the explicit-
     /// near tag so large model leaves it 2-byte.
     fn make_ptr_ty(inner: Type, is_far: bool, is_huge: bool, is_near: bool) -> Type {
-        Self::make_ptr_ty_seg(inner, is_far, is_huge, is_near, None)
+        Self::make_ptr_ty_seg(inner, is_far, is_huge, is_near, None, false)
     }
 
     /// Like `make_ptr_ty` but accepts a segment-prefix qualifier
-    /// (`_ss/_es/_cs/_ds`). When present, builds a `Type::SegPointer`
-    /// instead of the regular near/far variants. The seg qualifier
-    /// trumps `near`/`far` in this position (a `_ss *` is always a
-    /// 2-byte near pointer regardless of memory model). Fixtures
-    /// 4063–4068.
+    /// (`_ss/_es/_cs/_ds`) and the `_seg`-pointer marker. When
+    /// `is_seg` is set, builds a `Type::SegSelector` (segment-only
+    /// 2-byte pointer); the seg-prefix qualifier builds
+    /// `Type::SegPointer`. Both trump `near`/`far` in this position.
+    /// Fixtures 4063–4068 (qualifier), 4069–4074 (`_seg`).
     fn make_ptr_ty_seg(
         inner: Type,
         is_far: bool,
         is_huge: bool,
         is_near: bool,
         seg: Option<crate::ast::SegReg>,
+        is_seg: bool,
     ) -> Type {
-        if let Some(seg) = seg {
+        if is_seg {
+            Type::SegSelector { pointee: Box::new(inner) }
+        } else if let Some(seg) = seg {
             Type::SegPointer { pointee: Box::new(inner), seg }
         } else if is_far || is_huge {
             Type::FarPointer { pointee: Box::new(inner), is_huge }
@@ -858,16 +868,17 @@ impl Parser {
         // contexts. Capture `far` / `huge` so the pointer level
         // built from the next `*` becomes a `Type::FarPointer`.
         // Fixture 1649 (`(int far *)&x`), 1652 (`(int huge *)&x`).
-        let (_, mut is_far, mut is_huge, _, mut is_near, mut seg) =
+        let (_, mut is_far, mut is_huge, _, mut is_near, mut seg, mut is_seg) =
             self.consume_cc_modifiers_seg();
         while matches!(self.peek().kind, TokenKind::Star) {
             self.bump();
-            ty = Self::make_ptr_ty_seg(ty, is_far, is_huge, is_near, seg);
-            let (_, f, h, _, n, s) = self.consume_cc_modifiers_seg();
+            ty = Self::make_ptr_ty_seg(ty, is_far, is_huge, is_near, seg, is_seg);
+            let (_, f, h, _, n, s, sg) = self.consume_cc_modifiers_seg();
             is_far = f;
             is_huge = h;
             is_near = n;
             seg = s;
+            is_seg = sg;
         }
         // Abstract function-pointer declarator: `( * ) ( <args> )`
         // — appears in casts like `(int (*)(void))vp`. Fn-ptr
@@ -1216,17 +1227,18 @@ impl Parser {
             // an `int*` and `b` a plain `int`. Capture `far` / `huge`
             // / `near` so each level becomes FarPointer / NearPointer
             // when qualified.
-            let (_, mut is_far, mut is_huge, _, mut is_near, mut seg) =
+            let (_, mut is_far, mut is_huge, _, mut is_near, mut seg, mut is_seg) =
                 self.consume_cc_modifiers_seg();
             let mut ty = base_ty.clone();
             while matches!(self.peek().kind, TokenKind::Star) {
                 self.bump();
-                ty = Self::make_ptr_ty_seg(ty, is_far, is_huge, is_near, seg);
-                let (_, f, h, _, n, s) = self.consume_cc_modifiers_seg();
+                ty = Self::make_ptr_ty_seg(ty, is_far, is_huge, is_near, seg, is_seg);
+                let (_, f, h, _, n, s, sg) = self.consume_cc_modifiers_seg();
                 is_far = f;
                 is_huge = h;
                 is_near = n;
                 seg = s;
+                is_seg = sg;
             }
             // Function-pointer global declarator: `int (*name)(...)`.
             // Mirrors the param / local paths — the signature isn't
@@ -1620,18 +1632,19 @@ impl Parser {
                 return Ok((params, true));
             }
             let mut ty = self.parse_type()?;
-            let (_, mut is_far, mut is_huge, _, mut is_near, mut seg) =
+            let (_, mut is_far, mut is_huge, _, mut is_near, mut seg, mut is_seg) =
                 self.consume_cc_modifiers_seg();
             // Pointer stars wrap the base type, just like in a local
             // declaration (fixture 095: `int sum(int *p)`).
             while matches!(self.peek().kind, TokenKind::Star) {
                 self.bump();
-                ty = Self::make_ptr_ty_seg(ty, is_far, is_huge, is_near, seg);
-                let (_, f, h, _, n, s) = self.consume_cc_modifiers_seg();
+                ty = Self::make_ptr_ty_seg(ty, is_far, is_huge, is_near, seg, is_seg);
+                let (_, f, h, _, n, s, sg) = self.consume_cc_modifiers_seg();
                 is_far = f;
                 is_huge = h;
                 is_near = n;
                 seg = s;
+                is_seg = sg;
             }
             // Function-pointer parameter: `<ret> ( * <name> ) ( <params> )`.
             // Mirrors the local-declaration path — we don't model the
@@ -2299,7 +2312,7 @@ impl Parser {
         // pointer level picks the right variant. Fixtures 1649,
         // 1650, 1651, 1652, 2058, 2250 (far / huge); 1748 (near in
         // far-data model).
-        let (_, mut is_far, mut is_huge, _, mut is_near, mut seg) =
+        let (_, mut is_far, mut is_huge, _, mut is_near, mut seg, mut is_seg) =
             self.consume_cc_modifiers_seg();
         // Pointer stars wrap the base type: `int **pp` is `Pointer(Pointer(Int))`.
         // Stars are per-declarator — `int *a, b;` makes `a` an `int*`
@@ -2309,16 +2322,17 @@ impl Parser {
         let mut ty = base_ty.clone();
         while matches!(self.peek().kind, TokenKind::Star) {
             self.bump();
-            ty = Self::make_ptr_ty_seg(ty, is_far, is_huge, is_near, seg);
+            ty = Self::make_ptr_ty_seg(ty, is_far, is_huge, is_near, seg, is_seg);
             // `T far *` / `T *far` — modifiers can also appear AFTER
             // a pointer star. Consume them and let the next `*` (if
             // any) pick them up. Also accept `T * const p`
             // (const-qualified pointer). Fixture 2380.
-            let (_, f, h, _, n, s) = self.consume_cc_modifiers_seg();
+            let (_, f, h, _, n, s, sg) = self.consume_cc_modifiers_seg();
             is_far = f;
             is_huge = h;
             is_near = n;
             seg = s;
+            is_seg = sg;
             while matches!(
                 self.peek().kind,
                 TokenKind::KwConst | TokenKind::KwVolatile

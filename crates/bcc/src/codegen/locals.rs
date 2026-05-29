@@ -441,6 +441,17 @@ impl Locals {
         } else {
             HashSet::new()
         };
+        // Names used as the non-constant offset in a `_seg` pointer
+        // deref (`*(seg_ptr + <offset>)`). BCC enregisters these
+        // into SI / DI / etc. regardless of use count because the
+        // deref pattern needs them in a register for the
+        // `es:[<reg>]` addressing mode. Fixture 4073 (`return *(p +
+        // q);` for `int f(char _seg *p, char near *q)` — q
+        // enregisters into SI even with one use).
+        let seg_deref_offset_names: HashSet<&str> = collect_seg_deref_offset_names(
+            function.body.as_deref().unwrap_or(&[]),
+            &declared,
+        );
         let eligible_int: Vec<usize> = (0..declared.len())
             .filter(|&i| {
                 if address_taken.contains(&declared[i].name) {
@@ -466,11 +477,14 @@ impl Locals {
                 if no_reg_vars {
                     return false;
                 }
+                let is_seg_deref_offset =
+                    seg_deref_offset_names.contains(declared[i].name.as_str());
                 match &declared[i].ty {
                     Type::Int | Type::UInt | Type::Pointer(_) | Type::SegPointer { .. } => {
                         declared[i].is_register
                             || uses >= ENREGISTER_THRESHOLD
                             || leaf_param_subscript.contains(&i)
+                            || is_seg_deref_offset
                     }
                     _ => false,
                 }
@@ -2790,6 +2804,170 @@ fn stmt_has_2d_array_index(stmt: &Stmt) -> bool {
         | StmtKind::Label { .. }
         | StmtKind::Empty
         | StmtKind::Asm { .. } => false,
+    }
+}
+
+/// Walk `body` and collect the names of any identifier that appears
+/// as the non-constant right operand of a `BinOp::Add` whose left
+/// operand is a `_seg`-typed identifier (`*(p + q)` where p is
+/// `T _seg *`). These names need to be enregistered into SI / DI
+/// regardless of use-count, because the deref site emits
+/// `mov al/ax, <width> ptr es:[<reg>]` and requires the offset in
+/// a register. Fixture 4073.
+fn collect_seg_deref_offset_names<'a>(
+    body: &'a [Stmt],
+    declared: &'a [DeclItem],
+) -> HashSet<&'a str> {
+    let mut out: HashSet<&str> = HashSet::new();
+    for stmt in body {
+        walk_stmt_seg_deref(stmt, declared, &mut out);
+    }
+    out
+}
+
+fn walk_stmt_seg_deref<'a>(
+    stmt: &'a Stmt,
+    declared: &'a [DeclItem],
+    out: &mut HashSet<&'a str>,
+) {
+    match &stmt.kind {
+        StmtKind::Return(Some(e))
+        | StmtKind::ExprStmt(e) => walk_expr_seg_deref(e, declared, out),
+        StmtKind::Declare { init: Some(e), .. } => walk_expr_seg_deref(e, declared, out),
+        StmtKind::Assign { value, .. } | StmtKind::CompoundAssign { value, .. } => {
+            walk_expr_seg_deref(value, declared, out);
+        }
+        StmtKind::ArrayAssign { indices, value, .. }
+        | StmtKind::ArrayCompoundAssign { indices, value, .. }
+        | StmtKind::MemberArrayAssign { indices, value, .. } => {
+            for i in indices {
+                walk_expr_seg_deref(i, declared, out);
+            }
+            walk_expr_seg_deref(value, declared, out);
+        }
+        StmtKind::DerefAssign { target, value }
+        | StmtKind::DerefCompoundAssign { target, value, .. } => {
+            walk_expr_seg_deref(target, declared, out);
+            walk_expr_seg_deref(value, declared, out);
+        }
+        StmtKind::MemberAssign { base, value, .. }
+        | StmtKind::MemberCompoundAssign { base, value, .. } => {
+            walk_expr_seg_deref(base, declared, out);
+            walk_expr_seg_deref(value, declared, out);
+        }
+        StmtKind::If { cond, then_branch, else_branch } => {
+            walk_expr_seg_deref(cond, declared, out);
+            for s in then_branch {
+                walk_stmt_seg_deref(s, declared, out);
+            }
+            if let Some(eb) = else_branch {
+                for s in eb {
+                    walk_stmt_seg_deref(s, declared, out);
+                }
+            }
+        }
+        StmtKind::While { cond, body } | StmtKind::DoWhile { cond, body } => {
+            walk_expr_seg_deref(cond, declared, out);
+            for s in body {
+                walk_stmt_seg_deref(s, declared, out);
+            }
+        }
+        StmtKind::For { init, cond, step, body } => {
+            if let Some(es) = init {
+                for e in es {
+                    walk_expr_seg_deref(e, declared, out);
+                }
+            }
+            if let Some(e) = cond {
+                walk_expr_seg_deref(e, declared, out);
+            }
+            if let Some(es) = step {
+                for e in es {
+                    walk_expr_seg_deref(e, declared, out);
+                }
+            }
+            for s in body {
+                walk_stmt_seg_deref(s, declared, out);
+            }
+        }
+        StmtKind::Switch { scrutinee, cases } => {
+            walk_expr_seg_deref(scrutinee, declared, out);
+            for c in cases {
+                for s in &c.body {
+                    walk_stmt_seg_deref(s, declared, out);
+                }
+            }
+        }
+        StmtKind::Block(body) => {
+            for s in body {
+                walk_stmt_seg_deref(s, declared, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn walk_expr_seg_deref<'a>(
+    e: &'a Expr,
+    declared: &'a [DeclItem],
+    out: &mut HashSet<&'a str>,
+) {
+    // Detect `<seg-selector-ident> + <ident>` and record the right ident.
+    if let ExprKind::BinOp { op: crate::ast::BinOp::Add, left, right } = &e.kind
+        && let ExprKind::Ident(lname) = &left.kind
+        && let Some(litem) = declared.iter().find(|d| d.name == *lname)
+        && litem.ty.is_seg_selector()
+        && let ExprKind::Ident(rname) = &right.kind
+    {
+        if let Some(ritem) = declared.iter().find(|d| d.name == *rname) {
+            out.insert(ritem.name.as_str());
+        }
+    }
+    match &e.kind {
+        ExprKind::BinOp { left, right, .. }
+        | ExprKind::Logical { left, right, .. }
+        | ExprKind::Comma { left, right } => {
+            walk_expr_seg_deref(left, declared, out);
+            walk_expr_seg_deref(right, declared, out);
+        }
+        ExprKind::Unary { operand, .. } | ExprKind::Cast { operand, .. } => {
+            walk_expr_seg_deref(operand, declared, out);
+        }
+        ExprKind::Deref(inner) => walk_expr_seg_deref(inner, declared, out),
+        ExprKind::AssignExpr { value, .. } => walk_expr_seg_deref(value, declared, out),
+        ExprKind::AssignLvalueExpr { target, value } => {
+            walk_expr_seg_deref(target, declared, out);
+            walk_expr_seg_deref(value, declared, out);
+        }
+        ExprKind::CompoundAssignExpr { value, .. } => walk_expr_seg_deref(value, declared, out),
+        ExprKind::Call { args, .. } => {
+            for a in args {
+                walk_expr_seg_deref(a, declared, out);
+            }
+        }
+        ExprKind::CallVia { addr, args } => {
+            walk_expr_seg_deref(addr, declared, out);
+            for a in args {
+                walk_expr_seg_deref(a, declared, out);
+            }
+        }
+        ExprKind::ArrayIndex { array, index } => {
+            walk_expr_seg_deref(array, declared, out);
+            walk_expr_seg_deref(index, declared, out);
+        }
+        ExprKind::Member { base, .. } => walk_expr_seg_deref(base, declared, out),
+        ExprKind::Ternary { cond, then_value, else_value } => {
+            walk_expr_seg_deref(cond, declared, out);
+            walk_expr_seg_deref(then_value, declared, out);
+            walk_expr_seg_deref(else_value, declared, out);
+        }
+        ExprKind::UpdateLvalue { target, .. } => walk_expr_seg_deref(target, declared, out),
+        ExprKind::InitList { items } => {
+            for i in items {
+                walk_expr_seg_deref(i, declared, out);
+            }
+        }
+        _ => {}
     }
 }
 

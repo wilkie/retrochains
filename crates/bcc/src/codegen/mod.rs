@@ -13006,6 +13006,21 @@ impl<'a> FunctionEmitter<'a> {
                 return;
             }
         }
+        // `*(p + <offset>)` where p is a `_seg` segment-only pointer:
+        // load the segment into ES, then read via `es:[<offset>]`.
+        // Offset can be a constant (folded into displacement) or
+        // a near-pointer local (loaded into SI first). Fixtures
+        // 4070 (offset 0), 4071 (const offset), 4073 (seg + near).
+        if let ExprKind::BinOp { op: BinOp::Add, left, right } = &ptr.kind
+            && let ExprKind::Ident(name) = &left.kind
+            && self.locals.has(name)
+            && self.locals.type_of(name).is_seg_selector()
+        {
+            let p_ty = self.locals.type_of(name).clone();
+            let pointee = p_ty.pointee().expect("SegSelector has a pointee").clone();
+            self.emit_seg_selector_deref_read(name, &pointee, right);
+            return;
+        }
         // `*(p + offset)` shapes go through a shared helper that
         // builds the addressing mode.
         if let ExprKind::BinOp { op: BinOp::Add, left, right } = &ptr.kind
@@ -13225,6 +13240,91 @@ impl<'a> FunctionEmitter<'a> {
     /// `*(<ptr> + <offset>)` for fixtures 091, 092, 094. The pointer
     /// name + pointee type are extracted by the caller; `offset` is
     /// the right side of the `+`.
+    /// `*(<seg-selector> + <offset>) = v` write. Loads the segment
+    /// into ES, then stores via `es:[<offset>]`. Constant offset
+    /// becomes the displacement; constant RHS folds to a single
+    /// `mov <width> ptr es:[<off>], imm`. Fixture 4072.
+    fn emit_seg_selector_deref_write(
+        &mut self,
+        name: &str,
+        pointee: &Type,
+        offset: &Expr,
+        value: &Expr,
+    ) {
+        let p_addr = match self.locals.location_of(name) {
+            LocalLocation::Stack(off) => bp_addr(off),
+            LocalLocation::Reg(_) => {
+                panic!("`_seg` pointer unexpectedly enregistered — should stay on stack");
+            }
+        };
+        let width = ptr_width(pointee);
+        let off_operand = if let Some(k) = try_const_eval(offset) {
+            format!("{}", k & 0xFFFF)
+        } else if let ExprKind::Ident(q_name) = &offset.kind
+            && self.locals.has(q_name)
+            && let LocalLocation::Reg(q_reg) = self.locals.location_of(q_name)
+        {
+            q_reg.name().to_owned()
+        } else {
+            panic!("`_seg` deref-write offset must be a constant or register-resident local (no fixture)");
+        };
+        let _ = write!(self.out, "\tmov\tes,word ptr {p_addr}\r\n");
+        if let Some(v) = try_const_eval(value) {
+            let v_masked = if pointee.is_char_like() { v & 0xFF } else { v & 0xFFFF };
+            let _ = write!(
+                self.out,
+                "\tmov\t{width} ptr es:[{off_operand}],{v_masked}\r\n",
+            );
+            return;
+        }
+        self.emit_expr_to_ax(value);
+        let src = if pointee.is_char_like() { "al" } else { "ax" };
+        let _ = write!(
+            self.out,
+            "\tmov\t{width} ptr es:[{off_operand}],{src}\r\n",
+        );
+    }
+
+    /// `*(<seg-selector> + <offset>)` value-context read. Loads the
+    /// segment into ES, then accesses `es:[<offset>]`. `<offset>` can
+    /// be a constant (baked into displacement) or a register-resident
+    /// near-pointer / int local (used as `es:[<reg>]`). The pointee's
+    /// width picks `byte`/`word` and triggers `cbw` for char.
+    /// Fixtures 4070 (offset 0), 4071 (const offset), 4073 (seg + near).
+    fn emit_seg_selector_deref_read(
+        &mut self,
+        name: &str,
+        pointee: &Type,
+        offset: &Expr,
+    ) {
+        let p_addr = match self.locals.location_of(name) {
+            LocalLocation::Stack(off) => bp_addr(off),
+            LocalLocation::Reg(_) => {
+                panic!("`_seg` pointer unexpectedly enregistered — should stay on stack");
+            }
+        };
+        let reg_name = if pointee.is_char_like() { "al" } else { "ax" };
+        let width = ptr_width(pointee);
+        let off_operand = if let Some(k) = try_const_eval(offset) {
+            format!("{}", k & 0xFFFF)
+        } else if let ExprKind::Ident(q_name) = &offset.kind
+            && self.locals.has(q_name)
+            && let LocalLocation::Reg(q_reg) = self.locals.location_of(q_name)
+        {
+            q_reg.name().to_owned()
+        } else {
+            panic!("`_seg` deref offset must be a constant or register-resident local (no fixture)");
+        };
+        let _ = write!(self.out, "\tmov\tes,word ptr {p_addr}\r\n");
+        let _ = write!(
+            self.out,
+            "\tmov\t{reg_name},{width} ptr es:[{off_operand}]\r\n",
+        );
+        if pointee.is_char_like() {
+            self.emit_widen_al(pointee);
+        }
+    }
+
     fn emit_deref_pointer_plus_offset(
         &mut self,
         ptr_name: &str,
@@ -18604,6 +18704,21 @@ impl<'a> FunctionEmitter<'a> {
     /// ```
     /// where SI holds the pointer.
     fn emit_deref_assign(&mut self, target: &Expr, value: &Expr) {
+        // `*(<seg-selector> + <offset>) = v;` — write through a
+        // `_seg` segment-only pointer. Loads the segment into ES,
+        // then stores via `es:[<offset>]`. Constant RHS folds to
+        // `mov <width> ptr es:[<off>], imm`; non-constant goes
+        // through AX/AL. Fixture 4072.
+        if let ExprKind::BinOp { op: BinOp::Add, left, right } = &target.kind
+            && let ExprKind::Ident(p_name) = &left.kind
+            && self.locals.has(p_name)
+            && self.locals.type_of(p_name).is_seg_selector()
+        {
+            let p_ty = self.locals.type_of(p_name).clone();
+            let pointee = p_ty.pointee().expect("SegSelector has a pointee").clone();
+            self.emit_seg_selector_deref_write(p_name, &pointee, right, value);
+            return;
+        }
         // `*<seg-qual-ptr> = v;` — write through a segment-qualified
         // pointer. The qualifier becomes a TASM `<seg>:` operand
         // prefix (DS elided as the default segment). Constant RHS

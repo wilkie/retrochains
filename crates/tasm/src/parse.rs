@@ -1254,6 +1254,14 @@ fn parse_mov(operands: &str, line_no: usize) -> AsmResult<Instr> {
     {
         return Ok(Instr::MovDsReg16 { reg: src });
     }
+    // `mov <sreg>, word ptr [bp+disp]` — load a segment register
+    // from memory. BCC's `_seg`-pointer codegen brings the segment
+    // selector into ES at every dereference. Fixtures 4070–4073.
+    if let Some(seg) = crate::ir::SegReg::parse(lhs)
+        && let Some(offset) = parse_word_bp_relative(rhs)
+    {
+        return Ok(Instr::MovSregBpRel { seg, offset });
+    }
     // `mov <reg16>, DGROUP` — load the DGROUP group's segment value
     // as a 16-bit immediate with a SegRelGroupTarget fixup. Fixture
     // 1655.
@@ -1574,6 +1582,16 @@ fn parse_mov(operands: &str, line_no: usize) -> AsmResult<Instr> {
         if rhs == "byte ptr [bx+di]" {
             return Ok(Instr::MovAlFromBxDi);
         }
+        // `mov al, byte ptr [<imm16>]` — moffs8 load from a literal
+        // 16-bit address. Used (with a wrapping ES override) by
+        // `_seg`-pointer deref with a constant offset. Fixtures
+        // 4070 (offset 0), 4071 (offset 5).
+        if let Some(inner) = rhs.strip_prefix("byte ptr [")
+            && let Some(num) = inner.strip_suffix(']')
+            && let Some(addr) = parse_imm16(num)
+        {
+            return Ok(Instr::MovAlAtAddr { addr });
+        }
         // `mov al, byte ptr [bp+si+disp]` — char-array load via
         // BP+SI indexed addressing. Fixture 2488.
         if let Some(disp) = parse_byte_bp_si_disp(rhs) {
@@ -1841,6 +1859,16 @@ fn parse_mov(operands: &str, line_no: usize) -> AsmResult<Instr> {
         && let Some(src) = Reg8::parse(rhs)
     {
         return Ok(Instr::MovDiPtrReg8 { src });
+    }
+    // LHS `byte ptr [<imm16>]` — immediate-to-memory byte store at
+    // a literal address. Used (with a wrapping ES override) by
+    // `_seg`-pointer write with a constant offset. Fixture 4072.
+    if let Some(inner) = lhs.strip_prefix("byte ptr [")
+        && let Some(num) = inner.strip_suffix(']')
+        && let Some(addr) = parse_imm16(num)
+        && let Some(imm) = parse_imm8(rhs)
+    {
+        return Ok(Instr::MovByteAtAddrImm8 { addr, imm });
     }
     // LHS `word ptr [si+disp]` — store-imm to long pointer's high
     // half (fixture 308: `*p = K` where `p: long *` in SI emits

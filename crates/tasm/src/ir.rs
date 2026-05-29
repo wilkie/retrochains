@@ -131,6 +131,21 @@ pub enum Instr {
     /// 4068; the `_ds` case elides the prefix and skips this
     /// wrapper since DS is the default).
     SegOverride { seg: SegReg, inner: Box<Instr> },
+    /// `mov <sreg>, word ptr [bp+disp]` — load a segment register
+    /// from a bp-relative memory operand. 8E /<sreg> [bp+disp].
+    /// Used by `_seg`-pointer deref codegen to bring the segment
+    /// value into ES at every dereference. Fixtures 4070–4073.
+    MovSregBpRel { seg: SegReg, offset: i16 },
+    /// `mov al, byte ptr [<imm16>]` — A0 lo hi (3 bytes). The
+    /// moffs8 accumulator form of a load from a literal 16-bit
+    /// address. Used by `_seg`-pointer deref with a constant
+    /// offset (fixtures 4070, 4071).
+    MovAlAtAddr { addr: u16 },
+    /// `mov byte ptr [<imm16>], imm8` — C6 06 lo hi imm8 (5 bytes).
+    /// Direct immediate-to-memory store at a literal address.
+    /// Used by `_seg`-pointer write with a constant offset
+    /// (fixture 4072).
+    MovByteAtAddrImm8 { addr: u16, imm: u8 },
     /// `mov <dst>,<src>` between 16-bit registers — 8B xx with
     /// ModR/M mod=11 reg=dst-code r/m=src-code. Covers `mov bp,sp`,
     /// `mov sp,bp`, `mov ax,dx`, `mov ax,si`, etc.
