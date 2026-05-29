@@ -1663,6 +1663,16 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
                     });
                 }
                 FixupKind::StrLoad { string_idx } => {
+                    // Patch the placeholder bytes with the string's
+                    // CONST offset so the linker (which adds the
+                    // CONST base) lands at the right byte. Fixture
+                    // 4128 has multiple strings — without this patch
+                    // every StrLoad would resolve to the first
+                    // string.
+                    let off = u16::try_from(string_offsets[*string_idx])
+                        .expect("string offset fits");
+                    fe.bytes[fx.body_offset + 1] = (off & 0xFF) as u8;
+                    fe.bytes[fx.body_offset + 2] = ((off >> 8) & 0xFF) as u8;
                     ledata_fixups.push(ResolvedFixup {
                         ledata_offset: caller_off + fx.body_offset + 1,
                         kind: FixupKind::StrLoad { string_idx: *string_idx },
@@ -2072,7 +2082,7 @@ fn emit_stmt(
             let then_len = then_buf.len();
             let take_then_disp = i8::try_from(then_len)
                 .expect("then-body short enough for jcc rel8");
-            emit_cond_skip(cond, take_then_disp, out);
+            emit_cond_skip(cond, take_then_disp, out, fixups);
             // Bring any then-branch call sites into the parent buffer,
             // offsetting their body_offset by where the then bytes
             // land in `out`.
@@ -2248,6 +2258,18 @@ fn emit_push_arg(arg: &Expr, _locals: &[Option<i32>], out: &mut Vec<u8>, fixups:
             let body_offset = out.len();
             out.extend_from_slice(&[0xB8, 0x00, 0x00]);
             out.push(0x50); // push ax
+            fixups.push(Fixup {
+                body_offset,
+                kind: FixupKind::GlobalAddr { global_idx: *idx },
+            });
+        }
+        Expr::Global(idx) => {
+            // `ff 36 <addr>` — push word ptr [imm16]. The placeholder
+            // gets the global's _DATA offset; the FIXUP carries the
+            // base. Fixture 4131.
+            out.push(0xFF);
+            let body_offset = out.len();
+            out.extend_from_slice(&[0x36, 0x00, 0x00]);
             fixups.push(Fixup {
                 body_offset,
                 kind: FixupKind::GlobalAddr { global_idx: *idx },
@@ -2635,12 +2657,26 @@ fn emit_cond_cmp(cond: &Cond, out: &mut Vec<u8>) {
 /// forward `rel8` displacement equal to `take_then_disp`. The
 /// caller has pre-computed the size of the then-body so we can use
 /// the 2-byte jcc form without a fixup. Fixtures 4090 / 4091 / 4092.
-fn emit_cond_skip(cond: &Cond, take_then_disp: i8, out: &mut Vec<u8>) {
+fn emit_cond_skip(cond: &Cond, take_then_disp: i8, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
     match cond {
         Cond::Truthy(Expr::Local(idx)) => {
             // `if (<local>)` → `cmp word ptr [bp-disp], 0; je skip`.
             emit_cmp_local_imm(*idx, 0, out);
             out.push(0x74); // je rel8
+            out.push(take_then_disp as u8);
+        }
+        Cond::Truthy(Expr::Global(idx)) => {
+            // `if (<global>)` → `cmp word ptr [<addr>], 0; je skip`
+            // with a GlobalAddr FIXUP on the addr. Fixture 4129.
+            out.push(0x83);
+            out.push(0x3E);  // ModR/M: mod=00 reg=111(/7=CMP) r/m=110(disp16)
+            let body_offset = out.len();
+            out.extend_from_slice(&[0x00, 0x00, 0x00]); // addr LO HI imm8
+            fixups.push(Fixup {
+                body_offset: body_offset - 1,
+                kind: FixupKind::GlobalAddr { global_idx: *idx },
+            });
+            out.push(0x74);
             out.push(take_then_disp as u8);
         }
         Cond::Cmp { op: RelOp::Eq, left: Expr::Local(idx), right: Expr::IntLit(k) }
