@@ -2240,6 +2240,58 @@ fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                 })
             }
         }
+        Some(Tok::Kw("sizeof")) => {
+            // `sizeof(<type>)` or `sizeof <expr>` — evaluated at
+            // parse time into an int literal. We support int/char,
+            // pointer-to-X (always 2 in small model), `struct Name`,
+            // and a bare identifier (local / global storage size).
+            let has_paren = matches!(p.peek(), Some(Tok::LParen));
+            if has_paren { p.bump(); }
+            let n = if let Some(Tok::Kw("struct")) = p.peek().cloned() {
+                p.bump();
+                let sname = match p.bump().cloned() {
+                    Some(Tok::Ident(s)) => s,
+                    other => {
+                        return Err(EmitError::Unsupported(format!(
+                            "expected struct name in sizeof, got {other:?}"
+                        )));
+                    }
+                };
+                p.structs.iter().find(|s| s.name == sname)
+                    .map(|s| s.total_bytes as i32)
+                    .ok_or_else(|| EmitError::Unsupported(format!("unknown struct `{sname}` in sizeof")))?
+            } else if let Some(Tok::Kw("int")) = p.peek().cloned() {
+                p.bump();
+                while matches!(p.peek(), Some(Tok::Star)) { p.bump(); }
+                2 // int or any int-pointer = 2 in small model
+            } else if let Some(Tok::Kw("char")) = p.peek().cloned() {
+                p.bump();
+                if matches!(p.peek(), Some(Tok::Star)) {
+                    p.bump();
+                    2
+                } else {
+                    1
+                }
+            } else if let Some(Tok::Ident(name)) = p.peek().cloned() {
+                p.bump();
+                if let Some(idx) = p.local_names.iter().position(|n| *n == name) {
+                    p.local_specs[idx].storage_bytes() as i32
+                } else if let Some(idx) = p.global_names.iter().position(|n| *n == name) {
+                    let g = &p.globals[idx];
+                    (g.element_size * g.array_len) as i32
+                } else {
+                    return Err(EmitError::Unsupported(format!(
+                        "sizeof unknown identifier `{name}`"
+                    )));
+                }
+            } else {
+                return Err(EmitError::Unsupported(format!(
+                    "unsupported sizeof operand: {:?}", p.peek()
+                )));
+            };
+            if has_paren { p.eat(&Tok::RParen)?; }
+            Ok(Expr::IntLit(n))
+        }
         Some(Tok::Amp) => {
             // Address-of `&<ident>`. Phase 1 supports globals and
             // locals; locals lower to `lea ax, [bp-disp]`.
