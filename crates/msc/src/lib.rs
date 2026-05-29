@@ -4472,7 +4472,40 @@ fn emit_cond_cmp_inner(cond: &Cond, locals: &Locals<'_>, out: &mut Vec<u8>, fixu
         | Cond::Cmp { op: _, left: Expr::IntLit(k), right: Expr::Global(idx) } => {
             emit_cmp_global_imm(*idx, *k, out, fixups);
         }
+        // Generic fallback for unsupported cond shapes: evaluate LHS
+        // into AX, then `cmp ax, K` (`3d K K` for word, `83 f8 K` for
+        // imm8sx). Used for `p->x == K` and other DerefLocalField cases.
+        Cond::Cmp { op: _, left, right: Expr::IntLit(k) } => {
+            emit_expr_to_ax(left, locals, out, fixups);
+            emit_cmp_ax_imm(*k, out);
+        }
+        Cond::Cmp { op: _, left: Expr::IntLit(k), right } => {
+            emit_expr_to_ax(right, locals, out, fixups);
+            emit_cmp_ax_imm(*k, out);
+        }
+        Cond::Truthy(expr) => {
+            // `if (<expr>)` — evaluate to AX, then test ax, ax (or
+            // cmp ax, 0). MSC picks `or ax, ax` (`0b c0`) as the
+            // 2-byte test. Most truthy-on-local/global cases were
+            // handled earlier; this is the fallback.
+            emit_expr_to_ax(expr, locals, out, fixups);
+            out.extend_from_slice(&[0x0B, 0xC0]);
+        }
         other => panic!("Slice 5 cond shape not yet supported: {other:?}"),
+    }
+}
+
+/// `cmp ax, imm` — picks `83 f8 imm8sx` for small constants,
+/// `3d imm16` for larger.
+fn emit_cmp_ax_imm(k: i32, out: &mut Vec<u8>) {
+    if let Ok(k8) = i8::try_from(k) {
+        out.push(0x83);
+        out.push(0xF8);
+        out.push(k8 as u8);
+    } else {
+        let k16 = (k as u32 & 0xFFFF) as u16;
+        out.push(0x3D);
+        out.extend_from_slice(&k16.to_le_bytes());
     }
 }
 
