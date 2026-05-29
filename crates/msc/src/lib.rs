@@ -3493,16 +3493,17 @@ fn const_prop_globals(stmts: &[Stmt], local_specs: &[LocalSpec], long_globals: &
     // const-fold pass sees `int x = 1; switch(x)` as having x=1
     // without re-deriving it from prologue stores.
     for (i, spec) in local_specs.iter().enumerate() {
-        // Skip long locals here: substituting `Local(c)` → `IntLit(K)`
-        // would make `return (int)c;` emit a const load instead of a
-        // slot read (fixture 1037). The emit-time fold_cond path still
-        // sees the init via `locals.inits` for cond elision (1632).
+        // Skip long locals: substituting `Local(c)` → `IntLit(K)` would
+        // make `return (int)c;` emit a const load instead of a slot
+        // read (fixture 1037). The emit-time fold_cond path still sees
+        // the init via `locals.inits` for cond elision (1632).
         if spec.is_long { continue; }
-        // Char locals: only literal-init chars are substituted. A
-        // char initialized via local-var arithmetic (`char c = a+b;`)
-        // stays as `Local(c)` so bare reads go through slot+cbw
-        // (fixture 1046). Literal init (`char c = 'A'+1;`) folds (1023).
-        if spec.size == 1 && !spec.init_is_literal { continue; }
+        // Only literal-init locals (pure compile-time constant) get
+        // substituted. Locals whose init came from another local —
+        // `int n = c;` (1043), `char c = a + b;` (1046) — stay as
+        // `Local` so reads go through the slot. Literal-init keeps
+        // (`int x = 5;` 4081, `char c = 'A'+1;` 1023).
+        if !spec.init_is_literal { continue; }
         if let Some(k) = spec.init {
             cp.l_known.insert(i, k);
         }
