@@ -4437,7 +4437,6 @@ fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_>, out: &mu
     let is_byte = locals.size(local_idx) == 1;
     if let Some(k) = value.fold(locals.inits) {
         if is_byte {
-            // `c6 46 disp imm8` — store low byte to char slot.
             out.push(0xC6);
             out.push(0x46);
             out.push(disp as u8);
@@ -5692,10 +5691,33 @@ fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: 
             let disp = locals.disp(*idx);
             out.extend_from_slice(&[0x8D, 0x46, disp as u8]);
         }
-        Expr::Ternary { .. } => {
-            // Should have folded already by the caller for runtime
-            // ternary codegen we don't yet implement.
-            panic!("non-constant ternary not yet supported");
+        Expr::Ternary { cond, then_arm, else_arm } => {
+            // Runtime ternary: `a ? b : c`. Cond becomes
+            // `or ax, ax; je else_branch`; then_arm leaves value in AX
+            // followed by `jmp end`; else_arm leaves its value in AX.
+            // Pre-emit both arms to size the jumps.
+            let mut then_buf: Vec<u8> = Vec::new();
+            let mut then_fixups: Vec<Fixup> = Vec::new();
+            emit_expr_to_ax(then_arm, locals, &mut then_buf, &mut then_fixups);
+            let mut else_buf: Vec<u8> = Vec::new();
+            let mut else_fixups: Vec<Fixup> = Vec::new();
+            emit_expr_to_ax(else_arm, locals, &mut else_buf, &mut else_fixups);
+            // Cond → `mov ax, ...; or ax, ax`.
+            emit_expr_to_ax(cond, locals, out, fixups);
+            out.extend_from_slice(&[0x0B, 0xC0]);
+            // je over then_buf + 2-byte jmp.
+            let then_with_jmp = then_buf.len() + 2;
+            out.push(0x74);
+            out.push(i8::try_from(then_with_jmp).expect("then arm fits in i8") as u8);
+            let then_base = out.len();
+            for mut f in then_fixups { f.body_offset += then_base; fixups.push(f); }
+            out.extend_from_slice(&then_buf);
+            // jmp over else_buf.
+            out.push(0xEB);
+            out.push(i8::try_from(else_buf.len()).expect("else arm fits in i8") as u8);
+            let else_base = out.len();
+            for mut f in else_fixups { f.body_offset += else_base; fixups.push(f); }
+            out.extend_from_slice(&else_buf);
         }
         Expr::GlobalField { global, byte_off, size } => {
             // Word field: `a1 byte_off byte_off` + GlobalAddr FIXUP.
