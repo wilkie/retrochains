@@ -47,9 +47,20 @@ pub struct Unit {
     /// later fixture and use COMDEF instead.
     pub globals: Vec<Global>,
     pub functions: Vec<Function>,
+    /// Top-level declarations in source order. Used by PUBDEF
+    /// emission, which groups consecutive same-segment symbols into
+    /// one record and starts a new record on bucket changes
+    /// (fixture 4125's `_get`/`_g`/`_main` interleave).
+    pub decl_order: Vec<TopDecl>,
     /// Each string is the bytes between the source double-quotes
     /// PLUS a terminating NUL byte appended by the parser.
     pub strings: Vec<Vec<u8>>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum TopDecl {
+    Global(usize),
+    Function(usize),
 }
 
 /// A file-scope global variable. Phase 1 covers scalar `int g [= K];`
@@ -72,6 +83,16 @@ pub struct Global {
     /// storage is still 2 bytes (near pointer), but indexing a
     /// pointer requires a load+offset, not a direct addressing mode.
     pub is_pointer: bool,
+}
+
+impl Global {
+    /// Bytes occupied in `_DATA` (init) or `_BSS`/COMDEF (tentative).
+    /// Pointers are always 2 bytes per slot regardless of pointee
+    /// size; arrays scale element_size by `array_len`.
+    fn storage_bytes(&self) -> usize {
+        let slot = if self.is_pointer { 2 } else { self.element_size };
+        slot * self.array_len
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -175,6 +196,10 @@ pub enum AssignTarget {
     /// `<char-global>[K] = <byte>;` — write one byte at a constant
     /// index into a char-array global. `byte_off` is `K`. Fixture 4122.
     IndexedGlobalByte { array: usize, byte_off: u16 },
+    /// `<char-ptr-global>[K] = <byte>;` — write one byte through a
+    /// char-pointer global. `disp` is the constant index (fits in
+    /// disp8 in Phase 1). Fixture 4124.
+    PtrIndexByte { ptr: usize, disp: i8 },
 }
 
 /// Condition for `if` (and later `while`/`for`). Slice 5 covers the
@@ -241,9 +266,16 @@ pub enum Expr {
     /// `char *` global. Constant index lowers to
     /// `mov bx, [p]; mov al, [bx+disp]; cbw`. Fixture 4123.
     PtrIndexByte { ptr: usize, index: Box<Expr> },
-    /// `*<ptr>` — pointer dereference. Phase 1 supports only the
-    /// `*<char-ptr-global>` form (fixture 4111).
-    Deref { ptr: Box<Expr> },
+    /// `&<global>` — address-of a file-scope global, as an
+    /// expression. Lowers to `b8 imm16` with a FIXUP on the imm16
+    /// targeting the global. Fixture 4125 (passed as an argument).
+    AddrOfGlobal(usize),
+    /// `*<ptr>` — byte-sized pointer dereference (`char *`). Lowers
+    /// to `mov bx, <ptr>; mov al, [bx]; cbw`. Fixture 4111.
+    DerefByte { ptr: Box<Expr> },
+    /// `*<ptr>` — word-sized pointer dereference (`int *`). Lowers
+    /// to `mov bx, <ptr>; mov ax, [bx]`. Fixture 4125.
+    DerefWord { ptr: Box<Expr> },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -279,7 +311,8 @@ impl Expr {
             Expr::StrLit(_) => None,
             Expr::Global(_) => None,
             Expr::Index { .. } | Expr::IndexByte { .. } | Expr::PtrIndexByte { .. } => None,
-            Expr::Deref { .. } => None,
+            Expr::DerefByte { .. } | Expr::DerefWord { .. } => None,
+            Expr::AddrOfGlobal(_) => None,
         }
     }
 }
@@ -512,6 +545,7 @@ fn parse_unit(source: &str) -> Result<Unit, EmitError> {
         strings: Vec::new(),
     };
     let mut functions = Vec::new();
+    let mut decl_order: Vec<TopDecl> = Vec::new();
     while p.peek().is_some() {
         // Skip any preprocessor directives at file scope.
         if matches!(p.peek(), Some(Tok::PreprocLine)) {
@@ -532,17 +566,23 @@ fn parse_unit(source: &str) -> Result<Unit, EmitError> {
             && matches!(p.toks.get(p.pos + 1), Some(Tok::Ident(_)))
             && matches!(p.toks.get(p.pos + 2), Some(Tok::LBrack));
         if is_int_global || is_int_ptr_global || is_char_ptr_global || is_char_array_global {
+            let before = p.globals.len();
             parse_global_decl(&mut p)?;
+            for i in before..p.globals.len() {
+                decl_order.push(TopDecl::Global(i));
+            }
             continue;
         }
+        let fn_idx = functions.len();
         functions.push(parse_function(&mut p)?);
+        decl_order.push(TopDecl::Function(fn_idx));
     }
     if functions.is_empty() {
         return Err(EmitError::Unsupported(
             "translation unit has no functions".to_owned(),
         ));
     }
-    Ok(Unit { globals: p.globals, functions, strings: p.strings })
+    Ok(Unit { globals: p.globals, functions, decl_order, strings: p.strings })
 }
 
 /// Parse one file-scope `<type> <name> [= <init>];` declaration and
@@ -566,11 +606,10 @@ fn parse_global_decl(p: &mut Parser<'_>) -> Result<(), EmitError> {
         }
         Some(Tok::Kw("char")) => {
             p.bump();
+            is_char = true;
             if matches!(p.peek(), Some(Tok::Star)) {
                 p.bump();
                 is_pointer = true;
-            } else {
-                is_char = true;
             }
         }
         other => {
@@ -669,7 +708,11 @@ fn parse_global_decl(p: &mut Parser<'_>) -> Result<(), EmitError> {
         None
     };
     p.eat(&Tok::Semi)?;
-    let element_size = if is_char && !is_pointer { 1 } else { 2 };
+    // `element_size` describes the pointed-to or array-element type
+    // (1 for `char` family, 2 otherwise). `is_pointer` is set when
+    // the declarator carries a `*`. Storage size is independent:
+    // pointers are always 2 bytes; arrays scale by `array_len`.
+    let element_size = if is_char { 1 } else { 2 };
     p.global_names.push(name.clone());
     p.globals.push(Global { name, init, array_len, element_size, is_pointer });
     Ok(())
@@ -706,7 +749,12 @@ fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> {
     } else {
         let mut names = Vec::new();
         loop {
+            // Type: `int` or `int *` (both occupy one 16-bit slot in
+            // the cdecl frame).
             p.eat(&Tok::Kw("int"))?;
+            if matches!(p.peek(), Some(Tok::Star)) {
+                p.bump();
+            }
             let pname = match p.bump().cloned() {
                 Some(Tok::Ident(s)) => s,
                 other => {
@@ -888,13 +936,21 @@ fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
                 let k = index_expr.fold(&[]).ok_or_else(|| EmitError::Unsupported(
                     "non-constant array index in store not yet supported".to_owned(),
                 ))?;
-                let elem_bytes = p.globals[array_idx].element_size;
-                let byte_off = u16::try_from((k as i64) * (elem_bytes as i64))
-                    .expect("indexed-store byte offset fits");
-                let target = if elem_bytes == 1 {
-                    AssignTarget::IndexedGlobalByte { array: array_idx, byte_off }
+                let g = &p.globals[array_idx];
+                let target = if g.is_pointer {
+                    // `<ptr>[K] = ...` — load pointer then store at
+                    // offset. Phase 1 covers the `char *p` byte form.
+                    let disp = i8::try_from(k).expect("ptr index fits in i8");
+                    AssignTarget::PtrIndexByte { ptr: array_idx, disp }
                 } else {
-                    AssignTarget::IndexedGlobal { array: array_idx, byte_off }
+                    let elem_bytes = g.element_size;
+                    let byte_off = u16::try_from((k as i64) * (elem_bytes as i64))
+                        .expect("indexed-store byte offset fits");
+                    if elem_bytes == 1 {
+                        AssignTarget::IndexedGlobalByte { array: array_idx, byte_off }
+                    } else {
+                        AssignTarget::IndexedGlobal { array: array_idx, byte_off }
+                    }
                 };
                 return Ok(Stmt::Assign { target, value });
             }
@@ -995,10 +1051,39 @@ fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                 "expected int after unary -, got {other:?}"
             ))),
         },
+        Some(Tok::Amp) => {
+            // Address-of `&<ident>`. Phase 1 supports `&<global>`.
+            let name = match p.bump().cloned() {
+                Some(Tok::Ident(s)) => s,
+                other => {
+                    return Err(EmitError::Unsupported(format!(
+                        "expected identifier after `&`, got {other:?}"
+                    )));
+                }
+            };
+            let idx = p.global_names.iter().position(|n| *n == name)
+                .ok_or_else(|| EmitError::Unsupported(format!(
+                    "address-of unknown global `{name}`"
+                )))?;
+            Ok(Expr::AddrOfGlobal(idx))
+        }
         Some(Tok::Star) => {
-            // Unary deref `*<expr>`.
+            // Unary deref `*<expr>`. Pick the byte- vs word-sized
+            // variant from the inner expression's pointee type.
             let inner = parse_atom(p)?;
-            Ok(Expr::Deref { ptr: Box::new(inner) })
+            let pointee_size = match &inner {
+                Expr::Global(idx) => p.globals[*idx].element_size,
+                // Parameters carry no type info in Phase 1; treat
+                // every dereffable param as `int *` (word). When a
+                // `char *` parameter fixture lands, thread types in.
+                Expr::Param(_) => 2,
+                _ => 2,
+            };
+            if pointee_size == 1 {
+                Ok(Expr::DerefByte { ptr: Box::new(inner) })
+            } else {
+                Ok(Expr::DerefWord { ptr: Box::new(inner) })
+            }
         }
         Some(Tok::Ident(name)) => {
             // Identifier may be a call site (`f(args)`), a local
@@ -1391,7 +1476,7 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
             for &gi in &comdef_globals {
                 let g = &unit.globals[gi];
                 let sym = symbol_name(&g.name);
-                let byte_len = g.array_len * g.element_size;
+                let byte_len = g.storage_bytes();
                 payload.push(u8::try_from(sym.len()).expect("COMDEF name fits"));
                 payload.extend_from_slice(sym.as_bytes());
                 payload.push(0x00); // type index
@@ -1430,43 +1515,51 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
         emit_group(&mut b, &entries, &mut extdef_idx_of, &mut next_idx);
     }
 
-    // PUBDEFs — one record per (base-group, base-seg) bucket.
-    // Globals live at DGROUP:_DATA = (group 1, seg 2). Functions
-    // live at 0:_TEXT = (group 0, seg 1). MSC emits the globals
-    // PUBDEF first when both exist (source order matches: globals
-    // are declared at file scope before functions). Fixtures 4104,
-    // 4106.
-    let has_init_globals = data_cursor > 0;
-    if has_init_globals {
-        let mut payload = Vec::new();
-        payload.push(1); // base group idx (DGROUP)
-        payload.push(2); // base segment idx (_DATA)
-        for (i, g) in unit.globals.iter().enumerate() {
-            if let Some(off) = data_offsets[i] {
-                let sym = symbol_name(&g.name);
+    // PUBDEFs — MSC walks definitions in source order and starts a
+    // new PUBDEF record on each (group, segment) transition. So
+    // `_get; int g; _main;` becomes three records (text → data →
+    // text), while consecutive same-bucket symbols share a record.
+    // Fixtures 4104 (data first), 4099 (text only), 4125 (interleaved).
+    //
+    // Buckets:
+    //   _TEXT: (group 0, seg 1) — functions
+    //   _DATA: (group 1 = DGROUP, seg 2) — initialized globals
+    let mut current: Option<(u8, u8, Vec<u8>)> = None;
+    let flush = |b: &mut ObjBuilder, cur: &mut Option<(u8, u8, Vec<u8>)>| {
+        if let Some((grp, seg, payload)) = cur.take() {
+            let mut rec = Vec::with_capacity(payload.len() + 2);
+            rec.push(grp);
+            rec.push(seg);
+            rec.extend_from_slice(&payload);
+            b.write_record(obj::PUBDEF_16, &rec);
+        }
+    };
+    for entry in &unit.decl_order {
+        let (grp, seg, sym, off) = match entry {
+            TopDecl::Global(i) => {
+                let Some(off) = data_offsets[*i] else { continue };
+                let sym = symbol_name(&unit.globals[*i].name);
                 let off = u16::try_from(off).expect("offset fits");
-                payload.push(u8::try_from(sym.len()).expect("pubdef name fits"));
-                payload.extend_from_slice(sym.as_bytes());
-                payload.extend_from_slice(&off.to_le_bytes());
-                payload.push(0); // type idx
+                (1u8, 2u8, sym, off)
             }
+            TopDecl::Function(i) => {
+                let sym = symbol_name(&unit.functions[*i].name);
+                let off = u16::try_from(function_offsets[*i]).expect("offset fits");
+                (0u8, 1u8, sym, off)
+            }
+        };
+        let same_bucket = matches!(&current, Some((g, s, _)) if *g == grp && *s == seg);
+        if !same_bucket {
+            flush(&mut b, &mut current);
+            current = Some((grp, seg, Vec::new()));
         }
-        b.write_record(obj::PUBDEF_16, &payload);
+        let payload = &mut current.as_mut().unwrap().2;
+        payload.push(u8::try_from(sym.len()).expect("pubdef name fits"));
+        payload.extend_from_slice(sym.as_bytes());
+        payload.extend_from_slice(&off.to_le_bytes());
+        payload.push(0); // type idx
     }
-    {
-        let mut payload = Vec::new();
-        payload.push(0); // base group idx
-        payload.push(1); // base segment idx (_TEXT)
-        for (i, f) in unit.functions.iter().enumerate() {
-            let sym = symbol_name(&f.name);
-            let off = u16::try_from(function_offsets[i]).expect("offset fits");
-            payload.push(u8::try_from(sym.len()).expect("pubdef name fits"));
-            payload.extend_from_slice(sym.as_bytes());
-            payload.extend_from_slice(&off.to_le_bytes());
-            payload.push(0); // type idx
-        }
-        b.write_record(obj::PUBDEF_16, &payload);
-    }
+    flush(&mut b, &mut current);
 
     // COMENT class 0xA2 — link-pass marker. MSC sandwiches the
     // LEDATA records between EXTDEF/PUBDEF setup and the data
@@ -1782,9 +1875,10 @@ fn fold_globals_expr(e: &mut Expr, known: &std::collections::HashMap<usize, i32>
         | Expr::PtrIndexByte { index, .. } => {
             fold_globals_expr(index, known);
         }
-        Expr::Deref { ptr } => {
+        Expr::DerefByte { ptr } | Expr::DerefWord { ptr } => {
             fold_globals_expr(ptr, known);
         }
+        Expr::AddrOfGlobal(_) => {}
         Expr::IntLit(_) | Expr::Local(_) | Expr::Param(_) | Expr::StrLit(_) => {}
     }
 }
@@ -2091,6 +2185,17 @@ fn emit_push_arg(arg: &Expr, _locals: &[Option<i32>], out: &mut Vec<u8>, fixups:
                 kind: FixupKind::StrLoad { string_idx: *string_idx },
             });
         }
+        Expr::AddrOfGlobal(idx) => {
+            // `mov ax, 00 00` placeholder; FIXUP carries the global's
+            // address back into the imm16 at link time. Fixture 4125.
+            let body_offset = out.len();
+            out.extend_from_slice(&[0xB8, 0x00, 0x00]);
+            out.push(0x50); // push ax
+            fixups.push(Fixup {
+                body_offset,
+                kind: FixupKind::GlobalAddr { global_idx: *idx },
+            });
+        }
         other => panic!("argument shape not yet supported: {other:?}"),
     }
 }
@@ -2114,6 +2219,9 @@ fn emit_assign(target: AssignTarget, value: &Expr, locals: &[Option<i32>], out: 
         }
         AssignTarget::IndexedGlobalByte { array, byte_off } => {
             return emit_assign_indexed_global_byte(array, byte_off, value, locals, out, fixups);
+        }
+        AssignTarget::PtrIndexByte { ptr, disp } => {
+            return emit_assign_ptr_index_byte(ptr, disp, value, locals, out, fixups);
         }
     };
     let disp = -(i16::try_from(local_idx + 1).expect("local index fits") * 2);
@@ -2229,6 +2337,22 @@ fn emit_assign_indexed_global_byte(global_idx: usize, byte_off: u16, value: &Exp
         body_offset: addr_off - 1,
         kind: FixupKind::GlobalAddr { global_idx },
     });
+}
+
+/// `<char-ptr-global>[K] = <byte>;` — load pointer into BX, then
+/// `c6 47 disp imm8` (mov byte ptr [bx+disp], imm8). Fixture 4124.
+fn emit_assign_ptr_index_byte(ptr_idx: usize, disp: i8, value: &Expr, locals: &[Option<i32>], out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    let k = value.fold(locals).unwrap_or_else(|| {
+        panic!("non-constant ptr-byte-store value not yet supported")
+    });
+    let imm = (k as u32 & 0xFF) as u8;
+    let body_offset = out.len();
+    out.extend_from_slice(&[0x8B, 0x1E, 0x00, 0x00]);
+    fixups.push(Fixup {
+        body_offset: body_offset + 1,
+        kind: FixupKind::GlobalAddr { global_idx: ptr_idx },
+    });
+    out.extend_from_slice(&[0xC6, 0x47, disp as u8, imm]);
 }
 
 /// `*<ptr-global> = <expr>;` — store through a pointer global.
@@ -2540,10 +2664,10 @@ fn emit_expr_to_ax(expr: &Expr, locals: &[Option<i32>], out: &mut Vec<u8>, fixup
                 kind: FixupKind::GlobalAddr { global_idx: *idx },
             });
         }
-        Expr::Deref { ptr } => {
-            // Phase 1: only `*<char-ptr-global>` is supported. The
-            // pattern is `mov bx, [p]; mov al, [bx]; cbw`. The FIXUP
-            // sits at the `[p]` address inside the mov-bx encoding.
+        Expr::DerefByte { ptr } => {
+            // Phase 1: `*<char-ptr-global>` only. Pattern is
+            // `mov bx, [p]; mov al, [bx]; cbw`. The FIXUP sits at
+            // the `[p]` address inside the mov-bx encoding.
             match ptr.as_ref() {
                 Expr::Global(idx) => {
                     let body_offset = out.len();
@@ -2554,7 +2678,31 @@ fn emit_expr_to_ax(expr: &Expr, locals: &[Option<i32>], out: &mut Vec<u8>, fixup
                     });
                     out.extend_from_slice(&[0x8A, 0x07, 0x98]);
                 }
-                other => panic!("deref of {other:?} not yet supported"),
+                other => panic!("byte deref of {other:?} not yet supported"),
+            }
+        }
+        Expr::DerefWord { ptr } => {
+            // Phase 1: `*<int-ptr-param>` (fixture 4125). Pattern is
+            // `mov bx, [bp+disp]; mov ax, [bx]`. Future fixtures with
+            // a global int-pointer source pick up the BX-from-global
+            // load shape.
+            match ptr.as_ref() {
+                Expr::Param(i) => {
+                    let disp = i8::try_from(4 + (*i * 2))
+                        .expect("param disp fits");
+                    out.extend_from_slice(&[0x8B, 0x5E, disp as u8]);
+                    out.extend_from_slice(&[0x8B, 0x07]);
+                }
+                Expr::Global(idx) => {
+                    let body_offset = out.len();
+                    out.extend_from_slice(&[0x8B, 0x1E, 0x00, 0x00]);
+                    fixups.push(Fixup {
+                        body_offset: body_offset + 1,
+                        kind: FixupKind::GlobalAddr { global_idx: *idx },
+                    });
+                    out.extend_from_slice(&[0x8B, 0x07]);
+                }
+                other => panic!("word deref of {other:?} not yet supported"),
             }
         }
         Expr::PtrIndexByte { ptr, index } => {
@@ -2630,6 +2778,14 @@ fn emit_expr_to_ax(expr: &Expr, locals: &[Option<i32>], out: &mut Vec<u8>, fixup
                     kind: FixupKind::GlobalAddr { global_idx: *array },
                 });
             }
+        }
+        Expr::AddrOfGlobal(idx) => {
+            let body_offset = out.len();
+            out.extend_from_slice(&[0xB8, 0x00, 0x00]);
+            fixups.push(Fixup {
+                body_offset,
+                kind: FixupKind::GlobalAddr { global_idx: *idx },
+            });
         }
     }
 }
