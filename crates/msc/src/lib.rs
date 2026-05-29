@@ -6085,6 +6085,17 @@ fn emit_binop(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, out: &m
         emit_binop(op, left, &Expr::IntLit(k), locals, out, fixups);
         return;
     }
+    // Both sides are IntLit: fold the whole binop and emit a single
+    // `mov ax, K`. The recursion guard above blocks the per-side
+    // substitution from doing this.
+    if let (Expr::IntLit(_), Expr::IntLit(_)) = (left, right)
+        && let Some(k) = (Expr::BinOp { op, left: Box::new(left.clone()), right: Box::new(right.clone()) }).fold(locals.inits)
+    {
+        let k16 = (k as u32 & 0xFFFF) as u16;
+        out.push(0xB8);
+        out.extend_from_slice(&k16.to_le_bytes());
+        return;
+    }
     // `a[I] + a[J]` where both ParamIndex share the same param:
     // load the pointer into BX once, then read RHS into AX and add
     // LHS as a memory operand. Matches MSC's `mov bx, [bp+disp];
