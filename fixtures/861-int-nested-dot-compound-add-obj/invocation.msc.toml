@@ -1,0 +1,4 @@
+description = "Auto-derived from 861-int-nested-dot-compound-add-obj (BCC fixture). cl /c /AS via the microsoft-msc5 oracle profile."
+tool = "cl"
+args = ["/c", "/AS", "HELLO.C"]
+inputs = ["HELLO.C"]

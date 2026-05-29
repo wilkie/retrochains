@@ -1,0 +1,4 @@
+description = "Auto-derived from 738-long-global-compound-xor-long-var-obj (BCC fixture). cl /c /AS via the microsoft-msc5 oracle profile."
+tool = "cl"
+args = ["/c", "/AS", "HELLO.C"]
+inputs = ["HELLO.C"]

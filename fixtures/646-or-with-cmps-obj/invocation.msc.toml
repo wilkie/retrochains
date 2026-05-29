@@ -1,0 +1,4 @@
+description = "Auto-derived from 646-or-with-cmps-obj (BCC fixture). cl /c /AS via the microsoft-msc5 oracle profile."
+tool = "cl"
+args = ["/c", "/AS", "HELLO.C"]
+inputs = ["HELLO.C"]

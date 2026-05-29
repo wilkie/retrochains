@@ -1,0 +1,4 @@
+description = "Auto-derived from 1452-nested-while-loops-obj (BCC fixture). cl /c /AS via the microsoft-msc5 oracle profile."
+tool = "cl"
+args = ["/c", "/AS", "HELLO.C"]
+inputs = ["HELLO.C"]

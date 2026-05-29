@@ -1,0 +1,4 @@
+description = "Auto-derived from 3773-large-shift-obj (BCC fixture). cl /c /AS via the microsoft-msc5 oracle profile."
+tool = "cl"
+args = ["/c", "/AS", "HELLO.C"]
+inputs = ["HELLO.C"]

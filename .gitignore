@@ -54,3 +54,5 @@ Thumbs.db
 
 # Agents
 .claude
+scripts/bulk_msc_capture.log
+scripts/bulk_msc_capture.out

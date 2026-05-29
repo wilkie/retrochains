@@ -1,0 +1,4 @@
+description = "auto"
+tool = "cl"
+args = ["/c", "/AS", "HELLO.C"]
+inputs = ["HELLO.C"]

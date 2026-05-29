@@ -1,0 +1,4 @@
+description = "Auto-derived from 963-int-global-postinc-as-value-obj (BCC fixture). cl /c /AS via the microsoft-msc5 oracle profile."
+tool = "cl"
+args = ["/c", "/AS", "HELLO.C"]
+inputs = ["HELLO.C"]

@@ -1,0 +1,4 @@
+description = "Auto-derived from 2128-O-O2-jump-and-O2-tail-obj (BCC fixture). cl /c /AS via the microsoft-msc5 oracle profile."
+tool = "cl"
+args = ["/c", "/AS", "HELLO.C"]
+inputs = ["HELLO.C"]

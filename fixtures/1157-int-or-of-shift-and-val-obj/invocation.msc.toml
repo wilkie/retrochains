@@ -1,0 +1,4 @@
+description = "Auto-derived from 1157-int-or-of-shift-and-val-obj (BCC fixture). cl /c /AS via the microsoft-msc5 oracle profile."
+tool = "cl"
+args = ["/c", "/AS", "HELLO.C"]
+inputs = ["HELLO.C"]

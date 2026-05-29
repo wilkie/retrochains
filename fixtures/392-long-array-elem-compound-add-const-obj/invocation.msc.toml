@@ -1,0 +1,4 @@
+description = "Auto-derived from 392-long-array-elem-compound-add-const-obj (BCC fixture). cl /c /AS via the microsoft-msc5 oracle profile."
+tool = "cl"
+args = ["/c", "/AS", "HELLO.C"]
+inputs = ["HELLO.C"]

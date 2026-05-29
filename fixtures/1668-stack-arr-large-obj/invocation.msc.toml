@@ -1,0 +1,4 @@
+description = "Auto-derived from 1668-stack-arr-large-obj (BCC fixture). cl /c /AS via the microsoft-msc5 oracle profile."
+tool = "cl"
+args = ["/c", "/AS", "HELLO.C"]
+inputs = ["HELLO.C"]

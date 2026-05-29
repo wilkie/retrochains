@@ -1,0 +1,4 @@
+description = "Auto-derived from 2193-double-eq-literal-zero-obj (BCC fixture). cl /c /AS via the microsoft-msc5 oracle profile."
+tool = "cl"
+args = ["/c", "/AS", "HELLO.C"]
+inputs = ["HELLO.C"]
