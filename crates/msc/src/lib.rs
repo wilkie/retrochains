@@ -967,6 +967,8 @@ fn tokenize(source: &str) -> Result<Vec<Tok>, EmitError> {
                     "struct" => Tok::Kw("struct"),
                     "sizeof" => Tok::Kw("sizeof"),
                     "long" => Tok::Kw("long"),
+                    "enum" => Tok::Kw("enum"),
+                    "typedef" => Tok::Kw("typedef"),
                     // Storage-class / qualifier modifiers we currently
                     // treat as no-ops in declarator parsing.
                     "unsigned" => Tok::Kw("unsigned"),
@@ -1020,6 +1022,10 @@ struct Parser<'a> {
     /// entries (no dedup yet — no fixture exercises a repeated
     /// literal).
     strings: Vec<Vec<u8>>,
+    /// Compile-time integer constants from enum declarations.
+    /// Looked up at every Ident parse so `N` from `enum { N = 4 }`
+    /// substitutes as `IntLit(4)`.
+    enum_consts: std::collections::HashMap<String, i32>,
 }
 
 impl<'a> Parser<'a> {
@@ -1063,6 +1069,7 @@ fn parse_unit(source: &str) -> Result<Unit, EmitError> {
         globals: Vec::new(),
         structs: Vec::new(),
         strings: Vec::new(),
+        enum_consts: std::collections::HashMap::new(),
     };
     let mut functions = Vec::new();
     let mut decl_order: Vec<TopDecl> = Vec::new();
@@ -1080,6 +1087,18 @@ fn parse_unit(source: &str) -> Result<Unit, EmitError> {
             && matches!(p.toks.get(p.pos + 2), Some(Tok::LBrace))
         {
             parse_struct_def(&mut p)?;
+            continue;
+        }
+        // `enum [<tag>] { NAME [= K], ... };` — register the listed
+        // names as compile-time constants. Phase 1: only the anonymous
+        // top-level enum (fixture 1004).
+        if matches!(p.peek(), Some(Tok::Kw("enum"))) {
+            parse_enum_def(&mut p)?;
+            continue;
+        }
+        // `typedef <type> <name>;` — record the alias and continue.
+        if matches!(p.peek(), Some(Tok::Kw("typedef"))) {
+            parse_typedef(&mut p)?;
             continue;
         }
         // Disambiguate file-scope `int <name>...;` (global) from
@@ -1241,6 +1260,49 @@ fn parse_struct_global_decl(p: &mut Parser<'_>) -> Result<(), EmitError> {
 /// for `char`). MSC's small-model size is the sum of field sizes
 /// without trailing pad until the next int boundary; we use the
 /// same rule. Anonymous structs and bitfields aren't supported.
+/// `enum [<tag>] { NAME [= K], ... };` — record each enum constant
+/// in `enum_consts` so subsequent Ident lookups fold to the literal.
+/// The optional tag is consumed but unused (no type tracking yet).
+/// Default value is 0 for the first entry, then increment by 1.
+fn parse_enum_def(p: &mut Parser<'_>) -> Result<(), EmitError> {
+    p.eat(&Tok::Kw("enum"))?;
+    if matches!(p.peek(), Some(Tok::Ident(_))) { p.bump(); }
+    p.eat(&Tok::LBrace)?;
+    let mut next_val: i32 = 0;
+    while !matches!(p.peek(), Some(Tok::RBrace)) {
+        let name = match p.bump().cloned() {
+            Some(Tok::Ident(s)) => s,
+            other => return Err(EmitError::Unsupported(format!(
+                "expected enum constant name, got {other:?}"
+            ))),
+        };
+        if matches!(p.peek(), Some(Tok::Assign)) {
+            p.bump();
+            next_val = parse_signed_int(p)?;
+        }
+        p.enum_consts.insert(name, next_val);
+        next_val += 1;
+        if matches!(p.peek(), Some(Tok::Comma)) { p.bump(); }
+    }
+    p.eat(&Tok::RBrace)?;
+    p.eat(&Tok::Semi)?;
+    Ok(())
+}
+
+/// `typedef <type-tokens> <name>;` — record the name as an alias for
+/// the source-level type. Phase 1: just consume the tokens (we don't
+/// model type aliases; downstream identifiers using the alias would
+/// need type resolution). Skip-only path matches MSC's `typedef
+/// long` fixture which is unused beyond the declaration.
+fn parse_typedef(p: &mut Parser<'_>) -> Result<(), EmitError> {
+    p.eat(&Tok::Kw("typedef"))?;
+    while !matches!(p.peek(), Some(Tok::Semi) | None) {
+        p.bump();
+    }
+    p.eat(&Tok::Semi)?;
+    Ok(())
+}
+
 fn parse_struct_def(p: &mut Parser<'_>) -> Result<(), EmitError> {
     p.eat(&Tok::Kw("struct"))?;
     let sname = match p.bump().cloned() {
@@ -2867,6 +2929,10 @@ fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                 p.bump(); // (
                 let args = parse_call_args(p)?;
                 return Ok(Expr::Call { name, args });
+            }
+            // Enum constants substitute directly to their literal value.
+            if let Some(&v) = p.enum_consts.get(&name) {
+                return Ok(Expr::IntLit(v));
             }
             if let Some(idx) = p.local_names.iter().position(|n| *n == name) {
                 // `<local>[<expr>]` — element access on a local
