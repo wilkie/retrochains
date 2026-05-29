@@ -26,8 +26,8 @@ pub fn emit_dash_c(source_path: &Path) -> Result<std::path::PathBuf, EmitError> 
         .and_then(|s| s.to_str())
         .ok_or_else(|| EmitError::BadSourcePath(source_path.display().to_string()))?;
     let source = std::fs::read_to_string(source_path).map_err(EmitError::Io)?;
-    let return_value = parse_return_int(&source)?;
-    let bytes = build_obj(source_filename, return_value);
+    let ast = parse_main(&source)?;
+    let bytes = build_obj(source_filename, &ast);
     let basename = source_path
         .file_stem()
         .and_then(|s| s.to_str())
@@ -37,30 +37,98 @@ pub fn emit_dash_c(source_path: &Path) -> Result<std::path::PathBuf, EmitError> 
     Ok(std::path::PathBuf::from(out_name))
 }
 
-/// Extract the `return K;` literal from an `int main(void) { return K; }`
-/// source. Phase 1's source-shape envelope is intentionally tiny —
-/// once Slice 3 lands we'll have a real parser. Returns the literal
-/// truncated to a 16-bit value (matching MSC's `int` width under /AS).
-fn parse_return_int(source: &str) -> Result<i32, EmitError> {
-    let after_return = source
-        .find("return")
-        .map(|i| &source[i + "return".len()..])
-        .ok_or_else(|| EmitError::Unsupported("no `return` keyword in source".to_owned()))?;
-    let trimmed = after_return.trim_start();
-    let end = trimmed
-        .find(';')
-        .ok_or_else(|| EmitError::Unsupported("no `;` after `return`".to_owned()))?;
-    let lit = trimmed[..end].trim();
-    lit.parse::<i32>()
-        .map_err(|_| EmitError::Unsupported(format!("`return {lit};` literal not parseable")))
+/// A minimal AST covering Phase 1's source-shape envelope. Each
+/// local is an int at a unique bp-relative slot (`[bp-2]`, `[bp-4]`,
+/// …); the return expression is either an int literal or a reference
+/// to a local that has a known constant value (MSC folds the latter
+/// at parse time — see fixture 4081).
+#[derive(Debug, Clone)]
+pub struct MainAst {
+    /// Initializer per local in source-declaration order. `None` for
+    /// uninitialized declarations (`int x;`). Length is the local
+    /// count; bytes-of-frame = `locals.len() * 2`.
+    pub locals: Vec<Option<i32>>,
+    /// The constant-folded value of the `return <expr>;`. The folding
+    /// is the parser's responsibility — by the time we reach codegen,
+    /// the AST has already resolved `return x;` to its compile-time
+    /// constant. Future slices that handle non-constant returns will
+    /// widen this variant.
+    pub return_value: i32,
 }
 
-/// Produce the OBJ bytes for `cl /c /AS <source>` compiling
-/// `int main(void) { return <return_value>; }`. `source_filename`
-/// goes into THEADR uppercased the same way CL does it on the
-/// command line.
+/// Parse Phase 1's source-shape envelope:
+/// ```text
+/// int main(void) {
+///   [int <name> [= <int>];]*
+///   return <int_lit | local_name>;
+/// }
+/// ```
+/// Constant-folds `return x;` when `x` has a single compile-time
+/// initializer — matches MSC's own folding for this trivial shape
+/// (fixture 4081 confirms).
+fn parse_main(source: &str) -> Result<MainAst, EmitError> {
+    let body_open = source
+        .find('{')
+        .ok_or_else(|| EmitError::Unsupported("no `{` in source".to_owned()))?;
+    let body_close = source
+        .rfind('}')
+        .ok_or_else(|| EmitError::Unsupported("no `}` in source".to_owned()))?;
+    let body = source[body_open + 1..body_close].trim();
+
+    let mut locals: Vec<(String, Option<i32>)> = Vec::new();
+    let mut return_expr: Option<String> = None;
+
+    for stmt in body.split(';') {
+        let stmt = stmt.trim();
+        if stmt.is_empty() {
+            continue;
+        }
+        if let Some(rest) = stmt.strip_prefix("return") {
+            return_expr = Some(rest.trim().to_owned());
+            continue;
+        }
+        if let Some(rest) = stmt.strip_prefix("int") {
+            let decl = rest.trim();
+            if let Some((name, init_expr)) = decl.split_once('=') {
+                let init: i32 = init_expr.trim().parse().map_err(|_| {
+                    EmitError::Unsupported(format!("non-int initializer `{init_expr}`"))
+                })?;
+                locals.push((name.trim().to_owned(), Some(init)));
+            } else {
+                locals.push((decl.to_owned(), None));
+            }
+            continue;
+        }
+        return Err(EmitError::Unsupported(format!("statement `{stmt}` not supported")));
+    }
+
+    let return_expr = return_expr
+        .ok_or_else(|| EmitError::Unsupported("no `return` in body".to_owned()))?;
+    let return_value = if let Ok(n) = return_expr.parse::<i32>() {
+        n
+    } else if let Some((_, Some(init))) =
+        locals.iter().find(|(name, _)| *name == return_expr)
+    {
+        // `return <local>;` where the local has a constant
+        // initializer — MSC folds this to the constant. Fixture 4081.
+        *init
+    } else {
+        return Err(EmitError::Unsupported(format!(
+            "`return {return_expr};` is not a literal or constant-initialized local",
+        )));
+    };
+
+    Ok(MainAst {
+        locals: locals.into_iter().map(|(_, init)| init).collect(),
+        return_value,
+    })
+}
+
+/// Produce the OBJ bytes for `cl /c /AS <source>` compiling the
+/// `int main(void)` shape modeled by `ast`. `source_filename` goes
+/// into THEADR uppercased the same way CL does it on the command line.
 #[must_use]
-pub fn build_obj(source_filename: &str, return_value: i32) -> Vec<u8> {
+pub fn build_obj(source_filename: &str, ast: &MainAst) -> Vec<u8> {
     let mut b = ObjBuilder::new();
 
     // THEADR — module header. Source filename uppercased.
@@ -110,12 +178,14 @@ pub fn build_obj(source_filename: &str, return_value: i32) -> Vec<u8> {
 
     // Build the `_main` body up front so we can stamp its length
     // into the _TEXT SEGDEF. MSC pads odd-length function bodies
-    // with a trailing NOP so every function ends on a word boundary
-    // — the `return K != 0` shape lands at 9 bytes pre-pad and 10
-    // after; `return 0` is already 8 and gets no pad. Fixtures 4075
-    // (return 0), 4076 (return 1), 4077 (return 42), 4078 (return -1).
-    let main_body = main_body_for_return(return_value);
+    // with a trailing NOP so every function ends on a word boundary.
+    let main_body = main_body_for(ast);
     let text_len = u16::try_from(main_body.len()).expect("_TEXT body fits in u16");
+    // The chkstk call's displacement bytes live at a fixed offset
+    // within the body — same byte position regardless of what comes
+    // after. Compute it once for the FIXUPP that patches the call.
+    let chkstk_patch_offset = u8::try_from(chkstk_disp_offset(ast))
+        .expect("chkstk patch offset fits in u8");
 
     // SEGDEF table. MSC uses acbp=0x48 (word-aligned, public, big=0,
     // proc=0) for every segment in the small model — distinct from
@@ -211,16 +281,17 @@ pub fn build_obj(source_filename: &str, return_value: i32) -> Vec<u8> {
     // FIXUPP — patch the placeholder bytes of the `call __chkstk`.
     //   Locat byte 1 (0x84): bit7=1 (FIXUP), M=0 (self-relative),
     //                        location=0001 (16-bit offset), hi-off=00
-    //   Locat byte 2 (0x03): low 8 bits of data-record offset = 3
-    //                        (i.e. bytes 3-4 of the LEDATA data,
-    //                        which is the `00 00` displacement of
-    //                        the `e8 00 00`)
+    //   Locat byte 2 (<off>): low 8 bits of data-record offset — the
+    //                        position of the call's displacement
+    //                        within the LEDATA's data bytes. Varies
+    //                        with frame size: 3 for 0-byte frames
+    //                        (empty-main), 7 with a prologue.
     //   Fix Data  (0x56):    F=0 (frame explicit), frame-method=F5
     //                        (target's segment), T=0 (target explicit),
     //                        P=1 (no displacement), target-method=T2
     //                        (EXTDEF)
     //   Target datum (0x02): EXTDEF index 2 (__chkstk)
-    b.write_fixupp(&[0x84, 0x03, 0x56, 0x02]);
+    b.write_fixupp(&[0x84, chkstk_patch_offset, 0x56, 0x02]);
 
     // MODEND — end of module. No-entry form (the executable's entry
     // point comes from the PUBDEF of `_main` resolved at link time,
@@ -230,58 +301,115 @@ pub fn build_obj(source_filename: &str, return_value: i32) -> Vec<u8> {
     b.into_bytes()
 }
 
-/// MSC's `_main` body for `int main(void) { return K; }`. Two
-/// shapes, picked by whether the literal is zero:
+/// MSC's `_main` body for `int main(void) { <locals + return> }`.
+/// Shape depends on whether the function has a stack frame:
 ///
-/// **`return 0;` (fixture 4075):**
+/// **Zero locals (fixtures 4075 / 4076 / 4077 / 4078):**
 /// ```text
-/// 33 c0          xor ax, ax       ; chkstk arg = frame size (0)
-/// e8 00 00       call __chkstk   ; FIXUP'd to EXTDEF #2
-/// 2b c0          sub ax, ax       ; return value = 0
-/// c3             ret
+/// 33 c0           xor ax, ax       ; chkstk arg = 0
+/// e8 00 00        call __chkstk   ; FIXUP'd at offset 3
+/// <return load>   (see below)
+/// c3              ret
+/// [90]            nop pad if odd
 /// ```
-/// Total 8 bytes — already word-aligned, no NOP needed.
+/// No prologue or epilogue — MSC elides them entirely for a 0-byte
+/// frame.
 ///
-/// **`return K != 0;` (fixtures 4076 / 4077 / 4078):**
+/// **N≥1 locals (fixtures 4079 / 4080 / 4081):**
 /// ```text
-/// 33 c0          xor ax, ax       ; chkstk arg = 0
-/// e8 00 00       call __chkstk   ; FIXUP'd
-/// b8 <lo> <hi>   mov ax, K        ; return value
-/// c3             ret
-/// 90             nop              ; pad to even byte count
+/// 55              push bp
+/// 8b ec           mov bp, sp
+/// b8 <2N> 00      mov ax, frame_bytes  ; chkstk arg
+/// e8 00 00        call __chkstk        ; FIXUP'd at offset 7
+/// <initializers>  c7 46 <disp> <lo> <hi>   ; per initialized local
+/// <return load>
+/// 8b e5           mov sp, bp
+/// 5d              pop bp
+/// c3              ret
+/// [90]            nop pad if odd
 /// ```
-/// Total 10 bytes after the pad.
 ///
-/// The shared prefix `33 c0 e8 00 00` is the per-function prologue
-/// MSC always emits under /AS (zero AX as the chkstk arg, call
-/// chkstk, the call's displacement gets FIXUP'd at byte offset 3).
-/// After the call returns, codegen emits the return-value setup —
-/// `sub ax, ax` for zero (special-case, even byte count) or `mov ax,
-/// imm16` for everything else (with a trailing NOP to round up).
-fn main_body_for_return(return_value: i32) -> Vec<u8> {
-    let mut body = Vec::with_capacity(10);
-    // Per-function prologue: AX = chkstk arg (0 for empty frame),
-    // call __chkstk with the displacement bytes left as 00 00 for
-    // the FIXUP to patch.
-    body.extend_from_slice(&[0x33, 0xC0, 0xE8, 0x00, 0x00]);
-    if return_value == 0 {
-        // `sub ax, ax` — 2-byte form picked for the return-0 path
-        // even though `xor ax, ax` (2-byte) would be equivalent.
-        // MSC's codegen always uses `sub ax, ax` for `return 0;`
-        // — empirically pinned by fixture 4075.
-        body.extend_from_slice(&[0x2B, 0xC0, 0xC3]);
+/// **Return-value load** picks between two encodings:
+/// - `return 0;` (fixture 4075, 4079, 4080): `2b c0` (sub ax, ax).
+/// - any other literal: `b8 <lo> <hi>` (mov ax, imm16).
+///
+/// The "sub ax, ax for 0" idiom is MSC's special-case — it doesn't
+/// re-use the existing 0 in AX from the chkstk arg even when it
+/// could; the codegen always emits the explicit return-value
+/// instruction.
+fn main_body_for(ast: &MainAst) -> Vec<u8> {
+    let mut body = Vec::with_capacity(32);
+    let frame_bytes = ast.locals.len() * 2;
+
+    if frame_bytes > 0 {
+        // Prologue: standard 8086 frame setup. MSC doesn't use the
+        // 186-era ENTER instruction under /AS even when the model
+        // would allow it.
+        body.extend_from_slice(&[0x55, 0x8B, 0xEC]);
+        // Chkstk arg as `mov ax, <frame_bytes>`. The 16-bit immediate
+        // form is always picked here even for sizes that would fit
+        // in a `push imm8 / pop ax`.
+        body.push(0xB8);
+        body.extend_from_slice(&u16::try_from(frame_bytes)
+            .expect("frame fits in u16")
+            .to_le_bytes());
     } else {
-        // `mov ax, imm16` — 3-byte form B8 lo hi. Negative literals
-        // wrap to 16-bit unsigned (`-1` → 0xFFFF), matching the
-        // standard 8086 convention BCC also follows. Then `ret`
-        // and a `nop` pad to even byte count.
-        let imm = (return_value as u32 & 0xFFFF) as u16;
+        // No prologue. `xor ax, ax` doubles as the chkstk arg of 0;
+        // the eventual return-0 path emits its own `sub ax, ax` to
+        // re-zero AX (chkstk clobbers it).
+        body.extend_from_slice(&[0x33, 0xC0]);
+    }
+    // `call __chkstk` with the 2-byte displacement left as zeros for
+    // the FIXUP to patch.
+    body.extend_from_slice(&[0xE8, 0x00, 0x00]);
+
+    // Initialized-local writes — each `int x = K;` becomes
+    // `mov word ptr [bp-disp], K` (`c7 46 <disp> <lo> <hi>`).
+    // Locals are laid out at `[bp-2]`, `[bp-4]`, … in source order
+    // (same as BCC). Uninitialized declarations get no write.
+    for (i, init) in ast.locals.iter().enumerate() {
+        if let Some(value) = init {
+            let disp = -(i16::try_from(i + 1).expect("local index fits") * 2);
+            let imm = (*value as u32 & 0xFFFF) as u16;
+            body.push(0xC7);
+            body.push(0x46);
+            body.push(disp as u8);
+            body.extend_from_slice(&imm.to_le_bytes());
+        }
+    }
+
+    // Return-value load.
+    if ast.return_value == 0 {
+        body.extend_from_slice(&[0x2B, 0xC0]);
+    } else {
+        let imm = (ast.return_value as u32 & 0xFFFF) as u16;
         body.push(0xB8);
         body.extend_from_slice(&imm.to_le_bytes());
-        body.push(0xC3);
+    }
+
+    // Epilogue + ret. Same conditional as the prologue.
+    if frame_bytes > 0 {
+        body.extend_from_slice(&[0x8B, 0xE5, 0x5D]);
+    }
+    body.push(0xC3);
+
+    // Pad to an even byte count with a single NOP. MSC enforces this
+    // unconditionally — every `_main` body in fixtures 4075–4081
+    // ends on a word boundary, with the pad NOP appended when the
+    // natural shape was odd.
+    if body.len() % 2 != 0 {
         body.push(0x90);
     }
     body
+}
+
+/// Byte offset within `_main`'s body where the `e8 disp16` call to
+/// `__chkstk` keeps its displacement bytes — the location the
+/// FIXUPP patches at link time. With no prologue: bytes 3-4 (offset
+/// 3, after `33 c0 e8`). With a prologue: bytes 7-8 (offset 7, after
+/// `55 8b ec b8 <lo> <hi> e8`).
+fn chkstk_disp_offset(ast: &MainAst) -> usize {
+    if ast.locals.is_empty() { 3 } else { 7 }
 }
 
 #[derive(Debug, thiserror::Error)]
