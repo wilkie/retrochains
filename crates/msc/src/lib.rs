@@ -1733,6 +1733,36 @@ fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> {
                     }
                 } else {
                     let init_expr = parse_expr(p)?;
+                    // Postfix `++`/`--` on the init expression — yields
+                    // the *current* value (which is what we already
+                    // have in init_expr), then increments the target.
+                    // Supported only when init_expr is a bare lvalue
+                    // (Local or Global). Fixtures 1154, 1265.
+                    if matches!(p.peek(), Some(Tok::PlusPlus) | Some(Tok::MinusMinus)) {
+                        let inc = matches!(p.peek(), Some(Tok::PlusPlus));
+                        let op = if inc { BinOp::Add } else { BinOp::Sub };
+                        let post_target = match &init_expr {
+                            Expr::Local(i) => Some(AssignTarget::Local(*i)),
+                            Expr::Global(g) => Some(AssignTarget::Global(*g)),
+                            _ => None,
+                        };
+                        if let Some(target) = post_target {
+                            p.bump(); // consume `++`/`--`
+                            let lvalue_expr = match &target {
+                                AssignTarget::Local(i) => Expr::Local(*i),
+                                AssignTarget::Global(g) => Expr::Global(*g),
+                                _ => unreachable!(),
+                            };
+                            prelude.push(Stmt::Assign {
+                                target,
+                                value: Expr::BinOp {
+                                    op,
+                                    left: Box::new(lvalue_expr),
+                                    right: Box::new(Expr::IntLit(1)),
+                                },
+                            });
+                        }
+                    }
                     let init_view: Vec<Option<i32>> = locals
                         .iter()
                         .take(local_idx)
@@ -3501,9 +3531,18 @@ struct ConstProp {
     /// like `g += K` and `g = g + K` keep `Global(g)` on the left for
     /// the long-specific assign codegen to recognize.
     long_globals: std::collections::HashSet<usize>,
+    /// Locals that may have been mutated at runtime. The emit-time
+    /// fold view drops these from `locals.inits` so post-mutation
+    /// reads load from the slot rather than folding the declared init.
+    mutated_locals: std::collections::HashSet<usize>,
+    mutated_globals: std::collections::HashSet<usize>,
 }
 
-fn const_prop_globals(stmts: &[Stmt], local_specs: &[LocalSpec], long_globals: &[bool]) -> Vec<Stmt> {
+fn const_prop_globals(
+    stmts: &[Stmt],
+    local_specs: &[LocalSpec],
+    long_globals: &[bool],
+) -> (Vec<Stmt>, std::collections::HashSet<usize>, std::collections::HashSet<usize>) {
     let mut cp = ConstProp::default();
     for (i, &is_long) in long_globals.iter().enumerate() {
         if is_long { cp.long_globals.insert(i); }
@@ -3527,11 +3566,12 @@ fn const_prop_globals(stmts: &[Stmt], local_specs: &[LocalSpec], long_globals: &
             cp.l_known.insert(i, k);
         }
     }
-    stmts.iter().map(|s| {
+    let new_stmts: Vec<Stmt> = stmts.iter().map(|s| {
         let mut new_stmt = s.clone();
         prop_stmt(&mut new_stmt, &mut cp);
         new_stmt
-    }).collect()
+    }).collect();
+    (new_stmts, cp.mutated_locals, cp.mutated_globals)
 }
 
 fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
@@ -3564,6 +3604,19 @@ fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
                 prop_expr(right, cp);
             } else {
                 prop_expr(value, cp);
+            }
+            // Mark the assign target as mutated so the emit-time fold
+            // view ignores its `spec.init` (fixture 1029, 1154).
+            match target {
+                AssignTarget::Local(l) => { cp.mutated_locals.insert(*l); }
+                AssignTarget::Global(g) => { cp.mutated_globals.insert(*g); }
+                AssignTarget::IndexedLocal { local, .. }
+                | AssignTarget::IndexedLocalByte { local, .. }
+                | AssignTarget::LocalField { local, .. } => { cp.mutated_locals.insert(*local); }
+                AssignTarget::IndexedGlobal { array, .. }
+                | AssignTarget::IndexedGlobalByte { array, .. }
+                | AssignTarget::GlobalField { global: array, .. } => { cp.mutated_globals.insert(*array); }
+                _ => {}
             }
             match target {
                 AssignTarget::Global(g) => {
@@ -3684,6 +3737,8 @@ fn cp_clone(cp: &ConstProp) -> ConstProp {
         l_known: cp.l_known.clone(),
         la_known: cp.la_known.clone(),
         long_globals: cp.long_globals.clone(),
+        mutated_locals: cp.mutated_locals.clone(),
+        mutated_globals: cp.mutated_globals.clone(),
     }
 }
 
@@ -3787,10 +3842,16 @@ fn prop_expr(e: &mut Expr, cp: &ConstProp) {
 }
 
 fn emit_function(func: &Function, long_globals: &[bool], char_globals: &[bool]) -> FunctionEmit {
-    let body = const_prop_globals(&func.body, &func.locals, long_globals);
+    let (body, mutated_locals, _mutated_globals) = const_prop_globals(&func.body, &func.locals, long_globals);
     // Extract a `Vec<Option<i32>>` view for the existing fold path —
     // saves rewriting every codegen helper to know about LocalSpec.
-    let local_inits: Vec<Option<i32>> = func.locals.iter().map(|l| l.init).collect();
+    // Strip the init for any local that was mutated during the
+    // const-prop walk — the static `spec.init` no longer reflects
+    // the runtime value, so fold(locals.inits) must miss for it.
+    // Fixture 1154 (`int b = a++; return a + b;`).
+    let local_inits: Vec<Option<i32>> = func.locals.iter().enumerate()
+        .map(|(i, l)| if mutated_locals.contains(&i) { None } else { l.init })
+        .collect();
     let local_long: Vec<bool> = func.locals.iter().map(|l| l.is_long).collect();
     let local_literals: Vec<bool> = func.locals.iter().map(|l| l.init_is_literal).collect();
     let mut bytes = Vec::with_capacity(32);
