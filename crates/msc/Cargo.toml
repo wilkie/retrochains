@@ -1,0 +1,24 @@
+[package]
+name = "msc"
+description = "Reimplementation of the Microsoft C 5.0 compiler driver and front-end (CL.EXE)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lib]
+name = "msc"
+path = "src/lib.rs"
+
+[[bin]]
+name = "msc"
+path = "src/main.rs"
+
+[dependencies]
+obj = { path = "../obj" }
+thiserror = "2"
+
+[lints]
+workspace = true

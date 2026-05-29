@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "crates/bcc",
+    "crates/msc",
     "crates/tlink",
     "crates/tasm",
     "crates/obj",
