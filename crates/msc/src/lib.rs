@@ -150,6 +150,9 @@ pub struct Function {
     pub return_char: bool,
     pub params: Vec<String>,
     pub locals: Vec<LocalSpec>,
+    /// Names parallel to `locals` — used to compute MSC's hash-table
+    /// traversal order for frame slot assignment.
+    pub local_names: Vec<String>,
     pub body: Vec<Stmt>,
 }
 
@@ -180,6 +183,13 @@ pub struct LocalSpec {
     /// (2-byte offset at disp + 2-byte segment at disp+2). Uses
     /// `les`/`mov es:[bx]` codegen for deref.
     pub is_far_ptr: bool,
+    /// For pointer locals (`int *p`, `char *p`): the byte size of the
+    /// pointed-to element (1 for char*, 2 for int*). Zero for non-pointer
+    /// locals. Used to compute the step for postfix `p++`/`p--`.
+    pub pointee_size: usize,
+    /// True for `unsigned char x` — load uses `sub ah, ah` (zero-extend)
+    /// instead of `cbw` (sign-extend).
+    pub is_unsigned: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -198,13 +208,13 @@ pub struct StructField {
 
 impl LocalSpec {
     pub fn int(init: Option<i32>) -> Self {
-        Self { size: 2, array_len: 1, init, struct_idx: None, is_long: false, init_is_literal: init.is_some(), is_far_ptr: false }
+        Self { size: 2, array_len: 1, init, struct_idx: None, is_long: false, init_is_literal: init.is_some(), is_far_ptr: false, pointee_size: 0, is_unsigned: false }
     }
     pub fn char_(init: Option<i32>) -> Self {
-        Self { size: 1, array_len: 1, init, struct_idx: None, is_long: false, init_is_literal: init.is_some(), is_far_ptr: false }
+        Self { size: 1, array_len: 1, init, struct_idx: None, is_long: false, init_is_literal: init.is_some(), is_far_ptr: false, pointee_size: 0, is_unsigned: false }
     }
     pub fn long_(init: Option<i32>) -> Self {
-        Self { size: 2, array_len: 2, init, struct_idx: None, is_long: true, init_is_literal: init.is_some(), is_far_ptr: false }
+        Self { size: 2, array_len: 2, init, struct_idx: None, is_long: true, init_is_literal: init.is_some(), is_far_ptr: false, pointee_size: 0, is_unsigned: false }
     }
     /// Bytes occupied in the frame, rounded up to an even count.
     /// MSC pads each local to a word boundary — scalar char gets 2
@@ -252,6 +262,9 @@ pub struct Locals<'a> {
     /// array. Used to distinguish array decay (`p = a`) from value
     /// copy in far-pointer assignment codegen.
     pub array_locals: &'a [bool],
+    /// Parallel-indexed: true for `unsigned char x` locals — load uses
+    /// `sub ah, ah` (zero-extend) instead of `cbw` (sign-extend).
+    pub unsigned_locals: &'a [bool],
     /// Map of function names that return `char`. The caller inserts
     /// `cbw` after the call to widen AL to AX (fixture 1006).
     pub char_returners: &'a std::collections::HashSet<String>,
@@ -295,6 +308,9 @@ impl Locals<'_> {
     }
     pub fn is_array_local(&self, idx: usize) -> bool {
         self.array_locals.get(idx).copied().unwrap_or(false)
+    }
+    pub fn is_unsigned_local(&self, idx: usize) -> bool {
+        self.unsigned_locals.get(idx).copied().unwrap_or(false)
     }
 }
 
@@ -428,6 +444,10 @@ pub enum AssignTarget {
     /// `**<global-ptr-to-ptr> = <expr>;` — double-deref store. Codegen:
     /// `mov bx, [global]; mov bx, [bx]; mov [bx], ax`.
     DoubleDerefGlobal(usize),
+    /// `*<ptr-local>++ = <expr>;` — store through the OLD pointer value,
+    /// then advance the pointer by `step`. Codegen: `mov bx, [bp-p];
+    /// <mutate p>; mov [bx], ax/imm`.
+    DerefPostMutateLocal { local_idx: usize, step: i32 },
 }
 
 /// Condition for `if` (and later `while`/`for`). Slice 5 covers the
@@ -561,6 +581,22 @@ pub enum Expr {
     /// `*<ptr>` — word-sized pointer dereference (`int *`). Lowers
     /// to `mov bx, <ptr>; mov ax, [bx]`. Fixture 4125.
     DerefWord { ptr: Box<Expr> },
+    /// `<local>++` or `<local>--` — evaluates to the OLD value of the
+    /// local and then mutates the local by `step` (±1 for scalars,
+    /// ±pointee_size for pointer locals). Used in conditions, call
+    /// args, and deref-postmutate expressions. Step encodes both
+    /// direction (sign) and magnitude (pointer stride).
+    PostMutateLocal { local_idx: usize, step: i32 },
+    /// `<global>++` or `<global>--` — same semantics as PostMutateLocal
+    /// but targeting a file-scope variable. Requires a GlobalAddr fixup
+    /// for both the load and the mutate instruction.
+    PostMutateGlobal { global_idx: usize, step: i32 },
+    /// `++<local>` or `--<local>` — pre-increment/decrement. Mutates the
+    /// local first (inc/dec/add), then evaluates to the NEW value.
+    PreMutateLocal { local_idx: usize, step: i32 },
+    /// `++<global>` or `--<global>` — pre-increment/decrement of a
+    /// file-scope variable. Mutates first, then evaluates to the NEW value.
+    PreMutateGlobal { global_idx: usize, step: i32 },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -633,6 +669,8 @@ impl Expr {
             Expr::DerefParamField { .. } | Expr::DerefGlobalField { .. } => None,
             Expr::DerefByte { .. } | Expr::DerefWord { .. } => None,
             Expr::AddrOfGlobal(_) | Expr::AddrOfLocal(_) => None,
+            Expr::PostMutateLocal { .. } | Expr::PostMutateGlobal { .. }
+            | Expr::PreMutateLocal { .. } | Expr::PreMutateGlobal { .. } => None,
             // Comma expression fold: if all the side stmts have no
             // observable side effect (just discard a value), fold to
             // the tail's value. Otherwise refuse to fold (the assigns
@@ -1956,9 +1994,9 @@ fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> {
                     }
                 };
                 let spec = if is_ptr {
-                    LocalSpec { size: 2, array_len: 1, init: None, struct_idx: Some(sidx), is_long: false, init_is_literal: false, is_far_ptr: false }
+                    LocalSpec { size: 2, array_len: 1, init: None, struct_idx: Some(sidx), is_long: false, init_is_literal: false, is_far_ptr: false, pointee_size: stotal, is_unsigned: false }
                 } else {
-                    LocalSpec { size: 1, array_len: stotal, init: None, struct_idx: Some(sidx), is_long: false, init_is_literal: false, is_far_ptr: false }
+                    LocalSpec { size: 1, array_len: stotal, init: None, struct_idx: Some(sidx), is_long: false, init_is_literal: false, is_far_ptr: false, pointee_size: 0, is_unsigned: false }
                 };
                 let local_idx = locals.len();
                 p.local_names.push(lname);
@@ -1983,6 +2021,10 @@ fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> {
             p.eat(&Tok::Semi)?;
             continue;
         }
+        // Detect `unsigned` in the peek range so we can mark char locals.
+        let has_unsigned = (start_pos..peek_pos).any(|i| {
+            matches!(p.toks.get(i), Some(Tok::Kw("unsigned")))
+        });
         let (size, has_explicit_type, is_long_decl) = if enum_consumed {
             // The `enum [<tag>]` prefix has already been consumed; the
             // next token is the declarator. Treat as int.
@@ -2066,7 +2108,7 @@ fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> {
             } else {
                 (size, array_len, false)
             };
-            let spec = LocalSpec { size: slot_size, array_len: slot_len, init: None, struct_idx: None, is_long: is_long_slot, init_is_literal: false, is_far_ptr: is_far_ptr_decl };
+            let spec = LocalSpec { size: slot_size, array_len: slot_len, init: None, struct_idx: None, is_long: is_long_slot, init_is_literal: false, is_far_ptr: is_far_ptr_decl, pointee_size: if star_count > 0 { size } else { 0 }, is_unsigned: has_unsigned && size == 1 && star_count == 0 };
             p.local_specs.push(spec.clone());
             locals.push(spec);
             if matches!(p.peek(), Some(Tok::Assign)) {
@@ -2147,7 +2189,12 @@ fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> {
                         .take(local_idx)
                         .map(|l| l.init)
                         .collect();
-                    if let Some(k) = init_expr.fold(&init_view) {
+                    // MSC never const-folds || / && into a compile-time
+                    // literal — always emits the full short-circuit code.
+                    let is_logical = matches!(&init_expr,
+                        Expr::BinOp { op: BinOp::LogOr | BinOp::LogAnd, .. });
+                    let fold_k = if is_logical { None } else { init_expr.fold(&init_view) };
+                    if let Some(k) = fold_k {
                         locals[local_idx].init = Some(k);
                         // Mirror into the parser's snapshot so later
                         // stmt-level lookups (a[i] with i known) see
@@ -2191,7 +2238,8 @@ fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> {
     }
     p.eat(&Tok::RBrace)?;
 
-    Ok(Function { name, return_int, return_char, params, locals, body })
+    let local_names = p.local_names.clone();
+    Ok(Function { name, return_int, return_char, params, locals, local_names, body })
 }
 
 fn parse_signed_int(p: &mut Parser<'_>) -> Result<i32, EmitError> {
@@ -2387,6 +2435,22 @@ fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
                     )));
                 }
             };
+            // `*p++ = v;` — store through old pointer then advance.
+            if matches!(p.peek(), Some(Tok::PlusPlus) | Some(Tok::MinusMinus)) {
+                if let Some(local_idx) = p.local_names.iter().position(|n| *n == target_name) {
+                    let step_sign = if matches!(p.peek(), Some(Tok::PlusPlus)) { 1i32 } else { -1i32 };
+                    p.bump();
+                    let ptsz = p.local_specs[local_idx].pointee_size;
+                    let step = step_sign * if ptsz > 0 { ptsz as i32 } else { 1 };
+                    p.eat(&Tok::Assign)?;
+                    let value = parse_expr(p)?;
+                    p.eat(&Tok::Semi)?;
+                    return Ok(Stmt::Assign {
+                        target: AssignTarget::DerefPostMutateLocal { local_idx, step },
+                        value,
+                    });
+                }
+            }
             let target = if let Some(idx) = p.local_names.iter().position(|n| *n == target_name) {
                 AssignTarget::DerefLocal(idx)
             } else if let Some(idx) = p.global_names.iter().position(|n| *n == target_name) {
@@ -3117,6 +3181,11 @@ fn parse_binop_prec(p: &mut Parser<'_>, min_prec: u8) -> Result<Expr, EmitError>
 fn pointee_size_of(e: &Expr, globals: &[Global]) -> usize {
     match e {
         Expr::Global(idx) => globals[*idx].element_size,
+        // Postfix on a pointer: step magnitude = pointee element size.
+        // step=±1 → char*, step=±2 → int*.
+        Expr::PostMutateLocal { step, .. } | Expr::PostMutateGlobal { step, .. } => {
+            step.unsigned_abs() as usize
+        }
         Expr::BinOp { op: BinOp::Add, left, right } => {
             // `<ptr> + K` and `K + <ptr>` both inherit the pointer's
             // pointee size.
@@ -3233,23 +3302,28 @@ fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
         }
         Some(Tok::Int(n)) => Ok(Expr::IntLit(n)),
         Some(Tok::PlusPlus) => {
-            // `++<ident>` — synthesize `<ident> + 1` at use site.
-            // For statement contexts, parse_stmt routes through
-            // parse_compound_rhs instead.
             let inner = parse_atom(p)?;
-            Ok(Expr::BinOp {
-                op: BinOp::Add,
-                left: Box::new(inner),
-                right: Box::new(Expr::IntLit(1)),
-            })
+            match inner {
+                Expr::Local(idx) => Ok(Expr::PreMutateLocal { local_idx: idx, step: 1 }),
+                Expr::Global(idx) => Ok(Expr::PreMutateGlobal { global_idx: idx, step: 1 }),
+                other => Ok(Expr::BinOp {
+                    op: BinOp::Add,
+                    left: Box::new(other),
+                    right: Box::new(Expr::IntLit(1)),
+                }),
+            }
         }
         Some(Tok::MinusMinus) => {
             let inner = parse_atom(p)?;
-            Ok(Expr::BinOp {
-                op: BinOp::Sub,
-                left: Box::new(inner),
-                right: Box::new(Expr::IntLit(1)),
-            })
+            match inner {
+                Expr::Local(idx) => Ok(Expr::PreMutateLocal { local_idx: idx, step: -1 }),
+                Expr::Global(idx) => Ok(Expr::PreMutateGlobal { global_idx: idx, step: -1 }),
+                other => Ok(Expr::BinOp {
+                    op: BinOp::Sub,
+                    left: Box::new(other),
+                    right: Box::new(Expr::IntLit(1)),
+                }),
+            }
         }
         Some(Tok::Bang) => {
             // `!<expr>` — equivalent to `<expr> == 0`.
@@ -3464,6 +3538,15 @@ fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                     let (byte_off, size) = parse_field_lookup(p, sidx)?;
                     return Ok(Expr::DerefLocalField { ptr_local: idx, byte_off, size });
                 }
+                // Postfix `++`/`--` on a local — yields the OLD value
+                // and schedules the mutation as a side effect in codegen.
+                if matches!(p.peek(), Some(Tok::PlusPlus) | Some(Tok::MinusMinus)) {
+                    let step_sign = if matches!(p.peek(), Some(Tok::PlusPlus)) { 1i32 } else { -1i32 };
+                    p.bump();
+                    let ptsz = p.local_specs[idx].pointee_size;
+                    let step = step_sign * if ptsz > 0 { ptsz as i32 } else { 1 };
+                    return Ok(Expr::PostMutateLocal { local_idx: idx, step });
+                }
                 Ok(Expr::Local(idx))
             } else if let Some(idx) = p.param_names.iter().position(|n| *n == name) {
                 // `<param>[K]` for `int *p` / `int p[]` parameters →
@@ -3516,6 +3599,14 @@ fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                     let (byte_off, size) = parse_field_lookup(p, sidx)?;
                     Ok(Expr::DerefGlobalField { ptr_global: idx, byte_off, size })
                 } else {
+                    // Postfix `++`/`--` on a global scalar or pointer.
+                    if matches!(p.peek(), Some(Tok::PlusPlus) | Some(Tok::MinusMinus)) {
+                        let step_sign = if matches!(p.peek(), Some(Tok::PlusPlus)) { 1i32 } else { -1i32 };
+                        p.bump();
+                        let g = &p.globals[idx];
+                        let step = if g.is_pointer { step_sign * g.element_size as i32 } else { step_sign };
+                        return Ok(Expr::PostMutateGlobal { global_idx: idx, step });
+                    }
                     // Array name in non-subscript position decays to
                     // a pointer (the array's base address). Scalar
                     // globals stay as values.
@@ -4555,6 +4646,12 @@ fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
                 *e = Expr::IntLit(k);
             }
         }
+        Expr::BinOp { op: BinOp::LogOr | BinOp::LogAnd, .. } => {
+            // MSC does NOT substitute constant locals inside || / && operands:
+            // `return x || y` with x=1 always emits `cmp [bp-x], 0`, not
+            // `cmp 1, 0`. The fold() path (for if-condition dead-branch
+            // elimination) still works because fold() reads l_known directly.
+        }
         Expr::BinOp { left, right, .. } => {
             prop_expr(left, cp);
             prop_expr(right, cp);
@@ -4630,6 +4727,22 @@ fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
             for s in sides { prop_stmt(s, cp); }
             prop_expr(value, cp);
         }
+        Expr::PostMutateLocal { local_idx, .. } => {
+            cp.mutated_locals.insert(*local_idx);
+            cp.l_known.remove(local_idx);
+        }
+        Expr::PostMutateGlobal { global_idx, .. } => {
+            cp.mutated_globals.insert(*global_idx);
+            cp.g_known.remove(global_idx);
+        }
+        Expr::PreMutateLocal { local_idx, .. } => {
+            cp.mutated_locals.insert(*local_idx);
+            cp.l_known.remove(local_idx);
+        }
+        Expr::PreMutateGlobal { global_idx, .. } => {
+            cp.mutated_globals.insert(*global_idx);
+            cp.g_known.remove(global_idx);
+        }
         Expr::IntLit(_) | Expr::Param(_) | Expr::StrLit(_) => {}
     }
 }
@@ -4654,6 +4767,7 @@ fn emit_function(
     let local_literals: Vec<bool> = func.locals.iter().map(|l| l.init_is_literal).collect();
     let local_far_ptrs: Vec<bool> = func.locals.iter().map(|l| l.is_far_ptr).collect();
     let local_arrays: Vec<bool> = func.locals.iter().map(|l| l.array_len > 1).collect();
+    let local_unsigned: Vec<bool> = func.locals.iter().map(|l| l.is_unsigned).collect();
     let mut bytes = Vec::with_capacity(32);
     let mut fixups: Vec<Fixup> = Vec::new();
     let frame = Frame::for_function(func);
@@ -4662,18 +4776,45 @@ fn emit_function(
     // locals in source order.  For functions with no far pointers this
     // reduces to simple source-order allocation.
     let mut local_disps: Vec<i16> = vec![0i16; func.locals.len()];
+    // Three-pass frame layout:
+    //   Pass 1: far/huge pointer locals (4-byte seg:off slots) — shallowest.
+    //   Pass 2: near pointer locals (pointee_size > 0) — intermediate.
+    //   Pass 3: non-pointer locals sorted by sum_of_name_chars % 16
+    //           (ascending). This mirrors MSC's internal hash-table
+    //           traversal order: hash bucket determines slot depth, lower
+    //           bucket → closer to BP (smaller absolute displacement).
     let mut cumulative: i32 = 0;
     for (i, spec) in func.locals.iter().enumerate() {
         if spec.is_far_ptr {
-            let own = i32::try_from(spec.storage_bytes()).expect("local fits");
-            cumulative += own;
+            cumulative += spec.storage_bytes() as i32;
             local_disps[i] = -i16::try_from(cumulative).expect("local disp fits");
         }
     }
     for (i, spec) in func.locals.iter().enumerate() {
-        if !spec.is_far_ptr {
-            let own = i32::try_from(spec.storage_bytes()).expect("local fits");
-            cumulative += own;
+        if !spec.is_far_ptr && spec.pointee_size > 0 {
+            cumulative += spec.storage_bytes() as i32;
+            local_disps[i] = -i16::try_from(cumulative).expect("local disp fits");
+        }
+    }
+    {
+        let mut np_indices: Vec<usize> = func.locals.iter().enumerate()
+            .filter(|(_, s)| !s.is_far_ptr && s.pointee_size == 0)
+            .map(|(i, _)| i)
+            .collect();
+        let name_hash = |i: usize| -> u32 {
+            let h: u32 = func.local_names[i].bytes().map(|b| b as u32).sum();
+            h % 16
+        };
+        // Within a hash bucket, MSC's internal hash table uses LIFO
+        // (linked-list prepend), so the last-declared variable in a
+        // bucket gets the shallowest (smallest absolute) displacement.
+        // Secondary key: descending source index to match that ordering.
+        np_indices.sort_by(|&a, &b| {
+            name_hash(a).cmp(&name_hash(b)).then(b.cmp(&a))
+        });
+        for i in np_indices {
+            let spec = &func.locals[i];
+            cumulative += spec.storage_bytes() as i32;
             local_disps[i] = -i16::try_from(cumulative).expect("local disp fits");
         }
     }
@@ -4764,6 +4905,7 @@ fn emit_function(
         init_literals: &local_literals,
         far_ptr_locals: &local_far_ptrs,
         array_locals: &local_arrays,
+        unsigned_locals: &local_unsigned,
         char_returners,
         loop_stack: &loop_stack,
     };
@@ -5039,21 +5181,39 @@ fn emit_return(
         // Return-of-call peephole: `return f(args);` leaves the
         // result in AX from the call's return value — no extra
         // load before ret. Fixture 4102 confirms.
+        // For WithSlide frames, `mov sp, bp` in the epilogue restores sp
+        // across the pushed args — no `add sp, N` cleanup needed.
         if let Expr::Call { name, args } = expr {
-            emit_call(name, args, locals, out, fixups);
+            let skip_cleanup = frame == Frame::WithSlide;
+            emit_call_inner(name, args, locals, skip_cleanup, out, fixups);
         } else if matches!(expr, Expr::Local(i) if locals.is_long_local(*i)) {
             // Long locals are read through the 4-byte slot — MSC
             // emits `mov ax, [bp-disp_low]` even when the value is
             // known at compile time (fixture 1037).
             emit_expr_to_ax(expr, locals, out, fixups);
-        } else if matches!(expr, Expr::Local(_)) {
-            // Const-prop replaces known `Local(i)` with `IntLit(K)`
-            // upstream — so anything still showing as `Local` at this
-            // point either wasn't tracked (long, computed-char) or has
-            // been mutated past its declaration value. Always load,
-            // never fold from the static `spec.init` view (would
-            // misread mutated scalars; fixture 1029).
-            emit_expr_to_ax(expr, locals, out, fixups);
+        } else if let Expr::Local(i) = expr {
+            // Peephole: if the last instruction was `mov [bp+d], ax`
+            // (89 46 d) for this same local, AX already holds the value
+            // — skip the reload. Covers `y = ++x; return y;` shapes.
+            let disp = locals.disp(*i) as u8;
+            let ax_already_set = out.len() >= 3
+                && out[out.len()-3..] == [0x89, 0x46, disp];
+            if !ax_already_set {
+                emit_expr_to_ax(expr, locals, out, fixups);
+            }
+        } else if matches!(expr, Expr::BinOp { op: BinOp::LogOr | BinOp::LogAnd, .. }) {
+            // `return x || y` / `return x && y` — MSC always emits the full
+            // short-circuit branch structure with TWO separate epilogue+ret
+            // paths (one for true=1, one for false=0). Does NOT const-fold.
+            let epi = frame.epilogue_bytes();
+            let take_then_disp = 3i8 + epi.len() as i8;  // true block = 3 (mov ax,1) + epi
+            let cond = cond_from_expr(expr.clone());
+            emit_cond_skip(&cond, take_then_disp, locals, out, fixups);
+            out.extend_from_slice(&[0xB8, 0x01, 0x00]);  // mov ax, 1
+            out.extend_from_slice(epi);                   // epilogue + ret
+            out.extend_from_slice(&[0x2B, 0xC0]);         // sub ax, ax
+            out.extend_from_slice(epi);                   // epilogue + ret
+            return;  // both branches already have the epilogue
         } else if let Some(k) = expr.fold(locals.inits) {
             if k == 0 {
                 out.extend_from_slice(&[0x2B, 0xC0]);
@@ -5083,6 +5243,17 @@ fn emit_call(
     out: &mut Vec<u8>,
     fixups: &mut Vec<Fixup>,
 ) {
+    emit_call_inner(name, args, locals, false, out, fixups);
+}
+
+fn emit_call_inner(
+    name: &str,
+    args: &[Expr],
+    locals: &Locals<'_>,
+    skip_cleanup: bool,
+    out: &mut Vec<u8>,
+    fixups: &mut Vec<Fixup>,
+) {
     for arg in args.iter().rev() {
         emit_push_arg(arg, locals, out, fixups);
     }
@@ -5096,7 +5267,7 @@ fn emit_call(
         kind: FixupKind::TuLocalCall { target: symbol_name(name) },
     });
     let cleanup_bytes = args.len() * 2;
-    if cleanup_bytes > 0 {
+    if cleanup_bytes > 0 && !skip_cleanup {
         // `add sp, imm8sx` — Grp1 r/m16,imm8sx with /0=ADD,
         // ModR/M mod=11 r/m=100 (SP). 3 bytes for small N.
         out.push(0x83);
@@ -5175,13 +5346,27 @@ fn emit_push_arg(arg: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mu
                 kind: FixupKind::GlobalAddr { global_idx: *idx },
             });
         }
+        Expr::PostMutateLocal { local_idx, step } => {
+            // Push the OLD value of the local, then mutate it in place.
+            // `push word ptr [bp-a]` + inc/dec/add/sub.
+            let disp = locals.disp(*local_idx);
+            out.extend_from_slice(&[0xFF, 0x76, disp as u8]);
+            emit_postmutate_local(*step, locals.size(*local_idx), disp, out);
+        }
+        Expr::PreMutateLocal { local_idx, step } => {
+            // Mutate first, then push the NEW value.
+            let disp = locals.disp(*local_idx);
+            emit_postmutate_local(*step, locals.size(*local_idx), disp, out);
+            out.extend_from_slice(&[0xFF, 0x76, disp as u8]);
+        }
         Expr::BinOp { .. } | Expr::Call { .. } | Expr::Ternary { .. }
             | Expr::DerefWord { .. } | Expr::DerefByte { .. }
             | Expr::GlobalField { .. } | Expr::LocalField { .. }
             | Expr::DerefLocalField { .. } | Expr::DerefParamField { .. }
             | Expr::Index { .. } | Expr::IndexByte { .. }
             | Expr::LocalIndex { .. } | Expr::LocalIndexByte { .. }
-            | Expr::ParamIndex { .. } | Expr::PtrIndexByte { .. } => {
+            | Expr::ParamIndex { .. } | Expr::PtrIndexByte { .. }
+            | Expr::PostMutateGlobal { .. } | Expr::PreMutateGlobal { .. } | Expr::Seq { .. } => {
             // Computed value: build the result in AX then push.
             // Fixture 4144 (BinOp), 1270 (Call).
             emit_expr_to_ax(arg, locals, out, fixups);
@@ -5246,6 +5431,9 @@ fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_>, out: &mu
         }
         AssignTarget::DoubleDerefGlobal(g) => {
             return emit_assign_double_deref_global(g, value, locals, out, fixups);
+        }
+        AssignTarget::DerefPostMutateLocal { local_idx, step } => {
+            return emit_assign_deref_postmutate_local(local_idx, step, value, locals, out, fixups);
         }
     };
     let disp = locals.disp(local_idx);
@@ -5436,9 +5624,31 @@ fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_>, out: &mu
             }
         }
     }
+    // Add/sub-to-memory peephole: `x = x + other` / `x = x - other` where
+    // `other` is a non-constant expression (local/param/global). Emits
+    // `load other; add/sub [bp-disp], ax` (6 bytes vs 9 for load-modify-store).
+    // Only for non-byte (int/word) targets — byte form would need AL.
+    if locals.size(local_idx) == 2
+        && let Expr::BinOp { op: op @ (BinOp::Add | BinOp::Sub), left, right } = value
+        && let Expr::Local(li) = left.as_ref()
+        && *li == local_idx
+        && right.fold(locals.inits).is_none()
+    {
+        emit_expr_to_ax(right, locals, out, fixups);
+        let opc = if matches!(op, BinOp::Add) { 0x01u8 } else { 0x29u8 };
+        out.extend_from_slice(&[opc, 0x46, disp as u8]);
+        return;
+    }
     // General path: evaluate the RHS into AX, then store.
     let is_byte = locals.size(local_idx) == 1;
-    if let Some(k) = value.fold(locals.inits) {
+    // MSC never const-folds || / && — always emits the short-circuit
+    // code even when operands are compile-time constants (fixture 1466).
+    let fold_val = if matches!(value, Expr::BinOp { op: BinOp::LogOr | BinOp::LogAnd, .. }) {
+        None
+    } else {
+        value.fold(locals.inits)
+    };
+    if let Some(k) = fold_val {
         if is_byte {
             out.push(0xC6);
             out.push(0x46);
@@ -6094,6 +6304,93 @@ fn emit_assign_deref_local_field(ptr_local: usize, byte_off: u16, size: u8, valu
     }
 }
 
+/// Emit the mutation half of a postfix `local++`/`local--` expression.
+/// The load-into-AX (or BX) half is the caller's responsibility.
+/// `slot_size` is the storage size of the local (1 for char, 2 for int/ptr).
+fn emit_postmutate_local(step: i32, slot_size: usize, disp: i16, out: &mut Vec<u8>) {
+    let d = disp as u8;
+    let abs = step.unsigned_abs() as u32;
+    if slot_size == 1 {
+        match step {
+            1  => out.extend_from_slice(&[0xFE, 0x46, d]),
+            -1 => out.extend_from_slice(&[0xFE, 0x4E, d]),
+            _  => {
+                let m = if step > 0 { 0x46u8 } else { 0x6Eu8 };
+                out.extend_from_slice(&[0x80, m, d, abs as u8]);
+            }
+        }
+    } else {
+        match step {
+            1  => out.extend_from_slice(&[0xFF, 0x46, d]),
+            -1 => out.extend_from_slice(&[0xFF, 0x4E, d]),
+            _  => {
+                let m = if step > 0 { 0x46u8 } else { 0x6Eu8 };
+                if abs <= 127 {
+                    out.extend_from_slice(&[0x83, m, d, abs as u8]);
+                } else {
+                    out.extend_from_slice(&[0x81, m, d]);
+                    out.extend_from_slice(&(abs as u16).to_le_bytes());
+                }
+            }
+        }
+    }
+}
+
+/// Emit the mutation half of a postfix `global++`/`global--` expression.
+/// `step` encodes direction and magnitude; requires a GlobalAddr fixup.
+fn emit_postmutate_global(step: i32, global_idx: usize, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    let abs = step.unsigned_abs() as u32;
+    // body_offset points at the ModRM/reg byte so +1,+2 land on the addr16.
+    match step {
+        1 => {
+            let bo = out.len() + 1;
+            out.extend_from_slice(&[0xFF, 0x06, 0x00, 0x00]);
+            fixups.push(Fixup { body_offset: bo, kind: FixupKind::GlobalAddr { global_idx } });
+        }
+        -1 => {
+            let bo = out.len() + 1;
+            out.extend_from_slice(&[0xFF, 0x0E, 0x00, 0x00]);
+            fixups.push(Fixup { body_offset: bo, kind: FixupKind::GlobalAddr { global_idx } });
+        }
+        _ => {
+            let m = if step > 0 { 0x06u8 } else { 0x2Eu8 };
+            let bo = out.len() + 1;
+            if abs <= 127 {
+                out.extend_from_slice(&[0x83, m, 0x00, 0x00, abs as u8]);
+            } else {
+                out.extend_from_slice(&[0x81, m, 0x00, 0x00]);
+                out.extend_from_slice(&(abs as u16).to_le_bytes());
+            }
+            fixups.push(Fixup { body_offset: bo, kind: FixupKind::GlobalAddr { global_idx } });
+        }
+    }
+}
+
+/// `*<ptr-local>++ = <expr>;` — store through the OLD pointer value
+/// then advance the pointer by `step` bytes.
+fn emit_assign_deref_postmutate_local(local_idx: usize, step: i32, value: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    let disp = locals.disp(local_idx);
+    out.extend_from_slice(&[0x8B, 0x5E, disp as u8]);    // mov bx, [bp-p]
+    emit_postmutate_local(step, locals.size(local_idx), disp, out);
+    // pointee size = |step| (step encodes the pointer stride)
+    let psz = step.unsigned_abs() as usize;
+    if let Some(k) = value.fold(locals.inits) {
+        if psz == 1 {
+            out.extend_from_slice(&[0xC6, 0x07, (k as u32 & 0xFF) as u8]);
+        } else {
+            out.extend_from_slice(&[0xC7, 0x07]);
+            out.extend_from_slice(&((k as u32 & 0xFFFF) as u16).to_le_bytes());
+        }
+    } else {
+        emit_expr_to_ax(value, locals, out, fixups);
+        if psz == 1 {
+            out.extend_from_slice(&[0x88, 0x07]);
+        } else {
+            out.extend_from_slice(&[0x89, 0x07]);
+        }
+    }
+}
+
 /// `*<ptr-local> = <expr>;` — load the pointer local into BX, then
 /// store the RHS through `[bx]`. Constant RHS → `c7 07 imm16`;
 /// general RHS → `<expr-to-ax>; 89 07`.
@@ -6192,24 +6489,30 @@ fn emit_while(
     out: &mut Vec<u8>,
     fixups: &mut Vec<Fixup>,
 ) {
-    emit_loop(cond, &[body_stmt], locals, frame, return_int, out, fixups);
+    emit_loop(cond, &[body_stmt], None, locals, frame, return_int, out, fixups);
 }
 
-/// `for (<init>; <cond>; <step>) <body>` — MSC's layout (fixture
-/// 4097):
+/// `for (<init>; <cond>; <step>) <body>` — MSC's layout.
+///
+/// When the entry condition is known true after the for-init (e.g.
+/// `for (i=0; i<4; i++)`), MSC uses do-while form:
 /// ```text
-/// <init>              init expression-statement
-/// eb <step+body[+pad]>  jmp short to cond
-/// [90]                nop pad iff alignment requires
-/// <step>              step expression (interleaved BEFORE body in loop)
-/// <body>              loop body
-/// <cmp>               cond comparison
-/// <jcc> <-back>       jne/je back to step start
+/// <init>    init expression-statement
+/// <body>    loop body
+/// <step>    step expression
+/// <cmp>     cond comparison
+/// <jcc>     jcc back to body start
 /// ```
-/// The "step before body" arrangement makes the initial jmp skip
-/// the step on the first iteration only; later iterations execute
-/// step, then fall into body, then cond. Same alignment rule as
-/// `while` for the post-jmp pad.
+/// When the entry condition is unknown, the while form is used:
+/// ```text
+/// <init>
+/// eb <step+body[+pad]>  jmp short to cond
+/// [90]
+/// <step>
+/// <body>
+/// <cmp>
+/// <jcc>     jcc back to step start
+/// ```
 fn emit_for(
     init: &Stmt,
     cond: &Cond,
@@ -6222,9 +6525,61 @@ fn emit_for(
     fixups: &mut Vec<Fixup>,
 ) {
     emit_stmt(init, locals, frame, return_int, out, fixups);
-    // The looped section is `step; body;` — treated as a single
-    // "loop body" for the shared shape helper.
-    emit_loop(cond, &[step, body_stmt], locals, frame, return_int, out, fixups);
+    // After the init runs, check if the condition is known true.
+    // If so, use do-while (body then step); otherwise while (step then body).
+    let entry = for_entry_fold(init, cond, locals);
+    if matches!(entry, Some(k) if k != 0) && !matches!(body_stmt, Stmt::Empty) {
+        // Do-while form: body THEN step, no initial jmp.
+        emit_loop(cond, &[body_stmt, step], entry, locals, frame, return_int, out, fixups);
+    } else {
+        emit_loop(cond, &[step, body_stmt], None, locals, frame, return_int, out, fixups);
+    }
+}
+
+/// Compute `fold_cond` as it would evaluate after the for-init runs.
+/// Handles only the common case: `init = Local(idx) = const_expr`.
+fn for_entry_fold(init: &Stmt, cond: &Cond, locals: &Locals<'_>) -> Option<i32> {
+    if let Stmt::Assign { target: AssignTarget::Local(idx), value } = init {
+        if let Some(k) = value.fold(locals.inits) {
+            let mut tmp: Vec<Option<i32>> = locals.inits.to_vec();
+            if *idx < tmp.len() {
+                tmp[*idx] = Some(k);
+            }
+            return fold_cond_raw(cond, &tmp);
+        }
+    }
+    None
+}
+
+/// Fold a condition using an explicit inits slice (no Locals wrapper).
+fn fold_cond_raw(cond: &Cond, inits: &[Option<i32>]) -> Option<i32> {
+    match cond {
+        Cond::Truthy(e) => e.fold(inits),
+        Cond::Cmp { op, left, right } => {
+            let l = left.fold(inits)?;
+            let r = right.fold(inits)?;
+            Some(match op {
+                RelOp::Eq => i32::from(l == r),
+                RelOp::Ne => i32::from(l != r),
+                RelOp::Lt => i32::from(l < r),
+                RelOp::Gt => i32::from(l > r),
+                RelOp::Le => i32::from(l <= r),
+                RelOp::Ge => i32::from(l >= r),
+            })
+        }
+        Cond::And(a, b) => {
+            let av = fold_cond_raw(a, inits)?;
+            if av == 0 { return Some(0); }
+            let bv = fold_cond_raw(b, inits)?;
+            Some(i32::from(bv != 0))
+        }
+        Cond::Or(a, b) => {
+            let av = fold_cond_raw(a, inits)?;
+            if av != 0 { return Some(1); }
+            let bv = fold_cond_raw(b, inits)?;
+            Some(i32::from(bv != 0))
+        }
+    }
 }
 
 /// Shared loop emitter — handles the alignment-pad, body
@@ -6234,6 +6589,7 @@ fn emit_for(
 fn emit_loop(
     cond: &Cond,
     body_segments: &[&Stmt],
+    entry_fold: Option<i32>,
     locals: &Locals<'_>,
     frame: Frame,
     return_int: bool,
@@ -6273,10 +6629,12 @@ fn emit_loop(
     //     (no initial jmp; do-while shape). Fixtures 126, 1044.
     //   `Some(0)`        → loop body never runs; elide entirely
     //     (no jmp/body/cmp). Fixture 1587.
-    if matches!(fold_cond(cond, locals), Some(0)) && !cond_references_local(cond) {
+    // entry_fold is a pre-computed override (e.g. from a for-loop init).
+    let effective_fold = entry_fold.or_else(|| fold_cond(cond, locals));
+    if matches!(effective_fold, Some(0)) && !cond_references_local(cond) {
         return;
     }
-    let skip_initial_jmp = matches!(fold_cond(cond, locals), Some(k) if k != 0);
+    let skip_initial_jmp = matches!(effective_fold, Some(k) if k != 0);
     if !skip_initial_jmp {
         let forward_disp = i8::try_from(body_len + pad)
             .expect("body+pad short enough for jmp rel8");
@@ -6888,11 +7246,69 @@ fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: 
                 });
             }
         }
+        Expr::PostMutateLocal { local_idx, step } => {
+            // Load the OLD value into AX, then mutate the slot.
+            let disp = locals.disp(*local_idx);
+            if locals.size(*local_idx) == 1 {
+                out.extend_from_slice(&[0x8A, 0x46, disp as u8]);  // mov al,[bp-d]
+                out.push(0x98);                                       // cbw
+            } else {
+                out.extend_from_slice(&[0x8B, 0x46, disp as u8]);  // mov ax,[bp-d]
+            }
+            emit_postmutate_local(*step, locals.size(*local_idx), disp, out);
+        }
+        Expr::PreMutateLocal { local_idx, step } => {
+            // Mutate first, then load the NEW value into AX.
+            let disp = locals.disp(*local_idx);
+            emit_postmutate_local(*step, locals.size(*local_idx), disp, out);
+            if locals.size(*local_idx) == 1 {
+                out.extend_from_slice(&[0x8A, 0x46, disp as u8]);  // mov al,[bp-d]
+                out.push(0x98);                                       // cbw
+            } else {
+                out.extend_from_slice(&[0x8B, 0x46, disp as u8]);  // mov ax,[bp-d]
+            }
+        }
+        Expr::PostMutateGlobal { global_idx, step } => {
+            // Load the OLD value into AX, then mutate the global.
+            if locals.is_char_global(*global_idx) {
+                let bo = out.len();
+                out.extend_from_slice(&[0xA0, 0x00, 0x00]);  // mov al, [g]
+                fixups.push(Fixup { body_offset: bo, kind: FixupKind::GlobalAddr { global_idx: *global_idx } });
+                out.push(0x98);                                // cbw
+            } else {
+                let bo = out.len();
+                out.extend_from_slice(&[0xA1, 0x00, 0x00]);  // mov ax, [g]
+                fixups.push(Fixup { body_offset: bo, kind: FixupKind::GlobalAddr { global_idx: *global_idx } });
+            }
+            emit_postmutate_global(*step, *global_idx, out, fixups);
+        }
+        Expr::PreMutateGlobal { global_idx, step } => {
+            // Mutate first, then load the NEW value into AX.
+            emit_postmutate_global(*step, *global_idx, out, fixups);
+            if locals.is_char_global(*global_idx) {
+                let bo = out.len();
+                out.extend_from_slice(&[0xA0, 0x00, 0x00]);  // mov al, [g]
+                fixups.push(Fixup { body_offset: bo, kind: FixupKind::GlobalAddr { global_idx: *global_idx } });
+                out.push(0x98);  // cbw
+            } else {
+                let bo = out.len();
+                out.extend_from_slice(&[0xA1, 0x00, 0x00]);  // mov ax, [g]
+                fixups.push(Fixup { body_offset: bo, kind: FixupKind::GlobalAddr { global_idx: *global_idx } });
+            }
+        }
         Expr::DerefByte { ptr } => {
             // Phase 1: `*<char-ptr-global>` and `*(<char-ptr> + K)`.
             // Both lower to `mov bx, [p]; mov al, [bx+disp]; cbw`,
             // with disp 0 for the bare deref and K for the
             // constant-offset form (fixtures 4111, 4127).
+            // `*p++` for char* locals: load old ptr into BX, advance, byte-deref.
+            if let Expr::PostMutateLocal { local_idx, step } = ptr.as_ref() {
+                let disp = locals.disp(*local_idx);
+                out.extend_from_slice(&[0x8B, 0x5E, disp as u8]);  // mov bx,[bp-p]
+                emit_postmutate_local(*step, locals.size(*local_idx), disp, out);
+                out.extend_from_slice(&[0x8A, 0x07, 0x98]);         // mov al,[bx]; cbw
+                return;
+            }
             let (ptr_idx, disp) = match ptr.as_ref() {
                 Expr::Global(idx) => (*idx, 0i8),
                 Expr::BinOp { op: BinOp::Add, left, right }
@@ -6924,6 +7340,13 @@ fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: 
             // a global int-pointer source pick up the BX-from-global
             // load shape.
             match ptr.as_ref() {
+                // `*p++` — load old ptr into BX, advance ptr, read from old location.
+                Expr::PostMutateLocal { local_idx, step } => {
+                    let disp = locals.disp(*local_idx);
+                    out.extend_from_slice(&[0x8B, 0x5E, disp as u8]);  // mov bx,[bp-p]
+                    emit_postmutate_local(*step, locals.size(*local_idx), disp, out);
+                    out.extend_from_slice(&[0x8B, 0x07]);               // mov ax,[bx]
+                }
                 Expr::Param(i) => {
                     let disp = i8::try_from(4 + (*i * 2))
                         .expect("param disp fits");
@@ -7307,11 +7730,15 @@ fn emit_load_param(idx: usize, out: &mut Vec<u8>) {
 fn emit_load_local(idx: usize, locals: &Locals<'_>, out: &mut Vec<u8>) {
     let disp = locals.disp(idx);
     if locals.size(idx) == 1 {
-        // `mov al, [bp-disp]; cbw` — sign-extend char to int in AX.
         out.push(0x8A);
         out.push(0x46);
         out.push(disp as u8);
-        out.push(0x98); // cbw
+        if locals.is_unsigned_local(idx) {
+            // `mov al, [bp-disp]; sub ah, ah` — zero-extend for unsigned char.
+            out.extend_from_slice(&[0x2A, 0xE4]); // sub ah, ah
+        } else {
+            out.push(0x98); // cbw — sign-extend for signed char
+        }
     } else {
         out.push(0x8B);
         out.push(0x46);
@@ -7320,6 +7747,20 @@ fn emit_load_local(idx: usize, locals: &Locals<'_>, out: &mut Vec<u8>) {
 }
 
 fn emit_binop(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    // Logical-and/or as a VALUE: short-circuit branches producing 0 or 1 in AX.
+    // Pattern: emit_cond_skip(cond, 5); [mov ax,1; jmp +2]; [sub ax,ax]
+    // The true block is 5 bytes (B8 01 00 EB 02); jmp +2 skips sub ax,ax.
+    if matches!(op, BinOp::LogOr | BinOp::LogAnd) {
+        let cond = cond_from_expr(Expr::BinOp {
+            op,
+            left: Box::new(left.clone()),
+            right: Box::new(right.clone()),
+        });
+        emit_cond_skip(&cond, 5, locals, out, fixups);
+        out.extend_from_slice(&[0xB8, 0x01, 0x00, 0xEB, 0x02]);  // mov ax,1; jmp +2
+        out.extend_from_slice(&[0x2B, 0xC0]);                      // sub ax,ax
+        return;
+    }
     // Comparison ops materialize as 0/1 in AX via cmp+jcc.
     if matches!(op, BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge) {
         let cond = Cond::Cmp {
