@@ -2852,6 +2852,10 @@ fn parse_assign_no_semi(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
 }
 
 fn parse_cond(p: &mut Parser<'_>) -> Result<Cond, EmitError> {
+    // Empty cond (`for (;;)`) — model as a constant truthy.
+    if matches!(p.peek(), Some(Tok::Semi) | Some(Tok::RParen)) {
+        return Ok(Cond::Truthy(Expr::IntLit(1)));
+    }
     let expr = parse_expr(p)?;
     Ok(cond_from_expr(expr))
 }
