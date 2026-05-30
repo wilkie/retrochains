@@ -6831,10 +6831,25 @@ fn emit_binop(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, out: &m
         }
         if let Expr::Global(idx2) = right {
             // `op ax, word ptr [g2]` — Grp1 r/m16 with mod=00 r/m=110.
+            if matches!(op, BinOp::Mul) {
+                // `imul word ptr [g2]` (`f7 /5 mem`) — DX:AX = AX *
+                // [g2]. AX gets the low word.
+                out.push(0xF7);
+                out.push(0x2E);
+                let body_offset = out.len();
+                out.extend_from_slice(&[0x00, 0x00]);
+                fixups.push(Fixup {
+                    body_offset: body_offset - 1,
+                    kind: FixupKind::GlobalAddr { global_idx: *idx2 },
+                });
+                return;
+            }
             let opcode = match op {
                 BinOp::Add => 0x03,
                 BinOp::Sub => 0x2B,
-                BinOp::Mul => panic!("mul of two globals not yet supported"),
+                BinOp::BitAnd => 0x23,
+                BinOp::BitOr => 0x0B,
+                BinOp::BitXor => 0x33,
                 _ => panic!("{op:?} between two globals not yet supported"),
             };
             out.push(opcode);
