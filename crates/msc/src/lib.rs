@@ -4688,6 +4688,13 @@ fn emit_stmt(
             // its byte count for the conditional-jump displacement.
             let mut then_buf = Vec::new();
             let mut then_fixups = Vec::new();
+            // Record where the current loop ctx's break/continue
+            // slots were before the then-branch emit, so we can shift
+            // any newly-recorded offsets to absolute out positions.
+            let (pre_breaks, pre_conts) = {
+                let stack = locals.loop_stack.borrow();
+                stack.last().map(|t| (t.breaks.len(), t.continues.len())).unwrap_or((0, 0))
+            };
             emit_stmt(then_branch, locals, frame, return_int, &mut then_buf, &mut then_fixups);
             let then_len = then_buf.len();
             let take_then_disp = i8::try_from(then_len)
@@ -4701,6 +4708,19 @@ fn emit_stmt(
             for mut c in then_fixups {
                 c.body_offset += then_base;
                 fixups.push(c);
+            }
+            // Shift break/continue offsets recorded during the then
+            // emit by `then_base` so they point at the correct bytes.
+            {
+                let mut stack = locals.loop_stack.borrow_mut();
+                if let Some(top) = stack.last_mut() {
+                    for off in &mut top.breaks[pre_breaks..] {
+                        *off += then_base;
+                    }
+                    for off in &mut top.continues[pre_conts..] {
+                        *off += then_base;
+                    }
+                }
             }
             if let Some(else_branch) = else_branch {
                 emit_stmt(else_branch, locals, frame, return_int, out, fixups);
