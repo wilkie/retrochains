@@ -1265,6 +1265,26 @@ fn parse_unit(source: &str) -> Result<Unit, EmitError> {
                 }
                 continue;
             }
+            // Prototype-only declaration: `int f(int);` ends in `;`
+            // rather than `{`. Walk to the matching `)` and check.
+            let lparen_idx = after + 1;
+            let mut depth: i32 = 0;
+            let mut close_idx = lparen_idx;
+            for j in lparen_idx..p.toks.len() {
+                match p.toks.get(j) {
+                    Some(Tok::LParen) => depth += 1,
+                    Some(Tok::RParen) => {
+                        depth -= 1;
+                        if depth == 0 { close_idx = j; break; }
+                    }
+                    _ => {}
+                }
+            }
+            if matches!(p.toks.get(close_idx + 1), Some(Tok::Semi)) {
+                // Skip the prototype. Advance the parser past `;`.
+                p.pos = close_idx + 2;
+                continue;
+            }
         }
         let fn_idx = functions.len();
         functions.push(parse_function(&mut p)?);
