@@ -4595,7 +4595,10 @@ fn emit_stmt(
             emit_call(name, args, locals, out, fixups);
         }
         Stmt::ExprStmt(other) => {
-            panic!("ExprStmt with non-call expression not yet supported: {other:?}");
+            // Generic: evaluate the expression, discard the AX result.
+            // Side-effect-free shapes still compile; they just leave
+            // dead code in AX.
+            emit_expr_to_ax(other, locals, out, fixups);
         }
         Stmt::Assign { target, value } => emit_assign(*target, value, locals, out, fixups),
         Stmt::Switch { scrutinee, cases } => {
