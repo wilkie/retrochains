@@ -4706,6 +4706,29 @@ fn stmt_always_returns(stmt: &Stmt, locals: &Locals<'_>) -> bool {
 /// Try to fold the condition to a compile-time boolean (returned as
 /// an int: 0 = false, anything else = true). Mirrors MSC's
 /// const-condition elision. Fixtures 4094 / 4095.
+fn expr_references_local(e: &Expr) -> bool {
+    match e {
+        Expr::Local(_) | Expr::LocalIndex { .. } | Expr::LocalIndexByte { .. }
+            | Expr::LocalField { .. } | Expr::DerefLocalField { .. }
+            | Expr::AddrOfLocal(_) => true,
+        Expr::BinOp { left, right, .. } => expr_references_local(left) || expr_references_local(right),
+        Expr::DerefByte { ptr } | Expr::DerefWord { ptr } => expr_references_local(ptr),
+        Expr::Ternary { cond, then_arm, else_arm } => {
+            expr_references_local(cond) || expr_references_local(then_arm) || expr_references_local(else_arm)
+        }
+        Expr::Call { args, .. } => args.iter().any(expr_references_local),
+        _ => false,
+    }
+}
+
+fn cond_references_local(cond: &Cond) -> bool {
+    match cond {
+        Cond::Truthy(e) => expr_references_local(e),
+        Cond::Cmp { left, right, .. } => expr_references_local(left) || expr_references_local(right),
+        Cond::And(a, b) | Cond::Or(a, b) => cond_references_local(a) || cond_references_local(b),
+    }
+}
+
 fn fold_cond(cond: &Cond, locals: &Locals<'_>) -> Option<i32> {
     match cond {
         Cond::Truthy(e) => e.fold(locals.inits),
@@ -5890,7 +5913,7 @@ fn emit_loop(
     //     (no initial jmp; do-while shape). Fixtures 126, 1044.
     //   `Some(0)`        → loop body never runs; elide entirely
     //     (no jmp/body/cmp). Fixture 1587.
-    if matches!(fold_cond(cond, locals), Some(0)) {
+    if matches!(fold_cond(cond, locals), Some(0)) && !cond_references_local(cond) {
         return;
     }
     let skip_initial_jmp = matches!(fold_cond(cond, locals), Some(k) if k != 0);
@@ -6063,8 +6086,10 @@ fn emit_do_while(
     emit_stmt(body_stmt, locals, frame, return_int, &mut body_buf, &mut body_fixups);
     let body_len = body_buf.len();
     // `do body while (0);` — body runs once, then the cond fails and
-    // we drop through. Emit just the body and return. Fixture 1588.
-    if matches!(fold_cond(cond, locals), Some(0)) {
+    // we drop through. Emit just the body and return. Only safe when
+    // the cond references no Locals (otherwise the body may mutate
+    // them, e.g. fixture 1316). Fixture 1588.
+    if matches!(fold_cond(cond, locals), Some(0)) && !cond_references_local(cond) {
         let body_base = out.len();
         for mut c in body_fixups { c.body_offset += body_base; fixups.push(c); }
         out.extend_from_slice(&body_buf);
