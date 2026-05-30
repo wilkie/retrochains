@@ -1875,6 +1875,15 @@ fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> {
         ) {
             peek_pos += 1;
         }
+        // `enum [<tag>]` — treat as int (no separate enum type yet).
+        // Consume the optional tag identifier and let the standard
+        // int-decl path handle the declarator(s).
+        let enum_consumed = matches!(p.toks.get(peek_pos), Some(Tok::Kw("enum")));
+        if enum_consumed {
+            skip_decl_modifiers(p);
+            p.bump(); // enum
+            if matches!(p.peek(), Some(Tok::Ident(_))) { p.bump(); }
+        }
         // `struct <Name>` form is a separate path because the size is
         // looked up from the struct registry rather than a primitive
         // type token. Each declarator can still be `s` (struct value)
@@ -1937,7 +1946,11 @@ fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> {
             p.eat(&Tok::Semi)?;
             continue;
         }
-        let (size, has_explicit_type, is_long_decl) = match p.toks.get(peek_pos) {
+        let (size, has_explicit_type, is_long_decl) = if enum_consumed {
+            // The `enum [<tag>]` prefix has already been consumed; the
+            // next token is the declarator. Treat as int.
+            (2usize, false, false)
+        } else { match p.toks.get(peek_pos) {
             Some(Tok::Kw("int")) => (2usize, true, false),
             Some(Tok::Kw("char")) => (1usize, true, false),
             Some(Tok::Kw("long")) => (2usize, true, true),
@@ -1948,7 +1961,7 @@ fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> {
                 (2usize, false, false)
             }
             _ => break,
-        };
+        }};
         skip_decl_modifiers(p);
         if has_explicit_type {
             p.bump(); // type kw
