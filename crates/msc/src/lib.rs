@@ -2190,10 +2190,18 @@ fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> {
                         .map(|l| l.init)
                         .collect();
                     // MSC never const-folds || / && into a compile-time
-                    // literal — always emits the full short-circuit code.
-                    let is_logical = matches!(&init_expr,
-                        Expr::BinOp { op: BinOp::LogOr | BinOp::LogAnd, .. });
-                    let fold_k = if is_logical { None } else { init_expr.fold(&init_view) };
+                    // literal (fixture 1466). For ternary: only skip fold
+                    // when the condition is a non-comparison truthy check
+                    // (e.g. `a ? b : c` with a a local). When the condition
+                    // is a comparison operator, fold normally (fixture 1156).
+                    let skip_fold = matches!(&init_expr,
+                        Expr::BinOp { op: BinOp::LogOr | BinOp::LogAnd, .. })
+                        || matches!(&init_expr, Expr::Ternary { cond, .. }
+                            if !matches!(cond.as_ref(), Expr::BinOp {
+                                op: BinOp::Eq | BinOp::Ne | BinOp::Lt
+                                    | BinOp::Le | BinOp::Gt | BinOp::Ge, ..
+                            }));
+                    let fold_k = if skip_fold { None } else { init_expr.fold(&init_view) };
                     if let Some(k) = fold_k {
                         locals[local_idx].init = Some(k);
                         // Mirror into the parser's snapshot so later
@@ -4718,10 +4726,10 @@ fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
             cp.mutated_locals.insert(*j);
             cp.l_known.remove(j);
         }
-        Expr::Ternary { cond, then_arm, else_arm } => {
+        Expr::Ternary { cond, then_arm: _, else_arm: _ } => {
+            // Only substitute into the condition so fold() can determine
+            // the branch; arms are emitted as runtime loads (fixture 1038).
             prop_expr(cond, cp);
-            prop_expr(then_arm, cp);
-            prop_expr(else_arm, cp);
         }
         Expr::Seq { sides, value } => {
             for s in sides { prop_stmt(s, cp); }
@@ -5641,12 +5649,18 @@ fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_>, out: &mu
     }
     // General path: evaluate the RHS into AX, then store.
     let is_byte = locals.size(local_idx) == 1;
-    // MSC never const-folds || / && — always emits the short-circuit
-    // code even when operands are compile-time constants (fixture 1466).
-    let fold_val = if matches!(value, Expr::BinOp { op: BinOp::LogOr | BinOp::LogAnd, .. }) {
-        None
-    } else {
-        value.fold(locals.inits)
+    // MSC never const-folds || / && into an immediate store (fixture
+    // 1466). For ternary: skip fold only when the condition is a
+    // non-comparison truthy check — e.g. `a ? b : c` where a is a
+    // local (fixture 1038). Comparison conditions fold normally.
+    let fold_val = match value {
+        Expr::BinOp { op: BinOp::LogOr | BinOp::LogAnd, .. } => None,
+        Expr::Ternary { cond, .. }
+            if !matches!(cond.as_ref(), Expr::BinOp {
+                op: BinOp::Eq | BinOp::Ne | BinOp::Lt
+                    | BinOp::Le | BinOp::Gt | BinOp::Ge, ..
+            }) => None,
+        _ => value.fold(locals.inits),
     };
     if let Some(k) = fold_val {
         if is_byte {
@@ -7531,6 +7545,15 @@ fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: 
             out.extend_from_slice(&[0x8D, 0x46, disp as u8]);
         }
         Expr::Ternary { cond, then_arm, else_arm } => {
+            // When cond is a compile-time constant, MSC skips the branch
+            // structure entirely and emits just the selected arm (load,
+            // not an inline immediate). Fixture 1038: `a ? b : c` with
+            // a=1 → `mov ax, [bp-4]` (load b at runtime).
+            if let Some(k) = cond.fold(locals.inits) {
+                let arm = if k != 0 { then_arm } else { else_arm };
+                emit_expr_to_ax(arm, locals, out, fixups);
+                return;
+            }
             // Runtime ternary: `a ? b : c`. Cond becomes
             // `or ax, ax; je else_branch`; then_arm leaves value in AX
             // followed by `jmp end`; else_arm leaves its value in AX.
