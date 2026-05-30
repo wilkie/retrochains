@@ -2345,21 +2345,15 @@ fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
             {
                 p.bump();
                 let (byte_off, size) = parse_field_lookup(p, sidx)?;
-                if let Some(value) = parse_compound_rhs_for_indexed(p, param_idx, byte_off, size == 1, false)? {
-                    // Compound assign — fall through using AssignTarget::DerefParamField with the rewritten RHS.
+                let target = AssignTarget::DerefParamField { ptr_param: param_idx, byte_off, size };
+                if let Some(value) = parse_compound_rhs(p, &target)? {
                     p.eat(&Tok::Semi)?;
-                    return Ok(Stmt::Assign {
-                        target: AssignTarget::DerefParamField { ptr_param: param_idx, byte_off, size },
-                        value,
-                    });
+                    return Ok(Stmt::Assign { target, value });
                 }
                 p.eat(&Tok::Assign)?;
                 let value = parse_expr(p)?;
                 p.eat(&Tok::Semi)?;
-                return Ok(Stmt::Assign {
-                    target: AssignTarget::DerefParamField { ptr_param: param_idx, byte_off, size },
-                    value,
-                });
+                return Ok(Stmt::Assign { target, value });
             }
             // `<struct-ptr-local>-><field> = <expr>;`
             if matches!(p.peek(), Some(Tok::Arrow))
@@ -2712,6 +2706,23 @@ fn parse_compound_rhs(p: &mut Parser<'_>, target: &AssignTarget) -> Result<Optio
         AssignTarget::DerefLocal(i) => Expr::DerefWord { ptr: Box::new(Expr::Local(*i)) },
         AssignTarget::DerefParam(i) => Expr::DerefWord { ptr: Box::new(Expr::Param(*i)) },
         AssignTarget::DerefGlobal(g) => Expr::DerefWord { ptr: Box::new(Expr::Global(*g)) },
+        // Struct-field deref targets — the read uses the matching
+        // DerefXField shape so `p->x++` desugars correctly.
+        AssignTarget::DerefParamField { ptr_param, byte_off, size } => {
+            Expr::DerefParamField { ptr_param: *ptr_param, byte_off: *byte_off, size: *size }
+        }
+        AssignTarget::DerefLocalField { ptr_local, byte_off, size } => {
+            Expr::DerefLocalField { ptr_local: *ptr_local, byte_off: *byte_off, size: *size }
+        }
+        AssignTarget::DerefGlobalField { ptr_global, byte_off, size } => {
+            Expr::DerefGlobalField { ptr_global: *ptr_global, byte_off: *byte_off, size: *size }
+        }
+        AssignTarget::GlobalField { global, byte_off, size } => {
+            Expr::GlobalField { global: *global, byte_off: *byte_off, size: *size }
+        }
+        AssignTarget::LocalField { local, byte_off, size } => {
+            Expr::LocalField { local: *local, byte_off: *byte_off, size: *size }
+        }
         _ => return Ok(None),
     };
     let op = match p.peek() {
