@@ -1719,6 +1719,10 @@ fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> {
     let params = if matches!(p.peek(), Some(Tok::Kw("void"))) {
         p.bump();
         (Vec::new(), Vec::new())
+    } else if matches!(p.peek(), Some(Tok::RParen)) {
+        // K&R-style empty param list (`int main()`). Treat as no
+        // params. Fixture 888.
+        (Vec::new(), Vec::new())
     } else {
         let mut names = Vec::new();
         let mut struct_idxs: Vec<Option<usize>> = Vec::new();
