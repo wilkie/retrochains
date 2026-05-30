@@ -243,6 +243,17 @@ pub struct Locals<'a> {
     /// Map of function names that return `char`. The caller inserts
     /// `cbw` after the call to widen AL to AX (fixture 1006).
     pub char_returners: &'a std::collections::HashSet<String>,
+    /// Stack of in-progress loops. Each entry's `breaks` and
+    /// `continues` collect placeholder-jump offsets within the loop
+    /// body's emit buffer, to be patched at loop end. RefCell so
+    /// emit_stmt (which only takes `&Locals`) can mutate.
+    pub loop_stack: &'a std::cell::RefCell<Vec<LoopCtx>>,
+}
+
+#[derive(Default, Debug)]
+pub struct LoopCtx {
+    pub breaks: Vec<usize>,
+    pub continues: Vec<usize>,
 }
 
 impl Locals<'_> {
@@ -4538,6 +4549,7 @@ fn emit_function(
         }
     }
 
+    let loop_stack: std::cell::RefCell<Vec<LoopCtx>> = std::cell::RefCell::new(Vec::new());
     let locals_view = Locals {
         inits: &local_inits,
         disps: &local_disps,
@@ -4547,6 +4559,7 @@ fn emit_function(
         long_locals: &local_long,
         init_literals: &local_literals,
         char_returners,
+        loop_stack: &loop_stack,
     };
 
     let mut reachable = true;
@@ -4615,10 +4628,26 @@ fn emit_stmt(
             emit_runtime_switch(scrutinee, cases, locals, frame, return_int, out, fixups);
         }
         Stmt::Break => {
-            panic!("break outside const-folded switch not yet supported")
+            // Emit a forward `jmp near` placeholder; the enclosing
+            // loop patches the disp16 at its end.
+            let mut stack = locals.loop_stack.borrow_mut();
+            if let Some(top) = stack.last_mut() {
+                let off = out.len();
+                out.extend_from_slice(&[0xE9, 0x00, 0x00]);
+                top.breaks.push(off);
+            } else {
+                panic!("break outside a loop or const-folded switch");
+            }
         }
         Stmt::Continue => {
-            panic!("continue not yet supported")
+            let mut stack = locals.loop_stack.borrow_mut();
+            if let Some(top) = stack.last_mut() {
+                let off = out.len();
+                out.extend_from_slice(&[0xE9, 0x00, 0x00]);
+                top.continues.push(off);
+            } else {
+                panic!("continue outside a loop");
+            }
         }
         Stmt::Block(stmts) => {
             // Block has no scoping at the codegen level. Sub-statements
@@ -5897,9 +5926,11 @@ fn emit_loop(
 ) {
     let mut body_buf = Vec::new();
     let mut body_fixups: Vec<Fixup> = Vec::new();
+    locals.loop_stack.borrow_mut().push(LoopCtx::default());
     for seg in body_segments {
         emit_stmt(seg, locals, frame, return_int, &mut body_buf, &mut body_fixups);
     }
+    let loop_ctx = locals.loop_stack.borrow_mut().pop().expect("loop stack");
     let mut cmp_buf = Vec::new();
     let mut cmp_fixups: Vec<Fixup> = Vec::new();
     emit_cond_cmp(cond, locals, &mut cmp_buf, &mut cmp_fixups);
@@ -5955,6 +5986,25 @@ fn emit_loop(
         .expect("loop body+cmp short enough for jcc rel8"));
     out.push(jcc_opcode);
     out.push(back_disp as u8);
+    let loop_end = out.len();
+    // Patch break/continue placeholders (Break/Continue stmt arms
+    // left `e9 00 00` markers). break → loop_end; continue → cmp_base.
+    for off in &loop_ctx.breaks {
+        let abs = body_base + off;
+        let after = abs + 3;
+        let target = loop_end as i32 - after as i32;
+        let rel = (target as i16) as u16;
+        out[abs + 1] = rel.to_le_bytes()[0];
+        out[abs + 2] = rel.to_le_bytes()[1];
+    }
+    for off in &loop_ctx.continues {
+        let abs = body_base + off;
+        let after = abs + 3;
+        let target = cmp_base as i32 - after as i32;
+        let rel = (target as i16) as u16;
+        out[abs + 1] = rel.to_le_bytes()[0];
+        out[abs + 2] = rel.to_le_bytes()[1];
+    }
 }
 
 /// `do <body> while (<cond>);` (fixture 4098). When the body's last
@@ -6096,7 +6146,9 @@ fn emit_do_while(
 ) {
     let mut body_buf = Vec::new();
     let mut body_fixups: Vec<Fixup> = Vec::new();
+    locals.loop_stack.borrow_mut().push(LoopCtx::default());
     emit_stmt(body_stmt, locals, frame, return_int, &mut body_buf, &mut body_fixups);
+    let loop_ctx = locals.loop_stack.borrow_mut().pop().expect("loop stack");
     let body_len = body_buf.len();
     // `do body while (0);` — body runs once, then the cond fails and
     // we drop through. Emit just the body and return. Only safe when
@@ -6138,6 +6190,23 @@ fn emit_do_while(
         .expect("loop body+cmp short enough for jcc rel8"));
     out.push(jcc_opcode);
     out.push(back_disp as u8);
+    let loop_end = out.len();
+    for off in &loop_ctx.breaks {
+        let abs = body_base + off;
+        let after = abs + 3;
+        let target = loop_end as i32 - after as i32;
+        let rel = (target as i16) as u16;
+        out[abs + 1] = rel.to_le_bytes()[0];
+        out[abs + 2] = rel.to_le_bytes()[1];
+    }
+    for off in &loop_ctx.continues {
+        let abs = body_base + off;
+        let after = abs + 3;
+        let target = cmp_base as i32 - after as i32;
+        let rel = (target as i16) as u16;
+        out[abs + 1] = rel.to_le_bytes()[0];
+        out[abs + 2] = rel.to_le_bytes()[1];
+    }
 }
 
 /// True when the body's last operation sets ZF appropriately for
