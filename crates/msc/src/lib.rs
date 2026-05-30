@@ -407,6 +407,9 @@ pub enum AssignTarget {
     /// `<local-char-array>[K] = <byte>;` — write a byte at a constant
     /// index. `byte_off` is `K`. Codegen uses `c6 46 disp imm8`.
     IndexedLocalByte { local: usize, byte_off: u16 },
+    /// `**<global-ptr-to-ptr> = <expr>;` — double-deref store. Codegen:
+    /// `mov bx, [global]; mov bx, [bx]; mov [bx], ax`.
+    DoubleDerefGlobal(usize),
 }
 
 /// Condition for `if` (and later `while`/`for`). Slice 5 covers the
@@ -1569,7 +1572,7 @@ fn parse_global_decl(p: &mut Parser<'_>) -> Result<(), EmitError> {
     match p.peek() {
         Some(Tok::Kw("int")) => {
             p.bump();
-            if matches!(p.peek(), Some(Tok::Star)) {
+            while matches!(p.peek(), Some(Tok::Star)) {
                 p.bump();
                 is_pointer = true;
             }
@@ -1577,7 +1580,7 @@ fn parse_global_decl(p: &mut Parser<'_>) -> Result<(), EmitError> {
         Some(Tok::Kw("char")) => {
             p.bump();
             is_char = true;
-            if matches!(p.peek(), Some(Tok::Star)) {
+            while matches!(p.peek(), Some(Tok::Star)) {
                 p.bump();
                 is_pointer = true;
             }
@@ -1587,6 +1590,10 @@ fn parse_global_decl(p: &mut Parser<'_>) -> Result<(), EmitError> {
             // `long int` is just `long`.
             if matches!(p.peek(), Some(Tok::Kw("int"))) { p.bump(); }
             is_long = true;
+            while matches!(p.peek(), Some(Tok::Star)) {
+                p.bump();
+                is_pointer = true;
+            }
         }
         // Bare modifier (`unsigned x;`) → implicit int.
         Some(Tok::Ident(_)) if mods_consumed > 0 => {}
@@ -2305,9 +2312,30 @@ fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
             Ok(Stmt::Block(stmts))
         }
         Some(Tok::Star) => {
-            // `*<ident> = <expr>;` — store through a pointer.
-            // The pointer can be a global or a local.
+            // `*<ident> = <expr>;` or `**<ident> = <expr>;` — store
+            // through a pointer (single or double deref).
             p.bump();
+            // `**<ident> = <expr>;` — double-deref store.
+            if matches!(p.peek(), Some(Tok::Star)) {
+                p.bump();
+                let name = match p.bump().cloned() {
+                    Some(Tok::Ident(s)) => s,
+                    other => return Err(EmitError::Unsupported(format!(
+                        "expected identifier after `**`, got {other:?}"
+                    ))),
+                };
+                let target = if let Some(idx) = p.global_names.iter().position(|n| *n == name) {
+                    AssignTarget::DoubleDerefGlobal(idx)
+                } else {
+                    return Err(EmitError::Unsupported(format!(
+                        "double-deref store through non-global `{name}` not yet supported"
+                    )));
+                };
+                p.eat(&Tok::Assign)?;
+                let value = parse_expr(p)?;
+                p.eat(&Tok::Semi)?;
+                return Ok(Stmt::Assign { target, value });
+            }
             let target_name = match p.bump().cloned() {
                 Some(Tok::Ident(s)) => s,
                 other => {
@@ -5149,6 +5177,9 @@ fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_>, out: &mu
         AssignTarget::DerefGlobalField { ptr_global, byte_off, size } => {
             return emit_assign_deref_global_field(ptr_global, byte_off, size, value, locals, out, fixups);
         }
+        AssignTarget::DoubleDerefGlobal(g) => {
+            return emit_assign_double_deref_global(g, value, locals, out, fixups);
+        }
     };
     let disp = locals.disp(local_idx);
     // Peephole: `x = x ± K` for int locals collapses to an in-place
@@ -5963,6 +5994,30 @@ fn emit_assign_deref_local(local_idx: usize, value: &Expr, locals: &Locals<'_>, 
     }
 }
 
+fn emit_assign_double_deref_global(global_idx: usize, value: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    // `**pp = value` — load pp into BX, deref once to get target pointer,
+    // then store value through it.
+    // `mov bx, [pp]`
+    let body_offset = out.len();
+    out.extend_from_slice(&[0x8B, 0x1E, 0x00, 0x00]);
+    fixups.push(Fixup {
+        body_offset: body_offset + 1,
+        kind: FixupKind::GlobalAddr { global_idx },
+    });
+    // `mov bx, [bx]` — one level of indirection.
+    out.extend_from_slice(&[0x8B, 0x1F]);
+    if let Some(k) = value.fold(locals.inits) {
+        let imm = (k as u32 & 0xFFFF) as u16;
+        // `c7 07 imm16` — mov word ptr [bx], imm16.
+        out.extend_from_slice(&[0xC7, 0x07]);
+        out.extend_from_slice(&imm.to_le_bytes());
+    } else {
+        emit_expr_to_ax(value, locals, out, fixups);
+        // `89 07` — mov [bx], ax.
+        out.extend_from_slice(&[0x89, 0x07]);
+    }
+}
+
 fn emit_assign_deref_global(global_idx: usize, value: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
     // `mov bx, [p]` — load pointer global into BX.
     let body_offset = out.len();
@@ -6769,11 +6824,37 @@ fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: 
                     out.extend_from_slice(&[0x8B, 0x07]);
                 }
                 Expr::DerefWord { ptr: inner_ptr } => {
-                    // Recursive deref. Evaluate inner_ptr into AX,
-                    // move to BX, then deref. Fixture 1232.
-                    emit_expr_to_ax(&Expr::DerefWord { ptr: inner_ptr.clone() }, locals, out, fixups);
-                    out.extend_from_slice(&[0x8B, 0xD8]); // mov bx, ax
-                    out.extend_from_slice(&[0x8B, 0x07]);
+                    // Double-deref (`**p`). MSC keeps the intermediate
+                    // value in BX: load pointer → BX, deref to BX, then
+                    // deref BX to AX. Avoids an `mov bx, ax` round-trip.
+                    match inner_ptr.as_ref() {
+                        Expr::Global(idx) => {
+                            let body_offset = out.len();
+                            out.extend_from_slice(&[0x8B, 0x1E, 0x00, 0x00]);
+                            fixups.push(Fixup {
+                                body_offset: body_offset + 1,
+                                kind: FixupKind::GlobalAddr { global_idx: *idx },
+                            });
+                        }
+                        Expr::Local(li) => {
+                            let disp = locals.disp(*li) as i8;
+                            out.extend_from_slice(&[0x8B, 0x5E, disp as u8]);
+                        }
+                        Expr::Param(pi) => {
+                            let disp = param_disp(*pi) as i8;
+                            out.extend_from_slice(&[0x8B, 0x5E, disp as u8]);
+                        }
+                        _ => {
+                            // Generic fallback: evaluate inner DerefWord
+                            // into AX then transfer to BX.
+                            emit_expr_to_ax(&Expr::DerefWord { ptr: inner_ptr.clone() }, locals, out, fixups);
+                            out.extend_from_slice(&[0x8B, 0xD8]); // mov bx, ax
+                            out.extend_from_slice(&[0x8B, 0x07]); // mov ax, [bx]
+                            return;
+                        }
+                    }
+                    out.extend_from_slice(&[0x8B, 0x1F]); // mov bx, [bx]
+                    out.extend_from_slice(&[0x8B, 0x07]); // mov ax, [bx]
                 }
                 Expr::BinOp { op: BinOp::Add, left, right } => {
                     // `*(p + K)` where p is a Local pointer and K is a
