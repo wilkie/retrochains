@@ -4587,8 +4587,8 @@ fn emit_stmt(
             panic!("ExprStmt with non-call expression not yet supported: {other:?}");
         }
         Stmt::Assign { target, value } => emit_assign(*target, value, locals, out, fixups),
-        Stmt::Switch { .. } => {
-            panic!("non-foldable switch not yet supported (const-prop should have rewritten)")
+        Stmt::Switch { scrutinee, cases } => {
+            emit_runtime_switch(scrutinee, cases, locals, frame, return_int, out, fixups);
         }
         Stmt::Break => {
             panic!("break outside const-folded switch not yet supported")
@@ -5922,6 +5922,122 @@ fn emit_loop(
 /// [<cmp>]             cmp only when peephole doesn't apply
 /// <jcc> <-back>       jne/je back to body
 /// ```
+/// Runtime `switch (<scrutinee>) { case K0: body0 case K1: body1 default: ... }`.
+/// Falls through to a cmp+je chain; bodies end at the next `Stmt::Break`
+/// or fall through to the next case. Each `Break` inside the bodies
+/// becomes a forward `jmp` to the end of the switch.
+fn emit_runtime_switch(
+    scrutinee: &Expr,
+    cases: &[SwitchArm],
+    locals: &Locals<'_>,
+    frame: Frame,
+    return_int: bool,
+    out: &mut Vec<u8>,
+    fixups: &mut Vec<Fixup>,
+) {
+    // Pre-emit each case body to size the jumps. Track break positions
+    // for late-patching to the end of the switch.
+    struct CaseBuf {
+        buf: Vec<u8>,
+        fixups: Vec<Fixup>,
+        breaks: Vec<usize>, // offsets within `buf` of `eb XX` jmps
+    }
+    let mut case_bufs: Vec<CaseBuf> = Vec::new();
+    for arm in cases {
+        let mut buf = Vec::new();
+        let mut fxs: Vec<Fixup> = Vec::new();
+        let mut breaks: Vec<usize> = Vec::new();
+        for s in &arm.body {
+            if matches!(s, Stmt::Break) {
+                // Placeholder for forward jump; patched at the end.
+                let off = buf.len();
+                buf.extend_from_slice(&[0xE9, 0x00, 0x00]); // jmp near (3 bytes)
+                breaks.push(off);
+            } else {
+                emit_stmt(s, locals, frame, return_int, &mut buf, &mut fxs);
+            }
+        }
+        case_bufs.push(CaseBuf { buf, fixups: fxs, breaks });
+    }
+    // Order: walk cases in source order. Each non-default case emits
+    // its cmp + je-to-its-body chunk before bodies. Then bodies in
+    // source order. Default body sits at the end (after the cmp chain
+    // and before final fallthrough).
+    // We'll lay out as:
+    //   <cmp/je sequence for non-default cases>
+    //   jmp default (if a default exists, else fall through to next-after-switch)
+    //   body0, body1, ... bodyN (bodies in source order)
+    // Compute body offsets first.
+    let default_idx = cases.iter().position(|c| c.value.is_none());
+    let mut body_offsets: Vec<usize> = vec![0; cases.len()];
+    // Build the cmp+je chain length and the default-jmp length, then
+    // compute the absolute offset of each body relative to the start
+    // of the switch emission.
+    // Per non-default case: load scrutinee into AX (if needed) + cmp + je. We pre-emit scrutinee once, then for each case do `cmp ax, K; je rel16`.
+    let mut scrutinee_buf = Vec::new();
+    let mut scrutinee_fixups: Vec<Fixup> = Vec::new();
+    emit_expr_to_ax(scrutinee, locals, &mut scrutinee_buf, &mut scrutinee_fixups);
+    // Each non-default case: `83 f8 K` (or `3d K K`) + `0f 84 disp16` (je near).
+    // Use the simplest form: `cmp ax, K` (3 or 4 bytes) + `74 disp8` if disp fits, else `0f 84 disp32`.
+    // We'll always use the near form `3d K K` (3 bytes) + `0f 84 rel16` (6 bytes) for predictability.
+    let non_default_count = cases.iter().filter(|c| c.value.is_some()).count();
+    let chain_len = non_default_count * (3 + 6); // cmp + je-near
+    let default_jmp_len = if default_idx.is_some() { 3 } else { 0 }; // e9 disp16
+    // The "switch end" comes after all bodies. Body positions:
+    let mut acc = scrutinee_buf.len() + chain_len + default_jmp_len;
+    for (i, cb) in case_bufs.iter().enumerate() {
+        body_offsets[i] = acc;
+        acc += cb.buf.len();
+    }
+    let switch_end = acc;
+    let start = out.len();
+    // Emit scrutinee.
+    let scrut_base = out.len();
+    for mut f in scrutinee_fixups { f.body_offset += scrut_base; fixups.push(f); }
+    out.extend_from_slice(&scrutinee_buf);
+    // Emit cmp+je for each non-default case in source order.
+    for (i, arm) in cases.iter().enumerate() {
+        if let Some(k) = arm.value {
+            let k16 = (k as u32 & 0xFFFF) as u16;
+            out.push(0x3D);
+            out.extend_from_slice(&k16.to_le_bytes());
+            out.push(0x0F);
+            out.push(0x84);
+            let here_end = out.len() + 2; // after this je's disp16
+            let target_abs = start + body_offsets[i];
+            let target_rel = target_abs as i32 - here_end as i32;
+            let rel16 = (target_rel as i16) as u16;
+            out.extend_from_slice(&rel16.to_le_bytes());
+        }
+    }
+    // Default fallthrough.
+    if let Some(d) = default_idx {
+        out.push(0xE9);
+        let here_end = out.len() + 2;
+        let target_abs = start + body_offsets[d];
+        let target_rel = target_abs as i32 - here_end as i32;
+        let rel16 = (target_rel as i16) as u16;
+        out.extend_from_slice(&rel16.to_le_bytes());
+    }
+    // Emit the bodies in source order; patch break-jumps to switch_end.
+    for cb in case_bufs.into_iter() {
+        let body_base = out.len();
+        for mut f in cb.fixups { f.body_offset += body_base; fixups.push(f); }
+        // Patch break offsets first (their bytes are relative to the
+        // post-jmp position).
+        let mut body = cb.buf;
+        for off in cb.breaks {
+            let after_jmp = body_base + off + 3;
+            let target_abs = start + switch_end;
+            let target_rel = target_abs as i32 - after_jmp as i32;
+            let rel16 = (target_rel as i16) as u16;
+            body[off + 1] = rel16.to_le_bytes()[0];
+            body[off + 2] = rel16.to_le_bytes()[1];
+        }
+        out.extend_from_slice(&body);
+    }
+}
+
 fn emit_do_while(
     body_stmt: &Stmt,
     cond: &Cond,
