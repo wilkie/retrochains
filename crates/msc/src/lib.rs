@@ -7336,16 +7336,23 @@ fn emit_binop_right(op: BinOp, right: &Expr, locals: &Locals<'_>, out: &mut Vec<
     emit_expr_to_ax(right, locals, out, fixups);
     out.extend_from_slice(&[0x8B, 0xD8]); // mov bx, ax (rhs in bx)
     out.push(0x58); // pop ax (lhs back in ax)
-    // `op ax, bx` — reg-reg shape: 03 c3 (add), 2b c3 (sub), ...
-    let op_byte = match op {
-        BinOp::Add => 0x03,
-        BinOp::Sub => 0x2B,
-        BinOp::BitAnd => 0x23,
-        BinOp::BitOr => 0x0B,
-        BinOp::BitXor => 0x33,
+    match op {
+        BinOp::Mul => out.extend_from_slice(&[0xF7, 0xEB]), // imul bx (DX:AX = AX * BX)
+        BinOp::Div => out.extend_from_slice(&[0x99, 0xF7, 0xFB]), // cwd; idiv bx
+        BinOp::Mod => out.extend_from_slice(&[0x99, 0xF7, 0xFB, 0x8B, 0xC2]), // cwd; idiv bx; mov ax, dx
+        BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor => {
+            let op_byte = match op {
+                BinOp::Add => 0x03,
+                BinOp::Sub => 0x2B,
+                BinOp::BitAnd => 0x23,
+                BinOp::BitOr => 0x0B,
+                BinOp::BitXor => 0x33,
+                _ => unreachable!(),
+            };
+            out.extend_from_slice(&[op_byte, 0xC3]);
+        }
         _ => panic!("binop_right shape not yet supported: {op:?} of {right:?}"),
-    };
-    out.extend_from_slice(&[op_byte, 0xC3]);
+    }
 }
 
 /// If `e` is an `Index { array, IntLit(K) }` (or the IndexByte
