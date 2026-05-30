@@ -145,6 +145,8 @@ impl GlobalInit {
 pub struct Function {
     pub name: String,
     pub return_int: bool,
+    /// True when the function returns `long` — return value occupies DX:AX.
+    pub return_long: bool,
     /// True when the function returns `char` — callers should cbw the
     /// AL result into AX before using it as an int.
     pub return_char: bool,
@@ -153,6 +155,10 @@ pub struct Function {
     /// declared as `char` (signed or unsigned). Used to emit byte-compare
     /// and byte-load codegen for char params (fixtures 3121, 3130 etc).
     pub param_is_char: Vec<bool>,
+    /// Parallel to `params`: true when the corresponding parameter is `long`.
+    pub param_is_long: Vec<bool>,
+    /// Parallel to `params`: true when param is `unsigned int` (not char, not pointer).
+    pub param_is_unsigned: Vec<bool>,
     pub locals: Vec<LocalSpec>,
     /// Names parallel to `locals` — used to compute MSC's hash-table
     /// traversal order for frame slot assignment.
@@ -198,6 +204,11 @@ pub struct LocalSpec {
     /// wider type. MSC uses `b0 imm8; 88 46 disp` for these in the prologue
     /// instead of the direct `c6 46 disp imm8` form. Fixture 1039.
     pub init_via_cast: bool,
+    /// True when the init expression started with a type-cast prefix such as
+    /// `(int)`, `(unsigned int)`, `(char)` etc.  MSC does NOT fold the init
+    /// value into later uses when a type cast is involved — the local is read
+    /// from its slot at runtime. Fixture 1732.
+    pub init_via_type_cast: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -216,13 +227,13 @@ pub struct StructField {
 
 impl LocalSpec {
     pub fn int(init: Option<i32>) -> Self {
-        Self { size: 2, array_len: 1, init, struct_idx: None, is_long: false, init_is_literal: init.is_some(), is_far_ptr: false, pointee_size: 0, is_unsigned: false, init_via_cast: false }
+        Self { size: 2, array_len: 1, init, struct_idx: None, is_long: false, init_is_literal: init.is_some(), is_far_ptr: false, pointee_size: 0, is_unsigned: false, init_via_cast: false, init_via_type_cast: false }
     }
     pub fn char_(init: Option<i32>) -> Self {
-        Self { size: 1, array_len: 1, init, struct_idx: None, is_long: false, init_is_literal: init.is_some(), is_far_ptr: false, pointee_size: 0, is_unsigned: false, init_via_cast: false }
+        Self { size: 1, array_len: 1, init, struct_idx: None, is_long: false, init_is_literal: init.is_some(), is_far_ptr: false, pointee_size: 0, is_unsigned: false, init_via_cast: false, init_via_type_cast: false }
     }
     pub fn long_(init: Option<i32>) -> Self {
-        Self { size: 2, array_len: 2, init, struct_idx: None, is_long: true, init_is_literal: init.is_some(), is_far_ptr: false, pointee_size: 0, is_unsigned: false, init_via_cast: false }
+        Self { size: 2, array_len: 2, init, struct_idx: None, is_long: true, init_is_literal: init.is_some(), is_far_ptr: false, pointee_size: 0, is_unsigned: false, init_via_cast: false, init_via_type_cast: false }
     }
     /// Bytes occupied in the frame, rounded up to an even count.
     /// MSC pads each local to a word boundary — scalar char gets 2
@@ -276,9 +287,17 @@ pub struct Locals<'a> {
     /// Parallel to function params: true when that param is `char`
     /// typed. Used to emit byte-compare / byte-load codegen.
     pub char_params: &'a [bool],
+    /// Parallel to function params: true when that param is `long`.
+    pub long_params: &'a [bool],
+    /// Parallel to function params: true when that param is `unsigned int`
+    /// (not char, not signed). Used to emit `shr ax,1` for /2 vs `cwd+sar`.
+    pub unsigned_params: &'a [bool],
     /// Map of function names that return `char`. The caller inserts
     /// `cbw` after the call to widen AL to AX (fixture 1006).
     pub char_returners: &'a std::collections::HashSet<String>,
+    /// Map of function symbol names to their param_is_long arrays.
+    /// Used by emit_call_inner to push long args as 4-byte pairs.
+    pub long_param_funcs: &'a std::collections::HashMap<String, Vec<bool>>,
     /// Stack of in-progress loops. Each entry's `breaks` and
     /// `continues` collect placeholder-jump offsets within the loop
     /// body's emit buffer, to be patched at loop end. RefCell so
@@ -325,6 +344,12 @@ impl Locals<'_> {
     }
     pub fn is_char_param(&self, idx: usize) -> bool {
         self.char_params.get(idx).copied().unwrap_or(false)
+    }
+    pub fn is_long_param(&self, idx: usize) -> bool {
+        self.long_params.get(idx).copied().unwrap_or(false)
+    }
+    pub fn is_unsigned_param(&self, idx: usize) -> bool {
+        self.unsigned_params.get(idx).copied().unwrap_or(false)
     }
 }
 
@@ -404,7 +429,7 @@ pub struct SwitchArm {
     pub body: Vec<Stmt>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum AssignTarget {
     Local(usize),
     /// Assigning to a function parameter — addressed via `[bp+pdisp]`
@@ -455,6 +480,14 @@ pub enum AssignTarget {
     /// `<local-char-array>[K] = <byte>;` — write a byte at a constant
     /// index. `byte_off` is `K`. Codegen uses `c6 46 disp imm8`.
     IndexedLocalByte { local: usize, byte_off: u16 },
+    /// `<local-int-array>[<expr>] = <expr>;` — write a word at a
+    /// runtime index. Codegen: `mov si, [idx_disp]; shl si, 1;
+    /// <eval rhs→AX>; mov [bp+si+base_disp], ax`. Fixtures 1468.
+    IndexedLocalVar { local: usize, index: Box<Expr> },
+    /// `<local-char-array>[<expr>] = <byte>;` — write a byte at a
+    /// runtime index. Codegen: `mov si, [idx_disp]; <eval rhs→AL>;
+    /// mov [bp+si+base_disp], al`. Fixture 1219.
+    IndexedLocalByteVar { local: usize, index: Box<Expr> },
     /// `**<global-ptr-to-ptr> = <expr>;` — double-deref store. Codegen:
     /// `mov bx, [global]; mov bx, [bx]; mov [bx], ax`.
     DoubleDerefGlobal(usize),
@@ -1190,6 +1223,10 @@ struct Parser<'a> {
     param_struct_idxs: Vec<Option<usize>>,
     /// Parallel to `param_names`: true when the param is `char` typed.
     param_is_char: Vec<bool>,
+    /// Parallel to `param_names`: true when the param is `long`.
+    param_is_long: Vec<bool>,
+    /// Parallel to `param_names`: true when the param is `unsigned int`.
+    param_is_unsigned: Vec<bool>,
     /// File-scope global names in source order; the index doubles
     /// as the `Expr::Global(idx)` value.
     global_names: Vec<String>,
@@ -1252,6 +1289,8 @@ fn parse_unit(source: &str) -> Result<Unit, EmitError> {
         param_names: Vec::new(),
         param_struct_idxs: Vec::new(),
         param_is_char: Vec::new(),
+        param_is_long: Vec::new(),
+        param_is_unsigned: Vec::new(),
         global_names: Vec::new(),
         globals: Vec::new(),
         structs: Vec::new(),
@@ -1813,6 +1852,35 @@ fn parse_global_decl(p: &mut Parser<'_>) -> Result<(), EmitError> {
     Ok(())
 }
 
+/// Returns true when `e` has a direct `Local` leaf whose `init_is_literal`
+/// flag is set, whose known init value equals `fold_val`, AND whose storage
+/// size matches `target_size`.
+///
+/// This detects "identity-operation" initialisers: `int a = x << 0` where
+/// x=5 folds to 5 (same as x's init), so MSC's middle-end effectively treats
+/// `a` as an alias of `x`. Contrast `int a = x & 127` (x=0x1234 → 52 ≠ 0x1234)
+/// or `int a = x + y` (x=5, y=10 → 15 ≠ 5 and 15 ≠ 10), which MSC does NOT
+/// fold into later uses.  The size check prevents cross-type-size detection
+/// like `int n = c` where c is a char (fixture 1043).
+fn init_expr_has_matching_literal_leaf(
+    e: &Expr,
+    fold_val: i32,
+    target_size: usize,
+    locals: &[LocalSpec],
+) -> bool {
+    match e {
+        Expr::Local(i) => locals
+            .get(*i)
+            .map(|l| l.init_is_literal && l.init == Some(fold_val) && l.size == target_size)
+            .unwrap_or(false),
+        Expr::BinOp { left, right, .. } => {
+            init_expr_has_matching_literal_leaf(left, fold_val, target_size, locals)
+                || init_expr_has_matching_literal_leaf(right, fold_val, target_size, locals)
+        }
+        _ => false,
+    }
+}
+
 fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> {
     // `<modifiers>* <ret-type> <name>(...)` — skip any leading
     // storage-class / sign keywords (static, extern, unsigned, etc.),
@@ -1820,13 +1888,13 @@ fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> {
     // to int via cbw at the consume site; treat as int here.
     skip_decl_modifiers(p);
     let mut return_char = false;
+    let mut return_long = false;
     let return_int = match p.bump().cloned() {
         Some(Tok::Kw("int")) => true,
         Some(Tok::Kw("char")) => { return_char = true; true }
         Some(Tok::Kw("long")) => {
-            // `long int` accepted; treat long return as int (just
-            // takes the low word). No 32-bit return ABI yet.
             if matches!(p.peek(), Some(Tok::Kw("int"))) { p.bump(); }
+            return_long = true;
             true
         }
         Some(Tok::Kw("void")) => false,
@@ -1866,31 +1934,36 @@ fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> {
     // parameters; other types come with later fixtures.
     let params = if matches!(p.peek(), Some(Tok::Kw("void"))) {
         p.bump();
-        (Vec::new(), Vec::new(), Vec::new())
+        (Vec::<String>::new(), Vec::<Option<usize>>::new(), Vec::<bool>::new(), Vec::<bool>::new(), Vec::<bool>::new())
     } else if matches!(p.peek(), Some(Tok::RParen)) {
         // K&R-style empty param list (`int main()`). Treat as no
         // params. Fixture 888.
-        (Vec::new(), Vec::new(), Vec::new())
+        (Vec::<String>::new(), Vec::<Option<usize>>::new(), Vec::<bool>::new(), Vec::<bool>::new(), Vec::<bool>::new())
     } else {
         let mut names = Vec::new();
         let mut struct_idxs: Vec<Option<usize>> = Vec::new();
         let mut is_chars: Vec<bool> = Vec::new();
+        let mut is_longs: Vec<bool> = Vec::new();
+        let mut is_unsigned_ints: Vec<bool> = Vec::new();
         loop {
             // Optional sign/qualifier modifiers, then `int` / `char` /
             // `struct Name`. Pointers (`<type> *<name>`) consume one
             // stack slot regardless of pointee type.
+            let mod_start = p.pos;
             skip_decl_modifiers(p);
+            let has_unsigned_mod = (mod_start..p.pos).any(|i| {
+                matches!(p.toks.get(i), Some(Tok::Kw("unsigned")))
+            });
             let mut struct_idx: Option<usize> = None;
             let mut is_char = false;
+            let mut is_long = false;
             match p.peek() {
                 Some(Tok::Kw("char")) => { is_char = true; p.bump(); }
                 Some(Tok::Kw("int")) => { p.bump(); }
                 Some(Tok::Kw("long")) => {
-                    // Long param — treated as a single 2-byte slot for
-                    // now (caller passes the low word). Real `long`
-                    // param ABI would need 4 bytes; deferred.
                     p.bump();
                     if matches!(p.peek(), Some(Tok::Kw("int"))) { p.bump(); }
+                    is_long = true;
                 }
                 Some(Tok::Kw("struct")) => {
                     p.bump();
@@ -1936,15 +2009,18 @@ fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> {
             names.push(pname);
             struct_idxs.push(struct_idx);
             is_chars.push(is_char);
+            is_longs.push(is_long && !has_ptr); // pointer-to-long is word-sized
+            // `unsigned int x` (not pointer, not char) → track for /2 optimization
+            is_unsigned_ints.push(has_unsigned_mod && !is_char && !has_ptr);
             if matches!(p.peek(), Some(Tok::Comma)) {
                 p.bump();
                 continue;
             }
             break;
         }
-        (names, struct_idxs, is_chars)
+        (names, struct_idxs, is_chars, is_longs, is_unsigned_ints)
     };
-    let (params, param_struct_idxs, param_is_char) = params;
+    let (params, param_struct_idxs, param_is_char, param_is_long, param_is_unsigned) = params;
     p.eat(&Tok::RParen)?;
     p.eat(&Tok::LBrace)?;
 
@@ -1955,6 +2031,8 @@ fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> {
     p.param_names = params.clone();
     p.param_struct_idxs = param_struct_idxs;
     p.param_is_char = param_is_char.clone();
+    p.param_is_long = param_is_long.clone();
+    p.param_is_unsigned = param_is_unsigned.clone();
 
     // `[storage-class]+ int|char <name> [= <init>] (, <name> [= <init>])* ;`
     //
@@ -2022,9 +2100,9 @@ fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> {
                     }
                 };
                 let spec = if is_ptr {
-                    LocalSpec { size: 2, array_len: 1, init: None, struct_idx: Some(sidx), is_long: false, init_is_literal: false, is_far_ptr: false, pointee_size: stotal, is_unsigned: false, init_via_cast: false }
+                    LocalSpec { size: 2, array_len: 1, init: None, struct_idx: Some(sidx), is_long: false, init_is_literal: false, is_far_ptr: false, pointee_size: stotal, is_unsigned: false, init_via_cast: false, init_via_type_cast: false }
                 } else {
-                    LocalSpec { size: 1, array_len: stotal, init: None, struct_idx: Some(sidx), is_long: false, init_is_literal: false, is_far_ptr: false, pointee_size: 0, is_unsigned: false, init_via_cast: false }
+                    LocalSpec { size: 1, array_len: stotal, init: None, struct_idx: Some(sidx), is_long: false, init_is_literal: false, is_far_ptr: false, pointee_size: 0, is_unsigned: false, init_via_cast: false, init_via_type_cast: false }
                 };
                 let local_idx = locals.len();
                 p.local_names.push(lname);
@@ -2136,7 +2214,7 @@ fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> {
             } else {
                 (size, array_len, false)
             };
-            let spec = LocalSpec { size: slot_size, array_len: slot_len, init: None, struct_idx: None, is_long: is_long_slot, init_is_literal: false, is_far_ptr: is_far_ptr_decl, pointee_size: if star_count > 0 { size } else { 0 }, is_unsigned: has_unsigned && size == 1 && star_count == 0, init_via_cast: false };
+            let spec = LocalSpec { size: slot_size, array_len: slot_len, init: None, struct_idx: None, is_long: is_long_slot, init_is_literal: false, is_far_ptr: is_far_ptr_decl, pointee_size: if star_count > 0 { size } else { 0 }, is_unsigned: has_unsigned && size == 1 && star_count == 0, init_via_cast: false, init_via_type_cast: false };
             p.local_specs.push(spec.clone());
             locals.push(spec);
             if matches!(p.peek(), Some(Tok::Assign)) {
@@ -2189,6 +2267,28 @@ fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> {
                     let init_via_cast = matches!(p.toks.get(p.pos), Some(Tok::LParen))
                         && matches!(p.toks.get(p.pos + 1), Some(Tok::Kw("char")))
                         && matches!(p.toks.get(p.pos + 2), Some(Tok::RParen));
+                    // Detect any `( [qualifier*] type-kw [*...] )` cast prefix.
+                    // When the init is a type-cast of another local, the cast is
+                    // erased in the AST (parse_atom returns the inner Local),
+                    // making it look like a direct-alias init and triggering
+                    // chained_literal. But MSC does NOT propagate const values
+                    // through casts: `unsigned int u = (unsigned int)x` still
+                    // emits a runtime load of u. Fixture 1855.
+                    let init_via_type_cast = {
+                        let mut i = p.pos;
+                        let mut found = false;
+                        if matches!(p.toks.get(i), Some(Tok::LParen)) {
+                            i += 1;
+                            while matches!(p.toks.get(i), Some(Tok::Kw("unsigned" | "signed" | "short" | "long" | "far" | "near" | "huge"))) { i += 1; }
+                            if matches!(p.toks.get(i), Some(Tok::Kw("int" | "char" | "long"))) {
+                                i += 1;
+                                while matches!(p.toks.get(i), Some(Tok::Kw("int" | "unsigned" | "signed" | "short" | "long" | "far" | "near" | "huge"))) { i += 1; }
+                                while matches!(p.toks.get(i), Some(Tok::Star)) { i += 1; }
+                                if matches!(p.toks.get(i), Some(Tok::RParen)) { found = true; }
+                            }
+                        }
+                        found
+                    };
                     let init_expr = parse_expr(p)?;
                     // Postfix `++`/`--` on the init expression — yields
                     // the *current* value (which is what we already
@@ -2247,17 +2347,26 @@ fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> {
                             spec.init = Some(k);
                         }
                         let pure_literal = init_expr.fold(&[]).is_some();
-                        let chained_literal = matches!(
+                        let chained_literal = !init_via_type_cast && matches!(
                             &init_expr,
                             Expr::Local(li) if locals.get(*li)
                                 .map(|l| l.init_is_literal && l.size == size)
                                 .unwrap_or(false)
                         );
-                        locals[local_idx].init_is_literal = pure_literal || chained_literal;
+                        // Detect identity-operation inits: `int a = x << 0`
+                        // where x's known-literal value equals the fold result.
+                        // MSC simplifies these to `a = x` at the IR level, so
+                        // `a` can be folded in later uses just like `x`.
+                        // See `init_expr_has_matching_literal_leaf` for the rule.
+                        let identity_literal = !init_via_type_cast
+                            && init_expr_has_matching_literal_leaf(&init_expr, k, size, &locals);
+                        locals[local_idx].init_is_literal = pure_literal || chained_literal || identity_literal;
                         locals[local_idx].init_via_cast = init_via_cast && size == 1;
+                        locals[local_idx].init_via_type_cast = init_via_type_cast;
                         if let Some(spec) = p.local_specs.get_mut(local_idx) {
-                            spec.init_is_literal = pure_literal || chained_literal;
+                            spec.init_is_literal = pure_literal || chained_literal || identity_literal;
                             spec.init_via_cast = init_via_cast && size == 1;
+                            spec.init_via_type_cast = init_via_type_cast;
                         }
                     } else {
                         prelude.push(Stmt::Assign {
@@ -2285,7 +2394,7 @@ fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> {
     p.eat(&Tok::RBrace)?;
 
     let local_names = p.local_names.clone();
-    Ok(Function { name, return_int, return_char, params, param_is_char, locals, local_names, body })
+    Ok(Function { name, return_int, return_long, return_char, params, param_is_char, param_is_long, param_is_unsigned, locals, local_names, body })
 }
 
 fn parse_signed_int(p: &mut Parser<'_>) -> Result<i32, EmitError> {
@@ -2645,26 +2754,38 @@ fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
                 // Try folding against the local-init view so simple
                 // `a[i] = ...` with `i = K` known at decl folds.
                 let init_view: Vec<Option<i32>> = p.local_specs.iter().map(|l| l.init).collect();
-                let k = index_expr.fold(&init_view).ok_or_else(|| EmitError::Unsupported(
-                    "non-constant local-array index in store not yet supported".to_owned(),
-                ))?;
                 let elem_bytes = p.local_specs[local_idx].size;
-                let byte_off = u16::try_from((k as i64) * (elem_bytes as i64))
-                    .expect("indexed-store byte offset fits");
-                let target = if elem_bytes == 1 {
-                    AssignTarget::IndexedLocalByte { local: local_idx, byte_off }
-                } else {
-                    AssignTarget::IndexedLocal { local: local_idx, byte_off }
-                };
-                let value = if let Some(v) = parse_compound_rhs_for_indexed(
-                    p, local_idx, byte_off, elem_bytes == 1, false,
-                )? {
-                    v
-                } else {
-                    p.eat(&Tok::Assign)?;
-                    parse_expr(p)?
-                };
+                if let Some(k) = index_expr.fold(&init_view) {
+                    // Constant index — use existing byte-offset forms.
+                    let byte_off = u16::try_from((k as i64) * (elem_bytes as i64))
+                        .expect("indexed-store byte offset fits");
+                    let target = if elem_bytes == 1 {
+                        AssignTarget::IndexedLocalByte { local: local_idx, byte_off }
+                    } else {
+                        AssignTarget::IndexedLocal { local: local_idx, byte_off }
+                    };
+                    let value = if let Some(v) = parse_compound_rhs_for_indexed(
+                        p, local_idx, byte_off, elem_bytes == 1, false,
+                    )? {
+                        v
+                    } else {
+                        p.eat(&Tok::Assign)?;
+                        parse_expr(p)?
+                    };
+                    p.eat(&Tok::Semi)?;
+                    return Ok(Stmt::Assign { target, value });
+                }
+                // Runtime (non-constant) index — `a[i] = expr`.
+                // Requires SI register; Frame::WithSlideSi is chosen
+                // in emit_function when these targets appear.
+                p.eat(&Tok::Assign)?;
+                let value = parse_expr(p)?;
                 p.eat(&Tok::Semi)?;
+                let target = if elem_bytes == 1 {
+                    AssignTarget::IndexedLocalByteVar { local: local_idx, index: Box::new(index_expr) }
+                } else {
+                    AssignTarget::IndexedLocalVar { local: local_idx, index: Box::new(index_expr) }
+                };
                 return Ok(Stmt::Assign { target, value });
             }
             // `<global>[K] = <expr>;` — indexed array store.
@@ -3712,7 +3833,7 @@ struct FunctionEmit {
     fixups: Vec<Fixup>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Fixup {
     /// Offset of the placeholder bytes within `FunctionEmit::bytes`.
     /// For `e8 disp16` calls this is the offset of the `e8` opcode
@@ -3722,7 +3843,7 @@ struct Fixup {
     kind: FixupKind,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum FixupKind {
     /// TU-local call: target's offset is known once all functions
     /// are emitted; the placeholder gets resolved in-band (no OMF
@@ -3767,6 +3888,10 @@ enum Frame {
     /// allocation via chkstk, and `mov sp, bp; pop bp; ret` tail.
     /// Used whenever the function has locals (fixtures 4079+).
     WithSlide,
+    /// Like WithSlide but also saves/restores SI for runtime local
+    /// array indexing. Prologue adds `push si` after chkstk.
+    /// Epilogue: `pop si; mov sp, bp; pop bp; ret` (fixtures 1219, 1468).
+    WithSlideSi,
 }
 
 impl Frame {
@@ -3784,7 +3909,11 @@ impl Frame {
             Frame::None => &[0xC3],
             Frame::BpOnly => &[0x5D, 0xC3],
             Frame::WithSlide => &[0x8B, 0xE5, 0x5D, 0xC3],
+            Frame::WithSlideSi => &[0x5E, 0x8B, 0xE5, 0x5D, 0xC3],
         }
+    }
+    fn is_with_slide(self) -> bool {
+        matches!(self, Frame::WithSlide | Frame::WithSlideSi)
     }
 }
 
@@ -3849,10 +3978,14 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
         .filter(|f| f.return_char)
         .map(|f| symbol_name(&f.name))
         .collect();
+    let long_param_funcs: std::collections::HashMap<String, Vec<bool>> = unit.functions.iter()
+        .filter(|f| f.param_is_long.iter().any(|&b| b))
+        .map(|f| (symbol_name(&f.name), f.param_is_long.clone()))
+        .collect();
     let function_emits: Vec<FunctionEmit> = unit
         .functions
         .iter()
-        .map(|f| emit_function(f, &long_globals, &char_globals, &char_returners))
+        .map(|f| emit_function(f, &long_globals, &char_globals, &char_returners, &long_param_funcs))
         .collect();
 
     // Per-function global offset within the _TEXT segment.
@@ -4455,6 +4588,8 @@ struct ConstProp {
     /// reads load from the slot rather than folding the declared init.
     mutated_locals: std::collections::HashSet<usize>,
     mutated_globals: std::collections::HashSet<usize>,
+    /// Copy of local_specs for size checks during assignment propagation.
+    local_specs: Vec<LocalSpec>,
 }
 
 fn const_prop_globals(
@@ -4462,7 +4597,10 @@ fn const_prop_globals(
     local_specs: &[LocalSpec],
     long_globals: &[bool],
 ) -> (Vec<Stmt>, std::collections::HashSet<usize>, std::collections::HashSet<usize>) {
-    let mut cp = ConstProp::default();
+    let mut cp = ConstProp {
+        local_specs: local_specs.to_vec(),
+        ..ConstProp::default()
+    };
     for (i, &is_long) in long_globals.iter().enumerate() {
         if is_long { cp.long_globals.insert(i); }
     }
@@ -4547,6 +4685,8 @@ fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
                 AssignTarget::Global(g) => { cp.mutated_globals.insert(*g); }
                 AssignTarget::IndexedLocal { local, .. }
                 | AssignTarget::IndexedLocalByte { local, .. }
+                | AssignTarget::IndexedLocalVar { local, .. }
+                | AssignTarget::IndexedLocalByteVar { local, .. }
                 | AssignTarget::LocalField { local, .. } => { cp.mutated_locals.insert(*local); }
                 AssignTarget::IndexedGlobal { array, .. }
                 | AssignTarget::IndexedGlobalByte { array, .. }
@@ -4609,43 +4749,61 @@ fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
         }
         Stmt::Switch { scrutinee, cases } => {
             prop_expr(scrutinee, cp);
-            // If the scrutinee folds, replace the switch with the
-            // matched case's body (up to the first Stmt::Break).
             if let Expr::IntLit(k) = scrutinee {
-                let mut chosen: Option<usize> = None;
-                let mut default: Option<usize> = None;
-                for (i, arm) in cases.iter().enumerate() {
-                    match arm.value {
-                        Some(v) if v == *k => { chosen = Some(i); break; }
-                        Some(_) => {}
-                        None => { default = Some(i); }
-                    }
-                }
-                let pick = chosen.or(default);
-                let body: Vec<Stmt> = match pick {
-                    Some(i) => {
-                        // Take statements up to the first Break.
-                        let mut out = Vec::new();
-                        let mut j = i;
-                        'outer: while j < cases.len() {
-                            for s in &cases[j].body {
-                                if matches!(s, Stmt::Break) { break 'outer; }
-                                out.push(s.clone());
-                            }
-                            j += 1;
+                let k = *k;
+                // Check whether any NFC cases exist: V != 0 AND V < k (signed).
+                let has_nfc = cases.iter()
+                    .any(|a| matches!(a.value, Some(v) if v != 0 && v < k));
+
+                if has_nfc {
+                    // Partial switch: emit_function will call
+                    // emit_partial_switch_with_continuation.
+                    cp.g_known.clear();
+                    cp.l_known.clear();
+                    cp.la_known.clear();
+                } else {
+                    // No NFC: fold to matched body block. MSC clears the
+                    // const-prop tables BEFORE processing the body so that
+                    // any inner switches inside the folded arm use runtime
+                    // scrutinee loads rather than const-prop'd literals.
+                    cp.g_known.clear();
+                    cp.l_known.clear();
+                    cp.la_known.clear();
+                    let mut chosen: Option<usize> = None;
+                    let mut default: Option<usize> = None;
+                    for (i, arm) in cases.iter().enumerate() {
+                        match arm.value {
+                            Some(v) if v == k => { chosen = Some(i); break; }
+                            Some(_) => {}
+                            None => { default = Some(i); }
                         }
-                        out
                     }
-                    None => Vec::new(),
-                };
-                *stmt = Stmt::Block(body);
-                // Recurse into the rewritten Block.
-                if let Stmt::Block(stmts) = stmt {
-                    for s in stmts { prop_stmt(s, cp); }
+                    let pick = chosen.or(default);
+                    let body: Vec<Stmt> = match pick {
+                        Some(i) => {
+                            let mut out = Vec::new();
+                            let mut j = i;
+                            'outer: while j < cases.len() {
+                                for s in &cases[j].body {
+                                    if matches!(s, Stmt::Break) { break 'outer; }
+                                    out.push(s.clone());
+                                }
+                                j += 1;
+                            }
+                            out
+                        }
+                        None => Vec::new(),
+                    };
+                    *stmt = Stmt::Block(body);
+                    if let Stmt::Block(stmts) = stmt {
+                        for s in stmts { prop_stmt(s, cp); }
+                    }
+                    cp.g_known.clear();
+                    cp.l_known.clear();
+                    cp.la_known.clear();
                 }
             } else {
-                // Runtime scrutinee — leave as Switch; codegen
-                // will panic until we add real lowering.
+                // Runtime scrutinee (not folded): leave as Switch.
                 cp.g_known.clear();
                 cp.l_known.clear();
                 cp.la_known.clear();
@@ -4674,6 +4832,7 @@ fn cp_clone(cp: &ConstProp) -> ConstProp {
         long_globals: cp.long_globals.clone(),
         mutated_locals: cp.mutated_locals.clone(),
         mutated_globals: cp.mutated_globals.clone(),
+        local_specs: cp.local_specs.clone(),
     }
 }
 
@@ -4809,11 +4968,83 @@ fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
     }
 }
 
+/// Returns true if the function body contains any runtime local array
+/// access (read or write with non-constant index). These require the SI
+/// register to be saved/restored, upgrading the frame to WithSlideSi.
+fn body_needs_si(stmts: &[Stmt], local_inits: &[Option<i32>]) -> bool {
+    fn stmt_si(s: &Stmt, inits: &[Option<i32>]) -> bool {
+        match s {
+            Stmt::Assign { target, value } => {
+                matches!(target,
+                    AssignTarget::IndexedLocalVar { .. }
+                    | AssignTarget::IndexedLocalByteVar { .. })
+                    || expr_si(value, inits)
+            }
+            Stmt::Return(e) => expr_si(e, inits),
+            Stmt::ExprStmt(e) => expr_si(e, inits),
+            Stmt::Block(ss) => ss.iter().any(|s| stmt_si(s, inits)),
+            Stmt::If { cond, then_branch, else_branch } => {
+                cond_si(cond, inits)
+                    || stmt_si(then_branch, inits)
+                    || else_branch.as_ref().is_some_and(|e| stmt_si(e, inits))
+            }
+            Stmt::While { cond, body } => cond_si(cond, inits) || stmt_si(body, inits),
+            Stmt::DoWhile { body, cond } => stmt_si(body, inits) || cond_si(cond, inits),
+            Stmt::For { init, cond, step, body } => {
+                stmt_si(init, inits)
+                    || cond_si(cond, inits)
+                    || stmt_si(step, inits)
+                    || stmt_si(body, inits)
+            }
+            _ => false,
+        }
+    }
+    fn expr_si(e: &Expr, inits: &[Option<i32>]) -> bool {
+        match e {
+            Expr::LocalIndex { index, .. } | Expr::LocalIndexByte { index, .. } => {
+                index.fold(inits).is_none()
+            }
+            Expr::BinOp { left, right, .. } => expr_si(left, inits) || expr_si(right, inits),
+            Expr::Call { args, .. } => args.iter().any(|a| expr_si(a, inits)),
+            _ => false,
+        }
+    }
+    fn cond_si(c: &Cond, inits: &[Option<i32>]) -> bool {
+        match c {
+            Cond::Truthy(e) => expr_si(e, inits),
+            Cond::Cmp { left, right, .. } => expr_si(left, inits) || expr_si(right, inits),
+            Cond::And(a, b) | Cond::Or(a, b) => cond_si(a, inits) || cond_si(b, inits),
+        }
+    }
+    stmts.iter().any(|s| stmt_si(s, local_inits))
+}
+
+/// Return the mod=01 or mod=10 modrm byte for `[bp + disp]`.
+/// When `disp` fits in i8 (-128..=127) use mod=01 (1-byte disp, modrm as-is).
+/// Otherwise use mod=10 (2-byte disp, modrm + 0x40 to flip the mod field).
+#[inline]
+fn bp_modrm(modrm_mod01: u8, disp: i16) -> u8 {
+    if (-128..=127).contains(&disp) { modrm_mod01 } else { modrm_mod01 + 0x40 }
+}
+
+/// Push 1 or 2 displacement bytes for a `[bp + disp]` operand.
+#[inline]
+fn push_bp_disp(buf: &mut Vec<u8>, disp: i16) {
+    if (-128..=127).contains(&disp) {
+        buf.push(disp as u8);
+    } else {
+        let b = (disp as u16).to_le_bytes();
+        buf.push(b[0]);
+        buf.push(b[1]);
+    }
+}
+
 fn emit_function(
     func: &Function,
     long_globals: &[bool],
     char_globals: &[bool],
     char_returners: &std::collections::HashSet<String>,
+    long_param_funcs: &std::collections::HashMap<String, Vec<bool>>,
 ) -> FunctionEmit {
     let (body, mutated_locals, _mutated_globals) = const_prop_globals(&func.body, &func.locals, long_globals);
     // Extract a `Vec<Option<i32>>` view for the existing fold path —
@@ -4822,8 +5053,14 @@ fn emit_function(
     // const-prop walk — the static `spec.init` no longer reflects
     // the runtime value, so fold(locals.inits) must miss for it.
     // Fixture 1154 (`int b = a++; return a + b;`).
+    // Only expose init values for locals whose init is a compile-time
+    // constant: pure literal, chained literal, or an identity-operation
+    // of a literal-init local (e.g. `int a = x << 0` where x=5).
+    // MSC does NOT fold type-cast inits (`int i = (int)sc`, fixture 1732)
+    // or derived arithmetic (`int sum = x + y`, fixture 2126).
+    // These cases leave `init_is_literal = false` via the parser's logic.
     let local_inits: Vec<Option<i32>> = func.locals.iter().enumerate()
-        .map(|(i, l)| if mutated_locals.contains(&i) { None } else { l.init })
+        .map(|(i, l)| if mutated_locals.contains(&i) || !l.init_is_literal { None } else { l.init })
         .collect();
     let local_long: Vec<bool> = func.locals.iter().map(|l| l.is_long).collect();
     let local_literals: Vec<bool> = func.locals.iter().map(|l| l.init_is_literal).collect();
@@ -4832,7 +5069,16 @@ fn emit_function(
     let local_unsigned: Vec<bool> = func.locals.iter().map(|l| l.is_unsigned).collect();
     let mut bytes = Vec::with_capacity(32);
     let mut fixups: Vec<Fixup> = Vec::new();
-    let frame = Frame::for_function(func);
+    let base_frame = Frame::for_function(func);
+    // Upgrade to WithSlideSi when the body uses runtime local array
+    // indexing (SI register must be caller-saved).
+    let frame = if matches!(base_frame, Frame::WithSlide)
+        && body_needs_si(&body, &local_inits)
+    {
+        Frame::WithSlideSi
+    } else {
+        base_frame
+    };
     // Two-pass frame layout: far/huge pointer locals (4-byte seg:off slots)
     // get the shallowest positions first (in source order), then all other
     // locals in source order.  For functions with no far pointers this
@@ -4886,7 +5132,7 @@ fn emit_function(
     match frame {
         Frame::None => bytes.extend_from_slice(&[0x33, 0xC0]),
         Frame::BpOnly => bytes.extend_from_slice(&[0x55, 0x8B, 0xEC, 0x33, 0xC0]),
-        Frame::WithSlide => {
+        Frame::WithSlide | Frame::WithSlideSi => {
             bytes.extend_from_slice(&[0x55, 0x8B, 0xEC]);
             bytes.push(0xB8);
             bytes.extend_from_slice(
@@ -4906,6 +5152,10 @@ fn emit_function(
         body_offset,
         kind: FixupKind::ExtCall { target: "__chkstk".to_owned() },
     });
+    // For WithSlideSi: save SI after the frame is established.
+    if matches!(frame, Frame::WithSlideSi) {
+        bytes.push(0x56); // push si
+    }
 
     // Initialized-local writes — `int x = K;` → `c7 46 disp lo hi`;
     // `char x = K;` → `c6 46 disp imm8`. Arrays don't get a constant
@@ -4923,21 +5173,21 @@ fn emit_function(
                     // two `c7 46` stores. Fixture 1737.
                     bytes.extend_from_slice(&[0x2B, 0xC0]);
                     bytes.push(0x89);
-                    bytes.push(0x46);
-                    bytes.push((disp + 2) as u8);
+                    bytes.push(bp_modrm(0x46, disp + 2));
+                    push_bp_disp(&mut bytes, disp + 2);
                     bytes.push(0x89);
-                    bytes.push(0x46);
-                    bytes.push(disp as u8);
+                    bytes.push(bp_modrm(0x46, disp));
+                    push_bp_disp(&mut bytes, disp);
                 } else {
                     // Long: two word stores. `c7 46 disp_low <lo>`
                     // then `c7 46 disp_high <hi>`.
                     bytes.push(0xC7);
-                    bytes.push(0x46);
-                    bytes.push(disp as u8);
+                    bytes.push(bp_modrm(0x46, disp));
+                    push_bp_disp(&mut bytes, disp);
                     bytes.extend_from_slice(&low.to_le_bytes());
                     bytes.push(0xC7);
-                    bytes.push(0x46);
-                    bytes.push((disp + 2) as u8);
+                    bytes.push(bp_modrm(0x46, disp + 2));
+                    push_bp_disp(&mut bytes, disp + 2);
                     bytes.extend_from_slice(&high.to_le_bytes());
                 }
             } else if spec.size == 1 {
@@ -4948,21 +5198,21 @@ fn emit_function(
                     bytes.push(0xB0);
                     bytes.push(imm);
                     bytes.push(0x88);
-                    bytes.push(0x46);
-                    bytes.push(disp as u8);
+                    bytes.push(bp_modrm(0x46, disp));
+                    push_bp_disp(&mut bytes, disp);
                 } else {
                     // Direct / chained literal init: compact byte-store.
                     // `c6 46 disp imm8` — fixtures 1040, 1045, 1046, etc.
                     bytes.push(0xC6);
-                    bytes.push(0x46);
-                    bytes.push(disp as u8);
+                    bytes.push(bp_modrm(0x46, disp));
+                    push_bp_disp(&mut bytes, disp);
                     bytes.push(imm);
                 }
             } else {
                 let imm = (value as u32 & 0xFFFF) as u16;
                 bytes.push(0xC7);
-                bytes.push(0x46);
-                bytes.push(disp as u8);
+                bytes.push(bp_modrm(0x46, disp));
+                push_bp_disp(&mut bytes, disp);
                 bytes.extend_from_slice(&imm.to_le_bytes());
             }
         }
@@ -4970,6 +5220,8 @@ fn emit_function(
 
     let loop_stack: std::cell::RefCell<Vec<LoopCtx>> = std::cell::RefCell::new(Vec::new());
     let param_is_char: Vec<bool> = func.param_is_char.clone();
+    let param_is_long: Vec<bool> = func.param_is_long.clone();
+    let param_is_unsigned: Vec<bool> = func.param_is_unsigned.clone();
     let locals_view = Locals {
         inits: &local_inits,
         disps: &local_disps,
@@ -4982,33 +5234,62 @@ fn emit_function(
         array_locals: &local_arrays,
         unsigned_locals: &local_unsigned,
         char_params: &param_is_char,
+        long_params: &param_is_long,
+        unsigned_params: &param_is_unsigned,
         char_returners,
+        long_param_funcs,
         loop_stack: &loop_stack,
     };
 
     let mut reachable = true;
-    for stmt in &body {
-        if !reachable {
-            break;
+    let mut i = 0;
+    while i < body.len() {
+        if !reachable { break; }
+        let stmt = &body[i];
+
+        // Detect a partial switch (const literal scrutinee with NFC cases).
+        // emit_partial_switch_with_continuation handles the switch + all
+        // remaining statements in one shot and returns whether the function
+        // is still reachable after the continuation.
+        if let Stmt::Switch { scrutinee: Expr::IntLit(k), cases } = stmt {
+            let has_nfc = cases.iter()
+                .any(|a| matches!(a.value, Some(v) if v != 0 && v < *k));
+            if has_nfc {
+                let cont_reachable = emit_partial_switch_with_continuation(
+                    *k,
+                    cases,
+                    &body[i + 1..],
+                    &locals_view,
+                    frame,
+                    func.return_int,
+                    func.return_long,
+                    &mut bytes,
+                    &mut fixups,
+                );
+                reachable = cont_reachable;
+                break; // all remaining statements consumed inside the call
+            }
         }
+
         emit_stmt(
             stmt,
             &locals_view,
             frame,
             func.return_int,
+            func.return_long,
             &mut bytes,
             &mut fixups,
         );
         if stmt_always_returns(stmt, &locals_view) {
             reachable = false;
         }
+        i += 1;
     }
 
-    // Implicit return at the end of void functions that don't have
-    // an explicit `return;`. MSC's `_f` body in fixture 4099 ends
-    // with `c3` after the chkstk call. The epilogue shape follows
-    // the function's frame.
-    if reachable && !func.return_int {
+    // Implicit return at the end of functions that fall off without an
+    // explicit `return`. MSC emits leave+ret for both void and int-returning
+    // functions. The epilogue shape follows the function's frame.
+    if reachable {
         bytes.extend_from_slice(frame.epilogue_bytes());
     }
 
@@ -5032,11 +5313,12 @@ fn emit_stmt(
     locals: &Locals<'_>,
     frame: Frame,
     return_int: bool,
+    return_long: bool,
     out: &mut Vec<u8>,
     fixups: &mut Vec<Fixup>,
 ) {
     match stmt {
-        Stmt::Return(expr) => emit_return(expr, locals, frame, return_int, out, fixups),
+        Stmt::Return(expr) => emit_return(expr, locals, frame, return_int, return_long, out, fixups),
         Stmt::Empty => {}
         Stmt::ExprStmt(Expr::Call { name, args }) => {
             emit_call(name, args, locals, out, fixups);
@@ -5047,9 +5329,9 @@ fn emit_stmt(
             // dead code in AX.
             emit_expr_to_ax(other, locals, out, fixups);
         }
-        Stmt::Assign { target, value } => emit_assign(*target, value, locals, out, fixups),
+        Stmt::Assign { target, value } => emit_assign(target.clone(), value, locals, out, fixups),
         Stmt::Switch { scrutinee, cases } => {
-            emit_runtime_switch(scrutinee, cases, locals, frame, return_int, out, fixups);
+            emit_runtime_switch(scrutinee, cases, locals, frame, return_int, return_long, out, fixups);
         }
         Stmt::Break => {
             // Emit a forward `jmp near` placeholder; the enclosing
@@ -5080,20 +5362,20 @@ fn emit_stmt(
             let mut reachable = true;
             for s in stmts {
                 if !reachable { break; }
-                emit_stmt(s, locals, frame, return_int, out, fixups);
+                emit_stmt(s, locals, frame, return_int, return_long, out, fixups);
                 if stmt_always_returns(s, locals) {
                     reachable = false;
                 }
             }
         }
         Stmt::While { cond, body } => {
-            emit_while(cond, body, locals, frame, return_int, out, fixups);
+            emit_while(cond, body, locals, frame, return_int, return_long, out, fixups);
         }
         Stmt::DoWhile { body, cond } => {
-            emit_do_while(body, cond, locals, frame, return_int, out, fixups);
+            emit_do_while(body, cond, locals, frame, return_int, return_long, out, fixups);
         }
         Stmt::For { init, cond, step, body } => {
-            emit_for(init, cond, step, body, locals, frame, return_int, out, fixups);
+            emit_for(init, cond, step, body, locals, frame, return_int, return_long, out, fixups);
         }
         Stmt::If { cond, then_branch, else_branch } => {
             // Constant-condition elision: when the cond folds to a
@@ -5102,9 +5384,9 @@ fn emit_stmt(
             // 4094 (if (0)) and 4095 (if (1)) confirm.
             if let Some(k) = fold_cond(cond, locals) {
                 if k != 0 {
-                    emit_stmt(then_branch, locals, frame, return_int, out, fixups);
+                    emit_stmt(then_branch, locals, frame, return_int, return_long, out, fixups);
                 } else if let Some(else_branch) = else_branch {
-                    emit_stmt(else_branch, locals, frame, return_int, out, fixups);
+                    emit_stmt(else_branch, locals, frame, return_int, return_long, out, fixups);
                 }
                 return;
             }
@@ -5119,7 +5401,7 @@ fn emit_stmt(
                 let stack = locals.loop_stack.borrow();
                 stack.last().map(|t| (t.breaks.len(), t.continues.len())).unwrap_or((0, 0))
             };
-            emit_stmt(then_branch, locals, frame, return_int, &mut then_buf, &mut then_fixups);
+            emit_stmt(then_branch, locals, frame, return_int, return_long, &mut then_buf, &mut then_fixups);
             let then_len = then_buf.len();
             // Alignment NOP: MSC aligns branch-target labels to even byte
             // offsets. If the else-label (= position right after the
@@ -5160,7 +5442,7 @@ fn emit_stmt(
             }
             if needs_nop { out.push(0x90); }
             if let Some(else_branch) = else_branch {
-                emit_stmt(else_branch, locals, frame, return_int, out, fixups);
+                emit_stmt(else_branch, locals, frame, return_int, return_long, out, fixups);
             }
         }
     }
@@ -5179,7 +5461,14 @@ fn stmt_always_returns(stmt: &Stmt, locals: &Locals<'_>) -> bool {
         // const-true infinite-loop case isn't exercised yet so we
         // conservatively answer false.
         Stmt::While { .. } | Stmt::DoWhile { .. } | Stmt::For { .. } => false,
-        Stmt::Switch { .. } | Stmt::Break | Stmt::Continue => false,
+        Stmt::Break | Stmt::Continue => false,
+        Stmt::Switch { cases, .. } => {
+            // A switch always returns when there is a default arm (all values
+            // covered) and every arm body contains at least one returning stmt.
+            let has_default = cases.iter().any(|a| a.value.is_none());
+            has_default
+                && cases.iter().all(|a| a.body.iter().any(|s| stmt_always_returns(s, locals)))
+        }
         Stmt::Block(stmts) => stmts.iter().any(|s| stmt_always_returns(s, locals)),
         Stmt::If { cond, then_branch, else_branch } => {
             if let Some(k) = fold_cond(cond, locals) {
@@ -5278,6 +5567,7 @@ fn emit_return(
     locals: &Locals<'_>,
     frame: Frame,
     return_int: bool,
+    return_long: bool,
     out: &mut Vec<u8>,
     fixups: &mut Vec<Fixup>,
 ) {
@@ -5288,13 +5578,19 @@ fn emit_return(
         // For WithSlide frames, `mov sp, bp` in the epilogue restores sp
         // across the pushed args — no `add sp, N` cleanup needed.
         if let Expr::Call { name, args } = expr {
-            let skip_cleanup = frame == Frame::WithSlide;
+            let skip_cleanup = frame.is_with_slide();
             emit_call_inner(name, args, locals, skip_cleanup, out, fixups);
         } else if matches!(expr, Expr::Local(i) if locals.is_long_local(*i)) {
             // Long locals are read through the 4-byte slot — MSC
             // emits `mov ax, [bp-disp_low]` even when the value is
             // known at compile time (fixture 1037).
             emit_expr_to_ax(expr, locals, out, fixups);
+            if return_long {
+                // Also load the high word into DX.
+                let i = if let Expr::Local(i) = expr { *i } else { unreachable!() };
+                let disp = locals.disp(i);
+                out.extend_from_slice(&[0x8B, 0x56, (disp + 2) as u8]); // mov dx, [bp+d+2]
+            }
         } else if let Expr::Param(i) = expr
             && locals.is_char_param(*i)
         {
@@ -5304,38 +5600,74 @@ fn emit_return(
             out.push(0x98); // cbw
             out.extend_from_slice(frame.epilogue_bytes());
             return;
+        } else if return_long
+            && let Expr::Param(i) = expr
+            && locals.is_long_param(*i)
+        {
+            // `return x` where x is a long param in a long-returning function:
+            // load low word into AX, high word into DX.
+            let lo_disp = param_disp(*i) as u8;
+            let hi_disp = (param_disp(*i) + 2) as u8;
+            out.extend_from_slice(&[0x8B, 0x46, lo_disp]); // mov ax, [bp+lo]
+            out.extend_from_slice(&[0x8B, 0x56, hi_disp]); // mov dx, [bp+hi]
+            out.extend_from_slice(frame.epilogue_bytes());
+            return;
         } else if let Expr::LocalIndex { local: l, index } = expr {
             let k = index.fold(locals.inits).unwrap_or(0);
-            let word_disp = (locals.disp(*l) + k as i16 * 2) as u8;
-            let ax_already_set = out.len() >= 3
-                && out[out.len()-3..] == [0x89, 0x46, word_disp];
+            let word_disp = locals.disp(*l) + k as i16 * 2;
+            let prev_store = {
+                let mr = bp_modrm(0x46, word_disp);
+                let mut v = vec![0x89, mr];
+                push_bp_disp(&mut v, word_disp);
+                v
+            };
+            let ax_already_set = out.len() >= prev_store.len()
+                && out[out.len()-prev_store.len()..] == *prev_store;
             if !ax_already_set {
-                out.extend_from_slice(&[0x8B, 0x46, word_disp]); // mov ax, [bp+d]
+                out.push(0x8B);
+                out.push(bp_modrm(0x46, word_disp));
+                push_bp_disp(out, word_disp);
             }
             out.extend_from_slice(frame.epilogue_bytes());
             return;
         } else if let Expr::LocalIndexByte { local: l, index } = expr {
             let k = index.fold(locals.inits).unwrap_or(0);
-            let byte_disp = (locals.disp(*l) + k as i16) as u8;
-            let al_already_set = out.len() >= 3
-                && out[out.len()-3..] == [0x88, 0x46, byte_disp];
+            let byte_disp = locals.disp(*l) + k as i16;
+            let prev_store = {
+                let mr = bp_modrm(0x46, byte_disp);
+                let mut v = vec![0x88, mr];
+                push_bp_disp(&mut v, byte_disp);
+                v
+            };
+            let al_already_set = out.len() >= prev_store.len()
+                && out[out.len()-prev_store.len()..] == *prev_store;
             if !al_already_set {
-                out.extend_from_slice(&[0x8A, 0x46, byte_disp]); // mov al, [bp+d]
+                out.push(0x8A);
+                out.push(bp_modrm(0x46, byte_disp));
+                push_bp_disp(out, byte_disp);
             }
             out.push(0x98); // cbw
             out.extend_from_slice(frame.epilogue_bytes());
             return;
         } else if let Expr::Local(i) = expr {
-            let disp = locals.disp(*i) as u8;
+            let disp = locals.disp(*i);
             if locals.size(*i) == 1 && !locals.is_unsigned_local(*i) {
                 // Signed char local: check if AL is already loaded from a
                 // prior byte-store (`88 46 disp`). If so, just cbw; else
                 // reload from the slot. Fixture 1039 (non-literal prologue
                 // init leaves AL set; emit just cbw for return).
-                let al_already_set = out.len() >= 3
-                    && out[out.len()-3..] == [0x88, 0x46, disp];
+                let prev_store = {
+                    let mr = bp_modrm(0x46, disp);
+                    let mut v = vec![0x88, mr];
+                    push_bp_disp(&mut v, disp);
+                    v
+                };
+                let al_already_set = out.len() >= prev_store.len()
+                    && out[out.len()-prev_store.len()..] == *prev_store;
                 if !al_already_set {
-                    out.extend_from_slice(&[0x8A, 0x46, disp]); // mov al, [bp-d]
+                    out.push(0x8A);
+                    out.push(bp_modrm(0x46, disp));
+                    push_bp_disp(out, disp);
                 }
                 out.push(0x98); // cbw
                 out.extend_from_slice(frame.epilogue_bytes());
@@ -5343,8 +5675,14 @@ fn emit_return(
             }
             // Non-char or unsigned-char: check if AX already holds the
             // value (`89 46 d` was last emitted). If so, skip reload.
-            let ax_already_set = out.len() >= 3
-                && out[out.len()-3..] == [0x89, 0x46, disp];
+            let prev_store = {
+                let mr = bp_modrm(0x46, disp);
+                let mut v = vec![0x89, mr];
+                push_bp_disp(&mut v, disp);
+                v
+            };
+            let ax_already_set = out.len() >= prev_store.len()
+                && out[out.len()-prev_store.len()..] == *prev_store;
             if !ax_already_set {
                 emit_expr_to_ax(expr, locals, out, fixups);
             }
@@ -5393,11 +5731,34 @@ fn emit_return(
         } else if let Some(k) = expr.fold(locals.inits) {
             if k == 0 {
                 out.extend_from_slice(&[0x2B, 0xC0]);
+                if return_long { out.push(0x99); } // cwd: DX:AX = sign-extend(AX)
             } else {
-                let imm = (k as u32 & 0xFFFF) as u16;
+                let lo = (k as u32 & 0xFFFF) as u16;
                 out.push(0xB8);
-                out.extend_from_slice(&imm.to_le_bytes());
+                out.extend_from_slice(&lo.to_le_bytes());
+                if return_long {
+                    if i16::try_from(k).is_ok() {
+                        out.push(0x99); // cwd: high word = sign extension of low
+                    } else {
+                        let hi = ((k as u32) >> 16) as u16;
+                        out.push(0xBA);
+                        out.extend_from_slice(&hi.to_le_bytes());
+                    }
+                }
             }
+        } else if return_long
+            && let Expr::Global(idx) = expr
+            && locals.is_long_global(*idx)
+        {
+            // Long global return: mov ax, [g]; mov dx, [g+2]
+            let body_offset_lo = out.len();
+            out.extend_from_slice(&[0xA1, 0x00, 0x00]);
+            fixups.push(Fixup { body_offset: body_offset_lo, kind: FixupKind::GlobalAddr { global_idx: *idx } });
+            // 8b 16 02 00 = mov dx, [imm16]; placeholder 0x0002 gets patched
+            // to global_offset+2 by the existing GlobalAddr addend logic.
+            let body_offset_hi = out.len() + 1; // points to modrm, so +1,+2 are the address bytes
+            out.extend_from_slice(&[0x8B, 0x16, 0x02, 0x00]);
+            fixups.push(Fixup { body_offset: body_offset_hi, kind: FixupKind::GlobalAddr { global_idx: *idx } });
         } else {
             emit_expr_to_ax(expr, locals, out, fixups);
         }
@@ -5430,8 +5791,16 @@ fn emit_call_inner(
     out: &mut Vec<u8>,
     fixups: &mut Vec<Fixup>,
 ) {
-    for arg in args.iter().rev() {
-        emit_push_arg(arg, locals, out, fixups);
+    let sym = symbol_name(name);
+    let param_longs = locals.long_param_funcs.get(&sym);
+    // Push args right-to-left (cdecl).
+    for (i, arg) in args.iter().enumerate().rev() {
+        let is_long_param = param_longs.map(|v| v.get(i).copied().unwrap_or(false)).unwrap_or(false);
+        if is_long_param {
+            emit_push_arg_long(arg, locals, out, fixups);
+        } else {
+            emit_push_arg(arg, locals, out, fixups);
+        }
     }
     let body_offset = out.len();
     out.extend_from_slice(&[0xE8, 0x00, 0x00]);
@@ -5440,9 +5809,11 @@ fn emit_call_inner(
     // happens in build_obj once the defined-function set is known.
     fixups.push(Fixup {
         body_offset,
-        kind: FixupKind::TuLocalCall { target: symbol_name(name) },
+        kind: FixupKind::TuLocalCall { target: sym.clone() },
     });
-    let cleanup_bytes = args.len() * 2;
+    let cleanup_bytes: usize = args.iter().enumerate().map(|(i, _)| {
+        if param_longs.map(|v| v.get(i).copied().unwrap_or(false)).unwrap_or(false) { 4 } else { 2 }
+    }).sum();
     if cleanup_bytes > 0 && !skip_cleanup {
         // `add sp, imm8sx` — Grp1 r/m16,imm8sx with /0=ADD,
         // ModR/M mod=11 r/m=100 (SP). 3 bytes for small N.
@@ -5452,9 +5823,33 @@ fn emit_call_inner(
     }
     // Char-returning callee leaves the byte in AL; widen to int via
     // cbw before the caller treats the value as an int. Fixture 1006.
-    if locals.char_returners.contains(&symbol_name(name)) {
+    if locals.char_returners.contains(&sym) {
         out.push(0x98);
     }
+}
+
+/// Push a long (32-bit) call argument: sign-extend to DX:AX, push DX
+/// (high word) then AX (low word). For constants that fit in i16, uses
+/// `cwd` for the sign extension; otherwise uses explicit `mov dx, K_hi`.
+fn emit_push_arg_long(arg: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    if let Some(k) = arg.fold(locals.inits) {
+        let lo = (k as u32 & 0xFFFF) as u16;
+        out.push(0xB8);
+        out.extend_from_slice(&lo.to_le_bytes()); // mov ax, k_lo
+        if i16::try_from(k).is_ok() {
+            out.push(0x99); // cwd: sign-extend AX into DX
+        } else {
+            let hi = ((k as u32) >> 16) as u16;
+            out.push(0xBA);
+            out.extend_from_slice(&hi.to_le_bytes()); // mov dx, k_hi
+        }
+    } else {
+        // Non-constant: load low word into AX, then use cwd or load DX separately.
+        emit_expr_to_ax(arg, locals, out, fixups);
+        out.push(0x99); // cwd: assume sign extension is appropriate
+    }
+    out.push(0x52); // push dx (high word)
+    out.push(0x50); // push ax (low word)
 }
 
 /// Push one call argument onto the stack. For Phase 1: constants
@@ -5473,8 +5868,8 @@ fn emit_push_arg(arg: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mu
             // `push word ptr [bp-disp]` — `FF /6 r/m`.
             let disp = locals.disp(*idx);
             out.push(0xFF);
-            out.push(0x76);
-            out.push(disp as u8);
+            out.push(bp_modrm(0x76, disp));
+            push_bp_disp(out, disp);
         }
         Expr::Param(idx) => {
             let disp = i8::try_from(4 + (idx * 2)).expect("param disp fits");
@@ -5508,7 +5903,10 @@ fn emit_push_arg(arg: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mu
         Expr::AddrOfLocal(idx) => {
             // `lea ax, [bp-disp]; push ax`. Fixture 1225.
             let disp = locals.disp(*idx);
-            out.extend_from_slice(&[0x8D, 0x46, disp as u8, 0x50]);
+            out.push(0x8D);
+            out.push(bp_modrm(0x46, disp));
+            push_bp_disp(out, disp);
+            out.push(0x50);
         }
         Expr::Global(idx) => {
             // `ff 36 <addr>` — push word ptr [imm16]. The placeholder
@@ -5526,14 +5924,18 @@ fn emit_push_arg(arg: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mu
             // Push the OLD value of the local, then mutate it in place.
             // `push word ptr [bp-a]` + inc/dec/add/sub.
             let disp = locals.disp(*local_idx);
-            out.extend_from_slice(&[0xFF, 0x76, disp as u8]);
+            out.push(0xFF);
+            out.push(bp_modrm(0x76, disp));
+            push_bp_disp(out, disp);
             emit_postmutate_local(*step, locals.size(*local_idx), disp, out);
         }
         Expr::PreMutateLocal { local_idx, step } => {
             // Mutate first, then push the NEW value.
             let disp = locals.disp(*local_idx);
             emit_postmutate_local(*step, locals.size(*local_idx), disp, out);
-            out.extend_from_slice(&[0xFF, 0x76, disp as u8]);
+            out.push(0xFF);
+            out.push(bp_modrm(0x76, disp));
+            push_bp_disp(out, disp);
         }
         Expr::BinOp { .. } | Expr::Call { .. } | Expr::Ternary { .. }
             | Expr::DerefWord { .. } | Expr::DerefByte { .. }
@@ -5590,6 +5992,12 @@ fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_>, out: &mu
         AssignTarget::IndexedLocalByte { local, byte_off } => {
             return emit_assign_indexed_local_byte(local, byte_off, value, locals, out, fixups);
         }
+        AssignTarget::IndexedLocalVar { local, index } => {
+            return emit_assign_indexed_local_var(local, index.as_ref(), value, locals, out, fixups);
+        }
+        AssignTarget::IndexedLocalByteVar { local, index } => {
+            return emit_assign_indexed_local_byte_var(local, index.as_ref(), value, locals, out, fixups);
+        }
         AssignTarget::LocalField { local, byte_off, size } => {
             return emit_assign_local_field(local, byte_off, size, value, locals, out, fixups);
         }
@@ -5618,8 +6026,8 @@ fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_>, out: &mu
     // AddrOfLocal+K, or an array-local decay) or a general expression.
     // The segment is always SS since all local/stack addresses use SS.
     if locals.is_far_ptr_local(local_idx) {
-        let offset_disp = disp as u8;
-        let segment_disp = (disp + 2) as u8;
+        let offset_disp = disp;
+        let segment_disp = disp + 2;
         // Peephole: `p = p ± K` on a far ptr → add/sub only the offset word.
         // Emits `add/sub word ptr [bp-disp], K` (fixture 1651: p++).
         if let Expr::BinOp { op: op @ (BinOp::Add | BinOp::Sub), left, right } = value
@@ -5631,34 +6039,40 @@ fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_>, out: &mu
             let is_sub = matches!(op, BinOp::Sub);
             let modrm = if is_sub { 0x6Eu8 } else { 0x46u8 };
             if k_u16 == 1 {
-                // inc/dec word ptr [bp+disp8]: ff 46/4e disp
-                out.extend_from_slice(&[0xFF, modrm, offset_disp]);
+                out.push(0xFF);
+                out.push(bp_modrm(modrm, offset_disp));
+                push_bp_disp(out, offset_disp);
             } else if k_u16 <= 127 {
-                out.extend_from_slice(&[0x83, modrm, offset_disp, k_u16 as u8]);
+                out.push(0x83);
+                out.push(bp_modrm(modrm, offset_disp));
+                push_bp_disp(out, offset_disp);
+                out.push(k_u16 as u8);
             } else {
-                out.extend_from_slice(&[0x81, modrm, offset_disp]);
+                out.push(0x81);
+                out.push(bp_modrm(modrm, offset_disp));
+                push_bp_disp(out, offset_disp);
                 out.extend_from_slice(&k_u16.to_le_bytes());
             }
             return;
         }
         match value {
             Expr::AddrOfLocal(j) => {
-                let j_disp = locals.disp(*j) as u8;
-                out.extend_from_slice(&[0x8D, 0x46, j_disp]);        // lea ax,[bp-j]
-                out.extend_from_slice(&[0x89, 0x46, offset_disp]);   // mov [bp-p],ax
-                out.extend_from_slice(&[0x8C, 0x56, segment_disp]);  // mov [bp-p+2],ss
+                let j_disp = locals.disp(*j);
+                out.push(0x8D); out.push(bp_modrm(0x46, j_disp)); push_bp_disp(out, j_disp);
+                out.push(0x89); out.push(bp_modrm(0x46, offset_disp)); push_bp_disp(out, offset_disp);
+                out.push(0x8C); out.push(bp_modrm(0x56, segment_disp)); push_bp_disp(out, segment_disp);
             }
             Expr::Local(j) if locals.is_array_local(*j) => {
                 // Array-to-pointer decay: p = (far *)a → lea not load.
-                let j_disp = locals.disp(*j) as u8;
-                out.extend_from_slice(&[0x8D, 0x46, j_disp]);        // lea ax,[bp-a]
-                out.extend_from_slice(&[0x89, 0x46, offset_disp]);   // mov [bp-p],ax
-                out.extend_from_slice(&[0x8C, 0x56, segment_disp]);  // mov [bp-p+2],ss
+                let j_disp = locals.disp(*j);
+                out.push(0x8D); out.push(bp_modrm(0x46, j_disp)); push_bp_disp(out, j_disp);
+                out.push(0x89); out.push(bp_modrm(0x46, offset_disp)); push_bp_disp(out, offset_disp);
+                out.push(0x8C); out.push(bp_modrm(0x56, segment_disp)); push_bp_disp(out, segment_disp);
             }
             _ => {
                 emit_expr_to_ax(value, locals, out, fixups);
-                out.extend_from_slice(&[0x89, 0x46, offset_disp]);   // mov [bp-p],ax
-                out.extend_from_slice(&[0x8C, 0x56, segment_disp]);  // mov [bp-p+2],ss
+                out.push(0x89); out.push(bp_modrm(0x46, offset_disp)); push_bp_disp(out, offset_disp);
+                out.push(0x8C); out.push(bp_modrm(0x56, segment_disp)); push_bp_disp(out, segment_disp);
             }
         }
         return;
@@ -5686,8 +6100,8 @@ fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_>, out: &mu
         let k16 = (k as u32 & 0xFFFF) as u16;
         out.push(0xB8);
         out.extend_from_slice(&k16.to_le_bytes());
-        out.extend_from_slice(&[0xF7, 0x6E, disp as u8]);
-        out.extend_from_slice(&[0x89, 0x46, disp as u8]);
+        out.push(0xF7); out.push(bp_modrm(0x6E, disp)); push_bp_disp(out, disp);
+        out.push(0x89); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp);
         return;
     }
     // Shift/mul peephole on locals:
@@ -5715,9 +6129,10 @@ fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_>, out: &mu
             let is_byte = locals.size(local_idx) == 1;
             let (one_op, cl_op) = if is_byte { (0xD0u8, 0xD2u8) } else { (0xD1u8, 0xD3u8) };
             if shift_k == 1 {
-                out.extend_from_slice(&[one_op, modrm, disp as u8]);
+                out.push(one_op); out.push(bp_modrm(modrm, disp)); push_bp_disp(out, disp);
             } else {
-                out.extend_from_slice(&[0xB1, shift_k, cl_op, modrm, disp as u8]);
+                out.push(0xB1); out.push(shift_k);
+                out.push(cl_op); out.push(bp_modrm(modrm, disp)); push_bp_disp(out, disp);
             }
             return;
         }
@@ -5749,7 +6164,7 @@ fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_>, out: &mu
         let is_byte_slot = locals.size(local_idx) == 1;
         if is_byte_slot {
             let imm = (k as u32 & 0xFF) as u8;
-            out.extend_from_slice(&[0x80, modrm, disp as u8, imm]);
+            out.push(0x80); out.push(bp_modrm(modrm, disp)); push_bp_disp(out, disp); out.push(imm);
             return;
         }
         let imm16 = (k as u32 & 0xFFFF) as u16;
@@ -5760,25 +6175,25 @@ fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_>, out: &mu
                 if high == 0xFF {
                     if imm8 == 0x00 {
                         // AND with 0xFF00: clear low byte via mov byte.
-                        out.extend_from_slice(&[0xC6, 0x46, disp as u8, 0x00]);
+                        out.push(0xC6); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp); out.push(0x00);
                     } else {
                         // AND with 0xFFxx: byte form (high byte ANDs with 0xFF = identity).
-                        out.extend_from_slice(&[0x80, modrm, disp as u8, imm8]);
+                        out.push(0x80); out.push(bp_modrm(modrm, disp)); push_bp_disp(out, disp); out.push(imm8);
                     }
                 } else {
                     // AND with 0x00xx or other: word form to correctly affect high byte.
-                    out.extend_from_slice(&[0x81, modrm, disp as u8]);
+                    out.push(0x81); out.push(bp_modrm(modrm, disp)); push_bp_disp(out, disp);
                     out.extend_from_slice(&imm16.to_le_bytes());
                 }
             }
             BinOp::BitOr | BinOp::BitXor => {
                 if imm16 <= 0xFF {
                     // Small non-negative: byte form (high byte OR/XOR 0x00 = identity).
-                    out.extend_from_slice(&[0x80, modrm, disp as u8, imm8]);
+                    out.push(0x80); out.push(bp_modrm(modrm, disp)); push_bp_disp(out, disp); out.push(imm8);
                 } else if let Ok(k8) = i8::try_from(k) {
-                    out.extend_from_slice(&[0x83, modrm, disp as u8, k8 as u8]);
+                    out.push(0x83); out.push(bp_modrm(modrm, disp)); push_bp_disp(out, disp); out.push(k8 as u8);
                 } else {
-                    out.extend_from_slice(&[0x81, modrm, disp as u8]);
+                    out.push(0x81); out.push(bp_modrm(modrm, disp)); push_bp_disp(out, disp);
                     out.extend_from_slice(&imm16.to_le_bytes());
                 }
             }
@@ -5795,27 +6210,47 @@ fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_>, out: &mu
         let is_byte = locals.size(local_idx) == 1;
         match (op, k, is_byte) {
             (BinOp::Add, 1, false) => {
-                out.extend_from_slice(&[0xFF, 0x46, disp as u8]);
+                out.push(0xFF); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp);
                 return;
             }
             (BinOp::Sub, 1, false) => {
-                out.extend_from_slice(&[0xFF, 0x4E, disp as u8]);
+                out.push(0xFF); out.push(bp_modrm(0x4E, disp)); push_bp_disp(out, disp);
                 return;
             }
             (BinOp::Add, 1, true) => {
-                out.extend_from_slice(&[0xFE, 0x46, disp as u8]);
+                out.push(0xFE); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp);
                 return;
             }
             (BinOp::Sub, 1, true) => {
-                out.extend_from_slice(&[0xFE, 0x4E, disp as u8]);
+                out.push(0xFE); out.push(bp_modrm(0x4E, disp)); push_bp_disp(out, disp);
                 return;
             }
             (op, _, false) => {
-                let modrm_base = if matches!(op, BinOp::Add) { 0x46 } else { 0x6E };
+                let modrm_base = if matches!(op, BinOp::Add) { 0x46u8 } else { 0x6Eu8 };
+                if locals.is_long_local(local_idx) {
+                    // Long local `x ±= K`: add/sub low half, then adc/sbb high half.
+                    let low = (k as u32 & 0xFFFF) as i16;
+                    let high = ((k as i32) >> 16) as i16;
+                    let hi_disp = disp + 2;
+                    let high_modrm = if matches!(op, BinOp::Add) { 0x56u8 } else { 0x5Eu8 };
+                    if let Ok(l8) = i8::try_from(low) {
+                        out.push(0x83); out.push(bp_modrm(modrm_base, disp)); push_bp_disp(out, disp); out.push(l8 as u8);
+                    } else {
+                        out.push(0x81); out.push(bp_modrm(modrm_base, disp)); push_bp_disp(out, disp);
+                        out.extend_from_slice(&(low as u16).to_le_bytes());
+                    }
+                    if let Ok(h8) = i8::try_from(high) {
+                        out.push(0x83); out.push(bp_modrm(high_modrm, hi_disp)); push_bp_disp(out, hi_disp); out.push(h8 as u8);
+                    } else {
+                        out.push(0x81); out.push(bp_modrm(high_modrm, hi_disp)); push_bp_disp(out, hi_disp);
+                        out.extend_from_slice(&(high as u16).to_le_bytes());
+                    }
+                    return;
+                }
                 if let Ok(k8) = i8::try_from(k) {
-                    out.extend_from_slice(&[0x83, modrm_base, disp as u8, k8 as u8]);
+                    out.push(0x83); out.push(bp_modrm(modrm_base, disp)); push_bp_disp(out, disp); out.push(k8 as u8);
                 } else {
-                    out.extend_from_slice(&[0x81, modrm_base, disp as u8]);
+                    out.push(0x81); out.push(bp_modrm(modrm_base, disp)); push_bp_disp(out, disp);
                     let imm = (k as u32 & 0xFFFF) as u16;
                     out.extend_from_slice(&imm.to_le_bytes());
                 }
@@ -5823,8 +6258,9 @@ fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_>, out: &mu
             }
             (op, _, true) => {
                 // `80 /0 imm8` add byte mem / `80 /5 imm8` sub byte mem.
-                let modrm = if matches!(op, BinOp::Add) { 0x46 } else { 0x6E };
-                out.extend_from_slice(&[0x80, modrm, disp as u8, (k as u32 & 0xFF) as u8]);
+                let modrm = if matches!(op, BinOp::Add) { 0x46u8 } else { 0x6Eu8 };
+                out.push(0x80); out.push(bp_modrm(modrm, disp)); push_bp_disp(out, disp);
+                out.push((k as u32 & 0xFF) as u8);
                 return;
             }
         }
@@ -5841,7 +6277,7 @@ fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_>, out: &mu
     {
         emit_expr_to_ax(right, locals, out, fixups);
         let opc = if matches!(op, BinOp::Add) { 0x01u8 } else { 0x29u8 };
-        out.extend_from_slice(&[opc, 0x46, disp as u8]);
+        out.push(opc); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp);
         return;
     }
     // General path: evaluate the RHS into AX, then store.
@@ -5861,28 +6297,34 @@ fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_>, out: &mu
     };
     if let Some(k) = fold_val {
         if is_byte {
-            out.push(0xC6);
-            out.push(0x46);
-            out.push(disp as u8);
+            out.push(0xC6); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp);
             out.push((k as u32 & 0xFF) as u8);
+        } else if locals.is_long_local(local_idx) {
+            // Long local: two word stores — low half at disp, high half at disp+2.
+            let low = (k as u32 & 0xFFFF) as u16;
+            let high = (((k as i32) >> 16) as u32 & 0xFFFF) as u16;
+            out.push(0xC7); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp);
+            out.extend_from_slice(&low.to_le_bytes());
+            let hi_disp = disp + 2;
+            out.push(0xC7); out.push(bp_modrm(0x46, hi_disp)); push_bp_disp(out, hi_disp);
+            out.extend_from_slice(&high.to_le_bytes());
         } else {
             let imm = (k as u32 & 0xFFFF) as u16;
-            out.push(0xC7);
-            out.push(0x46);
-            out.push(disp as u8);
+            out.push(0xC7); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp);
             out.extend_from_slice(&imm.to_le_bytes());
         }
     } else {
         emit_expr_to_ax(value, locals, out, fixups);
         if is_byte {
+            // Strip trailing CBW emitted for char globals/fields — AL still
+            // holds the byte value and we're storing to a char slot.
+            if out.last() == Some(&0x98) {
+                out.pop();
+            }
             // `88 46 disp` — store AL to char slot.
-            out.push(0x88);
-            out.push(0x46);
-            out.push(disp as u8);
+            out.push(0x88); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp);
         } else {
-            out.push(0x89);                       // MOV r/m16, r16
-            out.push(0x46);
-            out.push(disp as u8);
+            out.push(0x89); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp);
         }
     }
 }
@@ -5977,6 +6419,46 @@ fn emit_assign_param(param_idx: usize, value: &Expr, locals: &Locals<'_>, out: &
             out.extend_from_slice(&[0x88, 0x46, disp as u8]); // mov [bp+d], al
         } else {
             out.extend_from_slice(&[0x89, 0x46, disp as u8]); // mov [bp+d], ax
+        }
+    }
+}
+
+/// Load a long (32-bit) expression into DX:AX. Used for long global
+/// assignments and potentially other long-value sinks. Handles the
+/// expression shapes that can appear as a long RHS:
+/// - Call result: DX:AX already set by callee, just emit the call
+/// - Long local: mov ax, [bp+lo]; mov dx, [bp+hi]
+/// - Long param: mov ax, [bp+lo]; mov dx, [bp+hi]
+/// - Long global: mov ax, [g]; mov dx, [g+2]
+/// - Otherwise: emit_expr_to_ax + cwd (sign-extend int to long)
+fn emit_long_to_dx_ax(value: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    match value {
+        Expr::Call { name, args } => {
+            emit_call(name, args, locals, out, fixups);
+            // DX:AX already set by callee returning long
+        }
+        Expr::Local(i) if locals.is_long_local(*i) => {
+            let disp = locals.disp(*i);
+            out.extend_from_slice(&[0x8B, 0x46, disp as u8]);     // mov ax, [bp+lo]
+            out.extend_from_slice(&[0x8B, 0x56, (disp+2) as u8]); // mov dx, [bp+hi]
+        }
+        Expr::Param(i) if locals.is_long_param(*i) => {
+            let lo = param_disp(*i) as u8;
+            let hi = (param_disp(*i) + 2) as u8;
+            out.extend_from_slice(&[0x8B, 0x46, lo]); // mov ax, [bp+lo]
+            out.extend_from_slice(&[0x8B, 0x56, hi]); // mov dx, [bp+hi]
+        }
+        Expr::Global(j) if locals.is_long_global(*j) => {
+            let body_offset = out.len();
+            out.extend_from_slice(&[0xA1, 0x00, 0x00]); // mov ax, [g]
+            fixups.push(Fixup { body_offset, kind: FixupKind::GlobalAddr { global_idx: *j } });
+            let body_offset = out.len() + 1;
+            out.extend_from_slice(&[0x8B, 0x16, 0x02, 0x00]); // mov dx, [g+2]
+            fixups.push(Fixup { body_offset, kind: FixupKind::GlobalAddr { global_idx: *j } });
+        }
+        _ => {
+            emit_expr_to_ax(value, locals, out, fixups);
+            out.push(0x99); // cwd: sign-extend AX into DX
         }
     }
 }
@@ -6211,6 +6693,21 @@ fn emit_assign_global(global_idx: usize, value: &Expr, locals: &Locals<'_>, out:
             }
         }
     }
+    // Long global with runtime RHS: compute DX:AX then store both halves.
+    if locals.is_long_global(global_idx) {
+        // If it doesn't match any of the earlier specialized arms, the
+        // RHS is a runtime expression. Load both words and store both.
+        emit_long_to_dx_ax(value, locals, out, fixups);
+        out.push(0xA3); // mov [g], ax
+        let addr_off = out.len();
+        out.extend_from_slice(&[0x00, 0x00]);
+        fixups.push(Fixup { body_offset: addr_off - 1, kind: FixupKind::GlobalAddr { global_idx } });
+        out.extend_from_slice(&[0x89, 0x16]); // mov [g+2], dx
+        let addr_off = out.len();
+        out.extend_from_slice(&2u16.to_le_bytes());
+        fixups.push(Fixup { body_offset: addr_off - 1, kind: FixupKind::GlobalAddr { global_idx } });
+        return;
+    }
     if let Some(k) = value.fold(locals.inits) {
         let imm = (k as u32 & 0xFFFF) as u16;
         out.push(0xC7);
@@ -6322,19 +6819,19 @@ fn emit_assign_indexed_local(local_idx: usize, byte_off: u16, value: &Expr, loca
                 return;
             }
             BinOp::Add if k == 1 => {
-                out.extend_from_slice(&[0xFF, 0x46, disp as u8]); // inc word ptr [bp+d]
+                out.push(0xFF); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp);
                 return;
             }
             BinOp::Sub if k == 1 => {
-                out.extend_from_slice(&[0xFF, 0x4E, disp as u8]); // dec word ptr [bp+d]
+                out.push(0xFF); out.push(bp_modrm(0x4E, disp)); push_bp_disp(out, disp);
                 return;
             }
             BinOp::Add | BinOp::Sub => {
                 let modrm = if matches!(op, BinOp::Add) { 0x46u8 } else { 0x6Eu8 };
                 if let Ok(k8) = i8::try_from(k) {
-                    out.extend_from_slice(&[0x83, modrm, disp as u8, k8 as u8]);
+                    out.push(0x83); out.push(bp_modrm(modrm, disp)); push_bp_disp(out, disp); out.push(k8 as u8);
                 } else {
-                    out.extend_from_slice(&[0x81, modrm, disp as u8]);
+                    out.push(0x81); out.push(bp_modrm(modrm, disp)); push_bp_disp(out, disp);
                     out.extend_from_slice(&(k as u32 as u16).to_le_bytes());
                 }
                 return;
@@ -6344,15 +6841,11 @@ fn emit_assign_indexed_local(local_idx: usize, byte_off: u16, value: &Expr, loca
     }
     if let Some(k) = value.fold(locals.inits) {
         let imm = (k as u32 & 0xFFFF) as u16;
-        out.push(0xC7);
-        out.push(0x46);
-        out.push(disp as u8);
+        out.push(0xC7); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp);
         out.extend_from_slice(&imm.to_le_bytes());
     } else {
         emit_expr_to_ax(value, locals, out, fixups);
-        out.push(0x89);
-        out.push(0x46);
-        out.push(disp as u8);
+        out.push(0x89); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp);
     }
 }
 
@@ -6375,17 +6868,17 @@ fn emit_assign_indexed_local_byte(local_idx: usize, byte_off: u16, value: &Expr,
                 return;
             }
             BinOp::Add if k == 1 => {
-                out.extend_from_slice(&[0xFE, 0x46, disp as u8]); // inc byte ptr [bp+d]
+                out.push(0xFE); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp);
                 return;
             }
             BinOp::Sub if k == 1 => {
-                out.extend_from_slice(&[0xFE, 0x4E, disp as u8]); // dec byte ptr [bp+d]
+                out.push(0xFE); out.push(bp_modrm(0x4E, disp)); push_bp_disp(out, disp);
                 return;
             }
             BinOp::Add | BinOp::Sub => {
                 let modrm = if matches!(op, BinOp::Add) { 0x46u8 } else { 0x6Eu8 };
                 let k8 = (k as u32 & 0xFF) as u8;
-                out.extend_from_slice(&[0x80, modrm, disp as u8, k8]);
+                out.push(0x80); out.push(bp_modrm(modrm, disp)); push_bp_disp(out, disp); out.push(k8);
                 return;
             }
             _ => {}
@@ -6395,10 +6888,66 @@ fn emit_assign_indexed_local_byte(local_idx: usize, byte_off: u16, value: &Expr,
         panic!("non-constant char-local-array store value not yet supported")
     });
     let imm = (k as u32 & 0xFF) as u8;
-    out.push(0xC6);
-    out.push(0x46);
-    out.push(disp as u8);
-    out.push(imm);
+    out.push(0xC6); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp); out.push(imm);
+}
+
+/// Load the index expression into SI for BP+SI-based local array
+/// indexing.  Only `Expr::Local` and `Expr::Param` are supported
+/// (runtime indices must be scalar variables).
+fn emit_index_to_si(index: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>) {
+    match index {
+        Expr::Local(i) => {
+            let disp = locals.disp(*i);
+            out.push(0x8B); out.push(bp_modrm(0x76, disp)); push_bp_disp(out, disp);
+        }
+        Expr::Param(i) => {
+            let pdisp = param_disp(*i);
+            out.extend_from_slice(&[0x8B, 0x76, pdisp as u8]);
+        }
+        other => panic!("unsupported runtime local-array index expr: {other:?}"),
+    }
+}
+
+/// Emit a byte-sized RHS into AL. For simple locals/params, use
+/// an explicit byte load (`8a 46 disp`) so MSC's `mov al, [bp+d]`
+/// form is matched. For other expressions evaluate into AX (AL is
+/// the low byte). Fixture 1219.
+fn emit_byte_rhs_to_al(value: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    match value {
+        Expr::Local(i) => {
+            let disp = locals.disp(*i);
+            out.push(0x8A); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp);
+        }
+        Expr::Param(i) => {
+            let pdisp = param_disp(*i);
+            out.extend_from_slice(&[0x8A, 0x46, pdisp as u8]);
+        }
+        Expr::IntLit(k) => {
+            out.extend_from_slice(&[0xB0, (*k as u32 & 0xFF) as u8]); // mov al, imm8
+        }
+        _ => emit_expr_to_ax(value, locals, out, fixups),
+    }
+}
+
+/// `<local-int-array>[<expr>] = <expr>;` — SI-based word store.
+/// Codegen: `mov si, [idx]; shl si, 1; <rhs→AX>; mov [bp+si+base], ax`.
+/// Requires Frame::WithSlideSi. Fixture 1468.
+fn emit_assign_indexed_local_var(local_idx: usize, index: &Expr, value: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    emit_index_to_si(index, locals, out);
+    out.extend_from_slice(&[0xD1, 0xE6]); // shl si, 1
+    emit_expr_to_ax(value, locals, out, fixups);
+    let base_disp = locals.disp(local_idx);
+    out.push(0x89); out.push(bp_modrm(0x42, base_disp)); push_bp_disp(out, base_disp); // mov [bp+si+base], ax
+}
+
+/// `<local-char-array>[<expr>] = <byte>;` — SI-based byte store.
+/// Codegen: `mov si, [idx]; <rhs→AL>; mov [bp+si+base], al`.
+/// No shl since char elements are 1 byte each. Fixture 1219.
+fn emit_assign_indexed_local_byte_var(local_idx: usize, index: &Expr, value: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    emit_index_to_si(index, locals, out);
+    emit_byte_rhs_to_al(value, locals, out, fixups);
+    let base_disp = locals.disp(local_idx);
+    out.push(0x88); out.push(bp_modrm(0x42, base_disp)); push_bp_disp(out, base_disp); // mov [bp+si+base], al
 }
 
 /// `<struct-global>.<field> = <expr>;` — store at the global's
@@ -6450,21 +6999,14 @@ fn emit_assign_local_field(local_idx: usize, byte_off: u16, size: u8, value: &Ex
             panic!("non-constant byte struct-field store not yet supported")
         });
         let imm = (k as u32 & 0xFF) as u8;
-        out.push(0xC6);
-        out.push(0x46);
-        out.push(disp as u8);
-        out.push(imm);
+        out.push(0xC6); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp); out.push(imm);
     } else if let Some(k) = value.fold(locals.inits) {
         let imm = (k as u32 & 0xFFFF) as u16;
-        out.push(0xC7);
-        out.push(0x46);
-        out.push(disp as u8);
+        out.push(0xC7); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp);
         out.extend_from_slice(&imm.to_le_bytes());
     } else {
         emit_expr_to_ax(value, locals, out, fixups);
-        out.push(0x89);
-        out.push(0x46);
-        out.push(disp as u8);
+        out.push(0x89); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp);
     }
 }
 
@@ -6597,27 +7139,26 @@ fn emit_assign_deref_local_field(ptr_local: usize, byte_off: u16, size: u8, valu
 /// The load-into-AX (or BX) half is the caller's responsibility.
 /// `slot_size` is the storage size of the local (1 for char, 2 for int/ptr).
 fn emit_postmutate_local(step: i32, slot_size: usize, disp: i16, out: &mut Vec<u8>) {
-    let d = disp as u8;
     let abs = step.unsigned_abs() as u32;
     if slot_size == 1 {
         match step {
-            1  => out.extend_from_slice(&[0xFE, 0x46, d]),
-            -1 => out.extend_from_slice(&[0xFE, 0x4E, d]),
+            1  => { out.push(0xFE); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp); }
+            -1 => { out.push(0xFE); out.push(bp_modrm(0x4E, disp)); push_bp_disp(out, disp); }
             _  => {
                 let m = if step > 0 { 0x46u8 } else { 0x6Eu8 };
-                out.extend_from_slice(&[0x80, m, d, abs as u8]);
+                out.push(0x80); out.push(bp_modrm(m, disp)); push_bp_disp(out, disp); out.push(abs as u8);
             }
         }
     } else {
         match step {
-            1  => out.extend_from_slice(&[0xFF, 0x46, d]),
-            -1 => out.extend_from_slice(&[0xFF, 0x4E, d]),
+            1  => { out.push(0xFF); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp); }
+            -1 => { out.push(0xFF); out.push(bp_modrm(0x4E, disp)); push_bp_disp(out, disp); }
             _  => {
                 let m = if step > 0 { 0x46u8 } else { 0x6Eu8 };
                 if abs <= 127 {
-                    out.extend_from_slice(&[0x83, m, d, abs as u8]);
+                    out.push(0x83); out.push(bp_modrm(m, disp)); push_bp_disp(out, disp); out.push(abs as u8);
                 } else {
-                    out.extend_from_slice(&[0x81, m, d]);
+                    out.push(0x81); out.push(bp_modrm(m, disp)); push_bp_disp(out, disp);
                     out.extend_from_slice(&(abs as u16).to_le_bytes());
                 }
             }
@@ -6659,7 +7200,7 @@ fn emit_postmutate_global(step: i32, global_idx: usize, out: &mut Vec<u8>, fixup
 /// then advance the pointer by `step` bytes.
 fn emit_assign_deref_postmutate_local(local_idx: usize, step: i32, value: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
     let disp = locals.disp(local_idx);
-    out.extend_from_slice(&[0x8B, 0x5E, disp as u8]);    // mov bx, [bp-p]
+    { out.push(0x8B); out.push(bp_modrm(0x5E, disp)); push_bp_disp(out, disp); }    // mov bx, [bp-p]
     emit_postmutate_local(step, locals.size(local_idx), disp, out);
     // pointee size = |step| (step encodes the pointer stride)
     let psz = step.unsigned_abs() as usize;
@@ -6687,7 +7228,7 @@ fn emit_assign_deref_local(local_idx: usize, value: &Expr, locals: &Locals<'_>, 
     let disp = locals.disp(local_idx);
     if locals.is_far_ptr_local(local_idx) {
         // Far/huge pointer: `les bx,[bp-disp]` then store through ES:BX.
-        out.extend_from_slice(&[0xC4, 0x5E, disp as u8]); // les bx,[bp-p]
+        out.push(0xC4); out.push(bp_modrm(0x5E, disp)); push_bp_disp(out, disp);
         if let Some(k) = value.fold(locals.inits) {
             let imm = (k as u32 & 0xFFFF) as u16;
             out.extend_from_slice(&[0x26, 0xC7, 0x07]);   // mov word ptr es:[bx],imm
@@ -6698,8 +7239,8 @@ fn emit_assign_deref_local(local_idx: usize, value: &Expr, locals: &Locals<'_>, 
         }
         return;
     }
-    // Near pointer: `mov bx, [bp-disp]` — 8b 5e disp8.
-    out.extend_from_slice(&[0x8B, 0x5E, disp as u8]);
+    // Near pointer: `mov bx, [bp-disp]`.
+    out.push(0x8B); out.push(bp_modrm(0x5E, disp)); push_bp_disp(out, disp);
     if let Some(k) = value.fold(locals.inits) {
         let imm = (k as u32 & 0xFFFF) as u16;
         out.extend_from_slice(&[0xC7, 0x07]);
@@ -6775,10 +7316,11 @@ fn emit_while(
     locals: &Locals<'_>,
     frame: Frame,
     return_int: bool,
+    return_long: bool,
     out: &mut Vec<u8>,
     fixups: &mut Vec<Fixup>,
 ) {
-    emit_loop(cond, &[body_stmt], None, locals, frame, return_int, out, fixups);
+    emit_loop(cond, &[body_stmt], None, locals, frame, return_int, return_long, out, fixups);
 }
 
 /// `for (<init>; <cond>; <step>) <body>` — MSC's layout.
@@ -6810,18 +7352,19 @@ fn emit_for(
     locals: &Locals<'_>,
     frame: Frame,
     return_int: bool,
+    return_long: bool,
     out: &mut Vec<u8>,
     fixups: &mut Vec<Fixup>,
 ) {
-    emit_stmt(init, locals, frame, return_int, out, fixups);
+    emit_stmt(init, locals, frame, return_int, return_long, out, fixups);
     // After the init runs, check if the condition is known true.
     // If so, use do-while (body then step); otherwise while (step then body).
     let entry = for_entry_fold(init, cond, locals);
     if matches!(entry, Some(k) if k != 0) && !matches!(body_stmt, Stmt::Empty) {
         // Do-while form: body THEN step, no initial jmp.
-        emit_loop(cond, &[body_stmt, step], entry, locals, frame, return_int, out, fixups);
+        emit_loop(cond, &[body_stmt, step], entry, locals, frame, return_int, return_long, out, fixups);
     } else {
-        emit_loop(cond, &[step, body_stmt], None, locals, frame, return_int, out, fixups);
+        emit_loop(cond, &[step, body_stmt], None, locals, frame, return_int, return_long, out, fixups);
     }
 }
 
@@ -6883,6 +7426,8 @@ fn collect_loop_body_mutations(stmts: &[&Stmt]) -> std::collections::HashSet<usi
                     AssignTarget::Local(i)
                     | AssignTarget::IndexedLocal { local: i, .. }
                     | AssignTarget::IndexedLocalByte { local: i, .. }
+                    | AssignTarget::IndexedLocalVar { local: i, .. }
+                    | AssignTarget::IndexedLocalByteVar { local: i, .. }
                     | AssignTarget::LocalField { local: i, .. }
                     | AssignTarget::DerefLocal(i)
                     | AssignTarget::DerefLocalField { ptr_local: i, .. }
@@ -6936,6 +7481,7 @@ fn emit_loop(
     locals: &Locals<'_>,
     frame: Frame,
     return_int: bool,
+    return_long: bool,
     out: &mut Vec<u8>,
     fixups: &mut Vec<Fixup>,
 ) {
@@ -6961,19 +7507,26 @@ fn emit_loop(
         array_locals: locals.array_locals,
         unsigned_locals: locals.unsigned_locals,
         char_params: locals.char_params,
+        long_params: locals.long_params,
+        unsigned_params: locals.unsigned_params,
         char_returners: locals.char_returners,
+        long_param_funcs: locals.long_param_funcs,
         loop_stack: locals.loop_stack,
     };
     let mut body_buf = Vec::new();
     let mut body_fixups: Vec<Fixup> = Vec::new();
     locals.loop_stack.borrow_mut().push(LoopCtx::default());
     for seg in body_segments {
-        emit_stmt(seg, &body_locals, frame, return_int, &mut body_buf, &mut body_fixups);
+        emit_stmt(seg, &body_locals, frame, return_int, return_long, &mut body_buf, &mut body_fixups);
     }
     let loop_ctx = locals.loop_stack.borrow_mut().pop().expect("loop stack");
     let mut cmp_buf = Vec::new();
     let mut cmp_fixups: Vec<Fixup> = Vec::new();
-    emit_cond_cmp(cond, locals, &mut cmp_buf, &mut cmp_fixups);
+    // Use body_locals for the cond so that variables mutated inside the
+    // loop body are treated as runtime (not folded to their pre-loop init
+    // values). Fixture 1309: `while(a[i])` where `i` starts at 0 but is
+    // incremented in the body — must NOT fold the index to 0.
+    emit_cond_cmp(cond, &body_locals, &mut cmp_buf, &mut cmp_fixups);
 
     // Alignment: position right after the 2-byte `eb XX` should be
     // even. If it would be odd, insert a NOP pad and bump the
@@ -7017,8 +7570,15 @@ fn emit_loop(
     if matches!(effective_fold, Some(0)) && !cond_references_local(cond) {
         return;
     }
-    let skip_initial_jmp = matches!(effective_fold, Some(k) if k != 0)
-        && (is_for_entry || !needs_pad);
+    // Empty body: the initial jmp would be a no-op (jmp +0 or +1 with pad);
+    // MSC always uses do-while form when the body is empty.
+    // Single local: empirically MSC always uses do-while for single-local
+    // while-loops when the entry condition folds true (fixtures 124, 1044, 1158).
+    // For 2+ locals with an odd-position body, MSC keeps the while form
+    // to maintain even loop-top alignment (fixture 1182).
+    let skip_initial_jmp = body_len == 0
+        || (matches!(effective_fold, Some(k) if k != 0)
+            && (is_for_entry || !needs_pad || locals.disps.len() == 1));
     if !skip_initial_jmp {
         let forward_disp = i8::try_from(body_len + pad)
             .expect("body+pad short enough for jmp rel8");
@@ -7077,119 +7637,430 @@ fn emit_loop(
 /// [<cmp>]             cmp only when peephole doesn't apply
 /// <jcc> <-back>       jne/je back to body
 /// ```
+/// Partial switch for a const-scrutinee k with NFC cases (V != 0, V < k signed).
+///
+/// MSC does NOT fold the whole switch to just the matched case body. Instead it
+/// emits a comparison chain for NFC cases, the fallthrough (matched / default)
+/// body, then a forward-jmp layout:
+///
+/// FWD path (no `case 0` in switch, or k == 0):
+///   [mov ax,k] [cmp chain] [fallthrough] [eb→RL] [nop?] [NFC[0] body]
+///   ← return_label (RL) here →
+///   [continuation] [nop?] [NFC[1] body][eb→RL][nop?] …
+///
+/// DIRECT path (switch has `case 0` and k != 0):
+///   [mov ax,k] [cmp chain] [fallthrough]
+///   ← return_label (RL) here →
+///   [continuation] [nop?] [NFC[0] body][eb→RL][nop?] [NFC[1] body][eb→RL][nop?] …
+///
+/// Nops align each NFC body start to an even code-segment offset.
+/// Returns true if the code following the continuation is still reachable.
+#[allow(clippy::too_many_arguments)]
+fn emit_partial_switch_with_continuation(
+    k: i32,
+    cases: &[SwitchArm],
+    continuation: &[Stmt],
+    locals: &Locals<'_>,
+    frame: Frame,
+    return_int: bool,
+    return_long: bool,
+    out: &mut Vec<u8>,
+    fixups: &mut Vec<Fixup>,
+) -> bool {
+    // Collect NFC arms: V != 0 AND V < k (signed), in source order.
+    let nfc_arms: Vec<&SwitchArm> = cases.iter()
+        .filter(|a| matches!(a.value, Some(v) if v != 0 && v < k))
+        .collect();
+
+    // Fallthrough arm: matched case k, or default if no case k.
+    let ft_arm = cases.iter().find(|a| a.value == Some(k))
+        .or_else(|| cases.iter().find(|a| a.value.is_none()));
+
+    // Pre-emit a case arm body (stopping at Break), returning (bytes, fixups, terminates).
+    let emit_arm = |arm: Option<&SwitchArm>| -> (Vec<u8>, Vec<Fixup>, bool) {
+        let mut b: Vec<u8> = Vec::new();
+        let mut f: Vec<Fixup> = Vec::new();
+        let mut term = false;
+        if let Some(arm) = arm {
+            for s in &arm.body {
+                if matches!(s, Stmt::Break) { break; }
+                emit_stmt(s, locals, frame, return_int, return_long, &mut b, &mut f);
+                if stmt_always_returns(s, locals) { term = true; break; }
+            }
+        }
+        (b, f, term)
+    };
+
+    let (ft_bytes, ft_fxs, ft_term) = emit_arm(ft_arm);
+    let nfc_bufs: Vec<(Vec<u8>, Vec<Fixup>, bool)> =
+        nfc_arms.iter().map(|arm| emit_arm(Some(arm))).collect();
+
+    // need_cont: true when any body doesn't terminate (→ continuation needed).
+    let need_cont = !ft_term || nfc_bufs.iter().any(|(_, _, t)| !t);
+
+    // Pre-emit continuation (only when needed).
+    let mut cont_bytes: Vec<u8> = Vec::new();
+    let mut cont_fxs: Vec<Fixup> = Vec::new();
+    if need_cont {
+        let mut reachable = true;
+        for s in continuation {
+            if !reachable { break; }
+            emit_stmt(s, locals, frame, return_int, return_long,
+                      &mut cont_bytes, &mut cont_fxs);
+            if stmt_always_returns(s, locals) { reachable = false; }
+        }
+        if reachable {
+            cont_bytes.extend_from_slice(frame.epilogue_bytes());
+        }
+    }
+
+    // ── emit scrutinee load ───────────────────────────────────────────────
+
+    if k == 0 {
+        out.extend_from_slice(&[0x2B, 0xC0]); // sub ax, ax
+    } else {
+        let k16 = (k as u32 & 0xFFFF) as u16;
+        let [lo, hi] = k16.to_le_bytes();
+        out.extend_from_slice(&[0xB8, lo, hi]); // mov ax, k
+    }
+
+    // ── emit comparison chain (je placeholders) ───────────────────────────
+
+    let mut je_patches: Vec<usize> = Vec::new();
+    for arm in &nfc_arms {
+        let v = arm.value.unwrap();
+        let v16 = (v as u32 & 0xFFFF) as u16;
+        let [vlo, vhi] = v16.to_le_bytes();
+        out.extend_from_slice(&[0x3D, vlo, vhi]); // cmp ax, v
+        out.push(0x74); // je short
+        je_patches.push(out.len()); // index of rel8 placeholder
+        out.push(0x00);
+    }
+
+    // ── emit ft body ─────────────────────────────────────────────────────
+
+    {
+        let base = out.len();
+        for mut f in ft_fxs { f.body_offset += base; fixups.push(f); }
+        out.extend_from_slice(&ft_bytes);
+    }
+
+    // MSC uses three distinct layouts:
+    //
+    // CASE 1 – no continuation (all bodies terminate):
+    //   [ft+nop_if_odd] [NFC[0]+nop_if_odd] ... [NFC[n]+nop_if_odd]
+    //
+    // CASE 2 FWD – continuation needed, no `case 0` in switch (or K==0):
+    //   [ft] [ft_jmp→RL] [nop_if_odd]
+    //   [NFC[0]]                       ← falls through to RL
+    //   RL: [continuation]
+    //   [NFC[1]+jmp→RL+nop_if_odd] ...
+    //
+    // CASE 2 DIRECT – continuation needed, `case 0` exists AND K != 0:
+    //   [ft]                           ← falls through directly to RL
+    //   RL: [continuation]
+    //   [nop_if_odd]
+    //   [NFC[0]+jmp→RL+nop_if_odd] ... [NFC[n]+jmp→RL+nop_if_odd]
+
+    let has_zero_case = k != 0 && cases.iter().any(|a| a.value == Some(0));
+    let direct_path = need_cont && has_zero_case;
+    let fwd_path = need_cont && !has_zero_case;
+
+    let mut nfc_starts: Vec<usize> = Vec::new();
+
+    if !need_cont {
+        // CASE 1: all bodies terminate.
+        if out.len() % 2 != 0 { out.push(0x90); }
+        for (nfc_bytes, nfc_fxs, _) in &nfc_bufs {
+            nfc_starts.push(out.len());
+            let base = out.len();
+            for mut f in nfc_fxs.iter().cloned() { f.body_offset += base; fixups.push(f); }
+            out.extend_from_slice(nfc_bytes);
+            if out.len() % 2 != 0 { out.push(0x90); }
+        }
+        // Patch je → NFC starts.
+        for (idx, &p) in je_patches.iter().enumerate() {
+            out[p] = (nfc_starts[idx] as i32 - (p + 1) as i32) as u8;
+        }
+    } else if fwd_path {
+        // CASE 2 FWD: ft body jumps forward past NFC[0] to RL; NFC[0] falls through.
+        let ft_jmp_patch = {
+            out.push(0xEB);
+            let p = out.len();
+            out.push(0x00);
+            p
+        };
+        if out.len() % 2 != 0 { out.push(0x90); }
+
+        // NFC[0]: between ft body and return_label. Falls through — no explicit jmp.
+        nfc_starts.push(out.len());
+        {
+            let (b, f, _) = &nfc_bufs[0];
+            let base = out.len();
+            for mut fx in f.iter().cloned() { fx.body_offset += base; fixups.push(fx); }
+            out.extend_from_slice(b);
+        }
+
+        // return_label: emit continuation.
+        let return_label = out.len();
+        {
+            let base = out.len();
+            for mut f in cont_fxs { f.body_offset += base; fixups.push(f); }
+            out.extend_from_slice(&cont_bytes);
+        }
+
+        // NFC[1..]: after continuation; each has backward jmp → return_label + nop.
+        for (nfc_bytes, nfc_fxs, nfc_term) in nfc_bufs.iter().skip(1) {
+            nfc_starts.push(out.len());
+            let base = out.len();
+            for mut f in nfc_fxs.iter().cloned() { f.body_offset += base; fixups.push(f); }
+            out.extend_from_slice(nfc_bytes);
+            if !nfc_term {
+                out.push(0xEB);
+                let p = out.len();
+                out.push(0x00);
+                let rel8 = return_label as i32 - (p + 1) as i32;
+                out[p] = rel8 as u8;
+            }
+            if out.len() % 2 != 0 { out.push(0x90); }
+        }
+
+        // Patch ft_jmp → return_label.
+        out[ft_jmp_patch] = (return_label as i32 - (ft_jmp_patch + 1) as i32) as u8;
+
+        // Patch je → NFC starts.
+        for (idx, &p) in je_patches.iter().enumerate() {
+            out[p] = (nfc_starts[idx] as i32 - (p + 1) as i32) as u8;
+        }
+    } else {
+        // CASE 2 DIRECT: ft body falls through to RL; all NFCs after continuation.
+        debug_assert!(direct_path);
+
+        // return_label immediately after ft body.
+        let return_label = out.len();
+        {
+            let base = out.len();
+            for mut f in cont_fxs { f.body_offset += base; fixups.push(f); }
+            out.extend_from_slice(&cont_bytes);
+        }
+
+        // Alignment nop before first NFC body.
+        if out.len() % 2 != 0 { out.push(0x90); }
+
+        // All NFC bodies: each has backward jmp → return_label + nop.
+        for (nfc_bytes, nfc_fxs, nfc_term) in &nfc_bufs {
+            nfc_starts.push(out.len());
+            let base = out.len();
+            for mut f in nfc_fxs.iter().cloned() { f.body_offset += base; fixups.push(f); }
+            out.extend_from_slice(nfc_bytes);
+            if !nfc_term {
+                out.push(0xEB);
+                let p = out.len();
+                out.push(0x00);
+                let rel8 = return_label as i32 - (p + 1) as i32;
+                out[p] = rel8 as u8;
+            }
+            if out.len() % 2 != 0 { out.push(0x90); }
+        }
+
+        // Patch je → NFC starts.
+        for (idx, &p) in je_patches.iter().enumerate() {
+            out[p] = (nfc_starts[idx] as i32 - (p + 1) as i32) as u8;
+        }
+    }
+
+    false // caller must not add another epilogue (handled internally)
+}
+
 /// Runtime `switch (<scrutinee>) { case K0: body0 case K1: body1 default: ... }`.
-/// Falls through to a cmp+je chain; bodies end at the next `Stmt::Break`
-/// or fall through to the next case. Each `Break` inside the bodies
-/// becomes a forward `jmp` to the end of the switch.
+/// Matches MSC layout: short cmp+je chain; `jmp short; nop` fallthrough; non-default
+/// bodies each get a trailing NOP; default body goes last with no trailing NOP.
 fn emit_runtime_switch(
     scrutinee: &Expr,
     cases: &[SwitchArm],
     locals: &Locals<'_>,
     frame: Frame,
     return_int: bool,
+    return_long: bool,
     out: &mut Vec<u8>,
     fixups: &mut Vec<Fixup>,
 ) {
-    // Pre-emit each case body to size the jumps. Track break positions
-    // for late-patching to the end of the switch.
     struct CaseBuf {
         buf: Vec<u8>,
         fixups: Vec<Fixup>,
-        breaks: Vec<usize>, // offsets within `buf` of `eb XX` jmps
+        breaks: Vec<usize>, // offsets of `eb XX` short-jmp placeholders
+        term: bool,
     }
     let mut case_bufs: Vec<CaseBuf> = Vec::new();
     for arm in cases {
         let mut buf = Vec::new();
         let mut fxs: Vec<Fixup> = Vec::new();
         let mut breaks: Vec<usize> = Vec::new();
+        let mut term = false;
         for s in &arm.body {
             if matches!(s, Stmt::Break) {
-                // Placeholder for forward jump; patched at the end.
                 let off = buf.len();
-                buf.extend_from_slice(&[0xE9, 0x00, 0x00]); // jmp near (3 bytes)
+                buf.extend_from_slice(&[0xEB, 0x00]); // short jmp placeholder (2 bytes)
                 breaks.push(off);
             } else {
-                emit_stmt(s, locals, frame, return_int, &mut buf, &mut fxs);
+                emit_stmt(s, locals, frame, return_int, return_long, &mut buf, &mut fxs);
+                if stmt_always_returns(s, locals) { term = true; break; }
             }
         }
-        case_bufs.push(CaseBuf { buf, fixups: fxs, breaks });
+        case_bufs.push(CaseBuf { buf, fixups: fxs, breaks, term });
     }
-    // Order: walk cases in source order. Each non-default case emits
-    // its cmp + je-to-its-body chunk before bodies. Then bodies in
-    // source order. Default body sits at the end (after the cmp chain
-    // and before final fallthrough).
-    // We'll lay out as:
-    //   <cmp/je sequence for non-default cases>
-    //   jmp default (if a default exists, else fall through to next-after-switch)
-    //   body0, body1, ... bodyN (bodies in source order)
-    // Compute body offsets first.
-    let default_idx = cases.iter().position(|c| c.value.is_none());
-    let mut body_offsets: Vec<usize> = vec![0; cases.len()];
-    // Build the cmp+je chain length and the default-jmp length, then
-    // compute the absolute offset of each body relative to the start
-    // of the switch emission.
-    // Per non-default case: load scrutinee into AX (if needed) + cmp + je. We pre-emit scrutinee once, then for each case do `cmp ax, K; je rel16`.
+
     let mut scrutinee_buf = Vec::new();
     let mut scrutinee_fixups: Vec<Fixup> = Vec::new();
     emit_expr_to_ax(scrutinee, locals, &mut scrutinee_buf, &mut scrutinee_fixups);
-    // Each non-default case: `83 f8 K` (or `3d K K`) + `0f 84 disp16` (je near).
-    // Use the simplest form: `cmp ax, K` (3 or 4 bytes) + `74 disp8` if disp fits, else `0f 84 disp32`.
-    // We'll always use the near form `3d K K` (3 bytes) + `0f 84 rel16` (6 bytes) for predictability.
-    let non_default_count = cases.iter().filter(|c| c.value.is_some()).count();
-    let chain_len = non_default_count * (3 + 6); // cmp + je-near
-    let default_jmp_len = if default_idx.is_some() { 3 } else { 0 }; // e9 disp16
-    // The "switch end" comes after all bodies. Body positions:
-    let mut acc = scrutinee_buf.len() + chain_len + default_jmp_len;
-    for (i, cb) in case_bufs.iter().enumerate() {
-        body_offsets[i] = acc;
-        acc += cb.buf.len();
+
+    // Empty switch: MSC emits only the scrutinee load (side-effect) and
+    // falls through — no cmp chain, no jmp, no NOP. Fixture 2893.
+    if cases.is_empty() {
+        let start = out.len();
+        for mut f in scrutinee_fixups { f.body_offset += start; fixups.push(f); }
+        out.extend_from_slice(&scrutinee_buf);
+        return;
     }
-    let switch_end = acc;
+
+    let default_idx = cases.iter().position(|c| c.value.is_none());
+    let any_breaks = case_bufs.iter().any(|cb| !cb.breaks.is_empty());
+
     let start = out.len();
-    // Emit scrutinee.
-    let scrut_base = out.len();
-    for mut f in scrutinee_fixups { f.body_offset += scrut_base; fixups.push(f); }
-    out.extend_from_slice(&scrutinee_buf);
-    // Emit cmp+je for each non-default case in source order.
-    for (i, arm) in cases.iter().enumerate() {
-        if let Some(k) = arm.value {
-            let k16 = (k as u32 & 0xFFFF) as u16;
+
+    // When every case is a default (no value-case comparisons needed), MSC
+    // omits the scrutinee load entirely — there is nothing to compare against.
+    // Fixture 3673 (single default: return -1).
+    let has_nondefault = cases.iter().any(|c| c.value.is_some());
+    let scr_len = if has_nondefault { scrutinee_buf.len() } else { 0 };
+    if has_nondefault {
+        for mut f in scrutinee_fixups { f.body_offset += start; fixups.push(f); }
+        out.extend_from_slice(&scrutinee_buf);
+    }
+
+    // Single-case no-default with no breaks: JNE layout.
+    // MSC uses `jne → continuation` so the matching case body comes first,
+    // then the continuation is emitted by the caller. E.g. fixture 3082.
+    if default_idx.is_none() && cases.len() == 1 && !any_breaks {
+        let ci = 0;
+        let arm_val = cases[ci].value.unwrap();
+        let k16 = (arm_val as u32 & 0xFFFF) as u16;
+        if arm_val == 0 {
+            out.extend_from_slice(&[0x0B, 0xC0]); // or ax, ax
+        } else {
             out.push(0x3D);
             out.extend_from_slice(&k16.to_le_bytes());
-            out.push(0x0F);
-            out.push(0x84);
-            let here_end = out.len() + 2; // after this je's disp16
-            let target_abs = start + body_offsets[i];
-            let target_rel = target_abs as i32 - here_end as i32;
-            let rel16 = (target_rel as i16) as u16;
-            out.extend_from_slice(&rel16.to_le_bytes());
+        }
+        // jne → cont (skips case body + nop)
+        let body_size = case_bufs[ci].buf.len();
+        let body_nop = if (start + scr_len + (if arm_val == 0 { 2 } else { 3 }) + 2 + body_size) % 2 != 0 { 1usize } else { 0 };
+        out.push(0x75); // jne
+        out.push((body_size + body_nop) as u8);
+        // case body
+        let body_base = out.len();
+        for mut f in case_bufs[ci].fixups.iter().cloned() { f.body_offset += body_base; fixups.push(f); }
+        out.extend_from_slice(&case_bufs[ci].buf);
+        if body_nop != 0 { out.push(0x90); }
+        return;
+    }
+
+    // Chain length: per non-default case:
+    //   K == 0: `0b c0` (2) + `74 rel8` (2) = 4 bytes
+    //   K != 0: `3d K K` (3) + `74 rel8` (2) = 5 bytes
+    let chain_len: usize = cases.iter()
+        .filter_map(|c| c.value)
+        .map(|k| if k == 0 { 4 } else { 5 })
+        .sum();
+
+    // Layout selection:
+    // - No breaks and default exists → default-as-fallthrough: default body emitted
+    //   first (right after chain), non-default bodies after; no jmp after chain.
+    // - Otherwise → jmp (2 bytes) + alignment nop (if jmp end is odd) after chain.
+    let default_fallthrough = default_idx.is_some() && !any_breaks;
+    let jmp_nop_len: usize = if default_fallthrough {
+        0
+    } else {
+        // MSC adds a nop after the jmp when the jmp's end position is odd, to
+        // align the first case body to an even absolute address.
+        let jmp_end_abs = start + scr_len + chain_len + 2;
+        if jmp_end_abs % 2 != 0 { 3 } else { 2 }
+    };
+
+    // Emission order:
+    // - default-fallthrough: default first, then non-default in source order
+    // - otherwise: non-default in source order, then default
+    let emission_order: Vec<usize> = if default_fallthrough {
+        let d = default_idx.unwrap();
+        let mut v = vec![d];
+        v.extend((0..cases.len()).filter(|&i| i != d));
+        v
+    } else {
+        let mut v: Vec<usize> = (0..cases.len()).filter(|&i| cases[i].value.is_some()).collect();
+        if let Some(d) = default_idx { v.push(d); }
+        v
+    };
+
+    // Compute body offsets (relative to switch start) and per-body nop flags,
+    // using absolute position for alignment so the parity is correct even if
+    // the switch does not start on an even function offset.
+    let mut body_offsets: Vec<usize> = vec![0; cases.len()];
+    let mut body_has_nop: Vec<bool> = vec![false; cases.len()];
+    let mut running_abs = start + scr_len + chain_len + jmp_nop_len;
+    for &i in &emission_order {
+        body_offsets[i] = running_abs - start;
+        running_abs += case_bufs[i].buf.len();
+        if running_abs % 2 != 0 {
+            body_has_nop[i] = true;
+            running_abs += 1;
         }
     }
-    // Default fallthrough.
-    if let Some(d) = default_idx {
-        out.push(0xE9);
-        let here_end = out.len() + 2;
-        let target_abs = start + body_offsets[d];
-        let target_rel = target_abs as i32 - here_end as i32;
-        let rel16 = (target_rel as i16) as u16;
-        out.extend_from_slice(&rel16.to_le_bytes());
+    let switch_end = running_abs - start;
+
+    // Emit cmp+je (short) for each non-default case in source order.
+    for (i, arm) in cases.iter().enumerate() {
+        if let Some(k) = arm.value {
+            if k == 0 {
+                out.extend_from_slice(&[0x0B, 0xC0]); // or ax, ax
+            } else {
+                let k16 = (k as u32 & 0xFFFF) as u16;
+                out.push(0x3D);
+                out.extend_from_slice(&k16.to_le_bytes());
+            }
+            out.push(0x74); // JE short
+            let here_end = out.len() + 1;
+            let rel8 = (start + body_offsets[i]) as i32 - here_end as i32;
+            out.push(rel8 as u8);
+        }
     }
-    // Emit the bodies in source order; patch break-jumps to switch_end.
-    for cb in case_bufs.into_iter() {
+
+    // Jmp after chain + alignment nop when not using default-fallthrough.
+    if !default_fallthrough {
+        let jmp_target = if let Some(d) = default_idx {
+            start + body_offsets[d]
+        } else {
+            start + switch_end
+        };
+        out.push(0xEB);
+        let here_end = out.len() + 1;
+        out.push((jmp_target as i32 - here_end as i32) as u8);
+        if jmp_nop_len == 3 { out.push(0x90); } // alignment nop
+    }
+
+    // Emit bodies in emission_order; each gets an alignment nop if needed.
+    let break_target = start + switch_end;
+    let mut case_bufs_indexed: Vec<Option<CaseBuf>> = case_bufs.into_iter().map(Some).collect();
+    for &case_idx in &emission_order {
+        let cb = case_bufs_indexed[case_idx].take().unwrap();
         let body_base = out.len();
         for mut f in cb.fixups { f.body_offset += body_base; fixups.push(f); }
-        // Patch break offsets first (their bytes are relative to the
-        // post-jmp position).
         let mut body = cb.buf;
         for off in cb.breaks {
-            let after_jmp = body_base + off + 3;
-            let target_abs = start + switch_end;
-            let target_rel = target_abs as i32 - after_jmp as i32;
-            let rel16 = (target_rel as i16) as u16;
-            body[off + 1] = rel16.to_le_bytes()[0];
-            body[off + 2] = rel16.to_le_bytes()[1];
+            let after_jmp = body_base + off + 2;
+            let rel8 = break_target as i32 - after_jmp as i32;
+            body[off + 1] = rel8 as u8;
         }
         out.extend_from_slice(&body);
+        if body_has_nop[case_idx] { out.push(0x90); }
     }
 }
 
@@ -7199,6 +8070,7 @@ fn emit_do_while(
     locals: &Locals<'_>,
     frame: Frame,
     return_int: bool,
+    return_long: bool,
     out: &mut Vec<u8>,
     fixups: &mut Vec<Fixup>,
 ) {
@@ -7220,13 +8092,16 @@ fn emit_do_while(
         array_locals: locals.array_locals,
         unsigned_locals: locals.unsigned_locals,
         char_params: locals.char_params,
+        long_params: locals.long_params,
+        unsigned_params: locals.unsigned_params,
         char_returners: locals.char_returners,
+        long_param_funcs: locals.long_param_funcs,
         loop_stack: locals.loop_stack,
     };
     let mut body_buf = Vec::new();
     let mut body_fixups: Vec<Fixup> = Vec::new();
     locals.loop_stack.borrow_mut().push(LoopCtx::default());
-    emit_stmt(body_stmt, &body_locals, frame, return_int, &mut body_buf, &mut body_fixups);
+    emit_stmt(body_stmt, &body_locals, frame, return_int, return_long, &mut body_buf, &mut body_fixups);
     let loop_ctx = locals.loop_stack.borrow_mut().pop().expect("loop stack");
     let body_len = body_buf.len();
     // `do body while (0);` — body runs once, then the cond fails and
@@ -7453,33 +8328,25 @@ fn emit_cond_cmp_inner(cond: &Cond, locals: &Locals<'_>, out: &mut Vec<u8>, fixu
             // MSC loads right (param) into AX, then `cmp [local], ax`.
             emit_load_param(*pi, out);
             let l_disp = locals.disp(*li);
-            out.push(0x39);
-            out.push(0x46);
-            out.push(l_disp as u8);
+            out.push(0x39); out.push(bp_modrm(0x46, l_disp)); push_bp_disp(out, l_disp);
         }
         Cond::Cmp { op: _, left: Expr::Local(li), right: Expr::Local(rj) } => {
             // MSC loads right into AX, then `cmp [left], ax`.
             emit_load_local(*rj, locals, out);
             let l_disp = locals.disp(*li);
-            out.push(0x39);
-            out.push(0x46);
-            out.push(l_disp as u8);
+            out.push(0x39); out.push(bp_modrm(0x46, l_disp)); push_bp_disp(out, l_disp);
         }
         Cond::Cmp { op: _, left: Expr::Param(li), right: Expr::Param(rj) } => {
             // MSC loads right (rj) into AX, then `cmp [left], ax`.
             emit_load_param(*rj, out);
             let l_disp = param_disp(*li);
-            out.push(0x39);
-            out.push(0x46);
-            out.push(l_disp as u8);
+            out.push(0x39); out.push(0x46); out.push(l_disp as u8); // params always small
         }
         Cond::Cmp { op: _, left: Expr::Param(pi), right: Expr::Local(li) } => {
             // MSC loads right (local) into AX, then `cmp [param], ax`.
             emit_load_local(*li, locals, out);
             let p_disp = param_disp(*pi);
-            out.push(0x39);
-            out.push(0x46);
-            out.push(p_disp as u8);
+            out.push(0x39); out.push(0x46); out.push(p_disp as u8); // params always small
         }
         Cond::Cmp { op: _, left: Expr::Global(idx), right: Expr::IntLit(k) }
         | Cond::Cmp { op: _, left: Expr::IntLit(k), right: Expr::Global(idx) } => {
@@ -7496,6 +8363,41 @@ fn emit_cond_cmp_inner(cond: &Cond, locals: &Locals<'_>, out: &mut Vec<u8>, fixu
             emit_expr_to_ax(right, locals, out, fixups);
             emit_cmp_ax_imm(*k, out);
         }
+        // `while (a[i])` / `if (a[i])` where `a` is a global int array
+        // and `i` is a runtime variable — MSC emits `mov bx, [i];
+        // shl bx, 1; cmp WORD PTR [bx+_a], 0` (saves one byte vs
+        // loading to AX then `or ax,ax`). Fixture 1309.
+        // `while (a[i])` / `if (a[i])` where `a` is a global int array
+        // and `i` is a runtime variable — MSC emits `mov bx, [i];
+        // shl bx, 1; cmp WORD PTR [bx+_a], 0` (saves one byte vs
+        // loading to AX then `or ax,ax`). Fixture 1309.
+        Cond::Truthy(Expr::Index { array, index })
+            if index.fold(locals.inits).is_none() =>
+        {
+            match index.as_ref() {
+                Expr::Local(i) => {
+                    let disp = locals.disp(*i);
+                    { out.push(0x8B); out.push(bp_modrm(0x5E, disp)); push_bp_disp(out, disp); } // mov bx, [bp+disp]
+                }
+                Expr::Param(i) => {
+                    let pdisp = param_disp(*i) as i8;
+                    out.extend_from_slice(&[0x8B, 0x5E, pdisp as u8]);
+                }
+                _ => {
+                    // Fallback: load to AX, test
+                    emit_expr_to_ax(&Expr::Index { array: *array, index: index.clone() }, locals, out, fixups);
+                    out.extend_from_slice(&[0x0B, 0xC0]);
+                    return;
+                }
+            }
+            out.extend_from_slice(&[0xD1, 0xE3]); // shl bx, 1
+            let body_offset = out.len();
+            out.extend_from_slice(&[0x83, 0xBF, 0x00, 0x00, 0x00]); // cmp word [bx+addr], 0
+            fixups.push(Fixup {
+                body_offset: body_offset + 1,
+                kind: FixupKind::GlobalAddr { global_idx: *array },
+            });
+        }
         Cond::Truthy(expr) => {
             // `if (<expr>)` — evaluate to AX, then test ax, ax (or
             // cmp ax, 0). MSC picks `or ax, ax` (`0b c0`) as the
@@ -7508,18 +8410,11 @@ fn emit_cond_cmp_inner(cond: &Cond, locals: &Locals<'_>, out: &mut Vec<u8>, fixu
     }
 }
 
-/// `cmp ax, imm` — picks `83 f8 imm8sx` for small constants,
-/// `3d imm16` for larger.
+/// `cmp ax, imm` — MSC always uses `3d imm16` (cmp ax, imm16).
 fn emit_cmp_ax_imm(k: i32, out: &mut Vec<u8>) {
-    if let Ok(k8) = i8::try_from(k) {
-        out.push(0x83);
-        out.push(0xF8);
-        out.push(k8 as u8);
-    } else {
-        let k16 = (k as u32 & 0xFFFF) as u16;
-        out.push(0x3D);
-        out.extend_from_slice(&k16.to_le_bytes());
-    }
+    let k16 = (k as u32 & 0xFFFF) as u16;
+    out.push(0x3D);
+    out.extend_from_slice(&k16.to_le_bytes());
 }
 
 fn param_disp(idx: usize) -> i16 {
@@ -7590,14 +8485,14 @@ fn emit_cmp_local_imm(idx: usize, locals: &Locals<'_>, k: i32, out: &mut Vec<u8>
 fn emit_cmp_bp_imm(disp: i16, k: i32, out: &mut Vec<u8>) {
     if let Ok(k_i8) = i8::try_from(k) {
         out.push(0x83);
-        out.push(0x7E);          // ModR/M: mod=01 reg=111 (/7=CMP) r/m=110 (BP+disp8)
-        out.push(disp as u8);
+        out.push(bp_modrm(0x7E, disp)); // /7=CMP, mod=01/10 bp-rel
+        push_bp_disp(out, disp);
         out.push(k_i8 as u8);
     } else {
         let k16 = (k as u32 & 0xFFFF) as u16;
         out.push(0x81);
-        out.push(0x7E);
-        out.push(disp as u8);
+        out.push(bp_modrm(0x7E, disp));
+        push_bp_disp(out, disp);
         out.extend_from_slice(&k16.to_le_bytes());
     }
 }
@@ -7674,10 +8569,10 @@ fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: 
             // Load the OLD value into AX, then mutate the slot.
             let disp = locals.disp(*local_idx);
             if locals.size(*local_idx) == 1 {
-                out.extend_from_slice(&[0x8A, 0x46, disp as u8]);  // mov al,[bp-d]
-                out.push(0x98);                                       // cbw
+                out.push(0x8A); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp);
+                out.push(0x98); // cbw
             } else {
-                out.extend_from_slice(&[0x8B, 0x46, disp as u8]);  // mov ax,[bp-d]
+                out.push(0x8B); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp);
             }
             emit_postmutate_local(*step, locals.size(*local_idx), disp, out);
         }
@@ -7686,10 +8581,10 @@ fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: 
             let disp = locals.disp(*local_idx);
             emit_postmutate_local(*step, locals.size(*local_idx), disp, out);
             if locals.size(*local_idx) == 1 {
-                out.extend_from_slice(&[0x8A, 0x46, disp as u8]);  // mov al,[bp-d]
-                out.push(0x98);                                       // cbw
+                out.push(0x8A); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp);
+                out.push(0x98); // cbw
             } else {
-                out.extend_from_slice(&[0x8B, 0x46, disp as u8]);  // mov ax,[bp-d]
+                out.push(0x8B); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp);
             }
         }
         Expr::PostMutateGlobal { global_idx, step } => {
@@ -7728,7 +8623,7 @@ fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: 
             // `*p++` for char* locals: load old ptr into BX, advance, byte-deref.
             if let Expr::PostMutateLocal { local_idx, step } = ptr.as_ref() {
                 let disp = locals.disp(*local_idx);
-                out.extend_from_slice(&[0x8B, 0x5E, disp as u8]);  // mov bx,[bp-p]
+                { out.push(0x8B); out.push(bp_modrm(0x5E, disp)); push_bp_disp(out, disp); }  // mov bx,[bp-p]
                 emit_postmutate_local(*step, locals.size(*local_idx), disp, out);
                 out.extend_from_slice(&[0x8A, 0x07, 0x98]);         // mov al,[bx]; cbw
                 return;
@@ -7767,14 +8662,13 @@ fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: 
                 // `*p++` — load old ptr into BX, advance ptr, read from old location.
                 Expr::PostMutateLocal { local_idx, step } => {
                     let disp = locals.disp(*local_idx);
-                    out.extend_from_slice(&[0x8B, 0x5E, disp as u8]);  // mov bx,[bp-p]
+                    { out.push(0x8B); out.push(bp_modrm(0x5E, disp)); push_bp_disp(out, disp); }  // mov bx,[bp-p]
                     emit_postmutate_local(*step, locals.size(*local_idx), disp, out);
                     out.extend_from_slice(&[0x8B, 0x07]);               // mov ax,[bx]
                 }
                 Expr::Param(i) => {
-                    let disp = i8::try_from(4 + (*i * 2))
-                        .expect("param disp fits");
-                    out.extend_from_slice(&[0x8B, 0x5E, disp as u8]);
+                    let disp = (4 + (*i * 2)) as i16;
+                    { out.push(0x8B); out.push(bp_modrm(0x5E, disp)); push_bp_disp(out, disp); }
                     out.extend_from_slice(&[0x8B, 0x07]);
                 }
                 Expr::Global(idx) => {
@@ -7801,8 +8695,8 @@ fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: 
                 }
                 Expr::Param(i) => {
                     // `mov bx, [bp+disp]; mov ax, [bx]`.
-                    let disp = param_disp(*i) as i8;
-                    out.extend_from_slice(&[0x8B, 0x5E, disp as u8]);
+                    let disp = param_disp(*i);
+                    { out.push(0x8B); out.push(bp_modrm(0x5E, disp)); push_bp_disp(out, disp); }
                     out.extend_from_slice(&[0x8B, 0x07]);
                 }
                 Expr::DerefWord { ptr: inner_ptr } => {
@@ -7819,12 +8713,12 @@ fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: 
                             });
                         }
                         Expr::Local(li) => {
-                            let disp = locals.disp(*li) as i8;
-                            out.extend_from_slice(&[0x8B, 0x5E, disp as u8]);
+                            let disp = locals.disp(*li);
+                            { out.push(0x8B); out.push(bp_modrm(0x5E, disp)); push_bp_disp(out, disp); }
                         }
                         Expr::Param(pi) => {
-                            let disp = param_disp(*pi) as i8;
-                            out.extend_from_slice(&[0x8B, 0x5E, disp as u8]);
+                            let disp = param_disp(*pi);
+                            { out.push(0x8B); out.push(bp_modrm(0x5E, disp)); push_bp_disp(out, disp); }
                         }
                         _ => {
                             // Generic fallback: evaluate inner DerefWord
@@ -7845,9 +8739,9 @@ fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: 
                     if let (Expr::Local(li), Some(k)) =
                         (left.as_ref(), right.fold(locals.inits))
                     {
-                        let disp = locals.disp(*li) as i8;
+                        let disp = locals.disp(*li);
                         let off = (k * 2) as i8;
-                        out.extend_from_slice(&[0x8B, 0x5E, disp as u8]);
+                        { out.push(0x8B); out.push(bp_modrm(0x5E, disp)); push_bp_disp(out, disp); }
                         if off == 0 {
                             out.extend_from_slice(&[0x8B, 0x07]);
                         } else {
@@ -7919,14 +8813,19 @@ fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: 
                 // Fixture 4112.
                 match index.as_ref() {
                     Expr::Param(i) => {
-                        let disp = i8::try_from(4 + (*i * 2))
-                            .expect("param disp fits");
-                        out.extend_from_slice(&[0x8B, 0x5E, disp as u8]);
+                        let disp = param_disp(*i);
+                        if locals.is_char_param(*i) {
+                            // char param: byte-load + cbw + mov bx, ax
+                            out.push(0x8A); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp);
+                            out.push(0x98); // cbw
+                            out.extend_from_slice(&[0x8B, 0xD8]); // mov bx, ax
+                        } else {
+                            out.push(0x8B); out.push(bp_modrm(0x5E, disp)); push_bp_disp(out, disp);
+                        }
                     }
                     Expr::Local(i) => {
-                        let disp = -(i16::try_from(*i + 1)
-                            .expect("local idx") * 2);
-                        out.extend_from_slice(&[0x8B, 0x5E, disp as u8]);
+                        let disp = locals.disp(*i);
+                        { out.push(0x8B); out.push(bp_modrm(0x5E, disp)); push_bp_disp(out, disp); }
                     }
                     other => panic!(
                         "non-const, non-param/local array index not supported: {other:?}"
@@ -7952,7 +8851,7 @@ fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: 
         Expr::AddrOfLocal(idx) => {
             // `lea ax, [bp-disp]` = `8d 46 disp`.
             let disp = locals.disp(*idx);
-            out.extend_from_slice(&[0x8D, 0x46, disp as u8]);
+            out.push(0x8D); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp);
         }
         Expr::Ternary { cond, then_arm, else_arm } => {
             // When cond is a compile-time constant, MSC skips the branch
@@ -8000,7 +8899,7 @@ fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: 
             // Use a noop frame since these stmts shouldn't include
             // returns or `chkstk`.
             for s in sides {
-                emit_stmt(s, locals, Frame::BpOnly, true, out, fixups);
+                emit_stmt(s, locals, Frame::BpOnly, true, false, out, fixups);
             }
             emit_expr_to_ax(value, locals, out, fixups);
         }
@@ -8025,14 +8924,10 @@ fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: 
         Expr::LocalField { local, byte_off, size } => {
             let disp = locals.disp(*local) + *byte_off as i16;
             if *size == 1 {
-                out.push(0x8A);
-                out.push(0x46);
-                out.push(disp as u8);
+                out.push(0x8A); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp);
                 out.push(0x98); // cbw
             } else {
-                out.push(0x8B);
-                out.push(0x46);
-                out.push(disp as u8);
+                out.push(0x8B); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp);
             }
         }
         Expr::DerefParamField { ptr_param, byte_off, size } => {
@@ -8061,9 +8956,7 @@ fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: 
             // mov bx, [bp + ptr_disp]; mov ax, [bx + byte_off] (word)
             //                          or mov al, [bx + byte_off]; cbw (byte)
             let p_disp = locals.disp(*ptr_local);
-            out.push(0x8B);
-            out.push(0x5E);
-            out.push(p_disp as u8);
+            out.push(0x8B); out.push(bp_modrm(0x5E, p_disp)); push_bp_disp(out, p_disp);
             if *size == 1 {
                 if *byte_off == 0 {
                     out.extend_from_slice(&[0x8A, 0x07]);
@@ -8124,32 +9017,37 @@ fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: 
             }
         }
         Expr::LocalIndex { local, index } => {
-            // Constant K → `mov ax, [bp - disp + 2K]` (`8b 46 disp`).
-            let k = index.fold(locals.inits).unwrap_or_else(|| {
-                panic!("non-constant local-int-array index not yet supported")
-            });
-            let disp = locals.disp(*local) + (k as i16) * 2;
-            out.push(0x8B);
-            out.push(0x46);
-            out.push(disp as u8);
+            if let Some(k) = index.fold(locals.inits) {
+                // Constant K → `mov ax, [bp+disp+2K]`.
+                let disp = locals.disp(*local) + (k as i16) * 2;
+                out.push(0x8B); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp);
+            } else {
+                // Runtime index: load into SI, scale, load element.
+                // Requires Frame::WithSlideSi (push si in prologue).
+                emit_index_to_si(index, locals, out);
+                out.extend_from_slice(&[0xD1, 0xE6]); // shl si, 1
+                let base_disp = locals.disp(*local);
+                out.push(0x8B); out.push(bp_modrm(0x42, base_disp)); push_bp_disp(out, base_disp); // mov ax,[bp+si+base]
+            }
         }
         Expr::LocalIndexByte { local, index } => {
-            // Constant K → `mov al, [bp - disp + K]; cbw` (`8a 46 disp; 98`).
-            let k = index.fold(locals.inits).unwrap_or_else(|| {
-                panic!("non-constant local-char-array index not yet supported")
-            });
-            let disp = locals.disp(*local) + (k as i16);
-            out.push(0x8A);
-            out.push(0x46);
-            out.push(disp as u8);
-            out.push(0x98);
+            if let Some(k) = index.fold(locals.inits) {
+                // Constant K → `mov al, [bp+disp+K]; cbw`.
+                let disp = locals.disp(*local) + (k as i16);
+                out.push(0x8A); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp);
+                out.push(0x98);
+            } else {
+                // Runtime index: load into SI (no scale for bytes), load byte, cbw.
+                emit_index_to_si(index, locals, out);
+                let base_disp = locals.disp(*local);
+                out.push(0x8A); out.push(bp_modrm(0x42, base_disp)); push_bp_disp(out, base_disp); // mov al,[bp+si+base]
+                out.push(0x98); // cbw
+            }
         }
     }
 }
 
 /// `mov ax, word ptr [bp + 4 + 2*idx]` — load a parameter into AX.
-/// Same `8B 46 disp8` form as locals, just with a positive
-/// displacement. Fixture 4102 (`return a + b;`) exercises this.
 fn emit_load_param(idx: usize, out: &mut Vec<u8>) {
     let disp = i8::try_from(4 + (idx * 2)).expect("param disp fits in i8");
     out.push(0x8B);
@@ -8157,15 +9055,11 @@ fn emit_load_param(idx: usize, out: &mut Vec<u8>) {
     out.push(disp as u8);
 }
 
-/// `mov ax, word ptr [bp-disp]` — 3-byte form `8B 46 disp8`. The
-/// caller has already converted the local index into a BP-relative
-/// displacement (via `Locals::disp`).
+/// `mov ax/al, word/byte ptr [bp-disp]` — load a local into AX.
 fn emit_load_local(idx: usize, locals: &Locals<'_>, out: &mut Vec<u8>) {
     let disp = locals.disp(idx);
     if locals.size(idx) == 1 {
-        out.push(0x8A);
-        out.push(0x46);
-        out.push(disp as u8);
+        out.push(0x8A); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp);
         if locals.is_unsigned_local(idx) {
             // `mov al, [bp-disp]; sub ah, ah` — zero-extend for unsigned char.
             out.extend_from_slice(&[0x2A, 0xE4]); // sub ah, ah
@@ -8173,9 +9067,7 @@ fn emit_load_local(idx: usize, locals: &Locals<'_>, out: &mut Vec<u8>) {
             out.push(0x98); // cbw — sign-extend for signed char
         }
     } else {
-        out.push(0x8B);
-        out.push(0x46);
-        out.push(disp as u8);
+        out.push(0x8B); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp);
     }
 }
 
@@ -8234,6 +9126,67 @@ fn emit_binop(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, out: &m
         emit_expr_to_ax(right, locals, out, fixups);
         emit_mem_op_at(op, disp, out);
         return;
+    }
+    // Commutative swap: when RIGHT is a char param and LEFT is a non-char
+    // bp-rel operand, MSC loads the char first (byte+cbw) and uses the
+    // other operand as a word mem source. Fixtures 616, 3685.
+    if commutative
+        && let Expr::Param(ri) = right
+        && locals.is_char_param(*ri)
+        && !matches!(left, Expr::Param(li) if locals.is_char_param(*li))
+        && let Some(l_disp) = bp_disp(left, locals)
+    {
+        let r_disp = param_disp(*ri) as u8;
+        out.extend_from_slice(&[0x8A, 0x46, r_disp]);  // mov al, [bp+r_disp]
+        out.push(0x98);  // cbw
+        emit_mem_op_at(op, l_disp, out);
+        return;
+    }
+    // Char local /= K: byte division.  MSC hoists `mov cl, K` before the
+    // load and uses `idiv cl` (f6 f9) instead of word `idiv cx` (f7 f9).
+    // Pattern: `b1 K; 8a 46 disp; 98; f6 f9`.
+    if matches!(op, BinOp::Div)
+        && let Expr::Local(li) = left
+        && locals.size(*li) == 1
+        && let Expr::IntLit(k) = right
+    {
+        let disp = locals.disp(*li);
+        out.push(0xB1); // mov cl, K
+        out.push((*k as u32 & 0xFF) as u8);
+        out.push(0x8A); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp);
+        out.push(0x98); // cbw
+        out.push(0xF6); // idiv cl
+        out.push(0xF9);
+        return;
+    }
+    // Signed/unsigned int /2 optimization: MSC avoids `idiv` for
+    // division by 2.  Signed: `load; cwd; sub ax,dx; sar ax,1`.
+    // Unsigned: `load; shr ax,1`.  Only for int-sized (non-char) operands.
+    if matches!(op, BinOp::Div)
+        && matches!(right, Expr::IntLit(2))
+        && matches!(left, Expr::Local(_) | Expr::Param(_))
+    {
+        let is_unsigned = match left {
+            Expr::Param(i) => locals.is_unsigned_param(*i),
+            Expr::Local(i) => locals.is_unsigned_local(*i),
+            _ => false,
+        };
+        let is_char_sized = match left {
+            Expr::Local(i) => locals.size(*i) == 1,
+            Expr::Param(i) => locals.is_char_param(*i),
+            _ => false,
+        };
+        if !is_char_sized {
+            if let Some(load) = bp_load(left, locals) {
+                load(out);
+                if is_unsigned {
+                    out.extend_from_slice(&[0xD1, 0xE8]); // shr ax, 1
+                } else {
+                    out.extend_from_slice(&[0x99, 0x2B, 0xC2, 0xD1, 0xF8]); // cwd; sub ax,dx; sar ax,1
+                }
+                return;
+            }
+        }
     }
     // Left as a BP-rel operand we can load into AX.
     if let Some(load) = bp_load(left, locals) {
@@ -8572,7 +9525,15 @@ fn const_index_global(e: &Expr, locals: &Locals<'_>) -> Option<(usize, u16)> {
 fn bp_load<'a>(e: &'a Expr, locals: &'a Locals<'_>) -> Option<Box<dyn FnOnce(&mut Vec<u8>) + 'a>> {
     match e {
         Expr::Local(i) => Some(Box::new(move |out: &mut Vec<u8>| emit_load_local(*i, locals, out))),
-        Expr::Param(i) => Some(Box::new(move |out: &mut Vec<u8>| emit_load_param(*i, out))),
+        Expr::Param(i) => Some(Box::new(move |out: &mut Vec<u8>| {
+            if locals.is_char_param(*i) {
+                let disp = param_disp(*i) as u8;
+                out.extend_from_slice(&[0x8A, 0x46, disp]);  // mov al, [bp+disp]
+                out.push(0x98);  // cbw — sign-extend byte param to word
+            } else {
+                emit_load_param(*i, out);
+            }
+        })),
         _ => None,
     }
 }
