@@ -3272,8 +3272,8 @@ fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
             Ok(Expr::IntLit(n))
         }
         Some(Tok::Amp) => {
-            // Address-of `&<ident>`. Phase 1 supports globals and
-            // locals; locals lower to `lea ax, [bp-disp]`.
+            // Address-of `&<ident>` or `&<ident>[K]`. Phase 1 supports
+            // globals and locals; locals lower to `lea ax, [bp-disp]`.
             let name = match p.bump().cloned() {
                 Some(Tok::Ident(s)) => s,
                 other => {
@@ -3282,6 +3282,47 @@ fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                     )));
                 }
             };
+            // `&<ident>[K]` — address of an array element. Synthesize
+            // `<base-addr> + K*elem_size` as a BinOp.
+            if matches!(p.peek(), Some(Tok::LBrack)) {
+                p.bump();
+                let idx_expr = parse_expr(p)?;
+                p.eat(&Tok::RBrack)?;
+                if let Some(local_idx) = p.local_names.iter().position(|n| *n == name) {
+                    let elem_size = p.local_specs[local_idx].size as i32;
+                    let init_view: Vec<Option<i32>> = p.local_specs.iter().map(|l| l.init).collect();
+                    let k = idx_expr.fold(&init_view).ok_or_else(|| EmitError::Unsupported(
+                        "non-constant index in `&<local>[K]` not yet supported".to_owned()
+                    ))?;
+                    let base_disp = -(elem_size * k);
+                    let _ = base_disp;
+                    // Synthesize: lea ax, [bp-disp_a + K*elem_size].
+                    // We don't have a direct AST node for that; fall
+                    // back to "address-of slot at element K".
+                    // For now, use AddrOfLocal + IntLit offset binop.
+                    return Ok(Expr::BinOp {
+                        op: BinOp::Add,
+                        left: Box::new(Expr::AddrOfLocal(local_idx)),
+                        right: Box::new(Expr::IntLit(k * elem_size)),
+                    });
+                }
+                if let Some(global_idx) = p.global_names.iter().position(|n| *n == name) {
+                    let g = &p.globals[global_idx];
+                    let elem_size = g.element_size as i32;
+                    let init_view: Vec<Option<i32>> = p.local_specs.iter().map(|l| l.init).collect();
+                    let k = idx_expr.fold(&init_view).ok_or_else(|| EmitError::Unsupported(
+                        "non-constant index in `&<global>[K]` not yet supported".to_owned()
+                    ))?;
+                    return Ok(Expr::BinOp {
+                        op: BinOp::Add,
+                        left: Box::new(Expr::AddrOfGlobal(global_idx)),
+                        right: Box::new(Expr::IntLit(k * elem_size)),
+                    });
+                }
+                return Err(EmitError::Unsupported(format!(
+                    "address-of unknown identifier `{name}`"
+                )));
+            }
             if let Some(idx) = p.local_names.iter().position(|n| *n == name) {
                 return Ok(Expr::AddrOfLocal(idx));
             }
