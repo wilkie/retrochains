@@ -2133,6 +2133,12 @@ fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
     match p.peek() {
         Some(Tok::Kw("return")) => {
             p.bump();
+            // `return;` (void) — no value. Codegen with IntLit(0) and
+            // the return-emit path will ignore it for void functions.
+            if matches!(p.peek(), Some(Tok::Semi)) {
+                p.bump();
+                return Ok(Stmt::Return(Expr::IntLit(0)));
+            }
             let expr = parse_expr(p)?;
             p.eat(&Tok::Semi)?;
             Ok(Stmt::Return(expr))
