@@ -4162,7 +4162,7 @@ fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
             // don't have a peephole shape, so we substitute normally
             // (fixtures 1022, 1024).
             let self_assign_addsub = match (target.clone(), value.clone()) {
-                (AssignTarget::Local(t), Expr::BinOp { op: BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Shl | BinOp::Shr | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor, left, .. }) => {
+                (AssignTarget::Local(t), Expr::BinOp { op: BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod | BinOp::Shl | BinOp::Shr | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor, left, .. }) => {
                     matches!(left.as_ref(), Expr::Local(l) if *l == t)
                 }
                 (AssignTarget::Global(t), Expr::BinOp { op: BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor, left, .. }) => {
@@ -7314,6 +7314,19 @@ fn emit_imm_op(op: BinOp, k: i32, out: &mut Vec<u8>) {
         (BinOp::Shr, 1) => out.extend_from_slice(&[0xD1, 0xE8]),
         (BinOp::Shl, _) => out.extend_from_slice(&[0xB1, k as u8, 0xD3, 0xE0]),
         (BinOp::Shr, _) => out.extend_from_slice(&[0xB1, k as u8, 0xD3, 0xE8]),
+        // Generic `ax /= K` / `ax %= K` for word: `b9 K K cwd f7 f9`
+        // (mov cx, K; cwd; idiv cx) — DX:AX = AX / CX, AX gets quotient.
+        // Mod: same setup, but the result is in DX, so swap into AX.
+        (BinOp::Div, _) => {
+            out.push(0xB9);
+            out.extend_from_slice(&k16.to_le_bytes());
+            out.extend_from_slice(&[0x99, 0xF7, 0xF9]);
+        }
+        (BinOp::Mod, _) => {
+            out.push(0xB9);
+            out.extend_from_slice(&k16.to_le_bytes());
+            out.extend_from_slice(&[0x99, 0xF7, 0xF9, 0x8B, 0xC2]);
+        }
         (op, _) => {
             panic!("imm-op `{op:?}` not yet covered by a fixture (k={k})");
         }
