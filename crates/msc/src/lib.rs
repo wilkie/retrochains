@@ -1604,10 +1604,17 @@ fn parse_global_decl(p: &mut Parser<'_>) -> Result<(), EmitError> {
             )));
         }
     };
-    // Optional `[N]` for an array declaration. The element count
-    // determines the COMDEF or _DATA byte length.
+    // Optional `[N]` (or `[]` with init) for an array declaration.
+    // The element count determines the COMDEF or _DATA byte length.
+    let mut implicit_array_len = false;
     let array_len = if matches!(p.peek(), Some(Tok::LBrack)) {
         p.bump();
+        if matches!(p.peek(), Some(Tok::RBrack)) {
+            // `int a[] = {...};` — size from init list count.
+            p.bump();
+            implicit_array_len = true;
+            0 // placeholder; we'll overwrite after parsing init below
+        } else {
         let k = parse_signed_int(p)?;
         if k <= 0 {
             return Err(EmitError::Unsupported(format!(
@@ -1617,6 +1624,7 @@ fn parse_global_decl(p: &mut Parser<'_>) -> Result<(), EmitError> {
         let n = k as usize;
         p.eat(&Tok::RBrack)?;
         n
+        }
     } else {
         1
     };
@@ -1706,11 +1714,15 @@ fn parse_global_decl(p: &mut Parser<'_>) -> Result<(), EmitError> {
     let element_size = if is_char { 1 } else { 2 };
     // Long storage is 4 bytes; modeled as a 2-slot word array. Reads of
     // `(int)g` naturally pick up the low word at the base address.
-    let (array_len, element_size) = if is_long && !is_pointer {
+    let (mut array_len, element_size) = if is_long && !is_pointer {
         (2usize, 2usize)
     } else {
         (array_len, element_size)
     };
+    // Implicit array size from initializer count (`int a[] = {1,2,3};`).
+    if implicit_array_len {
+        array_len = init.as_ref().map(|v| v.len()).unwrap_or(0).max(1);
+    }
     p.global_names.push(name.clone());
     p.globals.push(Global { name, init, array_len, element_size, is_pointer, struct_idx: None, is_long, is_static, is_extern });
     Ok(())
