@@ -5228,6 +5228,21 @@ fn cond_references_local(cond: &Cond) -> bool {
     }
 }
 
+/// True when at least one leaf of the condition is a pure literal (evaluable
+/// without any variable inits). Used to gate while-loop do-while elision:
+/// MSC elides the initial jmp only when the condition has a literal side.
+fn cond_has_literal_side(cond: &Cond) -> bool {
+    match cond {
+        Cond::Truthy(e) => e.fold(&[]).is_some(),
+        Cond::Cmp { left, right, .. } => {
+            left.fold(&[]).is_some() || right.fold(&[]).is_some()
+        }
+        Cond::And(a, b) | Cond::Or(a, b) => {
+            cond_has_literal_side(a) || cond_has_literal_side(b)
+        }
+    }
+}
+
 fn fold_cond(cond: &Cond, locals: &Locals<'_>) -> Option<i32> {
     match cond {
         Cond::Truthy(e) => e.fold(locals.inits),
@@ -6992,7 +7007,13 @@ fn emit_loop(
     // Fixture 1182 (while, two locals, odd body offset → while form),
     // fixture 1078 (for, two locals, odd body offset → do-while, entry_fold).
     let is_for_entry = entry_fold.is_some();
-    let effective_fold = entry_fold.or_else(|| fold_cond(cond, locals));
+    // For while-loops (no explicit entry_fold), only apply the do-while
+    // elision when at least one operand of the condition is a literal.
+    // Both-sides-are-locals (`while (a < b)`) never elides; one-literal
+    // (`while (i < 10)`) elides when the init value makes it true.
+    let effective_fold = entry_fold.or_else(|| {
+        if cond_has_literal_side(cond) { fold_cond(cond, locals) } else { None }
+    });
     if matches!(effective_fold, Some(0)) && !cond_references_local(cond) {
         return;
     }
@@ -7181,10 +7202,31 @@ fn emit_do_while(
     out: &mut Vec<u8>,
     fixups: &mut Vec<Fixup>,
 ) {
+    // Clear init values for any local mutated in the body, matching
+    // the same treatment in emit_loop (used by emit_while/emit_for).
+    let body_mutations = collect_loop_body_mutations(&[body_stmt]);
+    let body_inits: Vec<Option<i32>> = locals.inits.iter().enumerate()
+        .map(|(i, &v)| if body_mutations.contains(&i) { None } else { v })
+        .collect();
+    let body_locals = Locals {
+        inits: &body_inits,
+        disps: locals.disps,
+        sizes: locals.sizes,
+        long_globals: locals.long_globals,
+        char_globals: locals.char_globals,
+        long_locals: locals.long_locals,
+        init_literals: locals.init_literals,
+        far_ptr_locals: locals.far_ptr_locals,
+        array_locals: locals.array_locals,
+        unsigned_locals: locals.unsigned_locals,
+        char_params: locals.char_params,
+        char_returners: locals.char_returners,
+        loop_stack: locals.loop_stack,
+    };
     let mut body_buf = Vec::new();
     let mut body_fixups: Vec<Fixup> = Vec::new();
     locals.loop_stack.borrow_mut().push(LoopCtx::default());
-    emit_stmt(body_stmt, locals, frame, return_int, &mut body_buf, &mut body_fixups);
+    emit_stmt(body_stmt, &body_locals, frame, return_int, &mut body_buf, &mut body_fixups);
     let loop_ctx = locals.loop_stack.borrow_mut().pop().expect("loop stack");
     let body_len = body_buf.len();
     // `do body while (0);` — body runs once, then the cond fails and
