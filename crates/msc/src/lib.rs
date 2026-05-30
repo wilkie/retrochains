@@ -6414,7 +6414,14 @@ fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: 
                     }
                     panic!("word deref of {:?} not yet supported", ptr);
                 }
-                other => panic!("word deref of {other:?} not yet supported"),
+                other => {
+                    // Generic: evaluate the pointer into AX, move to
+                    // BX, deref. Covers Call returns (fixture 1343),
+                    // Ternary, etc.
+                    emit_expr_to_ax(other, locals, out, fixups);
+                    out.extend_from_slice(&[0x8B, 0xD8]); // mov bx, ax
+                    out.extend_from_slice(&[0x8B, 0x07]);
+                }
             }
         }
         Expr::PtrIndexByte { ptr, index } => {
