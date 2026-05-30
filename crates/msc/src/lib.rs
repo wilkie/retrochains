@@ -176,6 +176,10 @@ pub struct LocalSpec {
     /// distinguishes `char c = 'A' + 1;` (folds for read) from
     /// `char c = a + b;` (stored, but read from slot).
     pub init_is_literal: bool,
+    /// True for `int far *p` / `int huge *p` — storage is 4 bytes
+    /// (2-byte offset at disp + 2-byte segment at disp+2). Uses
+    /// `les`/`mov es:[bx]` codegen for deref.
+    pub is_far_ptr: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -194,20 +198,21 @@ pub struct StructField {
 
 impl LocalSpec {
     pub fn int(init: Option<i32>) -> Self {
-        Self { size: 2, array_len: 1, init, struct_idx: None, is_long: false, init_is_literal: init.is_some() }
+        Self { size: 2, array_len: 1, init, struct_idx: None, is_long: false, init_is_literal: init.is_some(), is_far_ptr: false }
     }
     pub fn char_(init: Option<i32>) -> Self {
-        Self { size: 1, array_len: 1, init, struct_idx: None, is_long: false, init_is_literal: init.is_some() }
+        Self { size: 1, array_len: 1, init, struct_idx: None, is_long: false, init_is_literal: init.is_some(), is_far_ptr: false }
     }
     pub fn long_(init: Option<i32>) -> Self {
-        Self { size: 2, array_len: 2, init, struct_idx: None, is_long: true, init_is_literal: init.is_some() }
+        Self { size: 2, array_len: 2, init, struct_idx: None, is_long: true, init_is_literal: init.is_some(), is_far_ptr: false }
     }
     /// Bytes occupied in the frame, rounded up to an even count.
     /// MSC pads each local to a word boundary — scalar char gets 2
     /// bytes, char[3] gets 4 bytes, int[3] gets 6 bytes. Fixture 1134.
     /// Struct locals carry the struct's natural total_bytes
-    /// (also even-padded).
+    /// (also even-padded). Far/huge pointers occupy 4 bytes (offset + segment).
     pub fn storage_bytes(&self) -> usize {
+        if self.is_far_ptr { return 4; }
         let raw = self.size * self.array_len;
         (raw + 1) & !1
     }
@@ -240,6 +245,13 @@ pub struct Locals<'a> {
     /// literal expression. Char locals fold for bare reads only when
     /// this is true (fixture 1023 vs 1046).
     pub init_literals: &'a [bool],
+    /// Parallel-indexed: true for `int far *p` / `int huge *p` locals.
+    /// Uses les+ES-override codegen for deref; 4-byte frame slot.
+    pub far_ptr_locals: &'a [bool],
+    /// Parallel-indexed: true when array_len > 1, i.e. the local is an
+    /// array. Used to distinguish array decay (`p = a`) from value
+    /// copy in far-pointer assignment codegen.
+    pub array_locals: &'a [bool],
     /// Map of function names that return `char`. The caller inserts
     /// `cbw` after the call to widen AL to AX (fixture 1006).
     pub char_returners: &'a std::collections::HashSet<String>,
@@ -277,6 +289,12 @@ impl Locals<'_> {
     }
     pub fn init_is_literal(&self, idx: usize) -> bool {
         self.init_literals.get(idx).copied().unwrap_or(false)
+    }
+    pub fn is_far_ptr_local(&self, idx: usize) -> bool {
+        self.far_ptr_locals.get(idx).copied().unwrap_or(false)
+    }
+    pub fn is_array_local(&self, idx: usize) -> bool {
+        self.array_locals.get(idx).copied().unwrap_or(false)
     }
 }
 
@@ -1938,9 +1956,9 @@ fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> {
                     }
                 };
                 let spec = if is_ptr {
-                    LocalSpec { size: 2, array_len: 1, init: None, struct_idx: Some(sidx), is_long: false, init_is_literal: false }
+                    LocalSpec { size: 2, array_len: 1, init: None, struct_idx: Some(sidx), is_long: false, init_is_literal: false, is_far_ptr: false }
                 } else {
-                    LocalSpec { size: 1, array_len: stotal, init: None, struct_idx: Some(sidx), is_long: false, init_is_literal: false }
+                    LocalSpec { size: 1, array_len: stotal, init: None, struct_idx: Some(sidx), is_long: false, init_is_literal: false, is_far_ptr: false }
                 };
                 let local_idx = locals.len();
                 p.local_names.push(lname);
@@ -1990,8 +2008,33 @@ fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> {
             }
         }
         loop {
-            // Per-declarator `*` prefix for pointer locals.
-            while matches!(p.peek(), Some(Tok::Star)) { p.bump(); }
+            // Per-declarator `*` prefix for pointer locals, with
+            // optional pointer-distance qualifiers (`far`/`near`/`huge`)
+            // between the type and `*` (e.g. `int far *p`).
+            // Peek ahead to detect far/huge before consuming modifiers.
+            let is_far_or_huge = {
+                let mut i = p.pos;
+                let mut found = false;
+                while i < p.toks.len() {
+                    match &p.toks[i] {
+                        Tok::Kw("far") | Tok::Kw("huge") => { found = true; break; }
+                        Tok::Kw("near") | Tok::Kw("unsigned") | Tok::Kw("signed")
+                        | Tok::Kw("static") | Tok::Kw("extern") | Tok::Kw("register")
+                        | Tok::Kw("auto") | Tok::Kw("volatile") | Tok::Kw("const")
+                        | Tok::Kw("short") | Tok::Kw("cdecl") | Tok::Kw("pascal")
+                        | Tok::Kw("interrupt") => { i += 1; }
+                        _ => break,
+                    }
+                }
+                found
+            };
+            skip_decl_modifiers(p);
+            let star_count = {
+                let mut n = 0usize;
+                while matches!(p.peek(), Some(Tok::Star)) { p.bump(); n += 1; }
+                n
+            };
+            let is_far_ptr_decl = is_far_or_huge && star_count > 0;
             let lname = match p.bump().cloned() {
                 Some(Tok::Ident(s)) => s,
                 other => {
@@ -2023,7 +2066,7 @@ fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> {
             } else {
                 (size, array_len, false)
             };
-            let spec = LocalSpec { size: slot_size, array_len: slot_len, init: None, struct_idx: None, is_long: is_long_slot, init_is_literal: false };
+            let spec = LocalSpec { size: slot_size, array_len: slot_len, init: None, struct_idx: None, is_long: is_long_slot, init_is_literal: false, is_far_ptr: is_far_ptr_decl };
             p.local_specs.push(spec.clone());
             locals.push(spec);
             if matches!(p.peek(), Some(Tok::Assign)) {
@@ -2854,8 +2897,12 @@ fn parse_compound_rhs(p: &mut Parser<'_>, target: &AssignTarget) -> Result<Optio
         BinOp::Add | BinOp::Sub
             if matches!(p.peek(), Some(Tok::Semi) | Some(Tok::Comma) | Some(Tok::RParen)) =>
         {
-            // Post-(in|de)crement form: `x++;` / `x--;`. RHS is implicit 1.
-            Expr::IntLit(1)
+            // Post-(in|de)crement form: `x++;` / `x--;`. For far/huge
+            // pointer locals the step is 2 (int element size); otherwise 1.
+            let step = if let AssignTarget::Local(idx) = target {
+                if p.local_specs.get(*idx).map(|s| s.is_far_ptr).unwrap_or(false) { 2 } else { 1 }
+            } else { 1 };
+            Expr::IntLit(step)
         }
         _ => parse_expr(p)?,
     };
@@ -3115,8 +3162,11 @@ fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
             skip_decl_modifiers(p);
             if matches!(p.peek(), Some(Tok::Kw("int")) | Some(Tok::Kw("char")) | Some(Tok::Kw("long"))) {
                 p.bump();
-                // Accept `long int` and skip trailing modifiers.
+                // Accept `long int`, then skip any pointer-distance
+                // qualifiers (`far`/`near`/`huge`) that may appear between
+                // the type and `*` (e.g. `(int far *)`), then skip `*`s.
                 while matches!(p.peek(), Some(Tok::Kw("int"))) { p.bump(); }
+                skip_decl_modifiers(p);
                 while matches!(p.peek(), Some(Tok::Star)) { p.bump(); }
                 p.eat(&Tok::RParen)?;
                 return parse_atom(p);
@@ -4563,7 +4613,14 @@ fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
         Expr::DerefByte { ptr } | Expr::DerefWord { ptr } => {
             prop_expr(ptr, cp);
         }
-        Expr::AddrOfGlobal(_) | Expr::AddrOfLocal(_) => {}
+        Expr::AddrOfGlobal(_) => {}
+        Expr::AddrOfLocal(j) => {
+            // Taking a local's address allows writes through the pointer;
+            // conservatively mark it as mutated so reads after this point
+            // do not fold the stale init value (fixture 1650).
+            cp.mutated_locals.insert(*j);
+            cp.l_known.remove(j);
+        }
         Expr::Ternary { cond, then_arm, else_arm } => {
             prop_expr(cond, cp);
             prop_expr(then_arm, cp);
@@ -4595,22 +4652,30 @@ fn emit_function(
         .collect();
     let local_long: Vec<bool> = func.locals.iter().map(|l| l.is_long).collect();
     let local_literals: Vec<bool> = func.locals.iter().map(|l| l.init_is_literal).collect();
+    let local_far_ptrs: Vec<bool> = func.locals.iter().map(|l| l.is_far_ptr).collect();
+    let local_arrays: Vec<bool> = func.locals.iter().map(|l| l.array_len > 1).collect();
     let mut bytes = Vec::with_capacity(32);
     let mut fixups: Vec<Fixup> = Vec::new();
     let frame = Frame::for_function(func);
-    // Each local — int or char — occupies one 2-byte slot in MSC's
-    // frame (confirmed by fixtures 4080, 1010, 1305). Char slots use
-    // byte instructions for load/store but still consume a word.
-    //
-    // Layout: source order. First-declared local gets the shallowest
-    // slots (closest to BP); arrays occupy `array_len` contiguous
-    // word/byte slots with element 0 at the deepest disp.
-    let mut local_disps: Vec<i16> = Vec::with_capacity(func.locals.len());
+    // Two-pass frame layout: far/huge pointer locals (4-byte seg:off slots)
+    // get the shallowest positions first (in source order), then all other
+    // locals in source order.  For functions with no far pointers this
+    // reduces to simple source-order allocation.
+    let mut local_disps: Vec<i16> = vec![0i16; func.locals.len()];
     let mut cumulative: i32 = 0;
-    for spec in &func.locals {
-        let own = i32::try_from(spec.storage_bytes()).expect("local fits");
-        cumulative += own;
-        local_disps.push(-i16::try_from(cumulative).expect("local disp fits"));
+    for (i, spec) in func.locals.iter().enumerate() {
+        if spec.is_far_ptr {
+            let own = i32::try_from(spec.storage_bytes()).expect("local fits");
+            cumulative += own;
+            local_disps[i] = -i16::try_from(cumulative).expect("local disp fits");
+        }
+    }
+    for (i, spec) in func.locals.iter().enumerate() {
+        if !spec.is_far_ptr {
+            let own = i32::try_from(spec.storage_bytes()).expect("local fits");
+            cumulative += own;
+            local_disps[i] = -i16::try_from(cumulative).expect("local disp fits");
+        }
     }
     let local_sizes: Vec<usize> = func.locals.iter().map(|l| l.size).collect();
     let frame_bytes: usize = cumulative as usize;
@@ -4697,6 +4762,8 @@ fn emit_function(
         char_globals,
         long_locals: &local_long,
         init_literals: &local_literals,
+        far_ptr_locals: &local_far_ptrs,
+        array_locals: &local_arrays,
         char_returners,
         loop_stack: &loop_stack,
     };
@@ -5182,6 +5249,56 @@ fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_>, out: &mu
         }
     };
     let disp = locals.disp(local_idx);
+    // Far/huge pointer assignment: store 2-byte offset + 2-byte SS segment.
+    // The offset comes from either an address expression (AddrOfLocal,
+    // AddrOfLocal+K, or an array-local decay) or a general expression.
+    // The segment is always SS since all local/stack addresses use SS.
+    if locals.is_far_ptr_local(local_idx) {
+        let offset_disp = disp as u8;
+        let segment_disp = (disp + 2) as u8;
+        // Peephole: `p = p ± K` on a far ptr → add/sub only the offset word.
+        // Emits `add/sub word ptr [bp-disp], K` (fixture 1651: p++).
+        if let Expr::BinOp { op: op @ (BinOp::Add | BinOp::Sub), left, right } = value
+            && let Expr::Local(li) = left.as_ref()
+            && *li == local_idx
+            && let Some(k) = right.fold(locals.inits)
+        {
+            let k_u16 = (k.unsigned_abs() as u32 & 0xFFFF) as u16;
+            let is_sub = matches!(op, BinOp::Sub);
+            let modrm = if is_sub { 0x6Eu8 } else { 0x46u8 };
+            if k_u16 == 1 {
+                // inc/dec word ptr [bp+disp8]: ff 46/4e disp
+                out.extend_from_slice(&[0xFF, modrm, offset_disp]);
+            } else if k_u16 <= 127 {
+                out.extend_from_slice(&[0x83, modrm, offset_disp, k_u16 as u8]);
+            } else {
+                out.extend_from_slice(&[0x81, modrm, offset_disp]);
+                out.extend_from_slice(&k_u16.to_le_bytes());
+            }
+            return;
+        }
+        match value {
+            Expr::AddrOfLocal(j) => {
+                let j_disp = locals.disp(*j) as u8;
+                out.extend_from_slice(&[0x8D, 0x46, j_disp]);        // lea ax,[bp-j]
+                out.extend_from_slice(&[0x89, 0x46, offset_disp]);   // mov [bp-p],ax
+                out.extend_from_slice(&[0x8C, 0x56, segment_disp]);  // mov [bp-p+2],ss
+            }
+            Expr::Local(j) if locals.is_array_local(*j) => {
+                // Array-to-pointer decay: p = (far *)a → lea not load.
+                let j_disp = locals.disp(*j) as u8;
+                out.extend_from_slice(&[0x8D, 0x46, j_disp]);        // lea ax,[bp-a]
+                out.extend_from_slice(&[0x89, 0x46, offset_disp]);   // mov [bp-p],ax
+                out.extend_from_slice(&[0x8C, 0x56, segment_disp]);  // mov [bp-p+2],ss
+            }
+            _ => {
+                emit_expr_to_ax(value, locals, out, fixups);
+                out.extend_from_slice(&[0x89, 0x46, offset_disp]);   // mov [bp-p],ax
+                out.extend_from_slice(&[0x8C, 0x56, segment_disp]);  // mov [bp-p+2],ss
+            }
+        }
+        return;
+    }
     // Peephole: `x = x ± K` for int locals collapses to an in-place
     // memory op:
     //   K == 1: `inc/dec word ptr [bp-disp]`     (3 bytes)
@@ -5982,7 +6099,20 @@ fn emit_assign_deref_local_field(ptr_local: usize, byte_off: u16, size: u8, valu
 /// general RHS → `<expr-to-ax>; 89 07`.
 fn emit_assign_deref_local(local_idx: usize, value: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
     let disp = locals.disp(local_idx);
-    // `mov bx, [bp-disp]` — 8b 5e disp8.
+    if locals.is_far_ptr_local(local_idx) {
+        // Far/huge pointer: `les bx,[bp-disp]` then store through ES:BX.
+        out.extend_from_slice(&[0xC4, 0x5E, disp as u8]); // les bx,[bp-p]
+        if let Some(k) = value.fold(locals.inits) {
+            let imm = (k as u32 & 0xFFFF) as u16;
+            out.extend_from_slice(&[0x26, 0xC7, 0x07]);   // mov word ptr es:[bx],imm
+            out.extend_from_slice(&imm.to_le_bytes());
+        } else {
+            emit_expr_to_ax(value, locals, out, fixups);
+            out.extend_from_slice(&[0x26, 0x89, 0x07]);   // mov es:[bx],ax
+        }
+        return;
+    }
+    // Near pointer: `mov bx, [bp-disp]` — 8b 5e disp8.
     out.extend_from_slice(&[0x8B, 0x5E, disp as u8]);
     if let Some(k) = value.fold(locals.inits) {
         let imm = (k as u32 & 0xFFFF) as u16;
@@ -6810,12 +6940,17 @@ fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: 
                     out.extend_from_slice(&[0x8B, 0x07]);
                 }
                 Expr::Local(i) => {
-                    // `mov bx, [bp-disp]; mov ax, [bx]` — load pointer
-                    // from a local slot, then read through it. Fixture
-                    // 1126: `int *p = &g; return *p;`.
-                    let disp = locals.disp(*i) as i8;
-                    out.extend_from_slice(&[0x8B, 0x5E, disp as u8]);
-                    out.extend_from_slice(&[0x8B, 0x07]);
+                    // Deref a local pointer. For far/huge pointers use
+                    // `les bx,[bp-p]; mov ax,es:[bx]`; for near pointers
+                    // `mov bx,[bp-p]; mov ax,[bx]`.
+                    let disp = locals.disp(*i) as u8;
+                    if locals.is_far_ptr_local(*i) {
+                        out.extend_from_slice(&[0xC4, 0x5E, disp]); // les bx,[bp-p]
+                        out.extend_from_slice(&[0x26, 0x8B, 0x07]); // mov ax,es:[bx]
+                    } else {
+                        out.extend_from_slice(&[0x8B, 0x5E, disp]); // mov bx,[bp-p]
+                        out.extend_from_slice(&[0x8B, 0x07]);        // mov ax,[bx]
+                    }
                 }
                 Expr::Param(i) => {
                     // `mov bx, [bp+disp]; mov ax, [bx]`.
