@@ -6292,6 +6292,21 @@ fn emit_cond_cmp_inner(cond: &Cond, locals: &Locals<'_>, out: &mut Vec<u8>, fixu
             out.push(0x46);
             out.push(r_disp as u8);
         }
+        Cond::Cmp { op: _, left: Expr::Param(li), right: Expr::Param(rj) } => {
+            // `cmp <param>, <param>` → load LHS, cmp [bp+pj].
+            emit_load_param(*li, out);
+            let r_disp = param_disp(*rj);
+            out.push(0x3B);
+            out.push(0x46);
+            out.push(r_disp as u8);
+        }
+        Cond::Cmp { op: _, left: Expr::Param(pi), right: Expr::Local(li) } => {
+            emit_load_param(*pi, out);
+            let r_disp = locals.disp(*li);
+            out.push(0x3B);
+            out.push(0x46);
+            out.push(r_disp as u8);
+        }
         Cond::Cmp { op: _, left: Expr::Global(idx), right: Expr::IntLit(k) }
         | Cond::Cmp { op: _, left: Expr::IntLit(k), right: Expr::Global(idx) } => {
             emit_cmp_global_imm(*idx, *k, out, fixups);
