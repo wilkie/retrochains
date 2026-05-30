@@ -3191,6 +3191,11 @@ fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                 } else {
                     1
                 }
+            } else if let Some(Tok::Kw("long")) = p.peek().cloned() {
+                p.bump();
+                if matches!(p.peek(), Some(Tok::Kw("int"))) { p.bump(); }
+                while matches!(p.peek(), Some(Tok::Star)) { p.bump(); }
+                4 // long = 4 bytes; pointer-to-long still 2
             } else if let Some(Tok::Ident(name)) = p.peek().cloned() {
                 p.bump();
                 if let Some(idx) = p.local_names.iter().position(|n| *n == name) {
