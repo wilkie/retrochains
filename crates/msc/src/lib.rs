@@ -601,11 +601,21 @@ impl Expr {
             Expr::DerefParamField { .. } | Expr::DerefGlobalField { .. } => None,
             Expr::DerefByte { .. } | Expr::DerefWord { .. } => None,
             Expr::AddrOfGlobal(_) | Expr::AddrOfLocal(_) => None,
-            // Comma expression fold: side effects don't fold; only the
-            // tail's value matters. But sides may include assigns that
-            // mutate the fold view's locals — be conservative and
-            // never fold a Seq.
-            Expr::Seq { .. } => None,
+            // Comma expression fold: if all the side stmts have no
+            // observable side effect (just discard a value), fold to
+            // the tail's value. Otherwise refuse to fold (the assigns
+            // would still need to run at runtime).
+            Expr::Seq { sides, value } => {
+                let all_pure = sides.iter().all(|s| matches!(s,
+                    Stmt::ExprStmt(e) if e.fold(locals).is_some()
+                        || matches!(e, Expr::Local(_) | Expr::Param(_) | Expr::Global(_) | Expr::StrLit(_) | Expr::AddrOfGlobal(_) | Expr::AddrOfLocal(_))
+                ));
+                if all_pure {
+                    value.fold(locals)
+                } else {
+                    None
+                }
+            }
             Expr::Ternary { cond, then_arm, else_arm } => {
                 let c = cond.fold(locals)?;
                 if c != 0 {
