@@ -2564,6 +2564,44 @@ fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
                 },
             })
         }
+        Some(Tok::LParen) => {
+            // Statement starting with `(` — typically a parenthesized
+            // lvalue followed by `++/--` or `=`, e.g. `(*p)++;`.
+            p.bump(); // (
+            let inner = parse_expr(p)?;
+            p.eat(&Tok::RParen)?;
+            // Post-inc/dec on the deref expression.
+            if matches!(p.peek(), Some(Tok::PlusPlus) | Some(Tok::MinusMinus)) {
+                let inc = matches!(p.peek(), Some(Tok::PlusPlus));
+                p.bump();
+                p.eat(&Tok::Semi)?;
+                let op = if inc { BinOp::Add } else { BinOp::Sub };
+                if let Expr::DerefWord { ptr } = &inner {
+                    let target = match ptr.as_ref() {
+                        Expr::Local(i) => AssignTarget::DerefLocal(*i),
+                        Expr::Param(i) => AssignTarget::DerefParam(*i),
+                        Expr::Global(g) => AssignTarget::DerefGlobal(*g),
+                        _ => return Err(EmitError::Unsupported(format!(
+                            "post-inc on (*<expr>) with non-ident inner ptr not supported"
+                        ))),
+                    };
+                    return Ok(Stmt::Assign {
+                        target,
+                        value: Expr::BinOp {
+                            op,
+                            left: Box::new(inner.clone()),
+                            right: Box::new(Expr::IntLit(1)),
+                        },
+                    });
+                }
+                return Err(EmitError::Unsupported(format!(
+                    "post-inc on parenthesized non-deref: {inner:?}"
+                )));
+            }
+            // Bare `(<expr>);` — discard, treat as expression statement.
+            p.eat(&Tok::Semi)?;
+            Ok(Stmt::ExprStmt(inner))
+        }
         other => Err(EmitError::Unsupported(format!(
             "statement starting with {other:?} not yet supported"
         ))),
