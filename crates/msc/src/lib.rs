@@ -1241,6 +1241,13 @@ fn parse_unit(source: &str) -> Result<Unit, EmitError> {
             if matches!(p.toks.get(k), Some(Tok::Kw("struct"))) {
                 after += 1; // consume the struct's name
             }
+            // Skip calling-convention / pointer-distance modifiers
+            // (`int far helper(...)`).
+            while matches!(p.toks.get(after),
+                Some(Tok::Kw("cdecl")) | Some(Tok::Kw("pascal"))
+                | Some(Tok::Kw("far")) | Some(Tok::Kw("near"))
+                | Some(Tok::Kw("huge")) | Some(Tok::Kw("interrupt"))
+            ) { after += 1; }
             if matches!(p.toks.get(after), Some(Tok::Star)) { after += 1; }
             // Now expect an ident or the `main` keyword. The token
             // after the name decides function (`(`) vs global decl.
@@ -1720,6 +1727,9 @@ fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> {
             )));
         }
     };
+    // Skip post-return-type calling-convention / pointer-distance
+    // modifiers (`int far helper(...)`).
+    skip_decl_modifiers(p);
     // Pointer return types (`char *fn(...)`, `int *fn(...)`): consume
     // the `*` markers. We model the return as int (a pointer fits in
     // AX) — sufficient for `fn()[K]` shapes (fixture 1227).
