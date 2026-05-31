@@ -1,4 +1,4 @@
-// Public entry point for @borland-c20/bcc.
+// Public entry point for @retrochains/bcc.
 // The Rust crates/bcc-wasm cdylib is built to wasm32-unknown-unknown and the
 // resulting .wasm is loaded here. The API mirrors the original Borland C++ 2.0
 // toolchain (bcc/tlink/tasm) so callers can drive the same flow that

@@ -266,7 +266,7 @@ impl TempWorkDir {
         let base = std::env::temp_dir();
         let pid = std::process::id();
         for n in 0u32..1024 {
-            let candidate = base.join(format!("borland-c20-oracle-{pid}-{n}"));
+            let candidate = base.join(format!("retrochains-oracle-{pid}-{n}"));
             match fs::create_dir(&candidate) {
                 Ok(()) => return Ok(Self { path: candidate }),
                 Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}

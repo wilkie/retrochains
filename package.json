@@ -1,7 +1,7 @@
 {
-  "name": "borland-c20",
+  "name": "retrochains",
   "private": true,
-  "description": "Reverse-engineered Borland C++ 2.0 toolchain (Rust + WASM, TypeScript wrapper)",
+  "description": "Clean-room reimplementations of vintage x86 C/C++ compiler toolchains (Rust + WASM, TypeScript wrappers)",
   "packageManager": "pnpm@10.31.0",
   "engines": {
     "node": ">=22"

@@ -95,7 +95,7 @@ crates/               cargo workspace
   bcc-wasm/                   — cdylib that exposes the tools to TS over WASM
   oracle/                     — runs the BC2 binaries under DOSBox
 packages/             pnpm workspace
-  bcc/                        — @borland-c20/bcc, the TS wrapper
+  bcc/                        — @retrochains/bcc, the TS wrapper
 specs/                Specs and design notes (start here)
 ```
 

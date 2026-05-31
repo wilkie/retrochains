@@ -275,7 +275,7 @@ fn make_workdir() -> Result<PathBuf, HarnessError> {
     let base = std::env::temp_dir();
     let pid = std::process::id();
     for n in 0u32..1024 {
-        let candidate = base.join(format!("borland-c20-fixtures-{pid}-{n}"));
+        let candidate = base.join(format!("retrochains-fixtures-{pid}-{n}"));
         match fs::create_dir(&candidate) {
             Ok(()) => return Ok(candidate),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}

@@ -15,7 +15,7 @@ compiler and its peculiarity.
 ## Project Layout
 
 ```
-borland-c20/
+retrochains/
 ├── BC2.zip                 # Original Borland C++ 2.0 install tree (the oracle source)
 ├── .bc2/                   # Gitignored. Lazily unpacked from BC2.zip on first oracle use.
 ├── Cargo.toml              # Rust workspace manifest
@@ -35,7 +35,7 @@ borland-c20/
 │   ├── bcc-wasm/
 │   └── oracle/             # Runs the original BC2 binaries under DOSBox
 ├── packages/               # TypeScript packages (pnpm workspace members)
-│   └── bcc/                # @borland-c20/bcc — WASM wrapper
+│   └── bcc/                # @retrochains/bcc — WASM wrapper
 └── specs/                  # Specs and design notes (this directory)
     ├── OVERVIEW.md
     └── RUNNING_BCC.md
@@ -66,7 +66,7 @@ driven independently from the CLI or composed together via the WASM facade.
   (assembly emission).
 - **`bcc-wasm`** — A `cdylib` crate that re-exports the three tools through a
   single WASM module. Its job is to expose a stable C-ABI surface that
-  `@borland-c20/bcc` (the TS package) can call so the entire compile / assemble
+  `@retrochains/bcc` (the TS package) can call so the entire compile / assemble
   / link pipeline runs in-browser or in Node without shelling out.
 - **`oracle`** — Runs the original Borland binaries from `BC2.zip` under
   DOSBox so the rest of the workspace can diff its output byte-for-byte
@@ -79,7 +79,7 @@ standard linting, testing, and layout best practice.
 
 ### TypeScript packages
 
-- **`@borland-c20/bcc`** (in `packages/bcc/`) — TypeScript wrapper around the
+- **`@retrochains/bcc`** (in `packages/bcc/`) — TypeScript wrapper around the
   WASM build of `bcc-wasm`. This is the user-facing package. It mirrors the
   original toolchain so callers can invoke `bcc`, `tlink`, and `tasm` with
   the same CLI surface the original binaries expose.
