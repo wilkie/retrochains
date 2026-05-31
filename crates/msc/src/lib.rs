@@ -4149,61 +4149,88 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
         }
         b.write_record(obj::EXTDEF, &payload);
     };
-    if user_extern_order.is_empty() {
-        if comdef_globals.is_empty() {
+    // Helper: emit COMDEF record for tentative globals.
+    let emit_comdef = |b: &mut ObjBuilder,
+                       idx_map: &mut std::collections::HashMap<String, u8>,
+                       start: &mut u8| {
+        let mut payload = Vec::new();
+        for &gi in &comdef_globals {
+            let g = &unit.globals[gi];
+            let sym = symbol_name(&g.name);
+            let byte_len = g.storage_bytes();
+            payload.push(u8::try_from(sym.len()).expect("COMDEF name fits"));
+            payload.extend_from_slice(sym.as_bytes());
+            payload.push(0x00); // type index
+            payload.push(0x62); // NEAR data
+            if byte_len <= 0x80 {
+                payload.push(byte_len as u8);
+            } else {
+                payload.push(0x81);
+                payload.extend_from_slice(&u16::try_from(byte_len)
+                    .expect("COMDEF u16 length fits")
+                    .to_le_bytes());
+            }
+            idx_map.insert(sym, *start);
+            *start += 1;
+        }
+        b.write_record(0xB0, &payload);
+    };
+    if comdef_globals.is_empty() {
+        if user_extern_order.is_empty() {
             // No splits — single combined EXTDEF.
+            // Extern globals (from `extern int g;`) go between __chkstk
+            // and defined-function names. Fixtures 163, 1959, 2157, 4041.
             let mut entries: Vec<(String, u8)> = Vec::new();
             entries.push(("__acrtused".to_owned(), 0x01));
             entries.push(("__chkstk".to_owned(), 0x00));
+            for &gi in &extern_globals {
+                entries.push((symbol_name(&unit.globals[gi].name), 0x00));
+            }
             for f in &unit.functions {
                 entries.push((symbol_name(&f.name), 0x00));
             }
             emit_group(&mut b, &entries, &mut extdef_idx_of, &mut next_idx);
         } else {
-            let pre =
-                vec![("__acrtused".to_owned(), 0x01), ("__chkstk".to_owned(), 0x00)];
-            emit_group(&mut b, &pre, &mut extdef_idx_of, &mut next_idx);
-            let mut payload = Vec::new();
-            for &gi in &comdef_globals {
-                let g = &unit.globals[gi];
-                let sym = symbol_name(&g.name);
-                let byte_len = g.storage_bytes();
-                payload.push(u8::try_from(sym.len()).expect("COMDEF name fits"));
-                payload.extend_from_slice(sym.as_bytes());
-                payload.push(0x00); // type index
-                payload.push(0x62); // NEAR data
-                // Length encoded: single byte for ≤0x80, otherwise
-                // 0x81 + LE u16. Fixture 4107 sits in the small bucket.
-                if byte_len <= 0x80 {
-                    payload.push(byte_len as u8);
-                } else {
-                    payload.push(0x81);
-                    payload.extend_from_slice(&u16::try_from(byte_len)
-                        .expect("COMDEF u16 length fits")
-                        .to_le_bytes());
-                }
-                extdef_idx_of.insert(sym, next_idx);
-                next_idx += 1;
+            // Has implicit user-function externs, no COMDEFs.
+            // Layout: __acrtused, [user-fn-externs], [fns], __chkstk.
+            // Extern globals also go after __chkstk if any (fixture 4024).
+            let mut entries: Vec<(String, u8)> = Vec::new();
+            entries.push(("__acrtused".to_owned(), 0x01));
+            for name in &user_extern_order {
+                entries.push((name.clone(), 0x00));
             }
-            b.write_record(0xB0, &payload);
-            let post: Vec<(String, u8)> = unit
-                .functions
-                .iter()
-                .map(|f| (symbol_name(&f.name), 0x00))
-                .collect();
-            emit_group(&mut b, &post, &mut extdef_idx_of, &mut next_idx);
+            for f in &unit.functions {
+                entries.push((symbol_name(&f.name), 0x00));
+            }
+            entries.push(("__chkstk".to_owned(), 0x00));
+            emit_group(&mut b, &entries, &mut extdef_idx_of, &mut next_idx);
+            // Add any extern globals to extdef_idx_of so FIXUP generation
+            // can reference them (even if order isn't perfect yet).
+            for &gi in &extern_globals {
+                let sym = symbol_name(&unit.globals[gi].name);
+                if !extdef_idx_of.contains_key(&sym) {
+                    extdef_idx_of.insert(sym, next_idx);
+                    next_idx += 1;
+                }
+            }
         }
     } else {
-        let mut entries: Vec<(String, u8)> = Vec::new();
-        entries.push(("__acrtused".to_owned(), 0x01));
+        // Has COMDEFs — always use split layout regardless of user-fn-externs.
+        // Fixtures 482, 3590, 3602, 424.
+        // EXTDEF1: __acrtused, __chkstk
+        let pre = vec![("__acrtused".to_owned(), 0x01), ("__chkstk".to_owned(), 0x00)];
+        emit_group(&mut b, &pre, &mut extdef_idx_of, &mut next_idx);
+        // COMDEF: tentative globals
+        emit_comdef(&mut b, &mut extdef_idx_of, &mut next_idx);
+        // EXTDEF2: user-fn-externs + defined functions
+        let mut post: Vec<(String, u8)> = Vec::new();
         for name in &user_extern_order {
-            entries.push((name.clone(), 0x00));
+            post.push((name.clone(), 0x00));
         }
         for f in &unit.functions {
-            entries.push((symbol_name(&f.name), 0x00));
+            post.push((symbol_name(&f.name), 0x00));
         }
-        entries.push(("__chkstk".to_owned(), 0x00));
-        emit_group(&mut b, &entries, &mut extdef_idx_of, &mut next_idx);
+        emit_group(&mut b, &post, &mut extdef_idx_of, &mut next_idx);
     }
 
     // PUBDEFs — MSC walks definitions in source order and starts a
@@ -4578,6 +4605,8 @@ struct ConstProp {
     /// Matches the IndexedLocal/IndexedLocalByte byte_off so a
     /// `<local>[K] = V; return <local>[K];` round-trip folds.
     la_known: std::collections::HashMap<(usize, u16), i32>,
+    /// Global array element values keyed by (global_idx, byte_off).
+    ga_known: std::collections::HashMap<(usize, u16), i32>,
     /// Globals that hold a 4-byte long. Skipped by the
     /// `Global(g) → IntLit(K)` substitution pass so compound updates
     /// like `g += K` and `g = g + K` keep `Global(g)` on the left for
@@ -4723,6 +4752,17 @@ fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
                         cp.la_known.remove(&(*local, *byte_off));
                     }
                 }
+                AssignTarget::IndexedGlobal { array, byte_off }
+                | AssignTarget::IndexedGlobalByte { array, byte_off } => {
+                    if let Some(k) = value.fold(&[]) {
+                        *value = Expr::IntLit(k);
+                    }
+                    if let Expr::IntLit(k) = value {
+                        cp.ga_known.insert((*array, *byte_off), *k);
+                    } else {
+                        cp.ga_known.remove(&(*array, *byte_off));
+                    }
+                }
                 _ => {}
             }
         }
@@ -4741,6 +4781,8 @@ fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
             // After a branch we don't know which path was taken.
             cp.g_known.clear();
             cp.l_known.clear();
+            cp.la_known.clear();
+            cp.ga_known.clear();
         }
         Stmt::Block(stmts) => {
             for s in stmts {
@@ -4761,6 +4803,7 @@ fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
                     cp.g_known.clear();
                     cp.l_known.clear();
                     cp.la_known.clear();
+                    cp.ga_known.clear();
                 } else {
                     // No NFC: fold to matched body block. MSC clears the
                     // const-prop tables BEFORE processing the body so that
@@ -4769,6 +4812,7 @@ fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
                     cp.g_known.clear();
                     cp.l_known.clear();
                     cp.la_known.clear();
+                    cp.ga_known.clear();
                     let mut chosen: Option<usize> = None;
                     let mut default: Option<usize> = None;
                     for (i, arm) in cases.iter().enumerate() {
@@ -4801,12 +4845,14 @@ fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
                     cp.g_known.clear();
                     cp.l_known.clear();
                     cp.la_known.clear();
+                    cp.ga_known.clear();
                 }
             } else {
                 // Runtime scrutinee (not folded): leave as Switch.
                 cp.g_known.clear();
                 cp.l_known.clear();
                 cp.la_known.clear();
+                cp.ga_known.clear();
             }
         }
         Stmt::Break | Stmt::Continue => {
@@ -4820,6 +4866,7 @@ fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
             cp.g_known.clear();
             cp.l_known.clear();
             cp.la_known.clear();
+            cp.ga_known.clear();
         }
     }
 }
@@ -4829,6 +4876,7 @@ fn cp_clone(cp: &ConstProp) -> ConstProp {
         g_known: cp.g_known.clone(),
         l_known: cp.l_known.clone(),
         la_known: cp.la_known.clone(),
+        ga_known: cp.ga_known.clone(),
         long_globals: cp.long_globals.clone(),
         mutated_locals: cp.mutated_locals.clone(),
         mutated_globals: cp.mutated_globals.clone(),
@@ -4882,9 +4930,22 @@ fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
                 prop_expr(a, cp);
             }
         }
-        Expr::Index { index, .. }
-        | Expr::IndexByte { index, .. }
-        | Expr::PtrIndexByte { index, .. } => {
+        Expr::Index { .. } | Expr::IndexByte { .. } => {
+            // Substitute index first, then try to fold to a known global array element.
+            let (array, elem_size, index_ref) = match e {
+                Expr::Index { array, index } => (*array, 2u16, index.as_mut()),
+                Expr::IndexByte { array, index } => (*array, 1u16, index.as_mut()),
+                _ => unreachable!(),
+            };
+            prop_expr(index_ref, cp);
+            if let Expr::IntLit(k) = index_ref
+                && let Ok(byte_off) = u16::try_from(*k as i64 * elem_size as i64)
+                && let Some(&v) = cp.ga_known.get(&(array, byte_off))
+            {
+                *e = Expr::IntLit(v);
+            }
+        }
+        Expr::PtrIndexByte { index, .. } => {
             prop_expr(index, cp);
         }
         Expr::ParamIndex { index, .. } => {
@@ -6404,6 +6465,21 @@ fn emit_assign_param(param_idx: usize, value: &Expr, locals: &Locals<'_>, out: &
         }
         return;
     }
+    // `param >>= local/param` peephole: `mov cl, [bp+r]; sar/shl [bp+param], cl`
+    if let Expr::BinOp { op, left, right } = value
+        && matches!(left.as_ref(), Expr::Param(i) if *i == param_idx)
+        && matches!(op, BinOp::Shl | BinOp::Shr)
+        && let Some(r_disp) = bp_disp(right, locals)
+    {
+        out.push(0x8A); out.push(bp_modrm(0x4E, r_disp)); push_bp_disp(out, r_disp); // mov cl, [bp+r]
+        let modrm_base = match op {
+            BinOp::Shl => 0x66u8,  // /4 = SHL [bp+disp], cl
+            BinOp::Shr => 0x7Eu8,  // /7 = SAR [bp+disp], cl
+            _ => unreachable!(),
+        };
+        out.push(0xD3); out.push(bp_modrm(modrm_base, disp)); push_bp_disp(out, disp); // sar/shl [bp+param], cl
+        return;
+    }
     // Generic: const RHS → store imm; else eval then store.
     if let Some(k) = value.fold(locals.inits) {
         if is_char {
@@ -7519,14 +7595,35 @@ fn emit_loop(
     for seg in body_segments {
         emit_stmt(seg, &body_locals, frame, return_int, return_long, &mut body_buf, &mut body_fixups);
     }
-    let loop_ctx = locals.loop_stack.borrow_mut().pop().expect("loop stack");
+    let mut loop_ctx = locals.loop_stack.borrow_mut().pop().expect("loop stack");
     let mut cmp_buf = Vec::new();
     let mut cmp_fixups: Vec<Fixup> = Vec::new();
-    // Use body_locals for the cond so that variables mutated inside the
-    // loop body are treated as runtime (not folded to their pre-loop init
-    // values). Fixture 1309: `while(a[i])` where `i` starts at 0 but is
-    // incremented in the body — must NOT fold the index to 0.
-    emit_cond_cmp(cond, &body_locals, &mut cmp_buf, &mut cmp_fixups);
+    // For &&-conditions MSC puts B (right) before the body with a forward
+    // exit-jcc, and A (left) after the body as the loop-back cmp section.
+    // Layout: jmp→A_check; [nop]; B_check+exit_jcc; body; A_check; jcc_back→B_check.
+    if let Cond::And(cond_a, cond_b) = cond {
+        emit_cond_cmp(cond_a, &body_locals, &mut cmp_buf, &mut cmp_fixups);
+        let b_exit_disp = i8::try_from(body_buf.len() + cmp_buf.len() + 2)
+            .expect("&&-while B exit disp fits in i8");
+        let mut b_cond_buf: Vec<u8> = Vec::new();
+        let mut b_cond_fixups: Vec<Fixup> = Vec::new();
+        emit_cond_skip(cond_b, b_exit_disp, &body_locals, &mut b_cond_buf, &mut b_cond_fixups);
+        let b_cond_len = b_cond_buf.len();
+        for c in &mut body_fixups { c.body_offset += b_cond_len; }
+        for off in &mut loop_ctx.breaks { *off += b_cond_len; }
+        for off in &mut loop_ctx.continues { *off += b_cond_len; }
+        b_cond_buf.extend_from_slice(&body_buf);
+        body_buf = b_cond_buf;
+        let mut new_fixups = b_cond_fixups;
+        new_fixups.extend(body_fixups.drain(..));
+        body_fixups = new_fixups;
+    } else {
+        // Use body_locals for the cond so that variables mutated inside the
+        // loop body are treated as runtime (not folded to their pre-loop init
+        // values). Fixture 1309: `while(a[i])` where `i` starts at 0 but is
+        // incremented in the body — must NOT fold the index to 0.
+        emit_cond_cmp(cond, &body_locals, &mut cmp_buf, &mut cmp_fixups);
+    }
 
     // Alignment: position right after the 2-byte `eb XX` should be
     // even. If it would be odd, insert a NOP pad and bump the
@@ -7538,9 +7635,12 @@ fn emit_loop(
     let jcc_opcode = match cond {
         Cond::Truthy(_) => 0x75,             // jne (back when nonzero)
         Cond::Cmp { op, .. } => loop_back_jcc(*op),
-        Cond::And(_, _) | Cond::Or(_, _) => {
-            panic!("&&/|| in while/do-while not yet supported");
-        }
+        Cond::And(cond_a, _) => match cond_a.as_ref() {
+            Cond::Truthy(_) => 0x75,
+            Cond::Cmp { op, .. } => loop_back_jcc(*op),
+            other => panic!("&&-while: A must be Cmp/Truthy, got: {other:?}"),
+        },
+        Cond::Or(_, _) => panic!("|| in while/do-while not yet supported"),
     };
 
     let body_len = body_buf.len();
@@ -8117,16 +8217,30 @@ fn emit_do_while(
     let elide_cmp = body_sets_flags_for_cond(body_stmt, cond);
     let mut cmp_buf = Vec::new();
     let mut cmp_fixups: Vec<Fixup> = Vec::new();
-    if !elide_cmp {
+    // For do-while (A && B): emit A with a forward exit-jcc (skipping B+jcc_back),
+    // then B's cmp (the loop-back check). jcc_back opcode comes from B's condition.
+    if let Cond::And(cond_a, cond_b) = cond {
+        let mut b_cmp_buf: Vec<u8> = Vec::new();
+        let mut b_cmp_fixups: Vec<Fixup> = Vec::new();
+        emit_cond_cmp(cond_b, locals, &mut b_cmp_buf, &mut b_cmp_fixups);
+        let a_exit_disp = i8::try_from(b_cmp_buf.len() + 2)
+            .expect("do-while && A exit disp fits");
+        emit_cond_skip(cond_a, a_exit_disp, locals, &mut cmp_buf, &mut cmp_fixups);
+        let a_len = cmp_buf.len();
+        for mut f in b_cmp_fixups { f.body_offset += a_len; cmp_fixups.push(f); }
+        cmp_buf.extend_from_slice(&b_cmp_buf);
+    } else if !elide_cmp {
         emit_cond_cmp(cond, locals, &mut cmp_buf, &mut cmp_fixups);
     }
     let cmp_len = cmp_buf.len();
     let jcc_opcode = match cond {
         Cond::Truthy(_) => 0x75,             // jne (back when nonzero)
         Cond::Cmp { op, .. } => loop_back_jcc(*op),
-        Cond::And(_, _) | Cond::Or(_, _) => {
-            panic!("&&/|| in while/do-while not yet supported");
-        }
+        Cond::And(_, cond_b) => match cond_b.as_ref() {
+            Cond::Cmp { op, .. } => loop_back_jcc(*op),
+            other => panic!("do-while &&: B must be Cmp, got: {other:?}"),
+        },
+        Cond::Or(_, _) => panic!("|| in do-while not yet supported"),
     };
     let body_base = out.len();
     out.extend_from_slice(&body_buf);
@@ -8352,6 +8466,18 @@ fn emit_cond_cmp_inner(cond: &Cond, locals: &Locals<'_>, out: &mut Vec<u8>, fixu
         | Cond::Cmp { op: _, left: Expr::IntLit(k), right: Expr::Global(idx) } => {
             emit_cmp_global_imm(*idx, *k, out, fixups);
         }
+        // Global-global comparison (non-long): load right into AX, then cmp [left], ax.
+        // Result = left - right, so inverted_jcc / loop_back_jcc semantics are standard.
+        Cond::Cmp { op: _, left: Expr::Global(li), right: Expr::Global(ri) }
+            if !locals.is_long_global(*li) && !locals.is_long_global(*ri) =>
+        {
+            let off = out.len();
+            out.extend_from_slice(&[0xA1, 0x00, 0x00]); // mov ax, [right]
+            fixups.push(Fixup { body_offset: off, kind: FixupKind::GlobalAddr { global_idx: *ri } });
+            let off = out.len();
+            out.extend_from_slice(&[0x39, 0x06, 0x00, 0x00]); // cmp [left], ax
+            fixups.push(Fixup { body_offset: off + 1, kind: FixupKind::GlobalAddr { global_idx: *li } });
+        }
         // Generic fallback for unsupported cond shapes: evaluate LHS
         // into AX, then `cmp ax, K` (`3d K K` for word, `83 f8 K` for
         // imm8sx). Used for `p->x == K` and other DerefLocalField cases.
@@ -8362,6 +8488,15 @@ fn emit_cond_cmp_inner(cond: &Cond, locals: &Locals<'_>, out: &mut Vec<u8>, fixu
         Cond::Cmp { op: _, left: Expr::IntLit(k), right } => {
             emit_expr_to_ax(right, locals, out, fixups);
             emit_cmp_ax_imm(*k, out);
+        }
+        // Generic fallback for two-sided non-literal comparisons:
+        // evaluate right into AX, save to BX, evaluate left into AX, cmp ax, bx.
+        // Result = left - right → standard jcc semantics.
+        Cond::Cmp { op: _, left, right } => {
+            emit_expr_to_ax(right, locals, out, fixups);
+            out.extend_from_slice(&[0x8B, 0xD8]); // mov bx, ax
+            emit_expr_to_ax(left, locals, out, fixups);
+            out.extend_from_slice(&[0x3B, 0xC3]); // cmp ax, bx
         }
         // `while (a[i])` / `if (a[i])` where `a` is a global int array
         // and `i` is a runtime variable — MSC emits `mov bx, [i];
@@ -8455,15 +8590,22 @@ fn loop_back_jcc(op: RelOp) -> u8 {
 /// form for global compares against a sign-extended byte (fixtures
 /// 4129, 4133). The placeholder address gets a GlobalAddr FIXUP.
 fn emit_cmp_global_imm(global_idx: usize, k: i32, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
-    let k_i8 = i8::try_from(k).expect("global cmp imm fits in i8");
-    out.push(0x83);
-    out.push(0x3E);
-    let body_offset = out.len();
-    out.extend_from_slice(&[0x00, 0x00, k_i8 as u8]);
-    fixups.push(Fixup {
-        body_offset: body_offset - 1,
-        kind: FixupKind::GlobalAddr { global_idx },
-    });
+    if let Ok(k_i8) = i8::try_from(k) {
+        out.push(0x83);
+        out.push(0x3E);
+        let body_offset = out.len();
+        out.extend_from_slice(&[0x00, 0x00, k_i8 as u8]);
+        fixups.push(Fixup { body_offset: body_offset - 1, kind: FixupKind::GlobalAddr { global_idx } });
+    } else {
+        // 16-bit immediate form: `81 3e addr_lo addr_hi imm_lo imm_hi`
+        out.push(0x81);
+        out.push(0x3E);
+        let body_offset = out.len();
+        out.extend_from_slice(&[0x00, 0x00]);
+        fixups.push(Fixup { body_offset: body_offset - 1, kind: FixupKind::GlobalAddr { global_idx } });
+        let imm = (k as u32 & 0xFFFF) as u16;
+        out.extend_from_slice(&imm.to_le_bytes());
+    }
 }
 
 /// `cmp word ptr [bp-disp], imm` — MSC picks the `83 /7 r/m imm8sx`
@@ -9647,25 +9789,50 @@ fn emit_imm_op(op: BinOp, k: i32, out: &mut Vec<u8>) {
 /// Works for both negative disps (locals) and positive disps
 /// (params); fixture 4102 uses param shape.
 fn emit_mem_op_at(op: BinOp, disp: i16, out: &mut Vec<u8>) {
-    let disp8 = i8::try_from(disp).expect("disp fits in i8");
-    if matches!(op, BinOp::Mul) {
-        // `imul word ptr [bp+disp8]` — `F7 /5 r/m`.
-        out.push(0xF7);
-        out.push(0x6E);  // mod=01 reg=101 (/5=IMUL) r/m=110 (BP-rel)
-        out.push(disp8 as u8);
-        return;
+    match op {
+        BinOp::Mul => {
+            // `imul word ptr [bp+disp]` — `F7 /5 r/m`.
+            out.push(0xF7);
+            out.push(bp_modrm(0x6E, disp));
+            push_bp_disp(out, disp);
+        }
+        BinOp::Div => {
+            // `cwd; mov cx, [bp+disp]; idiv cx`
+            out.push(0x99);                         // cwd
+            out.push(0x8B); out.push(bp_modrm(0x4E, disp)); push_bp_disp(out, disp); // mov cx, [bp+disp]
+            out.extend_from_slice(&[0xF7, 0xF9]);   // idiv cx
+        }
+        BinOp::Mod => {
+            // `cwd; mov cx, [bp+disp]; idiv cx; mov ax, dx`
+            out.push(0x99);                         // cwd
+            out.push(0x8B); out.push(bp_modrm(0x4E, disp)); push_bp_disp(out, disp); // mov cx, [bp+disp]
+            out.extend_from_slice(&[0xF7, 0xF9]);   // idiv cx
+            out.extend_from_slice(&[0x8B, 0xC2]);   // mov ax, dx
+        }
+        BinOp::Shl => {
+            // `mov cl, byte ptr [bp+disp]; shl ax, cl`
+            out.push(0x8A); out.push(bp_modrm(0x4E, disp)); push_bp_disp(out, disp); // mov cl, [bp+disp]
+            out.extend_from_slice(&[0xD3, 0xE0]);   // shl ax, cl
+        }
+        BinOp::Shr => {
+            // `mov cl, byte ptr [bp+disp]; sar ax, cl` (signed int >>)
+            out.push(0x8A); out.push(bp_modrm(0x4E, disp)); push_bp_disp(out, disp); // mov cl, [bp+disp]
+            out.extend_from_slice(&[0xD3, 0xF8]);   // sar ax, cl
+        }
+        op => {
+            let opcode = match op {
+                BinOp::Add => 0x03,
+                BinOp::Sub => 0x2B,
+                BinOp::BitAnd => 0x23,
+                BinOp::BitOr => 0x0B,
+                BinOp::BitXor => 0x33,
+                _ => panic!("memory-source {op:?} not yet covered by a fixture"),
+            };
+            out.push(opcode);
+            out.push(bp_modrm(0x46, disp));
+            push_bp_disp(out, disp);
+        }
     }
-    let opcode = match op {
-        BinOp::Add => 0x03,
-        BinOp::Sub => 0x2B,
-        BinOp::BitAnd => 0x23,
-        BinOp::BitOr => 0x0B,
-        BinOp::BitXor => 0x33,
-        _ => panic!("memory-source {op:?} not yet covered by a fixture"),
-    };
-    out.push(opcode);
-    out.push(0x46);  // ModR/M: mod=01 (disp8), reg=000 (AX), r/m=110 (BP-rel)
-    out.push(disp8 as u8);
 }
 
 #[derive(Debug, thiserror::Error)]
