@@ -42,8 +42,8 @@ fn try_main() -> Result<ExitCode, Box<dyn std::error::Error>> {
     let mut toolchain = Toolchain::Oracle;
     let mut fixture_path: Option<PathBuf> = None;
     let mut jobs: Option<usize> = None;
-    // Compiler defaults to "bcc" — today the only supported target.
-    // See `specs/plans/SECOND_COMPILER.md` for the fan-out plan.
+    // Compiler defaults to "bcc". Supported targets come from the toolchain
+    // registry (`oracle::TOOLCHAINS`); see `specs/plans/SECOND_COMPILER.md`.
     let mut compiler = String::from("bcc");
     while let Some(arg) = it.next() {
         match arg.as_str() {
@@ -71,6 +71,17 @@ fn try_main() -> Result<ExitCode, Box<dyn std::error::Error>> {
     }
 
     let workspace_root = find_workspace_root()?;
+
+    // Validate the requested compiler against the toolchain registry up front,
+    // so an unknown `--compiler` fails fast with the supported list rather
+    // than per-fixture deep in the harness.
+    if oracle::toolchain(&compiler).is_none() {
+        return Err(format!(
+            "unknown --compiler {compiler:?}; supported: {}",
+            oracle::supported_toolchains()
+        )
+        .into());
+    }
 
     match sub.as_str() {
         "capture" => {

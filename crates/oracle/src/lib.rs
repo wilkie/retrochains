@@ -243,6 +243,61 @@ impl OracleConfig {
     }
 }
 
+/// A supported compiler toolchain: its `--compiler` name and the
+/// constructors for everything that varies per vendor. This is the single
+/// registry the fixtures harness consults, so the per-compiler facts
+/// (oracle distribution, dosbox config, clock anchor) live in exactly one
+/// place and can't drift out of sync across call sites.
+#[derive(Debug, Clone, Copy)]
+pub struct ToolchainProfile {
+    /// Identifier shared by the `--compiler` flag, `invocation.<name>.toml`
+    /// and `expected/<name>/`.
+    pub name: &'static str,
+    /// Builds the oracle config (distribution + dosbox + faketime) for a
+    /// given workspace root.
+    pub oracle_config: fn(&Path) -> OracleConfig,
+    /// The clock anchor for this toolchain. Also embedded in `oracle_config`;
+    /// exposed separately so callers that only need the time (e.g. stamping
+    /// input mtimes) don't have to build a full config or supply a root.
+    pub fake_time: fn() -> FakeTime,
+}
+
+/// Every compiler toolchain the project can drive.
+///
+/// **To add a vendor, add one row here** — together with its
+/// [`DistroSpec`], [`FakeTime`], and `OracleConfig::for_*` constructor. The
+/// fixtures harness and CLI discover supported compilers purely from this
+/// table; nothing else needs editing.
+pub const TOOLCHAINS: &[ToolchainProfile] = &[
+    ToolchainProfile {
+        name: "bcc",
+        oracle_config: OracleConfig::for_workspace,
+        fake_time: FakeTime::bc2,
+    },
+    ToolchainProfile {
+        name: "msc",
+        oracle_config: OracleConfig::for_msc500_workspace,
+        fake_time: FakeTime::msc500,
+    },
+];
+
+/// Look up a toolchain profile by `--compiler` name. `None` for an
+/// unregistered vendor.
+#[must_use]
+pub fn toolchain(name: &str) -> Option<&'static ToolchainProfile> {
+    TOOLCHAINS.iter().find(|t| t.name == name)
+}
+
+/// Comma-separated list of supported `--compiler` names, for error messages.
+#[must_use]
+pub fn supported_toolchains() -> String {
+    TOOLCHAINS
+        .iter()
+        .map(|t| t.name)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// The oracle. Owns the lazily-extracted distribution tree and drives
 /// DOSBox. Each `Oracle` instance is scoped to one distribution; to
 /// drive both BC2 and MSC500 in the same process, open two oracles.

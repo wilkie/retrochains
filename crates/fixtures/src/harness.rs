@@ -11,28 +11,29 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
 
-use oracle::{Oracle, OracleConfig, OracleInvocation, OracleOutput, OracleRun};
+use oracle::{FakeTime, Oracle, OracleConfig, OracleInvocation, OracleOutput, OracleRun};
 
 use crate::diff::{Diff, ManifestDiff, diff_bytes, diff_manifests};
 use crate::fixture::{Fixture, ToolName};
 use crate::manifest::{Manifest, OracleSummary, OutputEntry, RunSummary};
 use crate::timefmt;
 
-/// Per-compiler clock anchors. Each value must match the corresponding
-/// `oracle::FakeTime::*().instant` so inputs materialized for our
-/// toolchain see the same mtime the oracle pinned them to.
-///   - bcc:  1991-04-23 12:00:00 UTC = BC2 release date
-///   - msc:  1987-10-15 12:00:00 UTC = MSC 5.0 release date
-const PIN_EPOCH_SECS_BCC: u64 = 672_408_000;
-const PIN_EPOCH_SECS_MSC: u64 = 561_297_600;
+/// The clock anchor for a compiler comes from the single toolchain registry
+/// in the `oracle` crate (`oracle::toolchain`), so the harness can't drift
+/// from the instant the oracle actually pins. An unrecognized compiler falls
+/// back to the bcc anchor — the time helpers are infallible; an unknown
+/// compiler becomes an error in [`oracle_config_for`] (and earlier, at the
+/// CLI).
+fn fake_time_for(compiler: &str) -> FakeTime {
+    oracle::toolchain(compiler).map_or_else(FakeTime::bc2, |t| (t.fake_time)())
+}
 
 fn pin_epoch_secs_for(compiler: &str) -> u64 {
-    match compiler {
-        "msc" => PIN_EPOCH_SECS_MSC,
-        // Default to bcc for any unrecognized compiler so existing
-        // bcc fixtures continue to anchor at the BC2 instant.
-        _ => PIN_EPOCH_SECS_BCC,
-    }
+    fake_time_for(compiler)
+        .instant
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 /// Capture a fixture: run the oracle and write a fresh `expected/`.
@@ -292,7 +293,7 @@ fn our_summary(fixture: &Fixture) -> OracleSummary {
         tool: fixture.invocation.tool.as_str().to_owned(),
         args: fixture.invocation.args.clone(),
         dosbox_version: None,
-        fake_time: Some(faketime_iso_for(&fixture.compiler).to_owned()),
+        fake_time: Some(faketime_iso_for(&fixture.compiler)),
     }
 }
 
@@ -311,21 +312,22 @@ fn run_oracle(workspace_root: &Path, fixture: &Fixture) -> Result<OracleRun, Har
     oracle.run(&inv).map_err(|e| HarnessError::Oracle(e.to_string()))
 }
 
-/// Map a fixture's `compiler` field to the right [`OracleConfig`].
-/// Today we recognize "bcc" (BC2.zip) and "msc" (MSC500.zip); future
-/// vendors are a one-line addition. Anything else is a harness-time
-/// error rather than a silent fall-through to BC2.
+/// Map a fixture's `compiler` field to the right [`OracleConfig`] via the
+/// toolchain registry (`oracle::TOOLCHAINS`). Adding a vendor is one row
+/// there. An unregistered compiler is a harness-time error rather than a
+/// silent fall-through to BC2.
 fn oracle_config_for(
     workspace_root: &Path,
     compiler: &str,
 ) -> Result<OracleConfig, HarnessError> {
-    match compiler {
-        "bcc" => Ok(OracleConfig::for_workspace(workspace_root)),
-        "msc" => Ok(OracleConfig::for_msc500_workspace(workspace_root)),
-        other => Err(HarnessError::Oracle(format!(
-            "no oracle profile registered for compiler {other:?}"
-        ))),
-    }
+    let profile = oracle::toolchain(compiler).ok_or_else(|| {
+        HarnessError::Oracle(format!(
+            "no oracle profile registered for compiler {compiler:?} \
+             (supported: {})",
+            oracle::supported_toolchains()
+        ))
+    })?;
+    Ok((profile.oracle_config)(workspace_root))
 }
 
 fn build_manifest(fixture: &Fixture, run: &OracleRun, oracle: OracleSummary) -> Manifest {
@@ -357,21 +359,17 @@ fn oracle_summary(fixture: &Fixture) -> OracleSummary {
         tool: fixture.invocation.tool.as_str().to_owned(),
         args: fixture.invocation.args.clone(),
         dosbox_version: None,
-        fake_time: Some(faketime_iso_for(&fixture.compiler).to_owned()),
+        fake_time: Some(faketime_iso_for(&fixture.compiler)),
     }
 }
 
-fn faketime_iso_for(compiler: &str) -> &'static str {
-    match compiler {
-        // BC2 release date.
-        "bcc" => "1991-04-23T12:00:00Z",
-        // MSC 5.0 release date.
-        "msc" => "1987-10-15T12:00:00Z",
-        // Fall back to BC2 — pre-existing manifests for `bcc` fixtures
-        // expect this exact string and we don't want a future
-        // unrecognized compiler to silently change captured goldens.
-        _ => "1991-04-23T12:00:00Z",
-    }
+/// The faketime anchor in ISO-8601 form for the manifest's `fake_time`
+/// field, derived from the registry's [`FakeTime`] (whose `timestamp` is
+/// `YYYY-MM-DD hh:mm:ss`) so it always denotes the same instant the oracle
+/// pinned. e.g. bcc -> "1991-04-23T12:00:00Z", msc -> "1987-10-15T12:00:00Z".
+fn faketime_iso_for(compiler: &str) -> String {
+    let ts = fake_time_for(compiler).timestamp;
+    format!("{}Z", ts.replacen(' ', "T", 1))
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
