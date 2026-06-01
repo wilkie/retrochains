@@ -1,6 +1,7 @@
 //! Fixture corpus loader and capture/verify harness. See `specs/FIXTURES.md`
 //! for the on-disk format and the workflow this crate supports.
 
+pub mod dashboard;
 mod diff;
 mod fixture;
 mod harness;

@@ -3,6 +3,7 @@
 //!     xfix capture <fixture>                       # run the oracle, write expected/
 //!     xfix verify [--toolchain T] <fixture>        # diff a fresh run against expected/
 //!     xfix verify-all [--toolchain T] [--jobs N]   # verify every fixture in parallel
+//!     xfix dashboard [--jobs N] [--out PATH]       # cross-compiler coverage HTML
 //!
 //! `--toolchain oracle` (default) re-runs the oracle (a determinism check
 //! on the capture itself). `--toolchain ours` runs our host-side
@@ -42,6 +43,7 @@ fn try_main() -> Result<ExitCode, Box<dyn std::error::Error>> {
     let mut toolchain = Toolchain::Oracle;
     let mut fixture_path: Option<PathBuf> = None;
     let mut jobs: Option<usize> = None;
+    let mut out: Option<PathBuf> = None;
     // Compiler defaults to "bcc". Supported targets come from the toolchain
     // registry (`oracle::TOOLCHAINS`); see `specs/plans/SECOND_COMPILER.md`.
     let mut compiler = String::from("bcc");
@@ -62,6 +64,10 @@ fn try_main() -> Result<ExitCode, Box<dyn std::error::Error>> {
             "--jobs" => {
                 let v = it.next().ok_or("--jobs needs a positive integer")?;
                 jobs = Some(v.parse().map_err(|_| format!("--jobs: not a number: {v}"))?);
+            }
+            "--out" => {
+                let v = it.next().ok_or("--out needs a path")?;
+                out = Some(PathBuf::from(v));
             }
             path if !path.starts_with("--") => {
                 fixture_path = Some(PathBuf::from(path));
@@ -109,6 +115,18 @@ fn try_main() -> Result<ExitCode, Box<dyn std::error::Error>> {
             }
         }
         "verify-all" => verify_all(&workspace_root, toolchain, jobs, &compiler),
+        "dashboard" => {
+            let out = out.unwrap_or_else(|| workspace_root.join("target").join("coverage.html"));
+            let summary = fixtures::dashboard::generate(&workspace_root, jobs, &out)?;
+            for (c, pass, total) in &summary.totals {
+                eprintln!(
+                    "[xfix] {c}: {pass}/{total} pass ({:.1}%)",
+                    if *total == 0 { 0.0 } else { *pass as f64 / *total as f64 * 100.0 }
+                );
+            }
+            eprintln!("[xfix] dashboard written to {}", summary.out.display());
+            Ok(ExitCode::from(0))
+        }
         other => Err(format!("unknown subcommand: {other}").into()),
     }
 }
