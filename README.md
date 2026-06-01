@@ -1,6 +1,7 @@
 # Retrochains
 
-A clean-room implementation of several old C/C++ compilers.
+A clean-room implementation of several old C/C++ compilers written in Rust with
+WebAssembly builds for browser-based TypeScript and JavaScript use.
 
 Currently, this is targetting mostly x86 compiler toolchains from the 1980s and
 1990s.
