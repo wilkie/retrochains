@@ -222,7 +222,7 @@ pub(crate) fn is_long_shift1(e: &Expr, locals: &Locals<'_>) -> bool {
 /// args pushed right-to-left so earlier params sit at lower offsets). The
 /// plain `param_disp` assumes 2 bytes per param, which is wrong once a long
 /// precedes the one being addressed.
-fn long_param_disp(idx: usize, locals: &Locals<'_>) -> i16 {
+pub(crate) fn long_param_disp(idx: usize, locals: &Locals<'_>) -> i16 {
     let mut d = 4i16;
     for k in 0..idx {
         d += if locals.is_long_param(k) { 4 } else { 2 };

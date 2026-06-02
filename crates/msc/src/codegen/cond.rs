@@ -52,6 +52,15 @@ pub(crate) fn emit_cond_skip(cond: &Cond, take_then_disp: i8, locals: &Locals<'_
                 fixups.push(f);
             }
         }
+        Cond::Cmp { op, left, right }
+            if long_operand(left, locals) && long_operand(right, locals) =>
+        {
+            // 32-bit comparison: a multi-branch sequence (not the single
+            // cmp+jcc int shape). See emit_long_cmp_skip.
+            let unsigned = long_operand_unsigned(left, locals)
+                || long_operand_unsigned(right, locals);
+            emit_long_cmp_skip(*op, left, right, take_then_disp, unsigned, locals, out, fixups);
+        }
         _ => {
             let jcc = match cond {
                 Cond::Truthy(_) => 0x74, // je on zero
@@ -62,6 +71,144 @@ pub(crate) fn emit_cond_skip(cond: &Cond, take_then_disp: i8, locals: &Locals<'_
             out.push(jcc);
             out.push(take_then_disp as u8);
         }
+    }
+}
+
+/// Lower `if (a <op> b)` for two long operands as the skip-on-false sequence
+/// MSC emits. The RHS is loaded into DX:AX; the LHS is compared word-wise
+/// from memory. Ordering compares the high word first (signed jg/jl or
+/// unsigned ja/jb) with the low word as an unsigned tiebreak; eq/ne compare
+/// the low word first. Multiple jccs target two labels — the else-label
+/// (false: skip the then-block) and the then-label (true: fall into it) —
+/// so we lay the sequence out and compute each rel8 forward displacement.
+/// Fixtures 234-237, 2864, 2868, 2869.
+fn emit_long_cmp_skip(
+    op: RelOp,
+    left: &Expr,
+    right: &Expr,
+    take_then_disp: i8,
+    unsigned: bool,
+    locals: &Locals<'_>,
+    out: &mut Vec<u8>,
+    fixups: &mut Vec<Fixup>,
+) {
+    // RHS into DX:AX (built into a scratch buffer so its size is known).
+    let mut load = Vec::new();
+    let mut load_fx = Vec::new();
+    emit_long_to_dx_ax(right, locals, &mut load, &mut load_fx);
+    let (cmp_lo, lo_fx) = long_cmp_word(left, 0, false, locals);
+    let (cmp_hi, hi_fx) = long_cmp_word(left, 2, true, locals);
+
+    // Each step is a cmp (with optional global fixup) or a jcc to a label.
+    enum Step<'a> {
+        Cmp(&'a [u8], &'a Option<(usize, usize)>),
+        Jcc(u8, bool), // (opcode, to_then?)
+    }
+    let (hi_f, hi_t, lo_f) = long_ordering_jccs(op, unsigned);
+    let steps: Vec<Step> = match op {
+        RelOp::Eq => vec![
+            Step::Cmp(&cmp_lo, &lo_fx), Step::Jcc(0x75, false), // jne else
+            Step::Cmp(&cmp_hi, &hi_fx), Step::Jcc(0x75, false), // jne else
+        ],
+        RelOp::Ne => vec![
+            Step::Cmp(&cmp_lo, &lo_fx), Step::Jcc(0x75, true), // jne then
+            Step::Cmp(&cmp_hi, &hi_fx), Step::Jcc(0x74, false), // je else
+        ],
+        _ => vec![
+            Step::Cmp(&cmp_hi, &hi_fx),
+            Step::Jcc(hi_f, false), // high word decides false
+            Step::Jcc(hi_t, true),  // high word decides true
+            Step::Cmp(&cmp_lo, &lo_fx),
+            Step::Jcc(lo_f, false), // low word (unsigned) tiebreak
+        ],
+    };
+
+    let seq_size: usize = load.len()
+        + steps.iter().map(|s| match s { Step::Cmp(b, _) => b.len(), Step::Jcc(..) => 2 }).sum::<usize>();
+    let then_off = seq_size as i32;
+    let else_off = seq_size as i32 + take_then_disp as i32;
+
+    let base = out.len();
+    out.extend_from_slice(&load);
+    for mut f in load_fx {
+        f.body_offset += base;
+        fixups.push(f);
+    }
+    let mut pos = load.len();
+    for step in steps {
+        match step {
+            Step::Cmp(bytes, fx) => {
+                out.extend_from_slice(bytes);
+                if let Some((rel, gidx)) = fx {
+                    fixups.push(Fixup {
+                        body_offset: base + pos + rel,
+                        kind: FixupKind::GlobalAddr { global_idx: *gidx },
+                    });
+                }
+                pos += bytes.len();
+            }
+            Step::Jcc(opcode, to_then) => {
+                let target = if to_then { then_off } else { else_off };
+                let disp = target - (pos as i32 + 2);
+                out.push(opcode);
+                out.push(i8::try_from(disp).expect("long-cmp jcc disp fits rel8") as u8);
+                pos += 2;
+            }
+        }
+    }
+}
+
+/// `cmp WORD PTR [<left word>], <ax|dx>` for a long LHS in memory. Returns the
+/// bytes plus, for a global, the (offset-of-address-within-bytes, global_idx)
+/// so the caller can register a GlobalAddr fixup. `word_off` is 0 (low) or 2
+/// (high); the placeholder address encodes that addend.
+fn long_cmp_word(
+    left: &Expr,
+    word_off: i16,
+    reg_is_dx: bool,
+    locals: &Locals<'_>,
+) -> (Vec<u8>, Option<(usize, usize)>) {
+    let mut b = vec![0x39u8]; // cmp r/m16, r16
+    match left {
+        Expr::Global(j) => {
+            // The GlobalAddr resolver treats the fixup offset as the byte
+            // before the address (it patches body_offset+1/+2), so point it
+            // at the modrm byte. The placeholder holds the word_off addend.
+            let modrm_at = b.len();
+            b.push(if reg_is_dx { 0x16 } else { 0x06 }); // mod00 disp16, reg=dx|ax
+            b.extend_from_slice(&(word_off as u16).to_le_bytes()); // placeholder addend
+            (b, Some((modrm_at, *j)))
+        }
+        Expr::Param(i) => {
+            let disp = long_param_disp(*i, locals) + word_off;
+            b.push(bp_modrm(if reg_is_dx { 0x56 } else { 0x46 }, disp));
+            push_bp_disp(&mut b, disp);
+            (b, None)
+        }
+        Expr::Local(i) => {
+            let disp = locals.disp(*i) + word_off;
+            b.push(bp_modrm(if reg_is_dx { 0x56 } else { 0x46 }, disp));
+            push_bp_disp(&mut b, disp);
+            (b, None)
+        }
+        _ => unreachable!("long_operand gates these forms"),
+    }
+}
+
+/// (high-word false jcc, high-word true jcc, low-word false jcc) for an
+/// ordering comparison. High word uses signed jg/jl (or unsigned ja/jb); the
+/// low word is always an unsigned tiebreak.
+const fn long_ordering_jccs(op: RelOp, unsigned: bool) -> (u8, u8, u8) {
+    match (op, unsigned) {
+        (RelOp::Lt, false) => (0x7F, 0x7C, 0x73), // jg / jl / jae
+        (RelOp::Lt, true) => (0x77, 0x72, 0x73),  // ja / jb / jae
+        (RelOp::Gt, false) => (0x7C, 0x7F, 0x76), // jl / jg / jbe
+        (RelOp::Gt, true) => (0x72, 0x77, 0x76),  // jb / ja / jbe
+        (RelOp::Le, false) => (0x7F, 0x7C, 0x77), // jg / jl / ja
+        (RelOp::Le, true) => (0x77, 0x72, 0x77),  // ja / jb / ja
+        (RelOp::Ge, false) => (0x7C, 0x7F, 0x72), // jl / jg / jb
+        (RelOp::Ge, true) => (0x72, 0x77, 0x72),  // jb / ja / jb
+        _ => (0, 0, 0),                            // eq/ne don't use this
     }
 }
 /// Counterpart of `emit_cond_skip` — emits cmp + a jcc that fires
