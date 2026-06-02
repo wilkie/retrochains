@@ -282,10 +282,15 @@ pub(crate) fn emit_return(
         } else if let Expr::Param(i) = expr
             && locals.is_char_param(*i)
         {
-            // `return c` where `c` is a char param: byte load + cbw.
+            // `return c` where `c` is a char param: byte load + cbw, plus a
+            // cwd to widen into DX:AX when the function returns long
+            // (`return (long)c`, fixture 3183).
             let disp = param_disp(*i) as u8;
             out.extend_from_slice(&[0x8A, 0x46, disp]); // mov al, [bp+4]
             out.push(0x98); // cbw
+            if return_long {
+                out.push(0x99); // cwd
+            }
             out.extend_from_slice(frame.epilogue_bytes());
             return;
         } else if return_long
@@ -460,6 +465,18 @@ pub(crate) fn emit_return(
             emit_long_to_dx_ax(expr, locals, out, fixups);
         } else {
             emit_expr_to_ax(expr, locals, out, fixups);
+            if return_long {
+                // int->long promotion of `return (long)<int>`: sign-extend
+                // (cwd) for signed, zero-extend (sub dx,dx) for unsigned int.
+                let unsigned = matches!(expr, Expr::Param(i) if locals.is_unsigned_param(*i))
+                    || matches!(expr, Expr::Local(i) if locals.is_unsigned_local(*i))
+                    || matches!(expr, Expr::Global(j) if locals.is_unsigned_global(*j));
+                if unsigned {
+                    out.extend_from_slice(&[0x2B, 0xD2]); // sub dx, dx
+                } else {
+                    out.push(0x99); // cwd
+                }
+            }
         }
     }
     out.extend_from_slice(frame.epilogue_bytes());
