@@ -1321,6 +1321,7 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
     // offsets for call resolution + chkstk FIXUPs.
     let long_globals: Vec<bool> = unit.globals.iter().map(|g| g.is_long).collect();
     let char_globals: Vec<bool> = unit.globals.iter().map(|g| !g.is_pointer && g.element_size == 1 && g.array_len == 1).collect();
+    let global_elem_sizes: Vec<usize> = unit.globals.iter().map(|g| g.element_size).collect();
     let unsigned_globals: Vec<bool> = unit.globals.iter().map(|g| g.is_unsigned).collect();
     let float_globals: Vec<usize> = unit.globals.iter()
         .map(|g| if g.is_float { g.element_size } else { 0 }).collect();
@@ -1339,7 +1340,7 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
     let function_emits: Vec<FunctionEmit> = unit
         .functions
         .iter()
-        .map(|f| emit_function(f, &long_globals, &char_globals, &unsigned_globals, &float_globals, &char_returners, &float_returners, &long_param_funcs))
+        .map(|f| emit_function(f, &long_globals, &char_globals, &unsigned_globals, &float_globals, &global_elem_sizes, &char_returners, &float_returners, &long_param_funcs))
         .collect();
 
     // Per-function global offset within the _TEXT segment.
@@ -2320,10 +2321,10 @@ struct ConstProp {
     ptr_addr: std::collections::HashMap<usize, (AliasTarget, i32)>,
     /// Copy of local_specs for size checks during assignment propagation.
     local_specs: Vec<LocalSpec>,
-    /// Parallel to globals: true when the global's element type is `char`
-    /// (byte). Used to pick IndexByte vs Index when resolving a global-pointer
-    /// subscript through `ptr_alias_g`.
-    global_is_char: Vec<bool>,
+    /// Parallel to globals: each global's element byte size (1 for char arrays
+    /// /scalars, 2 for int, etc). Used to pick IndexByte vs Index and the byte
+    /// offset when resolving a global-pointer subscript through `ptr_alias_g`.
+    global_elem_sizes: Vec<usize>,
 }
 
 /// The lvalue a pointer local currently aliases (`&x`).

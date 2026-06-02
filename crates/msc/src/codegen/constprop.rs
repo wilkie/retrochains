@@ -4,11 +4,11 @@ pub(crate) fn const_prop_globals(
     stmts: &[Stmt],
     local_specs: &[LocalSpec],
     long_globals: &[bool],
-    char_globals: &[bool],
+    global_elem_sizes: &[usize],
 ) -> (Vec<Stmt>, std::collections::HashSet<usize>, std::collections::HashSet<usize>) {
     let mut cp = ConstProp {
         local_specs: local_specs.to_vec(),
-        global_is_char: char_globals.to_vec(),
+        global_elem_sizes: global_elem_sizes.to_vec(),
         ..ConstProp::default()
     };
     for (i, &is_long) in long_globals.iter().enumerate() {
@@ -211,12 +211,12 @@ pub(crate) fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
                 && let Some(&AliasTarget::Global(a)) = cp.ptr_alias_g.get(p)
             {
                 from_ptr_store = true;
-                let is_byte = cp.global_is_char.get(a).copied().unwrap_or(false);
+                let elem = cp.global_elem_sizes.get(a).copied().unwrap_or(2);
                 let k = *disp as i64;
-                *target = if is_byte {
+                *target = if elem == 1 {
                     AssignTarget::IndexedGlobalByte { array: a, byte_off: k as u16 }
                 } else {
-                    AssignTarget::IndexedGlobal { array: a, byte_off: (k * 2) as u16 }
+                    AssignTarget::IndexedGlobal { array: a, byte_off: (k * elem as i64) as u16 }
                 };
             }
             // `x = x op RHS` preserves the `Local(x)` on the left so
@@ -472,7 +472,7 @@ pub(crate) fn cp_clone(cp: &ConstProp) -> ConstProp {
         aliases_used: cp.aliases_used.clone(),
         ptr_addr: cp.ptr_addr.clone(),
         local_specs: cp.local_specs.clone(),
-        global_is_char: cp.global_is_char.clone(),
+        global_elem_sizes: cp.global_elem_sizes.clone(),
     }
 }
 /// If `e` is a pointer local holding `&x`/`&g` (offset 0), the address
@@ -632,8 +632,8 @@ pub(crate) fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
                 && let Expr::IntLit(k) = index.as_ref()
             {
                 let k = *k;
-                let is_byte = cp.global_is_char.get(a).copied().unwrap_or(false);
-                *e = if is_byte {
+                let elem = cp.global_elem_sizes.get(a).copied().unwrap_or(2);
+                *e = if elem == 1 {
                     Expr::IndexByte { array: a, index: Box::new(Expr::IntLit(k)) }
                 } else {
                     Expr::Index { array: a, index: Box::new(Expr::IntLit(k)) }
