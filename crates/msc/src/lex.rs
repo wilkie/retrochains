@@ -427,5 +427,17 @@ pub(crate) fn tokenize(source: &str) -> Result<Vec<Tok>, EmitError> {
             }
         }
     }
-    Ok(toks)
+    // Adjacent string-literal concatenation (`"ab" "cd"` → `"abcd"`): C joins
+    // consecutive string literal tokens into one before parsing.
+    let mut merged: Vec<Tok> = Vec::with_capacity(toks.len());
+    for t in toks {
+        if let Tok::StrLit(cur) = &t
+            && let Some(Tok::StrLit(prev)) = merged.last_mut()
+        {
+            prev.extend_from_slice(cur);
+        } else {
+            merged.push(t);
+        }
+    }
+    Ok(merged)
 }
