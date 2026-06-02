@@ -2827,6 +2827,16 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                     let step = step_sign * if ptsz > 0 { ptsz as i32 } else { 1 };
                     return Ok(Expr::PostMutateLocal { local_idx: idx, step });
                 }
+                // Array name in non-subscript/non-member position decays to its
+                // base address (`int a[N]` → &a[0]). Scalars, pointers, longs,
+                // and structs stay as plain values. Mirrors the global path.
+                // Fixtures 1339, 2802, ...
+                let s = &p.local_specs[idx];
+                if s.array_len > 1 && s.pointee_size == 0 && !s.is_far_ptr
+                    && s.struct_idx.is_none() && !s.is_long
+                {
+                    return Ok(Expr::AddrOfLocal(idx));
+                }
                 Ok(Expr::Local(idx))
             } else if let Some(idx) = p.param_names.iter().position(|n| *n == name) {
                 // `<param>[K]` for `int *p` / `int p[]` parameters →
