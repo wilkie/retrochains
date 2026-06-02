@@ -538,6 +538,34 @@ pub(crate) fn emit_assign_global(global_idx: usize, value: &Expr, locals: &Local
         fixups.push(Fixup { body_offset: call, kind: FixupKind::ExtCall { target: helper.to_owned() } });
         return;
     }
+    // Long-global compound mul/div/mod `g *= r` / `g /= r` / `g %= r`: a
+    // runtime-helper call taking the RHS long (DX:AX, pushed high-then-low)
+    // and the global's address. Fixtures 747, 748, 762, 763, 787, 788.
+    if locals.is_long_global(global_idx)
+        && let Expr::BinOp { op, left, right } = value
+        && matches!(op, BinOp::Mul | BinOp::Div | BinOp::Mod)
+        && matches!(left.as_ref(), Expr::Global(g) if *g == global_idx)
+    {
+        let helper = match (op, locals.is_unsigned_global(global_idx)) {
+            (BinOp::Mul, _) => "__aNNalmul",     // multiply is sign-agnostic
+            (BinOp::Div, false) => "__aNNaldiv",
+            (BinOp::Div, true) => "__aNNauldiv",
+            (BinOp::Mod, false) => "__aNNalrem",
+            (BinOp::Mod, true) => "__aNNaurem",
+            _ => unreachable!(),
+        };
+        emit_long_to_dx_ax(right, locals, out, fixups); // RHS long → DX:AX
+        out.push(0x52); // push dx
+        out.push(0x50); // push ax
+        let b8 = out.len();
+        out.extend_from_slice(&[0xB8, 0x00, 0x00]); // mov ax, OFFSET g
+        fixups.push(Fixup { body_offset: b8, kind: FixupKind::GlobalAddr { global_idx } });
+        out.push(0x50); // push ax
+        let call = out.len();
+        out.extend_from_slice(&[0xE8, 0x00, 0x00]); // call helper
+        fixups.push(Fixup { body_offset: call, kind: FixupKind::ExtCall { target: helper.to_owned() } });
+        return;
+    }
     // Long-global = long-global. Plain copy through DX:AX.
     //   `b = a` → `mov ax, [a]; mov dx, [a+2];
     //              mov [b], ax; mov [b+2], dx`
