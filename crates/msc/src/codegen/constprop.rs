@@ -43,6 +43,32 @@ pub(crate) fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
         Stmt::Return(e) => prop_expr(e, cp),
         Stmt::ExprStmt(e) => prop_expr(e, cp),
         Stmt::Assign { target, value } => {
+            // Pointer aliasing: `int *p = &x` (p a NEAR pointer) records `p->x`
+            // and leaves x's known value intact — unlike a bare `&x` (which
+            // escapes and invalidates x), writes through p are tracked via the
+            // `*p` rewrite below. The `p = &x` store still emits normally.
+            if let AssignTarget::Local(p) = target
+                && !cp.local_specs.get(*p).map(|s| s.is_far_ptr).unwrap_or(false)
+                && matches!(value, Expr::AddrOfLocal(_) | Expr::AddrOfGlobal(_))
+            {
+                match value {
+                    Expr::AddrOfLocal(x) => { cp.ptr_alias.insert(*p, AliasTarget::Local(*x)); }
+                    Expr::AddrOfGlobal(g) => { cp.ptr_alias.insert(*p, AliasTarget::Global(*g)); }
+                    _ => unreachable!(),
+                }
+                cp.l_known.remove(p);
+                cp.mutated_locals.insert(*p);
+                return;
+            }
+            // `*p = ...` where p aliases x/g → rewrite to a direct store.
+            if let AssignTarget::DerefLocal(p) = target
+                && let Some(&a) = cp.ptr_alias.get(p)
+            {
+                *target = match a {
+                    AliasTarget::Local(x) => AssignTarget::Local(x),
+                    AliasTarget::Global(g) => AssignTarget::Global(g),
+                };
+            }
             // `x = x op RHS` preserves the `Local(x)` on the left so
             // emit_assign can hit the in-place inc/dec/add/sub-mem
             // peepholes (fixtures 1029, 1116). Substituting `x` to its
@@ -88,7 +114,12 @@ pub(crate) fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
             // Mark the assign target as mutated so the emit-time fold
             // view ignores its `spec.init` (fixture 1029, 1154).
             match target {
-                AssignTarget::Local(l) => { cp.mutated_locals.insert(*l); }
+                AssignTarget::Local(l) => {
+                    cp.mutated_locals.insert(*l);
+                    // Reassigning a pointer to a non-address drops its alias.
+                    // (An `&x` init was handled by the early return above.)
+                    cp.ptr_alias.remove(l);
+                }
                 AssignTarget::Global(g) => { cp.mutated_globals.insert(*g); }
                 AssignTarget::IndexedLocal { local, .. }
                 | AssignTarget::IndexedLocalByte { local, .. }
@@ -169,6 +200,7 @@ pub(crate) fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
             cp.g_known.clear();
             cp.l_known.clear();
             cp.la_known.clear();
+            cp.ptr_alias.clear();
             cp.ga_known.clear();
         }
         Stmt::Block(stmts) => {
@@ -190,6 +222,7 @@ pub(crate) fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
                     cp.g_known.clear();
                     cp.l_known.clear();
                     cp.la_known.clear();
+            cp.ptr_alias.clear();
                     cp.ga_known.clear();
                 } else {
                     // No NFC: fold to matched body block. MSC clears the
@@ -199,6 +232,7 @@ pub(crate) fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
                     cp.g_known.clear();
                     cp.l_known.clear();
                     cp.la_known.clear();
+            cp.ptr_alias.clear();
                     cp.ga_known.clear();
                     let mut chosen: Option<usize> = None;
                     let mut default: Option<usize> = None;
@@ -232,6 +266,7 @@ pub(crate) fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
                     cp.g_known.clear();
                     cp.l_known.clear();
                     cp.la_known.clear();
+            cp.ptr_alias.clear();
                     cp.ga_known.clear();
                 }
             } else {
@@ -239,6 +274,7 @@ pub(crate) fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
                 cp.g_known.clear();
                 cp.l_known.clear();
                 cp.la_known.clear();
+            cp.ptr_alias.clear();
                 cp.ga_known.clear();
             }
         }
@@ -253,6 +289,7 @@ pub(crate) fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
             cp.g_known.clear();
             cp.l_known.clear();
             cp.la_known.clear();
+            cp.ptr_alias.clear();
             cp.ga_known.clear();
         }
     }
@@ -266,6 +303,7 @@ pub(crate) fn cp_clone(cp: &ConstProp) -> ConstProp {
         long_globals: cp.long_globals.clone(),
         mutated_locals: cp.mutated_locals.clone(),
         mutated_globals: cp.mutated_globals.clone(),
+        ptr_alias: cp.ptr_alias.clone(),
         local_specs: cp.local_specs.clone(),
     }
 }
@@ -384,6 +422,17 @@ pub(crate) fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
         }
         Expr::DerefByte { ptr } | Expr::DerefWord { ptr } => {
             prop_expr(ptr, cp);
+            // Pointer aliasing: `*p` where p aliases x/g reads the aliased
+            // lvalue directly (and then folds it via known values).
+            if let Expr::Local(p) = ptr.as_ref()
+                && let Some(&a) = cp.ptr_alias.get(p)
+            {
+                *e = match a {
+                    AliasTarget::Local(x) => Expr::Local(x),
+                    AliasTarget::Global(g) => Expr::Global(g),
+                };
+                prop_expr(e, cp);
+            }
         }
         Expr::AddrOfGlobal(_) => {}
         Expr::AddrOfLocal(j) => {

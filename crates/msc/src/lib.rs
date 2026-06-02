@@ -2277,8 +2277,19 @@ struct ConstProp {
     /// reads load from the slot rather than folding the declared init.
     mutated_locals: std::collections::HashSet<usize>,
     mutated_globals: std::collections::HashSet<usize>,
+    /// Pointer-alias tracking: `int *p = &x` records `p -> x`, so a later
+    /// `*p` (read or store) is rewritten to the aliased lvalue and folds /
+    /// stores directly. Cleared at branch boundaries.
+    ptr_alias: std::collections::HashMap<usize, AliasTarget>,
     /// Copy of local_specs for size checks during assignment propagation.
     local_specs: Vec<LocalSpec>,
+}
+
+/// The lvalue a pointer local currently aliases (`&x`).
+#[derive(Clone, Copy, Debug)]
+enum AliasTarget {
+    Local(usize),
+    Global(usize),
 }
 
 
