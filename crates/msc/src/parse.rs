@@ -990,6 +990,24 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
                     other => return Err(EmitError::Unsupported(format!(
                         "expected float local name, got {other:?}"))),
                 };
+                // `float a[N];` — a stack float array. Elements are set by later
+                // `a[K] = <float>` statements (no scalar init here).
+                if matches!(p.peek(), Some(Tok::LBrack)) {
+                    p.bump();
+                    let n = parse_signed_int(p)?;
+                    if n <= 0 {
+                        return Err(EmitError::Unsupported(format!(
+                            "float array length must be positive, got {n}")));
+                    }
+                    p.eat(&Tok::RBrack)?;
+                    let mut s = LocalSpec::float_(size, None);
+                    s.array_len = n as usize;
+                    p.local_names.push(lname);
+                    p.local_specs.push(s.clone());
+                    locals.push(s);
+                    if matches!(p.peek(), Some(Tok::Comma)) { p.bump(); continue; }
+                    break;
+                }
                 let spec = if matches!(p.peek(), Some(Tok::Assign)) {
                     p.bump();
                     // A direct literal init (`float f = 3.0f;`) folds: the local

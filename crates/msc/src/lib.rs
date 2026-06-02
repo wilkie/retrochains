@@ -381,6 +381,9 @@ pub struct Locals<'a> {
     /// BP-relative displacement of the hidden 8-byte temp used to receive a
     /// `return (int)<float-returning call>` result, 0 when unused.
     pub float_call_temp_disp: i16,
+    /// Set after a body-level float store (`a[k] = K.Ff`) leaves a pending x87
+    /// store; the `90 9B` fwait is flushed before the next non-FP statement.
+    pub fpu_pending_fwait: &'a std::cell::Cell<bool>,
 }
 
 #[derive(Default, Debug)]
@@ -1384,6 +1387,20 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
         if f.return_float_width == 0 { continue; }
         for s in &f.body {
             if let Stmt::Return(Expr::FloatLit(bits, is_double)) = s {
+                let w = if *is_double { 8 } else { 4 };
+                if !float_pool.contains(&(*bits, w)) {
+                    float_pool.push((*bits, w));
+                }
+            }
+        }
+    }
+    // …and float/double array element stores (`a[k] = 1.0f`) — width from the
+    // literal (a float array gets float literals, a double array doubles).
+    for f in &unit.functions {
+        for s in &f.body {
+            if let Stmt::Assign { target: AssignTarget::IndexedLocal { local, .. }, value: Expr::FloatLit(bits, is_double) } = s
+                && f.locals.get(*local).map(|l| l.is_float).unwrap_or(false)
+            {
                 let w = if *is_double { 8 } else { 4 };
                 if !float_pool.contains(&(*bits, w)) {
                     float_pool.push((*bits, w));

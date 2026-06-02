@@ -118,6 +118,7 @@ pub(crate) fn emit_function(
     let local_unsigned: Vec<bool> = func.locals.iter().map(|l| l.is_unsigned).collect();
     let local_float: Vec<usize> = func.locals.iter().map(|l| if l.is_float { l.size } else { 0 }).collect();
     let fpu_live: std::cell::Cell<Option<usize>> = std::cell::Cell::new(None);
+    let fpu_pending_fwait: std::cell::Cell<bool> = std::cell::Cell::new(false);
     let mut bytes = Vec::with_capacity(32);
     let mut fixups: Vec<Fixup> = Vec::new();
     // A call that passes a float/double literal pushes it via `sub sp,N;
@@ -418,6 +419,7 @@ pub(crate) fn emit_function(
         fpu_live: &fpu_live,
         return_float_width: func.return_float_width,
         float_call_temp_disp,
+        fpu_pending_fwait: &fpu_pending_fwait,
     };
 
     let mut reachable = true;

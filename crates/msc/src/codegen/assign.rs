@@ -56,6 +56,33 @@ pub(crate) fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_
         locals.fpu_live.set(Some(i));
         return;
     }
+    // Float/double array element store `a[K] = K.Ff`:
+    //   9B <D9|DD> 06 <off16>   fld  <width> [$T]            (FIDRQQ + FloatLoad)
+    //   9B <D9|DD> 5E <disp>    fstp <width> [bp+disp]       (FIDRQQ)
+    // No fwait here — it is flushed (90 9B) before the next non-FP statement
+    // via `fpu_pending_fwait`.
+    if let AssignTarget::IndexedLocal { local, byte_off } = target
+        && locals.is_float_local(local)
+        && let Expr::FloatLit(bits, _) = value
+    {
+        let width = locals.float_local_width(local);
+        let op = if width == 4 { 0xD9u8 } else { 0xDDu8 };
+        let disp = locals.disp(local) + byte_off as i16;
+        fixups.push(Fixup { body_offset: out.len(), kind: FixupKind::FloatMarker { target: "FIDRQQ" } });
+        out.push(0x9B);
+        out.push(op);
+        out.push(0x06);
+        let bo = out.len() - 1;
+        out.extend_from_slice(&[0x00, 0x00]);
+        fixups.push(Fixup { body_offset: bo, kind: FixupKind::FloatLoad { bits: *bits, width } });
+        fixups.push(Fixup { body_offset: out.len(), kind: FixupKind::FloatMarker { target: "FIDRQQ" } });
+        out.push(0x9B);
+        out.push(op);
+        out.push(bp_modrm(0x5E, disp));
+        push_bp_disp(out, disp);
+        locals.fpu_pending_fwait.set(true);
+        return;
+    }
     let local_idx = match target {
         AssignTarget::Local(i) => i,
         AssignTarget::Param(i) => {

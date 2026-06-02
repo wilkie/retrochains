@@ -2,6 +2,13 @@ use crate::*;
 
 /// Emit a single statement (recursive: if-statements contain
 /// nested statements). Returns no value — appends directly to `out`.
+/// A statement that continues an x87 float-store run (`a[k] = K.Ff`) — no
+/// `fwait` is flushed before it.
+fn stmt_is_float_elem_store(stmt: &Stmt, locals: &Locals<'_>) -> bool {
+    matches!(stmt,
+        Stmt::Assign { target: AssignTarget::IndexedLocal { local, .. }, value: Expr::FloatLit(..) }
+            if locals.is_float_local(*local))
+}
 pub(crate) fn emit_stmt(
     stmt: &Stmt,
     locals: &Locals<'_>,
@@ -11,6 +18,14 @@ pub(crate) fn emit_stmt(
     out: &mut Vec<u8>,
     fixups: &mut Vec<Fixup>,
 ) {
+    // Flush a pending x87 store's `fwait` (90 9B) before any statement that is
+    // not another float store — the FxxRQQ emulator's 2-byte patch slot.
+    if locals.fpu_pending_fwait.get() && !stmt_is_float_elem_store(stmt, locals) {
+        locals.fpu_pending_fwait.set(false);
+        fixups.push(Fixup { body_offset: out.len(), kind: FixupKind::FloatMarker { target: "FIWRQQ" } });
+        out.push(0x90);
+        out.push(0x9B);
+    }
     match stmt {
         Stmt::Return(expr) => emit_return(expr, locals, frame, return_int, return_long, out, fixups),
         Stmt::Empty => {}
@@ -903,6 +918,7 @@ pub(crate) fn emit_loop(
         fpu_live: locals.fpu_live,
         return_float_width: locals.return_float_width,
         float_call_temp_disp: locals.float_call_temp_disp,
+        fpu_pending_fwait: locals.fpu_pending_fwait,
     };
     let mut body_buf = Vec::new();
     let mut body_fixups: Vec<Fixup> = Vec::new();
@@ -1517,6 +1533,7 @@ pub(crate) fn emit_do_while(
         fpu_live: locals.fpu_live,
         return_float_width: locals.return_float_width,
         float_call_temp_disp: locals.float_call_temp_disp,
+        fpu_pending_fwait: locals.fpu_pending_fwait,
     };
     let mut body_buf = Vec::new();
     let mut body_fixups: Vec<Fixup> = Vec::new();

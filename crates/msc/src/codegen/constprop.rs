@@ -123,14 +123,17 @@ pub(crate) fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
                 AssignTarget::IndexedLocal { local, byte_off }
                 | AssignTarget::IndexedLocalByte { local, byte_off }
                 | AssignTarget::LocalField { local, byte_off, .. } => {
-                    // Try to fold the value once more — after
-                    // prop_expr's leaf substitution the BinOp may
-                    // have two literal operands ready to collapse.
-                    if let Some(k) = value.fold(&[]) {
+                    // Try to fold the value once more — after prop_expr's leaf
+                    // substitution the BinOp may have two literal operands ready
+                    // to collapse. NOT for a float array, whose element store
+                    // must keep its FloatLit for x87 codegen (fixture 1679).
+                    let is_float_arr = cp.local_specs.get(*local).map(|l| l.is_float).unwrap_or(false);
+                    if !is_float_arr && let Some(k) = value.fold(&[]) {
                         *value = Expr::IntLit(k);
                     }
-                    if let Expr::IntLit(k) = value {
-                        cp.la_known.insert((*local, *byte_off), *k);
+                    // Record the (truncated) element value so later reads fold.
+                    if let Some(k) = value.fold(&[]) {
+                        cp.la_known.insert((*local, *byte_off), k);
                     } else {
                         cp.la_known.remove(&(*local, *byte_off));
                     }
@@ -354,7 +357,9 @@ pub(crate) fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
                 Expr::LocalIndex { local, index } => {
                     prop_expr(index, cp);
                     let k = if let Expr::IntLit(k) = index.as_ref() { Some(*k) } else { None };
-                    (*local, 2u16, k)
+                    // Element size from the local (2 for int, 4/8 for float arrays).
+                    let sz = cp.local_specs.get(*local).map(|l| l.size as u16).unwrap_or(2);
+                    (*local, sz, k)
                 }
                 Expr::LocalIndexByte { local, index } => {
                     prop_expr(index, cp);
