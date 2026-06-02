@@ -566,6 +566,21 @@ pub(crate) fn emit_assign_global(global_idx: usize, value: &Expr, locals: &Local
         fixups.push(Fixup { body_offset: call, kind: FixupKind::ExtCall { target: helper.to_owned() } });
         return;
     }
+    // `g = a <*|/|%> b` (expression-context long mul/div/mod): evaluate via
+    // the runtime helper (result in DX:AX), then store into the global.
+    // Fixtures 231, 232, 233, 245, 246, 247.
+    if locals.is_long_global(global_idx) && is_long_muldiv(value, locals) {
+        emit_long_to_dx_ax(value, locals, out, fixups);
+        out.push(0xA3); // mov [g], ax
+        let off = out.len();
+        out.extend_from_slice(&[0x00, 0x00]);
+        fixups.push(Fixup { body_offset: off - 1, kind: FixupKind::GlobalAddr { global_idx } });
+        out.push(0x89); out.push(0x16); // mov [g+2], dx
+        let off = out.len();
+        out.extend_from_slice(&2u16.to_le_bytes());
+        fixups.push(Fixup { body_offset: off - 1, kind: FixupKind::GlobalAddr { global_idx } });
+        return;
+    }
     // Long-global = long-global. Plain copy through DX:AX.
     //   `b = a` → `mov ax, [a]; mov dx, [a+2];
     //              mov [b], ax; mov [b+2], dx`

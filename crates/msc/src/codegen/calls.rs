@@ -258,6 +258,51 @@ pub(crate) fn is_long_arith_mem(e: &Expr, locals: &Locals<'_>) -> bool {
             && long_rhs_mem(right, locals))
 }
 
+/// The runtime helper for an expression-context long mul/div/mod (operands
+/// pushed on the stack, result returned in DX:AX). `None` for other ops.
+fn long_muldiv_helper(op: BinOp, unsigned: bool) -> Option<&'static str> {
+    Some(match (op, unsigned) {
+        (BinOp::Mul, false) => "__aNlmul",
+        (BinOp::Mul, true) => "__aNulmul",
+        (BinOp::Div, false) => "__aNldiv",
+        (BinOp::Div, true) => "__aNuldiv",
+        (BinOp::Mod, false) => "__aNlrem",
+        (BinOp::Mod, true) => "__aNulrem",
+        _ => return None,
+    })
+}
+
+/// `e` is `<long> * / % <long>` — an expression-context helper-call op.
+pub(crate) fn is_long_muldiv(e: &Expr, locals: &Locals<'_>) -> bool {
+    matches!(e, Expr::BinOp { op, left, right }
+        if long_muldiv_helper(*op, false).is_some()
+            && long_operand(left, locals)
+            && long_operand(right, locals))
+}
+
+/// Push a long operand's two words (high then low) from memory, as MSC does
+/// for the helper-call calling convention.
+fn push_long_operand(e: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    let mut push_global_word = |word_off: i16, j: usize, out: &mut Vec<u8>| {
+        out.push(0xFF);
+        out.push(0x36); // push word [disp16]
+        let modrm_pos = out.len() - 1;
+        out.extend_from_slice(&(word_off as u16).to_le_bytes());
+        fixups.push(Fixup { body_offset: modrm_pos, kind: FixupKind::GlobalAddr { global_idx: j } });
+    };
+    let mut push_bp_word = |disp: i16, out: &mut Vec<u8>| {
+        out.push(0xFF);
+        out.push(bp_modrm(0x76, disp)); // push word [bp+disp]
+        push_bp_disp(out, disp);
+    };
+    match e {
+        Expr::Global(j) => { push_global_word(2, *j, out); push_global_word(0, *j, out); }
+        Expr::Param(i) => { let d = long_param_disp(*i, locals); push_bp_word(d + 2, out); push_bp_word(d, out); }
+        Expr::Local(i) => { let d = locals.disp(*i); push_bp_word(d + 2, out); push_bp_word(d, out); }
+        _ => unreachable!("long_operand gates these forms"),
+    }
+}
+
 /// Emit `op ax,[rhs_lo]; op2 dx,[rhs_hi]` for a bp-relative long RHS, combining
 /// it into DX:AX (which already holds the left operand).
 fn emit_long_op_mem(op: BinOp, rhs: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>) {
@@ -277,6 +322,23 @@ fn emit_long_op_mem(op: BinOp, rhs: &Expr, locals: &Locals<'_>, out: &mut Vec<u8
 
 pub(crate) fn emit_long_to_dx_ax(value: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
     match value {
+        // Expression-context long mul/div/mod: push both operands as longs
+        // (RHS then LHS, each high-then-low), call the runtime helper, result
+        // comes back in DX:AX. Fixtures 231-233, 3173, 3181, ...
+        Expr::BinOp { op, left, right }
+            if long_muldiv_helper(*op, false).is_some()
+                && long_operand(left, locals)
+                && long_operand(right, locals) =>
+        {
+            let unsigned = long_operand_unsigned(left, locals)
+                || long_operand_unsigned(right, locals);
+            let helper = long_muldiv_helper(*op, unsigned).expect("muldiv helper");
+            push_long_operand(right, locals, out, fixups);
+            push_long_operand(left, locals, out, fixups);
+            let call = out.len();
+            out.extend_from_slice(&[0xE8, 0x00, 0x00]); // call helper
+            fixups.push(Fixup { body_offset: call, kind: FixupKind::ExtCall { target: helper.to_owned() } });
+        }
         // 32-bit shift-by-1 of a long: load DX:AX, then shift across both
         // words. Left: shl ax,1; rcl dx,1. Right: (sar|shr) dx,1; rcr ax,1
         // (high word first so the carry threads into the low word). MSC picks

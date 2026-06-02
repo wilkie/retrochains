@@ -448,10 +448,12 @@ pub(crate) fn emit_return(
             out.extend_from_slice(&[0x8B, 0x16, 0x02, 0x00]);
             fixups.push(Fixup { body_offset: body_offset_hi, kind: FixupKind::GlobalAddr { global_idx: *idx } });
         } else if return_long
-            && (is_long_shift1(expr, locals) || is_long_arith_mem(expr, locals))
+            && (is_long_shift1(expr, locals)
+                || is_long_arith_mem(expr, locals)
+                || is_long_muldiv(expr, locals))
         {
-            // `return <long> <op> ..` lowered across DX:AX (shift-by-1 or
-            // inline 2-word arithmetic).
+            // `return <long> <op> ..` lowered across DX:AX (shift-by-1,
+            // inline 2-word arithmetic, or a mul/div/mod helper call).
             emit_long_to_dx_ax(expr, locals, out, fixups);
         } else {
             emit_expr_to_ax(expr, locals, out, fixups);
