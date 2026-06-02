@@ -661,6 +661,7 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
     skip_decl_modifiers(p);
     let mut return_char = false;
     let mut return_long = false;
+    let mut return_float_width = 0usize;
     let return_int = match p.bump().cloned() {
         Some(Tok::Kw("int")) => true,
         Some(Tok::Kw("char")) => { return_char = true; true }
@@ -669,6 +670,10 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
             return_long = true;
             true
         }
+        // `float`/`double` returns go through the __fac floating accumulator,
+        // not AX — `return_int` is false.
+        Some(Tok::Kw("float")) => { return_float_width = 4; false }
+        Some(Tok::Kw("double")) => { return_float_width = 8; false }
         Some(Tok::Kw("void")) => false,
         Some(Tok::Kw("struct")) => {
             // Skip the struct's name. Phase 1 only models functions
@@ -1219,8 +1224,23 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
     }
     p.eat(&Tok::RBrace)?;
 
+    // Float/double-returning functions: const-fold each `return <expr>` to a
+    // float literal so the value materializes as a CONST temp for the __fac
+    // return sequence (and survives the int-oriented const-prop pass, which
+    // would otherwise truncate the operands).
+    if return_float_width != 0 {
+        let is_double = return_float_width == 8;
+        for s in &mut body {
+            if let Stmt::Return(e) = s
+                && let Some(v) = float_fold_value(e, &p.local_specs)
+            {
+                *e = Expr::FloatLit(v.to_bits(), is_double);
+            }
+        }
+    }
+
     let local_names = p.local_names.clone();
-    Ok(Function { name, return_int, return_long, return_char, params, param_is_char, param_is_long, param_is_unsigned, param_float_width, locals, local_names, body })
+    Ok(Function { name, return_int, return_long, return_char, return_float_width, params, param_is_char, param_is_long, param_is_unsigned, param_float_width, locals, local_names, body })
 }
 pub(crate) fn parse_signed_int(p: &mut Parser<'_>) -> Result<i32, EmitError> {
     // Accept any compile-time constant expression — integer literal,

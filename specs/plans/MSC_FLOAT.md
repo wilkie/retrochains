@@ -197,6 +197,30 @@ the `faddp st(1),st`/etc. register forms — decode from a runtime fixture.
 and stores at the other (`fld dword; fstp qword` and vice-versa). Targets:
 1676, 1677.
 
+### Float/double returns via `__fac` (callee side, const return — done)
+A `float`/`double`-returning function returns its value through the `__fac`
+floating accumulator (a trailing data extern):
+```
+9B <D9|DD> 06 <off16>   fld  <width> [$T]      (FIDRQQ + FloatLoad)
+9B DD 1E <off16>        fstp QWORD [__fac]      (FIDRQQ + ExtData __fac)  ; always qword
+B8 <imm16>              mov  ax, OFFSET __fac   (ExtData __fac)           ; AX = &__fac
+90 9B                   nop; fwait              (FIWRQQ)
+```
+- `Function.return_float_width` (parser accepts `float`/`double` return types,
+  `return_int=false`); the parser const-folds each `return <expr>` to a FloatLit
+  so it survives the int const-prop pass and materializes as a CONST temp.
+  `Locals.return_float_width` carries it to `emit_return`.
+- `FixupKind::ExtData { target }` → `c4 off 56 <idx>` for the `__fac` references;
+  `__fac` is registered as a trailing EXTDEF (`uses_fac`).
+- `fwait` rule extended: the last float init emits no `fwait` when the body
+  starts with an FP op (`body_starts_fp` — coupled `(int)<local>` or a float
+  `return`).
+
+Flips 3997, 3998, 4002 (`float`/`double main` with const-folded return, no
+caller-receive). MSC at 2004/3952. **Still TODO**: caller-receive (the
+`lea di; mov si,ax; movsw×4` copy from `__fac` into a double local — 1684,
+2144, 4001, 2146), `fild` (int→float, 4001), runtime `fdiv`/`fadd` (2144).
+
 ### 3f — float/double args, returns, globals
 - Double/float **args**: caller pushes the 4/8 bytes (or `fld`+`sub sp`/
   `fstp [sp]`); needed for 1678's `main` calling `dbl_to_int(3.5)`. **Done in

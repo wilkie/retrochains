@@ -217,6 +217,13 @@ pub(crate) fn emit_function(
         (Some(r), Some(l)) if r == l => Some(r),
         _ => None,
     };
+    // Whether the first op after the prologue float inits is itself an FP
+    // instruction — then no `fwait` is needed after the last float init. True
+    // for a coupled `(int)<local>` (→ `call __ftol`) and for a float `return`
+    // (→ `fld …; fstp __fac`).
+    let body_starts_fp = coupled_float_local.is_some()
+        || (func.return_float_width != 0
+            && matches!(body.first(), Some(Stmt::Return(Expr::FloatLit(..)))));
 
     // Initialized-local writes — `int x = K;` → `c7 46 disp lo hi`;
     // `char x = K;` → `c6 46 disp imm8`. Arrays don't get a constant
@@ -257,7 +264,7 @@ pub(crate) fn emit_function(
                 // fwait only when the next op is non-FP.
                 let more_floats_after = func.locals[i + 1..].iter()
                     .any(|l| l.is_float && l.float_bits.is_some());
-                if !more_floats_after && !coupled {
+                if !more_floats_after && !body_starts_fp {
                     fixups.push(Fixup { body_offset: bytes.len(), kind: FixupKind::FloatMarker { target: "FIWRQQ" } });
                     bytes.push(0x90); // nop — emulator patch slot
                     bytes.push(0x9B); // fwait
@@ -348,6 +355,7 @@ pub(crate) fn emit_function(
         long_param_funcs,
         loop_stack: &loop_stack,
         fpu_live: &fpu_live,
+        return_float_width: func.return_float_width,
     };
 
     let mut reachable = true;

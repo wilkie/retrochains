@@ -171,6 +171,10 @@ pub struct Function {
     /// True when the function returns `char` — callers should cbw the
     /// AL result into AX before using it as an int.
     pub return_char: bool,
+    /// Byte width (4/8) of a `float`/`double` return, 0 otherwise. The value
+    /// is returned via the `__fac` floating accumulator: the callee does
+    /// `fstp QWORD __fac; mov ax, OFFSET __fac`, returning AX = &__fac.
+    pub return_float_width: usize,
     pub params: Vec<String>,
     /// Parallel to `params`: true when the corresponding parameter is
     /// declared as `char` (signed or unsigned). Used to emit byte-compare
@@ -367,6 +371,9 @@ pub struct Locals<'a> {
     /// the stack top). A coupled `return (int)<local>` consumes it with a bare
     /// `call __ftol`; otherwise the value must be reloaded with `fld` first.
     pub fpu_live: &'a std::cell::Cell<Option<usize>>,
+    /// Byte width (4/8) of the enclosing function's `float`/`double` return,
+    /// 0 otherwise. A `return <float>` emits the `__fac` accumulator sequence.
+    pub return_float_width: usize,
 }
 
 #[derive(Default, Debug)]
@@ -1049,6 +1056,10 @@ enum FixupKind {
     /// _DATA-as-target via the pre-emitted threads (`c4 off 9d`).
     /// Fixtures 4104, 4106.
     GlobalAddr { global_idx: usize },
+    /// Reference to a runtime *data* extern by name (e.g. `__fac`, the
+    /// floating accumulator). Seg-relative external FIXUP `c4 off 56 <idx>`
+    /// (same shape as a COMDEF GlobalAddr). The placeholder stays 0.
+    ExtData { target: &'static str },
 }
 
 /// Same as `Fixup` but with the body_offset translated to the
@@ -1350,6 +1361,19 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
             }
         }
     }
+    // …and the const-folded value of a `float`/`double` `return` (parse folds
+    // it to a FloatLit), materialized as a CONST temp for the __fac sequence.
+    for f in &unit.functions {
+        if f.return_float_width == 0 { continue; }
+        for s in &f.body {
+            if let Stmt::Return(Expr::FloatLit(bits, is_double)) = s {
+                let w = if *is_double { 8 } else { 4 };
+                if !float_pool.contains(&(*bits, w)) {
+                    float_pool.push((*bits, w));
+                }
+            }
+        }
+    }
     if !float_pool.is_empty() && const_cursor % 2 != 0 {
         const_cursor += 1;
     }
@@ -1437,6 +1461,10 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
             }
             temps.len() >= 3
         });
+    // `__fac` (the floating accumulator) is a data extern referenced by any
+    // float/double-returning function; it trails the function names in the
+    // EXTDEF table.
+    let uses_fac = unit.functions.iter().any(|f| f.return_float_width != 0);
 
     // SEGDEF table. MSC uses acbp=0x48 for every segment in the
     // small model.
@@ -1588,6 +1616,10 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
             // CONST temps (see `ftol_trailing`).
             if ftol_trailing {
                 entries.push(("__ftol".to_owned(), 0x00));
+            }
+            // `__fac` (floating accumulator) trails the function names.
+            if uses_fac {
+                entries.push(("__fac".to_owned(), 0x00));
             }
             emit_group(&mut b, &entries, &mut extdef_idx_of, &mut next_idx);
         } else {
@@ -1797,6 +1829,14 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
                     ledata_fixups.push(ResolvedFixup {
                         ledata_offset: caller_off + fx.body_offset + 1,
                         kind: FixupKind::GlobalAddr { global_idx: *global_idx },
+                    });
+                }
+                FixupKind::ExtData { target } => {
+                    // Data extern (e.g. __fac); placeholder stays 0, the linker
+                    // substitutes the address via the EXTDEF FIXUP.
+                    ledata_fixups.push(ResolvedFixup {
+                        ledata_offset: caller_off + fx.body_offset + 1,
+                        kind: FixupKind::ExtData { target },
                     });
                 }
             }
@@ -2013,6 +2053,12 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
                         .unwrap_or_else(|| panic!("EXTDEF index missing for COMDEF `{sym}`"));
                     payload.extend_from_slice(&[0xC4, off, 0x56, idx]);
                 }
+            }
+            FixupKind::ExtData { target } => {
+                let idx = *extdef_idx_of
+                    .get(*target)
+                    .unwrap_or_else(|| panic!("EXTDEF index missing for data extern `{target}`"));
+                payload.extend_from_slice(&[0xC4, off, 0x56, idx]);
             }
             FixupKind::TuLocalCall { .. } => unreachable!(),
         }

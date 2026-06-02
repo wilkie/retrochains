@@ -272,6 +272,45 @@ pub(crate) fn emit_return(
     out: &mut Vec<u8>,
     fixups: &mut Vec<Fixup>,
 ) {
+    // Float/double return via the `__fac` accumulator. The parser folds the
+    // returned expression to a FloatLit (materialized as a CONST temp):
+    //   9B <D9|DD> 06 <off16>  fld  <width> [$T]        (FIDRQQ + FloatLoad)
+    //   9B DD 1E <off16>       fstp QWORD [__fac]        (FIDRQQ + ExtData)
+    //   B8 <imm16>             mov  ax, OFFSET __fac     (ExtData)
+    //   90 9B                  nop; fwait                (FIWRQQ)
+    if locals.return_float_width != 0 {
+        if let Expr::FloatLit(bits, is_double) = expr {
+            let width = if *is_double { 8 } else { 4 };
+            let op = if width == 4 { 0xD9u8 } else { 0xDDu8 };
+            // fld <width> [$T]
+            fixups.push(Fixup { body_offset: out.len(), kind: FixupKind::FloatMarker { target: "FIDRQQ" } });
+            out.push(0x9B);
+            out.push(op);
+            out.push(0x06);
+            let bo = out.len() - 1;
+            out.extend_from_slice(&[0x00, 0x00]);
+            fixups.push(Fixup { body_offset: bo, kind: FixupKind::FloatLoad { bits: *bits, width } });
+            // fstp QWORD [__fac]  (always qword, modrm 1E = /3 [disp16])
+            fixups.push(Fixup { body_offset: out.len(), kind: FixupKind::FloatMarker { target: "FIDRQQ" } });
+            out.push(0x9B);
+            out.push(0xDD);
+            out.push(0x1E);
+            let bo = out.len() - 1;
+            out.extend_from_slice(&[0x00, 0x00]);
+            fixups.push(Fixup { body_offset: bo, kind: FixupKind::ExtData { target: "__fac" } });
+            // mov ax, OFFSET __fac
+            out.push(0xB8);
+            let bo = out.len() - 1;
+            out.extend_from_slice(&[0x00, 0x00]);
+            fixups.push(Fixup { body_offset: bo, kind: FixupKind::ExtData { target: "__fac" } });
+            // nop; fwait (emulator patch slot, FIWRQQ marker)
+            fixups.push(Fixup { body_offset: out.len(), kind: FixupKind::FloatMarker { target: "FIWRQQ" } });
+            out.push(0x90);
+            out.push(0x9B);
+            out.extend_from_slice(frame.epilogue_bytes());
+            return;
+        }
+    }
     if return_int {
         // Return-of-call peephole: `return f(args);` leaves the
         // result in AX from the call's return value — no extra
@@ -779,6 +818,7 @@ pub(crate) fn emit_loop(
         long_param_funcs: locals.long_param_funcs,
         loop_stack: locals.loop_stack,
         fpu_live: locals.fpu_live,
+        return_float_width: locals.return_float_width,
     };
     let mut body_buf = Vec::new();
     let mut body_fixups: Vec<Fixup> = Vec::new();
@@ -1390,6 +1430,7 @@ pub(crate) fn emit_do_while(
         long_param_funcs: locals.long_param_funcs,
         loop_stack: locals.loop_stack,
         fpu_live: locals.fpu_live,
+        return_float_width: locals.return_float_width,
     };
     let mut body_buf = Vec::new();
     let mut body_fixups: Vec<Fixup> = Vec::new();
