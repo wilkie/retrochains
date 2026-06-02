@@ -144,9 +144,20 @@ pub(crate) fn emit_stmt(
                 emit_cond_skip(cond, 0i8, locals, &mut sz, &mut Vec::new());
                 sz.len()
             };
-            let needs_nop = (out.len() + cond_size + then_len) % 2 != 0;
+            // When the then-branch falls through (does not unconditionally
+            // return) and an else-branch exists, MSC emits `jmp SHORT $end`
+            // after the then-block so control skips the else-block. If the
+            // then-branch always returns, no jmp is needed — control never
+            // reaches it (this is the common case, hence it was the only one
+            // handled before). Fixture 2434.
+            let emit_else_jmp =
+                else_branch.is_some() && !stmt_always_returns(then_branch, locals);
+            let jmp_len = if emit_else_jmp { 2 } else { 0 };
+            // The alignment nop aligns the else-label (the je target), which
+            // sits past the then-block and the over-else jmp.
+            let needs_nop = (out.len() + cond_size + then_len + jmp_len) % 2 != 0;
             let nop_pad = usize::from(needs_nop);
-            let take_then_disp = i8::try_from(then_len + nop_pad)
+            let take_then_disp = i8::try_from(then_len + jmp_len + nop_pad)
                 .expect("then-body short enough for jcc rel8");
             emit_cond_skip(cond, take_then_disp, locals, out, fixups);
             // Bring any then-branch call sites into the parent buffer,
@@ -171,9 +182,22 @@ pub(crate) fn emit_stmt(
                     }
                 }
             }
+            // Over-else jmp placeholder (backpatched once the else-block
+            // size is known). It precedes the alignment nop so the nop lands
+            // immediately before the else-label.
+            let jmp_pos = out.len();
+            if emit_else_jmp {
+                out.push(0xEB);
+                out.push(0x00);
+            }
             if needs_nop { out.push(0x90); }
             if let Some(else_branch) = else_branch {
                 emit_stmt(else_branch, locals, frame, return_int, return_long, out, fixups);
+            }
+            if emit_else_jmp {
+                let disp = i8::try_from(out.len() - (jmp_pos + 2))
+                    .expect("else-body short enough for jmp rel8");
+                out[jmp_pos + 1] = disp as u8;
             }
         }
     }
