@@ -1391,17 +1391,25 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
             }
         }
     }
-    // …and the literal operand of a coupled FP op in a return (`return (int)(f +
-    // 1.5f)` → `fadd QWORD [$T]`), always a width-8 (double) temp.
+    // …and the literal operand of a coupled FP op (`return (int)(f + 1.5f)` or a
+    // compound assign `d += 5.5`) — always a width-8 (double) temp.
     for f in &unit.functions {
         for s in &f.body {
-            if let Stmt::Return(Expr::BinOp { left, right, .. }) = s
-                && let Expr::FloatLit(bits, _) = right.as_ref()
-                && let Expr::Local(li) = left.as_ref()
-                && f.locals.get(*li).map(|l| l.is_float).unwrap_or(false)
-                && !float_pool.contains(&(*bits, 8))
+            let operand = match s {
+                Stmt::Return(Expr::BinOp { left, right, .. })
+                | Stmt::Assign { value: Expr::BinOp { left, right, .. }, .. } => {
+                    match (left.as_ref(), right.as_ref()) {
+                        (Expr::Local(li), Expr::FloatLit(bits, _))
+                            if f.locals.get(*li).map(|l| l.is_float).unwrap_or(false) => Some(*bits),
+                        _ => None,
+                    }
+                }
+                _ => None,
+            };
+            if let Some(bits) = operand
+                && !float_pool.contains(&(bits, 8))
             {
-                float_pool.push((*bits, 8));
+                float_pool.push((bits, 8));
             }
         }
     }

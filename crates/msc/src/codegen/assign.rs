@@ -26,6 +26,36 @@ pub(crate) fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_
         }
         return;
     }
+    // Float/double compound assign `d op= K` (`d = d op K`): apply the op to the
+    // live st(0), then `fst` back (keeping it live for the next op / the cast):
+    //   9B DC /r <off16>   f<op> QWORD [$T]   (FIDRQQ + FloatLoad, qword operand)
+    //   9B DD 56 <disp>    fst   QWORD [bp+disp]  (FIDRQQ)
+    if let AssignTarget::Local(i) = target
+        && locals.is_float_local(i)
+        && let Expr::BinOp { op, left, right } = value
+        && matches!(left.as_ref(), Expr::Local(li) if *li == i)
+        && let Expr::FloatLit(bits, _) = right.as_ref()
+    {
+        let reg = match op {
+            BinOp::Add => 0u8, BinOp::Mul => 1, BinOp::Sub => 4, BinOp::Div => 6,
+            _ => 0,
+        };
+        fixups.push(Fixup { body_offset: out.len(), kind: FixupKind::FloatMarker { target: "FIDRQQ" } });
+        out.push(0x9B);
+        out.push(0xDC);
+        out.push(0x06 | (reg << 3));
+        let bo = out.len() - 1;
+        out.extend_from_slice(&[0x00, 0x00]);
+        fixups.push(Fixup { body_offset: bo, kind: FixupKind::FloatLoad { bits: *bits, width: 8 } });
+        let disp = locals.disp(i);
+        fixups.push(Fixup { body_offset: out.len(), kind: FixupKind::FloatMarker { target: "FIDRQQ" } });
+        out.push(0x9B);
+        out.push(0xDD);
+        out.push(bp_modrm(0x56, disp)); // fst qword [bp+disp]
+        push_bp_disp(out, disp);
+        locals.fpu_live.set(Some(i));
+        return;
+    }
     let local_idx = match target {
         AssignTarget::Local(i) => i,
         AssignTarget::Param(i) => {

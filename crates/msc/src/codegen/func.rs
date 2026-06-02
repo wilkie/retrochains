@@ -248,10 +248,15 @@ pub(crate) fn emit_function(
     // only when it is the LAST float local initialized (otherwise a later float
     // init would have clobbered st(0)). Literal float locals fold to `mov ax,K`
     // via const-prop, so they never reach here as `Return(Local)`.
+    // A float local is coupled (st(0) kept live via `fst`) when its `(int)` read
+    // would NOT const-fold: either its init wasn't a direct literal, or it was
+    // mutated (compound FP assign) so the fold view dropped its init.
     let returned_float_local = body.iter().rev().find_map(|s| match s {
         Stmt::Return(e) => coupled_return_local(e),
         _ => None,
-    }).filter(|&i| func.locals.get(i).map(|l| l.is_float && !l.init_is_literal).unwrap_or(false));
+    }).filter(|&i| func.locals.get(i).map(|l| {
+        l.is_float && (!l.init_is_literal || mutated_locals.contains(&i))
+    }).unwrap_or(false));
     let last_float_init = func.locals.iter().enumerate()
         .filter(|(_, l)| l.is_float && l.float_bits.is_some())
         .map(|(i, _)| i)
