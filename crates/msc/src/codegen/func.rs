@@ -99,7 +99,15 @@ pub(crate) fn emit_function(
     let local_unsigned: Vec<bool> = func.locals.iter().map(|l| l.is_unsigned).collect();
     let mut bytes = Vec::with_capacity(32);
     let mut fixups: Vec<Fixup> = Vec::new();
-    let base_frame = Frame::for_function(func);
+    // A call that passes a float/double literal pushes it via `sub sp,N;
+    // mov bx,sp; fstp [bx]`, sliding SP — so the function needs a WithSlide
+    // frame (cleanup via `mov sp,bp`) plus a 2-byte temp for the call result.
+    let has_float_arg_call = func_has_float_arg_call(func);
+    let base_frame = if has_float_arg_call {
+        Frame::WithSlide
+    } else {
+        Frame::for_function(func)
+    };
     // Upgrade to WithSlideSi when the body uses runtime local array
     // indexing (SI register must be caller-saved).
     let frame = if matches!(base_frame, Frame::WithSlide)
@@ -157,7 +165,9 @@ pub(crate) fn emit_function(
         }
     }
     let local_sizes: Vec<usize> = func.locals.iter().map(|l| l.size).collect();
-    let frame_bytes: usize = cumulative as usize;
+    // The float-arg call result is spilled to a 2-byte temp at [bp-2]; reserve
+    // it at the deepest frame slot so chkstk sizes the frame to include it.
+    let frame_bytes: usize = cumulative as usize + if has_float_arg_call { 2 } else { 0 };
 
     match frame {
         Frame::None => bytes.extend_from_slice(&[0x33, 0xC0]),
@@ -286,6 +296,7 @@ pub(crate) fn emit_function(
     let param_is_char: Vec<bool> = func.param_is_char.clone();
     let param_is_long: Vec<bool> = func.param_is_long.clone();
     let param_is_unsigned: Vec<bool> = func.param_is_unsigned.clone();
+    let param_float_widths: Vec<usize> = func.param_float_width.clone();
     let locals_view = Locals {
         inits: &local_inits,
         disps: &local_disps,
@@ -301,6 +312,7 @@ pub(crate) fn emit_function(
         char_params: &param_is_char,
         long_params: &param_is_long,
         unsigned_params: &param_is_unsigned,
+        param_float_widths: &param_float_widths,
         char_returners,
         long_param_funcs,
         loop_stack: &loop_stack,

@@ -21,6 +21,14 @@ Done and on `main` (byte-exact, zero regressions):
   `float_bits`; parser float local decls with literal initializers.
 - **Block 2** (`f2345c160`) — basic decl/init codegen. See "Architecture".
   Flips 1670, 1672, 2132, 2139, 2151, 2193. MSC at 1980/3952.
+- **Block 3a** (this commit) — `(int)<float/double param>` → `fld [bp+disp];
+  call __ftol`, plus double/float **const-arg passing** at the caller
+  (`fld $T; sub sp,N; mov bx,sp; fstp [bx]; fwait; call`, WithSlide frame +
+  result temp). Flips 1678, 2143. MSC at 1982/3952. Also reworked OBJ record
+  framing: `_TEXT` now emits one LEDATA per maximal contiguous function run,
+  with a CONST float temp introduced by a later function flushed between the
+  runs (mirrors the ASM's `_TEXT ENDS / CONST SEGMENT / _TEXT SEGMENT`
+  interleaving). Each `_TEXT` LEDATA gets its own following FIXUPP.
 
 The hard, non-obvious part (the emulator linkage) is done. Blocks 3+ build on
 it but need an FPU-stack model.

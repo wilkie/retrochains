@@ -29,7 +29,9 @@ pub(crate) fn emit_call_inner(
     // Push args right-to-left (cdecl).
     for (i, arg) in args.iter().enumerate().rev() {
         let is_long_param = param_longs.map(|v| v.get(i).copied().unwrap_or(false)).unwrap_or(false);
-        if is_long_param {
+        if let Expr::FloatLit(bits, is_double) = arg {
+            emit_push_arg_float(*bits, if *is_double { 8 } else { 4 }, out, fixups);
+        } else if is_long_param {
             emit_push_arg_long(arg, locals, out, fixups);
         } else {
             emit_push_arg(arg, locals, out, fixups);
@@ -44,8 +46,9 @@ pub(crate) fn emit_call_inner(
         body_offset,
         kind: FixupKind::TuLocalCall { target: sym.clone() },
     });
-    let cleanup_bytes: usize = args.iter().enumerate().map(|(i, _)| {
-        if param_longs.map(|v| v.get(i).copied().unwrap_or(false)).unwrap_or(false) { 4 } else { 2 }
+    let cleanup_bytes: usize = args.iter().enumerate().map(|(i, a)| {
+        if let Expr::FloatLit(_, is_double) = a { if *is_double { 8 } else { 4 } }
+        else if param_longs.map(|v| v.get(i).copied().unwrap_or(false)).unwrap_or(false) { 4 } else { 2 }
     }).sum();
     if cleanup_bytes > 0 && !skip_cleanup {
         // `add sp, imm8sx` — Grp1 r/m16,imm8sx with /0=ADD,
@@ -82,6 +85,42 @@ pub(crate) fn emit_push_arg_long(arg: &Expr, locals: &Locals<'_>, out: &mut Vec<
     }
     out.push(0x52); // push dx (high word)
     out.push(0x50); // push ax (low word)
+}
+/// Push a float/double literal argument. MSC loads the CONST `$T` temp onto
+/// the FPU stack, carves `width` bytes off SP, and stores the value there:
+///   9B <D9|DD> 06 <off16>   fld <dword|qword> [$T]   (FIDRQQ + FloatLoad)
+///   83 EC <width>           sub sp, width
+///   8B DC                   mov bx, sp
+///   9B <D9|DD> 1F           fstp <dword|qword> [bx]   (FIDRQQ)
+///   [90]                    nop so the next statement is even-aligned
+///   9B                      fwait                     (FIWRQQ on the leading byte)
+/// SP stays low after the call; the caller's WithSlide epilogue (`mov sp,bp`)
+/// reclaims it — there is no `add sp` cleanup.
+pub(crate) fn emit_push_arg_float(bits: u64, width: usize, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    let op = if width == 4 { 0xD9u8 } else { 0xDDu8 };
+    // fld <width> [$T]
+    fixups.push(Fixup { body_offset: out.len(), kind: FixupKind::FloatMarker { target: "FIDRQQ" } });
+    out.push(0x9B);
+    out.push(op);
+    out.push(0x06);
+    let body_offset = out.len() - 1; // the 06 modrm; off16 at +1
+    out.extend_from_slice(&[0x00, 0x00]);
+    fixups.push(Fixup { body_offset, kind: FixupKind::FloatLoad { bits, width } });
+    // sub sp, width
+    out.extend_from_slice(&[0x83, 0xEC, width as u8]);
+    // mov bx, sp
+    out.extend_from_slice(&[0x8B, 0xDC]);
+    // fstp <width> [bx]  (modrm 1F = mod00 /3 r/m=111)
+    fixups.push(Fixup { body_offset: out.len(), kind: FixupKind::FloatMarker { target: "FIDRQQ" } });
+    out.push(0x9B);
+    out.push(op);
+    out.push(0x1F);
+    // nop (parity) + fwait, marker on the leading byte.
+    fixups.push(Fixup { body_offset: out.len(), kind: FixupKind::FloatMarker { target: "FIWRQQ" } });
+    if out.len() % 2 == 0 {
+        out.push(0x90); // nop
+    }
+    out.push(0x9B); // fwait
 }
 /// Push one call argument onto the stack. For Phase 1: constants
 /// via `mov ax, K; push ax`; locals/params via direct memory push;

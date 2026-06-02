@@ -171,6 +171,9 @@ pub struct Function {
     pub param_is_long: Vec<bool>,
     /// Parallel to `params`: true when param is `unsigned int` (not char, not pointer).
     pub param_is_unsigned: Vec<bool>,
+    /// Parallel to `params`: byte width of a `float`/`double` param (4 or 8),
+    /// 0 for non-float params. Selects D9/DD x87 width for `(int)<param>`.
+    pub param_float_width: Vec<usize>,
     pub locals: Vec<LocalSpec>,
     /// Names parallel to `locals` — used to compute MSC's hash-table
     /// traversal order for frame slot assignment.
@@ -320,6 +323,10 @@ pub struct Locals<'a> {
     /// Parallel to function params: true when that param is `unsigned int`
     /// (not char, not signed). Used to emit `shr ax,1` for /2 vs `cwd+sar`.
     pub unsigned_params: &'a [bool],
+    /// Parallel to function params: byte width of a `float`/`double` param
+    /// (4 or 8), 0 otherwise. Selects the x87 width (D9/DD) when an `(int)`
+    /// cast of the param lowers to `fld [bp+disp]; call __ftol`.
+    pub param_float_widths: &'a [usize],
     /// Map of function names that return `char`. The caller inserts
     /// `cbw` after the call to widen AL to AX (fixture 1006).
     pub char_returners: &'a std::collections::HashSet<String>,
@@ -381,6 +388,13 @@ impl Locals<'_> {
     }
     pub fn is_unsigned_param(&self, idx: usize) -> bool {
         self.unsigned_params.get(idx).copied().unwrap_or(false)
+    }
+    /// 4 or 8 for a `float`/`double` param, else 0.
+    pub fn float_param_width(&self, idx: usize) -> usize {
+        self.param_float_widths.get(idx).copied().unwrap_or(0)
+    }
+    pub fn is_float_param(&self, idx: usize) -> bool {
+        self.float_param_width(idx) != 0
     }
 }
 
@@ -1063,6 +1077,69 @@ fn fp_extern_block(uses_float: bool) -> &'static [(&'static str, u8)] {
     }
 }
 
+/// Walk an expression, collecting `(bits, width)` for every float/double
+/// literal passed as a call argument (width 8 for `double`, 4 for `float`).
+/// These materialize as CONST `$T` temps, loaded with `fld` at the call site.
+fn collect_call_float_args_expr(e: &Expr, out: &mut Vec<(u64, usize)>) {
+    match e {
+        Expr::Call { args, .. } => {
+            for a in args {
+                if let Expr::FloatLit(bits, is_double) = a {
+                    out.push((*bits, if *is_double { 8 } else { 4 }));
+                }
+                collect_call_float_args_expr(a, out);
+            }
+        }
+        Expr::BinOp { left, right, .. } => {
+            collect_call_float_args_expr(left, out);
+            collect_call_float_args_expr(right, out);
+        }
+        Expr::Ternary { cond, then_arm, else_arm } => {
+            collect_call_float_args_expr(cond, out);
+            collect_call_float_args_expr(then_arm, out);
+            collect_call_float_args_expr(else_arm, out);
+        }
+        Expr::Seq { sides, value } => {
+            for s in sides { collect_call_float_args_stmt(s, out); }
+            collect_call_float_args_expr(value, out);
+        }
+        _ => {}
+    }
+}
+
+fn collect_call_float_args_stmt(s: &Stmt, out: &mut Vec<(u64, usize)>) {
+    match s {
+        Stmt::Return(e) | Stmt::ExprStmt(e) => collect_call_float_args_expr(e, out),
+        Stmt::Assign { value, .. } => collect_call_float_args_expr(value, out),
+        Stmt::If { then_branch, else_branch, .. } => {
+            collect_call_float_args_stmt(then_branch, out);
+            if let Some(eb) = else_branch { collect_call_float_args_stmt(eb, out); }
+        }
+        Stmt::While { body, .. } | Stmt::DoWhile { body, .. } => {
+            collect_call_float_args_stmt(body, out);
+        }
+        Stmt::For { init, step, body, .. } => {
+            collect_call_float_args_stmt(init, out);
+            collect_call_float_args_stmt(step, out);
+            collect_call_float_args_stmt(body, out);
+        }
+        Stmt::Block(ss) => for s in ss { collect_call_float_args_stmt(s, out); },
+        Stmt::Switch { cases, .. } => {
+            for c in cases { for s in &c.body { collect_call_float_args_stmt(s, out); } }
+        }
+        _ => {}
+    }
+}
+
+/// True when the function passes a float/double literal as a call argument.
+/// Such a call needs the `fld; sub sp; mov bx,sp; fstp [bx]; fwait` push
+/// sequence, which slides SP — forcing a WithSlide frame and a result temp.
+pub(crate) fn func_has_float_arg_call(func: &Function) -> bool {
+    let mut v = Vec::new();
+    for s in &func.body { collect_call_float_args_stmt(s, &mut v); }
+    !v.is_empty()
+}
+
 /// Produce the OBJ bytes for `cl /c /AS <source>` compiling the
 /// translation unit `unit`. `source_filename` goes into THEADR
 /// uppercased the same way CL does it on the command line.
@@ -1178,6 +1255,17 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
             }
         }
     }
+    // Float/double literals passed as call arguments also intern into the
+    // CONST pool (the caller does `fld $T; ...; fstp [bx]` to push them).
+    for f in &unit.functions {
+        let mut args = Vec::new();
+        for s in &f.body { collect_call_float_args_stmt(s, &mut args); }
+        for (bits, width) in args {
+            if !float_pool.contains(&(bits, width)) {
+                float_pool.push((bits, width));
+            }
+        }
+    }
     if !float_pool.is_empty() && const_cursor % 2 != 0 {
         const_cursor += 1;
     }
@@ -1186,7 +1274,12 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
         float_offsets.push(const_cursor);
         const_cursor += width;
     }
-    let uses_float = !float_pool.is_empty();
+    // A function with a float/double parameter emits x87 FIDRQQ markers even
+    // when the unit has no CONST float temp, so the FxxRQQ EXTDEF block must
+    // still be present.
+    let any_float_param = unit.functions.iter()
+        .any(|f| f.param_float_width.iter().any(|w| *w != 0));
+    let uses_float = !float_pool.is_empty() || any_float_param;
     let float_offset_of = |bits: u64, width: usize| -> usize {
         let idx = float_pool.iter().position(|e| *e == (bits, width)).expect("float in pool");
         float_offsets[idx]
@@ -1603,6 +1696,27 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
         }
     }
 
+    // For each CONST float temp, the index of the first function that loads
+    // it. MSC interleaves segments in compilation order: it flushes a temp's
+    // CONST LEDATA just before the _TEXT of the function that introduces it.
+    // Temps introduced by function 0 go in the pre-_TEXT CONST block (below);
+    // temps introduced by a later function split _TEXT into separate runs.
+    let mut float_intro_fn: Vec<usize> = vec![0usize; float_pool.len()];
+    {
+        let mut seen = vec![false; float_pool.len()];
+        for (fi, fe) in function_emits.iter().enumerate() {
+            for fx in &fe.fixups {
+                if let FixupKind::FloatLoad { bits, width } = &fx.kind
+                    && let Some(k) = float_pool.iter().position(|e| e == &(*bits, *width))
+                    && !seen[k]
+                {
+                    seen[k] = true;
+                    float_intro_fn[k] = fi;
+                }
+            }
+        }
+    }
+
     // LEDATA — CONST segment. MSC packs consecutive strings into
     // one LEDATA when no padding is needed. When an odd-length
     // string forces a 1-byte pad before the next string, MSC closes
@@ -1629,10 +1743,13 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
         }
     }
 
-    // LEDATA — CONST float-literal pool. Each `$T` temp holds the IEEE bytes:
-    // a `float` collapses the f64 value to f32 (4 bytes); a `double` keeps
-    // the full f64 (8 bytes). Little-endian.
+    // LEDATA — CONST float-literal pool, the temps introduced by function 0
+    // (the pre-_TEXT block). Each `$T` temp holds the IEEE bytes: a `float`
+    // collapses the f64 value to f32 (4 bytes); a `double` keeps the full f64
+    // (8 bytes). Little-endian. Temps introduced by later functions are
+    // flushed mid-stream (interleaved with the _TEXT runs, below).
     for (i, &(bits, width)) in float_pool.iter().enumerate() {
+        if float_intro_fn[i] != 0 { continue; }
         let off = u16::try_from(float_offsets[i]).expect("CONST float offset fits");
         if width == 4 {
             b.write_ledata16(3, off, &(f64::from_bits(bits) as f32).to_bits().to_le_bytes());
@@ -1734,60 +1851,97 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
         }
     }
 
-    // LEDATA — _TEXT segment, the concatenated function bodies.
-    let mut all_code = Vec::with_capacity(total_code_bytes);
-    for fe in &function_emits {
-        all_code.extend_from_slice(&fe.bytes);
-    }
-    b.write_ledata16(1, 0, &all_code);
-
-    // FIXUPP — every ExtCall + StrLoad fixup needs a subrecord.
-    // MSC sorts by descending LEDATA offset (fixture 4103's order
-    // is offset 10, 6, 3). Each FIXUP subrecord's shape:
-    //   ExtCall: `84 off 56 <extdef_idx>` (self-rel to EXTDEF)
-    //   StrLoad: `c4 off 9c` (seg-rel via DGROUP/CONST threads)
-    ledata_fixups.sort_by(|a, b| b.ledata_offset.cmp(&a.ledata_offset));
-    let mut fixup_payload = Vec::new();
-    for rf in &ledata_fixups {
-        let off = u8::try_from(rf.ledata_offset).expect("fixup offset fits in u8");
-        match &rf.kind {
+    // FIXUPP subrecord builder — shared across every _TEXT run. `off` is the
+    // fixup's offset relative to its LEDATA record's start.
+    //   ExtCall:     `84 off 56 <extdef_idx>` (self-rel to EXTDEF)
+    //   StrLoad/FloatLoad: `c4 off 9c`        (seg-rel via DGROUP/CONST threads)
+    //   FloatMarker: `c4 off 56 <extdef_idx>` (FxxRQQ emulator marker)
+    //   GlobalAddr:  `c4 off 9d` (PUBDEF) / `c4 off 56 idx` (COMDEF)
+    let build_fixup_subrecord = |off: u8, kind: &FixupKind, payload: &mut Vec<u8>| {
+        match kind {
             FixupKind::ExtCall { target } => {
                 let idx = *extdef_idx_of
                     .get(target)
                     .unwrap_or_else(|| panic!("EXTDEF index missing for `{target}`"));
-                fixup_payload.extend_from_slice(&[0x84, off, 0x56, idx]);
+                payload.extend_from_slice(&[0x84, off, 0x56, idx]);
             }
             FixupKind::StrLoad { .. } | FixupKind::FloatLoad { .. } => {
-                fixup_payload.extend_from_slice(&[0xC4, off, 0x9C]);
+                payload.extend_from_slice(&[0xC4, off, 0x9C]);
             }
             FixupKind::FloatMarker { target } => {
                 let idx = *extdef_idx_of
                     .get(*target)
                     .unwrap_or_else(|| panic!("EXTDEF index missing for FP marker `{target}`"));
-                fixup_payload.extend_from_slice(&[0xC4, off, 0x56, idx]);
+                payload.extend_from_slice(&[0xC4, off, 0x56, idx]);
             }
             FixupKind::GlobalAddr { global_idx } => {
                 if unit.globals[*global_idx].init.is_some() {
-                    // Init global → PUBDEF in DGROUP:_DATA. Frame
-                    // thread 1 (DGROUP) + target thread 1 (_DATA),
-                    // no displacement; the linker substitutes the
-                    // global's _DATA-relative offset.
-                    fixup_payload.extend_from_slice(&[0xC4, off, 0x9D]);
+                    payload.extend_from_slice(&[0xC4, off, 0x9D]);
                 } else {
-                    // Tentative def → COMDEF. Explicit frame method
-                    // 5 (target's frame), explicit target via EXTDEF
-                    // index, no displacement.
                     let sym = symbol_name(&unit.globals[*global_idx].name);
                     let idx = *extdef_idx_of
                         .get(&sym)
                         .unwrap_or_else(|| panic!("EXTDEF index missing for COMDEF `{sym}`"));
-                    fixup_payload.extend_from_slice(&[0xC4, off, 0x56, idx]);
+                    payload.extend_from_slice(&[0xC4, off, 0x56, idx]);
                 }
             }
             FixupKind::TuLocalCall { .. } => unreachable!(),
         }
+    };
+
+    // LEDATA — _TEXT segment. MSC emits one LEDATA per maximal contiguous run
+    // of functions; a CONST float temp introduced by a later function splits
+    // the run (its CONST LEDATA is flushed between the two _TEXT records,
+    // mirroring the ASM's `_TEXT ENDS / CONST SEGMENT / _TEXT SEGMENT`
+    // interleaving — fixture 1678). Each _TEXT LEDATA is immediately followed
+    // by its own FIXUPP, with offsets relative to that record's start.
+    let n_funcs = function_emits.len();
+    let mut run_boundaries: Vec<usize> = vec![0];
+    for i in 1..n_funcs {
+        if float_intro_fn.iter().any(|&f| f == i) {
+            run_boundaries.push(i);
+        }
     }
-    b.write_fixupp(&fixup_payload);
+    run_boundaries.push(n_funcs);
+    for w in 0..run_boundaries.len().saturating_sub(1) {
+        let start = run_boundaries[w];
+        let end = run_boundaries[w + 1];
+        let run_base = function_offsets[start];
+        let mut run_bytes = Vec::new();
+        for fi in start..end {
+            run_bytes.extend_from_slice(&function_emits[fi].bytes);
+        }
+        let run_end_off = run_base + run_bytes.len();
+        b.write_ledata16(1, u16::try_from(run_base).expect("text offset fits"), &run_bytes);
+        // Fixups whose absolute (segment) offset lands inside this run,
+        // re-based to the LEDATA start and sorted descending (MSC's order).
+        let mut these: Vec<&ResolvedFixup> = ledata_fixups.iter()
+            .filter(|rf| rf.ledata_offset >= run_base && rf.ledata_offset < run_end_off)
+            .collect();
+        these.sort_by(|a, b| b.ledata_offset.cmp(&a.ledata_offset));
+        let mut payload = Vec::new();
+        for rf in these {
+            let off = u8::try_from(rf.ledata_offset - run_base).expect("fixup offset fits in u8");
+            build_fixup_subrecord(off, &rf.kind, &mut payload);
+        }
+        if !payload.is_empty() {
+            b.write_fixupp(&payload);
+        }
+        // Interleave the CONST float temps introduced by the function that
+        // starts the next run.
+        if end < n_funcs {
+            for (k, &(bits, width)) in float_pool.iter().enumerate() {
+                if float_intro_fn[k] == end {
+                    let off = u16::try_from(float_offsets[k]).expect("CONST float offset fits");
+                    if width == 4 {
+                        b.write_ledata16(3, off, &(f64::from_bits(bits) as f32).to_bits().to_le_bytes());
+                    } else {
+                        b.write_ledata16(3, off, &bits.to_le_bytes());
+                    }
+                }
+            }
+        }
+    }
 
     // MODEND — end of module. No-entry form (the executable's entry
     // point comes from the PUBDEF of `_main` resolved at link time,

@@ -656,17 +656,18 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
     // parameters; other types come with later fixtures.
     let params = if matches!(p.peek(), Some(Tok::Kw("void"))) {
         p.bump();
-        (Vec::<String>::new(), Vec::<Option<usize>>::new(), Vec::<bool>::new(), Vec::<bool>::new(), Vec::<bool>::new())
+        (Vec::<String>::new(), Vec::<Option<usize>>::new(), Vec::<bool>::new(), Vec::<bool>::new(), Vec::<bool>::new(), Vec::<usize>::new())
     } else if matches!(p.peek(), Some(Tok::RParen)) {
         // K&R-style empty param list (`int main()`). Treat as no
         // params. Fixture 888.
-        (Vec::<String>::new(), Vec::<Option<usize>>::new(), Vec::<bool>::new(), Vec::<bool>::new(), Vec::<bool>::new())
+        (Vec::<String>::new(), Vec::<Option<usize>>::new(), Vec::<bool>::new(), Vec::<bool>::new(), Vec::<bool>::new(), Vec::<usize>::new())
     } else {
         let mut names = Vec::new();
         let mut struct_idxs: Vec<Option<usize>> = Vec::new();
         let mut is_chars: Vec<bool> = Vec::new();
         let mut is_longs: Vec<bool> = Vec::new();
         let mut is_unsigned_ints: Vec<bool> = Vec::new();
+        let mut float_widths: Vec<usize> = Vec::new();
         loop {
             // Optional sign/qualifier modifiers, then `int` / `char` /
             // `struct Name`. Pointers (`<type> *<name>`) consume one
@@ -679,9 +680,12 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
             let mut struct_idx: Option<usize> = None;
             let mut is_char = false;
             let mut is_long = false;
+            let mut float_width = 0usize;
             match p.peek() {
                 Some(Tok::Kw("char")) => { is_char = true; p.bump(); }
                 Some(Tok::Kw("int")) => { p.bump(); }
+                Some(Tok::Kw("float")) => { float_width = 4; p.bump(); }
+                Some(Tok::Kw("double")) => { float_width = 8; p.bump(); }
                 Some(Tok::Kw("long")) => {
                     p.bump();
                     if matches!(p.peek(), Some(Tok::Kw("int"))) { p.bump(); }
@@ -734,15 +738,16 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
             is_longs.push(is_long && !has_ptr); // pointer-to-long is word-sized
             // `unsigned int x` (not pointer, not char) → track for /2 optimization
             is_unsigned_ints.push(has_unsigned_mod && !is_char && !has_ptr);
+            float_widths.push(if has_ptr { 0 } else { float_width }); // pointer-to-float is word-sized
             if matches!(p.peek(), Some(Tok::Comma)) {
                 p.bump();
                 continue;
             }
             break;
         }
-        (names, struct_idxs, is_chars, is_longs, is_unsigned_ints)
+        (names, struct_idxs, is_chars, is_longs, is_unsigned_ints, float_widths)
     };
-    let (params, param_struct_idxs, param_is_char, param_is_long, param_is_unsigned) = params;
+    let (params, param_struct_idxs, param_is_char, param_is_long, param_is_unsigned, param_float_width) = params;
     p.eat(&Tok::RParen)?;
     p.eat(&Tok::LBrace)?;
 
@@ -1148,7 +1153,7 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
     p.eat(&Tok::RBrace)?;
 
     let local_names = p.local_names.clone();
-    Ok(Function { name, return_int, return_long, return_char, params, param_is_char, param_is_long, param_is_unsigned, locals, local_names, body })
+    Ok(Function { name, return_int, return_long, return_char, params, param_is_char, param_is_long, param_is_unsigned, param_float_width, locals, local_names, body })
 }
 pub(crate) fn parse_signed_int(p: &mut Parser<'_>) -> Result<i32, EmitError> {
     // Accept any compile-time constant expression — integer literal,

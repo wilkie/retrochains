@@ -279,8 +279,35 @@ pub(crate) fn emit_return(
         // For WithSlide frames, `mov sp, bp` in the epilogue restores sp
         // across the pushed args — no `add sp, N` cleanup needed.
         if let Expr::Call { name, args } = expr {
+            let has_float_arg = args.iter().any(|a| matches!(a, Expr::FloatLit(..)));
             let skip_cleanup = frame.is_with_slide();
             emit_call_inner(name, args, locals, skip_cleanup, out, fixups);
+            if has_float_arg {
+                // The float-arg push slid SP, so the result is spilled to the
+                // frame temp at [bp-2]; MSC emits this store even though AX
+                // already holds the value the function returns. The WithSlide
+                // epilogue (`mov sp,bp`) reclaims the arg space.
+                out.extend_from_slice(&[0x89, 0x46, 0xFE]); // mov [bp-2], ax
+            }
+        } else if let Expr::Param(i) = expr
+            && locals.is_float_param(*i)
+        {
+            // `return (int)<float/double param>` — the `(int)` cast parses to
+            // an identity, so this is just `Expr::Param`. Load the param onto
+            // the FPU stack and convert to int via `__ftol` (result in AX).
+            let width = locals.float_param_width(*i);
+            let op = if width == 4 { 0xD9u8 } else { 0xDDu8 };
+            let disp = param_disp(*i);
+            fixups.push(Fixup { body_offset: out.len(), kind: FixupKind::FloatMarker { target: "FIDRQQ" } });
+            out.push(0x9B);
+            out.push(op);
+            out.push(bp_modrm(0x46, disp));
+            push_bp_disp(out, disp);
+            let body_offset = out.len();
+            out.extend_from_slice(&[0xE8, 0x00, 0x00]); // call __ftol
+            fixups.push(Fixup { body_offset, kind: FixupKind::ExtCall { target: "__ftol".to_owned() } });
+            out.extend_from_slice(frame.epilogue_bytes());
+            return;
         } else if matches!(expr, Expr::Local(i) if locals.is_long_local(*i)) {
             // Long locals are read through the 4-byte slot — MSC
             // emits `mov ax, [bp-disp_low]` even when the value is
@@ -706,6 +733,7 @@ pub(crate) fn emit_loop(
         char_params: locals.char_params,
         long_params: locals.long_params,
         unsigned_params: locals.unsigned_params,
+        param_float_widths: locals.param_float_widths,
         char_returners: locals.char_returners,
         long_param_funcs: locals.long_param_funcs,
         loop_stack: locals.loop_stack,
@@ -1313,6 +1341,7 @@ pub(crate) fn emit_do_while(
         char_params: locals.char_params,
         long_params: locals.long_params,
         unsigned_params: locals.unsigned_params,
+        param_float_widths: locals.param_float_widths,
         char_returners: locals.char_returners,
         long_param_funcs: locals.long_param_funcs,
         loop_stack: locals.loop_stack,
