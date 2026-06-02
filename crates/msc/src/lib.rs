@@ -619,6 +619,12 @@ pub enum AssignTarget {
     /// then advance the pointer by `step`. Codegen: `mov bx, [bp-p];
     /// <mutate p>; mov [bx], ax/imm`.
     DerefPostMutateLocal { local_idx: usize, step: i32 },
+    /// `<ptr-local>[K] = <expr>;` with constant K≠0 — store through a
+    /// pointer local at a byte offset (`byte_off` = K * pointee size).
+    /// When the pointer aliases a base array the const-prop pass rewrites
+    /// this to an `IndexedLocal`/`IndexedGlobal` direct store; otherwise the
+    /// fallback is `mov bx, [bp-p]; mov [bx+byte_off], ax/imm`.
+    DerefLocalOffset { local: usize, byte_off: u16, is_byte: bool },
 }
 
 /// Condition for `if` (and later `while`/`for`). Slice 5 covers the

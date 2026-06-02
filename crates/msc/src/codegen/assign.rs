@@ -127,6 +127,9 @@ pub(crate) fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_
         AssignTarget::DerefLocal(li) => {
             return emit_assign_deref_local(li, value, locals, out, fixups);
         }
+        AssignTarget::DerefLocalOffset { local, byte_off, is_byte } => {
+            return emit_assign_deref_local_offset(local, byte_off, is_byte, value, locals, out, fixups);
+        }
         AssignTarget::IndexedGlobal { array, byte_off } => {
             return emit_assign_indexed_global(array, byte_off, value, locals, out, fixups);
         }
@@ -1524,6 +1527,38 @@ pub(crate) fn emit_assign_deref_local(local_idx: usize, value: &Expr, locals: &L
     } else {
         emit_expr_to_ax(value, locals, out, fixups);
         out.extend_from_slice(&[0x89, 0x07]);
+    }
+}
+/// `<ptr-local>[K] = <expr>;` (K≠0) fallback when the pointer has no known
+/// alias: `mov bx, [bp-disp]` then store the RHS at `[bx + byte_off]`. The
+/// aliased case is rewritten to a direct array store in const-prop, so this
+/// only runs for genuine runtime pointers.
+pub(crate) fn emit_assign_deref_local_offset(local_idx: usize, byte_off: u16, is_byte: bool, value: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    let disp = locals.disp(local_idx);
+    // mov bx, [bp-disp]
+    out.push(0x8B); out.push(bp_modrm(0x5E, disp)); push_bp_disp(out, disp);
+    // [bx + byte_off] modrm: reg field filled per opcode; base bx with disp8/16.
+    let off = byte_off as i16;
+    let modrm_base = if (0..=127).contains(&off) { 0x47 } else { 0x87 };
+    let push_off = |out: &mut Vec<u8>| {
+        if (0..=127).contains(&off) { out.push(off as u8); }
+        else { out.extend_from_slice(&byte_off.to_le_bytes()); }
+    };
+    if is_byte {
+        if let Some(k) = value.fold(locals.inits) {
+            out.push(0xC6); out.push(modrm_base); push_off(out); // mov byte [bx+off], imm8
+            out.push((k as u32 & 0xFF) as u8);
+        } else {
+            emit_expr_to_ax(value, locals, out, fixups);
+            out.push(0x88); out.push(modrm_base); push_off(out); // mov [bx+off], al
+        }
+    } else if let Some(k) = value.fold(locals.inits) {
+        let imm = (k as u32 & 0xFFFF) as u16;
+        out.push(0xC7); out.push(modrm_base); push_off(out); // mov word [bx+off], imm16
+        out.extend_from_slice(&imm.to_le_bytes());
+    } else {
+        emit_expr_to_ax(value, locals, out, fixups);
+        out.push(0x89); out.push(modrm_base); push_off(out); // mov [bx+off], ax
     }
 }
 pub(crate) fn emit_assign_double_deref_global(global_idx: usize, value: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {

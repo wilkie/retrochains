@@ -1836,6 +1836,20 @@ pub(crate) fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
                     p.eat(&Tok::Semi)?;
                     return Ok(Stmt::Assign { target, value });
                 }
+                // Pointer local with a constant non-zero index: `p[K] = v` is a
+                // store through `p + K*pointee`. The const-prop alias pass turns
+                // this into a direct array-element store when p aliases a base.
+                if ptsz > 0 && let Some(k) = index_expr.fold(&init_view) {
+                    let byte_off = u16::try_from((k as i64) * (ptsz as i64))
+                        .expect("ptr-subscript byte offset fits");
+                    let target = AssignTarget::DerefLocalOffset {
+                        local: local_idx, byte_off, is_byte: ptsz == 1,
+                    };
+                    p.eat(&Tok::Assign)?;
+                    let value = parse_expr(p)?;
+                    p.eat(&Tok::Semi)?;
+                    return Ok(Stmt::Assign { target, value });
+                }
                 if let Some(k) = index_expr.fold(&init_view) {
                     // Constant index — use existing byte-offset forms.
                     let byte_off = u16::try_from((k as i64) * (elem_bytes as i64))
@@ -2777,7 +2791,13 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                     // can fold it; K!=0 derefs `p + K*pointee`.
                     let ptsz = p.local_specs[idx].pointee_size;
                     if ptsz > 0 {
-                        let inner = match index.fold(&[]) {
+                        // Fold the index against the local-init view (mirrors the
+                        // write side) so `p[i]` with a constant-init `i` scales by
+                        // the pointee size here rather than slipping through as an
+                        // unscaled runtime offset. Fixture 1339.
+                        let init_view: Vec<Option<i32>> =
+                            p.local_specs.iter().map(|l| l.init).collect();
+                        let inner = match index.fold(&init_view) {
                             Some(0) => Expr::Local(idx),
                             Some(k) => Expr::BinOp {
                                 op: BinOp::Add,

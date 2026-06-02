@@ -64,6 +64,49 @@ fn alias_rewrite_derefs(e: &mut Expr, cp: &ConstProp) {
         _ => {}
     }
 }
+/// Resolve `*p` / `*(p + byte_off)` (a DerefWord/DerefByte read) through a
+/// pointer alias `p -> base`:
+///   - offset 0  → the aliased lvalue `Local(x)`/`Global(g)`, then const-folded
+///     (a scalar pointee like `p = &g; *p` folds to g's value — fixture 596).
+///   - offset K≠0 → the base array's element `base[K/elem]`, left as a runtime
+///     element read (MSC does NOT fold these — fixtures 1019, 888).
+/// Marks the alias used (single-use semantics, drained per top-level stmt).
+fn fold_aliased_deref(e: &mut Expr, cp: &mut ConstProp) {
+    let is_byte = matches!(e, Expr::DerefByte { .. });
+    let (p, byte_off) = {
+        let ptr = match e {
+            Expr::DerefWord { ptr } | Expr::DerefByte { ptr } => ptr,
+            _ => return,
+        };
+        match ptr.as_ref() {
+            Expr::Local(p) => (*p, 0i32),
+            Expr::BinOp { op: BinOp::Add, left, right } => match (left.as_ref(), right.as_ref()) {
+                (Expr::Local(p), Expr::IntLit(k)) => (*p, *k),
+                _ => return,
+            },
+            _ => return,
+        }
+    };
+    let Some(&base) = cp.ptr_alias.get(&p) else { return };
+    cp.aliases_used.insert(p);
+    if byte_off == 0 {
+        *e = match base {
+            AliasTarget::Local(x) => Expr::Local(x),
+            AliasTarget::Global(g) => Expr::Global(g),
+        };
+        prop_expr(e, cp);
+        return;
+    }
+    let elem = if is_byte { 1 } else { 2 };
+    if byte_off < 0 || byte_off % elem != 0 { return; }
+    let idx = Box::new(Expr::IntLit(byte_off / elem));
+    *e = match (base, is_byte) {
+        (AliasTarget::Local(a), false) => Expr::LocalIndex { local: a, index: idx },
+        (AliasTarget::Local(a), true) => Expr::LocalIndexByte { local: a, index: idx },
+        (AliasTarget::Global(g), false) => Expr::Index { array: g, index: idx },
+        (AliasTarget::Global(g), true) => Expr::IndexByte { array: g, index: idx },
+    };
+}
 /// The address value an init expression denotes, as (base lvalue, byte offset):
 /// `&x` / `&g` (offset 0) and `&base[K]` (lowered to `AddrOf(base) + K*elem`).
 fn addr_value_of(e: &Expr) -> Option<(AliasTarget, i32)> {
@@ -83,6 +126,11 @@ pub(crate) fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
         Stmt::Return(e) => prop_expr(e, cp),
         Stmt::ExprStmt(e) => prop_expr(e, cp),
         Stmt::Assign { target, value } => {
+            // Set when a `p[K]=v` pointer store is rewritten to a direct array
+            // element store: MSC's element table does NOT track writes that went
+            // through a pointer, so the element stays unknown (later direct reads
+            // must NOT fold). Fixture 1017.
+            let mut from_ptr_store = false;
             // Pointer-value tracking: record/clear p's known address (&g[K]).
             if let AssignTarget::Local(p) = target {
                 if let Some(av) = addr_value_of(value) {
@@ -128,6 +176,21 @@ pub(crate) fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
                     AliasTarget::Global(g) => AssignTarget::Global(g),
                 };
                 alias_rewrite_derefs(value, cp);
+            }
+            // `p[K] = ...` (constant K≠0) where p aliases a base array → a direct
+            // element store `base[K] = ...`. byte_off is already in pointee bytes.
+            if let AssignTarget::DerefLocalOffset { local: p, byte_off, is_byte } = target
+                && let Some(&a) = cp.ptr_alias.get(p)
+            {
+                cp.aliases_used.insert(*p);
+                from_ptr_store = true;
+                let (byte_off, is_byte) = (*byte_off, *is_byte);
+                *target = match (a, is_byte) {
+                    (AliasTarget::Local(x), false) => AssignTarget::IndexedLocal { local: x, byte_off },
+                    (AliasTarget::Local(x), true) => AssignTarget::IndexedLocalByte { local: x, byte_off },
+                    (AliasTarget::Global(g), false) => AssignTarget::IndexedGlobal { array: g, byte_off },
+                    (AliasTarget::Global(g), true) => AssignTarget::IndexedGlobalByte { array: g, byte_off },
+                };
             }
             // `x = x op RHS` preserves the `Local(x)` on the left so
             // emit_assign can hit the in-place inc/dec/add/sub-mem
@@ -222,8 +285,10 @@ pub(crate) fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
                     if !is_float_arr && let Some(k) = value.fold(&[]) {
                         *value = Expr::IntLit(k);
                     }
-                    // Record the (truncated) element value so later reads fold.
-                    if let Some(k) = value.fold(&[]) {
+                    // Record the (truncated) element value so later reads fold —
+                    // UNLESS this store came through a pointer, which MSC's element
+                    // table does not track (the element stays unknown). Fixture 1017.
+                    if !from_ptr_store && let Some(k) = value.fold(&[]) {
                         cp.la_known.insert((*local, *byte_off), k);
                     } else {
                         cp.la_known.remove(&(*local, *byte_off));
@@ -575,20 +640,14 @@ pub(crate) fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
                 *e = Expr::IntLit(v);
             }
         }
-        Expr::DerefByte { ptr } | Expr::DerefWord { ptr } => {
-            prop_expr(ptr, cp);
-            // Pointer aliasing: `*p` where p aliases x/g reads the aliased
-            // lvalue directly (and then folds it via known values).
-            if let Expr::Local(p) = ptr.as_ref()
-                && let Some(&a) = cp.ptr_alias.get(p)
-            {
-                cp.aliases_used.insert(*p);
-                *e = match a {
-                    AliasTarget::Local(x) => Expr::Local(x),
-                    AliasTarget::Global(g) => Expr::Global(g),
-                };
-                prop_expr(e, cp);
+        Expr::DerefByte { .. } | Expr::DerefWord { .. } => {
+            // Recurse into the pointer subexpression first (folds the index of
+            // `*(p + i)` when i is a known local), then resolve through any alias.
+            match e {
+                Expr::DerefByte { ptr } | Expr::DerefWord { ptr } => prop_expr(ptr, cp),
+                _ => unreachable!(),
             }
+            fold_aliased_deref(e, cp);
         }
         Expr::AddrOfGlobal(_) => {}
         Expr::AddrOfLocal(j) => {
