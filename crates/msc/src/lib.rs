@@ -187,6 +187,10 @@ pub struct Function {
     /// Parallel to `params`: byte width of a `float`/`double` param (4 or 8),
     /// 0 for non-float params. Selects D9/DD x87 width for `(int)<param>`.
     pub param_float_width: Vec<usize>,
+    /// Parallel to `params`: pointee byte size for pointer params
+    /// (char*→1, int*/struct*→2, long*→4, float*→width), 0 for
+    /// non-pointer params. Drives pointer-difference element scaling.
+    pub param_pointee_size: Vec<usize>,
     pub locals: Vec<LocalSpec>,
     /// Names parallel to `locals` — used to compute MSC's hash-table
     /// traversal order for frame slot assignment.
@@ -358,6 +362,10 @@ pub struct Locals<'a> {
     /// (4 or 8), 0 otherwise. Selects the x87 width (D9/DD) when an `(int)`
     /// cast of the param lowers to `fld [bp+disp]; call __ftol`.
     pub param_float_widths: &'a [usize],
+    /// Parallel to function params: pointee byte size for pointer params
+    /// (0 for non-pointers). Drives pointer-difference element scaling
+    /// (`p - q` → byte sub then `sar` to convert bytes → elements).
+    pub param_pointee_sizes: &'a [usize],
     /// Map of function names that return `char`. The caller inserts
     /// `cbw` after the call to widen AL to AX (fixture 1006).
     pub char_returners: &'a std::collections::HashSet<String>,
@@ -458,6 +466,10 @@ impl Locals<'_> {
     }
     pub fn is_float_param(&self, idx: usize) -> bool {
         self.float_param_width(idx) != 0
+    }
+    /// Pointee byte size of a pointer param, else 0.
+    pub fn param_pointee_size(&self, idx: usize) -> usize {
+        self.param_pointee_sizes.get(idx).copied().unwrap_or(0)
     }
 }
 

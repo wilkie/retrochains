@@ -820,11 +820,11 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
     // parameters; other types come with later fixtures.
     let params = if matches!(p.peek(), Some(Tok::Kw("void"))) {
         p.bump();
-        (Vec::<String>::new(), Vec::<Option<usize>>::new(), Vec::<bool>::new(), Vec::<bool>::new(), Vec::<bool>::new(), Vec::<usize>::new())
+        (Vec::<String>::new(), Vec::<Option<usize>>::new(), Vec::<bool>::new(), Vec::<bool>::new(), Vec::<bool>::new(), Vec::<usize>::new(), Vec::<usize>::new())
     } else if matches!(p.peek(), Some(Tok::RParen)) {
         // K&R-style empty param list (`int main()`). Treat as no
         // params. Fixture 888.
-        (Vec::<String>::new(), Vec::<Option<usize>>::new(), Vec::<bool>::new(), Vec::<bool>::new(), Vec::<bool>::new(), Vec::<usize>::new())
+        (Vec::<String>::new(), Vec::<Option<usize>>::new(), Vec::<bool>::new(), Vec::<bool>::new(), Vec::<bool>::new(), Vec::<usize>::new(), Vec::<usize>::new())
     } else {
         let mut names = Vec::new();
         let mut struct_idxs: Vec<Option<usize>> = Vec::new();
@@ -832,6 +832,7 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
         let mut is_longs: Vec<bool> = Vec::new();
         let mut is_unsigned_ints: Vec<bool> = Vec::new();
         let mut float_widths: Vec<usize> = Vec::new();
+        let mut pointee_sizes: Vec<usize> = Vec::new();
         loop {
             // Optional sign/qualifier modifiers, then `int` / `char` /
             // `struct Name`. Pointers (`<type> *<name>`) consume one
@@ -874,6 +875,13 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
                 }
             }
             let has_ptr = matches!(p.peek(), Some(Tok::Star));
+            // Pointee byte size, captured before `is_char` is cleared below:
+            // char*→1, long*→4, float*→width, int*/struct*→2. 0 = not a
+            // pointer. Drives pointer-difference element scaling.
+            let mut pointee_size = if has_ptr {
+                if is_char { 1 } else if is_long { 4 }
+                else if float_width != 0 { float_width } else { 2 }
+            } else { 0 };
             if has_ptr {
                 p.bump();
                 is_char = false; // pointer: always word-sized
@@ -889,6 +897,11 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
             // `int a[]` and `int a[N]` decay to `int *a`. Eat the
             // optional bracket pair.
             if matches!(p.peek(), Some(Tok::LBrack)) {
+                // array decays to pointer: pointee = the element type size.
+                if pointee_size == 0 {
+                    pointee_size = if is_char { 1 } else if is_long { 4 }
+                        else if float_width != 0 { float_width } else { 2 };
+                }
                 is_char = false; // array decays to pointer: word-sized
                 p.bump();
                 while !matches!(p.peek(), Some(Tok::RBrack)) {
@@ -896,6 +909,7 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
                 }
                 p.eat(&Tok::RBrack)?;
             }
+            pointee_sizes.push(pointee_size);
             names.push(pname);
             struct_idxs.push(struct_idx);
             is_chars.push(is_char);
@@ -909,9 +923,9 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
             }
             break;
         }
-        (names, struct_idxs, is_chars, is_longs, is_unsigned_ints, float_widths)
+        (names, struct_idxs, is_chars, is_longs, is_unsigned_ints, float_widths, pointee_sizes)
     };
-    let (params, param_struct_idxs, param_is_char, param_is_long, param_is_unsigned, param_float_width) = params;
+    let (params, param_struct_idxs, param_is_char, param_is_long, param_is_unsigned, param_float_width, param_pointee_size) = params;
     p.eat(&Tok::RParen)?;
     p.eat(&Tok::LBrace)?;
 
@@ -1417,7 +1431,7 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
     }
 
     let local_names = p.local_names.clone();
-    Ok(Function { name, return_int, return_long, return_char, return_float_width, params, param_is_char, param_is_long, param_is_unsigned, param_float_width, locals, local_names, body })
+    Ok(Function { name, return_int, return_long, return_char, return_float_width, params, param_is_char, param_is_long, param_is_unsigned, param_float_width, param_pointee_size, locals, local_names, body })
 }
 pub(crate) fn parse_signed_int(p: &mut Parser<'_>) -> Result<i32, EmitError> {
     // Accept any compile-time constant expression — integer literal,

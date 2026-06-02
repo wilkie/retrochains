@@ -616,7 +616,41 @@ fn emit_long_high_word_to_ax(e: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, f
         _ => unreachable!("long_operand gates these forms"),
     }
 }
+/// Element-shift count for a pointer-minus-pointer difference, or None
+/// when this isn't a same-size pointer subtraction. `p - q` yields an
+/// element count, so MSC computes the byte difference then arithmetic-
+/// shifts to divide by the (power-of-two) element size: int*→1, char*→0.
+/// Only pointer *parameters* are recognized here — local-pointer diffs
+/// reuse a live AX from the preceding assignment and are handled
+/// elsewhere. Fixtures 3103, 2647, 3377.
+fn ptr_diff_shift(left: &Expr, right: &Expr, locals: &Locals<'_>) -> Option<u32> {
+    let lsz = match left { Expr::Param(i) => locals.param_pointee_size(*i), _ => 0 };
+    let rsz = match right { Expr::Param(i) => locals.param_pointee_size(*i), _ => 0 };
+    if lsz == 0 || lsz != rsz { return None; }
+    match lsz {
+        1 => Some(0),
+        2 => Some(1),
+        4 => Some(2),
+        _ => None,
+    }
+}
+
 pub(crate) fn emit_binop(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    // Pointer difference: emit the raw byte-difference subtraction, then
+    // convert bytes → elements with `sar ax,1` per shift step.
+    if matches!(op, BinOp::Sub)
+        && let Some(shift) = ptr_diff_shift(left, right, locals)
+    {
+        emit_binop_inner(BinOp::Sub, left, right, locals, out, fixups);
+        for _ in 0..shift {
+            out.extend_from_slice(&[0xD1, 0xF8]); // sar ax,1
+        }
+        return;
+    }
+    emit_binop_inner(op, left, right, locals, out, fixups);
+}
+
+fn emit_binop_inner(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
     // Logical-and/or as a VALUE: short-circuit branches producing 0 or 1 in AX.
     // Pattern: emit_cond_skip(cond, 5); [mov ax,1; jmp +2]; [sub ax,ax]
     // The true block is 5 bytes (B8 01 00 EB 02); jmp +2 skips sub ax,ax.

@@ -402,6 +402,7 @@ pub(crate) fn emit_function(
     let param_is_long: Vec<bool> = func.param_is_long.clone();
     let param_is_unsigned: Vec<bool> = func.param_is_unsigned.clone();
     let param_float_widths: Vec<usize> = func.param_float_width.clone();
+    let param_pointee_sizes: Vec<usize> = func.param_pointee_size.clone();
     let locals_view = Locals {
         inits: &local_inits,
         disps: &local_disps,
@@ -420,6 +421,7 @@ pub(crate) fn emit_function(
         long_params: &param_is_long,
         unsigned_params: &param_is_unsigned,
         param_float_widths: &param_float_widths,
+        param_pointee_sizes: &param_pointee_sizes,
         char_returners,
         long_param_funcs,
         float_returners: float_returners_arg,
