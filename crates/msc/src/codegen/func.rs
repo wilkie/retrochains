@@ -72,6 +72,7 @@ pub(crate) fn emit_function(
     func: &Function,
     long_globals: &[bool],
     char_globals: &[bool],
+    unsigned_globals: &[bool],
     char_returners: &std::collections::HashSet<String>,
     long_param_funcs: &std::collections::HashMap<String, Vec<bool>>,
 ) -> FunctionEmit {
@@ -257,6 +258,7 @@ pub(crate) fn emit_function(
         sizes: &local_sizes,
         long_globals,
         char_globals,
+        unsigned_globals,
         long_locals: &local_long,
         init_literals: &local_literals,
         far_ptr_locals: &local_far_ptrs,

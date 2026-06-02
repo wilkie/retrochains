@@ -109,6 +109,9 @@ pub struct Global {
     /// `extern` storage class — symbol is defined elsewhere. Skip
     /// COMDEF + storage; register as an EXTDEF instead.
     pub is_extern: bool,
+    /// `true` for `unsigned` globals (`unsigned long`, `unsigned int`).
+    /// Selects unsigned codegen (e.g. SHR vs SAR, ja/jb vs jg/jl).
+    pub is_unsigned: bool,
 }
 
 impl Global {
@@ -275,6 +278,9 @@ pub struct Locals<'a> {
     /// Parallel-indexed flags marking globals whose element size is
     /// 1 (char). Used to pick byte-load (`a0`) + cbw over word-load.
     pub char_globals: &'a [bool],
+    /// Parallel-indexed flags marking `unsigned` globals. Selects
+    /// unsigned codegen (SHR vs SAR, ja/jb vs jg/jl for long compares).
+    pub unsigned_globals: &'a [bool],
     /// Parallel-indexed flags marking locals that are `long`. Direct
     /// loads (return, assign) bypass the fold view so the slot is
     /// read at runtime even when its constant value is known.
@@ -335,6 +341,9 @@ impl Locals<'_> {
     }
     pub fn is_char_global(&self, idx: usize) -> bool {
         self.char_globals.get(idx).copied().unwrap_or(false)
+    }
+    pub fn is_unsigned_global(&self, idx: usize) -> bool {
+        self.unsigned_globals.get(idx).copied().unwrap_or(false)
     }
     pub fn is_long_local(&self, idx: usize) -> bool {
         self.long_locals.get(idx).copied().unwrap_or(false)
@@ -1065,6 +1074,7 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
     // offsets for call resolution + chkstk FIXUPs.
     let long_globals: Vec<bool> = unit.globals.iter().map(|g| g.is_long).collect();
     let char_globals: Vec<bool> = unit.globals.iter().map(|g| !g.is_pointer && g.element_size == 1 && g.array_len == 1).collect();
+    let unsigned_globals: Vec<bool> = unit.globals.iter().map(|g| g.is_unsigned).collect();
     let char_returners: std::collections::HashSet<String> = unit.functions.iter()
         .filter(|f| f.return_char)
         .map(|f| symbol_name(&f.name))
@@ -1076,7 +1086,7 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
     let function_emits: Vec<FunctionEmit> = unit
         .functions
         .iter()
-        .map(|f| emit_function(f, &long_globals, &char_globals, &char_returners, &long_param_funcs))
+        .map(|f| emit_function(f, &long_globals, &char_globals, &unsigned_globals, &char_returners, &long_param_funcs))
         .collect();
 
     // Per-function global offset within the _TEXT segment.

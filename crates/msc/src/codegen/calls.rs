@@ -207,6 +207,7 @@ pub(crate) fn long_operand_unsigned(e: &Expr, locals: &Locals<'_>) -> bool {
     match e {
         Expr::Param(i) => locals.is_unsigned_param(*i),
         Expr::Local(i) => locals.is_unsigned_local(*i),
+        Expr::Global(j) => locals.is_unsigned_global(*j),
         _ => false,
     }
 }

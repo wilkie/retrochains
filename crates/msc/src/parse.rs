@@ -229,6 +229,7 @@ pub(crate) fn parse_struct_global_decl(p: &mut Parser<'_>) -> Result<(), EmitErr
         is_long: false,
         is_static: false,
         is_extern: false,
+        is_unsigned: false,
     });
     Ok(())
 }
@@ -376,11 +377,13 @@ pub(crate) fn parse_global_decl(p: &mut Parser<'_>) -> Result<(), EmitError> {
     let mut i = p.pos;
     let mut is_static = false;
     let mut is_extern = false;
+    let mut is_unsigned = false;
     while let Some(t) = p.toks.get(i) {
         match t {
             Tok::Kw("static") => { is_static = true; i += 1; }
             Tok::Kw("extern") => { is_extern = true; i += 1; }
-            Tok::Kw("unsigned") | Tok::Kw("signed")
+            Tok::Kw("unsigned") => { is_unsigned = true; i += 1; }
+            Tok::Kw("signed")
                 | Tok::Kw("register") | Tok::Kw("auto")
                 | Tok::Kw("volatile") | Tok::Kw("const")
                 | Tok::Kw("short") => { i += 1; }
@@ -569,7 +572,7 @@ pub(crate) fn parse_global_decl(p: &mut Parser<'_>) -> Result<(), EmitError> {
         array_len = init.as_ref().map(|v| v.len()).unwrap_or(0).max(1);
     }
     p.global_names.push(name.clone());
-    p.globals.push(Global { name, init, array_len, element_size, is_pointer, struct_idx: None, is_long, is_static, is_extern });
+    p.globals.push(Global { name, init, array_len, element_size, is_pointer, struct_idx: None, is_long, is_static, is_extern, is_unsigned });
     Ok(())
 }
 /// Returns true when `e` has a direct `Local` leaf whose `init_is_literal`
