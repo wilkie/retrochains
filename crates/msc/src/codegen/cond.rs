@@ -303,6 +303,29 @@ pub(crate) fn emit_cond_cmp_inner(cond: &Cond, locals: &Locals<'_>, out: &mut Ve
         out.extend_from_slice(&[0x0B, 0xC0]); // or ax, ax
         return;
     }
+    // Global array element in a condition: `if (a[K])` / `if (a[K] <op> imm)`
+    // (incl. `p[K]` resolved through a global-pointer alias) → a direct
+    // `cmp word/byte ptr [_a+off], imm` rather than load-then-test. The element
+    // index is a constant here (folded earlier). Fixtures 889, 891, 892, 898.
+    if let Some((array, k, cmp_to)) = match cond {
+        Cond::Truthy(Expr::Index { array, index } | Expr::IndexByte { array, index }) => {
+            if let Expr::IntLit(k) = index.as_ref() { Some((*array, *k, 0)) } else { None }
+        }
+        Cond::Cmp { op: _, left: Expr::Index { array, index } | Expr::IndexByte { array, index }, right: Expr::IntLit(m) }
+        | Cond::Cmp { op: _, left: Expr::IntLit(m), right: Expr::Index { array, index } | Expr::IndexByte { array, index } } => {
+            if let Expr::IntLit(k) = index.as_ref() { Some((*array, *k, *m)) } else { None }
+        }
+        _ => None,
+    } {
+        let is_byte = matches!(cond,
+            Cond::Truthy(Expr::IndexByte { .. })
+            | Cond::Cmp { left: Expr::IndexByte { .. }, .. }
+            | Cond::Cmp { right: Expr::IndexByte { .. }, .. });
+        let elem = if is_byte { 1 } else { 2 };
+        let byte_off = (k as u16).wrapping_mul(elem);
+        emit_cmp_global_off_imm(array, byte_off, cmp_to, is_byte, out, fixups);
+        return;
+    }
     match cond {
         Cond::Truthy(Expr::Local(idx)) => emit_cmp_local_imm(*idx, locals, 0, out),
         Cond::Truthy(Expr::Param(idx)) => {
@@ -495,6 +518,24 @@ pub(crate) fn loop_back_jcc(op: RelOp) -> u8 {
 /// `cmp word ptr [<global-addr>], imm8` — MSC picks the `83 3e disp imm8`
 /// form for global compares against a sign-extended byte (fixtures
 /// 4129, 4133). The placeholder address gets a GlobalAddr FIXUP.
+/// `cmp word/byte ptr [_g + byte_off], imm` — a global array element compared to
+/// an immediate. The element address placeholder carries byte_off as the
+/// GlobalAddr addend. Used for `a[K]`/`p[K]` in conditions. Fixtures 889, 891.
+pub(crate) fn emit_cmp_global_off_imm(global_idx: usize, byte_off: u16, k: i32, is_byte: bool, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    let emit_addr = |out: &mut Vec<u8>, fixups: &mut Vec<Fixup>| {
+        let bo = out.len();
+        out.extend_from_slice(&byte_off.to_le_bytes());
+        fixups.push(Fixup { body_offset: bo - 1, kind: FixupKind::GlobalAddr { global_idx } });
+    };
+    if is_byte {
+        out.push(0x80); out.push(0x3E); emit_addr(out, fixups); out.push((k as u32 & 0xFF) as u8);
+    } else if let Ok(k8) = i8::try_from(k) {
+        out.push(0x83); out.push(0x3E); emit_addr(out, fixups); out.push(k8 as u8);
+    } else {
+        out.push(0x81); out.push(0x3E); emit_addr(out, fixups);
+        out.extend_from_slice(&((k as u32 & 0xFFFF) as u16).to_le_bytes());
+    }
+}
 pub(crate) fn emit_cmp_global_imm(global_idx: usize, k: i32, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
     if let Ok(k_i8) = i8::try_from(k) {
         out.push(0x83);

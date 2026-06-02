@@ -207,6 +207,18 @@ pub(crate) fn emit_push_arg(arg: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, 
             out.push(bp_modrm(0x76, disp));
             push_bp_disp(out, disp);
         }
+        // Word global-array element `a[K]` (incl. `p[K]` via alias) as an
+        // argument: `push word ptr [_a+off]` (ff 36) with byte_off as the
+        // GlobalAddr addend. Fixture 893.
+        Expr::Index { array, index } if matches!(index.as_ref(), Expr::IntLit(_)) => {
+            let Expr::IntLit(k) = index.as_ref() else { unreachable!() };
+            let byte_off = (*k as u16).wrapping_mul(2);
+            out.push(0xFF);
+            let body_offset = out.len();
+            out.push(0x36);
+            out.extend_from_slice(&byte_off.to_le_bytes());
+            fixups.push(Fixup { body_offset, kind: FixupKind::GlobalAddr { global_idx: *array } });
+        }
         Expr::BinOp { .. } | Expr::Call { .. } | Expr::Ternary { .. }
             | Expr::DerefWord { .. } | Expr::DerefByte { .. }
             | Expr::GlobalField { .. } | Expr::LocalField { .. }
