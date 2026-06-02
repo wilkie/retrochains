@@ -296,6 +296,39 @@ pub(crate) fn tokenize(source: &str) -> Result<Vec<Tok>, EmitError> {
                 toks.push(Tok::StrLit(buf));
             }
             b'0'..=b'9' => {
+                // Floating-point literal: decimal digits followed by a `.`,
+                // an exponent, or an `f` suffix (hex floats unsupported).
+                if !(bytes.get(i) == Some(&b'0')
+                    && matches!(bytes.get(i + 1), Some(&b'x') | Some(&b'X')))
+                {
+                    let mut j = i;
+                    while j < bytes.len() && bytes[j].is_ascii_digit() { j += 1; }
+                    if matches!(bytes.get(j), Some(b'.') | Some(b'e') | Some(b'E') | Some(b'f') | Some(b'F')) {
+                        let start = i;
+                        while i < bytes.len() && bytes[i].is_ascii_digit() { i += 1; }
+                        if bytes.get(i) == Some(&b'.') {
+                            i += 1;
+                            while i < bytes.len() && bytes[i].is_ascii_digit() { i += 1; }
+                        }
+                        if matches!(bytes.get(i), Some(b'e') | Some(b'E')) {
+                            i += 1;
+                            if matches!(bytes.get(i), Some(b'+') | Some(b'-')) { i += 1; }
+                            while i < bytes.len() && bytes[i].is_ascii_digit() { i += 1; }
+                        }
+                        let text = std::str::from_utf8(&bytes[start..i])
+                            .map_err(|_| EmitError::Unsupported("non-ASCII in float".to_owned()))?;
+                        let val: f64 = text.parse()
+                            .map_err(|_| EmitError::Unsupported(format!("bad float `{text}`")))?;
+                        let mut is_double = true;
+                        match bytes.get(i) {
+                            Some(b'f') | Some(b'F') => { is_double = false; i += 1; }
+                            Some(b'l') | Some(b'L') => { i += 1; }
+                            _ => {}
+                        }
+                        toks.push(Tok::Float(val.to_bits(), is_double));
+                        continue;
+                    }
+                }
                 // Hex (`0x` / `0X`), octal (`0` followed by digits),
                 // and decimal forms. Trailing L/U/UL suffixes ignored.
                 let n: i32 = if bytes.get(i) == Some(&b'0')
@@ -362,6 +395,8 @@ pub(crate) fn tokenize(source: &str) -> Result<Vec<Tok>, EmitError> {
                     "struct" => Tok::Kw("struct"),
                     "sizeof" => Tok::Kw("sizeof"),
                     "long" => Tok::Kw("long"),
+                    "float" => Tok::Kw("float"),
+                    "double" => Tok::Kw("double"),
                     "enum" => Tok::Kw("enum"),
                     "typedef" => Tok::Kw("typedef"),
                     "cdecl" => Tok::Kw("cdecl"),

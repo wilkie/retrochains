@@ -275,6 +275,7 @@ pub(crate) fn prop_cond(cond: &mut Cond, cp: &mut ConstProp) {
 }
 pub(crate) fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
     match e {
+        Expr::FloatLit(..) => {} // no int const-prop into float literals
         Expr::Global(idx) => {
             // Long globals are never substituted — their compound
             // updates need `Global(g)` on the lhs for the long-specific

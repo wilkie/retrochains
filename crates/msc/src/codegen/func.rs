@@ -192,6 +192,11 @@ pub(crate) fn emit_function(
     // init here; their element stores live in the prelude body the
     // parser synthesized.
     for (i, spec) in func.locals.iter().enumerate() {
+        // Float/double locals are initialized via the x87 const pool, not
+        // an integer store — handled by the float codegen block (pending).
+        if spec.is_float {
+            continue;
+        }
         if let Some(value) = spec.init {
             let disp = local_disps[i];
             if spec.is_long {

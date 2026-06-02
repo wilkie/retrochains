@@ -221,6 +221,12 @@ pub struct LocalSpec {
     /// value into later uses when a type cast is involved — the local is read
     /// from its slot at runtime. Fixture 1732.
     pub init_via_type_cast: bool,
+    /// True for `float`/`double` locals — storage is `size` bytes (4 or 8),
+    /// init goes through the x87 const-literal pool rather than `init`.
+    pub is_float: bool,
+    /// For a float/double local with a literal initializer, the f64 bits of
+    /// the value, materialized in the CONST pool and loaded via `fld`.
+    pub float_bits: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -239,13 +245,20 @@ pub struct StructField {
 
 impl LocalSpec {
     pub fn int(init: Option<i32>) -> Self {
-        Self { size: 2, array_len: 1, init, struct_idx: None, is_long: false, init_is_literal: init.is_some(), is_far_ptr: false, pointee_size: 0, is_unsigned: false, init_via_cast: false, init_via_type_cast: false }
+        Self { size: 2, array_len: 1, init, struct_idx: None, is_long: false, init_is_literal: init.is_some(), is_far_ptr: false, pointee_size: 0, is_unsigned: false, init_via_cast: false, init_via_type_cast: false, is_float: false, float_bits: None }
     }
     pub fn char_(init: Option<i32>) -> Self {
-        Self { size: 1, array_len: 1, init, struct_idx: None, is_long: false, init_is_literal: init.is_some(), is_far_ptr: false, pointee_size: 0, is_unsigned: false, init_via_cast: false, init_via_type_cast: false }
+        Self { size: 1, array_len: 1, init, struct_idx: None, is_long: false, init_is_literal: init.is_some(), is_far_ptr: false, pointee_size: 0, is_unsigned: false, init_via_cast: false, init_via_type_cast: false, is_float: false, float_bits: None }
     }
     pub fn long_(init: Option<i32>) -> Self {
-        Self { size: 2, array_len: 2, init, struct_idx: None, is_long: true, init_is_literal: init.is_some(), is_far_ptr: false, pointee_size: 0, is_unsigned: false, init_via_cast: false, init_via_type_cast: false }
+        Self { size: 2, array_len: 2, init, struct_idx: None, is_long: true, init_is_literal: init.is_some(), is_far_ptr: false, pointee_size: 0, is_unsigned: false, init_via_cast: false, init_via_type_cast: false, is_float: false, float_bits: None }
+    }
+    /// `float`/`double` local. `width` is 4 (float) or 8 (double); `bits` is
+    /// the f64 value of a literal initializer (None for uninitialized). `init`
+    /// carries the truncated int value so `(int)f` const-folds.
+    pub fn float_(width: usize, bits: Option<u64>) -> Self {
+        let init = bits.map(|b| f64::from_bits(b) as i32);
+        Self { size: width, array_len: 1, init, struct_idx: None, is_long: false, init_is_literal: init.is_some(), is_far_ptr: false, pointee_size: 0, is_unsigned: false, init_via_cast: false, init_via_type_cast: false, is_float: true, float_bits: bits }
     }
     /// Bytes occupied in the frame, rounded up to an even count.
     /// MSC pads each local to a word boundary — scalar char gets 2
@@ -550,6 +563,10 @@ pub enum RelOp {
 pub enum Expr {
     /// A 16-bit-truncated int literal.
     IntLit(i32),
+    /// A floating-point literal: the f64 value's raw bits and whether the
+    /// source was `double` (true) or `float`/`3.0f` (false). Materialized in
+    /// the CONST float-literal pool; `fold` truncates it for `(int)` casts.
+    FloatLit(u64, bool),
     /// Reference to a local by index into the enclosing function's
     /// `locals` array. Loaded from `[bp - 2*(idx+1)]`.
     Local(usize),
@@ -696,6 +713,8 @@ impl Expr {
     fn fold(&self, locals: &[Option<i32>]) -> Option<i32> {
         match self {
             Expr::IntLit(k) => Some(*k),
+            // `(int)<float-const>` truncates toward zero.
+            Expr::FloatLit(bits, _) => Some(f64::from_bits(*bits) as i32),
             Expr::Local(i) => locals.get(*i).copied().flatten(),
             // Parameters carry an unknown value at compile time.
             Expr::Param(_) => None,
@@ -769,6 +788,8 @@ impl Expr {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Tok {
     Kw(&'static str),
+    /// Floating-point literal: f64 bits + whether it was a `double`.
+    Float(u64, bool),
     Ident(String),
     Int(i32),
     LParen,

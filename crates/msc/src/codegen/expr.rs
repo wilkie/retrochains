@@ -15,6 +15,13 @@ pub(crate) fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8
             out.push(0xB8);
             out.extend_from_slice(&imm.to_le_bytes());
         }
+        Expr::FloatLit(bits, _) => {
+            // A float literal reaching int context (e.g. an unfolded
+            // `(int)<const>`): load its truncated int value.
+            let imm = (f64::from_bits(*bits) as i32 as u32 & 0xFFFF) as u16;
+            out.push(0xB8);
+            out.extend_from_slice(&imm.to_le_bytes());
+        }
         Expr::Local(i) => {
             emit_load_local(*i, locals, out);
         }

@@ -822,9 +822,9 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
                     }
                 };
                 let spec = if is_ptr {
-                    LocalSpec { size: 2, array_len: 1, init: None, struct_idx: Some(sidx), is_long: false, init_is_literal: false, is_far_ptr: false, pointee_size: stotal, is_unsigned: false, init_via_cast: false, init_via_type_cast: false }
+                    LocalSpec { size: 2, array_len: 1, init: None, struct_idx: Some(sidx), is_long: false, init_is_literal: false, is_far_ptr: false, pointee_size: stotal, is_unsigned: false, init_via_cast: false, init_via_type_cast: false, is_float: false, float_bits: None }
                 } else {
-                    LocalSpec { size: 1, array_len: stotal, init: None, struct_idx: Some(sidx), is_long: false, init_is_literal: false, is_far_ptr: false, pointee_size: 0, is_unsigned: false, init_via_cast: false, init_via_type_cast: false }
+                    LocalSpec { size: 1, array_len: stotal, init: None, struct_idx: Some(sidx), is_long: false, init_is_literal: false, is_far_ptr: false, pointee_size: 0, is_unsigned: false, init_via_cast: false, init_via_type_cast: false, is_float: false, float_bits: None }
                 };
                 let local_idx = locals.len();
                 p.local_names.push(lname);
@@ -853,19 +853,21 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
         let has_unsigned = (start_pos..peek_pos).any(|i| {
             matches!(p.toks.get(i), Some(Tok::Kw("unsigned")))
         });
-        let (size, has_explicit_type, is_long_decl) = if enum_consumed {
+        let (size, has_explicit_type, is_long_decl, is_float_decl) = if enum_consumed {
             // The `enum [<tag>]` prefix has already been consumed; the
             // next token is the declarator. Treat as int.
-            (2usize, false, false)
+            (2usize, false, false, false)
         } else { match p.toks.get(peek_pos) {
-            Some(Tok::Kw("int")) => (2usize, true, false),
-            Some(Tok::Kw("char")) => (1usize, true, false),
-            Some(Tok::Kw("long")) => (2usize, true, true),
+            Some(Tok::Kw("int")) => (2usize, true, false, false),
+            Some(Tok::Kw("char")) => (1usize, true, false, false),
+            Some(Tok::Kw("long")) => (2usize, true, true, false),
+            Some(Tok::Kw("float")) => (4usize, true, false, true),
+            Some(Tok::Kw("double")) => (8usize, true, false, true),
             // `unsigned x;` / `signed x;` → implicit int.
             _ if peek_pos > start_pos
                 && matches!(p.toks.get(peek_pos), Some(Tok::Ident(_))) =>
             {
-                (2usize, false, false)
+                (2usize, false, false, false)
             }
             _ => break,
         }};
@@ -876,6 +878,36 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
             if is_long_decl && matches!(p.peek(), Some(Tok::Kw("int"))) {
                 p.bump();
             }
+        }
+        // Float/double locals: `float|double name [= <literal>] [, ...] ;`.
+        // The init literal's f64 bits are stored for the x87 const pool;
+        // a non-literal float init isn't supported yet.
+        if is_float_decl {
+            loop {
+                let lname = match p.bump().cloned() {
+                    Some(Tok::Ident(s)) => s,
+                    other => return Err(EmitError::Unsupported(format!(
+                        "expected float local name, got {other:?}"))),
+                };
+                let mut bits = None;
+                if matches!(p.peek(), Some(Tok::Assign)) {
+                    p.bump();
+                    match p.bump().cloned() {
+                        Some(Tok::Float(b, _)) => bits = Some(b),
+                        Some(Tok::Int(n)) => bits = Some((f64::from(n)).to_bits()),
+                        other => return Err(EmitError::Unsupported(format!(
+                            "unsupported float initializer {other:?}"))),
+                    }
+                }
+                p.local_names.push(lname);
+                let spec = LocalSpec::float_(size, bits);
+                p.local_specs.push(spec.clone());
+                locals.push(spec);
+                if matches!(p.peek(), Some(Tok::Comma)) { p.bump(); continue; }
+                break;
+            }
+            p.eat(&Tok::Semi)?;
+            continue;
         }
         loop {
             // Per-declarator `*` prefix for pointer locals, with
@@ -936,7 +968,7 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
             } else {
                 (size, array_len, false)
             };
-            let spec = LocalSpec { size: slot_size, array_len: slot_len, init: None, struct_idx: None, is_long: is_long_slot, init_is_literal: false, is_far_ptr: is_far_ptr_decl, pointee_size: if star_count > 0 { size } else { 0 }, is_unsigned: has_unsigned && size == 1 && star_count == 0, init_via_cast: false, init_via_type_cast: false };
+            let spec = LocalSpec { size: slot_size, array_len: slot_len, init: None, struct_idx: None, is_long: is_long_slot, init_is_literal: false, is_far_ptr: is_far_ptr_decl, pointee_size: if star_count > 0 { size } else { 0 }, is_unsigned: has_unsigned && size == 1 && star_count == 0, init_via_cast: false, init_via_type_cast: false, is_float: false, float_bits: None };
             p.local_specs.push(spec.clone());
             locals.push(spec);
             if matches!(p.peek(), Some(Tok::Assign)) {
@@ -2175,6 +2207,7 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
             Ok(inner)
         }
         Some(Tok::Int(n)) => Ok(Expr::IntLit(n)),
+        Some(Tok::Float(bits, double)) => Ok(Expr::FloatLit(bits, double)),
         Some(Tok::PlusPlus) => {
             let inner = parse_atom(p)?;
             match inner {
