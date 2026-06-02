@@ -163,10 +163,20 @@ and stores at the other (`fld dword; fstp qword` and vice-versa). Targets:
 
 ### 3f — float/double args, returns, globals
 - Double/float **args**: caller pushes the 4/8 bytes (or `fld`+`sub sp`/
-  `fstp [sp]`); needed for 1678's `main` calling `dbl_to_int(3.5)`.
-- Float **returns**: value returned on the FPU stack (`st(0)`).
-- Float **globals**: `_DATA`/COMDEF storage at 4/8 bytes; loads/stores via
-  `fld/fstp [g]` with a `GlobalAddr` fixup.
+  `fstp [sp]`); needed for 1678's `main` calling `dbl_to_int(3.5)`. **Done in
+  block 3a.**
+- Float **returns**: value returned on the FPU stack (`st(0)`). *Still TODO.*
+- Float **globals** — **done**:
+  - `double g = 3.14;` → 8/4-byte `_DATA` PUBDEF; `(int)g` → `fld [g]; call
+    __ftol` (`Global.is_float`, `GlobalInit::FloatBits`, `float_globals` in
+    `Locals`). Fixture 1680.
+  - `double g;` (tentative) → COMDEF `BYTE:8`; `g = 3.14;` → `fld $T; fstp [g];
+    fwait` (float-global store, literal interns into the CONST pool); a later
+    `(int)g` const-folds to `mov ax,K` (const-prop records the truncated value
+    on a FloatLit global store, store still emits). Fixture 1757.
+  - The `90 9B` before a standalone `fwait` is the 8087-emulator's 2-byte patch
+    slot (carries the FIWRQQ marker), not a parity nop — emitted
+    unconditionally.
 
 ## Suggested order
 

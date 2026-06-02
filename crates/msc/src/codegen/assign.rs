@@ -510,6 +510,39 @@ pub(crate) fn emit_assign_param(param_idx: usize, value: &Expr, locals: &Locals<
     }
 }
 pub(crate) fn emit_assign_global(global_idx: usize, value: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    // Float/double global store from a literal: `g = 3.14;` →
+    //   9B <D9|DD> 06 <off16>   fld  <dword|qword> [$T]   (FIDRQQ + FloatLoad)
+    //   9B <D9|DD> 1E <off16>   fstp <dword|qword> [g]    (FIDRQQ + GlobalAddr)
+    //   90 9B                   nop; fwait                (FIWRQQ — emulator slot)
+    // The `90 9B` is the 8087-emulator's 2-byte patch slot for the standalone
+    // wait, not a parity nop, so it is emitted unconditionally.
+    if locals.is_float_global(global_idx)
+        && let Expr::FloatLit(bits, _) = value
+    {
+        let width = locals.float_global_width(global_idx);
+        let op = if width == 4 { 0xD9u8 } else { 0xDDu8 };
+        // fld <width> [$T]
+        fixups.push(Fixup { body_offset: out.len(), kind: FixupKind::FloatMarker { target: "FIDRQQ" } });
+        out.push(0x9B);
+        out.push(op);
+        out.push(0x06);
+        let bo = out.len() - 1;
+        out.extend_from_slice(&[0x00, 0x00]);
+        fixups.push(Fixup { body_offset: bo, kind: FixupKind::FloatLoad { bits: *bits, width } });
+        // fstp <width> [g]  (modrm 1E = /3 [disp16])
+        fixups.push(Fixup { body_offset: out.len(), kind: FixupKind::FloatMarker { target: "FIDRQQ" } });
+        out.push(0x9B);
+        out.push(op);
+        out.push(0x1E);
+        let bo = out.len() - 1;
+        out.extend_from_slice(&[0x00, 0x00]);
+        fixups.push(Fixup { body_offset: bo, kind: FixupKind::GlobalAddr { global_idx } });
+        // nop + fwait, marker on the nop (the emulator patch slot).
+        fixups.push(Fixup { body_offset: out.len(), kind: FixupKind::FloatMarker { target: "FIWRQQ" } });
+        out.push(0x90); // nop
+        out.push(0x9B); // fwait
+        return;
+    }
     // Long-global compound shift `g <<= k` / `g >>= k`: MSC calls a runtime
     // helper, passing the shift count (in AL) and the global's address.
     //   mov al, k; push ax; mov ax, OFFSET g; push ax; call __aNN*shl/shr

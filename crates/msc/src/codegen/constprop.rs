@@ -104,6 +104,11 @@ pub(crate) fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
                 AssignTarget::Global(g) => {
                     if let Expr::IntLit(k) = value {
                         cp.g_known.insert(*g, *k);
+                    } else if let Expr::FloatLit(bits, _) = value {
+                        // Float-global store: a later `(int)g` read folds to the
+                        // truncated value (`mov ax,K`), while the float store
+                        // itself still emits. Fixture 1757.
+                        cp.g_known.insert(*g, f64::from_bits(*bits) as i32);
                     } else {
                         cp.g_known.remove(g);
                     }

@@ -1150,6 +1150,35 @@ fn collect_call_float_args_stmt(s: &Stmt, out: &mut Vec<(u64, usize)>) {
     }
 }
 
+/// Collect `(bits, width)` for every float/double literal stored to a global
+/// (`g = 3.14;`). These intern into the CONST pool as `$T` temps loaded by the
+/// float-global store sequence (`fld $T; fstp [g]`). Kept separate from the
+/// call-arg walker so it does not affect the WithSlide frame decision.
+fn collect_global_store_floats_stmt(s: &Stmt, out: &mut Vec<(u64, usize)>) {
+    match s {
+        Stmt::Assign { target: AssignTarget::Global(_), value: Expr::FloatLit(bits, is_double) } => {
+            out.push((*bits, if *is_double { 8 } else { 4 }));
+        }
+        Stmt::If { then_branch, else_branch, .. } => {
+            collect_global_store_floats_stmt(then_branch, out);
+            if let Some(eb) = else_branch { collect_global_store_floats_stmt(eb, out); }
+        }
+        Stmt::While { body, .. } | Stmt::DoWhile { body, .. } => {
+            collect_global_store_floats_stmt(body, out);
+        }
+        Stmt::For { init, step, body, .. } => {
+            collect_global_store_floats_stmt(init, out);
+            collect_global_store_floats_stmt(step, out);
+            collect_global_store_floats_stmt(body, out);
+        }
+        Stmt::Block(ss) => for s in ss { collect_global_store_floats_stmt(s, out); },
+        Stmt::Switch { cases, .. } => {
+            for c in cases { for s in &c.body { collect_global_store_floats_stmt(s, out); } }
+        }
+        _ => {}
+    }
+}
+
 /// True when the function passes a float/double literal as a call argument.
 /// Such a call needs the `fld; sub sp; mov bx,sp; fstp [bx]; fwait` push
 /// sequence, which slides SP — forcing a WithSlide frame and a result temp.
@@ -1282,6 +1311,16 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
         let mut args = Vec::new();
         for s in &f.body { collect_call_float_args_stmt(s, &mut args); }
         for (bits, width) in args {
+            if !float_pool.contains(&(bits, width)) {
+                float_pool.push((bits, width));
+            }
+        }
+    }
+    // …as do float/double literals stored to a global (`g = 3.14;`).
+    for f in &unit.functions {
+        let mut stores = Vec::new();
+        for s in &f.body { collect_global_store_floats_stmt(s, &mut stores); }
+        for (bits, width) in stores {
             if !float_pool.contains(&(bits, width)) {
                 float_pool.push((bits, width));
             }
