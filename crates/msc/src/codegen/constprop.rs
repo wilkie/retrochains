@@ -38,6 +38,30 @@ pub(crate) fn const_prop_globals(
     }).collect();
     (new_stmts, cp.mutated_locals, cp.mutated_globals)
 }
+/// Rewrite `*p` (DerefWord/DerefByte over an aliased pointer local) to the
+/// aliased lvalue `Local(x)`/`Global(g)` WITHOUT const-folding it. Used on a
+/// compound-assign RHS so the self-assign peephole sees `x op K` (and emits an
+/// in-place `add [x],K`) rather than a folded constant store.
+fn alias_rewrite_derefs(e: &mut Expr, cp: &ConstProp) {
+    match e {
+        Expr::DerefByte { ptr } | Expr::DerefWord { ptr } => {
+            alias_rewrite_derefs(ptr, cp);
+            if let Expr::Local(p) = ptr.as_ref()
+                && let Some(&a) = cp.ptr_alias.get(p)
+            {
+                *e = match a {
+                    AliasTarget::Local(x) => Expr::Local(x),
+                    AliasTarget::Global(g) => Expr::Global(g),
+                };
+            }
+        }
+        Expr::BinOp { left, right, .. } => {
+            alias_rewrite_derefs(left, cp);
+            alias_rewrite_derefs(right, cp);
+        }
+        _ => {}
+    }
+}
 pub(crate) fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
     match stmt {
         Stmt::Return(e) => prop_expr(e, cp),
@@ -60,7 +84,9 @@ pub(crate) fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
                 cp.mutated_locals.insert(*p);
                 return;
             }
-            // `*p = ...` where p aliases x/g → rewrite to a direct store.
+            // `*p = ...` where p aliases x/g → rewrite to a direct store, and
+            // rewrite any `*p` in the RHS to the aliased lvalue too, so a
+            // compound `*p += K` becomes `x += K` (in-place add) not a fold.
             if let AssignTarget::DerefLocal(p) = target
                 && let Some(&a) = cp.ptr_alias.get(p)
             {
@@ -68,6 +94,7 @@ pub(crate) fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
                     AliasTarget::Local(x) => AssignTarget::Local(x),
                     AliasTarget::Global(g) => AssignTarget::Global(g),
                 };
+                alias_rewrite_derefs(value, cp);
             }
             // `x = x op RHS` preserves the `Local(x)` on the left so
             // emit_assign can hit the in-place inc/dec/add/sub-mem
