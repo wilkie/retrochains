@@ -217,9 +217,26 @@ B8 <imm16>              mov  ax, OFFSET __fac   (ExtData __fac)           ; AX =
   `return`).
 
 Flips 3997, 3998, 4002 (`float`/`double main` with const-folded return, no
-caller-receive). MSC at 2004/3952. **Still TODO**: caller-receive (the
-`lea di; mov si,ax; movsw×4` copy from `__fac` into a double local — 1684,
-2144, 4001, 2146), `fild` (int→float, 4001), runtime `fdiv`/`fadd` (2144).
+caller-receive). MSC at 2004/3952.
+
+### Float-return value producers + caller-receive (1684, 4001 — done)
+- **Callee value producers** (`emit_return`, float-return): a `FloatLit` folds
+  to `fld [$T]`; an int param is `fild WORD [bp+disp]` (`(double)x`, fixture
+  4001); a float param is `fld <width> [bp+disp]`. All carry a FIDRQQ marker,
+  then the common `fstp __fac; mov ax,OFFSET __fac; nop;fwait` tail.
+- **Caller-receive**: `double d = f();` (named local, 1684) and `return (int)
+  f();` (hidden temp, 4001) copy the 8 bytes from `__fac`:
+  `call _f; lea di,[bp+disp]; mov si,ax; push ss; pop es; movsw×(width/2)`.
+  The `return (int)f()` form then does `fld [temp]; call __ftol`. A new
+  `Frame::WithSlideDiSi` (push di/si) wraps it; the hidden temp is the deepest
+  8-byte frame slot (`float_call_temp_disp`).
+- `FixupKind::ExtData`/`__fac` join the reference-ordered helper externs;
+  `float_returners` (name→width) on `Locals`; `uses_float` also trips on a
+  float-returning function.
+
+MSC at 2007/3952. **Still TODO**: runtime FP arithmetic — `fdiv`/`fadd`/`fmul`
+on a live st(0) (2144 `x/2.0`, 2145 `f+1.5f`, 2148 `d+=`), `fchs` (2147),
+runtime compares (1754, 2149), float arrays (1679, 1755, 2140, 2150).
 
 ### 3f — float/double args, returns, globals
 - Double/float **args**: caller pushes the 4/8 bytes (or `fld`+`sub sp`/

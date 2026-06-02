@@ -117,9 +117,14 @@ pub(crate) fn emit_function(
     let receives_float_return = body.iter().any(|s| matches!(s,
         Stmt::Assign { target: AssignTarget::Local(_), value: Expr::Call { name, .. } }
             if float_returners_arg.contains_key(&symbol_name(name))));
+    // `return (int)<float-returning call>` receives the result into a hidden
+    // 8-byte temp, then `fld; call __ftol`. Same di+si copy frame.
+    let returns_float_call = body.iter().any(|s| matches!(s,
+        Stmt::Return(Expr::Call { name, .. })
+            if float_returners_arg.contains_key(&symbol_name(name))));
     // Upgrade to WithSlideSi when the body uses runtime local array
     // indexing (SI register must be caller-saved).
-    let frame = if receives_float_return {
+    let frame = if receives_float_return || returns_float_call {
         Frame::WithSlideDiSi
     } else if matches!(base_frame, Frame::WithSlide)
         && body_needs_si(&body, &local_inits)
@@ -178,7 +183,15 @@ pub(crate) fn emit_function(
     let local_sizes: Vec<usize> = func.locals.iter().map(|l| l.size).collect();
     // The float-arg call result is spilled to a 2-byte temp at [bp-2]; reserve
     // it at the deepest frame slot so chkstk sizes the frame to include it.
-    let frame_bytes: usize = cumulative as usize + if has_float_arg_call { 2 } else { 0 };
+    let frame_bytes: usize = cumulative as usize
+        + if has_float_arg_call { 2 } else { 0 }
+        + if returns_float_call { 8 } else { 0 };
+    // The float-call-return temp is the deepest 8-byte slot.
+    let float_call_temp_disp: i16 = if returns_float_call {
+        -i16::try_from(frame_bytes).expect("frame fits")
+    } else {
+        0
+    };
 
     match frame {
         Frame::None => bytes.extend_from_slice(&[0x33, 0xC0]),
@@ -370,6 +383,7 @@ pub(crate) fn emit_function(
         loop_stack: &loop_stack,
         fpu_live: &fpu_live,
         return_float_width: func.return_float_width,
+        float_call_temp_disp,
     };
 
     let mut reachable = true;

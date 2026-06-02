@@ -279,17 +279,47 @@ pub(crate) fn emit_return(
     //   B8 <imm16>             mov  ax, OFFSET __fac     (ExtData)
     //   90 9B                  nop; fwait                (FIWRQQ)
     if locals.return_float_width != 0 {
-        if let Expr::FloatLit(bits, is_double) = expr {
-            let width = if *is_double { 8 } else { 4 };
-            let op = if width == 4 { 0xD9u8 } else { 0xDDu8 };
-            // fld <width> [$T]
-            fixups.push(Fixup { body_offset: out.len(), kind: FixupKind::FloatMarker { target: "FIDRQQ" } });
-            out.push(0x9B);
-            out.push(op);
-            out.push(0x06);
-            let bo = out.len() - 1;
-            out.extend_from_slice(&[0x00, 0x00]);
-            fixups.push(Fixup { body_offset: bo, kind: FixupKind::FloatLoad { bits: *bits, width } });
+        // Produce the return value on st(0):
+        //   FloatLit          → fld <width> [$T]              (const-folded)
+        //   int param         → fild WORD [bp+disp]           (`(double)x`)
+        //   float/double param→ fld <width> [bp+disp]
+        let produced = match expr {
+            Expr::FloatLit(bits, is_double) => {
+                let width = if *is_double { 8 } else { 4 };
+                let op = if width == 4 { 0xD9u8 } else { 0xDDu8 };
+                fixups.push(Fixup { body_offset: out.len(), kind: FixupKind::FloatMarker { target: "FIDRQQ" } });
+                out.push(0x9B);
+                out.push(op);
+                out.push(0x06);
+                let bo = out.len() - 1;
+                out.extend_from_slice(&[0x00, 0x00]);
+                fixups.push(Fixup { body_offset: bo, kind: FixupKind::FloatLoad { bits: *bits, width } });
+                true
+            }
+            Expr::Param(i) if !locals.is_float_param(*i) => {
+                // `(double)<int param>` → fild WORD [bp+disp]
+                let disp = param_disp(*i);
+                fixups.push(Fixup { body_offset: out.len(), kind: FixupKind::FloatMarker { target: "FIDRQQ" } });
+                out.push(0x9B);
+                out.push(0xDF); // fild m16int (/0)
+                out.push(bp_modrm(0x46, disp));
+                push_bp_disp(out, disp);
+                true
+            }
+            Expr::Param(i) => {
+                let width = locals.float_param_width(*i);
+                let op = if width == 4 { 0xD9u8 } else { 0xDDu8 };
+                let disp = param_disp(*i);
+                fixups.push(Fixup { body_offset: out.len(), kind: FixupKind::FloatMarker { target: "FIDRQQ" } });
+                out.push(0x9B);
+                out.push(op);
+                out.push(bp_modrm(0x46, disp));
+                push_bp_disp(out, disp);
+                true
+            }
+            _ => false,
+        };
+        if produced {
             // fstp QWORD [__fac]  (always qword, modrm 1E = /3 [disp16])
             fixups.push(Fixup { body_offset: out.len(), kind: FixupKind::FloatMarker { target: "FIDRQQ" } });
             out.push(0x9B);
@@ -317,7 +347,34 @@ pub(crate) fn emit_return(
         // load before ret. Fixture 4102 confirms.
         // For WithSlide frames, `mov sp, bp` in the epilogue restores sp
         // across the pushed args — no `add sp, N` cleanup needed.
-        if let Expr::Call { name, args } = expr {
+        if let Expr::Call { name, args } = expr
+            && let Some(&width) = locals.float_returners.get(&symbol_name(name))
+        {
+            // `return (int)<float-returning call>`: receive the result into the
+            // hidden temp via __fac, then convert. The int args (if any) clean
+            // up with the normal `add sp,N`.
+            emit_call_inner(name, args, locals, false, out, fixups);
+            let disp = locals.float_call_temp_disp;
+            out.push(0x8D); // lea di, [bp+disp]
+            out.push(bp_modrm(0x7E, disp));
+            push_bp_disp(out, disp);
+            out.extend_from_slice(&[0x8B, 0xF0]); // mov si, ax
+            out.extend_from_slice(&[0x16, 0x07]); // push ss; pop es
+            for _ in 0..(width / 2) {
+                out.push(0xA5); // movsw
+            }
+            // fld QWORD [bp+disp]; call __ftol
+            fixups.push(Fixup { body_offset: out.len(), kind: FixupKind::FloatMarker { target: "FIDRQQ" } });
+            out.push(0x9B);
+            out.push(0xDD);
+            out.push(bp_modrm(0x46, disp));
+            push_bp_disp(out, disp);
+            let call_off = out.len();
+            out.extend_from_slice(&[0xE8, 0x00, 0x00]);
+            fixups.push(Fixup { body_offset: call_off, kind: FixupKind::ExtCall { target: "__ftol".to_owned() } });
+            out.extend_from_slice(frame.epilogue_bytes());
+            return;
+        } else if let Expr::Call { name, args } = expr {
             let has_float_arg = args.iter().any(|a| matches!(a, Expr::FloatLit(..)));
             let skip_cleanup = frame.is_with_slide();
             emit_call_inner(name, args, locals, skip_cleanup, out, fixups);
@@ -820,6 +877,7 @@ pub(crate) fn emit_loop(
         loop_stack: locals.loop_stack,
         fpu_live: locals.fpu_live,
         return_float_width: locals.return_float_width,
+        float_call_temp_disp: locals.float_call_temp_disp,
     };
     let mut body_buf = Vec::new();
     let mut body_fixups: Vec<Fixup> = Vec::new();
@@ -1433,6 +1491,7 @@ pub(crate) fn emit_do_while(
         loop_stack: locals.loop_stack,
         fpu_live: locals.fpu_live,
         return_float_width: locals.return_float_width,
+        float_call_temp_disp: locals.float_call_temp_disp,
     };
     let mut body_buf = Vec::new();
     let mut body_fixups: Vec<Fixup> = Vec::new();

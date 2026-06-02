@@ -378,6 +378,9 @@ pub struct Locals<'a> {
     /// Byte width (4/8) of the enclosing function's `float`/`double` return,
     /// 0 otherwise. A `return <float>` emits the `__fac` accumulator sequence.
     pub return_float_width: usize,
+    /// BP-relative displacement of the hidden 8-byte temp used to receive a
+    /// `return (int)<float-returning call>` result, 0 when unused.
+    pub float_call_temp_disp: i16,
 }
 
 #[derive(Default, Debug)]
@@ -1402,7 +1405,11 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
     let any_float_param = unit.functions.iter()
         .any(|f| f.param_float_width.iter().any(|w| *w != 0));
     let any_float_global = unit.globals.iter().any(|g| g.is_float);
-    let uses_float = !float_pool.is_empty() || any_float_param || any_float_global;
+    // A float-returning function emits x87 (fild/fld/fstp __fac); its callers do
+    // the same (`fld temp; __ftol`). Either way the FxxRQQ block must be present.
+    let any_float_return = unit.functions.iter().any(|f| f.return_float_width != 0);
+    let uses_float = !float_pool.is_empty() || any_float_param || any_float_global
+        || any_float_return;
     let float_offset_of = |bits: u64, width: usize| -> usize {
         let idx = float_pool.iter().position(|e| *e == (bits, width)).expect("float in pool");
         float_offsets[idx]
