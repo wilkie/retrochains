@@ -1979,7 +1979,7 @@ pub(crate) fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
                 p.bump();
                 p.eat(&Tok::Semi)?;
                 let op = if inc { BinOp::Add } else { BinOp::Sub };
-                if let Expr::DerefWord { ptr } = &inner {
+                if let Expr::DerefWord { ptr } | Expr::DerefByte { ptr } = &inner {
                     let target = match ptr.as_ref() {
                         Expr::Local(i) => AssignTarget::DerefLocal(*i),
                         Expr::Param(i) => AssignTarget::DerefParam(*i),
