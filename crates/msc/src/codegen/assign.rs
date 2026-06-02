@@ -882,6 +882,36 @@ pub(crate) fn emit_assign_global(global_idx: usize, value: &Expr, locals: &Local
         });
         return;
     }
+    // Char global compound `g op= K` → in-place BYTE op (`add/sub/and/or/xor
+    // byte [g], imm8`, or `inc/dec byte [g]` for ±1). Reached directly or via
+    // an aliased `*p op= K` where p points to a char global (fixtures 711-715).
+    if locals.is_char_global(global_idx)
+        && let Expr::BinOp { op, left, right } = value
+        && let Expr::Global(li) = left.as_ref()
+        && *li == global_idx
+        && matches!(op, BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor)
+        && let Some(k) = right.fold(locals.inits)
+    {
+        let body_offset;
+        if matches!(op, BinOp::Add | BinOp::Sub) && (k == 1) {
+            out.push(0xFE); // inc/dec byte [g]
+            out.push(if matches!(op, BinOp::Add) { 0x06 } else { 0x0E });
+            body_offset = out.len();
+            out.extend_from_slice(&[0x00, 0x00]);
+        } else {
+            let modrm = match op {
+                BinOp::Add => 0x06u8, BinOp::Sub => 0x2E, BinOp::BitAnd => 0x26,
+                BinOp::BitOr => 0x0E, BinOp::BitXor => 0x36, _ => unreachable!(),
+            };
+            out.push(0x80); // <op> byte [g], imm8
+            out.push(modrm);
+            body_offset = out.len();
+            out.extend_from_slice(&[0x00, 0x00]);
+            out.push((k as u32 & 0xFF) as u8);
+        }
+        fixups.push(Fixup { body_offset: body_offset - 1, kind: FixupKind::GlobalAddr { global_idx } });
+        return;
+    }
     // Peephole: `g = g ± K` for int globals:
     //   K == 1: `inc/dec word ptr [g]`               (4 bytes)
     //   |K| ≤ 127: `add/sub word [g], imm8sx`         (5 bytes)
@@ -894,29 +924,6 @@ pub(crate) fn emit_assign_global(global_idx: usize, value: &Expr, locals: &Local
         && matches!(op, BinOp::Add | BinOp::Sub)
         && let Some(k) = right.fold(locals.inits)
     {
-        // Char global: byte-sized in-place op (`*p += 5` aliased to a char g).
-        if locals.is_char_global(global_idx) {
-            let body_offset;
-            match (op, k) {
-                (BinOp::Add, 1) | (BinOp::Sub, 1) => {
-                    let modrm = if matches!(op, BinOp::Add) { 0x06 } else { 0x0E };
-                    out.push(0xFE); // inc/dec byte [g]
-                    out.push(modrm);
-                    body_offset = out.len();
-                    out.extend_from_slice(&[0x00, 0x00]);
-                }
-                _ => {
-                    let modrm = if matches!(op, BinOp::Add) { 0x06 } else { 0x2E };
-                    out.push(0x80); // add/sub byte [g], imm8
-                    out.push(modrm);
-                    body_offset = out.len();
-                    out.extend_from_slice(&[0x00, 0x00]);
-                    out.push((k as u32 & 0xFF) as u8);
-                }
-            }
-            fixups.push(Fixup { body_offset: body_offset - 1, kind: FixupKind::GlobalAddr { global_idx } });
-            return;
-        }
         match (op, k) {
             (BinOp::Add, 1) | (BinOp::Sub, 1) => {
                 let modrm = if matches!(op, BinOp::Add) { 0x06 } else { 0x0E };
