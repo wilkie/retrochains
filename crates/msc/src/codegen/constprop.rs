@@ -475,6 +475,20 @@ pub(crate) fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
                     _ => {}
                 }
             }
+            // `p == q` / `p != q` over two pointer locals holding `&x`/`&g`
+            // (offset 0) whose bases are NOT a foldable same-global pair:
+            // substitute each with its address expression so codegen compares
+            // the materialized addresses (`lea ax,[q]; lea cx,[p]; cmp cx,ax`).
+            // MSC keeps the runtime compare even when the bases are provably
+            // distinct. Fixture 1235.
+            if matches!(op, BinOp::Eq | BinOp::Ne)
+                && let (Some(la), Some(ra)) =
+                    (ptr_local_addr(left.as_ref(), cp), ptr_local_addr(right.as_ref(), cp))
+            {
+                **left = la;
+                **right = ra;
+                return;
+            }
             prop_expr(left, cp);
             prop_expr(right, cp);
         }

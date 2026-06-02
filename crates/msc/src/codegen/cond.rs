@@ -234,6 +234,27 @@ pub(crate) fn emit_cond_take(cond: &Cond, take_disp: i8, locals: &Locals<'_>, ou
 }
 /// Emit only the cmp half of a Cond. Used by both emit_cond_skip
 /// (forward jcc for `if`) and emit_cond_cmp (backward jcc for loops).
+/// Emit an `&local`/`&global` address into AX (`to_cx == false`) or CX
+/// (`to_cx == true`): `lea ax/cx, [bp+disp]` for a local, `mov ax/cx,
+/// OFFSET g` for a global. Used by the address-vs-address comparison.
+fn emit_addr_to_reg(e: &Expr, to_cx: bool, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    match e {
+        Expr::AddrOfLocal(idx) => {
+            let disp = locals.disp(*idx);
+            let base = if to_cx { 0x4E } else { 0x46 };
+            out.push(0x8D);
+            out.push(bp_modrm(base, disp));
+            push_bp_disp(out, disp);
+        }
+        Expr::AddrOfGlobal(idx) => {
+            let body_offset = out.len();
+            out.push(if to_cx { 0xB9 } else { 0xB8 }); // mov cx/ax, imm16
+            out.extend_from_slice(&[0x00, 0x00]);
+            fixups.push(Fixup { body_offset, kind: FixupKind::GlobalAddr { global_idx: *idx } });
+        }
+        _ => unreachable!("emit_addr_to_reg expects an address-of expression"),
+    }
+}
 pub(crate) fn emit_cond_cmp_inner(cond: &Cond, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
     // Long-global vs zero idiom: `mov ax, [g]; or ax, [g+2]` — ZF set
     // iff both halves are zero. Covers `if (g == 0)`, `if (!g)`, and
@@ -345,6 +366,19 @@ pub(crate) fn emit_cond_cmp_inner(cond: &Cond, locals: &Locals<'_>, out: &mut Ve
             let off = out.len();
             out.extend_from_slice(&[0x39, 0x06, 0x00, 0x00]); // cmp [left], ax
             fixups.push(Fixup { body_offset: off + 1, kind: FixupKind::GlobalAddr { global_idx: *li } });
+        }
+        // Address-vs-address comparison (`&a == &b`): two pointer locals
+        // holding distinct `&x`/`&g` values compared with `== / !=`. MSC
+        // re-materializes both addresses — right into AX, left into CX —
+        // then `cmp cx, ax`. It does NOT fold even when the bases are
+        // provably distinct. Fixture 1235.
+        Cond::Cmp { op: _, left, right }
+            if matches!(left, Expr::AddrOfLocal(_) | Expr::AddrOfGlobal(_))
+                && matches!(right, Expr::AddrOfLocal(_) | Expr::AddrOfGlobal(_)) =>
+        {
+            emit_addr_to_reg(right, false, locals, out, fixups); // right → AX
+            emit_addr_to_reg(left, true, locals, out, fixups); // left → CX
+            out.extend_from_slice(&[0x3B, 0xC8]); // cmp cx, ax
         }
         // Generic fallback for unsupported cond shapes: evaluate LHS
         // into AX, then `cmp ax, K` (`3d K K` for word, `83 f8 K` for
