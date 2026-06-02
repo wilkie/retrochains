@@ -653,6 +653,47 @@ pub(crate) fn float_fold_value(e: &Expr, specs: &[LocalSpec]) -> Option<f64> {
         _ => None,
     }
 }
+/// Like `float_fold_value` but only folds float locals whose init was a direct
+/// literal (`init_is_literal`); a non-literal float local (cast/arith init)
+/// returns `None` so its consumer lowers to runtime FP, not a fold.
+pub(crate) fn float_fold_literal(e: &Expr, specs: &[LocalSpec]) -> Option<f64> {
+    match e {
+        Expr::FloatLit(bits, _) => Some(f64::from_bits(*bits)),
+        Expr::IntLit(k) => Some(*k as f64),
+        Expr::Local(idx) => {
+            let s = specs.get(*idx)?;
+            if s.is_float {
+                if s.init_is_literal { s.float_bits.map(f64::from_bits) } else { None }
+            } else {
+                s.init.map(|k| k as f64)
+            }
+        }
+        Expr::BinOp { op, left, right } => {
+            let l = float_fold_literal(left, specs)?;
+            let r = float_fold_literal(right, specs)?;
+            match op {
+                BinOp::Add => Some(l + r),
+                BinOp::Sub => Some(l - r),
+                BinOp::Mul => Some(l * r),
+                BinOp::Div => Some(l / r),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+/// True when the expression references a `float`/`double` operand. Gates the
+/// int-context float fold so it never alters pure-integer arithmetic.
+pub(crate) fn expr_involves_float(e: &Expr, specs: &[LocalSpec]) -> bool {
+    match e {
+        Expr::FloatLit(..) => true,
+        Expr::Local(idx) => specs.get(*idx).map(|s| s.is_float).unwrap_or(false),
+        Expr::BinOp { left, right, .. } => {
+            expr_involves_float(left, specs) || expr_involves_float(right, specs)
+        }
+        _ => false,
+    }
+}
 pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> {
     // `<modifiers>* <ret-type> <name>(...)` — skip any leading
     // storage-class / sign keywords (static, extern, unsigned, etc.),
@@ -1235,6 +1276,22 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
                 && let Some(v) = float_fold_value(e, &p.local_specs)
             {
                 *e = Expr::FloatLit(v.to_bits(), is_double);
+            }
+        }
+    }
+    // In an int-returning function, `return (int)(<float arith>)` — e.g.
+    // `(int)(a * b)` with literal-double `a`/`b` — folds via float semantics to
+    // an int literal. Gated to arithmetic that references a float operand so it
+    // never alters pure-integer expressions; non-literal float operands return
+    // None (they need runtime FP, not yet handled). Fixture 1751.
+    if return_int {
+        for s in &mut body {
+            if let Stmt::Return(e) = s
+                && matches!(e, Expr::BinOp { .. })
+                && expr_involves_float(e, &p.local_specs)
+                && let Some(v) = float_fold_literal(e, &p.local_specs)
+            {
+                *e = Expr::IntLit(v as i32);
             }
         }
     }
