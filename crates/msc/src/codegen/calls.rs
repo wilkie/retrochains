@@ -212,12 +212,6 @@ pub(crate) fn long_operand_unsigned(e: &Expr, locals: &Locals<'_>) -> bool {
     }
 }
 
-/// `e` is `<long> << 1` / `<long> >> 1` — a shift we lower across DX:AX.
-pub(crate) fn is_long_shift1(e: &Expr, locals: &Locals<'_>) -> bool {
-    matches!(e, Expr::BinOp { op: BinOp::Shl | BinOp::Shr, left, right }
-        if right.fold(locals.inits) == Some(1) && long_operand(left, locals))
-}
-
 /// BP-relative displacement of param `idx`'s low word, accounting for the
 /// 4-byte width of any preceding long params (cdecl: first param at [bp+4],
 /// args pushed right-to-left so earlier params sit at lower offsets). The
@@ -273,11 +267,47 @@ fn long_muldiv_helper(op: BinOp, unsigned: bool) -> Option<&'static str> {
 }
 
 /// `e` is `<long> * / % <long>` — an expression-context helper-call op.
+/// Power-of-two multiplies are excluded (they strength-reduce to a shift).
 pub(crate) fn is_long_muldiv(e: &Expr, locals: &Locals<'_>) -> bool {
     matches!(e, Expr::BinOp { op, left, right }
         if long_muldiv_helper(*op, false).is_some()
             && long_operand(left, locals)
-            && long_operand(right, locals))
+            && long_operand(right, locals)
+            && long_shl_amount(*op, right, locals).is_none())
+}
+
+/// Shift-left amount for a long `<<` / `* 2^n`: `v << k` (1..=31) or
+/// `v * 2^n` both lower to a left shift by that many bits.
+fn long_shl_amount(op: BinOp, right: &Expr, locals: &Locals<'_>) -> Option<u8> {
+    let k = right.fold(locals.inits)?;
+    match op {
+        BinOp::Shl if (1..=31).contains(&k) => Some(k as u8),
+        BinOp::Mul if k >= 2 && (k & (k - 1)) == 0 => Some(k.trailing_zeros() as u8),
+        _ => None,
+    }
+}
+
+/// `e` is a long left shift (`v << k`) or power-of-two multiply (`v * 2^n`).
+pub(crate) fn is_long_shl(e: &Expr, locals: &Locals<'_>) -> bool {
+    matches!(e, Expr::BinOp { op, left, right }
+        if long_operand(left, locals) && long_shl_amount(*op, right, locals).is_some())
+}
+
+/// `e` is a long right shift by one (`v >> 1`).
+pub(crate) fn is_long_shr1(e: &Expr, locals: &Locals<'_>) -> bool {
+    matches!(e, Expr::BinOp { op: BinOp::Shr, left, right }
+        if right.fold(locals.inits) == Some(1) && long_operand(left, locals))
+}
+
+/// Emit a long shift-left-by-k on DX:AX. k==1 is a single shl/rcl; k>=2 uses
+/// MSC's cl-counted loop: `mov cl,k; shl ax,1; rcl dx,1; dec cl; jnz -8`.
+fn emit_long_shl_k(k: u8, out: &mut Vec<u8>) {
+    if k == 1 {
+        out.extend_from_slice(&[0xD1, 0xE0, 0xD1, 0xD2]);
+    } else {
+        out.extend_from_slice(&[0xB1, k]); // mov cl, k
+        out.extend_from_slice(&[0xD1, 0xE0, 0xD1, 0xD2, 0xFE, 0xC9, 0x75, 0xF8]);
+    }
 }
 
 /// Push a long operand's two words (high then low) from memory, as MSC does
@@ -328,7 +358,8 @@ pub(crate) fn emit_long_to_dx_ax(value: &Expr, locals: &Locals<'_>, out: &mut Ve
         Expr::BinOp { op, left, right }
             if long_muldiv_helper(*op, false).is_some()
                 && long_operand(left, locals)
-                && long_operand(right, locals) =>
+                && long_operand(right, locals)
+                && long_shl_amount(*op, right, locals).is_none() =>
         {
             let unsigned = long_operand_unsigned(left, locals)
                 || long_operand_unsigned(right, locals);
@@ -339,22 +370,29 @@ pub(crate) fn emit_long_to_dx_ax(value: &Expr, locals: &Locals<'_>, out: &mut Ve
             out.extend_from_slice(&[0xE8, 0x00, 0x00]); // call helper
             fixups.push(Fixup { body_offset: call, kind: FixupKind::ExtCall { target: helper.to_owned() } });
         }
-        // 32-bit shift-by-1 of a long: load DX:AX, then shift across both
-        // words. Left: shl ax,1; rcl dx,1. Right: (sar|shr) dx,1; rcr ax,1
-        // (high word first so the carry threads into the low word). MSC picks
-        // SAR vs SHR on the operand's signedness. Fixtures 2878/2885/2886/
-        // 3300/377/378.
+        // Long left shift `v << k` or power-of-two multiply `v * 2^n`: load
+        // DX:AX, then shift left by that many bits. k==1 is a single
+        // shl/rcl; k>=2 uses MSC's cl-counted loop. Fixtures 2878, 377,
+        // 3170 (*2), 3175 (*4), 3177 (*8).
         Expr::BinOp { op, left, right }
-            if matches!(op, BinOp::Shl | BinOp::Shr)
-                && right.fold(locals.inits) == Some(1)
-                && long_operand(left, locals) =>
+            if long_operand(left, locals)
+                && long_shl_amount(*op, right, locals).is_some() =>
+        {
+            let n = long_shl_amount(*op, right, locals).expect("shl amount");
+            emit_long_to_dx_ax(left, locals, out, fixups);
+            emit_long_shl_k(n, out);
+        }
+        // Long right shift by one `v >> 1`: high word first so the carry
+        // threads into the low word; SAR vs SHR by signedness. Fixtures
+        // 2885, 2886, 3300, 378.
+        Expr::BinOp { op: BinOp::Shr, left, right }
+            if right.fold(locals.inits) == Some(1) && long_operand(left, locals) =>
         {
             emit_long_to_dx_ax(left, locals, out, fixups);
-            match (op, long_operand_unsigned(left, locals)) {
-                (BinOp::Shl, _) => out.extend_from_slice(&[0xD1, 0xE0, 0xD1, 0xD2]),
-                (BinOp::Shr, true) => out.extend_from_slice(&[0xD1, 0xEA, 0xD1, 0xD8]),
-                (BinOp::Shr, false) => out.extend_from_slice(&[0xD1, 0xFA, 0xD1, 0xD8]),
-                _ => unreachable!(),
+            if long_operand_unsigned(left, locals) {
+                out.extend_from_slice(&[0xD1, 0xEA, 0xD1, 0xD8]); // shr dx,1; rcr ax,1
+            } else {
+                out.extend_from_slice(&[0xD1, 0xFA, 0xD1, 0xD8]); // sar dx,1; rcr ax,1
             }
         }
         // Inline 2-word arithmetic: `a <op> b` where both are long. Load a
