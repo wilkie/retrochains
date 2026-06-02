@@ -272,6 +272,14 @@ impl LocalSpec {
         let init = bits.map(|b| f64::from_bits(b) as i32);
         Self { size: width, array_len: 1, init, struct_idx: None, is_long: false, init_is_literal: init.is_some(), is_far_ptr: false, pointee_size: 0, is_unsigned: false, init_via_cast: false, init_via_type_cast: false, is_float: true, float_bits: bits }
     }
+    /// A `float`/`double` local whose initializer is a const-foldable cast or
+    /// arithmetic (`(float)i`, `double d = f`, `a + b`) rather than a direct
+    /// literal. `float_bits` materializes the CONST temp, but `init` is `None`
+    /// so the int-fold view does NOT replace `(int)<local>` with `mov ax,K`;
+    /// instead the store keeps st(0) live (`fst`) and the cast is `call __ftol`.
+    pub fn float_nonliteral(width: usize, bits: u64) -> Self {
+        Self { size: width, array_len: 1, init: None, struct_idx: None, is_long: false, init_is_literal: false, is_far_ptr: false, pointee_size: 0, is_unsigned: false, init_via_cast: false, init_via_type_cast: false, is_float: true, float_bits: Some(bits) }
+    }
     /// Bytes occupied in the frame, rounded up to an even count.
     /// MSC pads each local to a word boundary — scalar char gets 2
     /// bytes, char[3] gets 4 bytes, int[3] gets 6 bytes. Fixture 1134.
@@ -327,6 +335,10 @@ pub struct Locals<'a> {
     /// Parallel-indexed: true for `unsigned char x` locals — load uses
     /// `sub ah, ah` (zero-extend) instead of `cbw` (sign-extend).
     pub unsigned_locals: &'a [bool],
+    /// Parallel-indexed byte width (4/8) of `float`/`double` locals, 0
+    /// otherwise. A non-literal float local consumed by `(int)<local>` is
+    /// stored with `fst` (st(0) kept live) and the cast is bare `call __ftol`.
+    pub float_locals: &'a [usize],
     /// Parallel to function params: true when that param is `char`
     /// typed. Used to emit byte-compare / byte-load codegen.
     pub char_params: &'a [bool],
@@ -350,6 +362,11 @@ pub struct Locals<'a> {
     /// body's emit buffer, to be patched at loop end. RefCell so
     /// emit_stmt (which only takes `&Locals`) can mutate.
     pub loop_stack: &'a std::cell::RefCell<Vec<LoopCtx>>,
+    /// FpuStack state: `Some(local_idx)` when that float local's value is
+    /// currently live on x87 `st(0)` (its init was stored with `fst`, keeping
+    /// the stack top). A coupled `return (int)<local>` consumes it with a bare
+    /// `call __ftol`; otherwise the value must be reloaded with `fld` first.
+    pub fpu_live: &'a std::cell::Cell<Option<usize>>,
 }
 
 #[derive(Default, Debug)]
@@ -398,6 +415,13 @@ impl Locals<'_> {
     }
     pub fn is_unsigned_local(&self, idx: usize) -> bool {
         self.unsigned_locals.get(idx).copied().unwrap_or(false)
+    }
+    /// 4 or 8 for a `float`/`double` local, else 0.
+    pub fn float_local_width(&self, idx: usize) -> usize {
+        self.float_locals.get(idx).copied().unwrap_or(0)
+    }
+    pub fn is_float_local(&self, idx: usize) -> bool {
+        self.float_local_width(idx) != 0
     }
     pub fn is_char_param(&self, idx: usize) -> bool {
         self.char_params.get(idx).copied().unwrap_or(false)
@@ -1809,13 +1833,27 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
     // collapses the f64 value to f32 (4 bytes); a `double` keeps the full f64
     // (8 bytes). Little-endian. Temps introduced by later functions are
     // flushed mid-stream (interleaved with the _TEXT runs, below).
-    for (i, &(bits, width)) in float_pool.iter().enumerate() {
-        if float_intro_fn[i] != 0 { continue; }
-        let off = u16::try_from(float_offsets[i]).expect("CONST float offset fits");
-        if width == 4 {
-            b.write_ledata16(3, off, &(f64::from_bits(bits) as f32).to_bits().to_le_bytes());
-        } else {
-            b.write_ledata16(3, off, &bits.to_le_bytes());
+    // MSC packs consecutive (adjacent-offset) float temps into a single CONST
+    // LEDATA (like strings), so emit them in contiguous-offset runs.
+    {
+        let mut pre: Vec<usize> = (0..float_pool.len()).filter(|&k| float_intro_fn[k] == 0).collect();
+        pre.sort_by_key(|&k| float_offsets[k]);
+        let mut i = 0;
+        while i < pre.len() {
+            let start_off = float_offsets[pre[i]];
+            let mut buf: Vec<u8> = Vec::new();
+            let mut expect = start_off;
+            while i < pre.len() && float_offsets[pre[i]] == expect {
+                let (bits, width) = float_pool[pre[i]];
+                if width == 4 {
+                    buf.extend_from_slice(&(f64::from_bits(bits) as f32).to_bits().to_le_bytes());
+                } else {
+                    buf.extend_from_slice(&bits.to_le_bytes());
+                }
+                expect += width;
+                i += 1;
+            }
+            b.write_ledata16(3, u16::try_from(start_off).expect("CONST float offset fits"), &buf);
         }
     }
 

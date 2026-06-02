@@ -628,6 +628,31 @@ pub(crate) fn init_expr_has_matching_literal_leaf(
         _ => false,
     }
 }
+/// Const-fold a float/double initializer to its f64 value using the locals
+/// declared so far. Handles literals, int/float local references, and `+-*/`
+/// arithmetic — enough for `(float)i`, `double d = f`, and `a + b` inits.
+pub(crate) fn float_fold_value(e: &Expr, specs: &[LocalSpec]) -> Option<f64> {
+    match e {
+        Expr::FloatLit(bits, _) => Some(f64::from_bits(*bits)),
+        Expr::IntLit(k) => Some(*k as f64),
+        Expr::Local(idx) => {
+            let s = specs.get(*idx)?;
+            if s.is_float { s.float_bits.map(f64::from_bits) } else { s.init.map(|k| k as f64) }
+        }
+        Expr::BinOp { op, left, right } => {
+            let l = float_fold_value(left, specs)?;
+            let r = float_fold_value(right, specs)?;
+            match op {
+                BinOp::Add => Some(l + r),
+                BinOp::Sub => Some(l - r),
+                BinOp::Mul => Some(l * r),
+                BinOp::Div => Some(l / r),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
 pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> {
     // `<modifiers>* <ret-type> <name>(...)` — skip any leading
     // storage-class / sign keywords (static, extern, unsigned, etc.),
@@ -919,18 +944,35 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
                     other => return Err(EmitError::Unsupported(format!(
                         "expected float local name, got {other:?}"))),
                 };
-                let mut bits = None;
-                if matches!(p.peek(), Some(Tok::Assign)) {
+                let spec = if matches!(p.peek(), Some(Tok::Assign)) {
                     p.bump();
-                    match p.bump().cloned() {
-                        Some(Tok::Float(b, _)) => bits = Some(b),
-                        Some(Tok::Int(n)) => bits = Some((f64::from(n)).to_bits()),
-                        other => return Err(EmitError::Unsupported(format!(
-                            "unsupported float initializer {other:?}"))),
+                    // A direct literal init (`float f = 3.0f;`) folds: the local
+                    // gets `init = (int)value` so `(int)f` lowers to `mov ax,K`
+                    // (fixture 1670). A cast/arith init (`(float)i`, `double d =
+                    // f`, `a + b`) is const-foldable but kept non-literal: the
+                    // CONST temp is materialized and the store keeps st(0) live
+                    // (`fst`) so the coupled `(int)<local>` is `call __ftol`.
+                    let direct_literal = matches!(p.peek(), Some(Tok::Float(..)) | Some(Tok::Int(..)))
+                        && matches!(p.toks.get(p.pos + 1), Some(Tok::Comma) | Some(Tok::Semi));
+                    if direct_literal {
+                        let bits = match p.bump().cloned() {
+                            Some(Tok::Float(b, _)) => b,
+                            Some(Tok::Int(n)) => f64::from(n).to_bits(),
+                            _ => unreachable!(),
+                        };
+                        LocalSpec::float_(size, Some(bits))
+                    } else {
+                        let rhs = parse_expr(p)?;
+                        let v = float_fold_value(&rhs, &p.local_specs).ok_or_else(|| {
+                            EmitError::Unsupported(
+                                "unsupported non-constant float initializer".to_owned())
+                        })?;
+                        LocalSpec::float_nonliteral(size, v.to_bits())
                     }
-                }
+                } else {
+                    LocalSpec::float_(size, None)
+                };
                 p.local_names.push(lname);
-                let spec = LocalSpec::float_(size, bits);
                 p.local_specs.push(spec.clone());
                 locals.push(spec);
                 if matches!(p.peek(), Some(Tok::Comma)) { p.bump(); continue; }
@@ -2165,7 +2207,8 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
             // after `(` and treat the cast as identity (Phase 1
             // doesn't model signedness or narrowing semantics).
             skip_decl_modifiers(p);
-            if matches!(p.peek(), Some(Tok::Kw("int")) | Some(Tok::Kw("char")) | Some(Tok::Kw("long"))) {
+            if matches!(p.peek(), Some(Tok::Kw("int")) | Some(Tok::Kw("char")) | Some(Tok::Kw("long"))
+                | Some(Tok::Kw("float")) | Some(Tok::Kw("double"))) {
                 p.bump();
                 // Accept `long int`, then skip any pointer-distance
                 // qualifiers (`far`/`near`/`huge`) that may appear between

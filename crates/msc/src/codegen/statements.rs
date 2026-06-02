@@ -326,6 +326,27 @@ pub(crate) fn emit_return(
             fixups.push(Fixup { body_offset: call_off, kind: FixupKind::ExtCall { target: "__ftol".to_owned() } });
             out.extend_from_slice(frame.epilogue_bytes());
             return;
+        } else if let Expr::Local(idx) = expr
+            && locals.is_float_local(*idx)
+        {
+            // `return (int)<non-literal float local>`. When the value is live on
+            // st(0) (coupled init stored with `fst`), the cast is a bare
+            // `call __ftol`; otherwise reload the slot with `fld` first.
+            if locals.fpu_live.get() != Some(*idx) {
+                let width = locals.float_local_width(*idx);
+                let op = if width == 4 { 0xD9u8 } else { 0xDDu8 };
+                let disp = locals.disp(*idx);
+                fixups.push(Fixup { body_offset: out.len(), kind: FixupKind::FloatMarker { target: "FIDRQQ" } });
+                out.push(0x9B);
+                out.push(op);
+                out.push(bp_modrm(0x46, disp));
+                push_bp_disp(out, disp);
+            }
+            let call_off = out.len();
+            out.extend_from_slice(&[0xE8, 0x00, 0x00]); // call __ftol
+            fixups.push(Fixup { body_offset: call_off, kind: FixupKind::ExtCall { target: "__ftol".to_owned() } });
+            out.extend_from_slice(frame.epilogue_bytes());
+            return;
         } else if matches!(expr, Expr::Local(i) if locals.is_long_local(*i)) {
             // Long locals are read through the 4-byte slot — MSC
             // emits `mov ax, [bp-disp_low]` even when the value is
@@ -749,6 +770,7 @@ pub(crate) fn emit_loop(
         far_ptr_locals: locals.far_ptr_locals,
         array_locals: locals.array_locals,
         unsigned_locals: locals.unsigned_locals,
+        float_locals: locals.float_locals,
         char_params: locals.char_params,
         long_params: locals.long_params,
         unsigned_params: locals.unsigned_params,
@@ -756,6 +778,7 @@ pub(crate) fn emit_loop(
         char_returners: locals.char_returners,
         long_param_funcs: locals.long_param_funcs,
         loop_stack: locals.loop_stack,
+        fpu_live: locals.fpu_live,
     };
     let mut body_buf = Vec::new();
     let mut body_fixups: Vec<Fixup> = Vec::new();
@@ -1358,6 +1381,7 @@ pub(crate) fn emit_do_while(
         far_ptr_locals: locals.far_ptr_locals,
         array_locals: locals.array_locals,
         unsigned_locals: locals.unsigned_locals,
+        float_locals: locals.float_locals,
         char_params: locals.char_params,
         long_params: locals.long_params,
         unsigned_params: locals.unsigned_params,
@@ -1365,6 +1389,7 @@ pub(crate) fn emit_do_while(
         char_returners: locals.char_returners,
         long_param_funcs: locals.long_param_funcs,
         loop_stack: locals.loop_stack,
+        fpu_live: locals.fpu_live,
     };
     let mut body_buf = Vec::new();
     let mut body_fixups: Vec<Fixup> = Vec::new();

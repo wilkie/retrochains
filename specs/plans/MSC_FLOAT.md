@@ -88,6 +88,41 @@ many "arithmetic" fixtures don't emit runtime FP ops at all:
 
 So `fadd`/`fmul`/`fild` only appear with **runtime** operands.
 
+## Block 3b/3e — FpuStack coupling + float const-folding (done)
+
+The genuinely new mechanism: an **FpuStack** state (`Locals.fpu_live: Cell<Option<usize>>`)
+tracking whether a float local's value is live on x87 `st(0)`.
+
+- The float local returned via `(int)<local>` — when it is the **last** float
+  init (so nothing clobbered `st(0)`) — is stored with **`fst`** (keep, modrm
+  `…56…`) instead of `fstp` (`…5E…`); the cast is then a bare `call __ftol`
+  with no reload. Other float inits use `fstp`. `func.rs` sets `fpu_live` when
+  it emits the coupled `fst`; `emit_return` reads it.
+- **`fwait` rule**: the `90 9B` (FIWRQQ emulator patch slot) follows a float
+  store only when the NEXT emitted op is non-FP. Consecutive float inits, and a
+  coupled store followed by `call __ftol`, emit no `fwait`. (Block 2's
+  `if len%2==0` was coincidentally right — all its fixtures were single-init
+  with a non-FP follower; now unconditional once the next-op test passes.)
+- **Float const-folding** (`parse.rs::float_fold_value`): cast/arith float
+  inits (`(float)i`, `double d = f`, `(float)d`, `a + b`) fold to an f64 value
+  materialized as a CONST temp, but kept **non-literal** (`LocalSpec::float_nonliteral`,
+  `init = None`) so the int-read does NOT fold to `mov ax,K` — it goes through
+  the coupled `fst`+`__ftol`. Direct-literal float locals (`float f = 3.0f`)
+  keep `init = Some(trunc)` and DO fold (1670). `(float)`/`(double)` added to
+  the cast-identity set in `parse_atom`.
+- **CONST temp packing**: consecutive (adjacent-offset) float temps share one
+  CONST LEDATA (like strings), not one record each.
+
+Flips 1674, 1675, 1676, 1677, 1681, 1752, 1753, 1756, 2152, 2192, 4000. MSC at
+1995/3952.
+
+**Known near-miss — 1671** (`float a; float b; float r=a+b; return (int)r;`):
+byte-identical except the `__ftol` EXTDEF index — MSC places `__ftol` *after*
+`_main` (trailing) here, but *before* `_main` (helper position) in 1675/1676/
+1677/1752. The only structural difference is 1671 has **3** float CONST temps
+vs ≤2; one data point isn't enough to pin the extern-ordering rule, so left as a
+follow-up.
+
 ## Block 3+ — the remaining mechanisms
 
 These need an **`FpuStack` model**: track whether `st(0)` currently holds a

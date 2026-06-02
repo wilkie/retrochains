@@ -98,6 +98,8 @@ pub(crate) fn emit_function(
     let local_far_ptrs: Vec<bool> = func.locals.iter().map(|l| l.is_far_ptr).collect();
     let local_arrays: Vec<bool> = func.locals.iter().map(|l| l.array_len > 1).collect();
     let local_unsigned: Vec<bool> = func.locals.iter().map(|l| l.is_unsigned).collect();
+    let local_float: Vec<usize> = func.locals.iter().map(|l| if l.is_float { l.size } else { 0 }).collect();
+    let fpu_live: std::cell::Cell<Option<usize>> = std::cell::Cell::new(None);
     let mut bytes = Vec::with_capacity(32);
     let mut fixups: Vec<Fixup> = Vec::new();
     // A call that passes a float/double literal pushes it via `sub sp,N;
@@ -198,22 +200,44 @@ pub(crate) fn emit_function(
         bytes.push(0x56); // push si
     }
 
+    // FpuStack coupling: the float local returned via `(int)<local>` is stored
+    // with `fst` (st(0) kept live) so the cast is a bare `call __ftol` — but
+    // only when it is the LAST float local initialized (otherwise a later float
+    // init would have clobbered st(0)). Literal float locals fold to `mov ax,K`
+    // via const-prop, so they never reach here as `Return(Local)`.
+    let returned_float_local = body.iter().rev().find_map(|s| match s {
+        Stmt::Return(Expr::Local(i)) => Some(*i),
+        _ => None,
+    }).filter(|&i| func.locals.get(i).map(|l| l.is_float && !l.init_is_literal).unwrap_or(false));
+    let last_float_init = func.locals.iter().enumerate()
+        .filter(|(_, l)| l.is_float && l.float_bits.is_some())
+        .map(|(i, _)| i)
+        .next_back();
+    let coupled_float_local = match (returned_float_local, last_float_init) {
+        (Some(r), Some(l)) if r == l => Some(r),
+        _ => None,
+    };
+
     // Initialized-local writes — `int x = K;` → `c7 46 disp lo hi`;
     // `char x = K;` → `c6 46 disp imm8`. Arrays don't get a constant
     // init here; their element stores live in the prelude body the
     // parser synthesized.
     for (i, spec) in func.locals.iter().enumerate() {
-        // Float/double locals: load the literal from the CONST pool and
-        // store it to the slot, all x87-wait-prefixed:
-        //   9B <D9|DD> 06 <off16>   fld <dword|qword> [$T]   (FloatLoad fixup)
-        //   9B <D9|DD> 5E <disp>    fstp <dword|qword> [bp+disp]
-        //   [90]                    nop so the next statement is even-aligned
-        //   9B                      fwait
+        // Float/double locals: load the const-pool value, store it to the slot:
+        //   9B <D9|DD> 06 <off16>   fld  <dword|qword> [$T]   (FIDRQQ + FloatLoad)
+        //   9B <D9|DD> 5E/56 <disp> fstp/fst <dword|qword> [bp+disp]   (FIDRQQ)
+        // The coupled local (consumed by `(int)<local>`) uses `fst` (5E→56) to
+        // keep st(0) live. A standalone `fwait` (`90 9B`, FIWRQQ — the 8087
+        // emulator's 2-byte patch slot) follows only when the NEXT emitted op
+        // is non-FP: i.e. this is the last float init and it is NOT coupled (a
+        // coupled value is consumed by the body's `call __ftol`). Consecutive
+        // float inits need no fwait between them.
         if spec.is_float {
             if let Some(bits) = spec.float_bits {
                 let disp = local_disps[i];
                 let op = if spec.size == 4 { 0xD9u8 } else { 0xDDu8 };
-                // fld: FP-emulator marker on the leading 9B, FloatLoad on off16.
+                let coupled = coupled_float_local == Some(i);
+                // fld <width> [$T]
                 fixups.push(Fixup { body_offset: bytes.len(), kind: FixupKind::FloatMarker { target: "FIDRQQ" } });
                 bytes.push(0x9B);
                 bytes.push(op);
@@ -221,19 +245,23 @@ pub(crate) fn emit_function(
                 let body_offset = bytes.len() - 1; // the 06 modrm; off16 at +1
                 bytes.extend_from_slice(&[0x00, 0x00]);
                 fixups.push(Fixup { body_offset, kind: FixupKind::FloatLoad { bits, width: spec.size } });
-                // fstp: FP-emulator marker on the leading 9B.
+                // fst (coupled, keep st(0)) or fstp (pop).
                 fixups.push(Fixup { body_offset: bytes.len(), kind: FixupKind::FloatMarker { target: "FIDRQQ" } });
                 bytes.push(0x9B);
                 bytes.push(op);
-                bytes.push(bp_modrm(0x5E, disp));
+                bytes.push(bp_modrm(if coupled { 0x56 } else { 0x5E }, disp));
                 push_bp_disp(&mut bytes, disp);
-                // fwait: marker on the leading byte (the alignment nop, if any,
-                // else the 9B), targeting FIWRQQ.
-                fixups.push(Fixup { body_offset: bytes.len(), kind: FixupKind::FloatMarker { target: "FIWRQQ" } });
-                if bytes.len() % 2 == 0 {
-                    bytes.push(0x90); // nop
+                if coupled {
+                    fpu_live.set(Some(i));
                 }
-                bytes.push(0x9B); // fwait
+                // fwait only when the next op is non-FP.
+                let more_floats_after = func.locals[i + 1..].iter()
+                    .any(|l| l.is_float && l.float_bits.is_some());
+                if !more_floats_after && !coupled {
+                    fixups.push(Fixup { body_offset: bytes.len(), kind: FixupKind::FloatMarker { target: "FIWRQQ" } });
+                    bytes.push(0x90); // nop — emulator patch slot
+                    bytes.push(0x9B); // fwait
+                }
             }
             continue;
         }
@@ -311,6 +339,7 @@ pub(crate) fn emit_function(
         far_ptr_locals: &local_far_ptrs,
         array_locals: &local_arrays,
         unsigned_locals: &local_unsigned,
+        float_locals: &local_float,
         char_params: &param_is_char,
         long_params: &param_is_long,
         unsigned_params: &param_is_unsigned,
@@ -318,6 +347,7 @@ pub(crate) fn emit_function(
         char_returners,
         long_param_funcs,
         loop_stack: &loop_stack,
+        fpu_live: &fpu_live,
     };
 
     let mut reachable = true;
