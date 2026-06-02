@@ -504,6 +504,14 @@ pub(crate) fn parse_global_decl(p: &mut Parser<'_>) -> Result<(), EmitError> {
             )));
         }
     };
+    // Comma-separated declarators share the base type but each gets its own
+    // `*` (pointer-ness), array suffix, and initializer: `int g1, g2;`,
+    // `int *p, q;`. Loop over them; `is_pointer` resets per declarator.
+    // Fixtures 3944-3947.
+    loop {
+    // Pointer-ness is per-declarator; floatness follows from the base type
+    // unless this declarator is a pointer (pointer-to-float is a near word).
+    is_float = float_width != 0 && !is_pointer;
     let name = match p.bump().cloned() {
         Some(Tok::Ident(s)) => s,
         other => {
@@ -647,7 +655,6 @@ pub(crate) fn parse_global_decl(p: &mut Parser<'_>) -> Result<(), EmitError> {
     } else {
         None
     };
-    p.eat(&Tok::Semi)?;
     // `element_size` describes the pointed-to or array-element type
     // (1 for `char` family, 2 otherwise). `is_pointer` is set when
     // the declarator carries a `*`. Storage size is independent:
@@ -666,6 +673,21 @@ pub(crate) fn parse_global_decl(p: &mut Parser<'_>) -> Result<(), EmitError> {
     }
     p.global_names.push(name.clone());
     p.globals.push(Global { name, init, array_len, element_size, is_pointer, struct_idx: None, is_long, is_static, is_extern, is_unsigned, is_float: is_float && !is_pointer });
+    // Another declarator after a comma, or end of statement.
+    match p.peek() {
+        Some(Tok::Comma) => {
+            p.bump();
+            // Reset pointer-ness and re-read this declarator's `*` markers.
+            is_pointer = false;
+            while matches!(p.peek(), Some(Tok::Star)) {
+                p.bump();
+                is_pointer = true;
+            }
+        }
+        _ => break,
+    }
+    }
+    p.eat(&Tok::Semi)?;
     Ok(())
 }
 /// Returns true when `e` has a direct `Local` leaf whose `init_is_literal`

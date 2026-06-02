@@ -425,6 +425,17 @@ pub(crate) fn prop_cond(cond: &mut Cond, cp: &mut ConstProp) {
                     return;
                 }
             }
+            // `if (p == q)` over two pointer locals holding `&x`/`&g` (offset 0)
+            // whose bases aren't a foldable same-global pair: substitute each
+            // with its address so emit materializes both. Fixtures 1235 (locals),
+            // 3944-3947 (distinct globals).
+            if matches!(op, RelOp::Eq | RelOp::Ne)
+                && let (Some(la), Some(ra)) = (ptr_local_addr(left, cp), ptr_local_addr(right, cp))
+            {
+                *left = la;
+                *right = ra;
+                return;
+            }
             prop_expr(left, cp);
             prop_expr(right, cp);
         }

@@ -367,11 +367,23 @@ pub(crate) fn emit_cond_cmp_inner(cond: &Cond, locals: &Locals<'_>, out: &mut Ve
             out.extend_from_slice(&[0x39, 0x06, 0x00, 0x00]); // cmp [left], ax
             fixups.push(Fixup { body_offset: off + 1, kind: FixupKind::GlobalAddr { global_idx: *li } });
         }
-        // Address-vs-address comparison (`&a == &b`): two pointer locals
-        // holding distinct `&x`/`&g` values compared with `== / !=`. MSC
-        // re-materializes both addresses — right into AX, left into CX —
-        // then `cmp cx, ax`. It does NOT fold even when the bases are
-        // provably distinct. Fixture 1235.
+        // Address-vs-address comparison: two pointer locals holding distinct
+        // `&x`/`&g` values compared with `== / !=`. MSC does NOT fold even when
+        // the bases are provably distinct — it materializes both addresses.
+        //
+        // Both global addresses use the immediate form (fixtures 3944-3947):
+        //   `mov ax, OFFSET g_left; cmp ax, OFFSET g_right`
+        Cond::Cmp { op: _, left: Expr::AddrOfGlobal(lg), right: Expr::AddrOfGlobal(rg) } => {
+            let off = out.len();
+            out.extend_from_slice(&[0xB8, 0x00, 0x00]); // mov ax, OFFSET left
+            fixups.push(Fixup { body_offset: off, kind: FixupKind::GlobalAddr { global_idx: *lg } });
+            let off = out.len();
+            out.extend_from_slice(&[0x3D, 0x00, 0x00]); // cmp ax, OFFSET right
+            fixups.push(Fixup { body_offset: off, kind: FixupKind::GlobalAddr { global_idx: *rg } });
+        }
+        // Any local address involved: re-materialize right into AX, left into
+        // CX (lea for locals, mov-OFFSET for globals), then `cmp cx, ax`.
+        // Fixture 1235.
         Cond::Cmp { op: _, left, right }
             if matches!(left, Expr::AddrOfLocal(_) | Expr::AddrOfGlobal(_))
                 && matches!(right, Expr::AddrOfLocal(_) | Expr::AddrOfGlobal(_)) =>
