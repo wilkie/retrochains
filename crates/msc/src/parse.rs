@@ -660,10 +660,12 @@ pub(crate) fn parse_global_decl(p: &mut Parser<'_>) -> Result<(), EmitError> {
     // the declarator carries a `*`. Storage size is independent:
     // pointers are always 2 bytes; arrays scale by `array_len`.
     let element_size = if is_char { 1 } else if is_float && !is_pointer { float_width } else { 2 };
-    // Long storage is 4 bytes; modeled as a 2-slot word array. Reads of
-    // `(int)g` naturally pick up the low word at the base address.
+    // Long storage is 4 bytes. A scalar long is modeled as a 2-slot word array
+    // (array_len=2, element_size=2) so `(int)g` reads the low word at the base.
+    // A long ARRAY keeps its element count with a 4-byte element so `a[K]` lands
+    // at K*4 and storage is N*4 bytes.
     let (mut array_len, element_size) = if is_long && !is_pointer {
-        (2usize, 2usize)
+        if array_len <= 1 { (2usize, 2usize) } else { (array_len, 4usize) }
     } else {
         (array_len, element_size)
     };
@@ -672,7 +674,10 @@ pub(crate) fn parse_global_decl(p: &mut Parser<'_>) -> Result<(), EmitError> {
         array_len = init.as_ref().map(|v| v.len()).unwrap_or(0).max(1);
     }
     p.global_names.push(name.clone());
-    p.globals.push(Global { name, init, array_len, element_size, is_pointer, struct_idx: None, is_long, is_static, is_extern, is_unsigned, is_float: is_float && !is_pointer });
+    // A long POINTER (`long *p`) is just a near pointer; its long-ness belongs
+    // to the pointee, so it must not be flagged is_long (else `p = a` would be
+    // treated as a 4-byte long store).
+    p.globals.push(Global { name, init, array_len, element_size, is_pointer, struct_idx: None, is_long: is_long && !is_pointer, is_static, is_extern, is_unsigned, is_float: is_float && !is_pointer });
     // Another declarator after a comma, or end of statement.
     match p.peek() {
         Some(Tok::Comma) => {
@@ -2940,7 +2945,10 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                     // a pointer (the array's base address). Scalar
                     // globals stay as values.
                     let g = &p.globals[idx];
-                    if !g.is_pointer && g.array_len > 1 && g.struct_idx.is_none() && !g.is_long {
+                    // A long ARRAY (element_size 4) decays like any array; a long
+                    // SCALAR (the 2-word model, element_size 2) does not.
+                    let is_array = g.array_len > 1 && !(g.is_long && g.element_size == 2);
+                    if !g.is_pointer && is_array && g.struct_idx.is_none() {
                         Ok(Expr::AddrOfGlobal(idx))
                     } else {
                         Ok(Expr::Global(idx))
