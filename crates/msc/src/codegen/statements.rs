@@ -250,6 +250,19 @@ pub(crate) fn fold_cond(cond: &Cond, locals: &Locals<'_>) -> Option<i32> {
         }
     }
 }
+/// True if `e` contains a `(int)(long >> 16)` high-word extract. MSC reads
+/// the long's high word from its slot for these rather than folding to a
+/// constant, so we must skip the const-fold path and let emit_expr_to_ax
+/// emit the slot read(s). Fixtures 1949, 2189.
+fn expr_has_long_highword(e: &Expr, locals: &Locals<'_>) -> bool {
+    match e {
+        Expr::BinOp { op: BinOp::Shr, left, right }
+            if long_operand(left, locals) && right.fold(locals.inits) == Some(16) => true,
+        Expr::BinOp { left, right, .. } =>
+            expr_has_long_highword(left, locals) || expr_has_long_highword(right, locals),
+        _ => false,
+    }
+}
 pub(crate) fn emit_return(
     expr: &Expr,
     locals: &Locals<'_>,
@@ -421,7 +434,9 @@ pub(crate) fn emit_return(
             out.extend_from_slice(&[0x2B, 0xC0]);         // sub ax, ax
             out.extend_from_slice(epi);                   // epilogue + ret
             return;  // both branches already have the epilogue
-        } else if let Some(k) = expr.fold(locals.inits) {
+        } else if let Some(k) = expr.fold(locals.inits)
+            && !expr_has_long_highword(expr, locals)
+        {
             if k == 0 {
                 out.extend_from_slice(&[0x2B, 0xC0]);
                 if return_long { out.push(0x99); } // cwd: DX:AX = sign-extend(AX)
