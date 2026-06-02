@@ -192,8 +192,51 @@ pub(crate) fn emit_push_arg(arg: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, 
 /// - Long param: mov ax, [bp+lo]; mov dx, [bp+hi]
 /// - Long global: mov ax, [g]; mov dx, [g+2]
 /// - Otherwise: emit_expr_to_ax + cwd (sign-extend int to long)
+/// Is `e` a long-typed scalar (param/local/global) loadable into DX:AX?
+pub(crate) fn long_operand(e: &Expr, locals: &Locals<'_>) -> bool {
+    match e {
+        Expr::Param(i) => locals.is_long_param(*i),
+        Expr::Local(i) => locals.is_long_local(*i),
+        Expr::Global(j) => locals.is_long_global(*j),
+        _ => false,
+    }
+}
+
+/// Whether a long operand is unsigned (selects SHR vs SAR for `>>`).
+pub(crate) fn long_operand_unsigned(e: &Expr, locals: &Locals<'_>) -> bool {
+    match e {
+        Expr::Param(i) => locals.is_unsigned_param(*i),
+        Expr::Local(i) => locals.is_unsigned_local(*i),
+        _ => false,
+    }
+}
+
+/// `e` is `<long> << 1` / `<long> >> 1` — a shift we lower across DX:AX.
+pub(crate) fn is_long_shift1(e: &Expr, locals: &Locals<'_>) -> bool {
+    matches!(e, Expr::BinOp { op: BinOp::Shl | BinOp::Shr, left, right }
+        if right.fold(locals.inits) == Some(1) && long_operand(left, locals))
+}
+
 pub(crate) fn emit_long_to_dx_ax(value: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
     match value {
+        // 32-bit shift-by-1 of a long: load DX:AX, then shift across both
+        // words. Left: shl ax,1; rcl dx,1. Right: (sar|shr) dx,1; rcr ax,1
+        // (high word first so the carry threads into the low word). MSC picks
+        // SAR vs SHR on the operand's signedness. Fixtures 2878/2885/2886/
+        // 3300/377/378.
+        Expr::BinOp { op, left, right }
+            if matches!(op, BinOp::Shl | BinOp::Shr)
+                && right.fold(locals.inits) == Some(1)
+                && long_operand(left, locals) =>
+        {
+            emit_long_to_dx_ax(left, locals, out, fixups);
+            match (op, long_operand_unsigned(left, locals)) {
+                (BinOp::Shl, _) => out.extend_from_slice(&[0xD1, 0xE0, 0xD1, 0xD2]),
+                (BinOp::Shr, true) => out.extend_from_slice(&[0xD1, 0xEA, 0xD1, 0xD8]),
+                (BinOp::Shr, false) => out.extend_from_slice(&[0xD1, 0xFA, 0xD1, 0xD8]),
+                _ => unreachable!(),
+            }
+        }
         Expr::Call { name, args } => {
             emit_call(name, args, locals, out, fixups);
             // DX:AX already set by callee returning long

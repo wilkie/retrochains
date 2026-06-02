@@ -447,6 +447,9 @@ pub(crate) fn emit_return(
             let body_offset_hi = out.len() + 1; // points to modrm, so +1,+2 are the address bytes
             out.extend_from_slice(&[0x8B, 0x16, 0x02, 0x00]);
             fixups.push(Fixup { body_offset: body_offset_hi, kind: FixupKind::GlobalAddr { global_idx: *idx } });
+        } else if return_long && is_long_shift1(expr, locals) {
+            // `return <long> << 1` / `>> 1`: 32-bit shift across DX:AX.
+            emit_long_to_dx_ax(expr, locals, out, fixups);
         } else {
             emit_expr_to_ax(expr, locals, out, fixups);
         }
