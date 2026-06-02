@@ -1890,9 +1890,6 @@ pub(crate) fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
                 p.bump(); // [
                 let index_expr = parse_expr(p)?;
                 p.eat(&Tok::RBrack)?;
-                p.eat(&Tok::Assign)?;
-                let value = parse_expr(p)?;
-                p.eat(&Tok::Semi)?;
                 let k = index_expr.fold(&[]).ok_or_else(|| EmitError::Unsupported(
                     "non-constant array index in store not yet supported".to_owned(),
                 ))?;
@@ -1912,6 +1909,15 @@ pub(crate) fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
                         AssignTarget::IndexedGlobal { array: array_idx, byte_off }
                     }
                 };
+                // Compound `op=` / `++`/`--` desugars to a self-referential BinOp
+                // value; plain `=` falls through.
+                let value = if let Some(v) = parse_compound_rhs(p, &target)? {
+                    v
+                } else {
+                    p.eat(&Tok::Assign)?;
+                    parse_expr(p)?
+                };
+                p.eat(&Tok::Semi)?;
                 return Ok(Stmt::Assign { target, value });
             }
             let target = if let Some(idx) = p.local_names.iter().position(|n| *n == name) {
@@ -2205,6 +2211,19 @@ pub(crate) fn parse_compound_rhs(p: &mut Parser<'_>, target: &AssignTarget) -> R
         }
         AssignTarget::DoubleDerefGlobal(g) => {
             Expr::DerefWord { ptr: Box::new(Expr::DerefWord { ptr: Box::new(Expr::Global(*g)) }) }
+        }
+        // Global-pointer subscript `p[K] op= v` — the self-read is the matching
+        // PtrIndexByte; const-prop rewrites both it and the target through the
+        // p→array alias so the in-place mem-op peephole fires on the element.
+        AssignTarget::PtrIndexByte { ptr, disp } => {
+            Expr::PtrIndexByte { ptr: *ptr, index: Box::new(Expr::IntLit(*disp as i32)) }
+        }
+        // Direct global-array subscript `a[K] op= v` (the self-read is Index).
+        AssignTarget::IndexedGlobal { array, byte_off } => {
+            Expr::Index { array: *array, index: Box::new(Expr::IntLit((*byte_off / 2) as i32)) }
+        }
+        AssignTarget::IndexedGlobalByte { array, byte_off } => {
+            Expr::IndexByte { array: *array, index: Box::new(Expr::IntLit(*byte_off as i32)) }
         }
         _ => return Ok(None),
     };

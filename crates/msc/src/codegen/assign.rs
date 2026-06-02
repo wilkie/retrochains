@@ -1057,6 +1057,46 @@ pub(crate) fn emit_assign_global(global_idx: usize, value: &Expr, locals: &Local
 /// global's base. Constant RHS → `c7 06 byte_off imm16`; general RHS
 /// → `<expr-to-ax>; a3 byte_off`. Fixture 4119.
 pub(crate) fn emit_assign_indexed_global(global_idx: usize, byte_off: u16, value: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    // Compound `a[K] op= imm` → in-place word mem-op `add/sub/and/or/xor word
+    // ptr [_a+off], imm` (and inc/dec for ±1). The element address placeholder
+    // carries byte_off as the GlobalAddr addend. Fixtures 864-877.
+    if let Expr::BinOp { op, left, right } = value
+        && matches!(left.as_ref(), Expr::Index { array, index }
+            if *array == global_idx
+                && matches!(index.as_ref(), Expr::IntLit(k) if (*k as u16).wrapping_mul(2) == byte_off))
+        && matches!(op, BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor)
+        && let Some(k) = right.fold(locals.inits)
+    {
+        let emit_addr = |out: &mut Vec<u8>, fixups: &mut Vec<Fixup>| {
+            let bo = out.len();
+            out.extend_from_slice(&byte_off.to_le_bytes());
+            fixups.push(Fixup { body_offset: bo - 1, kind: FixupKind::GlobalAddr { global_idx } });
+        };
+        // inc/dec word for ±1.
+        if matches!(op, BinOp::Add | BinOp::Sub) && k == 1 {
+            out.push(0xFF);
+            out.push(if matches!(op, BinOp::Add) { 0x06 } else { 0x0E });
+            emit_addr(out, fixups);
+            return;
+        }
+        let modrm = match op {
+            BinOp::Add => 0x06, BinOp::Sub => 0x2E, BinOp::BitAnd => 0x26,
+            BinOp::BitOr => 0x0E, BinOp::BitXor => 0x36, _ => unreachable!(),
+        };
+        // or/xor with a byte-sized immediate use the BYTE form (`80`): the high
+        // byte is unaffected, so MSC writes only the low byte. and must stay word
+        // (`81`) to clear the high byte; add/sub use imm8-sign-extended (`83`)
+        // when it fits, else imm16 (`81`). Fixtures 864/867/868/872.
+        if matches!(op, BinOp::BitOr | BinOp::BitXor) && (0..=255).contains(&k) {
+            out.push(0x80); out.push(modrm); emit_addr(out, fixups); out.push(k as u8);
+        } else if matches!(op, BinOp::Add | BinOp::Sub) && let Ok(k8) = i8::try_from(k) {
+            out.push(0x83); out.push(modrm); emit_addr(out, fixups); out.push(k8 as u8);
+        } else {
+            out.push(0x81); out.push(modrm); emit_addr(out, fixups);
+            out.extend_from_slice(&((k as u32 & 0xFFFF) as u16).to_le_bytes());
+        }
+        return;
+    }
     if let Some(k) = value.fold(locals.inits) {
         let imm = (k as u32 & 0xFFFF) as u16;
         out.push(0xC7);
@@ -1082,6 +1122,35 @@ pub(crate) fn emit_assign_indexed_global(global_idx: usize, byte_off: u16, value
 /// `<char-global>[K] = <byte>;` — store one byte at a constant
 /// index. `c6 06 byte_off imm8`. Fixture 4122.
 pub(crate) fn emit_assign_indexed_global_byte(global_idx: usize, byte_off: u16, value: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    // Compound `a[K] op= imm` on a char array → in-place byte mem-op
+    // `add/sub/and/or/xor byte ptr [_a+off], imm8` (inc/dec byte for ±1).
+    // Fixtures 865, 869-873, 877.
+    if let Expr::BinOp { op, left, right } = value
+        && matches!(left.as_ref(), Expr::IndexByte { array, index }
+            if *array == global_idx
+                && matches!(index.as_ref(), Expr::IntLit(k) if *k as u16 == byte_off))
+        && matches!(op, BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor)
+        && let Some(k) = right.fold(locals.inits)
+    {
+        let emit_addr = |out: &mut Vec<u8>, fixups: &mut Vec<Fixup>| {
+            let bo = out.len();
+            out.extend_from_slice(&byte_off.to_le_bytes());
+            fixups.push(Fixup { body_offset: bo - 1, kind: FixupKind::GlobalAddr { global_idx } });
+        };
+        if matches!(op, BinOp::Add | BinOp::Sub) && k == 1 {
+            out.push(0xFE);
+            out.push(if matches!(op, BinOp::Add) { 0x06 } else { 0x0E });
+            emit_addr(out, fixups);
+            return;
+        }
+        let modrm = match op {
+            BinOp::Add => 0x06, BinOp::Sub => 0x2E, BinOp::BitAnd => 0x26,
+            BinOp::BitOr => 0x0E, BinOp::BitXor => 0x36, _ => unreachable!(),
+        };
+        out.push(0x80); out.push(modrm); emit_addr(out, fixups);
+        out.push((k as u32 & 0xFF) as u8);
+        return;
+    }
     let k = value.fold(locals.inits).unwrap_or_else(|| {
         panic!("non-constant char-array store value not yet supported")
     });
