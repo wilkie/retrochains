@@ -1776,6 +1776,21 @@ pub(crate) fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
                 // `a[i] = ...` with `i = K` known at decl folds.
                 let init_view: Vec<Option<i32>> = p.local_specs.iter().map(|l| l.init).collect();
                 let elem_bytes = p.local_specs[local_idx].size;
+                // A POINTER local: `p[0] = v` is `*p = v` (deref store), so the
+                // alias pass can redirect it to the pointee. (Non-zero indices
+                // through a pointer local are deferred.)
+                let ptsz = p.local_specs[local_idx].pointee_size;
+                if ptsz > 0 && matches!(index_expr.fold(&init_view), Some(0)) {
+                    let target = AssignTarget::DerefLocal(local_idx);
+                    let value = if let Some(v) = parse_compound_rhs(p, &target)? {
+                        v
+                    } else {
+                        p.eat(&Tok::Assign)?;
+                        parse_expr(p)?
+                    };
+                    p.eat(&Tok::Semi)?;
+                    return Ok(Stmt::Assign { target, value });
+                }
                 if let Some(k) = index_expr.fold(&init_view) {
                     // Constant index — use existing byte-offset forms.
                     let byte_off = u16::try_from((k as i64) * (elem_bytes as i64))
@@ -2705,6 +2720,30 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                     p.bump();
                     let index = parse_expr(p)?;
                     p.eat(&Tok::RBrack)?;
+                    // A POINTER local: `p[K]` is `*(p + K)` — a deref, not an
+                    // array-slot read. K==0 yields a bare `*p` so the alias pass
+                    // can fold it; K!=0 derefs `p + K*pointee`.
+                    let ptsz = p.local_specs[idx].pointee_size;
+                    if ptsz > 0 {
+                        let inner = match index.fold(&[]) {
+                            Some(0) => Expr::Local(idx),
+                            Some(k) => Expr::BinOp {
+                                op: BinOp::Add,
+                                left: Box::new(Expr::Local(idx)),
+                                right: Box::new(Expr::IntLit(k * ptsz as i32)),
+                            },
+                            None => Expr::BinOp {
+                                op: BinOp::Add,
+                                left: Box::new(Expr::Local(idx)),
+                                right: Box::new(index),
+                            },
+                        };
+                        return Ok(if ptsz == 1 {
+                            Expr::DerefByte { ptr: Box::new(inner) }
+                        } else {
+                            Expr::DerefWord { ptr: Box::new(inner) }
+                        });
+                    }
                     return if p.local_specs[idx].size == 1 {
                         Ok(Expr::LocalIndexByte { local: idx, index: Box::new(index) })
                     } else {
