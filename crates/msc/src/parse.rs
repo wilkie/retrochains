@@ -1199,6 +1199,10 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
             // `Expr::Local(idx)` pick up the low word at [bp-disp].
             let (slot_size, slot_len, is_long_slot) = if is_long_decl && array_len == 1 {
                 (2usize, 2usize, true)
+            } else if star_count > 0 {
+                // A near pointer is a 2-byte slot regardless of pointee type
+                // (so `char *p` stores its address as a word, not a byte).
+                (2usize, array_len, false)
             } else {
                 (size, array_len, false)
             };
