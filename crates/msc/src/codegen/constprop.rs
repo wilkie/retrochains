@@ -375,9 +375,30 @@ pub(crate) fn cp_clone(cp: &ConstProp) -> ConstProp {
         local_specs: cp.local_specs.clone(),
     }
 }
+/// If `e` is a pointer local holding `&x`/`&g` (offset 0), the address
+/// expression `AddrOfLocal(x)`/`AddrOfGlobal(g)` — used to lower `if (p)` /
+/// `if (p == 0)` to `cmp bp,K` / `mov ax,&g; or ax,ax`.
+fn ptr_local_addr(e: &Expr, cp: &ConstProp) -> Option<Expr> {
+    if let Expr::Local(p) = e
+        && let Some(&(base, 0)) = cp.ptr_addr.get(p)
+    {
+        Some(match base {
+            AliasTarget::Local(x) => Expr::AddrOfLocal(x),
+            AliasTarget::Global(g) => Expr::AddrOfGlobal(g),
+        })
+    } else {
+        None
+    }
+}
 pub(crate) fn prop_cond(cond: &mut Cond, cp: &mut ConstProp) {
     match cond {
-        Cond::Truthy(e) => prop_expr(e, cp),
+        Cond::Truthy(e) => {
+            if let Some(addr) = ptr_local_addr(e, cp) {
+                *e = addr;
+                return;
+            }
+            prop_expr(e, cp)
+        }
         Cond::Cmp { op, left, right } => {
             // `p == q` / `p != q` over two same-GLOBAL-base address values folds
             // to a constant condition (fixture 601). Local-base stays runtime.
@@ -391,6 +412,18 @@ pub(crate) fn prop_cond(cond: &mut Cond, cp: &mut ConstProp) {
                 let truthy = if matches!(op, RelOp::Eq) { eq } else { !eq };
                 *cond = Cond::Truthy(Expr::IntLit(truthy as i32));
                 return;
+            }
+            // `p == 0` / `p != 0` (p a pointer holding `&x`/`&g`): rewrite the
+            // pointer to its address so emit lowers it (cmp bp,K / or ax,ax).
+            if matches!(op, RelOp::Eq | RelOp::Ne) {
+                if matches!(right, Expr::IntLit(0)) && let Some(addr) = ptr_local_addr(left, cp) {
+                    *left = addr;
+                    return;
+                }
+                if matches!(left, Expr::IntLit(0)) && let Some(addr) = ptr_local_addr(right, cp) {
+                    *right = addr;
+                    return;
+                }
             }
             prop_expr(left, cp);
             prop_expr(right, cp);

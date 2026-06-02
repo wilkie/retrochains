@@ -257,6 +257,31 @@ pub(crate) fn emit_cond_cmp_inner(cond: &Cond, locals: &Locals<'_>, out: &mut Ve
         fixups.push(Fixup { body_offset: off - 1, kind: FixupKind::GlobalAddr { global_idx: idx } });
         return;
     }
+    // Pointer-as-condition: `if (p)` / `if (p == 0)` where p holds `&x`/`&g`.
+    //   &local x at [bp-K] → `cmp bp, K`  (the pointer is 0 iff bp == K)
+    //   &global g          → `mov ax, OFFSET g; or ax, ax`
+    if let Cond::Truthy(Expr::AddrOfLocal(x))
+        | Cond::Cmp { op: RelOp::Eq | RelOp::Ne, left: Expr::AddrOfLocal(x), right: Expr::IntLit(0) }
+        | Cond::Cmp { op: RelOp::Eq | RelOp::Ne, left: Expr::IntLit(0), right: Expr::AddrOfLocal(x) } = cond
+    {
+        let k = -locals.disp(*x);
+        if let Ok(k8) = i8::try_from(k) {
+            out.extend_from_slice(&[0x83, 0xFD, k8 as u8]); // cmp bp, imm8sx
+        } else {
+            out.push(0x81); out.push(0xFD); out.extend_from_slice(&(k as u16).to_le_bytes());
+        }
+        return;
+    }
+    if let Cond::Truthy(Expr::AddrOfGlobal(g))
+        | Cond::Cmp { op: RelOp::Eq | RelOp::Ne, left: Expr::AddrOfGlobal(g), right: Expr::IntLit(0) }
+        | Cond::Cmp { op: RelOp::Eq | RelOp::Ne, left: Expr::IntLit(0), right: Expr::AddrOfGlobal(g) } = cond
+    {
+        let off = out.len();
+        out.extend_from_slice(&[0xB8, 0x00, 0x00]); // mov ax, OFFSET g
+        fixups.push(Fixup { body_offset: off, kind: FixupKind::GlobalAddr { global_idx: *g } });
+        out.extend_from_slice(&[0x0B, 0xC0]); // or ax, ax
+        return;
+    }
     match cond {
         Cond::Truthy(Expr::Local(idx)) => emit_cmp_local_imm(*idx, locals, 0, out),
         Cond::Truthy(Expr::Param(idx)) => {
