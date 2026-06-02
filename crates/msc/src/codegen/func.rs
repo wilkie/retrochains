@@ -170,9 +170,21 @@ pub(crate) fn emit_function(
             local_disps[i] = -i16::try_from(cumulative).expect("local disp fits");
         }
     }
-    for (i, spec) in func.locals.iter().enumerate() {
-        if !spec.is_far_ptr && spec.pointee_size > 0 {
-            cumulative += spec.storage_bytes() as i32;
+    let name_hash = |i: usize| -> u32 {
+        let h: u32 = func.local_names[i].bytes().map(|b| b as u32).sum();
+        h % 16
+    };
+    // Near pointers share the same hash-bucket / LIFO ordering as other locals
+    // (so `int *p; int **pp;` puts the later `pp` shallower — fixtures 1232,
+    // 1964), but as a separate pass they still precede the non-pointer locals.
+    {
+        let mut np_ptrs: Vec<usize> = func.locals.iter().enumerate()
+            .filter(|(_, s)| !s.is_far_ptr && s.pointee_size > 0)
+            .map(|(i, _)| i)
+            .collect();
+        np_ptrs.sort_by(|&a, &b| name_hash(a).cmp(&name_hash(b)).then(b.cmp(&a)));
+        for i in np_ptrs {
+            cumulative += func.locals[i].storage_bytes() as i32;
             local_disps[i] = -i16::try_from(cumulative).expect("local disp fits");
         }
     }
@@ -181,10 +193,6 @@ pub(crate) fn emit_function(
             .filter(|(_, s)| !s.is_far_ptr && s.pointee_size == 0)
             .map(|(i, _)| i)
             .collect();
-        let name_hash = |i: usize| -> u32 {
-            let h: u32 = func.local_names[i].bytes().map(|b| b as u32).sum();
-            h % 16
-        };
         // Within a hash bucket, MSC's internal hash table uses LIFO
         // (linked-list prepend), so the last-declared variable in a
         // bucket gets the shallowest (smallest absolute) displacement.
