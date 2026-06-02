@@ -116,12 +116,13 @@ tracking whether a float local's value is live on x87 `st(0)`.
 Flips 1674, 1675, 1676, 1677, 1681, 1752, 1753, 1756, 2152, 2192, 4000. MSC at
 1995/3952.
 
-**Known near-miss — 1671** (`float a; float b; float r=a+b; return (int)r;`):
-byte-identical except the `__ftol` EXTDEF index — MSC places `__ftol` *after*
-`_main` (trailing) here, but *before* `_main` (helper position) in 1675/1676/
-1677/1752. The only structural difference is 1671 has **3** float CONST temps
-vs ≤2; one data point isn't enough to pin the extern-ordering rule, so left as a
-follow-up.
+### `__ftol` EXTDEF placement (≥3 float temps → trailing)
+MSC places `__ftol`'s EXTDEF **after** the function names (trailing) instead of
+at the helper slot when a single function references **≥3 distinct float CONST
+temps**; ≤2 temps, or temps split across functions (2146: scale=1 + main=2),
+keep the helper slot. Implemented as `ftol_trailing` in `build_obj` (only the
+no-COMDEF/no-user-extern layout, i.e. a single `main`, is affected). Flips
+1671, 1673, 2136, 2138, 2141, 2142. MSC at 2001/3952.
 
 ## Block 3+ — the remaining mechanisms
 

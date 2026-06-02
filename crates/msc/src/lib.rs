@@ -1421,6 +1421,22 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
             }
         }
     }
+    // MSC places `__ftol`'s EXTDEF AFTER the function names (trailing) instead
+    // of at the helper slot when a single function references >= 3 distinct
+    // float CONST temps. Empirical: 1671/2138/2141/2142/2136/1673/2148 (one
+    // function, 3 temps) trail; <=2 temps, or temps split across functions
+    // (2146), keep the helper slot. Only the no-COMDEF/no-user-extern layout is
+    // affected (these units are a single `main`).
+    let ftol_trailing = helper_extern_order.iter().any(|h| h == "__ftol")
+        && function_emits.iter().any(|fe| {
+            let mut temps = std::collections::HashSet::new();
+            for fx in &fe.fixups {
+                if let FixupKind::FloatLoad { bits, width } = &fx.kind {
+                    temps.insert((*bits, *width));
+                }
+            }
+            temps.len() >= 3
+        });
 
     // SEGDEF table. MSC uses acbp=0x48 for every segment in the
     // small model.
@@ -1559,6 +1575,7 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
             entries.push(("__acrtused".to_owned(), 0x01));
             entries.push(("__chkstk".to_owned(), 0x00));
             for h in &helper_extern_order {
+                if ftol_trailing && h == "__ftol" { continue; }
                 entries.push((h.clone(), 0x00));
             }
             for &gi in &extern_globals {
@@ -1566,6 +1583,11 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
             }
             for f in &unit.functions {
                 entries.push((symbol_name(&f.name), 0x00));
+            }
+            // `__ftol` trails the function names when a function uses >=3 float
+            // CONST temps (see `ftol_trailing`).
+            if ftol_trailing {
+                entries.push(("__ftol".to_owned(), 0x00));
             }
             emit_group(&mut b, &entries, &mut extdef_idx_of, &mut next_idx);
         } else {
