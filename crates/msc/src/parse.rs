@@ -864,6 +864,27 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
     let mut locals: Vec<LocalSpec> = Vec::new();
     let mut prelude: Vec<Stmt> = Vec::new();
     loop {
+        // A function-local `static` declaration is really a TU-private global:
+        // route it through parse_global_decl, which appends it to p.globals
+        // (no PUBDEF, is_static) and p.global_names so body references resolve
+        // to `Expr::Global`. MSC names them `$S<n>_<name>`, but that symbol is
+        // cosmetic — the OBJ references them by _DATA offset.
+        {
+            let mut j = p.pos;
+            let mut has_static = false;
+            while let Some(Tok::Kw(k)) = p.toks.get(j) {
+                if !matches!(*k, "static" | "unsigned" | "signed" | "register"
+                    | "auto" | "volatile" | "const" | "short" | "extern") {
+                    break;
+                }
+                if *k == "static" { has_static = true; }
+                j += 1;
+            }
+            if has_static {
+                parse_global_decl(p)?;
+                continue;
+            }
+        }
         // Peek across leading modifier keywords. The decl is a local
         // when the next token is int/char OR when *any* modifier was
         // present (bare `unsigned x;` means `unsigned int x;`).
