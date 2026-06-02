@@ -2,6 +2,28 @@ use crate::*;
 
 /// Emit a single statement (recursive: if-statements contain
 /// nested statements). Returns no value — appends directly to `out`.
+/// Recognize `(int)<float-global-array>[K]` and `(int)(<…>[K] <op> <floatlit>)`
+/// in a return: returns (global_idx, const_index, optional (op, operand_bits)).
+fn float_global_index_return(expr: &Expr, locals: &Locals<'_>) -> Option<(usize, i32, Option<(BinOp, u64)>)> {
+    let probe = |e: &Expr| -> Option<(usize, i32)> {
+        if let Expr::Index { array, index } = e
+            && locals.is_float_global(*array)
+            && let Some(k) = index.fold(locals.inits)
+        {
+            Some((*array, k))
+        } else {
+            None
+        }
+    };
+    match expr {
+        Expr::Index { .. } => probe(expr).map(|(a, k)| (a, k, None)),
+        Expr::BinOp { op, left, right } if matches!(right.as_ref(), Expr::FloatLit(..)) => {
+            let (bits, _) = match right.as_ref() { Expr::FloatLit(b, d) => (*b, *d), _ => unreachable!() };
+            probe(left).map(|(a, k)| (a, k, Some((*op, bits))))
+        }
+        _ => None,
+    }
+}
 /// A statement that continues an x87 float-store run (`a[k] = K.Ff`) — no
 /// `fwait` is flushed before it.
 fn stmt_is_float_elem_store(stmt: &Stmt, locals: &Locals<'_>) -> bool {
@@ -432,6 +454,36 @@ pub(crate) fn emit_return(
             let body_offset = out.len() - 1; // the 06 modrm; off16 at +1
             out.extend_from_slice(&[0x00, 0x00]);
             fixups.push(Fixup { body_offset, kind: FixupKind::GlobalAddr { global_idx: *idx } });
+            let call_off = out.len();
+            out.extend_from_slice(&[0xE8, 0x00, 0x00]); // call __ftol
+            fixups.push(Fixup { body_offset: call_off, kind: FixupKind::ExtCall { target: "__ftol".to_owned() } });
+            out.extend_from_slice(frame.epilogue_bytes());
+            return;
+        } else if let Some((array, k, fop)) = float_global_index_return(expr, locals) {
+            // `return (int)<float-global-array>[K]` (optionally `<op> <floatlit>`):
+            //   fld QWORD [arr+K*w]; [f<op> QWORD [$T]]; call __ftol
+            let width = locals.float_global_width(array);
+            let op = if width == 4 { 0xD9u8 } else { 0xDDu8 };
+            let byte_off = (k as u32).wrapping_mul(width as u32) as u16;
+            fixups.push(Fixup { body_offset: out.len(), kind: FixupKind::FloatMarker { target: "FIDRQQ" } });
+            out.push(0x9B);
+            out.push(op);
+            out.push(0x06); // modrm /0 [disp16]
+            let bo = out.len() - 1;
+            out.extend_from_slice(&byte_off.to_le_bytes());
+            fixups.push(Fixup { body_offset: bo, kind: FixupKind::GlobalAddr { global_idx: array } });
+            if let Some((binop, bits)) = fop {
+                let reg = match binop {
+                    BinOp::Add => 0u8, BinOp::Mul => 1, BinOp::Sub => 4, BinOp::Div => 6, _ => 0,
+                };
+                fixups.push(Fixup { body_offset: out.len(), kind: FixupKind::FloatMarker { target: "FIDRQQ" } });
+                out.push(0x9B);
+                out.push(0xDC);
+                out.push(0x06 | (reg << 3));
+                let bo = out.len() - 1;
+                out.extend_from_slice(&[0x00, 0x00]);
+                fixups.push(Fixup { body_offset: bo, kind: FixupKind::FloatLoad { bits, width: 8 } });
+            }
             let call_off = out.len();
             out.extend_from_slice(&[0xE8, 0x00, 0x00]); // call __ftol
             fixups.push(Fixup { body_offset: call_off, kind: FixupKind::ExtCall { target: "__ftol".to_owned() } });

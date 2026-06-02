@@ -1408,6 +1408,20 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
             }
         }
     }
+    // …and the operand of `return (int)(<float-global-array>[K] op lit)` — a
+    // width-8 (double) temp.
+    for f in &unit.functions {
+        for s in &f.body {
+            if let Stmt::Return(Expr::BinOp { left, right, .. }) = s
+                && let Expr::Index { array, .. } = left.as_ref()
+                && unit.globals.get(*array).map(|g| g.is_float).unwrap_or(false)
+                && let Expr::FloatLit(bits, _) = right.as_ref()
+                && !float_pool.contains(&(*bits, 8))
+            {
+                float_pool.push((*bits, 8));
+            }
+        }
+    }
     // …and the literal operand of a coupled FP op (`return (int)(f + 1.5f)` or a
     // compound assign `d += 5.5`) — always a width-8 (double) temp.
     for f in &unit.functions {
@@ -1954,31 +1968,10 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
     // LEDATA — CONST float-literal pool, the temps introduced by function 0
     // (the pre-_TEXT block). Each `$T` temp holds the IEEE bytes: a `float`
     // collapses the f64 value to f32 (4 bytes); a `double` keeps the full f64
-    // (8 bytes). Little-endian. Temps introduced by later functions are
-    // flushed mid-stream (interleaved with the _TEXT runs, below).
-    // MSC packs consecutive (adjacent-offset) float temps into a single CONST
-    // LEDATA (like strings), so emit them in contiguous-offset runs.
-    {
-        let mut pre: Vec<usize> = (0..float_pool.len()).filter(|&k| float_intro_fn[k] == 0).collect();
-        pre.sort_by_key(|&k| float_offsets[k]);
-        let mut i = 0;
-        while i < pre.len() {
-            let start_off = float_offsets[pre[i]];
-            let mut buf: Vec<u8> = Vec::new();
-            let mut expect = start_off;
-            while i < pre.len() && float_offsets[pre[i]] == expect {
-                let (bits, width) = float_pool[pre[i]];
-                if width == 4 {
-                    buf.extend_from_slice(&(f64::from_bits(bits) as f32).to_bits().to_le_bytes());
-                } else {
-                    buf.extend_from_slice(&bits.to_le_bytes());
-                }
-                expect += width;
-                i += 1;
-            }
-            b.write_ledata16(3, u16::try_from(start_off).expect("CONST float offset fits"), &buf);
-        }
-    }
+    // (8 bytes). Little-endian. The pre-text float temps are emitted AFTER the
+    // _DATA segment (MSC's segment order when both are present — fixture 2150),
+    // below. Temps introduced by later functions are flushed mid-stream
+    // (interleaved with the _TEXT runs).
 
     // LEDATA — _DATA segment, initialized global values. MSC packs
     // them sequentially in source order, little-endian. StrAddr
@@ -2078,6 +2071,31 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
         }
         if !data_fixups.is_empty() {
             b.write_fixupp(&data_fixups);
+        }
+    }
+
+    // LEDATA — CONST float-literal pool (pre-text temps), emitted after _DATA.
+    // MSC packs consecutive (adjacent-offset) float temps into a single LEDATA
+    // (like strings), so emit them in contiguous-offset runs.
+    {
+        let mut pre: Vec<usize> = (0..float_pool.len()).filter(|&k| float_intro_fn[k] == 0).collect();
+        pre.sort_by_key(|&k| float_offsets[k]);
+        let mut i = 0;
+        while i < pre.len() {
+            let start_off = float_offsets[pre[i]];
+            let mut buf: Vec<u8> = Vec::new();
+            let mut expect = start_off;
+            while i < pre.len() && float_offsets[pre[i]] == expect {
+                let (bits, width) = float_pool[pre[i]];
+                if width == 4 {
+                    buf.extend_from_slice(&(f64::from_bits(bits) as f32).to_bits().to_le_bytes());
+                } else {
+                    buf.extend_from_slice(&bits.to_le_bytes());
+                }
+                expect += width;
+                i += 1;
+            }
+            b.write_ledata16(3, u16::try_from(start_off).expect("CONST float offset fits"), &buf);
         }
     }
 

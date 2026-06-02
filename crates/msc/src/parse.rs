@@ -496,6 +496,23 @@ pub(crate) fn parse_global_decl(p: &mut Parser<'_>) -> Result<(), EmitError> {
                     p.bump();
                     break;
                 }
+                if is_float && !is_pointer {
+                    // `double arr[] = {1.0, 2.0, ...}` — IEEE bytes per element.
+                    let bits = match p.bump().cloned() {
+                        Some(Tok::Float(b, _)) => b,
+                        Some(Tok::Int(n)) => f64::from(n).to_bits(),
+                        other => return Err(EmitError::Unsupported(format!(
+                            "expected float literal in initializer, got {other:?}"))),
+                    };
+                    values.push(GlobalInit::FloatBits(bits, float_width));
+                    match p.peek() {
+                        Some(Tok::Comma) => { p.bump(); }
+                        Some(Tok::RBrace) => { p.bump(); break; }
+                        other => return Err(EmitError::Unsupported(format!(
+                            "expected `,` or `}}` in initializer, got {other:?}"))),
+                    }
+                    continue;
+                }
                 let v = parse_signed_int(p)?;
                 if is_char && !is_pointer {
                     values.push(GlobalInit::Byte((v as u32 & 0xFF) as u8));
