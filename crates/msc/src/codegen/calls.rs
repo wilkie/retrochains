@@ -299,6 +299,18 @@ pub(crate) fn is_long_shr1(e: &Expr, locals: &Locals<'_>) -> bool {
         if right.fold(locals.inits) == Some(1) && long_operand(left, locals))
 }
 
+/// `e` is a long negate `-x` (parsed as `0 - x`).
+pub(crate) fn is_long_neg(e: &Expr, locals: &Locals<'_>) -> bool {
+    matches!(e, Expr::BinOp { op: BinOp::Sub, left, right }
+        if matches!(left.as_ref(), Expr::IntLit(0)) && long_operand(right, locals))
+}
+
+/// `e` is a long bitwise-not `~x` (parsed as `x ^ -1`).
+pub(crate) fn is_long_not(e: &Expr, locals: &Locals<'_>) -> bool {
+    matches!(e, Expr::BinOp { op: BinOp::BitXor, left, right }
+        if matches!(right.as_ref(), Expr::IntLit(-1)) && long_operand(left, locals))
+}
+
 /// Emit a long shift-left-by-k on DX:AX. k==1 is a single shl/rcl; k>=2 uses
 /// MSC's cl-counted loop: `mov cl,k; shl ax,1; rcl dx,1; dec cl; jnz -8`.
 fn emit_long_shl_k(k: u8, out: &mut Vec<u8>) {
@@ -394,6 +406,22 @@ pub(crate) fn emit_long_to_dx_ax(value: &Expr, locals: &Locals<'_>, out: &mut Ve
             } else {
                 out.extend_from_slice(&[0xD1, 0xFA, 0xD1, 0xD8]); // sar dx,1; rcr ax,1
             }
+        }
+        // Long negate `-x` (parsed as `0 - x`): neg ax; adc dx,0; neg dx.
+        // Fixtures 2673, 2877.
+        Expr::BinOp { op: BinOp::Sub, left, right }
+            if matches!(left.as_ref(), Expr::IntLit(0)) && long_operand(right, locals) =>
+        {
+            emit_long_to_dx_ax(right, locals, out, fixups);
+            out.extend_from_slice(&[0xF7, 0xD8, 0x83, 0xD2, 0x00, 0xF7, 0xDA]);
+        }
+        // Long bitwise-not `~x` (parsed as `x ^ -1`): not ax; not dx.
+        // Fixtures 3290, 372.
+        Expr::BinOp { op: BinOp::BitXor, left, right }
+            if matches!(right.as_ref(), Expr::IntLit(-1)) && long_operand(left, locals) =>
+        {
+            emit_long_to_dx_ax(left, locals, out, fixups);
+            out.extend_from_slice(&[0xF7, 0xD0, 0xF7, 0xD2]);
         }
         // Inline 2-word arithmetic: `a <op> b` where both are long. Load a
         // into DX:AX, then combine b (in memory) word-wise: add/adc, sub/sbb,

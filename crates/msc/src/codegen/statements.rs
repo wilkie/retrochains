@@ -450,6 +450,8 @@ pub(crate) fn emit_return(
         } else if return_long
             && (is_long_shl(expr, locals)
                 || is_long_shr1(expr, locals)
+                || is_long_neg(expr, locals)
+                || is_long_not(expr, locals)
                 || is_long_arith_mem(expr, locals)
                 || is_long_muldiv(expr, locals))
         {
