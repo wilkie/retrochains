@@ -75,6 +75,7 @@ pub(crate) fn emit_function(
     unsigned_globals: &[bool],
     float_globals: &[usize],
     char_returners: &std::collections::HashSet<String>,
+    float_returners_arg: &std::collections::HashMap<String, usize>,
     long_param_funcs: &std::collections::HashMap<String, Vec<bool>>,
 ) -> FunctionEmit {
     let (body, mutated_locals, _mutated_globals) = const_prop_globals(&func.body, &func.locals, long_globals);
@@ -111,9 +112,16 @@ pub(crate) fn emit_function(
     } else {
         Frame::for_function(func)
     };
+    // Receiving a float/double return (`double d = f();`) copies 8 bytes from
+    // __fac via `movsw`, needing DI and SI saved → WithSlideDiSi.
+    let receives_float_return = body.iter().any(|s| matches!(s,
+        Stmt::Assign { target: AssignTarget::Local(_), value: Expr::Call { name, .. } }
+            if float_returners_arg.contains_key(&symbol_name(name))));
     // Upgrade to WithSlideSi when the body uses runtime local array
     // indexing (SI register must be caller-saved).
-    let frame = if matches!(base_frame, Frame::WithSlide)
+    let frame = if receives_float_return {
+        Frame::WithSlideDiSi
+    } else if matches!(base_frame, Frame::WithSlide)
         && body_needs_si(&body, &local_inits)
     {
         Frame::WithSlideSi
@@ -175,7 +183,7 @@ pub(crate) fn emit_function(
     match frame {
         Frame::None => bytes.extend_from_slice(&[0x33, 0xC0]),
         Frame::BpOnly => bytes.extend_from_slice(&[0x55, 0x8B, 0xEC, 0x33, 0xC0]),
-        Frame::WithSlide | Frame::WithSlideSi => {
+        Frame::WithSlide | Frame::WithSlideSi | Frame::WithSlideDiSi => {
             bytes.extend_from_slice(&[0x55, 0x8B, 0xEC]);
             bytes.push(0xB8);
             bytes.extend_from_slice(
@@ -195,6 +203,11 @@ pub(crate) fn emit_function(
         body_offset,
         kind: FixupKind::ExtCall { target: "__chkstk".to_owned() },
     });
+    // WithSlideDiSi: save DI then SI for the float-return `movsw` copy.
+    if matches!(frame, Frame::WithSlideDiSi) {
+        bytes.push(0x57); // push di
+        bytes.push(0x56); // push si
+    }
     // For WithSlideSi: save SI after the frame is established.
     if matches!(frame, Frame::WithSlideSi) {
         bytes.push(0x56); // push si
@@ -353,6 +366,7 @@ pub(crate) fn emit_function(
         param_float_widths: &param_float_widths,
         char_returners,
         long_param_funcs,
+        float_returners: float_returners_arg,
         loop_stack: &loop_stack,
         fpu_live: &fpu_live,
         return_float_width: func.return_float_width,

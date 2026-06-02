@@ -361,6 +361,10 @@ pub struct Locals<'a> {
     /// Map of function symbol names to their param_is_long arrays.
     /// Used by emit_call_inner to push long args as 4-byte pairs.
     pub long_param_funcs: &'a std::collections::HashMap<String, Vec<bool>>,
+    /// Map of `float`/`double`-returning function symbol names to their return
+    /// width (4/8). The result comes back as AX = &__fac; assigning the call to
+    /// a float local triggers the `movsw`-copy receive sequence.
+    pub float_returners: &'a std::collections::HashMap<String, usize>,
     /// Stack of in-progress loops. Each entry's `breaks` and
     /// `continues` collect placeholder-jump offsets within the loop
     /// body's emit buffer, to be patched at loop end. RefCell so
@@ -1090,6 +1094,11 @@ enum Frame {
     /// array indexing. Prologue adds `push si` after chkstk.
     /// Epilogue: `pop si; mov sp, bp; pop bp; ret` (fixtures 1219, 1468).
     WithSlideSi,
+    /// Like WithSlide but saves/restores DI then SI — needed for the `movsw`
+    /// copy that receives a float/double return into a local. Prologue adds
+    /// `push di; push si` after chkstk; epilogue `pop si; pop di; mov sp,bp;
+    /// pop bp; ret` (fixtures 1684, 2144, 4001).
+    WithSlideDiSi,
 }
 
 impl Frame {
@@ -1108,10 +1117,11 @@ impl Frame {
             Frame::BpOnly => &[0x5D, 0xC3],
             Frame::WithSlide => &[0x8B, 0xE5, 0x5D, 0xC3],
             Frame::WithSlideSi => &[0x5E, 0x8B, 0xE5, 0x5D, 0xC3],
+            Frame::WithSlideDiSi => &[0x5E, 0x5F, 0x8B, 0xE5, 0x5D, 0xC3],
         }
     }
     fn is_with_slide(self) -> bool {
-        matches!(self, Frame::WithSlide | Frame::WithSlideSi)
+        matches!(self, Frame::WithSlide | Frame::WithSlideSi | Frame::WithSlideDiSi)
     }
 }
 
@@ -1291,10 +1301,14 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
         .filter(|f| f.param_is_long.iter().any(|&b| b))
         .map(|f| (symbol_name(&f.name), f.param_is_long.clone()))
         .collect();
+    let float_returners: std::collections::HashMap<String, usize> = unit.functions.iter()
+        .filter(|f| f.return_float_width != 0)
+        .map(|f| (symbol_name(&f.name), f.return_float_width))
+        .collect();
     let function_emits: Vec<FunctionEmit> = unit
         .functions
         .iter()
-        .map(|f| emit_function(f, &long_globals, &char_globals, &unsigned_globals, &float_globals, &char_returners, &long_param_funcs))
+        .map(|f| emit_function(f, &long_globals, &char_globals, &unsigned_globals, &float_globals, &char_returners, &float_returners, &long_param_funcs))
         .collect();
 
     // Per-function global offset within the _TEXT segment.
@@ -1433,38 +1447,38 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
     // Runtime-helper externs referenced via ExtCall (e.g. __aNNalshl for long
     // shift compound-assign). These sit right after __chkstk in the EXTDEF
     // table, in first-reference order. __chkstk itself is emitted explicitly.
+    // Runtime data externs (e.g. __fac) referenced via ExtData interleave here
+    // too, in first-reference order across functions.
     let mut helper_extern_order: Vec<String> = Vec::new();
     let mut seen_helpers: std::collections::HashSet<String> = std::collections::HashSet::new();
     for fe in &function_emits {
         for fx in &fe.fixups {
-            if let FixupKind::ExtCall { target } = &fx.kind
-                && target != "__chkstk"
-                && seen_helpers.insert(target.clone())
-            {
-                helper_extern_order.push(target.clone());
+            let target = match &fx.kind {
+                FixupKind::ExtCall { target } if target != "__chkstk" => target.clone(),
+                FixupKind::ExtData { target } => (*target).to_owned(),
+                _ => continue,
+            };
+            if seen_helpers.insert(target.clone()) {
+                helper_extern_order.push(target);
             }
         }
     }
-    // MSC places `__ftol`'s EXTDEF AFTER the function names (trailing) instead
-    // of at the helper slot when a single function references >= 3 distinct
-    // float CONST temps. Empirical: 1671/2138/2141/2142/2136/1673/2148 (one
-    // function, 3 temps) trail; <=2 temps, or temps split across functions
-    // (2146), keep the helper slot. Only the no-COMDEF/no-user-extern layout is
-    // affected (these units are a single `main`).
-    let ftol_trailing = helper_extern_order.iter().any(|h| h == "__ftol")
-        && function_emits.iter().any(|fe| {
-            let mut temps = std::collections::HashSet::new();
-            for fx in &fe.fixups {
-                if let FixupKind::FloatLoad { bits, width } = &fx.kind {
-                    temps.insert((*bits, *width));
-                }
+    // The float runtime externs `__ftol`/`__fac` move AFTER the function names
+    // (trailing) instead of the helper slot when a single function references
+    // >= 3 distinct float CONST temps. Empirical: 1671/2138/2141/2142/2136/
+    // 1673/2148/3997/4002 (one function, 3 temps) trail; <=2 temps, or temps
+    // split across functions (1684, 2146), keep the helper slot. Only the
+    // no-COMDEF/no-user-extern layout (a single `main`) is affected.
+    let float_helpers_trailing = function_emits.iter().any(|fe| {
+        let mut temps = std::collections::HashSet::new();
+        for fx in &fe.fixups {
+            if let FixupKind::FloatLoad { bits, width } = &fx.kind {
+                temps.insert((*bits, *width));
             }
-            temps.len() >= 3
-        });
-    // `__fac` (the floating accumulator) is a data extern referenced by any
-    // float/double-returning function; it trails the function names in the
-    // EXTDEF table.
-    let uses_fac = unit.functions.iter().any(|f| f.return_float_width != 0);
+        }
+        temps.len() >= 3
+    });
+    let is_float_helper = |h: &str| h == "__ftol" || h == "__fac";
 
     // SEGDEF table. MSC uses acbp=0x48 for every segment in the
     // small model.
@@ -1603,7 +1617,7 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
             entries.push(("__acrtused".to_owned(), 0x01));
             entries.push(("__chkstk".to_owned(), 0x00));
             for h in &helper_extern_order {
-                if ftol_trailing && h == "__ftol" { continue; }
+                if float_helpers_trailing && is_float_helper(h) { continue; }
                 entries.push((h.clone(), 0x00));
             }
             for &gi in &extern_globals {
@@ -1612,14 +1626,15 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
             for f in &unit.functions {
                 entries.push((symbol_name(&f.name), 0x00));
             }
-            // `__ftol` trails the function names when a function uses >=3 float
-            // CONST temps (see `ftol_trailing`).
-            if ftol_trailing {
-                entries.push(("__ftol".to_owned(), 0x00));
-            }
-            // `__fac` (floating accumulator) trails the function names.
-            if uses_fac {
-                entries.push(("__fac".to_owned(), 0x00));
+            // The float runtime externs (`__ftol`/`__fac`) trail the function
+            // names when a function uses >=3 float CONST temps, in their
+            // first-reference order (see `float_helpers_trailing`).
+            if float_helpers_trailing {
+                for h in &helper_extern_order {
+                    if is_float_helper(h) {
+                        entries.push((h.clone(), 0x00));
+                    }
+                }
             }
             emit_group(&mut b, &entries, &mut extdef_idx_of, &mut next_idx);
         } else {

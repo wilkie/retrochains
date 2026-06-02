@@ -1009,11 +1009,20 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
                         LocalSpec::float_(size, Some(bits))
                     } else {
                         let rhs = parse_expr(p)?;
-                        let v = float_fold_value(&rhs, &p.local_specs).ok_or_else(|| {
-                            EmitError::Unsupported(
-                                "unsupported non-constant float initializer".to_owned())
-                        })?;
-                        LocalSpec::float_nonliteral(size, v.to_bits())
+                        if let Some(v) = float_fold_value(&rhs, &p.local_specs) {
+                            LocalSpec::float_nonliteral(size, v.to_bits())
+                        } else {
+                            // Non-foldable init (e.g. `double d = pi();`, a
+                            // float-returning call): emit a synthetic assign;
+                            // the local has no CONST temp. The assign lowers to
+                            // the __fac receive-copy.
+                            let local_idx = locals.len();
+                            prelude.push(Stmt::Assign {
+                                target: AssignTarget::Local(local_idx),
+                                value: rhs,
+                            });
+                            LocalSpec::float_(size, None)
+                        }
                     }
                 } else {
                     LocalSpec::float_(size, None)

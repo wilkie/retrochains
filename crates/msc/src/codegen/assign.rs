@@ -6,6 +6,26 @@ use crate::*;
 /// — `mov ax, <expr>; mov [bp-disp], ax` — is reserved for a
 /// future fixture that exercises a non-peephole shape.
 pub(crate) fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    // Receive a float/double return into a local: the callee returns AX = &__fac,
+    // and the caller block-copies `width` bytes from there into the local:
+    //   call _fn; lea di,[bp+disp]; mov si,ax; push ss; pop es; movsw×(width/2)
+    if let AssignTarget::Local(i) = target
+        && locals.is_float_local(i)
+        && let Expr::Call { name, args } = value
+        && let Some(&width) = locals.float_returners.get(&symbol_name(name))
+    {
+        emit_call_inner(name, args, locals, false, out, fixups);
+        let disp = locals.disp(i);
+        out.push(0x8D); // lea di, [bp+disp]
+        out.push(bp_modrm(0x7E, disp));
+        push_bp_disp(out, disp);
+        out.extend_from_slice(&[0x8B, 0xF0]); // mov si, ax
+        out.extend_from_slice(&[0x16, 0x07]); // push ss; pop es
+        for _ in 0..(width / 2) {
+            out.push(0xA5); // movsw
+        }
+        return;
+    }
     let local_idx = match target {
         AssignTarget::Local(i) => i,
         AssignTarget::Param(i) => {
