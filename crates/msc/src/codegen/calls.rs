@@ -217,6 +217,63 @@ pub(crate) fn is_long_shift1(e: &Expr, locals: &Locals<'_>) -> bool {
         if right.fold(locals.inits) == Some(1) && long_operand(left, locals))
 }
 
+/// BP-relative displacement of param `idx`'s low word, accounting for the
+/// 4-byte width of any preceding long params (cdecl: first param at [bp+4],
+/// args pushed right-to-left so earlier params sit at lower offsets). The
+/// plain `param_disp` assumes 2 bytes per param, which is wrong once a long
+/// precedes the one being addressed.
+fn long_param_disp(idx: usize, locals: &Locals<'_>) -> i16 {
+    let mut d = 4i16;
+    for k in 0..idx {
+        d += if locals.is_long_param(k) { 4 } else { 2 };
+    }
+    d
+}
+
+/// A long RHS that lives in memory we can fold into an `op ax,[..]; op dx,[..]`
+/// pair (bp-relative param/local). Globals are handled elsewhere later.
+fn long_rhs_mem(e: &Expr, locals: &Locals<'_>) -> bool {
+    matches!(e, Expr::Param(i) if locals.is_long_param(*i))
+        || matches!(e, Expr::Local(i) if locals.is_long_local(*i))
+}
+
+const fn long_arith_opcodes(op: BinOp) -> Option<(u8, u8)> {
+    // (low-word op, high-word op): high word carries for add/sub.
+    match op {
+        BinOp::Add => Some((0x03, 0x13)),    // add ax,..; adc dx,..
+        BinOp::Sub => Some((0x2B, 0x1B)),    // sub ax,..; sbb dx,..
+        BinOp::BitOr => Some((0x0B, 0x0B)),  // or  ax,..; or  dx,..
+        BinOp::BitAnd => Some((0x23, 0x23)), // and ax,..; and dx,..
+        BinOp::BitXor => Some((0x33, 0x33)), // xor ax,..; xor dx,..
+        _ => None,
+    }
+}
+
+/// `e` is `<long> <arith> <long-in-memory>` — an inline 2-word arithmetic op.
+pub(crate) fn is_long_arith_mem(e: &Expr, locals: &Locals<'_>) -> bool {
+    matches!(e, Expr::BinOp { op, left, right }
+        if long_arith_opcodes(*op).is_some()
+            && long_operand(left, locals)
+            && long_rhs_mem(right, locals))
+}
+
+/// Emit `op ax,[rhs_lo]; op2 dx,[rhs_hi]` for a bp-relative long RHS, combining
+/// it into DX:AX (which already holds the left operand).
+fn emit_long_op_mem(op: BinOp, rhs: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>) {
+    let (lo_op, hi_op) = long_arith_opcodes(op).expect("long arith opcode");
+    let disp = match rhs {
+        Expr::Param(i) => long_param_disp(*i, locals),
+        Expr::Local(i) => locals.disp(*i),
+        _ => unreachable!("long_rhs_mem gates this"),
+    };
+    out.push(lo_op);
+    out.push(bp_modrm(0x46, disp)); // reg = ax
+    push_bp_disp(out, disp);
+    out.push(hi_op);
+    out.push(bp_modrm(0x56, disp + 2)); // reg = dx
+    push_bp_disp(out, disp + 2);
+}
+
 pub(crate) fn emit_long_to_dx_ax(value: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
     match value {
         // 32-bit shift-by-1 of a long: load DX:AX, then shift across both
@@ -237,6 +294,17 @@ pub(crate) fn emit_long_to_dx_ax(value: &Expr, locals: &Locals<'_>, out: &mut Ve
                 _ => unreachable!(),
             }
         }
+        // Inline 2-word arithmetic: `a <op> b` where both are long. Load a
+        // into DX:AX, then combine b (in memory) word-wise: add/adc, sub/sbb,
+        // or/or, and/and, xor/xor. Fixtures 2870/2872/2873/285/...
+        Expr::BinOp { op, left, right }
+            if long_arith_opcodes(*op).is_some()
+                && long_operand(left, locals)
+                && long_rhs_mem(right, locals) =>
+        {
+            emit_long_to_dx_ax(left, locals, out, fixups);
+            emit_long_op_mem(*op, right, locals, out);
+        }
         Expr::Call { name, args } => {
             emit_call(name, args, locals, out, fixups);
             // DX:AX already set by callee returning long
@@ -247,8 +315,8 @@ pub(crate) fn emit_long_to_dx_ax(value: &Expr, locals: &Locals<'_>, out: &mut Ve
             out.extend_from_slice(&[0x8B, 0x56, (disp+2) as u8]); // mov dx, [bp+hi]
         }
         Expr::Param(i) if locals.is_long_param(*i) => {
-            let lo = param_disp(*i) as u8;
-            let hi = (param_disp(*i) + 2) as u8;
+            let lo = long_param_disp(*i, locals) as u8;
+            let hi = (long_param_disp(*i, locals) + 2) as u8;
             out.extend_from_slice(&[0x8B, 0x46, lo]); // mov ax, [bp+lo]
             out.extend_from_slice(&[0x8B, 0x56, hi]); // mov dx, [bp+hi]
         }
