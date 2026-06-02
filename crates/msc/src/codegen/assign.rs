@@ -1097,6 +1097,46 @@ pub(crate) fn emit_assign_indexed_global(global_idx: usize, byte_off: u16, value
         }
         return;
     }
+    // Compound `a[K] op= imm` for shift / mul / div / mod — load-op-store shapes
+    // (no single mem-op). Fixtures 878/882 (shl), 883 (mul), 884 (mod), 885 (div).
+    if let Expr::BinOp { op, left, right } = value
+        && matches!(left.as_ref(), Expr::Index { array, index }
+            if *array == global_idx
+                && matches!(index.as_ref(), Expr::IntLit(k) if (*k as u16).wrapping_mul(2) == byte_off))
+        && matches!(op, BinOp::Shl | BinOp::Shr | BinOp::Mul | BinOp::Div | BinOp::Mod)
+        && let Some(k) = right.fold(locals.inits)
+    {
+        let emit_addr = |out: &mut Vec<u8>, fixups: &mut Vec<Fixup>| {
+            let bo = out.len();
+            out.extend_from_slice(&byte_off.to_le_bytes());
+            fixups.push(Fixup { body_offset: bo - 1, kind: FixupKind::GlobalAddr { global_idx } });
+        };
+        match op {
+            BinOp::Shl | BinOp::Shr => {
+                out.extend_from_slice(&[0xB1, k as u8]); // mov cl, k
+                out.push(0xD3); // shift word [mem], cl
+                out.push(if matches!(op, BinOp::Shl) { 0x26 } else { 0x3E }); // shl /4 | sar /7
+                emit_addr(out, fixups);
+            }
+            BinOp::Mul => {
+                out.push(0xB8); out.extend_from_slice(&((k as u32 & 0xFFFF) as u16).to_le_bytes()); // mov ax, k
+                out.extend_from_slice(&[0xF7, 0x2E]); emit_addr(out, fixups); // imul word [mem]
+                out.push(0xA3); emit_addr(out, fixups); // mov [mem], ax
+            }
+            BinOp::Div | BinOp::Mod => {
+                out.push(0xB9); out.extend_from_slice(&((k as u32 & 0xFFFF) as u16).to_le_bytes()); // mov cx, k
+                out.push(0xA1); emit_addr(out, fixups); // mov ax, [mem]
+                out.extend_from_slice(&[0x99, 0xF7, 0xF9]); // cwd; idiv cx
+                if matches!(op, BinOp::Div) {
+                    out.push(0xA3); emit_addr(out, fixups); // mov [mem], ax
+                } else {
+                    out.extend_from_slice(&[0x89, 0x16]); emit_addr(out, fixups); // mov [mem], dx
+                }
+            }
+            _ => unreachable!(),
+        }
+        return;
+    }
     if let Some(k) = value.fold(locals.inits) {
         let imm = (k as u32 & 0xFFFF) as u16;
         out.push(0xC7);
