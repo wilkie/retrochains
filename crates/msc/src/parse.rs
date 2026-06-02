@@ -72,6 +72,7 @@ pub(crate) fn parse_unit(source: &str) -> Result<Unit, EmitError> {
         let is_type_prefix = matches!(
             p.toks.get(k),
             Some(Tok::Kw("int")) | Some(Tok::Kw("char")) | Some(Tok::Kw("long"))
+                | Some(Tok::Kw("float")) | Some(Tok::Kw("double"))
         ) || (k > p.pos && matches!(p.toks.get(k), Some(Tok::Ident(_))))
             || matches!(p.toks.get(k), Some(Tok::Kw("struct")));
         if is_type_prefix {
@@ -230,6 +231,7 @@ pub(crate) fn parse_struct_global_decl(p: &mut Parser<'_>) -> Result<(), EmitErr
         is_static: false,
         is_extern: false,
         is_unsigned: false,
+        is_float: false,
     });
     Ok(())
 }
@@ -405,12 +407,24 @@ pub(crate) fn parse_global_decl(p: &mut Parser<'_>) -> Result<(), EmitError> {
     let mut is_pointer = false;
     let mut is_char = false;
     let mut is_long = false;
+    let mut is_float = false;
+    let mut float_width = 0usize;
     match p.peek() {
         Some(Tok::Kw("int")) => {
             p.bump();
             while matches!(p.peek(), Some(Tok::Star)) {
                 p.bump();
                 is_pointer = true;
+            }
+        }
+        Some(Tok::Kw("float")) | Some(Tok::Kw("double")) => {
+            float_width = if matches!(p.peek(), Some(Tok::Kw("double"))) { 8 } else { 4 };
+            is_float = true;
+            p.bump();
+            while matches!(p.peek(), Some(Tok::Star)) {
+                p.bump();
+                is_pointer = true;
+                is_float = false; // pointer-to-float is a 2-byte near pointer
             }
         }
         Some(Tok::Kw("char")) => {
@@ -539,6 +553,17 @@ pub(crate) fn parse_global_decl(p: &mut Parser<'_>) -> Result<(), EmitError> {
                     "address-of unknown global `{target_name}`"
                 )))?;
             Some(vec![GlobalInit::GlobalAddr(target_idx)])
+        } else if is_float && !is_pointer {
+            // `double g = 3.14;` / `float g = 3.5f;` — IEEE bytes in _DATA.
+            let bits = match p.bump().cloned() {
+                Some(Tok::Float(bits, _)) => bits,
+                other => {
+                    return Err(EmitError::Unsupported(format!(
+                        "expected float literal initializer, got {other:?}"
+                    )));
+                }
+            };
+            Some(vec![GlobalInit::FloatBits(bits, float_width)])
         } else if is_long {
             let k = parse_signed_int(p)?;
             let low = (k as u32 & 0xFFFF) as i32;
@@ -559,7 +584,7 @@ pub(crate) fn parse_global_decl(p: &mut Parser<'_>) -> Result<(), EmitError> {
     // (1 for `char` family, 2 otherwise). `is_pointer` is set when
     // the declarator carries a `*`. Storage size is independent:
     // pointers are always 2 bytes; arrays scale by `array_len`.
-    let element_size = if is_char { 1 } else { 2 };
+    let element_size = if is_char { 1 } else if is_float && !is_pointer { float_width } else { 2 };
     // Long storage is 4 bytes; modeled as a 2-slot word array. Reads of
     // `(int)g` naturally pick up the low word at the base address.
     let (mut array_len, element_size) = if is_long && !is_pointer {
@@ -572,7 +597,7 @@ pub(crate) fn parse_global_decl(p: &mut Parser<'_>) -> Result<(), EmitError> {
         array_len = init.as_ref().map(|v| v.len()).unwrap_or(0).max(1);
     }
     p.global_names.push(name.clone());
-    p.globals.push(Global { name, init, array_len, element_size, is_pointer, struct_idx: None, is_long, is_static, is_extern, is_unsigned });
+    p.globals.push(Global { name, init, array_len, element_size, is_pointer, struct_idx: None, is_long, is_static, is_extern, is_unsigned, is_float: is_float && !is_pointer });
     Ok(())
 }
 /// Returns true when `e` has a direct `Local` leaf whose `init_is_literal`

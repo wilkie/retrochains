@@ -112,6 +112,10 @@ pub struct Global {
     /// `true` for `unsigned` globals (`unsigned long`, `unsigned int`).
     /// Selects unsigned codegen (e.g. SHR vs SAR, ja/jb vs jg/jl).
     pub is_unsigned: bool,
+    /// `true` for `float`/`double` globals. Storage is `element_size`
+    /// bytes (4 or 8); loads/stores use x87 `fld`/`fstp` and an `(int)`
+    /// cast lowers to `call __ftol`.
+    pub is_float: bool,
 }
 
 impl Global {
@@ -138,12 +142,17 @@ pub enum GlobalInit {
     /// is the target global's `_DATA` offset; FIXUP shape is the
     /// same `c4 off 9d` as a PUBDEF-global access. Fixture 4115.
     GlobalAddr(usize),
+    /// IEEE float/double initializer — `double g = 3.14;`. The `u64`
+    /// holds the f64 bits; `usize` is the byte width (8 for `double`,
+    /// 4 for `float`, in which case the value is collapsed to f32).
+    FloatBits(u64, usize),
 }
 
 impl GlobalInit {
     fn size_bytes(&self) -> usize {
         match self {
             GlobalInit::Byte(_) => 1,
+            GlobalInit::FloatBits(_, width) => *width,
             _ => 2,
         }
     }
@@ -297,6 +306,9 @@ pub struct Locals<'a> {
     /// Parallel-indexed flags marking `unsigned` globals. Selects
     /// unsigned codegen (SHR vs SAR, ja/jb vs jg/jl for long compares).
     pub unsigned_globals: &'a [bool],
+    /// Parallel-indexed byte width (4/8) of `float`/`double` globals,
+    /// 0 otherwise. Selects x87 `fld`/`fstp` width for float-global access.
+    pub float_globals: &'a [usize],
     /// Parallel-indexed flags marking locals that are `long`. Direct
     /// loads (return, assign) bypass the fold view so the slot is
     /// read at runtime even when its constant value is known.
@@ -364,6 +376,13 @@ impl Locals<'_> {
     }
     pub fn is_unsigned_global(&self, idx: usize) -> bool {
         self.unsigned_globals.get(idx).copied().unwrap_or(false)
+    }
+    /// 4 or 8 for a `float`/`double` global, else 0.
+    pub fn float_global_width(&self, idx: usize) -> usize {
+        self.float_globals.get(idx).copied().unwrap_or(0)
+    }
+    pub fn is_float_global(&self, idx: usize) -> bool {
+        self.float_global_width(idx) != 0
     }
     pub fn is_long_local(&self, idx: usize) -> bool {
         self.long_locals.get(idx).copied().unwrap_or(false)
@@ -1198,6 +1217,8 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
     let long_globals: Vec<bool> = unit.globals.iter().map(|g| g.is_long).collect();
     let char_globals: Vec<bool> = unit.globals.iter().map(|g| !g.is_pointer && g.element_size == 1 && g.array_len == 1).collect();
     let unsigned_globals: Vec<bool> = unit.globals.iter().map(|g| g.is_unsigned).collect();
+    let float_globals: Vec<usize> = unit.globals.iter()
+        .map(|g| if g.is_float { g.element_size } else { 0 }).collect();
     let char_returners: std::collections::HashSet<String> = unit.functions.iter()
         .filter(|f| f.return_char)
         .map(|f| symbol_name(&f.name))
@@ -1209,7 +1230,7 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
     let function_emits: Vec<FunctionEmit> = unit
         .functions
         .iter()
-        .map(|f| emit_function(f, &long_globals, &char_globals, &unsigned_globals, &char_returners, &long_param_funcs))
+        .map(|f| emit_function(f, &long_globals, &char_globals, &unsigned_globals, &float_globals, &char_returners, &long_param_funcs))
         .collect();
 
     // Per-function global offset within the _TEXT segment.
@@ -1279,7 +1300,8 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
     // still be present.
     let any_float_param = unit.functions.iter()
         .any(|f| f.param_float_width.iter().any(|w| *w != 0));
-    let uses_float = !float_pool.is_empty() || any_float_param;
+    let any_float_global = unit.globals.iter().any(|g| g.is_float);
+    let uses_float = !float_pool.is_empty() || any_float_param || any_float_global;
     let float_offset_of = |bits: u64, width: usize| -> usize {
         let idx = float_pool.iter().position(|e| *e == (bits, width)).expect("float in pool");
         float_offsets[idx]
@@ -1775,6 +1797,14 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
                         GlobalInit::Byte(b) => {
                             data_bytes.push(*b);
                         }
+                        GlobalInit::FloatBits(bits, width) => {
+                            if *width == 4 {
+                                data_bytes.extend_from_slice(
+                                    &(f64::from_bits(*bits) as f32).to_bits().to_le_bytes());
+                            } else {
+                                data_bytes.extend_from_slice(&bits.to_le_bytes());
+                            }
+                        }
                         GlobalInit::StrAddr(si) => {
                             // Placeholder = the string's CONST offset.
                             // FIXUP uses P=1 (no displacement), so the
@@ -1827,7 +1857,7 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
                                 data_slot_fixups.push((slot_off, DataFx::Ext(idx)));
                             }
                         }
-                        GlobalInit::Int(_) | GlobalInit::Byte(_) => {}
+                        GlobalInit::Int(_) | GlobalInit::Byte(_) | GlobalInit::FloatBits(..) => {}
                     }
                     off += v.size_bytes();
                 }

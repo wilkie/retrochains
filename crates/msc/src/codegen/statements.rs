@@ -308,6 +308,24 @@ pub(crate) fn emit_return(
             fixups.push(Fixup { body_offset, kind: FixupKind::ExtCall { target: "__ftol".to_owned() } });
             out.extend_from_slice(frame.epilogue_bytes());
             return;
+        } else if let Expr::Global(idx) = expr
+            && locals.is_float_global(*idx)
+        {
+            // `return (int)<float/double global>` → fld <width> [g]; call __ftol.
+            let width = locals.float_global_width(*idx);
+            let op = if width == 4 { 0xD9u8 } else { 0xDDu8 };
+            fixups.push(Fixup { body_offset: out.len(), kind: FixupKind::FloatMarker { target: "FIDRQQ" } });
+            out.push(0x9B);
+            out.push(op);
+            out.push(0x06); // modrm /0 [disp16]
+            let body_offset = out.len() - 1; // the 06 modrm; off16 at +1
+            out.extend_from_slice(&[0x00, 0x00]);
+            fixups.push(Fixup { body_offset, kind: FixupKind::GlobalAddr { global_idx: *idx } });
+            let call_off = out.len();
+            out.extend_from_slice(&[0xE8, 0x00, 0x00]); // call __ftol
+            fixups.push(Fixup { body_offset: call_off, kind: FixupKind::ExtCall { target: "__ftol".to_owned() } });
+            out.extend_from_slice(frame.epilogue_bytes());
+            return;
         } else if matches!(expr, Expr::Local(i) if locals.is_long_local(*i)) {
             // Long locals are read through the 4-byte slot — MSC
             // emits `mov ax, [bp-disp_low]` even when the value is
@@ -725,6 +743,7 @@ pub(crate) fn emit_loop(
         long_globals: locals.long_globals,
         char_globals: locals.char_globals,
         unsigned_globals: locals.unsigned_globals,
+        float_globals: locals.float_globals,
         long_locals: locals.long_locals,
         init_literals: locals.init_literals,
         far_ptr_locals: locals.far_ptr_locals,
@@ -1333,6 +1352,7 @@ pub(crate) fn emit_do_while(
         long_globals: locals.long_globals,
         char_globals: locals.char_globals,
         unsigned_globals: locals.unsigned_globals,
+        float_globals: locals.float_globals,
         long_locals: locals.long_locals,
         init_literals: locals.init_literals,
         far_ptr_locals: locals.far_ptr_locals,
