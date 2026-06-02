@@ -27,6 +27,14 @@ pub(crate) fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8
                 emit_load_param(*i, out);
             }
         }
+        // `(int)(long >> 16)`: the result is the long's high word. Read it
+        // directly instead of loading the low word and shifting. Fixtures
+        // 2170, 231-style high-word extracts.
+        Expr::BinOp { op: BinOp::Shr, left, right }
+            if long_operand(left, locals) && right.fold(locals.inits) == Some(16) =>
+        {
+            emit_long_high_word_to_ax(left, locals, out, fixups);
+        }
         Expr::BinOp { op, left, right } => {
             emit_binop(*op, left, right, locals, out, fixups);
         }
@@ -569,6 +577,27 @@ pub(crate) fn emit_load_local(idx: usize, locals: &Locals<'_>, out: &mut Vec<u8>
         }
     } else {
         out.push(0x8B); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp);
+    }
+}
+/// Load a long operand's high word (the upper 16 bits) into AX — used for
+/// `(int)(long >> 16)`.
+fn emit_long_high_word_to_ax(e: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    match e {
+        Expr::Local(i) => {
+            let d = locals.disp(*i) + 2;
+            out.push(0x8B); out.push(bp_modrm(0x46, d)); push_bp_disp(out, d);
+        }
+        Expr::Param(i) => {
+            let d = long_param_disp(*i, locals) + 2;
+            out.push(0x8B); out.push(bp_modrm(0x46, d)); push_bp_disp(out, d);
+        }
+        Expr::Global(j) => {
+            out.push(0xA1); // mov ax, [g+2]
+            let off = out.len();
+            out.extend_from_slice(&2u16.to_le_bytes());
+            fixups.push(Fixup { body_offset: off - 1, kind: FixupKind::GlobalAddr { global_idx: *j } });
+        }
+        _ => unreachable!("long_operand gates these forms"),
     }
 }
 pub(crate) fn emit_binop(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
