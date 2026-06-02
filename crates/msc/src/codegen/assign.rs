@@ -255,11 +255,11 @@ pub(crate) fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_
     {
         let is_byte = locals.size(local_idx) == 1;
         match (op, k, is_byte) {
-            (BinOp::Add, 1, false) => {
+            (BinOp::Add, 1, false) if !locals.is_long_local(local_idx) => {
                 out.push(0xFF); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp);
                 return;
             }
-            (BinOp::Sub, 1, false) => {
+            (BinOp::Sub, 1, false) if !locals.is_long_local(local_idx) => {
                 out.push(0xFF); out.push(bp_modrm(0x4E, disp)); push_bp_disp(out, disp);
                 return;
             }
@@ -416,6 +416,34 @@ pub(crate) fn emit_assign_param(param_idx: usize, value: &Expr, locals: &Locals<
     let disp = param_disp(param_idx);
     let is_char = locals.is_char_param(param_idx);
     // `x++` / `x--` → `inc/dec [bp+disp]` (byte or word based on param type).
+    // Long param `n ±= K`: add/sub the low half then adc/sbb the high half.
+    // The carry must propagate, so even ±1 uses add/adc (not inc). Fixture
+    // 3094 (`n += 1L`).
+    if locals.is_long_param(param_idx)
+        && let Expr::BinOp { op, left, right } = value
+        && matches!(left.as_ref(), Expr::Param(i) if *i == param_idx)
+        && matches!(op, BinOp::Add | BinOp::Sub)
+        && let Some(k) = right.fold(locals.inits)
+    {
+        let low = (k as u32 & 0xFFFF) as i16;
+        let high = ((k as i32) >> 16) as i16;
+        let lo_modrm = if matches!(op, BinOp::Add) { 0x46u8 } else { 0x6Eu8 }; // /0 add, /5 sub
+        let hi_modrm = if matches!(op, BinOp::Add) { 0x56u8 } else { 0x5Eu8 }; // /2 adc, /3 sbb
+        let hi_disp = (disp + 2) as u8;
+        if let Ok(l8) = i8::try_from(low) {
+            out.extend_from_slice(&[0x83, lo_modrm, disp as u8, l8 as u8]);
+        } else {
+            out.extend_from_slice(&[0x81, lo_modrm, disp as u8]);
+            out.extend_from_slice(&(low as u16).to_le_bytes());
+        }
+        if let Ok(h8) = i8::try_from(high) {
+            out.extend_from_slice(&[0x83, hi_modrm, hi_disp, h8 as u8]);
+        } else {
+            out.extend_from_slice(&[0x81, hi_modrm, hi_disp]);
+            out.extend_from_slice(&(high as u16).to_le_bytes());
+        }
+        return;
+    }
     if let Expr::BinOp { op, left, right } = value
         && matches!(left.as_ref(), Expr::Param(i) if *i == param_idx)
         && matches!(right.as_ref(), Expr::IntLit(1))
