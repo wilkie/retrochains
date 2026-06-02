@@ -94,11 +94,44 @@ top of stack is live.
 
 ### 3a — `(int)float` via `__ftol`
 - Param/slot form (clean, no coupling): `fld [src]; call __ftol` → result in
-  `DX:AX`/`AX`. Append `__ftol` as a trailing EXTDEF; emit the call as
-  `ExtCall { target: "__ftol" }`.
+  `AX`. Emit the call as `ExtCall { target: "__ftol" }`.
 - Local-then-cast coupling: float-local init emits `fst` (live st(0)); the
   `(int)local` emits just `call __ftol`.
 - Targets: 1671, 1673, 1675, 1678 (callee), and most `(int)<float>` returns.
+
+#### Findings from starting 3a (important — no atomic target)
+The conversion codegen is trivial, but **no fixture flips from it alone** —
+each needs ≥1 coupled mechanism that isn't built yet:
+
+1. **Float params are unsupported** — `int f(double d)` fails to parse
+   (`parse_param_list` only accepts int/char/long/struct). Needed:
+   `param_is_float` tracking, 4/8-byte param width, and a float-aware
+   `param_disp` (a `double` param occupies 8 bytes, shifting later params —
+   the same shape as `long_param_disp`). *Touching `param_disp` risks
+   non-float regressions; gate the float-width path carefully.*
+2. **Double/float const args** (caller side, 1678/2143 `main`):
+   `fld QWORD PTR $T; sub sp,8; mov bx,sp; fstp QWORD PTR [bx]; fwait; call`.
+   (4 bytes / `sub sp,4` for `float`.) Each x87 op carries its FIDRQQ/FIWRQQ
+   marker; the `fld $T` carries a FloatLoad.
+3. **`(int)<float local>` is coupled** (1671/1675): the local store is `fst`
+   (keeps st(0) live) and the cast is just `call __ftol` — needs the
+   `FpuStack` model. Also needs FP const-fold (1671 `a+b`, 1675 `(float)i`),
+   so these are *not* the place to start.
+
+**Smallest complete unit = 1678 + 2143** (`int dbl_to_int(double d){return
+(int)d;}` + `main` calling it with a const): clean callee (`fld [bp+4]; call
+__ftol`) + float params (#1) + double const arg (#2). That's the recommended
+first 3a deliverable; the coupled-local form (#3) comes after the FpuStack
+model.
+
+#### `__ftol` EXTDEF placement (empirical, differs by shape)
+`__ftol` is an `ExtCall` target, so the existing `helper_extern_order` places
+it after `__chkstk`, before the function-name EXTDEFs. This **matches the
+multi-function shape** (1678: `… __chkstk, __ftol, _dbl_to_int, _main`). But
+the single-function coupled shape (1671) puts `__ftol` **after** `_main`
+(trailing). So the placement rule isn't "always after `__chkstk`" — confirm
+per shape; 1678/2143 work with the current helper placement, 1671 will need a
+trailing-extern path.
 
 ### 3b — `(float)int` and runtime `fild`
 - Const int → folded to a float CONST temp + `fld`/`fst` (1675).
