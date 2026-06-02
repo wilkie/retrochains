@@ -635,6 +635,20 @@ fn ptr_diff_shift(left: &Expr, right: &Expr, locals: &Locals<'_>) -> Option<u32>
     }
 }
 
+/// `(pointer_param_pointee_size, scalar_param_disp)` for a `ptr - n`
+/// pointer-arithmetic subtraction where the left operand is a pointer param
+/// with a power-of-two pointee ≥ 2 and the right operand is a scalar (non-
+/// pointer) param. `p - n` yields `p - n*elem`, so the index is scaled by
+/// the element size before subtracting. Fixture 3648.
+fn ptr_int_sub(left: &Expr, right: &Expr, locals: &Locals<'_>) -> Option<(usize, i16)> {
+    let Expr::Param(pi) = left else { return None };
+    let Expr::Param(ri) = right else { return None };
+    let elem = locals.param_pointee_size(*pi);
+    if elem < 2 || !elem.is_power_of_two() { return None; }
+    if locals.param_pointee_size(*ri) != 0 { return None; } // right must be scalar
+    Some((elem, param_disp(*ri)))
+}
+
 pub(crate) fn emit_binop(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
     // Pointer difference: emit the raw byte-difference subtraction, then
     // convert bytes → elements with `sar ax,1` per shift step.
@@ -645,6 +659,22 @@ pub(crate) fn emit_binop(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'
         for _ in 0..shift {
             out.extend_from_slice(&[0xD1, 0xF8]); // sar ax,1
         }
+        return;
+    }
+    // Pointer minus integer (pointer arithmetic): `p - n` → `p - n*elem`.
+    // Load the pointer into AX, the index into CX, scale CX by the element
+    // size (`shl cx,1` per power-of-two step), then `sub ax,cx`. Fixture 3648.
+    if matches!(op, BinOp::Sub)
+        && let Some((elem, rdisp)) = ptr_int_sub(left, right, locals)
+    {
+        emit_expr_to_ax(left, locals, out, fixups); // mov ax, [p]
+        out.push(0x8B);
+        out.push(bp_modrm(0x4E, rdisp));
+        push_bp_disp(out, rdisp); // mov cx, [n]
+        for _ in 0..elem.trailing_zeros() {
+            out.extend_from_slice(&[0xD1, 0xE1]); // shl cx, 1
+        }
+        out.extend_from_slice(&[0x2B, 0xC1]); // sub ax, cx
         return;
     }
     emit_binop_inner(op, left, right, locals, out, fixups);

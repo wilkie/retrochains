@@ -898,11 +898,14 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
             }
             let has_ptr = matches!(p.peek(), Some(Tok::Star));
             // Pointee byte size, captured before `is_char` is cleared below:
-            // char*→1, long*→4, float*→width, int*/struct*→2. 0 = not a
-            // pointer. Drives pointer-difference element scaling.
+            // char*→1, long*→4, float*→width, struct*→struct size, int*→2.
+            // 0 = not a pointer. Drives pointer-arithmetic element scaling.
             let mut pointee_size = if has_ptr {
                 if is_char { 1 } else if is_long { 4 }
-                else if float_width != 0 { float_width } else { 2 }
+                else if float_width != 0 { float_width }
+                else if let Some(si) = struct_idx {
+                    p.structs.get(si).map(|s| s.total_bytes).unwrap_or(2)
+                } else { 2 }
             } else { 0 };
             if has_ptr {
                 p.bump();
