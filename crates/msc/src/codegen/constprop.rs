@@ -34,6 +34,8 @@ pub(crate) fn const_prop_globals(
     let new_stmts: Vec<Stmt> = stmts.iter().map(|s| {
         let mut new_stmt = s.clone();
         prop_stmt(&mut new_stmt, &mut cp);
+        let used: Vec<usize> = cp.aliases_used.drain().collect();
+        for p in used { cp.ptr_alias.remove(&p); }
         new_stmt
     }).collect();
     (new_stmts, cp.mutated_locals, cp.mutated_globals)
@@ -90,6 +92,7 @@ pub(crate) fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
             if let AssignTarget::DerefLocal(p) = target
                 && let Some(&a) = cp.ptr_alias.get(p)
             {
+                cp.aliases_used.insert(*p);
                 *target = match a {
                     AliasTarget::Local(x) => AssignTarget::Local(x),
                     AliasTarget::Global(g) => AssignTarget::Global(g),
@@ -331,6 +334,7 @@ pub(crate) fn cp_clone(cp: &ConstProp) -> ConstProp {
         mutated_locals: cp.mutated_locals.clone(),
         mutated_globals: cp.mutated_globals.clone(),
         ptr_alias: cp.ptr_alias.clone(),
+        aliases_used: cp.aliases_used.clone(),
         local_specs: cp.local_specs.clone(),
     }
 }
@@ -454,6 +458,7 @@ pub(crate) fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
             if let Expr::Local(p) = ptr.as_ref()
                 && let Some(&a) = cp.ptr_alias.get(p)
             {
+                cp.aliases_used.insert(*p);
                 *e = match a {
                     AliasTarget::Local(x) => Expr::Local(x),
                     AliasTarget::Global(g) => Expr::Global(g),

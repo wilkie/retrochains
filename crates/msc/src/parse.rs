@@ -2366,9 +2366,11 @@ pub(crate) fn parse_binop_prec(p: &mut Parser<'_>, min_prec: u8) -> Result<Expr,
 /// (and unrecognized shapes) to 2. Used by parse_atom to pick between
 /// `DerefByte` and `DerefWord` variants. Parameters carry no type
 /// info in Phase 1 so they default to int-pointer (word).
-pub(crate) fn pointee_size_of(e: &Expr, globals: &[Global]) -> usize {
+pub(crate) fn pointee_size_of(e: &Expr, globals: &[Global], locals: &[LocalSpec]) -> usize {
     match e {
         Expr::Global(idx) => globals[*idx].element_size,
+        // A pointer local carries its pointee size (1 for `char *`, 2 for `int *`).
+        Expr::Local(idx) => locals.get(*idx).map(|s| s.pointee_size).unwrap_or(0),
         // Postfix on a pointer: step magnitude = pointee element size.
         // step=±1 → char*, step=±2 → int*.
         Expr::PostMutateLocal { step, .. } | Expr::PostMutateGlobal { step, .. } => {
@@ -2675,7 +2677,7 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
             // Unary deref `*<expr>`. Pick the byte- vs word-sized
             // variant from the inner expression's pointee type.
             let inner = parse_atom(p)?;
-            let pointee_size = pointee_size_of(&inner, &p.globals);
+            let pointee_size = pointee_size_of(&inner, &p.globals, &p.local_specs);
             if pointee_size == 1 {
                 Ok(Expr::DerefByte { ptr: Box::new(inner) })
             } else {

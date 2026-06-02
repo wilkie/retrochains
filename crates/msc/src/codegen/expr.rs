@@ -146,6 +146,15 @@ pub(crate) fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8
                 out.extend_from_slice(&[0x8A, 0x07, 0x98]);         // mov al,[bx]; cbw
                 return;
             }
+            // `*<char-ptr local>`: load p from its slot, byte-deref + widen.
+            if let Expr::Local(idx) = ptr.as_ref() {
+                let disp = locals.disp(*idx);
+                out.push(0x8B);
+                out.push(bp_modrm(0x5E, disp));
+                push_bp_disp(out, disp); // mov bx, [bp-disp]
+                out.extend_from_slice(&[0x8A, 0x07, 0x98]); // mov al, [bx]; cbw
+                return;
+            }
             let (ptr_idx, disp) = match ptr.as_ref() {
                 Expr::Global(idx) => (*idx, 0i8),
                 Expr::BinOp { op: BinOp::Add, left, right }

@@ -894,6 +894,29 @@ pub(crate) fn emit_assign_global(global_idx: usize, value: &Expr, locals: &Local
         && matches!(op, BinOp::Add | BinOp::Sub)
         && let Some(k) = right.fold(locals.inits)
     {
+        // Char global: byte-sized in-place op (`*p += 5` aliased to a char g).
+        if locals.is_char_global(global_idx) {
+            let body_offset;
+            match (op, k) {
+                (BinOp::Add, 1) | (BinOp::Sub, 1) => {
+                    let modrm = if matches!(op, BinOp::Add) { 0x06 } else { 0x0E };
+                    out.push(0xFE); // inc/dec byte [g]
+                    out.push(modrm);
+                    body_offset = out.len();
+                    out.extend_from_slice(&[0x00, 0x00]);
+                }
+                _ => {
+                    let modrm = if matches!(op, BinOp::Add) { 0x06 } else { 0x2E };
+                    out.push(0x80); // add/sub byte [g], imm8
+                    out.push(modrm);
+                    body_offset = out.len();
+                    out.extend_from_slice(&[0x00, 0x00]);
+                    out.push((k as u32 & 0xFF) as u8);
+                }
+            }
+            fixups.push(Fixup { body_offset: body_offset - 1, kind: FixupKind::GlobalAddr { global_idx } });
+            return;
+        }
         match (op, k) {
             (BinOp::Add, 1) | (BinOp::Sub, 1) => {
                 let modrm = if matches!(op, BinOp::Add) { 0x06 } else { 0x0E };

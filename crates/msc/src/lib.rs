@@ -2281,6 +2281,11 @@ struct ConstProp {
     /// `*p` (read or store) is rewritten to the aliased lvalue and folds /
     /// stores directly. Cleared at branch boundaries.
     ptr_alias: std::collections::HashMap<usize, AliasTarget>,
+    /// Pointers whose alias was used in the current statement. MSC's alias is
+    /// single-use: only the FIRST statement dereferencing `p` (after `p = &x`)
+    /// is aliased; later `*p` derefs through the pointer. Drained after each
+    /// top-level statement to drop those aliases.
+    aliases_used: std::collections::HashSet<usize>,
     /// Copy of local_specs for size checks during assignment propagation.
     local_specs: Vec<LocalSpec>,
 }
