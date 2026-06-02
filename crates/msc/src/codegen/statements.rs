@@ -422,21 +422,46 @@ pub(crate) fn emit_return(
             fixups.push(Fixup { body_offset: call_off, kind: FixupKind::ExtCall { target: "__ftol".to_owned() } });
             out.extend_from_slice(frame.epilogue_bytes());
             return;
-        } else if let Expr::Local(idx) = expr
-            && locals.is_float_local(*idx)
+        } else if let Some(idx) = coupled_return_local(expr)
+            && locals.is_float_local(idx)
         {
-            // `return (int)<non-literal float local>`. When the value is live on
-            // st(0) (coupled init stored with `fst`), the cast is a bare
-            // `call __ftol`; otherwise reload the slot with `fld` first.
-            if locals.fpu_live.get() != Some(*idx) {
-                let width = locals.float_local_width(*idx);
+            // `return (int)(<op on float local>)`. The local's value is on st(0)
+            // (coupled init stored with `fst`); otherwise reload with `fld`.
+            if locals.fpu_live.get() != Some(idx) {
+                let width = locals.float_local_width(idx);
                 let op = if width == 4 { 0xD9u8 } else { 0xDDu8 };
-                let disp = locals.disp(*idx);
+                let disp = locals.disp(idx);
                 fixups.push(Fixup { body_offset: out.len(), kind: FixupKind::FloatMarker { target: "FIDRQQ" } });
                 out.push(0x9B);
                 out.push(op);
                 out.push(bp_modrm(0x46, disp));
                 push_bp_disp(out, disp);
+            }
+            // Apply the FP operation to st(0):
+            //   bare local        → nothing (value already there)
+            //   0 - local         → fchs  (9B D9 E0)
+            //   local <op> <flit> → f<op> QWORD [$T]  (DC mem form)
+            match expr {
+                Expr::BinOp { op: BinOp::Sub, left, .. } if matches!(left.as_ref(), Expr::IntLit(0)) => {
+                    fixups.push(Fixup { body_offset: out.len(), kind: FixupKind::FloatMarker { target: "FIDRQQ" } });
+                    out.extend_from_slice(&[0x9B, 0xD9, 0xE0]); // fchs
+                }
+                Expr::BinOp { op, right, .. } if matches!(right.as_ref(), Expr::FloatLit(..)) => {
+                    let (bits, _) = match right.as_ref() { Expr::FloatLit(b, d) => (*b, *d), _ => unreachable!() };
+                    // DC /r m64: /0 fadd, /1 fmul, /4 fsub, /6 fdiv.
+                    let reg = match op {
+                        BinOp::Add => 0u8, BinOp::Mul => 1, BinOp::Sub => 4, BinOp::Div => 6,
+                        _ => 0,
+                    };
+                    fixups.push(Fixup { body_offset: out.len(), kind: FixupKind::FloatMarker { target: "FIDRQQ" } });
+                    out.push(0x9B);
+                    out.push(0xDC);
+                    out.push(0x06 | (reg << 3)); // modrm /reg [disp16]
+                    let bo = out.len() - 1;
+                    out.extend_from_slice(&[0x00, 0x00]);
+                    fixups.push(Fixup { body_offset: bo, kind: FixupKind::FloatLoad { bits, width: 8 } });
+                }
+                _ => {} // bare local
             }
             let call_off = out.len();
             out.extend_from_slice(&[0xE8, 0x00, 0x00]); // call __ftol

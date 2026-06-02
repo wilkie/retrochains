@@ -68,6 +68,23 @@ pub(crate) fn push_bp_disp(buf: &mut Vec<u8>, disp: i16) {
         buf.push(b[1]);
     }
 }
+/// The float local whose value a `return` consumes from x87 st(0) for the
+/// FpuStack coupling. Recognizes a bare local (`(int)f`), `0 - local` (unary
+/// negation → `fchs`), and `local <op> <floatlit>` (→ `fadd`/`fsub`/…).
+pub(crate) fn coupled_return_local(expr: &Expr) -> Option<usize> {
+    match expr {
+        Expr::Local(i) => Some(*i),
+        Expr::BinOp { op: BinOp::Sub, left, right }
+            if matches!(left.as_ref(), Expr::IntLit(0)) =>
+        {
+            if let Expr::Local(i) = right.as_ref() { Some(*i) } else { None }
+        }
+        Expr::BinOp { left, right, .. } if matches!(right.as_ref(), Expr::FloatLit(..)) => {
+            if let Expr::Local(i) = left.as_ref() { Some(*i) } else { None }
+        }
+        _ => None,
+    }
+}
 pub(crate) fn emit_function(
     func: &Function,
     long_globals: &[bool],
@@ -232,7 +249,7 @@ pub(crate) fn emit_function(
     // init would have clobbered st(0)). Literal float locals fold to `mov ax,K`
     // via const-prop, so they never reach here as `Return(Local)`.
     let returned_float_local = body.iter().rev().find_map(|s| match s {
-        Stmt::Return(Expr::Local(i)) => Some(*i),
+        Stmt::Return(e) => coupled_return_local(e),
         _ => None,
     }).filter(|&i| func.locals.get(i).map(|l| l.is_float && !l.init_is_literal).unwrap_or(false));
     let last_float_init = func.locals.iter().enumerate()
