@@ -257,6 +257,9 @@ pub struct StructField {
     pub name: String,
     pub byte_off: u16,
     pub size: u8,
+    /// `Some(struct_idx)` when this field is itself a (non-pointer) struct,
+    /// enabling multi-level member access (`o.inner.a`).
+    pub struct_idx: Option<usize>,
 }
 
 impl LocalSpec {

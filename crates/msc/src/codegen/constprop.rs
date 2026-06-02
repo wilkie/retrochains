@@ -139,7 +139,8 @@ pub(crate) fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
                     }
                 }
                 AssignTarget::IndexedGlobal { array, byte_off }
-                | AssignTarget::IndexedGlobalByte { array, byte_off } => {
+                | AssignTarget::IndexedGlobalByte { array, byte_off }
+                | AssignTarget::GlobalField { global: array, byte_off, .. } => {
                     if let Some(k) = value.fold(&[]) {
                         *value = Expr::IntLit(k);
                     }
@@ -345,7 +346,13 @@ pub(crate) fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
             }
         }
         Expr::GlobalField { .. } => {
-            // No const-prop tracking for global struct fields yet.
+            // Substitute the field's known value via ga_known keyed by
+            // (global, byte_off) — works for nested fields too (summed offset).
+            if let Expr::GlobalField { global, byte_off, .. } = e
+                && let Some(&v) = cp.ga_known.get(&(*global, *byte_off))
+            {
+                *e = Expr::IntLit(v);
+            }
         }
         Expr::DerefLocalField { .. } | Expr::DerefParamField { .. } | Expr::DerefGlobalField { .. } => {
             // Pointer-aliasing const-prop not yet implemented.

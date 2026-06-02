@@ -350,13 +350,30 @@ pub(crate) fn parse_struct_def(p: &mut Parser<'_>) -> Result<(), EmitError> {
     let mut cursor: usize = 0;
     while !matches!(p.peek(), Some(Tok::RBrace)) {
         skip_decl_modifiers(p);
-        let size: u8 = match p.bump().cloned() {
-            Some(Tok::Kw("int")) => 2,
-            Some(Tok::Kw("char")) => 1,
-            other => {
-                return Err(EmitError::Unsupported(format!(
-                    "struct field type not yet supported: {other:?}"
-                )));
+        // A field may be a nested `struct <Name>` (value or pointer).
+        let mut field_struct_idx: Option<usize> = None;
+        let size: u8 = if matches!(p.peek(), Some(Tok::Kw("struct"))) {
+            p.bump();
+            let inner_name = match p.bump().cloned() {
+                Some(Tok::Ident(s)) => s,
+                other => return Err(EmitError::Unsupported(format!(
+                    "expected struct name for nested field, got {other:?}"))),
+            };
+            let inner = p.structs.iter().position(|s| s.name == inner_name).ok_or_else(|| {
+                EmitError::Unsupported(format!("unknown nested struct `{inner_name}`"))
+            })?;
+            field_struct_idx = Some(inner);
+            u8::try_from(p.structs[inner].total_bytes).expect("nested struct fits in u8")
+        } else {
+            match p.bump().cloned() {
+                Some(Tok::Kw("int")) => 2,
+                Some(Tok::Kw("char")) => 1,
+                Some(Tok::Kw("long")) => 4,
+                other => {
+                    return Err(EmitError::Unsupported(format!(
+                        "struct field type not yet supported: {other:?}"
+                    )));
+                }
             }
         };
         let is_ptr = if matches!(p.peek(), Some(Tok::Star)) {
@@ -365,6 +382,9 @@ pub(crate) fn parse_struct_def(p: &mut Parser<'_>) -> Result<(), EmitError> {
         } else {
             false
         };
+        // A pointer-to-struct field is a 2-byte near pointer, not an inline
+        // struct, so it carries no struct_idx for inline member access.
+        if is_ptr { field_struct_idx = None; }
         let fname = match p.bump().cloned() {
             Some(Tok::Ident(s)) => s,
             other => {
@@ -374,9 +394,9 @@ pub(crate) fn parse_struct_def(p: &mut Parser<'_>) -> Result<(), EmitError> {
             }
         };
         let field_size = if is_ptr { 2 } else { size };
-        // Word-align int / pointer fields. Char fields take the
+        // Word-align int / pointer / struct fields. Char fields take the
         // next byte at any offset.
-        if field_size == 2 && cursor % 2 != 0 {
+        if field_size >= 2 && cursor % 2 != 0 {
             cursor += 1;
         }
         let byte_off = u16::try_from(cursor).expect("field offset fits in u16");
@@ -384,6 +404,7 @@ pub(crate) fn parse_struct_def(p: &mut Parser<'_>) -> Result<(), EmitError> {
             name: fname,
             byte_off,
             size: field_size,
+            struct_idx: field_struct_idx,
         });
         cursor += field_size as usize;
         p.eat(&Tok::Semi)?;
@@ -392,7 +413,7 @@ pub(crate) fn parse_struct_def(p: &mut Parser<'_>) -> Result<(), EmitError> {
     p.eat(&Tok::Semi)?;
     // Round total up to the natural alignment (2 bytes for any
     // struct containing an int/pointer field; 1 byte otherwise).
-    let needs_word_align = fields.iter().any(|f| f.size == 2);
+    let needs_word_align = fields.iter().any(|f| f.size >= 2);
     let total_bytes = if needs_word_align { (cursor + 1) & !1 } else { cursor };
     p.structs.push(StructDef { name: sname, fields, total_bytes });
     Ok(())
@@ -2225,7 +2246,17 @@ pub(crate) fn parse_field_lookup(p: &mut Parser<'_>, sidx: usize) -> Result<(u16
             "field `{fname}` not in struct `{}`", sdef.name
         ))
     })?;
-    Ok((field.byte_off, field.size))
+    let (byte_off, size, inner) = (field.byte_off, field.size, field.struct_idx);
+    // Multi-level access `o.inner.a`: recurse into the nested struct, summing
+    // byte offsets; the returned size is the leaf field's.
+    if let Some(inner_sidx) = inner
+        && matches!(p.peek(), Some(Tok::Dot))
+    {
+        p.bump(); // .
+        let (inner_off, inner_size) = parse_field_lookup(p, inner_sidx)?;
+        return Ok((byte_off + inner_off, inner_size));
+    }
+    Ok((byte_off, size))
 }
 /// Convert a parsed expression into a Cond — recognizes `&&` / `||`
 /// at the top level so emit_cond_skip can emit short-circuit
