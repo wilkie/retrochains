@@ -510,6 +510,34 @@ pub(crate) fn emit_assign_param(param_idx: usize, value: &Expr, locals: &Locals<
     }
 }
 pub(crate) fn emit_assign_global(global_idx: usize, value: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    // Long-global compound shift `g <<= k` / `g >>= k`: MSC calls a runtime
+    // helper, passing the shift count (in AL) and the global's address.
+    //   mov al, k; push ax; mov ax, OFFSET g; push ax; call __aNN*shl/shr
+    // Fixtures 263, 264, 1139.
+    if locals.is_long_global(global_idx)
+        && let Expr::BinOp { op, left, right } = value
+        && matches!(op, BinOp::Shl | BinOp::Shr)
+        && matches!(left.as_ref(), Expr::Global(g) if *g == global_idx)
+        && let Some(k) = right.fold(locals.inits)
+        && (0..32).contains(&k)
+    {
+        let helper = match (op, locals.is_unsigned_global(global_idx)) {
+            (BinOp::Shl, _) => "__aNNalshl",       // left shift is sign-agnostic
+            (BinOp::Shr, false) => "__aNNalshr",   // arithmetic (signed)
+            (BinOp::Shr, true) => "__aNNaulshr",   // logical (unsigned)
+            _ => unreachable!(),
+        };
+        out.extend_from_slice(&[0xB0, k as u8]); // mov al, k
+        out.push(0x50); // push ax
+        let b8 = out.len();
+        out.extend_from_slice(&[0xB8, 0x00, 0x00]); // mov ax, OFFSET g
+        fixups.push(Fixup { body_offset: b8, kind: FixupKind::GlobalAddr { global_idx } });
+        out.push(0x50); // push ax
+        let call = out.len();
+        out.extend_from_slice(&[0xE8, 0x00, 0x00]); // call helper
+        fixups.push(Fixup { body_offset: call, kind: FixupKind::ExtCall { target: helper.to_owned() } });
+        return;
+    }
     // Long-global = long-global. Plain copy through DX:AX.
     //   `b = a` → `mov ax, [a]; mov dx, [a+2];
     //              mov [b], ax; mov [b+2], dx`

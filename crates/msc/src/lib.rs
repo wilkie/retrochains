@@ -1154,6 +1154,22 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
         }
     }
 
+    // Runtime-helper externs referenced via ExtCall (e.g. __aNNalshl for long
+    // shift compound-assign). These sit right after __chkstk in the EXTDEF
+    // table, in first-reference order. __chkstk itself is emitted explicitly.
+    let mut helper_extern_order: Vec<String> = Vec::new();
+    let mut seen_helpers: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for fe in &function_emits {
+        for fx in &fe.fixups {
+            if let FixupKind::ExtCall { target } = &fx.kind
+                && target != "__chkstk"
+                && seen_helpers.insert(target.clone())
+            {
+                helper_extern_order.push(target.clone());
+            }
+        }
+    }
+
     // SEGDEF table. MSC uses acbp=0x48 for every segment in the
     // small model.
     //
@@ -1284,6 +1300,9 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
             let mut entries: Vec<(String, u8)> = Vec::new();
             entries.push(("__acrtused".to_owned(), 0x01));
             entries.push(("__chkstk".to_owned(), 0x00));
+            for h in &helper_extern_order {
+                entries.push((h.clone(), 0x00));
+            }
             for &gi in &extern_globals {
                 entries.push((symbol_name(&unit.globals[gi].name), 0x00));
             }
@@ -1304,6 +1323,9 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
                 entries.push((symbol_name(&f.name), 0x00));
             }
             entries.push(("__chkstk".to_owned(), 0x00));
+            for h in &helper_extern_order {
+                entries.push((h.clone(), 0x00));
+            }
             emit_group(&mut b, &entries, &mut extdef_idx_of, &mut next_idx);
             // Add any extern globals to extdef_idx_of so FIXUP generation
             // can reference them (even if order isn't perfect yet).
@@ -1319,7 +1341,10 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
         // Has COMDEFs — always use split layout regardless of user-fn-externs.
         // Fixtures 482, 3590, 3602, 424.
         // EXTDEF1: __acrtused, __chkstk
-        let pre = vec![("__acrtused".to_owned(), 0x01), ("__chkstk".to_owned(), 0x00)];
+        let mut pre = vec![("__acrtused".to_owned(), 0x01), ("__chkstk".to_owned(), 0x00)];
+        for h in &helper_extern_order {
+            pre.push((h.clone(), 0x00));
+        }
         emit_group(&mut b, &pre, &mut extdef_idx_of, &mut next_idx);
         // COMDEF: tentative globals
         emit_comdef(&mut b, &mut extdef_idx_of, &mut next_idx);
