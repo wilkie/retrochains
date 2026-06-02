@@ -292,19 +292,31 @@ pub(crate) fn emit_function(
                 let disp = local_disps[i];
                 let op = if spec.size == 4 { 0xD9u8 } else { 0xDDu8 };
                 let coupled = coupled_float_local == Some(i);
-                // fld <width> [$T]
+                // Shared-load peephole: an adjacent preceding float local with
+                // the same (bits, width) already loaded the value onto st(0)
+                // (it used `fst`), so this store reuses it without a new `fld`.
+                let same = |j: usize| func.locals.get(j)
+                    .map(|l| l.is_float && l.float_bits == Some(bits) && l.size == spec.size)
+                    .unwrap_or(false);
+                let prev_same = i > 0 && same(i - 1);
+                let next_same = same(i + 1);
+                if !prev_same {
+                    // fld <width> [$T]
+                    fixups.push(Fixup { body_offset: bytes.len(), kind: FixupKind::FloatMarker { target: "FIDRQQ" } });
+                    bytes.push(0x9B);
+                    bytes.push(op);
+                    bytes.push(0x06);
+                    let body_offset = bytes.len() - 1; // the 06 modrm; off16 at +1
+                    bytes.extend_from_slice(&[0x00, 0x00]);
+                    fixups.push(Fixup { body_offset, kind: FixupKind::FloatLoad { bits, width: spec.size } });
+                }
+                // `fst` keeps st(0) live — used when coupled (the cast consumes
+                // it) or when the next adjacent local shares this value.
+                let keep = coupled || next_same;
                 fixups.push(Fixup { body_offset: bytes.len(), kind: FixupKind::FloatMarker { target: "FIDRQQ" } });
                 bytes.push(0x9B);
                 bytes.push(op);
-                bytes.push(0x06);
-                let body_offset = bytes.len() - 1; // the 06 modrm; off16 at +1
-                bytes.extend_from_slice(&[0x00, 0x00]);
-                fixups.push(Fixup { body_offset, kind: FixupKind::FloatLoad { bits, width: spec.size } });
-                // fst (coupled, keep st(0)) or fstp (pop).
-                fixups.push(Fixup { body_offset: bytes.len(), kind: FixupKind::FloatMarker { target: "FIDRQQ" } });
-                bytes.push(0x9B);
-                bytes.push(op);
-                bytes.push(bp_modrm(if coupled { 0x56 } else { 0x5E }, disp));
+                bytes.push(bp_modrm(if keep { 0x56 } else { 0x5E }, disp));
                 push_bp_disp(&mut bytes, disp);
                 if coupled {
                     fpu_live.set(Some(i));
