@@ -86,6 +86,14 @@ pub(crate) fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
                 cp.mutated_locals.insert(*p);
                 return;
             }
+            // `**pp = ...` where pp aliases a local p → resolve one level to
+            // `*p = ...`; the DerefLocal rewrite below finishes the second level.
+            if let AssignTarget::DoubleDerefLocal(pp) = target
+                && let Some(&AliasTarget::Local(p)) = cp.ptr_alias.get(pp)
+            {
+                cp.aliases_used.insert(*pp);
+                *target = AssignTarget::DerefLocal(p);
+            }
             // `*p = ...` where p aliases x/g → rewrite to a direct store, and
             // rewrite any `*p` in the RHS to the aliased lvalue too, so a
             // compound `*p += K` becomes `x += K` (in-place add) not a fold.

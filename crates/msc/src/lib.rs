@@ -599,6 +599,10 @@ pub enum AssignTarget {
     /// `**<global-ptr-to-ptr> = <expr>;` — double-deref store. Codegen:
     /// `mov bx, [global]; mov bx, [bx]; mov [bx], ax`.
     DoubleDerefGlobal(usize),
+    /// `**<local-ptr-to-ptr> = <expr>;` — double-deref store through a local.
+    /// Usually resolved to a direct lvalue by the alias pass (pp -> p -> x);
+    /// the fallback codegen is `mov bx, [bp-pp]; mov bx, [bx]; mov [bx], ax`.
+    DoubleDerefLocal(usize),
     /// `*<ptr-local>++ = <expr>;` — store through the OLD pointer value,
     /// then advance the pointer by `step`. Codegen: `mov bx, [bp-p];
     /// <mutate p>; mov [bx], ax/imm`.

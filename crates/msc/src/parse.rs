@@ -1593,13 +1593,19 @@ pub(crate) fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
                 };
                 let target = if let Some(idx) = p.global_names.iter().position(|n| *n == name) {
                     AssignTarget::DoubleDerefGlobal(idx)
+                } else if let Some(idx) = p.local_names.iter().position(|n| *n == name) {
+                    AssignTarget::DoubleDerefLocal(idx)
                 } else {
                     return Err(EmitError::Unsupported(format!(
-                        "double-deref store through non-global `{name}` not yet supported"
+                        "double-deref store through `{name}` not yet supported"
                     )));
                 };
-                p.eat(&Tok::Assign)?;
-                let value = parse_expr(p)?;
+                let value = if let Some(v) = parse_compound_rhs(p, &target)? {
+                    v
+                } else {
+                    p.eat(&Tok::Assign)?;
+                    parse_expr(p)?
+                };
                 p.eat(&Tok::Semi)?;
                 return Ok(Stmt::Assign { target, value });
             }
@@ -2139,6 +2145,13 @@ pub(crate) fn parse_compound_rhs(p: &mut Parser<'_>, target: &AssignTarget) -> R
         }
         AssignTarget::LocalField { local, byte_off, size } => {
             Expr::LocalField { local: *local, byte_off: *byte_off, size: *size }
+        }
+        // Double-deref read `**pp` for `**pp op= K`.
+        AssignTarget::DoubleDerefLocal(i) => {
+            Expr::DerefWord { ptr: Box::new(Expr::DerefWord { ptr: Box::new(Expr::Local(*i)) }) }
+        }
+        AssignTarget::DoubleDerefGlobal(g) => {
+            Expr::DerefWord { ptr: Box::new(Expr::DerefWord { ptr: Box::new(Expr::Global(*g)) }) }
         }
         _ => return Ok(None),
     };
