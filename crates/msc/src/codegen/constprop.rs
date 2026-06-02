@@ -4,9 +4,11 @@ pub(crate) fn const_prop_globals(
     stmts: &[Stmt],
     local_specs: &[LocalSpec],
     long_globals: &[bool],
+    char_globals: &[bool],
 ) -> (Vec<Stmt>, std::collections::HashSet<usize>, std::collections::HashSet<usize>) {
     let mut cp = ConstProp {
         local_specs: local_specs.to_vec(),
+        global_is_char: char_globals.to_vec(),
         ..ConstProp::default()
     };
     for (i, &is_long) in long_globals.iter().enumerate() {
@@ -139,6 +141,17 @@ pub(crate) fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
                     cp.ptr_addr.remove(p);
                 }
             }
+            // Global-pointer aliasing: `p = a` (p a global pointer, a a global
+            // array → AddrOfGlobal) records `p -> Global(a)` so `p[K]` resolves to
+            // direct `a[K]` addressing. Any other store to a global pointer clears
+            // its alias.
+            if let AssignTarget::Global(p) = target {
+                if let Expr::AddrOfGlobal(a) = value {
+                    cp.ptr_alias_g.insert(*p, AliasTarget::Global(*a));
+                } else {
+                    cp.ptr_alias_g.remove(p);
+                }
+            }
             // Pointer aliasing: `int *p = &x` (p a NEAR pointer) records `p->x`
             // and leaves x's known value intact — unlike a bare `&x` (which
             // escapes and invalidates x), writes through p are tracked via the
@@ -190,6 +203,20 @@ pub(crate) fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
                     (AliasTarget::Local(x), true) => AssignTarget::IndexedLocalByte { local: x, byte_off },
                     (AliasTarget::Global(g), false) => AssignTarget::IndexedGlobal { array: g, byte_off },
                     (AliasTarget::Global(g), true) => AssignTarget::IndexedGlobalByte { array: g, byte_off },
+                };
+            }
+            // `p[K] = ...` through a GLOBAL pointer aliased to array `a` → direct
+            // `a[K]` store. The parser lowers this to PtrIndexByte{ptr:p, disp:K}.
+            if let AssignTarget::PtrIndexByte { ptr: p, disp } = target
+                && let Some(&AliasTarget::Global(a)) = cp.ptr_alias_g.get(p)
+            {
+                from_ptr_store = true;
+                let is_byte = cp.global_is_char.get(a).copied().unwrap_or(false);
+                let k = *disp as i64;
+                *target = if is_byte {
+                    AssignTarget::IndexedGlobalByte { array: a, byte_off: k as u16 }
+                } else {
+                    AssignTarget::IndexedGlobal { array: a, byte_off: (k * 2) as u16 }
                 };
             }
             // `x = x op RHS` preserves the `Local(x)` on the left so
@@ -300,7 +327,7 @@ pub(crate) fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
                     if let Some(k) = value.fold(&[]) {
                         *value = Expr::IntLit(k);
                     }
-                    if let Expr::IntLit(k) = value {
+                    if !from_ptr_store && let Expr::IntLit(k) = value {
                         cp.ga_known.insert((*array, *byte_off), *k);
                     } else {
                         cp.ga_known.remove(&(*array, *byte_off));
@@ -326,6 +353,7 @@ pub(crate) fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
             cp.l_known.clear();
             cp.la_known.clear();
             cp.ptr_alias.clear();
+            cp.ptr_alias_g.clear();
             cp.ptr_addr.clear();
             cp.ga_known.clear();
         }
@@ -349,6 +377,7 @@ pub(crate) fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
                     cp.l_known.clear();
                     cp.la_known.clear();
             cp.ptr_alias.clear();
+            cp.ptr_alias_g.clear();
             cp.ptr_addr.clear();
                     cp.ga_known.clear();
                 } else {
@@ -360,6 +389,7 @@ pub(crate) fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
                     cp.l_known.clear();
                     cp.la_known.clear();
             cp.ptr_alias.clear();
+            cp.ptr_alias_g.clear();
             cp.ptr_addr.clear();
                     cp.ga_known.clear();
                     let mut chosen: Option<usize> = None;
@@ -395,6 +425,7 @@ pub(crate) fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
                     cp.l_known.clear();
                     cp.la_known.clear();
             cp.ptr_alias.clear();
+            cp.ptr_alias_g.clear();
             cp.ptr_addr.clear();
                     cp.ga_known.clear();
                 }
@@ -404,6 +435,7 @@ pub(crate) fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
                 cp.l_known.clear();
                 cp.la_known.clear();
             cp.ptr_alias.clear();
+            cp.ptr_alias_g.clear();
             cp.ptr_addr.clear();
                 cp.ga_known.clear();
             }
@@ -420,6 +452,7 @@ pub(crate) fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
             cp.l_known.clear();
             cp.la_known.clear();
             cp.ptr_alias.clear();
+            cp.ptr_alias_g.clear();
             cp.ptr_addr.clear();
             cp.ga_known.clear();
         }
@@ -435,9 +468,11 @@ pub(crate) fn cp_clone(cp: &ConstProp) -> ConstProp {
         mutated_locals: cp.mutated_locals.clone(),
         mutated_globals: cp.mutated_globals.clone(),
         ptr_alias: cp.ptr_alias.clone(),
+        ptr_alias_g: cp.ptr_alias_g.clone(),
         aliases_used: cp.aliases_used.clone(),
         ptr_addr: cp.ptr_addr.clone(),
         local_specs: cp.local_specs.clone(),
+        global_is_char: cp.global_is_char.clone(),
     }
 }
 /// If `e` is a pointer local holding `&x`/`&g` (offset 0), the address
@@ -588,8 +623,22 @@ pub(crate) fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
                 *e = Expr::IntLit(v);
             }
         }
-        Expr::PtrIndexByte { index, .. } => {
+        Expr::PtrIndexByte { ptr, index } => {
             prop_expr(index, cp);
+            // `p[K]` through a GLOBAL pointer aliased to array `a` → direct
+            // `a[K]` element read (runtime, not folded to an immediate — MSC
+            // keeps pointer-routed reads as loads). Fixtures 888, 890.
+            if let Some(&AliasTarget::Global(a)) = cp.ptr_alias_g.get(ptr)
+                && let Expr::IntLit(k) = index.as_ref()
+            {
+                let k = *k;
+                let is_byte = cp.global_is_char.get(a).copied().unwrap_or(false);
+                *e = if is_byte {
+                    Expr::IndexByte { array: a, index: Box::new(Expr::IntLit(k)) }
+                } else {
+                    Expr::Index { array: a, index: Box::new(Expr::IntLit(k)) }
+                };
+            }
         }
         Expr::ParamIndex { index, .. } => {
             prop_expr(index, cp);

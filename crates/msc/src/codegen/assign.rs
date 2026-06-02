@@ -627,6 +627,31 @@ pub(crate) fn emit_assign_param(param_idx: usize, value: &Expr, locals: &Locals<
     }
 }
 pub(crate) fn emit_assign_global(global_idx: usize, value: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    // Global pointer = address-of-global (`p = a` / `p = &g[K]`): MSC stores the
+    // link-time OFFSET directly into the global with one instruction —
+    //   c7 06 <&p> <OFFSET a + K>   mov word ptr [_p], OFFSET _a
+    // carrying two GlobalAddr fixups (the destination address and the immediate).
+    // Fixtures 888, 890.
+    if let Some((a, off)) = match value {
+        Expr::AddrOfGlobal(a) => Some((*a, 0u16)),
+        Expr::BinOp { op: BinOp::Add, left, right }
+            if matches!(left.as_ref(), Expr::AddrOfGlobal(_))
+                && matches!(right.as_ref(), Expr::IntLit(_)) =>
+        {
+            let Expr::AddrOfGlobal(a) = **left else { unreachable!() };
+            let Expr::IntLit(k) = **right else { unreachable!() };
+            Some((a, (k as u32 & 0xFFFF) as u16))
+        }
+        _ => None,
+    } {
+        let start = out.len();
+        out.extend_from_slice(&[0xC7, 0x06, 0x00, 0x00]); // mov word [disp16], imm16
+        fixups.push(Fixup { body_offset: start + 1, kind: FixupKind::GlobalAddr { global_idx } });
+        let imm_bo = out.len() - 1; // last disp byte; imm16 placeholder follows
+        out.extend_from_slice(&off.to_le_bytes());
+        fixups.push(Fixup { body_offset: imm_bo, kind: FixupKind::GlobalAddr { global_idx: a } });
+        return;
+    }
     // Float/double global store from a literal: `g = 3.14;` →
     //   9B <D9|DD> 06 <off16>   fld  <dword|qword> [$T]   (FIDRQQ + FloatLoad)
     //   9B <D9|DD> 1E <off16>   fstp <dword|qword> [g]    (FIDRQQ + GlobalAddr)

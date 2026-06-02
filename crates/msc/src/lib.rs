@@ -2303,6 +2303,11 @@ struct ConstProp {
     /// `*p` (read or store) is rewritten to the aliased lvalue and folds /
     /// stores directly. Cleared at branch boundaries.
     ptr_alias: std::collections::HashMap<usize, AliasTarget>,
+    /// Global-pointer alias tracking: `int *p; p = a;` (p a near GLOBAL pointer,
+    /// a a global array) records `p -> Global(a)`, so `p[K]` reads/writes resolve
+    /// to direct `a[K]` global addressing. Unlike the local single-use alias this
+    /// persists until p is reassigned or a branch boundary. Keyed by global idx.
+    ptr_alias_g: std::collections::HashMap<usize, AliasTarget>,
     /// Pointers whose alias was used in the current statement. MSC's alias is
     /// single-use: only the FIRST statement dereferencing `p` (after `p = &x`)
     /// is aliased; later `*p` derefs through the pointer. Drained after each
@@ -2315,6 +2320,10 @@ struct ConstProp {
     ptr_addr: std::collections::HashMap<usize, (AliasTarget, i32)>,
     /// Copy of local_specs for size checks during assignment propagation.
     local_specs: Vec<LocalSpec>,
+    /// Parallel to globals: true when the global's element type is `char`
+    /// (byte). Used to pick IndexByte vs Index when resolving a global-pointer
+    /// subscript through `ptr_alias_g`.
+    global_is_char: Vec<bool>,
 }
 
 /// The lvalue a pointer local currently aliases (`&x`).
