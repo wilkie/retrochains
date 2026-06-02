@@ -83,19 +83,31 @@ pub(crate) fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_
         locals.fpu_pending_fwait.set(true);
         return;
     }
-    // Near pointer = address-of-global (`int *p = &g`): MSC stores the link-time
-    // OFFSET directly with `c7 46 disp <off16>` (GlobalAddr fixup), not via AX.
+    // Near pointer = address-of-global (`int *p = &g` or `&g[K]`): MSC stores
+    // the link-time OFFSET directly with `c7 46 disp <off16>` (GlobalAddr fixup
+    // whose placeholder carries the +K byte offset), not via AX.
     if let AssignTarget::Local(i) = target
         && !locals.is_far_ptr_local(i)
-        && let Expr::AddrOfGlobal(g) = value
+        && let Some((g, off)) = match value {
+            Expr::AddrOfGlobal(g) => Some((*g, 0u16)),
+            Expr::BinOp { op: BinOp::Add, left, right }
+                if matches!(left.as_ref(), Expr::AddrOfGlobal(_))
+                    && matches!(right.as_ref(), Expr::IntLit(_)) =>
+            {
+                let Expr::AddrOfGlobal(g) = **left else { unreachable!() };
+                let Expr::IntLit(k) = **right else { unreachable!() };
+                Some((g, (k as u32 & 0xFFFF) as u16))
+            }
+            _ => None,
+        }
     {
         let disp = locals.disp(i);
         out.push(0xC7);
         out.push(bp_modrm(0x46, disp));
         push_bp_disp(out, disp);
         let body_offset = out.len() - 1; // last disp byte; off16 placeholder follows
-        out.extend_from_slice(&[0x00, 0x00]);
-        fixups.push(Fixup { body_offset, kind: FixupKind::GlobalAddr { global_idx: *g } });
+        out.extend_from_slice(&off.to_le_bytes());
+        fixups.push(Fixup { body_offset, kind: FixupKind::GlobalAddr { global_idx: g } });
         return;
     }
     let local_idx = match target {

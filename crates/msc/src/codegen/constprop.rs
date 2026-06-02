@@ -64,11 +64,33 @@ fn alias_rewrite_derefs(e: &mut Expr, cp: &ConstProp) {
         _ => {}
     }
 }
+/// The address value an init expression denotes, as (base lvalue, byte offset):
+/// `&x` / `&g` (offset 0) and `&base[K]` (lowered to `AddrOf(base) + K*elem`).
+fn addr_value_of(e: &Expr) -> Option<(AliasTarget, i32)> {
+    match e {
+        Expr::AddrOfLocal(x) => Some((AliasTarget::Local(*x), 0)),
+        Expr::AddrOfGlobal(g) => Some((AliasTarget::Global(*g), 0)),
+        Expr::BinOp { op: BinOp::Add, left, right } => match (left.as_ref(), right.as_ref()) {
+            (Expr::AddrOfLocal(x), Expr::IntLit(k)) => Some((AliasTarget::Local(*x), *k)),
+            (Expr::AddrOfGlobal(g), Expr::IntLit(k)) => Some((AliasTarget::Global(*g), *k)),
+            _ => None,
+        },
+        _ => None,
+    }
+}
 pub(crate) fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
     match stmt {
         Stmt::Return(e) => prop_expr(e, cp),
         Stmt::ExprStmt(e) => prop_expr(e, cp),
         Stmt::Assign { target, value } => {
+            // Pointer-value tracking: record/clear p's known address (&g[K]).
+            if let AssignTarget::Local(p) = target {
+                if let Some(av) = addr_value_of(value) {
+                    cp.ptr_addr.insert(*p, av);
+                } else {
+                    cp.ptr_addr.remove(p);
+                }
+            }
             // Pointer aliasing: `int *p = &x` (p a NEAR pointer) records `p->x`
             // and leaves x's known value intact — unlike a bare `&x` (which
             // escapes and invalidates x), writes through p are tracked via the
@@ -239,6 +261,7 @@ pub(crate) fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
             cp.l_known.clear();
             cp.la_known.clear();
             cp.ptr_alias.clear();
+            cp.ptr_addr.clear();
             cp.ga_known.clear();
         }
         Stmt::Block(stmts) => {
@@ -261,6 +284,7 @@ pub(crate) fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
                     cp.l_known.clear();
                     cp.la_known.clear();
             cp.ptr_alias.clear();
+            cp.ptr_addr.clear();
                     cp.ga_known.clear();
                 } else {
                     // No NFC: fold to matched body block. MSC clears the
@@ -271,6 +295,7 @@ pub(crate) fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
                     cp.l_known.clear();
                     cp.la_known.clear();
             cp.ptr_alias.clear();
+            cp.ptr_addr.clear();
                     cp.ga_known.clear();
                     let mut chosen: Option<usize> = None;
                     let mut default: Option<usize> = None;
@@ -305,6 +330,7 @@ pub(crate) fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
                     cp.l_known.clear();
                     cp.la_known.clear();
             cp.ptr_alias.clear();
+            cp.ptr_addr.clear();
                     cp.ga_known.clear();
                 }
             } else {
@@ -313,6 +339,7 @@ pub(crate) fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
                 cp.l_known.clear();
                 cp.la_known.clear();
             cp.ptr_alias.clear();
+            cp.ptr_addr.clear();
                 cp.ga_known.clear();
             }
         }
@@ -328,6 +355,7 @@ pub(crate) fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
             cp.l_known.clear();
             cp.la_known.clear();
             cp.ptr_alias.clear();
+            cp.ptr_addr.clear();
             cp.ga_known.clear();
         }
     }
@@ -343,13 +371,27 @@ pub(crate) fn cp_clone(cp: &ConstProp) -> ConstProp {
         mutated_globals: cp.mutated_globals.clone(),
         ptr_alias: cp.ptr_alias.clone(),
         aliases_used: cp.aliases_used.clone(),
+        ptr_addr: cp.ptr_addr.clone(),
         local_specs: cp.local_specs.clone(),
     }
 }
 pub(crate) fn prop_cond(cond: &mut Cond, cp: &mut ConstProp) {
     match cond {
         Cond::Truthy(e) => prop_expr(e, cp),
-        Cond::Cmp { left, right, .. } => {
+        Cond::Cmp { op, left, right } => {
+            // `p == q` / `p != q` over two same-GLOBAL-base address values folds
+            // to a constant condition (fixture 601). Local-base stays runtime.
+            if matches!(op, RelOp::Eq | RelOp::Ne)
+                && let (Expr::Local(lp), Expr::Local(rp)) = (&*left, &*right)
+                && let (Some(&(lb, lo)), Some(&(rb, ro))) = (cp.ptr_addr.get(lp), cp.ptr_addr.get(rp))
+                && let (AliasTarget::Global(lg), AliasTarget::Global(rg)) = (lb, rb)
+                && lg == rg
+            {
+                let eq = lo == ro;
+                let truthy = if matches!(op, RelOp::Eq) { eq } else { !eq };
+                *cond = Cond::Truthy(Expr::IntLit(truthy as i32));
+                return;
+            }
             prop_expr(left, cp);
             prop_expr(right, cp);
         }
@@ -383,7 +425,23 @@ pub(crate) fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
             // `cmp 1, 0`. The fold() path (for if-condition dead-branch
             // elimination) still works because fold() reads l_known directly.
         }
-        Expr::BinOp { left, right, .. } => {
+        Expr::BinOp { op, left, right } => {
+            // Pointer subtraction / equality over two same-GLOBAL-base address
+            // values folds to a compile-time constant (`&g[7] - &g[2]` → 5,
+            // `p == q` (same addr) → 1). Local-base addresses stay runtime.
+            if let (Expr::Local(lp), Expr::Local(rp)) = (left.as_ref(), right.as_ref())
+                && let (Some(&(lb, lo)), Some(&(rb, ro))) = (cp.ptr_addr.get(lp), cp.ptr_addr.get(rp))
+                && let (AliasTarget::Global(lg), AliasTarget::Global(rg)) = (lb, rb)
+                && lg == rg
+            {
+                let elem = cp.local_specs.get(*lp).map(|s| s.pointee_size.max(1)).unwrap_or(1) as i32;
+                match op {
+                    BinOp::Sub => { *e = Expr::IntLit((lo - ro) / elem); return; }
+                    BinOp::Eq => { *e = Expr::IntLit((lo == ro) as i32); return; }
+                    BinOp::Ne => { *e = Expr::IntLit((lo != ro) as i32); return; }
+                    _ => {}
+                }
+            }
             prop_expr(left, cp);
             prop_expr(right, cp);
         }

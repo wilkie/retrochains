@@ -2290,6 +2290,11 @@ struct ConstProp {
     /// is aliased; later `*p` derefs through the pointer. Drained after each
     /// top-level statement to drop those aliases.
     aliases_used: std::collections::HashSet<usize>,
+    /// Pointer-value tracking: `p = &g[K]` records p holds the ADDRESS of
+    /// (base, byte_offset). Lets `p - q` and `p == q` over same-base GLOBAL
+    /// addresses fold to a compile-time constant. Cleared on reassignment and
+    /// at branch boundaries.
+    ptr_addr: std::collections::HashMap<usize, (AliasTarget, i32)>,
     /// Copy of local_specs for size checks during assignment propagation.
     local_specs: Vec<LocalSpec>,
 }
