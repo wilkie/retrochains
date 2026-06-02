@@ -144,7 +144,7 @@ pub(crate) fn parse_unit(source: &str) -> Result<Unit, EmitError> {
 /// the struct's total_bytes — that gives correct storage layout
 /// without needing a separate Global::struct_idx field. Initializer
 /// values are mapped to per-field byte slots.
-pub(crate) fn parse_struct_global_decl(p: &mut Parser<'_>) -> Result<(), EmitError> {
+pub(crate) fn parse_struct_global_decl(p: &mut Parser<'_>, is_static: bool) -> Result<(), EmitError> {
     p.eat(&Tok::Kw("struct"))?;
     let sname = match p.bump().cloned() {
         Some(Tok::Ident(s)) => s,
@@ -177,7 +177,9 @@ pub(crate) fn parse_struct_global_decl(p: &mut Parser<'_>) -> Result<(), EmitErr
             while !matches!(p.peek(), Some(Tok::RBrace)) {
                 let v = parse_signed_int(p)?;
                 let field = &p.structs[sidx].fields[field_idx];
-                while slots.len() < field.byte_off as usize {
+                // Pad to the field's byte offset by BYTES (an Int slot is 2
+                // bytes), not slot count, so word fields align correctly.
+                while slots.iter().map(GlobalInit::size_bytes).sum::<usize>() < field.byte_off as usize {
                     slots.push(GlobalInit::Byte(0));
                 }
                 if field.size == 1 {
@@ -228,7 +230,7 @@ pub(crate) fn parse_struct_global_decl(p: &mut Parser<'_>) -> Result<(), EmitErr
         is_pointer,
         struct_idx: Some(sidx),
         is_long: false,
-        is_static: false,
+        is_static,
         is_extern: false,
         is_unsigned: false,
         is_float: false,
@@ -399,7 +401,7 @@ pub(crate) fn parse_global_decl(p: &mut Parser<'_>) -> Result<(), EmitError> {
     // routed through a separate parse path because the size + element
     // model differ from primitive types.
     if matches!(p.peek(), Some(Tok::Kw("struct"))) {
-        return parse_struct_global_decl(p);
+        return parse_struct_global_decl(p, is_static);
     }
     // Type prefix. Phase 1 globals: `int [*]`, `char *`, `char [N]`,
     // and minimal `long` support (storage only; arithmetic not yet).
