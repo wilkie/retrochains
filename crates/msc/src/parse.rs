@@ -175,17 +175,45 @@ pub(crate) fn parse_struct_global_decl(p: &mut Parser<'_>, is_static: bool) -> R
             let mut slots: Vec<GlobalInit> = Vec::new();
             let mut field_idx = 0usize;
             while !matches!(p.peek(), Some(Tok::RBrace)) {
-                let v = parse_signed_int(p)?;
                 let field = &p.structs[sidx].fields[field_idx];
+                let field_size = field.size;
                 // Pad to the field's byte offset by BYTES (an Int slot is 2
                 // bytes), not slot count, so word fields align correctly.
                 while slots.iter().map(GlobalInit::size_bytes).sum::<usize>() < field.byte_off as usize {
                     slots.push(GlobalInit::Byte(0));
                 }
-                if field.size == 1 {
-                    slots.push(GlobalInit::Byte((v as u32 & 0xFF) as u8));
-                } else {
-                    slots.push(GlobalInit::Int(v));
+                match p.peek() {
+                    // Nested struct field `{...}` — flatten its scalar members
+                    // into consecutive 2-byte slots (fixture 2102).
+                    Some(Tok::LBrace) => {
+                        p.bump();
+                        while !matches!(p.peek(), Some(Tok::RBrace)) {
+                            let v = parse_signed_int(p)?;
+                            slots.push(GlobalInit::Int(v));
+                            if matches!(p.peek(), Some(Tok::Comma)) { p.bump(); }
+                        }
+                        p.eat(&Tok::RBrace)?;
+                    }
+                    // String-literal pointer field — intern + StrAddr (2100).
+                    Some(Tok::StrLit(_)) => {
+                        let bytes = match p.bump().cloned() {
+                            Some(Tok::StrLit(b)) => b,
+                            _ => unreachable!(),
+                        };
+                        let mut with_nul = bytes.clone();
+                        with_nul.push(0);
+                        let str_idx = p.strings.len();
+                        p.strings.push(with_nul);
+                        slots.push(GlobalInit::StrAddr(str_idx));
+                    }
+                    _ => {
+                        let v = parse_signed_int(p)?;
+                        if field_size == 1 {
+                            slots.push(GlobalInit::Byte((v as u32 & 0xFF) as u8));
+                        } else {
+                            slots.push(GlobalInit::Int(v));
+                        }
+                    }
                 }
                 field_idx += 1;
                 if matches!(p.peek(), Some(Tok::Comma)) { p.bump(); }
