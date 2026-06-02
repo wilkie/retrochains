@@ -978,6 +978,15 @@ enum FixupKind {
     /// to the CONST offset, with a segment-relative FIXUP using
     /// pre-emitted threads (`c4 off 9c`).
     StrLoad { string_idx: usize },
+    /// Load of an x87 float/double literal from the CONST pool
+    /// (`fld <dword|qword> [$T]`). Same CONST/DGROUP segment-relative FIXUP
+    /// shape as StrLoad (`c4 off 9c`); resolved via the (bits,width) pool.
+    FloatLoad { bits: u64, width: usize },
+    /// FP-emulator marker fixup on an x87 instruction's leading byte: a
+    /// seg-relative external reference (`c4 off 56 <idx>`) to FIDRQQ/FIWRQQ so
+    /// the linker can rewrite the site for the emulator. The fixup offset is
+    /// the instruction byte itself (no +1).
+    FloatMarker { target: &'static str },
     /// Reference to an initialized file-scope global at a known
     /// offset within `_DATA`. The FIXUP uses DGROUP-as-frame and
     /// _DATA-as-target via the pre-emitted threads (`c4 off 9d`).
@@ -1035,6 +1044,22 @@ impl Frame {
     }
     fn is_with_slide(self) -> bool {
         matches!(self, Frame::WithSlide | Frame::WithSlideSi)
+    }
+}
+
+/// MSC's fixed floating-point-emulator EXTDEF block, emitted (before
+/// `__acrtused`) whenever the unit uses FP. FIDRQQ/FIWRQQ are the markers the
+/// per-FP-instruction fixups target.
+fn fp_extern_block(uses_float: bool) -> &'static [(&'static str, u8)] {
+    if uses_float {
+        // __fltused uses type-index 0; the FxxRQQ emulator markers use 1.
+        &[
+            ("__fltused", 0x00),
+            ("FJSRQQ", 0x01), ("FISRQQ", 0x01), ("FIERQQ", 0x01),
+            ("FIDRQQ", 0x01), ("FIWRQQ", 0x01),
+        ][..]
+    } else {
+        &[]
     }
 }
 
@@ -1139,6 +1164,34 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
             const_cursor += 1;
         }
     }
+    // Float-literal pool: distinct (bits, width) from all float/double
+    // locals, placed in CONST after the strings (word-aligned, `width` bytes
+    // each). MSC materializes these as `$T` DD/DQ temps.
+    let mut float_pool: Vec<(u64, usize)> = Vec::new();
+    for f in &unit.functions {
+        for l in &f.locals {
+            if l.is_float
+                && let Some(bits) = l.float_bits
+                && !float_pool.contains(&(bits, l.size))
+            {
+                float_pool.push((bits, l.size));
+            }
+        }
+    }
+    if !float_pool.is_empty() && const_cursor % 2 != 0 {
+        const_cursor += 1;
+    }
+    let mut float_offsets: Vec<usize> = Vec::with_capacity(float_pool.len());
+    for (_, width) in &float_pool {
+        float_offsets.push(const_cursor);
+        const_cursor += width;
+    }
+    let uses_float = !float_pool.is_empty();
+    let float_offset_of = |bits: u64, width: usize| -> usize {
+        let idx = float_pool.iter().position(|e| *e == (bits, width)).expect("float in pool");
+        float_offsets[idx]
+    };
+
     let const_len = u16::try_from(const_cursor).expect("CONST length fits in u16");
 
     // _DATA layout — every initialized global gets 2 bytes (int) in
@@ -1319,6 +1372,12 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
             // Extern globals (from `extern int g;`) go between __chkstk
             // and defined-function names. Fixtures 163, 1959, 2157, 4041.
             let mut entries: Vec<(String, u8)> = Vec::new();
+            // FP-emulator marker block precedes __acrtused when the unit uses
+            // floating point (matches MSC's EXTDEF layout). FIDRQQ/FIWRQQ are
+            // referenced by per-instruction marker fixups.
+            for (m, ty) in fp_extern_block(uses_float) {
+                entries.push(((*m).to_owned(), *ty));
+            }
             entries.push(("__acrtused".to_owned(), 0x01));
             entries.push(("__chkstk".to_owned(), 0x00));
             for h in &helper_extern_order {
@@ -1336,6 +1395,9 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
             // Layout: __acrtused, [user-fn-externs], [fns], __chkstk.
             // Extern globals also go after __chkstk if any (fixture 4024).
             let mut entries: Vec<(String, u8)> = Vec::new();
+            for (m, ty) in fp_extern_block(uses_float) {
+                entries.push(((*m).to_owned(), *ty));
+            }
             entries.push(("__acrtused".to_owned(), 0x01));
             for name in &user_extern_order {
                 entries.push((name.clone(), 0x00));
@@ -1362,7 +1424,12 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
         // Has COMDEFs — always use split layout regardless of user-fn-externs.
         // Fixtures 482, 3590, 3602, 424.
         // EXTDEF1: __acrtused, __chkstk
-        let mut pre = vec![("__acrtused".to_owned(), 0x01), ("__chkstk".to_owned(), 0x00)];
+        let mut pre: Vec<(String, u8)> = Vec::new();
+        for (m, ty) in fp_extern_block(uses_float) {
+            pre.push(((*m).to_owned(), *ty));
+        }
+        pre.push(("__acrtused".to_owned(), 0x01));
+        pre.push(("__chkstk".to_owned(), 0x00));
         for h in &helper_extern_order {
             pre.push((h.clone(), 0x00));
         }
@@ -1488,6 +1555,23 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
                         kind: FixupKind::StrLoad { string_idx: *string_idx },
                     });
                 }
+                FixupKind::FloatLoad { bits, width } => {
+                    let off = u16::try_from(float_offset_of(*bits, *width))
+                        .expect("float CONST offset fits");
+                    fe.bytes[fx.body_offset + 1] = (off & 0xFF) as u8;
+                    fe.bytes[fx.body_offset + 2] = ((off >> 8) & 0xFF) as u8;
+                    ledata_fixups.push(ResolvedFixup {
+                        ledata_offset: caller_off + fx.body_offset + 1,
+                        kind: FixupKind::FloatLoad { bits: *bits, width: *width },
+                    });
+                }
+                FixupKind::FloatMarker { target } => {
+                    // The fixup lands on the instruction byte itself (no +1).
+                    ledata_fixups.push(ResolvedFixup {
+                        ledata_offset: caller_off + fx.body_offset,
+                        kind: FixupKind::FloatMarker { target },
+                    });
+                }
                 FixupKind::GlobalAddr { global_idx } => {
                     // Patch placeholder bytes with the global's
                     // in-_DATA offset for PUBDEF targets. COMDEF
@@ -1542,6 +1626,18 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
         if !current_bytes.is_empty() {
             let off = u16::try_from(current_start).expect("CONST offset fits");
             b.write_ledata16(3, off, &current_bytes);
+        }
+    }
+
+    // LEDATA — CONST float-literal pool. Each `$T` temp holds the IEEE bytes:
+    // a `float` collapses the f64 value to f32 (4 bytes); a `double` keeps
+    // the full f64 (8 bytes). Little-endian.
+    for (i, &(bits, width)) in float_pool.iter().enumerate() {
+        let off = u16::try_from(float_offsets[i]).expect("CONST float offset fits");
+        if width == 4 {
+            b.write_ledata16(3, off, &(f64::from_bits(bits) as f32).to_bits().to_le_bytes());
+        } else {
+            b.write_ledata16(3, off, &bits.to_le_bytes());
         }
     }
 
@@ -1661,8 +1757,14 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
                     .unwrap_or_else(|| panic!("EXTDEF index missing for `{target}`"));
                 fixup_payload.extend_from_slice(&[0x84, off, 0x56, idx]);
             }
-            FixupKind::StrLoad { .. } => {
+            FixupKind::StrLoad { .. } | FixupKind::FloatLoad { .. } => {
                 fixup_payload.extend_from_slice(&[0xC4, off, 0x9C]);
+            }
+            FixupKind::FloatMarker { target } => {
+                let idx = *extdef_idx_of
+                    .get(*target)
+                    .unwrap_or_else(|| panic!("EXTDEF index missing for FP marker `{target}`"));
+                fixup_payload.extend_from_slice(&[0xC4, off, 0x56, idx]);
             }
             FixupKind::GlobalAddr { global_idx } => {
                 if unit.globals[*global_idx].init.is_some() {

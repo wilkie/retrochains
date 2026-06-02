@@ -192,9 +192,38 @@ pub(crate) fn emit_function(
     // init here; their element stores live in the prelude body the
     // parser synthesized.
     for (i, spec) in func.locals.iter().enumerate() {
-        // Float/double locals are initialized via the x87 const pool, not
-        // an integer store — handled by the float codegen block (pending).
+        // Float/double locals: load the literal from the CONST pool and
+        // store it to the slot, all x87-wait-prefixed:
+        //   9B <D9|DD> 06 <off16>   fld <dword|qword> [$T]   (FloatLoad fixup)
+        //   9B <D9|DD> 5E <disp>    fstp <dword|qword> [bp+disp]
+        //   [90]                    nop so the next statement is even-aligned
+        //   9B                      fwait
         if spec.is_float {
+            if let Some(bits) = spec.float_bits {
+                let disp = local_disps[i];
+                let op = if spec.size == 4 { 0xD9u8 } else { 0xDDu8 };
+                // fld: FP-emulator marker on the leading 9B, FloatLoad on off16.
+                fixups.push(Fixup { body_offset: bytes.len(), kind: FixupKind::FloatMarker { target: "FIDRQQ" } });
+                bytes.push(0x9B);
+                bytes.push(op);
+                bytes.push(0x06);
+                let body_offset = bytes.len() - 1; // the 06 modrm; off16 at +1
+                bytes.extend_from_slice(&[0x00, 0x00]);
+                fixups.push(Fixup { body_offset, kind: FixupKind::FloatLoad { bits, width: spec.size } });
+                // fstp: FP-emulator marker on the leading 9B.
+                fixups.push(Fixup { body_offset: bytes.len(), kind: FixupKind::FloatMarker { target: "FIDRQQ" } });
+                bytes.push(0x9B);
+                bytes.push(op);
+                bytes.push(bp_modrm(0x5E, disp));
+                push_bp_disp(&mut bytes, disp);
+                // fwait: marker on the leading byte (the alignment nop, if any,
+                // else the 9B), targeting FIWRQQ.
+                fixups.push(Fixup { body_offset: bytes.len(), kind: FixupKind::FloatMarker { target: "FIWRQQ" } });
+                if bytes.len() % 2 == 0 {
+                    bytes.push(0x90); // nop
+                }
+                bytes.push(0x9B); // fwait
+            }
             continue;
         }
         if let Some(value) = spec.init {
