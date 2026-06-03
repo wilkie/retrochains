@@ -435,6 +435,36 @@ fn ternary_folds_to_immediate(expr: &Expr, locals: &Locals<'_>) -> bool {
         _ => true,
     }
 }
+/// MSC distributes an operation applied to a ternary into both arms:
+/// `(cond ? a : b) OP k` → `cond ? (a OP k) : (b OP k)` (fixture 432
+/// `return (g>0?g:-g)+1` → each arm computes its value, adds 1, then rets).
+/// Only lift when the non-ternary operand is side-effect-free and cheap to
+/// duplicate (literal / direct variable read).
+fn try_lift_ternary_return(expr: &Expr) -> Option<Expr> {
+    let Expr::BinOp { op, left, right } = expr else { return None; };
+    let dup_ok = |e: &Expr| {
+        matches!(e, Expr::IntLit(_) | Expr::Local(_) | Expr::Param(_) | Expr::Global(_))
+    };
+    if let Expr::Ternary { cond, then_arm, else_arm } = left.as_ref()
+        && dup_ok(right)
+    {
+        return Some(Expr::Ternary {
+            cond: cond.clone(),
+            then_arm: Box::new(Expr::BinOp { op: *op, left: then_arm.clone(), right: right.clone() }),
+            else_arm: Box::new(Expr::BinOp { op: *op, left: else_arm.clone(), right: right.clone() }),
+        });
+    }
+    if let Expr::Ternary { cond, then_arm, else_arm } = right.as_ref()
+        && dup_ok(left)
+    {
+        return Some(Expr::Ternary {
+            cond: cond.clone(),
+            then_arm: Box::new(Expr::BinOp { op: *op, left: left.clone(), right: then_arm.clone() }),
+            else_arm: Box::new(Expr::BinOp { op: *op, left: left.clone(), right: else_arm.clone() }),
+        });
+    }
+    None
+}
 pub(crate) fn emit_return(
     expr: &Expr,
     locals: &Locals<'_>,
@@ -514,6 +544,16 @@ pub(crate) fn emit_return(
         }
     }
     if return_int {
+        // `(cond ? a : b) OP k` in a return distributes OP into both arms and
+        // emits the two-epilogue ternary structure (fixture 432). Only for
+        // runtime conds — folded ternaries fold through the normal paths.
+        if let Some(lifted) = try_lift_ternary_return(expr)
+            && let Expr::Ternary { cond, .. } = &lifted
+            && cond.fold(locals.inits).is_none()
+        {
+            emit_return(&lifted, locals, frame, return_int, return_long, out, fixups);
+            return;
+        }
         // Return-of-call peephole: `return f(args);` leaves the
         // result in AX from the call's return value — no extra
         // load before ret. Fixture 4102 confirms.
