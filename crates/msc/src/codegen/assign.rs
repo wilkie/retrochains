@@ -669,6 +669,43 @@ pub(crate) fn emit_assign_param(param_idx: usize, value: &Expr, locals: &Locals<
         }
         return;
     }
+    // Long param `x <<=/>>= K` by a constant. K==1 shifts in place across both
+    // words (`shl [lo],1; rcl [hi],1` for <<; `sar/shr [hi],1; rcr [lo],1` for >>,
+    // high word first). K>1 calls the runtime helper (count in AL, address pushed).
+    if locals.is_long_param(param_idx)
+        && let Expr::BinOp { op: op @ (BinOp::Shl | BinOp::Shr), left, right } = value
+        && matches!(left.as_ref(), Expr::Param(i) if *i == param_idx)
+        && let Some(k) = right.fold(locals.inits)
+        && (0..32).contains(&k)
+    {
+        let lo = disp;
+        let hi = disp + 2;
+        if k == 1 {
+            if matches!(op, BinOp::Shl) {
+                out.push(0xD1); out.push(bp_modrm(0x66, lo)); push_bp_disp(out, lo); // shl [lo],1
+                out.push(0xD1); out.push(bp_modrm(0x56, hi)); push_bp_disp(out, hi); // rcl [hi],1
+            } else {
+                let hi_reg = if locals.is_unsigned_param(param_idx) { 0x6Eu8 } else { 0x7Eu8 }; // shr / sar
+                out.push(0xD1); out.push(bp_modrm(hi_reg, hi)); push_bp_disp(out, hi);
+                out.push(0xD1); out.push(bp_modrm(0x5E, lo)); push_bp_disp(out, lo); // rcr [lo],1
+            }
+        } else {
+            let helper = match (op, locals.is_unsigned_param(param_idx)) {
+                (BinOp::Shl, _) => "__aNNalshl",
+                (BinOp::Shr, false) => "__aNNalshr",
+                (BinOp::Shr, true) => "__aNNaulshr",
+                _ => unreachable!(),
+            };
+            out.extend_from_slice(&[0xB0, k as u8]); // mov al, k
+            out.push(0x50); // push ax
+            out.push(0x8D); out.push(bp_modrm(0x46, lo)); push_bp_disp(out, lo); // lea ax,[bp+lo]
+            out.push(0x50); // push ax
+            let call = out.len();
+            out.extend_from_slice(&[0xE8, 0x00, 0x00]);
+            fixups.push(Fixup { body_offset: call, kind: FixupKind::ExtCall { target: helper.to_owned() } });
+        }
+        return;
+    }
     // `param >>= local/param` peephole: `mov cl, [bp+r]; sar/shl [bp+param], cl`
     if let Expr::BinOp { op, left, right } = value
         && matches!(left.as_ref(), Expr::Param(i) if *i == param_idx)
