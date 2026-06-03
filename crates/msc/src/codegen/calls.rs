@@ -249,6 +249,10 @@ pub(crate) fn long_operand(e: &Expr, locals: &Locals<'_>) -> bool {
         Expr::Param(i) => locals.is_long_param(*i),
         Expr::Local(i) => locals.is_long_local(*i),
         Expr::Global(j) => locals.is_long_global(*j),
+        // Long struct field / long array element (emit_long_to_dx_ax loads both
+        // words; long_global_rhs_addr supplies the address as an RHS).
+        Expr::GlobalField { size: 4, .. } => true,
+        Expr::Index { array, .. } => locals.is_long_global(*array),
         _ => false,
     }
 }
@@ -281,6 +285,21 @@ pub(crate) fn long_param_disp(idx: usize, locals: &Locals<'_>) -> i16 {
 fn long_rhs_mem(e: &Expr, locals: &Locals<'_>) -> bool {
     matches!(e, Expr::Param(i) if locals.is_long_param(*i))
         || matches!(e, Expr::Local(i) if locals.is_long_local(*i))
+        || long_global_rhs_addr(e, locals).is_some()
+}
+/// For a long RHS living at a fixed global address (long global, long struct
+/// field, or long array element with a constant index), return its (global index,
+/// low-word in-segment offset). The high word is at offset+2.
+fn long_global_rhs_addr(e: &Expr, locals: &Locals<'_>) -> Option<(usize, u16)> {
+    match e {
+        Expr::Global(g) if locals.is_long_global(*g) => Some((*g, 0)),
+        Expr::GlobalField { global, byte_off, size: 4 } => Some((*global, *byte_off)),
+        Expr::Index { array, index } if locals.is_long_global(*array) => {
+            let k = index.fold(locals.inits)?;
+            Some((*array, (k as u32 & 0xFFFF) as u16 * 4))
+        }
+        _ => None,
+    }
 }
 
 const fn long_arith_opcodes(op: BinOp) -> Option<(u8, u8)> {
@@ -409,8 +428,19 @@ fn push_long_operand(e: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &
 
 /// Emit `op ax,[rhs_lo]; op2 dx,[rhs_hi]` for a bp-relative long RHS, combining
 /// it into DX:AX (which already holds the left operand).
-fn emit_long_op_mem(op: BinOp, rhs: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>) {
+fn emit_long_op_mem(op: BinOp, rhs: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
     let (lo_op, hi_op) = long_arith_opcodes(op).expect("long arith opcode");
+    // Global-address RHS (long global / struct field / array element): disp16 form
+    // `<op> ax,[g+lo]; <op> dx,[g+hi]` with GlobalAddr fixups.
+    if let Some((gidx, lo)) = long_global_rhs_addr(rhs, locals) {
+        out.push(lo_op); out.push(0x06); // reg = ax, [disp16]
+        let p = out.len(); out.extend_from_slice(&lo.to_le_bytes());
+        fixups.push(Fixup { body_offset: p - 1, kind: FixupKind::GlobalAddr { global_idx: gidx } });
+        out.push(hi_op); out.push(0x16); // reg = dx, [disp16]
+        let p = out.len(); out.extend_from_slice(&(lo + 2).to_le_bytes());
+        fixups.push(Fixup { body_offset: p - 1, kind: FixupKind::GlobalAddr { global_idx: gidx } });
+        return;
+    }
     let disp = match rhs {
         Expr::Param(i) => long_param_disp(*i, locals),
         Expr::Local(i) => locals.disp(*i),
@@ -494,7 +524,7 @@ pub(crate) fn emit_long_to_dx_ax(value: &Expr, locals: &Locals<'_>, out: &mut Ve
                 && long_rhs_mem(right, locals) =>
         {
             emit_long_to_dx_ax(left, locals, out, fixups);
-            emit_long_op_mem(*op, right, locals, out);
+            emit_long_op_mem(*op, right, locals, out, fixups);
         }
         Expr::Call { name, args } => {
             emit_call(name, args, locals, out, fixups);
