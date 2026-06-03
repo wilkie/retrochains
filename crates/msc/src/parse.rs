@@ -29,6 +29,7 @@ pub(crate) fn parse_unit(source: &str) -> Result<Unit, EmitError> {
         fn_ptr_globals: std::collections::HashSet::new(),
         fn_ptr_params: std::collections::HashSet::new(),
         fn_ptr_locals: std::collections::HashSet::new(),
+        fn_names: std::collections::HashSet::new(),
     };
     let mut functions = Vec::new();
     let mut decl_order: Vec<TopDecl> = Vec::new();
@@ -135,7 +136,11 @@ pub(crate) fn parse_unit(source: &str) -> Result<Unit, EmitError> {
             }
         }
         let fn_idx = functions.len();
-        functions.push(parse_function(&mut p)?);
+        let parsed_fn = parse_function(&mut p)?;
+        // Register the function name so a later function can take its address
+        // by bare name (`apply(sq, 6)` → FuncAddr). Fixture 2314.
+        p.fn_names.insert(parsed_fn.name.clone());
+        functions.push(parsed_fn);
         decl_order.push(TopDecl::Function(fn_idx));
     }
     if functions.is_empty() {
@@ -3690,6 +3695,10 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                         Ok(Expr::Global(idx))
                     }
                 }
+            } else if p.fn_names.contains(&name) {
+                // A bare function name in value position is its address
+                // (`apply(sq, 6)` passes `OFFSET _sq`). Fixture 2314.
+                Ok(Expr::FuncAddr(name))
             } else {
                 Err(EmitError::Unsupported(format!("unknown identifier `{name}`")))
             }

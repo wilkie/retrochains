@@ -1092,6 +1092,9 @@ struct Parser<'a> {
     /// Local indices (within the function being parsed) that are
     /// function pointers (`int (*p)(void)`); reset per function.
     fn_ptr_locals: std::collections::HashSet<usize>,
+    /// Source names of all functions seen so far (definitions + prototypes).
+    /// A bare function name used as a value resolves to `Expr::FuncAddr`.
+    fn_names: std::collections::HashSet<String>,
 }
 
 impl<'a> Parser<'a> {

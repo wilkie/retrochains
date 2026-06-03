@@ -273,13 +273,14 @@ pub(crate) fn emit_push_arg(arg: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, 
             out.extend_from_slice(&byte_off.to_le_bytes());
             fixups.push(Fixup { body_offset, kind: FixupKind::GlobalAddr { global_idx: *array } });
         }
-        Expr::BinOp { .. } | Expr::Call { .. } | Expr::Ternary { .. }
+        Expr::BinOp { .. } | Expr::Call { .. } | Expr::CallPtr { .. } | Expr::Ternary { .. }
             | Expr::DerefWord { .. } | Expr::DerefByte { .. }
             | Expr::GlobalField { .. } | Expr::LocalField { .. }
             | Expr::DerefLocalField { .. } | Expr::DerefParamField { .. }
             | Expr::Index { .. } | Expr::IndexByte { .. }
             | Expr::LocalIndex { .. } | Expr::LocalIndexByte { .. }
             | Expr::ParamIndex { .. } | Expr::PtrIndexByte { .. }
+            | Expr::FuncAddr(..)
             | Expr::PostMutateGlobal { .. } | Expr::PreMutateGlobal { .. } | Expr::Seq { .. } => {
             // Computed value: build the result in AX then push.
             // Fixture 4144 (BinOp), 1270 (Call).
