@@ -375,7 +375,19 @@ pub(crate) fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8
                 // `*p++` — load old ptr into BX, advance ptr, read from old location.
                 Expr::PostMutateLocal { local_idx, step } => {
                     let disp = locals.disp(*local_idx);
-                    { out.push(0x8B); out.push(bp_modrm(0x5E, disp)); push_bp_disp(out, disp); }  // mov bx,[bp-p]
+                    // If AX still holds p (the immediately-preceding `p = <addr>`
+                    // store was `mov [bp-p], ax`), reuse it via `mov bx,ax`
+                    // instead of reloading `mov bx,[bp-p]` (fixture 1289).
+                    let store = {
+                        let mut v = vec![0x89, bp_modrm(0x46, disp)];
+                        push_bp_disp(&mut v, disp);
+                        v
+                    };
+                    if out.len() >= store.len() && out[out.len() - store.len()..] == store[..] {
+                        out.extend_from_slice(&[0x8B, 0xD8]); // mov bx, ax
+                    } else {
+                        out.push(0x8B); out.push(bp_modrm(0x5E, disp)); push_bp_disp(out, disp); // mov bx,[bp-p]
+                    }
                     emit_postmutate_local(*step, locals.size(*local_idx), disp, out);
                     out.extend_from_slice(&[0x8B, 0x07]);               // mov ax,[bx]
                 }
