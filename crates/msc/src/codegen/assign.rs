@@ -866,6 +866,11 @@ pub(crate) fn emit_assign_global(global_idx: usize, value: &Expr, locals: &Local
         && let Some(k) = right.fold(locals.inits)
         && (0..32).contains(&k)
     {
+        // Shift by 1 is done in place (shl/rcl, sar/shr+rcr); larger counts call
+        // the runtime helper. Fixtures 265/266 (in-place) vs 263/264 (helper).
+        if k == 1 && emit_long_global_4byte(global_idx, 0, 2, value, true, locals, out, fixups) {
+            return;
+        }
         let helper = match (op, locals.is_unsigned_global(global_idx)) {
             (BinOp::Shl, _) => "__aNNalshl",       // left shift is sign-agnostic
             (BinOp::Shr, false) => "__aNNalshr",   // arithmetic (signed)
@@ -1498,7 +1503,13 @@ pub(crate) fn emit_long_global_4byte(
                 out.extend_from_slice(&[0xD1, 0x26]); put_addr(out, fixups, lo); // shl word [lo],1
                 out.extend_from_slice(&[0xD1, 0x16]); put_addr(out, fixups, hi); // rcl word [hi],1
             }
-            _ => return false, // unsupported long compound op (mul/div/shl>1/shr)
+            BinOp::Shr if m == 1 => {
+                // high word first: sar/shr [hi],1 then rcr [lo],1 (threads carry down).
+                let hi_op = if locals.is_unsigned_global(global_idx) { 0x2E } else { 0x3E }; // shr /5 | sar /7
+                out.push(0xD1); out.push(hi_op); put_addr(out, fixups, hi);
+                out.extend_from_slice(&[0xD1, 0x1E]); put_addr(out, fixups, lo); // rcr word [lo],1
+            }
+            _ => return false, // unsupported long compound op (mul/div, shift>1)
         }
         return true;
     }
