@@ -222,7 +222,17 @@ pub(crate) fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8
         }
         Expr::CallPtr { target, args } => {
             // Indirect call through a function-pointer variable; result in AX.
-            crate::codegen::calls::emit_call_ptr(target, args, locals, out, fixups);
+            // Value context (non-tail): always clean up the pushed args.
+            crate::codegen::calls::emit_call_ptr(target, args, locals, false, out, fixups);
+        }
+        Expr::FuncAddr(name) => {
+            // `OFFSET _f` as a value in AX: `b8 <off16>` + FuncAddr fixup. The
+            // fixup location convention is body_offset+1 (the off16 immediate),
+            // so body_offset points at the `b8` opcode.
+            out.push(0xB8);
+            let body_offset = out.len() - 1;
+            out.extend_from_slice(&[0x00, 0x00]);
+            fixups.push(Fixup { body_offset, kind: FixupKind::FuncAddr { target: symbol_name(name) } });
         }
         Expr::StrLit(string_idx) => {
             // `mov ax, <str_addr>` — for use as a pointer value.

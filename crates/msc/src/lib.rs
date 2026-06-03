@@ -728,6 +728,10 @@ pub enum Expr {
     /// fnptr lvalue (`Global`/`Param`/`Local`); codegen pushes args RTL then
     /// emits `call WORD PTR <mem>` (FF /2) + `add sp, N`. Fixtures 2818/2750/3323.
     CallPtr { target: Box<Expr>, args: Vec<Expr> },
+    /// Address of a (named) function — `f` used as a value, not called. Loads
+    /// `OFFSET _f` via a `FuncAddr` fixup (`b8 off16` as a value, or stored
+    /// directly with `c7 /0 off16`). Fixtures 110, 187, 2211.
+    FuncAddr(String),
     /// Reference to an interned string literal — index into
     /// `Unit::strings`. Loaded as `mov ax, offset DGROUP:<CONST+off>`
     /// with a segment-relative FIXUP. Fixture 4103.
@@ -907,6 +911,7 @@ impl Expr {
             }
             Expr::Call { .. } => None,
             Expr::CallPtr { .. } => None,
+            Expr::FuncAddr(_) => None,
             Expr::StrLit(_) => None,
             Expr::Global(_) => None,
             Expr::Index { .. } | Expr::IndexByte { .. } | Expr::PtrIndexByte { .. } => None,
@@ -1080,6 +1085,9 @@ struct Parser<'a> {
     /// Param indices (within the function being parsed) that are
     /// function pointers (`int (*fp)(int)`); reset per function.
     fn_ptr_params: std::collections::HashSet<usize>,
+    /// Local indices (within the function being parsed) that are
+    /// function pointers (`int (*p)(void)`); reset per function.
+    fn_ptr_locals: std::collections::HashSet<usize>,
 }
 
 impl<'a> Parser<'a> {
@@ -1183,6 +1191,10 @@ enum FixupKind {
     /// floating accumulator). Seg-relative external FIXUP `c4 off 56 <idx>`
     /// (same shape as a COMDEF GlobalAddr). The placeholder stays 0.
     ExtData { target: &'static str },
+    /// Address of a defined (or extern) function — `OFFSET _f`. Segment-relative
+    /// FIXUP `c4 off 56 <idx>` targeting the function's EXTDEF index (every
+    /// defined function already has one). Placeholder offset stays 0. Fixture 110.
+    FuncAddr { target: String },
 }
 
 /// Same as `Fixup` but with the body_offset translated to the
@@ -2003,6 +2015,14 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
                         kind: FixupKind::FloatMarker { target },
                     });
                 }
+                FixupKind::FuncAddr { target } => {
+                    // `OFFSET _f` — placeholder stays 0; the linker substitutes
+                    // via the EXTDEF FIXUP. Fixup location is body_offset+1.
+                    ledata_fixups.push(ResolvedFixup {
+                        ledata_offset: caller_off + fx.body_offset + 1,
+                        kind: FixupKind::FuncAddr { target: target.clone() },
+                    });
+                }
                 FixupKind::GlobalAddr { global_idx } => {
                     // Patch placeholder bytes with the global's
                     // in-_DATA offset for PUBDEF targets. COMDEF
@@ -2261,6 +2281,14 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
                 let idx = *extdef_idx_of
                     .get(*target)
                     .unwrap_or_else(|| panic!("EXTDEF index missing for data extern `{target}`"));
+                payload.extend_from_slice(&[0xC4, off, 0x56, idx]);
+            }
+            FixupKind::FuncAddr { target } => {
+                // `OFFSET _f` — segment-relative reference to the function's
+                // EXTDEF index (every defined function carries one).
+                let idx = *extdef_idx_of
+                    .get(target)
+                    .unwrap_or_else(|| panic!("EXTDEF index missing for function `{target}`"));
                 payload.extend_from_slice(&[0xC4, off, 0x56, idx]);
             }
             FixupKind::TuLocalCall { .. } => unreachable!(),

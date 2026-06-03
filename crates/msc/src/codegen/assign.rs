@@ -110,6 +110,22 @@ pub(crate) fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_
         fixups.push(Fixup { body_offset, kind: FixupKind::GlobalAddr { global_idx: g } });
         return;
     }
+    // Function-pointer local = address-of-function (`int (*p)() = f`): store the
+    // link-time `OFFSET _f` directly with `c7 46 disp <off16>` + FuncAddr fixup,
+    // exactly like the address-of-global store above. Fixtures 110, 187, 2211.
+    if let AssignTarget::Local(i) = target
+        && !locals.is_far_ptr_local(i)
+        && let Expr::FuncAddr(name) = value
+    {
+        let disp = locals.disp(i);
+        out.push(0xC7);
+        out.push(bp_modrm(0x46, disp));
+        push_bp_disp(out, disp);
+        let body_offset = out.len() - 1; // last disp byte; off16 placeholder follows
+        out.extend_from_slice(&[0x00, 0x00]);
+        fixups.push(Fixup { body_offset, kind: FixupKind::FuncAddr { target: symbol_name(name) } });
+        return;
+    }
     let local_idx = match target {
         AssignTarget::Local(i) => i,
         AssignTarget::Param(i) => {

@@ -622,6 +622,12 @@ pub(crate) fn emit_return(
                 // epilogue (`mov sp,bp`) reclaims the arg space.
                 out.extend_from_slice(&[0x89, 0x46, 0xFE]); // mov [bp-2], ax
             }
+        } else if let Expr::CallPtr { target, args } = expr {
+            // `return <fnptr>(args);` — like the direct return-of-call, a slide
+            // frame skips the per-call cleanup (the epilogue's `mov sp,bp`
+            // reclaims the pushed args). Fixtures 187, 2211.
+            let skip_cleanup = frame.is_with_slide();
+            crate::codegen::calls::emit_call_ptr(target, args, locals, skip_cleanup, out, fixups);
         } else if let Expr::Param(i) = expr
             && locals.is_float_param(*i)
         {

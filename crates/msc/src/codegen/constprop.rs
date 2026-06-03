@@ -774,6 +774,9 @@ pub(crate) fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
                 prop_expr(a, cp);
             }
         }
+        Expr::FuncAddr(_) => {
+            // A relocatable address; nothing to const-fold.
+        }
         Expr::Index { .. } | Expr::IndexByte { .. } => {
             // Substitute index first, then try to fold to a known global array element.
             let (array, elem_size, index_ref) = match e {

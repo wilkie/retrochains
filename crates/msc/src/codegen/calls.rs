@@ -72,6 +72,7 @@ pub(crate) fn emit_call_ptr(
     target: &Expr,
     args: &[Expr],
     locals: &Locals<'_>,
+    skip_cleanup: bool,
     out: &mut Vec<u8>,
     fixups: &mut Vec<Fixup>,
 ) {
@@ -110,7 +111,7 @@ pub(crate) fn emit_call_ptr(
     let cleanup_bytes: usize = args.iter().map(|a| {
         if let Expr::FloatLit(_, is_double) = a { if *is_double { 8 } else { 4 } } else { 2 }
     }).sum();
-    if cleanup_bytes > 0 {
+    if cleanup_bytes > 0 && !skip_cleanup {
         out.push(0x83);
         out.push(0xC4);
         out.push(u8::try_from(cleanup_bytes).expect("cleanup fits in u8"));

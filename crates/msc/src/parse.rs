@@ -28,6 +28,7 @@ pub(crate) fn parse_unit(source: &str) -> Result<Unit, EmitError> {
         typedefs: std::collections::HashMap::new(),
         fn_ptr_globals: std::collections::HashSet::new(),
         fn_ptr_params: std::collections::HashSet::new(),
+        fn_ptr_locals: std::collections::HashSet::new(),
     };
     let mut functions = Vec::new();
     let mut decl_order: Vec<TopDecl> = Vec::new();
@@ -978,6 +979,7 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
     // `int <name>` separated by `,`. Phase 1 only handles int
     // parameters; other types come with later fixtures.
     p.fn_ptr_params.clear();
+    p.fn_ptr_locals.clear();
     let params = if matches!(p.peek(), Some(Tok::Kw("void"))) {
         p.bump();
         (Vec::<String>::new(), Vec::<Option<usize>>::new(), Vec::<bool>::new(), Vec::<bool>::new(), Vec::<bool>::new(), Vec::<usize>::new(), Vec::<usize>::new())
@@ -1398,6 +1400,55 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
                 found
             };
             skip_decl_modifiers(p);
+            // Function-pointer local: `<ret> (*name)(params) [= func];` — a
+            // 2-byte near pointer. The optional initializer is a function name,
+            // lowered to `name = FuncAddr(func)` in the prelude. The call site
+            // resolves `name(args)` to an indirect CallPtr. Fixtures 110/187/2211.
+            if matches!(p.peek(), Some(Tok::LParen))
+                && matches!(p.toks.get(p.pos + 1), Some(Tok::Star))
+                && matches!(p.toks.get(p.pos + 2), Some(Tok::Ident(_)))
+                && matches!(p.toks.get(p.pos + 3), Some(Tok::RParen))
+                && matches!(p.toks.get(p.pos + 4), Some(Tok::LParen))
+            {
+                p.bump(); p.bump(); // `(` `*`
+                let fpname = match p.bump().cloned() { Some(Tok::Ident(s)) => s, _ => unreachable!() };
+                p.bump(); // `)`
+                p.eat(&Tok::LParen)?;
+                let mut depth = 1usize;
+                while depth > 0 {
+                    match p.bump() {
+                        Some(Tok::LParen) => depth += 1,
+                        Some(Tok::RParen) => depth -= 1,
+                        None => return Err(EmitError::Unsupported("unterminated fnptr parameter list".to_owned())),
+                        _ => {}
+                    }
+                }
+                let local_idx = locals.len();
+                p.local_names.push(fpname);
+                p.fn_ptr_locals.insert(local_idx);
+                let spec = LocalSpec {
+                    size: 2, array_len: 1, init: None, struct_idx: None, is_long: false,
+                    init_is_literal: false, is_far_ptr: false, pointee_size: 2, is_unsigned: false,
+                    init_via_cast: false, init_via_type_cast: false, is_float: false, float_bits: None,
+                };
+                p.local_specs.push(spec.clone());
+                locals.push(spec);
+                // Optional `= <function>` initializer → prelude store of OFFSET _func.
+                if matches!(p.peek(), Some(Tok::Assign)) {
+                    p.bump();
+                    let fname = match p.bump().cloned() {
+                        Some(Tok::Ident(s)) => s,
+                        other => return Err(EmitError::Unsupported(format!(
+                            "expected function name initializing a function pointer, got {other:?}"))),
+                    };
+                    prelude.push(Stmt::Assign {
+                        target: AssignTarget::Local(local_idx),
+                        value: Expr::FuncAddr(fname),
+                    });
+                }
+                if matches!(p.peek(), Some(Tok::Comma)) { p.bump(); continue; }
+                break;
+            }
             let star_count = {
                 let mut n = 0usize;
                 while matches!(p.peek(), Some(Tok::Star)) { p.bump(); n += 1; }
@@ -3356,7 +3407,12 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                 p.bump(); // (
                 let args = parse_call_args(p)?;
                 // Indirect call when `name` is a function-pointer variable: a
-                // fnptr param (shadows globals) or a fnptr global.
+                // fnptr local (shadows all), param (shadows globals), or global.
+                if let Some(idx) = p.local_names.iter().position(|n| *n == name)
+                    && p.fn_ptr_locals.contains(&idx)
+                {
+                    return Ok(Expr::CallPtr { target: Box::new(Expr::Local(idx)), args });
+                }
                 if let Some(idx) = p.param_names.iter().position(|n| *n == name)
                     && p.fn_ptr_params.contains(&idx)
                 {
