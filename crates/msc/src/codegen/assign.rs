@@ -504,6 +504,27 @@ pub(crate) fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_
             }
         }
     }
+    // Local int `x /= K` / `x %= K` by a foldable RHS: divisor-first idiv (MSC does
+    // NOT strength-reduce, even `/= 2`). `mov cx,K; mov ax,[x]; cwd|xor dx,dx;
+    // idiv|div cx; mov [x],ax` (div) or `mov [x],dx; mov ax,dx` (mod, result in AX).
+    if locals.size(local_idx) == 2 && !locals.is_long_local(local_idx)
+        && let Expr::BinOp { op: op @ (BinOp::Div | BinOp::Mod), left, right } = value
+        && matches!(left.as_ref(), Expr::Local(l) if *l == local_idx)
+        && let Some(k) = right.fold(locals.inits)
+    {
+        let unsigned = locals.is_unsigned_local(local_idx);
+        out.push(0xB9); out.extend_from_slice(&((k as u32 & 0xFFFF) as u16).to_le_bytes()); // mov cx,K
+        out.push(0x8B); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp); // mov ax,[x]
+        if unsigned { out.extend_from_slice(&[0x33, 0xD2, 0xF7, 0xF1]); } // xor dx,dx; div cx
+        else { out.extend_from_slice(&[0x99, 0xF7, 0xF9]); } // cwd; idiv cx
+        if matches!(op, BinOp::Div) {
+            out.push(0x89); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp); // mov [x],ax
+        } else {
+            out.push(0x89); out.push(bp_modrm(0x56, disp)); push_bp_disp(out, disp); // mov [x],dx
+            out.extend_from_slice(&[0x8B, 0xC2]); // mov ax,dx
+        }
+        return;
+    }
     // Add/sub-to-memory peephole: `x = x + other` / `x = x - other` where
     // `other` is a non-constant expression (local/param/global). Emits
     // `load other; add/sub [bp-disp], ax` (6 bytes vs 9 for load-modify-store).

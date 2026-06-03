@@ -756,8 +756,16 @@ pub(crate) fn emit_return(
                 push_bp_disp(&mut v, disp);
                 v
             };
-            let ax_already_set = out.len() >= prev_store.len()
-                && out[out.len()-prev_store.len()..] == *prev_store;
+            // `x %= K` ends `mov [x],dx; mov ax,dx`, which also leaves AX = x.
+            let prev_store_mod = {
+                let mr = bp_modrm(0x56, disp);
+                let mut v = vec![0x89, mr];
+                push_bp_disp(&mut v, disp);
+                v.extend_from_slice(&[0x8B, 0xC2]);
+                v
+            };
+            let ends_with = |pat: &[u8]| out.len() >= pat.len() && out[out.len() - pat.len()..] == *pat;
+            let ax_already_set = ends_with(&prev_store) || ends_with(&prev_store_mod);
             if !ax_already_set {
                 emit_expr_to_ax(expr, locals, out, fixups);
             }
