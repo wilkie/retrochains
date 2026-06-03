@@ -1,5 +1,39 @@
 use crate::*;
 
+/// Dead-code elimination around `goto`: (1) statements after an unconditional
+/// top-level `goto` are unreachable until the next label, so drop them; (2) a
+/// `goto L` whose target `L` is reachable from that point through only labels
+/// (no intervening code) is a jump to the next instruction — MSC elides it.
+pub(crate) fn drop_dead_after_goto(stmts: Vec<Stmt>) -> Vec<Stmt> {
+    // Pass 1: drop unreachable statements after an unconditional goto.
+    let mut live: Vec<Stmt> = Vec::with_capacity(stmts.len());
+    let mut dropping = false;
+    for s in stmts {
+        match &s {
+            Stmt::Label(_) => { dropping = false; live.push(s); }
+            _ if dropping => {}
+            Stmt::Goto(_) => { dropping = true; live.push(s); }
+            _ => live.push(s),
+        }
+    }
+    // Pass 2: drop a goto whose target label is reachable through only labels.
+    let mut out: Vec<Stmt> = Vec::with_capacity(live.len());
+    for (i, s) in live.iter().enumerate() {
+        if let Stmt::Goto(l) = s {
+            let mut reaches = false;
+            for next in &live[i + 1..] {
+                match next {
+                    Stmt::Label(m) if m == l => { reaches = true; break; }
+                    Stmt::Label(_) => {}
+                    _ => break,
+                }
+            }
+            if reaches { continue; } // jump to the next instruction — elide
+        }
+        out.push(s.clone());
+    }
+    out
+}
 pub(crate) fn const_prop_globals(
     stmts: &[Stmt],
     local_specs: &[LocalSpec],
@@ -33,6 +67,7 @@ pub(crate) fn const_prop_globals(
             cp.l_known.insert(i, k);
         }
     }
+    let stmts = drop_dead_after_goto(stmts.to_vec());
     let new_stmts: Vec<Stmt> = stmts.iter().map(|s| {
         let mut new_stmt = s.clone();
         prop_stmt(&mut new_stmt, &mut cp);
