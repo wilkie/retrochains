@@ -1107,10 +1107,22 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
                         )));
                     }
                 };
+                // `struct S arr[N];` — an array of N structs is a byte array of
+                // N*sizeof(S). Element `arr[i]` lives at byte i*sizeof(S).
+                let mut elem_count = 1usize;
+                if !is_ptr && matches!(p.peek(), Some(Tok::LBrack)) {
+                    p.bump();
+                    let n = parse_signed_int(p)?;
+                    if n <= 0 {
+                        return Err(EmitError::Unsupported(format!("struct array length must be positive, got {n}")));
+                    }
+                    p.eat(&Tok::RBrack)?;
+                    elem_count = n as usize;
+                }
                 let spec = if is_ptr {
                     LocalSpec { size: 2, array_len: 1, init: None, struct_idx: Some(sidx), is_long: false, init_is_literal: false, is_far_ptr: false, pointee_size: stotal, is_unsigned: false, init_via_cast: false, init_via_type_cast: false, is_float: false, float_bits: None }
                 } else {
-                    LocalSpec { size: 1, array_len: stotal, init: None, struct_idx: Some(sidx), is_long: false, init_is_literal: false, is_far_ptr: false, pointee_size: 0, is_unsigned: false, init_via_cast: false, init_via_type_cast: false, is_float: false, float_bits: None }
+                    LocalSpec { size: 1, array_len: stotal * elem_count, init: None, struct_idx: Some(sidx), is_long: false, init_is_literal: false, is_far_ptr: false, pointee_size: 0, is_unsigned: false, init_via_cast: false, init_via_type_cast: false, is_float: false, float_bits: None }
                 };
                 let local_idx = locals.len();
                 p.local_names.push(lname);
@@ -1831,6 +1843,34 @@ pub(crate) fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
                 }
                 p.eat(&Tok::Assign)?;
                 let value = parse_expr(p)?;
+                p.eat(&Tok::Semi)?;
+                return Ok(Stmt::Assign { target, value });
+            }
+            // `<struct-array-local>[K].<field> = <expr>;` — store into an element
+            // of an array of structs (byte_off = K*sizeof(S) + field_off).
+            if matches!(p.peek(), Some(Tok::LBrack))
+                && let Some(local_idx) = p.local_names.iter().position(|n| *n == name)
+                && let Some(sidx) = p.local_specs[local_idx].struct_idx
+                && p.local_specs[local_idx].pointee_size == 0
+            {
+                p.bump();
+                let index = parse_expr(p)?;
+                p.eat(&Tok::RBrack)?;
+                let init_view: Vec<Option<i32>> = p.local_specs.iter().map(|l| l.init).collect();
+                let k = index.fold(&init_view).ok_or_else(|| EmitError::Unsupported(
+                    "non-constant struct-array index not yet supported".to_owned()))?;
+                let stotal = p.structs[sidx].total_bytes;
+                p.eat(&Tok::Dot)?;
+                let (field_off, size) = parse_field_lookup(p, sidx)?;
+                let byte_off = u16::try_from(k as i64 * stotal as i64 + field_off as i64)
+                    .expect("struct-array field offset fits");
+                let target = AssignTarget::LocalField { local: local_idx, byte_off, size };
+                let value = if let Some(v) = parse_compound_rhs(p, &target)? {
+                    v
+                } else {
+                    p.eat(&Tok::Assign)?;
+                    parse_expr(p)?
+                };
                 p.eat(&Tok::Semi)?;
                 return Ok(Stmt::Assign { target, value });
             }
@@ -2998,6 +3038,25 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                 // `<local>[<expr>]` — element access on a local
                 // array. Picks the byte-load + cbw variant for char
                 // arrays, word load otherwise.
+                // `<struct-array-local>[K].<field>` — element access into an array
+                // of structs. byte_off = K*sizeof(S) + field_off. Constant K.
+                if matches!(p.peek(), Some(Tok::LBrack))
+                    && let Some(sidx) = p.local_specs[idx].struct_idx
+                    && p.local_specs[idx].pointee_size == 0 // value array, not a pointer
+                {
+                    p.bump();
+                    let index = parse_expr(p)?;
+                    p.eat(&Tok::RBrack)?;
+                    let init_view: Vec<Option<i32>> = p.local_specs.iter().map(|l| l.init).collect();
+                    let k = index.fold(&init_view).ok_or_else(|| EmitError::Unsupported(
+                        "non-constant struct-array index not yet supported".to_owned()))?;
+                    let stotal = p.structs[sidx].total_bytes;
+                    p.eat(&Tok::Dot)?;
+                    let (field_off, size) = parse_field_lookup(p, sidx)?;
+                    let byte_off = u16::try_from(k as i64 * stotal as i64 + field_off as i64)
+                        .expect("struct-array field offset fits");
+                    return Ok(Expr::LocalField { local: idx, byte_off, size });
+                }
                 if matches!(p.peek(), Some(Tok::LBrack)) {
                     p.bump();
                     let index = parse_expr(p)?;
