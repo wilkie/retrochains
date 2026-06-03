@@ -976,6 +976,12 @@ struct Parser<'a> {
     global_names: Vec<String>,
     /// Same source order, used to materialize the `Unit::globals`.
     globals: Vec<Global>,
+    /// Multidimensional array shapes, keyed by global / local index.
+    /// `[2,3]` for `int a[2][3]`. Absent for scalars and 1-D arrays.
+    /// Lets `a[i][j]` with constant indices fold to a flat element offset
+    /// (row-major: `i*3 + j`) reusing the 1-D Index codegen.
+    global_dims: std::collections::HashMap<usize, Vec<usize>>,
+    local_dims: std::collections::HashMap<usize, Vec<usize>>,
     /// Named struct definitions collected at parse time, by source
     /// order. The position in the Vec is the `struct_idx` referenced
     /// by `LocalSpec::struct_idx` and `Global::struct_idx`.

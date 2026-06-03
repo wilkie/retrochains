@@ -19,6 +19,8 @@ pub(crate) fn parse_unit(source: &str) -> Result<Unit, EmitError> {
         param_is_unsigned: Vec::new(),
         global_names: Vec::new(),
         globals: Vec::new(),
+        global_dims: std::collections::HashMap::new(),
+        local_dims: std::collections::HashMap::new(),
         structs: Vec::new(),
         strings: Vec::new(),
         enum_consts: std::collections::HashMap::new(),
@@ -520,9 +522,13 @@ pub(crate) fn parse_global_decl(p: &mut Parser<'_>) -> Result<(), EmitError> {
             )));
         }
     };
-    // Optional `[N]` (or `[]` with init) for an array declaration.
-    // The element count determines the COMDEF or _DATA byte length.
+    // Optional `[N]` (or `[]` with init) for an array declaration, plus any
+    // further dimensions for a multidimensional array (`int a[N][M]`). The total
+    // element count (product of dims) determines the COMDEF / _DATA byte length;
+    // `dims` is recorded so `a[i][j]` with constant indices folds to a flat
+    // row-major offset.
     let mut implicit_array_len = false;
+    let mut dims: Vec<usize> = Vec::new();
     let array_len = if matches!(p.peek(), Some(Tok::LBrack)) {
         p.bump();
         if matches!(p.peek(), Some(Tok::RBrack)) {
@@ -537,9 +543,21 @@ pub(crate) fn parse_global_decl(p: &mut Parser<'_>) -> Result<(), EmitError> {
                 "array length must be positive, got {k}"
             )));
         }
-        let n = k as usize;
         p.eat(&Tok::RBrack)?;
-        n
+        let mut total = k as usize;
+        dims.push(k as usize);
+        // Further dimensions: `[M][P]...`.
+        while matches!(p.peek(), Some(Tok::LBrack)) {
+            p.bump();
+            let m = parse_signed_int(p)?;
+            if m <= 0 {
+                return Err(EmitError::Unsupported(format!("array length must be positive, got {m}")));
+            }
+            p.eat(&Tok::RBrack)?;
+            dims.push(m as usize);
+            total *= m as usize;
+        }
+        total
         }
     } else {
         1
@@ -672,6 +690,9 @@ pub(crate) fn parse_global_decl(p: &mut Parser<'_>) -> Result<(), EmitError> {
     // Implicit array size from initializer count (`int a[] = {1,2,3};`).
     if implicit_array_len {
         array_len = init.as_ref().map(|v| v.len()).unwrap_or(0).max(1);
+    }
+    if dims.len() > 1 {
+        p.global_dims.insert(p.global_names.len(), dims.clone());
     }
     p.global_names.push(name.clone());
     // A long POINTER (`long *p`) is just a near pointer; its long-ness belongs
@@ -963,6 +984,7 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
     // function's params before parsing the body.
     p.local_names.clear();
     p.local_specs.clear();
+    p.local_dims.clear();
     p.param_names = params.clone();
     p.param_struct_idxs = param_struct_idxs;
     p.param_is_char = param_is_char.clone();
@@ -1223,7 +1245,8 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
                     )));
                 }
             };
-            // Optional `[N]` for an array decl.
+            // Optional `[N]` (plus further dims for `int a[N][M]`) for an array.
+            let mut local_dims_vec: Vec<usize> = Vec::new();
             let array_len = if matches!(p.peek(), Some(Tok::LBrack)) {
                 p.bump();
                 let k = parse_signed_int(p)?;
@@ -1233,11 +1256,26 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
                     )));
                 }
                 p.eat(&Tok::RBrack)?;
-                k as usize
+                let mut total = k as usize;
+                local_dims_vec.push(k as usize);
+                while matches!(p.peek(), Some(Tok::LBrack)) {
+                    p.bump();
+                    let m = parse_signed_int(p)?;
+                    if m <= 0 {
+                        return Err(EmitError::Unsupported(format!("local array length must be positive, got {m}")));
+                    }
+                    p.eat(&Tok::RBrack)?;
+                    local_dims_vec.push(m as usize);
+                    total *= m as usize;
+                }
+                total
             } else {
                 1
             };
             let local_idx = locals.len();
+            if local_dims_vec.len() > 1 {
+                p.local_dims.insert(local_idx, local_dims_vec);
+            }
             p.local_names.push(lname);
             // Long: 4-byte slot modeled as a 2-word "array". Reads via
             // `Expr::Local(idx)` pick up the low word at [bp-disp].
@@ -1820,8 +1858,15 @@ pub(crate) fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
                 && let Some(local_idx) = p.local_names.iter().position(|n| *n == name)
             {
                 p.bump(); // [
-                let index_expr = parse_expr(p)?;
+                let mut index_expr = parse_expr(p)?;
                 p.eat(&Tok::RBrack)?;
+                // Multidimensional local `a[i][j] = ...` folds to a flat element
+                // index, then flows through the ordinary 1-D indexed-store path.
+                if let Some(dims) = p.local_dims.get(&local_idx).cloned()
+                    && let Some(flat) = fold_multidim_flat(p, &index_expr, &dims)?
+                {
+                    index_expr = Expr::IntLit(flat);
+                }
                 // Try folding against the local-init view so simple
                 // `a[i] = ...` with `i = K` known at decl folds.
                 let init_view: Vec<Option<i32>> = p.local_specs.iter().map(|l| l.init).collect();
@@ -1895,9 +1940,16 @@ pub(crate) fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
                 p.bump(); // [
                 let index_expr = parse_expr(p)?;
                 p.eat(&Tok::RBrack)?;
-                let k = index_expr.fold(&[]).ok_or_else(|| EmitError::Unsupported(
-                    "non-constant array index in store not yet supported".to_owned(),
-                ))?;
+                // Multidimensional `a[i][j] = ...` folds to a flat element index.
+                let multidim_flat = if let Some(dims) = p.global_dims.get(&array_idx).cloned() {
+                    fold_multidim_flat(p, &index_expr, &dims)?
+                } else { None };
+                let k = match multidim_flat {
+                    Some(flat) => flat,
+                    None => index_expr.fold(&[]).ok_or_else(|| EmitError::Unsupported(
+                        "non-constant array index in store not yet supported".to_owned(),
+                    ))?,
+                };
                 let g = &p.globals[array_idx];
                 let target = if g.is_pointer {
                     // `<ptr>[K] = ...` — load pointer then store at
@@ -2130,6 +2182,41 @@ pub(crate) fn skip_decl_modifiers(p: &mut Parser<'_>) -> usize {
 /// `Expr::Index{,Byte}` (global) or `Expr::LocalIndex{,Byte}` (local)
 /// so the rewritten expression `a[K] op V` lowers through the
 /// existing emit_binop path.
+/// Multidimensional subscript folding. The caller has parsed `name[idx0]` and
+/// passes `idx0` plus the array's recorded `dims`. If there are further `[idxN]`
+/// subscripts, parse them and fold the whole list to a flat row-major element
+/// index (constant indices only — a runtime multidim index is left unsupported
+/// for now). Returns `Ok(Some(flat))` when this is a multidim access, `Ok(None)`
+/// when it is an ordinary 1-D subscript (no extra `[`).
+pub(crate) fn fold_multidim_flat(
+    p: &mut Parser<'_>,
+    idx0: &Expr,
+    dims: &[usize],
+) -> Result<Option<i32>, EmitError> {
+    if !matches!(p.peek(), Some(Tok::LBrack)) {
+        return Ok(None);
+    }
+    let init_view: Vec<Option<i32>> = p.local_specs.iter().map(|l| l.init).collect();
+    let mut idxs: Vec<i32> = Vec::new();
+    let fold_one = |e: &Expr, iv: &[Option<i32>]| -> Result<i32, EmitError> {
+        e.fold(iv).ok_or_else(|| EmitError::Unsupported(
+            "runtime multidimensional array index not yet supported".to_owned()))
+    };
+    idxs.push(fold_one(idx0, &init_view)?);
+    while matches!(p.peek(), Some(Tok::LBrack)) {
+        p.bump();
+        let e = parse_expr(p)?;
+        p.eat(&Tok::RBrack)?;
+        idxs.push(fold_one(&e, &init_view)?);
+    }
+    // Row-major flat index: sum(idx[d] * product(dims[d+1..])).
+    let mut flat = 0i32;
+    for (d, &ix) in idxs.iter().enumerate() {
+        let stride: usize = dims.get(d + 1..).map(|rest| rest.iter().product()).unwrap_or(1);
+        flat += ix * stride as i32;
+    }
+    Ok(Some(flat))
+}
 pub(crate) fn parse_compound_rhs_for_indexed(
     p: &mut Parser<'_>,
     container_idx: usize,
@@ -2810,6 +2897,18 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                     p.bump();
                     let index = parse_expr(p)?;
                     p.eat(&Tok::RBrack)?;
+                    // Multidimensional local `a[i][j]` (constant indices) folds to
+                    // a flat row-major element index, reusing the 1-D read.
+                    if let Some(dims) = p.local_dims.get(&idx).cloned()
+                        && let Some(flat) = fold_multidim_flat(p, &index, &dims)?
+                    {
+                        let fi = Box::new(Expr::IntLit(flat));
+                        return if p.local_specs[idx].size == 1 {
+                            Ok(Expr::LocalIndexByte { local: idx, index: fi })
+                        } else {
+                            Ok(Expr::LocalIndex { local: idx, index: fi })
+                        };
+                    }
                     // A POINTER local: `p[K]` is `*(p + K)` — a deref, not an
                     // array-slot read. K==0 yields a bare `*p` so the alias pass
                     // can fold it; K!=0 derefs `p + K*pointee`.
@@ -2909,6 +3008,19 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                     p.bump();
                     let index = parse_expr(p)?;
                     p.eat(&Tok::RBrack)?;
+                    // Multidimensional `a[i][j]` (constant indices) folds to a flat
+                    // row-major element index, reusing the 1-D Index read.
+                    if let Some(dims) = p.global_dims.get(&idx).cloned()
+                        && let Some(flat) = fold_multidim_flat(p, &index, &dims)?
+                    {
+                        let g = &p.globals[idx];
+                        let fi = Box::new(Expr::IntLit(flat));
+                        return Ok(if g.element_size == 1 {
+                            Expr::IndexByte { array: idx, index: fi }
+                        } else {
+                            Expr::Index { array: idx, index: fi }
+                        });
+                    }
                     let g = &p.globals[idx];
                     if g.is_pointer {
                         // Pointer-indexed read. Phase 1 covers the
