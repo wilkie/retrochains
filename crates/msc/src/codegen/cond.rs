@@ -394,6 +394,14 @@ pub(crate) fn emit_cond_cmp_inner(cond: &Cond, locals: &Locals<'_>, out: &mut Ve
             out.extend_from_slice(&[0x8A, 0x46, param_disp(*rj) as u8]);
             out.extend_from_slice(&[0x38, 0x46, param_disp(*li) as u8]);
         }
+        Cond::Cmp { op: _, left: Expr::Param(li), right: Expr::Param(rj) }
+            if locals.is_char_param(*li) && !locals.is_char_param(*rj) =>
+        {
+            // char (left) vs int (right): widen the char into AX, then word
+            // `cmp ax, [right]` — result = left - right (fixture 3619).
+            out.extend_from_slice(&[0x8A, 0x46, param_disp(*li) as u8, 0x98]); // mov al,[li]; cbw
+            out.extend_from_slice(&[0x3B, 0x46, param_disp(*rj) as u8]); // cmp ax,[rj]
+        }
         Cond::Cmp { op: _, left: Expr::Param(li), right: Expr::Param(rj) } => {
             // MSC loads right (rj) into AX, then `cmp [left], ax`.
             emit_load_param(*rj, out);
