@@ -877,7 +877,67 @@ pub(crate) fn emit_while(
     out: &mut Vec<u8>,
     fixups: &mut Vec<Fixup>,
 ) {
+    // Infinite loop with a trailing `if (c) break;`: MSC folds the break into the
+    // back edge — `while (1) { prefix; if (c) break; }` becomes
+    // `do { prefix } while (!c)`, looping back on the inverted condition.
+    if matches!(cond, Cond::Truthy(Expr::IntLit(k)) if *k != 0)
+        && let Some((prefix, neg)) = loop_trailing_break_rewrite(body_stmt)
+    {
+        let dw_body = Stmt::Block(prefix);
+        emit_do_while(&dw_body, &neg, locals, frame, return_int, return_long, out, fixups);
+        return;
+    }
     emit_loop(cond, &[body_stmt], None, None, locals, frame, return_int, return_long, out, fixups);
+}
+/// The RelOp whose truth is the negation of `op`.
+pub(crate) fn negate_relop(op: RelOp) -> RelOp {
+    match op {
+        RelOp::Eq => RelOp::Ne, RelOp::Ne => RelOp::Eq,
+        RelOp::Lt => RelOp::Ge, RelOp::Ge => RelOp::Lt,
+        RelOp::Gt => RelOp::Le, RelOp::Le => RelOp::Gt,
+    }
+}
+/// Negate a condition for use as a loop-back test. `And`/`Or` bail (None).
+pub(crate) fn negate_cond(c: &Cond) -> Option<Cond> {
+    match c {
+        Cond::Cmp { op, left, right } =>
+            Some(Cond::Cmp { op: negate_relop(*op), left: left.clone(), right: right.clone() }),
+        // `if (e) break` loops back while e == 0.
+        Cond::Truthy(e) => Some(Cond::Cmp { op: RelOp::Eq, left: e.clone(), right: Expr::IntLit(0) }),
+        Cond::And(_, _) | Cond::Or(_, _) => None,
+    }
+}
+/// True when `s` contains a `break`/`continue` belonging to the current loop
+/// (i.e. not absorbed by a nested loop or switch).
+fn stmt_has_loop_break(s: &Stmt) -> bool {
+    match s {
+        Stmt::Break | Stmt::Continue => true,
+        Stmt::If { then_branch, else_branch, .. } =>
+            stmt_has_loop_break(then_branch)
+                || else_branch.as_ref().is_some_and(|e| stmt_has_loop_break(e)),
+        Stmt::Block(ss) => ss.iter().any(stmt_has_loop_break),
+        _ => false, // nested While/DoWhile/For/Switch own their break/continue
+    }
+}
+/// If a loop body is `{ prefix...; if (c) break; }` with no other loop-level
+/// break/continue, return the (cloned) prefix and the negated break condition
+/// so the loop can be lowered to `do { prefix } while (!c)`.
+pub(crate) fn loop_trailing_break_rewrite(body: &Stmt) -> Option<(Vec<Stmt>, Cond)> {
+    let stmts: &[Stmt] = match body {
+        Stmt::Block(s) => s,
+        other => std::slice::from_ref(other),
+    };
+    let last = stmts.last()?;
+    let Stmt::If { cond, then_branch, else_branch } = last else { return None };
+    if else_branch.is_some() || !matches!(then_branch.as_ref(), Stmt::Break) {
+        return None;
+    }
+    let negated = negate_cond(cond)?;
+    let prefix: Vec<Stmt> = stmts[..stmts.len() - 1].to_vec();
+    if prefix.iter().any(stmt_has_loop_break) {
+        return None;
+    }
+    Some((prefix, negated))
 }
 /// `for (<init>; <cond>; <step>) <body>` — MSC's layout.
 ///
@@ -913,6 +973,16 @@ pub(crate) fn emit_for(
     fixups: &mut Vec<Fixup>,
 ) {
     emit_stmt(init, locals, frame, return_int, return_long, out, fixups);
+    // Infinite for-loop with no step and a trailing `if (c) break;` →
+    // `do { prefix } while (!c)` after the init (same fold as while(1)).
+    if matches!(step, Stmt::Empty)
+        && matches!(cond, Cond::Truthy(Expr::IntLit(k)) if *k != 0)
+        && let Some((prefix, neg)) = loop_trailing_break_rewrite(body_stmt)
+    {
+        let dw_body = Stmt::Block(prefix);
+        emit_do_while(&dw_body, &neg, locals, frame, return_int, return_long, out, fixups);
+        return;
+    }
     // After the init runs, check if the condition is known true.
     // If so, use do-while (body then step); otherwise while (step then body).
     let entry = for_entry_fold(init, cond, locals);
@@ -1663,6 +1733,16 @@ pub(crate) fn emit_do_while(
     out: &mut Vec<u8>,
     fixups: &mut Vec<Fixup>,
 ) {
+    // `do { prefix; if (c) break; } while (1);` — an infinite do-while with a
+    // trailing break — folds the break into the back edge: `do { prefix } while (!c)`.
+    if matches!(cond, Cond::Truthy(Expr::IntLit(k)) if *k != 0)
+        && let Some((prefix, neg)) = loop_trailing_break_rewrite(body_stmt)
+    {
+        let dw_body = Stmt::Block(prefix);
+        // `neg` is never a compile-time constant, so this does not re-trigger.
+        emit_do_while(&dw_body, &neg, locals, frame, return_int, return_long, out, fixups);
+        return;
+    }
     // Clear init values for any local mutated in the body, matching
     // the same treatment in emit_loop (used by emit_while/emit_for).
     let body_mutations = collect_loop_body_mutations(&[body_stmt]);
