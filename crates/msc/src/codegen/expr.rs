@@ -979,6 +979,50 @@ pub(crate) fn emit_binop(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'
         }
         return;
     }
+    // Pointer param ± integer CONSTANT: scale the constant by the element size
+    // and emit `add/sub ax, imm16` (not the raw ±1 inc/dec peephole, which would
+    // adjust the pointer by 1 byte). `p - 1` (int*) → `mov ax,[p]; sub ax,2`.
+    // Fixtures 3256, 3382.
+    if matches!(op, BinOp::Add | BinOp::Sub)
+        && let Expr::Param(pi) = left
+        && let Expr::IntLit(k) = right
+        && locals.param_pointee_size(*pi) >= 2
+        && locals.param_pointee_size(*pi).is_power_of_two()
+    {
+        let elem = locals.param_pointee_size(*pi) as i32;
+        let imm = ((*k * elem) as u32 & 0xFFFF) as u16;
+        emit_expr_to_ax(left, locals, out, fixups); // mov ax, [p]
+        out.push(if matches!(op, BinOp::Sub) { 0x2D } else { 0x05 }); // sub/add ax, imm16
+        out.extend_from_slice(&imm.to_le_bytes());
+        return;
+    }
+    // Pointer param + integer-variable param: load the INDEX, scale it by the
+    // element size, then add the pointer. `p + n` (int*) →
+    // `mov ax,[n]; shl ax,1; add ax,[p]`. Fixture 3380.
+    if matches!(op, BinOp::Add) {
+        let pair = match (left, right) {
+            (Expr::Param(a), Expr::Param(b))
+                if locals.param_pointee_size(*a) >= 2
+                    && locals.param_pointee_size(*a).is_power_of_two()
+                    && locals.param_pointee_size(*b) == 0 => Some((*a, *b)),
+            (Expr::Param(a), Expr::Param(b))
+                if locals.param_pointee_size(*b) >= 2
+                    && locals.param_pointee_size(*b).is_power_of_two()
+                    && locals.param_pointee_size(*a) == 0 => Some((*b, *a)),
+            _ => None,
+        };
+        if let Some((pp, ip)) = pair {
+            let elem = locals.param_pointee_size(pp);
+            let idisp = param_disp(ip);
+            let pdisp = param_disp(pp);
+            out.push(0x8B); out.push(bp_modrm(0x46, idisp)); push_bp_disp(out, idisp); // mov ax,[n]
+            for _ in 0..elem.trailing_zeros() {
+                out.extend_from_slice(&[0xD1, 0xE0]); // shl ax, 1
+            }
+            out.push(0x03); out.push(bp_modrm(0x46, pdisp)); push_bp_disp(out, pdisp); // add ax,[p]
+            return;
+        }
+    }
     // Pointer minus integer (pointer arithmetic): `p - n` → `p - n*elem`.
     // Load the pointer into AX, the index into CX, scale CX by the element
     // size (`shl cx,1` per power-of-two step), then `sub ax,cx`. Fixture 3648.
