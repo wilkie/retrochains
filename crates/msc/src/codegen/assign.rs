@@ -320,7 +320,9 @@ pub(crate) fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_
     {
         let (kind, shift_k) = match (op, k) {
             (BinOp::Shl, k) if k > 0 && k < 16 => (Some(0x66u8), k as u8),
-            (BinOp::Shr, k) if k > 0 && k < 16 => (Some(0x7Eu8), k as u8),
+            // `>>=`: SAR (/7, 0x7E) for signed, SHR (/5, 0x6E) for unsigned.
+            (BinOp::Shr, k) if k > 0 && k < 16 =>
+                (Some(if locals.is_unsigned_local(local_idx) { 0x6Eu8 } else { 0x7Eu8 }), k as u8),
             (BinOp::Mul, k) if k >= 2 && (k & (k - 1)) == 0 => {
                 let mut bits = 0u8;
                 let mut v = k as u32;
@@ -648,6 +650,39 @@ pub(crate) fn emit_assign_param(param_idx: usize, value: &Expr, locals: &Locals<
         };
         out.push(0xD3); out.push(bp_modrm(modrm_base, disp)); push_bp_disp(out, disp); // sar/shl [bp+param], cl
         return;
+    }
+    // `param <<=/>>= K` (and `param *= 2^k`) by a constant → in-place shift:
+    //   word: `d1 modrm disp` for K=1, else `b1 K d3 modrm disp`.
+    //   byte (char param): `d0`/`d2`.
+    //   modrm reg: SHL=4 (0x66), SHR-unsigned=5 (0x6E), SAR-signed=7 (0x7E).
+    if let Expr::BinOp { op, left, right } = value
+        && matches!(left.as_ref(), Expr::Param(i) if *i == param_idx)
+        && let Some(k) = right.fold(locals.inits)
+    {
+        let shift_k = match (op, k) {
+            (BinOp::Shl, k) if k > 0 && k < 16 => Some(k as u8),
+            (BinOp::Shr, k) if k > 0 && k < 16 => Some(k as u8),
+            (BinOp::Mul, k) if k >= 2 && (k & (k - 1)) == 0 => {
+                let mut b = 0u8; let mut v = k as u32; while v > 1 { b += 1; v >>= 1; } Some(b)
+            }
+            _ => None,
+        };
+        if let Some(sk) = shift_k {
+            let reg: u8 = match op {
+                BinOp::Shl | BinOp::Mul => 4,
+                BinOp::Shr => if locals.is_unsigned_param(param_idx) { 5 } else { 7 },
+                _ => unreachable!(),
+            };
+            let modrm_base = 0x46 | (reg << 3);
+            let (one_op, cl_op) = if is_char { (0xD0u8, 0xD2u8) } else { (0xD1u8, 0xD3u8) };
+            if sk == 1 {
+                out.push(one_op); out.push(bp_modrm(modrm_base, disp)); push_bp_disp(out, disp);
+            } else {
+                out.push(0xB1); out.push(sk);
+                out.push(cl_op); out.push(bp_modrm(modrm_base, disp)); push_bp_disp(out, disp);
+            }
+            return;
+        }
     }
     // Generic: const RHS → store imm; else eval then store.
     if let Some(k) = value.fold(locals.inits) {
@@ -1054,6 +1089,41 @@ pub(crate) fn emit_assign_global(global_idx: usize, value: &Expr, locals: &Local
                 }
                 return;
             }
+        }
+    }
+    // Scalar global compound shift `g <<=/>>= K` (and `g *= 2^k`) → in-place
+    // `shl/shr/sar word|byte [g], 1` (D1/D0) or `mov cl,K; ... [g], cl` (D3/D2).
+    // modrm reg: SHL=4 (0x26), SHR-unsigned=5 (0x2E), SAR-signed=7 (0x3E).
+    if !locals.is_long_global(global_idx)
+        && let Expr::BinOp { op, left, right } = value
+        && let Expr::Global(li) = left.as_ref()
+        && *li == global_idx
+        && let Some(k) = right.fold(locals.inits)
+    {
+        let shift_k = match (op, k) {
+            (BinOp::Shl, k) if k > 0 && k < 16 => Some(k as u8),
+            (BinOp::Shr, k) if k > 0 && k < 16 => Some(k as u8),
+            (BinOp::Mul, k) if k >= 2 && (k & (k - 1)) == 0 => {
+                let mut b = 0u8; let mut v = k as u32; while v > 1 { b += 1; v >>= 1; } Some(b)
+            }
+            _ => None,
+        };
+        if let Some(sk) = shift_k {
+            let reg: u8 = match op {
+                BinOp::Shl | BinOp::Mul => 4,
+                BinOp::Shr => if locals.is_unsigned_global(global_idx) { 5 } else { 7 },
+                _ => unreachable!(),
+            };
+            let modrm = 0x06 | (reg << 3);
+            let is_byte = locals.is_char_global(global_idx);
+            let (one_op, cl_op) = if is_byte { (0xD0u8, 0xD2u8) } else { (0xD1u8, 0xD3u8) };
+            if sk != 1 { out.extend_from_slice(&[0xB1, sk]); } // mov cl, K
+            out.push(if sk == 1 { one_op } else { cl_op });
+            out.push(modrm);
+            let disp_pos = out.len();
+            out.extend_from_slice(&[0x00, 0x00]);
+            fixups.push(Fixup { body_offset: disp_pos - 1, kind: FixupKind::GlobalAddr { global_idx } });
+            return;
         }
     }
     // Long global with runtime RHS: compute DX:AX then store both halves.
