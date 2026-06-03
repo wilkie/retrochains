@@ -393,6 +393,7 @@ pub(crate) fn tokenize(source: &str) -> Result<Vec<Tok>, EmitError> {
                     "break" => Tok::Kw("break"),
                     "continue" => Tok::Kw("continue"),
                     "struct" => Tok::Kw("struct"),
+                    "union" => Tok::Kw("union"),
                     "sizeof" => Tok::Kw("sizeof"),
                     "long" => Tok::Kw("long"),
                     "float" => Tok::Kw("float"),

@@ -53,10 +53,20 @@ pub(crate) fn const_prop_globals(
     local_specs: &[LocalSpec],
     long_globals: &[bool],
     global_elem_sizes: &[usize],
+    struct_is_union: &[bool],
+    union_globals: &std::collections::HashSet<usize>,
 ) -> (Vec<Stmt>, std::collections::HashSet<usize>, std::collections::HashSet<usize>) {
+    // Locals whose struct type is a union — their field writes stay out of the
+    // const-prop tables so punned sibling reads aren't folded (fixtures 177/919).
+    let union_locals: std::collections::HashSet<usize> = local_specs.iter().enumerate()
+        .filter(|(_, s)| s.struct_idx.map(|si| struct_is_union.get(si).copied().unwrap_or(false)).unwrap_or(false))
+        .map(|(i, _)| i)
+        .collect();
     let mut cp = ConstProp {
         local_specs: local_specs.to_vec(),
         global_elem_sizes: global_elem_sizes.to_vec(),
+        union_locals,
+        union_globals: union_globals.clone(),
         ..ConstProp::default()
     };
     for (i, &is_long) in long_globals.iter().enumerate() {
@@ -394,6 +404,13 @@ pub(crate) fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
                 }
                 _ => {}
             }
+            // Access size of a struct/union field write, captured before the
+            // mutable `match target` below (used to size-gate union folding).
+            let write_field_size: Option<u8> = match &*target {
+                AssignTarget::LocalField { size, .. }
+                | AssignTarget::GlobalField { size, .. } => Some(*size),
+                _ => None,
+            };
             match target {
                 AssignTarget::Global(g) => {
                     if let Expr::IntLit(k) = value
@@ -434,8 +451,12 @@ pub(crate) fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
                     // table does not track (the element stays unknown). Fixture 1017.
                     if !from_ptr_store && let Some(k) = value.fold(&[]) {
                         cp.la_known.insert((*local, *byte_off), k);
+                        if let Some(sz) = write_field_size {
+                            cp.la_field_size.insert((*local, *byte_off), sz);
+                        }
                     } else {
                         cp.la_known.remove(&(*local, *byte_off));
+                        cp.la_field_size.remove(&(*local, *byte_off));
                     }
                 }
                 AssignTarget::IndexedGlobal { array, byte_off }
@@ -446,8 +467,12 @@ pub(crate) fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
                     }
                     if !from_ptr_store && let Expr::IntLit(k) = value {
                         cp.ga_known.insert((*array, *byte_off), *k);
+                        if let Some(sz) = write_field_size {
+                            cp.ga_field_size.insert((*array, *byte_off), sz);
+                        }
                     } else {
                         cp.ga_known.remove(&(*array, *byte_off));
+                        cp.ga_field_size.remove(&(*array, *byte_off));
                     }
                 }
                 _ => {}
@@ -590,6 +615,10 @@ pub(crate) fn cp_clone(cp: &ConstProp) -> ConstProp {
         ptr_addr: cp.ptr_addr.clone(),
         local_specs: cp.local_specs.clone(),
         global_elem_sizes: cp.global_elem_sizes.clone(),
+        union_locals: cp.union_locals.clone(),
+        union_globals: cp.union_globals.clone(),
+        la_field_size: cp.la_field_size.clone(),
+        ga_field_size: cp.ga_field_size.clone(),
     }
 }
 /// If `e` is a pointer local holding `&x`/`&g` (offset 0), the address
@@ -791,9 +820,13 @@ pub(crate) fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
         }
         Expr::LocalField { .. } => {
             // Substitute the field's known value via la_known
-            // keyed by (local, byte_off).
-            if let Expr::LocalField { local, byte_off, .. } = e
+            // keyed by (local, byte_off). For a union, only fold when the read
+            // size matches the recorded write size (word↔word puns fold; a
+            // byte read of a word store goes to memory).
+            if let Expr::LocalField { local, byte_off, size } = e
                 && let Some(&v) = cp.la_known.get(&(*local, *byte_off))
+                && (!cp.union_locals.contains(local)
+                    || cp.la_field_size.get(&(*local, *byte_off)) == Some(size))
             {
                 *e = Expr::IntLit(v);
             }
@@ -801,8 +834,10 @@ pub(crate) fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
         Expr::GlobalField { .. } => {
             // Substitute the field's known value via ga_known keyed by
             // (global, byte_off) — works for nested fields too (summed offset).
-            if let Expr::GlobalField { global, byte_off, .. } = e
+            if let Expr::GlobalField { global, byte_off, size } = e
                 && let Some(&v) = cp.ga_known.get(&(*global, *byte_off))
+                && (!cp.union_globals.contains(global)
+                    || cp.ga_field_size.get(&(*global, *byte_off)) == Some(size))
             {
                 *e = Expr::IntLit(v);
             }

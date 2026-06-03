@@ -109,8 +109,10 @@ pub(crate) fn emit_function(
     char_returners: &std::collections::HashSet<String>,
     float_returners_arg: &std::collections::HashMap<String, usize>,
     long_param_funcs: &std::collections::HashMap<String, Vec<bool>>,
+    struct_is_union: &[bool],
+    union_globals: &std::collections::HashSet<usize>,
 ) -> FunctionEmit {
-    let (body, mutated_locals, _mutated_globals) = const_prop_globals(&func.body, &func.locals, long_globals, global_elem_sizes);
+    let (body, mutated_locals, _mutated_globals) = const_prop_globals(&func.body, &func.locals, long_globals, global_elem_sizes, struct_is_union, union_globals);
     // Extract a `Vec<Option<i32>>` view for the existing fold path —
     // saves rewriting every codegen helper to know about LocalSpec.
     // Strip the init for any local that was mutated during the

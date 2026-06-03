@@ -254,6 +254,10 @@ pub struct StructDef {
     pub name: String,
     pub fields: Vec<StructField>,
     pub total_bytes: usize,
+    /// `true` for `union` types: every field sits at offset 0 and the members
+    /// alias the same storage. Const-prop must not fold one member's read from
+    /// a sibling member's write (type punning — MSC always reads memory).
+    pub is_union: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -1397,6 +1401,11 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
     // total length into the _TEXT SEGDEF and compute per-function
     // offsets for call resolution + chkstk FIXUPs.
     let long_globals: Vec<bool> = unit.globals.iter().map(|g| g.is_long).collect();
+    let struct_is_union: Vec<bool> = unit.structs.iter().map(|s| s.is_union).collect();
+    let union_globals: std::collections::HashSet<usize> = unit.globals.iter().enumerate()
+        .filter(|(_, g)| g.struct_idx.map(|si| struct_is_union.get(si).copied().unwrap_or(false)).unwrap_or(false))
+        .map(|(i, _)| i)
+        .collect();
     let char_globals: Vec<bool> = unit.globals.iter().map(|g| !g.is_pointer && g.element_size == 1 && g.array_len == 1).collect();
     let global_elem_sizes: Vec<usize> = unit.globals.iter().map(|g| g.element_size).collect();
     let unsigned_globals: Vec<bool> = unit.globals.iter().map(|g| g.is_unsigned).collect();
@@ -1417,7 +1426,7 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
     let function_emits: Vec<FunctionEmit> = unit
         .functions
         .iter()
-        .map(|f| emit_function(f, &long_globals, &char_globals, &unsigned_globals, &float_globals, &global_elem_sizes, &char_returners, &float_returners, &long_param_funcs))
+        .map(|f| emit_function(f, &long_globals, &char_globals, &unsigned_globals, &float_globals, &global_elem_sizes, &char_returners, &float_returners, &long_param_funcs, &struct_is_union, &union_globals))
         .collect();
 
     // Per-function global offset within the _TEXT segment.
@@ -2402,6 +2411,18 @@ struct ConstProp {
     /// /scalars, 2 for int, etc). Used to pick IndexByte vs Index and the byte
     /// offset when resolving a global-pointer subscript through `ptr_alias_g`.
     global_elem_sizes: Vec<usize>,
+    /// Local indices whose type is a `union`. A union member read is folded
+    /// from `la_known` only when its access size matches the recorded write's
+    /// size (`la_field_size`) — MSC folds word↔word punning (2819) but reads a
+    /// byte-of-word from memory (177/2103).
+    union_locals: std::collections::HashSet<usize>,
+    /// Global indices whose type is a `union` (same rationale, `ga_field_size`).
+    union_globals: std::collections::HashSet<usize>,
+    /// Size (bytes) of the last write recorded at each `la_known` slot — used
+    /// to size-gate union member folding.
+    la_field_size: std::collections::HashMap<(usize, u16), u8>,
+    /// Size (bytes) of the last write recorded at each `ga_known` slot.
+    ga_field_size: std::collections::HashMap<(usize, u16), u8>,
 }
 
 /// The lvalue a pointer local currently aliases (`&x`).

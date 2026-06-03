@@ -38,7 +38,7 @@ pub(crate) fn parse_unit(source: &str) -> Result<Unit, EmitError> {
         // `struct <Name> { ... };` — record the struct definition.
         // `struct <Name> <var>;` and `struct <Name> *<var>;` fall
         // into the global-decl path further down.
-        if matches!(p.peek(), Some(Tok::Kw("struct")))
+        if matches!(p.peek(), Some(Tok::Kw("struct")) | Some(Tok::Kw("union")))
             && matches!(p.toks.get(p.pos + 1), Some(Tok::Ident(_)))
             && matches!(p.toks.get(p.pos + 2), Some(Tok::LBrace))
         {
@@ -77,14 +77,14 @@ pub(crate) fn parse_unit(source: &str) -> Result<Unit, EmitError> {
             Some(Tok::Kw("int")) | Some(Tok::Kw("char")) | Some(Tok::Kw("long"))
                 | Some(Tok::Kw("float")) | Some(Tok::Kw("double"))
         ) || (k > p.pos && matches!(p.toks.get(k), Some(Tok::Ident(_))))
-            || matches!(p.toks.get(k), Some(Tok::Kw("struct")));
+            || matches!(p.toks.get(k), Some(Tok::Kw("struct")) | Some(Tok::Kw("union")));
         if is_type_prefix {
-            // Walk past the type kw (plus the struct's name token if
-            // it's a `struct <Name>` prefix) + optional `*` to look
-            // at the declarator's first token after the name.
+            // Walk past the type kw (plus the struct/union's name token if
+            // it's a `struct <Name>` / `union <Name>` prefix) + optional `*`
+            // to look at the declarator's first token after the name.
             let mut after = k + 1;
-            if matches!(p.toks.get(k), Some(Tok::Kw("struct"))) {
-                after += 1; // consume the struct's name
+            if matches!(p.toks.get(k), Some(Tok::Kw("struct")) | Some(Tok::Kw("union"))) {
+                after += 1; // consume the struct/union's name
             }
             // Skip calling-convention / pointer-distance modifiers
             // (`int far helper(...)`).
@@ -197,7 +197,10 @@ pub(crate) fn parse_struct_brace_group(p: &mut Parser<'_>, sidx: usize, stotal: 
     Ok(slots)
 }
 pub(crate) fn parse_struct_global_decl(p: &mut Parser<'_>, is_static: bool) -> Result<(), EmitError> {
-    p.eat(&Tok::Kw("struct"))?;
+    // Accept either `struct <Tag> <var>;` or `union <Tag> <var>;` — both tags
+    // live in the shared `p.structs` registry.
+    if matches!(p.peek(), Some(Tok::Kw("union"))) { p.eat(&Tok::Kw("union"))?; }
+    else { p.eat(&Tok::Kw("struct"))?; }
     let sname = match p.bump().cloned() {
         Some(Tok::Ident(s)) => s,
         other => {
@@ -361,7 +364,10 @@ pub(crate) fn parse_typedef(p: &mut Parser<'_>) -> Result<(), EmitError> {
     Ok(())
 }
 pub(crate) fn parse_struct_def(p: &mut Parser<'_>) -> Result<(), EmitError> {
-    p.eat(&Tok::Kw("struct"))?;
+    // `union` shares the struct path: identical field syntax, but every
+    // member sits at offset 0 and the total size is the largest member.
+    let is_union = matches!(p.peek(), Some(Tok::Kw("union")));
+    if is_union { p.eat(&Tok::Kw("union"))?; } else { p.eat(&Tok::Kw("struct"))?; }
     let sname = match p.bump().cloned() {
         Some(Tok::Ident(s)) => s,
         other => {
@@ -431,19 +437,25 @@ pub(crate) fn parse_struct_def(p: &mut Parser<'_>) -> Result<(), EmitError> {
             p.eat(&Tok::RBrack)?;
             count = n as usize;
         }
-        // Word-align int / pointer / struct fields. Char fields take the
-        // next byte at any offset.
-        if elem_size >= 2 && cursor % 2 != 0 {
-            cursor += 1;
-        }
-        let byte_off = u16::try_from(cursor).expect("field offset fits in u16");
+        // Struct: word-align int/pointer/struct fields (char fields take the
+        // next byte at any offset) and advance the cursor cumulatively. Union:
+        // every field sits at offset 0; the total is the largest member span.
+        let span = elem_size as usize * count;
+        let byte_off = if is_union {
+            cursor = cursor.max(span);
+            0
+        } else {
+            if elem_size >= 2 && cursor % 2 != 0 { cursor += 1; }
+            let off = u16::try_from(cursor).expect("field offset fits in u16");
+            cursor += span;
+            off
+        };
         fields.push(StructField {
             name: fname,
             byte_off,
             size: elem_size,
             struct_idx: field_struct_idx,
         });
-        cursor += elem_size as usize * count;
         p.eat(&Tok::Semi)?;
     }
     p.eat(&Tok::RBrace)?;
@@ -452,7 +464,7 @@ pub(crate) fn parse_struct_def(p: &mut Parser<'_>) -> Result<(), EmitError> {
     // struct containing an int/pointer field; 1 byte otherwise).
     let needs_word_align = fields.iter().any(|f| f.size >= 2);
     let total_bytes = if needs_word_align { (cursor + 1) & !1 } else { cursor };
-    p.structs.push(StructDef { name: sname, fields, total_bytes });
+    p.structs.push(StructDef { name: sname, fields, total_bytes, is_union });
     Ok(())
 }
 /// Parse one file-scope `<type> <name> [= <init>];` declaration and
@@ -486,7 +498,7 @@ pub(crate) fn parse_global_decl(p: &mut Parser<'_>) -> Result<(), EmitError> {
     // `struct <Name> name [= {...}] ;` and `struct <Name> *name [= ...] ;`
     // routed through a separate parse path because the size + element
     // model differ from primitive types.
-    if matches!(p.peek(), Some(Tok::Kw("struct"))) {
+    if matches!(p.peek(), Some(Tok::Kw("struct")) | Some(Tok::Kw("union"))) {
         return parse_struct_global_decl(p, is_static);
     }
     // Type prefix. Phase 1 globals: `int [*]`, `char *`, `char [N]`,
@@ -1122,9 +1134,9 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
         // looked up from the struct registry rather than a primitive
         // type token. Each declarator can still be `s` (struct value)
         // or `*s` (struct pointer).
-        if matches!(p.toks.get(peek_pos), Some(Tok::Kw("struct"))) {
+        if matches!(p.toks.get(peek_pos), Some(Tok::Kw("struct")) | Some(Tok::Kw("union"))) {
             skip_decl_modifiers(p);
-            p.bump(); // struct
+            p.bump(); // struct / union
             let sname = match p.bump().cloned() {
                 Some(Tok::Ident(s)) => s,
                 other => {
