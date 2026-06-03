@@ -478,7 +478,12 @@ pub(crate) fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8
                 body_offset: body_offset + 1,
                 kind: FixupKind::GlobalAddr { global_idx: *ptr },
             });
-            out.extend_from_slice(&[0x8A, 0x47, disp as u8, 0x98]);
+            // disp 0 uses the no-displacement modrm `8a 07` (fixture 192).
+            if disp == 0 {
+                out.extend_from_slice(&[0x8A, 0x07, 0x98]);
+            } else {
+                out.extend_from_slice(&[0x8A, 0x47, disp as u8, 0x98]);
+            }
         }
         Expr::IndexByte { array, index } => {
             // Constant index → `a0 <byte_off> 98` (the placeholder is the index;
