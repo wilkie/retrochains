@@ -877,7 +877,7 @@ pub(crate) fn emit_while(
     out: &mut Vec<u8>,
     fixups: &mut Vec<Fixup>,
 ) {
-    emit_loop(cond, &[body_stmt], None, locals, frame, return_int, return_long, out, fixups);
+    emit_loop(cond, &[body_stmt], None, None, locals, frame, return_int, return_long, out, fixups);
 }
 /// `for (<init>; <cond>; <step>) <body>` — MSC's layout.
 ///
@@ -917,10 +917,11 @@ pub(crate) fn emit_for(
     // If so, use do-while (body then step); otherwise while (step then body).
     let entry = for_entry_fold(init, cond, locals);
     if matches!(entry, Some(k) if k != 0) && !matches!(body_stmt, Stmt::Empty) {
-        // Do-while form: body THEN step, no initial jmp.
-        emit_loop(cond, &[body_stmt, step], entry, locals, frame, return_int, return_long, out, fixups);
+        // Do-while form: body THEN step, no initial jmp. `continue` → step (seg 1).
+        emit_loop(cond, &[body_stmt, step], entry, Some(1), locals, frame, return_int, return_long, out, fixups);
     } else {
-        emit_loop(cond, &[step, body_stmt], None, locals, frame, return_int, return_long, out, fixups);
+        // While form: step THEN body. `continue` → step (seg 0).
+        emit_loop(cond, &[step, body_stmt], None, Some(0), locals, frame, return_int, return_long, out, fixups);
     }
 }
 /// Compute `fold_cond` as it would evaluate after the for-init runs.
@@ -1030,6 +1031,7 @@ pub(crate) fn emit_loop(
     cond: &Cond,
     body_segments: &[&Stmt],
     entry_fold: Option<i32>,
+    cont_seg: Option<usize>,
     locals: &Locals<'_>,
     frame: Frame,
     return_int: bool,
@@ -1080,7 +1082,11 @@ pub(crate) fn emit_loop(
     let mut body_buf = Vec::new();
     let mut body_fixups: Vec<Fixup> = Vec::new();
     locals.loop_stack.borrow_mut().push(LoopCtx::default());
-    for seg in body_segments {
+    // For a `for` loop, `continue` jumps to the step segment, not the cond.
+    // Record the body-buffer offset at the start of that segment.
+    let mut cont_off: Option<usize> = None;
+    for (idx, seg) in body_segments.iter().enumerate() {
+        if Some(idx) == cont_seg { cont_off = Some(body_buf.len()); }
         emit_stmt(seg, &body_locals, frame, return_int, return_long, &mut body_buf, &mut body_fixups);
     }
     let mut loop_ctx = locals.loop_stack.borrow_mut().pop().expect("loop stack");
@@ -1100,6 +1106,7 @@ pub(crate) fn emit_loop(
         for c in &mut body_fixups { c.body_offset += b_cond_len; }
         for off in &mut loop_ctx.breaks { *off += b_cond_len; }
         for off in &mut loop_ctx.continues { *off += b_cond_len; }
+        if let Some(o) = cont_off.as_mut() { *o += b_cond_len; }
         b_cond_buf.extend_from_slice(&body_buf);
         body_buf = b_cond_buf;
         let mut new_fixups = b_cond_fixups;
@@ -1194,7 +1201,9 @@ pub(crate) fn emit_loop(
     out.push(back_disp as u8);
     let loop_end = out.len();
     // Patch break/continue placeholders (rel8 `eb/jcc XX`). break → loop_end;
-    // continue → cmp_base. Each offset points at the disp byte.
+    // continue → the for-loop step (cont_off) if present, else cmp_base. Each
+    // offset points at the disp byte.
+    let cont_target = cont_off.map(|o| body_base + o).unwrap_or(cmp_base);
     for &off in &loop_ctx.breaks {
         let abs = body_base + off;
         let disp = loop_end as i32 - (abs as i32 + 1);
@@ -1202,7 +1211,7 @@ pub(crate) fn emit_loop(
     }
     for &off in &loop_ctx.continues {
         let abs = body_base + off;
-        let disp = cmp_base as i32 - (abs as i32 + 1);
+        let disp = cont_target as i32 - (abs as i32 + 1);
         out[abs] = i8::try_from(disp).expect("continue rel8 disp fits") as u8;
     }
 }
