@@ -401,21 +401,24 @@ pub(crate) fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8
             out.extend_from_slice(&[0x8A, 0x47, disp as u8, 0x98]);
         }
         Expr::IndexByte { array, index } => {
-            // Phase 1: constant index only — `a0 <byte_off> 98`.
-            // The placeholder is the index itself (size 1 per slot);
-            // the linker adds the array's base address.
-            let k = index.fold(locals.inits).unwrap_or_else(|| {
-                panic!("non-constant char-array index not yet supported")
-            });
-            let byte_off = (k as u32 & 0xFFFF) as u16;
-            let body_offset = out.len();
-            out.push(0xA0);
-            out.extend_from_slice(&byte_off.to_le_bytes());
-            fixups.push(Fixup {
-                body_offset,
-                kind: FixupKind::GlobalAddr { global_idx: *array },
-            });
-            out.push(0x98);
+            // Constant index → `a0 <byte_off> 98` (the placeholder is the index;
+            // the linker adds the array base). Runtime index → BX-based:
+            // `mov bx,[i]; mov al,[bx+&arr]; cbw`. Fixtures 4109, 3231.
+            if let Some(k) = index.fold(locals.inits) {
+                let byte_off = (k as u32 & 0xFFFF) as u16;
+                let body_offset = out.len();
+                out.push(0xA0);
+                out.extend_from_slice(&byte_off.to_le_bytes());
+                fixups.push(Fixup { body_offset, kind: FixupKind::GlobalAddr { global_idx: *array } });
+                out.push(0x98);
+            } else {
+                emit_load_bx(index, locals, out, fixups);
+                out.push(0x8A); out.push(0x87); // mov al, [bx + disp16]
+                let bo = out.len();
+                out.extend_from_slice(&[0x00, 0x00]);
+                fixups.push(Fixup { body_offset: bo - 1, kind: FixupKind::GlobalAddr { global_idx: *array } });
+                out.push(0x98); // cbw
+            }
         }
         Expr::Index { array, index } => {
             if let Some(k) = index.fold(locals.inits) {
