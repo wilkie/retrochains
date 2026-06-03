@@ -724,6 +724,10 @@ pub enum Expr {
     /// right-to-left then cleans up the stack with `add sp, N`
     /// after the call. Fixtures 4099 (zero-arg) through 4102.
     Call { name: String, args: Vec<Expr> },
+    /// Indirect call through a function-pointer variable. `target` is the
+    /// fnptr lvalue (`Global`/`Param`/`Local`); codegen pushes args RTL then
+    /// emits `call WORD PTR <mem>` (FF /2) + `add sp, N`. Fixtures 2818/2750/3323.
+    CallPtr { target: Box<Expr>, args: Vec<Expr> },
     /// Reference to an interned string literal — index into
     /// `Unit::strings`. Loaded as `mov ax, offset DGROUP:<CONST+off>`
     /// with a segment-relative FIXUP. Fixture 4103.
@@ -902,6 +906,7 @@ impl Expr {
                 })
             }
             Expr::Call { .. } => None,
+            Expr::CallPtr { .. } => None,
             Expr::StrLit(_) => None,
             Expr::Global(_) => None,
             Expr::Index { .. } | Expr::IndexByte { .. } | Expr::PtrIndexByte { .. } => None,
@@ -1068,6 +1073,13 @@ struct Parser<'a> {
     /// `typedef <type> <alias>;` aliases. Each alias maps to one of
     /// the recognized primitive type names ("int", "char", "long").
     typedefs: std::collections::HashMap<String, &'static str>,
+    /// Names of file-scope function-pointer variables (`int (*fp)(args);`).
+    /// A call `fp(...)` whose name is here lowers to an indirect `CallPtr`
+    /// (`call WORD PTR _fp`) rather than a direct `call _fp`.
+    fn_ptr_globals: std::collections::HashSet<String>,
+    /// Param indices (within the function being parsed) that are
+    /// function pointers (`int (*fp)(int)`); reset per function.
+    fn_ptr_params: std::collections::HashSet<usize>,
 }
 
 impl<'a> Parser<'a> {
@@ -1258,7 +1270,7 @@ fn fp_extern_block(uses_float: bool) -> &'static [(&'static str, u8)] {
 /// These materialize as CONST `$T` temps, loaded with `fld` at the call site.
 fn collect_call_float_args_expr(e: &Expr, out: &mut Vec<(u64, usize)>) {
     match e {
-        Expr::Call { args, .. } => {
+        Expr::Call { args, .. } | Expr::CallPtr { args, .. } => {
             for a in args {
                 if let Expr::FloatLit(bits, is_double) = a {
                     out.push((*bits, if *is_double { 8 } else { 4 }));

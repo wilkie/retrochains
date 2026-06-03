@@ -767,6 +767,13 @@ pub(crate) fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
                 prop_expr(a, cp);
             }
         }
+        Expr::CallPtr { args, .. } => {
+            // Target is a fnptr lvalue (Global/Param/Local) — leave it; just
+            // propagate into the arguments.
+            for a in args {
+                prop_expr(a, cp);
+            }
+        }
         Expr::Index { .. } | Expr::IndexByte { .. } => {
             // Substitute index first, then try to fold to a known global array element.
             let (array, elem_size, index_ref) = match e {

@@ -220,6 +220,10 @@ pub(crate) fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8
             // arithmetic or assignment expression.
             emit_call(name, args, locals, out, fixups);
         }
+        Expr::CallPtr { target, args } => {
+            // Indirect call through a function-pointer variable; result in AX.
+            crate::codegen::calls::emit_call_ptr(target, args, locals, out, fixups);
+        }
         Expr::StrLit(string_idx) => {
             // `mov ax, <str_addr>` — for use as a pointer value.
             // The address gets resolved to CONST-segment offset via

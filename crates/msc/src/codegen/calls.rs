@@ -63,6 +63,59 @@ pub(crate) fn emit_call_inner(
         out.push(0x98);
     }
 }
+/// Indirect call through a function-pointer variable: `call WORD PTR <mem>`
+/// (FF /2). Args are pushed right-to-left then cleaned up with `add sp, N`,
+/// exactly like a direct cdecl call — only the call instruction differs.
+/// `target` is the fnptr lvalue (`Global`/`Param`/`Local`). Fixtures 2818,
+/// 2750, 3323.
+pub(crate) fn emit_call_ptr(
+    target: &Expr,
+    args: &[Expr],
+    locals: &Locals<'_>,
+    out: &mut Vec<u8>,
+    fixups: &mut Vec<Fixup>,
+) {
+    use crate::codegen::func::{bp_modrm, push_bp_disp, param_disp};
+    // Push args right-to-left (cdecl).
+    for arg in args.iter().rev() {
+        if let Expr::FloatLit(bits, is_double) = arg {
+            emit_push_arg_float(*bits, if *is_double { 8 } else { 4 }, out, fixups);
+        } else {
+            emit_push_arg(arg, locals, out, fixups);
+        }
+    }
+    // `call WORD PTR <mem>` — FF /2.
+    match target {
+        Expr::Global(idx) => {
+            // `ff 16 off16` — call through an absolute [moffs]. The offset takes
+            // a GlobalAddr fixup (modrm form → body_offset = disp16 pos - 1).
+            let body_offset = out.len();
+            out.extend_from_slice(&[0xFF, 0x16, 0x00, 0x00]);
+            fixups.push(Fixup {
+                body_offset: body_offset + 1,
+                kind: FixupKind::GlobalAddr { global_idx: *idx },
+            });
+        }
+        Expr::Param(i) => {
+            let disp = param_disp(*i);
+            out.push(0xFF); out.push(bp_modrm(0x56, disp)); push_bp_disp(out, disp);
+        }
+        Expr::Local(i) => {
+            let disp = locals.disp(*i);
+            out.push(0xFF); out.push(bp_modrm(0x56, disp)); push_bp_disp(out, disp);
+        }
+        other => panic!("indirect call through unsupported target {other:?}"),
+    }
+    // cdecl caller cleanup: `add sp, N`.
+    let cleanup_bytes: usize = args.iter().map(|a| {
+        if let Expr::FloatLit(_, is_double) = a { if *is_double { 8 } else { 4 } } else { 2 }
+    }).sum();
+    if cleanup_bytes > 0 {
+        out.push(0x83);
+        out.push(0xC4);
+        out.push(u8::try_from(cleanup_bytes).expect("cleanup fits in u8"));
+    }
+}
 /// Push a long (32-bit) call argument: sign-extend to DX:AX, push DX
 /// (high word) then AX (low word). For constants that fit in i16, uses
 /// `cwd` for the sign extension; otherwise uses explicit `mov dx, K_hi`.

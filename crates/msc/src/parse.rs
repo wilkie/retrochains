@@ -26,6 +26,8 @@ pub(crate) fn parse_unit(source: &str) -> Result<Unit, EmitError> {
         strings: Vec::new(),
         enum_consts: std::collections::HashMap::new(),
         typedefs: std::collections::HashMap::new(),
+        fn_ptr_globals: std::collections::HashSet::new(),
+        fn_ptr_params: std::collections::HashSet::new(),
     };
     let mut functions = Vec::new();
     let mut decl_order: Vec<TopDecl> = Vec::new();
@@ -553,6 +555,38 @@ pub(crate) fn parse_global_decl(p: &mut Parser<'_>) -> Result<(), EmitError> {
             )));
         }
     };
+    // Function-pointer global: `<ret> (*name)(params);` — a 2-byte near
+    // pointer slot. The signature isn't modeled; the call site resolves it as
+    // an indirect call. (Initializer `= func` deferred to a later slice.)
+    if matches!(p.peek(), Some(Tok::LParen))
+        && matches!(p.toks.get(p.pos + 1), Some(Tok::Star))
+        && matches!(p.toks.get(p.pos + 2), Some(Tok::Ident(_)))
+        && matches!(p.toks.get(p.pos + 3), Some(Tok::RParen))
+        && matches!(p.toks.get(p.pos + 4), Some(Tok::LParen))
+    {
+        p.bump(); p.bump(); // `(` `*`
+        let name = match p.bump().cloned() { Some(Tok::Ident(s)) => s, _ => unreachable!() };
+        p.bump(); // `)`
+        // Skip the parameter-list parens (balanced).
+        p.eat(&Tok::LParen)?;
+        let mut depth = 1usize;
+        while depth > 0 {
+            match p.bump() {
+                Some(Tok::LParen) => depth += 1,
+                Some(Tok::RParen) => depth -= 1,
+                None => return Err(EmitError::Unsupported("unterminated fnptr parameter list".to_owned())),
+                _ => {}
+            }
+        }
+        p.eat(&Tok::Semi)?;
+        p.global_names.push(name.clone());
+        p.fn_ptr_globals.insert(name.clone());
+        p.globals.push(Global {
+            name, init: None, array_len: 1, element_size: 2, is_pointer: true,
+            struct_idx: None, is_long: false, is_static, is_extern, is_unsigned: false, is_float: false,
+        });
+        return Ok(());
+    }
     // Comma-separated declarators share the base type but each gets its own
     // `*` (pointer-ness), array suffix, and initializer: `int g1, g2;`,
     // `int *p, q;`. Loop over them; `is_pointer` resets per declarator.
@@ -943,6 +977,7 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
     // Parameter list: either `void` (no params) or one or more
     // `int <name>` separated by `,`. Phase 1 only handles int
     // parameters; other types come with later fixtures.
+    p.fn_ptr_params.clear();
     let params = if matches!(p.peek(), Some(Tok::Kw("void"))) {
         p.bump();
         (Vec::<String>::new(), Vec::<Option<usize>>::new(), Vec::<bool>::new(), Vec::<bool>::new(), Vec::<bool>::new(), Vec::<usize>::new(), Vec::<usize>::new())
@@ -998,6 +1033,39 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
                         "expected `int`, `char`, or `struct` in parameter type, got {other:?}"
                     )));
                 }
+            }
+            // Function-pointer parameter: `<ret> (*name)(params)` — a 2-byte
+            // near pointer. Record the index so a call `name(...)` in the body
+            // lowers to an indirect CallPtr (fixtures 3323, 2905, 3016, …).
+            if matches!(p.peek(), Some(Tok::LParen))
+                && matches!(p.toks.get(p.pos + 1), Some(Tok::Star))
+                && matches!(p.toks.get(p.pos + 2), Some(Tok::Ident(_)))
+                && matches!(p.toks.get(p.pos + 3), Some(Tok::RParen))
+                && matches!(p.toks.get(p.pos + 4), Some(Tok::LParen))
+            {
+                p.bump(); p.bump(); // `(` `*`
+                let fpname = match p.bump().cloned() { Some(Tok::Ident(s)) => s, _ => unreachable!() };
+                p.bump(); // `)`
+                p.eat(&Tok::LParen)?;
+                let mut depth = 1usize;
+                while depth > 0 {
+                    match p.bump() {
+                        Some(Tok::LParen) => depth += 1,
+                        Some(Tok::RParen) => depth -= 1,
+                        None => return Err(EmitError::Unsupported("unterminated fnptr parameter list".to_owned())),
+                        _ => {}
+                    }
+                }
+                p.fn_ptr_params.insert(names.len());
+                pointee_sizes.push(2);
+                names.push(fpname);
+                struct_idxs.push(None);
+                is_chars.push(false);
+                is_longs.push(false);
+                is_unsigned_ints.push(false);
+                float_widths.push(0);
+                if matches!(p.peek(), Some(Tok::Comma)) { p.bump(); continue; }
+                break;
             }
             let has_ptr = matches!(p.peek(), Some(Tok::Star));
             // Pointee byte size, captured before `is_char` is cleared below:
@@ -3287,6 +3355,18 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
             if matches!(p.peek(), Some(Tok::LParen)) {
                 p.bump(); // (
                 let args = parse_call_args(p)?;
+                // Indirect call when `name` is a function-pointer variable: a
+                // fnptr param (shadows globals) or a fnptr global.
+                if let Some(idx) = p.param_names.iter().position(|n| *n == name)
+                    && p.fn_ptr_params.contains(&idx)
+                {
+                    return Ok(Expr::CallPtr { target: Box::new(Expr::Param(idx)), args });
+                }
+                if p.fn_ptr_globals.contains(&name)
+                    && let Some(idx) = p.global_names.iter().position(|n| *n == name)
+                {
+                    return Ok(Expr::CallPtr { target: Box::new(Expr::Global(idx)), args });
+                }
                 return Ok(Expr::Call { name, args });
             }
             // Enum constants substitute directly to their literal value.
