@@ -1871,6 +1871,26 @@ pub(crate) fn emit_assign_global_field(global_idx: usize, byte_off: u16, size: u
 /// `<struct-local>.<field> = <expr>;` — store at `disp + byte_off`,
 /// picking word vs byte form based on the field's size.
 pub(crate) fn emit_assign_local_field(local_idx: usize, byte_off: u16, size: u8, value: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    // Compound `s.f op= rhs` (preserved self-read): a local struct field is a local
+    // at byte_off — reuse the indexed-local compound codegen by rewriting the
+    // self-read to LocalIndex/LocalIndexByte (which only matches on the local).
+    if let Expr::BinOp { op, left, right } = value
+        && matches!(left.as_ref(), Expr::LocalField { local: l, byte_off: bo, .. } if *l == local_idx && *bo == byte_off)
+        && !locals.is_long_local(local_idx)
+    {
+        let self_read = if size == 1 {
+            Expr::LocalIndexByte { local: local_idx, index: Box::new(Expr::IntLit(0)) }
+        } else {
+            Expr::LocalIndex { local: local_idx, index: Box::new(Expr::IntLit(0)) }
+        };
+        let rewritten = Expr::BinOp { op: *op, left: Box::new(self_read), right: right.clone() };
+        if size == 1 {
+            emit_assign_indexed_local_byte(local_idx, byte_off, &rewritten, locals, out, fixups);
+        } else {
+            emit_assign_indexed_local(local_idx, byte_off, &rewritten, locals, out, fixups);
+        }
+        return;
+    }
     let disp = locals.disp(local_idx) + byte_off as i16;
     if size == 1 {
         let k = value.fold(locals.inits).unwrap_or_else(|| {
