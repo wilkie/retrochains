@@ -657,6 +657,18 @@ pub(crate) fn prop_cond(cond: &mut Cond, cp: &mut ConstProp) {
 pub(crate) fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
     match e {
         Expr::FloatLit(..) => {} // no int const-prop into float literals
+        Expr::AssignExpr { target, value } => {
+            // Substitute into the RHS so the cond can fold, then invalidate the
+            // target's known value: MSC reloads/reuses-AX for later reads rather
+            // than re-materializing the immediate (the store leaves AX set, and
+            // the return/use peepholes reuse it). Mirrors the ternary-assign rule.
+            prop_expr(value, cp);
+            match target {
+                AssignTarget::Local(l) => { cp.mutated_locals.insert(*l); cp.l_known.remove(l); }
+                AssignTarget::Global(g) => { cp.mutated_globals.insert(*g); cp.g_known.remove(g); }
+                _ => {}
+            }
+        }
         Expr::Global(idx) => {
             // Long globals are never substituted — their compound
             // updates need `Global(g)` on the lhs for the long-specific

@@ -189,6 +189,9 @@ pub(crate) fn emit_stmt(
             // and drops the comparison + jump entirely. Fixtures
             // 4094 (if (0)) and 4095 (if (1)) confirm.
             if let Some(k) = fold_cond(cond, locals) {
+                // Even when the cond folds, an assignment embedded in it (e.g.
+                // `if ((x = 5))`) still has to execute its store.
+                emit_cond_side_effects(cond, locals, out, fixups);
                 if k != 0 {
                     emit_stmt(then_branch, locals, frame, return_int, return_long, out, fixups);
                 } else if let Some(else_branch) = else_branch {
@@ -370,6 +373,28 @@ pub(crate) fn cond_has_literal_side(cond: &Cond) -> bool {
         }
         Cond::And(a, b) | Cond::Or(a, b) => {
             cond_has_literal_side(a) || cond_has_literal_side(b)
+        }
+    }
+}
+/// Emit the side effects of a condition's operands when the cond is being
+/// elided by const-folding — specifically assignment-expressions like
+/// `if ((x=5))`, whose store must still run even though the branch is decided
+/// at compile time. Emits each AssignExpr operand (store + value-in-AX).
+pub(crate) fn emit_cond_side_effects(cond: &Cond, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    fn walk(e: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+        if matches!(e, Expr::AssignExpr { .. }) {
+            emit_expr_to_ax(e, locals, out, fixups);
+        }
+    }
+    match cond {
+        Cond::Truthy(e) => walk(e, locals, out, fixups),
+        Cond::Cmp { left, right, .. } => {
+            walk(left, locals, out, fixups);
+            walk(right, locals, out, fixups);
+        }
+        Cond::And(a, b) | Cond::Or(a, b) => {
+            emit_cond_side_effects(a, locals, out, fixups);
+            emit_cond_side_effects(b, locals, out, fixups);
         }
     }
 }
@@ -860,7 +885,6 @@ pub(crate) fn emit_return(
             // `return x<0?-1:1` → `cmp x,0; jge else; mov ax,-1; pop bp; ret;
             // nop; mov ax,1; pop bp; ret`). An alignment nop precedes the else
             // arm when the running offset would otherwise be odd.
-            let epi = frame.epilogue_bytes();
             let cond_c = cond_from_expr((**cond).clone());
             let mut then_buf = Vec::new();
             let mut then_fx = Vec::new();

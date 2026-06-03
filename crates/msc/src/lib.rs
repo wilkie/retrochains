@@ -814,6 +814,12 @@ pub enum Expr {
     /// `++<global>` or `--<global>` — pre-increment/decrement of a
     /// file-scope variable. Mutates first, then evaluates to the NEW value.
     PreMutateGlobal { global_idx: usize, step: i32 },
+    /// `<lvalue> = <expr>` used as an EXPRESSION (e.g. `if ((x = 5))`,
+    /// `while ((c = g) > 0)`). MSC produces the RHS value in AX and stores it:
+    /// `<value→ax>; mov [target], ax`, leaving the value in AX for the
+    /// surrounding condition/use. Distinct from a `Stmt::Assign`, which may use
+    /// a const store (`c7`). Fixtures 513 / 1434 / 2996 / 3395 / 555.
+    AssignExpr { target: AssignTarget, value: Box<Expr> },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -914,6 +920,9 @@ impl Expr {
                     else_arm.fold(locals)
                 }
             }
+            // The value of `(x = v)` is v — lets `if ((x=K))` fold its cond for
+            // dead-branch elision. The store side effect is emitted separately.
+            Expr::AssignExpr { value, .. } => value.fold(locals),
         }
     }
 }

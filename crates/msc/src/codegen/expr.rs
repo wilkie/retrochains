@@ -94,6 +94,28 @@ pub(crate) fn emit_index2d_regs(row: &Expr, col: &Expr, cols: usize, elem: usize
 }
 pub(crate) fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
     match expr {
+        Expr::AssignExpr { target, value } => {
+            // Assignment-as-expression: produce the RHS in AX, store it, leave
+            // the value in AX (`<value→ax>; mov [target], ax`). Fixtures
+            // 513/1434/2996/3395/555.
+            emit_expr_to_ax(value, locals, out, fixups);
+            match target {
+                AssignTarget::Local(i) => {
+                    let d = locals.disp(*i);
+                    out.push(0x89); out.push(bp_modrm(0x46, d)); push_bp_disp(out, d);
+                }
+                AssignTarget::Param(i) => {
+                    let d = param_disp(*i);
+                    out.push(0x89); out.push(bp_modrm(0x46, d)); push_bp_disp(out, d);
+                }
+                AssignTarget::Global(g) => {
+                    let bo = out.len();
+                    out.extend_from_slice(&[0xA3, 0x00, 0x00]); // mov [moffs], ax
+                    fixups.push(Fixup { body_offset: bo, kind: FixupKind::GlobalAddr { global_idx: *g } });
+                }
+                other => panic!("AssignExpr target not yet supported: {other:?}"),
+            }
+        }
         Expr::Index2D { is_global, base, row, col, cols, elem } => {
             assert!(*is_global, "local 2-D runtime index should have const-folded");
             emit_index2d_regs(row, col, *cols, *elem, locals, out, fixups);

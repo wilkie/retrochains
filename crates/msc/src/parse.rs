@@ -2983,11 +2983,19 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                 // Trailing `,<expr>)` case handled above; otherwise the
                 // last assign IS the value.
                 p.eat(&Tok::RParen)?;
-                // Reduce: convert the last Assign Stmt to an Expr that
-                // returns the assigned value. For simplicity we re-read
-                // the target post-store. Common case: `(x = 5)` alone.
-                if let Stmt::Assign { target, .. } = &last {
-                    let val_expr = match target {
+                if let Stmt::Assign { target, value } = last {
+                    // Pure `(x = v)` (no comma) with a SIMPLE RHS: an assignment
+                    // EXPRESSION whose value is the RHS, kept in AX for the
+                    // surrounding cond/use (fixtures 513/1434/2996). A compound
+                    // RHS like `(a = a+1)` stays the Seq form so MSC's in-place
+                    // peephole + reload fires (fixture 2992). With prior comma
+                    // sides, also fall back to the Seq form.
+                    if sides.is_empty()
+                        && matches!(value, Expr::IntLit(_) | Expr::Local(_) | Expr::Param(_) | Expr::Global(_))
+                    {
+                        return Ok(Expr::AssignExpr { target, value: Box::new(value) });
+                    }
+                    let val_expr = match &target {
                         AssignTarget::Local(i) => Expr::Local(*i),
                         AssignTarget::Param(i) => Expr::Param(*i),
                         AssignTarget::Global(g) => Expr::Global(*g),
@@ -2995,7 +3003,7 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                             "assign-tail value with unsupported target".to_owned()
                         )),
                     };
-                    sides.push(last);
+                    sides.push(Stmt::Assign { target, value });
                     return Ok(Expr::Seq { sides, value: Box::new(val_expr) });
                 }
                 return Err(EmitError::Unsupported("expected comma-tail value".to_owned()));
