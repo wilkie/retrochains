@@ -1428,7 +1428,22 @@ pub(crate) fn emit_long_global_4byte(
             BinOp::Add => { word_imm(out, fixups, 0, lo, low); word_imm(out, fixups, 2, hi, high); }
             BinOp::Sub => { word_imm(out, fixups, 5, lo, low); word_imm(out, fixups, 3, hi, high); }
             BinOp::BitAnd => {
-                word_imm16(out, fixups, 4, lo, low);
+                // Low word: when its low byte is 0xFF (AND-identity), MSC touches
+                // only the high byte of the low word (clear → mov byte [lo+1],0;
+                // partial → and byte [lo+1],hb; all-ones → nothing). Otherwise it
+                // ANDs the whole word (81 imm16). Fixtures 393/390 (&255) vs 253 (&15).
+                if (low & 0xFF) == 0xFF {
+                    let hb = (low >> 8) & 0xFF;
+                    if hb == 0xFF {
+                        // low word unchanged
+                    } else if hb == 0 {
+                        out.push(0xC6); out.push(0x06); put_addr(out, fixups, lo + 1); out.push(0x00);
+                    } else {
+                        out.push(0x80); out.push(0x06 | (4 << 3)); put_addr(out, fixups, lo + 1); out.push(hb as u8);
+                    }
+                } else {
+                    word_imm16(out, fixups, 4, lo, low);
+                }
                 if high == 0 { mov_imm(out, fixups, hi, 0); }
                 else { word_imm16(out, fixups, 4, hi, high); }
             }
