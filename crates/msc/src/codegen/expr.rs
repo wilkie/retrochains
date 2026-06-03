@@ -190,7 +190,11 @@ pub(crate) fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8
             if locals.is_char_param(*i) {
                 let disp = param_disp(*i) as u8;
                 out.extend_from_slice(&[0x8A, 0x46, disp]); // mov al, [bp+disp]
-                out.push(0x98); // cbw
+                if locals.is_unsigned_param(*i) {
+                    out.extend_from_slice(&[0x2A, 0xE4]); // sub ah, ah (zero-extend)
+                } else {
+                    out.push(0x98); // cbw (sign-extend)
+                }
             } else {
                 emit_load_param(*i, out);
             }
@@ -1419,7 +1423,11 @@ pub(crate) fn bp_load<'a>(e: &'a Expr, locals: &'a Locals<'_>) -> Option<Box<dyn
             if locals.is_char_param(*i) {
                 let disp = param_disp(*i) as u8;
                 out.extend_from_slice(&[0x8A, 0x46, disp]);  // mov al, [bp+disp]
-                out.push(0x98);  // cbw — sign-extend byte param to word
+                if locals.is_unsigned_param(*i) {
+                    out.extend_from_slice(&[0x2A, 0xE4]); // sub ah,ah — zero-extend
+                } else {
+                    out.push(0x98);  // cbw — sign-extend byte param to word
+                }
             } else {
                 emit_load_param(*i, out);
             }
