@@ -1112,10 +1112,23 @@ pub(crate) fn emit_threaded_for(
     if matches!(outer_step, Stmt::Empty) || matches!(jstep.as_ref(), Stmt::Empty) {
         return false;
     }
-    // No-break inner only; no further nesting (3-deep handled later).
-    if for_leading_break(jbody).is_some() || stmt_has_loop_break(jbody) || stmt_contains_loop(jbody) {
-        return false;
+    if stmt_contains_loop(jbody) {
+        return false; // 3-deep handled later
     }
+    // The inner body is either break-free, or a leading `if(c)break;` + rest (the
+    // for-step break-fold, threaded). `inner_break` carries (break_cond, rest).
+    let inner_break: Option<(Cond, Vec<Stmt>)> = match for_leading_break(jbody) {
+        Some((bc, rest)) => match bc {
+            Cond::Cmp { .. } => Some((bc, rest)),
+            _ => return false, // only Cmp break conds
+        },
+        None => {
+            if stmt_has_loop_break(jbody) {
+                return false; // break not in the canonical leading position
+            }
+            None
+        }
+    };
     // Clear inits for every local mutated across the nest so the cond/body reads
     // are runtime, not the pre-loop init constants.
     let muts = collect_loop_body_mutations(&[outer_body, outer_step]);
@@ -1163,23 +1176,47 @@ pub(crate) fn emit_threaded_for(
     let jmp_ocond = b.len();
     b.push(0x00);
     if needs_pad { b.push(0x90); }
-    // 3. ITOP: inner step
-    let itop = b.len();
-    emit_stmt(&**jstep, &bl, frame, return_int, return_long, &mut b, &mut bfix);
-    // 4. ICOND: inner cond; jcc(!Cj) -> IEXIT
-    let icond = b.len();
-    emit_cond_cmp(jcond, &bl, &mut b, &mut bfix);
-    b.push(inverted_jcc(*ic_op));
-    let iexit_jcc = b.len();
-    b.push(0x00);
-    // 5. inner body
-    emit_stmt(&**jbody, &bl, frame, return_int, return_long, &mut b, &mut bfix);
-    // 6. jmp ITOP
-    b.push(0xEB);
-    let p = b.len();
-    b.push(0x00);
-    let Some(d) = i8_disp(itop, p) else { return false };
-    b[p] = d;
+    // 3-6. ITOP/ICOND region (differs by break presence).
+    let itop;
+    let icond;
+    let iexit_jcc;
+    if let Some((break_c, rest)) = &inner_break {
+        let Cond::Cmp { op: bc_op, .. } = break_c else { return false };
+        // ITOP: inner body (rest) then inner step.
+        itop = b.len();
+        for s in rest {
+            emit_stmt(s, &bl, frame, return_int, return_long, &mut b, &mut bfix);
+        }
+        emit_stmt(&**jstep, &bl, frame, return_int, return_long, &mut b, &mut bfix);
+        // ICOND: guard cmp Cj; jcc(!Cj) -> IEXIT ; break cmp; jcc(!break) -> ITOP
+        icond = b.len();
+        emit_cond_cmp(jcond, &bl, &mut b, &mut bfix);
+        b.push(inverted_jcc(*ic_op));
+        iexit_jcc = b.len();
+        b.push(0x00);
+        emit_cond_cmp(break_c, &bl, &mut b, &mut bfix);
+        b.push(inverted_jcc(*bc_op)); // loop back when the break cond is false
+        let p = b.len();
+        b.push(0x00);
+        let Some(d) = i8_disp(itop, p) else { return false };
+        b[p] = d;
+    } else {
+        // ITOP: inner step
+        itop = b.len();
+        emit_stmt(&**jstep, &bl, frame, return_int, return_long, &mut b, &mut bfix);
+        // ICOND: cmp Cj; jcc(!Cj) -> IEXIT ; B ; jmp ITOP
+        icond = b.len();
+        emit_cond_cmp(jcond, &bl, &mut b, &mut bfix);
+        b.push(inverted_jcc(*ic_op));
+        iexit_jcc = b.len();
+        b.push(0x00);
+        emit_stmt(&**jbody, &bl, frame, return_int, return_long, &mut b, &mut bfix);
+        b.push(0xEB);
+        let p = b.len();
+        b.push(0x00);
+        let Some(d) = i8_disp(itop, p) else { return false };
+        b[p] = d;
+    }
     // 7. IEXIT: outer step
     let iexit = b.len();
     emit_stmt(outer_step, &bl, frame, return_int, return_long, &mut b, &mut bfix);
@@ -1199,6 +1236,10 @@ pub(crate) fn emit_threaded_for(
     b.push(0x00);
     let Some(d) = i8_disp(icond, p) else { return false };
     b[p] = d;
+    // Align EXIT to an even offset (MSC pads the loop exit with a nop).
+    if (base + b.len()) % 2 != 0 {
+        b.push(0x90);
+    }
     // 11. EXIT: backpatch the two forward exit jccs.
     let exit = b.len();
     let (Some(d1), Some(d2)) = (i8_disp(iexit, iexit_jcc), i8_disp(exit, exit_jcc)) else { return false };
