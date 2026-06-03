@@ -920,8 +920,9 @@ pub(crate) fn emit_for(
         // Do-while form: body THEN step, no initial jmp. `continue` → step (seg 1).
         emit_loop(cond, &[body_stmt, step], entry, Some(1), locals, frame, return_int, return_long, out, fixups);
     } else {
-        // While form: step THEN body. `continue` → step (seg 0).
-        emit_loop(cond, &[step, body_stmt], None, Some(0), locals, frame, return_int, return_long, out, fixups);
+        // While form: body THEN step, with an initial jmp to the cond (added by
+        // emit_loop). `continue` → step (seg 1).
+        emit_loop(cond, &[body_stmt, step], None, Some(1), locals, frame, return_int, return_long, out, fixups);
     }
 }
 /// Compute `fold_cond` as it would evaluate after the for-init runs.
