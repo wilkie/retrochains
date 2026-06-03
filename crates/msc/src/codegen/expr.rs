@@ -918,6 +918,13 @@ pub(crate) fn emit_binop(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'
         out.extend_from_slice(&[0xF7, 0xD8]); // neg ax
         return;
     }
+    // `x + x` (same simple variable) → load x, `shl ax,1` (fixture 1991
+    // `return x+x` → `mov al,[x]; sub ah,ah; shl ax,1`), not load + add-mem.
+    if matches!(op, BinOp::Add) && same_var(left, right) && !long_operand(left, locals) {
+        emit_expr_to_ax(left, locals, out, fixups);
+        out.extend_from_slice(&[0xD1, 0xE0]); // shl ax, 1
+        return;
+    }
     // Pointer difference: emit the raw byte-difference subtraction, then
     // convert bytes → elements with `sar ax,1` per shift step.
     if matches!(op, BinOp::Sub)
