@@ -350,7 +350,13 @@ pub(crate) fn emit_cond_cmp_inner(cond: &Cond, locals: &Locals<'_>, out: &mut Ve
                 emit_cmp_bp_imm(param_disp(*idx), 0, out);
             }
         }
-        Cond::Truthy(Expr::Global(idx)) => emit_cmp_global_imm(*idx, 0, out, fixups),
+        Cond::Truthy(Expr::Global(idx)) => {
+            if locals.is_char_global(*idx) {
+                emit_cmp_global_off_imm(*idx, 0, 0, true, out, fixups); // cmp byte [g], 0
+            } else {
+                emit_cmp_global_imm(*idx, 0, out, fixups);
+            }
+        }
         Cond::Cmp { op: _, left: Expr::Local(idx), right: Expr::IntLit(k) }
         | Cond::Cmp { op: _, left: Expr::IntLit(k), right: Expr::Local(idx) } => {
             emit_cmp_local_imm(*idx, locals, *k, out);
@@ -391,7 +397,11 @@ pub(crate) fn emit_cond_cmp_inner(cond: &Cond, locals: &Locals<'_>, out: &mut Ve
         }
         Cond::Cmp { op: _, left: Expr::Global(idx), right: Expr::IntLit(k) }
         | Cond::Cmp { op: _, left: Expr::IntLit(k), right: Expr::Global(idx) } => {
-            emit_cmp_global_imm(*idx, *k, out, fixups);
+            if locals.is_char_global(*idx) {
+                emit_cmp_global_off_imm(*idx, 0, *k, true, out, fixups); // cmp byte [g], imm8
+            } else {
+                emit_cmp_global_imm(*idx, *k, out, fixups);
+            }
         }
         // Global-global comparison (non-long): load right into AX, then cmp [left], ax.
         // Result = left - right, so inverted_jcc / loop_back_jcc semantics are standard.
