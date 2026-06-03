@@ -960,6 +960,14 @@ pub(crate) fn emit_binop(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'
         out.extend_from_slice(&[0xD1, 0xE0]); // shl ax, 1
         return;
     }
+    // `x * x` (same simple variable) → load x, `imul ax` (one-operand signed
+    // multiply, DX:AX = AX*AX), not load + `imul word [x]`. Fixture 2314
+    // (`return n * n` → `mov ax,[bp+4]; imul ax`).
+    if matches!(op, BinOp::Mul) && same_var(left, right) && !long_operand(left, locals) {
+        emit_expr_to_ax(left, locals, out, fixups);
+        out.extend_from_slice(&[0xF7, 0xE8]); // imul ax
+        return;
+    }
     // Pointer difference: emit the raw byte-difference subtraction, then
     // convert bytes → elements with `sar ax,1` per shift step.
     if matches!(op, BinOp::Sub)
