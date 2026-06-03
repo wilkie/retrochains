@@ -383,6 +383,14 @@ pub(crate) fn emit_cond_cmp_inner(cond: &Cond, locals: &Locals<'_>, out: &mut Ve
             let l_disp = locals.disp(*li);
             out.push(0x39); out.push(bp_modrm(0x46, l_disp)); push_bp_disp(out, l_disp);
         }
+        Cond::Cmp { op: _, left: Expr::Param(li), right: Expr::Param(rj) }
+            if locals.is_char_param(*li) && locals.is_char_param(*rj) =>
+        {
+            // Two char params: byte load right into AL, byte `cmp [left], al`
+            // (fixtures 3565/2984/3542). `8a 46 rd; 38 46 ld`.
+            out.extend_from_slice(&[0x8A, 0x46, param_disp(*rj) as u8]);
+            out.extend_from_slice(&[0x38, 0x46, param_disp(*li) as u8]);
+        }
         Cond::Cmp { op: _, left: Expr::Param(li), right: Expr::Param(rj) } => {
             // MSC loads right (rj) into AX, then `cmp [left], ax`.
             emit_load_param(*rj, out);
