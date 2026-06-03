@@ -532,9 +532,19 @@ pub(crate) fn parse_global_decl(p: &mut Parser<'_>) -> Result<(), EmitError> {
     let array_len = if matches!(p.peek(), Some(Tok::LBrack)) {
         p.bump();
         if matches!(p.peek(), Some(Tok::RBrack)) {
-            // `int a[] = {...};` — size from init list count.
+            // `int a[] = {...};` — size from init list count. Also
+            // `int m[][N] = {{...},...}` — outer dim implicit, inner dims given.
             p.bump();
             implicit_array_len = true;
+            while matches!(p.peek(), Some(Tok::LBrack)) {
+                p.bump();
+                let m = parse_signed_int(p)?;
+                if m <= 0 {
+                    return Err(EmitError::Unsupported(format!("array length must be positive, got {m}")));
+                }
+                p.eat(&Tok::RBrack)?;
+                dims.push(m as usize);
+            }
             0 // placeholder; we'll overwrite after parsing init below
         } else {
         let k = parse_signed_int(p)?;
@@ -568,6 +578,22 @@ pub(crate) fn parse_global_decl(p: &mut Parser<'_>) -> Result<(), EmitError> {
             // Multidimensional array initializer (`int m[2][3] = {{...},{...}}`):
             // flatten row-major with per-level zero padding.
             Some(parse_multidim_init(p, &dims, is_char && !is_pointer)?)
+        } else if implicit_array_len && !dims.is_empty() && matches!(p.peek(), Some(Tok::LBrace)) {
+            // `int m[][N] = {{...},{...}}`: outer dim implicit — parse repeated
+            // inner groups (each padded to the inner dims) and count them.
+            p.bump(); // outer `{`
+            let mut values = Vec::new();
+            let mut outer = 0usize;
+            while !matches!(p.peek(), Some(Tok::RBrace)) {
+                values.extend(parse_multidim_init(p, &dims, is_char && !is_pointer)?);
+                outer += 1;
+                if matches!(p.peek(), Some(Tok::Comma)) { p.bump(); }
+            }
+            p.eat(&Tok::RBrace)?;
+            let mut full = vec![outer];
+            full.extend(dims.iter().copied());
+            dims = full;
+            Some(values)
         } else if matches!(p.peek(), Some(Tok::LBrace)) {
             p.bump();
             let mut values = Vec::new();
