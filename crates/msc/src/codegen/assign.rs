@@ -154,8 +154,16 @@ pub(crate) fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_
                 crate::codegen::expr::emit_load_bx(&index, locals, out, fixups);
                 if !is_byte { out.extend_from_slice(&[0xD1, 0xE3]); }
                 crate::codegen::expr::emit_load_si(&Expr::Param(param), locals, out, fixups);
-                emit_expr_to_ax(&value, locals, out, fixups);
-                out.push(st); out.push(0x00); // [bx+si]
+                if let Some(v) = value.fold(locals.inits) {
+                    // Constant RHS → immediate store `mov byte/word [bx+si], imm`.
+                    out.push(if is_byte { 0xC6 } else { 0xC7 });
+                    out.push(0x00); // [bx+si]
+                    if is_byte { out.push((v as u32 & 0xFF) as u8); }
+                    else { out.extend_from_slice(&((v as u32 & 0xFFFF) as u16).to_le_bytes()); }
+                } else {
+                    emit_expr_to_ax(&value, locals, out, fixups);
+                    out.push(st); out.push(0x00); // [bx+si]
+                }
             }
             return;
         }
