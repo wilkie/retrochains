@@ -1273,6 +1273,49 @@ pub(crate) fn emit_assign_global(global_idx: usize, value: &Expr, locals: &Local
         fixups.push(Fixup { body_offset: addr_off - 1, kind: FixupKind::GlobalAddr { global_idx } });
         return;
     }
+    // Scalar int-global compound mul/div/mod/shl/shr by a foldable RHS → runtime
+    // in-place op (MSC does NOT const-fold these). Mirrors the indexed-global
+    // form with the element address at disp16 0 (GlobalAddr supplies the base).
+    if let Expr::BinOp { op, left, right } = value
+        && matches!(left.as_ref(), Expr::Global(g) if *g == global_idx)
+        && matches!(op, BinOp::Shl | BinOp::Shr | BinOp::Mul | BinOp::Div | BinOp::Mod)
+        && let Some(k) = right.fold(locals.inits)
+    {
+        let unsigned = locals.is_unsigned_global(global_idx);
+        let put0 = |out: &mut Vec<u8>, fixups: &mut Vec<Fixup>| {
+            let bo = out.len();
+            out.extend_from_slice(&[0x00, 0x00]);
+            fixups.push(Fixup { body_offset: bo - 1, kind: FixupKind::GlobalAddr { global_idx } });
+        };
+        let imm16 = (k as u32 & 0xFFFF) as u16;
+        match op {
+            BinOp::Shl | BinOp::Shr => {
+                out.extend_from_slice(&[0xB1, k as u8]); // mov cl, k
+                out.push(0xD3);
+                out.push(match op {
+                    BinOp::Shl => 0x26u8,                                   // shl /4
+                    BinOp::Shr => if unsigned { 0x2E } else { 0x3E },       // shr /5 | sar /7
+                    _ => unreachable!(),
+                });
+                put0(out, fixups);
+            }
+            BinOp::Mul => {
+                out.push(0xB8); out.extend_from_slice(&imm16.to_le_bytes()); // mov ax, k
+                out.push(0xF7); out.push(if unsigned { 0x26 } else { 0x2E }); put0(out, fixups); // mul/imul word [g]
+                out.push(0xA3); put0(out, fixups); // mov [g], ax
+            }
+            BinOp::Div | BinOp::Mod => {
+                out.push(0xB9); out.extend_from_slice(&imm16.to_le_bytes()); // mov cx, k
+                out.push(0xA1); put0(out, fixups); // mov ax, [g]
+                if unsigned { out.extend_from_slice(&[0x33, 0xD2, 0xF7, 0xF1]); } // xor dx,dx; div cx
+                else { out.extend_from_slice(&[0x99, 0xF7, 0xF9]); } // cwd; idiv cx
+                if matches!(op, BinOp::Div) { out.push(0xA3); put0(out, fixups); } // mov [g], ax
+                else { out.extend_from_slice(&[0x89, 0x16]); put0(out, fixups); } // mov [g], dx
+            }
+            _ => unreachable!(),
+        }
+        return;
+    }
     // Char global scalar store `c = K;` → byte form `mov byte [c], imm8` (c6 06).
     if locals.is_char_global(global_idx)
         && let Some(k) = value.fold(locals.inits)
