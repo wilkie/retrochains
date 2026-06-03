@@ -900,7 +900,7 @@ pub(crate) fn emit_while(
         emit_do_while(&dw_body, &neg, locals, frame, return_int, return_long, out, fixups);
         return;
     }
-    emit_loop(cond, &[body_stmt], None, None, locals, frame, return_int, return_long, out, fixups);
+    emit_loop(cond, &[body_stmt], None, None, None, false, locals, frame, return_int, return_long, out, fixups);
 }
 /// The RelOp whose truth is the negation of `op`.
 pub(crate) fn negate_relop(op: RelOp) -> RelOp {
@@ -951,6 +951,23 @@ pub(crate) fn loop_trailing_break_rewrite(body: &Stmt) -> Option<(Vec<Stmt>, Con
         return None;
     }
     Some((prefix, negated))
+}
+/// If a for-loop body starts with `if (c) break;` (no else) and has no other
+/// loop-level break/continue, return the break condition and the rest of the body.
+fn for_leading_break(body: &Stmt) -> Option<(Cond, Vec<Stmt>)> {
+    let stmts: &[Stmt] = match body {
+        Stmt::Block(v) => v,
+        other => std::slice::from_ref(other),
+    };
+    let Stmt::If { cond, then_branch, else_branch } = stmts.first()? else { return None };
+    if else_branch.is_some() || !matches!(then_branch.as_ref(), Stmt::Break) {
+        return None;
+    }
+    let rest: Vec<Stmt> = stmts[1..].to_vec();
+    if rest.iter().any(stmt_has_loop_break) {
+        return None;
+    }
+    Some((cond.clone(), rest))
 }
 /// A no-step loop whose body starts with `if (c) break;`. Returns the optional
 /// init (for-loop), the loop cond (None when literally infinite), the break
@@ -1088,16 +1105,38 @@ pub(crate) fn emit_for(
         emit_do_while(&dw_body, &neg, locals, frame, return_int, return_long, out, fixups);
         return;
     }
+    // For-loop WITH step and a LEADING `if (c) break;`: fold the break into the
+    // loop. `for (init; C; step) { if (c) break; REST }` lowers to a while-form
+    // loop over REST+step whose bottom tests are the original cond C (exit guard)
+    // followed by the inverted break `!c` (loop-back). MSC always uses the while
+    // form here — the do-while opt keys off the syntactic for-cond, which a
+    // break-derived bound lacks. The guard is None for a literally-infinite cond.
+    if !matches!(step, Stmt::Empty)
+        && let Some((break_c, rest)) = for_leading_break(body_stmt)
+        && let Some(loop_back) = negate_cond(&break_c)
+    {
+        let guard_opt = match cond {
+            Cond::Truthy(Expr::IntLit(k)) if *k != 0 => Some(None),
+            Cond::Cmp { .. } => Some(Some(cond)),
+            _ => None, // And/Or/runtime-truthy guard: fall through to normal path
+        };
+        if let Some(guard) = guard_opt {
+            let rest_block = Stmt::Block(rest);
+            emit_loop(&loop_back, &[&rest_block, step], None, Some(1), guard, true,
+                locals, frame, return_int, return_long, out, fixups);
+            return;
+        }
+    }
     // After the init runs, check if the condition is known true.
     // If so, use do-while (body then step); otherwise while (step then body).
     let entry = for_entry_fold(init, cond, locals);
     if matches!(entry, Some(k) if k != 0) && !matches!(body_stmt, Stmt::Empty) {
         // Do-while form: body THEN step, no initial jmp. `continue` → step (seg 1).
-        emit_loop(cond, &[body_stmt, step], entry, Some(1), locals, frame, return_int, return_long, out, fixups);
+        emit_loop(cond, &[body_stmt, step], entry, Some(1), None, false, locals, frame, return_int, return_long, out, fixups);
     } else {
         // While form: body THEN step, with an initial jmp to the cond (added by
         // emit_loop). `continue` → step (seg 1).
-        emit_loop(cond, &[body_stmt, step], None, Some(1), locals, frame, return_int, return_long, out, fixups);
+        emit_loop(cond, &[body_stmt, step], None, Some(1), None, false, locals, frame, return_int, return_long, out, fixups);
     }
 }
 /// Compute `fold_cond` as it would evaluate after the for-init runs.
@@ -1208,6 +1247,8 @@ pub(crate) fn emit_loop(
     body_segments: &[&Stmt],
     entry_fold: Option<i32>,
     cont_seg: Option<usize>,
+    exit_guard: Option<&Cond>,
+    force_while: bool,
     locals: &Locals<'_>,
     frame: Frame,
     return_int: bool,
@@ -1295,6 +1336,29 @@ pub(crate) fn emit_loop(
         // incremented in the body — must NOT fold the index to 0.
         emit_cond_cmp(cond, &body_locals, &mut cmp_buf, &mut cmp_fixups);
     }
+    // An `exit_guard` is a second bottom test placed BEFORE the loop-back cmp:
+    //   guard-cmp; jcc(!guard) → loop_end; <loop-back cmp>; jcc(cond) → top
+    // Used for a break folded into a for-loop's condition, where the original
+    // for-cond C becomes the exit guard and `!break` becomes the loop-back.
+    if let Some(guard) = exit_guard {
+        let Cond::Cmp { op: gop, .. } = guard else {
+            panic!("exit_guard must be a Cmp");
+        };
+        let mut gbuf = Vec::new();
+        let mut gfix: Vec<Fixup> = Vec::new();
+        emit_cond_cmp(guard, &body_locals, &mut gbuf, &mut gfix);
+        // Forward disp from after the guard jcc to loop_end = the loop-back cmp
+        // bytes plus the 2-byte back-jcc that follows them.
+        let fwd = i8::try_from(cmp_buf.len() + 2).expect("exit-guard forward disp fits");
+        gbuf.push(inverted_jcc(*gop)); // jump out when the guard is false
+        gbuf.push(fwd as u8);
+        let glen = gbuf.len();
+        for c in &mut cmp_fixups { c.body_offset += glen; }
+        gfix.extend(cmp_fixups.drain(..));
+        cmp_fixups = gfix;
+        gbuf.extend_from_slice(&cmp_buf);
+        cmp_buf = gbuf;
+    }
 
     // Alignment: position right after the 2-byte `eb XX` should be
     // even. If it would be odd, insert a NOP pad and bump the
@@ -1347,8 +1411,12 @@ pub(crate) fn emit_loop(
     // while-loops when the entry condition folds true (fixtures 124, 1044, 1158).
     // For 2+ locals with an odd-position body, MSC keeps the while form
     // to maintain even loop-top alignment (fixture 1182).
+    // A break-folded loop (force_while) always uses the while form (initial jmp)
+    // — MSC's do-while opt keys off the syntactic for-cond, which a for(;;)+break
+    // loop doesn't have. The empty-body shortcut still applies.
     let skip_initial_jmp = body_len == 0
-        || (matches!(effective_fold, Some(k) if k != 0)
+        || (!force_while
+            && matches!(effective_fold, Some(k) if k != 0)
             && (is_for_entry || !needs_pad || locals.disps.len() == 1));
     if !skip_initial_jmp {
         let forward_disp = i8::try_from(body_len + pad)
