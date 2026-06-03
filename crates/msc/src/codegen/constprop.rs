@@ -341,6 +341,16 @@ pub(crate) fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
                         *lx == t && matches!(index.as_ref(), Expr::IntLit(k) if (*k as u16 * 2) == byte_off)
                     } else { false }
                 }
+                // Struct-field compound `s.f op= rhs` — keep the field self-read so
+                // the in-place mem-op fires (MSC does not const-fold these).
+                (AssignTarget::GlobalField { global: t, byte_off, .. },
+                 Expr::BinOp { op: BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod | BinOp::Shl | BinOp::Shr | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor, ref left, .. }) => {
+                    matches!(left.as_ref(), Expr::GlobalField { global: g, byte_off: bo, .. } if *g == t && *bo == byte_off)
+                }
+                (AssignTarget::LocalField { local: t, byte_off, .. },
+                 Expr::BinOp { op: BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod | BinOp::Shl | BinOp::Shr | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor, ref left, .. }) => {
+                    matches!(left.as_ref(), Expr::LocalField { local: l, byte_off: bo, .. } if *l == t && *bo == byte_off)
+                }
                 _ => false,
             };
             if self_assign_addsub

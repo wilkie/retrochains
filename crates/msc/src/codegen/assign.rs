@@ -1813,6 +1813,25 @@ pub(crate) fn emit_assign_indexed_local_byte_var(local_idx: usize, index: &Expr,
 /// `<struct-global>.<field> = <expr>;` — store at the global's
 /// address + byte_off. Word: `c7 06 disp imm16`; byte: `c6 06 disp imm8`.
 pub(crate) fn emit_assign_global_field(global_idx: usize, byte_off: u16, size: u8, value: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    // Compound `s.f op= rhs` (preserved self-read): a struct field is a global at
+    // `byte_off`, structurally identical to a global-array element — rewrite the
+    // self-read to Index/IndexByte and reuse the indexed-global compound codegen.
+    if let Expr::BinOp { op, left, right } = value
+        && matches!(left.as_ref(), Expr::GlobalField { global: g, byte_off: bo, .. } if *g == global_idx && *bo == byte_off)
+    {
+        let self_read = if size == 1 {
+            Expr::IndexByte { array: global_idx, index: Box::new(Expr::IntLit(byte_off as i32)) }
+        } else {
+            Expr::Index { array: global_idx, index: Box::new(Expr::IntLit((byte_off / 2) as i32)) }
+        };
+        let rewritten = Expr::BinOp { op: *op, left: Box::new(self_read), right: right.clone() };
+        if size == 1 {
+            emit_assign_indexed_global_byte(global_idx, byte_off, &rewritten, locals, out, fixups);
+        } else {
+            emit_assign_indexed_global(global_idx, byte_off, &rewritten, locals, out, fixups);
+        }
+        return;
+    }
     if size == 1 {
         let k = value.fold(locals.inits).unwrap_or_else(|| {
             panic!("non-constant byte global-struct-field store not yet supported")

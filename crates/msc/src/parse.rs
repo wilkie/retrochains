@@ -1901,13 +1901,15 @@ pub(crate) fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
             {
                 p.bump();
                 let (byte_off, size) = parse_field_lookup(p, sidx)?;
-                p.eat(&Tok::Assign)?;
-                let value = parse_expr(p)?;
+                let target = AssignTarget::GlobalField { global: global_idx, byte_off, size };
+                let value = if let Some(v) = parse_compound_rhs(p, &target)? {
+                    v
+                } else {
+                    p.eat(&Tok::Assign)?;
+                    parse_expr(p)?
+                };
                 p.eat(&Tok::Semi)?;
-                return Ok(Stmt::Assign {
-                    target: AssignTarget::GlobalField { global: global_idx, byte_off, size },
-                    value,
-                });
+                return Ok(Stmt::Assign { target, value });
             }
             // `<struct-ptr-global>-><field> = <expr>;`
             if matches!(p.peek(), Some(Tok::Arrow))
@@ -1979,13 +1981,15 @@ pub(crate) fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
             {
                 p.bump();
                 let (byte_off, size) = parse_field_lookup(p, sidx)?;
-                p.eat(&Tok::Assign)?;
-                let value = parse_expr(p)?;
+                let target = AssignTarget::LocalField { local: local_idx, byte_off, size };
+                let value = if let Some(v) = parse_compound_rhs(p, &target)? {
+                    v
+                } else {
+                    p.eat(&Tok::Assign)?;
+                    parse_expr(p)?
+                };
                 p.eat(&Tok::Semi)?;
-                return Ok(Stmt::Assign {
-                    target: AssignTarget::LocalField { local: local_idx, byte_off, size },
-                    value,
-                });
+                return Ok(Stmt::Assign { target, value });
             }
             // `<struct-ptr-param>-><field> = <expr>;`
             if matches!(p.peek(), Some(Tok::Arrow))
@@ -2011,13 +2015,15 @@ pub(crate) fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
             {
                 p.bump();
                 let (byte_off, size) = parse_field_lookup(p, sidx)?;
-                p.eat(&Tok::Assign)?;
-                let value = parse_expr(p)?;
+                let target = AssignTarget::DerefLocalField { ptr_local: local_idx, byte_off, size };
+                let value = if let Some(v) = parse_compound_rhs(p, &target)? {
+                    v
+                } else {
+                    p.eat(&Tok::Assign)?;
+                    parse_expr(p)?
+                };
                 p.eat(&Tok::Semi)?;
-                return Ok(Stmt::Assign {
-                    target: AssignTarget::DerefLocalField { ptr_local: local_idx, byte_off, size },
-                    value,
-                });
+                return Ok(Stmt::Assign { target, value });
             }
             // `<local-array>[K] = <expr>;` (and compound shapes:
             // `+=`, `-=`, `*=`, `++`, `--`, etc.) — indexed local
