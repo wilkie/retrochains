@@ -133,6 +133,22 @@ pub(crate) fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
             // through a pointer, so the element stays unknown (later direct reads
             // must NOT fold). Fixture 1017.
             let mut from_ptr_store = false;
+            // Runtime 2-D store `a[i][j] = v`: fold the indices; when both are
+            // known, rewrite to a flat IndexedGlobal/IndexedLocal store (matching
+            // MSC's const folding). Otherwise it stays Index2D for SI/BX codegen.
+            if let AssignTarget::Index2D { is_global, base, row, col, cols, elem } = target {
+                prop_expr(row, cp);
+                prop_expr(col, cp);
+                if let (Expr::IntLit(r), Expr::IntLit(c)) = (row.as_ref(), col.as_ref()) {
+                    let byte_off = ((r * *cols as i32 + c) * *elem as i32) as u16;
+                    *target = match (*is_global, *elem == 1) {
+                        (true, false) => AssignTarget::IndexedGlobal { array: *base, byte_off },
+                        (true, true) => AssignTarget::IndexedGlobalByte { array: *base, byte_off },
+                        (false, false) => AssignTarget::IndexedLocal { local: *base, byte_off },
+                        (false, true) => AssignTarget::IndexedLocalByte { local: *base, byte_off },
+                    };
+                }
+            }
             // Pointer-value tracking: record/clear p's known address (&g[K]).
             if let AssignTarget::Local(p) = target {
                 if let Some(av) = addr_value_of(value) {
@@ -656,6 +672,22 @@ pub(crate) fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
         }
         Expr::ParamIndex { index, .. } => {
             prop_expr(index, cp);
+        }
+        Expr::Index2D { is_global, base, row, col, cols, elem } => {
+            prop_expr(row, cp);
+            prop_expr(col, cp);
+            // Both indices constant → fold to a flat 1-D element access, then
+            // re-run prop so a known element value folds via la_known/ga_known.
+            if let (Expr::IntLit(r), Expr::IntLit(c)) = (row.as_ref(), col.as_ref()) {
+                let flat = Box::new(Expr::IntLit(r * *cols as i32 + c));
+                *e = match (*is_global, *elem == 1) {
+                    (true, false) => Expr::Index { array: *base, index: flat },
+                    (true, true) => Expr::IndexByte { array: *base, index: flat },
+                    (false, false) => Expr::LocalIndex { local: *base, index: flat },
+                    (false, true) => Expr::LocalIndexByte { local: *base, index: flat },
+                };
+                prop_expr(e, cp);
+            }
         }
         Expr::LocalField { .. } => {
             // Substitute the field's known value via la_known

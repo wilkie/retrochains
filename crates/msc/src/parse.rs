@@ -1864,12 +1864,26 @@ pub(crate) fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
                 p.bump(); // [
                 let mut index_expr = parse_expr(p)?;
                 p.eat(&Tok::RBrack)?;
-                // Multidimensional local `a[i][j] = ...` folds to a flat element
-                // index, then flows through the ordinary 1-D indexed-store path.
+                // Multidimensional local `a[i][j] = ...`: constant folds to a flat
+                // element index (flows through the 1-D path); runtime 2-D → Index2D.
                 if let Some(dims) = p.local_dims.get(&local_idx).cloned()
-                    && let Some(flat) = fold_multidim_flat(p, &index_expr, &dims)?
+                    && let Some(ms) = parse_multidim_sub(p, &index_expr, &dims)?
                 {
-                    index_expr = Expr::IntLit(flat);
+                    match ms {
+                        MultiSub::Flat(flat) => { index_expr = Expr::IntLit(flat); }
+                        MultiSub::Runtime(mut ix) if ix.len() == 2 => {
+                            let elem = p.local_specs[local_idx].size;
+                            let col = Box::new(ix.pop().unwrap());
+                            let row = Box::new(ix.pop().unwrap());
+                            let target = AssignTarget::Index2D { is_global: false, base: local_idx, row, col, cols: dims[1], elem };
+                            p.eat(&Tok::Assign)?;
+                            let value = parse_expr(p)?;
+                            p.eat(&Tok::Semi)?;
+                            return Ok(Stmt::Assign { target, value });
+                        }
+                        MultiSub::Runtime(_) => return Err(EmitError::Unsupported(
+                            "runtime index on a >2-D local array store not yet supported".to_owned())),
+                    }
                 }
                 // Try folding against the local-init view so simple
                 // `a[i] = ...` with `i = K` known at decl folds.
@@ -1944,13 +1958,27 @@ pub(crate) fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
                 p.bump(); // [
                 let index_expr = parse_expr(p)?;
                 p.eat(&Tok::RBrack)?;
-                // Multidimensional `a[i][j] = ...` folds to a flat element index.
-                let multidim_flat = if let Some(dims) = p.global_dims.get(&array_idx).cloned() {
-                    fold_multidim_flat(p, &index_expr, &dims)?
+                // Multidimensional `a[i][j] = ...`: constant → flat element index;
+                // runtime 2-D → AssignTarget::Index2D (plain store).
+                let multidim = if let Some(dims) = p.global_dims.get(&array_idx).cloned() {
+                    parse_multidim_sub(p, &index_expr, &dims)?.map(|ms| (ms, dims))
                 } else { None };
-                let k = match multidim_flat {
-                    Some(flat) => flat,
-                    None => index_expr.fold(&[]).ok_or_else(|| EmitError::Unsupported(
+                if let Some((MultiSub::Runtime(mut ix), dims)) = multidim {
+                    if ix.len() != 2 {
+                        return Err(EmitError::Unsupported("runtime index on a >2-D array store not yet supported".to_owned()));
+                    }
+                    let elem = p.globals[array_idx].element_size;
+                    let col = Box::new(ix.pop().unwrap());
+                    let row = Box::new(ix.pop().unwrap());
+                    let target = AssignTarget::Index2D { is_global: true, base: array_idx, row, col, cols: dims[1], elem };
+                    p.eat(&Tok::Assign)?;
+                    let value = parse_expr(p)?;
+                    p.eat(&Tok::Semi)?;
+                    return Ok(Stmt::Assign { target, value });
+                }
+                let k = match multidim {
+                    Some((MultiSub::Flat(flat), _)) => flat,
+                    _ => index_expr.fold(&[]).ok_or_else(|| EmitError::Unsupported(
                         "non-constant array index in store not yet supported".to_owned(),
                     ))?,
                 };
@@ -2234,34 +2262,39 @@ pub(crate) fn parse_multidim_init(
     }
     Ok(out)
 }
-pub(crate) fn fold_multidim_flat(
+pub(crate) enum MultiSub {
+    /// All indices compile-time constant → flat row-major element index.
+    Flat(i32),
+    /// At least one runtime index → the parsed index expressions, in order.
+    Runtime(Vec<Expr>),
+}
+pub(crate) fn parse_multidim_sub(
     p: &mut Parser<'_>,
     idx0: &Expr,
     dims: &[usize],
-) -> Result<Option<i32>, EmitError> {
+) -> Result<Option<MultiSub>, EmitError> {
     if !matches!(p.peek(), Some(Tok::LBrack)) {
         return Ok(None);
     }
-    let init_view: Vec<Option<i32>> = p.local_specs.iter().map(|l| l.init).collect();
-    let mut idxs: Vec<i32> = Vec::new();
-    let fold_one = |e: &Expr, iv: &[Option<i32>]| -> Result<i32, EmitError> {
-        e.fold(iv).ok_or_else(|| EmitError::Unsupported(
-            "runtime multidimensional array index not yet supported".to_owned()))
-    };
-    idxs.push(fold_one(idx0, &init_view)?);
+    let mut idxs: Vec<Expr> = vec![idx0.clone()];
     while matches!(p.peek(), Some(Tok::LBrack)) {
         p.bump();
         let e = parse_expr(p)?;
         p.eat(&Tok::RBrack)?;
-        idxs.push(fold_one(&e, &init_view)?);
+        idxs.push(e);
     }
-    // Row-major flat index: sum(idx[d] * product(dims[d+1..])).
-    let mut flat = 0i32;
-    for (d, &ix) in idxs.iter().enumerate() {
-        let stride: usize = dims.get(d + 1..).map(|rest| rest.iter().product()).unwrap_or(1);
-        flat += ix * stride as i32;
+    let init_view: Vec<Option<i32>> = p.local_specs.iter().map(|l| l.init).collect();
+    let consts: Option<Vec<i32>> = idxs.iter().map(|e| e.fold(&init_view)).collect();
+    if let Some(cs) = consts {
+        let mut flat = 0i32;
+        for (d, &ix) in cs.iter().enumerate() {
+            let stride: usize = dims.get(d + 1..).map(|rest| rest.iter().product()).unwrap_or(1);
+            flat += ix * stride as i32;
+        }
+        Ok(Some(MultiSub::Flat(flat)))
+    } else {
+        Ok(Some(MultiSub::Runtime(idxs)))
     }
-    Ok(Some(flat))
 }
 pub(crate) fn parse_compound_rhs_for_indexed(
     p: &mut Parser<'_>,
@@ -2943,17 +2976,29 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                     p.bump();
                     let index = parse_expr(p)?;
                     p.eat(&Tok::RBrack)?;
-                    // Multidimensional local `a[i][j]` (constant indices) folds to
-                    // a flat row-major element index, reusing the 1-D read.
+                    // Multidimensional local `a[i][j]`: constant → flat 1-D read;
+                    // runtime 2-D → Expr::Index2D.
                     if let Some(dims) = p.local_dims.get(&idx).cloned()
-                        && let Some(flat) = fold_multidim_flat(p, &index, &dims)?
+                        && let Some(ms) = parse_multidim_sub(p, &index, &dims)?
                     {
-                        let fi = Box::new(Expr::IntLit(flat));
-                        return if p.local_specs[idx].size == 1 {
-                            Ok(Expr::LocalIndexByte { local: idx, index: fi })
-                        } else {
-                            Ok(Expr::LocalIndex { local: idx, index: fi })
-                        };
+                        let elem = p.local_specs[idx].size;
+                        match ms {
+                            MultiSub::Flat(flat) => {
+                                let fi = Box::new(Expr::IntLit(flat));
+                                return if elem == 1 {
+                                    Ok(Expr::LocalIndexByte { local: idx, index: fi })
+                                } else {
+                                    Ok(Expr::LocalIndex { local: idx, index: fi })
+                                };
+                            }
+                            MultiSub::Runtime(mut ix) if ix.len() == 2 => {
+                                let col = Box::new(ix.pop().unwrap());
+                                let row = Box::new(ix.pop().unwrap());
+                                return Ok(Expr::Index2D { is_global: false, base: idx, row, col, cols: dims[1], elem });
+                            }
+                            MultiSub::Runtime(_) => return Err(EmitError::Unsupported(
+                                "runtime index on a >2-D local array not yet supported".to_owned())),
+                        }
                     }
                     // A POINTER local: `p[K]` is `*(p + K)` — a deref, not an
                     // array-slot read. K==0 yields a bare `*p` so the alias pass
@@ -3054,18 +3099,30 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                     p.bump();
                     let index = parse_expr(p)?;
                     p.eat(&Tok::RBrack)?;
-                    // Multidimensional `a[i][j]` (constant indices) folds to a flat
-                    // row-major element index, reusing the 1-D Index read.
+                    // Multidimensional `a[i][j]`: constant indices fold to a flat
+                    // 1-D read; a runtime 2-D index becomes Expr::Index2D.
                     if let Some(dims) = p.global_dims.get(&idx).cloned()
-                        && let Some(flat) = fold_multidim_flat(p, &index, &dims)?
+                        && let Some(ms) = parse_multidim_sub(p, &index, &dims)?
                     {
                         let g = &p.globals[idx];
-                        let fi = Box::new(Expr::IntLit(flat));
-                        return Ok(if g.element_size == 1 {
-                            Expr::IndexByte { array: idx, index: fi }
-                        } else {
-                            Expr::Index { array: idx, index: fi }
-                        });
+                        let elem = g.element_size;
+                        match ms {
+                            MultiSub::Flat(flat) => {
+                                let fi = Box::new(Expr::IntLit(flat));
+                                return Ok(if elem == 1 {
+                                    Expr::IndexByte { array: idx, index: fi }
+                                } else {
+                                    Expr::Index { array: idx, index: fi }
+                                });
+                            }
+                            MultiSub::Runtime(mut ix) if ix.len() == 2 => {
+                                let col = Box::new(ix.pop().unwrap());
+                                let row = Box::new(ix.pop().unwrap());
+                                return Ok(Expr::Index2D { is_global: true, base: idx, row, col, cols: dims[1], elem });
+                            }
+                            MultiSub::Runtime(_) => return Err(EmitError::Unsupported(
+                                "runtime index on a >2-D array not yet supported".to_owned())),
+                        }
                     }
                     let g = &p.globals[idx];
                     if g.is_pointer {

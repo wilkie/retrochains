@@ -6,8 +6,54 @@ use crate::*;
 /// supports a tight set of patterns — every other shape panics with
 /// a clear message so the missing case is obvious when a future
 /// fixture hits it.
+/// Load an int operand into SI (modrm reg 110) — `mov si,[bp+disp]` for a
+/// param/local, else evaluate into AX and `mov si,ax`.
+fn emit_load_si(e: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    match e {
+        Expr::Param(i) => { out.extend_from_slice(&[0x8B, 0x76, param_disp(*i) as u8]); }
+        Expr::Local(i) => { let d = locals.disp(*i); out.push(0x8B); out.push(bp_modrm(0x76, d)); push_bp_disp(out, d); }
+        _ => { emit_expr_to_ax(e, locals, out, fixups); out.extend_from_slice(&[0x8B, 0xF0]); } // mov si,ax
+    }
+}
+/// Load an int operand into BX (modrm reg 011).
+fn emit_load_bx(e: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    match e {
+        Expr::Param(i) => { out.extend_from_slice(&[0x8B, 0x5E, param_disp(*i) as u8]); }
+        Expr::Local(i) => { let d = locals.disp(*i); out.push(0x8B); out.push(bp_modrm(0x5E, d)); push_bp_disp(out, d); }
+        _ => { emit_expr_to_ax(e, locals, out, fixups); out.extend_from_slice(&[0x8B, 0xD8]); } // mov bx,ax
+    }
+}
+/// Scale SI by `factor`: power-of-two → `shl si,1` steps; 3 → `mov ax,si; shl
+/// si,1; add si,ax`; otherwise `imul si,si,imm16`.
+fn scale_si(out: &mut Vec<u8>, factor: usize) {
+    match factor {
+        0 | 1 => {}
+        f if f.is_power_of_two() => { for _ in 0..f.trailing_zeros() { out.extend_from_slice(&[0xD1, 0xE6]); } }
+        3 => out.extend_from_slice(&[0x8B, 0xC6, 0xD1, 0xE6, 0x03, 0xF0]),
+        f => { out.push(0x69); out.push(0xF6); out.extend_from_slice(&(f as u16).to_le_bytes()); }
+    }
+}
+/// Emit the SI=row*rowstride, BX=col*elem address setup shared by 2-D read/write.
+pub(crate) fn emit_index2d_regs(row: &Expr, col: &Expr, cols: usize, elem: usize, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    emit_load_si(row, locals, out, fixups);
+    scale_si(out, cols * elem);
+    emit_load_bx(col, locals, out, fixups);
+    for _ in 0..(elem.max(1)).trailing_zeros() { out.extend_from_slice(&[0xD1, 0xE3]); } // shl bx,1
+}
 pub(crate) fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
     match expr {
+        Expr::Index2D { is_global, base, row, col, cols, elem } => {
+            assert!(*is_global, "local 2-D runtime index should have const-folded");
+            emit_index2d_regs(row, col, *cols, *elem, locals, out, fixups);
+            // mov ax/al, [base + bx + si]  (modrm [bx+si]+disp16 = 0x80)
+            let op = if *elem == 1 { 0x8A } else { 0x8B };
+            out.push(op);
+            let mp = out.len();
+            out.push(0x80);
+            out.extend_from_slice(&[0x00, 0x00]);
+            fixups.push(Fixup { body_offset: mp, kind: FixupKind::GlobalAddr { global_idx: *base } });
+            if *elem == 1 { out.push(0x98); } // cbw
+        }
         Expr::IntLit(k) => {
             // Foldable path is handled by the caller; this arm only
             // fires if the caller bypassed folding.

@@ -9,7 +9,8 @@ pub(crate) fn body_needs_si(stmts: &[Stmt], local_inits: &[Option<i32>]) -> bool
             Stmt::Assign { target, value } => {
                 matches!(target,
                     AssignTarget::IndexedLocalVar { .. }
-                    | AssignTarget::IndexedLocalByteVar { .. })
+                    | AssignTarget::IndexedLocalByteVar { .. }
+                    | AssignTarget::Index2D { .. })
                     || expr_si(value, inits)
             }
             Stmt::Return(e) => expr_si(e, inits),
@@ -36,6 +37,7 @@ pub(crate) fn body_needs_si(stmts: &[Stmt], local_inits: &[Option<i32>]) -> bool
             Expr::LocalIndex { index, .. } | Expr::LocalIndexByte { index, .. } => {
                 index.fold(inits).is_none()
             }
+            Expr::Index2D { .. } => true,
             Expr::BinOp { left, right, .. } => expr_si(left, inits) || expr_si(right, inits),
             Expr::Call { args, .. } => args.iter().any(|a| expr_si(a, inits)),
             _ => false,
@@ -149,6 +151,10 @@ pub(crate) fn emit_function(
         && body_needs_si(&body, &local_inits)
     {
         Frame::WithSlideSi
+    } else if matches!(base_frame, Frame::BpOnly)
+        && body_needs_si(&body, &local_inits)
+    {
+        Frame::BpOnlySi
     } else {
         base_frame
     };
@@ -222,7 +228,7 @@ pub(crate) fn emit_function(
 
     match frame {
         Frame::None => bytes.extend_from_slice(&[0x33, 0xC0]),
-        Frame::BpOnly => bytes.extend_from_slice(&[0x55, 0x8B, 0xEC, 0x33, 0xC0]),
+        Frame::BpOnly | Frame::BpOnlySi => bytes.extend_from_slice(&[0x55, 0x8B, 0xEC, 0x33, 0xC0]),
         Frame::WithSlide | Frame::WithSlideSi | Frame::WithSlideDiSi => {
             bytes.extend_from_slice(&[0x55, 0x8B, 0xEC]);
             bytes.push(0xB8);
@@ -248,8 +254,8 @@ pub(crate) fn emit_function(
         bytes.push(0x57); // push di
         bytes.push(0x56); // push si
     }
-    // For WithSlideSi: save SI after the frame is established.
-    if matches!(frame, Frame::WithSlideSi) {
+    // For WithSlideSi / BpOnlySi: save SI after the frame is established.
+    if matches!(frame, Frame::WithSlideSi | Frame::BpOnlySi) {
         bytes.push(0x56); // push si
     }
 

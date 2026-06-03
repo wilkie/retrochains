@@ -130,6 +130,18 @@ pub(crate) fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_
         AssignTarget::DerefLocalOffset { local, byte_off, is_byte } => {
             return emit_assign_deref_local_offset(local, byte_off, is_byte, value, locals, out, fixups);
         }
+        AssignTarget::Index2D { is_global, base, row, col, cols, elem } => {
+            assert!(is_global, "local 2-D runtime store should have const-folded");
+            crate::codegen::expr::emit_index2d_regs(&row, &col, cols, elem, locals, out, fixups);
+            emit_expr_to_ax(&value, locals, out, fixups); // value → AX
+            // mov [base + bx + si], ax/al  (modrm [bx+si]+disp16 = 0x80)
+            out.push(if elem == 1 { 0x88 } else { 0x89 });
+            let mp = out.len();
+            out.push(0x80);
+            out.extend_from_slice(&[0x00, 0x00]);
+            fixups.push(Fixup { body_offset: mp, kind: FixupKind::GlobalAddr { global_idx: base } });
+            return;
+        }
         AssignTarget::IndexedGlobal { array, byte_off } => {
             return emit_assign_indexed_global(array, byte_off, value, locals, out, fixups);
         }

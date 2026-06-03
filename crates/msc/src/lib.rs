@@ -619,6 +619,10 @@ pub enum AssignTarget {
     /// then advance the pointer by `step`. Codegen: `mov bx, [bp-p];
     /// <mutate p>; mov [bx], ax/imm`.
     DerefPostMutateLocal { local_idx: usize, step: i32 },
+    /// `a[i][j] = <expr>;` store on a 2-D array with a runtime index. Mirrors
+    /// `Expr::Index2D`; const-prop folds to a flat IndexedGlobal/IndexedLocal when
+    /// both indices are known, else codegen does the `si`/`bx` addressing.
+    Index2D { is_global: bool, base: usize, row: Box<Expr>, col: Box<Expr>, cols: usize, elem: usize },
     /// `<ptr-local>[K] = <expr>;` with constant K≠0 — store through a
     /// pointer local at a byte offset (`byte_off` = K * pointee size).
     /// When the pointer aliases a base array the const-prop pass rewrites
@@ -711,6 +715,12 @@ pub enum Expr {
     /// `<param>[<expr>]` — `int *p` / `int p[]` parameter index.
     /// Constant K lowers to `mov bx, [bp+param_disp]; mov ax, [bx+2K]`.
     ParamIndex { param: usize, index: Box<Expr> },
+    /// `a[i][j]` read on a 2-D array with a runtime index. `base` is the
+    /// global (or local, when `is_global` is false) index, `cols` the inner
+    /// dimension, `elem` the element byte size. Const-prop folds this to a flat
+    /// 1-D access when both indices are known; otherwise codegen materializes
+    /// `si = row*cols*elem`, `bx = col*elem` and reads `[base + bx + si]`.
+    Index2D { is_global: bool, base: usize, row: Box<Expr>, col: Box<Expr>, cols: usize, elem: usize },
     /// `<struct-local>.<field>` — read a field of a struct local.
     /// `byte_off` is the precomputed field offset within the
     /// struct. `size == 1` triggers `mov al, [bp+disp]; cbw`;
@@ -846,6 +856,7 @@ impl Expr {
             Expr::StrLit(_) => None,
             Expr::Global(_) => None,
             Expr::Index { .. } | Expr::IndexByte { .. } | Expr::PtrIndexByte { .. } => None,
+            Expr::Index2D { .. } => None,
             Expr::LocalIndex { .. } | Expr::LocalIndexByte { .. } => None,
             Expr::ParamIndex { .. } => None,
             Expr::LocalField { .. } | Expr::DerefLocalField { .. } | Expr::GlobalField { .. } => None,
@@ -1131,6 +1142,10 @@ enum Frame {
     /// array indexing. Prologue adds `push si` after chkstk.
     /// Epilogue: `pop si; mov sp, bp; pop bp; ret` (fixtures 1219, 1468).
     WithSlideSi,
+    /// Like BpOnly but saves/restores SI — a no-locals function that uses a
+    /// runtime 2-D index (SI). Prologue adds `push si` after chkstk; SP doesn't
+    /// slide so the epilogue is `pop si; pop bp; ret` (fixtures 3327, 3544).
+    BpOnlySi,
     /// Like WithSlide but saves/restores DI then SI — needed for the `movsw`
     /// copy that receives a float/double return into a local. Prologue adds
     /// `push di; push si` after chkstk; epilogue `pop si; pop di; mov sp,bp;
@@ -1152,6 +1167,7 @@ impl Frame {
         match self {
             Frame::None => &[0xC3],
             Frame::BpOnly => &[0x5D, 0xC3],
+            Frame::BpOnlySi => &[0x5E, 0x5D, 0xC3],
             Frame::WithSlide => &[0x8B, 0xE5, 0x5D, 0xC3],
             Frame::WithSlideSi => &[0x5E, 0x8B, 0xE5, 0x5D, 0xC3],
             Frame::WithSlideDiSi => &[0x5E, 0x5F, 0x8B, 0xE5, 0x5D, 0xC3],
