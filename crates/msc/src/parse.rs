@@ -579,11 +579,23 @@ pub(crate) fn parse_global_decl(p: &mut Parser<'_>) -> Result<(), EmitError> {
                 _ => {}
             }
         }
+        // Optional `= func` initializer → a _DATA word holding OFFSET _func.
+        let init = if matches!(p.peek(), Some(Tok::Assign)) {
+            p.bump();
+            let fname = match p.bump().cloned() {
+                Some(Tok::Ident(s)) => s,
+                other => return Err(EmitError::Unsupported(format!(
+                    "expected function name initializing a function pointer, got {other:?}"))),
+            };
+            Some(vec![GlobalInit::FuncAddr(symbol_name(&fname))])
+        } else {
+            None
+        };
         p.eat(&Tok::Semi)?;
         p.global_names.push(name.clone());
         p.fn_ptr_globals.insert(name.clone());
         p.globals.push(Global {
-            name, init: None, array_len: 1, element_size: 2, is_pointer: true,
+            name, init, array_len: 1, element_size: 2, is_pointer: true,
             struct_idx: None, is_long: false, is_static, is_extern, is_unsigned: false, is_float: false,
         });
         return Ok(());

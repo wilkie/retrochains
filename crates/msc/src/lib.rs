@@ -146,6 +146,10 @@ pub enum GlobalInit {
     /// holds the f64 bits; `usize` is the byte width (8 for `double`,
     /// 4 for `float`, in which case the value is collapsed to f32).
     FloatBits(u64, usize),
+    /// Function address — `int (*op)(int) = f;`. A 2-byte `_DATA` word
+    /// (`_op DW _f`) with a `c4 off 56 idx` FIXUP to the function's EXTDEF
+    /// index. The placeholder stays 0. Fixtures 2607, 3212.
+    FuncAddr(String),
 }
 
 impl GlobalInit {
@@ -2162,6 +2166,11 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
                             };
                             data_bytes.extend_from_slice(&off.to_le_bytes());
                         }
+                        GlobalInit::FuncAddr(_) => {
+                            // `_op DW _f` — placeholder 0; the linker substitutes
+                            // the function offset via the EXTDEF FIXUP.
+                            data_bytes.extend_from_slice(&[0x00, 0x00]);
+                        }
                     }
                 }
             }
@@ -2193,6 +2202,12 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
                                 });
                                 data_slot_fixups.push((slot_off, DataFx::Ext(idx)));
                             }
+                        }
+                        GlobalInit::FuncAddr(sym) => {
+                            let idx = *extdef_idx_of.get(sym).unwrap_or_else(|| {
+                                panic!("EXTDEF index missing for function `{sym}`")
+                            });
+                            data_slot_fixups.push((slot_off, DataFx::Ext(idx)));
                         }
                         GlobalInit::Int(_) | GlobalInit::Byte(_) | GlobalInit::FloatBits(..) => {}
                     }
