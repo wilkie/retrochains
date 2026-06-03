@@ -761,6 +761,33 @@ pub(crate) fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
             }
             prop_expr(left, cp);
             prop_expr(right, cp);
+            // Identity simplifications MSC drops (the no-op operation vanishes,
+            // leaving just the surviving operand):
+            //   x+0, x-0, x<<0, x>>0, x*1, x/1  and  0+x, 1*x.
+            // Fixtures 3370 (x+0), 3463 (x*1), 3574 (x/1), 3556 (x<<0).
+            if let Expr::IntLit(k) = right.as_ref() {
+                let drop = match op {
+                    BinOp::Add | BinOp::Sub | BinOp::Shl | BinOp::Shr => *k == 0,
+                    BinOp::Mul | BinOp::Div => *k == 1,
+                    _ => false,
+                };
+                if drop {
+                    *e = (**left).clone();
+                    return;
+                }
+            }
+            if let Expr::IntLit(k) = left.as_ref() {
+                // Commutative identities only (`0 + x`, `1 * x`).
+                let drop = match op {
+                    BinOp::Add => *k == 0,
+                    BinOp::Mul => *k == 1,
+                    _ => false,
+                };
+                if drop {
+                    *e = (**right).clone();
+                    return;
+                }
+            }
         }
         Expr::Call { args, .. } => {
             for a in args {
