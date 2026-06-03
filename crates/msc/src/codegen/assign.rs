@@ -1594,8 +1594,13 @@ pub(crate) fn emit_assign_indexed_global_var(global_idx: usize, index: &Expr, is
         if is_byte { out.push((k as u32 & 0xFF) as u8); }
         else { out.extend_from_slice(&((k as u32 & 0xFFFF) as u16).to_le_bytes()); }
     } else {
-        emit_expr_to_ax(value, locals, out, fixups);
-        out.push(if is_byte { 0x88 } else { 0x89 });
+        if is_byte {
+            emit_byte_rhs_to_al(value, locals, out, fixups); // mov al, <rhs byte>
+            out.push(0x88);
+        } else {
+            emit_expr_to_ax(value, locals, out, fixups);
+            out.push(0x89);
+        }
         out.push(0x87); // [bx]+disp16
         let dp = out.len();
         out.extend_from_slice(&[0x00, 0x00]);
