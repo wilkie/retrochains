@@ -1100,30 +1100,43 @@ pub(crate) fn emit_threaded_for(
     out: &mut Vec<u8>,
     fixups: &mut Vec<Fixup>,
 ) -> bool {
-    let Cond::Cmp { op: oc_op, .. } = outer_cond else { return false };
-    // Outer body must be exactly one for-loop.
-    let inner = match outer_body {
-        Stmt::For { .. } => outer_body,
-        Stmt::Block(v) if v.len() == 1 => &v[0],
-        _ => return false,
-    };
-    let Stmt::For { init: jinit, cond: jcond, step: jstep, body: jbody } = inner else { return false };
-    let Cond::Cmp { op: ic_op, .. } = jcond else { return false };
-    if matches!(outer_step, Stmt::Empty) || matches!(jstep.as_ref(), Stmt::Empty) {
+    // Collect the loop chain outer→inner. Each level is a for-loop with an
+    // invertible Cmp cond and a non-empty step; an intermediate body is exactly
+    // one nested for-loop. The innermost level's body is the work.
+    struct Level<'a> { init: &'a Stmt, cond: &'a Cond, op: RelOp, step: &'a Stmt }
+    let mut levels: Vec<Level> = Vec::new();
+    {
+        let Cond::Cmp { op, .. } = outer_cond else { return false };
+        if matches!(outer_step, Stmt::Empty) { return false; }
+        levels.push(Level { init: outer_init, cond: outer_cond, op: *op, step: outer_step });
+    }
+    let mut work_body: &Stmt = outer_body;
+    loop {
+        let inner = match work_body {
+            Stmt::For { .. } => work_body,
+            Stmt::Block(v) if v.len() == 1 && matches!(v[0], Stmt::For { .. }) => &v[0],
+            _ => break,
+        };
+        let Stmt::For { init, cond, step, body } = inner else { break };
+        let Cond::Cmp { op, .. } = cond else { break };
+        if matches!(step.as_ref(), Stmt::Empty) { break; }
+        levels.push(Level { init: &**init, cond, op: *op, step: &**step });
+        work_body = &**body;
+    }
+    if levels.len() < 2 {
+        return false; // not a nested loop
+    }
+    // Innermost body: break-free, or a leading `if(c)break;` + rest; no more loops.
+    if stmt_contains_loop(work_body) {
         return false;
     }
-    if stmt_contains_loop(jbody) {
-        return false; // 3-deep handled later
-    }
-    // The inner body is either break-free, or a leading `if(c)break;` + rest (the
-    // for-step break-fold, threaded). `inner_break` carries (break_cond, rest).
-    let inner_break: Option<(Cond, Vec<Stmt>)> = match for_leading_break(jbody) {
+    let inner_break: Option<(Cond, Vec<Stmt>)> = match for_leading_break(work_body) {
         Some((bc, rest)) => match bc {
             Cond::Cmp { .. } => Some((bc, rest)),
             _ => return false, // only Cmp break conds
         },
         None => {
-            if stmt_has_loop_break(jbody) {
+            if stmt_has_loop_break(work_body) {
                 return false; // break not in the canonical leading position
             }
             None
@@ -1165,34 +1178,34 @@ pub(crate) fn emit_threaded_for(
         float_call_temp_disp: locals.float_call_temp_disp,
         fpu_pending_fwait: locals.fpu_pending_fwait,
     };
+    let n = levels.len();
     let base = out.len();
     let mut b: Vec<u8> = Vec::new();
     let mut bfix: Vec<Fixup> = Vec::new();
-    // 1. outer init
-    emit_stmt(outer_init, &bl, frame, return_int, return_long, &mut b, &mut bfix);
-    // 2. jmp OCOND (forward, backpatched) + alignment nop so ITOP is even.
+    let mut cond_pos = vec![0usize; n]; // offset of each level's COND
+    let mut jge_pos = vec![0usize; n];  // disp byte of each COND's exit jcc
+    let mut exit_tgt = vec![0usize; n]; // where each COND's exit jcc lands
+    // Outermost init, then jmp to the outermost COND (+ nop to align the
+    // innermost loop top to an even offset).
+    emit_stmt(levels[0].init, &bl, frame, return_int, return_long, &mut b, &mut bfix);
     let needs_pad = (base + b.len() + 2) % 2 != 0;
     b.push(0xEB);
-    let jmp_ocond = b.len();
+    let jmp0 = b.len();
     b.push(0x00);
     if needs_pad { b.push(0x90); }
-    // 3-6. ITOP/ICOND region (differs by break presence).
-    let itop;
-    let icond;
-    let iexit_jcc;
+    // Innermost loop body region (level n-1).
+    let inner = &levels[n - 1];
+    let itop = b.len();
     if let Some((break_c, rest)) = &inner_break {
         let Cond::Cmp { op: bc_op, .. } = break_c else { return false };
-        // ITOP: inner body (rest) then inner step.
-        itop = b.len();
         for s in rest {
             emit_stmt(s, &bl, frame, return_int, return_long, &mut b, &mut bfix);
         }
-        emit_stmt(&**jstep, &bl, frame, return_int, return_long, &mut b, &mut bfix);
-        // ICOND: guard cmp Cj; jcc(!Cj) -> IEXIT ; break cmp; jcc(!break) -> ITOP
-        icond = b.len();
-        emit_cond_cmp(jcond, &bl, &mut b, &mut bfix);
-        b.push(inverted_jcc(*ic_op));
-        iexit_jcc = b.len();
+        emit_stmt(inner.step, &bl, frame, return_int, return_long, &mut b, &mut bfix);
+        cond_pos[n - 1] = b.len();
+        emit_cond_cmp(inner.cond, &bl, &mut b, &mut bfix);
+        b.push(inverted_jcc(inner.op));
+        jge_pos[n - 1] = b.len();
         b.push(0x00);
         emit_cond_cmp(break_c, &bl, &mut b, &mut bfix);
         b.push(inverted_jcc(*bc_op)); // loop back when the break cond is false
@@ -1201,50 +1214,48 @@ pub(crate) fn emit_threaded_for(
         let Some(d) = i8_disp(itop, p) else { return false };
         b[p] = d;
     } else {
-        // ITOP: inner step
-        itop = b.len();
-        emit_stmt(&**jstep, &bl, frame, return_int, return_long, &mut b, &mut bfix);
-        // ICOND: cmp Cj; jcc(!Cj) -> IEXIT ; B ; jmp ITOP
-        icond = b.len();
-        emit_cond_cmp(jcond, &bl, &mut b, &mut bfix);
-        b.push(inverted_jcc(*ic_op));
-        iexit_jcc = b.len();
+        emit_stmt(inner.step, &bl, frame, return_int, return_long, &mut b, &mut bfix);
+        cond_pos[n - 1] = b.len();
+        emit_cond_cmp(inner.cond, &bl, &mut b, &mut bfix);
+        b.push(inverted_jcc(inner.op));
+        jge_pos[n - 1] = b.len();
         b.push(0x00);
-        emit_stmt(&**jbody, &bl, frame, return_int, return_long, &mut b, &mut bfix);
+        emit_stmt(work_body, &bl, frame, return_int, return_long, &mut b, &mut bfix);
         b.push(0xEB);
         let p = b.len();
         b.push(0x00);
         let Some(d) = i8_disp(itop, p) else { return false };
         b[p] = d;
     }
-    // 7. IEXIT: outer step
-    let iexit = b.len();
-    emit_stmt(outer_step, &bl, frame, return_int, return_long, &mut b, &mut bfix);
-    // 8. OCOND: backpatch the entry jmp; outer cond; jcc(!Ci) -> EXIT
-    let ocond = b.len();
-    let Some(d) = i8_disp(ocond, jmp_ocond) else { return false };
-    b[jmp_ocond] = d;
-    emit_cond_cmp(outer_cond, &bl, &mut b, &mut bfix);
-    b.push(inverted_jcc(*oc_op));
-    let exit_jcc = b.len();
-    b.push(0x00);
-    // 9. inner init J
-    emit_stmt(&**jinit, &bl, frame, return_int, return_long, &mut b, &mut bfix);
-    // 10. jmp ICOND
-    b.push(0xEB);
-    let p = b.len();
-    b.push(0x00);
-    let Some(d) = i8_disp(icond, p) else { return false };
-    b[p] = d;
+    // Enclosing levels, inner→outer: each emits its step, its COND (with an exit
+    // jcc), then the next-inner level's init and a jmp into that inner COND.
+    for l in (0..n - 1).rev() {
+        exit_tgt[l + 1] = b.len(); // the inner COND's exit lands at this step
+        emit_stmt(levels[l].step, &bl, frame, return_int, return_long, &mut b, &mut bfix);
+        cond_pos[l] = b.len();
+        emit_cond_cmp(levels[l].cond, &bl, &mut b, &mut bfix);
+        b.push(inverted_jcc(levels[l].op));
+        jge_pos[l] = b.len();
+        b.push(0x00);
+        emit_stmt(levels[l + 1].init, &bl, frame, return_int, return_long, &mut b, &mut bfix);
+        b.push(0xEB);
+        let p = b.len();
+        b.push(0x00);
+        let Some(d) = i8_disp(cond_pos[l + 1], p) else { return false };
+        b[p] = d;
+    }
     // Align EXIT to an even offset (MSC pads the loop exit with a nop).
     if (base + b.len()) % 2 != 0 {
         b.push(0x90);
     }
-    // 11. EXIT: backpatch the two forward exit jccs.
-    let exit = b.len();
-    let (Some(d1), Some(d2)) = (i8_disp(iexit, iexit_jcc), i8_disp(exit, exit_jcc)) else { return false };
-    b[iexit_jcc] = d1;
-    b[exit_jcc] = d2;
+    exit_tgt[0] = b.len();
+    // Backpatch the entry jmp and every level's exit jcc.
+    let Some(d) = i8_disp(cond_pos[0], jmp0) else { return false };
+    b[jmp0] = d;
+    for l in 0..n {
+        let Some(d) = i8_disp(exit_tgt[l], jge_pos[l]) else { return false };
+        b[jge_pos[l]] = d;
+    }
     // Commit: append the scratch buffer and re-base its fixups.
     out.extend_from_slice(&b);
     for mut f in bfix {
