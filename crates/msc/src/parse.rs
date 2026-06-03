@@ -146,6 +146,55 @@ pub(crate) fn parse_unit(source: &str) -> Result<Unit, EmitError> {
 /// the struct's total_bytes — that gives correct storage layout
 /// without needing a separate Global::struct_idx field. Initializer
 /// values are mapped to per-field byte slots.
+/// Parse one `{ ... }` struct initializer group into flattened GlobalInit slots,
+/// zero-padded to the struct's byte size. Handles nested-struct field braces,
+/// string-literal pointer fields, and scalar fields.
+pub(crate) fn parse_struct_brace_group(p: &mut Parser<'_>, sidx: usize, stotal: usize) -> Result<Vec<GlobalInit>, EmitError> {
+    p.eat(&Tok::LBrace)?;
+    let mut slots: Vec<GlobalInit> = Vec::new();
+    let mut field_idx = 0usize;
+    while !matches!(p.peek(), Some(Tok::RBrace)) {
+        let field = &p.structs[sidx].fields[field_idx];
+        let field_size = field.size;
+        while slots.iter().map(GlobalInit::size_bytes).sum::<usize>() < field.byte_off as usize {
+            slots.push(GlobalInit::Byte(0));
+        }
+        match p.peek() {
+            Some(Tok::LBrace) => {
+                p.bump();
+                while !matches!(p.peek(), Some(Tok::RBrace)) {
+                    let v = parse_signed_int(p)?;
+                    slots.push(GlobalInit::Int(v));
+                    if matches!(p.peek(), Some(Tok::Comma)) { p.bump(); }
+                }
+                p.eat(&Tok::RBrace)?;
+            }
+            Some(Tok::StrLit(_)) => {
+                let bytes = match p.bump().cloned() { Some(Tok::StrLit(b)) => b, _ => unreachable!() };
+                let mut with_nul = bytes.clone();
+                with_nul.push(0);
+                let str_idx = p.strings.len();
+                p.strings.push(with_nul);
+                slots.push(GlobalInit::StrAddr(str_idx));
+            }
+            _ => {
+                let v = parse_signed_int(p)?;
+                if field_size == 1 {
+                    slots.push(GlobalInit::Byte((v as u32 & 0xFF) as u8));
+                } else {
+                    slots.push(GlobalInit::Int(v));
+                }
+            }
+        }
+        field_idx += 1;
+        if matches!(p.peek(), Some(Tok::Comma)) { p.bump(); }
+    }
+    p.eat(&Tok::RBrace)?;
+    while slots.iter().map(GlobalInit::size_bytes).sum::<usize>() < stotal {
+        slots.push(GlobalInit::Byte(0));
+    }
+    Ok(slots)
+}
 pub(crate) fn parse_struct_global_decl(p: &mut Parser<'_>, is_static: bool) -> Result<(), EmitError> {
     p.eat(&Tok::Kw("struct"))?;
     let sname = match p.bump().cloned() {
@@ -170,61 +219,34 @@ pub(crate) fn parse_struct_global_decl(p: &mut Parser<'_>, is_static: bool) -> R
             )));
         }
     };
+    // `struct S arr[N];` — array of N structs (byte storage N*sizeof(S)).
+    let mut elem_count = 1usize;
+    if !is_pointer && matches!(p.peek(), Some(Tok::LBrack)) {
+        p.bump();
+        let n = parse_signed_int(p)?;
+        if n <= 0 {
+            return Err(EmitError::Unsupported(format!("struct array length must be positive, got {n}")));
+        }
+        p.eat(&Tok::RBrack)?;
+        elem_count = n as usize;
+    }
     let init = if matches!(p.peek(), Some(Tok::Assign)) {
         p.bump();
-        if !is_pointer && matches!(p.peek(), Some(Tok::LBrace)) {
-            p.bump();
-            let mut slots: Vec<GlobalInit> = Vec::new();
-            let mut field_idx = 0usize;
+        if !is_pointer && elem_count > 1 && matches!(p.peek(), Some(Tok::LBrace)) {
+            // `struct S arr[N] = {{...},{...}}` — one brace group per element.
+            p.bump(); // outer `{`
+            let mut all: Vec<GlobalInit> = Vec::new();
             while !matches!(p.peek(), Some(Tok::RBrace)) {
-                let field = &p.structs[sidx].fields[field_idx];
-                let field_size = field.size;
-                // Pad to the field's byte offset by BYTES (an Int slot is 2
-                // bytes), not slot count, so word fields align correctly.
-                while slots.iter().map(GlobalInit::size_bytes).sum::<usize>() < field.byte_off as usize {
-                    slots.push(GlobalInit::Byte(0));
-                }
-                match p.peek() {
-                    // Nested struct field `{...}` — flatten its scalar members
-                    // into consecutive 2-byte slots (fixture 2102).
-                    Some(Tok::LBrace) => {
-                        p.bump();
-                        while !matches!(p.peek(), Some(Tok::RBrace)) {
-                            let v = parse_signed_int(p)?;
-                            slots.push(GlobalInit::Int(v));
-                            if matches!(p.peek(), Some(Tok::Comma)) { p.bump(); }
-                        }
-                        p.eat(&Tok::RBrace)?;
-                    }
-                    // String-literal pointer field — intern + StrAddr (2100).
-                    Some(Tok::StrLit(_)) => {
-                        let bytes = match p.bump().cloned() {
-                            Some(Tok::StrLit(b)) => b,
-                            _ => unreachable!(),
-                        };
-                        let mut with_nul = bytes.clone();
-                        with_nul.push(0);
-                        let str_idx = p.strings.len();
-                        p.strings.push(with_nul);
-                        slots.push(GlobalInit::StrAddr(str_idx));
-                    }
-                    _ => {
-                        let v = parse_signed_int(p)?;
-                        if field_size == 1 {
-                            slots.push(GlobalInit::Byte((v as u32 & 0xFF) as u8));
-                        } else {
-                            slots.push(GlobalInit::Int(v));
-                        }
-                    }
-                }
-                field_idx += 1;
+                all.extend(parse_struct_brace_group(p, sidx, stotal)?);
                 if matches!(p.peek(), Some(Tok::Comma)) { p.bump(); }
             }
             p.eat(&Tok::RBrace)?;
-            while slots.iter().map(GlobalInit::size_bytes).sum::<usize>() < stotal {
-                slots.push(GlobalInit::Byte(0));
+            while all.iter().map(GlobalInit::size_bytes).sum::<usize>() < stotal * elem_count {
+                all.push(GlobalInit::Byte(0));
             }
-            Some(slots)
+            Some(all)
+        } else if !is_pointer && matches!(p.peek(), Some(Tok::LBrace)) {
+            Some(parse_struct_brace_group(p, sidx, stotal)?)
         } else if is_pointer && matches!(p.peek(), Some(Tok::Amp)) {
             p.bump();
             let target_name = match p.bump().cloned() {
@@ -249,7 +271,7 @@ pub(crate) fn parse_struct_global_decl(p: &mut Parser<'_>, is_static: bool) -> R
         None
     };
     p.eat(&Tok::Semi)?;
-    let array_len = if is_pointer { 1 } else { stotal };
+    let array_len = if is_pointer { 1 } else { stotal * elem_count };
     let element_size = 1; // byte-oriented storage; fields by offset
     p.global_names.push(name.clone());
     p.globals.push(Global {
@@ -1813,6 +1835,33 @@ pub(crate) fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
                 p.eat(&Tok::Semi)?;
                 return Ok(Stmt::ExprStmt(Expr::Call { name, args }));
             }
+            // `<struct-array-global>[K].<field> = <expr>;`
+            if matches!(p.peek(), Some(Tok::LBrack))
+                && let Some(global_idx) = p.global_names.iter().position(|n| *n == name)
+                && let Some(sidx) = p.globals[global_idx].struct_idx
+                && !p.globals[global_idx].is_pointer
+            {
+                p.bump();
+                let index = parse_expr(p)?;
+                p.eat(&Tok::RBrack)?;
+                let init_view: Vec<Option<i32>> = p.local_specs.iter().map(|l| l.init).collect();
+                let k = index.fold(&init_view).ok_or_else(|| EmitError::Unsupported(
+                    "non-constant struct-array index not yet supported".to_owned()))?;
+                let stotal = p.structs[sidx].total_bytes;
+                p.eat(&Tok::Dot)?;
+                let (field_off, size) = parse_field_lookup(p, sidx)?;
+                let byte_off = u16::try_from(k as i64 * stotal as i64 + field_off as i64)
+                    .expect("struct-array field offset fits");
+                let target = AssignTarget::GlobalField { global: global_idx, byte_off, size };
+                let value = if let Some(v) = parse_compound_rhs(p, &target)? {
+                    v
+                } else {
+                    p.eat(&Tok::Assign)?;
+                    parse_expr(p)?
+                };
+                p.eat(&Tok::Semi)?;
+                return Ok(Stmt::Assign { target, value });
+            }
             // `<struct-global>.<field> = <expr>;`
             if matches!(p.peek(), Some(Tok::Dot))
                 && let Some(global_idx) = p.global_names.iter().position(|n| *n == name)
@@ -3177,6 +3226,25 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                 }
                 Ok(Expr::Param(idx))
             } else if let Some(idx) = p.global_names.iter().position(|n| *n == name) {
+                // `<struct-array-global>[K].<field>` — element of an array of
+                // structs → GlobalField at K*sizeof(S) + field_off (constant K).
+                if matches!(p.peek(), Some(Tok::LBrack))
+                    && let Some(sidx) = p.globals[idx].struct_idx
+                    && !p.globals[idx].is_pointer
+                {
+                    p.bump();
+                    let index = parse_expr(p)?;
+                    p.eat(&Tok::RBrack)?;
+                    let init_view: Vec<Option<i32>> = p.local_specs.iter().map(|l| l.init).collect();
+                    let k = index.fold(&init_view).ok_or_else(|| EmitError::Unsupported(
+                        "non-constant struct-array index not yet supported".to_owned()))?;
+                    let stotal = p.structs[sidx].total_bytes;
+                    p.eat(&Tok::Dot)?;
+                    let (field_off, size) = parse_field_lookup(p, sidx)?;
+                    let byte_off = u16::try_from(k as i64 * stotal as i64 + field_off as i64)
+                        .expect("struct-array field offset fits");
+                    return Ok(Expr::GlobalField { global: idx, byte_off, size });
+                }
                 // `<global>[<expr>]` — array index or pointer index.
                 // Array (`int a[N]`): direct addressing.
                 // Pointer (`char *p`): load pointer first, then offset.
