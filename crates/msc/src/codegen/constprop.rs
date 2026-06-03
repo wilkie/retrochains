@@ -657,6 +657,7 @@ pub(crate) fn prop_cond(cond: &mut Cond, cp: &mut ConstProp) {
 pub(crate) fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
     match e {
         Expr::FloatLit(..) => {} // no int const-prop into float literals
+        Expr::CastChar { value, .. } => prop_expr(value, cp),
         Expr::AssignExpr { target, value } => {
             // Substitute into the RHS so the cond can fold, then invalidate the
             // target's known value: MSC reloads/reuses-AX for later reads rather

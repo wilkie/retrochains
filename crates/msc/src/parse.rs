@@ -2939,21 +2939,28 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
     let tok = p.bump().cloned();
     match tok {
         Some(Tok::LParen) => {
-            // `(type) <expr>` cast — recognize a type-keyword right
-            // after `(` and treat the cast as identity (Phase 1
-            // doesn't model signedness or narrowing semantics).
+            // `(type) <expr>` cast. A `(char)` / `(unsigned char)` VALUE cast
+            // (no `*`) truncates to a byte (handled below); other scalar/pointer
+            // casts are identity (Phase 1 doesn't model widening semantics).
+            let cast_unsigned = matches!(p.peek(), Some(Tok::Kw("unsigned")));
             skip_decl_modifiers(p);
             if matches!(p.peek(), Some(Tok::Kw("int")) | Some(Tok::Kw("char")) | Some(Tok::Kw("long"))
                 | Some(Tok::Kw("float")) | Some(Tok::Kw("double"))) {
+                let cast_char = matches!(p.peek(), Some(Tok::Kw("char")));
                 p.bump();
                 // Accept `long int`, then skip any pointer-distance
                 // qualifiers (`far`/`near`/`huge`) that may appear between
                 // the type and `*` (e.g. `(int far *)`), then skip `*`s.
                 while matches!(p.peek(), Some(Tok::Kw("int"))) { p.bump(); }
                 skip_decl_modifiers(p);
-                while matches!(p.peek(), Some(Tok::Star)) { p.bump(); }
+                let mut had_star = false;
+                while matches!(p.peek(), Some(Tok::Star)) { p.bump(); had_star = true; }
                 p.eat(&Tok::RParen)?;
-                return parse_atom(p);
+                let inner = parse_atom(p)?;
+                if cast_char && !had_star {
+                    return Ok(Expr::CastChar { value: Box::new(inner), unsigned: cast_unsigned });
+                }
+                return Ok(inner);
             }
             let inner = parse_expr(p)?;
             // Comma operator: `(<ident> = <expr>, <expr>, ...)` or

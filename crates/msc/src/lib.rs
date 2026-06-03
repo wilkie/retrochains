@@ -820,6 +820,11 @@ pub enum Expr {
     /// surrounding condition/use. Distinct from a `Stmt::Assign`, which may use
     /// a const store (`c7`). Fixtures 513 / 1434 / 2996 / 3395 / 555.
     AssignExpr { target: AssignTarget, value: Box<Expr> },
+    /// `(char)<int-expr>` / `(unsigned char)<int-expr>` — truncate to a byte
+    /// then widen back: signed → `cbw` (98), unsigned → `sub ah,ah` (2a e4).
+    /// For a simple int variable operand MSC loads just the low byte
+    /// (`mov al,[v]`). Fixtures 3223 / 2707 / 3411 / 3655.
+    CastChar { value: Box<Expr>, unsigned: bool },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -923,6 +928,10 @@ impl Expr {
             // The value of `(x = v)` is v — lets `if ((x=K))` fold its cond for
             // dead-branch elision. The store side effect is emitted separately.
             Expr::AssignExpr { value, .. } => value.fold(locals),
+            Expr::CastChar { value, unsigned } => {
+                let v = value.fold(locals)?;
+                Some(if *unsigned { (v as u8) as i32 } else { (v as i8) as i32 })
+            }
         }
     }
 }

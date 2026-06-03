@@ -116,6 +116,39 @@ pub(crate) fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8
                 other => panic!("AssignExpr target not yet supported: {other:?}"),
             }
         }
+        Expr::CastChar { value, unsigned } => {
+            // Truncate to a byte then widen back. MSC loads the low byte of a
+            // simple int variable directly (`mov al,[v]`); a general expression
+            // is computed into AX (AL is its low byte). Widen: signed → cbw,
+            // unsigned → `sub ah,ah`.
+            match value.as_ref() {
+                Expr::Param(i)
+                    if !locals.is_char_param(*i) && !locals.is_long_param(*i) && !locals.is_float_param(*i) =>
+                {
+                    let d = param_disp(*i);
+                    out.push(0x8A); out.push(bp_modrm(0x46, d)); push_bp_disp(out, d);
+                }
+                Expr::Local(i)
+                    if locals.size(*i) == 2 && !locals.is_long_local(*i) && !locals.is_float_local(*i) =>
+                {
+                    let d = locals.disp(*i);
+                    out.push(0x8A); out.push(bp_modrm(0x46, d)); push_bp_disp(out, d);
+                }
+                Expr::Global(g)
+                    if !locals.is_char_global(*g) && !locals.is_long_global(*g) && !locals.is_float_global(*g) =>
+                {
+                    let bo = out.len();
+                    out.extend_from_slice(&[0xA0, 0x00, 0x00]); // mov al, moffs
+                    fixups.push(Fixup { body_offset: bo, kind: FixupKind::GlobalAddr { global_idx: *g } });
+                }
+                _ => emit_expr_to_ax(value, locals, out, fixups),
+            }
+            if *unsigned {
+                out.extend_from_slice(&[0x2A, 0xE4]); // sub ah, ah
+            } else {
+                out.push(0x98); // cbw
+            }
+        }
         Expr::Index2D { is_global, base, row, col, cols, elem } => {
             assert!(*is_global, "local 2-D runtime index should have const-folded");
             emit_index2d_regs(row, col, *cols, *elem, locals, out, fixups);
