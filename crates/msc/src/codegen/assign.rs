@@ -1549,10 +1549,19 @@ pub(crate) fn emit_byte_rhs_to_al(value: &Expr, locals: &Locals<'_>, out: &mut V
 /// Codegen: `mov si, [idx]; shl si, 1; <rhs→AX>; mov [bp+si+base], ax`.
 /// Requires Frame::WithSlideSi. Fixture 1468.
 pub(crate) fn emit_assign_indexed_local_var(local_idx: usize, index: &Expr, value: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    let base_disp = locals.disp(local_idx);
+    // Constant RHS: store the immediate directly (no AX). `mov si,[i]; shl si,1;
+    // mov word [bp+si+base], imm` (c7 /0). Fixture 1933 (`a[i] = 0`).
+    if let Some(k) = value.fold(locals.inits) {
+        emit_index_to_si(index, locals, out);
+        out.extend_from_slice(&[0xD1, 0xE6]); // shl si, 1
+        out.push(0xC7); out.push(bp_modrm(0x42, base_disp)); push_bp_disp(out, base_disp);
+        out.extend_from_slice(&((k as u32 & 0xFFFF) as u16).to_le_bytes());
+        return;
+    }
     emit_index_to_si(index, locals, out);
     out.extend_from_slice(&[0xD1, 0xE6]); // shl si, 1
     emit_expr_to_ax(value, locals, out, fixups);
-    let base_disp = locals.disp(local_idx);
     out.push(0x89); out.push(bp_modrm(0x42, base_disp)); push_bp_disp(out, base_disp); // mov [bp+si+base], ax
 }
 /// `<local-char-array>[<expr>] = <byte>;` — SI-based byte store.
