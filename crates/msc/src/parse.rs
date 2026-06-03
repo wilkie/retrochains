@@ -417,20 +417,32 @@ pub(crate) fn parse_struct_def(p: &mut Parser<'_>) -> Result<(), EmitError> {
                 )));
             }
         };
-        let field_size = if is_ptr { 2 } else { size };
+        let elem_size = if is_ptr { 2 } else { size };
+        // Array field `int v[N];` — element size stays `elem_size` (so `s.v[K]`
+        // indexes correctly); the field spans elem_size*N bytes.
+        let mut count = 1usize;
+        if matches!(p.peek(), Some(Tok::LBrack)) {
+            p.bump();
+            let n = parse_signed_int(p)?;
+            if n <= 0 {
+                return Err(EmitError::Unsupported(format!("struct array field length must be positive, got {n}")));
+            }
+            p.eat(&Tok::RBrack)?;
+            count = n as usize;
+        }
         // Word-align int / pointer / struct fields. Char fields take the
         // next byte at any offset.
-        if field_size >= 2 && cursor % 2 != 0 {
+        if elem_size >= 2 && cursor % 2 != 0 {
             cursor += 1;
         }
         let byte_off = u16::try_from(cursor).expect("field offset fits in u16");
         fields.push(StructField {
             name: fname,
             byte_off,
-            size: field_size,
+            size: elem_size,
             struct_idx: field_struct_idx,
         });
-        cursor += field_size as usize;
+        cursor += elem_size as usize * count;
         p.eat(&Tok::Semi)?;
     }
     p.eat(&Tok::RBrace)?;
@@ -2645,6 +2657,18 @@ pub(crate) fn parse_field_lookup(p: &mut Parser<'_>, sidx: usize) -> Result<(u16
         p.bump(); // .
         let (inner_off, inner_size) = parse_field_lookup(p, inner_sidx)?;
         return Ok((byte_off + inner_off, inner_size));
+    }
+    // Array field element `s.v[K]` (constant K) → byte_off + K*element_size.
+    if matches!(p.peek(), Some(Tok::LBrack)) {
+        p.bump();
+        let idx = parse_expr(p)?;
+        p.eat(&Tok::RBrack)?;
+        let init_view: Vec<Option<i32>> = p.local_specs.iter().map(|l| l.init).collect();
+        let k = idx.fold(&init_view).ok_or_else(|| EmitError::Unsupported(
+            "non-constant struct array-field index not yet supported".to_owned()))?;
+        let off = u16::try_from(byte_off as i64 + k as i64 * size as i64)
+            .expect("struct array-field offset fits");
+        return Ok((off, size));
     }
     Ok((byte_off, size))
 }
