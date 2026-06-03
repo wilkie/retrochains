@@ -1371,90 +1371,98 @@ pub(crate) fn emit_assign_global(global_idx: usize, value: &Expr, locals: &Local
         });
     }
 }
+/// Emit a long (4-byte) const-store or compound-assign on a global whose low word
+/// is at `[global+lo]` and high word at `[global+hi]`. `self_matches` tells whether
+/// a BinOp value's left operand is the lvalue's own self-read (compound). Returns
+/// true if it emitted; false for an unsupported shape (caller falls back). Shared by
+/// long array elements (`a[K]`) and long struct fields (`s.f`).
+pub(crate) fn emit_long_global_4byte(
+    global_idx: usize, lo: u16, hi: u16, value: &Expr, self_matches: bool,
+    locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>,
+) -> bool {
+    let put_addr = |out: &mut Vec<u8>, fixups: &mut Vec<Fixup>, off: u16| {
+        let bo = out.len();
+        out.extend_from_slice(&off.to_le_bytes());
+        fixups.push(Fixup { body_offset: bo - 1, kind: FixupKind::GlobalAddr { global_idx } });
+    };
+    // `<grp1-op> word [g+off], imm` — 83 (imm8sx) when it fits else 81.
+    let word_imm = |out: &mut Vec<u8>, fixups: &mut Vec<Fixup>, digit: u8, off: u16, imm: i32| {
+        let modrm = 0x06 | (digit << 3);
+        if let Ok(k8) = i8::try_from(imm) {
+            out.push(0x83); out.push(modrm); put_addr(out, fixups, off); out.push(k8 as u8);
+        } else {
+            out.push(0x81); out.push(modrm); put_addr(out, fixups, off);
+            out.extend_from_slice(&((imm as u32 & 0xFFFF) as u16).to_le_bytes());
+        }
+    };
+    let mov_imm = |out: &mut Vec<u8>, fixups: &mut Vec<Fixup>, off: u16, imm: u16| {
+        out.push(0xC7); out.push(0x06); put_addr(out, fixups, off);
+        out.extend_from_slice(&imm.to_le_bytes());
+    };
+    // AND keeps the 81 (imm16) word form to clear the high bits.
+    let word_imm16 = |out: &mut Vec<u8>, fixups: &mut Vec<Fixup>, digit: u8, off: u16, imm: i32| {
+        out.push(0x81); out.push(0x06 | (digit << 3)); put_addr(out, fixups, off);
+        out.extend_from_slice(&((imm as u32 & 0xFFFF) as u16).to_le_bytes());
+    };
+    // Long const assign. Zeroing both words goes through AX (high then low); a
+    // nonzero value uses one `mov word [g+off], imm` per half.
+    if let Some(k) = value.fold(locals.inits) {
+        if k == 0 {
+            out.extend_from_slice(&[0x2B, 0xC0]); // sub ax, ax
+            out.push(0xA3); put_addr(out, fixups, hi); // mov [hi], ax
+            out.push(0xA3); put_addr(out, fixups, lo); // mov [lo], ax
+        } else {
+            mov_imm(out, fixups, lo, (k as u32 & 0xFFFF) as u16);
+            mov_imm(out, fixups, hi, (((k as i32) >> 16) as u32 & 0xFFFF) as u16);
+        }
+        return true;
+    }
+    // Long compound `<lvalue> op= imm` (foldable RHS, self-read on the left).
+    if self_matches
+        && let Expr::BinOp { op, right, .. } = value
+        && let Some(m) = right.fold(locals.inits)
+    {
+        let low = (m as u32 & 0xFFFF) as i16 as i32;
+        let high = ((m as i32) >> 16) as i32;
+        match op {
+            BinOp::Add => { word_imm(out, fixups, 0, lo, low); word_imm(out, fixups, 2, hi, high); }
+            BinOp::Sub => { word_imm(out, fixups, 5, lo, low); word_imm(out, fixups, 3, hi, high); }
+            BinOp::BitAnd => {
+                word_imm16(out, fixups, 4, lo, low);
+                if high == 0 { mov_imm(out, fixups, hi, 0); }
+                else { word_imm16(out, fixups, 4, hi, high); }
+            }
+            BinOp::BitOr | BinOp::BitXor => {
+                let digit = if matches!(op, BinOp::BitOr) { 1 } else { 6 };
+                if (0..=255).contains(&low) {
+                    out.push(0x80); out.push(0x06 | (digit << 3)); put_addr(out, fixups, lo);
+                    out.push(low as u8);
+                } else {
+                    word_imm(out, fixups, digit, lo, low);
+                }
+                if high != 0 { word_imm(out, fixups, digit, hi, high); }
+            }
+            BinOp::Shl if m == 1 => {
+                out.extend_from_slice(&[0xD1, 0x26]); put_addr(out, fixups, lo); // shl word [lo],1
+                out.extend_from_slice(&[0xD1, 0x16]); put_addr(out, fixups, hi); // rcl word [hi],1
+            }
+            _ => return false, // unsupported long compound op (mul/div/shl>1/shr)
+        }
+        return true;
+    }
+    false
+}
 /// `<global>[K] = <expr>;` — write at a constant array index. The
 /// placeholder address is `byte_off`, which the linker adds to the
 /// global's base. Constant RHS → `c7 06 byte_off imm16`; general RHS
 /// → `<expr-to-ax>; a3 byte_off`. Fixture 4119.
 pub(crate) fn emit_assign_indexed_global(global_idx: usize, byte_off: u16, value: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
-    // Long array element `a[K]` (4-byte element): assign and compound operate on
-    // the low word at byte_off and the high word at byte_off+2. Fixtures 897/899-904.
+    // Long array element `a[K]` (4-byte element): low word at byte_off, high at
+    // byte_off+2. Fixtures 897/899-904.
     if locals.is_long_global(global_idx) {
-        let lo = byte_off;
-        let hi = byte_off.wrapping_add(2);
-        let put_addr = |out: &mut Vec<u8>, fixups: &mut Vec<Fixup>, off: u16| {
-            let bo = out.len();
-            out.extend_from_slice(&off.to_le_bytes());
-            fixups.push(Fixup { body_offset: bo - 1, kind: FixupKind::GlobalAddr { global_idx } });
-        };
-        // `<grp1-op> word [_a+off], imm` — 83 (imm8sx) when it fits else 81.
-        let word_imm = |out: &mut Vec<u8>, fixups: &mut Vec<Fixup>, digit: u8, off: u16, imm: i32| {
-            let modrm = 0x06 | (digit << 3);
-            if let Ok(k8) = i8::try_from(imm) {
-                out.push(0x83); out.push(modrm); put_addr(out, fixups, off); out.push(k8 as u8);
-            } else {
-                out.push(0x81); out.push(modrm); put_addr(out, fixups, off);
-                out.extend_from_slice(&((imm as u32 & 0xFFFF) as u16).to_le_bytes());
-            }
-        };
-        let mov_imm = |out: &mut Vec<u8>, fixups: &mut Vec<Fixup>, off: u16, imm: u16| {
-            out.push(0xC7); out.push(0x06); put_addr(out, fixups, off);
-            out.extend_from_slice(&imm.to_le_bytes());
-        };
-        // `<grp1-op> word [_a+off], imm16` — always the 81 (imm16) form. Used for
-        // AND, which must keep the word width to clear the high bits.
-        let word_imm16 = |out: &mut Vec<u8>, fixups: &mut Vec<Fixup>, digit: u8, off: u16, imm: i32| {
-            out.push(0x81); out.push(0x06 | (digit << 3)); put_addr(out, fixups, off);
-            out.extend_from_slice(&((imm as u32 & 0xFFFF) as u16).to_le_bytes());
-        };
-        // Long const assign. Zeroing both words goes through AX (`sub ax,ax; mov
-        // [hi],ax; mov [lo],ax` — high then low); a nonzero value uses one
-        // `mov word [_a+off], imm` per half.
-        if let Some(k) = value.fold(locals.inits) {
-            if k == 0 {
-                out.extend_from_slice(&[0x2B, 0xC0]); // sub ax, ax
-                out.push(0xA3); put_addr(out, fixups, hi); // mov [hi], ax
-                out.push(0xA3); put_addr(out, fixups, lo); // mov [lo], ax
-            } else {
-                mov_imm(out, fixups, lo, (k as u32 & 0xFFFF) as u16);
-                mov_imm(out, fixups, hi, (((k as i32) >> 16) as u32 & 0xFFFF) as u16);
-            }
-            return;
-        }
-        // Long compound `a[K] op= imm` (foldable RHS).
-        if let Expr::BinOp { op, left, right } = value
-            && matches!(left.as_ref(), Expr::Index { array, .. } if *array == global_idx)
-            && let Some(m) = right.fold(locals.inits)
-        {
-            let low = (m as u32 & 0xFFFF) as i16 as i32;
-            let high = ((m as i32) >> 16) as i32;
-            match op {
-                BinOp::Add => { word_imm(out, fixups, 0, lo, low); word_imm(out, fixups, 2, hi, high); }
-                BinOp::Sub => { word_imm(out, fixups, 5, lo, low); word_imm(out, fixups, 3, hi, high); }
-                BinOp::BitAnd => {
-                    word_imm16(out, fixups, 4, lo, low); // and always word imm16
-                    // high &= K_hi; K_hi==0 clears it, emitted as a mov 0.
-                    if high == 0 { mov_imm(out, fixups, hi, 0); }
-                    else { word_imm16(out, fixups, 4, hi, high); }
-                }
-                BinOp::BitOr | BinOp::BitXor => {
-                    let digit = if matches!(op, BinOp::BitOr) { 1 } else { 6 };
-                    // low: byte form when the immediate fits a byte (high byte of
-                    // the low word is untouched); else word.
-                    if (0..=255).contains(&low) {
-                        out.push(0x80); out.push(0x06 | (digit << 3)); put_addr(out, fixups, lo);
-                        out.push(low as u8);
-                    } else {
-                        word_imm(out, fixups, digit, lo, low);
-                    }
-                    // high: or/xor by 0 is a no-op, omitted.
-                    if high != 0 { word_imm(out, fixups, digit, hi, high); }
-                }
-                BinOp::Shl if m == 1 => {
-                    out.extend_from_slice(&[0xD1, 0x26]); put_addr(out, fixups, lo); // shl word [lo],1
-                    out.extend_from_slice(&[0xD1, 0x16]); put_addr(out, fixups, hi); // rcl word [hi],1
-                }
-                _ => panic!("unsupported long indexed-global compound op {op:?}"),
-            }
+        let self_matches = matches!(value, Expr::BinOp { left, .. }
+            if matches!(left.as_ref(), Expr::Index { array, .. } if *array == global_idx));
+        if emit_long_global_4byte(global_idx, byte_off, byte_off.wrapping_add(2), value, self_matches, locals, out, fixups) {
             return;
         }
     }
@@ -1848,6 +1856,15 @@ pub(crate) fn emit_assign_indexed_local_byte_var(local_idx: usize, index: &Expr,
 /// `<struct-global>.<field> = <expr>;` — store at the global's
 /// address + byte_off. Word: `c7 06 disp imm16`; byte: `c6 06 disp imm8`.
 pub(crate) fn emit_assign_global_field(global_idx: usize, byte_off: u16, size: u8, value: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    // Long (4-byte) struct field: a long element at byte_off — reuse the shared
+    // long const-store / compound codegen (low at byte_off, high at byte_off+2).
+    if size == 4 {
+        let self_matches = matches!(value, Expr::BinOp { left, .. }
+            if matches!(left.as_ref(), Expr::GlobalField { global: g, byte_off: bo, .. } if *g == global_idx && *bo == byte_off));
+        if emit_long_global_4byte(global_idx, byte_off, byte_off.wrapping_add(2), value, self_matches, locals, out, fixups) {
+            return;
+        }
+    }
     // Compound `s.f op= rhs` (preserved self-read): a struct field is a global at
     // `byte_off`, structurally identical to a global-array element — rewrite the
     // self-read to Index/IndexByte and reuse the indexed-global compound codegen.
