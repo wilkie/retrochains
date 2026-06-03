@@ -14,16 +14,16 @@ dist/
 build/
 pkg/
 
-# Extracted Borland C++ 2.0 install tree (extracted lazily from BC2.zip by the
-# oracle crate; BC2.zip itself is tracked, the unpacked contents are not).
-.bc2/
-
-# Oracle distributions for the second/third compiler targets. The binaries
-# aren't ours to redistribute, so we ship a SHA-256 manifest (`MSC500.sha256`,
-# `LATTICE*.sha256`) and a how-to-acquire doc (`MSC500.md`, `LATTICE*.md`)
-# instead of the zip itself. See specs/plans/SECOND_COMPILER.md.
+# Oracle distributions. The binaries aren't ours to redistribute, so for each
+# toolchain we ship a SHA-256 manifest (`BC2.sha256`, `MSC500.sha256`,
+# `LATTICE*.sha256`) and a how-to-acquire doc (`BC2.md`, `MSC500.md`,
+# `LATTICE*.md`) instead of the zip itself. The oracle crate lazily unpacks
+# each zip into its own gitignored dir on first use. See
+# specs/plans/SECOND_COMPILER.md.
+/BC2.zip
 /MSC*.zip
 /LATTICE*.zip
+.bc2/
 .msc500/
 .lattice2/
 .lattice3/

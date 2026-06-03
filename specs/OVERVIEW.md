@@ -16,7 +16,9 @@ compiler and its peculiarity.
 
 ```
 retrochains/
-├── BC2.zip                 # Original Borland C++ 2.0 install tree (the oracle source)
+├── BC2.zip                 # Borland C++ 2.0 install tree (oracle source; gitignored, supply your own — see BC2.md)
+├── BC2.sha256              # Integrity manifest for BC2.zip's contents
+├── BC2.md                  # How to acquire / verify BC2.zip
 ├── .bc2/                   # Gitignored. Lazily unpacked from BC2.zip on first oracle use.
 ├── Cargo.toml              # Rust workspace manifest
 ├── rust-toolchain.toml     # Pinned rustup channel + components
@@ -90,11 +92,13 @@ and use any best practice to structure its build system and testing practices.
 ## The oracle
 
 The original Borland C++ 2.0 binaries (`BCC.EXE`, `TASM.EXE`, `TLINK.EXE`)
-along with their headers and runtime libraries are committed to the repo as
-`BC2.zip` — it's the only file we get from the original distribution that
-lives in version control. On first use, `crates/oracle/` unpacks the archive
-into a gitignored `.bc2/` directory and from then on drives those binaries
-under DOSBox to produce reference outputs.
+along with their headers and runtime libraries are supplied as `BC2.zip` at the
+repo root. The Borland binaries aren't ours to redistribute, so `BC2.zip` is
+gitignored; we track the [`BC2.sha256`](../BC2.sha256) integrity manifest and the
+[`BC2.md`](../BC2.md) how-to-acquire doc instead (the same pattern as
+`MSC500.{sha256,md}`). On first use, `crates/oracle/` unpacks the archive into a
+gitignored `.bc2/` directory and from then on drives those binaries under DOSBox
+to produce reference outputs.
 
 That reference is the **oracle**: every byte our Rust reimplementation
 produces must match the byte the oracle produces for the same input. See

@@ -314,9 +314,10 @@ compiler work whenever we're ready.
 
 ## Open questions
 
-- **License / redistribution**: BC2.zip ships in the repo. MSC 5 may
-  or may not be similarly redistributable. If not, the oracle has to
-  fetch it from a configurable path the developer provides.
+- **License / redistribution**: neither BC2.zip nor MSC500.zip is ours
+  to redistribute, so neither is committed — we track a `.sha256`
+  integrity manifest plus a `.md` how-to-acquire doc for each, and the
+  developer drops their own zip at a configurable path the oracle reads.
 - **Multi-compiler CI**: the corpus regression is already slow;
   running it under N compilers multiplies the time. Worth thinking
   about parallel oracle invocations or compiler-conditioned subsets.

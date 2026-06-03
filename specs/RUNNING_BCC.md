@@ -2,9 +2,12 @@
 
 The original 1991 Borland C++ 2.0 install tree — `BCC.EXE`, `TASM.EXE`,
 `TLINK.EXE`, all the headers in `INCLUDE/`, and every memory-model variant of
-the runtime libraries in `LIB/` — is stored as `BC2.zip` at the repository
-root. It's the only Borland-distributed file that lives in version control;
-everything else is unpacked on demand.
+the runtime libraries in `LIB/` — is supplied as `BC2.zip` at the repository
+root. The Borland binaries aren't ours to redistribute, so `BC2.zip` itself is
+gitignored; what lives in version control is the [`BC2.sha256`](../BC2.sha256)
+integrity manifest and the [`BC2.md`](../BC2.md) how-to-acquire doc. Contributors
+drop their own copy of `BC2.zip` at the repo root and the oracle unpacks it on
+demand.
 
 We run those original binaries on a modern host with [DOSBox](https://www.dosbox.com/)
 and call the result *the oracle*: when we build our own implementation,
@@ -12,7 +15,9 @@ every byte we emit must match what the oracle emits for the same input.
 
 ## Layout
 
-- `BC2.zip` — the install tree. Tracked. Read-only.
+- `BC2.zip` — the install tree. Gitignored (not redistributable); supply your
+  own — see [`BC2.md`](../BC2.md). Verified against [`BC2.sha256`](../BC2.sha256).
+  Read-only.
 - `.bc2/` — gitignored. Lazily populated with the unpacked contents of
   `BC2.zip` the first time the oracle is used.
 - `crates/oracle/` — the wrapper. Public API in `oracle::Oracle`. Handles
