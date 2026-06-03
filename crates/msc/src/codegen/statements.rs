@@ -52,7 +52,10 @@ pub(crate) fn emit_stmt(
         Stmt::Return(expr) => emit_return(expr, locals, frame, return_int, return_long, out, fixups),
         Stmt::Empty => {}
         Stmt::ExprStmt(Expr::Call { name, args }) => {
-            emit_call(name, args, locals, out, fixups);
+            // A call statement in a slide-frame function omits the per-call
+            // `add sp,N` cleanup — the epilogue's `mov sp,bp` reclaims the args
+            // (fixtures 1443, 1872). Non-slide frames still clean up per call.
+            emit_call_inner(name, args, locals, frame.is_with_slide(), out, fixups);
         }
         Stmt::ExprStmt(other) => {
             // Generic: evaluate the expression, discard the AX result.
