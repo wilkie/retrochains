@@ -1273,6 +1273,18 @@ pub(crate) fn emit_assign_global(global_idx: usize, value: &Expr, locals: &Local
         fixups.push(Fixup { body_offset: addr_off - 1, kind: FixupKind::GlobalAddr { global_idx } });
         return;
     }
+    // Char global scalar store `c = K;` → byte form `mov byte [c], imm8` (c6 06).
+    if locals.is_char_global(global_idx)
+        && let Some(k) = value.fold(locals.inits)
+    {
+        out.push(0xC6);
+        out.push(0x06);
+        let addr_off = out.len();
+        out.extend_from_slice(&[0x00, 0x00]);
+        out.push((k as u32 & 0xFF) as u8);
+        fixups.push(Fixup { body_offset: addr_off - 1, kind: FixupKind::GlobalAddr { global_idx } });
+        return;
+    }
     if let Some(k) = value.fold(locals.inits) {
         let imm = (k as u32 & 0xFFFF) as u16;
         out.push(0xC7);
