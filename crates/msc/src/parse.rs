@@ -2877,6 +2877,12 @@ pub(crate) fn parse_binop_prec(p: &mut Parser<'_>, min_prec: u8) -> Result<Expr,
         if prec < min_prec { break; }
         p.bump();
         let right = parse_binop_prec(p, prec + 1)?;
+        // `e & 0xFF` is the zero-extended low byte — MSC lowers it exactly like
+        // `(unsigned char)e` (`mov al,[e]; sub ah,ah`). Fixtures 2935 / 2539.
+        if matches!(op, BinOp::BitAnd) && matches!(right, Expr::IntLit(255)) {
+            left = Expr::CastChar { value: Box::new(left), unsigned: true };
+            continue;
+        }
         left = Expr::BinOp { op, left: Box::new(left), right: Box::new(right) };
     }
     Ok(left)
@@ -2958,7 +2964,13 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                 p.eat(&Tok::RParen)?;
                 let inner = parse_atom(p)?;
                 if cast_char && !had_star {
-                    return Ok(Expr::CastChar { value: Box::new(inner), unsigned: cast_unsigned });
+                    // Collapse a nested byte cast: `(unsigned char)(x & 0xFF)`
+                    // (the mask already lowered to CastChar) is one truncation.
+                    let value = match inner {
+                        Expr::CastChar { value, .. } => value,
+                        other => Box::new(other),
+                    };
+                    return Ok(Expr::CastChar { value, unsigned: cast_unsigned });
                 }
                 return Ok(inner);
             }
