@@ -2303,7 +2303,19 @@ pub(crate) fn emit_postmutate_global(step: i32, global_idx: usize, out: &mut Vec
 /// then advance the pointer by `step` bytes.
 pub(crate) fn emit_assign_deref_postmutate_local(local_idx: usize, step: i32, value: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
     let disp = locals.disp(local_idx);
-    { out.push(0x8B); out.push(bp_modrm(0x5E, disp)); push_bp_disp(out, disp); }    // mov bx, [bp-p]
+    // If AX still holds p (the immediately-preceding `p = <addr>` store was
+    // `mov [bp-p], ax`), reuse it via `mov bx,ax` instead of reloading
+    // `mov bx,[bp-p]` (fixture 1299 `p = buf; *p++ = 'A'`).
+    let store = {
+        let mut v = vec![0x89, bp_modrm(0x46, disp)];
+        push_bp_disp(&mut v, disp);
+        v
+    };
+    if out.len() >= store.len() && out[out.len() - store.len()..] == store[..] {
+        out.extend_from_slice(&[0x8B, 0xD8]); // mov bx, ax
+    } else {
+        out.push(0x8B); out.push(bp_modrm(0x5E, disp)); push_bp_disp(out, disp); // mov bx, [bp-p]
+    }
     emit_postmutate_local(step, locals.size(local_idx), disp, out);
     // pointee size = |step| (step encodes the pointer stride)
     let psz = step.unsigned_abs() as usize;
