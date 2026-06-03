@@ -68,23 +68,26 @@ pub(crate) fn emit_stmt(
             emit_runtime_switch(scrutinee, cases, locals, frame, return_int, return_long, out, fixups);
         }
         Stmt::Break => {
-            // Emit a forward `jmp near` placeholder; the enclosing
-            // loop patches the disp16 at its end.
+            // Emit a forward `jmp short` (eb) placeholder; the enclosing loop
+            // patches the rel8 disp byte at its end. The recorded offset points
+            // at the disp byte (one past the opcode).
+            out.push(0xEB);
+            let pos = out.len();
+            out.push(0x00);
             let mut stack = locals.loop_stack.borrow_mut();
             if let Some(top) = stack.last_mut() {
-                let off = out.len();
-                out.extend_from_slice(&[0xE9, 0x00, 0x00]);
-                top.breaks.push(off);
+                top.breaks.push(pos);
             } else {
                 panic!("break outside a loop or const-folded switch");
             }
         }
         Stmt::Continue => {
+            out.push(0xEB);
+            let pos = out.len();
+            out.push(0x00);
             let mut stack = locals.loop_stack.borrow_mut();
             if let Some(top) = stack.last_mut() {
-                let off = out.len();
-                out.extend_from_slice(&[0xE9, 0x00, 0x00]);
-                top.continues.push(off);
+                top.continues.push(pos);
             } else {
                 panic!("continue outside a loop");
             }
@@ -147,6 +150,38 @@ pub(crate) fn emit_stmt(
                 let pos = out.len();
                 out.push(0x00);
                 locals.label_fixups.borrow_mut().push((label.clone(), pos));
+                return;
+            }
+            // `if (cond) break;` / `if (cond) continue;` lower to a single
+            // conditional jump (jcc taken when the cond is TRUE) straight to the
+            // loop's break/continue target — exactly like `if (cond) goto L`,
+            // but the offset is recorded in the enclosing loop ctx (rel8).
+            if else_branch.is_none()
+                && matches!(then_branch.as_ref(), Stmt::Break | Stmt::Continue)
+            {
+                let is_break = matches!(then_branch.as_ref(), Stmt::Break);
+                if let Some(k) = fold_cond(cond, locals) {
+                    if k != 0 {
+                        out.push(0xEB);
+                        let pos = out.len();
+                        out.push(0x00);
+                        let mut stack = locals.loop_stack.borrow_mut();
+                        let top = stack.last_mut().expect("break/continue outside a loop");
+                        if is_break { top.breaks.push(pos); } else { top.continues.push(pos); }
+                    }
+                    return;
+                }
+                let jcc = match cond {
+                    Cond::Cmp { op, .. } => loop_back_jcc(*op),
+                    _ => 0x75, // jnz for a truthy condition
+                };
+                emit_cond_cmp_inner(cond, locals, out, fixups);
+                out.push(jcc);
+                let pos = out.len();
+                out.push(0x00);
+                let mut stack = locals.loop_stack.borrow_mut();
+                let top = stack.last_mut().expect("break/continue outside a loop");
+                if is_break { top.breaks.push(pos); } else { top.continues.push(pos); }
                 return;
             }
             // Constant-condition elision: when the cond folds to a
@@ -1158,23 +1193,17 @@ pub(crate) fn emit_loop(
     out.push(jcc_opcode);
     out.push(back_disp as u8);
     let loop_end = out.len();
-    // Patch break/continue placeholders (Break/Continue stmt arms
-    // left `e9 00 00` markers). break → loop_end; continue → cmp_base.
-    for off in &loop_ctx.breaks {
+    // Patch break/continue placeholders (rel8 `eb/jcc XX`). break → loop_end;
+    // continue → cmp_base. Each offset points at the disp byte.
+    for &off in &loop_ctx.breaks {
         let abs = body_base + off;
-        let after = abs + 3;
-        let target = loop_end as i32 - after as i32;
-        let rel = (target as i16) as u16;
-        out[abs + 1] = rel.to_le_bytes()[0];
-        out[abs + 2] = rel.to_le_bytes()[1];
+        let disp = loop_end as i32 - (abs as i32 + 1);
+        out[abs] = i8::try_from(disp).expect("break rel8 disp fits") as u8;
     }
-    for off in &loop_ctx.continues {
+    for &off in &loop_ctx.continues {
         let abs = body_base + off;
-        let after = abs + 3;
-        let target = cmp_base as i32 - after as i32;
-        let rel = (target as i16) as u16;
-        out[abs + 1] = rel.to_le_bytes()[0];
-        out[abs + 2] = rel.to_le_bytes()[1];
+        let disp = cmp_base as i32 - (abs as i32 + 1);
+        out[abs] = i8::try_from(disp).expect("continue rel8 disp fits") as u8;
     }
 }
 /// `do <body> while (<cond>);` (fixture 4098). When the body's last
@@ -1721,21 +1750,17 @@ pub(crate) fn emit_do_while(
     out.push(jcc_opcode);
     out.push(back_disp as u8);
     let loop_end = out.len();
-    for off in &loop_ctx.breaks {
+    // break → loop_end; continue → the cmp section. Each recorded offset points
+    // at the rel8 disp byte (one past the eb/jcc opcode).
+    for &off in &loop_ctx.breaks {
         let abs = body_base + off;
-        let after = abs + 3;
-        let target = loop_end as i32 - after as i32;
-        let rel = (target as i16) as u16;
-        out[abs + 1] = rel.to_le_bytes()[0];
-        out[abs + 2] = rel.to_le_bytes()[1];
+        let disp = loop_end as i32 - (abs as i32 + 1);
+        out[abs] = i8::try_from(disp).expect("break rel8 disp fits") as u8;
     }
-    for off in &loop_ctx.continues {
+    for &off in &loop_ctx.continues {
         let abs = body_base + off;
-        let after = abs + 3;
-        let target = cmp_base as i32 - after as i32;
-        let rel = (target as i16) as u16;
-        out[abs + 1] = rel.to_le_bytes()[0];
-        out[abs + 2] = rel.to_le_bytes()[1];
+        let disp = cmp_base as i32 - (abs as i32 + 1);
+        out[abs] = i8::try_from(disp).expect("continue rel8 disp fits") as u8;
     }
 }
 /// True when the body's last operation sets ZF appropriately for
