@@ -1777,6 +1777,41 @@ pub(crate) fn emit_assign_indexed_local_var(local_idx: usize, index: &Expr, valu
 /// The store modrm is `[bx]+disp16` (0x87) with a GlobalAddr fixup. Constant RHS
 /// uses the immediate form (c6/c7). Fixtures 510, 1257, 1366, 1444.
 pub(crate) fn emit_assign_indexed_global_var(global_idx: usize, index: &Expr, is_byte: bool, value: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    // Self-compound `arr[i] += rhs` / `arr[i]++` → in-place op at [bx + &arr].
+    if let Expr::BinOp { op: op @ (BinOp::Add | BinOp::Sub), left, right } = value
+        && matches!(left.as_ref(), Expr::IndexByte { array, .. } | Expr::Index { array, .. } if *array == global_idx)
+    {
+        crate::codegen::expr::emit_load_bx(index, locals, out, fixups);
+        if !is_byte { out.extend_from_slice(&[0xD1, 0xE3]); } // shl bx, 1
+        let addr = |out: &mut Vec<u8>, fixups: &mut Vec<Fixup>| {
+            let dp = out.len();
+            out.extend_from_slice(&[0x00, 0x00]);
+            fixups.push(Fixup { body_offset: dp - 1, kind: FixupKind::GlobalAddr { global_idx } });
+        };
+        let is_add = matches!(op, BinOp::Add);
+        if let Some(k) = right.fold(locals.inits) {
+            if k == 1 {
+                out.push(if is_byte { 0xFE } else { 0xFF });          // inc/dec
+                out.push(if is_add { 0x87 } else { 0x8F }); addr(out, fixups);
+            } else if is_byte {
+                out.push(0x80); out.push(if is_add { 0x87 } else { 0xAF }); addr(out, fixups);
+                out.push((k as u32 & 0xFF) as u8);
+            } else if let Ok(k8) = i8::try_from(k) {
+                out.push(0x83); out.push(if is_add { 0x87 } else { 0xAF }); addr(out, fixups);
+                out.push(k8 as u8);
+            } else {
+                out.push(0x81); out.push(if is_add { 0x87 } else { 0xAF }); addr(out, fixups);
+                out.extend_from_slice(&((k as u32 & 0xFFFF) as u16).to_le_bytes());
+            }
+        } else if is_byte {
+            emit_byte_rhs_to_al(right, locals, out, fixups);
+            out.push(if is_add { 0x00 } else { 0x28 }); out.push(0x87); addr(out, fixups); // add/sub [bx+&arr], al
+        } else {
+            emit_expr_to_ax(right, locals, out, fixups);
+            out.push(if is_add { 0x01 } else { 0x29 }); out.push(0x87); addr(out, fixups); // add/sub [bx+&arr], ax
+        }
+        return;
+    }
     crate::codegen::expr::emit_load_bx(index, locals, out, fixups);
     if !is_byte { out.extend_from_slice(&[0xD1, 0xE3]); } // shl bx, 1
     if let Some(k) = value.fold(locals.inits) {

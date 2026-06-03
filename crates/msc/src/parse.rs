@@ -2157,8 +2157,25 @@ pub(crate) fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
                             ));
                         }
                         let byte_elem = g.element_size == 1;
-                        p.eat(&Tok::Assign)?;
-                        let value = parse_expr(p)?;
+                        // The element self-read (for compound `arr[i] op= rhs`).
+                        let read = if byte_elem {
+                            Expr::IndexByte { array: array_idx, index: Box::new(index_expr.clone()) }
+                        } else {
+                            Expr::Index { array: array_idx, index: Box::new(index_expr.clone()) }
+                        };
+                        let value = match p.peek() {
+                            Some(Tok::Assign) => { p.bump(); parse_expr(p)? }
+                            Some(Tok::PlusPlus) => { p.bump(); Expr::BinOp { op: BinOp::Add, left: Box::new(read), right: Box::new(Expr::IntLit(1)) } }
+                            Some(Tok::MinusMinus) => { p.bump(); Expr::BinOp { op: BinOp::Sub, left: Box::new(read), right: Box::new(Expr::IntLit(1)) } }
+                            Some(tok) if compound_assign_op(tok).is_some() => {
+                                let op = compound_assign_op(tok).unwrap();
+                                p.bump();
+                                let rhs = parse_expr(p)?;
+                                Expr::BinOp { op, left: Box::new(read), right: Box::new(rhs) }
+                            }
+                            other => return Err(EmitError::Unsupported(
+                                format!("expected assignment to runtime array element, got {other:?}"))),
+                        };
                         p.eat(&Tok::Semi)?;
                         let target = if byte_elem {
                             AssignTarget::IndexedGlobalByteVar { array: array_idx, index: Box::new(index_expr) }
@@ -2538,6 +2555,23 @@ pub(crate) fn parse_compound_rhs_for_indexed(
 /// form rewrites to an equivalent `Expr::BinOp(<lvalue>, <op>, rhs)`
 /// so the existing target-store codegen + `x = x ± 1 → inc/dec`
 /// peephole kick in for free.
+/// Map a compound-assignment token (`+=`, `*=`, …) to its `BinOp`. Returns None
+/// for non-compound tokens.
+pub(crate) fn compound_assign_op(tok: &Tok) -> Option<BinOp> {
+    Some(match tok {
+        Tok::PlusEq => BinOp::Add,
+        Tok::MinusEq => BinOp::Sub,
+        Tok::StarEq => BinOp::Mul,
+        Tok::SlashEq => BinOp::Div,
+        Tok::PercentEq => BinOp::Mod,
+        Tok::AndEq => BinOp::BitAnd,
+        Tok::PipeEq => BinOp::BitOr,
+        Tok::CaretEq => BinOp::BitXor,
+        Tok::ShlEq => BinOp::Shl,
+        Tok::ShrEq => BinOp::Shr,
+        _ => return None,
+    })
+}
 pub(crate) fn parse_compound_rhs(p: &mut Parser<'_>, target: &AssignTarget) -> Result<Option<Expr>, EmitError> {
     let lvalue_expr = match target {
         AssignTarget::Local(i) => Expr::Local(*i),
