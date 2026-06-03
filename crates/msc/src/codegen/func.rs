@@ -458,7 +458,10 @@ pub(crate) fn emit_function(
     let mut reachable = true;
     let mut i = 0;
     while i < body.len() {
-        if !reachable { break; }
+        // A label is a join point (a goto may target it), so it revives
+        // reachability even after a return / unconditional goto.
+        if matches!(&body[i], Stmt::Label(_)) { reachable = true; }
+        if !reachable { i += 1; continue; }
         let stmt = &body[i];
 
         // Detect a partial switch (const literal scrutinee with NFC cases).
