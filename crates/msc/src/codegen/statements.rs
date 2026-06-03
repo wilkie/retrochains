@@ -1061,6 +1061,162 @@ pub(crate) fn fold_break_loops(stmts: Vec<Stmt>) -> (Vec<Stmt>, std::collections
     }
     (out, extra_mut)
 }
+/// True when `s` contains a loop construct (used to bail out of the 2-deep
+/// nested-loop threading when the inner body itself has a loop).
+fn stmt_contains_loop(s: &Stmt) -> bool {
+    match s {
+        Stmt::While { .. } | Stmt::DoWhile { .. } | Stmt::For { .. } => true,
+        Stmt::Block(v) => v.iter().any(stmt_contains_loop),
+        Stmt::If { then_branch, else_branch, .. } =>
+            stmt_contains_loop(then_branch)
+                || else_branch.as_ref().is_some_and(|e| stmt_contains_loop(e)),
+        _ => false,
+    }
+}
+/// MSC threads a 2-deep nested for-loop: the inner loop's init is hoisted into
+/// the outer loop's cond-continuation, and the loops share back edges:
+/// ```text
+///   I; jmp OCOND; [nop]
+///   ITOP:  Sj                              (inner step)
+///   ICOND: cmp Cj; jcc(!Cj) -> IEXIT ; B ; jmp ITOP
+///   IEXIT: Si                              (outer step)
+///   OCOND: cmp Ci; jcc(!Ci) -> EXIT  ; J ; jmp ICOND
+///   EXIT:
+/// ```
+/// Handles only the no-break inner form (the inner body has no break/continue and
+/// no further nested loop). Returns false if the shape doesn't match, so the
+/// caller falls back to normal emission. Builds into a scratch buffer so a rel8
+/// overflow can bail without corrupting `out`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn emit_threaded_for(
+    outer_init: &Stmt,
+    outer_cond: &Cond,
+    outer_step: &Stmt,
+    outer_body: &Stmt,
+    locals: &Locals<'_>,
+    frame: Frame,
+    return_int: bool,
+    return_long: bool,
+    out: &mut Vec<u8>,
+    fixups: &mut Vec<Fixup>,
+) -> bool {
+    let Cond::Cmp { op: oc_op, .. } = outer_cond else { return false };
+    // Outer body must be exactly one for-loop.
+    let inner = match outer_body {
+        Stmt::For { .. } => outer_body,
+        Stmt::Block(v) if v.len() == 1 => &v[0],
+        _ => return false,
+    };
+    let Stmt::For { init: jinit, cond: jcond, step: jstep, body: jbody } = inner else { return false };
+    let Cond::Cmp { op: ic_op, .. } = jcond else { return false };
+    if matches!(outer_step, Stmt::Empty) || matches!(jstep.as_ref(), Stmt::Empty) {
+        return false;
+    }
+    // No-break inner only; no further nesting (3-deep handled later).
+    if for_leading_break(jbody).is_some() || stmt_has_loop_break(jbody) || stmt_contains_loop(jbody) {
+        return false;
+    }
+    // Clear inits for every local mutated across the nest so the cond/body reads
+    // are runtime, not the pre-loop init constants.
+    let muts = collect_loop_body_mutations(&[outer_body, outer_step]);
+    let body_inits: Vec<Option<i32>> = locals.inits.iter().enumerate()
+        .map(|(i, &v)| if muts.contains(&i) { None } else { v })
+        .collect();
+    let bl = Locals {
+        inits: &body_inits,
+        disps: locals.disps,
+        sizes: locals.sizes,
+        long_globals: locals.long_globals,
+        char_globals: locals.char_globals,
+        unsigned_globals: locals.unsigned_globals,
+        float_globals: locals.float_globals,
+        long_locals: locals.long_locals,
+        init_literals: locals.init_literals,
+        far_ptr_locals: locals.far_ptr_locals,
+        array_locals: locals.array_locals,
+        unsigned_locals: locals.unsigned_locals,
+        float_locals: locals.float_locals,
+        char_params: locals.char_params,
+        long_params: locals.long_params,
+        unsigned_params: locals.unsigned_params,
+        param_float_widths: locals.param_float_widths,
+        param_pointee_sizes: locals.param_pointee_sizes,
+        char_returners: locals.char_returners,
+        long_param_funcs: locals.long_param_funcs,
+        float_returners: locals.float_returners,
+        loop_stack: locals.loop_stack,
+        labels: locals.labels,
+        label_fixups: locals.label_fixups,
+        fpu_live: locals.fpu_live,
+        return_float_width: locals.return_float_width,
+        float_call_temp_disp: locals.float_call_temp_disp,
+        fpu_pending_fwait: locals.fpu_pending_fwait,
+    };
+    let base = out.len();
+    let mut b: Vec<u8> = Vec::new();
+    let mut bfix: Vec<Fixup> = Vec::new();
+    // 1. outer init
+    emit_stmt(outer_init, &bl, frame, return_int, return_long, &mut b, &mut bfix);
+    // 2. jmp OCOND (forward, backpatched) + alignment nop so ITOP is even.
+    let needs_pad = (base + b.len() + 2) % 2 != 0;
+    b.push(0xEB);
+    let jmp_ocond = b.len();
+    b.push(0x00);
+    if needs_pad { b.push(0x90); }
+    // 3. ITOP: inner step
+    let itop = b.len();
+    emit_stmt(&**jstep, &bl, frame, return_int, return_long, &mut b, &mut bfix);
+    // 4. ICOND: inner cond; jcc(!Cj) -> IEXIT
+    let icond = b.len();
+    emit_cond_cmp(jcond, &bl, &mut b, &mut bfix);
+    b.push(inverted_jcc(*ic_op));
+    let iexit_jcc = b.len();
+    b.push(0x00);
+    // 5. inner body
+    emit_stmt(&**jbody, &bl, frame, return_int, return_long, &mut b, &mut bfix);
+    // 6. jmp ITOP
+    b.push(0xEB);
+    let p = b.len();
+    b.push(0x00);
+    let Some(d) = i8_disp(itop, p) else { return false };
+    b[p] = d;
+    // 7. IEXIT: outer step
+    let iexit = b.len();
+    emit_stmt(outer_step, &bl, frame, return_int, return_long, &mut b, &mut bfix);
+    // 8. OCOND: backpatch the entry jmp; outer cond; jcc(!Ci) -> EXIT
+    let ocond = b.len();
+    let Some(d) = i8_disp(ocond, jmp_ocond) else { return false };
+    b[jmp_ocond] = d;
+    emit_cond_cmp(outer_cond, &bl, &mut b, &mut bfix);
+    b.push(inverted_jcc(*oc_op));
+    let exit_jcc = b.len();
+    b.push(0x00);
+    // 9. inner init J
+    emit_stmt(&**jinit, &bl, frame, return_int, return_long, &mut b, &mut bfix);
+    // 10. jmp ICOND
+    b.push(0xEB);
+    let p = b.len();
+    b.push(0x00);
+    let Some(d) = i8_disp(icond, p) else { return false };
+    b[p] = d;
+    // 11. EXIT: backpatch the two forward exit jccs.
+    let exit = b.len();
+    let (Some(d1), Some(d2)) = (i8_disp(iexit, iexit_jcc), i8_disp(exit, exit_jcc)) else { return false };
+    b[iexit_jcc] = d1;
+    b[exit_jcc] = d2;
+    // Commit: append the scratch buffer and re-base its fixups.
+    out.extend_from_slice(&b);
+    for mut f in bfix {
+        f.body_offset += base;
+        fixups.push(f);
+    }
+    true
+}
+/// rel8 displacement from a jump whose disp byte is at `disp_pos` to `target`
+/// (both buffer-relative). Returns None if it doesn't fit in an i8.
+fn i8_disp(target: usize, disp_pos: usize) -> Option<u8> {
+    i8::try_from(target as i64 - (disp_pos as i64 + 1)).ok().map(|d| d as u8)
+}
 /// `for (<init>; <cond>; <step>) <body>` — MSC's layout.
 ///
 /// When the entry condition is known true after the for-init (e.g.
@@ -1094,6 +1250,12 @@ pub(crate) fn emit_for(
     out: &mut Vec<u8>,
     fixups: &mut Vec<Fixup>,
 ) {
+    // 2-deep nested for-loop: MSC threads the two loops (inner init hoisted into
+    // the outer cond-continuation). Handled before the normal init emission since
+    // the threaded emitter lays down the outer init itself.
+    if emit_threaded_for(init, cond, step, body_stmt, locals, frame, return_int, return_long, out, fixups) {
+        return;
+    }
     emit_stmt(init, locals, frame, return_int, return_long, out, fixups);
     // Infinite for-loop with no step and a trailing `if (c) break;` →
     // `do { prefix } while (!c)` after the init (same fold as while(1)).
