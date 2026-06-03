@@ -762,6 +762,18 @@ fn ptr_int_sub(left: &Expr, right: &Expr, locals: &Locals<'_>) -> Option<(usize,
 }
 
 pub(crate) fn emit_binop(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    // Unary negation `-x` (parsed as `0 - x`): load x into AX and `neg ax`,
+    // not `mov ax,0; sub ax,x` (fixture 3346 `return x<0?-x:x` → `mov ax,[bp+4];
+    // neg ax`). Skip literal RHS (folds elsewhere) and long RHS (own path).
+    if matches!(op, BinOp::Sub)
+        && matches!(left, Expr::IntLit(0))
+        && !matches!(right, Expr::IntLit(_))
+        && !long_operand(right, locals)
+    {
+        emit_expr_to_ax(right, locals, out, fixups);
+        out.extend_from_slice(&[0xF7, 0xD8]); // neg ax
+        return;
+    }
     // Pointer difference: emit the raw byte-difference subtraction, then
     // convert bytes → elements with `sar ax,1` per shift step.
     if matches!(op, BinOp::Sub)
