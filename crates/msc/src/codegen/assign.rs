@@ -1041,6 +1041,37 @@ pub(crate) fn emit_assign_global(global_idx: usize, value: &Expr, locals: &Local
         }
         return;
     }
+    // Long-global `g |= K` / `g ^= K`: OR/XOR the low word in place (byte form
+    // when K_lo fits 8 bits, else word form), then the high word only when K_hi
+    // is non-zero (OR/XOR by 0 is identity). Fixtures 737, 738, 758.
+    if locals.is_long_global(global_idx)
+        && let Expr::BinOp { op: op @ (BinOp::BitOr | BinOp::BitXor), left, right } = value
+        && matches!(left.as_ref(), Expr::Global(g) if *g == global_idx)
+        && let Some(k) = right.fold(locals.inits)
+    {
+        let reg = if matches!(op, BinOp::BitOr) { 1u8 } else { 6u8 };
+        let modrm = 0x06 | (reg << 3);
+        let emit_word = |out: &mut Vec<u8>, fixups: &mut Vec<Fixup>, off16: u16, imm: u16| {
+            if imm <= 0xFF {
+                out.push(0x80); out.push(modrm);
+                let p = out.len(); out.extend_from_slice(&off16.to_le_bytes());
+                fixups.push(Fixup { body_offset: p - 1, kind: FixupKind::GlobalAddr { global_idx } });
+                out.push(imm as u8);
+            } else {
+                out.push(0x81); out.push(modrm);
+                let p = out.len(); out.extend_from_slice(&off16.to_le_bytes());
+                fixups.push(Fixup { body_offset: p - 1, kind: FixupKind::GlobalAddr { global_idx } });
+                out.extend_from_slice(&imm.to_le_bytes());
+            }
+        };
+        let k32 = k as u32;
+        emit_word(out, fixups, 0, (k32 & 0xFFFF) as u16);
+        let hi = (k32 >> 16) as u16;
+        if hi != 0 {
+            emit_word(out, fixups, 2, hi);
+        }
+        return;
+    }
     // Long globals get a special 4-byte store: low word at [g],
     // sign-extended high word at [g+2]. Only the constant-RHS shape
     // is wired up (most-common `long g = K;` pattern); a runtime RHS
