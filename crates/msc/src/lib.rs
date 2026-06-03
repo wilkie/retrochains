@@ -982,6 +982,9 @@ struct Parser<'a> {
     param_is_long: Vec<bool>,
     /// Parallel to `param_names`: true when the param is `unsigned int`.
     param_is_unsigned: Vec<bool>,
+    /// Parallel to `param_names`: pointee byte size for pointer params (char*→1,
+    /// int*→2, …), 0 for non-pointers. Drives `*(p + i)` byte/word selection.
+    param_pointee_sizes: Vec<usize>,
     /// File-scope global names in source order; the index doubles
     /// as the `Expr::Global(idx)` value.
     global_names: Vec<String>,

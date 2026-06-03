@@ -17,6 +17,7 @@ pub(crate) fn parse_unit(source: &str) -> Result<Unit, EmitError> {
         param_is_char: Vec::new(),
         param_is_long: Vec::new(),
         param_is_unsigned: Vec::new(),
+        param_pointee_sizes: Vec::new(),
         global_names: Vec::new(),
         globals: Vec::new(),
         global_dims: std::collections::HashMap::new(),
@@ -1054,6 +1055,7 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
     p.param_is_char = param_is_char.clone();
     p.param_is_long = param_is_long.clone();
     p.param_is_unsigned = param_is_unsigned.clone();
+    p.param_pointee_sizes = param_pointee_size.clone();
 
     // `[storage-class]+ int|char <name> [= <init>] (, <name> [= <init>])* ;`
     //
@@ -2776,25 +2778,32 @@ pub(crate) fn parse_binop_prec(p: &mut Parser<'_>, min_prec: u8) -> Result<Expr,
 /// (and unrecognized shapes) to 2. Used by parse_atom to pick between
 /// `DerefByte` and `DerefWord` variants. Parameters carry no type
 /// info in Phase 1 so they default to int-pointer (word).
-pub(crate) fn pointee_size_of(e: &Expr, globals: &[Global], locals: &[LocalSpec]) -> usize {
+pub(crate) fn pointee_size_of(e: &Expr, globals: &[Global], locals: &[LocalSpec], params: &[usize]) -> usize {
     match e {
         Expr::Global(idx) => globals[*idx].element_size,
         // A pointer local carries its pointee size (1 for `char *`, 2 for `int *`).
         Expr::Local(idx) => locals.get(*idx).map(|s| s.pointee_size).unwrap_or(0),
+        Expr::Param(idx) => params.get(*idx).copied().unwrap_or(0),
+        // Decayed arrays: element size of the pointed-to array.
+        Expr::AddrOfGlobal(idx) => globals.get(*idx).map(|g| g.element_size).unwrap_or(2),
+        Expr::AddrOfLocal(idx) => locals.get(*idx).map(|s| s.size).unwrap_or(2),
+        // A plain integer is not a pointer (so the other operand of `K + ptr`
+        // wins the pointee-size vote).
+        Expr::IntLit(_) => 0,
         // Postfix on a pointer: step magnitude = pointee element size.
         // step=±1 → char*, step=±2 → int*.
         Expr::PostMutateLocal { step, .. } | Expr::PostMutateGlobal { step, .. } => {
             step.unsigned_abs() as usize
         }
         Expr::BinOp { op: BinOp::Add, left, right } => {
-            // `<ptr> + K` and `K + <ptr>` both inherit the pointer's
-            // pointee size.
-            match (left.as_ref(), right.as_ref()) {
-                (Expr::Global(idx), _) | (_, Expr::Global(idx)) => {
-                    globals[*idx].element_size
-                }
-                _ => 2,
-            }
+            // `<ptr> + K` / `K + <ptr>` inherits the pointer operand's pointee
+            // size, so `*(char_ptr + i)` is a byte deref. Whichever side is a
+            // pointer (nonzero pointee) wins; default to int.
+            let ls = pointee_size_of(left, globals, locals, params);
+            if ls != 0 { return ls; }
+            let rs = pointee_size_of(right, globals, locals, params);
+            if rs != 0 { return rs; }
+            2
         }
         _ => 2,
     }
@@ -3087,7 +3096,7 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
             // Unary deref `*<expr>`. Pick the byte- vs word-sized
             // variant from the inner expression's pointee type.
             let inner = parse_atom(p)?;
-            let pointee_size = pointee_size_of(&inner, &p.globals, &p.local_specs);
+            let pointee_size = pointee_size_of(&inner, &p.globals, &p.local_specs, &p.param_pointee_sizes);
             if pointee_size == 1 {
                 Ok(Expr::DerefByte { ptr: Box::new(inner) })
             } else {
