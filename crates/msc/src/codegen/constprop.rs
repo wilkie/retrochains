@@ -353,6 +353,12 @@ pub(crate) fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
                 }
                 _ => false,
             };
+            // A ternary RHS may fold to a constant store, but MSC does NOT
+            // propagate that value to later reads of the target — the read
+            // reloads from the slot (fixture 551 `x=a>0?100:200; return x` →
+            // `mov [x],100; ...; mov ax,[x]`). Remember so the known-value
+            // recording below is suppressed for ternary-derived stores.
+            let value_was_ternary = matches!(value, Expr::Ternary { .. });
             if self_assign_addsub
                 && let Expr::BinOp { right, .. } = value
             {
@@ -382,7 +388,9 @@ pub(crate) fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
             }
             match target {
                 AssignTarget::Global(g) => {
-                    if let Expr::IntLit(k) = value {
+                    if let Expr::IntLit(k) = value
+                        && !value_was_ternary
+                    {
                         cp.g_known.insert(*g, *k);
                     } else if let Expr::FloatLit(bits, _) = value {
                         // Float-global store: a later `(int)g` read folds to the
@@ -394,7 +402,9 @@ pub(crate) fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
                     }
                 }
                 AssignTarget::Local(l) => {
-                    if let Expr::IntLit(k) = value {
+                    if let Expr::IntLit(k) = value
+                        && !value_was_ternary
+                    {
                         cp.l_known.insert(*l, *k);
                     } else {
                         cp.l_known.remove(l);
@@ -825,10 +835,31 @@ pub(crate) fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
             cp.l_known.remove(j);
             cp.la_known.retain(|(l, _), _| l != j);
         }
-        Expr::Ternary { cond, then_arm: _, else_arm: _ } => {
-            // Only substitute into the condition so fold() can determine
-            // the branch; arms are emitted as runtime loads (fixture 1038).
+        Expr::Ternary { cond, then_arm, else_arm } => {
+            // Substitute into the condition so fold() can determine the branch.
             prop_expr(cond, cp);
+            // A COMPARISON-cond ternary whose arms both propagate to literals
+            // folds to a constant (assignment emits an immediate store, return
+            // a mov-imm): fixture 2670 `x=a>b?a:b` (a,b const) → `mov [x],7`,
+            // 588 (globals). Truthy-cond ternaries keep their arms as runtime
+            // loads (fixture 1038), and compound arms (e.g. `-a`) stay non-
+            // literal so the load / two-epilogue paths still fire (fixture 430).
+            let mut replacement = None;
+            if matches!(cond.as_ref(), Expr::BinOp { op, .. }
+                if matches!(op, BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge))
+                && let Some(c) = cond.fold(&[])
+            {
+                let mut t = (**then_arm).clone();
+                prop_expr(&mut t, cp);
+                let mut e2 = (**else_arm).clone();
+                prop_expr(&mut e2, cp);
+                if let (Expr::IntLit(tv), Expr::IntLit(ev)) = (&t, &e2) {
+                    replacement = Some(if c != 0 { *tv } else { *ev });
+                }
+            }
+            if let Some(v) = replacement {
+                *e = Expr::IntLit(v);
+            }
         }
         Expr::Seq { sides, value } => {
             for s in sides { prop_stmt(s, cp); }
