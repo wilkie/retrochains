@@ -141,6 +141,13 @@ pub(crate) fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8
                     out.extend_from_slice(&[0xA0, 0x00, 0x00]); // mov al, moffs
                     fixups.push(Fixup { body_offset: bo, kind: FixupKind::GlobalAddr { global_idx: *g } });
                 }
+                // Constant operand: MSC materializes the truncated byte directly
+                // with `mov al, imm8` (b0), not `mov ax, imm16`. Fixtures
+                // 1533/1534/1535…
+                Expr::IntLit(k) => {
+                    out.push(0xB0);
+                    out.push(*k as u8);
+                }
                 _ => emit_expr_to_ax(value, locals, out, fixups),
             }
             if *unsigned {

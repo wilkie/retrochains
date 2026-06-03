@@ -2964,6 +2964,14 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                 p.eat(&Tok::RParen)?;
                 let inner = parse_atom(p)?;
                 if cast_char && !had_star {
+                    // A literal operand in source (`(char)200`) folds completely
+                    // to the truncated constant — MSC materializes it as a word
+                    // `mov ax,K` (fixture 171), unlike `(char)<var>` which keeps
+                    // the byte form even when the var is const-propagated.
+                    if let Expr::IntLit(k) = inner {
+                        let t = if cast_unsigned { (k as u8) as i32 } else { (k as i8) as i32 };
+                        return Ok(Expr::IntLit(t));
+                    }
                     // Collapse a nested byte cast: `(unsigned char)(x & 0xFF)`
                     // (the mask already lowered to CastChar) is one truncation.
                     let value = match inner {

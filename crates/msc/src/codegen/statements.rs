@@ -954,6 +954,7 @@ pub(crate) fn emit_return(
         } else if let Some(k) = expr.fold(locals.inits)
             && !expr_has_long_highword(expr, locals)
             && ternary_folds_to_immediate(expr, locals)
+            && !matches!(expr, Expr::CastChar { .. })
         {
             // A const-folded ternary collapses to an immediate only when BOTH
             // arms are simple direct values (fixture 167: `a=3; b=7; return
