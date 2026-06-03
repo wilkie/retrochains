@@ -38,6 +38,17 @@ pub(crate) fn body_needs_si(stmts: &[Stmt], local_inits: &[Option<i32>]) -> bool
                 index.fold(inits).is_none()
             }
             Expr::Index2D { .. } => true,
+            // `*(ptr + i)` with a runtime index on a pointer param/local uses SI
+            // (`mov si,[p]; mov ax,[bx+si]`); a decayed global array uses BX only.
+            Expr::DerefWord { ptr } | Expr::DerefByte { ptr } => {
+                if let Expr::BinOp { op: BinOp::Add, left, right } = ptr.as_ref() {
+                    (matches!(left.as_ref(), Expr::Param(_) | Expr::Local(_))
+                        && right.fold(inits).is_none())
+                        || expr_si(left, inits) || expr_si(right, inits)
+                } else {
+                    expr_si(ptr, inits)
+                }
+            }
             Expr::BinOp { left, right, .. } => expr_si(left, inits) || expr_si(right, inits),
             Expr::Call { args, .. } => args.iter().any(|a| expr_si(a, inits)),
             _ => false,

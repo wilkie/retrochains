@@ -23,6 +23,58 @@ fn emit_load_bx(e: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut V
         _ => { emit_expr_to_ax(e, locals, out, fixups); out.extend_from_slice(&[0x8B, 0xD8]); } // mov bx,ax
     }
 }
+/// Emit `*(base + idx)` (pointer-arithmetic deref) into AX/AL. `is_byte` selects
+/// the element width (byte+cbw vs word; the index scales by the element size).
+/// Handles base = decayed global array (AddrOfGlobal) or a pointer param/local,
+/// with a constant or runtime index. Returns false for shapes it can't handle.
+pub(crate) fn emit_offset_deref(base: &Expr, idx: &Expr, is_byte: bool, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) -> bool {
+    let read = if is_byte { 0x8Au8 } else { 0x8B }; // mov al / mov ax (r, r/m)
+    let elem: i32 = if is_byte { 1 } else { 2 };
+    let kfold = idx.fold(locals.inits);
+    match base {
+        Expr::AddrOfGlobal(g) => {
+            if let Some(k) = kfold {
+                // mov ax/al, [_g + k*elem]   (a1 / a0 + GlobalAddr addend)
+                let off = (k * elem) as u16;
+                out.push(if is_byte { 0xA0 } else { 0xA1 });
+                let bo = out.len();
+                out.extend_from_slice(&off.to_le_bytes());
+                fixups.push(Fixup { body_offset: bo - 1, kind: FixupKind::GlobalAddr { global_idx: *g } });
+            } else {
+                // mov bx,[idx]; shl bx (word); mov ax/al,[_g + bx]   (modrm [bx]+disp16 = 0x87)
+                emit_load_bx(idx, locals, out, fixups);
+                if !is_byte { out.extend_from_slice(&[0xD1, 0xE3]); }
+                out.push(read); out.push(0x87);
+                let bo = out.len();
+                out.extend_from_slice(&[0x00, 0x00]);
+                fixups.push(Fixup { body_offset: bo - 1, kind: FixupKind::GlobalAddr { global_idx: *g } });
+            }
+        }
+        Expr::Param(_) | Expr::Local(_) => {
+            if let Some(k) = kfold {
+                // mov bx,[p]; mov ax/al,[bx + k*elem]
+                emit_load_bx(base, locals, out, fixups);
+                let off = (k * elem) as i32;
+                if off == 0 {
+                    out.push(read); out.push(0x07); // [bx]
+                } else if let Ok(o8) = i8::try_from(off) {
+                    out.push(read); out.push(0x47); out.push(o8 as u8); // [bx+disp8]
+                } else {
+                    out.push(read); out.push(0x87); out.extend_from_slice(&(off as u16).to_le_bytes());
+                }
+            } else {
+                // mov bx,[idx]; shl bx (word); mov si,[p]; mov ax/al,[bx+si]
+                emit_load_bx(idx, locals, out, fixups);
+                if !is_byte { out.extend_from_slice(&[0xD1, 0xE3]); }
+                emit_load_si(base, locals, out, fixups);
+                out.push(read); out.push(0x00); // [bx+si]
+            }
+        }
+        _ => return false,
+    }
+    if is_byte { out.push(0x98); } // cbw
+    true
+}
 /// Scale SI by `factor`: power-of-two → `shl si,1` steps; 3 → `mov ax,si; shl
 /// si,1; add si,ax`; otherwise `imul si,si,imm16`.
 fn scale_si(out: &mut Vec<u8>, factor: usize) {
@@ -201,6 +253,14 @@ pub(crate) fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8
                 out.extend_from_slice(&[0x8A, 0x07, 0x98]); // mov al, [bx]; cbw
                 return;
             }
+            // `*(base + idx)` byte deref — decayed global array / pointer
+            // param/local, constant or runtime index. Fixtures 2546, 3227.
+            if let Expr::BinOp { op: BinOp::Add, left, right } = ptr.as_ref()
+                && matches!(left.as_ref(), Expr::AddrOfGlobal(_) | Expr::Param(_) | Expr::Local(_))
+                && emit_offset_deref(left, right, true, locals, out, fixups)
+            {
+                return;
+            }
             let (ptr_idx, disp) = match ptr.as_ref() {
                 Expr::Global(idx) => (*idx, 0i8),
                 Expr::BinOp { op: BinOp::Add, left, right }
@@ -306,20 +366,10 @@ pub(crate) fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8
                     out.extend_from_slice(&[0x8B, 0x07]); // mov ax, [bx]
                 }
                 Expr::BinOp { op: BinOp::Add, left, right } => {
-                    // `*(p + K)` where p is a Local pointer and K is a
-                    // foldable constant. Word ptr arithmetic: K scales
-                    // by 2. Fixture 1152.
-                    if let (Expr::Local(li), Some(k)) =
-                        (left.as_ref(), right.fold(locals.inits))
-                    {
-                        let disp = locals.disp(*li);
-                        let off = (k * 2) as i8;
-                        { out.push(0x8B); out.push(bp_modrm(0x5E, disp)); push_bp_disp(out, disp); }
-                        if off == 0 {
-                            out.extend_from_slice(&[0x8B, 0x07]);
-                        } else {
-                            out.extend_from_slice(&[0x8B, 0x47, off as u8]);
-                        }
+                    // `*(base + idx)` word deref — decayed global array, or a
+                    // pointer param/local, with a constant or runtime index.
+                    // Fixtures 1152, 1379, 3025, 3189.
+                    if emit_offset_deref(left, right, false, locals, out, fixups) {
                         return;
                     }
                     panic!("word deref of {:?} not yet supported", ptr);
