@@ -11,6 +11,7 @@ pub(crate) fn body_needs_si(stmts: &[Stmt], local_inits: &[Option<i32>]) -> bool
                     AssignTarget::IndexedLocalVar { .. }
                     | AssignTarget::IndexedLocalByteVar { .. }
                     | AssignTarget::Index2D { .. })
+                    || matches!(target, AssignTarget::ParamIndexStore { index, .. } if index.fold(inits).is_none())
                     || expr_si(value, inits)
             }
             Stmt::Return(e) => expr_si(e, inits),

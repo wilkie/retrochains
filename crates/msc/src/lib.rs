@@ -619,6 +619,10 @@ pub enum AssignTarget {
     /// then advance the pointer by `step`. Codegen: `mov bx, [bp-p];
     /// <mutate p>; mov [bx], ax/imm`.
     DerefPostMutateLocal { local_idx: usize, step: i32 },
+    /// `<ptr-param>[idx] = <expr>;` — store through a pointer parameter at an
+    /// element index (constant or runtime). `elem` is the pointee byte size
+    /// (1 → byte store via AL).
+    ParamIndexStore { param: usize, index: Box<Expr>, elem: usize },
     /// `a[i][j] = <expr>;` store on a 2-D array with a runtime index. Mirrors
     /// `Expr::Index2D`; const-prop folds to a flat IndexedGlobal/IndexedLocal when
     /// both indices are known, else codegen does the `si`/`bx` addressing.

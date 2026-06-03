@@ -746,11 +746,15 @@ pub(crate) fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
         }
         Expr::AddrOfGlobal(_) => {}
         Expr::AddrOfLocal(j) => {
-            // Taking a local's address allows writes through the pointer;
-            // conservatively mark it as mutated so reads after this point
-            // do not fold the stale init value (fixture 1650).
+            // Taking a local's address (escaping it — call arg, `&x`) allows
+            // writes through the pointer; conservatively mark it mutated so reads
+            // after this point do not fold the stale init value (fixture 1650).
+            // The `int *p = &x` alias-recording case early-returns before here, so
+            // this only fires for genuinely escaping addresses; also drop any
+            // known array-element values for an escaped array.
             cp.mutated_locals.insert(*j);
             cp.l_known.remove(j);
+            cp.la_known.retain(|(l, _), _| l != j);
         }
         Expr::Ternary { cond, then_arm: _, else_arm: _ } => {
             // Only substitute into the condition so fold() can determine

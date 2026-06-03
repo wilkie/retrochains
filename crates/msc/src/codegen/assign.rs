@@ -130,6 +130,35 @@ pub(crate) fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_
         AssignTarget::DerefLocalOffset { local, byte_off, is_byte } => {
             return emit_assign_deref_local_offset(local, byte_off, is_byte, value, locals, out, fixups);
         }
+        AssignTarget::ParamIndexStore { param, index, elem } => {
+            let is_byte = elem == 1;
+            let st = if is_byte { 0x88u8 } else { 0x89 }; // mov [..],al / [..],ax
+            let bx_modrm = |off: i32| -> u8 { if off == 0 { 0x07 } else if (-128..=127).contains(&off) { 0x47 } else { 0x87 } };
+            let push_off = |out: &mut Vec<u8>, off: i32| {
+                if off == 0 {} else if (-128..=127).contains(&off) { out.push(off as u8); }
+                else { out.extend_from_slice(&(off as u16).to_le_bytes()); }
+            };
+            if let Some(k) = index.fold(locals.inits) {
+                let off = k * elem as i32;
+                out.extend_from_slice(&[0x8B, 0x5E, param_disp(param) as u8]); // mov bx,[bp+pd]
+                if let Some(v) = value.fold(locals.inits) {
+                    out.push(if is_byte { 0xC6 } else { 0xC7 });
+                    out.push(bx_modrm(off)); push_off(out, off);
+                    if is_byte { out.push((v as u32 & 0xFF) as u8); }
+                    else { out.extend_from_slice(&((v as u32 & 0xFFFF) as u16).to_le_bytes()); }
+                } else {
+                    emit_expr_to_ax(&value, locals, out, fixups);
+                    out.push(st); out.push(bx_modrm(off)); push_off(out, off);
+                }
+            } else {
+                crate::codegen::expr::emit_load_bx(&index, locals, out, fixups);
+                if !is_byte { out.extend_from_slice(&[0xD1, 0xE3]); }
+                crate::codegen::expr::emit_load_si(&Expr::Param(param), locals, out, fixups);
+                emit_expr_to_ax(&value, locals, out, fixups);
+                out.push(st); out.push(0x00); // [bx+si]
+            }
+            return;
+        }
         AssignTarget::Index2D { is_global, base, row, col, cols, elem } => {
             assert!(is_global, "local 2-D runtime store should have const-folded");
             crate::codegen::expr::emit_index2d_regs(&row, &col, cols, elem, locals, out, fixups);

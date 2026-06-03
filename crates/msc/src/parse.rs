@@ -1909,6 +1909,23 @@ pub(crate) fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
                 p.eat(&Tok::Semi)?;
                 return Ok(Stmt::Assign { target, value });
             }
+            // `<ptr-param>[idx] = <expr>;` — store through a pointer parameter.
+            if matches!(p.peek(), Some(Tok::LBrack))
+                && let Some(param_idx) = p.param_names.iter().position(|n| *n == name)
+                && p.param_pointee_sizes.get(param_idx).copied().unwrap_or(0) > 0
+            {
+                p.bump();
+                let index = parse_expr(p)?;
+                p.eat(&Tok::RBrack)?;
+                let elem = p.param_pointee_sizes[param_idx];
+                p.eat(&Tok::Assign)?;
+                let value = parse_expr(p)?;
+                p.eat(&Tok::Semi)?;
+                return Ok(Stmt::Assign {
+                    target: AssignTarget::ParamIndexStore { param: param_idx, index: Box::new(index), elem },
+                    value,
+                });
+            }
             // `<struct-array-local>[K].<field> = <expr>;` — store into an element
             // of an array of structs (byte_off = K*sizeof(S) + field_off).
             if matches!(p.peek(), Some(Tok::LBrack))

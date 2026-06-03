@@ -8,7 +8,7 @@ use crate::*;
 /// fixture hits it.
 /// Load an int operand into SI (modrm reg 110) — `mov si,[bp+disp]` for a
 /// param/local, else evaluate into AX and `mov si,ax`.
-fn emit_load_si(e: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+pub(crate) fn emit_load_si(e: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
     match e {
         Expr::Param(i) => { out.extend_from_slice(&[0x8B, 0x76, param_disp(*i) as u8]); }
         Expr::Local(i) => { let d = locals.disp(*i); out.push(0x8B); out.push(bp_modrm(0x76, d)); push_bp_disp(out, d); }
@@ -16,7 +16,7 @@ fn emit_load_si(e: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut V
     }
 }
 /// Load an int operand into BX (modrm reg 011).
-fn emit_load_bx(e: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+pub(crate) fn emit_load_bx(e: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
     match e {
         Expr::Param(i) => { out.extend_from_slice(&[0x8B, 0x5E, param_disp(*i) as u8]); }
         Expr::Local(i) => { let d = locals.disp(*i); out.push(0x8B); out.push(bp_modrm(0x5E, d)); push_bp_disp(out, d); }
@@ -1118,7 +1118,8 @@ fn emit_binop_inner(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, o
     if matches!(left, Expr::DerefWord { .. } | Expr::DerefByte { .. }
                     | Expr::Call { .. } | Expr::Ternary { .. } | Expr::Seq { .. }
                     | Expr::GlobalField { .. } | Expr::LocalField { .. }
-                    | Expr::DerefLocalField { .. } | Expr::DerefParamField { .. })
+                    | Expr::DerefLocalField { .. } | Expr::DerefParamField { .. }
+                    | Expr::LocalIndex { .. } | Expr::Index { .. })
     {
         emit_expr_to_ax(left, locals, out, fixups);
         return emit_binop_right(op, right, locals, out, fixups);
@@ -1264,6 +1265,9 @@ pub(crate) fn bp_disp(e: &Expr, locals: &Locals<'_>) -> Option<i16> {
     match e {
         Expr::Local(i) => Some(locals.disp(*i)),
         Expr::Param(i) => Some(4 + (*i as i16) * 2),
+        // Word local-array element `a[K]` (constant K) is a `[bp+disp]` operand.
+        // (Byte elements need cbw, so they are not bp-addressable here.)
+        Expr::LocalIndex { local, index } => index.fold(locals.inits).map(|k| locals.disp(*local) + (k as i16) * 2),
         _ => None,
     }
 }
