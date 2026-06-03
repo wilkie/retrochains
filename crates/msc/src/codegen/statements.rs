@@ -281,6 +281,19 @@ pub(crate) fn emit_stmt(
 /// statement at the same nesting level is unreachable. Used to
 /// drop trailing dead code (fixture 4095: `if (1) return 1; return
 /// 0;` keeps only the `return 1;` path).
+/// True when control never falls through past `stmt` — it returns or jumps away
+/// unconditionally. Unlike [`stmt_always_returns`], a bare `goto` counts as an
+/// exit, and an `if/else` exits when both arms do. Used to suppress a dead
+/// trailing function epilogue after a loop lowered to if/else+goto.
+pub(crate) fn stmt_exits(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::Return(_) | Stmt::Goto(_) => true,
+        Stmt::Block(v) => v.last().is_some_and(stmt_exits),
+        Stmt::If { then_branch, else_branch, .. } =>
+            stmt_exits(then_branch) && else_branch.as_ref().is_some_and(|e| stmt_exits(e)),
+        _ => false,
+    }
+}
 pub(crate) fn stmt_always_returns(stmt: &Stmt, locals: &Locals<'_>) -> bool {
     match stmt {
         Stmt::Return(_) => true,
@@ -938,6 +951,98 @@ pub(crate) fn loop_trailing_break_rewrite(body: &Stmt) -> Option<(Vec<Stmt>, Con
         return None;
     }
     Some((prefix, negated))
+}
+/// A no-step loop whose body starts with `if (c) break;`. Returns the optional
+/// init (for-loop), the loop cond (None when literally infinite), the break
+/// condition, and the rest of the body.
+fn match_leading_break_loop(s: &Stmt) -> Option<(Option<Stmt>, Option<Cond>, Cond, Vec<Stmt>)> {
+    let (init, loop_cond, body): (Option<Stmt>, Cond, &Stmt) = match s {
+        Stmt::While { cond, body } => (None, cond.clone(), body),
+        Stmt::DoWhile { body, cond } => (None, cond.clone(), body),
+        Stmt::For { init, cond, step, body } if matches!(step.as_ref(), Stmt::Empty) =>
+            (Some((**init).clone()), cond.clone(), body),
+        _ => return None,
+    };
+    // Literally-constant-true cond → infinite loop (no exit test).
+    let cond_opt = match &loop_cond {
+        Cond::Truthy(Expr::IntLit(k)) if *k != 0 => None,
+        other => Some(other.clone()),
+    };
+    // A finite do-while has its test at the bottom (two exit points) — skip.
+    if matches!(s, Stmt::DoWhile { .. }) && cond_opt.is_some() {
+        return None;
+    }
+    let stmts: &[Stmt] = match body {
+        Stmt::Block(v) => v,
+        other => std::slice::from_ref(other),
+    };
+    let Stmt::If { cond: bc, then_branch, else_branch } = stmts.first()? else { return None };
+    if else_branch.is_some() || !matches!(then_branch.as_ref(), Stmt::Break) {
+        return None;
+    }
+    let rest: Vec<Stmt> = stmts[1..].to_vec();
+    if rest.iter().any(stmt_has_loop_break) {
+        return None;
+    }
+    Some((init, cond_opt, bc.clone(), rest))
+}
+/// Lower a return-terminated no-step loop with a leading `if (c) break;` to the
+/// if/else+goto form MSC emits:
+///   `while (C) { if (c) break; REST } return X;`
+///     →  `[init] L: if (!C || c) { return X } else { REST; goto L }`
+/// (for a literally-infinite loop the cond is just `c`). Reuses the existing
+/// if/else and goto codegen, which matches MSC's block ordering byte-for-byte.
+fn try_rewrite_break_loop(s: &Stmt, ret: &Stmt, id: usize) -> Option<Vec<Stmt>> {
+    let (init, cond_opt, break_cond, rest) = match_leading_break_loop(s)?;
+    let combined = match cond_opt {
+        None => break_cond,
+        Some(c) => Cond::Or(Box::new(negate_cond(&c)?), Box::new(break_cond)),
+    };
+    let label = format!("__bl{id}");
+    let mut new = Vec::new();
+    if let Some(init) = init
+        && !matches!(init, Stmt::Empty)
+    {
+        new.push(init);
+    }
+    new.push(Stmt::Label(label.clone()));
+    let mut else_block = rest;
+    else_block.push(Stmt::Goto(label.clone()));
+    new.push(Stmt::If {
+        cond: combined,
+        then_branch: Box::new(ret.clone()),
+        else_branch: Some(Box::new(Stmt::Block(else_block))),
+    });
+    Some(new)
+}
+/// Top-level pass: rewrite each `[no-step leading-break loop, return]` pair into
+/// the if/else+goto form. Run after const-prop so the body reads are already
+/// resolved to runtime loads.
+pub(crate) fn fold_break_loops(stmts: Vec<Stmt>) -> (Vec<Stmt>, std::collections::HashSet<usize>) {
+    let mut out: Vec<Stmt> = Vec::new();
+    let mut extra_mut: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    let mut i = 0;
+    let mut id = 0usize;
+    while i < stmts.len() {
+        if i + 1 < stmts.len()
+            && matches!(stmts[i + 1], Stmt::Return(_))
+            && let Some(rw) = try_rewrite_break_loop(&stmts[i], &stmts[i + 1], id)
+        {
+            id += 1;
+            // The rewritten loop reads its mutated locals across the back edge,
+            // but the if/else form is emitted with plain inits — mark them so the
+            // emit-time fold view treats them as runtime, not their pre-loop init.
+            for m in collect_loop_body_mutations(&[&stmts[i]]) {
+                extra_mut.insert(m);
+            }
+            out.extend(rw);
+            i += 2;
+            continue;
+        }
+        out.push(stmts[i].clone());
+        i += 1;
+    }
+    (out, extra_mut)
 }
 /// `for (<init>; <cond>; <step>) <body>` — MSC's layout.
 ///

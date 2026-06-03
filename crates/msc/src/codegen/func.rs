@@ -497,7 +497,7 @@ pub(crate) fn emit_function(
             &mut bytes,
             &mut fixups,
         );
-        if stmt_always_returns(stmt, &locals_view) {
+        if stmt_always_returns(stmt, &locals_view) || stmt_exits(stmt) {
             reachable = false;
         }
         i += 1;

@@ -92,6 +92,13 @@ pub(crate) fn const_prop_globals(
     // Re-run after prop so a now-constant `if (cond) goto L;` folds and its
     // newly-dead tail is dropped.
     let new_stmts = drop_dead_after_goto(new_stmts);
+    // Lower return-terminated no-step loops with a leading `if(c)break;` to the
+    // if/else+goto form MSC emits; mark the loop-mutated locals so the emit-time
+    // fold view keeps them runtime.
+    let (new_stmts, extra_mut) = crate::codegen::statements::fold_break_loops(new_stmts);
+    for m in extra_mut {
+        cp.mutated_locals.insert(m);
+    }
     (new_stmts, cp.mutated_locals, cp.mutated_globals)
 }
 /// Rewrite `*p` (DerefWord/DerefByte over an aliased pointer local) to the
