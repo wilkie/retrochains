@@ -2142,6 +2142,25 @@ pub(crate) fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
                 }
                 let k = match multidim {
                     Some((MultiSub::Flat(flat), _)) => flat,
+                    None if index_expr.fold(&[]).is_none() => {
+                        // Runtime (non-constant) index into a global array.
+                        let g = &p.globals[array_idx];
+                        if g.is_pointer {
+                            return Err(EmitError::Unsupported(
+                                "runtime index on a global pointer store not yet supported".to_owned(),
+                            ));
+                        }
+                        let byte_elem = g.element_size == 1;
+                        p.eat(&Tok::Assign)?;
+                        let value = parse_expr(p)?;
+                        p.eat(&Tok::Semi)?;
+                        let target = if byte_elem {
+                            AssignTarget::IndexedGlobalByteVar { array: array_idx, index: Box::new(index_expr) }
+                        } else {
+                            AssignTarget::IndexedGlobalVar { array: array_idx, index: Box::new(index_expr) }
+                        };
+                        return Ok(Stmt::Assign { target, value });
+                    }
                     _ => index_expr.fold(&[]).ok_or_else(|| EmitError::Unsupported(
                         "non-constant array index in store not yet supported".to_owned(),
                     ))?,

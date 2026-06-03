@@ -185,6 +185,12 @@ pub(crate) fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_
         AssignTarget::IndexedGlobalByte { array, byte_off } => {
             return emit_assign_indexed_global_byte(array, byte_off, value, locals, out, fixups);
         }
+        AssignTarget::IndexedGlobalVar { array, index } => {
+            return emit_assign_indexed_global_var(array, index.as_ref(), false, value, locals, out, fixups);
+        }
+        AssignTarget::IndexedGlobalByteVar { array, index } => {
+            return emit_assign_indexed_global_var(array, index.as_ref(), true, value, locals, out, fixups);
+        }
         AssignTarget::PtrIndexByte { ptr, disp } => {
             return emit_assign_ptr_index_byte(ptr, disp, value, locals, out, fixups);
         }
@@ -1571,6 +1577,30 @@ pub(crate) fn emit_assign_indexed_local_var(local_idx: usize, index: &Expr, valu
     out.extend_from_slice(&[0xD1, 0xE6]); // shl si, 1
     emit_expr_to_ax(value, locals, out, fixups);
     out.push(0x89); out.push(bp_modrm(0x42, base_disp)); push_bp_disp(out, base_disp); // mov [bp+si+base], ax
+}
+/// `<global-array>[<expr>] = <expr>;` — runtime index into a global array,
+/// BX-based: `mov bx,[i]; [shl bx,1]; <value→AX or imm>; mov [bx+&a], ax/al`.
+/// The store modrm is `[bx]+disp16` (0x87) with a GlobalAddr fixup. Constant RHS
+/// uses the immediate form (c6/c7). Fixtures 510, 1257, 1366, 1444.
+pub(crate) fn emit_assign_indexed_global_var(global_idx: usize, index: &Expr, is_byte: bool, value: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    crate::codegen::expr::emit_load_bx(index, locals, out, fixups);
+    if !is_byte { out.extend_from_slice(&[0xD1, 0xE3]); } // shl bx, 1
+    if let Some(k) = value.fold(locals.inits) {
+        out.push(if is_byte { 0xC6 } else { 0xC7 });
+        out.push(0x87); // [bx]+disp16
+        let dp = out.len();
+        out.extend_from_slice(&[0x00, 0x00]);
+        fixups.push(Fixup { body_offset: dp - 1, kind: FixupKind::GlobalAddr { global_idx } });
+        if is_byte { out.push((k as u32 & 0xFF) as u8); }
+        else { out.extend_from_slice(&((k as u32 & 0xFFFF) as u16).to_le_bytes()); }
+    } else {
+        emit_expr_to_ax(value, locals, out, fixups);
+        out.push(if is_byte { 0x88 } else { 0x89 });
+        out.push(0x87); // [bx]+disp16
+        let dp = out.len();
+        out.extend_from_slice(&[0x00, 0x00]);
+        fixups.push(Fixup { body_offset: dp - 1, kind: FixupKind::GlobalAddr { global_idx } });
+    }
 }
 /// `<local-char-array>[<expr>] = <byte>;` — SI-based byte store.
 /// Codegen: `mov si, [idx]; <rhs→AL>; mov [bp+si+base], al`.

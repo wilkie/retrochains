@@ -585,6 +585,12 @@ pub enum AssignTarget {
     /// `<char-global>[K] = <byte>;` — write one byte at a constant
     /// index into a char-array global. `byte_off` is `K`. Fixture 4122.
     IndexedGlobalByte { array: usize, byte_off: u16 },
+    /// `<int-global>[i] = <expr>;` — runtime index into an int-array global.
+    /// Codegen: `mov bx,[i]; shl bx,1; <value>; mov [bx+&a], ax` (BX-based).
+    IndexedGlobalVar { array: usize, index: Box<Expr> },
+    /// `<char-global>[i] = <byte>;` — runtime index into a char-array global.
+    /// Codegen: `mov bx,[i]; <value>; mov [bx+&a], al` (no shl).
+    IndexedGlobalByteVar { array: usize, index: Box<Expr> },
     /// `<char-ptr-global>[K] = <byte>;` — write one byte through a
     /// char-pointer global. `disp` is the constant index (fits in
     /// disp8 in Phase 1). Fixture 4124.
