@@ -344,6 +344,17 @@ pub(crate) fn is_long_shl(e: &Expr, locals: &Locals<'_>) -> bool {
         if long_operand(left, locals) && long_shl_amount(*op, right, locals).is_some())
 }
 
+/// `e` is a long-valued expression that emit_long_to_dx_ax can load directly:
+/// a long struct field, a long array element (const index), or `<long> ± <const>`.
+pub(crate) fn is_long_field_elem_or_const_arith(e: &Expr, locals: &Locals<'_>) -> bool {
+    match e {
+        Expr::GlobalField { size: 4, .. } => true,
+        Expr::Index { array, index } => locals.is_long_global(*array) && index.fold(locals.inits).is_some(),
+        Expr::BinOp { op: BinOp::Add | BinOp::Sub, left, right } =>
+            long_operand(left, locals) && !long_operand(right, locals) && right.fold(locals.inits).is_some(),
+        _ => false,
+    }
+}
 /// `e` is a long right shift by one (`v >> 1`).
 pub(crate) fn is_long_shr1(e: &Expr, locals: &Locals<'_>) -> bool {
     matches!(e, Expr::BinOp { op: BinOp::Shr, left, right }
@@ -507,6 +518,46 @@ pub(crate) fn emit_long_to_dx_ax(value: &Expr, locals: &Locals<'_>, out: &mut Ve
             let body_offset = out.len() + 1;
             out.extend_from_slice(&[0x8B, 0x16, 0x02, 0x00]); // mov dx, [g+2]
             fixups.push(Fixup { body_offset, kind: FixupKind::GlobalAddr { global_idx: *j } });
+        }
+        // Long struct field `s.f` / long array element `a[K]` (constant K): load the
+        // low word at the byte offset and the high word at +2. Fixtures 363, 364.
+        Expr::GlobalField { global, byte_off, size: 4 } => {
+            let lo = *byte_off;
+            let bo = out.len(); out.push(0xA1); out.extend_from_slice(&lo.to_le_bytes()); // mov ax, [g+lo]
+            fixups.push(Fixup { body_offset: bo, kind: FixupKind::GlobalAddr { global_idx: *global } });
+            let bo = out.len() + 1; out.extend_from_slice(&[0x8B, 0x16]); out.extend_from_slice(&(lo + 2).to_le_bytes()); // mov dx, [g+lo+2]
+            fixups.push(Fixup { body_offset: bo, kind: FixupKind::GlobalAddr { global_idx: *global } });
+        }
+        Expr::Index { array, index }
+            if locals.is_long_global(*array) && index.fold(locals.inits).is_some() =>
+        {
+            let k = index.fold(locals.inits).unwrap();
+            let lo = (k as u32 & 0xFFFF) as u16 * 4;
+            let bo = out.len(); out.push(0xA1); out.extend_from_slice(&lo.to_le_bytes()); // mov ax, [a+lo]
+            fixups.push(Fixup { body_offset: bo, kind: FixupKind::GlobalAddr { global_idx: *array } });
+            let bo = out.len() + 1; out.extend_from_slice(&[0x8B, 0x16]); out.extend_from_slice(&(lo + 2).to_le_bytes()); // mov dx, [a+lo+2]
+            fixups.push(Fixup { body_offset: bo, kind: FixupKind::GlobalAddr { global_idx: *array } });
+        }
+        // Long `<long> ± <const>`: load DX:AX, then add/sub the immediate across
+        // the two words (`add ax,lo; adc dx,hi` / `sub ax,lo; sbb dx,hi`). Fixture 362.
+        Expr::BinOp { op: op @ (BinOp::Add | BinOp::Sub), left, right }
+            if long_operand(left, locals)
+                && !long_operand(right, locals)
+                && right.fold(locals.inits).is_some() =>
+        {
+            let k = right.fold(locals.inits).unwrap();
+            emit_long_to_dx_ax(left, locals, out, fixups);
+            let lo = (k as u32 & 0xFFFF) as u16;
+            let hi = ((k as i32) >> 16) as i32;
+            if matches!(op, BinOp::Add) {
+                out.push(0x05); out.extend_from_slice(&lo.to_le_bytes()); // add ax, lo
+                if let Ok(h8) = i8::try_from(hi) { out.extend_from_slice(&[0x83, 0xD2, h8 as u8]); } // adc dx, hi (sx)
+                else { out.push(0x81); out.push(0xD2); out.extend_from_slice(&((hi as u32 & 0xFFFF) as u16).to_le_bytes()); }
+            } else {
+                out.push(0x2D); out.extend_from_slice(&lo.to_le_bytes()); // sub ax, lo
+                if let Ok(h8) = i8::try_from(hi) { out.extend_from_slice(&[0x83, 0xDA, h8 as u8]); } // sbb dx, hi (sx)
+                else { out.push(0x81); out.push(0xDA); out.extend_from_slice(&((hi as u32 & 0xFFFF) as u16).to_le_bytes()); }
+            }
         }
         _ => {
             emit_expr_to_ax(value, locals, out, fixups);

@@ -850,7 +850,8 @@ pub(crate) fn emit_return(
                 || is_long_neg(expr, locals)
                 || is_long_not(expr, locals)
                 || is_long_arith_mem(expr, locals)
-                || is_long_muldiv(expr, locals))
+                || is_long_muldiv(expr, locals)
+                || is_long_field_elem_or_const_arith(expr, locals))
         {
             // `return <long> <op> ..` lowered across DX:AX (shift-by-1,
             // inline 2-word arithmetic, or a mul/div/mod helper call).
