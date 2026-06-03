@@ -924,6 +924,21 @@ fn same_var(a: &Expr, b: &Expr) -> bool {
         _ => false,
     }
 }
+/// A signed-byte (char) operand that `emit_expr_to_ax` loads as `mov al,..; cbw`.
+/// Drives the CX-save shape for `char OP char` binops. Unsigned char scalars are
+/// excluded (they use a different `cl`/`sub ch,ch` load shape).
+fn signed_byte_load(e: &Expr, locals: &Locals<'_>) -> bool {
+    match e {
+        Expr::IndexByte { .. } | Expr::LocalIndexByte { .. } | Expr::DerefByte { .. } => true,
+        Expr::LocalField { size: 1, .. } | Expr::GlobalField { size: 1, .. }
+        | Expr::DerefLocalField { size: 1, .. } | Expr::DerefParamField { size: 1, .. }
+        | Expr::DerefGlobalField { size: 1, .. } => true,
+        Expr::Param(i) => locals.is_char_param(*i) && !locals.is_unsigned_param(*i),
+        Expr::Local(i) => locals.size(*i) == 1 && !locals.is_unsigned_local(*i),
+        Expr::Global(g) => locals.is_char_global(*g) && !locals.is_unsigned_global(*g),
+        _ => false,
+    }
+}
 /// The `[bp+disp]` of a simple word-sized Param/Local read (not char/long/float).
 fn simple_word_bp(e: &Expr, locals: &Locals<'_>) -> Option<i16> {
     match e {
@@ -1084,13 +1099,15 @@ fn emit_binop_inner(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, o
         out.extend_from_slice(&[0x2B, 0xC0]); // sub ax, ax
         return;
     }
-    // Two char global-array elements (`a[i] OP b[j]`, byte loads): MSC loads
-    // the RHS to AX via `mov al,..; cbw`, parks it in CX, loads the LHS the same
-    // way, then `op ax, cx`. (The generic indexed-global path below would wrongly
-    // emit word loads for byte elements.) Fixture 2431.
+    // Two SIGNED byte (char) operands (`a OP b`, both byte loads): MSC loads the
+    // RHS to AX via `mov al,..; cbw`, parks it in CX, loads the LHS the same way,
+    // then `op ax, cx`. Covers char params/locals/globals, char-array elements,
+    // and size-1 (union/struct) field reads. (The generic path below would wrongly
+    // read a char as a word.) Unsigned chars use a different shape (cl/sub ch,ch)
+    // and are excluded. Fixtures 2431, 3517, 3667, 2103, 2563.
     if matches!(op, BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor)
-        && matches!(left, Expr::IndexByte { .. })
-        && matches!(right, Expr::IndexByte { .. })
+        && signed_byte_load(left, locals)
+        && signed_byte_load(right, locals)
     {
         emit_expr_to_ax(right, locals, out, fixups); // mov al,[r]; cbw
         out.extend_from_slice(&[0x8B, 0xC8]);        // mov cx, ax
