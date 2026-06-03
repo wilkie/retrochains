@@ -326,6 +326,21 @@ pub(crate) fn emit_cond_cmp_inner(cond: &Cond, locals: &Locals<'_>, out: &mut Ve
         emit_cmp_global_off_imm(array, byte_off, cmp_to, is_byte, out, fixups);
         return;
     }
+    // Bitwise-AND condition: `if (x & K)` and `if ((x & K) == 0 / != 0)` lower to
+    // `test byte/word [mem], K`. The caller's jcc (Truthy/Ne → jne, Eq → je) and
+    // the skip path's inverted jcc both read ZF after the test consistently.
+    // Fixtures 1704, 2679, 3270, 3264, 3269, 3536, 3540, …
+    if let Some((operand, k)) = match cond {
+        Cond::Truthy(Expr::BinOp { op: BinOp::BitAnd, left, right }) => bitand_mask(left, right),
+        Cond::Cmp { op: RelOp::Eq | RelOp::Ne,
+            left: Expr::BinOp { op: BinOp::BitAnd, left: a, right: b }, right: Expr::IntLit(0) }
+        | Cond::Cmp { op: RelOp::Eq | RelOp::Ne, left: Expr::IntLit(0),
+            right: Expr::BinOp { op: BinOp::BitAnd, left: a, right: b } } => bitand_mask(a, b),
+        _ => None,
+    } {
+        emit_test_mem_imm(operand, k, locals, out, fixups);
+        return;
+    }
     match cond {
         Cond::Truthy(Expr::Local(idx)) => emit_cmp_local_imm(*idx, locals, 0, out),
         Cond::Truthy(Expr::Param(idx)) => {
@@ -581,5 +596,50 @@ pub(crate) fn emit_cmp_bp_imm(disp: i16, k: i32, out: &mut Vec<u8>) {
         out.push(bp_modrm(0x7E, disp));
         push_bp_disp(out, disp);
         out.extend_from_slice(&k16.to_le_bytes());
+    }
+}
+/// If one operand of a `&` is a mask literal and the other a simple memory
+/// operand (Local/Param/Global), return `(operand, mask)` for a `test`.
+fn bitand_mask<'a>(a: &'a Expr, b: &'a Expr) -> Option<(&'a Expr, i32)> {
+    let simple = |e: &Expr| matches!(e, Expr::Local(_) | Expr::Param(_) | Expr::Global(_));
+    match (a, b) {
+        (m, Expr::IntLit(k)) if simple(m) => Some((m, *k)),
+        (Expr::IntLit(k), m) if simple(m) => Some((m, *k)),
+        _ => None,
+    }
+}
+/// `test byte/word [mem], imm` — MSC's lowering for a bitwise-AND condition.
+/// The byte form (`f6 /0`) is used when the mask fits in 8 bits.
+fn emit_test_mem_imm(operand: &Expr, k: i32, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    let is_byte = (0..=0xFF).contains(&k);
+    let push_imm = |out: &mut Vec<u8>| {
+        if is_byte { out.push((k as u32 & 0xFF) as u8); }
+        else { out.extend_from_slice(&((k as u32 & 0xFFFF) as u16).to_le_bytes()); }
+    };
+    let opcode = if is_byte { 0xF6 } else { 0xF7 };
+    match operand {
+        Expr::Local(i) => {
+            let disp = locals.disp(*i);
+            out.push(opcode);
+            out.push(bp_modrm(0x46, disp)); // /0=TEST, bp-rel
+            push_bp_disp(out, disp);
+            push_imm(out);
+        }
+        Expr::Param(i) => {
+            let disp = param_disp(*i);
+            out.push(opcode);
+            out.push(bp_modrm(0x46, disp));
+            push_bp_disp(out, disp);
+            push_imm(out);
+        }
+        Expr::Global(i) => {
+            out.push(opcode);
+            out.push(0x06); // /0=TEST, disp16
+            let pos = out.len();
+            out.extend_from_slice(&[0x00, 0x00]);
+            fixups.push(Fixup { body_offset: pos - 1, kind: FixupKind::GlobalAddr { global_idx: *i } });
+            push_imm(out);
+        }
+        _ => unreachable!("emit_test_mem_imm: non-simple operand"),
     }
 }
