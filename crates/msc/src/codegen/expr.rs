@@ -117,38 +117,39 @@ pub(crate) fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8
             }
         }
         Expr::CastChar { value, unsigned } => {
-            // Truncate to a byte then widen back. MSC loads the low byte of a
-            // simple int variable directly (`mov al,[v]`); a general expression
-            // is computed into AX (AL is its low byte). Widen: signed → cbw,
-            // unsigned → `sub ah,ah`.
-            match value.as_ref() {
-                Expr::Param(i)
-                    if !locals.is_char_param(*i) && !locals.is_long_param(*i) && !locals.is_float_param(*i) =>
-                {
-                    let d = param_disp(*i);
-                    out.push(0x8A); out.push(bp_modrm(0x46, d)); push_bp_disp(out, d);
+            // Truncate to a byte then widen back. A constant operand (incl. a
+            // foldable arithmetic expression like `a+b` with known a,b) is
+            // materialized as the truncated byte `mov al, imm8` (b0), NOT a word
+            // `mov ax, imm16` (fixtures 1533/1535). Otherwise MSC loads the low
+            // byte of a simple int variable directly (`mov al,[v]`); a general
+            // expression is computed into AX (AL is its low byte). Widen:
+            // signed → cbw, unsigned → `sub ah,ah`.
+            if let Some(k) = value.fold(locals.inits) {
+                out.push(0xB0);
+                out.push(k as u8);
+            } else {
+                match value.as_ref() {
+                    Expr::Param(i)
+                        if !locals.is_char_param(*i) && !locals.is_long_param(*i) && !locals.is_float_param(*i) =>
+                    {
+                        let d = param_disp(*i);
+                        out.push(0x8A); out.push(bp_modrm(0x46, d)); push_bp_disp(out, d);
+                    }
+                    Expr::Local(i)
+                        if locals.size(*i) == 2 && !locals.is_long_local(*i) && !locals.is_float_local(*i) =>
+                    {
+                        let d = locals.disp(*i);
+                        out.push(0x8A); out.push(bp_modrm(0x46, d)); push_bp_disp(out, d);
+                    }
+                    Expr::Global(g)
+                        if !locals.is_char_global(*g) && !locals.is_long_global(*g) && !locals.is_float_global(*g) =>
+                    {
+                        let bo = out.len();
+                        out.extend_from_slice(&[0xA0, 0x00, 0x00]); // mov al, moffs
+                        fixups.push(Fixup { body_offset: bo, kind: FixupKind::GlobalAddr { global_idx: *g } });
+                    }
+                    _ => emit_expr_to_ax(value, locals, out, fixups),
                 }
-                Expr::Local(i)
-                    if locals.size(*i) == 2 && !locals.is_long_local(*i) && !locals.is_float_local(*i) =>
-                {
-                    let d = locals.disp(*i);
-                    out.push(0x8A); out.push(bp_modrm(0x46, d)); push_bp_disp(out, d);
-                }
-                Expr::Global(g)
-                    if !locals.is_char_global(*g) && !locals.is_long_global(*g) && !locals.is_float_global(*g) =>
-                {
-                    let bo = out.len();
-                    out.extend_from_slice(&[0xA0, 0x00, 0x00]); // mov al, moffs
-                    fixups.push(Fixup { body_offset: bo, kind: FixupKind::GlobalAddr { global_idx: *g } });
-                }
-                // Constant operand: MSC materializes the truncated byte directly
-                // with `mov al, imm8` (b0), not `mov ax, imm16`. Fixtures
-                // 1533/1534/1535…
-                Expr::IntLit(k) => {
-                    out.push(0xB0);
-                    out.push(*k as u8);
-                }
-                _ => emit_expr_to_ax(value, locals, out, fixups),
             }
             if *unsigned {
                 out.extend_from_slice(&[0x2A, 0xE4]); // sub ah, ah
