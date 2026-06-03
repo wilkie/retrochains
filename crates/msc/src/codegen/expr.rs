@@ -768,6 +768,25 @@ fn emit_binop_inner(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, o
         out.extend_from_slice(&[0x2B, 0xC0]); // sub ax, ax
         return;
     }
+    // Two char global-array elements (`a[i] OP b[j]`, byte loads): MSC loads
+    // the RHS to AX via `mov al,..; cbw`, parks it in CX, loads the LHS the same
+    // way, then `op ax, cx`. (The generic indexed-global path below would wrongly
+    // emit word loads for byte elements.) Fixture 2431.
+    if matches!(op, BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor)
+        && matches!(left, Expr::IndexByte { .. })
+        && matches!(right, Expr::IndexByte { .. })
+    {
+        emit_expr_to_ax(right, locals, out, fixups); // mov al,[r]; cbw
+        out.extend_from_slice(&[0x8B, 0xC8]);        // mov cx, ax
+        emit_expr_to_ax(left, locals, out, fixups);  // mov al,[l]; cbw
+        let opc = match op {
+            BinOp::Add => 0x03, BinOp::Sub => 0x2B, BinOp::BitAnd => 0x23,
+            BinOp::BitOr => 0x0B, BinOp::BitXor => 0x33, _ => unreachable!(),
+        };
+        out.push(opc);
+        out.push(0xC1); // op ax, cx
+        return;
+    }
     // Commutative-op swap: when the RHS is a value that needs AX
     // (call, complex expression) and the LHS is a BP-rel operand,
     // MSC emits the RHS first and then uses the BP-rel as a memory
