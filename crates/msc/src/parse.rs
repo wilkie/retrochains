@@ -564,7 +564,11 @@ pub(crate) fn parse_global_decl(p: &mut Parser<'_>) -> Result<(), EmitError> {
     };
     let init = if matches!(p.peek(), Some(Tok::Assign)) {
         p.bump();
-        if matches!(p.peek(), Some(Tok::LBrace)) {
+        if dims.len() > 1 && matches!(p.peek(), Some(Tok::LBrace)) {
+            // Multidimensional array initializer (`int m[2][3] = {{...},{...}}`):
+            // flatten row-major with per-level zero padding.
+            Some(parse_multidim_init(p, &dims, is_char && !is_pointer)?)
+        } else if matches!(p.peek(), Some(Tok::LBrace)) {
             p.bump();
             let mut values = Vec::new();
             loop {
@@ -2188,6 +2192,48 @@ pub(crate) fn skip_decl_modifiers(p: &mut Parser<'_>) -> usize {
 /// index (constant indices only — a runtime multidim index is left unsupported
 /// for now). Returns `Ok(Some(flat))` when this is a multidim access, `Ok(None)`
 /// when it is an ordinary 1-D subscript (no extra `[`).
+/// Parse a (possibly nested) braced initializer for a multidimensional array,
+/// flattening it row-major and zero-padding each level to its declared size.
+/// `dims` is the remaining dimension slice (e.g. `[3,2]` → `[2]` on recursion).
+/// `is_char` selects Byte vs Int leaves. Handles partial inner inits (`{3}` →
+/// `[3,0]`) and char string rows (`"AB"` in a char[N] row → bytes then 0-pad).
+pub(crate) fn parse_multidim_init(
+    p: &mut Parser<'_>,
+    dims: &[usize],
+    is_char: bool,
+) -> Result<Vec<GlobalInit>, EmitError> {
+    let total: usize = dims.iter().product();
+    let mut out: Vec<GlobalInit> = Vec::new();
+    p.eat(&Tok::LBrace)?;
+    let inner_stride: usize = dims.get(1..).map(|r| r.iter().product()).unwrap_or(1);
+    while !matches!(p.peek(), Some(Tok::RBrace)) {
+        if dims.len() > 1 && matches!(p.peek(), Some(Tok::LBrace)) {
+            out.extend(parse_multidim_init(p, &dims[1..], is_char)?);
+        } else if dims.len() > 1 && is_char && matches!(p.peek(), Some(Tok::StrLit(_))) {
+            // A string literal fills one row of a char array (NUL + pad as 0).
+            let bytes = match p.bump().cloned() { Some(Tok::StrLit(b)) => b, _ => unreachable!() };
+            let start = out.len();
+            for b in bytes.iter().take(inner_stride) { out.push(GlobalInit::Byte(*b)); }
+            while out.len() - start < inner_stride { out.push(GlobalInit::Byte(0)); }
+        } else {
+            // Scalar leaf at the innermost level.
+            let v = parse_signed_int(p)?;
+            out.push(if is_char { GlobalInit::Byte((v as u32 & 0xFF) as u8) } else { GlobalInit::Int(v) });
+        }
+        match p.peek() {
+            Some(Tok::Comma) => { p.bump(); }
+            Some(Tok::RBrace) => break,
+            other => return Err(EmitError::Unsupported(format!(
+                "expected `,` or `}}` in array initializer, got {other:?}"))),
+        }
+    }
+    p.eat(&Tok::RBrace)?;
+    // Zero-pad this level to its full size.
+    while out.len() < total {
+        out.push(if is_char { GlobalInit::Byte(0) } else { GlobalInit::Int(0) });
+    }
+    Ok(out)
+}
 pub(crate) fn fold_multidim_flat(
     p: &mut Parser<'_>,
     idx0: &Expr,
