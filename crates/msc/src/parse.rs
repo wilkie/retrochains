@@ -1030,8 +1030,9 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
             struct_idxs.push(struct_idx);
             is_chars.push(is_char);
             is_longs.push(is_long && !has_ptr); // pointer-to-long is word-sized
-            // `unsigned int x` (not pointer, not char) → track for /2 optimization
-            is_unsigned_ints.push(has_unsigned_mod && !is_char && !has_ptr);
+            // `unsigned x` (not pointer) → track for /2 optimization and for
+            // unsigned comparison jcc selection (incl. unsigned char).
+            is_unsigned_ints.push(has_unsigned_mod && !has_ptr);
             float_widths.push(if has_ptr { 0 } else { float_width }); // pointer-to-float is word-sized
             if matches!(p.peek(), Some(Tok::Comma)) {
                 p.bump();
