@@ -1589,6 +1589,24 @@ pub(crate) fn parse_signed_int(p: &mut Parser<'_>) -> Result<i32, EmitError> {
     ))
 }
 pub(crate) fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
+    // `goto <label>;`
+    if matches!(p.peek(), Some(Tok::Ident(n)) if n == "goto") {
+        p.bump();
+        let name = match p.bump().cloned() {
+            Some(Tok::Ident(s)) => s,
+            other => return Err(EmitError::Unsupported(format!("expected label after goto, got {other:?}"))),
+        };
+        p.eat(&Tok::Semi)?;
+        return Ok(Stmt::Goto(name));
+    }
+    // `<label>:` — an identifier immediately followed by a colon.
+    if let Some(Tok::Ident(n)) = p.peek().cloned()
+        && matches!(p.toks.get(p.pos + 1), Some(Tok::Colon))
+    {
+        p.bump(); // ident
+        p.bump(); // colon
+        return Ok(Stmt::Label(n));
+    }
     match p.peek() {
         Some(Tok::Kw("return")) => {
             p.bump();

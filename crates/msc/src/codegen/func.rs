@@ -417,6 +417,8 @@ pub(crate) fn emit_function(
     }
 
     let loop_stack: std::cell::RefCell<Vec<LoopCtx>> = std::cell::RefCell::new(Vec::new());
+    let labels: std::cell::RefCell<std::collections::HashMap<String, usize>> = std::cell::RefCell::new(std::collections::HashMap::new());
+    let label_fixups: std::cell::RefCell<Vec<(String, usize)>> = std::cell::RefCell::new(Vec::new());
     let param_is_char: Vec<bool> = func.param_is_char.clone();
     let param_is_long: Vec<bool> = func.param_is_long.clone();
     let param_is_unsigned: Vec<bool> = func.param_is_unsigned.clone();
@@ -445,6 +447,8 @@ pub(crate) fn emit_function(
         long_param_funcs,
         float_returners: float_returners_arg,
         loop_stack: &loop_stack,
+        labels: &labels,
+        label_fixups: &label_fixups,
         fpu_live: &fpu_live,
         return_float_width: func.return_float_width,
         float_call_temp_disp,
@@ -496,6 +500,17 @@ pub(crate) fn emit_function(
         i += 1;
     }
 
+    // Resolve `goto`/label jumps: backpatch each pending rel8 displacement now
+    // that every label's byte offset is known.
+    {
+        let labels = labels.borrow();
+        for (name, pos) in label_fixups.borrow().iter() {
+            let target = *labels.get(name)
+                .unwrap_or_else(|| panic!("goto to undefined label `{name}`"));
+            let disp = target as i64 - (*pos as i64 + 1);
+            bytes[*pos] = i8::try_from(disp).expect("goto rel8 displacement fits") as u8;
+        }
+    }
     // Implicit return at the end of functions that fall off without an
     // explicit `return`. MSC emits leave+ret for both void and int-returning
     // functions. The epilogue shape follows the function's frame.

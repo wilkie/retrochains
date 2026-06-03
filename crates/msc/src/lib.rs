@@ -381,6 +381,11 @@ pub struct Locals<'a> {
     /// body's emit buffer, to be patched at loop end. RefCell so
     /// emit_stmt (which only takes `&Locals`) can mutate.
     pub loop_stack: &'a std::cell::RefCell<Vec<LoopCtx>>,
+    /// `goto` label support: resolved byte offsets of emitted labels, and
+    /// pending forward/backward jump fixups `(label, disp8_pos)` to patch once
+    /// every label offset is known (after the whole body is emitted).
+    pub labels: &'a std::cell::RefCell<std::collections::HashMap<String, usize>>,
+    pub label_fixups: &'a std::cell::RefCell<Vec<(String, usize)>>,
     /// FpuStack state: `Some(local_idx)` when that float local's value is
     /// currently live on x87 `st(0)` (its init was stored with `fst`, keeping
     /// the stack top). A coupled `return (int)<local>` consumes it with a bare
@@ -539,6 +544,13 @@ pub enum Stmt {
     /// `continue;` — Phase 1 placeholder; not yet implemented for
     /// loops, but parses so source files compile.
     Continue,
+    /// `<name>:` — a labelled jump target for `goto`. Carries no codegen
+    /// itself; records the current offset in the function's label map.
+    Label(String),
+    /// `goto <name>;` — unconditional jump to a label (`jmp` to its offset,
+    /// backpatched for forward labels). `if (cond) goto L;` lowers to a single
+    /// conditional jump straight to L.
+    Goto(String),
 }
 
 /// One arm of a `switch` statement. `value` is `Some(K)` for `case K:`

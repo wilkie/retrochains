@@ -89,6 +89,18 @@ pub(crate) fn emit_stmt(
                 panic!("continue outside a loop");
             }
         }
+        Stmt::Label(name) => {
+            // Record this label's byte offset; jumps to it are backpatched after
+            // the whole body is emitted.
+            locals.labels.borrow_mut().insert(name.clone(), out.len());
+        }
+        Stmt::Goto(name) => {
+            // Unconditional `jmp short` to the label (rel8 backpatched).
+            out.push(0xEB);
+            let pos = out.len();
+            out.push(0x00);
+            locals.label_fixups.borrow_mut().push((name.clone(), pos));
+        }
         Stmt::Block(stmts) => {
             // Block has no scoping at the codegen level. Sub-statements
             // emit inline. Const-prop's already been applied at the
@@ -112,6 +124,31 @@ pub(crate) fn emit_stmt(
             emit_for(init, cond, step, body, locals, frame, return_int, return_long, out, fixups);
         }
         Stmt::If { cond, then_branch, else_branch } => {
+            // `if (cond) goto L;` lowers to a single conditional jump straight to
+            // the label (jcc taken when the cond is TRUE), not cond_skip + jmp.
+            if else_branch.is_none()
+                && let Stmt::Goto(label) = then_branch.as_ref()
+            {
+                if let Some(k) = fold_cond(cond, locals) {
+                    if k != 0 {
+                        out.push(0xEB);
+                        let pos = out.len();
+                        out.push(0x00);
+                        locals.label_fixups.borrow_mut().push((label.clone(), pos));
+                    }
+                    return;
+                }
+                let jcc = match cond {
+                    Cond::Cmp { op, .. } => loop_back_jcc(*op),
+                    _ => 0x75, // jnz for a truthy condition
+                };
+                emit_cond_cmp_inner(cond, locals, out, fixups);
+                out.push(jcc);
+                let pos = out.len();
+                out.push(0x00);
+                locals.label_fixups.borrow_mut().push((label.clone(), pos));
+                return;
+            }
             // Constant-condition elision: when the cond folds to a
             // compile-time integer, MSC keeps only the live branch
             // and drops the comparison + jump entirely. Fixtures
@@ -214,6 +251,9 @@ pub(crate) fn stmt_always_returns(stmt: &Stmt, locals: &Locals<'_>) -> bool {
         Stmt::Return(_) => true,
         Stmt::Empty => false,
         Stmt::ExprStmt(_) | Stmt::Assign { .. } => false,
+        // A label is a reachable join point; a bare goto isn't treated as a
+        // function exit here (so a following label still emits).
+        Stmt::Label(_) | Stmt::Goto(_) => false,
         // Loops with a runtime cond can fall through; the
         // const-true infinite-loop case isn't exercised yet so we
         // conservatively answer false.
@@ -995,6 +1035,8 @@ pub(crate) fn emit_loop(
         long_param_funcs: locals.long_param_funcs,
         float_returners: locals.float_returners,
         loop_stack: locals.loop_stack,
+        labels: locals.labels,
+        label_fixups: locals.label_fixups,
         fpu_live: locals.fpu_live,
         return_float_width: locals.return_float_width,
         float_call_temp_disp: locals.float_call_temp_disp,
@@ -1611,6 +1653,8 @@ pub(crate) fn emit_do_while(
         long_param_funcs: locals.long_param_funcs,
         float_returners: locals.float_returners,
         loop_stack: locals.loop_stack,
+        labels: locals.labels,
+        label_fixups: locals.label_fixups,
         fpu_live: locals.fpu_live,
         return_float_width: locals.return_float_width,
         float_call_temp_disp: locals.float_call_temp_disp,
