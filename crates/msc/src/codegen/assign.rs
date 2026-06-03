@@ -1467,6 +1467,56 @@ pub(crate) fn emit_long_global_4byte(
     }
     false
 }
+/// bp-relative long (4-byte) const-store or compound at `[bp+lo]`/`[bp+hi]`.
+/// Mirror of [`emit_long_global_4byte`] for locals (stack struct fields). Covers
+/// const store + add/sub + shl-by-1; returns false otherwise.
+pub(crate) fn emit_long_local_4byte(
+    lo: i16, hi: i16, value: &Expr, self_matches: bool,
+    locals: &Locals<'_>, out: &mut Vec<u8>,
+) -> bool {
+    let word_imm = |out: &mut Vec<u8>, digit: u8, off: i16, imm: i32| {
+        let modrm = 0x46 | (digit << 3);
+        if let Ok(k8) = i8::try_from(imm) {
+            out.push(0x83); out.push(bp_modrm(modrm, off)); push_bp_disp(out, off); out.push(k8 as u8);
+        } else {
+            out.push(0x81); out.push(bp_modrm(modrm, off)); push_bp_disp(out, off);
+            out.extend_from_slice(&((imm as u32 & 0xFFFF) as u16).to_le_bytes());
+        }
+    };
+    let mov_imm = |out: &mut Vec<u8>, off: i16, imm: u16| {
+        out.push(0xC7); out.push(bp_modrm(0x46, off)); push_bp_disp(out, off);
+        out.extend_from_slice(&imm.to_le_bytes());
+    };
+    if let Some(k) = value.fold(locals.inits) {
+        if k == 0 {
+            out.extend_from_slice(&[0x2B, 0xC0]); // sub ax, ax
+            out.push(0x89); out.push(bp_modrm(0x46, hi)); push_bp_disp(out, hi); // mov [hi], ax
+            out.push(0x89); out.push(bp_modrm(0x46, lo)); push_bp_disp(out, lo); // mov [lo], ax
+        } else {
+            mov_imm(out, lo, (k as u32 & 0xFFFF) as u16);
+            mov_imm(out, hi, (((k as i32) >> 16) as u32 & 0xFFFF) as u16);
+        }
+        return true;
+    }
+    if self_matches
+        && let Expr::BinOp { op, right, .. } = value
+        && let Some(m) = right.fold(locals.inits)
+    {
+        let low = (m as u32 & 0xFFFF) as i16 as i32;
+        let high = ((m as i32) >> 16) as i32;
+        match op {
+            BinOp::Add => { word_imm(out, 0, lo, low); word_imm(out, 2, hi, high); }
+            BinOp::Sub => { word_imm(out, 5, lo, low); word_imm(out, 3, hi, high); }
+            BinOp::Shl if m == 1 => {
+                out.push(0xD1); out.push(bp_modrm(0x66, lo)); push_bp_disp(out, lo); // shl word [lo],1
+                out.push(0xD1); out.push(bp_modrm(0x56, hi)); push_bp_disp(out, hi); // rcl word [hi],1
+            }
+            _ => return false,
+        }
+        return true;
+    }
+    false
+}
 /// `<global>[K] = <expr>;` — write at a constant array index. The
 /// placeholder address is `byte_off`, which the linker adds to the
 /// global's base. Constant RHS → `c7 06 byte_off imm16`; general RHS
@@ -1938,6 +1988,16 @@ pub(crate) fn emit_assign_global_field(global_idx: usize, byte_off: u16, size: u
 /// `<struct-local>.<field> = <expr>;` — store at `disp + byte_off`,
 /// picking word vs byte form based on the field's size.
 pub(crate) fn emit_assign_local_field(local_idx: usize, byte_off: u16, size: u8, value: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    // Long (4-byte) local struct field: low word at disp(local)+byte_off, high at
+    // +2. Shared bp-relative long const-store / compound helper.
+    if size == 4 {
+        let lo = locals.disp(local_idx) + byte_off as i16;
+        let self_matches = matches!(value, Expr::BinOp { left, .. }
+            if matches!(left.as_ref(), Expr::LocalField { local: l, byte_off: bo, .. } if *l == local_idx && *bo == byte_off));
+        if emit_long_local_4byte(lo, lo + 2, value, self_matches, locals, out) {
+            return;
+        }
+    }
     // Compound `s.f op= rhs` (preserved self-read): a local struct field is a local
     // at byte_off — reuse the indexed-local compound codegen by rewriting the
     // self-read to LocalIndex/LocalIndexByte (which only matches on the local).
