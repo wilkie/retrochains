@@ -255,7 +255,7 @@ pub(crate) fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
             // `*p = ...` where p aliases x/g → rewrite to a direct store, and
             // rewrite any `*p` in the RHS to the aliased lvalue too, so a
             // compound `*p += K` becomes `x += K` (in-place add) not a fold.
-            if let AssignTarget::DerefLocal(p) = target
+            if let (AssignTarget::DerefLocal(p) | AssignTarget::DerefLocalByte(p)) = target
                 && let Some(&a) = cp.ptr_alias.get(p)
             {
                 cp.aliases_used.insert(*p);
@@ -384,6 +384,14 @@ pub(crate) fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
                 AssignTarget::IndexedGlobal { array, .. }
                 | AssignTarget::IndexedGlobalByte { array, .. }
                 | AssignTarget::GlobalField { global: array, .. } => { cp.mutated_globals.insert(*array); }
+                // `*p++ = v` mutates the pointer p itself — drop its known value
+                // and alias so a later `*p` reloads p at runtime (fixture 1299).
+                AssignTarget::DerefPostMutateLocal { local_idx, .. } => {
+                    cp.mutated_locals.insert(*local_idx);
+                    cp.ptr_alias.remove(local_idx);
+                    cp.l_known.remove(local_idx);
+                    cp.ptr_addr.remove(local_idx);
+                }
                 _ => {}
             }
             match target {

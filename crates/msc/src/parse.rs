@@ -1832,6 +1832,14 @@ pub(crate) fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
             p.eat(&Tok::Assign)?;
             let value = parse_expr(p)?;
             p.eat(&Tok::Semi)?;
+            // A plain `*p = v` through a `char *` local is a byte store (fixture
+            // 1299). Compound `*p op= K` keeps DerefLocal so the in-place
+            // self-assign peephole still fires.
+            let target = match target {
+                AssignTarget::DerefLocal(idx) if p.local_specs[idx].pointee_size == 1 =>
+                    AssignTarget::DerefLocalByte(idx),
+                other => other,
+            };
             Ok(Stmt::Assign { target, value })
         }
         Some(Tok::Ident(_)) => {

@@ -127,6 +127,18 @@ pub(crate) fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_
         AssignTarget::DerefLocal(li) => {
             return emit_assign_deref_local(li, value, locals, out, fixups);
         }
+        AssignTarget::DerefLocalByte(li) => {
+            // `*<char-ptr local> = v` → `mov bx,[bp-p]; mov byte [bx], imm/al`.
+            let disp = locals.disp(li);
+            out.push(0x8B); out.push(bp_modrm(0x5E, disp)); push_bp_disp(out, disp); // mov bx,[bp-p]
+            if let Some(k) = value.fold(locals.inits) {
+                out.extend_from_slice(&[0xC6, 0x07, (k as u32 & 0xFF) as u8]); // mov byte [bx], imm
+            } else {
+                emit_expr_to_ax(value, locals, out, fixups);
+                out.extend_from_slice(&[0x88, 0x07]); // mov [bx], al
+            }
+            return;
+        }
         AssignTarget::DerefLocalOffset { local, byte_off, is_byte } => {
             return emit_assign_deref_local_offset(local, byte_off, is_byte, value, locals, out, fixups);
         }

@@ -578,6 +578,9 @@ pub enum AssignTarget {
     /// `*<ptr-local> = <expr>;` — store through a pointer local.
     /// Codegen: `mov bx, [bp-disp]; mov [bx], imm/ax`.
     DerefLocal(usize),
+    /// `*<char-ptr-local> = <expr>;` — byte store through a char-pointer local.
+    /// Codegen: `mov bx, [bp-disp]; mov byte [bx], imm/al` (fixture 1299).
+    DerefLocalByte(usize),
     /// `<global>[K] = <expr>;` — write a 2-byte word at a constant
     /// index into an int-array global. `byte_off` is `K * 2`.
     /// Fixture 4119.
