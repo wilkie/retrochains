@@ -249,6 +249,23 @@ pub(crate) fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_
             out.extend_from_slice(&[0x89, 0x07]); // mov [bx], ax
             return;
         }
+        AssignTarget::DoubleDerefParam(pp) => {
+            // `**pp = value` through an `int **` param: `mov bx,[bp+pdisp];
+            // mov bx,[bx]; <store value through BX>`. A constant value uses
+            // the `c7 07 imm16` direct form (fixture 2906); otherwise the
+            // value is evaluated to AX and stored `89 07` (fixtures 2680/3479).
+            let disp = param_disp(pp);
+            out.push(0x8B); out.push(bp_modrm(0x5E, disp)); push_bp_disp(out, disp); // mov bx,[bp+pp]
+            out.extend_from_slice(&[0x8B, 0x1F]); // mov bx, [bx]
+            if let Some(k) = value.fold(locals.inits) {
+                out.extend_from_slice(&[0xC7, 0x07]); // mov word ptr [bx], imm16
+                out.extend_from_slice(&((k as u32 & 0xFFFF) as u16).to_le_bytes());
+            } else {
+                emit_expr_to_ax(value, locals, out, fixups);
+                out.extend_from_slice(&[0x89, 0x07]); // mov [bx], ax
+            }
+            return;
+        }
         AssignTarget::DerefPostMutateLocal { local_idx, step } => {
             return emit_assign_deref_postmutate_local(local_idx, step, value, locals, out, fixups);
         }

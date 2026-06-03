@@ -1001,6 +1001,14 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
             if has_ptr {
                 p.bump();
                 is_char = false; // pointer: always word-sized
+                // Pointer-to-pointer (`int **pp`, `char **pp`): consume the
+                // extra star(s). The immediate pointee is a near pointer
+                // (2 bytes); the deref count is driven by `*`/`**` at the use
+                // site. Fixtures 2680/2721/2906/3190/3479.
+                if matches!(p.peek(), Some(Tok::Star)) {
+                    while matches!(p.peek(), Some(Tok::Star)) { p.bump(); }
+                    pointee_size = 2;
+                }
             }
             let pname = match p.bump().cloned() {
                 Some(Tok::Ident(s)) => s,
@@ -1774,6 +1782,8 @@ pub(crate) fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
                     AssignTarget::DoubleDerefGlobal(idx)
                 } else if let Some(idx) = p.local_names.iter().position(|n| *n == name) {
                     AssignTarget::DoubleDerefLocal(idx)
+                } else if let Some(idx) = p.param_names.iter().position(|n| *n == name) {
+                    AssignTarget::DoubleDerefParam(idx)
                 } else {
                     return Err(EmitError::Unsupported(format!(
                         "double-deref store through `{name}` not yet supported"
@@ -2628,6 +2638,9 @@ pub(crate) fn parse_compound_rhs(p: &mut Parser<'_>, target: &AssignTarget) -> R
         }
         AssignTarget::DoubleDerefGlobal(g) => {
             Expr::DerefWord { ptr: Box::new(Expr::DerefWord { ptr: Box::new(Expr::Global(*g)) }) }
+        }
+        AssignTarget::DoubleDerefParam(i) => {
+            Expr::DerefWord { ptr: Box::new(Expr::DerefWord { ptr: Box::new(Expr::Param(*i)) }) }
         }
         // Global-pointer subscript `p[K] op= v` — the self-read is the matching
         // PtrIndexByte; const-prop rewrites both it and the target through the

@@ -640,6 +640,11 @@ pub enum AssignTarget {
     /// Usually resolved to a direct lvalue by the alias pass (pp -> p -> x);
     /// the fallback codegen is `mov bx, [bp-pp]; mov bx, [bx]; mov [bx], ax`.
     DoubleDerefLocal(usize),
+    /// `**<param-ptr-to-ptr> = <expr>;` — double-deref store through an
+    /// `int **` parameter. Codegen: `mov bx, [bp+pdisp]; mov bx, [bx];
+    /// <eval value→AX>; mov [bx], ax` (or `c7 07 imm16` for a constant).
+    /// Fixtures 2680, 3479, 2906.
+    DoubleDerefParam(usize),
     /// `*<ptr-local>++ = <expr>;` — store through the OLD pointer value,
     /// then advance the pointer by `step`. Codegen: `mov bx, [bp-p];
     /// <mutate p>; mov [bx], ax/imm`.
