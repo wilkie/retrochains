@@ -128,21 +128,25 @@ pub(crate) fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8
                 out.push(0xB0);
                 out.push(k as u8);
             } else {
+                // Load just the low byte of a scalar variable operand (incl. a
+                // char operand — no inner widening, since we re-widen below; this
+                // avoids the double-widen of `(unsigned char)<signed char>`,
+                // fixture 3537). Long/float operands fall to the general path.
                 match value.as_ref() {
                     Expr::Param(i)
-                        if !locals.is_char_param(*i) && !locals.is_long_param(*i) && !locals.is_float_param(*i) =>
+                        if !locals.is_long_param(*i) && !locals.is_float_param(*i) =>
                     {
                         let d = param_disp(*i);
                         out.push(0x8A); out.push(bp_modrm(0x46, d)); push_bp_disp(out, d);
                     }
                     Expr::Local(i)
-                        if locals.size(*i) == 2 && !locals.is_long_local(*i) && !locals.is_float_local(*i) =>
+                        if !locals.is_long_local(*i) && !locals.is_float_local(*i) =>
                     {
                         let d = locals.disp(*i);
                         out.push(0x8A); out.push(bp_modrm(0x46, d)); push_bp_disp(out, d);
                     }
                     Expr::Global(g)
-                        if !locals.is_char_global(*g) && !locals.is_long_global(*g) && !locals.is_float_global(*g) =>
+                        if !locals.is_long_global(*g) && !locals.is_float_global(*g) =>
                     {
                         let bo = out.len();
                         out.extend_from_slice(&[0xA0, 0x00, 0x00]); // mov al, moffs
