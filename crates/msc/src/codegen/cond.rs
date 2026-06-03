@@ -64,7 +64,10 @@ pub(crate) fn emit_cond_skip(cond: &Cond, take_then_disp: i8, locals: &Locals<'_
         _ => {
             let jcc = match cond {
                 Cond::Truthy(_) => 0x74, // je on zero
-                Cond::Cmp { op, .. } => inverted_jcc(*op),
+                Cond::Cmp { op, .. } => {
+                    let j = inverted_jcc(*op);
+                    if cmp_is_unsigned(cond, locals) { to_unsigned_jcc(j) } else { j }
+                }
                 _ => unreachable!(),
             };
             emit_cond_cmp_inner(cond, locals, out, fixups);
@@ -525,6 +528,31 @@ pub(crate) fn emit_cmp_ax_imm(k: i32, out: &mut Vec<u8>) {
 /// emitted `jcc skip` triggers when the cond is *false*, so this is
 /// the **inversion** of the source-level relop. MSC's signed-jcc
 /// mnemonic family is `7c..7f` for the disp8 forms.
+/// Map a signed conditional-jump opcode to its unsigned counterpart for the
+/// relational forms (jge→jae, jg→ja, jle→jbe, jl→jb); je/jne are unchanged.
+pub(crate) fn to_unsigned_jcc(signed: u8) -> u8 {
+    match signed {
+        0x7D => 0x73, // jge → jae
+        0x7F => 0x77, // jg  → ja
+        0x7E => 0x76, // jle → jbe
+        0x7C => 0x72, // jl  → jb
+        other => other,
+    }
+}
+/// True when a comparison's operands are unsigned (any unsigned operand makes
+/// the comparison unsigned), so the jcc must use the unsigned variant.
+pub(crate) fn cmp_is_unsigned(cond: &Cond, locals: &Locals<'_>) -> bool {
+    fn operand_unsigned(e: &Expr, locals: &Locals<'_>) -> bool {
+        match e {
+            Expr::Param(i) => locals.is_unsigned_param(*i),
+            Expr::Local(i) => locals.is_unsigned_local(*i),
+            Expr::Global(g) => locals.is_unsigned_global(*g),
+            _ => false,
+        }
+    }
+    matches!(cond, Cond::Cmp { left, right, .. }
+        if operand_unsigned(left, locals) || operand_unsigned(right, locals))
+}
 pub(crate) fn inverted_jcc(op: RelOp) -> u8 {
     match op {
         RelOp::Eq => 0x75, // jne — skip then-block when not-equal
