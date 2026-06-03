@@ -585,6 +585,10 @@ pub enum AssignTarget {
     /// `<char-global>[K] = <byte>;` — write one byte at a constant
     /// index into a char-array global. `byte_off` is `K`. Fixture 4122.
     IndexedGlobalByte { array: usize, byte_off: u16 },
+    /// `<struct-global> = <struct-global>;` — whole-struct copy between two
+    /// globals. `bytes` is the struct size; ≤4 bytes copies via AX/DX, larger
+    /// uses a `movsw` run. The Assign's `value` field is unused.
+    StructGlobalCopy { dst: usize, src: usize, bytes: u16 },
     /// `<int-global>[i] = <expr>;` — runtime index into an int-array global.
     /// Codegen: `mov bx,[i]; shl bx,1; <value>; mov [bx+&a], ax` (BX-based).
     IndexedGlobalVar { array: usize, index: Box<Expr> },

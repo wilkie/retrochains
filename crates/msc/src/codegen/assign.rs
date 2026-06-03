@@ -191,6 +191,9 @@ pub(crate) fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_
         AssignTarget::IndexedGlobalByteVar { array, index } => {
             return emit_assign_indexed_global_var(array, index.as_ref(), true, value, locals, out, fixups);
         }
+        AssignTarget::StructGlobalCopy { dst, src, bytes } => {
+            return emit_struct_global_copy(dst, src, bytes, out, fixups);
+        }
         AssignTarget::PtrIndexByte { ptr, disp } => {
             return emit_assign_ptr_index_byte(ptr, disp, value, locals, out, fixups);
         }
@@ -1500,6 +1503,42 @@ pub(crate) fn emit_long_global_4byte(
         return true;
     }
     false
+}
+/// `<struct-global> = <struct-global>;` — whole-struct copy. ≤2 words copies via
+/// AX/DX; ≥3 words uses a `movsw` run (di=dst, si=src, es=ds). Fixtures 410/413.
+pub(crate) fn emit_struct_global_copy(dst: usize, src: usize, bytes: u16, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    let words = bytes / 2;
+    let g_moffs = |out: &mut Vec<u8>, fixups: &mut Vec<Fixup>, opcode: u8, g: usize| {
+        let bo = out.len();
+        out.push(opcode);
+        out.extend_from_slice(&[0x00, 0x00]);
+        fixups.push(Fixup { body_offset: bo, kind: FixupKind::GlobalAddr { global_idx: g } });
+    };
+    if words <= 2 {
+        g_moffs(out, fixups, 0xA1, src); // mov ax, [src]
+        if words == 2 {
+            out.extend_from_slice(&[0x8B, 0x16]); // mov dx, [src+2]
+            let bo = out.len();
+            out.extend_from_slice(&2u16.to_le_bytes());
+            fixups.push(Fixup { body_offset: bo - 1, kind: FixupKind::GlobalAddr { global_idx: src } });
+        }
+        g_moffs(out, fixups, 0xA3, dst); // mov [dst], ax
+        if words == 2 {
+            out.extend_from_slice(&[0x89, 0x16]); // mov [dst+2], dx
+            let bo = out.len();
+            out.extend_from_slice(&2u16.to_le_bytes());
+            fixups.push(Fixup { body_offset: bo - 1, kind: FixupKind::GlobalAddr { global_idx: dst } });
+        }
+    } else {
+        out.extend_from_slice(&[0x57, 0x56]); // push di; push si
+        g_moffs(out, fixups, 0xBF, dst); // mov di, OFFSET dst
+        g_moffs(out, fixups, 0xBE, src); // mov si, OFFSET src
+        out.extend_from_slice(&[0x1E, 0x07]); // push ds; pop es
+        for _ in 0..words {
+            out.push(0xA5); // movsw
+        }
+        out.extend_from_slice(&[0x5E, 0x5F]); // pop si; pop di
+    }
 }
 /// bp-relative long (4-byte) const-store or compound at `[bp+lo]`/`[bp+hi]`.
 /// Mirror of [`emit_long_global_4byte`] for locals (stack struct fields). Covers
