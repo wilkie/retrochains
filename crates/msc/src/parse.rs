@@ -3391,6 +3391,16 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                     p.bump();
                     let index = parse_expr(p)?;
                     p.eat(&Tok::RBrack)?;
+                    // `char *` / `char []` param subscript → byte deref + widen.
+                    // `s[0]` is `*s`; `s[K]` is `*(s + K)` (fixtures 2618/2919).
+                    if p.param_pointee_sizes.get(idx).copied().unwrap_or(0) == 1 {
+                        let ptr = if matches!(index, Expr::IntLit(0)) {
+                            Expr::Param(idx)
+                        } else {
+                            Expr::BinOp { op: BinOp::Add, left: Box::new(Expr::Param(idx)), right: Box::new(index) }
+                        };
+                        return Ok(Expr::DerefByte { ptr: Box::new(ptr) });
+                    }
                     return Ok(Expr::ParamIndex { param: idx, index: Box::new(index) });
                 }
                 // `<struct-ptr-param>-><field>` member access.

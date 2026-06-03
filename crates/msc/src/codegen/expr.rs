@@ -316,6 +316,15 @@ pub(crate) fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8
                 out.extend_from_slice(&[0x8A, 0x07, 0x98]); // mov al, [bx]; cbw
                 return;
             }
+            // `*<char-ptr param>` / `s[0]` on a char* param: load p from its
+            // slot, byte-deref + widen (`mov bx,[bp+pd]; mov al,[bx]; cbw`).
+            // Fixtures 2618 / 2919 / 2702.
+            if let Expr::Param(idx) = ptr.as_ref() {
+                let d = param_disp(*idx);
+                out.push(0x8B); out.push(0x5E); out.push(d as u8); // mov bx, [bp+pd]
+                out.extend_from_slice(&[0x8A, 0x07, 0x98]); // mov al, [bx]; cbw
+                return;
+            }
             // `*(base + idx)` byte deref — decayed global array / pointer
             // param/local, constant or runtime index. Fixtures 2546, 3227.
             if let Expr::BinOp { op: BinOp::Add, left, right } = ptr.as_ref()
