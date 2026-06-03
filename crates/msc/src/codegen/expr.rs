@@ -489,6 +489,33 @@ pub(crate) fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8
                 emit_expr_to_ax(arm, locals, out, fixups);
                 return;
             }
+            // "max/min" select-operand idiom: `(L OP R) ? L : R` where L,R are
+            // the same simple word bp-relative reads as the comparison's own
+            // operands. MSC reuses the AX already loaded with L for the cmp and
+            // selects R with a SINGLE forward jcc — no jmp, no second branch.
+            //   mov ax,[bp+L]; cmp ax,[bp+R]; jge/jle +szR; mov ax,[bp+R]
+            // The jcc uses the "or-equal" variant (a==b ⟹ L,R values equal, so
+            // the equality case folds into keep-then). Fixtures 3617/3621/2719.
+            if let Expr::BinOp { op, left: cl, right: cr } = cond.as_ref()
+                && matches!(op, BinOp::Gt | BinOp::Ge | BinOp::Lt | BinOp::Le)
+                && same_var(then_arm, cl)
+                && same_var(else_arm, cr)
+                && let Some(ld) = simple_word_bp(cl, locals)
+                && let Some(rd) = simple_word_bp(cr, locals)
+            {
+                let jcc = match op { BinOp::Gt | BinOp::Ge => 0x7Du8, _ => 0x7E };
+                // mov ax,[bp+ld]
+                out.push(0x8B); out.push(bp_modrm(0x46, ld)); push_bp_disp(out, ld);
+                // cmp ax,[bp+rd]
+                out.push(0x3B); out.push(bp_modrm(0x46, rd)); push_bp_disp(out, rd);
+                // else load size = mov ax,[bp+rd]
+                let mut else_buf = Vec::new();
+                else_buf.push(0x8B); else_buf.push(bp_modrm(0x46, rd)); push_bp_disp(&mut else_buf, rd);
+                out.push(jcc);
+                out.push(i8::try_from(else_buf.len()).expect("select-operand else fits in rel8") as u8);
+                out.extend_from_slice(&else_buf);
+                return;
+            }
             // Runtime ternary: `cond ? b : c`. MSC emits the condition as a
             // DIRECT comparison + inverted jcc that skips to the else arm —
             // not a materialized 0/1 boolean. Shape (fixture 429
@@ -761,6 +788,47 @@ fn ptr_int_sub(left: &Expr, right: &Expr, locals: &Locals<'_>) -> Option<(usize,
     Some((elem, param_disp(*ri)))
 }
 
+/// True when a ternary is the `(L OP R) ? L : R` select-operand idiom that
+/// emit_expr_to_ax lowers to a single forward jcc (max/min). emit_return uses
+/// this to keep such ternaries on the single-epilogue value path rather than
+/// the two-epilogue structure.
+pub(crate) fn is_ternary_select_operand(cond: &Expr, then_arm: &Expr, else_arm: &Expr, locals: &Locals<'_>) -> bool {
+    if let Expr::BinOp { op, left: cl, right: cr } = cond
+        && matches!(op, BinOp::Gt | BinOp::Ge | BinOp::Lt | BinOp::Le)
+        && same_var(then_arm, cl)
+        && same_var(else_arm, cr)
+        && simple_word_bp(cl, locals).is_some()
+        && simple_word_bp(cr, locals).is_some()
+    {
+        return true;
+    }
+    false
+}
+/// True when both exprs are the same simple variable read (same Param or same
+/// Local index). Used by the ternary select-operand idiom (no PartialEq on Expr).
+fn same_var(a: &Expr, b: &Expr) -> bool {
+    match (a, b) {
+        (Expr::Param(i), Expr::Param(j)) => i == j,
+        (Expr::Local(i), Expr::Local(j)) => i == j,
+        _ => false,
+    }
+}
+/// The `[bp+disp]` of a simple word-sized Param/Local read (not char/long/float).
+fn simple_word_bp(e: &Expr, locals: &Locals<'_>) -> Option<i16> {
+    match e {
+        Expr::Param(i)
+            if !locals.is_char_param(*i) && !locals.is_long_param(*i) && !locals.is_float_param(*i) =>
+        {
+            Some(param_disp(*i))
+        }
+        Expr::Local(i)
+            if locals.size(*i) == 2 && !locals.is_long_local(*i) && !locals.is_float_local(*i) =>
+        {
+            Some(locals.disp(*i))
+        }
+        _ => None,
+    }
+}
 pub(crate) fn emit_binop(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
     // Unary negation `-x` (parsed as `0 - x`): load x into AX and `neg ax`,
     // not `mov ax,0; sub ax,x` (fixture 3346 `return x<0?-x:x` → `mov ax,[bp+4];
