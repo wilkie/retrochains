@@ -5,6 +5,20 @@ use crate::*;
 /// `goto L` whose target `L` is reachable from that point through only labels
 /// (no intervening code) is a jump to the next instruction — MSC elides it.
 pub(crate) fn drop_dead_after_goto(stmts: Vec<Stmt>) -> Vec<Stmt> {
+    // Pass 0: a constant `if (cond) goto L;` becomes an unconditional goto
+    // (cond true) or vanishes (cond false). Operands are already substituted to
+    // literals by const-prop, so fold_cond_raw with an empty view resolves them.
+    let stmts: Vec<Stmt> = stmts.into_iter().map(|s| {
+        if let Stmt::If { cond, then_branch, else_branch } = &s
+            && else_branch.is_none()
+            && let Stmt::Goto(l) = then_branch.as_ref()
+            && let Some(k) = crate::codegen::statements::fold_cond_raw(cond, &[])
+        {
+            if k != 0 { Stmt::Goto(l.clone()) } else { Stmt::Empty }
+        } else {
+            s
+        }
+    }).collect();
     // Pass 1: drop unreachable statements after an unconditional goto.
     let mut live: Vec<Stmt> = Vec::with_capacity(stmts.len());
     let mut dropping = false;
@@ -75,6 +89,9 @@ pub(crate) fn const_prop_globals(
         for p in used { cp.ptr_alias.remove(&p); }
         new_stmt
     }).collect();
+    // Re-run after prop so a now-constant `if (cond) goto L;` folds and its
+    // newly-dead tail is dropped.
+    let new_stmts = drop_dead_after_goto(new_stmts);
     (new_stmts, cp.mutated_locals, cp.mutated_globals)
 }
 /// Rewrite `*p` (DerefWord/DerefByte over an aliased pointer local) to the
