@@ -1294,6 +1294,40 @@ pub(crate) fn emit_assign_global(global_idx: usize, value: &Expr, locals: &Local
         fixups.push(Fixup { body_offset: addr_off - 1, kind: FixupKind::GlobalAddr { global_idx } });
         return;
     }
+    // Char-global compound mul/div/mod by a foldable RHS → byte runtime op,
+    // result left in AL. mul: `mov al,K; imul byte [g]; mov [g],al`. div:
+    // `mov cl,K; mov al,[g]; cbw; idiv cl; mov [g],al`. mod: `…; mov [g],ah;
+    // mov al,ah`. Fixtures 691/692/693/695/696/699.
+    if locals.is_char_global(global_idx)
+        && let Expr::BinOp { op, left, right } = value
+        && matches!(left.as_ref(), Expr::Global(g) if *g == global_idx)
+        && matches!(op, BinOp::Mul | BinOp::Div | BinOp::Mod)
+        && let Some(k) = right.fold(locals.inits)
+    {
+        let put0 = |out: &mut Vec<u8>, fixups: &mut Vec<Fixup>| {
+            let bo = out.len();
+            out.extend_from_slice(&[0x00, 0x00]);
+            fixups.push(Fixup { body_offset: bo - 1, kind: FixupKind::GlobalAddr { global_idx } });
+        };
+        let k8 = (k as u32 & 0xFF) as u8;
+        if matches!(op, BinOp::Mul) {
+            out.extend_from_slice(&[0xB0, k8]); // mov al, K
+            out.push(0xF6); out.push(0x2E); put0(out, fixups); // imul byte [g]
+            out.push(0xA2); put0(out, fixups); // mov [g], al
+        } else {
+            out.extend_from_slice(&[0xB1, k8]); // mov cl, K
+            out.push(0xA0); put0(out, fixups); // mov al, [g]
+            out.push(0x98); // cbw
+            out.extend_from_slice(&[0xF6, 0xF9]); // idiv cl
+            if matches!(op, BinOp::Div) {
+                out.push(0xA2); put0(out, fixups); // mov [g], al
+            } else {
+                out.push(0x88); out.push(0x26); put0(out, fixups); // mov [g], ah
+                out.extend_from_slice(&[0x8A, 0xC4]); // mov al, ah
+            }
+        }
+        return;
+    }
     // Scalar int-global compound mul/div/mod/shl/shr by a foldable RHS → runtime
     // in-place op (MSC does NOT const-fold these). Mirrors the indexed-global
     // form with the element address at disp16 0 (GlobalAddr supplies the base).

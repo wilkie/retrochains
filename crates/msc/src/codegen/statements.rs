@@ -724,6 +724,27 @@ pub(crate) fn emit_return(
             out.push(0x98); // cbw
             out.extend_from_slice(frame.epilogue_bytes());
             return;
+        } else if let Expr::Global(idx) = expr
+            && locals.is_char_global(*idx)
+            && !locals.is_unsigned_global(*idx)
+        {
+            // Signed char global return: AL may already hold the value from a
+            // preceding `g op= K` (div/mul end `mov [g],al` = a2 00 00 with a
+            // GlobalAddr fixup to g; mod ends `mov al,ah` = 8a c4). Else reload
+            // `mov al,[g]`. Always cbw to widen to int.
+            let ends_store = out.len() >= 3
+                && out[out.len() - 3..] == [0xA2, 0x00, 0x00]
+                && matches!(fixups.last(), Some(Fixup { kind: FixupKind::GlobalAddr { global_idx }, .. }) if *global_idx == *idx);
+            let ends_mov_al_ah = out.len() >= 2 && out[out.len() - 2..] == [0x8A, 0xC4];
+            if !(ends_store || ends_mov_al_ah) {
+                let bo = out.len();
+                out.push(0xA0); // mov al, [g]  (moffs fixup at the opcode position)
+                out.extend_from_slice(&[0x00, 0x00]);
+                fixups.push(Fixup { body_offset: bo, kind: FixupKind::GlobalAddr { global_idx: *idx } });
+            }
+            out.push(0x98); // cbw
+            out.extend_from_slice(frame.epilogue_bytes());
+            return;
         } else if let Expr::Local(i) = expr {
             let disp = locals.disp(*i);
             if locals.size(*i) == 1 && !locals.is_unsigned_local(*i) {
