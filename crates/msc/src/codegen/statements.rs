@@ -810,6 +810,40 @@ pub(crate) fn emit_return(
             if !ax_already_set {
                 emit_expr_to_ax(expr, locals, out, fixups);
             }
+        } else if let Expr::Ternary { cond, then_arm, else_arm } = expr
+            && cond.fold(locals.inits).is_none()
+        {
+            // Runtime `return cond ? a : b` — like the comparison/logical
+            // returns, MSC inlines a separate epilogue+ret into EACH arm
+            // rather than jumping to a shared end (fixture 3141
+            // `return x<0?-1:1` → `cmp x,0; jge else; mov ax,-1; pop bp; ret;
+            // nop; mov ax,1; pop bp; ret`). An alignment nop precedes the else
+            // arm when the running offset would otherwise be odd.
+            let epi = frame.epilogue_bytes();
+            let cond_c = cond_from_expr((**cond).clone());
+            let mut then_buf = Vec::new();
+            let mut then_fx = Vec::new();
+            emit_return(then_arm, locals, frame, return_int, return_long, &mut then_buf, &mut then_fx);
+            let mut else_buf = Vec::new();
+            let mut else_fx = Vec::new();
+            emit_return(else_arm, locals, frame, return_int, return_long, &mut else_buf, &mut else_fx);
+            let cond_size = {
+                let mut b = Vec::new();
+                emit_cond_skip(&cond_c, 0, locals, &mut b, &mut Vec::new());
+                b.len()
+            };
+            let needs_nop = (out.len() + cond_size + then_buf.len()) % 2 != 0;
+            let skip = i8::try_from(then_buf.len() + needs_nop as usize)
+                .expect("ternary return then-block fits in rel8");
+            emit_cond_skip(&cond_c, skip, locals, out, fixups);
+            let tb = out.len();
+            for mut f in then_fx { f.body_offset += tb; fixups.push(f); }
+            out.extend_from_slice(&then_buf);
+            if needs_nop { out.push(0x90); }
+            let eb = out.len();
+            for mut f in else_fx { f.body_offset += eb; fixups.push(f); }
+            out.extend_from_slice(&else_buf);
+            return; // both arms already carry their epilogue
         } else if matches!(expr, Expr::BinOp { op: BinOp::LogOr | BinOp::LogAnd, .. }) {
             // `return x || y` / `return x && y` — MSC always emits the full
             // short-circuit branch structure with TWO separate epilogue+ret
