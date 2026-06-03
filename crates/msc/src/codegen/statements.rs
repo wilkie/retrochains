@@ -415,6 +415,26 @@ fn expr_has_long_highword(e: &Expr, locals: &Locals<'_>) -> bool {
         _ => false,
     }
 }
+/// A folded-ternary return collapses to an immediate only when both arms are
+/// "simple" direct values (a literal, or a variable whose value is known by
+/// const-prop). A compound arm (e.g. `-a`) blocks the collapse: MSC then folds
+/// only the condition and loads the selected arm at runtime. Non-ternary exprs
+/// always qualify, so unrelated folds are unaffected.
+fn ternary_folds_to_immediate(expr: &Expr, locals: &Locals<'_>) -> bool {
+    fn is_simple_const_arm(e: &Expr, locals: &Locals<'_>) -> bool {
+        match e {
+            Expr::IntLit(_) => true,
+            Expr::Local(_) | Expr::Param(_) | Expr::Global(_) => e.fold(locals.inits).is_some(),
+            _ => false,
+        }
+    }
+    match expr {
+        Expr::Ternary { then_arm, else_arm, .. } => {
+            is_simple_const_arm(then_arm, locals) && is_simple_const_arm(else_arm, locals)
+        }
+        _ => true,
+    }
+}
 pub(crate) fn emit_return(
     expr: &Expr,
     locals: &Locals<'_>,
@@ -834,7 +854,15 @@ pub(crate) fn emit_return(
             return;  // both branches already have the epilogue
         } else if let Some(k) = expr.fold(locals.inits)
             && !expr_has_long_highword(expr, locals)
+            && ternary_folds_to_immediate(expr, locals)
         {
+            // A const-folded ternary collapses to an immediate only when BOTH
+            // arms are simple direct values (fixture 167: `a=3; b=7; return
+            // a<b?a:b` → `mov ax,3`). If an arm is a compound expression, MSC
+            // instead folds only the condition to pick the arm and emits that
+            // arm as a runtime load (fixture 430: `a=5; return a>0?a:-a` →
+            // `mov ax,[bp-2]`, not `mov ax,5`) — handled by the emit_expr_to_ax
+            // fallthrough, whose Ternary arm reproduces the load behavior.
             if k == 0 {
                 out.extend_from_slice(&[0x2B, 0xC0]);
                 if return_long { out.push(0x99); } // cwd: DX:AX = sign-extend(AX)
