@@ -381,6 +381,25 @@ pub(crate) fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_
             _ => unreachable!(),
         };
         let modrm = 0x46 | (reg << 3);
+        // Long local `x &= K`: AND the low word (81 imm16), then the high word —
+        // `mov word [hi],0` when K's high word is 0, `and word [hi],K_hi` when
+        // partial, omitted when K_hi is 0xFFFF (identity). Fixtures 289, 342.
+        if locals.is_long_local(local_idx) && matches!(op, BinOp::BitAnd) {
+            let k32 = k as u32;
+            let lo = (k32 & 0xFFFF) as u16;
+            let hi = (k32 >> 16) as u16;
+            let hi_disp = disp + 2;
+            out.push(0x81); out.push(bp_modrm(0x66, disp)); push_bp_disp(out, disp);
+            out.extend_from_slice(&lo.to_le_bytes());
+            if hi == 0x0000 {
+                out.push(0xC7); out.push(bp_modrm(0x46, hi_disp)); push_bp_disp(out, hi_disp);
+                out.extend_from_slice(&0u16.to_le_bytes());
+            } else if hi != 0xFFFF {
+                out.push(0x81); out.push(bp_modrm(0x66, hi_disp)); push_bp_disp(out, hi_disp);
+                out.extend_from_slice(&hi.to_le_bytes());
+            }
+            return;
+        }
         let is_byte_slot = locals.size(local_idx) == 1;
         if is_byte_slot {
             let imm = (k as u32 & 0xFF) as u8;
@@ -988,6 +1007,37 @@ pub(crate) fn emit_assign_global(global_idx: usize, value: &Expr, locals: &Local
                 body_offset: addr_off - 1,
                 kind: FixupKind::GlobalAddr { global_idx },
             });
+        }
+        return;
+    }
+    // Long-global `g &= K`: AND the low word in place (81 /4 = 81 26), then the
+    // high word — `mov word [g+2],0` when K_hi is 0, `and word [g+2],K_hi` when
+    // partial, omitted when K_hi is 0xFFFF (identity). Fixture 253.
+    if locals.is_long_global(global_idx)
+        && let Expr::BinOp { op: BinOp::BitAnd, left, right } = value
+        && matches!(left.as_ref(), Expr::Global(g) if *g == global_idx)
+        && let Some(k) = right.fold(locals.inits)
+    {
+        let k32 = k as u32;
+        let lo = (k32 & 0xFFFF) as u16;
+        let hi = (k32 >> 16) as u16;
+        out.push(0x81); out.push(0x26); // and word [g], lo
+        let off = out.len();
+        out.extend_from_slice(&[0x00, 0x00]);
+        fixups.push(Fixup { body_offset: off - 1, kind: FixupKind::GlobalAddr { global_idx } });
+        out.extend_from_slice(&lo.to_le_bytes());
+        if hi == 0x0000 {
+            out.push(0xC7); out.push(0x06); // mov word [g+2], 0
+            let off = out.len();
+            out.extend_from_slice(&2u16.to_le_bytes());
+            fixups.push(Fixup { body_offset: off - 1, kind: FixupKind::GlobalAddr { global_idx } });
+            out.extend_from_slice(&0u16.to_le_bytes());
+        } else if hi != 0xFFFF {
+            out.push(0x81); out.push(0x26); // and word [g+2], hi
+            let off = out.len();
+            out.extend_from_slice(&2u16.to_le_bytes());
+            fixups.push(Fixup { body_offset: off - 1, kind: FixupKind::GlobalAddr { global_idx } });
+            out.extend_from_slice(&hi.to_le_bytes());
         }
         return;
     }
