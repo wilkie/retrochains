@@ -941,12 +941,16 @@ pub(crate) fn emit_assign_global(global_idx: usize, value: &Expr, locals: &Local
         && matches!(op, BinOp::Mul | BinOp::Div | BinOp::Mod)
         && matches!(left.as_ref(), Expr::Global(g) if *g == global_idx)
     {
+        // MSC names the helper by signedness even though long multiply's low
+        // 32 bits are sign-agnostic: `__aNNaulmul` for unsigned (fixture 772),
+        // `__aNNalmul` for signed.
         let helper = match (op, locals.is_unsigned_global(global_idx)) {
-            (BinOp::Mul, _) => "__aNNalmul",     // multiply is sign-agnostic
+            (BinOp::Mul, false) => "__aNNalmul",
+            (BinOp::Mul, true) => "__aNNaulmul",
             (BinOp::Div, false) => "__aNNaldiv",
             (BinOp::Div, true) => "__aNNauldiv",
             (BinOp::Mod, false) => "__aNNalrem",
-            (BinOp::Mod, true) => "__aNNaurem",
+            (BinOp::Mod, true) => "__aNNaulrem",
             _ => unreachable!(),
         };
         emit_long_to_dx_ax(right, locals, out, fixups); // RHS long → DX:AX
