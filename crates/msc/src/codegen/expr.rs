@@ -1676,19 +1676,22 @@ pub(crate) fn emit_imm_op(op: BinOp, k: i32, out: &mut Vec<u8>) {
                 out.extend_from_slice(&k16.to_le_bytes());
             }
         }
-        // Bitwise imm-AX: prefer 3-byte `83 /digit imm8sx` for small K,
-        // 3-byte `op_byte imm16` (form `25/0d/35`) otherwise.
+        // Bitwise imm-AX always uses the accumulator imm16 form (`25/0d/35`),
+        // NOT `83 /digit imm8sx`: a sign-extended imm8 would corrupt the high
+        // byte for any mask with bit 7 set (e.g. `and ax,0x80` must be 0x0080,
+        // not 0xFF80). MSC uses imm16 even for small masks. Fixtures 3683, 3684.
         (BinOp::BitAnd, _) => {
-            if let Ok(k8) = i8::try_from(k) {
-                out.extend_from_slice(&[0x83, 0xE0, k8 as u8]);
-            } else {
-                out.push(0x25);
-                out.extend_from_slice(&k16.to_le_bytes());
-            }
+            out.push(0x25);
+            out.extend_from_slice(&k16.to_le_bytes());
         }
+        // OR/XOR with a low-byte-only mask (<= 0xFF) uses the byte accumulator
+        // form `or/xor al, imm8` (`0c`/`34`): OR/XOR with 0 in the high byte
+        // leaves it unchanged, so only AL is touched (fixture 3684 `x | 0x80`).
+        // A wider mask uses `0d`/`35 imm16`. AND cannot do this (it clears the
+        // high byte) and always uses the word form above.
         (BinOp::BitOr, _) => {
-            if let Ok(k8) = i8::try_from(k) {
-                out.extend_from_slice(&[0x83, 0xC8, k8 as u8]);
+            if k16 <= 0xFF {
+                out.extend_from_slice(&[0x0C, k16 as u8]); // or al, imm8
             } else {
                 out.push(0x0D);
                 out.extend_from_slice(&k16.to_le_bytes());
@@ -1699,8 +1702,8 @@ pub(crate) fn emit_imm_op(op: BinOp, k: i32, out: &mut Vec<u8>) {
             out.extend_from_slice(&[0xF7, 0xD0]);
         }
         (BinOp::BitXor, _) => {
-            if let Ok(k8) = i8::try_from(k) {
-                out.extend_from_slice(&[0x83, 0xF0, k8 as u8]);
+            if k16 <= 0xFF {
+                out.extend_from_slice(&[0x34, k16 as u8]); // xor al, imm8
             } else {
                 out.push(0x35);
                 out.extend_from_slice(&k16.to_le_bytes());
