@@ -3549,6 +3549,8 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
             match inner {
                 Expr::Local(idx) => Ok(Expr::PreMutateLocal { local_idx: idx, step: 1 }),
                 Expr::Global(idx) => Ok(Expr::PreMutateGlobal { global_idx: idx, step: 1 }),
+                Expr::DerefWord { ptr } => Ok(Expr::PreMutateDeref { ptr, step: 1, is_byte: false }),
+                Expr::DerefByte { ptr } => Ok(Expr::PreMutateDeref { ptr, step: 1, is_byte: true }),
                 other => Ok(Expr::BinOp {
                     op: BinOp::Add,
                     left: Box::new(other),
@@ -3561,6 +3563,8 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
             match inner {
                 Expr::Local(idx) => Ok(Expr::PreMutateLocal { local_idx: idx, step: -1 }),
                 Expr::Global(idx) => Ok(Expr::PreMutateGlobal { global_idx: idx, step: -1 }),
+                Expr::DerefWord { ptr } => Ok(Expr::PreMutateDeref { ptr, step: -1, is_byte: false }),
+                Expr::DerefByte { ptr } => Ok(Expr::PreMutateDeref { ptr, step: -1, is_byte: true }),
                 other => Ok(Expr::BinOp {
                     op: BinOp::Sub,
                     left: Box::new(other),

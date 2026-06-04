@@ -1011,6 +1011,7 @@ pub(crate) fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
             cp.mutated_globals.insert(*global_idx);
             cp.g_known.remove(global_idx);
         }
+        Expr::PreMutateDeref { ptr, .. } => prop_expr(ptr, cp),
         Expr::IntLit(_) | Expr::Param(_) | Expr::StrLit(_) => {}
     }
 }

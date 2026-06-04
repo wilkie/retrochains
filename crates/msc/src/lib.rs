@@ -919,6 +919,10 @@ pub enum Expr {
     /// `++<local>` or `--<local>` — pre-increment/decrement. Mutates the
     /// local first (inc/dec/add), then evaluates to the NEW value.
     PreMutateLocal { local_idx: usize, step: i32 },
+    /// `++(*p)` / `--(*p)` — pre-inc/dec the value AT a pointer. Loads p into
+    /// BX, increments `[bx]` in place, then evaluates to the NEW value
+    /// (`mov bx,[p]; inc word [bx]; mov ax,[bx]`). Fixtures 2762, 3110.
+    PreMutateDeref { ptr: Box<Expr>, step: i32, is_byte: bool },
     /// `++<global>` or `--<global>` — pre-increment/decrement of a
     /// file-scope variable. Mutates first, then evaluates to the NEW value.
     PreMutateGlobal { global_idx: usize, step: i32 },
@@ -1012,7 +1016,8 @@ impl Expr {
             Expr::DerefByte { .. } | Expr::DerefWord { .. } => None,
             Expr::AddrOfGlobal(_) | Expr::AddrOfLocal(_) => None,
             Expr::PostMutateLocal { .. } | Expr::PostMutateGlobal { .. }
-            | Expr::PreMutateLocal { .. } | Expr::PreMutateGlobal { .. } => None,
+            | Expr::PreMutateLocal { .. } | Expr::PreMutateGlobal { .. }
+            | Expr::PreMutateDeref { .. } => None,
             // Comma expression fold: if all the side stmts have no
             // observable side effect (just discard a value), fold to
             // the tail's value. Otherwise refuse to fold (the assigns
