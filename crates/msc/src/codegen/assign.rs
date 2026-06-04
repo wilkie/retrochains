@@ -222,6 +222,22 @@ pub(crate) fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_
         AssignTarget::StructGlobalCopy { dst, src, bytes } => {
             return emit_struct_global_copy(dst, src, bytes, out, fixups);
         }
+        AssignTarget::StructLocalCopy { dst, src, bytes } => {
+            // `mov ax,[src]; [mov dx,[src+2];] mov [dst],ax; [mov [dst+2],dx]`.
+            let sd = locals.disp(src);
+            let dd = locals.disp(dst);
+            out.push(0x8B); out.push(bp_modrm(0x46, sd)); push_bp_disp(out, sd); // mov ax,[src]
+            if bytes > 2 {
+                let h = sd + 2;
+                out.push(0x8B); out.push(bp_modrm(0x56, h)); push_bp_disp(out, h); // mov dx,[src+2]
+            }
+            out.push(0x89); out.push(bp_modrm(0x46, dd)); push_bp_disp(out, dd); // mov [dst],ax
+            if bytes > 2 {
+                let h = dd + 2;
+                out.push(0x89); out.push(bp_modrm(0x56, h)); push_bp_disp(out, h); // mov [dst+2],dx
+            }
+            return;
+        }
         AssignTarget::PtrIndexByte { ptr, disp } => {
             return emit_assign_ptr_index_byte(ptr, disp, value, locals, out, fixups);
         }
