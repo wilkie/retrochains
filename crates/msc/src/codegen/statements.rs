@@ -755,12 +755,17 @@ pub(crate) fn emit_return(
         } else if let Expr::Param(i) = expr
             && locals.is_char_param(*i)
         {
-            // `return c` where `c` is a char param: byte load + cbw, plus a
-            // cwd to widen into DX:AX when the function returns long
-            // (`return (long)c`, fixture 3183).
+            // `return c` where `c` is a char param: byte load then widen —
+            // `cbw` for signed, `sub ah,ah` for unsigned char (zero-extend,
+            // fixtures 2881/3320). Plus a cwd to widen into DX:AX when the
+            // function returns long (`return (long)c`, fixture 3183).
             let disp = param_disp(*i) as u8;
             out.extend_from_slice(&[0x8A, 0x46, disp]); // mov al, [bp+4]
-            out.push(0x98); // cbw
+            if locals.is_unsigned_param(*i) {
+                out.extend_from_slice(&[0x2A, 0xE4]); // sub ah, ah
+            } else {
+                out.push(0x98); // cbw
+            }
             if return_long {
                 out.push(0x99); // cwd
             }
@@ -817,12 +822,11 @@ pub(crate) fn emit_return(
             return;
         } else if let Expr::Global(idx) = expr
             && locals.is_char_global(*idx)
-            && !locals.is_unsigned_global(*idx)
         {
-            // Signed char global return: AL may already hold the value from a
-            // preceding `g op= K` (div/mul end `mov [g],al` = a2 00 00 with a
-            // GlobalAddr fixup to g; mod ends `mov al,ah` = 8a c4). Else reload
-            // `mov al,[g]`. Always cbw to widen to int.
+            // Char global return: AL may already hold the value from a preceding
+            // `g op= K` (div/mul end `mov [g],al` = a2 00 00 with a GlobalAddr
+            // fixup to g; mod ends `mov al,ah` = 8a c4). Else reload `mov al,[g]`.
+            // Widen: `cbw` for signed, `sub ah,ah` for unsigned (fixture 466).
             let ends_store = out.len() >= 3
                 && out[out.len() - 3..] == [0xA2, 0x00, 0x00]
                 && matches!(fixups.last(), Some(Fixup { kind: FixupKind::GlobalAddr { global_idx }, .. }) if *global_idx == *idx);
@@ -833,7 +837,11 @@ pub(crate) fn emit_return(
                 out.extend_from_slice(&[0x00, 0x00]);
                 fixups.push(Fixup { body_offset: bo, kind: FixupKind::GlobalAddr { global_idx: *idx } });
             }
-            out.push(0x98); // cbw
+            if locals.is_unsigned_global(*idx) {
+                out.extend_from_slice(&[0x2A, 0xE4]); // sub ah, ah
+            } else {
+                out.push(0x98); // cbw
+            }
             out.extend_from_slice(frame.epilogue_bytes());
             return;
         } else if let Expr::Local(i) = expr {

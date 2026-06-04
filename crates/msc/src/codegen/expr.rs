@@ -249,15 +249,20 @@ pub(crate) fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8
         }
         Expr::Global(idx) => {
             if locals.is_char_global(*idx) {
-                // `a0 00 00` mov al, moffs8 + `98` cbw — read a char
-                // global with sign extension. Fixture 1092.
+                // `a0 00 00` mov al, moffs8, then widen: `98` cbw (signed char,
+                // fixture 1092) or `2a e4` sub ah,ah (unsigned char, zero-extend
+                // — fixtures 460/466).
                 let body_offset = out.len();
                 out.extend_from_slice(&[0xA0, 0x00, 0x00]);
                 fixups.push(Fixup {
                     body_offset,
                     kind: FixupKind::GlobalAddr { global_idx: *idx },
                 });
-                out.push(0x98);
+                if locals.is_unsigned_global(*idx) {
+                    out.extend_from_slice(&[0x2A, 0xE4]); // sub ah, ah
+                } else {
+                    out.push(0x98); // cbw
+                }
             } else {
                 // `a1 00 00` — mov ax, moffs16.
                 let body_offset = out.len();
@@ -1315,7 +1320,19 @@ fn emit_binop_inner(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, o
     // be an int literal (fixture 4135), another global via memory
     // operand (`03 06 addr`, fixture 4138), or a local/param via the
     // BP-rel path.
-    if let Expr::Global(idx) = left {
+    if let Expr::Global(idx) = left
+        && locals.is_char_global(*idx)
+    {
+        // Char global left: byte load + widen (`a0; cbw` / `a0; sub ah,ah`,
+        // via emit_expr_to_ax), NOT a word load. `c + 1` → `mov al,_c; sub
+        // ah,ah; inc ax`. Fixture 460. Non-const RHS falls through to the
+        // generic left-load/op-right path below (also byte-correct now).
+        if let Expr::IntLit(k) = right {
+            emit_expr_to_ax(left, locals, out, fixups);
+            emit_imm_op(op, *k, out);
+            return;
+        }
+    } else if let Expr::Global(idx) = left {
         let body_offset = out.len();
         out.extend_from_slice(&[0xA1, 0x00, 0x00]);
         fixups.push(Fixup {
