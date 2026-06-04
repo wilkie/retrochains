@@ -1211,17 +1211,21 @@ fn emit_binop_inner(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, o
         emit_mem_op_at(op, disp, out);
         return;
     }
-    // Commutative swap: when RIGHT is a char param and LEFT is a non-char
-    // bp-rel operand, MSC loads the char first (byte+cbw) and uses the
-    // other operand as a word mem source. Fixtures 616, 3685.
+    // Commutative swap: when RIGHT is a char (char param, or a 1-byte field of
+    // a by-value struct param) and LEFT is a non-char bp-rel operand, MSC loads
+    // the char first (byte+cbw) and uses the other operand as a word mem source.
+    // Fixtures 616, 3685, 2866 (`s.a + s.b`, int field + char field).
+    let right_char_disp = match right {
+        Expr::Param(ri) if locals.is_char_param(*ri) => Some(param_disp(*ri)),
+        Expr::ParamField { param, byte_off, size: 1 } => Some(locals.param_base_disp(*param) + *byte_off as i16),
+        _ => None,
+    };
     if commutative
-        && let Expr::Param(ri) = right
-        && locals.is_char_param(*ri)
+        && let Some(r_disp) = right_char_disp
         && !matches!(left, Expr::Param(li) if locals.is_char_param(*li))
         && let Some(l_disp) = bp_disp(left, locals)
     {
-        let r_disp = param_disp(*ri) as u8;
-        out.extend_from_slice(&[0x8A, 0x46, r_disp]);  // mov al, [bp+r_disp]
+        out.push(0x8A); out.push(bp_modrm(0x46, r_disp)); push_bp_disp(out, r_disp); // mov al, [bp+r_disp]
         out.push(0x98);  // cbw
         emit_mem_op_at(op, l_disp, out);
         return;

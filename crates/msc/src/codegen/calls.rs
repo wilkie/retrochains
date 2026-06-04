@@ -134,23 +134,35 @@ pub(crate) fn emit_call_ptr(
 /// The struct arg is a struct local. The first (highest-word) push reuses AX
 /// when the preceding store left that word there (`mov [w],ax` → `push ax`).
 /// Fixtures 3197, 2866.
-pub(crate) fn emit_push_struct_arg(arg: &Expr, bytes: usize, locals: &Locals<'_>, out: &mut Vec<u8>, _fixups: &mut Vec<Fixup>) {
-    let disp = match arg {
-        Expr::Local(i) => locals.disp(*i),
-        _ => { return; } // only struct locals supported; others NYI
-    };
+pub(crate) fn emit_push_struct_arg(arg: &Expr, bytes: usize, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
     let nwords = bytes / 2;
-    for w in (0..nwords).rev() {
-        let wdisp = disp + (w as i16) * 2;
-        if w == nwords - 1 {
-            // Reuse AX if the highest word was just stored from it.
-            let store = { let mut v = vec![0x89, bp_modrm(0x46, wdisp)]; push_bp_disp(&mut v, wdisp); v };
-            if out.len() >= store.len() && out[out.len() - store.len()..] == *store {
-                out.push(0x50); // push ax
-                continue;
+    match arg {
+        Expr::Local(i) => {
+            let disp = locals.disp(*i);
+            for w in (0..nwords).rev() {
+                let wdisp = disp + (w as i16) * 2;
+                if w == nwords - 1 {
+                    // Reuse AX if the highest word was just stored from it.
+                    let store = { let mut v = vec![0x89, bp_modrm(0x46, wdisp)]; push_bp_disp(&mut v, wdisp); v };
+                    if out.len() >= store.len() && out[out.len() - store.len()..] == *store {
+                        out.push(0x50); // push ax
+                        continue;
+                    }
+                }
+                out.push(0xFF); out.push(bp_modrm(0x76, wdisp)); push_bp_disp(out, wdisp); // push WORD [bp+wdisp]
             }
         }
-        out.push(0xFF); out.push(bp_modrm(0x76, wdisp)); push_bp_disp(out, wdisp); // push WORD [bp+wdisp]
+        Expr::Global(g) => {
+            // `push WORD [g + off]` (ff 36 <off16>) for each word, high addr first.
+            for w in (0..nwords).rev() {
+                let off = (w as u16) * 2;
+                out.push(0xFF); out.push(0x36);
+                let p = out.len();
+                out.extend_from_slice(&off.to_le_bytes());
+                fixups.push(Fixup { body_offset: p - 1, kind: FixupKind::GlobalAddr { global_idx: *g } });
+            }
+        }
+        _ => {} // other struct arg sources NYI
     }
 }
 pub(crate) fn emit_push_arg_long(arg: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
