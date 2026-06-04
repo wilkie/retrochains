@@ -668,6 +668,15 @@ pub(crate) fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_
             }
             // `88 46 disp` — store AL to char slot.
             out.push(0x88); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp);
+        } else if locals.is_long_local(local_idx) && !long_operand(value, locals) {
+            // An int expression assigned to a long local: the value is in AX;
+            // sign-extend to a full long (`cwd`) and store both words. Fixture
+            // 3230 (`long n; n = x + 1`). A genuinely-long RHS is handled by the
+            // long-specific paths above and never reaches here.
+            out.push(0x99); // cwd
+            out.push(0x89); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp);   // mov [lo],ax
+            let hi = disp + 2;
+            out.push(0x89); out.push(bp_modrm(0x56, hi)); push_bp_disp(out, hi);       // mov [hi],dx
         } else {
             out.push(0x89); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp);
         }

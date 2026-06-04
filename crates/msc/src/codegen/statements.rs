@@ -750,9 +750,24 @@ pub(crate) fn emit_return(
                 if let Some(k) = expr.fold(locals.inits) {
                     emit_long_const_to_dx_ax(k, out);
                 } else {
-                    emit_expr_to_ax(expr, locals, out, fixups); // mov ax,[lo]
                     let disp = locals.disp(i);
-                    out.extend_from_slice(&[0x8B, 0x56, (disp + 2) as u8]); // mov dx,[hi]
+                    let hi = disp + 2;
+                    // DX:AX reuse: if the slot was just written from DX:AX
+                    // (`mov [lo],ax; mov [hi],dx`), both words are already live —
+                    // skip the reload (the long analog of the AX-liveness reuse).
+                    // Fixture 3230 (`n = x+1; return n`).
+                    let store = {
+                        let mut v = vec![0x89, bp_modrm(0x46, disp)];
+                        push_bp_disp(&mut v, disp);
+                        v.push(0x89); v.push(bp_modrm(0x56, hi));
+                        push_bp_disp(&mut v, hi);
+                        v
+                    };
+                    let live = out.len() >= store.len() && out[out.len() - store.len()..] == *store;
+                    if !live {
+                        emit_expr_to_ax(expr, locals, out, fixups); // mov ax,[lo]
+                        out.extend_from_slice(&[0x8B, 0x56, hi as u8]); // mov dx,[hi]
+                    }
                 }
             } else {
                 // `(int)<long-local>`: read the low word from the slot — MSC
