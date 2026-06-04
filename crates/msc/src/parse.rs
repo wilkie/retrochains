@@ -1175,6 +1175,17 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
         (names, struct_idxs, is_chars, is_longs, is_unsigned_ints, float_widths, pointee_sizes)
     };
     let (params, param_struct_idxs, param_is_char, param_is_long, param_is_unsigned, param_float_width, param_pointee_size) = params;
+    // Struct-by-value params: total_bytes (even-padded) when the param has a
+    // struct type AND is not a pointer (pointee_size == 0). 0 otherwise.
+    let param_struct_bytes: Vec<usize> = param_struct_idxs.iter().zip(param_pointee_size.iter())
+        .map(|(si, &pointee)| match si {
+            Some(sidx) if pointee == 0 => {
+                let n = p.structs.get(*sidx).map(|s| s.total_bytes).unwrap_or(0);
+                (n + 1) & !1
+            }
+            _ => 0,
+        })
+        .collect();
     p.eat(&Tok::RParen)?;
     p.eat(&Tok::LBrace)?;
 
@@ -1766,7 +1777,7 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
     // while the body was parsed. For functions without nested-block
     // declarations the two are identical.
     let locals = p.local_specs.clone();
-    Ok(Function { name, return_int, return_long, return_char, return_float_width, return_struct_bytes, params, param_is_char, param_is_long, param_is_unsigned, param_float_width, param_pointee_size, locals, local_names, body })
+    Ok(Function { name, return_int, return_long, return_char, return_float_width, return_struct_bytes, params, param_struct_bytes, param_is_char, param_is_long, param_is_unsigned, param_float_width, param_pointee_size, locals, local_names, body })
 }
 /// Scan a prototype's parameter list (the tokens between `(` at `lparen_idx`
 /// and `)` at `close_idx`) and return each param's `is_long` flag. A param is
@@ -2391,6 +2402,24 @@ pub(crate) fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
                 p.bump();
                 let (byte_off, size) = parse_field_lookup(p, sidx)?;
                 let target = AssignTarget::DerefParamField { ptr_param: param_idx, byte_off, size };
+                if let Some(value) = parse_compound_rhs(p, &target)? {
+                    p.eat(&Tok::Semi)?;
+                    return Ok(Stmt::Assign { target, value });
+                }
+                p.eat(&Tok::Assign)?;
+                let value = parse_expr(p)?;
+                p.eat(&Tok::Semi)?;
+                return Ok(Stmt::Assign { target, value });
+            }
+            // `<struct-value-param>.<field> = <expr>;`
+            if matches!(p.peek(), Some(Tok::Dot))
+                && let Some(param_idx) = p.param_names.iter().position(|n| *n == name)
+                && let Some(Some(sidx)) = p.param_struct_idxs.get(param_idx).cloned()
+                && p.param_pointee_sizes.get(param_idx).copied().unwrap_or(0) == 0
+            {
+                p.bump();
+                let (byte_off, size) = parse_field_lookup(p, sidx)?;
+                let target = AssignTarget::ParamField { param: param_idx, byte_off, size };
                 if let Some(value) = parse_compound_rhs(p, &target)? {
                     p.eat(&Tok::Semi)?;
                     return Ok(Stmt::Assign { target, value });
@@ -3821,6 +3850,16 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                     p.bump();
                     let (byte_off, size) = parse_field_lookup(p, sidx)?;
                     return Ok(Expr::DerefParamField { ptr_param: idx, byte_off, size });
+                }
+                // `<struct-value-param>.<field>` — field of a by-value struct
+                // param (struct type, not a pointer: pointee_size == 0).
+                if matches!(p.peek(), Some(Tok::Dot))
+                    && let Some(Some(sidx)) = p.param_struct_idxs.get(idx).cloned()
+                    && p.param_pointee_sizes.get(idx).copied().unwrap_or(0) == 0
+                {
+                    p.bump();
+                    let (byte_off, size) = parse_field_lookup(p, sidx)?;
+                    return Ok(Expr::ParamField { param: idx, byte_off, size });
                 }
                 Ok(Expr::Param(idx))
             } else if let Some(idx) = p.global_names.iter().position(|n| *n == name) {

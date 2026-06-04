@@ -196,6 +196,9 @@ pub struct Function {
     /// return is just an int (this stays 0). Larger by-value returns are NYI.
     pub return_struct_bytes: usize,
     pub params: Vec<String>,
+    /// Parallel to `params`: total bytes (even-padded) of a struct passed BY
+    /// VALUE, 0 for non-struct-value params. Sets the param's stack footprint.
+    pub param_struct_bytes: Vec<usize>,
     /// Parallel to `params`: true when the corresponding parameter is
     /// declared as `char` (signed or unsigned). Used to emit byte-compare
     /// and byte-load codegen for char params (fixtures 3121, 3130 etc).
@@ -384,6 +387,10 @@ pub struct Locals<'a> {
     /// Parallel to function params: true when that param is `char`
     /// typed. Used to emit byte-compare / byte-load codegen.
     pub char_params: &'a [bool],
+    /// Parallel to function params: total bytes of a struct passed BY VALUE
+    /// (its stack footprint, even-padded), 0 for non-struct-value params.
+    /// Drives the stack offset of later params and struct-value field access.
+    pub param_struct_bytes: &'a [usize],
     /// Parallel to function params: true when that param is `long`.
     pub long_params: &'a [bool],
     /// Parallel to function params: true when that param is `unsigned int`
@@ -502,6 +509,26 @@ impl Locals<'_> {
     /// 4 or 8 for a `float`/`double` param, else 0.
     pub fn float_param_width(&self, idx: usize) -> usize {
         self.param_float_widths.get(idx).copied().unwrap_or(0)
+    }
+    /// Even-padded byte footprint of a struct-by-value param, 0 otherwise.
+    pub fn param_struct_bytes(&self, idx: usize) -> usize {
+        self.param_struct_bytes.get(idx).copied().unwrap_or(0)
+    }
+    /// BP-relative base displacement of param `idx`, summing the stack
+    /// footprint of every preceding param (struct-by-value → its bytes,
+    /// long → 4, else 2). For all-2-byte params this equals `param_disp`.
+    pub fn param_base_disp(&self, idx: usize) -> i16 {
+        let mut d = 4i16;
+        for k in 0..idx {
+            d += if self.param_struct_bytes(k) > 0 {
+                self.param_struct_bytes(k) as i16
+            } else if self.is_long_param(k) {
+                4
+            } else {
+                2
+            };
+        }
+        d
     }
     pub fn is_float_param(&self, idx: usize) -> bool {
         self.float_param_width(idx) != 0
@@ -638,6 +665,9 @@ pub enum AssignTarget {
     PtrIndexByte { ptr: usize, disp: i8 },
     /// `<struct-local>.<field> = <expr>;` — store to a struct field.
     LocalField { local: usize, byte_off: u16, size: u8 },
+    /// `<struct-value-param>.<field> = <expr>;` — store to a field of a
+    /// struct passed BY VALUE. Codegen targets `[bp + param_base + byte_off]`.
+    ParamField { param: usize, byte_off: u16, size: u8 },
     /// `<struct-ptr-local>-><field> = <expr>;` — store through a
     /// struct pointer local.
     DerefLocalField { ptr_local: usize, byte_off: u16, size: u8 },
@@ -802,6 +832,10 @@ pub enum Expr {
     /// struct. `size == 1` triggers `mov al, [bp+disp]; cbw`;
     /// `size == 2` uses `mov ax, [bp+disp]`.
     LocalField { local: usize, byte_off: u16, size: u8 },
+    /// `<struct-value-param>.<field>` — read a field of a struct passed BY
+    /// VALUE, at `[bp + param_base + byte_off]` (like LocalField but at the
+    /// param's positive stack offset).
+    ParamField { param: usize, byte_off: u16, size: u8 },
     /// `<struct-ptr-local>-><field>` — deref through a struct
     /// pointer local. Lowers to `mov bx, [bp+local_disp];
     /// mov ax, [bx+byte_off]` for word fields.
@@ -949,6 +983,7 @@ impl Expr {
             Expr::LocalIndex { .. } | Expr::LocalIndexByte { .. } => None,
             Expr::ParamIndex { .. } => None,
             Expr::LocalField { .. } | Expr::DerefLocalField { .. } | Expr::GlobalField { .. } => None,
+            Expr::ParamField { .. } => None,
             Expr::DerefParamField { .. } | Expr::DerefGlobalField { .. } => None,
             Expr::DerefByte { .. } | Expr::DerefWord { .. } => None,
             Expr::AddrOfGlobal(_) | Expr::AddrOfLocal(_) => None,

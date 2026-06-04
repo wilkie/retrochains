@@ -457,6 +457,7 @@ pub(crate) fn emit_function(
         unsigned_locals: &local_unsigned,
         float_locals: &local_float,
         char_params: &param_is_char,
+        param_struct_bytes: &func.param_struct_bytes,
         long_params: &param_is_long,
         unsigned_params: &param_is_unsigned,
         param_float_widths: &param_float_widths,

@@ -714,6 +714,16 @@ pub(crate) fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8
                 out.push(0x8B); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp);
             }
         }
+        Expr::ParamField { param, byte_off, size } => {
+            // Field of a struct passed by value: `[bp + param_base + byte_off]`.
+            let disp = locals.param_base_disp(*param) + *byte_off as i16;
+            if *size == 1 {
+                out.push(0x8A); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp);
+                out.push(0x98); // cbw
+            } else {
+                out.push(0x8B); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp);
+            }
+        }
         Expr::DerefParamField { ptr_param, byte_off, size } => {
             let p_disp = param_disp(*ptr_param);
             out.push(0x8B);
@@ -1622,6 +1632,10 @@ pub(crate) fn bp_load<'a>(e: &'a Expr, locals: &'a Locals<'_>) -> Option<Box<dyn
                 emit_load_param_reuse(*i, locals, out);
             }
         })),
+        Expr::ParamField { param, byte_off, size: 2 } => Some(Box::new(move |out: &mut Vec<u8>| {
+            let disp = locals.param_base_disp(*param) + *byte_off as i16;
+            out.push(0x8B); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp); // mov ax,[bp+disp]
+        })),
         _ => None,
     }
 }
@@ -1631,6 +1645,8 @@ pub(crate) fn bp_disp(e: &Expr, locals: &Locals<'_>) -> Option<i16> {
     match e {
         Expr::Local(i) => Some(locals.disp(*i)),
         Expr::Param(i) => Some(4 + (*i as i16) * 2),
+        // Word field of a by-value struct param: a `[bp+disp]` operand.
+        Expr::ParamField { param, byte_off, size: 2 } => Some(locals.param_base_disp(*param) + *byte_off as i16),
         // Word local-array element `a[K]` (constant K) is a `[bp+disp]` operand.
         // (Byte elements need cbw, so they are not bp-addressable here.)
         Expr::LocalIndex { local, index } => index.fold(locals.inits).map(|k| locals.disp(*local) + (k as i16) * 2),

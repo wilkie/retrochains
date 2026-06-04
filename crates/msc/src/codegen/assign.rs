@@ -240,6 +240,9 @@ pub(crate) fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_
         AssignTarget::LocalField { local, byte_off, size } => {
             return emit_assign_local_field(local, byte_off, size, value, locals, out, fixups);
         }
+        AssignTarget::ParamField { param, byte_off, size } => {
+            return emit_assign_param_field(param, byte_off, size, value, locals, out, fixups);
+        }
         AssignTarget::DerefLocalField { ptr_local, byte_off, size } => {
             return emit_assign_deref_local_field(ptr_local, byte_off, size, value, locals, out, fixups);
         }
@@ -2196,6 +2199,27 @@ pub(crate) fn emit_assign_global_field(global_idx: usize, byte_off: u16, size: u
 }
 /// `<struct-local>.<field> = <expr>;` — store at `disp + byte_off`,
 /// picking word vs byte form based on the field's size.
+/// `<struct-value-param>.<field> = <expr>;` — store to a field of a struct
+/// passed by value, at `[bp + param_base + byte_off]`. Word/byte by field size.
+pub(crate) fn emit_assign_param_field(param_idx: usize, byte_off: u16, size: u8, value: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    let disp = locals.param_base_disp(param_idx) + byte_off as i16;
+    if size == 1 {
+        if let Some(k) = value.fold(locals.inits) {
+            out.push(0xC6); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp);
+            out.push((k as u32 & 0xFF) as u8);
+        } else {
+            emit_expr_to_ax(value, locals, out, fixups);
+            if out.last() == Some(&0x98) { out.pop(); } // strip cbw — storing AL
+            out.push(0x88); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp);
+        }
+    } else if let Some(k) = value.fold(locals.inits) {
+        out.push(0xC7); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp);
+        out.extend_from_slice(&((k as u32 & 0xFFFF) as u16).to_le_bytes());
+    } else {
+        emit_expr_to_ax(value, locals, out, fixups);
+        out.push(0x89); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp);
+    }
+}
 pub(crate) fn emit_assign_local_field(local_idx: usize, byte_off: u16, size: u8, value: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
     // Long (4-byte) local struct field: low word at disp(local)+byte_off, high at
     // +2. Shared bp-relative long const-store / compound helper.

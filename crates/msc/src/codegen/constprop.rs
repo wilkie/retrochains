@@ -902,6 +902,9 @@ pub(crate) fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
                 *e = Expr::IntLit(v);
             }
         }
+        // A struct-value param field is read from the stack at runtime; params
+        // carry no compile-time known value, so nothing to substitute.
+        Expr::ParamField { .. } => {}
         Expr::GlobalField { .. } => {
             // Substitute the field's known value via ga_known keyed by
             // (global, byte_off) — works for nested fields too (summed offset).
