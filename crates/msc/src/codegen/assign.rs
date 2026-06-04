@@ -1105,6 +1105,36 @@ pub(crate) fn emit_assign_global(global_idx: usize, value: &Expr, locals: &Local
         fixups.push(Fixup { body_offset: off - 1, kind: FixupKind::GlobalAddr { global_idx } });
         return;
     }
+    // Long-global compound `g = g OP <int global>` (add/sub/and/or/xor). MSC
+    // does NOT fold an int-GLOBAL operand (unlike an int local) — it loads it
+    // and sign-extends with `cwd`, then a two-word register op:
+    //   `mov ax,_i; cwd; <op> WORD [g],ax; <op-carry> WORD [g+2],dx`
+    // The const-prop side preserves the int-global RHS so it reaches here as
+    // Expr::Global. Fixtures 257/258/259/269/270.
+    if locals.is_long_global(global_idx)
+        && let Expr::BinOp { op, left, right } = value
+        && matches!(op, BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor)
+        && matches!(left.as_ref(), Expr::Global(g) if *g == global_idx)
+        && matches!(right.as_ref(), Expr::Global(r) if !locals.is_long_global(*r))
+    {
+        let (lo_op, hi_op): (u8, u8) = match op {
+            BinOp::Add => (0x01, 0x11), // add / adc
+            BinOp::Sub => (0x29, 0x19), // sub / sbb
+            BinOp::BitAnd => (0x21, 0x21),
+            BinOp::BitOr => (0x09, 0x09),
+            BinOp::BitXor => (0x31, 0x31),
+            _ => unreachable!(),
+        };
+        emit_expr_to_ax(right, locals, out, fixups); // mov ax,_i (int global)
+        out.push(0x99); // cwd → DX:AX
+        out.push(lo_op); out.push(0x06);
+        let off = out.len(); out.extend_from_slice(&[0x00, 0x00]);
+        fixups.push(Fixup { body_offset: off - 1, kind: FixupKind::GlobalAddr { global_idx } });
+        out.push(hi_op); out.push(0x16);
+        let off = out.len(); out.extend_from_slice(&2u16.to_le_bytes());
+        fixups.push(Fixup { body_offset: off - 1, kind: FixupKind::GlobalAddr { global_idx } });
+        return;
+    }
     // Long-global compound add/sub by a foldable RHS:
     //   `g += K` → `add [g], K_lo; adc [g+2], K_hi`
     //   `g -= K` → `sub [g], K_lo; sbb [g+2], K_hi`

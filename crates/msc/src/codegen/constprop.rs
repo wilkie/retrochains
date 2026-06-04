@@ -382,8 +382,17 @@ pub(crate) fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
                     Expr::Global(gi) if cp.long_globals.contains(gi) => cp.g_known.get(gi).copied(),
                     _ => None,
                 };
+                // A long-global compound with an int-GLOBAL RHS keeps that RHS a
+                // runtime read: MSC loads + sign-extends an int global operand
+                // (`mov ax,_i; cwd; add [g],ax; adc [g+2],dx`) rather than folding
+                // it — UNLIKE an int LOCAL RHS, which does fold (fixture 755 vs
+                // 257). Only int globals are preserved here. 257/258/259/269/270.
+                let int_global_rhs = matches!(target, AssignTarget::Global(g) if cp.long_globals.contains(g))
+                    && matches!(right.as_ref(), Expr::Global(r) if !cp.long_globals.contains(r));
                 if let Some(k) = known_long_global {
                     **right = Expr::IntLit(k);
+                } else if int_global_rhs {
+                    // preserve the int-global RHS unsubstituted
                 } else {
                     prop_expr(right, cp);
                 }
