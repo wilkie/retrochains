@@ -742,15 +742,22 @@ pub(crate) fn emit_return(
             out.extend_from_slice(frame.epilogue_bytes());
             return;
         } else if matches!(expr, Expr::Local(i) if locals.is_long_local(*i)) {
-            // Long locals are read through the 4-byte slot — MSC
-            // emits `mov ax, [bp-disp_low]` even when the value is
-            // known at compile time (fixture 1037).
-            emit_expr_to_ax(expr, locals, out, fixups);
+            let i = if let Expr::Local(i) = expr { *i } else { unreachable!() };
             if return_long {
-                // Also load the high word into DX.
-                let i = if let Expr::Local(i) = expr { *i } else { unreachable!() };
-                let disp = locals.disp(i);
-                out.extend_from_slice(&[0x8B, 0x56, (disp + 2) as u8]); // mov dx, [bp+d+2]
+                // Long-returning function: `return x`. A known long materializes
+                // as `mov ax,lo; cwd` (fixture 298); otherwise load both slot
+                // words (`mov ax,[lo]; mov dx,[hi]`).
+                if let Some(k) = expr.fold(locals.inits) {
+                    emit_long_const_to_dx_ax(k, out);
+                } else {
+                    emit_expr_to_ax(expr, locals, out, fixups); // mov ax,[lo]
+                    let disp = locals.disp(i);
+                    out.extend_from_slice(&[0x8B, 0x56, (disp + 2) as u8]); // mov dx,[hi]
+                }
+            } else {
+                // `(int)<long-local>`: read the low word from the slot — MSC
+                // does NOT fold even when the value is known (fixture 1037).
+                emit_expr_to_ax(expr, locals, out, fixups);
             }
         } else if let Expr::Param(i) = expr
             && locals.is_char_param(*i)
