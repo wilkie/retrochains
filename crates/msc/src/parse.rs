@@ -788,17 +788,20 @@ pub(crate) fn parse_global_decl(p: &mut Parser<'_>) -> Result<(), EmitError> {
             p.strings.push(with_nul);
             Some(vec![GlobalInit::StrAddr(str_idx)])
         } else if is_char && matches!(p.peek(), Some(Tok::StrLit(_))) {
-            // `char a[N] = "...";` — bytes land directly in _DATA.
-            // Trailing NUL is included; if the literal is shorter than
-            // N, the remainder stays zero-filled by the linker.
+            // `char a[N] = "...";` — bytes land directly in _DATA. MSC emits the
+            // full declared array: the string, an implicit NUL when it fits (or
+            // always for an implicit `char a[]`), then explicit zero-fill to N.
+            // Fixtures 908/2095 (implicit → strlen+1), 1386 (explicit → N).
             let bytes = match p.bump().cloned() {
                 Some(Tok::StrLit(b)) => b,
                 _ => unreachable!(),
             };
             let mut slots: Vec<GlobalInit> =
                 bytes.iter().map(|b| GlobalInit::Byte(*b)).collect();
-            // C semantics: include the implicit NUL if it fits.
-            if slots.len() < array_len {
+            if implicit_array_len || slots.len() < array_len {
+                slots.push(GlobalInit::Byte(0)); // implicit NUL terminator
+            }
+            while slots.len() < array_len {
                 slots.push(GlobalInit::Byte(0));
             }
             Some(slots)
