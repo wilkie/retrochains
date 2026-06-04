@@ -287,6 +287,35 @@ pub(crate) fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_
         }
     };
     let disp = locals.disp(local_idx);
+    // Long local compound mul/div/mod (`a *= r`, `a /= r`, `a %= r`): a runtime
+    // helper taking the RHS long (DX:AX, pushed high-then-low) and the local's
+    // ADDRESS. Mirrors the long-global path (emit_assign_global) but pushes
+    // `lea ax,[bp+disp]` instead of `mov ax,OFFSET g`. Helper named by
+    // signedness. Fixtures 345/346/347/766/778/779/820.
+    if locals.is_long_local(local_idx)
+        && let Expr::BinOp { op, left, right } = value
+        && matches!(op, BinOp::Mul | BinOp::Div | BinOp::Mod)
+        && matches!(left.as_ref(), Expr::Local(l) if *l == local_idx)
+    {
+        let helper = match (op, locals.is_unsigned_local(local_idx)) {
+            (BinOp::Mul, false) => "__aNNalmul",
+            (BinOp::Mul, true) => "__aNNaulmul",
+            (BinOp::Div, false) => "__aNNaldiv",
+            (BinOp::Div, true) => "__aNNauldiv",
+            (BinOp::Mod, false) => "__aNNalrem",
+            (BinOp::Mod, true) => "__aNNaulrem",
+            _ => unreachable!(),
+        };
+        emit_long_to_dx_ax(right, locals, out, fixups); // RHS long → DX:AX
+        out.push(0x52); // push dx
+        out.push(0x50); // push ax
+        out.push(0x8D); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp); // lea ax,[bp+disp]
+        out.push(0x50); // push ax
+        let call = out.len();
+        out.extend_from_slice(&[0xE8, 0x00, 0x00]); // call helper
+        fixups.push(Fixup { body_offset: call, kind: FixupKind::ExtCall { target: helper.to_owned() } });
+        return;
+    }
     // Far/huge pointer assignment: store 2-byte offset + 2-byte SS segment.
     // The offset comes from either an address expression (AddrOfLocal,
     // AddrOfLocal+K, or an array-local decay) or a general expression.
