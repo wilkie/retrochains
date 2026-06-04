@@ -688,33 +688,33 @@ pub(crate) fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_
 /// Both shapes plant a 2-byte address placeholder that the linker
 /// resolves via a GlobalAddr fixup.
 /// `*<ptr-param> = <expr>;` — store through a param pointer.
-/// `mov bx, [bp+pdisp]; mov [bx], imm/ax`. We don't track param
-/// pointee size yet; emit word store by default, which is correct
-/// for `int *` and the low byte of `char *` (the high byte is
-/// untouched but ignored). For `char *p; *p = K;` the right shape
-/// would be `c6 07 imm8` — let's match that.
+/// `mov bx, [bp+pdisp]; mov [bx], imm/ax`. The store width follows the param's
+/// POINTEE size: a `char *p` (pointee 1) stores a byte (`c6 07`/`88 07`); an
+/// `int *p` (pointee 2) stores a word (`c7 07`/`89 07`). Fixtures 1225 (char*),
+/// 3055 (int*, `*p = 42` — must be a word store, not a byte one).
 pub(crate) fn emit_assign_deref_param(param_idx: usize, value: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
     let pdisp = param_disp(param_idx);
+    let is_byte = locals.param_pointee_size(param_idx) == 1;
     out.push(0x8B);
     out.push(0x5E);
     out.push(pdisp as u8);
     if let Some(k) = value.fold(locals.inits) {
-        // `c7 07 imm16` mov word [bx], imm. We don't know if dest is
-        // byte/word — default to word; fixture 1225 has char and expects
-        // byte store. Pick byte when fits in i8 to favor the common
-        // small-K char case.
-        if let Ok(k8) = i8::try_from(k) {
-            out.extend_from_slice(&[0xC6, 0x07, k8 as u8]);
+        if is_byte {
+            out.extend_from_slice(&[0xC6, 0x07, (k as u32 & 0xFF) as u8]); // mov byte [bx], k
         } else {
             out.push(0xC7);
             out.push(0x07);
             let imm = (k as u32 & 0xFFFF) as u16;
-            out.extend_from_slice(&imm.to_le_bytes());
+            out.extend_from_slice(&imm.to_le_bytes()); // mov word [bx], imm16
         }
     } else {
         emit_expr_to_ax(value, locals, out, fixups);
-        // `mov [bx], ax`.
-        out.extend_from_slice(&[0x89, 0x07]);
+        if is_byte {
+            if out.last() == Some(&0x98) { out.pop(); } // strip cbw — storing AL
+            out.extend_from_slice(&[0x88, 0x07]); // mov [bx], al
+        } else {
+            out.extend_from_slice(&[0x89, 0x07]); // mov [bx], ax
+        }
     }
 }
 /// `<param> = <expr>;` — modify the function's local copy. Same
