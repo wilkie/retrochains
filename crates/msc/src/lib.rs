@@ -73,6 +73,10 @@ pub struct Unit {
     /// flags via `Function.param_is_long`; this carries the externs so a call
     /// to one still pushes long args as two words (fixtures 3252, 3426).
     pub proto_long_params: std::collections::HashMap<String, Vec<bool>>,
+    /// Per prototype-only declaration, the per-param struct-by-value byte sizes
+    /// (0 for non-struct params), keyed by symbol name — so a call to a
+    /// prototyped function still pushes a struct argument as its words.
+    pub proto_struct_params: std::collections::HashMap<String, Vec<usize>>,
     /// Symbol names of functions given an explicit source prototype
     /// (`int f(int);`). MSC orders an explicitly-declared extern AFTER `__chkstk`
     /// in the EXTDEF table, but an implicitly-declared one (called with only a
@@ -410,6 +414,10 @@ pub struct Locals<'a> {
     /// Map of function symbol names to their param_is_long arrays.
     /// Used by emit_call_inner to push long args as 4-byte pairs.
     pub long_param_funcs: &'a std::collections::HashMap<String, Vec<bool>>,
+    /// Map of function symbol names to their per-param struct-by-value byte
+    /// sizes (0 for non-struct params). Used by emit_call_inner to push a
+    /// struct argument as its words (high address first).
+    pub struct_param_funcs: &'a std::collections::HashMap<String, Vec<usize>>,
     /// Map of `float`/`double`-returning function symbol names to their return
     /// width (4/8). The result comes back as AX = &__fac; assigning the call to
     /// a float local triggers the `movsw`-copy receive sequence.
@@ -1531,6 +1539,15 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
     for (name, longs) in &unit.proto_long_params {
         long_param_funcs.entry(name.clone()).or_insert_with(|| longs.clone());
     }
+    // Per-function struct-by-value param byte sizes (defined fns + prototypes),
+    // so a call pushes a struct argument as its words.
+    let mut struct_param_funcs: std::collections::HashMap<String, Vec<usize>> = unit.functions.iter()
+        .filter(|f| f.param_struct_bytes.iter().any(|&b| b > 0))
+        .map(|f| (symbol_name(&f.name), f.param_struct_bytes.clone()))
+        .collect();
+    for (name, bytes) in &unit.proto_struct_params {
+        struct_param_funcs.entry(name.clone()).or_insert_with(|| bytes.clone());
+    }
     let float_returners: std::collections::HashMap<String, usize> = unit.functions.iter()
         .filter(|f| f.return_float_width != 0)
         .map(|f| (symbol_name(&f.name), f.return_float_width))
@@ -1538,7 +1555,7 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
     let function_emits: Vec<FunctionEmit> = unit
         .functions
         .iter()
-        .map(|f| emit_function(f, &long_globals, &char_globals, &unsigned_globals, &float_globals, &global_elem_sizes, &char_returners, &float_returners, &long_param_funcs, &struct_is_union, &union_globals))
+        .map(|f| emit_function(f, &long_globals, &char_globals, &unsigned_globals, &float_globals, &global_elem_sizes, &char_returners, &float_returners, &long_param_funcs, &struct_param_funcs, &struct_is_union, &union_globals))
         .collect();
 
     // Per-function global offset within the _TEXT segment.

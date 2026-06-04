@@ -109,6 +109,7 @@ pub(crate) fn emit_function(
     char_returners: &std::collections::HashSet<String>,
     float_returners_arg: &std::collections::HashMap<String, usize>,
     long_param_funcs: &std::collections::HashMap<String, Vec<bool>>,
+    struct_param_funcs: &std::collections::HashMap<String, Vec<usize>>,
     struct_is_union: &[bool],
     union_globals: &std::collections::HashSet<usize>,
 ) -> FunctionEmit {
@@ -464,6 +465,7 @@ pub(crate) fn emit_function(
         param_pointee_sizes: &param_pointee_sizes,
         char_returners,
         long_param_funcs,
+        struct_param_funcs,
         float_returners: float_returners_arg,
         loop_stack: &loop_stack,
         labels: &labels,

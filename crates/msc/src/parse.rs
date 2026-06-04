@@ -36,6 +36,7 @@ pub(crate) fn parse_unit(source: &str) -> Result<Unit, EmitError> {
         block_local_scopes: Vec::new(),
     };
     let mut proto_long_params: std::collections::HashMap<String, Vec<bool>> = std::collections::HashMap::new();
+    let mut proto_struct_params: std::collections::HashMap<String, Vec<usize>> = std::collections::HashMap::new();
     let mut prototyped_fns: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut functions = Vec::new();
     let mut decl_order: Vec<TopDecl> = Vec::new();
@@ -144,6 +145,10 @@ pub(crate) fn parse_unit(source: &str) -> Result<Unit, EmitError> {
                     if longs.iter().any(|&b| b) {
                         proto_long_params.insert(symbol_name(nm), longs);
                     }
+                    let sbytes = proto_param_struct_bytes(p.toks, lparen_idx, close_idx, &p.structs);
+                    if sbytes.iter().any(|&b| b > 0) {
+                        proto_struct_params.insert(symbol_name(nm), sbytes);
+                    }
                 }
                 p.pos = close_idx + 2;
                 continue;
@@ -162,7 +167,7 @@ pub(crate) fn parse_unit(source: &str) -> Result<Unit, EmitError> {
             "translation unit has no functions".to_owned(),
         ));
     }
-    Ok(Unit { globals: p.globals, structs: p.structs, functions, decl_order, strings: p.strings, proto_long_params, prototyped_fns })
+    Ok(Unit { globals: p.globals, structs: p.structs, functions, decl_order, strings: p.strings, proto_long_params, proto_struct_params, prototyped_fns })
 }
 /// Parse a file-scope `struct <Name> <var> [= { ... }];` declaration.
 /// Stores the struct global as if it were a `char` array sized to
@@ -1807,6 +1812,45 @@ fn proto_param_longs(toks: &[Tok], lparen_idx: usize, close_idx: usize) -> Vec<b
         longs.push(has_long && !has_star);
     }
     longs
+}
+/// Scan a prototype's parameter list and return each param's struct-by-value
+/// byte size (even-padded total_bytes when it is `struct NAME` with no `*`, 0
+/// otherwise). Used so a call to a prototyped function pushes a struct arg as
+/// its words. `(void)` / `()` → empty.
+fn proto_param_struct_bytes(toks: &[Tok], lparen_idx: usize, close_idx: usize, structs: &[StructDef]) -> Vec<usize> {
+    let mut out = Vec::new();
+    let mut depth = 0i32;
+    let (mut sname, mut has_star, mut saw_any): (Option<String>, bool, bool) = (None, false, false);
+    let mut flush = |sname: &Option<String>, has_star: bool| -> usize {
+        match sname {
+            Some(n) if !has_star => {
+                structs.iter().find(|s| s.name == *n).map(|s| (s.total_bytes + 1) & !1).unwrap_or(0)
+            }
+            _ => 0,
+        }
+    };
+    for j in (lparen_idx + 1)..close_idx {
+        match toks.get(j) {
+            Some(Tok::LParen) => { depth += 1; saw_any = true; }
+            Some(Tok::RParen) => depth -= 1,
+            Some(Tok::Comma) if depth == 0 => {
+                out.push(flush(&sname, has_star));
+                sname = None; has_star = false; saw_any = false;
+            }
+            Some(Tok::Kw("struct")) if depth == 0 => { saw_any = true; }
+            Some(Tok::Star) if depth == 0 => { has_star = true; saw_any = true; }
+            Some(Tok::Ident(n)) if depth == 0 && sname.is_none() && !has_star => {
+                // The first identifier after `struct` is the tag name.
+                sname = Some(n.clone()); saw_any = true;
+            }
+            Some(_) => saw_any = true,
+            None => {}
+        }
+    }
+    if saw_any {
+        out.push(flush(&sname, has_star));
+    }
+    out
 }
 pub(crate) fn parse_signed_int(p: &mut Parser<'_>) -> Result<i32, EmitError> {
     // Accept any compile-time constant expression — integer literal,

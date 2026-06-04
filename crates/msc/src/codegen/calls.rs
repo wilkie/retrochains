@@ -26,10 +26,17 @@ pub(crate) fn emit_call_inner(
 ) {
     let sym = symbol_name(name);
     let param_longs = locals.long_param_funcs.get(&sym);
+    let param_structs = locals.struct_param_funcs.get(&sym);
+    let struct_bytes_at = |i: usize| -> usize {
+        param_structs.and_then(|v| v.get(i).copied()).unwrap_or(0)
+    };
     // Push args right-to-left (cdecl).
     for (i, arg) in args.iter().enumerate().rev() {
         let is_long_param = param_longs.map(|v| v.get(i).copied().unwrap_or(false)).unwrap_or(false);
-        if let Expr::FloatLit(bits, is_double) = arg {
+        let struct_bytes = struct_bytes_at(i);
+        if struct_bytes > 0 {
+            emit_push_struct_arg(arg, struct_bytes, locals, out, fixups);
+        } else if let Expr::FloatLit(bits, is_double) = arg {
             emit_push_arg_float(*bits, if *is_double { 8 } else { 4 }, out, fixups);
         } else if is_long_param {
             emit_push_arg_long(arg, locals, out, fixups);
@@ -47,7 +54,9 @@ pub(crate) fn emit_call_inner(
         kind: FixupKind::TuLocalCall { target: sym.clone() },
     });
     let cleanup_bytes: usize = args.iter().enumerate().map(|(i, a)| {
-        if let Expr::FloatLit(_, is_double) = a { if *is_double { 8 } else { 4 } }
+        let sb = struct_bytes_at(i);
+        if sb > 0 { sb }
+        else if let Expr::FloatLit(_, is_double) = a { if *is_double { 8 } else { 4 } }
         else if param_longs.map(|v| v.get(i).copied().unwrap_or(false)).unwrap_or(false) { 4 } else { 2 }
     }).sum();
     if cleanup_bytes > 0 && !skip_cleanup {
@@ -120,6 +129,30 @@ pub(crate) fn emit_call_ptr(
 /// Push a long (32-bit) call argument: sign-extend to DX:AX, push DX
 /// (high word) then AX (low word). For constants that fit in i16, uses
 /// `cwd` for the sign extension; otherwise uses explicit `mov dx, K_hi`.
+/// Push a struct argument passed BY VALUE: its words, highest stack address
+/// first (so the struct lands in memory order on the downward-growing stack).
+/// The struct arg is a struct local. The first (highest-word) push reuses AX
+/// when the preceding store left that word there (`mov [w],ax` → `push ax`).
+/// Fixtures 3197, 2866.
+pub(crate) fn emit_push_struct_arg(arg: &Expr, bytes: usize, locals: &Locals<'_>, out: &mut Vec<u8>, _fixups: &mut Vec<Fixup>) {
+    let disp = match arg {
+        Expr::Local(i) => locals.disp(*i),
+        _ => { return; } // only struct locals supported; others NYI
+    };
+    let nwords = bytes / 2;
+    for w in (0..nwords).rev() {
+        let wdisp = disp + (w as i16) * 2;
+        if w == nwords - 1 {
+            // Reuse AX if the highest word was just stored from it.
+            let store = { let mut v = vec![0x89, bp_modrm(0x46, wdisp)]; push_bp_disp(&mut v, wdisp); v };
+            if out.len() >= store.len() && out[out.len() - store.len()..] == *store {
+                out.push(0x50); // push ax
+                continue;
+            }
+        }
+        out.push(0xFF); out.push(bp_modrm(0x76, wdisp)); push_bp_disp(out, wdisp); // push WORD [bp+wdisp]
+    }
+}
 pub(crate) fn emit_push_arg_long(arg: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
     if let Some(k) = arg.fold(locals.inits) {
         // Constant long: materialize into DX:AX, push high then low.
