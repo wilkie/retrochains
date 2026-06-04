@@ -1184,6 +1184,27 @@ fn emit_binop_inner(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, o
         out.extend_from_slice(&[0x2B, 0xC0]); // sub ax, ax
         return;
     }
+    // DX:AX field reuse: `a OP b` where both are word operands at the exact bp
+    // slots a preceding DX:AX store just wrote (`mov [a],ax; mov [b],dx`) — e.g.
+    // `s.x + s.y` right after a struct copy/receive — reuses the live registers
+    // with `<op> ax, dx`. Fixtures 2611, 2614.
+    if matches!(op, BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor)
+        && let Some(ld) = bp_disp(left, locals)
+        && let Some(rd) = bp_disp(right, locals)
+    {
+        let mut pat = vec![0x89, bp_modrm(0x46, ld)];
+        push_bp_disp(&mut pat, ld);
+        pat.push(0x89); pat.push(bp_modrm(0x56, rd));
+        push_bp_disp(&mut pat, rd);
+        if out.len() >= pat.len() && out[out.len() - pat.len()..] == *pat {
+            let opc = match op {
+                BinOp::Add => 0x03, BinOp::Sub => 0x2B, BinOp::BitAnd => 0x23,
+                BinOp::BitOr => 0x0B, BinOp::BitXor => 0x33, _ => unreachable!(),
+            };
+            out.push(opc); out.push(0xC2); // op ax, dx
+            return;
+        }
+    }
     // Two SIGNED byte (char) operands (`a OP b`, both byte loads): MSC loads the
     // RHS to AX via `mov al,..; cbw`, parks it in CX, loads the LHS the same way,
     // then `op ax, cx`. Covers char params/locals/globals, char-array elements,
