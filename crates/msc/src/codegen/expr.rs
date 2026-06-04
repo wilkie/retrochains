@@ -1681,6 +1681,12 @@ pub(crate) fn emit_imm_op(op: BinOp, k: i32, out: &mut Vec<u8>) {
         // byte for any mask with bit 7 set (e.g. `and ax,0x80` must be 0x0080,
         // not 0xFF80). MSC uses imm16 even for small masks. Fixtures 3683, 3684.
         (BinOp::BitAnd, _) => {
+            // `and ax, 0x00XX` forces the high byte to 0, so a `cbw` widening the
+            // operand just before is dead — MSC omits it (`char c & 0x0F` →
+            // `mov al,[c]; and ax,15`, no cbw). Fixture 3097.
+            if k16 <= 0xFF && out.last() == Some(&0x98) {
+                out.pop();
+            }
             out.push(0x25);
             out.extend_from_slice(&k16.to_le_bytes());
         }
