@@ -503,6 +503,17 @@ pub(crate) fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
             for s in stmts {
                 prop_stmt(s, cp);
             }
+            // Exiting a nested block scope flushes MSC's known-value cache:
+            // a read after the block reloads from its slot rather than folding
+            // a value learned inside (or before) the block. Mirrors the loop /
+            // if boundary clears. Fixtures 2258, 2316, 2467 (shadowed locals).
+            cp.g_known.clear();
+            cp.l_known.clear();
+            cp.la_known.clear();
+            cp.ptr_alias.clear();
+            cp.ptr_alias_g.clear();
+            cp.ptr_addr.clear();
+            cp.ga_known.clear();
         }
         Stmt::Switch { scrutinee, cases } => {
             prop_expr(scrutinee, cp);

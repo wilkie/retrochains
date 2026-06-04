@@ -1111,6 +1111,12 @@ struct Parser<'a> {
     block_scope_stack: Vec<Vec<(u16, u16)>>,
     free_block_slots: Vec<(u16, u16)>,
     block_frame_max: u16,
+    /// Parallel to `block_scope_stack`: the local INDICES declared by each
+    /// currently-open block, innermost frame last. Drives innermost-wins name
+    /// resolution ([`Parser::resolve_local`]) so a block local shadows an outer
+    /// local / param / global of the same name while its block is open, and the
+    /// outer binding reappears once the block closes.
+    block_local_scopes: Vec<Vec<usize>>,
 }
 
 impl<'a> Parser<'a> {

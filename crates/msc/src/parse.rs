@@ -33,6 +33,7 @@ pub(crate) fn parse_unit(source: &str) -> Result<Unit, EmitError> {
         block_scope_stack: Vec::new(),
         free_block_slots: Vec::new(),
         block_frame_max: 0,
+        block_local_scopes: Vec::new(),
     };
     let mut functions = Vec::new();
     let mut decl_order: Vec<TopDecl> = Vec::new();
@@ -1003,6 +1004,7 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
     p.block_scope_stack.clear();
     p.free_block_slots.clear();
     p.block_frame_max = 0;
+    p.block_local_scopes.clear();
     let params = if matches!(p.peek(), Some(Tok::Kw("void"))) {
         p.bump();
         (Vec::<String>::new(), Vec::<Option<usize>>::new(), Vec::<bool>::new(), Vec::<bool>::new(), Vec::<bool>::new(), Vec::<usize>::new(), Vec::<usize>::new())
@@ -1787,6 +1789,7 @@ pub(crate) fn looks_like_local_decl(p: &Parser<'_>) -> bool {
 impl Parser<'_> {
     fn enter_block_scope(&mut self) {
         self.block_scope_stack.push(Vec::new());
+        self.block_local_scopes.push(Vec::new());
     }
     fn exit_block_scope(&mut self) {
         if let Some(frame) = self.block_scope_stack.pop() {
@@ -1794,6 +1797,23 @@ impl Parser<'_> {
                 self.free_block_slots.push(slot);
             }
         }
+        self.block_local_scopes.pop();
+    }
+    /// Resolve a name to a local index with innermost-wins scoping: a block
+    /// local declared in a currently-open block shadows an outer local of the
+    /// same name. Searches the open block scopes from innermost to outermost,
+    /// then falls back to the flat function-level position (the first — i.e.
+    /// outermost — match). With no open block scopes this is exactly the old
+    /// `local_names.iter().position(|n| n == name)`.
+    fn resolve_local(&self, name: &str) -> Option<usize> {
+        for frame in self.block_local_scopes.iter().rev() {
+            for &idx in frame.iter().rev() {
+                if self.local_names[idx] == name {
+                    return Some(idx);
+                }
+            }
+        }
+        self.local_names.iter().position(|n| n == name)
     }
     /// Allocate a frame slot of `size` bytes (rounded up to even) for a
     /// block-level local. Reuses the deepest freed slot of the exact size
@@ -1876,6 +1896,11 @@ fn parse_block_local_decl(p: &mut Parser<'_>) -> Result<Vec<Stmt>, EmitError> {
         let local_idx = p.local_specs.len();
         p.local_names.push(lname);
         p.local_specs.push(spec);
+        // Register in the current block scope so a later reference resolves
+        // to this (innermost) declaration even if an outer local shares its name.
+        if let Some(frame) = p.block_local_scopes.last_mut() {
+            frame.push(local_idx);
+        }
         if matches!(p.peek(), Some(Tok::Assign)) {
             p.bump();
             let value = parse_expr(p)?;
@@ -2082,7 +2107,7 @@ pub(crate) fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
                 };
                 let target = if let Some(idx) = p.global_names.iter().position(|n| *n == name) {
                     AssignTarget::DoubleDerefGlobal(idx)
-                } else if let Some(idx) = p.local_names.iter().position(|n| *n == name) {
+                } else if let Some(idx) = p.resolve_local(&name) {
                     AssignTarget::DoubleDerefLocal(idx)
                 } else if let Some(idx) = p.param_names.iter().position(|n| *n == name) {
                     AssignTarget::DoubleDerefParam(idx)
@@ -2110,7 +2135,7 @@ pub(crate) fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
             };
             // `*p++ = v;` — store through old pointer then advance.
             if matches!(p.peek(), Some(Tok::PlusPlus) | Some(Tok::MinusMinus)) {
-                if let Some(local_idx) = p.local_names.iter().position(|n| *n == target_name) {
+                if let Some(local_idx) = p.resolve_local(&target_name) {
                     let step_sign = if matches!(p.peek(), Some(Tok::PlusPlus)) { 1i32 } else { -1i32 };
                     p.bump();
                     let ptsz = p.local_specs[local_idx].pointee_size;
@@ -2124,7 +2149,7 @@ pub(crate) fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
                     });
                 }
             }
-            let target = if let Some(idx) = p.local_names.iter().position(|n| *n == target_name) {
+            let target = if let Some(idx) = p.resolve_local(&target_name) {
                 AssignTarget::DerefLocal(idx)
             } else if let Some(idx) = p.global_names.iter().position(|n| *n == target_name) {
                 AssignTarget::DerefGlobal(idx)
@@ -2270,7 +2295,7 @@ pub(crate) fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
             // `<struct-array-local>[K].<field> = <expr>;` — store into an element
             // of an array of structs (byte_off = K*sizeof(S) + field_off).
             if matches!(p.peek(), Some(Tok::LBrack))
-                && let Some(local_idx) = p.local_names.iter().position(|n| *n == name)
+                && let Some(local_idx) = p.resolve_local(&name)
                 && let Some(sidx) = p.local_specs[local_idx].struct_idx
                 && p.local_specs[local_idx].pointee_size == 0
             {
@@ -2297,7 +2322,7 @@ pub(crate) fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
             }
             // `<struct-local>.<field> = <expr>;`
             if matches!(p.peek(), Some(Tok::Dot))
-                && let Some(local_idx) = p.local_names.iter().position(|n| *n == name)
+                && let Some(local_idx) = p.resolve_local(&name)
                 && let Some(sidx) = p.local_specs[local_idx].struct_idx
             {
                 p.bump();
@@ -2331,7 +2356,7 @@ pub(crate) fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
             }
             // `<struct-ptr-local>-><field> = <expr>;`
             if matches!(p.peek(), Some(Tok::Arrow))
-                && let Some(local_idx) = p.local_names.iter().position(|n| *n == name)
+                && let Some(local_idx) = p.resolve_local(&name)
                 && let Some(sidx) = p.local_specs[local_idx].struct_idx
             {
                 p.bump();
@@ -2350,7 +2375,7 @@ pub(crate) fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
             // `+=`, `-=`, `*=`, `++`, `--`, etc.) — indexed local
             // array store.
             if matches!(p.peek(), Some(Tok::LBrack))
-                && let Some(local_idx) = p.local_names.iter().position(|n| *n == name)
+                && let Some(local_idx) = p.resolve_local(&name)
             {
                 p.bump(); // [
                 let mut index_expr = parse_expr(p)?;
@@ -2536,7 +2561,7 @@ pub(crate) fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
                 p.eat(&Tok::Semi)?;
                 return Ok(Stmt::Assign { target, value });
             }
-            let target = if let Some(idx) = p.local_names.iter().position(|n| *n == name) {
+            let target = if let Some(idx) = p.resolve_local(&name) {
                 AssignTarget::Local(idx)
             } else if let Some(idx) = p.global_names.iter().position(|n| *n == name) {
                 AssignTarget::Global(idx)
@@ -2650,7 +2675,7 @@ pub(crate) fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
                     )));
                 }
             };
-            let target = if let Some(idx) = p.local_names.iter().position(|n| *n == name) {
+            let target = if let Some(idx) = p.resolve_local(&name) {
                 AssignTarget::Local(idx)
             } else if let Some(idx) = p.global_names.iter().position(|n| *n == name) {
                 AssignTarget::Global(idx)
@@ -3014,7 +3039,7 @@ pub(crate) fn parse_assign_no_semi(p: &mut Parser<'_>) -> Result<Stmt, EmitError
                 )));
             }
         };
-        let (target, lvalue) = if let Some(idx) = p.local_names.iter().position(|n| *n == name) {
+        let (target, lvalue) = if let Some(idx) = p.resolve_local(&name) {
             (AssignTarget::Local(idx), Expr::Local(idx))
         } else if let Some(idx) = p.global_names.iter().position(|n| *n == name) {
             (AssignTarget::Global(idx), Expr::Global(idx))
@@ -3040,7 +3065,7 @@ pub(crate) fn parse_assign_no_semi(p: &mut Parser<'_>) -> Result<Stmt, EmitError
             )));
         }
     };
-    let target = if let Some(idx) = p.local_names.iter().position(|n| *n == name) {
+    let target = if let Some(idx) = p.resolve_local(&name) {
         AssignTarget::Local(idx)
     } else if let Some(idx) = p.global_names.iter().position(|n| *n == name) {
         AssignTarget::Global(idx)
@@ -3480,7 +3505,7 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                 4 // long = 4 bytes; pointer-to-long still 2
             } else if let Some(Tok::Ident(name)) = p.peek().cloned() {
                 p.bump();
-                if let Some(idx) = p.local_names.iter().position(|n| *n == name) {
+                if let Some(idx) = p.resolve_local(&name) {
                     p.local_specs[idx].storage_bytes() as i32
                 } else if let Some(idx) = p.global_names.iter().position(|n| *n == name) {
                     let g = &p.globals[idx];
@@ -3515,7 +3540,7 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                 p.bump();
                 let idx_expr = parse_expr(p)?;
                 p.eat(&Tok::RBrack)?;
-                if let Some(local_idx) = p.local_names.iter().position(|n| *n == name) {
+                if let Some(local_idx) = p.resolve_local(&name) {
                     let elem_size = p.local_specs[local_idx].size as i32;
                     let init_view: Vec<Option<i32>> = p.local_specs.iter().map(|l| l.init).collect();
                     let k = idx_expr.fold(&init_view).ok_or_else(|| EmitError::Unsupported(
@@ -3550,7 +3575,7 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                     "address-of unknown identifier `{name}`"
                 )));
             }
-            if let Some(idx) = p.local_names.iter().position(|n| *n == name) {
+            if let Some(idx) = p.resolve_local(&name) {
                 return Ok(Expr::AddrOfLocal(idx));
             }
             let idx = p.global_names.iter().position(|n| *n == name)
@@ -3579,7 +3604,7 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                 let args = parse_call_args(p)?;
                 // Indirect call when `name` is a function-pointer variable: a
                 // fnptr local (shadows all), param (shadows globals), or global.
-                if let Some(idx) = p.local_names.iter().position(|n| *n == name)
+                if let Some(idx) = p.resolve_local(&name)
                     && p.fn_ptr_locals.contains(&idx)
                 {
                     return Ok(Expr::CallPtr { target: Box::new(Expr::Local(idx)), args });
@@ -3600,7 +3625,7 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
             if let Some(&v) = p.enum_consts.get(&name) {
                 return Ok(Expr::IntLit(v));
             }
-            if let Some(idx) = p.local_names.iter().position(|n| *n == name) {
+            if let Some(idx) = p.resolve_local(&name) {
                 // `<local>[<expr>]` — element access on a local
                 // array. Picks the byte-load + cbw variant for char
                 // arrays, word load otherwise.
