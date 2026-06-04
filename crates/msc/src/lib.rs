@@ -251,6 +251,13 @@ pub struct LocalSpec {
     /// For a float/double local with a literal initializer, the f64 bits of
     /// the value, materialized in the CONST pool and loaded via `fld`.
     pub float_bits: Option<u64>,
+    /// `None` for a function-level local (laid out by the hash-bucket frame
+    /// passes). `Some(off)` for a local declared inside a nested `{ ... }`
+    /// block: `off` is the cumulative depth (deepest byte) below the
+    /// function frame size `F`, so the local's displacement is `-(F + off)`.
+    /// Block locals are allocated in scope order with slot reuse on block
+    /// exit; they are skipped by the hash-bucket layout passes.
+    pub block_offset: Option<u16>,
 }
 
 #[derive(Debug, Clone)]
@@ -276,20 +283,20 @@ pub struct StructField {
 
 impl LocalSpec {
     pub fn int(init: Option<i32>) -> Self {
-        Self { size: 2, array_len: 1, init, struct_idx: None, is_long: false, init_is_literal: init.is_some(), is_far_ptr: false, pointee_size: 0, is_unsigned: false, init_via_cast: false, init_via_type_cast: false, is_float: false, float_bits: None }
+        Self { size: 2, array_len: 1, init, struct_idx: None, is_long: false, init_is_literal: init.is_some(), is_far_ptr: false, pointee_size: 0, is_unsigned: false, init_via_cast: false, init_via_type_cast: false, is_float: false, float_bits: None, block_offset: None }
     }
     pub fn char_(init: Option<i32>) -> Self {
-        Self { size: 1, array_len: 1, init, struct_idx: None, is_long: false, init_is_literal: init.is_some(), is_far_ptr: false, pointee_size: 0, is_unsigned: false, init_via_cast: false, init_via_type_cast: false, is_float: false, float_bits: None }
+        Self { size: 1, array_len: 1, init, struct_idx: None, is_long: false, init_is_literal: init.is_some(), is_far_ptr: false, pointee_size: 0, is_unsigned: false, init_via_cast: false, init_via_type_cast: false, is_float: false, float_bits: None, block_offset: None }
     }
     pub fn long_(init: Option<i32>) -> Self {
-        Self { size: 2, array_len: 2, init, struct_idx: None, is_long: true, init_is_literal: init.is_some(), is_far_ptr: false, pointee_size: 0, is_unsigned: false, init_via_cast: false, init_via_type_cast: false, is_float: false, float_bits: None }
+        Self { size: 2, array_len: 2, init, struct_idx: None, is_long: true, init_is_literal: init.is_some(), is_far_ptr: false, pointee_size: 0, is_unsigned: false, init_via_cast: false, init_via_type_cast: false, is_float: false, float_bits: None, block_offset: None }
     }
     /// `float`/`double` local. `width` is 4 (float) or 8 (double); `bits` is
     /// the f64 value of a literal initializer (None for uninitialized). `init`
     /// carries the truncated int value so `(int)f` const-folds.
     pub fn float_(width: usize, bits: Option<u64>) -> Self {
         let init = bits.map(|b| f64::from_bits(b) as i32);
-        Self { size: width, array_len: 1, init, struct_idx: None, is_long: false, init_is_literal: init.is_some(), is_far_ptr: false, pointee_size: 0, is_unsigned: false, init_via_cast: false, init_via_type_cast: false, is_float: true, float_bits: bits }
+        Self { size: width, array_len: 1, init, struct_idx: None, is_long: false, init_is_literal: init.is_some(), is_far_ptr: false, pointee_size: 0, is_unsigned: false, init_via_cast: false, init_via_type_cast: false, is_float: true, float_bits: bits, block_offset: None }
     }
     /// A `float`/`double` local whose initializer is a const-foldable cast or
     /// arithmetic (`(float)i`, `double d = f`, `a + b`) rather than a direct
@@ -297,7 +304,7 @@ impl LocalSpec {
     /// so the int-fold view does NOT replace `(int)<local>` with `mov ax,K`;
     /// instead the store keeps st(0) live (`fst`) and the cast is `call __ftol`.
     pub fn float_nonliteral(width: usize, bits: u64) -> Self {
-        Self { size: width, array_len: 1, init: None, struct_idx: None, is_long: false, init_is_literal: false, is_far_ptr: false, pointee_size: 0, is_unsigned: false, init_via_cast: false, init_via_type_cast: false, is_float: true, float_bits: Some(bits) }
+        Self { size: width, array_len: 1, init: None, struct_idx: None, is_long: false, init_is_literal: false, is_far_ptr: false, pointee_size: 0, is_unsigned: false, init_via_cast: false, init_via_type_cast: false, is_float: true, float_bits: Some(bits), block_offset: None }
     }
     /// Bytes occupied in the frame, rounded up to an even count.
     /// MSC pads each local to a word boundary — scalar char gets 2
@@ -1095,6 +1102,15 @@ struct Parser<'a> {
     /// Source names of all functions seen so far (definitions + prototypes).
     /// A bare function name used as a value resolves to `Expr::FuncAddr`.
     fn_names: std::collections::HashSet<String>,
+    /// Nested-block local layout (reset per function). Each entry of
+    /// `block_scope_stack` is the set of frame slots `(offset, size)`
+    /// allocated by the currently-open block; on `}` they return to
+    /// `free_block_slots`. A new block local takes the deepest free slot
+    /// that exactly fits, else extends `block_frame_max` (the high-water
+    /// depth below the function frame). See [`Parser::alloc_block_slot`].
+    block_scope_stack: Vec<Vec<(u16, u16)>>,
+    free_block_slots: Vec<(u16, u16)>,
+    block_frame_max: u16,
 }
 
 impl<'a> Parser<'a> {

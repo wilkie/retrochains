@@ -184,9 +184,12 @@ pub(crate) fn emit_function(
     //           (ascending). This mirrors MSC's internal hash-table
     //           traversal order: hash bucket determines slot depth, lower
     //           bucket → closer to BP (smaller absolute displacement).
+    // Block-level locals (declared inside a nested `{ ... }`) are laid out
+    // separately, DEEPER than the function frame, by a dedicated pass below.
+    // The three hash-bucket passes skip them.
     let mut cumulative: i32 = 0;
     for (i, spec) in func.locals.iter().enumerate() {
-        if spec.is_far_ptr {
+        if spec.is_far_ptr && spec.block_offset.is_none() {
             cumulative += spec.storage_bytes() as i32;
             local_disps[i] = -i16::try_from(cumulative).expect("local disp fits");
         }
@@ -200,7 +203,7 @@ pub(crate) fn emit_function(
     // 1964), but as a separate pass they still precede the non-pointer locals.
     {
         let mut np_ptrs: Vec<usize> = func.locals.iter().enumerate()
-            .filter(|(_, s)| !s.is_far_ptr && s.pointee_size > 0)
+            .filter(|(_, s)| !s.is_far_ptr && s.pointee_size > 0 && s.block_offset.is_none())
             .map(|(i, _)| i)
             .collect();
         np_ptrs.sort_by(|&a, &b| name_hash(a).cmp(&name_hash(b)).then(b.cmp(&a)));
@@ -211,7 +214,7 @@ pub(crate) fn emit_function(
     }
     {
         let mut np_indices: Vec<usize> = func.locals.iter().enumerate()
-            .filter(|(_, s)| !s.is_far_ptr && s.pointee_size == 0)
+            .filter(|(_, s)| !s.is_far_ptr && s.pointee_size == 0 && s.block_offset.is_none())
             .map(|(i, _)| i)
             .collect();
         // Within a hash bucket, MSC's internal hash table uses LIFO
@@ -227,6 +230,19 @@ pub(crate) fn emit_function(
             local_disps[i] = -i16::try_from(cumulative).expect("local disp fits");
         }
     }
+    // Block-local pass: each block local sits at `-(F + block_offset)`, where
+    // `F = cumulative` is the function frame size computed above. `block_offset`
+    // is the parser-assigned cumulative depth (with slot reuse across sibling
+    // blocks); the high-water mark extends the frame below `F`.
+    let f = cumulative;
+    let mut block_frame_max: i32 = 0;
+    for (i, spec) in func.locals.iter().enumerate() {
+        if let Some(off) = spec.block_offset {
+            local_disps[i] = -i16::try_from(f + off as i32).expect("block local disp fits");
+            block_frame_max = block_frame_max.max(off as i32);
+        }
+    }
+    cumulative = f + block_frame_max;
     let local_sizes: Vec<usize> = func.locals.iter().map(|l| l.size).collect();
     // The float-arg call result is spilled to a 2-byte temp at [bp-2]; reserve
     // it at the deepest frame slot so chkstk sizes the frame to include it.

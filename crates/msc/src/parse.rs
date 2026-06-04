@@ -30,6 +30,9 @@ pub(crate) fn parse_unit(source: &str) -> Result<Unit, EmitError> {
         fn_ptr_params: std::collections::HashSet::new(),
         fn_ptr_locals: std::collections::HashSet::new(),
         fn_names: std::collections::HashSet::new(),
+        block_scope_stack: Vec::new(),
+        free_block_slots: Vec::new(),
+        block_frame_max: 0,
     };
     let mut functions = Vec::new();
     let mut decl_order: Vec<TopDecl> = Vec::new();
@@ -997,6 +1000,9 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
     // parameters; other types come with later fixtures.
     p.fn_ptr_params.clear();
     p.fn_ptr_locals.clear();
+    p.block_scope_stack.clear();
+    p.free_block_slots.clear();
+    p.block_frame_max = 0;
     let params = if matches!(p.peek(), Some(Tok::Kw("void"))) {
         p.bump();
         (Vec::<String>::new(), Vec::<Option<usize>>::new(), Vec::<bool>::new(), Vec::<bool>::new(), Vec::<bool>::new(), Vec::<usize>::new(), Vec::<usize>::new())
@@ -1264,9 +1270,9 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
                     elem_count = n as usize;
                 }
                 let spec = if is_ptr {
-                    LocalSpec { size: 2, array_len: 1, init: None, struct_idx: Some(sidx), is_long: false, init_is_literal: false, is_far_ptr: false, pointee_size: stotal, is_unsigned: false, init_via_cast: false, init_via_type_cast: false, is_float: false, float_bits: None }
+                    LocalSpec { size: 2, array_len: 1, init: None, struct_idx: Some(sidx), is_long: false, init_is_literal: false, is_far_ptr: false, pointee_size: stotal, is_unsigned: false, init_via_cast: false, init_via_type_cast: false, is_float: false, float_bits: None, block_offset: None }
                 } else {
-                    LocalSpec { size: 1, array_len: stotal * elem_count, init: None, struct_idx: Some(sidx), is_long: false, init_is_literal: false, is_far_ptr: false, pointee_size: 0, is_unsigned: false, init_via_cast: false, init_via_type_cast: false, is_float: false, float_bits: None }
+                    LocalSpec { size: 1, array_len: stotal * elem_count, init: None, struct_idx: Some(sidx), is_long: false, init_is_literal: false, is_far_ptr: false, pointee_size: 0, is_unsigned: false, init_via_cast: false, init_via_type_cast: false, is_float: false, float_bits: None, block_offset: None }
                 };
                 let local_idx = locals.len();
                 p.local_names.push(lname);
@@ -1447,6 +1453,7 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
                     size: 2, array_len: 1, init: None, struct_idx: None, is_long: false,
                     init_is_literal: false, is_far_ptr: false, pointee_size: 2, is_unsigned: false,
                     init_via_cast: false, init_via_type_cast: false, is_float: false, float_bits: None,
+                    block_offset: None,
                 };
                 p.local_specs.push(spec.clone());
                 locals.push(spec);
@@ -1523,7 +1530,7 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
             } else {
                 (size, array_len, false)
             };
-            let spec = LocalSpec { size: slot_size, array_len: slot_len, init: None, struct_idx: None, is_long: is_long_slot, init_is_literal: false, is_far_ptr: is_far_ptr_decl, pointee_size: if star_count > 0 { size } else { 0 }, is_unsigned: has_unsigned && size == 1 && star_count == 0, init_via_cast: false, init_via_type_cast: false, is_float: false, float_bits: None };
+            let spec = LocalSpec { size: slot_size, array_len: slot_len, init: None, struct_idx: None, is_long: is_long_slot, init_is_literal: false, is_far_ptr: is_far_ptr_decl, pointee_size: if star_count > 0 { size } else { 0 }, is_unsigned: has_unsigned && size == 1 && star_count == 0, init_via_cast: false, init_via_type_cast: false, is_float: false, float_bits: None, block_offset: None };
             p.local_specs.push(spec.clone());
             locals.push(spec);
             if matches!(p.peek(), Some(Tok::Assign)) {
@@ -1734,6 +1741,12 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
     }
 
     let local_names = p.local_names.clone();
+    // `p.local_specs` is the superset of the `locals` Vec above: it carries
+    // the same function-level locals (kept in sync via the `local_specs`
+    // mirror writes during init folding) plus any block-level locals appended
+    // while the body was parsed. For functions without nested-block
+    // declarations the two are identical.
+    let locals = p.local_specs.clone();
     Ok(Function { name, return_int, return_long, return_char, return_float_width, params, param_is_char, param_is_long, param_is_unsigned, param_float_width, param_pointee_size, locals, local_names, body })
 }
 pub(crate) fn parse_signed_int(p: &mut Parser<'_>) -> Result<i32, EmitError> {
@@ -1745,6 +1758,139 @@ pub(crate) fn parse_signed_int(p: &mut Parser<'_>) -> Result<i32, EmitError> {
         format!("expected constant expression in init, got {expr:?}")
     ))
 }
+/// Storage-class / sign keywords that may lead a declaration.
+fn is_decl_modifier_kw(k: &str) -> bool {
+    matches!(k, "unsigned" | "signed" | "static" | "extern" | "register"
+        | "auto" | "volatile" | "const" | "short")
+}
+
+/// True when the upcoming tokens begin a local variable declaration —
+/// used to detect block-level `{ int a; ... }` declarations. Mirrors the
+/// function-top decl detection: an optional run of storage/sign modifiers
+/// followed by a primitive type keyword, or `≥1` modifier then an
+/// identifier (`unsigned x;` → implicit int). Statements never start with
+/// a type keyword, so this never misfires on a real statement.
+pub(crate) fn looks_like_local_decl(p: &Parser<'_>) -> bool {
+    let mut i = p.pos;
+    while matches!(p.toks.get(i), Some(Tok::Kw(k)) if is_decl_modifier_kw(k)) {
+        i += 1;
+    }
+    match p.toks.get(i) {
+        Some(Tok::Kw("int" | "char" | "long" | "float" | "double"
+            | "struct" | "union" | "enum")) => true,
+        // `unsigned x;` / `register r;` — a bare modifier run then a name.
+        Some(Tok::Ident(_)) => i > p.pos,
+        _ => false,
+    }
+}
+
+impl Parser<'_> {
+    fn enter_block_scope(&mut self) {
+        self.block_scope_stack.push(Vec::new());
+    }
+    fn exit_block_scope(&mut self) {
+        if let Some(frame) = self.block_scope_stack.pop() {
+            for slot in frame {
+                self.free_block_slots.push(slot);
+            }
+        }
+    }
+    /// Allocate a frame slot of `size` bytes (rounded up to even) for a
+    /// block-level local. Reuses the deepest freed slot of the exact size
+    /// when one is available, else extends `block_frame_max` (the high-water
+    /// depth). Returns the `block_offset` — the cumulative depth below the
+    /// function frame `F`, so the local's displacement is `-(F + offset)`.
+    fn alloc_block_slot(&mut self, size: u16) -> u16 {
+        let even = (size + 1) & !1;
+        let pick = self.free_block_slots.iter().enumerate()
+            .filter(|(_, (_, sz))| *sz == even)
+            .max_by_key(|(_, (off, _))| *off)
+            .map(|(i, _)| i);
+        let offset = if let Some(i) = pick {
+            self.free_block_slots.remove(i).0
+        } else {
+            self.block_frame_max += even;
+            self.block_frame_max
+        };
+        if let Some(frame) = self.block_scope_stack.last_mut() {
+            frame.push((offset, even));
+        }
+        offset
+    }
+}
+
+/// Parse one block-level declaration statement (`int a = 1, b;`),
+/// allocating a reusable frame slot for each declarator and returning the
+/// synthesized init-assign statements. Block-local inits emit INLINE at the
+/// block's position (unlike function-top literal inits, which store in the
+/// prologue): the value flows to later reads through const-prop's `l_known`
+/// tracking, not `spec.init`, so `spec.init` is left `None`. Only scalar
+/// `int` / `char` locals are supported; richer block-local types fall
+/// through as `Unsupported` until a fixture needs them.
+fn parse_block_local_decl(p: &mut Parser<'_>) -> Result<Vec<Stmt>, EmitError> {
+    let mod_start = p.pos;
+    skip_decl_modifiers(p);
+    let has_unsigned = (mod_start..p.pos)
+        .any(|i| matches!(p.toks.get(i), Some(Tok::Kw("unsigned"))));
+    let enum_consumed = matches!(p.peek(), Some(Tok::Kw("enum")));
+    if enum_consumed {
+        p.bump();
+        if matches!(p.peek(), Some(Tok::Ident(_))) { p.bump(); }
+    }
+    let size = if enum_consumed {
+        2usize
+    } else {
+        match p.peek() {
+            Some(Tok::Kw("int")) => { p.bump(); 2 }
+            Some(Tok::Kw("char")) => { p.bump(); 1 }
+            // `unsigned x;` — a modifier run with no explicit type kw.
+            Some(Tok::Ident(_)) if p.pos > mod_start => 2,
+            other => return Err(EmitError::Unsupported(format!(
+                "unsupported block-local declaration starting with {other:?}"))),
+        }
+    };
+    let mut stmts = Vec::new();
+    loop {
+        if matches!(p.peek(), Some(Tok::Star) | Some(Tok::LParen)) {
+            return Err(EmitError::Unsupported(
+                "pointer block-local not yet supported".to_owned()));
+        }
+        let lname = match p.bump().cloned() {
+            Some(Tok::Ident(s)) => s,
+            other => return Err(EmitError::Unsupported(format!(
+                "expected identifier in block declaration, got {other:?}"))),
+        };
+        if matches!(p.peek(), Some(Tok::LBrack)) {
+            return Err(EmitError::Unsupported(
+                "array block-local not yet supported".to_owned()));
+        }
+        let storage = ((size + 1) & !1) as u16;
+        let off = p.alloc_block_slot(storage);
+        let mut spec = if size == 1 {
+            LocalSpec::char_(None)
+        } else {
+            LocalSpec::int(None)
+        };
+        spec.is_unsigned = has_unsigned && size == 1;
+        spec.block_offset = Some(off);
+        let local_idx = p.local_specs.len();
+        p.local_names.push(lname);
+        p.local_specs.push(spec);
+        if matches!(p.peek(), Some(Tok::Assign)) {
+            p.bump();
+            let value = parse_expr(p)?;
+            stmts.push(Stmt::Assign {
+                target: AssignTarget::Local(local_idx),
+                value,
+            });
+        }
+        if matches!(p.peek(), Some(Tok::Comma)) { p.bump(); continue; }
+        break;
+    }
+    p.eat(&Tok::Semi)?;
+    Ok(stmts)
+}
+
 pub(crate) fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
     // `goto <label>;`
     if matches!(p.peek(), Some(Tok::Ident(n)) if n == "goto") {
@@ -1904,13 +2050,21 @@ pub(crate) fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
         Some(Tok::LBrace) => {
             // Block statement: `{ <stmt>* }`. Lowered as a Block
             // variant so caller (if/while/etc.) can treat it as one
-            // statement.
+            // statement. A nested block opens a fresh local scope:
+            // leading `int a; ...` declarations allocate reusable frame
+            // slots (freed on `}`) and their inits emit inline.
             p.bump();
+            p.enter_block_scope();
             let mut stmts = Vec::new();
             while !matches!(p.peek(), Some(Tok::RBrace)) {
-                stmts.push(parse_stmt(p)?);
+                if looks_like_local_decl(p) {
+                    stmts.extend(parse_block_local_decl(p)?);
+                } else {
+                    stmts.push(parse_stmt(p)?);
+                }
             }
             p.eat(&Tok::RBrace)?;
+            p.exit_block_scope();
             Ok(Stmt::Block(stmts))
         }
         Some(Tok::Star) => {
