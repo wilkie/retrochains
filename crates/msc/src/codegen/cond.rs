@@ -53,10 +53,14 @@ pub(crate) fn emit_cond_skip(cond: &Cond, take_then_disp: i8, locals: &Locals<'_
             }
         }
         Cond::Cmp { op, left, right }
-            if long_operand(left, locals) && long_operand(right, locals) =>
+            if long_operand(left, locals)
+                && (long_operand(right, locals) || matches!(right, Expr::IntLit(k) if *k != 0)) =>
         {
             // 32-bit comparison: a multi-branch sequence (not the single
-            // cmp+jcc int shape). See emit_long_cmp_skip.
+            // cmp+jcc int shape). A long compared against a NON-ZERO int
+            // constant compares each word against an immediate. (A zero
+            // constant falls through to the `mov ax,[lo]; or ax,[hi]` zero
+            // idiom in emit_cond_cmp_inner.) See emit_long_cmp_skip.
             let unsigned = long_operand_unsigned(left, locals)
                 || long_operand_unsigned(right, locals);
             emit_long_cmp_skip(*op, left, right, take_then_disp, unsigned, locals, out, fixups);
@@ -95,12 +99,23 @@ fn emit_long_cmp_skip(
     out: &mut Vec<u8>,
     fixups: &mut Vec<Fixup>,
 ) {
-    // RHS into DX:AX (built into a scratch buffer so its size is known).
+    // RHS handling: a constant compares each word against an immediate (no
+    // DX:AX load — `cmp WORD [lo],K_lo; ...; cmp WORD [hi],K_hi`); a long
+    // operand is loaded into DX:AX and the LHS compared word-wise to AX/DX.
     let mut load = Vec::new();
     let mut load_fx = Vec::new();
-    emit_long_to_dx_ax(right, locals, &mut load, &mut load_fx);
-    let (cmp_lo, lo_fx) = long_cmp_word(left, 0, false, locals);
-    let (cmp_hi, hi_fx) = long_cmp_word(left, 2, true, locals);
+    let (cmp_lo, lo_fx, cmp_hi, hi_fx) = if let Expr::IntLit(k) = right {
+        let lo = (*k as u32 & 0xFFFF) as i16;
+        let hi = ((*k >> 16) as u32 & 0xFFFF) as i16;
+        let (cl, lf) = long_cmp_word_imm(left, 0, lo, locals);
+        let (ch, hf) = long_cmp_word_imm(left, 2, hi, locals);
+        (cl, lf, ch, hf)
+    } else {
+        emit_long_to_dx_ax(right, locals, &mut load, &mut load_fx);
+        let (cl, lf) = long_cmp_word(left, 0, false, locals);
+        let (ch, hf) = long_cmp_word(left, 2, true, locals);
+        (cl, lf, ch, hf)
+    };
 
     // Each step is a cmp (with optional global fixup) or a jcc to a label.
     enum Step<'a> {
@@ -198,6 +213,46 @@ fn long_cmp_word(
     }
 }
 
+/// `cmp WORD PTR [<left word>], <imm>` for a long LHS in memory against an
+/// immediate (the constant-RHS form). `83 /7 imm8sx` when `imm` fits i8, else
+/// `81 /7 imm16`. Like [`long_cmp_word`] it returns the bytes plus, for a
+/// global, the (modrm-offset, global_idx) for a GlobalAddr fixup.
+fn long_cmp_word_imm(
+    left: &Expr,
+    word_off: i16,
+    imm: i16,
+    locals: &Locals<'_>,
+) -> (Vec<u8>, Option<(usize, usize)>) {
+    let use_imm8 = i8::try_from(imm).is_ok();
+    let push_imm = |b: &mut Vec<u8>| {
+        if use_imm8 { b.push(imm as i8 as u8); } else { b.extend_from_slice(&(imm as u16).to_le_bytes()); }
+    };
+    let mut b = vec![if use_imm8 { 0x83u8 } else { 0x81 }]; // cmp r/m16, imm8sx | imm16  (/7)
+    match left {
+        Expr::Global(j) => {
+            let modrm_at = b.len();
+            b.push(0x3E); // mod00 r/m110 reg=7 → [disp16]
+            b.extend_from_slice(&(word_off as u16).to_le_bytes()); // placeholder addend
+            push_imm(&mut b);
+            (b, Some((modrm_at, *j)))
+        }
+        Expr::Param(i) => {
+            let disp = long_param_disp(*i, locals) + word_off;
+            b.push(bp_modrm(0x7E, disp)); // /7 with bp
+            push_bp_disp(&mut b, disp);
+            push_imm(&mut b);
+            (b, None)
+        }
+        Expr::Local(i) => {
+            let disp = locals.disp(*i) + word_off;
+            b.push(bp_modrm(0x7E, disp));
+            push_bp_disp(&mut b, disp);
+            push_imm(&mut b);
+            (b, None)
+        }
+        _ => unreachable!("long_operand gates these forms"),
+    }
+}
 /// (high-word false jcc, high-word true jcc, low-word false jcc) for an
 /// ordering comparison. High word uses signed jg/jl (or unsigned ja/jb); the
 /// low word is always an unsigned tiebreak.
