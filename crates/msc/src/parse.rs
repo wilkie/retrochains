@@ -764,6 +764,18 @@ pub(crate) fn parse_global_decl(p: &mut Parser<'_>) -> Result<(), EmitError> {
                     }
                 }
             }
+            // Partial initializer (`int a[5] = {1,2}`): zero-fill to the declared
+            // array length — MSC emits the trailing zeros explicitly in _DATA.
+            // Fixtures 502, 2093, 2453.
+            while values.len() < array_len {
+                values.push(if is_float && !is_pointer {
+                    GlobalInit::FloatBits(0, float_width)
+                } else if is_char && !is_pointer {
+                    GlobalInit::Byte(0)
+                } else {
+                    GlobalInit::Int(0)
+                });
+            }
             Some(values)
         } else if is_pointer && matches!(p.peek(), Some(Tok::StrLit(_))) {
             let bytes = match p.bump().cloned() {
