@@ -881,20 +881,28 @@ pub(crate) fn ax_holds_word_operand(out: &[u8], load: &[u8], store_self: &[u8]) 
     if ends(store_self) {
         return true;
     }
-    let n = out.len();
-    // Length of a trailing store-from-AX: `89 46 d8` / `89 86 d16` (bp-rel) or
-    // `a3 o16` (global moffs). None of these modify AX.
-    let store_len = if n >= 3 && out[n - 3] == 0x89 && out[n - 2] == 0x46 {
-        3
-    } else if n >= 4 && out[n - 4] == 0x89 && out[n - 3] == 0x86 {
-        4
-    } else if n >= 3 && out[n - 3] == 0xA3 {
-        3
-    } else {
-        return false;
-    };
-    let before = &out[..n - store_len];
-    before.len() >= load.len() && before[before.len() - load.len()..] == *load
+    // Pattern B: the operand was loaded into AX, then ONE OR MORE stores from AX
+    // to other slots followed — none of those modify AX, so AX still holds the
+    // operand (e.g. `r.a=v; r.b=v; r.c=v` keeps v live). Strip trailing
+    // stores-from-AX until the operand's load is exposed.
+    let mut n = out.len();
+    loop {
+        if n >= load.len() && out[n - load.len()..n] == *load {
+            return true;
+        }
+        // Length of a trailing store-from-AX: `89 46 d8` / `89 86 d16` (bp-rel)
+        // or `a3 o16` (global moffs).
+        let store_len = if n >= 3 && out[n - 3] == 0x89 && out[n - 2] == 0x46 {
+            3
+        } else if n >= 4 && out[n - 4] == 0x89 && out[n - 3] == 0x86 {
+            4
+        } else if n >= 3 && out[n - 3] == 0xA3 {
+            3
+        } else {
+            return false;
+        };
+        n -= store_len;
+    }
 }
 /// `mov ax,[local i]`, eliding the load when AX provably already holds local
 /// `i` (straight-line reuse — see [`ax_holds_word_operand`]). Plain int slots
