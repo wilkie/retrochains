@@ -188,7 +188,9 @@ pub(crate) fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8
             out.extend_from_slice(&imm.to_le_bytes());
         }
         Expr::Local(i) => {
-            emit_load_local(*i, locals, out);
+            // Reuse AX when a just-emitted store/load already left local `i`
+            // there (MSC's straight-line register liveness).
+            emit_load_local_reuse(*i, locals, out);
         }
         Expr::Param(i) => {
             if locals.is_char_param(*i) {
@@ -200,7 +202,7 @@ pub(crate) fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8
                     out.push(0x98); // cbw (sign-extend)
                 }
             } else {
-                emit_load_param(*i, out);
+                emit_load_param_reuse(*i, locals, out);
             }
         }
         // `(int)(long >> 16)`: the result is the long's high word. Read it
@@ -844,6 +846,66 @@ pub(crate) fn emit_load_local(idx: usize, locals: &Locals<'_>, out: &mut Vec<u8>
     } else {
         out.push(0x8B); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp);
     }
+}
+/// Heuristic AX-liveness reuse: returns true when the trailing bytes of `out`
+/// prove AX already holds the word operand whose `mov ax,[op]` encoding is
+/// `load` and whose `mov [op],ax` self-store is `store_self`. MSC keeps a value
+/// just loaded into / stored from AX live across adjacent straight-line
+/// statements and reuses it instead of reloading. Two trailing shapes:
+///   (A) out ends with `store_self` — `op` was just written from AX
+///       (`x = …` then a read of `x`; fixtures 1970 `sum += t`, 3014 `s = s+x`).
+///   (B) out ends with `load` then exactly one store-from-AX to another slot —
+///       `op` was loaded then spilled, leaving AX unchanged (3014 `s = a` then
+///       `x = a + 1` reuses `a`).
+/// A store-from-AX never clobbers AX, so both shapes leave AX == op. This is a
+/// byte-pattern heuristic (same approach as the `return <local>` reload
+/// elision); it only fires when the defining op is literally the last thing
+/// emitted, i.e. straight-line within a basic block.
+pub(crate) fn ax_holds_word_operand(out: &[u8], load: &[u8], store_self: &[u8]) -> bool {
+    let ends = |pat: &[u8]| out.len() >= pat.len() && out[out.len() - pat.len()..] == *pat;
+    if ends(store_self) {
+        return true;
+    }
+    let n = out.len();
+    // Length of a trailing store-from-AX: `89 46 d8` / `89 86 d16` (bp-rel) or
+    // `a3 o16` (global moffs). None of these modify AX.
+    let store_len = if n >= 3 && out[n - 3] == 0x89 && out[n - 2] == 0x46 {
+        3
+    } else if n >= 4 && out[n - 4] == 0x89 && out[n - 3] == 0x86 {
+        4
+    } else if n >= 3 && out[n - 3] == 0xA3 {
+        3
+    } else {
+        return false;
+    };
+    let before = &out[..n - store_len];
+    before.len() >= load.len() && before[before.len() - load.len()..] == *load
+}
+/// `mov ax,[local i]`, eliding the load when AX provably already holds local
+/// `i` (straight-line reuse — see [`ax_holds_word_operand`]). Plain int slots
+/// only; long / float / char fall back to a real load.
+pub(crate) fn emit_load_local_reuse(i: usize, locals: &Locals<'_>, out: &mut Vec<u8>) {
+    if locals.size(i) == 2 && !locals.is_long_local(i) && !locals.is_float_local(i) {
+        let d = locals.disp(i);
+        let load = { let mut v = vec![0x8B, bp_modrm(0x46, d)]; push_bp_disp(&mut v, d); v };
+        let store_self = { let mut v = vec![0x89, bp_modrm(0x46, d)]; push_bp_disp(&mut v, d); v };
+        if ax_holds_word_operand(out, &load, &store_self) {
+            return;
+        }
+    }
+    emit_load_local(i, locals, out);
+}
+/// `mov ax,[param i]` with the same AX-reuse elision, for plain int params.
+pub(crate) fn emit_load_param_reuse(i: usize, locals: &Locals<'_>, out: &mut Vec<u8>) {
+    if !locals.is_long_param(i) && !locals.is_float_param(i) {
+        let d = param_disp(i);
+        let load = { let mut v = vec![0x8B, bp_modrm(0x46, d)]; push_bp_disp(&mut v, d); v };
+        let store_self = { let mut v = vec![0x89, bp_modrm(0x46, d)]; push_bp_disp(&mut v, d); v };
+        if ax_holds_word_operand(out, &load, &store_self) {
+            return;
+        }
+    }
+    emit_load_param(i, out);
 }
 /// Load a long operand's high word (the upper 16 bits) into AX — used for
 /// `(int)(long >> 16)`.
@@ -1529,7 +1591,7 @@ pub(crate) fn const_index_global(e: &Expr, locals: &Locals<'_>) -> Option<(usize
 /// `emit_binop` to handle either operand kind on the left-hand side.
 pub(crate) fn bp_load<'a>(e: &'a Expr, locals: &'a Locals<'_>) -> Option<Box<dyn FnOnce(&mut Vec<u8>) + 'a>> {
     match e {
-        Expr::Local(i) => Some(Box::new(move |out: &mut Vec<u8>| emit_load_local(*i, locals, out))),
+        Expr::Local(i) => Some(Box::new(move |out: &mut Vec<u8>| emit_load_local_reuse(*i, locals, out))),
         Expr::Param(i) => Some(Box::new(move |out: &mut Vec<u8>| {
             if locals.is_char_param(*i) {
                 let disp = param_disp(*i) as u8;
@@ -1540,7 +1602,7 @@ pub(crate) fn bp_load<'a>(e: &'a Expr, locals: &'a Locals<'_>) -> Option<Box<dyn
                     out.push(0x98);  // cbw — sign-extend byte param to word
                 }
             } else {
-                emit_load_param(*i, out);
+                emit_load_param_reuse(*i, locals, out);
             }
         })),
         _ => None,
