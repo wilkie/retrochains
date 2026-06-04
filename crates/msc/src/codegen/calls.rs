@@ -122,6 +122,7 @@ pub(crate) fn emit_call_ptr(
 /// `cwd` for the sign extension; otherwise uses explicit `mov dx, K_hi`.
 pub(crate) fn emit_push_arg_long(arg: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
     if let Some(k) = arg.fold(locals.inits) {
+        // Constant long: materialize into DX:AX, push high then low.
         let lo = (k as u32 & 0xFFFF) as u16;
         out.push(0xB8);
         out.extend_from_slice(&lo.to_le_bytes()); // mov ax, k_lo
@@ -132,11 +133,41 @@ pub(crate) fn emit_push_arg_long(arg: &Expr, locals: &Locals<'_>, out: &mut Vec<
             out.push(0xBA);
             out.extend_from_slice(&hi.to_le_bytes()); // mov dx, k_hi
         }
-    } else {
-        // Non-constant: load low word into AX, then use cwd or load DX separately.
-        emit_expr_to_ax(arg, locals, out, fixups);
-        out.push(0x99); // cwd: assume sign extension is appropriate
+        out.push(0x52); // push dx (high word)
+        out.push(0x50); // push ax (low word)
+        return;
     }
+    // An addressable long operand is pushed directly from memory, high word
+    // then low — `push WORD [hi]; push WORD [lo]` — without going through
+    // DX:AX. Fixture 3252 (`take_long(x)`, x a long param).
+    match arg {
+        Expr::Param(i) if locals.is_long_param(*i) => {
+            let lo = long_param_disp(*i, locals);
+            let hi = lo + 2;
+            out.push(0xFF); out.push(bp_modrm(0x76, hi)); push_bp_disp(out, hi);
+            out.push(0xFF); out.push(bp_modrm(0x76, lo)); push_bp_disp(out, lo);
+            return;
+        }
+        Expr::Local(i) if locals.is_long_local(*i) => {
+            let lo = locals.disp(*i);
+            let hi = lo + 2;
+            out.push(0xFF); out.push(bp_modrm(0x76, hi)); push_bp_disp(out, hi);
+            out.push(0xFF); out.push(bp_modrm(0x76, lo)); push_bp_disp(out, lo);
+            return;
+        }
+        Expr::Global(g) if locals.is_long_global(*g) => {
+            out.push(0xFF); out.push(0x36); // push WORD [g+2]
+            let off = out.len(); out.extend_from_slice(&2u16.to_le_bytes());
+            fixups.push(Fixup { body_offset: off - 1, kind: FixupKind::GlobalAddr { global_idx: *g } });
+            out.push(0xFF); out.push(0x36); // push WORD [g]
+            let off = out.len(); out.extend_from_slice(&[0x00, 0x00]);
+            fixups.push(Fixup { body_offset: off - 1, kind: FixupKind::GlobalAddr { global_idx: *g } });
+            return;
+        }
+        _ => {}
+    }
+    // Fallback: a computed long expression — evaluate into DX:AX, push both.
+    emit_long_to_dx_ax(arg, locals, out, fixups);
     out.push(0x52); // push dx (high word)
     out.push(0x50); // push ax (low word)
 }

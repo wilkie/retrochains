@@ -35,6 +35,8 @@ pub(crate) fn parse_unit(source: &str) -> Result<Unit, EmitError> {
         block_frame_max: 0,
         block_local_scopes: Vec::new(),
     };
+    let mut proto_long_params: std::collections::HashMap<String, Vec<bool>> = std::collections::HashMap::new();
+    let mut prototyped_fns: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut functions = Vec::new();
     let mut decl_order: Vec<TopDecl> = Vec::new();
     while p.peek().is_some() {
@@ -134,7 +136,15 @@ pub(crate) fn parse_unit(source: &str) -> Result<Unit, EmitError> {
                 }
             }
             if matches!(p.toks.get(close_idx + 1), Some(Tok::Semi)) {
-                // Skip the prototype. Advance the parser past `;`.
+                // Record the prototype's long-param flags (so a call still pushes
+                // long args as two words), then skip past `;`.
+                if let Some(Tok::Ident(nm)) = p.toks.get(after) {
+                    prototyped_fns.insert(symbol_name(nm));
+                    let longs = proto_param_longs(p.toks, lparen_idx, close_idx);
+                    if longs.iter().any(|&b| b) {
+                        proto_long_params.insert(symbol_name(nm), longs);
+                    }
+                }
                 p.pos = close_idx + 2;
                 continue;
             }
@@ -152,7 +162,7 @@ pub(crate) fn parse_unit(source: &str) -> Result<Unit, EmitError> {
             "translation unit has no functions".to_owned(),
         ));
     }
-    Ok(Unit { globals: p.globals, structs: p.structs, functions, decl_order, strings: p.strings })
+    Ok(Unit { globals: p.globals, structs: p.structs, functions, decl_order, strings: p.strings, proto_long_params, prototyped_fns })
 }
 /// Parse a file-scope `struct <Name> <var> [= { ... }];` declaration.
 /// Stores the struct global as if it were a `char` array sized to
@@ -1750,6 +1760,35 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
     // declarations the two are identical.
     let locals = p.local_specs.clone();
     Ok(Function { name, return_int, return_long, return_char, return_float_width, params, param_is_char, param_is_long, param_is_unsigned, param_float_width, param_pointee_size, locals, local_names, body })
+}
+/// Scan a prototype's parameter list (the tokens between `(` at `lparen_idx`
+/// and `)` at `close_idx`) and return each param's `is_long` flag. A param is
+/// long iff it carries the `long` keyword and is NOT a pointer (`long *` is a
+/// 2-byte near pointer, not a 4-byte long arg). `(void)` / `()` → empty.
+fn proto_param_longs(toks: &[Tok], lparen_idx: usize, close_idx: usize) -> Vec<bool> {
+    let mut longs = Vec::new();
+    let mut depth = 0i32;
+    let (mut has_long, mut has_star, mut saw_any) = (false, false, false);
+    for j in (lparen_idx + 1)..close_idx {
+        match toks.get(j) {
+            Some(Tok::LParen) => { depth += 1; saw_any = true; }
+            Some(Tok::RParen) => depth -= 1,
+            Some(Tok::Comma) if depth == 0 => {
+                longs.push(has_long && !has_star);
+                has_long = false; has_star = false; saw_any = false;
+            }
+            Some(Tok::Kw("long")) if depth == 0 => { has_long = true; saw_any = true; }
+            Some(Tok::Star) if depth == 0 => { has_star = true; saw_any = true; }
+            // A lone `void` parameter list means no params.
+            Some(Tok::Kw("void")) if depth == 0 && !saw_any => {}
+            Some(_) => saw_any = true,
+            None => {}
+        }
+    }
+    if saw_any {
+        longs.push(has_long && !has_star);
+    }
+    longs
 }
 pub(crate) fn parse_signed_int(p: &mut Parser<'_>) -> Result<i32, EmitError> {
     // Accept any compile-time constant expression — integer literal,

@@ -68,6 +68,17 @@ pub struct Unit {
     /// Each string is the bytes between the source double-quotes
     /// PLUS a terminating NUL byte appended by the parser.
     pub strings: Vec<Vec<u8>>,
+    /// Per prototype-only function declaration (`long f(long);`), the param
+    /// `is_long` flags keyed by symbol name. Definitions contribute their own
+    /// flags via `Function.param_is_long`; this carries the externs so a call
+    /// to one still pushes long args as two words (fixtures 3252, 3426).
+    pub proto_long_params: std::collections::HashMap<String, Vec<bool>>,
+    /// Symbol names of functions given an explicit source prototype
+    /// (`int f(int);`). MSC orders an explicitly-declared extern AFTER `__chkstk`
+    /// in the EXTDEF table, but an implicitly-declared one (called with only a
+    /// swallowed `#include`, no prototype) BEFORE `__chkstk`. Fixtures 1734
+    /// (proto → chkstk first) vs 4103 (`#include`, implicit → chkstk last).
+    pub prototyped_fns: std::collections::HashSet<String>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1468,10 +1479,15 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
         .filter(|f| f.return_char)
         .map(|f| symbol_name(&f.name))
         .collect();
-    let long_param_funcs: std::collections::HashMap<String, Vec<bool>> = unit.functions.iter()
+    let mut long_param_funcs: std::collections::HashMap<String, Vec<bool>> = unit.functions.iter()
         .filter(|f| f.param_is_long.iter().any(|&b| b))
         .map(|f| (symbol_name(&f.name), f.param_is_long.clone()))
         .collect();
+    // Prototype-only externs (no body in this TU) also need their long-param
+    // flags so calls push long args as two words. Definitions take precedence.
+    for (name, longs) in &unit.proto_long_params {
+        long_param_funcs.entry(name.clone()).or_insert_with(|| longs.clone());
+    }
     let float_returners: std::collections::HashMap<String, usize> = unit.functions.iter()
         .filter(|f| f.return_float_width != 0)
         .map(|f| (symbol_name(&f.name), f.return_float_width))
@@ -1866,20 +1882,33 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
             // Has implicit user-function externs, no COMDEFs.
             // Layout: __acrtused, [user-fn-externs], [fns], __chkstk.
             // Extern globals also go after __chkstk if any (fixture 4024).
+            // `__chkstk` precedes the user externs when every called extern was
+            // given an explicit source prototype (`int f(int);` — fixture 1734);
+            // an implicitly-declared extern (called with only a swallowed
+            // `#include`, no prototype — fixture 4103) keeps `__chkstk` LAST.
+            let chkstk_early = user_extern_order.iter().all(|n| unit.prototyped_fns.contains(n));
             let mut entries: Vec<(String, u8)> = Vec::new();
             for (m, ty) in fp_extern_block(uses_float) {
                 entries.push(((*m).to_owned(), *ty));
             }
             entries.push(("__acrtused".to_owned(), 0x01));
+            if chkstk_early {
+                entries.push(("__chkstk".to_owned(), 0x00));
+                for h in &helper_extern_order {
+                    entries.push((h.clone(), 0x00));
+                }
+            }
             for name in &user_extern_order {
                 entries.push((name.clone(), 0x00));
             }
             for f in &unit.functions {
                 entries.push((symbol_name(&f.name), 0x00));
             }
-            entries.push(("__chkstk".to_owned(), 0x00));
-            for h in &helper_extern_order {
-                entries.push((h.clone(), 0x00));
+            if !chkstk_early {
+                entries.push(("__chkstk".to_owned(), 0x00));
+                for h in &helper_extern_order {
+                    entries.push((h.clone(), 0x00));
+                }
             }
             emit_group(&mut b, &entries, &mut extdef_idx_of, &mut next_idx);
             // Add any extern globals to extdef_idx_of so FIXUP generation
