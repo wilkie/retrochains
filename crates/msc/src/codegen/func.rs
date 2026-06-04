@@ -165,7 +165,11 @@ pub(crate) fn emit_function(
     // Returning a struct > 4 bytes copies it to the `_BSS` temp via `movsw`,
     // needing DI+SI saved → WithSlideDiSi.
     let returns_big_struct = func.return_struct_bytes > 4;
-    let frame = if receives_float_return || returns_float_call || returns_big_struct {
+    let frame = if returns_big_struct && matches!(base_frame, Frame::None) {
+        // No locals (e.g. `return <global>`) — keep the bp-less prologue but add
+        // di/si for the movsw copy.
+        Frame::NoneDiSi
+    } else if receives_float_return || returns_float_call || returns_big_struct {
         Frame::WithSlideDiSi
     } else if matches!(base_frame, Frame::WithSlide)
         && body_needs_si(&body, &local_inits)
@@ -263,7 +267,7 @@ pub(crate) fn emit_function(
     };
 
     match frame {
-        Frame::None => bytes.extend_from_slice(&[0x33, 0xC0]),
+        Frame::None | Frame::NoneDiSi => bytes.extend_from_slice(&[0x33, 0xC0]),
         Frame::BpOnly | Frame::BpOnlySi => bytes.extend_from_slice(&[0x55, 0x8B, 0xEC, 0x33, 0xC0]),
         Frame::WithSlide | Frame::WithSlideSi | Frame::WithSlideDiSi => {
             bytes.extend_from_slice(&[0x55, 0x8B, 0xEC]);
@@ -285,8 +289,8 @@ pub(crate) fn emit_function(
         body_offset,
         kind: FixupKind::ExtCall { target: "__chkstk".to_owned() },
     });
-    // WithSlideDiSi: save DI then SI for the float-return `movsw` copy.
-    if matches!(frame, Frame::WithSlideDiSi) {
+    // WithSlideDiSi / NoneDiSi: save DI then SI for the `movsw` copy.
+    if matches!(frame, Frame::WithSlideDiSi | Frame::NoneDiSi) {
         bytes.push(0x57); // push di
         bytes.push(0x56); // push si
     }

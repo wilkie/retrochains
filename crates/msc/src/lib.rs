@@ -1341,6 +1341,12 @@ enum Frame {
     /// `push di; push si` after chkstk; epilogue `pop si; pop di; mov sp,bp;
     /// pop bp; ret` (fixtures 1684, 2144, 4001).
     WithSlideDiSi,
+    /// Like None (`xor ax,ax`, no bp) but saves/restores DI then SI for the
+    /// `movsw` that copies a struct return to its `_BSS` temp — a function that
+    /// returns a struct > 4 bytes but has no locals (e.g. `return <global>`).
+    /// Prologue adds `push di; push si` after chkstk; epilogue `pop si; pop di;
+    /// ret`. Fixture 423.
+    NoneDiSi,
 }
 
 impl Frame {
@@ -1356,6 +1362,7 @@ impl Frame {
     fn epilogue_bytes(self) -> &'static [u8] {
         match self {
             Frame::None => &[0xC3],
+            Frame::NoneDiSi => &[0x5E, 0x5F, 0xC3],
             Frame::BpOnly => &[0x5D, 0xC3],
             Frame::BpOnlySi => &[0x5E, 0x5D, 0xC3],
             Frame::WithSlide => &[0x8B, 0xE5, 0x5D, 0xC3],

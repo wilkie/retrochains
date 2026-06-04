@@ -547,6 +547,48 @@ pub(crate) fn emit_return(
         out.extend_from_slice(frame.epilogue_bytes());
         return;
     }
+    // Returning a struct GLOBAL by value (`return g`): same as the local case
+    // but the source is a fixed global address. Fixtures 422 (4B), 423 (6B).
+    if locals.return_struct_bytes > 0
+        && let Expr::Global(g) = expr
+    {
+        let n = locals.return_struct_bytes;
+        if n > 4
+            && let Some(bss_offset) = locals.struct_temp_bss_offset
+        {
+            let bo = out.len();
+            out.push(0xBF); out.extend_from_slice(&[0x00, 0x00]); // mov di, OFFSET $T
+            fixups.push(Fixup { body_offset: bo, kind: FixupKind::StructTemp { bss_offset } });
+            let bo = out.len();
+            out.push(0xBE); out.extend_from_slice(&[0x00, 0x00]); // mov si, OFFSET g
+            fixups.push(Fixup { body_offset: bo, kind: FixupKind::GlobalAddr { global_idx: *g } });
+            out.extend_from_slice(&[0x1E, 0x07]); // push ds; pop es
+            for _ in 0..(n / 2) { out.push(0xA5); } // movsw
+            let bo = out.len();
+            out.push(0xB8); out.extend_from_slice(&[0x00, 0x00]); // mov ax, OFFSET $T
+            fixups.push(Fixup { body_offset: bo, kind: FixupKind::StructTemp { bss_offset } });
+            out.extend_from_slice(frame.epilogue_bytes());
+            return;
+        }
+        if n == 1 {
+            let bo = out.len();
+            out.push(0xA0); out.extend_from_slice(&[0x00, 0x00]); // mov al, _g
+            fixups.push(Fixup { body_offset: bo, kind: FixupKind::GlobalAddr { global_idx: *g } });
+            out.extend_from_slice(&[0x2A, 0xE4]); // sub ah, ah
+        } else {
+            let bo = out.len();
+            out.push(0xA1); out.extend_from_slice(&[0x00, 0x00]); // mov ax, _g
+            fixups.push(Fixup { body_offset: bo, kind: FixupKind::GlobalAddr { global_idx: *g } });
+            if n > 2 {
+                out.push(0x8B); out.push(0x16); // mov dx, [g+2]
+                let bo = out.len();
+                out.extend_from_slice(&2u16.to_le_bytes());
+                fixups.push(Fixup { body_offset: bo - 1, kind: FixupKind::GlobalAddr { global_idx: *g } });
+            }
+        }
+        out.extend_from_slice(frame.epilogue_bytes());
+        return;
+    }
     // Float/double return via the `__fac` accumulator. The parser folds the
     // returned expression to a FloatLit (materialized as a CONST temp):
     //   9B <D9|DD> 06 <off16>  fld  <width> [$T]        (FIDRQQ + FloatLoad)
