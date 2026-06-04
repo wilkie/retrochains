@@ -290,6 +290,21 @@ pub(crate) fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_
         }
     };
     let disp = locals.disp(local_idx);
+    // `<struct-local> = <struct-returning call>`: a call returning a struct by
+    // value (<= 4 bytes) leaves it in AX (<=2) / DX:AX (3-4); store those words
+    // into the destination struct local. Fixtures 2614 etc.
+    if let Expr::Call { name, args } = value
+        && let Some(&bytes) = locals.struct_return_funcs.get(&symbol_name(name))
+        && bytes <= 4
+    {
+        emit_call_inner(name, args, locals, false, out, fixups);
+        out.push(0x89); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp); // mov [dest],ax
+        if bytes > 2 {
+            let hi = disp + 2;
+            out.push(0x89); out.push(bp_modrm(0x56, hi)); push_bp_disp(out, hi); // mov [dest+2],dx
+        }
+        return;
+    }
     // Long local compound mul/div/mod (`a *= r`, `a /= r`, `a %= r`): a runtime
     // helper taking the RHS long (DX:AX, pushed high-then-low) and the local's
     // ADDRESS. Mirrors the long-global path (emit_assign_global) but pushes
@@ -891,6 +906,24 @@ pub(crate) fn emit_assign_param(param_idx: usize, value: &Expr, locals: &Locals<
     }
 }
 pub(crate) fn emit_assign_global(global_idx: usize, value: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    // `<struct-global> = <struct-returning call>`: store AX (<=2 bytes) /
+    // DX:AX (3-4) into the destination struct global. Fixture 424.
+    if let Expr::Call { name, args } = value
+        && let Some(&bytes) = locals.struct_return_funcs.get(&symbol_name(name))
+        && bytes <= 4
+    {
+        emit_call_inner(name, args, locals, false, out, fixups);
+        let bo = out.len();
+        out.extend_from_slice(&[0xA3, 0x00, 0x00]); // mov [g], ax
+        fixups.push(Fixup { body_offset: bo, kind: FixupKind::GlobalAddr { global_idx } });
+        if bytes > 2 {
+            out.push(0x89); out.push(0x16); // mov [g+2], dx
+            let off = out.len();
+            out.extend_from_slice(&2u16.to_le_bytes());
+            fixups.push(Fixup { body_offset: off - 1, kind: FixupKind::GlobalAddr { global_idx } });
+        }
+        return;
+    }
     // Global pointer = address-of-global (`p = a` / `p = &g[K]`): MSC stores the
     // link-time OFFSET directly into the global with one instruction —
     //   c7 06 <&p> <OFFSET a + K>   mov word ptr [_p], OFFSET _a
