@@ -499,6 +499,37 @@ pub(crate) fn emit_return(
     out: &mut Vec<u8>,
     fixups: &mut Vec<Fixup>,
 ) {
+    // Small struct returned by value: load the struct local's bytes into the
+    // return registers — AX for <=2 bytes, DX:AX for 3-4. Reuse a value the
+    // preceding store just left in AL/AX (fixture 3408). 1-byte structs
+    // zero-extend the byte (`sub ah,ah`, fixture 2537); 2-byte load a word
+    // (2531); int-field structs reuse AX (3408).
+    if locals.return_struct_bytes > 0
+        && let Expr::Local(i) = expr
+    {
+        let n = locals.return_struct_bytes;
+        let disp = locals.disp(*i);
+        if n == 1 {
+            let byte_store = { let mut v = vec![0x88, bp_modrm(0x46, disp)]; push_bp_disp(&mut v, disp); v };
+            let al_set = out.len() >= byte_store.len() && out[out.len() - byte_store.len()..] == *byte_store;
+            if !al_set {
+                out.push(0x8A); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp); // mov al,[t]
+            }
+            out.extend_from_slice(&[0x2A, 0xE4]); // sub ah, ah
+        } else {
+            let word_store = { let mut v = vec![0x89, bp_modrm(0x46, disp)]; push_bp_disp(&mut v, disp); v };
+            let ax_set = out.len() >= word_store.len() && out[out.len() - word_store.len()..] == *word_store;
+            if !ax_set {
+                out.push(0x8B); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp); // mov ax,[t]
+            }
+            if n > 2 {
+                let hi = disp + 2;
+                out.push(0x8B); out.push(bp_modrm(0x56, hi)); push_bp_disp(out, hi); // mov dx,[t+2]
+            }
+        }
+        out.extend_from_slice(frame.epilogue_bytes());
+        return;
+    }
     // Float/double return via the `__fac` accumulator. The parser folds the
     // returned expression to a FloatLit (materialized as a CONST temp):
     //   9B <D9|DD> 06 <off16>  fld  <width> [$T]        (FIDRQQ + FloatLoad)
@@ -1369,6 +1400,7 @@ pub(crate) fn emit_threaded_for(
         label_fixups: locals.label_fixups,
         fpu_live: locals.fpu_live,
         return_float_width: locals.return_float_width,
+        return_struct_bytes: locals.return_struct_bytes,
         float_call_temp_disp: locals.float_call_temp_disp,
         fpu_pending_fwait: locals.fpu_pending_fwait,
     };
@@ -1701,6 +1733,7 @@ pub(crate) fn emit_loop(
         label_fixups: locals.label_fixups,
         fpu_live: locals.fpu_live,
         return_float_width: locals.return_float_width,
+        return_struct_bytes: locals.return_struct_bytes,
         float_call_temp_disp: locals.float_call_temp_disp,
         fpu_pending_fwait: locals.fpu_pending_fwait,
     };
@@ -2357,6 +2390,7 @@ pub(crate) fn emit_do_while(
         label_fixups: locals.label_fixups,
         fpu_live: locals.fpu_live,
         return_float_width: locals.return_float_width,
+        return_struct_bytes: locals.return_struct_bytes,
         float_call_temp_disp: locals.float_call_temp_disp,
         fpu_pending_fwait: locals.fpu_pending_fwait,
     };

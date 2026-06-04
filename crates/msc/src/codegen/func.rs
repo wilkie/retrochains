@@ -469,6 +469,7 @@ pub(crate) fn emit_function(
         label_fixups: &label_fixups,
         fpu_live: &fpu_live,
         return_float_width: func.return_float_width,
+        return_struct_bytes: func.return_struct_bytes,
         float_call_temp_disp,
         fpu_pending_fwait: &fpu_pending_fwait,
     };

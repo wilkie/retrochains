@@ -190,6 +190,11 @@ pub struct Function {
     /// is returned via the `__fac` floating accumulator: the callee does
     /// `fstp QWORD __fac; mov ax, OFFSET __fac`, returning AX = &__fac.
     pub return_float_width: usize,
+    /// Total bytes of a struct returned BY VALUE (1..=4), 0 otherwise. A small
+    /// struct comes back in AX (<=2 bytes) or DX:AX (3-4 bytes); `return <s>`
+    /// loads the struct local's bytes into those registers. A struct-pointer
+    /// return is just an int (this stays 0). Larger by-value returns are NYI.
+    pub return_struct_bytes: usize,
     pub params: Vec<String>,
     /// Parallel to `params`: true when the corresponding parameter is
     /// declared as `char` (signed or unsigned). Used to emit byte-compare
@@ -420,6 +425,9 @@ pub struct Locals<'a> {
     /// Byte width (4/8) of the enclosing function's `float`/`double` return,
     /// 0 otherwise. A `return <float>` emits the `__fac` accumulator sequence.
     pub return_float_width: usize,
+    /// Total bytes (1..=4) of a struct returned BY VALUE, 0 otherwise.
+    /// `return <struct-local>` loads it into AX (<=2 bytes) or DX:AX (3-4).
+    pub return_struct_bytes: usize,
     /// BP-relative displacement of the hidden 8-byte temp used to receive a
     /// `return (int)<float-returning call>` result, 0 when unused.
     pub float_call_temp_disp: i16,

@@ -962,6 +962,7 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
     let mut return_char = false;
     let mut return_long = false;
     let mut return_float_width = 0usize;
+    let mut return_struct_bytes = 0usize;
     let return_int = match p.bump().cloned() {
         Some(Tok::Kw("int")) => true,
         Some(Tok::Kw("char")) => { return_char = true; true }
@@ -976,11 +977,17 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
         Some(Tok::Kw("double")) => { return_float_width = 8; false }
         Some(Tok::Kw("void")) => false,
         Some(Tok::Kw("struct")) => {
-            // Skip the struct's name. Phase 1 only models functions
-            // that return a struct *pointer* (`struct S *f()`) — full
-            // struct-by-value returns need a hidden-pointer ABI we
-            // don't support yet.
-            if matches!(p.peek(), Some(Tok::Ident(_))) { p.bump(); }
+            // Capture the struct's total size: a small struct returned BY VALUE
+            // (<= 4 bytes, no `*`) comes back in AX / DX:AX. A struct *pointer*
+            // return (`struct S *f()`) is just an int (handled by the `*` loop
+            // below, which clears return_struct_bytes). Larger by-value returns
+            // need the hidden-pointer ABI we don't support yet.
+            if let Some(Tok::Ident(sname)) = p.peek().cloned() {
+                p.bump();
+                if let Some(s) = p.structs.iter().find(|s| s.name == sname) {
+                    return_struct_bytes = s.total_bytes;
+                }
+            }
             true
         }
         other => {
@@ -995,7 +1002,7 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
     // Pointer return types (`char *fn(...)`, `int *fn(...)`): consume
     // the `*` markers. We model the return as int (a pointer fits in
     // AX) — sufficient for `fn()[K]` shapes (fixture 1227).
-    while matches!(p.peek(), Some(Tok::Star)) { p.bump(); }
+    while matches!(p.peek(), Some(Tok::Star)) { p.bump(); return_struct_bytes = 0; }
     let name = match p.bump().cloned() {
         Some(Tok::Kw("main")) => "main".to_owned(),
         Some(Tok::Ident(s)) => s,
@@ -1759,7 +1766,7 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
     // while the body was parsed. For functions without nested-block
     // declarations the two are identical.
     let locals = p.local_specs.clone();
-    Ok(Function { name, return_int, return_long, return_char, return_float_width, params, param_is_char, param_is_long, param_is_unsigned, param_float_width, param_pointee_size, locals, local_names, body })
+    Ok(Function { name, return_int, return_long, return_char, return_float_width, return_struct_bytes, params, param_is_char, param_is_long, param_is_unsigned, param_float_width, param_pointee_size, locals, local_names, body })
 }
 /// Scan a prototype's parameter list (the tokens between `(` at `lparen_idx`
 /// and `)` at `close_idx`) and return each param's `is_long` flag. A param is
