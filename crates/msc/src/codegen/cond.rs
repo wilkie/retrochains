@@ -281,6 +281,31 @@ pub(crate) fn emit_cond_cmp_inner(cond: &Cond, locals: &Locals<'_>, out: &mut Ve
         fixups.push(Fixup { body_offset: off - 1, kind: FixupKind::GlobalAddr { global_idx: idx } });
         return;
     }
+    // Long local/param vs zero idiom: `mov ax,[lo]; or ax,[hi]` — ZF set iff
+    // both halves are zero (a long is 0 iff its low and high words are both 0).
+    // Covers `if (v)`, `if (v == 0L)`, `if (v != 0L)` for a long local or param;
+    // the generic path would wrongly test only the low word. Fixtures
+    // 3261/3263/3265/3298.
+    fn long_lp_disp(e: &Expr, locals: &Locals<'_>) -> Option<i16> {
+        match e {
+            Expr::Local(i) if locals.is_long_local(*i) => Some(locals.disp(*i)),
+            Expr::Param(i) if locals.is_long_param(*i) => Some(long_param_disp(*i, locals)),
+            _ => None,
+        }
+    }
+    if let Some(disp) = match cond {
+        Cond::Truthy(e) => long_lp_disp(e, locals),
+        Cond::Cmp { op: RelOp::Eq | RelOp::Ne, left, right } if matches!(right, Expr::IntLit(0)) =>
+            long_lp_disp(left, locals),
+        Cond::Cmp { op: RelOp::Eq | RelOp::Ne, left, right } if matches!(left, Expr::IntLit(0)) =>
+            long_lp_disp(right, locals),
+        _ => None,
+    } {
+        let hi = disp + 2;
+        out.push(0x8B); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp); // mov ax,[bp+lo]
+        out.push(0x0B); out.push(bp_modrm(0x46, hi)); push_bp_disp(out, hi);     // or ax,[bp+hi]
+        return;
+    }
     // Pointer-as-condition: `if (p)` / `if (p == 0)` where p holds `&x`/`&g`.
     //   &local x at [bp-K] → `cmp bp, K`  (the pointer is 0 iff bp == K)
     //   &global g          → `mov ax, OFFSET g; or ax, ax`
