@@ -372,7 +372,21 @@ pub(crate) fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
             if self_assign_addsub
                 && let Expr::BinOp { right, .. } = value
             {
-                prop_expr(right, cp);
+                // Long globals are normally never substituted (the LHS self-read
+                // must stay `Global(g)` for the long-assign codegen). But here the
+                // self-read LHS is preserved separately — only the RHS operand is
+                // prop'd — so a KNOWN long-global RHS may fold to a literal, letting
+                // a long compound `g op= h` lower to immediates / `mov ax,K; cwd`.
+                // Fixtures 734/735/741/742.
+                let known_long_global = match right.as_ref() {
+                    Expr::Global(gi) if cp.long_globals.contains(gi) => cp.g_known.get(gi).copied(),
+                    _ => None,
+                };
+                if let Some(k) = known_long_global {
+                    **right = Expr::IntLit(k);
+                } else {
+                    prop_expr(right, cp);
+                }
             } else {
                 prop_expr(value, cp);
             }

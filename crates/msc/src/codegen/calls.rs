@@ -509,6 +509,20 @@ fn emit_long_op_mem(op: BinOp, rhs: &Expr, locals: &Locals<'_>, out: &mut Vec<u8
     push_bp_disp(out, disp + 2);
 }
 
+/// Materialize a known 32-bit long constant into DX:AX the way MSC does:
+/// `mov ax,lo; cwd` when the high word is the sign-extension of the low word
+/// (the common small-value case), else `mov ax,lo; mov dx,hi`.
+pub(crate) fn emit_long_const_to_dx_ax(k: i32, out: &mut Vec<u8>) {
+    let lo = (k as u32 & 0xFFFF) as u16;
+    let hi = ((k >> 16) as u32 & 0xFFFF) as u16;
+    out.push(0xB8); out.extend_from_slice(&lo.to_le_bytes()); // mov ax, lo
+    let sign_ext = if (lo as i16) < 0 { 0xFFFFu16 } else { 0x0000 };
+    if hi == sign_ext {
+        out.push(0x99); // cwd
+    } else {
+        out.push(0xBA); out.extend_from_slice(&hi.to_le_bytes()); // mov dx, hi
+    }
+}
 pub(crate) fn emit_long_to_dx_ax(value: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
     match value {
         // Expression-context long mul/div/mod: push both operands as longs

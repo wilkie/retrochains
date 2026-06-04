@@ -306,7 +306,15 @@ pub(crate) fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_
             (BinOp::Mod, true) => "__aNNaulrem",
             _ => unreachable!(),
         };
-        emit_long_to_dx_ax(right, locals, out, fixups); // RHS long → DX:AX
+        // RHS long → DX:AX. A KNOWN long value (incl. a long-local operand whose
+        // init lives in locals.inits) materializes as `mov ax,lo; cwd` (or
+        // `mov ax,lo; mov dx,hi` when it exceeds a sign-extended i16), matching
+        // MSC's const materialization rather than a two-word slot load. 345/346/347.
+        if let Some(k) = right.fold(locals.inits) {
+            emit_long_const_to_dx_ax(k, out);
+        } else {
+            emit_long_to_dx_ax(right, locals, out, fixups);
+        }
         out.push(0x52); // push dx
         out.push(0x50); // push ax
         out.push(0x8D); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp); // lea ax,[bp+disp]
