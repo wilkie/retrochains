@@ -451,6 +451,10 @@ pub struct Locals<'a> {
     /// Total bytes (1..=4) of a struct returned BY VALUE, 0 otherwise.
     /// `return <struct-local>` loads it into AX (<=2 bytes) or DX:AX (3-4).
     pub return_struct_bytes: usize,
+    /// `Some(off)` for a function returning a struct > 4 bytes: the `_BSS`
+    /// offset of its scratch temp `$T`. `return <struct>` movsw-copies into it
+    /// and returns `AX = OFFSET $T`.
+    pub struct_temp_bss_offset: Option<u16>,
     /// BP-relative displacement of the hidden 8-byte temp used to receive a
     /// `return (int)<float-returning call>` result, 0 when unused.
     pub float_call_temp_disp: i16,
@@ -1276,6 +1280,10 @@ enum FixupKind {
     /// (`fld <dword|qword> [$T]`). Same CONST/DGROUP segment-relative FIXUP
     /// shape as StrLoad (`c4 off 9c`); resolved via the (bits,width) pool.
     FloatLoad { bits: u64, width: usize },
+    /// `OFFSET DGROUP:$T` — the address of a function's `_BSS` struct-return
+    /// scratch temp. Seg-relative via the DGROUP frame + `_BSS` target thread
+    /// (`c4 off 9f`); the placeholder holds the temp's `_BSS` offset.
+    StructTemp { bss_offset: u16 },
     /// FP-emulator marker fixup on an x87 instruction's leading byte: a
     /// seg-relative external reference (`c4 off 56 <idx>`) to FIDRQQ/FIWRQQ so
     /// the linker can rewrite the site for the emulator. The fixup offset is
@@ -1567,10 +1575,23 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
         .filter(|f| f.return_float_width != 0)
         .map(|f| (symbol_name(&f.name), f.return_float_width))
         .collect();
+    // Assign each function returning a struct > 4 bytes by value its own `_BSS`
+    // scratch temp at a sequential offset; total = `_BSS` segment length.
+    let mut bss_len = 0usize;
+    let struct_temp_offsets: Vec<Option<u16>> = unit.functions.iter().map(|f| {
+        if f.return_struct_bytes > 4 {
+            let off = bss_len as u16;
+            bss_len += (f.return_struct_bytes + 1) & !1;
+            Some(off)
+        } else {
+            None
+        }
+    }).collect();
     let function_emits: Vec<FunctionEmit> = unit
         .functions
         .iter()
-        .map(|f| emit_function(f, &long_globals, &char_globals, &unsigned_globals, &float_globals, &global_elem_sizes, &char_returners, &float_returners, &long_param_funcs, &struct_param_funcs, &struct_return_funcs, &struct_is_union, &union_globals))
+        .enumerate()
+        .map(|(i, f)| emit_function(f, struct_temp_offsets[i], &long_globals, &char_globals, &unsigned_globals, &float_globals, &global_elem_sizes, &char_returners, &float_returners, &long_param_funcs, &struct_param_funcs, &struct_return_funcs, &struct_is_union, &union_globals))
         .collect();
 
     // Per-function global offset within the _TEXT segment.
@@ -1807,8 +1828,8 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
     // SEGDEF #3: CONST  — read-only literals; length = string-pool
     // total (fixture 4103: `"hi\0"` = 3 bytes)
     b.write_segdef16(0x48, const_len, 7, 7, 1);
-    // SEGDEF #4: _BSS   — uninitialized data, 0 bytes
-    b.write_segdef16(0x48, 0, 8, 9, 1);
+    // SEGDEF #4: _BSS   — uninitialized data; struct-return scratch temps.
+    b.write_segdef16(0x48, u16::try_from(bss_len).expect("_BSS len fits"), 8, 9, 1);
 
     // GRPDEF — DGROUP contains CONST, _BSS, _DATA in *that* order.
     // The order matches MSC's typical link layout: read-only first,
@@ -2141,6 +2162,16 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
                         kind: FixupKind::FloatLoad { bits: *bits, width: *width },
                     });
                 }
+                FixupKind::StructTemp { bss_offset } => {
+                    // Placeholder holds the temp's _BSS offset; the linker adds
+                    // the _BSS segment base.
+                    fe.bytes[fx.body_offset + 1] = (bss_offset & 0xFF) as u8;
+                    fe.bytes[fx.body_offset + 2] = ((bss_offset >> 8) & 0xFF) as u8;
+                    ledata_fixups.push(ResolvedFixup {
+                        ledata_offset: caller_off + fx.body_offset + 1,
+                        kind: FixupKind::StructTemp { bss_offset: *bss_offset },
+                    });
+                }
                 FixupKind::FloatMarker { target } => {
                     // The fixup lands on the instruction byte itself (no +1).
                     ledata_fixups.push(ResolvedFixup {
@@ -2403,6 +2434,10 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
             }
             FixupKind::StrLoad { .. } | FixupKind::FloatLoad { .. } => {
                 payload.extend_from_slice(&[0xC4, off, 0x9C]);
+            }
+            FixupKind::StructTemp { .. } => {
+                // DGROUP frame (thread 1) + _BSS target (thread 3), P=1 → 0x9F.
+                payload.extend_from_slice(&[0xC4, off, 0x9F]);
             }
             FixupKind::FloatMarker { target } => {
                 let idx = *extdef_idx_of

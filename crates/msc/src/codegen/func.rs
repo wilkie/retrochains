@@ -101,6 +101,7 @@ pub(crate) fn coupled_return_local(expr: &Expr) -> Option<usize> {
 }
 pub(crate) fn emit_function(
     func: &Function,
+    struct_temp_offset: Option<u16>,
     long_globals: &[bool],
     char_globals: &[bool],
     unsigned_globals: &[bool],
@@ -161,7 +162,10 @@ pub(crate) fn emit_function(
             if float_returners_arg.contains_key(&symbol_name(name))));
     // Upgrade to WithSlideSi when the body uses runtime local array
     // indexing (SI register must be caller-saved).
-    let frame = if receives_float_return || returns_float_call {
+    // Returning a struct > 4 bytes copies it to the `_BSS` temp via `movsw`,
+    // needing DI+SI saved → WithSlideDiSi.
+    let returns_big_struct = func.return_struct_bytes > 4;
+    let frame = if receives_float_return || returns_float_call || returns_big_struct {
         Frame::WithSlideDiSi
     } else if matches!(base_frame, Frame::WithSlide)
         && body_needs_si(&body, &local_inits)
@@ -475,6 +479,7 @@ pub(crate) fn emit_function(
         fpu_live: &fpu_live,
         return_float_width: func.return_float_width,
         return_struct_bytes: func.return_struct_bytes,
+        struct_temp_bss_offset: struct_temp_offset,
         float_call_temp_disp,
         fpu_pending_fwait: &fpu_pending_fwait,
     };

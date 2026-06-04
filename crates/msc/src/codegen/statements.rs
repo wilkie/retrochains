@@ -509,6 +509,23 @@ pub(crate) fn emit_return(
     {
         let n = locals.return_struct_bytes;
         let disp = locals.disp(*i);
+        // Struct > 4 bytes: copy it to the `_BSS` scratch temp via `movsw` and
+        // return `AX = OFFSET $T` (hidden-pointer ABI). Fixtures 2755, 3410.
+        if n > 4
+            && let Some(bss_offset) = locals.struct_temp_bss_offset
+        {
+            let bo = out.len();
+            out.push(0xBF); out.extend_from_slice(&[0x00, 0x00]); // mov di, OFFSET $T
+            fixups.push(Fixup { body_offset: bo, kind: FixupKind::StructTemp { bss_offset } });
+            out.push(0x8D); out.push(bp_modrm(0x76, disp)); push_bp_disp(out, disp); // lea si,[bp+disp]
+            out.extend_from_slice(&[0x1E, 0x07]); // push ds; pop es
+            for _ in 0..(n / 2) { out.push(0xA5); } // movsw
+            let bo = out.len();
+            out.push(0xB8); out.extend_from_slice(&[0x00, 0x00]); // mov ax, OFFSET $T
+            fixups.push(Fixup { body_offset: bo, kind: FixupKind::StructTemp { bss_offset } });
+            out.extend_from_slice(frame.epilogue_bytes());
+            return;
+        }
         if n == 1 {
             let byte_store = { let mut v = vec![0x88, bp_modrm(0x46, disp)]; push_bp_disp(&mut v, disp); v };
             let al_set = out.len() >= byte_store.len() && out[out.len() - byte_store.len()..] == *byte_store;
@@ -1404,6 +1421,7 @@ pub(crate) fn emit_threaded_for(
         fpu_live: locals.fpu_live,
         return_float_width: locals.return_float_width,
         return_struct_bytes: locals.return_struct_bytes,
+        struct_temp_bss_offset: locals.struct_temp_bss_offset,
         float_call_temp_disp: locals.float_call_temp_disp,
         fpu_pending_fwait: locals.fpu_pending_fwait,
     };
@@ -1740,6 +1758,7 @@ pub(crate) fn emit_loop(
         fpu_live: locals.fpu_live,
         return_float_width: locals.return_float_width,
         return_struct_bytes: locals.return_struct_bytes,
+        struct_temp_bss_offset: locals.struct_temp_bss_offset,
         float_call_temp_disp: locals.float_call_temp_disp,
         fpu_pending_fwait: locals.fpu_pending_fwait,
     };
@@ -2400,6 +2419,7 @@ pub(crate) fn emit_do_while(
         fpu_live: locals.fpu_live,
         return_float_width: locals.return_float_width,
         return_struct_bytes: locals.return_struct_bytes,
+        struct_temp_bss_offset: locals.struct_temp_bss_offset,
         float_call_temp_disp: locals.float_call_temp_disp,
         fpu_pending_fwait: locals.fpu_pending_fwait,
     };
