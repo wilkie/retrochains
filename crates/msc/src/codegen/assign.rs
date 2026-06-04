@@ -291,17 +291,25 @@ pub(crate) fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_
     };
     let disp = locals.disp(local_idx);
     // `<struct-local> = <struct-returning call>`: a call returning a struct by
-    // value (<= 4 bytes) leaves it in AX (<=2) / DX:AX (3-4); store those words
-    // into the destination struct local. Fixtures 2614 etc.
+    // value leaves it in AX (<=2) / DX:AX (3-4), or AX = &temp (>4). Store the
+    // words into the dest, or movsw-copy from the temp. Fixtures 2614, 2352.
     if let Expr::Call { name, args } = value
         && let Some(&bytes) = locals.struct_return_funcs.get(&symbol_name(name))
-        && bytes <= 4
     {
         emit_call_inner(name, args, locals, false, out, fixups);
-        out.push(0x89); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp); // mov [dest],ax
-        if bytes > 2 {
-            let hi = disp + 2;
-            out.push(0x89); out.push(bp_modrm(0x56, hi)); push_bp_disp(out, hi); // mov [dest+2],dx
+        if bytes <= 4 {
+            out.push(0x89); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp); // mov [dest],ax
+            if bytes > 2 {
+                let hi = disp + 2;
+                out.push(0x89); out.push(bp_modrm(0x56, hi)); push_bp_disp(out, hi); // mov [dest+2],dx
+            }
+        } else {
+            // > 4 bytes: callee returned AX = &temp; movsw-copy into the dest
+            // local (`lea di,[dest]; mov si,ax; push ss; pop es; movsw`).
+            out.push(0x8D); out.push(bp_modrm(0x7E, disp)); push_bp_disp(out, disp); // lea di,[bp+disp]
+            out.extend_from_slice(&[0x8B, 0xF0]); // mov si, ax
+            out.extend_from_slice(&[0x16, 0x07]); // push ss; pop es
+            for _ in 0..(bytes / 2) { out.push(0xA5); } // movsw
         }
         return;
     }

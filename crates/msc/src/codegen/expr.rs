@@ -1640,6 +1640,10 @@ pub(crate) fn bp_load<'a>(e: &'a Expr, locals: &'a Locals<'_>) -> Option<Box<dyn
             let disp = locals.param_base_disp(*param) + *byte_off as i16;
             out.push(0x8B); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp); // mov ax,[bp+disp]
         })),
+        Expr::LocalField { local, byte_off, size: 2 } => Some(Box::new(move |out: &mut Vec<u8>| {
+            let disp = locals.disp(*local) + *byte_off as i16;
+            out.push(0x8B); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp); // mov ax,[bp+disp]
+        })),
         _ => None,
     }
 }
@@ -1651,6 +1655,8 @@ pub(crate) fn bp_disp(e: &Expr, locals: &Locals<'_>) -> Option<i16> {
         Expr::Param(i) => Some(4 + (*i as i16) * 2),
         // Word field of a by-value struct param: a `[bp+disp]` operand.
         Expr::ParamField { param, byte_off, size: 2 } => Some(locals.param_base_disp(*param) + *byte_off as i16),
+        // Word field of a struct local: a `[bp+disp]` operand.
+        Expr::LocalField { local, byte_off, size: 2 } => Some(locals.disp(*local) + *byte_off as i16),
         // Word local-array element `a[K]` (constant K) is a `[bp+disp]` operand.
         // (Byte elements need cbw, so they are not bp-addressable here.)
         Expr::LocalIndex { local, index } => index.fold(locals.inits).map(|k| locals.disp(*local) + (k as i16) * 2),

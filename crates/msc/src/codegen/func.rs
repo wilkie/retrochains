@@ -163,8 +163,12 @@ pub(crate) fn emit_function(
     // Upgrade to WithSlideSi when the body uses runtime local array
     // indexing (SI register must be caller-saved).
     // Returning a struct > 4 bytes copies it to the `_BSS` temp via `movsw`,
-    // needing DI+SI saved → WithSlideDiSi.
-    let returns_big_struct = func.return_struct_bytes > 4;
+    // needing DI+SI saved → WithSlideDiSi. Same for a caller RECEIVING a >4-byte
+    // struct return (`dest = f()` → movsw from the temp).
+    let receives_big_struct = body.iter().any(|s| matches!(s,
+        Stmt::Assign { target: AssignTarget::Local(_) | AssignTarget::Global(_), value: Expr::Call { name, .. } }
+            if struct_return_funcs.get(&symbol_name(name)).copied().unwrap_or(0) > 4));
+    let returns_big_struct = func.return_struct_bytes > 4 || receives_big_struct;
     let frame = if returns_big_struct && matches!(base_frame, Frame::None) {
         // No locals (e.g. `return <global>`) — keep the bp-less prologue but add
         // di/si for the movsw copy.
