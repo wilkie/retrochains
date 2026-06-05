@@ -618,6 +618,24 @@ pub(crate) fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8
                 out.extend_from_slice(&[0x8B, 0x07]); // mov ax,[bx]
             }
         }
+        Expr::PostMutateDeref { ptr, step, is_byte } => {
+            // `(*p)++` — read the OLD pointee into AX, THEN increment `[bx]` in
+            // place: `mov bx,[p]; mov ax,[bx]; inc word [bx]`. Fixtures 2857/3107.
+            emit_load_bx(ptr, locals, out, fixups);
+            if *is_byte {
+                out.extend_from_slice(&[0x8A, 0x07, 0x98]); // mov al,[bx]; cbw
+            } else {
+                out.extend_from_slice(&[0x8B, 0x07]); // mov ax,[bx]
+            }
+            match (*step, *is_byte) {
+                (1, false) => out.extend_from_slice(&[0xFF, 0x07]),  // inc word [bx]
+                (-1, false) => out.extend_from_slice(&[0xFF, 0x0F]), // dec word [bx]
+                (1, true) => out.extend_from_slice(&[0xFE, 0x07]),   // inc byte [bx]
+                (-1, true) => out.extend_from_slice(&[0xFE, 0x0F]),  // dec byte [bx]
+                (k, false) => { out.extend_from_slice(&[0x81, 0x07]); out.extend_from_slice(&((k as u32 & 0xFFFF) as u16).to_le_bytes()); }
+                (k, true) => out.extend_from_slice(&[0x80, 0x07, (k as u32 & 0xFF) as u8]),
+            }
+        }
         Expr::PostMutateGlobal { global_idx, step } => {
             // Load the OLD value into AX, then mutate the global.
             if locals.is_char_global(*global_idx) {

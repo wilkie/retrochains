@@ -4225,6 +4225,20 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                 return Ok(Expr::Seq { sides, value: Box::new(acc_value) });
             }
             p.eat(&Tok::RParen)?;
+            // `(*p)++` / `(*p)--` — the parens group the deref, so this mutates
+            // the POINTEE (by 1), unlike `*p++` which advances the pointer.
+            // Build a PostMutateDeref directly so the generic postfix loop
+            // doesn't reparent it as a pointer advance. Fixtures 2857, 3107.
+            if matches!(p.peek(), Some(Tok::PlusPlus) | Some(Tok::MinusMinus))
+                && let Expr::DerefWord { ptr } | Expr::DerefByte { ptr } = &inner
+                && matches!(ptr.as_ref(), Expr::Param(_) | Expr::Local(_) | Expr::Global(_))
+            {
+                let step = if matches!(p.peek(), Some(Tok::PlusPlus)) { 1 } else { -1 };
+                p.bump();
+                let is_byte = matches!(inner, Expr::DerefByte { .. });
+                let ptr = ptr.clone();
+                return Ok(Expr::PostMutateDeref { ptr, step, is_byte });
+            }
             // `(*p).field` (p a struct pointer) / `(*pp)->field` (pp a pointer to
             // struct pointer) — a pointer member chain. `.` after the deref reads
             // the struct directly (no extra hop); `->` derefs one more level.

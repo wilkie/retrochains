@@ -989,6 +989,10 @@ pub enum Expr {
     /// BX, increments `[bx]` in place, then evaluates to the NEW value
     /// (`mov bx,[p]; inc word [bx]; mov ax,[bx]`). Fixtures 2762, 3110.
     PreMutateDeref { ptr: Box<Expr>, step: i32, is_byte: bool },
+    /// `(*p)++` / `(*p)--` — evaluates to the OLD value at a pointer, then
+    /// increments `[bx]` in place (`mov bx,[p]; mov ax,[bx]; inc word [bx]`).
+    /// Distinct from `*p++` (which advances the pointer). Fixtures 2857, 3107.
+    PostMutateDeref { ptr: Box<Expr>, step: i32, is_byte: bool },
     /// `*p++` — the value at the OLD pointer, then the pointer advances by
     /// `step` (its element size). `mov bx,[p]; add [p],step; mov al/ax,[bx]`.
     /// The strcpy/walk idiom. Fixtures 3102, 2027 (in a condition).
@@ -1127,7 +1131,7 @@ impl Expr {
             Expr::PostMutateLocal { .. } | Expr::PostMutateGlobal { .. }
             | Expr::PreMutateLocal { .. } | Expr::PreMutateGlobal { .. }
             | Expr::PreMutateParam { .. } | Expr::PostMutateParam { .. }
-            | Expr::PreMutateDeref { .. } | Expr::PostIncDeref { .. }
+            | Expr::PreMutateDeref { .. } | Expr::PostIncDeref { .. } | Expr::PostMutateDeref { .. }
             | Expr::PreMutateIndexedGlobal { .. } | Expr::PostMutateIndexedGlobal { .. } => None,
             // Comma expression fold: if all the side stmts have no
             // observable side effect (just discard a value), fold to
