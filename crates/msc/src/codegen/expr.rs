@@ -20,6 +20,18 @@ pub(crate) fn emit_load_bx(e: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fix
     match e {
         Expr::Param(i) => { out.extend_from_slice(&[0x8B, 0x5E, param_disp(*i) as u8]); }
         Expr::Local(i) => { let d = locals.disp(*i); out.push(0x8B); out.push(bp_modrm(0x5E, d)); push_bp_disp(out, d); }
+        // A word global / global struct-field pointer loads straight into BX
+        // (`mov bx,[g+off]` = 8b 1e) — `*(g.p)`. Fixture 2981.
+        Expr::Global(g) if !locals.is_char_global(*g) && !locals.is_long_global(*g) => {
+            out.extend_from_slice(&[0x8B, 0x1E]);
+            let bo = out.len(); out.extend_from_slice(&[0x00, 0x00]);
+            fixups.push(Fixup { body_offset: bo - 1, kind: FixupKind::GlobalAddr { global_idx: *g } });
+        }
+        Expr::GlobalField { global, byte_off, size: 2 } => {
+            out.extend_from_slice(&[0x8B, 0x1E]);
+            let bo = out.len(); out.extend_from_slice(&byte_off.to_le_bytes());
+            fixups.push(Fixup { body_offset: bo - 1, kind: FixupKind::GlobalAddr { global_idx: *global } });
+        }
         _ => { emit_expr_to_ax(e, locals, out, fixups); out.extend_from_slice(&[0x8B, 0xD8]); } // mov bx,ax
     }
 }
@@ -797,6 +809,12 @@ pub(crate) fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8
                         return;
                     }
                     panic!("word deref of {:?} not yet supported", ptr);
+                }
+                // `*(g.p)` — a global struct-field pointer loads straight into
+                // BX (`mov bx,[g+off]`), no AX round-trip. Fixture 2981.
+                Expr::GlobalField { size: 2, .. } => {
+                    emit_load_bx(ptr, locals, out, fixups);
+                    out.extend_from_slice(&[0x8B, 0x07]); // mov ax,[bx]
                 }
                 other => {
                     // Generic: evaluate the pointer into AX, move to
