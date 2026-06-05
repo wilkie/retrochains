@@ -2074,6 +2074,36 @@ fn emit_binop_inner(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, o
         out.extend_from_slice(&[0x2B, 0xC0]);                      // sub ax,ax
         return;
     }
+    // `x * K` for a high-popcount constant over a WORD memory operand: a long
+    // shift/add chain isn't worth it, so MSC loads the constant into AX and
+    // multiplies the memory operand directly (`mov ax,K; imul word [x]`).
+    // Fixture 3623 (×31). Threshold: ≥5 set bits.
+    if matches!(op, BinOp::Mul)
+        && let Expr::IntLit(k) = right
+        && *k > 0
+        && (*k as u32).count_ones() >= 5
+    {
+        let kw = (*k as u32 & 0xFFFF) as u16;
+        let word_mem = match left {
+            Expr::Local(i) => locals.size(*i) == 2 && !locals.is_long_local(*i),
+            Expr::Param(i) => !locals.is_char_param(*i) && !locals.is_long_param(*i),
+            _ => false,
+        };
+        if word_mem && let Some(disp) = bp_disp(left, locals) {
+            out.push(0xB8); out.extend_from_slice(&kw.to_le_bytes()); // mov ax,K
+            out.push(0xF7); out.push(bp_modrm(0x6E, disp)); push_bp_disp(out, disp); // imul word [bp+disp]
+            return;
+        }
+        if let Expr::Global(g) = left
+            && !locals.is_char_global(*g) && !locals.is_long_global(*g)
+        {
+            out.push(0xB8); out.extend_from_slice(&kw.to_le_bytes()); // mov ax,K
+            out.push(0xF7); out.push(0x2E); // imul word [g]
+            let bo = out.len(); out.extend_from_slice(&[0x00, 0x00]);
+            fixups.push(Fixup { body_offset: bo - 1, kind: FixupKind::GlobalAddr { global_idx: *g } });
+            return;
+        }
+    }
     // Comparison ops materialize as 0/1 in AX via cmp+jcc.
     if matches!(op, BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge) {
         let cond = Cond::Cmp {
