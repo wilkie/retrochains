@@ -12,6 +12,10 @@ pub(crate) fn body_needs_si(stmts: &[Stmt], local_inits: &[Option<i32>]) -> bool
                     | AssignTarget::IndexedLocalByteVar { .. }
                     | AssignTarget::Index2D { .. })
                     || matches!(target, AssignTarget::ParamIndexStore { index, .. } if index.fold(inits).is_none())
+                    // `*dst = *src [± K]` copies through a pointer param from a
+                    // deref of another param — the source deref uses SI.
+                    || matches!(target, AssignTarget::DerefParam(d)
+                        if deref_param_src_is_param(value, *d))
                     || expr_si(value, inits)
             }
             Stmt::Return(e) => expr_si(e, inits),
@@ -38,6 +42,9 @@ pub(crate) fn body_needs_si(stmts: &[Stmt], local_inits: &[Option<i32>]) -> bool
             Expr::LocalIndex { index, .. } | Expr::LocalIndexByte { index, .. } => {
                 index.fold(inits).is_none()
             }
+            // `a[i]` on a pointer/array PARAM with a runtime index loads the
+            // pointer into SI (`mov si,[bp+p]; mov ax,[bx+si]`).
+            Expr::ParamIndex { index, .. } => index.fold(inits).is_none(),
             Expr::Index2D { .. } => true,
             // `*(ptr + i)` with a runtime index on a pointer param/local uses SI
             // (`mov si,[p]; mov ax,[bx+si]`); a decayed global array uses BX only.
@@ -63,6 +70,26 @@ pub(crate) fn body_needs_si(stmts: &[Stmt], local_inits: &[Option<i32>]) -> bool
         }
     }
     stmts.iter().any(|s| stmt_si(s, local_inits))
+}
+/// Structural check matching `deref_param_source`: is `value` a `*Param(s)` or
+/// `*Param(s) ± K` with `s != dst`? Used by body_needs_si (no pointee-width
+/// info available here; the corpus never mixes widths so the structural test
+/// agrees with the codegen path).
+fn deref_param_src_is_param(value: &Expr, dst: usize) -> bool {
+    fn src_of(e: &Expr) -> Option<usize> {
+        match e {
+            Expr::DerefWord { ptr } | Expr::DerefByte { ptr } => match ptr.as_ref() {
+                Expr::Param(s) => Some(*s),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+    let s = match value {
+        Expr::BinOp { op: BinOp::Add | BinOp::Sub, left, .. } => src_of(left),
+        _ => src_of(value),
+    };
+    matches!(s, Some(s) if s != dst)
 }
 /// Return the mod=01 or mod=10 modrm byte for `[bp + disp]`.
 /// When `disp` fits in i8 (-128..=127) use mod=01 (1-byte disp, modrm as-is).

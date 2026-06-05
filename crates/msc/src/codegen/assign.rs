@@ -6,6 +6,22 @@ use crate::*;
 /// — `mov ax, <expr>; mov [bp-disp], ax` — is reserved for a
 /// future fixture that exercises a non-peephole shape.
 pub(crate) fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    // Chained assignment `a = b = c = V`: the RHS is an AssignExpr with its own
+    // store side effects. Emit it (storing into the inner targets, leaving V in
+    // AX), then store AX into this target too — `mov ax,V; mov [c],ax; mov [b],ax;
+    // mov [a],ax`. Simple scalar targets. Fixtures 500, 2951, 3513.
+    if matches!(value, Expr::AssignExpr { .. })
+        && matches!(target, AssignTarget::Local(_) | AssignTarget::Param(_) | AssignTarget::Global(_))
+    {
+        emit_expr_to_ax(value, locals, out, fixups); // inner stores, value → AX
+        match target {
+            AssignTarget::Local(i) => { let d = locals.disp(i); out.push(0x89); out.push(bp_modrm(0x46, d)); push_bp_disp(out, d); }
+            AssignTarget::Param(i) => { let d = param_disp(i); out.push(0x89); out.push(bp_modrm(0x46, d)); push_bp_disp(out, d); }
+            AssignTarget::Global(g) => { let bo = out.len(); out.extend_from_slice(&[0xA3, 0x00, 0x00]); fixups.push(Fixup { body_offset: bo, kind: FixupKind::GlobalAddr { global_idx: g } }); }
+            _ => unreachable!(),
+        }
+        return;
+    }
     // Receive a float/double return into a local: the callee returns AX = &__fac,
     // and the caller block-copies `width` bytes from there into the local:
     //   call _fn; lea di,[bp+disp]; mov si,ax; push ss; pop es; movsw×(width/2)
@@ -265,6 +281,31 @@ pub(crate) fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_
         AssignTarget::GlobalField { global, byte_off, size } => {
             return emit_assign_global_field(global, byte_off, size, value, locals, out, fixups);
         }
+        AssignTarget::BitField { base, byte_off, bit_off, bit_width } => {
+            return emit_assign_bitfield(base, byte_off, bit_off, bit_width, value, locals, out, fixups);
+        }
+        AssignTarget::StructArrayField { array, index, stride, field_off, size } => {
+            // `arr[i].field = v`: `mov bx,[i]; <scale bx>; <v→ax>; mov [_arr+bx+off],ax`.
+            emit_load_bx(&index, locals, out, fixups);
+            let s = stride as usize;
+            if s.is_power_of_two() {
+                for _ in 0..s.trailing_zeros() { out.extend_from_slice(&[0xD1, 0xE3]); }
+            } else {
+                out.push(0x69); out.push(0xDB); out.extend_from_slice(&stride.to_le_bytes());
+            }
+            emit_expr_to_ax(&value, locals, out, fixups); // v → AX
+            if size == 1 {
+                if out.last() == Some(&0x98) { out.pop(); } // storing AL — strip cbw
+                out.push(0x88);
+            } else {
+                out.push(0x89);
+            }
+            out.push(0x87);
+            let bo = out.len();
+            out.extend_from_slice(&field_off.to_le_bytes());
+            fixups.push(Fixup { body_offset: bo - 1, kind: FixupKind::GlobalAddr { global_idx: array } });
+            return;
+        }
         AssignTarget::DerefParamField { ptr_param, byte_off, size } => {
             return emit_assign_deref_param_field(ptr_param, byte_off, size, value, locals, out, fixups);
         }
@@ -303,6 +344,9 @@ pub(crate) fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_
         }
         AssignTarget::DerefPostMutateLocal { local_idx, step } => {
             return emit_assign_deref_postmutate_local(local_idx, step, value, locals, out, fixups);
+        }
+        AssignTarget::DerefPostMutateParam { param_idx, step } => {
+            return emit_assign_deref_postmutate_param(param_idx, step, value, locals, out, fixups);
         }
     };
     let disp = locals.disp(local_idx);
@@ -734,9 +778,100 @@ pub(crate) fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_
 /// POINTEE size: a `char *p` (pointee 1) stores a byte (`c6 07`/`88 07`); an
 /// `int *p` (pointee 2) stores a word (`c7 07`/`89 07`). Fixtures 1225 (char*),
 /// 3055 (int*, `*p = 42` — must be a word store, not a byte one).
+/// For `*dst = RHS`, detect when RHS is `*src` or `*src ± K` where `src` is a
+/// pointer PARAM distinct from `dst`. Returns `(src_param, Option<(op, K)>)`.
+/// The same-pointee-width is required so the store width matches the load.
+pub(crate) fn deref_param_source(value: &Expr, dst: usize, locals: &Locals<'_>) -> Option<(usize, Option<(BinOp, i32)>)> {
+    fn src_of(e: &Expr) -> Option<usize> {
+        match e {
+            Expr::DerefWord { ptr } | Expr::DerefByte { ptr } => match ptr.as_ref() {
+                Expr::Param(s) => Some(*s),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+    let (src, post) = match value {
+        Expr::BinOp { op: op @ (BinOp::Add | BinOp::Sub), left, right } => {
+            let s = src_of(left)?;
+            let k = right.fold(locals.inits)?;
+            (s, Some((*op, k)))
+        }
+        _ => (src_of(value)?, None),
+    };
+    if src == dst { return None; }
+    // Both must have the same pointee width (byte vs word).
+    if (locals.param_pointee_size(src) == 1) != (locals.param_pointee_size(dst) == 1) {
+        return None;
+    }
+    Some((src, post))
+}
 pub(crate) fn emit_assign_deref_param(param_idx: usize, value: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
     let pdisp = param_disp(param_idx);
     let is_byte = locals.param_pointee_size(param_idx) == 1;
+    // `*p = *p ± K` (self-modify through a pointer param) → load p into BX, then
+    // an in-place memory op on `[bx]`: `inc/dec word [bx]` for ±1, else
+    // `add/sub word [bx], K`. Mirrors the local/global self-assign peephole.
+    // Fixture 4038 (`*p = *p + 1`).
+    if let Expr::BinOp { op, left, right } = value
+        && matches!(op, BinOp::Add | BinOp::Sub)
+        && matches!(left.as_ref(),
+            Expr::DerefWord { ptr } | Expr::DerefByte { ptr } if matches!(ptr.as_ref(), Expr::Param(i) if *i == param_idx))
+        && let Some(k) = right.fold(locals.inits)
+    {
+        out.extend_from_slice(&[0x8B, 0x5E, pdisp as u8]); // mov bx,[bp+p]
+        let is_sub = matches!(op, BinOp::Sub);
+        if k == 1 || k == -1 {
+            // inc/dec [bx]. A `-1` flips the direction.
+            let dec = is_sub ^ (k == -1);
+            let modrm = if dec { 0x0Fu8 } else { 0x07 }; // /1 dec, /0 inc
+            out.push(if is_byte { 0xFE } else { 0xFF });
+            out.push(modrm);
+        } else {
+            let modrm = if is_sub { 0x2Fu8 } else { 0x07 }; // /5 sub, /0 add, r/m=[bx]
+            if is_byte {
+                out.extend_from_slice(&[0x80, modrm, (k as u32 & 0xFF) as u8]);
+            } else if let Ok(k8) = i8::try_from(k) {
+                out.extend_from_slice(&[0x83, modrm, k8 as u8]);
+            } else {
+                out.push(0x81); out.push(modrm);
+                out.extend_from_slice(&((k as u32 & 0xFFFF) as u16).to_le_bytes());
+            }
+        }
+        return;
+    }
+    // `*dst = *src` / `*dst = *src ± K` (copy through one pointer param from a
+    // deref of ANOTHER pointer param): dst stays in BX for the store, so the
+    // source deref uses SI. `mov bx,[dst]; mov si,[src]; mov ax,[si]; [op];
+    // mov [bx],ax`. Requires a push-SI frame. Fixtures 2993, 3184.
+    if let Some((src, post)) = deref_param_source(value, param_idx, locals) {
+        let sdisp = param_disp(src);
+        out.extend_from_slice(&[0x8B, 0x5E, pdisp as u8]);  // mov bx,[bp+dst]
+        out.push(0x8B); out.push(bp_modrm(0x76, sdisp)); push_bp_disp(out, sdisp); // mov si,[bp+src]
+        if is_byte {
+            out.extend_from_slice(&[0x8A, 0x04]); // mov al,[si]
+        } else {
+            out.extend_from_slice(&[0x8B, 0x04]); // mov ax,[si]
+        }
+        if let Some((op, k)) = post {
+            // Apply the trailing `± K` to AX (word). ±1 → inc/dec ax.
+            let is_sub = matches!(op, BinOp::Sub);
+            if k == 1 || k == -1 {
+                let dec = is_sub ^ (k == -1);
+                out.push(if dec { 0x48 } else { 0x40 }); // dec/inc ax
+            } else {
+                let opc = if is_sub { 0x2Du8 } else { 0x05 }; // sub/add ax, imm16
+                out.push(opc);
+                out.extend_from_slice(&((k as u32 & 0xFFFF) as u16).to_le_bytes());
+            }
+        }
+        if is_byte {
+            out.extend_from_slice(&[0x88, 0x07]); // mov [bx],al
+        } else {
+            out.extend_from_slice(&[0x89, 0x07]); // mov [bx],ax
+        }
+        return;
+    }
     out.push(0x8B);
     out.push(0x5E);
     out.push(pdisp as u8);
@@ -791,6 +926,24 @@ pub(crate) fn emit_assign_param(param_idx: usize, value: &Expr, locals: &Locals<
         } else {
             out.extend_from_slice(&[0x81, hi_modrm, hi_disp]);
             out.extend_from_slice(&(high as u16).to_le_bytes());
+        }
+        return;
+    }
+    // Pointer-param self-arithmetic `p = p ± K` (`p += K`) scales K by the
+    // pointee size: `int *p; p += 1` → `add WORD PTR [bp+d], 2`. Fixture 2922.
+    if locals.param_pointee_size(param_idx) > 1
+        && let Expr::BinOp { op, left, right } = value
+        && matches!(left.as_ref(), Expr::Param(i) if *i == param_idx)
+        && matches!(op, BinOp::Add | BinOp::Sub)
+        && let Some(k) = right.fold(locals.inits)
+    {
+        let scaled = k * locals.param_pointee_size(param_idx) as i32;
+        let add_modrm = if matches!(op, BinOp::Add) { 0x46u8 } else { 0x6Eu8 }; // /0 add, /5 sub
+        if let Ok(k8) = i8::try_from(scaled) {
+            out.extend_from_slice(&[0x83, add_modrm, disp as u8, k8 as u8]);
+        } else {
+            out.extend_from_slice(&[0x81, add_modrm, disp as u8]);
+            out.extend_from_slice(&((scaled as u32 & 0xFFFF) as u16).to_le_bytes());
         }
         return;
     }
@@ -2189,6 +2342,83 @@ pub(crate) fn emit_assign_indexed_local_byte_var(local_idx: usize, index: &Expr,
 }
 /// `<struct-global>.<field> = <expr>;` — store at the global's
 /// address + byte_off. Word: `c7 06 disp imm16`; byte: `c6 06 disp imm8`.
+/// `s.f = K;` bit-field store (constant value): read-modify-write the 16-bit
+/// unit — clear the field's bits, OR in the masked+shifted value. Picks the
+/// narrowest AL/AH/AX op form for each of the AND/OR, skips the AND when the
+/// value fills the field, skips the OR when the value is 0, and uses a direct
+/// `mov al/ah,K` for a byte-aligned full-byte field. Reuses a live AX left by a
+/// preceding bit-field store to the same unit. Fixtures 3209, 3217, 1691.
+pub(crate) fn emit_assign_bitfield(base: BitBase, byte_off: u16, bit_off: u8, bit_width: u8, value: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    use crate::codegen::expr::{bf_load_word, bf_store_word, bf_ax_live, emit_expr_to_ax};
+    let maskw = (1u32 << bit_width) - 1;
+    // Runtime value `s.f = v`: build `(v & maskw) << bit_off` in AX, load the
+    // unit into CX, clear the field bits, OR together, store. Fixture 3322.
+    let Some(k) = value.fold(locals.inits) else {
+        emit_expr_to_ax(value, locals, out, fixups);     // v → AX
+        out.push(0x25); out.extend_from_slice(&(maskw as u16).to_le_bytes()); // and ax,maskw
+        for _ in 0..bit_off { out.extend_from_slice(&[0xD1, 0xE0]); } // shl ax,1 (×bit_off)
+        // Load the unit into CX and clear the field bits there.
+        match base {
+            BitBase::Global(g) => {
+                out.push(0x8B); out.push(0x0E);
+                let bo = out.len(); // the imm16 follows the two-byte `8b 0e` opcode
+                out.extend_from_slice(&byte_off.to_le_bytes()); // mov cx,[g]
+                fixups.push(Fixup { body_offset: bo - 1, kind: FixupKind::GlobalAddr { global_idx: g } });
+            }
+            BitBase::Local(l) => {
+                let d = locals.disp(l) + byte_off as i16;
+                out.push(0x8B); out.push(bp_modrm(0x4E, d)); push_bp_disp(out, d); // mov cx,[bp+d]
+            }
+            BitBase::DerefParam(_) => panic!("runtime bit-field store via pointer not supported"),
+        }
+        let clear = !((maskw << bit_off) & 0xFFFF) & 0xFFFF;
+        let (hi, lo) = ((clear >> 8) & 0xFF, clear & 0xFF);
+        if hi == 0xFF { out.extend_from_slice(&[0x80, 0xE1, lo as u8]); }       // and cl, lo
+        else if lo == 0xFF { out.extend_from_slice(&[0x80, 0xE5, hi as u8]); }  // and ch, hi
+        else { out.push(0x81); out.push(0xE1); out.extend_from_slice(&(clear as u16).to_le_bytes()); } // and cx,clear
+        out.extend_from_slice(&[0x0B, 0xC1]); // or ax,cx
+        bf_store_word(base, byte_off, locals, out, fixups);
+        return;
+    };
+    let val = ((k as u32 & maskw) << bit_off) & 0xFFFF;
+    let field_mask = (maskw << bit_off) & 0xFFFF;
+    let clear = !field_mask & 0xFFFF;
+    if !bf_ax_live(base, byte_off, locals, out, fixups) {
+        bf_load_word(base, byte_off, locals, out, fixups);
+    }
+    if bit_width == 8 && bit_off % 8 == 0 {
+        // Full byte: set it directly (the other byte is untouched).
+        if bit_off == 0 {
+            out.push(0xB0); out.push(val as u8);       // mov al, K
+        } else {
+            out.push(0xB4); out.push((val >> 8) as u8); // mov ah, K
+        }
+    } else {
+        // Clear the field bits (skip if the value fills the whole field).
+        if val != field_mask {
+            let (hi, lo) = ((clear >> 8) & 0xFF, clear & 0xFF);
+            if hi == 0xFF {
+                out.extend_from_slice(&[0x24, lo as u8]);          // and al, lo
+            } else if lo == 0xFF {
+                out.extend_from_slice(&[0x80, 0xE4, hi as u8]);    // and ah, hi
+            } else {
+                out.push(0x25); out.extend_from_slice(&(clear as u16).to_le_bytes()); // and ax, clear
+            }
+        }
+        // OR in the value (skip if zero).
+        if val != 0 {
+            let (hi, lo) = ((val >> 8) & 0xFF, val & 0xFF);
+            if hi == 0 {
+                out.extend_from_slice(&[0x0C, lo as u8]);          // or al, lo
+            } else if lo == 0 {
+                out.extend_from_slice(&[0x80, 0xCC, hi as u8]);    // or ah, hi
+            } else {
+                out.push(0x0D); out.extend_from_slice(&(val as u16).to_le_bytes()); // or ax, val
+            }
+        }
+    }
+    bf_store_word(base, byte_off, locals, out, fixups);
+}
 pub(crate) fn emit_assign_global_field(global_idx: usize, byte_off: u16, size: u8, value: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
     // Long (4-byte) struct field: a long element at byte_off — reuse the shared
     // long const-store / compound codegen (low at byte_off, high at byte_off+2).
@@ -2535,6 +2765,32 @@ pub(crate) fn emit_assign_deref_postmutate_local(local_idx: usize, step: i32, va
     } else {
         emit_expr_to_ax(value, locals, out, fixups);
         if psz == 1 {
+            out.extend_from_slice(&[0x88, 0x07]);
+        } else {
+            out.extend_from_slice(&[0x89, 0x07]);
+        }
+    }
+}
+/// `*<ptr-param>++ = <expr>;` — load the param pointer into BX (the old
+/// value), advance the param in place by `step`, then store the RHS
+/// through `[bx]`. The pointer slot is always 2 bytes; `|step|` is the
+/// pointee size (1 → byte store, ≥2 → word). Fixtures 2803, 3351.
+pub(crate) fn emit_assign_deref_postmutate_param(param_idx: usize, step: i32, value: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    let pdisp = param_disp(param_idx) as i16;
+    out.push(0x8B); out.push(bp_modrm(0x5E, pdisp)); push_bp_disp(out, pdisp); // mov bx,[bp+p]
+    emit_postmutate_local(step, 2, pdisp, out); // advance the 2-byte pointer slot
+    let psz = step.unsigned_abs() as usize;
+    if let Some(k) = value.fold(locals.inits) {
+        if psz == 1 {
+            out.extend_from_slice(&[0xC6, 0x07, (k as u32 & 0xFF) as u8]);
+        } else {
+            out.extend_from_slice(&[0xC7, 0x07]);
+            out.extend_from_slice(&((k as u32 & 0xFFFF) as u16).to_le_bytes());
+        }
+    } else {
+        emit_expr_to_ax(value, locals, out, fixups);
+        if psz == 1 {
+            if out.last() == Some(&0x98) { out.pop(); } // storing AL, drop cbw
             out.extend_from_slice(&[0x88, 0x07]);
         } else {
             out.extend_from_slice(&[0x89, 0x07]);

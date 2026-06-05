@@ -2552,8 +2552,8 @@ pub(crate) fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
             };
             // `*p++ = v;` — store through old pointer then advance.
             if matches!(p.peek(), Some(Tok::PlusPlus) | Some(Tok::MinusMinus)) {
+                let step_sign = if matches!(p.peek(), Some(Tok::PlusPlus)) { 1i32 } else { -1i32 };
                 if let Some(local_idx) = p.resolve_local(&target_name) {
-                    let step_sign = if matches!(p.peek(), Some(Tok::PlusPlus)) { 1i32 } else { -1i32 };
                     p.bump();
                     let ptsz = p.local_specs[local_idx].pointee_size;
                     let step = step_sign * if ptsz > 0 { ptsz as i32 } else { 1 };
@@ -2562,6 +2562,17 @@ pub(crate) fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
                     p.eat(&Tok::Semi)?;
                     return Ok(Stmt::Assign {
                         target: AssignTarget::DerefPostMutateLocal { local_idx, step },
+                        value,
+                    });
+                } else if let Some(param_idx) = p.param_names.iter().position(|n| *n == target_name) {
+                    p.bump();
+                    let ptsz = p.param_pointee_sizes.get(param_idx).copied().unwrap_or(0);
+                    let step = step_sign * if ptsz > 0 { ptsz as i32 } else { 1 };
+                    p.eat(&Tok::Assign)?;
+                    let value = parse_expr(p)?;
+                    p.eat(&Tok::Semi)?;
+                    return Ok(Stmt::Assign {
+                        target: AssignTarget::DerefPostMutateParam { param_idx, step },
                         value,
                     });
                 }

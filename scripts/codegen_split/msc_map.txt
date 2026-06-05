@@ -1,0 +1,170 @@
+TOTAL LINES: 9846
+
+[use] L12: use std::path::Path;
+[use] L14: use obj::ObjBuilder;
+[fn] L23-38 (16): pub fn emit_dash_c(source_path: &Path) -> Result<std::path::PathBuf, EmitError> {
+[struct] L43-62 (20): pub struct Unit {
+[enum] L65-68 (4): pub enum TopDecl {
+[struct] L73-103 (31): pub struct Global {
+[impl] L105-113 (9): impl Global {
+    fn storage_bytes  L109-112 (4)
+[enum] L116-129 (14): pub enum GlobalInit {
+[impl] L131-138 (8): impl GlobalInit {
+    fn size_bytes  L132-137 (6)
+[struct] L145-167 (23): pub struct Function {
+[struct] L175-212 (38): pub struct LocalSpec {
+[struct] L215-219 (5): pub struct StructDef {
+[struct] L222-226 (5): pub struct StructField {
+[impl] L228-248 (21): impl LocalSpec {
+    fn int  L229-231 (3)
+    fn char_  L232-234 (3)
+    fn long_  L235-237 (3)
+    fn storage_bytes  L243-247 (5)
+[struct] L254-306 (53): pub struct Locals<'a> {
+[struct] L309-312 (4): pub struct LoopCtx {
+[impl] L314-354 (41): impl Locals<'_> {
+    fn get_init  L315-317 (3)
+    fn disp  L318-320 (3)
+    fn size  L321-323 (3)
+    fn is_long_global  L324-326 (3)
+    fn is_char_global  L327-329 (3)
+    fn is_long_local  L330-332 (3)
+    fn init_is_literal  L333-335 (3)
+    fn is_far_ptr_local  L336-338 (3)
+    fn is_array_local  L339-341 (3)
+    fn is_unsigned_local  L342-344 (3)
+    fn is_char_param  L345-347 (3)
+    fn is_long_param  L348-350 (3)
+    fn is_unsigned_param  L351-353 (3)
+[enum] L363-422 (60): pub enum Stmt {
+[struct] L427-430 (4): pub struct SwitchArm {
+[enum] L433-498 (66): pub enum AssignTarget {
+[enum] L504-516 (13): pub enum Cond {
+[enum] L519-526 (8): pub enum RelOp {
+[enum] L532-647 (116): pub enum Expr {
+[enum] L650-669 (20): pub enum BinOp {
+[impl] L671-746 (76): impl Expr {
+    fn fold  L678-745 (68)
+[enum] L752-812 (61): enum Tok {
+[fn] L819-858 (40): fn apply_typedef_substitutions(toks: &mut Vec<Tok>) {
+[fn] L860-1208 (349): fn tokenize(source: &str) -> Result<Vec<Tok>, EmitError> {
+[struct] L1210-1251 (42): struct Parser<'a> {
+[impl] L1253-1275 (23): impl<'a> Parser<'a> {
+    fn peek  L1254-1256 (3)
+    fn eat  L1257-1267 (11)
+    fn bump  L1268-1274 (7)
+[fn] L1281-1414 (134): fn parse_unit(source: &str) -> Result<Unit, EmitError> {
+[fn] L1421-1509 (89): fn parse_struct_global_decl(p: &mut Parser<'_>) -> Result<(), EmitError> {
+[fn] L1521-1544 (24): fn parse_enum_def(p: &mut Parser<'_>) -> Result<(), EmitError> {
+[fn] L1551-1581 (31): fn parse_typedef(p: &mut Parser<'_>) -> Result<(), EmitError> {
+[fn] L1583-1644 (62): fn parse_struct_def(p: &mut Parser<'_>) -> Result<(), EmitError> {
+[fn] L1651-1853 (203): fn parse_global_decl(p: &mut Parser<'_>) -> Result<(), EmitError> {
+[fn] L1865-1882 (18): fn init_expr_has_matching_literal_leaf(
+[fn] L1884-2398 (515): fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> {
+[fn] L2400-2408 (9): fn parse_signed_int(p: &mut Parser<'_>) -> Result<i32, EmitError> {
+[fn] L2410-2991 (582): fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
+[fn] L2998-3022 (25): fn skip_decl_modifiers(p: &mut Parser<'_>) -> usize {
+[fn] L3029-3074 (46): fn parse_compound_rhs_for_indexed(
+[fn] L3083-3145 (63): fn parse_compound_rhs(p: &mut Parser<'_>, target: &AssignTarget) -> Result<Option<Expr>, EmitEr
+[fn] L3150-3209 (60): fn parse_assign_no_semi(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
+[fn] L3211-3218 (8): fn parse_cond(p: &mut Parser<'_>) -> Result<Cond, EmitError> {
+[fn] L3223-3239 (17): fn parse_field_lookup(p: &mut Parser<'_>, sidx: usize) -> Result<(u16, u8), EmitError> {
+[fn] L3244-3276 (33): fn cond_from_expr(expr: Expr) -> Cond {
+[fn] L3280-3294 (15): fn parse_expr(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
+[fn] L3311-3341 (31): fn parse_binop_prec(p: &mut Parser<'_>, min_prec: u8) -> Result<Expr, EmitError> {
+[fn] L3348-3368 (21): fn pointee_size_of(e: &Expr, globals: &[Global]) -> usize {
+[fn] L3373-3385 (13): fn parse_assign_tail(p: &mut Parser<'_>, lvalue: Expr) -> Result<Stmt, EmitError> {
+[fn] L3389-3389 (1): fn expr_from_stmt_value(e: Expr) -> Expr { e }
+[fn] L3391-3795 (405): fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
+[fn] L3800-3823 (24): fn parse_call_args(p: &mut Parser<'_>) -> Result<Vec<Expr>, EmitError> {
+[struct] L3831-3834 (4): struct FunctionEmit {
+[struct] L3837-3844 (8): struct Fixup {
+[enum] L3847-3865 (19): enum FixupKind {
+[struct] L3870-3873 (4): struct ResolvedFixup {
+[enum] L3878-3895 (18): enum Frame {
+[impl] L3897-3918 (22): impl Frame {
+    fn for_function  L3898-3906 (9)
+    fn epilogue_bytes  L3907-3914 (8)
+    fn is_with_slide  L3915-3917 (3)
+[fn] L3924-4549 (626): pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
+[struct] L4601-4622 (22): struct ConstProp {
+[fn] L4624-4661 (38): fn const_prop_globals(
+[fn] L4663-4872 (210): fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
+[fn] L4874-4885 (12): fn cp_clone(cp: &ConstProp) -> ConstProp {
+[fn] L4887-4899 (13): fn prop_cond(cond: &mut Cond, cp: &mut ConstProp) {
+[fn] L4901-5030 (130): fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
+[fn] L5035-5081 (47): fn body_needs_si(stmts: &[Stmt], local_inits: &[Option<i32>]) -> bool {
+[fn] L5087-5089 (3): fn bp_modrm(modrm_mod01: u8, disp: i16) -> u8 {
+[fn] L5093-5101 (9): fn push_bp_disp(buf: &mut Vec<u8>, disp: i16) {
+[fn] L5103-5362 (260): fn emit_function(
+[fn] L5366-5368 (3): fn symbol_name(c_name: &str) -> String {
+[fn] L5372-5510 (139): fn emit_stmt(
+[fn] L5516-5553 (38): fn stmt_always_returns(stmt: &Stmt, locals: &Locals<'_>) -> bool {
+[fn] L5558-5571 (14): fn expr_references_local(e: &Expr) -> bool {
+[fn] L5573-5579 (7): fn cond_references_local(cond: &Cond) -> bool {
+[fn] L5584-5594 (11): fn cond_has_literal_side(cond: &Cond) -> bool {
+[fn] L5596-5624 (29): fn fold_cond(cond: &Cond, locals: &Locals<'_>) -> Option<i32> {
+[fn] L5626-5828 (203): fn emit_return(
+[fn] L5837-5845 (9): fn emit_call(
+[fn] L5847-5890 (44): fn emit_call_inner(
+[fn] L5895-5914 (20): fn emit_push_arg_long(arg: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixu
+[fn] L5920-6016 (97): fn emit_push_arg(arg: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+[fn] L6023-6391 (369): fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixu
+[fn] L6404-6427 (24): fn emit_assign_deref_param(param_idx: usize, value: &Expr, locals: &Locals<'_>, out: &mut Vec<u
+[fn] L6432-6500 (69): fn emit_assign_param(param_idx: usize, value: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fi
+[fn] L6510-6540 (31): fn emit_long_to_dx_ax(value: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fi
+[fn] L6542-6808 (267): fn emit_assign_global(global_idx: usize, value: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, 
+[fn] L6814-6836 (23): fn emit_assign_indexed_global(global_idx: usize, byte_off: u16, value: &Expr, locals: &Locals<'
+[fn] L6840-6854 (15): fn emit_assign_indexed_global_byte(global_idx: usize, byte_off: u16, value: &Expr, locals: &Loc
+[fn] L6858-6870 (13): fn emit_assign_ptr_index_byte(ptr_idx: usize, disp: i8, value: &Expr, locals: &Locals<'_>, out:
+[fn] L6879-6926 (48): fn emit_assign_indexed_local(local_idx: usize, byte_off: u16, value: &Expr, locals: &Locals<'_>
+[fn] L6931-6968 (38): fn emit_assign_indexed_local_byte(local_idx: usize, byte_off: u16, value: &Expr, locals: &Local
+[fn] L6973-6985 (13): fn emit_index_to_si(index: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>) {
+[fn] L6991-7006 (16): fn emit_byte_rhs_to_al(value: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<F
+[fn] L7011-7017 (7): fn emit_assign_indexed_local_var(local_idx: usize, index: &Expr, value: &Expr, locals: &Locals<
+[fn] L7022-7027 (6): fn emit_assign_indexed_local_byte_var(local_idx: usize, index: &Expr, value: &Expr, locals: &Lo
+[fn] L7031-7067 (37): fn emit_assign_global_field(global_idx: usize, byte_off: u16, size: u8, value: &Expr, locals: &
+[fn] L7071-7087 (17): fn emit_assign_local_field(local_idx: usize, byte_off: u16, size: u8, value: &Expr, locals: &Lo
+[fn] L7093-7128 (36): fn emit_assign_deref_global_field(ptr_global: usize, byte_off: u16, size: u8, value: &Expr, loc
+[fn] L7130-7169 (40): fn emit_assign_deref_param_field(ptr_param: usize, byte_off: u16, size: u8, value: &Expr, local
+[fn] L7173-7212 (40): fn emit_assign_deref_local_field(ptr_local: usize, byte_off: u16, size: u8, value: &Expr, local
+[fn] L7217-7243 (27): fn emit_postmutate_local(step: i32, slot_size: usize, disp: i16, out: &mut Vec<u8>) {
+[fn] L7247-7273 (27): fn emit_postmutate_global(step: i32, global_idx: usize, out: &mut Vec<u8>, fixups: &mut Vec<Fix
+[fn] L7277-7298 (22): fn emit_assign_deref_postmutate_local(local_idx: usize, step: i32, value: &Expr, locals: &Local
+[fn] L7303-7328 (26): fn emit_assign_deref_local(local_idx: usize, value: &Expr, locals: &Locals<'_>, out: &mut Vec<u
+[fn] L7330-7352 (23): fn emit_assign_double_deref_global(global_idx: usize, value: &Expr, locals: &Locals<'_>, out: &
+[fn] L7354-7372 (19): fn emit_assign_deref_global(global_idx: usize, value: &Expr, locals: &Locals<'_>, out: &mut Vec
+[fn] L7389-7400 (12): fn emit_while(
+[fn] L7423-7445 (23): fn emit_for(
+[fn] L7449-7460 (12): fn for_entry_fold(init: &Stmt, cond: &Cond, locals: &Locals<'_>) -> Option<i32> {
+[fn] L7463-7491 (29): fn fold_cond_raw(cond: &Cond, inits: &[Option<i32>]) -> Option<i32> {
+[fn] L7497-7547 (51): fn collect_loop_body_mutations(stmts: &[&Stmt]) -> std::collections::HashSet<usize> {
+[fn] L7553-7726 (174): fn emit_loop(
+[fn] L7759-7973 (215): fn emit_partial_switch_with_continuation(
+[fn] L7978-8165 (188): fn emit_runtime_switch(
+[fn] L8167-8278 (112): fn emit_do_while(
+[fn] L8284-8302 (19): fn body_sets_flags_for_cond(body: &Stmt, cond: &Cond) -> bool {
+[fn] L8306-8308 (3): fn emit_cond_cmp(cond: &Cond, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) 
+[fn] L8314-8368 (55): fn emit_cond_skip(cond: &Cond, take_then_disp: i8, locals: &Locals<'_>, out: &mut Vec<u8>, fixu
+[fn] L8374-8390 (17): fn emit_cond_take(cond: &Cond, take_disp: i8, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &
+[fn] L8394-8546 (153): fn emit_cond_cmp_inner(cond: &Cond, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fi
+[fn] L8549-8553 (5): fn emit_cmp_ax_imm(k: i32, out: &mut Vec<u8>) {
+[fn] L8555-8557 (3): fn param_disp(idx: usize) -> i16 {
+[fn] L8564-8573 (10): fn inverted_jcc(op: RelOp) -> u8 {
+[fn] L8578-8587 (10): fn loop_back_jcc(op: RelOp) -> u8 {
+[fn] L8592-8609 (18): fn emit_cmp_global_imm(global_idx: usize, k: i32, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+[fn] L8615-8622 (8): fn emit_cmp_local_imm(idx: usize, locals: &Locals<'_>, k: i32, out: &mut Vec<u8>) {
+[fn] L8627-8640 (14): fn emit_cmp_bp_imm(disp: i16, k: i32, out: &mut Vec<u8>) {
+[fn] L8648-9190 (543): fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>
+[fn] L9193-9198 (6): fn emit_load_param(idx: usize, out: &mut Vec<u8>) {
+[fn] L9201-9214 (14): fn emit_load_local(idx: usize, locals: &Locals<'_>, out: &mut Vec<u8>) {
+[fn] L9216-9571 (356): fn emit_binop(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fix
+[fn] L9576-9640 (65): fn emit_binop_right(op: BinOp, right: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &m
+[fn] L9645-9662 (18): fn const_index_global(e: &Expr, locals: &Locals<'_>) -> Option<(usize, u16)> {
+[fn] L9667-9681 (15): fn bp_load<'a>(e: &'a Expr, locals: &'a Locals<'_>) -> Option<Box<dyn FnOnce(&mut Vec<u8>) + 'a
+[fn] L9685-9691 (7): fn bp_disp(e: &Expr, locals: &Locals<'_>) -> Option<i16> {
+[fn] L9696-9785 (90): fn emit_imm_op(op: BinOp, k: i32, out: &mut Vec<u8>) {
+[fn] L9791-9836 (46): fn emit_mem_op_at(op: BinOp, disp: i16, out: &mut Vec<u8>) {
+[enum] L9839-9846 (8): pub enum EmitError {
+
+ITEM COUNTS: enum=12, fn=105, impl=7, struct=14, use=2

@@ -1,0 +1,24 @@
+impl span: L988-L25136  methods: 147
+non-blank/non-attr gap lines inside impl (should be ~0): 0
+
+  arrays           7 methods    3078 lines
+      emit_index_into_bx, emit_array_index_to_ax, emit_index_into_bx_long_stride, emit_array_addr_to_bx, emit_array_addr_2d_to_bx, emit_array_assign, emit_array_compound_assign
+  assign          11 methods    6141 lines
+      emit_compound_assign, emit_deref_to_ax, emit_deref_pointer_plus_offset, try_emit_assign_lvalue_addr_first, emit_store_ax_to_lvalue, emit_deref_assign, emit_deref_compound_assign, emit_assign_pseudo_register, emit_assign_global, emit_assign_local, emit_store_reg
+  bitfields        5 methods     240 lines
+      resolve_bitfield, resolve_bitfield_through_ptr, resolve_bitfield_named, emit_bitfield_read_to_reg, try_emit_bitfield_chain_to_ax
+  classify         9 methods     212 lines
+      ident_is_long_like, expr_is_long_like, classify_var_idx_array, is_long_vs_int_ne, is_long_ne_const, expr_is_unsigned, ident_is_uchar, ident_is_char, expr_is_char_load
+  conditions       6 methods    1023 lines
+      is_long_signed_globals_cmp, is_long_signed_const_cmp, is_long_vs_int_cmp, emit_cond_branch, emit_cond_test, try_emit_int_vs_char_cmp
+  emit_core       63 methods    5946 lines
+      new, new_with_opts, struct_call_tmp_offset, exit_label_num, emit_label, label_ref, run, flush_pending_post_update, emit_update_in_place, advance_to_stmt_line, advance_to_for_header_line, advance_to_stmt_line_at, translate_asm_line, substitute_asm_ident, long_arm_load, expr_int_is_unsigned, value_nee
+  expressions      7 methods    1967 lines
+      emit_expr_discard, emit_unary, emit_expr_to_ax, emit_cast_to_ax, emit_ternary_to_ax, emit_comparison_as_value, emit_binary_right
+  lvalues         21 methods     517 lines
+      collect_long_lvalue_chain, long_addr_pair, is_simple_lvalue, int_lvalue_addr, named_int_lvalue_addr, int_lvalue_src, long_lvalue_addr_pair, resolve_chain_addr, try_lvalue_chain_addr, try_arrow_chain_addr, target_is_char_lvalue, emit_arr_var_field_addr_to_bx, named_int_lvalue_addr_or_reg, huge_ptr_lv
+  members          4 methods    1651 lines
+      emit_member_to_ax, emit_member_assign, emit_member_array_assign, emit_member_compound_assign
+  statements      14 methods    2370 lines
+      emit_stmt, emit_stmt_inner, emit_if, emit_while, emit_do_while, emit_for, emit_switch, emit_switch_chained, emit_switch_jump_table, emit_switch_linear_search, emit_asm_block, emit_switch_long_linear_search, emit_return_value_load, emit_return_value_load_inner
+  TOTAL          147 methods   23145 lines

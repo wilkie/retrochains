@@ -769,6 +769,10 @@ pub enum AssignTarget {
     /// then advance the pointer by `step`. Codegen: `mov bx, [bp-p];
     /// <mutate p>; mov [bx], ax/imm`.
     DerefPostMutateLocal { local_idx: usize, step: i32 },
+    /// `*<ptr-param>++ = <expr>;` — store through the OLD pointer-parameter
+    /// value, then advance the param by `step`. Codegen: `mov bx, [bp+p];
+    /// <mutate [bp+p]>; mov [bx], ax/imm`. Fixtures 2803, 3351.
+    DerefPostMutateParam { param_idx: usize, step: i32 },
     /// `<ptr-param>[idx] = <expr>;` — store through a pointer parameter at an
     /// element index (constant or runtime). `elem` is the pointee byte size
     /// (1 → byte store via AL).

@@ -873,6 +873,15 @@ pub(crate) fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
         Expr::ParamIndex { index, .. } => {
             prop_expr(index, cp);
         }
+        Expr::PtrArrayElem { index, .. } => {
+            // The element is a pointer VALUE read from _DATA at runtime; MSC
+            // never folds it to an immediate. Just propagate into the index.
+            prop_expr(index, cp);
+        }
+        Expr::PtrArrayDeref { index, inner, .. } => {
+            prop_expr(index, cp);
+            prop_expr(inner, cp);
+        }
         Expr::Index2D { is_global, base, row, col, cols, elem } => {
             prop_expr(row, cp);
             prop_expr(col, cp);
@@ -954,6 +963,7 @@ pub(crate) fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
             fold_aliased_deref(e, cp);
         }
         Expr::AddrOfGlobal(_) => {}
+        Expr::AddrOfIndexedGlobal { index, .. } => prop_expr(index, cp),
         Expr::AddrOfLocal(j) => {
             // Taking a local's address (escaping it — call arg, `&x`) allows
             // writes through the pointer; conservatively mark it mutated so reads
@@ -1011,7 +1021,23 @@ pub(crate) fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
             cp.mutated_globals.insert(*global_idx);
             cp.g_known.remove(global_idx);
         }
-        Expr::PreMutateDeref { ptr, .. } => prop_expr(ptr, cp),
+        Expr::PreMutateDeref { ptr, .. } | Expr::PostIncDeref { ptr, .. } => prop_expr(ptr, cp),
+        Expr::PreMutateIndexedGlobal { array, index, .. }
+        | Expr::PostMutateIndexedGlobal { array, index, .. } => {
+            prop_expr(index, cp);
+            cp.mutated_globals.insert(*array);
+        }
+        // A param's value is unknown at compile time; mutating it changes
+        // nothing in the const-prop tables (params aren't tracked).
+        Expr::PreMutateParam { .. } | Expr::PostMutateParam { .. } => {}
+        // A bit-field read is always a runtime masked load — MSC never folds it,
+        // even when the stored value is known. No sub-expressions to propagate.
+        Expr::BitField { .. } => {}
+        // A string-literal byte read is a CONST load — no folding.
+        Expr::StrLitByte { .. } => {}
+        // A pointer member chain is a runtime BX-walk — no folding.
+        Expr::PtrChainField { .. } => {}
+        Expr::StructArrayField { index, .. } => prop_expr(index, cp),
         Expr::IntLit(_) | Expr::Param(_) | Expr::StrLit(_) => {}
     }
 }

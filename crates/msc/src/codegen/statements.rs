@@ -57,6 +57,18 @@ pub(crate) fn emit_stmt(
             // (fixtures 1443, 1872). Non-slide frames still clean up per call.
             emit_call_inner(name, args, locals, frame.is_with_slide(), out, fixups);
         }
+        // A postfix/prefix `param++;` used purely for its side effect (e.g. a
+        // comma-operator side, fixture 3308) emits just the in-place mutate — no
+        // value load. The Local/Global variants already lower this way via their
+        // own statement paths; the Param case is added here.
+        Stmt::ExprStmt(Expr::PostMutateParam { param_idx, step })
+        | Stmt::ExprStmt(Expr::PreMutateParam { param_idx, step }) => {
+            let disp = param_disp(*param_idx);
+            let slot_size = if locals.is_char_param(*param_idx) { 1 } else { 2 };
+            let pointee = locals.param_pointee_size(*param_idx);
+            let eff = if pointee > 0 { *step * pointee as i32 } else { *step };
+            crate::codegen::assign::emit_postmutate_local(eff, slot_size, disp, out);
+        }
         Stmt::ExprStmt(other) => {
             // Generic: evaluate the expression, discard the AX result.
             // Side-effect-free shapes still compile; they just leave
@@ -499,6 +511,51 @@ pub(crate) fn emit_return(
     out: &mut Vec<u8>,
     fixups: &mut Vec<Fixup>,
 ) {
+    // `return *p` where p is a `long *` param in a long-returning function: load
+    // both words of the pointee (`mov bx,[p]; mov ax,[bx]; mov dx,[bx+2]`).
+    // Fixture 3285.
+    if return_long
+        && let Expr::DerefWord { ptr } = expr
+        && let Expr::Param(i) = ptr.as_ref()
+        && locals.param_pointee_size(*i) == 4
+    {
+        let d = param_disp(*i) as u8;
+        out.extend_from_slice(&[0x8B, 0x5E, d]);       // mov bx,[bp+d]
+        out.extend_from_slice(&[0x8B, 0x07]);          // mov ax,[bx]
+        out.extend_from_slice(&[0x8B, 0x57, 0x02]);    // mov dx,[bx+2]
+        out.extend_from_slice(frame.epilogue_bytes());
+        return;
+    }
+    // `return <long-param> >> 16` (long fn): the high word becomes the low word
+    // and the new high word is 0 — `mov ax,[v+2]; sub dx,dx`. Fixtures 2801, 2998.
+    if return_long
+        && let Expr::BinOp { op: BinOp::Shr, left, right } = expr
+        && matches!(right.as_ref(), Expr::IntLit(16))
+        && let Expr::Param(i) = left.as_ref()
+        && locals.is_long_param(*i)
+        && locals.is_unsigned_param(*i) // signed >>16 sign-extends; this is the logical case
+    {
+        let hi = (param_disp(*i) + 2) as u8;
+        out.extend_from_slice(&[0x8B, 0x46, hi]);   // mov ax,[bp+v+2]
+        out.extend_from_slice(&[0x2B, 0xD2]);        // sub dx,dx
+        out.extend_from_slice(frame.epilogue_bytes());
+        return;
+    }
+    // `return <long-param> & 0xFF` (long fn): low byte, zero-extended, high word 0
+    // — `mov al,[v]; sub ah,ah; sub dx,dx`. Fixture 3199.
+    if return_long
+        && let Expr::BinOp { op: BinOp::BitAnd, left, right } = expr
+        && matches!(right.as_ref(), Expr::IntLit(255))
+        && let Expr::Param(i) = left.as_ref()
+        && locals.is_long_param(*i)
+    {
+        let lo = param_disp(*i) as u8;
+        out.extend_from_slice(&[0x8A, 0x46, lo]);   // mov al,[bp+v]
+        out.extend_from_slice(&[0x2A, 0xE4]);        // sub ah,ah
+        out.extend_from_slice(&[0x2B, 0xD2]);        // sub dx,dx
+        out.extend_from_slice(frame.epilogue_bytes());
+        return;
+    }
     // Small struct returned by value: load the struct local's bytes into the
     // return registers — AX for <=2 bytes, DX:AX for 3-4. Reuse a value the
     // preceding store just left in AL/AX (fixture 3408). 1-byte structs
@@ -1052,6 +1109,31 @@ pub(crate) fn emit_return(
             && matches!(op, BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge)
             && expr.fold(locals.inits).is_none()
         {
+            // `return x == 0`/`!x` and `return x != 0` (is-zero / is-nonzero):
+            // MSC uses the carry trick `cmp word [x],1` (CF set iff x==0), then
+            // `sbb ax,ax` (ax = -CF). `== 0` finishes with `neg ax` (→1 iff x==0);
+            // `!= 0` with `inc ax` (→1 iff x!=0). Replaces the two-epilogue branch.
+            // Word param/local operand only. Fixtures 3487/3378 (==0), 3642 (!=0).
+            if matches!(op, BinOp::Eq | BinOp::Ne)
+                && right.fold(locals.inits) == Some(0)
+                && let Some(disp) = match left.as_ref() {
+                    Expr::Param(i) if !locals.is_char_param(*i) && !locals.is_long_param(*i)
+                        && !locals.is_float_param(*i) => Some(param_disp(*i)),
+                    Expr::Local(i) if locals.size(*i) == 2 && !locals.is_long_local(*i)
+                        && !locals.is_float_local(*i) => Some(locals.disp(*i)),
+                    _ => None,
+                }
+            {
+                out.push(0x83); out.push(bp_modrm(0x7E, disp)); push_bp_disp(out, disp); out.push(0x01); // cmp word [bp+d],1
+                out.extend_from_slice(&[0x1B, 0xC0]); // sbb ax,ax
+                if matches!(op, BinOp::Eq) {
+                    out.extend_from_slice(&[0xF7, 0xD8]); // neg ax  → 1 iff x==0
+                } else {
+                    out.push(0x40); // inc ax  → 1 iff x!=0
+                }
+                out.extend_from_slice(frame.epilogue_bytes());
+                return;
+            }
             // `return x == y` etc — two-epilogue structure with optional NOP
             // to keep the false-path aligned. The inverted_jcc fires when
             // the condition is FALSE and jumps past the true block to the

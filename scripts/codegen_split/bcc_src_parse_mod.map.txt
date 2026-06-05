@@ -1,0 +1,75 @@
+TOTAL LINES: 4077
+
+[use] L7: use std::collections::HashMap;
+[use] L9: use crate::ast::{
+[use] L14: use crate::lex::{Span, Token, TokenKind};
+[enum] L17-24 (8): pub enum ParseError {
+[struct] L27-83 (57): pub struct Parser {
+[impl] L85-3922 (3838): impl Parser {
+    fn new  L87-102 (16)
+    fn parse_unit  L112-394 (283)
+    fn parse_enum_decl  L401-411 (11)
+    fn parse_enum_body  L420-465 (46)
+    fn parse_typedef  L473-516 (44)
+    fn is_bare_record_def  L523-554 (32)
+    fn parse_bare_record_decl  L560-571 (12)
+    fn consume_cc_modifiers  L583-585 (3)
+    fn consume_cc_modifiers_collect  L592-595 (4)
+    fn consume_cc_modifiers_full  L606-609 (4)
+    fn consume_cc_modifiers_seg  L617-677 (61)
+    fn make_ptr_ty  L686-688 (3)
+    fn make_ptr_ty_seg  L696-715 (20)
+    fn parse_type  L717-857 (141)
+    fn parse_type_name  L864-915 (52)
+    fn parse_struct_type  L921-923 (3)
+    fn parse_union_type  L925-927 (3)
+    fn parse_record_type  L936-1214 (279)
+    fn parse_global  L1221-1367 (147)
+    fn parse_function  L1369-1529 (161)
+    fn parse_initializer  L1544-1573 (30)
+    fn parse_param_list  L1580-1739 (160)
+    fn parse_stmt  L1741-2000 (260)
+    fn parse_expr_or_lvalue_assign  L2012-2260 (249)
+    fn parse_declare  L2272-2416 (145)
+    fn finish_declare_unsized  L2418-2466 (49)
+    fn finish_declare  L2474-2643 (170)
+    fn rename_shadowed_local  L2651-2667 (17)
+    fn lookup_block_rename  L2672-2679 (8)
+    fn parse_func_ptr_declarator  L2686-2779 (94)
+    fn parse_while  L2782-2796 (15)
+    fn parse_do_while  L2799-2811 (13)
+    fn parse_for  L2817-2844 (28)
+    fn parse_for_clause_list  L2849-2862 (14)
+    fn parse_for_clause_expr  L2869-2931 (63)
+    fn parse_switch  L2939-3017 (79)
+    fn parse_if  L3021-3042 (22)
+    fn parse_branch  L3044-3060 (17)
+    fn parse_expr  L3062-3067 (6)
+    fn parse_conditional  L3070-3088 (19)
+    fn parse_logor  L3090-3106 (17)
+    fn parse_logand  L3108-3124 (17)
+    fn parse_bitor  L3126-3130 (5)
+    fn parse_bitxor  L3132-3136 (5)
+    fn parse_bitand  L3138-3142 (5)
+    fn parse_equality  L3144-3150 (7)
+    fn parse_relational  L3152-3160 (9)
+    fn parse_shift  L3162-3168 (7)
+    fn parse_additive  L3170-3176 (7)
+    fn parse_multiplicative  L3178-3185 (8)
+    fn expr_static_size  L3199-3257 (59)
+    fn is_type_name_after_lparen  L3262-3276 (15)
+    fn parse_unary  L3278-3561 (284)
+    fn left_assoc  L3566-3582 (17)
+    fn parse_atom  L3584-3722 (139)
+    fn parse_primary  L3724-3879 (156)
+    fn peek  L3883-3885 (3)
+    fn peek_n  L3890-3896 (7)
+    fn bump  L3898-3904 (7)
+    fn at_eof  L3906-3908 (3)
+    fn expect  L3910-3921 (12)
+[fn] L3924-3930 (7): fn match_update_op(t: &TokenKind) -> Option<UpdateOp> {
+[fn] L3938-3946 (9): fn is_assignable_lvalue(kind: &ExprKind) -> bool {
+[fn] L3948-3962 (15): fn match_compound_op(t: &TokenKind) -> Option<BinOp> {
+[mod] L3965: mod tests {
+
+ITEM COUNTS: enum=1, fn=3, impl=1, mod=1, struct=1, use=3

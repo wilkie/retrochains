@@ -314,6 +314,15 @@ fn emit_addr_to_reg(e: &Expr, to_cx: bool, locals: &Locals<'_>, out: &mut Vec<u8
     }
 }
 pub(crate) fn emit_cond_cmp_inner(cond: &Cond, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    // `while (*s++)` — test the OLD pointee for zero while advancing the pointer:
+    // `mov bx,[s]; <advance [s]>; cmp byte/word [bx],0`. The caller's jcc (jne for
+    // truthy) takes the loop while the pointee is non-zero. Fixture 2027.
+    if let Cond::Truthy(Expr::PostIncDeref { ptr, step, is_byte }) = cond {
+        crate::codegen::expr::emit_postinc_ptr_to_bx(ptr, *step, locals, out, fixups);
+        if *is_byte { out.extend_from_slice(&[0x80, 0x3F, 0x00]); } // cmp byte [bx],0
+        else { out.extend_from_slice(&[0x83, 0x3F, 0x00]); }        // cmp word [bx],0
+        return;
+    }
     // Long-global vs zero idiom: `mov ax, [g]; or ax, [g+2]` — ZF set
     // iff both halves are zero. Covers `if (g == 0)`, `if (!g)`, and
     // (with inverted jcc) `if (g != 0)`.

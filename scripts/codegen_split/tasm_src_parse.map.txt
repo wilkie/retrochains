@@ -1,0 +1,87 @@
+TOTAL LINES: 4943
+
+[use] L5: use crate::ir::{
+[use] L9: use crate::lex::{tokenize, Line};
+[fn] L11-22 (12): pub fn parse(source: &str) -> AsmResult<Module> {
+[struct] L24-31 (8): struct Parser<'a> {
+[impl] L33-363 (331): impl<'a> Parser<'a> {
+    fn peek  L34-36 (3)
+    fn bump  L38-42 (5)
+    fn skip_preamble  L50-73 (24)
+    fn parse_body  L75-85 (11)
+    fn dispatch_line  L87-126 (40)
+    fn parse_debug  L128-152 (25)
+    fn parse_segment_open  L154-177 (24)
+    fn parse_segment_close  L179-182 (4)
+    fn parse_group  L184-198 (15)
+    fn parse_anchor_label  L200-211 (12)
+    fn parse_proc  L213-227 (15)
+    fn parse_db  L229-260 (32)
+    fn parse_dw  L262-298 (37)
+    fn parse_dd  L300-331 (32)
+    fn parse_extrn  L333-346 (14)
+    fn parse_instruction  L348-353 (6)
+    fn require_open_segment  L355-362 (8)
+[impl] L366-366 (1): impl<'a> Copy for Line<'a> {}
+[impl] L367-371 (5): impl<'a> Clone for Line<'a> {
+    fn clone  L368-370 (3)
+[fn] L373-400 (28): fn parse_segment_attrs(rest: &str, line_no: usize) -> AsmResult<(SegAlign, SegCombine, String)>
+[fn] L402-1213 (812): fn parse_instr(line: &Line<'_>) -> AsmResult<Instr> {
+[fn] L1215-2116 (902): fn parse_mov(operands: &str, line_no: usize) -> AsmResult<Instr> {
+[fn] L2118-2353 (236): fn parse_sub(operands: &str, line_no: usize) -> AsmResult<Instr> {
+[fn] L2358-2560 (203): fn parse_and(operands: &str, line_no: usize) -> AsmResult<Instr> {
+[fn] L2564-2677 (114): fn parse_sbb(operands: &str, line_no: usize) -> AsmResult<Instr> {
+[fn] L2682-2816 (135): fn parse_adc(operands: &str, line_no: usize) -> AsmResult<Instr> {
+[fn] L2820-2833 (14): fn parse_single_op_word_ptr(
+[fn] L2838-3253 (416): fn parse_add(operands: &str, line_no: usize) -> AsmResult<Instr> {
+[fn] L3258-3555 (298): fn parse_cmp(operands: &str, line_no: usize) -> AsmResult<Instr> {
+[fn] L3560-3594 (35): fn parse_jmp(operands: &str, line_no: usize) -> AsmResult<Instr> {
+[fn] L3599-3653 (55): fn parse_shl_one(operands: &str, line_no: usize) -> AsmResult<Instr> {
+[fn] L3657-3670 (14): fn parse_rcl_one(operands: &str, line_no: usize) -> AsmResult<Instr> {
+[fn] L3674-3713 (40): fn parse_sar_one(operands: &str, line_no: usize) -> AsmResult<Instr> {
+[fn] L3717-3756 (40): fn parse_shr_one(operands: &str, line_no: usize) -> AsmResult<Instr> {
+[fn] L3760-3773 (14): fn parse_rcr_one(operands: &str, line_no: usize) -> AsmResult<Instr> {
+[fn] L3778-3787 (10): fn parse_lea(operands: &str, line_no: usize) -> AsmResult<Instr> {
+[fn] L3791-4006 (216): fn parse_or(operands: &str, line_no: usize) -> AsmResult<Instr> {
+[fn] L4010-4213 (204): fn parse_xor(operands: &str, line_no: usize) -> AsmResult<Instr> {
+[fn] L4218-4236 (19): fn parse_alu_ax_mem(
+[fn] L4238-4269 (32): fn parse_jmp_cond(kw: &str, operands: &str, line_no: usize) -> AsmResult<Instr> {
+[fn] L4271-4273 (3): fn split_comma(s: &str) -> Option<(&str, &str)> {
+[fn] L4283-4304 (22): fn strip_segment_override(operand: &str) -> Option<(crate::ir::SegReg, String)> {
+[fn] L4308-4316 (9): fn parse_imm8(s: &str) -> Option<u8> {
+[fn] L4324-4335 (12): fn parse_imm8_signed(s: &str) -> Option<i8> {
+[fn] L4340-4357 (18): fn parse_imm16(s: &str) -> Option<u16> {
+[fn] L4361-4374 (14): fn parse_offset_symbol(s: &str) -> Option<&str> {
+[fn] L4377-4387 (11): fn parse_offset_group_symbol(s: &str) -> Option<(&str, &str)> {
+[fn] L4391-4393 (3): fn parse_group_symbol(s: &str) -> Option<(&str, &str)> {
+[fn] L4396-4398 (3): fn parse_byte_group_symbol(s: &str) -> Option<(&str, &str)> {
+[fn] L4400-4422 (23): fn parse_group_symbol_with_width<'a>(s: &'a str, prefix: &str) -> Option<(&'a str, &'a str)> {
+[fn] L4426-4435 (10): fn parse_word_si_disp(s: &str) -> Option<i8> {
+[fn] L4437-4446 (10): fn parse_word_di_disp(s: &str) -> Option<i8> {
+[fn] L4456-4465 (10): fn parse_byte_bp_si_disp(s: &str) -> Option<i8> {
+[fn] L4474-4480 (7): fn parse_es_bx_disp(s: &str, prefix: &str) -> Option<u8> {
+[fn] L4482-4491 (10): fn parse_word_bx_disp(s: &str) -> Option<i8> {
+[fn] L4496-4505 (10): fn parse_byte_bx_disp(s: &str) -> Option<i8> {
+[fn] L4511-4551 (41): fn parse_group_symbol_base_disp<'a>(
+[fn] L4557-4559 (3): fn parse_group_symbol_bx_disp(s: &str) -> Option<(&str, &str, u16)> {
+[fn] L4562-4564 (3): fn parse_byte_group_symbol_bx_disp(s: &str) -> Option<(&str, &str, u16)> {
+[fn] L4568-4606 (39): fn parse_byte_group_symbol_reg_disp<'a>(s: &'a str, reg: &str) -> Option<(&'a str, &'a str, u16
+[fn] L4608-4653 (46): fn parse_group_symbol_bx_disp_width<'a>(s: &'a str, width: &str) -> Option<(&'a str, &'a str, u
+[fn] L4657-4664 (8): fn split_sym_offset(s: &str) -> (&str, i16) {
+[fn] L4668-4670 (3): fn parse_bp_relative(s: &str) -> Option<i16> {
+[fn] L4675-4677 (3): fn parse_byte_bp_relative(s: &str) -> Option<i16> {
+[fn] L4683-4692 (10): fn parse_byte_si_disp(s: &str) -> Option<i8> {
+[fn] L4697-4699 (3): fn parse_word_bp_relative(s: &str) -> Option<i16> {
+[fn] L4701-4703 (3): fn parse_dword_bp_relative(s: &str) -> Option<i16> {
+[fn] L4705-4707 (3): fn parse_qword_bp_relative(s: &str) -> Option<i16> {
+[fn] L4711-4752 (42): fn parse_fld(rest: &str, line_no: usize) -> AsmResult<Instr> {
+[fn] L4757-4784 (28): fn parse_fstp(rest: &str, line_no: usize) -> AsmResult<Instr> {
+[fn] L4792-4828 (37): fn parse_fpu_arith(
+[enum] L4830-4836 (7): enum BpWidth {
+[fn] L4838-4857 (20): fn parse_bp_relative_with_width(s: &str, width: BpWidth) -> Option<i16> {
+[fn] L4859-4868 (10): fn unquote(s: &str) -> Option<&str> {
+[fn] L4870-4889 (20): fn decode_hex(s: &str, line_no: usize) -> AsmResult<Vec<u8>> {
+[fn] L4891-4901 (11): fn hex_digit(c: u8, line_no: usize) -> AsmResult<u8> {
+[mod] L4904: mod tests {
+
+ITEM COUNTS: enum=1, fn=57, impl=3, mod=1, struct=1, use=2

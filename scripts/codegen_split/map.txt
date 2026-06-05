@@ -1,0 +1,239 @@
+TOTAL LINES: 26071
+
+[struct] L27-29 (3 lines): pub struct Signatures {
+[struct] L32-42 (11 lines): struct FunctionSig {
+[impl] L44-110 (67 lines): impl Signatures {
+    fn from_unit  L46-64  (19)
+    fn params_of  L71-73  (3)
+    fn ret_ty_of  L80-82  (3)
+    fn is_pascal  L89-91  (3)
+    fn is_far  L96-98  (3)
+    fn is_extern_function  L105-109  (5)
+[mod] L112: pub mod fold;
+[mod] L113: mod line_map;
+[mod] L114: mod locals;
+[mod] L115: mod plan;
+[fn] L122-124 (3 lines): pub fn fold_const_global(expr: &crate::ast::Expr) -> Option<u32> {
+[struct] L133-136 (4 lines): pub struct GlobalTable {
+[impl] L138-204 (67 lines): impl GlobalTable {
+    fn from_unit  L140-153  (14)
+    fn type_of  L156-158  (3)
+    fn names  L161-163  (3)
+    fn is_static  L169-171  (3)
+    fn lookup_struct_by_tag  L181-198  (18)
+    fn contains  L201-203  (3)
+[struct] L212-231 (20 lines): pub struct StringPool {
+[struct] L234-237 (4 lines): pub struct PoolEntry {
+[impl] L239-332 (94 lines): impl StringPool {
+    fn intern  L244-246  (3)
+    fn intern_at  L253-257  (5)
+    fn offset_for_span  L263-265  (3)
+    fn intern_blob  L270-272  (3)
+    fn intern_float  L281-283  (3)
+    fn intern_double  L292-294  (3)
+    fn intern_inner  L296-315  (20)
+    fn is_empty  L321-323  (3)
+    fn entries  L329-331  (3)
+[fn] L340-346 (7 lines): fn struct_field_info<'a>(ty: &'a Type, name: &str) -> Option<&'a crate::ast::StructField> 
+[struct] L354-369 (16 lines): struct BitfieldRef {
+[enum] L372-375 (4 lines): enum BitfieldAccess {
+[impl] L377-384 (8 lines): impl BitfieldAccess {
+    fn ptr  L378-383  (6)
+[fn] L389-395 (7 lines): fn expr_is_float_one(e: &Expr) -> bool {
+[fn] L397-403 (7 lines): fn bp_addr(off: i16) -> String {
+[fn] L423-431 (9 lines): fn flatten_init_to_bytes(ty: &Type, init: &Expr) -> Option<Vec<u8>> {
+[fn] L436-487 (52 lines): fn write_init_bytes(dst: &mut [u8], ty: &Type, init: &Expr) -> Option<bool> {
+[fn] L493-499 (7 lines): fn global_offset_addr(sym: &str, off: i32) -> String {
+[fn] L505-518 (14 lines): fn last_emit_ends_with_byte_store_al(buf: &[u8]) -> bool {
+[fn] L527-568 (42 lines): fn hoist_bx_load_above_ax_load(buf: &mut Vec<u8>, pre_pos: usize, mid_pos: usize) {
+[fn] L582-612 (31 lines): fn tail_is_ax_imm_op(buf: &[u8]) -> bool {
+[fn] L614-645 (32 lines): fn hoist_first_setup_above_push(buf: &mut Vec<u8>, push_pos: usize) {
+[fn] L654-685 (32 lines): fn try_rewind_array_addr_ax_to_dx(
+[fn] L698-740 (43 lines): fn split_lhs_reg_clobber_tail(buf: &[u8]) -> Option<(usize, usize, usize, &'static [u8])> 
+[fn] L752-795 (44 lines): fn split_lhs_mem_clobber_tail(buf: &[u8]) -> Option<(usize, usize, usize, &'static [u8])> 
+[fn] L802-834 (33 lines): fn shift_dest_by_two(dest: &str) -> String {
+[fn] L838-862 (25 lines): pub fn emit_function(
+[fn] L866-868 (3 lines): pub fn function_symbol(name: &str) -> String {
+[fn] L872-874 (3 lines): pub fn function_symbol_pascal(name: &str) -> String {
+[struct] L876-976 (101 lines): struct FunctionEmitter<'a> {
+[struct] L983-986 (4 lines): struct LoopTargets {
+[impl] L988-25136 (24149 lines): impl<'a> FunctionEmitter<'a> {
+    fn new  L989-1003  (15)
+    fn new_with_opts  L1005-1045  (41)
+    fn struct_call_tmp_offset  L1050-1053  (4)
+    fn exit_label_num  L1055-1057  (3)
+    fn emit_label  L1059-1062  (4)
+    fn label_ref  L1064-1066  (3)
+    fn run  L1068-1274  (207)
+    fn emit_stmt  L1276-1282  (7)
+    fn flush_pending_post_update  L1284-1290  (7)
+    fn emit_stmt_inner  L1292-1454  (163)
+    fn emit_expr_discard  L1461-1590  (130)
+    fn emit_update_in_place  L1600-1814  (215)
+    fn advance_to_stmt_line  L1816-1819  (4)
+    fn emit_if  L1821-1942  (122)
+    fn emit_while  L1944-2041  (98)
+    fn emit_do_while  L2043-2087  (45)
+    fn emit_for  L2089-2155  (67)
+    fn advance_to_for_header_line  L2160-2163  (4)
+    fn emit_switch  L2193-2234  (42)
+    fn emit_switch_chained  L2238-2387  (150)
+    fn advance_to_stmt_line_at  L2391-2394  (4)
+    fn emit_switch_jump_table  L2426-2631  (206)
+    fn emit_switch_linear_search  L2668-2810  (143)
+    fn emit_asm_block  L2821-2836  (16)
+    fn translate_asm_line  L2846-2872  (27)
+    fn substitute_asm_ident  L2877-2892  (16)
+    fn emit_switch_long_linear_search  L2903-3022  (120)
+    fn is_long_signed_globals_cmp  L3042-3051  (10)
+    fn ident_is_long_like  L3053-3058  (6)
+    fn collect_long_lvalue_chain  L3067-3096  (30)
+    fn long_arm_load  L3102-3119  (18)
+    fn expr_is_long_like  L3124-3175  (52)
+    fn expr_int_is_unsigned  L3180-3191  (12)
+    fn long_addr_pair  L3197-3206  (10)
+    fn emit_index_into_bx  L3228-3378  (151)
+    fn value_needs_ax_route  L3385-3434  (50)
+    fn lookup_struct_by_tag  L3443-3466  (24)
+    fn try_dx_load_source  L3477-3502  (26)
+    fn try_op_source  L3508-3533  (26)
+    fn classify_var_idx_array  L3540-3562  (23)
+    fn is_simple_lvalue  L3569-3584  (16)
+    fn try_memory_source  L3586-3600  (15)
+    fn int_lvalue_addr  L3606-3609  (4)
+    fn named_int_lvalue_addr  L3618-3631  (14)
+    fn int_lvalue_src  L3637-3654  (18)
+    fn long_lvalue_addr_pair  L3656-3719  (64)
+    fn try_emit_long_value_to_dest  L3732-4104  (373)
+    fn is_long_signed_const_cmp  L4112-4124  (13)
+    fn is_long_vs_int_cmp  L4133-4145  (13)
+    fn is_long_vs_int_ne  L4151-4162  (12)
+    fn is_long_ne_const  L4167-4182  (16)
+    fn emit_cond_branch  L4184-4743  (560)
+    fn emit_cond_test  L4754-5143  (390)
+    fn cmp_is_unsigned  L5150-5152  (3)
+    fn expr_is_unsigned  L5154-5165  (12)
+    fn expr_shift_is_unsigned  L5176-5187  (12)
+    fn resolve_chain_addr  L5202-5215  (14)
+    fn try_lvalue_chain_addr  L5217-5242  (26)
+    fn try_member_dot_chain  L5248-5257  (10)
+    fn try_arrow_chain_addr  L5269-5316  (48)
+    fn emit_widen_al  L5322-5335  (14)
+    fn emit_zero_test  L5340-5652  (313)
+    fn target_is_char_lvalue  L5657-5676  (20)
+    fn bp_idx_disp_for_char_array  L5695-5714  (20)
+    fn emit_arr_var_field_addr_to_bx  L5727-5747  (21)
+    fn match_arr_var_field_add_chain  L5755-5825  (71)
+    fn named_int_lvalue_addr_or_reg  L5832-5849  (18)
+    fn huge_ptr_lvalue_addr  L5854-5864  (11)
+    fn far_ptr_lvalue_addr  L5870-5880  (11)
+    fn emit_compare  L5882-6266  (385)
+    fn emit_logical_to_ax  L6293-6321  (29)
+    fn emit_unary  L6331-6342  (12)
+    fn emit_update_to_ax  L6353-6523  (171)
+    fn emit_call_via  L6542-6661  (120)
+    fn emit_call  L6663-7067  (405)
+    fn emit_long_arg_push  L7075-7223  (149)
+    fn try_direct_arg_push  L7231-7310  (80)
+    fn emit_arg_into_ax  L7316-7369  (54)
+    fn ident_in_register  L7373-7382  (10)
+    fn emit_return_value_load  L7384-7399  (16)
+    fn emit_return_value_load_inner  L7401-8575  (1175)
+    fn operand_is_float_like  L8582-8637  (56)
+    fn emit_float_load_to_fpu  L8648-8864  (217)
+    fn emit_float_compare_branch  L8875-8986  (112)
+    fn float_operand_width  L8991-9007  (17)
+    fn emit_float_arith_mem  L9014-9079  (66)
+    fn resolve_float_array_addr  L9087-9123  (37)
+    fn emit_init_local  L9126-10110  (985)
+    fn emit_compound_assign  L10129-12688  (2560)
+    fn emit_address_of  L12698-12714  (17)
+    fn emit_deref_to_ax  L12730-13183  (454)
+    fn emit_chain_to_bx  L13192-13238  (47)
+    fn emit_seg_selector_deref_write  L13247-13286  (40)
+    fn emit_seg_selector_deref_read  L13294-13326  (33)
+    fn emit_deref_pointer_plus_offset  L13328-13420  (93)
+    fn emit_array_index_to_ax  L13430-14200  (771)
+    fn emit_global_pointer_index_to_ax  L14209-14260  (52)
+    fn emit_pointer_index_to_ax  L14262-14425  (164)
+    fn emit_string_lit_index_to_ax  L14431-14446  (16)
+    fn emit_index_into_bx_long_stride  L14459-14477  (19)
+    fn emit_array_addr_to_bx  L14486-14596  (111)
+    fn emit_array_addr_2d_to_bx  L14630-14670  (41)
+    fn idx_reg_name  L14674-14684  (11)
+    fn emit_array_assign  L14690-15766  (1077)
+    fn emit_array_compound_assign  L15772-16679  (908)
+    fn emit_member_to_ax  L16693-17338  (646)
+    fn emit_member_assign  L17342-17877  (536)
+    fn emit_long_compound_to_mem  L17894-18088  (195)
+    fn emit_member_array_assign  L18094-18143  (50)
+    fn emit_member_compound_assign  L18145-18563  (419)
+    fn try_emit_assign_lvalue_addr_first  L18578-18633  (56)
+    fn emit_store_ax_to_lvalue  L18635-18699  (65)
+    fn emit_deref_assign  L18706-19190  (485)
+    fn peek_chain_leaf_ty  L19195-19209  (15)
+    fn emit_deref_compound_assign  L19215-19512  (298)
+    fn emit_assign_pseudo_register  L19521-19529  (9)
+    fn emit_assign_global  L19531-20188  (658)
+    fn emit_assign_local  L20190-21404  (1215)
+    fn emit_arith_setup_for_mod  L21411-21416  (6)
+    fn emit_store_reg  L21422-21669  (248)
+    fn resolve_bitfield  L21677-21699  (23)
+    fn resolve_bitfield_through_ptr  L21706-21740  (35)
+    fn resolve_bitfield_named  L21742-21783  (42)
+    fn emit_bitfield_read_to_reg  L21791-21849  (59)
+    fn try_emit_bitfield_chain_to_ax  L21859-21939  (81)
+    fn emit_expr_to_ax  L21942-23465  (1524)
+    fn emit_cast_to_ax  L23473-23615  (143)
+    fn emit_ternary_to_ax  L23623-23674  (52)
+    fn emit_comparison_as_value  L23676-23697  (22)
+    fn emit_binary_right  L23700-23783  (84)
+    fn try_emit_int_vs_char_cmp  L23795-23831  (37)
+    fn try_collapse_lhs_clobber_to_dx  L23849-23932  (84)
+    fn ident_is_uchar  L23938-23946  (9)
+    fn ident_is_char  L23951-23958  (8)
+    fn expr_is_char_load  L23966-24039  (74)
+    fn expr_pointee  L24049-24070  (22)
+    fn ident_pointee  L24072-24080  (9)
+    fn rhs_type_for_long_widening  L24090-24102  (13)
+    fn rhs_byte_addr  L24109-24178  (70)
+    fn long_rhs_halves  L24186-24264  (79)
+    fn global_int_rhs_addr  L24274-24310  (37)
+    fn rhs_int_compound_type  L24319-24415  (97)
+    fn lhs_long_type  L24420-24428  (9)
+    fn rhs_long_type_of_ident  L24429-24431  (3)
+    fn long_halves_of  L24436-24448  (13)
+    fn resolve_operand_source  L24450-25108  (659)
+    fn advance_to_line  L25123-25135  (13)
+[fn] L25145-25267 (123 lines): fn compute_struct_call_tmp_bytes(
+[fn] L25274-25282 (9 lines): fn strip_cast(e: &Expr) -> Option<&Expr> {
+[fn] L25291-25313 (23 lines): fn match_combine_long_idiom(e: &Expr) -> Option<(String, String, bool)> {
+[fn] L25318-25331 (14 lines): fn scrutinee_is_long_typed(
+[fn] L25344-25353 (10 lines): pub(crate) fn is_asm_pseudo_register(name: &str) -> bool {
+[fn] L25359-25370 (12 lines): fn pseudo_register_operand(name: &str) -> Option<&'static str> {
+[fn] L25374-25376 (3 lines): fn is_byte_pseudo_register(name: &str) -> bool {
+[fn] L25383-25406 (24 lines): fn flags_bit_test_mnemonics(cond: &Expr) -> Option<(&'static str, &'static str)> {
+[fn] L25408-25437 (30 lines): fn normalize_asm_line(s: &str) -> String {
+[fn] L25442-25448 (7 lines): fn signed_disp_suffix(disp: i8) -> String {
+[fn] L25450-25452 (3 lines): fn body_has_return(body: &[Stmt]) -> bool {
+[fn] L25454-25470 (17 lines): fn stmt_has_return(stmt: &Stmt) -> bool {
+[fn] L25472-25474 (3 lines): fn body_has_break(body: &[Stmt]) -> bool {
+[fn] L25476-25488 (13 lines): fn stmt_has_break(stmt: &Stmt) -> bool {
+[fn] L25490-25492 (3 lines): fn body_has_continue(body: &[Stmt]) -> bool {
+[fn] L25494-25509 (16 lines): fn stmt_has_continue(stmt: &Stmt) -> bool {
+[fn] L25520-25535 (16 lines): fn switch_c_num(strategy: SwitchStrategy, case_count: u32) -> u32 {
+[fn] L25545-25554 (10 lines): fn long_pair_op(op: BinOp) -> Option<(&'static str, &'static str)> {
+[fn] L25556-25558 (3 lines): fn ptr_width(ty: &Type) -> &'static str {
+[fn] L25560-25562 (3 lines): fn is_reg16_name(s: &str) -> bool {
+[fn] L25570-25649 (80 lines): fn multi_arrow_chain(
+[fn] L25657-25684 (28 lines): fn deref_chain_root(ptr: &Expr) -> (&str, u32) {
+[fn] L25692-25706 (15 lines): fn try_const_array_offset<'a, I>(array_ty: &Type, indices: I) -> Option<(i32, Type)>
+[struct] L25711-25716 (6 lines): struct LongChainStep {
+[enum] L25722-25729 (8 lines): enum VarIdxKind {
+[enum] L25732-25756 (25 lines): enum OperandSource {
+[impl] L25758-25832 (75 lines): impl OperandSource {
+    fn word  L25760-25788  (29)
+    fn byte  L25791-25831  (41)
+[fn] L25838-25840 (3 lines): fn emit_op_with_source(out: &mut Vec<u8>, op: BinOp, src: &OperandSource, unsigned: bool) 
+[fn] L25845-25859 (15 lines): fn swap_jcc(m: &'static str) -> &'static str {
+[fn] L25862-26071 (210 lines): fn emit_op_with_source_opts(

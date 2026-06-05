@@ -273,9 +273,19 @@ pub(crate) fn emit_push_arg(arg: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, 
         }
         Expr::Param(idx) => {
             let disp = i8::try_from(4 + (idx * 2)).expect("param disp fits");
-            out.push(0xFF);
-            out.push(0x76);
-            out.push(disp as u8);
+            if locals.is_char_param(*idx) {
+                // A char param passed as an int arg widens first: `mov al,[c];
+                // cbw|sub ah,ah; push ax` (pushing the raw word would carry the
+                // high-byte garbage). Fixture 2836.
+                out.extend_from_slice(&[0x8A, 0x46, disp as u8]); // mov al,[bp+disp]
+                if locals.is_unsigned_param(*idx) { out.extend_from_slice(&[0x2A, 0xE4]); } // sub ah,ah
+                else { out.push(0x98); } // cbw
+                out.push(0x50); // push ax
+            } else {
+                out.push(0xFF);
+                out.push(0x76);
+                out.push(disp as u8);
+            }
         }
         Expr::StrLit(string_idx) => {
             // `mov ax, 00 00` placeholder; FIXUPP makes the linker
@@ -357,9 +367,13 @@ pub(crate) fn emit_push_arg(arg: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, 
             | Expr::LocalIndex { .. } | Expr::LocalIndexByte { .. }
             | Expr::ParamIndex { .. } | Expr::PtrIndexByte { .. }
             | Expr::FuncAddr(..)
-            | Expr::PostMutateGlobal { .. } | Expr::PreMutateGlobal { .. } | Expr::Seq { .. } => {
+            | Expr::PostMutateGlobal { .. } | Expr::PreMutateGlobal { .. } | Expr::Seq { .. }
+            | Expr::PostIncDeref { .. } | Expr::PostMutateLocal { .. } | Expr::PostMutateParam { .. }
+            | Expr::PtrChainField { .. } | Expr::AddrOfIndexedGlobal { .. }
+            | Expr::StructArrayField { .. } | Expr::PreMutateIndexedGlobal { .. }
+            | Expr::PostMutateIndexedGlobal { .. } => {
             // Computed value: build the result in AX then push.
-            // Fixture 4144 (BinOp), 1270 (Call).
+            // Fixture 4144 (BinOp), 1270 (Call), 3626 (`putchar(*s++)`).
             emit_expr_to_ax(arg, locals, out, fixups);
             out.push(0x50);
         }

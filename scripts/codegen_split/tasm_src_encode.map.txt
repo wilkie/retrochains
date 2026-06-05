@@ -1,0 +1,28 @@
+TOTAL LINES: 4409
+
+[use] L5: use std::collections::{HashMap, HashSet};
+[use] L7: use crate::ir::{
+[type] L15: type ExpandedJccs = HashSet<(usize, usize)>;
+[struct] L20-24 (5): pub struct EncodedSeg {
+[type] L30: pub type Symbols = HashMap<String, SymbolLoc>;
+[struct] L33-36 (4): pub struct SymbolLoc {
+[struct] L38-41 (4): pub struct EncodedModule {
+[fn] L43-119 (77): pub fn encode_module(module: &Module) -> AsmResult<EncodedModule> {
+[fn] L121-128 (8): fn build_extern_idx(module: &Module) -> HashMap<String, u8> {
+[fn] L130-167 (38): fn build_symbols(module: &Module, expanded: &ExpandedJccs) -> AsmResult<Symbols> {
+[fn] L169-176 (8): fn build_group_idx(module: &Module) -> HashMap<String, u8> {
+[fn] L178-185 (8): fn build_segment_idx(module: &Module) -> HashMap<String, u8> {
+[fn] L187-407 (221): fn encode_segment(
+[fn] L409-873 (465): fn instr_size(instr: &Instr) -> usize {
+[fn] L875-4157 (3283): fn emit_instr(
+[fn] L4165-4171 (7): fn push_fidrqq_fixup(
+[fn] L4177-4183 (7): fn push_fiwrqq_fixup(
+[fn] L4185-4205 (21): fn push_marker_fixup(
+[fn] L4210-4213 (4): fn emit_alu_ax_bp_rel(opcode: u8, offset: i16, out: &mut Vec<u8>) {
+[fn] L4222-4231 (10): fn emit_bp_rel_modrm(reg_field: u8, offset: i16, out: &mut Vec<u8>) {
+[fn] L4237-4239 (3): fn bp_rel_modrm_size(offset: i16) -> usize {
+[fn] L4253-4302 (50): fn emit_group_sym_imm16(
+[fn] L4304-4365 (62): fn emit_group_sym_lea(
+[mod] L4368: mod tests {
+
+ITEM COUNTS: fn=16, mod=1, struct=3, type=2, use=2

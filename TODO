@@ -1,0 +1,36 @@
+[done] make fixtures to test _FLAGS and _AX register usage against the real BCC.
+  → fixtures 4051-4062 (pseudo-registers + _FLAGS bit-mask recognizer);
+    see memory: bcc-pseudo-register-codegen.
+
+  `if (_FLAGS & 0x1)` -> direct `jnc`. The whole jumpable-flag table maps:
+    CF/PF/ZF/SF/OF -> `jnc`/`jnp`/`jne`/`jns`/`jno` (skip-then).
+    `!(_FLAGS & bit)` inverts to the set-jump. Value context falls back
+    to `pushf; pop ax; and ax, K`.
+  `_AX = 0xabcd` -> bare `mov ax, imm16`. `return _AX` is free.
+  `if (_AL == 0x80)` -> direct `cmp al, imm8`, no widening.
+  `_AL` widens unsigned (zero-extend via `mov ah, 0`).
+
+[done] Take a look at segment prefixes used in type declarations
+  → fixtures 4063-4068; see memory: bcc-segment-qualified-pointers.
+
+  `int _ss/_es/_cs/_ds *p` is always 2 bytes regardless of memory model.
+  Qualifier becomes a TASM `<seg>:` override on the deref operand. DS
+  elided (default segment). Large model (-ml) preserves near-ness: the
+  function turns far but the seg-qualified pointer stays a single word.
+
+[done] Segment pointers (_seg)
+  → fixtures 4069-4074; see memory: bcc-seg-pointers.
+
+  `char _seg *p` is a 2-byte segment selector. Deref pattern:
+    mov es, word ptr [<seg-ptr>]      ; load segment into ES
+    mov <reg>, byte ptr es:[<off>]    ; offset becomes displacement
+  Offset can be 0, a constant, or a near pointer (-> SI). The seg+near
+  -> far semantic is realized purely by the addressing mode.
+  `(unsigned)p` is identity at codegen.
+
+  Distinct from the `_es` qualifier: `_es *` assumes ES is already set
+  (just emits the override); `_seg *` actively loads ES at every deref.
+
+  Full PSP example from the original TODO not yet fixtured end-to-end
+  (combines _seg + near ptr + putchar loop). Pieces are covered by
+  4069-4074 individually.
