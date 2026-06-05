@@ -2317,6 +2317,21 @@ fn emit_binop_inner(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, o
         load(out);
         // Right as IntLit → imm form.
         if let Expr::IntLit(k) = right {
+            // A SIGNED int right-shift `x >> K` is arithmetic (`sar`), but
+            // emit_imm_op only emits the logical `shr`. Route signed shifts to
+            // sar here. Fixture 1515 (`int x; ...; return x >> 4`).
+            let signed_word = match left {
+                Expr::Local(i) => locals.size(*i) == 2 && !locals.is_long_local(*i)
+                    && !locals.is_float_local(*i) && !locals.is_unsigned_local(*i),
+                Expr::Param(i) => !locals.is_char_param(*i) && !locals.is_long_param(*i)
+                    && !locals.is_float_param(*i) && !locals.is_unsigned_param(*i),
+                _ => false,
+            };
+            if matches!(op, BinOp::Shr) && signed_word && *k > 0 {
+                if *k == 1 { out.extend_from_slice(&[0xD1, 0xF8]); } // sar ax,1
+                else { out.extend_from_slice(&[0xB1, *k as u8, 0xD3, 0xF8]); } // mov cl,k; sar ax,cl
+                return;
+            }
             emit_imm_op(op, *k, out);
             return;
         }
