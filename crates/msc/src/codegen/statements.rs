@@ -1772,6 +1772,39 @@ pub(crate) fn fold_cond_raw(cond: &Cond, inits: &[Option<i32>]) -> Option<i32> {
 /// inside the loop body statements. Used to clear their `spec.init`
 /// values from the body's fold view so MSC emits runtime loads
 /// instead of substituting the pre-loop init constant.
+/// Collect locals mutated inside a loop CONDITION (or exit guard): a
+/// pre/post-mutation (`i--`) or an assignment-expression (`(*p = v)`) used as
+/// the test. Unioned into the body fold-view strip set so those locals read
+/// from their slot in the body. Fixture 2202.
+pub(crate) fn collect_cond_mutations(cond: &Cond, set: &mut std::collections::HashSet<usize>) {
+    fn expr_mut(e: &Expr, set: &mut std::collections::HashSet<usize>) {
+        match e {
+            Expr::PostMutateLocal { local_idx, .. }
+            | Expr::PreMutateLocal { local_idx, .. } => { set.insert(*local_idx); }
+            Expr::AssignExpr { target, value } => {
+                match target {
+                    AssignTarget::Local(i)
+                    | AssignTarget::DerefLocal(i)
+                    | AssignTarget::DerefLocalByte(i)
+                    | AssignTarget::DerefPostMutateLocal { local_idx: i, .. } => { set.insert(*i); }
+                    _ => {}
+                }
+                expr_mut(value, set);
+            }
+            Expr::BinOp { left, right, .. } => { expr_mut(left, set); expr_mut(right, set); }
+            Expr::Ternary { cond, then_arm, else_arm } => { expr_mut(cond, set); expr_mut(then_arm, set); expr_mut(else_arm, set); }
+            _ => {}
+        }
+    }
+    match cond {
+        Cond::Truthy(e) => expr_mut(e, set),
+        Cond::Cmp { left, right, .. } => { expr_mut(left, set); expr_mut(right, set); }
+        Cond::And(a, b) | Cond::Or(a, b) => {
+            collect_cond_mutations(a, set);
+            collect_cond_mutations(b, set);
+        }
+    }
+}
 pub(crate) fn collect_loop_body_mutations(stmts: &[&Stmt]) -> std::collections::HashSet<usize> {
     fn visit_stmt(stmt: &Stmt, set: &mut std::collections::HashSet<usize>) {
         match stmt {
@@ -1847,7 +1880,14 @@ pub(crate) fn emit_loop(
     // body expressions like `s = s + i` in later iterations.
     // The outer `locals` (with init values intact) is still used for
     // the entry-condition fold to detect the do-while optimization.
-    let body_mutations = collect_loop_body_mutations(body_segments);
+    let mut body_mutations = collect_loop_body_mutations(body_segments);
+    // A local mutated in the loop CONDITION (`while(i--)`) or exit guard is also
+    // loop-carried, so it must read from its slot in the body, not fold to its
+    // declared init. This only strips the body fold view — the entry-condition
+    // fold still uses the full `locals` (so the do-while elision is unaffected).
+    // Fixture 2202.
+    collect_cond_mutations(cond, &mut body_mutations);
+    if let Some(g) = exit_guard { collect_cond_mutations(g, &mut body_mutations); }
     let body_inits: Vec<Option<i32>> = locals.inits.iter().enumerate()
         .map(|(i, &v)| if body_mutations.contains(&i) { None } else { v })
         .collect();
