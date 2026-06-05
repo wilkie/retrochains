@@ -2728,10 +2728,12 @@ pub(crate) fn emit_do_while(
 /// Current trigger: `<local> = <local> ± 1;` paired with
 /// `while (<same-local>);`. Fixture 4098.
 pub(crate) fn body_sets_flags_for_cond(body: &Stmt, cond: &Cond) -> bool {
-    // Peel a single-statement block so `do { i--; } while (i);` is
-    // recognized identically to `do i--; while (i);` (fixture 1218).
+    // The flag-setting `i--`/`i++` only needs to be the LAST statement of the
+    // body — its `dec/inc word [i]` is then the last instruction emitted before
+    // the loop-back jcc, so the comparison is redundant. `do { i--; } while (i)`
+    // (fixture 1218) and `do { sum += i; i--; } while (i)` (1887) both qualify.
     let body = match body {
-        Stmt::Block(stmts) if stmts.len() == 1 => &stmts[0],
+        Stmt::Block(stmts) if !stmts.is_empty() => stmts.last().unwrap(),
         other => other,
     };
     let Stmt::Assign { target: AssignTarget::Local(local_idx), value } = body else { return false };
