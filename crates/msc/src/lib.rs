@@ -15,6 +15,7 @@ use obj::ObjBuilder;
 
 mod lex;
 mod parse;
+mod preproc;
 mod codegen;
 
 // Phase modules hold the free functions; types/impls stay here.
@@ -159,8 +160,9 @@ pub enum GlobalInit {
     StrAddr(usize),
     /// _DATA-segment global's address — `int *q = &g;`. Placeholder
     /// is the target global's `_DATA` offset; FIXUP shape is the
-    /// same `c4 off 9d` as a PUBDEF-global access. Fixture 4115.
-    GlobalAddr(usize),
+    /// same `c4 off 9d` as a PUBDEF-global access. Fixture 4115. The second
+    /// field is an extra byte offset for `&arr[K]` (`_p DW DGROUP:_arr+K*elem`).
+    GlobalAddr(usize, u16),
     /// IEEE float/double initializer — `double g = 3.14;`. The `u64`
     /// holds the f64 bits; `usize` is the byte width (8 for `double`,
     /// 4 for `float`, in which case the value is collapsed to f32).
@@ -306,6 +308,28 @@ pub struct StructField {
     /// `Some(struct_idx)` when this field is itself a (non-pointer) struct,
     /// enabling multi-level member access (`o.inner.a`).
     pub struct_idx: Option<usize>,
+    /// Bit-field width in bits (`0` = ordinary field). When non-zero the field
+    /// occupies `bit_width` bits starting at `bit_off` within the 16-bit unit at
+    /// `byte_off`. MSC reads/writes bit-fields signedness-agnostically (no sign
+    /// extension), so no signed flag is needed.
+    pub bit_width: u8,
+    pub bit_off: u8,
+    /// `true` when the field is a pointer (`int *p`, `struct X *q`). The slot is
+    /// 2 bytes; `pointee_size` is the pointed-to element size for `p->q[K]`
+    /// scaling, and `struct_idx` (kept even for pointers) names the target struct
+    /// for member chains like `o->p->v`.
+    pub is_pointer: bool,
+    pub pointee_size: u8,
+}
+
+/// Base storage of a bit-field access — a file-scope global or a stack local.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BitBase {
+    Global(usize),
+    Local(usize),
+    /// `p->f` — the field lives at `[bx + byte_off]` after loading the struct
+    /// pointer param into BX. Fixture 3447.
+    DerefParam(usize),
 }
 
 impl LocalSpec {
@@ -698,6 +722,14 @@ pub enum AssignTarget {
     /// `<struct-global>.<field> = <expr>;` — store to a global
     /// struct's field.
     GlobalField { global: usize, byte_off: u16, size: u8 },
+    /// Bit-field store `s.f = <expr>;` — read-modify-write the 16-bit unit at
+    /// `base+byte_off`: clear the field's bits, OR in the (masked, shifted)
+    /// value. Fixtures 3209, 3217, 1691.
+    BitField { base: BitBase, byte_off: u16, bit_off: u8, bit_width: u8 },
+    /// `arr[i].field = <expr>;` on a global struct array with a RUNTIME index:
+    /// scale `i` by `stride`, store `size` bytes to `[_arr + bx + field_off]`.
+    /// Fixtures 3240, 1914.
+    StructArrayField { array: usize, index: Box<Expr>, stride: u16, field_off: u16, size: u8 },
     /// `<struct-ptr-param>-><field> = <expr>;` — store via a struct
     /// pointer parameter. Codegen: `mov bx, [bp+pdisp];
     /// c7 47 off imm16` (word) / `c6 47 off imm8` (byte).
@@ -877,6 +909,17 @@ pub enum Expr {
     /// `char *` global. Constant index lowers to
     /// `mov bx, [p]; mov al, [bx+disp]; cbw`. Fixture 4123.
     PtrIndexByte { ptr: usize, index: Box<Expr> },
+    /// `arr[i]` where `arr` is an array-of-pointers global (`char *names[]`,
+    /// `int *table[]`) — yields the POINTER VALUE stored at element `i`. Const
+    /// `i` → `mov ax, _arr+2i`; runtime → `mov bx,[i]; shl bx,1; mov ax,
+    /// _arr[bx]`. Used for `return messages[i]` (fixture 2860).
+    PtrArrayElem { array: usize, index: Box<Expr> },
+    /// `arr[i][j]` / `*arr[i]` on an array-of-pointers global — load the
+    /// pointer element at `index` into BX, then read `elem_size` bytes at
+    /// `inner*elem_size`. `elem_size` is the pointee element size (1 for
+    /// `char *names[]`, 2 for `int *table[]`). Fixtures 1394, 2231, 2345,
+    /// 2397, 2551, 2608.
+    PtrArrayDeref { array: usize, index: Box<Expr>, inner: Box<Expr>, elem_size: u8 },
     /// `&<global>` — address-of a file-scope global, as an
     /// expression. Lowers to `b8 imm16` with a FIXUP on the imm16
     /// targeting the global. Fixture 4125 (passed as an argument).
@@ -884,6 +927,9 @@ pub enum Expr {
     /// `&<local>` — address-of a stack local. Lowers to
     /// `lea ax, [bp-disp]` (`8d 46 disp`).
     AddrOfLocal(usize),
+    /// `&arr[i]` with a runtime index on a global array → `<i→ax>; shl ax (×log2
+    /// elem); add ax, OFFSET _arr`. Fixtures 2884, 3249, 3645.
+    AddrOfIndexedGlobal { array: usize, index: Box<Expr>, elem: u8 },
     /// `<cond> ? <then> : <else>` — C ternary. Folds when cond is
     /// a known literal; otherwise codegen would need branching
     /// support (not yet implemented).
@@ -923,9 +969,28 @@ pub enum Expr {
     /// BX, increments `[bx]` in place, then evaluates to the NEW value
     /// (`mov bx,[p]; inc word [bx]; mov ax,[bx]`). Fixtures 2762, 3110.
     PreMutateDeref { ptr: Box<Expr>, step: i32, is_byte: bool },
+    /// `*p++` — the value at the OLD pointer, then the pointer advances by
+    /// `step` (its element size). `mov bx,[p]; add [p],step; mov al/ax,[bx]`.
+    /// The strcpy/walk idiom. Fixtures 3102, 2027 (in a condition).
+    PostIncDeref { ptr: Box<Expr>, step: i32, is_byte: bool },
+    /// `++arr[i]` with a runtime index on a global array: `mov bx,[i]; shl bx,1
+    /// (word); inc word/byte _arr[bx]; mov ax/al,_arr[bx]` — mutate in place then
+    /// load the NEW value. Fixture 2937.
+    PreMutateIndexedGlobal { array: usize, index: Box<Expr>, step: i32, is_byte: bool },
+    /// `arr[i]++` on a global array — yields the OLD element value, then mutates:
+    /// `mov ax,_arr[bx]; inc word _arr[bx]` (const index uses the moffs form).
+    /// Fixtures 3032, 2700, 3123.
+    PostMutateIndexedGlobal { array: usize, index: Box<Expr>, step: i32, is_byte: bool },
     /// `++<global>` or `--<global>` — pre-increment/decrement of a
     /// file-scope variable. Mutates first, then evaluates to the NEW value.
     PreMutateGlobal { global_idx: usize, step: i32 },
+    /// `++<param>` / `--<param>` — pre-inc/dec of a parameter's local stack
+    /// copy. Mutates `[bp+disp]` first, then evaluates to the NEW value; a char
+    /// param widens the reloaded byte with `cbw`. Fixture 3273.
+    PreMutateParam { param_idx: usize, step: i32 },
+    /// `<param>++` / `<param>--` — evaluates to the OLD value, then mutates the
+    /// parameter's stack copy. Fixtures 3308, 3527.
+    PostMutateParam { param_idx: usize, step: i32 },
     /// `<lvalue> = <expr>` used as an EXPRESSION (e.g. `if ((x = 5))`,
     /// `while ((c = g) > 0)`). MSC produces the RHS value in AX and stores it:
     /// `<value→ax>; mov [target], ax`, leaving the value in AX for the
@@ -937,6 +1002,24 @@ pub enum Expr {
     /// For a simple int variable operand MSC loads just the low byte
     /// (`mov al,[v]`). Fixtures 3223 / 2707 / 3411 / 3655.
     CastChar { value: Box<Expr>, unsigned: bool },
+    /// `"string"[K]` — byte at constant offset K of a string literal. Reads
+    /// `mov al, $SG+K; cbw` (a CONST-segment byte load, not folded). Fixtures
+    /// 1209, 2381.
+    StrLitByte { string_idx: usize, byte_off: u16 },
+    /// `arr[i].field` on a global array of structs with a RUNTIME index: scale
+    /// `i` by the struct `stride`, then read `size` bytes at `[_arr + bx +
+    /// field_off]`. Fixtures 3237, 3348, 2841.
+    StructArrayField { array: usize, index: Box<Expr>, stride: u16, field_off: u16, size: u8 },
+    /// Pointer member-chain read `o->p->v` / `(*p).x` / `w->data[K]`: load the
+    /// `base` pointer into BX, dereference through each `hop` offset
+    /// (`mov bx,[bx+hop]`), then read `final_size` bytes at `final_off`. Fixtures
+    /// 2816, 2703, 2960, 2815.
+    PtrChainField { base: Box<Expr>, hops: Vec<u16>, final_off: u16, final_size: u8 },
+    /// Bit-field read `s.f` — load the 16-bit unit at `base+byte_off`, shift
+    /// right by `bit_off`, mask to `bit_width` bits (zero-extended). A
+    /// byte-aligned full-byte field reads the byte directly. Fixtures 3207,
+    /// 3210, 3216, 3419.
+    BitField { base: BitBase, byte_off: u16, bit_off: u8, bit_width: u8 },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1007,6 +1090,11 @@ impl Expr {
             Expr::StrLit(_) => None,
             Expr::Global(_) => None,
             Expr::Index { .. } | Expr::IndexByte { .. } | Expr::PtrIndexByte { .. } => None,
+            Expr::PtrArrayElem { .. } | Expr::PtrArrayDeref { .. } => None,
+            Expr::BitField { .. } => None,
+            Expr::StrLitByte { .. } => None,
+            Expr::PtrChainField { .. } => None,
+            Expr::StructArrayField { .. } => None,
             Expr::Index2D { .. } => None,
             Expr::LocalIndex { .. } | Expr::LocalIndexByte { .. } => None,
             Expr::ParamIndex { .. } => None,
@@ -1014,10 +1102,12 @@ impl Expr {
             Expr::ParamField { .. } => None,
             Expr::DerefParamField { .. } | Expr::DerefGlobalField { .. } => None,
             Expr::DerefByte { .. } | Expr::DerefWord { .. } => None,
-            Expr::AddrOfGlobal(_) | Expr::AddrOfLocal(_) => None,
+            Expr::AddrOfGlobal(_) | Expr::AddrOfLocal(_) | Expr::AddrOfIndexedGlobal { .. } => None,
             Expr::PostMutateLocal { .. } | Expr::PostMutateGlobal { .. }
             | Expr::PreMutateLocal { .. } | Expr::PreMutateGlobal { .. }
-            | Expr::PreMutateDeref { .. } => None,
+            | Expr::PreMutateParam { .. } | Expr::PostMutateParam { .. }
+            | Expr::PreMutateDeref { .. } | Expr::PostIncDeref { .. }
+            | Expr::PreMutateIndexedGlobal { .. } | Expr::PostMutateIndexedGlobal { .. } => None,
             // Comma expression fold: if all the side stmts have no
             // observable side effect (just discard a value), fold to
             // the tail's value. Otherwise refuse to fold (the assigns
@@ -1042,8 +1132,17 @@ impl Expr {
                 }
             }
             // The value of `(x = v)` is v — lets `if ((x=K))` fold its cond for
-            // dead-branch elision. The store side effect is emitted separately.
-            Expr::AssignExpr { value, .. } => value.fold(locals),
+            // dead-branch elision. Only scalar targets fold: for those the store
+            // is emitted separately (and const-prop tracks the new value). A
+            // deref/index target's store can't be elided by folding the
+            // surrounding expression to a constant (`(*p = 5) + 1` must still
+            // emit the store), so those don't fold. Fixture 3333.
+            Expr::AssignExpr { value, target } => match target {
+                AssignTarget::Local(_) | AssignTarget::Param(_) | AssignTarget::Global(_) => {
+                    value.fold(locals)
+                }
+                _ => None,
+            },
             Expr::CastChar { value, unsigned } => {
                 let v = value.fold(locals)?;
                 Some(if *unsigned { (v as u8) as i32 } else { (v as i8) as i32 })
@@ -1160,6 +1259,11 @@ struct Parser<'a> {
     /// order. The position in the Vec is the `struct_idx` referenced
     /// by `LocalSpec::struct_idx` and `Global::struct_idx`.
     structs: Vec<StructDef>,
+    /// Set by `parse_field_lookup` to the leaf field's `(bit_off, bit_width)`
+    /// when that field is a bit-field, else `None`. Member-access sites read it
+    /// right after the lookup to emit a `BitField` variant instead of a plain
+    /// field access.
+    last_field_bits: Option<(u8, u8)>,
     /// Strings interned across the whole translation unit. New
     /// string literals append; duplicates currently get distinct
     /// entries (no dedup yet — no fixture exercises a repeated
@@ -1968,7 +2072,11 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
                 entries.push(((*m).to_owned(), *ty));
             }
             entries.push(("__acrtused".to_owned(), 0x01));
-            entries.push(("__chkstk".to_owned(), 0x00));
+            // A function-less TU (only global data) has no code that calls
+            // chkstk, so MSC omits its EXTDEF. Fixtures 3657/3660/3680.
+            if !unit.functions.is_empty() {
+                entries.push(("__chkstk".to_owned(), 0x00));
+            }
             for h in &helper_extern_order {
                 if float_helpers_trailing && is_float_helper(h) { continue; }
                 entries.push((h.clone(), 0x00));
@@ -2042,7 +2150,10 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
             pre.push(((*m).to_owned(), *ty));
         }
         pre.push(("__acrtused".to_owned(), 0x01));
-        pre.push(("__chkstk".to_owned(), 0x00));
+        // Function-less TU: no code calls chkstk, so MSC omits its EXTDEF.
+        if !unit.functions.is_empty() {
+            pre.push(("__chkstk".to_owned(), 0x00));
+        }
         for h in &helper_extern_order {
             pre.push((h.clone(), 0x00));
         }
@@ -2159,8 +2270,16 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
                     // 4128 has multiple strings — without this patch
                     // every StrLoad would resolve to the first
                     // string.
+                    // Add the existing placeholder (a constant byte offset K from
+                    // `"str"[K]`; 0 for a plain string-address load) to the
+                    // string's CONST offset.
+                    let addend = u16::from_le_bytes([
+                        fe.bytes[fx.body_offset + 1],
+                        fe.bytes[fx.body_offset + 2],
+                    ]);
                     let off = u16::try_from(string_offsets[*string_idx])
-                        .expect("string offset fits");
+                        .expect("string offset fits")
+                        .wrapping_add(addend);
                     fe.bytes[fx.body_offset + 1] = (off & 0xFF) as u8;
                     fe.bytes[fx.body_offset + 2] = ((off >> 8) & 0xFF) as u8;
                     ledata_fixups.push(ResolvedFixup {
@@ -2331,15 +2450,16 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
                                 .expect("string offset fits");
                             data_bytes.extend_from_slice(&off.to_le_bytes());
                         }
-                        GlobalInit::GlobalAddr(gi) => {
+                        GlobalInit::GlobalAddr(gi, elem_off) => {
                             // Placeholder = _DATA offset of the target if
                             // it's initialized (PUBDEF path), else 0 — for
                             // a COMDEF target the linker substitutes the
-                            // address via the EXTDEF FIXUP.
+                            // address via the EXTDEF FIXUP. `elem_off` adds the
+                            // `&arr[K]` element byte offset.
                             let off = match data_offsets[*gi] {
                                 Some(o) => u16::try_from(o).expect("global offset fits"),
                                 None => 0,
-                            };
+                            }.wrapping_add(*elem_off);
                             data_bytes.extend_from_slice(&off.to_le_bytes());
                         }
                         GlobalInit::FuncAddr(_) => {
@@ -2368,7 +2488,7 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
                         GlobalInit::StrAddr(_) => {
                             data_slot_fixups.push((slot_off, DataFx::Thread(0x9C)));
                         }
-                        GlobalInit::GlobalAddr(gi) => {
+                        GlobalInit::GlobalAddr(gi, _) => {
                             if unit.globals[*gi].init.is_some() {
                                 data_slot_fixups.push((slot_off, DataFx::Thread(0x9D)));
                             } else {
@@ -2507,6 +2627,7 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
     for w in 0..run_boundaries.len().saturating_sub(1) {
         let start = run_boundaries[w];
         let end = run_boundaries[w + 1];
+        if start >= end { continue; } // function-less TU — no _TEXT run
         let run_base = function_offsets[start];
         let mut run_bytes = Vec::new();
         for fi in start..end {

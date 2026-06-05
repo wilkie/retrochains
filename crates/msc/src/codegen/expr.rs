@@ -75,6 +75,44 @@ pub(crate) fn emit_offset_deref(base: &Expr, idx: &Expr, is_byte: bool, locals: 
     if is_byte { out.push(0x98); } // cbw
     true
 }
+/// Load the pointer element at `index` of an array-of-pointers global `array`
+/// into BX (`arr[index]`). This phase leaves AX untouched.
+pub(crate) fn emit_ptr_array_load_bx(array: usize, index: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    if let Some(k) = index.fold(locals.inits) {
+        // mov bx, _arr+2k   (8b 1e <off16>)
+        let off = (k as u32).wrapping_mul(2) as u16;
+        out.extend_from_slice(&[0x8B, 0x1E]);
+        let bo = out.len();
+        out.extend_from_slice(&off.to_le_bytes());
+        fixups.push(Fixup { body_offset: bo - 1, kind: FixupKind::GlobalAddr { global_idx: array } });
+    } else {
+        // mov bx,[i]; shl bx,1; mov bx,[bx+_arr]   (8b 9f <off16>)
+        emit_load_bx(index, locals, out, fixups);
+        out.extend_from_slice(&[0xD1, 0xE3]); // shl bx,1
+        out.push(0x8B); out.push(0x9F);
+        let bo = out.len();
+        out.extend_from_slice(&[0x00, 0x00]);
+        fixups.push(Fixup { body_offset: bo - 1, kind: FixupKind::GlobalAddr { global_idx: array } });
+    }
+}
+/// Read the pointee at `[bx + inner*elem_size]` into AX/AL (BX already holds
+/// the pointer). Char element widens with `cbw`. Only a constant `inner` index
+/// is supported (the corpus uses J ∈ {0,1}).
+pub(crate) fn emit_ptr_array_read_elem(inner: &Expr, elem_size: u8, locals: &Locals<'_>, out: &mut Vec<u8>) {
+    let j = inner.fold(locals.inits).unwrap_or_else(|| {
+        panic!("non-constant pointer-array inner index not supported")
+    });
+    let off = j * elem_size as i32;
+    let read = if elem_size == 1 { 0x8Au8 } else { 0x8B };
+    if off == 0 {
+        out.push(read); out.push(0x07); // [bx]
+    } else if let Ok(o8) = i8::try_from(off) {
+        out.push(read); out.push(0x47); out.push(o8 as u8); // [bx+disp8]
+    } else {
+        out.push(read); out.push(0x87); out.extend_from_slice(&(off as u16).to_le_bytes());
+    }
+    if elem_size == 1 { out.push(0x98); } // cbw
+}
 /// Scale SI by `factor`: power-of-two → `shl si,1` steps; 3 → `mov ax,si; shl
 /// si,1; add si,ax`; otherwise `imul si,si,imm16`.
 fn scale_si(out: &mut Vec<u8>, factor: usize) {
@@ -97,8 +135,13 @@ pub(crate) fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8
         Expr::AssignExpr { target, value } => {
             // Assignment-as-expression: produce the RHS in AX, store it, leave
             // the value in AX (`<value→ax>; mov [target], ax`). Fixtures
-            // 513/1434/2996/3395/555.
-            emit_expr_to_ax(value, locals, out, fixups);
+            // 513/1434/2996/3395/555. A literal 0 loads via `sub ax,ax` (the
+            // chained-assignment value form, fixture 3334).
+            if matches!(value.as_ref(), Expr::IntLit(0)) {
+                out.extend_from_slice(&[0x2B, 0xC0]); // sub ax,ax
+            } else {
+                emit_expr_to_ax(value, locals, out, fixups);
+            }
             match target {
                 AssignTarget::Local(i) => {
                     let d = locals.disp(*i);
@@ -112,6 +155,32 @@ pub(crate) fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8
                     let bo = out.len();
                     out.extend_from_slice(&[0xA3, 0x00, 0x00]); // mov [moffs], ax
                     fixups.push(Fixup { body_offset: bo, kind: FixupKind::GlobalAddr { global_idx: *g } });
+                }
+                // `(*p = v)` as a value: the pointer base goes into BX after the
+                // value is already in AX, then the store reuses AX (`mov bx,
+                // [ptr]; mov [bx], ax`). Byte pointees store AL. Fixture 3333.
+                AssignTarget::DerefParam(i) => {
+                    let d = param_disp(*i);
+                    out.push(0x8B); out.push(bp_modrm(0x5E, d)); push_bp_disp(out, d); // mov bx,[bp+d]
+                    out.extend_from_slice(&[0x89, 0x07]); // mov [bx],ax
+                }
+                AssignTarget::DerefLocal(i) => {
+                    let d = locals.disp(*i);
+                    out.push(0x8B); out.push(bp_modrm(0x5E, d)); push_bp_disp(out, d);
+                    out.extend_from_slice(&[0x89, 0x07]);
+                }
+                AssignTarget::DerefLocalByte(i) => {
+                    let d = locals.disp(*i);
+                    if out.last() == Some(&0x98) { out.pop(); } // storing AL, drop cbw
+                    out.push(0x8B); out.push(bp_modrm(0x5E, d)); push_bp_disp(out, d);
+                    out.extend_from_slice(&[0x88, 0x07]); // mov [bx],al
+                }
+                AssignTarget::DerefGlobal(g) => {
+                    out.extend_from_slice(&[0x8B, 0x1E]); // mov bx,[g]
+                    let bo = out.len();
+                    out.extend_from_slice(&[0x00, 0x00]);
+                    fixups.push(Fixup { body_offset: bo - 1, kind: FixupKind::GlobalAddr { global_idx: *g } });
+                    out.extend_from_slice(&[0x89, 0x07]);
                 }
                 other => panic!("AssignExpr target not yet supported: {other:?}"),
             }
@@ -247,6 +316,57 @@ pub(crate) fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8
                 kind: FixupKind::StrLoad { string_idx: *string_idx },
             });
         }
+        Expr::PtrChainField { base, hops, final_off, final_size } => {
+            // Load the base pointer into BX.
+            match base.as_ref() {
+                Expr::Param(i) => { out.extend_from_slice(&[0x8B, 0x5E, param_disp(*i) as u8]); }
+                Expr::Local(i) => { let d = locals.disp(*i); out.push(0x8B); out.push(bp_modrm(0x5E, d)); push_bp_disp(out, d); }
+                Expr::Global(g) => {
+                    out.extend_from_slice(&[0x8B, 0x1E, 0x00, 0x00]);
+                    let bo = out.len() - 2;
+                    fixups.push(Fixup { body_offset: bo - 1, kind: FixupKind::GlobalAddr { global_idx: *g } });
+                }
+                // `arr[i]->...` — load the runtime-indexed struct pointer into BX
+                // (`mov bx,[i]; shl bx,1; mov bx,_arr[bx]`). Fixtures 3541, 2997.
+                Expr::PtrArrayElem { array, index } => {
+                    emit_ptr_array_load_bx(*array, index, locals, out, fixups);
+                }
+                // `a.next->...` — the pointer field of a struct VALUE: load
+                // `[bp+disp+byte_off]` into BX. Fixtures 1928, 1419.
+                Expr::LocalField { local, byte_off, .. } => {
+                    let d = locals.disp(*local) + *byte_off as i16;
+                    out.push(0x8B); out.push(bp_modrm(0x5E, d)); push_bp_disp(out, d);
+                }
+                Expr::GlobalField { global, byte_off, .. } => {
+                    let bo = out.len();
+                    out.push(0x8B); out.push(0x1E); out.extend_from_slice(&byte_off.to_le_bytes());
+                    fixups.push(Fixup { body_offset: bo + 1, kind: FixupKind::GlobalAddr { global_idx: *global } });
+                }
+                other => panic!("unsupported ptr-chain base: {other:?}"),
+            }
+            // Walk each hop: mov bx,[bx+hop].
+            let mov_bx_off = |out: &mut Vec<u8>, off: u16| {
+                if off == 0 { out.extend_from_slice(&[0x8B, 0x1F]); }
+                else if off < 128 { out.push(0x8B); out.push(0x5F); out.push(off as u8); }
+                else { out.push(0x8B); out.push(0x9F); out.extend_from_slice(&off.to_le_bytes()); }
+            };
+            for &h in hops { mov_bx_off(out, h); }
+            // Final field read at [bx + final_off].
+            let read = if *final_size == 1 { 0x8Au8 } else { 0x8B };
+            if *final_off == 0 { out.push(read); out.push(0x07); }
+            else if *final_off < 128 { out.push(read); out.push(0x47); out.push(*final_off as u8); }
+            else { out.push(read); out.push(0x87); out.extend_from_slice(&final_off.to_le_bytes()); }
+            if *final_size == 1 { out.push(0x98); } // cbw
+        }
+        Expr::StrLitByte { string_idx, byte_off } => {
+            // `mov al, $SG+K; cbw` — CONST byte load via a StrLoad fixup whose
+            // placeholder is K (the linker adds the string's CONST address).
+            let body_offset = out.len();
+            out.push(0xA0); // mov al, moffs8
+            out.extend_from_slice(&byte_off.to_le_bytes());
+            fixups.push(Fixup { body_offset, kind: FixupKind::StrLoad { string_idx: *string_idx } });
+            out.push(0x98); // cbw
+        }
         Expr::Global(idx) => {
             if locals.is_char_global(*idx) {
                 // `a0 00 00` mov al, moffs8, then widen: `98` cbw (signed char,
@@ -293,6 +413,106 @@ pub(crate) fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8
                 out.push(0x98); // cbw
             } else {
                 out.push(0x8B); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp);
+            }
+        }
+        Expr::PreMutateParam { param_idx, step } => {
+            // Mutate the param's stack slot, then load the NEW value into AX.
+            let disp = param_disp(*param_idx);
+            let is_char = locals.is_char_param(*param_idx);
+            let pointee = locals.param_pointee_size(*param_idx);
+            let eff_step = if pointee > 0 { *step * pointee as i32 } else { *step };
+            let slot_size = if is_char { 1 } else { 2 };
+            crate::codegen::assign::emit_postmutate_local(eff_step, slot_size, disp, out);
+            if is_char {
+                out.push(0x8A); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp);
+                out.push(0x98); // cbw
+            } else {
+                out.push(0x8B); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp);
+            }
+        }
+        Expr::PostMutateParam { param_idx, step } => {
+            // Load the OLD value into AX, then mutate the param's stack slot.
+            let disp = param_disp(*param_idx);
+            let is_char = locals.is_char_param(*param_idx);
+            let pointee = locals.param_pointee_size(*param_idx);
+            let eff_step = if pointee > 0 { *step * pointee as i32 } else { *step };
+            let slot_size = if is_char { 1 } else { 2 };
+            if is_char {
+                out.push(0x8A); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp);
+                out.push(0x98); // cbw
+            } else {
+                out.push(0x8B); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp);
+            }
+            crate::codegen::assign::emit_postmutate_local(eff_step, slot_size, disp, out);
+        }
+        Expr::PreMutateIndexedGlobal { array, index, step, is_byte } => {
+            // `mov bx,[i]; shl bx,1 (word); <inc/add word/byte _arr[bx]>; mov
+            // ax/al,_arr[bx]` (+cbw). Mutate then load NEW value. Fixture 2937.
+            emit_load_bx(index, locals, out, fixups);
+            if !*is_byte { out.extend_from_slice(&[0xD1, 0xE3]); } // shl bx,1
+            // in-place mutate at [_arr + bx]
+            let modrm = 0x87u8; // [bx]+disp16
+            if *step == 1 || *step == -1 {
+                out.push(if *is_byte { 0xFE } else { 0xFF });
+                out.push(if *step == 1 { modrm } else { modrm + 8 }); // /0 inc, /1 dec
+            } else {
+                out.push(if *is_byte { 0x80 } else { 0x83 });
+                out.push(modrm); // /0 add
+            }
+            let bo = out.len();
+            out.extend_from_slice(&[0x00, 0x00]);
+            fixups.push(Fixup { body_offset: bo - 1, kind: FixupKind::GlobalAddr { global_idx: *array } });
+            if !(*step == 1 || *step == -1) { out.push(*step as i8 as u8); }
+            // load the new value
+            out.push(if *is_byte { 0x8A } else { 0x8B }); out.push(0x87);
+            let bo = out.len();
+            out.extend_from_slice(&[0x00, 0x00]);
+            fixups.push(Fixup { body_offset: bo - 1, kind: FixupKind::GlobalAddr { global_idx: *array } });
+            if *is_byte { out.push(0x98); }
+        }
+        Expr::PostMutateIndexedGlobal { array, index, step, is_byte } => {
+            // `arr[i]++`: load the OLD element value, then mutate in place.
+            if let Some(k) = index.fold(locals.inits) {
+                // Const index: moffs forms `mov ax/al,[_a+off]; inc/add [_a+off]`.
+                let off = (k as u32).wrapping_mul(if *is_byte { 1 } else { 2 }) as u16;
+                let bo = out.len();
+                out.push(if *is_byte { 0xA0 } else { 0xA1 }); out.extend_from_slice(&off.to_le_bytes());
+                fixups.push(Fixup { body_offset: bo, kind: FixupKind::GlobalAddr { global_idx: *array } });
+                if *is_byte { out.push(0x98); }
+                if *step == 1 || *step == -1 {
+                    out.push(if *is_byte { 0xFE } else { 0xFF }); out.push(if *step == 1 { 0x06 } else { 0x0E });
+                } else {
+                    out.push(if *is_byte { 0x80 } else { 0x83 }); out.push(0x06);
+                }
+                let bo = out.len(); out.extend_from_slice(&off.to_le_bytes());
+                fixups.push(Fixup { body_offset: bo - 1, kind: FixupKind::GlobalAddr { global_idx: *array } });
+                if !(*step == 1 || *step == -1) { out.push(*step as i8 as u8); }
+            } else {
+                // Runtime index: `mov bx,[i]; shl bx,1; mov ax,_arr[bx]; inc word _arr[bx]`.
+                emit_load_bx(index, locals, out, fixups);
+                if !*is_byte { out.extend_from_slice(&[0xD1, 0xE3]); }
+                out.push(if *is_byte { 0x8A } else { 0x8B }); out.push(0x87);
+                let bo = out.len(); out.extend_from_slice(&[0x00, 0x00]);
+                fixups.push(Fixup { body_offset: bo - 1, kind: FixupKind::GlobalAddr { global_idx: *array } });
+                if *is_byte { out.push(0x98); }
+                if *step == 1 || *step == -1 {
+                    out.push(if *is_byte { 0xFE } else { 0xFF }); out.push(if *step == 1 { 0x87 } else { 0x8F });
+                } else {
+                    out.push(if *is_byte { 0x80 } else { 0x83 }); out.push(0x87);
+                }
+                let bo = out.len(); out.extend_from_slice(&[0x00, 0x00]);
+                fixups.push(Fixup { body_offset: bo - 1, kind: FixupKind::GlobalAddr { global_idx: *array } });
+                if !(*step == 1 || *step == -1) { out.push(*step as i8 as u8); }
+            }
+        }
+        Expr::PostIncDeref { ptr, step, is_byte } => {
+            // Value of `*p++`: the OLD pointee. Load p into BX, advance [p], then
+            // deref BX. Fixture 3102.
+            emit_postinc_ptr_to_bx(ptr, *step, locals, out, fixups);
+            if *is_byte {
+                out.extend_from_slice(&[0x8A, 0x07, 0x98]); // mov al,[bx]; cbw
+            } else {
+                out.extend_from_slice(&[0x8B, 0x07]); // mov ax,[bx]
             }
         }
         Expr::PreMutateDeref { ptr, step, is_byte } => {
@@ -539,24 +759,65 @@ pub(crate) fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8
                 out.extend_from_slice(&[0x8A, 0x47, disp as u8, 0x98]);
             }
         }
+        Expr::StructArrayField { array, index, stride, field_off, size } => {
+            // `arr[i].field`: `mov bx,[i]; <scale bx by stride>; mov ax/al,
+            // [_arr + bx + field_off]`. The field offset folds into the fixup.
+            emit_load_bx(index, locals, out, fixups);
+            let s = *stride as usize;
+            if s.is_power_of_two() {
+                for _ in 0..s.trailing_zeros() { out.extend_from_slice(&[0xD1, 0xE3]); } // shl bx,1
+            } else {
+                out.push(0x69); out.push(0xDB); out.extend_from_slice(&stride.to_le_bytes()); // imul bx,bx,stride
+            }
+            out.push(if *size == 1 { 0x8A } else { 0x8B }); out.push(0x87); // mov ax/al,[bx+disp16]
+            let bo = out.len();
+            out.extend_from_slice(&field_off.to_le_bytes());
+            fixups.push(Fixup { body_offset: bo - 1, kind: FixupKind::GlobalAddr { global_idx: *array } });
+            if *size == 1 { out.push(0x98); } // cbw
+        }
+        Expr::PtrArrayElem { array, index } => {
+            // Pointer VALUE at element `index` of an array-of-pointers global.
+            if let Some(k) = index.fold(locals.inits) {
+                // mov ax, _arr+2k   (a1 <off16>)
+                let off = (k as u32).wrapping_mul(2) as u16;
+                let body_offset = out.len();
+                out.push(0xA1);
+                out.extend_from_slice(&off.to_le_bytes());
+                fixups.push(Fixup { body_offset, kind: FixupKind::GlobalAddr { global_idx: *array } });
+            } else {
+                // mov bx,[i]; shl bx,1; mov ax,[bx+_arr]   (8b 87 <off16>)
+                emit_load_bx(index, locals, out, fixups);
+                out.extend_from_slice(&[0xD1, 0xE3]); // shl bx,1
+                out.push(0x8B); out.push(0x87);
+                let bo = out.len();
+                out.extend_from_slice(&[0x00, 0x00]);
+                fixups.push(Fixup { body_offset: bo - 1, kind: FixupKind::GlobalAddr { global_idx: *array } });
+            }
+        }
+        Expr::PtrArrayDeref { array, index, inner, elem_size } => {
+            emit_ptr_array_load_bx(*array, index, locals, out, fixups);
+            emit_ptr_array_read_elem(inner, *elem_size, locals, out);
+        }
         Expr::IndexByte { array, index } => {
             // Constant index → `a0 <byte_off> 98` (the placeholder is the index;
             // the linker adds the array base). Runtime index → BX-based:
             // `mov bx,[i]; mov al,[bx+&arr]; cbw`. Fixtures 4109, 3231.
+            // Unsigned char array → zero-extend (`sub ah,ah`); signed → `cbw`.
+            let widen: &[u8] = if locals.is_unsigned_global(*array) { &[0x2A, 0xE4] } else { &[0x98] };
             if let Some(k) = index.fold(locals.inits) {
                 let byte_off = (k as u32 & 0xFFFF) as u16;
                 let body_offset = out.len();
                 out.push(0xA0);
                 out.extend_from_slice(&byte_off.to_le_bytes());
                 fixups.push(Fixup { body_offset, kind: FixupKind::GlobalAddr { global_idx: *array } });
-                out.push(0x98);
+                out.extend_from_slice(widen);
             } else {
                 emit_load_bx(index, locals, out, fixups);
                 out.push(0x8A); out.push(0x87); // mov al, [bx + disp16]
                 let bo = out.len();
                 out.extend_from_slice(&[0x00, 0x00]);
                 fixups.push(Fixup { body_offset: bo - 1, kind: FixupKind::GlobalAddr { global_idx: *array } });
-                out.push(0x98); // cbw
+                out.extend_from_slice(widen);
             }
         }
         Expr::Index { array, index } => {
@@ -573,32 +834,27 @@ pub(crate) fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8
                     kind: FixupKind::GlobalAddr { global_idx: *array },
                 });
             } else {
-                // Variable index → load it into BX, scale ×2 with
-                // `shl bx, 1`, then `mov ax, [bx+addr]` with FIXUP.
-                // Fixture 4112.
-                match index.as_ref() {
-                    Expr::Param(i) => {
-                        let disp = param_disp(*i);
-                        if locals.is_char_param(*i) {
-                            // char param: byte-load + cbw + mov bx, ax
-                            out.push(0x8A); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp);
-                            out.push(0x98); // cbw
-                            out.extend_from_slice(&[0x8B, 0xD8]); // mov bx, ax
-                        } else {
-                            out.push(0x8B); out.push(bp_modrm(0x5E, disp)); push_bp_disp(out, disp);
-                        }
-                    }
-                    Expr::Local(i) => {
-                        let disp = locals.disp(*i);
-                        { out.push(0x8B); out.push(bp_modrm(0x5E, disp)); push_bp_disp(out, disp); }
-                    }
-                    other => panic!(
-                        "non-const, non-param/local array index not supported: {other:?}"
-                    ),
+                // Variable index → load the variable part into BX, scale ×2 with
+                // `shl bx, 1`, then `mov ax, [bx + _arr + koff*2]`. A `± K`
+                // constant in the index folds into the FIXUP displacement
+                // (`_arr[bx+2]`), not a separate add. Fixtures 4112, 3028, 3033.
+                let (var, koff) = split_index_offset(index);
+                // A char param index widens via AL/cbw before landing in BX.
+                if let Expr::Param(i) = var
+                    && locals.is_char_param(*i)
+                {
+                    let d = param_disp(*i);
+                    out.push(0x8A); out.push(bp_modrm(0x46, d)); push_bp_disp(out, d); // mov al,[bp+d]
+                    out.push(0x98); // cbw
+                    out.extend_from_slice(&[0x8B, 0xD8]); // mov bx, ax
+                } else {
+                    emit_load_bx(var, locals, out, fixups);
                 }
-                out.extend_from_slice(&[0xD1, 0xE3]);
+                out.extend_from_slice(&[0xD1, 0xE3]); // shl bx,1
+                let off = (koff.wrapping_mul(2)) as i16 as u16;
                 let body_offset = out.len();
-                out.extend_from_slice(&[0x8B, 0x87, 0x00, 0x00]);
+                out.extend_from_slice(&[0x8B, 0x87]);
+                out.extend_from_slice(&off.to_le_bytes());
                 fixups.push(Fixup {
                     body_offset: body_offset + 1,
                     kind: FixupKind::GlobalAddr { global_idx: *array },
@@ -617,6 +873,14 @@ pub(crate) fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8
             // `lea ax, [bp-disp]` = `8d 46 disp`.
             let disp = locals.disp(*idx);
             out.push(0x8D); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp);
+        }
+        Expr::AddrOfIndexedGlobal { array, index, elem } => {
+            // `&arr[i]` runtime: `<i→ax>; shl ax (×log2 elem); add ax,OFFSET _arr`.
+            emit_expr_to_ax(index, locals, out, fixups);
+            for _ in 0..(*elem as usize).max(1).trailing_zeros() { out.extend_from_slice(&[0xD1, 0xE0]); } // shl ax,1
+            let bo = out.len();
+            out.extend_from_slice(&[0x05, 0x00, 0x00]); // add ax, imm16
+            fixups.push(Fixup { body_offset: bo, kind: FixupKind::GlobalAddr { global_idx: *array } });
         }
         Expr::Ternary { cond, then_arm, else_arm } => {
             // When cond is a compile-time constant, MSC skips the branch
@@ -707,6 +971,30 @@ pub(crate) fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8
                 emit_stmt(s, locals, Frame::BpOnly, true, false, out, fixups);
             }
             emit_expr_to_ax(value, locals, out, fixups);
+        }
+        Expr::BitField { base, byte_off, bit_off, bit_width } => {
+            let mask = (1u32 << *bit_width) - 1;
+            // Byte-aligned full-byte field → read the byte directly + zero-extend.
+            if *bit_width == 8 && bit_off % 8 == 0 {
+                bf_load_byte_al(*base, byte_off + (*bit_off / 8) as u16, locals, out, fixups);
+                out.extend_from_slice(&[0x2A, 0xE4]); // sub ah,ah (zero-extend)
+            } else {
+                // Reuse a live AX left by a preceding store to the same unit
+                // (`f.b=K; return f.b` keeps `_f` in AX — no reload). Fixture 2529.
+                if !bf_ax_live(*base, *byte_off, locals, out, fixups) {
+                    bf_load_word(*base, *byte_off, locals, out, fixups);
+                }
+                if *bit_off == 1 {
+                    out.extend_from_slice(&[0xD1, 0xE8]); // shr ax,1
+                } else if *bit_off > 1 {
+                    out.push(0xB1); out.push(*bit_off); // mov cl, bit_off
+                    out.extend_from_slice(&[0xD3, 0xE8]); // shr ax,cl
+                }
+                if *bit_width < 16 {
+                    out.push(0x25); // and ax, mask
+                    out.extend_from_slice(&(mask as u16).to_le_bytes());
+                }
+            }
         }
         Expr::GlobalField { global, byte_off, size } => {
             // Word field: `a1 byte_off byte_off` + GlobalAddr FIXUP.
@@ -813,22 +1101,30 @@ pub(crate) fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8
             }
         }
         Expr::ParamIndex { param, index } => {
-            // Constant K → `mov bx, [bp+param_disp]; mov ax, [bx+2K]`.
-            // Fixture 1236.
-            let k = index.fold(locals.inits).unwrap_or_else(|| {
-                panic!("non-constant param-index not yet supported")
-            });
             let p_disp = param_disp(*param);
-            out.push(0x8B);
-            out.push(0x5E);
-            out.push(p_disp as u8);
-            let elem_disp = (k as i16) * 2;
-            if elem_disp == 0 {
-                out.extend_from_slice(&[0x8B, 0x07]);
-            } else {
+            if let Some(k) = index.fold(locals.inits) {
+                // Constant K → `mov bx, [bp+param_disp]; mov ax, [bx+2K]`.
+                // Fixture 1236.
                 out.push(0x8B);
-                out.push(0x47);
-                out.push(elem_disp as u8);
+                out.push(0x5E);
+                out.push(p_disp as u8);
+                let elem_disp = (k as i16) * 2;
+                if elem_disp == 0 {
+                    out.extend_from_slice(&[0x8B, 0x07]);
+                } else {
+                    out.push(0x8B);
+                    out.push(0x47);
+                    out.push(elem_disp as u8);
+                }
+            } else {
+                // Runtime index `a[i]` on an `int *` / `int a[]` param: load the
+                // index into BX, scale ×2, load the param pointer into SI, then
+                // `mov ax,[bx+si]`. Requires a SI-saving frame. Fixtures 1385,
+                // 2849, 2046, 2266, 2454.
+                emit_load_bx(index, locals, out, fixups); // mov bx,[i]
+                out.extend_from_slice(&[0xD1, 0xE3]); // shl bx,1
+                out.push(0x8B); out.push(bp_modrm(0x76, p_disp)); push_bp_disp(out, p_disp); // mov si,[bp+param]
+                out.extend_from_slice(&[0x8B, 0x00]); // mov ax,[bx+si]
             }
         }
         Expr::LocalIndex { local, index } => {
@@ -1033,9 +1329,62 @@ fn same_var(a: &Expr, b: &Expr) -> bool {
 /// A signed-byte (char) operand that `emit_expr_to_ax` loads as `mov al,..; cbw`.
 /// Drives the CX-save shape for `char OP char` binops. Unsigned char scalars are
 /// excluded (they use a different `cl`/`sub ch,ch` load shape).
+/// `x ± y` where both x and y are simple word bp-rel operands → (op, ldisp, rdisp).
+fn simple_addsub(e: &Expr, locals: &Locals<'_>) -> Option<(BinOp, i16, i16)> {
+    let Expr::BinOp { op: op @ (BinOp::Add | BinOp::Sub), left, right } = e else { return None };
+    Some((*op, simple_word_bp(left, locals)?, simple_word_bp(right, locals)?))
+}
+/// Emit `x ± y` into CX (`cx=true`) or AX, both word memory operands.
+fn emit_addsub_into(cx: bool, e: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>) {
+    let (op, ld, rd) = simple_addsub(e, locals).expect("validated by caller");
+    let (mov_reg, op_reg) = if cx { (0x4Eu8, 0x4Eu8) } else { (0x46, 0x46) };
+    out.push(0x8B); out.push(bp_modrm(mov_reg, ld)); push_bp_disp(out, ld); // mov reg,[ld]
+    let opc = if matches!(op, BinOp::Sub) { 0x2Bu8 } else { 0x03 };
+    out.push(opc); out.push(bp_modrm(op_reg, rd)); push_bp_disp(out, rd);   // add/sub reg,[rd]
+}
+/// `v << k` / `v >> k` where v is a word bp-rel variable and k a constant.
+/// Returns (disp, is_shl, k, is_unsigned) for the rotate-idiom codegen.
+fn shift_of_bp(e: &Expr, locals: &Locals<'_>) -> Option<(i16, bool, u8, bool)> {
+    let Expr::BinOp { op: op @ (BinOp::Shl | BinOp::Shr), left, right } = e else { return None };
+    let Expr::IntLit(k) = right.as_ref() else { return None };
+    if *k <= 0 || *k > 15 { return None; }
+    let (disp, unsigned) = match left.as_ref() {
+        Expr::Param(i) if !locals.is_char_param(*i) && !locals.is_long_param(*i) && !locals.is_float_param(*i) =>
+            (param_disp(*i), locals.is_unsigned_param(*i)),
+        Expr::Local(i) if locals.size(*i) == 2 && !locals.is_long_local(*i) && !locals.is_float_local(*i) =>
+            (locals.disp(*i), locals.is_unsigned_local(*i)),
+        _ => return None,
+    };
+    Some((disp, matches!(op, BinOp::Shl), *k as u8, unsigned))
+}
+/// Emit `<var> shifted` into AX (`dx=false`) or DX (`dx=true`).
+fn emit_shift_into(dx: bool, s: (i16, bool, u8, bool), out: &mut Vec<u8>) {
+    let (disp, is_shl, k, unsigned) = s;
+    // mov ax/dx, [bp+disp]
+    out.push(0x8B); out.push(bp_modrm(if dx { 0x56 } else { 0x46 }, disp)); push_bp_disp(out, disp);
+    // /4 shl, /5 shr (logical), /7 sar (arith). reg field: ax=000, dx=010.
+    let digit = if is_shl { 4u8 } else if unsigned { 5 } else { 7 };
+    let modrm = 0xC0 | (digit << 3) | if dx { 2 } else { 0 };
+    if k <= 2 {
+        for _ in 0..k { out.push(0xD1); out.push(modrm); } // k× shift reg,1
+    } else {
+        out.push(0xB1); out.push(k);      // mov cl,k
+        out.push(0xD3); out.push(modrm);  // shift reg,cl
+    }
+}
+/// The `[bp+disp]` of an UNSIGNED char param/local read (zero-extends via
+/// `sub ch,ch` rather than `cbw`).
+fn unsigned_byte_bp(e: &Expr, locals: &Locals<'_>) -> Option<i16> {
+    match e {
+        Expr::Param(i) if locals.is_char_param(*i) && locals.is_unsigned_param(*i) => Some(param_disp(*i)),
+        Expr::Local(i) if locals.size(*i) == 1 && locals.is_unsigned_local(*i) => Some(locals.disp(*i)),
+        _ => None,
+    }
+}
 fn signed_byte_load(e: &Expr, locals: &Locals<'_>) -> bool {
     match e {
         Expr::IndexByte { .. } | Expr::LocalIndexByte { .. } | Expr::DerefByte { .. } => true,
+        Expr::PtrArrayDeref { elem_size: 1, .. } => true,
         Expr::LocalField { size: 1, .. } | Expr::GlobalField { size: 1, .. }
         | Expr::DerefLocalField { size: 1, .. } | Expr::DerefParamField { size: 1, .. }
         | Expr::DerefGlobalField { size: 1, .. } => true,
@@ -1043,6 +1392,19 @@ fn signed_byte_load(e: &Expr, locals: &Locals<'_>) -> bool {
         Expr::Local(i) => locals.size(*i) == 1 && !locals.is_unsigned_local(*i),
         Expr::Global(g) => locals.is_char_global(*g) && !locals.is_unsigned_global(*g),
         _ => false,
+    }
+}
+/// Element size (pointee bytes) if `e` evaluates to a pointer: a pointer param,
+/// or pointer arithmetic `ptr ± int`. Used to scale a trailing `± K` in chained
+/// pointer arithmetic like `p + n + 1`. None for non-pointer expressions.
+fn pointer_elem_size(e: &Expr, locals: &Locals<'_>) -> Option<usize> {
+    match e {
+        Expr::Param(p) if locals.param_pointee_size(*p) > 0 => Some(locals.param_pointee_size(*p)),
+        Expr::BinOp { op: BinOp::Add, left, right } => {
+            pointer_elem_size(left, locals).or_else(|| pointer_elem_size(right, locals))
+        }
+        Expr::BinOp { op: BinOp::Sub, left, .. } => pointer_elem_size(left, locals),
+        _ => None,
     }
 }
 /// The `[bp+disp]` of a simple word-sized Param/Local read (not char/long/float).
@@ -1073,6 +1435,24 @@ pub(crate) fn emit_binop(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'
         emit_expr_to_ax(right, locals, out, fixups);
         out.extend_from_slice(&[0xF7, 0xD8]); // neg ax
         return;
+    }
+    // `a + b` where the two slots were BOTH just stored from the live AX (a
+    // chained `a = b = V` leaves AX = a = b) → `add ax,ax`, no reload. Fixtures
+    // 2951, 1817, 3513.
+    if matches!(op, BinOp::Add)
+        && let Some(la) = simple_word_bp(left, locals)
+        && let Some(lb) = simple_word_bp(right, locals)
+        && la != lb
+    {
+        let store = |d: i16| { let mut v = vec![0x89, bp_modrm(0x46, d)]; push_bp_disp(&mut v, d); v };
+        let (sa, sb) = (store(la), store(lb));
+        let ends_with = |pat: &[u8]| out.len() >= pat.len() && out[out.len() - pat.len()..] == *pat;
+        let mut ab = sb.clone(); ab.extend_from_slice(&sa); // store b then store a
+        let mut ba = sa.clone(); ba.extend_from_slice(&sb);
+        if ends_with(&ab) || ends_with(&ba) {
+            out.extend_from_slice(&[0x03, 0xC0]); // add ax, ax
+            return;
+        }
     }
     // `x + x` (same simple variable) → load x, `shl ax,1` (fixture 1991
     // `return x+x` → `mov al,[x]; sub ah,ah; shl ax,1`), not load + add-mem.
@@ -1113,6 +1493,22 @@ pub(crate) fn emit_binop(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'
         let elem = locals.param_pointee_size(*pi) as i32;
         let imm = ((*k * elem) as u32 & 0xFFFF) as u16;
         emit_expr_to_ax(left, locals, out, fixups); // mov ax, [p]
+        out.push(if matches!(op, BinOp::Sub) { 0x2D } else { 0x05 }); // sub/add ax, imm16
+        out.extend_from_slice(&imm.to_le_bytes());
+        return;
+    }
+    // Chained pointer arithmetic `(<ptr-expr>) ± K` where the left is itself a
+    // pointer-valued expression (e.g. `p + n + 1`): emit the inner pointer expr
+    // into AX, then `add/sub ax, K*elem` (the trailing constant is in elements).
+    // Fixture 3632 (`p + n + 1` → `mov ax,[n]; shl ax,1; add ax,[p]; add ax,2`).
+    if matches!(op, BinOp::Add | BinOp::Sub)
+        && let Expr::IntLit(k) = right
+        && matches!(left, Expr::BinOp { .. })
+        && let Some(elem) = pointer_elem_size(left, locals)
+        && elem.is_power_of_two()
+    {
+        emit_expr_to_ax(left, locals, out, fixups);
+        let imm = ((*k * elem as i32) as u32 & 0xFFFF) as u16;
         out.push(if matches!(op, BinOp::Sub) { 0x2D } else { 0x05 }); // sub/add ax, imm16
         out.extend_from_slice(&imm.to_le_bytes());
         return;
@@ -1160,7 +1556,309 @@ pub(crate) fn emit_binop(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'
         out.extend_from_slice(&[0x2B, 0xC1]); // sub ax, cx
         return;
     }
+    // Chain of 3+ char-pointer-array derefs joined by `+` (e.g.
+    // `names[0][0] + names[1][0] + names[2][0]`): MSC evaluates the operands
+    // right-to-left, parking each result in CX, DX, BX, loads the leftmost
+    // into AX, then adds them back in source order. The save (`mov reg,ax`) is
+    // scheduled AFTER the next operand's pointer load (which doesn't touch AX),
+    // so it lands between that load and its element read. Fixtures 2231, 2345.
+    if matches!(op, BinOp::Add)
+        && let Some(leaves) = ptr_deref_add_chain(left, right, locals)
+    {
+        let n = leaves.len();
+        const MOV_FROM_AX: [u8; 3] = [0xC8, 0xD0, 0xD8]; // mov cx/dx/bx, ax
+        const ADD_AX_REG: [u8; 3] = [0xC1, 0xC2, 0xC3];  // add ax, cx/dx/bx
+        fn parts(o: &Expr) -> (usize, &Expr, &Expr, u8) {
+            let Expr::PtrArrayDeref { array, index, inner, elem_size } = o else { unreachable!() };
+            (*array, index.as_ref(), inner.as_ref(), *elem_size)
+        }
+        // Rightmost operand: full load + read into AX.
+        let (a, idx, inr, es) = parts(leaves[n - 1]);
+        emit_ptr_array_load_bx(a, idx, locals, out, fixups);
+        emit_ptr_array_read_elem(inr, es, locals, out);
+        // Remaining operands right-to-left: load pointer, save previous AX, read.
+        for k in 1..n {
+            let (a, idx, inr, es) = parts(leaves[n - 1 - k]);
+            emit_ptr_array_load_bx(a, idx, locals, out, fixups);
+            out.push(0x8B); out.push(MOV_FROM_AX[k - 1]); // mov cx/dx/bx, ax
+            emit_ptr_array_read_elem(inr, es, locals, out);
+        }
+        // AX = leaves[0]; add back in source order (leaves[j] sits in reg n-1-j).
+        for j in 1..n {
+            out.push(0x03); out.push(ADD_AX_REG[n - 1 - j]);
+        }
+        return;
+    }
+    // Chain of 3-4 signed-byte (char) operands joined by `+`, each a single-
+    // instruction load (char param/local/global, IndexByte array element — NOT
+    // a two-phase PtrArrayDeref, handled above): evaluate right-to-left, saving
+    // each into CX, DX, BX immediately, load the leftmost into AX, then add back
+    // in source order. Fixtures 3037, 2095, 2096.
+    if matches!(op, BinOp::Add)
+        && let Some(leaves) = byte_simple_add_chain(left, right, locals)
+    {
+        let n = leaves.len();
+        const MOV_FROM_AX: [u8; 3] = [0xC8, 0xD0, 0xD8]; // mov cx/dx/bx, ax
+        const ADD_AX_REG: [u8; 3] = [0xC1, 0xC2, 0xC3];  // add ax, cx/dx/bx
+        for (slot, j) in (1..n).rev().enumerate() {
+            emit_expr_to_ax(leaves[j], locals, out, fixups);
+            out.push(0x8B); out.push(MOV_FROM_AX[slot]); // mov cx/dx/bx, ax
+        }
+        emit_expr_to_ax(leaves[0], locals, out, fixups);
+        for j in 1..n {
+            out.push(0x03); out.push(ADD_AX_REG[n - 1 - j]);
+        }
+        return;
+    }
+    // `s[i] + s[j]` — two char-byte subscripts of the SAME char-pointer global:
+    // load the pointer into BX once, read `[bx+i]` (LHS) into AX and park in CX,
+    // read `[bx+j]` (RHS), then `add ax,cx`. Fixture 2291 (`s[0]+s[1]`).
+    if matches!(op, BinOp::Add)
+        && let Expr::PtrIndexByte { ptr: lg, index: li } = left
+        && let Expr::PtrIndexByte { ptr: rg, index: ri } = right
+        && lg == rg
+        && let (Some(lk), Some(rk)) = (li.fold(locals.inits), ri.fold(locals.inits))
+    {
+        let body_offset = out.len();
+        out.extend_from_slice(&[0x8B, 0x1E, 0x00, 0x00]); // mov bx,[g]
+        fixups.push(Fixup { body_offset: body_offset + 1, kind: FixupKind::GlobalAddr { global_idx: *lg } });
+        let mut byte_read = |off: i32, out: &mut Vec<u8>| {
+            if off == 0 { out.extend_from_slice(&[0x8A, 0x07]); }
+            else { out.push(0x8A); out.push(0x47); out.push(off as u8); }
+            out.push(0x98); // cbw
+        };
+        byte_read(lk, out);                  // mov al,[bx+lk]; cbw  (LHS)
+        out.extend_from_slice(&[0x8B, 0xC8]); // mov cx, ax
+        byte_read(rk, out);                  // mov al,[bx+rk]; cbw  (RHS)
+        out.extend_from_slice(&[0x03, 0xC1]); // add ax, cx
+        return;
+    }
+    // `*p + *(p+K)` — both operands are word derefs of the SAME pointer param at
+    // constant offsets. Load `p` into BX once, then `mov ax,[bx+roff]; add ax,
+    // [bx+loff]` (RHS into AX, LHS as a memory operand — `+` is commutative).
+    // Fixture 3625.
+    if matches!(op, BinOp::Add)
+        && let Some((lp, loff)) = same_param_word_deref(left)
+        && let Some((rp, roff)) = same_param_word_deref(right)
+    {
+        let emit_bx = |out: &mut Vec<u8>, opc: u8, off: i32| {
+            if off == 0 { out.push(opc); out.push(0x07); }
+            else { out.push(opc); out.push(0x47); out.push(off as i8 as u8); }
+        };
+        if lp == rp {
+            // Same pointer: load once, RHS offset into AX, LHS as mem operand.
+            let pdisp = param_disp(lp);
+            out.push(0x8B); out.push(bp_modrm(0x5E, pdisp)); push_bp_disp(out, pdisp); // mov bx,[bp+p]
+            emit_bx(out, 0x8B, roff); // mov ax,[bx+roff]
+            emit_bx(out, 0x03, loff); // add ax,[bx+loff]
+        } else {
+            // Different pointers: load LHS ptr, `*lhs` into AX; reload BX with the
+            // RHS ptr, `add ax,*rhs`. Fixture 3607 (`*p + *q`).
+            let ld = param_disp(lp);
+            out.push(0x8B); out.push(bp_modrm(0x5E, ld)); push_bp_disp(out, ld); // mov bx,[p]
+            emit_bx(out, 0x8B, loff); // mov ax,[bx+loff]
+            let rd = param_disp(rp);
+            out.push(0x8B); out.push(bp_modrm(0x5E, rd)); push_bp_disp(out, rd); // mov bx,[q]
+            emit_bx(out, 0x03, roff); // add ax,[bx+roff]
+        }
+        return;
+    }
     emit_binop_inner(op, left, right, locals, out, fixups);
+}
+/// `*p++` setup: load the OLD pointer into BX, then advance `[p]` by `step`.
+/// Shared by the value (`return *p++`) and condition (`while(*s++)`) paths.
+pub(crate) fn emit_postinc_ptr_to_bx(ptr: &Expr, step: i32, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    match ptr {
+        Expr::Param(i) => {
+            let d = param_disp(*i);
+            out.push(0x8B); out.push(bp_modrm(0x5E, d)); push_bp_disp(out, d); // mov bx,[bp+d]
+            crate::codegen::assign::emit_postmutate_local(step, 2, d, out);
+        }
+        Expr::Local(i) => {
+            let d = locals.disp(*i);
+            out.push(0x8B); out.push(bp_modrm(0x5E, d)); push_bp_disp(out, d);
+            crate::codegen::assign::emit_postmutate_local(step, 2, d, out);
+        }
+        Expr::Global(g) => {
+            out.extend_from_slice(&[0x8B, 0x1E, 0x00, 0x00]); // mov bx,[g]
+            let bo = out.len() - 2;
+            fixups.push(Fixup { body_offset: bo - 1, kind: FixupKind::GlobalAddr { global_idx: *g } });
+            // advance [g]
+            if step == 1 || step == -1 {
+                out.push(0xFF); out.push(if step == 1 { 0x06 } else { 0x0E });
+            } else {
+                out.push(0x83); out.push(0x06);
+            }
+            let bo = out.len();
+            out.extend_from_slice(&[0x00, 0x00]);
+            fixups.push(Fixup { body_offset: bo - 1, kind: FixupKind::GlobalAddr { global_idx: *g } });
+            if !(step == 1 || step == -1) { out.push(step as i8 as u8); }
+        }
+        other => panic!("unsupported *p++ pointer: {other:?}"),
+    }
+}
+/// Load a bit-field's containing 16-bit unit (`base + byte_off`) into AX.
+pub(crate) fn bf_load_word(base: BitBase, byte_off: u16, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    match base {
+        BitBase::Global(g) => {
+            let bo = out.len();
+            out.push(0xA1); // mov ax, moffs16
+            out.extend_from_slice(&byte_off.to_le_bytes());
+            fixups.push(Fixup { body_offset: bo, kind: FixupKind::GlobalAddr { global_idx: g } });
+        }
+        BitBase::Local(l) => {
+            let d = locals.disp(l) + byte_off as i16;
+            out.push(0x8B); out.push(bp_modrm(0x46, d)); push_bp_disp(out, d); // mov ax,[bp+d]
+        }
+        BitBase::DerefParam(pp) => {
+            // mov bx,[bp+pdisp]; mov ax,[bx+byte_off]
+            out.extend_from_slice(&[0x8B, 0x5E, param_disp(pp) as u8]);
+            if byte_off == 0 { out.extend_from_slice(&[0x8B, 0x07]); }
+            else { out.push(0x8B); out.push(0x47); out.push(byte_off as u8); }
+        }
+    }
+}
+/// Load the byte at `base + off` into AL.
+pub(crate) fn bf_load_byte_al(base: BitBase, off: u16, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    match base {
+        BitBase::Global(g) => {
+            let bo = out.len();
+            out.push(0xA0); // mov al, moffs8
+            out.extend_from_slice(&off.to_le_bytes());
+            fixups.push(Fixup { body_offset: bo, kind: FixupKind::GlobalAddr { global_idx: g } });
+        }
+        BitBase::Local(l) => {
+            let d = locals.disp(l) + off as i16;
+            out.push(0x8A); out.push(bp_modrm(0x46, d)); push_bp_disp(out, d); // mov al,[bp+d]
+        }
+        BitBase::DerefParam(pp) => {
+            out.extend_from_slice(&[0x8B, 0x5E, param_disp(pp) as u8]); // mov bx,[bp+pdisp]
+            if off == 0 { out.extend_from_slice(&[0x8A, 0x07]); }
+            else { out.push(0x8A); out.push(0x47); out.push(off as u8); }
+        }
+    }
+}
+/// Store AX back to the bit-field unit (`base + byte_off`).
+pub(crate) fn bf_store_word(base: BitBase, byte_off: u16, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    match base {
+        BitBase::Global(g) => {
+            let bo = out.len();
+            out.push(0xA3); // mov moffs16, ax
+            out.extend_from_slice(&byte_off.to_le_bytes());
+            fixups.push(Fixup { body_offset: bo, kind: FixupKind::GlobalAddr { global_idx: g } });
+        }
+        BitBase::Local(l) => {
+            let d = locals.disp(l) + byte_off as i16;
+            out.push(0x89); out.push(bp_modrm(0x46, d)); push_bp_disp(out, d); // mov [bp+d],ax
+        }
+        BitBase::DerefParam(pp) => {
+            out.extend_from_slice(&[0x8B, 0x5E, param_disp(pp) as u8]); // mov bx,[bp+pdisp]
+            if byte_off == 0 { out.extend_from_slice(&[0x89, 0x07]); }
+            else { out.push(0x89); out.push(0x47); out.push(byte_off as u8); }
+        }
+    }
+}
+/// True when `out` already ends with the store of this exact bit-field unit, so
+/// AX still holds the unit's value and the load can be skipped (MSC keeps AX
+/// live across consecutive bit-field writes to the same struct). Fixture 1691.
+pub(crate) fn bf_ax_live(base: BitBase, byte_off: u16, locals: &Locals<'_>, out: &[u8], fixups: &[Fixup]) -> bool {
+    match base {
+        BitBase::Local(l) => {
+            let d = locals.disp(l) + byte_off as i16;
+            let mut pat = vec![0x89, bp_modrm(0x46, d)];
+            push_bp_disp(&mut pat, d);
+            out.len() >= pat.len() && out[out.len() - pat.len()..] == *pat
+        }
+        BitBase::Global(g) => {
+            let mut pat = vec![0xA3];
+            pat.extend_from_slice(&byte_off.to_le_bytes());
+            out.len() >= pat.len() && out[out.len() - pat.len()..] == *pat
+                && matches!(fixups.last(), Some(Fixup { kind: FixupKind::GlobalAddr { global_idx }, .. }) if *global_idx == g)
+        }
+        // BX-based access — no AX-reuse modeled.
+        BitBase::DerefParam(_) => false,
+    }
+}
+/// Split an array index `i ± K` into its variable part and the constant element
+/// offset `K` (folded into the addressing displacement). `i`, `i+K`, `K+i`, and
+/// `i-K` are recognized; anything else returns `(e, 0)`.
+fn split_index_offset(e: &Expr) -> (&Expr, i32) {
+    match e {
+        Expr::BinOp { op: BinOp::Add, left, right } => {
+            if let Expr::IntLit(k) = right.as_ref() { (left, *k) }
+            else if let Expr::IntLit(k) = left.as_ref() { (right, *k) }
+            else { (e, 0) }
+        }
+        Expr::BinOp { op: BinOp::Sub, left, right } => {
+            if let Expr::IntLit(k) = right.as_ref() { (left, -*k) } else { (e, 0) }
+        }
+        _ => (e, 0),
+    }
+}
+/// `*p` / `*(p + K)` as a WORD deref of a pointer PARAM → `(param, byte_off)`.
+fn same_param_word_deref(e: &Expr) -> Option<(usize, i32)> {
+    let Expr::DerefWord { ptr } = e else { return None };
+    match ptr.as_ref() {
+        Expr::Param(p) => Some((*p, 0)),
+        Expr::BinOp { op: BinOp::Add, left, right } => {
+            if let (Expr::Param(p), Expr::IntLit(k)) = (left.as_ref(), right.as_ref()) {
+                Some((*p, k * 2))
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+/// Flatten a left-associative `a + b + c [+ d]` chain of single-instruction
+/// signed-byte loads (char param/local/global, IndexByte) — excluding the
+/// two-phase PtrArrayDeref (its own interleaved schedule). 3 or 4 leaves.
+fn byte_simple_add_chain<'a>(left: &'a Expr, right: &'a Expr, locals: &Locals<'_>) -> Option<Vec<&'a Expr>> {
+    fn ok(e: &Expr, locals: &Locals<'_>) -> bool {
+        signed_byte_load(e, locals) && !matches!(e, Expr::PtrArrayDeref { .. })
+    }
+    fn walk<'a>(e: &'a Expr, locals: &Locals<'_>, out: &mut Vec<&'a Expr>) -> bool {
+        match e {
+            Expr::BinOp { op: BinOp::Add, left, right } => {
+                if !ok(right, locals) { return false; }
+                if !walk(left, locals, out) { return false; }
+                out.push(right);
+                true
+            }
+            _ => {
+                if ok(e, locals) { out.push(e); true } else { false }
+            }
+        }
+    }
+    if !ok(right, locals) { return None; }
+    let mut leaves = Vec::new();
+    if !walk(left, locals, &mut leaves) { return None; }
+    leaves.push(right);
+    if (3..=4).contains(&leaves.len()) { Some(leaves) } else { None }
+}
+/// Flatten a left-associative `a + b + c [+ d]` chain where every leaf is a
+/// char (`elem_size==1`) pointer-array deref, returning the leaves in source
+/// order. `None` unless the chain has 3 or 4 such leaves.
+fn ptr_deref_add_chain<'a>(left: &'a Expr, right: &'a Expr, _locals: &Locals<'_>) -> Option<Vec<&'a Expr>> {
+    fn is_char_deref(e: &Expr) -> bool { matches!(e, Expr::PtrArrayDeref { elem_size: 1, .. }) }
+    fn walk<'a>(e: &'a Expr, out: &mut Vec<&'a Expr>) -> bool {
+        match e {
+            Expr::BinOp { op: BinOp::Add, left, right } => {
+                if !is_char_deref(right) { return false; }
+                if !walk(left, out) { return false; }
+                out.push(right);
+                true
+            }
+            _ => {
+                if is_char_deref(e) { out.push(e); true } else { false }
+            }
+        }
+    }
+    if !is_char_deref(right) { return None; }
+    let mut leaves = Vec::new();
+    if !walk(left, &mut leaves) { return None; }
+    leaves.push(right);
+    if (3..=4).contains(&leaves.len()) { Some(leaves) } else { None }
 }
 
 fn emit_binop_inner(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
@@ -1225,6 +1923,48 @@ fn emit_binop_inner(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, o
             out.push(opc); out.push(0xC2); // op ax, dx
             return;
         }
+    }
+    // `(a±b) * (c±d)` — product of two simple add/sub sub-expressions: MSC
+    // computes the RHS into CX, the LHS into AX, then `imul cx`. Fixture 3454.
+    if matches!(op, BinOp::Mul)
+        && simple_addsub(left, locals).is_some()
+        && simple_addsub(right, locals).is_some()
+    {
+        emit_addsub_into(true, right, locals, out);  // RHS → CX
+        emit_addsub_into(false, left, locals, out);  // LHS → AX
+        out.extend_from_slice(&[0xF7, 0xE9]); // imul cx
+        return;
+    }
+    // Rotate-style `(v sh1 k1) OP (v sh2 k2)` where both operands are constant
+    // shifts of word bp-rel variables: MSC computes the LHS in AX and the RHS in
+    // DX (no push/pop), then `op ax,dx`. Fixtures 3532, 3533 (`(x<<1)|(x>>15)`).
+    if matches!(op, BinOp::BitOr | BinOp::BitXor | BinOp::Add)
+        && let Some(l) = shift_of_bp(left, locals)
+        && let Some(r) = shift_of_bp(right, locals)
+    {
+        emit_shift_into(false, l, out); // LHS → AX
+        emit_shift_into(true, r, out);  // RHS → DX
+        let opc = match op { BinOp::BitOr => 0x0B, BinOp::BitXor => 0x33, BinOp::Add => 0x03, _ => unreachable!() };
+        out.push(opc); out.push(0xC2); // op ax, dx
+        return;
+    }
+    // Signed-char LEFT + unsigned-char RIGHT (`s + u`): the signed operand widens
+    // into AX (`mov al,[s]; cbw`), the unsigned operand zero-extends into CX
+    // (`mov cl,[u]; sub ch,ch`), then `op ax, cx`. Unlike the all-signed path
+    // below, the LEFT operand is loaded first. Fixture 2690.
+    if matches!(op, BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor)
+        && signed_byte_load(left, locals)
+        && let Some(udisp) = unsigned_byte_bp(right, locals)
+    {
+        emit_expr_to_ax(left, locals, out, fixups);                          // mov al,[s]; cbw
+        out.push(0x8A); out.push(bp_modrm(0x4E, udisp)); push_bp_disp(out, udisp); // mov cl,[u]
+        out.extend_from_slice(&[0x2A, 0xED]);                                 // sub ch,ch
+        let opc = match op {
+            BinOp::Add => 0x03, BinOp::Sub => 0x2B, BinOp::BitAnd => 0x23,
+            BinOp::BitOr => 0x0B, BinOp::BitXor => 0x33, _ => unreachable!(),
+        };
+        out.push(opc); out.push(0xC1); // op ax, cx
+        return;
     }
     // Two SIGNED byte (char) operands (`a OP b`, both byte loads): MSC loads the
     // RHS to AX via `mov al,..; cbw`, parks it in CX, loads the LHS the same way,
@@ -1297,6 +2037,99 @@ fn emit_binop_inner(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, o
         out.push(0xF9);
         return;
     }
+    // Signed int division by a power of two 2^m with m >= 2: MSC avoids `idiv`
+    // with the abs idiom — `cwd; xor ax,dx; sub ax,dx` (ax = |x|), `mov cx,m;
+    // sar ax,cl`, then `xor ax,dx; sub ax,dx` to restore the sign. Division by
+    // 2 (m==1) uses the simpler shape handled below. Int-sized signed operands
+    // only. Fixtures 3090, 3338.
+    if matches!(op, BinOp::Div)
+        && let Expr::IntLit(k) = right
+        && *k >= 4
+        && (*k as u32).is_power_of_two()
+        && matches!(left, Expr::Local(_) | Expr::Param(_))
+    {
+        let is_unsigned = match left {
+            Expr::Param(i) => locals.is_unsigned_param(*i),
+            Expr::Local(i) => locals.is_unsigned_local(*i),
+            _ => false,
+        };
+        let is_char_sized = match left {
+            Expr::Local(i) => locals.size(*i) == 1,
+            Expr::Param(i) => locals.is_char_param(*i),
+            _ => false,
+        };
+        if !is_unsigned && !is_char_sized
+            && let Some(load) = bp_load(left, locals)
+        {
+            let m = (*k as u32).trailing_zeros() as u8;
+            load(out);
+            out.extend_from_slice(&[0x99, 0x33, 0xC2, 0x2B, 0xC2]); // cwd; xor ax,dx; sub ax,dx
+            out.extend_from_slice(&[0xB9, m, 0x00]);                // mov cx, m
+            out.extend_from_slice(&[0xD3, 0xF8]);                   // sar ax, cl
+            out.extend_from_slice(&[0x33, 0xC2, 0x2B, 0xC2]);       // xor ax,dx; sub ax,dx
+            return;
+        }
+    }
+    // Unsigned int division by a power of two `x / 2^k` (k>=2) → logical shift
+    // right by k. MSC uses `shr ax,1` repeated for a shift of 2, `mov cl,k; shr
+    // ax,cl` for 3+. Unsigned int param/local only. Fixtures 3339 (/4), 3369 (/8).
+    if matches!(op, BinOp::Div)
+        && let Expr::IntLit(k) = right
+        && *k >= 4
+        && (*k as u32).is_power_of_two()
+        && matches!(left, Expr::Local(_) | Expr::Param(_))
+    {
+        let is_unsigned = match left {
+            Expr::Param(i) => locals.is_unsigned_param(*i),
+            Expr::Local(i) => locals.is_unsigned_local(*i),
+            _ => false,
+        };
+        let is_char_sized = match left {
+            Expr::Local(i) => locals.size(*i) == 1,
+            Expr::Param(i) => locals.is_char_param(*i),
+            _ => false,
+        };
+        if is_unsigned && !is_char_sized
+            && let Some(load) = bp_load(left, locals)
+        {
+            let shift = (*k as u32).trailing_zeros();
+            load(out);
+            if shift <= 2 {
+                for _ in 0..shift { out.extend_from_slice(&[0xD1, 0xE8]); } // shr ax,1
+            } else {
+                out.push(0xB1); out.push(shift as u8);  // mov cl, shift
+                out.extend_from_slice(&[0xD3, 0xE8]);    // shr ax, cl
+            }
+            return;
+        }
+    }
+    // Unsigned int modulo by a power of two `x % 2^k` → `load; and ax, 2^k-1`
+    // (the remainder is just the low k bits). Unsigned int param/local only;
+    // signed `%` needs a sign-correcting sequence. Fixtures 3092, 3095.
+    if matches!(op, BinOp::Mod)
+        && let Expr::IntLit(k) = right
+        && *k >= 2
+        && (*k as u32).is_power_of_two()
+        && matches!(left, Expr::Local(_) | Expr::Param(_))
+    {
+        let is_unsigned = match left {
+            Expr::Param(i) => locals.is_unsigned_param(*i),
+            Expr::Local(i) => locals.is_unsigned_local(*i),
+            _ => false,
+        };
+        let is_char_sized = match left {
+            Expr::Local(i) => locals.size(*i) == 1,
+            Expr::Param(i) => locals.is_char_param(*i),
+            _ => false,
+        };
+        if is_unsigned && !is_char_sized
+            && let Some(load) = bp_load(left, locals)
+        {
+            load(out);
+            emit_imm_op(BinOp::BitAnd, *k - 1, out); // and ax, k-1
+            return;
+        }
+    }
     // Signed/unsigned int /2 optimization: MSC avoids `idiv` for
     // division by 2.  Signed: `load; cwd; sub ax,dx; sar ax,1`.
     // Unsigned: `load; shr ax,1`.  Only for int-sized (non-char) operands.
@@ -1324,6 +2157,27 @@ fn emit_binop_inner(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, o
                 }
                 return;
             }
+        }
+    }
+    // Unsigned int division/modulo by a variable: `a / b` / `a % b` where both
+    // are unsigned word operands → `mov ax,[a]; sub dx,dx; div WORD [b]` (`div`,
+    // not signed `idiv`; `sub dx,dx` zero-extends instead of `cwd`). Modulo adds
+    // `mov ax,dx`. Fixtures 3519, 3627.
+    if matches!(op, BinOp::Div | BinOp::Mod) {
+        let unsigned_word = |e: &Expr| match e {
+            Expr::Param(i) => locals.is_unsigned_param(*i) && !locals.is_char_param(*i),
+            Expr::Local(i) => locals.is_unsigned_local(*i) && locals.size(*i) == 2,
+            _ => false,
+        };
+        if unsigned_word(left) && unsigned_word(right)
+            && let Some(rdisp) = bp_disp(right, locals)
+            && let Some(load) = bp_load(left, locals)
+        {
+            load(out); // mov ax,[a]
+            out.extend_from_slice(&[0x2B, 0xD2]); // sub dx,dx
+            out.push(0xF7); out.push(bp_modrm(0x76, rdisp)); push_bp_disp(out, rdisp); // div word [b]
+            if matches!(op, BinOp::Mod) { out.extend_from_slice(&[0x8B, 0xC2]); } // mov ax,dx
+            return;
         }
     }
     // Left as a BP-rel operand we can load into AX.
@@ -1561,6 +2415,32 @@ fn emit_binop_inner(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, o
             kind: FixupKind::GlobalAddr { global_idx: array_idx },
         });
         return emit_binop_right(op, right, locals, out, fixups);
+    }
+    // `<expr> * (++x)` where the RHS pre-increment lands in a word local: MSC
+    // evaluates the LHS into AX, mutates+loads the RHS into CX (the `inc [x]`
+    // doesn't touch AX), then `imul cx`. Covers `(++i)*(++i)` (fixture 2293).
+    if matches!(op, BinOp::Mul)
+        && let Expr::PreMutateLocal { local_idx: rb, step: rstep } = right
+        && locals.size(*rb) == 2
+    {
+        emit_expr_to_ax(left, locals, out, fixups); // LHS → AX
+        let disp = locals.disp(*rb);
+        crate::codegen::assign::emit_postmutate_local(*rstep, 2, disp, out); // inc/dec [x]
+        out.push(0x8B); out.push(bp_modrm(0x4E, disp)); push_bp_disp(out, disp); // mov cx,[x]
+        out.extend_from_slice(&[0xF7, 0xE9]); // imul cx
+        return;
+    }
+    // `(<assign-expr>) op K` — the assignment has a side effect that must run
+    // first (it can't be reordered after loading K into BX), so evaluate the
+    // AssignExpr into AX, then fold the constant in place (`inc ax` for +1).
+    // Fixture 3333 (`(*p = 5) + 1`).
+    if matches!(op, BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor)
+        && matches!(left, Expr::AssignExpr { .. })
+        && let Expr::IntLit(k) = right
+    {
+        emit_expr_to_ax(left, locals, out, fixups);
+        emit_imm_op(op, *k, out);
+        return;
     }
     // Generic fallback: evaluate RHS first into AX, save to BX, then
     // evaluate LHS into AX and apply the reg-reg op. Works for any

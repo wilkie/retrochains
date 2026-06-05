@@ -3423,6 +3423,24 @@ pub(crate) fn compound_assign_op(tok: &Tok) -> Option<BinOp> {
         _ => return None,
     })
 }
+/// Map a deref lvalue expression (`*p`) to the AssignTarget that stores
+/// to it, for assignment-as-expression `(*p = v)`. Only the scalar
+/// pointer-deref forms are handled. Fixture 3333.
+pub(crate) fn expr_to_deref_target(e: &Expr) -> Option<AssignTarget> {
+    match e {
+        Expr::DerefWord { ptr } => match ptr.as_ref() {
+            Expr::Local(i) => Some(AssignTarget::DerefLocal(*i)),
+            Expr::Param(i) => Some(AssignTarget::DerefParam(*i)),
+            Expr::Global(g) => Some(AssignTarget::DerefGlobal(*g)),
+            _ => None,
+        },
+        Expr::DerefByte { ptr } => match ptr.as_ref() {
+            Expr::Local(i) => Some(AssignTarget::DerefLocalByte(*i)),
+            _ => None,
+        },
+        _ => None,
+    }
+}
 pub(crate) fn parse_compound_rhs(p: &mut Parser<'_>, target: &AssignTarget) -> Result<Option<Expr>, EmitError> {
     let lvalue_expr = match target {
         AssignTarget::Local(i) => Expr::Local(*i),
@@ -3986,6 +4004,17 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                 return Ok(inner);
             }
             let inner = parse_expr(p)?;
+            // `(*p = v)` — assignment-as-expression through a pointer deref.
+            // The value is produced in AX, stored, and left in AX for the
+            // enclosing expression. Fixture 3333.
+            if matches!(p.peek(), Some(Tok::Assign))
+                && let Some(target) = expr_to_deref_target(&inner)
+            {
+                p.bump();
+                let value = parse_assign_rhs(p)?;
+                p.eat(&Tok::RParen)?;
+                return Ok(Expr::AssignExpr { target, value: Box::new(value) });
+            }
             // Comma operator: `(<ident> = <expr>, <expr>, ...)` or
             // `(<expr>, <expr>)`. Build a sequence of side-effect
             // statements followed by the value expression. Fixtures
