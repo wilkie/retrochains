@@ -159,6 +159,92 @@ pub(crate) fn apply_typedef_substitutions(toks: &mut Vec<Tok>) {
         i += 1;
     }
 }
+/// One-pass scan that resolves `enum` declarations at the token level,
+/// so the parser never needs to model enums as a type. An `enum [tag]
+/// { A, B = K, ... }` definition registers each constant's integer
+/// value (auto-incrementing, honoring explicit `= K`), and every later
+/// use of the constant is replaced with its `Int` literal. A pure
+/// definition (`enum ... ;`) is removed; a definition used as a type
+/// (`enum {..} x;`) and a brace-less `enum tag` collapse to `int`.
+/// Fixtures 470, 472, 473, 474, 2353, 3195, 3631, 2684.
+pub(crate) fn apply_enum_substitutions(toks: &mut Vec<Tok>) {
+    let mut vals: std::collections::HashMap<String, i32> =
+        std::collections::HashMap::new();
+    let mut i = 0;
+    while i < toks.len() {
+        if let Tok::Ident(name) = &toks[i] {
+            if let Some(&v) = vals.get(name) {
+                toks[i] = Tok::Int(v);
+                i += 1;
+                continue;
+            }
+        }
+        if matches!(&toks[i], Tok::Kw("enum")) {
+            // Past an optional tag.
+            let mut j = i + 1;
+            if matches!(toks.get(j), Some(Tok::Ident(_))) {
+                j += 1;
+            }
+            if matches!(toks.get(j), Some(Tok::LBrace)) {
+                // Find the matching `}`.
+                let body_start = j + 1;
+                let mut depth = 1i32;
+                let mut bclose = body_start;
+                while bclose < toks.len() {
+                    match &toks[bclose] {
+                        Tok::LBrace => depth += 1,
+                        Tok::RBrace => {
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                    bclose += 1;
+                }
+                // Register constants `NAME [= [-]K]`, auto-incrementing.
+                let mut next_val = 0i32;
+                let mut m = body_start;
+                while m < bclose {
+                    if let Tok::Ident(name) = toks[m].clone() {
+                        m += 1;
+                        if matches!(toks.get(m), Some(Tok::Assign)) {
+                            m += 1;
+                            let neg = matches!(toks.get(m), Some(Tok::Minus));
+                            if neg {
+                                m += 1;
+                            }
+                            if let Some(Tok::Int(v)) = toks.get(m).cloned() {
+                                next_val = if neg { -v } else { v };
+                                m += 1;
+                            }
+                        }
+                        vals.insert(name, next_val);
+                        next_val += 1;
+                    } else {
+                        m += 1;
+                    }
+                }
+                // A `;` right after `}` is a pure definition (drop it); any
+                // declarator means the enum was a type spec (→ `int`).
+                if matches!(toks.get(bclose + 1), Some(Tok::Semi)) {
+                    toks.drain(i..=bclose + 1);
+                } else {
+                    toks.splice(i..=bclose, [Tok::Kw("int")]);
+                    i += 1;
+                }
+                continue;
+            } else {
+                // Brace-less `enum tag` used as a type → `int`.
+                toks.splice(i..j, [Tok::Kw("int")]);
+                i += 1;
+                continue;
+            }
+        }
+        i += 1;
+    }
+}
 pub(crate) fn tokenize(source: &str) -> Result<Vec<Tok>, EmitError> {
     let bytes = source.as_bytes();
     let mut toks = Vec::new();

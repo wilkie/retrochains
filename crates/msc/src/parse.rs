@@ -7,6 +7,7 @@ use crate::*;
 pub(crate) fn parse_unit(source: &str) -> Result<Unit, EmitError> {
     let preprocessed = crate::preproc::preprocess(source)?;
     let mut toks = tokenize(&preprocessed)?;
+    apply_enum_substitutions(&mut toks);
     apply_typedef_substitutions(&mut toks);
     let mut p = Parser {
         toks: &toks,
