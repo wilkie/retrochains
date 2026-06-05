@@ -385,8 +385,21 @@ pub(crate) fn emit_cond_cmp_inner(cond: &Cond, locals: &Locals<'_>, out: &mut Ve
     // pointee into AX and testing it. A plain pointer param/local loads directly;
     // a pre-mutated pointer (`*++p`) is advanced in place first, then its slot is
     // loaded. Fixtures 3351, 1311.
-    if let Cond::Truthy(e @ (Expr::DerefByte { ptr } | Expr::DerefWord { ptr })) = cond {
-        let loaded = match ptr.as_ref() {
+    // Accept both the truthy form `while (*s)` and the explicit-compare form
+    // `while (*s != 0)` / `if (*p == 0)` (the caller's jcc reads ZF the same way).
+    // Fixture 1408 (`while (*s != 0)` → `mov bx,[s]; cmp byte [bx],0`).
+    let deref_cond: Option<(bool, &Expr)> = match cond {
+        Cond::Truthy(Expr::DerefByte { ptr }) => Some((true, ptr.as_ref())),
+        Cond::Truthy(Expr::DerefWord { ptr }) => Some((false, ptr.as_ref())),
+        Cond::Cmp { op: RelOp::Eq | RelOp::Ne, left, right } if matches!(right, Expr::IntLit(0)) => match left {
+            Expr::DerefByte { ptr } => Some((true, ptr.as_ref())),
+            Expr::DerefWord { ptr } => Some((false, ptr.as_ref())),
+            _ => None,
+        },
+        _ => None,
+    };
+    if let Some((is_byte, ptr)) = deref_cond {
+        let loaded = match ptr {
             Expr::Param(_) | Expr::Local(_) => {
                 crate::codegen::expr::emit_load_bx(ptr, locals, out, fixups);
                 true
@@ -399,7 +412,7 @@ pub(crate) fn emit_cond_cmp_inner(cond: &Cond, locals: &Locals<'_>, out: &mut Ve
             _ => false,
         };
         if loaded {
-            if matches!(e, Expr::DerefByte { .. }) {
+            if is_byte {
                 out.extend_from_slice(&[0x80, 0x3F, 0x00]); // cmp byte [bx],0
             } else {
                 out.extend_from_slice(&[0x83, 0x3F, 0x00]); // cmp word [bx],0
