@@ -1718,15 +1718,28 @@ pub(crate) fn emit_assign_global(global_idx: usize, value: &Expr, locals: &Local
             fixups.push(Fixup { body_offset: bo - 1, kind: FixupKind::GlobalAddr { global_idx } });
         };
         let k8 = (k as u32 & 0xFF) as u8;
+        let uns = locals.is_unsigned_global(global_idx);
+        // Unsigned char `g /= 2^m` strength-reduces to `shr byte [g],cl` and
+        // `g %= 2^m` to `and byte [g],(2^m-1)`. Fixture 694.
+        if uns && k > 1 && (k as u32).is_power_of_two() && matches!(op, BinOp::Div | BinOp::Mod) {
+            if matches!(op, BinOp::Div) {
+                let m = (k as u32).trailing_zeros() as u8;
+                out.extend_from_slice(&[0xB1, m]);              // mov cl, m
+                out.push(0xD2); out.push(0x2E); put0(out, fixups); // shr byte [g], cl
+            } else {
+                out.push(0x80); out.push(0x26); put0(out, fixups); out.push(k8 - 1); // and byte [g], 2^m-1
+            }
+            return;
+        }
         if matches!(op, BinOp::Mul) {
             out.extend_from_slice(&[0xB0, k8]); // mov al, K
-            out.push(0xF6); out.push(0x2E); put0(out, fixups); // imul byte [g]
+            out.push(0xF6); out.push(if uns { 0x26 } else { 0x2E }); put0(out, fixups); // mul/imul byte [g]
             out.push(0xA2); put0(out, fixups); // mov [g], al
         } else {
             out.extend_from_slice(&[0xB1, k8]); // mov cl, K
             out.push(0xA0); put0(out, fixups); // mov al, [g]
-            out.push(0x98); // cbw
-            out.extend_from_slice(&[0xF6, 0xF9]); // idiv cl
+            if uns { out.extend_from_slice(&[0x2A, 0xE4]); } else { out.push(0x98); } // sub ah,ah / cbw
+            out.extend_from_slice(&[0xF6, if uns { 0xF1 } else { 0xF9 }]); // div/idiv cl
             if matches!(op, BinOp::Div) {
                 out.push(0xA2); put0(out, fixups); // mov [g], al
             } else {
