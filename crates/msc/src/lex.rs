@@ -1,45 +1,104 @@
 use crate::*;
 
-/// One-pass scan for `typedef <type> <alias>;` declarations.
-/// Replaces subsequent `Ident(alias)` occurrences with the primitive
-/// type keyword (`Kw("int" | "char" | "long")`). The typedef
-/// declaration tokens themselves are kept; `parse_typedef` consumes
-/// them. Fixture 1000.
+/// One-pass scan for `typedef <type-tokens> <alias>;` declarations.
+/// Records each alias as the full token sequence of its type spec
+/// (already expanded through prior aliases) and splices that sequence
+/// in at every later use site. This covers scalar aliases (`typedef
+/// int X`), pointer aliases (`typedef int *PI` — the `*` is kept),
+/// alias chains (`typedef X Y` resolves `X` first), and named-struct
+/// aliases (`typedef struct Tag T`). Anonymous-struct, array, and
+/// function-pointer typedefs contain `{`/`[`/`(` and are left for the
+/// parser to handle (or remain unsupported); they are skipped here.
+/// The typedef declaration tokens themselves are kept; `parse_typedef`
+/// consumes them. Fixture 1000.
 pub(crate) fn apply_typedef_substitutions(toks: &mut Vec<Tok>) {
-    let mut aliases: std::collections::HashMap<String, &'static str> =
+    let mut aliases: std::collections::HashMap<String, Vec<Tok>> =
         std::collections::HashMap::new();
     let mut i = 0;
     while i < toks.len() {
-        // Substitute first so any typedef sees prior aliases.
+        // Substitute a known alias used at a non-typedef site. Expansions
+        // are already fully resolved, so the spliced tokens never contain
+        // another unresolved alias — advance past them.
         if let Tok::Ident(name) = &toks[i] {
-            if let Some(&kw) = aliases.get(name) {
-                toks[i] = Tok::Kw(kw);
-                i += 1;
+            if let Some(expansion) = aliases.get(name).cloned() {
+                let n = expansion.len();
+                toks.splice(i..=i, expansion);
+                i += n;
                 continue;
             }
         }
         if matches!(&toks[i], Tok::Kw("typedef")) {
-            // Walk to the matching `;`. Pick the last primitive type
-            // keyword seen as the base, and the last Ident as alias.
-            let mut j = i + 1;
-            let mut base: Option<&'static str> = None;
-            let mut last_ident: Option<usize> = None;
-            while j < toks.len() && !matches!(&toks[j], Tok::Semi) {
-                match &toks[j] {
-                    Tok::Kw("int") => base = Some("int"),
-                    Tok::Kw("char") => base = Some("char"),
-                    Tok::Kw("long") => base = Some("long"),
-                    Tok::Ident(_) => last_ident = Some(j),
+            let start = i + 1;
+            // Find the terminating `;` at brace depth 0 (a struct-body
+            // typedef has inner field semicolons we must skip past).
+            let mut depth = 0i32;
+            let mut semi = start;
+            while semi < toks.len() {
+                match &toks[semi] {
+                    Tok::LBrace => depth += 1,
+                    Tok::RBrace => depth -= 1,
+                    Tok::Semi if depth == 0 => break,
                     _ => {}
                 }
-                j += 1;
+                semi += 1;
             }
-            if let (Some(b), Some(name_idx)) = (base, last_ident) {
-                if let Tok::Ident(name) = &toks[name_idx] {
-                    aliases.insert(name.clone(), b);
+            // Struct-body (`{`) and function-pointer (`(`) typedefs are left
+            // for the parser. An array typedef (`[`) is handled lossily: the
+            // dimension is dropped and only the element type is recorded, so
+            // `IARR a = {...}` becomes `int a = {...}` and the initializer
+            // sizes the array (matches the prior behavior; fixture 2099).
+            let complex = toks[start..semi]
+                .iter()
+                .any(|t| matches!(t, Tok::LBrace | Tok::LParen));
+            if !complex {
+                // Type tokens stop at the first `[` (the array suffix, if any).
+                let cut = toks[start..semi]
+                    .iter()
+                    .position(|t| matches!(t, Tok::LBrack))
+                    .unwrap_or(semi - start);
+                let body = &toks[start..start + cut];
+                if let Some(rel_name) =
+                    body.iter().rposition(|t| matches!(t, Tok::Ident(_)))
+                {
+                    let name = match &body[rel_name] {
+                        Tok::Ident(s) => s.clone(),
+                        _ => unreachable!(),
+                    };
+                    // Expansion = the type tokens (everything but the alias
+                    // name), resolving any nested alias to its expansion.
+                    let mut expansion: Vec<Tok> = Vec::new();
+                    for (k, t) in body.iter().enumerate() {
+                        if k == rel_name {
+                            continue;
+                        }
+                        match t {
+                            Tok::Ident(s) => match aliases.get(s) {
+                                Some(e) => expansion.extend(e.iter().cloned()),
+                                None => expansion.push(t.clone()),
+                            },
+                            _ => expansion.push(t.clone()),
+                        }
+                    }
+                    let has_base = expansion.iter().any(|t| {
+                        matches!(
+                            t,
+                            Tok::Kw("int")
+                                | Tok::Kw("char")
+                                | Tok::Kw("long")
+                                | Tok::Kw("unsigned")
+                                | Tok::Kw("signed")
+                                | Tok::Kw("short")
+                                | Tok::Kw("struct")
+                                | Tok::Kw("union")
+                                | Tok::Kw("void")
+                        )
+                    });
+                    if has_base {
+                        aliases.insert(name, expansion);
+                    }
                 }
             }
-            i = j + 1;
+            i = semi + 1;
             continue;
         }
         i += 1;
