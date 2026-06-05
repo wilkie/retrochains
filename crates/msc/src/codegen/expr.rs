@@ -434,7 +434,21 @@ pub(crate) fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8
                         f.body_offset == out.len() - 3
                             && matches!(f.kind, FixupKind::GlobalAddr { global_idx } if global_idx == *idx)
                     });
-                if !stored_from_ax {
+                // Same idea when the global was just stored from DX (`89 16 addr`
+                // = mov [g],dx, e.g. `g %= b; return g` leaves the remainder in
+                // DX) → reuse via `mov ax,dx`. Fixture 950.
+                let stored_from_dx = out.len() >= 4
+                    && out[out.len() - 4] == 0x89
+                    && out[out.len() - 3] == 0x16
+                    && fixups.last().is_some_and(|f| {
+                        f.body_offset == out.len() - 3
+                            && matches!(f.kind, FixupKind::GlobalAddr { global_idx } if global_idx == *idx)
+                    });
+                if stored_from_ax {
+                    // AX already holds g.
+                } else if stored_from_dx {
+                    out.extend_from_slice(&[0x8B, 0xC2]); // mov ax, dx
+                } else {
                     // `a1 00 00` — mov ax, moffs16.
                     let body_offset = out.len();
                     out.extend_from_slice(&[0xA1, 0x00, 0x00]);
