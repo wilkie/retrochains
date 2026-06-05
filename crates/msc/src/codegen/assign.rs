@@ -701,6 +701,36 @@ pub(crate) fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_
             }
         }
     }
+    // Char-local compound mul/div/mod by a foldable RHS → BYTE op (mirrors the
+    // char-global path). mul: `mov al,K; imul byte [c]; mov [c],al`. div:
+    // `mov cl,K; mov al,[c]; cbw; idiv cl; mov [c],al`. mod: `…; mov [c],ah; mov
+    // al,ah`. Fixture 1436. (`c` is a char local, size 1, not unsigned-special.)
+    if locals.size(local_idx) == 1 && !locals.is_unsigned_local(local_idx)
+        && let Expr::BinOp { op, left, right } = value
+        && matches!(left.as_ref(), Expr::Local(l) if *l == local_idx)
+        && matches!(op, BinOp::Mul | BinOp::Div | BinOp::Mod)
+        && let Some(k) = right.fold(locals.inits)
+    {
+        let k8 = (k as u32 & 0xFF) as u8;
+        let dm = |out: &mut Vec<u8>, modrm: u8| { out.push(0x88); out.push(bp_modrm(modrm, disp)); push_bp_disp(out, disp); };
+        if matches!(op, BinOp::Mul) {
+            out.extend_from_slice(&[0xB0, k8]);                  // mov al, K
+            out.push(0xF6); out.push(bp_modrm(0x6E, disp)); push_bp_disp(out, disp); // imul byte [c]
+            dm(out, 0x46);                                       // mov [c], al
+        } else {
+            out.extend_from_slice(&[0xB1, k8]);                  // mov cl, K
+            out.push(0x8A); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp); // mov al,[c]
+            out.extend_from_slice(&[0x98, 0xF6, 0xF9]);          // cbw; idiv cl
+            if matches!(op, BinOp::Div) {
+                dm(out, 0x46);                                   // mov [c], al
+            } else {
+                dm(out, 0x66);                                   // mov [c], ah
+                out.extend_from_slice(&[0x8A, 0xC4]);            // mov al, ah
+            }
+        }
+        out.push(0x98); // cbw — the char compound's value widens to int
+        return;
+    }
     // Local int `x /= K` / `x %= K` by a foldable RHS: divisor-first idiv (MSC does
     // NOT strength-reduce, even `/= 2`). `mov cx,K; mov ax,[x]; cwd|xor dx,dx;
     // idiv|div cx; mov [x],ax` (div) or `mov [x],dx; mov ax,dx` (mod, result in AX).

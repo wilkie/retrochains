@@ -1020,14 +1020,33 @@ pub(crate) fn emit_return(
                 // prior byte-store (`88 46 disp`). If so, just cbw; else
                 // reload from the slot. Fixture 1039 (non-literal prologue
                 // init leaves AL set; emit just cbw for return).
+                let ends_with = |pat: &[u8]| out.len() >= pat.len() && out[out.len() - pat.len()..] == *pat;
+                // A char compound div/mod already left the WIDENED result in AX
+                // (`mov [c],ah; mov al,ah; cbw` for mod, `mov [c],al; cbw` for div)
+                // — `return c` reuses it directly, no reload or extra cbw. (1436)
+                let mod_tail = {
+                    let mut v = vec![0x88, bp_modrm(0x66, disp)];
+                    push_bp_disp(&mut v, disp);
+                    v.extend_from_slice(&[0x8A, 0xC4, 0x98]);
+                    v
+                };
+                let div_tail = {
+                    let mut v = vec![0x88, bp_modrm(0x46, disp)];
+                    push_bp_disp(&mut v, disp);
+                    v.push(0x98);
+                    v
+                };
+                if ends_with(&mod_tail) || ends_with(&div_tail) {
+                    out.extend_from_slice(frame.epilogue_bytes());
+                    return;
+                }
                 let prev_store = {
                     let mr = bp_modrm(0x46, disp);
                     let mut v = vec![0x88, mr];
                     push_bp_disp(&mut v, disp);
                     v
                 };
-                let al_already_set = out.len() >= prev_store.len()
-                    && out[out.len()-prev_store.len()..] == *prev_store;
+                let al_already_set = ends_with(&prev_store);
                 if !al_already_set {
                     out.push(0x8A);
                     out.push(bp_modrm(0x46, disp));
