@@ -2622,6 +2622,33 @@ pub(crate) fn emit_assign_deref_global_field(ptr_global: usize, byte_off: u16, s
 }
 pub(crate) fn emit_assign_deref_param_field(ptr_param: usize, byte_off: u16, size: u8, value: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
     let p_disp = param_disp(ptr_param);
+    // In-place self-compound `p->f ± K` (e.g. `p->x++`): load p into BX once, then
+    // `inc/dec`/`add/sub` directly at `[bx+off]` — instead of the load-modify-store
+    // (which re-loads BX). Fixture 1290 (`p->x++` → `mov bx,[p]; inc word [bx]`).
+    if let Expr::BinOp { op: op @ (BinOp::Add | BinOp::Sub), left, right } = value
+        && matches!(left.as_ref(),
+            Expr::DerefParamField { ptr_param: lp, byte_off: lo, .. } if *lp == ptr_param && *lo == byte_off)
+        && let Some(k) = right.fold(locals.inits)
+    {
+        out.extend_from_slice(&[0x8B, 0x5E, p_disp as u8]); // mov bx,[bp+p]
+        let is_sub = matches!(op, BinOp::Sub);
+        let off = byte_off;
+        let modrm = |out: &mut Vec<u8>, re: u8| {
+            if off == 0 { out.push(0x07 | (re << 3)); }
+            else { out.push(0x47 | (re << 3)); out.push(off as u8); }
+        };
+        if k == 1 || k == -1 {
+            let dec = is_sub ^ (k == -1);
+            out.push(if size == 1 { 0xFE } else { 0xFF });
+            modrm(out, if dec { 1 } else { 0 });
+        } else {
+            let re = if is_sub { 5 } else { 0 };
+            if size == 1 { out.push(0x80); modrm(out, re); out.push((k as u32 & 0xFF) as u8); }
+            else if let Ok(k8) = i8::try_from(k) { out.push(0x83); modrm(out, re); out.push(k8 as u8); }
+            else { out.push(0x81); modrm(out, re); out.extend_from_slice(&((k as u32 & 0xFFFF) as u16).to_le_bytes()); }
+        }
+        return;
+    }
     out.push(0x8B);
     out.push(0x5E);
     out.push(p_disp as u8);
@@ -2664,6 +2691,32 @@ pub(crate) fn emit_assign_deref_param_field(ptr_param: usize, byte_off: u16, siz
 /// c7 47 byte_off imm16` (or byte form).
 pub(crate) fn emit_assign_deref_local_field(ptr_local: usize, byte_off: u16, size: u8, value: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
     let p_disp = locals.disp(ptr_local);
+    // In-place self-compound `p->f ± K` (`p->x++`) — load p into BX once, then
+    // mutate `[bx+off]` directly (mirrors the param-ptr field path).
+    if let Expr::BinOp { op: op @ (BinOp::Add | BinOp::Sub), left, right } = value
+        && matches!(left.as_ref(),
+            Expr::DerefLocalField { ptr_local: lp, byte_off: lo, .. } if *lp == ptr_local && *lo == byte_off)
+        && let Some(k) = right.fold(locals.inits)
+    {
+        out.push(0x8B); out.push(bp_modrm(0x5E, p_disp)); push_bp_disp(out, p_disp); // mov bx,[bp-p]
+        let is_sub = matches!(op, BinOp::Sub);
+        let off = byte_off;
+        let modrm = |out: &mut Vec<u8>, re: u8| {
+            if off == 0 { out.push(0x07 | (re << 3)); }
+            else { out.push(0x47 | (re << 3)); out.push(off as u8); }
+        };
+        if k == 1 || k == -1 {
+            let dec = is_sub ^ (k == -1);
+            out.push(if size == 1 { 0xFE } else { 0xFF });
+            modrm(out, if dec { 1 } else { 0 });
+        } else {
+            let re = if is_sub { 5 } else { 0 };
+            if size == 1 { out.push(0x80); modrm(out, re); out.push((k as u32 & 0xFF) as u8); }
+            else if let Ok(k8) = i8::try_from(k) { out.push(0x83); modrm(out, re); out.push(k8 as u8); }
+            else { out.push(0x81); modrm(out, re); out.extend_from_slice(&((k as u32 & 0xFFFF) as u16).to_le_bytes()); }
+        }
+        return;
+    }
     out.push(0x8B);
     out.push(0x5E);
     out.push(p_disp as u8);
