@@ -3217,10 +3217,21 @@ pub(crate) fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
                 )));
             };
             p.eat(&Tok::Semi)?;
-            let lvalue = match target {
-                AssignTarget::Local(i) => Expr::Local(i),
-                AssignTarget::Param(i) => Expr::Param(i),
-                AssignTarget::Global(g) => Expr::Global(g),
+            // A pointer steps by its pointee size, not 1 (`++p` on `int *p` adds
+            // 2). Fixture 561.
+            let (lvalue, stride) = match target {
+                AssignTarget::Local(i) => {
+                    let s = p.local_specs[i].pointee_size;
+                    (Expr::Local(i), if s > 0 { s as i32 } else { 1 })
+                }
+                AssignTarget::Param(i) => {
+                    let s = p.param_pointee_sizes.get(i).copied().unwrap_or(0);
+                    (Expr::Param(i), if s > 0 { s as i32 } else { 1 })
+                }
+                AssignTarget::Global(g) => {
+                    let s = if p.globals[g].is_pointer { p.globals[g].element_size as i32 } else { 1 };
+                    (Expr::Global(g), s)
+                }
                 _ => unreachable!(),
             };
             Ok(Stmt::Assign {
@@ -3228,7 +3239,7 @@ pub(crate) fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
                 value: Expr::BinOp {
                     op: if inc { BinOp::Add } else { BinOp::Sub },
                     left: Box::new(lvalue),
-                    right: Box::new(Expr::IntLit(1)),
+                    right: Box::new(Expr::IntLit(stride)),
                 },
             })
         }
@@ -4258,9 +4269,13 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
         Some(Tok::Float(bits, double)) => Ok(Expr::FloatLit(bits, double)),
         Some(Tok::PlusPlus) => {
             let inner = parse_atom(p)?;
+            // Prefix `++` on a pointer advances by the pointee element size
+            // (`++p` on `int *p` adds 2), not 1. Fixture 561.
+            let gstep = |idx: usize| if p.globals[idx].is_pointer { p.globals[idx].element_size as i32 } else { 1 };
+            let lstep = |idx: usize| { let s = p.local_specs[idx].pointee_size; if s > 0 { s as i32 } else { 1 } };
             match inner {
-                Expr::Local(idx) => Ok(Expr::PreMutateLocal { local_idx: idx, step: 1 }),
-                Expr::Global(idx) => Ok(Expr::PreMutateGlobal { global_idx: idx, step: 1 }),
+                Expr::Local(idx) => Ok(Expr::PreMutateLocal { local_idx: idx, step: lstep(idx) }),
+                Expr::Global(idx) => Ok(Expr::PreMutateGlobal { global_idx: idx, step: gstep(idx) }),
                 Expr::Param(idx) => Ok(Expr::PreMutateParam { param_idx: idx, step: 1 }),
                 Expr::DerefWord { ptr } => Ok(Expr::PreMutateDeref { ptr, step: 1, is_byte: false }),
                 Expr::DerefByte { ptr } => Ok(Expr::PreMutateDeref { ptr, step: 1, is_byte: true }),
@@ -4277,9 +4292,11 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
         }
         Some(Tok::MinusMinus) => {
             let inner = parse_atom(p)?;
+            let gstep = |idx: usize| if p.globals[idx].is_pointer { p.globals[idx].element_size as i32 } else { 1 };
+            let lstep = |idx: usize| { let s = p.local_specs[idx].pointee_size; if s > 0 { s as i32 } else { 1 } };
             match inner {
-                Expr::Local(idx) => Ok(Expr::PreMutateLocal { local_idx: idx, step: -1 }),
-                Expr::Global(idx) => Ok(Expr::PreMutateGlobal { global_idx: idx, step: -1 }),
+                Expr::Local(idx) => Ok(Expr::PreMutateLocal { local_idx: idx, step: -lstep(idx) }),
+                Expr::Global(idx) => Ok(Expr::PreMutateGlobal { global_idx: idx, step: -gstep(idx) }),
                 Expr::Param(idx) => Ok(Expr::PreMutateParam { param_idx: idx, step: -1 }),
                 Expr::DerefWord { ptr } => Ok(Expr::PreMutateDeref { ptr, step: -1, is_byte: false }),
                 Expr::DerefByte { ptr } => Ok(Expr::PreMutateDeref { ptr, step: -1, is_byte: true }),
