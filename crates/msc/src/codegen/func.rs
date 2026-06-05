@@ -183,7 +183,9 @@ pub(crate) fn emit_function(
     // mov bx,sp; fstp [bx]`, sliding SP — so the function needs a WithSlide
     // frame (cleanup via `mov sp,bp`) plus a 2-byte temp for the call result.
     let has_float_arg_call = func_has_float_arg_call(func);
-    let base_frame = if has_float_arg_call {
+    // A `make().field` call spills its result to a frame temp sized by chkstk, so
+    // the function needs a WithSlide frame even with no declared locals (2629).
+    let base_frame = if has_float_arg_call || func.struct_field_temp_count > 0 {
         Frame::WithSlide
     } else {
         Frame::for_function(func)
@@ -298,7 +300,15 @@ pub(crate) fn emit_function(
     let local_sizes: Vec<usize> = func.locals.iter().map(|l| l.size).collect();
     // The float-arg call result is spilled to a 2-byte temp at [bp-2]; reserve
     // it at the deepest frame slot so chkstk sizes the frame to include it.
+    // `make().field` temps occupy 4 bytes each, just below the locals, allocated
+    // in source order (temp #0 shallowest). temp #0's disp = -(cumulative + 4).
+    let struct_field_temp_base: i16 = if func.struct_field_temp_count > 0 {
+        -i16::try_from(cumulative + 4).expect("struct-field temp disp fits")
+    } else {
+        0
+    };
     let frame_bytes: usize = cumulative as usize
+        + 4 * func.struct_field_temp_count as usize
         + if has_float_arg_call { 2 } else { 0 }
         + if returns_float_call { 8 } else { 0 };
     // The float-call-return temp is the deepest 8-byte slot.
@@ -528,6 +538,7 @@ pub(crate) fn emit_function(
         struct_temp_bss_offset: struct_temp_offset,
         float_call_temp_disp,
         fpu_pending_fwait: &fpu_pending_fwait,
+        struct_field_temp_base,
     };
 
     let mut reachable = true;

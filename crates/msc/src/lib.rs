@@ -229,6 +229,9 @@ pub struct Function {
     /// traversal order for frame slot assignment.
     pub local_names: Vec<String>,
     pub body: Vec<Stmt>,
+    /// Number of `make().field` struct-return temps the body uses. Each reserves
+    /// a 4-byte frame slot (deepest, source order) for the spilled DX:AX result.
+    pub struct_field_temp_count: u16,
 }
 
 /// A function-local variable's storage descriptor. `size` is bytes
@@ -485,6 +488,10 @@ pub struct Locals<'a> {
     /// Set after a body-level float store (`a[k] = K.Ff`) leaves a pending x87
     /// store; the `90 9B` fwait is flushed before the next non-FP statement.
     pub fpu_pending_fwait: &'a std::cell::Cell<bool>,
+    /// BP-relative displacement of `make().field` struct-return temp #0 (the
+    /// call result is spilled here before the field is read). Temp `idx` sits at
+    /// `base - 4*idx`. 0 when the function has no such call. Fixtures 2629/2634.
+    pub struct_field_temp_base: i16,
 }
 
 #[derive(Default, Debug)]
@@ -499,6 +506,10 @@ impl Locals<'_> {
     }
     pub fn disp(&self, idx: usize) -> i16 {
         self.disps[idx]
+    }
+    /// BP-relative disp of `make().field` temp `idx` (4 bytes apart, deepening).
+    pub fn struct_field_temp_disp(&self, idx: u16) -> i16 {
+        self.struct_field_temp_base - 4 * idx as i16
     }
     pub fn size(&self, idx: usize) -> usize {
         self.sizes[idx]
@@ -844,6 +855,11 @@ pub enum Expr {
     /// right-to-left then cleans up the stack with `add sp, N`
     /// after the call. Fixtures 4099 (zero-arg) through 4102.
     Call { name: String, args: Vec<Expr> },
+    /// `make().field` — a member access on the (by-value) struct returned by a
+    /// call. The call result (DX:AX for a ≤4-byte struct) is spilled to a frame
+    /// temp (`temp_idx`, allocated at the deepest frame slots in source order),
+    /// then the field at `byte_off`/`size` is read. Fixtures 2629/2634.
+    CallStructField { name: String, args: Vec<Expr>, byte_off: u16, size: u8, temp_idx: u16 },
     /// Indirect call through a function-pointer variable. `target` is the
     /// fnptr lvalue (`Global`/`Param`/`Local`); codegen pushes args RTL then
     /// emits `call WORD PTR <mem>` (FF /2) + `add sp, N`. Fixtures 2818/2750/3323.
@@ -1089,6 +1105,7 @@ impl Expr {
                 })
             }
             Expr::Call { .. } => None,
+            Expr::CallStructField { .. } => None,
             Expr::CallPtr { .. } => None,
             Expr::FuncAddr(_) => None,
             Expr::StrLit(_) => None,
@@ -1308,6 +1325,14 @@ struct Parser<'a> {
     /// local / param / global of the same name while its block is open, and the
     /// outer binding reappears once the block closes.
     block_local_scopes: Vec<Vec<usize>>,
+    /// Source name → struct_idx for functions that RETURN a struct by value
+    /// (prototypes + definitions). Lets `make().field` resolve the member offset
+    /// at parse time. Fixtures 2629/2634.
+    fn_return_struct_idx: std::collections::HashMap<String, usize>,
+    /// Per-function counter of `make().field` temps assigned so far (reset at the
+    /// start of each function body). Each such expression gets the next index,
+    /// laid out at the deepest frame slots in source order.
+    struct_field_temp_count: u16,
 }
 
 impl<'a> Parser<'a> {

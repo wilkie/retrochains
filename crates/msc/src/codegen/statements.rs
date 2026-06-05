@@ -1548,6 +1548,7 @@ pub(crate) fn emit_threaded_for(
         struct_temp_bss_offset: locals.struct_temp_bss_offset,
         float_call_temp_disp: locals.float_call_temp_disp,
         fpu_pending_fwait: locals.fpu_pending_fwait,
+        struct_field_temp_base: locals.struct_field_temp_base,
     };
     let n = levels.len();
     let base = out.len();
@@ -1925,6 +1926,7 @@ pub(crate) fn emit_loop(
         struct_temp_bss_offset: locals.struct_temp_bss_offset,
         float_call_temp_disp: locals.float_call_temp_disp,
         fpu_pending_fwait: locals.fpu_pending_fwait,
+        struct_field_temp_base: locals.struct_field_temp_base,
     };
     let mut body_buf = Vec::new();
     let mut body_fixups: Vec<Fixup> = Vec::new();
@@ -2586,6 +2588,7 @@ pub(crate) fn emit_do_while(
         struct_temp_bss_offset: locals.struct_temp_bss_offset,
         float_call_temp_disp: locals.float_call_temp_disp,
         fpu_pending_fwait: locals.fpu_pending_fwait,
+        struct_field_temp_base: locals.struct_field_temp_base,
     };
     let mut body_buf = Vec::new();
     let mut body_fixups: Vec<Fixup> = Vec::new();

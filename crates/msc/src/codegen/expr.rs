@@ -308,6 +308,29 @@ pub(crate) fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8
             // arithmetic or assignment expression.
             emit_call(name, args, locals, out, fixups);
         }
+        Expr::CallStructField { name, args, byte_off, size, temp_idx } => {
+            // `make().field`: call → DX:AX (a ≤4-byte struct), spill both words to
+            // the frame temp, then extract the field. The field at offset 0 is
+            // already in AX (left live by the spill); offset 2 is in DX → mov ax,dx;
+            // otherwise reload from the temp. Fixtures 2629/2634.
+            emit_call(name, args, locals, out, fixups);
+            let disp = locals.struct_field_temp_disp(*temp_idx);
+            out.push(0x89); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp); // mov [temp],ax
+            let dh = disp + 2;
+            out.push(0x89); out.push(bp_modrm(0x56, dh)); push_bp_disp(out, dh);     // mov [temp+2],dx
+            match *byte_off {
+                0 => { if *size == 1 { out.push(0x98); } } // AX live; char field widens
+                2 => out.extend_from_slice(&[0x8B, 0xC2]),  // mov ax,dx
+                off => {
+                    let fd = disp + off as i16;
+                    if *size == 1 {
+                        out.push(0x8A); out.push(bp_modrm(0x46, fd)); push_bp_disp(out, fd); out.push(0x98);
+                    } else {
+                        out.push(0x8B); out.push(bp_modrm(0x46, fd)); push_bp_disp(out, fd);
+                    }
+                }
+            }
+        }
         Expr::CallPtr { target, args } => {
             // Indirect call through a function-pointer variable; result in AX.
             // Value context (non-tail): always clean up the pushed args.

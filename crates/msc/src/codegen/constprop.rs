@@ -927,7 +927,7 @@ pub(crate) fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
                 }
             }
         }
-        Expr::Call { args, .. } => {
+        Expr::Call { args, .. } | Expr::CallStructField { args, .. } => {
             for a in args {
                 prop_expr(a, cp);
             }

@@ -38,6 +38,8 @@ pub(crate) fn parse_unit(source: &str) -> Result<Unit, EmitError> {
         free_block_slots: Vec::new(),
         block_frame_max: 0,
         block_local_scopes: Vec::new(),
+        fn_return_struct_idx: std::collections::HashMap::new(),
+        struct_field_temp_count: 0,
     };
     let mut proto_long_params: std::collections::HashMap<String, Vec<bool>> = std::collections::HashMap::new();
     let mut proto_struct_params: std::collections::HashMap<String, Vec<usize>> = std::collections::HashMap::new();
@@ -171,9 +173,10 @@ pub(crate) fn parse_unit(source: &str) -> Result<Unit, EmitError> {
                     if matches!(p.toks.get(k), Some(Tok::Kw("struct")) | Some(Tok::Kw("union")))
                         && !((k + 2)..after).any(|j| matches!(p.toks.get(j), Some(Tok::Star)))
                         && let Some(Tok::Ident(sn)) = p.toks.get(k + 1)
-                        && let Some(s) = p.structs.iter().find(|s| s.name == *sn)
+                        && let Some(sidx) = p.structs.iter().position(|s| s.name == *sn)
                     {
-                        proto_struct_returns.insert(symbol_name(nm), (s.total_bytes + 1) & !1);
+                        proto_struct_returns.insert(symbol_name(nm), (p.structs[sidx].total_bytes + 1) & !1);
+                        p.fn_return_struct_idx.insert(symbol_name(nm), sidx);
                     }
                 }
                 p.pos = close_idx + 2;
@@ -1194,6 +1197,7 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
     let mut return_long = false;
     let mut return_float_width = 0usize;
     let mut return_struct_bytes = 0usize;
+    let mut return_struct_idx: Option<usize> = None;
     let return_int = match p.peek().cloned() {
         Some(Tok::Kw("int")) => { p.bump(); true }
         Some(Tok::Kw("char")) => { p.bump(); return_char = true; true }
@@ -1220,8 +1224,9 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
             // need the hidden-pointer ABI we don't support yet.
             if let Some(Tok::Ident(sname)) = p.peek().cloned() {
                 p.bump();
-                if let Some(s) = p.structs.iter().find(|s| s.name == sname) {
-                    return_struct_bytes = s.total_bytes;
+                if let Some(sidx) = p.structs.iter().position(|s| s.name == sname) {
+                    return_struct_bytes = p.structs[sidx].total_bytes;
+                    return_struct_idx = Some(sidx);
                 }
             }
             true
@@ -1238,7 +1243,9 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
     // Pointer return types (`char *fn(...)`, `int *fn(...)`): consume
     // the `*` markers. We model the return as int (a pointer fits in
     // AX) — sufficient for `fn()[K]` shapes (fixture 1227).
-    while matches!(p.peek(), Some(Tok::Star)) { p.bump(); return_struct_bytes = 0; }
+    while matches!(p.peek(), Some(Tok::Star)) { p.bump(); return_struct_bytes = 0; return_struct_idx = None; }
+    // Reset the per-function `make().field` temp counter.
+    p.struct_field_temp_count = 0;
     let name = match p.bump().cloned() {
         Some(Tok::Kw("main")) => "main".to_owned(),
         Some(Tok::Ident(s)) => s,
@@ -1248,6 +1255,11 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
             )));
         }
     };
+    // Register this definition's by-value struct return so a caller's
+    // `name().field` resolves the member offset (mirrors the prototype path).
+    if let Some(sidx) = return_struct_idx {
+        p.fn_return_struct_idx.insert(symbol_name(&name), sidx);
+    }
     p.eat(&Tok::LParen)?;
     // Parameter list: either `void` (no params) or one or more
     // `int <name>` separated by `,`. Phase 1 only handles int
@@ -2098,7 +2110,7 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
     // while the body was parsed. For functions without nested-block
     // declarations the two are identical.
     let locals = p.local_specs.clone();
-    Ok(Function { name, return_int, return_long, return_char, return_float_width, return_struct_bytes, params, param_struct_bytes, param_is_char, param_is_long, param_is_unsigned, param_float_width, param_pointee_size, locals, local_names, body })
+    Ok(Function { name, return_int, return_long, return_char, return_float_width, return_struct_bytes, params, param_struct_bytes, param_is_char, param_is_long, param_is_unsigned, param_float_width, param_pointee_size, locals, local_names, body, struct_field_temp_count: p.struct_field_temp_count })
 }
 /// Scan a prototype's parameter list (the tokens between `(` at `lparen_idx`
 /// and `)` at `close_idx`) and return each param's `is_long` flag. A param is
@@ -4578,6 +4590,18 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                     && let Some(idx) = p.global_names.iter().position(|n| *n == name)
                 {
                     return Ok(Expr::CallPtr { target: Box::new(Expr::Global(idx)), args });
+                }
+                // `make().field` — member access on a by-value struct return. Spill
+                // the DX:AX result to a frame temp, then read the field. Fixtures
+                // 2629/2634.
+                if matches!(p.peek(), Some(Tok::Dot) | Some(Tok::Arrow))
+                    && let Some(&sidx) = p.fn_return_struct_idx.get(&symbol_name(&name))
+                {
+                    p.bump(); // `.` / `->`
+                    let (byte_off, size) = parse_field_lookup(p, sidx)?;
+                    let temp_idx = p.struct_field_temp_count;
+                    p.struct_field_temp_count += 1;
+                    return Ok(Expr::CallStructField { name, args, byte_off, size, temp_idx });
                 }
                 return Ok(Expr::Call { name, args });
             }
