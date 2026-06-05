@@ -4854,6 +4854,38 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                         return continue_chain(p, base, vec![], f.struct_idx.unwrap());
                     }
                     p.bump();
+                    // `<global-struct>.<array-field>[i]` with a RUNTIME index → a
+                    // runtime-indexed global read with the field's element offset
+                    // folded into the index (`_g[bx + field_off]`). Constant index
+                    // still folds to a GlobalField. Fixtures 2940, 3422.
+                    if let Some(Tok::Ident(fname)) = p.peek().cloned()
+                        && matches!(p.toks.get(p.pos + 1), Some(Tok::LBrack))
+                        && let Some(f) = p.structs[sidx].fields.iter().find(|ff| ff.name == fname).cloned()
+                        && !f.is_pointer && f.bit_width == 0
+                    {
+                        p.bump(); // field name
+                        p.bump(); // [
+                        let index = parse_expr(p)?;
+                        p.eat(&Tok::RBrack)?;
+                        let init_view: Vec<Option<i32>> = p.local_specs.iter().map(|l| l.init).collect();
+                        let elem = f.size.max(1) as i32;
+                        if let Some(k) = index.fold(&init_view) {
+                            let byte_off = u16::try_from(f.byte_off as i64 + k as i64 * elem as i64)
+                                .expect("struct array-field offset fits");
+                            return Ok(Expr::GlobalField { global: idx, byte_off, size: f.size });
+                        }
+                        // Runtime: fold the field's element offset into the index so
+                        // `Expr::Index` emits `_g[bx + field_off]`.
+                        let elem_off = f.byte_off as i32 / elem;
+                        let idx_expr = if elem_off == 0 { index } else {
+                            Expr::BinOp { op: BinOp::Add, left: Box::new(index), right: Box::new(Expr::IntLit(elem_off)) }
+                        };
+                        return Ok(if f.size == 1 {
+                            Expr::IndexByte { array: idx, index: Box::new(idx_expr) }
+                        } else {
+                            Expr::Index { array: idx, index: Box::new(idx_expr) }
+                        });
+                    }
                     let (byte_off, size) = parse_field_lookup(p, sidx)?;
                     if let Some((bit_off, bit_width)) = p.last_field_bits {
                         Ok(Expr::BitField { base: BitBase::Global(idx), byte_off, bit_off, bit_width })
