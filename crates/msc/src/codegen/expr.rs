@@ -1441,6 +1441,25 @@ fn simple_word_bp(e: &Expr, locals: &Locals<'_>) -> Option<i16> {
     }
 }
 pub(crate) fn emit_binop(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    // `&local + K` / `&global + K` as a value (`&s.field`, `&a[K]`) → fold the
+    // constant into the lea displacement / OFFSET addend rather than computing
+    // the base address and adding K at runtime. Fixtures 485, 3262.
+    if matches!(op, BinOp::Add)
+        && let Expr::IntLit(k) = right
+    {
+        if let Expr::AddrOfLocal(l) = left {
+            let disp = locals.disp(*l) + *k as i16;
+            out.push(0x8D); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp); // lea ax,[bp+disp+k]
+            return;
+        }
+        if let Expr::AddrOfGlobal(g) = left {
+            let body_offset = out.len();
+            out.push(0xB8);
+            out.extend_from_slice(&((*k as u32 & 0xFFFF) as u16).to_le_bytes()); // mov ax, OFFSET g (+K addend)
+            fixups.push(Fixup { body_offset, kind: FixupKind::GlobalAddr { global_idx: *g } });
+            return;
+        }
+    }
     // Unary negation `-x` (parsed as `0 - x`): load x into AX and `neg ax`,
     // not `mov ax,0; sub ax,x` (fixture 3346 `return x<0?-x:x` → `mov ax,[bp+4];
     // neg ax`). Skip literal RHS (folds elsewhere) and long RHS (own path).

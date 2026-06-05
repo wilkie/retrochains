@@ -4351,6 +4351,44 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                     )));
                 }
             };
+            // `&<ident>.field` — address of a struct field. Resolve the field
+            // offset and synthesize `<base-addr> + field_off` (off 0 → the base
+            // address itself). Fixtures 485, 3262.
+            if matches!(p.peek(), Some(Tok::Dot)) {
+                p.bump(); // `.`
+                let fname = match p.bump().cloned() {
+                    Some(Tok::Ident(s)) => s,
+                    other => {
+                        return Err(EmitError::Unsupported(format!(
+                            "expected field name after `&{name}.`, got {other:?}"
+                        )));
+                    }
+                };
+                let (base, sidx) = if let Some(li) = p.resolve_local(&name) {
+                    (Expr::AddrOfLocal(li), p.local_specs[li].struct_idx)
+                } else if let Some(gi) = p.global_names.iter().position(|n| *n == name) {
+                    (Expr::AddrOfGlobal(gi), p.globals[gi].struct_idx)
+                } else {
+                    return Err(EmitError::Unsupported(format!(
+                        "address-of unknown identifier `{name}`"
+                    )));
+                };
+                let sidx = sidx.ok_or_else(|| EmitError::Unsupported(format!(
+                    "`&{name}.{fname}` on a non-struct"
+                )))?;
+                let off = p.structs[sidx].fields.iter().find(|f| f.name == fname)
+                    .ok_or_else(|| EmitError::Unsupported(format!(
+                        "unknown field `{fname}` in `&{name}.{fname}`"
+                    )))?.byte_off as i32;
+                if off == 0 {
+                    return Ok(base);
+                }
+                return Ok(Expr::BinOp {
+                    op: BinOp::Add,
+                    left: Box::new(base),
+                    right: Box::new(Expr::IntLit(off)),
+                });
+            }
             // `&<ident>[K]` — address of an array element. Synthesize
             // `<base-addr> + K*elem_size` as a BinOp.
             if matches!(p.peek(), Some(Tok::LBrack)) {
