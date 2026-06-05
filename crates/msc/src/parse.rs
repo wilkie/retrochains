@@ -1257,9 +1257,33 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
     p.free_block_slots.clear();
     p.block_frame_max = 0;
     p.block_local_scopes.clear();
+    // K&R-style definition: the parameter list is bare identifiers
+    // (`add(x, y)`) whose types are declared between `)` and `{`. After
+    // typedef substitution a real type would never appear as a bare
+    // `Ident` immediately followed by `,`/`)`, so this is unambiguous.
+    let is_knr = matches!(p.peek(), Some(Tok::Ident(_)))
+        && matches!(p.toks.get(p.pos + 1), Some(Tok::Comma) | Some(Tok::RParen));
     let params = if matches!(p.peek(), Some(Tok::Kw("void"))) {
         p.bump();
         (Vec::<String>::new(), Vec::<Option<usize>>::new(), Vec::<bool>::new(), Vec::<bool>::new(), Vec::<bool>::new(), Vec::<usize>::new(), Vec::<usize>::new())
+    } else if is_knr {
+        // Collect the parameter names now; types default to int and are
+        // patched from the declaration list below (after the `)`).
+        let mut names = Vec::new();
+        loop {
+            match p.bump().cloned() {
+                Some(Tok::Ident(s)) => names.push(s),
+                other => {
+                    return Err(EmitError::Unsupported(format!(
+                        "expected K&R parameter name, got {other:?}"
+                    )));
+                }
+            }
+            if matches!(p.peek(), Some(Tok::Comma)) { p.bump(); continue; }
+            break;
+        }
+        let n = names.len();
+        (names, vec![None; n], vec![false; n], vec![false; n], vec![false; n], vec![0; n], vec![0; n])
     } else if matches!(p.peek(), Some(Tok::RParen)) {
         // K&R-style empty param list (`int main()`). Treat as no
         // params. Fixture 888.
@@ -1416,7 +1440,7 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
         }
         (names, struct_idxs, is_chars, is_longs, is_unsigned_ints, float_widths, pointee_sizes)
     };
-    let (params, param_struct_idxs, param_is_char, param_is_long, param_is_unsigned, param_float_width, param_pointee_size) = params;
+    let (params, param_struct_idxs, mut param_is_char, mut param_is_long, param_is_unsigned, param_float_width, mut param_pointee_size) = params;
     // Struct-by-value params: total_bytes (even-padded) when the param has a
     // struct type AND is not a pointer (pointee_size == 0). 0 otherwise.
     let param_struct_bytes: Vec<usize> = param_struct_idxs.iter().zip(param_pointee_size.iter())
@@ -1429,6 +1453,60 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
         })
         .collect();
     p.eat(&Tok::RParen)?;
+    // K&R parameter type declarations sit between `)` and `{`:
+    // `int x; int y;` (any number, multiple declarators per line). Patch
+    // the default-int param vectors by name.
+    if is_knr {
+        while !matches!(p.peek(), Some(Tok::LBrace) | None) {
+            skip_decl_modifiers(p);
+            let (is_char, is_long, elem) = match p.peek() {
+                Some(Tok::Kw("char")) => { p.bump(); (true, false, 1usize) }
+                Some(Tok::Kw("int")) => { p.bump(); (false, false, 2) }
+                Some(Tok::Kw("long")) => {
+                    p.bump();
+                    if matches!(p.peek(), Some(Tok::Kw("int"))) { p.bump(); }
+                    (false, true, 4)
+                }
+                other => {
+                    return Err(EmitError::Unsupported(format!(
+                        "unsupported K&R parameter type, got {other:?}"
+                    )));
+                }
+            };
+            loop {
+                let has_ptr = matches!(p.peek(), Some(Tok::Star));
+                while matches!(p.peek(), Some(Tok::Star)) { p.bump(); }
+                let dname = match p.bump().cloned() {
+                    Some(Tok::Ident(s)) => s,
+                    other => {
+                        return Err(EmitError::Unsupported(format!(
+                            "expected K&R declarator name, got {other:?}"
+                        )));
+                    }
+                };
+                let is_array = matches!(p.peek(), Some(Tok::LBrack));
+                if is_array {
+                    p.bump();
+                    while !matches!(p.peek(), Some(Tok::RBrack) | None) { p.bump(); }
+                    p.eat(&Tok::RBrack)?;
+                }
+                if let Some(idx) = params.iter().position(|x| *x == dname) {
+                    if has_ptr || is_array {
+                        // pointer / array-decayed-to-pointer parameter
+                        param_pointee_size[idx] = elem;
+                        param_is_char[idx] = false;
+                        param_is_long[idx] = false;
+                    } else {
+                        param_is_char[idx] = is_char;
+                        param_is_long[idx] = is_long;
+                    }
+                }
+                if matches!(p.peek(), Some(Tok::Comma)) { p.bump(); continue; }
+                break;
+            }
+            p.eat(&Tok::Semi)?;
+        }
+    }
     p.eat(&Tok::LBrace)?;
 
     // Reset per-function name lists, then populate with this
