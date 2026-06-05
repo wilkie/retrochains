@@ -2790,6 +2790,9 @@ struct ConstProp {
 enum AliasTarget {
     Local(usize),
     Global(usize),
+    /// `char *s = "lit"` — the pointer holds the address of CONST string
+    /// `string_idx`; reads `s[K]`/`*s` resolve to a direct CONST load.
+    String(usize),
 }
 
 
