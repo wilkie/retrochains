@@ -332,20 +332,41 @@ pub(crate) fn emit_push_arg(arg: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, 
         }
         Expr::PostMutateLocal { local_idx, step } => {
             // Push the OLD value of the local, then mutate it in place.
-            // `push word ptr [bp-a]` + inc/dec/add/sub.
             let disp = locals.disp(*local_idx);
-            out.push(0xFF);
-            out.push(bp_modrm(0x76, disp));
-            push_bp_disp(out, disp);
-            emit_postmutate_local(*step, locals.size(*local_idx), disp, out);
+            if locals.size(*local_idx) == 1 {
+                // A char local passed as an int arg widens the OLD value:
+                // `mov al,[c]; inc/dec byte [c]; cbw|sub ah,ah; push ax`.
+                // Fixtures 731/733.
+                out.extend_from_slice(&[0x8A, bp_modrm(0x46, disp)]); push_bp_disp(out, disp);
+                emit_postmutate_local(*step, 1, disp, out);
+                if locals.is_unsigned_local(*local_idx) { out.extend_from_slice(&[0x2A, 0xE4]); }
+                else { out.push(0x98); }
+                out.push(0x50);
+            } else {
+                // `push word ptr [bp-a]` + inc/dec/add/sub.
+                out.push(0xFF);
+                out.push(bp_modrm(0x76, disp));
+                push_bp_disp(out, disp);
+                emit_postmutate_local(*step, locals.size(*local_idx), disp, out);
+            }
         }
         Expr::PreMutateLocal { local_idx, step } => {
             // Mutate first, then push the NEW value.
             let disp = locals.disp(*local_idx);
-            emit_postmutate_local(*step, locals.size(*local_idx), disp, out);
-            out.push(0xFF);
-            out.push(bp_modrm(0x76, disp));
-            push_bp_disp(out, disp);
+            if locals.size(*local_idx) == 1 {
+                // char local: `inc/dec byte [c]; mov al,[c]; cbw|sub ah,ah;
+                // push ax`. Fixture 732.
+                emit_postmutate_local(*step, 1, disp, out);
+                out.extend_from_slice(&[0x8A, bp_modrm(0x46, disp)]); push_bp_disp(out, disp);
+                if locals.is_unsigned_local(*local_idx) { out.extend_from_slice(&[0x2A, 0xE4]); }
+                else { out.push(0x98); }
+                out.push(0x50);
+            } else {
+                emit_postmutate_local(*step, locals.size(*local_idx), disp, out);
+                out.push(0xFF);
+                out.push(bp_modrm(0x76, disp));
+                push_bp_disp(out, disp);
+            }
         }
         // Word global-array element `a[K]` (incl. `p[K]` via alias) as an
         // argument: `push word ptr [_a+off]` (ff 36) with byte_off as the
