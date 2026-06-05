@@ -159,6 +159,21 @@ pub(crate) fn apply_typedef_substitutions(toks: &mut Vec<Tok>) {
         i += 1;
     }
 }
+/// Rewrite `void *` to `int *` at the token level. A `void` pointer is
+/// a 2-byte near pointer indistinguishable from `int *` in codegen (the
+/// OBJ encodes no C type), so this lets the existing pointer machinery
+/// handle `void *p`, `(void *)e`, and `void *`-returning prototypes
+/// without a dedicated type. A bare `void` (return type, `(void)` param
+/// list) is left untouched. Fixtures 3975, 3988.
+pub(crate) fn rewrite_void_pointers(toks: &mut [Tok]) {
+    for i in 0..toks.len() {
+        if matches!(&toks[i], Tok::Kw("void"))
+            && matches!(toks.get(i + 1), Some(Tok::Star))
+        {
+            toks[i] = Tok::Kw("int");
+        }
+    }
+}
 /// One-pass scan that resolves `enum` declarations at the token level,
 /// so the parser never needs to model enums as a type. An `enum [tag]
 /// { A, B = K, ... }` definition registers each constant's integer
