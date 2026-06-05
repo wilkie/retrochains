@@ -764,7 +764,7 @@ pub(crate) fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_
         let unsigned = locals.is_unsigned_local(local_idx);
         out.push(0xB9); out.extend_from_slice(&((k as u32 & 0xFFFF) as u16).to_le_bytes()); // mov cx,K
         out.push(0x8B); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp); // mov ax,[x]
-        if unsigned { out.extend_from_slice(&[0x33, 0xD2, 0xF7, 0xF1]); } // xor dx,dx; div cx
+        if unsigned { out.extend_from_slice(&[0x2B, 0xD2, 0xF7, 0xF1]); } // sub dx,dx; div cx
         else { out.extend_from_slice(&[0x99, 0xF7, 0xF9]); } // cwd; idiv cx
         if matches!(op, BinOp::Div) {
             out.push(0x89); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp); // mov [x],ax
@@ -1808,7 +1808,7 @@ pub(crate) fn emit_assign_global(global_idx: usize, value: &Expr, locals: &Local
             BinOp::Div | BinOp::Mod => {
                 out.push(0xB9); out.extend_from_slice(&imm16.to_le_bytes()); // mov cx, k
                 out.push(0xA1); put0(out, fixups); // mov ax, [g]
-                if unsigned { out.extend_from_slice(&[0x33, 0xD2, 0xF7, 0xF1]); } // xor dx,dx; div cx
+                if unsigned { out.extend_from_slice(&[0x2B, 0xD2, 0xF7, 0xF1]); } // sub dx,dx; div cx
                 else { out.extend_from_slice(&[0x99, 0xF7, 0xF9]); } // cwd; idiv cx
                 if matches!(op, BinOp::Div) { out.push(0xA3); put0(out, fixups); } // mov [g], ax
                 else { out.extend_from_slice(&[0x89, 0x16]); put0(out, fixups); } // mov [g], dx

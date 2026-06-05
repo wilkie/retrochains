@@ -424,13 +424,25 @@ pub(crate) fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8
                     out.push(0x98); // cbw
                 }
             } else {
-                // `a1 00 00` — mov ax, moffs16.
-                let body_offset = out.len();
-                out.extend_from_slice(&[0xA1, 0x00, 0x00]);
-                fixups.push(Fixup {
-                    body_offset,
-                    kind: FixupKind::GlobalAddr { global_idx: *idx },
-                });
+                // Reuse AX when the global was just stored from it (`a3 addr` =
+                // mov [g],ax leaves AX intact) — e.g. `g /= b; return g`. The
+                // store's address bytes are a placeholder fixed up to the same
+                // global, so match on the trailing opcode + last fixup. 949/950.
+                let stored_from_ax = out.len() >= 3
+                    && out[out.len() - 3] == 0xA3
+                    && fixups.last().is_some_and(|f| {
+                        f.body_offset == out.len() - 3
+                            && matches!(f.kind, FixupKind::GlobalAddr { global_idx } if global_idx == *idx)
+                    });
+                if !stored_from_ax {
+                    // `a1 00 00` — mov ax, moffs16.
+                    let body_offset = out.len();
+                    out.extend_from_slice(&[0xA1, 0x00, 0x00]);
+                    fixups.push(Fixup {
+                        body_offset,
+                        kind: FixupKind::GlobalAddr { global_idx: *idx },
+                    });
+                }
             }
         }
         Expr::PostMutateLocal { local_idx, step } => {
