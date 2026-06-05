@@ -6,6 +6,16 @@ use crate::*;
 /// — `mov ax, <expr>; mov [bp-disp], ax` — is reserved for a
 /// future fixture that exercises a non-peephole shape.
 pub(crate) fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    // `t = (s1, ..., v)` — run the comma side effects, then assign v to t so a
+    // constant v keeps the c7 immediate store (`mov [t],K`) instead of being
+    // materialized through AX. Fixture 2234.
+    if let Expr::Seq { sides, value: inner } = value {
+        for s in sides {
+            emit_stmt(s, locals, Frame::BpOnly, true, false, out, fixups);
+        }
+        emit_assign(target, inner, locals, out, fixups);
+        return;
+    }
     // Chained assignment `a = b = c = V`: the RHS is an AssignExpr with its own
     // store side effects. Emit it (storing into the inner targets, leaving V in
     // AX), then store AX into this target too — `mov ax,V; mov [c],ax; mov [b],ax;
