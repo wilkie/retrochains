@@ -265,11 +265,22 @@ pub(crate) fn emit_push_arg(arg: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, 
             out.push(0x50); // push ax
         }
         Expr::Local(idx) => {
-            // `push word ptr [bp-disp]` — `FF /6 r/m`.
             let disp = locals.disp(*idx);
-            out.push(0xFF);
-            out.push(bp_modrm(0x76, disp));
-            push_bp_disp(out, disp);
+            // Reuse AX when the local was just stored from it (`mov [l],ax`
+            // immediately precedes) — `push ax` instead of reloading. The
+            // `mov [l],ax` left the value live. Fixture 3975 (`p = malloc();
+            // free(p)`).
+            let self_store = { let mut v = vec![0x89, bp_modrm(0x46, disp)]; push_bp_disp(&mut v, disp); v };
+            if locals.size(*idx) == 2 && !locals.is_long_local(*idx)
+                && out.len() >= self_store.len() && out[out.len() - self_store.len()..] == *self_store
+            {
+                out.push(0x50); // push ax
+            } else {
+                // `push word ptr [bp-disp]` — `FF /6 r/m`.
+                out.push(0xFF);
+                out.push(bp_modrm(0x76, disp));
+                push_bp_disp(out, disp);
+            }
         }
         Expr::Param(idx) => {
             let disp = i8::try_from(4 + (idx * 2)).expect("param disp fits");
