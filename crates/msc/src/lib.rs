@@ -2148,7 +2148,24 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
     } else {
         // Has COMDEFs — always use split layout regardless of user-fn-externs.
         // Fixtures 482, 3590, 3602, 424.
-        // EXTDEF1: __acrtused, __chkstk
+        // MSC interleaves function EXTDEFs and the COMDEF by SOURCE order: a
+        // function DEFINED before the (first) tentative global lands in the
+        // pre-COMDEF EXTDEF (with the runtime externs); functions defined after
+        // land in the post-COMDEF EXTDEF. Fixture 322 (`int f(long){} long g;
+        // int main(){}` → EXTDEF[__acrtused,__chkstk,_f] COMDEF(_g) EXTDEF[_main]).
+        // When the global is declared first (the common case), `funcs_before` is
+        // empty and the layout is unchanged.
+        let split_pos = unit.decl_order.iter().position(|d|
+            matches!(d, TopDecl::Global(i) if comdef_globals.contains(i)));
+        let mut funcs_before: Vec<usize> = Vec::new();
+        let mut funcs_after: Vec<usize> = Vec::new();
+        for (pos, d) in unit.decl_order.iter().enumerate() {
+            if let TopDecl::Function(fi) = d {
+                if split_pos.is_some_and(|c| pos < c) { funcs_before.push(*fi); }
+                else { funcs_after.push(*fi); }
+            }
+        }
+        // EXTDEF1: __acrtused, __chkstk, helpers, [functions before the COMDEF]
         let mut pre: Vec<(String, u8)> = Vec::new();
         for (m, ty) in fp_extern_block(uses_float) {
             pre.push(((*m).to_owned(), *ty));
@@ -2161,16 +2178,19 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
         for h in &helper_extern_order {
             pre.push((h.clone(), 0x00));
         }
+        for &fi in &funcs_before {
+            pre.push((symbol_name(&unit.functions[fi].name), 0x00));
+        }
         emit_group(&mut b, &pre, &mut extdef_idx_of, &mut next_idx);
         // COMDEF: tentative globals
         emit_comdef(&mut b, &mut extdef_idx_of, &mut next_idx);
-        // EXTDEF2: user-fn-externs + defined functions
+        // EXTDEF2: user-fn-externs + [functions after the COMDEF]
         let mut post: Vec<(String, u8)> = Vec::new();
         for name in &user_extern_order {
             post.push((name.clone(), 0x00));
         }
-        for f in &unit.functions {
-            post.push((symbol_name(&f.name), 0x00));
+        for &fi in &funcs_after {
+            post.push((symbol_name(&unit.functions[fi].name), 0x00));
         }
         emit_group(&mut b, &post, &mut extdef_idx_of, &mut next_idx);
     }
