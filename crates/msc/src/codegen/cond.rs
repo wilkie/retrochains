@@ -664,6 +664,21 @@ pub(crate) fn emit_cond_cmp_inner(cond: &Cond, locals: &Locals<'_>, out: &mut Ve
             let l_disp = locals.disp(*li);
             out.push(0x39); out.push(bp_modrm(0x46, l_disp)); push_bp_disp(out, l_disp);
         }
+        // `<param|local> <op> <global>` — load the global into AX (a char global
+        // widens via emit_expr_to_ax), then `cmp [param|local], ax`. Fixture 3435.
+        Cond::Cmp { op: _, left: Expr::Param(pi), right: Expr::Global(g) }
+            if !locals.is_long_global(*g) =>
+        {
+            emit_expr_to_ax(&Expr::Global(*g), locals, out, fixups);
+            out.extend_from_slice(&[0x39, 0x46, param_disp(*pi) as u8]); // cmp [bp+pd], ax
+        }
+        Cond::Cmp { op: _, left: Expr::Local(li), right: Expr::Global(g) }
+            if !locals.is_long_global(*g) =>
+        {
+            emit_expr_to_ax(&Expr::Global(*g), locals, out, fixups);
+            let d = locals.disp(*li);
+            out.push(0x39); out.push(bp_modrm(0x46, d)); push_bp_disp(out, d); // cmp [local], ax
+        }
         Cond::Cmp { op: _, left: Expr::Param(li), right: Expr::Param(rj) }
             if locals.is_char_param(*li) && locals.is_char_param(*rj) =>
         {
