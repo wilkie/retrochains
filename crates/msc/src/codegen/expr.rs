@@ -2090,14 +2090,15 @@ fn emit_binop_inner(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, o
             return;
         }
     }
-    // `x * K` for a high-popcount constant over a WORD memory operand: a long
+    // `x * K` for a constant wider than 4 bits over a WORD memory operand: the
     // shift/add chain isn't worth it, so MSC loads the constant into AX and
     // multiplies the memory operand directly (`mov ax,K; imul word [x]`).
-    // Fixture 3623 (×31). Threshold: ≥5 set bits.
+    // Fixtures 3623 (×31), 1818 (×100). Threshold: K > 15 (bit-length ≥ 5),
+    // excluding powers of two (a plain shl) and 256 (the byte-move above).
     if matches!(op, BinOp::Mul)
         && let Expr::IntLit(k) = right
-        && *k > 0
-        && (*k as u32).count_ones() >= 5
+        && *k > 15
+        && !(*k as u32).is_power_of_two()
     {
         let kw = (*k as u32 & 0xFFFF) as u16;
         let word_mem = match left {
