@@ -2835,14 +2835,39 @@ pub(crate) fn emit_imm_op(op: BinOp, k: i32, out: &mut Vec<u8>) {
             out.extend_from_slice(&k16.to_le_bytes());
         }
         (BinOp::Mul, _) => {
-            // `imul ax, ax, imm8sx` (`6b c0 imm8`) or `imul ax, ax, imm16` (`69 c0 imm16`).
-            // Generic multiplication by any constant.
-            if let Ok(k8) = i8::try_from(k) {
-                out.extend_from_slice(&[0x6B, 0xC0, k8 as u8]);
+            // MSC targets the 8086, which lacks `imul r,imm` (a 186+ form), so
+            // `x * K` strength-reduces. Power-of-two → `shl ax,1` repeated.
+            // Otherwise build the product from the binary digits of K: cx = x,
+            // then for each bit below the MSB `shl ax,1` and (for a set bit)
+            // `add ax,cx`. The initial AX already holds x (the MSB). Fixtures
+            // 3366 (×5), 3895 (×7), 3896 (×9), 3898 (×11), 3899 (×4).
+            if k == 0 {
+                out.extend_from_slice(&[0x2B, 0xC0]); // sub ax,ax
+            } else if k == -1 {
+                out.extend_from_slice(&[0xF7, 0xD8]); // neg ax
+            } else if k > 0 && (k as u32).is_power_of_two() {
+                for _ in 0..(k as u32).trailing_zeros() {
+                    out.extend_from_slice(&[0xD1, 0xE0]); // shl ax,1
+                }
+            } else if k > 0 {
+                let ku = k as u32;
+                let bits = 32 - ku.leading_zeros(); // bit length (≥2 here)
+                out.extend_from_slice(&[0x8B, 0xC8]); // mov cx,ax
+                for i in (0..bits - 1).rev() {
+                    out.extend_from_slice(&[0xD1, 0xE0]); // shl ax,1
+                    if (ku >> i) & 1 == 1 {
+                        out.extend_from_slice(&[0x03, 0xC1]); // add ax,cx
+                    }
+                }
             } else {
-                out.push(0x69);
-                out.push(0xC0);
-                out.extend_from_slice(&k16.to_le_bytes());
+                // Negative non-(-1) constant: fall back (rare; left for a
+                // dedicated decode). 186 imul-imm is wrong for 8086 but these
+                // were already failing.
+                if let Ok(k8) = i8::try_from(k) {
+                    out.extend_from_slice(&[0x6B, 0xC0, k8 as u8]);
+                } else {
+                    out.push(0x69); out.push(0xC0); out.extend_from_slice(&k16.to_le_bytes());
+                }
             }
         }
         // Bitwise imm-AX always uses the accumulator imm16 form (`25/0d/35`),
