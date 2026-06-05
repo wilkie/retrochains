@@ -2122,12 +2122,12 @@ fn emit_binop_inner(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, o
         && let Expr::IntLit(k) = right
     {
         let disp = locals.disp(*li);
+        let uns = locals.is_unsigned_local(*li);
         out.push(0xB1); // mov cl, K
         out.push((*k as u32 & 0xFF) as u8);
         out.push(0x8A); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp);
-        out.push(0x98); // cbw
-        out.push(0xF6); // idiv cl
-        out.push(0xF9);
+        if uns { out.extend_from_slice(&[0x2A, 0xE4]); } else { out.push(0x98); } // sub ah,ah / cbw
+        out.push(0xF6); out.push(if uns { 0xF1 } else { 0xF9 }); // div cl / idiv cl
         return;
     }
     // Signed int division by a power of two 2^m with m >= 2: MSC avoids `idiv`
