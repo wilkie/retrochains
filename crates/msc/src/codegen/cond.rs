@@ -337,6 +337,40 @@ pub(crate) fn emit_cond_cmp_inner(cond: &Cond, locals: &Locals<'_>, out: &mut Ve
             return;
         }
     }
+    // Arithmetic result compared against zero — MSC reuses the ALU flags
+    // rather than a separate compare:
+    //   `(x - y) == 0` / `!= 0` → rewrite to `Cmp(op, x, y)`; the `cmp`
+    //     instruction IS the subtraction (`mov ax,y; cmp [x],ax`). 3257.
+    //   `(x + y) == 0` / `(x | y) == 0` / `(x ^ y) == 0` → evaluate the
+    //     binop into AX (`add/or/xor` already sets ZF) and drop the test
+    //     entirely. 3258. (BitAnd keeps its dedicated `test mem,imm` path.)
+    if let Cond::Cmp { op, left, right } = cond
+        && matches!(op, RelOp::Eq | RelOp::Ne)
+    {
+        let arith = match (left, right) {
+            (e @ Expr::BinOp { .. }, Expr::IntLit(0)) => Some(e),
+            (Expr::IntLit(0), e @ Expr::BinOp { .. }) => Some(e),
+            _ => None,
+        };
+        if let Some(e @ Expr::BinOp { op: bo, left: a, right: b }) = arith {
+            match bo {
+                BinOp::Sub => {
+                    let rewritten = Cond::Cmp {
+                        op: *op,
+                        left: (**a).clone(),
+                        right: (**b).clone(),
+                    };
+                    emit_cond_cmp_inner(&rewritten, locals, out, fixups);
+                    return;
+                }
+                BinOp::Add | BinOp::BitOr | BinOp::BitXor => {
+                    emit_expr_to_ax(e, locals, out, fixups);
+                    return;
+                }
+                _ => {}
+            }
+        }
+    }
     // `while (*s++)` — test the OLD pointee for zero while advancing the pointer:
     // `mov bx,[s]; <advance [s]>; cmp byte/word [bx],0`. The caller's jcc (jne for
     // truthy) takes the loop while the pointee is non-zero. Fixture 2027.
