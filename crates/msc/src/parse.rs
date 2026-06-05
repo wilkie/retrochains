@@ -5,7 +5,8 @@ use crate::*;
 /// is `int` or `void`; bodies follow the existing per-statement
 /// grammar.
 pub(crate) fn parse_unit(source: &str) -> Result<Unit, EmitError> {
-    let mut toks = tokenize(source)?;
+    let preprocessed = crate::preproc::preprocess(source)?;
+    let mut toks = tokenize(&preprocessed)?;
     apply_typedef_substitutions(&mut toks);
     let mut p = Parser {
         toks: &toks,
@@ -23,6 +24,7 @@ pub(crate) fn parse_unit(source: &str) -> Result<Unit, EmitError> {
         global_dims: std::collections::HashMap::new(),
         local_dims: std::collections::HashMap::new(),
         structs: Vec::new(),
+        last_field_bits: None,
         strings: Vec::new(),
         enum_consts: std::collections::HashMap::new(),
         typedefs: std::collections::HashMap::new(),
@@ -87,25 +89,37 @@ pub(crate) fn parse_unit(source: &str) -> Result<Unit, EmitError> {
         let is_type_prefix = matches!(
             p.toks.get(k),
             Some(Tok::Kw("int")) | Some(Tok::Kw("char")) | Some(Tok::Kw("long"))
-                | Some(Tok::Kw("float")) | Some(Tok::Kw("double"))
+                | Some(Tok::Kw("float")) | Some(Tok::Kw("double")) | Some(Tok::Kw("void"))
         ) || (k > p.pos && matches!(p.toks.get(k), Some(Tok::Ident(_))))
             || matches!(p.toks.get(k), Some(Tok::Kw("struct")) | Some(Tok::Kw("union")));
         if is_type_prefix {
+            // Bare `unsigned`/`signed`/`short` (modifiers consumed, `k > p.pos`)
+            // directly followed by an Ident whose next token starts a declarator
+            // (`(`/`[`/`;`/`=`/`,`) → `k` is the NAME itself (implicit-int), not a
+            // type token. e.g. `unsigned get_b(void)`. Otherwise `k` is a type
+            // (keyword or typedef-name) and the name follows it.
+            let bare_name_at_k = k > p.pos
+                && matches!(p.toks.get(k), Some(Tok::Ident(_)))
+                && matches!(p.toks.get(k + 1),
+                    Some(Tok::LParen) | Some(Tok::LBrack) | Some(Tok::Semi)
+                    | Some(Tok::Assign) | Some(Tok::Comma));
             // Walk past the type kw (plus the struct/union's name token if
             // it's a `struct <Name>` / `union <Name>` prefix) + optional `*`
             // to look at the declarator's first token after the name.
-            let mut after = k + 1;
-            if matches!(p.toks.get(k), Some(Tok::Kw("struct")) | Some(Tok::Kw("union"))) {
-                after += 1; // consume the struct/union's name
+            let mut after = if bare_name_at_k { k } else { k + 1 };
+            if !bare_name_at_k {
+                if matches!(p.toks.get(k), Some(Tok::Kw("struct")) | Some(Tok::Kw("union"))) {
+                    after += 1; // consume the struct/union's name
+                }
+                // Skip calling-convention / pointer-distance modifiers
+                // (`int far helper(...)`).
+                while matches!(p.toks.get(after),
+                    Some(Tok::Kw("cdecl")) | Some(Tok::Kw("pascal"))
+                    | Some(Tok::Kw("far")) | Some(Tok::Kw("near"))
+                    | Some(Tok::Kw("huge")) | Some(Tok::Kw("interrupt"))
+                ) { after += 1; }
+                if matches!(p.toks.get(after), Some(Tok::Star)) { after += 1; }
             }
-            // Skip calling-convention / pointer-distance modifiers
-            // (`int far helper(...)`).
-            while matches!(p.toks.get(after),
-                Some(Tok::Kw("cdecl")) | Some(Tok::Kw("pascal"))
-                | Some(Tok::Kw("far")) | Some(Tok::Kw("near"))
-                | Some(Tok::Kw("huge")) | Some(Tok::Kw("interrupt"))
-            ) { after += 1; }
-            if matches!(p.toks.get(after), Some(Tok::Star)) { after += 1; }
             // Now expect an ident or the `main` keyword. The token
             // after the name decides function (`(`) vs global decl.
             let name_ok = matches!(
@@ -172,11 +186,8 @@ pub(crate) fn parse_unit(source: &str) -> Result<Unit, EmitError> {
         functions.push(parsed_fn);
         decl_order.push(TopDecl::Function(fn_idx));
     }
-    if functions.is_empty() {
-        return Err(EmitError::Unsupported(
-            "translation unit has no functions".to_owned(),
-        ));
-    }
+    // A function-less translation unit (only global declarations) is valid —
+    // MSC emits an OBJ with just the data segments. Fixtures 3657/3659/3660/3680.
     Ok(Unit { globals: p.globals, structs: p.structs, functions, decl_order, strings: p.strings, proto_long_params, proto_struct_params, proto_struct_returns, prototyped_fns })
 }
 /// Parse a file-scope `struct <Name> <var> [= { ... }];` declaration.
@@ -214,6 +225,17 @@ pub(crate) fn parse_struct_brace_group(p: &mut Parser<'_>, sidx: usize, stotal: 
                 let str_idx = p.strings.len();
                 p.strings.push(with_nul);
                 slots.push(GlobalInit::StrAddr(str_idx));
+            }
+            // `&global` for a pointer field (`struct N a = {1, &b}`). Fixture 1419.
+            Some(Tok::Amp) => {
+                p.bump();
+                let tn = match p.bump().cloned() {
+                    Some(Tok::Ident(s)) => s,
+                    other => return Err(EmitError::Unsupported(format!("expected `&<global>` in struct init, got {other:?}"))),
+                };
+                let ti = p.global_names.iter().position(|n| *n == tn)
+                    .ok_or_else(|| EmitError::Unsupported(format!("address-of unknown global `{tn}`")))?;
+                slots.push(GlobalInit::GlobalAddr(ti, 0));
             }
             _ => {
                 let v = parse_signed_int(p)?;
@@ -260,9 +282,10 @@ pub(crate) fn parse_struct_global_decl(p: &mut Parser<'_>, is_static: bool) -> R
             )));
         }
     };
-    // `struct S arr[N];` — array of N structs (byte storage N*sizeof(S)).
+    // `struct S arr[N];` — array of N structs (storage N*sizeof(S)).
+    // `struct S *arr[N];` — array of N struct pointers (storage N*2). Fixture 3541.
     let mut elem_count = 1usize;
-    if !is_pointer && matches!(p.peek(), Some(Tok::LBrack)) {
+    if matches!(p.peek(), Some(Tok::LBrack)) {
         p.bump();
         let n = parse_signed_int(p)?;
         if n <= 0 {
@@ -271,6 +294,7 @@ pub(crate) fn parse_struct_global_decl(p: &mut Parser<'_>, is_static: bool) -> R
         p.eat(&Tok::RBrack)?;
         elem_count = n as usize;
     }
+    let is_ptr_array = is_pointer && elem_count > 1;
     let init = if matches!(p.peek(), Some(Tok::Assign)) {
         p.bump();
         if !is_pointer && elem_count > 1 && matches!(p.peek(), Some(Tok::LBrace)) {
@@ -288,6 +312,24 @@ pub(crate) fn parse_struct_global_decl(p: &mut Parser<'_>, is_static: bool) -> R
             Some(all)
         } else if !is_pointer && matches!(p.peek(), Some(Tok::LBrace)) {
             Some(parse_struct_brace_group(p, sidx, stotal)?)
+        } else if is_ptr_array && matches!(p.peek(), Some(Tok::LBrace)) {
+            // `struct S *arr[N] = { &a, &b }` — one GlobalAddr per element.
+            p.bump(); // `{`
+            let mut vals = Vec::new();
+            while !matches!(p.peek(), Some(Tok::RBrace)) {
+                p.eat(&Tok::Amp)?;
+                let tn = match p.bump().cloned() {
+                    Some(Tok::Ident(s)) => s,
+                    other => return Err(EmitError::Unsupported(format!("expected `&<global>` in struct-ptr-array init, got {other:?}"))),
+                };
+                let ti = p.global_names.iter().position(|n| *n == tn)
+                    .ok_or_else(|| EmitError::Unsupported(format!("address-of unknown global `{tn}`")))?;
+                vals.push(GlobalInit::GlobalAddr(ti, 0));
+                if matches!(p.peek(), Some(Tok::Comma)) { p.bump(); }
+            }
+            p.eat(&Tok::RBrace)?;
+            while vals.len() < elem_count { vals.push(GlobalInit::Int(0)); }
+            Some(vals)
         } else if is_pointer && matches!(p.peek(), Some(Tok::Amp)) {
             p.bump();
             let target_name = match p.bump().cloned() {
@@ -302,7 +344,7 @@ pub(crate) fn parse_struct_global_decl(p: &mut Parser<'_>, is_static: bool) -> R
                 .ok_or_else(|| EmitError::Unsupported(format!(
                     "address-of unknown global `{target_name}`"
                 )))?;
-            Some(vec![GlobalInit::GlobalAddr(target_idx)])
+            Some(vec![GlobalInit::GlobalAddr(target_idx, 0)])
         } else {
             return Err(EmitError::Unsupported(format!(
                 "unsupported struct global init: {:?}", p.peek()
@@ -312,8 +354,10 @@ pub(crate) fn parse_struct_global_decl(p: &mut Parser<'_>, is_static: bool) -> R
         None
     };
     p.eat(&Tok::Semi)?;
-    let array_len = if is_pointer { 1 } else { stotal * elem_count };
-    let element_size = 1; // byte-oriented storage; fields by offset
+    // Pointer-array: N 2-byte pointer slots (array_len=N, element_size=2 → the
+    // pointee struct is named by struct_idx). Struct array: byte storage.
+    let array_len = if is_ptr_array { elem_count } else if is_pointer { 1 } else { stotal * elem_count };
+    let element_size = if is_ptr_array { 2 } else { 1 }; // byte-oriented storage; fields by offset
     p.global_names.push(name.clone());
     p.globals.push(Global {
         name,
@@ -369,6 +413,21 @@ pub(crate) fn parse_enum_def(p: &mut Parser<'_>) -> Result<(), EmitError> {
 /// model type aliases; downstream identifiers using the alias would
 /// need type resolution). Skip-only path matches MSC's `typedef
 /// long` fixture which is unused beyond the declaration.
+/// Consume tokens up to (but not including) the `)` that closes the
+/// current parenthesized group — used to discard a `sizeof` operand
+/// without evaluating it. Nested parens are balanced.
+fn skip_balanced_to_rparen(p: &mut Parser<'_>) {
+    let mut depth = 0i32;
+    loop {
+        match p.peek() {
+            Some(Tok::LParen) => { depth += 1; p.bump(); }
+            Some(Tok::RParen) if depth == 0 => break,
+            Some(Tok::RParen) => { depth -= 1; p.bump(); }
+            None => break,
+            _ => { p.bump(); }
+        }
+    }
+}
 pub(crate) fn parse_typedef(p: &mut Parser<'_>) -> Result<(), EmitError> {
     p.eat(&Tok::Kw("typedef"))?;
     // Walk through the type tokens — accept primitive keywords +
@@ -416,8 +475,13 @@ pub(crate) fn parse_struct_def(p: &mut Parser<'_>) -> Result<(), EmitError> {
     p.eat(&Tok::LBrace)?;
     let mut fields: Vec<StructField> = Vec::new();
     let mut cursor: usize = 0;
+    // Bit-field packing state: `bit_unit_off` is the byte offset of the 16-bit
+    // unit currently being filled (None = no open unit), `bit_pos` the bits used
+    // in it. Opening a unit reserves its 2 bytes in `cursor` immediately.
+    let mut bit_unit_off: Option<u16> = None;
+    let mut bit_pos: u8 = 0;
     while !matches!(p.peek(), Some(Tok::RBrace)) {
-        skip_decl_modifiers(p);
+        let had_modifiers = skip_decl_modifiers(p) > 0;
         // A field may be a nested `struct <Name>` (value or pointer).
         let mut field_struct_idx: Option<usize> = None;
         let size: u8 = if matches!(p.peek(), Some(Tok::Kw("struct"))) {
@@ -427,16 +491,30 @@ pub(crate) fn parse_struct_def(p: &mut Parser<'_>) -> Result<(), EmitError> {
                 other => return Err(EmitError::Unsupported(format!(
                     "expected struct name for nested field, got {other:?}"))),
             };
-            let inner = p.structs.iter().position(|s| s.name == inner_name).ok_or_else(|| {
-                EmitError::Unsupported(format!("unknown nested struct `{inner_name}`"))
-            })?;
-            field_struct_idx = Some(inner);
-            u8::try_from(p.structs[inner].total_bytes).expect("nested struct fits in u8")
+            if inner_name == sname {
+                // Self-referential field `struct N *next;` — `N` isn't in the
+                // registry yet (it's being defined now); its index is the slot
+                // it will occupy. Must be a pointer (a struct can't contain
+                // itself by value), so its size is the 2-byte pointer. Fixtures
+                // 1419, 1928, 2310.
+                field_struct_idx = Some(p.structs.len());
+                2
+            } else {
+                let inner = p.structs.iter().position(|s| s.name == inner_name).ok_or_else(|| {
+                    EmitError::Unsupported(format!("unknown nested struct `{inner_name}`"))
+                })?;
+                field_struct_idx = Some(inner);
+                u8::try_from(p.structs[inner].total_bytes).expect("nested struct fits in u8")
+            }
         } else {
-            match p.bump().cloned() {
-                Some(Tok::Kw("int")) => 2,
-                Some(Tok::Kw("char")) => 1,
-                Some(Tok::Kw("long")) => 4,
+            match p.peek() {
+                Some(Tok::Kw("int")) => { p.bump(); 2 }
+                Some(Tok::Kw("char")) => { p.bump(); 1 }
+                Some(Tok::Kw("long")) => { p.bump(); 4 }
+                // Bare `unsigned`/`signed`/`short` (no explicit `int`) — e.g.
+                // `unsigned a : 3;`. The modifier was already consumed; the type
+                // defaults to int (2 bytes).
+                _ if had_modifiers => 2,
                 other => {
                     return Err(EmitError::Unsupported(format!(
                         "struct field type not yet supported: {other:?}"
@@ -450,17 +528,51 @@ pub(crate) fn parse_struct_def(p: &mut Parser<'_>) -> Result<(), EmitError> {
         } else {
             false
         };
-        // A pointer-to-struct field is a 2-byte near pointer, not an inline
-        // struct, so it carries no struct_idx for inline member access.
-        if is_ptr { field_struct_idx = None; }
-        let fname = match p.bump().cloned() {
-            Some(Tok::Ident(s)) => s,
-            other => {
-                return Err(EmitError::Unsupported(format!(
-                    "expected struct field name, got {other:?}"
-                )));
-            }
+        // A pointer-to-struct field keeps its `struct_idx` (so `o->p->v` member
+        // chains can resolve the target struct) but is flagged `is_pointer`, which
+        // distinguishes it from an inline struct value at member-access sites.
+        // Field name — optional for an anonymous bit-field (`unsigned : 0;`).
+        let fname = match p.peek() {
+            Some(Tok::Ident(s)) => { let s = s.clone(); p.bump(); Some(s) }
+            _ => None,
         };
+        // Bit-field declarator `<name> : <width>;` (or anonymous `: <width>;`).
+        if !is_ptr && field_struct_idx.is_none() && matches!(p.peek(), Some(Tok::Colon)) {
+            p.bump();
+            let width = parse_signed_int(p)? as u8;
+            p.eat(&Tok::Semi)?;
+            if width == 0 {
+                // Zero-width: close the current unit (align next field to a new
+                // unit). No named member.
+                bit_unit_off = None;
+                bit_pos = 0;
+                continue;
+            }
+            let (unit_off, place_bit) = match bit_unit_off {
+                Some(off) if bit_pos + width <= 16 => (off, bit_pos),
+                _ => {
+                    if cursor % 2 != 0 { cursor += 1; }
+                    let off = u16::try_from(cursor).expect("bit-field unit offset fits");
+                    cursor += 2;
+                    bit_unit_off = Some(off);
+                    (off, 0)
+                }
+            };
+            bit_pos = place_bit + width;
+            if let Some(name) = fname {
+                fields.push(StructField {
+                    name, byte_off: unit_off, size: 2, struct_idx: None,
+                    bit_width: width, bit_off: place_bit, is_pointer: false, pointee_size: 0,
+                });
+            }
+            continue;
+        }
+        // Ordinary field: close any open bit-field unit first (its 2 bytes are
+        // already reserved in `cursor`).
+        bit_unit_off = None;
+        bit_pos = 0;
+        let fname = fname.ok_or_else(|| EmitError::Unsupported(
+            "expected struct field name".to_owned()))?;
         let elem_size = if is_ptr { 2 } else { size };
         // Array field `int v[N];` — element size stays `elem_size` (so `s.v[K]`
         // indexes correctly); the field spans elem_size*N bytes.
@@ -492,16 +604,56 @@ pub(crate) fn parse_struct_def(p: &mut Parser<'_>) -> Result<(), EmitError> {
             byte_off,
             size: elem_size,
             struct_idx: field_struct_idx,
+            bit_width: 0,
+            bit_off: 0,
+            is_pointer: is_ptr,
+            pointee_size: if is_ptr { size } else { 0 },
         });
         p.eat(&Tok::Semi)?;
     }
     p.eat(&Tok::RBrace)?;
-    p.eat(&Tok::Semi)?;
     // Round total up to the natural alignment (2 bytes for any
     // struct containing an int/pointer field; 1 byte otherwise).
     let needs_word_align = fields.iter().any(|f| f.size >= 2);
     let total_bytes = if needs_word_align { (cursor + 1) & !1 } else { cursor };
+    let sidx = p.structs.len();
     p.structs.push(StructDef { name: sname, fields, total_bytes, is_union });
+    // Inline declarator(s): `struct X { ... } v, *p, a[N];` — the `}` is
+    // followed by variable declarators rather than `;`. Register each as a
+    // file-scope global of this struct type. Fixtures 3322, 3419, 3420, 3446.
+    if !matches!(p.peek(), Some(Tok::Semi)) {
+        loop {
+            let is_pointer = matches!(p.peek(), Some(Tok::Star));
+            if is_pointer { p.bump(); }
+            let name = match p.bump().cloned() {
+                Some(Tok::Ident(s)) => s,
+                other => return Err(EmitError::Unsupported(format!(
+                    "expected declarator after struct definition, got {other:?}"))),
+            };
+            let mut elem_count = 1usize;
+            if !is_pointer && matches!(p.peek(), Some(Tok::LBrack)) {
+                p.bump();
+                let n = parse_signed_int(p)?;
+                if n <= 0 {
+                    return Err(EmitError::Unsupported(format!("struct array length must be positive, got {n}")));
+                }
+                p.eat(&Tok::RBrack)?;
+                elem_count = n as usize;
+            }
+            let array_len = if is_pointer { 1 } else { total_bytes * elem_count };
+            p.global_names.push(name.clone());
+            p.globals.push(Global {
+                name, init: None, array_len, element_size: 1, is_pointer,
+                struct_idx: Some(sidx), is_long: false, is_static: false,
+                is_extern: false, is_unsigned: false, is_float: false,
+            });
+            match p.peek() {
+                Some(Tok::Comma) => { p.bump(); }
+                _ => break,
+            }
+        }
+    }
+    p.eat(&Tok::Semi)?;
     Ok(())
 }
 /// Parse one file-scope `<type> <name> [= <init>];` declaration and
@@ -748,6 +900,46 @@ pub(crate) fn parse_global_decl(p: &mut Parser<'_>) -> Result<(), EmitError> {
                     }
                     continue;
                 }
+                if is_pointer {
+                    // Array-of-pointers element: a string literal (`char
+                    // *names[]={"a","b"}` → CONST `$SG` + StrAddr) or `&g`
+                    // (`int *table[]={&a,&b}` → GlobalAddr). Fixtures 1394,
+                    // 2345, 2608, 2860.
+                    match p.peek() {
+                        Some(Tok::StrLit(_)) => {
+                            let bytes = match p.bump().cloned() {
+                                Some(Tok::StrLit(b)) => b,
+                                _ => unreachable!(),
+                            };
+                            let mut with_nul = bytes.clone();
+                            with_nul.push(0);
+                            let str_idx = p.strings.len();
+                            p.strings.push(with_nul);
+                            values.push(GlobalInit::StrAddr(str_idx));
+                        }
+                        Some(Tok::Amp) => {
+                            p.bump();
+                            let target_name = match p.bump().cloned() {
+                                Some(Tok::Ident(s)) => s,
+                                other => return Err(EmitError::Unsupported(format!(
+                                    "expected identifier after `&` in initializer, got {other:?}"))),
+                            };
+                            let target_idx = p.global_names.iter().position(|n| *n == target_name)
+                                .ok_or_else(|| EmitError::Unsupported(format!(
+                                    "address-of unknown global `{target_name}`")))?;
+                            values.push(GlobalInit::GlobalAddr(target_idx, 0));
+                        }
+                        other => return Err(EmitError::Unsupported(format!(
+                            "expected string literal or `&` in pointer-array initializer, got {other:?}"))),
+                    }
+                    match p.peek() {
+                        Some(Tok::Comma) => { p.bump(); }
+                        Some(Tok::RBrace) => { p.bump(); break; }
+                        other => return Err(EmitError::Unsupported(format!(
+                            "expected `,` or `}}` in initializer, got {other:?}"))),
+                    }
+                    continue;
+                }
                 let v = parse_signed_int(p)?;
                 if is_char && !is_pointer {
                     values.push(GlobalInit::Byte((v as u32 & 0xFF) as u8));
@@ -819,7 +1011,14 @@ pub(crate) fn parse_global_decl(p: &mut Parser<'_>) -> Result<(), EmitError> {
                 .ok_or_else(|| EmitError::Unsupported(format!(
                     "address-of unknown global `{target_name}`"
                 )))?;
-            Some(vec![GlobalInit::GlobalAddr(target_idx)])
+            // `&arr[K]` — address of an array element: add K*element_size.
+            let elem_off = if matches!(p.peek(), Some(Tok::LBrack)) {
+                p.bump();
+                let k = parse_signed_int(p)?;
+                p.eat(&Tok::RBrack)?;
+                (k * p.globals[target_idx].element_size as i32) as u16
+            } else { 0 };
+            Some(vec![GlobalInit::GlobalAddr(target_idx, elem_off)])
         } else if is_float && !is_pointer {
             // `double g = 3.14;` / `float g = 3.5f;` — IEEE bytes in _DATA.
             let bits = match p.bump().cloned() {
@@ -988,25 +1187,30 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
     // storage-class / sign keywords (static, extern, unsigned, etc.),
     // then expect `int` / `char` / `void`. `char` returns are widened
     // to int via cbw at the consume site; treat as int here.
-    skip_decl_modifiers(p);
+    let had_mod = skip_decl_modifiers(p) > 0;
     let mut return_char = false;
     let mut return_long = false;
     let mut return_float_width = 0usize;
     let mut return_struct_bytes = 0usize;
-    let return_int = match p.bump().cloned() {
-        Some(Tok::Kw("int")) => true,
-        Some(Tok::Kw("char")) => { return_char = true; true }
+    let return_int = match p.peek().cloned() {
+        Some(Tok::Kw("int")) => { p.bump(); true }
+        Some(Tok::Kw("char")) => { p.bump(); return_char = true; true }
         Some(Tok::Kw("long")) => {
+            p.bump();
             if matches!(p.peek(), Some(Tok::Kw("int"))) { p.bump(); }
             return_long = true;
             true
         }
         // `float`/`double` returns go through the __fac floating accumulator,
         // not AX — `return_int` is false.
-        Some(Tok::Kw("float")) => { return_float_width = 4; false }
-        Some(Tok::Kw("double")) => { return_float_width = 8; false }
-        Some(Tok::Kw("void")) => false,
+        Some(Tok::Kw("float")) => { p.bump(); return_float_width = 4; false }
+        Some(Tok::Kw("double")) => { p.bump(); return_float_width = 8; false }
+        Some(Tok::Kw("void")) => { p.bump(); false }
+        // Bare `unsigned`/`signed`/`short` return (no explicit `int`) — the next
+        // token is the function name. Treat as int; don't consume the name.
+        Some(Tok::Ident(_)) if had_mod => true,
         Some(Tok::Kw("struct")) => {
+            p.bump();
             // Capture the struct's total size: a small struct returned BY VALUE
             // (<= 4 bytes, no `*`) comes back in AX / DX:AX. A struct *pointer*
             // return (`struct S *f()`) is just an int (handled by the `*` loop
@@ -1076,6 +1280,10 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
             let has_unsigned_mod = (mod_start..p.pos).any(|i| {
                 matches!(p.toks.get(i), Some(Tok::Kw("unsigned")))
             });
+            // A bare `unsigned`/`signed`/`short` parameter with no explicit base
+            // type keyword (e.g. `unsigned v`) is an `int` param.
+            let bare_int_mod = (mod_start..p.pos).any(|i| matches!(p.toks.get(i),
+                Some(Tok::Kw("unsigned")) | Some(Tok::Kw("signed")) | Some(Tok::Kw("short"))));
             let mut struct_idx: Option<usize> = None;
             let mut is_char = false;
             let mut is_long = false;
@@ -1102,6 +1310,9 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
                     };
                     struct_idx = p.structs.iter().position(|s| s.name == sname);
                 }
+                // Bare `unsigned`/`signed`/`short` → implicit int; the name is
+                // the next token (don't consume it as a type).
+                _ if bare_int_mod => {}
                 other => {
                     return Err(EmitError::Unsupported(format!(
                         "expected `int`, `char`, or `struct` in parameter type, got {other:?}"
@@ -2348,15 +2559,17 @@ pub(crate) fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
                 p.bump();
                 let index = parse_expr(p)?;
                 p.eat(&Tok::RBrack)?;
-                let init_view: Vec<Option<i32>> = p.local_specs.iter().map(|l| l.init).collect();
-                let k = index.fold(&init_view).ok_or_else(|| EmitError::Unsupported(
-                    "non-constant struct-array index not yet supported".to_owned()))?;
                 let stotal = p.structs[sidx].total_bytes;
                 p.eat(&Tok::Dot)?;
                 let (field_off, size) = parse_field_lookup(p, sidx)?;
-                let byte_off = u16::try_from(k as i64 * stotal as i64 + field_off as i64)
-                    .expect("struct-array field offset fits");
-                let target = AssignTarget::GlobalField { global: global_idx, byte_off, size };
+                let init_view: Vec<Option<i32>> = p.local_specs.iter().map(|l| l.init).collect();
+                let target = if let Some(k) = index.fold(&init_view) {
+                    let byte_off = u16::try_from(k as i64 * stotal as i64 + field_off as i64)
+                        .expect("struct-array field offset fits");
+                    AssignTarget::GlobalField { global: global_idx, byte_off, size }
+                } else {
+                    AssignTarget::StructArrayField { array: global_idx, index: Box::new(index), stride: stotal as u16, field_off, size }
+                };
                 let value = if let Some(v) = parse_compound_rhs(p, &target)? {
                     v
                 } else {
@@ -2373,7 +2586,11 @@ pub(crate) fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
             {
                 p.bump();
                 let (byte_off, size) = parse_field_lookup(p, sidx)?;
-                let target = AssignTarget::GlobalField { global: global_idx, byte_off, size };
+                let target = if let Some((bit_off, bit_width)) = p.last_field_bits {
+                    AssignTarget::BitField { base: BitBase::Global(global_idx), byte_off, bit_off, bit_width }
+                } else {
+                    AssignTarget::GlobalField { global: global_idx, byte_off, size }
+                };
                 let value = if let Some(v) = parse_compound_rhs(p, &target)? {
                     v
                 } else {
@@ -2453,7 +2670,11 @@ pub(crate) fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
             {
                 p.bump();
                 let (byte_off, size) = parse_field_lookup(p, sidx)?;
-                let target = AssignTarget::LocalField { local: local_idx, byte_off, size };
+                let target = if let Some((bit_off, bit_width)) = p.last_field_bits {
+                    AssignTarget::BitField { base: BitBase::Local(local_idx), byte_off, bit_off, bit_width }
+                } else {
+                    AssignTarget::LocalField { local: local_idx, byte_off, size }
+                };
                 let value = if let Some(v) = parse_compound_rhs(p, &target)? {
                     v
                 } else {
@@ -2754,7 +2975,7 @@ pub(crate) fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
                 return Ok(Stmt::Assign { target, value });
             }
             p.eat(&Tok::Assign)?;
-            let value = parse_expr(p)?;
+            let value = parse_assign_rhs(p)?;
             // Whole-struct copy `g1 = g2;` (both struct globals).
             if let AssignTarget::Global(dst) = target
                 && let Expr::Global(src) = value
@@ -2833,6 +3054,38 @@ pub(crate) fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
                     )));
                 }
             };
+            // `++a[K];` — pre-inc/dec of an array element. Lowers to the indexed
+            // self-assign `a[K] = a[K] ± 1`, which the in-place mem-op peephole
+            // turns into `inc/dec [..]`. Constant index. Fixtures 547, 718.
+            if matches!(p.peek(), Some(Tok::LBrack)) {
+                p.bump();
+                let index = parse_expr(p)?;
+                p.eat(&Tok::RBrack)?;
+                let init_view: Vec<Option<i32>> = p.local_specs.iter().map(|l| l.init).collect();
+                let k = index.fold(&init_view).ok_or_else(|| EmitError::Unsupported(
+                    "non-constant array-element pre-inc not yet supported".to_owned()))?;
+                let (target, read) = if let Some(li) = p.resolve_local(&name) {
+                    let esz = p.local_specs[li].size as u16;
+                    let bo = k as u16 * esz;
+                    if esz == 1 { (AssignTarget::IndexedLocalByte { local: li, byte_off: bo }, Expr::LocalIndexByte { local: li, index: Box::new(Expr::IntLit(k)) }) }
+                    else { (AssignTarget::IndexedLocal { local: li, byte_off: bo }, Expr::LocalIndex { local: li, index: Box::new(Expr::IntLit(k)) }) }
+                } else if let Some(gi) = p.global_names.iter().position(|n| *n == name) {
+                    let esz = p.globals[gi].element_size as u16;
+                    let bo = k as u16 * esz;
+                    if esz == 1 { (AssignTarget::IndexedGlobalByte { array: gi, byte_off: bo }, Expr::IndexByte { array: gi, index: Box::new(Expr::IntLit(k)) }) }
+                    else { (AssignTarget::IndexedGlobal { array: gi, byte_off: bo }, Expr::Index { array: gi, index: Box::new(Expr::IntLit(k)) }) }
+                } else {
+                    return Err(EmitError::Unsupported(format!("pre-inc of unknown array `{name}`")));
+                };
+                p.eat(&Tok::Semi)?;
+                return Ok(Stmt::Assign {
+                    target,
+                    value: Expr::BinOp {
+                        op: if inc { BinOp::Add } else { BinOp::Sub },
+                        left: Box::new(read), right: Box::new(Expr::IntLit(1)),
+                    },
+                });
+            }
             let target = if let Some(idx) = p.resolve_local(&name) {
                 AssignTarget::Local(idx)
             } else if let Some(idx) = p.global_names.iter().position(|n| *n == name) {
@@ -3247,6 +3500,86 @@ pub(crate) fn parse_cond(p: &mut Parser<'_>) -> Result<Cond, EmitError> {
     let expr = parse_expr(p)?;
     Ok(cond_from_expr(expr))
 }
+/// When `base` (a struct pointer to `sidx`) is followed by `-><ptr-field>` and
+/// then more member access (`->`/`.`/`[`), build a `PtrChainField` that walks
+/// the pointer chain. The `->`/`.` is NOT yet consumed. Returns `None` (consuming
+/// nothing) when it's a plain single-field access, so the caller keeps its
+/// existing per-base codegen. Fixtures 2816, 2703.
+fn try_build_chain(p: &mut Parser<'_>, base: Expr, sidx: usize) -> Result<Option<Expr>, EmitError> {
+    // p.pos points at `->`/`.`; the field name is one past it.
+    let fname = match p.toks.get(p.pos + 1) {
+        Some(Tok::Ident(s)) => s.clone(),
+        _ => return Ok(None),
+    };
+    let next2 = p.toks.get(p.pos + 2).cloned();
+    let f = match p.structs[sidx].fields.iter().find(|f| f.name == fname) {
+        Some(f) if f.is_pointer => f.clone(),
+        _ => return Ok(None),
+    };
+    // `o->ptr[K]` — index the pointer field directly (one hop + element read).
+    if matches!(next2, Some(Tok::LBrack)) {
+        p.bump(); p.bump(); p.bump(); // `->`, field, `[`
+        let index = parse_expr(p)?;
+        p.eat(&Tok::RBrack)?;
+        let k = chain_const_index(p, &index)?;
+        let elem = f.pointee_size.max(1);
+        return Ok(Some(Expr::PtrChainField {
+            base: Box::new(base), hops: vec![f.byte_off],
+            final_off: (k as i64 * elem as i64) as u16, final_size: elem,
+        }));
+    }
+    // `o->ptr->...` / `o->ptr.field` — hop into the struct the pointer targets.
+    if f.struct_idx.is_some() && matches!(next2, Some(Tok::Arrow) | Some(Tok::Dot)) {
+        p.bump(); p.bump(); // `->`, field
+        return Ok(Some(continue_chain(p, base, vec![f.byte_off], f.struct_idx.unwrap())?));
+    }
+    Ok(None)
+}
+/// Fold a chain subscript index to a constant.
+fn chain_const_index(p: &Parser<'_>, index: &Expr) -> Result<i32, EmitError> {
+    let init_view: Vec<Option<i32>> = p.local_specs.iter().map(|l| l.init).collect();
+    index.fold(&init_view).ok_or_else(|| EmitError::Unsupported(
+        "non-constant pointer-chain index not yet supported".to_owned()))
+}
+/// Continue a pointer member-chain after the first hop. `cur` is the struct that
+/// the BX pointer currently points to. Consumes `->`/`.`/`[` until the leaf.
+fn continue_chain(p: &mut Parser<'_>, base: Expr, mut hops: Vec<u16>, mut cur: usize) -> Result<Expr, EmitError> {
+    loop {
+        let dot = matches!(p.peek(), Some(Tok::Dot));
+        let arrow = matches!(p.peek(), Some(Tok::Arrow));
+        if !dot && !arrow {
+            return Err(EmitError::Unsupported("malformed pointer member-chain".to_owned()));
+        }
+        p.bump();
+        let fname = match p.bump().cloned() {
+            Some(Tok::Ident(s)) => s,
+            other => return Err(EmitError::Unsupported(format!("expected field in chain, got {other:?}"))),
+        };
+        let f = p.structs[cur].fields.iter().find(|f| f.name == fname)
+            .ok_or_else(|| EmitError::Unsupported(format!("field `{fname}` not in chain struct")))?
+            .clone();
+        // Continuation? Another `->`/`.` means f is itself a struct pointer to
+        // hop through; `[K]` means f is a pointer to index; else f is the leaf.
+        if matches!(p.peek(), Some(Tok::Arrow) | Some(Tok::Dot)) {
+            if !f.is_pointer || f.struct_idx.is_none() {
+                return Err(EmitError::Unsupported("non-pointer field mid-chain".to_owned()));
+            }
+            hops.push(f.byte_off);
+            cur = f.struct_idx.unwrap();
+            continue;
+        }
+        if matches!(p.peek(), Some(Tok::LBrack)) {
+            p.bump();
+            let index = parse_expr(p)?;
+            p.eat(&Tok::RBrack)?;
+            let k = chain_const_index(p, &index)?;
+            hops.push(f.byte_off);
+            let elem = f.pointee_size.max(1);
+            return Ok(Expr::PtrChainField { base: Box::new(base), hops, final_off: (k as i64 * elem as i64) as u16, final_size: elem });
+        }
+        return Ok(Expr::PtrChainField { base: Box::new(base), hops, final_off: f.byte_off, final_size: f.size });
+    }
+}
 /// Resolve `<expr>.<field>` or `<expr>-><field>` to its byte offset
 /// and field size by looking up `field` in the struct definition at
 /// `sidx`. Caller has already consumed `.` or `->`.
@@ -3265,7 +3598,12 @@ pub(crate) fn parse_field_lookup(p: &mut Parser<'_>, sidx: usize) -> Result<(u16
             "field `{fname}` not in struct `{}`", sdef.name
         ))
     })?;
-    let (byte_off, size, inner) = (field.byte_off, field.size, field.struct_idx);
+    // Inline struct VALUE field carries struct_idx for `o.inner.a` recursion; a
+    // struct POINTER field also carries struct_idx but must NOT recurse inline.
+    let inner = if field.is_pointer { None } else { field.struct_idx };
+    let (byte_off, size) = (field.byte_off, field.size);
+    let leaf_bits = (field.bit_off, field.bit_width);
+    p.last_field_bits = None;
     // Multi-level access `o.inner.a`: recurse into the nested struct, summing
     // byte offsets; the returned size is the leaf field's.
     if let Some(inner_sidx) = inner
@@ -3274,6 +3612,11 @@ pub(crate) fn parse_field_lookup(p: &mut Parser<'_>, sidx: usize) -> Result<(u16
         p.bump(); // .
         let (inner_off, inner_size) = parse_field_lookup(p, inner_sidx)?;
         return Ok((byte_off + inner_off, inner_size));
+    }
+    // A leaf bit-field: expose its (bit_off, bit_width) so the caller emits a
+    // BitField access. Ordinary fields leave `last_field_bits` cleared.
+    if leaf_bits.1 > 0 {
+        p.last_field_bits = Some(leaf_bits);
     }
     // Array field element `s.v[K]` (constant K) → byte_off + K*element_size.
     if matches!(p.peek(), Some(Tok::LBrack)) {
@@ -3359,6 +3702,39 @@ pub(crate) fn parse_expr(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
 /// ```
 pub(crate) fn parse_binop_prec(p: &mut Parser<'_>, min_prec: u8) -> Result<Expr, EmitError> {
     let mut left = parse_atom(p)?;
+    // Postfix `++`/`--` in expression position (`i++ < n`, `(a++, ...)`). Yields
+    // the OLD value then mutates. Pointers step by their element size.
+    while matches!(p.peek(), Some(Tok::PlusPlus) | Some(Tok::MinusMinus)) {
+        let step = if matches!(p.peek(), Some(Tok::PlusPlus)) { 1 } else { -1 };
+        p.bump();
+        left = match left {
+            Expr::Local(i) => {
+                let st = if p.local_specs[i].pointee_size > 0 { step * p.local_specs[i].pointee_size as i32 } else { step };
+                Expr::PostMutateLocal { local_idx: i, step: st }
+            }
+            Expr::Param(i) => Expr::PostMutateParam { param_idx: i, step },
+            Expr::Global(i) => {
+                let g = &p.globals[i];
+                let st = if g.is_pointer { step * g.element_size as i32 } else { step };
+                Expr::PostMutateGlobal { global_idx: i, step: st }
+            }
+            // `*p++` parsed as `(*p)` then `++` — reparent to `*(p++)`: the deref
+            // reads the OLD pointee while the pointer advances by its stride.
+            Expr::DerefByte { ptr }
+                if matches!(ptr.as_ref(), Expr::Param(_) | Expr::Local(_) | Expr::Global(_)) =>
+                Expr::PostIncDeref { ptr, step, is_byte: true },
+            Expr::DerefWord { ptr }
+                if matches!(ptr.as_ref(), Expr::Param(_) | Expr::Local(_) | Expr::Global(_)) =>
+                Expr::PostIncDeref { ptr, step: step * 2, is_byte: false },
+            // `arr[i]++` / `a[K]++` on a global array — post-mutate the element.
+            Expr::Index { array, index } =>
+                Expr::PostMutateIndexedGlobal { array, index, step, is_byte: false },
+            Expr::IndexByte { array, index } =>
+                Expr::PostMutateIndexedGlobal { array, index, step, is_byte: true },
+            other => return Err(EmitError::Unsupported(format!(
+                "postfix ++/-- on unsupported operand: {other:?}"))),
+        };
+    }
     loop {
         let (op, prec) = match p.peek() {
             Some(Tok::Star)    => (BinOp::Mul,    12),
@@ -3445,6 +3821,28 @@ pub(crate) fn parse_assign_tail(p: &mut Parser<'_>, lvalue: Expr) -> Result<Stmt
     };
     Ok(Stmt::Assign { target, value })
 }
+/// Parse the RHS of a statement assignment, threading chained assignment
+/// `a = b = c = V` into right-associative nested `AssignExpr` (each stores the
+/// same AX value). Only fires for simple scalar lvalue links; used solely at the
+/// statement site so comma/ternary contexts (which call `parse_expr`) are
+/// unaffected. Fixtures 500, 2951, 3334.
+pub(crate) fn parse_assign_rhs(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
+    let e = parse_expr(p)?;
+    if matches!(p.peek(), Some(Tok::Assign))
+        && matches!(e, Expr::Local(_) | Expr::Param(_) | Expr::Global(_))
+    {
+        p.bump();
+        let rhs = parse_assign_rhs(p)?;
+        let target = match e {
+            Expr::Local(i) => AssignTarget::Local(i),
+            Expr::Param(i) => AssignTarget::Param(i),
+            Expr::Global(g) => AssignTarget::Global(g),
+            _ => unreachable!(),
+        };
+        return Ok(Expr::AssignExpr { target, value: Box::new(rhs) });
+    }
+    Ok(e)
+}
 /// Identity for the comma-operator value path; future widening for
 /// implicit type promotions can hook here.
 pub(crate) fn expr_from_stmt_value(e: Expr) -> Expr { e }
@@ -3457,6 +3855,16 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
             // casts are identity (Phase 1 doesn't model widening semantics).
             let cast_unsigned = matches!(p.peek(), Some(Tok::Kw("unsigned")));
             skip_decl_modifiers(p);
+            // `(struct Name *) <expr>` / `(union Name *) <expr>` — pointer cast,
+            // treated as identity. Fixture 1702 (`(struct Node *)0`).
+            if matches!(p.peek(), Some(Tok::Kw("struct")) | Some(Tok::Kw("union"))) {
+                p.bump();
+                if matches!(p.peek(), Some(Tok::Ident(_))) { p.bump(); } // tag name
+                skip_decl_modifiers(p);
+                while matches!(p.peek(), Some(Tok::Star)) { p.bump(); }
+                p.eat(&Tok::RParen)?;
+                return parse_atom(p);
+            }
             if matches!(p.peek(), Some(Tok::Kw("int")) | Some(Tok::Kw("char")) | Some(Tok::Kw("long"))
                 | Some(Tok::Kw("float")) | Some(Tok::Kw("double"))) {
                 let cast_char = matches!(p.peek(), Some(Tok::Kw("char")));
@@ -3555,6 +3963,44 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                 return Ok(Expr::Seq { sides, value: Box::new(acc_value) });
             }
             p.eat(&Tok::RParen)?;
+            // `(*p).field` (p a struct pointer) / `(*pp)->field` (pp a pointer to
+            // struct pointer) — a pointer member chain. `.` after the deref reads
+            // the struct directly (no extra hop); `->` derefs one more level.
+            if let Expr::DerefWord { ptr } | Expr::DerefByte { ptr } = &inner
+                && let Expr::Param(i) = ptr.as_ref()
+                && let Some(Some(sidx)) = p.param_struct_idxs.get(*i).cloned()
+                && matches!(p.peek(), Some(Tok::Dot) | Some(Tok::Arrow))
+            {
+                let i = *i;
+                let hops = if matches!(p.peek(), Some(Tok::Arrow)) { vec![0u16] } else { vec![] };
+                return continue_chain(p, Expr::Param(i), hops, sidx);
+            }
+            // `(&s)->field` / `(&s).field` ≡ `s.field` — address-of-struct then
+            // member is a direct field access. Fixture 3561.
+            if let Expr::AddrOfLocal(i) = &inner
+                && let Some(sidx) = p.local_specs.get(*i).and_then(|s| s.struct_idx)
+                && matches!(p.peek(), Some(Tok::Dot) | Some(Tok::Arrow))
+            {
+                let i = *i;
+                p.bump();
+                let (byte_off, size) = parse_field_lookup(p, sidx)?;
+                if let Some((bit_off, bit_width)) = p.last_field_bits {
+                    return Ok(Expr::BitField { base: BitBase::Local(i), byte_off, bit_off, bit_width });
+                }
+                return Ok(Expr::LocalField { local: i, byte_off, size });
+            }
+            if let Expr::AddrOfGlobal(g) = &inner
+                && let Some(sidx) = p.globals.get(*g).and_then(|gg| gg.struct_idx)
+                && matches!(p.peek(), Some(Tok::Dot) | Some(Tok::Arrow))
+            {
+                let g = *g;
+                p.bump();
+                let (byte_off, size) = parse_field_lookup(p, sidx)?;
+                if let Some((bit_off, bit_width)) = p.last_field_bits {
+                    return Ok(Expr::BitField { base: BitBase::Global(g), byte_off, bit_off, bit_width });
+                }
+                return Ok(Expr::GlobalField { global: g, byte_off, size });
+            }
             Ok(inner)
         }
         Some(Tok::Int(n)) => Ok(Expr::IntLit(n)),
@@ -3564,8 +4010,13 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
             match inner {
                 Expr::Local(idx) => Ok(Expr::PreMutateLocal { local_idx: idx, step: 1 }),
                 Expr::Global(idx) => Ok(Expr::PreMutateGlobal { global_idx: idx, step: 1 }),
+                Expr::Param(idx) => Ok(Expr::PreMutateParam { param_idx: idx, step: 1 }),
                 Expr::DerefWord { ptr } => Ok(Expr::PreMutateDeref { ptr, step: 1, is_byte: false }),
                 Expr::DerefByte { ptr } => Ok(Expr::PreMutateDeref { ptr, step: 1, is_byte: true }),
+                Expr::Index { array, index } if matches!(index.as_ref(), Expr::Param(_) | Expr::Local(_)) =>
+                    Ok(Expr::PreMutateIndexedGlobal { array, index, step: 1, is_byte: false }),
+                Expr::IndexByte { array, index } if matches!(index.as_ref(), Expr::Param(_) | Expr::Local(_)) =>
+                    Ok(Expr::PreMutateIndexedGlobal { array, index, step: 1, is_byte: true }),
                 other => Ok(Expr::BinOp {
                     op: BinOp::Add,
                     left: Box::new(other),
@@ -3578,6 +4029,7 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
             match inner {
                 Expr::Local(idx) => Ok(Expr::PreMutateLocal { local_idx: idx, step: -1 }),
                 Expr::Global(idx) => Ok(Expr::PreMutateGlobal { global_idx: idx, step: -1 }),
+                Expr::Param(idx) => Ok(Expr::PreMutateParam { param_idx: idx, step: -1 }),
                 Expr::DerefWord { ptr } => Ok(Expr::PreMutateDeref { ptr, step: -1, is_byte: false }),
                 Expr::DerefByte { ptr } => Ok(Expr::PreMutateDeref { ptr, step: -1, is_byte: true }),
                 other => Ok(Expr::BinOp {
@@ -3611,6 +4063,16 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
             bytes.push(0);
             let idx = p.strings.len();
             p.strings.push(bytes);
+            // `"abc"[K]` — byte at constant offset K of the literal.
+            if matches!(p.peek(), Some(Tok::LBrack)) {
+                p.bump();
+                let index = parse_expr(p)?;
+                p.eat(&Tok::RBrack)?;
+                let init_view: Vec<Option<i32>> = p.local_specs.iter().map(|l| l.init).collect();
+                let k = index.fold(&init_view).ok_or_else(|| EmitError::Unsupported(
+                    "non-constant string-literal index not yet supported".to_owned()))?;
+                return Ok(Expr::StrLitByte { string_idx: idx, byte_off: k as u16 });
+            }
             Ok(Expr::StrLit(idx))
         }
         Some(Tok::Minus) => {
@@ -3648,39 +4110,89 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                 p.structs.iter().find(|s| s.name == sname)
                     .map(|s| s.total_bytes as i32)
                     .ok_or_else(|| EmitError::Unsupported(format!("unknown struct `{sname}` in sizeof")))?
-            } else if let Some(Tok::Kw("int")) = p.peek().cloned() {
+            } else if let Some(Tok::Kw(
+                kw @ ("int" | "char" | "long" | "double" | "float"),
+            )) = p.peek().cloned()
+            {
                 p.bump();
-                while matches!(p.peek(), Some(Tok::Star)) { p.bump(); }
-                2 // int or any int-pointer = 2 in small model
-            } else if let Some(Tok::Kw("char")) = p.peek().cloned() {
-                p.bump();
+                if kw == "long" && matches!(p.peek(), Some(Tok::Kw("int"))) { p.bump(); }
                 if matches!(p.peek(), Some(Tok::Star)) {
-                    p.bump();
+                    // pointer to any type = 2 in the small model
+                    while matches!(p.peek(), Some(Tok::Star)) { p.bump(); }
                     2
                 } else {
-                    1
+                    match kw {
+                        "char" => 1,
+                        "int" => 2,
+                        "long" | "float" => 4,
+                        "double" => 8,
+                        _ => 2,
+                    }
                 }
-            } else if let Some(Tok::Kw("long")) = p.peek().cloned() {
+            } else if let Some(Tok::StrLit(b)) = p.peek().cloned() {
+                // `sizeof("...")` → byte length + 1 for the NUL terminator.
                 p.bump();
-                if matches!(p.peek(), Some(Tok::Kw("int"))) { p.bump(); }
-                while matches!(p.peek(), Some(Tok::Star)) { p.bump(); }
-                4 // long = 4 bytes; pointer-to-long still 2
+                (b.len() + 1) as i32
+            } else if matches!(p.peek(), Some(Tok::Star)) {
+                // `sizeof(*ptr)` → the pointee size (no evaluation).
+                p.bump();
+                let sz = if let Some(Tok::Ident(name)) = p.peek().cloned() {
+                    p.bump();
+                    if let Some(idx) = p.resolve_local(&name) {
+                        let ls = &p.local_specs[idx];
+                        if ls.pointee_size > 0 { ls.pointee_size as i32 } else { ls.size as i32 }
+                    } else if let Some(idx) = p.param_names.iter().position(|n| *n == name) {
+                        let ps = p.param_pointee_sizes.get(idx).copied().unwrap_or(0);
+                        if ps > 0 { ps as i32 } else { 2 }
+                    } else if let Some(idx) = p.global_names.iter().position(|n| *n == name) {
+                        p.globals[idx].element_size as i32
+                    } else { 2 }
+                } else { 2 };
+                if has_paren { skip_balanced_to_rparen(p); }
+                sz
             } else if let Some(Tok::Ident(name)) = p.peek().cloned() {
                 p.bump();
-                if let Some(idx) = p.resolve_local(&name) {
-                    p.local_specs[idx].storage_bytes() as i32
+                // `sizeof(a[K])` → the array's ELEMENT size (the index is
+                // irrelevant; consumed and discarded). `sizeof(a)` → full storage.
+                let is_elem = matches!(p.peek(), Some(Tok::LBrack));
+                if is_elem {
+                    p.bump();
+                    let _ = parse_expr(p)?;
+                    p.eat(&Tok::RBrack)?;
+                }
+                let base = if let Some(idx) = p.resolve_local(&name) {
+                    if is_elem { p.local_specs[idx].size as i32 }
+                    else { p.local_specs[idx].storage_bytes() as i32 }
+                } else if let Some(idx) = p.param_names.iter().position(|n| *n == name) {
+                    // A param array has decayed to a 2-byte pointer; a scalar
+                    // param sizes by its type.
+                    if p.param_is_long[idx] { 4 } else if p.param_is_char[idx] { 1 } else { 2 }
                 } else if let Some(idx) = p.global_names.iter().position(|n| *n == name) {
                     let g = &p.globals[idx];
-                    (g.element_size * g.array_len) as i32
+                    if is_elem { g.element_size as i32 } else { (g.element_size * g.array_len) as i32 }
                 } else {
                     return Err(EmitError::Unsupported(format!(
                         "sizeof unknown identifier `{name}`"
                     )));
+                };
+                // If the operand continues (`sizeof(x + 1)`), the result type
+                // is the expression's type — int (2), or long (4) if this
+                // operand is long. Consume the remaining operand tokens.
+                if has_paren && !matches!(p.peek(), Some(Tok::RParen)) {
+                    let is_long = p.resolve_local(&name)
+                        .map(|i| p.local_specs[i].is_long)
+                        .unwrap_or(false);
+                    skip_balanced_to_rparen(p);
+                    if is_long { 4 } else { 2 }
+                } else {
+                    base
                 }
             } else {
-                return Err(EmitError::Unsupported(format!(
-                    "unsupported sizeof operand: {:?}", p.peek()
-                )));
+                // General unevaluated expression (`sizeof(++i)`, `sizeof(1+2)`)
+                // — the result type is int. Consume the operand tokens without
+                // emitting (so side effects in the operand never run).
+                if has_paren { skip_balanced_to_rparen(p); }
+                2
             };
             if has_paren { p.eat(&Tok::RParen)?; }
             Ok(Expr::IntLit(n))
@@ -3724,14 +4236,15 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                     let g = &p.globals[global_idx];
                     let elem_size = g.element_size as i32;
                     let init_view: Vec<Option<i32>> = p.local_specs.iter().map(|l| l.init).collect();
-                    let k = idx_expr.fold(&init_view).ok_or_else(|| EmitError::Unsupported(
-                        "non-constant index in `&<global>[K]` not yet supported".to_owned()
-                    ))?;
-                    return Ok(Expr::BinOp {
-                        op: BinOp::Add,
-                        left: Box::new(Expr::AddrOfGlobal(global_idx)),
-                        right: Box::new(Expr::IntLit(k * elem_size)),
-                    });
+                    if let Some(k) = idx_expr.fold(&init_view) {
+                        return Ok(Expr::BinOp {
+                            op: BinOp::Add,
+                            left: Box::new(Expr::AddrOfGlobal(global_idx)),
+                            right: Box::new(Expr::IntLit(k * elem_size)),
+                        });
+                    }
+                    // Runtime index → `<i→ax>; shl ax; add ax,OFFSET _arr`.
+                    return Ok(Expr::AddrOfIndexedGlobal { array: global_idx, index: Box::new(idx_expr), elem: elem_size as u8 });
                 }
                 return Err(EmitError::Unsupported(format!(
                     "address-of unknown identifier `{name}`"
@@ -3750,6 +4263,14 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
             // Unary deref `*<expr>`. Pick the byte- vs word-sized
             // variant from the inner expression's pointee type.
             let inner = parse_atom(p)?;
+            // `*arr[i]` on an array-of-pointers — deref the pointer element,
+            // equivalent to `arr[i][0]`. Fixture 2608.
+            if let Expr::PtrArrayElem { array, index } = inner {
+                let elem_size = p.globals[array].element_size as u8;
+                return Ok(Expr::PtrArrayDeref {
+                    array, index, inner: Box::new(Expr::IntLit(0)), elem_size,
+                });
+            }
             let pointee_size = pointee_size_of(&inner, &p.globals, &p.local_specs, &p.param_pointee_sizes);
             if pointee_size == 1 {
                 Ok(Expr::DerefByte { ptr: Box::new(inner) })
@@ -3878,8 +4399,22 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                 if matches!(p.peek(), Some(Tok::Dot))
                     && let Some(sidx) = p.local_specs[idx].struct_idx
                 {
+                    // `a.ptr->...` — the field is a struct pointer; chain into it.
+                    // The pointer field load is the chain base. Fixtures 1928, 1419.
+                    if let Some(fname) = match p.toks.get(p.pos + 1) { Some(Tok::Ident(s)) => Some(s.clone()), _ => None }
+                        && let Some(f) = p.structs[sidx].fields.iter().find(|f| f.name == fname).cloned()
+                        && f.is_pointer && f.struct_idx.is_some()
+                        && matches!(p.toks.get(p.pos + 2), Some(Tok::Arrow) | Some(Tok::Dot))
+                    {
+                        p.bump(); p.bump(); // `.`, field
+                        let base = Expr::LocalField { local: idx, byte_off: f.byte_off, size: 2 };
+                        return continue_chain(p, base, vec![], f.struct_idx.unwrap());
+                    }
                     p.bump();
                     let (byte_off, size) = parse_field_lookup(p, sidx)?;
+                    if let Some((bit_off, bit_width)) = p.last_field_bits {
+                        return Ok(Expr::BitField { base: BitBase::Local(idx), byte_off, bit_off, bit_width });
+                    }
                     return Ok(Expr::LocalField { local: idx, byte_off, size });
                 }
                 // `<struct-ptr-local>-><field>` member access.
@@ -3934,8 +4469,14 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                 if matches!(p.peek(), Some(Tok::Arrow))
                     && let Some(Some(sidx)) = p.param_struct_idxs.get(idx).cloned()
                 {
+                    if let Some(chain) = try_build_chain(p, Expr::Param(idx), sidx)? {
+                        return Ok(chain);
+                    }
                     p.bump();
                     let (byte_off, size) = parse_field_lookup(p, sidx)?;
+                    if let Some((bit_off, bit_width)) = p.last_field_bits {
+                        return Ok(Expr::BitField { base: BitBase::DerefParam(idx), byte_off, bit_off, bit_width });
+                    }
                     return Ok(Expr::DerefParamField { ptr_param: idx, byte_off, size });
                 }
                 // `<struct-value-param>.<field>` — field of a by-value struct
@@ -3959,15 +4500,20 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                     p.bump();
                     let index = parse_expr(p)?;
                     p.eat(&Tok::RBrack)?;
-                    let init_view: Vec<Option<i32>> = p.local_specs.iter().map(|l| l.init).collect();
-                    let k = index.fold(&init_view).ok_or_else(|| EmitError::Unsupported(
-                        "non-constant struct-array index not yet supported".to_owned()))?;
                     let stotal = p.structs[sidx].total_bytes;
                     p.eat(&Tok::Dot)?;
                     let (field_off, size) = parse_field_lookup(p, sidx)?;
-                    let byte_off = u16::try_from(k as i64 * stotal as i64 + field_off as i64)
-                        .expect("struct-array field offset fits");
-                    return Ok(Expr::GlobalField { global: idx, byte_off, size });
+                    let init_view: Vec<Option<i32>> = p.local_specs.iter().map(|l| l.init).collect();
+                    if let Some(k) = index.fold(&init_view) {
+                        let byte_off = u16::try_from(k as i64 * stotal as i64 + field_off as i64)
+                            .expect("struct-array field offset fits");
+                        return Ok(Expr::GlobalField { global: idx, byte_off, size });
+                    }
+                    // Runtime index → scale at codegen time.
+                    return Ok(Expr::StructArrayField {
+                        array: idx, index: Box::new(index),
+                        stride: stotal as u16, field_off, size,
+                    });
                 }
                 // `<global>[<expr>]` — array index or pointer index.
                 // Array (`int a[N]`): direct addressing.
@@ -3976,6 +4522,35 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                     p.bump();
                     let index = parse_expr(p)?;
                     p.eat(&Tok::RBrack)?;
+                    // Array-of-pointers (`char *names[]`, `int *table[]`):
+                    // `arr[i]` is the pointer VALUE at element i; a following
+                    // `[j]` derefs it (`arr[i][j]`). Distinguished from a scalar
+                    // pointer (`char *p`, array_len==1) by array_len>1.
+                    {
+                        let g = &p.globals[idx];
+                        if g.is_pointer && g.array_len > 1 {
+                            let elem_size = g.element_size as u8;
+                            if matches!(p.peek(), Some(Tok::LBrack)) {
+                                p.bump();
+                                let inner = parse_expr(p)?;
+                                p.eat(&Tok::RBrack)?;
+                                return Ok(Expr::PtrArrayDeref {
+                                    array: idx, index: Box::new(index),
+                                    inner: Box::new(inner), elem_size,
+                                });
+                            }
+                            // `arr[i]->field` on an array of STRUCT pointers:
+                            // the element is a struct pointer; chain into it.
+                            // Fixtures 3541, 2997.
+                            if let Some(sidx) = g.struct_idx
+                                && matches!(p.peek(), Some(Tok::Arrow) | Some(Tok::Dot))
+                            {
+                                let base = Expr::PtrArrayElem { array: idx, index: Box::new(index) };
+                                return continue_chain(p, base, vec![], sidx);
+                            }
+                            return Ok(Expr::PtrArrayElem { array: idx, index: Box::new(index) });
+                        }
+                    }
                     // Multidimensional `a[i][j]`: constant indices fold to a flat
                     // 1-D read; a runtime 2-D index becomes Expr::Index2D.
                     if let Some(dims) = p.global_dims.get(&idx).cloned()
@@ -4014,9 +4589,23 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                 } else if matches!(p.peek(), Some(Tok::Dot))
                     && let Some(sidx) = p.globals[idx].struct_idx
                 {
+                    // `g.ptr->...` — struct-pointer field of a global struct → chain.
+                    if let Some(fname) = match p.toks.get(p.pos + 1) { Some(Tok::Ident(s)) => Some(s.clone()), _ => None }
+                        && let Some(f) = p.structs[sidx].fields.iter().find(|f| f.name == fname).cloned()
+                        && f.is_pointer && f.struct_idx.is_some()
+                        && matches!(p.toks.get(p.pos + 2), Some(Tok::Arrow) | Some(Tok::Dot))
+                    {
+                        p.bump(); p.bump(); // `.`, field
+                        let base = Expr::GlobalField { global: idx, byte_off: f.byte_off, size: 2 };
+                        return continue_chain(p, base, vec![], f.struct_idx.unwrap());
+                    }
                     p.bump();
                     let (byte_off, size) = parse_field_lookup(p, sidx)?;
-                    Ok(Expr::GlobalField { global: idx, byte_off, size })
+                    if let Some((bit_off, bit_width)) = p.last_field_bits {
+                        Ok(Expr::BitField { base: BitBase::Global(idx), byte_off, bit_off, bit_width })
+                    } else {
+                        Ok(Expr::GlobalField { global: idx, byte_off, size })
+                    }
                 } else if matches!(p.peek(), Some(Tok::Arrow))
                     && let Some(sidx) = p.globals[idx].struct_idx
                     && p.globals[idx].is_pointer
