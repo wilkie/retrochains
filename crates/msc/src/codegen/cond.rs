@@ -422,17 +422,20 @@ pub(crate) fn emit_cond_cmp_inner(cond: &Cond, locals: &Locals<'_>, out: &mut Ve
     // Accept both the truthy form `while (*s)` and the explicit-compare form
     // `while (*s != 0)` / `if (*p == 0)` (the caller's jcc reads ZF the same way).
     // Fixture 1408 (`while (*s != 0)` → `mov bx,[s]; cmp byte [bx],0`).
-    let deref_cond: Option<(bool, &Expr)> = match cond {
-        Cond::Truthy(Expr::DerefByte { ptr }) => Some((true, ptr.as_ref())),
-        Cond::Truthy(Expr::DerefWord { ptr }) => Some((false, ptr.as_ref())),
-        Cond::Cmp { op: RelOp::Eq | RelOp::Ne, left, right } if matches!(right, Expr::IntLit(0)) => match left {
-            Expr::DerefByte { ptr } => Some((true, ptr.as_ref())),
-            Expr::DerefWord { ptr } => Some((false, ptr.as_ref())),
+    // The compare constant may be nonzero too: `if (*p == 42)` → `mov bx,[p];
+    // cmp word [bx],42` (fixture 2693). `k` carries that immediate (0 for the
+    // truthy forms).
+    let deref_cond: Option<(bool, &Expr, i32)> = match cond {
+        Cond::Truthy(Expr::DerefByte { ptr }) => Some((true, ptr.as_ref(), 0)),
+        Cond::Truthy(Expr::DerefWord { ptr }) => Some((false, ptr.as_ref(), 0)),
+        Cond::Cmp { op: RelOp::Eq | RelOp::Ne, left, right: Expr::IntLit(k) } => match left {
+            Expr::DerefByte { ptr } => Some((true, ptr.as_ref(), *k)),
+            Expr::DerefWord { ptr } => Some((false, ptr.as_ref(), *k)),
             _ => None,
         },
         _ => None,
     };
-    if let Some((is_byte, ptr)) = deref_cond {
+    if let Some((is_byte, ptr, k)) = deref_cond {
         let loaded = match ptr {
             Expr::Param(_) | Expr::Local(_) => {
                 crate::codegen::expr::emit_load_bx(ptr, locals, out, fixups);
@@ -447,9 +450,12 @@ pub(crate) fn emit_cond_cmp_inner(cond: &Cond, locals: &Locals<'_>, out: &mut Ve
         };
         if loaded {
             if is_byte {
-                out.extend_from_slice(&[0x80, 0x3F, 0x00]); // cmp byte [bx],0
+                out.extend_from_slice(&[0x80, 0x3F, (k as u32 & 0xFF) as u8]); // cmp byte [bx],k
+            } else if let Ok(k8) = i8::try_from(k) {
+                out.extend_from_slice(&[0x83, 0x3F, k8 as u8]); // cmp word [bx],imm8sx
             } else {
-                out.extend_from_slice(&[0x83, 0x3F, 0x00]); // cmp word [bx],0
+                out.extend_from_slice(&[0x81, 0x3F]); // cmp word [bx],imm16
+                out.extend_from_slice(&((k as u32 & 0xFFFF) as u16).to_le_bytes());
             }
             return;
         }
