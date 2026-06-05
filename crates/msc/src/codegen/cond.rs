@@ -460,6 +460,34 @@ pub(crate) fn emit_cond_cmp_inner(cond: &Cond, locals: &Locals<'_>, out: &mut Ve
             return;
         }
     }
+    // `(unsigned char)x == K` / `!= K` — including `(x & 0xFF) == K`, which the
+    // parser lowers to a CastChar — compares the low byte in place:
+    // `cmp byte [x], K`. Fixtures 3264, 3269. K must fit a byte.
+    if let Cond::Cmp { op: RelOp::Eq | RelOp::Ne, left: Expr::CastChar { value, .. }, right: Expr::IntLit(k) } = cond
+        && (0..=0xFF).contains(k)
+    {
+        let kb = *k as u8;
+        match value.as_ref() {
+            Expr::Local(i) if locals.size(*i) >= 1 => {
+                let d = locals.disp(*i);
+                out.push(0x80); out.push(bp_modrm(0x7E, d)); push_bp_disp(out, d); out.push(kb);
+                return;
+            }
+            Expr::Param(i) => {
+                let d = param_disp(*i);
+                out.push(0x80); out.push(bp_modrm(0x7E, d)); push_bp_disp(out, d); out.push(kb);
+                return;
+            }
+            Expr::Global(g) => {
+                out.push(0x80); out.push(0x3E);
+                let pos = out.len(); out.extend_from_slice(&[0x00, 0x00]);
+                fixups.push(Fixup { body_offset: pos - 1, kind: FixupKind::GlobalAddr { global_idx: *g } });
+                out.push(kb);
+                return;
+            }
+            _ => {}
+        }
+    }
     // Long-global vs zero idiom: `mov ax, [g]; or ax, [g+2]` — ZF set
     // iff both halves are zero. Covers `if (g == 0)`, `if (!g)`, and
     // (with inverted jcc) `if (g != 0)`.
