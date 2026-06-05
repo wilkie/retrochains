@@ -564,6 +564,30 @@ pub(crate) fn emit_cond_cmp_inner(cond: &Cond, locals: &Locals<'_>, out: &mut Ve
         emit_test_mem_imm(operand, k, locals, out, fixups);
         return;
     }
+    // Bitwise-AND condition with a VARIABLE mask: `if ((x & mask) != 0)` where
+    // both operands are simple word lvalues → `mov ax,[mask]; test [x],ax`
+    // (the `test` sets ZF without a destructive AND). Fixture 3539.
+    if let Some((left, right)) = match cond {
+        Cond::Truthy(Expr::BinOp { op: BinOp::BitAnd, left, right }) => bitand_word_vars(left, right, locals),
+        Cond::Cmp { op: RelOp::Eq | RelOp::Ne,
+            left: Expr::BinOp { op: BinOp::BitAnd, left: a, right: b }, right: Expr::IntLit(0) }
+        | Cond::Cmp { op: RelOp::Eq | RelOp::Ne, left: Expr::IntLit(0),
+            right: Expr::BinOp { op: BinOp::BitAnd, left: a, right: b } } => bitand_word_vars(a, b, locals),
+        _ => None,
+    } {
+        emit_expr_to_ax(right, locals, out, fixups); // mov ax, [mask]
+        match left {
+            Expr::Local(i) => { let d = locals.disp(*i); out.push(0x85); out.push(bp_modrm(0x46, d)); push_bp_disp(out, d); }
+            Expr::Param(i) => { let d = param_disp(*i); out.push(0x85); out.push(bp_modrm(0x46, d)); push_bp_disp(out, d); }
+            Expr::Global(i) => {
+                out.push(0x85); out.push(0x06);
+                let pos = out.len(); out.extend_from_slice(&[0x00, 0x00]);
+                fixups.push(Fixup { body_offset: pos - 1, kind: FixupKind::GlobalAddr { global_idx: *i } });
+            }
+            _ => unreachable!(),
+        }
+        return;
+    }
     match cond {
         Cond::Truthy(Expr::Local(idx)) => emit_cmp_local_imm(*idx, locals, 0, out),
         Cond::Truthy(Expr::Param(idx)) => {
@@ -888,6 +912,18 @@ fn bitand_mask<'a>(a: &'a Expr, b: &'a Expr) -> Option<(&'a Expr, i32)> {
         (Expr::IntLit(k), m) if simple(m) => Some((m, *k)),
         _ => None,
     }
+}
+/// `x & mask` where BOTH operands are simple word (int) lvalues — neither a
+/// literal. Returns `(left, right)`; the caller loads `right` into AX and emits
+/// `test [left], ax`. Char/long operands are excluded (different widths).
+fn bitand_word_vars<'a>(a: &'a Expr, b: &'a Expr, locals: &Locals<'_>) -> Option<(&'a Expr, &'a Expr)> {
+    let word = |e: &Expr| match e {
+        Expr::Local(i) => locals.size(*i) == 2 && !locals.is_long_local(*i),
+        Expr::Param(i) => !locals.is_char_param(*i) && !locals.is_long_param(*i),
+        Expr::Global(i) => !locals.is_char_global(*i) && !locals.is_long_global(*i),
+        _ => false,
+    };
+    if word(a) && word(b) { Some((a, b)) } else { None }
 }
 /// `test byte/word [mem], imm` — MSC's lowering for a bitwise-AND condition.
 /// The byte form (`f6 /0`) is used when the mask fits in 8 bits.
