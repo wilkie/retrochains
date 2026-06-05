@@ -3449,6 +3449,12 @@ pub(crate) fn expr_to_deref_target(e: &Expr) -> Option<AssignTarget> {
             Expr::Local(i) => Some(AssignTarget::DerefLocalByte(*i)),
             _ => None,
         },
+        // `*p++ = v` as an expression/condition (the strcpy idiom).
+        Expr::PostIncDeref { ptr, step, .. } => match ptr.as_ref() {
+            Expr::Param(i) => Some(AssignTarget::DerefPostMutateParam { param_idx: *i, step: *step }),
+            Expr::Local(i) => Some(AssignTarget::DerefPostMutateLocal { local_idx: *i, step: *step }),
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -3607,6 +3613,15 @@ pub(crate) fn parse_cond(p: &mut Parser<'_>) -> Result<Cond, EmitError> {
         return Ok(Cond::Truthy(Expr::IntLit(1)));
     }
     let expr = parse_expr(p)?;
+    // Assignment as a condition: `while (*d++ = *s++)` / `if ((*p = v))`. The
+    // store runs and its value is tested for truthiness. Fixture 1808.
+    if matches!(p.peek(), Some(Tok::Assign))
+        && let Some(target) = expr_to_deref_target(&expr)
+    {
+        p.bump();
+        let value = parse_assign_rhs(p)?;
+        return Ok(Cond::Truthy(Expr::AssignExpr { target, value: Box::new(value) }));
+    }
     Ok(cond_from_expr(expr))
 }
 /// When `base` (a struct pointer to `sidx`) is followed by `-><ptr-field>` and

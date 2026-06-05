@@ -62,6 +62,14 @@ pub(crate) fn body_needs_si(stmts: &[Stmt], local_inits: &[Option<i32>]) -> bool
             }
             Expr::BinOp { left, right, .. } => expr_si(left, inits) || expr_si(right, inits),
             Expr::Call { args, .. } => args.iter().any(|a| expr_si(a, inits)),
+            // `*d++ = *s++` as an expression/condition reads the source via SI.
+            Expr::AssignExpr { target, value } => {
+                (matches!(target,
+                    AssignTarget::DerefPostMutateParam { .. }
+                    | AssignTarget::DerefPostMutateLocal { .. })
+                    && matches!(value.as_ref(), Expr::PostIncDeref { .. }))
+                    || expr_si(value, inits)
+            }
             _ => false,
         }
     }

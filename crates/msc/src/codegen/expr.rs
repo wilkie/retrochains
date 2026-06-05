@@ -133,6 +133,23 @@ pub(crate) fn emit_index2d_regs(row: &Expr, col: &Expr, cols: usize, elem: usize
 pub(crate) fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
     match expr {
         Expr::AssignExpr { target, value } => {
+            // Post-mutate deref targets (`*p++ = v`) compute the stored value as
+            // part of the store sequence (dst pointer first, then the source),
+            // leaving it in AL/AX — so route straight to the store helper rather
+            // than the value-first path. Fixture 1808.
+            match target {
+                AssignTarget::DerefPostMutateParam { param_idx, step } => {
+                    crate::codegen::assign::emit_assign_deref_postmutate_param(
+                        *param_idx, *step, value, locals, out, fixups);
+                    return;
+                }
+                AssignTarget::DerefPostMutateLocal { local_idx, step } => {
+                    crate::codegen::assign::emit_assign_deref_postmutate_local(
+                        *local_idx, *step, value, locals, out, fixups);
+                    return;
+                }
+                _ => {}
+            }
             // Assignment-as-expression: produce the RHS in AX, store it, leave
             // the value in AX (`<value→ax>; mov [target], ax`). Fixtures
             // 513/1434/2996/3395/555. A literal 0 loads via `sub ax,ax` (the

@@ -323,6 +323,20 @@ pub(crate) fn emit_cond_cmp_inner(cond: &Cond, locals: &Locals<'_>, out: &mut Ve
         else { out.extend_from_slice(&[0x83, 0x3F, 0x00]); }        // cmp word [bx],0
         return;
     }
+    // Assignment as a condition: `while (*d++ = *s++)` — emit the store
+    // (leaving the value in AL/AX), then `or al,al` (byte pointee) / `or ax,ax`
+    // (word) so the caller's jne loops while the copied value is non-zero.
+    // Fixture 1808.
+    if let Cond::Truthy(e @ Expr::AssignExpr { target, .. }) = cond
+        && let AssignTarget::DerefPostMutateParam { step, .. }
+            | AssignTarget::DerefPostMutateLocal { step, .. } = target
+    {
+        let byte = step.unsigned_abs() == 1;
+        crate::codegen::expr::emit_expr_to_ax(e, locals, out, fixups);
+        if byte { out.extend_from_slice(&[0x0A, 0xC0]); } // or al,al
+        else { out.extend_from_slice(&[0x0B, 0xC0]); }    // or ax,ax
+        return;
+    }
     // Plain pointer deref as a condition: `while (*s)` / `if (*p)` →
     // `mov bx,[ptr]; cmp byte/word [bx],0` instead of loading the pointee into
     // AX and testing it. Restricted to direct pointer params/locals, for which
