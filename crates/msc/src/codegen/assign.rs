@@ -2862,8 +2862,19 @@ pub(crate) fn emit_assign_deref_local(local_idx: usize, value: &Expr, locals: &L
         }
         return;
     }
-    // Near pointer: `mov bx, [bp-disp]`.
-    out.push(0x8B); out.push(bp_modrm(0x5E, disp)); push_bp_disp(out, disp);
+    // Near pointer. If AX still holds p (the immediately-preceding `p = <addr>`
+    // store was `mov [bp-p], ax`), reuse it via `mov bx,ax` instead of reloading
+    // `mov bx,[bp-p]` (fixture 1066 `p = a + 1; *p = 5`). Mirrors the *p++ store.
+    let store = {
+        let mut v = vec![0x89, bp_modrm(0x46, disp)];
+        push_bp_disp(&mut v, disp);
+        v
+    };
+    if out.len() >= store.len() && out[out.len() - store.len()..] == store[..] {
+        out.extend_from_slice(&[0x8B, 0xD8]); // mov bx, ax
+    } else {
+        out.push(0x8B); out.push(bp_modrm(0x5E, disp)); push_bp_disp(out, disp); // mov bx, [bp-p]
+    }
     if let Some(k) = value.fold(locals.inits) {
         let imm = (k as u32 & 0xFFFF) as u16;
         out.extend_from_slice(&[0xC7, 0x07]);
