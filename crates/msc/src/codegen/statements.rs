@@ -1075,6 +1075,19 @@ pub(crate) fn emit_return(
                     v
                 };
                 if ends_with(&mod_tail) || ends_with(&div_tail) {
+                    // The tail already zero-extended into AX — just return.
+                    out.extend_from_slice(frame.epilogue_bytes());
+                    return;
+                }
+                // A plain `mov [c],al` self-store (e.g. `c = f(); return (int)c`)
+                // leaves AL holding c — reuse it, only widening. Fixture 1988.
+                let self_store = {
+                    let mut v = vec![0x88, bp_modrm(0x46, disp)];
+                    push_bp_disp(&mut v, disp);
+                    v
+                };
+                if ends_with(&self_store) {
+                    out.extend_from_slice(&[0x2A, 0xE4]); // sub ah,ah (widen the live AL)
                     out.extend_from_slice(frame.epilogue_bytes());
                     return;
                 }

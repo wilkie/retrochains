@@ -1273,6 +1273,18 @@ pub(crate) fn emit_load_local_reuse(i: usize, locals: &Locals<'_>, out: &mut Vec
             return;
         }
     }
+    // Char local: when AL already holds the value (the last emit was its own
+    // `mov [c],al` store — e.g. `unsigned char c = f(); return (int)c` keeps
+    // the call result live), skip the reload and just widen. Fixture 1988.
+    if locals.size(i) == 1 {
+        let d = locals.disp(i);
+        let store_self = { let mut v = vec![0x88, bp_modrm(0x46, d)]; push_bp_disp(&mut v, d); v };
+        if out.len() >= store_self.len() && out[out.len() - store_self.len()..] == *store_self {
+            if locals.is_unsigned_local(i) { out.extend_from_slice(&[0x2A, 0xE4]); } // sub ah,ah
+            else { out.push(0x98); } // cbw
+            return;
+        }
+    }
     emit_load_local(i, locals, out);
 }
 /// `mov ax,[param i]` with the same AX-reuse elision, for plain int params.
