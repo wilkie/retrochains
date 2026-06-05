@@ -711,8 +711,15 @@ pub(crate) fn emit_cond_cmp_inner(cond: &Cond, locals: &Locals<'_>, out: &mut Ve
         other => panic!("Slice 5 cond shape not yet supported: {other:?}"),
     }
 }
-/// `cmp ax, imm` — MSC always uses `3d imm16` (cmp ax, imm16).
+/// `cmp ax, imm` — MSC uses `3d imm16` (cmp ax, imm16) for a nonzero
+/// immediate, but tests against zero with the shorter `or ax,ax`
+/// (`0b c0`), which sets ZF/SF identically (CF/OF cleared, so signed and
+/// equality jcc both read correctly). Fixtures 3639, 3548, 3267, 2693.
 pub(crate) fn emit_cmp_ax_imm(k: i32, out: &mut Vec<u8>) {
+    if k == 0 {
+        out.extend_from_slice(&[0x0B, 0xC0]); // or ax, ax
+        return;
+    }
     let k16 = (k as u32 & 0xFFFF) as u16;
     out.push(0x3D);
     out.extend_from_slice(&k16.to_le_bytes());
