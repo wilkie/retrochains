@@ -380,20 +380,32 @@ pub(crate) fn emit_cond_cmp_inner(cond: &Cond, locals: &Locals<'_>, out: &mut Ve
         crate::codegen::assign::emit_postmutate_local(*step, size, param_disp(*param_idx), out);
         return;
     }
-    // Plain pointer deref as a condition: `while (*s)` / `if (*p)` →
-    // `mov bx,[ptr]; cmp byte/word [bx],0` instead of loading the pointee into
-    // AX and testing it. Restricted to direct pointer params/locals, for which
-    // emit_load_bx yields the bare `mov bx,[ptr]`. Fixture 3351.
-    if let Cond::Truthy(e @ (Expr::DerefByte { ptr } | Expr::DerefWord { ptr })) = cond
-        && matches!(ptr.as_ref(), Expr::Param(_) | Expr::Local(_))
-    {
-        crate::codegen::expr::emit_load_bx(ptr, locals, out, fixups);
-        if matches!(e, Expr::DerefByte { .. }) {
-            out.extend_from_slice(&[0x80, 0x3F, 0x00]); // cmp byte [bx],0
-        } else {
-            out.extend_from_slice(&[0x83, 0x3F, 0x00]); // cmp word [bx],0
+    // Pointer deref as a condition: `while (*s)` / `if (*p)` / `while (*++p)` →
+    // `[<advance p>;] mov bx,[ptr]; cmp byte/word [bx],0` instead of loading the
+    // pointee into AX and testing it. A plain pointer param/local loads directly;
+    // a pre-mutated pointer (`*++p`) is advanced in place first, then its slot is
+    // loaded. Fixtures 3351, 1311.
+    if let Cond::Truthy(e @ (Expr::DerefByte { ptr } | Expr::DerefWord { ptr })) = cond {
+        let loaded = match ptr.as_ref() {
+            Expr::Param(_) | Expr::Local(_) => {
+                crate::codegen::expr::emit_load_bx(ptr, locals, out, fixups);
+                true
+            }
+            Expr::PreMutateLocal { local_idx, step } => {
+                crate::codegen::assign::emit_postmutate_local(*step, locals.size(*local_idx), locals.disp(*local_idx), out);
+                crate::codegen::expr::emit_load_bx(&Expr::Local(*local_idx), locals, out, fixups);
+                true
+            }
+            _ => false,
+        };
+        if loaded {
+            if matches!(e, Expr::DerefByte { .. }) {
+                out.extend_from_slice(&[0x80, 0x3F, 0x00]); // cmp byte [bx],0
+            } else {
+                out.extend_from_slice(&[0x83, 0x3F, 0x00]); // cmp word [bx],0
+            }
+            return;
         }
-        return;
     }
     // Long-global vs zero idiom: `mov ax, [g]; or ax, [g+2]` — ZF set
     // iff both halves are zero. Covers `if (g == 0)`, `if (!g)`, and

@@ -3982,9 +3982,11 @@ pub(crate) fn pointee_size_of(e: &Expr, globals: &[Global], locals: &[LocalSpec]
         // A plain integer is not a pointer (so the other operand of `K + ptr`
         // wins the pointee-size vote).
         Expr::IntLit(_) => 0,
-        // Postfix on a pointer: step magnitude = pointee element size.
-        // step=±1 → char*, step=±2 → int*.
-        Expr::PostMutateLocal { step, .. } | Expr::PostMutateGlobal { step, .. } => {
+        // Pre/postfix on a pointer: step magnitude = pointee element size.
+        // step=±1 → char*, step=±2 → int*. Covers `*++p` / `*p++`.
+        Expr::PostMutateLocal { step, .. } | Expr::PostMutateGlobal { step, .. }
+        | Expr::PreMutateLocal { step, .. } | Expr::PreMutateGlobal { step, .. }
+        | Expr::PreMutateParam { step, .. } | Expr::PostMutateParam { step, .. } => {
             step.unsigned_abs() as usize
         }
         Expr::BinOp { op: BinOp::Add, left, right } => {
