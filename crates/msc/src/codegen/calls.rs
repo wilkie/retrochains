@@ -258,6 +258,11 @@ pub(crate) fn emit_push_arg_float(bits: u64, width: usize, out: &mut Vec<u8>, fi
 /// FIXUP for the linker to fill in the actual offset.
 pub(crate) fn emit_push_arg(arg: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
     match arg {
+        Expr::IntLit(0) => {
+            // MSC zeroes AX with `sub ax,ax` (its zero idiom), then pushes.
+            // Fixture 3988.
+            out.extend_from_slice(&[0x2B, 0xC0, 0x50]); // sub ax,ax; push ax
+        }
         Expr::IntLit(k) => {
             let imm = (*k as u32 & 0xFFFF) as u16;
             out.push(0xB8);
