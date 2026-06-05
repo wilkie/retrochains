@@ -1066,7 +1066,17 @@ pub(crate) fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
             }
             fold_aliased_deref(e, cp);
         }
-        Expr::AddrOfGlobal(_) => {}
+        Expr::AddrOfGlobal(g) => {
+            // Taking a global's address (escaping it — call arg, bare `&g`) lets
+            // writes happen through the pointer, so reads after this point must not
+            // fold the stale value. The `int *p = &g` alias-recording case
+            // early-returns before here, so this only fires for genuine escapes.
+            // Drops the scalar value and any known struct/array element values.
+            // Fixture 1290 (`inc(&s); return s.x` must reload, not fold to 5).
+            cp.mutated_globals.insert(*g);
+            cp.g_known.remove(g);
+            cp.ga_known.retain(|(gi, _), _| gi != g);
+        }
         Expr::AddrOfIndexedGlobal { index, .. } => prop_expr(index, cp),
         Expr::AddrOfLocal(j) => {
             // Taking a local's address (escaping it — call arg, `&x`) allows
