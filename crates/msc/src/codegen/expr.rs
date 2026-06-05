@@ -1464,6 +1464,40 @@ fn simple_word_bp(e: &Expr, locals: &Locals<'_>) -> Option<i16> {
     }
 }
 pub(crate) fn emit_binop(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    // `make().a OP make().b` — two by-value struct-return field reads. Eval both
+    // calls left-to-right (each spilling DX:AX to its temp), then combine: left's
+    // field is reloaded from its temp (AX was clobbered by the 2nd call), right's
+    // word field at offset 2 is still live in DX (`op ax,dx`), else reloaded.
+    // Fixture 2682. Word (int) fields with a register-form opcode only.
+    if let (Expr::CallStructField { name: ln, args: la, byte_off: lo, size: 2, temp_idx: lt },
+            Expr::CallStructField { name: rn, args: ra, byte_off: ro, size: 2, temp_idx: rt }) = (left, right)
+        && let Some(op_rm) = match op {
+            BinOp::Add => Some(0x03u8), BinOp::Sub => Some(0x2B),
+            BinOp::BitAnd => Some(0x23), BinOp::BitOr => Some(0x0B), BinOp::BitXor => Some(0x33),
+            _ => None,
+        }
+    {
+        let spill = |disp: i16, out: &mut Vec<u8>| {
+            out.push(0x89); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp);   // mov [t],ax
+            let dh = disp + 2;
+            out.push(0x89); out.push(bp_modrm(0x56, dh)); push_bp_disp(out, dh);       // mov [t+2],dx
+        };
+        emit_call(ln, la, locals, out, fixups);
+        let ld = locals.struct_field_temp_disp(*lt);
+        spill(ld, out);
+        emit_call(rn, ra, locals, out, fixups);
+        let rd = locals.struct_field_temp_disp(*rt);
+        spill(rd, out);
+        let lf = ld + *lo as i16;
+        out.push(0x8B); out.push(bp_modrm(0x46, lf)); push_bp_disp(out, lf);           // mov ax,[left field]
+        if *ro == 2 {
+            out.extend_from_slice(&[op_rm, 0xC2]);                                     // op ax,dx
+        } else {
+            let rf = rd + *ro as i16;
+            out.push(op_rm); out.push(bp_modrm(0x46, rf)); push_bp_disp(out, rf);      // op ax,[right field]
+        }
+        return;
+    }
     // `&local + K` / `&global + K` as a value (`&s.field`, `&a[K]`) → fold the
     // constant into the lea displacement / OFFSET addend rather than computing
     // the base address and adding K at runtime. Fixtures 485, 3262.
