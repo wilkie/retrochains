@@ -616,8 +616,18 @@ pub(crate) fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_
                         // AND with 0xFFxx: byte form (high byte ANDs with 0xFF = identity).
                         out.push(0x80); out.push(bp_modrm(modrm, disp)); push_bp_disp(out, disp); out.push(imm8);
                     }
+                } else if imm8 == 0xFF {
+                    // AND with 0xxxFF: only the high byte changes (low byte AND
+                    // 0xFF = identity) → byte op on the high byte. Fixture 1942
+                    // (`&= 0x00FF` → high byte AND 0x00 = `mov byte [hi],0`).
+                    let hi_disp = disp + 1;
+                    if high == 0x00 {
+                        out.push(0xC6); out.push(bp_modrm(0x46, hi_disp)); push_bp_disp(out, hi_disp); out.push(0x00);
+                    } else {
+                        out.push(0x80); out.push(bp_modrm(modrm, hi_disp)); push_bp_disp(out, hi_disp); out.push(high);
+                    }
                 } else {
-                    // AND with 0x00xx or other: word form to correctly affect high byte.
+                    // AND affecting both bytes: word form.
                     out.push(0x81); out.push(bp_modrm(modrm, disp)); push_bp_disp(out, disp);
                     out.extend_from_slice(&imm16.to_le_bytes());
                 }
@@ -626,6 +636,12 @@ pub(crate) fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_
                 if imm16 <= 0xFF {
                     // Small non-negative: byte form (high byte OR/XOR 0x00 = identity).
                     out.push(0x80); out.push(bp_modrm(modrm, disp)); push_bp_disp(out, disp); out.push(imm8);
+                } else if imm8 == 0x00 {
+                    // OR/XOR with 0xXX00: only the high byte changes (low byte
+                    // OR/XOR 0x00 = identity) → byte op on the high byte.
+                    // Fixture 1715 (`^= 0x0500` → `xor byte [hi],0x05`).
+                    let hi_disp = disp + 1;
+                    out.push(0x80); out.push(bp_modrm(modrm, hi_disp)); push_bp_disp(out, hi_disp); out.push(high);
                 } else if let Ok(k8) = i8::try_from(k) {
                     out.push(0x83); out.push(bp_modrm(modrm, disp)); push_bp_disp(out, disp); out.push(k8 as u8);
                 } else {
