@@ -245,6 +245,62 @@ pub(crate) fn apply_enum_substitutions(toks: &mut Vec<Tok>) {
         i += 1;
     }
 }
+/// Decode the C escape sequence whose backslash is at `bytes[start]`.
+/// Returns the byte value (masked to 8 bits for octal/hex) and the
+/// index just past the sequence. Handles octal `\NNN`, hex `\xHH...`,
+/// and the named escapes (`\n \t \r \\ \' \" \a \b \f \v`).
+fn read_escape(bytes: &[u8], start: usize) -> Result<(i32, usize), EmitError> {
+    let esc = *bytes
+        .get(start + 1)
+        .ok_or_else(|| EmitError::Unsupported("dangling escape backslash".to_owned()))?;
+    // Octal `\NNN` — 1 to 3 octal digits.
+    if (b'0'..=b'7').contains(&esc) {
+        let mut v: i32 = 0;
+        let mut j = start + 1;
+        let mut digits = 0;
+        while digits < 3 && j < bytes.len() && (b'0'..=b'7').contains(&bytes[j]) {
+            v = v * 8 + (bytes[j] - b'0') as i32;
+            j += 1;
+            digits += 1;
+        }
+        return Ok((v & 0xFF, j));
+    }
+    // Hex `\xHH...` — one or more hex digits.
+    if esc == b'x' || esc == b'X' {
+        let mut v: i32 = 0;
+        let mut j = start + 2;
+        let mut digits = 0;
+        while j < bytes.len() && bytes[j].is_ascii_hexdigit() {
+            let d = (bytes[j] as char).to_digit(16).unwrap() as i32;
+            v = v * 16 + d;
+            j += 1;
+            digits += 1;
+        }
+        if digits == 0 {
+            return Err(EmitError::Unsupported("`\\x` with no hex digits".to_owned()));
+        }
+        return Ok((v & 0xFF, j));
+    }
+    let v = match esc {
+        b'n' => 0x0A,
+        b't' => 0x09,
+        b'r' => 0x0D,
+        b'\\' => b'\\' as i32,
+        b'\'' => b'\'' as i32,
+        b'"' => b'"' as i32,
+        b'a' => 0x07,
+        b'b' => 0x08,
+        b'f' => 0x0C,
+        b'v' => 0x0B,
+        _ => {
+            return Err(EmitError::Unsupported(format!(
+                "unknown escape `\\{}`",
+                esc as char
+            )));
+        }
+    };
+    Ok((v, start + 2))
+}
 pub(crate) fn tokenize(source: &str) -> Result<Vec<Tok>, EmitError> {
     let bytes = source.as_bytes();
     let mut toks = Vec::new();
@@ -410,44 +466,9 @@ pub(crate) fn tokenize(source: &str) -> Result<Vec<Tok>, EmitError> {
                     return Err(EmitError::Unsupported("unterminated char literal".to_owned()));
                 }
                 let value: i32 = if bytes[i] == b'\\' && i + 1 < bytes.len() {
-                    let esc = bytes[i + 1];
-                    // Octal escape `\NNN` (1–3 digits). C says `\0` is
-                    // NUL even when followed by another digit unless
-                    // that digit is also octal — we match the latter.
-                    if esc.is_ascii_digit() && esc <= b'7' {
-                        let mut v: i32 = 0;
-                        i += 1;
-                        let mut digits = 0;
-                        while digits < 3 && i < bytes.len()
-                            && bytes[i].is_ascii_digit() && bytes[i] <= b'7'
-                        {
-                            v = v * 8 + (bytes[i] - b'0') as i32;
-                            i += 1;
-                            digits += 1;
-                        }
-                        v
-                    } else {
-                        let v = match esc {
-                            b'n' => 0x0A,
-                            b't' => 0x09,
-                            b'r' => 0x0D,
-                            b'\\' => b'\\' as i32,
-                            b'\'' => b'\'' as i32,
-                            b'"' => b'"' as i32,
-                            b'a' => 0x07,
-                            b'b' => 0x08,
-                            b'f' => 0x0C,
-                            b'v' => 0x0B,
-                            _ => {
-                                return Err(EmitError::Unsupported(format!(
-                                    "unknown escape `\\{}` in char literal",
-                                    esc as char
-                                )));
-                            }
-                        };
-                        i += 2;
-                        v as i32
-                    }
+                    let (v, next) = read_escape(bytes, i)?;
+                    i = next;
+                    v
                 } else {
                     let v = bytes[i] as i32;
                     i += 1;
@@ -467,23 +488,9 @@ pub(crate) fn tokenize(source: &str) -> Result<Vec<Tok>, EmitError> {
                 let mut buf = Vec::new();
                 while i < bytes.len() && bytes[i] != b'"' {
                     if bytes[i] == b'\\' && i + 1 < bytes.len() {
-                        let esc = bytes[i + 1];
-                        let translated = match esc {
-                            b'n' => 0x0A,
-                            b't' => 0x09,
-                            b'r' => 0x0D,
-                            b'0' => 0x00,
-                            b'\\' => b'\\',
-                            b'"' => b'"',
-                            _ => {
-                                return Err(EmitError::Unsupported(format!(
-                                    "unknown escape `\\{}`",
-                                    esc as char
-                                )));
-                            }
-                        };
-                        buf.push(translated);
-                        i += 2;
+                        let (v, next) = read_escape(bytes, i)?;
+                        buf.push((v & 0xFF) as u8);
+                        i = next;
                     } else {
                         buf.push(bytes[i]);
                         i += 1;
