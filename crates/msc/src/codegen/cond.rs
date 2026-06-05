@@ -314,6 +314,29 @@ fn emit_addr_to_reg(e: &Expr, to_cx: bool, locals: &Locals<'_>, out: &mut Vec<u8
     }
 }
 pub(crate) fn emit_cond_cmp_inner(cond: &Cond, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    // `while (--n > 0)` — a pre-mutation on the LEFT of a comparison: do the
+    // in-place inc/dec first, then compare the slot directly (`dec [n]; cmp
+    // [n],0`). Rewrite the operand to the plain slot read and re-enter so the
+    // normal `cmp [slot],imm` path emits. Fixture 3644.
+    if let Cond::Cmp { op, left, right } = cond {
+        let slot = match left {
+            Expr::PreMutateLocal { local_idx, step } => {
+                crate::codegen::assign::emit_postmutate_local(*step, locals.size(*local_idx), locals.disp(*local_idx), out);
+                Some(Expr::Local(*local_idx))
+            }
+            Expr::PreMutateParam { param_idx, step } if !locals.is_long_param(*param_idx) => {
+                let size = if locals.is_char_param(*param_idx) { 1 } else { 2 };
+                crate::codegen::assign::emit_postmutate_local(*step, size, param_disp(*param_idx), out);
+                Some(Expr::Param(*param_idx))
+            }
+            _ => None,
+        };
+        if let Some(slot) = slot {
+            let rewritten = Cond::Cmp { op: *op, left: slot, right: right.clone() };
+            emit_cond_cmp_inner(&rewritten, locals, out, fixups);
+            return;
+        }
+    }
     // `while (*s++)` — test the OLD pointee for zero while advancing the pointer:
     // `mov bx,[s]; <advance [s]>; cmp byte/word [bx],0`. The caller's jcc (jne for
     // truthy) takes the loop while the pointee is non-zero. Fixture 2027.
