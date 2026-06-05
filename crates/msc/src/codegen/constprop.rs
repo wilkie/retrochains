@@ -219,6 +219,28 @@ fn fold_aliased_deref(e: &mut Expr, cp: &mut ConstProp) {
         prop_expr(e, cp);
     }
 }
+/// `*p = v` through a ptr_addr offset alias (`p = &a[K]`/`a + K`, no ptr_alias):
+/// record the written element value in the la/ga known-value table so a later
+/// DIRECT read `a[K]` folds (1062), then drop the pointer's address so a later
+/// POINTER read `*p` reloads at runtime (1066). No-op for far/aliased pointers.
+fn record_deref_ptr_addr_write(p: usize, is_byte: bool, value: &Expr, cp: &mut ConstProp) {
+    if cp.ptr_alias.contains_key(&p)
+        || !cp.ptr_addr.contains_key(&p)
+        || cp.local_specs.get(p).map(|s| s.is_far_ptr).unwrap_or(false)
+    {
+        return;
+    }
+    let (base, off) = cp.ptr_addr[&p];
+    let folded = value.fold(&[]).map(|k| if is_byte { (k as i8) as i32 } else { k });
+    match (base, folded) {
+        (AliasTarget::Local(a), Some(k)) => { cp.la_known.insert((a, off as u16), k); }
+        (AliasTarget::Local(a), None) => { cp.la_known.remove(&(a, off as u16)); }
+        (AliasTarget::Global(g), Some(k)) => { cp.ga_known.insert((g, off as u16), k); }
+        (AliasTarget::Global(g), None) => { cp.ga_known.remove(&(g, off as u16)); }
+        (AliasTarget::String(_), _) => {}
+    }
+    cp.ptr_addr.remove(&p);
+}
 /// The address value an init expression denotes, as (base lvalue, byte offset):
 /// `&x` / `&g` (offset 0) and `&base[K]` (lowered to `AddrOf(base) + K*elem`).
 fn addr_value_of(e: &Expr) -> Option<(AliasTarget, i32)> {
@@ -571,6 +593,14 @@ pub(crate) fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
                         cp.ga_field_size.remove(&(*array, *byte_off));
                     }
                 }
+                // `*p = v` where p points into an array element via a ptr_addr
+                // offset alias (`p = &a[K]` / `p = a + K`, ptr_alias absent).
+                // MSC's element table DOES track this write so a later DIRECT
+                // read `a[K]` folds (1062); but it then drops the pointer's
+                // address so a later POINTER read `*p` reloads at runtime (1066).
+                // The store itself stays pointer-routed (target unchanged).
+                AssignTarget::DerefLocal(p) => record_deref_ptr_addr_write(*p, false, value, cp),
+                AssignTarget::DerefLocalByte(p) => record_deref_ptr_addr_write(*p, true, value, cp),
                 _ => {}
             }
         }
