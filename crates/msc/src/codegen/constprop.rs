@@ -139,15 +139,19 @@ fn alias_rewrite_derefs(e: &mut Expr, cp: &ConstProp) {
     }
 }
 /// Resolve `*p` / `*(p + byte_off)` (a DerefWord/DerefByte read) through a
-/// pointer alias `p -> base`:
-///   - offset 0  → the aliased lvalue `Local(x)`/`Global(g)`, then const-folded
-///     (a scalar pointee like `p = &g; *p` folds to g's value — fixture 596).
-///   - offset K≠0 → the base array's element `base[K/elem]`, left as a runtime
-///     element read (MSC does NOT fold these — fixtures 1019, 888).
-/// Marks the alias used (single-use semantics, drained per top-level stmt).
+/// pointer whose base address is known. Two sources of base:
+///   - `ptr_alias` (offset-0 base from a bare `&x` / `&g` init), single-use.
+///   - `ptr_addr` (base + byte offset from `p = &a[K]` / `p = a + K`), where the
+///     pointer carries a non-zero base offset into an array. Single-use too.
+/// Fold rule keys on the DEREF-SITE offset (`*p` vs `*(p+K)`):
+///   - deref offset 0  → resolve the pointee (scalar `Local(x)` when the base
+///     offset is also 0, else the array element `base[off/elem]`) and const-fold
+///     it to an immediate (MSC folds `*p` reads — 596, 1047, 1049).
+///   - deref offset K≠0 → the array element `base[total/elem]`, left as a runtime
+///     read (MSC does NOT fold these — fixtures 1019, 888, 1152).
 fn fold_aliased_deref(e: &mut Expr, cp: &mut ConstProp) {
     let is_byte = matches!(e, Expr::DerefByte { .. });
-    let (p, byte_off) = {
+    let (p, deref_off) = {
         let ptr = match e {
             Expr::DerefWord { ptr } | Expr::DerefByte { ptr } => ptr,
             _ => return,
@@ -161,19 +165,38 @@ fn fold_aliased_deref(e: &mut Expr, cp: &mut ConstProp) {
             _ => return,
         }
     };
-    let Some(&base) = cp.ptr_alias.get(&p) else { return };
+    // Prefer the offset-0 alias map; fall back to the offset-carrying ptr_addr
+    // ONLY for a genuine non-zero base offset (`p = &a[K]` / `p = a + K`, which
+    // never gets a ptr_alias entry). An offset-0 pointer (`p = &g`) is handled by
+    // ptr_alias with single-use semantics — falling back to ptr_addr there would
+    // re-fold a later deref MSC reloads (711/714) and mis-fold far pointers
+    // (1649/1652/2250, which populate ptr_addr but not ptr_alias).
+    let is_far = cp.local_specs.get(p).map(|s| s.is_far_ptr).unwrap_or(false);
+    let (base, base_off, from_alias) = if let Some(&b) = cp.ptr_alias.get(&p) {
+        (b, 0i32, true)
+    } else if let Some(&(b, off)) = cp.ptr_addr.get(&p)
+        && off != 0
+        && !is_far
+    {
+        (b, off, false)
+    } else {
+        return;
+    };
     // `*s` / `s[K]` through a CONST-string pointer → a direct CONST byte load
     // `mov al, $SG+K; cbw` (strings are char, so always a byte read).
-    if let AliasTarget::String(idx) = base
-        && is_byte
-        && byte_off >= 0
-    {
-        cp.aliases_used.insert(p);
-        *e = Expr::StrLitByte { string_idx: idx, byte_off: byte_off as u16 };
+    if let AliasTarget::String(idx) = base {
+        if is_byte && base_off + deref_off >= 0 {
+            cp.aliases_used.insert(p);
+            *e = Expr::StrLitByte { string_idx: idx, byte_off: (base_off + deref_off) as u16 };
+        }
         return;
     }
-    cp.aliases_used.insert(p);
-    if byte_off == 0 {
+    // Single-use: drain the alias so a later deref reloads at runtime.
+    if from_alias { cp.aliases_used.insert(p); } else { cp.ptr_addr.remove(&p); }
+    let elem = if is_byte { 1 } else { 2 };
+    let total = base_off + deref_off;
+    if total < 0 || total % elem != 0 { return; }
+    if deref_off == 0 && total == 0 {
         *e = match base {
             AliasTarget::Local(x) => Expr::Local(x),
             AliasTarget::Global(g) => Expr::Global(g),
@@ -182,9 +205,7 @@ fn fold_aliased_deref(e: &mut Expr, cp: &mut ConstProp) {
         prop_expr(e, cp);
         return;
     }
-    let elem = if is_byte { 1 } else { 2 };
-    if byte_off < 0 || byte_off % elem != 0 { return; }
-    let idx = Box::new(Expr::IntLit(byte_off / elem));
+    let idx = Box::new(Expr::IntLit(total / elem));
     *e = match (base, is_byte) {
         (AliasTarget::Local(a), false) => Expr::LocalIndex { local: a, index: idx },
         (AliasTarget::Local(a), true) => Expr::LocalIndexByte { local: a, index: idx },
@@ -192,6 +213,11 @@ fn fold_aliased_deref(e: &mut Expr, cp: &mut ConstProp) {
         (AliasTarget::Global(g), true) => Expr::IndexByte { array: g, index: idx },
         (AliasTarget::String(_), _) => return,
     };
+    // A `*p` (deref offset 0) at a non-zero base offset still folds to an
+    // immediate; an explicit `*(p+K)` stays a runtime element read.
+    if deref_off == 0 {
+        prop_expr(e, cp);
+    }
 }
 /// The address value an init expression denotes, as (base lvalue, byte offset):
 /// `&x` / `&g` (offset 0) and `&base[K]` (lowered to `AddrOf(base) + K*elem`).

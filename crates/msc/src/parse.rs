@@ -3961,6 +3961,29 @@ pub(crate) fn parse_binop_prec(p: &mut Parser<'_>, min_prec: u8) -> Result<Expr,
             left = Expr::CastChar { value: Box::new(left), unsigned: true };
             continue;
         }
+        // Pointer arithmetic on a DECAYED ARRAY (`a + K` / `a - K`): the array
+        // name decayed to `AddrOf{Local,Global}(a)` and `K` counts ELEMENTS, so
+        // scale it to bytes — matching `&a[K]`, which is already byte-scaled at
+        // parse. (Pointer param/local arithmetic is scaled later in emit_binop,
+        // so only the address forms are scaled here.) Fixtures 1047, 1052, 1814.
+        if matches!(op, BinOp::Add | BinOp::Sub)
+            && let Expr::IntLit(k) = right
+        {
+            let elem = match &left {
+                Expr::AddrOfLocal(i)
+                    if p.local_specs[*i].array_len > 1 && p.local_specs[*i].pointee_size == 0 =>
+                    Some(p.local_specs[*i].size as i32),
+                Expr::AddrOfGlobal(i)
+                    if p.globals[*i].array_len > 1 && !p.globals[*i].is_pointer =>
+                    Some(p.globals[*i].element_size as i32),
+                _ => None,
+            };
+            if let Some(elem) = elem {
+                let off = if matches!(op, BinOp::Sub) { -(k * elem) } else { k * elem };
+                left = Expr::BinOp { op: BinOp::Add, left: Box::new(left), right: Box::new(Expr::IntLit(off)) };
+                continue;
+            }
+        }
         left = Expr::BinOp { op, left: Box::new(left), right: Box::new(right) };
     }
     Ok(left)
