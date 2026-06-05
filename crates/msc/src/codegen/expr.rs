@@ -211,8 +211,12 @@ pub(crate) fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8
             // expression is computed into AX (AL is its low byte). Widen:
             // signed → cbw, unsigned → `sub ah,ah`.
             if let Some(k) = value.fold(locals.inits) {
-                out.push(0xB0);
-                out.push(k as u8);
+                if k as u8 == 0 {
+                    out.extend_from_slice(&[0x2A, 0xC0]); // sub al,al (MSC's zero idiom)
+                } else {
+                    out.push(0xB0);
+                    out.push(k as u8);
+                }
             } else {
                 // Load just the low byte of a scalar variable operand (incl. a
                 // char operand — no inner widening, since we re-widen below; this
