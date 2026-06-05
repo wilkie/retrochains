@@ -20,7 +20,7 @@ pkg/
 # `LATTICE*.md`) instead of the zip itself. The oracle crate lazily unpacks
 # each zip into its own gitignored dir on first use. See
 # specs/plans/SECOND_COMPILER.md.
-/BC2.zip
+/BC*.zip
 /MSC*.zip
 /LATTICE*.zip
 .bc2/
@@ -38,6 +38,12 @@ pkg/
 /*.map
 /*.ASM
 /*.asm
+fixtures/*/*.OBJ
+fixtures/*/*.obj
+fixtures/*/*.EXE
+fixtures/*/*.exe
+fixtures/*/*.MAP
+fixtures/*/*.map
 
 # OS / editor
 .DS_Store
