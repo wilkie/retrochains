@@ -350,6 +350,13 @@ pub(crate) fn emit_cond_cmp_inner(cond: &Cond, locals: &Locals<'_>, out: &mut Ve
         crate::codegen::assign::emit_postmutate_global(*step, *global_idx, out, fixups);
         return;
     }
+    if let Cond::Truthy(Expr::PreMutateParam { param_idx, step }) = cond
+        && !locals.is_long_param(*param_idx)
+    {
+        let size = if locals.is_char_param(*param_idx) { 1 } else { 2 };
+        crate::codegen::assign::emit_postmutate_local(*step, size, param_disp(*param_idx), out);
+        return;
+    }
     // Plain pointer deref as a condition: `while (*s)` / `if (*p)` →
     // `mov bx,[ptr]; cmp byte/word [bx],0` instead of loading the pointee into
     // AX and testing it. Restricted to direct pointer params/locals, for which
