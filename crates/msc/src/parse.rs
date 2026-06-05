@@ -3177,6 +3177,22 @@ pub(crate) fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
                     },
                 });
             }
+            // `++<ident>.field;` / `++<ident>->field;` — pre-inc/dec of a struct
+            // field. Desugar to `lv = lv ± 1` with the field target + its read
+            // expr. Fixtures 404, 405, 709.
+            if matches!(p.peek(), Some(Tok::Dot) | Some(Tok::Arrow)) {
+                let is_arrow = matches!(p.peek(), Some(Tok::Arrow));
+                p.bump();
+                let (target, read) = struct_field_lvalue(p, &name, is_arrow)?;
+                p.eat(&Tok::Semi)?;
+                return Ok(Stmt::Assign {
+                    target,
+                    value: Expr::BinOp {
+                        op: if inc { BinOp::Add } else { BinOp::Sub },
+                        left: Box::new(read), right: Box::new(Expr::IntLit(1)),
+                    },
+                });
+            }
             let target = if let Some(idx) = p.resolve_local(&name) {
                 AssignTarget::Local(idx)
             } else if let Some(idx) = p.global_names.iter().position(|n| *n == name) {
@@ -3707,6 +3723,61 @@ fn continue_chain(p: &mut Parser<'_>, base: Expr, mut hops: Vec<u16>, mut cur: u
 /// Resolve `<expr>.<field>` or `<expr>-><field>` to its byte offset
 /// and field size by looking up `field` in the struct definition at
 /// `sidx`. Caller has already consumed `.` or `->`.
+/// Resolve a struct-member lvalue `<name>.field` / `<name>->field` (the `.`/`->`
+/// already consumed) to its (AssignTarget, read-Expr) pair, for desugaring
+/// `++<member>` into `member = member ± 1`. Bit-fields are rejected (they need
+/// a dedicated BitField target). Fixtures 404, 405, 709.
+fn struct_field_lvalue(p: &mut Parser<'_>, name: &str, is_arrow: bool) -> Result<(AssignTarget, Expr), EmitError> {
+    let unsupported = || EmitError::Unsupported(format!(
+        "prefix `++/--` of unsupported member `{name}`"));
+    if !is_arrow {
+        if let Some(gi) = p.global_names.iter().position(|n| n == name)
+            && let Some(sidx) = p.globals[gi].struct_idx
+            && !p.globals[gi].is_pointer
+        {
+            let (byte_off, size) = parse_field_lookup(p, sidx)?;
+            if p.last_field_bits.is_some() { return Err(unsupported()); }
+            return Ok((AssignTarget::GlobalField { global: gi, byte_off, size },
+                       Expr::GlobalField { global: gi, byte_off, size }));
+        }
+        if let Some(li) = p.resolve_local(name)
+            && let Some(sidx) = p.local_specs[li].struct_idx
+            && p.local_specs[li].pointee_size == 0
+        {
+            let (byte_off, size) = parse_field_lookup(p, sidx)?;
+            if p.last_field_bits.is_some() { return Err(unsupported()); }
+            return Ok((AssignTarget::LocalField { local: li, byte_off, size },
+                       Expr::LocalField { local: li, byte_off, size }));
+        }
+    } else {
+        if let Some(gi) = p.global_names.iter().position(|n| n == name)
+            && let Some(sidx) = p.globals[gi].struct_idx
+            && p.globals[gi].is_pointer
+        {
+            let (byte_off, size) = parse_field_lookup(p, sidx)?;
+            if p.last_field_bits.is_some() { return Err(unsupported()); }
+            return Ok((AssignTarget::DerefGlobalField { ptr_global: gi, byte_off, size },
+                       Expr::DerefGlobalField { ptr_global: gi, byte_off, size }));
+        }
+        if let Some(pi) = p.param_names.iter().position(|n| n == name)
+            && let Some(Some(sidx)) = p.param_struct_idxs.get(pi).cloned()
+        {
+            let (byte_off, size) = parse_field_lookup(p, sidx)?;
+            if p.last_field_bits.is_some() { return Err(unsupported()); }
+            return Ok((AssignTarget::DerefParamField { ptr_param: pi, byte_off, size },
+                       Expr::DerefParamField { ptr_param: pi, byte_off, size }));
+        }
+        if let Some(li) = p.resolve_local(name)
+            && let Some(sidx) = p.local_specs[li].struct_idx
+        {
+            let (byte_off, size) = parse_field_lookup(p, sidx)?;
+            if p.last_field_bits.is_some() { return Err(unsupported()); }
+            return Ok((AssignTarget::DerefLocalField { ptr_local: li, byte_off, size },
+                       Expr::DerefLocalField { ptr_local: li, byte_off, size }));
+        }
+    }
+    Err(unsupported())
+}
 pub(crate) fn parse_field_lookup(p: &mut Parser<'_>, sidx: usize) -> Result<(u16, u8), EmitError> {
     let fname = match p.bump().cloned() {
         Some(Tok::Ident(s)) => s,
