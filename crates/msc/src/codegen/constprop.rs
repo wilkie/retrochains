@@ -756,6 +756,7 @@ pub(crate) fn cp_clone(cp: &ConstProp) -> ConstProp {
         union_globals: cp.union_globals.clone(),
         la_field_size: cp.la_field_size.clone(),
         ga_field_size: cp.ga_field_size.clone(),
+        in_cond: cp.in_cond,
     }
 }
 /// If `e` is a pointer local holding `&x`/`&g` (offset 0), the address
@@ -775,6 +776,12 @@ fn ptr_local_addr(e: &Expr, cp: &ConstProp) -> Option<Expr> {
     }
 }
 pub(crate) fn prop_cond(cond: &mut Cond, cp: &mut ConstProp) {
+    let saved_in_cond = cp.in_cond;
+    cp.in_cond = true;
+    prop_cond_inner(cond, cp);
+    cp.in_cond = saved_in_cond;
+}
+fn prop_cond_inner(cond: &mut Cond, cp: &mut ConstProp) {
     match cond {
         Cond::Truthy(e) => {
             if let Some(addr) = ptr_local_addr(e, cp) {
@@ -839,9 +846,21 @@ pub(crate) fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
             // than re-materializing the immediate (the store leaves AX set, and
             // the return/use peepholes reuse it). Mirrors the ternary-assign rule.
             prop_expr(value, cp);
+            // A chained assignment `a = b = c = 7` carries the constant to every
+            // target, so a later read folds to the immediate (fixture 1817). A
+            // non-constant assigned value still invalidates — MSC reloads/reuses
+            // AX for those (the ternary-assign rule).
+            let lit = if cp.in_cond { None }
+                else if let Expr::IntLit(k) = value.as_ref() { Some(*k) } else { None };
             match target {
-                AssignTarget::Local(l) => { cp.mutated_locals.insert(*l); cp.l_known.remove(l); }
-                AssignTarget::Global(g) => { cp.mutated_globals.insert(*g); cp.g_known.remove(g); }
+                AssignTarget::Local(l) => {
+                    cp.mutated_locals.insert(*l);
+                    match lit { Some(k) => { cp.l_known.insert(*l, k); } None => { cp.l_known.remove(l); } }
+                }
+                AssignTarget::Global(g) => {
+                    cp.mutated_globals.insert(*g);
+                    match lit { Some(k) => { cp.g_known.insert(*g, k); } None => { cp.g_known.remove(g); } }
+                }
                 _ => {}
             }
         }

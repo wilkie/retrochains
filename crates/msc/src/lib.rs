@@ -2828,6 +2828,11 @@ struct ConstProp {
     la_field_size: std::collections::HashMap<(usize, u16), u8>,
     /// Size (bytes) of the last write recorded at each `ga_known` slot.
     ga_field_size: std::collections::HashMap<(usize, u16), u8>,
+    /// True while propagating a loop/if condition. An assignment-as-expression
+    /// in a condition (`if (x = K)`) must NOT record its value as known — MSC
+    /// reloads `x` in the branch body — whereas a statement-level chain
+    /// (`a = b = c = K`) does propagate the constant. Fixture 1817 vs 513.
+    in_cond: bool,
 }
 
 /// The lvalue a pointer local currently aliases (`&x`).

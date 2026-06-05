@@ -1547,6 +1547,33 @@ pub(crate) fn emit_binop(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'
             return;
         }
     }
+    // Same chained-store `add ax,ax`, but the second summand const-folded to
+    // `IntLit(K)` (its value was recorded by the chain const-prop). The chain
+    // `mov ax,K; mov [b],ax; mov [a],ax` leaves AX = a = b = K, so `a + K`
+    // reuses the live AX. Fixture 2951 (`a = b = 7; return a + b`).
+    if matches!(op, BinOp::Add)
+        && let Some(la) = simple_word_bp(left, locals)
+        && let Expr::IntLit(k) = right
+    {
+        let k16 = (*k as u32 & 0xFFFF) as u16;
+        let storela = { let mut v = vec![0x89, bp_modrm(0x46, la)]; push_bp_disp(&mut v, la); v };
+        if out.len() >= storela.len() && out[out.len() - storela.len()..] == *storela {
+            // Strip the trailing `mov [bp+d],ax` chain stores, then require the
+            // immediate that fed them (`mov ax,K`) — and ≥2 vars in the chain.
+            let mut p = out.len();
+            let mut stores = 0;
+            loop {
+                if p >= 4 && out[p - 4] == 0x89 && out[p - 3] == 0x86 { p -= 4; stores += 1; }
+                else if p >= 3 && out[p - 3] == 0x89 && out[p - 2] == 0x46 { p -= 3; stores += 1; }
+                else { break; }
+            }
+            let movax = { let mut v = vec![0xB8]; v.extend_from_slice(&k16.to_le_bytes()); v };
+            if stores >= 2 && p >= movax.len() && out[p - movax.len()..p] == *movax {
+                out.extend_from_slice(&[0x03, 0xC0]); // add ax, ax
+                return;
+            }
+        }
+    }
     // `x + x` (same simple variable) → load x, `shl ax,1` (fixture 1991
     // `return x+x` → `mov al,[x]; sub ah,ah; shl ax,1`), not load + add-mem.
     if matches!(op, BinOp::Add) && same_var(left, right) && !long_operand(left, locals) {
