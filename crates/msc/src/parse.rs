@@ -3933,6 +3933,7 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
             // `(type) <expr>` cast. A `(char)` / `(unsigned char)` VALUE cast
             // (no `*`) truncates to a byte (handled below); other scalar/pointer
             // casts are identity (Phase 1 doesn't model widening semantics).
+            let after_lparen = p.pos;
             let cast_unsigned = matches!(p.peek(), Some(Tok::Kw("unsigned")));
             skip_decl_modifiers(p);
             // `(struct Name *) <expr>` / `(union Name *) <expr>` — pointer cast,
@@ -3943,6 +3944,13 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                 skip_decl_modifiers(p);
                 while matches!(p.peek(), Some(Tok::Star)) { p.bump(); }
                 p.eat(&Tok::RParen)?;
+                return parse_atom(p);
+            }
+            // Modifier-only cast: `(unsigned)`, `(signed)`, `(short)` — an
+            // int-width identity cast (the keyword was a modifier, with the
+            // base `int` implied). Fixtures 2751, 3678.
+            if p.pos > after_lparen && matches!(p.peek(), Some(Tok::RParen)) {
+                p.bump();
                 return parse_atom(p);
             }
             if matches!(p.peek(), Some(Tok::Kw("int")) | Some(Tok::Kw("char")) | Some(Tok::Kw("long"))
