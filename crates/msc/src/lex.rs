@@ -42,11 +42,66 @@ pub(crate) fn apply_typedef_substitutions(toks: &mut Vec<Tok>) {
                 }
                 semi += 1;
             }
-            // Struct-body (`{`) and function-pointer (`(`) typedefs are left
-            // for the parser. An array typedef (`[`) is handled lossily: the
-            // dimension is dropped and only the element type is recorded, so
-            // `IARR a = {...}` becomes `int a = {...}` and the initializer
-            // sizes the array (matches the prior behavior; fixture 2099).
+            // `typedef struct|union [Tag] { ... } Alias;` — rewrite to a plain
+            // `struct <name> { ... };` so the existing struct-definition path
+            // registers it, and record `Alias -> struct <name>` so later uses
+            // (`Alias v;`) splice to `struct <name> v;`. An anonymous struct
+            // borrows the alias itself as the tag. Fixtures 489, 2334, 2545.
+            let is_struct_kw =
+                matches!(&toks[start], Tok::Kw("struct") | Tok::Kw("union"));
+            let brace_open = toks[start..semi]
+                .iter()
+                .position(|t| matches!(t, Tok::LBrace))
+                .map(|p| start + p);
+            if is_struct_kw {
+                if let Some(bopen) = brace_open {
+                    // Matching `}` at depth 0.
+                    let mut d = 0i32;
+                    let mut bclose = bopen;
+                    while bclose < semi {
+                        match &toks[bclose] {
+                            Tok::LBrace => d += 1,
+                            Tok::RBrace => {
+                                d -= 1;
+                                if d == 0 {
+                                    break;
+                                }
+                            }
+                            _ => {}
+                        }
+                        bclose += 1;
+                    }
+                    // Alias name = last Ident between `}` and `;`.
+                    let alias = toks[bclose + 1..semi].iter().rev().find_map(|t| {
+                        if let Tok::Ident(s) = t { Some(s.clone()) } else { None }
+                    });
+                    // Tag = Ident between the struct/union kw and `{`, if any.
+                    let tag = toks[start + 1..bopen].iter().find_map(|t| {
+                        if let Tok::Ident(s) = t { Some(s.clone()) } else { None }
+                    });
+                    if let Some(alias) = alias {
+                        let struct_kw = toks[start].clone();
+                        let tag_name = tag.clone().unwrap_or_else(|| alias.clone());
+                        aliases.insert(
+                            alias.clone(),
+                            vec![struct_kw.clone(), Tok::Ident(tag_name.clone())],
+                        );
+                        // Build `struct <tag> { body } ;`.
+                        let mut rewrite = vec![struct_kw, Tok::Ident(tag_name)];
+                        rewrite.extend(toks[bopen..=bclose].iter().cloned());
+                        rewrite.push(Tok::Semi);
+                        let n = rewrite.len();
+                        toks.splice(i..=semi, rewrite);
+                        i += n;
+                        continue;
+                    }
+                }
+            }
+            // Function-pointer (`(`) typedefs are left for the parser. An array
+            // typedef (`[`) is handled lossily: the dimension is dropped and
+            // only the element type is recorded, so `IARR a = {...}` becomes
+            // `int a = {...}` and the initializer sizes the array (matches the
+            // prior behavior; fixture 2099).
             let complex = toks[start..semi]
                 .iter()
                 .any(|t| matches!(t, Tok::LBrace | Tok::LParen));
