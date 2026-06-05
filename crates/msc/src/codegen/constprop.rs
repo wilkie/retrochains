@@ -175,7 +175,7 @@ fn fold_aliased_deref(e: &mut Expr, cp: &mut ConstProp) {
     let (base, base_off, from_alias) = if let Some(&b) = cp.ptr_alias.get(&p) {
         (b, 0i32, true)
     } else if let Some(&(b, off)) = cp.ptr_addr.get(&p)
-        && off != 0
+        && (off != 0 || deref_off != 0)
         && !is_far
     {
         (b, off, false)
@@ -291,6 +291,22 @@ pub(crate) fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
                     Expr::AddrOfGlobal(g) => { cp.ptr_alias.insert(*p, AliasTarget::Global(*g)); }
                     _ => unreachable!(),
                 }
+                cp.l_known.remove(p);
+                cp.mutated_locals.insert(*p);
+                return;
+            }
+            // Pointer aliasing with a base offset: `int *p = &a[K]` / `p = a + K`
+            // (already recorded in ptr_addr above). Like the bare `&x` case this
+            // is a TRACKED alias, not a genuine escape — keep the base array's
+            // known element values (la_known/ga_known) intact so `*p` folds to
+            // the element value (fixture 2376). The init store still emits; skip
+            // prop_expr(value), which would invalidate the array via AddrOfLocal.
+            if let AssignTarget::Local(p) = target
+                && !cp.local_specs.get(*p).map(|s| s.is_far_ptr).unwrap_or(false)
+                && let Expr::BinOp { op: BinOp::Add, left, right } = value
+                && matches!(left.as_ref(), Expr::AddrOfLocal(_) | Expr::AddrOfGlobal(_))
+                && matches!(right.as_ref(), Expr::IntLit(_))
+            {
                 cp.l_known.remove(p);
                 cp.mutated_locals.insert(*p);
                 return;
