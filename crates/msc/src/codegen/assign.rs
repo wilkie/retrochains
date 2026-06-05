@@ -2109,10 +2109,13 @@ pub(crate) fn emit_assign_indexed_global(global_idx: usize, byte_off: u16, value
         };
         match op {
             BinOp::Shl | BinOp::Shr => {
-                out.extend_from_slice(&[0xB1, k as u8]); // mov cl, k
-                out.push(0xD3); // shift word [mem], cl
-                out.push(if matches!(op, BinOp::Shl) { 0x26 } else { 0x3E }); // shl /4 | sar /7
-                emit_addr(out, fixups);
+                let modrm = if matches!(op, BinOp::Shl) { 0x26 } else { 0x3E }; // shl /4 | sar /7
+                if k == 1 {
+                    out.push(0xD1); out.push(modrm); emit_addr(out, fixups); // shift word [mem],1
+                } else {
+                    out.extend_from_slice(&[0xB1, k as u8]); // mov cl, k
+                    out.push(0xD3); out.push(modrm); emit_addr(out, fixups); // shift word [mem], cl
+                }
             }
             BinOp::Mul => {
                 out.push(0xB8); out.extend_from_slice(&((k as u32 & 0xFFFF) as u16).to_le_bytes()); // mov ax, k
