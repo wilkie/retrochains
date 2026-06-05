@@ -1056,6 +1056,33 @@ pub(crate) fn emit_return(
                 out.extend_from_slice(frame.epilogue_bytes());
                 return;
             }
+            if locals.size(*i) == 1 && locals.is_unsigned_local(*i) {
+                // Unsigned char local: a preceding char compound div/mod/mul left
+                // the zero-extended result in AX already (`mov [c],ah; mov al,ah;
+                // sub ah,ah` for mod, `mov [c],al; sub ah,ah` for div/mul). Reuse
+                // it; else reload `mov al,[c]; sub ah,ah`. Fixtures 677/678/679.
+                let ends_with = |pat: &[u8]| out.len() >= pat.len() && out[out.len() - pat.len()..] == *pat;
+                let mod_tail = {
+                    let mut v = vec![0x88, bp_modrm(0x66, disp)];
+                    push_bp_disp(&mut v, disp);
+                    v.extend_from_slice(&[0x8A, 0xC4, 0x2A, 0xE4]);
+                    v
+                };
+                let div_tail = {
+                    let mut v = vec![0x88, bp_modrm(0x46, disp)];
+                    push_bp_disp(&mut v, disp);
+                    v.extend_from_slice(&[0x2A, 0xE4]);
+                    v
+                };
+                if ends_with(&mod_tail) || ends_with(&div_tail) {
+                    out.extend_from_slice(frame.epilogue_bytes());
+                    return;
+                }
+                out.push(0x8A); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp); // mov al,[c]
+                out.extend_from_slice(&[0x2A, 0xE4]); // sub ah,ah
+                out.extend_from_slice(frame.epilogue_bytes());
+                return;
+            }
             // Non-char or unsigned-char: check if AX already holds the
             // value (`89 46 d` was last emitted). If so, skip reload.
             let prev_store = {
