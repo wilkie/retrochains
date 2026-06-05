@@ -337,6 +337,19 @@ pub(crate) fn emit_cond_cmp_inner(cond: &Cond, locals: &Locals<'_>, out: &mut Ve
         else { out.extend_from_slice(&[0x0B, 0xC0]); }    // or ax,ax
         return;
     }
+    // `while (--n)` / `if (++n)` — a PRE-mutation of a local/global as the sole
+    // condition tests the MUTATED value, and the in-place inc/dec/add/sub
+    // already sets ZF, so emit just that (no load+or) and let the caller's jcc
+    // test it. (Post-mutation `n--` tests the OLD value and keeps the generic
+    // load-then-mutate path.) Fixtures 1844, 2045, 2473, 2408.
+    if let Cond::Truthy(Expr::PreMutateLocal { local_idx, step }) = cond {
+        crate::codegen::assign::emit_postmutate_local(*step, locals.size(*local_idx), locals.disp(*local_idx), out);
+        return;
+    }
+    if let Cond::Truthy(Expr::PreMutateGlobal { global_idx, step }) = cond {
+        crate::codegen::assign::emit_postmutate_global(*step, *global_idx, out, fixups);
+        return;
+    }
     // Plain pointer deref as a condition: `while (*s)` / `if (*p)` →
     // `mov bx,[ptr]; cmp byte/word [bx],0` instead of loading the pointee into
     // AX and testing it. Restricted to direct pointer params/locals, for which
