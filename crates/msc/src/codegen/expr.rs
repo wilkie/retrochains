@@ -2074,6 +2074,22 @@ fn emit_binop_inner(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, o
         out.extend_from_slice(&[0x2B, 0xC0]);                      // sub ax,ax
         return;
     }
+    // `x * 256` over a WORD memory operand: a left-shift by 8 just moves the
+    // low byte into the high byte — `mov ah,[x]; sub al,al`. Fixture 3367.
+    if matches!(op, BinOp::Mul)
+        && matches!(right, Expr::IntLit(256))
+    {
+        let word_mem = match left {
+            Expr::Local(i) => locals.size(*i) == 2 && !locals.is_long_local(*i),
+            Expr::Param(i) => !locals.is_char_param(*i) && !locals.is_long_param(*i),
+            _ => false,
+        };
+        if word_mem && let Some(disp) = bp_disp(left, locals) {
+            out.push(0x8A); out.push(bp_modrm(0x66, disp)); push_bp_disp(out, disp); // mov ah,[mem]
+            out.extend_from_slice(&[0x2A, 0xC0]); // sub al,al
+            return;
+        }
+    }
     // `x * K` for a high-popcount constant over a WORD memory operand: a long
     // shift/add chain isn't worth it, so MSC loads the constant into AX and
     // multiplies the memory operand directly (`mov ax,K; imul word [x]`).
