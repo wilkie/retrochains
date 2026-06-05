@@ -809,14 +809,23 @@ pub(crate) fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_
             out.push(0xC6); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp);
             out.push((k as u32 & 0xFF) as u8);
         } else if locals.is_long_local(local_idx) {
-            // Long local: two word stores — low half at disp, high half at disp+2.
-            let low = (k as u32 & 0xFFFF) as u16;
-            let high = (((k as i32) >> 16) as u32 & 0xFFFF) as u16;
-            out.push(0xC7); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp);
-            out.extend_from_slice(&low.to_le_bytes());
             let hi_disp = disp + 2;
-            out.push(0xC7); out.push(bp_modrm(0x46, hi_disp)); push_bp_disp(out, hi_disp);
-            out.extend_from_slice(&high.to_le_bytes());
+            if k == 0 {
+                // `long x = 0`: zero AX once and store both halves from it
+                // (`sub ax,ax; mov [lo],ax; mov [hi],ax`) — shorter than two
+                // immediate stores. Fixture 568.
+                out.extend_from_slice(&[0x2B, 0xC0]); // sub ax,ax
+                out.push(0x89); out.push(bp_modrm(0x46, hi_disp)); push_bp_disp(out, hi_disp);
+                out.push(0x89); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp);
+            } else {
+                // Long local: two word stores — low half at disp, high half at disp+2.
+                let low = (k as u32 & 0xFFFF) as u16;
+                let high = (((k as i32) >> 16) as u32 & 0xFFFF) as u16;
+                out.push(0xC7); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp);
+                out.extend_from_slice(&low.to_le_bytes());
+                out.push(0xC7); out.push(bp_modrm(0x46, hi_disp)); push_bp_disp(out, hi_disp);
+                out.extend_from_slice(&high.to_le_bytes());
+            }
         } else {
             let imm = (k as u32 & 0xFFFF) as u16;
             out.push(0xC7); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp);
