@@ -2780,6 +2780,27 @@ pub(crate) fn emit_assign_deref_postmutate_param(param_idx: usize, step: i32, va
     out.push(0x8B); out.push(bp_modrm(0x5E, pdisp)); push_bp_disp(out, pdisp); // mov bx,[bp+p]
     emit_postmutate_local(step, 2, pdisp, out); // advance the 2-byte pointer slot
     let psz = step.unsigned_abs() as usize;
+    // `*d++ = *s++` — the source pointer goes in SI so the dst pointer (BX,
+    // loaded above) survives the store: `mov si,[s]; <advance s>; mov al/ax,
+    // [si]; mov [bx],al/ax`. Fixtures 1346, 3528.
+    if let Expr::PostIncDeref { ptr: src, step: sstep, is_byte: sbyte } = value {
+        match src.as_ref() {
+            Expr::Param(si) => {
+                let sd = param_disp(*si);
+                out.push(0x8B); out.push(bp_modrm(0x76, sd)); push_bp_disp(out, sd); // mov si,[bp+s]
+                emit_postmutate_local(*sstep, 2, sd, out);
+            }
+            Expr::Local(li) => {
+                let sd = locals.disp(*li);
+                out.push(0x8B); out.push(bp_modrm(0x76, sd)); push_bp_disp(out, sd);
+                emit_postmutate_local(*sstep, 2, sd, out);
+            }
+            other => panic!("postinc-deref source not yet supported: {other:?}"),
+        }
+        if *sbyte { out.extend_from_slice(&[0x8A, 0x04]); } else { out.extend_from_slice(&[0x8B, 0x04]); } // mov al/ax,[si]
+        if psz == 1 { out.extend_from_slice(&[0x88, 0x07]); } else { out.extend_from_slice(&[0x89, 0x07]); } // mov [bx],al/ax
+        return;
+    }
     if let Some(k) = value.fold(locals.inits) {
         if psz == 1 {
             out.extend_from_slice(&[0xC6, 0x07, (k as u32 & 0xFF) as u8]);

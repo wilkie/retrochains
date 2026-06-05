@@ -16,6 +16,9 @@ pub(crate) fn body_needs_si(stmts: &[Stmt], local_inits: &[Option<i32>]) -> bool
                     // deref of another param — the source deref uses SI.
                     || matches!(target, AssignTarget::DerefParam(d)
                         if deref_param_src_is_param(value, *d))
+                    // `*d++ = *s++` reads the source through SI so dst (BX) survives.
+                    || matches!(target, AssignTarget::DerefPostMutateParam { .. }
+                        if matches!(value, Expr::PostIncDeref { .. }))
                     || expr_si(value, inits)
             }
             Stmt::Return(e) => expr_si(e, inits),
