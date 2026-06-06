@@ -1946,6 +1946,65 @@ pub(crate) fn bf_load_word_cx(base: BitBase, byte_off: u16, locals: &Locals<'_>,
         BitBase::DerefParam(_) => false,
     }
 }
+/// Flatten a left-assoc `+` chain whose leaves are all `Expr::BitField` into a
+/// source-ordered list of `(base, byte_off, bit_off, bit_width)`. Returns false
+/// (leaving `out` partially filled) the moment a non-BitField, non-Add leaf is hit.
+fn collect_bitfield_add_chain(e: &Expr, out: &mut Vec<(BitBase, u16, u8, u8)>) -> bool {
+    match e {
+        Expr::BitField { base, byte_off, bit_off, bit_width } => {
+            out.push((*base, *byte_off, *bit_off, *bit_width));
+            true
+        }
+        Expr::BinOp { op: BinOp::Add, left, right } => {
+            collect_bitfield_add_chain(left, out) && collect_bitfield_add_chain(right, out)
+        }
+        _ => false,
+    }
+}
+/// True when every collected field shares the same Local/Global bit-field base
+/// (DerefParam bases are rejected — the multi-field readers only target bp/moffs).
+fn same_local_global_base(fields: &[(BitBase, u16, u8, u8)]) -> bool {
+    let key = |b: &BitBase| match b {
+        BitBase::Local(i) => Some((0u8, *i)),
+        BitBase::Global(i) => Some((1u8, *i)),
+        BitBase::DerefParam(_) => None,
+    };
+    match key(&fields[0].0) {
+        None => false,
+        first => fields.iter().all(|f| key(&f.0) == first),
+    }
+}
+/// Read a WORD bit-field (`base+byte_off`, `bit_off`, `bit_width`) into DX:
+/// `mov dx,[unit]` then shift down by bit_off and `and dx,mask`. Used as the
+/// middle-operand register in a multi-field sum (CL stays free for the shift).
+/// Returns false for bases we don't handle (DerefParam).
+pub(crate) fn bf_read_into_dx(base: BitBase, byte_off: u16, bit_off: u8, bit_width: u8, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) -> bool {
+    match base {
+        BitBase::Global(g) => {
+            out.push(0x8B); out.push(0x16); // mov dx,[moffs16]
+            let bo = out.len() - 1;
+            out.extend_from_slice(&byte_off.to_le_bytes());
+            fixups.push(Fixup { body_offset: bo, kind: FixupKind::GlobalAddr { global_idx: g } });
+        }
+        BitBase::Local(l) => {
+            let d = locals.disp(l) + byte_off as i16;
+            out.push(0x8B); out.push(bp_modrm(0x56, d)); push_bp_disp(out, d); // mov dx,[bp+d]
+        }
+        BitBase::DerefParam(_) => return false,
+    }
+    if bit_off == 1 {
+        out.extend_from_slice(&[0xD1, 0xEA]); // shr dx,1
+    } else if bit_off > 1 {
+        out.push(0xB1); out.push(bit_off); // mov cl,bit_off
+        out.extend_from_slice(&[0xD3, 0xEA]); // shr dx,cl
+    }
+    if bit_width < 16 {
+        let mask = (1u32 << bit_width) - 1;
+        out.push(0x81); out.push(0xE2); // and dx,imm16
+        out.extend_from_slice(&(mask as u16).to_le_bytes());
+    }
+    true
+}
 /// Load the byte at `base + off` into AL.
 pub(crate) fn bf_load_byte_al(base: BitBase, off: u16, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
     match base {
@@ -2103,6 +2162,48 @@ fn emit_binop_inner(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, o
         out.extend_from_slice(&[0xB8, 0x01, 0x00, 0xEB, 0x02]);  // mov ax,1; jmp +2
         out.extend_from_slice(&[0x2B, 0xC0]);                      // sub ax,ax
         return;
+    }
+    // Sum of bit-fields of one struct unit (a left-assoc `f0 + f1 + ... + f_{n-1}`
+    // chain, all fields of the same Local/Global base): MSC evaluates the operands
+    // in REVERSE source order — the last source operand into AX (byte fields widen,
+    // high fields shift), the middle operands into DX, and the FIRST source operand
+    // (the lowest field, bit_off==0, no shift → CL stays free) into CX — folding
+    // each with `add ax,<reg>`. This beats the generic save-to-BX/reload and matches
+    // MSC's register choices. Fixtures 2107, 2471 (2 fields); 1691, 1879, 2104 (3,
+    // trailing byte field). Add-only (the reverse reorder needs commutativity).
+    // Placed early — before the nested-binop-left dispatch claims `(f0+f1)+f2`.
+    if op == BinOp::Add {
+        let mut fields: Vec<(BitBase, u16, u8, u8)> = Vec::new();
+        if collect_bitfield_add_chain(left, &mut fields)
+            && collect_bitfield_add_chain(right, &mut fields)
+            && fields.len() >= 2
+            && same_local_global_base(&fields)
+            // first source operand (→CX) must be a low field (no shift)
+            && fields[0].2 == 0
+            // middle operands (→DX) must be word fields (the DX reader can't widen
+            // a byte field); a byte field may only sit last-source (→AX).
+            && fields[1..fields.len() - 1].iter().all(|f| !(f.3 == 8 && f.2 % 8 == 0))
+        {
+            let n = fields.len();
+            // Last source operand → AX (handles byte widen / high-field shift+reuse).
+            let last = fields[n - 1];
+            emit_expr_to_ax(&Expr::BitField { base: last.0, byte_off: last.1, bit_off: last.2, bit_width: last.3 }, locals, out, fixups);
+            // Middle operands → DX, add into AX.
+            for f in fields[1..n - 1].iter().rev() {
+                bf_read_into_dx(f.0, f.1, f.2, f.3, locals, out, fixups);
+                out.extend_from_slice(&[0x03, 0xC2]); // add ax,dx
+            }
+            // First source operand (lowest field) → CX, add into AX.
+            let f0 = fields[0];
+            bf_load_word_cx(f0.0, f0.1, locals, out, fixups);
+            if f0.3 < 16 {
+                let mask = (1u32 << f0.3) - 1;
+                out.push(0x81); out.push(0xE1); // and cx,imm16
+                out.extend_from_slice(&(mask as u16).to_le_bytes());
+            }
+            out.extend_from_slice(&[0x03, 0xC1]); // add ax,cx
+            return;
+        }
     }
     // `x * 256` over a WORD memory operand: a left-shift by 8 just moves the
     // low byte into the high byte — `mov ah,[x]; sub al,al`. Fixture 3367.
@@ -2730,31 +2831,6 @@ fn emit_binop_inner(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, o
     {
         emit_expr_to_ax(left, locals, out, fixups);
         emit_imm_op(op, *k, out);
-        return;
-    }
-    // Two bit-field operands of a commutative op where the LEFT is a low field
-    // (bit_off==0, mask only — no shift): MSC reads the RIGHT into AX (reusing a
-    // live unit-word from a preceding store, or loading+shifting it) and the LEFT
-    // into CX (`mov cx,[unit]; and cx,mask`), then folds with `op ax,cx` — instead
-    // of saving AX to BX and reloading. Sub is excluded (non-commutative: the
-    // operand left in AX would be the RHS). Fixtures 2107, 2471.
-    if matches!(op, BinOp::Add | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor)
-        && let Expr::BitField { base: lb, byte_off: lbo, bit_off: 0, bit_width: lw } = left
-        && matches!(right, Expr::BitField { .. })
-        && matches!(lb, BitBase::Local(_) | BitBase::Global(_))
-    {
-        emit_expr_to_ax(right, locals, out, fixups); // RHS → AX (reuse/shift+mask)
-        bf_load_word_cx(*lb, *lbo, locals, out, fixups); // mov cx,[unit]
-        if *lw < 16 {
-            let mask = (1u32 << *lw) - 1;
-            out.push(0x81); out.push(0xE1); // and cx, imm16
-            out.extend_from_slice(&(mask as u16).to_le_bytes());
-        }
-        let opc = match op {
-            BinOp::Add => 0x03, BinOp::BitAnd => 0x23,
-            BinOp::BitOr => 0x0B, BinOp::BitXor => 0x33, _ => unreachable!(),
-        };
-        out.push(opc); out.push(0xC1); // op ax, cx
         return;
     }
     // Generic fallback: evaluate RHS first into AX, save to BX, then
