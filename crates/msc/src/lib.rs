@@ -236,6 +236,10 @@ pub struct Function {
     /// Number of `make().field` struct-return temps the body uses. Each reserves
     /// a 4-byte frame slot (deepest, source order) for the spilled DX:AX result.
     pub struct_field_temp_count: u16,
+    /// True when declared with the `pascal` calling convention: args are pushed
+    /// left-to-right, params sit in reversed stack slots, and the callee cleans
+    /// the arguments via `ret N`. Fixtures 1653/2062/2063/2065/2246.
+    pub is_pascal: bool,
 }
 
 /// A function-local variable's storage descriptor. `size` is bytes
@@ -450,6 +454,13 @@ pub struct Locals<'a> {
     /// occupies DX:AX, so a `long x = f()` init stores both words with no
     /// `cwd`. Fixtures 315/321.
     pub long_returners: &'a std::collections::HashSet<String>,
+    /// Set of function names declared with the `pascal` calling convention.
+    /// Callers push their args left-to-right and skip the `add sp` cleanup
+    /// (the callee pops them via `ret N`). Fixtures 1653/2063.
+    pub pascal_fns: &'a std::collections::HashSet<String>,
+    /// When the CURRENT function is `pascal`, the byte count its epilogue must
+    /// pop via `ret N` (total argument bytes); 0 for a cdecl function.
+    pub pascal_cleanup: u16,
     /// Map of function symbol names to their param_is_long arrays.
     /// Used by emit_call_inner to push long args as 4-byte pairs.
     pub long_param_funcs: &'a std::collections::HashMap<String, Vec<bool>>,
@@ -1711,17 +1722,23 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
         .map(|g| if g.is_float { g.element_size } else { 0 }).collect();
     let mut char_returners: std::collections::HashSet<String> = unit.functions.iter()
         .filter(|f| f.return_char)
-        .map(|f| symbol_name(&f.name))
+        .map(fn_symbol)
         .collect();
     // Prototype-only char-returning externs widen their call result too.
     char_returners.extend(unit.proto_char_returns.iter().cloned());
     let long_returners: std::collections::HashSet<String> = unit.functions.iter()
         .filter(|f| f.return_long)
-        .map(|f| symbol_name(&f.name))
+        .map(fn_symbol)
+        .collect();
+    // Keyed by BARE C name (the call's identifier) so emit_call can both detect
+    // a pascal callee and derive its UPPERCASE symbol.
+    let pascal_fns: std::collections::HashSet<String> = unit.functions.iter()
+        .filter(|f| f.is_pascal)
+        .map(|f| f.name.clone())
         .collect();
     let mut long_param_funcs: std::collections::HashMap<String, Vec<bool>> = unit.functions.iter()
         .filter(|f| f.param_is_long.iter().any(|&b| b))
-        .map(|f| (symbol_name(&f.name), f.param_is_long.clone()))
+        .map(|f| (fn_symbol(f), f.param_is_long.clone()))
         .collect();
     // Prototype-only externs (no body in this TU) also need their long-param
     // flags so calls push long args as two words. Definitions take precedence.
@@ -1732,21 +1749,21 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
     // so a call pushes a struct argument as its words.
     let mut struct_param_funcs: std::collections::HashMap<String, Vec<usize>> = unit.functions.iter()
         .filter(|f| f.param_struct_bytes.iter().any(|&b| b > 0))
-        .map(|f| (symbol_name(&f.name), f.param_struct_bytes.clone()))
+        .map(|f| (fn_symbol(f), f.param_struct_bytes.clone()))
         .collect();
     for (name, bytes) in &unit.proto_struct_params {
         struct_param_funcs.entry(name.clone()).or_insert_with(|| bytes.clone());
     }
     let mut struct_return_funcs: std::collections::HashMap<String, usize> = unit.functions.iter()
         .filter(|f| f.return_struct_bytes > 0)
-        .map(|f| (symbol_name(&f.name), f.return_struct_bytes))
+        .map(|f| (fn_symbol(f), f.return_struct_bytes))
         .collect();
     for (name, bytes) in &unit.proto_struct_returns {
         struct_return_funcs.entry(name.clone()).or_insert(*bytes);
     }
     let float_returners: std::collections::HashMap<String, usize> = unit.functions.iter()
         .filter(|f| f.return_float_width != 0)
-        .map(|f| (symbol_name(&f.name), f.return_float_width))
+        .map(|f| (fn_symbol(f), f.return_float_width))
         .collect();
     // Assign each function returning a struct > 4 bytes by value its own `_BSS`
     // scratch temp at a sequential offset; total = `_BSS` segment length.
@@ -1764,7 +1781,7 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
         .functions
         .iter()
         .enumerate()
-        .map(|(i, f)| emit_function(f, struct_temp_offsets[i], &long_globals, &char_globals, &unsigned_globals, &float_globals, &global_elem_sizes, &char_returners, &long_returners, &float_returners, &long_param_funcs, &struct_param_funcs, &struct_return_funcs, &struct_is_union, &union_globals))
+        .map(|(i, f)| emit_function(f, struct_temp_offsets[i], &long_globals, &char_globals, &unsigned_globals, &float_globals, &global_elem_sizes, &char_returners, &long_returners, &pascal_fns, &float_returners, &long_param_funcs, &struct_param_funcs, &struct_return_funcs, &struct_is_union, &union_globals))
         .collect();
 
     // Per-function global offset within the _TEXT segment.
@@ -1775,7 +1792,7 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
     let mut defined_names: std::collections::HashSet<String> = std::collections::HashSet::new();
     for (i, fe) in function_emits.iter().enumerate() {
         function_offsets.push(cursor);
-        let sym = symbol_name(&unit.functions[i].name);
+        let sym = fn_symbol(&unit.functions[i]);
         offset_by_name.insert(sym.clone(), cursor);
         defined_names.insert(sym);
         cursor += fe.bytes.len();
@@ -2138,7 +2155,7 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
                 entries.push((symbol_name(&unit.globals[gi].name), 0x00));
             }
             for f in &unit.functions {
-                entries.push((symbol_name(&f.name), 0x00));
+                entries.push((fn_symbol(f), 0x00));
             }
             // The float runtime externs (`__ftol`/`__fac`) trail the function
             // names when a function uses >=3 float CONST temps, in their
@@ -2175,7 +2192,7 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
                 entries.push((name.clone(), 0x00));
             }
             for f in &unit.functions {
-                entries.push((symbol_name(&f.name), 0x00));
+                entries.push((fn_symbol(f), 0x00));
             }
             if !chkstk_early {
                 entries.push(("__chkstk".to_owned(), 0x00));
@@ -2228,7 +2245,7 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
             pre.push((h.clone(), 0x00));
         }
         for &fi in &funcs_before {
-            pre.push((symbol_name(&unit.functions[fi].name), 0x00));
+            pre.push((fn_symbol(&unit.functions[fi]), 0x00));
         }
         emit_group(&mut b, &pre, &mut extdef_idx_of, &mut next_idx);
         // COMDEF: tentative globals
@@ -2239,7 +2256,7 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
             post.push((name.clone(), 0x00));
         }
         for &fi in &funcs_after {
-            post.push((symbol_name(&unit.functions[fi].name), 0x00));
+            post.push((fn_symbol(&unit.functions[fi]), 0x00));
         }
         emit_group(&mut b, &post, &mut extdef_idx_of, &mut next_idx);
     }
@@ -2274,7 +2291,7 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
                 (1u8, 2u8, sym, off)
             }
             TopDecl::Function(i) => {
-                let sym = symbol_name(&unit.functions[*i].name);
+                let sym = fn_symbol(&unit.functions[*i]);
                 let off = u16::try_from(function_offsets[*i]).expect("offset fits");
                 (0u8, 1u8, sym, off)
             }

@@ -568,7 +568,7 @@ pub(crate) fn emit_return(
         out.extend_from_slice(&[0x8B, 0x5E, d]);       // mov bx,[bp+d]
         out.extend_from_slice(&[0x8B, 0x07]);          // mov ax,[bx]
         out.extend_from_slice(&[0x8B, 0x57, 0x02]);    // mov dx,[bx+2]
-        out.extend_from_slice(frame.epilogue_bytes());
+        crate::codegen::func::push_epilogue(frame, locals.pascal_cleanup, out);
         return;
     }
     // `return <long-param> >> 16` (long fn): the high word becomes the low word
@@ -583,7 +583,7 @@ pub(crate) fn emit_return(
         let hi = (param_disp(*i) + 2) as u8;
         out.extend_from_slice(&[0x8B, 0x46, hi]);   // mov ax,[bp+v+2]
         out.extend_from_slice(&[0x2B, 0xD2]);        // sub dx,dx
-        out.extend_from_slice(frame.epilogue_bytes());
+        crate::codegen::func::push_epilogue(frame, locals.pascal_cleanup, out);
         return;
     }
     // `return <long-param> & 0xFF` (long fn): low byte, zero-extended, high word 0
@@ -598,7 +598,7 @@ pub(crate) fn emit_return(
         out.extend_from_slice(&[0x8A, 0x46, lo]);   // mov al,[bp+v]
         out.extend_from_slice(&[0x2A, 0xE4]);        // sub ah,ah
         out.extend_from_slice(&[0x2B, 0xD2]);        // sub dx,dx
-        out.extend_from_slice(frame.epilogue_bytes());
+        crate::codegen::func::push_epilogue(frame, locals.pascal_cleanup, out);
         return;
     }
     // Small struct returned by value: load the struct local's bytes into the
@@ -625,7 +625,7 @@ pub(crate) fn emit_return(
             let bo = out.len();
             out.push(0xB8); out.extend_from_slice(&[0x00, 0x00]); // mov ax, OFFSET $T
             fixups.push(Fixup { body_offset: bo, kind: FixupKind::StructTemp { bss_offset } });
-            out.extend_from_slice(frame.epilogue_bytes());
+            crate::codegen::func::push_epilogue(frame, locals.pascal_cleanup, out);
             return;
         }
         if n == 1 {
@@ -646,7 +646,7 @@ pub(crate) fn emit_return(
                 out.push(0x8B); out.push(bp_modrm(0x56, hi)); push_bp_disp(out, hi); // mov dx,[t+2]
             }
         }
-        out.extend_from_slice(frame.epilogue_bytes());
+        crate::codegen::func::push_epilogue(frame, locals.pascal_cleanup, out);
         return;
     }
     // Returning a struct GLOBAL by value (`return g`): same as the local case
@@ -669,7 +669,7 @@ pub(crate) fn emit_return(
             let bo = out.len();
             out.push(0xB8); out.extend_from_slice(&[0x00, 0x00]); // mov ax, OFFSET $T
             fixups.push(Fixup { body_offset: bo, kind: FixupKind::StructTemp { bss_offset } });
-            out.extend_from_slice(frame.epilogue_bytes());
+            crate::codegen::func::push_epilogue(frame, locals.pascal_cleanup, out);
             return;
         }
         if n == 1 {
@@ -688,7 +688,7 @@ pub(crate) fn emit_return(
                 fixups.push(Fixup { body_offset: bo - 1, kind: FixupKind::GlobalAddr { global_idx: *g } });
             }
         }
-        out.extend_from_slice(frame.epilogue_bytes());
+        crate::codegen::func::push_epilogue(frame, locals.pascal_cleanup, out);
         return;
     }
     // Float/double return via the `__fac` accumulator. The parser folds the
@@ -756,7 +756,7 @@ pub(crate) fn emit_return(
             fixups.push(Fixup { body_offset: out.len(), kind: FixupKind::FloatMarker { target: "FIWRQQ" } });
             out.push(0x90);
             out.push(0x9B);
-            out.extend_from_slice(frame.epilogue_bytes());
+            crate::codegen::func::push_epilogue(frame, locals.pascal_cleanup, out);
             return;
         }
     }
@@ -803,7 +803,7 @@ pub(crate) fn emit_return(
             let call_off = out.len();
             out.extend_from_slice(&[0xE8, 0x00, 0x00]);
             fixups.push(Fixup { body_offset: call_off, kind: FixupKind::ExtCall { target: "__ftol".to_owned() } });
-            out.extend_from_slice(frame.epilogue_bytes());
+            crate::codegen::func::push_epilogue(frame, locals.pascal_cleanup, out);
             return;
         } else if let Expr::Call { name, args } = expr {
             let has_float_arg = args.iter().any(|a| matches!(a, Expr::FloatLit(..)));
@@ -839,7 +839,7 @@ pub(crate) fn emit_return(
             let body_offset = out.len();
             out.extend_from_slice(&[0xE8, 0x00, 0x00]); // call __ftol
             fixups.push(Fixup { body_offset, kind: FixupKind::ExtCall { target: "__ftol".to_owned() } });
-            out.extend_from_slice(frame.epilogue_bytes());
+            crate::codegen::func::push_epilogue(frame, locals.pascal_cleanup, out);
             return;
         } else if let Expr::Global(idx) = expr
             && locals.is_float_global(*idx)
@@ -857,7 +857,7 @@ pub(crate) fn emit_return(
             let call_off = out.len();
             out.extend_from_slice(&[0xE8, 0x00, 0x00]); // call __ftol
             fixups.push(Fixup { body_offset: call_off, kind: FixupKind::ExtCall { target: "__ftol".to_owned() } });
-            out.extend_from_slice(frame.epilogue_bytes());
+            crate::codegen::func::push_epilogue(frame, locals.pascal_cleanup, out);
             return;
         } else if let Some((array, k, fop)) = float_global_index_return(expr, locals) {
             // `return (int)<float-global-array>[K]` (optionally `<op> <floatlit>`):
@@ -887,7 +887,7 @@ pub(crate) fn emit_return(
             let call_off = out.len();
             out.extend_from_slice(&[0xE8, 0x00, 0x00]); // call __ftol
             fixups.push(Fixup { body_offset: call_off, kind: FixupKind::ExtCall { target: "__ftol".to_owned() } });
-            out.extend_from_slice(frame.epilogue_bytes());
+            crate::codegen::func::push_epilogue(frame, locals.pascal_cleanup, out);
             return;
         } else if let Some(idx) = coupled_return_local(expr)
             && locals.is_float_local(idx)
@@ -933,7 +933,7 @@ pub(crate) fn emit_return(
             let call_off = out.len();
             out.extend_from_slice(&[0xE8, 0x00, 0x00]); // call __ftol
             fixups.push(Fixup { body_offset: call_off, kind: FixupKind::ExtCall { target: "__ftol".to_owned() } });
-            out.extend_from_slice(frame.epilogue_bytes());
+            crate::codegen::func::push_epilogue(frame, locals.pascal_cleanup, out);
             return;
         } else if matches!(expr, Expr::Local(i) if locals.is_long_local(*i)) {
             let i = if let Expr::Local(i) = expr { *i } else { unreachable!() };
@@ -985,7 +985,7 @@ pub(crate) fn emit_return(
             if return_long {
                 out.push(0x99); // cwd
             }
-            out.extend_from_slice(frame.epilogue_bytes());
+            crate::codegen::func::push_epilogue(frame, locals.pascal_cleanup, out);
             return;
         } else if return_long
             && let Expr::Param(i) = expr
@@ -997,7 +997,7 @@ pub(crate) fn emit_return(
             let hi_disp = (param_disp(*i) + 2) as u8;
             out.extend_from_slice(&[0x8B, 0x46, lo_disp]); // mov ax, [bp+lo]
             out.extend_from_slice(&[0x8B, 0x56, hi_disp]); // mov dx, [bp+hi]
-            out.extend_from_slice(frame.epilogue_bytes());
+            crate::codegen::func::push_epilogue(frame, locals.pascal_cleanup, out);
             return;
         } else if let Expr::LocalIndex { local: l, index } = expr {
             let k = index.fold(locals.inits).unwrap_or(0);
@@ -1015,7 +1015,7 @@ pub(crate) fn emit_return(
                 out.push(bp_modrm(0x46, word_disp));
                 push_bp_disp(out, word_disp);
             }
-            out.extend_from_slice(frame.epilogue_bytes());
+            crate::codegen::func::push_epilogue(frame, locals.pascal_cleanup, out);
             return;
         } else if let Expr::LocalIndexByte { local: l, index } = expr {
             let k = index.fold(locals.inits).unwrap_or(0);
@@ -1034,7 +1034,7 @@ pub(crate) fn emit_return(
                 push_bp_disp(out, byte_disp);
             }
             out.push(0x98); // cbw
-            out.extend_from_slice(frame.epilogue_bytes());
+            crate::codegen::func::push_epilogue(frame, locals.pascal_cleanup, out);
             return;
         } else if let Expr::Global(idx) = expr
             && locals.is_char_global(*idx)
@@ -1058,7 +1058,7 @@ pub(crate) fn emit_return(
             } else {
                 out.push(0x98); // cbw
             }
-            out.extend_from_slice(frame.epilogue_bytes());
+            crate::codegen::func::push_epilogue(frame, locals.pascal_cleanup, out);
             return;
         } else if let Expr::Local(i) = expr {
             let disp = locals.disp(*i);
@@ -1084,7 +1084,7 @@ pub(crate) fn emit_return(
                     v
                 };
                 if ends_with(&mod_tail) || ends_with(&div_tail) {
-                    out.extend_from_slice(frame.epilogue_bytes());
+                    crate::codegen::func::push_epilogue(frame, locals.pascal_cleanup, out);
                     return;
                 }
                 let prev_store = {
@@ -1100,7 +1100,7 @@ pub(crate) fn emit_return(
                     push_bp_disp(out, disp);
                 }
                 out.push(0x98); // cbw
-                out.extend_from_slice(frame.epilogue_bytes());
+                crate::codegen::func::push_epilogue(frame, locals.pascal_cleanup, out);
                 return;
             }
             if locals.size(*i) == 1 && locals.is_unsigned_local(*i) {
@@ -1123,7 +1123,7 @@ pub(crate) fn emit_return(
                 };
                 if ends_with(&mod_tail) || ends_with(&div_tail) {
                     // The tail already zero-extended into AX — just return.
-                    out.extend_from_slice(frame.epilogue_bytes());
+                    crate::codegen::func::push_epilogue(frame, locals.pascal_cleanup, out);
                     return;
                 }
                 // A plain `mov [c],al` self-store (e.g. `c = f(); return (int)c`)
@@ -1135,12 +1135,12 @@ pub(crate) fn emit_return(
                 };
                 if ends_with(&self_store) {
                     out.extend_from_slice(&[0x2A, 0xE4]); // sub ah,ah (widen the live AL)
-                    out.extend_from_slice(frame.epilogue_bytes());
+                    crate::codegen::func::push_epilogue(frame, locals.pascal_cleanup, out);
                     return;
                 }
                 out.push(0x8A); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp); // mov al,[c]
                 out.extend_from_slice(&[0x2A, 0xE4]); // sub ah,ah
-                out.extend_from_slice(frame.epilogue_bytes());
+                crate::codegen::func::push_epilogue(frame, locals.pascal_cleanup, out);
                 return;
             }
             // Non-char or unsigned-char: check if AX already holds the
@@ -1202,14 +1202,14 @@ pub(crate) fn emit_return(
             // `return x || y` / `return x && y` — MSC always emits the full
             // short-circuit branch structure with TWO separate epilogue+ret
             // paths (one for true=1, one for false=0). Does NOT const-fold.
-            let epi = frame.epilogue_bytes();
+            let epi = crate::codegen::func::epilogue_vec(frame, locals.pascal_cleanup);
             let take_then_disp = 3i8 + epi.len() as i8;  // true block = 3 (mov ax,1) + epi
             let cond = cond_from_expr(expr.clone());
             emit_cond_skip(&cond, take_then_disp, locals, out, fixups);
             out.extend_from_slice(&[0xB8, 0x01, 0x00]);  // mov ax, 1
-            out.extend_from_slice(epi);                   // epilogue + ret
+            out.extend_from_slice(&epi);                   // epilogue + ret
             out.extend_from_slice(&[0x2B, 0xC0]);         // sub ax, ax
-            out.extend_from_slice(epi);                   // epilogue + ret
+            out.extend_from_slice(&epi);                   // epilogue + ret
             return;  // both branches already have the epilogue
         } else if let Expr::BinOp { op, left, right } = expr
             && matches!(op, BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge)
@@ -1237,14 +1237,14 @@ pub(crate) fn emit_return(
                 } else {
                     out.push(0x40); // inc ax  → 1 iff x!=0
                 }
-                out.extend_from_slice(frame.epilogue_bytes());
+                crate::codegen::func::push_epilogue(frame, locals.pascal_cleanup, out);
                 return;
             }
             // `return x == y` etc — two-epilogue structure with optional NOP
             // to keep the false-path aligned. The inverted_jcc fires when
             // the condition is FALSE and jumps past the true block to the
             // false path (sub ax,ax + epilogue).
-            let epi = frame.epilogue_bytes();
+            let epi = crate::codegen::func::epilogue_vec(frame, locals.pascal_cleanup);
             let rel_op = match op {
                 BinOp::Eq => RelOp::Eq, BinOp::Ne => RelOp::Ne,
                 BinOp::Lt => RelOp::Lt, BinOp::Le => RelOp::Le,
@@ -1260,10 +1260,10 @@ pub(crate) fn emit_return(
             let take_then_disp = (true_block_size + needs_nop as usize) as i8;
             emit_cond_skip(&cond, take_then_disp, locals, out, fixups);
             out.extend_from_slice(&[0xB8, 0x01, 0x00]);  // mov ax, 1
-            out.extend_from_slice(epi);                   // epilogue + ret
+            out.extend_from_slice(&epi);                   // epilogue + ret
             if needs_nop { out.push(0x90); }              // alignment NOP
             out.extend_from_slice(&[0x2B, 0xC0]);         // sub ax, ax
-            out.extend_from_slice(epi);                   // epilogue + ret
+            out.extend_from_slice(&epi);                   // epilogue + ret
             return;  // both branches already have the epilogue
         } else if let Some(k) = expr.fold(locals.inits)
             && !expr_has_long_highword(expr, locals)
@@ -1335,7 +1335,7 @@ pub(crate) fn emit_return(
             }
         }
     }
-    out.extend_from_slice(frame.epilogue_bytes());
+    crate::codegen::func::push_epilogue(frame, locals.pascal_cleanup, out);
 }
 /// `while (<cond>) <body>` lowers to a test-first shape with the
 /// initial jmp landing on the cond, the body and cmp run inline,
@@ -1642,6 +1642,8 @@ pub(crate) fn emit_threaded_for(
         param_pointee_sizes: locals.param_pointee_sizes,
         char_returners: locals.char_returners,
         long_returners: locals.long_returners,
+        pascal_fns: locals.pascal_fns,
+        pascal_cleanup: locals.pascal_cleanup,
         long_param_funcs: locals.long_param_funcs,
         struct_param_funcs: locals.struct_param_funcs,
         struct_return_funcs: locals.struct_return_funcs,
@@ -2022,6 +2024,8 @@ pub(crate) fn emit_loop(
         param_pointee_sizes: locals.param_pointee_sizes,
         char_returners: locals.char_returners,
         long_returners: locals.long_returners,
+        pascal_fns: locals.pascal_fns,
+        pascal_cleanup: locals.pascal_cleanup,
         long_param_funcs: locals.long_param_funcs,
         struct_param_funcs: locals.struct_param_funcs,
         struct_return_funcs: locals.struct_return_funcs,
@@ -2286,7 +2290,7 @@ pub(crate) fn emit_partial_switch_with_continuation(
             if stmt_always_returns(s, locals) { reachable = false; }
         }
         if reachable {
-            cont_bytes.extend_from_slice(frame.epilogue_bytes());
+            crate::codegen::func::push_epilogue(frame, locals.pascal_cleanup, &mut cont_bytes);
         }
     }
 
@@ -2686,6 +2690,8 @@ pub(crate) fn emit_do_while(
         param_pointee_sizes: locals.param_pointee_sizes,
         char_returners: locals.char_returners,
         long_returners: locals.long_returners,
+        pascal_fns: locals.pascal_fns,
+        pascal_cleanup: locals.pascal_cleanup,
         long_param_funcs: locals.long_param_funcs,
         struct_param_funcs: locals.struct_param_funcs,
         struct_return_funcs: locals.struct_return_funcs,

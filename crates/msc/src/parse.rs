@@ -1200,6 +1200,21 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
     // storage-class / sign keywords (static, extern, unsigned, etc.),
     // then expect `int` / `char` / `void`. `char` returns are widened
     // to int via cbw at the consume site; treat as int here.
+    // Detect the `pascal` calling convention anywhere in the declarator prefix
+    // (it may precede or follow the return type) before the modifier-skips
+    // swallow it. Scan up to the parameter list's `(`.
+    let is_pascal = {
+        let mut j = p.pos;
+        let mut found = false;
+        while let Some(t) = p.toks.get(j) {
+            match t {
+                Tok::LParen => break,
+                Tok::Kw("pascal") => { found = true; break; }
+                _ => j += 1,
+            }
+        }
+        found
+    };
     let had_mod = skip_decl_modifiers(p) > 0;
     let mut return_char = false;
     let mut return_long = false;
@@ -1461,10 +1476,10 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
         }
         (names, struct_idxs, is_chars, is_longs, is_unsigned_ints, float_widths, pointee_sizes)
     };
-    let (params, param_struct_idxs, mut param_is_char, mut param_is_long, param_is_unsigned, param_float_width, mut param_pointee_size) = params;
+    let (mut params, param_struct_idxs, mut param_is_char, mut param_is_long, mut param_is_unsigned, mut param_float_width, mut param_pointee_size) = params;
     // Struct-by-value params: total_bytes (even-padded) when the param has a
     // struct type AND is not a pointer (pointee_size == 0). 0 otherwise.
-    let param_struct_bytes: Vec<usize> = param_struct_idxs.iter().zip(param_pointee_size.iter())
+    let mut param_struct_bytes: Vec<usize> = param_struct_idxs.iter().zip(param_pointee_size.iter())
         .map(|(si, &pointee)| match si {
             Some(sidx) if pointee == 0 => {
                 let n = p.structs.get(*sidx).map(|s| s.total_bytes).unwrap_or(0);
@@ -1541,6 +1556,29 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
     p.param_is_long = param_is_long.clone();
     p.param_is_unsigned = param_is_unsigned.clone();
     p.param_pointee_sizes = param_pointee_size.clone();
+
+    // Pascal calling convention: parameters occupy REVERSED stack slots (the
+    // first-declared param sits at the highest BP offset). Reverse the param
+    // metadata and name resolution so that a body reference to the first param
+    // resolves to the LAST index, which the standard `param_disp` (4 + 2*idx)
+    // then maps to the highest slot — no per-access reversal needed. The K&R
+    // patching above has already run on declaration order, so reverse here.
+    // Fixtures 1653/2062/2063/2065/2246.
+    if is_pascal {
+        params.reverse();
+        param_is_char.reverse();
+        param_is_long.reverse();
+        param_is_unsigned.reverse();
+        param_float_width.reverse();
+        param_pointee_size.reverse();
+        param_struct_bytes.reverse();
+        p.param_names.reverse();
+        p.param_struct_idxs.reverse();
+        p.param_is_char.reverse();
+        p.param_is_long.reverse();
+        p.param_is_unsigned.reverse();
+        p.param_pointee_sizes.reverse();
+    }
 
     // `[storage-class]+ int|char <name> [= <init>] (, <name> [= <init>])* ;`
     //
@@ -2118,7 +2156,7 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
     // while the body was parsed. For functions without nested-block
     // declarations the two are identical.
     let locals = p.local_specs.clone();
-    Ok(Function { name, return_int, return_long, return_char, return_float_width, return_struct_bytes, params, param_struct_bytes, param_is_char, param_is_long, param_is_unsigned, param_float_width, param_pointee_size, locals, local_names, body, struct_field_temp_count: p.struct_field_temp_count })
+    Ok(Function { name, return_int, return_long, return_char, return_float_width, return_struct_bytes, params, param_struct_bytes, param_is_char, param_is_long, param_is_unsigned, param_float_width, param_pointee_size, locals, local_names, body, struct_field_temp_count: p.struct_field_temp_count, is_pascal })
 }
 /// Scan a prototype's parameter list (the tokens between `(` at `lparen_idx`
 /// and `)` at `close_idx`) and return each param's `is_long` flag. A param is

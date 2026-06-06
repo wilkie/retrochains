@@ -147,6 +147,7 @@ pub(crate) fn emit_function(
     global_elem_sizes: &[usize],
     char_returners: &std::collections::HashSet<String>,
     long_returners: &std::collections::HashSet<String>,
+    pascal_fns: &std::collections::HashSet<String>,
     float_returners_arg: &std::collections::HashMap<String, usize>,
     long_param_funcs: &std::collections::HashMap<String, Vec<bool>>,
     struct_param_funcs: &std::collections::HashMap<String, Vec<usize>>,
@@ -178,6 +179,16 @@ pub(crate) fn emit_function(
     let local_float: Vec<usize> = func.locals.iter().map(|l| if l.is_float { l.size } else { 0 }).collect();
     let fpu_live: std::cell::Cell<Option<usize>> = std::cell::Cell::new(None);
     let fpu_pending_fwait: std::cell::Cell<bool> = std::cell::Cell::new(false);
+    // A `pascal` function pops its arguments in the epilogue (`ret N`); N is the
+    // total stack footprint of the params (long=4, struct=even-padded, else 2).
+    let pascal_cleanup: u16 = if func.is_pascal {
+        (0..func.params.len()).map(|i| {
+            if func.param_is_long.get(i).copied().unwrap_or(false) { 4u16 }
+            else if func.param_struct_bytes.get(i).copied().unwrap_or(0) > 0 {
+                ((func.param_struct_bytes[i] + 1) & !1) as u16
+            } else { 2 }
+        }).sum()
+    } else { 0 };
     let mut bytes = Vec::with_capacity(32);
     let mut fixups: Vec<Fixup> = Vec::new();
     // A call that passes a float/double literal pushes it via `sub sp,N;
@@ -527,6 +538,8 @@ pub(crate) fn emit_function(
         param_pointee_sizes: &param_pointee_sizes,
         char_returners,
         long_returners,
+        pascal_fns,
+        pascal_cleanup,
         long_param_funcs,
         struct_param_funcs,
         struct_return_funcs,
@@ -624,7 +637,7 @@ pub(crate) fn emit_function(
     // explicit `return`. MSC emits leave+ret for both void and int-returning
     // functions. The epilogue shape follows the function's frame.
     if reachable {
-        bytes.extend_from_slice(frame.epilogue_bytes());
+        push_epilogue(frame, pascal_cleanup, &mut bytes);
     }
 
     if bytes.len() % 2 != 0 {
@@ -638,6 +651,37 @@ pub(crate) fn emit_function(
 pub(crate) fn symbol_name(c_name: &str) -> String {
     format!("_{c_name}")
 }
+/// OMF symbol for a function. `pascal` functions are exported UPPERCASE with no
+/// leading underscore (MS Pascal convention); cdecl functions get the standard
+/// `_name`. Fixtures 1653/2063.
+pub(crate) fn fn_symbol(f: &Function) -> String {
+    if f.is_pascal { f.name.to_uppercase() } else { symbol_name(&f.name) }
+}
+/// OMF symbol for a callee referenced by bare C name, given whether it is a
+/// known `pascal` function in this unit.
+pub(crate) fn callee_symbol(c_name: &str, is_pascal: bool) -> String {
+    if is_pascal { c_name.to_uppercase() } else { symbol_name(c_name) }
+}
 pub(crate) fn param_disp(idx: usize) -> i16 {
     i16::try_from(4 + (idx * 2)).expect("param disp fits in i16")
+}
+/// Append the function epilogue. For a `pascal` function (`pascal_cleanup > 0`)
+/// the trailing `ret` (0xC3) becomes `ret N` (0xC2 + imm16), popping the
+/// caller's arguments. cdecl functions emit the frame's plain epilogue.
+pub(crate) fn push_epilogue(frame: Frame, pascal_cleanup: u16, out: &mut Vec<u8>) {
+    let epi = frame.epilogue_bytes();
+    if pascal_cleanup > 0 {
+        out.extend_from_slice(&epi[..epi.len() - 1]); // all but the trailing C3
+        out.push(0xC2);
+        out.extend_from_slice(&pascal_cleanup.to_le_bytes());
+    } else {
+        out.extend_from_slice(epi);
+    }
+}
+/// Like [`push_epilogue`] but returns the bytes, for sites that need the
+/// epilogue's length (short-circuit `return a||b` double-epilogue paths).
+pub(crate) fn epilogue_vec(frame: Frame, pascal_cleanup: u16) -> Vec<u8> {
+    let mut v = Vec::new();
+    push_epilogue(frame, pascal_cleanup, &mut v);
+    v
 }

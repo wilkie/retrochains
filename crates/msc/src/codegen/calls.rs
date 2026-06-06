@@ -24,14 +24,24 @@ pub(crate) fn emit_call_inner(
     out: &mut Vec<u8>,
     fixups: &mut Vec<Fixup>,
 ) {
-    let sym = symbol_name(name);
+    // A `pascal` callee (detected by its bare C name) takes the UPPERCASE,
+    // underscore-free OMF symbol; cdecl callees get `_name`.
+    let is_pascal_call = locals.pascal_fns.contains(name);
+    let sym = callee_symbol(name, is_pascal_call);
     let param_longs = locals.long_param_funcs.get(&sym);
     let param_structs = locals.struct_param_funcs.get(&sym);
     let struct_bytes_at = |i: usize| -> usize {
         param_structs.and_then(|v| v.get(i).copied()).unwrap_or(0)
     };
-    // Push args right-to-left (cdecl).
-    for (i, arg) in args.iter().enumerate().rev() {
+    // cdecl pushes args right-to-left; the `pascal` convention pushes them
+    // left-to-right (and the callee cleans the stack via `ret N`).
+    let order: Vec<usize> = if is_pascal_call {
+        (0..args.len()).collect()
+    } else {
+        (0..args.len()).rev().collect()
+    };
+    for &i in &order {
+        let arg = &args[i];
         let is_long_param = param_longs.map(|v| v.get(i).copied().unwrap_or(false)).unwrap_or(false);
         let struct_bytes = struct_bytes_at(i);
         if struct_bytes > 0 {
@@ -62,7 +72,9 @@ pub(crate) fn emit_call_inner(
     // The single last call before a slide-frame epilogue elides its cleanup
     // (the `mov sp,bp` teardown restores SP) — signalled by the function view's
     // elide_call_cleanup flag, set in emit_function.
-    let skip_cleanup = skip_cleanup || locals.elide_call_cleanup.get();
+    // A pascal callee pops the arguments itself (`ret N`), so the caller emits
+    // no `add sp` cleanup.
+    let skip_cleanup = skip_cleanup || locals.elide_call_cleanup.get() || is_pascal_call;
     if cleanup_bytes > 0 && !skip_cleanup {
         // `add sp, imm8sx` — Grp1 r/m16,imm8sx with /0=ADD,
         // ModR/M mod=11 r/m=100 (SP). 3 bytes for small N.
