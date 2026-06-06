@@ -44,6 +44,7 @@ pub(crate) fn parse_unit(source: &str) -> Result<Unit, EmitError> {
     let mut proto_long_params: std::collections::HashMap<String, Vec<bool>> = std::collections::HashMap::new();
     let mut proto_struct_params: std::collections::HashMap<String, Vec<usize>> = std::collections::HashMap::new();
     let mut proto_struct_returns: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut proto_char_returns: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut prototyped_fns: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut functions = Vec::new();
     let mut decl_order: Vec<TopDecl> = Vec::new();
@@ -178,6 +179,13 @@ pub(crate) fn parse_unit(source: &str) -> Result<Unit, EmitError> {
                         proto_struct_returns.insert(symbol_name(nm), (p.structs[sidx].total_bytes + 1) & !1);
                         p.fn_return_struct_idx.insert(symbol_name(nm), sidx);
                     }
+                    // `char NAME(...)` return (no `*` between the keyword and the
+                    // name) — the call result widens via cbw. Fixture 3917.
+                    if matches!(p.toks.get(k), Some(Tok::Kw("char")))
+                        && !((k + 1)..after).any(|j| matches!(p.toks.get(j), Some(Tok::Star)))
+                    {
+                        proto_char_returns.insert(symbol_name(nm));
+                    }
                 }
                 p.pos = close_idx + 2;
                 continue;
@@ -193,7 +201,7 @@ pub(crate) fn parse_unit(source: &str) -> Result<Unit, EmitError> {
     }
     // A function-less translation unit (only global declarations) is valid —
     // MSC emits an OBJ with just the data segments. Fixtures 3657/3659/3660/3680.
-    Ok(Unit { globals: p.globals, structs: p.structs, functions, decl_order, strings: p.strings, proto_long_params, proto_struct_params, proto_struct_returns, prototyped_fns })
+    Ok(Unit { globals: p.globals, structs: p.structs, functions, decl_order, strings: p.strings, proto_long_params, proto_struct_params, proto_struct_returns, prototyped_fns, proto_char_returns })
 }
 /// Parse a file-scope `struct <Name> <var> [= { ... }];` declaration.
 /// Stores the struct global as if it were a `char` array sized to

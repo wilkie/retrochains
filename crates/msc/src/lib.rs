@@ -88,6 +88,10 @@ pub struct Unit {
     /// swallowed `#include`, no prototype) BEFORE `__chkstk`. Fixtures 1734
     /// (proto → chkstk first) vs 4103 (`#include`, implicit → chkstk last).
     pub prototyped_fns: std::collections::HashSet<String>,
+    /// Symbol names of prototype-only functions that return `char`, so a call
+    /// to one widens the AL result with `cbw` like a defined char-returner.
+    /// Fixtures 3917 (`char peekb(...)`).
+    pub proto_char_returns: std::collections::HashSet<String>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1701,10 +1705,12 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
     let unsigned_globals: Vec<bool> = unit.globals.iter().map(|g| g.is_unsigned).collect();
     let float_globals: Vec<usize> = unit.globals.iter()
         .map(|g| if g.is_float { g.element_size } else { 0 }).collect();
-    let char_returners: std::collections::HashSet<String> = unit.functions.iter()
+    let mut char_returners: std::collections::HashSet<String> = unit.functions.iter()
         .filter(|f| f.return_char)
         .map(|f| symbol_name(&f.name))
         .collect();
+    // Prototype-only char-returning externs widen their call result too.
+    char_returners.extend(unit.proto_char_returns.iter().cloned());
     let mut long_param_funcs: std::collections::HashMap<String, Vec<bool>> = unit.functions.iter()
         .filter(|f| f.param_is_long.iter().any(|&b| b))
         .map(|f| (symbol_name(&f.name), f.param_is_long.clone()))

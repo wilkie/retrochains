@@ -264,8 +264,14 @@ pub(crate) fn emit_push_arg(arg: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, 
     match arg {
         Expr::IntLit(0) => {
             // MSC zeroes AX with `sub ax,ax` (its zero idiom), then pushes.
-            // Fixture 3988.
-            out.extend_from_slice(&[0x2B, 0xC0, 0x50]); // sub ax,ax; push ax
+            // Fixture 3988. A consecutive 0 arg (args push RTL, so two trailing
+            // 0 args emit back-to-back) reuses the still-live AX with a bare
+            // `push ax` rather than re-zeroing. Fixtures 3915/3935.
+            if out.ends_with(&[0x2B, 0xC0, 0x50]) {
+                out.push(0x50); // push ax
+            } else {
+                out.extend_from_slice(&[0x2B, 0xC0, 0x50]); // sub ax,ax; push ax
+            }
         }
         Expr::IntLit(k) => {
             let imm = (*k as u32 & 0xFFFF) as u16;
