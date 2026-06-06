@@ -427,6 +427,10 @@ pub struct Locals<'a> {
     /// Parallel-indexed: true for `unsigned char x` locals — load uses
     /// `sub ah, ah` (zero-extend) instead of `cbw` (sign-extend).
     pub unsigned_locals: &'a [bool],
+    /// Parallel-indexed: pointee byte size for pointer locals (0 for
+    /// non-pointers). Drives pointer-difference element scaling for
+    /// `q - p` between two pointer locals (byte sub then `sar`).
+    pub local_pointee_sizes: &'a [usize],
     /// Parallel-indexed byte width (4/8) of `float`/`double` locals, 0
     /// otherwise. A non-literal float local consumed by `(int)<local>` is
     /// stored with `fst` (st(0) kept live) and the cast is bare `call __ftol`.
@@ -578,6 +582,9 @@ impl Locals<'_> {
     }
     pub fn is_unsigned_local(&self, idx: usize) -> bool {
         self.unsigned_locals.get(idx).copied().unwrap_or(false)
+    }
+    pub fn local_pointee_size(&self, idx: usize) -> usize {
+        self.local_pointee_sizes.get(idx).copied().unwrap_or(0)
     }
     /// 4 or 8 for a `float`/`double` local, else 0.
     pub fn float_local_width(&self, idx: usize) -> usize {

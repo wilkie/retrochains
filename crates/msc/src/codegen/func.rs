@@ -176,6 +176,7 @@ pub(crate) fn emit_function(
     let local_far_ptrs: Vec<bool> = func.locals.iter().map(|l| l.is_far_ptr).collect();
     let local_arrays: Vec<bool> = func.locals.iter().map(|l| l.array_len > 1).collect();
     let local_unsigned: Vec<bool> = func.locals.iter().map(|l| l.is_unsigned).collect();
+    let local_pointee: Vec<usize> = func.locals.iter().map(|l| if l.array_len > 1 { 0 } else { l.pointee_size as usize }).collect();
     let local_float: Vec<usize> = func.locals.iter().map(|l| if l.is_float { l.size } else { 0 }).collect();
     let fpu_live: std::cell::Cell<Option<usize>> = std::cell::Cell::new(None);
     let fpu_pending_fwait: std::cell::Cell<bool> = std::cell::Cell::new(false);
@@ -548,6 +549,7 @@ pub(crate) fn emit_function(
         far_ptr_locals: &local_far_ptrs,
         array_locals: &local_arrays,
         unsigned_locals: &local_unsigned,
+        local_pointee_sizes: &local_pointee,
         float_locals: &local_float,
         char_params: &param_is_char,
         param_struct_bytes: &func.param_struct_bytes,

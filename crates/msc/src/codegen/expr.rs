@@ -1404,8 +1404,13 @@ fn emit_long_high_word_to_ax(e: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, f
 /// reuse a live AX from the preceding assignment and are handled
 /// elsewhere. Fixtures 3103, 2647, 3377.
 fn ptr_diff_shift(left: &Expr, right: &Expr, locals: &Locals<'_>) -> Option<u32> {
-    let lsz = match left { Expr::Param(i) => locals.param_pointee_size(*i), _ => 0 };
-    let rsz = match right { Expr::Param(i) => locals.param_pointee_size(*i), _ => 0 };
+    let pointee = |e: &Expr| match e {
+        Expr::Param(i) => locals.param_pointee_size(*i),
+        Expr::Local(i) => locals.local_pointee_size(*i),
+        _ => 0,
+    };
+    let lsz = pointee(left);
+    let rsz = pointee(right);
     if lsz == 0 || lsz != rsz { return None; }
     match lsz {
         1 => Some(0),
