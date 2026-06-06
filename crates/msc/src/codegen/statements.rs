@@ -571,6 +571,18 @@ pub(crate) fn emit_return(
         crate::codegen::func::push_epilogue(frame, locals.pascal_cleanup, out);
         return;
     }
+    // `return *p` where p is a `long *` GLOBAL: load both pointee words. The
+    // DerefWord emit produces `mov bx,[p]; mov ax,[bx]`; append `mov dx,[bx+2]`
+    // instead of the int-style `cwd`. Fixture 3286.
+    if return_long
+        && let Expr::DerefWord { ptr } = expr
+        && matches!(ptr.as_ref(), Expr::Global(_))
+    {
+        emit_expr_to_ax(expr, locals, out, fixups);    // mov bx,[p]; mov ax,[bx]
+        out.extend_from_slice(&[0x8B, 0x57, 0x02]);    // mov dx,[bx+2]
+        crate::codegen::func::push_epilogue(frame, locals.pascal_cleanup, out);
+        return;
+    }
     // `return <long-param> >> 16` (long fn): the high word becomes the low word
     // and the new high word is 0 — `mov ax,[v+2]; sub dx,dx`. Fixtures 2801, 2998.
     if return_long
