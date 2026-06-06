@@ -2176,8 +2176,19 @@ fn emit_binop_inner(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, o
             left: Box::new(left.clone()),
             right: Box::new(right.clone()),
         });
-        emit_cond_skip(&cond, 5, locals, out, fixups);
-        out.extend_from_slice(&[0xB8, 0x01, 0x00, 0xEB, 0x02]);  // mov ax,1; jmp +2
+        // MSC aligns the false-block (`sub ax,ax`, the jcc target) to an even
+        // offset, inserting a NOP after the over-jmp when it would land odd.
+        // Fixture 2429. Size the cond onto a clone of `out` for an accurate offset.
+        let cond_size = {
+            let mut sz = out.clone();
+            let base = sz.len();
+            emit_cond_skip(&cond, 0i8, locals, &mut sz, &mut Vec::new());
+            sz.len() - base
+        };
+        let needs_nop = (out.len() + cond_size + 5) % 2 != 0; // sub ax,ax lands here
+        emit_cond_skip(&cond, 5 + needs_nop as i8, locals, out, fixups);
+        out.extend_from_slice(&[0xB8, 0x01, 0x00, 0xEB, 0x02 + needs_nop as u8]); // mov ax,1; jmp +2/+3
+        if needs_nop { out.push(0x90); }
         out.extend_from_slice(&[0x2B, 0xC0]);                      // sub ax,ax
         return;
     }
