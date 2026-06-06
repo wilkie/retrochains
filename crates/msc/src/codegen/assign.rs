@@ -1549,11 +1549,15 @@ pub(crate) fn emit_assign_global(global_idx: usize, value: &Expr, locals: &Local
         let k32 = k as u32;
         let lo = (k32 & 0xFFFF) as u16;
         let hi = (k32 >> 16) as u16;
-        out.push(0x81); out.push(0x26); // and word [g], lo
-        let off = out.len();
-        out.extend_from_slice(&[0x00, 0x00]);
-        fixups.push(Fixup { body_offset: off - 1, kind: FixupKind::GlobalAddr { global_idx } });
-        out.extend_from_slice(&lo.to_le_bytes());
+        // `& 0xFFFF` on the low word is the AND-identity — MSC omits it entirely
+        // (only the high word, here zeroed, is touched). Fixture 448.
+        if lo != 0xFFFF {
+            out.push(0x81); out.push(0x26); // and word [g], lo
+            let off = out.len();
+            out.extend_from_slice(&[0x00, 0x00]);
+            fixups.push(Fixup { body_offset: off - 1, kind: FixupKind::GlobalAddr { global_idx } });
+            out.extend_from_slice(&lo.to_le_bytes());
+        }
         if hi == 0x0000 {
             out.push(0xC7); out.push(0x06); // mov word [g+2], 0
             let off = out.len();
