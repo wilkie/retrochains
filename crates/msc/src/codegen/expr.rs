@@ -32,6 +32,17 @@ pub(crate) fn emit_load_bx(e: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fix
             let bo = out.len(); out.extend_from_slice(&byte_off.to_le_bytes());
             fixups.push(Fixup { body_offset: bo - 1, kind: FixupKind::GlobalAddr { global_idx: *global } });
         }
+        // `*p` (word deref of a simple pointer param/local) as an index: load the
+        // pointer into BX then deref in place (`mov bx,[p]; mov bx,[bx]`), rather
+        // than going through AX. Fixture 3584 (`arr[*p]`).
+        Expr::DerefWord { ptr } if matches!(ptr.as_ref(), Expr::Param(_) | Expr::Local(_)) => {
+            match ptr.as_ref() {
+                Expr::Param(i) => { out.extend_from_slice(&[0x8B, 0x5E, param_disp(*i) as u8]); }
+                Expr::Local(i) => { let d = locals.disp(*i); out.push(0x8B); out.push(bp_modrm(0x5E, d)); push_bp_disp(out, d); }
+                _ => unreachable!(),
+            }
+            out.extend_from_slice(&[0x8B, 0x1F]); // mov bx,[bx]
+        }
         _ => { emit_expr_to_ax(e, locals, out, fixups); out.extend_from_slice(&[0x8B, 0xD8]); } // mov bx,ax
     }
 }

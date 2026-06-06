@@ -2303,6 +2303,21 @@ pub(crate) fn emit_assign_indexed_local(local_idx: usize, byte_off: u16, value: 
                 }
                 return;
             }
+            // In-place bitwise `a[k] &= / |= / ^= K`. AND keeps the word form (81)
+            // to clear the high byte; OR/XOR with a byte-sized mask use the byte
+            // form (80, high byte unaffected). Mirrors the global-indexed path.
+            // Fixture 986.
+            BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor => {
+                let reg = match op { BinOp::BitAnd => 4u8, BinOp::BitOr => 1, BinOp::BitXor => 6, _ => unreachable!() };
+                let modrm_base = 0x46 | (reg << 3);
+                if matches!(op, BinOp::BitOr | BinOp::BitXor) && (0..=255).contains(&k) {
+                    out.push(0x80); out.push(bp_modrm(modrm_base, disp)); push_bp_disp(out, disp); out.push(k as u8);
+                } else {
+                    out.push(0x81); out.push(bp_modrm(modrm_base, disp)); push_bp_disp(out, disp);
+                    out.extend_from_slice(&((k as u32 & 0xFFFF) as u16).to_le_bytes());
+                }
+                return;
+            }
             _ => {}
         }
     }
