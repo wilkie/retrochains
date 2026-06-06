@@ -2930,13 +2930,17 @@ pub(crate) fn emit_binop_right(op: BinOp, right: &Expr, locals: &Locals<'_>, out
         return;
     }
     if let Some((array_idx, byte_off)) = const_index_global(right, locals) {
-        let opcode = match op {
-            BinOp::Add => 0x03,
-            BinOp::Sub => 0x2B,
+        // `imul word [a+off]` (F7 /5, modrm 0x2E) for Mul; `<op> ax,[a+off]`
+        // (modrm 0x06) for add/sub/and/or/xor. Fixture 1412 (`a[0] * a[2]`).
+        match op {
+            BinOp::Mul => { out.push(0xF7); out.push(0x2E); }
+            BinOp::Add => { out.push(0x03); out.push(0x06); }
+            BinOp::Sub => { out.push(0x2B); out.push(0x06); }
+            BinOp::BitAnd => { out.push(0x23); out.push(0x06); }
+            BinOp::BitOr => { out.push(0x0B); out.push(0x06); }
+            BinOp::BitXor => { out.push(0x33); out.push(0x06); }
             _ => panic!("{op:?} with indexed-global rhs not yet supported"),
-        };
-        out.push(opcode);
-        out.push(0x06);
+        }
         let body_offset = out.len();
         out.extend_from_slice(&byte_off.to_le_bytes());
         fixups.push(Fixup {
