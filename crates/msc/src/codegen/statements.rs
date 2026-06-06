@@ -52,10 +52,12 @@ pub(crate) fn emit_stmt(
         Stmt::Return(expr) => emit_return(expr, locals, frame, return_int, return_long, out, fixups),
         Stmt::Empty => {}
         Stmt::ExprStmt(Expr::Call { name, args }) => {
-            // A call statement in a slide-frame function omits the per-call
-            // `add sp,N` cleanup — the epilogue's `mov sp,bp` reclaims the args
-            // (fixtures 1443, 1872). Non-slide frames still clean up per call.
-            emit_call_inner(name, args, locals, frame.is_with_slide(), out, fixups);
+            // The per-call `add sp,N` cleanup is elided only for the function's
+            // single last call before a slide-frame epilogue — controlled by the
+            // emit_function `elide_call_cleanup` flag read inside emit_call_inner,
+            // not here (so earlier sequential calls still clean up). Fixtures
+            // 1443, 1872 (single bare call) elide; 4044 keeps all but the last.
+            emit_call_inner(name, args, locals, false, out, fixups);
         }
         // A postfix/prefix `param++;` used purely for its side effect (e.g. a
         // comma-operator side, fixture 3308) emits just the in-place mutate — no
@@ -300,6 +302,48 @@ pub(crate) fn emit_stmt(
 /// unconditionally. Unlike [`stmt_always_returns`], a bare `goto` counts as an
 /// exit, and an `if/else` exits when both arms do. Used to suppress a dead
 /// trailing function epilogue after a loop lowered to if/else+goto.
+/// Count the function calls in an expression (including CallPtr / make().field
+/// and any calls nested in operands or arguments). Used to detect a top-level
+/// statement whose SINGLE call is the function's last — that call's cdecl
+/// cleanup is elided before a slide-frame epilogue.
+pub(crate) fn expr_call_count(e: &Expr) -> usize {
+    match e {
+        Expr::Call { args, .. } | Expr::CallPtr { args, .. } | Expr::CallStructField { args, .. } => {
+            1 + args.iter().map(expr_call_count).sum::<usize>()
+        }
+        Expr::BinOp { left, right, .. } => expr_call_count(left) + expr_call_count(right),
+        Expr::Ternary { cond, then_arm, else_arm } =>
+            expr_call_count(cond) + expr_call_count(then_arm) + expr_call_count(else_arm),
+        Expr::AssignExpr { value, .. } => expr_call_count(value),
+        Expr::Seq { value, .. } => expr_call_count(value),
+        Expr::DerefWord { ptr } | Expr::DerefByte { ptr } => expr_call_count(ptr),
+        Expr::Index { index, .. } | Expr::IndexByte { index, .. } => expr_call_count(index),
+        Expr::CastChar { value, .. } => expr_call_count(value),
+        _ => 0,
+    }
+}
+/// True when this top-level statement is a straight-line statement carrying
+/// exactly one call (the candidate for last-call cleanup elision).
+pub(crate) fn stmt_single_call(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::ExprStmt(e) => expr_call_count(e) == 1,
+        Stmt::Assign { value, .. } => expr_call_count(value) == 1,
+        _ => false,
+    }
+}
+/// Total calls anywhere in a statement (recursing into nested control flow), to
+/// locate the last call-bearing top-level statement.
+pub(crate) fn stmt_call_count(stmt: &Stmt) -> usize {
+    match stmt {
+        Stmt::ExprStmt(e) => expr_call_count(e),
+        Stmt::Assign { value, .. } => expr_call_count(value),
+        Stmt::Return(e) => expr_call_count(e),
+        Stmt::Block(v) => v.iter().map(stmt_call_count).sum(),
+        Stmt::If { cond: _, then_branch, else_branch } =>
+            stmt_call_count(then_branch) + else_branch.as_ref().map_or(0, |e| stmt_call_count(e)),
+        _ => 0,
+    }
+}
 pub(crate) fn stmt_exits(stmt: &Stmt) -> bool {
     match stmt {
         Stmt::Return(_) | Stmt::Goto(_) => true,
@@ -1608,6 +1652,7 @@ pub(crate) fn emit_threaded_for(
         float_call_temp_disp: locals.float_call_temp_disp,
         fpu_pending_fwait: locals.fpu_pending_fwait,
         struct_field_temp_base: locals.struct_field_temp_base,
+        elide_call_cleanup: std::cell::Cell::new(false),
     };
     let n = levels.len();
     let base = out.len();
@@ -1986,6 +2031,7 @@ pub(crate) fn emit_loop(
         float_call_temp_disp: locals.float_call_temp_disp,
         fpu_pending_fwait: locals.fpu_pending_fwait,
         struct_field_temp_base: locals.struct_field_temp_base,
+        elide_call_cleanup: std::cell::Cell::new(false),
     };
     let mut body_buf = Vec::new();
     let mut body_fixups: Vec<Fixup> = Vec::new();
@@ -2648,6 +2694,7 @@ pub(crate) fn emit_do_while(
         float_call_temp_disp: locals.float_call_temp_disp,
         fpu_pending_fwait: locals.fpu_pending_fwait,
         struct_field_temp_base: locals.struct_field_temp_base,
+        elide_call_cleanup: std::cell::Cell::new(false),
     };
     let mut body_buf = Vec::new();
     let mut body_fixups: Vec<Fixup> = Vec::new();

@@ -492,6 +492,12 @@ pub struct Locals<'a> {
     /// call result is spilled here before the field is read). Temp `idx` sits at
     /// `base - 4*idx`. 0 when the function has no such call. Fixtures 2629/2634.
     pub struct_field_temp_base: i16,
+    /// Set true (only on the top-level function view) while emitting the single
+    /// last call-bearing statement of a slide-frame function, so that call's
+    /// cdecl `add sp,K` cleanup is elided — the epilogue's `mov sp,bp` restores
+    /// SP. Sub-scope (loop/block) views keep this false: a call inside a loop
+    /// repeats and must clean up each iteration. Fixtures 4044, 2439, 2299.
+    pub elide_call_cleanup: std::cell::Cell<bool>,
 }
 
 #[derive(Default, Debug)]

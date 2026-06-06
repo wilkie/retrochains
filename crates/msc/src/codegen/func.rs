@@ -539,7 +539,18 @@ pub(crate) fn emit_function(
         float_call_temp_disp,
         fpu_pending_fwait: &fpu_pending_fwait,
         struct_field_temp_base,
+        elide_call_cleanup: std::cell::Cell::new(false),
     };
+
+    // The last top-level call-bearing statement: if it carries exactly one call
+    // and the function uses a slide frame, that call's cdecl cleanup is elided
+    // (the epilogue's `mov sp,bp` restores SP). Earlier calls keep their cleanup.
+    let last_call_idx: Option<usize> = body
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| crate::codegen::statements::stmt_call_count(s) > 0)
+        .last()
+        .map(|(i, _)| i);
 
     let mut reachable = true;
     let mut i = 0;
@@ -549,6 +560,13 @@ pub(crate) fn emit_function(
         if matches!(&body[i], Stmt::Label(_)) { reachable = true; }
         if !reachable { i += 1; continue; }
         let stmt = &body[i];
+
+        // Arm/disarm the last-call cleanup elision for this statement.
+        locals_view.elide_call_cleanup.set(
+            frame.is_with_slide()
+                && last_call_idx == Some(i)
+                && crate::codegen::statements::stmt_single_call(stmt),
+        );
 
         // Detect a partial switch (const literal scrutinee with NFC cases).
         // emit_partial_switch_with_continuation handles the switch + all

@@ -59,6 +59,10 @@ pub(crate) fn emit_call_inner(
         else if let Expr::FloatLit(_, is_double) = a { if *is_double { 8 } else { 4 } }
         else if param_longs.map(|v| v.get(i).copied().unwrap_or(false)).unwrap_or(false) { 4 } else { 2 }
     }).sum();
+    // The single last call before a slide-frame epilogue elides its cleanup
+    // (the `mov sp,bp` teardown restores SP) — signalled by the function view's
+    // elide_call_cleanup flag, set in emit_function.
+    let skip_cleanup = skip_cleanup || locals.elide_call_cleanup.get();
     if cleanup_bytes > 0 && !skip_cleanup {
         // `add sp, imm8sx` — Grp1 r/m16,imm8sx with /0=ADD,
         // ModR/M mod=11 r/m=100 (SP). 3 bytes for small N.
