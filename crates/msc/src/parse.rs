@@ -1096,6 +1096,21 @@ pub(crate) fn parse_global_decl(p: &mut Parser<'_>) -> Result<(), EmitError> {
             // `char g = K;` — single byte in _DATA.
             let k = parse_signed_int(p)?;
             Some(vec![GlobalInit::Byte((k as u32 & 0xFF) as u8)])
+        } else if is_pointer
+            && matches!(p.peek(), Some(Tok::Ident(n)) if p.global_names.iter().any(|gn| gn == n))
+        {
+            // `int *p = data;` / `int *p = data + K;` — a global array (or var)
+            // decays to its address; the optional `± K` scales by the element
+            // size. Fixtures 2802, 2939, 3222.
+            let target_name = match p.bump().cloned() { Some(Tok::Ident(s)) => s, _ => unreachable!() };
+            let target_idx = p.global_names.iter().position(|n| *n == target_name).unwrap();
+            let elem = p.globals[target_idx].element_size.max(1) as i32;
+            let off = match p.peek() {
+                Some(Tok::Plus) => { p.bump(); (parse_signed_int(p)? * elem) as u16 }
+                Some(Tok::Minus) => { p.bump(); (-parse_signed_int(p)? * elem) as u16 }
+                _ => 0,
+            };
+            Some(vec![GlobalInit::GlobalAddr(target_idx, off)])
         } else {
             Some(vec![GlobalInit::Int(parse_signed_int(p)?)])
         }
