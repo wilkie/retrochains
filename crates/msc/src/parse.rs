@@ -2947,8 +2947,12 @@ pub(crate) fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
                     let target = AssignTarget::DerefLocalOffset {
                         local: local_idx, byte_off, is_byte: ptsz == 1,
                     };
-                    p.eat(&Tok::Assign)?;
-                    let value = parse_expr(p)?;
+                    let value = if let Some(v) = parse_compound_rhs(p, &target)? {
+                        v
+                    } else {
+                        p.eat(&Tok::Assign)?;
+                        parse_expr(p)?
+                    };
                     p.eat(&Tok::Semi)?;
                     return Ok(Stmt::Assign { target, value });
                 }
@@ -3596,6 +3600,17 @@ pub(crate) fn parse_compound_rhs(p: &mut Parser<'_>, target: &AssignTarget) -> R
         }
         AssignTarget::IndexedGlobalByte { array, byte_off } => {
             Expr::IndexByte { array: *array, index: Box::new(Expr::IntLit(*byte_off as i32)) }
+        }
+        // `p[K] op= v` on a pointer local: the self-read is `*(p + byte_off)`,
+        // matching the read-side parse so the alias pass folds it. Fixture 863.
+        AssignTarget::DerefLocalOffset { local, byte_off, is_byte } => {
+            let inner = Expr::BinOp {
+                op: BinOp::Add,
+                left: Box::new(Expr::Local(*local)),
+                right: Box::new(Expr::IntLit(*byte_off as i32)),
+            };
+            if *is_byte { Expr::DerefByte { ptr: Box::new(inner) } }
+            else { Expr::DerefWord { ptr: Box::new(inner) } }
         }
         _ => return Ok(None),
     };
