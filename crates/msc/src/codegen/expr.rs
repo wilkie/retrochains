@@ -1926,6 +1926,26 @@ pub(crate) fn bf_load_word(base: BitBase, byte_off: u16, locals: &Locals<'_>, ou
         }
     }
 }
+/// Load the bit-field unit word at `base + byte_off` into CX. Returns false for
+/// bases we don't load into CX (only Local/Global are needed by the read-pair
+/// scheduling below). Mirrors `bf_load_word` with the CX reg field.
+pub(crate) fn bf_load_word_cx(base: BitBase, byte_off: u16, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) -> bool {
+    match base {
+        BitBase::Global(g) => {
+            out.push(0x8B); out.push(0x0E); // mov cx, [moffs16] (modrm 0E = disp16, reg=cx)
+            let bo = out.len() - 1; // points at the 0E byte; address goes at bo+1/bo+2
+            out.extend_from_slice(&byte_off.to_le_bytes());
+            fixups.push(Fixup { body_offset: bo, kind: FixupKind::GlobalAddr { global_idx: g } });
+            true
+        }
+        BitBase::Local(l) => {
+            let d = locals.disp(l) + byte_off as i16;
+            out.push(0x8B); out.push(bp_modrm(0x4E, d)); push_bp_disp(out, d); // mov cx,[bp+d]
+            true
+        }
+        BitBase::DerefParam(_) => false,
+    }
+}
 /// Load the byte at `base + off` into AL.
 pub(crate) fn bf_load_byte_al(base: BitBase, off: u16, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
     match base {
@@ -2710,6 +2730,31 @@ fn emit_binop_inner(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, o
     {
         emit_expr_to_ax(left, locals, out, fixups);
         emit_imm_op(op, *k, out);
+        return;
+    }
+    // Two bit-field operands of a commutative op where the LEFT is a low field
+    // (bit_off==0, mask only — no shift): MSC reads the RIGHT into AX (reusing a
+    // live unit-word from a preceding store, or loading+shifting it) and the LEFT
+    // into CX (`mov cx,[unit]; and cx,mask`), then folds with `op ax,cx` — instead
+    // of saving AX to BX and reloading. Sub is excluded (non-commutative: the
+    // operand left in AX would be the RHS). Fixtures 2107, 2471.
+    if matches!(op, BinOp::Add | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor)
+        && let Expr::BitField { base: lb, byte_off: lbo, bit_off: 0, bit_width: lw } = left
+        && matches!(right, Expr::BitField { .. })
+        && matches!(lb, BitBase::Local(_) | BitBase::Global(_))
+    {
+        emit_expr_to_ax(right, locals, out, fixups); // RHS → AX (reuse/shift+mask)
+        bf_load_word_cx(*lb, *lbo, locals, out, fixups); // mov cx,[unit]
+        if *lw < 16 {
+            let mask = (1u32 << *lw) - 1;
+            out.push(0x81); out.push(0xE1); // and cx, imm16
+            out.extend_from_slice(&(mask as u16).to_le_bytes());
+        }
+        let opc = match op {
+            BinOp::Add => 0x03, BinOp::BitAnd => 0x23,
+            BinOp::BitOr => 0x0B, BinOp::BitXor => 0x33, _ => unreachable!(),
+        };
+        out.push(opc); out.push(0xC1); // op ax, cx
         return;
     }
     // Generic fallback: evaluate RHS first into AX, save to BX, then
