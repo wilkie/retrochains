@@ -2362,6 +2362,14 @@ pub(crate) fn emit_assign_indexed_local_byte(local_idx: usize, byte_off: u16, va
                 out.push(0x80); out.push(bp_modrm(modrm, disp)); push_bp_disp(out, disp); out.push(k8);
                 return;
             }
+            // In-place byte bitwise `a[k] &=/|=/^= K` → `<op> byte [bp+d],K8`.
+            // Fixture 720.
+            BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor => {
+                let reg = match op { BinOp::BitAnd => 4u8, BinOp::BitOr => 1, BinOp::BitXor => 6, _ => unreachable!() };
+                let modrm_base = 0x46 | (reg << 3);
+                out.push(0x80); out.push(bp_modrm(modrm_base, disp)); push_bp_disp(out, disp); out.push((k as u32 & 0xFF) as u8);
+                return;
+            }
             _ => {}
         }
     }
