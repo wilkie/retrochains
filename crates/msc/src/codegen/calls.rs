@@ -530,6 +530,23 @@ pub(crate) fn is_long_arith_mem(e: &Expr, locals: &Locals<'_>) -> bool {
             && long_rhs_mem(right, locals))
 }
 
+/// `e` is `<long> + <int>` / `<int> + <long>` — exactly one operand is a long in
+/// memory and the other is a non-constant RUNTIME int. Lowered by promoting the
+/// int to a long then two-word adding. A constant int operand is excluded — it
+/// folds into the long arithmetic instead (`add ax,K; adc dx,0`). Fixture 3291.
+pub(crate) fn is_long_plus_int(e: &Expr, locals: &Locals<'_>) -> bool {
+    let Expr::BinOp { op: BinOp::Add, left, right } = e else { return false };
+    let (long_side, int_side) = match (long_operand(left, locals), long_operand(right, locals)) {
+        (true, false) => (left.as_ref(), right.as_ref()),
+        (false, true) => (right.as_ref(), left.as_ref()),
+        _ => return false,
+    };
+    long_rhs_mem(long_side, locals)
+        && int_side.fold(locals.inits).is_none()
+        && matches!(int_side,
+            Expr::Param(i) if !locals.is_long_param(*i) && !locals.is_char_param(*i) && !locals.is_float_param(*i))
+}
+
 /// The runtime helper for an expression-context long mul/div/mod (operands
 /// pushed on the stack, result returned in DX:AX). `None` for other ops.
 fn long_muldiv_helper(op: BinOp, unsigned: bool) -> Option<&'static str> {
@@ -736,6 +753,26 @@ pub(crate) fn emit_long_to_dx_ax(value: &Expr, locals: &Locals<'_>, out: &mut Ve
         {
             emit_long_to_dx_ax(left, locals, out, fixups);
             out.extend_from_slice(&[0xF7, 0xD0, 0xF7, 0xD2]);
+        }
+        // `<long> + <int>` / `<int> + <long>` (commutative Add, exactly one
+        // operand long): promote the INT operand to a long — MSC loads it FIRST
+        // into AX and sign-extends with `cwd` (zero-extend `sub dx,dx` if the int
+        // is unsigned) — then two-word adds the long operand from memory. Fixture
+        // 3291 (`long a + int b`).
+        Expr::BinOp { left, right, .. } if is_long_plus_int(value, locals) => {
+            let (long_side, int_side) = if long_operand(left, locals) {
+                (left.as_ref(), right.as_ref())
+            } else {
+                (right.as_ref(), left.as_ref())
+            };
+            // int → AX with the long-aware displacement (a preceding long param
+            // shifts an int param: `int b` after `long a` is at [bp+8], not +6).
+            let Expr::Param(i) = int_side else { unreachable!("is_long_plus_int gates Param") };
+            let d = long_param_disp(*i, locals);
+            out.push(0x8B); out.push(bp_modrm(0x46, d)); push_bp_disp(out, d); // mov ax,[bp+d]
+            if locals.is_unsigned_param(*i) { out.extend_from_slice(&[0x2B, 0xD2]); } // sub dx,dx
+            else { out.push(0x99); } // cwd
+            emit_long_op_mem(BinOp::Add, long_side, locals, out, fixups);
         }
         // Inline 2-word arithmetic: `a <op> b` where both are long. Load a
         // into DX:AX, then combine b (in memory) word-wise: add/adc, sub/sbb,
