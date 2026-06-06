@@ -328,6 +328,7 @@ pub(crate) fn stmt_single_call(stmt: &Stmt) -> bool {
     match stmt {
         Stmt::ExprStmt(e) => expr_call_count(e) == 1,
         Stmt::Assign { value, .. } => expr_call_count(value) == 1,
+        Stmt::Return(e) => expr_call_count(e) == 1,
         _ => false,
     }
 }
@@ -780,7 +781,9 @@ pub(crate) fn emit_return(
         {
             // `return (int)<float-returning call>`: receive the result into the
             // hidden temp via __fac, then convert. The int args (if any) clean
-            // up with the normal `add sp,N`.
+            // up with the normal `add sp,N` — the float-return receive (di/si
+            // movsw copy) follows, so MSC keeps the cleanup here (fixture 4001).
+            locals.elide_call_cleanup.set(false);
             emit_call_inner(name, args, locals, false, out, fixups);
             let disp = locals.float_call_temp_disp;
             out.push(0x8D); // lea di, [bp+disp]
