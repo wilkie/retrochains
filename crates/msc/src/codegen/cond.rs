@@ -752,6 +752,26 @@ pub(crate) fn emit_cond_cmp_inner(cond: &Cond, locals: &Locals<'_>, out: &mut Ve
             emit_addr_to_reg(left, true, locals, out, fixups); // left → CX
             out.extend_from_slice(&[0x3B, 0xC8]); // cmp cx, ax
         }
+        // `a[i] == 0` / `a[i] != 0` (runtime index, word global array) → the same
+        // `mov bx,[i]; shl bx,1; cmp word [bx+_a],0` as `Truthy(a[i])` below — the
+        // caller's jcc (Eq→je / Ne→jne) reads ZF identically. Must precede the
+        // generic `Cmp{_, IntLit}` fallback, which would otherwise load to AX and
+        // `or ax,ax`. Fixture 3232 (`while (i<n && data[i] != 0)`).
+        Cond::Cmp { op: RelOp::Eq | RelOp::Ne, left: Expr::Index { array, index }, right: Expr::IntLit(0) }
+        | Cond::Cmp { op: RelOp::Eq | RelOp::Ne, left: Expr::IntLit(0), right: Expr::Index { array, index } }
+            if index.fold(locals.inits).is_none()
+                && matches!(index.as_ref(), Expr::Local(_) | Expr::Param(_)) =>
+        {
+            match index.as_ref() {
+                Expr::Local(i) => { let disp = locals.disp(*i); out.push(0x8B); out.push(bp_modrm(0x5E, disp)); push_bp_disp(out, disp); }
+                Expr::Param(i) => { out.extend_from_slice(&[0x8B, 0x5E, param_disp(*i) as u8]); }
+                _ => unreachable!(),
+            }
+            out.extend_from_slice(&[0xD1, 0xE3]); // shl bx,1
+            let body_offset = out.len();
+            out.extend_from_slice(&[0x83, 0xBF, 0x00, 0x00, 0x00]); // cmp word [bx+addr],0
+            fixups.push(Fixup { body_offset: body_offset + 1, kind: FixupKind::GlobalAddr { global_idx: *array } });
+        }
         // Generic fallback for unsupported cond shapes: evaluate LHS
         // into AX, then `cmp ax, K` (`3d K K` for word, `83 f8 K` for
         // imm8sx). Used for `p->x == K` and other DerefLocalField cases.
