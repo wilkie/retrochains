@@ -536,6 +536,11 @@ pub struct Locals<'a> {
     /// barrier — so the value isn't assumed live across a conditional branch.
     /// Fixture 1445.
     pub last_branch_barrier: std::cell::Cell<usize>,
+    /// Set true (top-level function view only) while emitting the function's LAST
+    /// reachable top-level statement. A no-else `if` here whose body falls through
+    /// merges directly into the epilogue, and MSC omits the merge-alignment NOP
+    /// for that case. Fixtures 452, 459, 3602.
+    pub last_top_stmt: std::cell::Cell<bool>,
 }
 
 #[derive(Default, Debug)]

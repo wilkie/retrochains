@@ -582,6 +582,7 @@ pub(crate) fn emit_function(
         struct_field_temp_base,
         elide_call_cleanup: std::cell::Cell::new(false),
         last_branch_barrier: std::cell::Cell::new(0),
+        last_top_stmt: std::cell::Cell::new(false),
     };
 
     // The last top-level call-bearing statement: if it carries exactly one call
@@ -634,6 +635,13 @@ pub(crate) fn emit_function(
             }
         }
 
+        // Mark when a trailing no-else `if` can omit its merge-alignment NOP: the
+        // merge falls through to the function's exit — either this is the last
+        // statement, or the only thing after it is a `return` (whose value +
+        // epilogue MSC does not pad). Fixtures 452, 459 (`...; return 0;`), 3602.
+        locals_view.last_top_stmt.set(
+            i + 1 == body.len() || matches!(body.get(i + 1), Some(Stmt::Return(_))),
+        );
         emit_stmt(
             stmt,
             &locals_view,

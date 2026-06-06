@@ -251,8 +251,15 @@ pub(crate) fn emit_stmt(
                 else_branch.is_some() && !stmt_always_returns(then_branch, locals);
             let jmp_len = if emit_else_jmp { 2 } else { 0 };
             // The alignment nop aligns the else-label (the je target), which
-            // sits past the then-block and the over-else jmp.
-            let needs_nop = (out.len() + cond_size + then_len + jmp_len) % 2 != 0;
+            // sits past the then-block and the over-else jmp. MSC omits it when
+            // this is the function's last top-level statement with no else and a
+            // falling-through body — the merge IS the epilogue, which isn't padded.
+            // Fixtures 452, 459, 3602.
+            let merge_is_epilogue = locals.last_top_stmt.get()
+                && else_branch.is_none()
+                && !stmt_always_returns(then_branch, locals);
+            let needs_nop = !merge_is_epilogue
+                && (out.len() + cond_size + then_len + jmp_len) % 2 != 0;
             let nop_pad = usize::from(needs_nop);
             let take_then_disp = i8::try_from(then_len + jmp_len + nop_pad)
                 .expect("then-body short enough for jcc rel8");
@@ -1695,6 +1702,7 @@ pub(crate) fn emit_threaded_for(
         struct_field_temp_base: locals.struct_field_temp_base,
         elide_call_cleanup: std::cell::Cell::new(false),
         last_branch_barrier: std::cell::Cell::new(0),
+        last_top_stmt: std::cell::Cell::new(false),
     };
     let n = levels.len();
     let base = out.len();
@@ -2081,6 +2089,7 @@ pub(crate) fn emit_loop(
         struct_field_temp_base: locals.struct_field_temp_base,
         elide_call_cleanup: std::cell::Cell::new(false),
         last_branch_barrier: std::cell::Cell::new(0),
+        last_top_stmt: std::cell::Cell::new(false),
     };
     let mut body_buf = Vec::new();
     let mut body_fixups: Vec<Fixup> = Vec::new();
@@ -2751,6 +2760,7 @@ pub(crate) fn emit_do_while(
         struct_field_temp_base: locals.struct_field_temp_base,
         elide_call_cleanup: std::cell::Cell::new(false),
         last_branch_barrier: std::cell::Cell::new(0),
+        last_top_stmt: std::cell::Cell::new(false),
     };
     let mut body_buf = Vec::new();
     let mut body_fixups: Vec<Fixup> = Vec::new();
