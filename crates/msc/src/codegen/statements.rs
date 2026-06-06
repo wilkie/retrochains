@@ -1327,6 +1327,7 @@ pub(crate) fn emit_return(
                 || is_long_not(expr, locals)
                 || is_long_arith_mem(expr, locals)
                 || is_long_plus_int(expr, locals)
+                || is_long_const_bitop(expr, locals)
                 || is_long_muldiv(expr, locals)
                 || is_long_field_elem_or_const_arith(expr, locals))
         {

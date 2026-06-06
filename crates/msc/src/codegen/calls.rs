@@ -679,6 +679,46 @@ fn emit_long_op_mem(op: BinOp, rhs: &Expr, locals: &Locals<'_>, out: &mut Vec<u8
     push_bp_disp(out, disp + 2);
 }
 
+/// Apply a bitwise op of a 16-bit constant `word` to AX (low half, `is_high`
+/// false) or DX (high half, `is_high` true) using MSC's byte-op idiom: a word
+/// whose byte equals the op's identity (0 for OR/XOR, 0xFF for AND) is reduced
+/// to a single-byte op on the other byte, and an all-identity word is elided.
+fn emit_word_const_bitop(op: BinOp, word: u16, is_high: bool, out: &mut Vec<u8>) {
+    let hi = (word >> 8) as u8;
+    let lo = word as u8;
+    let is_and = matches!(op, BinOp::BitAnd);
+    if (!is_and && word == 0) || (is_and && word == 0xFFFF) { return; } // identity
+    let grp = match op { BinOp::BitOr => 1u8, BinOp::BitAnd => 4, BinOp::BitXor => 6, _ => unreachable!() };
+    let byte_id: u8 = if is_and { 0xFF } else { 0x00 };
+    // ModRM (mod=11) r/m for the dl/dh vs al/ah register pick.
+    let rm_lo = if is_high { 0x02u8 } else { 0x00 }; // dl / al
+    let rm_hi = if is_high { 0x06u8 } else { 0x04 }; // dh / ah
+    if hi == byte_id {
+        // op the low byte. AL has an accumulator short form; DL uses 80 /grp.
+        if is_high {
+            out.extend_from_slice(&[0x80, 0xC0 | (grp << 3) | rm_lo, lo]);
+        } else {
+            let opc = match op { BinOp::BitOr => 0x0Cu8, BinOp::BitAnd => 0x24, BinOp::BitXor => 0x34, _ => unreachable!() };
+            out.extend_from_slice(&[opc, lo]);
+        }
+    } else if lo == byte_id {
+        // op the high byte (ah / dh) — always the 80 /grp form.
+        out.extend_from_slice(&[0x80, 0xC0 | (grp << 3) | rm_hi, hi]);
+    } else if is_high {
+        out.push(0x81); out.push(0xC0 | (grp << 3) | rm_lo); out.extend_from_slice(&word.to_le_bytes());
+    } else {
+        let opc = match op { BinOp::BitOr => 0x0Du8, BinOp::BitAnd => 0x25, BinOp::BitXor => 0x35, _ => unreachable!() };
+        out.push(opc); out.extend_from_slice(&word.to_le_bytes());
+    }
+}
+
+/// `e` is `<long> <&|`|^> <const>` — a long operand combined with a foldable
+/// constant via a bitwise op. Lowered by loading DX:AX then word-wise const ops.
+pub(crate) fn is_long_const_bitop(e: &Expr, locals: &Locals<'_>) -> bool {
+    matches!(e, Expr::BinOp { op: BinOp::BitOr | BinOp::BitAnd | BinOp::BitXor, left, right }
+        if long_operand(left, locals) && right.fold(locals.inits).is_some())
+}
+
 /// Materialize a known 32-bit long constant into DX:AX the way MSC does:
 /// `mov ax,lo; cwd` when the high word is the sign-extension of the low word
 /// (the common small-value case), else `mov ax,lo; mov dx,hi`.
@@ -773,6 +813,19 @@ pub(crate) fn emit_long_to_dx_ax(value: &Expr, locals: &Locals<'_>, out: &mut Ve
             if locals.is_unsigned_param(*i) { out.extend_from_slice(&[0x2B, 0xD2]); } // sub dx,dx
             else { out.push(0x99); } // cwd
             emit_long_op_mem(BinOp::Add, long_side, locals, out, fixups);
+        }
+        // `<long> <&|`|^> <const>`: load the long into DX:AX, then apply the
+        // constant word-wise with MSC's byte-op idiom (`a | 0x100L` → `or ah,1`,
+        // the all-identity high word elided). Fixture 2876.
+        Expr::BinOp { op, left, right }
+            if matches!(op, BinOp::BitOr | BinOp::BitAnd | BinOp::BitXor)
+                && long_operand(left, locals)
+                && right.fold(locals.inits).is_some() =>
+        {
+            let k = right.fold(locals.inits).expect("folded const");
+            emit_long_to_dx_ax(left, locals, out, fixups);
+            emit_word_const_bitop(*op, (k as u32 & 0xFFFF) as u16, false, out); // AX (low)
+            emit_word_const_bitop(*op, ((k as u32) >> 16) as u16, true, out);   // DX (high)
         }
         // Inline 2-word arithmetic: `a <op> b` where both are long. Load a
         // into DX:AX, then combine b (in memory) word-wise: add/adc, sub/sbb,
