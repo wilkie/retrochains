@@ -12,6 +12,9 @@ pub(crate) fn body_needs_si(stmts: &[Stmt], local_inits: &[Option<i32>]) -> bool
                     | AssignTarget::IndexedLocalByteVar { .. }
                     | AssignTarget::Index2D { .. })
                     || matches!(target, AssignTarget::ParamIndexStore { index, .. } if index.fold(inits).is_none())
+                    // `arr[i] = arr[j]` / `arr[i] ± arr[j]` (runtime indices): the
+                    // RHS array read uses SI so the LHS index in BX survives.
+                    || crate::codegen::assign::global_index_rhs_uses_si(target, value, inits)
                     // `*dst = *src [± K]` copies through a pointer param from a
                     // deref of another param — the source deref uses SI.
                     || matches!(target, AssignTarget::DerefParam(d)

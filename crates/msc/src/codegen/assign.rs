@@ -2415,6 +2415,42 @@ pub(crate) fn emit_assign_indexed_local_var(local_idx: usize, index: &Expr, valu
 /// BX-based: `mov bx,[i]; [shl bx,1]; <value→AX or imm>; mov [bx+&a], ax/al`.
 /// The store modrm is `[bx]+disp16` (0x87) with a GlobalAddr fixup. Constant RHS
 /// uses the immediate form (c6/c7). Fixtures 510, 1257, 1366, 1444.
+/// `arr[j]` with a RUNTIME word index, read into AX using SI for the index so a
+/// LHS index already parked in BX survives: `mov si,[j]; shl si,1; mov ax,[si+&arr]`.
+/// Returns true iff `rhs` matched this shape (a bare runtime-indexed word-array
+/// global read). MSC uses this for `arr[i] = arr[j]` / `arr[i] += arr[j]` — both
+/// index registers must be live at once. Kept in sync with `global_index_rhs_uses_si`.
+pub(crate) fn emit_indexed_global_read_via_si(rhs: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) -> bool {
+    let Expr::Index { array, index } = rhs else { return false };
+    if index.fold(locals.inits).is_some() { return false; }
+    emit_index_to_si(index, locals, out);            // mov si,[j]
+    out.extend_from_slice(&[0xD1, 0xE6]);            // shl si,1
+    out.push(0x8B); out.push(0x84);                  // mov ax,[si+disp16]
+    let dp = out.len();
+    out.extend_from_slice(&[0x00, 0x00]);
+    fixups.push(Fixup { body_offset: dp - 1, kind: FixupKind::GlobalAddr { global_idx: *array } });
+    true
+}
+/// Predicate matching the runtime-indexed-global store whose RHS read needs SI
+/// (so the frame must push/pop SI). True for `arr[i] = arr[j]` (bare runtime word
+/// Index value) and `arr[i] ± arr[j]` self-compound (right operand a runtime word
+/// Index). Mirrors `emit_indexed_global_read_via_si`'s firing condition.
+pub(crate) fn global_index_rhs_uses_si(target: &AssignTarget, value: &Expr, inits: &[Option<i32>]) -> bool {
+    if !matches!(target, AssignTarget::IndexedGlobalVar { .. }) {
+        return false;
+    }
+    let is_rt_index = |e: &Expr| matches!(e, Expr::Index { index, .. } if index.fold(inits).is_none());
+    if is_rt_index(value) {
+        return true;
+    }
+    if let Expr::BinOp { op: BinOp::Add | BinOp::Sub, left, right } = value
+        && matches!(left.as_ref(), Expr::Index { array, .. } if matches!(target, AssignTarget::IndexedGlobalVar { array: ta, .. } if ta == array))
+        && is_rt_index(right)
+    {
+        return true;
+    }
+    false
+}
 pub(crate) fn emit_assign_indexed_global_var(global_idx: usize, index: &Expr, is_byte: bool, value: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
     // Self-compound `arr[i] += rhs` / `arr[i]++` → in-place op at [bx + &arr].
     if let Expr::BinOp { op: op @ (BinOp::Add | BinOp::Sub), left, right } = value
@@ -2446,7 +2482,11 @@ pub(crate) fn emit_assign_indexed_global_var(global_idx: usize, index: &Expr, is
             emit_byte_rhs_to_al(right, locals, out, fixups);
             out.push(if is_add { 0x00 } else { 0x28 }); out.push(0x87); addr(out, fixups); // add/sub [bx+&arr], al
         } else {
-            emit_expr_to_ax(right, locals, out, fixups);
+            // `arr[i] ± arr[j]` (runtime j): read arr[j] through SI so the LHS
+            // index in BX survives (fixture 3593).
+            if !emit_indexed_global_read_via_si(right, locals, out, fixups) {
+                emit_expr_to_ax(right, locals, out, fixups);
+            }
             out.push(if is_add { 0x01 } else { 0x29 }); out.push(0x87); addr(out, fixups); // add/sub [bx+&arr], ax
         }
         return;
@@ -2466,7 +2506,11 @@ pub(crate) fn emit_assign_indexed_global_var(global_idx: usize, index: &Expr, is
             emit_byte_rhs_to_al(value, locals, out, fixups); // mov al, <rhs byte>
             out.push(0x88);
         } else {
-            emit_expr_to_ax(value, locals, out, fixups);
+            // `arr[i] = arr[j]` (runtime j): read arr[j] through SI so the LHS
+            // index in BX survives (fixture 3011).
+            if !emit_indexed_global_read_via_si(value, locals, out, fixups) {
+                emit_expr_to_ax(value, locals, out, fixups);
+            }
             out.push(0x89);
         }
         out.push(0x87); // [bx]+disp16
