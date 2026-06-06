@@ -231,10 +231,15 @@ pub(crate) fn emit_stmt(
             // then-block) would land at an odd offset, add 1 NOP. We
             // pre-emit the cond_skip into a scratch buffer to learn its
             // size (displacement is irrelevant for sizing).
+            // Size the cond by emitting onto a COPY of the real `out` so any
+            // tail-context peepholes (e.g. AX-reuse of a just-stored local in the
+            // compare) fire identically to the actual emission below — otherwise
+            // the alignment-nop parity would be computed from a stale size.
             let cond_size = {
-                let mut sz = Vec::new();
+                let mut sz = out.clone();
+                let base = sz.len();
                 emit_cond_skip(cond, 0i8, locals, &mut sz, &mut Vec::new());
-                sz.len()
+                sz.len() - base
             };
             // When the then-branch falls through (does not unconditionally
             // return) and an else-branch exists, MSC emits `jmp SHORT $end`
@@ -292,6 +297,13 @@ pub(crate) fn emit_stmt(
                 out[jmp_pos + 1] = disp as u8;
             }
         }
+    }
+    // After any statement that ends at a branch merge (if/loop/switch/labels) or
+    // otherwise leaves AX in an undefined state, advance the AX-reuse barrier so a
+    // following compare won't reuse a register stored before the merge (fixture
+    // 1445). Straight-line stores past this point remain reusable.
+    if !matches!(stmt, Stmt::Assign { .. }) {
+        locals.last_branch_barrier.set(out.len());
     }
 }
 /// True when `stmt` unconditionally returns — so a following
@@ -1172,7 +1184,12 @@ pub(crate) fn emit_return(
                 v.extend_from_slice(&[0x8B, 0xC2]);
                 v
             };
-            let ends_with = |pat: &[u8]| out.len() >= pat.len() && out[out.len() - pat.len()..] == *pat;
+            // The reuse is only valid for a STRAIGHT-LINE store (at or past the
+            // last branch merge) — after an if/loop merge MSC reloads even though
+            // AX may happen to hold the value. Fixture 1445.
+            let ends_with = |pat: &[u8]| out.len() >= pat.len()
+                && out[out.len() - pat.len()..] == *pat
+                && out.len() - pat.len() >= locals.last_branch_barrier.get();
             let ax_already_set = ends_with(&prev_store) || ends_with(&prev_store_mod);
             if !ax_already_set {
                 emit_expr_to_ax(expr, locals, out, fixups);
@@ -1677,6 +1694,7 @@ pub(crate) fn emit_threaded_for(
         fpu_pending_fwait: locals.fpu_pending_fwait,
         struct_field_temp_base: locals.struct_field_temp_base,
         elide_call_cleanup: std::cell::Cell::new(false),
+        last_branch_barrier: std::cell::Cell::new(0),
     };
     let n = levels.len();
     let base = out.len();
@@ -2062,6 +2080,7 @@ pub(crate) fn emit_loop(
         fpu_pending_fwait: locals.fpu_pending_fwait,
         struct_field_temp_base: locals.struct_field_temp_base,
         elide_call_cleanup: std::cell::Cell::new(false),
+        last_branch_barrier: std::cell::Cell::new(0),
     };
     let mut body_buf = Vec::new();
     let mut body_fixups: Vec<Fixup> = Vec::new();
@@ -2731,6 +2750,7 @@ pub(crate) fn emit_do_while(
         fpu_pending_fwait: locals.fpu_pending_fwait,
         struct_field_temp_base: locals.struct_field_temp_base,
         elide_call_cleanup: std::cell::Cell::new(false),
+        last_branch_barrier: std::cell::Cell::new(0),
     };
     let mut body_buf = Vec::new();
     let mut body_fixups: Vec<Fixup> = Vec::new();

@@ -659,8 +659,12 @@ pub(crate) fn emit_cond_cmp_inner(cond: &Cond, locals: &Locals<'_>, out: &mut Ve
             out.push(0x39); out.push(bp_modrm(0x46, l_disp)); push_bp_disp(out, l_disp);
         }
         Cond::Cmp { op: _, left: Expr::Local(li), right: Expr::Local(rj) } => {
-            // MSC loads right into AX, then `cmp [left], ax`.
-            emit_load_local(*rj, locals, out);
+            // MSC loads right into AX, then `cmp [left], ax`. If the right local
+            // was just stored from AX (`mov [rj],ax`), it's still live — skip the
+            // reload (the straight-line analog of the return AX-reuse).
+            if !word_local_live_in_ax(*rj, locals, out) {
+                emit_load_local(*rj, locals, out);
+            }
             let l_disp = locals.disp(*li);
             out.push(0x39); out.push(bp_modrm(0x46, l_disp)); push_bp_disp(out, l_disp);
         }
@@ -702,8 +706,12 @@ pub(crate) fn emit_cond_cmp_inner(cond: &Cond, locals: &Locals<'_>, out: &mut Ve
             out.push(0x39); out.push(0x46); out.push(l_disp as u8); // params always small
         }
         Cond::Cmp { op: _, left: Expr::Param(pi), right: Expr::Local(li) } => {
-            // MSC loads right (local) into AX, then `cmp [param], ax`.
-            emit_load_local(*li, locals, out);
+            // MSC loads right (local) into AX, then `cmp [param], ax`. Reuse a live
+            // AX when the local was just stored from it (`m = a; if (b < m)`).
+            // Fixture 1445.
+            if !word_local_live_in_ax(*li, locals, out) {
+                emit_load_local(*li, locals, out);
+            }
             let p_disp = param_disp(*pi);
             out.push(0x39); out.push(0x46); out.push(p_disp as u8); // params always small
         }
@@ -894,6 +902,23 @@ pub(crate) fn inverted_jcc(op: RelOp) -> u8 {
 /// Loop-back jcc opcode — fires when cond is *true*, so it's NOT
 /// inverted. Used by `emit_while` / `emit_do_while` for the tail
 /// branch back to the loop top.
+/// True when `out` ends with the exact `mov [bp+disp(idx)], ax` store of word
+/// local `idx`, so AX still holds its value and a reload can be skipped. Gated to
+/// plain word (int) locals — char/long/float use other load shapes.
+fn word_local_live_in_ax(idx: usize, locals: &Locals<'_>, out: &[u8]) -> bool {
+    if locals.size(idx) != 2 || locals.is_long_local(idx) || locals.is_float_local(idx) {
+        return false;
+    }
+    let d = locals.disp(idx);
+    let mut store = vec![0x89, bp_modrm(0x46, d)];
+    push_bp_disp(&mut store, d);
+    if out.len() < store.len() || out[out.len() - store.len()..] != *store {
+        return false;
+    }
+    // The store must be STRAIGHT-LINE — at or past the last branch merge — so AX
+    // isn't assumed live across a conditional branch (MSC reloads after a merge).
+    out.len() - store.len() >= locals.last_branch_barrier.get()
+}
 pub(crate) fn loop_back_jcc(op: RelOp) -> u8 {
     match op {
         RelOp::Eq => 0x74, // je

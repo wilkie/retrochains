@@ -1320,10 +1320,12 @@ pub(crate) fn emit_load_local(idx: usize, locals: &Locals<'_>, out: &mut Vec<u8>
 /// byte-pattern heuristic (same approach as the `return <local>` reload
 /// elision); it only fires when the defining op is literally the last thing
 /// emitted, i.e. straight-line within a basic block.
-pub(crate) fn ax_holds_word_operand(out: &[u8], load: &[u8], store_self: &[u8]) -> bool {
+pub(crate) fn ax_holds_word_operand(out: &[u8], load: &[u8], store_self: &[u8], barrier: usize) -> bool {
     let ends = |pat: &[u8]| out.len() >= pat.len() && out[out.len() - pat.len()..] == *pat;
+    // The instruction that established AX's value must be STRAIGHT-LINE (at or past
+    // the last branch merge) — otherwise AX isn't reliably live (fixture 1445).
     if ends(store_self) {
-        return true;
+        return out.len() - store_self.len() >= barrier;
     }
     // Pattern B: the operand was loaded into AX, then ONE OR MORE stores from AX
     // to other slots followed — none of those modify AX, so AX still holds the
@@ -1332,7 +1334,7 @@ pub(crate) fn ax_holds_word_operand(out: &[u8], load: &[u8], store_self: &[u8]) 
     let mut n = out.len();
     loop {
         if n >= load.len() && out[n - load.len()..n] == *load {
-            return true;
+            return n - load.len() >= barrier;
         }
         // Length of a trailing store-from-AX: `89 46 d8` / `89 86 d16` (bp-rel)
         // or `a3 o16` (global moffs).
@@ -1356,7 +1358,7 @@ pub(crate) fn emit_load_local_reuse(i: usize, locals: &Locals<'_>, out: &mut Vec
         let d = locals.disp(i);
         let load = { let mut v = vec![0x8B, bp_modrm(0x46, d)]; push_bp_disp(&mut v, d); v };
         let store_self = { let mut v = vec![0x89, bp_modrm(0x46, d)]; push_bp_disp(&mut v, d); v };
-        if ax_holds_word_operand(out, &load, &store_self) {
+        if ax_holds_word_operand(out, &load, &store_self, locals.last_branch_barrier.get()) {
             return;
         }
     }
@@ -1380,7 +1382,7 @@ pub(crate) fn emit_load_param_reuse(i: usize, locals: &Locals<'_>, out: &mut Vec
         let d = param_disp(i);
         let load = { let mut v = vec![0x8B, bp_modrm(0x46, d)]; push_bp_disp(&mut v, d); v };
         let store_self = { let mut v = vec![0x89, bp_modrm(0x46, d)]; push_bp_disp(&mut v, d); v };
-        if ax_holds_word_operand(out, &load, &store_self) {
+        if ax_holds_word_operand(out, &load, &store_self, locals.last_branch_barrier.get()) {
             return;
         }
     }

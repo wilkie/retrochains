@@ -581,6 +581,7 @@ pub(crate) fn emit_function(
         fpu_pending_fwait: &fpu_pending_fwait,
         struct_field_temp_base,
         elide_call_cleanup: std::cell::Cell::new(false),
+        last_branch_barrier: std::cell::Cell::new(0),
     };
 
     // The last top-level call-bearing statement: if it carries exactly one call

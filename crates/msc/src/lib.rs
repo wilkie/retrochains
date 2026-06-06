@@ -530,6 +530,12 @@ pub struct Locals<'a> {
     /// SP. Sub-scope (loop/block) views keep this false: a call inside a loop
     /// repeats and must clean up each iteration. Fixtures 4044, 2439, 2299.
     pub elide_call_cleanup: std::cell::Cell<bool>,
+    /// `out.len()` just after the most recent branch-merge (the end of an
+    /// `if`/loop/switch statement). A compare's AX-reuse of a just-stored local
+    /// is only valid for a STRAIGHT-LINE store — one emitted at or past this
+    /// barrier — so the value isn't assumed live across a conditional branch.
+    /// Fixture 1445.
+    pub last_branch_barrier: std::cell::Cell<usize>,
 }
 
 #[derive(Default, Debug)]
