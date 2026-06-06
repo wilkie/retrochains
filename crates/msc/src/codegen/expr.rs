@@ -1490,6 +1490,27 @@ fn emit_addsub_into(cx: bool, e: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>) 
 }
 /// `v << k` / `v >> k` where v is a word bp-rel variable and k a constant.
 /// Returns (disp, is_shl, k, is_unsigned) for the rotate-idiom codegen.
+/// bp-relative disps to build a runtime shift amount in CL: a single word var →
+/// `[d]` (mov cl,[d]); a sum of two word vars → `[da, db]` (mov cl,[da]; add
+/// cl,[db]). None for other shapes. Word int Param/Local only. Fixture 3634.
+fn shift_amount_cl(e: &Expr, locals: &Locals<'_>) -> Option<Vec<i16>> {
+    fn word_disp(e: &Expr, locals: &Locals<'_>) -> Option<i16> {
+        match e {
+            Expr::Param(i) if !locals.is_char_param(*i) && !locals.is_long_param(*i) && !locals.is_float_param(*i) => Some(param_disp(*i)),
+            Expr::Local(i) if locals.size(*i) == 2 && !locals.is_long_local(*i) && !locals.is_float_local(*i) => Some(locals.disp(*i)),
+            _ => None,
+        }
+    }
+    if let Some(d) = word_disp(e, locals) {
+        return Some(vec![d]);
+    }
+    if let Expr::BinOp { op: BinOp::Add, left, right } = e
+        && let (Some(a), Some(b)) = (word_disp(left, locals), word_disp(right, locals))
+    {
+        return Some(vec![a, b]);
+    }
+    None
+}
 fn shift_of_bp(e: &Expr, locals: &Locals<'_>) -> Option<(i16, bool, u8, bool)> {
     let Expr::BinOp { op: op @ (BinOp::Shl | BinOp::Shr), left, right } = e else { return None };
     let Expr::IntLit(k) = right.as_ref() else { return None };
@@ -2333,6 +2354,37 @@ fn emit_binop_inner(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, o
         }));
         out.push(0x02); // disp8 = 2 (skip the `sub ax, ax`)
         out.extend_from_slice(&[0x2B, 0xC0]); // sub ax, ax
+        return;
+    }
+    // Runtime shift `x << amt` / `x >> amt` (non-constant amount): load x into AX,
+    // compute the amount into CL via byte ops (which leave AX intact), then
+    // `shl/shr/sar ax,cl`. Fixture 3634 (`x << (a + b)`). The amount must be a
+    // simple var or a sum of two simple vars (the shapes MSC builds in CL).
+    if matches!(op, BinOp::Shl | BinOp::Shr)
+        && right.fold(locals.inits).is_none()
+        && shift_amount_cl(right, locals).is_some()
+        && !long_operand(left, locals)
+    {
+        emit_expr_to_ax(left, locals, out, fixups); // x → AX
+        let parts = shift_amount_cl(right, locals).unwrap();
+        // First operand: `mov cl,[d]` (8A 4E d); subsequent: `add cl,[d]` (02 4E d).
+        for (i, d) in parts.iter().enumerate() {
+            out.push(if i == 0 { 0x8A } else { 0x02 });
+            out.push(bp_modrm(0x4E, *d));
+            push_bp_disp(out, *d);
+        }
+        let unsigned = match left {
+            Expr::Param(i) => locals.is_unsigned_param(*i),
+            Expr::Local(i) => locals.is_unsigned_local(*i),
+            Expr::Global(g) => locals.is_unsigned_global(*g),
+            _ => false,
+        };
+        let modrm = match op {
+            BinOp::Shl => 0xE0,
+            BinOp::Shr => if unsigned { 0xE8 } else { 0xF8 },
+            _ => unreachable!(),
+        };
+        out.push(0xD3); out.push(modrm); // shl/shr/sar ax,cl
         return;
     }
     // DX:AX field reuse: `a OP b` where both are word operands at the exact bp
