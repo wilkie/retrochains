@@ -1623,6 +1623,10 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
         ) {
             peek_pos += 1;
         }
+        // A `register` storage-class on a scalar-int decl routes the local to a
+        // saved register (SI/DI) rather than its stack slot. Fixtures 1550/2069.
+        let has_register = (start_pos..peek_pos)
+            .any(|j| matches!(p.toks.get(j), Some(Tok::Kw("register"))));
         // `enum [<tag>]` — treat as int (no separate enum type yet).
         // Consume the optional tag identifier and let the standard
         // int-decl path handle the declarator(s).
@@ -1679,9 +1683,9 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
                     elem_count = n as usize;
                 }
                 let spec = if is_ptr {
-                    LocalSpec { size: 2, array_len: 1, init: None, struct_idx: Some(sidx), is_long: false, init_is_literal: false, is_far_ptr: false, pointee_size: stotal, is_unsigned: false, init_via_cast: false, init_via_type_cast: false, is_float: false, float_bits: None, block_offset: None }
+                    LocalSpec { size: 2, array_len: 1, init: None, struct_idx: Some(sidx), is_long: false, init_is_literal: false, is_far_ptr: false, pointee_size: stotal, is_unsigned: false, init_via_cast: false, init_via_type_cast: false, is_float: false, float_bits: None, block_offset: None, is_register: false }
                 } else {
-                    LocalSpec { size: 1, array_len: stotal * elem_count, init: None, struct_idx: Some(sidx), is_long: false, init_is_literal: false, is_far_ptr: false, pointee_size: 0, is_unsigned: false, init_via_cast: false, init_via_type_cast: false, is_float: false, float_bits: None, block_offset: None }
+                    LocalSpec { size: 1, array_len: stotal * elem_count, init: None, struct_idx: Some(sidx), is_long: false, init_is_literal: false, is_far_ptr: false, pointee_size: 0, is_unsigned: false, init_via_cast: false, init_via_type_cast: false, is_float: false, float_bits: None, block_offset: None, is_register: false }
                 };
                 let local_idx = locals.len();
                 p.local_names.push(lname);
@@ -1862,7 +1866,7 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
                     size: 2, array_len: 1, init: None, struct_idx: None, is_long: false,
                     init_is_literal: false, is_far_ptr: false, pointee_size: 2, is_unsigned: false,
                     init_via_cast: false, init_via_type_cast: false, is_float: false, float_bits: None,
-                    block_offset: None,
+                    block_offset: None, is_register: false,
                 };
                 p.local_specs.push(spec.clone());
                 locals.push(spec);
@@ -1939,7 +1943,7 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
             } else {
                 (size, array_len, false)
             };
-            let spec = LocalSpec { size: slot_size, array_len: slot_len, init: None, struct_idx: None, is_long: is_long_slot, init_is_literal: false, is_far_ptr: is_far_ptr_decl, pointee_size: if star_count > 0 { size } else { 0 }, is_unsigned: has_unsigned && star_count == 0 && (size == 1 || size == 2 || is_long_slot), init_via_cast: false, init_via_type_cast: false, is_float: false, float_bits: None, block_offset: None };
+            let spec = LocalSpec { size: slot_size, array_len: slot_len, init: None, struct_idx: None, is_long: is_long_slot, init_is_literal: false, is_far_ptr: is_far_ptr_decl, pointee_size: if star_count > 0 { size } else { 0 }, is_unsigned: has_unsigned && star_count == 0 && (size == 1 || size == 2 || is_long_slot), init_via_cast: false, init_via_type_cast: false, is_float: false, float_bits: None, block_offset: None, is_register: has_register && star_count == 0 && slot_len == 1 && !is_long_slot && slot_size == 2 };
             p.local_specs.push(spec.clone());
             locals.push(spec);
             if matches!(p.peek(), Some(Tok::Assign)) {

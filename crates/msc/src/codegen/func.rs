@@ -221,7 +221,19 @@ pub(crate) fn emit_function(
         Stmt::Assign { target: AssignTarget::Local(_) | AssignTarget::Global(_), value: Expr::Call { name, .. } }
             if struct_return_funcs.get(&symbol_name(name)).copied().unwrap_or(0) > 4));
     let returns_big_struct = func.return_struct_bytes > 4 || receives_big_struct;
-    let frame = if returns_big_struct && matches!(base_frame, Frame::None) {
+    // `register int` locals are accessed via SI (1st) / DI (2nd), saved across
+    // the call. The locals still reserve their stack slots (so base_frame is
+    // already WithSlide), but the frame upgrades to push/pop the register(s).
+    // Fixtures 1550 (1 reg → SI), 2069 (2 regs → DI+SI).
+    let reg_locals: Vec<usize> = func.locals.iter().enumerate()
+        .filter(|(_, l)| l.is_register).map(|(i, _)| i).collect();
+    let si_local = reg_locals.first().copied();
+    let di_local = reg_locals.get(1).copied();
+    let frame = if reg_locals.len() >= 2 {
+        Frame::WithSlideDiSi
+    } else if reg_locals.len() == 1 {
+        Frame::WithSlideSi
+    } else if returns_big_struct && matches!(base_frame, Frame::None) {
         // No locals (e.g. `return <global>`) — keep the bp-less prologue but add
         // di/si for the movsw copy.
         Frame::NoneDiSi
@@ -453,6 +465,13 @@ pub(crate) fn emit_function(
             continue;
         }
         if let Some(value) = spec.init {
+            // A `register` local lives in SI/DI, not its stack slot — never emit a
+            // slot init store. The value is still exposed via local_inits, so reads
+            // that fold (e.g. `if(x)`, `return x+y`) need no runtime materialization;
+            // a non-folding read materializes `mov si,K` at the use site. 1560/2069.
+            if spec.is_register {
+                continue;
+            }
             let disp = local_disps[i];
             if spec.is_long {
                 let low = (value as u32 & 0xFFFF) as u16;
@@ -540,6 +559,8 @@ pub(crate) fn emit_function(
         long_returners,
         pascal_fns,
         pascal_cleanup,
+        si_local,
+        di_local,
         long_param_funcs,
         struct_param_funcs,
         struct_return_funcs,

@@ -298,6 +298,10 @@ pub struct LocalSpec {
     /// Block locals are allocated in scope order with slot reuse on block
     /// exit; they are skipped by the hash-bucket layout passes.
     pub block_offset: Option<u16>,
+    /// True for a `register int x` — the local still reserves its frame slot
+    /// (counted in chkstk N) but is ACCESSED via a saved register (the first
+    /// such local in a function → SI, the second → DI). Fixtures 1550/2069.
+    pub is_register: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -345,20 +349,20 @@ pub enum BitBase {
 
 impl LocalSpec {
     pub fn int(init: Option<i32>) -> Self {
-        Self { size: 2, array_len: 1, init, struct_idx: None, is_long: false, init_is_literal: init.is_some(), is_far_ptr: false, pointee_size: 0, is_unsigned: false, init_via_cast: false, init_via_type_cast: false, is_float: false, float_bits: None, block_offset: None }
+        Self { size: 2, array_len: 1, init, struct_idx: None, is_long: false, init_is_literal: init.is_some(), is_far_ptr: false, pointee_size: 0, is_unsigned: false, init_via_cast: false, init_via_type_cast: false, is_float: false, float_bits: None, block_offset: None, is_register: false }
     }
     pub fn char_(init: Option<i32>) -> Self {
-        Self { size: 1, array_len: 1, init, struct_idx: None, is_long: false, init_is_literal: init.is_some(), is_far_ptr: false, pointee_size: 0, is_unsigned: false, init_via_cast: false, init_via_type_cast: false, is_float: false, float_bits: None, block_offset: None }
+        Self { size: 1, array_len: 1, init, struct_idx: None, is_long: false, init_is_literal: init.is_some(), is_far_ptr: false, pointee_size: 0, is_unsigned: false, init_via_cast: false, init_via_type_cast: false, is_float: false, float_bits: None, block_offset: None, is_register: false }
     }
     pub fn long_(init: Option<i32>) -> Self {
-        Self { size: 2, array_len: 2, init, struct_idx: None, is_long: true, init_is_literal: init.is_some(), is_far_ptr: false, pointee_size: 0, is_unsigned: false, init_via_cast: false, init_via_type_cast: false, is_float: false, float_bits: None, block_offset: None }
+        Self { size: 2, array_len: 2, init, struct_idx: None, is_long: true, init_is_literal: init.is_some(), is_far_ptr: false, pointee_size: 0, is_unsigned: false, init_via_cast: false, init_via_type_cast: false, is_float: false, float_bits: None, block_offset: None, is_register: false }
     }
     /// `float`/`double` local. `width` is 4 (float) or 8 (double); `bits` is
     /// the f64 value of a literal initializer (None for uninitialized). `init`
     /// carries the truncated int value so `(int)f` const-folds.
     pub fn float_(width: usize, bits: Option<u64>) -> Self {
         let init = bits.map(|b| f64::from_bits(b) as i32);
-        Self { size: width, array_len: 1, init, struct_idx: None, is_long: false, init_is_literal: init.is_some(), is_far_ptr: false, pointee_size: 0, is_unsigned: false, init_via_cast: false, init_via_type_cast: false, is_float: true, float_bits: bits, block_offset: None }
+        Self { size: width, array_len: 1, init, struct_idx: None, is_long: false, init_is_literal: init.is_some(), is_far_ptr: false, pointee_size: 0, is_unsigned: false, init_via_cast: false, init_via_type_cast: false, is_float: true, float_bits: bits, block_offset: None, is_register: false }
     }
     /// A `float`/`double` local whose initializer is a const-foldable cast or
     /// arithmetic (`(float)i`, `double d = f`, `a + b`) rather than a direct
@@ -366,7 +370,7 @@ impl LocalSpec {
     /// so the int-fold view does NOT replace `(int)<local>` with `mov ax,K`;
     /// instead the store keeps st(0) live (`fst`) and the cast is `call __ftol`.
     pub fn float_nonliteral(width: usize, bits: u64) -> Self {
-        Self { size: width, array_len: 1, init: None, struct_idx: None, is_long: false, init_is_literal: false, is_far_ptr: false, pointee_size: 0, is_unsigned: false, init_via_cast: false, init_via_type_cast: false, is_float: true, float_bits: Some(bits), block_offset: None }
+        Self { size: width, array_len: 1, init: None, struct_idx: None, is_long: false, init_is_literal: false, is_far_ptr: false, pointee_size: 0, is_unsigned: false, init_via_cast: false, init_via_type_cast: false, is_float: true, float_bits: Some(bits), block_offset: None, is_register: false }
     }
     /// Bytes occupied in the frame, rounded up to an even count.
     /// MSC pads each local to a word boundary — scalar char gets 2
@@ -461,6 +465,11 @@ pub struct Locals<'a> {
     /// When the CURRENT function is `pascal`, the byte count its epilogue must
     /// pop via `ret N` (total argument bytes); 0 for a cdecl function.
     pub pascal_cleanup: u16,
+    /// Local index allocated to the SI register (first `register int`), if any.
+    /// Reads/writes of this local use SI instead of its stack slot.
+    pub si_local: Option<usize>,
+    /// Local index allocated to the DI register (second `register int`), if any.
+    pub di_local: Option<usize>,
     /// Map of function symbol names to their param_is_long arrays.
     /// Used by emit_call_inner to push long args as 4-byte pairs.
     pub long_param_funcs: &'a std::collections::HashMap<String, Vec<bool>>,
