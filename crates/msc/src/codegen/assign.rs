@@ -1029,6 +1029,30 @@ pub(crate) fn emit_assign_param(param_idx: usize, value: &Expr, locals: &Locals<
         }
         return;
     }
+    // `a += b` (and -=, &=, |=, ^=) where a is a long PARAM and the RHS is a
+    // runtime long operand: load the RHS into DX:AX, then two-word op into the
+    // param's slot — `<op> [a.lo],ax; <op-carry> [a.hi],dx`. Fixture 3425.
+    if locals.is_long_param(param_idx)
+        && let Expr::BinOp { op, left, right } = value
+        && matches!(left.as_ref(), Expr::Param(i) if *i == param_idx)
+        && let Some((lo_op, hi_op)) = match op {
+            BinOp::Add => Some((0x01u8, 0x11u8)), // add r/m,ax ; adc r/m,dx
+            BinOp::Sub => Some((0x29, 0x19)),     // sub ; sbb
+            BinOp::BitAnd => Some((0x21, 0x21)),  // no carry → same op both words
+            BinOp::BitOr => Some((0x09, 0x09)),
+            BinOp::BitXor => Some((0x31, 0x31)),
+            _ => None,
+        }
+        && long_operand(right, locals)
+        && right.fold(locals.inits).is_none()
+    {
+        emit_long_to_dx_ax(right, locals, out, fixups); // RHS → DX:AX
+        let a_lo = long_param_disp(param_idx, locals);
+        let a_hi = a_lo + 2;
+        out.push(lo_op); out.push(bp_modrm(0x46, a_lo)); push_bp_disp(out, a_lo);
+        out.push(hi_op); out.push(bp_modrm(0x56, a_hi)); push_bp_disp(out, a_hi);
+        return;
+    }
     // Pointer-param self-arithmetic `p = p ± K` (`p += K`) scales K by the
     // pointee size: `int *p; p += 1` → `add WORD PTR [bp+d], 2`. Fixture 2922.
     if locals.param_pointee_size(param_idx) > 1
