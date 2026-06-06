@@ -285,6 +285,9 @@ pub(crate) fn parse_struct_global_decl(p: &mut Parser<'_>, is_static: bool) -> R
         EmitError::Unsupported(format!("unknown struct `{sname}` in global decl"))
     })?;
     let stotal = p.structs[sidx].total_bytes;
+    // Comma-separated declarators share the `struct <Tag>` prefix:
+    // `struct Pt a, b;` declares two globals. Fixtures 3349, 3612.
+    loop {
     let is_pointer = matches!(p.peek(), Some(Tok::Star));
     if is_pointer { p.bump(); }
     let name = match p.bump().cloned() {
@@ -366,7 +369,6 @@ pub(crate) fn parse_struct_global_decl(p: &mut Parser<'_>, is_static: bool) -> R
     } else {
         None
     };
-    p.eat(&Tok::Semi)?;
     // Pointer-array: N 2-byte pointer slots (array_len=N, element_size=2 → the
     // pointee struct is named by struct_idx). Struct array: byte storage.
     let array_len = if is_ptr_array { elem_count } else if is_pointer { 1 } else { stotal * elem_count };
@@ -385,6 +387,11 @@ pub(crate) fn parse_struct_global_decl(p: &mut Parser<'_>, is_static: bool) -> R
         is_unsigned: false,
         is_float: false,
     });
+        // More declarators after a comma, else the terminating semicolon.
+        if matches!(p.peek(), Some(Tok::Comma)) { p.bump(); continue; }
+        break;
+    }
+    p.eat(&Tok::Semi)?;
     Ok(())
 }
 /// Parse `struct Name { <field-decl>; ... };` — record the struct's
