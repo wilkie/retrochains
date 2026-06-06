@@ -3927,6 +3927,17 @@ pub(crate) fn cond_from_expr(expr: Expr) -> Cond {
             _ => None,
         };
         if let Some(op) = rel {
+            // Normalize a constant LEFT operand to the right (`3 > i` → `i < 3`):
+            // the emit arms compare `cmp [var], k` (= var - k), so a const-on-left
+            // ordering flips the subtraction sign and the jcc would be wrong unless
+            // the relational op is mirrored. Fixture 1531 (`for (i=0; 3 > i; i++)`).
+            if matches!(left.as_ref(), Expr::IntLit(_)) && !matches!(right.as_ref(), Expr::IntLit(_)) {
+                return Cond::Cmp {
+                    op: mirror_relop(op),
+                    left: right.as_ref().clone(),
+                    right: left.as_ref().clone(),
+                };
+            }
             return Cond::Cmp {
                 op,
                 left: left.as_ref().clone(),
@@ -3935,6 +3946,18 @@ pub(crate) fn cond_from_expr(expr: Expr) -> Cond {
         }
     }
     Cond::Truthy(expr)
+}
+/// Mirror a relational operator when its operands are swapped: `a < b` ⟺ `b > a`.
+/// Eq/Ne are symmetric (unchanged).
+pub(crate) fn mirror_relop(op: RelOp) -> RelOp {
+    match op {
+        RelOp::Eq => RelOp::Eq,
+        RelOp::Ne => RelOp::Ne,
+        RelOp::Lt => RelOp::Gt,
+        RelOp::Gt => RelOp::Lt,
+        RelOp::Le => RelOp::Ge,
+        RelOp::Ge => RelOp::Le,
+    }
 }
 /// Expression parser — recognizes the Slice-4 shapes:
 /// `<atom>` or `<atom> <op> <atom>` where op is `+ - *`.
