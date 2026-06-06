@@ -586,18 +586,19 @@ pub(crate) fn emit_return(
         crate::codegen::func::push_epilogue(frame, locals.pascal_cleanup, out);
         return;
     }
-    // `return <long-param> & 0xFF` (long fn): low byte, zero-extended, high word 0
-    // — `mov al,[v]; sub ah,ah; sub dx,dx`. Fixture 3199.
+    // `return (char)<e>` / `return <e> & 0xFF` (the parser lowers `& 0xFF` to a
+    // CastChar) in a long-returning function: produce the (zero/sign-)extended
+    // byte in AX, then extend into the long high word — `sub dx,dx` for unsigned
+    // (zero-extend), `cwd` for signed. Fixture 3199 (`return v & 0xFFL`).
     if return_long
-        && let Expr::BinOp { op: BinOp::BitAnd, left, right } = expr
-        && matches!(right.as_ref(), Expr::IntLit(255))
-        && let Expr::Param(i) = left.as_ref()
-        && locals.is_long_param(*i)
+        && let Expr::CastChar { unsigned, .. } = expr
     {
-        let lo = param_disp(*i) as u8;
-        out.extend_from_slice(&[0x8A, 0x46, lo]);   // mov al,[bp+v]
-        out.extend_from_slice(&[0x2A, 0xE4]);        // sub ah,ah
-        out.extend_from_slice(&[0x2B, 0xD2]);        // sub dx,dx
+        emit_expr_to_ax(expr, locals, out, fixups); // AX = extended byte
+        if *unsigned {
+            out.extend_from_slice(&[0x2B, 0xD2]); // sub dx,dx
+        } else {
+            out.push(0x99); // cwd
+        }
         crate::codegen::func::push_epilogue(frame, locals.pascal_cleanup, out);
         return;
     }

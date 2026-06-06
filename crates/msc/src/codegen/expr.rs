@@ -254,6 +254,16 @@ pub(crate) fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8
                         out.extend_from_slice(&[0xA0, 0x00, 0x00]); // mov al, moffs
                         fixups.push(Fixup { body_offset: bo, kind: FixupKind::GlobalAddr { global_idx: *g } });
                     }
+                    // `(char)<long>` truncates to the low byte (lowest address of
+                    // the little-endian long) — byte-load it. Fixture 3199.
+                    Expr::Param(i) if locals.is_long_param(*i) => {
+                        let d = long_param_disp(*i, locals);
+                        out.push(0x8A); out.push(bp_modrm(0x46, d)); push_bp_disp(out, d);
+                    }
+                    Expr::Local(i) if locals.is_long_local(*i) => {
+                        let d = locals.disp(*i);
+                        out.push(0x8A); out.push(bp_modrm(0x46, d)); push_bp_disp(out, d);
+                    }
                     _ => emit_expr_to_ax(value, locals, out, fixups),
                 }
             }
