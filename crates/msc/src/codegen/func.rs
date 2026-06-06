@@ -224,7 +224,12 @@ pub(crate) fn emit_function(
     let receives_big_struct = body.iter().any(|s| matches!(s,
         Stmt::Assign { target: AssignTarget::Local(_) | AssignTarget::Global(_), value: Expr::Call { name, .. } }
             if struct_return_funcs.get(&symbol_name(name)).copied().unwrap_or(0) > 4));
-    let returns_big_struct = func.return_struct_bytes > 4 || receives_big_struct;
+    // A whole-struct copy `g1 = g2;` of >4 bytes lowers to `rep movsw`, needing
+    // DI+SI saved. Fixture 3612.
+    let copies_big_struct = body.iter().any(|s| matches!(s,
+        Stmt::Assign { target: AssignTarget::StructGlobalCopy { bytes, .. } | AssignTarget::StructLocalCopy { bytes, .. }, .. }
+            if *bytes > 4));
+    let returns_big_struct = func.return_struct_bytes > 4 || receives_big_struct || copies_big_struct;
     // `register int` locals are accessed via SI (1st) / DI (2nd), saved across
     // the call. The locals still reserve their stack slots (so base_frame is
     // already WithSlide), but the frame upgrades to push/pop the register(s).

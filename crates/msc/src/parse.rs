@@ -629,6 +629,43 @@ pub(crate) fn parse_struct_def(p: &mut Parser<'_>) -> Result<(), EmitError> {
             is_pointer: is_ptr,
             pointee_size: if is_ptr { size } else { 0 },
         });
+        // Comma-separated declarators of the same base type: `int a, b, c;`.
+        // Each may have its own `*` and `[N]`. Fixture 3612. (Bit-field commas
+        // are not handled — those declare one member per `;`.)
+        while matches!(p.peek(), Some(Tok::Comma)) {
+            p.bump();
+            let is_ptr2 = matches!(p.peek(), Some(Tok::Star));
+            if is_ptr2 { p.bump(); }
+            let fname2 = match p.bump().cloned() {
+                Some(Tok::Ident(s)) => s,
+                other => return Err(EmitError::Unsupported(format!(
+                    "expected struct field name after comma, got {other:?}"))),
+            };
+            let elem_size2 = if is_ptr2 { 2 } else { size };
+            let mut count2 = 1usize;
+            if matches!(p.peek(), Some(Tok::LBrack)) {
+                p.bump();
+                let n = parse_signed_int(p)?;
+                if n <= 0 { return Err(EmitError::Unsupported(format!("struct array field length must be positive, got {n}"))); }
+                p.eat(&Tok::RBrack)?;
+                count2 = n as usize;
+            }
+            let span2 = elem_size2 as usize * count2;
+            let byte_off2 = if is_union {
+                cursor = cursor.max(span2);
+                0
+            } else {
+                if elem_size2 >= 2 && cursor % 2 != 0 { cursor += 1; }
+                let off = u16::try_from(cursor).expect("field offset fits in u16");
+                cursor += span2;
+                off
+            };
+            fields.push(StructField {
+                name: fname2, byte_off: byte_off2, size: elem_size2,
+                struct_idx: field_struct_idx, bit_width: 0, bit_off: 0,
+                is_pointer: is_ptr2, pointee_size: if is_ptr2 { size } else { 0 },
+            });
+        }
         p.eat(&Tok::Semi)?;
     }
     p.eat(&Tok::RBrace)?;
@@ -3145,7 +3182,9 @@ pub(crate) fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
                 && let Expr::Global(src) = value
                 && let Some(sidx) = p.globals[dst].struct_idx
                 && p.globals[src].struct_idx == Some(sidx)
-                && p.structs[sidx].total_bytes <= 4 // ≤2 words → AX/DX; movsw needs a di/si frame
+                // ≤2 words → AX/DX direct; >4 even bytes → rep movsw via a di/si
+                // frame (fixture 3612). Odd-byte structs aren't handled yet.
+                && p.structs[sidx].total_bytes % 2 == 0
             {
                 let bytes = u16::try_from(p.structs[sidx].total_bytes).expect("struct size fits");
                 p.eat(&Tok::Semi)?;

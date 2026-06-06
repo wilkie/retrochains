@@ -2053,14 +2053,14 @@ pub(crate) fn emit_struct_global_copy(dst: usize, src: usize, bytes: u16, out: &
             fixups.push(Fixup { body_offset: bo - 1, kind: FixupKind::GlobalAddr { global_idx: dst } });
         }
     } else {
-        out.extend_from_slice(&[0x57, 0x56]); // push di; push si
+        // >2 words: `mov di,OFFSET dst; mov si,OFFSET src; push ds; pop es;
+        // mov cx,words; repne movsw`. DI/SI are saved/restored by the function
+        // frame (NoneDiSi / WithSlideDiSi), not inline. Fixture 3612.
         g_moffs(out, fixups, 0xBF, dst); // mov di, OFFSET dst
         g_moffs(out, fixups, 0xBE, src); // mov si, OFFSET src
         out.extend_from_slice(&[0x1E, 0x07]); // push ds; pop es
-        for _ in 0..words {
-            out.push(0xA5); // movsw
-        }
-        out.extend_from_slice(&[0x5E, 0x5F]); // pop si; pop di
+        out.push(0xB9); out.extend_from_slice(&words.to_le_bytes()); // mov cx, words
+        out.extend_from_slice(&[0xF2, 0xA5]); // repne movsw
     }
 }
 /// bp-relative long (4-byte) const-store or compound at `[bp+lo]`/`[bp+hi]`.
