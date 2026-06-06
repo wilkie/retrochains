@@ -204,16 +204,20 @@ pub(crate) fn emit_push_arg_long(arg: &Expr, locals: &Locals<'_>, out: &mut Vec<
             out.push(0xFF); out.push(bp_modrm(0x76, lo)); push_bp_disp(out, lo);
             return;
         }
-        Expr::Global(g) if locals.is_long_global(*g) => {
-            out.push(0xFF); out.push(0x36); // push WORD [g+2]
-            let off = out.len(); out.extend_from_slice(&2u16.to_le_bytes());
-            fixups.push(Fixup { body_offset: off - 1, kind: FixupKind::GlobalAddr { global_idx: *g } });
-            out.push(0xFF); out.push(0x36); // push WORD [g]
-            let off = out.len(); out.extend_from_slice(&[0x00, 0x00]);
-            fixups.push(Fixup { body_offset: off - 1, kind: FixupKind::GlobalAddr { global_idx: *g } });
-            return;
+        _ => {
+            // A long global, long struct field, or long global-array element
+            // with a constant index: push both words straight from memory,
+            // high then low. Fixtures 3252-family + 328 (`f(a[1])`).
+            if let Some((g, base)) = long_global_rhs_addr(arg, locals) {
+                out.push(0xFF); out.push(0x36); // push WORD [g+base+2]
+                let off = out.len(); out.extend_from_slice(&(base + 2).to_le_bytes());
+                fixups.push(Fixup { body_offset: off - 1, kind: FixupKind::GlobalAddr { global_idx: g } });
+                out.push(0xFF); out.push(0x36); // push WORD [g+base]
+                let off = out.len(); out.extend_from_slice(&base.to_le_bytes());
+                fixups.push(Fixup { body_offset: off - 1, kind: FixupKind::GlobalAddr { global_idx: g } });
+                return;
+            }
         }
-        _ => {}
     }
     // Fallback: a computed long expression — evaluate into DX:AX, push both.
     emit_long_to_dx_ax(arg, locals, out, fixups);

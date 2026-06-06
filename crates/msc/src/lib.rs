@@ -446,6 +446,10 @@ pub struct Locals<'a> {
     /// Map of function names that return `char`. The caller inserts
     /// `cbw` after the call to widen AL to AX (fixture 1006).
     pub char_returners: &'a std::collections::HashSet<String>,
+    /// Set of function names that return `long`. Their call result already
+    /// occupies DX:AX, so a `long x = f()` init stores both words with no
+    /// `cwd`. Fixtures 315/321.
+    pub long_returners: &'a std::collections::HashSet<String>,
     /// Map of function symbol names to their param_is_long arrays.
     /// Used by emit_call_inner to push long args as 4-byte pairs.
     pub long_param_funcs: &'a std::collections::HashMap<String, Vec<bool>>,
@@ -1711,6 +1715,10 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
         .collect();
     // Prototype-only char-returning externs widen their call result too.
     char_returners.extend(unit.proto_char_returns.iter().cloned());
+    let long_returners: std::collections::HashSet<String> = unit.functions.iter()
+        .filter(|f| f.return_long)
+        .map(|f| symbol_name(&f.name))
+        .collect();
     let mut long_param_funcs: std::collections::HashMap<String, Vec<bool>> = unit.functions.iter()
         .filter(|f| f.param_is_long.iter().any(|&b| b))
         .map(|f| (symbol_name(&f.name), f.param_is_long.clone()))
@@ -1756,7 +1764,7 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
         .functions
         .iter()
         .enumerate()
-        .map(|(i, f)| emit_function(f, struct_temp_offsets[i], &long_globals, &char_globals, &unsigned_globals, &float_globals, &global_elem_sizes, &char_returners, &float_returners, &long_param_funcs, &struct_param_funcs, &struct_return_funcs, &struct_is_union, &union_globals))
+        .map(|(i, f)| emit_function(f, struct_temp_offsets[i], &long_globals, &char_globals, &unsigned_globals, &float_globals, &global_elem_sizes, &char_returners, &long_returners, &float_returners, &long_param_funcs, &struct_param_funcs, &struct_return_funcs, &struct_is_union, &union_globals))
         .collect();
 
     // Per-function global offset within the _TEXT segment.

@@ -789,6 +789,19 @@ pub(crate) fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_
         out.push(opc); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp);
         return;
     }
+    // `long x = f()` where f returns long: the callee already leaves the full
+    // long in DX:AX, so store both words directly — NO `cwd` (which would
+    // clobber the real high word with a sign-extension of AX). Fixtures 315/321.
+    if locals.is_long_local(local_idx)
+        && let Expr::Call { name, .. } = value
+        && locals.long_returners.contains(&symbol_name(name))
+    {
+        emit_long_to_dx_ax(value, locals, out, fixups); // call → DX:AX
+        out.push(0x89); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp);   // mov [lo],ax
+        let hi = disp + 2;
+        out.push(0x89); out.push(bp_modrm(0x56, hi)); push_bp_disp(out, hi);       // mov [hi],dx
+        return;
+    }
     // General path: evaluate the RHS into AX, then store.
     let is_byte = locals.size(local_idx) == 1;
     // MSC never const-folds || / && into an immediate store (fixture
