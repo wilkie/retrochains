@@ -2527,6 +2527,36 @@ pub(crate) fn emit_assign_bitfield(base: BitBase, byte_off: u16, bit_off: u8, bi
     let val = ((k as u32 & maskw) << bit_off) & 0xFFFF;
     let field_mask = (maskw << bit_off) & 0xFFFF;
     let clear = !field_mask & 0xFFFF;
+    // All-ones field set (`val == field_mask`) confined to a single byte: filling
+    // the whole field makes the clear redundant — the result is just `old | mask`,
+    // so MSC emits a direct memory OR `or byte [unit+b],byteval` (no load/store).
+    // Guarded to when AX isn't already holding the unit, and excluding a full
+    // byte-aligned byte (handled below as a `mov` of the whole byte). Fixtures
+    // 2300, 2301.
+    if val == field_mask
+        && (val & 0xFF00 == 0 || val & 0x00FF == 0)
+        && !(bit_width == 8 && bit_off % 8 == 0)
+        && matches!(base, BitBase::Local(_) | BitBase::Global(_))
+        && !bf_ax_live(base, byte_off, locals, out, fixups)
+    {
+        let (byte_idx, imm) = if val & 0x00FF != 0 { (0u16, (val & 0xFF) as u8) }
+                              else { (1u16, (val >> 8) as u8) };
+        match base {
+            BitBase::Local(l) => {
+                let d = locals.disp(l) + (byte_off + byte_idx) as i16;
+                out.push(0x80); out.push(bp_modrm(0x4E, d)); push_bp_disp(out, d); out.push(imm); // or byte [bp+d],imm8
+            }
+            BitBase::Global(g) => {
+                out.push(0x80); out.push(0x0E); // or byte [moffs16],imm8
+                let bo = out.len() - 1;
+                out.extend_from_slice(&(byte_off + byte_idx).to_le_bytes());
+                fixups.push(Fixup { body_offset: bo, kind: FixupKind::GlobalAddr { global_idx: g } });
+                out.push(imm);
+            }
+            BitBase::DerefParam(_) => unreachable!(),
+        }
+        return;
+    }
     if !bf_ax_live(base, byte_off, locals, out, fixups) {
         bf_load_word(base, byte_off, locals, out, fixups);
     }
