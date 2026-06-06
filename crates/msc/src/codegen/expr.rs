@@ -2190,10 +2190,16 @@ fn emit_binop_inner(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, o
     // Placed early — before the nested-binop-left dispatch claims `(f0+f1)+f2`.
     if op == BinOp::Add {
         let mut fields: Vec<(BitBase, u16, u8, u8)> = Vec::new();
-        if collect_bitfield_add_chain(left, &mut fields)
-            && collect_bitfield_add_chain(right, &mut fields)
+        let all_bitfields = collect_bitfield_add_chain(left, &mut fields)
+            & collect_bitfield_add_chain(right, &mut fields);
+        if all_bitfields
             && fields.len() >= 2
             && same_local_global_base(&fields)
+            // all fields must share the SAME unit word (same byte_off) — the
+            // reorder's AX-reuse / CL-shift-freedom only holds within one unit.
+            // A `:0` zero-width separator splits fields into different units
+            // (fixture 2302), which MSC reads in source order instead.
+            && fields.iter().all(|f| f.1 == fields[0].1)
             // first source operand (→CX) must be a low field (no shift)
             && fields[0].2 == 0
             // middle operands (→DX) must be word fields (the DX reader can't widen
@@ -2214,6 +2220,27 @@ fn emit_binop_inner(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, o
             bf_load_word_cx(f0.0, f0.1, locals, out, fixups);
             if f0.3 < 16 {
                 let mask = (1u32 << f0.3) - 1;
+                out.push(0x81); out.push(0xE1); // and cx,imm16
+                out.extend_from_slice(&(mask as u16).to_le_bytes());
+            }
+            out.extend_from_slice(&[0x03, 0xC1]); // add ax,cx
+            return;
+        }
+        // Two low bit-fields in DIFFERENT units (a `:0` zero-width separator put
+        // them in separate words): MSC can't reuse a live unit across them, so it
+        // reads in SOURCE order — first into AX (fresh `mov ax,[ua]; and ax,mask`),
+        // second into CX (`mov cx,[ub]; and cx,mask`), `add ax,cx`. Fixture 2302.
+        if all_bitfields
+            && fields.len() == 2
+            && same_local_global_base(&fields)
+            && fields[0].1 != fields[1].1
+            && fields[0].2 == 0 && fields[1].2 == 0
+        {
+            let (a, b) = (fields[0], fields[1]);
+            emit_expr_to_ax(&Expr::BitField { base: a.0, byte_off: a.1, bit_off: 0, bit_width: a.3 }, locals, out, fixups);
+            bf_load_word_cx(b.0, b.1, locals, out, fixups);
+            if b.3 < 16 {
+                let mask = (1u32 << b.3) - 1;
                 out.push(0x81); out.push(0xE1); // and cx,imm16
                 out.extend_from_slice(&(mask as u16).to_le_bytes());
             }
