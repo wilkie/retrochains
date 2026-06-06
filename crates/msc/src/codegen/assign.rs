@@ -1753,6 +1753,39 @@ pub(crate) fn emit_assign_global(global_idx: usize, value: &Expr, locals: &Local
             return;
         }
     }
+    // Int-global compound `g /= v` / `g %= v` by a RUNTIME word divisor (param or
+    // local): MSC loads the divisor into CX, g into AX, sign/zero-extends, divides,
+    // and stores the quotient (div) or remainder (mod). Fixture 3610 (`g %= v`).
+    if !locals.is_long_global(global_idx) && !locals.is_char_global(global_idx)
+        && let Expr::BinOp { op: op @ (BinOp::Div | BinOp::Mod), left, right } = value
+        && matches!(left.as_ref(), Expr::Global(li) if *li == global_idx)
+        && right.fold(locals.inits).is_none()
+    {
+        let cx_disp = match right.as_ref() {
+            Expr::Param(pi) if !locals.is_char_param(*pi) && !locals.is_long_param(*pi) && !locals.is_float_param(*pi) => Some((param_disp(*pi), locals.is_unsigned_param(*pi))),
+            Expr::Local(li) if locals.size(*li) == 2 && !locals.is_long_local(*li) && !locals.is_float_local(*li) => Some((locals.disp(*li), locals.is_unsigned_local(*li))),
+            _ => None,
+        };
+        if let Some((d, rhs_unsigned)) = cx_disp {
+            let uns = rhs_unsigned || locals.is_unsigned_global(global_idx);
+            out.push(0x8B); out.push(bp_modrm(0x4E, d)); push_bp_disp(out, d); // mov cx,[divisor]
+            let bo = out.len();
+            out.extend_from_slice(&[0xA1, 0x00, 0x00]); // mov ax,[g]
+            fixups.push(Fixup { body_offset: bo, kind: FixupKind::GlobalAddr { global_idx } });
+            if uns { out.extend_from_slice(&[0x2B, 0xD2]); } else { out.push(0x99); } // sub dx,dx / cwd
+            out.push(0xF7); out.push(if uns { 0xF1 } else { 0xF9 }); // div cx / idiv cx
+            // store result: mod → DX (89 16), div → AX (a3)
+            let bo2 = out.len();
+            if matches!(op, BinOp::Mod) {
+                out.extend_from_slice(&[0x89, 0x16, 0x00, 0x00]);
+                fixups.push(Fixup { body_offset: bo2 + 1, kind: FixupKind::GlobalAddr { global_idx } });
+            } else {
+                out.extend_from_slice(&[0xA3, 0x00, 0x00]);
+                fixups.push(Fixup { body_offset: bo2, kind: FixupKind::GlobalAddr { global_idx } });
+            }
+            return;
+        }
+    }
     // Long global with runtime RHS: compute DX:AX then store both halves.
     if locals.is_long_global(global_idx) {
         // If it doesn't match any of the earlier specialized arms, the
