@@ -536,6 +536,13 @@ pub(crate) fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
             // `mov [x],100; ...; mov ax,[x]`). Remember so the known-value
             // recording below is suppressed for ternary-derived stores.
             let value_was_ternary = matches!(value, Expr::Ternary { .. });
+            // The pre-prop RHS, when it is a bare scalar LOCAL read. MSC reloads
+            // (rather than propagating the folded value) when assigning across a
+            // type CONVERSION — a char/long/signedness change — even though the
+            // source local is known (`int n; char c=5; n=c; return n` reloads n).
+            // Captured here to suppress the known-value recording below for such
+            // converting copies. Fixtures 604/1312/2386/2491/2387.
+            let rhs_src_local: Option<usize> = if let Expr::Local(i) = value { Some(*i) } else { None };
             if self_assign_addsub
                 && let Expr::BinOp { right, .. } = value
             {
@@ -617,8 +624,21 @@ pub(crate) fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
                     }
                 }
                 AssignTarget::Local(l) => {
+                    // A converting copy from another local (char/long/signedness
+                    // mismatch with the target) stores the folded value but is NOT
+                    // propagated — MSC reloads the target. Fixtures 604/1312/2491.
+                    let converting = rhs_src_local.is_some_and(|s| {
+                        match (cp.local_specs.get(s), cp.local_specs.get(*l)) {
+                            (Some(src), Some(tgt)) => {
+                                let sz = |x: &LocalSpec| if x.is_long { 4 } else { x.size };
+                                sz(src) != sz(tgt) || src.is_unsigned != tgt.is_unsigned
+                            }
+                            _ => false,
+                        }
+                    });
                     if let Expr::IntLit(k) = value
                         && !value_was_ternary
+                        && !converting
                     {
                         cp.l_known.insert(*l, *k);
                     } else {
