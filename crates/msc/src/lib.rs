@@ -2115,6 +2115,25 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
         .enumerate()
         .filter_map(|(i, g)| if g.is_extern { Some(i) } else { None })
         .collect();
+    // Functions whose address is taken in a global data initializer but which
+    // are not defined in this TU (extern prototypes) need an EXTDEF, slotted
+    // with the extern globals (after __chkstk, before defined functions).
+    // Fixtures 2783, 3481, 3696.
+    let defined_fn_syms: std::collections::HashSet<String> =
+        unit.functions.iter().map(fn_symbol).collect();
+    let mut extern_funcs: Vec<String> = Vec::new();
+    for g in &unit.globals {
+        if let Some(init) = &g.init {
+            for v in init {
+                if let GlobalInit::FuncAddr(sym) = v
+                    && !defined_fn_syms.contains(sym)
+                    && !extern_funcs.contains(sym)
+                {
+                    extern_funcs.push(sym.clone());
+                }
+            }
+        }
+    }
 
     // EXTDEF + (optional) COMDEF layout, picked based on what
     // symbols this TU references:
@@ -2198,6 +2217,9 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
             }
             for &gi in &extern_globals {
                 entries.push((symbol_name(&unit.globals[gi].name), 0x00));
+            }
+            for sym in &extern_funcs {
+                entries.push((sym.clone(), 0x00));
             }
             for f in &unit.functions {
                 entries.push((fn_symbol(f), 0x00));
