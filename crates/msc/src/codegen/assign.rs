@@ -1406,9 +1406,16 @@ pub(crate) fn emit_assign_global(global_idx: usize, value: &Expr, locals: &Local
             (BinOp::Mod, true) => "__aNNaulrem",
             _ => unreachable!(),
         };
-        emit_long_to_dx_ax(right, locals, out, fixups); // RHS long → DX:AX
-        out.push(0x52); // push dx
-        out.push(0x50); // push ax
+        // A GLOBAL long RHS is pushed DIRECTLY from memory (`push [_b+2]; push
+        // [_b]`); a local/param/other RHS loads into DX:AX then pushes. Fixtures
+        // 260/261/262 (global RHS) vs 747/748 (local RHS).
+        if matches!(right.as_ref(), Expr::Global(j) if locals.is_long_global(*j)) {
+            crate::codegen::calls::push_long_operand(right, locals, out, fixups);
+        } else {
+            emit_long_to_dx_ax(right, locals, out, fixups); // RHS long → DX:AX
+            out.push(0x52); // push dx
+            out.push(0x50); // push ax
+        }
         let b8 = out.len();
         out.extend_from_slice(&[0xB8, 0x00, 0x00]); // mov ax, OFFSET g
         fixups.push(Fixup { body_offset: b8, kind: FixupKind::GlobalAddr { global_idx } });

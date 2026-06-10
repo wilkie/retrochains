@@ -687,7 +687,7 @@ fn emit_long_shl_k(k: u8, out: &mut Vec<u8>) {
 
 /// Push a long operand's two words (high then low) from memory, as MSC does
 /// for the helper-call calling convention.
-fn push_long_operand(e: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+pub(crate) fn push_long_operand(e: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
     let mut push_global_word = |word_off: i16, j: usize, out: &mut Vec<u8>| {
         out.push(0xFF);
         out.push(0x36); // push word [disp16]
