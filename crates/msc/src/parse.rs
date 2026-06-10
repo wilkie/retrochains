@@ -2390,12 +2390,24 @@ impl Parser<'_> {
     /// function frame `F`, so the local's displacement is `-(F + offset)`.
     fn alloc_block_slot(&mut self, size: u16) -> u16 {
         let even = (size + 1) & !1;
-        let pick = self.free_block_slots.iter().enumerate()
+        // Prefer the deepest free slot of the EXACT size; if none, reuse the
+        // deepest LARGER free slot (e.g. a 2-byte `int b` reusing a freed 4-byte
+        // `long a` region) and return the shallower remainder to the free list
+        // (`b` takes the deepest 2 bytes, frame doesn't grow). Fixture 1969.
+        let exact = self.free_block_slots.iter().enumerate()
             .filter(|(_, (_, sz))| *sz == even)
             .max_by_key(|(_, (off, _))| *off)
             .map(|(i, _)| i);
+        let pick = exact.or_else(|| self.free_block_slots.iter().enumerate()
+            .filter(|(_, (_, sz))| *sz > even)
+            .max_by_key(|(_, (off, _))| *off)
+            .map(|(i, _)| i));
         let offset = if let Some(i) = pick {
-            self.free_block_slots.remove(i).0
+            let (off, sz) = self.free_block_slots.remove(i);
+            if sz > even {
+                self.free_block_slots.push((off - even, sz - even));
+            }
+            off
         } else {
             self.block_frame_max += even;
             self.block_frame_max
@@ -2425,12 +2437,20 @@ fn parse_block_local_decl(p: &mut Parser<'_>) -> Result<Vec<Stmt>, EmitError> {
         p.bump();
         if matches!(p.peek(), Some(Tok::Ident(_))) { p.bump(); }
     }
+    let mut is_long = false;
     let size = if enum_consumed {
         2usize
     } else {
         match p.peek() {
             Some(Tok::Kw("int")) => { p.bump(); 2 }
             Some(Tok::Kw("char")) => { p.bump(); 1 }
+            // `long [int] x;` — a 4-byte slot (array_len=2, is_long). Fixture 1969.
+            Some(Tok::Kw("long")) => {
+                p.bump();
+                if matches!(p.peek(), Some(Tok::Kw("int"))) { p.bump(); }
+                is_long = true;
+                2
+            }
             // `unsigned x;` — a modifier run with no explicit type kw.
             Some(Tok::Ident(_)) if p.pos > mod_start => 2,
             other => return Err(EmitError::Unsupported(format!(
@@ -2452,9 +2472,11 @@ fn parse_block_local_decl(p: &mut Parser<'_>) -> Result<Vec<Stmt>, EmitError> {
             return Err(EmitError::Unsupported(
                 "array block-local not yet supported".to_owned()));
         }
-        let storage = ((size + 1) & !1) as u16;
+        let storage = if is_long { 4 } else { ((size + 1) & !1) as u16 };
         let off = p.alloc_block_slot(storage);
-        let mut spec = if size == 1 {
+        let mut spec = if is_long {
+            LocalSpec::long_(None)
+        } else if size == 1 {
             LocalSpec::char_(None)
         } else {
             LocalSpec::int(None)
