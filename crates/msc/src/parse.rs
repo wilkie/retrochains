@@ -64,6 +64,23 @@ pub(crate) fn parse_unit(source: &str) -> Result<Unit, EmitError> {
             parse_struct_def(&mut p)?;
             continue;
         }
+        // `struct <Name>;` / `union <Name>;` — forward declaration. Register an
+        // incomplete struct (no fields) so a following `struct <Name> *p;`
+        // pointer global can resolve the tag; the full definition fills it in
+        // later via parse_struct_def's update-in-place. Fixture 495.
+        if matches!(p.peek(), Some(Tok::Kw("struct")) | Some(Tok::Kw("union")))
+            && matches!(p.toks.get(p.pos + 1), Some(Tok::Ident(_)))
+            && matches!(p.toks.get(p.pos + 2), Some(Tok::Semi))
+        {
+            let is_union = matches!(p.peek(), Some(Tok::Kw("union")));
+            p.bump(); // struct / union
+            let sname = match p.bump().cloned() { Some(Tok::Ident(s)) => s, _ => unreachable!() };
+            p.eat(&Tok::Semi)?;
+            if !p.structs.iter().any(|s| s.name == sname) {
+                p.structs.push(StructDef { name: sname, fields: Vec::new(), total_bytes: 0, is_union });
+            }
+            continue;
+        }
         // `enum [<tag>] { NAME [= K], ... };` — register the listed
         // names as compile-time constants. Phase 1: only the anonymous
         // top-level enum (fixture 1004).
@@ -673,8 +690,17 @@ pub(crate) fn parse_struct_def(p: &mut Parser<'_>) -> Result<(), EmitError> {
     // struct containing an int/pointer field; 1 byte otherwise).
     let needs_word_align = fields.iter().any(|f| f.size >= 2);
     let total_bytes = if needs_word_align { (cursor + 1) & !1 } else { cursor };
-    let sidx = p.structs.len();
-    p.structs.push(StructDef { name: sname, fields, total_bytes, is_union });
+    // If a forward declaration (incomplete, no fields) of this tag already
+    // exists, fill it in place so its registry index — already referenced by
+    // any earlier `struct <Name> *p;` pointer global — stays valid. Fixture 495.
+    let sidx = if let Some(i) = p.structs.iter().position(|s| s.name == sname && s.fields.is_empty()) {
+        p.structs[i] = StructDef { name: sname, fields, total_bytes, is_union };
+        i
+    } else {
+        let i = p.structs.len();
+        p.structs.push(StructDef { name: sname, fields, total_bytes, is_union });
+        i
+    };
     // Inline declarator(s): `struct X { ... } v, *p, a[N];` — the `}` is
     // followed by variable declarators rather than `;`. Register each as a
     // file-scope global of this struct type. Fixtures 3322, 3419, 3420, 3446.
