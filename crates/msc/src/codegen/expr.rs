@@ -3084,6 +3084,27 @@ fn emit_binop_inner(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, o
         load(out);
         // Right as IntLit → imm form.
         if let Expr::IntLit(k) = right {
+            // CHAR operand right-shift: `load` already widened the byte in AX
+            // (cbw signed / sub ah,ah unsigned), so shift the word — `sar` for a
+            // signed char, `shr` for unsigned. MSC unrolls a shift of ≤2 into
+            // single-bit shifts (`shr/sar ax,1`); ≥3 uses `mov cl,k; ... ax,cl`.
+            // Fixtures 2807 (signed `c>>4`), 3583 (unsigned `c>>2`), 2955.
+            let char_unsigned = match left {
+                Expr::Param(i) if locals.is_char_param(*i) => Some(locals.is_unsigned_param(*i)),
+                Expr::Local(i) if locals.size(*i) == 1 => Some(locals.is_unsigned_local(*i)),
+                _ => None,
+            };
+            if matches!(op, BinOp::Shr) && *k > 0
+                && let Some(uns) = char_unsigned
+            {
+                let opb = if uns { 0xE8u8 } else { 0xF8u8 }; // /5=shr, /7=sar
+                if *k <= 2 {
+                    for _ in 0..*k { out.extend_from_slice(&[0xD1, opb]); } // shr/sar ax,1
+                } else {
+                    out.extend_from_slice(&[0xB1, *k as u8, 0xD3, opb]); // mov cl,k; shr/sar ax,cl
+                }
+                return;
+            }
             // A SIGNED int right-shift `x >> K` is arithmetic (`sar`), but
             // emit_imm_op only emits the logical `shr`. Route signed shifts to
             // sar here. Fixture 1515 (`int x; ...; return x >> 4`).
