@@ -1318,7 +1318,15 @@ pub(crate) fn emit_return(
             // arm as a runtime load (fixture 430: `a=5; return a>0?a:-a` →
             // `mov ax,[bp-2]`, not `mov ax,5`) — handled by the emit_expr_to_ax
             // fallthrough, whose Ternary arm reproduces the load behavior.
-            if k == 0 {
+            // AX-liveness: when AX provably already holds k (a preceding store
+            // of the constant left it live across only AX-preserving memory
+            // writes), reuse it instead of re-materializing. Int return only —
+            // the long path needs DX:AX setup. Fixtures 901/902.
+            if !return_long
+                && crate::codegen::expr::ax_holds_const(out, k, locals.last_branch_barrier.get())
+            {
+                // AX already == k; emit nothing.
+            } else if k == 0 {
                 out.extend_from_slice(&[0x2B, 0xC0]);
                 if return_long { out.push(0x99); } // cwd: DX:AX = sign-extend(AX)
             } else {

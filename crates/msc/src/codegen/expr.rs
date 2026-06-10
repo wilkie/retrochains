@@ -1535,6 +1535,44 @@ fn ax_holds_slot_over_imm_stores(out: &[u8], disp: i16, barrier: usize) -> bool 
         return false;
     }
 }
+/// True if AX provably holds the constant `k` at the current emit point: the
+/// last AX-establishing op (gated by the branch barrier) set AX to exactly `k`
+/// (`mov ax,k` / `sub ax,ax` / `xor ax,ax` for 0), with only AX-PRESERVING memory
+/// writes since (stores-from-AX and `mov/add/sub [mem],imm`, bp- or global-form,
+/// which don't touch AX). Lets `return k` reuse a live constant instead of
+/// re-materializing it (fixtures 901/902). The scan finds the actual establishing
+/// instruction and checks its value, so a different AX value rejects cleanly.
+pub(crate) fn ax_holds_const(out: &[u8], k: i32, barrier: usize) -> bool {
+    let target = (k as u32 & 0xFFFF) as u16;
+    let mut n = out.len();
+    loop {
+        if n < barrier { return false; }
+        // Establishing AX <- const.
+        if k == 0 && n >= 2 && (out[n-2..n] == [0x2B, 0xC0] || out[n-2..n] == [0x33, 0xC0]) {
+            return n - 2 >= barrier;
+        }
+        if n >= 3 && out[n-3] == 0xB8 {
+            let v = out[n-2] as u16 | ((out[n-1] as u16) << 8);
+            return v == target && n - 3 >= barrier;
+        }
+        // Strip one AX-preserving trailing memory write.
+        // bp store-from-AX/AL: 89/88 46 d8 ; global store-from-AX: a3 o16
+        if n >= 3 && out[n-2] == 0x46 && (out[n-3] == 0x89 || out[n-3] == 0x88) { n -= 3; continue; }
+        if n >= 4 && out[n-3] == 0x86 && out[n-4] == 0x89 { n -= 4; continue; } // 89 86 d16
+        if n >= 3 && out[n-3] == 0xA3 { n -= 3; continue; }
+        // bp mem-imm: c7 46 d8 i16 (5) / c6 46 d8 i8 (4) / 83 m46 d8 i8 (4) / 81 m46 d8 i16 (6)
+        if n >= 5 && out[n-5] == 0xC7 && out[n-4] == 0x46 { n -= 5; continue; }
+        if n >= 4 && out[n-4] == 0xC6 && out[n-3] == 0x46 { n -= 4; continue; }
+        if n >= 4 && out[n-4] == 0x83 && (out[n-3] & 0xC7) == 0x46 { n -= 4; continue; }
+        if n >= 6 && out[n-6] == 0x81 && (out[n-5] & 0xC7) == 0x46 { n -= 6; continue; }
+        // global mem-imm: c7 06 o16 i16 (6) / c6 06 o16 i8 (5) / 83 m06 o16 i8 (5) / 81 m06 o16 i16 (6)
+        if n >= 6 && out[n-6] == 0xC7 && (out[n-5] & 0xC7) == 0x06 { n -= 6; continue; }
+        if n >= 5 && out[n-5] == 0xC6 && (out[n-4] & 0xC7) == 0x06 { n -= 5; continue; }
+        if n >= 5 && out[n-5] == 0x83 && (out[n-4] & 0xC7) == 0x06 { n -= 5; continue; }
+        if n >= 6 && out[n-6] == 0x81 && (out[n-5] & 0xC7) == 0x06 { n -= 6; continue; }
+        return false;
+    }
+}
 /// Load a long operand's high word (the upper 16 bits) into AX — used for
 /// `(int)(long >> 16)`.
 fn emit_long_high_word_to_ax(e: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
