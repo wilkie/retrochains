@@ -3908,6 +3908,15 @@ fn try_build_chain(p: &mut Parser<'_>, base: Expr, sidx: usize) -> Result<Option
         _ => return Ok(None),
     };
     let next2 = p.toks.get(p.pos + 2).cloned();
+    // `o->m.<...>` where the first field `m` is an embedded VALUE struct (not a
+    // pointer): no initial deref hop — enter the chain at the param's target
+    // struct (`sidx`) with `acc` accumulating m's offset. Fixture 3448.
+    if let Some(f) = p.structs[sidx].fields.iter().find(|f| f.name == fname).cloned()
+        && !f.is_pointer && f.struct_idx.is_some()
+        && matches!(next2, Some(Tok::Dot))
+    {
+        return Ok(Some(continue_chain(p, base, vec![], sidx)?));
+    }
     let f = match p.structs[sidx].fields.iter().find(|f| f.name == fname) {
         Some(f) if f.is_pointer => f.clone(),
         _ => return Ok(None),
@@ -3940,6 +3949,11 @@ fn chain_const_index(p: &Parser<'_>, index: &Expr) -> Result<i32, EmitError> {
 /// Continue a pointer member-chain after the first hop. `cur` is the struct that
 /// the BX pointer currently points to. Consumes `->`/`.`/`[` until the leaf.
 fn continue_chain(p: &mut Parser<'_>, base: Expr, mut hops: Vec<u16>, mut cur: usize) -> Result<Expr, EmitError> {
+    // `acc` accumulates the byte offset of value-struct sub-fields traversed by
+    // `.` since the last pointer deref (a value struct is embedded, so `.field`
+    // just adds its offset without an extra `mov bx,[bx+off]`). A `->` deref of a
+    // pointer field flushes `acc` into a new hop. Fixtures 3448 (`o->m.p->c`).
+    let mut acc: u16 = 0;
     loop {
         let dot = matches!(p.peek(), Some(Tok::Dot));
         let arrow = matches!(p.peek(), Some(Tok::Arrow));
@@ -3954,13 +3968,24 @@ fn continue_chain(p: &mut Parser<'_>, base: Expr, mut hops: Vec<u16>, mut cur: u
         let f = p.structs[cur].fields.iter().find(|f| f.name == fname)
             .ok_or_else(|| EmitError::Unsupported(format!("field `{fname}` not in chain struct")))?
             .clone();
-        // Continuation? Another `->`/`.` means f is itself a struct pointer to
-        // hop through; `[K]` means f is a pointer to index; else f is the leaf.
-        if matches!(p.peek(), Some(Tok::Arrow) | Some(Tok::Dot)) {
+        let field_loc = acc + f.byte_off;
+        // Continuation? `->` derefs a pointer field (new hop); `.` descends into
+        // an embedded value struct (accumulate offset, no hop); `[K]` indexes a
+        // pointer field; else f is the leaf.
+        if matches!(p.peek(), Some(Tok::Arrow)) {
             if !f.is_pointer || f.struct_idx.is_none() {
-                return Err(EmitError::Unsupported("non-pointer field mid-chain".to_owned()));
+                return Err(EmitError::Unsupported("`->` on a non-pointer field mid-chain".to_owned()));
             }
-            hops.push(f.byte_off);
+            hops.push(field_loc);
+            cur = f.struct_idx.unwrap();
+            acc = 0;
+            continue;
+        }
+        if matches!(p.peek(), Some(Tok::Dot)) {
+            if f.is_pointer || f.struct_idx.is_none() {
+                return Err(EmitError::Unsupported("`.` on a non-value-struct field mid-chain".to_owned()));
+            }
+            acc = field_loc;
             cur = f.struct_idx.unwrap();
             continue;
         }
@@ -3969,11 +3994,11 @@ fn continue_chain(p: &mut Parser<'_>, base: Expr, mut hops: Vec<u16>, mut cur: u
             let index = parse_expr(p)?;
             p.eat(&Tok::RBrack)?;
             let k = chain_const_index(p, &index)?;
-            hops.push(f.byte_off);
+            hops.push(field_loc);
             let elem = f.pointee_size.max(1);
             return Ok(Expr::PtrChainField { base: Box::new(base), hops, final_off: (k as i64 * elem as i64) as u16, final_size: elem });
         }
-        return Ok(Expr::PtrChainField { base: Box::new(base), hops, final_off: f.byte_off, final_size: f.size });
+        return Ok(Expr::PtrChainField { base: Box::new(base), hops, final_off: field_loc, final_size: f.size });
     }
 }
 /// Resolve `<expr>.<field>` or `<expr>-><field>` to its byte offset
