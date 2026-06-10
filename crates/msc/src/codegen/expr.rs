@@ -1567,7 +1567,12 @@ pub(crate) fn ax_holds_const(out: &[u8], k: i32, barrier: usize) -> bool {
         if k == 0 && n >= 2 && (out[n-2..n] == [0x2B, 0xC0] || out[n-2..n] == [0x33, 0xC0]) {
             return n - 2 >= barrier;
         }
-        if n >= 3 && out[n-3] == 0xB8 {
+        // `mov ax,K` establishes a literal — but ONLY for a non-zero K. MSC
+        // never materializes 0 via `mov ax,0` (it uses sub/xor ax,ax), so a
+        // `b8 00 00` is always a RELOCATED `mov ax,OFFSET g` whose 00 00 is a
+        // fixup placeholder, not a literal zero. Treating it as 0 would wrongly
+        // elide a `sub ax,ax` for `return 0` (fixture 494).
+        if target != 0 && n >= 3 && out[n-3] == 0xB8 {
             let v = out[n-2] as u16 | ((out[n-1] as u16) << 8);
             return v == target && n - 3 >= barrier;
         }

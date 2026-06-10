@@ -2881,6 +2881,29 @@ pub(crate) fn emit_assign_bitfield(base: BitBase, byte_off: u16, bit_off: u8, bi
     bf_store_word(base, byte_off, locals, out, fixups);
 }
 pub(crate) fn emit_assign_global_field(global_idx: usize, byte_off: u16, size: u8, value: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    // `s.f = &g` / `s.f = a` / `&g + K` — store the link-time OFFSET directly with
+    // `c7 06 <base+byte_off> <OFFSET a + K>` (two GlobalAddr fixups), like the
+    // plain-global `p = &g`. Fixture 494 (`head.next = &head`).
+    if let Some((a, off)) = match value {
+        Expr::AddrOfGlobal(a) => Some((*a, 0u16)),
+        Expr::BinOp { op: BinOp::Add, left, right }
+            if matches!(left.as_ref(), Expr::AddrOfGlobal(_)) && matches!(right.as_ref(), Expr::IntLit(_)) =>
+        {
+            let Expr::AddrOfGlobal(a) = **left else { unreachable!() };
+            let Expr::IntLit(k) = **right else { unreachable!() };
+            Some((a, (k as u32 & 0xFFFF) as u16))
+        }
+        _ => None,
+    } {
+        let start = out.len();
+        out.push(0xC7); out.push(0x06);
+        out.extend_from_slice(&byte_off.to_le_bytes()); // dest = base + byte_off addend
+        fixups.push(Fixup { body_offset: start + 1, kind: FixupKind::GlobalAddr { global_idx } });
+        let imm_bo = out.len() - 1;
+        out.extend_from_slice(&off.to_le_bytes()); // imm = OFFSET a + off
+        fixups.push(Fixup { body_offset: imm_bo, kind: FixupKind::GlobalAddr { global_idx: a } });
+        return;
+    }
     // Long (4-byte) struct field: a long element at byte_off — reuse the shared
     // long const-store / compound codegen (low at byte_off, high at byte_off+2).
     if size == 4 {
