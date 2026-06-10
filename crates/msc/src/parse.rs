@@ -2176,12 +2176,14 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
             p.local_names.push(lname);
             // Long: 4-byte slot modeled as a 2-word "array". Reads via
             // `Expr::Local(idx)` pick up the low word at [bp-disp].
-            let (slot_size, slot_len, is_long_slot) = if is_long_decl && array_len == 1 {
-                (2usize, 2usize, true)
-            } else if star_count > 0 {
+            let (slot_size, slot_len, is_long_slot) = if star_count > 0 {
                 // A near pointer is a 2-byte slot regardless of pointee type
-                // (so `char *p` stores its address as a word, not a byte).
+                // (so `char *p` / `long *p` store the address as a word, not a
+                // 4-byte long). Must precede the long check — `long *p` is a
+                // pointer, not a long.
                 (2usize, array_len, false)
+            } else if is_long_decl && array_len == 1 {
+                (2usize, 2usize, true)
             } else {
                 (size, array_len, false)
             };
