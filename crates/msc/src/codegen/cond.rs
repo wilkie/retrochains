@@ -460,6 +460,24 @@ pub(crate) fn emit_cond_cmp_inner(cond: &Cond, locals: &Locals<'_>, out: &mut Ve
             return;
         }
     }
+    // `p->f == K` / `p->f != K` (struct-pointer field compared to a constant):
+    // load p into BX (reusing a live AX when p was just established), then
+    // compare the field directly through the pointer (`cmp word [bx+off],K`)
+    // rather than loading the field into AX first. Fixture 1007.
+    if let Cond::Cmp { op: RelOp::Eq | RelOp::Ne, left: Expr::DerefLocalField { ptr_local, byte_off, size }, right: Expr::IntLit(k) } = cond {
+        crate::codegen::expr::emit_ptr_local_to_bx(locals.disp(*ptr_local), locals, out);
+        let off = *byte_off as u8;
+        let rm = |base: u8| if off == 0 { base } else { base | 0x40 }; // [bx] vs [bx+disp8]
+        if *size == 1 {
+            out.push(0x80); out.push(rm(0x3F)); if off != 0 { out.push(off); } out.push((*k as u32 & 0xFF) as u8);
+        } else if let Ok(k8) = i8::try_from(*k) {
+            out.push(0x83); out.push(rm(0x3F)); if off != 0 { out.push(off); } out.push(k8 as u8);
+        } else {
+            out.push(0x81); out.push(rm(0x3F)); if off != 0 { out.push(off); }
+            out.extend_from_slice(&((*k as u32 & 0xFFFF) as u16).to_le_bytes());
+        }
+        return;
+    }
     // `(unsigned char)x == K` / `!= K` — including `(x & 0xFF) == K`, which the
     // parser lowers to a CastChar — compares the low byte in place:
     // `cmp byte [x], K`. Fixtures 3264, 3269. K must fit a byte.
