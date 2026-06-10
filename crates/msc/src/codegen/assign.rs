@@ -2073,14 +2073,20 @@ pub(crate) fn emit_struct_global_copy(dst: usize, src: usize, bytes: u16, out: &
             fixups.push(Fixup { body_offset: bo - 1, kind: FixupKind::GlobalAddr { global_idx: dst } });
         }
     } else {
-        // >2 words: `mov di,OFFSET dst; mov si,OFFSET src; push ds; pop es;
-        // mov cx,words; repne movsw`. DI/SI are saved/restored by the function
-        // frame (NoneDiSi / WithSlideDiSi), not inline. Fixture 3612.
+        // >2 words: `mov di,OFFSET dst; mov si,OFFSET src; push ds; pop es; ...`.
+        // DI/SI are saved/restored by the function frame (NoneDiSi /
+        // WithSlideDiSi), not inline. For a small word count (≤4) MSC UNROLLS
+        // the copy into individual `movsw` instructions (fixtures 413/414/3059);
+        // for ≥5 words it uses a counted `mov cx,words; rep movsw` (fixture 3612).
         g_moffs(out, fixups, 0xBF, dst); // mov di, OFFSET dst
         g_moffs(out, fixups, 0xBE, src); // mov si, OFFSET src
         out.extend_from_slice(&[0x1E, 0x07]); // push ds; pop es
-        out.push(0xB9); out.extend_from_slice(&words.to_le_bytes()); // mov cx, words
-        out.extend_from_slice(&[0xF2, 0xA5]); // repne movsw
+        if words <= 4 {
+            for _ in 0..words { out.push(0xA5); } // movsw (unrolled)
+        } else {
+            out.push(0xB9); out.extend_from_slice(&words.to_le_bytes()); // mov cx, words
+            out.extend_from_slice(&[0xF2, 0xA5]); // rep movsw
+        }
     }
 }
 /// bp-relative long (4-byte) const-store or compound at `[bp+lo]`/`[bp+hi]`.
