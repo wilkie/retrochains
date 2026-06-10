@@ -4518,6 +4518,27 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                 return Ok(Expr::Seq { sides, value: Box::new(acc_value) });
             }
             p.eat(&Tok::RParen)?;
+            // `(*pfn)(args)` / `(pfn)(args)` — call through a function pointer.
+            // Dereferencing a function pointer yields the function, so an
+            // explicit `(*pfn)` is the same indirect call as `pfn`. Fixture 2414.
+            if matches!(p.peek(), Some(Tok::LParen)) {
+                let is_fnptr = |e: &Expr| match e {
+                    Expr::Local(i) => p.fn_ptr_locals.contains(i),
+                    Expr::Param(i) => p.fn_ptr_params.contains(i),
+                    Expr::Global(g) => p.global_names.get(*g).is_some_and(|n| p.fn_ptr_globals.contains(n)),
+                    _ => false,
+                };
+                let target = match &inner {
+                    Expr::DerefWord { ptr } | Expr::DerefByte { ptr } if is_fnptr(ptr) => Some((**ptr).clone()),
+                    e if is_fnptr(e) => Some(e.clone()),
+                    _ => None,
+                };
+                if let Some(target) = target {
+                    p.bump(); // `(`
+                    let args = parse_call_args(p)?;
+                    return Ok(Expr::CallPtr { target: Box::new(target), args });
+                }
+            }
             // `(*p)++` / `(*p)--` — the parens group the deref, so this mutates
             // the POINTEE (by 1), unlike `*p++` which advances the pointer.
             // Build a PostMutateDeref directly so the generic postfix loop
