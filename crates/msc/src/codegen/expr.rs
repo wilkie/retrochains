@@ -1479,10 +1479,60 @@ pub(crate) fn emit_load_param_reuse(i: usize, locals: &Locals<'_>, out: &mut Vec
 pub(crate) fn emit_ptr_local_to_bx(disp: i16, locals: &Locals<'_>, out: &mut Vec<u8>) {
     let store_self = { let mut v = vec![0x89, bp_modrm(0x46, disp)]; push_bp_disp(&mut v, disp); v };
     let load = { let mut v = vec![0x8B, bp_modrm(0x46, disp)]; push_bp_disp(&mut v, disp); v };
-    if ax_holds_word_operand(out, &load, &store_self, locals.last_branch_barrier.get()) {
+    let barrier = locals.last_branch_barrier.get();
+    if ax_holds_word_operand(out, &load, &store_self, barrier)
+        || ax_holds_slot_over_imm_stores(out, disp, barrier)
+    {
         out.extend_from_slice(&[0x8B, 0xD8]); // mov bx, ax
     } else {
         out.push(0x8B); out.push(bp_modrm(0x5E, disp)); push_bp_disp(out, disp); // mov bx,[bp+disp]
+    }
+}
+/// Like the `store_self` branch of [`ax_holds_word_operand`] but also strips
+/// intervening AX-PRESERVING memory writes (immediate stores `mov/add/sub
+/// [bp+d],imm`) between the establishing `mov [bp+disp],ax` and now — they leave
+/// AX untouched, so it still holds the pointer. Used for `p->f` reads after the
+/// folded field stores of an aliased struct pointer (`p=&a; a.x=K; return p->x`,
+/// fixtures 1003/136/182). BAILS if a stripped store targets the pointer's own
+/// slot (which would change [p] without touching AX). disp8 bp slots only.
+fn ax_holds_slot_over_imm_stores(out: &[u8], disp: i16, barrier: usize) -> bool {
+    let Ok(dp) = i8::try_from(disp) else { return false };
+    let dp = dp as u8;
+    let mut n = out.len();
+    loop {
+        if n < barrier { return false; }
+        // Establishing event: AX was stored to (or loaded from) the pointer slot.
+        if n >= 3 && out[n-2] == 0x46 && out[n-1] == dp && (out[n-3] == 0x89 || out[n-3] == 0x8B) {
+            return n - 3 >= barrier;
+        }
+        // Strip one AX-preserving trailing instruction; bail on a write to OUR slot.
+        // store-from-AX/AL to another bp slot: 89/88 46 d8
+        if n >= 3 && out[n-2] == 0x46 && (out[n-3] == 0x89 || out[n-3] == 0x88) {
+            n -= 3; continue;
+        }
+        // store-from-AX to a global: a3 o16
+        if n >= 3 && out[n-3] == 0xA3 { n -= 3; continue; }
+        // mov [bp+d8],imm16 : c7 46 d8 i16   (collision if d8 == dp)
+        if n >= 5 && out[n-5] == 0xC7 && out[n-4] == 0x46 {
+            if out[n-3] == dp { return false; }
+            n -= 5; continue;
+        }
+        // mov [bp+d8],imm8 : c6 46 d8 i8
+        if n >= 4 && out[n-4] == 0xC6 && out[n-3] == 0x46 {
+            if out[n-2] == dp { return false; }
+            n -= 4; continue;
+        }
+        // alu [bp+d8],imm8 : 83 <m> d8 i8  (m: mod=01, rm=110 → (m&0xC7)==0x46)
+        if n >= 4 && out[n-4] == 0x83 && (out[n-3] & 0xC7) == 0x46 {
+            if out[n-2] == dp { return false; }
+            n -= 4; continue;
+        }
+        // alu [bp+d8],imm16 : 81 <m> d8 i16
+        if n >= 6 && out[n-6] == 0x81 && (out[n-5] & 0xC7) == 0x46 {
+            if out[n-3] == dp { return false; }
+            n -= 6; continue;
+        }
+        return false;
     }
 }
 /// Load a long operand's high word (the upper 16 bits) into AX — used for
