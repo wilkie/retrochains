@@ -92,6 +92,12 @@ pub struct Unit {
     /// to one widens the AL result with `cbw` like a defined char-returner.
     /// Fixtures 3917 (`char peekb(...)`).
     pub proto_char_returns: std::collections::HashSet<String>,
+    /// Raw function names in order of first source appearance (prototype or
+    /// definition, whichever is earlier). MSC lists functions in PUBDEF/EXTDEF
+    /// in this order, so a forward-declared function precedes its later
+    /// definition position. Raw (not symbol-mangled) so the lookup works for
+    /// `pascal` functions too. Fixtures 506/1762/3360/2154.
+    pub fn_appearance: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1851,6 +1857,29 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
     let total_code_bytes = cursor;
     let text_len = u16::try_from(total_code_bytes).expect("_TEXT body fits in u16");
 
+    // Function indices in MSC's PUBDEF/EXTDEF listing order: first source
+    // appearance (prototype or definition). A forward-declared function
+    // (`int helper(int);` before `main`) sorts ahead of its definition
+    // position. When there are no forward protos this equals definition
+    // order, so the common case is unchanged. Fixtures 506/1762/3360/2154.
+    let fn_order: Vec<usize> = {
+        let mut order: Vec<usize> = unit
+            .fn_appearance
+            .iter()
+            .filter_map(|name| {
+                unit.functions.iter().position(|f| &f.name == name)
+            })
+            .collect();
+        // Safety net: append any function missing from the appearance list
+        // (shouldn't happen, but keep the listing complete) in definition order.
+        for i in 0..unit.functions.len() {
+            if !order.contains(&i) {
+                order.push(i);
+            }
+        }
+        order
+    };
+
     // String-pool offsets in CONST. MSC aligns each string to a
     // 2-byte boundary, leaving a zero pad byte after any string of
     // odd length (fixture 4113). The last entry isn't padded — the
@@ -2227,8 +2256,8 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
             for sym in &extern_funcs {
                 entries.push((sym.clone(), 0x00));
             }
-            for f in &unit.functions {
-                entries.push((fn_symbol(f), 0x00));
+            for &fi in &fn_order {
+                entries.push((fn_symbol(&unit.functions[fi]), 0x00));
             }
             // The float runtime externs (`__ftol`/`__fac`) trail the function
             // names when a function uses >=3 float CONST temps, in their
@@ -2264,8 +2293,8 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
             for name in &user_extern_order {
                 entries.push((name.clone(), 0x00));
             }
-            for f in &unit.functions {
-                entries.push((fn_symbol(f), 0x00));
+            for &fi in &fn_order {
+                entries.push((fn_symbol(&unit.functions[fi]), 0x00));
             }
             if !chkstk_early {
                 entries.push(("__chkstk".to_owned(), 0x00));
@@ -2353,7 +2382,23 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
             b.write_record(obj::PUBDEF_16, &rec);
         }
     };
-    for entry in &unit.decl_order {
+    // Walk decls in PUBDEF order: functions in first-appearance order, globals
+    // in source position. Each Function slot in decl_order is filled with the
+    // next function from `fn_order` so a forward-declared function publishes
+    // ahead of its definition. Globals pass through unchanged.
+    let pub_walk: Vec<TopDecl> = {
+        let mut fn_iter = fn_order.iter();
+        unit.decl_order
+            .iter()
+            .map(|d| match d {
+                TopDecl::Function(_) => {
+                    TopDecl::Function(*fn_iter.next().expect("fn_order covers every Function decl"))
+                }
+                TopDecl::Global(i) => TopDecl::Global(*i),
+            })
+            .collect()
+    };
+    for entry in &pub_walk {
         let (grp, seg, sym, off) = match entry {
             TopDecl::Global(i) => {
                 let Some(off) = data_offsets[*i] else { continue };
@@ -2400,11 +2445,18 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
         let caller_off = function_offsets[i];
         for fx in &fe.fixups {
             match &fx.kind {
-                FixupKind::TuLocalCall { target } if defined_names.contains(target) => {
-                    let target_off = offset_by_name
-                        .get(target)
-                        .copied()
-                        .expect("defined names map covers this target");
+                // A call to a function defined EARLIER (or to itself) is a
+                // backward reference: MSC, a single-pass compiler, already
+                // knows the offset and emits a real self-relative displacement
+                // in-band. A FORWARD call (target defined later) can't be
+                // resolved yet, so MSC emits `E8 00 00` and a FIXUPP targeting
+                // the function's EXTDEF entry — handled by routing it through
+                // the ExtCall path below. Fixtures 506/1762/3360/2154.
+                FixupKind::TuLocalCall { target }
+                    if defined_names.contains(target)
+                        && offset_by_name[target] <= caller_off =>
+                {
+                    let target_off = offset_by_name[target];
                     let disp = (target_off as i32)
                         - (caller_off as i32 + fx.body_offset as i32 + 3);
                     let disp16 = (disp as i32 & 0xFFFF) as u16;

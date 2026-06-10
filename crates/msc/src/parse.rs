@@ -47,6 +47,11 @@ pub(crate) fn parse_unit(source: &str) -> Result<Unit, EmitError> {
     let mut proto_struct_returns: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let mut proto_char_returns: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut prototyped_fns: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // Order in which function names FIRST appear in the source (prototype or
+    // definition, whichever comes first). MSC lists functions in PUBDEF/EXTDEF
+    // in this order — a forward-declared function (`int helper(int);` before
+    // `main`) sorts ahead of its definition position. Fixtures 506/1762/3360.
+    let mut fn_appearance: Vec<String> = Vec::new();
     let mut functions = Vec::new();
     let mut decl_order: Vec<TopDecl> = Vec::new();
     while p.peek().is_some() {
@@ -184,6 +189,9 @@ pub(crate) fn parse_unit(source: &str) -> Result<Unit, EmitError> {
                 // Record the prototype's long-param flags (so a call still pushes
                 // long args as two words), then skip past `;`.
                 if let Some(Tok::Ident(nm)) = p.toks.get(after) {
+                    if !fn_appearance.contains(nm) {
+                        fn_appearance.push(nm.clone());
+                    }
                     prototyped_fns.insert(symbol_name(nm));
                     let longs = proto_param_longs(p.toks, lparen_idx, close_idx);
                     if longs.iter().any(|&b| b) {
@@ -220,12 +228,15 @@ pub(crate) fn parse_unit(source: &str) -> Result<Unit, EmitError> {
         // Register the function name so a later function can take its address
         // by bare name (`apply(sq, 6)` → FuncAddr). Fixture 2314.
         p.fn_names.insert(parsed_fn.name.clone());
+        if !fn_appearance.contains(&parsed_fn.name) {
+            fn_appearance.push(parsed_fn.name.clone());
+        }
         functions.push(parsed_fn);
         decl_order.push(TopDecl::Function(fn_idx));
     }
     // A function-less translation unit (only global declarations) is valid —
     // MSC emits an OBJ with just the data segments. Fixtures 3657/3659/3660/3680.
-    Ok(Unit { globals: p.globals, structs: p.structs, functions, decl_order, strings: p.strings, proto_long_params, proto_struct_params, proto_struct_returns, prototyped_fns, proto_char_returns })
+    Ok(Unit { globals: p.globals, structs: p.structs, functions, decl_order, strings: p.strings, proto_long_params, proto_struct_params, proto_struct_returns, prototyped_fns, proto_char_returns, fn_appearance })
 }
 /// Parse a file-scope `struct <Name> <var> [= { ... }];` declaration.
 /// Stores the struct global as if it were a `char` array sized to
