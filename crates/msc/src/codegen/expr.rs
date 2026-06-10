@@ -2256,7 +2256,7 @@ fn eligible_left_call(e: &Expr, inits: &[Option<i32>]) -> bool {
         Expr::CallPtr { target, args } => (args.as_slice(), Some(target.as_ref())),
         _ => return false,
     };
-    if largs.len() > 1 || !largs.first().map(arg_buildable_in_cx).unwrap_or(true) {
+    if !largs.iter().all(arg_buildable_in_cx) {
         return false;
     }
     target.map(|t| callptr_target_si_safe(t, inits)).unwrap_or(true)
@@ -2317,7 +2317,7 @@ fn callptr_target_si_safe(target: &Expr, inits: &[Option<i32>]) -> bool {
 /// parameter, or `<param> ± K`.
 fn arg_buildable_in_cx(e: &Expr) -> bool {
     match e {
-        Expr::IntLit(_) | Expr::StrLit(_) | Expr::Param(_) => true,
+        Expr::IntLit(_) | Expr::StrLit(_) | Expr::Param(_) | Expr::FuncAddr(_) => true,
         Expr::BinOp { op: BinOp::Add | BinOp::Sub, left, right } =>
             matches!(left.as_ref(), Expr::Param(_)) && matches!(right.as_ref(), Expr::IntLit(_)),
         _ => false,
@@ -2332,6 +2332,12 @@ fn emit_arg_to_cx(e: &Expr, _locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mu
             let bo = out.len();
             out.extend_from_slice(&[0xB9, 0x00, 0x00]); // mov cx, OFFSET str
             fixups.push(Fixup { body_offset: bo, kind: FixupKind::StrLoad { string_idx: *idx } });
+        }
+        Expr::FuncAddr(name) => {
+            out.push(0xB9); // mov cx, OFFSET _func
+            let bo = out.len() - 1;
+            out.extend_from_slice(&[0x00, 0x00]);
+            fixups.push(Fixup { body_offset: bo, kind: FixupKind::FuncAddr { target: symbol_name(name) } });
         }
         Expr::Param(i) => { let d = param_disp(*i); out.push(0x8B); out.push(bp_modrm(0x4E, d)); push_bp_disp(out, d); }
         Expr::BinOp { op, left, right } => {
@@ -2395,7 +2401,9 @@ fn emit_binop_inner(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, o
                 Expr::CallPtr { target, args } => (args, None, Some(target)),
                 _ => unreachable!(),
             };
-            if let Some(arg) = largs.first() {
+            // Build each arg in CX and push right-to-left (so AX, holding the
+            // running result, survives until it's parked below).
+            for arg in largs.iter().rev() {
                 emit_arg_to_cx(arg, locals, out, fixups);
                 out.push(0x51); // push cx
             }
@@ -2410,7 +2418,9 @@ fn emit_binop_inner(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, o
                 crate::codegen::calls::emit_call_ptr_target(target.unwrap(), locals, out, fixups);
                 false
             };
-            if !largs.is_empty() { out.extend_from_slice(&[0x83, 0xC4, 0x02]); } // add sp,2
+            if !largs.is_empty() {
+                out.extend_from_slice(&[0x83, 0xC4, (2 * largs.len()) as u8]); // add sp,2N
+            }
             if char_ret { out.push(0x98); } // cbw
         }
         // Combine: AX holds calls[0]; fold each op in source order with the reg
