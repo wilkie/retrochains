@@ -131,6 +131,16 @@ fn alias_rewrite_derefs(e: &mut Expr, cp: &ConstProp) {
                 }
             }
         }
+        Expr::DerefLocalField { ptr_local, byte_off, size } => {
+            // `p->f` where p aliases &g / &x → the direct field of g / x.
+            if let Some(&a) = cp.ptr_alias.get(ptr_local) {
+                match a {
+                    AliasTarget::Global(g) => *e = Expr::GlobalField { global: g, byte_off: *byte_off, size: *size },
+                    AliasTarget::Local(x) => *e = Expr::LocalField { local: x, byte_off: *byte_off, size: *size },
+                    AliasTarget::String(_) => {}
+                }
+            }
+        }
         Expr::BinOp { left, right, .. } => {
             alias_rewrite_derefs(left, cp);
             alias_rewrite_derefs(right, cp);
@@ -378,6 +388,23 @@ pub(crate) fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
                 *target = match a {
                     AliasTarget::Local(x) => AssignTarget::Local(x),
                     AliasTarget::Global(g) => AssignTarget::Global(g),
+                    AliasTarget::String(_) => unreachable!(),
+                };
+                alias_rewrite_derefs(value, cp);
+            }
+            // `p->f = ...` where p aliases &g / &x → a direct field store, and
+            // rewrite any `p->f` self-read in the RHS to the same field so a
+            // compound `p->f += K` becomes `g.f += K` (in-place) not a pointer
+            // deref. Fixtures 842/843.
+            if let AssignTarget::DerefLocalField { ptr_local, byte_off, size } = target
+                && let Some(&a) = cp.ptr_alias.get(ptr_local)
+                && !matches!(a, AliasTarget::String(_))
+            {
+                let (bo, sz) = (*byte_off, *size);
+                cp.aliases_used.insert(*ptr_local);
+                *target = match a {
+                    AliasTarget::Local(x) => AssignTarget::LocalField { local: x, byte_off: bo, size: sz },
+                    AliasTarget::Global(g) => AssignTarget::GlobalField { global: g, byte_off: bo, size: sz },
                     AliasTarget::String(_) => unreachable!(),
                 };
                 alias_rewrite_derefs(value, cp);
