@@ -680,6 +680,10 @@ pub(crate) fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_
         && let Some(k) = right.fold(locals.inits)
     {
         let is_byte = locals.size(local_idx) == 1;
+        // Pointer local `p += K` / `p -= K`: scale the constant by the pointee
+        // size (`int* p += 2` → `add word [p],4`). Non-pointers/arrays have
+        // pointee_size 0 → scale 1 (unchanged). Fixtures 542, 564.
+        let k = k * locals.local_pointee_size(local_idx).max(1) as i32;
         match (op, k, is_byte) {
             (BinOp::Add, 1, false) if !locals.is_long_local(local_idx) => {
                 out.push(0xFF); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp);
