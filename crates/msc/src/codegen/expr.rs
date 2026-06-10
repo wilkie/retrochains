@@ -2765,18 +2765,26 @@ fn emit_binop_inner(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, o
             left: left.clone(),
             right: right.clone(),
         };
-        // `<cmp>; mov ax, 1; jcc-true +2; sub ax, ax` shape — if condition
-        // is TRUE the jcc fires and skips `sub ax,ax`, leaving ax=1.
-        // If FALSE it falls through to `sub ax,ax` giving ax=0.
-        emit_cond_cmp_inner(&cond, locals, out, fixups);
-        out.extend_from_slice(&[0xB8, 0x01, 0x00]);
-        out.push(loop_back_jcc(match op {
+        // MSC's two-label boolean shape:
+        //   <cmp>; jcc-FALSE L1; mov ax,1; jmp short L2; L1: sub ax,ax; L2:
+        // The inverted (false-sense) jcc skips the `mov ax,1; jmp short`
+        // pair (5 bytes) to the `sub ax,ax` that yields 0; the true path
+        // falls through to `mov ax,1` then jumps over the sub. Fixture 3475.
+        let relop = match op {
             BinOp::Eq => RelOp::Eq, BinOp::Ne => RelOp::Ne,
             BinOp::Lt => RelOp::Lt, BinOp::Le => RelOp::Le,
             BinOp::Gt => RelOp::Gt, BinOp::Ge => RelOp::Ge,
             _ => unreachable!(),
-        }));
-        out.push(0x02); // disp8 = 2 (skip the `sub ax, ax`)
+        };
+        emit_cond_cmp_inner(&cond, locals, out, fixups);
+        let mut jcc = inverted_jcc(relop);
+        if cmp_is_unsigned(&cond, locals) {
+            jcc = to_unsigned_jcc(jcc);
+        }
+        out.push(jcc);
+        out.push(0x05); // skip `mov ax,1` (3) + `jmp short` (2)
+        out.extend_from_slice(&[0xB8, 0x01, 0x00]); // mov ax,1
+        out.extend_from_slice(&[0xEB, 0x02]); // jmp short +2 (skip sub ax,ax)
         out.extend_from_slice(&[0x2B, 0xC0]); // sub ax, ax
         return;
     }
