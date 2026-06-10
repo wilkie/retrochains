@@ -1038,8 +1038,27 @@ pub(crate) fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
                 **right = ra;
                 return;
             }
+            // Decayed-array pointer arith `a + i` where the index `i` was a
+            // VARIABLE at parse (so the parser's `a + <literal>` element-scaling
+            // did NOT fire). If const-prop now folds `i` to a constant, scale it
+            // by the array element size — otherwise the byte offset is computed in
+            // ELEMENTS (fixture 1278: `a + i` (i=1) → bp-6 not bp-7). Literal
+            // indices are already byte-scaled at parse and reach here as IntLit,
+            // so `right_was_var` keeps them from being scaled twice.
+            let right_was_var = !matches!(right.as_ref(), Expr::IntLit(_));
             prop_expr(left, cp);
             prop_expr(right, cp);
+            if matches!(op, BinOp::Add | BinOp::Sub)
+                && right_was_var
+                && let Expr::IntLit(k) = right.as_ref()
+                && let Expr::AddrOfLocal(li) = left.as_ref()
+                && let Some(s) = cp.local_specs.get(*li)
+                && s.array_len > 1 && s.pointee_size == 0
+            {
+                let off = if matches!(op, BinOp::Sub) { -(*k * s.size as i32) } else { *k * s.size as i32 };
+                *e = Expr::BinOp { op: BinOp::Add, left: left.clone(), right: Box::new(Expr::IntLit(off)) };
+                return;
+            }
             // Identity simplifications MSC drops (the no-op operation vanishes,
             // leaving just the surviving operand):
             //   x+0, x-0, x<<0, x>>0, x*1, x/1  and  0+x, 1*x.
