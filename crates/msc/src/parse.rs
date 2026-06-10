@@ -1012,8 +1012,15 @@ pub(crate) fn parse_global_decl(p: &mut Parser<'_>) -> Result<(), EmitError> {
                                     "address-of unknown global `{target_name}`")))?;
                             values.push(GlobalInit::GlobalAddr(target_idx, 0));
                         }
+                        // A bare integer is a null/numeric pointer constant
+                        // (`int *p[] = { &v, 0 }`) — stored as a plain word.
+                        // Fixture 3279.
+                        Some(Tok::Int(_)) => {
+                            let n = match p.bump().cloned() { Some(Tok::Int(n)) => n, _ => unreachable!() };
+                            values.push(GlobalInit::Int(n as i32));
+                        }
                         other => return Err(EmitError::Unsupported(format!(
-                            "expected string literal or `&` in pointer-array initializer, got {other:?}"))),
+                            "expected string literal, `&`, or integer in pointer-array initializer, got {other:?}"))),
                     }
                     match p.peek() {
                         Some(Tok::Comma) => { p.bump(); }
