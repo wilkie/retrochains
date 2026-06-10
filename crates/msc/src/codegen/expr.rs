@@ -3129,6 +3129,23 @@ fn emit_binop_inner(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, o
                 else { out.extend_from_slice(&[0xB1, *k as u8, 0xD3, 0xF8]); } // mov cl,k; sar ax,cl
                 return;
             }
+            // `x / K` / `x % K` (constant divisor not handled by the power-of-two
+            // paths above — signed, or unsigned non-pow2): MSC extends FIRST, then
+            // loads the divisor. Signed → `cwd; mov cx,K; idiv cx`; unsigned →
+            // `sub dx,dx; mov cx,K; div cx`. Mod swaps the remainder (DX) into AX.
+            // Fixtures 3091 (signed %2), 3096 (unsigned %7).
+            if matches!(op, BinOp::Div | BinOp::Mod) {
+                let uns = match left {
+                    Expr::Param(i) => locals.is_unsigned_param(*i) && !locals.is_char_param(*i) && !locals.is_long_param(*i),
+                    Expr::Local(i) => locals.is_unsigned_local(*i) && locals.size(*i) == 2 && !locals.is_long_local(*i),
+                    _ => false,
+                };
+                if uns { out.extend_from_slice(&[0x2B, 0xD2]); } else { out.push(0x99); } // sub dx,dx / cwd
+                out.push(0xB9); out.extend_from_slice(&((*k as u32 & 0xFFFF) as u16).to_le_bytes()); // mov cx,K
+                out.extend_from_slice(if uns { &[0xF7, 0xF1] } else { &[0xF7, 0xF9] }); // div cx / idiv cx
+                if matches!(op, BinOp::Mod) { out.extend_from_slice(&[0x8B, 0xC2]); } // mov ax,dx
+                return;
+            }
             emit_imm_op(op, *k, out);
             return;
         }
