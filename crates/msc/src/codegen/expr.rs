@@ -2245,16 +2245,13 @@ fn ptr_deref_add_chain<'a>(left: &'a Expr, right: &'a Expr, _locals: &Locals<'_>
     if (3..=4).contains(&leaves.len()) { Some(leaves) } else { None }
 }
 
-/// Is `BinOp{op, left, right}` a two-call binop the SI/CX scheduler handles?
-/// Both operands must be calls; the LEFT call drives the scheme so it must have
-/// ≤1 CX-buildable argument and, if indirect, an SI-safe target (one whose call
-/// instruction doesn't itself clobber SI/BX/CX — i.e. not a runtime-indexed
-/// array element). The RIGHT call is emitted normally, so it's unconstrained.
-pub(crate) fn is_two_call_binop(left: &Expr, right: &Expr, inits: &[Option<i32>]) -> bool {
-    if !matches!(right, Expr::Call { .. } | Expr::CallPtr { .. }) {
-        return false;
-    }
-    let (largs, target) = match left {
+/// A call expression (direct or indirect).
+fn is_any_call(e: &Expr) -> bool { matches!(e, Expr::Call { .. } | Expr::CallPtr { .. }) }
+/// A call eligible as a NON-rightmost operand of the call-chain scheduler: its
+/// argument is built in CX (so ≤1 CX-buildable arg) and, if indirect, its target
+/// must be SI-safe (call instruction uses no scratch register).
+fn eligible_left_call(e: &Expr, inits: &[Option<i32>]) -> bool {
+    let (largs, target) = match e {
         Expr::Call { args, .. } => (args.as_slice(), None),
         Expr::CallPtr { target, args } => (args.as_slice(), Some(target.as_ref())),
         _ => return false,
@@ -2262,10 +2259,46 @@ pub(crate) fn is_two_call_binop(left: &Expr, right: &Expr, inits: &[Option<i32>]
     if largs.len() > 1 || !largs.first().map(arg_buildable_in_cx).unwrap_or(true) {
         return false;
     }
-    match target {
-        None => true, // direct call
-        Some(t) => callptr_target_si_safe(t, inits),
+    target.map(|t| callptr_target_si_safe(t, inits)).unwrap_or(true)
+}
+/// Collect a left-assoc add/sub chain whose leaves are all calls into
+/// `(calls in source order, ops)`; false if `e` isn't such a chain.
+fn collect_call_chain<'a>(e: &'a Expr, calls: &mut Vec<&'a Expr>, ops: &mut Vec<BinOp>) -> bool {
+    match e {
+        Expr::BinOp { op: op @ (BinOp::Add | BinOp::Sub), left, right } => {
+            if !collect_call_chain(left, calls, ops) { return false; }
+            ops.push(*op);
+            if is_any_call(right) { calls.push(right); true } else { false }
+        }
+        _ if is_any_call(e) => { calls.push(e); true }
+        _ => false,
     }
+}
+/// If `BinOp{op,left,right}` is a 2- or 3-call add/sub chain handled by the
+/// SI/CX(/DI) scheduler, return `(calls, ops)`. All but the rightmost must be
+/// `eligible_left_call`. Fixtures 1277/1536 (2), 2305/2343 (3).
+pub(crate) fn call_chain<'a>(op: BinOp, left: &'a Expr, right: &'a Expr, inits: &[Option<i32>])
+    -> Option<(Vec<&'a Expr>, Vec<BinOp>)>
+{
+    if !matches!(op, BinOp::Add | BinOp::Sub) || !is_any_call(right) { return None; }
+    let mut calls: Vec<&Expr> = Vec::new();
+    let mut ops: Vec<BinOp> = Vec::new();
+    if !collect_call_chain(left, &mut calls, &mut ops) { return None; }
+    ops.push(op);
+    calls.push(right);
+    if !(2..=3).contains(&calls.len()) { return None; }
+    if !calls[..calls.len() - 1].iter().all(|c| eligible_left_call(c, inits)) { return None; }
+    Some((calls, ops))
+}
+/// True for a two-call chain (SI only → an Si frame upgrade).
+pub(crate) fn is_two_call_binop(left: &Expr, right: &Expr, inits: &[Option<i32>]) -> bool {
+    matches!(call_chain(BinOp::Add, left, right, inits), Some((c, _)) if c.len() == 2)
+        || matches!(call_chain(BinOp::Sub, left, right, inits), Some((c, _)) if c.len() == 2)
+}
+/// True for a 3-call chain (DI+SI parking → a DiSi frame upgrade).
+pub(crate) fn is_three_call_binop(left: &Expr, right: &Expr, inits: &[Option<i32>]) -> bool {
+    matches!(call_chain(BinOp::Add, left, right, inits), Some((c, _)) if c.len() == 3)
+        || matches!(call_chain(BinOp::Sub, left, right, inits), Some((c, _)) if c.len() == 3)
 }
 /// A fn-ptr call target whose `call WORD PTR <mem>` emission uses no scratch
 /// register (so it's safe inside the SI/CX scheduler). Runtime-indexed array
@@ -2343,47 +2376,49 @@ fn emit_binop_inner(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, o
         out.extend_from_slice(&[0x2B, 0xC0]);                      // sub ax,ax
         return;
     }
-    // Two-call binop `f(..) OP g(..)` (both calls, direct or indirect; op
-    // add/sub): MSC evaluates the RIGHT call first → AX, builds the LEFT call's
-    // (single, simple) argument in CX so the right result in AX survives, parks
-    // AX in SI, calls LEFT → AX, then folds with `OP ax,si` (ax = left result,
-    // si = right). The frame pushes/pops SI (body_needs_si detects this).
-    // Fixtures 1277, 1536 (direct), 1918, 2343 (fn-ptr arrays).
-    if matches!(op, BinOp::Add | BinOp::Sub)
-        && is_two_call_binop(left, right, locals.inits)
-    {
-        let largs: &[Expr] = match left {
-            Expr::Call { args, .. } | Expr::CallPtr { args, .. } => args,
-            _ => unreachable!(),
-        };
-        // RIGHT call → AX (full call: args pushed, call, cleanup).
-        emit_expr_to_ax(right, locals, out, fixups);
-        // Build LEFT's single arg in CX (so AX survives) and push it.
-        if let Some(arg) = largs.first() {
-            emit_arg_to_cx(arg, locals, out, fixups);
-            out.push(0x51); // push cx
-        }
-        out.extend_from_slice(&[0x8B, 0xF0]); // mov si,ax  (park right result)
-        // LEFT call instruction (E8 for a direct call; FF /2 for a fn-ptr).
-        let char_ret = match left {
-            Expr::Call { name, .. } => {
-                let sym = callee_symbol(name, locals.pascal_fns.contains(name));
+    // Call-chain binop `f(..) OP g(..) [OP h(..)]` (2 or 3 calls, op add/sub):
+    // MSC evaluates the calls RIGHT-to-LEFT, parking each result in SI then DI so
+    // the running AX survives. Each non-rightmost call's (single, simple) arg is
+    // built in CX. Then it folds left-to-right: `ax OP <reg>` reading the parked
+    // results. Fixtures 1277/1536 (2 calls), 2305/2343 (3 calls).
+    if let Some((calls, ops)) = call_chain(op, left, right, locals.inits) {
+        let n = calls.len();
+        // Rightmost call → AX (full call: args pushed, call, cleanup).
+        emit_expr_to_ax(calls[n - 1], locals, out, fixups);
+        // mov si,ax / mov di,ax park opcodes; add/sub ax,si / ax,di modrm.
+        let park_mov = [0xF0u8, 0xF8]; // mov si,ax ; mov di,ax
+        let combine_modrm = [0xC6u8, 0xC7]; // op ax,si ; op ax,di
+        for k in 0..n - 1 {
+            let call = calls[n - 2 - k];
+            let (largs, name, target): (&[Expr], Option<&str>, Option<&Expr>) = match call {
+                Expr::Call { name, args } => (args, Some(name), None),
+                Expr::CallPtr { target, args } => (args, None, Some(target)),
+                _ => unreachable!(),
+            };
+            if let Some(arg) = largs.first() {
+                emit_arg_to_cx(arg, locals, out, fixups);
+                out.push(0x51); // push cx
+            }
+            out.extend_from_slice(&[0x8B, park_mov[k]]); // park the running result
+            let char_ret = if let Some(nm) = name {
+                let sym = callee_symbol(nm, locals.pascal_fns.contains(nm));
                 let bo = out.len();
                 out.extend_from_slice(&[0xE8, 0x00, 0x00]);
                 fixups.push(Fixup { body_offset: bo, kind: FixupKind::TuLocalCall { target: sym.clone() } });
                 locals.char_returners.contains(&sym)
-            }
-            Expr::CallPtr { target, .. } => {
-                crate::codegen::calls::emit_call_ptr_target(target, locals, out, fixups);
+            } else {
+                crate::codegen::calls::emit_call_ptr_target(target.unwrap(), locals, out, fixups);
                 false
-            }
-            _ => unreachable!(),
-        };
-        if !largs.is_empty() {
-            out.extend_from_slice(&[0x83, 0xC4, 0x02]); // add sp,2
+            };
+            if !largs.is_empty() { out.extend_from_slice(&[0x83, 0xC4, 0x02]); } // add sp,2
+            if char_ret { out.push(0x98); } // cbw
         }
-        if char_ret { out.push(0x98); } // cbw
-        out.extend_from_slice(if matches!(op, BinOp::Add) { &[0x03, 0xC6] } else { &[0x2B, 0xC6] }); // add/sub ax,si
+        // Combine: AX holds calls[0]; fold each op in source order with the reg
+        // that parked the corresponding operand (op[j] ↔ park index n-2-j).
+        for j in 0..n - 1 {
+            let base = if matches!(ops[j], BinOp::Add) { 0x03u8 } else { 0x2B };
+            out.extend_from_slice(&[base, combine_modrm[n - 2 - j]]);
+        }
         return;
     }
     // Sum of bit-fields of one struct unit (a left-assoc `f0 + f1 + ... + f_{n-1}`

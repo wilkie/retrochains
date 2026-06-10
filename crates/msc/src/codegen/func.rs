@@ -113,6 +113,31 @@ pub(crate) fn body_needs_si(stmts: &[Stmt], local_inits: &[Option<i32>]) -> bool
     }
     stmts.iter().any(|s| stmt_si(s, local_inits))
 }
+/// True if the body contains a 3-call add/sub chain (`f()+g()+h()`), which the
+/// scheduler parks in SI and DI → the frame must save both. Fixtures 2305, 2343.
+pub(crate) fn body_needs_di_si(stmts: &[Stmt], inits: &[Option<i32>]) -> bool {
+    fn expr_has(e: &Expr, inits: &[Option<i32>]) -> bool {
+        match e {
+            Expr::BinOp { op: BinOp::Add | BinOp::Sub, left, right }
+                if crate::codegen::expr::is_three_call_binop(left, right, inits) => true,
+            Expr::BinOp { left, right, .. } => expr_has(left, inits) || expr_has(right, inits),
+            _ => false,
+        }
+    }
+    fn stmt_has(s: &Stmt, inits: &[Option<i32>]) -> bool {
+        match s {
+            Stmt::Return(e) | Stmt::ExprStmt(e) => expr_has(e, inits),
+            Stmt::Assign { value, .. } => expr_has(value, inits),
+            Stmt::Block(ss) => ss.iter().any(|s| stmt_has(s, inits)),
+            Stmt::If { then_branch, else_branch, .. } =>
+                stmt_has(then_branch, inits) || else_branch.as_ref().is_some_and(|e| stmt_has(e, inits)),
+            Stmt::While { body, .. } | Stmt::DoWhile { body, .. } => stmt_has(body, inits),
+            Stmt::For { init, step, body, .. } => stmt_has(init, inits) || stmt_has(step, inits) || stmt_has(body, inits),
+            _ => false,
+        }
+    }
+    stmts.iter().any(|s| stmt_has(s, inits))
+}
 /// Structural check matching `deref_param_source`: is `value` a `*Param(s)` or
 /// `*Param(s) ± K` with `s != dst`? Used by body_needs_si (no pointee-width
 /// info available here; the corpus never mixes widths so the structural test
@@ -276,6 +301,14 @@ pub(crate) fn emit_function(
         Frame::NoneDiSi
     } else if receives_float_return || returns_float_call || returns_big_struct {
         Frame::WithSlideDiSi
+    } else if matches!(base_frame, Frame::WithSlide)
+        && body_needs_di_si(&body, &local_inits)
+    {
+        Frame::WithSlideDiSi
+    } else if matches!(base_frame, Frame::None)
+        && body_needs_di_si(&body, &local_inits)
+    {
+        Frame::NoneDiSi
     } else if matches!(base_frame, Frame::WithSlide)
         && body_needs_si(&body, &local_inits)
     {
