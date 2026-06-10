@@ -1564,11 +1564,13 @@ pub(crate) fn ax_holds_const(out: &[u8], k: i32, barrier: usize) -> bool {
         if n >= 5 && out[n-5] == 0xC7 && out[n-4] == 0x46 { n -= 5; continue; }
         if n >= 4 && out[n-4] == 0xC6 && out[n-3] == 0x46 { n -= 4; continue; }
         if n >= 4 && out[n-4] == 0x83 && (out[n-3] & 0xC7) == 0x46 { n -= 4; continue; }
+        if n >= 4 && out[n-4] == 0x80 && (out[n-3] & 0xC7) == 0x46 { n -= 4; continue; } // byte alu [bp+d8],imm8
         if n >= 6 && out[n-6] == 0x81 && (out[n-5] & 0xC7) == 0x46 { n -= 6; continue; }
-        // global mem-imm: c7 06 o16 i16 (6) / c6 06 o16 i8 (5) / 83 m06 o16 i8 (5) / 81 m06 o16 i16 (6)
+        // global mem-imm: c7 06 o16 i16 (6) / c6 06 o16 i8 (5) / 80,83 m06 o16 i8 (5) / 81 m06 o16 i16 (6)
         if n >= 6 && out[n-6] == 0xC7 && (out[n-5] & 0xC7) == 0x06 { n -= 6; continue; }
         if n >= 5 && out[n-5] == 0xC6 && (out[n-4] & 0xC7) == 0x06 { n -= 5; continue; }
         if n >= 5 && out[n-5] == 0x83 && (out[n-4] & 0xC7) == 0x06 { n -= 5; continue; }
+        if n >= 5 && out[n-5] == 0x80 && (out[n-4] & 0xC7) == 0x06 { n -= 5; continue; } // byte alu [g],imm8
         if n >= 6 && out[n-6] == 0x81 && (out[n-5] & 0xC7) == 0x06 { n -= 6; continue; }
         return false;
     }
