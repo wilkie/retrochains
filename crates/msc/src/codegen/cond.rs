@@ -123,6 +123,12 @@ fn emit_long_cmp_skip(
         Jcc(u8, bool), // (opcode, to_then?)
     }
     let (hi_f, hi_t, lo_f) = long_ordering_jccs(op, unsigned);
+    // UNSIGNED ordering against a constant whose HIGH word is 0: the high word
+    // can't be negative, so one of the two high-word jccs (testing `high < 0`) is
+    // dead. The compare collapses to a single `cmp hi,0; jne <dst>` — high != 0
+    // means definitively greater (Gt/Ge → take then) or not-less (Lt/Le → take
+    // else). Fixture 3058 (`unsigned long v > 1000`).
+    let const_hi_zero = unsigned && matches!(right, Expr::IntLit(k) if ((*k >> 16) as u32 & 0xFFFF) == 0);
     let steps: Vec<Step> = match op {
         RelOp::Eq => vec![
             Step::Cmp(&cmp_lo, &lo_fx), Step::Jcc(0x75, false), // jne else
@@ -131,6 +137,14 @@ fn emit_long_cmp_skip(
         RelOp::Ne => vec![
             Step::Cmp(&cmp_lo, &lo_fx), Step::Jcc(0x75, true), // jne then
             Step::Cmp(&cmp_hi, &hi_fx), Step::Jcc(0x74, false), // je else
+        ],
+        RelOp::Gt | RelOp::Ge if const_hi_zero => vec![
+            Step::Cmp(&cmp_hi, &hi_fx), Step::Jcc(0x75, true), // jne then (high!=0 → greater)
+            Step::Cmp(&cmp_lo, &lo_fx), Step::Jcc(lo_f, false),
+        ],
+        RelOp::Lt | RelOp::Le if const_hi_zero => vec![
+            Step::Cmp(&cmp_hi, &hi_fx), Step::Jcc(0x75, false), // jne else (high!=0 → not less)
+            Step::Cmp(&cmp_lo, &lo_fx), Step::Jcc(lo_f, false),
         ],
         _ => vec![
             Step::Cmp(&cmp_hi, &hi_fx),
