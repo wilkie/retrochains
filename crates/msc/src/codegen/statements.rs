@@ -1,5 +1,11 @@
 use crate::*;
 
+/// Synthetic label name for a function's shared tail epilogue — a void early
+/// `return;` (`if(c) return;`) jccs here instead of emitting its own epilogue.
+/// The `@` can't appear in a C identifier, so it never collides with a user
+/// goto label. Recorded at the tail epilogue in `emit_function`. Fixtures 1566/2364.
+pub(crate) const EPILOGUE_LABEL: &str = "@epilogue";
+
 /// Emit a single statement (recursive: if-statements contain
 /// nested statements). Returns no value — appends directly to `out`.
 /// Recognize `(int)<float-global-array>[K]` and `(int)(<…>[K] <op> <floatlit>)`
@@ -141,11 +147,18 @@ pub(crate) fn emit_stmt(
             emit_for(init, cond, step, body, locals, frame, return_int, return_long, out, fixups);
         }
         Stmt::If { cond, then_branch, else_branch } => {
-            // `if (cond) goto L;` lowers to a single conditional jump straight to
-            // the label (jcc taken when the cond is TRUE), not cond_skip + jmp.
-            if else_branch.is_none()
-                && let Stmt::Goto(label) = then_branch.as_ref()
-            {
+            // `if (cond) goto L;` — and `if (cond) return;` in a VOID function,
+            // which MSC routes to a SHARED end epilogue label (EPILOGUE_LABEL,
+            // recorded at the function tail) — lower to a single conditional jump
+            // to the label (jcc taken when the cond is TRUE). Fixtures 1566/2364.
+            let goto_label: Option<String> = if else_branch.is_none() {
+                match then_branch.as_ref() {
+                    Stmt::Goto(label) => Some(label.clone()),
+                    Stmt::Return(Expr::IntLit(0)) if !return_int && !return_long => Some(EPILOGUE_LABEL.to_owned()),
+                    _ => None,
+                }
+            } else { None };
+            if let Some(label) = goto_label {
                 if let Some(k) = fold_cond(cond, locals) {
                     if k != 0 {
                         out.push(0xEB);

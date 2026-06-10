@@ -728,8 +728,20 @@ pub(crate) fn emit_function(
         i += 1;
     }
 
+    // Implicit return at the end of functions that fall off without an
+    // explicit `return`. MSC emits leave+ret for both void and int-returning
+    // functions. The epilogue shape follows the function's frame. It is also the
+    // SHARED target (EPILOGUE_LABEL) for void early returns (`if(c) return;`),
+    // so emit it when control falls through OR an early return jccs to it. The
+    // label is recorded at the epilogue's start, before the jump resolution below.
+    let epilogue_targeted = label_fixups.borrow().iter()
+        .any(|(n, _)| n == crate::codegen::statements::EPILOGUE_LABEL);
+    if reachable || epilogue_targeted {
+        labels.borrow_mut().insert(crate::codegen::statements::EPILOGUE_LABEL.to_owned(), bytes.len());
+        push_epilogue(frame, pascal_cleanup, &mut bytes);
+    }
     // Resolve `goto`/label jumps: backpatch each pending rel8 displacement now
-    // that every label's byte offset is known.
+    // that every label's byte offset is known (incl. the tail EPILOGUE_LABEL).
     {
         let labels = labels.borrow();
         for (name, pos) in label_fixups.borrow().iter() {
@@ -738,12 +750,6 @@ pub(crate) fn emit_function(
             let disp = target as i64 - (*pos as i64 + 1);
             bytes[*pos] = i8::try_from(disp).expect("goto rel8 displacement fits") as u8;
         }
-    }
-    // Implicit return at the end of functions that fall off without an
-    // explicit `return`. MSC emits leave+ret for both void and int-returning
-    // functions. The epilogue shape follows the function's frame.
-    if reachable {
-        push_epilogue(frame, pascal_cleanup, &mut bytes);
     }
 
     if bytes.len() % 2 != 0 {
