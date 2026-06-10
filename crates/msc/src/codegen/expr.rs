@@ -608,6 +608,28 @@ pub(crate) fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8
                 if !(*step == 1 || *step == -1) { out.push(*step as i8 as u8); }
             }
         }
+        Expr::PostMutateLocalIndex { local, index, step, is_byte } => {
+            // `a[K]++` on a local array (constant index): load the OLD element
+            // into AX/AL, then mutate the slot in place. Fixture 1418.
+            let k = index.fold(locals.inits)
+                .expect("runtime local-array post-mutate index not yet supported");
+            let elem = if *is_byte { 1 } else { 2 };
+            let disp = locals.disp(*local) + (k as i16) * elem;
+            // mov ax/al, [bp+disp]
+            out.push(if *is_byte { 0x8A } else { 0x8B });
+            out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp);
+            if *is_byte { out.push(0x98); } // cbw
+            // inc/dec or add/sub the slot in place.
+            if *step == 1 || *step == -1 {
+                out.push(if *is_byte { 0xFE } else { 0xFF });
+                out.push(bp_modrm(if *step == 1 { 0x46 } else { 0x4E }, disp));
+                push_bp_disp(out, disp);
+            } else {
+                out.push(if *is_byte { 0x80 } else { 0x83 });
+                out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp);
+                out.push(*step as i8 as u8);
+            }
+        }
         Expr::PostIncDeref { ptr, step, is_byte } => {
             // Value of `*p++`: the OLD pointee. Load p into BX, advance [p], then
             // deref BX. Fixture 3102.

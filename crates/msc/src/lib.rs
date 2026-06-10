@@ -1065,6 +1065,10 @@ pub enum Expr {
     /// `mov ax,_arr[bx]; inc word _arr[bx]` (const index uses the moffs form).
     /// Fixtures 3032, 2700, 3123.
     PostMutateIndexedGlobal { array: usize, index: Box<Expr>, step: i32, is_byte: bool },
+    /// `arr[K]++` on a LOCAL array — yields the OLD element value, then mutates
+    /// in place: `mov ax,[bp+d+off]; inc word [bp+d+off]`. Constant index only.
+    /// Fixture 1418.
+    PostMutateLocalIndex { local: usize, index: Box<Expr>, step: i32, is_byte: bool },
     /// `++<global>` or `--<global>` — pre-increment/decrement of a
     /// file-scope variable. Mutates first, then evaluates to the NEW value.
     PreMutateGlobal { global_idx: usize, step: i32 },
@@ -1192,7 +1196,8 @@ impl Expr {
             | Expr::PreMutateLocal { .. } | Expr::PreMutateGlobal { .. }
             | Expr::PreMutateParam { .. } | Expr::PostMutateParam { .. }
             | Expr::PreMutateDeref { .. } | Expr::PostIncDeref { .. } | Expr::PostMutateDeref { .. }
-            | Expr::PreMutateIndexedGlobal { .. } | Expr::PostMutateIndexedGlobal { .. } => None,
+            | Expr::PreMutateIndexedGlobal { .. } | Expr::PostMutateIndexedGlobal { .. }
+            | Expr::PostMutateLocalIndex { .. } => None,
             // Comma expression fold: if all the side stmts have no
             // observable side effect (just discard a value), fold to
             // the tail's value. Otherwise refuse to fold (the assigns

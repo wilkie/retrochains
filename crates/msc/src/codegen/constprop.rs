@@ -1164,6 +1164,16 @@ pub(crate) fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
             prop_expr(index, cp);
             cp.mutated_globals.insert(*array);
         }
+        Expr::PostMutateLocalIndex { local, index, is_byte, .. } => {
+            prop_expr(index, cp);
+            cp.mutated_locals.insert(*local);
+            // Drop the mutated element's known value so a later `a[K]` read
+            // reloads from the slot instead of folding the old value.
+            if let Expr::IntLit(k) = index.as_ref() {
+                let byte_off = (*k * if *is_byte { 1 } else { 2 }) as u16;
+                cp.la_known.remove(&(*local, byte_off));
+            }
+        }
         // A param's value is unknown at compile time; mutating it changes
         // nothing in the const-prop tables (params aren't tracked).
         Expr::PreMutateParam { .. } | Expr::PostMutateParam { .. } => {}

@@ -4150,6 +4150,11 @@ pub(crate) fn parse_binop_prec(p: &mut Parser<'_>, min_prec: u8) -> Result<Expr,
                 Expr::PostMutateIndexedGlobal { array, index, step, is_byte: false },
             Expr::IndexByte { array, index } =>
                 Expr::PostMutateIndexedGlobal { array, index, step, is_byte: true },
+            // `a[K]++` on a LOCAL array — post-mutate the element (const index).
+            Expr::LocalIndex { local, index } =>
+                Expr::PostMutateLocalIndex { local, index, step, is_byte: false },
+            Expr::LocalIndexByte { local, index } =>
+                Expr::PostMutateLocalIndex { local, index, step, is_byte: true },
             other => return Err(EmitError::Unsupported(format!(
                 "postfix ++/-- on unsupported operand: {other:?}"))),
         };

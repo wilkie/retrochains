@@ -442,7 +442,7 @@ pub(crate) fn emit_push_arg(arg: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, 
             | Expr::PostIncDeref { .. } | Expr::PostMutateLocal { .. } | Expr::PostMutateParam { .. }
             | Expr::PtrChainField { .. } | Expr::AddrOfIndexedGlobal { .. }
             | Expr::StructArrayField { .. } | Expr::PreMutateIndexedGlobal { .. }
-            | Expr::PostMutateIndexedGlobal { .. } => {
+            | Expr::PostMutateIndexedGlobal { .. } | Expr::PostMutateLocalIndex { .. } => {
             // Computed value: build the result in AX then push.
             // Fixture 4144 (BinOp), 1270 (Call), 3626 (`putchar(*s++)`).
             emit_expr_to_ax(arg, locals, out, fixups);
