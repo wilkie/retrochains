@@ -2834,11 +2834,16 @@ pub(crate) fn emit_assign_local_field(local_idx: usize, byte_off: u16, size: u8,
     }
     let disp = locals.disp(local_idx) + byte_off as i16;
     if size == 1 {
-        let k = value.fold(locals.inits).unwrap_or_else(|| {
-            panic!("non-constant byte struct-field store not yet supported")
-        });
-        let imm = (k as u32 & 0xFF) as u8;
-        out.push(0xC6); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp); out.push(imm);
+        if let Some(k) = value.fold(locals.inits) {
+            let imm = (k as u32 & 0xFF) as u8;
+            out.push(0xC6); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp); out.push(imm);
+        } else {
+            // Non-constant byte: compute in AL (drop a trailing widening cbw) and
+            // store the byte. `t.c = b` → `mov al,[b]; mov [bp+disp],al`. Fixture 3178.
+            emit_expr_to_ax(value, locals, out, fixups);
+            if out.last() == Some(&0x98) { out.pop(); }
+            out.push(0x88); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp);
+        }
     } else if let Some(k) = value.fold(locals.inits) {
         let imm = (k as u32 & 0xFFFF) as u16;
         out.push(0xC7); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp);
