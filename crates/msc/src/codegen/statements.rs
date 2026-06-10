@@ -309,7 +309,11 @@ pub(crate) fn emit_stmt(
     // otherwise leaves AX in an undefined state, advance the AX-reuse barrier so a
     // following compare won't reuse a register stored before the merge (fixture
     // 1445). Straight-line stores past this point remain reusable.
-    if !matches!(stmt, Stmt::Assign { .. }) {
+    // A `Block` is transparent: its inner statements advance the barrier
+    // themselves (a nested if/loop sets it at its own merge), so a block of
+    // straight-line assigns leaves AX reusable — matching MSC's flat view of an
+    // elided `if(true){v=...}` (fixture 1986).
+    if !matches!(stmt, Stmt::Assign { .. } | Stmt::Block(_)) {
         locals.last_branch_barrier.set(out.len());
     }
 }

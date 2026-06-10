@@ -4620,6 +4620,28 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                 p.eat(&Tok::RParen)?;
                 return Ok(Expr::AssignExpr { target, value: Box::new(value) });
             }
+            // `(a[i] = e)` — assignment-as-expression to an array element. Build
+            // the runtime-index store target; const-prop folds a known index to
+            // the direct form. Fixture 1986.
+            if matches!(p.peek(), Some(Tok::Assign)) {
+                let idx_target = match &inner {
+                    Expr::LocalIndex { local, index } =>
+                        Some(AssignTarget::IndexedLocalVar { local: *local, index: index.clone() }),
+                    Expr::LocalIndexByte { local, index } =>
+                        Some(AssignTarget::IndexedLocalByteVar { local: *local, index: index.clone() }),
+                    Expr::Index { array, index } =>
+                        Some(AssignTarget::IndexedGlobalVar { array: *array, index: index.clone() }),
+                    Expr::IndexByte { array, index } =>
+                        Some(AssignTarget::IndexedGlobalByteVar { array: *array, index: index.clone() }),
+                    _ => None,
+                };
+                if let Some(target) = idx_target {
+                    p.bump();
+                    let value = parse_assign_rhs(p)?;
+                    p.eat(&Tok::RParen)?;
+                    return Ok(Expr::AssignExpr { target, value: Box::new(value) });
+                }
+            }
             // Comma operator: `(<ident> = <expr>, <expr>, ...)` or
             // `(<expr>, <expr>)`. Build a sequence of side-effect
             // statements followed by the value expression. Fixtures

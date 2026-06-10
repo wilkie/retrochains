@@ -860,6 +860,36 @@ pub(crate) fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
             // than re-materializing the immediate (the store leaves AX set, and
             // the return/use peepholes reuse it). Mirrors the ternary-assign rule.
             prop_expr(value, cp);
+            // Fold a runtime index in an `(a[i] = e)` target: substitute `i`,
+            // and if it becomes constant, rewrite to the const-index store form
+            // so codegen emits a direct `mov [bp+d+off],ax`. Fixture 1986.
+            match target {
+                AssignTarget::IndexedLocalVar { local, index } => {
+                    prop_expr(index, cp);
+                    if let Expr::IntLit(k) = index.as_ref() {
+                        *target = AssignTarget::IndexedLocal { local: *local, byte_off: (*k * 2) as u16 };
+                    }
+                }
+                AssignTarget::IndexedLocalByteVar { local, index } => {
+                    prop_expr(index, cp);
+                    if let Expr::IntLit(k) = index.as_ref() {
+                        *target = AssignTarget::IndexedLocalByte { local: *local, byte_off: *k as u16 };
+                    }
+                }
+                AssignTarget::IndexedGlobalVar { array, index } => {
+                    prop_expr(index, cp);
+                    if let Expr::IntLit(k) = index.as_ref() {
+                        *target = AssignTarget::IndexedGlobal { array: *array, byte_off: (*k * 2) as u16 };
+                    }
+                }
+                AssignTarget::IndexedGlobalByteVar { array, index } => {
+                    prop_expr(index, cp);
+                    if let Expr::IntLit(k) = index.as_ref() {
+                        *target = AssignTarget::IndexedGlobalByte { array: *array, byte_off: *k as u16 };
+                    }
+                }
+                _ => {}
+            }
             // A chained assignment `a = b = c = 7` carries the constant to every
             // target, so a later read folds to the immediate (fixture 1817). A
             // non-constant assigned value still invalidates — MSC reloads/reuses

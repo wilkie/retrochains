@@ -250,6 +250,28 @@ pub(crate) fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8
                     fixups.push(Fixup { body_offset: bo - 1, kind: FixupKind::GlobalAddr { global_idx: *g } });
                     out.extend_from_slice(&[0x89, 0x07]);
                 }
+                // `v = (a[K] = e)` — store AX to the const-index array element,
+                // leaving the value in AX for the enclosing assignment. Fixture 1986.
+                AssignTarget::IndexedLocal { local, byte_off } => {
+                    let d = locals.disp(*local) + *byte_off as i16;
+                    out.push(0x89); out.push(bp_modrm(0x46, d)); push_bp_disp(out, d);
+                }
+                AssignTarget::IndexedLocalByte { local, byte_off } => {
+                    let d = locals.disp(*local) + *byte_off as i16;
+                    if out.last() == Some(&0x98) { out.pop(); } // storing AL, drop cbw
+                    out.push(0x88); out.push(bp_modrm(0x46, d)); push_bp_disp(out, d);
+                }
+                AssignTarget::IndexedGlobal { array, byte_off } => {
+                    out.extend_from_slice(&[0x89, 0x06]);
+                    let bo = out.len(); out.extend_from_slice(&byte_off.to_le_bytes());
+                    fixups.push(Fixup { body_offset: bo - 1, kind: FixupKind::GlobalAddr { global_idx: *array } });
+                }
+                AssignTarget::IndexedGlobalByte { array, byte_off } => {
+                    if out.last() == Some(&0x98) { out.pop(); }
+                    out.extend_from_slice(&[0x88, 0x06]);
+                    let bo = out.len(); out.extend_from_slice(&byte_off.to_le_bytes());
+                    fixups.push(Fixup { body_offset: bo - 1, kind: FixupKind::GlobalAddr { global_idx: *array } });
+                }
                 other => panic!("AssignExpr target not yet supported: {other:?}"),
             }
         }
