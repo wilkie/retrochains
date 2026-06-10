@@ -2184,12 +2184,19 @@ pub(crate) fn emit_loop(
     let needs_pad = pos_after_jmp % 2 != 0;
     let pad = if needs_pad { 1 } else { 0 };
 
+    // The loop-back jcc takes UNSIGNED form (jb/jae/…) when the comparison is
+    // unsigned — including a pointer compare like `while (p < end)`. Fixtures
+    // 1361 etc. (cmp_is_unsigned now treats pointer operands as unsigned).
+    let back_jcc = |c: &Cond, op: RelOp| {
+        let j = loop_back_jcc(op);
+        if cmp_is_unsigned(c, locals) { to_unsigned_jcc(j) } else { j }
+    };
     let jcc_opcode = match cond {
         Cond::Truthy(_) => 0x75,             // jne (back when nonzero)
-        Cond::Cmp { op, .. } => loop_back_jcc(*op),
+        Cond::Cmp { op, .. } => back_jcc(cond, *op),
         Cond::And(cond_a, _) => match cond_a.as_ref() {
             Cond::Truthy(_) => 0x75,
-            Cond::Cmp { op, .. } => loop_back_jcc(*op),
+            Cond::Cmp { op, .. } => back_jcc(cond_a, *op),
             other => panic!("&&-while: A must be Cmp/Truthy, got: {other:?}"),
         },
         Cond::Or(_, _) => panic!("|| in while/do-while not yet supported"),
