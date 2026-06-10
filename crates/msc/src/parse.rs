@@ -2715,6 +2715,44 @@ pub(crate) fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
                 p.eat(&Tok::Semi)?;
                 return Ok(Stmt::Assign { target, value });
             }
+            // `*(<ptr> +/- <idx>) = <value>;` — store through pointer arithmetic
+            // (`*(p + 1) = v` ≡ `p[1] = v`). The index scales by the pointee size
+            // in codegen, so it's passed unscaled. Fixture 3591.
+            if matches!(p.peek(), Some(Tok::LParen)) {
+                p.bump(); // (
+                let inner = parse_expr(p)?;
+                p.eat(&Tok::RParen)?;
+                let (op, base, idx) = match inner {
+                    Expr::BinOp { op: op @ (BinOp::Add | BinOp::Sub), left, right } => (op, *left, *right),
+                    other => return Err(EmitError::Unsupported(format!(
+                        "deref-store through `*({other:?})` not yet supported"))),
+                };
+                let init_view: Vec<Option<i32>> = p.local_specs.iter().map(|l| l.init).collect();
+                let index = match (&op, idx.fold(&init_view)) {
+                    (BinOp::Sub, Some(k)) => Expr::IntLit(-k),
+                    (BinOp::Add, _) => idx,
+                    (BinOp::Sub, None) => return Err(EmitError::Unsupported(
+                        "runtime `*(p - i)` deref-store not yet supported".to_owned())),
+                    _ => unreachable!(),
+                };
+                let target = if let Expr::Param(pi) = base {
+                    let elem = p.param_pointee_sizes.get(pi).copied().filter(|&s| s > 0).unwrap_or(2);
+                    AssignTarget::ParamIndexStore { param: pi, index: Box::new(index), elem }
+                } else if let Expr::Local(li) = base {
+                    let ptsz = p.local_specs[li].pointee_size.max(1);
+                    let k = index.fold(&init_view).ok_or_else(|| EmitError::Unsupported(
+                        "runtime `*(local + i)` deref-store not yet supported".to_owned()))?;
+                    let byte_off = (k * ptsz as i32) as u16;
+                    AssignTarget::DerefLocalOffset { local: li, byte_off, is_byte: ptsz == 1 }
+                } else {
+                    return Err(EmitError::Unsupported(format!(
+                        "deref-store through `*({base:?} + idx)` not yet supported")));
+                };
+                p.eat(&Tok::Assign)?;
+                let value = parse_expr(p)?;
+                p.eat(&Tok::Semi)?;
+                return Ok(Stmt::Assign { target, value });
+            }
             let target_name = match p.bump().cloned() {
                 Some(Tok::Ident(s)) => s,
                 other => {
