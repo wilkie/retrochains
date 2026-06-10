@@ -4685,6 +4685,35 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                 return Ok(Expr::Seq { sides, value: Box::new(acc_value) });
             }
             p.eat(&Tok::RParen)?;
+            // `(c ? a : b)[K]` — index a ternary of arrays by distributing the
+            // subscript into both branches (`c ? a[K] : b[K]`); const-prop folds
+            // a constant cond to the chosen element. Fixture 2379.
+            if let Expr::Ternary { cond, then_arm, else_arm } = &inner
+                && matches!(p.peek(), Some(Tok::LBrack))
+            {
+                p.bump();
+                let index = parse_expr(p)?;
+                p.eat(&Tok::RBrack)?;
+                let idx_branch = |br: &Expr| -> Result<Expr, EmitError> {
+                    match br {
+                        Expr::AddrOfLocal(i) => Ok(if p.local_specs[*i].size == 1 {
+                            Expr::LocalIndexByte { local: *i, index: Box::new(index.clone()) }
+                        } else {
+                            Expr::LocalIndex { local: *i, index: Box::new(index.clone()) }
+                        }),
+                        Expr::AddrOfGlobal(g) => Ok(if p.globals[*g].element_size == 1 {
+                            Expr::IndexByte { array: *g, index: Box::new(index.clone()) }
+                        } else {
+                            Expr::Index { array: *g, index: Box::new(index.clone()) }
+                        }),
+                        other => Err(EmitError::Unsupported(format!(
+                            "subscript of ternary branch {other:?} not supported"))),
+                    }
+                };
+                let t = idx_branch(then_arm)?;
+                let e = idx_branch(else_arm)?;
+                return Ok(Expr::Ternary { cond: cond.clone(), then_arm: Box::new(t), else_arm: Box::new(e) });
+            }
             // `(*pfn)(args)` / `(pfn)(args)` — call through a function pointer.
             // Dereferencing a function pointer yields the function, so an
             // explicit `(*pfn)` is the same indirect call as `pfn`. Fixture 2414.
