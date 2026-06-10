@@ -933,6 +933,21 @@ pub(crate) fn deref_param_source(value: &Expr, dst: usize, locals: &Locals<'_>) 
 pub(crate) fn emit_assign_deref_param(param_idx: usize, value: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
     let pdisp = param_disp(param_idx);
     let is_byte = locals.param_pointee_size(param_idx) == 1;
+    // `*p op= <long>` through a `long *p` param: load p into BX, the long RHS
+    // into DX:AX, then a two-word in-place op — `add/sub word [bx],ax; adc/sbb
+    // word [bx+2],dx`. Fixture 3296.
+    if locals.param_pointee_size(param_idx) == 4
+        && let Expr::BinOp { op: op @ (BinOp::Add | BinOp::Sub), left, right } = value
+        && matches!(left.as_ref(),
+            Expr::DerefWord { ptr } if matches!(ptr.as_ref(), Expr::Param(i) if *i == param_idx))
+    {
+        out.extend_from_slice(&[0x8B, 0x5E, pdisp as u8]); // mov bx,[bp+p]
+        crate::codegen::calls::emit_long_to_dx_ax(right, locals, out, fixups); // DX:AX = RHS long
+        let (lo_op, hi_op) = if matches!(op, BinOp::Sub) { (0x29u8, 0x19u8) } else { (0x01u8, 0x11u8) };
+        out.extend_from_slice(&[lo_op, 0x07]);        // add/sub word [bx],ax
+        out.extend_from_slice(&[hi_op, 0x57, 0x02]);  // adc/sbb word [bx+2],dx
+        return;
+    }
     // `*p = *p ± K` (self-modify through a pointer param) → load p into BX, then
     // an in-place memory op on `[bx]`: `inc/dec word [bx]` for ±1, else
     // `add/sub word [bx], K`. Mirrors the local/global self-assign peephole.
