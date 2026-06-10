@@ -294,8 +294,9 @@ pub(crate) fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
             // direct `a[K]` addressing. Any other store to a global pointer clears
             // its alias.
             if let AssignTarget::Global(p) = target {
-                if let Expr::AddrOfGlobal(a) = value {
-                    cp.ptr_alias_g.insert(*p, AliasTarget::Global(*a));
+                // `p = a` (off 0) or `p = &a[J]` / `p = a + J` (byte offset J).
+                if let Some((a @ AliasTarget::Global(_), off)) = addr_value_of(value) {
+                    cp.ptr_alias_g.insert(*p, (a, off));
                 } else {
                     cp.ptr_alias_g.remove(p);
                 }
@@ -388,15 +389,16 @@ pub(crate) fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
             // `p[K] = ...` through a GLOBAL pointer aliased to array `a` → direct
             // `a[K]` store. The parser lowers this to PtrIndexByte{ptr:p, disp:K}.
             if let AssignTarget::PtrIndexByte { ptr: p, disp } = target
-                && let Some(&AliasTarget::Global(a)) = cp.ptr_alias_g.get(p)
+                && let Some(&(AliasTarget::Global(a), base_off)) = cp.ptr_alias_g.get(p)
             {
                 from_ptr_store = true;
                 let elem = cp.global_elem_sizes.get(a).copied().unwrap_or(2);
                 let k = *disp as i64;
+                let byte_off = (base_off as i64 + k * elem as i64) as u16;
                 *target = if elem == 1 {
-                    AssignTarget::IndexedGlobalByte { array: a, byte_off: k as u16 }
+                    AssignTarget::IndexedGlobalByte { array: a, byte_off }
                 } else {
-                    AssignTarget::IndexedGlobal { array: a, byte_off: (k * elem as i64) as u16 }
+                    AssignTarget::IndexedGlobal { array: a, byte_off }
                 };
             }
             // `x = x op RHS` preserves the `Local(x)` on the left so
@@ -981,15 +983,16 @@ pub(crate) fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
             // `p[K]` through a GLOBAL pointer aliased to array `a` → direct
             // `a[K]` element read (runtime, not folded to an immediate — MSC
             // keeps pointer-routed reads as loads). Fixtures 888, 890.
-            if let Some(&AliasTarget::Global(a)) = cp.ptr_alias_g.get(ptr)
+            if let Some(&(AliasTarget::Global(a), base_off)) = cp.ptr_alias_g.get(ptr)
                 && let Expr::IntLit(k) = index.as_ref()
             {
-                let k = *k;
                 let elem = cp.global_elem_sizes.get(a).copied().unwrap_or(2);
+                // `p = &a[J]` shifts the element index by J = base_off/elem.
+                let idx = *k + base_off / elem as i32;
                 *e = if elem == 1 {
-                    Expr::IndexByte { array: a, index: Box::new(Expr::IntLit(k)) }
+                    Expr::IndexByte { array: a, index: Box::new(Expr::IntLit(idx)) }
                 } else {
-                    Expr::Index { array: a, index: Box::new(Expr::IntLit(k)) }
+                    Expr::Index { array: a, index: Box::new(Expr::IntLit(idx)) }
                 };
             }
         }

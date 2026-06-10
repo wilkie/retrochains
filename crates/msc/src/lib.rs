@@ -2872,10 +2872,12 @@ struct ConstProp {
     /// stores directly. Cleared at branch boundaries.
     ptr_alias: std::collections::HashMap<usize, AliasTarget>,
     /// Global-pointer alias tracking: `int *p; p = a;` (p a near GLOBAL pointer,
-    /// a a global array) records `p -> Global(a)`, so `p[K]` reads/writes resolve
-    /// to direct `a[K]` global addressing. Unlike the local single-use alias this
-    /// persists until p is reassigned or a branch boundary. Keyed by global idx.
-    ptr_alias_g: std::collections::HashMap<usize, AliasTarget>,
+    /// a a global array) records `p -> (Global(a), base_byte_off)`, so `p[K]`
+    /// reads/writes resolve to direct `a[base_off + K*elem]` global addressing.
+    /// The byte offset is nonzero for `p = &a[J]` / `p = a + J` (fixture 876).
+    /// Unlike the local single-use alias this persists until p is reassigned or
+    /// a branch boundary. Keyed by global idx.
+    ptr_alias_g: std::collections::HashMap<usize, (AliasTarget, i32)>,
     /// Pointers whose alias was used in the current statement. MSC's alias is
     /// single-use: only the FIRST statement dereferencing `p` (after `p = &x`)
     /// is aliased; later `*p` derefs through the pointer. Drained after each
