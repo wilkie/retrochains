@@ -62,7 +62,13 @@ pub(crate) fn parse_unit(source: &str) -> Result<Unit, EmitError> {
             && matches!(p.toks.get(p.pos + 1), Some(Tok::Ident(_)))
             && matches!(p.toks.get(p.pos + 2), Some(Tok::LBrace))
         {
+            let before = p.globals.len();
             parse_struct_def(&mut p)?;
+            // Inline declarators (`struct X { ... } v = {...};`) create globals;
+            // record them in declaration order so PUBDEF emission includes them.
+            for i in before..p.globals.len() {
+                decl_order.push(TopDecl::Global(i));
+            }
             continue;
         }
         // `struct <Name>;` / `union <Name>;` — forward declaration. Register an
@@ -750,9 +756,23 @@ pub(crate) fn parse_struct_def(p: &mut Parser<'_>) -> Result<(), EmitError> {
                 elem_count = n as usize;
             }
             let array_len = if is_pointer { 1 } else { total_bytes * elem_count };
+            // Optional `= { ... }` initializer on the inline declarator
+            // (`struct Pt { ... } p = {3,4};`). Reuse the struct brace-group
+            // parser. Fixture 3341.
+            let init = if !is_pointer && matches!(p.peek(), Some(Tok::Assign)) {
+                p.bump();
+                if matches!(p.peek(), Some(Tok::LBrace)) {
+                    Some(parse_struct_brace_group(p, sidx, total_bytes)?)
+                } else {
+                    return Err(EmitError::Unsupported(
+                        "non-brace initializer on inline struct declarator not yet supported".to_owned()));
+                }
+            } else {
+                None
+            };
             p.global_names.push(name.clone());
             p.globals.push(Global {
-                name, init: None, array_len, element_size: 1, is_pointer,
+                name, init, array_len, element_size: 1, is_pointer,
                 struct_idx: Some(sidx), is_long: false, is_static: false,
                 is_extern: false, is_unsigned: false, is_float: false,
             });
