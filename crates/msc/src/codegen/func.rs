@@ -64,10 +64,10 @@ pub(crate) fn body_needs_si(stmts: &[Stmt], local_inits: &[Option<i32>]) -> bool
                     expr_si(ptr, inits)
                 }
             }
-            // Two-call binop `f(..) OP g(..)` (both direct calls) parks the right
-            // result in SI while the left call runs. Fixtures 1277, 1536.
+            // Two-call binop `f(..) OP g(..)` parks the right result in SI while
+            // the left call runs. Fixtures 1277, 1536, 1918.
             Expr::BinOp { op: BinOp::Add | BinOp::Sub, left, right }
-                if matches!(left.as_ref(), Expr::Call { .. }) && matches!(right.as_ref(), Expr::Call { .. }) => true,
+                if crate::codegen::expr::is_two_call_binop(left, right, inits) => true,
             Expr::BinOp { left, right, .. } => expr_si(left, inits) || expr_si(right, inits),
             Expr::Call { args, .. } => args.iter().any(|a| expr_si(a, inits)),
             // `ops[i](args)` — a runtime-indexed fn-ptr array call scales the

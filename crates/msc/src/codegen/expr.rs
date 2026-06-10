@@ -2245,6 +2245,39 @@ fn ptr_deref_add_chain<'a>(left: &'a Expr, right: &'a Expr, _locals: &Locals<'_>
     if (3..=4).contains(&leaves.len()) { Some(leaves) } else { None }
 }
 
+/// Is `BinOp{op, left, right}` a two-call binop the SI/CX scheduler handles?
+/// Both operands must be calls; the LEFT call drives the scheme so it must have
+/// ≤1 CX-buildable argument and, if indirect, an SI-safe target (one whose call
+/// instruction doesn't itself clobber SI/BX/CX — i.e. not a runtime-indexed
+/// array element). The RIGHT call is emitted normally, so it's unconstrained.
+pub(crate) fn is_two_call_binop(left: &Expr, right: &Expr, inits: &[Option<i32>]) -> bool {
+    if !matches!(right, Expr::Call { .. } | Expr::CallPtr { .. }) {
+        return false;
+    }
+    let (largs, target) = match left {
+        Expr::Call { args, .. } => (args.as_slice(), None),
+        Expr::CallPtr { target, args } => (args.as_slice(), Some(target.as_ref())),
+        _ => return false,
+    };
+    if largs.len() > 1 || !largs.first().map(arg_buildable_in_cx).unwrap_or(true) {
+        return false;
+    }
+    match target {
+        None => true, // direct call
+        Some(t) => callptr_target_si_safe(t, inits),
+    }
+}
+/// A fn-ptr call target whose `call WORD PTR <mem>` emission uses no scratch
+/// register (so it's safe inside the SI/CX scheduler). Runtime-indexed array
+/// elements load SI/BX and are excluded.
+fn callptr_target_si_safe(target: &Expr, inits: &[Option<i32>]) -> bool {
+    match target {
+        Expr::Global(_) | Expr::Param(_) | Expr::Local(_)
+        | Expr::LocalField { .. } | Expr::GlobalField { .. } => true,
+        Expr::LocalIndex { index, .. } | Expr::Index { index, .. } => index.fold(inits).is_some(),
+        _ => false,
+    }
+}
 /// Can this call argument be built directly into CX (without touching AX)?
 /// Used by the two-call binop scheduler. Covers the simple shapes the corpus
 /// passes as a single call argument: a constant, a string-literal address, a
@@ -2310,18 +2343,19 @@ fn emit_binop_inner(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, o
         out.extend_from_slice(&[0x2B, 0xC0]);                      // sub ax,ax
         return;
     }
-    // Two-call binop `f(..) OP g(..)` (both DIRECT calls, op add/sub): MSC
-    // evaluates the RIGHT call first → AX, builds the LEFT call's (single, simple)
-    // argument in CX so the right result in AX survives, parks AX in SI, calls
-    // LEFT → AX, then folds with `OP ax,si` (ax = left result, si = right). The
-    // frame pushes/pops SI (body_needs_si detects the two-call binop). Fixtures
-    // 1277, 1945, 1536, 1537.
+    // Two-call binop `f(..) OP g(..)` (both calls, direct or indirect; op
+    // add/sub): MSC evaluates the RIGHT call first → AX, builds the LEFT call's
+    // (single, simple) argument in CX so the right result in AX survives, parks
+    // AX in SI, calls LEFT → AX, then folds with `OP ax,si` (ax = left result,
+    // si = right). The frame pushes/pops SI (body_needs_si detects this).
+    // Fixtures 1277, 1536 (direct), 1918, 2343 (fn-ptr arrays).
     if matches!(op, BinOp::Add | BinOp::Sub)
-        && let Expr::Call { name: lname, args: largs } = left
-        && matches!(right, Expr::Call { .. })
-        && largs.len() <= 1
-        && largs.first().map(arg_buildable_in_cx).unwrap_or(true)
+        && is_two_call_binop(left, right, locals.inits)
     {
+        let largs: &[Expr] = match left {
+            Expr::Call { args, .. } | Expr::CallPtr { args, .. } => args,
+            _ => unreachable!(),
+        };
         // RIGHT call → AX (full call: args pushed, call, cleanup).
         emit_expr_to_ax(right, locals, out, fixups);
         // Build LEFT's single arg in CX (so AX survives) and push it.
@@ -2330,14 +2364,25 @@ fn emit_binop_inner(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, o
             out.push(0x51); // push cx
         }
         out.extend_from_slice(&[0x8B, 0xF0]); // mov si,ax  (park right result)
-        let sym = callee_symbol(lname, locals.pascal_fns.contains(lname));
-        let bo = out.len();
-        out.extend_from_slice(&[0xE8, 0x00, 0x00]); // call LEFT
-        fixups.push(Fixup { body_offset: bo, kind: FixupKind::TuLocalCall { target: sym.clone() } });
+        // LEFT call instruction (E8 for a direct call; FF /2 for a fn-ptr).
+        let char_ret = match left {
+            Expr::Call { name, .. } => {
+                let sym = callee_symbol(name, locals.pascal_fns.contains(name));
+                let bo = out.len();
+                out.extend_from_slice(&[0xE8, 0x00, 0x00]);
+                fixups.push(Fixup { body_offset: bo, kind: FixupKind::TuLocalCall { target: sym.clone() } });
+                locals.char_returners.contains(&sym)
+            }
+            Expr::CallPtr { target, .. } => {
+                crate::codegen::calls::emit_call_ptr_target(target, locals, out, fixups);
+                false
+            }
+            _ => unreachable!(),
+        };
         if !largs.is_empty() {
             out.extend_from_slice(&[0x83, 0xC4, 0x02]); // add sp,2
         }
-        if locals.char_returners.contains(&sym) { out.push(0x98); } // cbw
+        if char_ret { out.push(0x98); } // cbw
         out.extend_from_slice(if matches!(op, BinOp::Add) { &[0x03, 0xC6] } else { &[0x2B, 0xC6] }); // add/sub ax,si
         return;
     }

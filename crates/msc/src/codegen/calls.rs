@@ -93,24 +93,11 @@ pub(crate) fn emit_call_inner(
 /// exactly like a direct cdecl call — only the call instruction differs.
 /// `target` is the fnptr lvalue (`Global`/`Param`/`Local`). Fixtures 2818,
 /// 2750, 3323.
-pub(crate) fn emit_call_ptr(
-    target: &Expr,
-    args: &[Expr],
-    locals: &Locals<'_>,
-    skip_cleanup: bool,
-    out: &mut Vec<u8>,
-    fixups: &mut Vec<Fixup>,
-) {
+/// Emit just the `call WORD PTR <mem>` instruction (FF /2) for a
+/// function-pointer target, with no argument push or cleanup. Shared by
+/// emit_call_ptr and the two-call binop scheduler.
+pub(crate) fn emit_call_ptr_target(target: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
     use crate::codegen::func::{bp_modrm, push_bp_disp, param_disp};
-    // Push args right-to-left (cdecl).
-    for arg in args.iter().rev() {
-        if let Expr::FloatLit(bits, is_double) = arg {
-            emit_push_arg_float(*bits, if *is_double { 8 } else { 4 }, out, fixups);
-        } else {
-            emit_push_arg(arg, locals, out, fixups);
-        }
-    }
-    // `call WORD PTR <mem>` — FF /2.
     match target {
         Expr::Global(idx) => {
             // `ff 16 off16` — call through an absolute [moffs]. The offset takes
@@ -175,6 +162,25 @@ pub(crate) fn emit_call_ptr(
         }
         other => panic!("indirect call through unsupported target {other:?}"),
     }
+}
+pub(crate) fn emit_call_ptr(
+    target: &Expr,
+    args: &[Expr],
+    locals: &Locals<'_>,
+    skip_cleanup: bool,
+    out: &mut Vec<u8>,
+    fixups: &mut Vec<Fixup>,
+) {
+    // Push args right-to-left (cdecl).
+    for arg in args.iter().rev() {
+        if let Expr::FloatLit(bits, is_double) = arg {
+            emit_push_arg_float(*bits, if *is_double { 8 } else { 4 }, out, fixups);
+        } else {
+            emit_push_arg(arg, locals, out, fixups);
+        }
+    }
+    // `call WORD PTR <mem>` — FF /2.
+    emit_call_ptr_target(target, locals, out, fixups);
     // cdecl caller cleanup: `add sp, N`.
     let cleanup_bytes: usize = args.iter().map(|a| {
         if let Expr::FloatLit(_, is_double) = a { if *is_double { 8 } else { 4 } } else { 2 }
