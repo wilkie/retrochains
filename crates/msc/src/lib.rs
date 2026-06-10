@@ -1563,6 +1563,11 @@ enum Frame {
     /// Prologue adds `push di; push si` after chkstk; epilogue `pop si; pop di;
     /// ret`. Fixture 423.
     NoneDiSi,
+    /// Like None (`xor ax,ax`, no bp) but saves/restores SI — a no-locals,
+    /// no-params function whose body uses SI (e.g. the two-call binop scheduler
+    /// `f(..) + g(..)` parking the right result in SI). Prologue adds `push si`
+    /// after chkstk; epilogue `pop si; ret`. Fixtures 1536, 1537.
+    NoneSi,
 }
 
 impl Frame {
@@ -1578,6 +1583,7 @@ impl Frame {
     fn epilogue_bytes(self) -> &'static [u8] {
         match self {
             Frame::None => &[0xC3],
+            Frame::NoneSi => &[0x5E, 0xC3],
             Frame::NoneDiSi => &[0x5E, 0x5F, 0xC3],
             Frame::BpOnly => &[0x5D, 0xC3],
             Frame::BpOnlySi => &[0x5E, 0x5D, 0xC3],

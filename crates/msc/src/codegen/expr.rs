@@ -2245,6 +2245,45 @@ fn ptr_deref_add_chain<'a>(left: &'a Expr, right: &'a Expr, _locals: &Locals<'_>
     if (3..=4).contains(&leaves.len()) { Some(leaves) } else { None }
 }
 
+/// Can this call argument be built directly into CX (without touching AX)?
+/// Used by the two-call binop scheduler. Covers the simple shapes the corpus
+/// passes as a single call argument: a constant, a string-literal address, a
+/// parameter, or `<param> ± K`.
+fn arg_buildable_in_cx(e: &Expr) -> bool {
+    match e {
+        Expr::IntLit(_) | Expr::StrLit(_) | Expr::Param(_) => true,
+        Expr::BinOp { op: BinOp::Add | BinOp::Sub, left, right } =>
+            matches!(left.as_ref(), Expr::Param(_)) && matches!(right.as_ref(), Expr::IntLit(_)),
+        _ => false,
+    }
+}
+/// Emit the call argument `e` into CX (mirrors the AX builder for the limited
+/// shapes `arg_buildable_in_cx` accepts). Used by the two-call binop scheduler.
+fn emit_arg_to_cx(e: &Expr, _locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    match e {
+        Expr::IntLit(k) => { out.push(0xB9); out.extend_from_slice(&(*k as u16).to_le_bytes()); }
+        Expr::StrLit(idx) => {
+            let bo = out.len();
+            out.extend_from_slice(&[0xB9, 0x00, 0x00]); // mov cx, OFFSET str
+            fixups.push(Fixup { body_offset: bo, kind: FixupKind::StrLoad { string_idx: *idx } });
+        }
+        Expr::Param(i) => { let d = param_disp(*i); out.push(0x8B); out.push(bp_modrm(0x4E, d)); push_bp_disp(out, d); }
+        Expr::BinOp { op, left, right } => {
+            emit_arg_to_cx(left, _locals, out, fixups);
+            let Expr::IntLit(k) = right.as_ref() else { unreachable!() };
+            match (op, *k) {
+                (BinOp::Add, 1) => out.push(0x41),  // inc cx
+                (BinOp::Sub, 1) => out.push(0x49),  // dec cx
+                (BinOp::Add, k) if (-128..=127).contains(&k) => out.extend_from_slice(&[0x83, 0xC1, k as u8]),
+                (BinOp::Sub, k) if (-128..=127).contains(&k) => out.extend_from_slice(&[0x83, 0xE9, k as u8]),
+                (BinOp::Add, k) => { out.extend_from_slice(&[0x81, 0xC1]); out.extend_from_slice(&(k as u16).to_le_bytes()); }
+                (BinOp::Sub, k) => { out.extend_from_slice(&[0x81, 0xE9]); out.extend_from_slice(&(k as u16).to_le_bytes()); }
+                _ => unreachable!(),
+            }
+        }
+        _ => unreachable!(),
+    }
+}
 fn emit_binop_inner(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
     // Logical-and/or as a VALUE: short-circuit branches producing 0 or 1 in AX.
     // Pattern: emit_cond_skip(cond, 5); [mov ax,1; jmp +2]; [sub ax,ax]
@@ -2269,6 +2308,37 @@ fn emit_binop_inner(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, o
         out.extend_from_slice(&[0xB8, 0x01, 0x00, 0xEB, 0x02 + needs_nop as u8]); // mov ax,1; jmp +2/+3
         if needs_nop { out.push(0x90); }
         out.extend_from_slice(&[0x2B, 0xC0]);                      // sub ax,ax
+        return;
+    }
+    // Two-call binop `f(..) OP g(..)` (both DIRECT calls, op add/sub): MSC
+    // evaluates the RIGHT call first → AX, builds the LEFT call's (single, simple)
+    // argument in CX so the right result in AX survives, parks AX in SI, calls
+    // LEFT → AX, then folds with `OP ax,si` (ax = left result, si = right). The
+    // frame pushes/pops SI (body_needs_si detects the two-call binop). Fixtures
+    // 1277, 1945, 1536, 1537.
+    if matches!(op, BinOp::Add | BinOp::Sub)
+        && let Expr::Call { name: lname, args: largs } = left
+        && matches!(right, Expr::Call { .. })
+        && largs.len() <= 1
+        && largs.first().map(arg_buildable_in_cx).unwrap_or(true)
+    {
+        // RIGHT call → AX (full call: args pushed, call, cleanup).
+        emit_expr_to_ax(right, locals, out, fixups);
+        // Build LEFT's single arg in CX (so AX survives) and push it.
+        if let Some(arg) = largs.first() {
+            emit_arg_to_cx(arg, locals, out, fixups);
+            out.push(0x51); // push cx
+        }
+        out.extend_from_slice(&[0x8B, 0xF0]); // mov si,ax  (park right result)
+        let sym = callee_symbol(lname, locals.pascal_fns.contains(lname));
+        let bo = out.len();
+        out.extend_from_slice(&[0xE8, 0x00, 0x00]); // call LEFT
+        fixups.push(Fixup { body_offset: bo, kind: FixupKind::TuLocalCall { target: sym.clone() } });
+        if !largs.is_empty() {
+            out.extend_from_slice(&[0x83, 0xC4, 0x02]); // add sp,2
+        }
+        if locals.char_returners.contains(&sym) { out.push(0x98); } // cbw
+        out.extend_from_slice(if matches!(op, BinOp::Add) { &[0x03, 0xC6] } else { &[0x2B, 0xC6] }); // add/sub ax,si
         return;
     }
     // Sum of bit-fields of one struct unit (a left-assoc `f0 + f1 + ... + f_{n-1}`

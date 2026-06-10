@@ -64,6 +64,10 @@ pub(crate) fn body_needs_si(stmts: &[Stmt], local_inits: &[Option<i32>]) -> bool
                     expr_si(ptr, inits)
                 }
             }
+            // Two-call binop `f(..) OP g(..)` (both direct calls) parks the right
+            // result in SI while the left call runs. Fixtures 1277, 1536.
+            Expr::BinOp { op: BinOp::Add | BinOp::Sub, left, right }
+                if matches!(left.as_ref(), Expr::Call { .. }) && matches!(right.as_ref(), Expr::Call { .. }) => true,
             Expr::BinOp { left, right, .. } => expr_si(left, inits) || expr_si(right, inits),
             Expr::Call { args, .. } => args.iter().any(|a| expr_si(a, inits)),
             // `ops[i](args)` — a runtime-indexed fn-ptr array call scales the
@@ -280,6 +284,10 @@ pub(crate) fn emit_function(
         && body_needs_si(&body, &local_inits)
     {
         Frame::BpOnlySi
+    } else if matches!(base_frame, Frame::None)
+        && body_needs_si(&body, &local_inits)
+    {
+        Frame::NoneSi
     } else {
         base_frame
     };
@@ -376,7 +384,7 @@ pub(crate) fn emit_function(
     };
 
     match frame {
-        Frame::None | Frame::NoneDiSi => bytes.extend_from_slice(&[0x33, 0xC0]),
+        Frame::None | Frame::NoneDiSi | Frame::NoneSi => bytes.extend_from_slice(&[0x33, 0xC0]),
         Frame::BpOnly | Frame::BpOnlySi => bytes.extend_from_slice(&[0x55, 0x8B, 0xEC, 0x33, 0xC0]),
         Frame::WithSlide | Frame::WithSlideSi | Frame::WithSlideDiSi => {
             bytes.extend_from_slice(&[0x55, 0x8B, 0xEC]);
@@ -403,8 +411,8 @@ pub(crate) fn emit_function(
         bytes.push(0x57); // push di
         bytes.push(0x56); // push si
     }
-    // For WithSlideSi / BpOnlySi: save SI after the frame is established.
-    if matches!(frame, Frame::WithSlideSi | Frame::BpOnlySi) {
+    // For WithSlideSi / BpOnlySi / NoneSi: save SI after the frame is established.
+    if matches!(frame, Frame::WithSlideSi | Frame::BpOnlySi | Frame::NoneSi) {
         bytes.push(0x56); // push si
     }
 
