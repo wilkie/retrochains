@@ -130,6 +130,17 @@ pub(crate) fn emit_call_ptr(
             let disp = locals.disp(*i);
             out.push(0xFF); out.push(bp_modrm(0x56, disp)); push_bp_disp(out, disp);
         }
+        // `op.fn(args)` — call through a function-pointer struct field of a local.
+        Expr::LocalField { local, byte_off, .. } => {
+            let disp = locals.disp(*local) + *byte_off as i16;
+            out.push(0xFF); out.push(bp_modrm(0x56, disp)); push_bp_disp(out, disp);
+        }
+        // `g.fn(args)` — call through a fn-ptr field of a global struct.
+        Expr::GlobalField { global, byte_off, .. } => {
+            out.push(0xFF); out.push(0x16);
+            let bo = out.len(); out.extend_from_slice(&byte_off.to_le_bytes());
+            fixups.push(Fixup { body_offset: bo - 1, kind: FixupKind::GlobalAddr { global_idx: *global } });
+        }
         other => panic!("indirect call through unsupported target {other:?}"),
     }
     // cdecl caller cleanup: `add sp, N`.

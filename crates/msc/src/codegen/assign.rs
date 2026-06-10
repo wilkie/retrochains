@@ -2833,6 +2833,15 @@ pub(crate) fn emit_assign_local_field(local_idx: usize, byte_off: u16, size: u8,
         return;
     }
     let disp = locals.disp(local_idx) + byte_off as i16;
+    // `op.fn = func` — store `OFFSET _func` to a fn-ptr field directly with the
+    // `c7 46 disp <off16>` immediate form + FuncAddr fixup. Fixture 2378.
+    if let Expr::FuncAddr(name) = value {
+        out.push(0xC7); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp);
+        let body_offset = out.len() - 1;
+        out.extend_from_slice(&[0x00, 0x00]);
+        fixups.push(Fixup { body_offset, kind: FixupKind::FuncAddr { target: symbol_name(name) } });
+        return;
+    }
     if size == 1 {
         if let Some(k) = value.fold(locals.inits) {
             let imm = (k as u32 & 0xFF) as u8;

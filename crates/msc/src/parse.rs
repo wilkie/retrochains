@@ -560,19 +560,44 @@ pub(crate) fn parse_struct_def(p: &mut Parser<'_>) -> Result<(), EmitError> {
                 }
             }
         };
-        let is_ptr = if matches!(p.peek(), Some(Tok::Star)) {
-            p.bump();
-            true
-        } else {
-            false
-        };
+        // Function-pointer field `<ret> (*name)(params)` — a 2-byte near pointer.
+        // Consume the `(*name)(params)` declarator; the field is a plain pointer.
+        // Fixtures 2378, 1812.
+        let mut fnptr_field_name: Option<String> = None;
+        if matches!(p.peek(), Some(Tok::LParen))
+            && matches!(p.toks.get(p.pos + 1), Some(Tok::Star))
+            && matches!(p.toks.get(p.pos + 2), Some(Tok::Ident(_)))
+            && matches!(p.toks.get(p.pos + 3), Some(Tok::RParen))
+            && matches!(p.toks.get(p.pos + 4), Some(Tok::LParen))
+        {
+            p.bump(); p.bump(); // `(` `*`
+            let nm = match p.bump().cloned() { Some(Tok::Ident(s)) => s, _ => unreachable!() };
+            p.bump(); // `)`
+            p.eat(&Tok::LParen)?;
+            let mut depth = 1usize;
+            while depth > 0 {
+                match p.bump() {
+                    Some(Tok::LParen) => depth += 1,
+                    Some(Tok::RParen) => depth -= 1,
+                    None => return Err(EmitError::Unsupported("unterminated fnptr field param list".to_owned())),
+                    _ => {}
+                }
+            }
+            fnptr_field_name = Some(nm);
+        }
+        let is_ptr = fnptr_field_name.is_some()
+            || if matches!(p.peek(), Some(Tok::Star)) { p.bump(); true } else { false };
         // A pointer-to-struct field keeps its `struct_idx` (so `o->p->v` member
         // chains can resolve the target struct) but is flagged `is_pointer`, which
         // distinguishes it from an inline struct value at member-access sites.
         // Field name — optional for an anonymous bit-field (`unsigned : 0;`).
-        let fname = match p.peek() {
-            Some(Tok::Ident(s)) => { let s = s.clone(); p.bump(); Some(s) }
-            _ => None,
+        let fname = if fnptr_field_name.is_some() {
+            fnptr_field_name
+        } else {
+            match p.peek() {
+                Some(Tok::Ident(s)) => { let s = s.clone(); p.bump(); Some(s) }
+                _ => None,
+            }
         };
         // Bit-field declarator `<name> : <width>;` (or anonymous `: <width>;`).
         if !is_ptr && field_struct_idx.is_none() && matches!(p.peek(), Some(Tok::Colon)) {
@@ -5100,7 +5125,14 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                     if let Some((bit_off, bit_width)) = p.last_field_bits {
                         return Ok(Expr::BitField { base: BitBase::Local(idx), byte_off, bit_off, bit_width });
                     }
-                    return Ok(Expr::LocalField { local: idx, byte_off, size });
+                    let field = Expr::LocalField { local: idx, byte_off, size };
+                    // `op.fn(args)` — calling a function-pointer field. Fixture 2378.
+                    if matches!(p.peek(), Some(Tok::LParen)) {
+                        p.bump();
+                        let args = parse_call_args(p)?;
+                        return Ok(Expr::CallPtr { target: Box::new(field), args });
+                    }
+                    return Ok(field);
                 }
                 // `<struct-ptr-local>-><field>` member access.
                 if matches!(p.peek(), Some(Tok::Arrow))
