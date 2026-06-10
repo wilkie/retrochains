@@ -550,15 +550,22 @@ pub(crate) fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8
             }
         }
         Expr::PostMutateLocal { local_idx, step } => {
-            // Load the OLD value into AX, then mutate the slot.
+            // Load the OLD value into AX, then mutate the slot. For a CHAR local
+            // the widening `cbw` comes AFTER the in-place inc/dec (`mov al,[c];
+            // inc [c]; cbw`) — matching MSC. A char-dest assign then strips the
+            // trailing cbw to store the byte; an int-dest keeps it. Fixtures
+            // 725/726/728/730.
             let disp = locals.disp(*local_idx);
-            if locals.size(*local_idx) == 1 {
+            let is_byte = locals.size(*local_idx) == 1;
+            if is_byte {
                 out.push(0x8A); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp);
-                out.push(0x98); // cbw
             } else {
                 out.push(0x8B); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp);
             }
             emit_postmutate_local(*step, locals.size(*local_idx), disp, out);
+            if is_byte {
+                out.push(0x98); // cbw
+            }
         }
         Expr::PreMutateLocal { local_idx, step } => {
             // Mutate first, then load the NEW value into AX.
