@@ -1444,6 +1444,30 @@ pub(crate) fn emit_assign_global(global_idx: usize, value: &Expr, locals: &Local
         fixups.push(Fixup { body_offset: off - 1, kind: FixupKind::GlobalAddr { global_idx } });
         return;
     }
+    // Long-global SELF-compound `g op= b` (g == left, b a long global): MSC keeps
+    // g in memory — `mov ax,[b]; mov dx,[b+2]; add/sub [g],ax; adc/sbb [g+2],dx`
+    // — instead of computing the sum in DX:AX and storing back. Reached via the
+    // `*p op= y` pointer-alias fold (p=&g) too. Fixture 398.
+    if locals.is_long_global(global_idx)
+        && let Expr::BinOp { op, left, right } = value
+        && matches!(op, BinOp::Add | BinOp::Sub)
+        && matches!(left.as_ref(), Expr::Global(a) if *a == global_idx)
+        && let Expr::Global(b) = right.as_ref()
+        && locals.is_long_global(*b)
+    {
+        // mov ax,[b]; mov dx,[b+2]
+        let off = out.len(); out.extend_from_slice(&[0xA1, 0x00, 0x00]);
+        fixups.push(Fixup { body_offset: off, kind: FixupKind::GlobalAddr { global_idx: *b } });
+        out.push(0x8B); out.push(0x16); let off = out.len(); out.extend_from_slice(&2u16.to_le_bytes());
+        fixups.push(Fixup { body_offset: off - 1, kind: FixupKind::GlobalAddr { global_idx: *b } });
+        let (lo_op, hi_op) = if matches!(op, BinOp::Sub) { (0x29u8, 0x19u8) } else { (0x01u8, 0x11u8) };
+        // <lo_op> [g],ax ; <hi_op> [g+2],dx
+        out.push(lo_op); out.push(0x06); let off = out.len(); out.extend_from_slice(&[0x00, 0x00]);
+        fixups.push(Fixup { body_offset: off - 1, kind: FixupKind::GlobalAddr { global_idx } });
+        out.push(hi_op); out.push(0x16); let off = out.len(); out.extend_from_slice(&2u16.to_le_bytes());
+        fixups.push(Fixup { body_offset: off - 1, kind: FixupKind::GlobalAddr { global_idx } });
+        return;
+    }
     // Long-global = long-global ± long-global. Loads lhs into DX:AX,
     // applies a memory add/sub to both halves, stores to dest.
     //   `g = a + b` → `mov ax, [a]; mov dx, [a+2];
