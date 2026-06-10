@@ -1738,6 +1738,68 @@ pub(crate) fn emit_assign_global(global_idx: usize, value: &Expr, locals: &Local
             }
         }
     }
+    // Peephole: int (word) global `g op= K` for bitwise ops → in-place memory
+    // op, choosing byte vs word form by which bytes the immediate affects
+    // (mirrors the int-local bitop selection). `g &= 15` → `and word [g],15`;
+    // `g |= 240` → `or byte [g],240`; `g ^= 255` → `xor byte [g],255`. Char
+    // globals are handled by the byte arm above; longs by their own arms.
+    // Fixtures 517/518/541.
+    if !locals.is_long_global(global_idx)
+        && let Expr::BinOp { op, left, right } = value
+        && let Expr::Global(li) = left.as_ref()
+        && *li == global_idx
+        && matches!(op, BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor)
+        && let Some(k) = right.fold(locals.inits)
+        // `g = ~g` (= `g ^ -1`) of an UNKNOWN global is emitted by MSC as a
+        // via-AX `mov ax,[g]; not ax; mov [g],ax`, NOT an in-place `xor word
+        // [g],-1` — leave it for that path (fixture 3501).
+        && !(matches!(op, BinOp::BitXor) && k == -1)
+    {
+        let reg = match op { BinOp::BitAnd => 4u8, BinOp::BitOr => 1, BinOp::BitXor => 6, _ => unreachable!() };
+        let op_modrm = 0x06 | (reg << 3);
+        let imm16 = (k as u32 & 0xFFFF) as u16;
+        let imm8 = (imm16 & 0xFF) as u8;
+        let high = (imm16 >> 8) as u8;
+        // <opcode> <modrm> <addr16 placeholder + GlobalAddr fixup carrying `addend`> <imm…>
+        let emit = |out: &mut Vec<u8>, fixups: &mut Vec<Fixup>, opcode: u8, modrm: u8, addend: u16, imm: &[u8]| {
+            out.push(opcode); out.push(modrm);
+            let p = out.len(); out.extend_from_slice(&addend.to_le_bytes());
+            fixups.push(Fixup { body_offset: p - 1, kind: FixupKind::GlobalAddr { global_idx } });
+            out.extend_from_slice(imm);
+        };
+        match op {
+            BinOp::BitAnd => {
+                if high == 0xFF {
+                    if imm8 == 0x00 {
+                        emit(out, fixups, 0xC6, 0x06, 0, &[0x00]); // AND 0xFF00: mov byte [g],0
+                    } else {
+                        emit(out, fixups, 0x80, op_modrm, 0, &[imm8]); // AND 0xFFxx: byte form
+                    }
+                } else if imm8 == 0xFF {
+                    if high == 0x00 {
+                        emit(out, fixups, 0xC6, 0x06, 1, &[0x00]); // AND 0x00FF: mov byte [g+1],0
+                    } else {
+                        emit(out, fixups, 0x80, op_modrm, 1, &[high]); // AND 0xXXFF: high byte only
+                    }
+                } else {
+                    emit(out, fixups, 0x81, op_modrm, 0, &imm16.to_le_bytes()); // word form
+                }
+            }
+            BinOp::BitOr | BinOp::BitXor => {
+                if imm16 <= 0xFF {
+                    emit(out, fixups, 0x80, op_modrm, 0, &[imm8]); // byte form (high OR/XOR 0 = identity)
+                } else if imm8 == 0x00 {
+                    emit(out, fixups, 0x80, op_modrm, 1, &[high]); // high byte only
+                } else if let Ok(k8) = i8::try_from(k) {
+                    emit(out, fixups, 0x83, op_modrm, 0, &[k8 as u8]); // sx imm8 word form
+                } else {
+                    emit(out, fixups, 0x81, op_modrm, 0, &imm16.to_le_bytes()); // word imm16
+                }
+            }
+            _ => unreachable!(),
+        }
+        return;
+    }
     // Scalar global compound shift `g <<=/>>= K` (and `g *= 2^k`) → in-place
     // `shl/shr/sar word|byte [g], 1` (D1/D0) or `mov cl,K; ... [g], cl` (D3/D2).
     // modrm reg: SHL=4 (0x26), SHR-unsigned=5 (0x2E), SAR-signed=7 (0x3E).
