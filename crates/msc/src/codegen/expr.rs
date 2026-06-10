@@ -2067,6 +2067,25 @@ pub(crate) fn emit_binop(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'
         out.extend_from_slice(&[0x03, 0xC1]); // add ax, cx
         return;
     }
+    // Chain of 3+ word `p->field` reads of the SAME struct-pointer param joined
+    // by `+`: load `p` into BX once, then read the fields in a left-rotated order
+    // — operand[1] into AX, operands[2..] added in source order, operand[0] added
+    // LAST (`mov ax,[bx+f1]; add ax,[bx+f2]; …; add ax,[bx+f0]`). Fixture 2556.
+    if matches!(op, BinOp::Add)
+        && let Some((p, offs)) = same_param_field_word_chain(left, right)
+        && offs.iter().all(|o| i8::try_from(*o).is_ok())
+    {
+        let pdisp = param_disp(p);
+        out.push(0x8B); out.push(bp_modrm(0x5E, pdisp)); push_bp_disp(out, pdisp); // mov bx,[bp+p]
+        let emit_bx = |out: &mut Vec<u8>, opc: u8, off: i32| {
+            if off == 0 { out.push(opc); out.push(0x07); }
+            else { out.push(opc); out.push(0x47); out.push(off as i8 as u8); }
+        };
+        emit_bx(out, 0x8B, offs[1]);                       // mov ax,[bx+f1]
+        for &o in &offs[2..] { emit_bx(out, 0x03, o); }    // add ax,[bx+fk]
+        emit_bx(out, 0x03, offs[0]);                       // add ax,[bx+f0]  (source-first added last)
+        return;
+    }
     // `*p + *(p+K)` — both operands are word derefs of the SAME pointer param at
     // constant offsets. Load `p` into BX once, then `mov ax,[bx+roff]; add ax,
     // [bx+loff]` (RHS into AX, LHS as a memory operand — `+` is commutative).
@@ -2309,6 +2328,34 @@ fn split_index_offset(e: &Expr) -> (&Expr, i32) {
     }
 }
 /// `*p` / `*(p + K)` as a WORD deref of a pointer PARAM → `(param, byte_off)`.
+/// Flatten a left-associative `+` chain whose every leaf is a WORD `p->field`
+/// of the SAME struct-pointer param. Returns (param, field byte offsets in
+/// source order) when ≥3 leaves match; None otherwise. Used to load `p` once.
+fn same_param_field_word_chain(left: &Expr, right: &Expr) -> Option<(usize, Vec<i32>)> {
+    fn collect(e: &Expr, p: &mut Option<usize>, offs: &mut Vec<i32>) -> bool {
+        if let Expr::BinOp { op: BinOp::Add, left, right } = e {
+            return collect(left, p, offs) && collect(right, p, offs);
+        }
+        if let Expr::DerefParamField { ptr_param, byte_off, size: 2 } = e {
+            match p {
+                None => *p = Some(*ptr_param),
+                Some(x) if *x == *ptr_param => {}
+                _ => return false,
+            }
+            offs.push(*byte_off as i32);
+            true
+        } else {
+            false
+        }
+    }
+    let mut p = None;
+    let mut offs = Vec::new();
+    if collect(left, &mut p, &mut offs) && collect(right, &mut p, &mut offs) && offs.len() >= 3 {
+        Some((p?, offs))
+    } else {
+        None
+    }
+}
 fn same_param_word_deref(e: &Expr) -> Option<(usize, i32)> {
     // `p->f` (word struct-pointer field) is a deref of the same param at a byte
     // offset — treat it like `*(p+off)` so a field sum loads p into BX once.
