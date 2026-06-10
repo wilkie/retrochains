@@ -999,6 +999,22 @@ pub(crate) fn emit_assign_deref_param(param_idx: usize, value: &Expr, locals: &L
     out.push(0x8B);
     out.push(0x5E);
     out.push(pdisp as u8);
+    // `*p = <long>` through a `long *p` param (pointee_size 4): store BOTH words
+    // at [bx] and [bx+2] — a constant sign-extends into the high word; a runtime
+    // long materializes in DX:AX. Fixture 3287.
+    if locals.param_pointee_size(param_idx) == 4 {
+        if let Some(k) = value.fold(locals.inits) {
+            let lo = (k as u32 & 0xFFFF) as u16;
+            let hi = (((k as i32) >> 16) as u32 & 0xFFFF) as u16;
+            out.extend_from_slice(&[0xC7, 0x07]); out.extend_from_slice(&lo.to_le_bytes());
+            out.extend_from_slice(&[0xC7, 0x47, 0x02]); out.extend_from_slice(&hi.to_le_bytes());
+        } else {
+            crate::codegen::calls::emit_long_to_dx_ax(value, locals, out, fixups);
+            out.extend_from_slice(&[0x89, 0x07]);        // mov [bx],ax
+            out.extend_from_slice(&[0x89, 0x57, 0x02]);  // mov [bx+2],dx
+        }
+        return;
+    }
     if let Some(k) = value.fold(locals.inits) {
         if is_byte {
             out.extend_from_slice(&[0xC6, 0x07, (k as u32 & 0xFF) as u8]); // mov byte [bx], k
