@@ -851,6 +851,61 @@ pub(crate) fn parse_global_decl(p: &mut Parser<'_>) -> Result<(), EmitError> {
             )));
         }
     };
+    // Function-pointer ARRAY global: `<ret> (*name[N])(params) [= {f,...}];` —
+    // an N-element array of 2-byte near pointers. Elements are called indirectly
+    // (`name[i](args)`). Fixtures 2944, 3696.
+    if matches!(p.peek(), Some(Tok::LParen))
+        && matches!(p.toks.get(p.pos + 1), Some(Tok::Star))
+        && matches!(p.toks.get(p.pos + 2), Some(Tok::Ident(_)))
+        && matches!(p.toks.get(p.pos + 3), Some(Tok::LBrack))
+    {
+        p.bump(); p.bump(); // `(` `*`
+        let name = match p.bump().cloned() { Some(Tok::Ident(s)) => s, _ => unreachable!() };
+        p.eat(&Tok::LBrack)?;
+        let n = parse_signed_int(p)?;
+        if n <= 0 {
+            return Err(EmitError::Unsupported(format!("fnptr-array length must be positive, got {n}")));
+        }
+        p.eat(&Tok::RBrack)?;
+        p.eat(&Tok::RParen)?; // close `(*name[N])`
+        p.eat(&Tok::LParen)?; // parameter list
+        let mut depth = 1usize;
+        while depth > 0 {
+            match p.bump() {
+                Some(Tok::LParen) => depth += 1,
+                Some(Tok::RParen) => depth -= 1,
+                None => return Err(EmitError::Unsupported("unterminated fnptr-array parameter list".to_owned())),
+                _ => {}
+            }
+        }
+        // Optional `= { f0, f1, ... }` initializer of function addresses.
+        let init = if matches!(p.peek(), Some(Tok::Assign)) {
+            p.bump();
+            p.eat(&Tok::LBrace)?;
+            let mut vals = Vec::new();
+            while !matches!(p.peek(), Some(Tok::RBrace)) {
+                match p.bump().cloned() {
+                    Some(Tok::Ident(s)) => vals.push(GlobalInit::FuncAddr(symbol_name(&s))),
+                    Some(Tok::Int(0)) => vals.push(GlobalInit::Int(0)),
+                    other => return Err(EmitError::Unsupported(format!(
+                        "expected function name in fnptr-array initializer, got {other:?}"))),
+                }
+                if matches!(p.peek(), Some(Tok::Comma)) { p.bump(); }
+            }
+            p.eat(&Tok::RBrace)?;
+            while vals.len() < n as usize { vals.push(GlobalInit::Int(0)); }
+            Some(vals)
+        } else {
+            None
+        };
+        p.eat(&Tok::Semi)?;
+        p.global_names.push(name.clone());
+        p.globals.push(Global {
+            name, init, array_len: n as usize, element_size: 2, is_pointer: true,
+            struct_idx: None, is_long: false, is_static, is_extern, is_unsigned: false, is_float: false,
+        });
+        return Ok(());
+    }
     // Function-pointer global: `<ret> (*name)(params);` — a 2-byte near
     // pointer slot. The signature isn't modeled; the call site resolves it as
     // an indirect call. (Initializer `= func` deferred to a later slice.)
@@ -5295,6 +5350,14 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                         let g = &p.globals[idx];
                         if g.is_pointer && g.array_len > 1 {
                             let elem_size = g.element_size as u8;
+                            // `ops[i](args)` — call through a fn-ptr array element.
+                            // Fixtures 2944, 3696.
+                            if matches!(p.peek(), Some(Tok::LParen)) {
+                                let target = Expr::Index { array: idx, index: Box::new(index) };
+                                p.bump();
+                                let args = parse_call_args(p)?;
+                                return Ok(Expr::CallPtr { target: Box::new(target), args });
+                            }
                             if matches!(p.peek(), Some(Tok::LBrack)) {
                                 p.bump();
                                 let inner = parse_expr(p)?;

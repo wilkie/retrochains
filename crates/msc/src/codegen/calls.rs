@@ -156,6 +156,23 @@ pub(crate) fn emit_call_ptr(
                 out.push(0xFF); out.push(bp_modrm(0x52, base)); push_bp_disp(out, base);
             }
         }
+        // `ops[i](args)` — call through a fn-ptr GLOBAL array element. Const
+        // index → `call [_ops + K*2]` (FF 16); runtime → `mov bx,[i]; shl bx,1;
+        // call [bx+_ops]` (FF 97 off16). Fixtures 2944, 3696.
+        Expr::Index { array, index } => {
+            if let Some(k) = index.fold(locals.inits) {
+                let off = (k as u32).wrapping_mul(2) as u16;
+                out.push(0xFF); out.push(0x16);
+                let bo = out.len(); out.extend_from_slice(&off.to_le_bytes());
+                fixups.push(Fixup { body_offset: bo - 1, kind: FixupKind::GlobalAddr { global_idx: *array } });
+            } else {
+                crate::codegen::expr::emit_load_bx(index, locals, out, fixups);
+                out.extend_from_slice(&[0xD1, 0xE3]); // shl bx,1
+                out.push(0xFF); out.push(0x97);
+                let bo = out.len(); out.extend_from_slice(&[0x00, 0x00]);
+                fixups.push(Fixup { body_offset: bo - 1, kind: FixupKind::GlobalAddr { global_idx: *array } });
+            }
+        }
         other => panic!("indirect call through unsupported target {other:?}"),
     }
     // cdecl caller cleanup: `add sp, N`.
