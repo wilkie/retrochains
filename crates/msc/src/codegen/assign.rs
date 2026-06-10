@@ -2322,6 +2322,15 @@ pub(crate) fn emit_assign_ptr_index_byte(ptr_idx: usize, disp: i8, value: &Expr,
 /// byte_off`. Non-constant RHS → `<expr-to-ax>; 89 46 disp`.
 pub(crate) fn emit_assign_indexed_local(local_idx: usize, byte_off: u16, value: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
     let disp = locals.disp(local_idx) + byte_off as i16;
+    // `ops[K] = func` — store `OFFSET _func` to a fn-ptr array element via the
+    // `c7 46 disp <off16>` immediate form + FuncAddr fixup. Fixture 2435.
+    if let Expr::FuncAddr(name) = value {
+        out.push(0xC7); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp);
+        let body_offset = out.len() - 1;
+        out.extend_from_slice(&[0x00, 0x00]);
+        fixups.push(Fixup { body_offset, kind: FixupKind::FuncAddr { target: symbol_name(name) } });
+        return;
+    }
     // Compound-assign peepholes for `a[k] op= K` (int/word array).
     // Must check BEFORE value.fold() to avoid const-folding the whole expr
     // when MSC emits runtime ops (fixtures 1210, and similar add/sub cases).

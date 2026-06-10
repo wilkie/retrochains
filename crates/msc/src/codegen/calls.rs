@@ -141,6 +141,21 @@ pub(crate) fn emit_call_ptr(
             let bo = out.len(); out.extend_from_slice(&byte_off.to_le_bytes());
             fixups.push(Fixup { body_offset: bo - 1, kind: FixupKind::GlobalAddr { global_idx: *global } });
         }
+        // `ops[i](args)` — call through a fn-ptr ARRAY element. A constant index
+        // folds to `call [bp+disp]`; a runtime index scales into SI and calls
+        // `call [bp+si+disp]` (FF 52 disp). disp = ops[0]'s slot. Fixture 2435.
+        Expr::LocalIndex { local, index } => {
+            let base = locals.disp(*local);
+            if let Some(k) = index.fold(locals.inits) {
+                let disp = base + (k as i16) * 2;
+                out.push(0xFF); out.push(bp_modrm(0x56, disp)); push_bp_disp(out, disp);
+            } else {
+                crate::codegen::expr::emit_load_si(index, locals, out, fixups);
+                out.extend_from_slice(&[0xD1, 0xE6]); // shl si,1
+                // call WORD [bp+si+disp]  (FF /2, modrm rm=010 [bp+si], base=0x52)
+                out.push(0xFF); out.push(bp_modrm(0x52, base)); push_bp_disp(out, base);
+            }
+        }
         other => panic!("indirect call through unsupported target {other:?}"),
     }
     // cdecl caller cleanup: `add sp, N`.

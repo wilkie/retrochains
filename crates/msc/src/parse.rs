@@ -1958,6 +1958,46 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
                 found
             };
             skip_decl_modifiers(p);
+            // Function-pointer ARRAY local: `<ret> (*name[N])(params);` — an
+            // N-element array of 2-byte near pointers. Elements are assigned by
+            // index (`name[K] = func`) and called indirectly (`name[i](args)`).
+            // Fixture 2435.
+            if matches!(p.peek(), Some(Tok::LParen))
+                && matches!(p.toks.get(p.pos + 1), Some(Tok::Star))
+                && matches!(p.toks.get(p.pos + 2), Some(Tok::Ident(_)))
+                && matches!(p.toks.get(p.pos + 3), Some(Tok::LBrack))
+            {
+                p.bump(); p.bump(); // `(` `*`
+                let fpname = match p.bump().cloned() { Some(Tok::Ident(s)) => s, _ => unreachable!() };
+                p.eat(&Tok::LBrack)?;
+                let n = parse_signed_int(p)?;
+                if n <= 0 {
+                    return Err(EmitError::Unsupported(format!("fnptr-array length must be positive, got {n}")));
+                }
+                p.eat(&Tok::RBrack)?;
+                p.eat(&Tok::RParen)?; // close `(*name[N])`
+                p.eat(&Tok::LParen)?; // parameter list
+                let mut depth = 1usize;
+                while depth > 0 {
+                    match p.bump() {
+                        Some(Tok::LParen) => depth += 1,
+                        Some(Tok::RParen) => depth -= 1,
+                        None => return Err(EmitError::Unsupported("unterminated fnptr-array parameter list".to_owned())),
+                        _ => {}
+                    }
+                }
+                let local_idx = locals.len();
+                p.local_names.push(fpname);
+                let spec = LocalSpec {
+                    size: 2, array_len: n as usize, init: None, struct_idx: None, is_long: false,
+                    init_is_literal: false, is_far_ptr: false, pointee_size: 0, is_unsigned: false,
+                    init_via_cast: false, init_via_type_cast: false, is_float: false, float_bits: None,
+                    block_offset: None, is_register: false,
+                };
+                p.local_specs.push(spec.clone());
+                locals.push(spec);
+                break;
+            }
             // Function-pointer local: `<ret> (*name)(params) [= func];` — a
             // 2-byte near pointer. The optional initializer is a function name,
             // lowered to `name = FuncAddr(func)` in the prelude. The call site
@@ -5098,6 +5138,14 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                         } else {
                             Expr::DerefWord { ptr: Box::new(inner) }
                         });
+                    }
+                    // `ops[i](args)` — call through a function-pointer array
+                    // element (a word element followed by a call). Fixture 2435.
+                    if p.local_specs[idx].size == 2 && matches!(p.peek(), Some(Tok::LParen)) {
+                        let target = Expr::LocalIndex { local: idx, index: Box::new(index) };
+                        p.bump(); // `(`
+                        let args = parse_call_args(p)?;
+                        return Ok(Expr::CallPtr { target: Box::new(target), args });
                     }
                     return if p.local_specs[idx].size == 1 {
                         Ok(Expr::LocalIndexByte { local: idx, index: Box::new(index) })

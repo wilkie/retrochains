@@ -66,6 +66,12 @@ pub(crate) fn body_needs_si(stmts: &[Stmt], local_inits: &[Option<i32>]) -> bool
             }
             Expr::BinOp { left, right, .. } => expr_si(left, inits) || expr_si(right, inits),
             Expr::Call { args, .. } => args.iter().any(|a| expr_si(a, inits)),
+            // `ops[i](args)` — a runtime-indexed fn-ptr array call scales the
+            // index into SI (`mov si,[i]; shl si,1; call [bp+si+disp]`). Fixture 2435.
+            Expr::CallPtr { target, args } => {
+                matches!(target.as_ref(), Expr::LocalIndex { index, .. } if index.fold(inits).is_none())
+                    || args.iter().any(|a| expr_si(a, inits))
+            }
             // `*d++ = *s++` as an expression/condition reads the source via SI.
             Expr::AssignExpr { target, value } => {
                 (matches!(target,
