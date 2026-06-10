@@ -2310,6 +2310,11 @@ fn split_index_offset(e: &Expr) -> (&Expr, i32) {
 }
 /// `*p` / `*(p + K)` as a WORD deref of a pointer PARAM → `(param, byte_off)`.
 fn same_param_word_deref(e: &Expr) -> Option<(usize, i32)> {
+    // `p->f` (word struct-pointer field) is a deref of the same param at a byte
+    // offset — treat it like `*(p+off)` so a field sum loads p into BX once.
+    if let Expr::DerefParamField { ptr_param, byte_off, size: 2 } = e {
+        return Some((*ptr_param, *byte_off as i32));
+    }
     let Expr::DerefWord { ptr } = e else { return None };
     match ptr.as_ref() {
         Expr::Param(p) => Some((*p, 0)),
