@@ -1297,6 +1297,10 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
         // Bare `unsigned`/`signed`/`short` return (no explicit `int`) — the next
         // token is the function name. Treat as int; don't consume the name.
         Some(Tok::Ident(_)) if had_mod => true,
+        // Implicit-int function definition: `name(params) { ... }` with no return
+        // type at all (K&R style). The name is the current token; leave it for
+        // the declarator parse below. Fixture 2163.
+        Some(Tok::Ident(_)) if matches!(p.toks.get(p.pos + 1), Some(Tok::LParen)) => true,
         Some(Tok::Kw("struct")) => {
             p.bump();
             // Capture the struct's total size: a small struct returned BY VALUE
