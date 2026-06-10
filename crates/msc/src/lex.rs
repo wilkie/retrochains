@@ -204,6 +204,65 @@ pub(crate) fn apply_typedef_substitutions(toks: &mut Vec<Tok>) {
         i += 1;
     }
 }
+/// Rewrite a function-returning-function-pointer declarator
+/// `<ret> (*name(params))(fnptr-params)` to the plain `<ret> name(params)`.
+/// The returned function pointer is a 2-byte near address that lives in AX
+/// just like an int return, so the wrapper and the fn-ptr parameter list carry
+/// no codegen information and are dropped. Fixtures 3324, 2336, 3255.
+pub(crate) fn rewrite_fnptr_returns(toks: &mut Vec<Tok>) {
+    let mut i = 0;
+    while i + 3 < toks.len() {
+        // Anchor on `( * Ident (` — the name is followed by its OWN param list
+        // (distinguishing it from a fn-ptr variable `(*p)(...)`, where the name
+        // is followed by `)`).
+        if matches!(toks[i], Tok::LParen)
+            && matches!(toks[i + 1], Tok::Star)
+            && matches!(toks[i + 2], Tok::Ident(_))
+            && matches!(toks[i + 3], Tok::LParen)
+        {
+            // Matching `)` of the function's param list (opened at i+3).
+            let mut depth = 0i32;
+            let mut q = i + 3;
+            while q < toks.len() {
+                match &toks[q] {
+                    Tok::LParen => depth += 1,
+                    Tok::RParen => { depth -= 1; if depth == 0 { break; } }
+                    _ => {}
+                }
+                q += 1;
+            }
+            // Expect `)` (wrapper close) then `(` ... `)` (fn-ptr param list).
+            if q + 2 < toks.len()
+                && matches!(toks[q + 1], Tok::RParen)
+                && matches!(toks[q + 2], Tok::LParen)
+            {
+                let mut d2 = 0i32;
+                let mut r = q + 2;
+                while r < toks.len() {
+                    match &toks[r] {
+                        Tok::LParen => d2 += 1,
+                        Tok::RParen => { d2 -= 1; if d2 == 0 { break; } }
+                        _ => {}
+                    }
+                    r += 1;
+                }
+                if r + 1 < toks.len() && matches!(toks[r + 1], Tok::LBrace | Tok::Semi) {
+                    // Rewrite `( * name ( params ) ) ( fnptr-params )`
+                    //      →  `name ( params )`.
+                    let name = toks[i + 2].clone();
+                    let mut rewrite = vec![name, Tok::LParen];
+                    rewrite.extend(toks[i + 4..q].iter().cloned());
+                    rewrite.push(Tok::RParen);
+                    let n = rewrite.len();
+                    toks.splice(i..=r, rewrite);
+                    i += n;
+                    continue;
+                }
+            }
+        }
+        i += 1;
+    }
+}
 /// Rewrite `void *` to `int *` at the token level. A `void` pointer is
 /// a 2-byte near pointer indistinguishable from `int *` in codegen (the
 /// OBJ encodes no C type), so this lets the existing pointer machinery

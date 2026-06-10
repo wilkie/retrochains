@@ -10,6 +10,7 @@ pub(crate) fn parse_unit(source: &str) -> Result<Unit, EmitError> {
     rewrite_void_pointers(&mut toks);
     apply_enum_substitutions(&mut toks);
     apply_typedef_substitutions(&mut toks);
+    rewrite_fnptr_returns(&mut toks);
     let mut p = Parser {
         toks: &toks,
         pos: 0,
@@ -1966,17 +1967,22 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
                 };
                 p.local_specs.push(spec.clone());
                 locals.push(spec);
-                // Optional `= <function>` initializer → prelude store of OFFSET _func.
+                // Optional initializer. A bare function name → `OFFSET _func`
+                // (FuncAddr); any other expression (e.g. a call `= get_op()`
+                // returning a fn-ptr) is stored as its computed value. Fixture 2336.
                 if matches!(p.peek(), Some(Tok::Assign)) {
                     p.bump();
-                    let fname = match p.bump().cloned() {
-                        Some(Tok::Ident(s)) => s,
-                        other => return Err(EmitError::Unsupported(format!(
-                            "expected function name initializing a function pointer, got {other:?}"))),
+                    let value = if let Some(Tok::Ident(s)) = p.peek().cloned()
+                        && !matches!(p.toks.get(p.pos + 1), Some(Tok::LParen))
+                    {
+                        p.bump();
+                        Expr::FuncAddr(s)
+                    } else {
+                        parse_expr(p)?
                     };
                     prelude.push(Stmt::Assign {
                         target: AssignTarget::Local(local_idx),
-                        value: Expr::FuncAddr(fname),
+                        value,
                     });
                 }
                 if matches!(p.peek(), Some(Tok::Comma)) { p.bump(); continue; }
