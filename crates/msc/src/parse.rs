@@ -4772,6 +4772,19 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                     // Runtime index → `<i→ax>; shl ax; add ax,OFFSET _arr`.
                     return Ok(Expr::AddrOfIndexedGlobal { array: global_idx, index: Box::new(idx_expr), elem: elem_size as u8 });
                 }
+                // `&p[n]` on a pointer PARAM ≡ `p + n` (pointer arithmetic): the
+                // param's value is already the base address, so the same
+                // pointer-scaling BinOp the bare `p + n` builds applies. Fixture
+                // 2978.
+                if let Some(pi) = p.param_names.iter().position(|n| *n == name)
+                    && p.param_pointee_sizes.get(pi).copied().unwrap_or(0) > 0
+                {
+                    return Ok(Expr::BinOp {
+                        op: BinOp::Add,
+                        left: Box::new(Expr::Param(pi)),
+                        right: Box::new(idx_expr),
+                    });
+                }
                 return Err(EmitError::Unsupported(format!(
                     "address-of unknown identifier `{name}`"
                 )));
