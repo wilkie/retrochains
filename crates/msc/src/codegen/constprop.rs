@@ -318,6 +318,19 @@ pub(crate) fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
                 cp.mutated_locals.insert(*p);
                 return;
             }
+            // Element-level aliasing: `arr[K] = &x` (arr a local array of
+            // pointers) records `(arr, byte_off) -> x`, leaving x intact (a
+            // tracked alias, not an escape). The store still emits. Fixture 1565.
+            if let AssignTarget::IndexedLocal { local, byte_off } = target
+                && matches!(value, Expr::AddrOfLocal(_) | Expr::AddrOfGlobal(_))
+            {
+                match value {
+                    Expr::AddrOfLocal(x) => { cp.elem_ptr_alias.insert((*local, *byte_off), AliasTarget::Local(*x)); }
+                    Expr::AddrOfGlobal(g) => { cp.elem_ptr_alias.insert((*local, *byte_off), AliasTarget::Global(*g)); }
+                    _ => unreachable!(),
+                }
+                return;
+            }
             // Pointer aliasing with a base offset: `int *p = &a[K]` / `p = a + K`
             // (already recorded in ptr_addr above). Like the bare `&x` case this
             // is a TRACKED alias, not a genuine escape — keep the base array's
@@ -368,6 +381,21 @@ pub(crate) fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
                     AliasTarget::String(_) => unreachable!(),
                 };
                 alias_rewrite_derefs(value, cp);
+            }
+            // `*arr[K] = ...` where the array element `arr[K]` aliases &x → a
+            // direct store to x. The parser lowers this to DerefExpr{ ptr:
+            // LocalIndex{arr, K} }. Fixture 1565.
+            if let AssignTarget::DerefExpr { ptr, .. } = target
+                && let Expr::LocalIndex { local, index } = ptr.as_ref()
+                && let Expr::IntLit(k) = index.as_ref()
+                && let Some(&a) = cp.elem_ptr_alias.get(&(*local, (*k * 2) as u16))
+            {
+                from_ptr_store = true;
+                *target = match a {
+                    AliasTarget::Local(x) => AssignTarget::Local(x),
+                    AliasTarget::Global(g) => AssignTarget::Global(g),
+                    AliasTarget::String(_) => unreachable!(),
+                };
             }
             // `p[K] = ...` (constant K≠0) where p aliases a base array → a direct
             // element store `base[K] = ...`. byte_off is already in pointee bytes.
@@ -635,6 +663,7 @@ pub(crate) fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
             cp.l_known.clear();
             cp.la_known.clear();
             cp.ptr_alias.clear();
+            cp.elem_ptr_alias.clear();
             cp.ptr_alias_g.clear();
             cp.ptr_addr.clear();
             cp.ga_known.clear();
@@ -651,6 +680,7 @@ pub(crate) fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
             cp.l_known.clear();
             cp.la_known.clear();
             cp.ptr_alias.clear();
+            cp.elem_ptr_alias.clear();
             cp.ptr_alias_g.clear();
             cp.ptr_addr.clear();
             cp.ga_known.clear();
@@ -670,6 +700,7 @@ pub(crate) fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
                     cp.l_known.clear();
                     cp.la_known.clear();
             cp.ptr_alias.clear();
+            cp.elem_ptr_alias.clear();
             cp.ptr_alias_g.clear();
             cp.ptr_addr.clear();
                     cp.ga_known.clear();
@@ -682,6 +713,7 @@ pub(crate) fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
                     cp.l_known.clear();
                     cp.la_known.clear();
             cp.ptr_alias.clear();
+            cp.elem_ptr_alias.clear();
             cp.ptr_alias_g.clear();
             cp.ptr_addr.clear();
                     cp.ga_known.clear();
@@ -718,6 +750,7 @@ pub(crate) fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
                     cp.l_known.clear();
                     cp.la_known.clear();
             cp.ptr_alias.clear();
+            cp.elem_ptr_alias.clear();
             cp.ptr_alias_g.clear();
             cp.ptr_addr.clear();
                     cp.ga_known.clear();
@@ -728,6 +761,7 @@ pub(crate) fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
                 cp.l_known.clear();
                 cp.la_known.clear();
             cp.ptr_alias.clear();
+            cp.elem_ptr_alias.clear();
             cp.ptr_alias_g.clear();
             cp.ptr_addr.clear();
                 cp.ga_known.clear();
@@ -745,6 +779,7 @@ pub(crate) fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
             cp.l_known.clear();
             cp.la_known.clear();
             cp.ptr_alias.clear();
+            cp.elem_ptr_alias.clear();
             cp.ptr_alias_g.clear();
             cp.ptr_addr.clear();
             cp.ga_known.clear();
@@ -761,6 +796,7 @@ pub(crate) fn cp_clone(cp: &ConstProp) -> ConstProp {
         mutated_locals: cp.mutated_locals.clone(),
         mutated_globals: cp.mutated_globals.clone(),
         ptr_alias: cp.ptr_alias.clone(),
+        elem_ptr_alias: cp.elem_ptr_alias.clone(),
         ptr_alias_g: cp.ptr_alias_g.clone(),
         aliases_used: cp.aliases_used.clone(),
         ptr_addr: cp.ptr_addr.clone(),

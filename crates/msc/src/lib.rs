@@ -2909,6 +2909,11 @@ struct ConstProp {
     /// `*p` (read or store) is rewritten to the aliased lvalue and folds /
     /// stores directly. Cleared at branch boundaries.
     ptr_alias: std::collections::HashMap<usize, AliasTarget>,
+    /// Element-level pointer-alias tracking: `int *arr[N]; arr[K] = &x` records
+    /// `(arr_local, byte_off) -> x`, so a later `*arr[K]` resolves to the aliased
+    /// lvalue. The array analog of `ptr_alias`. Cleared at branch boundaries.
+    /// Fixture 1565.
+    elem_ptr_alias: std::collections::HashMap<(usize, u16), AliasTarget>,
     /// Global-pointer alias tracking: `int *p; p = a;` (p a near GLOBAL pointer,
     /// a a global array) records `p -> (Global(a), base_byte_off)`, so `p[K]`
     /// reads/writes resolve to direct `a[base_off + K*elem]` global addressing.

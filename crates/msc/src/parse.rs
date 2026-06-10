@@ -2923,6 +2923,25 @@ pub(crate) fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
                 return Err(EmitError::Unsupported(
                     "deref-store through non-call `*<ident>(...)` not yet supported".to_owned()));
             }
+            // `*arr[K] = <value>;` — store through a local pointer-array element.
+            // Lowered to a generic DerefExpr{LocalIndex}; const-prop folds an
+            // `arr[K]=&x` element alias into a direct store to x. Fixture 1565.
+            if let Some(Tok::Ident(nm)) = p.peek().cloned()
+                && matches!(p.toks.get(p.pos + 1), Some(Tok::LBrack))
+                && let Some(li) = p.resolve_local(&nm)
+                && p.local_specs[li].array_len > 1
+            {
+                p.bump(); // ident
+                p.bump(); // [
+                let index = parse_expr(p)?;
+                p.eat(&Tok::RBrack)?;
+                let ptr = Expr::LocalIndex { local: li, index: Box::new(index) };
+                let target = AssignTarget::DerefExpr { ptr: Box::new(ptr), is_byte: false };
+                p.eat(&Tok::Assign)?;
+                let value = parse_expr(p)?;
+                p.eat(&Tok::Semi)?;
+                return Ok(Stmt::Assign { target, value });
+            }
             let target_name = match p.bump().cloned() {
                 Some(Tok::Ident(s)) => s,
                 other => {
@@ -3245,7 +3264,12 @@ pub(crate) fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
                 // A POINTER local: `p[0] = v` is `*p = v` (deref store), so the
                 // alias pass can redirect it to the pointee. (Non-zero indices
                 // through a pointer local are deferred.)
-                let ptsz = p.local_specs[local_idx].pointee_size;
+                // Gate the deref-store forms to SCALAR pointers (array_len==1);
+                // an `int *p[N]` array stores into its K-th element (IndexedLocal
+                // via the fall-through below), not through a deref. Fixture 1565.
+                let ptsz = if p.local_specs[local_idx].array_len == 1 {
+                    p.local_specs[local_idx].pointee_size
+                } else { 0 };
                 if ptsz > 0 && matches!(index_expr.fold(&init_view), Some(0)) {
                     let target = AssignTarget::DerefLocal(local_idx);
                     let value = if let Some(v) = parse_compound_rhs(p, &target)? {
@@ -5256,11 +5280,13 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                                 "runtime index on a >2-D local array not yet supported".to_owned())),
                         }
                     }
-                    // A POINTER local: `p[K]` is `*(p + K)` — a deref, not an
-                    // array-slot read. K==0 yields a bare `*p` so the alias pass
-                    // can fold it; K!=0 derefs `p + K*pointee`.
+                    // A scalar POINTER local: `p[K]` is `*(p + K)` — a deref, not
+                    // an array-slot read. K==0 yields a bare `*p` so the alias
+                    // pass can fold it; K!=0 derefs `p + K*pointee`. An ARRAY of
+                    // pointers (`int *p[N]`, array_len>1) instead reads the K-th
+                    // element (a pointer) via the LocalIndex fall-through. 1565.
                     let ptsz = p.local_specs[idx].pointee_size;
-                    if ptsz > 0 {
+                    if ptsz > 0 && p.local_specs[idx].array_len == 1 {
                         // Fold the index against the local-init view (mirrors the
                         // write side) so `p[i]` with a constant-init `i` scales by
                         // the pointee size here rather than slipping through as an
