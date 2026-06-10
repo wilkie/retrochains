@@ -605,6 +605,18 @@ pub(crate) fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
                 AssignTarget::DerefLocalByte(p) => record_deref_ptr_addr_write(*p, true, value, cp),
                 _ => {}
             }
+            // A store THROUGH a pointer (not rewritten to a direct global/array
+            // element) may hit any address-taken global, so known global values
+            // become unknown — a later global read must reload. MSC reloads `g`
+            // after `++(*p)` even when p = &g. Fixture 1302.
+            if matches!(target,
+                AssignTarget::DerefLocal(_) | AssignTarget::DerefLocalByte(_)
+                | AssignTarget::DerefParam(_) | AssignTarget::DerefGlobal(_)
+                | AssignTarget::DerefExpr { .. } | AssignTarget::PtrIndexByte { .. })
+            {
+                cp.g_known.clear();
+                cp.ga_known.clear();
+            }
         }
         Stmt::Empty => {}
         Stmt::If { cond, then_branch, else_branch } => {

@@ -3524,6 +3524,27 @@ pub(crate) fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
             // `<ident>++;` / `<ident>--;` at the codegen level.
             let inc = matches!(p.peek(), Some(Tok::PlusPlus));
             p.bump();
+            // `++(*p);` / `--(*p);` — pre-inc/dec the POINTEE. Statement value is
+            // unused, so it lowers to the deref store `*p = *p ± 1` (the in-place
+            // mem-op peephole turns it into `mov bx,[p]; inc/dec word [bx]`).
+            // Fixture 1302.
+            if matches!(p.peek(), Some(Tok::LParen)) {
+                p.bump(); // (
+                let inner = parse_expr(p)?;
+                p.eat(&Tok::RParen)?;
+                p.eat(&Tok::Semi)?;
+                if let Some(target) = expr_to_deref_target(&inner) {
+                    return Ok(Stmt::Assign {
+                        target,
+                        value: Expr::BinOp {
+                            op: if inc { BinOp::Add } else { BinOp::Sub },
+                            left: Box::new(inner), right: Box::new(Expr::IntLit(1)),
+                        },
+                    });
+                }
+                return Err(EmitError::Unsupported(format!(
+                    "prefix `++/--` on parenthesized non-deref: {inner:?}")));
+            }
             let name = match p.bump().cloned() {
                 Some(Tok::Ident(s)) => s,
                 other => {

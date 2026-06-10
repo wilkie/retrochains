@@ -3191,6 +3191,20 @@ pub(crate) fn emit_assign_deref_postmutate_param(param_idx: usize, step: i32, va
 /// `*<ptr-local> = <expr>;` — load the pointer local into BX, then
 /// store the RHS through `[bx]`. Constant RHS → `c7 07 imm16`;
 /// general RHS → `<expr-to-ax>; 89 07`.
+/// Emit an in-place word ALU op on `[bx]`: `inc/dec word [bx]` for ±1, else
+/// `add/sub word [bx], K` (imm8sx when it fits, else imm16). Used by the
+/// `*p op= K` deref-compound peephole.
+fn emit_inplace_bx_word_op(op: BinOp, k: i32, out: &mut Vec<u8>) {
+    match (op, k) {
+        (BinOp::Add, 1) => out.extend_from_slice(&[0xFF, 0x07]),   // inc word [bx]
+        (BinOp::Sub, 1) => out.extend_from_slice(&[0xFF, 0x0F]),   // dec word [bx]
+        (BinOp::Add, k) if (-128..=127).contains(&k) => out.extend_from_slice(&[0x83, 0x07, k as u8]),
+        (BinOp::Sub, k) if (-128..=127).contains(&k) => out.extend_from_slice(&[0x83, 0x2F, k as u8]),
+        (BinOp::Add, k) => { out.extend_from_slice(&[0x81, 0x07]); out.extend_from_slice(&(k as u16).to_le_bytes()); }
+        (BinOp::Sub, k) => { out.extend_from_slice(&[0x81, 0x2F]); out.extend_from_slice(&(k as u16).to_le_bytes()); }
+        _ => unreachable!(),
+    }
+}
 pub(crate) fn emit_assign_deref_local(local_idx: usize, value: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
     let disp = locals.disp(local_idx);
     if locals.is_far_ptr_local(local_idx) {
@@ -3204,6 +3218,18 @@ pub(crate) fn emit_assign_deref_local(local_idx: usize, value: &Expr, locals: &L
             emit_expr_to_ax(value, locals, out, fixups);
             out.extend_from_slice(&[0x26, 0x89, 0x07]);   // mov es:[bx],ax
         }
+        return;
+    }
+    // In-place compound `*p op= K` (and `++(*p)`/`--(*p)`): `mov bx,[p]; <op>
+    // word [bx],K` — no load-modify-store round trip. The value is the
+    // self-deref folded with a constant. Fixture 1302.
+    if let Expr::BinOp { op: op @ (BinOp::Add | BinOp::Sub), left, right } = value
+        && matches!(left.as_ref(), Expr::DerefWord { ptr }
+            if matches!(ptr.as_ref(), Expr::Local(l) if *l == local_idx))
+        && let Expr::IntLit(k) = right.as_ref()
+    {
+        out.push(0x8B); out.push(bp_modrm(0x5E, disp)); push_bp_disp(out, disp); // mov bx,[p]
+        emit_inplace_bx_word_op(*op, *k, out);
         return;
     }
     // Near pointer. If AX still holds p (the immediately-preceding `p = <addr>`
