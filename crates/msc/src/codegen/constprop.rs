@@ -439,7 +439,22 @@ pub(crate) fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
             // inc/dec/add/sub peephole. Other ops (Shl, Mul, etc.)
             // don't have a peephole shape, so we substitute normally
             // (fixtures 1022, 1024).
-            let self_assign_addsub = match (target.clone(), value.clone()) {
+            // EXCEPTION — `t = ~t` (parsed as `t ^ -1`) of a NON-long target is
+            // a plain assignment of a unary complement, NOT a compound op: MSC
+            // propagates the target's known value through the complement and
+            // stores the folded immediate (`mov word _g,-16` for g=15), unlike
+            // `t op= K` which stays in-place (fixtures 557, 1556). Long `~` keeps
+            // its self-read for the `not ax; not dx` codegen path, and `^= 0xFFFF`
+            // parses to IntLit(65535) (not -1), so it is unaffected.
+            let int_self_complement = matches!(value,
+                    Expr::BinOp { op: BinOp::BitXor, right, .. }
+                        if matches!(right.as_ref(), Expr::IntLit(-1)))
+                && match target {
+                    AssignTarget::Global(g) => !cp.long_globals.contains(g),
+                    AssignTarget::Local(l) => !cp.local_specs.get(*l).map(|s| s.is_long).unwrap_or(false),
+                    _ => false,
+                };
+            let self_assign_addsub = !int_self_complement && match (target.clone(), value.clone()) {
                 (AssignTarget::Local(t), Expr::BinOp { op: BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod | BinOp::Shl | BinOp::Shr | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor, left, .. }) => {
                     matches!(left.as_ref(), Expr::Local(l) if *l == t)
                 }
