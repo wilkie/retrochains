@@ -1819,6 +1819,33 @@ pub(crate) fn emit_assign_global(global_idx: usize, value: &Expr, locals: &Local
             }
         }
     }
+    // Int (word) global self-compound bitop with a non-const RHS, e.g.
+    // `g ^= g`: MSC evaluates the RHS into AX then applies an in-place
+    // memory-with-register op `<op> word [g],ax` (e.g. `mov ax,[g]; xor
+    // [g],ax`) instead of computing in AX and storing back. Scoped to the
+    // SELF case (`left` and `right` are this same int global) so the AX load
+    // reads the old value before the in-place op. Fixture 3587 (`g ^= g`).
+    if !locals.is_long_global(global_idx)
+        && !locals.is_char_global(global_idx)
+        && let Expr::BinOp { op, left, right } = value
+        && matches!(op, BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor)
+        && matches!(left.as_ref(), Expr::Global(g) if *g == global_idx)
+        && matches!(right.as_ref(), Expr::Global(r) if *r == global_idx)
+    {
+        emit_expr_to_ax(right, locals, out, fixups); // mov ax,[g]
+        let opcode = match op {
+            BinOp::BitAnd => 0x21u8,
+            BinOp::BitOr => 0x09,
+            BinOp::BitXor => 0x31,
+            _ => unreachable!(),
+        };
+        out.push(opcode);
+        out.push(0x06); // mod=00 reg=000(ax) rm=110(disp16)
+        let p = out.len();
+        out.extend_from_slice(&[0x00, 0x00]);
+        fixups.push(Fixup { body_offset: p - 1, kind: FixupKind::GlobalAddr { global_idx } });
+        return;
+    }
     // Peephole: int (word) global `g op= K` for bitwise ops → in-place memory
     // op, choosing byte vs word form by which bytes the immediate affects
     // (mirrors the int-local bitop selection). `g &= 15` → `and word [g],15`;
