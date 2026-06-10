@@ -958,6 +958,27 @@ pub(crate) fn emit_long_to_dx_ax(value: &Expr, locals: &Locals<'_>, out: &mut Ve
                 else { out.push(0x81); out.push(0xDA); out.extend_from_slice(&((hi as u32 & 0xFFFF) as u16).to_le_bytes()); }
             }
         }
+        // `*p` / `*p++` where p is a long* (pointee_size 4): read BOTH pointee
+        // words into DX:AX (`mov bx,[p]; mov ax,[bx]; mov dx,[bx+2]`). For `*p++`
+        // advance p by its stride first, keeping the OLD pointer in BX. Fixture 2521.
+        Expr::DerefWord { ptr } if matches!(ptr.as_ref(),
+                Expr::PostMutateLocal { local_idx, .. } if locals.local_pointee_size(*local_idx) == 4)
+            || matches!(ptr.as_ref(), Expr::Local(l) if locals.local_pointee_size(*l) == 4)
+            || matches!(ptr.as_ref(), Expr::Param(pi) if locals.param_pointee_size(*pi) == 4) =>
+        {
+            match ptr.as_ref() {
+                Expr::PostMutateLocal { local_idx, step } => {
+                    let d = locals.disp(*local_idx);
+                    out.extend_from_slice(&[0x8B, 0x5E, d as u8]); // mov bx,[bp-p]
+                    crate::codegen::assign::emit_postmutate_local(*step, 2, d, out); // add word [p],stride
+                }
+                Expr::Local(l) => { out.extend_from_slice(&[0x8B, 0x5E, locals.disp(*l) as u8]); }
+                Expr::Param(pi) => { out.extend_from_slice(&[0x8B, 0x5E, crate::codegen::func::param_disp(*pi) as u8]); }
+                _ => unreachable!(),
+            }
+            out.extend_from_slice(&[0x8B, 0x07]);       // mov ax,[bx]
+            out.extend_from_slice(&[0x8B, 0x57, 0x02]); // mov dx,[bx+2]
+        }
         _ => {
             emit_expr_to_ax(value, locals, out, fixups);
             out.push(0x99); // cwd: sign-extend AX into DX

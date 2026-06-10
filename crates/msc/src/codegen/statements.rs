@@ -1001,8 +1001,16 @@ pub(crate) fn emit_return(
                 }
             } else {
                 // `(int)<long-local>`: read the low word from the slot — MSC
-                // does NOT fold even when the value is known (fixture 1037).
-                emit_expr_to_ax(expr, locals, out, fixups);
+                // does NOT fold even when the value is known (fixture 1037). But
+                // if AX already holds the low word (just stored via `mov [lo],ax`,
+                // with only a `mov [hi],dx` since — which preserves AX), reuse it.
+                // Fixture 2521 (`v = *p++; return (int)v`).
+                let d = locals.disp(i);
+                let store_self = { let mut v = vec![0x89, bp_modrm(0x46, d)]; push_bp_disp(&mut v, d); v };
+                let load = { let mut v = vec![0x8B, bp_modrm(0x46, d)]; push_bp_disp(&mut v, d); v };
+                if !crate::codegen::expr::ax_holds_word_operand(out, &load, &store_self, locals.last_branch_barrier.get()) {
+                    emit_expr_to_ax(expr, locals, out, fixups);
+                }
             }
         } else if let Expr::Param(i) = expr
             && locals.is_char_param(*i)

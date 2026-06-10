@@ -1419,14 +1419,23 @@ pub(crate) fn ax_holds_word_operand(out: &[u8], load: &[u8], store_self: &[u8], 
         if n >= load.len() && out[n - load.len()..n] == *load {
             return n - load.len() >= barrier;
         }
+        // The establishing event may also be `store_self` itself when it is not
+        // the very last instruction (e.g. a `mov [hi],dx` followed it). Fixture 2521.
+        if n >= store_self.len() && out[n - store_self.len()..n] == *store_self {
+            return n - store_self.len() >= barrier;
+        }
         // Length of a trailing store-from-AX: `89 46 d8` / `89 86 d16` (bp-rel)
-        // or `a3 o16` (global moffs).
-        let store_len = if n >= 3 && out[n - 3] == 0x89 && out[n - 2] == 0x46 {
+        // or `a3 o16` (global moffs). A store-from-DX (`89 56 d8` / `89 16 o16`,
+        // the high word of a long store) also preserves AX, so strip it too —
+        // lets `v=*p++; return (int)v` reuse the live low word. Fixture 2521.
+        let store_len = if n >= 3 && out[n - 3] == 0x89 && (out[n - 2] == 0x46 || out[n - 2] == 0x56) {
             3
-        } else if n >= 4 && out[n - 4] == 0x89 && out[n - 3] == 0x86 {
+        } else if n >= 4 && out[n - 4] == 0x89 && (out[n - 3] == 0x86 || out[n - 3] == 0x96) {
             4
         } else if n >= 3 && out[n - 3] == 0xA3 {
             3
+        } else if n >= 4 && out[n - 4] == 0x89 && out[n - 3] == 0x16 {
+            4 // mov [o16],dx (global high word)
         } else {
             return false;
         };

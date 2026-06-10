@@ -826,6 +826,21 @@ pub(crate) fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_
         out.push(0x89); out.push(bp_modrm(0x56, hi)); push_bp_disp(out, hi);       // mov [hi],dx
         return;
     }
+    // `long v = *p` / `*p++` (deref of a long* pointer): the RHS yields a full
+    // long in DX:AX (mov bx,[p]; mov ax,[bx]; mov dx,[bx+2]) — store both words,
+    // NO cwd. Fixture 2521.
+    if locals.is_long_local(local_idx)
+        && let Expr::DerefWord { ptr } = value
+        && (matches!(ptr.as_ref(), Expr::PostMutateLocal { local_idx: l, .. } if locals.local_pointee_size(*l) == 4)
+            || matches!(ptr.as_ref(), Expr::Local(l) if locals.local_pointee_size(*l) == 4)
+            || matches!(ptr.as_ref(), Expr::Param(pi) if locals.param_pointee_size(*pi) == 4))
+    {
+        crate::codegen::calls::emit_long_to_dx_ax(value, locals, out, fixups);
+        out.push(0x89); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp);   // mov [lo],ax
+        let hi = disp + 2;
+        out.push(0x89); out.push(bp_modrm(0x56, hi)); push_bp_disp(out, hi);       // mov [hi],dx
+        return;
+    }
     // General path: evaluate the RHS into AX, then store.
     let is_byte = locals.size(local_idx) == 1;
     // MSC never const-folds || / && into an immediate store (fixture
