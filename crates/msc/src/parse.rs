@@ -4525,6 +4525,26 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                 let ptr = ptr.clone();
                 return Ok(Expr::PostMutateDeref { ptr, step, is_byte });
             }
+            // `(p ± K)->field` — pointer arithmetic on a struct pointer then a
+            // member read. The struct stride scales K (a negative result is a
+            // signed displacement off BX). Fixture 3251 (`(p - 1)->x`).
+            if let Expr::BinOp { op: op @ (BinOp::Add | BinOp::Sub), left, right } = &inner
+                && let Expr::Param(i) = left.as_ref()
+                && let Some(Some(sidx)) = p.param_struct_idxs.get(*i).cloned()
+                && let Expr::IntLit(k) = right.as_ref()
+                && matches!(p.peek(), Some(Tok::Arrow))
+            {
+                let i = *i;
+                let stride = p.structs[sidx].total_bytes as i32;
+                let signed_k = if matches!(op, BinOp::Sub) { -*k } else { *k };
+                let base_off = signed_k * stride;
+                p.bump(); // `->`
+                let (field_off, size) = parse_field_lookup(p, sidx)?;
+                let final_off = (base_off + field_off as i32) as i16 as u16;
+                return Ok(Expr::PtrChainField {
+                    base: Box::new(Expr::Param(i)), hops: vec![], final_off, final_size: size,
+                });
+            }
             // `(*p).field` (p a struct pointer) / `(*pp)->field` (pp a pointer to
             // struct pointer) — a pointer member chain. `.` after the deref reads
             // the struct directly (no extra hop); `->` derefs one more level.

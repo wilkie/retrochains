@@ -428,10 +428,13 @@ pub(crate) fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8
                 else { out.push(0x8B); out.push(0x9F); out.extend_from_slice(&off.to_le_bytes()); }
             };
             for &h in hops { mov_bx_off(out, h); }
-            // Final field read at [bx + final_off].
+            // Final field read at [bx + final_off]. final_off is interpreted as a
+            // SIGNED i16 so a negative displacement (`(p-1)->x` → [bx-4]) uses the
+            // disp8 form. Fixture 3251.
             let read = if *final_size == 1 { 0x8Au8 } else { 0x8B };
-            if *final_off == 0 { out.push(read); out.push(0x07); }
-            else if *final_off < 128 { out.push(read); out.push(0x47); out.push(*final_off as u8); }
+            let soff = *final_off as i16;
+            if soff == 0 { out.push(read); out.push(0x07); }
+            else if (-128..=127).contains(&soff) { out.push(read); out.push(0x47); out.push(soff as i8 as u8); }
             else { out.push(read); out.push(0x87); out.extend_from_slice(&final_off.to_le_bytes()); }
             if *final_size == 1 { out.push(0x98); } // cbw
         }
