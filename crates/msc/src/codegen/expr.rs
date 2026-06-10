@@ -2124,7 +2124,11 @@ pub(crate) fn emit_binop(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'
             let pdisp = param_disp(lp);
             out.push(0x8B); out.push(bp_modrm(0x5E, pdisp)); push_bp_disp(out, pdisp); // mov bx,[bp+p]
             emit_bx(out, 0x8B, roff); // mov ax,[bx+roff]
-            emit_bx(out, 0x03, loff); // add ax,[bx+loff]
+            if loff == roff {
+                out.extend_from_slice(&[0xD1, 0xE0]); // *p + *p → shl ax,1 (double)
+            } else {
+                emit_bx(out, 0x03, loff); // add ax,[bx+loff]
+            }
         } else {
             // Different pointers: load LHS ptr, `*lhs` into AX; reload BX with the
             // RHS ptr, `add ax,*rhs`. Fixture 3607 (`*p + *q`).
