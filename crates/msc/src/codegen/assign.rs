@@ -3061,7 +3061,10 @@ pub(crate) fn emit_assign_deref_local_field(ptr_local: usize, byte_off: u16, siz
             Expr::DerefLocalField { ptr_local: lp, byte_off: lo, .. } if *lp == ptr_local && *lo == byte_off)
         && let Some(k) = right.fold(locals.inits)
     {
-        out.push(0x8B); out.push(bp_modrm(0x5E, p_disp)); push_bp_disp(out, p_disp); // mov bx,[bp-p]
+        // Reuse a live &struct in AX (mov bx,ax) when p was just established —
+        // single-use: the in-place op below clobbers the reuse for any later
+        // deref. Fixture 182.
+        crate::codegen::expr::emit_ptr_local_to_bx(p_disp, locals, out); // mov bx,[bp-p] / mov bx,ax
         let is_sub = matches!(op, BinOp::Sub);
         let off = byte_off;
         let modrm = |out: &mut Vec<u8>, re: u8| {
