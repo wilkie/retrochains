@@ -866,25 +866,30 @@ pub(crate) fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8
             }
         }
         Expr::PtrIndexByte { ptr, index } => {
-            // Constant index: load pointer global into BX, then
-            // `mov al, [bx + disp]` and `cbw`. `disp` is the byte
-            // index. Fixture 4123. Phase 1 keeps it disp8.
+            // Constant index through a global pointer: load it into BX, then
+            // read the element. A `char *p` reads a byte + `cbw` (fixture
+            // 4123); an `int *p` reads a word and scales the index by 2
+            // (`mov bx,_p; mov ax,[bx+K*2]`, fixture 2939). The pointee width
+            // comes from the global's element size.
             let k = index.fold(locals.inits).unwrap_or_else(|| {
-                panic!("non-constant char-ptr index not yet supported")
+                panic!("non-constant ptr index not yet supported")
             });
-            let disp = i8::try_from(k).expect("ptr index fits in i8");
+            let elem = locals.global_elem_size(*ptr).max(1) as i32;
+            let off = i8::try_from(k * elem).expect("ptr index fits in i8");
             let body_offset = out.len();
             out.extend_from_slice(&[0x8B, 0x1E, 0x00, 0x00]);
             fixups.push(Fixup {
                 body_offset: body_offset + 1,
                 kind: FixupKind::GlobalAddr { global_idx: *ptr },
             });
+            let read = if elem == 1 { 0x8Au8 } else { 0x8B }; // mov al / mov ax
             // disp 0 uses the no-displacement modrm `8a 07` (fixture 192).
-            if disp == 0 {
-                out.extend_from_slice(&[0x8A, 0x07, 0x98]);
+            if off == 0 {
+                out.extend_from_slice(&[read, 0x07]);
             } else {
-                out.extend_from_slice(&[0x8A, 0x47, disp as u8, 0x98]);
+                out.extend_from_slice(&[read, 0x47, off as u8]);
             }
+            if elem == 1 { out.push(0x98); } // cbw
         }
         Expr::StructArrayField { array, index, stride, field_off, size } => {
             // `arr[i].field`: `mov bx,[i]; <scale bx by stride>; mov ax/al,

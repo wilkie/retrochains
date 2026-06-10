@@ -403,6 +403,10 @@ pub struct Locals<'a> {
     /// Parallel-indexed flags marking globals whose element size is
     /// 1 (char). Used to pick byte-load (`a0`) + cbw over word-load.
     pub char_globals: &'a [bool],
+    /// Parallel-indexed element / pointee byte size of each global (1
+    /// for `char`/`char *`, 2 for `int`/`int *`, …). For pointer globals
+    /// this is the pointee width, driving byte-vs-word `p[K]` deref.
+    pub global_elem_sizes: &'a [usize],
     /// Parallel-indexed flags marking `unsigned` globals. Selects
     /// unsigned codegen (SHR vs SAR, ja/jb vs jg/jl for long compares).
     pub unsigned_globals: &'a [bool],
@@ -568,6 +572,10 @@ impl Locals<'_> {
     }
     pub fn is_char_global(&self, idx: usize) -> bool {
         self.char_globals.get(idx).copied().unwrap_or(false)
+    }
+    /// Element / pointee byte width of global `idx` (defaults to 2).
+    pub fn global_elem_size(&self, idx: usize) -> usize {
+        self.global_elem_sizes.get(idx).copied().unwrap_or(2)
     }
     pub fn is_unsigned_global(&self, idx: usize) -> bool {
         self.unsigned_globals.get(idx).copied().unwrap_or(false)

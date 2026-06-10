@@ -550,6 +550,7 @@ pub(crate) fn emit_function(
         sizes: &local_sizes,
         long_globals,
         char_globals,
+        global_elem_sizes,
         unsigned_globals,
         float_globals,
         long_locals: &local_long,
