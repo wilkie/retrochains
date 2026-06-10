@@ -3031,6 +3031,27 @@ pub(crate) fn emit_assign_deref_param_field(ptr_param: usize, byte_off: u16, siz
     out.push(0x8B);
     out.push(0x5E);
     out.push(p_disp as u8);
+    // `p->f = <long>` — a long (4-byte) struct field: store both words at
+    // [bx+off] and [bx+off+2]. Fixture 318.
+    if size == 4 {
+        let store_word = |out: &mut Vec<u8>, off: u16, opc: u8, regimm: &[u8]| {
+            if off == 0 { out.push(opc); out.push(0x07); } else { out.push(opc); out.push(0x47); out.push(off as u8); }
+            out.extend_from_slice(regimm);
+        };
+        if let Some(k) = value.fold(locals.inits) {
+            let lo = (k as u32 & 0xFFFF) as u16;
+            let hi = (((k as i32) >> 16) as u32 & 0xFFFF) as u16;
+            store_word(out, byte_off, 0xC7, &lo.to_le_bytes());
+            store_word(out, byte_off + 2, 0xC7, &hi.to_le_bytes());
+        } else {
+            crate::codegen::calls::emit_long_to_dx_ax(value, locals, out, fixups);
+            store_word(out, byte_off, 0x89, &[]);       // 89 07/47 → mov [bx+off],ax  (reg=ax)
+            // high word: mov [bx+off+2],dx → 89 /16 form (reg=dx=010 → modrm 0x57/0x17)
+            if byte_off + 2 == 0 { out.extend_from_slice(&[0x89, 0x17]); }
+            else { out.push(0x89); out.push(0x57); out.push((byte_off + 2) as u8); }
+        }
+        return;
+    }
     if size == 1 {
         let k = value.fold(locals.inits).unwrap_or_else(|| {
             panic!("non-constant byte struct-field store via param ptr not yet supported")
