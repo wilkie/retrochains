@@ -911,9 +911,11 @@ pub(crate) fn to_unsigned_jcc(signed: u8) -> u8 {
 /// the comparison unsigned), so the jcc must use the unsigned variant.
 pub(crate) fn cmp_is_unsigned(cond: &Cond, locals: &Locals<'_>) -> bool {
     fn operand_unsigned(e: &Expr, locals: &Locals<'_>) -> bool {
+        // A pointer operand compares UNSIGNED (addresses) — ordering uses jb/jae,
+        // not jl/jge. Fixtures 2934 (int*), 2929 (struct*).
         match e {
-            Expr::Param(i) => locals.is_unsigned_param(*i),
-            Expr::Local(i) => locals.is_unsigned_local(*i),
+            Expr::Param(i) => locals.is_unsigned_param(*i) || locals.param_pointee_size(*i) > 0,
+            Expr::Local(i) => locals.is_unsigned_local(*i) || locals.local_pointee_size(*i) > 0,
             Expr::Global(g) => locals.is_unsigned_global(*g),
             _ => false,
         }
