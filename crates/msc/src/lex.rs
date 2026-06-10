@@ -14,8 +14,32 @@ use crate::*;
 pub(crate) fn apply_typedef_substitutions(toks: &mut Vec<Tok>) {
     let mut aliases: std::collections::HashMap<String, Vec<Tok>> =
         std::collections::HashMap::new();
+    // Function-pointer typedefs: `typedef <ret> (*Alias)(params);` records
+    // Alias -> (ret tokens, param-list tokens incl. parens). A use site
+    // `Alias name` splices to the declarator `<ret> (*name)(params)`, which the
+    // existing fn-ptr local/param parsing handles. Fixtures 1744, 2252, 2442.
+    let mut fnptr_aliases: std::collections::HashMap<String, (Vec<Tok>, Vec<Tok>)> =
+        std::collections::HashMap::new();
     let mut i = 0;
     while i < toks.len() {
+        // A function-pointer alias used as `Alias name` → splice the declarator
+        // with `name` injected into the `(*_)` hole. Consumes both tokens.
+        if let Tok::Ident(name) = &toks[i]
+            && let Some((ret, params)) = fnptr_aliases.get(name).cloned()
+            && let Some(Tok::Ident(_)) = toks.get(i + 1)
+        {
+            let varname = toks[i + 1].clone();
+            let mut rewrite = ret;
+            rewrite.push(Tok::LParen);
+            rewrite.push(Tok::Star);
+            rewrite.push(varname);
+            rewrite.push(Tok::RParen);
+            rewrite.extend(params);
+            let n = rewrite.len();
+            toks.splice(i..=i + 1, rewrite);
+            i += n;
+            continue;
+        }
         // Substitute a known alias used at a non-typedef site. Expansions
         // are already fully resolved, so the spliced tokens never contain
         // another unresolved alias — advance past them.
@@ -105,6 +129,27 @@ pub(crate) fn apply_typedef_substitutions(toks: &mut Vec<Tok>) {
             let complex = toks[start..semi]
                 .iter()
                 .any(|t| matches!(t, Tok::LBrace | Tok::LParen));
+            // `typedef <ret> (*Alias)(params);` — a function-pointer alias.
+            // Pattern: ret tokens, `(`, `*`, Ident(Alias), `)`, `(` params `)`.
+            if complex
+                && let Some(p1) = toks[start..semi].iter().position(|t| matches!(t, Tok::LParen)).map(|p| start + p)
+                && matches!(toks.get(p1 + 1), Some(Tok::Star))
+                && matches!(toks.get(p1 + 2), Some(Tok::Ident(_)))
+                && matches!(toks.get(p1 + 3), Some(Tok::RParen))
+                && matches!(toks.get(p1 + 4), Some(Tok::LParen))
+            {
+                let alias = match &toks[p1 + 2] { Tok::Ident(s) => s.clone(), _ => unreachable!() };
+                let ret: Vec<Tok> = toks[start..p1].to_vec();
+                let params: Vec<Tok> = toks[p1 + 4..semi].to_vec(); // includes `( ... )`
+                // Resolve any nested scalar alias inside the return type.
+                let ret: Vec<Tok> = ret.into_iter().flat_map(|t| match &t {
+                    Tok::Ident(s) => aliases.get(s).cloned().unwrap_or_else(|| vec![t.clone()]),
+                    _ => vec![t],
+                }).collect();
+                fnptr_aliases.insert(alias, (ret, params));
+                i = semi + 1;
+                continue;
+            }
             if !complex {
                 // Type tokens stop at the first `[` (the array suffix, if any).
                 let cut = toks[start..semi]
