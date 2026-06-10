@@ -3134,6 +3134,17 @@ fn emit_binop_inner(op: BinOp, left: &Expr, right: &Expr, locals: &Locals<'_>, o
         }
         // Right as BP-rel → `op ax, [bp+disp]` mem form.
         if let Some(disp) = bp_disp(right, locals) {
+            // Unsigned multiply uses `mul` (F7 /4) not `imul` (the low word is the
+            // same, but MSC distinguishes by operand signedness). Fixture 3413.
+            let left_unsigned_word = match left {
+                Expr::Param(i) => locals.is_unsigned_param(*i) && !locals.is_char_param(*i) && !locals.is_long_param(*i),
+                Expr::Local(i) => locals.is_unsigned_local(*i) && locals.size(*i) == 2 && !locals.is_long_local(*i),
+                _ => false,
+            };
+            if matches!(op, BinOp::Mul) && left_unsigned_word {
+                out.push(0xF7); out.push(bp_modrm(0x66, disp)); push_bp_disp(out, disp); // mul word [bp+disp]
+                return;
+            }
             emit_mem_op_at(op, disp, out);
             return;
         }
