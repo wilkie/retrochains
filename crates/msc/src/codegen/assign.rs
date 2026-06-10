@@ -1276,6 +1276,34 @@ pub(crate) fn emit_assign_param(param_idx: usize, value: &Expr, locals: &Locals<
         }
     }
 }
+/// `<long-global lvalue at base+byte_off> op= <long rhs>` (mul/div/mod) → MSC's
+/// in-place runtime helper: push the RHS long (a global RHS directly from memory,
+/// else loaded into DX:AX), push `OFFSET base+byte_off`, call __aNNal{mul,div,rem}.
+/// Covers a plain long global (byte_off 0), a long struct field, or a long array
+/// element. Fixtures 260/261/262, 407/408/409, 747/748.
+pub(crate) fn emit_long_global_muldiv(global_idx: usize, byte_off: u16, op: BinOp, right: &Expr, unsigned: bool, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+    let helper = match (op, unsigned) {
+        (BinOp::Mul, false) => "__aNNalmul", (BinOp::Mul, true) => "__aNNaulmul",
+        (BinOp::Div, false) => "__aNNaldiv", (BinOp::Div, true) => "__aNNauldiv",
+        (BinOp::Mod, false) => "__aNNalrem", (BinOp::Mod, true) => "__aNNaulrem",
+        _ => unreachable!(),
+    };
+    // A GLOBAL long RHS is pushed DIRECTLY from memory (`push [_b+2]; push [_b]`);
+    // a local/param/other RHS loads into DX:AX then pushes (260/261/262 vs 747/748).
+    if matches!(right, Expr::Global(j) if locals.is_long_global(*j)) {
+        crate::codegen::calls::push_long_operand(right, locals, out, fixups);
+    } else {
+        emit_long_to_dx_ax(right, locals, out, fixups);
+        out.push(0x52); out.push(0x50); // push dx; push ax
+    }
+    let b8 = out.len();
+    out.push(0xB8); out.extend_from_slice(&byte_off.to_le_bytes()); // mov ax, OFFSET base+byte_off
+    fixups.push(Fixup { body_offset: b8, kind: FixupKind::GlobalAddr { global_idx } });
+    out.push(0x50); // push ax
+    let call = out.len();
+    out.extend_from_slice(&[0xE8, 0x00, 0x00]); // call helper
+    fixups.push(Fixup { body_offset: call, kind: FixupKind::ExtCall { target: helper.to_owned() } });
+}
 pub(crate) fn emit_assign_global(global_idx: usize, value: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
     // `<struct-global> = <struct-returning call>`: store AX (<=2 bytes) /
     // DX:AX (3-4) into the destination struct global. Fixture 424.
@@ -1394,35 +1422,7 @@ pub(crate) fn emit_assign_global(global_idx: usize, value: &Expr, locals: &Local
         && matches!(op, BinOp::Mul | BinOp::Div | BinOp::Mod)
         && matches!(left.as_ref(), Expr::Global(g) if *g == global_idx)
     {
-        // MSC names the helper by signedness even though long multiply's low
-        // 32 bits are sign-agnostic: `__aNNaulmul` for unsigned (fixture 772),
-        // `__aNNalmul` for signed.
-        let helper = match (op, locals.is_unsigned_global(global_idx)) {
-            (BinOp::Mul, false) => "__aNNalmul",
-            (BinOp::Mul, true) => "__aNNaulmul",
-            (BinOp::Div, false) => "__aNNaldiv",
-            (BinOp::Div, true) => "__aNNauldiv",
-            (BinOp::Mod, false) => "__aNNalrem",
-            (BinOp::Mod, true) => "__aNNaulrem",
-            _ => unreachable!(),
-        };
-        // A GLOBAL long RHS is pushed DIRECTLY from memory (`push [_b+2]; push
-        // [_b]`); a local/param/other RHS loads into DX:AX then pushes. Fixtures
-        // 260/261/262 (global RHS) vs 747/748 (local RHS).
-        if matches!(right.as_ref(), Expr::Global(j) if locals.is_long_global(*j)) {
-            crate::codegen::calls::push_long_operand(right, locals, out, fixups);
-        } else {
-            emit_long_to_dx_ax(right, locals, out, fixups); // RHS long → DX:AX
-            out.push(0x52); // push dx
-            out.push(0x50); // push ax
-        }
-        let b8 = out.len();
-        out.extend_from_slice(&[0xB8, 0x00, 0x00]); // mov ax, OFFSET g
-        fixups.push(Fixup { body_offset: b8, kind: FixupKind::GlobalAddr { global_idx } });
-        out.push(0x50); // push ax
-        let call = out.len();
-        out.extend_from_slice(&[0xE8, 0x00, 0x00]); // call helper
-        fixups.push(Fixup { body_offset: call, kind: FixupKind::ExtCall { target: helper.to_owned() } });
+        emit_long_global_muldiv(global_idx, 0, *op, right, locals.is_unsigned_global(global_idx), locals, out, fixups);
         return;
     }
     // `g = a <*|/|%> b` (expression-context long mul/div/mod): evaluate via
@@ -2295,6 +2295,15 @@ pub(crate) fn emit_assign_indexed_global(global_idx: usize, byte_off: u16, value
         if emit_long_global_4byte(global_idx, byte_off, byte_off.wrapping_add(2), value, self_matches, locals, out, fixups) {
             return;
         }
+        // Long array-element compound mul/div/mod `a[K] op= r` → in-place helper
+        // with the element address (OFFSET _a+byte_off). Fixture 408.
+        if let Expr::BinOp { op, left, right } = value
+            && matches!(op, BinOp::Mul | BinOp::Div | BinOp::Mod)
+            && matches!(left.as_ref(), Expr::Index { array, .. } if *array == global_idx)
+        {
+            emit_long_global_muldiv(global_idx, byte_off, *op, right, locals.is_unsigned_global(global_idx), locals, out, fixups);
+            return;
+        }
     }
     // Compound `a[K] op= imm` → in-place word mem-op `add/sub/and/or/xor word
     // ptr [_a+off], imm` (and inc/dec for ±1). The element address placeholder
@@ -2878,6 +2887,15 @@ pub(crate) fn emit_assign_global_field(global_idx: usize, byte_off: u16, size: u
         let self_matches = matches!(value, Expr::BinOp { left, .. }
             if matches!(left.as_ref(), Expr::GlobalField { global: g, byte_off: bo, .. } if *g == global_idx && *bo == byte_off));
         if emit_long_global_4byte(global_idx, byte_off, byte_off.wrapping_add(2), value, self_matches, locals, out, fixups) {
+            return;
+        }
+        // Long field compound mul/div/mod `s.f op= r` → in-place helper with the
+        // field address (OFFSET base+byte_off). Fixtures 407/409.
+        if let Expr::BinOp { op, left, right } = value
+            && matches!(op, BinOp::Mul | BinOp::Div | BinOp::Mod)
+            && matches!(left.as_ref(), Expr::GlobalField { global: g, byte_off: bo, .. } if *g == global_idx && *bo == byte_off)
+        {
+            emit_long_global_muldiv(global_idx, byte_off, *op, right, locals.is_unsigned_global(global_idx), locals, out, fixups);
             return;
         }
     }
