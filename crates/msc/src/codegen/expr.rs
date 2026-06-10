@@ -738,17 +738,20 @@ pub(crate) fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8
                 let bo = out.len();
                 out.extend_from_slice(&[0xA0, 0x00, 0x00]);  // mov al, [g]
                 fixups.push(Fixup { body_offset: bo, kind: FixupKind::GlobalAddr { global_idx: *global_idx } });
+                // For a char global MSC mutates the byte BEFORE widening the old
+                // value (`mov al,[g]; inc byte [g]; cbw`). Fixtures 966/972.
+                emit_postmutate_global(*step, *global_idx, true, out, fixups);
                 out.push(0x98);                                // cbw
             } else {
                 let bo = out.len();
                 out.extend_from_slice(&[0xA1, 0x00, 0x00]);  // mov ax, [g]
                 fixups.push(Fixup { body_offset: bo, kind: FixupKind::GlobalAddr { global_idx: *global_idx } });
+                emit_postmutate_global(*step, *global_idx, false, out, fixups);
             }
-            emit_postmutate_global(*step, *global_idx, out, fixups);
         }
         Expr::PreMutateGlobal { global_idx, step } => {
             // Mutate first, then load the NEW value into AX.
-            emit_postmutate_global(*step, *global_idx, out, fixups);
+            emit_postmutate_global(*step, *global_idx, locals.is_char_global(*global_idx), out, fixups);
             if locals.is_char_global(*global_idx) {
                 let bo = out.len();
                 out.extend_from_slice(&[0xA0, 0x00, 0x00]);  // mov al, [g]

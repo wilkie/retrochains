@@ -404,7 +404,7 @@ pub(crate) fn emit_cond_cmp_inner(cond: &Cond, locals: &Locals<'_>, out: &mut Ve
         return;
     }
     if let Cond::Truthy(Expr::PreMutateGlobal { global_idx, step }) = cond {
-        crate::codegen::assign::emit_postmutate_global(*step, *global_idx, out, fixups);
+        crate::codegen::assign::emit_postmutate_global(*step, *global_idx, locals.is_char_global(*global_idx), out, fixups);
         return;
     }
     if let Cond::Truthy(Expr::PreMutateParam { param_idx, step }) = cond

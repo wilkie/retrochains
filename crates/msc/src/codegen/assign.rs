@@ -3084,24 +3084,28 @@ pub(crate) fn emit_postmutate_local(step: i32, slot_size: usize, disp: i16, out:
 }
 /// Emit the mutation half of a postfix `global++`/`global--` expression.
 /// `step` encodes direction and magnitude; requires a GlobalAddr fixup.
-pub(crate) fn emit_postmutate_global(step: i32, global_idx: usize, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
+pub(crate) fn emit_postmutate_global(step: i32, global_idx: usize, is_byte: bool, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
     let abs = step.unsigned_abs() as u32;
     // body_offset points at the ModRM/reg byte so +1,+2 land on the addr16.
+    // A char global mutates in BYTE width (`inc byte [g]` = FE /0, `add byte
+    // [g],K` = 80 /0) rather than the word forms (fixtures 964/966/972/973).
     match step {
         1 => {
             let bo = out.len() + 1;
-            out.extend_from_slice(&[0xFF, 0x06, 0x00, 0x00]);
+            out.extend_from_slice(&[if is_byte { 0xFE } else { 0xFF }, 0x06, 0x00, 0x00]);
             fixups.push(Fixup { body_offset: bo, kind: FixupKind::GlobalAddr { global_idx } });
         }
         -1 => {
             let bo = out.len() + 1;
-            out.extend_from_slice(&[0xFF, 0x0E, 0x00, 0x00]);
+            out.extend_from_slice(&[if is_byte { 0xFE } else { 0xFF }, 0x0E, 0x00, 0x00]);
             fixups.push(Fixup { body_offset: bo, kind: FixupKind::GlobalAddr { global_idx } });
         }
         _ => {
             let m = if step > 0 { 0x06u8 } else { 0x2Eu8 };
             let bo = out.len() + 1;
-            if abs <= 127 {
+            if is_byte {
+                out.extend_from_slice(&[0x80, m, 0x00, 0x00, abs as u8]);
+            } else if abs <= 127 {
                 out.extend_from_slice(&[0x83, m, 0x00, 0x00, abs as u8]);
             } else {
                 out.extend_from_slice(&[0x81, m, 0x00, 0x00]);
