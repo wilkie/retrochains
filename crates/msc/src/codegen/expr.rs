@@ -43,6 +43,25 @@ pub(crate) fn emit_load_bx(e: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fix
             }
             out.extend_from_slice(&[0x8B, 0x1F]); // mov bx,[bx]
         }
+        // `a + b` (both simple word operands) loaded straight into BX:
+        // `mov bx,[a]; add bx,[b]`. Used for a multi-term pointer index
+        // `*(p + i + j)`. Falls back to AX when an operand isn't a memory word.
+        Expr::BinOp { op: BinOp::Add, left, right }
+            if matches!(right.as_ref(), Expr::Param(_) | Expr::Local(_) | Expr::Global(_))
+                && matches!(left.as_ref(), Expr::Param(_) | Expr::Local(_) | Expr::Global(_) | Expr::BinOp { op: BinOp::Add, .. }) =>
+        {
+            emit_load_bx(left, locals, out, fixups);
+            match right.as_ref() {
+                Expr::Param(i) => { out.push(0x03); out.push(bp_modrm(0x5E, param_disp(*i))); push_bp_disp(out, param_disp(*i)); }
+                Expr::Local(i) => { let d = locals.disp(*i); out.push(0x03); out.push(bp_modrm(0x5E, d)); push_bp_disp(out, d); }
+                Expr::Global(g) => {
+                    out.extend_from_slice(&[0x03, 0x1E]);
+                    let bo = out.len(); out.extend_from_slice(&[0x00, 0x00]);
+                    fixups.push(Fixup { body_offset: bo - 1, kind: FixupKind::GlobalAddr { global_idx: *g } });
+                }
+                _ => unreachable!(),
+            }
+        }
         _ => { emit_expr_to_ax(e, locals, out, fixups); out.extend_from_slice(&[0x8B, 0xD8]); } // mov bx,ax
     }
 }
@@ -53,6 +72,15 @@ pub(crate) fn emit_load_bx(e: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fix
 pub(crate) fn emit_offset_deref(base: &Expr, idx: &Expr, is_byte: bool, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) -> bool {
     let read = if is_byte { 0x8Au8 } else { 0x8B }; // mov al / mov ax (r, r/m)
     let elem: i32 = if is_byte { 1 } else { 2 };
+    // Nested pointer arithmetic `*((p + i) + j)`: the real pointer is the inner
+    // base; fold the inner index together with the outer one into a combined
+    // runtime index (`mov bx,[i]; add bx,[j]`). Fixture 3468.
+    if let Expr::BinOp { op: BinOp::Add, left, right } = base {
+        let combined = Expr::BinOp {
+            op: BinOp::Add, left: Box::new((**right).clone()), right: Box::new(idx.clone()),
+        };
+        return emit_offset_deref(left, &combined, is_byte, locals, out, fixups);
+    }
     let kfold = idx.fold(locals.inits);
     match base {
         Expr::AddrOfGlobal(g) => {

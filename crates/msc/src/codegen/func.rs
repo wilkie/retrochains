@@ -52,12 +52,13 @@ pub(crate) fn body_needs_si(stmts: &[Stmt], local_inits: &[Option<i32>]) -> bool
             // pointer into SI (`mov si,[bp+p]; mov ax,[bx+si]`).
             Expr::ParamIndex { index, .. } => index.fold(inits).is_none(),
             Expr::Index2D { .. } => true,
-            // `*(ptr + i)` with a runtime index on a pointer param/local uses SI
-            // (`mov si,[p]; mov ax,[bx+si]`); a decayed global array uses BX only.
+            // `*(ptr + i)` (and the nested `*(p + i + j)`) with a runtime index on
+            // a pointer param/local uses SI (`mov si,[p]; mov ax,[bx+si]`); a
+            // decayed global array uses BX only. add_deref_uses_si peels the
+            // add-tree the same way emit_offset_deref does. Fixture 3468.
             Expr::DerefWord { ptr } | Expr::DerefByte { ptr } => {
                 if let Expr::BinOp { op: BinOp::Add, left, right } = ptr.as_ref() {
-                    (matches!(left.as_ref(), Expr::Param(_) | Expr::Local(_))
-                        && right.fold(inits).is_none())
+                    add_deref_uses_si(ptr, inits)
                         || expr_si(left, inits) || expr_si(right, inits)
                 } else {
                     expr_si(ptr, inits)
@@ -75,6 +76,23 @@ pub(crate) fn body_needs_si(stmts: &[Stmt], local_inits: &[Option<i32>]) -> bool
             }
             _ => false,
         }
+    }
+    // Does an offset-deref of `base` use SI? Mirrors emit_offset_deref's peel:
+    // a nested `(p + i) + j` flattens to a Param/Local pointer base with a
+    // runtime index sum (→ SI); a constant index uses a disp instead, and a
+    // decayed global array (AddrOfGlobal base) uses BX only.
+    fn add_deref_uses_si(base: &Expr, inits: &[Option<i32>]) -> bool {
+        fn peel(base: &Expr, idx_runtime: bool, inits: &[Option<i32>]) -> bool {
+            match base {
+                Expr::BinOp { op: BinOp::Add, left, right } => {
+                    let r_runtime = right.fold(inits).is_none();
+                    peel(left, idx_runtime || r_runtime, inits)
+                }
+                Expr::Param(_) | Expr::Local(_) => idx_runtime,
+                _ => false,
+            }
+        }
+        peel(base, false, inits)
     }
     fn cond_si(c: &Cond, inits: &[Option<i32>]) -> bool {
         match c {
