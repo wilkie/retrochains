@@ -875,7 +875,7 @@ pub(crate) fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8
                         out.extend_from_slice(&[0xC4, 0x5E, disp]); // les bx,[bp-p]
                         out.extend_from_slice(&[0x26, 0x8B, 0x07]); // mov ax,es:[bx]
                     } else {
-                        out.extend_from_slice(&[0x8B, 0x5E, disp]); // mov bx,[bp-p]
+                        emit_ptr_local_to_bx(locals.disp(*i), locals, out); // mov bx,[bp-p] / mov bx,ax
                         out.extend_from_slice(&[0x8B, 0x07]);        // mov ax,[bx]
                     }
                 }
@@ -1269,7 +1269,7 @@ pub(crate) fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8
             // mov bx, [bp + ptr_disp]; mov ax, [bx + byte_off] (word)
             //                          or mov al, [bx + byte_off]; cbw (byte)
             let p_disp = locals.disp(*ptr_local);
-            out.push(0x8B); out.push(bp_modrm(0x5E, p_disp)); push_bp_disp(out, p_disp);
+            emit_ptr_local_to_bx(p_disp, locals, out); // mov bx,[bp+disp] / mov bx,ax
             if *size == 1 {
                 if *byte_off == 0 {
                     out.extend_from_slice(&[0x8A, 0x07]);
@@ -1470,6 +1470,20 @@ pub(crate) fn emit_load_param_reuse(i: usize, locals: &Locals<'_>, out: &mut Vec
         }
     }
     emit_load_param(i, out);
+}
+/// Load a near pointer LOCAL into BX for a deref, reusing the value still in AX
+/// when it provably holds the pointer (the establishing `mov [p],ax` store — or a
+/// `mov ax,[p]` load followed only by stores-from-AX — is the last AX-affecting
+/// event, gated by the branch barrier). MSC emits `mov bx,ax` instead of reloading
+/// `mov bx,[bp+disp]` (fixtures 1278/1775/2852). Far pointers are NOT routed here.
+pub(crate) fn emit_ptr_local_to_bx(disp: i16, locals: &Locals<'_>, out: &mut Vec<u8>) {
+    let store_self = { let mut v = vec![0x89, bp_modrm(0x46, disp)]; push_bp_disp(&mut v, disp); v };
+    let load = { let mut v = vec![0x8B, bp_modrm(0x46, disp)]; push_bp_disp(&mut v, disp); v };
+    if ax_holds_word_operand(out, &load, &store_self, locals.last_branch_barrier.get()) {
+        out.extend_from_slice(&[0x8B, 0xD8]); // mov bx, ax
+    } else {
+        out.push(0x8B); out.push(bp_modrm(0x5E, disp)); push_bp_disp(out, disp); // mov bx,[bp+disp]
+    }
 }
 /// Load a long operand's high word (the upper 16 bits) into AX — used for
 /// `(int)(long >> 16)`.
