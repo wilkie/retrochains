@@ -200,6 +200,26 @@ pub(crate) fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_
         AssignTarget::DerefLocalOffset { local, byte_off, is_byte } => {
             return emit_assign_deref_local_offset(local, byte_off, is_byte, value, locals, out, fixups);
         }
+        AssignTarget::DerefExpr { ptr, is_byte } => {
+            // `*<expr> = <value>;` — evaluate the pointer first (`call ...; mov
+            // bx,ax`), then store the value at `[bx]`. A constant value uses the
+            // immediate-store form; otherwise the value is computed into AX (the
+            // pointer is already parked in BX). Fixture 1322.
+            emit_expr_to_ax(&ptr, locals, out, fixups);
+            out.extend_from_slice(&[0x8B, 0xD8]); // mov bx,ax
+            if let Some(v) = value.fold(locals.inits) {
+                if is_byte {
+                    out.extend_from_slice(&[0xC6, 0x07, (v as u32 & 0xFF) as u8]); // mov byte [bx],imm8
+                } else {
+                    out.extend_from_slice(&[0xC7, 0x07]); // mov word [bx],imm16
+                    out.extend_from_slice(&((v as u32 & 0xFFFF) as u16).to_le_bytes());
+                }
+            } else {
+                emit_expr_to_ax(&value, locals, out, fixups);
+                out.extend_from_slice(if is_byte { &[0x88, 0x07] } else { &[0x89, 0x07] }); // mov [bx],al/ax
+            }
+            return;
+        }
         AssignTarget::ParamIndexStore { param, index, elem } => {
             let is_byte = elem == 1;
             let st = if is_byte { 0x88u8 } else { 0x89 }; // mov [..],al / [..],ax

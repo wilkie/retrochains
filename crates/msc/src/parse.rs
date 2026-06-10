@@ -2753,6 +2753,23 @@ pub(crate) fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
                 p.eat(&Tok::Semi)?;
                 return Ok(Stmt::Assign { target, value });
             }
+            // `*<call>(...) = <value>;` — store through a call's pointer result.
+            // The pointer expr is evaluated then stored via a generic DerefExpr
+            // target (`call f; mov bx,ax; mov word [bx],v`). Fixture 1322.
+            if matches!(p.peek(), Some(Tok::Ident(_)))
+                && matches!(p.toks.get(p.pos + 1), Some(Tok::LParen))
+            {
+                let ptr_expr = parse_atom(p)?;
+                if matches!(ptr_expr, Expr::Call { .. } | Expr::CallPtr { .. }) {
+                    let target = AssignTarget::DerefExpr { ptr: Box::new(ptr_expr), is_byte: false };
+                    p.eat(&Tok::Assign)?;
+                    let value = parse_expr(p)?;
+                    p.eat(&Tok::Semi)?;
+                    return Ok(Stmt::Assign { target, value });
+                }
+                return Err(EmitError::Unsupported(
+                    "deref-store through non-call `*<ident>(...)` not yet supported".to_owned()));
+            }
             let target_name = match p.bump().cloned() {
                 Some(Tok::Ident(s)) => s,
                 other => {
