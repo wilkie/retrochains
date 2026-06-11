@@ -2386,6 +2386,12 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
                     entries.push((h.clone(), 0x00, false));
                 }
             }
+            // Extern globals (`extern int magic;`) precede the user function
+            // externs — gold 4024: [__acrtused, __chkstk, _magic, _helper,
+            // _main] for `extern int magic; extern int helper(int);`.
+            for &gi in &extern_globals {
+                entries.push((symbol_name(&unit.globals[gi].name), 0x00, false));
+            }
             for name in &user_extern_order {
                 entries.push((name.clone(), 0x00, false));
             }
@@ -2399,15 +2405,6 @@ pub fn build_obj(source_filename: &str, unit: &Unit) -> Vec<u8> {
                 }
             }
             emit_group(&mut b, &entries, &mut extdef_idx_of, &mut next_idx);
-            // Add any extern globals to extdef_idx_of so FIXUP generation
-            // can reference them (even if order isn't perfect yet).
-            for &gi in &extern_globals {
-                let sym = symbol_name(&unit.globals[gi].name);
-                if !extdef_idx_of.contains_key(&sym) {
-                    extdef_idx_of.insert(sym, next_idx);
-                    next_idx += 1;
-                }
-            }
         }
     } else {
         // Has COMDEFs — always use split layout regardless of user-fn-externs.

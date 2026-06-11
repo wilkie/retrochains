@@ -303,7 +303,7 @@ pub(crate) fn parse_struct_brace_group(p: &mut Parser<'_>, sidx: usize, stotal: 
     }
     Ok(slots)
 }
-pub(crate) fn parse_struct_global_decl(p: &mut Parser<'_>, is_static: bool, is_const: bool) -> Result<(), EmitError> {
+pub(crate) fn parse_struct_global_decl(p: &mut Parser<'_>, is_static: bool, is_const: bool, is_extern: bool) -> Result<(), EmitError> {
     // Accept either `struct <Tag> <var>;` or `union <Tag> <var>;` — both tags
     // live in the shared `p.structs` registry.
     if matches!(p.peek(), Some(Tok::Kw("union"))) { p.eat(&Tok::Kw("union"))?; }
@@ -418,7 +418,7 @@ pub(crate) fn parse_struct_global_decl(p: &mut Parser<'_>, is_static: bool, is_c
         struct_idx: Some(sidx),
         is_long: false,
         is_static,
-        is_extern: false,
+        is_extern,
         is_unsigned: false,
         is_float: false,
         is_const,
@@ -831,7 +831,7 @@ pub(crate) fn parse_global_decl(p: &mut Parser<'_>) -> Result<(), EmitError> {
     // routed through a separate parse path because the size + element
     // model differ from primitive types.
     if matches!(p.peek(), Some(Tok::Kw("struct")) | Some(Tok::Kw("union"))) {
-        return parse_struct_global_decl(p, is_static, is_const);
+        return parse_struct_global_decl(p, is_static, is_const, is_extern);
     }
     // Type prefix. Phase 1 globals: `int [*]`, `char *`, `char [N]`,
     // and minimal `long` support (storage only; arithmetic not yet).

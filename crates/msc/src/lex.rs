@@ -20,8 +20,26 @@ pub(crate) fn apply_typedef_substitutions(toks: &mut Vec<Tok>) {
     // existing fn-ptr local/param parsing handles. Fixtures 1744, 2252, 2442.
     let mut fnptr_aliases: std::collections::HashMap<String, (Vec<Tok>, Vec<Tok>)> =
         std::collections::HashMap::new();
+    // Array typedefs: `typedef int IARR[3];` records Alias -> (elem-type
+    // tokens, `[3]` suffix tokens) so `IARR a` splices to `int a[3]`.
+    let mut arr_aliases: std::collections::HashMap<String, (Vec<Tok>, Vec<Tok>)> =
+        std::collections::HashMap::new();
     let mut i = 0;
     while i < toks.len() {
+        // An array alias used as `Alias name` → `elem name [N]`. Consumes both.
+        if let Tok::Ident(name) = &toks[i]
+            && let Some((elem, suffix)) = arr_aliases.get(name).cloned()
+            && let Some(Tok::Ident(_)) = toks.get(i + 1)
+        {
+            let varname = toks[i + 1].clone();
+            let mut rewrite = elem;
+            rewrite.push(varname);
+            rewrite.extend(suffix);
+            let n = rewrite.len();
+            toks.splice(i..=i + 1, rewrite);
+            i += n;
+            continue;
+        }
         // A function-pointer alias used as `Alias name` → splice the declarator
         // with `name` injected into the `(*_)` hole. Consumes both tokens.
         if let Tok::Ident(name) = &toks[i]
@@ -194,6 +212,18 @@ pub(crate) fn apply_typedef_substitutions(toks: &mut Vec<Tok>) {
                         )
                     });
                     if has_base {
+                        // An array typedef (`typedef int IARR[3];`) records the
+                        // bracket suffix too, so an `IARR a;` use site splices to
+                        // `int a[3];` and the dimension survives (488: the COMDEF
+                        // length of a tentative `IARR a;` global is 6, not 2).
+                        // Uses that don't match the `Alias name` shape fall back
+                        // to the element-type-only expansion below.
+                        if cut < semi - start {
+                            arr_aliases.insert(
+                                name.clone(),
+                                (expansion.clone(), toks[start + cut..semi].to_vec()),
+                            );
+                        }
                         aliases.insert(name, expansion);
                     }
                 }
