@@ -1094,6 +1094,29 @@ pub(crate) fn emit_assign_deref_param(param_idx: usize, value: &Expr, locals: &L
         }
         return;
     }
+    // `*pp = &g` / `&g + K` (store a global's link-time OFFSET through a pointer
+    // param): `mov bx,[pp]; mov word [bx], OFFSET g+K` (c7 07 imm16 + GlobalAddr
+    // fixup), like the scalar `p = &g` immediate store. Fixture 1932.
+    if let Some((g, off)) = match value {
+        Expr::AddrOfGlobal(a) => Some((*a, 0u16)),
+        Expr::BinOp { op: BinOp::Add, left, right }
+            if matches!(left.as_ref(), Expr::AddrOfGlobal(_)) && matches!(right.as_ref(), Expr::IntLit(_)) =>
+        {
+            let Expr::AddrOfGlobal(a) = **left else { unreachable!() };
+            let Expr::IntLit(k) = **right else { unreachable!() };
+            Some((a, (k as u32 & 0xFFFF) as u16))
+        }
+        _ => None,
+    } {
+        out.extend_from_slice(&mov_bx);
+        out.extend_from_slice(&[0xC7, 0x07]); // mov word [bx], imm16
+        // GlobalAddr body_offset points ONE byte before the imm16 placeholder
+        // (the resolver adds 1), matching the other immediate-address stores.
+        let bo = out.len() - 1;
+        out.extend_from_slice(&off.to_le_bytes());
+        fixups.push(Fixup { body_offset: bo, kind: FixupKind::GlobalAddr { global_idx: g } });
+        return;
+    }
     if let Some(k) = value.fold(locals.inits) {
         // Constant store: load the pointer then write the immediate.
         out.extend_from_slice(&mov_bx);
