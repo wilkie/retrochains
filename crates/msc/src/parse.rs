@@ -1747,6 +1747,16 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
             _ => 0,
         })
         .collect();
+    // Struct-POINTER params: the pointee struct's even-padded byte size.
+    let mut param_struct_ptr_bytes: Vec<usize> = param_struct_idxs.iter().zip(param_pointee_size.iter())
+        .map(|(si, &pointee)| match si {
+            Some(sidx) if pointee != 0 => {
+                let n = p.structs.get(*sidx).map(|s| s.total_bytes).unwrap_or(0);
+                (n + 1) & !1
+            }
+            _ => 0,
+        })
+        .collect();
     p.eat(&Tok::RParen)?;
     // K&R parameter type declarations sit between `)` and `{`:
     // `int x; int y;` (any number, multiple declarators per line). Patch
@@ -1831,6 +1841,7 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
         param_float_width.reverse();
         param_pointee_size.reverse();
         param_struct_bytes.reverse();
+        param_struct_ptr_bytes.reverse();
         p.param_names.reverse();
         p.param_struct_idxs.reverse();
         p.param_is_char.reverse();
@@ -2491,7 +2502,7 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
     // while the body was parsed. For functions without nested-block
     // declarations the two are identical.
     let locals = p.local_specs.clone();
-    Ok(Function { name, return_int, return_long, return_char, return_float_width, return_struct_bytes, params, param_struct_bytes, param_is_char, param_is_long, param_is_unsigned, param_float_width, param_pointee_size, locals, local_names, int_cast_ptrs: std::mem::take(&mut p.int_cast_ptrs), body, struct_field_temp_count: p.struct_field_temp_count, is_pascal, is_static: is_static_fn })
+    Ok(Function { name, return_int, return_long, return_char, return_float_width, return_struct_bytes, params, param_struct_bytes, param_is_char, param_is_long, param_is_unsigned, param_float_width, param_pointee_size, param_struct_ptr_bytes, locals, local_names, int_cast_ptrs: std::mem::take(&mut p.int_cast_ptrs), body, struct_field_temp_count: p.struct_field_temp_count, is_pascal, is_static: is_static_fn })
 }
 /// Scan a prototype's parameter list (the tokens between `(` at `lparen_idx`
 /// and `)` at `close_idx`) and return each param's `is_long` flag. A param is
@@ -3581,14 +3592,16 @@ pub(crate) fn parse_stmt(p: &mut Parser<'_>) -> Result<Stmt, EmitError> {
                     value: Expr::IntLit(0),
                 });
             }
-            // Whole-struct copy `s2 = s1;` (both struct locals, ≤4 bytes).
+            // Whole-struct copy `s2 = s1;` (both struct locals). ≤4 bytes
+            // copies via AX/DX; larger structs movsw their even-padded
+            // storage (a 5-byte struct copies 3 words — fixture 2747).
             if let AssignTarget::Local(dst) = target
                 && let Expr::Local(src) = value
                 && let Some(sidx) = p.local_specs[dst].struct_idx
                 && p.local_specs[src].struct_idx == Some(sidx)
-                && p.structs[sidx].total_bytes <= 4
             {
-                let bytes = u16::try_from(p.structs[sidx].total_bytes).expect("struct size fits");
+                let padded = p.structs[sidx].total_bytes.div_ceil(2) * 2;
+                let bytes = u16::try_from(padded).expect("struct size fits");
                 p.eat(&Tok::Semi)?;
                 return Ok(Stmt::Assign {
                     target: AssignTarget::StructLocalCopy { dst, src, bytes },

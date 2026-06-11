@@ -683,6 +683,7 @@ pub(crate) fn emit_function(
         unsigned_params: &param_is_unsigned,
         param_float_widths: &param_float_widths,
         param_pointee_sizes: &param_pointee_sizes,
+        param_struct_ptr_bytes: &func.param_struct_ptr_bytes,
         int_cast_ptrs: &func.int_cast_ptrs,
         char_returners,
         long_returners,

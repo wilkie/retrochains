@@ -384,9 +384,26 @@ pub(crate) fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_
             return emit_struct_global_copy(dst, src, bytes, out, fixups);
         }
         AssignTarget::StructLocalCopy { dst, src, bytes } => {
-            // `mov ax,[src]; [mov dx,[src+2];] mov [dst],ax; [mov [dst+2],dx]`.
             let sd = locals.disp(src);
             let dd = locals.disp(dst);
+            if bytes > 4 {
+                // movsw copy through DI/SI (frame saves both): `lea di,[dst];
+                // lea si,[src]; push ss; pop es; movsw × words` — unrolled for
+                // ≤4 words, `mov cx,N; rep movsw` beyond (mirrors the global
+                // struct copy). Fixtures 2745, 2747, 1953.
+                out.push(0x8D); out.push(bp_modrm(0x7E, dd)); push_bp_disp(out, dd); // lea di,[bp+dst]
+                out.push(0x8D); out.push(bp_modrm(0x76, sd)); push_bp_disp(out, sd); // lea si,[bp+src]
+                out.extend_from_slice(&[0x16, 0x07]); // push ss; pop es
+                let words = bytes / 2;
+                if words <= 4 {
+                    for _ in 0..words { out.push(0xA5); } // movsw
+                } else {
+                    out.push(0xB9); out.extend_from_slice(&words.to_le_bytes()); // mov cx,words
+                    out.extend_from_slice(&[0xF3, 0xA5]); // rep movsw
+                }
+                return;
+            }
+            // `mov ax,[src]; [mov dx,[src+2];] mov [dst],ax; [mov [dst+2],dx]`.
             out.push(0x8B); out.push(bp_modrm(0x46, sd)); push_bp_disp(out, sd); // mov ax,[src]
             if bytes > 2 {
                 let h = sd + 2;
@@ -1274,6 +1291,18 @@ pub(crate) fn emit_assign_deref_param(param_idx: usize, value: &Expr, locals: &L
             out.extend_from_slice(&[0x8B, 0x5E, pdisp as u8]);  // mov bx,[bp+dst]
         }
         out.push(0x8B); out.push(bp_modrm(0x76, sdisp)); push_bp_disp(out, sdisp); // mov si,[bp+src]
+        // Whole-struct copy through 4-byte struct pointers (`*dst = *src`):
+        // both words load (AX,DX) before both store. Fixtures 2495, 3093.
+        if post.is_none()
+            && locals.param_struct_ptr_bytes.get(param_idx).copied().unwrap_or(0) == 4
+            && locals.param_struct_ptr_bytes.get(src).copied().unwrap_or(0) == 4
+        {
+            out.extend_from_slice(&[0x8B, 0x04]);        // mov ax,[si]
+            out.extend_from_slice(&[0x8B, 0x54, 0x02]);  // mov dx,[si+2]
+            out.extend_from_slice(&[0x89, 0x07]);        // mov [bx],ax
+            out.extend_from_slice(&[0x89, 0x57, 0x02]);  // mov [bx+2],dx
+            return;
+        }
         if is_byte {
             out.extend_from_slice(&[0x8A, 0x04]); // mov al,[si]
         } else {

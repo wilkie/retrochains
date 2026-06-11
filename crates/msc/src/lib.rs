@@ -239,6 +239,10 @@ pub struct Function {
     /// (char*→1, int*/struct*→2, long*→4, float*→width), 0 for
     /// non-pointer params. Drives pointer-difference element scaling.
     pub param_pointee_size: Vec<usize>,
+    /// Parallel to `params`: total struct bytes when the param is a POINTER
+    /// to a struct (`struct S *p` / array-decayed), 0 otherwise. Drives the
+    /// multi-word `*dst = *src` whole-struct copy (2495).
+    pub param_struct_ptr_bytes: Vec<usize>,
     pub locals: Vec<LocalSpec>,
     /// Names parallel to `locals` — used to compute MSC's hash-table
     /// traversal order for frame slot assignment.
@@ -477,6 +481,9 @@ pub struct Locals<'a> {
     /// (0 for non-pointers). Drives pointer-difference element scaling
     /// (`p - q` → byte sub then `sar` to convert bytes → elements).
     pub param_pointee_sizes: &'a [usize],
+    /// Total struct bytes for struct-POINTER params (0 otherwise) — the
+    /// width a `*dst = *src` whole-struct copy must move.
+    pub param_struct_ptr_bytes: &'a [usize],
     /// Pointer params/locals that appear under an `(int)` cast somewhere in
     /// the function — keyed (is_param, idx). An int-cast pointer behaves as
     /// a plain int in binop operand-order decisions (3429 vs 2711).
