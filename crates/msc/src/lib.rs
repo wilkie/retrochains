@@ -3149,6 +3149,11 @@ struct ConstProp {
     /// reloads `x` in the branch body — whereas a statement-level chain
     /// (`a = b = c = K`) does propagate the constant. Fixture 1817 vs 513.
     in_cond: bool,
+    /// Set when a call was propagated in the current statement; consumed at
+    /// the statement boundary, where it drops all memory value knowledge
+    /// (MSC reloads pre-call constants in the next statement — see
+    /// `kill_if_called`).
+    saw_call: bool,
 }
 
 /// The lvalue a pointer local currently aliases (`&x`).

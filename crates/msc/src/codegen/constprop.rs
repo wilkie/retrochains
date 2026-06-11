@@ -269,18 +269,19 @@ fn addr_value_of(e: &Expr) -> Option<(AliasTarget, i32)> {
     }
 }
 pub(crate) fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
+    prop_stmt_inner(stmt, cp);
+    // Statement boundary: a call anywhere in this statement invalidates
+    // memory knowledge for FOLLOWING statements (see kill_if_called).
+    // Compound statements (blocks, loops, ifs) recurse through prop_stmt,
+    // so their inner statements hit their own boundaries first.
+    kill_if_called(cp);
+}
+
+fn prop_stmt_inner(stmt: &mut Stmt, cp: &mut ConstProp) {
     match stmt {
         Stmt::Return(e) => prop_expr(e, cp),
         Stmt::ExprStmt(e) => {
             prop_expr(e, cp);
-            // After a function call, MSC reloads scalar locals/globals from their
-            // slots rather than re-materializing a propagated constant (the call
-            // clobbers registers / may touch globals). Clear the known-value
-            // tables so later reads emit memory loads. Fixtures 1865, 1980.
-            if expr_call_count(e) > 0 {
-                cp.l_known.clear();
-                cp.g_known.clear();
-            }
         }
         Stmt::Assign { target, value } => {
             // Set when a `p[K]=v` pointer store is rewritten to a direct array
@@ -721,13 +722,9 @@ pub(crate) fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
                 cp.g_known.clear();
                 cp.ga_known.clear();
             }
-            // A call in the assigned value clobbers scalar known-values (the
-            // target itself took the call result and is already unknown). Later
-            // reads reload from memory. Mirrors the ExprStmt-call rule.
-            if expr_call_count(value) > 0 {
-                cp.l_known.clear();
-                cp.g_known.clear();
-            }
+            // A call in the assigned value clobbers ALL known values — handled
+            // by the statement-boundary `kill_if_called` (which also marks the
+            // killed entries mutated so the emit-time init fold view agrees).
         }
         Stmt::Empty => {}
         Stmt::If { cond, then_branch, else_branch } => {
@@ -897,6 +894,7 @@ pub(crate) fn cp_clone(cp: &ConstProp) -> ConstProp {
         la_field_size: cp.la_field_size.clone(),
         ga_field_size: cp.ga_field_size.clone(),
         in_cond: cp.in_cond,
+        saw_call: cp.saw_call,
     }
 }
 /// If `e` is a pointer local holding `&x`/`&g` (offset 0), the address
@@ -1013,6 +1011,31 @@ pub(crate) fn eval_const_int(e: &Expr) -> Option<i32> {
         }
         _ => None,
     }
+}
+
+/// MSC's optimizer drops all memory value knowledge at the END of any
+/// statement containing a call: the callee may write any global, and it is
+/// conservative about locals too — gold reloads pre-call constants in the
+/// NEXT statement (1851: `return a+c+r` loads a and c from their slots
+/// after the `r = helper(b)` statement, even though both were known
+/// literals). Within the call's own statement knowledge survives — 1981's
+/// `return sqr(a) + b*c` folds b*c to `add ax,20` AFTER the call returns —
+/// so the kill fires at the statement boundary, not at the call site.
+/// Killed locals are also marked mutated so the emit-time init-based fold
+/// view doesn't resurrect them.
+fn kill_if_called(cp: &mut ConstProp) {
+    if !cp.saw_call {
+        return;
+    }
+    cp.saw_call = false;
+    cp.mutated_locals.extend(cp.l_known.keys().copied());
+    cp.mutated_locals.extend(cp.la_known.keys().map(|&(l, _)| l));
+    cp.mutated_globals.extend(cp.g_known.keys().copied());
+    cp.mutated_globals.extend(cp.ga_known.keys().map(|&(g, _)| g));
+    cp.l_known.clear();
+    cp.la_known.clear();
+    cp.g_known.clear();
+    cp.ga_known.clear();
 }
 
 pub(crate) fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
@@ -1183,6 +1206,7 @@ pub(crate) fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
             for a in args {
                 prop_expr(a, cp);
             }
+            cp.saw_call = true;
         }
         Expr::CallPtr { args, .. } => {
             // Target is a fnptr lvalue (Global/Param/Local) — leave it; just
@@ -1190,6 +1214,7 @@ pub(crate) fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
             for a in args {
                 prop_expr(a, cp);
             }
+            cp.saw_call = true;
         }
         Expr::FuncAddr(_) => {
             // A relocatable address; nothing to const-fold.
