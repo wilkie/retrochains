@@ -117,6 +117,9 @@ pub(crate) fn const_prop_globals(
     for m in extra_mut {
         cp.mutated_locals.insert(m);
     }
+    // Goto flow restructuring: invert `if (c) goto L` and inline the label
+    // block at the branch site (fixtures 3306, 2230, 1701).
+    let new_stmts = crate::codegen::statements::fold_goto_restructure(new_stmts);
     (new_stmts, cp.mutated_locals, cp.loop_mutated_locals, cp.mutated_globals)
 }
 /// Rewrite `*p` (DerefWord/DerefByte over an aliased pointer local) to the

@@ -169,6 +169,12 @@ pub(crate) fn emit_stmt(
             }
         }
         Stmt::Label(name) => {
+            // A label with no fall-through (right after a `ret`) aligns to an
+            // even offset with a NOP — labels reached by fall-through don't pad
+            // (3306 pads, 441 doesn't).
+            if out.len() % 2 != 0 && out.last() == Some(&0xC3) {
+                out.push(0x90);
+            }
             // Record this label's byte offset; jumps to it are backpatched after
             // the whole body is emitted.
             locals.labels.borrow_mut().insert(name.clone(), out.len());
@@ -1974,6 +1980,54 @@ fn match_once_loop(s: &Stmt) -> Option<Vec<Stmt>> {
         return None;
     }
     Some(prefix.to_vec())
+}
+/// Count `goto L` statements anywhere in a statement tree.
+fn count_gotos(stmts: &[Stmt], l: &str) -> usize {
+    fn walk(s: &Stmt, l: &str) -> usize {
+        match s {
+            Stmt::Goto(m) => usize::from(m == l),
+            Stmt::Block(v) => v.iter().map(|s| walk(s, l)).sum(),
+            Stmt::If { then_branch, else_branch, .. } =>
+                walk(then_branch, l) + else_branch.as_ref().map_or(0, |e| walk(e, l)),
+            Stmt::While { body, .. } | Stmt::DoWhile { body, .. } => walk(body, l),
+            Stmt::For { init, step, body, .. } => walk(init, l) + walk(step, l) + walk(body, l),
+            Stmt::Switch { cases, .. } =>
+                cases.iter().flat_map(|a| a.body.iter()).map(|s| walk(s, l)).sum(),
+            _ => 0,
+        }
+    }
+    stmts.iter().map(|s| walk(s, l)).sum()
+}
+/// MSC's goto flow restructuring: `if (c) goto L; MID...; L: TAIL...` — when
+/// MID exits (ends in return/goto) and TAIL terminates — INVERTS the branch
+/// and lays the label block inline at the branch site, moving MID to the
+/// function tail:  `if (!c) goto M; TAIL...; M: MID...`. The L label is
+/// consumed (single referencing goto required). Fixtures 3306, 2230, 1701.
+pub(crate) fn fold_goto_restructure(stmts: Vec<Stmt>) -> Vec<Stmt> {
+    for i in 0..stmts.len() {
+        let Stmt::If { cond, then_branch, else_branch: None } = &stmts[i] else { continue };
+        let Stmt::Goto(l) = then_branch.as_ref() else { continue };
+        let Some(neg) = negate_cond(cond) else { continue };
+        if count_gotos(&stmts, l) != 1 { continue; }
+        let Some(j) = stmts.iter().position(|s| matches!(s, Stmt::Label(m) if m == l)) else { continue };
+        if j <= i + 1 { continue; }
+        let mid = &stmts[i + 1..j];
+        let tail = &stmts[j + 1..];
+        if !mid.last().is_some_and(stmt_exits) { continue; }
+        if !tail.last().is_some_and(stmt_exits) { continue; }
+        let m_label = format!("__gr{i}");
+        let mut out = stmts[..i].to_vec();
+        out.push(Stmt::If {
+            cond: neg,
+            then_branch: Box::new(Stmt::Goto(m_label.clone())),
+            else_branch: None,
+        });
+        out.extend_from_slice(tail);
+        out.push(Stmt::Label(m_label));
+        out.extend_from_slice(mid);
+        return out;
+    }
+    stmts
 }
 /// Top-level pass: rewrite each `[no-step leading-break loop, return]` pair into
 /// the if/else+goto form. Run after const-prop so the body reads are already
