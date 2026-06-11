@@ -62,6 +62,24 @@ pub(crate) fn emit_load_bx(e: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fix
                 _ => unreachable!(),
             }
         }
+        // `arr[++i]` / `arr[++l]` — a pre-increment word index loads straight
+        // into BX after the in-place mutate (`inc [i]; mov bx,[i]`), avoiding the
+        // AX round-trip. Fixture 2837.
+        Expr::PreMutateParam { param_idx, step }
+            if !locals.is_char_param(*param_idx) && locals.param_pointee_size(*param_idx) == 0 =>
+        {
+            let disp = param_disp(*param_idx);
+            crate::codegen::assign::emit_postmutate_local(*step, 2, disp, out);
+            out.push(0x8B); out.push(bp_modrm(0x5E, disp)); push_bp_disp(out, disp);
+        }
+        Expr::PreMutateLocal { local_idx, step }
+            if locals.size(*local_idx) == 2 && !locals.is_long_local(*local_idx)
+                && locals.local_pointee_size(*local_idx) == 0 =>
+        {
+            let disp = locals.disp(*local_idx);
+            crate::codegen::assign::emit_postmutate_local(*step, 2, disp, out);
+            out.push(0x8B); out.push(bp_modrm(0x5E, disp)); push_bp_disp(out, disp);
+        }
         _ => { emit_expr_to_ax(e, locals, out, fixups); out.extend_from_slice(&[0x8B, 0xD8]); } // mov bx,ax
     }
 }
