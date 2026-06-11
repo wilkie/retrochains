@@ -293,7 +293,7 @@ pub(crate) fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8
                 other => panic!("AssignExpr target not yet supported: {other:?}"),
             }
         }
-        Expr::CastChar { value, unsigned } => {
+        Expr::CastChar { value, unsigned, .. } => {
             // Truncate to a byte then widen back. A constant operand (incl. a
             // foldable arithmetic expression like `a+b` with known a,b) is
             // materialized as the truncated byte `mov al, imm8` (b0), NOT a word

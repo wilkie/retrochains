@@ -1132,7 +1132,13 @@ pub enum Expr {
     /// then widen back: signed → `cbw` (98), unsigned → `sub ah,ah` (2a e4).
     /// For a simple int variable operand MSC loads just the low byte
     /// (`mov al,[v]`). Fixtures 3223 / 2707 / 3411 / 3655.
-    CastChar { value: Box<Expr>, unsigned: bool },
+    ///
+    /// `from_var` records (at parse time) whether the cast operand was a plain
+    /// scalar variable rather than a compound expression. It decides whether an
+    /// assignment/init RHS materializes through AL (`mov al,K; …; store`) vs folds
+    /// to an immediate — see [`crate::codegen::cast_rhs_needs_al_form`]. The flag
+    /// must survive const-prop (which substitutes the inner operand to a literal).
+    CastChar { value: Box<Expr>, unsigned: bool, from_var: bool },
     /// `"string"[K]` — byte at constant offset K of a string literal. Reads
     /// `mov al, $SG+K; cbw` (a CONST-segment byte load, not folded). Fixtures
     /// 1209, 2381.
@@ -1276,7 +1282,7 @@ impl Expr {
                 }
                 _ => None,
             },
-            Expr::CastChar { value, unsigned } => {
+            Expr::CastChar { value, unsigned, .. } => {
                 let v = value.fold(locals)?;
                 Some(if *unsigned { (v as u8) as i32 } else { (v as i8) as i32 })
             }

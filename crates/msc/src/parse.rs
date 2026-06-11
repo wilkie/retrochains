@@ -2377,7 +2377,14 @@ pub(crate) fn parse_function(p: &mut Parser<'_>) -> Result<Function, EmitError> 
                         // An init containing an assignment-expression has a SIDE
                         // EFFECT (the inner store); folding it to a constant would
                         // drop that store. Keep it a runtime assign. Fixture 1217.
-                        || crate::codegen::contains_assign_expr(&init_expr);
+                        || crate::codegen::contains_assign_expr(&init_expr)
+                        // A `(unsigned char)` / `(char)` cast init of a simple
+                        // variable is materialized at runtime through AL (`mov al,K;
+                        // sub ah,ah; mov [u],ax`), never folded to an immediate — MSC
+                        // does not const-propagate through such a char cast. The
+                        // shared rule (operand simple, sign/target gating) lives in
+                        // codegen. Fixture 1524.
+                        || (size == 2 && crate::codegen::cast_rhs_needs_al_form(&init_expr, true));
                     let fold_k = if skip_fold { None } else { init_expr.fold(&init_view) };
                     if let Some(k) = fold_k {
                         locals[local_idx].init = Some(k);
@@ -4538,7 +4545,9 @@ pub(crate) fn parse_binop_prec(p: &mut Parser<'_>, min_prec: u8) -> Result<Expr,
         // `e & 0xFF` is the zero-extended low byte — MSC lowers it exactly like
         // `(unsigned char)e` (`mov al,[e]; sub ah,ah`). Fixtures 2935 / 2539.
         if matches!(op, BinOp::BitAnd) && matches!(right, Expr::IntLit(255)) {
-            left = Expr::CastChar { value: Box::new(left), unsigned: true };
+            // `&0xff` masks keep folding to an immediate (from_var: false) — the
+            // AL-form rule is reserved for explicit `(char)`/`(unsigned char)` casts.
+            left = Expr::CastChar { value: Box::new(left), unsigned: true, from_var: false };
             continue;
         }
         // Pointer arithmetic on a DECAYED ARRAY (`a + K` / `a - K`): the array
@@ -4701,7 +4710,11 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                         Expr::CastChar { value, .. } => value,
                         other => Box::new(other),
                     };
-                    return Ok(Expr::CastChar { value, unsigned: cast_unsigned });
+                    // An explicit cast of a bare scalar variable selects the AL
+                    // materialize form for assign/init RHS (see cast_rhs_needs_al_form).
+                    let from_var = matches!(value.as_ref(),
+                        Expr::Local(_) | Expr::Param(_) | Expr::Global(_));
+                    return Ok(Expr::CastChar { value, unsigned: cast_unsigned, from_var });
                 }
                 return Ok(inner);
             }

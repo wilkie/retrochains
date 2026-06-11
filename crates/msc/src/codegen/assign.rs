@@ -5,6 +5,18 @@ use crate::*;
 /// (fixture 4096: `x = x - 1;` in a while body). The general path
 /// — `mov ax, <expr>; mov [bp-disp], ax` — is reserved for a
 /// future fixture that exercises a non-peephole shape.
+/// True when a `(char)` / `(unsigned char)` cast RHS must be materialized at
+/// runtime through AL (`mov al,K; cbw|sub ah,ah; store`) instead of folding to an
+/// immediate. MSC does this only when the cast operand is a SIMPLE scalar variable
+/// (not a compound expression) and the combination actually needs the register:
+///   - int target (size 2): always (the byte value is widened to a word). 1524.
+///   - char target (size 1): only the SIGNED `(char)` cast (`(unsigned char)` to a
+///     byte slot folds straight to `mov byte [c],imm`). 2455 (AL) vs 2460 (fold).
+/// A cast of an EXPRESSION operand (`(char)(a+100)`) always folds. 1384.
+pub(crate) fn cast_rhs_needs_al_form(value: &Expr, target_is_int: bool) -> bool {
+    matches!(value, Expr::CastChar { from_var: true, unsigned, .. }
+        if target_is_int || !*unsigned)
+}
 /// True when an expression tree contains an assignment-expression (a store side
 /// effect) anywhere — folding such a value to an immediate would drop the store.
 pub(crate) fn contains_assign_expr(e: &Expr) -> bool {
@@ -1016,6 +1028,11 @@ pub(crate) fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_
     } else {
         match value {
             Expr::BinOp { op: BinOp::LogOr | BinOp::LogAnd, .. } => None,
+            // A `(char)` / `(unsigned char)` cast of a SIMPLE variable is
+            // materialized through AL (`mov al,K; mov [c],al` for a char target;
+            // `mov al,K; sub ah,ah; mov [u],ax` for an int target) rather than
+            // folded to an immediate. Fixtures 2455, 1524 (vs 1384/2460 which fold).
+            Expr::CastChar { .. } if cast_rhs_needs_al_form(value, !is_byte) => None,
             Expr::Ternary { cond, .. }
                 if !matches!(cond.as_ref(), Expr::BinOp {
                     op: BinOp::Eq | BinOp::Ne | BinOp::Lt
