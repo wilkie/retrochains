@@ -870,6 +870,31 @@ pub(crate) fn emit_cond_cmp_inner(cond: &Cond, locals: &Locals<'_>, out: &mut Ve
             emit_expr_to_ax(right, locals, out, fixups);
             emit_cmp_ax_imm(*k, out);
         }
+        // COMPUTED LHS (arithmetic) vs a simple word memory RHS (`(a+b) == c`):
+        // evaluate the LHS into AX, then `cmp ax,[rhs]` directly — no BX round-
+        // trip for the RHS. Result = left - right → standard jcc. A memory LHS
+        // (deref/index) uses the opposite `cmp [lhs],ax` form (not handled here);
+        // char/long RHS fall through. Fixture 3596.
+        Cond::Cmp { op: _, left: left @ Expr::BinOp { .. }, right }
+            if matches!(right,
+                Expr::Param(i) if !locals.is_char_param(*i) && !locals.is_long_param(*i))
+                || matches!(right,
+                    Expr::Local(i) if locals.size(*i) == 2 && !locals.is_long_local(*i) && !locals.is_float_local(*i))
+                || matches!(right,
+                    Expr::Global(g) if !locals.is_char_global(*g) && !locals.is_long_global(*g)) =>
+        {
+            emit_expr_to_ax(left, locals, out, fixups);
+            match right {
+                Expr::Param(i) => { let d = param_disp(*i); out.push(0x3B); out.push(bp_modrm(0x46, d)); push_bp_disp(out, d); }
+                Expr::Local(i) => { let d = locals.disp(*i); out.push(0x3B); out.push(bp_modrm(0x46, d)); push_bp_disp(out, d); }
+                Expr::Global(g) => {
+                    out.extend_from_slice(&[0x3B, 0x06]);
+                    let p = out.len(); out.extend_from_slice(&[0x00, 0x00]);
+                    fixups.push(Fixup { body_offset: p - 1, kind: FixupKind::GlobalAddr { global_idx: *g } });
+                }
+                _ => unreachable!(),
+            }
+        }
         // Generic fallback for two-sided non-literal comparisons:
         // evaluate right into AX, save to BX, evaluate left into AX, cmp ax, bx.
         // Result = left - right → standard jcc semantics.
