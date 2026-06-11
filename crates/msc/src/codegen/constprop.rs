@@ -565,13 +565,23 @@ fn prop_stmt_inner(stmt: &mut Stmt, cp: &mut ConstProp) {
             // Captured here to suppress the known-value recording below for such
             // converting copies. Fixtures 604/1312/2386/2491/2387.
             let rhs_src_local: Option<usize> = if let Expr::Local(i) = value { Some(*i) } else { None };
-            // Pre-substitution: `~<SOURCE literal>` (parses to `K ^ -1`). Only
-            // this form propagates below — `~v` of a known local stores the
-            // folded imm but the next read reloads (543/1556 vs 2457).
-            let bitnot_of_source_lit = matches!(value,
-                Expr::BinOp { op: BinOp::BitXor, left, right }
-                    if matches!(left.as_ref(), Expr::IntLit(_))
-                        && matches!(right.as_ref(), Expr::IntLit(-1)));
+            // Pre-substitution: an all-SOURCE-literal arithmetic RHS
+            // (`x = ~0` → `0^-1`, `x = 30000+30000`). Only this form
+            // propagates below — computed values from substituted locals
+            // (`x = a*b` with known a,b) store the folded imm but the next
+            // read reloads (543/1556/546 vs 2457/2427).
+            // (purely — an embedded side effect like `(a = 7) + 3` must keep
+            // its statement form; fixture 1217.)
+            fn pure_literal_tree(e: &Expr) -> bool {
+                match e {
+                    Expr::IntLit(_) => true,
+                    Expr::BinOp { left, right, .. } => pure_literal_tree(left) && pure_literal_tree(right),
+                    _ => false,
+                }
+            }
+            let rhs_source_lit = matches!(value, Expr::BinOp { .. })
+                && pure_literal_tree(value)
+                && value.fold(&[]).is_some();
             if self_assign_addsub
                 && let Expr::BinOp { right, .. } = value
             {
@@ -665,12 +675,12 @@ fn prop_stmt_inner(stmt: &mut Stmt, cp: &mut ConstProp) {
                             _ => false,
                         }
                     });
-                    // `x = ~<literal>` (parses to `K ^ -1`): MSC propagates a
-                    // complement-of-constant like the `t = ~t` rule — the
-                    // store emits the folded immediate AND a later `return x`
-                    // folds (fixture 2457). General computed literals
-                    // (`x = a*b`) do NOT propagate — the return reloads.
-                    if bitnot_of_source_lit
+                    // `x = <source-literal arithmetic>` (`~0`, `30000+30000`):
+                    // MSC propagates — the store emits the folded immediate
+                    // AND a later `return x` folds (2457/2427). Values
+                    // computed from SUBSTITUTED locals (`x = a*b`) do NOT
+                    // propagate — the return reloads (543/1556/546).
+                    if rhs_source_lit
                         && !value_was_ternary
                         && !cp.local_specs.get(*l).is_some_and(|s| s.is_long || s.is_float)
                         && let Some(k) = value.fold(&[])
