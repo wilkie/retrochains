@@ -1127,6 +1127,43 @@ fn bx_holds_param_after_temp_copy(out: &[u8], pdisp: i16, barrier: usize) -> boo
     }
     false
 }
+/// True when BX provably still holds `[bp+pdisp]` (a pointer param): some
+/// `mov bx,[bp+pdisp]` (8B 5E pd) appears in the suffix (≥ barrier) and EVERY
+/// instruction after it is in a small whitelist of BX-preserving forms reaching
+/// exactly the end. Conservative — any unrecognized byte fails the candidate, so
+/// a false positive (wrong BX) cannot occur. Generalizes the swap-footprint
+/// check to cross-statement reuse like `s += p->v; p = p->next`. Fixture 3343.
+fn bx_holds_param(out: &[u8], pdisp: i16, barrier: usize) -> bool {
+    // Length of a BX-preserving instruction at `s[0..]`, or None if not one.
+    fn step(s: &[u8]) -> Option<usize> {
+        match s {
+            [0x8B, 0x07, ..] | [0x8A, 0x07, ..] => Some(2),       // mov ax/al,[bx]
+            [0x8B, 0x47, _, ..] | [0x8A, 0x47, _, ..] => Some(3), // mov ax/al,[bx+d8]
+            [0x89, 0x46, _, ..] | [0x88, 0x46, _, ..] => Some(3), // mov [bp+d8],ax/al
+            [0x89, 0x86, _, _, ..] => Some(4),                    // mov [bp+d16],ax
+            [0x8B, 0x46, _, ..] | [0x8B, 0x56, _, ..] | [0x8B, 0x76, _, ..] => Some(3), // mov ax/dx/si,[bp+d8]
+            // alu [bp+d8],ax  /  alu ax,[bp+d8]  (add/or/and/sub/xor, both dirs)
+            [op, 0x46, _, ..] if matches!(op, 0x01|0x03|0x09|0x0B|0x21|0x23|0x29|0x2B|0x31|0x33) => Some(3),
+            [0x98, ..] => Some(1),                                // cbw
+            _ => None,
+        }
+    }
+    let pd = pdisp as u8;
+    let mut p = out.len().saturating_sub(3);
+    loop {
+        if p < barrier { return false; }
+        if out[p] == 0x8B && out[p + 1] == 0x5E && out[p + 2] == pd {
+            let mut i = p + 3;
+            let mut ok = true;
+            while i < out.len() {
+                match step(&out[i..]) { Some(l) => i += l, None => { ok = false; break; } }
+            }
+            if ok { return true; }
+        }
+        if p == 0 { return false; }
+        p -= 1;
+    }
+}
 pub(crate) fn emit_assign_deref_param(param_idx: usize, value: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
     let pdisp = param_disp(param_idx);
     let is_byte = locals.param_pointee_size(param_idx) == 1;
@@ -1291,6 +1328,27 @@ pub(crate) fn emit_assign_deref_param(param_idx: usize, value: &Expr, locals: &L
 pub(crate) fn emit_assign_param(param_idx: usize, value: &Expr, locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
     let disp = param_disp(param_idx);
     let is_char = locals.is_char_param(param_idx);
+    // `p = p->next` (param = word field-deref through a param ptr) — reuse BX when
+    // it still holds the source pointer from a preceding statement (`s += p->v`),
+    // so the advance is `mov ax,[bx+off]; mov [p],ax` with no `mov bx,[p]` reload.
+    // Fixture 3343 (linked-list walk).
+    if !is_char && !locals.is_long_param(param_idx) {
+        if let Some((q, off)) = match value {
+            Expr::DerefWord { ptr } if matches!(ptr.as_ref(), Expr::Param(_)) => {
+                let Expr::Param(q) = ptr.as_ref() else { unreachable!() };
+                Some((*q, 0u16))
+            }
+            Expr::DerefParamField { ptr_param: q, byte_off, size: 2 } => Some((*q, *byte_off)),
+            _ => None,
+        } {
+            if bx_holds_param(out, param_disp(q), locals.last_branch_barrier.get()) {
+                if off == 0 { out.extend_from_slice(&[0x8B, 0x07]); }            // mov ax,[bx]
+                else { out.extend_from_slice(&[0x8B, 0x47, off as u8]); }        // mov ax,[bx+off]
+                out.push(0x89); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp); // mov [p],ax
+                return;
+            }
+        }
+    }
     // `x++` / `x--` → `inc/dec [bp+disp]` (byte or word based on param type).
     // Long param `n ±= K`: add/sub the low half then adc/sbb the high half.
     // The carry must propagate, so even ±1 uses add/adc (not inc). Fixture
