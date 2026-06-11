@@ -3162,6 +3162,11 @@ struct ConstProp {
     /// reloads `x` in the branch body — whereas a statement-level chain
     /// (`a = b = c = K`) does propagate the constant. Fixture 1817 vs 513.
     in_cond: bool,
+    /// Set when a Local/Global read was substituted with its known value.
+    /// The If arm resets and checks it: a condition that becomes fully
+    /// constant through substitution CONSUMES that knowledge (MSC re-tests
+    /// the same variable at runtime in a following else-if — fixture 509).
+    substituted: bool,
     /// Set when a call was propagated in the current statement; consumed at
     /// the statement boundary, where it drops all memory value knowledge
     /// (MSC reloads pre-call constants in the next statement — see

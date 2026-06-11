@@ -731,7 +731,23 @@ fn prop_stmt_inner(stmt: &mut Stmt, cp: &mut ConstProp) {
             // Fold the cond using current knowledge, then propagate
             // into each branch with an isolated copy so writes don't
             // leak across paths. After the if, conservatively clear.
+            cp.substituted = false;
             prop_cond(cond, cp);
+            // A condition that became fully constant-FALSE through
+            // substitution consumes the knowledge it used: the arm is elided
+            // at emit time and MSC re-tests the same variable at runtime in
+            // the surviving else-if (509: `x=2; if(x==1)... else if(x==2)...`
+            // drops the first arm but emits `cmp [x],2; jne` for the second).
+            // A TRUE fold keeps values — the taken then-arm continues folding
+            // (1687, 2354, 1986) — and a literal cond substitutes nothing.
+            if cp.substituted
+                && crate::codegen::statements::fold_cond_raw(cond, &[]) == Some(0)
+            {
+                cp.l_known.clear();
+                cp.g_known.clear();
+                cp.la_known.clear();
+                cp.ga_known.clear();
+            }
             let mut sub = cp_clone(cp);
             prop_stmt(then_branch, &mut sub);
             if let Some(eb) = else_branch {
@@ -895,6 +911,7 @@ pub(crate) fn cp_clone(cp: &ConstProp) -> ConstProp {
         ga_field_size: cp.ga_field_size.clone(),
         in_cond: cp.in_cond,
         saw_call: cp.saw_call,
+        substituted: cp.substituted,
     }
 }
 /// If `e` is a pointer local holding `&x`/`&g` (offset 0), the address
@@ -1107,6 +1124,7 @@ pub(crate) fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
                 && let Some(&k) = cp.g_known.get(idx)
             {
                 *e = Expr::IntLit(k);
+                cp.substituted = true;
             }
         }
         Expr::Local(idx) => {
@@ -1114,6 +1132,7 @@ pub(crate) fn prop_expr(e: &mut Expr, cp: &mut ConstProp) {
                 && !cp.local_specs.get(*idx).is_some_and(|s| s.is_register)
             {
                 *e = Expr::IntLit(k);
+                cp.substituted = true;
             }
         }
         Expr::BinOp { op: BinOp::LogOr | BinOp::LogAnd, .. } => {
