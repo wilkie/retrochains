@@ -54,6 +54,11 @@ pub(crate) fn emit_stmt(
         out.push(0x90);
         out.push(0x9B);
     }
+    // Read-and-clear the "function's final top-level statement" flag: only the
+    // statement the function loop set it for should see it true. Recursing into
+    // a nested block/branch (which calls emit_stmt again) must see false, so a
+    // nested terminal `if(c) return e;` isn't mistaken for the function's tail.
+    let final_top = locals.final_top_stmt.replace(false);
     match stmt {
         Stmt::Return(expr) => emit_return(expr, locals, frame, return_int, return_long, out, fixups),
         Stmt::Empty => {}
@@ -221,6 +226,30 @@ pub(crate) fn emit_stmt(
                 let pos = out.len();
                 out.push(0x00);
                 locals.label_fixups.borrow_mut().push((label.clone(), pos));
+                return;
+            }
+            // `if (c) return <expr>;` as the function's FINAL statement in an
+            // int-returning fall-off function: MSC inverts the cond and jccs to
+            // the SHARED tail epilogue, then lets the return-value computation
+            // fall through into it (one epilogue, not a duplicate). Fixture 1815.
+            if else_branch.is_none()
+                && return_int && !return_long
+                && final_top
+                && let Stmt::Return(rexpr) = then_branch.as_ref()
+                && !crate::codegen::calls::long_operand(rexpr, locals)
+                && let Cond::Cmp { op, .. } = cond
+                && fold_cond(cond, locals).is_none()
+            {
+                emit_cond_cmp_inner(cond, locals, out, fixups);
+                let mut jcc = inverted_jcc(*op);
+                if cmp_is_unsigned(cond, locals) {
+                    jcc = to_unsigned_jcc(jcc);
+                }
+                out.push(jcc);
+                let pos = out.len();
+                out.push(0x00);
+                locals.label_fixups.borrow_mut().push((EPILOGUE_LABEL.to_owned(), pos));
+                emit_expr_to_ax(rexpr, locals, out, fixups);
                 return;
             }
             // `if (cond) break;` / `if (cond) continue;` lower to a single
@@ -1840,6 +1869,7 @@ pub(crate) fn emit_threaded_for(
         elide_call_cleanup: std::cell::Cell::new(false),
         last_branch_barrier: std::cell::Cell::new(0),
         last_top_stmt: std::cell::Cell::new(false),
+        final_top_stmt: std::cell::Cell::new(false),
     };
     let n = levels.len();
     let base = out.len();
@@ -2228,6 +2258,7 @@ pub(crate) fn emit_loop(
         elide_call_cleanup: std::cell::Cell::new(false),
         last_branch_barrier: std::cell::Cell::new(0),
         last_top_stmt: std::cell::Cell::new(false),
+        final_top_stmt: std::cell::Cell::new(false),
     };
     let mut body_buf = Vec::new();
     let mut body_fixups: Vec<Fixup> = Vec::new();
@@ -2907,6 +2938,7 @@ pub(crate) fn emit_do_while(
         elide_call_cleanup: std::cell::Cell::new(false),
         last_branch_barrier: std::cell::Cell::new(0),
         last_top_stmt: std::cell::Cell::new(false),
+        final_top_stmt: std::cell::Cell::new(false),
     };
     let mut body_buf = Vec::new();
     let mut body_fixups: Vec<Fixup> = Vec::new();

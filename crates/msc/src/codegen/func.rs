@@ -654,6 +654,7 @@ pub(crate) fn emit_function(
         elide_call_cleanup: std::cell::Cell::new(false),
         last_branch_barrier: std::cell::Cell::new(0),
         last_top_stmt: std::cell::Cell::new(false),
+        final_top_stmt: std::cell::Cell::new(false),
     };
 
     // The last top-level call-bearing statement: if it carries exactly one call
@@ -713,6 +714,7 @@ pub(crate) fn emit_function(
         locals_view.last_top_stmt.set(
             i + 1 == body.len() || matches!(body.get(i + 1), Some(Stmt::Return(_))),
         );
+        locals_view.final_top_stmt.set(i + 1 == body.len());
         emit_stmt(
             stmt,
             &locals_view,

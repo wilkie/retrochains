@@ -556,6 +556,12 @@ pub struct Locals<'a> {
     /// merges directly into the epilogue, and MSC omits the merge-alignment NOP
     /// for that case. Fixtures 452, 459, 3602.
     pub last_top_stmt: std::cell::Cell<bool>,
+    /// Set true (top-level function view only) while emitting the function's
+    /// VERY LAST top-level statement — stricter than `last_top_stmt`, which also
+    /// fires when the next statement is a `return`. Used to route a terminal
+    /// `if(c) return <expr>;` in a fall-off int function into the shared tail
+    /// epilogue. Fixture 1815.
+    pub final_top_stmt: std::cell::Cell<bool>,
 }
 
 #[derive(Default, Debug)]
