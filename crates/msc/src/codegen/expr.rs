@@ -1167,12 +1167,21 @@ pub(crate) fn emit_expr_to_ax(expr: &Expr, locals: &Locals<'_>, out: &mut Vec<u8
             //   [90]                            alignment nop (else starts even)
             //   <else>                          value in AX
             // Pre-emit both arms to size the jumps.
+            // A literal-0 arm zeroes via `sub ax,ax`, not `mov ax,0`
+            // (fixtures 2272/1459 — chain tails ending in `: 0`).
+            let emit_arm = |arm: &Expr, buf: &mut Vec<u8>, fxs: &mut Vec<Fixup>| {
+                if matches!(arm, Expr::IntLit(0)) {
+                    buf.extend_from_slice(&[0x2B, 0xC0]); // sub ax,ax
+                } else {
+                    emit_expr_to_ax(arm, locals, buf, fxs);
+                }
+            };
             let mut then_buf: Vec<u8> = Vec::new();
             let mut then_fixups: Vec<Fixup> = Vec::new();
-            emit_expr_to_ax(then_arm, locals, &mut then_buf, &mut then_fixups);
+            emit_arm(then_arm, &mut then_buf, &mut then_fixups);
             let mut else_buf: Vec<u8> = Vec::new();
             let mut else_fixups: Vec<Fixup> = Vec::new();
-            emit_expr_to_ax(else_arm, locals, &mut else_buf, &mut else_fixups);
+            emit_arm(else_arm, &mut else_buf, &mut else_fixups);
             let cond_c = cond_from_expr((**cond).clone());
             // Size the condition's cmp+jcc to compute the alignment nop.
             let cond_size = {
