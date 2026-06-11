@@ -5334,6 +5334,28 @@ pub(crate) fn parse_atom(p: &mut Parser<'_>) -> Result<Expr, EmitError> {
                 });
             }
             let pointee_size = pointee_size_of(&inner, &p.globals, &p.local_specs, &p.param_pointee_sizes);
+            // `*(p + K)` over a scalar pointer LOCAL: scale the literal index
+            // by the pointee size, matching the byte-scaled `p[K]` subscript
+            // production — the alias-fold and emit paths see one convention.
+            // Fixtures 1152, 2646.
+            let inner = match inner {
+                Expr::BinOp { op: BinOp::Add, left, right } => {
+                    if let (Expr::Local(pi), Expr::IntLit(k)) = (left.as_ref(), right.as_ref())
+                        && let Some(spec) = p.local_specs.get(*pi)
+                        && spec.pointee_size > 1
+                        && spec.array_len == 1
+                    {
+                        Expr::BinOp {
+                            op: BinOp::Add,
+                            left,
+                            right: Box::new(Expr::IntLit(k * spec.pointee_size as i32)),
+                        }
+                    } else {
+                        Expr::BinOp { op: BinOp::Add, left, right }
+                    }
+                }
+                other => other,
+            };
             if pointee_size == 1 {
                 Ok(Expr::DerefByte { ptr: Box::new(inner) })
             } else {
