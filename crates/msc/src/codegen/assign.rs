@@ -829,6 +829,22 @@ pub(crate) fn emit_assign(target: AssignTarget, value: &Expr, locals: &Locals<'_
         // size (`int* p += 2` → `add word [p],4`). Non-pointers/arrays have
         // pointee_size 0 → scale 1 (unchanged). Fixtures 542, 564.
         let k = k * locals.local_pointee_size(local_idx).max(1) as i32;
+        // A signed `(char)` cast RHS forces the value through AL + cbw even
+        // when it folds to a constant: `a += (char)K` lowers to
+        // `mov al,K; cbw; add word [bp-disp],ax` rather than the in-place
+        // immediate `add [bp-disp],K`. Fixture 1288. (Scalar int locals only;
+        // pointers/longs/char-locals keep their existing forms.)
+        if let Expr::CastChar { unsigned: false, .. } = right.as_ref()
+            && !is_byte
+            && !locals.is_long_local(local_idx)
+            && locals.local_pointee_size(local_idx) == 0
+        {
+            out.push(0xB0); out.push((k as u32 & 0xFF) as u8); // mov al, K
+            out.push(0x98); // cbw
+            let op_byte = if matches!(op, BinOp::Add) { 0x01u8 } else { 0x29u8 };
+            out.push(op_byte); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp);
+            return;
+        }
         match (op, k, is_byte) {
             (BinOp::Add, 1, false) if !locals.is_long_local(local_idx) => {
                 out.push(0xFF); out.push(bp_modrm(0x46, disp)); push_bp_disp(out, disp);
