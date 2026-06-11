@@ -758,31 +758,6 @@ fn prop_stmt_inner(stmt: &mut Stmt, cp: &mut ConstProp) {
                 // mirroring the ternary-chain rule. `if (a>0)...else if (a<0)`
                 // with `int a = 0;` elides the first arm but emits a real
                 // `cmp [a],0` for the second (fixture 1201).
-                fn mark_cond_reads(c: &Cond, cp: &mut ConstProp) {
-                    fn mark_expr(e: &Expr, cp: &mut ConstProp) {
-                        match e {
-                            Expr::Local(i) => { cp.mutated_locals.insert(*i); }
-                            Expr::Global(g) => { cp.mutated_globals.insert(*g); }
-                            Expr::BinOp { left, right, .. } => {
-                                mark_expr(left, cp);
-                                mark_expr(right, cp);
-                            }
-                            Expr::CastChar { value, .. } => mark_expr(value, cp),
-                            _ => {}
-                        }
-                    }
-                    match c {
-                        Cond::Truthy(e) => mark_expr(e, cp),
-                        Cond::Cmp { left, right, .. } => {
-                            mark_expr(left, cp);
-                            mark_expr(right, cp);
-                        }
-                        Cond::And(a, b) | Cond::Or(a, b) => {
-                            mark_cond_reads(a, cp);
-                            mark_cond_reads(b, cp);
-                        }
-                    }
-                }
                 let mut chain: Option<&Stmt> = else_branch.as_deref();
                 while let Some(Stmt::If { cond, else_branch, .. }) = chain {
                     mark_cond_reads(cond, cp);
@@ -1003,6 +978,35 @@ fn ptr_local_addr(e: &Expr, cp: &ConstProp) -> Option<Expr> {
         None
     }
 }
+/// Mark every Local/Global read in a condition as mutated, so the EMIT-time
+/// fold view (locals.inits) misses them and the emitter re-tests at runtime.
+/// Companion of the knowledge-consume rules (FALSE folds through
+/// substitution). Fixtures 1201 (else-if chain), 1358 (`a&&b || c`).
+fn mark_cond_reads(c: &Cond, cp: &mut ConstProp) {
+    fn mark_expr(e: &Expr, cp: &mut ConstProp) {
+        match e {
+            Expr::Local(i) => { cp.mutated_locals.insert(*i); }
+            Expr::Global(g) => { cp.mutated_globals.insert(*g); }
+            Expr::BinOp { left, right, .. } => {
+                mark_expr(left, cp);
+                mark_expr(right, cp);
+            }
+            Expr::CastChar { value, .. } => mark_expr(value, cp),
+            _ => {}
+        }
+    }
+    match c {
+        Cond::Truthy(e) => mark_expr(e, cp),
+        Cond::Cmp { left, right, .. } => {
+            mark_expr(left, cp);
+            mark_expr(right, cp);
+        }
+        Cond::And(a, b) | Cond::Or(a, b) => {
+            mark_cond_reads(a, cp);
+            mark_cond_reads(b, cp);
+        }
+    }
+}
 pub(crate) fn prop_cond(cond: &mut Cond, cp: &mut ConstProp) {
     let saved_in_cond = cp.in_cond;
     cp.in_cond = true;
@@ -1059,8 +1063,35 @@ fn prop_cond_inner(cond: &mut Cond, cp: &mut ConstProp) {
             prop_expr(left, cp);
             prop_expr(right, cp);
         }
-        Cond::And(a, b) | Cond::Or(a, b) => {
+        Cond::And(a, b) => {
             prop_cond(a, cp);
+            prop_cond(b, cp);
+        }
+        Cond::Or(a, b) => {
+            prop_cond(a, cp);
+            // Left side of `||` folded FALSE through substitution: the OR
+            // reduces to its right side. When the dropped side was an `&&`
+            // GROUP, the failed group CONSUMES the knowledge it used — the
+            // surviving side re-tests at runtime (`if (a && b || c)` with
+            // a=1,b=0,c=2 emits a real `cmp [c],0`; fixtures 1358/1862). A
+            // bare/cmp/or left keeps knowledge, so the survivor goes on
+            // folding (572/621/1176/2615) — only the structural drop applies
+            // (`if (a || ++b)` emits just the `++b` test, fixture 1237).
+            if cp.substituted
+                && crate::codegen::statements::fold_cond_raw(a, &[]) == Some(0)
+            {
+                if matches!(**a, Cond::And(..)) {
+                    cp.l_known.clear();
+                    cp.g_known.clear();
+                    cp.la_known.clear();
+                    cp.ga_known.clear();
+                    mark_cond_reads(b, cp);
+                }
+                let mut survivor = (**b).clone();
+                prop_cond(&mut survivor, cp);
+                *cond = survivor;
+                return;
+            }
             prop_cond(b, cp);
         }
     }
