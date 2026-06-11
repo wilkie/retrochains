@@ -2567,6 +2567,8 @@ fn arg_buildable_in_cx(e: &Expr) -> bool {
 /// shapes `arg_buildable_in_cx` accepts). Used by the two-call binop scheduler.
 fn emit_arg_to_cx(e: &Expr, _locals: &Locals<'_>, out: &mut Vec<u8>, fixups: &mut Vec<Fixup>) {
     match e {
+        // MSC materializes a zero argument with its `sub reg,reg` zero idiom.
+        Expr::IntLit(0) => { out.extend_from_slice(&[0x2B, 0xC9]); } // sub cx,cx
         Expr::IntLit(k) => { out.push(0xB9); out.extend_from_slice(&(*k as u16).to_le_bytes()); }
         Expr::StrLit(idx) => {
             let bo = out.len();
