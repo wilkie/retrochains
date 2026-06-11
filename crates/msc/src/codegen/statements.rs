@@ -2642,18 +2642,24 @@ pub(crate) fn emit_loop(
         let disp = cont_target as i32 - (abs as i32 + 1);
         out[abs] = i8::try_from(disp).expect("continue rel8 disp fits") as u8;
     }
-    // Do-while form with no break/continue: the body always runs, so AX at
-    // loop exit is whatever the body's straight-line tail left there. Leave
-    // the AX-reuse barrier at the body's last internal merge (body start when
-    // it has none) instead of the loop end — a post-loop read can then reuse
-    // a value the body's last store left in AX, with the loop-tail strip in
-    // ax_holds_word_operand walking the inc/cmp/jcc bytes. Fixture 1411.
-    if skip_initial_jmp
-        && loop_ctx.breaks.is_empty()
+    // Loop with no break/continue: control always falls out through the cmp
+    // section, so AX at loop exit is whatever that straight-line trace left
+    // there. Leave the AX-reuse barrier inside the loop instead of at its
+    // end — a post-loop read can then reuse a value the trace left in AX,
+    // with the loop-tail strip in ax_holds_word_operand walking the
+    // inc/cmp/or/jcc bytes. Do-while form trusts the whole body tail (the
+    // body always runs — fixture 1411); while form only the cmp section,
+    // which executes even for zero iterations (fixture 555).
+    if loop_ctx.breaks.is_empty()
         && loop_ctx.continues.is_empty()
         && !matches!(cond, Cond::And(..) | Cond::Or(..))
     {
-        locals.loop_exit_barrier.set(Some(body_base + body_locals.last_branch_barrier.get()));
+        let barrier = if skip_initial_jmp {
+            body_base + body_locals.last_branch_barrier.get()
+        } else {
+            cmp_base
+        };
+        locals.loop_exit_barrier.set(Some(barrier));
     }
 }
 /// `do <body> while (<cond>);` (fixture 4098). When the body's last

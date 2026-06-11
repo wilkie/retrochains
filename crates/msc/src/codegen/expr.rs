@@ -1517,6 +1517,9 @@ pub(crate) fn ax_holds_word_operand(out: &[u8], load: &[u8], store_self: &[u8], 
             // cmp [bp+d8],ax / cmp [bp+d8],reg (39 r/m) — flags only.
             } else if n >= 3 && out[n - 3] == 0x39 && (out[n - 2] & 0xC0) == 0x40 {
                 n -= 3;
+            // or ax,ax (0B C0) — the truthiness test; AX value unchanged.
+            } else if n >= 2 && out[n - 2] == 0x0B && out[n - 1] == 0xC0 {
+                n -= 2;
             // inc/dec word [bp+d8] (FF 46/4E d) — writes ITS slot; opaque when
             // that slot is the queried one (AX would no longer mirror it).
             } else if n >= 3 && out[n - 3] == 0xFF && (out[n - 2] == 0x46 || out[n - 2] == 0x4E) {
