@@ -268,7 +268,17 @@ fn addr_value_of(e: &Expr) -> Option<(AliasTarget, i32)> {
 pub(crate) fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
     match stmt {
         Stmt::Return(e) => prop_expr(e, cp),
-        Stmt::ExprStmt(e) => prop_expr(e, cp),
+        Stmt::ExprStmt(e) => {
+            prop_expr(e, cp);
+            // After a function call, MSC reloads scalar locals/globals from their
+            // slots rather than re-materializing a propagated constant (the call
+            // clobbers registers / may touch globals). Clear the known-value
+            // tables so later reads emit memory loads. Fixtures 1865, 1980.
+            if expr_call_count(e) > 0 {
+                cp.l_known.clear();
+                cp.g_known.clear();
+            }
+        }
         Stmt::Assign { target, value } => {
             // Set when a `p[K]=v` pointer store is rewritten to a direct array
             // element store: MSC's element table does NOT track writes that went
@@ -706,6 +716,13 @@ pub(crate) fn prop_stmt(stmt: &mut Stmt, cp: &mut ConstProp) {
             {
                 cp.g_known.clear();
                 cp.ga_known.clear();
+            }
+            // A call in the assigned value clobbers scalar known-values (the
+            // target itself took the call result and is already unknown). Later
+            // reads reload from memory. Mirrors the ExprStmt-call rule.
+            if expr_call_count(value) > 0 {
+                cp.l_known.clear();
+                cp.g_known.clear();
             }
         }
         Stmt::Empty => {}
