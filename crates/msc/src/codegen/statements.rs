@@ -223,6 +223,57 @@ pub(crate) fn emit_stmt(
                     _ => None,
                 }
             } else { None };
+            // `if ((x = e) != 0) return x;` — the cond's embedded assign leaves
+            // AX holding x, so the then-return is just a jump into the SHARED
+            // tail epilogue with AX live (the following `return K` loads its
+            // value and falls into the same labeled epilogue). Fixture 3395.
+            let goto_label: Option<String> = goto_label.or_else(|| {
+                if else_branch.is_some() || !return_int || return_long
+                    // A folding cond (`if ((x = 5))`) keeps the straight-line
+                    // splice — no branch at all (513/1434).
+                    || fold_cond(cond, locals).is_some()
+                {
+                    return None;
+                }
+                let then_inner: &Stmt = match then_branch.as_ref() {
+                    Stmt::Block(v) if v.len() == 1 => &v[0],
+                    other => other,
+                };
+                let Stmt::Return(Expr::Local(rx)) = then_inner else { return None };
+                // The cond's tested expression when it embeds an assignment
+                // that leaves AX = Local(i): `AssignExpr` (`while (*d++=..)`
+                // form) or the parenthesized-assign `Seq{[x = e], x}` desugar.
+                let assigns_local = |e: &Expr| -> Option<usize> {
+                    match e {
+                        Expr::AssignExpr { target: AssignTarget::Local(i), .. } => Some(*i),
+                        Expr::Seq { sides, value } => {
+                            if let [Stmt::Assign { target: AssignTarget::Local(i), .. }] = sides.as_slice()
+                                && matches!(value.as_ref(), Expr::Local(v) if v == i)
+                            {
+                                Some(*i)
+                            } else {
+                                None
+                            }
+                        }
+                        _ => None,
+                    }
+                };
+                let assigned = match cond {
+                    Cond::Cmp { op: RelOp::Ne, left, right } if matches!(right, Expr::IntLit(0)) =>
+                        assigns_local(left),
+                    Cond::Truthy(e) => assigns_local(e),
+                    _ => None,
+                };
+                if assigned == Some(*rx)
+                    && locals.size(*rx) == 2
+                    && !locals.is_long_local(*rx)
+                    && locals.reg_for_local(*rx).is_none()
+                {
+                    Some(EPILOGUE_LABEL.to_owned())
+                } else {
+                    None
+                }
+            });
             if let Some(label) = goto_label {
                 if let Some(k) = fold_cond(cond, locals) {
                     if k != 0 {
