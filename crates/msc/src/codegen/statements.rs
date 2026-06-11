@@ -77,11 +77,46 @@ pub(crate) fn emit_stmt(
             let eff = if pointee > 0 { *step * pointee as i32 } else { *step };
             crate::codegen::assign::emit_postmutate_local(eff, slot_size, disp, out);
         }
+        // A local/global `x++`/`++x`/`x--`/`--x` used purely for its side
+        // effect (e.g. a discarded ternary `c ? a++ : a--;` after the cond
+        // folds) emits only the in-place mutate — no old/new value load.
+        // Fixtures 1202, 1861.
+        Stmt::ExprStmt(Expr::PostMutateLocal { local_idx, step })
+        | Stmt::ExprStmt(Expr::PreMutateLocal { local_idx, step }) => {
+            let disp = locals.disp(*local_idx);
+            let slot_size = locals.size(*local_idx);
+            let pointee = locals.local_pointee_size(*local_idx);
+            let eff = if pointee > 0 { *step * pointee as i32 } else { *step };
+            crate::codegen::assign::emit_postmutate_local(eff, slot_size, disp, out);
+        }
+        Stmt::ExprStmt(Expr::PostMutateGlobal { global_idx, step })
+        | Stmt::ExprStmt(Expr::PreMutateGlobal { global_idx, step }) => {
+            let is_byte = locals.is_char_global(*global_idx);
+            crate::codegen::assign::emit_postmutate_global(*step, *global_idx, is_byte, out, fixups);
+        }
+        // A discarded ternary `c ? a : b;` whose condition folds to a constant
+        // reduces to just the chosen arm's side effects — emit the live arm as
+        // its own discarded statement (so a pure arm vanishes, a mutate arm
+        // emits only its in-place op). Fixture 1202 (`a>0 ? a++ : a--;`).
+        Stmt::ExprStmt(Expr::Ternary { cond, then_arm, else_arm })
+            if cond.fold(locals.inits).is_some() =>
+        {
+            let chosen = if cond.fold(locals.inits) != Some(0) { then_arm } else { else_arm };
+            emit_stmt(
+                &Stmt::ExprStmt((**chosen).clone()),
+                locals, frame, return_int, return_long, out, fixups,
+            );
+        }
         Stmt::ExprStmt(other) => {
-            // Generic: evaluate the expression, discard the AX result.
-            // Side-effect-free shapes still compile; they just leave
-            // dead code in AX.
-            emit_expr_to_ax(other, locals, out, fixups);
+            // A discarded expression statement with NO side effects emits
+            // nothing — MSC drops dead value computations like `x + 1;`.
+            // Expressions with side effects (calls, mutates, assignments)
+            // still evaluate; their AX result is simply unused. Fixture 1960.
+            if expr_is_pure(other) {
+                // dead code — emit nothing
+            } else {
+                emit_expr_to_ax(other, locals, out, fixups);
+            }
         }
         Stmt::Assign { target, value } => emit_assign(target.clone(), value, locals, out, fixups),
         Stmt::Switch { scrutinee, cases } => {
@@ -379,6 +414,48 @@ pub(crate) fn stmt_call_count(stmt: &Stmt) -> usize {
         Stmt::If { cond: _, then_branch, else_branch } =>
             stmt_call_count(then_branch) + else_branch.as_ref().map_or(0, |e| stmt_call_count(e)),
         _ => 0,
+    }
+}
+/// True when evaluating `e` has no observable side effects, so a discarded
+/// expression statement (`e;`) can be dropped entirely. Conservative: only
+/// recognizes pure load / arithmetic shapes; calls, assignments, and every
+/// pre/post-increment variant make it false, as does any unrecognized node
+/// (so we never elide something with a hidden side effect). Fixture 1960.
+pub(crate) fn expr_is_pure(e: &Expr) -> bool {
+    match e {
+        Expr::IntLit(_)
+        | Expr::FloatLit(..)
+        | Expr::Local(_)
+        | Expr::Param(_)
+        | Expr::Global(_)
+        | Expr::StrLit(_)
+        | Expr::StrLitByte { .. }
+        | Expr::FuncAddr(_)
+        | Expr::AddrOfGlobal(_)
+        | Expr::AddrOfLocal(_)
+        | Expr::LocalField { .. }
+        | Expr::ParamField { .. }
+        | Expr::GlobalField { .. }
+        | Expr::DerefLocalField { .. }
+        | Expr::DerefParamField { .. }
+        | Expr::DerefGlobalField { .. } => true,
+        Expr::BinOp { left, right, .. } => expr_is_pure(left) && expr_is_pure(right),
+        Expr::Ternary { cond, then_arm, else_arm } => {
+            expr_is_pure(cond) && expr_is_pure(then_arm) && expr_is_pure(else_arm)
+        }
+        Expr::CastChar { value, .. } => expr_is_pure(value),
+        Expr::DerefByte { ptr } | Expr::DerefWord { ptr } => expr_is_pure(ptr),
+        Expr::Index { index, .. }
+        | Expr::IndexByte { index, .. }
+        | Expr::LocalIndex { index, .. }
+        | Expr::LocalIndexByte { index, .. }
+        | Expr::ParamIndex { index, .. }
+        | Expr::PtrIndexByte { index, .. }
+        | Expr::PtrArrayElem { index, .. }
+        | Expr::AddrOfIndexedGlobal { index, .. }
+        | Expr::StructArrayField { index, .. } => expr_is_pure(index),
+        Expr::Index2D { row, col, .. } => expr_is_pure(row) && expr_is_pure(col),
+        _ => false,
     }
 }
 pub(crate) fn stmt_exits(stmt: &Stmt) -> bool {
